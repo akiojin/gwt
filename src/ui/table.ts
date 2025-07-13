@@ -25,7 +25,40 @@ export async function createBranchTable(
       .map(w => [w.branch, w])
   );
 
-  const choices: Array<{ name: string; value: string; description?: string }> = [];
+  const choices: Array<{ name: string; value: string; description?: string; disabled?: boolean }> = [];
+
+  // Set fixed width for branch name column
+  const branchNameColumnWidth = 32;
+
+  // Add header row
+  const headerRow = [
+    padEndUnicode(chalk.bold.cyan('ブランチ名'), branchNameColumnWidth),
+    padEndUnicode(chalk.bold.cyan('タイプ'), 14),
+    padEndUnicode(chalk.bold.cyan('Worktree'), 10),
+    padEndUnicode(chalk.bold.cyan('ステータス'), 12),
+    chalk.bold.cyan('変更')
+  ].join(' ┃ ');
+
+  choices.push({
+    name: headerRow,
+    value: '__header__',
+    disabled: true
+  });
+
+  // Add separator row
+  const separatorRow = [
+    '─'.repeat(branchNameColumnWidth),
+    '─'.repeat(14),
+    '─'.repeat(10),
+    '─'.repeat(12),
+    '─'.repeat(4)
+  ].join('─┼─');
+
+  choices.push({
+    name: chalk.gray(separatorRow),
+    value: '__separator__',
+    disabled: true
+  });
 
   // Filter out "origin" branch and sort: current first, then by type
   const filteredBranches = branches.filter(b => b.name !== 'origin');
@@ -36,9 +69,6 @@ export async function createBranchTable(
     if (a.branchType !== 'main' && b.branchType === 'main') return 1;
     return a.name.localeCompare(b.name);
   });
-
-  // Set fixed width for branch name column
-  const branchNameColumnWidth = 32;
 
   for (const branch of sortedBranches) {
     const worktree = worktreeMap.get(branch.name);
