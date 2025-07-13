@@ -164,16 +164,6 @@ npm run start
 
 ## Integration Examples
 
-### CI/CD Integration
-
-```yaml
-# GitHub Actions example
-- name: Setup Worktree
-  run: |
-    npm install -g @akiojin/claude-worktree
-    claude-worktree --help
-```
-
 ### Custom Scripts
 
 ```bash

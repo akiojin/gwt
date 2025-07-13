@@ -164,16 +164,6 @@ npm run start
 
 ## 統合例
 
-### CI/CD統合
-
-```yaml
-# GitHub Actions例
-- name: Setup Worktree
-  run: |
-    npm install -g @akiojin/claude-worktree
-    claude-worktree --help
-```
-
 ### カスタムスクリプト
 
 ```bash
