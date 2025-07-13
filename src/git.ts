@@ -243,3 +243,11 @@ export async function fetchAllRemotes(): Promise<void> {
     throw new GitError('Failed to fetch remote branches', error);
   }
 }
+
+export async function deleteRemoteBranch(branchName: string, remote: string = 'origin'): Promise<void> {
+  try {
+    await execa('git', ['push', remote, '--delete', branchName]);
+  } catch (error) {
+    throw new GitError(`Failed to delete remote branch ${remote}/${branchName}`, error);
+  }
+}
