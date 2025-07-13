@@ -1,4 +1,3 @@
-import Table from 'cli-table3';
 import chalk from 'chalk';
 import stringWidth from 'string-width';
 import { BranchInfo } from './types.js';
@@ -49,7 +48,6 @@ export async function createBranchTable(
     }
     
     // Format type with colors and icons
-    const typeColor = getBranchTypeColor(branch.branchType);
     const typeIcon = getBranchTypeIcon(branch.branchType);
     const typeText = `${typeIcon} ${branch.branchType}`;
     
@@ -136,22 +134,6 @@ export async function createBranchTable(
   return choices;
 }
 
-function getBranchTypeColor(branchType: BranchInfo['branchType']) {
-  switch (branchType) {
-    case 'main':
-      return chalk.red.bold;
-    case 'develop':
-      return chalk.blue.bold;
-    case 'feature':
-      return chalk.green;
-    case 'hotfix':
-      return chalk.redBright;
-    case 'release':
-      return chalk.yellow;
-    default:
-      return chalk.gray;
-  }
-}
 
 function getBranchTypeIcon(branchType: BranchInfo['branchType']): string {
   switch (branchType) {
@@ -170,34 +152,6 @@ function getBranchTypeIcon(branchType: BranchInfo['branchType']): string {
   }
 }
 
-function truncatePath(path: string, maxLength: number): string {
-  const width = stringWidth(path);
-  if (width <= maxLength) return path;
-  
-  // Show the beginning of the path with ellipsis at the end
-  // Account for '...' which takes 3 display width
-  const ellipsis = '...';
-  const availableWidth = maxLength - stringWidth(ellipsis);
-  
-  // Start from the beginning
-  let result = '';
-  let currentWidth = 0;
-  
-  for (let i = 0; i < path.length; i++) {
-    const char = path[i];
-    if (!char) continue;
-    const charWidth = stringWidth(char);
-    
-    if (currentWidth + charWidth > availableWidth) {
-      break;
-    }
-    
-    result += char;
-    currentWidth += charWidth;
-  }
-  
-  return result + ellipsis;
-}
 
 function padEndUnicode(str: string, targetLength: number, padString: string = ' '): string {
   const strWidth = stringWidth(str);
