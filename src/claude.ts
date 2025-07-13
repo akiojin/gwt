@@ -13,9 +13,9 @@ export async function launchClaudeCode(worktreePath: string, skipPermissions: bo
     console.log(chalk.blue('🚀 Launching Claude Code...'));
     console.log(chalk.gray(`   Working directory: ${worktreePath}`));
     
-    const args = ['.'];
+    const args: string[] = [];
     if (skipPermissions) {
-      args.unshift('--dangerously-skip-permissions');
+      args.push('--dangerously-skip-permissions');
       console.log(chalk.yellow('   ⚠️  Skipping permissions check'));
     }
     
