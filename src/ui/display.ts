@@ -176,13 +176,17 @@ export async function printWelcome(): Promise<void> {
   const title = `🌳 Claude Worktree Manager${versionText}`;
   
   // Box border configuration
-  const borderWidth = 51; // Total width including borders
-  const contentWidth = borderWidth - 2; // Width without borders
+  const borderWidth = 49; // Total width including borders
+  const contentWidth = borderWidth - 2; // Width without borders (47)
   
-  // Calculate padding - account for emoji width (2 display columns)
-  const displayLength = 2 + title.length - 1; // 🌳 takes 2 columns, rest is normal
-  const totalPadding = contentWidth - displayLength - 2; // 2 for side spaces
-  const rightPadding = Math.max(0, totalPadding);
+  // Calculate title display width
+  // 🌳 = 2 columns, rest is normal text
+  const emojiWidth = 2;
+  const textLength = title.length - 2; // Subtract emoji bytes
+  const titleDisplayWidth = emojiWidth + textLength;
+  
+  // Calculate right padding
+  const rightPadding = contentWidth - titleDisplayWidth - 1; // -1 for left space
   
   console.log(chalk.blueBright.bold('╔═══════════════════════════════════════════════╗'));
   console.log(chalk.blueBright.bold(`║ ${title}${' '.repeat(rightPadding)} ║`));
