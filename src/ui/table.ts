@@ -4,14 +4,6 @@ import { BranchInfo } from './types.js';
 import { WorktreeInfo } from '../worktree.js';
 import { getChangedFilesCount } from '../git.js';
 
-export interface TableBranchRow {
-  branchName: string;
-  type: string;
-  worktree: string;
-  status: string;
-  path: string;
-  value: string;
-}
 
 export async function createBranchTable(
   branches: BranchInfo[],
@@ -151,7 +143,7 @@ function getBranchTypeIcon(branchType: BranchInfo['branchType']): string {
   }
 }
 
-function padEndUnicode(str: string, targetLength: number, padString: string = ' '): string {
+function padEndUnicode(str: string, targetLength: number, padString = ' '): string {
   const strWidth = stringWidth(str);
   if (strWidth >= targetLength) return str;
   

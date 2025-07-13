@@ -1,10 +1,9 @@
 import { execa } from 'execa';
-import path from 'path';
+import path from 'node:path';
 import chalk from 'chalk';
-import { WorktreeConfig, WorktreeWithPR, CleanupTarget } from './ui/types.js';
+import { WorktreeConfig, WorktreeWithPR, CleanupTarget, MergedPullRequest } from './ui/types.js';
 import { getPullRequestByBranch, getMergedPullRequests } from './github.js';
 import { hasUncommittedChanges, hasUnpushedCommits } from './git.js';
-
 export class WorktreeError extends Error {
   constructor(message: string, public cause?: unknown) {
     super(message);
@@ -18,7 +17,7 @@ export interface WorktreeInfo {
   head: string;
 }
 
-export async function listWorktrees(): Promise<WorktreeInfo[]> {
+async function listWorktrees(): Promise<WorktreeInfo[]> {
   try {
     const { stdout } = await execa('git', ['worktree', 'list', '--porcelain']);
     const worktrees: WorktreeInfo[] = [];
@@ -54,6 +53,11 @@ export async function listWorktrees(): Promise<WorktreeInfo[]> {
   }
 }
 
+/**
+ * 追加のworktree（メインworktreeを除く）の一覧を取得
+ * @returns {Promise<WorktreeInfo[]>} worktree情報の配列
+ * @throws {WorktreeError} worktree一覧の取得に失敗した場合
+ */
 export async function listAdditionalWorktrees(): Promise<WorktreeInfo[]> {
   try {
     const [allWorktrees, repoRoot] = await Promise.all([
@@ -80,6 +84,11 @@ export async function generateWorktreePath(repoRoot: string, branchName: string)
   return path.join(worktreeDir, sanitizedBranchName);
 }
 
+/**
+ * 新しいworktreeを作成
+ * @param {WorktreeConfig} config - worktreeの設定
+ * @throws {WorktreeError} worktreeの作成に失敗した場合
+ */
 export async function createWorktree(config: WorktreeConfig): Promise<void> {
   try {
     const args = ['worktree', 'add'];
@@ -102,7 +111,7 @@ export async function createWorktree(config: WorktreeConfig): Promise<void> {
   }
 }
 
-export async function removeWorktree(worktreePath: string, force: boolean = false): Promise<void> {
+export async function removeWorktree(worktreePath: string, force = false): Promise<void> {
   try {
     const args = ['worktree', 'remove'];
     if (force) {
@@ -116,15 +125,8 @@ export async function removeWorktree(worktreePath: string, force: boolean = fals
   }
 }
 
-export async function pruneWorktrees(): Promise<void> {
-  try {
-    await execa('git', ['worktree', 'prune']);
-  } catch (error) {
-    throw new WorktreeError('Failed to prune worktrees', error);
-  }
-}
 
-export async function getWorktreesWithPRStatus(): Promise<WorktreeWithPR[]> {
+async function getWorktreesWithPRStatus(): Promise<WorktreeWithPR[]> {
   const worktrees = await listAdditionalWorktrees();
   const worktreesWithPR: WorktreeWithPR[] = [];
   
@@ -150,7 +152,7 @@ function normalizeBranchName(branchName: string): string {
     .trim();
 }
 
-function findMatchingPR(worktreeBranch: string, mergedPRs: any[]): any | null {
+function findMatchingPR(worktreeBranch: string, mergedPRs: MergedPullRequest[]): MergedPullRequest | null {
   const normalizedWorktreeBranch = normalizeBranchName(worktreeBranch);
   
   for (const pr of mergedPRs) {
@@ -164,9 +166,16 @@ function findMatchingPR(worktreeBranch: string, mergedPRs: any[]): any | null {
   return null;
 }
 
+/**
+ * マージ済みPRに関連するworktreeのクリーンアップ候補を取得
+ * @returns {Promise<CleanupTarget[]>} クリーンアップ候補の配列
+ */
 export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
-  const worktreesWithPR = await getWorktreesWithPRStatus();
-  const mergedPRs = await getMergedPullRequests();
+  // 並列実行で高速化
+  const [worktreesWithPR, mergedPRs] = await Promise.all([
+    getWorktreesWithPRStatus(),
+    getMergedPullRequests()
+  ]);
   const cleanupTargets: CleanupTarget[] = [];
   
   if (process.env.DEBUG_CLEANUP) {
@@ -185,8 +194,11 @@ export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
     }
     
     if (mergedPR) {
-      const hasUncommitted = await hasUncommittedChanges(worktree.worktreePath);
-      const hasUnpushed = await hasUnpushedCommits(worktree.worktreePath, worktree.branch);
+      // 並列実行で高速化
+      const [hasUncommitted, hasUnpushed] = await Promise.all([
+        hasUncommittedChanges(worktree.worktreePath),
+        hasUnpushedCommits(worktree.worktreePath, worktree.branch)
+      ]);
       
       cleanupTargets.push({
         worktreePath: worktree.worktreePath,

@@ -8,6 +8,10 @@ export class GitError extends Error {
   }
 }
 
+/**
+ * 現在のディレクトリがGitリポジトリかどうかを確認
+ * @returns {Promise<boolean>} Gitリポジトリの場合true
+ */
 export async function isGitRepository(): Promise<boolean> {
   try {
     await execa('git', ['rev-parse', '--git-dir']);
@@ -17,6 +21,11 @@ export async function isGitRepository(): Promise<boolean> {
   }
 }
 
+/**
+ * Gitリポジトリのルートディレクトリを取得
+ * @returns {Promise<string>} リポジトリのルートパス
+ * @throws {GitError} リポジトリルートの取得に失敗した場合
+ */
 export async function getRepositoryRoot(): Promise<string> {
   try {
     const { stdout } = await execa('git', ['rev-parse', '--show-toplevel']);
@@ -26,35 +35,7 @@ export async function getRepositoryRoot(): Promise<string> {
   }
 }
 
-export async function getCurrentBranch(): Promise<string> {
-  try {
-    const { stdout } = await execa('git', ['branch', '--show-current']);
-    return stdout.trim();
-  } catch (error) {
-    throw new GitError('Failed to get current branch', error);
-  }
-}
 
-export async function getLocalBranches(): Promise<BranchInfo[]> {
-  try {
-    const { stdout } = await execa('git', ['branch', '--format=%(refname:short)|%(HEAD)']);
-    return stdout
-      .split('\n')
-      .filter(line => line.trim())
-      .map(line => {
-        const [name, isHead] = line.split('|');
-        const branchName = name?.trim() ?? '';
-        return {
-          name: branchName,
-          type: 'local' as const,
-          branchType: getBranchType(branchName),
-          isCurrent: isHead === '*'
-        };
-      });
-  } catch (error) {
-    throw new GitError('Failed to get local branches', error);
-  }
-}
 
 export async function getRemoteBranches(): Promise<BranchInfo[]> {
   try {
@@ -77,16 +58,56 @@ export async function getRemoteBranches(): Promise<BranchInfo[]> {
   }
 }
 
+async function getCurrentBranch(): Promise<string | null> {
+  try {
+    const { stdout } = await execa('git', ['branch', '--show-current']);
+    return stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+async function getLocalBranches(): Promise<BranchInfo[]> {
+  try {
+    const { stdout } = await execa('git', ['branch', '--format=%(refname:short)']);
+    return stdout
+      .split('\n')
+      .filter(line => line.trim())
+      .map(name => ({
+        name: name.trim(),
+        type: 'local' as const,
+        branchType: getBranchType(name.trim()),
+        isCurrent: false
+      }));
+  } catch (error) {
+    throw new GitError('Failed to get local branches', error);
+  }
+}
+
+/**
+ * ローカルとリモートのすべてのブランチ情報を取得
+ * @returns {Promise<BranchInfo[]>} ブランチ情報の配列
+ */
 export async function getAllBranches(): Promise<BranchInfo[]> {
-  const [localBranches, remoteBranches] = await Promise.all([
+  const [localBranches, remoteBranches, currentBranch] = await Promise.all([
     getLocalBranches(),
-    getRemoteBranches()
+    getRemoteBranches(),
+    getCurrentBranch()
   ]);
+  
+  // 現在のブランチ情報を設定
+  if (currentBranch) {
+    localBranches.forEach(branch => {
+      if (branch.name === currentBranch) {
+        branch.isCurrent = true;
+      }
+    });
+  }
   
   return [...localBranches, ...remoteBranches];
 }
 
-export async function createBranch(branchName: string, baseBranch: string = 'main'): Promise<void> {
+export async function createBranch(branchName: string, baseBranch = 'main'): Promise<void> {
   try {
     await execa('git', ['checkout', '-b', branchName, baseBranch]);
   } catch (error) {
@@ -103,7 +124,7 @@ export async function branchExists(branchName: string): Promise<boolean> {
   }
 }
 
-export async function deleteBranch(branchName: string, force: boolean = false): Promise<void> {
+export async function deleteBranch(branchName: string, force = false): Promise<void> {
   try {
     const args = ['branch', force ? '-D' : '-d', branchName];
     await execa('git', args);
@@ -112,38 +133,19 @@ export async function deleteBranch(branchName: string, force: boolean = false): 
   }
 }
 
-export interface WorktreeStatus {
+
+interface WorktreeStatusResult {
   hasChanges: boolean;
-  changedFiles: number;
-  stagedFiles: number;
-  untrackedFiles: number;
+  changedFilesCount: number;
 }
 
-export async function getWorktreeStatus(worktreePath: string): Promise<WorktreeStatus> {
+async function getWorkdirStatus(worktreePath: string): Promise<WorktreeStatusResult> {
   try {
     const { stdout } = await execa('git', ['status', '--porcelain'], { cwd: worktreePath });
     const lines = stdout.split('\n').filter(line => line.trim());
-    
-    let stagedFiles = 0;
-    let changedFiles = 0;
-    let untrackedFiles = 0;
-    
-    for (const line of lines) {
-      const status = line.substring(0, 2);
-      if (status.includes('?')) {
-        untrackedFiles++;
-      } else if (status[0] !== ' ' && status[0] !== '?') {
-        stagedFiles++;
-      } else if (status[1] !== ' ' && status[1] !== '?') {
-        changedFiles++;
-      }
-    }
-    
     return {
       hasChanges: lines.length > 0,
-      changedFiles: lines.length,
-      stagedFiles,
-      untrackedFiles
+      changedFilesCount: lines.length
     };
   } catch (error) {
     throw new GitError('Failed to get worktree status', error);
@@ -151,21 +153,13 @@ export async function getWorktreeStatus(worktreePath: string): Promise<WorktreeS
 }
 
 export async function hasUncommittedChanges(worktreePath: string): Promise<boolean> {
-  try {
-    const { stdout } = await execa('git', ['status', '--porcelain'], { cwd: worktreePath });
-    return stdout.trim().length > 0;
-  } catch (error) {
-    throw new GitError('Failed to check uncommitted changes', error);
-  }
+  const status = await getWorkdirStatus(worktreePath);
+  return status.hasChanges;
 }
 
 export async function getChangedFilesCount(worktreePath: string): Promise<number> {
-  try {
-    const { stdout } = await execa('git', ['status', '--porcelain'], { cwd: worktreePath });
-    return stdout.split('\n').filter(line => line.trim()).length;
-  } catch (error) {
-    throw new GitError('Failed to get changed files count', error);
-  }
+  const status = await getWorkdirStatus(worktreePath);
+  return status.changedFilesCount;
 }
 
 export async function showStatus(worktreePath: string): Promise<string> {
@@ -210,7 +204,7 @@ export async function commitChanges(worktreePath: string, message: string): Prom
 
 function getBranchType(branchName: string): BranchInfo['branchType'] {
   if (branchName === 'main' || branchName === 'master') return 'main';
-  if (branchName === 'develop' || branchName === 'development') return 'develop';
+  if (branchName === 'develop' || branchName === 'dev') return 'develop';
   if (branchName.startsWith('feature/')) return 'feature';
   if (branchName.startsWith('hotfix/')) return 'hotfix';
   if (branchName.startsWith('release/')) return 'release';
@@ -227,14 +221,6 @@ export async function hasUnpushedCommits(worktreePath: string, branch: string): 
   }
 }
 
-export async function isBranchMerged(branch: string, targetBranch: string = 'main'): Promise<boolean> {
-  try {
-    const { stdout } = await execa('git', ['branch', '--merged', targetBranch]);
-    return stdout.includes(branch);
-  } catch (error) {
-    throw new GitError(`Failed to check if branch ${branch} is merged`, error);
-  }
-}
 
 export async function fetchAllRemotes(): Promise<void> {
   try {
@@ -244,7 +230,7 @@ export async function fetchAllRemotes(): Promise<void> {
   }
 }
 
-export async function deleteRemoteBranch(branchName: string, remote: string = 'origin'): Promise<void> {
+export async function deleteRemoteBranch(branchName: string, remote = 'origin'): Promise<void> {
   try {
     await execa('git', ['push', remote, '--delete', branchName]);
   } catch (error) {

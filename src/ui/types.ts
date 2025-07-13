@@ -44,7 +44,6 @@ export interface CleanupResult {
   worktreeRemoved: boolean;
 }
 
-export type ActionType = 'work_existing' | 'create_new' | 'checkout_remote' | 'manage_worktrees';
 
 export interface BranchGroup {
   title: string;
@@ -89,4 +88,20 @@ export interface CleanupTarget {
   pullRequest: MergedPullRequest;
   hasUncommittedChanges: boolean;
   hasUnpushedCommits: boolean;
+}
+
+export interface GitHubPRAuthor {
+  id?: string;
+  is_bot?: boolean;
+  login?: string;
+  name?: string;
+}
+
+export interface GitHubPRResponse {
+  number: number;
+  title: string;
+  state: string;
+  headRefName: string;
+  mergedAt: string | null;
+  author: GitHubPRAuthor | null;
 }

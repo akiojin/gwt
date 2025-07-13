@@ -341,7 +341,7 @@ export async function confirmDiscardChanges(): Promise<boolean> {
   });
 }
 
-export async function confirmContinue(message: string = 'Continue?'): Promise<boolean> {
+export async function confirmContinue(message = 'Continue?'): Promise<boolean> {
   return await confirm({
     message,
     default: true
