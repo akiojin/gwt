@@ -12,10 +12,20 @@ export class GitService {
   }
 
   async getAllBranches(): Promise<BranchInfo[]> {
-    const [localBranches, remoteBranches] = await Promise.all([
+    const [localBranches, remoteBranches, currentBranch] = await Promise.all([
       this.getLocalBranchesInfo(),
-      this.getRemoteBranchesInfo()
+      this.getRemoteBranchesInfo(),
+      this.repository.getCurrentBranch()
     ]);
+    
+    // 現在のブランチ情報を設定
+    if (currentBranch) {
+      localBranches.forEach(branch => {
+        if (branch.name === currentBranch) {
+          branch.isCurrent = true;
+        }
+      });
+    }
     
     return [...localBranches, ...remoteBranches];
   }
@@ -26,7 +36,7 @@ export class GitService {
       name,
       type: 'local' as const,
       branchType: this.getBranchType(name),
-      isCurrent: false // TODO: 現在のブランチ情報を取得
+      isCurrent: false
     }));
   }
 

@@ -29,6 +29,15 @@ export class GitRepository {
     return stdout.trim();
   }
 
+  async getCurrentBranch(): Promise<string | null> {
+    try {
+      const stdout = await this.execute(['branch', '--show-current']);
+      return stdout.trim() || null;
+    } catch {
+      return null;
+    }
+  }
+
   async getBranches(options: { remote?: boolean }): Promise<string[]> {
     const args = ['branch'];
     if (options.remote) {

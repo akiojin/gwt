@@ -58,6 +58,15 @@ export async function getRemoteBranches(): Promise<BranchInfo[]> {
   }
 }
 
+async function getCurrentBranch(): Promise<string | null> {
+  try {
+    const { stdout } = await execa('git', ['branch', '--show-current']);
+    return stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
 async function getLocalBranches(): Promise<BranchInfo[]> {
   try {
     const { stdout } = await execa('git', ['branch', '--format=%(refname:short)']);
@@ -80,10 +89,20 @@ async function getLocalBranches(): Promise<BranchInfo[]> {
  * @returns {Promise<BranchInfo[]>} ブランチ情報の配列
  */
 export async function getAllBranches(): Promise<BranchInfo[]> {
-  const [localBranches, remoteBranches] = await Promise.all([
+  const [localBranches, remoteBranches, currentBranch] = await Promise.all([
     getLocalBranches(),
-    getRemoteBranches()
+    getRemoteBranches(),
+    getCurrentBranch()
   ]);
+  
+  // 現在のブランチ情報を設定
+  if (currentBranch) {
+    localBranches.forEach(branch => {
+      if (branch.name === currentBranch) {
+        branch.isCurrent = true;
+      }
+    });
+  }
   
   return [...localBranches, ...remoteBranches];
 }
