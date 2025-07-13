@@ -384,3 +384,14 @@ export async function confirmCleanup(targets: CleanupTarget[]): Promise<boolean>
     default: false
   });
 }
+
+export async function confirmRemoteBranchDeletion(targets: CleanupTarget[]): Promise<boolean> {
+  const message = targets.length === 1 && targets[0]
+    ? `Also delete remote branch "${targets[0].branch}"?`
+    : `Also delete ${targets.length} remote branches?`;
+    
+  return await confirm({
+    message,
+    default: false
+  });
+}
