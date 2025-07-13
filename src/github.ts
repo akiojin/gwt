@@ -1,7 +1,11 @@
 import { execa } from 'execa';
 import chalk from 'chalk';
-import type { PullRequest, MergedPullRequest } from './ui/types.js';
+import type { PullRequest, MergedPullRequest, GitHubPRResponse } from './ui/types.js';
 
+/**
+ * GitHub CLIがインストールされているかを確認
+ * @returns {Promise<boolean>} インストールされている場合true
+ */
 export async function isGitHubCLIAvailable(): Promise<boolean> {
   try {
     await execa('gh', ['--version']);
@@ -11,39 +15,11 @@ export async function isGitHubCLIAvailable(): Promise<boolean> {
   }
 }
 
-export async function getPullRequests(): Promise<PullRequest[]> {
-  try {
-    // リモート情報を更新してから PR を取得
-    try {
-      await execa('git', ['fetch', '--all', '--prune']);
-    } catch (fetchError) {
-      if (process.env.DEBUG_CLEANUP) {
-        console.log(chalk.yellow('Debug: Failed to fetch remote updates, continuing anyway'));
-      }
-    }
-    
-    const { stdout } = await execa('gh', [
-      'pr', 'list',
-      '--state', 'all',
-      '--json', 'number,title,state,headRefName,mergedAt,author',
-      '--limit', '100'
-    ]);
-    
-    const prs = JSON.parse(stdout);
-    return prs.map((pr: any) => ({
-      number: pr.number,
-      title: pr.title,
-      state: pr.state,
-      branch: pr.headRefName,
-      mergedAt: pr.mergedAt,
-      author: pr.author?.login || 'unknown'
-    }));
-  } catch (error) {
-    console.error(chalk.yellow('Warning: Failed to fetch pull requests'));
-    return [];
-  }
-}
 
+/**
+ * マージ済みのプルリクエスト一覧を取得
+ * @returns {Promise<MergedPullRequest[]>} マージ済みPRの配列
+ */
 export async function getMergedPullRequests(): Promise<MergedPullRequest[]> {
   try {
     // リモート情報を更新してから マージ済みPR を取得
@@ -69,16 +45,16 @@ export async function getMergedPullRequests(): Promise<MergedPullRequest[]> {
       return [];
     }
     
-    const prs = JSON.parse(stdout);
+    const prs: GitHubPRResponse[] = JSON.parse(stdout);
     if (process.env.DEBUG_CLEANUP) {
       console.log(chalk.cyan(`Debug: GitHub CLI returned ${prs.length} merged PRs`));
     }
     
-    return prs.map((pr: any) => ({
+    return prs.map((pr) => ({
       number: pr.number,
       title: pr.title,
       branch: pr.headRefName,
-      mergedAt: pr.mergedAt,
+      mergedAt: pr.mergedAt!,
       author: pr.author?.login || 'unknown'
     }));
   } catch (error) {
@@ -110,8 +86,8 @@ export async function getPullRequestByBranch(branchName: string): Promise<PullRe
       '--limit', '1'
     ]);
     
-    const prs = JSON.parse(stdout);
-    if (prs.length === 0) {
+    const prs: GitHubPRResponse[] = JSON.parse(stdout);
+    if (prs.length === 0 || !prs[0]) {
       return null;
     }
     
@@ -119,7 +95,7 @@ export async function getPullRequestByBranch(branchName: string): Promise<PullRe
     return {
       number: pr.number,
       title: pr.title,
-      state: pr.state,
+      state: pr.state as 'OPEN' | 'CLOSED' | 'MERGED',
       branch: pr.headRefName,
       mergedAt: pr.mergedAt,
       author: pr.author?.login || 'unknown'

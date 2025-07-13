@@ -1,6 +1,5 @@
 import { execa } from 'execa';
 import chalk from 'chalk';
-
 export class ClaudeError extends Error {
   constructor(message: string, public cause?: unknown) {
     super(message);
