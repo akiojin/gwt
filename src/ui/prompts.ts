@@ -7,10 +7,10 @@ import {
 } from './types.js';
 
 export async function selectFromTable(
-  choices: Array<{ name: string; value: string; description?: string }>,
+  choices: Array<{ name: string; value: string; description?: string; disabled?: boolean }>,
   statistics?: { branches: BranchInfo[]; worktrees: import('../worktree.js').WorktreeInfo[] }
 ): Promise<string> {
-  // Filter branch choices only (exclude action items)
+  // Filter branch choices only (exclude action items and header/separator rows)
   const branchChoices = choices.filter(choice => 
     choice.value !== '__separator__' && 
     choice.value !== '__separator_space__' && 
@@ -20,7 +20,9 @@ export async function selectFromTable(
     choice.value !== '__manage_worktrees__' &&
     choice.value !== '__cleanup_prs__' &&
     choice.value !== '__exit__' &&
-    choice.name.trim() !== ''
+    choice.value !== '__header__' &&
+    choice.name.trim() !== '' &&
+    !choice.disabled
   );
   
   // Display statistics if provided
@@ -33,13 +35,13 @@ export async function selectFromTable(
 }
 
 async function selectBranchWithShortcuts(
-  branchChoices: Array<{ name: string; value: string; description?: string }>
+  branchChoices: Array<{ name: string; value: string; description?: string; disabled?: boolean }>
 ): Promise<string> {
   const { createPrompt, useState, useKeypress, isEnterKey, usePrefix } = await import('@inquirer/core');
   
   const branchSelectPrompt = createPrompt<string, { 
     message: string; 
-    choices: Array<{ name: string; value: string; description?: string }>;
+    choices: Array<{ name: string; value: string; description?: string; disabled?: boolean }>;
     pageSize?: number;
   }>((config, done) => {
     const [selectedIndex, setSelectedIndex] = useState(0);
