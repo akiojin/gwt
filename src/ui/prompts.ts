@@ -10,8 +10,14 @@ export async function selectFromTable(
   choices: Array<{ name: string; value: string; description?: string }>,
   statistics?: { branches: BranchInfo[]; worktrees: import('../worktree.js').WorktreeInfo[] }
 ): Promise<string> {
-  // Filter out separator items for selection
-  const selectableChoices = choices.filter(choice => choice.value !== '__separator__');
+  // Filter out separator items and empty choices for selection
+  const selectableChoices = choices.filter(choice => 
+    choice.value !== '__separator__' && 
+    choice.value !== '__separator_space__' && 
+    choice.value !== '__separator_space2__' && 
+    choice.value !== '__actions_header__' &&
+    choice.name.trim() !== ''
+  );
   
   // Display statistics if provided
   if (statistics) {
