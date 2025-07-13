@@ -1,18 +1,17 @@
 import { select, input, confirm } from '@inquirer/prompts';
-import { BranchInfo, BranchChoice, BranchType, NewBranchConfig } from './types.js';
+import { 
+  BranchInfo, 
+  BranchType, 
+  NewBranchConfig
+} from './types.js';
 
-export async function selectBranch(branches: BranchChoice[]): Promise<string> {
+export async function selectFromTable(choices: Array<{ name: string; value: string; description?: string }>): Promise<string> {
+  // Filter out separator items for selection
+  const selectableChoices = choices.filter(choice => choice.value !== '__separator__');
+  
   return await select({
-    message: 'Select a branch or create a new one:',
-    choices: [
-      {
-        name: '🆕 Create new branch',
-        value: '__create_new__',
-        description: 'Create a new feature, hotfix, or release branch'
-      },
-      { name: '─'.repeat(50), value: '__separator__', disabled: true },
-      ...branches
-    ],
+    message: 'Select a branch or action:',
+    choices: selectableChoices,
     pageSize: 15
   });
 }
@@ -47,7 +46,7 @@ export async function inputBranchName(type: BranchType): Promise<string> {
       if (!value.trim()) {
         return 'Branch name cannot be empty';
       }
-      if (/[\s\\\/\:\*\?\"\<\>\|]/.test(value.trim())) {
+      if (/[\s\\/:*?"<>|]/.test(value.trim())) {
         return 'Branch name cannot contain spaces or special characters (\\/:*?"<>|)';
       }
       return true;
@@ -109,5 +108,68 @@ export async function confirmSkipPermissions(): Promise<boolean> {
   return await confirm({
     message: 'Skip Claude Code permissions check (--dangerously-skip-permissions)?',
     default: false
+  });
+}
+
+export async function selectWorktreeForManagement(worktrees: Array<{ branch: string; path: string }>): Promise<string | 'back'> {
+  const choices = [
+    ...worktrees.map((w, index) => ({
+      name: `${index + 1}. ${w.branch}`,
+      value: w.branch,
+      description: w.path
+    })),
+    {
+      name: '← Back to main menu',
+      value: 'back',
+      description: 'Return to main menu'
+    }
+  ];
+
+  return await select({
+    message: 'Select worktree to manage:',
+    choices,
+    pageSize: 15
+  });
+}
+
+export async function selectWorktreeAction(): Promise<'open' | 'remove' | 'remove-branch' | 'back'> {
+  return await select({
+    message: 'What would you like to do?',
+    choices: [
+      {
+        name: '📂 Open in Claude Code',
+        value: 'open',
+        description: 'Launch Claude Code in this worktree'
+      },
+      {
+        name: '🗑️  Remove worktree',
+        value: 'remove',
+        description: 'Delete this worktree only'
+      },
+      {
+        name: '🔥 Remove worktree and branch',
+        value: 'remove-branch',
+        description: 'Delete both worktree and branch'
+      },
+      {
+        name: '← Back',
+        value: 'back',
+        description: 'Return to worktree list'
+      }
+    ]
+  });
+}
+
+export async function confirmBranchRemoval(branchName: string): Promise<boolean> {
+  return await confirm({
+    message: `Are you sure you want to delete the branch "${branchName}"? This cannot be undone.`,
+    default: false
+  });
+}
+
+export async function confirmContinue(message: string = 'Continue?'): Promise<boolean> {
+  return await confirm({
+    message,
+    default: true
   });
 }

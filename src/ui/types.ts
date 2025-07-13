@@ -13,6 +13,14 @@ export interface BranchChoice {
   disabled?: boolean | string;
 }
 
+export interface EnhancedBranchChoice extends BranchChoice {
+  hasWorktree: boolean;
+  worktreePath?: string;
+  branchType: BranchInfo['branchType'];
+  branchDataType: 'local' | 'remote';
+  isCurrent: boolean;
+}
+
 export type BranchType = 'feature' | 'hotfix' | 'release';
 
 export interface NewBranchConfig {
@@ -34,4 +42,20 @@ export interface CleanupResult {
   committed: boolean;
   pushed: boolean;
   worktreeRemoved: boolean;
+}
+
+export type ActionType = 'work_existing' | 'create_new' | 'checkout_remote' | 'manage_worktrees';
+
+export interface BranchGroup {
+  title: string;
+  branches: EnhancedBranchChoice[];
+  priority: number;
+}
+
+export interface UIFilter {
+  showWithWorktree: boolean;
+  showWithoutWorktree: boolean;
+  branchTypes: BranchInfo['branchType'][];
+  showLocal: boolean;
+  showRemote: boolean;
 }

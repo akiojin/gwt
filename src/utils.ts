@@ -29,3 +29,27 @@ export class AppError extends Error {
     this.name = 'AppError';
   }
 }
+
+export function setupExitHandlers(): void {
+  // Handle Ctrl+C gracefully
+  process.on('SIGINT', () => {
+    console.log('\n\n👋 Goodbye!');
+    process.exit(0);
+  });
+
+  // Handle other termination signals
+  process.on('SIGTERM', () => {
+    console.log('\n\n👋 Goodbye!');
+    process.exit(0);
+  });
+}
+
+export function handleUserCancel(error: unknown): never {
+  if (error && typeof error === 'object' && 'name' in error) {
+    if (error.name === 'ExitPromptError' || error.name === 'AbortPromptError') {
+      console.log('\n\n👋 Operation cancelled. Goodbye!');
+      process.exit(0);
+    }
+  }
+  throw error;
+}

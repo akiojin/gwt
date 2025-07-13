@@ -103,6 +103,15 @@ export async function branchExists(branchName: string): Promise<boolean> {
   }
 }
 
+export async function deleteBranch(branchName: string, force: boolean = false): Promise<void> {
+  try {
+    const args = ['branch', force ? '-D' : '-d', branchName];
+    await execa('git', args);
+  } catch (error) {
+    throw new GitError(`Failed to delete branch ${branchName}`, error);
+  }
+}
+
 function getBranchType(branchName: string): BranchInfo['branchType'] {
   if (branchName === 'main' || branchName === 'master') return 'main';
   if (branchName === 'develop' || branchName === 'development') return 'develop';

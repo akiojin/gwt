@@ -6,13 +6,15 @@ import {
   createBranch, 
   branchExists, 
   getRepositoryRoot,
+  deleteBranch,
   GitError 
 } from './git.js';
 import { 
-  listWorktrees, 
+  listAdditionalWorktrees,
   worktreeExists, 
   generateWorktreePath, 
   createWorktree,
+  removeWorktree,
   WorktreeError 
 } from './worktree.js';
 import { 
@@ -21,26 +23,34 @@ import {
   ClaudeError 
 } from './claude.js';
 import { 
-  selectBranch, 
+  selectFromTable,
   getNewBranchConfig, 
   selectBaseBranch, 
   confirmWorktreeCreation,
-  confirmSkipPermissions
+  confirmSkipPermissions,
+  selectWorktreeForManagement,
+  selectWorktreeAction,
+  confirmWorktreeRemoval,
+  confirmBranchRemoval,
+  confirmContinue
 } from './ui/prompts.js';
 import { 
-  printWelcome, 
+  displayBranchTable,
   printError, 
   printSuccess, 
   printInfo, 
   printWarning,
-  formatBranchForDisplay 
+  printExit
 } from './ui/display.js';
-import { AppError } from './utils.js';
-import { BranchChoice, WorktreeConfig } from './ui/types.js';
+import { createBranchTable } from './ui/table.js';
+import { AppError, setupExitHandlers, handleUserCancel } from './utils.js';
+import { BranchInfo, WorktreeConfig } from './ui/types.js';
+import { WorktreeInfo } from './worktree.js';
 
 export async function main(): Promise<void> {
   try {
-    printWelcome();
+    // Setup graceful exit handlers
+    setupExitHandlers();
 
     // Check if current directory is a Git repository
     if (!(await isGitRepository())) {
@@ -54,101 +64,34 @@ export async function main(): Promise<void> {
       printInfo('You can install it from: https://claude.ai/code');
     }
 
-    // Get repository information
-    const repoRoot = await getRepositoryRoot();
-    const [branches, worktrees] = await Promise.all([
-      getAllBranches(),
-      listWorktrees()
-    ]);
+    // Main application loop
+    while (true) {
+      try {
+        // Get current repository state
+        const [branches, worktrees, repoRoot] = await Promise.all([
+          getAllBranches(),
+          listAdditionalWorktrees(),
+          getRepositoryRoot()
+        ]);
 
-    // Create worktree lookup map
-    const worktreeMap = new Map(worktrees.map(w => [w.branch, w]));
+        // Create and display table
+        const choices = createBranchTable(branches, worktrees);
+        displayBranchTable();
 
-    // Format branches for display
-    const branchChoices: BranchChoice[] = branches.map(branch => 
-      formatBranchForDisplay(branch, worktreeMap.get(branch.name))
-    );
+        // Get user selection
+        const selection = await selectFromTable(choices);
 
-    // Select branch or create new one
-    const selectedValue = await selectBranch(branchChoices);
-
-    let targetBranch: string;
-    let isNewBranch = false;
-    let baseBranch = 'main';
-
-    if (selectedValue === '__create_new__') {
-      // Create new branch flow
-      const newBranchConfig = await getNewBranchConfig();
-      targetBranch = newBranchConfig.branchName;
-      isNewBranch = true;
-
-      // Check if branch already exists
-      if (await branchExists(targetBranch)) {
-        printError(`Branch "${targetBranch}" already exists.`);
-        process.exit(1);
-      }
-
-      // Select base branch
-      baseBranch = await selectBaseBranch(branches);
-      printInfo(`Creating new branch "${targetBranch}" from "${baseBranch}"`);
-    } else {
-      targetBranch = selectedValue;
-      
-      // Handle remote branch selection
-      if (targetBranch.startsWith('origin/')) {
-        const localBranchName = targetBranch.replace('origin/', '');
+        // Handle selection
+        const shouldContinue = await handleSelection(selection, branches, worktrees, repoRoot);
         
-        if (await branchExists(localBranchName)) {
-          targetBranch = localBranchName;
-        } else {
-          printInfo(`Creating local branch "${localBranchName}" from "${targetBranch}"`);
-          await createBranch(localBranchName, targetBranch);
-          targetBranch = localBranchName;
-          isNewBranch = true;
+        if (!shouldContinue) {
+          break;
         }
+
+      } catch (error) {
+        handleUserCancel(error);
       }
     }
-
-    // Check if worktree exists for the target branch
-    const existingWorktreePath = await worktreeExists(targetBranch);
-
-    // Ask about permissions before launching Claude Code
-    const skipPermissions = await confirmSkipPermissions();
-
-    if (existingWorktreePath) {
-      printInfo(`Worktree already exists at: ${existingWorktreePath}`);
-      await launchClaudeCode(existingWorktreePath, skipPermissions);
-    } else {
-      // Generate worktree path
-      const worktreePath = await generateWorktreePath(repoRoot, targetBranch);
-
-      // Confirm worktree creation
-      const shouldCreate = await confirmWorktreeCreation(targetBranch, worktreePath);
-      
-      if (!shouldCreate) {
-        printInfo('Operation cancelled.');
-        process.exit(0);
-      }
-
-      // Create worktree configuration
-      const worktreeConfig: WorktreeConfig = {
-        branchName: targetBranch,
-        worktreePath,
-        repoRoot,
-        isNewBranch,
-        baseBranch
-      };
-
-      // Create worktree
-      printInfo(`Creating worktree for "${targetBranch}"...`);
-      await createWorktree(worktreeConfig);
-      printSuccess(`Worktree created at: ${worktreePath}`);
-
-      // Launch Claude Code
-      await launchClaudeCode(worktreePath, skipPermissions);
-    }
-
-    printSuccess('Done!');
 
   } catch (error) {
     if (error instanceof GitError) {
@@ -164,6 +107,193 @@ export async function main(): Promise<void> {
     }
     
     process.exit(1);
+  }
+}
+
+async function handleSelection(
+  selection: string,
+  branches: BranchInfo[],
+  worktrees: WorktreeInfo[],
+  repoRoot: string
+): Promise<boolean> {
+  
+  switch (selection) {
+    case '__exit__':
+      printExit();
+      return false;
+
+    case '__create_new__':
+      return await handleCreateNewBranch(branches, repoRoot);
+
+    case '__manage_worktrees__':
+      return await handleManageWorktrees(worktrees);
+
+    default:
+      // Handle branch selection
+      return await handleBranchSelection(selection, repoRoot);
+  }
+}
+
+async function handleBranchSelection(branchName: string, repoRoot: string): Promise<boolean> {
+  try {
+    // Check if worktree exists
+    let worktreePath = await worktreeExists(branchName);
+    
+    if (worktreePath) {
+      printInfo(`Opening existing worktree: ${worktreePath}`);
+    } else {
+      // Create new worktree
+      worktreePath = await generateWorktreePath(repoRoot, branchName);
+      
+      if (!(await confirmWorktreeCreation(branchName, worktreePath))) {
+        printInfo('Operation cancelled.');
+        return true; // Continue to main menu
+      }
+
+      const worktreeConfig: WorktreeConfig = {
+        branchName,
+        worktreePath,
+        repoRoot,
+        isNewBranch: false,
+        baseBranch: branchName
+      };
+
+      printInfo(`Creating worktree for "${branchName}"...`);
+      await createWorktree(worktreeConfig);
+      printSuccess(`Worktree created at: ${worktreePath}`);
+    }
+
+    // Ask about permissions and launch Claude Code
+    const skipPermissions = await confirmSkipPermissions();
+    await launchClaudeCode(worktreePath, skipPermissions);
+    
+    // After Claude Code exits, return to main menu
+    return true;
+
+  } catch (error) {
+    printError(`Failed to handle branch selection: ${error instanceof Error ? error.message : String(error)}`);
+    return true;
+  }
+}
+
+async function handleCreateNewBranch(branches: BranchInfo[], repoRoot: string): Promise<boolean> {
+  try {
+    const newBranchConfig = await getNewBranchConfig();
+    const targetBranch = newBranchConfig.branchName;
+
+    // Check if branch already exists
+    if (await branchExists(targetBranch)) {
+      printError(`Branch "${targetBranch}" already exists.`);
+      if (await confirmContinue('Return to main menu?')) {
+        return true;
+      }
+      return false;
+    }
+
+    // Select base branch
+    const baseBranch = await selectBaseBranch(branches);
+    printInfo(`Creating new branch "${targetBranch}" from "${baseBranch}"`);
+
+    // Create worktree path
+    const worktreePath = await generateWorktreePath(repoRoot, targetBranch);
+    
+    if (!(await confirmWorktreeCreation(targetBranch, worktreePath))) {
+      printInfo('Operation cancelled.');
+      return true;
+    }
+
+    // Create worktree configuration
+    const worktreeConfig: WorktreeConfig = {
+      branchName: targetBranch,
+      worktreePath,
+      repoRoot,
+      isNewBranch: true,
+      baseBranch
+    };
+
+    // Create worktree
+    printInfo(`Creating worktree for "${targetBranch}"...`);
+    await createWorktree(worktreeConfig);
+    printSuccess(`Worktree created at: ${worktreePath}`);
+
+    // Launch Claude Code
+    const skipPermissions = await confirmSkipPermissions();
+    await launchClaudeCode(worktreePath, skipPermissions);
+    
+    return true;
+
+  } catch (error) {
+    printError(`Failed to create new branch: ${error instanceof Error ? error.message : String(error)}`);
+    return true;
+  }
+}
+
+async function handleManageWorktrees(worktrees: WorktreeInfo[]): Promise<boolean> {
+  try {
+    if (worktrees.length === 0) {
+      printInfo('No worktrees found.');
+      if (await confirmContinue('Return to main menu?')) {
+        return true;
+      }
+      return false;
+    }
+
+    while (true) {
+      const worktreeChoices = worktrees.map(w => ({ branch: w.branch, path: w.path }));
+      const selectedWorktree = await selectWorktreeForManagement(worktreeChoices);
+      
+      if (selectedWorktree === 'back') {
+        return true; // Return to main menu
+      }
+
+      const worktree = worktrees.find(w => w.branch === selectedWorktree);
+      if (!worktree) {
+        printError('Worktree not found.');
+        continue;
+      }
+
+      const action = await selectWorktreeAction();
+      
+      switch (action) {
+        case 'open':
+          const skipPermissions = await confirmSkipPermissions();
+          await launchClaudeCode(worktree.path, skipPermissions);
+          return true; // Return to main menu after opening
+          
+        case 'remove':
+          if (await confirmWorktreeRemoval(worktree.path)) {
+            await removeWorktree(worktree.path);
+            printSuccess(`Worktree removed: ${worktree.path}`);
+            // Update worktrees list
+            const index = worktrees.indexOf(worktree);
+            worktrees.splice(index, 1);
+          }
+          break;
+          
+        case 'remove-branch':
+          if (await confirmWorktreeRemoval(worktree.path)) {
+            await removeWorktree(worktree.path);
+            printSuccess(`Worktree removed: ${worktree.path}`);
+            
+            if (await confirmBranchRemoval(worktree.branch)) {
+              await deleteBranch(worktree.branch, true); // Force delete
+              printSuccess(`Branch deleted: ${worktree.branch}`);
+            }
+            
+            // Update worktrees list
+            const index = worktrees.indexOf(worktree);
+            worktrees.splice(index, 1);
+          }
+          break;
+          
+        case 'back':
+          continue; // Continue worktree management loop
+      }
+    }
+
+  } catch (error) {
+    printError(`Failed to manage worktrees: ${error instanceof Error ? error.message : String(error)}`);
+    return true;
   }
 }
 

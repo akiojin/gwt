@@ -51,6 +51,20 @@ export async function listWorktrees(): Promise<WorktreeInfo[]> {
   }
 }
 
+export async function listAdditionalWorktrees(): Promise<WorktreeInfo[]> {
+  try {
+    const [allWorktrees, repoRoot] = await Promise.all([
+      listWorktrees(),
+      import('./git.js').then(m => m.getRepositoryRoot())
+    ]);
+    
+    // Filter out the main worktree (repository root)
+    return allWorktrees.filter(worktree => worktree.path !== repoRoot);
+  } catch (error) {
+    throw new WorktreeError('Failed to list additional worktrees', error);
+  }
+}
+
 export async function worktreeExists(branchName: string): Promise<string | null> {
   const worktrees = await listWorktrees();
   const worktree = worktrees.find(w => w.branch === branchName);
@@ -59,7 +73,8 @@ export async function worktreeExists(branchName: string): Promise<string | null>
 
 export async function generateWorktreePath(repoRoot: string, branchName: string): Promise<string> {
   const sanitizedBranchName = branchName.replace(/[\/\\:*?"<>|]/g, '-');
-  return path.join(repoRoot, '..', `${path.basename(repoRoot)}-${sanitizedBranchName}`);
+  const worktreeDir = path.join(repoRoot, '.git', 'worktree');
+  return path.join(worktreeDir, sanitizedBranchName);
 }
 
 export async function createWorktree(config: WorktreeConfig): Promise<void> {
