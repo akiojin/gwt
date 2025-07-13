@@ -1,4 +1,3 @@
-import Table from 'cli-table3';
 import chalk from 'chalk';
 import stringWidth from 'string-width';
 import { BranchInfo } from './types.js';
@@ -45,24 +44,24 @@ export async function createBranchTable(
     // Format branch name with indicators
     let branchDisplay = branch.name;
     if (branch.isCurrent) {
-      branchDisplay = `★ ${branch.name}`;
+      branchDisplay = `◉ ${branch.name}`;
     }
     
-    // Format type with colors
-    const typeColor = getBranchTypeColor(branch.branchType);
-    const typeText = branch.branchType;
+    // Format type with colors and icons
+    const typeIcon = getBranchTypeIcon(branch.branchType);
+    const typeText = `${typeIcon} ${branch.branchType}`;
     
     // Format worktree status
-    const worktreeStatus = hasWorktree ? '✓' : '';
+    const worktreeStatus = hasWorktree ? chalk.green('●') : chalk.gray('○');
     
-    // Format status
+    // Format status with colors
     let statusText = '';
     if (branch.isCurrent) {
-      statusText = 'current';
+      statusText = chalk.bgGreen.black(' CURRENT ');
     } else if (branch.type === 'remote') {
-      statusText = 'remote';
+      statusText = chalk.bgBlue.white(' REMOTE ');
     } else {
-      statusText = 'local';
+      statusText = chalk.bgGray.white(' LOCAL ');
     }
     
     // Get changes count if worktree exists
@@ -71,21 +70,25 @@ export async function createBranchTable(
       try {
         const changedFiles = await getChangedFilesCount(worktree.path);
         if (changedFiles > 0) {
-          changesText = `${changedFiles} files`;
+          changesText = chalk.yellow(`✎ ${changedFiles}`);
+        } else {
+          changesText = chalk.gray('─');
         }
       } catch {
-        // Ignore errors when getting change count
+        changesText = chalk.gray('─');
       }
+    } else {
+      changesText = chalk.gray('─');
     }
     
-    // Create table-like display string - no trailing spaces on last column
+    // Create table-like display string with modern separators
     const displayName = [
-      padEndUnicode(branchDisplay, 30),
-      padEndUnicode(typeText, 10),
-      padEndUnicode(worktreeStatus, 8),
-      padEndUnicode(statusText, 10),
+      padEndUnicode(branchDisplay, 32),
+      padEndUnicode(typeText, 14),
+      padEndUnicode(worktreeStatus, 10),
+      padEndUnicode(statusText, 12),
       changesText // No padding for the last column
-    ].join(' │ ');
+    ].join(' ┃ ');
 
     choices.push({
       name: displayName,
@@ -94,37 +97,36 @@ export async function createBranchTable(
     });
   }
 
-  // Add separator - match the exact width of table rows
-  // Create a sample row to measure its width (matching the header format)
+  // Add separator with modern box drawing characters
   const sampleRow = [
-    padEndUnicode('', 30),
+    padEndUnicode('', 32),
+    padEndUnicode('', 14),
     padEndUnicode('', 10),
-    padEndUnicode('', 8),
-    padEndUnicode('', 10),
-    'Changes' // Match the header's last column without padding
-  ].join(' │ ');
+    padEndUnicode('', 12),
+    'Changes'
+  ].join(' ┃ ');
   
   choices.push({
-    name: '─'.repeat(stringWidth(sampleRow)),
+    name: '━'.repeat(stringWidth(sampleRow)),
     value: '__separator__',
     description: ''
   });
 
-  // Add special choices
+  // Add special choices with improved formatting
   choices.push({
-    name: '✨ Create new branch',
+    name: chalk.cyan('➕ Create new branch'),
     value: '__create_new__',
     description: 'Create a new feature, hotfix, or release branch'
   });
 
   choices.push({
-    name: '🗂️  Manage worktrees',
+    name: chalk.magenta('📂 Manage worktrees'),
     value: '__manage_worktrees__',
     description: 'View and manage existing worktrees'
   });
 
   choices.push({
-    name: '❌ Exit',
+    name: chalk.red('◈ Exit'),
     value: '__exit__',
     description: 'Exit the application'
   });
@@ -132,51 +134,24 @@ export async function createBranchTable(
   return choices;
 }
 
-function getBranchTypeColor(branchType: BranchInfo['branchType']) {
+
+function getBranchTypeIcon(branchType: BranchInfo['branchType']): string {
   switch (branchType) {
     case 'main':
-      return chalk.red.bold;
+      return '⚡';
     case 'develop':
-      return chalk.blue.bold;
+      return '🔧';
     case 'feature':
-      return chalk.green;
+      return '✨';
     case 'hotfix':
-      return chalk.red;
+      return '🔥';
     case 'release':
-      return chalk.yellow;
+      return '🚀';
     default:
-      return chalk.gray;
+      return '📌';
   }
 }
 
-function truncatePath(path: string, maxLength: number): string {
-  const width = stringWidth(path);
-  if (width <= maxLength) return path;
-  
-  // Show the beginning of the path with ellipsis at the end
-  // Account for '...' which takes 3 display width
-  const ellipsis = '...';
-  const availableWidth = maxLength - stringWidth(ellipsis);
-  
-  // Start from the beginning
-  let result = '';
-  let currentWidth = 0;
-  
-  for (let i = 0; i < path.length; i++) {
-    const char = path[i];
-    if (!char) continue;
-    const charWidth = stringWidth(char);
-    
-    if (currentWidth + charWidth > availableWidth) {
-      break;
-    }
-    
-    result += char;
-    currentWidth += charWidth;
-  }
-  
-  return result + ellipsis;
-}
 
 function padEndUnicode(str: string, targetLength: number, padString: string = ' '): string {
   const strWidth = stringWidth(str);

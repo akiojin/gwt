@@ -169,7 +169,9 @@ export function getBranchTypeColor(branchType: BranchInfo['branchType']) {
 export function printWelcome(): void {
   console.clear();
   console.log();
-  console.log(chalk.blue.bold('🌳 Claude Worktree Manager'));
+  console.log(chalk.blueBright.bold('╔═══════════════════════════════════════════════╗'));
+  console.log(chalk.blueBright.bold('║  🌳 Claude Worktree Manager                   ║'));
+  console.log(chalk.blueBright.bold('╚═══════════════════════════════════════════════╝'));
   console.log(chalk.gray('Interactive Git worktree manager for Claude Code'));
   console.log(chalk.gray('Press Ctrl+C to quit anytime'));
   console.log();
@@ -179,17 +181,17 @@ export function displayBranchTable(): void {
   console.clear();
   printWelcome();
   
-  // Display table header - add 2 spaces for cursor alignment
+  // Display table header with updated column widths and modern separators
   const headerParts = [
-    padEndUnicode('Branch Name', 30),
-    padEndUnicode('Type', 10),
-    padEndUnicode('Worktree', 8),
-    padEndUnicode('Status', 10),
+    padEndUnicode('Branch Name', 32),
+    padEndUnicode('Type', 14),
+    padEndUnicode('Worktree', 10),
+    padEndUnicode('Status', 12),
     'Changes' // No padding for the last column
   ];
-  const header = '  ' + headerParts.join(' │ '); // 2 spaces for cursor
-  console.log(chalk.blue.bold(header));
-  console.log('  ' + '─'.repeat(stringWidth(header) - 2)); // 2 spaces + adjusted line
+  const header = '  ' + headerParts.join(' ┃ '); // 2 spaces for cursor
+  console.log(chalk.cyan.bold(header));
+  console.log('  ' + '━'.repeat(stringWidth(header) - 2)); // 2 spaces + adjusted line
 }
 
 function padEndUnicode(str: string, targetLength: number, padString: string = ' '): string {
@@ -266,15 +268,18 @@ export async function printStatistics(branches: BranchInfo[], worktrees: Worktre
     }
   }
   
-  console.log(chalk.gray('📊 Repository Statistics:'));
-  console.log(chalk.gray(`   Local branches: ${localBranches}`));
-  console.log(chalk.gray(`   Remote branches: ${remoteBranches}`));
-  console.log(chalk.gray(`   Active worktrees: ${worktreeCount}`));
+  console.log(chalk.cyan('╭─────────────────────────────────────────────╮'));
+  console.log(chalk.cyan('│ 📊 Repository Statistics                    │'));
+  console.log(chalk.cyan('├─────────────────────────────────────────────┤'));
+  console.log(chalk.cyan('│') + `   ${chalk.white('Local branches:')}  ${chalk.green.bold(localBranches.toString().padStart(3))}                      ` + chalk.cyan('│'));
+  console.log(chalk.cyan('│') + `   ${chalk.white('Remote branches:')} ${chalk.blue.bold(remoteBranches.toString().padStart(3))}                      ` + chalk.cyan('│'));
+  console.log(chalk.cyan('│') + `   ${chalk.white('Active worktrees:')} ${chalk.magenta.bold(worktreeCount.toString().padStart(2))}                      ` + chalk.cyan('│'));
   
   if (worktreesWithChanges > 0) {
-    console.log(chalk.yellow(`   Worktrees with changes: ${worktreesWithChanges}`));
-    console.log(chalk.yellow(`   Total uncommitted files: ${totalChangedFiles}`));
+    console.log(chalk.cyan('│') + `   ${chalk.yellow('Worktrees with changes:')} ${chalk.yellow.bold(worktreesWithChanges.toString().padStart(2))}              ` + chalk.cyan('│'));
+    console.log(chalk.cyan('│') + `   ${chalk.yellow('Total uncommitted files:')} ${chalk.yellow.bold(totalChangedFiles.toString().padStart(3))}           ` + chalk.cyan('│'));
   }
   
+  console.log(chalk.cyan('╰─────────────────────────────────────────────╯'));
   console.log();
 }
