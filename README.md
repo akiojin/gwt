@@ -21,18 +21,32 @@ Interactive Git worktree manager for Claude Code with graphical branch selection
 
 ## Installation
 
-Install globally via npm:
+### Global Installation (Recommended)
+
+Install globally via npm for permanent access:
 
 ```bash
 npm install -g @akiojin/claude-worktree
 ```
 
-## Quick Start
+### One-time Usage with npx
 
-Simply run in any Git repository:
+Run without installation using npx:
 
 ```bash
+npx @akiojin/claude-worktree
+```
+
+## Quick Start
+
+Run in any Git repository:
+
+```bash
+# If installed globally
 claude-worktree
+
+# Or use npx for one-time execution
+npx @akiojin/claude-worktree
 ```
 
 The tool presents an interactive interface with the following options:
