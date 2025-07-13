@@ -269,19 +269,40 @@ export async function printStatistics(branches: BranchInfo[], worktrees: Worktre
     }
   }
   
-  console.log(chalk.cyan('╭─────────────────────────────────────────────╮'));
-  console.log(chalk.cyan('│ 📊 Repository Statistics                    │'));
-  console.log(chalk.cyan('├─────────────────────────────────────────────┤'));
-  console.log(chalk.cyan('│') + `   ${chalk.white('Local branches:')}  ${chalk.green.bold(localBranches.toString().padStart(3))}                      ` + chalk.cyan('│'));
-  console.log(chalk.cyan('│') + `   ${chalk.white('Remote branches:')} ${chalk.blue.bold(remoteBranches.toString().padStart(3))}                      ` + chalk.cyan('│'));
-  console.log(chalk.cyan('│') + `   ${chalk.white('Active worktrees:')} ${chalk.magenta.bold(worktreeCount.toString().padStart(2))}                      ` + chalk.cyan('│'));
+  // Create dynamic statistics data
+  const stats = [
+    { label: 'Local branches', value: localBranches, color: chalk.green.bold },
+    { label: 'Remote branches', value: remoteBranches, color: chalk.blue.bold },
+    { label: 'Active worktrees', value: worktreeCount, color: chalk.magenta.bold }
+  ];
   
   if (worktreesWithChanges > 0) {
-    console.log(chalk.cyan('│') + `   ${chalk.yellow('Worktrees with changes:')} ${chalk.yellow.bold(worktreesWithChanges.toString().padStart(2))}              ` + chalk.cyan('│'));
-    console.log(chalk.cyan('│') + `   ${chalk.yellow('Total uncommitted files:')} ${chalk.yellow.bold(totalChangedFiles.toString().padStart(3))}           ` + chalk.cyan('│'));
+    stats.push(
+      { label: 'Worktrees with changes', value: worktreesWithChanges, color: chalk.yellow.bold },
+      { label: 'Total uncommitted files', value: totalChangedFiles, color: chalk.yellow.bold }
+    );
   }
   
-  console.log(chalk.cyan('╰─────────────────────────────────────────────╯'));
+  // Calculate the maximum label width for proper alignment
+  const maxLabelWidth = Math.max(...stats.map(s => s.label.length));
+  const valueWidth = 4; // Width for numbers (up to 9999)
+  const padding = 2; // Padding on each side
+  const totalWidth = maxLabelWidth + valueWidth + padding * 2 + 3; // +3 for ": " and spacing
+  
+  // Print the statistics box
+  console.log();
+  console.log(chalk.gray('┌' + '─'.repeat(totalWidth) + '┐'));
+  console.log(chalk.gray('│') + chalk.cyan.bold(' 📊 Repository Statistics'.padEnd(totalWidth - 1)) + chalk.gray('│'));
+  console.log(chalk.gray('├' + '─'.repeat(totalWidth) + '┤'));
+  
+  for (const stat of stats) {
+    const label = chalk.white(stat.label + ':');
+    const value = stat.color(stat.value.toString().padStart(valueWidth));
+    const line = ` ${label.padEnd(maxLabelWidth + 1)} ${value}`;
+    console.log(chalk.gray('│') + line.padEnd(totalWidth) + chalk.gray('│'));
+  }
+  
+  console.log(chalk.gray('└' + '─'.repeat(totalWidth) + '┘'));
   console.log();
 }
 
