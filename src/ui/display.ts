@@ -285,24 +285,24 @@ export async function printStatistics(branches: BranchInfo[], worktrees: Worktre
   
   // Calculate the maximum label width for proper alignment
   const maxLabelWidth = Math.max(...stats.map(s => s.label.length));
-  const valueWidth = 4; // Width for numbers (up to 9999)
-  const padding = 2; // Padding on each side
-  const totalWidth = maxLabelWidth + valueWidth + padding * 2 + 3; // +3 for ": " and spacing
+  const valueWidth = Math.max(...stats.map(s => s.value.toString().length), 3); // Dynamic value width
+  const padding = 1; // Reduced padding
+  const totalWidth = maxLabelWidth + valueWidth + padding * 2 + 2; // +2 for ": "
   
-  // Print the statistics box
+  // Print the compact statistics box
   console.log();
-  console.log(chalk.gray('┌' + '─'.repeat(totalWidth) + '┐'));
-  console.log(chalk.gray('│') + chalk.cyan.bold(' 📊 Repository Statistics'.padEnd(totalWidth - 1)) + chalk.gray('│'));
+  console.log(chalk.gray('╭' + '─'.repeat(totalWidth) + '╮'));
+  console.log(chalk.gray('│') + chalk.cyan.bold(' 📊 Repository Statistics') + chalk.gray(' '.repeat(totalWidth - 25) + '│'));
   console.log(chalk.gray('├' + '─'.repeat(totalWidth) + '┤'));
   
   for (const stat of stats) {
-    const label = chalk.white(stat.label + ':');
-    const value = stat.color(stat.value.toString().padStart(valueWidth));
-    const line = ` ${label.padEnd(maxLabelWidth + 1)} ${value}`;
-    console.log(chalk.gray('│') + line.padEnd(totalWidth) + chalk.gray('│'));
+    const label = `  ${stat.label}:`;
+    const value = stat.color(stat.value.toString());
+    const spacer = ' '.repeat(totalWidth - stringWidth(label) - stringWidth(value.toString()) - 1);
+    console.log(chalk.gray('│') + chalk.white(label) + spacer + value + chalk.gray(' │'));
   }
   
-  console.log(chalk.gray('└' + '─'.repeat(totalWidth) + '┘'));
+  console.log(chalk.gray('╰' + '─'.repeat(totalWidth) + '╯'));
   console.log();
 }
 
