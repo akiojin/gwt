@@ -1,0 +1,49 @@
+{
+  "name": "claude-worktree",
+  "version": "1.0.0",
+  "description": "Interactive Git worktree manager for Claude Code with graphical branch selection",
+  "main": "dist/index.js",
+  "bin": {
+    "claude-worktree": "./bin/claude-worktree"
+  },
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js",
+    "lint": "eslint src/**/*.ts",
+    "type-check": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "keywords": [
+    "git",
+    "worktree",
+    "claude",
+    "cli",
+    "interactive",
+    "branch",
+    "development"
+  ],
+  "author": "AI Novel Project",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@inquirer/prompts": "^6.0.1",
+    "chalk": "^5.3.0",
+    "execa": "^9.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@typescript-eslint/eslint-plugin": "^8.18.2",
+    "@typescript-eslint/parser": "^8.18.2",
+    "eslint": "^9.18.0",
+    "typescript": "^5.7.2"
+  },
+  "files": [
+    "dist/",
+    "bin/",
+    "README.md"
+  ]
+}
