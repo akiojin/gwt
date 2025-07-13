@@ -6,7 +6,10 @@ import {
   CleanupTarget
 } from './types.js';
 
-export async function selectFromTable(choices: Array<{ name: string; value: string; description?: string }>): Promise<string> {
+export async function selectFromTable(
+  choices: Array<{ name: string; value: string; description?: string }>,
+  statistics?: { branches: BranchInfo[]; worktrees: import('../worktree.js').WorktreeInfo[] }
+): Promise<string> {
   // Filter out separator items and empty choices for selection
   const selectableChoices = choices.filter(choice => 
     choice.value !== '__separator__' && 
@@ -15,6 +18,12 @@ export async function selectFromTable(choices: Array<{ name: string; value: stri
     choice.value !== '__actions_header__' &&
     choice.name.trim() !== ''
   );
+  
+  // Display statistics if provided
+  if (statistics) {
+    const { printStatistics } = await import('./display.js');
+    await printStatistics(statistics.branches, statistics.worktrees);
+  }
   
   return await select({
     message: 'Select a branch or action:',
