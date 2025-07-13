@@ -182,6 +182,11 @@ export function displayBranchTable(): void {
   console.clear();
   printWelcome();
   
+  // Display Branch Selection header
+  const totalWidth = 88; // Approximate width of the table
+  console.log(chalk.cyan.bold('╔' + '═'.repeat(22) + ' Branch Selection ' + '═'.repeat(totalWidth - 40) + '╗'));
+  console.log();
+  
   // Display table header with updated column widths and modern separators
   const headerParts = [
     padEndUnicode('Branch Name', 32),

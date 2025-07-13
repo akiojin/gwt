@@ -7,8 +7,14 @@ import {
 } from './types.js';
 
 export async function selectFromTable(choices: Array<{ name: string; value: string; description?: string }>): Promise<string> {
-  // Filter out separator items for selection
-  const selectableChoices = choices.filter(choice => choice.value !== '__separator__');
+  // Filter out separator items and empty choices for selection
+  const selectableChoices = choices.filter(choice => 
+    choice.value !== '__separator__' && 
+    choice.value !== '__separator_space__' && 
+    choice.value !== '__separator_space2__' && 
+    choice.value !== '__actions_header__' &&
+    choice.name.trim() !== ''
+  );
   
   return await select({
     message: 'Select a branch or action:',
