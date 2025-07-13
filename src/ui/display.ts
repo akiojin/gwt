@@ -175,14 +175,21 @@ export async function printWelcome(): Promise<void> {
   const versionText = version ? ` v${version}` : '';
   const title = `🌳 Claude Worktree Manager${versionText}`;
   
-  // Calculate padding to center the title
-  const totalWidth = 47; // Width of the border
-  const padding = Math.max(0, totalWidth - title.length - 4); // 4 for the "║  " and "  ║"
-  const leftPadding = Math.floor(padding / 2);
-  const rightPadding = padding - leftPadding;
+  // Box border configuration
+  const borderWidth = 49; // Total width including borders
+  const contentWidth = borderWidth - 2; // Width without borders (47)
+  
+  // Calculate title display width
+  // 🌳 = 2 columns, rest is normal text
+  const emojiWidth = 2;
+  const textLength = title.length - 2; // Subtract emoji bytes
+  const titleDisplayWidth = emojiWidth + textLength;
+  
+  // Calculate right padding
+  const rightPadding = contentWidth - titleDisplayWidth - 1; // -1 for left space
   
   console.log(chalk.blueBright.bold('╔═══════════════════════════════════════════════╗'));
-  console.log(chalk.blueBright.bold(`║  ${title}${' '.repeat(rightPadding)} ║`));
+  console.log(chalk.blueBright.bold(`║ ${title}${' '.repeat(rightPadding)} ║`));
   console.log(chalk.blueBright.bold('╚═══════════════════════════════════════════════╝'));
   console.log(chalk.gray('Interactive Git worktree manager for Claude Code'));
   console.log(chalk.gray('Press Ctrl+C to quit anytime'));

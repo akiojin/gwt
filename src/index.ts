@@ -7,6 +7,7 @@ import {
   branchExists, 
   getRepositoryRoot,
   deleteBranch,
+  deleteRemoteBranch,
   hasUncommittedChanges,
   showStatus,
   stashChanges,
@@ -373,8 +374,16 @@ async function handleCleanupMergedPRs(): Promise<boolean> {
         printInfo(`Removing worktree: ${target.worktreePath}`);
         await removeWorktree(target.worktreePath, true); // Force remove
         
-        printInfo(`Deleting branch: ${target.branch}`);
+        printInfo(`Deleting local branch: ${target.branch}`);
         await deleteBranch(target.branch, true); // Force delete
+        
+        printInfo(`Deleting remote branch: origin/${target.branch}`);
+        try {
+          await deleteRemoteBranch(target.branch);
+        } catch (error) {
+          // リモートブランチの削除に失敗してもローカルの削除は成功として扱う
+          printWarning(`Failed to delete remote branch: ${error instanceof Error ? error.message : String(error)}`);
+        }
         
         results.push({ target, success: true });
       } catch (error) {
