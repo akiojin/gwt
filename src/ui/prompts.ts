@@ -167,6 +167,58 @@ export async function confirmBranchRemoval(branchName: string): Promise<boolean>
   });
 }
 
+export async function selectChangesAction(): Promise<'status' | 'commit' | 'stash' | 'discard' | 'continue'> {
+  return await select({
+    message: 'Changes detected in worktree. What would you like to do?',
+    choices: [
+      {
+        name: '📋 View changes (git status)',
+        value: 'status',
+        description: 'Show modified files'
+      },
+      {
+        name: '💾 Commit changes',
+        value: 'commit',
+        description: 'Create a new commit'
+      },
+      {
+        name: '📦 Stash changes',
+        value: 'stash',
+        description: 'Save changes for later'
+      },
+      {
+        name: '🗑️  Discard changes',
+        value: 'discard',
+        description: 'Discard all changes (careful!)'
+      },
+      {
+        name: '➡️  Continue without action',
+        value: 'continue',
+        description: 'Return to main menu'
+      }
+    ]
+  });
+}
+
+export async function inputCommitMessage(): Promise<string> {
+  return await input({
+    message: 'Enter commit message:',
+    validate: (value: string) => {
+      if (!value.trim()) {
+        return 'Commit message cannot be empty';
+      }
+      return true;
+    }
+  });
+}
+
+export async function confirmDiscardChanges(): Promise<boolean> {
+  return await confirm({
+    message: 'Are you sure you want to discard all changes? This cannot be undone.',
+    default: false
+  });
+}
+
 export async function confirmContinue(message: string = 'Continue?'): Promise<boolean> {
   return await confirm({
     message,

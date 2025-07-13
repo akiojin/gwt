@@ -3,6 +3,7 @@ import chalk from 'chalk';
 import stringWidth from 'string-width';
 import { BranchInfo } from './types.js';
 import { WorktreeInfo } from '../worktree.js';
+import { getChangedFilesCount } from '../git.js';
 
 export interface TableBranchRow {
   branchName: string;
@@ -13,10 +14,10 @@ export interface TableBranchRow {
   value: string;
 }
 
-export function createBranchTable(
+export async function createBranchTable(
   branches: BranchInfo[],
   worktrees: WorktreeInfo[]
-): Array<{ name: string; value: string; description?: string }> {
+): Promise<Array<{ name: string; value: string; description?: string }>> {
   
   // Create worktree lookup map (excluding main repository)
   const worktreeMap = new Map(
@@ -64,12 +65,26 @@ export function createBranchTable(
       statusText = 'local';
     }
     
+    // Get changes count if worktree exists
+    let changesText = '';
+    if (hasWorktree && worktree) {
+      try {
+        const changedFiles = await getChangedFilesCount(worktree.path);
+        if (changedFiles > 0) {
+          changesText = `${changedFiles} files`;
+        }
+      } catch {
+        // Ignore errors when getting change count
+      }
+    }
+    
     // Create table-like display string - no trailing spaces on last column
     const displayName = [
       padEndUnicode(branchDisplay, 30),
       padEndUnicode(typeText, 10),
       padEndUnicode(worktreeStatus, 8),
-      statusText // No padding for the last column
+      padEndUnicode(statusText, 10),
+      changesText // No padding for the last column
     ].join(' │ ');
 
     choices.push({
@@ -85,7 +100,8 @@ export function createBranchTable(
     padEndUnicode('', 30),
     padEndUnicode('', 10),
     padEndUnicode('', 8),
-    'Status' // Match the header's last column without padding
+    padEndUnicode('', 10),
+    'Changes' // Match the header's last column without padding
   ].join(' │ ');
   
   choices.push({

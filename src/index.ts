@@ -7,6 +7,11 @@ import {
   branchExists, 
   getRepositoryRoot,
   deleteBranch,
+  hasUncommittedChanges,
+  showStatus,
+  stashChanges,
+  discardAllChanges,
+  commitChanges,
   GitError 
 } from './git.js';
 import { 
@@ -32,6 +37,9 @@ import {
   selectWorktreeAction,
   confirmWorktreeRemoval,
   confirmBranchRemoval,
+  selectChangesAction,
+  inputCommitMessage,
+  confirmDiscardChanges,
   confirmContinue
 } from './ui/prompts.js';
 import { 
@@ -40,7 +48,8 @@ import {
   printSuccess, 
   printInfo, 
   printWarning,
-  printExit
+  printExit,
+  printStatistics
 } from './ui/display.js';
 import { createBranchTable } from './ui/table.js';
 import { AppError, setupExitHandlers, handleUserCancel } from './utils.js';
@@ -75,8 +84,11 @@ export async function main(): Promise<void> {
         ]);
 
         // Create and display table
-        const choices = createBranchTable(branches, worktrees);
+        const choices = await createBranchTable(branches, worktrees);
         displayBranchTable();
+        
+        // Display statistics
+        await printStatistics(branches, worktrees);
 
         // Get user selection
         const selection = await selectFromTable(choices);
@@ -167,7 +179,10 @@ async function handleBranchSelection(branchName: string, repoRoot: string): Prom
     const skipPermissions = await confirmSkipPermissions();
     await launchClaudeCode(worktreePath, skipPermissions);
     
-    // After Claude Code exits, return to main menu
+    // Check for changes after Claude Code exits
+    await handlePostClaudeChanges(worktreePath);
+    
+    // After handling changes, return to main menu
     return true;
 
   } catch (error) {
@@ -219,6 +234,9 @@ async function handleCreateNewBranch(branches: BranchInfo[], repoRoot: string): 
     // Launch Claude Code
     const skipPermissions = await confirmSkipPermissions();
     await launchClaudeCode(worktreePath, skipPermissions);
+    
+    // Check for changes after Claude Code exits
+    await handlePostClaudeChanges(worktreePath);
     
     return true;
 
@@ -294,6 +312,51 @@ async function handleManageWorktrees(worktrees: WorktreeInfo[]): Promise<boolean
   } catch (error) {
     printError(`Failed to manage worktrees: ${error instanceof Error ? error.message : String(error)}`);
     return true;
+  }
+}
+
+async function handlePostClaudeChanges(worktreePath: string): Promise<void> {
+  try {
+    // Check if there are uncommitted changes
+    if (!(await hasUncommittedChanges(worktreePath))) {
+      return; // No changes, nothing to do
+    }
+
+    while (true) {
+      const action = await selectChangesAction();
+      
+      switch (action) {
+        case 'status':
+          const status = await showStatus(worktreePath);
+          console.log('\n' + status + '\n');
+          await confirmContinue('Press enter to continue...');
+          break;
+          
+        case 'commit':
+          const commitMessage = await inputCommitMessage();
+          await commitChanges(worktreePath, commitMessage);
+          printSuccess('Changes committed successfully!');
+          return;
+          
+        case 'stash':
+          await stashChanges(worktreePath, 'Stashed by Claude Worktree Manager');
+          printSuccess('Changes stashed successfully!');
+          return;
+          
+        case 'discard':
+          if (await confirmDiscardChanges()) {
+            await discardAllChanges(worktreePath);
+            printSuccess('All changes discarded.');
+            return;
+          }
+          break;
+          
+        case 'continue':
+          return;
+      }
+    }
+  } catch (error) {
+    printError(`Failed to handle changes: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 

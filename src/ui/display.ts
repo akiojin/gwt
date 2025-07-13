@@ -184,7 +184,8 @@ export function displayBranchTable(): void {
     padEndUnicode('Branch Name', 30),
     padEndUnicode('Type', 10),
     padEndUnicode('Worktree', 8),
-    'Status' // No padding for the last column
+    padEndUnicode('Status', 10),
+    'Changes' // No padding for the last column
   ];
   const header = '  ' + headerParts.join(' │ '); // 2 spaces for cursor
   console.log(chalk.blue.bold(header));
@@ -243,14 +244,37 @@ export function formatWorktreesList(worktrees: WorktreeInfo[]): void {
   console.log();
 }
 
-export function printStatistics(branches: BranchInfo[], worktrees: WorktreeInfo[]): void {
+export async function printStatistics(branches: BranchInfo[], worktrees: WorktreeInfo[]): Promise<void> {
   const localBranches = branches.filter(b => b.type === 'local').length;
   const remoteBranches = branches.filter(b => b.type === 'remote').length;
   const worktreeCount = worktrees.length;
+  
+  // Count worktrees with changes
+  let worktreesWithChanges = 0;
+  let totalChangedFiles = 0;
+  
+  for (const worktree of worktrees) {
+    try {
+      const { getChangedFilesCount } = await import('../git.js');
+      const changedFiles = await getChangedFilesCount(worktree.path);
+      if (changedFiles > 0) {
+        worktreesWithChanges++;
+        totalChangedFiles += changedFiles;
+      }
+    } catch {
+      // Ignore errors
+    }
+  }
   
   console.log(chalk.gray('📊 Repository Statistics:'));
   console.log(chalk.gray(`   Local branches: ${localBranches}`));
   console.log(chalk.gray(`   Remote branches: ${remoteBranches}`));
   console.log(chalk.gray(`   Active worktrees: ${worktreeCount}`));
+  
+  if (worktreesWithChanges > 0) {
+    console.log(chalk.yellow(`   Worktrees with changes: ${worktreesWithChanges}`));
+    console.log(chalk.yellow(`   Total uncommitted files: ${totalChangedFiles}`));
+  }
+  
   console.log();
 }
