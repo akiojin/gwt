@@ -94,7 +94,7 @@ export async function main(): Promise<void> {
 
         // Create and display table
         const choices = await createBranchTable(branches, worktrees);
-        displayBranchTable();
+        await displayBranchTable();
 
         // Get user selection with statistics
         const selection = await selectFromTable(choices, { branches, worktrees });

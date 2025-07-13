@@ -7,6 +7,7 @@ import {
   CleanupTarget 
 } from './types.js';
 import { WorktreeInfo } from '../worktree.js';
+import { getPackageVersion } from '../utils.js';
 
 export function createEnhancedBranchChoice(
   branch: BranchInfo, 
@@ -166,20 +167,31 @@ export function getBranchTypeColor(branchType: BranchInfo['branchType']) {
   }
 }
 
-export function printWelcome(): void {
+export async function printWelcome(): Promise<void> {
   console.clear();
   console.log();
+  
+  const version = await getPackageVersion();
+  const versionText = version ? ` v${version}` : '';
+  const title = `🌳 Claude Worktree Manager${versionText}`;
+  
+  // Calculate padding to center the title
+  const totalWidth = 47; // Width of the border
+  const padding = Math.max(0, totalWidth - title.length - 4); // 4 for the "║  " and "  ║"
+  const leftPadding = Math.floor(padding / 2);
+  const rightPadding = padding - leftPadding;
+  
   console.log(chalk.blueBright.bold('╔═══════════════════════════════════════════════╗'));
-  console.log(chalk.blueBright.bold('║  🌳 Claude Worktree Manager                   ║'));
+  console.log(chalk.blueBright.bold(`║  ${title}${' '.repeat(rightPadding)} ║`));
   console.log(chalk.blueBright.bold('╚═══════════════════════════════════════════════╝'));
   console.log(chalk.gray('Interactive Git worktree manager for Claude Code'));
   console.log(chalk.gray('Press Ctrl+C to quit anytime'));
   console.log();
 }
 
-export function displayBranchTable(): void {
+export async function displayBranchTable(): Promise<void> {
   console.clear();
-  printWelcome();
+  await printWelcome();
 }
 
 

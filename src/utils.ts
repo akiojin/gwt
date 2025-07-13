@@ -1,6 +1,6 @@
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { access } from 'fs/promises';
+import { access, readFile } from 'fs/promises';
 
 export function getCurrentDirname(): string {
   return path.dirname(fileURLToPath(import.meta.url));
@@ -52,4 +52,23 @@ export function handleUserCancel(error: unknown): never {
     }
   }
   throw error;
+}
+
+interface PackageJson {
+  version: string;
+  name?: string;
+}
+
+export async function getPackageVersion(): Promise<string | null> {
+  try {
+    const currentDir = getCurrentDirname();
+    const packageJsonPath = path.resolve(currentDir, '..', 'package.json');
+    
+    const packageJsonContent = await readFile(packageJsonPath, 'utf-8');
+    const packageJson: PackageJson = JSON.parse(packageJsonContent);
+    
+    return packageJson.version || null;
+  } catch {
+    return null;
+  }
 }
