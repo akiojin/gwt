@@ -45,7 +45,8 @@ import {
   confirmDiscardChanges,
   confirmContinue,
   selectCleanupTargets,
-  confirmCleanup
+  confirmCleanup,
+  confirmRemoteBranchDeletion
 } from './ui/prompts.js';
 import { 
   displayBranchTable,
@@ -367,6 +368,9 @@ async function handleCleanupMergedPRs(): Promise<boolean> {
       return true;
     }
 
+    // Ask about remote branch deletion
+    const deleteRemoteBranches = await confirmRemoteBranchDeletion(selectedTargets);
+
     // Perform cleanup
     const results: Array<{ target: CleanupTarget; success: boolean; error?: string }> = [];
 
@@ -378,12 +382,14 @@ async function handleCleanupMergedPRs(): Promise<boolean> {
         printInfo(`Deleting local branch: ${target.branch}`);
         await deleteBranch(target.branch, true); // Force delete
         
-        printInfo(`Deleting remote branch: origin/${target.branch}`);
-        try {
-          await deleteRemoteBranch(target.branch);
-        } catch (error) {
-          // リモートブランチの削除に失敗してもローカルの削除は成功として扱う
-          printWarning(`Failed to delete remote branch: ${error instanceof Error ? error.message : String(error)}`);
+        if (deleteRemoteBranches) {
+          printInfo(`Deleting remote branch: origin/${target.branch}`);
+          try {
+            await deleteRemoteBranch(target.branch);
+          } catch (error) {
+            // リモートブランチの削除に失敗してもローカルの削除は成功として扱う
+            printWarning(`Failed to delete remote branch: ${error instanceof Error ? error.message : String(error)}`);
+          }
         }
         
         results.push({ target, success: true });
