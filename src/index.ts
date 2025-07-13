@@ -14,6 +14,7 @@ import {
   discardAllChanges,
   commitChanges,
   fetchAllRemotes,
+  pushBranchToRemote,
   GitError 
 } from './git.js';
 import { 
@@ -46,7 +47,9 @@ import {
   confirmContinue,
   selectCleanupTargets,
   confirmCleanup,
-  confirmRemoteBranchDeletion
+  confirmRemoteBranchDeletion,
+  confirmPushUnpushedCommits,
+  confirmProceedWithoutPush
 } from './ui/prompts.js';
 import { 
   displayBranchTable,
@@ -367,6 +370,9 @@ async function handleCleanupMergedPRs(): Promise<boolean> {
       return true;
     }
 
+    // Check if there are branches with unpushed commits and ask about pushing
+    const shouldPushUnpushed = await confirmPushUnpushedCommits(selectedTargets);
+    
     // Ask about remote branch deletion
     const deleteRemoteBranches = await confirmRemoteBranchDeletion(selectedTargets);
 
@@ -375,6 +381,23 @@ async function handleCleanupMergedPRs(): Promise<boolean> {
 
     for (const target of selectedTargets) {
       try {
+        // Push unpushed commits if requested and needed
+        if (shouldPushUnpushed && target.hasUnpushedCommits) {
+          printInfo(`Pushing unpushed commits in branch: ${target.branch}`);
+          try {
+            await pushBranchToRemote(target.worktreePath, target.branch);
+            printSuccess(`Successfully pushed changes for branch: ${target.branch}`);
+          } catch (error) {
+            printWarning(`Failed to push branch ${target.branch}: ${error instanceof Error ? error.message : String(error)}`);
+            
+            // Ask user if they want to proceed without pushing
+            if (!(await confirmProceedWithoutPush(target.branch))) {
+              printInfo(`Skipping deletion of branch: ${target.branch}`);
+              continue; // Skip this target
+            }
+          }
+        }
+        
         printInfo(`Removing worktree: ${target.worktreePath}`);
         await removeWorktree(target.worktreePath, true); // Force remove
         

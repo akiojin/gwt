@@ -358,10 +358,8 @@ export async function selectCleanupTargets(targets: CleanupTarget[]): Promise<Cl
     value: target,
     disabled: target.hasUncommittedChanges 
       ? 'Has uncommitted changes' 
-      : target.hasUnpushedCommits
-      ? 'Has unpushed commits'
       : false,
-    checked: !target.hasUncommittedChanges && !target.hasUnpushedCommits
+    checked: !target.hasUncommittedChanges
   }));
   
   const selected = await checkbox({
@@ -392,6 +390,30 @@ export async function confirmRemoteBranchDeletion(targets: CleanupTarget[]): Pro
     
   return await confirm({
     message,
+    default: false
+  });
+}
+
+export async function confirmPushUnpushedCommits(targets: CleanupTarget[]): Promise<boolean> {
+  const branchesWithUnpushed = targets.filter(t => t.hasUnpushedCommits);
+  
+  if (branchesWithUnpushed.length === 0) {
+    return false;
+  }
+  
+  const message = branchesWithUnpushed.length === 1 && branchesWithUnpushed[0]
+    ? `Push unpushed commits in "${branchesWithUnpushed[0].branch}" before deletion?`
+    : `Push unpushed commits in ${branchesWithUnpushed.length} branches before deletion?`;
+    
+  return await confirm({
+    message,
+    default: true
+  });
+}
+
+export async function confirmProceedWithoutPush(branchName: string): Promise<boolean> {
+  return await confirm({
+    message: `Failed to push "${branchName}". Proceed with deletion anyway?`,
     default: false
   });
 }
