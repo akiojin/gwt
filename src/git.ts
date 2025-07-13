@@ -237,3 +237,29 @@ export async function deleteRemoteBranch(branchName: string, remote = 'origin'):
     throw new GitError(`Failed to delete remote branch ${remote}/${branchName}`, error);
   }
 }
+
+export async function pushBranchToRemote(worktreePath: string, branchName: string, remote = 'origin'): Promise<void> {
+  try {
+    // Check if the remote branch exists
+    const remoteBranchExists = await checkRemoteBranchExists(branchName, remote);
+    
+    if (remoteBranchExists) {
+      // Push to existing remote branch
+      await execa('git', ['push', remote, branchName], { cwd: worktreePath });
+    } else {
+      // Push and set upstream for new remote branch
+      await execa('git', ['push', '--set-upstream', remote, branchName], { cwd: worktreePath });
+    }
+  } catch (error) {
+    throw new GitError(`Failed to push branch ${branchName} to ${remote}`, error);
+  }
+}
+
+async function checkRemoteBranchExists(branchName: string, remote = 'origin'): Promise<boolean> {
+  try {
+    await execa('git', ['show-ref', '--verify', '--quiet', `refs/remotes/${remote}/${branchName}`]);
+    return true;
+  } catch {
+    return false;
+  }
+}

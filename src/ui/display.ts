@@ -148,7 +148,7 @@ export function displayCleanupTargets(targets: CleanupTarget[]): void {
       console.log(`    ${chalk.red('⚠️  Has uncommitted changes')}`);
     }
     if (target.hasUnpushedCommits) {
-      console.log(`    ${chalk.yellow('⚠️  Has unpushed commits')}`);
+      console.log(`    ${chalk.yellow('⚠️  Has unpushed commits (will be pushed before deletion)')}`);
     }
     console.log();
   }
