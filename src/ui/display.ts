@@ -267,11 +267,6 @@ export async function printStatistics(branches: BranchInfo[], worktrees: Worktre
 }
 
 export function displayCleanupTargets(targets: CleanupTarget[]): void {
-  if (targets.length === 0) {
-    console.log(chalk.gray('No merged PR worktrees found.'));
-    return;
-  }
-  
   console.log(chalk.blue.bold('\n🧹 Merged PR Worktrees:'));
   console.log();
   
