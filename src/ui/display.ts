@@ -288,27 +288,7 @@ export async function printStatistics(branches: BranchInfo[], worktrees: Worktre
     );
   }
   
-  // Calculate the maximum label width for proper alignment
-  const maxLabelWidth = Math.max(...stats.map(s => s.label.length));
-  const valueWidth = Math.max(...stats.map(s => s.value.toString().length), 3); // Dynamic value width
-  const padding = 1; // Reduced padding
-  const totalWidth = maxLabelWidth + valueWidth + padding * 2 + 2; // +2 for ": "
   
-  // Print the compact statistics box
-  console.log();
-  console.log(chalk.gray('╭' + '─'.repeat(totalWidth) + '╮'));
-  console.log(chalk.gray('│') + chalk.cyan.bold(' 📊 Repository Statistics') + chalk.gray(' '.repeat(totalWidth - 25) + '│'));
-  console.log(chalk.gray('├' + '─'.repeat(totalWidth) + '┤'));
-  
-  for (const stat of stats) {
-    const label = `  ${stat.label}:`;
-    const value = stat.color(stat.value.toString());
-    const spacer = ' '.repeat(totalWidth - stringWidth(label) - stringWidth(value.toString()) - 1);
-    console.log(chalk.gray('│') + chalk.white(label) + spacer + value + chalk.gray(' │'));
-  }
-  
-  console.log(chalk.gray('╰' + '─'.repeat(totalWidth) + '╯'));
-  console.log();
 }
 
 export function displayCleanupTargets(targets: CleanupTarget[]): void {
