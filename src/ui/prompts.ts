@@ -1,8 +1,9 @@
-import { select, input, confirm } from '@inquirer/prompts';
+import { select, input, confirm, checkbox } from '@inquirer/prompts';
 import { 
   BranchInfo, 
   BranchType, 
-  NewBranchConfig
+  NewBranchConfig,
+  CleanupTarget
 } from './types.js';
 
 export async function selectFromTable(choices: Array<{ name: string; value: string; description?: string }>): Promise<string> {
@@ -223,5 +224,42 @@ export async function confirmContinue(message: string = 'Continue?'): Promise<bo
   return await confirm({
     message,
     default: true
+  });
+}
+
+export async function selectCleanupTargets(targets: CleanupTarget[]): Promise<CleanupTarget[]> {
+  if (targets.length === 0) {
+    return [];
+  }
+  
+  const choices = targets.map(target => ({
+    name: `${target.branch} (PR #${target.pullRequest.number}: ${target.pullRequest.title})`,
+    value: target,
+    disabled: target.hasUncommittedChanges 
+      ? 'Has uncommitted changes' 
+      : target.hasUnpushedCommits
+      ? 'Has unpushed commits'
+      : false,
+    checked: !target.hasUncommittedChanges && !target.hasUnpushedCommits
+  }));
+  
+  const selected = await checkbox({
+    message: 'Select worktrees to clean up (merged PRs):',
+    choices,
+    pageSize: 15,
+    instructions: 'Space to select, Enter to confirm'
+  });
+  
+  return selected;
+}
+
+export async function confirmCleanup(targets: CleanupTarget[]): Promise<boolean> {
+  const message = targets.length === 1 && targets[0]
+    ? `Delete worktree and branch "${targets[0].branch}"?`
+    : `Delete ${targets.length} worktrees and their branches?`;
+    
+  return await confirm({
+    message,
+    default: false
   });
 }

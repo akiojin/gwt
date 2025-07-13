@@ -126,6 +126,12 @@ export async function createBranchTable(
   });
 
   choices.push({
+    name: chalk.yellow('🧹 Clean up merged PRs'),
+    value: '__cleanup_prs__',
+    description: 'Remove worktrees and branches for merged pull requests'
+  });
+
+  choices.push({
     name: chalk.red('◈ Exit'),
     value: '__exit__',
     description: 'Exit the application'
@@ -133,7 +139,6 @@ export async function createBranchTable(
 
   return choices;
 }
-
 
 function getBranchTypeIcon(branchType: BranchInfo['branchType']): string {
   switch (branchType) {
@@ -151,7 +156,6 @@ function getBranchTypeIcon(branchType: BranchInfo['branchType']): string {
       return '📌';
   }
 }
-
 
 function padEndUnicode(str: string, targetLength: number, padString: string = ' '): string {
   const strWidth = stringWidth(str);

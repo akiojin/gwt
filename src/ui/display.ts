@@ -4,7 +4,8 @@ import {
   BranchInfo, 
   EnhancedBranchChoice, 
   BranchGroup,
-  UIFilter 
+  UIFilter,
+  CleanupTarget 
 } from './types.js';
 import { WorktreeInfo } from '../worktree.js';
 
@@ -282,4 +283,59 @@ export async function printStatistics(branches: BranchInfo[], worktrees: Worktre
   
   console.log(chalk.cyan('╰─────────────────────────────────────────────╯'));
   console.log();
+}
+
+export function displayCleanupTargets(targets: CleanupTarget[]): void {
+  if (targets.length === 0) {
+    console.log(chalk.gray('No merged PR worktrees found.'));
+    return;
+  }
+  
+  console.log(chalk.blue.bold('\n🧹 Merged PR Worktrees:'));
+  console.log();
+  
+  for (const target of targets) {
+    const statusIcons = [];
+    if (target.hasUncommittedChanges) {
+      statusIcons.push(chalk.red('●'));
+    }
+    if (target.hasUnpushedCommits) {
+      statusIcons.push(chalk.yellow('↑'));
+    }
+    
+    const status = statusIcons.length > 0 ? ` ${statusIcons.join(' ')}` : '';
+    const prInfo = chalk.gray(`PR #${target.pullRequest.number}: ${target.pullRequest.title}`);
+    
+    console.log(`  ${chalk.green(target.branch)}${status}`);
+    console.log(`    ${prInfo}`);
+    console.log(`    ${chalk.gray(target.worktreePath)}`);
+    if (target.hasUncommittedChanges) {
+      console.log(`    ${chalk.red('⚠️  Has uncommitted changes')}`);
+    }
+    if (target.hasUnpushedCommits) {
+      console.log(`    ${chalk.yellow('⚠️  Has unpushed commits')}`);
+    }
+    console.log();
+  }
+}
+
+export function displayCleanupResults(results: Array<{ target: CleanupTarget; success: boolean; error?: string }>): void {
+  console.log(chalk.blue.bold('\n🧹 Cleanup Results:'));
+  console.log();
+  
+  let successCount = 0;
+  let failureCount = 0;
+  
+  for (const result of results) {
+    if (result.success) {
+      successCount++;
+      console.log(chalk.green(`  ✅ ${result.target.branch} - Successfully removed`));
+    } else {
+      failureCount++;
+      console.log(chalk.red(`  ❌ ${result.target.branch} - Failed: ${result.error || 'Unknown error'}`));
+    }
+  }
+  
+  console.log();
+  console.log(chalk.gray(`Summary: ${successCount} succeeded, ${failureCount} failed`));
 }

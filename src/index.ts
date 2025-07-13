@@ -12,6 +12,7 @@ import {
   stashChanges,
   discardAllChanges,
   commitChanges,
+  fetchAllRemotes,
   GitError 
 } from './git.js';
 import { 
@@ -20,6 +21,7 @@ import {
   generateWorktreePath, 
   createWorktree,
   removeWorktree,
+  getMergedPRWorktrees,
   WorktreeError 
 } from './worktree.js';
 import { 
@@ -40,7 +42,9 @@ import {
   selectChangesAction,
   inputCommitMessage,
   confirmDiscardChanges,
-  confirmContinue
+  confirmContinue,
+  selectCleanupTargets,
+  confirmCleanup
 } from './ui/prompts.js';
 import { 
   displayBranchTable,
@@ -49,9 +53,13 @@ import {
   printInfo, 
   printWarning,
   printExit,
-  printStatistics
+  printStatistics,
+  displayCleanupTargets,
+  displayCleanupResults
 } from './ui/display.js';
 import { createBranchTable } from './ui/table.js';
+import { isGitHubCLIAvailable, checkGitHubAuth } from './github.js';
+import { CleanupTarget } from './ui/types.js';
 import { AppError, setupExitHandlers, handleUserCancel } from './utils.js';
 import { BranchInfo, WorktreeConfig } from './ui/types.js';
 import { WorktreeInfo } from './worktree.js';
@@ -139,6 +147,9 @@ async function handleSelection(
 
     case '__manage_worktrees__':
       return await handleManageWorktrees(worktrees);
+
+    case '__cleanup_prs__':
+      return await handleCleanupMergedPRs();
 
     default:
       // Handle branch selection
@@ -311,6 +322,80 @@ async function handleManageWorktrees(worktrees: WorktreeInfo[]): Promise<boolean
 
   } catch (error) {
     printError(`Failed to manage worktrees: ${error instanceof Error ? error.message : String(error)}`);
+    return true;
+  }
+}
+
+async function handleCleanupMergedPRs(): Promise<boolean> {
+  try {
+    // Check if GitHub CLI is available
+    if (!(await isGitHubCLIAvailable())) {
+      printError('GitHub CLI is not installed. Please install it to use this feature.');
+      printInfo('Install GitHub CLI: https://cli.github.com/');
+      return true;
+    }
+
+    // Check if authenticated
+    if (!(await checkGitHubAuth())) {
+      return true;
+    }
+
+    printInfo('Fetching latest changes from remote...');
+    await fetchAllRemotes();
+
+    printInfo('Checking for merged pull requests...');
+    const cleanupTargets = await getMergedPRWorktrees();
+
+    if (cleanupTargets.length === 0) {
+      printInfo('No merged PR worktrees found.');
+      return true;
+    }
+
+    // Display targets
+    displayCleanupTargets(cleanupTargets);
+
+    // Select targets to clean up
+    const selectedTargets = await selectCleanupTargets(cleanupTargets);
+
+    if (selectedTargets.length === 0) {
+      printInfo('No worktrees selected for cleanup.');
+      return true;
+    }
+
+    // Confirm cleanup
+    if (!(await confirmCleanup(selectedTargets))) {
+      printInfo('Cleanup cancelled.');
+      return true;
+    }
+
+    // Perform cleanup
+    const results: Array<{ target: CleanupTarget; success: boolean; error?: string }> = [];
+
+    for (const target of selectedTargets) {
+      try {
+        printInfo(`Removing worktree: ${target.worktreePath}`);
+        await removeWorktree(target.worktreePath, true); // Force remove
+        
+        printInfo(`Deleting branch: ${target.branch}`);
+        await deleteBranch(target.branch, true); // Force delete
+        
+        results.push({ target, success: true });
+      } catch (error) {
+        results.push({ 
+          target, 
+          success: false, 
+          error: error instanceof Error ? error.message : String(error) 
+        });
+      }
+    }
+
+    // Display results
+    displayCleanupResults(results);
+
+    return true;
+
+  } catch (error) {
+    printError(`Failed to cleanup merged PRs: ${error instanceof Error ? error.message : String(error)}`);
     return true;
   }
 }
