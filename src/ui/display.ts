@@ -184,7 +184,7 @@ export function displayBranchTable(): void {
   
   // Display Branch Selection header
   const totalWidth = 88; // Approximate width of the table
-  console.log(chalk.cyan.bold('╔' + '═'.repeat(22) + ' Branch Selection ' + '═'.repeat(totalWidth - 40) + '╗'));
+  console.log(chalk.cyan.bold('╔' + '═'.repeat(22) + ' Branch Selection ' + '═'.repeat(Math.max(0, totalWidth - 40)) + '╗'));
   console.log();
   
   // Display table header with updated column widths and modern separators
@@ -197,7 +197,7 @@ export function displayBranchTable(): void {
   ];
   const header = '  ' + headerParts.join(' ┃ '); // 2 spaces for cursor
   console.log(chalk.cyan.bold(header));
-  console.log('  ' + '━'.repeat(stringWidth(header) - 2)); // 2 spaces + adjusted line
+  console.log('  ' + '━'.repeat(Math.max(0, stringWidth(header) - 2))); // 2 spaces + adjusted line, prevent negative values
 }
 
 function padEndUnicode(str: string, targetLength: number, padString: string = ' '): string {
@@ -205,7 +205,7 @@ function padEndUnicode(str: string, targetLength: number, padString: string = ' 
   if (strWidth >= targetLength) return str;
   
   const padWidth = targetLength - strWidth;
-  return str + padString.repeat(padWidth);
+  return str + padString.repeat(Math.max(0, padWidth));
 }
 
 export function printSuccess(message: string): void {
@@ -297,13 +297,13 @@ export async function printStatistics(branches: BranchInfo[], worktrees: Worktre
   // Print the compact statistics box
   console.log();
   console.log(chalk.gray('╭' + '─'.repeat(totalWidth) + '╮'));
-  console.log(chalk.gray('│') + chalk.cyan.bold(' 📊 Repository Statistics') + chalk.gray(' '.repeat(totalWidth - 25) + '│'));
+  console.log(chalk.gray('│') + chalk.cyan.bold(' 📊 Repository Statistics') + chalk.gray(' '.repeat(Math.max(0, totalWidth - 25)) + '│'));
   console.log(chalk.gray('├' + '─'.repeat(totalWidth) + '┤'));
   
   for (const stat of stats) {
     const label = `  ${stat.label}:`;
     const value = stat.color(stat.value.toString());
-    const spacer = ' '.repeat(totalWidth - stringWidth(label) - stringWidth(value.toString()) - 1);
+    const spacer = ' '.repeat(Math.max(0, totalWidth - stringWidth(label) - stringWidth(value.toString()) - 1));
     console.log(chalk.gray('│') + chalk.white(label) + spacer + value + chalk.gray(' │'));
   }
   

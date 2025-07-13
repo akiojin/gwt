@@ -106,7 +106,7 @@ export async function createBranchTable(
   });
   
   choices.push({
-    name: chalk.magenta.bold('╔' + '═'.repeat(29) + ' Actions ' + '═'.repeat(totalWidth - 39) + '╗'),
+    name: chalk.magenta.bold('╔' + '═'.repeat(29) + ' Actions ' + '═'.repeat(Math.max(0, totalWidth - 39)) + '╗'),
     value: '__actions_header__',
     description: ''
   });
@@ -167,5 +167,5 @@ function padEndUnicode(str: string, targetLength: number, padString: string = ' 
   if (strWidth >= targetLength) return str;
   
   const padWidth = targetLength - strWidth;
-  return str + padString.repeat(padWidth);
+  return str + padString.repeat(Math.max(0, padWidth));
 }
