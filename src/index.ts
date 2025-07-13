@@ -58,6 +58,7 @@ import {
   displayCleanupResults
 } from './ui/display.js';
 import { createBranchTable } from './ui/table.js';
+import chalk from 'chalk';
 import { isGitHubCLIAvailable, checkGitHubAuth } from './github.js';
 import { CleanupTarget } from './ui/types.js';
 import { AppError, setupExitHandlers, handleUserCancel } from './utils.js';
@@ -344,7 +345,7 @@ async function handleCleanupMergedPRs(): Promise<boolean> {
     const cleanupTargets = await getMergedPRWorktrees();
 
     if (cleanupTargets.length === 0) {
-      printInfo('No merged PR worktrees found.');
+      console.log(chalk.green('✨ すべてクリーンです！クリーンアップが必要なworktreeはありません。'));
       return true;
     }
 
@@ -355,13 +356,13 @@ async function handleCleanupMergedPRs(): Promise<boolean> {
     const selectedTargets = await selectCleanupTargets(cleanupTargets);
 
     if (selectedTargets.length === 0) {
-      printInfo('No worktrees selected for cleanup.');
+      console.log(chalk.yellow('🚫 クリーンアップをキャンセルしました。'));
       return true;
     }
 
     // Confirm cleanup
     if (!(await confirmCleanup(selectedTargets))) {
-      printInfo('Cleanup cancelled.');
+      console.log(chalk.yellow('🚫 クリーンアップをキャンセルしました。'));
       return true;
     }
 
