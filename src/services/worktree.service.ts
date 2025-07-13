@@ -1,4 +1,4 @@
-import path from 'path';
+import path from 'node:path';
 import { WorktreeRepository } from '../repositories/worktree.repository.js';
 import { GitRepository } from '../repositories/git.repository.js';
 import { WorktreeInfo } from '../worktree.js';
@@ -36,7 +36,7 @@ export class WorktreeService {
     await this.worktreeRepository.add(config.worktreePath, config.branchName);
   }
 
-  async removeWorktree(worktreePath: string, force: boolean = false): Promise<void> {
+  async removeWorktree(worktreePath: string, force = false): Promise<void> {
     await this.worktreeRepository.remove(worktreePath, force);
   }
 

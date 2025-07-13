@@ -1,5 +1,5 @@
 import { execa } from 'execa';
-import path from 'path';
+import path from 'node:path';
 import chalk from 'chalk';
 import { WorktreeConfig, WorktreeWithPR, CleanupTarget, MergedPullRequest } from './ui/types.js';
 import { getPullRequestByBranch, getMergedPullRequests } from './github.js';
@@ -111,7 +111,7 @@ export async function createWorktree(config: WorktreeConfig): Promise<void> {
   }
 }
 
-export async function removeWorktree(worktreePath: string, force: boolean = false): Promise<void> {
+export async function removeWorktree(worktreePath: string, force = false): Promise<void> {
   try {
     const args = ['worktree', 'remove'];
     if (force) {

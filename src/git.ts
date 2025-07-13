@@ -107,7 +107,7 @@ export async function getAllBranches(): Promise<BranchInfo[]> {
   return [...localBranches, ...remoteBranches];
 }
 
-export async function createBranch(branchName: string, baseBranch: string = 'main'): Promise<void> {
+export async function createBranch(branchName: string, baseBranch = 'main'): Promise<void> {
   try {
     await execa('git', ['checkout', '-b', branchName, baseBranch]);
   } catch (error) {
@@ -124,7 +124,7 @@ export async function branchExists(branchName: string): Promise<boolean> {
   }
 }
 
-export async function deleteBranch(branchName: string, force: boolean = false): Promise<void> {
+export async function deleteBranch(branchName: string, force = false): Promise<void> {
   try {
     const args = ['branch', force ? '-D' : '-d', branchName];
     await execa('git', args);
@@ -204,7 +204,7 @@ export async function commitChanges(worktreePath: string, message: string): Prom
 
 function getBranchType(branchName: string): BranchInfo['branchType'] {
   if (branchName === 'main' || branchName === 'master') return 'main';
-  if (branchName === 'develop' || branchName === 'development') return 'develop';
+  if (branchName === 'develop' || branchName === 'dev') return 'develop';
   if (branchName.startsWith('feature/')) return 'feature';
   if (branchName.startsWith('hotfix/')) return 'hotfix';
   if (branchName.startsWith('release/')) return 'release';
@@ -230,7 +230,7 @@ export async function fetchAllRemotes(): Promise<void> {
   }
 }
 
-export async function deleteRemoteBranch(branchName: string, remote: string = 'origin'): Promise<void> {
+export async function deleteRemoteBranch(branchName: string, remote = 'origin'): Promise<void> {
   try {
     await execa('git', ['push', remote, '--delete', branchName]);
   } catch (error) {

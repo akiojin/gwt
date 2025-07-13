@@ -7,7 +7,7 @@ export class ClaudeError extends Error {
   }
 }
 
-export async function launchClaudeCode(worktreePath: string, skipPermissions: boolean = false): Promise<void> {
+export async function launchClaudeCode(worktreePath: string, skipPermissions = false): Promise<void> {
   try {
     console.log(chalk.blue('🚀 Launching Claude Code...'));
     console.log(chalk.gray(`   Working directory: ${worktreePath}`));

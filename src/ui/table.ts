@@ -143,7 +143,7 @@ function getBranchTypeIcon(branchType: BranchInfo['branchType']): string {
   }
 }
 
-function padEndUnicode(str: string, targetLength: number, padString: string = ' '): string {
+function padEndUnicode(str: string, targetLength: number, padString = ' '): string {
   const strWidth = stringWidth(str);
   if (strWidth >= targetLength) return str;
   

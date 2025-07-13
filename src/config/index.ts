@@ -1,6 +1,6 @@
-import { homedir } from 'os';
-import path from 'path';
-import { readFile } from 'fs/promises';
+import { homedir } from 'node:os';
+import path from 'node:path';
+import { readFile } from 'node:fs/promises';
 
 export interface AppConfig {
   defaultBaseBranch: string;
@@ -33,9 +33,11 @@ export async function loadConfig(): Promise<AppConfig> {
       const content = await readFile(configPath, 'utf-8');
       const userConfig = JSON.parse(content);
       return { ...DEFAULT_CONFIG, ...userConfig };
-    } catch {
+    } catch (error) {
       // 設定ファイルが見つからない場合は次を試す
-      continue;
+      if (process.env.DEBUG_CONFIG) {
+        console.error(`Failed to load config from ${configPath}:`, error instanceof Error ? error.message : String(error));
+      }
     }
   }
   

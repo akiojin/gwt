@@ -49,20 +49,51 @@ export const GITHUB_CONFIG = {
   DEBUG_ENV_VAR: 'DEBUG_CLEANUP'
 } as const;
 
-// エラーメッセージ
-export const ERROR_MESSAGES = {
-  NOT_GIT_REPO: 'このディレクトリはGitリポジトリではありません',
-  GIT_COMMAND_FAILED: 'Gitコマンドの実行に失敗しました',
-  WORKTREE_CREATE_FAILED: 'worktreeの作成に失敗しました',
-  GITHUB_CLI_NOT_AVAILABLE: 'GitHub CLIがインストールされていません',
-  GITHUB_AUTH_REQUIRED: 'GitHub認証が必要です。gh auth login を実行してください'
+// メッセージキー（国際化対応の基盤）
+export const MESSAGE_KEYS = {
+  // エラーメッセージ
+  ERROR: {
+    NOT_GIT_REPO: 'error.not_git_repo',
+    GIT_COMMAND_FAILED: 'error.git_command_failed',
+    WORKTREE_CREATE_FAILED: 'error.worktree_create_failed',
+    GITHUB_CLI_NOT_AVAILABLE: 'error.github_cli_not_available',
+    GITHUB_AUTH_REQUIRED: 'error.github_auth_required'
+  },
+  // 成功メッセージ
+  SUCCESS: {
+    WORKTREE_CREATED: 'success.worktree_created',
+    BRANCH_CREATED: 'success.branch_created',
+    CHANGES_COMMITTED: 'success.changes_committed',
+    CHANGES_PUSHED: 'success.changes_pushed',
+    CLEANUP_COMPLETED: 'success.cleanup_completed'
+  },
+  // 情報メッセージ
+  INFO: {
+    LOADING: 'info.loading',
+    PROCESSING: 'info.processing',
+    FETCHING_DATA: 'info.fetching_data'
+  }
 } as const;
 
-// 成功メッセージ
-export const SUCCESS_MESSAGES = {
-  WORKTREE_CREATED: 'worktreeを作成しました',
-  BRANCH_CREATED: 'ブランチを作成しました',
-  CHANGES_COMMITTED: '変更をコミットしました',
-  CHANGES_PUSHED: '変更をプッシュしました',
-  CLEANUP_COMPLETED: 'クリーンアップが完了しました'
+// 日本語メッセージ（デフォルト）
+export const MESSAGES_JA = {
+  [MESSAGE_KEYS.ERROR.NOT_GIT_REPO]: 'このディレクトリはGitリポジトリではありません',
+  [MESSAGE_KEYS.ERROR.GIT_COMMAND_FAILED]: 'Gitコマンドの実行に失敗しました',
+  [MESSAGE_KEYS.ERROR.WORKTREE_CREATE_FAILED]: 'worktreeの作成に失敗しました',
+  [MESSAGE_KEYS.ERROR.GITHUB_CLI_NOT_AVAILABLE]: 'GitHub CLIがインストールされていません',
+  [MESSAGE_KEYS.ERROR.GITHUB_AUTH_REQUIRED]: 'GitHub認証が必要です。gh auth login を実行してください',
+  [MESSAGE_KEYS.SUCCESS.WORKTREE_CREATED]: 'worktreeを作成しました',
+  [MESSAGE_KEYS.SUCCESS.BRANCH_CREATED]: 'ブランチを作成しました',
+  [MESSAGE_KEYS.SUCCESS.CHANGES_COMMITTED]: '変更をコミットしました',
+  [MESSAGE_KEYS.SUCCESS.CHANGES_PUSHED]: '変更をプッシュしました',
+  [MESSAGE_KEYS.SUCCESS.CLEANUP_COMPLETED]: 'クリーンアップが完了しました',
+  [MESSAGE_KEYS.INFO.LOADING]: '読み込み中...',
+  [MESSAGE_KEYS.INFO.PROCESSING]: '処理中...',
+  [MESSAGE_KEYS.INFO.FETCHING_DATA]: 'データを取得中...'
 } as const;
+
+// メッセージ取得関数（将来的に多言語対応可能）
+export function getMessage(key: string): string {
+  // 現時点では日本語のみサポート
+  return MESSAGES_JA[key as keyof typeof MESSAGES_JA] || key;
+}

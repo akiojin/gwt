@@ -60,7 +60,7 @@ export class GitRepository {
     await this.execute(args);
   }
 
-  async deleteBranch(branchName: string, force: boolean = false): Promise<void> {
+  async deleteBranch(branchName: string, force = false): Promise<void> {
     const args = ['branch', force ? '-D' : '-d', branchName];
     await this.execute(args);
   }

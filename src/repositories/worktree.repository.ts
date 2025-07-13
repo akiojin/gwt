@@ -53,7 +53,7 @@ export class WorktreeRepository {
     await this.execute(['add', worktreePath, branchName]);
   }
 
-  async remove(worktreePath: string, force: boolean = false): Promise<void> {
+  async remove(worktreePath: string, force = false): Promise<void> {
     const args = ['remove'];
     if (force) args.push('--force');
     args.push(worktreePath);
