@@ -97,18 +97,23 @@ export async function createBranchTable(
     });
   }
 
-  // Add separator with modern box drawing characters
-  const sampleRow = [
-    padEndUnicode('', 32),
-    padEndUnicode('', 14),
-    padEndUnicode('', 10),
-    padEndUnicode('', 12),
-    'Changes'
-  ].join(' ┃ ');
+  // Add separator with Actions header
+  const totalWidth = 88; // Approximate width of the table
+  choices.push({
+    name: '',
+    value: '__separator_space__',
+    description: ''
+  });
   
   choices.push({
-    name: '━'.repeat(stringWidth(sampleRow)),
-    value: '__separator__',
+    name: chalk.magenta.bold('╔' + '═'.repeat(29) + ' Actions ' + '═'.repeat(totalWidth - 39) + '╗'),
+    value: '__actions_header__',
+    description: ''
+  });
+  
+  choices.push({
+    name: '',
+    value: '__separator_space2__',
     description: ''
   });
 
