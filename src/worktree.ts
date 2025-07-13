@@ -1,5 +1,6 @@
 import { execa } from 'execa';
 import path from 'path';
+import chalk from 'chalk';
 import { WorktreeConfig, WorktreeWithPR, CleanupTarget } from './ui/types.js';
 import { getPullRequestByBranch, getMergedPullRequests } from './github.js';
 import { hasUncommittedChanges, hasUnpushedCommits } from './git.js';
@@ -141,13 +142,48 @@ export async function getWorktreesWithPRStatus(): Promise<WorktreeWithPR[]> {
   return worktreesWithPR;
 }
 
+function normalizeBranchName(branchName: string): string {
+  return branchName
+    .replace(/^origin\//, '')
+    .replace(/^refs\/heads\//, '')
+    .replace(/^refs\/remotes\/origin\//, '')
+    .trim();
+}
+
+function findMatchingPR(worktreeBranch: string, mergedPRs: any[]): any | null {
+  const normalizedWorktreeBranch = normalizeBranchName(worktreeBranch);
+  
+  for (const pr of mergedPRs) {
+    const normalizedPRBranch = normalizeBranchName(pr.branch);
+    
+    if (normalizedWorktreeBranch === normalizedPRBranch) {
+      return pr;
+    }
+  }
+  
+  return null;
+}
+
 export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
   const worktreesWithPR = await getWorktreesWithPRStatus();
   const mergedPRs = await getMergedPullRequests();
   const cleanupTargets: CleanupTarget[] = [];
   
+  if (process.env.DEBUG_CLEANUP) {
+    console.log(chalk.cyan('Debug: Available worktrees:'));
+    worktreesWithPR.forEach(w => console.log(`  ${w.branch} -> ${w.worktreePath}`));
+    console.log(chalk.cyan('Debug: Merged PRs:'));
+    mergedPRs.forEach(pr => console.log(`  ${pr.branch} (PR #${pr.number})`));
+  }
+  
   for (const worktree of worktreesWithPR) {
-    const mergedPR = mergedPRs.find(pr => pr.branch === worktree.branch);
+    const mergedPR = findMatchingPR(worktree.branch, mergedPRs);
+    
+    if (process.env.DEBUG_CLEANUP) {
+      const normalizedWorktree = normalizeBranchName(worktree.branch);
+      console.log(chalk.gray(`Debug: Checking worktree ${worktree.branch} (normalized: ${normalizedWorktree}) -> ${mergedPR ? 'MATCH' : 'NO MATCH'}`));
+    }
+    
     if (mergedPR) {
       const hasUncommitted = await hasUncommittedChanges(worktree.worktreePath);
       const hasUnpushed = await hasUnpushedCommits(worktree.worktreePath, worktree.branch);
@@ -160,6 +196,10 @@ export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
         hasUnpushedCommits: hasUnpushed
       });
     }
+  }
+  
+  if (process.env.DEBUG_CLEANUP) {
+    console.log(chalk.cyan(`Debug: Found ${cleanupTargets.length} cleanup targets`));
   }
   
   return cleanupTargets;
