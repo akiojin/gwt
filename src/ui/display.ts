@@ -126,31 +126,68 @@ export async function printStatistics(branches: BranchInfo[], worktrees: Worktre
 }
 
 export function displayCleanupTargets(targets: CleanupTarget[]): void {
-  console.log(chalk.blue.bold('\n🧹 Merged PR Worktrees:'));
-  console.log();
+  const worktreeTargets = targets.filter(t => t.cleanupType === 'worktree-and-branch');
+  const branchOnlyTargets = targets.filter(t => t.cleanupType === 'branch-only');
   
-  for (const target of targets) {
-    const statusIcons = [];
-    if (target.hasUncommittedChanges) {
-      statusIcons.push(chalk.red('●'));
-    }
-    if (target.hasUnpushedCommits) {
-      statusIcons.push(chalk.yellow('↑'));
-    }
-    
-    const status = statusIcons.length > 0 ? ` ${statusIcons.join(' ')}` : '';
-    const prInfo = chalk.gray(`PR #${target.pullRequest.number}: ${target.pullRequest.title}`);
-    
-    console.log(`  ${chalk.green(target.branch)}${status}`);
-    console.log(`    ${prInfo}`);
-    console.log(`    ${chalk.gray(target.worktreePath)}`);
-    if (target.hasUncommittedChanges) {
-      console.log(`    ${chalk.red('⚠️  Has uncommitted changes')}`);
-    }
-    if (target.hasUnpushedCommits) {
-      console.log(`    ${chalk.yellow('⚠️  Has unpushed commits (will be pushed before deletion)')}`);
-    }
+  if (worktreeTargets.length > 0) {
+    console.log(chalk.blue.bold('\n🧹 Merged PR Worktrees (Worktree + Local Branch):'));
     console.log();
+    
+    for (const target of worktreeTargets) {
+      const statusIcons = [];
+      if (target.hasUncommittedChanges) {
+        statusIcons.push(chalk.red('●'));
+      }
+      if (target.hasUnpushedCommits) {
+        statusIcons.push(chalk.yellow('↑'));
+      }
+      if (target.hasRemoteBranch) {
+        statusIcons.push(chalk.blue('🌐'));
+      }
+      
+      const status = statusIcons.length > 0 ? ` ${statusIcons.join(' ')}` : '';
+      const prInfo = chalk.gray(`PR #${target.pullRequest.number}: ${target.pullRequest.title}`);
+      
+      console.log(`  ${chalk.green(target.branch)}${status}`);
+      console.log(`    ${prInfo}`);
+      console.log(`    ${chalk.gray(target.worktreePath)}`);
+      if (target.hasUncommittedChanges) {
+        console.log(`    ${chalk.red('⚠️  Has uncommitted changes')}`);
+      }
+      if (target.hasUnpushedCommits) {
+        console.log(`    ${chalk.yellow('⚠️  Has unpushed commits (will be pushed before deletion)')}`);
+      }
+      if (target.hasRemoteBranch) {
+        console.log(`    ${chalk.blue('ℹ️  Has remote branch (will be deleted if selected)')}`);
+      }
+      console.log();
+    }
+  }
+  
+  if (branchOnlyTargets.length > 0) {
+    console.log(chalk.cyan.bold('\n🌿 Merged PR Local Branches (Local Branch Only):'));
+    console.log();
+    
+    for (const target of branchOnlyTargets) {
+      const statusIcons = [];
+      if (target.hasRemoteBranch) {
+        statusIcons.push(chalk.blue('🌐'));
+      } else {
+        statusIcons.push(chalk.gray('📍'));
+      }
+      
+      const status = statusIcons.length > 0 ? ` ${statusIcons.join(' ')}` : '';
+      const prInfo = chalk.gray(`PR #${target.pullRequest.number}: ${target.pullRequest.title}`);
+      
+      console.log(`  ${chalk.cyan(target.branch)}${status}`);
+      console.log(`    ${prInfo}`);
+      if (target.hasRemoteBranch) {
+        console.log(`    ${chalk.blue('ℹ️  Has remote branch (will be deleted if selected)')}`);
+      } else {
+        console.log(`    ${chalk.gray('ℹ️  Local branch only (no remote)')}`);
+      }
+      console.log();
+    }
   }
 }
 

@@ -83,11 +83,13 @@ export interface WorktreeWithPR {
 }
 
 export interface CleanupTarget {
-  worktreePath: string;
+  worktreePath: string | null; // null for local branch only cleanup
   branch: string;
   pullRequest: MergedPullRequest;
   hasUncommittedChanges: boolean;
   hasUnpushedCommits: boolean;
+  cleanupType: 'worktree-and-branch' | 'branch-only';
+  hasRemoteBranch?: boolean;
 }
 
 export interface GitHubPRAuthor {
