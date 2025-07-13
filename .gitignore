@@ -1,3 +1,6 @@
+.claude/settings.local.json
+.docker/bash_history
+
 # Dependencies
 node_modules/
 npm-debug.log*
