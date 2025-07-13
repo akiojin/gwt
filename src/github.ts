@@ -89,7 +89,9 @@ export async function getPullRequestByBranch(branchName: string): Promise<PullRe
 
 export async function checkGitHubAuth(): Promise<boolean> {
   try {
-    await execa('gh', ['auth', 'status']);
+    // gh auth status returns non-zero exit code even when authenticated
+    // Check if we can actually use the API instead
+    await execa('gh', ['api', 'user']);
     return true;
   } catch {
     console.error(chalk.red('Error: GitHub CLI is not authenticated'));
