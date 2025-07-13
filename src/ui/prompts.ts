@@ -10,12 +10,16 @@ export async function selectFromTable(
   choices: Array<{ name: string; value: string; description?: string }>,
   statistics?: { branches: BranchInfo[]; worktrees: import('../worktree.js').WorktreeInfo[] }
 ): Promise<string> {
-  // Filter out separator items and empty choices for selection
-  const selectableChoices = choices.filter(choice => 
+  // Filter branch choices only (exclude action items)
+  const branchChoices = choices.filter(choice => 
     choice.value !== '__separator__' && 
     choice.value !== '__separator_space__' && 
     choice.value !== '__separator_space2__' && 
     choice.value !== '__actions_header__' &&
+    choice.value !== '__create_new__' &&
+    choice.value !== '__manage_worktrees__' &&
+    choice.value !== '__cleanup_prs__' &&
+    choice.value !== '__exit__' &&
     choice.name.trim() !== ''
   );
   
@@ -25,9 +29,88 @@ export async function selectFromTable(
     await printStatistics(statistics.branches, statistics.worktrees);
   }
   
-  return await select({
-    message: 'Select a branch or action:',
-    choices: selectableChoices,
+  return await selectBranchWithShortcuts(branchChoices);
+}
+
+async function selectBranchWithShortcuts(
+  branchChoices: Array<{ name: string; value: string; description?: string }>
+): Promise<string> {
+  const { createPrompt, useState, useKeypress, isEnterKey, usePrefix } = await import('@inquirer/core');
+  
+  const branchSelectPrompt = createPrompt<string, { 
+    message: string; 
+    choices: Array<{ name: string; value: string; description?: string }>;
+    pageSize?: number;
+  }>((config, done) => {
+    const [selectedIndex, setSelectedIndex] = useState(0);
+    const [status, setStatus] = useState<'idle' | 'done'>('idle');
+    const prefix = usePrefix({});
+    
+    useKeypress((key) => {
+      if (key.name === 'n') {
+        setStatus('done');
+        done('__create_new__');
+        return;
+      }
+      if (key.name === 'm') {
+        setStatus('done');
+        done('__manage_worktrees__');
+        return;
+      }
+      if (key.name === 'c') {
+        setStatus('done');
+        done('__cleanup_prs__');
+        return;
+      }
+      if (key.name === 'q') {
+        setStatus('done');
+        done('__exit__');
+        return;
+      }
+      
+      if (key.name === 'up' || key.name === 'k') {
+        setSelectedIndex(Math.max(0, selectedIndex - 1));
+        return;
+      }
+      if (key.name === 'down' || key.name === 'j') {
+        setSelectedIndex(Math.min(config.choices.length - 1, selectedIndex + 1));
+        return;
+      }
+      
+      if (isEnterKey(key)) {
+        const selectedChoice = config.choices[selectedIndex];
+        if (selectedChoice) {
+          setStatus('done');
+          done(selectedChoice.value);
+        }
+        return;
+      }
+    });
+    
+    if (status === 'done') {
+      return `${prefix} ${config.message}`;
+    }
+    
+    const pageSize = config.pageSize || 15;
+    const startIndex = Math.max(0, selectedIndex - Math.floor(pageSize / 2));
+    const endIndex = Math.min(config.choices.length, startIndex + pageSize);
+    const visibleChoices = config.choices.slice(startIndex, endIndex);
+    
+    let output = `${prefix} ${config.message}\n`;
+    output += 'Actions: (n) Create new branch, (m) Manage worktrees, (c) Clean up merged PRs, (q) Exit\n\n';
+    
+    visibleChoices.forEach((choice, index) => {
+      const globalIndex = startIndex + index;
+      const cursor = globalIndex === selectedIndex ? '❯' : ' ';
+      output += `${cursor} ${choice.name}\n`;
+    });
+    
+    return output;
+  });
+  
+  return await branchSelectPrompt({
+    message: 'Select a branch:',
+    choices: branchChoices,
     pageSize: 15
   });
 }

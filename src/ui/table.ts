@@ -37,6 +37,9 @@ export async function createBranchTable(
     return a.name.localeCompare(b.name);
   });
 
+  // Set fixed width for branch name column
+  const branchNameColumnWidth = 32;
+
   for (const branch of sortedBranches) {
     const worktree = worktreeMap.get(branch.name);
     const hasWorktree = !!worktree;
@@ -81,9 +84,9 @@ export async function createBranchTable(
       changesText = chalk.gray('─');
     }
     
-    // Create table-like display string with modern separators
+    // Create table-like display string with truncated branch names
     const displayName = [
-      padEndUnicode(branchDisplay, 32),
+      padEndUnicode(truncateString(branchDisplay, branchNameColumnWidth), branchNameColumnWidth),
       padEndUnicode(typeText, 14),
       padEndUnicode(worktreeStatus, 10),
       padEndUnicode(statusText, 12),
@@ -97,50 +100,6 @@ export async function createBranchTable(
     });
   }
 
-  // Add separator with Actions header
-  const totalWidth = 88; // Approximate width of the table
-  choices.push({
-    name: '',
-    value: '__separator_space__',
-    description: ''
-  });
-  
-  choices.push({
-    name: chalk.magenta.bold('╔' + '═'.repeat(29) + ' Actions ' + '═'.repeat(Math.max(0, totalWidth - 39)) + '╗'),
-    value: '__actions_header__',
-    description: ''
-  });
-  
-  choices.push({
-    name: '',
-    value: '__separator_space2__',
-    description: ''
-  });
-
-  // Add special choices with improved formatting
-  choices.push({
-    name: chalk.cyan('➕ Create new branch'),
-    value: '__create_new__',
-    description: 'Create a new feature, hotfix, or release branch'
-  });
-
-  choices.push({
-    name: chalk.magenta('📂 Manage worktrees'),
-    value: '__manage_worktrees__',
-    description: 'View and manage existing worktrees'
-  });
-
-  choices.push({
-    name: chalk.yellow('🧹 Clean up merged PRs'),
-    value: '__cleanup_prs__',
-    description: 'Remove worktrees and branches for merged pull requests'
-  });
-
-  choices.push({
-    name: chalk.red('◈ Exit'),
-    value: '__exit__',
-    description: 'Exit the application'
-  });
 
   return choices;
 }
@@ -168,4 +127,21 @@ function padEndUnicode(str: string, targetLength: number, padString: string = ' 
   
   const padWidth = targetLength - strWidth;
   return str + padString.repeat(Math.max(0, padWidth));
+}
+
+function truncateString(str: string, maxWidth: number): string {
+  const strWidth = stringWidth(str);
+  if (strWidth <= maxWidth) return str;
+  
+  // Try to truncate while preserving meaning
+  let truncated = str;
+  const ellipsis = '...';
+  const ellipsisWidth = stringWidth(ellipsis);
+  const targetWidth = maxWidth - ellipsisWidth;
+  
+  while (stringWidth(truncated) > targetWidth && truncated.length > 0) {
+    truncated = truncated.slice(0, -1);
+  }
+  
+  return truncated + ellipsis;
 }
