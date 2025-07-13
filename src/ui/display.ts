@@ -1,5 +1,4 @@
 import chalk from 'chalk';
-import stringWidth from 'string-width';
 import { 
   BranchInfo, 
   EnhancedBranchChoice, 
@@ -181,32 +180,8 @@ export function printWelcome(): void {
 export function displayBranchTable(): void {
   console.clear();
   printWelcome();
-  
-  // Display Branch Selection header
-  const totalWidth = 88; // Approximate width of the table
-  console.log(chalk.cyan.bold('╔' + '═'.repeat(22) + ' Branch Selection ' + '═'.repeat(Math.max(0, totalWidth - 40)) + '╗'));
-  console.log();
-  
-  // Display table header with updated column widths and modern separators
-  const headerParts = [
-    padEndUnicode('Branch Name', 32),
-    padEndUnicode('Type', 14),
-    padEndUnicode('Worktree', 10),
-    padEndUnicode('Status', 12),
-    'Changes' // No padding for the last column
-  ];
-  const header = '  ' + headerParts.join(' ┃ '); // 2 spaces for cursor
-  console.log(chalk.cyan.bold(header));
-  console.log('  ' + '━'.repeat(Math.max(0, stringWidth(header) - 2))); // 2 spaces + adjusted line, prevent negative values
 }
 
-function padEndUnicode(str: string, targetLength: number, padString: string = ' '): string {
-  const strWidth = stringWidth(str);
-  if (strWidth >= targetLength) return str;
-  
-  const padWidth = targetLength - strWidth;
-  return str + padString.repeat(Math.max(0, padWidth));
-}
 
 export function printSuccess(message: string): void {
   console.log(chalk.green('✅'), message);
@@ -292,11 +267,6 @@ export async function printStatistics(branches: BranchInfo[], worktrees: Worktre
 }
 
 export function displayCleanupTargets(targets: CleanupTarget[]): void {
-  if (targets.length === 0) {
-    console.log(chalk.gray('No merged PR worktrees found.'));
-    return;
-  }
-  
   console.log(chalk.blue.bold('\n🧹 Merged PR Worktrees:'));
   console.log();
   
