@@ -1,6 +1,8 @@
 import { execa } from 'execa';
 import path from 'path';
-import { WorktreeConfig } from './ui/types.js';
+import { WorktreeConfig, WorktreeWithPR, CleanupTarget } from './ui/types.js';
+import { getPullRequestByBranch, getMergedPullRequests } from './github.js';
+import { hasUncommittedChanges, hasUnpushedCommits } from './git.js';
 
 export class WorktreeError extends Error {
   constructor(message: string, public cause?: unknown) {
@@ -119,4 +121,46 @@ export async function pruneWorktrees(): Promise<void> {
   } catch (error) {
     throw new WorktreeError('Failed to prune worktrees', error);
   }
+}
+
+export async function getWorktreesWithPRStatus(): Promise<WorktreeWithPR[]> {
+  const worktrees = await listAdditionalWorktrees();
+  const worktreesWithPR: WorktreeWithPR[] = [];
+  
+  for (const worktree of worktrees) {
+    if (worktree.branch) {
+      const pullRequest = await getPullRequestByBranch(worktree.branch);
+      worktreesWithPR.push({
+        worktreePath: worktree.path,
+        branch: worktree.branch,
+        pullRequest
+      });
+    }
+  }
+  
+  return worktreesWithPR;
+}
+
+export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
+  const worktreesWithPR = await getWorktreesWithPRStatus();
+  const mergedPRs = await getMergedPullRequests();
+  const cleanupTargets: CleanupTarget[] = [];
+  
+  for (const worktree of worktreesWithPR) {
+    const mergedPR = mergedPRs.find(pr => pr.branch === worktree.branch);
+    if (mergedPR) {
+      const hasUncommitted = await hasUncommittedChanges(worktree.worktreePath);
+      const hasUnpushed = await hasUnpushedCommits(worktree.worktreePath, worktree.branch);
+      
+      cleanupTargets.push({
+        worktreePath: worktree.worktreePath,
+        branch: worktree.branch,
+        pullRequest: mergedPR,
+        hasUncommittedChanges: hasUncommitted,
+        hasUnpushedCommits: hasUnpushed
+      });
+    }
+  }
+  
+  return cleanupTargets;
 }

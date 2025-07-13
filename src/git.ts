@@ -216,3 +216,30 @@ function getBranchType(branchName: string): BranchInfo['branchType'] {
   if (branchName.startsWith('release/')) return 'release';
   return 'other';
 }
+
+export async function hasUnpushedCommits(worktreePath: string, branch: string): Promise<boolean> {
+  try {
+    const { stdout } = await execa('git', ['log', `origin/${branch}..${branch}`, '--oneline'], { cwd: worktreePath });
+    return stdout.trim().length > 0;
+  } catch {
+    // If the branch doesn't exist on remote, consider it has unpushed commits
+    return true;
+  }
+}
+
+export async function isBranchMerged(branch: string, targetBranch: string = 'main'): Promise<boolean> {
+  try {
+    const { stdout } = await execa('git', ['branch', '--merged', targetBranch]);
+    return stdout.includes(branch);
+  } catch (error) {
+    throw new GitError(`Failed to check if branch ${branch} is merged`, error);
+  }
+}
+
+export async function fetchAllRemotes(): Promise<void> {
+  try {
+    await execa('git', ['fetch', '--all', '--prune']);
+  } catch (error) {
+    throw new GitError('Failed to fetch remote branches', error);
+  }
+}

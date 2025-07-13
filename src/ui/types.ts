@@ -59,3 +59,34 @@ export interface UIFilter {
   showLocal: boolean;
   showRemote: boolean;
 }
+
+export interface PullRequest {
+  number: number;
+  title: string;
+  state: 'OPEN' | 'CLOSED' | 'MERGED';
+  branch: string;
+  mergedAt: string | null;
+  author: string;
+}
+
+export interface MergedPullRequest {
+  number: number;
+  title: string;
+  branch: string;
+  mergedAt: string;
+  author: string;
+}
+
+export interface WorktreeWithPR {
+  worktreePath: string;
+  branch: string;
+  pullRequest: PullRequest | null;
+}
+
+export interface CleanupTarget {
+  worktreePath: string;
+  branch: string;
+  pullRequest: MergedPullRequest;
+  hasUncommittedChanges: boolean;
+  hasUnpushedCommits: boolean;
+}
