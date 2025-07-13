@@ -381,11 +381,11 @@ async function handleCleanupMergedPRs(): Promise<boolean> {
 
     for (const target of selectedTargets) {
       try {
-        // Push unpushed commits if requested and needed
-        if (shouldPushUnpushed && target.hasUnpushedCommits) {
+        // Push unpushed commits if requested and needed (only for worktree targets)
+        if (shouldPushUnpushed && target.hasUnpushedCommits && target.cleanupType === 'worktree-and-branch') {
           printInfo(`Pushing unpushed commits in branch: ${target.branch}`);
           try {
-            await pushBranchToRemote(target.worktreePath, target.branch);
+            await pushBranchToRemote(target.worktreePath!, target.branch);
             printSuccess(`Successfully pushed changes for branch: ${target.branch}`);
           } catch (error) {
             printWarning(`Failed to push branch ${target.branch}: ${error instanceof Error ? error.message : String(error)}`);
@@ -398,16 +398,23 @@ async function handleCleanupMergedPRs(): Promise<boolean> {
           }
         }
         
-        printInfo(`Removing worktree: ${target.worktreePath}`);
-        await removeWorktree(target.worktreePath, true); // Force remove
+        // Handle different cleanup types
+        if (target.cleanupType === 'worktree-and-branch') {
+          printInfo(`Removing worktree: ${target.worktreePath}`);
+          await removeWorktree(target.worktreePath!, true); // Force remove
+          
+          printInfo(`Deleting local branch: ${target.branch}`);
+          await deleteBranch(target.branch, true); // Force delete
+        } else if (target.cleanupType === 'branch-only') {
+          printInfo(`Deleting local branch: ${target.branch}`);
+          await deleteBranch(target.branch, true); // Force delete
+        }
         
-        printInfo(`Deleting local branch: ${target.branch}`);
-        await deleteBranch(target.branch, true); // Force delete
-        
-        if (deleteRemoteBranches) {
+        if (deleteRemoteBranches && target.hasRemoteBranch) {
           printInfo(`Deleting remote branch: origin/${target.branch}`);
           try {
             await deleteRemoteBranch(target.branch);
+            printSuccess(`Successfully deleted remote branch: origin/${target.branch}`);
           } catch (error) {
             // リモートブランチの削除に失敗してもローカルの削除は成功として扱う
             printWarning(`Failed to delete remote branch: ${error instanceof Error ? error.message : String(error)}`);

@@ -67,7 +67,7 @@ async function getCurrentBranch(): Promise<string | null> {
   }
 }
 
-async function getLocalBranches(): Promise<BranchInfo[]> {
+export async function getLocalBranches(): Promise<BranchInfo[]> {
   try {
     const { stdout } = await execa('git', ['branch', '--format=%(refname:short)']);
     return stdout
@@ -255,7 +255,7 @@ export async function pushBranchToRemote(worktreePath: string, branchName: strin
   }
 }
 
-async function checkRemoteBranchExists(branchName: string, remote = 'origin'): Promise<boolean> {
+export async function checkRemoteBranchExists(branchName: string, remote = 'origin'): Promise<boolean> {
   try {
     await execa('git', ['show-ref', '--verify', '--quiet', `refs/remotes/${remote}/${branchName}`]);
     return true;

@@ -3,7 +3,7 @@ import path from 'node:path';
 import chalk from 'chalk';
 import { WorktreeConfig, WorktreeWithPR, CleanupTarget, MergedPullRequest } from './ui/types.js';
 import { getPullRequestByBranch, getMergedPullRequests } from './github.js';
-import { hasUncommittedChanges, hasUnpushedCommits } from './git.js';
+import { hasUncommittedChanges, hasUnpushedCommits, getLocalBranches, checkRemoteBranchExists } from './git.js';
 export class WorktreeError extends Error {
   constructor(message: string, public cause?: unknown) {
     super(message);
@@ -144,6 +144,68 @@ async function getWorktreesWithPRStatus(): Promise<WorktreeWithPR[]> {
   return worktreesWithPR;
 }
 
+/**
+ * worktreeに存在しないローカルブランチの中でマージ済みPRに関連するクリーンアップ候補を取得
+ * @returns {Promise<CleanupTarget[]>} クリーンアップ候補の配列
+ */
+async function getOrphanedLocalBranches(): Promise<CleanupTarget[]> {
+  try {
+    // 並列実行で高速化
+    const [localBranches, mergedPRs, worktrees] = await Promise.all([
+      getLocalBranches(),
+      getMergedPullRequests(),
+      listAdditionalWorktrees()
+    ]);
+    
+    const cleanupTargets: CleanupTarget[] = [];
+    const worktreeBranches = new Set(worktrees.map(w => w.branch).filter(Boolean));
+    
+    if (process.env.DEBUG_CLEANUP) {
+      console.log(chalk.cyan('Debug: Orphaned branch scan - Available local branches:'));
+      localBranches.forEach(b => console.log(`  ${b.name} (type: ${b.type})`));
+      console.log(chalk.cyan(`Debug: Worktree branches: ${Array.from(worktreeBranches).join(', ')}`));
+    }
+    
+    for (const localBranch of localBranches) {
+      // worktreeに存在しないローカルブランチのみ対象
+      if (!worktreeBranches.has(localBranch.name)) {
+        const mergedPR = findMatchingPR(localBranch.name, mergedPRs);
+        
+        if (process.env.DEBUG_CLEANUP) {
+          console.log(chalk.gray(`Debug: Checking orphaned branch ${localBranch.name} -> ${mergedPR ? 'MATCH' : 'NO MATCH'}`));
+        }
+        
+        if (mergedPR) {
+          // リモートブランチの存在確認
+          const hasRemoteBranch = await checkRemoteBranchExists(localBranch.name);
+          
+          cleanupTargets.push({
+            worktreePath: null, // worktreeは存在しない
+            branch: localBranch.name,
+            pullRequest: mergedPR,
+            hasUncommittedChanges: false, // worktreeが存在しないため常にfalse
+            hasUnpushedCommits: false, // ローカルブランチのみの場合、プッシュ対象なし
+            cleanupType: 'branch-only',
+            hasRemoteBranch
+          });
+        }
+      }
+    }
+    
+    if (process.env.DEBUG_CLEANUP) {
+      console.log(chalk.cyan(`Debug: Found ${cleanupTargets.length} orphaned branch cleanup targets`));
+    }
+    
+    return cleanupTargets;
+  } catch (error) {
+    console.error(chalk.red('Error: Failed to get orphaned local branches'));
+    if (process.env.DEBUG_CLEANUP) {
+      console.error(chalk.red('Debug: Full error details:'), error);
+    }
+    return [];
+  }
+}
+
 function normalizeBranchName(branchName: string): string {
   return branchName
     .replace(/^origin\//, '')
@@ -167,13 +229,14 @@ function findMatchingPR(worktreeBranch: string, mergedPRs: MergedPullRequest[]):
 }
 
 /**
- * マージ済みPRに関連するworktreeのクリーンアップ候補を取得
+ * マージ済みPRに関連するworktreeおよびローカルブランチのクリーンアップ候補を取得
  * @returns {Promise<CleanupTarget[]>} クリーンアップ候補の配列
  */
 export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
-  // 並列実行で高速化
-  const [worktreesWithPR, mergedPRs] = await Promise.all([
+  // 並列実行で高速化 - worktreeとローカルブランチの両方を取得
+  const [worktreesWithPR, orphanedBranches, mergedPRs] = await Promise.all([
     getWorktreesWithPRStatus(),
+    getOrphanedLocalBranches(),
     getMergedPullRequests()
   ]);
   const cleanupTargets: CleanupTarget[] = [];
@@ -205,13 +268,20 @@ export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
         branch: worktree.branch,
         pullRequest: mergedPR,
         hasUncommittedChanges: hasUncommitted,
-        hasUnpushedCommits: hasUnpushed
+        hasUnpushedCommits: hasUnpushed,
+        cleanupType: 'worktree-and-branch',
+        hasRemoteBranch: await checkRemoteBranchExists(worktree.branch)
       });
     }
   }
   
+  // orphanedBranches (ローカルブランチのみの削除対象) を追加
+  cleanupTargets.push(...orphanedBranches);
+  
   if (process.env.DEBUG_CLEANUP) {
-    console.log(chalk.cyan(`Debug: Found ${cleanupTargets.length} cleanup targets`));
+    const worktreeTargets = cleanupTargets.filter(t => t.cleanupType === 'worktree-and-branch').length;
+    const branchOnlyTargets = cleanupTargets.filter(t => t.cleanupType === 'branch-only').length;
+    console.log(chalk.cyan(`Debug: Found ${cleanupTargets.length} cleanup targets (${worktreeTargets} worktree+branch, ${branchOnlyTargets} branch-only)`));
   }
   
   return cleanupTargets;
