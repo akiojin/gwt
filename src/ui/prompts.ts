@@ -10,32 +10,20 @@ export async function selectFromTable(
   choices: Array<{ name: string; value: string; description?: string; disabled?: boolean }>,
   statistics?: { branches: BranchInfo[]; worktrees: import('../worktree.js').WorktreeInfo[] }
 ): Promise<string> {
-  // Filter branch choices only (exclude action items and header/separator rows)
-  const branchChoices = choices.filter(choice => 
-    choice.value !== '__separator__' && 
-    choice.value !== '__separator_space__' && 
-    choice.value !== '__separator_space2__' && 
-    choice.value !== '__actions_header__' &&
-    choice.value !== '__create_new__' &&
-    choice.value !== '__manage_worktrees__' &&
-    choice.value !== '__cleanup_prs__' &&
-    choice.value !== '__exit__' &&
-    choice.value !== '__header__' &&
-    choice.name.trim() !== '' &&
-    !choice.disabled
-  );
   
   // Display statistics if provided
   if (statistics) {
-    const { printStatistics } = await import('./display.js');
+    const { printStatistics, printWelcome } = await import('./display.js');
+    console.clear();
+    await printWelcome();
     await printStatistics(statistics.branches, statistics.worktrees);
   }
   
-  return await selectBranchWithShortcuts(branchChoices);
+  return await selectBranchWithShortcuts(choices);
 }
 
 async function selectBranchWithShortcuts(
-  branchChoices: Array<{ name: string; value: string; description?: string; disabled?: boolean }>
+  allChoices: Array<{ name: string; value: string; description?: string; disabled?: boolean }>
 ): Promise<string> {
   const { createPrompt, useState, useKeypress, isEnterKey, usePrefix } = await import('@inquirer/core');
   
@@ -75,12 +63,24 @@ async function selectBranchWithShortcuts(
         return;
       }
       if (key.name === 'down' || key.name === 'j') {
-        setSelectedIndex(Math.min(config.choices.length - 1, selectedIndex + 1));
+        // 選択可能な項目数に基づいて制限
+        const selectableChoices = config.choices.filter(c => 
+          c.value !== '__header__' && 
+          c.value !== '__separator__' &&
+          !c.disabled
+        );
+        setSelectedIndex(Math.min(selectableChoices.length - 1, selectedIndex + 1));
         return;
       }
       
       if (isEnterKey(key)) {
-        const selectedChoice = config.choices[selectedIndex];
+        // 選択可能な項目のみから選択
+        const selectableChoices = config.choices.filter(c => 
+          c.value !== '__header__' && 
+          c.value !== '__separator__' &&
+          !c.disabled
+        );
+        const selectedChoice = selectableChoices[selectedIndex];
         if (selectedChoice) {
           setStatus('done');
           done(selectedChoice.value);
@@ -93,16 +93,37 @@ async function selectBranchWithShortcuts(
       return `${prefix} ${config.message}`;
     }
     
+    // ヘッダー行とセパレーター行を探す
+    const headerChoice = config.choices.find(c => c.value === '__header__');
+    const separatorChoice = config.choices.find(c => c.value === '__separator__');
+    
+    // 選択可能な項目のみをフィルタリング
+    const selectableChoices = config.choices.filter(c => 
+      c.value !== '__header__' && 
+      c.value !== '__separator__' &&
+      !c.disabled
+    );
+    
     const pageSize = config.pageSize || 15;
-    const startIndex = Math.max(0, selectedIndex - Math.floor(pageSize / 2));
-    const endIndex = Math.min(config.choices.length, startIndex + pageSize);
-    const visibleChoices = config.choices.slice(startIndex, endIndex);
     
     let output = `${prefix} ${config.message}\n`;
     output += 'Actions: (n) Create new branch, (m) Manage worktrees, (c) Clean up merged PRs, (q) Exit\n\n';
     
-    visibleChoices.forEach((choice, index) => {
-      const globalIndex = startIndex + index;
+    // ヘッダー行とセパレーター行を表示
+    if (headerChoice) {
+      output += `  ${headerChoice.name}\n`;
+    }
+    if (separatorChoice) {
+      output += `  ${separatorChoice.name}\n`;
+    }
+    
+    // 選択可能な項目のみを表示（ページネーション付き）
+    const selectableStartIndex = Math.max(0, selectedIndex - Math.floor(pageSize / 2));
+    const selectableEndIndex = Math.min(selectableChoices.length, selectableStartIndex + pageSize);
+    const visibleSelectableChoices = selectableChoices.slice(selectableStartIndex, selectableEndIndex);
+    
+    visibleSelectableChoices.forEach((choice, index) => {
+      const globalIndex = selectableStartIndex + index;
       const cursor = globalIndex === selectedIndex ? '❯' : ' ';
       output += `${cursor} ${choice.name}\n`;
     });
@@ -112,7 +133,7 @@ async function selectBranchWithShortcuts(
   
   return await branchSelectPrompt({
     message: 'Select a branch:',
-    choices: branchChoices,
+    choices: allChoices,
     pageSize: 15
   });
 }
