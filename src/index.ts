@@ -161,29 +161,53 @@ async function handleSelection(
 
 async function handleBranchSelection(branchName: string, repoRoot: string): Promise<boolean> {
   try {
-    // Check if worktree exists
-    let worktreePath = await worktreeExists(branchName);
+    // Check if this is a remote branch
+    const isRemoteBranch = branchName.startsWith('origin/');
+    let localBranchName = branchName;
+    let targetBranch = branchName;
+    
+    if (isRemoteBranch) {
+      // Extract local branch name from remote branch
+      localBranchName = branchName.replace(/^origin\//, '');
+      targetBranch = localBranchName;
+    }
+    
+    // Check if worktree exists (using local branch name)
+    let worktreePath = await worktreeExists(targetBranch);
     
     if (worktreePath) {
       printInfo(`Opening existing worktree: ${worktreePath}`);
     } else {
       // Create new worktree
-      worktreePath = await generateWorktreePath(repoRoot, branchName);
+      worktreePath = await generateWorktreePath(repoRoot, targetBranch);
       
-      if (!(await confirmWorktreeCreation(branchName, worktreePath))) {
+      if (!(await confirmWorktreeCreation(targetBranch, worktreePath))) {
         printInfo('Operation cancelled.');
         return true; // Continue to main menu
       }
 
+      let isNewBranch = false;
+      let baseBranch = targetBranch;
+      
+      if (isRemoteBranch) {
+        // Check if local branch exists
+        const localExists = await branchExists(localBranchName);
+        if (!localExists) {
+          // Need to create new local branch from remote
+          isNewBranch = true;
+          baseBranch = branchName; // Use full remote branch name as base
+        }
+      }
+
       const worktreeConfig: WorktreeConfig = {
-        branchName,
+        branchName: targetBranch,
         worktreePath,
         repoRoot,
-        isNewBranch: false,
-        baseBranch: branchName
+        isNewBranch,
+        baseBranch
       };
 
-      printInfo(`Creating worktree for "${branchName}"...`);
+      printInfo(`Creating worktree for "${targetBranch}"...`);
       await createWorktree(worktreeConfig);
       printSuccess(`Worktree created at: ${worktreePath}`);
     }
