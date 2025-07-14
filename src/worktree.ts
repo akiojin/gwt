@@ -4,6 +4,9 @@ import chalk from 'chalk';
 import { WorktreeConfig, WorktreeWithPR, CleanupTarget, MergedPullRequest } from './ui/types.js';
 import { getPullRequestByBranch, getMergedPullRequests } from './github.js';
 import { hasUncommittedChanges, hasUnpushedCommits, getLocalBranches, checkRemoteBranchExists } from './git.js';
+
+// 保護対象のブランチ（クリーンアップから除外）
+const PROTECTED_BRANCHES = ['main', 'master', 'develop'];
 export class WorktreeError extends Error {
   constructor(message: string, public cause?: unknown) {
     super(message);
@@ -167,6 +170,14 @@ async function getOrphanedLocalBranches(): Promise<CleanupTarget[]> {
     }
     
     for (const localBranch of localBranches) {
+      // 保護対象ブランチはスキップ
+      if (PROTECTED_BRANCHES.includes(localBranch.name)) {
+        if (process.env.DEBUG_CLEANUP) {
+          console.log(chalk.yellow(`Debug: Skipping protected branch ${localBranch.name}`));
+        }
+        continue;
+      }
+      
       // worktreeに存在しないローカルブランチのみ対象
       if (!worktreeBranches.has(localBranch.name)) {
         const mergedPR = findMatchingPR(localBranch.name, mergedPRs);
@@ -249,6 +260,14 @@ export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
   }
   
   for (const worktree of worktreesWithPR) {
+    // 保護対象ブランチはスキップ
+    if (PROTECTED_BRANCHES.includes(worktree.branch)) {
+      if (process.env.DEBUG_CLEANUP) {
+        console.log(chalk.yellow(`Debug: Skipping protected branch ${worktree.branch}`));
+      }
+      continue;
+    }
+    
     const mergedPR = findMatchingPR(worktree.branch, mergedPRs);
     
     if (process.env.DEBUG_CLEANUP) {
