@@ -122,6 +122,9 @@ export async function main(): Promise<void> {
       printError(`Worktree error: ${error.message}`);
     } else if (error instanceof ClaudeError) {
       printError(`Claude Code error: ${error.message}`);
+      if (error.cause && error.cause instanceof Error) {
+        printError(`Cause: ${error.cause.message}`);
+      }
     } else if (error instanceof AppError) {
       printError(`Application error: ${error.message}`);
     } else {
