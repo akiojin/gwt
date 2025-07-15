@@ -224,6 +224,7 @@ async function handleBranchSelection(branchName: string, repoRoot: string): Prom
 
   } catch (error) {
     printError(`Failed to handle branch selection: ${error instanceof Error ? error.message : String(error)}`);
+    await confirmContinue('Press enter to continue...');
     return true;
   }
 }
@@ -279,6 +280,7 @@ async function handleCreateNewBranch(branches: BranchInfo[], repoRoot: string): 
 
   } catch (error) {
     printError(`Failed to create new branch: ${error instanceof Error ? error.message : String(error)}`);
+    await confirmContinue('Press enter to continue...');
     return true;
   }
 }
@@ -348,6 +350,7 @@ async function handleManageWorktrees(worktrees: WorktreeInfo[]): Promise<boolean
 
   } catch (error) {
     printError(`Failed to manage worktrees: ${error instanceof Error ? error.message : String(error)}`);
+    await confirmContinue('Press enter to continue...');
     return true;
   }
 }
@@ -462,6 +465,7 @@ async function handleCleanupMergedPRs(): Promise<boolean> {
 
   } catch (error) {
     printError(`Failed to cleanup merged PRs: ${error instanceof Error ? error.message : String(error)}`);
+    await confirmContinue('Press enter to continue...');
     return true;
   }
 }
@@ -508,6 +512,7 @@ async function handlePostClaudeChanges(worktreePath: string): Promise<void> {
     }
   } catch (error) {
     printError(`Failed to handle changes: ${error instanceof Error ? error.message : String(error)}`);
+    await confirmContinue('Press enter to continue...');
   }
 }
 
