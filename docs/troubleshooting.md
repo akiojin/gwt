@@ -92,3 +92,74 @@ git branch -D branch-name
 2. 使用しているOS
 3. Gitとgh CLIのバージョン
 4. 実行したコマンドと期待した結果
+
+## Windows環境での実行
+
+### npx実行時のエラー
+
+Windows環境でnpxを使用して実行する際に以下のエラーが発生する場合があります：
+
+**症状：**
+```
+Error [ERR_MODULE_NOT_FOUND]: Cannot find module 'E:\claude-worktree\dist\index.js'
+```
+
+**原因：**
+- パッケージがインストールされた際にビルドが実行されていない
+- TypeScriptがグローバルにインストールされていない
+
+**解決方法：**
+
+1. **初回実行時**
+   ```bash
+   # パッケージを一度アンインストール
+   npm uninstall -g @akiojin/claude-worktree
+   
+   # 再インストール（prepareスクリプトが自動実行される）
+   npm install -g @akiojin/claude-worktree
+   ```
+
+2. **ローカル開発時**
+   ```bash
+   # 依存関係のインストール
+   npm install
+   
+   # ビルドの実行
+   npm run build
+   
+   # 実行
+   npm start
+   ```
+
+### TypeScriptコンパイルエラー
+
+**症状：**
+```
+This is not the tsc command you are looking for
+```
+
+**原因：**
+Windowsの`tsc`コマンドが別のプログラムを参照している
+
+**解決方法：**
+```bash
+# npx経由でTypeScriptを実行
+npx tsc
+
+# または、package.jsonのスクリプトを使用
+npm run build
+```
+
+### npm警告の対処
+
+**症状：**
+```
+npm warn Unknown project config "shamefully-hoist"...
+```
+
+**原因：**
+pnpmやyarnの設定ファイルが存在する
+
+**解決方法：**
+- これらの警告は無視して問題ありません
+- 必要に応じて、`.npmrc`、`.yarnrc`、`.pnpmfile.cjs`などの設定ファイルを削除
