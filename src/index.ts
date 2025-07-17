@@ -219,10 +219,23 @@ async function handleBranchSelection(branchName: string, repoRoot: string): Prom
     if (await isClaudeCodeAvailable()) {
       // Ask about permissions and launch Claude Code
       const skipPermissions = await confirmSkipPermissions();
-      await launchClaudeCode(worktreePath, skipPermissions);
       
-      // Check for changes after Claude Code exits
-      await handlePostClaudeChanges(worktreePath);
+      try {
+        await launchClaudeCode(worktreePath, skipPermissions);
+        
+        // Check for changes after Claude Code exits
+        await handlePostClaudeChanges(worktreePath);
+      } catch (error) {
+        if (error instanceof ClaudeError) {
+          printError(`Failed to launch Claude Code: ${error.message}`);
+          if (error.message.includes('command not found')) {
+            printInfo('Install with: npm install -g @anthropic-ai/claude-code');
+          }
+        } else {
+          printError(`Unexpected error: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        await confirmContinue('Press enter to continue...');
+      }
     } else {
       printError('Claude Code is not available. Please install it first.');
       printInfo('Install with: npm install -g @anthropic-ai/claude-code');
@@ -283,10 +296,23 @@ async function handleCreateNewBranch(branches: BranchInfo[], repoRoot: string): 
     if (await isClaudeCodeAvailable()) {
       // Launch Claude Code
       const skipPermissions = await confirmSkipPermissions();
-      await launchClaudeCode(worktreePath, skipPermissions);
       
-      // Check for changes after Claude Code exits
-      await handlePostClaudeChanges(worktreePath);
+      try {
+        await launchClaudeCode(worktreePath, skipPermissions);
+        
+        // Check for changes after Claude Code exits
+        await handlePostClaudeChanges(worktreePath);
+      } catch (error) {
+        if (error instanceof ClaudeError) {
+          printError(`Failed to launch Claude Code: ${error.message}`);
+          if (error.message.includes('command not found')) {
+            printInfo('Install with: npm install -g @anthropic-ai/claude-code');
+          }
+        } else {
+          printError(`Unexpected error: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        await confirmContinue('Press enter to continue...');
+      }
     } else {
       printError('Claude Code is not available. Please install it first.');
       printInfo('Install with: npm install -g @anthropic-ai/claude-code');
@@ -333,7 +359,20 @@ async function handleManageWorktrees(worktrees: WorktreeInfo[]): Promise<boolean
           // Check if Claude Code is available before launching
           if (await isClaudeCodeAvailable()) {
             const skipPermissions = await confirmSkipPermissions();
-            await launchClaudeCode(worktree.path, skipPermissions);
+            
+            try {
+              await launchClaudeCode(worktree.path, skipPermissions);
+            } catch (error) {
+              if (error instanceof ClaudeError) {
+                printError(`Failed to launch Claude Code: ${error.message}`);
+                if (error.message.includes('command not found')) {
+                  printInfo('Install with: npm install -g @anthropic-ai/claude-code');
+                }
+              } else {
+                printError(`Unexpected error: ${error instanceof Error ? error.message : String(error)}`);
+              }
+              await confirmContinue('Press enter to continue...');
+            }
           } else {
             printError('Claude Code is not available. Please install it first.');
             printInfo('Install with: npm install -g @anthropic-ai/claude-code');
