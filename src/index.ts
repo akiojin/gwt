@@ -215,12 +215,19 @@ async function handleBranchSelection(branchName: string, repoRoot: string): Prom
       printSuccess(`Worktree created at: ${worktreePath}`);
     }
 
-    // Ask about permissions and launch Claude Code
-    const skipPermissions = await confirmSkipPermissions();
-    await launchClaudeCode(worktreePath, skipPermissions);
-    
-    // Check for changes after Claude Code exits
-    await handlePostClaudeChanges(worktreePath);
+    // Check if Claude Code is available before launching
+    if (await isClaudeCodeAvailable()) {
+      // Ask about permissions and launch Claude Code
+      const skipPermissions = await confirmSkipPermissions();
+      await launchClaudeCode(worktreePath, skipPermissions);
+      
+      // Check for changes after Claude Code exits
+      await handlePostClaudeChanges(worktreePath);
+    } else {
+      printError('Claude Code is not available. Please install it first.');
+      printInfo('Install with: npm install -g @anthropic-ai/claude-code');
+      await confirmContinue('Press enter to continue...');
+    }
     
     // After handling changes, return to main menu
     return true;
@@ -272,12 +279,19 @@ async function handleCreateNewBranch(branches: BranchInfo[], repoRoot: string): 
     await createWorktree(worktreeConfig);
     printSuccess(`Worktree created at: ${worktreePath}`);
 
-    // Launch Claude Code
-    const skipPermissions = await confirmSkipPermissions();
-    await launchClaudeCode(worktreePath, skipPermissions);
-    
-    // Check for changes after Claude Code exits
-    await handlePostClaudeChanges(worktreePath);
+    // Check if Claude Code is available before launching
+    if (await isClaudeCodeAvailable()) {
+      // Launch Claude Code
+      const skipPermissions = await confirmSkipPermissions();
+      await launchClaudeCode(worktreePath, skipPermissions);
+      
+      // Check for changes after Claude Code exits
+      await handlePostClaudeChanges(worktreePath);
+    } else {
+      printError('Claude Code is not available. Please install it first.');
+      printInfo('Install with: npm install -g @anthropic-ai/claude-code');
+      await confirmContinue('Press enter to continue...');
+    }
     
     return true;
 
@@ -316,8 +330,15 @@ async function handleManageWorktrees(worktrees: WorktreeInfo[]): Promise<boolean
       
       switch (action) {
         case 'open':
-          const skipPermissions = await confirmSkipPermissions();
-          await launchClaudeCode(worktree.path, skipPermissions);
+          // Check if Claude Code is available before launching
+          if (await isClaudeCodeAvailable()) {
+            const skipPermissions = await confirmSkipPermissions();
+            await launchClaudeCode(worktree.path, skipPermissions);
+          } else {
+            printError('Claude Code is not available. Please install it first.');
+            printInfo('Install with: npm install -g @anthropic-ai/claude-code');
+            await confirmContinue('Press enter to continue...');
+          }
           return true; // Return to main menu after opening
           
         case 'remove':
