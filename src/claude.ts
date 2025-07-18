@@ -1,7 +1,7 @@
 import { execa } from 'execa';
 import chalk from 'chalk';
 import { platform } from 'os';
-import { convertPathForDocker, isRunningInDocker } from './utils.js';
+import { existsSync } from 'fs';
 export class ClaudeError extends Error {
   constructor(message: string, public cause?: unknown) {
     super(message);
@@ -11,15 +11,13 @@ export class ClaudeError extends Error {
 
 export async function launchClaudeCode(worktreePath: string, skipPermissions = false): Promise<void> {
   try {
-    // Docker環境の場合はパスを変換
-    const actualPath = convertPathForDocker(worktreePath);
+    // Check if the worktree path exists
+    if (!existsSync(worktreePath)) {
+      throw new Error(`Worktree path does not exist: ${worktreePath}`);
+    }
     
     console.log(chalk.blue('🚀 Launching Claude Code...'));
-    console.log(chalk.gray(`   Working directory: ${actualPath}`));
-    
-    if (isRunningInDocker() && actualPath !== worktreePath) {
-      console.log(chalk.gray(`   (Docker path converted from: ${worktreePath})`));
-    }
+    console.log(chalk.gray(`   Working directory: ${worktreePath}`));
     
     const args: string[] = [];
     if (skipPermissions) {
@@ -30,21 +28,16 @@ export async function launchClaudeCode(worktreePath: string, skipPermissions = f
     const isWindows = platform() === 'win32';
     
     await execa('claude', args, {
-      cwd: actualPath,
+      cwd: worktreePath,
       stdio: 'inherit',
-      shell: isWindows
+      shell: true
     });
   } catch (error: any) {
     const errorMessage = error.code === 'ENOENT' 
       ? 'Claude Code command not found. Please ensure Claude Code is installed and available in your PATH.'
       : `Failed to launch Claude Code: ${error.message || 'Unknown error'}`;
     
-    if (isRunningInDocker()) {
-      console.error(chalk.red('\n🐳 Docker troubleshooting tips:'));
-      console.error(chalk.yellow('   1. Ensure Claude Code is installed in the container'));
-      console.error(chalk.yellow('   2. Check if the worktree path is accessible inside the container'));
-      console.error(chalk.yellow('   3. Verify volume mounts in docker-compose.yml'));
-    } else if (platform() === 'win32') {
+    if (platform() === 'win32') {
       console.error(chalk.red('\n💡 Windows troubleshooting tips:'));
       console.error(chalk.yellow('   1. Ensure Claude Code is installed: npm install -g @anthropic-ai/claude-code'));
       console.error(chalk.yellow('   2. Try restarting your terminal or IDE'));
@@ -59,7 +52,7 @@ export async function launchClaudeCode(worktreePath: string, skipPermissions = f
 export async function isClaudeCodeAvailable(): Promise<boolean> {
   try {
     const isWindows = platform() === 'win32';
-    await execa('claude', ['--version'], { shell: isWindows });
+    await execa('claude', ['--version'], { shell: true });
     return true;
   } catch (error: any) {
     if (error.code === 'ENOENT') {
