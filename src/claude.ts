@@ -32,7 +32,7 @@ export async function launchClaudeCode(worktreePath: string, skipPermissions = f
     await execa('claude', args, {
       cwd: actualPath,
       stdio: 'inherit',
-      shell: isWindows
+      shell: true
     });
   } catch (error: any) {
     const errorMessage = error.code === 'ENOENT' 
@@ -59,7 +59,7 @@ export async function launchClaudeCode(worktreePath: string, skipPermissions = f
 export async function isClaudeCodeAvailable(): Promise<boolean> {
   try {
     const isWindows = platform() === 'win32';
-    await execa('claude', ['--version'], { shell: isWindows });
+    await execa('claude', ['--version'], { shell: true });
     return true;
   } catch (error: any) {
     if (error.code === 'ENOENT') {
