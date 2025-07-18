@@ -15,6 +15,7 @@ import {
   commitChanges,
   fetchAllRemotes,
   pushBranchToRemote,
+  isInWorktree,
   GitError 
 } from './git.js';
 import { 
@@ -79,6 +80,17 @@ export async function main(): Promise<void> {
     if (!(await isGitRepository())) {
       printError('Current directory is not a Git repository.');
       process.exit(1);
+    }
+    
+    // Check if running from a worktree directory
+    if (await isInWorktree()) {
+      printWarning('Running from a worktree directory is not recommended.');
+      printInfo('Please run this command from the main repository root to avoid path issues.');
+      printInfo('You can continue, but some operations may not work correctly.');
+      const shouldContinue = await confirmContinue('Do you want to continue anyway?');
+      if (!shouldContinue) {
+        process.exit(0);
+      }
     }
 
     // Check if Claude Code is available

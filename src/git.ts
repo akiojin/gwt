@@ -28,8 +28,20 @@ export async function isGitRepository(): Promise<boolean> {
  */
 export async function getRepositoryRoot(): Promise<string> {
   try {
-    const { stdout } = await execa('git', ['rev-parse', '--show-toplevel']);
-    return stdout.trim();
+    // git rev-parse --git-common-dirを使用してメインリポジトリの.gitディレクトリを取得
+    const { stdout: gitCommonDir } = await execa('git', ['rev-parse', '--git-common-dir']);
+    const gitDir = gitCommonDir.trim();
+    
+    // .gitディレクトリの親ディレクトリがリポジトリルート
+    const path = await import('node:path');
+    const repoRoot = path.dirname(gitDir);
+    
+    // 相対パスが返された場合（.gitなど）は、現在のディレクトリからの相対パスとして解決
+    if (!path.isAbsolute(repoRoot)) {
+      return path.resolve(repoRoot);
+    }
+    
+    return repoRoot;
   } catch (error) {
     throw new GitError('Failed to get repository root', error);
   }
@@ -141,6 +153,16 @@ interface WorktreeStatusResult {
 
 async function getWorkdirStatus(worktreePath: string): Promise<WorktreeStatusResult> {
   try {
+    // ファイルシステムの存在確認のためにfs.existsSyncを使用
+    const fs = await import('node:fs');
+    if (!fs.existsSync(worktreePath)) {
+      // worktreeパスが存在しない場合はデフォルト値を返す
+      return {
+        hasChanges: false,
+        changedFilesCount: 0
+      };
+    }
+    
     const { stdout } = await execa('git', ['status', '--porcelain'], { cwd: worktreePath });
     const lines = stdout.split('\n').filter(line => line.trim());
     return {
@@ -148,7 +170,7 @@ async function getWorkdirStatus(worktreePath: string): Promise<WorktreeStatusRes
       changedFilesCount: lines.length
     };
   } catch (error) {
-    throw new GitError('Failed to get worktree status', error);
+    throw new GitError(`Failed to get worktree status for path: ${worktreePath}`, error);
   }
 }
 
@@ -259,6 +281,35 @@ export async function checkRemoteBranchExists(branchName: string, remote = 'orig
   try {
     await execa('git', ['show-ref', '--verify', '--quiet', `refs/remotes/${remote}/${branchName}`]);
     return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 現在のディレクトリがworktreeディレクトリかどうかを確認
+ * @returns {Promise<boolean>} worktreeディレクトリの場合true
+ */
+export async function isInWorktree(): Promise<boolean> {
+  try {
+    // git rev-parse --show-toplevelとgit rev-parse --git-common-dirの結果を比較
+    const [toplevelResult, gitCommonDirResult] = await Promise.all([
+      execa('git', ['rev-parse', '--show-toplevel']),
+      execa('git', ['rev-parse', '--git-common-dir'])
+    ]);
+    
+    const toplevel = toplevelResult.stdout.trim();
+    const gitCommonDir = gitCommonDirResult.stdout.trim();
+    
+    // gitCommonDirが絶対パスで、toplevelと異なる親ディレクトリを持つ場合はworktree
+    const path = await import('node:path');
+    if (path.isAbsolute(gitCommonDir)) {
+      const mainRepoRoot = path.dirname(gitCommonDir);
+      return toplevel !== mainRepoRoot;
+    }
+    
+    // gitCommonDirが相対パス（.git）の場合はメインリポジトリ
+    return false;
   } catch {
     return false;
   }

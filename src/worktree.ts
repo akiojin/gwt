@@ -68,8 +68,24 @@ export async function listAdditionalWorktrees(): Promise<WorktreeInfo[]> {
       import('./git.js').then(m => m.getRepositoryRoot())
     ]);
     
-    // Filter out the main worktree (repository root)
-    return allWorktrees.filter(worktree => worktree.path !== repoRoot);
+    const fs = await import('node:fs');
+    
+    // Filter out the main worktree (repository root) and check for valid paths
+    const validWorktrees = allWorktrees.filter(worktree => {
+      if (worktree.path === repoRoot) {
+        return false;
+      }
+      
+      // パスの存在を確認
+      if (!fs.existsSync(worktree.path)) {
+        console.log(chalk.yellow(`Warning: Worktree path does not exist and will be filtered out: ${worktree.path}`));
+        return false;
+      }
+      
+      return true;
+    });
+    
+    return validWorktrees;
   } catch (error) {
     throw new WorktreeError('Failed to list additional worktrees', error);
   }
@@ -276,11 +292,27 @@ export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
     }
     
     if (mergedPR) {
-      // 並列実行で高速化
-      const [hasUncommitted, hasUnpushed] = await Promise.all([
-        hasUncommittedChanges(worktree.worktreePath),
-        hasUnpushedCommits(worktree.worktreePath, worktree.branch)
-      ]);
+      // worktreeパスの存在を確認
+      const fs = await import('node:fs');
+      const worktreeExists = fs.existsSync(worktree.worktreePath);
+      
+      let hasUncommitted = false;
+      let hasUnpushed = false;
+      
+      if (worktreeExists) {
+        // worktreeが存在する場合のみ状態をチェック
+        try {
+          [hasUncommitted, hasUnpushed] = await Promise.all([
+            hasUncommittedChanges(worktree.worktreePath),
+            hasUnpushedCommits(worktree.worktreePath, worktree.branch)
+          ]);
+        } catch (error) {
+          // エラーが発生した場合はデフォルト値を使用
+          console.log(chalk.yellow(`Warning: Failed to check status for worktree ${worktree.worktreePath}: ${error instanceof Error ? error.message : String(error)}`));
+        }
+      } else {
+        console.log(chalk.yellow(`Warning: Worktree path does not exist: ${worktree.worktreePath}`));
+      }
       
       cleanupTargets.push({
         worktreePath: worktree.worktreePath,
