@@ -11,12 +11,15 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 
-# pnpmとClaude Codeのインストール
-RUN npm install -g @anthropic-ai/claude-code@latest
+# Corepackを有効化してpnpmを利用可能にする
+RUN corepack enable
 
 # pnpmの環境変数設定
 ENV PNPM_HOME=/pnpm
 ENV PATH="$PNPM_HOME:$PATH"
+
+# Claude Codeのインストール
+RUN npm install -g @anthropic-ai/claude-code@latest
 
 # グローバルNode.jsツールのインストール（pnpm使用）
 RUN pnpm add -g \
