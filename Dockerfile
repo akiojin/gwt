@@ -10,8 +10,6 @@ RUN apt-get update && apt-get install -y \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# npmを最新バージョンに更新
-RUN npm install -g npm@latest
 
 # pnpmとClaude Codeのインストール
 RUN npm install -g @anthropic-ai/claude-code@latest
