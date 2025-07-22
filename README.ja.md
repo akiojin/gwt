@@ -23,18 +23,40 @@ Claude Code用の対話型Gitワークツリーマネージャー（グラフィ
 
 ### グローバルインストール（推奨）
 
-永続的なアクセスのためにnpmでグローバルインストール:
+永続的なアクセスのためにグローバルインストール:
 
+#### npm
 ```bash
 npm install -g @akiojin/claude-worktree
 ```
 
-### npxでの一回限りの使用
+#### pnpm
+```bash
+pnpm add -g @akiojin/claude-worktree
+```
 
-インストールせずにnpxで実行:
+#### bun
+```bash
+bun add -g @akiojin/claude-worktree
+```
 
+### 一回限りの使用
+
+インストールせずに実行:
+
+#### npx (npm)
 ```bash
 npx @akiojin/claude-worktree
+```
+
+#### pnpx (pnpm)
+```bash
+pnpx @akiojin/claude-worktree
+```
+
+#### bunx (bun)
+```bash
+bunx @akiojin/claude-worktree
 ```
 
 ## クイックスタート
