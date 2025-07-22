@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y \
 RUN npm install -g npm@latest
 
 # pnpmとClaude Codeのインストール
-RUN npm install -g pnpm@latest @anthropic-ai/claude-code@latest
+RUN npm install -g @anthropic-ai/claude-code@latest
 
 # pnpmの環境変数設定
 ENV PNPM_HOME=/pnpm
