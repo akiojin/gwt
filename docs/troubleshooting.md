@@ -113,22 +113,22 @@ Error [ERR_MODULE_NOT_FOUND]: Cannot find module 'E:\claude-worktree\dist\index.
 1. **初回実行時**
    ```bash
    # パッケージを一度アンインストール
-   npm uninstall -g @akiojin/claude-worktree
+   pnpm uninstall -g @akiojin/claude-worktree
    
    # 再インストール（prepareスクリプトが自動実行される）
-   npm install -g @akiojin/claude-worktree
+   pnpm add -g @akiojin/claude-worktree
    ```
 
 2. **ローカル開発時**
    ```bash
    # 依存関係のインストール
-   npm install
+   pnpm install
    
    # ビルドの実行
-   npm run build
+   pnpm run build
    
    # 実行
-   npm start
+   pnpm start
    ```
 
 ### TypeScriptコンパイルエラー
@@ -147,14 +147,14 @@ Windowsの`tsc`コマンドが別のプログラムを参照している
 npx tsc
 
 # または、package.jsonのスクリプトを使用
-npm run build
+pnpm run build
 ```
 
-### npm警告の対処
+### pnpm警告の対処
 
 **症状：**
 ```
-npm warn Unknown project config "shamefully-hoist"...
+pnpm warn Unknown project config "shamefully-hoist"...
 ```
 
 **原因：**

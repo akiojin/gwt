@@ -65,6 +65,7 @@ import {
 } from './ui/display.js';
 import { createBranchTable } from './ui/table.js';
 import chalk from 'chalk';
+import { confirm } from '@inquirer/prompts';
 import { isGitHubCLIAvailable, checkGitHubAuth } from './github.js';
 import { CleanupTarget } from './ui/types.js';
 import { AppError, setupExitHandlers, handleUserCancel } from './utils.js';
@@ -241,7 +242,7 @@ async function handleBranchSelection(branchName: string, repoRoot: string): Prom
         if (error instanceof ClaudeError) {
           printError(`Failed to launch Claude Code: ${error.message}`);
           if (error.message.includes('command not found')) {
-            printInfo('Install with: npm install -g @anthropic-ai/claude-code');
+            printInfo('Install with: pnpm add -g @anthropic-ai/claude-code');
           }
         } else {
           printError(`Unexpected error: ${error instanceof Error ? error.message : String(error)}`);
@@ -250,7 +251,7 @@ async function handleBranchSelection(branchName: string, repoRoot: string): Prom
       }
     } else {
       printError('Claude Code is not available. Please install it first.');
-      printInfo('Install with: npm install -g @anthropic-ai/claude-code');
+      printInfo('Install with: pnpm add -g @anthropic-ai/claude-code');
       await confirmContinue('Press enter to continue...');
     }
     
@@ -318,7 +319,7 @@ async function handleCreateNewBranch(branches: BranchInfo[], repoRoot: string): 
         if (error instanceof ClaudeError) {
           printError(`Failed to launch Claude Code: ${error.message}`);
           if (error.message.includes('command not found')) {
-            printInfo('Install with: npm install -g @anthropic-ai/claude-code');
+            printInfo('Install with: pnpm add -g @anthropic-ai/claude-code');
           }
         } else {
           printError(`Unexpected error: ${error instanceof Error ? error.message : String(error)}`);
@@ -327,7 +328,7 @@ async function handleCreateNewBranch(branches: BranchInfo[], repoRoot: string): 
       }
     } else {
       printError('Claude Code is not available. Please install it first.');
-      printInfo('Install with: npm install -g @anthropic-ai/claude-code');
+      printInfo('Install with: pnpm add -g @anthropic-ai/claude-code');
       await confirmContinue('Press enter to continue...');
     }
     
@@ -368,6 +369,15 @@ async function handleManageWorktrees(worktrees: WorktreeInfo[]): Promise<boolean
       
       switch (action) {
         case 'open':
+          // Check if worktree is accessible
+          if (worktree.isAccessible === false) {
+            printError('Cannot open inaccessible worktree in Claude Code');
+            printInfo(`Path: ${worktree.path}`);
+            printInfo('This worktree was created in a different environment and is not accessible here.');
+            await confirmContinue('Press enter to continue...');
+            break;
+          }
+          
           // Check if Claude Code is available before launching
           if (await isClaudeCodeAvailable()) {
             const skipPermissions = await confirmSkipPermissions();
@@ -378,7 +388,7 @@ async function handleManageWorktrees(worktrees: WorktreeInfo[]): Promise<boolean
               if (error instanceof ClaudeError) {
                 printError(`Failed to launch Claude Code: ${error.message}`);
                 if (error.message.includes('command not found')) {
-                  printInfo('Install with: npm install -g @anthropic-ai/claude-code');
+                  printInfo('Install with: pnpm add -g @anthropic-ai/claude-code');
                 }
               } else {
                 printError(`Unexpected error: ${error instanceof Error ? error.message : String(error)}`);
@@ -387,34 +397,70 @@ async function handleManageWorktrees(worktrees: WorktreeInfo[]): Promise<boolean
             }
           } else {
             printError('Claude Code is not available. Please install it first.');
-            printInfo('Install with: npm install -g @anthropic-ai/claude-code');
+            printInfo('Install with: pnpm add -g @anthropic-ai/claude-code');
             await confirmContinue('Press enter to continue...');
           }
           return true; // Return to main menu after opening
           
         case 'remove':
-          if (await confirmWorktreeRemoval(worktree.path)) {
-            await removeWorktree(worktree.path);
-            printSuccess(`Worktree removed: ${worktree.path}`);
-            // Update worktrees list
-            const index = worktrees.indexOf(worktree);
-            worktrees.splice(index, 1);
+          if (worktree.isAccessible === false) {
+            // Special handling for inaccessible worktrees
+            const shouldRemove = await confirm({
+              message: 'This worktree is inaccessible. Do you want to remove it from Git\'s records?',
+              default: false
+            });
+            if (shouldRemove) {
+              await removeWorktree(worktree.path, true); // Force removal
+              printSuccess(`Worktree record removed: ${worktree.path}`);
+              // Update worktrees list
+              const index = worktrees.indexOf(worktree);
+              worktrees.splice(index, 1);
+            }
+          } else {
+            if (await confirmWorktreeRemoval(worktree.path)) {
+              await removeWorktree(worktree.path);
+              printSuccess(`Worktree removed: ${worktree.path}`);
+              // Update worktrees list
+              const index = worktrees.indexOf(worktree);
+              worktrees.splice(index, 1);
+            }
           }
           break;
           
         case 'remove-branch':
-          if (await confirmWorktreeRemoval(worktree.path)) {
-            await removeWorktree(worktree.path);
-            printSuccess(`Worktree removed: ${worktree.path}`);
-            
-            if (await confirmBranchRemoval(worktree.branch)) {
-              await deleteBranch(worktree.branch, true); // Force delete
-              printSuccess(`Branch deleted: ${worktree.branch}`);
+          if (worktree.isAccessible === false) {
+            // Special handling for inaccessible worktrees
+            const shouldRemove = await confirm({
+              message: 'This worktree is inaccessible. Do you want to remove it from Git\'s records and delete the branch?',
+              default: false
+            });
+            if (shouldRemove) {
+              await removeWorktree(worktree.path, true); // Force removal
+              printSuccess(`Worktree record removed: ${worktree.path}`);
+              
+              if (await confirmBranchRemoval(worktree.branch)) {
+                await deleteBranch(worktree.branch, true); // Force delete
+                printSuccess(`Branch deleted: ${worktree.branch}`);
+              }
+              
+              // Update worktrees list
+              const index = worktrees.indexOf(worktree);
+              worktrees.splice(index, 1);
             }
-            
-            // Update worktrees list
-            const index = worktrees.indexOf(worktree);
-            worktrees.splice(index, 1);
+          } else {
+            if (await confirmWorktreeRemoval(worktree.path)) {
+              await removeWorktree(worktree.path);
+              printSuccess(`Worktree removed: ${worktree.path}`);
+              
+              if (await confirmBranchRemoval(worktree.branch)) {
+                await deleteBranch(worktree.branch, true); // Force delete
+                printSuccess(`Branch deleted: ${worktree.branch}`);
+              }
+              
+              // Update worktrees list
+              const index = worktrees.indexOf(worktree);
+              worktrees.splice(index, 1);
+            }
           }
           break;
           
@@ -452,6 +498,7 @@ async function handleCleanupMergedPRs(): Promise<boolean> {
 
     if (cleanupTargets.length === 0) {
       console.log(chalk.green('✨ すべてクリーンです！クリーンアップが必要なworktreeはありません。'));
+      await confirmContinue('Press enter to continue...');
       return true;
     }
 

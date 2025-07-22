@@ -1,4 +1,5 @@
 import { select, input, confirm, checkbox } from '@inquirer/prompts';
+import chalk from 'chalk';
 import { 
   BranchInfo, 
   BranchType, 
@@ -233,13 +234,21 @@ export async function confirmSkipPermissions(): Promise<boolean> {
   });
 }
 
-export async function selectWorktreeForManagement(worktrees: Array<{ branch: string; path: string }>): Promise<string | 'back'> {
+export async function selectWorktreeForManagement(worktrees: Array<{ branch: string; path: string; isAccessible?: boolean; invalidReason?: string }>): Promise<string | 'back'> {
   const choices = [
-    ...worktrees.map((w, index) => ({
-      name: `${index + 1}. ${w.branch}`,
-      value: w.branch,
-      description: w.path
-    })),
+    ...worktrees.map((w, index) => {
+      const isInvalid = w.isAccessible === false;
+      return {
+        name: isInvalid 
+          ? chalk.red(`${index + 1}. ✗ ${w.branch}`)
+          : `${index + 1}. ${w.branch}`,
+        value: w.branch,
+        description: isInvalid 
+          ? chalk.red(`${w.path} (${w.invalidReason || 'Inaccessible'})`)
+          : w.path,
+        disabled: isInvalid ? 'Cannot access this worktree' : false
+      };
+    }),
     {
       name: '← Back to main menu',
       value: 'back',

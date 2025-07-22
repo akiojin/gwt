@@ -39,7 +39,7 @@ export async function launchClaudeCode(worktreePath: string, skipPermissions = f
     
     if (platform() === 'win32') {
       console.error(chalk.red('\n💡 Windows troubleshooting tips:'));
-      console.error(chalk.yellow('   1. Ensure Claude Code is installed: npm install -g @anthropic-ai/claude-code'));
+      console.error(chalk.yellow('   1. Ensure Claude Code is installed: pnpm add -g @anthropic-ai/claude-code'));
       console.error(chalk.yellow('   2. Try restarting your terminal or IDE'));
       console.error(chalk.yellow('   3. Check if "claude" is available in your PATH'));
       console.error(chalk.yellow('   4. Try running "where claude" or "npx claude" to test the command'));
@@ -57,7 +57,7 @@ export async function isClaudeCodeAvailable(): Promise<boolean> {
   } catch (error: any) {
     if (error.code === 'ENOENT') {
       console.error(chalk.yellow('\n⚠️  Claude Code not found in PATH'));
-      console.error(chalk.gray('   Please install Claude Code: npm install -g @anthropic-ai/claude-code'));
+      console.error(chalk.gray('   Please install Claude Code: pnpm add -g @anthropic-ai/claude-code'));
     }
     return false;
   }
