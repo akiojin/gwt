@@ -92,15 +92,20 @@ export async function createBranchTable(
     // Get changes count if worktree exists
     let changesText = '';
     if (hasWorktree && worktree) {
-      try {
-        const changedFiles = await getChangedFilesCount(worktree.path);
-        if (changedFiles > 0) {
-          changesText = chalk.yellow(`✎ ${changedFiles}`);
-        } else {
+      // Check if worktree is accessible
+      if (worktree.isAccessible === false) {
+        changesText = chalk.red('✗ Invalid');
+      } else {
+        try {
+          const changedFiles = await getChangedFilesCount(worktree.path);
+          if (changedFiles > 0) {
+            changesText = chalk.yellow(`✎ ${changedFiles}`);
+          } else {
+            changesText = chalk.gray('─');
+          }
+        } catch {
           changesText = chalk.gray('─');
         }
-      } catch {
-        changesText = chalk.gray('─');
       }
     } else {
       changesText = chalk.gray('─');

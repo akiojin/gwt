@@ -139,32 +139,32 @@ git clone https://github.com/akiojin/claude-worktree.git
 cd claude-worktree
 
 # Install dependencies
-npm install
+pnpm install
 
 # Build the project
-npm run build
+pnpm run build
 ```
 
 ### Available Scripts
 
 ```bash
 # Development mode with auto-rebuild
-npm run dev
+pnpm run dev
 
 # Production build
-npm run build
+pnpm run build
 
 # Type checking
-npm run type-check
+pnpm run type-check
 
 # Code linting
-npm run lint
+pnpm run lint
 
 # Clean build artifacts
-npm run clean
+pnpm run clean
 
 # Test the CLI locally
-npm run start
+pnpm run start
 ```
 
 ### Development Workflow
@@ -172,8 +172,8 @@ npm run start
 1. **Fork and Clone**: Fork the repository and clone your fork
 2. **Create Branch**: Use the tool itself to create a feature branch
 3. **Development**: Make changes with TypeScript support
-4. **Testing**: Test CLI functionality with `npm run start`
-5. **Quality Checks**: Run `npm run type-check` and `npm run lint`
+4. **Testing**: Test CLI functionality with `pnpm run start`
+5. **Quality Checks**: Run `pnpm run type-check` and `pnpm run lint`
 6. **Pull Request**: Submit a PR with clear description
 
 ### Code Structure

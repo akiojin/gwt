@@ -90,12 +90,18 @@ export async function printStatistics(branches: BranchInfo[], worktrees: Worktre
   const localBranches = branches.filter(b => b.type === 'local').length;
   const remoteBranches = branches.filter(b => b.type === 'remote').length;
   const worktreeCount = worktrees.length;
+  const invalidWorktrees = worktrees.filter(w => w.isAccessible === false).length;
   
   // Count worktrees with changes
   let worktreesWithChanges = 0;
   let totalChangedFiles = 0;
   
   for (const worktree of worktrees) {
+    // Skip inaccessible worktrees
+    if (worktree.isAccessible === false) {
+      continue;
+    }
+    
     try {
       const { getChangedFilesCount } = await import('../git.js');
       const changedFiles = await getChangedFilesCount(worktree.path);
@@ -115,6 +121,10 @@ export async function printStatistics(branches: BranchInfo[], worktrees: Worktre
     { label: 'Active worktrees', value: worktreeCount, color: chalk.magenta.bold }
   ];
   
+  if (invalidWorktrees > 0) {
+    stats.push({ label: 'Invalid worktrees', value: invalidWorktrees, color: chalk.red.bold });
+  }
+  
   if (worktreesWithChanges > 0) {
     stats.push(
       { label: 'Worktrees with changes', value: worktreesWithChanges, color: chalk.yellow.bold },
@@ -122,7 +132,12 @@ export async function printStatistics(branches: BranchInfo[], worktrees: Worktre
     );
   }
   
-  
+  // Display statistics
+  console.log();
+  stats.forEach(stat => {
+    console.log(chalk.gray('  ') + stat.color(stat.value.toString().padStart(3)) + chalk.gray(' ') + stat.label);
+  });
+  console.log();
 }
 
 export function displayCleanupTargets(targets: CleanupTarget[]): void {

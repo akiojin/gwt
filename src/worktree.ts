@@ -18,6 +18,8 @@ export interface WorktreeInfo {
   path: string;
   branch: string;
   head: string;
+  isAccessible?: boolean;
+  invalidReason?: string;
 }
 
 async function listWorktrees(): Promise<WorktreeInfo[]> {
@@ -70,22 +72,26 @@ export async function listAdditionalWorktrees(): Promise<WorktreeInfo[]> {
     
     const fs = await import('node:fs');
     
-    // Filter out the main worktree (repository root) and check for valid paths
-    const validWorktrees = allWorktrees.filter(worktree => {
-      if (worktree.path === repoRoot) {
-        return false;
-      }
-      
-      // パスの存在を確認
-      if (!fs.existsSync(worktree.path)) {
-        console.log(chalk.yellow(`Warning: Worktree path does not exist and will be filtered out: ${worktree.path}`));
-        return false;
-      }
-      
-      return true;
-    });
+    // Filter out the main worktree (repository root) and add accessibility info
+    const additionalWorktrees = allWorktrees
+      .filter(worktree => worktree.path !== repoRoot)
+      .map(worktree => {
+        // パスの存在を確認
+        const isAccessible = fs.existsSync(worktree.path);
+        
+        const result: WorktreeInfo = {
+          ...worktree,
+          isAccessible
+        };
+        
+        if (!isAccessible) {
+          result.invalidReason = 'Path not accessible in current environment';
+        }
+        
+        return result;
+      });
     
-    return validWorktrees;
+    return additionalWorktrees;
   } catch (error) {
     throw new WorktreeError('Failed to list additional worktrees', error);
   }
@@ -294,12 +300,12 @@ export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
     if (mergedPR) {
       // worktreeパスの存在を確認
       const fs = await import('node:fs');
-      const worktreeExists = fs.existsSync(worktree.worktreePath);
+      const isAccessible = fs.existsSync(worktree.worktreePath);
       
       let hasUncommitted = false;
       let hasUnpushed = false;
       
-      if (worktreeExists) {
+      if (isAccessible) {
         // worktreeが存在する場合のみ状態をチェック
         try {
           [hasUncommitted, hasUnpushed] = await Promise.all([
@@ -308,21 +314,28 @@ export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
           ]);
         } catch (error) {
           // エラーが発生した場合はデフォルト値を使用
-          console.log(chalk.yellow(`Warning: Failed to check status for worktree ${worktree.worktreePath}: ${error instanceof Error ? error.message : String(error)}`));
+          if (process.env.DEBUG_CLEANUP) {
+            console.log(chalk.yellow(`Debug: Failed to check status for worktree ${worktree.worktreePath}: ${error instanceof Error ? error.message : String(error)}`));
+          }
         }
-      } else {
-        console.log(chalk.yellow(`Warning: Worktree path does not exist: ${worktree.worktreePath}`));
       }
       
-      cleanupTargets.push({
+      const target: CleanupTarget = {
         worktreePath: worktree.worktreePath,
         branch: worktree.branch,
         pullRequest: mergedPR,
         hasUncommittedChanges: hasUncommitted,
         hasUnpushedCommits: hasUnpushed,
         cleanupType: 'worktree-and-branch',
-        hasRemoteBranch: await checkRemoteBranchExists(worktree.branch)
-      });
+        hasRemoteBranch: await checkRemoteBranchExists(worktree.branch),
+        isAccessible
+      };
+      
+      if (!isAccessible) {
+        target.invalidReason = 'Path not accessible in current environment';
+      }
+      
+      cleanupTargets.push(target);
     }
   }
   

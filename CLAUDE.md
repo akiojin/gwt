@@ -36,16 +36,16 @@
 ### ビルドコマンド
 
 ```bash
-npm run build    # TypeScriptコンパイル
-npm run dev      # ウォッチモードでのコンパイル
-npm start        # ビルド済みバイナリの実行
+pnpm run build    # TypeScriptコンパイル
+pnpm run dev      # ウォッチモードでのコンパイル
+pnpm start        # ビルド済みバイナリの実行
 ```
 
 ### テストコマンド
 
 ```bash
-npm run type-check  # TypeScript型チェック
-npm run lint        # ESLint実行
+pnpm run type-check  # TypeScript型チェック
+pnpm run lint        # ESLint実行
 ```
 
 ### 主要な依存関係

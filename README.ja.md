@@ -139,32 +139,32 @@ git clone https://github.com/akiojin/claude-worktree.git
 cd claude-worktree
 
 # 依存関係をインストール
-npm install
+pnpm install
 
 # プロジェクトをビルド
-npm run build
+pnpm run build
 ```
 
 ### 利用可能なスクリプト
 
 ```bash
 # 自動リビルド付き開発モード
-npm run dev
+pnpm run dev
 
 # プロダクションビルド
-npm run build
+pnpm run build
 
 # 型チェック
-npm run type-check
+pnpm run type-check
 
 # コードリンティング
-npm run lint
+pnpm run lint
 
 # ビルド成果物をクリーン
-npm run clean
+pnpm run clean
 
 # CLIをローカルテスト
-npm run start
+pnpm run start
 ```
 
 ### 開発ワークフロー
@@ -172,8 +172,8 @@ npm run start
 1. **フォークとクローン**: リポジトリをフォークし、あなたのフォークをクローン
 2. **ブランチ作成**: ツール自体を使用してfeatureブランチを作成
 3. **開発**: TypeScriptサポート付きで変更を実施
-4. **テスト**: `npm run start`でCLI機能をテスト
-5. **品質チェック**: `npm run type-check`と`npm run lint`を実行
+4. **テスト**: `pnpm run start`でCLI機能をテスト
+5. **品質チェック**: `pnpm run type-check`と`pnpm run lint`を実行
 6. **プルリクエスト**: 明確な説明付きでPRを提出
 
 ### コード構造

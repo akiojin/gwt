@@ -90,6 +90,8 @@ export interface CleanupTarget {
   hasUnpushedCommits: boolean;
   cleanupType: 'worktree-and-branch' | 'branch-only';
   hasRemoteBranch?: boolean;
+  isAccessible?: boolean;
+  invalidReason?: string;
 }
 
 export interface GitHubPRAuthor {
