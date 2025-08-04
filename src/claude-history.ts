@@ -133,8 +133,10 @@ async function parseConversationFile(filePath: string): Promise<ClaudeConversati
     // Debug: Log raw messages for investigation
     if (process.env.DEBUG_CLAUDE_HISTORY) {
       console.log(`[DEBUG] Processing file: ${filePath}`);
+      console.log(`[DEBUG] File basename: ${path.basename(filePath, '.jsonl')}`);
       console.log(`[DEBUG] Message count: ${messages.length}`);
       console.log(`[DEBUG] First message:`, JSON.stringify(messages[0], null, 2));
+      console.log(`[DEBUG] All message roles:`, messages.map(m => m.role || 'no-role'));
     }
     
     // Find first user message - be more flexible about role matching
@@ -193,6 +195,7 @@ async function parseConversationFile(filePath: string): Promise<ClaudeConversati
         // Debug: Log title extraction
         if (process.env.DEBUG_CLAUDE_HISTORY) {
           console.log(`[DEBUG] Extracted title: "${title}" from content: "${extractedContent.substring(0, 100)}..."`);
+          console.log(`[DEBUG] firstUserMessage structure:`, JSON.stringify(firstUserMessage, null, 2).substring(0, 500));
         }
       }
     }
@@ -205,22 +208,49 @@ async function parseConversationFile(filePath: string): Promise<ClaudeConversati
       // Remove timestamp patterns and use remaining text
       const cleanFileName = fileName.replace(/^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_/, '');
       
-      if (cleanFileName && cleanFileName.length > 0) {
+      if (cleanFileName && cleanFileName.length > 0 && !cleanFileName.match(/^[0-9a-f-]+$/i)) {
+        // Only use filename if it's not just a UUID
         title = cleanFileName.replace(/[-_]/g, ' ').trim();
         title = title.charAt(0).toUpperCase() + title.slice(1);
       } else {
-        // Last resort: use session ID if available, otherwise generic title
-        title = sessionId ? `Session ${sessionId.substring(0, 8)}...` : 'Conversation';
+        // If we only have UUID or nothing meaningful, create a better fallback
+        if (messages.length > 0) {
+          // Try to create title from first few messages
+          const firstMessages = messages.slice(0, 3);
+          const keywords = [];
+          
+          for (const msg of firstMessages) {
+            if (msg.content) {
+              let content = '';
+              if (typeof msg.content === 'string') {
+                content = msg.content;
+              } else if (Array.isArray(msg.content) && msg.content[0]) {
+                content = msg.content[0].text || msg.content[0].content || '';
+              }
+              
+              // Extract meaningful words from content
+              const words = content.split(/\s+/).slice(0, 5).join(' ');
+              if (words && words.length > 10) {
+                keywords.push(words.substring(0, 30) + '...');
+                break;
+              }
+            }
+          }
+          
+          title = keywords.length > 0 ? keywords[0]! : 'Recent conversation';
+        } else {
+          title = 'Empty conversation';
+        }
       }
     }
 
+    // Get file stats for last activity time
+    const stats = await stat(filePath);
+    
     // Extract project path from file path
     const projectsDir = getClaudeProjectsDir();
     const relativePath = path.relative(projectsDir, filePath);
     const projectPath = path.dirname(relativePath);
-
-    // Get file stats for last activity time
-    const stats = await stat(filePath);
     
     const result: ClaudeConversation = {
       id: path.basename(filePath, '.jsonl'),
