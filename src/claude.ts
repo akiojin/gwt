@@ -43,8 +43,9 @@ export async function launchClaudeCode(
           
           if (selectedConversation) {
             console.log(chalk.green(`   ✨ Resuming: ${selectedConversation.title}`));
-            // For now, use standard resume mode - in the future, we could launch with specific conversation ID
-            args.push('-r');
+            // Don't use -r flag since we already handled conversation selection
+            // Launch in normal mode to start fresh in the selected context
+            console.log(chalk.gray('   📝 Starting new session in conversation context'));
           } else {
             // User cancelled or no conversations found, fall back to normal mode
             console.log(chalk.gray('   ✨ Starting new session'));
