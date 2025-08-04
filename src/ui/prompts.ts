@@ -6,6 +6,7 @@ import {
   NewBranchConfig,
   CleanupTarget
 } from './types.js';
+import { SessionData } from '../config/index.js';
 
 export async function selectFromTable(
   choices: Array<{ name: string; value: string; description?: string; disabled?: boolean }>,
@@ -425,4 +426,88 @@ export async function confirmProceedWithoutPush(branchName: string): Promise<boo
     message: `Failed to push "${branchName}". Proceed with deletion anyway?`,
     default: false
   });
+}
+
+export async function selectSession(sessions: SessionData[]): Promise<SessionData | null> {
+  if (sessions.length === 0) {
+    return null;
+  }
+
+  const choices = sessions.map((session, index) => {
+    const repo = session.repositoryRoot.split('/').pop() || 'unknown';
+    const timeAgo = formatTimeAgo(session.timestamp);
+    const branch = session.lastBranch || 'unknown';
+    
+    return {
+      name: `${chalk.cyan(repo)} - ${chalk.green(branch)} ${chalk.gray(`(${timeAgo})`)}`,
+      value: index.toString(),
+      description: session.lastWorktreePath || ''
+    };
+  });
+
+  const selectedIndex = await select({
+    message: 'Select a session to resume:',
+    choices: [
+      ...choices,
+      { name: chalk.gray('← Cancel'), value: 'cancel' }
+    ],
+    pageSize: 10
+  });
+
+  if (selectedIndex === 'cancel') {
+    return null;
+  }
+
+  return sessions[parseInt(selectedIndex)] || null;
+}
+
+export async function selectClaudeExecutionMode(): Promise<{
+  mode: 'normal' | 'continue' | 'resume';
+  skipPermissions: boolean;
+}> {
+  const mode = await select({
+    message: 'Select Claude Code execution mode:',
+    choices: [
+      {
+        name: '🚀 Normal - Start a new session',
+        value: 'normal',
+        description: 'Launch Claude Code normally'
+      },
+      {
+        name: '⏭️  Continue - Continue most recent conversation (-c)',
+        value: 'continue',
+        description: 'Continue from the most recent conversation'
+      },
+      {
+        name: '🔄 Resume - Select conversation to resume (-r)',
+        value: 'resume',
+        description: 'Interactively select a conversation to resume'
+      }
+    ],
+    pageSize: 3
+  }) as 'normal' | 'continue' | 'resume';
+
+  const skipPermissions = await confirm({
+    message: 'Skip permission checks? (--dangerously-skip-permissions)',
+    default: false
+  });
+
+  return { mode, skipPermissions };
+}
+
+function formatTimeAgo(timestamp: number): string {
+  const now = Date.now();
+  const diff = now - timestamp;
+  
+  const minutes = Math.floor(diff / (1000 * 60));
+  const hours = Math.floor(diff / (1000 * 60 * 60));
+  const days = Math.floor(diff / (1000 * 60 * 60 * 24));
+  
+  if (minutes < 60) {
+    return `${minutes}m ago`;
+  } else if (hours < 24) {
+    return `${hours}h ago`;
+  } else {
+    return `${days}d ago`;
+  }
 }

@@ -12,10 +12,12 @@ services:
       # Docker socket（必要な場合）
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
+      - NPM_USER
+      - NPM_EMAIL
+      - NPM_PASS
       # AI API Keys
       - OPENAI_API_KEY
       - ANTHROPIC_API_KEY
-      - CLAUDE_CODE_MAX_OUTPUT_TOKENS
       # GitHub設定
       - GITHUB_TOKEN
       - GITHUB_PERSONAL_ACCESS_TOKEN

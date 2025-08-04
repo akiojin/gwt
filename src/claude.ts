@@ -9,7 +9,13 @@ export class ClaudeError extends Error {
   }
 }
 
-export async function launchClaudeCode(worktreePath: string, skipPermissions = false): Promise<void> {
+export async function launchClaudeCode(
+  worktreePath: string, 
+  options: {
+    skipPermissions?: boolean;
+    mode?: 'normal' | 'continue' | 'resume';
+  } = {}
+): Promise<void> {
   try {
     // Check if the worktree path exists
     if (!existsSync(worktreePath)) {
@@ -20,7 +26,25 @@ export async function launchClaudeCode(worktreePath: string, skipPermissions = f
     console.log(chalk.gray(`   Working directory: ${worktreePath}`));
     
     const args: string[] = [];
-    if (skipPermissions) {
+    
+    // Handle execution mode
+    switch (options.mode) {
+      case 'continue':
+        args.push('-c');
+        console.log(chalk.cyan('   📱 Continuing most recent conversation'));
+        break;
+      case 'resume':
+        args.push('-r');
+        console.log(chalk.cyan('   🔄 Resuming selected conversation'));
+        break;
+      case 'normal':
+      default:
+        console.log(chalk.green('   ✨ Starting new session'));
+        break;
+    }
+    
+    // Handle skip permissions
+    if (options.skipPermissions) {
       args.push('--dangerously-skip-permissions');
       console.log(chalk.yellow('   ⚠️  Skipping permissions check'));
     }

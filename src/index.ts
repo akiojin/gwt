@@ -50,7 +50,9 @@ import {
   confirmCleanup,
   confirmRemoteBranchDeletion,
   confirmPushUnpushedCommits,
-  confirmProceedWithoutPush
+  confirmProceedWithoutPush,
+  selectSession,
+  selectClaudeExecutionMode
 } from './ui/prompts.js';
 import { 
   displayBranchTable,
@@ -71,9 +73,42 @@ import { CleanupTarget } from './ui/types.js';
 import { AppError, setupExitHandlers, handleUserCancel } from './utils.js';
 import { BranchInfo, WorktreeConfig } from './ui/types.js';
 import { WorktreeInfo } from './worktree.js';
+import { loadSession, saveSession, SessionData, getAllSessions } from './config/index.js';
+
+function showHelp(): void {
+  console.log(`
+Claude Worktree Manager
+
+Usage: claude-worktree [options]
+
+Options:
+  -c              Continue from the last session (automatically open the last used worktree)
+  -r, --resume    Resume a session - interactively select from available sessions
+  -h, --help      Show this help message
+
+Description:
+  Interactive Git worktree manager for Claude Code with graphical branch selection.
+  
+  Without options: Opens the interactive menu to select branches and manage worktrees.
+  With -c option: Automatically continues from where you left off in the last session.
+  With -r option: Shows a list of recent sessions to choose from and resume.
+`);
+}
 
 export async function main(): Promise<void> {
   try {
+    // Parse command line arguments
+    const args = process.argv.slice(2);
+    const continueLastSession = args.includes('-c');
+    const resumeSession = args.includes('-r') || args.includes('--resume');
+    const showHelpFlag = args.includes('-h') || args.includes('--help');
+
+    // Show help if requested
+    if (showHelpFlag) {
+      showHelp();
+      return;
+    }
+
     // Setup graceful exit handlers
     setupExitHandlers();
 
@@ -100,14 +135,85 @@ export async function main(): Promise<void> {
       printInfo('You can install it from: https://claude.ai/code');
     }
 
+    // Get repository root
+    const repoRoot = await getRepositoryRoot();
+
+    // Handle continue last session option
+    if (continueLastSession) {
+      const sessionData = await loadSession(repoRoot);
+      if (sessionData && sessionData.lastWorktreePath) {
+        printInfo(`Continuing last session: ${sessionData.lastBranch} (${sessionData.lastWorktreePath})`);
+        
+        // Check if worktree still exists
+        if (await worktreeExists(sessionData.lastBranch!)) {
+          const skipPermissions = await confirmSkipPermissions();
+          
+          try {
+            await launchClaudeCode(sessionData.lastWorktreePath, { skipPermissions });
+            await handlePostClaudeChanges(sessionData.lastWorktreePath);
+          } catch (error) {
+            if (error instanceof ClaudeError) {
+              printError(`Failed to launch Claude Code: ${error.message}`);
+            } else {
+              printError(`Unexpected error: ${error instanceof Error ? error.message : String(error)}`);
+            }
+            await confirmContinue('Press enter to continue...');
+          }
+          
+          return; // Exit after continuing session
+        } else {
+          printWarning(`Last session worktree no longer exists: ${sessionData.lastWorktreePath}`);
+          printInfo('Falling back to normal flow...');
+        }
+      } else {
+        printInfo('No previous session found. Starting normally...');
+      }
+    }
+
+    // Handle resume session option
+    if (resumeSession) {
+      const allSessions = await getAllSessions();
+      if (allSessions.length === 0) {
+        printInfo('No previous sessions found. Starting normally...');
+      } else {
+        const selectedSession = await selectSession(allSessions);
+        if (selectedSession && selectedSession.lastWorktreePath) {
+          printInfo(`Resuming session: ${selectedSession.lastBranch} (${selectedSession.lastWorktreePath})`);
+          
+          // Check if worktree still exists
+          if (await worktreeExists(selectedSession.lastBranch!)) {
+            const skipPermissions = await confirmSkipPermissions();
+            
+            try {
+              await launchClaudeCode(selectedSession.lastWorktreePath, { skipPermissions });
+              await handlePostClaudeChanges(selectedSession.lastWorktreePath);
+            } catch (error) {
+              if (error instanceof ClaudeError) {
+                printError(`Failed to launch Claude Code: ${error.message}`);
+              } else {
+                printError(`Unexpected error: ${error instanceof Error ? error.message : String(error)}`);
+              }
+              await confirmContinue('Press enter to continue...');
+            }
+            
+            return; // Exit after resuming session
+          } else {
+            printWarning(`Selected session worktree no longer exists: ${selectedSession.lastWorktreePath}`);
+            printInfo('Falling back to normal flow...');
+          }
+        } else {
+          printInfo('No session selected. Starting normally...');
+        }
+      }
+    }
+
     // Main application loop
     while (true) {
       try {
         // Get current repository state
-        const [branches, worktrees, repoRoot] = await Promise.all([
+        const [branches, worktrees] = await Promise.all([
           getAllBranches(),
-          listAdditionalWorktrees(),
-          getRepositoryRoot()
+          listAdditionalWorktrees()
         ]);
 
         // Create and display table
@@ -230,11 +336,20 @@ async function handleBranchSelection(branchName: string, repoRoot: string): Prom
 
     // Check if Claude Code is available before launching
     if (await isClaudeCodeAvailable()) {
-      // Ask about permissions and launch Claude Code
-      const skipPermissions = await confirmSkipPermissions();
+      // Ask about execution mode
+      const { mode, skipPermissions } = await selectClaudeExecutionMode();
       
       try {
-        await launchClaudeCode(worktreePath, skipPermissions);
+        // Save session data before launching Claude Code
+        const sessionData: SessionData = {
+          lastWorktreePath: worktreePath,
+          lastBranch: targetBranch,
+          timestamp: Date.now(),
+          repositoryRoot: repoRoot
+        };
+        await saveSession(sessionData);
+        
+        await launchClaudeCode(worktreePath, { mode, skipPermissions });
         
         // Check for changes after Claude Code exits
         await handlePostClaudeChanges(worktreePath);
@@ -307,11 +422,20 @@ async function handleCreateNewBranch(branches: BranchInfo[], repoRoot: string): 
 
     // Check if Claude Code is available before launching
     if (await isClaudeCodeAvailable()) {
-      // Launch Claude Code
-      const skipPermissions = await confirmSkipPermissions();
+      // Ask about execution mode
+      const { mode, skipPermissions } = await selectClaudeExecutionMode();
       
       try {
-        await launchClaudeCode(worktreePath, skipPermissions);
+        // Save session data before launching Claude Code
+        const sessionData: SessionData = {
+          lastWorktreePath: worktreePath,
+          lastBranch: targetBranch,
+          timestamp: Date.now(),
+          repositoryRoot: repoRoot
+        };
+        await saveSession(sessionData);
+        
+        await launchClaudeCode(worktreePath, { mode, skipPermissions });
         
         // Check for changes after Claude Code exits
         await handlePostClaudeChanges(worktreePath);
@@ -380,10 +504,20 @@ async function handleManageWorktrees(worktrees: WorktreeInfo[]): Promise<boolean
           
           // Check if Claude Code is available before launching
           if (await isClaudeCodeAvailable()) {
-            const skipPermissions = await confirmSkipPermissions();
+            // Ask about execution mode
+            const { mode, skipPermissions } = await selectClaudeExecutionMode();
             
             try {
-              await launchClaudeCode(worktree.path, skipPermissions);
+              // Save session data before launching Claude Code
+              const sessionData: SessionData = {
+                lastWorktreePath: worktree.path,
+                lastBranch: worktree.branch,
+                timestamp: Date.now(),
+                repositoryRoot: await getRepositoryRoot()
+              };
+              await saveSession(sessionData);
+              
+              await launchClaudeCode(worktree.path, { mode, skipPermissions });
             } catch (error) {
               if (error instanceof ClaudeError) {
                 printError(`Failed to launch Claude Code: ${error.message}`);

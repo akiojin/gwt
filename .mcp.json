@@ -12,6 +12,28 @@
         "mcp-gemini-google-search"
       ],
       "env": {}
+    },
+    "textlint": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "textlint",
+        "--mcp"
+      ],
+      "env": {}
+    },
+    "serena": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/oraios/serena",
+        "serena-mcp-server",
+        "--context",
+        "ide-assistant",
+        "--project",
+        "$(pwd)"
+      ]
     }
   }
 }
