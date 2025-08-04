@@ -162,22 +162,22 @@ async function parseConversationFile(filePath: string): Promise<ClaudeConversati
       });
     }
     
-    // Find first user message - be more flexible about role matching
-    const firstUserMessage = messages.find(msg => 
+    // Find last user message - more relevant for understanding current context
+    const lastUserMessage = messages.slice().reverse().find(msg => 
       msg.role === 'user' || msg.role === 'human' || 
       (msg.sender && msg.sender === 'human') ||
       (!msg.role && msg.content) // fallback for messages without explicit role
     );
     
-    if (firstUserMessage && firstUserMessage.content) {
+    if (lastUserMessage && lastUserMessage.content) {
       let extractedContent = '';
       
       // Handle different content formats that Claude Code might use
-      if (typeof firstUserMessage.content === 'string') {
-        extractedContent = firstUserMessage.content;
-      } else if (Array.isArray(firstUserMessage.content)) {
+      if (typeof lastUserMessage.content === 'string') {
+        extractedContent = lastUserMessage.content;
+      } else if (Array.isArray(lastUserMessage.content)) {
         // Handle array of content blocks
-        for (const block of firstUserMessage.content) {
+        for (const block of lastUserMessage.content) {
           if (typeof block === 'string') {
             extractedContent = block;
             break;
@@ -192,12 +192,12 @@ async function parseConversationFile(filePath: string): Promise<ClaudeConversati
             }
           }
         }
-      } else if (firstUserMessage.content && typeof firstUserMessage.content === 'object') {
+      } else if (lastUserMessage.content && typeof lastUserMessage.content === 'object') {
         // Handle single content object
-        if (firstUserMessage.content.text) {
-          extractedContent = firstUserMessage.content.text;
-        } else if (firstUserMessage.content.content) {
-          extractedContent = firstUserMessage.content.content;
+        if (lastUserMessage.content.text) {
+          extractedContent = lastUserMessage.content.text;
+        } else if (lastUserMessage.content.content) {
+          extractedContent = lastUserMessage.content.content;
         }
       }
       
@@ -218,7 +218,7 @@ async function parseConversationFile(filePath: string): Promise<ClaudeConversati
         // Debug: Log title extraction
         if (process.env.DEBUG_CLAUDE_HISTORY) {
           console.log(`[DEBUG] Extracted title: "${title}" from content: "${extractedContent.substring(0, 100)}..."`);
-          console.log(`[DEBUG] firstUserMessage structure:`, JSON.stringify(firstUserMessage, null, 2).substring(0, 500));
+          console.log(`[DEBUG] lastUserMessage structure:`, JSON.stringify(lastUserMessage, null, 2).substring(0, 500));
         }
       }
     }
@@ -239,8 +239,8 @@ async function parseConversationFile(filePath: string): Promise<ClaudeConversati
         // Fallback: try to extract from any message content
         let foundTitle = false;
         
-        // Try all messages, not just user messages
-        for (const msg of messages.slice(0, 10)) { // Check first 10 messages
+        // Try last messages first - more relevant for current context
+        for (const msg of messages.slice(-10).reverse()) { // Check last 10 messages in reverse order
           if (msg && msg.content) {
             let content = '';
             
