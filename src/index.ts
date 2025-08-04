@@ -337,7 +337,12 @@ async function handleBranchSelection(branchName: string, repoRoot: string): Prom
     // Check if Claude Code is available before launching
     if (await isClaudeCodeAvailable()) {
       // Ask about execution mode
-      const { mode, skipPermissions } = await selectClaudeExecutionMode();
+      const executionConfig = await selectClaudeExecutionMode();
+      if (!executionConfig) {
+        // User cancelled, return to main menu
+        return true;
+      }
+      const { mode, skipPermissions } = executionConfig;
       
       try {
         // Save session data before launching Claude Code
@@ -423,7 +428,12 @@ async function handleCreateNewBranch(branches: BranchInfo[], repoRoot: string): 
     // Check if Claude Code is available before launching
     if (await isClaudeCodeAvailable()) {
       // Ask about execution mode
-      const { mode, skipPermissions } = await selectClaudeExecutionMode();
+      const executionConfig = await selectClaudeExecutionMode();
+      if (!executionConfig) {
+        // User cancelled, return to main menu
+        return true;
+      }
+      const { mode, skipPermissions } = executionConfig;
       
       try {
         // Save session data before launching Claude Code
@@ -505,7 +515,12 @@ async function handleManageWorktrees(worktrees: WorktreeInfo[]): Promise<boolean
           // Check if Claude Code is available before launching
           if (await isClaudeCodeAvailable()) {
             // Ask about execution mode
-            const { mode, skipPermissions } = await selectClaudeExecutionMode();
+      const executionConfig = await selectClaudeExecutionMode();
+      if (!executionConfig) {
+        // User cancelled, return to main menu
+        return true;
+      }
+      const { mode, skipPermissions } = executionConfig;
             
             try {
               // Save session data before launching Claude Code

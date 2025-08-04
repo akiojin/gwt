@@ -1127,7 +1127,7 @@ function formatConversationDisplay(
 export async function selectClaudeExecutionMode(): Promise<{
   mode: 'normal' | 'continue' | 'resume';
   skipPermissions: boolean;
-}> {
+} | null> {
   const mode = await select({
     message: 'Select Claude Code execution mode:',
     choices: [
@@ -1145,10 +1145,19 @@ export async function selectClaudeExecutionMode(): Promise<{
         name: '🔄 Resume - Select conversation to resume (-r)',
         value: 'resume',
         description: 'Interactively select a conversation to resume'
+      },
+      {
+        name: chalk.gray('← Back (q)'),
+        value: 'cancel',
+        description: 'Return to branch selection'
       }
     ],
-    pageSize: 3
-  }) as 'normal' | 'continue' | 'resume';
+    pageSize: 4
+  }) as 'normal' | 'continue' | 'resume' | 'cancel';
+
+  if (mode === 'cancel') {
+    return null;
+  }
 
   const skipPermissions = await confirm({
     message: 'Skip permission checks? (--dangerously-skip-permissions)',
