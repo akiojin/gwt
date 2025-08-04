@@ -7,6 +7,7 @@ import path from 'node:path';
  */
 export interface ClaudeConversation {
   id: string;
+  sessionId?: string; // Claude Code session ID for --resume command
   title: string;
   lastActivity: number;
   messageCount: number;
@@ -97,23 +98,120 @@ async function parseConversationFile(filePath: string): Promise<ClaudeConversati
     const firstMessage = messages[0];
     const lastMessage = messages[messages.length - 1];
     
+    // Extract session ID from messages (look for session_id, id, or conversation_id fields)
+    let sessionId: string | undefined;
+    for (const message of messages) {
+      if (message.session_id) {
+        sessionId = message.session_id;
+        break;
+      } else if (message.conversation_id) {
+        sessionId = message.conversation_id;
+        break;
+      } else if (message.id && typeof message.id === 'string' && message.id.length > 10) {
+        // If ID looks like a session ID (longer string), use it
+        sessionId = message.id;
+        break;
+      }
+    }
+    
+    // If no session ID found in messages, try to extract from filename
+    if (!sessionId) {
+      const fileName = path.basename(filePath, '.jsonl');
+      // Look for UUID-like patterns in filename
+      const uuidMatch = fileName.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+      if (uuidMatch) {
+        sessionId = uuidMatch[1];
+      } else if (fileName.length > 20) {
+        // Use filename as session ID if it's long enough
+        sessionId = fileName;
+      }
+    }
+    
     // Generate conversation title from first user message or file name
     let title = 'Untitled Conversation';
-    const firstUserMessage = messages.find(msg => msg.role === 'user');
+    
+    // Debug: Log raw messages for investigation
+    if (process.env.DEBUG_CLAUDE_HISTORY) {
+      console.log(`[DEBUG] Processing file: ${filePath}`);
+      console.log(`[DEBUG] Message count: ${messages.length}`);
+      console.log(`[DEBUG] First message:`, JSON.stringify(messages[0], null, 2));
+    }
+    
+    // Find first user message - be more flexible about role matching
+    const firstUserMessage = messages.find(msg => 
+      msg.role === 'user' || msg.role === 'human' || 
+      (msg.sender && msg.sender === 'human') ||
+      (!msg.role && msg.content) // fallback for messages without explicit role
+    );
+    
     if (firstUserMessage && firstUserMessage.content) {
-      const content = typeof firstUserMessage.content === 'string' 
-        ? firstUserMessage.content 
-        : firstUserMessage.content[0]?.text || '';
+      let extractedContent = '';
       
-      // Extract first line or truncate long content
-      const firstLine = content.split('\n')[0].trim();
-      title = firstLine.length > 60 ? firstLine.substring(0, 57) + '...' : firstLine;
+      // Handle different content formats that Claude Code might use
+      if (typeof firstUserMessage.content === 'string') {
+        extractedContent = firstUserMessage.content;
+      } else if (Array.isArray(firstUserMessage.content)) {
+        // Handle array of content blocks
+        for (const block of firstUserMessage.content) {
+          if (typeof block === 'string') {
+            extractedContent = block;
+            break;
+          } else if (block && typeof block === 'object') {
+            // Handle content blocks with type and text properties
+            if (block.text && typeof block.text === 'string') {
+              extractedContent = block.text;
+              break;
+            } else if (block.content && typeof block.content === 'string') {
+              extractedContent = block.content;
+              break;
+            }
+          }
+        }
+      } else if (firstUserMessage.content && typeof firstUserMessage.content === 'object') {
+        // Handle single content object
+        if (firstUserMessage.content.text) {
+          extractedContent = firstUserMessage.content.text;
+        } else if (firstUserMessage.content.content) {
+          extractedContent = firstUserMessage.content.content;
+        }
+      }
+      
+      // Clean and format the extracted content
+      if (extractedContent) {
+        // Remove system prompts or meta information
+        const cleanContent = extractedContent
+          .replace(/^(<.*?>|System:|Assistant:|Human:)/i, '')
+          .trim();
+          
+        // Extract first meaningful line
+        const firstLine = cleanContent.split('\n')[0]?.trim() || '';
+        
+        if (firstLine.length > 0) {
+          title = firstLine.length > 60 ? firstLine.substring(0, 57) + '...' : firstLine;
+        }
+        
+        // Debug: Log title extraction
+        if (process.env.DEBUG_CLAUDE_HISTORY) {
+          console.log(`[DEBUG] Extracted title: "${title}" from content: "${extractedContent.substring(0, 100)}..."`);
+        }
+      }
     }
 
-    // If still no good title, use file name
+    // If still no good title, try alternative extraction methods
     if (!title || title === 'Untitled Conversation') {
+      // Try to extract from filename patterns
       const fileName = path.basename(filePath, '.jsonl');
-      title = fileName.replace(/^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_/, '') || 'Conversation';
+      
+      // Remove timestamp patterns and use remaining text
+      const cleanFileName = fileName.replace(/^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_/, '');
+      
+      if (cleanFileName && cleanFileName.length > 0) {
+        title = cleanFileName.replace(/[-_]/g, ' ').trim();
+        title = title.charAt(0).toUpperCase() + title.slice(1);
+      } else {
+        // Last resort: use session ID if available, otherwise generic title
+        title = sessionId ? `Session ${sessionId.substring(0, 8)}...` : 'Conversation';
+      }
     }
 
     // Extract project path from file path
@@ -124,7 +222,7 @@ async function parseConversationFile(filePath: string): Promise<ClaudeConversati
     // Get file stats for last activity time
     const stats = await stat(filePath);
     
-    return {
+    const result: ClaudeConversation = {
       id: path.basename(filePath, '.jsonl'),
       title: title,
       lastActivity: stats.mtime.getTime(),
@@ -133,6 +231,13 @@ async function parseConversationFile(filePath: string): Promise<ClaudeConversati
       filePath: filePath,
       summary: generateSummary(messages)
     };
+    
+    // Only add sessionId if it exists
+    if (sessionId) {
+      result.sessionId = sessionId;
+    }
+    
+    return result;
   } catch (error) {
     console.error(`Failed to parse conversation file ${filePath}:`, error);
     return null;
@@ -183,15 +288,46 @@ export async function getDetailedConversation(conversation: ClaudeConversation):
  * Generate a summary from conversation messages
  */
 function generateSummary(messages: any[]): string {
-  const userMessages = messages.filter(msg => msg.role === 'user').slice(0, 3);
+  // Find user messages with flexible role matching
+  const userMessages = messages.filter(msg => 
+    msg.role === 'user' || msg.role === 'human' || 
+    (msg.sender && msg.sender === 'human') ||
+    (!msg.role && msg.content)
+  ).slice(0, 3);
+  
   const topics = userMessages.map(msg => {
-    const content = typeof msg.content === 'string' 
-      ? msg.content 
-      : msg.content[0]?.text || '';
+    let content = '';
     
-    const firstLine = content.split('\n')[0].trim();
+    // Handle different content formats
+    if (typeof msg.content === 'string') {
+      content = msg.content;
+    } else if (Array.isArray(msg.content)) {
+      // Handle array of content blocks
+      for (const block of msg.content) {
+        if (typeof block === 'string') {
+          content = block;
+          break;
+        } else if (block && typeof block === 'object') {
+          if (block.text && typeof block.text === 'string') {
+            content = block.text;
+            break;
+          } else if (block.content && typeof block.content === 'string') {
+            content = block.content;
+            break;
+          }
+        }
+      }
+    } else if (msg.content && typeof msg.content === 'object') {
+      if (msg.content.text) {
+        content = msg.content.text;
+      } else if (msg.content.content) {
+        content = msg.content.content;
+      }
+    }
+    
+    const firstLine = content.split('\n')[0]?.trim() || '';
     return firstLine.length > 30 ? firstLine.substring(0, 27) + '...' : firstLine;
-  });
+  }).filter(topic => topic.length > 0);
   
   return topics.length > 0 ? topics.join(' • ') : 'No summary available';
 }
