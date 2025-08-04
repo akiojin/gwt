@@ -226,13 +226,23 @@ async function parseConversationFile(filePath: string): Promise<ClaudeConversati
       if (extractedContent) {
         // Remove system prompts or meta information
         const cleanContent = extractedContent
-          .replace(/^(<.*?>|System:|Assistant:|Human:)/i, '')
+          .replace(/^(<.*?>|System:|Assistant:|Human:|User:)/i, '')  
+          .replace(/<\/[^>]+>/g, '') // Remove closing tags like </local-command-stdout>
+          .replace(/^(Result of calling|Error:|Warning:|DEBUG:|LOG:)/i, '') // Remove system messages
+          .replace(/^(Tool executed|Command executed|Output:)/i, '') // Remove tool output indicators  
+          .replace(/^\s*[-#*•]\s*/gm, '') // Remove list markers
+          .replace(/^https?:\/\/[^\s]+$/gm, '') // Remove standalone URLs
           .trim();
           
         // Extract first meaningful line
         const firstLine = cleanContent.split('\n')[0]?.trim() || '';
         
-        if (firstLine.length > 0) {
+        // Validate that the content is meaningful
+        if (firstLine.length > 5 && 
+            !firstLine.match(/^(no content|undefined|null|\(no content\))$/i) &&
+            !firstLine.includes('</') && // Avoid HTML-like content
+            !firstLine.match(/^[^a-zA-Z]*$/) // Must contain some letters
+        ) {
           title = firstLine.length > 60 ? firstLine.substring(0, 57) + '...' : firstLine;
         }
         
