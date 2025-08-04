@@ -61,7 +61,10 @@ async function selectBranchWithShortcuts(
       }
       
       if (key.name === 'up' || key.name === 'k') {
-        setSelectedIndex(Math.max(0, selectedIndex - 1));
+        // 最上部で停止（ループしない）
+        if (selectedIndex > 0) {
+          setSelectedIndex(selectedIndex - 1);
+        }
         return;
       }
       if (key.name === 'down' || key.name === 'j') {
@@ -71,7 +74,10 @@ async function selectBranchWithShortcuts(
           c.value !== '__separator__' &&
           !c.disabled
         );
-        setSelectedIndex(Math.min(selectableChoices.length - 1, selectedIndex + 1));
+        // 最下部で停止（ループしない）
+        if (selectedIndex < selectableChoices.length - 1) {
+          setSelectedIndex(selectedIndex + 1);
+        }
         return;
       }
       
@@ -535,13 +541,13 @@ export async function selectClaudeConversation(worktreePath: string): Promise<im
     }
 
     console.log('\n' + chalk.bold.cyan('Recent Claude Code Conversations'));
-    console.log(chalk.gray('Select a conversation to resume:\n'));
+    console.log(chalk.gray('Select a conversation to view details:\n'));
 
     // Get conversations for the current project
     const conversations = await getConversationsForProject(worktreePath);
     
     if (conversations.length === 0) {
-      console.log(chalk.yellow('📭 No conversations found for this project'));
+      console.log(chalk.yellow('📝 No conversations found for this project'));
       console.log(chalk.gray('   Starting a new conversation instead...'));
       return null;
     }
@@ -558,10 +564,11 @@ export async function selectClaudeConversation(worktreePath: string): Promise<im
       value: 'cancel'
     });
 
+    // First selection: choose conversation to preview
     const selectedValue = await select({
       message: '',
       choices: choices,
-      pageSize: 10
+      pageSize: 15
     });
 
     if (selectedValue === 'cancel') {
@@ -569,12 +576,166 @@ export async function selectClaudeConversation(worktreePath: string): Promise<im
     }
 
     const selectedIndex = parseInt(selectedValue);
-    return conversations[selectedIndex] || null;
+    const selectedConversation = conversations[selectedIndex];
+    
+    if (!selectedConversation) {
+      return null;
+    }
+
+    // Second step: display conversation messages and get confirmation
+    const shouldProceed = await displayConversationMessages(selectedConversation);
+    
+    if (shouldProceed) {
+      console.log(chalk.green(`✨ Selected: ${selectedConversation.title}`));
+      return selectedConversation;
+    } else {
+      console.log(chalk.gray('Selection cancelled'));
+      // Recursively call to go back to the conversation list
+      return await selectClaudeConversation(worktreePath);
+    }
   } catch (error) {
     console.error(chalk.red('Failed to load Claude Code conversations:'), error);
     console.log(chalk.gray('Using standard Claude Code resume functionality instead...'));
     return null;
   }
+}
+
+/**
+ * Display conversation messages with scrollable interface
+ */
+export async function displayConversationMessages(conversation: import('../claude-history.js').ClaudeConversation): Promise<boolean> {
+  try {
+    const { getDetailedConversation } = await import('../claude-history.js');
+    const detailedConversation = await getDetailedConversation(conversation);
+    
+    if (!detailedConversation || !detailedConversation.messages) {
+      console.log(chalk.red('Unable to load conversation messages'));
+      return false;
+    }
+
+    console.clear();
+    console.log(chalk.bold.cyan(`📖 ${conversation.title}`));
+    console.log(chalk.gray(`${conversation.messageCount} messages • ${formatTimeAgo(conversation.lastActivity)}`));
+    console.log(chalk.gray('─'.repeat(80)));
+    console.log();
+
+    // Create scrollable message viewer
+    return await createMessageViewer(detailedConversation.messages);
+  } catch (error) {
+    console.error(chalk.red('Failed to display conversation messages:'), error);
+    return false;
+  }
+}
+
+/**
+ * Create scrollable message viewer component
+ */
+async function createMessageViewer(messages: import('../claude-history.js').ClaudeMessage[]): Promise<boolean> {
+  const { createPrompt, useState, useKeypress, isEnterKey } = await import('@inquirer/prompts');
+  
+  const messageViewer = createPrompt<boolean, {}>((config, done) => {
+    const [currentIndex, setCurrentIndex] = useState(Math.max(0, messages.length - 5)); // Start near the end
+    const [status, setStatus] = useState<'viewing' | 'done'>('viewing');
+    
+    const pageSize = 10;
+    
+    useKeypress((key) => {
+      if (key.name === 'q' || key.name === 'escape') {
+        setStatus('done');
+        done(false); // Cancel
+        return;
+      }
+      
+      if (isEnterKey(key) || key.name === 'space') {
+        setStatus('done');
+        done(true); // Confirm selection
+        return;
+      }
+      
+      if (key.name === 'up' || key.name === 'k') {
+        if (currentIndex > 0) {
+          setCurrentIndex(currentIndex - 1);
+        }
+        return;
+      }
+      
+      if (key.name === 'down' || key.name === 'j') {
+        if (currentIndex < Math.max(0, messages.length - pageSize)) {
+          setCurrentIndex(currentIndex + 1);
+        }
+        return;
+      }
+      
+      if (key.name === 'pageup') {
+        setCurrentIndex(Math.max(0, currentIndex - pageSize));
+        return;
+      }
+      
+      if (key.name === 'pagedown') {
+        setCurrentIndex(Math.min(Math.max(0, messages.length - pageSize), currentIndex + pageSize));
+        return;
+      }
+      
+      if (key.name === 'home') {
+        setCurrentIndex(0);
+        return;
+      }
+      
+      if (key.name === 'end') {
+        setCurrentIndex(Math.max(0, messages.length - pageSize));
+        return;
+      }
+    });
+    
+    if (status === 'done') {
+      return '';
+    }
+    
+    // Display messages
+    const startIndex = currentIndex;
+    const endIndex = Math.min(messages.length, startIndex + pageSize);
+    const visibleMessages = messages.slice(startIndex, endIndex);
+    
+    let output = '';
+    
+    visibleMessages.forEach((message, index) => {
+      const globalIndex = startIndex + index;
+      const isUser = message.role === 'user';
+      const icon = isUser ? '👤' : '🤖';
+      const roleColor = isUser ? chalk.blue : chalk.green;
+      const role = isUser ? 'User' : 'Claude';
+      
+      // Format message content
+      let content = '';
+      if (typeof message.content === 'string') {
+        content = message.content;
+      } else if (Array.isArray(message.content)) {
+        content = message.content.map(item => item.text || '').join('\\n');
+      }
+      
+      // Truncate very long messages for readability
+      const maxLength = 400;
+      if (content.length > maxLength) {
+        content = content.substring(0, maxLength) + '...\\n' + chalk.gray('[Message truncated]');
+      }
+      
+      output += `${icon} ${roleColor.bold(role)}${globalIndex === messages.length - 1 ? chalk.yellow(' (Latest)') : ''}\\n`;
+      output += `${content}\\n`;
+      output += chalk.gray('─'.repeat(60)) + '\\n\\n';
+    });
+    
+    // Navigation info
+    const currentPos = startIndex + 1;
+    const endPos = endIndex;
+    const total = messages.length;
+    
+    output += chalk.gray(`Showing ${currentPos}-${endPos} of ${total} messages\\n`);
+    output += chalk.gray('Navigation: ↑↓ scroll, PgUp/PgDown jump, Home/End, Enter to select, q to cancel');
+    
+    return output;
+  });
+
+  return await messageViewer({});
 }
 
 /**
@@ -602,18 +763,25 @@ function categorizeConversationsByActivity(
   conversations: import('../claude-history.js').ClaudeConversation[]
 ): CategorizedConversation[] {
   const now = Date.now();
-  const oneDay = 24 * 60 * 60 * 1000;
+  const oneHour = 60 * 60 * 1000;
+  const oneDay = 24 * oneHour;
   const oneWeek = 7 * oneDay;
 
   return conversations.map((conversation, index) => {
     const age = now - conversation.lastActivity;
     
     let category: ConversationCategory;
-    if (age < oneDay) {
+    if (age < oneHour) {
       category = {
         type: 'recent',
-        title: '🔥 Recent (within 24 hours)',
+        title: '🔥 Very Recent (within 1 hour)',
         emoji: '🔥'
+      };
+    } else if (age < oneDay) {
+      category = {
+        type: 'recent',
+        title: '⚡ Recent (within 24 hours)',
+        emoji: '⚡'
       };
     } else if (age < oneWeek) {
       category = {
@@ -634,6 +802,14 @@ function categorizeConversationsByActivity(
       category,
       index
     };
+  }).sort((a, b) => {
+    // First sort by category priority (recent -> this-week -> older)
+    const categoryOrder = { 'recent': 0, 'this-week': 1, 'older': 2 };
+    const categoryDiff = categoryOrder[a.category.type] - categoryOrder[b.category.type];
+    if (categoryDiff !== 0) return categoryDiff;
+    
+    // Within each category, sort by most recent first
+    return b.conversation.lastActivity - a.conversation.lastActivity;
   });
 }
 
@@ -717,20 +893,41 @@ function formatConversationDisplay(
     icon = '🧪';
   }
   
-  // Format: "  💬 Conversation title               (X messages, time ago)"
-  const title = conversation.title.length > 45 ? 
-    conversation.title.substring(0, 42) + '...' : 
+  // Format: "  💬 Conversation title (X messages, time ago)"
+  const title = conversation.title.length > 40 ? 
+    conversation.title.substring(0, 37) + '...' : 
     conversation.title;
   
-  const padding = Math.max(0, 45 - title.length);
   const metadata = `(${messageCount} message${messageCount !== 1 ? 's' : ''}, ${chalk.gray(timeAgo)})`;
   
-  const display = `  ${icon} ${chalk.cyan(title)}${' '.repeat(padding)} ${metadata}`;
+  // Create main display line
+  const display = `  ${icon} ${chalk.cyan(title)} ${metadata}`;
+  
+  // Enhanced description with summary if available
+  let description = '';
+  if (conversation.summary && conversation.summary.trim()) {
+    description = conversation.summary.length > 80 ? 
+      conversation.summary.substring(0, 77) + '...' : 
+      conversation.summary;
+  } else {
+    // Fallback description based on title analysis
+    if (lowerTitle.includes('bug') || lowerTitle.includes('fix')) {
+      description = 'Bug fix or error resolution';
+    } else if (lowerTitle.includes('feature') || lowerTitle.includes('implement')) {
+      description = 'Feature development or implementation';
+    } else if (lowerTitle.includes('doc') || lowerTitle.includes('readme')) {
+      description = 'Documentation or README updates';
+    } else if (lowerTitle.includes('test')) {
+      description = 'Testing and test improvements';
+    } else {
+      description = `${messageCount} messages exchanged ${timeAgo}`;
+    }
+  }
   
   return {
     name: display,
     value: index.toString(),
-    description: conversation.summary || ''
+    description: description
   };
 }
 
@@ -775,13 +972,27 @@ function formatTimeAgo(timestamp: number): string {
   const minutes = Math.floor(diff / (1000 * 60));
   const hours = Math.floor(diff / (1000 * 60 * 60));
   const days = Math.floor(diff / (1000 * 60 * 60 * 24));
+  const weeks = Math.floor(days / 7);
+  const months = Math.floor(days / 30);
   
-  if (minutes < 60) {
+  if (minutes < 1) {
+    return 'just now';
+  } else if (minutes < 60) {
     return `${minutes}m ago`;
   } else if (hours < 24) {
     return `${hours}h ago`;
+  } else if (days === 1) {
+    return '1 day ago';
+  } else if (days < 7) {
+    return `${days} days ago`;
+  } else if (weeks === 1) {
+    return '1 week ago';
+  } else if (weeks < 4) {
+    return `${weeks} weeks ago`;
+  } else if (months === 1) {
+    return '1 month ago';
   } else {
-    return `${days}d ago`;
+    return `${months} months ago`;
   }
 }
 

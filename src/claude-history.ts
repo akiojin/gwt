@@ -16,6 +16,22 @@ export interface ClaudeConversation {
 }
 
 /**
+ * Message structure for conversation details
+ */
+export interface ClaudeMessage {
+  role: 'user' | 'assistant';
+  content: string | Array<{ text: string; type?: string }>;
+  timestamp?: number;
+}
+
+/**
+ * Detailed conversation with full message history
+ */
+export interface DetailedClaudeConversation extends ClaudeConversation {
+  messages: ClaudeMessage[];
+}
+
+/**
  * Claude Code history manager error
  */
 export class ClaudeHistoryError extends Error {
@@ -119,6 +135,46 @@ async function parseConversationFile(filePath: string): Promise<ClaudeConversati
     };
   } catch (error) {
     console.error(`Failed to parse conversation file ${filePath}:`, error);
+    return null;
+  }
+}
+
+/**
+ * Get detailed conversation with all messages
+ */
+export async function getDetailedConversation(conversation: ClaudeConversation): Promise<DetailedClaudeConversation | null> {
+  try {
+    const content = await readFile(conversation.filePath, 'utf-8');
+    const lines = content.trim().split('\n').filter(line => line.trim());
+    
+    if (lines.length === 0) {
+      return null;
+    }
+
+    // Parse all messages
+    const messages: ClaudeMessage[] = lines.map(line => {
+      try {
+        const parsed = JSON.parse(line);
+        return {
+          role: parsed.role || 'user',
+          content: parsed.content || '',
+          timestamp: parsed.timestamp || Date.now()
+        };
+      } catch {
+        return null;
+      }
+    }).filter(Boolean) as ClaudeMessage[];
+
+    if (messages.length === 0) {
+      return null;
+    }
+
+    return {
+      ...conversation,
+      messages
+    };
+  } catch (error) {
+    console.error(`Failed to get detailed conversation:`, error);
     return null;
   }
 }
