@@ -243,6 +243,112 @@ export async function hasUnpushedCommits(worktreePath: string, branch: string): 
   }
 }
 
+/**
+ * Get the latest commit message for a specific branch in a worktree
+ */
+export async function getLatestCommitMessage(worktreePath: string, branch: string): Promise<string | null> {
+  try {
+    const { stdout } = await execa('git', ['log', '-1', '--pretty=format:%s', branch], { cwd: worktreePath });
+    return stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Get the count of unpushed commits
+ */
+export async function getUnpushedCommitsCount(worktreePath: string, branch: string): Promise<number> {
+  try {
+    const { stdout } = await execa('git', ['rev-list', '--count', `origin/${branch}..${branch}`], { cwd: worktreePath });
+    return parseInt(stdout.trim()) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Get the count of uncommitted changes (staged + unstaged)
+ */
+export async function getUncommittedChangesCount(worktreePath: string): Promise<number> {
+  try {
+    const { stdout } = await execa('git', ['status', '--porcelain'], { cwd: worktreePath });
+    return stdout.trim().split('\n').filter(line => line.trim()).length;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Enhanced session information for better display
+ */
+export interface EnhancedSessionInfo {
+  hasUncommittedChanges: boolean;
+  uncommittedChangesCount: number;
+  hasUnpushedCommits: boolean;
+  unpushedCommitsCount: number;
+  latestCommitMessage: string | null;
+  branchType: 'feature' | 'bugfix' | 'hotfix' | 'develop' | 'main' | 'master' | 'other';
+}
+
+/**
+ * Get enhanced session information for display
+ */
+export async function getEnhancedSessionInfo(worktreePath: string, branch: string): Promise<EnhancedSessionInfo> {
+  try {
+    const [
+      hasUncommitted,
+      uncommittedCount,
+      hasUnpushed,
+      unpushedCount,
+      latestCommit
+    ] = await Promise.all([
+      hasUncommittedChanges(worktreePath),
+      getUncommittedChangesCount(worktreePath),
+      hasUnpushedCommits(worktreePath, branch),
+      getUnpushedCommitsCount(worktreePath, branch),
+      getLatestCommitMessage(worktreePath, branch)
+    ]);
+
+    // Determine branch type based on branch name
+    let branchType: EnhancedSessionInfo['branchType'] = 'other';
+    const lowerBranch = branch.toLowerCase();
+    
+    if (lowerBranch.startsWith('feature/') || lowerBranch.startsWith('feat/')) {
+      branchType = 'feature';
+    } else if (lowerBranch.startsWith('bugfix/') || lowerBranch.startsWith('bug/') || lowerBranch.startsWith('fix/')) {
+      branchType = 'bugfix';
+    } else if (lowerBranch.startsWith('hotfix/')) {
+      branchType = 'hotfix';
+    } else if (lowerBranch === 'develop' || lowerBranch === 'development') {
+      branchType = 'develop';
+    } else if (lowerBranch === 'main') {
+      branchType = 'main';
+    } else if (lowerBranch === 'master') {
+      branchType = 'master';
+    }
+
+    return {
+      hasUncommittedChanges: hasUncommitted,
+      uncommittedChangesCount: uncommittedCount,
+      hasUnpushedCommits: hasUnpushed,
+      unpushedCommitsCount: unpushedCount,
+      latestCommitMessage: latestCommit,
+      branchType
+    };
+  } catch (error) {
+    // Return safe defaults if any operation fails
+    return {
+      hasUncommittedChanges: false,
+      uncommittedChangesCount: 0,
+      hasUnpushedCommits: false,
+      unpushedCommitsCount: 0,
+      latestCommitMessage: null,
+      branchType: 'other'
+    };
+  }
+}
+
 
 export async function fetchAllRemotes(): Promise<void> {
   try {
