@@ -433,59 +433,91 @@ export async function selectSession(sessions: SessionData[]): Promise<SessionDat
     return null;
   }
 
-  console.log('\n┌─────────────────────────────────────────────────────────────────────────────────┐');
-  console.log('│                            📋 Resume Claude Code Session                        │');
-  console.log('└─────────────────────────────────────────────────────────────────────────────────┘\n');
+  console.log('\n' + chalk.bold.cyan('Recent Claude Code Sessions'));
+  console.log(chalk.gray('Select a session to resume:\n'));
 
-  // Collect enhanced session information
-  const enhancedChoices = await Promise.all(
-    sessions.map(async (session, index) => {
-      if (!session.lastWorktreePath || !session.lastBranch) {
-        // Fallback to simple display for incomplete sessions
-        const repo = session.repositoryRoot.split('/').pop() || 'unknown';
-        const timeAgo = formatTimeAgo(session.timestamp);
-        const branch = session.lastBranch || 'unknown';
-        
-        return {
-          name: `${chalk.cyan(repo)} - ${chalk.green(branch)} ${chalk.gray(`(${timeAgo})`)}`,
-          value: index.toString(),
-          description: session.lastWorktreePath || ''
-        };
-      }
+  // Collect enhanced session information with categorization
+  const categorizedSessions: CategorizedSession[] = [];
+  
+  for (let index = 0; index < sessions.length; index++) {
+    const session = sessions[index];
+    if (!session) continue;
+    
+    if (!session.lastWorktreePath || !session.lastBranch) {
+      // Create a fallback category for incomplete sessions
+      const fallbackInfo: import('../git.js').EnhancedSessionInfo = {
+        hasUncommittedChanges: false,
+        uncommittedChangesCount: 0,
+        hasUnpushedCommits: false,
+        unpushedCommitsCount: 0,
+        latestCommitMessage: null,
+        branchType: 'other'
+      };
+      
+      categorizedSessions.push({
+        session,
+        sessionInfo: fallbackInfo,
+        category: categorizeSession(fallbackInfo),
+        index
+      });
+      continue;
+    }
 
-      try {
-        const { getEnhancedSessionInfo } = await import('../git.js');
-        const sessionInfo = await getEnhancedSessionInfo(session.lastWorktreePath, session.lastBranch);
-        return formatEnhancedSessionDisplay(session, sessionInfo, index);
-      } catch {
-        // Fallback to simple display if enhanced info fails
-        const repo = session.repositoryRoot.split('/').pop() || 'unknown';
-        const timeAgo = formatTimeAgo(session.timestamp);
-        const branch = session.lastBranch || 'unknown';
-        
-        return {
-          name: `${chalk.cyan(repo)} - ${chalk.green(branch)} ${chalk.gray(`(${timeAgo})`)} ${chalk.red('(info unavailable)')}`,
-          value: index.toString(),
-          description: session.lastWorktreePath || ''
-        };
-      }
-    })
-  );
+    try {
+      const { getEnhancedSessionInfo } = await import('../git.js');
+      const sessionInfo = await getEnhancedSessionInfo(session.lastWorktreePath, session.lastBranch);
+      const category = categorizeSession(sessionInfo);
+      
+      categorizedSessions.push({
+        session,
+        sessionInfo,
+        category,
+        index
+      });
+    } catch {
+      // Fallback for sessions where enhanced info is not available
+      const fallbackInfo: import('../git.js').EnhancedSessionInfo = {
+        hasUncommittedChanges: false,
+        uncommittedChangesCount: 0,
+        hasUnpushedCommits: false,
+        unpushedCommitsCount: 0,
+        latestCommitMessage: null,
+        branchType: 'other'
+      };
+      
+      categorizedSessions.push({
+        session,
+        sessionInfo: fallbackInfo,
+        category: categorizeSession(fallbackInfo),
+        index
+      });
+    }
+  }
+
+  // Group and sort sessions
+  const groupedSessions = groupAndSortSessions(categorizedSessions);
+  
+  // Create choices with grouping
+  const groupedChoices = createGroupedChoices(groupedSessions);
+  
+  // Add cancel option
+  groupedChoices.push({
+    name: chalk.gray('← Cancel'),
+    value: 'cancel'
+  });
 
   const selectedIndex = await select({
-    message: 'Select a session to resume:',
-    choices: [
-      ...enhancedChoices,
-      { name: chalk.gray('← Cancel'), value: 'cancel' }
-    ],
-    pageSize: 8
+    message: '',
+    choices: groupedChoices,
+    pageSize: 12
   });
 
   if (selectedIndex === 'cancel') {
     return null;
   }
 
-  return sessions[parseInt(selectedIndex)] || null;
+  const index = parseInt(selectedIndex);
+  return sessions[index] ?? null;
 }
 
 export async function selectClaudeExecutionMode(): Promise<{
@@ -539,20 +571,7 @@ function formatTimeAgo(timestamp: number): string {
   }
 }
 
-/**
- * Get branch icon based on branch type
- */
-function getBranchIcon(branchType: string): string {
-  switch (branchType) {
-    case 'feature': return '🌿';
-    case 'bugfix': return '🐛';
-    case 'hotfix': return '🔥';
-    case 'develop': return '🌱';
-    case 'main':
-    case 'master': return '🎯';
-    default: return '📝';
-  }
-}
+
 
 /**
  * Get project icon based on repository name
@@ -571,36 +590,63 @@ function getProjectIcon(repoName: string): string {
   return '🚀';
 }
 
+
+
+
 /**
- * Get status display with icon and color
+ * Session status categories for grouping
  */
-function getStatusDisplay(sessionInfo: import('../git.js').EnhancedSessionInfo): { text: string; color: string } {
+interface SessionCategory {
+  type: 'active' | 'ready' | 'needs-attention';
+  title: string;
+  emoji: string;
+  description: string;
+}
+
+/**
+ * Enhanced session with category information
+ */
+interface CategorizedSession {
+  session: SessionData;
+  sessionInfo: import('../git.js').EnhancedSessionInfo;
+  category: SessionCategory;
+  index: number;
+}
+
+/**
+ * Determine session category based on git status
+ */
+function categorizeSession(sessionInfo: import('../git.js').EnhancedSessionInfo): SessionCategory {
   if (sessionInfo.hasUncommittedChanges) {
-    const count = sessionInfo.uncommittedChangesCount;
     return {
-      text: `📝 ${count} uncommitted change${count !== 1 ? 's' : ''}`,
-      color: 'yellow'
+      type: 'active',
+      title: '🔥 Active (uncommitted changes)',
+      emoji: '🔥',
+      description: 'Sessions with ongoing work'
     };
   }
   
   if (sessionInfo.hasUnpushedCommits) {
-    const count = sessionInfo.unpushedCommitsCount;
     return {
-      text: `⚠️  Needs push (${count} commit${count !== 1 ? 's' : ''})`,
-      color: 'yellow'
+      type: 'needs-attention', 
+      title: '⚠️ Needs attention',
+      emoji: '⚠️',
+      description: 'Sessions with unpushed commits'
     };
   }
   
   return {
-    text: '✅ All changes committed',
-    color: 'green'
+    type: 'ready',
+    title: '✅ Ready to continue', 
+    emoji: '✅',
+    description: 'Clean sessions ready to resume'
   };
 }
 
 /**
- * Format enhanced session display with better visual layout
+ * Format session in new compact style
  */
-function formatEnhancedSessionDisplay(
+function formatCompactSessionDisplay(
   session: SessionData, 
   sessionInfo: import('../git.js').EnhancedSessionInfo,
   index: number
@@ -610,37 +656,102 @@ function formatEnhancedSessionDisplay(
   const branch = session.lastBranch || 'unknown';
   
   const projectIcon = getProjectIcon(repo);
-  const branchIcon = getBranchIcon(sessionInfo.branchType);
-  const statusDisplay = getStatusDisplay(sessionInfo);
   
-  // Create commit message display (truncate if too long)
-  const commitMsg = sessionInfo.latestCommitMessage || 'No commit message';
-  const truncatedCommit = commitMsg.length > 50 ? commitMsg.substring(0, 47) + '...' : commitMsg;
-  
-  // Format status text with proper colors
-  let coloredStatusText: string;
-  if (statusDisplay.color === 'yellow') {
-    coloredStatusText = chalk.yellow(statusDisplay.text);
-  } else if (statusDisplay.color === 'green') {
-    coloredStatusText = chalk.green(statusDisplay.text);
-  } else {
-    coloredStatusText = chalk.red(statusDisplay.text);
+  // Create status info in parentheses
+  let statusInfo = '';
+  if (sessionInfo.hasUncommittedChanges) {
+    const count = sessionInfo.uncommittedChangesCount;
+    statusInfo = `📝 ${count} file${count !== 1 ? 's' : ''}`;
+  } else if (sessionInfo.hasUnpushedCommits) {
+    const count = sessionInfo.unpushedCommitsCount;
+    statusInfo = `🔄 ${count} commit${count !== 1 ? 's' : ''}`;
   }
   
-  // Format the display with box-like structure
-  const topLine = `┌─ ${projectIcon} ${chalk.bold(repo)} ${' '.repeat(Math.max(0, 60 - repo.length))} ${chalk.gray(timeAgo)} ─┐`;
-  const branchLine = `│ ${branchIcon} ${chalk.green(branch)} ${' '.repeat(Math.max(0, 35 - branch.length))} ${coloredStatusText} ${' '.repeat(Math.max(0, 15))} │`;
-  const commitLine = `│ 💬 ${chalk.gray(`"${truncatedCommit}"`)} ${' '.repeat(Math.max(0, 65 - truncatedCommit.length))} │`;
-  const pathLine = `│ 📁 ${chalk.dim(session.lastWorktreePath || '')} ${' '.repeat(Math.max(0, 65 - (session.lastWorktreePath || '').length))} │`;
-  const bottomLine = `└${'─'.repeat(77)}┘`;
+  // Format: "  🚀 project-name → branch-name     (status, time)"
+  const projectBranch = `${chalk.cyan(repo)} → ${chalk.green(branch)}`;
+  const padding = Math.max(0, 35 - repo.length - branch.length);
+  const timeAndStatus = statusInfo ? 
+    `(${statusInfo}, ${chalk.gray(timeAgo)})` : 
+    `(${chalk.gray(timeAgo)})`;
   
-  const fullDisplay = [topLine, branchLine, commitLine, pathLine, bottomLine].join('\n');
+  const display = `  ${projectIcon} ${projectBranch}${' '.repeat(padding)} ${timeAndStatus}`;
   
   return {
-    name: fullDisplay,
+    name: display,
     value: index.toString(),
-    description: ''
+    description: session.lastWorktreePath || ''
   };
+}
+
+/**
+ * Group and sort sessions by category and priority
+ */
+function groupAndSortSessions(categorizedSessions: CategorizedSession[]): Map<string, CategorizedSession[]> {
+  const groups = new Map<string, CategorizedSession[]>();
+  
+  // Initialize groups
+  groups.set('active', []);
+  groups.set('ready', []);
+  groups.set('needs-attention', []);
+  
+  // Group sessions by category
+  for (const session of categorizedSessions) {
+    const group = groups.get(session.category.type) || [];
+    group.push(session);
+    groups.set(session.category.type, group);
+  }
+  
+  // Sort within each group by timestamp (most recent first)
+  for (const [key, sessions] of groups.entries()) {
+    sessions.sort((a, b) => b.session.timestamp - a.session.timestamp);
+    groups.set(key, sessions);
+  }
+  
+  return groups;
+}
+
+/**
+ * Create grouped choices for the prompt
+ */
+function createGroupedChoices(groupedSessions: Map<string, CategorizedSession[]>): Array<{ name: string; value: string; description?: string; disabled?: boolean }> {
+  const choices: Array<{ name: string; value: string; description?: string; disabled?: boolean }> = [];
+  
+  // Define group order for display
+  const groupOrder = ['active', 'needs-attention', 'ready'] as const;
+  
+  for (const groupType of groupOrder) {
+    const sessions = groupedSessions.get(groupType) || [];
+    
+    if (sessions.length === 0) continue;
+    
+    // Add group header
+    const category = sessions[0]?.category;
+    if (!category) continue;
+    
+    choices.push({
+      name: `
+${category.title}`,
+      value: `__header_${groupType}__`,
+      disabled: true
+    });
+    
+    // Add sessions in this group
+    for (const { session, sessionInfo, index } of sessions) {
+      const formatted = formatCompactSessionDisplay(session, sessionInfo, index);
+      choices.push(formatted);
+    }
+  }
+  
+  // Add a separator before cancel option
+  if (choices.length > 0) {
+    choices.push({
+      name: '',
+      value: '__separator__',
+      disabled: true
+    });
+  }
+  
+  return choices;
 }
 
 
