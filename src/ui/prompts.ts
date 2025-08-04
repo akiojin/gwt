@@ -256,46 +256,47 @@ export async function selectWorktreeForManagement(worktrees: Array<{ branch: str
         disabled: isInvalid ? 'Cannot access this worktree' : false
       };
     }),
-    {
-      name: '← Back to main menu',
-      value: 'back',
-      description: 'Return to main menu'
-    }
+
   ];
 
-  return await select({
-    message: 'Select worktree to manage:',
-    choices,
-    pageSize: 15
-  });
+  try {
+    return await select({
+      message: 'Select worktree to manage (q to go back):',
+      choices,
+      pageSize: 15
+    });
+  } catch {
+    // Handle q key - return 'back' to maintain compatibility
+    return 'back';
+  }
 }
 
 export async function selectWorktreeAction(): Promise<'open' | 'remove' | 'remove-branch' | 'back'> {
-  return await select({
-    message: 'What would you like to do?',
-    choices: [
-      {
-        name: '📂 Open in Claude Code',
-        value: 'open',
-        description: 'Launch Claude Code in this worktree'
-      },
-      {
-        name: '🗑️  Remove worktree',
-        value: 'remove',
-        description: 'Delete this worktree only'
-      },
-      {
-        name: '🔥 Remove worktree and branch',
-        value: 'remove-branch',
-        description: 'Delete both worktree and branch'
-      },
-      {
-        name: '← Back',
-        value: 'back',
-        description: 'Return to worktree list'
-      }
-    ]
-  });
+  try {
+    return await select({
+      message: 'What would you like to do (q to go back)?',
+      choices: [
+        {
+          name: '📂 Open in Claude Code',
+          value: 'open',
+          description: 'Launch Claude Code in this worktree'
+        },
+        {
+          name: '🗑️  Remove worktree',
+          value: 'remove',
+          description: 'Delete this worktree only'
+        },
+        {
+          name: '🔥 Remove worktree and branch',
+          value: 'remove-branch',
+          description: 'Delete both worktree and branch'
+        }
+      ]
+    });
+  } catch {
+    // Handle q key - return 'back' to maintain compatibility
+    return 'back';
+  }
 }
 
 export async function confirmBranchRemoval(branchName: string): Promise<boolean> {
@@ -506,19 +507,17 @@ export async function selectSession(sessions: SessionData[]): Promise<SessionDat
   // Create choices with grouping
   const groupedChoices = createGroupedChoices(groupedSessions);
   
-  // Add cancel option
-  groupedChoices.push({
-    name: chalk.gray('← Cancel'),
-    value: 'cancel'
-  });
+  // No cancel option - use q key to go back
 
-  const selectedIndex = await select({
-    message: '',
-    choices: groupedChoices,
-    pageSize: 12
-  });
-
-  if (selectedIndex === 'cancel') {
+  let selectedIndex;
+  try {
+    selectedIndex = await select({
+      message: 'Select session (q to go back):',
+      choices: groupedChoices,
+      pageSize: 12
+    });
+  } catch {
+    // Handle q key - user wants to go back
     return null;
   }
 
@@ -558,20 +557,18 @@ export async function selectClaudeConversation(worktreePath: string): Promise<im
     // Create grouped choices
     const choices = createConversationChoices(categorizedConversations);
     
-    // Add cancel option
-    choices.push({
-      name: chalk.gray('← Cancel'),
-      value: 'cancel'
-    });
+    // No cancel option - use q key to go back
 
     // Single selection prompt
-    const selectedValue = await select({
-      message: 'Choose conversation to resume:',
-      choices: choices,
-      pageSize: 15
-    });
-
-    if (selectedValue === 'cancel') {
+    let selectedValue;
+    try {
+      selectedValue = await select({
+        message: 'Choose conversation to resume (q to go back):',
+        choices: choices,
+        pageSize: 15
+      });
+    } catch {
+      // Handle q key - user wants to go back
       return null;
     }
 
@@ -585,9 +582,9 @@ export async function selectClaudeConversation(worktreePath: string): Promise<im
     // Clear screen before showing preview
     console.clear();
     
-    // Show preview before final confirmation
+    // Show enhanced preview
     console.log(chalk.bold.cyan('📖 Conversation Preview'));
-    console.log(chalk.gray('─'.repeat(80)));
+    console.log(chalk.gray('─'.repeat(Math.min(80, process.stdout.columns || 80))));
     console.log();
     
     const { getDetailedConversation } = await import('../claude-history.js');
@@ -597,23 +594,64 @@ export async function selectClaudeConversation(worktreePath: string): Promise<im
     }
     
     console.log();
-    console.log(chalk.gray('─'.repeat(80)));
+    console.log(chalk.gray('─'.repeat(Math.min(80, process.stdout.columns || 80))));
 
-    // Final confirmation
-    const shouldResume = await confirm({
-      message: `Resume "${selectedConversation.title}"?`,
-      default: true
-    });
-    
-    if (shouldResume) {
-      return selectedConversation;
-    } else {
-      // Clear screen before going back to selection
+    // Simplified action selection - use q to go back
+    let action;
+    try {
+      action = await select({
+        message: 'What would you like to do (q to go back)?',
+        choices: [
+          {
+            name: chalk.green(`✅ Resume "${selectedConversation.title}"`),
+            value: 'resume'
+          },
+          {
+            name: chalk.blue('📋 View more messages'),
+            value: 'view_more'
+          }
+        ]
+      });
+    } catch {
+      // Handle q key - go back to conversation selection
       console.clear();
       return await selectClaudeConversation(worktreePath);
     }
-  } catch (error) {
-    console.error(chalk.red('Failed to load Claude Code conversations:'), error);
+    
+    switch (action) {
+      case 'resume':
+        return selectedConversation;
+      case 'view_more': {
+        // Show extended preview
+        console.clear();
+        console.log(chalk.bold.cyan('📖 Extended Conversation History'));
+        console.log(chalk.gray('─'.repeat(Math.min(80, process.stdout.columns || 80))));
+        console.log();
+        
+        if (detailed) {
+          displayExtendedConversationPreview(detailed.messages);
+        }
+        
+        console.log();
+        console.log(chalk.gray('─'.repeat(Math.min(80, process.stdout.columns || 80))));
+        
+        const resumeAfterExtended = await confirm({
+          message: `Resume "${selectedConversation.title}"?`,
+          default: true
+        });
+        
+        if (resumeAfterExtended) {
+          return selectedConversation;
+        } else {
+          console.clear();
+          return await selectClaudeConversation(worktreePath);
+        }
+      }
+      default:
+        return null;
+    }
+  } catch {
+    console.error(chalk.red('Failed to load Claude Code conversations:'));
     console.log(chalk.gray('Using standard Claude Code resume functionality instead...'));
     return null;
   }
@@ -640,8 +678,8 @@ export async function displayConversationMessages(conversation: import('../claud
 
     // Create scrollable message viewer
     return await createMessageViewer(detailedConversation.messages);
-  } catch (error) {
-    console.error(chalk.red('Failed to display conversation messages:'), error);
+  } catch {
+    console.error(chalk.red('Failed to display conversation messages:'));
     return false;
   }
 }
@@ -660,8 +698,8 @@ async function createMessageViewer(messages: import('../claude-history.js').Clau
   
   recentMessages.forEach((message) => {
     const isUser = message.role === 'user';
-    const roleLabel = isUser ? 'User' : 'Assistant';
-    const roleColor = isUser ? chalk.blue : chalk.green;
+    const roleSymbol = isUser ? '>' : '⏺';
+    const roleColor = isUser ? chalk.blue : chalk.cyan;
     
     // Format message content
     let content = '';
@@ -684,17 +722,18 @@ async function createMessageViewer(messages: import('../claude-history.js').Clau
       displayContent = content.substring(0, 57) + '...';
     }
     
-    // Format the line like ccresume (without time)
-    const roleDisplay = roleColor(`[${roleLabel}]`);
+    // Format like Claude Code
+    const roleDisplay = roleColor(roleSymbol);
     
-    let line = roleDisplay;
+    // Display the message with Claude Code formatting
     if (toolInfo) {
-      line += ` ${toolInfo}`;
-    } else if (displayContent) {
-      line += ` ${displayContent}`;
+      console.log(`${roleDisplay} ${toolInfo}`);
+    } else if (displayContent.trim()) {
+      console.log(`${roleDisplay} ${displayContent}`);
     }
     
-    console.log(line);
+    // Add spacing between messages like Claude Code
+    console.log();
   });
   
   if (messages.length > 10) {
@@ -717,13 +756,21 @@ async function createMessageViewer(messages: import('../claude-history.js').Clau
  * Display conversation preview (ccresume style)
  */
 function displayConversationPreview(messages: import('../claude-history.js').ClaudeMessage[]): void {
-  // Show last 5 messages for preview
-  const recentMessages = messages.slice(-5);
+  // Get terminal height and calculate available space for messages
+  const terminalHeight = process.stdout.rows || 24; // Default to 24 if unavailable
+  const headerLines = 3; // Title + separator + empty line
+  const footerLines = 3; // Empty line + separator + confirmation prompt
+  const availableLines = Math.max(10, terminalHeight - headerLines - footerLines);
+  
+  // Show more messages based on available terminal space
+  // Start with recent messages and work backwards
+  const messagesToShow = Math.min(messages.length, Math.floor(availableLines / 2)); // Estimate 2 lines per message on average
+  const recentMessages = messages.slice(-messagesToShow);
   
   recentMessages.forEach((message) => {
     const isUser = message.role === 'user';
-    const roleLabel = isUser ? 'User' : 'Assistant';
-    const roleColor = isUser ? chalk.blue : chalk.green;
+    const roleSymbol = isUser ? '>' : '⏺';
+    const roleColor = isUser ? chalk.blue : chalk.cyan;
     
     // Format message content
     let content = '';
@@ -739,18 +786,140 @@ function displayConversationPreview(messages: import('../claude-history.js').Cla
     if (content.startsWith('🔧 Used tool:')) {
       const toolName = content.replace('🔧 Used tool: ', '');
       displayContent = chalk.yellow(`[Tool: ${toolName}]`);
-    } else if (content.length > 70) {
-      // Truncate long messages for preview
-      displayContent = content.substring(0, 67) + '...';
+    } else {
+      // Don't truncate as aggressively - use more terminal width
+      const terminalWidth = process.stdout.columns || 80;
+      const maxContentWidth = terminalWidth - 15; // Account for role label and spacing
+      
+      if (content.length > maxContentWidth) {
+        // For long content, show more but still truncate if needed
+        displayContent = content.substring(0, maxContentWidth - 3) + '...';
+      } else {
+        displayContent = content;
+      }
+      
+      // Handle multi-line content - show first few lines
+      const lines = displayContent.split('\n');
+      if (lines.length > 3) {
+        displayContent = lines.slice(0, 3).join('\n') + '\n' + chalk.gray(`... (${lines.length - 3} more lines)`);
+      }
     }
     
-    // Format like ccresume
-    const roleDisplay = roleColor(`[${roleLabel}]`);
-    console.log(`${roleDisplay} ${displayContent}`);
+    // Format like Claude Code
+    const roleDisplay = roleColor(roleSymbol);
+    
+    // Handle multi-line display
+    const contentLines = displayContent.split('\n');
+    contentLines.forEach((line, index) => {
+      if (index === 0) {
+        console.log(`${roleDisplay} ${line}`);
+      } else {
+        // Indent continuation lines
+        console.log(`${' '.repeat(roleDisplay.length - 8)} ${line}`); // Account for ANSI color codes
+      }
+    });
   });
   
-  if (messages.length > 5) {
-    console.log(chalk.gray(`... and ${messages.length - 5} more messages above`));
+  if (messages.length > messagesToShow) {
+    console.log(chalk.gray(`... and ${messages.length - messagesToShow} more messages above`));
+  }
+  
+  // Add some spacing if we have room
+  if (messagesToShow < availableLines / 3) {
+    console.log();
+  }
+}
+
+/**
+ * Display extended conversation preview with more messages
+ */
+function displayExtendedConversationPreview(messages: import('../claude-history.js').ClaudeMessage[]): void {
+  // Get terminal height and use most of it for extended preview
+  const terminalHeight = process.stdout.rows || 24;
+  const headerLines = 3; // Title + separator + empty line
+  const footerLines = 4; // Empty line + separator + confirmation prompt + extra space
+  const availableLines = Math.max(15, terminalHeight - headerLines - footerLines);
+  
+  // Show many more messages for extended preview - aim to fill most of the screen
+  const messagesToShow = Math.min(messages.length, Math.floor(availableLines * 0.8)); // Use 80% of available lines
+  const recentMessages = messages.slice(-messagesToShow);
+  
+  recentMessages.forEach((message, index) => {
+    const isUser = message.role === 'user';
+    const roleSymbol = isUser ? '>' : '⏺';
+    const roleColor = isUser ? chalk.blue : chalk.cyan;
+    
+    // Add separator between messages for better readability
+    if (index > 0) {
+      console.log(chalk.gray('┈'.repeat(40)));
+    }
+    
+    // Format message content
+    let content = '';
+    if (typeof message.content === 'string') {
+      content = message.content;
+    } else if (Array.isArray(message.content)) {
+      content = message.content.map(item => item.text || '').join(' ');
+    }
+    
+    // Handle special content types
+    let displayContent = content;
+    
+    if (content.startsWith('🔧 Used tool:')) {
+      const toolName = content.replace('🔧 Used tool: ', '');
+      displayContent = chalk.yellow(`[Tool: ${toolName}]`);
+    } else {
+      // For extended preview, show more content
+      const terminalWidth = process.stdout.columns || 80;
+      const maxContentWidth = terminalWidth - 15; // Account for role label and spacing
+      
+      // Show more lines and characters for extended preview
+      const lines = content.split('\n');
+      const maxLines = 8; // Show up to 8 lines per message
+      
+      if (lines.length > maxLines) {
+        const shownLines = lines.slice(0, maxLines);
+        const lastLine = shownLines[shownLines.length - 1];
+        
+        // Truncate last shown line if needed
+        if (lastLine && lastLine.length > maxContentWidth) {
+          shownLines[shownLines.length - 1] = lastLine.substring(0, maxContentWidth - 3) + '...';
+        }
+        
+        displayContent = shownLines.join('\n') + '\n' + 
+          chalk.gray(`... (${lines.length - maxLines} more lines, ${content.length - shownLines.join('\n').length} more chars)`);
+      } else {
+        // Handle long single lines
+        displayContent = lines.map(line => {
+          if (line.length > maxContentWidth) {
+            return line.substring(0, maxContentWidth - 3) + '...';
+          }
+          return line;
+        }).join('\n');
+      }
+    }
+    
+    // Format with role
+    const roleDisplay = roleColor(roleSymbol);
+    
+    // Handle multi-line display with Claude Code formatting
+    const contentLines = displayContent.split('\n');
+    contentLines.forEach((line, lineIndex) => {
+      if (lineIndex === 0) {
+        console.log(`${roleDisplay} ${line}`);
+      } else {
+        // Indent continuation lines
+        console.log(`   ${line}`); // Simple indent for continuation lines
+      }
+    });
+    
+    // Add spacing between messages like Claude Code
+    console.log();
+  });
+  
+  if (messages.length > messagesToShow) {
+    console.log();
+    console.log(chalk.gray(`... and ${messages.length - messagesToShow} more messages above (${messages.length} total)`));
   }
 }
 
@@ -950,35 +1119,40 @@ function formatConversationDisplay(
 export async function selectClaudeExecutionMode(): Promise<{
   mode: 'normal' | 'continue' | 'resume';
   skipPermissions: boolean;
-}> {
-  const mode = await select({
-    message: 'Select Claude Code execution mode:',
-    choices: [
-      {
-        name: '🚀 Normal - Start a new session',
-        value: 'normal',
-        description: 'Launch Claude Code normally'
-      },
-      {
-        name: '⏭️  Continue - Continue most recent conversation (-c)',
-        value: 'continue',
-        description: 'Continue from the most recent conversation'
-      },
-      {
-        name: '🔄 Resume - Select conversation to resume (-r)',
-        value: 'resume',
-        description: 'Interactively select a conversation to resume'
-      }
-    ],
-    pageSize: 3
-  }) as 'normal' | 'continue' | 'resume';
+} | null> {
+  try {
+    const mode = await select({
+      message: 'Select Claude Code execution mode (q to go back):',
+      choices: [
+        {
+          name: '🚀 Normal - Start a new session',
+          value: 'normal',
+          description: 'Launch Claude Code normally'
+        },
+        {
+          name: '⏭️  Continue - Continue most recent conversation (-c)',
+          value: 'continue',
+          description: 'Continue from the most recent conversation'
+        },
+        {
+          name: '🔄 Resume - Select conversation to resume (-r)',
+          value: 'resume',
+          description: 'Interactively select a conversation to resume'
+        }
+      ],
+      pageSize: 3
+    }) as 'normal' | 'continue' | 'resume';
 
-  const skipPermissions = await confirm({
-    message: 'Skip permission checks? (--dangerously-skip-permissions)',
-    default: false
-  });
+    const skipPermissions = await confirm({
+      message: 'Skip permission checks? (--dangerously-skip-permissions)',
+      default: false
+    });
 
-  return { mode, skipPermissions };
+    return { mode, skipPermissions };
+  } catch {
+    // Handle Ctrl+C or q key - user wants to go back
+    return null;
+  }
 }
 
 function formatTimeAgo(timestamp: number): string {
