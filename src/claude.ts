@@ -43,9 +43,17 @@ export async function launchClaudeCode(
           
           if (selectedConversation) {
             console.log(chalk.green(`   ✨ Resuming: ${selectedConversation.title}`));
-            // Don't use -r flag since we already handled conversation selection
-            // Launch in normal mode to start fresh in the selected context
-            console.log(chalk.gray('   📝 Starting new session in conversation context'));
+            
+            // Use specific session ID if available
+            if (selectedConversation.sessionId) {
+              args.push('--resume', selectedConversation.sessionId);
+              console.log(chalk.cyan(`   🆔 Using session ID: ${selectedConversation.sessionId}`));
+            } else {
+              // Fallback: try to use filename as session identifier
+              const fileName = selectedConversation.id;
+              console.log(chalk.yellow(`   ⚠️  No session ID found, trying filename: ${fileName}`));
+              args.push('--resume', fileName);
+            }
           } else {
             // User cancelled or no conversations found, fall back to normal mode
             console.log(chalk.gray('   ✨ Starting new session'));
