@@ -461,6 +461,40 @@ export async function selectSession(sessions: SessionData[]): Promise<SessionDat
   return sessions[parseInt(selectedIndex)] || null;
 }
 
+export async function selectClaudeExecutionMode(): Promise<{
+  mode: 'normal' | 'continue' | 'resume';
+  skipPermissions: boolean;
+}> {
+  const mode = await select({
+    message: 'Select Claude Code execution mode:',
+    choices: [
+      {
+        name: '🚀 Normal - Start a new session',
+        value: 'normal',
+        description: 'Launch Claude Code normally'
+      },
+      {
+        name: '⏭️  Continue - Continue most recent conversation (-c)',
+        value: 'continue',
+        description: 'Continue from the most recent conversation'
+      },
+      {
+        name: '🔄 Resume - Select conversation to resume (-r)',
+        value: 'resume',
+        description: 'Interactively select a conversation to resume'
+      }
+    ],
+    pageSize: 3
+  }) as 'normal' | 'continue' | 'resume';
+
+  const skipPermissions = await confirm({
+    message: 'Skip permission checks? (--dangerously-skip-permissions)',
+    default: false
+  });
+
+  return { mode, skipPermissions };
+}
+
 function formatTimeAgo(timestamp: number): string {
   const now = Date.now();
   const diff = now - timestamp;

@@ -51,7 +51,8 @@ import {
   confirmRemoteBranchDeletion,
   confirmPushUnpushedCommits,
   confirmProceedWithoutPush,
-  selectSession
+  selectSession,
+  selectClaudeExecutionMode
 } from './ui/prompts.js';
 import { 
   displayBranchTable,
@@ -148,7 +149,7 @@ export async function main(): Promise<void> {
           const skipPermissions = await confirmSkipPermissions();
           
           try {
-            await launchClaudeCode(sessionData.lastWorktreePath, skipPermissions);
+            await launchClaudeCode(sessionData.lastWorktreePath, { skipPermissions });
             await handlePostClaudeChanges(sessionData.lastWorktreePath);
           } catch (error) {
             if (error instanceof ClaudeError) {
@@ -184,7 +185,7 @@ export async function main(): Promise<void> {
             const skipPermissions = await confirmSkipPermissions();
             
             try {
-              await launchClaudeCode(selectedSession.lastWorktreePath, skipPermissions);
+              await launchClaudeCode(selectedSession.lastWorktreePath, { skipPermissions });
               await handlePostClaudeChanges(selectedSession.lastWorktreePath);
             } catch (error) {
               if (error instanceof ClaudeError) {
@@ -335,8 +336,8 @@ async function handleBranchSelection(branchName: string, repoRoot: string): Prom
 
     // Check if Claude Code is available before launching
     if (await isClaudeCodeAvailable()) {
-      // Ask about permissions and launch Claude Code
-      const skipPermissions = await confirmSkipPermissions();
+      // Ask about execution mode
+      const { mode, skipPermissions } = await selectClaudeExecutionMode();
       
       try {
         // Save session data before launching Claude Code
@@ -348,7 +349,7 @@ async function handleBranchSelection(branchName: string, repoRoot: string): Prom
         };
         await saveSession(sessionData);
         
-        await launchClaudeCode(worktreePath, skipPermissions);
+        await launchClaudeCode(worktreePath, { mode, skipPermissions });
         
         // Check for changes after Claude Code exits
         await handlePostClaudeChanges(worktreePath);
@@ -421,8 +422,8 @@ async function handleCreateNewBranch(branches: BranchInfo[], repoRoot: string): 
 
     // Check if Claude Code is available before launching
     if (await isClaudeCodeAvailable()) {
-      // Launch Claude Code
-      const skipPermissions = await confirmSkipPermissions();
+      // Ask about execution mode
+      const { mode, skipPermissions } = await selectClaudeExecutionMode();
       
       try {
         // Save session data before launching Claude Code
@@ -434,7 +435,7 @@ async function handleCreateNewBranch(branches: BranchInfo[], repoRoot: string): 
         };
         await saveSession(sessionData);
         
-        await launchClaudeCode(worktreePath, skipPermissions);
+        await launchClaudeCode(worktreePath, { mode, skipPermissions });
         
         // Check for changes after Claude Code exits
         await handlePostClaudeChanges(worktreePath);
@@ -503,7 +504,8 @@ async function handleManageWorktrees(worktrees: WorktreeInfo[]): Promise<boolean
           
           // Check if Claude Code is available before launching
           if (await isClaudeCodeAvailable()) {
-            const skipPermissions = await confirmSkipPermissions();
+            // Ask about execution mode
+            const { mode, skipPermissions } = await selectClaudeExecutionMode();
             
             try {
               // Save session data before launching Claude Code
@@ -515,7 +517,7 @@ async function handleManageWorktrees(worktrees: WorktreeInfo[]): Promise<boolean
               };
               await saveSession(sessionData);
               
-              await launchClaudeCode(worktree.path, skipPermissions);
+              await launchClaudeCode(worktree.path, { mode, skipPermissions });
             } catch (error) {
               if (error instanceof ClaudeError) {
                 printError(`Failed to launch Claude Code: ${error.message}`);
