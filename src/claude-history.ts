@@ -162,22 +162,43 @@ async function parseConversationFile(filePath: string): Promise<ClaudeConversati
       });
     }
     
-    // Find last user message - more relevant for understanding current context
+    // Find last user message - Claude Code uses different message structure
     const lastUserMessage = messages.slice().reverse().find(msg => 
+      // Claude Code format: type='message' + userType='user'
+      (msg.type === 'message' && msg.userType === 'user') ||
+      // Nested format: type='user' with message.role='user'
+      (msg.type === 'user' && msg.message && msg.message.role === 'user') ||
+      // Legacy format
       msg.role === 'user' || msg.role === 'human' || 
       (msg.sender && msg.sender === 'human') ||
       (!msg.role && msg.content) // fallback for messages without explicit role
     );
     
-    if (lastUserMessage && lastUserMessage.content) {
+    if (lastUserMessage) {
       let extractedContent = '';
       
+      // Extract content based on Claude Code's actual structure
+      let messageContent = null;
+      
+      // For Claude Code format: msg.message.content
+      if (lastUserMessage.message && lastUserMessage.message.content) {
+        messageContent = lastUserMessage.message.content;
+      }
+      // For direct message field (string)
+      else if (lastUserMessage.message && typeof lastUserMessage.message === 'string') {
+        messageContent = lastUserMessage.message;
+      }
+      // For legacy content field
+      else if (lastUserMessage.content) {
+        messageContent = lastUserMessage.content;
+      }
+      
       // Handle different content formats that Claude Code might use
-      if (typeof lastUserMessage.content === 'string') {
-        extractedContent = lastUserMessage.content;
-      } else if (Array.isArray(lastUserMessage.content)) {
+      if (typeof messageContent === 'string') {
+        extractedContent = messageContent;
+      } else if (Array.isArray(messageContent)) {
         // Handle array of content blocks
-        for (const block of lastUserMessage.content) {
+        for (const block of messageContent) {
           if (typeof block === 'string') {
             extractedContent = block;
             break;
@@ -192,12 +213,12 @@ async function parseConversationFile(filePath: string): Promise<ClaudeConversati
             }
           }
         }
-      } else if (lastUserMessage.content && typeof lastUserMessage.content === 'object') {
+      } else if (messageContent && typeof messageContent === 'object') {
         // Handle single content object
-        if (lastUserMessage.content.text) {
-          extractedContent = lastUserMessage.content.text;
-        } else if (lastUserMessage.content.content) {
-          extractedContent = lastUserMessage.content.content;
+        if (messageContent.text) {
+          extractedContent = messageContent.text;
+        } else if (messageContent.content) {
+          extractedContent = messageContent.content;
         }
       }
       
