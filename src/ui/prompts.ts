@@ -582,8 +582,11 @@ export async function selectClaudeConversation(worktreePath: string): Promise<im
       return null;
     }
 
+    // Clear screen before showing preview
+    console.clear();
+    
     // Show preview before final confirmation
-    console.log('\n' + chalk.bold.cyan('📖 Conversation Preview'));
+    console.log(chalk.bold.cyan('📖 Conversation Preview'));
     console.log(chalk.gray('─'.repeat(80)));
     console.log();
     
@@ -605,7 +608,8 @@ export async function selectClaudeConversation(worktreePath: string): Promise<im
     if (shouldResume) {
       return selectedConversation;
     } else {
-      // Go back to selection
+      // Clear screen before going back to selection
+      console.clear();
       return await selectClaudeConversation(worktreePath);
     }
   } catch (error) {
