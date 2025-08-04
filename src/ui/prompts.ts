@@ -872,14 +872,19 @@ function displayConversationPreview(messages: import('../claude-history.js').Cla
   const terminalHeight = process.stdout.rows || 24; // Default to 24 if unavailable
   const headerLines = 3; // Title + separator + empty line
   const footerLines = 3; // Empty line + separator + confirmation prompt
-  const availableLines = Math.max(10, terminalHeight - headerLines - footerLines);
+  const availableLines = Math.max(8, terminalHeight - headerLines - footerLines);
   
-  // Show more messages based on available terminal space
-  // Start with recent messages and work backwards
-  const messagesToShow = Math.min(messages.length, Math.floor(availableLines / 2)); // Estimate 2 lines per message on average
+  // Calculate how many messages we can safely show
+  // Be more conservative to ensure newest messages are always visible
+  const messagesToShow = Math.min(messages.length, Math.floor(availableLines / 3)); // More conservative estimate
+  
+  // Always start from the most recent messages
   const recentMessages = messages.slice(-messagesToShow);
   
-  recentMessages.forEach((message) => {
+  // Display messages in reverse order so newest appears first (at top)
+  const reversedMessages = [...recentMessages].reverse();
+  
+  reversedMessages.forEach((message) => {
     const isUser = message.role === 'user';
     const roleSymbol = isUser ? '>' : '⏺';
     const roleColor = isUser ? chalk.blue : chalk.cyan;
@@ -899,21 +904,20 @@ function displayConversationPreview(messages: import('../claude-history.js').Cla
       const toolName = content.replace('🔧 Used tool: ', '');
       displayContent = chalk.yellow(`[Tool: ${toolName}]`);
     } else {
-      // Don't truncate as aggressively - use more terminal width
+      // More aggressive truncation to ensure all messages fit
       const terminalWidth = process.stdout.columns || 80;
       const maxContentWidth = terminalWidth - 15; // Account for role label and spacing
       
       if (content.length > maxContentWidth) {
-        // For long content, show more but still truncate if needed
         displayContent = content.substring(0, maxContentWidth - 3) + '...';
       } else {
         displayContent = content;
       }
       
-      // Handle multi-line content - show first few lines
+      // Limit multi-line content more strictly
       const lines = displayContent.split('\n');
-      if (lines.length > 3) {
-        displayContent = lines.slice(0, 3).join('\n') + '\n' + chalk.gray(`... (${lines.length - 3} more lines)`);
+      if (lines.length > 2) {
+        displayContent = lines.slice(0, 2).join('\n') + '\n' + chalk.gray(`... (${lines.length - 2} more lines)`);
       }
     }
     
@@ -936,10 +940,7 @@ function displayConversationPreview(messages: import('../claude-history.js').Cla
     console.log(chalk.gray(`... and ${messages.length - messagesToShow} more messages above`));
   }
   
-  // Add some spacing if we have room
-  if (messagesToShow < availableLines / 3) {
-    console.log();
-  }
+  console.log(); // Add spacing before footer
 }
 
 
