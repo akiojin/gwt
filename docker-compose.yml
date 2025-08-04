@@ -14,7 +14,7 @@ services:
     environment:
       - NPM_USER
       - NPM_EMAIL
-      - NPM_PASSWORD
+      - NPM_PASS
       # AI API Keys
       - OPENAI_API_KEY
       - ANTHROPIC_API_KEY
