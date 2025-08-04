@@ -631,49 +631,70 @@ export async function displayConversationMessages(conversation: import('../claud
  * Create scrollable message viewer component
  */
 async function createMessageViewer(messages: import('../claude-history.js').ClaudeMessage[]): Promise<boolean> {
-  // Simplified message viewer without low-level prompt APIs
-  console.log(chalk.gray('Messages Preview:'));
-  console.log(chalk.gray('─'.repeat(60)));
+  console.clear();
+  console.log(chalk.bold.cyan(`📖 Conversation History (${messages.length} messages)`));
+  console.log(chalk.gray('─'.repeat(80)));
+  console.log();
   
-  // Show recent messages (last 5-10)
-  const recentMessages = messages.slice(-8);
+  // Show recent messages (last 10)
+  const recentMessages = messages.slice(-10);
   
   recentMessages.forEach((message, index) => {
     const isUser = message.role === 'user';
-    const icon = isUser ? '👤' : '🤖';
+    const roleLabel = isUser ? 'User' : 'Assistant';
     const roleColor = isUser ? chalk.blue : chalk.green;
-    const role = isUser ? 'User' : 'Claude';
+    
+    // Format timestamp
+    const timestamp = new Date(message.timestamp || Date.now());
+    const timeStr = timestamp.toLocaleTimeString('en-US', { 
+      hour12: false, 
+      hour: '2-digit', 
+      minute: '2-digit',
+      second: '2-digit'
+    });
     
     // Format message content
     let content = '';
     if (typeof message.content === 'string') {
       content = message.content;
     } else if (Array.isArray(message.content)) {
-      content = message.content.map(item => item.text || '').join('\n');
+      content = message.content.map(item => item.text || '').join(' ');
     }
     
-    // Truncate very long messages for readability
-    const maxLength = 200;
-    if (content.length > maxLength) {
-      content = content.substring(0, maxLength) + '...\n' + chalk.gray('[Message truncated]');
+    // Handle special content types
+    let displayContent = content;
+    let toolInfo = '';
+    
+    if (content.startsWith('🔧 Used tool:')) {
+      const toolName = content.replace('🔧 Used tool: ', '');
+      toolInfo = chalk.yellow(`[Tool: ${toolName}]`);
+      displayContent = ''; // Don't show content for tool calls
+    } else if (content.length > 60) {
+      // Truncate long messages
+      displayContent = content.substring(0, 57) + '...';
     }
     
-    // Show only first few lines
-    const lines = content.split('\n').slice(0, 3);
-    const displayContent = lines.join('\n');
-    if (lines.length < content.split('\n').length) {
-      lines.push(chalk.gray('[...more content...]'));
+    // Format the line similar to ccresume
+    const roleDisplay = roleColor(`[${roleLabel}]`);
+    const timeDisplay = chalk.gray(`(${timeStr})`);
+    
+    let line = `${roleDisplay} ${timeDisplay}`;
+    if (toolInfo) {
+      line += ` ${toolInfo}`;
+    } else if (displayContent) {
+      line += ` ${displayContent}`;
     }
     
-    console.log(`${icon} ${roleColor.bold(role)}${index === recentMessages.length - 1 ? chalk.yellow(' (Latest)') : ''}`);
-    console.log(displayContent);
-    console.log(chalk.gray('─'.repeat(40)));
+    console.log(line);
   });
   
-  if (messages.length > 8) {
-    console.log(chalk.gray(`... and ${messages.length - 8} more messages`));
+  if (messages.length > 10) {
+    console.log();
+    console.log(chalk.gray(`... and ${messages.length - 10} more messages above`));
   }
   
+  console.log();
+  console.log(chalk.gray('─'.repeat(80)));
   console.log();
   
   // Simple confirmation

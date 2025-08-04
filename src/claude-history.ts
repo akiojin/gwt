@@ -357,9 +357,95 @@ export async function getDetailedConversation(conversation: ClaudeConversation):
     const messages: ClaudeMessage[] = lines.map(line => {
       try {
         const parsed = JSON.parse(line);
+        
+        // Extract role and content based on Claude Code's actual structure
+        let role: 'user' | 'assistant' = 'user';
+        let content = '';
+        
+        // Determine role based on Claude Code's structure
+        if (parsed.type === 'message' && parsed.userType === 'user') {
+          role = 'user';
+        } else if (parsed.type === 'user') {
+          role = 'user';
+        } else if (parsed.type === 'assistant') {
+          role = 'assistant';
+        } else if (parsed.message && parsed.message.role === 'user') {
+          role = 'user';
+        } else if (parsed.message && parsed.message.role === 'assistant') {
+          role = 'assistant';
+        } else if (parsed.role === 'user' || parsed.role === 'human') {
+          role = 'user';
+        } else if (parsed.role === 'assistant') {
+          role = 'assistant';
+        } else {
+          // Default based on message structure
+          role = 'assistant';
+        }
+        
+        // Extract content based on Claude Code's structure
+        if (parsed.message && parsed.message.content) {
+          // For Claude Code format: msg.message.content
+          const messageContent = parsed.message.content;
+          if (typeof messageContent === 'string') {
+            content = messageContent;
+          } else if (Array.isArray(messageContent)) {
+            // Handle array of content blocks
+            for (const block of messageContent) {
+              if (typeof block === 'string') {
+                content = block;
+                break;
+              } else if (block && typeof block === 'object') {
+                // Claude Code format: {type: "text", text: "..."}
+                if (block.type === 'text' && block.text && typeof block.text === 'string') {
+                  content = block.text;
+                  break;
+                } else if (block.type === 'tool_use' && block.name) {
+                  // Display tool usage
+                  content = `🔧 Used tool: ${block.name}`;
+                  break;
+                } else if (block.text && typeof block.text === 'string') {
+                  content = block.text;
+                  break;
+                } else if (block.content && typeof block.content === 'string') {
+                  content = block.content;
+                  break;
+                }
+              }
+            }
+          }
+        } else if (parsed.message && typeof parsed.message === 'string') {
+          // For direct message field (string)
+          content = parsed.message;
+        } else if (parsed.content) {
+          // For legacy content field
+          if (typeof parsed.content === 'string') {
+            content = parsed.content;
+          } else if (Array.isArray(parsed.content)) {
+            for (const block of parsed.content) {
+              if (typeof block === 'string') {
+                content = block;
+                break;
+              } else if (block && typeof block === 'object') {
+                // Claude Code format: {type: "text", text: "..."}
+                if (block.type === 'text' && block.text && typeof block.text === 'string') {
+                  content = block.text;
+                  break;
+                } else if (block.type === 'tool_use' && block.name) {
+                  // Display tool usage
+                  content = `🔧 Used tool: ${block.name}`;
+                  break;
+                } else if (block.text && typeof block.text === 'string') {
+                  content = block.text;
+                  break;
+                }
+              }
+            }
+          }
+        }
+        
         return {
-          role: parsed.role || 'user',
-          content: parsed.content || '',
+          role,
+          content,
           timestamp: parsed.timestamp || Date.now()
         };
       } catch {
