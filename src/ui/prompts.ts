@@ -256,46 +256,47 @@ export async function selectWorktreeForManagement(worktrees: Array<{ branch: str
         disabled: isInvalid ? 'Cannot access this worktree' : false
       };
     }),
-    {
-      name: '← Back to main menu',
-      value: 'back',
-      description: 'Return to main menu'
-    }
+
   ];
 
-  return await select({
-    message: 'Select worktree to manage:',
-    choices,
-    pageSize: 15
-  });
+  try {
+    return await select({
+      message: 'Select worktree to manage (q to go back):',
+      choices,
+      pageSize: 15
+    });
+  } catch {
+    // Handle q key - return 'back' to maintain compatibility
+    return 'back';
+  }
 }
 
 export async function selectWorktreeAction(): Promise<'open' | 'remove' | 'remove-branch' | 'back'> {
-  return await select({
-    message: 'What would you like to do?',
-    choices: [
-      {
-        name: '📂 Open in Claude Code',
-        value: 'open',
-        description: 'Launch Claude Code in this worktree'
-      },
-      {
-        name: '🗑️  Remove worktree',
-        value: 'remove',
-        description: 'Delete this worktree only'
-      },
-      {
-        name: '🔥 Remove worktree and branch',
-        value: 'remove-branch',
-        description: 'Delete both worktree and branch'
-      },
-      {
-        name: '← Back',
-        value: 'back',
-        description: 'Return to worktree list'
-      }
-    ]
-  });
+  try {
+    return await select({
+      message: 'What would you like to do (q to go back)?',
+      choices: [
+        {
+          name: '📂 Open in Claude Code',
+          value: 'open',
+          description: 'Launch Claude Code in this worktree'
+        },
+        {
+          name: '🗑️  Remove worktree',
+          value: 'remove',
+          description: 'Delete this worktree only'
+        },
+        {
+          name: '🔥 Remove worktree and branch',
+          value: 'remove-branch',
+          description: 'Delete both worktree and branch'
+        }
+      ]
+    });
+  } catch {
+    // Handle q key - return 'back' to maintain compatibility
+    return 'back';
+  }
 }
 
 export async function confirmBranchRemoval(branchName: string): Promise<boolean> {
@@ -506,19 +507,17 @@ export async function selectSession(sessions: SessionData[]): Promise<SessionDat
   // Create choices with grouping
   const groupedChoices = createGroupedChoices(groupedSessions);
   
-  // Add cancel option
-  groupedChoices.push({
-    name: chalk.gray('← Cancel'),
-    value: 'cancel'
-  });
+  // No cancel option - use q key to go back
 
-  const selectedIndex = await select({
-    message: '',
-    choices: groupedChoices,
-    pageSize: 12
-  });
-
-  if (selectedIndex === 'cancel') {
+  let selectedIndex;
+  try {
+    selectedIndex = await select({
+      message: 'Select session (q to go back):',
+      choices: groupedChoices,
+      pageSize: 12
+    });
+  } catch {
+    // Handle q key - user wants to go back
     return null;
   }
 
@@ -558,20 +557,18 @@ export async function selectClaudeConversation(worktreePath: string): Promise<im
     // Create grouped choices
     const choices = createConversationChoices(categorizedConversations);
     
-    // Add cancel option
-    choices.push({
-      name: chalk.gray('← Cancel'),
-      value: 'cancel'
-    });
+    // No cancel option - use q key to go back
 
     // Single selection prompt
-    const selectedValue = await select({
-      message: 'Choose conversation to resume:',
-      choices: choices,
-      pageSize: 15
-    });
-
-    if (selectedValue === 'cancel') {
+    let selectedValue;
+    try {
+      selectedValue = await select({
+        message: 'Choose conversation to resume (q to go back):',
+        choices: choices,
+        pageSize: 15
+      });
+    } catch {
+      // Handle q key - user wants to go back
       return null;
     }
 
@@ -599,28 +596,27 @@ export async function selectClaudeConversation(worktreePath: string): Promise<im
     console.log();
     console.log(chalk.gray('─'.repeat(Math.min(80, process.stdout.columns || 80))));
 
-    // Enhanced confirmation with options
-    const action = await select({
-      message: 'What would you like to do?',
-      choices: [
-        {
-          name: chalk.green(`✅ Resume "${selectedConversation.title}"`),
-          value: 'resume'
-        },
-        {
-          name: chalk.blue('📋 View more messages'),
-          value: 'view_more'
-        },
-        {
-          name: chalk.yellow('🔙 Choose different conversation'),
-          value: 'back'
-        },
-        {
-          name: chalk.gray('❌ Cancel'),
-          value: 'cancel'
-        }
-      ]
-    });
+    // Simplified action selection - use q to go back
+    let action;
+    try {
+      action = await select({
+        message: 'What would you like to do (q to go back)?',
+        choices: [
+          {
+            name: chalk.green(`✅ Resume "${selectedConversation.title}"`),
+            value: 'resume'
+          },
+          {
+            name: chalk.blue('📋 View more messages'),
+            value: 'view_more'
+          }
+        ]
+      });
+    } catch {
+      // Handle q key - go back to conversation selection
+      console.clear();
+      return await selectClaudeConversation(worktreePath);
+    }
     
     switch (action) {
       case 'resume':
@@ -651,15 +647,11 @@ export async function selectClaudeConversation(worktreePath: string): Promise<im
           return await selectClaudeConversation(worktreePath);
         }
       }
-      case 'back':
-        console.clear();
-        return await selectClaudeConversation(worktreePath);
-      case 'cancel':
       default:
         return null;
     }
-  } catch (error) {
-    console.error(chalk.red('Failed to load Claude Code conversations:'), error);
+  } catch {
+    console.error(chalk.red('Failed to load Claude Code conversations:'));
     console.log(chalk.gray('Using standard Claude Code resume functionality instead...'));
     return null;
   }
@@ -686,8 +678,8 @@ export async function displayConversationMessages(conversation: import('../claud
 
     // Create scrollable message viewer
     return await createMessageViewer(detailedConversation.messages);
-  } catch (error) {
-    console.error(chalk.red('Failed to display conversation messages:'), error);
+  } catch {
+    console.error(chalk.red('Failed to display conversation messages:'));
     return false;
   }
 }
@@ -1128,43 +1120,39 @@ export async function selectClaudeExecutionMode(): Promise<{
   mode: 'normal' | 'continue' | 'resume';
   skipPermissions: boolean;
 } | null> {
-  const mode = await select({
-    message: 'Select Claude Code execution mode:',
-    choices: [
-      {
-        name: '🚀 Normal - Start a new session',
-        value: 'normal',
-        description: 'Launch Claude Code normally'
-      },
-      {
-        name: '⏭️  Continue - Continue most recent conversation (-c)',
-        value: 'continue',
-        description: 'Continue from the most recent conversation'
-      },
-      {
-        name: '🔄 Resume - Select conversation to resume (-r)',
-        value: 'resume',
-        description: 'Interactively select a conversation to resume'
-      },
-      {
-        name: chalk.gray('← Back (q)'),
-        value: 'cancel',
-        description: 'Return to branch selection'
-      }
-    ],
-    pageSize: 4
-  }) as 'normal' | 'continue' | 'resume' | 'cancel';
+  try {
+    const mode = await select({
+      message: 'Select Claude Code execution mode (q to go back):',
+      choices: [
+        {
+          name: '🚀 Normal - Start a new session',
+          value: 'normal',
+          description: 'Launch Claude Code normally'
+        },
+        {
+          name: '⏭️  Continue - Continue most recent conversation (-c)',
+          value: 'continue',
+          description: 'Continue from the most recent conversation'
+        },
+        {
+          name: '🔄 Resume - Select conversation to resume (-r)',
+          value: 'resume',
+          description: 'Interactively select a conversation to resume'
+        }
+      ],
+      pageSize: 3
+    }) as 'normal' | 'continue' | 'resume';
 
-  if (mode === 'cancel') {
+    const skipPermissions = await confirm({
+      message: 'Skip permission checks? (--dangerously-skip-permissions)',
+      default: false
+    });
+
+    return { mode, skipPermissions };
+  } catch {
+    // Handle Ctrl+C or q key - user wants to go back
     return null;
   }
-
-  const skipPermissions = await confirm({
-    message: 'Skip permission checks? (--dangerously-skip-permissions)',
-    default: false
-  });
-
-  return { mode, skipPermissions };
 }
 
 function formatTimeAgo(timestamp: number): string {
