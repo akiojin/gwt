@@ -706,8 +706,8 @@ async function createMessageViewer(messages: import('../claude-history.js').Clau
   
   recentMessages.forEach((message) => {
     const isUser = message.role === 'user';
-    const roleLabel = isUser ? 'Human' : 'Assistant';
-    const roleColor = isUser ? chalk.blue : chalk.green;
+    const roleSymbol = isUser ? '>' : '⏺';
+    const roleColor = isUser ? chalk.blue : chalk.cyan;
     
     // Format message content
     let content = '';
@@ -730,17 +730,18 @@ async function createMessageViewer(messages: import('../claude-history.js').Clau
       displayContent = content.substring(0, 57) + '...';
     }
     
-    // Format the line like ccresume (without time)
-    const roleDisplay = roleColor(`[${roleLabel}]`);
+    // Format like Claude Code
+    const roleDisplay = roleColor(roleSymbol);
     
-    let line = roleDisplay;
+    // Display the message with Claude Code formatting
     if (toolInfo) {
-      line += ` ${toolInfo}`;
-    } else if (displayContent) {
-      line += ` ${displayContent}`;
+      console.log(`${roleDisplay} ${toolInfo}`);
+    } else if (displayContent.trim()) {
+      console.log(`${roleDisplay} ${displayContent}`);
     }
     
-    console.log(line);
+    // Add spacing between messages like Claude Code
+    console.log();
   });
   
   if (messages.length > 10) {
@@ -776,8 +777,8 @@ function displayConversationPreview(messages: import('../claude-history.js').Cla
   
   recentMessages.forEach((message) => {
     const isUser = message.role === 'user';
-    const roleLabel = isUser ? 'Human' : 'Assistant';
-    const roleColor = isUser ? chalk.blue : chalk.green;
+    const roleSymbol = isUser ? '>' : '⏺';
+    const roleColor = isUser ? chalk.blue : chalk.cyan;
     
     // Format message content
     let content = '';
@@ -812,8 +813,8 @@ function displayConversationPreview(messages: import('../claude-history.js').Cla
       }
     }
     
-    // Format like ccresume
-    const roleDisplay = roleColor(`[${roleLabel}]`);
+    // Format like Claude Code
+    const roleDisplay = roleColor(roleSymbol);
     
     // Handle multi-line display
     const contentLines = displayContent.split('\n');
@@ -853,8 +854,8 @@ function displayExtendedConversationPreview(messages: import('../claude-history.
   
   recentMessages.forEach((message, index) => {
     const isUser = message.role === 'user';
-    const roleLabel = isUser ? 'Human' : 'Assistant';
-    const roleColor = isUser ? chalk.blue : chalk.green;
+    const roleSymbol = isUser ? '>' : '⏺';
+    const roleColor = isUser ? chalk.blue : chalk.cyan;
     
     // Add separator between messages for better readability
     if (index > 0) {
@@ -907,18 +908,21 @@ function displayExtendedConversationPreview(messages: import('../claude-history.
     }
     
     // Format with role
-    const roleDisplay = roleColor(`[${roleLabel}]`);
+    const roleDisplay = roleColor(roleSymbol);
     
-    // Handle multi-line display with proper indentation
+    // Handle multi-line display with Claude Code formatting
     const contentLines = displayContent.split('\n');
     contentLines.forEach((line, lineIndex) => {
       if (lineIndex === 0) {
         console.log(`${roleDisplay} ${line}`);
       } else {
-        // Indent continuation lines properly
-        console.log(`${' '.repeat(12)} ${line}`); // Fixed indent for continuation
+        // Indent continuation lines
+        console.log(`   ${line}`); // Simple indent for continuation lines
       }
     });
+    
+    // Add spacing between messages like Claude Code
+    console.log();
   });
   
   if (messages.length > messagesToShow) {
