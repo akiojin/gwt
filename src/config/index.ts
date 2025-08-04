@@ -1,6 +1,6 @@
 import { homedir } from 'node:os';
 import path from 'node:path';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile, mkdir } from 'node:fs/promises';
 
 export interface AppConfig {
   defaultBaseBranch: string;
@@ -8,6 +8,13 @@ export interface AppConfig {
   enableGitHubIntegration: boolean;
   enableDebugMode: boolean;
   worktreeNamingPattern: string;
+}
+
+export interface SessionData {
+  lastWorktreePath: string | null;
+  lastBranch: string | null;
+  timestamp: number;
+  repositoryRoot: string;
 }
 
 const DEFAULT_CONFIG: AppConfig = {
@@ -65,4 +72,55 @@ export async function getConfig(): Promise<AppConfig> {
 
 export function resetConfigCache(): void {
   cachedConfig = null;
+}
+
+/**
+ * セッションデータの保存・読み込み
+ */
+function getSessionFilePath(repositoryRoot: string): string {
+  const sessionDir = path.join(homedir(), '.config', 'claude-worktree', 'sessions');
+  const repoName = path.basename(repositoryRoot);
+  const repoHash = Buffer.from(repositoryRoot).toString('base64').replace(/[/+=]/g, '_');
+  return path.join(sessionDir, `${repoName}_${repoHash}.json`);
+}
+
+export async function saveSession(sessionData: SessionData): Promise<void> {
+  try {
+    const sessionPath = getSessionFilePath(sessionData.repositoryRoot);
+    const sessionDir = path.dirname(sessionPath);
+    
+    // ディレクトリを作成
+    await mkdir(sessionDir, { recursive: true });
+    
+    await writeFile(sessionPath, JSON.stringify(sessionData, null, 2), 'utf-8');
+  } catch (error) {
+    // セッション保存の失敗は致命的ではないため、エラーをログに出力するのみ
+    if (process.env.DEBUG_SESSION) {
+      console.error('Failed to save session:', error instanceof Error ? error.message : String(error));
+    }
+  }
+}
+
+export async function loadSession(repositoryRoot: string): Promise<SessionData | null> {
+  try {
+    const sessionPath = getSessionFilePath(repositoryRoot);
+    const content = await readFile(sessionPath, 'utf-8');
+    const sessionData = JSON.parse(content) as SessionData;
+    
+    // セッションが24時間以内のもののみ有効とする
+    const now = Date.now();
+    const sessionAge = now - sessionData.timestamp;
+    const maxAge = 24 * 60 * 60 * 1000; // 24時間
+    
+    if (sessionAge > maxAge) {
+      return null;
+    }
+    
+    return sessionData;
+  } catch (error) {
+    if (process.env.DEBUG_SESSION) {
+      console.error('Failed to load session:', error instanceof Error ? error.message : String(error));
+    }
+    return null;
+  }
 }
