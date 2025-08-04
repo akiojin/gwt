@@ -937,7 +937,7 @@ function displayConversationPreview(messages: import('../claude-history.js').Cla
   });
   
   if (messages.length > messagesToShow) {
-    console.log(chalk.gray(`... and ${messages.length - messagesToShow} more messages above`));
+    console.log(chalk.gray(`... and ${messages.length - messagesToShow} more messages below`));
   }
   
   console.log(); // Add spacing before footer
