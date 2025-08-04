@@ -433,25 +433,52 @@ export async function selectSession(sessions: SessionData[]): Promise<SessionDat
     return null;
   }
 
-  const choices = sessions.map((session, index) => {
-    const repo = session.repositoryRoot.split('/').pop() || 'unknown';
-    const timeAgo = formatTimeAgo(session.timestamp);
-    const branch = session.lastBranch || 'unknown';
-    
-    return {
-      name: `${chalk.cyan(repo)} - ${chalk.green(branch)} ${chalk.gray(`(${timeAgo})`)}`,
-      value: index.toString(),
-      description: session.lastWorktreePath || ''
-    };
-  });
+  console.log('\n┌─────────────────────────────────────────────────────────────────────────────────┐');
+  console.log('│                            📋 Resume Claude Code Session                        │');
+  console.log('└─────────────────────────────────────────────────────────────────────────────────┘\n');
+
+  // Collect enhanced session information
+  const enhancedChoices = await Promise.all(
+    sessions.map(async (session, index) => {
+      if (!session.lastWorktreePath || !session.lastBranch) {
+        // Fallback to simple display for incomplete sessions
+        const repo = session.repositoryRoot.split('/').pop() || 'unknown';
+        const timeAgo = formatTimeAgo(session.timestamp);
+        const branch = session.lastBranch || 'unknown';
+        
+        return {
+          name: `${chalk.cyan(repo)} - ${chalk.green(branch)} ${chalk.gray(`(${timeAgo})`)}`,
+          value: index.toString(),
+          description: session.lastWorktreePath || ''
+        };
+      }
+
+      try {
+        const { getEnhancedSessionInfo } = await import('../git.js');
+        const sessionInfo = await getEnhancedSessionInfo(session.lastWorktreePath, session.lastBranch);
+        return formatEnhancedSessionDisplay(session, sessionInfo, index);
+      } catch {
+        // Fallback to simple display if enhanced info fails
+        const repo = session.repositoryRoot.split('/').pop() || 'unknown';
+        const timeAgo = formatTimeAgo(session.timestamp);
+        const branch = session.lastBranch || 'unknown';
+        
+        return {
+          name: `${chalk.cyan(repo)} - ${chalk.green(branch)} ${chalk.gray(`(${timeAgo})`)} ${chalk.red('(info unavailable)')}`,
+          value: index.toString(),
+          description: session.lastWorktreePath || ''
+        };
+      }
+    })
+  );
 
   const selectedIndex = await select({
     message: 'Select a session to resume:',
     choices: [
-      ...choices,
+      ...enhancedChoices,
       { name: chalk.gray('← Cancel'), value: 'cancel' }
     ],
-    pageSize: 10
+    pageSize: 8
   });
 
   if (selectedIndex === 'cancel') {
@@ -511,3 +538,109 @@ function formatTimeAgo(timestamp: number): string {
     return `${days}d ago`;
   }
 }
+
+/**
+ * Get branch icon based on branch type
+ */
+function getBranchIcon(branchType: string): string {
+  switch (branchType) {
+    case 'feature': return '🌿';
+    case 'bugfix': return '🐛';
+    case 'hotfix': return '🔥';
+    case 'develop': return '🌱';
+    case 'main':
+    case 'master': return '🎯';
+    default: return '📝';
+  }
+}
+
+/**
+ * Get project icon based on repository name
+ */
+function getProjectIcon(repoName: string): string {
+  const lowerName = repoName.toLowerCase();
+  
+  if (lowerName.includes('app') || lowerName.includes('mobile')) return '📱';
+  if (lowerName.includes('api') || lowerName.includes('backend')) return '⚡';
+  if (lowerName.includes('frontend') || lowerName.includes('ui')) return '🎨';
+  if (lowerName.includes('cli') || lowerName.includes('tool')) return '🛠️';
+  if (lowerName.includes('bot') || lowerName.includes('ai')) return '🤖';
+  if (lowerName.includes('web')) return '🌐';
+  if (lowerName.includes('doc') || lowerName.includes('guide')) return '📚';
+  
+  return '🚀';
+}
+
+/**
+ * Get status display with icon and color
+ */
+function getStatusDisplay(sessionInfo: import('../git.js').EnhancedSessionInfo): { text: string; color: string } {
+  if (sessionInfo.hasUncommittedChanges) {
+    const count = sessionInfo.uncommittedChangesCount;
+    return {
+      text: `📝 ${count} uncommitted change${count !== 1 ? 's' : ''}`,
+      color: 'yellow'
+    };
+  }
+  
+  if (sessionInfo.hasUnpushedCommits) {
+    const count = sessionInfo.unpushedCommitsCount;
+    return {
+      text: `⚠️  Needs push (${count} commit${count !== 1 ? 's' : ''})`,
+      color: 'yellow'
+    };
+  }
+  
+  return {
+    text: '✅ All changes committed',
+    color: 'green'
+  };
+}
+
+/**
+ * Format enhanced session display with better visual layout
+ */
+function formatEnhancedSessionDisplay(
+  session: SessionData, 
+  sessionInfo: import('../git.js').EnhancedSessionInfo,
+  index: number
+): { name: string; value: string; description?: string } {
+  const repo = session.repositoryRoot.split('/').pop() || 'unknown';
+  const timeAgo = formatTimeAgo(session.timestamp);
+  const branch = session.lastBranch || 'unknown';
+  
+  const projectIcon = getProjectIcon(repo);
+  const branchIcon = getBranchIcon(sessionInfo.branchType);
+  const statusDisplay = getStatusDisplay(sessionInfo);
+  
+  // Create commit message display (truncate if too long)
+  const commitMsg = sessionInfo.latestCommitMessage || 'No commit message';
+  const truncatedCommit = commitMsg.length > 50 ? commitMsg.substring(0, 47) + '...' : commitMsg;
+  
+  // Format status text with proper colors
+  let coloredStatusText: string;
+  if (statusDisplay.color === 'yellow') {
+    coloredStatusText = chalk.yellow(statusDisplay.text);
+  } else if (statusDisplay.color === 'green') {
+    coloredStatusText = chalk.green(statusDisplay.text);
+  } else {
+    coloredStatusText = chalk.red(statusDisplay.text);
+  }
+  
+  // Format the display with box-like structure
+  const topLine = `┌─ ${projectIcon} ${chalk.bold(repo)} ${' '.repeat(Math.max(0, 60 - repo.length))} ${chalk.gray(timeAgo)} ─┐`;
+  const branchLine = `│ ${branchIcon} ${chalk.green(branch)} ${' '.repeat(Math.max(0, 35 - branch.length))} ${coloredStatusText} ${' '.repeat(Math.max(0, 15))} │`;
+  const commitLine = `│ 💬 ${chalk.gray(`"${truncatedCommit}"`)} ${' '.repeat(Math.max(0, 65 - truncatedCommit.length))} │`;
+  const pathLine = `│ 📁 ${chalk.dim(session.lastWorktreePath || '')} ${' '.repeat(Math.max(0, 65 - (session.lastWorktreePath || '').length))} │`;
+  const bottomLine = `└${'─'.repeat(77)}┘`;
+  
+  const fullDisplay = [topLine, branchLine, commitLine, pathLine, bottomLine].join('\n');
+  
+  return {
+    name: fullDisplay,
+    value: index.toString(),
+    description: ''
+  };
+}
+
+
