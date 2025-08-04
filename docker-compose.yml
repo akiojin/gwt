@@ -12,6 +12,9 @@ services:
       # Docker socket（必要な場合）
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
+      - NPM_USER
+      - NPM_EMAIL
+      - NPM_PASSWORD
       # AI API Keys
       - OPENAI_API_KEY
       - ANTHROPIC_API_KEY
