@@ -531,7 +531,7 @@ export async function selectSession(sessions: SessionData[]): Promise<SessionDat
  */
 export async function selectClaudeConversation(worktreePath: string): Promise<import('../claude-history.js').ClaudeConversation | null> {
   try {
-    const { getConversationsForProject, isClaudeHistoryAvailable } = await import('../claude-history.js');
+    const { getConversationsForProject, isClaudeHistoryAvailable, getDetailedConversation } = await import('../claude-history.js');
     
     // Check if Claude Code history is available
     if (!(await isClaudeHistoryAvailable())) {
@@ -539,9 +539,6 @@ export async function selectClaudeConversation(worktreePath: string): Promise<im
       console.log(chalk.gray('   Using standard Claude Code resume functionality instead...'));
       return null;
     }
-
-    console.log('\n' + chalk.bold.cyan('Recent Claude Code Conversations'));
-    console.log(chalk.gray('Select a conversation to view details:\n'));
 
     // Get conversations for the current project
     const conversations = await getConversationsForProject(worktreePath);
@@ -564,9 +561,44 @@ export async function selectClaudeConversation(worktreePath: string): Promise<im
       value: 'cancel'
     });
 
-    // First selection: choose conversation to preview
+    // Create a dynamic preview system like ccresume
+    let selectedConversation: import('../claude-history.js').ClaudeConversation | null = null;
+    
+    // Display header
+    console.clear();
+    console.log(chalk.bold.cyan('🔄 Resume Claude Code Conversation'));
+    console.log(chalk.gray('─'.repeat(80)));
+    console.log();
+    
+    // Show conversation list
+    console.log(chalk.bold('Select a conversation:'));
+    conversations.slice(0, 10).forEach((conv, index) => {
+      const indicator = index === 0 ? '▶' : ' ';
+      const title = conv.title.length > 50 ? conv.title.substring(0, 47) + '...' : conv.title;
+      console.log(`${chalk.cyan(indicator)} ${index + 1}. ${title}`);
+    });
+    
+    console.log();
+    console.log(chalk.gray('─'.repeat(80)));
+    console.log(chalk.bold('Preview:'));
+    
+    // Initial preview for first conversation
+    if (conversations.length > 0) {
+      selectedConversation = conversations[0] || null;
+      if (selectedConversation) {
+        const detailed = await getDetailedConversation(selectedConversation);
+        if (detailed) {
+          displayConversationPreview(detailed.messages);
+        }
+      }
+    }
+    
+    console.log();
+    console.log(chalk.gray('─'.repeat(80)));
+    
+    // Get user selection with enhanced interface
     const selectedValue = await select({
-      message: '',
+      message: 'Choose conversation to resume:',
       choices: choices,
       pageSize: 15
     });
@@ -576,21 +608,22 @@ export async function selectClaudeConversation(worktreePath: string): Promise<im
     }
 
     const selectedIndex = parseInt(selectedValue);
-    const selectedConversation = conversations[selectedIndex];
+    selectedConversation = conversations[selectedIndex] || null;
     
     if (!selectedConversation) {
       return null;
     }
 
-    // Second step: display conversation messages and get confirmation
-    const shouldProceed = await displayConversationMessages(selectedConversation);
+    // Simple confirmation
+    const shouldResume = await confirm({
+      message: `Resume "${selectedConversation.title}"?`,
+      default: true
+    });
     
-    if (shouldProceed) {
-      console.log(chalk.green(`✨ Selected: ${selectedConversation.title}`));
+    if (shouldResume) {
       return selectedConversation;
     } else {
-      console.log(chalk.gray('Selection cancelled'));
-      // Recursively call to go back to the conversation list
+      // Go back to selection
       return await selectClaudeConversation(worktreePath);
     }
   } catch (error) {
@@ -639,19 +672,10 @@ async function createMessageViewer(messages: import('../claude-history.js').Clau
   // Show recent messages (last 10)
   const recentMessages = messages.slice(-10);
   
-  recentMessages.forEach((message, index) => {
+  recentMessages.forEach((message) => {
     const isUser = message.role === 'user';
     const roleLabel = isUser ? 'User' : 'Assistant';
     const roleColor = isUser ? chalk.blue : chalk.green;
-    
-    // Format timestamp
-    const timestamp = new Date(message.timestamp || Date.now());
-    const timeStr = timestamp.toLocaleTimeString('en-US', { 
-      hour12: false, 
-      hour: '2-digit', 
-      minute: '2-digit',
-      second: '2-digit'
-    });
     
     // Format message content
     let content = '';
@@ -674,11 +698,10 @@ async function createMessageViewer(messages: import('../claude-history.js').Clau
       displayContent = content.substring(0, 57) + '...';
     }
     
-    // Format the line similar to ccresume
+    // Format the line like ccresume (without time)
     const roleDisplay = roleColor(`[${roleLabel}]`);
-    const timeDisplay = chalk.gray(`(${timeStr})`);
     
-    let line = `${roleDisplay} ${timeDisplay}`;
+    let line = roleDisplay;
     if (toolInfo) {
       line += ` ${toolInfo}`;
     } else if (displayContent) {
@@ -702,6 +725,47 @@ async function createMessageViewer(messages: import('../claude-history.js').Clau
     message: 'Resume this conversation?',
     default: true
   });
+}
+
+/**
+ * Display conversation preview (ccresume style)
+ */
+function displayConversationPreview(messages: import('../claude-history.js').ClaudeMessage[]): void {
+  // Show last 5 messages for preview
+  const recentMessages = messages.slice(-5);
+  
+  recentMessages.forEach((message) => {
+    const isUser = message.role === 'user';
+    const roleLabel = isUser ? 'User' : 'Assistant';
+    const roleColor = isUser ? chalk.blue : chalk.green;
+    
+    // Format message content
+    let content = '';
+    if (typeof message.content === 'string') {
+      content = message.content;
+    } else if (Array.isArray(message.content)) {
+      content = message.content.map(item => item.text || '').join(' ');
+    }
+    
+    // Handle special content types
+    let displayContent = content;
+    
+    if (content.startsWith('🔧 Used tool:')) {
+      const toolName = content.replace('🔧 Used tool: ', '');
+      displayContent = chalk.yellow(`[Tool: ${toolName}]`);
+    } else if (content.length > 70) {
+      // Truncate long messages for preview
+      displayContent = content.substring(0, 67) + '...';
+    }
+    
+    // Format like ccresume
+    const roleDisplay = roleColor(`[${roleLabel}]`);
+    console.log(`${roleDisplay} ${displayContent}`);
+  });
+  
+  if (messages.length > 5) {
+    console.log(chalk.gray(`... and ${messages.length - 5} more messages above`));
+  }
 }
 
 /**
