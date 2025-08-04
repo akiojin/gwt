@@ -631,111 +631,56 @@ export async function displayConversationMessages(conversation: import('../claud
  * Create scrollable message viewer component
  */
 async function createMessageViewer(messages: import('../claude-history.js').ClaudeMessage[]): Promise<boolean> {
-  const { createPrompt, useState, useKeypress, isEnterKey } = await import('@inquirer/prompts');
+  // Simplified message viewer without low-level prompt APIs
+  console.log(chalk.gray('Messages Preview:'));
+  console.log(chalk.gray('─'.repeat(60)));
   
-  const messageViewer = createPrompt<boolean, {}>((config, done) => {
-    const [currentIndex, setCurrentIndex] = useState(Math.max(0, messages.length - 5)); // Start near the end
-    const [status, setStatus] = useState<'viewing' | 'done'>('viewing');
+  // Show recent messages (last 5-10)
+  const recentMessages = messages.slice(-8);
+  
+  recentMessages.forEach((message, index) => {
+    const isUser = message.role === 'user';
+    const icon = isUser ? '👤' : '🤖';
+    const roleColor = isUser ? chalk.blue : chalk.green;
+    const role = isUser ? 'User' : 'Claude';
     
-    const pageSize = 10;
-    
-    useKeypress((key) => {
-      if (key.name === 'q' || key.name === 'escape') {
-        setStatus('done');
-        done(false); // Cancel
-        return;
-      }
-      
-      if (isEnterKey(key) || key.name === 'space') {
-        setStatus('done');
-        done(true); // Confirm selection
-        return;
-      }
-      
-      if (key.name === 'up' || key.name === 'k') {
-        if (currentIndex > 0) {
-          setCurrentIndex(currentIndex - 1);
-        }
-        return;
-      }
-      
-      if (key.name === 'down' || key.name === 'j') {
-        if (currentIndex < Math.max(0, messages.length - pageSize)) {
-          setCurrentIndex(currentIndex + 1);
-        }
-        return;
-      }
-      
-      if (key.name === 'pageup') {
-        setCurrentIndex(Math.max(0, currentIndex - pageSize));
-        return;
-      }
-      
-      if (key.name === 'pagedown') {
-        setCurrentIndex(Math.min(Math.max(0, messages.length - pageSize), currentIndex + pageSize));
-        return;
-      }
-      
-      if (key.name === 'home') {
-        setCurrentIndex(0);
-        return;
-      }
-      
-      if (key.name === 'end') {
-        setCurrentIndex(Math.max(0, messages.length - pageSize));
-        return;
-      }
-    });
-    
-    if (status === 'done') {
-      return '';
+    // Format message content
+    let content = '';
+    if (typeof message.content === 'string') {
+      content = message.content;
+    } else if (Array.isArray(message.content)) {
+      content = message.content.map(item => item.text || '').join('\n');
     }
     
-    // Display messages
-    const startIndex = currentIndex;
-    const endIndex = Math.min(messages.length, startIndex + pageSize);
-    const visibleMessages = messages.slice(startIndex, endIndex);
+    // Truncate very long messages for readability
+    const maxLength = 200;
+    if (content.length > maxLength) {
+      content = content.substring(0, maxLength) + '...\n' + chalk.gray('[Message truncated]');
+    }
     
-    let output = '';
+    // Show only first few lines
+    const lines = content.split('\n').slice(0, 3);
+    const displayContent = lines.join('\n');
+    if (lines.length < content.split('\n').length) {
+      lines.push(chalk.gray('[...more content...]'));
+    }
     
-    visibleMessages.forEach((message, index) => {
-      const globalIndex = startIndex + index;
-      const isUser = message.role === 'user';
-      const icon = isUser ? '👤' : '🤖';
-      const roleColor = isUser ? chalk.blue : chalk.green;
-      const role = isUser ? 'User' : 'Claude';
-      
-      // Format message content
-      let content = '';
-      if (typeof message.content === 'string') {
-        content = message.content;
-      } else if (Array.isArray(message.content)) {
-        content = message.content.map(item => item.text || '').join('\\n');
-      }
-      
-      // Truncate very long messages for readability
-      const maxLength = 400;
-      if (content.length > maxLength) {
-        content = content.substring(0, maxLength) + '...\\n' + chalk.gray('[Message truncated]');
-      }
-      
-      output += `${icon} ${roleColor.bold(role)}${globalIndex === messages.length - 1 ? chalk.yellow(' (Latest)') : ''}\\n`;
-      output += `${content}\\n`;
-      output += chalk.gray('─'.repeat(60)) + '\\n\\n';
-    });
-    
-    // Navigation info
-    const currentPos = startIndex + 1;
-    const endPos = endIndex;
-    const total = messages.length;
-    
-    output += chalk.gray(`Showing ${currentPos}-${endPos} of ${total} messages\\n`);
-    output += chalk.gray('Navigation: ↑↓ scroll, PgUp/PgDown jump, Home/End, Enter to select, q to cancel');
-    
-    return output;
+    console.log(`${icon} ${roleColor.bold(role)}${index === recentMessages.length - 1 ? chalk.yellow(' (Latest)') : ''}`);
+    console.log(displayContent);
+    console.log(chalk.gray('─'.repeat(40)));
   });
-
-  return await messageViewer({});
+  
+  if (messages.length > 8) {
+    console.log(chalk.gray(`... and ${messages.length - 8} more messages`));
+  }
+  
+  console.log();
+  
+  // Simple confirmation
+  return await confirm({
+    message: 'Resume this conversation?',
+    default: true
+  });
 }
 
 /**
