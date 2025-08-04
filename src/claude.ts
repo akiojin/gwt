@@ -55,8 +55,9 @@ export async function launchClaudeCode(
               args.push('--resume', fileName);
             }
           } else {
-            // User cancelled or no conversations found, fall back to normal mode
-            console.log(chalk.gray('   ✨ Starting new session'));
+            // User cancelled - return without launching Claude
+            console.log(chalk.gray('   ↩️  Selection cancelled, returning to menu'));
+            return;
           }
         } catch (error) {
           console.warn(chalk.yellow('   ⚠️  Failed to load conversation history, using standard resume'));
