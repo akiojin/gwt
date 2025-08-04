@@ -8,6 +8,88 @@ import {
 } from './types.js';
 import { SessionData } from '../config/index.js';
 
+/**
+ * Custom select prompt with q key support for going back
+ * @param config - prompt configuration
+ * @returns selected value or null if user pressed q
+ */
+async function createQuitableSelect<T>(config: {
+  message: string;
+  choices: Array<{
+    name: string;
+    value: T;
+    description?: string;
+    disabled?: boolean | string;
+  }>;
+  pageSize?: number;
+}): Promise<T | null> {
+  const { createPrompt, useState, useKeypress, isEnterKey, usePrefix, isUpKey, isDownKey } = await import('@inquirer/core');
+
+  const customSelect = createPrompt<T | null, typeof config>((promptConfig, done) => {
+    const [selectedIndex, setSelectedIndex] = useState<number>(0);
+    const [status, setStatus] = useState<'idle' | 'done'>('idle');
+    const prefix = usePrefix({});
+
+    useKeypress((key) => {
+      if (status === 'done') return;
+
+      if (key.name === 'q' || (key.name === 'c' && key.ctrl)) {
+        setStatus('done');
+        done(null);
+        return;
+      }
+
+      if (isEnterKey(key)) {
+        const selectedChoice = promptConfig.choices[selectedIndex];
+        if (!selectedChoice) return;
+        if (selectedChoice.disabled) {
+          return;
+        }
+        setStatus('done');
+        done(selectedChoice.value);
+        return;
+      }
+
+      if (isUpKey(key)) {
+        let newIndex = selectedIndex > 0 ? selectedIndex - 1 : promptConfig.choices.length - 1;
+        // Skip disabled items
+        while (promptConfig.choices[newIndex]?.disabled && newIndex !== selectedIndex) {
+          newIndex = newIndex > 0 ? newIndex - 1 : promptConfig.choices.length - 1;
+        }
+        setSelectedIndex(newIndex);
+      } else if (isDownKey(key)) {
+        let newIndex = selectedIndex < promptConfig.choices.length - 1 ? selectedIndex + 1 : 0;
+        // Skip disabled items
+        while (promptConfig.choices[newIndex]?.disabled && newIndex !== selectedIndex) {
+          newIndex = newIndex < promptConfig.choices.length - 1 ? newIndex + 1 : 0;
+        }
+        setSelectedIndex(newIndex);
+      }
+    });
+
+    if (status === 'done') {
+      return '';
+    }
+
+    const message = promptConfig.message;
+    const choicesDisplay = promptConfig.choices.map((choice, index) => {
+      const isSelected = index === selectedIndex;
+      const pointer = isSelected ? '❯' : ' ';
+      const nameDisplay = choice.disabled 
+        ? chalk.gray(choice.name) 
+        : (isSelected ? chalk.cyan(choice.name) : choice.name);
+      const description = choice.description && isSelected 
+        ? `\n  ${choice.disabled ? chalk.gray(choice.description) : chalk.gray(choice.description)}` 
+        : '';
+      return `${pointer} ${nameDisplay}${description}`;
+    }).join('\n');
+
+    return `${prefix} ${message}\n${choicesDisplay}`;
+  });
+
+  return await customSelect(config);
+}
+
 export async function selectFromTable(
   choices: Array<{ name: string; value: string; description?: string; disabled?: boolean }>,
   statistics?: { branches: BranchInfo[]; worktrees: import('../worktree.js').WorktreeInfo[] }
@@ -242,61 +324,112 @@ export async function confirmSkipPermissions(): Promise<boolean> {
 }
 
 export async function selectWorktreeForManagement(worktrees: Array<{ branch: string; path: string; isAccessible?: boolean; invalidReason?: string }>): Promise<string | 'back'> {
-  const choices = [
-    ...worktrees.map((w, index) => {
-      const isInvalid = w.isAccessible === false;
-      return {
-        name: isInvalid 
-          ? chalk.red(`${index + 1}. ✗ ${w.branch}`)
-          : `${index + 1}. ${w.branch}`,
-        value: w.branch,
-        description: isInvalid 
-          ? chalk.red(`${w.path} (${w.invalidReason || 'Inaccessible'})`)
-          : w.path,
-        disabled: isInvalid ? 'Cannot access this worktree' : false
-      };
-    }),
+  const { createPrompt, useState, useKeypress, isEnterKey, usePrefix, isUpKey, isDownKey } = await import('@inquirer/core');
 
-  ];
+  // Custom prompt that handles 'q' key
+  const customSelect = createPrompt<string | null, { message: string; choices: any[] }>((config, done) => {
+    const [selectedIndex, setSelectedIndex] = useState<number>(0);
+    const [status, setStatus] = useState<'idle' | 'done'>('idle');
+    const prefix = usePrefix({});
 
-  try {
-    return await select({
-      message: 'Select worktree to manage (q to go back):',
-      choices,
-      pageSize: 15
+    useKeypress((key) => {
+      if (status === 'done') return;
+
+      if (key.name === 'q' || (key.name === 'c' && key.ctrl)) {
+        setStatus('done');
+        done(null); // Return null for cancelled
+        return;
+      }
+
+      if (isEnterKey(key)) {
+        const selectedChoice = config.choices[selectedIndex];
+        if (selectedChoice.disabled) {
+          // Don't allow selection of disabled items
+          return;
+        }
+        setStatus('done');
+        done(selectedChoice.value);
+        return;
+      }
+
+      if (isUpKey(key)) {
+        let newIndex = selectedIndex > 0 ? selectedIndex - 1 : config.choices.length - 1;
+        // Skip disabled items
+        while (config.choices[newIndex].disabled && newIndex !== selectedIndex) {
+          newIndex = newIndex > 0 ? newIndex - 1 : config.choices.length - 1;
+        }
+        setSelectedIndex(newIndex);
+      } else if (isDownKey(key)) {
+        let newIndex = selectedIndex < config.choices.length - 1 ? selectedIndex + 1 : 0;
+        // Skip disabled items
+        while (config.choices[newIndex].disabled && newIndex !== selectedIndex) {
+          newIndex = newIndex < config.choices.length - 1 ? newIndex + 1 : 0;
+        }
+        setSelectedIndex(newIndex);
+      }
     });
-  } catch {
-    // Handle q key - return 'back' to maintain compatibility
-    return 'back';
-  }
+
+    if (status === 'done') {
+      return '';
+    }
+
+    const message = config.message;
+    const choicesDisplay = config.choices.map((choice, index) => {
+      const isSelected = index === selectedIndex;
+      const pointer = isSelected ? '❯' : ' ';
+      const nameDisplay = choice.disabled ? chalk.gray(choice.name) : (isSelected ? chalk.cyan(choice.name) : choice.name);
+      const description = choice.description ? `\n  ${choice.disabled ? chalk.gray(choice.description) : chalk.gray(choice.description)}` : '';
+      return `${pointer} ${nameDisplay}${isSelected ? description : ''}`;
+    }).join('\n');
+
+    return `${prefix} ${message}\n${choicesDisplay}`;
+  });
+
+  const choices = worktrees.map((w, index) => {
+    const isInvalid = w.isAccessible === false;
+    return {
+      name: isInvalid 
+        ? `${index + 1}. ✗ ${w.branch}`
+        : `${index + 1}. ${w.branch}`,
+      value: w.branch,
+      description: isInvalid 
+        ? `${w.path} (${w.invalidReason || 'Inaccessible'})`
+        : w.path,
+      disabled: isInvalid
+    };
+  });
+
+  const result = await customSelect({
+    message: 'Select worktree to manage (q to go back):',
+    choices
+  });
+
+  return result === null ? 'back' : result;
 }
 
 export async function selectWorktreeAction(): Promise<'open' | 'remove' | 'remove-branch' | 'back'> {
-  try {
-    return await select({
-      message: 'What would you like to do (q to go back)?',
-      choices: [
-        {
-          name: '📂 Open in Claude Code',
-          value: 'open',
-          description: 'Launch Claude Code in this worktree'
-        },
-        {
-          name: '🗑️  Remove worktree',
-          value: 'remove',
-          description: 'Delete this worktree only'
-        },
-        {
-          name: '🔥 Remove worktree and branch',
-          value: 'remove-branch',
-          description: 'Delete both worktree and branch'
-        }
-      ]
-    });
-  } catch {
-    // Handle q key - return 'back' to maintain compatibility
-    return 'back';
-  }
+  const result = await createQuitableSelect({
+    message: 'What would you like to do (q to go back)?',
+    choices: [
+      {
+        name: '📂 Open in Claude Code',
+        value: 'open' as const,
+        description: 'Launch Claude Code in this worktree'
+      },
+      {
+        name: '🗑️  Remove worktree',
+        value: 'remove' as const,
+        description: 'Delete this worktree only'
+      },
+      {
+        name: '🔥 Remove worktree and branch',
+        value: 'remove-branch' as const,
+        description: 'Delete both worktree and branch'
+      }
+    ]
+  });
+
+  return result === null ? 'back' : result;
 }
 
 export async function confirmBranchRemoval(branchName: string): Promise<boolean> {
@@ -509,15 +642,22 @@ export async function selectSession(sessions: SessionData[]): Promise<SessionDat
   
   // No cancel option - use q key to go back
 
-  let selectedIndex;
-  try {
-    selectedIndex = await select({
-      message: 'Select session (q to go back):',
-      choices: groupedChoices,
-      pageSize: 12
-    });
-  } catch {
-    // Handle q key - user wants to go back
+  const selectedIndex = await createQuitableSelect({
+    message: 'Select session (q to go back):',
+    choices: groupedChoices.map(choice => {
+      const result: { name: string; value: string; description?: string; disabled?: boolean | string } = {
+        name: choice.name,
+        value: choice.value
+      };
+      if (choice.description) result.description = choice.description;
+      if (choice.disabled) result.disabled = choice.disabled;
+      return result;
+    }),
+    pageSize: 12
+  });
+
+  if (selectedIndex === null) {
+    // User pressed q - user wants to go back
     return null;
   }
 
@@ -560,14 +700,21 @@ export async function selectClaudeConversation(worktreePath: string): Promise<im
     // No cancel option - use q key to go back
 
     // Single selection prompt
-    let selectedValue;
-    try {
-      selectedValue = await select({
-        message: 'Choose conversation to resume (q to go back):',
-        choices: choices,
-        pageSize: 15
-      });
-    } catch {
+    const selectedValue = await createQuitableSelect({
+      message: 'Choose conversation to resume (q to go back):',
+      choices: choices.map(choice => {
+        const result: { name: string; value: string; description?: string; disabled?: boolean | string } = {
+          name: choice.name,
+          value: choice.value
+        };
+        if (choice.description) result.description = choice.description;
+        if (choice.disabled) result.disabled = choice.disabled;
+        return result;
+      }),
+      pageSize: 15
+    });
+
+    if (selectedValue === null) {
       // Handle q key - user wants to go back
       return null;
     }
