@@ -34,8 +34,25 @@ export async function launchClaudeCode(
         console.log(chalk.cyan('   📱 Continuing most recent conversation'));
         break;
       case 'resume':
-        args.push('-r');
-        console.log(chalk.cyan('   🔄 Resuming selected conversation'));
+        // Use our custom conversation selection instead of claude -r
+        console.log(chalk.cyan('   🔄 Selecting conversation to resume'));
+        
+        try {
+          const { selectClaudeConversation } = await import('./ui/prompts.js');
+          const selectedConversation = await selectClaudeConversation(worktreePath);
+          
+          if (selectedConversation) {
+            console.log(chalk.green(`   ✨ Resuming: ${selectedConversation.title}`));
+            // For now, use standard resume mode - in the future, we could launch with specific conversation ID
+            args.push('-r');
+          } else {
+            // User cancelled or no conversations found, fall back to normal mode
+            console.log(chalk.gray('   ✨ Starting new session'));
+          }
+        } catch (error) {
+          console.warn(chalk.yellow('   ⚠️  Failed to load conversation history, using standard resume'));
+          args.push('-r');
+        }
         break;
       case 'normal':
       default:

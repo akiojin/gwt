@@ -520,6 +520,220 @@ export async function selectSession(sessions: SessionData[]): Promise<SessionDat
   return sessions[index] ?? null;
 }
 
+/**
+ * Select Claude Code conversation from history
+ */
+export async function selectClaudeConversation(worktreePath: string): Promise<import('../claude-history.js').ClaudeConversation | null> {
+  try {
+    const { getConversationsForProject, isClaudeHistoryAvailable } = await import('../claude-history.js');
+    
+    // Check if Claude Code history is available
+    if (!(await isClaudeHistoryAvailable())) {
+      console.log(chalk.yellow('⚠️  Claude Code history not found on this system'));
+      console.log(chalk.gray('   Using standard Claude Code resume functionality instead...'));
+      return null;
+    }
+
+    console.log('\n' + chalk.bold.cyan('Recent Claude Code Conversations'));
+    console.log(chalk.gray('Select a conversation to resume:\n'));
+
+    // Get conversations for the current project
+    const conversations = await getConversationsForProject(worktreePath);
+    
+    if (conversations.length === 0) {
+      console.log(chalk.yellow('📭 No conversations found for this project'));
+      console.log(chalk.gray('   Starting a new conversation instead...'));
+      return null;
+    }
+
+    // Categorize conversations by recency
+    const categorizedConversations = categorizeConversationsByActivity(conversations);
+    
+    // Create grouped choices
+    const choices = createConversationChoices(categorizedConversations);
+    
+    // Add cancel option
+    choices.push({
+      name: chalk.gray('← Cancel'),
+      value: 'cancel'
+    });
+
+    const selectedValue = await select({
+      message: '',
+      choices: choices,
+      pageSize: 10
+    });
+
+    if (selectedValue === 'cancel') {
+      return null;
+    }
+
+    const selectedIndex = parseInt(selectedValue);
+    return conversations[selectedIndex] || null;
+  } catch (error) {
+    console.error(chalk.red('Failed to load Claude Code conversations:'), error);
+    console.log(chalk.gray('Using standard Claude Code resume functionality instead...'));
+    return null;
+  }
+}
+
+/**
+ * Conversation category for grouping
+ */
+interface ConversationCategory {
+  type: 'recent' | 'this-week' | 'older';
+  title: string;
+  emoji: string;
+}
+
+/**
+ * Categorized conversation with metadata
+ */
+interface CategorizedConversation {
+  conversation: import('../claude-history.js').ClaudeConversation;
+  category: ConversationCategory;
+  index: number;
+}
+
+/**
+ * Categorize conversations by activity recency
+ */
+function categorizeConversationsByActivity(
+  conversations: import('../claude-history.js').ClaudeConversation[]
+): CategorizedConversation[] {
+  const now = Date.now();
+  const oneDay = 24 * 60 * 60 * 1000;
+  const oneWeek = 7 * oneDay;
+
+  return conversations.map((conversation, index) => {
+    const age = now - conversation.lastActivity;
+    
+    let category: ConversationCategory;
+    if (age < oneDay) {
+      category = {
+        type: 'recent',
+        title: '🔥 Recent (within 24 hours)',
+        emoji: '🔥'
+      };
+    } else if (age < oneWeek) {
+      category = {
+        type: 'this-week', 
+        title: '📅 This week',
+        emoji: '📅'
+      };
+    } else {
+      category = {
+        type: 'older',
+        title: '📚 Older conversations',
+        emoji: '📚'
+      };
+    }
+
+    return {
+      conversation,
+      category,
+      index
+    };
+  });
+}
+
+/**
+ * Create conversation choices with grouping
+ */
+function createConversationChoices(
+  categorizedConversations: CategorizedConversation[]
+): Array<{ name: string; value: string; description?: string; disabled?: boolean }> {
+  const choices: Array<{ name: string; value: string; description?: string; disabled?: boolean }> = [];
+  
+  // Group conversations by category
+  const groups = new Map<string, CategorizedConversation[]>();
+  groups.set('recent', []);
+  groups.set('this-week', []);
+  groups.set('older', []);
+  
+  for (const item of categorizedConversations) {
+    const group = groups.get(item.category.type) || [];
+    group.push(item);
+    groups.set(item.category.type, group);
+  }
+
+  // Add groups in order
+  const groupOrder = ['recent', 'this-week', 'older'] as const;
+  
+  for (const groupType of groupOrder) {
+    const group = groups.get(groupType as string) || [];
+    
+    if (group.length === 0) continue;
+    
+    // Add group header
+    const category = group[0]?.category;
+    if (!category) continue;
+    
+    choices.push({
+      name: `\n${category.title}`,
+      value: `__header_${groupType}__`,
+      disabled: true
+    });
+    
+    // Add conversations in this group
+    for (const { conversation, index } of group) {
+      const formatted = formatConversationDisplay(conversation, index);
+      choices.push(formatted);
+    }
+  }
+  
+  // Add separator before cancel option
+  if (choices.length > 0) {
+    choices.push({
+      name: '',
+      value: '__separator__',
+      disabled: true
+    });
+  }
+  
+  return choices;
+}
+
+/**
+ * Format conversation display
+ */
+function formatConversationDisplay(
+  conversation: import('../claude-history.js').ClaudeConversation,
+  index: number
+): { name: string; value: string; description?: string } {
+  const timeAgo = formatTimeAgo(conversation.lastActivity);
+  const messageCount = conversation.messageCount;
+  
+  // Icon based on conversation content/title
+  let icon = '💬';
+  const lowerTitle = conversation.title.toLowerCase();
+  if (lowerTitle.includes('bug') || lowerTitle.includes('fix') || lowerTitle.includes('error')) {
+    icon = '🐛';
+  } else if (lowerTitle.includes('feature') || lowerTitle.includes('implement') || lowerTitle.includes('add')) {
+    icon = '🚀';
+  } else if (lowerTitle.includes('doc') || lowerTitle.includes('readme') || lowerTitle.includes('comment')) {
+    icon = '📝';
+  } else if (lowerTitle.includes('test') || lowerTitle.includes('spec')) {
+    icon = '🧪';
+  }
+  
+  // Format: "  💬 Conversation title               (X messages, time ago)"
+  const title = conversation.title.length > 45 ? 
+    conversation.title.substring(0, 42) + '...' : 
+    conversation.title;
+  
+  const padding = Math.max(0, 45 - title.length);
+  const metadata = `(${messageCount} message${messageCount !== 1 ? 's' : ''}, ${chalk.gray(timeAgo)})`;
+  
+  const display = `  ${icon} ${chalk.cyan(title)}${' '.repeat(padding)} ${metadata}`;
+  
+  return {
+    name: display,
+    value: index.toString(),
+    description: conversation.summary || ''
+  };
+}
+
 export async function selectClaudeExecutionMode(): Promise<{
   mode: 'normal' | 'continue' | 'resume';
   skipPermissions: boolean;
