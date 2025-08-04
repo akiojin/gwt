@@ -531,7 +531,7 @@ export async function selectSession(sessions: SessionData[]): Promise<SessionDat
  */
 export async function selectClaudeConversation(worktreePath: string): Promise<import('../claude-history.js').ClaudeConversation | null> {
   try {
-    const { getConversationsForProject, isClaudeHistoryAvailable, getDetailedConversation } = await import('../claude-history.js');
+    const { getConversationsForProject, isClaudeHistoryAvailable } = await import('../claude-history.js');
     
     // Check if Claude Code history is available
     if (!(await isClaudeHistoryAvailable())) {
@@ -539,6 +539,9 @@ export async function selectClaudeConversation(worktreePath: string): Promise<im
       console.log(chalk.gray('   Using standard Claude Code resume functionality instead...'));
       return null;
     }
+
+    console.log('\n' + chalk.bold.cyan('🔄 Resume Claude Code Conversation'));
+    console.log(chalk.gray('Select a conversation to resume:\n'));
 
     // Get conversations for the current project
     const conversations = await getConversationsForProject(worktreePath);
@@ -561,42 +564,7 @@ export async function selectClaudeConversation(worktreePath: string): Promise<im
       value: 'cancel'
     });
 
-    // Create a dynamic preview system like ccresume
-    let selectedConversation: import('../claude-history.js').ClaudeConversation | null = null;
-    
-    // Display header
-    console.clear();
-    console.log(chalk.bold.cyan('🔄 Resume Claude Code Conversation'));
-    console.log(chalk.gray('─'.repeat(80)));
-    console.log();
-    
-    // Show conversation list
-    console.log(chalk.bold('Select a conversation:'));
-    conversations.slice(0, 10).forEach((conv, index) => {
-      const indicator = index === 0 ? '▶' : ' ';
-      const title = conv.title.length > 50 ? conv.title.substring(0, 47) + '...' : conv.title;
-      console.log(`${chalk.cyan(indicator)} ${index + 1}. ${title}`);
-    });
-    
-    console.log();
-    console.log(chalk.gray('─'.repeat(80)));
-    console.log(chalk.bold('Preview:'));
-    
-    // Initial preview for first conversation
-    if (conversations.length > 0) {
-      selectedConversation = conversations[0] || null;
-      if (selectedConversation) {
-        const detailed = await getDetailedConversation(selectedConversation);
-        if (detailed) {
-          displayConversationPreview(detailed.messages);
-        }
-      }
-    }
-    
-    console.log();
-    console.log(chalk.gray('─'.repeat(80)));
-    
-    // Get user selection with enhanced interface
+    // Single selection prompt
     const selectedValue = await select({
       message: 'Choose conversation to resume:',
       choices: choices,
@@ -608,13 +576,27 @@ export async function selectClaudeConversation(worktreePath: string): Promise<im
     }
 
     const selectedIndex = parseInt(selectedValue);
-    selectedConversation = conversations[selectedIndex] || null;
+    const selectedConversation = conversations[selectedIndex] || null;
     
     if (!selectedConversation) {
       return null;
     }
 
-    // Simple confirmation
+    // Show preview before final confirmation
+    console.log('\n' + chalk.bold.cyan('📖 Conversation Preview'));
+    console.log(chalk.gray('─'.repeat(80)));
+    console.log();
+    
+    const { getDetailedConversation } = await import('../claude-history.js');
+    const detailed = await getDetailedConversation(selectedConversation);
+    if (detailed) {
+      displayConversationPreview(detailed.messages);
+    }
+    
+    console.log();
+    console.log(chalk.gray('─'.repeat(80)));
+
+    // Final confirmation
     const shouldResume = await confirm({
       message: `Resume "${selectedConversation.title}"?`,
       default: true
