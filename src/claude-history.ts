@@ -131,12 +131,35 @@ async function parseConversationFile(filePath: string): Promise<ClaudeConversati
     let title = 'Untitled Conversation';
     
     // Debug: Log raw messages for investigation
-    if (process.env.DEBUG_CLAUDE_HISTORY) {
-      console.log(`[DEBUG] Processing file: ${filePath}`);
+    if (process.env.DEBUG_CLAUDE_HISTORY || process.env.CLAUDE_WORKTREE_DEBUG) {
+      console.log(`
+[DEBUG] ===== Processing file: ${filePath} =====`);
       console.log(`[DEBUG] File basename: ${path.basename(filePath, '.jsonl')}`);
       console.log(`[DEBUG] Message count: ${messages.length}`);
-      console.log(`[DEBUG] First message:`, JSON.stringify(messages[0], null, 2));
-      console.log(`[DEBUG] All message roles:`, messages.map(m => m.role || 'no-role'));
+      
+      // Log first 3 messages in detail
+      console.log(`[DEBUG] First 3 messages:`);
+      messages.slice(0, 3).forEach((msg, idx) => {
+        console.log(`[DEBUG] Message ${idx + 1}:`);
+        console.log(`  - Type: ${typeof msg}`);
+        console.log(`  - Keys: ${Object.keys(msg).join(', ')}`);
+        console.log(`  - Role: ${msg.role || 'undefined'}`);
+        console.log(`  - Content type: ${typeof msg.content}`);
+        if (msg.content) {
+          if (typeof msg.content === 'string') {
+            console.log(`  - Content preview: ${msg.content.substring(0, 100)}...`);
+          } else if (Array.isArray(msg.content)) {
+            console.log(`  - Content is array with ${msg.content.length} items`);
+            if (msg.content[0]) {
+              console.log(`  - First item type: ${typeof msg.content[0]}`);
+              console.log(`  - First item keys: ${typeof msg.content[0] === 'object' ? Object.keys(msg.content[0]).join(', ') : 'N/A'}`);
+            }
+          } else {
+            console.log(`  - Content is object with keys: ${Object.keys(msg.content).join(', ')}`);
+          }
+        }
+        console.log('');
+      });
     }
     
     // Find first user message - be more flexible about role matching
@@ -213,33 +236,56 @@ async function parseConversationFile(filePath: string): Promise<ClaudeConversati
         title = cleanFileName.replace(/[-_]/g, ' ').trim();
         title = title.charAt(0).toUpperCase() + title.slice(1);
       } else {
-        // If we only have UUID or nothing meaningful, create a better fallback
-        if (messages.length > 0) {
-          // Try to create title from first few messages
-          const firstMessages = messages.slice(0, 3);
-          const keywords = [];
-          
-          for (const msg of firstMessages) {
-            if (msg.content) {
-              let content = '';
-              if (typeof msg.content === 'string') {
-                content = msg.content;
-              } else if (Array.isArray(msg.content) && msg.content[0]) {
-                content = msg.content[0].text || msg.content[0].content || '';
+        // Fallback: try to extract from any message content
+        let foundTitle = false;
+        
+        // Try all messages, not just user messages
+        for (const msg of messages.slice(0, 10)) { // Check first 10 messages
+          if (msg && msg.content) {
+            let content = '';
+            
+            // Extract content regardless of format
+            if (typeof msg.content === 'string') {
+              content = msg.content;
+            } else if (Array.isArray(msg.content)) {
+              for (const item of msg.content) {
+                if (typeof item === 'string') {
+                  content = item;
+                  break;
+                } else if (item && typeof item === 'object') {
+                  content = item.text || item.content || JSON.stringify(item).substring(0, 100);
+                  if (content) break;
+                }
               }
+            } else if (typeof msg.content === 'object') {
+              content = msg.content.text || msg.content.content || JSON.stringify(msg.content).substring(0, 100);
+            }
+            
+            // Clean and extract meaningful text
+            if (content && content.length > 10) {
+              // Remove common prefixes and clean up
+              const cleaned = content
+                .replace(/^(Human:|Assistant:|User:|System:|<.*?>|\[.*?\])/gi, '')
+                .replace(/^\s*[-#*•]\s*/gm, '') // Remove list markers
+                .trim();
               
-              // Extract meaningful words from content
-              const words = content.split(/\s+/).slice(0, 5).join(' ');
-              if (words && words.length > 10) {
-                keywords.push(words.substring(0, 30) + '...');
-                break;
+              if (cleaned.length > 10) {
+                // Get first sentence or line
+                const firstSentence = cleaned.match(/^[^.!?\n]{10,60}/)?.[0] || cleaned.substring(0, 50);
+                if (firstSentence && firstSentence.length > 10) {
+                  title = firstSentence.trim() + (firstSentence.length === 50 ? '...' : '');
+                  foundTitle = true;
+                  break;
+                }
               }
             }
           }
-          
-          title = keywords.length > 0 ? keywords[0]! : 'Recent conversation';
-        } else {
-          title = 'Empty conversation';
+        }
+        
+        // If still no title, use generic title
+        if (!foundTitle) {
+          // We'll use the file stats later for the date
+          title = `Conversation (${messages.length} messages)`;
         }
       }
     }
