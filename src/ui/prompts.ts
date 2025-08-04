@@ -596,59 +596,24 @@ export async function selectClaudeConversation(worktreePath: string): Promise<im
     console.log();
     console.log(chalk.gray('─'.repeat(Math.min(80, process.stdout.columns || 80))));
 
-    // Simplified action selection - use q to go back
-    let action;
+    // Simple confirmation - use q to go back
     try {
-      action = await select({
-        message: 'What would you like to do (q to go back)?',
-        choices: [
-          {
-            name: chalk.green(`✅ Resume "${selectedConversation.title}"`),
-            value: 'resume'
-          },
-          {
-            name: chalk.blue('📋 View more messages'),
-            value: 'view_more'
-          }
-        ]
+      const shouldResume = await confirm({
+        message: `Resume "${selectedConversation.title}"?`,
+        default: true
       });
+      
+      if (shouldResume) {
+        return selectedConversation;
+      } else {
+        // User chose not to resume, go back to conversation selection
+        console.clear();
+        return await selectClaudeConversation(worktreePath);
+      }
     } catch {
       // Handle q key - go back to conversation selection
       console.clear();
       return await selectClaudeConversation(worktreePath);
-    }
-    
-    switch (action) {
-      case 'resume':
-        return selectedConversation;
-      case 'view_more': {
-        // Show extended preview
-        console.clear();
-        console.log(chalk.bold.cyan('📖 Extended Conversation History'));
-        console.log(chalk.gray('─'.repeat(Math.min(80, process.stdout.columns || 80))));
-        console.log();
-        
-        if (detailed) {
-          displayExtendedConversationPreview(detailed.messages);
-        }
-        
-        console.log();
-        console.log(chalk.gray('─'.repeat(Math.min(80, process.stdout.columns || 80))));
-        
-        const resumeAfterExtended = await confirm({
-          message: `Resume "${selectedConversation.title}"?`,
-          default: true
-        });
-        
-        if (resumeAfterExtended) {
-          return selectedConversation;
-        } else {
-          console.clear();
-          return await selectClaudeConversation(worktreePath);
-        }
-      }
-      default:
-        return null;
     }
   } catch {
     console.error(chalk.red('Failed to load Claude Code conversations:'));
@@ -830,98 +795,7 @@ function displayConversationPreview(messages: import('../claude-history.js').Cla
   }
 }
 
-/**
- * Display extended conversation preview with more messages
- */
-function displayExtendedConversationPreview(messages: import('../claude-history.js').ClaudeMessage[]): void {
-  // Get terminal height and use most of it for extended preview
-  const terminalHeight = process.stdout.rows || 24;
-  const headerLines = 3; // Title + separator + empty line
-  const footerLines = 4; // Empty line + separator + confirmation prompt + extra space
-  const availableLines = Math.max(15, terminalHeight - headerLines - footerLines);
-  
-  // Show many more messages for extended preview - aim to fill most of the screen
-  const messagesToShow = Math.min(messages.length, Math.floor(availableLines * 0.8)); // Use 80% of available lines
-  const recentMessages = messages.slice(-messagesToShow);
-  
-  recentMessages.forEach((message, index) => {
-    const isUser = message.role === 'user';
-    const roleSymbol = isUser ? '>' : '⏺';
-    const roleColor = isUser ? chalk.blue : chalk.cyan;
-    
-    // Add separator between messages for better readability
-    if (index > 0) {
-      console.log(chalk.gray('┈'.repeat(40)));
-    }
-    
-    // Format message content
-    let content = '';
-    if (typeof message.content === 'string') {
-      content = message.content;
-    } else if (Array.isArray(message.content)) {
-      content = message.content.map(item => item.text || '').join(' ');
-    }
-    
-    // Handle special content types
-    let displayContent = content;
-    
-    if (content.startsWith('🔧 Used tool:')) {
-      const toolName = content.replace('🔧 Used tool: ', '');
-      displayContent = chalk.yellow(`[Tool: ${toolName}]`);
-    } else {
-      // For extended preview, show more content
-      const terminalWidth = process.stdout.columns || 80;
-      const maxContentWidth = terminalWidth - 15; // Account for role label and spacing
-      
-      // Show more lines and characters for extended preview
-      const lines = content.split('\n');
-      const maxLines = 8; // Show up to 8 lines per message
-      
-      if (lines.length > maxLines) {
-        const shownLines = lines.slice(0, maxLines);
-        const lastLine = shownLines[shownLines.length - 1];
-        
-        // Truncate last shown line if needed
-        if (lastLine && lastLine.length > maxContentWidth) {
-          shownLines[shownLines.length - 1] = lastLine.substring(0, maxContentWidth - 3) + '...';
-        }
-        
-        displayContent = shownLines.join('\n') + '\n' + 
-          chalk.gray(`... (${lines.length - maxLines} more lines, ${content.length - shownLines.join('\n').length} more chars)`);
-      } else {
-        // Handle long single lines
-        displayContent = lines.map(line => {
-          if (line.length > maxContentWidth) {
-            return line.substring(0, maxContentWidth - 3) + '...';
-          }
-          return line;
-        }).join('\n');
-      }
-    }
-    
-    // Format with role
-    const roleDisplay = roleColor(roleSymbol);
-    
-    // Handle multi-line display with Claude Code formatting
-    const contentLines = displayContent.split('\n');
-    contentLines.forEach((line, lineIndex) => {
-      if (lineIndex === 0) {
-        console.log(`${roleDisplay} ${line}`);
-      } else {
-        // Indent continuation lines
-        console.log(`   ${line}`); // Simple indent for continuation lines
-      }
-    });
-    
-    // Add spacing between messages like Claude Code
-    console.log();
-  });
-  
-  if (messages.length > messagesToShow) {
-    console.log();
-    console.log(chalk.gray(`... and ${messages.length - messagesToShow} more messages above (${messages.length} total)`));
-  }
-}
+
 
 /**
  * Conversation category for grouping
@@ -1120,39 +994,88 @@ export async function selectClaudeExecutionMode(): Promise<{
   mode: 'normal' | 'continue' | 'resume';
   skipPermissions: boolean;
 } | null> {
-  try {
-    const mode = await select({
-      message: 'Select Claude Code execution mode (q to go back):',
-      choices: [
-        {
-          name: '🚀 Normal - Start a new session',
-          value: 'normal',
-          description: 'Launch Claude Code normally'
-        },
-        {
-          name: '⏭️  Continue - Continue most recent conversation (-c)',
-          value: 'continue',
-          description: 'Continue from the most recent conversation'
-        },
-        {
-          name: '🔄 Resume - Select conversation to resume (-r)',
-          value: 'resume',
-          description: 'Interactively select a conversation to resume'
-        }
-      ],
-      pageSize: 3
-    }) as 'normal' | 'continue' | 'resume';
+  const { createPrompt, useState, useKeypress, isEnterKey, usePrefix, isUpKey, isDownKey } = await import('@inquirer/core');
 
-    const skipPermissions = await confirm({
-      message: 'Skip permission checks? (--dangerously-skip-permissions)',
-      default: false
+  // Custom prompt that handles 'q' key
+  const customSelect = createPrompt<string | null, { message: string; choices: any[] }>((config, done) => {
+    const [selectedIndex, setSelectedIndex] = useState<number>(0);
+    const [status, setStatus] = useState<'idle' | 'done'>('idle');
+    const prefix = usePrefix({});
+
+    useKeypress((key) => {
+      if (status === 'done') return;
+
+      if (key.name === 'q' || (key.name === 'c' && key.ctrl)) {
+        setStatus('done');
+        done(null); // Return null for cancelled
+        return;
+      }
+
+      if (isEnterKey(key)) {
+        const selectedChoice = config.choices[selectedIndex];
+        setStatus('done');
+        done(selectedChoice.value);
+        return;
+      }
+
+      if (isUpKey(key)) {
+        const newIndex = selectedIndex > 0 ? selectedIndex - 1 : config.choices.length - 1;
+        setSelectedIndex(newIndex);
+      } else if (isDownKey(key)) {
+        const newIndex = selectedIndex < config.choices.length - 1 ? selectedIndex + 1 : 0;
+        setSelectedIndex(newIndex);
+      }
     });
 
-    return { mode, skipPermissions };
-  } catch {
-    // Handle Ctrl+C or q key - user wants to go back
+    if (status === 'done') {
+      return '';
+    }
+
+    const message = config.message;
+    const choicesDisplay = config.choices.map((choice, index) => {
+      const isSelected = index === selectedIndex;
+      const pointer = isSelected ? '❯' : ' ';
+      const nameColor = isSelected ? chalk.cyan : chalk.reset;
+      return `${pointer} ${nameColor(choice.name)}${isSelected && choice.description ? '\n  ' + chalk.gray(choice.description) : ''}`;
+    }).join('\n');
+
+    return `${prefix} ${message}\n${choicesDisplay}`;
+  });
+
+  const choices = [
+    {
+      name: '🚀 Normal - Start a new session',
+      value: 'normal',
+      description: 'Launch Claude Code normally'
+    },
+    {
+      name: '⏭️  Continue - Continue most recent conversation (-c)',
+      value: 'continue',
+      description: 'Continue from the most recent conversation'
+    },
+    {
+      name: '🔄 Resume - Select conversation to resume (-r)',
+      value: 'resume',
+      description: 'Interactively select a conversation to resume'
+    }
+  ];
+
+  const mode = await customSelect({
+    message: 'Select Claude Code execution mode (q to go back):',
+    choices
+  });
+
+  if (mode === null) {
+    // User pressed 'q' or Ctrl+C
     return null;
   }
+
+  const skipPermissions = await confirm({
+    message: 'Skip permission checks? (--dangerously-skip-permissions)',
+    default: false
+  });
+
+  return { mode: mode as 'normal' | 'continue' | 'resume', skipPermissions };
 }
 
 function formatTimeAgo(timestamp: number): string {
