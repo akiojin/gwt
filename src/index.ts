@@ -50,7 +50,8 @@ import {
   confirmCleanup,
   confirmRemoteBranchDeletion,
   confirmPushUnpushedCommits,
-  confirmProceedWithoutPush
+  confirmProceedWithoutPush,
+  selectSession
 } from './ui/prompts.js';
 import { 
   displayBranchTable,
@@ -71,7 +72,7 @@ import { CleanupTarget } from './ui/types.js';
 import { AppError, setupExitHandlers, handleUserCancel } from './utils.js';
 import { BranchInfo, WorktreeConfig } from './ui/types.js';
 import { WorktreeInfo } from './worktree.js';
-import { loadSession, saveSession, SessionData } from './config/index.js';
+import { loadSession, saveSession, SessionData, getAllSessions } from './config/index.js';
 
 function showHelp(): void {
   console.log(`
@@ -81,6 +82,7 @@ Usage: claude-worktree [options]
 
 Options:
   -c              Continue from the last session (automatically open the last used worktree)
+  -r, --resume    Resume a session - interactively select from available sessions
   -h, --help      Show this help message
 
 Description:
@@ -88,6 +90,7 @@ Description:
   
   Without options: Opens the interactive menu to select branches and manage worktrees.
   With -c option: Automatically continues from where you left off in the last session.
+  With -r option: Shows a list of recent sessions to choose from and resume.
 `);
 }
 
@@ -96,6 +99,7 @@ export async function main(): Promise<void> {
     // Parse command line arguments
     const args = process.argv.slice(2);
     const continueLastSession = args.includes('-c');
+    const resumeSession = args.includes('-r') || args.includes('--resume');
     const showHelpFlag = args.includes('-h') || args.includes('--help');
 
     // Show help if requested
@@ -162,6 +166,43 @@ export async function main(): Promise<void> {
         }
       } else {
         printInfo('No previous session found. Starting normally...');
+      }
+    }
+
+    // Handle resume session option
+    if (resumeSession) {
+      const allSessions = await getAllSessions();
+      if (allSessions.length === 0) {
+        printInfo('No previous sessions found. Starting normally...');
+      } else {
+        const selectedSession = await selectSession(allSessions);
+        if (selectedSession && selectedSession.lastWorktreePath) {
+          printInfo(`Resuming session: ${selectedSession.lastBranch} (${selectedSession.lastWorktreePath})`);
+          
+          // Check if worktree still exists
+          if (await worktreeExists(selectedSession.lastBranch!)) {
+            const skipPermissions = await confirmSkipPermissions();
+            
+            try {
+              await launchClaudeCode(selectedSession.lastWorktreePath, skipPermissions);
+              await handlePostClaudeChanges(selectedSession.lastWorktreePath);
+            } catch (error) {
+              if (error instanceof ClaudeError) {
+                printError(`Failed to launch Claude Code: ${error.message}`);
+              } else {
+                printError(`Unexpected error: ${error instanceof Error ? error.message : String(error)}`);
+              }
+              await confirmContinue('Press enter to continue...');
+            }
+            
+            return; // Exit after resuming session
+          } else {
+            printWarning(`Selected session worktree no longer exists: ${selectedSession.lastWorktreePath}`);
+            printInfo('Falling back to normal flow...');
+          }
+        } else {
+          printInfo('No session selected. Starting normally...');
+        }
       }
     }
 

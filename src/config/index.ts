@@ -124,3 +124,45 @@ export async function loadSession(repositoryRoot: string): Promise<SessionData |
     return null;
   }
 }
+
+export async function getAllSessions(): Promise<SessionData[]> {
+  try {
+    const sessionDir = path.join(homedir(), '.config', 'claude-worktree', 'sessions');
+    const { readdir } = await import('node:fs/promises');
+    
+    const files = await readdir(sessionDir);
+    const sessions: SessionData[] = [];
+    const now = Date.now();
+    const maxAge = 24 * 60 * 60 * 1000; // 24時間
+    
+    for (const file of files) {
+      if (!file.endsWith('.json')) continue;
+      
+      try {
+        const filePath = path.join(sessionDir, file);
+        const content = await readFile(filePath, 'utf-8');
+        const sessionData = JSON.parse(content) as SessionData;
+        
+        // 有効期限内のセッションのみ
+        const sessionAge = now - sessionData.timestamp;
+        if (sessionAge <= maxAge) {
+          sessions.push(sessionData);
+        }
+      } catch (error) {
+        if (process.env.DEBUG_SESSION) {
+          console.error(`Failed to load session file ${file}:`, error instanceof Error ? error.message : String(error));
+        }
+      }
+    }
+    
+    // 最新のものから順にソート
+    sessions.sort((a, b) => b.timestamp - a.timestamp);
+    
+    return sessions;
+  } catch (error) {
+    if (process.env.DEBUG_SESSION) {
+      console.error('Failed to get all sessions:', error instanceof Error ? error.message : String(error));
+    }
+    return [];
+  }
+}
