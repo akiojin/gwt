@@ -16,7 +16,9 @@ import {
   fetchAllRemotes,
   pushBranchToRemote,
   isInWorktree,
-  GitError 
+  GitError,
+  getCurrentVersion,
+  executeNpmVersion
 } from './git.js';
 import { 
   listAdditionalWorktrees,
@@ -52,7 +54,8 @@ import {
   confirmPushUnpushedCommits,
   confirmProceedWithoutPush,
   selectSession,
-  selectClaudeExecutionMode
+  selectClaudeExecutionMode,
+  selectVersionBumpType
 } from './ui/prompts.js';
 import { 
   displayBranchTable,
@@ -388,7 +391,26 @@ async function handleBranchSelection(branchName: string, repoRoot: string): Prom
 async function handleCreateNewBranch(branches: BranchInfo[], repoRoot: string): Promise<boolean> {
   try {
     const newBranchConfig = await getNewBranchConfig();
-    const targetBranch = newBranchConfig.branchName;
+    let targetBranch = newBranchConfig.branchName;
+    let baseBranch = await selectBaseBranch(branches);
+
+    // リリースブランチの場合、npm versionと連携
+    if (newBranchConfig.type === 'release') {
+      const currentVersion = await getCurrentVersion(repoRoot);
+      const versionBump = await selectVersionBumpType(currentVersion);
+      
+      printInfo(`Executing npm version ${versionBump}...`);
+      try {
+        const newVersion = await executeNpmVersion(repoRoot, versionBump);
+        // リリースブランチ名を自動生成
+        targetBranch = `release/v${newVersion}`;
+        printSuccess(`Version bumped to ${newVersion}`);
+        printInfo(`Release branch name: ${targetBranch}`);
+      } catch (error) {
+        printError(`Failed to execute npm version: ${error instanceof Error ? error.message : String(error)}`);
+        return true;
+      }
+    }
 
     // Check if branch already exists
     if (await branchExists(targetBranch)) {
@@ -399,8 +421,6 @@ async function handleCreateNewBranch(branches: BranchInfo[], repoRoot: string): 
       return false;
     }
 
-    // Select base branch
-    const baseBranch = await selectBaseBranch(branches);
     printInfo(`Creating new branch "${targetBranch}" from "${baseBranch}"`);
 
     // Create worktree path

@@ -251,6 +251,34 @@ export async function selectBranchType(): Promise<BranchType> {
   });
 }
 
+export async function selectVersionBumpType(currentVersion: string): Promise<'patch' | 'minor' | 'major'> {
+  const versionParts = currentVersion.split('.');
+  const major = parseInt(versionParts[0] || '0');
+  const minor = parseInt(versionParts[1] || '0');
+  const patch = parseInt(versionParts[2] || '0');
+  
+  return await select({
+    message: `Current version: ${currentVersion}. Select version bump type:`,
+    choices: [
+      {
+        name: `📌 Patch (${major}.${minor}.${patch + 1})`,
+        value: 'patch',
+        description: 'Bug fixes and minor changes'
+      },
+      {
+        name: `📈 Minor (${major}.${minor + 1}.0)`,
+        value: 'minor',
+        description: 'New features, backwards compatible'
+      },
+      {
+        name: `🚀 Major (${major + 1}.0.0)`,
+        value: 'major',
+        description: 'Breaking changes'
+      }
+    ]
+  });
+}
+
 export async function inputBranchName(type: BranchType): Promise<string> {
   return await input({
     message: `Enter ${type} name:`,
