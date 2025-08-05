@@ -1,4 +1,5 @@
 import { execa } from 'execa';
+import path from 'node:path';
 import { BranchInfo } from './ui/types.js';
 
 export class GitError extends Error {
@@ -355,6 +356,41 @@ export async function fetchAllRemotes(): Promise<void> {
     await execa('git', ['fetch', '--all', '--prune']);
   } catch (error) {
     throw new GitError('Failed to fetch remote branches', error);
+  }
+}
+
+export async function getCurrentVersion(repoRoot: string): Promise<string> {
+  try {
+    const packageJsonPath = path.join(repoRoot, 'package.json');
+    const fs = await import('node:fs');
+    const packageJson = JSON.parse(await fs.promises.readFile(packageJsonPath, 'utf-8'));
+    return packageJson.version || '0.0.0';
+  } catch (error) {
+    // package.jsonが存在しない場合はデフォルトバージョンを返す
+    return '0.0.0';
+  }
+}
+
+export async function executeNpmVersion(
+  repoRoot: string, 
+  versionBump: 'patch' | 'minor' | 'major'
+): Promise<string> {
+  try {
+    // npm versionコマンドを実行（gitタグは作成しない）
+    const { stdout } = await execa('npm', ['version', versionBump, '--no-git-tag-version'], {
+      cwd: repoRoot
+    });
+    
+    // npm versionの出力から新しいバージョンを抽出（v1.2.3形式）
+    const newVersion = stdout.trim().replace(/^v/, '');
+    
+    // package.jsonの変更をコミット
+    await execa('git', ['add', 'package.json', 'package-lock.json'], { cwd: repoRoot });
+    await execa('git', ['commit', '-m', `chore: bump version to ${newVersion}`], { cwd: repoRoot });
+    
+    return newVersion;
+  } catch (error) {
+    throw new GitError(`Failed to execute npm version ${versionBump}`, error);
   }
 }
 
