@@ -136,11 +136,6 @@ async function selectBranchWithShortcuts(
         done('__cleanup_prs__');
         return;
       }
-      if (key.name === 'a') {
-        setStatus('done');
-        done('__account_management__');
-        return;
-      }
       if (key.name === 'q') {
         setStatus('done');
         done('__exit__');
