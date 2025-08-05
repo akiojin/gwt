@@ -854,6 +854,22 @@ async function handlePostClaudeChanges(worktreePath: string): Promise<void> {
                 
                 printSuccess('Pull request created successfully!');
                 printInfo(stdout);
+                
+                // リリースブランチのworktreeとローカルブランチを削除
+                printInfo('\nCleaning up release worktree and local branch...');
+                try {
+                  await removeWorktree(worktreePath, true);
+                  printSuccess('Release worktree removed successfully.');
+                  
+                  // ローカルブランチも削除（リモートブランチは残す）
+                  await deleteBranch(branchName, true);
+                  printSuccess(`Local branch ${branchName} deleted successfully.`);
+                  
+                  printInfo('\nRelease process initiated. The PR is ready for review.');
+                  printInfo('Remote branch is preserved for the PR.');
+                } catch (error) {
+                  printWarning('Failed to clean up. Please remove worktree/branch manually.');
+                }
               } catch (error) {
                 printWarning('Failed to create PR automatically. Please create it manually.');
                 printInfo('\nGit Flow Release Process:');

@@ -422,12 +422,20 @@ export async function executeNpmVersionInWorktree(
         cwd: worktreePath
       });
       
-      // package.jsonとpackage-lock.jsonの変更をコミット
-      await execa('git', ['add', 'package.json', 'package-lock.json'], { cwd: worktreePath });
+      // package.jsonの変更をコミット（package-lock.jsonは存在する場合のみ）
+      const filesToAdd = ['package.json'];
+      if (fs.existsSync(path.join(worktreePath, 'package-lock.json'))) {
+        filesToAdd.push('package-lock.json');
+      }
+      await execa('git', ['add', ...filesToAdd], { cwd: worktreePath });
       await execa('git', ['commit', '-m', `chore: bump version to ${newVersion}`], { cwd: worktreePath });
     }
-  } catch (error) {
-    throw new GitError(`Failed to execute npm version ${newVersion} in worktree`, error);
+  } catch (error: any) {
+    // エラーの詳細情報を含める
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorDetails = error?.stderr ? ` (stderr: ${error.stderr})` : '';
+    const errorStdout = error?.stdout ? ` (stdout: ${error.stdout})` : '';
+    throw new GitError(`Failed to execute npm version ${newVersion} in worktree: ${errorMessage}${errorDetails}${errorStdout}`, error);
   }
 }
 
