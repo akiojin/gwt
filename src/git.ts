@@ -371,26 +371,40 @@ export async function getCurrentVersion(repoRoot: string): Promise<string> {
   }
 }
 
-export async function executeNpmVersion(
-  repoRoot: string, 
+export function calculateNewVersion(
+  currentVersion: string,
   versionBump: 'patch' | 'minor' | 'major'
-): Promise<string> {
+): string {
+  const versionParts = currentVersion.split('.');
+  const major = parseInt(versionParts[0] || '0');
+  const minor = parseInt(versionParts[1] || '0');
+  const patch = parseInt(versionParts[2] || '0');
+  
+  switch (versionBump) {
+    case 'major':
+      return `${major + 1}.0.0`;
+    case 'minor':
+      return `${major}.${minor + 1}.0`;
+    case 'patch':
+      return `${major}.${minor}.${patch + 1}`;
+  }
+}
+
+export async function executeNpmVersionInWorktree(
+  worktreePath: string,
+  newVersion: string
+): Promise<void> {
   try {
-    // npm versionコマンドを実行（gitタグは作成しない）
-    const { stdout } = await execa('npm', ['version', versionBump, '--no-git-tag-version'], {
-      cwd: repoRoot
+    // worktree内でnpm versionコマンドを実行（既に計算済みのバージョンを使用）
+    await execa('npm', ['version', newVersion, '--no-git-tag-version'], {
+      cwd: worktreePath
     });
     
-    // npm versionの出力から新しいバージョンを抽出（v1.2.3形式）
-    const newVersion = stdout.trim().replace(/^v/, '');
-    
-    // package.jsonの変更をコミット
-    await execa('git', ['add', 'package.json', 'package-lock.json'], { cwd: repoRoot });
-    await execa('git', ['commit', '-m', `chore: bump version to ${newVersion}`], { cwd: repoRoot });
-    
-    return newVersion;
+    // package.jsonとpackage-lock.jsonの変更をコミット
+    await execa('git', ['add', 'package.json', 'package-lock.json'], { cwd: worktreePath });
+    await execa('git', ['commit', '-m', `chore: bump version to ${newVersion}`], { cwd: worktreePath });
   } catch (error) {
-    throw new GitError(`Failed to execute npm version ${versionBump}`, error);
+    throw new GitError(`Failed to execute npm version ${newVersion} in worktree`, error);
   }
 }
 
