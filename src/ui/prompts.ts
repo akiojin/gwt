@@ -607,6 +607,29 @@ export async function confirmProceedWithoutPush(branchName: string): Promise<boo
   });
 }
 
+export async function selectReleaseAction(): Promise<'complete' | 'continue' | 'nothing'> {
+  return await select({
+    message: 'What would you like to do with this release branch?',
+    choices: [
+      {
+        name: '🚀 Complete release - Push and create PR to main',
+        value: 'complete',
+        description: 'Start the release process'
+      },
+      {
+        name: '⏸️  Save and continue later',
+        value: 'continue',
+        description: 'Keep the branch for future work'
+      },
+      {
+        name: '❌ Exit without action',
+        value: 'nothing',
+        description: 'Just exit'
+      }
+    ]
+  });
+}
+
 export async function selectSession(sessions: SessionData[]): Promise<SessionData | null> {
   if (sessions.length === 0) {
     return null;

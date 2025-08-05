@@ -58,7 +58,8 @@ import {
   confirmProceedWithoutPush,
   selectSession,
   selectClaudeExecutionMode,
-  selectVersionBumpType
+  selectVersionBumpType,
+  selectReleaseAction
 } from './ui/prompts.js';
 import { 
   displayBranchTable,
@@ -815,24 +816,32 @@ async function handlePostClaudeChanges(worktreePath: string): Promise<void> {
     
     // Check if there are uncommitted changes
     if (!(await hasUncommittedChanges(worktreePath))) {
-      // リリースブランチの場合は、変更がなくてもPR作成を提案
+      // リリースブランチの場合は、変更がなくてもリリースアクションを選択
       if (isReleaseBranch) {
-        printInfo('This is a release branch. You may want to:');
-        printInfo('1. Push changes and create a PR to main');
-        printInfo('2. After merge, create a tag and merge back to develop');
-        const shouldPush = await confirm({
-          message: 'Push release branch and create PR?',
-          default: true
-        });
+        const action = await selectReleaseAction();
         
-        if (shouldPush) {
-          try {
-            await pushBranchToRemote(worktreePath, branchName);
-            printSuccess(`Pushed release branch: ${branchName}`);
-            printInfo('You can now create a PR to main branch using GitHub/GitLab');
-          } catch (error) {
-            printError(`Failed to push: ${error instanceof Error ? error.message : String(error)}`);
-          }
+        switch (action) {
+          case 'complete':
+            try {
+              await pushBranchToRemote(worktreePath, branchName);
+              printSuccess(`Pushed release branch: ${branchName}`);
+              printInfo('\nGit Flow Release Process:');
+              printInfo('1. Create a PR to main branch');
+              printInfo('2. After merge, create a tag on main branch');
+              printInfo('3. Merge back to develop branch');
+              printInfo('\nUse GitHub/GitLab to create the PR.');
+            } catch (error) {
+              printError(`Failed to push: ${error instanceof Error ? error.message : String(error)}`);
+            }
+            break;
+            
+          case 'continue':
+            printInfo('Release branch saved. You can continue working on it later.');
+            break;
+            
+          case 'nothing':
+            // Just exit
+            break;
         }
       }
       return;
@@ -853,25 +862,32 @@ async function handlePostClaudeChanges(worktreePath: string): Promise<void> {
           await commitChanges(worktreePath, commitMessage);
           printSuccess('Changes committed successfully!');
           
-          // リリースブランチの場合は、PR作成を提案
+          // リリースブランチの場合は、リリースアクションを選択
           if (isReleaseBranch) {
-            const shouldPush = await confirm({
-              message: 'Push release branch and create PR to main?',
-              default: true
-            });
+            const action = await selectReleaseAction();
             
-            if (shouldPush) {
-              try {
-                await pushBranchToRemote(worktreePath, branchName);
-                printSuccess(`Pushed release branch: ${branchName}`);
-                printInfo('\nGit Flow Release Process:');
-                printInfo('1. Create a PR to main branch');
-                printInfo('2. After merge, create a tag on main branch');
-                printInfo('3. Merge back to develop branch');
-                printInfo('\nUse GitHub/GitLab to create the PR.');
-              } catch (error) {
-                printError(`Failed to push: ${error instanceof Error ? error.message : String(error)}`);
-              }
+            switch (action) {
+              case 'complete':
+                try {
+                  await pushBranchToRemote(worktreePath, branchName);
+                  printSuccess(`Pushed release branch: ${branchName}`);
+                  printInfo('\nGit Flow Release Process:');
+                  printInfo('1. Create a PR to main branch');
+                  printInfo('2. After merge, create a tag on main branch');
+                  printInfo('3. Merge back to develop branch');
+                  printInfo('\nUse GitHub/GitLab to create the PR.');
+                } catch (error) {
+                  printError(`Failed to push: ${error instanceof Error ? error.message : String(error)}`);
+                }
+                break;
+                
+              case 'continue':
+                printInfo('Release branch saved with your commits. You can continue working on it later.');
+                break;
+                
+              case 'nothing':
+                // Just exit
+                break;
             }
           }
           return;
