@@ -334,6 +334,17 @@ export async function confirmWorktreeRemoval(worktreePath: string): Promise<bool
 
 export async function getNewBranchConfig(): Promise<NewBranchConfig> {
   const type = await selectBranchType();
+  
+  // リリースブランチの場合は、バージョン選択後に自動生成されるため、
+  // ここでは仮の値を返す
+  if (type === 'release') {
+    return {
+      type,
+      taskName: 'version-placeholder',
+      branchName: 'release/version-placeholder'
+    };
+  }
+  
   const taskName = await inputBranchName(type);
   const branchName = `${type}/${taskName}`;
   
