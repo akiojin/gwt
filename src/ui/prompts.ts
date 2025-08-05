@@ -136,6 +136,11 @@ async function selectBranchWithShortcuts(
         done('__cleanup_prs__');
         return;
       }
+      if (key.name === 'a') {
+        setStatus('done');
+        done('__account_management__');
+        return;
+      }
       if (key.name === 'q') {
         setStatus('done');
         done('__exit__');
@@ -197,7 +202,7 @@ async function selectBranchWithShortcuts(
     const pageSize = config.pageSize || 15;
     
     let output = `${prefix} ${config.message}\n`;
-    output += 'Actions: (n) Create new branch, (m) Manage worktrees, (c) Clean up merged PRs, (q) Exit\n\n';
+    output += 'Actions: (n) Create new branch, (m) Manage worktrees, (c) Clean up merged PRs, (a) Account management, (q) Exit\n\n';
     
     // ヘッダー行とセパレーター行を表示
     if (headerChoice) {
