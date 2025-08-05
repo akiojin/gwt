@@ -35,8 +35,7 @@ import {
   ClaudeError 
 } from './claude.js';
 import { 
-  selectFromTable,
-  getNewBranchConfig, 
+  selectFromTable, 
   selectBaseBranch, 
   confirmWorktreeCreation,
   confirmSkipPermissions,
@@ -390,13 +389,22 @@ async function handleBranchSelection(branchName: string, repoRoot: string): Prom
 
 async function handleCreateNewBranch(branches: BranchInfo[], repoRoot: string): Promise<boolean> {
   try {
-    const newBranchConfig = await getNewBranchConfig();
-    let targetBranch = newBranchConfig.branchName;
-    let baseBranch = await selectBaseBranch(branches);
+    // まず、ブランチタイプのみを選択
+    const { selectBranchType } = await import('./ui/prompts.js');
+    const branchType = await selectBranchType();
+    
+    let targetBranch: string;
+    let baseBranch: string;
 
-    // リリースブランチの場合、npm versionと連携
-    if (newBranchConfig.type === 'release') {
+    // リリースブランチの場合は特別な処理
+    if (branchType === 'release') {
+      // 先にベースブランチを選択
+      baseBranch = await selectBaseBranch(branches);
+      
+      // 現在のバージョンを取得
       const currentVersion = await getCurrentVersion(repoRoot);
+      
+      // バージョンバンプタイプを選択
       const versionBump = await selectVersionBumpType(currentVersion);
       
       printInfo(`Executing npm version ${versionBump}...`);
@@ -410,6 +418,12 @@ async function handleCreateNewBranch(branches: BranchInfo[], repoRoot: string): 
         printError(`Failed to execute npm version: ${error instanceof Error ? error.message : String(error)}`);
         return true;
       }
+    } else {
+      // 通常のブランチの場合
+      const { inputBranchName } = await import('./ui/prompts.js');
+      const taskName = await inputBranchName(branchType);
+      targetBranch = `${branchType}/${taskName}`;
+      baseBranch = await selectBaseBranch(branches);
     }
 
     // Check if branch already exists
