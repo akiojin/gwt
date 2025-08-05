@@ -28,8 +28,20 @@ export async function showCurrentAccountInfo(): Promise<void> {
     }
     
     if (accountInfo) {
-      console.log(chalk.cyan(`📋 Plan: ${accountInfo.subscriptionType}`));
+      // subscriptionTypeの表示（nullの場合の処理を追加）
+      const planDisplay = accountInfo.subscriptionType || 'Unknown';
+      const planColor = accountInfo.subscriptionType === 'max' ? chalk.yellow : 
+                       accountInfo.subscriptionType === 'pro' ? chalk.blue : 
+                       accountInfo.subscriptionType === 'free' ? chalk.gray : chalk.cyan;
+      console.log(planColor(`📋 Plan: ${planDisplay}`));
+      
+      // Scopesの表示
       console.log(chalk.cyan(`🔑 Scopes: ${accountInfo.scopes.join(', ')}`));
+      
+      // user:profileスコープがない場合は警告
+      if (!accountInfo.scopes.includes('user:profile')) {
+        console.log(chalk.yellow('⚠️  Note: user:profile scope is missing. Profile information may be limited.'));
+      }
       
       const expirationDate = new Date(accountInfo.expiresAt);
       const isExpired = accountInfo.isExpired;
@@ -79,7 +91,8 @@ export async function selectAccountToSwitch(): Promise<string | null> {
       const isExpired = account.expiresAt < Date.now();
       
       let name = account.name;
-      let description = `${account.subscriptionType}`;
+      const planDisplay = account.subscriptionType || 'Unknown';
+      let description = `${planDisplay}`;
       
       if (isActive) {
         name = `${name} ${chalk.green('(current)')}`;
@@ -93,6 +106,11 @@ export async function selectAccountToSwitch(): Promise<string | null> {
       
       const savedDate = new Date(account.savedAt).toLocaleDateString('ja-JP');
       description += ` - 保存日 ${savedDate}`;
+      
+      // スコープ情報も追加
+      if (!account.scopes.includes('user:profile')) {
+        description += ` ${chalk.yellow('(limited scopes)')}`;
+      }
       
       return {
         name,
@@ -137,8 +155,13 @@ export async function saveCurrentAccountPrompt(): Promise<string | null> {
     console.log(chalk.gray('Current account details:'));
     
     if (authStatus.accountInfo) {
-      console.log(chalk.cyan(`   Plan: ${authStatus.accountInfo.subscriptionType}`));
+      const planDisplay = authStatus.accountInfo.subscriptionType || 'Unknown';
+      console.log(chalk.cyan(`   Plan: ${planDisplay}`));
       console.log(chalk.cyan(`   Scopes: ${authStatus.accountInfo.scopes.join(', ')}`));
+      
+      if (!authStatus.accountInfo.scopes.includes('user:profile')) {
+        console.log(chalk.yellow('   ⚠️  Note: user:profile scope is missing'));
+      }
     }
 
     const accountName = await input({
@@ -182,7 +205,8 @@ export async function selectAccountToDelete(): Promise<string | null> {
     const choices = accounts.map(account => {
       const isActive = account.name === currentActive;
       let name = account.name;
-      let description = `${account.subscriptionType}`;
+      const planDisplay = account.subscriptionType || 'Unknown';
+      let description = `${planDisplay}`;
       
       if (isActive) {
         name = `${name} ${chalk.yellow('(currently active)')}`;

@@ -170,6 +170,12 @@ export class ClaudeAccountService {
       throw new Error(`Account "${accountName}" not found`);
     }
 
+    console.log(chalk.gray(`[DEBUG] Target account data:`));
+    console.log(chalk.gray(`  Name: ${targetAccount.name}`));
+    console.log(chalk.gray(`  SubscriptionType: ${targetAccount.subscriptionType}`));
+    console.log(chalk.gray(`  Scopes: ${targetAccount.scopes.join(', ')}`));
+    console.log(chalk.gray(`  ExpiresAt: ${new Date(targetAccount.expiresAt).toISOString()}`));
+
     // 現在の認証情報をバックアップ
     await this.backupCurrentCredentials();
 
@@ -184,8 +190,16 @@ export class ClaudeAccountService {
     await claudeConfigService.setActiveAccount(accountName);
 
     console.log(chalk.green(`🔄 Switched to account: ${accountName}`));
-    console.log(chalk.cyan(`   Plan: ${targetAccount.subscriptionType}`));
+    console.log(chalk.cyan(`   Plan: ${targetAccount.subscriptionType || 'Unknown'}`));
     console.log(chalk.cyan(`   Scopes: ${targetAccount.scopes.join(', ')}`));
+
+    // 切り替え後の認証情報を確認
+    const newCredentials = await this.getCurrentCredentials();
+    if (newCredentials) {
+      console.log(chalk.gray(`[DEBUG] New credentials applied:`));
+      console.log(chalk.gray(`  SubscriptionType: ${newCredentials.claudeAiOauth.subscriptionType}`));
+      console.log(chalk.gray(`  Scopes: ${newCredentials.claudeAiOauth.scopes.join(', ')}`));
+    }
   }
 
   /**
