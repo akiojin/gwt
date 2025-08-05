@@ -61,6 +61,7 @@ import {
   selectVersionBumpType,
   selectReleaseAction
 } from './ui/prompts.js';
+import { handleAccountManagement } from './ui/account-prompts.js';
 import { 
   displayBranchTable,
   printError, 
@@ -280,6 +281,10 @@ async function handleSelection(
 
     case '__cleanup_prs__':
       return await handleCleanupMergedPRs();
+
+    case '__account_management__':
+      await handleAccountManagement();
+      return true;
 
     default:
       // Handle branch selection
