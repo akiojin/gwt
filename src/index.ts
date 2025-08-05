@@ -814,36 +814,78 @@ async function handlePostClaudeChanges(worktreePath: string): Promise<void> {
     const branchName = await getCurrentBranchName(worktreePath);
     const isReleaseBranch = branchName.startsWith('release/');
     
-    // Check if there are uncommitted changes
-    if (!(await hasUncommittedChanges(worktreePath))) {
-      // リリースブランチの場合は、変更がなくてもリリースアクションを選択
-      if (isReleaseBranch) {
-        const action = await selectReleaseAction();
-        
-        switch (action) {
-          case 'complete':
-            try {
-              await pushBranchToRemote(worktreePath, branchName);
-              printSuccess(`Pushed release branch: ${branchName}`);
-              printInfo('\nGit Flow Release Process:');
+    // リリースブランチの場合は特別な処理
+    if (isReleaseBranch) {
+      // 変更がある場合は自動的にコミット
+      if (await hasUncommittedChanges(worktreePath)) {
+        const version = branchName.replace('release/', '');
+        const commitMessage = `chore: prepare release ${version}`;
+        printInfo(`Committing release changes: ${commitMessage}`);
+        await commitChanges(worktreePath, commitMessage);
+        printSuccess('Release changes committed successfully!');
+      }
+      
+      // リリースアクションを選択
+      const action = await selectReleaseAction();
+      
+      switch (action) {
+        case 'complete':
+          try {
+            await pushBranchToRemote(worktreePath, branchName);
+            printSuccess(`Pushed release branch: ${branchName}`);
+            
+            // GitHub CLIが利用可能か確認
+            if (await isGitHubCLIAvailable()) {
+              const version = branchName.replace('release/', '');
+              printInfo('\nCreating pull request...');
+              
+              try {
+                const { execa } = await import('execa');
+                const prTitle = `Release v${version}`;
+                const prBody = `## Release v${version}\n\nThis PR contains the release preparation for version ${version}.\n\n### Release Checklist\n- [ ] Review changes\n- [ ] Update changelog if needed\n- [ ] Merge to main\n- [ ] Create tag v${version}\n- [ ] Merge back to develop`;
+                
+                const { stdout } = await execa('gh', [
+                  'pr', 'create',
+                  '--base', 'main',
+                  '--head', branchName,
+                  '--title', prTitle,
+                  '--body', prBody
+                ], { cwd: worktreePath });
+                
+                printSuccess('Pull request created successfully!');
+                printInfo(stdout);
+              } catch (error) {
+                printWarning('Failed to create PR automatically. Please create it manually.');
+                printInfo('\nGit Flow Release Process:');
+                printInfo('1. Create a PR to main branch');
+                printInfo('2. After merge, create a tag on main branch');
+                printInfo('3. Merge back to develop branch');
+              }
+            } else {
+              printInfo('\nGitHub CLI not found. Please create the PR manually:');
               printInfo('1. Create a PR to main branch');
               printInfo('2. After merge, create a tag on main branch');
               printInfo('3. Merge back to develop branch');
-              printInfo('\nUse GitHub/GitLab to create the PR.');
-            } catch (error) {
-              printError(`Failed to push: ${error instanceof Error ? error.message : String(error)}`);
             }
-            break;
-            
-          case 'continue':
-            printInfo('Release branch saved. You can continue working on it later.');
-            break;
-            
-          case 'nothing':
-            // Just exit
-            break;
-        }
+          } catch (error) {
+            printError(`Failed to push: ${error instanceof Error ? error.message : String(error)}`);
+          }
+          break;
+          
+        case 'continue':
+          printInfo('Release branch saved. You can continue working on it later.');
+          break;
+          
+        case 'nothing':
+          // Just exit
+          break;
       }
+      return;
+    }
+    
+    // 通常のブランチの場合は従来の処理
+    // Check if there are uncommitted changes
+    if (!(await hasUncommittedChanges(worktreePath))) {
       return;
     }
 
