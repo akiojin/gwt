@@ -21,7 +21,8 @@ import {
   GitError,
   getCurrentVersion,
   calculateNewVersion,
-  executeNpmVersionInWorktree
+  executeNpmVersionInWorktree,
+  getCurrentBranchName
 } from './git.js';
 import { 
   listAdditionalWorktrees,
@@ -808,9 +809,9 @@ async function handleCleanupMergedPRs(): Promise<boolean> {
 
 async function handlePostClaudeChanges(worktreePath: string): Promise<void> {
   try {
-    // worktreepathからブランチ名を取得
-    const branchName = path.basename(worktreePath);
-    const isReleaseBranch = branchName.startsWith('release/') || branchName.startsWith('release-');
+    // 正確なブランチ名を取得
+    const branchName = await getCurrentBranchName(worktreePath);
+    const isReleaseBranch = branchName.startsWith('release/');
     
     // Check if there are uncommitted changes
     if (!(await hasUncommittedChanges(worktreePath))) {
@@ -863,10 +864,11 @@ async function handlePostClaudeChanges(worktreePath: string): Promise<void> {
               try {
                 await pushBranchToRemote(worktreePath, branchName);
                 printSuccess(`Pushed release branch: ${branchName}`);
-                printInfo('You can now create a PR to main branch');
-                printInfo('After merge, remember to:');
-                printInfo('1. Create a tag on main branch');
-                printInfo('2. Merge back to develop branch');
+                printInfo('\nGit Flow Release Process:');
+                printInfo('1. Create a PR to main branch');
+                printInfo('2. After merge, create a tag on main branch');
+                printInfo('3. Merge back to develop branch');
+                printInfo('\nUse GitHub/GitLab to create the PR.');
               } catch (error) {
                 printError(`Failed to push: ${error instanceof Error ? error.message : String(error)}`);
               }

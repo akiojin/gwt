@@ -439,6 +439,17 @@ export async function deleteRemoteBranch(branchName: string, remote = 'origin'):
   }
 }
 
+export async function getCurrentBranchName(worktreePath: string): Promise<string> {
+  try {
+    const { stdout } = await execa('git', ['branch', '--show-current'], {
+      cwd: worktreePath
+    });
+    return stdout.trim();
+  } catch (error) {
+    throw new GitError('Failed to get current branch name', error);
+  }
+}
+
 export async function pushBranchToRemote(worktreePath: string, branchName: string, remote = 'origin'): Promise<void> {
   try {
     // Check if the remote branch exists
