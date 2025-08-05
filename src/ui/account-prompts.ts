@@ -1,6 +1,7 @@
 import { select, input, confirm } from '@inquirer/prompts';
 import chalk from 'chalk';
 import { claudeAccountService } from '../services/claude-account.service.js';
+import { confirmContinue } from './prompts.js';
 
 /**
  * 現在のアカウント情報を表示
@@ -33,7 +34,19 @@ export async function showCurrentAccountInfo(): Promise<void> {
       const expirationDate = new Date(accountInfo.expiresAt);
       const isExpired = accountInfo.isExpired;
       
-      console.log(chalk.cyan(`⏰ Expires: ${expirationDate.toLocaleString()}`));
+      // タイムゾーン付きで表示
+      const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      const localeDateString = expirationDate.toLocaleString('ja-JP', { 
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        timeZoneName: 'short'
+      });
+      
+      console.log(chalk.cyan(`⏰ Expires: ${localeDateString} (${timeZone})`));
       console.log(isExpired ? 
         chalk.red('❌ Token is expired') : 
         chalk.green('✅ Token is valid')
@@ -78,8 +91,8 @@ export async function selectAccountToSwitch(): Promise<string | null> {
         description += ` ${chalk.green('(valid)')}`;
       }
       
-      const savedDate = new Date(account.savedAt).toLocaleDateString();
-      description += ` - saved ${savedDate}`;
+      const savedDate = new Date(account.savedAt).toLocaleDateString('ja-JP');
+      description += ` - 保存日 ${savedDate}`;
       
       return {
         name,
@@ -175,8 +188,8 @@ export async function selectAccountToDelete(): Promise<string | null> {
         name = `${name} ${chalk.yellow('(currently active)')}`;
       }
       
-      const savedDate = new Date(account.savedAt).toLocaleDateString();
-      description += ` - saved ${savedDate}`;
+      const savedDate = new Date(account.savedAt).toLocaleDateString('ja-JP');
+      description += ` - 保存日 ${savedDate}`;
       
       return {
         name,
@@ -302,7 +315,9 @@ export async function showAccountManagementMenu(): Promise<string> {
  * アカウント管理のメインフロー
  */
 export async function handleAccountManagement(): Promise<void> {
-  while (true) {
+  let continueLoop = true;
+  
+  while (continueLoop) {
     try {
       const action = await showAccountManagementMenu();
 
@@ -346,23 +361,21 @@ export async function handleAccountManagement(): Promise<void> {
         }
 
         case 'back':
-          return;
+          continueLoop = false;
+          break;
 
         default:
           console.log(chalk.red('Unknown action'));
       }
 
-      // 操作完了後、少し間を置く
+      // backの場合は待機せずに終了、それ以外は待機
       if (action !== 'back') {
-        console.log(chalk.gray('\nPress Enter to continue...'));
-        await new Promise(resolve => {
-          process.stdin.once('data', () => resolve(undefined));
-        });
+        await confirmContinue('Press enter to continue...');
       }
 
     } catch (error) {
       console.error(chalk.red('Error in account management:'), error);
-      break;
+      continueLoop = false;
     }
   }
 }
