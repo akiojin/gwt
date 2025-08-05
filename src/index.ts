@@ -18,7 +18,8 @@ import {
   isInWorktree,
   GitError,
   getCurrentVersion,
-  executeNpmVersion
+  calculateNewVersion,
+  executeNpmVersionInWorktree
 } from './git.js';
 import { 
   listAdditionalWorktrees,
@@ -398,8 +399,18 @@ async function handleCreateNewBranch(branches: BranchInfo[], repoRoot: string): 
 
     // リリースブランチの場合は特別な処理
     if (branchType === 'release') {
-      // 先にベースブランチを選択
-      baseBranch = await selectBaseBranch(branches);
+      // Git flowではリリースブランチはdevelopから分岐する
+      const developBranch = branches.find(b => 
+        b.type === 'local' && (b.name === 'develop' || b.name === 'dev')
+      );
+      
+      if (!developBranch) {
+        printError('No develop branch found. Release branches should be created from develop branch.');
+        return true;
+      }
+      
+      baseBranch = developBranch.name;
+      printInfo(`Creating release branch from ${baseBranch}`);
       
       // 現在のバージョンを取得
       const currentVersion = await getCurrentVersion(repoRoot);
@@ -407,17 +418,12 @@ async function handleCreateNewBranch(branches: BranchInfo[], repoRoot: string): 
       // バージョンバンプタイプを選択
       const versionBump = await selectVersionBumpType(currentVersion);
       
-      printInfo(`Executing npm version ${versionBump}...`);
-      try {
-        const newVersion = await executeNpmVersion(repoRoot, versionBump);
-        // リリースブランチ名を自動生成
-        targetBranch = `release/v${newVersion}`;
-        printSuccess(`Version bumped to ${newVersion}`);
-        printInfo(`Release branch name: ${targetBranch}`);
-      } catch (error) {
-        printError(`Failed to execute npm version: ${error instanceof Error ? error.message : String(error)}`);
-        return true;
-      }
+      // 新しいバージョンを計算
+      const newVersion = calculateNewVersion(currentVersion, versionBump);
+      
+      // リリースブランチ名を生成
+      targetBranch = `release/${newVersion}`;
+      printInfo(`Release branch will be: ${targetBranch}`);
     } else {
       // 通常のブランチの場合
       const { inputBranchName } = await import('./ui/prompts.js');
@@ -458,6 +464,19 @@ async function handleCreateNewBranch(branches: BranchInfo[], repoRoot: string): 
     printInfo(`Creating worktree for "${targetBranch}"...`);
     await createWorktree(worktreeConfig);
     printSuccess(`Worktree created at: ${worktreePath}`);
+    
+    // リリースブランチの場合、worktree作成後にnpm versionを実行
+    if (branchType === 'release') {
+      printInfo('Updating version in release branch...');
+      try {
+        const newVersion = targetBranch.replace('release/', '');
+        await executeNpmVersionInWorktree(worktreePath, newVersion);
+        printSuccess(`Version updated to ${newVersion} in release branch`);
+      } catch (error) {
+        printError(`Failed to update version: ${error instanceof Error ? error.message : String(error)}`);
+        // エラーが発生してもworktreeは作成済みなので続行
+      }
+    }
 
     // Check if Claude Code is available before launching
     if (await isClaudeCodeAvailable()) {
