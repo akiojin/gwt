@@ -395,14 +395,37 @@ export async function executeNpmVersionInWorktree(
   newVersion: string
 ): Promise<void> {
   try {
-    // worktree内でnpm versionコマンドを実行（既に計算済みのバージョンを使用）
-    await execa('npm', ['version', newVersion, '--no-git-tag-version'], {
-      cwd: worktreePath
-    });
+    // まずpackage.jsonが存在するか確認
+    const fs = await import('node:fs');
+    const packageJsonPath = path.join(worktreePath, 'package.json');
     
-    // package.jsonとpackage-lock.jsonの変更をコミット
-    await execa('git', ['add', 'package.json', 'package-lock.json'], { cwd: worktreePath });
-    await execa('git', ['commit', '-m', `chore: bump version to ${newVersion}`], { cwd: worktreePath });
+    if (!fs.existsSync(packageJsonPath)) {
+      // package.jsonが存在しない場合は作成
+      const packageJson = {
+        name: path.basename(worktreePath),
+        version: newVersion,
+        description: '',
+        main: 'index.js',
+        scripts: {},
+        keywords: [],
+        author: '',
+        license: 'ISC'
+      };
+      await fs.promises.writeFile(packageJsonPath, JSON.stringify(packageJson, null, 2) + '\n');
+      
+      // 新規作成したpackage.jsonをコミット
+      await execa('git', ['add', 'package.json'], { cwd: worktreePath });
+      await execa('git', ['commit', '-m', `chore: create package.json with version ${newVersion}`], { cwd: worktreePath });
+    } else {
+      // worktree内でnpm versionコマンドを実行（既に計算済みのバージョンを使用）
+      await execa('npm', ['version', newVersion, '--no-git-tag-version'], {
+        cwd: worktreePath
+      });
+      
+      // package.jsonとpackage-lock.jsonの変更をコミット
+      await execa('git', ['add', 'package.json', 'package-lock.json'], { cwd: worktreePath });
+      await execa('git', ['commit', '-m', `chore: bump version to ${newVersion}`], { cwd: worktreePath });
+    }
   } catch (error) {
     throw new GitError(`Failed to execute npm version ${newVersion} in worktree`, error);
   }

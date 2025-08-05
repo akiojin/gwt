@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import path from 'node:path';
+import { confirm } from '@inquirer/prompts';
 import { 
   isGitRepository, 
   getAllBranches, 
@@ -70,7 +72,6 @@ import {
 } from './ui/display.js';
 import { createBranchTable } from './ui/table.js';
 import chalk from 'chalk';
-import { confirm } from '@inquirer/prompts';
 import { isGitHubCLIAvailable, checkGitHubAuth } from './github.js';
 import { CleanupTarget } from './ui/types.js';
 import { AppError, setupExitHandlers, handleUserCancel } from './utils.js';
@@ -807,9 +808,33 @@ async function handleCleanupMergedPRs(): Promise<boolean> {
 
 async function handlePostClaudeChanges(worktreePath: string): Promise<void> {
   try {
+    // worktreepathからブランチ名を取得
+    const branchName = path.basename(worktreePath);
+    const isReleaseBranch = branchName.startsWith('release/') || branchName.startsWith('release-');
+    
     // Check if there are uncommitted changes
     if (!(await hasUncommittedChanges(worktreePath))) {
-      return; // No changes, nothing to do
+      // リリースブランチの場合は、変更がなくてもPR作成を提案
+      if (isReleaseBranch) {
+        printInfo('This is a release branch. You may want to:');
+        printInfo('1. Push changes and create a PR to main');
+        printInfo('2. After merge, create a tag and merge back to develop');
+        const shouldPush = await confirm({
+          message: 'Push release branch and create PR?',
+          default: true
+        });
+        
+        if (shouldPush) {
+          try {
+            await pushBranchToRemote(worktreePath, branchName);
+            printSuccess(`Pushed release branch: ${branchName}`);
+            printInfo('You can now create a PR to main branch using GitHub/GitLab');
+          } catch (error) {
+            printError(`Failed to push: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
+      }
+      return;
     }
 
     while (true) {
@@ -826,6 +851,27 @@ async function handlePostClaudeChanges(worktreePath: string): Promise<void> {
           const commitMessage = await inputCommitMessage();
           await commitChanges(worktreePath, commitMessage);
           printSuccess('Changes committed successfully!');
+          
+          // リリースブランチの場合は、PR作成を提案
+          if (isReleaseBranch) {
+            const shouldPush = await confirm({
+              message: 'Push release branch and create PR to main?',
+              default: true
+            });
+            
+            if (shouldPush) {
+              try {
+                await pushBranchToRemote(worktreePath, branchName);
+                printSuccess(`Pushed release branch: ${branchName}`);
+                printInfo('You can now create a PR to main branch');
+                printInfo('After merge, remember to:');
+                printInfo('1. Create a tag on main branch');
+                printInfo('2. Merge back to develop branch');
+              } catch (error) {
+                printError(`Failed to push: ${error instanceof Error ? error.message : String(error)}`);
+              }
+            }
+          }
           return;
           
         case 'stash':
