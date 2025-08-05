@@ -399,18 +399,29 @@ async function handleCreateNewBranch(branches: BranchInfo[], repoRoot: string): 
 
     // リリースブランチの場合は特別な処理
     if (branchType === 'release') {
-      // Git flowではリリースブランチはdevelopから分岐する
+      // Git flowではリリースブランチはdevelopから分岐するが、
+      // developブランチがない場合はmainブランチから分岐
       const developBranch = branches.find(b => 
         b.type === 'local' && (b.name === 'develop' || b.name === 'dev')
       );
       
-      if (!developBranch) {
-        printError('No develop branch found. Release branches should be created from develop branch.');
-        return true;
+      if (developBranch) {
+        baseBranch = developBranch.name;
+        printInfo(`Creating release branch from ${baseBranch} (Git Flow)`);
+      } else {
+        // developがない場合はmain/masterから分岐
+        const mainBranch = branches.find(b => 
+          b.type === 'local' && (b.name === 'main' || b.name === 'master')
+        );
+        
+        if (!mainBranch) {
+          printError('No develop, main, or master branch found.');
+          return true;
+        }
+        
+        baseBranch = mainBranch.name;
+        printWarning(`No develop branch found. Creating release branch from ${baseBranch}`);
       }
-      
-      baseBranch = developBranch.name;
-      printInfo(`Creating release branch from ${baseBranch}`);
       
       // 現在のバージョンを取得
       const currentVersion = await getCurrentVersion(repoRoot);
