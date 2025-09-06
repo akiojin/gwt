@@ -11,7 +11,7 @@
 ## 前提条件
 
 - Node.js 18+ がインストールされていること
-- bun（推奨）または npm が利用可能であること
+- bun が利用可能であること
 - ターミナル環境（bash, zsh, PowerShell など）
 
 ## インストール
@@ -21,11 +21,11 @@
 git clone <repository-url>
 cd claude-worktree
 
-# 依存関係のインストール
-npm install
+# 依存関係のインストール（bun）
+bun install
 
-# グローバルインストール（オプション）
-npm link
+# グローバルリンク（オプション / bun）
+bun link
 ```
 
 ## 基本的な使用方法

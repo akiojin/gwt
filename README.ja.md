@@ -25,12 +25,7 @@ Claude Code用の対話型Gitワークツリーマネージャー（グラフィ
 
 永続的なアクセスのためにグローバルインストール:
 
-#### npm
-```bash
-npm install -g @akiojin/claude-worktree
-```
-
-#### bun（推奨）
+#### bun（グローバルインストール）
 ```bash
 bun add -g @akiojin/claude-worktree
 ```
@@ -38,11 +33,6 @@ bun add -g @akiojin/claude-worktree
 ### 一回限りの使用
 
 インストールせずに実行:
-
-#### npx (npm)
-```bash
-npx @akiojin/claude-worktree
-```
 
 #### bunx (bun)
 ```bash
@@ -57,8 +47,8 @@ bunx @akiojin/claude-worktree
 # グローバルインストール済みの場合
 claude-worktree
 
-# または一回限りの実行にnpxを使用
-npx @akiojin/claude-worktree
+# または一回限りの実行に bunx を使用
+bunx @akiojin/claude-worktree
 ```
 
 ツールは以下のオプションを持つ対話型インターフェースを提供します:

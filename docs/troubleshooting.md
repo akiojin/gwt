@@ -143,8 +143,8 @@ Windowsの`tsc`コマンドが別のプログラムを参照している
 
 **解決方法：**
 ```bash
-# npx経由でTypeScriptを実行
-npx tsc
+# bunx経由でTypeScriptを実行
+bunx tsc
 
 # または、package.jsonのスクリプトを使用
 bun run build
