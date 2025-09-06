@@ -113,22 +113,22 @@ Error [ERR_MODULE_NOT_FOUND]: Cannot find module 'E:\claude-worktree\dist\index.
 1. **初回実行時**
    ```bash
    # パッケージを一度アンインストール
-   pnpm uninstall -g @akiojin/claude-worktree
+   bun remove -g @akiojin/claude-worktree || pnpm uninstall -g @akiojin/claude-worktree
    
    # 再インストール（prepareスクリプトが自動実行される）
-   pnpm add -g @akiojin/claude-worktree
+   bun add -g @akiojin/claude-worktree
    ```
 
 2. **ローカル開発時**
    ```bash
    # 依存関係のインストール
-   pnpm install
+   bun install
    
    # ビルドの実行
-   pnpm run build
+   bun run build
    
    # 実行
-   pnpm start
+   bun run start
    ```
 
 ### TypeScriptコンパイルエラー
@@ -147,7 +147,7 @@ Windowsの`tsc`コマンドが別のプログラムを参照している
 npx tsc
 
 # または、package.jsonのスクリプトを使用
-pnpm run build
+bun run build
 ```
 
 ### パッケージマネージャの警告の対処
