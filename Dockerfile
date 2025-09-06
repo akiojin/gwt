@@ -13,6 +13,7 @@ RUN curl -fsSL https://claude.ai/install.sh | bash
 # グローバルツールのインストール（bun使用に移行）
 RUN npm i -g \
     npm@latest \
+    bun@latest \
     typescript@latest \
     eslint@latest \
     prettier@latest \

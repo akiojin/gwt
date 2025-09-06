@@ -2,18 +2,19 @@
 
 [English](README.md)
 
-Claude Code用の対話型Gitワークツリーマネージャー（グラフィカルなブランチ選択と高度なワークフロー管理機能付き）
+Claude Code / Codex CLI 対応の対話型Gitワークツリーマネージャー（グラフィカルなブランチ選択と高度なワークフロー管理機能付き）
 
 ## 概要
 
-`@akiojin/claude-worktree`は、直感的なインターフェースを通じてGitワークツリー管理を革新する強力なCLIツールです。Claude Code開発ワークフローとシームレスに統合し、インテリジェントなブランチ選択、自動ワークツリー作成、包括的なプロジェクト管理機能を提供します。
+`@akiojin/claude-worktree`は、直感的なインターフェースを通じてGitワークツリー管理を革新する強力なCLIツールです。Claude Code / Codex CLI の開発ワークフローとシームレスに統合し、インテリジェントなブランチ選択、自動ワークツリー作成、包括的なプロジェクト管理機能を提供します。
 
 ## ✨ 主要機能
 
 - 🎯 **対話型ブランチ選択**: エレガントなテーブルベースインターフェースでローカル・リモートブランチをナビゲート
 - 🌟 **スマートブランチ作成**: ガイド付きプロンプトと自動ベースブランチ選択でfeature、hotfix、releaseブランチを作成
 - 🔄 **高度なワークツリー管理**: 作成、クリーンアップ、パス最適化を含む完全なライフサイクル管理
-- 🚀 **Claude Code統合**: 権限設定と開発後の変更処理を含むシームレスな起動
+- 🤖 **AIツール選択**: 起動時に Claude Code / Codex CLI を選択、または `--tool` で直接指定（`--` 以降は各ツールへ引数パススルー）
+- 🚀 **AIツール統合**: 選択したツールをワークツリーで起動（Claude Codeは権限設定・変更処理の統合あり）
 - 📊 **GitHub PR統合**: マージされたプルリクエストのブランチとワークツリーの自動クリーンアップ
 - 🛠️ **変更管理**: 開発セッション後のコミット、stash、破棄の内蔵サポート
 - 📦 **ユニバーサルパッケージ**: 一度インストールすれば全プロジェクトで一貫した動作
@@ -51,6 +52,21 @@ claude-worktree
 bunx @akiojin/claude-worktree
 ```
 
+### AIツール選択と直接指定
+
+```bash
+# 対話的にツールを選ぶ（Claude / Codex）
+claude-worktree
+
+# 直接指定
+claude-worktree --tool claude
+claude-worktree --tool codex
+
+# ツール固有オプションを渡す（"--" 以降はツールへパススルー）
+claude-worktree --tool claude -- -r   # Claude Code を resume
+claude-worktree --tool codex -- --continue  # Codex CLI を continue
+```
+
 ツールは以下のオプションを持つ対話型インターフェースを提供します:
 
 1. **既存ブランチを選択**: ワークツリー自動作成機能付きでローカル・リモートブランチから選択
@@ -67,11 +83,11 @@ bunx @akiojin/claude-worktree
 3. 自動プレフィックス適用でブランチ名を入力
 4. 利用可能なオプションからベースブランチを選択
 5. ワークツリー作成パスを確認
-6. 自動ワークツリーセットアップとClaude Code起動
+6. 自動ワークツリーセットアップと選択ツールの起動
 
 ### ワークツリー管理
 
-- **既存を開く**: 既存ワークツリーでClaude Codeを起動
+- **既存を開く**: 既存ワークツリーで選択ツールを起動
 - **ワークツリー削除**: オプションのブランチ削除付きクリーン削除
 - **バッチ操作**: 複数ワークツリーの効率的な処理
 
@@ -85,7 +101,7 @@ bunx @akiojin/claude-worktree
 
 - **Node.js**: >= 18.0.0
 - **Git**: ワークツリーサポート付き最新版
-- **Claude Code**: 最適な開発体験のため
+- **AIツール**: 少なくともいずれかが必要（Claude Code もしくは Codex CLI）
 - **GitHub CLI**: PR クリーンアップ機能に必要（オプション）
 
 ## プロジェクト構造
@@ -96,7 +112,8 @@ bunx @akiojin/claude-worktree
 │   ├── index.ts          # メインアプリケーションエントリーポイント
 │   ├── git.ts           # Git操作とブランチ管理
 │   ├── worktree.ts      # ワークツリー作成と管理
-│   ├── claude.ts        # Claude Code統合
+│   ├── claude.ts        # Claude Code 統合
+│   ├── codex.ts         # Codex CLI 統合
 │   ├── github.ts        # GitHub CLI統合
 │   ├── utils.ts         # ユーティリティ関数とエラーハンドリング
 │   └── ui/              # ユーザーインターフェースコンポーネント
