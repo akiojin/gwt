@@ -31,6 +31,19 @@
 - 作業（タスク）の開始前には、必ずToDoを登録した後に作業を開始する
 - 作業（タスク）は、忖度なしで進める
 
+### ローカル検証/実行ルール（bun）
+
+- パッケージマネージャは bun のみを使用する（npm/pnpmは使用しない）
+- 依存インストール: `bun install`
+- ビルド: `bun run build`
+- 実行（ローカル）:
+  - 一発実行: `bunx .`
+  - スクリプト実行: `bun run start`
+- 実行（グローバル）:
+  - インストール: `bun add -g @akiojin/claude-worktree`
+  - 起動: `claude-worktree`
+- Lint/型チェック（あれば）: `bun run lint` / `bun run type-check`
+
 ## コミュニケーションガイドライン
 
 - 回答は必ず日本語

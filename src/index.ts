@@ -652,48 +652,60 @@ async function handleManageWorktrees(worktrees: WorktreeInfo[]): Promise<boolean
         case 'open':
           // Check if worktree is accessible
           if (worktree.isAccessible === false) {
-            printError('Cannot open inaccessible worktree in Claude Code');
+            printError('Cannot open inaccessible worktree');
             printInfo(`Path: ${worktree.path}`);
             printInfo('This worktree was created in a different environment and is not accessible here.');
             await confirmContinue('Press enter to continue...');
             break;
           }
-          
-          // Check if Claude Code is available before launching
-          if (await isClaudeCodeAvailable()) {
-            // Ask about execution mode
-      const executionConfig = await selectClaudeExecutionMode();
-      if (!executionConfig) {
-        // User cancelled, return to main menu
-        return true;
-      }
-      const { mode, skipPermissions } = executionConfig;
-            
-            try {
-              // Save session data before launching Claude Code
-              const sessionData: SessionData = {
-                lastWorktreePath: worktree.path,
-                lastBranch: worktree.branch,
-                timestamp: Date.now(),
-                repositoryRoot: await getRepositoryRoot()
-              };
-              await saveSession(sessionData);
-              
+
+          // Select AI tool (reuse selection logic)
+          const [localClaudeAvail, localCodexAvail] = await Promise.all([
+            isClaudeCodeAvailable().catch(() => false),
+            isCodexAvailable().catch(() => false)
+          ]);
+          if (!localClaudeAvail && !localCodexAvail) {
+            printError('No AI tools are available in PATH (Claude Code or Codex CLI).');
+            await confirmContinue('Press enter to continue...');
+            return true;
+          }
+
+          const { selectAITool } = await import('./ui/prompts.js');
+          let selectedTool: 'claude' | 'codex' | null = null;
+          if (localClaudeAvail && !localCodexAvail) selectedTool = 'claude';
+          else if (!localClaudeAvail && localCodexAvail) selectedTool = 'codex';
+          else selectedTool = await selectAITool({ claudeAvailable: localClaudeAvail, codexAvailable: localCodexAvail });
+          if (!selectedTool) {
+            printInfo('No AI tool selected. Returning to menu.');
+            return true;
+          }
+
+          // Ask execution mode
+          const execCfg = await selectClaudeExecutionMode(selectedTool === 'claude' ? 'Claude Code' : 'Codex CLI');
+          if (!execCfg) return true;
+          const { mode, skipPermissions } = execCfg;
+
+          try {
+            // Save session data before launching
+            const sessionData: SessionData = {
+              lastWorktreePath: worktree.path,
+              lastBranch: worktree.branch,
+              timestamp: Date.now(),
+              repositoryRoot: await getRepositoryRoot()
+            };
+            await saveSession(sessionData);
+
+            if (selectedTool === 'claude') {
               await launchClaudeCode(worktree.path, { mode, skipPermissions });
-            } catch (error) {
-              if (error instanceof ClaudeError) {
-                printError(`Failed to launch Claude Code: ${error.message}`);
-                if (error.message.includes('command not found')) {
-                  printInfo('Install Claude Code CLI: https://claude.ai/code');
-                }
-              } else {
-                printError(`Unexpected error: ${error instanceof Error ? error.message : String(error)}`);
-              }
-              await confirmContinue('Press enter to continue...');
+            } else {
+              await launchCodexCLI(worktree.path, { mode });
             }
-          } else {
-            printError('Claude Code is not available. Please install it first.');
-            printInfo('Install Claude Code CLI: https://claude.ai/code');
+          } catch (error) {
+            if (error instanceof ClaudeError || error instanceof CodexError) {
+              printError(error.message);
+            } else {
+              printError(`Unexpected error: ${error instanceof Error ? error.message : String(error)}`);
+            }
             await confirmContinue('Press enter to continue...');
           }
           return true; // Return to main menu after opening

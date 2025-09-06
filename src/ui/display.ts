@@ -26,38 +26,11 @@ export function getBranchTypeColor(branchType: BranchInfo['branchType']) {
 
 export async function printWelcome(): Promise<void> {
   console.clear();
-  console.log();
   
   const version = await getPackageVersion();
   const versionText = version ? ` v${version}` : '';
-  const title = `🌳 Worktree Manager${versionText}`;
-  
-  // Calculate title display width
-  // 🌳 = 2 columns, rest is normal text
-  const emojiWidth = 2;
-  const textAfterEmoji = title.substring(2).length; // Get length of text after emoji
-  const titleDisplayWidth = emojiWidth + textAfterEmoji;
-  
-  // Determine box width dynamically based on title length
-  // Minimum width of 49, or title width + padding
-  const minBorderWidth = 49;
-  const neededWidth = titleDisplayWidth + 4; // +4 for "║ " and " ║"
-  const borderWidth = Math.max(minBorderWidth, neededWidth);
-  const contentWidth = borderWidth - 2; // Width without borders
-  
-  // Calculate right padding
-  const rightPadding = contentWidth - titleDisplayWidth - 1; // -1 for left space
-  
-  // Create border strings
-  const topBorder = '╔' + '═'.repeat(borderWidth - 2) + '╗';
-  const bottomBorder = '╚' + '═'.repeat(borderWidth - 2) + '╝';
-  
-  console.log(chalk.blueBright.bold(topBorder));
-  console.log(chalk.blueBright.bold(`║ ${title}${' '.repeat(rightPadding)} ║`));
-  console.log(chalk.blueBright.bold(bottomBorder));
-  console.log(chalk.gray('Interactive Git worktree manager for Claude Code'));
-  console.log(chalk.gray('Press Ctrl+C to quit anytime'));
-  console.log();
+  const title = `Worktree Manager${versionText}`;
+  console.log(chalk.blueBright.bold(title));
 }
 
 export async function displayBranchTable(): Promise<void> {

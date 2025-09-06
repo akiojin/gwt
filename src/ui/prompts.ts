@@ -451,9 +451,9 @@ export async function selectWorktreeAction(): Promise<'open' | 'remove' | 'remov
     message: 'What would you like to do (q to go back)?',
     choices: [
       {
-        name: '📂 Open in Claude Code',
+        name: '📂 Open in AI tool',
         value: 'open' as const,
-        description: 'Launch Claude Code in this worktree'
+        description: 'Launch the selected AI tool in this worktree'
       },
       {
         name: '🗑️  Remove worktree',
@@ -1580,4 +1580,3 @@ ${category.title}`,
   
   return choices;
 }
-
