@@ -113,7 +113,7 @@ Error [ERR_MODULE_NOT_FOUND]: Cannot find module 'E:\claude-worktree\dist\index.
 1. **初回実行時**
    ```bash
    # パッケージを一度アンインストール
-   bun remove -g @akiojin/claude-worktree || pnpm uninstall -g @akiojin/claude-worktree
+   bun remove -g @akiojin/claude-worktree
    
    # 再インストール（prepareスクリプトが自動実行される）
    bun add -g @akiojin/claude-worktree
@@ -152,14 +152,9 @@ bun run build
 
 ### パッケージマネージャの警告の対処
 
-**症状：**
-```
-pnpm warn Unknown project config "shamefully-hoist"...
-```
-
 **原因：**
-pnpm / yarn / npm 固有の設定ファイルが存在する
+各パッケージマネージャ固有の設定ファイルが残っている場合に、警告が表示されることがあります。
 
 **解決方法：**
-- これらの警告は無視して問題ありません
-- 必要に応じて、`.npmrc`、`.yarnrc`、`.pnpmfile.cjs` などの設定ファイルを見直し/削除
+- プロジェクト直下に残存する設定ファイル（例: `.npmrc`、`.yarnrc`、`.pnpmfile.cjs` など）を見直し/削除
+- 本プロジェクトでは bun を前提とします

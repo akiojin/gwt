@@ -417,7 +417,7 @@ export async function executeNpmVersionInWorktree(
       await execa('git', ['add', 'package.json'], { cwd: worktreePath });
       await execa('git', ['commit', '-m', `chore: create package.json with version ${newVersion}`], { cwd: worktreePath });
     } else {
-      // package.json の version を直接書き換え（npm に依存しない）
+      // package.json の version を直接書き換え（外部PMに依存しない）
       const content = await fs.promises.readFile(packageJsonPath, 'utf-8');
       const json = JSON.parse(content);
       json.version = newVersion;

@@ -600,7 +600,7 @@ async function handleCreateNewBranch(branches: BranchInfo[], repoRoot: string): 
         if (error instanceof ClaudeError) {
           printError(`Failed to launch Claude Code: ${error.message}`);
           if (error.message.includes('command not found')) {
-            printInfo('Install Claude Code CLI: https://claude.ai/code (e.g., npm i -g @anthropic-ai/claude-code)');
+            printInfo('Install Claude Code CLI: https://claude.ai/code');
           }
         } else {
           printError(`Unexpected error: ${error instanceof Error ? error.message : String(error)}`);
@@ -609,7 +609,7 @@ async function handleCreateNewBranch(branches: BranchInfo[], repoRoot: string): 
       }
     } else {
       printError('Claude Code is not available. Please install it first.');
-      printInfo('Install Claude Code CLI: https://claude.ai/code (e.g., npm i -g @anthropic-ai/claude-code)');
+      printInfo('Install Claude Code CLI: https://claude.ai/code');
       await confirmContinue('Press enter to continue...');
     }
     
@@ -684,7 +684,7 @@ async function handleManageWorktrees(worktrees: WorktreeInfo[]): Promise<boolean
               if (error instanceof ClaudeError) {
                 printError(`Failed to launch Claude Code: ${error.message}`);
                 if (error.message.includes('command not found')) {
-                  printInfo('Install Claude Code CLI: https://claude.ai/code (e.g., npm i -g @anthropic-ai/claude-code)');
+                  printInfo('Install Claude Code CLI: https://claude.ai/code');
                 }
               } else {
                 printError(`Unexpected error: ${error instanceof Error ? error.message : String(error)}`);
@@ -693,7 +693,7 @@ async function handleManageWorktrees(worktrees: WorktreeInfo[]): Promise<boolean
             }
           } else {
             printError('Claude Code is not available. Please install it first.');
-            printInfo('Install Claude Code CLI: https://claude.ai/code (e.g., npm i -g @anthropic-ai/claude-code)');
+            printInfo('Install Claude Code CLI: https://claude.ai/code');
             await confirmContinue('Press enter to continue...');
           }
           return true; // Return to main menu after opening
