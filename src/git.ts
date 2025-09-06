@@ -417,17 +417,14 @@ export async function executeNpmVersionInWorktree(
       await execa('git', ['add', 'package.json'], { cwd: worktreePath });
       await execa('git', ['commit', '-m', `chore: create package.json with version ${newVersion}`], { cwd: worktreePath });
     } else {
-      // worktree内でnpm versionコマンドを実行（既に計算済みのバージョンを使用）
-      await execa('npm', ['version', newVersion, '--no-git-tag-version'], {
-        cwd: worktreePath
-      });
-      
-      // package.jsonの変更をコミット（package-lock.jsonは存在する場合のみ）
-      const filesToAdd = ['package.json'];
-      if (fs.existsSync(path.join(worktreePath, 'package-lock.json'))) {
-        filesToAdd.push('package-lock.json');
-      }
-      await execa('git', ['add', ...filesToAdd], { cwd: worktreePath });
+      // package.json の version を直接書き換え（npm に依存しない）
+      const content = await fs.promises.readFile(packageJsonPath, 'utf-8');
+      const json = JSON.parse(content);
+      json.version = newVersion;
+      await fs.promises.writeFile(packageJsonPath, JSON.stringify(json, null, 2) + '\n');
+
+      // 変更をコミット
+      await execa('git', ['add', 'package.json'], { cwd: worktreePath });
       await execa('git', ['commit', '-m', `chore: bump version to ${newVersion}`], { cwd: worktreePath });
     }
   } catch (error: any) {
@@ -435,7 +432,7 @@ export async function executeNpmVersionInWorktree(
     const errorMessage = error instanceof Error ? error.message : String(error);
     const errorDetails = error?.stderr ? ` (stderr: ${error.stderr})` : '';
     const errorStdout = error?.stdout ? ` (stdout: ${error.stdout})` : '';
-    throw new GitError(`Failed to execute npm version ${newVersion} in worktree: ${errorMessage}${errorDetails}${errorStdout}`, error);
+    throw new GitError(`Failed to update version to ${newVersion} in worktree: ${errorMessage}${errorDetails}${errorStdout}`, error);
   }
 }
 

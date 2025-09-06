@@ -89,7 +89,7 @@ paths:
                 type: string
               examples:
                 not_installed:
-                  value: "Error: Codex CLI is not installed. Please install it with: npm install -g @openai/codex-cli"
+                  value: "Error: Codex CLI is not installed. Please install it (see official docs)."
                 config_error:
                   value: "Error: Unable to read configuration file"
                   

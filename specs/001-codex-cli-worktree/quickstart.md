@@ -229,8 +229,8 @@ echo '{"preferences":{"colorOutput":false}}' > ~/.claude-worktree/config.json
 # Codex CLIのインストール状況確認
 which codex
 
-# インストールされていない場合
-npm install -g @openai/codex-cli
+# インストールされていない場合（bun）
+bun add -g @openai/codex-cli
 ```
 
 ## 統合テストスクリプト

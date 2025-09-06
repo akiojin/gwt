@@ -97,7 +97,7 @@ export async function launchClaudeCode(
       console.error(chalk.yellow('      e.g., npm i -g @anthropic-ai/claude-code'));
       console.error(chalk.yellow('   2. Try restarting your terminal or IDE'));
       console.error(chalk.yellow('   3. Check if "claude" is available in your PATH'));
-      console.error(chalk.yellow('   4. Try running "where claude" or "npx claude" to test the command'));
+      console.error(chalk.yellow('   4. Try running "claude --version" or "where/which claude" to test the command'));
     }
     
     throw new ClaudeError(errorMessage, error);
