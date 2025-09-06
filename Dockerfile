@@ -24,7 +24,7 @@ RUN curl -fsSL https://astral.sh/uv/install.sh | bash
 ENV PATH="/root/.cargo/bin:${PATH}"
 
 # エントリーポイントスクリプトをコピー
-COPY .docker/entrypoint.sh /entrypoint.sh
+COPY .scripts/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 WORKDIR /claude-worktree
