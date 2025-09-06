@@ -1,13 +1,13 @@
 
-Start a new feature by creating a specification and feature branch.
+仕様書と機能ブランチを作成して、新しい機能を開始します。
 
-This is the first step in the Spec-Driven Development lifecycle.
+これは Spec-Driven Development ライフサイクルの最初のステップです。
 
-Given the feature description provided as an argument, do this:
+引数で与えられた機能の説明に基づき、次を実施します:
 
-1. Run the script `scripts/create-new-feature.sh --json "$ARGUMENTS"` from repo root and parse its JSON output for BRANCH_NAME and SPEC_FILE. All file paths must be absolute.
-2. Load `templates/spec-template.md` to understand required sections.
-3. Write the specification to SPEC_FILE using the template structure, replacing placeholders with concrete details derived from the feature description (arguments) while preserving section order and headings.
-4. Report completion with branch name, spec file path, and readiness for the next phase.
+1. リポジトリルートで `scripts/create-new-feature.sh --no-branch --json "$ARGUMENTS"` を実行し、JSON 出力から BRANCH_NAME と SPEC_FILE を取得する。すべてのファイルパスは絶対パスにすること。
+2. 必須セクションを把握するために `templates/spec-template.md` を読み込む。
+3. テンプレート構造に従い、SPEC_FILE に仕様を書き込む。プレースホルダは機能説明（引数）から得られた具体内容に置換し、セクションの順序と見出しは維持する。
+4. ブランチ名、仕様ファイルのパス、次フェーズに進める準備が整った旨を報告する。
 
-Note: The script creates and checks out the new branch and initializes the spec file before writing.
+注: `--no-branch` を付与しているため、ブランチは作成・チェックアウトされません。仕様ファイルのみ初期化します。

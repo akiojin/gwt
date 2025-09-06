@@ -10,14 +10,18 @@ RUN apt-get update && apt-get install -y \
 # Install Claude Code
 RUN curl -fsSL https://claude.ai/install.sh | bash
 
-# グローバルNode.jsツールのインストール（pnpm使用）
-RUN npm i -g \
-    npm@latest \
-    typescript@latest \
-    eslint@latest \
-    prettier@latest \
-    @openai/codex@latest \
-    @google/gemini-cli@latest
+# Install bun
+RUN curl -fsSL https://bun.sh/install | bash
+ENV BUN_INSTALL="/root/.bun" \
+    PATH="/root/.bun/bin:${PATH}"
+
+# Global tools with bun
+RUN bun add -g \
+    typescript \
+    eslint \
+    prettier \
+    @openai/codex-cli \
+    @google/gemini-cli
 
 # Install uv/uvx
 RUN curl -fsSL https://astral.sh/uv/install.sh | bash

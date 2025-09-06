@@ -13,8 +13,7 @@
     "start": "node dist/index.js",
     "lint": "eslint src/**/*.ts",
     "type-check": "tsc --noEmit",
-    "clean": "rimraf dist",
-    "prepare": "pnpm run build"
+    "clean": "rimraf dist"
   },
   "keywords": [
     "git",
@@ -31,7 +30,8 @@
   "author": "akiojin",
   "license": "MIT",
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=18.0.0",
+    "bun": ">=1.0.0"
   },
   "dependencies": {
     "@inquirer/core": "^10.1.15",
@@ -50,6 +50,7 @@
   },
   "files": [
     "dist/",
+    "src/",
     "bin/",
     "README.md"
   ]

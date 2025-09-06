@@ -14,6 +14,7 @@ export async function launchClaudeCode(
   options: {
     skipPermissions?: boolean;
     mode?: 'normal' | 'continue' | 'resume';
+    extraArgs?: string[];
   } = {}
 ): Promise<void> {
   try {
@@ -75,9 +76,11 @@ export async function launchClaudeCode(
       args.push('--dangerously-skip-permissions');
       console.log(chalk.yellow('   ⚠️  Skipping permissions check'));
     }
-    
-    const isWindows = platform() === 'win32';
-    
+    // Append any pass-through arguments after our flags
+    if (options.extraArgs && options.extraArgs.length > 0) {
+      args.push(...options.extraArgs);
+    }
+
     await execa('claude', args, {
       cwd: worktreePath,
       stdio: 'inherit',
@@ -90,10 +93,11 @@ export async function launchClaudeCode(
     
     if (platform() === 'win32') {
       console.error(chalk.red('\n💡 Windows troubleshooting tips:'));
-      console.error(chalk.yellow('   1. Ensure Claude Code is installed: pnpm add -g @anthropic-ai/claude-code'));
+      console.error(chalk.yellow('   1. Ensure Claude Code is installed — see https://claude.ai/code'));
+      // Installation methods vary by environment; see official docs.
       console.error(chalk.yellow('   2. Try restarting your terminal or IDE'));
       console.error(chalk.yellow('   3. Check if "claude" is available in your PATH'));
-      console.error(chalk.yellow('   4. Try running "where claude" or "npx claude" to test the command'));
+      console.error(chalk.yellow('   4. Try running "claude --version" or "where/which claude" to test the command'));
     }
     
     throw new ClaudeError(errorMessage, error);
@@ -108,7 +112,7 @@ export async function isClaudeCodeAvailable(): Promise<boolean> {
   } catch (error: any) {
     if (error.code === 'ENOENT') {
       console.error(chalk.yellow('\n⚠️  Claude Code not found in PATH'));
-      console.error(chalk.gray('   Please install Claude Code: pnpm add -g @anthropic-ai/claude-code'));
+      console.error(chalk.gray('   Please install Claude Code CLI: https://claude.ai/code'));
     }
     return false;
   }

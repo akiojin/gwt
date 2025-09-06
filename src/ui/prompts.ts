@@ -451,9 +451,9 @@ export async function selectWorktreeAction(): Promise<'open' | 'remove' | 'remov
     message: 'What would you like to do (q to go back)?',
     choices: [
       {
-        name: '📂 Open in Claude Code',
+        name: '📂 Open in AI tool',
         value: 'open' as const,
-        description: 'Launch Claude Code in this worktree'
+        description: 'Launch the selected AI tool in this worktree'
       },
       {
         name: '🗑️  Remove worktree',
@@ -1196,7 +1196,7 @@ function formatConversationDisplay(
   };
 }
 
-export async function selectClaudeExecutionMode(): Promise<{
+export async function selectClaudeExecutionMode(toolLabel: string = 'Claude Code'): Promise<{
   mode: 'normal' | 'continue' | 'resume';
   skipPermissions: boolean;
 } | null> {
@@ -1252,7 +1252,7 @@ export async function selectClaudeExecutionMode(): Promise<{
     {
       name: '🚀 Normal - Start a new session',
       value: 'normal',
-      description: 'Launch Claude Code normally'
+      description: `Launch ${toolLabel} normally`
     },
     {
       name: '⏭️  Continue - Continue most recent conversation (-c)',
@@ -1267,7 +1267,7 @@ export async function selectClaudeExecutionMode(): Promise<{
   ];
 
   const mode = await customSelect({
-    message: 'Select Claude Code execution mode (q to go back):',
+    message: `Select ${toolLabel} execution mode (q to go back):`,
     choices
   });
 
@@ -1276,12 +1276,101 @@ export async function selectClaudeExecutionMode(): Promise<{
     return null;
   }
 
+  // Show appropriate flag hint per tool
+  const lower = (toolLabel || '').toLowerCase();
+  const isCodex = lower.includes('codex');
+  const flagHint = isCodex 
+    ? '--dangerously-bypass-approvals-and-sandbox' 
+    : '--dangerously-skip-permissions';
   const skipPermissions = await confirm({
-    message: 'Skip permission checks? (--dangerously-skip-permissions)',
+    message: `Skip permission checks? (${flagHint})`,
     default: false
   });
 
   return { mode: mode as 'normal' | 'continue' | 'resume', skipPermissions };
+}
+
+export async function selectAITool(options: {
+  claudeAvailable: boolean;
+  codexAvailable: boolean;
+}): Promise<'claude' | 'codex' | null> {
+  const { createPrompt, useState, useKeypress, isEnterKey, usePrefix, isUpKey, isDownKey } = await import('@inquirer/core');
+
+  const customSelect = createPrompt<string | null, { message: string; choices: any[] }>((config, done) => {
+    const [selectedIndex, setSelectedIndex] = useState<number>(0);
+    const [status, setStatus] = useState<'idle' | 'done'>('idle');
+    const prefix = usePrefix({});
+
+    useKeypress((key) => {
+      if (status === 'done') return;
+
+      if (key.name === 'q' || (key.name === 'c' && key.ctrl)) {
+        setStatus('done');
+        done(null);
+        return;
+      }
+
+      if (isEnterKey(key)) {
+        const selectedChoice = config.choices[selectedIndex];
+        if (selectedChoice.disabled) return;
+        setStatus('done');
+        done(selectedChoice.value);
+        return;
+      }
+
+      if (isUpKey(key)) {
+        let newIndex = selectedIndex > 0 ? selectedIndex - 1 : config.choices.length - 1;
+        while (config.choices[newIndex]?.disabled && newIndex !== selectedIndex) {
+          newIndex = newIndex > 0 ? newIndex - 1 : config.choices.length - 1;
+        }
+        setSelectedIndex(newIndex);
+      } else if (isDownKey(key)) {
+        let newIndex = selectedIndex < config.choices.length - 1 ? selectedIndex + 1 : 0;
+        while (config.choices[newIndex]?.disabled && newIndex !== selectedIndex) {
+          newIndex = newIndex < config.choices.length - 1 ? newIndex + 1 : 0;
+        }
+        setSelectedIndex(newIndex);
+      }
+    });
+
+    if (status === 'done') {
+      return '';
+    }
+
+    const message = config.message;
+    const choicesDisplay = config.choices.map((choice, index) => {
+      const isSelected = index === selectedIndex;
+      const pointer = isSelected ? '❯' : ' ';
+      const nameDisplay = choice.disabled ? chalk.gray(choice.name) : (isSelected ? chalk.cyan(choice.name) : choice.name);
+      const description = choice.description && isSelected ? `\n  ${chalk.gray(choice.description)}` : '';
+      return `${pointer} ${nameDisplay}${description}`;
+    }).join('\n');
+
+    return `${prefix} ${message}\n${choicesDisplay}`;
+  });
+
+  const choices = [
+    {
+      name: 'Claude Code - Anthropic\'s AI coding assistant',
+      value: 'claude',
+      description: options.claudeAvailable ? 'Use the Claude Code CLI' : 'Not found in PATH',
+      disabled: !options.claudeAvailable && 'Not available'
+    },
+    {
+      name: 'Codex CLI - OpenAI\'s code generation tool',
+      value: 'codex',
+      description: options.codexAvailable ? 'Use the Codex CLI' : 'Not found in PATH',
+      disabled: !options.codexAvailable && 'Not available'
+    }
+  ];
+
+  const value = await customSelect({
+    message: 'Which AI tool would you like to use? (q to cancel)',
+    choices
+  });
+
+  if (value === null) return null;
+  return value as 'claude' | 'codex';
 }
 
 function formatTimeAgo(timestamp: number): string {
@@ -1497,5 +1586,3 @@ ${category.title}`,
   
   return choices;
 }
-
-

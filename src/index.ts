@@ -38,6 +38,11 @@ import {
   isClaudeCodeAvailable, 
   ClaudeError 
 } from './claude.js';
+import {
+  launchCodexCLI,
+  isCodexAvailable,
+  CodexError
+} from './codex.js';
 import { 
   selectFromTable, 
   selectBaseBranch, 
@@ -83,21 +88,28 @@ import { loadSession, saveSession, SessionData, getAllSessions } from './config/
 
 function showHelp(): void {
   console.log(`
-Claude Worktree Manager
+Worktree Manager
 
 Usage: claude-worktree [options]
 
 Options:
   -c              Continue from the last session (automatically open the last used worktree)
   -r, --resume    Resume a session - interactively select from available sessions
+  --tool <name>   Select AI tool to launch in worktree (claude|codex)
   -h, --help      Show this help message
 
 Description:
-  Interactive Git worktree manager for Claude Code with graphical branch selection.
+  Interactive Git worktree manager with AI tool selection (Claude Code / Codex CLI) and graphical branch selection.
   
   Without options: Opens the interactive menu to select branches and manage worktrees.
   With -c option: Automatically continues from where you left off in the last session.
   With -r option: Shows a list of recent sessions to choose from and resume.
+
+Pass-through:
+  Use "--" to pass additional args directly to the selected tool.
+  Examples:
+    claude-worktree --tool claude -- -r
+    claude-worktree --tool codex -- --continue
 `);
 }
 
@@ -108,6 +120,29 @@ export async function main(): Promise<void> {
     const continueLastSession = args.includes('-c');
     const resumeSession = args.includes('-r') || args.includes('--resume');
     const showHelpFlag = args.includes('-h') || args.includes('--help');
+    // Parse --tool value (supports --tool codex or --tool=codex)
+    const toolIndex = args.findIndex(a => a === '--tool' || (typeof a === 'string' && a.startsWith('--tool=')));
+    let cliToolArg: 'claude' | 'codex' | undefined;
+    if (toolIndex !== -1) {
+      const token: string | undefined = args[toolIndex];
+      if (typeof token === 'string' && token.includes('=')) {
+        const val = token.split('=')[1];
+        if (val === 'claude' || val === 'codex') cliToolArg = val;
+        else {
+          printError(`Unknown tool: ${val}. Use --tool claude|codex`);
+          return; // Exit early on invalid tool arg
+        }
+      } else if (typeof args[toolIndex + 1] === 'string' && (args[toolIndex + 1] === 'claude' || args[toolIndex + 1] === 'codex')) {
+        cliToolArg = args[toolIndex + 1] as 'claude' | 'codex';
+      } else if (typeof args[toolIndex + 1] === 'string') {
+        printError(`Unknown tool: ${args[toolIndex + 1]}. Use --tool claude|codex`);
+        return;
+      }
+    }
+
+    // Collect pass-through args after "--"
+    const dashDashIndex = args.findIndex(a => a === '--');
+    const passThroughArgs: string[] = dashDashIndex !== -1 ? args.slice(dashDashIndex + 1) : [];
 
     // Show help if requested
     if (showHelpFlag) {
@@ -135,10 +170,18 @@ export async function main(): Promise<void> {
       }
     }
 
-    // Check if Claude Code is available
-    if (!(await isClaudeCodeAvailable())) {
+    // Check tool availability for selection later
+    const [claudeAvailable, codexAvailable] = await Promise.all([
+      isClaudeCodeAvailable().catch(() => false),
+      isCodexAvailable().catch(() => false)
+    ]);
+    if (!claudeAvailable) {
       printWarning('Claude Code CLI not found. Make sure it\'s installed and in your PATH.');
       printInfo('You can install it from: https://claude.ai/code');
+    }
+    if (!codexAvailable) {
+      // Optional informational message – Codex is optional
+      // printInfo('Codex CLI not found. Install it if you intend to use it.');
     }
 
     // Get repository root
@@ -290,6 +333,11 @@ async function handleSelection(
 
 async function handleBranchSelection(branchName: string, repoRoot: string): Promise<boolean> {
   try {
+    // Collect pass-through args from process argv
+    const argvAll = process.argv.slice(2);
+    const ddIndex = argvAll.findIndex(a => a === '--');
+    const passThroughArgs = ddIndex !== -1 ? argvAll.slice(ddIndex + 1) : [];
+
     // Check if this is a remote branch
     const isRemoteBranch = branchName.startsWith('origin/');
     let localBranchName = branchName;
@@ -341,44 +389,75 @@ async function handleBranchSelection(branchName: string, repoRoot: string): Prom
       printSuccess(`Worktree created at: ${worktreePath}`);
     }
 
-    // Check if Claude Code is available before launching
-    if (await isClaudeCodeAvailable()) {
-      // Ask about execution mode
-      const executionConfig = await selectClaudeExecutionMode();
-      if (!executionConfig) {
-        // User cancelled, return to main menu
-        return true;
+    // Select and launch AI tool
+    const { selectAITool } = await import('./ui/prompts.js');
+    let selectedTool: 'claude' | 'codex' | null = null;
+    // Re-parse tool arg for this flow as well
+    const argv = process.argv.slice(2);
+    const idx = argv.findIndex(a => a === '--tool' || (typeof a === 'string' && a.startsWith('--tool=')));
+    let argTool: 'claude' | 'codex' | undefined;
+    if (idx !== -1) {
+      const tok: string | undefined = argv[idx];
+      if (typeof tok === 'string' && tok.includes('=')) {
+        const val = tok.split('=')[1];
+        if (val === 'claude' || val === 'codex') argTool = val;
+      } else if (typeof argv[idx + 1] === 'string' && (argv[idx + 1] === 'claude' || argv[idx + 1] === 'codex')) {
+        argTool = argv[idx + 1] as 'claude' | 'codex';
       }
-      const { mode, skipPermissions } = executionConfig;
-      
-      try {
-        // Save session data before launching Claude Code
-        const sessionData: SessionData = {
-          lastWorktreePath: worktreePath,
-          lastBranch: targetBranch,
-          timestamp: Date.now(),
-          repositoryRoot: repoRoot
-        };
-        await saveSession(sessionData);
-        
-        await launchClaudeCode(worktreePath, { mode, skipPermissions });
-        
-        // Check for changes after Claude Code exits
+    }
+    const [localClaudeAvail, localCodexAvail] = await Promise.all([
+      isClaudeCodeAvailable().catch(() => false),
+      isCodexAvailable().catch(() => false)
+    ]);
+    if (argTool) {
+      selectedTool = argTool;
+      if (selectedTool === 'claude' && !localClaudeAvail) selectedTool = null;
+      if (selectedTool === 'codex' && !localCodexAvail) selectedTool = null;
+      if (!selectedTool) printWarning('Requested tool is not available.');
+    }
+    if (!selectedTool) {
+      if (localClaudeAvail && !localCodexAvail) selectedTool = 'claude';
+      else if (!localClaudeAvail && localCodexAvail) selectedTool = 'codex';
+      else selectedTool = await selectAITool({ claudeAvailable: localClaudeAvail, codexAvailable: localCodexAvail });
+    }
+    if (!selectedTool) {
+      printInfo('No AI tool selected. Returning to menu.');
+      return true;
+    }
+
+    // If neither tool is available, abort early
+    if (!localClaudeAvail && !localCodexAvail) {
+      printError('No AI tools are available in PATH (Claude Code or Codex CLI).');
+      await confirmContinue('Press enter to continue...');
+      return true;
+    }
+
+    const executionConfig = await selectClaudeExecutionMode(selectedTool === 'claude' ? 'Claude Code' : 'Codex CLI');
+    if (!executionConfig) return true;
+    const { mode, skipPermissions } = executionConfig;
+
+    try {
+      // Save session data before launching
+      const sessionData: SessionData = {
+        lastWorktreePath: worktreePath,
+        lastBranch: targetBranch,
+        timestamp: Date.now(),
+        repositoryRoot: repoRoot
+      };
+      await saveSession(sessionData);
+
+      if (selectedTool === 'claude') {
+        await launchClaudeCode(worktreePath, { mode, skipPermissions, extraArgs: passThroughArgs });
         await handlePostClaudeChanges(worktreePath);
-      } catch (error) {
-        if (error instanceof ClaudeError) {
-          printError(`Failed to launch Claude Code: ${error.message}`);
-          if (error.message.includes('command not found')) {
-            printInfo('Install with: pnpm add -g @anthropic-ai/claude-code');
-          }
-        } else {
-          printError(`Unexpected error: ${error instanceof Error ? error.message : String(error)}`);
-        }
-        await confirmContinue('Press enter to continue...');
+      } else {
+        await launchCodexCLI(worktreePath, { mode, extraArgs: passThroughArgs, bypassApprovals: skipPermissions });
       }
-    } else {
-      printError('Claude Code is not available. Please install it first.');
-      printInfo('Install with: pnpm add -g @anthropic-ai/claude-code');
+    } catch (error) {
+      if (error instanceof ClaudeError || error instanceof CodexError) {
+        printError(error.message);
+      } else {
+        printError(`Unexpected error: ${error instanceof Error ? error.message : String(error)}`);
+      }
       await confirmContinue('Press enter to continue...');
     }
     
@@ -521,7 +600,7 @@ async function handleCreateNewBranch(branches: BranchInfo[], repoRoot: string): 
         if (error instanceof ClaudeError) {
           printError(`Failed to launch Claude Code: ${error.message}`);
           if (error.message.includes('command not found')) {
-            printInfo('Install with: pnpm add -g @anthropic-ai/claude-code');
+            printInfo('Install Claude Code CLI: https://claude.ai/code');
           }
         } else {
           printError(`Unexpected error: ${error instanceof Error ? error.message : String(error)}`);
@@ -530,7 +609,7 @@ async function handleCreateNewBranch(branches: BranchInfo[], repoRoot: string): 
       }
     } else {
       printError('Claude Code is not available. Please install it first.');
-      printInfo('Install with: pnpm add -g @anthropic-ai/claude-code');
+      printInfo('Install Claude Code CLI: https://claude.ai/code');
       await confirmContinue('Press enter to continue...');
     }
     
@@ -573,48 +652,60 @@ async function handleManageWorktrees(worktrees: WorktreeInfo[]): Promise<boolean
         case 'open':
           // Check if worktree is accessible
           if (worktree.isAccessible === false) {
-            printError('Cannot open inaccessible worktree in Claude Code');
+            printError('Cannot open inaccessible worktree');
             printInfo(`Path: ${worktree.path}`);
             printInfo('This worktree was created in a different environment and is not accessible here.');
             await confirmContinue('Press enter to continue...');
             break;
           }
-          
-          // Check if Claude Code is available before launching
-          if (await isClaudeCodeAvailable()) {
-            // Ask about execution mode
-      const executionConfig = await selectClaudeExecutionMode();
-      if (!executionConfig) {
-        // User cancelled, return to main menu
-        return true;
-      }
-      const { mode, skipPermissions } = executionConfig;
-            
-            try {
-              // Save session data before launching Claude Code
-              const sessionData: SessionData = {
-                lastWorktreePath: worktree.path,
-                lastBranch: worktree.branch,
-                timestamp: Date.now(),
-                repositoryRoot: await getRepositoryRoot()
-              };
-              await saveSession(sessionData);
-              
+
+          // Select AI tool (reuse selection logic)
+          const [localClaudeAvail, localCodexAvail] = await Promise.all([
+            isClaudeCodeAvailable().catch(() => false),
+            isCodexAvailable().catch(() => false)
+          ]);
+          if (!localClaudeAvail && !localCodexAvail) {
+            printError('No AI tools are available in PATH (Claude Code or Codex CLI).');
+            await confirmContinue('Press enter to continue...');
+            return true;
+          }
+
+          const { selectAITool } = await import('./ui/prompts.js');
+          let selectedTool: 'claude' | 'codex' | null = null;
+          if (localClaudeAvail && !localCodexAvail) selectedTool = 'claude';
+          else if (!localClaudeAvail && localCodexAvail) selectedTool = 'codex';
+          else selectedTool = await selectAITool({ claudeAvailable: localClaudeAvail, codexAvailable: localCodexAvail });
+          if (!selectedTool) {
+            printInfo('No AI tool selected. Returning to menu.');
+            return true;
+          }
+
+          // Ask execution mode
+          const execCfg = await selectClaudeExecutionMode(selectedTool === 'claude' ? 'Claude Code' : 'Codex CLI');
+          if (!execCfg) return true;
+          const { mode, skipPermissions } = execCfg;
+
+          try {
+            // Save session data before launching
+            const sessionData: SessionData = {
+              lastWorktreePath: worktree.path,
+              lastBranch: worktree.branch,
+              timestamp: Date.now(),
+              repositoryRoot: await getRepositoryRoot()
+            };
+            await saveSession(sessionData);
+
+            if (selectedTool === 'claude') {
               await launchClaudeCode(worktree.path, { mode, skipPermissions });
-            } catch (error) {
-              if (error instanceof ClaudeError) {
-                printError(`Failed to launch Claude Code: ${error.message}`);
-                if (error.message.includes('command not found')) {
-                  printInfo('Install with: pnpm add -g @anthropic-ai/claude-code');
-                }
-              } else {
-                printError(`Unexpected error: ${error instanceof Error ? error.message : String(error)}`);
-              }
-              await confirmContinue('Press enter to continue...');
+            } else {
+              await launchCodexCLI(worktree.path, { mode, bypassApprovals: skipPermissions });
             }
-          } else {
-            printError('Claude Code is not available. Please install it first.');
-            printInfo('Install with: pnpm add -g @anthropic-ai/claude-code');
+          } catch (error) {
+            if (error instanceof ClaudeError || error instanceof CodexError) {
+              printError(error.message);
+            } else {
+              printError(`Unexpected error: ${error instanceof Error ? error.message : String(error)}`);
+            }
             await confirmContinue('Press enter to continue...');
           }
           return true; // Return to main menu after opening
@@ -952,7 +1043,7 @@ async function handlePostClaudeChanges(worktreePath: string): Promise<void> {
           return;
           
         case 'stash':
-          await stashChanges(worktreePath, 'Stashed by Claude Worktree Manager');
+      await stashChanges(worktreePath, 'Stashed by Worktree Manager');
           printSuccess('Changes stashed successfully!');
           return;
           
