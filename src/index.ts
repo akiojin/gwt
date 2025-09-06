@@ -88,7 +88,7 @@ import { loadSession, saveSession, SessionData, getAllSessions } from './config/
 
 function showHelp(): void {
   console.log(`
-Claude Worktree Manager
+Worktree Manager
 
 Usage: claude-worktree [options]
 
@@ -99,7 +99,7 @@ Options:
   -h, --help      Show this help message
 
 Description:
-  Interactive Git worktree manager for Claude Code with graphical branch selection.
+  Interactive Git worktree manager with AI tool selection (Claude Code / Codex CLI) and graphical branch selection.
   
   Without options: Opens the interactive menu to select branches and manage worktrees.
   With -c option: Automatically continues from where you left off in the last session.
@@ -1031,7 +1031,7 @@ async function handlePostClaudeChanges(worktreePath: string): Promise<void> {
           return;
           
         case 'stash':
-          await stashChanges(worktreePath, 'Stashed by Claude Worktree Manager');
+      await stashChanges(worktreePath, 'Stashed by Worktree Manager');
           printSuccess('Changes stashed successfully!');
           return;
           

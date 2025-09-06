@@ -13,8 +13,7 @@
     "start": "node dist/index.js",
     "lint": "eslint src/**/*.ts",
     "type-check": "tsc --noEmit",
-    "clean": "rimraf dist",
-    "prepare": "bun run build"
+    "clean": "rimraf dist"
   },
   "keywords": [
     "git",
@@ -51,6 +50,7 @@
   },
   "files": [
     "dist/",
+    "src/",
     "bin/",
     "README.md"
   ]

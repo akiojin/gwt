@@ -30,7 +30,7 @@ export async function printWelcome(): Promise<void> {
   
   const version = await getPackageVersion();
   const versionText = version ? ` v${version}` : '';
-  const title = `🌳 Claude Worktree Manager${versionText}`;
+  const title = `🌳 Worktree Manager${versionText}`;
   
   // Calculate title display width
   // 🌳 = 2 columns, rest is normal text
