@@ -6,6 +6,7 @@
 set -e
 
 JSON_MODE=false
+NO_BRANCH=false
 
 # Collect non-flag args
 ARGS=()
@@ -14,8 +15,11 @@ for arg in "$@"; do
         --json)
             JSON_MODE=true
             ;;
+        --no-branch)
+            NO_BRANCH=true
+            ;;
         --help|-h)
-            echo "Usage: $0 [--json] <feature_description>"; exit 0 ;;
+            echo "Usage: $0 [--json] [--no-branch] <feature_description>"; exit 0 ;;
         *)
             ARGS+=("$arg") ;;
     esac
@@ -23,7 +27,7 @@ done
 
 FEATURE_DESCRIPTION="${ARGS[*]}"
 if [ -z "$FEATURE_DESCRIPTION" ]; then
-        echo "Usage: $0 [--json] <feature_description>" >&2
+        echo "Usage: $0 [--json] [--no-branch] <feature_description>" >&2
         exit 1
 fi
 
@@ -67,8 +71,10 @@ WORDS=$(echo "$BRANCH_NAME" | tr '-' '\n' | grep -v '^$' | head -3 | tr '\n' '-'
 # Final branch name
 BRANCH_NAME="${FEATURE_NUM}-${WORDS}"
 
-# Create and switch to new branch
-git checkout -b "$BRANCH_NAME"
+# Create and switch to new branch (unless --no-branch)
+if [ "$NO_BRANCH" != true ]; then
+    git checkout -b "$BRANCH_NAME"
+fi
 
 # Create feature directory
 FEATURE_DIR="$SPECS_DIR/$BRANCH_NAME"

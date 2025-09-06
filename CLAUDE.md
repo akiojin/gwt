@@ -51,3 +51,11 @@
 ## ドキュメント作成ガイドライン
 
 - README.mdには設計などは書いてはいけない。プロジェクトの説明やディレクトリ構成などの説明のみに徹底する。設計などは、適切なファイルへのリンクを書く。
+
+## 最近の変更
+
+### 2025-01-06: Codex CLI対応機能の計画
+
+- worktree起動時にClaude CodeとCodex CLIを選択可能にする機能を計画中
+- 詳細: `/specs/001-codex-cli-worktree/`
+- 技術スタック: Node.js 18+, TypeScript, inquirer
