@@ -4,24 +4,6 @@
       "type": "sse",
       "url": "https://mcp.context7.com/sse"
     },
-    "google-search": {
-      "type": "stdio",
-      "command": "npx",
-      "args": [
-        "-y",
-        "mcp-gemini-google-search"
-      ],
-      "env": {}
-    },
-    "textlint": {
-      "type": "stdio",
-      "command": "npx",
-      "args": [
-        "textlint",
-        "--mcp"
-      ],
-      "env": {}
-    },
     "serena": {
       "type": "stdio",
       "command": "uvx",

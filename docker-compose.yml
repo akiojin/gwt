@@ -5,12 +5,9 @@ services:
     volumes:
       # プロジェクトファイルの永続化
       - .:/claude-worktree
-      # 設定ファイルの永続化（必要なもののみ）
-      - ssh_keys:/root/.ssh
       - claude_config:/root/.claude
       - ./.docker/bash_history:/root/.bash_history
-      # Docker socket（必要な場合）
-      - /var/run/docker.sock:/var/run/docker.sock
+      - ~/.codex:/root/.codex
     environment:
       - NPM_USER
       - NPM_EMAIL
@@ -22,16 +19,10 @@ services:
       - GITHUB_TOKEN
       - GITHUB_PERSONAL_ACCESS_TOKEN
       - GITHUB_USERNAME
-      # Docker in Docker
-      - DOCKER_HOST=unix:///var/run/docker.sock
     stdin_open: true
     tty: true
     restart: unless-stopped
     working_dir: /claude-worktree
 
 volumes:
-  # 必要最小限の設定のみ永続化
-  ssh_keys:
-    driver: local
-  claude_config:
-    driver: local
+  claude_config: {}
