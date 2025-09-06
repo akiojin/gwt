@@ -1196,7 +1196,7 @@ function formatConversationDisplay(
   };
 }
 
-export async function selectClaudeExecutionMode(toolLabel = 'Claude Code'): Promise<{
+export async function selectClaudeExecutionMode(toolLabel: string = 'Claude Code'): Promise<{
   mode: 'normal' | 'continue' | 'resume';
   skipPermissions: boolean;
 } | null> {
@@ -1276,8 +1276,14 @@ export async function selectClaudeExecutionMode(toolLabel = 'Claude Code'): Prom
     return null;
   }
 
+  // Show appropriate flag hint per tool
+  const lower = (toolLabel || '').toLowerCase();
+  const isCodex = lower.includes('codex');
+  const flagHint = isCodex 
+    ? '--dangerously-bypass-approvals-and-sandbox' 
+    : '--dangerously-skip-permissions';
   const skipPermissions = await confirm({
-    message: 'Skip permission checks? (--dangerously-skip-permissions)',
+    message: `Skip permission checks? (${flagHint})`,
     default: false
   });
 

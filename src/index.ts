@@ -450,7 +450,7 @@ async function handleBranchSelection(branchName: string, repoRoot: string): Prom
         await launchClaudeCode(worktreePath, { mode, skipPermissions, extraArgs: passThroughArgs });
         await handlePostClaudeChanges(worktreePath);
       } else {
-        await launchCodexCLI(worktreePath, { mode, extraArgs: passThroughArgs });
+        await launchCodexCLI(worktreePath, { mode, extraArgs: passThroughArgs, bypassApprovals: skipPermissions });
       }
     } catch (error) {
       if (error instanceof ClaudeError || error instanceof CodexError) {
@@ -698,7 +698,7 @@ async function handleManageWorktrees(worktrees: WorktreeInfo[]): Promise<boolean
             if (selectedTool === 'claude') {
               await launchClaudeCode(worktree.path, { mode, skipPermissions });
             } else {
-              await launchCodexCLI(worktree.path, { mode });
+              await launchCodexCLI(worktree.path, { mode, bypassApprovals: skipPermissions });
             }
           } catch (error) {
             if (error instanceof ClaudeError || error instanceof CodexError) {

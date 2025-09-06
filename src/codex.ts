@@ -15,6 +15,7 @@ export async function launchCodexCLI(
   options: {
     mode?: 'normal' | 'continue' | 'resume';
     extraArgs?: string[];
+    bypassApprovals?: boolean;
   } = {}
 ): Promise<void> {
   try {
@@ -40,6 +41,11 @@ export async function launchCodexCLI(
       default:
         console.log(chalk.green('   ✨ Starting new session'));
         break;
+    }
+
+    if (options.bypassApprovals) {
+      args.push('--dangerously-bypass-approvals-and-sandbox');
+      console.log(chalk.yellow('   ⚠️  Bypassing approvals and sandbox'));
     }
 
     if (options.extraArgs && options.extraArgs.length > 0) {
