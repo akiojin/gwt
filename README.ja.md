@@ -30,12 +30,7 @@ Claude Code用の対話型Gitワークツリーマネージャー（グラフィ
 npm install -g @akiojin/claude-worktree
 ```
 
-#### pnpm
-```bash
-pnpm add -g @akiojin/claude-worktree
-```
-
-#### bun
+#### bun（推奨）
 ```bash
 bun add -g @akiojin/claude-worktree
 ```
@@ -47,11 +42,6 @@ bun add -g @akiojin/claude-worktree
 #### npx (npm)
 ```bash
 npx @akiojin/claude-worktree
-```
-
-#### pnpx (pnpm)
-```bash
-pnpx @akiojin/claude-worktree
 ```
 
 #### bunx (bun)
@@ -138,33 +128,33 @@ npx @akiojin/claude-worktree
 git clone https://github.com/akiojin/claude-worktree.git
 cd claude-worktree
 
-# 依存関係をインストール
-pnpm install
+# 依存関係をインストール（bun）
+bun install
 
-# プロジェクトをビルド
-pnpm run build
+# プロジェクトをビルド（bun）
+bun run build
 ```
 
 ### 利用可能なスクリプト
 
 ```bash
-# 自動リビルド付き開発モード
-pnpm run dev
+# 自動リビルド付き開発モード（bun）
+bun run dev
 
-# プロダクションビルド
-pnpm run build
+# プロダクションビルド（bun）
+bun run build
 
-# 型チェック
-pnpm run type-check
+# 型チェック（bun）
+bun run type-check
 
-# コードリンティング
-pnpm run lint
+# コードリンティング（bun）
+bun run lint
 
-# ビルド成果物をクリーン
-pnpm run clean
+# ビルド成果物をクリーン（bun）
+bun run clean
 
-# CLIをローカルテスト
-pnpm run start
+# CLIをローカルテスト（bun）
+bun run start
 ```
 
 ### 開発ワークフロー
@@ -172,8 +162,8 @@ pnpm run start
 1. **フォークとクローン**: リポジトリをフォークし、あなたのフォークをクローン
 2. **ブランチ作成**: ツール自体を使用してfeatureブランチを作成
 3. **開発**: TypeScriptサポート付きで変更を実施
-4. **テスト**: `pnpm run start`でCLI機能をテスト
-5. **品質チェック**: `pnpm run type-check`と`pnpm run lint`を実行
+4. **テスト**: `bun run start`でCLI機能をテスト
+5. **品質チェック**: `bun run type-check`と`bun run lint`を実行
 6. **プルリクエスト**: 明確な説明付きでPRを提出
 
 ### コード構造

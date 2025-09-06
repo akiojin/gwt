@@ -600,7 +600,7 @@ async function handleCreateNewBranch(branches: BranchInfo[], repoRoot: string): 
         if (error instanceof ClaudeError) {
           printError(`Failed to launch Claude Code: ${error.message}`);
           if (error.message.includes('command not found')) {
-            printInfo('Install with: pnpm add -g @anthropic-ai/claude-code');
+            printInfo('Install with: bun add -g @anthropic-ai/claude-code');
           }
         } else {
           printError(`Unexpected error: ${error instanceof Error ? error.message : String(error)}`);
@@ -609,7 +609,7 @@ async function handleCreateNewBranch(branches: BranchInfo[], repoRoot: string): 
       }
     } else {
       printError('Claude Code is not available. Please install it first.');
-      printInfo('Install with: pnpm add -g @anthropic-ai/claude-code');
+      printInfo('Install with: bun add -g @anthropic-ai/claude-code');
       await confirmContinue('Press enter to continue...');
     }
     

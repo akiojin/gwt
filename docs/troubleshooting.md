@@ -150,7 +150,7 @@ npx tsc
 pnpm run build
 ```
 
-### pnpm警告の対処
+### パッケージマネージャの警告の対処
 
 **症状：**
 ```
@@ -158,8 +158,8 @@ pnpm warn Unknown project config "shamefully-hoist"...
 ```
 
 **原因：**
-pnpmやyarnの設定ファイルが存在する
+pnpm / yarn / npm 固有の設定ファイルが存在する
 
 **解決方法：**
 - これらの警告は無視して問題ありません
-- 必要に応じて、`.npmrc`、`.yarnrc`、`.pnpmfile.cjs`などの設定ファイルを削除
+- 必要に応じて、`.npmrc`、`.yarnrc`、`.pnpmfile.cjs` などの設定ファイルを見直し/削除

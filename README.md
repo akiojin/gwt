@@ -30,12 +30,7 @@ Install globally for permanent access:
 npm install -g @akiojin/claude-worktree
 ```
 
-#### pnpm
-```bash
-pnpm add -g @akiojin/claude-worktree
-```
-
-#### bun
+#### bun (recommended)
 ```bash
 bun add -g @akiojin/claude-worktree
 ```
@@ -47,11 +42,6 @@ Run without installation:
 #### npx (npm)
 ```bash
 npx @akiojin/claude-worktree
-```
-
-#### pnpx (pnpm)
-```bash
-pnpx @akiojin/claude-worktree
 ```
 
 #### bunx (bun)
@@ -138,33 +128,33 @@ The tool presents an interactive interface with the following options:
 git clone https://github.com/akiojin/claude-worktree.git
 cd claude-worktree
 
-# Install dependencies
-pnpm install
+# Install dependencies (bun)
+bun install
 
-# Build the project
-pnpm run build
+# Build the project (bun)
+bun run build
 ```
 
 ### Available Scripts
 
 ```bash
-# Development mode with auto-rebuild
-pnpm run dev
+# Development mode with auto-rebuild (bun)
+bun run dev
 
-# Production build
-pnpm run build
+# Production build (bun)
+bun run build
 
-# Type checking
-pnpm run type-check
+# Type checking (bun)
+bun run type-check
 
-# Code linting
-pnpm run lint
+# Code linting (bun)
+bun run lint
 
-# Clean build artifacts
-pnpm run clean
+# Clean build artifacts (bun)
+bun run clean
 
-# Test the CLI locally
-pnpm run start
+# Test the CLI locally (bun)
+bun run start
 ```
 
 ### Development Workflow
@@ -172,8 +162,8 @@ pnpm run start
 1. **Fork and Clone**: Fork the repository and clone your fork
 2. **Create Branch**: Use the tool itself to create a feature branch
 3. **Development**: Make changes with TypeScript support
-4. **Testing**: Test CLI functionality with `pnpm run start`
-5. **Quality Checks**: Run `pnpm run type-check` and `pnpm run lint`
+4. **Testing**: Test CLI functionality with `bun run start`
+5. **Quality Checks**: Run `bun run type-check` and `bun run lint`
 6. **Pull Request**: Submit a PR with clear description
 
 ### Code Structure

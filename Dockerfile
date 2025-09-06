@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y \
 # Install Claude Code
 RUN curl -fsSL https://claude.ai/install.sh | bash
 
-# グローバルNode.jsツールのインストール（pnpm使用）
+# グローバルツールのインストール（bun使用に移行）
 RUN npm i -g \
     npm@latest \
     typescript@latest \
