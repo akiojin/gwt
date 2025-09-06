@@ -1,12 +1,12 @@
 # クイックスタートガイド: Codex CLI対応
 
-**機能**: worktree起動時のツール選択  
+**機能**: claude-worktree起動時のツール選択  
 **バージョン**: 1.0.0  
 **最終更新**: 2025-01-06
 
 ## 概要
 
-このガイドでは、worktreeコマンドの新しいツール選択機能を素早く試す方法を説明します。
+このガイドでは、claude-worktreeコマンドの新しいツール選択機能を素早く試す方法を説明します。
 
 ## 前提条件
 
@@ -19,7 +19,7 @@
 ```bash
 # リポジトリのクローン
 git clone <repository-url>
-cd worktree-project
+cd claude-worktree
 
 # 依存関係のインストール
 npm install
@@ -33,32 +33,50 @@ npm link
 ### 1. 対話型選択（推奨）
 
 ```bash
-# worktreeを起動
-worktree
+# claude-worktreeを起動
+claude-worktree
 
 # 以下のような選択画面が表示されます：
-? Which AI tool would you like to use? (Use arrow keys)
+? Which AI tool would you like to use? (Use arrow keys, press 'q' to cancel)
 ❯ Claude Code - Anthropic's AI coding assistant
   Codex CLI - OpenAI's code generation tool
 ```
 
-矢印キーで選択し、Enterキーで確定します。
+- 矢印キーで選択
+- Enterキーで確定
+- qキーでキャンセル
 
 ### 2. 直接指定
 
 ```bash
 # Claude Codeを直接起動
-worktree --tool claude
+claude-worktree --tool claude
 
 # Codex CLIを直接起動
-worktree --tool codex
+claude-worktree --tool codex
 ```
 
-### 3. ヘルプの表示
+### 3. ツール固有オプション付き起動
+
+```bash
+# Claude Codeをリジュームモードで起動
+claude-worktree --tool claude -- -r
+
+# Claude Codeをコンテキスト継続モードで起動
+claude-worktree --tool claude -- -c
+
+# Codex CLIを継続モードで起動
+claude-worktree --tool codex -- --continue
+
+# Codex CLIをレジュームモードで起動
+claude-worktree --tool codex -- --resume
+```
+
+### 4. ヘルプの表示
 
 ```bash
 # 使用可能なオプションを確認
-worktree --help
+claude-worktree --help
 ```
 
 ## 動作確認テスト
@@ -67,26 +85,39 @@ worktree --help
 
 ```bash
 # 設定をリセット
-rm -rf ~/.worktree
+rm -rf ~/.claude-worktree
 
-# worktreeを起動
-worktree
+# claude-worktreeを起動
+claude-worktree
 
 # 期待される動作:
-# 1. ツール選択画面が表示される
+# 1. ツール選択画面が表示される（qキーでキャンセル可能）
 # 2. Claude Codeを選択
 # 3. "✓ Claude Code workspace initialized" が表示される
+```
+
+### テスト1.1: キャンセル操作
+
+```bash
+# claude-worktreeを起動
+claude-worktree
+
+# qキーを押す
+
+# 期待される動作:
+# "Operation cancelled by user (q)" が表示される
+# 終了コード 130 で終了
 ```
 
 ### テスト2: 選択の記憶
 
 ```bash
 # 1回目: Claude Codeを選択
-worktree
+claude-worktree
 # Claude Codeを選択
 
 # 2回目: 前回の選択が記憶されている
-worktree
+claude-worktree
 # 期待: Claude Codeがデフォルトで選択されている状態
 ```
 
@@ -94,7 +125,7 @@ worktree
 
 ```bash
 # Codex CLIが未インストールの環境で実行
-worktree
+claude-worktree
 
 # 期待される動作:
 # Codex CLIの選択肢が無効化されている
@@ -105,35 +136,42 @@ worktree
 
 ```bash
 # バージョン確認
-worktree --version
+claude-worktree --version
 # 期待: バージョン番号が表示される
 
 # デフォルト設定のリセット
-worktree --reset-default
+claude-worktree --reset-default
 # 期待: "Default tool selection has been reset" が表示される
 
 # 静音モード
-worktree --tool claude --quiet
+claude-worktree --tool claude --quiet
 # 期待: 最小限の出力でClaude Codeが起動
+
+# ツール固有オプションの動作確認
+claude-worktree --tool claude -- -r
+# 期待: Claude Codeが -r オプション付きで起動
+
+claude-worktree --tool codex -- --continue
+# 期待: Codex CLIが --continue オプション付きで起動
 ```
 
 ### テスト5: エラーハンドリング
 
 ```bash
 # 無効なツール指定
-worktree --tool invalid
+claude-worktree --tool invalid
 # 期待: エラーメッセージ "Error: Invalid tool 'invalid'"
 
 # 権限エラーのシミュレーション
-chmod 000 ~/.worktree/config.json
-worktree
+chmod 000 ~/.claude-worktree/config.json
+claude-worktree
 # 期待: 権限エラーメッセージと回復方法の提示
-chmod 644 ~/.worktree/config.json
+chmod 644 ~/.claude-worktree/config.json
 ```
 
 ## 設定ファイル
 
-設定は `~/.worktree/config.json` に保存されます：
+設定は `~/.claude-worktree/config.json` に保存されます：
 
 ```json
 {
@@ -152,11 +190,11 @@ chmod 644 ~/.worktree/config.json
 
 ```bash
 # 設定ファイルを直接編集
-nano ~/.worktree/config.json
+nano ~/.claude-worktree/config.json
 
 # または環境変数で制御
-export WORKTREE_DEFAULT_TOOL=codex
-worktree
+export CLAUDE_WORKTREE_DEFAULT_TOOL=codex
+claude-worktree
 ```
 
 ## トラブルシューティング
@@ -170,7 +208,7 @@ echo $PS1
 # 空の場合は非インタラクティブモード
 
 # 強制的にインタラクティブモードで実行
-bash -i -c "worktree"
+bash -i -c "claude-worktree"
 ```
 
 ### 問題: 色が表示されない
@@ -178,10 +216,10 @@ bash -i -c "worktree"
 **解決方法**:
 ```bash
 # カラー出力を無効化
-worktree --no-color
+claude-worktree --no-color
 
 # または設定で無効化
-echo '{"preferences":{"colorOutput":false}}' > ~/.worktree/config.json
+echo '{"preferences":{"colorOutput":false}}' > ~/.claude-worktree/config.json
 ```
 
 ### 問題: Codex CLIが見つからない
@@ -201,25 +239,25 @@ npm install -g @openai/codex-cli
 
 ```bash
 #!/bin/bash
-# test-worktree.sh
+# test-claude-worktree.sh
 
-echo "=== Worktree Tool Selection Test Suite ==="
+echo "=== Claude-Worktree Tool Selection Test Suite ==="
 
 # テスト1: ヘルプ
 echo "Test 1: Help"
-worktree --help || exit 1
+claude-worktree --help || exit 1
 
 # テスト2: バージョン
 echo "Test 2: Version"
-worktree --version || exit 1
+claude-worktree --version || exit 1
 
 # テスト3: Claude直接指定
 echo "Test 3: Direct Claude"
-worktree --tool claude --quiet || exit 1
+claude-worktree --tool claude --quiet || exit 1
 
 # テスト4: 設定リセット
 echo "Test 4: Reset Default"
-worktree --reset-default || exit 1
+claude-worktree --reset-default || exit 1
 
 echo "=== All tests passed! ==="
 ```
@@ -228,7 +266,7 @@ echo "=== All tests passed! ==="
 
 ```bash
 # 起動時間測定
-time worktree --tool claude --quiet
+time claude-worktree --tool claude --quiet
 
 # 期待: < 100ms
 ```
