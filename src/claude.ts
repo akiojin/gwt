@@ -14,6 +14,7 @@ export async function launchClaudeCode(
   options: {
     skipPermissions?: boolean;
     mode?: 'normal' | 'continue' | 'resume';
+    extraArgs?: string[];
   } = {}
 ): Promise<void> {
   try {
@@ -75,9 +76,11 @@ export async function launchClaudeCode(
       args.push('--dangerously-skip-permissions');
       console.log(chalk.yellow('   ⚠️  Skipping permissions check'));
     }
-    
-    const isWindows = platform() === 'win32';
-    
+    // Append any pass-through arguments after our flags
+    if (options.extraArgs && options.extraArgs.length > 0) {
+      args.push(...options.extraArgs);
+    }
+
     await execa('claude', args, {
       cwd: worktreePath,
       stdio: 'inherit',

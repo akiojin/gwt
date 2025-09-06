@@ -14,6 +14,7 @@ export async function launchCodexCLI(
   worktreePath: string,
   options: {
     mode?: 'normal' | 'continue' | 'resume';
+    extraArgs?: string[];
   } = {}
 ): Promise<void> {
   try {
@@ -39,6 +40,10 @@ export async function launchCodexCLI(
       default:
         console.log(chalk.green('   ✨ Starting new session'));
         break;
+    }
+
+    if (options.extraArgs && options.extraArgs.length > 0) {
+      args.push(...options.extraArgs);
     }
 
     await execa('codex', args, {
@@ -73,4 +78,3 @@ export async function isCodexAvailable(): Promise<boolean> {
     return false;
   }
 }
-

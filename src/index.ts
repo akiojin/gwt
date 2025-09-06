@@ -104,6 +104,12 @@ Description:
   Without options: Opens the interactive menu to select branches and manage worktrees.
   With -c option: Automatically continues from where you left off in the last session.
   With -r option: Shows a list of recent sessions to choose from and resume.
+
+Pass-through:
+  Use "--" to pass additional args directly to the selected tool.
+  Examples:
+    claude-worktree --tool claude -- -r
+    claude-worktree --tool codex -- --continue
 `);
 }
 
@@ -122,10 +128,21 @@ export async function main(): Promise<void> {
       if (typeof token === 'string' && token.includes('=')) {
         const val = token.split('=')[1];
         if (val === 'claude' || val === 'codex') cliToolArg = val;
+        else {
+          printError(`Unknown tool: ${val}. Use --tool claude|codex`);
+          return; // Exit early on invalid tool arg
+        }
       } else if (typeof args[toolIndex + 1] === 'string' && (args[toolIndex + 1] === 'claude' || args[toolIndex + 1] === 'codex')) {
         cliToolArg = args[toolIndex + 1] as 'claude' | 'codex';
+      } else if (typeof args[toolIndex + 1] === 'string') {
+        printError(`Unknown tool: ${args[toolIndex + 1]}. Use --tool claude|codex`);
+        return;
       }
     }
+
+    // Collect pass-through args after "--"
+    const dashDashIndex = args.findIndex(a => a === '--');
+    const passThroughArgs: string[] = dashDashIndex !== -1 ? args.slice(dashDashIndex + 1) : [];
 
     // Show help if requested
     if (showHelpFlag) {
@@ -316,6 +333,11 @@ async function handleSelection(
 
 async function handleBranchSelection(branchName: string, repoRoot: string): Promise<boolean> {
   try {
+    // Collect pass-through args from process argv
+    const argvAll = process.argv.slice(2);
+    const ddIndex = argvAll.findIndex(a => a === '--');
+    const passThroughArgs = ddIndex !== -1 ? argvAll.slice(ddIndex + 1) : [];
+
     // Check if this is a remote branch
     const isRemoteBranch = branchName.startsWith('origin/');
     let localBranchName = branchName;
@@ -403,6 +425,13 @@ async function handleBranchSelection(branchName: string, repoRoot: string): Prom
       return true;
     }
 
+    // If neither tool is available, abort early
+    if (!localClaudeAvail && !localCodexAvail) {
+      printError('No AI tools are available in PATH (Claude Code or Codex CLI).');
+      await confirmContinue('Press enter to continue...');
+      return true;
+    }
+
     const executionConfig = await selectClaudeExecutionMode(selectedTool === 'claude' ? 'Claude Code' : 'Codex CLI');
     if (!executionConfig) return true;
     const { mode, skipPermissions } = executionConfig;
@@ -418,10 +447,10 @@ async function handleBranchSelection(branchName: string, repoRoot: string): Prom
       await saveSession(sessionData);
 
       if (selectedTool === 'claude') {
-        await launchClaudeCode(worktreePath, { mode, skipPermissions });
+        await launchClaudeCode(worktreePath, { mode, skipPermissions, extraArgs: passThroughArgs });
         await handlePostClaudeChanges(worktreePath);
       } else {
-        await launchCodexCLI(worktreePath, { mode });
+        await launchCodexCLI(worktreePath, { mode, extraArgs: passThroughArgs });
       }
     } catch (error) {
       if (error instanceof ClaudeError || error instanceof CodexError) {
