@@ -44,13 +44,15 @@ export async function launchCodexCLI(
     }
 
     if (options.bypassApprovals) {
-      args.push('--dangerously-bypass-approvals-and-sandbox');
+      args.push('--yolo');
       console.log(chalk.yellow('   ⚠️  Bypassing approvals and sandbox'));
     }
 
     if (options.extraArgs && options.extraArgs.length > 0) {
       args.push(...options.extraArgs);
     }
+
+    args.push('--search');
 
     await execa('codex', args, {
       cwd: worktreePath,
