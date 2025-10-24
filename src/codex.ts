@@ -3,6 +3,8 @@ import chalk from 'chalk';
 import { platform } from 'os';
 import { existsSync } from 'fs';
 
+const CODEX_CLI_PACKAGE = '@openai/codex';
+
 export class CodexError extends Error {
   constructor(message: string, public cause?: unknown) {
     super(message);
@@ -54,21 +56,21 @@ export async function launchCodexCLI(
 
     args.push('--search');
 
-    await execa('codex', args, {
+    await execa('npx', ['--yes', CODEX_CLI_PACKAGE, ...args], {
       cwd: worktreePath,
       stdio: 'inherit',
       shell: true
     });
   } catch (error: any) {
     const errorMessage = error.code === 'ENOENT'
-      ? 'Codex CLI command not found. Please ensure Codex CLI is installed and available in your PATH.'
+      ? 'npx command not found. Please ensure Node.js/npm is installed so Codex CLI can run via npx.'
       : `Failed to launch Codex CLI: ${error.message || 'Unknown error'}`;
 
     if (platform() === 'win32') {
       console.error(chalk.red('\n💡 Windows troubleshooting tips:'));
-      console.error(chalk.yellow('   1. Ensure Codex CLI is installed globally'));
-      console.error(chalk.yellow('   2. Restart your terminal or IDE'));
-      console.error(chalk.yellow('   3. Check if "codex" is available in your PATH'));
+      console.error(chalk.yellow('   1. Ensure Node.js/npm がインストールされ npx が利用可能か確認'));
+      console.error(chalk.yellow('   2. "npx @openai/codex -- --help" を実行してセットアップを確認'));
+      console.error(chalk.yellow('   3. ターミナルやIDEを再起動して PATH を更新'));
     }
 
     throw new CodexError(errorMessage, error);
@@ -77,11 +79,11 @@ export async function launchCodexCLI(
 
 export async function isCodexAvailable(): Promise<boolean> {
   try {
-    await execa('codex', ['--help'], { shell: true });
+    await execa('npx', ['--yes', CODEX_CLI_PACKAGE, '--help'], { shell: true });
     return true;
   } catch (error: any) {
     if (error.code === 'ENOENT') {
-      console.error(chalk.yellow('\n⚠️  Codex CLI not found in PATH'));
+      console.error(chalk.yellow('\n⚠️  npx コマンドが見つかりません'));
     }
     return false;
   }

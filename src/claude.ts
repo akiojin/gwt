@@ -2,6 +2,8 @@ import { execa } from 'execa';
 import chalk from 'chalk';
 import { platform } from 'os';
 import { existsSync } from 'fs';
+
+const CLAUDE_CLI_PACKAGE = '@anthropic-ai/claude-code';
 export class ClaudeError extends Error {
   constructor(message: string, public cause?: unknown) {
     super(message);
@@ -81,38 +83,35 @@ export async function launchClaudeCode(
       args.push(...options.extraArgs);
     }
 
-    await execa('claude', args, {
+    await execa('npx', ['--yes', CLAUDE_CLI_PACKAGE, ...args], {
       cwd: worktreePath,
       stdio: 'inherit',
       shell: true
     });
   } catch (error: any) {
     const errorMessage = error.code === 'ENOENT' 
-      ? 'Claude Code command not found. Please ensure Claude Code is installed and available in your PATH.'
+      ? 'npx command not found. Please ensure Node.js/npm is installed so Claude Code can run via npx.'
       : `Failed to launch Claude Code: ${error.message || 'Unknown error'}`;
-    
+
     if (platform() === 'win32') {
       console.error(chalk.red('\n💡 Windows troubleshooting tips:'));
-      console.error(chalk.yellow('   1. Ensure Claude Code is installed — see https://claude.ai/code'));
-      // Installation methods vary by environment; see official docs.
-      console.error(chalk.yellow('   2. Try restarting your terminal or IDE'));
-      console.error(chalk.yellow('   3. Check if "claude" is available in your PATH'));
-      console.error(chalk.yellow('   4. Try running "claude --version" or "where/which claude" to test the command'));
+      console.error(chalk.yellow('   1. Ensure Node.js/npm がインストールされ npx が利用可能か確認'));
+      console.error(chalk.yellow('   2. "npx @anthropic-ai/claude-code -- --version" を実行してセットアップを確認'));
+      console.error(chalk.yellow('   3. ターミナルやIDEを再起動して PATH を更新'));
     }
-    
+
     throw new ClaudeError(errorMessage, error);
   }
 }
 
 export async function isClaudeCodeAvailable(): Promise<boolean> {
   try {
-    const isWindows = platform() === 'win32';
-    await execa('claude', ['--version'], { shell: true });
+    await execa('npx', ['--yes', CLAUDE_CLI_PACKAGE, '--version'], { shell: true });
     return true;
   } catch (error: any) {
     if (error.code === 'ENOENT') {
-      console.error(chalk.yellow('\n⚠️  Claude Code not found in PATH'));
-      console.error(chalk.gray('   Please install Claude Code CLI: https://claude.ai/code'));
+      console.error(chalk.yellow('\n⚠️  npx コマンドが見つかりません'));
+      console.error(chalk.gray('   Node.js/npm をインストールして npx が使用可能か確認してください'));
     }
     return false;
   }
