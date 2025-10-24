@@ -7,28 +7,23 @@ RUN apt-get update && apt-get install -y \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Claude Code
-RUN curl -fsSL https://claude.ai/install.sh | bash
-
-# Install bun
-RUN curl -fsSL https://bun.sh/install | bash
-ENV BUN_INSTALL="/root/.bun" \
-    PATH="/root/.bun/bin:${PATH}"
-
 # Global tools with bun
-RUN bun add -g \
-    typescript \
-    eslint \
-    prettier \
-    @openai/codex-cli \
-    @google/gemini-cli
+RUN npm i -g \
+    npm@latest \
+    bun@latest \
+    typescript@latest \
+    eslint@latest \
+    prettier@latest \
+    @anthropic-ai/claude-code@latest \
+    @openai/codex@latest \
+    @google/gemini-cli@latest
 
 # Install uv/uvx
 RUN curl -fsSL https://astral.sh/uv/install.sh | bash
 ENV PATH="/root/.cargo/bin:${PATH}"
 
 # エントリーポイントスクリプトをコピー
-COPY .scripts/entrypoint.sh /entrypoint.sh
+COPY scripts/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 WORKDIR /claude-worktree
