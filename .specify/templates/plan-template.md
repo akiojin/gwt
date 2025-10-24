@@ -1,104 +1,183 @@
-# Implementation Plan: [FEATURE]
+# 実装計画: [機能名]
 
-**Branch**: `[###-feature-name]` | **Date**: [DATE] | **Spec**: [link]
-**Input**: Feature specification from `/specs/[###-feature-name]/spec.md`
+**仕様ID**: `[SPEC-xxxxxxxx]` | **日付**: [日付] | **仕様書**: [リンク]
+**入力**: `/specs/[SPEC-xxxxxxxx]/spec.md` からの機能仕様
 
-**Note**: This template is filled in by the `/speckit.plan` command. See `.specify/templates/commands/plan.md` for the execution workflow.
+**注**: このテンプレートは `/speckit.plan` コマンドによって記入されます。実行ワークフローについては `.specify/templates/commands/plan.md` を参照してください。
 
-## Summary
+## 概要
 
-[Extract from feature spec: primary requirement + technical approach from research]
+[機能仕様から抽出: 主要要件 + 調査からの技術的アプローチ]
 
-## Technical Context
+## 技術コンテキスト
 
 <!--
-  ACTION REQUIRED: Replace the content in this section with the technical details
-  for the project. The structure here is presented in advisory capacity to guide
-  the iteration process.
+  対応必要: このセクションの内容をプロジェクトの技術詳細で置き換えてください。
+  ここで示されている構造は、反復プロセスをガイドするための助言的な役割を果たします。
 -->
 
-**Language/Version**: [e.g., Python 3.11, Swift 5.9, Rust 1.75 or NEEDS CLARIFICATION]  
-**Primary Dependencies**: [e.g., FastAPI, UIKit, LLVM or NEEDS CLARIFICATION]  
-**Storage**: [if applicable, e.g., PostgreSQL, CoreData, files or N/A]  
-**Testing**: [e.g., pytest, XCTest, cargo test or NEEDS CLARIFICATION]  
-**Target Platform**: [e.g., Linux server, iOS 15+, WASM or NEEDS CLARIFICATION]
-**Project Type**: [single/web/mobile - determines source structure]  
-**Performance Goals**: [domain-specific, e.g., 1000 req/s, 10k lines/sec, 60 fps or NEEDS CLARIFICATION]  
-**Constraints**: [domain-specific, e.g., <200ms p95, <100MB memory, offline-capable or NEEDS CLARIFICATION]  
-**Scale/Scope**: [domain-specific, e.g., 10k users, 1M LOC, 50 screens or NEEDS CLARIFICATION]
+**言語/バージョン**: [例: Python 3.11、Swift 5.9、Rust 1.75 または 要確認]
+**主要な依存関係**: [例: FastAPI、UIKit、LLVM または 要確認]
+**ストレージ**: [該当する場合、例: PostgreSQL、CoreData、ファイル または N/A]
+**テスト**: [例: pytest、XCTest、cargo test または 要確認]
+**ターゲットプラットフォーム**: [例: Linuxサーバー、iOS 15+、WASM または 要確認]
+**プロジェクトタイプ**: [単一/Web/モバイル - ソース構造を決定]
+**パフォーマンス目標**: [ドメイン固有、例: 1000 req/s、10k lines/sec、60 fps または 要確認]
+**制約**: [ドメイン固有、例: <200ms p95、<100MB メモリ、オフライン対応 または 要確認]
+**スケール/範囲**: [ドメイン固有、例: 1万ユーザー、100万LOC、50画面 または 要確認]
 
-## Constitution Check
+## 原則チェック
 
-*GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
+*ゲート: フェーズ0の調査前に合格する必要があります。フェーズ1の設計後に再チェック。*
 
-[Gates determined based on constitution file]
+[原則ファイルに基づいて決定されたゲート]
 
-## Project Structure
+## プロジェクト構造
 
-### Documentation (this feature)
+### ドキュメント（この機能）
 
 ```text
-specs/[###-feature]/
-├── plan.md              # This file (/speckit.plan command output)
-├── research.md          # Phase 0 output (/speckit.plan command)
-├── data-model.md        # Phase 1 output (/speckit.plan command)
-├── quickstart.md        # Phase 1 output (/speckit.plan command)
-├── contracts/           # Phase 1 output (/speckit.plan command)
-└── tasks.md             # Phase 2 output (/speckit.tasks command - NOT created by /speckit.plan)
+specs/[SPEC-xxxxxxxx]/
+├── plan.md              # このファイル（/speckit.plan コマンド出力）
+├── research.md          # フェーズ0出力（/speckit.plan コマンド）
+├── data-model.md        # フェーズ1出力（/speckit.plan コマンド）
+├── quickstart.md        # フェーズ1出力（/speckit.plan コマンド）
+├── contracts/           # フェーズ1出力（/speckit.plan コマンド）
+└── tasks.md             # フェーズ2出力（/speckit.tasks コマンド - /speckit.planでは作成されません）
 ```
 
-### Source Code (repository root)
-<!--
-  ACTION REQUIRED: Replace the placeholder tree below with the concrete layout
-  for this feature. Delete unused options and expand the chosen structure with
-  real paths (e.g., apps/admin, packages/something). The delivered plan must
-  not include Option labels.
--->
+### ソースコード（リポジトリルート）
 
 ```text
-# [REMOVE IF UNUSED] Option 1: Single project (DEFAULT)
+[プロジェクトタイプに基づいて決定 - 単一/Web/モバイル]
+
+単一プロジェクトの例:
 src/
-├── models/
-├── services/
-├── cli/
-└── lib/
-
+├── [機能モジュール]/
 tests/
-├── contract/
-├── integration/
-└── unit/
+├── [テストファイル]
 
-# [REMOVE IF UNUSED] Option 2: Web application (when "frontend" + "backend" detected)
-backend/
-├── src/
-│   ├── models/
-│   ├── services/
-│   └── api/
-└── tests/
+Webアプリの例:
+backend/src/
+frontend/src/
 
-frontend/
-├── src/
-│   ├── components/
-│   ├── pages/
-│   └── services/
-└── tests/
-
-# [REMOVE IF UNUSED] Option 3: Mobile + API (when "iOS/Android" detected)
-api/
-└── [same as backend above]
-
-ios/ or android/
-└── [platform-specific structure: feature modules, UI flows, platform tests]
+モバイルの例:
+api/src/
+ios/src/ または android/src/
 ```
 
-**Structure Decision**: [Document the selected structure and reference the real
-directories captured above]
+## フェーズ0: 調査（技術スタック選定）
 
-## Complexity Tracking
+**目的**: 要件に基づいて技術スタックを決定し、既存のコードパターンを理解する
 
-> **Fill ONLY if Constitution Check has violations that must be justified**
+**出力**: `specs/[SPEC-xxxxxxxx]/research.md`
 
-| Violation | Why Needed | Simpler Alternative Rejected Because |
-|-----------|------------|-------------------------------------|
-| [e.g., 4th project] | [current need] | [why 3 projects insufficient] |
-| [e.g., Repository pattern] | [specific problem] | [why direct DB access insufficient] |
+### 調査項目
+
+1. **既存のコードベース分析**
+   - 現在の技術スタック（言語、フレームワーク、ライブラリ）
+   - 既存のパターンとアーキテクチャ
+   - 統合ポイント
+
+2. **技術的決定**
+   - [決定1、例: 認証ライブラリの選択]
+   - [決定2、例: データベース層のアプローチ]
+   - [決定3、例: テストフレームワーク]
+
+3. **制約と依存関係**
+   - [制約1、例: 既存システムとの互換性]
+   - [制約2、例: パフォーマンス要件]
+
+## フェーズ1: 設計（アーキテクチャと契約）
+
+**目的**: 実装前に技術設計を定義する
+
+**出力**:
+- `specs/[SPEC-xxxxxxxx]/data-model.md`
+- `specs/[SPEC-xxxxxxxx]/quickstart.md`
+- `specs/[SPEC-xxxxxxxx]/contracts/` （該当する場合）
+
+### 1.1 データモデル設計
+
+**ファイル**: `data-model.md`
+
+主要なエンティティとその関係を定義：
+- エンティティ構造
+- 属性とタイプ
+- 関係と制約
+- 検証ルール
+
+### 1.2 クイックスタートガイド
+
+**ファイル**: `quickstart.md`
+
+開発者向けの簡潔なガイド：
+- セットアップ手順
+- 開発ワークフロー
+- よくある操作
+- トラブルシューティング
+
+### 1.3 契約/インターフェース（該当する場合）
+
+**ディレクトリ**: `contracts/`
+
+該当する場合に技術契約を定義：
+- APIエンドポイント（OpenAPI/Swagger）
+- イベントスキーマ
+- メッセージフォーマット
+- プロトコル定義
+
+## フェーズ2: タスク生成
+
+**次のステップ**: `/speckit.tasks` コマンドを実行
+
+**入力**: このプラン + 仕様書 + 設計ドキュメント
+
+**出力**: `specs/[SPEC-xxxxxxxx]/tasks.md` - 実装のための実行可能なタスクリスト
+
+## 実装戦略
+
+### 優先順位付け
+
+ユーザーストーリーの優先度に基づいて実装：
+1. **P1**: 最も重要 - 最初に実装
+2. **P2**: 重要 - P1の後
+3. **P3**: 補完的 - 最後に
+
+### 独立したデリバリー
+
+各ユーザーストーリーは独立して実装・テスト・デプロイ可能：
+- ストーリー1を完了 → デプロイ可能なMVP
+- ストーリー2を追加 → 拡張MVP
+- ストーリー3を追加 → 完全な機能
+
+## テスト戦略
+
+[機能仕様のテスト要件に基づく]
+
+- **ユニットテスト**: [範囲とアプローチ]
+- **統合テスト**: [範囲とアプローチ]
+- **エンドツーエンドテスト**: [範囲とアプローチ]
+- **パフォーマンステスト**: [該当する場合]
+
+## リスクと緩和策
+
+### 技術的リスク
+
+1. **[リスク1]**: [説明]
+   - **緩和策**: [対処方法]
+
+2. **[リスク2]**: [説明]
+   - **緩和策**: [対処方法]
+
+### 依存関係リスク
+
+1. **[依存関係1]**: [説明]
+   - **緩和策**: [対処方法]
+
+## 次のステップ
+
+1. ✅ フェーズ0完了: 調査と技術スタック決定
+2. ✅ フェーズ1完了: 設計とアーキテクチャ定義
+3. ⏭️ `/speckit.tasks` を実行してタスクを生成
+4. ⏭️ `/speckit.implement` で実装を開始

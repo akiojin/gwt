@@ -1,5 +1,5 @@
 ---
-description: Create or update the project constitution from interactive or provided principle inputs, ensuring all dependent templates stay in sync
+description: 対話形式または提供された原則に基づいてプロジェクト原則を作成・更新し、すべての依存テンプレートとの同期を維持します。
 ---
 
 ## User Input

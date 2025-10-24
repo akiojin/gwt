@@ -1,63 +1,39 @@
 ---
-description: Create or update the feature specification from a natural language feature description.
+description: 自然言語の機能説明から機能仕様を作成または更新します。
 ---
 
-## User Input
+## ユーザー入力
 
 ```text
 $ARGUMENTS
 ```
 
-You **MUST** consider the user input before proceeding (if not empty).
+（空でない場合）続行する前に、ユーザー入力を**必ず**考慮してください。
 
-## Outline
+## 概要
 
-The text the user typed after `/speckit.specify` in the triggering message **is** the feature description. Assume you always have it available in this conversation even if `$ARGUMENTS` appears literally below. Do not ask the user to repeat it unless they provided an empty command.
+`/speckit.specify` の後にユーザーが入力したテキスト**が**機能の説明です。以下に文字通り `$ARGUMENTS` と表示されていても、この会話で常に利用可能であると想定してください。空のコマンドを提供した場合を除き、ユーザーに繰り返し尋ねないでください。
 
-Given that feature description, do this:
+機能の説明が与えられた場合、以下を実行します：
 
-1. **Generate a concise short name** (2-4 words) for the branch:
-   - Analyze the feature description and extract the most meaningful keywords
-   - Create a 2-4 word short name that captures the essence of the feature
-   - Use action-noun format when possible (e.g., "add-user-auth", "fix-payment-bug")
-   - Preserve technical terms and acronyms (OAuth2, API, JWT, etc.)
-   - Keep it concise but descriptive enough to understand the feature at a glance
-   - Examples:
-     - "I want to add user authentication" → "user-auth"
-     - "Implement OAuth2 integration for the API" → "oauth2-api-integration"
-     - "Create a dashboard for analytics" → "analytics-dashboard"
-     - "Fix payment processing timeout bug" → "fix-payment-timeout"
+1. **SPEC IDベースのブランチを作成**:
 
-2. **Check for existing branches before creating new one**:
-   
-   a. First, fetch all remote branches to ensure we have the latest information:
+   a. まず、すべてのリモートブランチをフェッチして最新情報を取得します：
       ```bash
       git fetch --all --prune
       ```
-   
-   b. Find the highest feature number across all sources for the short-name:
-      - Remote branches: `git ls-remote --heads origin | grep -E 'refs/heads/[0-9]+-<short-name>$'`
-      - Local branches: `git branch | grep -E '^[* ]*[0-9]+-<short-name>$'`
-      - Specs directories: Check for directories matching `specs/[0-9]+-<short-name>`
-   
-   c. Determine the next available number:
-      - Extract all numbers from all three sources
-      - Find the highest number N
-      - Use N+1 for the new branch number
-   
-   d. Run the script `.specify/scripts/bash/create-new-feature.sh --json "$ARGUMENTS"` with the calculated number and short-name:
-      - Pass `--number N+1` and `--short-name "your-short-name"` along with the feature description
-      - Bash example: `.specify/scripts/bash/create-new-feature.sh --json "$ARGUMENTS" --json --number 5 --short-name "user-auth" "Add user authentication"`
-      - PowerShell example: `.specify/scripts/bash/create-new-feature.sh --json "$ARGUMENTS" -Json -Number 5 -ShortName "user-auth" "Add user authentication"`
-   
-   **IMPORTANT**:
-   - Check all three sources (remote branches, local branches, specs directories) to find the highest number
-   - Only match branches/directories with the exact short-name pattern
-   - If no existing branches/directories found with this short-name, start with number 1
-   - You must only ever run this script once per feature
-   - The JSON is provided in the terminal as output - always refer to it to get the actual content you're looking for
-   - The JSON output will contain BRANCH_NAME and SPEC_FILE paths
-   - For single quotes in args like "I'm Groot", use escape syntax: e.g 'I'\''m Groot' (or double-quote if possible: "I'm Groot")
+
+   b. スクリプトを実行して新しいSPEC IDを生成します：
+      `.specify/scripts/bash/create-new-feature.sh --json "$ARGUMENTS"`
+
+      - 例: `.specify/scripts/bash/create-new-feature.sh --json "ユーザー認証を追加"`
+
+   **重要**:
+   - このスクリプトは機能ごとに1回だけ実行する必要があります
+   - JSONは端末に出力として提供されます - 探しているコンテンツを取得するために常にそれを参照してください
+   - JSON出力にはBRANCH_NAME、SPEC_FILE、SPEC_IDが含まれます
+   - スクリプトは自動的に一意のSPEC ID（SPEC-xxxxxxxx形式）を生成します
+   - シングルクォートを含む引数（"I'm Groot"など）の場合は、エスケープ構文を使用: 例 'I'\''m Groot'（または可能であればダブルクォート: "I'm Groot"）
 
 3. Load `.specify/templates/spec-template.md` to understand required sections.
 

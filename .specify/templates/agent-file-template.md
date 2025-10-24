@@ -1,28 +1,40 @@
-# [PROJECT NAME] Development Guidelines
+# [機能名] - AI エージェントコンテキスト
 
-Auto-generated from all feature plans. Last updated: [DATE]
+**仕様ID**: `[SPEC-xxxxxxxx]`
+**最終更新**: [日付]
+**目的**: このプロジェクトで作業するAIエージェントのためのコンテキスト情報を提供
 
-## Active Technologies
+## 機能概要
 
-[EXTRACTED FROM ALL PLAN.MD FILES]
+[この機能の簡潔な説明]
 
-## Project Structure
+## 現在のフェーズ
 
-```text
-[ACTUAL STRUCTURE FROM PLANS]
-```
+- [ ] フェーズ0: 調査
+- [ ] フェーズ1: 設計
+- [ ] フェーズ2: タスク生成
+- [ ] フェーズ3: 実装
+- [ ] フェーズ4: テスト
+- [ ] フェーズ5: 統合
 
-## Commands
+## 重要なファイルパス
 
-[ONLY COMMANDS FOR ACTIVE TECHNOLOGIES]
+### ドキュメント
+- 仕様書: `specs/[SPEC-xxxxxxxx]/spec.md`
+- 計画: `specs/[SPEC-xxxxxxxx]/plan.md`
+- タスク: `specs/[SPEC-xxxxxxxx]/tasks.md`
 
-## Code Style
+### ソースコード
+- [主要なソースファイルパス]
 
-[LANGUAGE-SPECIFIC, ONLY FOR LANGUAGES IN USE]
+## コンテキストメモ
 
-## Recent Changes
+[この機能に取り組むエージェントのためのメモや重要な情報]
 
-[LAST 3 FEATURES AND WHAT THEY ADDED]
+## 既知の問題
 
-<!-- MANUAL ADDITIONS START -->
-<!-- MANUAL ADDITIONS END -->
+[実装中に遭遇した問題や注意点]
+
+## 次のステップ
+
+[次に実行すべきアクション]

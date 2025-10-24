@@ -1,5 +1,5 @@
 ---
-description: Generate a custom checklist for the current feature based on user requirements.
+description: ユーザー要件に基づいて、現在の機能のカスタムチェックリストを生成します。
 ---
 
 ## Checklist Purpose: "Unit Tests for English"

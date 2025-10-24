@@ -1,5 +1,5 @@
 ---
-description: Generate an actionable, dependency-ordered tasks.md for the feature based on available design artifacts.
+description: 利用可能な設計成果物に基づいて、実行可能で依存関係を考慮したtasks.mdを生成します。
 ---
 
 ## User Input

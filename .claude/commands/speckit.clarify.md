@@ -1,5 +1,5 @@
 ---
-description: Identify underspecified areas in the current feature spec by asking up to 5 highly targeted clarification questions and encoding answers back into the spec.
+description: 最大5つの的を絞った質問を通じて、現在の機能仕様の不明確な領域を特定し、回答を仕様に反映します。
 ---
 
 ## User Input

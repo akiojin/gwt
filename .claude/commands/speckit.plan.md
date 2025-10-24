@@ -1,5 +1,5 @@
 ---
-description: Execute the implementation planning workflow using the plan template to generate design artifacts.
+description: 計画テンプレートを使用して実装計画ワークフローを実行し、設計成果物を生成します。
 ---
 
 ## User Input
