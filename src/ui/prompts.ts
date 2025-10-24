@@ -1279,8 +1279,8 @@ export async function selectClaudeExecutionMode(toolLabel: string = 'Claude Code
   // Show appropriate flag hint per tool
   const lower = (toolLabel || '').toLowerCase();
   const isCodex = lower.includes('codex');
-  const flagHint = isCodex 
-    ? '--dangerously-bypass-approvals-and-sandbox' 
+  const flagHint = isCodex
+    ? '--yolo'
     : '--dangerously-skip-permissions';
   const skipPermissions = await confirm({
     message: `Skip permission checks? (${flagHint})`,
