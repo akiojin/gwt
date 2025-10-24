@@ -103,6 +103,48 @@ The tool presents an interactive interface with the following options:
 - **Git**: Latest version with worktree support
 - **AI Tool**: At least one of Claude Code or Codex CLI should be available
 - **GitHub CLI**: Required for PR cleanup features (optional)
+- **Python**: >= 3.11 (for Spec Kit CLI)
+- **uv**: Python package manager (for Spec Kit CLI)
+
+## Spec-Driven Development with Spec Kit
+
+This project uses **@akiojin/spec-kit**, a Japanese-localized version of GitHub's Spec Kit for spec-driven development workflows.
+
+### Installing Spec Kit CLI
+
+```bash
+# Install globally with uv
+uv tool install specify-cli --from git+https://github.com/akiojin/spec-kit.git
+
+# Verify installation
+specify --help
+```
+
+### Available Spec Kit Commands
+
+Execute these commands in Claude Code to leverage spec-driven development:
+
+- `/speckit.constitution` - Define project principles and guidelines
+- `/speckit.specify` - Create feature specifications
+- `/speckit.plan` - Create technical implementation plans
+- `/speckit.tasks` - Generate actionable task lists
+- `/speckit.implement` - Execute implementation
+
+### Optional Quality Assurance Commands
+
+- `/speckit.clarify` - Resolve ambiguities before planning
+- `/speckit.analyze` - Validate consistency between spec, plan, and tasks
+- `/speckit.checklist` - Verify requirement coverage and clarity
+
+### Spec Kit Workflow
+
+1. Start with `/speckit.constitution` to establish project foundations
+2. Use `/speckit.specify` to define what you want to build
+3. Run `/speckit.plan` to create technical architecture
+4. Generate tasks with `/speckit.tasks`
+5. Implement with `/speckit.implement`
+
+For more details, see the [Spec Kit documentation](https://github.com/akiojin/spec-kit).
 
 ## Project Structure
 
@@ -123,6 +165,13 @@ The tool presents an interactive interface with the following options:
 │       └── types.ts     # TypeScript type definitions
 ├── bin/
 │   └── claude-worktree.js # Executable wrapper
+├── .claude/             # Claude Code configuration
+│   └── commands/        # Spec Kit slash commands
+├── .specify/            # Spec Kit scripts and templates
+│   ├── memory/          # Project memory files
+│   ├── scripts/         # Automation scripts
+│   └── templates/       # Specification templates
+├── specs/               # Feature specifications
 └── dist/                # Compiled JavaScript output
 ```
 

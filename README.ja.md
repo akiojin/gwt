@@ -103,6 +103,48 @@ claude-worktree --tool codex -- --continue  # Codex CLI を continue
 - **Git**: ワークツリーサポート付き最新版
 - **AIツール**: 少なくともいずれかが必要（Claude Code もしくは Codex CLI）
 - **GitHub CLI**: PR クリーンアップ機能に必要（オプション）
+- **Python**: >= 3.11（Spec Kit CLIに必要）
+- **uv**: Pythonパッケージマネージャー（Spec Kit CLIに必要）
+
+## Spec Kit による仕様駆動開発
+
+このプロジェクトは、仕様駆動開発ワークフローのために **@akiojin/spec-kit**（GitHub Spec Kit の日本語対応版）を使用しています。
+
+### Spec Kit CLI のインストール
+
+```bash
+# uvでグローバルインストール
+uv tool install specify-cli --from git+https://github.com/akiojin/spec-kit.git
+
+# インストール確認
+specify --help
+```
+
+### 利用可能な Spec Kit コマンド
+
+Claude Code で以下のコマンドを実行して、仕様駆動開発を活用できます：
+
+- `/speckit.constitution` - プロジェクト原則とガイドラインを定義
+- `/speckit.specify` - 機能仕様書を作成
+- `/speckit.plan` - 技術実装計画を作成
+- `/speckit.tasks` - 実行可能なタスクリストを生成
+- `/speckit.implement` - 実装を実行
+
+### 品質保証用オプションコマンド
+
+- `/speckit.clarify` - 計画前に曖昧な領域を解消
+- `/speckit.analyze` - 仕様、計画、タスク間の整合性を検証
+- `/speckit.checklist` - 要件の網羅性と明確性を検証
+
+### Spec Kit ワークフロー
+
+1. `/speckit.constitution` でプロジェクトの基礎を確立
+2. `/speckit.specify` で構築したいものを定義
+3. `/speckit.plan` で技術アーキテクチャを作成
+4. `/speckit.tasks` でタスクを生成
+5. `/speckit.implement` で実装を実行
+
+詳細は [Spec Kit ドキュメント](https://github.com/akiojin/spec-kit) を参照してください。
 
 ## プロジェクト構造
 
@@ -123,6 +165,13 @@ claude-worktree --tool codex -- --continue  # Codex CLI を continue
 │       └── types.ts     # TypeScript型定義
 ├── bin/
 │   └── claude-worktree.js # 実行可能ラッパー
+├── .claude/             # Claude Code 設定
+│   └── commands/        # Spec Kit スラッシュコマンド
+├── .specify/            # Spec Kit スクリプトとテンプレート
+│   ├── memory/          # プロジェクトメモリファイル
+│   ├── scripts/         # 自動化スクリプト
+│   └── templates/       # 仕様書テンプレート
+├── specs/               # 機能仕様書
 └── dist/                # コンパイル済みJavaScript出力
 ```
 
