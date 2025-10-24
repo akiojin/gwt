@@ -3,26 +3,32 @@ services:
     build: .
     container_name: claude-worktree
     volumes:
-      # プロジェクトファイルの永続化
       - .:/claude-worktree
-      - claude_config:/root/.claude
+      - bash-history:/root/.bash_history_dir
       - ./.docker/bash_history:/root/.bash_history
-      - ~/.codex:/root/.codex
+      - claude-config:/root/.claude
+      - codex-config:/root/.codex
+      - ~/.codex/auth.json:/root/.codex/auth.json
     environment:
       - NPM_USER
       - NPM_EMAIL
       - NPM_PASS
-      # AI API Keys
       - OPENAI_API_KEY
       - ANTHROPIC_API_KEY
-      # GitHub設定
       - GITHUB_TOKEN
       - GITHUB_PERSONAL_ACCESS_TOKEN
       - GITHUB_USERNAME
+      - HISTFILE=/root/.bash_history_dir/.bash_history
+      - HISTSIZE=100000
+      - HISTFILESIZE=100000
+      - MAX_MCP_OUTPUT_TOKENS
+      - ENABLE_BACKGROUND_TASKS=1
+      - FORCE_AUTO_BACKGROUND_TASKS=1
     stdin_open: true
     tty: true
-    restart: unless-stopped
     working_dir: /claude-worktree
 
 volumes:
-  claude_config: {}
+  bash-history: {}
+  claude-config: {}
+  codex-config: {}
