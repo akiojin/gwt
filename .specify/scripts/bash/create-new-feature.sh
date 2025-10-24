@@ -129,8 +129,8 @@ if [ -z "$SPEC_ID" ]; then
     SPEC_ID=$(generate_spec_id)
 
     # Retry if ID already exists (very unlikely but possible)
-    local retry_count=0
-    local max_retries=10
+    retry_count=0
+    max_retries=10
     while check_spec_id_exists "$SPEC_ID" && [ $retry_count -lt $max_retries ]; do
         >&2 echo "[specify] 警告: SPEC ID $SPEC_ID は既に存在します。新しいIDを生成中..."
         SPEC_ID=$(generate_spec_id)
