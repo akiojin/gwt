@@ -3,7 +3,7 @@ import chalk from 'chalk';
 import { platform } from 'os';
 import { existsSync } from 'fs';
 
-const CODEX_CLI_PACKAGE = '@openai/codex';
+const CODEX_CLI_PACKAGE = '@openai/codex@latest';
 
 export class CodexError extends Error {
   constructor(message: string, public cause?: unknown) {
@@ -69,7 +69,7 @@ export async function launchCodexCLI(
     if (platform() === 'win32') {
       console.error(chalk.red('\n💡 Windows troubleshooting tips:'));
       console.error(chalk.yellow('   1. Ensure Node.js/npm がインストールされ npx が利用可能か確認'));
-      console.error(chalk.yellow('   2. "npx @openai/codex -- --help" を実行してセットアップを確認'));
+      console.error(chalk.yellow('   2. "npx @openai/codex@latest -- --help" を実行してセットアップを確認'));
       console.error(chalk.yellow('   3. ターミナルやIDEを再起動して PATH を更新'));
     }
 

@@ -3,7 +3,7 @@ import chalk from 'chalk';
 import { platform } from 'os';
 import { existsSync } from 'fs';
 
-const CLAUDE_CLI_PACKAGE = '@anthropic-ai/claude-code';
+const CLAUDE_CLI_PACKAGE = '@anthropic-ai/claude-code@latest';
 export class ClaudeError extends Error {
   constructor(message: string, public cause?: unknown) {
     super(message);
@@ -96,7 +96,7 @@ export async function launchClaudeCode(
     if (platform() === 'win32') {
       console.error(chalk.red('\n💡 Windows troubleshooting tips:'));
       console.error(chalk.yellow('   1. Ensure Node.js/npm がインストールされ npx が利用可能か確認'));
-      console.error(chalk.yellow('   2. "npx @anthropic-ai/claude-code -- --version" を実行してセットアップを確認'));
+      console.error(chalk.yellow('   2. "npx @anthropic-ai/claude-code@latest -- --version" を実行してセットアップを確認'));
       console.error(chalk.yellow('   3. ターミナルやIDEを再起動して PATH を更新'));
     }
 
