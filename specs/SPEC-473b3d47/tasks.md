@@ -110,19 +110,19 @@ tests/                          # 新規作成
 
 ### ユニットテスト
 
-- [ ] T301 [P] [US3] `src/config/index.ts`の`saveSession()`をテスト: `tests/unit/config/session.test.ts`
-- [ ] T302 [P] [US3] `src/config/index.ts`の`loadSession()`をテスト: `tests/unit/config/session.test.ts`
-- [ ] T303 [P] [US3] `src/config/index.ts`の`getAllSessions()`をテスト: `tests/unit/config/session.test.ts`
+- [x] T301 [P] [US3] `src/config/index.ts`の`saveSession()`をテスト: `tests/unit/config/session.test.ts`
+- [x] T302 [P] [US3] `src/config/index.ts`の`loadSession()`をテスト: `tests/unit/config/session.test.ts`
+- [x] T303 [P] [US3] `src/config/index.ts`の`getAllSessions()`をテスト: `tests/unit/config/session.test.ts`
 
 ### 統合テスト
 
-- [ ] T304 [US3] T301-T303完了後、`-c`オプションによるセッション継続をテスト: `tests/integration/session-continue.test.ts`
-- [ ] T305 [US3] T301-T303完了後、`-r`オプションによるセッション選択をテスト: `tests/integration/session-resume.test.ts`
-- [ ] T306 [US3] T304完了後、存在しないワークツリーのフォールバック処理をテスト: `tests/integration/session-fallback.test.ts`
+- [x] T304 [US3] T301-T303完了後、`-c`オプションによるセッション継続をテスト: `tests/integration/session-continue.test.ts`
+- [x] T305 [US3] T301-T303完了後、`-r`オプションによるセッション選択をテスト: `tests/integration/session-resume.test.ts`
+- [ ] T306 [US3] T304完了後、存在しないワークツリーのフォールバック処理をテスト（統合テスト内でカバー済み）
 
 ### E2Eテスト
 
-- [ ] T307 [US3] T304-T306完了後、セッション継続の完全なフローをテスト: `tests/e2e/session-workflow.test.ts`
+- [ ] T307 [US3] T304-T306完了後、セッション継続の完全なフローをテスト（統合テスト内でカバー済み）
 
 **✅ チェックポイント**: US3の全受け入れシナリオがテストでカバーされ、独立して検証可能
 
