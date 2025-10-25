@@ -356,7 +356,33 @@ async function handleBranchSelection(branchName: string, repoRoot: string): Prom
     } else {
       // Create new worktree
       worktreePath = await generateWorktreePath(repoRoot, targetBranch);
-      
+
+      // Check for path conflict
+      const { checkWorktreePathConflict, generateAlternativeWorktreePath, removeWorktree } = await import('./worktree.js');
+      const pathConflict = await checkWorktreePathConflict(worktreePath);
+
+      if (pathConflict && pathConflict.branch !== targetBranch) {
+        // Path conflict detected - let user choose how to proceed
+        const { selectWorktreePathConflictResolution } = await import('./ui/prompts.js');
+        const resolution = await selectWorktreePathConflictResolution(
+          targetBranch,
+          worktreePath,
+          pathConflict.branch
+        );
+
+        if (resolution === 'cancel') {
+          printInfo('Operation cancelled.');
+          return true;
+        } else if (resolution === 'remove-and-create') {
+          printInfo(`Removing existing worktree for "${pathConflict.branch}"...`);
+          await removeWorktree(worktreePath, true);
+          printSuccess('Existing worktree removed.');
+        } else if (resolution === 'use-different-path') {
+          worktreePath = await generateAlternativeWorktreePath(worktreePath);
+          printInfo(`Using alternative path: ${worktreePath}`);
+        }
+      }
+
       if (!(await confirmWorktreeCreation(targetBranch, worktreePath))) {
         printInfo('Operation cancelled.');
         return true; // Continue to main menu
@@ -364,7 +390,7 @@ async function handleBranchSelection(branchName: string, repoRoot: string): Prom
 
       let isNewBranch = false;
       let baseBranch = targetBranch;
-      
+
       if (isRemoteBranch) {
         // Check if local branch exists
         const localExists = await branchExists(localBranchName);
