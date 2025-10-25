@@ -13,8 +13,9 @@ export interface FooterProps {
 
 /**
  * Footer component - displays keyboard actions
+ * Optimized with React.memo to prevent unnecessary re-renders
  */
-export function Footer({ actions, separator = '  ' }: FooterProps) {
+export const Footer = React.memo(function Footer({ actions, separator = '  ' }: FooterProps) {
   if (actions.length === 0) {
     return null;
   }
@@ -34,4 +35,4 @@ export function Footer({ actions, separator = '  ' }: FooterProps) {
       ))}
     </Box>
   );
-}
+});

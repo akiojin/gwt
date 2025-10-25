@@ -28,11 +28,11 @@ export function App({ onExit }: AppProps) {
   const { branches, worktrees, loading, error, refresh, lastUpdated } = useGitData();
   const { currentScreen, navigateTo, goBack, reset } = useScreenState();
 
-  // Format branches to BranchItems
-  const branchItems: BranchItem[] = formatBranchItems(branches);
+  // Format branches to BranchItems (memoized for performance)
+  const branchItems: BranchItem[] = useMemo(() => formatBranchItems(branches), [branches]);
 
-  // Calculate statistics
-  const stats = calculateStatistics(branches);
+  // Calculate statistics (memoized for performance)
+  const stats = useMemo(() => calculateStatistics(branches), [branches]);
 
   // Format worktrees to WorktreeItems
   const worktreeItems: WorktreeItem[] = useMemo(

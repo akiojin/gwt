@@ -31,8 +31,9 @@ function formatRelativeTime(date: Date): string {
 
 /**
  * Stats component - displays statistics in one line
+ * Optimized with React.memo to prevent unnecessary re-renders
  */
-export function Stats({ stats, separator = '  ', lastUpdated = null }: StatsProps) {
+export const Stats = React.memo(function Stats({ stats, separator = '  ', lastUpdated = null }: StatsProps) {
   const items = [
     { label: 'Local', value: stats.localCount, color: 'cyan' },
     { label: 'Remote', value: stats.remoteCount, color: 'green' },
@@ -59,4 +60,4 @@ export function Stats({ stats, separator = '  ', lastUpdated = null }: StatsProp
       )}
     </Box>
   );
-}
+});

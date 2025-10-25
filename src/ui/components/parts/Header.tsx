@@ -11,8 +11,9 @@ export interface HeaderProps {
 
 /**
  * Header component - displays title and optional divider
+ * Optimized with React.memo to prevent unnecessary re-renders
  */
-export function Header({
+export const Header = React.memo(function Header({
   title,
   titleColor = 'cyan',
   dividerChar = '─',
@@ -35,4 +36,4 @@ export function Header({
       )}
     </Box>
   );
-}
+});
