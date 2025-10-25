@@ -92,7 +92,7 @@ graph TD
 - [x] T003 [P] [US1] ジョブの実行条件を設定（conclusion=success、event=pull_request）し、必要な権限を定義 in .github/workflows/auto-merge.yml
 - [x] T004 [US1] PR番号取得ステップを実装（workflow_run.head_branchからgh pr listで取得）in .github/workflows/auto-merge.yml
 - [x] T005 [US1] マージ可能性チェックステップを実装（mergeable、mergeStateStatusを確認）in .github/workflows/auto-merge.yml
-- [x] T006 [US1] PRマージステップを実装（gh pr merge --merge --autoを使用）in .github/workflows/auto-merge.yml
+- [x] T006 [US1] PRマージステップを実装（gh api graphqlによるmergePullRequest実行）in .github/workflows/auto-merge.yml
 - [ ] T007 [US1] 統合テスト: テストPRを作成し、CI成功後に自動マージされることを確認
 
 ---

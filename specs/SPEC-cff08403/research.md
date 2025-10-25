@@ -82,7 +82,9 @@ on:
 gh pr view $PR_NUMBER --json mergeable,mergeStateStatus
 
 # PRマージ
-gh pr merge $PR_NUMBER --merge --auto
+gh api graphql \
+  -f query='mutation($pr:ID!){ mergePullRequest(input:{pullRequestId:$pr, mergeMethod:MERGE}) { pullRequest { number }}}' \
+  -f pr="$PR_ID"
 ```
 
 ### 2.2 マージ状態の確認方法
@@ -192,17 +194,22 @@ fi
 
 ### 4.1 マージ方法の指定
 
-**決定**: `--merge`フラグでMerge commitを明示
+**決定**: GraphQL APIの`mergePullRequest`ミューテーションでMerge commitを明示
 
-**コマンド**:
+**手順**:
+1. `gh pr view`でPRのGraphQL IDを取得
+2. `gh api graphql`で`mergePullRequest`を実行（`mergeMethod: MERGE`）
+
+**コマンド例**:
 ```bash
-gh pr merge $PR_NUMBER --merge --auto
+PR_ID=$(gh pr view $PR_NUMBER --json id --jq '.id')
+gh api graphql -f query='mutation($pr:ID!){ mergePullRequest(input:{pullRequestId:$pr, mergeMethod:MERGE}) { pullRequest { number }}}' -f pr="$PR_ID"
 ```
 
-**`--auto`フラグの使用**:
-- すべての必須チェックが完了するまで待機
-- 条件が満たされた時点で自動的にマージ
-- GitHub側で最終的な安全性確認が行われる
+**理由**:
+- 対話不要でCIから確実にマージ実行
+- `mergeMethod: MERGE`を固定指定し履歴を保持
+- GitHub側で最終チェックを再確認した上でマージ
 
 ### 4.2 セキュリティと権限
 
@@ -237,7 +244,7 @@ permissions:
 | マージ条件 | `mergeable == MERGEABLE` && `mergeStateStatus in [CLEAN, UNSTABLE]` | 安全性と柔軟性のバランス |
 | エラー処理 | 段階的チェックとログ出力 | デバッグ性と安全性 |
 | 権限 | `contents: write`, `pull-requests: write` | 最小限の必要権限 |
-| マージ方法 | `--merge --auto` | Merge commit、GitHub側で最終確認 |
+| マージ方法 | GraphQL `mergePullRequest` (MERGE) | Merge commit、対話不要で即時実行 |
 
 ## 6. 次のステップ
 

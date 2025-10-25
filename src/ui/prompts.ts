@@ -1897,3 +1897,44 @@ ${category.title}`,
 
   return choices;
 }
+
+/**
+ * worktreeパス衝突時の対処方法を選択
+ * @param targetBranch - 作成しようとしているブランチ名
+ * @param targetPath - 作成しようとしているパス
+ * @param existingBranch - 既に存在するworktreeのブランチ名
+ * @returns 選択されたアクション（'remove-and-create' | 'use-different-path' | 'cancel'）
+ */
+export async function selectWorktreePathConflictResolution(
+  targetBranch: string,
+  targetPath: string,
+  existingBranch: string
+): Promise<'remove-and-create' | 'use-different-path' | 'cancel'> {
+  console.log(chalk.yellow(`\n⚠️  Worktree path conflict detected:`));
+  console.log(chalk.dim(`  Target path: ${targetPath}`));
+  console.log(chalk.dim(`  Target branch: ${targetBranch}`));
+  console.log(chalk.dim(`  Existing branch at this path: ${existingBranch}\n`));
+
+  const action = await select({
+    message: 'How would you like to proceed?',
+    choices: [
+      {
+        name: `Remove existing worktree and create new one for "${targetBranch}"`,
+        value: 'remove-and-create' as const,
+        description: `Delete the worktree for "${existingBranch}" and create a new one`
+      },
+      {
+        name: 'Use a different path (add suffix)',
+        value: 'use-different-path' as const,
+        description: 'Create the worktree at an alternative path (e.g., path-2)'
+      },
+      {
+        name: 'Cancel',
+        value: 'cancel' as const,
+        description: 'Return to main menu'
+      }
+    ]
+  });
+
+  return action;
+}

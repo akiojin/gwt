@@ -128,6 +128,35 @@ export async function generateWorktreePath(
 }
 
 /**
+ * 指定されたパスに既存のworktreeが存在するか確認
+ * @param {string} targetPath - 確認するパス
+ * @returns {Promise<WorktreeInfo | null>} 既存のworktree情報、または存在しない場合はnull
+ */
+export async function checkWorktreePathConflict(targetPath: string): Promise<WorktreeInfo | null> {
+  const worktrees = await listWorktrees();
+  const existingWorktree = worktrees.find(w => w.path === targetPath);
+  return existingWorktree || null;
+}
+
+/**
+ * 衝突を避けるため、代替のworktreeパスを生成
+ * @param {string} basePath - 元のパス
+ * @returns {Promise<string>} 利用可能な代替パス
+ */
+export async function generateAlternativeWorktreePath(basePath: string): Promise<string> {
+  let counter = 2;
+  let alternativePath = `${basePath}-${counter}`;
+
+  // 衝突しないパスが見つかるまで試行
+  while (await checkWorktreePathConflict(alternativePath)) {
+    counter++;
+    alternativePath = `${basePath}-${counter}`;
+  }
+
+  return alternativePath;
+}
+
+/**
  * 新しいworktreeを作成
  * @param {WorktreeConfig} config - worktreeの設定
  * @throws {WorktreeError} worktreeの作成に失敗した場合
@@ -149,11 +178,12 @@ export async function createWorktree(config: WorktreeConfig): Promise<void> {
     }
 
     await execa("git", args);
-  } catch (error) {
-    throw new WorktreeError(
-      `Failed to create worktree for ${config.branchName}`,
-      error,
-    );
+  } catch (error: any) {
+    // Extract more detailed error information from git command
+    const gitError =
+      error?.stderr || error?.stdout || error?.message || String(error);
+    const errorMessage = `Failed to create worktree for ${config.branchName}\nGit error: ${gitError}`;
+    throw new WorktreeError(errorMessage, error);
   }
 }
 
