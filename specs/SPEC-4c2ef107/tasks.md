@@ -94,10 +94,10 @@
 
 ### データ変換ロジック（TDD）
 
-- [ ] T032 [US1] src/ui/utils/branchFormatter.tsのテストを作成（BranchInfo → BranchItem変換）
-- [ ] T033 [US1] T032の後にsrc/ui/utils/branchFormatter.tsを実装（アイコン生成、ラベル作成）
-- [ ] T034 [US1] src/ui/utils/statisticsCalculator.tsのテストを作成（Statistics計算）
-- [ ] T035 [US1] T034の後にsrc/ui/utils/statisticsCalculator.tsを実装（ブランチ/Worktree集計）
+- [x] T032 [US1] src/ui/utils/branchFormatter.tsのテストを作成（BranchInfo → BranchItem変換）
+- [x] T033 [US1] T032の後にsrc/ui/utils/branchFormatter.tsを実装（アイコン生成、ラベル作成）
+- [x] T034 [US1] src/ui/utils/statisticsCalculator.tsのテストを作成（Statistics計算）
+- [x] T035 [US1] T034の後にsrc/ui/utils/statisticsCalculator.tsを実装（ブランチ/Worktree集計）
 
 ### カスタムフック（TDD）
 

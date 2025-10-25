@@ -1,9 +1,16 @@
+export interface WorktreeInfo {
+  path: string;
+  locked: boolean;
+  prunable: boolean;
+}
+
 export interface BranchInfo {
   name: string;
   type: "local" | "remote";
   branchType: "feature" | "hotfix" | "release" | "main" | "develop" | "other";
   isCurrent: boolean;
   description?: string;
+  worktree?: WorktreeInfo;
 }
 
 export interface BranchChoice {
@@ -21,7 +28,7 @@ export interface EnhancedBranchChoice extends BranchChoice {
   isCurrent: boolean;
 }
 
-export type BranchType = "feature" | "hotfix" | "release";
+export type BranchType = "feature" | "hotfix" | "release" | "main" | "develop" | "other";
 
 export interface NewBranchConfig {
   type: BranchType;
