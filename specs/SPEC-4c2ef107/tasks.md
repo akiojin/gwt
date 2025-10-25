@@ -53,7 +53,7 @@
 
 ### 型定義の拡張
 
-- [ ] T011 data-model.mdに基づいてsrc/ui/types.tsを拡張（BranchItem, Statistics, Layout, Screen型を追加）
+- [x] T011 data-model.mdに基づいてsrc/ui/types.tsを拡張（BranchItem, Statistics, Layout, Screen型を追加）
 
 ### カスタムフック（TDD）
 
