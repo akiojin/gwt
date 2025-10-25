@@ -93,10 +93,27 @@ export async function launchClaudeCode(
         break;
     }
 
+    // Detect root user for Docker/sandbox environments
+    let isRoot = false;
+    try {
+      isRoot = process.getuid ? process.getuid() === 0 : false;
+    } catch {
+      // process.getuid() not available (e.g., Windows) - default to false
+    }
+
     // Handle skip permissions
     if (options.skipPermissions) {
       args.push("--dangerously-skip-permissions");
       console.log(chalk.yellow("   ⚠️  Skipping permissions check"));
+
+      // Show additional warning for root users in Docker/sandbox environments
+      if (isRoot) {
+        console.log(
+          chalk.yellow(
+            "   ⚠️  Docker/サンドボックス環境として実行中（IS_SANDBOX=1）",
+          ),
+        );
+      }
     }
     // Append any pass-through arguments after our flags
     if (options.extraArgs && options.extraArgs.length > 0) {
@@ -107,6 +124,10 @@ export async function launchClaudeCode(
       cwd: worktreePath,
       stdio: "inherit",
       shell: true,
+      env:
+        isRoot && options.skipPermissions
+          ? { ...process.env, IS_SANDBOX: "1" }
+          : process.env,
     });
   } catch (error: any) {
     const errorMessage =

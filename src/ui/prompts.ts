@@ -730,21 +730,24 @@ export async function selectCleanupTargets(
   } = await import("@inquirer/core");
 
   // Custom checkbox prompt with q key support
-  const customCheckbox = createPrompt<CleanupTarget[] | null, {
-    message: string;
-    choices: Array<{
-      name: string;
-      value: CleanupTarget;
-      disabled?: boolean | string;
-      checked: boolean;
-    }>;
-  }>((config, done) => {
+  const customCheckbox = createPrompt<
+    CleanupTarget[] | null,
+    {
+      message: string;
+      choices: Array<{
+        name: string;
+        value: CleanupTarget;
+        disabled?: boolean | string;
+        checked: boolean;
+      }>;
+    }
+  >((config, done) => {
     const [selectedIndices, setSelectedIndices] = useState<Set<number>>(
       new Set(
         config.choices
           .map((c, i) => (!c.disabled && c.checked ? i : -1))
-          .filter((i) => i >= 0)
-      )
+          .filter((i) => i >= 0),
+      ),
     );
     const [cursorIndex, setCursorIndex] = useState<number>(0);
     const [status, setStatus] = useState<"idle" | "done">("idle");
@@ -764,7 +767,10 @@ export async function selectCleanupTargets(
       if (isEnterKey(key)) {
         const selected = Array.from(selectedIndices)
           .map((i) => config.choices[i])
-          .filter((choice): choice is NonNullable<typeof choice> => choice !== undefined)
+          .filter(
+            (choice): choice is NonNullable<typeof choice> =>
+              choice !== undefined,
+          )
           .map((choice) => choice.value);
         setStatus("done");
         done(selected);
@@ -788,10 +794,12 @@ export async function selectCleanupTargets(
 
       // Handle up/down navigation
       if (isUpKey(key)) {
-        const newIndex = cursorIndex > 0 ? cursorIndex - 1 : config.choices.length - 1;
+        const newIndex =
+          cursorIndex > 0 ? cursorIndex - 1 : config.choices.length - 1;
         setCursorIndex(newIndex);
       } else if (isDownKey(key)) {
-        const newIndex = cursorIndex < config.choices.length - 1 ? cursorIndex + 1 : 0;
+        const newIndex =
+          cursorIndex < config.choices.length - 1 ? cursorIndex + 1 : 0;
         setCursorIndex(newIndex);
       }
     });
@@ -816,9 +824,10 @@ export async function selectCleanupTargets(
             ? chalk.cyan(choice.name)
             : choice.name;
 
-        const disabledText = choice.disabled && typeof choice.disabled === "string"
-          ? chalk.gray(` (${choice.disabled})`)
-          : "";
+        const disabledText =
+          choice.disabled && typeof choice.disabled === "string"
+            ? chalk.gray(` (${choice.disabled})`)
+            : "";
 
         return `${pointer}${checkbox} ${nameDisplay}${disabledText}`;
       })
