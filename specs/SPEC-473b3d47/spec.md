@@ -224,6 +224,10 @@
 - **FR-035**: システムは、ブランチとワークツリーの統計情報（総数）をリアルタイム表示しなければならない
 - **FR-036**: システムは、ヘルプメッセージ（-h、--help）を表示できなければならない
 
+#### Codex CLI起動設定
+
+- **FR-037**: システムは、Codex CLIを`bunx @openai/codex@latest`で起動する際に、次の引数を常に付与しなければならない：`--search`、`--model="gpt-5-codex"`、`--sandbox workspace-write`、`-c model_reasoning_effort="high"`、`-c model_reasoning_summaries="detailed"`、`-c sandbox_workspace_write.network_access=true`、`-c shell_environment_policy.inherit=all`、`-c shell_environment_policy.ignore_default_excludes=true`、`-c shell_environment_policy.experimental_use_profile=true`
+
 ### 主要エンティティ
 
 - **ブランチ（Branch）**: Gitブランチを表し、名前、タイプ（local/remote）、ブランチタイプ（feature/hotfix/release/other）、現在のブランチかどうかの属性を持つ
