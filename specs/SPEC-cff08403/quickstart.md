@@ -34,9 +34,6 @@ on:
     workflows: ["Test", "Lint"]
     types:
       - completed
-    branches:
-      - main
-      - develop
 
 jobs:
   auto-merge:

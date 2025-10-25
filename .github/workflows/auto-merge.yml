@@ -5,9 +5,6 @@ on:
     workflows: ["Test", "Lint"]
     types:
       - completed
-    branches:
-      - main
-      - develop
 
 jobs:
   auto-merge:
@@ -70,6 +67,6 @@ jobs:
         run: |
           PR_NUMBER=${{ steps.pr.outputs.number }}
           echo "Auto-merging PR #$PR_NUMBER"
-          gh pr merge $PR_NUMBER --merge --auto
+          gh pr merge $PR_NUMBER --merge --auto --yes
         env:
           GH_TOKEN: ${{ github.token }}
