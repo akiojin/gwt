@@ -15,6 +15,7 @@ export interface BranchListScreenProps {
   onQuit?: () => void;
   loading?: boolean;
   error?: Error | null;
+  lastUpdated?: Date | null;
 }
 
 /**
@@ -29,6 +30,7 @@ export function BranchListScreen({
   onQuit,
   loading = false,
   error = null,
+  lastUpdated = null,
 }: BranchListScreenProps) {
   const { rows } = useTerminalSize();
 
@@ -75,7 +77,7 @@ export function BranchListScreen({
 
       {/* Stats */}
       <Box marginTop={1}>
-        <Stats stats={stats} />
+        <Stats stats={stats} lastUpdated={lastUpdated} />
       </Box>
 
       {/* Empty line */}

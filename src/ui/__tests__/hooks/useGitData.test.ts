@@ -206,4 +206,109 @@ describe('useGitData', () => {
     expect(branchC?.worktree).toBeDefined();
     expect(branchC?.worktree?.path).toBe('/path/c');
   });
+
+  it('should set lastUpdated after loading data', async () => {
+    (getAllBranches as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    (listAdditionalWorktrees as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+
+    const { result } = renderHook(() => useGitData());
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
+    expect(result.current.lastUpdated).toBeInstanceOf(Date);
+  });
+
+  it('should auto-refresh when enableAutoRefresh is true', async () => {
+    const mockBranches: BranchInfo[] = [
+      { name: 'main', type: 'local', branchType: 'main', isCurrent: true },
+    ];
+
+    (getAllBranches as ReturnType<typeof vi.fn>).mockResolvedValue(mockBranches);
+    (listAdditionalWorktrees as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+
+    const { result } = renderHook(() =>
+      useGitData({ enableAutoRefresh: true, refreshInterval: 100 })
+    );
+
+    // Wait for initial load
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
+    const initialCallCount = (getAllBranches as ReturnType<typeof vi.fn>).mock.calls.length;
+
+    // Wait for auto-refresh to trigger (slightly more than refreshInterval)
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    // Wait for refresh to complete
+    await waitFor(() => {
+      expect((getAllBranches as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(
+        initialCallCount
+      );
+    });
+  });
+
+  it('should not auto-refresh when enableAutoRefresh is false', async () => {
+    const mockBranches: BranchInfo[] = [
+      { name: 'main', type: 'local', branchType: 'main', isCurrent: true },
+    ];
+
+    (getAllBranches as ReturnType<typeof vi.fn>).mockResolvedValue(mockBranches);
+    (listAdditionalWorktrees as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+
+    const { result } = renderHook(() =>
+      useGitData({ enableAutoRefresh: false, refreshInterval: 100 })
+    );
+
+    // Wait for initial load
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
+    const initialCallCount = (getAllBranches as ReturnType<typeof vi.fn>).mock.calls.length;
+
+    // Wait for longer than refreshInterval
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    // Should not have refreshed
+    expect((getAllBranches as ReturnType<typeof vi.fn>).mock.calls.length).toBe(initialCallCount);
+  });
+
+  it('should respect custom refreshInterval', async () => {
+    const mockBranches: BranchInfo[] = [
+      { name: 'main', type: 'local', branchType: 'main', isCurrent: true },
+    ];
+
+    (getAllBranches as ReturnType<typeof vi.fn>).mockResolvedValue(mockBranches);
+    (listAdditionalWorktrees as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+
+    const { result } = renderHook(() =>
+      useGitData({ enableAutoRefresh: true, refreshInterval: 300 })
+    );
+
+    // Wait for initial load
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
+    const initialCallCount = (getAllBranches as ReturnType<typeof vi.fn>).mock.calls.length;
+
+    // Wait less than interval
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    // Should not have refreshed yet
+    expect((getAllBranches as ReturnType<typeof vi.fn>).mock.calls.length).toBe(initialCallCount);
+
+    // Wait for interval to complete (total 350ms)
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    // Wait for refresh to complete
+    await waitFor(() => {
+      expect((getAllBranches as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(
+        initialCallCount
+      );
+    });
+  });
 });

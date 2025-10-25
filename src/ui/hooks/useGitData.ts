@@ -4,22 +4,31 @@ import { listAdditionalWorktrees } from '../../worktree.js';
 import type { BranchInfo, WorktreeInfo } from '../types.js';
 import type { WorktreeInfo as GitWorktreeInfo } from '../../worktree.js';
 
+export interface UseGitDataOptions {
+  enableAutoRefresh?: boolean;
+  refreshInterval?: number; // milliseconds (default: 5000ms = 5s)
+}
+
 export interface UseGitDataResult {
   branches: BranchInfo[];
   worktrees: GitWorktreeInfo[];
   loading: boolean;
   error: Error | null;
   refresh: () => void;
+  lastUpdated: Date | null;
 }
 
 /**
  * Hook to fetch and manage Git data (branches and worktrees)
+ * @param options - Configuration options for auto-refresh and polling interval
  */
-export function useGitData(): UseGitDataResult {
+export function useGitData(options?: UseGitDataOptions): UseGitDataResult {
+  const { enableAutoRefresh = false, refreshInterval = 5000 } = options || {};
   const [branches, setBranches] = useState<BranchInfo[]>([]);
   const [worktrees, setWorktrees] = useState<GitWorktreeInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -59,6 +68,7 @@ export function useGitData(): UseGitDataResult {
       });
 
       setBranches(enrichedBranches);
+      setLastUpdated(new Date());
     } catch (err) {
       setError(err instanceof Error ? err : new Error(String(err)));
       setBranches([]);
@@ -76,11 +86,27 @@ export function useGitData(): UseGitDataResult {
     loadData();
   }, [loadData]);
 
+  // Auto-refresh polling (if enabled)
+  useEffect(() => {
+    if (!enableAutoRefresh) {
+      return;
+    }
+
+    const intervalId = setInterval(() => {
+      loadData();
+    }, refreshInterval);
+
+    return () => {
+      clearInterval(intervalId);
+    };
+  }, [enableAutoRefresh, refreshInterval, loadData]);
+
   return {
     branches,
     worktrees,
     loading,
     error,
     refresh,
+    lastUpdated,
   };
 }

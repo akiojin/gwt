@@ -25,7 +25,7 @@ export interface AppProps {
  * Integrates ErrorBoundary, data fetching, screen navigation, and all screens
  */
 export function App({ onExit }: AppProps) {
-  const { branches, worktrees, loading, error, refresh } = useGitData();
+  const { branches, worktrees, loading, error, refresh, lastUpdated } = useGitData();
   const { currentScreen, navigateTo, goBack, reset } = useScreenState();
 
   // Format branches to BranchItems
@@ -131,6 +131,7 @@ export function App({ onExit }: AppProps) {
             onQuit={handleQuit}
             loading={loading}
             error={error}
+            lastUpdated={lastUpdated}
           />
         );
 
@@ -179,6 +180,7 @@ export function App({ onExit }: AppProps) {
             onSelect={handleSelect}
             loading={loading}
             error={error}
+            lastUpdated={lastUpdated}
           />
         );
     }

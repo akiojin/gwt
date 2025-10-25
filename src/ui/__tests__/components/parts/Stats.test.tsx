@@ -83,4 +83,53 @@ describe('Stats', () => {
     expect(getByText(/777/)).toBeDefined();
     expect(getByText(/666/)).toBeDefined();
   });
+
+  it('should display lastUpdated when provided', () => {
+    const now = new Date();
+    const lastUpdated = new Date(now.getTime() - 5000); // 5 seconds ago
+
+    const { getByText } = render(<Stats stats={mockStats} lastUpdated={lastUpdated} />);
+
+    expect(getByText(/Updated:/)).toBeDefined();
+    expect(getByText(/ago/)).toBeDefined();
+  });
+
+  it('should not display lastUpdated when null', () => {
+    const { queryByText } = render(<Stats stats={mockStats} lastUpdated={null} />);
+
+    expect(queryByText(/Updated:/)).toBeNull();
+  });
+
+  it('should not display lastUpdated when not provided', () => {
+    const { queryByText } = render(<Stats stats={mockStats} />);
+
+    expect(queryByText(/Updated:/)).toBeNull();
+  });
+
+  it('should format relative time correctly (seconds)', () => {
+    const now = new Date();
+    const lastUpdated = new Date(now.getTime() - 30000); // 30 seconds ago
+
+    const { getByText } = render(<Stats stats={mockStats} lastUpdated={lastUpdated} />);
+
+    expect(getByText(/30s ago/)).toBeDefined();
+  });
+
+  it('should format relative time correctly (minutes)', () => {
+    const now = new Date();
+    const lastUpdated = new Date(now.getTime() - 120000); // 2 minutes ago
+
+    const { getByText } = render(<Stats stats={mockStats} lastUpdated={lastUpdated} />);
+
+    expect(getByText(/2m ago/)).toBeDefined();
+  });
+
+  it('should format relative time correctly (hours)', () => {
+    const now = new Date();
+    const lastUpdated = new Date(now.getTime() - 7200000); // 2 hours ago
+
+    const { getByText } = render(<Stats stats={mockStats} lastUpdated={lastUpdated} />);
+
+    expect(getByText(/2h ago/)).toBeDefined();
+  });
 });
