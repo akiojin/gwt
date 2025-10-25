@@ -1,43 +1,43 @@
-import type { BranchInfo } from '../../src/ui/types';
+import type { BranchInfo } from "../../src/ui/types";
 
 /**
  * テスト用のローカルブランチデータ
  */
 export const localBranches: BranchInfo[] = [
   {
-    name: 'main',
-    type: 'local',
-    branchType: 'main',
+    name: "main",
+    type: "local",
+    branchType: "main",
     isCurrent: true,
   },
   {
-    name: 'develop',
-    type: 'local',
-    branchType: 'develop',
+    name: "develop",
+    type: "local",
+    branchType: "develop",
     isCurrent: false,
   },
   {
-    name: 'feature/user-auth',
-    type: 'local',
-    branchType: 'feature',
+    name: "feature/user-auth",
+    type: "local",
+    branchType: "feature",
     isCurrent: false,
   },
   {
-    name: 'feature/dashboard',
-    type: 'local',
-    branchType: 'feature',
+    name: "feature/dashboard",
+    type: "local",
+    branchType: "feature",
     isCurrent: false,
   },
   {
-    name: 'hotfix/security-patch',
-    type: 'local',
-    branchType: 'hotfix',
+    name: "hotfix/security-patch",
+    type: "local",
+    branchType: "hotfix",
     isCurrent: false,
   },
   {
-    name: 'release/1.2.0',
-    type: 'local',
-    branchType: 'release',
+    name: "release/1.2.0",
+    type: "local",
+    branchType: "release",
     isCurrent: false,
   },
 ];
@@ -47,27 +47,27 @@ export const localBranches: BranchInfo[] = [
  */
 export const remoteBranches: BranchInfo[] = [
   {
-    name: 'origin/main',
-    type: 'remote',
-    branchType: 'main',
+    name: "origin/main",
+    type: "remote",
+    branchType: "main",
     isCurrent: false,
   },
   {
-    name: 'origin/develop',
-    type: 'remote',
-    branchType: 'develop',
+    name: "origin/develop",
+    type: "remote",
+    branchType: "develop",
     isCurrent: false,
   },
   {
-    name: 'origin/feature/api-integration',
-    type: 'remote',
-    branchType: 'feature',
+    name: "origin/feature/api-integration",
+    type: "remote",
+    branchType: "feature",
     isCurrent: false,
   },
   {
-    name: 'origin/hotfix/bug-123',
-    type: 'remote',
-    branchType: 'hotfix',
+    name: "origin/hotfix/bug-123",
+    type: "remote",
+    branchType: "hotfix",
     isCurrent: false,
   },
 ];
