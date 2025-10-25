@@ -67,12 +67,12 @@ tests/                          # 新規作成
 
 ### 統合テスト
 
-- [ ] T108 [US1] T101-T106完了後、ブランチ選択からワークツリー作成までの統合テスト: `tests/integration/branch-selection.test.ts`
-- [ ] T109 [US1] T108完了後、リモートブランチからローカルブランチ自動作成をテスト: `tests/integration/remote-branch.test.ts`
+- [x] T108 [US1] T101-T106完了後、ブランチ選択からワークツリー作成までの統合テスト: `tests/integration/branch-selection.test.ts`
+- [x] T109 [US1] T108完了後、リモートブランチからローカルブランチ自動作成をテスト: `tests/integration/remote-branch.test.ts`
 
 ### E2Eテスト
 
-- [ ] T110 [US1] T108-T109完了後、完全なユーザーフローをテスト（モックAIツール使用）: `tests/e2e/branch-to-worktree.test.ts`
+- [x] T110 [US1] T108-T109完了後、完全なユーザーフローをテスト（モックAIツール使用）: `tests/e2e/branch-to-worktree.test.ts`
 
 **✅ MVP1チェックポイント**: US1の全受け入れシナリオがテストでカバーされ、独立して検証可能
 
