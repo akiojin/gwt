@@ -8,6 +8,17 @@ import {
 } from './types.js';
 import { SessionData } from '../config/index.js';
 
+type SelectChoice<TValue> = {
+  name: string;
+  value: TValue;
+  description?: string;
+  disabled?: boolean | string;
+};
+
+type SelectPromptConfig<TValue> = {
+  message: string;
+  choices: Array<SelectChoice<TValue>>;
+};
 /**
  * Custom select prompt with q key support for going back
  * @param config - prompt configuration
@@ -366,7 +377,7 @@ export async function selectWorktreeForManagement(worktrees: Array<{ branch: str
   const { createPrompt, useState, useKeypress, isEnterKey, usePrefix, isUpKey, isDownKey } = await import('@inquirer/core');
 
   // Custom prompt that handles 'q' key
-  const customSelect = createPrompt<string | null, { message: string; choices: any[] }>((config, done) => {
+  const customSelect = createPrompt<string | null, SelectPromptConfig<string>>((config, done) => {
     const [selectedIndex, setSelectedIndex] = useState<number>(0);
     const [status, setStatus] = useState<'idle' | 'done'>('idle');
     const prefix = usePrefix({});
@@ -382,6 +393,9 @@ export async function selectWorktreeForManagement(worktrees: Array<{ branch: str
 
       if (isEnterKey(key)) {
         const selectedChoice = config.choices[selectedIndex];
+        if (!selectedChoice) {
+          return;
+        }
         if (selectedChoice.disabled) {
           // Don't allow selection of disabled items
           return;
@@ -394,14 +408,14 @@ export async function selectWorktreeForManagement(worktrees: Array<{ branch: str
       if (isUpKey(key)) {
         let newIndex = selectedIndex > 0 ? selectedIndex - 1 : config.choices.length - 1;
         // Skip disabled items
-        while (config.choices[newIndex].disabled && newIndex !== selectedIndex) {
+        while (config.choices[newIndex]?.disabled && newIndex !== selectedIndex) {
           newIndex = newIndex > 0 ? newIndex - 1 : config.choices.length - 1;
         }
         setSelectedIndex(newIndex);
       } else if (isDownKey(key)) {
         let newIndex = selectedIndex < config.choices.length - 1 ? selectedIndex + 1 : 0;
         // Skip disabled items
-        while (config.choices[newIndex].disabled && newIndex !== selectedIndex) {
+        while (config.choices[newIndex]?.disabled && newIndex !== selectedIndex) {
           newIndex = newIndex < config.choices.length - 1 ? newIndex + 1 : 0;
         }
         setSelectedIndex(newIndex);
@@ -424,7 +438,7 @@ export async function selectWorktreeForManagement(worktrees: Array<{ branch: str
     return `${prefix} ${message}\n${choicesDisplay}`;
   });
 
-  const choices = worktrees.map((w, index) => {
+  const choices: Array<SelectChoice<string>> = worktrees.map((w, index) => {
     const isInvalid = w.isAccessible === false;
     return {
       name: isInvalid 
@@ -1203,13 +1217,18 @@ export async function selectClaudeExecutionMode(toolLabel: string = 'Claude Code
   const { createPrompt, useState, useKeypress, isEnterKey, usePrefix, isUpKey, isDownKey } = await import('@inquirer/core');
 
   // Custom prompt that handles 'q' key
-  const customSelect = createPrompt<string | null, { message: string; choices: any[] }>((config, done) => {
+  const customSelect = createPrompt<'normal' | 'continue' | 'resume' | null, SelectPromptConfig<'normal' | 'continue' | 'resume'>>((config, done) => {
     const [selectedIndex, setSelectedIndex] = useState<number>(0);
     const [status, setStatus] = useState<'idle' | 'done'>('idle');
     const prefix = usePrefix({});
 
     useKeypress((key) => {
       if (status === 'done') return;
+      if (config.choices.length === 0) {
+        setStatus('done');
+        done(null);
+        return;
+      }
 
       if (key.name === 'q' || (key.name === 'c' && key.ctrl)) {
         setStatus('done');
@@ -1219,6 +1238,9 @@ export async function selectClaudeExecutionMode(toolLabel: string = 'Claude Code
 
       if (isEnterKey(key)) {
         const selectedChoice = config.choices[selectedIndex];
+        if (!selectedChoice) {
+          return;
+        }
         setStatus('done');
         done(selectedChoice.value);
         return;
@@ -1249,7 +1271,7 @@ export async function selectClaudeExecutionMode(toolLabel: string = 'Claude Code
   });
 
   const isCodexTool = toolLabel.toLowerCase().includes('codex');
-  const choices = [
+  const choices: Array<SelectChoice<'normal' | 'continue' | 'resume'>> = [
     {
       name: '🚀 Normal - Start a new session',
       value: 'normal',
@@ -1359,8 +1381,8 @@ export async function selectAITool(options: {
   });
 
   const claudeDescription = claudeAvailable
-    ? 'Use the Claude Code CLI'
-    : 'CLI not detected (選択するとエラーになる可能性があります)';
+    ? 'Run via bunx @anthropic-ai/claude-code@latest'
+    : 'bunx 経由で実行（事前チェックなし）';
   const codexDescription = codexAvailable
     ? 'Run via bunx @openai/codex@latest'
     : 'bunx 経由で実行（事前チェックなし）';

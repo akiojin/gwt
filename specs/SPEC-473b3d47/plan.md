@@ -7,7 +7,7 @@
 
 ## 概要
 
-`@akiojin/claude-worktree`は、Claude Code / Codex CLI と統合された対話型Gitワークツリーマネージャーです。TypeScriptで実装され、Node.js 18+環境で動作します。主要な機能は以下の8つのユーザーストーリーに分類されます：
+`@akiojin/claude-worktree`は、Claude Code / Codex CLI と統合された対話型Gitワークツリーマネージャーです。TypeScriptで実装され、Bun 1.0.0+ 環境で動作します（必要に応じてNode.js 18+を併用可能）。主要な機能は以下の8つのユーザーストーリーに分類されます：
 
 1. **対話型ブランチ選択とワークツリー自動作成** (P1)
 2. **スマートブランチ作成ワークフロー** (P1)
@@ -22,8 +22,8 @@
 
 ## 技術コンテキスト
 
-**言語/バージョン**: TypeScript 5.8.3 / Node.js 18.0.0+
-**ランタイム**: Node.js / Bun 1.0.0+（開発・実行）
+**言語/バージョン**: TypeScript 5.8.3 / Bun 1.0.0+
+**ランタイム**: Bun 1.0.0+（開発・実行）※必要に応じてNode.js 18.0.0+を併用可能
 **主要な依存関係**:
 - `@inquirer/prompts` (^6.0.1) - 対話型プロンプトとユーザー入力
 - `chalk` (^5.4.1) - コンソール出力の色付け
@@ -47,7 +47,7 @@
 
 **制約**:
 - Git 2.5+（worktree機能要件）
-- Node.js 18.0.0+必須
+- Bun 1.0.0+必須
 - AIツール（Claude Code / Codex CLI）いずれか1つ以上インストール必要
 - GitHub統合はGitHub CLI（gh）必須
 

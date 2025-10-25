@@ -6,8 +6,8 @@
 
 ### Prerequisites
 
-- Node.js 18+ (推奨: 20.x または 22.x)
-- Bun 1.3.1+ (パッケージマネージャー)
+- Bun 1.3.1+（推奨: 最新版）
+- Node.js 18+（任意、Node製開発ツール利用時）
 - Git 2.25+
 - GitHub CLI (オプション、PRクリーンアップ機能のテストに必要)
 
@@ -21,17 +21,17 @@ git clone https://github.com/YOUR_USERNAME/claude-worktree.git
 cd claude-worktree
 ```
 
-3. 依存関係をインストール
+1. 依存関係をインストール
 ```bash
 bun install
 ```
 
-4. ビルド
+1. ビルド
 ```bash
 bun run build
 ```
 
-5. ローカルで実行
+1. ローカルで実行
 ```bash
 bunx .
 ```
@@ -261,7 +261,7 @@ describe('Module/Feature', () => {
 ```markdown
 ## 環境
 - OS:
-- Node.js バージョン:
+- Node.js バージョン（利用している場合）:
 - Bun バージョン:
 - Claude Worktree バージョン:
 

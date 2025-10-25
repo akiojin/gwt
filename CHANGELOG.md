@@ -21,6 +21,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - テストフレームワークをVitestに移行
 - CI/CDパイプラインの強化
+- **bunx移行**: Claude Code起動方式をnpxからbunxへ完全移行
+  - Claude Code: `bunx @anthropic-ai/claude-code@latest`で起動
+  - Codex CLI: 既存のbunx対応を維持
+  - UI表示文言をbunx表記へ統一
+
+### Breaking Changes
+- **Bun 1.0+が必須**: Claude Code起動にはBun 1.0.0以上が必要
+- npx対応の廃止: `npx`経由でのClaude Code起動は非対応
+- ユーザーへの移行ガイダンス:
+  - Bunインストール: `curl -fsSL https://bun.sh/install | bash` (macOS/Linux)
+  - Bunインストール: `powershell -c "irm bun.sh/install.ps1|iex"` (Windows)
+  - エラー時に詳細なインストール手順を表示
 
 ## [0.6.1] - 2024-09-06
 
@@ -112,8 +124,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Technical
 - TypeScript 5.8.3
-- Node.js 18+ サポート
-- Bun 1.3.1+ サポート
+- Bun 1.3.1+ サポート（必須ランタイム）
+- Node.js 18+ サポート（開発ツール向けオプション）
 - Git 2.25+ 必須
 - execa for Git command execution
 - inquirer for interactive prompts

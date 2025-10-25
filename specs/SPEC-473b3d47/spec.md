@@ -252,7 +252,7 @@
 
 ### 制約
 
-- Node.js 18.0.0以上がインストールされている必要がある
+- Bun 1.0.0以上がインストールされている必要がある
 - Gitコマンドラインツールがインストールされ、PATHに含まれている必要がある
 - AIツール（Claude Code / Codex CLI）のいずれか一方がインストールされている必要がある
 - GitHub統合機能はGitHub CLIのインストールと認証が必要
@@ -302,8 +302,8 @@
 - **Codex CLI**: AIツール統合に必要（オプション）
 - **GitHub CLI（gh）**: GitHub統合機能に必要（オプション）
 
-### Node.jsパッケージ依存
-
+### npmパッケージ依存
+（npm経由で提供されるパッケージ。Bun環境で実行）
 - **@inquirer/prompts**: 対話型プロンプトの提供
 - **chalk**: コンソール出力の色付け
 - **execa**: 外部コマンド実行
@@ -311,9 +311,9 @@
 
 ## 参考資料
 
-- プロジェクトリポジトリ: https://github.com/akiojin/claude-worktree
+- プロジェクトリポジトリ: [https://github.com/akiojin/claude-worktree](https://github.com/akiojin/claude-worktree)
 - README.md: 使用方法とインストール手順
-- Git Worktree ドキュメント: https://git-scm.com/docs/git-worktree
-- Git Flow: https://nvie.com/posts/a-successful-git-branching-model/
-- Claude Code: https://claude.ai/code
-- GitHub CLI: https://cli.github.com/
+- Git Worktree ドキュメント: [https://git-scm.com/docs/git-worktree](https://git-scm.com/docs/git-worktree)
+- Git Flow: [https://nvie.com/posts/a-successful-git-branching-model/](https://nvie.com/posts/a-successful-git-branching-model/)
+- Claude Code: [https://claude.ai/code](https://claude.ai/code)
+- GitHub CLI: [https://cli.github.com/](https://cli.github.com/)

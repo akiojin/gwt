@@ -1,0 +1,324 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/akiojin/claude-worktree/blob/main/specs/SPEC-23bb2eed/contracts/releaserc-schema.json",
+  "title": "semantic-release Configuration Schema",
+  "description": "JSON Schema for .releaserc.json configuration file used by semantic-release",
+  "type": "object",
+  "properties": {
+    "branches": {
+      "description": "List of branches on which releases should be performed",
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "type": "string",
+            "description": "Branch name (e.g., 'main', 'master', 'next')"
+          },
+          {
+            "type": "object",
+            "description": "Branch configuration object for advanced options",
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Branch name"
+              },
+              "prerelease": {
+                "oneOf": [
+                  {
+                    "type": "boolean",
+                    "description": "Whether to create prerelease versions"
+                  },
+                  {
+                    "type": "string",
+                    "description": "Prerelease identifier (e.g., 'beta', 'alpha')"
+                  }
+                ]
+              }
+            },
+            "required": ["name"]
+          }
+        ]
+      },
+      "minItems": 1,
+      "default": ["main"]
+    },
+    "tagFormat": {
+      "description": "Git tag format template (must include ${version} placeholder)",
+      "type": "string",
+      "pattern": ".*\\$\\{version\\}.*",
+      "default": "v${version}",
+      "examples": ["v${version}", "${version}", "release-${version}"]
+    },
+    "repositoryUrl": {
+      "description": "Git repository URL (defaults to repository field in package.json)",
+      "type": "string",
+      "format": "uri",
+      "examples": [
+        "https://github.com/akiojin/claude-worktree.git",
+        "git@github.com:akiojin/claude-worktree.git"
+      ]
+    },
+    "plugins": {
+      "description": "List of plugins to execute semantic-release steps",
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "type": "string",
+            "description": "Plugin name without configuration"
+          },
+          {
+            "type": "array",
+            "description": "Plugin with configuration [pluginName, config]",
+            "items": [
+              {
+                "type": "string",
+                "description": "Plugin name"
+              },
+              {
+                "type": "object",
+                "description": "Plugin-specific configuration"
+              }
+            ],
+            "minItems": 2,
+            "maxItems": 2
+          }
+        ]
+      },
+      "minItems": 1,
+      "default": [
+        "@semantic-release/commit-analyzer",
+        "@semantic-release/release-notes-generator",
+        "@semantic-release/npm",
+        "@semantic-release/github"
+      ]
+    },
+    "extends": {
+      "description": "Shareable configuration to extend",
+      "oneOf": [
+        {
+          "type": "string",
+          "description": "Single shareable configuration"
+        },
+        {
+          "type": "array",
+          "description": "Multiple shareable configurations",
+          "items": {
+            "type": "string"
+          }
+        }
+      ],
+      "examples": ["semantic-release-config-custom"]
+    },
+    "preset": {
+      "description": "Preset for commit-analyzer and release-notes-generator",
+      "type": "string",
+      "enum": ["angular", "atom", "codemirror", "ember", "eslint", "express", "jquery"],
+      "default": "angular",
+      "examples": ["angular", "conventionalcommits"]
+    }
+  },
+  "required": ["branches", "plugins"],
+  "additionalProperties": false,
+  "examples": [
+    {
+      "branches": ["main"],
+      "tagFormat": "v${version}",
+      "plugins": [
+        "@semantic-release/commit-analyzer",
+        "@semantic-release/release-notes-generator",
+        [
+          "@semantic-release/changelog",
+          {
+            "changelogFile": "CHANGELOG.md"
+          }
+        ],
+        [
+          "@semantic-release/npm",
+          {
+            "npmPublish": true
+          }
+        ],
+        [
+          "@semantic-release/git",
+          {
+            "assets": ["CHANGELOG.md", "package.json"],
+            "message": "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
+          }
+        ],
+        "@semantic-release/github"
+      ]
+    },
+    {
+      "branches": [
+        "main",
+        {
+          "name": "beta",
+          "prerelease": true
+        },
+        {
+          "name": "alpha",
+          "prerelease": "alpha"
+        }
+      ],
+      "tagFormat": "v${version}",
+      "plugins": [
+        "@semantic-release/commit-analyzer",
+        "@semantic-release/release-notes-generator",
+        "@semantic-release/npm",
+        "@semantic-release/github"
+      ]
+    }
+  ],
+  "definitions": {
+    "pluginConfig": {
+      "commit-analyzer": {
+        "type": "object",
+        "description": "Configuration for @semantic-release/commit-analyzer",
+        "properties": {
+          "preset": {
+            "type": "string",
+            "description": "Preset for parsing commits",
+            "enum": ["angular", "atom", "codemirror", "ember", "eslint", "express", "jquery"],
+            "default": "angular"
+          },
+          "releaseRules": {
+            "type": "array",
+            "description": "Custom release rules",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "description": "Commit type (e.g., feat, fix)"
+                },
+                "release": {
+                  "type": "string",
+                  "enum": ["major", "minor", "patch", false],
+                  "description": "Release type to trigger"
+                }
+              }
+            }
+          }
+        }
+      },
+      "changelog": {
+        "type": "object",
+        "description": "Configuration for @semantic-release/changelog",
+        "properties": {
+          "changelogFile": {
+            "type": "string",
+            "description": "Path to changelog file",
+            "default": "CHANGELOG.md"
+          },
+          "changelogTitle": {
+            "type": "string",
+            "description": "Title for the changelog file",
+            "default": "# Changelog"
+          }
+        }
+      },
+      "npm": {
+        "type": "object",
+        "description": "Configuration for @semantic-release/npm",
+        "properties": {
+          "npmPublish": {
+            "type": "boolean",
+            "description": "Whether to publish to npm registry",
+            "default": true
+          },
+          "pkgRoot": {
+            "type": "string",
+            "description": "Directory containing package.json",
+            "default": "."
+          },
+          "tarballDir": {
+            "type": "string",
+            "description": "Directory to save the npm package tarball"
+          }
+        }
+      },
+      "git": {
+        "type": "object",
+        "description": "Configuration for @semantic-release/git",
+        "properties": {
+          "assets": {
+            "type": "array",
+            "description": "Files to commit",
+            "items": {
+              "type": "string"
+            },
+            "default": ["CHANGELOG.md", "package.json", "package-lock.json"]
+          },
+          "message": {
+            "type": "string",
+            "description": "Commit message template",
+            "default": "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
+          }
+        }
+      },
+      "github": {
+        "type": "object",
+        "description": "Configuration for @semantic-release/github",
+        "properties": {
+          "assets": {
+            "type": "array",
+            "description": "Files to attach to GitHub Release",
+            "items": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "description": "File path or glob pattern"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "description": "File path"
+                    },
+                    "name": {
+                      "type": "string",
+                      "description": "Asset name"
+                    },
+                    "label": {
+                      "type": "string",
+                      "description": "Asset label"
+                    }
+                  },
+                  "required": ["path"]
+                }
+              ]
+            }
+          },
+          "successComment": {
+            "oneOf": [
+              {
+                "type": "boolean",
+                "description": "Whether to comment on resolved issues/PRs"
+              },
+              {
+                "type": "string",
+                "description": "Custom success comment template"
+              }
+            ],
+            "default": true
+          },
+          "failComment": {
+            "oneOf": [
+              {
+                "type": "boolean",
+                "description": "Whether to comment on failed release"
+              },
+              {
+                "type": "string",
+                "description": "Custom fail comment template"
+              }
+            ],
+            "default": true
+          }
+        }
+      }
+    }
+  }
+}
