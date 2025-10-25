@@ -142,13 +142,13 @@
 
 ### 画面状態管理の拡張
 
-- [ ] T052 [US2] src/ui/hooks/useScreenState.tsを拡張（すべての画面タイプに対応）
-- [ ] T053 [US2] T052の後にsrc/ui/components/App.tsxに画面遷移ロジックを追加
+- [x] T052 [US2] src/ui/hooks/useScreenState.tsを拡張（すべての画面タイプに対応）
+- [x] T053 [US2] T052の後にsrc/ui/components/App.tsxに画面遷移ロジックを追加
 
 ### Worktree管理画面（TDD）
 
-- [ ] T054 [P] [US2] src/ui/components/screens/WorktreeManagerScreen.tsxのテストを作成
-- [ ] T055 [US2] T054の後にsrc/ui/components/screens/WorktreeManagerScreen.tsxを実装（Worktree一覧表示とアクション選択）
+- [x] T054 [P] [US2] src/ui/components/screens/WorktreeManagerScreen.tsxのテストを作成
+- [x] T055 [US2] T054の後にsrc/ui/components/screens/WorktreeManagerScreen.tsxを実装（Worktree一覧表示とアクション選択）
 - [ ] T056 [US2] T055の後にsrc/ui/components/App.tsxにWorktreeManager画面遷移を統合（mキー）
 
 ### 新規ブランチ作成画面（TDD）
