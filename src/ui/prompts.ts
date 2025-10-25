@@ -1,5 +1,10 @@
 import { select, input, confirm, checkbox } from "@inquirer/prompts";
 import chalk from "chalk";
+import stringWidth from "string-width";
+
+function stripAnsi(value: string): string {
+  return value.replace(/\u001B\[[0-9;]*m/g, "");
+}
 import {
   BranchInfo,
   BranchType,
@@ -164,6 +169,8 @@ async function selectBranchWithShortcuts(
   const { createPrompt, useState, useKeypress, isEnterKey, usePrefix } =
     await import("@inquirer/core");
 
+  const supportsColor = chalk.level > 0;
+
   const branchSelectPrompt = createPrompt<
     string,
     {
@@ -258,11 +265,17 @@ async function selectBranchWithShortcuts(
         c.value !== "__header__" && c.value !== "__separator__" && !c.disabled,
     );
 
+    const maxChoiceWidth = selectableChoices.reduce((max, choice) => {
+      const width = stringWidth(stripAnsi(choice.name));
+      return width > max ? width : max;
+    }, 0);
+
     const pageSize = config.pageSize || 15;
 
     let output = `${prefix} ${config.message}\n`;
     output +=
-      "Actions: (n) Create new branch, (m) Manage worktrees, (c) Clean up merged PRs, (a) Account management, (q) Exit\n\n";
+      "Actions: (n) Create new branch, (m) Manage worktrees, (c) Clean up merged PRs, (a) Account management, (q) Exit\n";
+    output += "\n";
 
     // ヘッダー行とセパレーター行を表示
     if (headerChoice) {
@@ -288,8 +301,12 @@ async function selectBranchWithShortcuts(
 
     visibleSelectableChoices.forEach((choice, index) => {
       const globalIndex = selectableStartIndex + index;
-      const cursor = globalIndex === selectedIndex ? "❯" : " ";
-      output += `${cursor} ${choice.name}\n`;
+      const line = formatBranchChoiceLine(choice.name, {
+        isSelected: globalIndex === selectedIndex,
+        supportsColor,
+        maxWidth: maxChoiceWidth,
+      });
+      output += `${line}\n`;
     });
 
     return output;
@@ -300,6 +317,33 @@ async function selectBranchWithShortcuts(
     choices: allChoices,
     pageSize: 15,
   });
+}
+
+type HighlightOptions = {
+  isSelected: boolean;
+  supportsColor: boolean;
+  maxWidth: number;
+};
+
+function padToWidth(value: string, width: number): string {
+  const currentWidth = stringWidth(value);
+  if (currentWidth >= width) {
+    return value;
+  }
+  return value + " ".repeat(width - currentWidth);
+}
+
+export function formatBranchChoiceLine(
+  name: string,
+  { isSelected, supportsColor: _supportsColor, maxWidth }: HighlightOptions,
+): string {
+  const plain = stripAnsi(name);
+  const paddedPlain = padToWidth(plain, maxWidth);
+  if (isSelected) {
+    return `> ${paddedPlain}`;
+  }
+
+  return `  ${paddedPlain}`;
 }
 
 export async function selectBranchType(): Promise<BranchType> {

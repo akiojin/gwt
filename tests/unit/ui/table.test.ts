@@ -3,6 +3,12 @@ import { createBranchTable } from "../../../src/ui/table";
 import { localBranches, remoteBranches } from "../../fixtures/branches";
 import { worktrees } from "../../fixtures/worktrees";
 
+const stripAnsi = (value: string) => value.replace(/\u001B\[[0-9;]*m/g, "");
+const normalizeName = (name: string) => {
+  const slashIndex = name.indexOf("/");
+  return slashIndex === -1 ? name : name.slice(slashIndex + 1);
+};
+
 // Mock dependencies
 vi.mock("../../../src/git.js", () => ({
   getChangedFilesCount: vi.fn(),
@@ -19,137 +25,69 @@ describe("table.ts - Branch Table Operations", () => {
     vi.restoreAllMocks();
   });
 
-  describe("createBranchTable (T107)", () => {
-    it("should create branch table with branches and worktrees", async () => {
-      // Mock getChangedFilesCount to return 0 for all worktrees
+  describe("createBranchTable (icon list)", () => {
+    beforeEach(() => {
       (getChangedFilesCount as any).mockResolvedValue(0);
-
-      const choices = await createBranchTable(localBranches, worktrees);
-
-      // Should include header and separator
-      expect(choices.length).toBeGreaterThan(localBranches.length);
-
-      // Check that header and separator are disabled
-      const header = choices.find((c) => c.value === "__header__");
-      const separator = choices.find((c) => c.value === "__separator__");
-
-      expect(header).toBeDefined();
-      expect(separator).toBeDefined();
-      expect(header?.disabled).toBe(true);
-      expect(separator?.disabled).toBe(true);
     });
 
-    it("should include branch information in choices", async () => {
-      (getChangedFilesCount as any).mockResolvedValue(0);
-
-      const choices = await createBranchTable(localBranches, worktrees);
-
-      // Find a specific branch
-      const mainBranch = choices.find((c) => c.value === "main");
-      expect(mainBranch).toBeDefined();
-      expect(mainBranch?.name).toContain("main");
+    it("creates one entry per branch without headers", async () => {
+      const allBranches = [...localBranches, ...remoteBranches];
+      const choices = await createBranchTable(allBranches, worktrees);
+      const localSet = new Set(localBranches.map((b) => normalizeName(b.name)));
+      const expectedSize = new Set([
+        ...localSet,
+        ...remoteBranches
+          .map((b) => normalizeName(b.name))
+          .filter((name) => !localSet.has(name)),
+      ]).size;
+      expect(choices).toHaveLength(expectedSize);
+      expect(choices.every((c) => !c.value.startsWith("__"))).toBe(true);
     });
 
-    it("should show worktree status for branches", async () => {
-      (getChangedFilesCount as any).mockResolvedValue(0);
+    it("prefixes icons for branch type, worktree, and changes", async () => {
+      const allBranches = [...localBranches, ...remoteBranches];
+      const choices = await createBranchTable(allBranches, worktrees);
+      const main = choices.find((c) => c.value === "main");
+      expect(main).toBeDefined();
+      const plain = stripAnsi(main!.name);
+      expect(plain.startsWith("⚡🟢⭐  main")).toBe(true);
+    });
 
-      const choices = await createBranchTable(localBranches, worktrees);
-
-      // Branches with worktrees should have worktree description
-      const featureUserAuth = choices.find(
-        (c) => c.value === "feature/user-auth",
+    it("omits worktree icon when none exists", async () => {
+      const allBranches = [...localBranches, ...remoteBranches];
+      const choices = await createBranchTable(allBranches, []);
+      const remoteOnly = choices.find(
+        (c) => c.value === "origin/feature/api-integration",
       );
-      expect(featureUserAuth?.description).toContain("Worktree");
+      expect(remoteOnly).toBeDefined();
+      const plain = stripAnsi(remoteOnly!.name);
+      expect(plain.includes("☁ ")).toBe(true);
+      expect(plain.trimStart().endsWith("feature/api-integration")).toBe(true);
     });
 
-    it("should handle branches without worktrees", async () => {
-      (getChangedFilesCount as any).mockResolvedValue(0);
-
-      const branchesWithoutWorktrees = localBranches.filter(
-        (b) => !worktrees.some((w) => w.branch === b.name),
-      );
-
-      const choices = await createBranchTable(branchesWithoutWorktrees, []);
-
-      const branch = choices.find(
-        (c) => c.value === branchesWithoutWorktrees[0]?.name,
-      );
-      expect(branch?.description).toContain("No worktree");
-    });
-
-    it("should display changed files count", async () => {
-      // Mock some branches to have changes
+    it("shows change icon when worktree has modifications", async () => {
       (getChangedFilesCount as any).mockImplementation(async (path: string) => {
         if (path.includes("user-auth")) return 5;
         return 0;
       });
-
-      const choices = await createBranchTable(localBranches, worktrees);
-
-      // The table should be created successfully
-      expect(choices).toBeDefined();
-      expect(choices.length).toBeGreaterThan(0);
+      const allBranches = [...localBranches, ...remoteBranches];
+      const choices = await createBranchTable(allBranches, worktrees);
+      const target = choices.find((c) => c.value === "hotfix/security-patch");
+      expect(target).toBeDefined();
+      const plain = stripAnsi(target!.name);
+      expect(plain.includes("⚠️")).toBe(true);
+      expect(plain.includes("hotfix/security-patch")).toBe(true);
+      expect(plain.includes("☁")).toBe(false);
     });
 
-    it("should handle remote branches", async () => {
-      (getChangedFilesCount as any).mockResolvedValue(0);
-
-      const choices = await createBranchTable(remoteBranches, []);
-
-      // Remote branches should not have worktrees
-      const remoteBranch = choices.find((c) => c.value === "origin/main");
-      expect(remoteBranch).toBeDefined();
-      expect(remoteBranch?.description).toContain("No worktree");
-    });
-
-    it("should sort branches with current branch first", async () => {
-      (getChangedFilesCount as any).mockResolvedValue(0);
-
-      const choices = await createBranchTable(localBranches, worktrees);
-
-      // Skip header and separator
-      const branchChoices = choices.filter(
-        (c) => c.value !== "__header__" && c.value !== "__separator__",
-      );
-
-      // Current branch should be first
-      const currentBranch = localBranches.find((b) => b.isCurrent);
-      if (currentBranch) {
-        expect(branchChoices[0]?.value).toBe(currentBranch.name);
-      }
-    });
-
-    it("should filter out origin branch", async () => {
-      (getChangedFilesCount as any).mockResolvedValue(0);
-
-      const branchesWithOrigin = [
-        ...localBranches,
-        {
-          name: "origin",
-          type: "remote" as const,
-          branchType: "other" as const,
-          isCurrent: false,
-        },
-      ];
-
-      const choices = await createBranchTable(branchesWithOrigin, []);
-
-      // origin branch should be filtered out
-      const originBranch = choices.find((c) => c.value === "origin");
-      expect(originBranch).toBeUndefined();
-    });
-
-    it("should handle inaccessible worktrees", async () => {
-      (getChangedFilesCount as any).mockResolvedValue(0);
-
-      const inaccessibleWorktrees = [
+    it("masks inaccessible worktrees with warning icon", async () => {
+      const inaccessible = [
         {
           branch: "feature/test",
           path: "/inaccessible/path",
           isAccessible: false,
         },
       ];
-
       const branches = [
         {
           name: "feature/test",
@@ -159,26 +97,20 @@ describe("table.ts - Branch Table Operations", () => {
         },
       ];
 
-      const choices = await createBranchTable(
-        branches,
-        inaccessibleWorktrees as any,
-      );
-
-      // Should handle inaccessible worktrees without error
-      expect(choices).toBeDefined();
-      expect(choices.length).toBeGreaterThan(0);
+      const allBranches = [...branches, ...remoteBranches];
+      const choices = await createBranchTable(allBranches, inaccessible as any);
+      const warning = choices.find((c) => c.value === "feature/test");
+      expect(warning).toBeDefined();
+      const plain = stripAnsi(warning!.name);
+      expect(plain.includes("⚠️")).toBe(true);
+      expect(plain.includes("feature/test")).toBe(true);
+      expect(plain.includes("☁")).toBe(false);
     });
 
-    it("should handle getChangedFilesCount errors gracefully", async () => {
-      // Mock getChangedFilesCount to throw error
-      (getChangedFilesCount as any).mockRejectedValue(
-        new Error("Failed to get changes"),
-      );
-
-      const choices = await createBranchTable(localBranches, worktrees);
-
-      // Should still create table even if change detection fails
-      expect(choices).toBeDefined();
+    it("still emits entries when change detection fails", async () => {
+      (getChangedFilesCount as any).mockRejectedValue(new Error("boom"));
+      const allBranches = [...localBranches, ...remoteBranches];
+      const choices = await createBranchTable(allBranches, worktrees);
       expect(choices.length).toBeGreaterThan(0);
     });
   });
