@@ -307,9 +307,9 @@
 
 ## 参考資料
 
-- プロジェクトリポジトリ: https://github.com/akiojin/claude-worktree
+- プロジェクトリポジトリ: [https://github.com/akiojin/claude-worktree](https://github.com/akiojin/claude-worktree)
 - README.md: 使用方法とインストール手順
-- Git Worktree ドキュメント: https://git-scm.com/docs/git-worktree
-- Git Flow: https://nvie.com/posts/a-successful-git-branching-model/
-- Claude Code: https://claude.ai/code
-- GitHub CLI: https://cli.github.com/
+- Git Worktree ドキュメント: [https://git-scm.com/docs/git-worktree](https://git-scm.com/docs/git-worktree)
+- Git Flow: [https://nvie.com/posts/a-successful-git-branching-model/](https://nvie.com/posts/a-successful-git-branching-model/)
+- Claude Code: [https://claude.ai/code](https://claude.ai/code)
+- GitHub CLI: [https://cli.github.com/](https://cli.github.com/)

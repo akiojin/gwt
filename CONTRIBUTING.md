@@ -21,17 +21,17 @@ git clone https://github.com/YOUR_USERNAME/claude-worktree.git
 cd claude-worktree
 ```
 
-3. 依存関係をインストール
+1. 依存関係をインストール
 ```bash
 bun install
 ```
 
-4. ビルド
+1. ビルド
 ```bash
 bun run build
 ```
 
-5. ローカルで実行
+1. ローカルで実行
 ```bash
 bunx .
 ```

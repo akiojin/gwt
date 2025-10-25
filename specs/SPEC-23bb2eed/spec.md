@@ -119,6 +119,6 @@
 
 ## 参考資料 *(該当する場合)*
 
-- GitHub Actions ワークフロー構文: https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions
-- npm version コマンドドキュメント: https://docs.npmjs.com/cli/version
-- semantic-release ドキュメント: https://semantic-release.gitbook.io/
+- GitHub Actions ワークフロー構文: [https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions](https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions)
+- npm version コマンドドキュメント: [https://docs.npmjs.com/cli/version](https://docs.npmjs.com/cli/version)
+- semantic-release ドキュメント: [https://semantic-release.gitbook.io/](https://semantic-release.gitbook.io/)

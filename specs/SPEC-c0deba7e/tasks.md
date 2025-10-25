@@ -138,8 +138,8 @@ description: "SPEC-c0deba7e実装のためのタスクリスト: AIツール(Cla
   - Claude Code/Codex関連の表記をすべてbunxへ統一
 
 - [x] T307 [P] [US3] ドキュメント内のリンク切れチェック
-  - Bun公式ドキュメント（https://bun.sh/docs）へのリンク確認
-  - bunxコマンドリファレンス（https://bun.sh/docs/cli/bunx）へのリンク確認
+  - Bun公式ドキュメント（[https://bun.sh/docs](https://bun.sh/docs)）へのリンク確認
+  - bunxコマンドリファレンス（[https://bun.sh/docs/cli/bunx](https://bun.sh/docs/cli/bunx)）へのリンク確認
 
 **✅ 完全な機能**: US3完了後、すべてのUI/ドキュメントがbunx表記で統一される
 

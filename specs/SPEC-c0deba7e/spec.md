@@ -116,4 +116,4 @@
 ## 参考資料 *(該当する場合)*
 
 - プロジェクトREADME内のSpec Kitワークフロー説明。
-- Bun公式ドキュメント（https://bun.sh/docs/cli/bunx）。
+- Bun公式ドキュメント（[https://bun.sh/docs/cli/bunx](https://bun.sh/docs/cli/bunx)）。

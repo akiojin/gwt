@@ -221,7 +221,7 @@ npm view @akiojin/claude-worktree versions
    - 対処: Conventional Commits 形式でコミット
 
 2. **GitHub Actions が失敗している**
-   - 確認: https://github.com/akiojin/claude-worktree/actions
+   - 確認: [GitHub Actions 実行履歴](https://github.com/akiojin/claude-worktree/actions)
    - 対処: エラーログを確認して修正
 
 3. **テストまたはビルドが失敗している**

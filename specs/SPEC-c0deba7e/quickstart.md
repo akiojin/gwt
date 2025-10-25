@@ -247,23 +247,23 @@ bunx @anthropic-ai/claude-code@latest
 **症状**: `bunx command not found`エラーが表示される
 
 **解決方法**:
-1. Bunがインストールされているか確認:
+- Bunがインストールされているか確認:
    ```bash
    bun --version
    ```
 
-2. Bunがインストールされていない場合:
+- Bunがインストールされていない場合:
    - macOS/Linux: `curl -fsSL https://bun.sh/install | bash`
    - Windows: `powershell -c "irm bun.sh/install.ps1|iex"`
 
-3. インストール後、ターミナルを再起動
+- インストール後、ターミナルを再起動
 
-4. PATHが正しく設定されているか確認:
+- PATHが正しく設定されているか確認:
    ```bash
    echo $PATH | grep bun
    ```
 
-5. Windows固有: PowerShell実行ポリシーを確認:
+- Windows固有: PowerShell実行ポリシーを確認:
    ```powershell
    Get-ExecutionPolicy
    # RemoteSigned または Unrestricted が推奨
