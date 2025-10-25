@@ -216,16 +216,81 @@ export async function main(): Promise<void> {
 
         // Check if worktree still exists
         if (await worktreeExists(sessionData.lastBranch!)) {
-          const skipPermissions = await confirmSkipPermissions();
+          // Select AI tool
+          const { selectAITool } = await import("./ui/prompts.js");
+          let selectedTool: "claude" | "codex" | null = null;
+
+          // Parse tool arg
+          const argv = process.argv.slice(2);
+          const idx = argv.findIndex(
+            (a) =>
+              a === "--tool" ||
+              (typeof a === "string" && a.startsWith("--tool=")),
+          );
+          let argTool: "claude" | "codex" | undefined;
+          if (idx !== -1) {
+            const tok: string | undefined = argv[idx];
+            if (typeof tok === "string" && tok.includes("=")) {
+              const val = tok.split("=")[1];
+              if (val === "claude" || val === "codex") argTool = val;
+            } else if (
+              typeof argv[idx + 1] === "string" &&
+              (argv[idx + 1] === "claude" || argv[idx + 1] === "codex")
+            ) {
+              argTool = argv[idx + 1] as "claude" | "codex";
+            }
+          }
+
+          const [localClaudeAvail, localCodexAvail] = await Promise.all([
+            isClaudeCodeAvailable().catch(() => false),
+            isCodexAvailable().catch(() => false),
+          ]);
+
+          if (argTool) {
+            selectedTool = argTool;
+            if (selectedTool === "claude" && !localClaudeAvail) {
+              selectedTool = null;
+              printWarning("Requested tool is not available.");
+            } else if (selectedTool === "codex" && !localCodexAvail) {
+              selectedTool = null;
+              printWarning("Codex CLI was not detected.");
+            }
+          }
+
+          if (!selectedTool) {
+            selectedTool = await selectAITool({
+              claudeAvailable: localClaudeAvail,
+              codexAvailable: localCodexAvail,
+            });
+          }
+
+          if (!selectedTool) {
+            printInfo("No AI tool selected.");
+            return;
+          }
+
+          const executionConfig = await selectClaudeExecutionMode(
+            selectedTool === "claude" ? "Claude Code" : "Codex CLI",
+          );
+          if (!executionConfig) return;
+          const { mode, skipPermissions } = executionConfig;
 
           try {
-            await launchClaudeCode(sessionData.lastWorktreePath, {
-              skipPermissions,
-            });
-            await handlePostClaudeChanges(sessionData.lastWorktreePath);
+            if (selectedTool === "claude") {
+              await launchClaudeCode(sessionData.lastWorktreePath, {
+                mode,
+                skipPermissions,
+              });
+              await handlePostClaudeChanges(sessionData.lastWorktreePath);
+            } else {
+              await launchCodexCLI(sessionData.lastWorktreePath, {
+                mode,
+                bypassApprovals: skipPermissions,
+              });
+            }
           } catch (error) {
-            if (error instanceof ClaudeError) {
-              printError(`Failed to launch Claude Code: ${error.message}`);
+            if (error instanceof ClaudeError || error instanceof CodexError) {
+              printError(error.message);
             } else {
               printError(
                 `Unexpected error: ${error instanceof Error ? error.message : String(error)}`,
@@ -260,16 +325,81 @@ export async function main(): Promise<void> {
 
           // Check if worktree still exists
           if (await worktreeExists(selectedSession.lastBranch!)) {
-            const skipPermissions = await confirmSkipPermissions();
+            // Select AI tool
+            const { selectAITool } = await import("./ui/prompts.js");
+            let selectedTool: "claude" | "codex" | null = null;
+
+            // Parse tool arg
+            const argv = process.argv.slice(2);
+            const idx = argv.findIndex(
+              (a) =>
+                a === "--tool" ||
+                (typeof a === "string" && a.startsWith("--tool=")),
+            );
+            let argTool: "claude" | "codex" | undefined;
+            if (idx !== -1) {
+              const tok: string | undefined = argv[idx];
+              if (typeof tok === "string" && tok.includes("=")) {
+                const val = tok.split("=")[1];
+                if (val === "claude" || val === "codex") argTool = val;
+              } else if (
+                typeof argv[idx + 1] === "string" &&
+                (argv[idx + 1] === "claude" || argv[idx + 1] === "codex")
+              ) {
+                argTool = argv[idx + 1] as "claude" | "codex";
+              }
+            }
+
+            const [localClaudeAvail, localCodexAvail] = await Promise.all([
+              isClaudeCodeAvailable().catch(() => false),
+              isCodexAvailable().catch(() => false),
+            ]);
+
+            if (argTool) {
+              selectedTool = argTool;
+              if (selectedTool === "claude" && !localClaudeAvail) {
+                selectedTool = null;
+                printWarning("Requested tool is not available.");
+              } else if (selectedTool === "codex" && !localCodexAvail) {
+                selectedTool = null;
+                printWarning("Codex CLI was not detected.");
+              }
+            }
+
+            if (!selectedTool) {
+              selectedTool = await selectAITool({
+                claudeAvailable: localClaudeAvail,
+                codexAvailable: localCodexAvail,
+              });
+            }
+
+            if (!selectedTool) {
+              printInfo("No AI tool selected.");
+              return;
+            }
+
+            const executionConfig = await selectClaudeExecutionMode(
+              selectedTool === "claude" ? "Claude Code" : "Codex CLI",
+            );
+            if (!executionConfig) return;
+            const { mode, skipPermissions } = executionConfig;
 
             try {
-              await launchClaudeCode(selectedSession.lastWorktreePath, {
-                skipPermissions,
-              });
-              await handlePostClaudeChanges(selectedSession.lastWorktreePath);
+              if (selectedTool === "claude") {
+                await launchClaudeCode(selectedSession.lastWorktreePath, {
+                  mode,
+                  skipPermissions,
+                });
+                await handlePostClaudeChanges(selectedSession.lastWorktreePath);
+              } else {
+                await launchCodexCLI(selectedSession.lastWorktreePath, {
+                  mode,
+                  bypassApprovals: skipPermissions,
+                });
+              }
             } catch (error) {
-              if (error instanceof ClaudeError) {
-                printError(`Failed to launch Claude Code: ${error.message}`);
+              if (error instanceof ClaudeError || error instanceof CodexError) {
+                printError(error.message);
               } else {
                 printError(
                   `Unexpected error: ${error instanceof Error ? error.message : String(error)}`,
@@ -698,46 +828,118 @@ async function handleCreateNewBranch(
       }
     }
 
-    // Check if Claude Code is available before launching
-    if (await isClaudeCodeAvailable()) {
-      // Ask about execution mode
-      const executionConfig = await selectClaudeExecutionMode();
-      if (!executionConfig) {
-        // User cancelled, return to main menu
-        return true;
+    // Select and launch AI tool
+    const { selectAITool } = await import("./ui/prompts.js");
+    let selectedTool: "claude" | "codex" | null = null;
+
+    // Parse tool arg
+    const argv = process.argv.slice(2);
+    const idx = argv.findIndex(
+      (a) =>
+        a === "--tool" ||
+        (typeof a === "string" && a.startsWith("--tool=")),
+    );
+    let argTool: "claude" | "codex" | undefined;
+    if (idx !== -1) {
+      const tok: string | undefined = argv[idx];
+      if (typeof tok === "string" && tok.includes("=")) {
+        const val = tok.split("=")[1];
+        if (val === "claude" || val === "codex") argTool = val;
+      } else if (
+        typeof argv[idx + 1] === "string" &&
+        (argv[idx + 1] === "claude" || argv[idx + 1] === "codex")
+      ) {
+        argTool = argv[idx + 1] as "claude" | "codex";
       }
-      const { mode, skipPermissions } = executionConfig;
+    }
 
-      try {
-        // Save session data before launching Claude Code
-        const sessionData: SessionData = {
-          lastWorktreePath: worktreePath,
-          lastBranch: targetBranch,
-          timestamp: Date.now(),
-          repositoryRoot: repoRoot,
-        };
-        await saveSession(sessionData);
+    const [localClaudeAvail, localCodexAvail] = await Promise.all([
+      isClaudeCodeAvailable().catch(() => false),
+      isCodexAvailable().catch(() => false),
+    ]);
 
+    if (argTool) {
+      selectedTool = argTool;
+      if (selectedTool === "claude" && !localClaudeAvail) {
+        selectedTool = null;
+        printWarning("Requested tool is not available.");
+      } else if (selectedTool === "codex" && !localCodexAvail) {
+        selectedTool = null;
+        printWarning(
+          "Codex CLI was not detected. Install Bun and Codex before selecting it.",
+        );
+      }
+    }
+
+    if (!selectedTool) {
+      selectedTool = await selectAITool({
+        claudeAvailable: localClaudeAvail,
+        codexAvailable: localCodexAvail,
+      });
+    }
+
+    if (!selectedTool) {
+      printInfo("No AI tool selected. Returning to menu.");
+      return true;
+    }
+
+    if (!localClaudeAvail && !localCodexAvail) {
+      printError(
+        "No AI tools are available in PATH (Claude Code or Codex CLI).",
+      );
+      await confirmContinue("Press enter to continue...");
+      return true;
+    }
+
+    if (selectedTool === "claude" && !localClaudeAvail) {
+      printError(
+        "Claude Code CLI not found in PATH. Install it before selecting this option.",
+      );
+      await confirmContinue("Press enter to continue...");
+      return true;
+    }
+
+    if (selectedTool === "codex" && !localCodexAvail) {
+      printError(
+        "Codex CLI not detected via bunx. Install Bun and the Codex CLI before selecting this option.",
+      );
+      await confirmContinue("Press enter to continue...");
+      return true;
+    }
+
+    const executionConfig = await selectClaudeExecutionMode(
+      selectedTool === "claude" ? "Claude Code" : "Codex CLI",
+    );
+    if (!executionConfig) return true;
+    const { mode, skipPermissions } = executionConfig;
+
+    try {
+      // Save session data before launching
+      const sessionData: SessionData = {
+        lastWorktreePath: worktreePath,
+        lastBranch: targetBranch,
+        timestamp: Date.now(),
+        repositoryRoot: repoRoot,
+      };
+      await saveSession(sessionData);
+
+      if (selectedTool === "claude") {
         await launchClaudeCode(worktreePath, { mode, skipPermissions });
-
-        // Check for changes after Claude Code exits
         await handlePostClaudeChanges(worktreePath);
-      } catch (error) {
-        if (error instanceof ClaudeError) {
-          printError(`Failed to launch Claude Code: ${error.message}`);
-          if (error.message.includes("command not found")) {
-            printInfo("Install Claude Code CLI: https://claude.ai/code");
-          }
-        } else {
-          printError(
-            `Unexpected error: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        }
-        await confirmContinue("Press enter to continue...");
+      } else {
+        await launchCodexCLI(worktreePath, {
+          mode,
+          bypassApprovals: skipPermissions,
+        });
       }
-    } else {
-      printError("Claude Code is not available. Please install it first.");
-      printInfo("Install Claude Code CLI: https://claude.ai/code");
+    } catch (error) {
+      if (error instanceof ClaudeError || error instanceof CodexError) {
+        printError(error.message);
+      } else {
+        printError(
+          `Unexpected error: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
       await confirmContinue("Press enter to continue...");
     }
 
