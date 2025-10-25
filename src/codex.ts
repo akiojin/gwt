@@ -4,6 +4,24 @@ import { platform } from 'os';
 import { existsSync } from 'fs';
 
 const CODEX_CLI_PACKAGE = '@openai/codex@latest';
+const DEFAULT_CODEX_ARGS = [
+  '--search',
+  '--model="gpt-5-codex"',
+  '--sandbox',
+  'workspace-write',
+  '-c',
+  'model_reasoning_effort="high"',
+  '-c',
+  'model_reasoning_summaries="detailed"',
+  '-c',
+  'sandbox_workspace_write.network_access=true',
+  '-c',
+  'shell_environment_policy.inherit=all',
+  '-c',
+  'shell_environment_policy.ignore_default_excludes=true',
+  '-c',
+  'shell_environment_policy.experimental_use_profile=true'
+];
 
 export class CodexError extends Error {
   constructor(message: string, public cause?: unknown) {
@@ -54,7 +72,7 @@ export async function launchCodexCLI(
       args.push(...options.extraArgs);
     }
 
-    args.push('--search');
+    args.push(...DEFAULT_CODEX_ARGS);
 
     await execa('bunx', [CODEX_CLI_PACKAGE, ...args], {
       cwd: worktreePath,
