@@ -377,7 +377,7 @@ git.deleteBranch() → Delete Branch
 
 ### Requirements
 
-- Node.js 18+
+- Bun 1.0.0+
 - Git 2.25+
 - GitHub CLI (PRクリーンアップ機能使用時)
 - Claude Code または Codex CLI

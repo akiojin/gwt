@@ -12,13 +12,14 @@
 ### 必須
 
 - **Git** 2.5+ (worktree機能サポート)
-- **Node.js** 18.0.0+または**Bun** 1.0.0+
+- **Bun** 1.0.0+
 - **AIツール**: 以下のいずれか1つ以上
   - Claude Code ([https://claude.ai/code](https://claude.ai/code))
   - Codex CLI
 
 ### オプション
 
+- **Node.js** 18.0.0+（開発ツール利用時）
 - **GitHub CLI** (`gh`) - PR自動クリーンアップ機能に必要
 
 ## インストール
@@ -26,21 +27,13 @@
 ### グローバルインストール（推奨）
 
 ```bash
-# bunを使用
 bun add -g @akiojin/claude-worktree
-
-# npmを使用
-npm install -g @akiojin/claude-worktree
 ```
 
 ### 一回限りの実行
 
 ```bash
-# bunxで実行
 bunx @akiojin/claude-worktree
-
-# npxで実行
-npx @akiojin/claude-worktree
 ```
 
 ## 基本的な使い方

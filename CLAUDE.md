@@ -67,4 +67,4 @@
 
 - worktree起動時にClaude CodeとCodex CLIを選択可能にする機能を計画中
 - 詳細: `/specs/001-codex-cli-worktree/`
-- 技術スタック: Node.js 18+, TypeScript, inquirer
+- 技術スタック: Bun 1.0+, TypeScript, inquirer（必要に応じてNode.js 18+を併用）
