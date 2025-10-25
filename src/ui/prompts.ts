@@ -1359,8 +1359,8 @@ export async function selectAITool(options: {
   });
 
   const claudeDescription = claudeAvailable
-    ? 'Use the Claude Code CLI'
-    : 'CLI not detected (選択するとエラーになる可能性があります)';
+    ? 'Run via bunx @anthropic-ai/claude-code@latest'
+    : 'bunx 経由で実行（事前チェックなし）';
   const codexDescription = codexAvailable
     ? 'Run via bunx @openai/codex@latest'
     : 'bunx 経由で実行（事前チェックなし）';
