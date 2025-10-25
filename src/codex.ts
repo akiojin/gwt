@@ -32,12 +32,12 @@ export async function launchCodexCLI(
 
     switch (options.mode) {
       case 'continue':
-        args.push('--continue');
-        console.log(chalk.cyan('   ⏭️  Continue mode'));
+        args.push('resume', '--last');
+        console.log(chalk.cyan('   ⏭️  Resuming last Codex session'));
         break;
       case 'resume':
-        args.push('--resume');
-        console.log(chalk.cyan('   🔄 Resume mode'));
+        args.push('resume');
+        console.log(chalk.cyan('   🔄 Resume command'));
         break;
       case 'normal':
       default:
@@ -56,20 +56,20 @@ export async function launchCodexCLI(
 
     args.push('--search');
 
-    await execa('npx', ['--yes', CODEX_CLI_PACKAGE, ...args], {
+    await execa('bunx', [CODEX_CLI_PACKAGE, ...args], {
       cwd: worktreePath,
       stdio: 'inherit',
       shell: true
     });
   } catch (error: any) {
     const errorMessage = error.code === 'ENOENT'
-      ? 'npx command not found. Please ensure Node.js/npm is installed so Codex CLI can run via npx.'
+      ? 'bunx command not found. Please ensure Bun is installed so Codex CLI can run via bunx.'
       : `Failed to launch Codex CLI: ${error.message || 'Unknown error'}`;
 
     if (platform() === 'win32') {
       console.error(chalk.red('\n💡 Windows troubleshooting tips:'));
-      console.error(chalk.yellow('   1. Ensure Node.js/npm がインストールされ npx が利用可能か確認'));
-      console.error(chalk.yellow('   2. "npx @openai/codex@latest -- --help" を実行してセットアップを確認'));
+      console.error(chalk.yellow('   1. Bun がインストールされ bunx が利用可能か確認'));
+      console.error(chalk.yellow('   2. "bunx @openai/codex@latest -- --help" を実行してセットアップを確認'));
       console.error(chalk.yellow('   3. ターミナルやIDEを再起動して PATH を更新'));
     }
 
@@ -79,11 +79,11 @@ export async function launchCodexCLI(
 
 export async function isCodexAvailable(): Promise<boolean> {
   try {
-    await execa('npx', ['--yes', CODEX_CLI_PACKAGE, '--help'], { shell: true });
+    await execa('bunx', [CODEX_CLI_PACKAGE, '--help'], { shell: true });
     return true;
   } catch (error: any) {
     if (error.code === 'ENOENT') {
-      console.error(chalk.yellow('\n⚠️  npx コマンドが見つかりません'));
+      console.error(chalk.yellow('\n⚠️  bunx コマンドが見つかりません'));
     }
     return false;
   }

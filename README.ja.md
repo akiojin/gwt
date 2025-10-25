@@ -63,8 +63,9 @@ claude-worktree --tool claude
 claude-worktree --tool codex
 
 # ツール固有オプションを渡す（"--" 以降はツールへパススルー）
-claude-worktree --tool claude -- -r   # Claude Code を resume
-claude-worktree --tool codex -- --continue  # Codex CLI を continue
+claude-worktree --tool claude -- -r      # Claude Code を resume
+claude-worktree --tool codex -- resume --last  # Codex CLI の直近セッションを再開
+claude-worktree --tool codex -- resume <id>  # Codex CLI の特定セッションを再開
 ```
 
 ツールは以下のオプションを持つ対話型インターフェースを提供します:
