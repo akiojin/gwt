@@ -1,55 +1,60 @@
-import path from 'path';
-import { fileURLToPath } from 'url';
-import { access } from 'fs/promises';
-
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { access, readFile } from "fs/promises";
+import { existsSync } from "fs";
 export function getCurrentDirname(): string {
   return path.dirname(fileURLToPath(import.meta.url));
 }
 
-export async function pathExists(filePath: string): Promise<boolean> {
-  try {
-    await access(filePath);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-export function sanitizePath(input: string): string {
-  return input.replace(/[^a-zA-Z0-9-_./]/g, '-');
-}
-
-export function formatBranchName(type: string, name: string): string {
-  return `${type}/${name}`;
-}
-
 export class AppError extends Error {
-  constructor(message: string, public cause?: unknown) {
+  constructor(
+    message: string,
+    public cause?: unknown,
+  ) {
     super(message);
-    this.name = 'AppError';
+    this.name = "AppError";
   }
 }
 
 export function setupExitHandlers(): void {
   // Handle Ctrl+C gracefully
-  process.on('SIGINT', () => {
-    console.log('\n\n👋 Goodbye!');
+  process.on("SIGINT", () => {
+    console.log("\n\n👋 Goodbye!");
     process.exit(0);
   });
 
   // Handle other termination signals
-  process.on('SIGTERM', () => {
-    console.log('\n\n👋 Goodbye!');
+  process.on("SIGTERM", () => {
+    console.log("\n\n👋 Goodbye!");
     process.exit(0);
   });
 }
 
 export function handleUserCancel(error: unknown): never {
-  if (error && typeof error === 'object' && 'name' in error) {
-    if (error.name === 'ExitPromptError' || error.name === 'AbortPromptError') {
-      console.log('\n\n👋 Operation cancelled. Goodbye!');
+  if (error && typeof error === "object" && "name" in error) {
+    if (error.name === "ExitPromptError" || error.name === "AbortPromptError") {
+      console.log("\n\n👋 Operation cancelled. Goodbye!");
       process.exit(0);
     }
   }
   throw error;
+}
+
+interface PackageJson {
+  version: string;
+  name?: string;
+}
+
+export async function getPackageVersion(): Promise<string | null> {
+  try {
+    const currentDir = getCurrentDirname();
+    const packageJsonPath = path.resolve(currentDir, "..", "package.json");
+
+    const packageJsonContent = await readFile(packageJsonPath, "utf-8");
+    const packageJson: PackageJson = JSON.parse(packageJsonContent);
+
+    return packageJson.version || null;
+  } catch {
+    return null;
+  }
 }

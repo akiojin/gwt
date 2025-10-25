@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+
+# Testing
+coverage/
+
+# Generated files
+*.d.ts
+*.min.js
+
+# Configuration files
+*.config.js
+*.config.ts
+
+# Spec Kit output
+specs/
+
+# External tools
+.serena/
+.claude/

@@ -1,171 +1,178 @@
-import chalk from 'chalk';
-import stringWidth from 'string-width';
-import { BranchInfo } from './types.js';
-import { WorktreeInfo } from '../worktree.js';
-import { getChangedFilesCount } from '../git.js';
+import stringWidth from "string-width";
+import { BranchInfo } from "./types.js";
+import { WorktreeInfo } from "../worktree.js";
+import { getChangedFilesCount } from "../git.js";
 
-export interface TableBranchRow {
-  branchName: string;
-  type: string;
-  worktree: string;
-  status: string;
-  path: string;
-  value: string;
+function stripAnsi(value: string): string {
+  // eslint-disable-next-line no-control-regex
+  return value.replace(/\u001B\[[0-9;]*m/g, "");
+}
+
+function formatIconSlot(icon?: string): string {
+  return padEndUnicode(icon ?? "", 2);
+}
+
+function getWorktreeIcon(worktree?: WorktreeInfo): string | undefined {
+  if (!worktree) {
+    return undefined;
+  }
+  if (worktree.isAccessible === false) {
+    return "🟠";
+  }
+  return "🟢";
+}
+
+async function getChangeIcon(
+  branch: BranchInfo,
+  worktree?: WorktreeInfo,
+): Promise<string | undefined> {
+  if (branch.isCurrent) {
+    return "⭐";
+  }
+  if (!worktree) {
+    return undefined;
+  }
+  if (worktree.isAccessible === false) {
+    return "⚠️";
+  }
+  try {
+    const changedFiles = await getChangedFilesCount(worktree.path);
+    if (changedFiles > 0) {
+      return "✏️";
+    }
+  } catch {
+    return "⚠️";
+  }
+  return undefined;
+}
+
+function normalizeBranchName(branch: BranchInfo): string {
+  if (branch.type === "remote") {
+    const slashIndex = branch.name.indexOf("/");
+    if (slashIndex === -1) {
+      return branch.name;
+    }
+    return branch.name.slice(slashIndex + 1);
+  }
+  return branch.name;
 }
 
 export async function createBranchTable(
   branches: BranchInfo[],
-  worktrees: WorktreeInfo[]
+  worktrees: WorktreeInfo[],
 ): Promise<Array<{ name: string; value: string; description?: string }>> {
-  
-  // Create worktree lookup map (excluding main repository)
   const worktreeMap = new Map(
-    worktrees
-      .filter(w => w.path !== process.cwd()) // Exclude main repository
-      .map(w => [w.branch, w])
+    worktrees.filter((w) => w.path !== process.cwd()).map((w) => [w.branch, w]),
   );
 
-  const choices: Array<{ name: string; value: string; description?: string }> = [];
+  const localBaseNames = new Set(
+    branches
+      .filter((branch) => branch.type === "local")
+      .map((branch) => normalizeBranchName(branch)),
+  );
+  const remoteBaseNames = new Set(
+    branches
+      .filter((branch) => branch.type === "remote")
+      .map((branch) => normalizeBranchName(branch)),
+  );
 
-  // Filter out "origin" branch and sort: current first, then by type
-  const filteredBranches = branches.filter(b => b.name !== 'origin');
+  const filteredBranches = branches.filter((b) => b.name !== "origin");
   const sortedBranches = [...filteredBranches].sort((a, b) => {
     if (a.isCurrent && !b.isCurrent) return -1;
     if (!a.isCurrent && b.isCurrent) return 1;
-    if (a.branchType === 'main' && b.branchType !== 'main') return -1;
-    if (a.branchType !== 'main' && b.branchType === 'main') return 1;
+    if (a.branchType === "main" && b.branchType !== "main") return -1;
+    if (a.branchType !== "main" && b.branchType === "main") return 1;
     return a.name.localeCompare(b.name);
   });
 
-  for (const branch of sortedBranches) {
-    const worktree = worktreeMap.get(branch.name);
-    const hasWorktree = !!worktree;
-    
-    // Format branch name with indicators
-    let branchDisplay = branch.name;
-    if (branch.isCurrent) {
-      branchDisplay = `◉ ${branch.name}`;
-    }
-    
-    // Format type with colors and icons
-    const typeIcon = getBranchTypeIcon(branch.branchType);
-    const typeText = `${typeIcon} ${branch.branchType}`;
-    
-    // Format worktree status
-    const worktreeStatus = hasWorktree ? chalk.green('●') : chalk.gray('○');
-    
-    // Format status with colors
-    let statusText = '';
-    if (branch.isCurrent) {
-      statusText = chalk.bgGreen.black(' CURRENT ');
-    } else if (branch.type === 'remote') {
-      statusText = chalk.bgBlue.white(' REMOTE ');
-    } else {
-      statusText = chalk.bgGray.white(' LOCAL ');
-    }
-    
-    // Get changes count if worktree exists
-    let changesText = '';
-    if (hasWorktree && worktree) {
-      try {
-        const changedFiles = await getChangedFilesCount(worktree.path);
-        if (changedFiles > 0) {
-          changesText = chalk.yellow(`✎ ${changedFiles}`);
-        } else {
-          changesText = chalk.gray('─');
-        }
-      } catch {
-        changesText = chalk.gray('─');
-      }
-    } else {
-      changesText = chalk.gray('─');
-    }
-    
-    // Create table-like display string with modern separators
-    const displayName = [
-      padEndUnicode(branchDisplay, 32),
-      padEndUnicode(typeText, 14),
-      padEndUnicode(worktreeStatus, 10),
-      padEndUnicode(statusText, 12),
-      changesText // No padding for the last column
-    ].join(' ┃ ');
+  const lines: Array<{
+    raw: string;
+    colored: string;
+    value: string;
+    description?: string;
+  }> = [];
 
-    choices.push({
-      name: displayName,
+  for (const branch of sortedBranches) {
+    const normalizedName = normalizeBranchName(branch);
+
+    const hasLocal = localBaseNames.has(normalizedName);
+    const hasRemote = remoteBaseNames.has(normalizedName);
+
+    if (branch.type === "remote" && hasLocal) {
+      continue;
+    }
+
+    const worktree = worktreeMap.get(branch.name);
+    const worktreeIcon = getWorktreeIcon(worktree);
+    const changeIcon = await getChangeIcon(branch, worktree);
+
+    const branchIcon = getBranchTypeIcon(branch, branch.branchType);
+    const iconCluster =
+      `${formatIconSlot(branchIcon)}` +
+      `${formatIconSlot(worktreeIcon)}` +
+      `${formatIconSlot(changeIcon)}`;
+
+    const locationSegment = hasRemote && !hasLocal ? "☁ " : "  ";
+    const displayName = branch.type === "remote" ? normalizedName : branch.name;
+    const baseLine = `${iconCluster}${locationSegment}${displayName}`;
+
+    lines.push({
+      raw: baseLine,
+      colored: baseLine,
       value: branch.name,
-      description: hasWorktree ? `Worktree: ${worktree.path}` : 'No worktree'
+      description: worktree ? `Worktree: ${worktree.path}` : "No worktree",
     });
   }
 
-  // Add separator with Actions header
-  const totalWidth = 88; // Approximate width of the table
-  choices.push({
-    name: '',
-    value: '__separator_space__',
-    description: ''
-  });
-  
-  choices.push({
-    name: chalk.magenta.bold('╔' + '═'.repeat(29) + ' Actions ' + '═'.repeat(Math.max(0, totalWidth - 39)) + '╗'),
-    value: '__actions_header__',
-    description: ''
-  });
-  
-  choices.push({
-    name: '',
-    value: '__separator_space2__',
-    description: ''
-  });
+  const maxWidth = lines.reduce((max, line) => {
+    return Math.max(max, stringWidth(stripAnsi(line.raw)));
+  }, 0);
 
-  // Add special choices with improved formatting
-  choices.push({
-    name: chalk.cyan('➕ Create new branch'),
-    value: '__create_new__',
-    description: 'Create a new feature, hotfix, or release branch'
+  return lines.map((line) => {
+    const padCount = maxWidth - stringWidth(stripAnsi(line.raw));
+    const padded = line.raw + " ".repeat(Math.max(0, padCount));
+    const entry: { name: string; value: string; description?: string } = {
+      name: padded,
+      value: line.value,
+    };
+    if (line.description) {
+      entry.description = line.description;
+    }
+    return entry;
   });
-
-  choices.push({
-    name: chalk.magenta('📂 Manage worktrees'),
-    value: '__manage_worktrees__',
-    description: 'View and manage existing worktrees'
-  });
-
-  choices.push({
-    name: chalk.yellow('🧹 Clean up merged PRs'),
-    value: '__cleanup_prs__',
-    description: 'Remove worktrees and branches for merged pull requests'
-  });
-
-  choices.push({
-    name: chalk.red('◈ Exit'),
-    value: '__exit__',
-    description: 'Exit the application'
-  });
-
-  return choices;
 }
 
-function getBranchTypeIcon(branchType: BranchInfo['branchType']): string {
+function getBranchTypeIcon(
+  branch: BranchInfo,
+  branchType: BranchInfo["branchType"],
+): string {
   switch (branchType) {
-    case 'main':
-      return '⚡';
-    case 'develop':
-      return '🔧';
-    case 'feature':
-      return '✨';
-    case 'hotfix':
-      return '🔥';
-    case 'release':
-      return '🚀';
+    case "main":
+      return "⚡";
+    case "develop":
+      return "⚡";
+    case "feature":
+      return "✨";
+    case "hotfix":
+      return "🔥";
+    case "release":
+      return "🚀";
     default:
-      return '📌';
+      if (branch.type === "remote") {
+        return "🌿";
+      }
+      return "📌";
   }
 }
 
-function padEndUnicode(str: string, targetLength: number, padString: string = ' '): string {
+function padEndUnicode(
+  str: string,
+  targetLength: number,
+  padString = " ",
+): string {
   const strWidth = stringWidth(str);
   if (strWidth >= targetLength) return str;
-  
+
   const padWidth = targetLength - strWidth;
   return str + padString.repeat(Math.max(0, padWidth));
 }

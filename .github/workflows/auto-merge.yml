@@ -1,0 +1,75 @@
+name: Auto Merge
+
+on:
+  workflow_run:
+    workflows: ["Test", "Lint"]
+    types:
+      - completed
+
+jobs:
+  auto-merge:
+    name: Auto Merge PR
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'pull_request'
+
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Get PR number
+        id: pr
+        run: |
+          PR_NUMBER=$(gh pr list --head ${{ github.event.workflow_run.head_branch }} --json number --jq '.[0].number')
+          if [ -z "$PR_NUMBER" ]; then
+            echo "No PR found for branch ${{ github.event.workflow_run.head_branch }}"
+            exit 0
+          fi
+          echo "number=$PR_NUMBER" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Check merge conditions
+        if: steps.pr.outputs.number
+        id: check
+        run: |
+          PR_NUMBER=${{ steps.pr.outputs.number }}
+          PR_DATA=$(gh pr view $PR_NUMBER --json id,mergeable,mergeStateStatus,isDraft)
+
+          MERGEABLE=$(echo "$PR_DATA" | jq -r '.mergeable')
+          MERGE_STATE=$(echo "$PR_DATA" | jq -r '.mergeStateStatus')
+          IS_DRAFT=$(echo "$PR_DATA" | jq -r '.isDraft')
+          PR_ID=$(echo "$PR_DATA" | jq -r '.id')
+
+          if [ "$IS_DRAFT" = "true" ]; then
+            echo "PR is a draft, skipping"
+            exit 0
+          fi
+
+          if [ "$MERGEABLE" != "MERGEABLE" ]; then
+            echo "PR has conflicts, skipping"
+            exit 0
+          fi
+
+          if [ "$MERGE_STATE" != "CLEAN" ] && [ "$MERGE_STATE" != "UNSTABLE" ]; then
+            echo "Merge state is not clean: $MERGE_STATE"
+            exit 0
+          fi
+
+          echo "ready=true" >> $GITHUB_OUTPUT
+          echo "id=$PR_ID" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Merge PR
+        if: steps.check.outputs.ready == 'true'
+        run: |
+          PR_NUMBER=${{ steps.pr.outputs.number }}
+          PR_ID=${{ steps.check.outputs.id }}
+          echo "Auto-merging PR #$PR_NUMBER"
+          gh api graphql -f query='mutation($pr:ID!){ mergePullRequest(input:{pullRequestId:$pr, mergeMethod:MERGE}) { pullRequest { number }}}' -f pr="$PR_ID"
+        env:
+          GH_TOKEN: ${{ github.token }}

@@ -1,7 +1,7 @@
 export interface BranchInfo {
   name: string;
-  type: 'local' | 'remote';
-  branchType: 'feature' | 'hotfix' | 'release' | 'main' | 'develop' | 'other';
+  type: "local" | "remote";
+  branchType: "feature" | "hotfix" | "release" | "main" | "develop" | "other";
   isCurrent: boolean;
   description?: string;
 }
@@ -16,12 +16,12 @@ export interface BranchChoice {
 export interface EnhancedBranchChoice extends BranchChoice {
   hasWorktree: boolean;
   worktreePath?: string;
-  branchType: BranchInfo['branchType'];
-  branchDataType: 'local' | 'remote';
+  branchType: BranchInfo["branchType"];
+  branchDataType: "local" | "remote";
   isCurrent: boolean;
 }
 
-export type BranchType = 'feature' | 'hotfix' | 'release';
+export type BranchType = "feature" | "hotfix" | "release";
 
 export interface NewBranchConfig {
   type: BranchType;
@@ -44,8 +44,6 @@ export interface CleanupResult {
   worktreeRemoved: boolean;
 }
 
-export type ActionType = 'work_existing' | 'create_new' | 'checkout_remote' | 'manage_worktrees';
-
 export interface BranchGroup {
   title: string;
   branches: EnhancedBranchChoice[];
@@ -55,7 +53,7 @@ export interface BranchGroup {
 export interface UIFilter {
   showWithWorktree: boolean;
   showWithoutWorktree: boolean;
-  branchTypes: BranchInfo['branchType'][];
+  branchTypes: BranchInfo["branchType"][];
   showLocal: boolean;
   showRemote: boolean;
 }
@@ -63,7 +61,7 @@ export interface UIFilter {
 export interface PullRequest {
   number: number;
   title: string;
-  state: 'OPEN' | 'CLOSED' | 'MERGED';
+  state: "OPEN" | "CLOSED" | "MERGED";
   branch: string;
   mergedAt: string | null;
   author: string;
@@ -84,9 +82,29 @@ export interface WorktreeWithPR {
 }
 
 export interface CleanupTarget {
-  worktreePath: string;
+  worktreePath: string | null; // null for local branch only cleanup
   branch: string;
   pullRequest: MergedPullRequest;
   hasUncommittedChanges: boolean;
   hasUnpushedCommits: boolean;
+  cleanupType: "worktree-and-branch" | "branch-only";
+  hasRemoteBranch?: boolean;
+  isAccessible?: boolean;
+  invalidReason?: string;
+}
+
+export interface GitHubPRAuthor {
+  id?: string;
+  is_bot?: boolean;
+  login?: string;
+  name?: string;
+}
+
+export interface GitHubPRResponse {
+  number: number;
+  title: string;
+  state: string;
+  headRefName: string;
+  mergedAt: string | null;
+  author: GitHubPRAuthor | null;
 }

@@ -1,9 +1,14 @@
 .claude/settings.local.json
 .docker/bash_history
 
+# Serena MCP tool cache directory
+.serena/
+
 # Dependencies
 node_modules/
+node-compile-cache/
 npm-debug.log*
+package-lock.json
 yarn-debug.log*
 yarn-error.log*
 

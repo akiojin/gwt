@@ -4,14 +4,18 @@
       "type": "sse",
       "url": "https://mcp.context7.com/sse"
     },
-    "google-search": {
+    "serena": {
       "type": "stdio",
-      "command": "npx",
+      "command": "uvx",
       "args": [
-        "-y",
-        "mcp-gemini-google-search"
-      ],
-      "env": {}
+        "--from",
+        "git+https://github.com/oraios/serena",
+        "serena-mcp-server",
+        "--context",
+        "ide-assistant",
+        "--project",
+        "$(pwd)"
+      ]
     }
   }
 }

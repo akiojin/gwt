@@ -1,38 +1,172 @@
-import { execa } from 'execa';
-import chalk from 'chalk';
+import { execa } from "execa";
+import chalk from "chalk";
+import { platform } from "os";
+import { existsSync } from "fs";
 
+const CLAUDE_CLI_PACKAGE = "@anthropic-ai/claude-code@latest";
 export class ClaudeError extends Error {
-  constructor(message: string, public cause?: unknown) {
+  constructor(
+    message: string,
+    public cause?: unknown,
+  ) {
     super(message);
-    this.name = 'ClaudeError';
+    this.name = "ClaudeError";
   }
 }
 
-export async function launchClaudeCode(worktreePath: string, skipPermissions: boolean = false): Promise<void> {
+export async function launchClaudeCode(
+  worktreePath: string,
+  options: {
+    skipPermissions?: boolean;
+    mode?: "normal" | "continue" | "resume";
+    extraArgs?: string[];
+  } = {},
+): Promise<void> {
   try {
-    console.log(chalk.blue('🚀 Launching Claude Code...'));
-    console.log(chalk.gray(`   Working directory: ${worktreePath}`));
-    
-    const args: string[] = [];
-    if (skipPermissions) {
-      args.push('--dangerously-skip-permissions');
-      console.log(chalk.yellow('   ⚠️  Skipping permissions check'));
+    // Check if the worktree path exists
+    if (!existsSync(worktreePath)) {
+      throw new Error(`Worktree path does not exist: ${worktreePath}`);
     }
-    
-    await execa('claude', args, {
+
+    console.log(chalk.blue("🚀 Launching Claude Code..."));
+    console.log(chalk.gray(`   Working directory: ${worktreePath}`));
+
+    const args: string[] = [];
+
+    // Handle execution mode
+    switch (options.mode) {
+      case "continue":
+        args.push("-c");
+        console.log(chalk.cyan("   📱 Continuing most recent conversation"));
+        break;
+      case "resume":
+        // Use our custom conversation selection instead of claude -r
+        console.log(chalk.cyan("   🔄 Selecting conversation to resume"));
+
+        try {
+          const { selectClaudeConversation } = await import("./ui/prompts.js");
+          const selectedConversation =
+            await selectClaudeConversation(worktreePath);
+
+          if (selectedConversation) {
+            console.log(
+              chalk.green(`   ✨ Resuming: ${selectedConversation.title}`),
+            );
+
+            // Use specific session ID if available
+            if (selectedConversation.sessionId) {
+              args.push("--resume", selectedConversation.sessionId);
+              console.log(
+                chalk.cyan(
+                  `   🆔 Using session ID: ${selectedConversation.sessionId}`,
+                ),
+              );
+            } else {
+              // Fallback: try to use filename as session identifier
+              const fileName = selectedConversation.id;
+              console.log(
+                chalk.yellow(
+                  `   ⚠️  No session ID found, trying filename: ${fileName}`,
+                ),
+              );
+              args.push("--resume", fileName);
+            }
+          } else {
+            // User cancelled - return without launching Claude
+            console.log(
+              chalk.gray("   ↩️  Selection cancelled, returning to menu"),
+            );
+            return;
+          }
+        } catch (error) {
+          console.warn(
+            chalk.yellow(
+              "   ⚠️  Failed to load conversation history, using standard resume",
+            ),
+          );
+          args.push("-r");
+        }
+        break;
+      case "normal":
+      default:
+        console.log(chalk.green("   ✨ Starting new session"));
+        break;
+    }
+
+    // Detect root user for Docker/sandbox environments
+    let isRoot = false;
+    try {
+      isRoot = process.getuid ? process.getuid() === 0 : false;
+    } catch {
+      // process.getuid() not available (e.g., Windows) - default to false
+    }
+
+    // Handle skip permissions
+    if (options.skipPermissions) {
+      args.push("--dangerously-skip-permissions");
+      console.log(chalk.yellow("   ⚠️  Skipping permissions check"));
+
+      // Show additional warning for root users in Docker/sandbox environments
+      if (isRoot) {
+        console.log(
+          chalk.yellow(
+            "   ⚠️  Docker/サンドボックス環境として実行中（IS_SANDBOX=1）",
+          ),
+        );
+      }
+    }
+    // Append any pass-through arguments after our flags
+    if (options.extraArgs && options.extraArgs.length > 0) {
+      args.push(...options.extraArgs);
+    }
+
+    await execa("bunx", [CLAUDE_CLI_PACKAGE, ...args], {
       cwd: worktreePath,
-      stdio: 'inherit'
+      stdio: "inherit",
+      shell: true,
+      env:
+        isRoot && options.skipPermissions
+          ? { ...process.env, IS_SANDBOX: "1" }
+          : process.env,
     });
-  } catch (error) {
-    throw new ClaudeError('Failed to launch Claude Code', error);
+  } catch (error: any) {
+    const errorMessage =
+      error.code === "ENOENT"
+        ? "bunx command not found. Please ensure Bun is installed so Claude Code can run via bunx."
+        : `Failed to launch Claude Code: ${error.message || "Unknown error"}`;
+
+    if (platform() === "win32") {
+      console.error(chalk.red("\n💡 Windows troubleshooting tips:"));
+      console.error(
+        chalk.yellow("   1. Bun がインストールされ bunx が利用可能か確認"),
+      );
+      console.error(
+        chalk.yellow(
+          '   2. "bunx @anthropic-ai/claude-code@latest -- --version" を実行してセットアップを確認',
+        ),
+      );
+      console.error(
+        chalk.yellow("   3. ターミナルやIDEを再起動して PATH を更新"),
+      );
+    }
+
+    throw new ClaudeError(errorMessage, error);
   }
 }
 
 export async function isClaudeCodeAvailable(): Promise<boolean> {
   try {
-    await execa('claude', ['--version']);
+    await execa("bunx", [CLAUDE_CLI_PACKAGE, "--version"], { shell: true });
     return true;
-  } catch {
+  } catch (error: any) {
+    if (error.code === "ENOENT") {
+      console.error(chalk.yellow("\n⚠️  bunx コマンドが見つかりません"));
+      console.error(
+        chalk.gray(
+          "   Bun をインストールして bunx が使用可能か確認してください",
+        ),
+      );
+    }
     return false;
   }
 }

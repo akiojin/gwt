@@ -3,33 +3,32 @@ services:
     build: .
     container_name: claude-worktree
     volumes:
-      # プロジェクトファイルの永続化
       - .:/claude-worktree
-      # 設定ファイルの永続化（必要なもののみ）
-      - ssh_keys:/root/.ssh
-      - claude_config:/root/.claude
+      - bash-history:/root/.bash_history_dir
       - ./.docker/bash_history:/root/.bash_history
-      # Docker socket（必要な場合）
-      - /var/run/docker.sock:/var/run/docker.sock
+      - claude-config:/root/.claude
+      - codex-config:/root/.codex
+      - ~/.codex/auth.json:/root/.codex/auth.json
     environment:
-      # AI API Keys
+      - NPM_USER
+      - NPM_EMAIL
+      - NPM_PASS
       - OPENAI_API_KEY
       - ANTHROPIC_API_KEY
-      - CLAUDE_CODE_MAX_OUTPUT_TOKENS
-      # GitHub設定
       - GITHUB_TOKEN
       - GITHUB_PERSONAL_ACCESS_TOKEN
       - GITHUB_USERNAME
-      # Docker in Docker
-      - DOCKER_HOST=unix:///var/run/docker.sock
+      - HISTFILE=/root/.bash_history_dir/.bash_history
+      - HISTSIZE=100000
+      - HISTFILESIZE=100000
+      - MAX_MCP_OUTPUT_TOKENS
+      - ENABLE_BACKGROUND_TASKS=1
+      - FORCE_AUTO_BACKGROUND_TASKS=1
     stdin_open: true
     tty: true
-    restart: unless-stopped
     working_dir: /claude-worktree
 
 volumes:
-  # 必要最小限の設定のみ永続化
-  ssh_keys:
-    driver: local
-  claude_config:
-    driver: local
+  bash-history: {}
+  claude-config: {}
+  codex-config: {}
