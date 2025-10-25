@@ -1,4 +1,4 @@
-import { select, input, confirm, checkbox } from "@inquirer/prompts";
+import { select, input, confirm } from "@inquirer/prompts";
 import chalk from "chalk";
 import {
   BranchInfo,
@@ -717,9 +717,10 @@ export async function selectCleanupTargets(
 
       // Handle Enter key to confirm
       if (isEnterKey(key)) {
-        const selected = Array.from(selectedIndices).map(
-          (i) => config.choices[i]!.value
-        );
+        const selected = Array.from(selectedIndices)
+          .map((i) => config.choices[i])
+          .filter((choice): choice is NonNullable<typeof choice> => choice !== undefined)
+          .map((choice) => choice.value);
         setStatus("done");
         done(selected);
         return;
