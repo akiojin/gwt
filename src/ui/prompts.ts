@@ -668,10 +668,118 @@ export async function confirmContinue(message = "Continue?"): Promise<boolean> {
 
 export async function selectCleanupTargets(
   targets: CleanupTarget[],
-): Promise<CleanupTarget[]> {
+): Promise<CleanupTarget[] | null> {
   if (targets.length === 0) {
     return [];
   }
+
+  const {
+    createPrompt,
+    useState,
+    useKeypress,
+    isEnterKey,
+    usePrefix,
+    isUpKey,
+    isDownKey,
+    isSpaceKey,
+  } = await import("@inquirer/core");
+
+  // Custom checkbox prompt with q key support
+  const customCheckbox = createPrompt<CleanupTarget[] | null, {
+    message: string;
+    choices: Array<{
+      name: string;
+      value: CleanupTarget;
+      disabled?: boolean | string;
+      checked: boolean;
+    }>;
+  }>((config, done) => {
+    const [selectedIndices, setSelectedIndices] = useState<Set<number>>(
+      new Set(
+        config.choices
+          .map((c, i) => (!c.disabled && c.checked ? i : -1))
+          .filter((i) => i >= 0)
+      )
+    );
+    const [cursorIndex, setCursorIndex] = useState<number>(0);
+    const [status, setStatus] = useState<"idle" | "done">("idle");
+    const prefix = usePrefix({});
+
+    useKeypress((key) => {
+      if (status === "done") return;
+
+      // Handle q key to go back
+      if (key.name === "q" || (key.name === "c" && key.ctrl)) {
+        setStatus("done");
+        done(null);
+        return;
+      }
+
+      // Handle Enter key to confirm
+      if (isEnterKey(key)) {
+        const selected = Array.from(selectedIndices).map(
+          (i) => config.choices[i]!.value
+        );
+        setStatus("done");
+        done(selected);
+        return;
+      }
+
+      // Handle Space key to toggle selection
+      if (isSpaceKey(key)) {
+        const choice = config.choices[cursorIndex];
+        if (choice && !choice.disabled) {
+          const newSelection = new Set(selectedIndices);
+          if (newSelection.has(cursorIndex)) {
+            newSelection.delete(cursorIndex);
+          } else {
+            newSelection.add(cursorIndex);
+          }
+          setSelectedIndices(newSelection);
+        }
+        return;
+      }
+
+      // Handle up/down navigation
+      if (isUpKey(key)) {
+        const newIndex = cursorIndex > 0 ? cursorIndex - 1 : config.choices.length - 1;
+        setCursorIndex(newIndex);
+      } else if (isDownKey(key)) {
+        const newIndex = cursorIndex < config.choices.length - 1 ? cursorIndex + 1 : 0;
+        setCursorIndex(newIndex);
+      }
+    });
+
+    if (status === "done") {
+      return "";
+    }
+
+    const message = config.message;
+    const instructions = "Space to select, Enter to confirm, q to go back";
+
+    const choicesDisplay = config.choices
+      .map((choice, index) => {
+        const isCursor = index === cursorIndex;
+        const isSelected = selectedIndices.has(index);
+        const pointer = isCursor ? "❯" : " ";
+        const checkbox = isSelected ? "◉" : "◯";
+
+        const nameDisplay = choice.disabled
+          ? chalk.gray(choice.name)
+          : isCursor
+            ? chalk.cyan(choice.name)
+            : choice.name;
+
+        const disabledText = choice.disabled && typeof choice.disabled === "string"
+          ? chalk.gray(` (${choice.disabled})`)
+          : "";
+
+        return `${pointer}${checkbox} ${nameDisplay}${disabledText}`;
+      })
+      .join("\n");
+
+    return `${prefix} ${message}\n${chalk.gray(instructions)}\n${choicesDisplay}`;
+  });
 
   const choices = targets.map((target) => ({
     name: `${target.branch} (PR #${target.pullRequest.number}: ${target.pullRequest.title})`,
@@ -680,14 +788,10 @@ export async function selectCleanupTargets(
     checked: !target.hasUncommittedChanges,
   }));
 
-  const selected = await checkbox({
+  return await customCheckbox({
     message: "Select worktrees to clean up (merged PRs):",
     choices,
-    pageSize: 15,
-    instructions: "Space to select, Enter to confirm",
   });
-
-  return selected;
 }
 
 export async function confirmCleanup(
