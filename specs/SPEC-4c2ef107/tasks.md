@@ -64,14 +64,14 @@
 
 ### 共通コンポーネント（TDD）
 
-- [ ] T016 [P] src/ui/components/common/ErrorBoundary.tsxのテストを作成
-- [ ] T017 T016の後にsrc/ui/components/common/ErrorBoundary.tsxを実装（エラーキャッチとメッセージ表示）
-- [ ] T018 [P] src/ui/components/common/Select.tsxのテストを作成
-- [ ] T019 T018の後にsrc/ui/components/common/Select.tsxを実装（ink-select-inputのラッパー）
-- [ ] T020 [P] src/ui/components/common/Confirm.tsxのテストを作成
-- [ ] T021 T020の後にsrc/ui/components/common/Confirm.tsxを実装（確認ダイアログ）
-- [ ] T022 [P] src/ui/components/common/Input.tsxのテストを作成
-- [ ] T023 T022の後にsrc/ui/components/common/Input.tsxを実装（ink-text-inputのラッパー）
+- [x] T016 [P] src/ui/components/common/ErrorBoundary.tsxのテストを作成
+- [x] T017 T016の後にsrc/ui/components/common/ErrorBoundary.tsxを実装（エラーキャッチとメッセージ表示）
+- [x] T018 [P] src/ui/components/common/Select.tsxのテストを作成
+- [x] T019 T018の後にsrc/ui/components/common/Select.tsxを実装（ink-select-inputのラッパー）
+- [x] T020 [P] src/ui/components/common/Confirm.tsxのテストを作成
+- [x] T021 T020の後にsrc/ui/components/common/Confirm.tsxを実装（確認ダイアログ）
+- [x] T022 [P] src/ui/components/common/Input.tsxのテストを作成
+- [x] T023 T022の後にsrc/ui/components/common/Input.tsxを実装（ink-text-inputのラッパー）
 
 ### UI部品コンポーネント（TDD）
 
