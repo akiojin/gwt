@@ -98,6 +98,28 @@ The tool presents an interactive interface with the following options:
 - **Authentication Check**: Verify GitHub CLI setup before operations
 - **Remote Sync**: Fetch latest changes before cleanup operations
 
+### Automated PR Merge
+
+The repository includes an automated PR merge workflow that streamlines the development process:
+
+- **Automatic Merge**: PRs are automatically merged when all CI checks (Test, Lint) pass and there are no conflicts
+- **Merge Method**: Uses merge commit to preserve full commit history
+- **Smart Skip Logic**: Automatically skips draft PRs, conflicted PRs, and failed CI runs
+- **Target Branches**: Active for PRs targeting `main` and `develop` branches
+- **Safety First**: Respects branch protection rules and requires successful CI completion
+
+**How it works:**
+1. PR is created targeting `main` or `develop`
+2. CI workflows (Test, Lint) run automatically
+3. When all CI checks pass and no conflicts exist, the PR is automatically merged
+4. No manual intervention required - just create the PR and let CI handle the rest
+
+**Disabling auto-merge:**
+- Create PRs as drafts to prevent auto-merge: `gh pr create --draft`
+- The auto-merge workflow respects this setting and will skip draft PRs
+
+For technical details, see [specs/SPEC-cff08403/](specs/SPEC-cff08403/).
+
 ## System Requirements
 
 - **Node.js**: >= 18.0.0

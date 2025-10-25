@@ -109,10 +109,10 @@ graph TD
 
 ### タスク
 
-- [ ] T008 [P] [US2] CI失敗検知ロジックを追加（workflow_run.conclusion != 'success'時の処理）in .github/workflows/auto-merge.yml
-- [ ] T009 [P] [US2] 競合検知ロジックを追加（mergeable != 'MERGEABLE'時のスキップ処理）in .github/workflows/auto-merge.yml
-- [ ] T010 [P] [US2] ドラフトPR除外ロジックを追加（isDraft=trueの確認）in .github/workflows/auto-merge.yml
-- [ ] T011 [US2] エラーログとスキップログの記録機能を実装（echoでスキップ理由を出力）in .github/workflows/auto-merge.yml
+- [x] T008 [P] [US2] CI失敗検知ロジックを追加（workflow_run.conclusion != 'success'時の処理）in .github/workflows/auto-merge.yml
+- [x] T009 [P] [US2] 競合検知ロジックを追加（mergeable != 'MERGEABLE'時のスキップ処理）in .github/workflows/auto-merge.yml
+- [x] T010 [P] [US2] ドラフトPR除外ロジックを追加（isDraft=trueの確認）in .github/workflows/auto-merge.yml
+- [x] T011 [US2] エラーログとスキップログの記録機能を実装（echoでスキップ理由を出力）in .github/workflows/auto-merge.yml
 - [ ] T012 [US2] 統合テスト: CI失敗、競合、ドラフトPRの各シナリオでスキップを確認
 
 ---
@@ -128,7 +128,7 @@ graph TD
 
 ### タスク
 
-- [ ] T013 [US3] workflow_runトリガーのworkflows配列にTestとLintの両方を設定し、両方を監視 in .github/workflows/auto-merge.yml
+- [x] T013 [US3] workflow_runトリガーのworkflows配列にTestとLintの両方を設定し、両方を監視 in .github/workflows/auto-merge.yml
 - [ ] T014 [US3] 統合テスト: 複数ワークフローが順次完了する場合、最後のワークフロー完了時にマージを確認
 
 ---
@@ -139,8 +139,8 @@ graph TD
 
 ### タスク
 
-- [ ] T015 [P] README.mdに自動マージ機能の説明を追加（機能概要、動作条件、無効化方法）
-- [ ] T016 [P] quickstart.mdのセットアップ手順を最終確認し、実際の手順と一致していることを検証
+- [x] T015 [P] README.mdに自動マージ機能の説明を追加（機能概要、動作条件、無効化方法）
+- [x] T016 [P] quickstart.mdのセットアップ手順を最終確認し、実際の手順と一致していることを検証
 
 ---
 
