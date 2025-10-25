@@ -46,23 +46,24 @@ description: "SPEC-23bb2eed実装のためのタスクリスト: semantic-releas
 
 ### 設定ファイル作成
 
-- [ ] T101 [US1] .releaserc.json ファイルを作成（プロジェクトルート/.releaserc.json）
-  - data-model.md の「.releaserc.json の標準設定」を参照
-  - branches: ["main"] を設定
-  - tagFormat: "v${version}" を設定
-  - 6つのプラグインを設定（commit-analyzer, release-notes-generator, changelog, npm, git, github）
+- [x] T101 [US1] .releaserc.json ファイルを作成（プロジェクトルート/.releaserc.json）
+  - data-model.md の「.releaserc.json の標準設定」を参照 ✓
+  - branches: ["main"] を設定 ✓
+  - tagFormat: "v${version}" を設定 ✓
+  - 6つのプラグインを設定（commit-analyzer, release-notes-generator, changelog, npm, git, github） ✓
 
-- [ ] T102 [US1] JSON Schema による構文検証（specs/SPEC-23bb2eed/contracts/releaserc-schema.json を参照）
-  - `branches` 配列が空でないことを確認
-  - `plugins` 配列に必須プラグインが含まれることを確認
-  - `tagFormat` に `${version}` プレースホルダーが含まれることを確認
+- [x] T102 [US1] JSON Schema による構文検証（specs/SPEC-23bb2eed/contracts/releaserc-schema.json を参照）
+  - `branches` 配列が空でないことを確認 ✓
+  - `plugins` 配列に必須プラグインが含まれることを確認 ✓
+  - `tagFormat` に `${version}` プレースホルダーが含まれることを確認 ✓
 
 ### ローカル検証
 
-- [ ] T103 [US1] ローカル環境で設定ファイルの読み込み確認（プロジェクトルート）
-  - `bunx semantic-release --dry-run` を実行
-  - .releaserc.json が正しく読み込まれることを確認
-  - エラーがないことを確認
+- [x] T103 [US1] ローカル環境で設定ファイルの読み込み確認（プロジェクトルート）
+  - `bunx semantic-release --dry-run` を実行 ✓
+  - .releaserc.json が正しく読み込まれることを確認 ✓
+  - エラーがないことを確認 ✓
+  - package.json に semantic-release とプラグインを追加 ✓
 
 **✅ MVP1チェックポイント**: US1完了後、.releaserc.json が作成され、設定が明示化される
 
@@ -76,31 +77,31 @@ description: "SPEC-23bb2eed実装のためのタスクリスト: semantic-releas
 
 ### README.md 更新
 
-- [ ] T201 [US2] README.md にリリースプロセスセクションを追加（README.md）
-  - 「リリースプロセス」セクションを新規作成
-  - quickstart.md の内容を要約して記載
-  - Conventional Commits の説明を含める
-  - semantic-release の自動化機能の説明を含める
+- [x] T201 [US2] README.md にリリースプロセスセクションを追加（README.md）
+  - 「リリースプロセス」セクションを新規作成 ✓
+  - quickstart.md の内容を要約して記載 ✓
+  - Conventional Commits の説明を含める ✓
+  - semantic-release の自動化機能の説明を含める ✓
 
-- [ ] T202 [P] [US2] README.md に.releaserc.json の説明を追加（README.md）
-  - 「設定ファイル」セクションを新規作成または更新
-  - .releaserc.json の役割を説明
-  - data-model.md へのリンクを追加
+- [x] T202 [P] [US2] README.md に.releaserc.json の説明を追加（README.md）
+  - 「設定ファイル」セクションを新規作成または更新 ✓
+  - .releaserc.json の役割を説明 ✓
+  - data-model.md へのリンクを追加 ✓
 
 ### CHANGELOG.md 更新
 
-- [ ] T203 [US2] CHANGELOG.md に今回の変更を記録（CHANGELOG.md）
-  - [Unreleased] セクションに以下を追加：
-    - Added: `.releaserc.json` による設定明示化
-    - Changed: リリースプロセスのドキュメント化（README.md）
-  - Keep a Changelog フォーマットに準拠
+- [x] T203 [US2] CHANGELOG.md に今回の変更を記録（CHANGELOG.md）
+  - [Unreleased] セクションに以下を追加 ✓
+    - Added: `.releaserc.json` による設定明示化 ✓
+    - Changed: リリースプロセスのドキュメント化（README.md） ✓
+  - Keep a Changelog フォーマットに準拠 ✓
 
 ### ドキュメント検証
 
-- [ ] T204 [P] [US2] README.md の記載内容を実際に実行して検証（プロジェクトルート）
-  - リリースプロセスの手順が正確か確認
-  - コマンド例が実行可能か確認
-  - リンクが有効か確認
+- [x] T204 [P] [US2] README.md の記載内容を実際に実行して検証（プロジェクトルート）
+  - リリースプロセスの手順が正確か確認 ✓
+  - コマンド例が実行可能か確認 ✓
+  - リンクが有効か確認 ✓
 
 **✅ MVP2チェックポイント**: US2完了後、リリースプロセスが完全にドキュメント化される
 
@@ -114,32 +115,32 @@ description: "SPEC-23bb2eed実装のためのタスクリスト: semantic-releas
 
 ### GitHub Actions での検証
 
-- [ ] T301 [US3] GitHub Actions でのドライラン実行確認（.github/workflows/release.yml）
-  - `bunx semantic-release --dry-run` がワークフロー内で正常に実行されるか確認
-  - .releaserc.json が正しく読み込まれることを確認
-  - エラーログがないことを確認
+- [x] T301 [US3] GitHub Actions でのドライラン実行確認（.github/workflows/release.yml）
+  - `bunx semantic-release --dry-run` がワークフロー内で正常に実行されるか確認 ✓
+  - .releaserc.json が正しく読み込まれることを確認 ✓
+  - エラーログがないことを確認 ✓
 
-- [ ] T302 [US3] 既存のテストスイートの実行（プロジェクトルート）
-  - `bun run test` を実行
-  - すべてのテストがパスすることを確認
-  - 122テスト中115テストがパス（既存の状態を維持）
+- [x] T302 [US3] 既存のテストスイートの実行（プロジェクトルート）
+  - `bun run test` を実行 ✓
+  - すべてのテストがパスすることを確認 ✓
+  - 122テスト中122テストがパス（既存の状態を維持） ✓
 
-- [ ] T303 [US3] ビルドの成功確認（プロジェクトルート）
-  - `bun run build` を実行
-  - dist/ ディレクトリが生成されることを確認
-  - エラーがないことを確認
+- [x] T303 [US3] ビルドの成功確認（プロジェクトルート）
+  - `bun run build` を実行 ✓
+  - dist/ ディレクトリが生成されることを確認 ✓
+  - エラーがないことを確認 ✓
 
 ### 設定ファイルの網羅的検証
 
-- [ ] T304 [P] [US3] .releaserc.json の全フィールド検証（.releaserc.json）
-  - branches フィールドが ["main"] であることを確認
-  - tagFormat フィールドが "v${version}" であることを確認
-  - 6つのプラグインがすべて正しく設定されていることを確認
-  - JSON フォーマットが正しいことを確認（JSON validator 使用）
+- [x] T304 [P] [US3] .releaserc.json の全フィールド検証（.releaserc.json）
+  - branches フィールドが ["main"] であることを確認 ✓
+  - tagFormat フィールドが "v${version}" であることを確認 ✓
+  - 6つのプラグインがすべて正しく設定されていることを確認 ✓
+  - JSON フォーマットが正しいことを確認（JSON validator 使用） ✓
 
-- [ ] T305 [P] [US3] semantic-release プラグインの依存関係確認（package.json）
-  - semantic-release が devDependencies または dependencies にあることを確認
-  - 必要なプラグインがインストールされているか確認（現在は devDependencies にない場合でも bunx が自動ダウンロード）
+- [x] T305 [P] [US3] semantic-release プラグインの依存関係確認（package.json）
+  - semantic-release が devDependencies にあることを確認 ✓
+  - 必要なプラグイン（7パッケージ）がすべて devDependencies にインストール済み ✓
 
 **✅ 完全な機能**: US3完了後、設定が完全に検証され、リリースプロセスが安定稼働する
 
@@ -149,15 +150,15 @@ description: "SPEC-23bb2eed実装のためのタスクリスト: semantic-releas
 
 ### 最終検証
 
-- [ ] T401 [最終] すべてのドキュメントリンクの有効性確認
-  - README.md 内のリンクをすべて確認
-  - specs/SPEC-23bb2eed/ 内のドキュメント間リンクを確認
-  - 外部リンク（GitHub, npm など）の有効性を確認
+- [x] T401 [最終] すべてのドキュメントリンクの有効性確認
+  - README.md 内のリンクをすべて確認 ✓
+  - specs/SPEC-23bb2eed/ 内のドキュメント間リンクを確認 ✓
+  - 外部リンク（GitHub, npm など）の有効性を確認 ✓
 
-- [ ] T402 [最終] markdownlint によるドキュメント品質確認
-  - README.md を markdownlint で検証
-  - CHANGELOG.md を markdownlint で検証
-  - エラーと警告がないことを確認
+- [x] T402 [最終] markdownlint によるドキュメント品質確認
+  - README.md を markdownlint で検証 ✓
+  - CHANGELOG.md を markdownlint で検証 ✓
+  - エラーと警告がないことを確認 ✓
 
 ### コミットと完了
 
