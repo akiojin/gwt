@@ -124,8 +124,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Technical
 - TypeScript 5.8.3
-- Node.js 18+ サポート
-- Bun 1.3.1+ サポート
+- Bun 1.3.1+ サポート（必須ランタイム）
+- Node.js 18+ サポート（開発ツール向けオプション）
 - Git 2.25+ 必須
 - execa for Git command execution
 - inquirer for interactive prompts

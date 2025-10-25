@@ -69,7 +69,7 @@ await execa('npx', ['--yes', CLAUDE_CLI_PACKAGE, ...args], {
 ```typescript
 catch (error: any) {
   const errorMessage = error.code === 'ENOENT'
-    ? 'npx command not found. Please ensure Node.js/npm is installed so Claude Code can run via npx.'
+    ? 'bunx command not found. Please ensure Bun is installed and available in your PATH.'
     : `Failed to launch Claude Code: ${error.message || 'Unknown error'}`;
   throw new ClaudeError(errorMessage, error);
 }
@@ -79,8 +79,8 @@ catch (error: any) {
 ```typescript
 if (platform() === 'win32') {
   console.error(chalk.red('\n💡 Windows troubleshooting tips:'));
-  console.error(chalk.yellow('   1. Ensure Node.js/npm がインストールされ npx が利用可能か確認'));
-  console.error(chalk.yellow('   2. "npx @anthropic-ai/claude-code@latest -- --version" を実行してセットアップを確認'));
+  console.error(chalk.yellow('   1. Ensure Bun がインストールされ bunx が利用可能か確認'));
+  console.error(chalk.yellow('   2. "bunx @anthropic-ai/claude-code@latest -- --version" を実行してセットアップを確認'));
   console.error(chalk.yellow('   3. ターミナルやIDEを再起動して PATH を更新'));
 }
 ```

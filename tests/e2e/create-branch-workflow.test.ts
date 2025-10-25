@@ -9,10 +9,14 @@ vi.mock('node:fs', () => ({
   existsSync: vi.fn(() => true),
 }));
 
-vi.mock('../../src/git.js', () => ({
-  getChangedFilesCount: vi.fn(() => Promise.resolve(0)),
-  getRepositoryRoot: vi.fn(() => Promise.resolve('/path/to/repo')),
-}));
+vi.mock('../../src/git.js', async () => {
+  const actual = await vi.importActual<typeof import('../../src/git.js')>('../../src/git.js');
+  return {
+    ...actual,
+    getChangedFilesCount: vi.fn(() => Promise.resolve(0)),
+    getRepositoryRoot: vi.fn(() => Promise.resolve('/path/to/repo')),
+  };
+});
 
 import { execa } from 'execa';
 import * as git from '../../src/git';

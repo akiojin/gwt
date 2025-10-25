@@ -100,7 +100,8 @@ The tool presents an interactive interface with the following options:
 
 ## System Requirements
 
-- **Node.js**: >= 18.0.0
+- **Bun**: >= 1.0.0
+- **Node.js** (optional): Recommended >= 18.0.0 when working with Node-based tooling
 - **Git**: Latest version with worktree support
 - **AI Tool**: At least one of Claude Code or Codex CLI should be available
 - **GitHub CLI**: Required for PR cleanup features (optional)
@@ -251,7 +252,7 @@ bun run start
 **Permission Errors**: Ensure Claude Code has proper directory permissions  
 **Git Worktree Conflicts**: Use the cleanup feature to remove stale worktrees  
 **GitHub Authentication**: Run `gh auth login` before using PR cleanup features  
-**Node Version**: Verify Node.js >= 18.0.0 with `node --version`
+**Bun Version**: Verify Bun >= 1.0.0 with `bun --version`
 
 ### Debug Mode
 
