@@ -248,26 +248,26 @@ bunx @anthropic-ai/claude-code@latest
 
 **解決方法**:
 - Bunがインストールされているか確認:
-   ```bash
-   bun --version
-   ```
+  ```bash
+  bun --version
+  ```
 
 - Bunがインストールされていない場合:
-   - macOS/Linux: `curl -fsSL https://bun.sh/install | bash`
-   - Windows: `powershell -c "irm bun.sh/install.ps1|iex"`
+  - macOS/Linux: `curl -fsSL https://bun.sh/install | bash`
+  - Windows: `powershell -c "irm bun.sh/install.ps1|iex"`
 
 - インストール後、ターミナルを再起動
 
 - PATHが正しく設定されているか確認:
-   ```bash
-   echo $PATH | grep bun
-   ```
+  ```bash
+  echo $PATH | grep bun
+  ```
 
 - Windows固有: PowerShell実行ポリシーを確認:
-   ```powershell
-   Get-ExecutionPolicy
-   # RemoteSigned または Unrestricted が推奨
-   ```
+  ```powershell
+  Get-ExecutionPolicy
+  # RemoteSigned または Unrestricted が推奨
+  ```
 ```
 
 ## テスト実行
