@@ -2,6 +2,7 @@ import React, { useCallback, useMemo } from 'react';
 import { ErrorBoundary } from './common/ErrorBoundary.js';
 import { BranchListScreen } from './screens/BranchListScreen.js';
 import { WorktreeManagerScreen } from './screens/WorktreeManagerScreen.js';
+import { BranchCreatorScreen } from './screens/BranchCreatorScreen.js';
 import type { WorktreeItem } from './screens/WorktreeManagerScreen.js';
 import { useGitData } from '../hooks/useGitData.js';
 import { useScreenState } from '../hooks/useScreenState.js';
@@ -59,6 +60,17 @@ export function App({ onExit }: AppProps) {
     onExit();
   }, [onExit]);
 
+  // Handle branch creation
+  const handleCreate = useCallback(
+    (branchName: string) => {
+      // TODO: Implement branch creation logic (git.js integration)
+      // For now, just go back to branch list
+      goBack();
+      refresh();
+    },
+    [goBack, refresh]
+  );
+
   // Render screen based on currentScreen
   const renderScreen = () => {
     switch (currentScreen) {
@@ -88,8 +100,7 @@ export function App({ onExit }: AppProps) {
         );
 
       case 'branch-creator':
-        // TODO: Implement BranchCreatorScreen
-        return <BranchListScreen branches={branchItems} stats={stats} onSelect={handleSelect} />;
+        return <BranchCreatorScreen onBack={goBack} onCreate={handleCreate} />;
 
       case 'pr-cleanup':
         // TODO: Implement PRCleanupScreen
