@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+
+- **`.releaserc.json` による semantic-release 設定の明示化**
+  - デフォルト設定への暗黙的な依存を排除
+  - リリースプロセスの可視化と保守性向上
+  - 全6つのプラグイン設定を明示的に定義 (commit-analyzer, release-notes-generator, changelog, npm, git, github)
+- semantic-release と必要なプラグインを devDependencies に追加
 - 完全なテストカバレッジ（104+ tests）
   - ユニットテスト: Git operations, Worktree management, UI components
   - 統合テスト: Branch selection, Remote branch handling, Branch creation workflows
@@ -19,6 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Troubleshooting guide (docs/troubleshooting.md)
 
 ### Changed
+
+- **リリースプロセスのドキュメント化**
+  - README.md にリリースプロセスセクションを追加
+  - Conventional Commits のガイドライン記載
+  - semantic-release の動作説明を追加
+  - .releaserc.json の詳細説明を追加
+  - リリースプロセスガイド (specs/SPEC-23bb2eed/quickstart.md) へのリンク追加
 - テストフレームワークをVitestに移行
 - CI/CDパイプラインの強化
 - **bunx移行**: Claude Code起動方式をnpxからbunxへ完全移行
@@ -27,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - UI表示文言をbunx表記へ統一
 
 ### Breaking Changes
+
 - **Bun 1.0+が必須**: Claude Code起動にはBun 1.0.0以上が必要
 - npx対応の廃止: `npx`経由でのClaude Code起動は非対応
 - ユーザーへの移行ガイダンス:

@@ -46,6 +46,12 @@
     "string-width": "^7.2.0"
   },
   "devDependencies": {
+    "@semantic-release/changelog": "^6.0.3",
+    "@semantic-release/commit-analyzer": "^13.0.1",
+    "@semantic-release/git": "^10.0.1",
+    "@semantic-release/github": "^12.0.0",
+    "@semantic-release/npm": "^13.1.1",
+    "@semantic-release/release-notes-generator": "^14.1.0",
     "@types/node": "^22.16.5",
     "@typescript-eslint/eslint-plugin": "^8.38.0",
     "@typescript-eslint/parser": "^8.38.0",
@@ -53,6 +59,7 @@
     "@vitest/ui": "^2.1.8",
     "eslint": "^9.31.0",
     "rimraf": "^6.0.1",
+    "semantic-release": "^25.0.1",
     "typescript": "^5.8.3",
     "vitest": "^2.1.8"
   },
