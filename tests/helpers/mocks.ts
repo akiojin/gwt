@@ -143,7 +143,7 @@ export function mockFileSystem() {
 export function createMockBranchInfo(overrides?: Partial<{
   name: string;
   type: 'local' | 'remote';
-  branchType: 'feature' | 'hotfix' | 'release' | 'other';
+  branchType: 'feature' | 'hotfix' | 'release' | 'main' | 'develop' | 'other';
   isCurrent: boolean;
 }>) {
   return {

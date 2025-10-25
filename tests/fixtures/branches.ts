@@ -7,13 +7,13 @@ export const localBranches: BranchInfo[] = [
   {
     name: 'main',
     type: 'local',
-    branchType: 'other',
+    branchType: 'main',
     isCurrent: true,
   },
   {
     name: 'develop',
     type: 'local',
-    branchType: 'other',
+    branchType: 'develop',
     isCurrent: false,
   },
   {
@@ -49,13 +49,13 @@ export const remoteBranches: BranchInfo[] = [
   {
     name: 'origin/main',
     type: 'remote',
-    branchType: 'other',
+    branchType: 'main',
     isCurrent: false,
   },
   {
     name: 'origin/develop',
     type: 'remote',
-    branchType: 'other',
+    branchType: 'develop',
     isCurrent: false,
   },
   {

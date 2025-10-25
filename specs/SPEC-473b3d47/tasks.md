@@ -57,13 +57,13 @@ tests/                          # 新規作成
 
 ### ユニットテスト
 
-- [ ] T101 [P] [US1] `src/git.ts`の`getAllBranches()`をテスト: `tests/unit/git.test.ts`
-- [ ] T102 [P] [US1] `src/git.ts`の`getLocalBranches()`をテスト: `tests/unit/git.test.ts`
-- [ ] T103 [P] [US1] `src/git.ts`の`getRemoteBranches()`をテスト: `tests/unit/git.test.ts`
-- [ ] T104 [P] [US1] `src/worktree.ts`の`worktreeExists()`をテスト: `tests/unit/worktree.test.ts`
-- [ ] T105 [P] [US1] `src/worktree.ts`の`generateWorktreePath()`をテスト: `tests/unit/worktree.test.ts`
-- [ ] T106 [P] [US1] `src/worktree.ts`の`createWorktree()`をテスト: `tests/unit/worktree.test.ts`
-- [ ] T107 [P] [US1] `src/ui/table.ts`の`createBranchTable()`をテスト: `tests/unit/ui/table.test.ts`
+- [x] T101 [P] [US1] `src/git.ts`の`getAllBranches()`をテスト: `tests/unit/git.test.ts`
+- [x] T102 [P] [US1] `src/git.ts`の`getLocalBranches()`をテスト: `tests/unit/git.test.ts`
+- [x] T103 [P] [US1] `src/git.ts`の`getRemoteBranches()`をテスト: `tests/unit/git.test.ts`
+- [x] T104 [P] [US1] `src/worktree.ts`の`worktreeExists()`をテスト: `tests/unit/worktree.test.ts`
+- [x] T105 [P] [US1] `src/worktree.ts`の`generateWorktreePath()`をテスト: `tests/unit/worktree.test.ts`
+- [x] T106 [P] [US1] `src/worktree.ts`の`createWorktree()`をテスト: `tests/unit/worktree.test.ts`
+- [x] T107 [P] [US1] `src/ui/table.ts`の`createBranchTable()`をテスト: `tests/unit/worktree.test.ts`
 
 ### 統合テスト
 
