@@ -174,7 +174,7 @@ description: "SPEC-23bb2eed実装のためのタスクリスト: semantic-releas
 
 - [x] T405 [最終] main ブランチにプッシュして自動リリースを確認
   - `git push origin SPEC-23bb2eed` でブランチプッシュ ✓
-  - PR を作成して main へマージ（手動: https://github.com/akiojin/claude-worktree/pull/new/SPEC-23bb2eed）
+  - PR を作成して main へマージ（手動: <https://github.com/akiojin/claude-worktree/pull/new/SPEC-23bb2eed>）
   - GitHub Actions でリリースワークフローが正常に実行されることを確認（PR マージ後）
 
 ## タスク凡例
