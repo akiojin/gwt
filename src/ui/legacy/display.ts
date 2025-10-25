@@ -1,7 +1,7 @@
 import chalk from "chalk";
-import { BranchInfo, CleanupTarget } from "./types.js";
-import { WorktreeInfo } from "../worktree.js";
-import { getPackageVersion } from "../utils.js";
+import { BranchInfo, CleanupTarget } from "../types.js";
+import { WorktreeInfo } from "../../worktree.js";
+import { getPackageVersion } from "../../utils.js";
 
 export function getBranchTypeColor(branchType: BranchInfo["branchType"]) {
   switch (branchType) {
@@ -76,7 +76,7 @@ export async function printStatistics(
     }
 
     try {
-      const { getChangedFilesCount } = await import("../git.js");
+      const { getChangedFilesCount } = await import("../../git.js");
       const changedFiles = await getChangedFilesCount(worktree.path);
       if (changedFiles > 0) {
         worktreesWithChanges++;

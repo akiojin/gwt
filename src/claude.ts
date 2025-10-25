@@ -44,7 +44,7 @@ export async function launchClaudeCode(
         console.log(chalk.cyan("   🔄 Selecting conversation to resume"));
 
         try {
-          const { selectClaudeConversation } = await import("./ui/prompts.js");
+          const { selectClaudeConversation } = await import("./ui/legacy/prompts.js");
           const selectedConversation =
             await selectClaudeConversation(worktreePath);
 

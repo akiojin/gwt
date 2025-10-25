@@ -6,8 +6,8 @@ import {
   BranchType,
   NewBranchConfig,
   CleanupTarget,
-} from "./types.js";
-import { SessionData } from "../config/index.js";
+} from "../types.js";
+import { SessionData } from "../../config/index.js";
 
 function stripAnsi(value: string): string {
   // eslint-disable-next-line no-control-regex
@@ -145,7 +145,7 @@ export async function selectFromTable(
   }>,
   statistics?: {
     branches: BranchInfo[];
-    worktrees: import("../worktree.js").WorktreeInfo[];
+    worktrees: import("../../worktree.js").WorktreeInfo[];
   },
 ): Promise<string> {
   // Display statistics if provided
@@ -941,7 +941,7 @@ export async function selectSession(
 
     if (!session.lastWorktreePath || !session.lastBranch) {
       // Create a fallback category for incomplete sessions
-      const fallbackInfo: import("../git.js").EnhancedSessionInfo = {
+      const fallbackInfo: import("../../git.js").EnhancedSessionInfo = {
         hasUncommittedChanges: false,
         uncommittedChangesCount: 0,
         hasUnpushedCommits: false,
@@ -960,7 +960,7 @@ export async function selectSession(
     }
 
     try {
-      const { getEnhancedSessionInfo } = await import("../git.js");
+      const { getEnhancedSessionInfo } = await import("../../git.js");
       const sessionInfo = await getEnhancedSessionInfo(
         session.lastWorktreePath,
         session.lastBranch,
@@ -975,7 +975,7 @@ export async function selectSession(
       });
     } catch {
       // Fallback for sessions where enhanced info is not available
-      const fallbackInfo: import("../git.js").EnhancedSessionInfo = {
+      const fallbackInfo: import("../../git.js").EnhancedSessionInfo = {
         hasUncommittedChanges: false,
         uncommittedChangesCount: 0,
         hasUnpushedCommits: false,
@@ -1034,10 +1034,10 @@ export async function selectSession(
  */
 export async function selectClaudeConversation(
   worktreePath: string,
-): Promise<import("../claude-history.js").ClaudeConversation | null> {
+): Promise<import("../../claude-history.js").ClaudeConversation | null> {
   try {
     const { getConversationsForProject, isClaudeHistoryAvailable } =
-      await import("../claude-history.js");
+      await import("../../claude-history.js");
 
     // Check if Claude Code history is available
     if (!(await isClaudeHistoryAvailable())) {
@@ -1115,7 +1115,7 @@ export async function selectClaudeConversation(
     );
     console.log();
 
-    const { getDetailedConversation } = await import("../claude-history.js");
+    const { getDetailedConversation } = await import("../../claude-history.js");
     const detailed = await getDetailedConversation(selectedConversation);
     if (detailed) {
       displayConversationPreview(detailed.messages);
@@ -1158,10 +1158,10 @@ export async function selectClaudeConversation(
  * Display conversation messages with scrollable interface
  */
 export async function displayConversationMessages(
-  conversation: import("../claude-history.js").ClaudeConversation,
+  conversation: import("../../claude-history.js").ClaudeConversation,
 ): Promise<boolean> {
   try {
-    const { getDetailedConversation } = await import("../claude-history.js");
+    const { getDetailedConversation } = await import("../../claude-history.js");
     const detailedConversation = await getDetailedConversation(conversation);
 
     if (!detailedConversation || !detailedConversation.messages) {
@@ -1191,7 +1191,7 @@ export async function displayConversationMessages(
  * Create scrollable message viewer component
  */
 async function createMessageViewer(
-  messages: import("../claude-history.js").ClaudeMessage[],
+  messages: import("../../claude-history.js").ClaudeMessage[],
 ): Promise<boolean> {
   console.clear();
   console.log(
@@ -1265,7 +1265,7 @@ async function createMessageViewer(
  * Display conversation preview (ccresume style)
  */
 function displayConversationPreview(
-  messages: import("../claude-history.js").ClaudeMessage[],
+  messages: import("../../claude-history.js").ClaudeMessage[],
 ): void {
   // Get terminal height and calculate available space for messages
   const terminalHeight = process.stdout.rows || 24; // Default to 24 if unavailable
@@ -1365,7 +1365,7 @@ interface ConversationCategory {
  * Categorized conversation with metadata
  */
 interface CategorizedConversation {
-  conversation: import("../claude-history.js").ClaudeConversation;
+  conversation: import("../../claude-history.js").ClaudeConversation;
   category: ConversationCategory;
   index: number;
 }
@@ -1374,7 +1374,7 @@ interface CategorizedConversation {
  * Categorize conversations by activity recency
  */
 function categorizeConversationsByActivity(
-  conversations: import("../claude-history.js").ClaudeConversation[],
+  conversations: import("../../claude-history.js").ClaudeConversation[],
 ): CategorizedConversation[] {
   const now = Date.now();
   const oneHour = 60 * 60 * 1000;
@@ -1501,7 +1501,7 @@ function createConversationChoices(
  * Format conversation display
  */
 function formatConversationDisplay(
-  conversation: import("../claude-history.js").ClaudeConversation,
+  conversation: import("../../claude-history.js").ClaudeConversation,
   index: number,
 ): { name: string; value: string; description?: string } {
   const timeAgo = formatTimeAgo(conversation.lastActivity);
@@ -1882,7 +1882,7 @@ interface SessionCategory {
  */
 interface CategorizedSession {
   session: SessionData;
-  sessionInfo: import("../git.js").EnhancedSessionInfo;
+  sessionInfo: import("../../git.js").EnhancedSessionInfo;
   category: SessionCategory;
   index: number;
 }
@@ -1891,7 +1891,7 @@ interface CategorizedSession {
  * Determine session category based on git status
  */
 function categorizeSession(
-  sessionInfo: import("../git.js").EnhancedSessionInfo,
+  sessionInfo: import("../../git.js").EnhancedSessionInfo,
 ): SessionCategory {
   if (sessionInfo.hasUncommittedChanges) {
     return {
@@ -1924,7 +1924,7 @@ function categorizeSession(
  */
 function formatCompactSessionDisplay(
   session: SessionData,
-  sessionInfo: import("../git.js").EnhancedSessionInfo,
+  sessionInfo: import("../../git.js").EnhancedSessionInfo,
   index: number,
 ): { name: string; value: string; description?: string } {
   const repo = session.repositoryRoot.split("/").pop() || "unknown";

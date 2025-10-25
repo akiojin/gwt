@@ -1,7 +1,7 @@
 import stringWidth from "string-width";
-import { BranchInfo } from "./types.js";
-import { WorktreeInfo } from "../worktree.js";
-import { getChangedFilesCount } from "../git.js";
+import { BranchInfo } from "../types.js";
+import { WorktreeInfo } from "../../worktree.js";
+import { getChangedFilesCount } from "../../git.js";
 
 function stripAnsi(value: string): string {
   // eslint-disable-next-line no-control-regex

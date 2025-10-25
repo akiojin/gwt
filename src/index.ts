@@ -61,7 +61,7 @@ import {
   selectClaudeExecutionMode,
   selectVersionBumpType,
   selectReleaseAction,
-} from "./ui/prompts.js";
+} from "./ui/legacy/prompts.js";
 import {
   displayBranchTable,
   printError,
@@ -72,8 +72,8 @@ import {
   printStatistics,
   displayCleanupTargets,
   displayCleanupResults,
-} from "./ui/display.js";
-import { createBranchTable } from "./ui/table.js";
+} from "./ui/legacy/display.js";
+import { createBranchTable } from "./ui/legacy/table.js";
 import chalk from "chalk";
 import { isGitHubCLIAvailable, checkGitHubAuth } from "./github.js";
 import { CleanupTarget } from "./ui/types.js";
@@ -217,7 +217,7 @@ export async function main(): Promise<void> {
         // Check if worktree still exists
         if (await worktreeExists(sessionData.lastBranch!)) {
           // Select AI tool
-          const { selectAITool } = await import("./ui/prompts.js");
+          const { selectAITool } = await import("./ui/legacy/prompts.js");
           let selectedTool: "claude" | "codex" | null = null;
 
           // Parse tool arg
@@ -326,7 +326,7 @@ export async function main(): Promise<void> {
           // Check if worktree still exists
           if (await worktreeExists(selectedSession.lastBranch!)) {
             // Select AI tool
-            const { selectAITool } = await import("./ui/prompts.js");
+            const { selectAITool } = await import("./ui/legacy/prompts.js");
             let selectedTool: "claude" | "codex" | null = null;
 
             // Parse tool arg
@@ -543,7 +543,7 @@ async function handleBranchSelection(
       if (pathConflict && pathConflict.branch !== targetBranch) {
         // Path conflict detected - let user choose how to proceed
         const { selectWorktreePathConflictResolution } = await import(
-          "./ui/prompts.js"
+          "./ui/legacy/prompts.js"
         );
         const resolution = await selectWorktreePathConflictResolution(
           targetBranch,
@@ -598,7 +598,7 @@ async function handleBranchSelection(
     }
 
     // Select and launch AI tool
-    const { selectAITool } = await import("./ui/prompts.js");
+    const { selectAITool } = await import("./ui/legacy/prompts.js");
     let selectedTool: "claude" | "codex" | null = null;
     // Re-parse tool arg for this flow as well
     const argv = process.argv.slice(2);
@@ -725,7 +725,7 @@ async function handleCreateNewBranch(
 ): Promise<boolean> {
   try {
     // まず、ブランチタイプのみを選択
-    const { selectBranchType } = await import("./ui/prompts.js");
+    const { selectBranchType } = await import("./ui/legacy/prompts.js");
     const branchType = await selectBranchType();
 
     let targetBranch: string;
@@ -774,7 +774,7 @@ async function handleCreateNewBranch(
       printInfo(`Release branch will be: ${targetBranch}`);
     } else {
       // 通常のブランチの場合
-      const { inputBranchName } = await import("./ui/prompts.js");
+      const { inputBranchName } = await import("./ui/legacy/prompts.js");
       const taskName = await inputBranchName(branchType);
       targetBranch = `${branchType}/${taskName}`;
       baseBranch = await selectBaseBranch(branches);
@@ -829,7 +829,7 @@ async function handleCreateNewBranch(
     }
 
     // Select and launch AI tool
-    const { selectAITool } = await import("./ui/prompts.js");
+    const { selectAITool } = await import("./ui/legacy/prompts.js");
     let selectedTool: "claude" | "codex" | null = null;
 
     // Parse tool arg
@@ -998,7 +998,7 @@ async function handleManageWorktrees(
           }
 
           // Select AI tool (reuse selection logic)
-          const { selectAITool } = await import("./ui/prompts.js");
+          const { selectAITool } = await import("./ui/legacy/prompts.js");
           const [localClaudeAvail, localCodexAvail] = await Promise.all([
             isClaudeCodeAvailable().catch(() => false),
             isCodexAvailable().catch(() => false),
