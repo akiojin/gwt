@@ -95,9 +95,9 @@ git branch -D branch-name
 
 ## Windows環境での実行
 
-### npx実行時のエラー
+### bunx実行時のエラー
 
-Windows環境でnpxを使用して実行する際に以下のエラーが発生する場合があります：
+Windows環境でbunxを使用して実行する際に以下のエラーが発生する場合があります：
 
 **症状：**
 ```

@@ -1248,6 +1248,7 @@ export async function selectClaudeExecutionMode(toolLabel: string = 'Claude Code
     return `${prefix} ${message}\n${choicesDisplay}`;
   });
 
+  const isCodexTool = toolLabel.toLowerCase().includes('codex');
   const choices = [
     {
       name: '🚀 Normal - Start a new session',
@@ -1255,14 +1256,22 @@ export async function selectClaudeExecutionMode(toolLabel: string = 'Claude Code
       description: `Launch ${toolLabel} normally`
     },
     {
-      name: '⏭️  Continue - Continue most recent conversation (-c)',
+      name: isCodexTool
+        ? '⏭️  Resume last session (codex resume last)'
+        : '⏭️  Continue - Continue most recent conversation (-c)',
       value: 'continue',
-      description: 'Continue from the most recent conversation'
+      description: isCodexTool
+        ? 'Run Codex resume last to continue the most recent session'
+        : 'Continue from the most recent conversation'
     },
     {
-      name: '🔄 Resume - Select conversation to resume (-r)',
+      name: isCodexTool
+        ? '🔄 Resume - Choose a session to resume (codex resume)'
+        : '🔄 Resume - Select conversation to resume (-r)',
       value: 'resume',
-      description: 'Interactively select a conversation to resume'
+      description: isCodexTool
+        ? 'Launch Codex resume and pick a session from the list'
+        : 'Interactively select a conversation to resume'
     }
   ];
 
@@ -1277,9 +1286,7 @@ export async function selectClaudeExecutionMode(toolLabel: string = 'Claude Code
   }
 
   // Show appropriate flag hint per tool
-  const lower = (toolLabel || '').toLowerCase();
-  const isCodex = lower.includes('codex');
-  const flagHint = isCodex
+  const flagHint = isCodexTool
     ? '--yolo'
     : '--dangerously-skip-permissions';
   const skipPermissions = await confirm({
@@ -1290,13 +1297,17 @@ export async function selectClaudeExecutionMode(toolLabel: string = 'Claude Code
   return { mode: mode as 'normal' | 'continue' | 'resume', skipPermissions };
 }
 
+type AIToolChoiceValue = 'claude' | 'codex';
+
 export async function selectAITool(options: {
-  claudeAvailable: boolean;
-  codexAvailable: boolean;
-}): Promise<'claude' | 'codex' | null> {
+  claudeAvailable?: boolean;
+  codexAvailable?: boolean;
+} = {}): Promise<AIToolChoiceValue | null> {
+  const claudeAvailable = options.claudeAvailable ?? true;
+  const codexAvailable = options.codexAvailable ?? true;
   const { createPrompt, useState, useKeypress, isEnterKey, usePrefix, isUpKey, isDownKey } = await import('@inquirer/core');
 
-  const customSelect = createPrompt<string | null, { message: string; choices: any[] }>((config, done) => {
+  const customSelect = createPrompt<AIToolChoiceValue | null, { message: string; choices: Array<{ name: string; value: AIToolChoiceValue; description?: string }> }>((config, done) => {
     const [selectedIndex, setSelectedIndex] = useState<number>(0);
     const [status, setStatus] = useState<'idle' | 'done'>('idle');
     const prefix = usePrefix({});
@@ -1312,23 +1323,21 @@ export async function selectAITool(options: {
 
       if (isEnterKey(key)) {
         const selectedChoice = config.choices[selectedIndex];
-        if (selectedChoice.disabled) return;
+        if (!selectedChoice) {
+          setStatus('done');
+          done(null);
+          return;
+        }
         setStatus('done');
         done(selectedChoice.value);
         return;
       }
 
       if (isUpKey(key)) {
-        let newIndex = selectedIndex > 0 ? selectedIndex - 1 : config.choices.length - 1;
-        while (config.choices[newIndex]?.disabled && newIndex !== selectedIndex) {
-          newIndex = newIndex > 0 ? newIndex - 1 : config.choices.length - 1;
-        }
+        const newIndex = selectedIndex > 0 ? selectedIndex - 1 : config.choices.length - 1;
         setSelectedIndex(newIndex);
       } else if (isDownKey(key)) {
-        let newIndex = selectedIndex < config.choices.length - 1 ? selectedIndex + 1 : 0;
-        while (config.choices[newIndex]?.disabled && newIndex !== selectedIndex) {
-          newIndex = newIndex < config.choices.length - 1 ? newIndex + 1 : 0;
-        }
+        const newIndex = selectedIndex < config.choices.length - 1 ? selectedIndex + 1 : 0;
         setSelectedIndex(newIndex);
       }
     });
@@ -1341,7 +1350,7 @@ export async function selectAITool(options: {
     const choicesDisplay = config.choices.map((choice, index) => {
       const isSelected = index === selectedIndex;
       const pointer = isSelected ? '❯' : ' ';
-      const nameDisplay = choice.disabled ? chalk.gray(choice.name) : (isSelected ? chalk.cyan(choice.name) : choice.name);
+      const nameDisplay = isSelected ? chalk.cyan(choice.name) : choice.name;
       const description = choice.description && isSelected ? `\n  ${chalk.gray(choice.description)}` : '';
       return `${pointer} ${nameDisplay}${description}`;
     }).join('\n');
@@ -1349,18 +1358,23 @@ export async function selectAITool(options: {
     return `${prefix} ${message}\n${choicesDisplay}`;
   });
 
-  const choices = [
+  const claudeDescription = claudeAvailable
+    ? 'Use the Claude Code CLI'
+    : 'CLI not detected (選択するとエラーになる可能性があります)';
+  const codexDescription = codexAvailable
+    ? 'Run via bunx @openai/codex@latest'
+    : 'bunx 経由で実行（事前チェックなし）';
+
+  const choices: Array<{ name: string; value: AIToolChoiceValue; description: string }> = [
     {
       name: 'Claude Code - Anthropic\'s AI coding assistant',
       value: 'claude',
-      description: options.claudeAvailable ? 'Use the Claude Code CLI' : 'Not found in PATH',
-      disabled: !options.claudeAvailable && 'Not available'
+      description: claudeDescription
     },
     {
       name: 'Codex CLI - OpenAI\'s code generation tool',
       value: 'codex',
-      description: options.codexAvailable ? 'Use the Codex CLI' : 'Not found in PATH',
-      disabled: !options.codexAvailable && 'Not available'
+      description: codexDescription
     }
   ];
 
@@ -1369,8 +1383,7 @@ export async function selectAITool(options: {
     choices
   });
 
-  if (value === null) return null;
-  return value as 'claude' | 'codex';
+  return value;
 }
 
 function formatTimeAgo(timestamp: number): string {

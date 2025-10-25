@@ -63,7 +63,8 @@ claude-worktree --tool codex
 
 # Pass tool-specific options (after "--")
 claude-worktree --tool claude -- -r          # Resume in Claude Code
-claude-worktree --tool codex -- --continue   # Continue in Codex CLI
+claude-worktree --tool codex -- resume last  # Resume last Codex session
+claude-worktree --tool codex -- resume <id>  # Resume specific Codex session
 ```
 ```
 

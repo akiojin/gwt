@@ -109,7 +109,7 @@ Pass-through:
   Use "--" to pass additional args directly to the selected tool.
   Examples:
     claude-worktree --tool claude -- -r
-    claude-worktree --tool codex -- --continue
+    claude-worktree --tool codex -- resume last
 `);
 }
 
@@ -180,8 +180,7 @@ export async function main(): Promise<void> {
       printInfo('You can install it from: https://claude.ai/code');
     }
     if (!codexAvailable) {
-      // Optional informational message – Codex is optional
-      // printInfo('Codex CLI not found. Install it if you intend to use it.');
+      printInfo('Codex CLI not detected. You can still select it, but bunx may prompt to install.');
     }
 
     // Get repository root
@@ -411,23 +410,33 @@ async function handleBranchSelection(branchName: string, repoRoot: string): Prom
     ]);
     if (argTool) {
       selectedTool = argTool;
-      if (selectedTool === 'claude' && !localClaudeAvail) selectedTool = null;
-      if (selectedTool === 'codex' && !localCodexAvail) selectedTool = null;
-      if (!selectedTool) printWarning('Requested tool is not available.');
+      if (selectedTool === 'claude' && !localClaudeAvail) {
+        selectedTool = null;
+        printWarning('Requested tool is not available.');
+      } else if (selectedTool === 'codex' && !localCodexAvail) {
+        selectedTool = null;
+        printWarning('Codex CLI was not detected. Install Bun and Codex before selecting it.');
+      }
     }
     if (!selectedTool) {
-      if (localClaudeAvail && !localCodexAvail) selectedTool = 'claude';
-      else if (!localClaudeAvail && localCodexAvail) selectedTool = 'codex';
-      else selectedTool = await selectAITool({ claudeAvailable: localClaudeAvail, codexAvailable: localCodexAvail });
+      selectedTool = await selectAITool({ claudeAvailable: localClaudeAvail, codexAvailable: localCodexAvail });
     }
     if (!selectedTool) {
       printInfo('No AI tool selected. Returning to menu.');
       return true;
     }
-
-    // If neither tool is available, abort early
     if (!localClaudeAvail && !localCodexAvail) {
       printError('No AI tools are available in PATH (Claude Code or Codex CLI).');
+      await confirmContinue('Press enter to continue...');
+      return true;
+    }
+    if (selectedTool === 'claude' && !localClaudeAvail) {
+      printError('Claude Code CLI not found in PATH. Install it before selecting this option.');
+      await confirmContinue('Press enter to continue...');
+      return true;
+    }
+    if (selectedTool === 'codex' && !localCodexAvail) {
+      printError('Codex CLI not detected via bunx. Install Bun and the Codex CLI before selecting this option.');
       await confirmContinue('Press enter to continue...');
       return true;
     }
@@ -660,6 +669,7 @@ async function handleManageWorktrees(worktrees: WorktreeInfo[]): Promise<boolean
           }
 
           // Select AI tool (reuse selection logic)
+          const { selectAITool } = await import('./ui/prompts.js');
           const [localClaudeAvail, localCodexAvail] = await Promise.all([
             isClaudeCodeAvailable().catch(() => false),
             isCodexAvailable().catch(() => false)
@@ -670,13 +680,19 @@ async function handleManageWorktrees(worktrees: WorktreeInfo[]): Promise<boolean
             return true;
           }
 
-          const { selectAITool } = await import('./ui/prompts.js');
-          let selectedTool: 'claude' | 'codex' | null = null;
-          if (localClaudeAvail && !localCodexAvail) selectedTool = 'claude';
-          else if (!localClaudeAvail && localCodexAvail) selectedTool = 'codex';
-          else selectedTool = await selectAITool({ claudeAvailable: localClaudeAvail, codexAvailable: localCodexAvail });
+          const selectedTool = await selectAITool({ claudeAvailable: localClaudeAvail, codexAvailable: localCodexAvail });
           if (!selectedTool) {
             printInfo('No AI tool selected. Returning to menu.');
+            return true;
+          }
+          if (selectedTool === 'claude' && !localClaudeAvail) {
+            printError('Claude Code CLI not found in PATH. Install it before selecting this option.');
+            await confirmContinue('Press enter to continue...');
+            return true;
+          }
+          if (selectedTool === 'codex' && !localCodexAvail) {
+            printError('Codex CLI not detected via bunx. Install Bun and the Codex CLI before selecting this option.');
+            await confirmContinue('Press enter to continue...');
             return true;
           }
 
