@@ -47,12 +47,14 @@ Claude WorktreeはGit worktreeを活用した対話型ブランチ管理CLIツ�
 ### 1. CLI Interface (`src/index.ts`)
 
 **責務:**
+
 - コマンドライン引数のパース
 - ユーザー入力の受付（inquirer）
 - 各モジュールのオーケストレーション
 - エラーハンドリングと終了処理
 
 **主要な関数:**
+
 - `main()`: エントリーポイント
 - `handleSelection()`: ユーザー選択のルーティング
 - `handleBranchSelection()`: ブランチ選択フロー
@@ -61,6 +63,7 @@ Claude WorktreeはGit worktreeを活用した対話型ブランチ管理CLIツ�
 - `handleCleanupMergedPRs()`: PRクリーンアップフロー
 
 **依存関係:**
+
 - `git.ts` - Git操作
 - `worktree.ts` - ワークツリー管理
 - `github.ts` - GitHub統合
@@ -70,12 +73,14 @@ Claude WorktreeはGit worktreeを活用した対話型ブランチ管理CLIツ�
 ### 2. Git Module (`src/git.ts`)
 
 **責務:**
+
 - Gitコマンドの実行と抽象化
 - ブランチ管理（作成、削除、一覧取得）
 - バージョン管理（package.jsonの読み書き）
 - 変更管理（コミット、stash、破棄）
 
 **主要な関数:**
+
 - `getAllBranches()`: 全ブランチ取得
 - `createBranch()`: ブランチ作成
 - `deleteBranch()`: ブランチ削除
@@ -85,17 +90,20 @@ Claude WorktreeはGit worktreeを活用した対話型ブランチ管理CLIツ�
 - `commitChanges()`: 変更をコミット
 
 **技術スタック:**
+
 - `execa` - Gitコマンド実行
 - `node:fs` - ファイルシステム操作
 
 ### 3. Worktree Module (`src/worktree.ts`)
 
 **責務:**
+
 - Gitワークツリーの作成と削除
 - ワークツリー一覧の取得
 - ワークツリーパスの生成
 
 **主要な関数:**
+
 - `worktreeExists()`: ワークツリー存在チェック
 - `createWorktree()`: ワークツリー作成
 - `removeWorktree()`: ワークツリー削除
@@ -103,22 +111,26 @@ Claude WorktreeはGit worktreeを活用した対話型ブランチ管理CLIツ�
 - `generateWorktreePath()`: パス生成
 
 **技術スタック:**
+
 - `execa` - Git worktreeコマンド実行
 - `node:path` - パス操作
 
 ### 4. GitHub Module (`src/github.ts`)
 
 **責務:**
+
 - GitHub CLIとの統合
 - マージ済みPRの取得
 - PR情報の解析
 
 **主要な関数:**
+
 - `getMergedPullRequests()`: マージ済みPR取得
 - `isGitHubCLIAvailable()`: GitHub CLI可用性チェック
 - `checkGitHubAuth()`: 認証状態チェック
 
 **技術スタック:**
+
 - `execa` - `gh`コマンド実行
 
 ### 5. AI Tool Integration
@@ -126,58 +138,70 @@ Claude WorktreeはGit worktreeを活用した対話型ブランチ管理CLIツ�
 #### Claude Code (`src/claude.ts`)
 
 **責務:**
+
 - Claude Codeの起動と管理
 - 実行モードの設定
 
 **主要な関数:**
+
 - `launchClaudeCode()`: Claude Code起動
 - `isClaudeCodeAvailable()`: 可用性チェック
 
 #### Codex CLI (`src/codex.ts`)
 
 **責務:**
+
 - Codex CLIの起動と管理
 - 実行モードの設定
 
 **主要な関数:**
+
 - `launchCodexCLI()`: Codex CLI起動
 - `isCodexAvailable()`: 可用性チェック
 
 **技術スタック:**
+
 - `execa` - AIツールプロセス起動
 - `node:child_process` - プロセス管理
 
 ### 6. Session Management (`src/config/index.ts`)
 
 **責務:**
+
 - セッション情報の永続化
 - セッション履歴の管理
 - 継続/再開機能のサポート
 
 **主要な関数:**
+
 - `saveSession()`: セッション保存
 - `loadSession()`: 最新セッション読み込み
 - `getAllSessions()`: 全セッション取得
 
 **データ保存:**
+
 - `~/.config/claude-worktree/sessions.json`
 
 **技術スタック:**
+
 - `node:fs` - ファイル操作
 - `node:os` - ホームディレクトリ取得
 
 ### 7. UI Components (`src/ui/`)
 
 **責務:**
+
 - ブランチテーブルの生成
 - フォーマット済み出力
 - ユーザーインタラクション
 
 **主要な関数:**
+
 - `createBranchTable()`: ブランチ選択テーブル生成
 - `formatDisplay()`: 出力フォーマット
 
 **技術スタック:**
+
 - `inquirer` - 対話型プロンプト
 - `chalk` - カラー出力
 
@@ -285,6 +309,7 @@ git.deleteBranch() → Delete Branch
 ### Exit Handlers
 
 `src/utils.ts`の`setupExitHandlers()`により以下を処理:
+
 - SIGINT (Ctrl+C)
 - SIGTERM
 - Uncaught exceptions
@@ -297,6 +322,7 @@ git.deleteBranch() → Delete Branch
 **場所:** `~/.config/claude-worktree/sessions.json`
 
 **形式:**
+
 ```json
 {
   "sessions": [
@@ -333,6 +359,7 @@ git.deleteBranch() → Delete Branch
 **Testing Framework:** Vitest
 
 **Mock Strategy:**
+
 - `execa`: Gitコマンドのモック
 - `node:fs`: ファイルシステムのモック
 - `inquirer`: ユーザー入力のモック

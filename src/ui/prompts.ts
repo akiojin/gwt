@@ -1,5 +1,6 @@
 import { select, input, confirm } from "@inquirer/prompts";
 import chalk from "chalk";
+import stringWidth from "string-width";
 import {
   BranchInfo,
   BranchType,
@@ -7,6 +8,11 @@ import {
   CleanupTarget,
 } from "./types.js";
 import { SessionData } from "../config/index.js";
+
+function stripAnsi(value: string): string {
+  // eslint-disable-next-line no-control-regex
+  return value.replace(/\u001B\[[0-9;]*m/g, "");
+}
 
 type SelectChoice<TValue> = {
   name: string;
@@ -164,6 +170,8 @@ async function selectBranchWithShortcuts(
   const { createPrompt, useState, useKeypress, isEnterKey, usePrefix } =
     await import("@inquirer/core");
 
+  const supportsColor = chalk.level > 0;
+
   const branchSelectPrompt = createPrompt<
     string,
     {
@@ -258,11 +266,17 @@ async function selectBranchWithShortcuts(
         c.value !== "__header__" && c.value !== "__separator__" && !c.disabled,
     );
 
+    const maxChoiceWidth = selectableChoices.reduce((max, choice) => {
+      const width = stringWidth(stripAnsi(choice.name));
+      return width > max ? width : max;
+    }, 0);
+
     const pageSize = config.pageSize || 15;
 
     let output = `${prefix} ${config.message}\n`;
     output +=
-      "Actions: (n) Create new branch, (m) Manage worktrees, (c) Clean up merged PRs, (a) Account management, (q) Exit\n\n";
+      "Actions: (n) Create new branch, (m) Manage worktrees, (c) Clean up merged PRs, (a) Account management, (q) Exit\n";
+    output += "\n";
 
     // ヘッダー行とセパレーター行を表示
     if (headerChoice) {
@@ -288,8 +302,12 @@ async function selectBranchWithShortcuts(
 
     visibleSelectableChoices.forEach((choice, index) => {
       const globalIndex = selectableStartIndex + index;
-      const cursor = globalIndex === selectedIndex ? "❯" : " ";
-      output += `${cursor} ${choice.name}\n`;
+      const line = formatBranchChoiceLine(choice.name, {
+        isSelected: globalIndex === selectedIndex,
+        supportsColor,
+        maxWidth: maxChoiceWidth,
+      });
+      output += `${line}\n`;
     });
 
     return output;
@@ -300,6 +318,33 @@ async function selectBranchWithShortcuts(
     choices: allChoices,
     pageSize: 15,
   });
+}
+
+type HighlightOptions = {
+  isSelected: boolean;
+  supportsColor: boolean;
+  maxWidth: number;
+};
+
+function padToWidth(value: string, width: number): string {
+  const currentWidth = stringWidth(value);
+  if (currentWidth >= width) {
+    return value;
+  }
+  return value + " ".repeat(width - currentWidth);
+}
+
+export function formatBranchChoiceLine(
+  name: string,
+  { isSelected, maxWidth }: HighlightOptions,
+): string {
+  const plain = stripAnsi(name);
+  const paddedPlain = padToWidth(plain, maxWidth);
+  if (isSelected) {
+    return `> ${paddedPlain}`;
+  }
+
+  return `  ${paddedPlain}`;
 }
 
 export async function selectBranchType(): Promise<BranchType> {
@@ -2013,32 +2058,33 @@ ${category.title}`,
 export async function selectWorktreePathConflictResolution(
   targetBranch: string,
   targetPath: string,
-  existingBranch: string
-): Promise<'remove-and-create' | 'use-different-path' | 'cancel'> {
+  existingBranch: string,
+): Promise<"remove-and-create" | "use-different-path" | "cancel"> {
   console.log(chalk.yellow(`\n⚠️  Worktree path conflict detected:`));
   console.log(chalk.dim(`  Target path: ${targetPath}`));
   console.log(chalk.dim(`  Target branch: ${targetBranch}`));
   console.log(chalk.dim(`  Existing branch at this path: ${existingBranch}\n`));
 
   const action = await select({
-    message: 'How would you like to proceed?',
+    message: "How would you like to proceed?",
     choices: [
       {
         name: `Remove existing worktree and create new one for "${targetBranch}"`,
-        value: 'remove-and-create' as const,
-        description: `Delete the worktree for "${existingBranch}" and create a new one`
+        value: "remove-and-create" as const,
+        description: `Delete the worktree for "${existingBranch}" and create a new one`,
       },
       {
-        name: 'Use a different path (add suffix)',
-        value: 'use-different-path' as const,
-        description: 'Create the worktree at an alternative path (e.g., path-2)'
+        name: "Use a different path (add suffix)",
+        value: "use-different-path" as const,
+        description:
+          "Create the worktree at an alternative path (e.g., path-2)",
       },
       {
-        name: 'Cancel',
-        value: 'cancel' as const,
-        description: 'Return to main menu'
-      }
-    ]
+        name: "Cancel",
+        value: "cancel" as const,
+        description: "Return to main menu",
+      },
+    ],
   });
 
   return action;

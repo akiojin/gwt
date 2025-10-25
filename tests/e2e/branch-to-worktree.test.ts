@@ -14,6 +14,8 @@ import * as git from "../../src/git";
 import * as worktree from "../../src/worktree";
 import { createBranchTable } from "../../src/ui/table";
 
+const stripAnsi = (value: string) => value.replace(/\u001B\[[0-9;]*m/g, "");
+
 describe("E2E: Complete Branch to Worktree Flow", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -121,11 +123,9 @@ branch refs/heads/feature/user-auth
       );
       expect(branchTable.length).toBeGreaterThan(0);
 
-      // Verify table has header and separator
-      const header = branchTable.find((c) => c.value === "__header__");
-      const separator = branchTable.find((c) => c.value === "__separator__");
-      expect(header).toBeDefined();
-      expect(separator).toBeDefined();
+      // Verify first row follows icon+name format
+      const firstRow = stripAnsi(branchTable[0]?.name ?? "");
+      expect(firstRow.startsWith("⚡🟢⭐  ")).toBe(true);
 
       // === STEP 4: User selects a branch ===
       const selectedBranchName = "feature/dashboard";

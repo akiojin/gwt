@@ -16,22 +16,26 @@
 1. リポジトリをフォーク
 
 2. クローン
+
 ```bash
 git clone https://github.com/YOUR_USERNAME/claude-worktree.git
 cd claude-worktree
 ```
 
 1. 依存関係をインストール
+
 ```bash
 bun install
 ```
 
 1. ビルド
+
 ```bash
 bun run build
 ```
 
 1. ローカルで実行
+
 ```bash
 bunx .
 ```
@@ -68,6 +72,7 @@ git checkout -b feature/your-feature-name
 ```
 
 ブランチ命名規則:
+
 - `feature/` - 新機能
 - `fix/` - バグ修正
 - `docs/` - ドキュメント更新
@@ -77,6 +82,7 @@ git checkout -b feature/your-feature-name
 ### 2. 開発
 
 コード品質ツール:
+
 - ESLint: `bun run lint`
 - Prettier: `bun run format`
 - TypeScript: `bun run type-check`
@@ -104,6 +110,7 @@ bun test tests/unit/git.test.ts
 このプロジェクトは[Conventional Commits](https://www.conventionalcommits.org/)を使用します。
 
 コミットメッセージ形式:
+
 ```
 <type>(<scope>): <subject>
 
@@ -113,6 +120,7 @@ bun test tests/unit/git.test.ts
 ```
 
 **Types:**
+
 - `feat`: 新機能
 - `fix`: バグ修正
 - `docs`: ドキュメント更新
@@ -121,6 +129,7 @@ bun test tests/unit/git.test.ts
 - `chore`: ビルド・ツール更新
 
 **例:**
+
 ```bash
 git commit -m "feat(worktree): add support for custom worktree paths"
 git commit -m "fix(git): handle branch names with special characters"
@@ -152,20 +161,25 @@ GitHubでPull Requestを作成してください。
 
 ```markdown
 ## 概要
+
 <!-- 変更の概要を記述 -->
 
 ## 変更内容
-<!-- 主な変更点をリスト化 -->
--
+
+## <!-- 主な変更点をリスト化 -->
+
 -
 
 ## 関連Issue
+
 <!-- Closes #123 -->
 
 ## テスト
+
 <!-- テストの内容や手順 -->
 
 ## スクリーンショット（該当する場合）
+
 <!-- 実行例や出力例 -->
 ```
 
@@ -212,7 +226,7 @@ throw new GitError(`Failed to create branch ${branchName}`, originalError);
  */
 export async function createBranch(
   branchName: string,
-  baseBranch = 'main'
+  baseBranch = "main",
 ): Promise<void> {
   // implementation
 }
@@ -223,7 +237,7 @@ export async function createBranch(
 ### Test Structure
 
 ```typescript
-describe('Module/Feature', () => {
+describe("Module/Feature", () => {
   beforeEach(() => {
     // Setup
   });
@@ -232,8 +246,8 @@ describe('Module/Feature', () => {
     // Cleanup
   });
 
-  describe('Function Name', () => {
-    it('should do something specific', () => {
+  describe("Function Name", () => {
+    it("should do something specific", () => {
       // Arrange
       // Act
       // Assert
@@ -260,24 +274,23 @@ describe('Module/Feature', () => {
 
 ```markdown
 ## 環境
+
 - OS:
 - Node.js バージョン（利用している場合）:
 - Bun バージョン:
 - Claude Worktree バージョン:
 
 ## 再現手順
+
 1.
 2.
 3.
 
 ## 期待される動作
 
-
 ## 実際の動作
 
-
 ## エラーメッセージ/ログ
-
 ```
 
 ### Feature Request Template
@@ -285,15 +298,11 @@ describe('Module/Feature', () => {
 ```markdown
 ## 機能の概要
 
-
 ## ユースケース
-
 
 ## 提案する実装方法（あれば）
 
-
 ## 代替案（あれば）
-
 ```
 
 ## Communication

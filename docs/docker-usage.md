@@ -7,16 +7,18 @@
 このエラーは通常、改行コードの問題で発生します。以下の手順で解決してください：
 
 1. **Dockerイメージの再ビルド**
+
    ```bash
    # 既存のコンテナとイメージを削除
    docker-compose down
    docker system prune -f
-   
+
    # イメージを再ビルド
    docker-compose build --no-cache
    ```
 
 2. **コンテナの起動**
+
    ```bash
    docker-compose up -d
    ```
@@ -34,6 +36,7 @@ Windowsで開発している場合、シェルスクリプトの改行コード�
 `.gitattributes`ファイルが設定されているため、Gitで管理されるファイルは自動的にLFに変換されます。
 
 手動で修正する場合：
+
 ```bash
 # macOS/Linuxの場合
 perl -pi -e 's/\r\n/\n/g' .docker/entrypoint.sh
@@ -47,6 +50,7 @@ file .docker/entrypoint.sh
 ### Dockerイメージのクリーンアップ
 
 完全にクリーンな状態から始める場合：
+
 ```bash
 # すべてのコンテナを停止・削除
 docker-compose down -v

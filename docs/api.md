@@ -34,6 +34,7 @@ const branches = await git.getAllBranches();
 新しいブランチを作成します。
 
 **パラメータ:**
+
 - `branchName`: 作成するブランチ名
 - `baseBranch`: ベースとなるブランチ（デフォルト: 'main'）
 
@@ -44,6 +45,7 @@ const branches = await git.getAllBranches();
 ブランチが存在するかチェックします。
 
 **パラメータ:**
+
 - `branchName`: チェックするブランチ名
 
 **戻り値:** ブランチが存在する場合`true`
@@ -53,6 +55,7 @@ const branches = await git.getAllBranches();
 ブランチを削除します。
 
 **パラメータ:**
+
 - `branchName`: 削除するブランチ名
 - `force`: 強制削除フラグ（デフォルト: false）
 
@@ -65,6 +68,7 @@ const branches = await git.getAllBranches();
 `package.json`から現在のバージョンを取得します。
 
 **パラメータ:**
+
 - `repoRoot`: リポジトリのルートパス
 
 **戻り値:** セマンティックバージョン文字列（例: "1.2.3"）
@@ -74,14 +78,16 @@ const branches = await git.getAllBranches();
 新しいバージョンを計算します。
 
 **パラメータ:**
+
 - `currentVersion`: 現在のバージョン
 - `versionBump`: バージョンアップの種類
 
 **戻り値:** 新しいバージョン文字列
 
 **例:**
+
 ```typescript
-calculateNewVersion('1.2.3', 'minor') // => '1.3.0'
+calculateNewVersion("1.2.3", "minor"); // => '1.3.0'
 ```
 
 #### `executeNpmVersionInWorktree(worktreePath: string, newVersion: string): Promise<void>`
@@ -89,6 +95,7 @@ calculateNewVersion('1.2.3', 'minor') // => '1.3.0'
 ワークツリー内でバージョンを更新します。
 
 **パラメータ:**
+
 - `worktreePath`: ワークツリーのパス
 - `newVersion`: 新しいバージョン
 
@@ -99,6 +106,7 @@ calculateNewVersion('1.2.3', 'minor') // => '1.3.0'
 未コミット変更があるかチェックします。
 
 **パラメータ:**
+
 - `worktreePath`: チェックするワークツリーのパス
 
 **戻り値:** 未コミット変更がある場合`true`
@@ -108,6 +116,7 @@ calculateNewVersion('1.2.3', 'minor') // => '1.3.0'
 変更をコミットします。
 
 **パラメータ:**
+
 - `worktreePath`: ワークツリーのパス
 - `message`: コミットメッセージ
 
@@ -116,6 +125,7 @@ calculateNewVersion('1.2.3', 'minor') // => '1.3.0'
 変更をstashします。
 
 **パラメータ:**
+
 - `worktreePath`: ワークツリーのパス
 
 #### `discardAllChanges(worktreePath: string): Promise<void>`
@@ -123,6 +133,7 @@ calculateNewVersion('1.2.3', 'minor') // => '1.3.0'
 全ての変更を破棄します。
 
 **パラメータ:**
+
 - `worktreePath`: ワークツリーのパス
 
 **警告:** この操作は元に戻せません
@@ -136,6 +147,7 @@ calculateNewVersion('1.2.3', 'minor') // => '1.3.0'
 指定ブランチのワークツリーが存在するかチェックします。
 
 **パラメータ:**
+
 - `branchName`: チェックするブランチ名
 
 **戻り値:** ワークツリーが存在する場合そのパス、存在しない場合`null`
@@ -145,6 +157,7 @@ calculateNewVersion('1.2.3', 'minor') // => '1.3.0'
 ブランチ名からワークツリーパスを生成します。
 
 **パラメータ:**
+
 - `repoRoot`: リポジトリのルートパス
 - `branchName`: ブランチ名
 
@@ -155,6 +168,7 @@ calculateNewVersion('1.2.3', 'minor') // => '1.3.0'
 新しいワークツリーを作成します。
 
 **パラメータ:**
+
 - `config.branchName`: ブランチ名
 - `config.worktreePath`: ワークツリーのパス
 - `config.repoRoot`: リポジトリのルートパス
@@ -168,6 +182,7 @@ calculateNewVersion('1.2.3', 'minor') // => '1.3.0'
 ワークツリーを削除します。
 
 **パラメータ:**
+
 - `worktreePath`: 削除するワークツリーのパス
 - `force`: 強制削除フラグ（デフォルト: false）
 
@@ -188,6 +203,7 @@ calculateNewVersion('1.2.3', 'minor') // => '1.3.0'
 Claude Codeを起動します。
 
 **パラメータ:**
+
 - `worktreePath`: 作業ディレクトリ
 - `args`: 追加引数（オプション）
 
@@ -204,6 +220,7 @@ Claude Codeが利用可能かチェックします。
 Codex CLIを起動します。
 
 **パラメータ:**
+
 - `worktreePath`: 作業ディレクトリ
 - `args`: 追加引数（オプション）
 
@@ -246,6 +263,7 @@ GitHub CLIの認証状態をチェックします。
 セッション情報を保存します。
 
 **パラメータ:**
+
 - `session`: 保存するセッション情報
 
 #### `loadSession(): Promise<SessionInfo | null>`
@@ -267,8 +285,8 @@ GitHub CLIの認証状態をチェックします。
 ```typescript
 interface BranchInfo {
   name: string;
-  type: 'local' | 'remote';
-  branchType: 'main' | 'develop' | 'feature' | 'hotfix' | 'release' | 'other';
+  type: "local" | "remote";
+  branchType: "main" | "develop" | "feature" | "hotfix" | "release" | "other";
   isCurrent: boolean;
 }
 ```
@@ -302,7 +320,7 @@ interface SessionInfo {
   worktreePath: string;
   branchName: string;
   timestamp: number;
-  aiTool: 'claude-code' | 'codex-cli';
+  aiTool: "claude-code" | "codex-cli";
 }
 ```
 
@@ -314,10 +332,10 @@ Git操作の失敗時にスローされます。
 
 ```typescript
 try {
-  await git.createBranch('feature/test');
+  await git.createBranch("feature/test");
 } catch (error) {
   if (error instanceof GitError) {
-    console.error('Git operation failed:', error.message);
+    console.error("Git operation failed:", error.message);
   }
 }
 ```
@@ -331,7 +349,7 @@ try {
   await worktree.createWorktree(config);
 } catch (error) {
   if (error instanceof WorktreeError) {
-    console.error('Worktree operation failed:', error.message);
+    console.error("Worktree operation failed:", error.message);
   }
 }
 ```
@@ -346,6 +364,7 @@ try {
 - `-- <args>`: AIツールに渡す追加引数
 
 **例:**
+
 ```bash
 # Claude Codeで新規ワークツリー作成
 claude-worktree
