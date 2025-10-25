@@ -1,13 +1,13 @@
 module.exports = {
   parserPreset: {
-    name: 'subject-only',
+    name: "subject-only",
     parserOpts: {
       headerPattern: /^(.*)$/,
-      headerCorrespondence: ['subject'],
+      headerCorrespondence: ["subject"],
     },
   },
   rules: {
-    'subject-empty': [2, 'never'],
-    'subject-max-length': [2, 'always', 100],
+    "subject-empty": [2, "never"],
+    "subject-max-length": [2, "always", 100],
   },
 };

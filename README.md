@@ -27,6 +27,7 @@ Interactive Git worktree manager with AI tool selection (Claude Code / Codex CLI
 Install globally with bun:
 
 #### bun (global install)
+
 ```bash
 bun add -g @akiojin/claude-worktree
 ```
@@ -36,6 +37,7 @@ bun add -g @akiojin/claude-worktree
 Run without installation using bunx:
 
 #### bunx (bun)
+
 ```bash
 bunx @akiojin/claude-worktree
 ```
@@ -44,7 +46,7 @@ bunx @akiojin/claude-worktree
 
 Run in any Git repository:
 
-```bash
+````bash
 # If installed globally
 claude-worktree
 
@@ -65,8 +67,9 @@ claude-worktree --tool codex
 claude-worktree --tool claude -- -r          # Resume in Claude Code
 claude-worktree --tool codex -- resume --last  # Resume last Codex session
 claude-worktree --tool codex -- resume <id>  # Resume specific Codex session
-```
-```
+````
+
+````
 
 The tool presents an interactive interface with the following options:
 
@@ -142,7 +145,7 @@ uv tool install specify-cli --from git+https://github.com/akiojin/spec-kit.git
 
 # Verify installation
 specify --help
-```
+````
 
 ### Available Spec Kit Commands
 
@@ -287,12 +290,12 @@ This project uses **semantic-release** for automated version management, changel
 
 semantic-release uses commit messages to determine release types:
 
-| Type | Description | Version Impact |
-|------|-------------|----------------|
-| `feat:` | New feature | minor (1.0.0 → 1.1.0) |
-| `fix:` | Bug fix | patch (1.0.0 → 1.0.1) |
-| `BREAKING CHANGE:` | Breaking change | major (1.0.0 → 2.0.0) |
-| `chore:`, `docs:`, `style:`, `refactor:`, `test:` | No release | - |
+| Type                                              | Description     | Version Impact        |
+| ------------------------------------------------- | --------------- | --------------------- |
+| `feat:`                                           | New feature     | minor (1.0.0 → 1.1.0) |
+| `fix:`                                            | Bug fix         | patch (1.0.0 → 1.0.1) |
+| `BREAKING CHANGE:`                                | Breaking change | major (1.0.0 → 2.0.0) |
+| `chore:`, `docs:`, `style:`, `refactor:`, `test:` | No release      | -                     |
 
 **Example commits**:
 

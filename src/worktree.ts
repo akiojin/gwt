@@ -132,9 +132,11 @@ export async function generateWorktreePath(
  * @param {string} targetPath - 確認するパス
  * @returns {Promise<WorktreeInfo | null>} 既存のworktree情報、または存在しない場合はnull
  */
-export async function checkWorktreePathConflict(targetPath: string): Promise<WorktreeInfo | null> {
+export async function checkWorktreePathConflict(
+  targetPath: string,
+): Promise<WorktreeInfo | null> {
   const worktrees = await listWorktrees();
-  const existingWorktree = worktrees.find(w => w.path === targetPath);
+  const existingWorktree = worktrees.find((w) => w.path === targetPath);
   return existingWorktree || null;
 }
 
@@ -143,7 +145,9 @@ export async function checkWorktreePathConflict(targetPath: string): Promise<Wor
  * @param {string} basePath - 元のパス
  * @returns {Promise<string>} 利用可能な代替パス
  */
-export async function generateAlternativeWorktreePath(basePath: string): Promise<string> {
+export async function generateAlternativeWorktreePath(
+  basePath: string,
+): Promise<string> {
   let counter = 2;
   let alternativePath = `${basePath}-${counter}`;
 

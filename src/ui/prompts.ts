@@ -10,6 +10,7 @@ import {
 import { SessionData } from "../config/index.js";
 
 function stripAnsi(value: string): string {
+  // eslint-disable-next-line no-control-regex
   return value.replace(/\u001B\[[0-9;]*m/g, "");
 }
 
@@ -335,7 +336,7 @@ function padToWidth(value: string, width: number): string {
 
 export function formatBranchChoiceLine(
   name: string,
-  { isSelected, supportsColor: _supportsColor, maxWidth }: HighlightOptions,
+  { isSelected, maxWidth }: HighlightOptions,
 ): string {
   const plain = stripAnsi(name);
   const paddedPlain = padToWidth(plain, maxWidth);
@@ -1952,32 +1953,33 @@ ${category.title}`,
 export async function selectWorktreePathConflictResolution(
   targetBranch: string,
   targetPath: string,
-  existingBranch: string
-): Promise<'remove-and-create' | 'use-different-path' | 'cancel'> {
+  existingBranch: string,
+): Promise<"remove-and-create" | "use-different-path" | "cancel"> {
   console.log(chalk.yellow(`\n⚠️  Worktree path conflict detected:`));
   console.log(chalk.dim(`  Target path: ${targetPath}`));
   console.log(chalk.dim(`  Target branch: ${targetBranch}`));
   console.log(chalk.dim(`  Existing branch at this path: ${existingBranch}\n`));
 
   const action = await select({
-    message: 'How would you like to proceed?',
+    message: "How would you like to proceed?",
     choices: [
       {
         name: `Remove existing worktree and create new one for "${targetBranch}"`,
-        value: 'remove-and-create' as const,
-        description: `Delete the worktree for "${existingBranch}" and create a new one`
+        value: "remove-and-create" as const,
+        description: `Delete the worktree for "${existingBranch}" and create a new one`,
       },
       {
-        name: 'Use a different path (add suffix)',
-        value: 'use-different-path' as const,
-        description: 'Create the worktree at an alternative path (e.g., path-2)'
+        name: "Use a different path (add suffix)",
+        value: "use-different-path" as const,
+        description:
+          "Create the worktree at an alternative path (e.g., path-2)",
       },
       {
-        name: 'Cancel',
-        value: 'cancel' as const,
-        description: 'Return to main menu'
-      }
-    ]
+        name: "Cancel",
+        value: "cancel" as const,
+        description: "Return to main menu",
+      },
+    ],
   });
 
   return action;

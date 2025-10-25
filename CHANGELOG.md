@@ -51,16 +51,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.6.1] - 2024-09-06
 
 ### Fixed
+
 - Docker環境での動作改善
 - パスハンドリングの修正
 
 ### Added
+
 - Dockerサポートの完全実装
 - Docker使用ガイド (docs/docker-usage.md)
 
 ## [0.6.0] - 2024-09-06
 
 ### Added
+
 - @akiojin/spec-kit統合による仕様駆動開発サポート
 - Codex CLI対応
   - Claude CodeとCodex CLIの選択機能
@@ -68,60 +71,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `--tool`オプションによる直接指定
 
 ### Changed
+
 - npmコマンドからnpx経由での実行に変更
 - npxコマンドを最新版指定に更新
 
 ## [0.5.0] - 2024-08-XX
 
 ### Added
+
 - セッション管理機能
   - `-c, --continue`: 最後のセッションを継続
   - `-r, --resume`: セッション選択して再開
   - セッション情報の永続化 (~/.config/claude-worktree/sessions.json)
 
 ### Changed
+
 - Claude Code統合の改善
 - UI/UXの向上
 
 ## [0.4.0] - 2024-07-XX
 
 ### Added
+
 - GitHub PR統合
   - マージ済みPRの自動検出
   - ブランチとワークツリーの一括クリーンアップ
   - 未プッシュコミットの処理
 
 ### Changed
+
 - エラーハンドリングの改善
 - パフォーマンスの最適化
 
 ## [0.3.0] - 2024-06-XX
 
 ### Added
+
 - スマートブランチ作成ワークフロー
   - feature/hotfix/releaseブランチタイプのサポート
   - releaseブランチでの自動バージョン管理
   - package.jsonの自動更新
 
 ### Changed
+
 - ブランチタイプの自動検出
 - ワークツリーパス生成ロジックの改善
 
 ## [0.2.0] - 2024-05-XX
 
 ### Added
+
 - ワークツリー管理機能
   - 既存ワークツリーの一覧表示
   - ワークツリーの開く/削除操作
   - ブランチも含めた削除オプション
 
 ### Changed
+
 - CLI UIの改善
 - エラーメッセージの分かりやすさ向上
 
 ## [0.1.0] - 2024-04-XX
 
 ### Added
+
 - 対話型ブランチ選択
   - ローカル・リモートブランチの統合表示
   - ブランチタイプ別の視覚的識別
@@ -137,6 +150,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - commit/stash/discard オプション
 
 ### Technical
+
 - TypeScript 5.8.3
 - Bun 1.3.1+ サポート（必須ランタイム）
 - Node.js 18+ サポート（開発ツール向けオプション）
@@ -147,6 +161,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.0.1] - 2024-03-XX
 
 ### Added
+
 - 初期リリース
 - 基本的なワークツリー管理機能
 
@@ -170,10 +185,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Breaking changes: なし
 
 新機能:
+
 - テストスイートの追加（ユーザーへの影響なし）
 - ドキュメントの拡充
 
 推奨アクション:
+
 - 特になし、通常通りアップグレード可能
 
 ### v0.5.x → v0.6.x
@@ -181,10 +198,12 @@ Breaking changes: なし
 Breaking changes: なし
 
 新機能:
+
 - Codex CLI対応
 - Docker対応
 
 推奨アクション:
+
 - Codex CLIを使用したい場合は`codex`コマンドをインストール
 - Docker環境で使用したい場合はdocs/docker-usage.mdを参照
 
@@ -193,9 +212,11 @@ Breaking changes: なし
 Breaking changes: なし
 
 新機能:
+
 - セッション管理 (-c, -r オプション)
 
 推奨アクション:
+
 - セッション機能を活用して開発効率を向上
 
 ## Deprecation Notices

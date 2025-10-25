@@ -836,8 +836,7 @@ async function handleCreateNewBranch(
     const argv = process.argv.slice(2);
     const idx = argv.findIndex(
       (a) =>
-        a === "--tool" ||
-        (typeof a === "string" && a.startsWith("--tool=")),
+        a === "--tool" || (typeof a === "string" && a.startsWith("--tool=")),
     );
     let argTool: "claude" | "codex" | undefined;
     if (idx !== -1) {

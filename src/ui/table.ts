@@ -4,6 +4,7 @@ import { WorktreeInfo } from "../worktree.js";
 import { getChangedFilesCount } from "../git.js";
 
 function stripAnsi(value: string): string {
+  // eslint-disable-next-line no-control-regex
   return value.replace(/\u001B\[[0-9;]*m/g, "");
 }
 
@@ -61,9 +62,7 @@ export async function createBranchTable(
   worktrees: WorktreeInfo[],
 ): Promise<Array<{ name: string; value: string; description?: string }>> {
   const worktreeMap = new Map(
-    worktrees
-      .filter((w) => w.path !== process.cwd())
-      .map((w) => [w.branch, w]),
+    worktrees.filter((w) => w.path !== process.cwd()).map((w) => [w.branch, w]),
   );
 
   const localBaseNames = new Set(
@@ -121,9 +120,7 @@ export async function createBranchTable(
       raw: baseLine,
       colored: baseLine,
       value: branch.name,
-      description: worktree
-        ? `Worktree: ${worktree.path}`
-        : "No worktree",
+      description: worktree ? `Worktree: ${worktree.path}` : "No worktree",
     });
   }
 

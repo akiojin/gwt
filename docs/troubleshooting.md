@@ -26,9 +26,11 @@ DEBUG_CLEANUP=1 claude-worktree
 worktreeのブランチ名とGitHub PRのブランチ名が一致しない場合があります。
 
 **症状：**
+
 - マージ済みPRが存在するのにクリーンアップ対象として表示されない
 
 **解決方法：**
+
 - デバッグモードでブランチ名を確認
 - 必要に応じて手動でブランチを削除
 
@@ -37,12 +39,14 @@ worktreeのブランチ名とGitHub PRのブランチ名が一致しない場合
 GitHub CLIが認証されていない場合、PR情報を取得できません。
 
 **症状：**
+
 ```
 Error: Failed to fetch merged pull requests
 Details: authentication required
 ```
 
 **解決方法：**
+
 ```bash
 gh auth login
 ```
@@ -52,9 +56,11 @@ gh auth login
 ローカルのリモートブランチ情報が古い場合があります。
 
 **症状：**
+
 - 最近マージされたPRが表示されない
 
 **解決方法：**
+
 ```bash
 git fetch --all --prune
 ```
@@ -64,10 +70,12 @@ git fetch --all --prune
 GitHub CLIがインストールされていない場合、PR機能は動作しません。
 
 **症状：**
+
 - PR関連のメニューが表示されない
 
 **解決方法：**
 GitHub CLIをインストールしてください：
+
 - macOS: `brew install gh`
 - Windows: `winget install GitHub.CLI`
 - Linux: 各ディストリビューションのパッケージマネージャーを使用
@@ -100,33 +108,37 @@ git branch -D branch-name
 Windows環境でbunxを使用して実行する際に以下のエラーが発生する場合があります：
 
 **症状：**
+
 ```
 Error [ERR_MODULE_NOT_FOUND]: Cannot find module 'E:\claude-worktree\dist\index.js'
 ```
 
 **原因：**
+
 - パッケージがインストールされた際にビルドが実行されていない
 - TypeScriptがグローバルにインストールされていない
 
 **解決方法：**
 
 1. **初回実行時**
+
    ```bash
    # パッケージを一度アンインストール
    bun remove -g @akiojin/claude-worktree
-   
+
    # 再インストール（prepareスクリプトが自動実行される）
    bun add -g @akiojin/claude-worktree
    ```
 
 2. **ローカル開発時**
+
    ```bash
    # 依存関係のインストール
    bun install
-   
+
    # ビルドの実行
    bun run build
-   
+
    # 実行
    bun run start
    ```
@@ -134,6 +146,7 @@ Error [ERR_MODULE_NOT_FOUND]: Cannot find module 'E:\claude-worktree\dist\index.
 ### TypeScriptコンパイルエラー
 
 **症状：**
+
 ```
 This is not the tsc command you are looking for
 ```
@@ -142,6 +155,7 @@ This is not the tsc command you are looking for
 Windowsの`tsc`コマンドが別のプログラムを参照している
 
 **解決方法：**
+
 ```bash
 # bunx経由でTypeScriptを実行
 bunx tsc
@@ -156,5 +170,6 @@ bun run build
 各パッケージマネージャ固有の設定ファイルが残っている場合に、警告が表示されることがあります。
 
 **解決方法：**
+
 - プロジェクト直下に残存する設定ファイル（例: `.npmrc`、`.yarnrc`、`.pnpmfile.cjs` など）を見直し/削除
 - 本プロジェクトでは bun を前提とします
