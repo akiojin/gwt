@@ -34,9 +34,6 @@ on:
     workflows: ["Test", "Lint"]
     types:
       - completed
-    branches:
-      - main
-      - develop
 
 jobs:
   auto-merge:
@@ -98,8 +95,9 @@ jobs:
         if: steps.check.outputs.ready == 'true'
         run: |
           PR_NUMBER=${{ steps.pr.outputs.number }}
+          PR_ID=${{ steps.check.outputs.id }}
           echo "Auto-merging PR #$PR_NUMBER"
-          gh pr merge $PR_NUMBER --merge --auto
+          gh api graphql -f query='mutation($pr:ID!){ mergePullRequest(input:{pullRequestId:$pr, mergeMethod:MERGE}) { pullRequest { number }}}' -f pr="$PR_ID"
         env:
           GH_TOKEN: ${{ github.token }}
 ```

@@ -81,11 +81,12 @@ gh pr view <pr-number> --json <fields>
 #### 取得フィールド
 
 ```bash
-gh pr view $PR_NUMBER --json mergeable,mergeStateStatus,isDraft
+gh pr view $PR_NUMBER --json id,mergeable,mergeStateStatus,isDraft
 ```
 
 | フィールド | 型 | 値 | 説明 |
 |-----------|-----|-----|------|
+| `id` | string | GraphQL Node ID | GraphQL API呼び出しで使用 |
 | `mergeable` | string | `MERGEABLE`, `CONFLICTING`, `UNKNOWN` | マージ可能性 |
 | `mergeStateStatus` | string | `CLEAN`, `UNSTABLE`, `BLOCKED`, `DIRTY`, `UNKNOWN` | マージ状態 |
 | `isDraft` | boolean | `true`, `false` | ドラフトPRかどうか |
@@ -103,10 +104,11 @@ gh pr view $PR_NUMBER --json mergeable,mergeStateStatus,isDraft
 #### 使用例
 
 ```bash
-PR_DATA=$(gh pr view 123 --json mergeable,mergeStateStatus,isDraft)
+PR_DATA=$(gh pr view 123 --json id,mergeable,mergeStateStatus,isDraft)
 MERGEABLE=$(echo "$PR_DATA" | jq -r '.mergeable')
 MERGE_STATE=$(echo "$PR_DATA" | jq -r '.mergeStateStatus')
 IS_DRAFT=$(echo "$PR_DATA" | jq -r '.isDraft')
+PR_ID=$(echo "$PR_DATA" | jq -r '.id')
 
 if [ "$MERGEABLE" != "MERGEABLE" ]; then
   echo "PR is not mergeable"
@@ -123,52 +125,53 @@ fi
 
 #### コマンド
 
+GraphQL APIの`mergePullRequest`ミューテーションを呼び出します。
+
 ```bash
-gh pr merge <pr-number> --merge --auto
+PR_ID=$(gh pr view <pr-number> --json id --jq '.id')
+gh api graphql \
+  -f query='mutation($pr:ID!){ mergePullRequest(input:{pullRequestId:$pr, mergeMethod:MERGE}) { pullRequest { number }}}' \
+  -f pr="$PR_ID"
 ```
 
 #### パラメータ
 
-- `<pr-number>`: マージするPR番号
-- `--merge`: Merge commitを使用（デフォルト：squash）
-- `--auto`: 条件が満たされたら自動的にマージ
+- `<pr-number>`: マージするPR番号（`gh pr view`でID取得に使用）
+- `pr`: GraphQLミューテーションに渡すPRのNode ID
 
-#### マージ方法の違い
+#### マージ方法
 
-| オプション | 説明 | コミット履歴 |
-|-----------|------|-------------|
-| `--merge` | Merge commit | すべてのコミットを保持 |
-| `--squash` | Squash and merge | 1つのコミットにまとめる |
-| `--rebase` | Rebase and merge | リニアな履歴 |
-
-**自動マージでは**: `--merge`を使用（仕様要件）
+- `mergeMethod: MERGE` 固定（Merge commitを保持）
+- 他のマージ方式（`SQUASH`, `REBASE`）は仕様外
 
 #### 出力形式
 
-**成功時**:
-```
-✓ Merged pull request #123 (feature-branch)
-```
-
-**失敗時**:
-```
-! Failed to merge pull request #123: <reason>
+**成功時（JSON）**:
+```json
+{
+  "data": {
+    "mergePullRequest": {
+      "pullRequest": {
+        "number": 123
+      }
+    }
+  }
+}
 ```
 
 #### エラーケース
 
 | エラー | 原因 | 対処 |
 |-------|------|------|
-| `pull request already merged` | 既にマージ済み | スキップ（正常終了） |
-| `merge conflict` | マージ競合 | スキップ（正常終了） |
-| `required status checks failed` | CIチェック失敗 | スキップ（正常終了） |
-| `insufficient permissions` | 権限不足 | エラー終了 |
+| `{"errors":[{"type":"UNPROCESSABLE"}]}` | 競合やステータスチェック未完了 | スキップ（正常終了）扱いにするか、ログ出力後に`exit 1` |
+| `{"errors":[{"type":"FORBIDDEN"}]}` | 権限不足 | エラー終了 |
+| ネットワークエラー | APIリクエスト失敗 | エラー終了 |
 
 #### 使用例
 
 ```bash
-echo "Auto-merging PR #$PR_NUMBER"
-if gh pr merge $PR_NUMBER --merge --auto; then
+PR_ID=$(gh pr view "$PR_NUMBER" --json id --jq '.id')
+if gh api graphql -f query='mutation($pr:ID!){ mergePullRequest(input:{pullRequestId:$pr, mergeMethod:MERGE}) { pullRequest { number }}}' -f pr="$PR_ID"; then
   echo "✓ Successfully merged PR #$PR_NUMBER"
 else
   EXIT_CODE=$?
@@ -255,13 +258,15 @@ if [ -z "$PR_NUMBER" ]; then
 fi
 
 # PR詳細取得
-if ! PR_DATA=$(gh pr view "$PR_NUMBER" --json mergeable,mergeStateStatus,isDraft); then
+if ! PR_DATA=$(gh pr view "$PR_NUMBER" --json id,mergeable,mergeStateStatus,isDraft); then
   echo "Failed to get PR details"
   exit 1  # エラー終了
 fi
 
+PR_ID=$(echo "$PR_DATA" | jq -r '.id')
+
 # PRマージ
-if ! gh pr merge "$PR_NUMBER" --merge --auto; then
+if ! gh api graphql -f query='mutation($pr:ID!){ mergePullRequest(input:{pullRequestId:$pr, mergeMethod:MERGE}) { pullRequest { number }}}' -f pr="$PR_ID"; then
   echo "Failed to merge PR"
   exit 1  # エラー終了
 fi

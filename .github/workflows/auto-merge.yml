@@ -5,9 +5,6 @@ on:
     workflows: ["Test", "Lint"]
     types:
       - completed
-    branches:
-      - main
-      - develop
 
 jobs:
   auto-merge:
@@ -40,11 +37,12 @@ jobs:
         id: check
         run: |
           PR_NUMBER=${{ steps.pr.outputs.number }}
-          PR_DATA=$(gh pr view $PR_NUMBER --json mergeable,mergeStateStatus,isDraft)
+          PR_DATA=$(gh pr view $PR_NUMBER --json id,mergeable,mergeStateStatus,isDraft)
 
           MERGEABLE=$(echo "$PR_DATA" | jq -r '.mergeable')
           MERGE_STATE=$(echo "$PR_DATA" | jq -r '.mergeStateStatus')
           IS_DRAFT=$(echo "$PR_DATA" | jq -r '.isDraft')
+          PR_ID=$(echo "$PR_DATA" | jq -r '.id')
 
           if [ "$IS_DRAFT" = "true" ]; then
             echo "PR is a draft, skipping"
@@ -62,6 +60,7 @@ jobs:
           fi
 
           echo "ready=true" >> $GITHUB_OUTPUT
+          echo "id=$PR_ID" >> $GITHUB_OUTPUT
         env:
           GH_TOKEN: ${{ github.token }}
 
@@ -69,7 +68,8 @@ jobs:
         if: steps.check.outputs.ready == 'true'
         run: |
           PR_NUMBER=${{ steps.pr.outputs.number }}
+          PR_ID=${{ steps.check.outputs.id }}
           echo "Auto-merging PR #$PR_NUMBER"
-          gh pr merge $PR_NUMBER --merge --auto
+          gh api graphql -f query='mutation($pr:ID!){ mergePullRequest(input:{pullRequestId:$pr, mergeMethod:MERGE}) { pullRequest { number }}}' -f pr="$PR_ID"
         env:
           GH_TOKEN: ${{ github.token }}

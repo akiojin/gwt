@@ -267,13 +267,101 @@ bun run start
 }
 ```
 
+## Release Process
+
+This project uses **semantic-release** for automated version management, changelog generation, and npm publishing. Releases are automatically triggered when pull requests are merged to the `main` branch.
+
+### How Releases Work
+
+1. **Commit with Conventional Commits**: Use standardized commit messages (`feat:`, `fix:`, `BREAKING CHANGE:`)
+2. **Merge to Main**: PR merge triggers GitHub Actions
+3. **Automatic Versioning**: semantic-release analyzes commits and determines version
+   - `feat:` → minor version (1.0.0 → 1.1.0)
+   - `fix:` → patch version (1.0.0 → 1.0.1)
+   - `BREAKING CHANGE:` → major version (1.0.0 → 2.0.0)
+4. **CHANGELOG Update**: Automatically generates CHANGELOG.md updates
+5. **npm Publish**: Publishes to npm registry
+6. **GitHub Release**: Creates release with notes
+
+### Conventional Commits
+
+semantic-release uses commit messages to determine release types:
+
+| Type | Description | Version Impact |
+|------|-------------|----------------|
+| `feat:` | New feature | minor (1.0.0 → 1.1.0) |
+| `fix:` | Bug fix | patch (1.0.0 → 1.0.1) |
+| `BREAKING CHANGE:` | Breaking change | major (1.0.0 → 2.0.0) |
+| `chore:`, `docs:`, `style:`, `refactor:`, `test:` | No release | - |
+
+**Example commits**:
+
+```bash
+# Feature (minor release)
+git commit -m "feat: add session management feature"
+
+# Bug fix (patch release)
+git commit -m "fix: resolve Docker path handling issue"
+
+# Breaking change (major release)
+git commit -m "feat!: require Bun 1.0+
+
+BREAKING CHANGE: npx support removed, bunx required"
+```
+
+### Configuration Files
+
+#### .releaserc.json
+
+The semantic-release configuration file defines the release process:
+
+```json
+{
+  "branches": ["main"],
+  "tagFormat": "v${version}",
+  "plugins": [
+    "@semantic-release/commit-analyzer",
+    "@semantic-release/release-notes-generator",
+    "@semantic-release/changelog",
+    "@semantic-release/npm",
+    "@semantic-release/git",
+    "@semantic-release/github"
+  ]
+}
+```
+
+For detailed configuration specifications, see [specs/SPEC-23bb2eed/data-model.md](./specs/SPEC-23bb2eed/data-model.md).
+
+#### GitHub Actions Workflow
+
+The release workflow (`.github/workflows/release.yml`) runs on every push to `main`:
+
+1. Run tests (`bun run test`)
+2. Build project (`bun run build`)
+3. Execute semantic-release (version, changelog, publish)
+
+### Manual Verification
+
+To verify the release configuration locally:
+
+```bash
+# Dry-run to test configuration
+bunx semantic-release --dry-run
+```
+
+### Resources
+
+- [semantic-release Documentation](https://semantic-release.gitbook.io/)
+- [Conventional Commits Specification](https://www.conventionalcommits.org/)
+- [Release Process Guide](./specs/SPEC-23bb2eed/quickstart.md)
+
 ## Troubleshooting
 
 ### Common Issues
 
-**Permission Errors**: Ensure Claude Code has proper directory permissions  
-**Git Worktree Conflicts**: Use the cleanup feature to remove stale worktrees  
-**GitHub Authentication**: Run `gh auth login` before using PR cleanup features  
+**Permission Errors**: Ensure Claude Code has proper directory permissions
+**Git Worktree Conflicts**: Use the cleanup feature to remove stale worktrees
+**GitHub Authentication**: Run `gh auth login` before using PR cleanup features
 **Bun Version**: Verify Bun >= 1.0.0 with `bun --version`
 
 ### Debug Mode

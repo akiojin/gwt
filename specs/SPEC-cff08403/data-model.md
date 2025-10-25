@@ -114,9 +114,9 @@ ELSE:
                                                ↓
                                      shouldMerge == true?
                                          ↙         ↘
-                                      Yes          No
-                                       ↓            ↓
-                                   gh pr merge    Log + Skip
+                                     Yes          No
+                                      ↓            ↓
+                        gh api graphql mergePullRequest    Log + Skip
 ```
 
 ### 2. PRデータ取得フロー
