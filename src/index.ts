@@ -1187,6 +1187,12 @@ async function handleCleanupMergedPRs(): Promise<boolean> {
     // Select targets to clean up
     const selectedTargets = await selectCleanupTargets(cleanupTargets);
 
+    // Check if user pressed q to go back
+    if (selectedTargets === null) {
+      console.log(chalk.yellow("🔙 前の画面に戻ります。"));
+      return true;
+    }
+
     if (selectedTargets.length === 0) {
       console.log(chalk.yellow("🚫 クリーンアップをキャンセルしました。"));
       return true;
