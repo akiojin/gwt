@@ -80,9 +80,28 @@ export async function createBranchTable(
   const sortedBranches = [...filteredBranches].sort((a, b) => {
     if (a.isCurrent && !b.isCurrent) return -1;
     if (!a.isCurrent && b.isCurrent) return 1;
-    if (a.branchType === "main" && b.branchType !== "main") return -1;
-    if (a.branchType !== "main" && b.branchType === "main") return 1;
-    return a.name.localeCompare(b.name);
+
+    const aIsMain = a.branchType === "main";
+    const bIsMain = b.branchType === "main";
+    if (aIsMain && !bIsMain) return -1;
+    if (!aIsMain && bIsMain) return 1;
+
+    const aIsDevelop = a.branchType === "develop";
+    const bIsDevelop = b.branchType === "develop";
+    if (aIsDevelop && !bIsDevelop) return -1;
+    if (!aIsDevelop && bIsDevelop) return 1;
+
+    const aHasWorktree = worktreeMap.has(a.name);
+    const bHasWorktree = worktreeMap.has(b.name);
+    if (aHasWorktree && !bHasWorktree) return -1;
+    if (!aHasWorktree && bHasWorktree) return 1;
+
+    const aIsLocal = a.type === "local";
+    const bIsLocal = b.type === "local";
+    if (aIsLocal && !bIsLocal) return -1;
+    if (!aIsLocal && bIsLocal) return 1;
+
+    return normalizeBranchName(a).localeCompare(normalizeBranchName(b));
   });
 
   const lines: Array<{

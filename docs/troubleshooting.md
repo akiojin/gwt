@@ -101,6 +101,17 @@ git branch -D branch-name
 3. Gitとgh CLIのバージョン
 4. 実行したコマンドと期待した結果
 
+## ブランチ一覧の表示順がおかしい場合
+
+ブランチ一覧画面で期待と異なる並び順になっている場合は、次の手順で原因を切り分けてください。
+
+1. `bun run build` の後に `bun run start -- --help` を実行し、最新のビルドで CLI が起動しているか確認する
+2. `bun run test tests/unit/ui/table.test.ts` を実行し、ソートのユニットテストがすべて成功することを確認する
+3. worktree が優先されない場合は `git worktree list` で対象ブランチの worktree エントリが存在するか確認する
+4. ローカル／リモートの優先度が逆転している場合は `git fetch --all --prune` を実行し、古いリモートブランチを整理する
+
+上記でも問題が解決しない場合は、確認結果とともに Issue を作成してください。
+
 ## Windows環境での実行
 
 ### bunx実行時のエラー
