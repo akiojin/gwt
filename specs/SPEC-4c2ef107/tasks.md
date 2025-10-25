@@ -101,8 +101,8 @@
 
 ### カスタムフック（TDD）
 
-- [ ] T036 [US1] src/ui/hooks/useGitData.tsのテストを作成（Git情報取得）
-- [ ] T037 [US1] T036の後にsrc/ui/hooks/useGitData.tsを実装（getAllBranches, listAdditionalWorktreesを呼び出し）
+- [x] T036 [US1] src/ui/hooks/useGitData.tsのテストを作成（Git情報取得）
+- [x] T037 [US1] T036の後にsrc/ui/hooks/useGitData.tsを実装（getAllBranches, listAdditionalWorktreesを呼び出し）
 
 ### メイン画面コンポーネント（TDD）
 
