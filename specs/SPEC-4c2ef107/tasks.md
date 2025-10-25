@@ -106,10 +106,10 @@
 
 ### メイン画面コンポーネント（TDD）
 
-- [ ] T038 [US1] src/ui/components/screens/BranchListScreen.tsxのテストを作成
-- [ ] T039 [US1] T038の後にsrc/ui/components/screens/BranchListScreen.tsxを実装（全画面レイアウト: Header + Stats + ScrollableList + Footer）
-- [ ] T040 [US1] T039の後にsrc/ui/components/screens/BranchListScreen.tsxにスクロール機能を統合（limitプロパティで動的行数制御）
-- [ ] T041 [US1] T040の後にsrc/ui/components/screens/BranchListScreen.tsxにキーボードナビゲーションを実装（q=終了、Enter=選択）
+- [x] T038 [US1] src/ui/components/screens/BranchListScreen.tsxのテストを作成
+- [x] T039 [US1] T038の後にsrc/ui/components/screens/BranchListScreen.tsxを実装（全画面レイアウト: Header + Stats + ScrollableList + Footer）
+- [x] T040 [US1] T039の後にsrc/ui/components/screens/BranchListScreen.tsxにスクロール機能を統合（limitプロパティで動的行数制御）
+- [x] T041 [US1] T040の後にsrc/ui/components/screens/BranchListScreen.tsxにキーボードナビゲーションを実装（q=終了、Enter=選択）
 
 ### メインアプリケーション（TDD）
 
