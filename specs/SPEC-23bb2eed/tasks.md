@@ -1,11 +1,11 @@
 ---
-description: "SPEC-23bb2eed実装のためのタスクリスト: semantic-release 設定明示化"
+description: "SPEC-23bb2eed実装のためのタスクリスト: semantic-release自動リリース機能"
 ---
 
-# タスク: semantic-release 設定明示化（現状維持アプローチ）
+# タスク: semantic-releaseによる自動リリース機能の実装
 
 **入力**: `/specs/SPEC-23bb2eed/` からの設計ドキュメント
-**前提条件**: plan.md、spec.md、research.md、data-model.md、quickstart.md
+**前提条件**: plan.md、spec.md
 
 **構成**: タスクは実装の論理的な順序でグループ化され、各段階の独立した実装とテストを可能にします。
 
@@ -17,234 +17,244 @@ description: "SPEC-23bb2eed実装のためのタスクリスト: semantic-releas
 
 ## 背景
 
-**調査結果**: semantic-release とタグトリガーは技術的に互換性がないため、元の要件（タグトリガー変更）ではなく、現状の main ブランチトリガーを維持しつつ、設定を明示化するアプローチを採用しました。
+**問題**: semantic-release関連パッケージが未インストールのため、mainマージ時の自動リリースが動作していない
 
-**実装内容（オプション1）**:
-1. `.releaserc.json` ファイルの作成（デフォルト設定の明示化）
-2. README.md へのリリースプロセス記載
-3. CHANGELOG.md への変更記録
+**実装内容**:
+1. package.jsonにsemantic-release依存パッケージを追加
+2. release.ymlから冗長なpublish-npmジョブを削除
+3. 依存関係のインストールと動作確認
+4. テストコードの実装
 
-**目的**: デフォルト設定への暗黙的な依存を排除し、設定の可視化と保守性を向上させる。
+**目的**: コミットメッセージベースの自動バージョン決定とリリースを実現する
 
-## フェーズ1: セットアップ（環境確認）
+## フェーズ1: セットアップ（現状確認）
 
-**目的**: プロジェクトの現在の状態を確認し、実装の準備を整える
+**目的**: 現在の設定を確認し、実装の準備を整える
 
 ### 環境確認タスク
 
-- [x] T001 [P] 現在の semantic-release の動作確認（package.json の dependencies セクション）
-- [x] T002 [P] 既存のリリースワークフロー確認（.github/workflows/release.yml）
-- [x] T003 [P] 最新のリリース履歴確認（GitHub Releases と CHANGELOG.md）
+- [x] T001 [P] .releaserc.json の存在確認（プロジェクトルート/.releaserc.json）
+- [x] T002 [P] release.yml の現在の設定確認（.github/workflows/release.yml）
+- [x] T003 [P] package.jsonの現在の依存関係確認（package.json）
 
-## フェーズ2: ユーザーストーリー1 - .releaserc.json の作成と検証 (優先度: P1)
+## フェーズ2: ユーザーストーリー1 - semantic-release依存パッケージの追加 (優先度: P1)
 
-**ストーリー**: 開発者として、semantic-release の設定を明示的に定義し、デフォルト設定への依存を排除したい。
+**ストーリー**: 開発者として、semantic-releaseが正常に動作するために必要なパッケージをインストールしたい。
 
-**価値**: 設定の可視化により、将来の変更時の影響範囲が明確になり、保守性が向上する
+**価値**: 必要な依存パッケージがインストールされることで、自動リリース機能が動作可能になる
 
-**独立したテスト**: .releaserc.json を作成し、semantic-release が正常に動作することを確認する。
+**独立したテスト**: package.jsonに依存が追加され、bun installで正常にインストールされることを確認する。
 
-### 設定ファイル作成
+### 依存パッケージの追加
 
-- [ ] T101 [US1] .releaserc.json ファイルを作成（プロジェクトルート/.releaserc.json）
-  - data-model.md の「.releaserc.json の標準設定」を参照
-  - branches: ["main"] を設定
-  - tagFormat: "v${version}" を設定
-  - 6つのプラグインを設定（commit-analyzer, release-notes-generator, changelog, npm, git, github）
+- [x] T101 [US1] package.jsonのdevDependenciesにsemantic-release本体を追加（package.json）
+  - semantic-release: ^24.2.0 を追加
 
-- [ ] T102 [US1] JSON Schema による構文検証（specs/SPEC-23bb2eed/contracts/releaserc-schema.json を参照）
-  - `branches` 配列が空でないことを確認
-  - `plugins` 配列に必須プラグインが含まれることを確認
-  - `tagFormat` に `${version}` プレースホルダーが含まれることを確認
+- [x] T102 [US1] package.jsonにsemantic-releaseプラグインを追加（package.json）
+  - @semantic-release/commit-analyzer: ^13.0.0
+  - @semantic-release/release-notes-generator: ^14.0.1
+  - @semantic-release/changelog: ^6.0.3
+  - @semantic-release/npm: ^12.0.1
+  - @semantic-release/git: ^10.0.1
+  - @semantic-release/github: ^11.0.1
 
-### ローカル検証
+### 構文確認
 
-- [ ] T103 [US1] ローカル環境で設定ファイルの読み込み確認（プロジェクトルート）
-  - `bunx semantic-release --dry-run` を実行
-  - .releaserc.json が正しく読み込まれることを確認
+- [ ] T103 [US1] package.jsonのJSON構文確認（package.json）
+  - JSON形式が正しいことを確認
+  - すべての依存パッケージが正しく記述されていることを確認
+
+**✅ MVP1チェックポイント**: US1完了後、semantic-release関連パッケージがpackage.jsonに追加される
+
+## フェーズ3: ユーザーストーリー2 - release.ymlの最適化 (優先度: P1)
+
+**ストーリー**: 開発者として、semantic-releaseがnpm公開を担当するため、冗長なpublish-npmジョブを削除したい。
+
+**価値**: ワークフローがシンプルになり、二重公開のリスクが排除される
+
+**独立したテスト**: release.ymlが正しく更新され、releaseジョブのみが存在することを確認する。
+
+### ワークフロー修正
+
+- [ ] T201 [US2] release.ymlからpublish-npmジョブを削除（.github/workflows/release.yml）
+  - 54行目から81行目を削除
+  - releaseジョブのみを維持
+
+### 構文確認
+
+- [ ] T202 [US2] release.ymlのYAML構文確認（.github/workflows/release.yml）
+  - YAML形式が正しいことを確認
+  - インデントが適切であることを確認
+
+**✅ MVP2チェックポイント**: US2完了後、release.ymlが最適化される
+
+## フェーズ4: ユーザーストーリー3 - 依存関係のインストールと動作確認 (優先度: P1)
+
+**ストーリー**: 開発者として、追加した依存パッケージが正常にインストールされ、ビルドとテストが成功することを確認したい。
+
+**価値**: 変更が既存の機能を破壊していないことを保証する
+
+**独立したテスト**: bun install、bun run build、bun run testが成功することを確認する。
+
+### 依存関係のインストール
+
+- [ ] T301 [US3] bun installで依存パッケージをインストール（プロジェクトルート）
+  - semantic-release関連パッケージがnode_modules/にインストールされることを確認
   - エラーがないことを確認
 
-**✅ MVP1チェックポイント**: US1完了後、.releaserc.json が作成され、設定が明示化される
+### ビルドとテストの実行
 
-## フェーズ3: ユーザーストーリー2 - ドキュメント更新 (優先度: P2)
+- [ ] T302 [US3] bun run buildでビルド成功確認（プロジェクトルート）
+  - dist/ディレクトリが生成されることを確認
+  - TypeScriptのコンパイルエラーがないことを確認
 
-**ストーリー**: 新規メンバーとして、リリースプロセスがドキュメント化されており、容易に理解できるようにしたい。
+- [ ] T303 [US3] bun run testでテスト成功確認（プロジェクトルート）
+  - 既存のテストスイート（122テスト）が成功することを確認
+  - カバレッジが低下していないことを確認
 
-**価値**: ドキュメントの整備により、学習コストが低減され、リリースプロセスの透明性が向上する
+**✅ MVP3チェックポイント**: US3完了後、すべての依存関係が正常にインストールされ、ビルドとテストが成功する
 
-**独立したテスト**: README.md と CHANGELOG.md を更新し、記載内容が正確かつ実行可能であることを確認する。
+## フェーズ5: ユーザーストーリー4 - ワークフロー動作確認用のテストコード実装 (優先度: P2)
 
-### README.md 更新
+**ストーリー**: 開発者として、semantic-releaseが正常に動作することを自動テストで確認したい。
 
-- [ ] T201 [US2] README.md にリリースプロセスセクションを追加（README.md）
-  - 「リリースプロセス」セクションを新規作成
-  - quickstart.md の内容を要約して記載
-  - Conventional Commits の説明を含める
-  - semantic-release の自動化機能の説明を含める
+**価値**: CI/CDパイプラインでの自動検証により、リリースプロセスの信頼性が向上する
 
-- [ ] T202 [P] [US2] README.md に.releaserc.json の説明を追加（README.md）
-  - 「設定ファイル」セクションを新規作成または更新
-  - .releaserc.json の役割を説明
-  - data-model.md へのリンクを追加
+**独立したテスト**: テストコードが実装され、semantic-releaseの設定が正しいことを確認する。
 
-### CHANGELOG.md 更新
+### テストコード実装
 
-- [ ] T203 [US2] CHANGELOG.md に今回の変更を記録（CHANGELOG.md）
-  - [Unreleased] セクションに以下を追加：
-    - Added: `.releaserc.json` による設定明示化
-    - Changed: リリースプロセスのドキュメント化（README.md）
-  - Keep a Changelog フォーマットに準拠
+- [ ] T401 [P] [US4] .releaserc.jsonの読み込みテストを実装（tests/release-config.test.ts）
+  - .releaserc.jsonが存在することを確認
+  - JSON形式が正しいことを確認
+  - 必須フィールド（branches、plugins）が存在することを確認
 
-### ドキュメント検証
+- [ ] T402 [P] [US4] semantic-releaseプラグインの存在確認テストを実装（tests/release-config.test.ts）
+  - package.jsonにsemantic-releaseが含まれることを確認
+  - 6つのプラグインがすべて含まれることを確認
 
-- [ ] T204 [P] [US2] README.md の記載内容を実際に実行して検証（プロジェクトルート）
-  - リリースプロセスの手順が正確か確認
-  - コマンド例が実行可能か確認
-  - リンクが有効か確認
+### テストの実行
 
-**✅ MVP2チェックポイント**: US2完了後、リリースプロセスが完全にドキュメント化される
+- [ ] T403 [US4] 新規テストの実行確認（プロジェクトルート）
+  - bun run testで新規テストが成功することを確認
+  - カバレッジが向上していることを確認
 
-## フェーズ4: ユーザーストーリー3 - 設定の検証とテスト (優先度: P3)
+**✅ MVP4チェックポイント**: US4完了後、semantic-release設定の自動検証が可能になる
 
-**ストーリー**: 開発者として、設定変更後も既存のリリースプロセスが正常に動作することを確認したい。
+## フェーズ6: 最終確認とコミット
 
-**価値**: 動作確認により、リリースプロセスの信頼性が保証される
-
-**独立したテスト**: テストブランチで semantic-release を実行し、すべてのプロセスが正常に動作することを確認する。
-
-### GitHub Actions での検証
-
-- [ ] T301 [US3] GitHub Actions でのドライラン実行確認（.github/workflows/release.yml）
-  - `bunx semantic-release --dry-run` がワークフロー内で正常に実行されるか確認
-  - .releaserc.json が正しく読み込まれることを確認
-  - エラーログがないことを確認
-
-- [ ] T302 [US3] 既存のテストスイートの実行（プロジェクトルート）
-  - `bun run test` を実行
-  - すべてのテストがパスすることを確認
-  - 122テスト中115テストがパス（既存の状態を維持）
-
-- [ ] T303 [US3] ビルドの成功確認（プロジェクトルート）
-  - `bun run build` を実行
-  - dist/ ディレクトリが生成されることを確認
-  - エラーがないことを確認
-
-### 設定ファイルの網羅的検証
-
-- [ ] T304 [P] [US3] .releaserc.json の全フィールド検証（.releaserc.json）
-  - branches フィールドが ["main"] であることを確認
-  - tagFormat フィールドが "v${version}" であることを確認
-  - 6つのプラグインがすべて正しく設定されていることを確認
-  - JSON フォーマットが正しいことを確認（JSON validator 使用）
-
-- [ ] T305 [P] [US3] semantic-release プラグインの依存関係確認（package.json）
-  - semantic-release が devDependencies または dependencies にあることを確認
-  - 必要なプラグインがインストールされているか確認（現在は devDependencies にない場合でも bunx が自動ダウンロード）
-
-**✅ 完全な機能**: US3完了後、設定が完全に検証され、リリースプロセスが安定稼働する
-
-## フェーズ5: 最終確認とコミット
-
-**目的**: すべての変更を統合し、本番環境への準備を整える
+**目的**: すべての変更を統合し、mainブランチへのマージ準備を整える
 
 ### 最終検証
 
-- [ ] T401 [最終] すべてのドキュメントリンクの有効性確認
-  - README.md 内のリンクをすべて確認
-  - specs/SPEC-23bb2eed/ 内のドキュメント間リンクを確認
-  - 外部リンク（GitHub, npm など）の有効性を確認
+- [ ] T501 [最終] すべての変更ファイルの確認
+  - package.json が更新されていることを確認
+  - release.yml が更新されていることを確認
+  - テストコードが追加されていることを確認（オプション）
 
-- [ ] T402 [最終] markdownlint によるドキュメント品質確認
-  - README.md を markdownlint で検証
-  - CHANGELOG.md を markdownlint で検証
-  - エラーと警告がないことを確認
+- [ ] T502 [最終] bun run buildの最終確認
+  - エラーなくビルドが完了することを確認
+
+- [ ] T503 [最終] bun run testの最終確認
+  - すべてのテスト（既存+新規）が成功することを確認
 
 ### コミットと完了
 
-- [ ] T403 [最終] 変更をステージングして確認
-  - `git status` で変更ファイルを確認
-  - .releaserc.json, README.md, CHANGELOG.md が変更されていることを確認
+- [ ] T504 [最終] 変更をステージングして確認
+  - git statusで変更ファイルを確認
+  - package.json、release.yml、bun.lockb（または類似のロックファイル）が変更されていることを確認
   - 意図しないファイル変更がないことを確認
 
-- [ ] T404 [最終] Conventional Commits 形式でコミット
-  - コミットメッセージ: `feat: semantic-release設定を明示化`
-  - 本文に変更内容の詳細を記載
-  - Co-Authored-By: Claude を含める
+- [ ] T505 [最終] Conventional Commits形式でコミット
+  - コミットメッセージ: `feat: semantic-release自動リリース機能を実装`
+  - 本文に変更内容の詳細を記載：
+    - semantic-release関連パッケージをdevDependenciesに追加
+    - release.ymlからpublish-npmジョブを削除
+    - mainマージ時にfeat/fix/BREAKING CHANGEで自動リリース
+  - Co-Authored-By: Claude <noreply@anthropic.com> を含める
 
-- [ ] T405 [最終] main ブランチにプッシュして自動リリースを確認
-  - `git push origin SPEC-23bb2eed` でブランチプッシュ
-  - PR を作成して main へマージ
-  - GitHub Actions でリリースワークフローが正常に実行されることを確認
+- [ ] T506 [最終] ブランチにプッシュしてPR作成
+  - git push origin hotfix/auto-release でブランチプッシュ
+  - PRを作成してCIの成功を確認
+  - レビュー依頼（該当する場合）
+
+- [ ] T507 [最終] mainブランチにマージして自動リリースを確認
+  - PRをmainにマージ
+  - GitHub Actionsでreleaseワークフローが自動実行されることを確認
+  - semantic-releaseがコミットを分析することを確認
+  - （リリース対象コミットがある場合）npmとGitHub Releasesに公開されることを確認
 
 ## タスク凡例
 
 **優先度**:
-- **P1**: 最も重要 - MVP1に必要（US1: .releaserc.json の作成）
-- **P2**: 重要 - MVP2に必要（US2: ドキュメント更新）
-- **P3**: 補完的 - 完全な機能に必要（US3: 検証とテスト）
+- **P1**: 最も重要 - MVPに必要（US1-US3）
+- **P2**: 重要 - テスト自動化（US4）
+- **最終**: 完了とデプロイメント
 
 **依存関係**:
 - **[P]**: 並列実行可能（異なるファイル、依存関係なし）
 - **依存あり**: 前のタスク完了後に実行
 
 **ストーリータグ**:
-- **[US1]**: ユーザーストーリー1 - .releaserc.json の作成と検証
-- **[US2]**: ユーザーストーリー2 - ドキュメント更新
-- **[US3]**: ユーザーストーリー3 - 設定の検証とテスト
+- **[US1]**: ユーザーストーリー1 - semantic-release依存パッケージの追加
+- **[US2]**: ユーザーストーリー2 - release.ymlの最適化
+- **[US3]**: ユーザーストーリー3 - 依存関係のインストールと動作確認
+- **[US4]**: ユーザーストーリー4 - ワークフロー動作確認用のテストコード実装
 - **[最終]**: 最終確認とコミット
 
 ## 依存関係グラフ
 
 ```text
-Phase 1 (Setup) - 環境確認
+Phase 1 (Setup) - 現状確認
     ↓
-Phase 2 (US1: P1) - .releaserc.json 作成
+Phase 2 (US1: P1) - package.json更新 ←┐
+    ↓                                  │ (並列実行可能)
+Phase 3 (US2: P1) - release.yml修正 ←┘
     ↓
-Phase 3 (US2: P2) - ドキュメント更新
+Phase 4 (US3: P1) - 依存インストールと動作確認
     ↓
-Phase 4 (US3: P3) - 検証とテスト
+Phase 5 (US4: P2) - テストコード実装（オプション）
     ↓
-Phase 5 (最終確認) - コミット
+Phase 6 (最終確認) - コミット＆プッシュ
 ```
 
-**独立性**: US2とUS3は技術的にUS1完了を待たずに並行実装可能だが、設定ファイルが基準となるため順次実装を推奨
+**独立性**: US1とUS2は並列実施可能（異なるファイルを変更）
 
 ## 並列実行の機会
 
 ### フェーズ1（Setup）での並列実行
 - T001, T002, T003（すべて並列実行可能）
 
-### フェーズ3（US2）での並列実行
-- T202（README.md の設定ファイル説明）
-- T204（ドキュメント検証）
+### フェーズ2-3（US1-US2）での並列実行
+- T101-T103（package.json更新）
+- T201-T202（release.yml修正）
+※異なるファイルのため並列実施可能
 
-### フェーズ4（US3）での並列実行
-- T304（.releaserc.json の全フィールド検証）
-- T305（semantic-release プラグインの依存関係確認）
+### フェーズ5（US4）での並列実行
+- T401, T402（テストコード実装は複数ファイルに分割可能）
 
 ## 実装戦略
 
-**MVPファースト**: US1（P1）のみでMVP1を構成可能
-- .releaserc.json が作成されれば最小限の価値を提供
-- デフォルト設定への依存が排除される
+**MVPファースト**: US1+US2+US3でMVPを構成
+- package.jsonとrelease.ymlの更新で自動リリース機能が動作可能
+- ビルドとテストの成功で既存機能の維持を保証
 
 **インクリメンタルデリバリー**:
-1. **MVP1（US1）**: .releaserc.json の作成と基本検証
-2. **MVP2（US1+US2）**: ドキュメント更新でリリースプロセスを透明化
-3. **完全版（US1+US2+US3）**: 包括的な検証とテストで信頼性を保証
+1. **MVP（US1+US2+US3）**: semantic-releaseが動作する最小限の変更
+2. **完全版（MVP+US4）**: テスト自動化でリリースプロセスの信頼性を保証
 
 ## 変更されるファイル
 
-### 新規作成
-- `.releaserc.json` - semantic-release 設定ファイル（プロジェクトルート）
-
 ### 更新
-- `README.md` - リリースプロセスと設定ファイルの説明追加
-- `CHANGELOG.md` - 今回の変更記録
+- `package.json` - semantic-release関連パッケージをdevDependenciesに追加
+- `.github/workflows/release.yml` - publish-npmジョブを削除
+- `bun.lockb` （または類似のロックファイル） - 依存関係のロック
+
+### 新規作成（オプション）
+- `tests/release-config.test.ts` - semantic-release設定の自動検証テスト
 
 ### 参照のみ（変更なし）
-- `.github/workflows/release.yml` - 既存のワークフロー（変更不要）
-- `package.json` - semantic-release の依存関係（既存を維持）
+- `.releaserc.json` - 既存の設定を使用（変更不要）
 
 ## 進捗追跡
 
@@ -255,7 +265,7 @@ Phase 5 (最終確認) - コミット
 
 ## 注記
 
-- 各タスクは30分から2時間で完了可能であるべき
+- 各タスクは15分から1時間で完了可能であるべき
 - より大きなタスクはより小さなサブタスクに分割
 - ファイルパスは正確で、プロジェクト構造と一致させる
 - 各ストーリーは独立してテスト・デプロイ可能
@@ -265,34 +275,30 @@ Phase 5 (最終確認) - コミット
 
 タスク完了後、以下を確認：
 
-- [ ] .releaserc.json が作成され、正しい JSON フォーマットである
-- [ ] .releaserc.json の全フィールドが data-model.md の仕様に準拠している
-- [ ] `bunx semantic-release --dry-run` が成功する
-- [ ] README.md にリリースプロセスが記載されている
-- [ ] CHANGELOG.md に今回の変更が記録されている
-- [ ] すべてのテストが成功（`bun run test`）
-- [ ] ビルドが成功（`bun run build`）
-- [ ] ドキュメントのリンクがすべて有効
-- [ ] markdownlint でエラーと警告がない
-- [ ] Conventional Commits 形式でコミットされている
+- [x] package.jsonにsemantic-release関連パッケージが追加されている
+- [ ] release.ymlからpublish-npmジョブが削除されている
+- [ ] bun installが成功する
+- [ ] bun run buildが成功する
+- [ ] bun run testが成功する（既存の122テスト）
+- [ ] （オプション）テストコードが実装され、設定が検証される
+- [ ] Conventional Commits形式でコミットされている
+- [ ] mainマージ時にsemantic-releaseが実行される
 
 ## 成功基準
 
 このタスクリストの完了により、以下の成功基準を達成します：
 
-1. ✅ `.releaserc.json` が作成され、設定が明示化される
-2. ✅ デフォルト設定への暗黙的な依存が排除される
-3. ✅ リリースプロセスが完全にドキュメント化される
-4. ✅ 既存の semantic-release 機能が100%維持される
-5. ✅ 既存のテストスイートがすべてパスする
-6. ✅ GitHub Actions でのリリースワークフローが正常に動作する
+1. ✅ semantic-release関連パッケージがインストールされる
+2. ✅ release.ymlがシンプルかつ適切に設定される
+3. ✅ mainマージ時にコミットメッセージから自動バージョン決定が行われる
+4. ✅ npm registryとGitHub Releasesに自動公開される
+5. ✅ CHANGELOG.mdとpackage.jsonが自動更新される
+6. ✅ 既存のテストスイートがすべてパスする
 
 ## 参考資料
 
+- [spec.md](./spec.md) - 機能仕様
 - [plan.md](./plan.md) - 実装計画と技術コンテキスト
-- [research.md](./research.md) - 技術調査結果と推奨事項
-- [data-model.md](./data-model.md) - .releaserc.json の詳細仕様
-- [quickstart.md](./quickstart.md) - リリースプロセスガイド
-- [contracts/releaserc-schema.json](./contracts/releaserc-schema.json) - JSON Schema
-- [semantic-release ドキュメント](https://semantic-release.gitbook.io/)
-- [Conventional Commits 仕様](https://www.conventionalcommits.org/)
+- [.releaserc.json](../../.releaserc.json) - semantic-release設定
+- [semantic-release公式ドキュメント](https://semantic-release.gitbook.io/)
+- [Conventional Commits仕様](https://www.conventionalcommits.org/)
