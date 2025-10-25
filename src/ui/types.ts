@@ -108,3 +108,63 @@ export interface GitHubPRResponse {
   mergedAt: string | null;
   author: GitHubPRAuthor | null;
 }
+
+// ========================================
+// Ink.js UI Types (Phase 2+)
+// ========================================
+
+/**
+ * Screen types for Ink.js UI
+ */
+export type ScreenType =
+  | "branch-list"
+  | "worktree-manager"
+  | "branch-creator"
+  | "pr-cleanup"
+  | "ai-tool-selector"
+  | "session-selector"
+  | "execution-mode-selector";
+
+export type ScreenState = "active" | "hidden";
+
+export interface Screen {
+  type: ScreenType;
+  state: ScreenState;
+  data?: unknown;
+}
+
+/**
+ * BranchItem - Extended BranchInfo for display purposes
+ */
+export type WorktreeStatus = "active" | "inaccessible" | undefined;
+
+export interface BranchItem extends BranchInfo {
+  // Display properties
+  icons: string[];
+  worktreeStatus?: WorktreeStatus;
+  hasChanges: boolean;
+  label: string;
+  value: string;
+}
+
+/**
+ * Statistics - Real-time statistics
+ */
+export interface Statistics {
+  localCount: number;
+  remoteCount: number;
+  worktreeCount: number;
+  changesCount: number;
+  lastUpdated: Date;
+}
+
+/**
+ * Layout - Dynamic layout information
+ */
+export interface Layout {
+  terminalHeight: number;
+  terminalWidth: number;
+  headerLines: number;
+  footerLines: number;
+  contentHeight: number;
+}
