@@ -109,7 +109,7 @@ Pass-through:
   Use "--" to pass additional args directly to the selected tool.
   Examples:
     claude-worktree --tool claude -- -r
-    claude-worktree --tool codex -- resume last
+    claude-worktree --tool codex -- resume --last
 `);
 }
 

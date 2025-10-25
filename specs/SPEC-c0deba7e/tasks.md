@@ -1,0 +1,4 @@
+- [ ] Codex CLI の continue モードで `bunx @openai/codex resume --last` を使用するように修正する
+- [ ] `resume --last` の利用方法が README/README.ja.md/仕様書に反映されていることを確認・更新する
+- [ ] Codex 関連の UI 表示文言を `resume --last` に統一する
+- [ ] `bunx @openai/codex --help` ベースで挙動を確認し、必要に応じて lint/type-check を実行する

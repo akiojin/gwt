@@ -1257,11 +1257,11 @@ export async function selectClaudeExecutionMode(toolLabel: string = 'Claude Code
     },
     {
       name: isCodexTool
-        ? '⏭️  Resume last session (codex resume last)'
+        ? '⏭️  Resume last session (codex resume --last)'
         : '⏭️  Continue - Continue most recent conversation (-c)',
       value: 'continue',
       description: isCodexTool
-        ? 'Run Codex resume last to continue the most recent session'
+        ? 'Run Codex resume --last to continue the most recent session'
         : 'Continue from the most recent conversation'
     },
     {

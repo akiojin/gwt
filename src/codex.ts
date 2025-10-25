@@ -32,7 +32,7 @@ export async function launchCodexCLI(
 
     switch (options.mode) {
       case 'continue':
-        args.push('resume', 'last');
+        args.push('resume', '--last');
         console.log(chalk.cyan('   ⏭️  Resuming last Codex session'));
         break;
       case 'resume':
