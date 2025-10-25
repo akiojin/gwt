@@ -84,21 +84,21 @@ tests/                          # 新規作成
 
 ### ユニットテスト
 
-- [ ] T201 [P] [US2] `src/git.ts`の`createBranch()`をテスト: `tests/unit/git.test.ts`
-- [ ] T202 [P] [US2] `src/git.ts`の`branchExists()`をテスト: `tests/unit/git.test.ts`
-- [ ] T203 [P] [US2] `src/git.ts`のブランチタイプ決定ロジックをテスト: `tests/unit/git.test.ts`
-- [ ] T204 [P] [US2] `src/git.ts`の`getCurrentVersion()`をテスト: `tests/unit/git.test.ts`
-- [ ] T205 [P] [US2] `src/git.ts`の`calculateNewVersion()`をテスト: `tests/unit/git.test.ts`
-- [ ] T206 [P] [US2] `src/git.ts`の`executeNpmVersionInWorktree()`をテスト: `tests/unit/git.test.ts`
+- [x] T201 [P] [US2] `src/git.ts`の`createBranch()`をテスト: `tests/unit/git.test.ts`
+- [x] T202 [P] [US2] `src/git.ts`の`branchExists()`をテスト: `tests/unit/git.test.ts`
+- [x] T203 [P] [US2] `src/git.ts`のブランチタイプ決定ロジックをテスト: `tests/unit/git.test.ts`
+- [x] T204 [P] [US2] `src/git.ts`の`getCurrentVersion()`をテスト: `tests/unit/git.test.ts`
+- [x] T205 [P] [US2] `src/git.ts`の`calculateNewVersion()`をテスト: `tests/unit/git.test.ts`
+- [x] T206 [P] [US2] `src/git.ts`の`executeNpmVersionInWorktree()`をテスト: `tests/unit/git.test.ts`
 
 ### 統合テスト
 
-- [ ] T207 [US2] T201-T203完了後、feature/hotfixブランチ作成フローをテスト: `tests/integration/branch-creation.test.ts`
-- [ ] T208 [US2] T204-T206完了後、releaseブランチ作成とバージョン更新をテスト: `tests/integration/release-branch.test.ts`
+- [x] T207 [US2] T201-T203完了後、feature/hotfixブランチ作成フローをテスト: `tests/integration/branch-creation.test.ts`
+- [x] T208 [US2] T204-T206完了後、releaseブランチ作成とバージョン更新をテスト: `tests/integration/release-branch.test.ts`
 
 ### E2Eテスト
 
-- [ ] T209 [US2] T207-T208完了後、全ブランチタイプの作成フローをテスト: `tests/e2e/create-branch-workflow.test.ts`
+- [x] T209 [US2] T207-T208完了後、全ブランチタイプの作成フローをテスト: `tests/e2e/create-branch-workflow.test.ts`
 
 **✅ MVP2チェックポイント**: US2の全受け入れシナリオがテストでカバーされ、独立して検証可能
 

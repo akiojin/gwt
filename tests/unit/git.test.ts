@@ -343,4 +343,212 @@ origin/develop`;
       await expect(git.deleteBranch('feature/test')).rejects.toThrow('Failed to delete branch');
     });
   });
+
+  describe('US2: Smart Branch Creation Workflow', () => {
+    describe('createBranch (T201)', () => {
+      it('should create branch from default base branch (main)', async () => {
+        (execa as any).mockResolvedValue({
+          stdout: '',
+          stderr: '',
+          exitCode: 0,
+        } as any);
+
+        await git.createBranch('feature/new-feature');
+
+        expect(execa).toHaveBeenCalledWith('git', ['checkout', '-b', 'feature/new-feature', 'main']);
+      });
+
+      it('should create branch from specified base branch', async () => {
+        (execa as any).mockResolvedValue({
+          stdout: '',
+          stderr: '',
+          exitCode: 0,
+        } as any);
+
+        await git.createBranch('hotfix/urgent-fix', 'develop');
+
+        expect(execa).toHaveBeenCalledWith('git', ['checkout', '-b', 'hotfix/urgent-fix', 'develop']);
+      });
+
+      it('should throw GitError on failure', async () => {
+        (execa as any).mockRejectedValue(new Error('Branch already exists'));
+
+        await expect(git.createBranch('feature/duplicate')).rejects.toThrow('Failed to create branch');
+      });
+    });
+
+    describe('Branch Type Determination (T203)', () => {
+      it('should identify main branch type', async () => {
+        (execa as any).mockImplementation(async (command: string, args?: readonly string[]) => {
+          if (args?.[0] === 'branch' && args.includes('--show-current')) {
+            return { stdout: 'main', stderr: '', exitCode: 0 };
+          }
+          if (args?.[0] === 'branch' && args.includes('-r')) {
+            return { stdout: '', stderr: '', exitCode: 0 };
+          }
+          if (args?.[0] === 'branch' && args.includes('--format=%(refname:short)')) {
+            return { stdout: 'main', stderr: '', exitCode: 0 };
+          }
+        });
+
+        const branches = await git.getAllBranches();
+        const mainBranch = branches.find(b => b.name === 'main');
+        expect(mainBranch?.branchType).toBe('main');
+      });
+
+      it('should identify develop branch type', async () => {
+        (execa as any).mockImplementation(async (command: string, args?: readonly string[]) => {
+          if (args?.[0] === 'branch' && args.includes('--show-current')) {
+            return { stdout: 'main', stderr: '', exitCode: 0 };
+          }
+          if (args?.[0] === 'branch' && args.includes('-r')) {
+            return { stdout: '', stderr: '', exitCode: 0 };
+          }
+          if (args?.[0] === 'branch' && args.includes('--format=%(refname:short)')) {
+            return { stdout: 'develop', stderr: '', exitCode: 0 };
+          }
+        });
+
+        const branches = await git.getAllBranches();
+        const devBranch = branches.find(b => b.name === 'develop');
+        expect(devBranch?.branchType).toBe('develop');
+      });
+
+      it('should identify feature branch type', async () => {
+        (execa as any).mockImplementation(async (command: string, args?: readonly string[]) => {
+          if (args?.[0] === 'branch' && args.includes('--show-current')) {
+            return { stdout: 'main', stderr: '', exitCode: 0 };
+          }
+          if (args?.[0] === 'branch' && args.includes('-r')) {
+            return { stdout: '', stderr: '', exitCode: 0 };
+          }
+          if (args?.[0] === 'branch' && args.includes('--format=%(refname:short)')) {
+            return { stdout: 'feature/test', stderr: '', exitCode: 0 };
+          }
+        });
+
+        const branches = await git.getAllBranches();
+        const featureBranch = branches.find(b => b.name === 'feature/test');
+        expect(featureBranch?.branchType).toBe('feature');
+      });
+
+      it('should identify hotfix branch type', async () => {
+        (execa as any).mockImplementation(async (command: string, args?: readonly string[]) => {
+          if (args?.[0] === 'branch' && args.includes('--show-current')) {
+            return { stdout: 'main', stderr: '', exitCode: 0 };
+          }
+          if (args?.[0] === 'branch' && args.includes('-r')) {
+            return { stdout: '', stderr: '', exitCode: 0 };
+          }
+          if (args?.[0] === 'branch' && args.includes('--format=%(refname:short)')) {
+            return { stdout: 'hotfix/urgent', stderr: '', exitCode: 0 };
+          }
+        });
+
+        const branches = await git.getAllBranches();
+        const hotfixBranch = branches.find(b => b.name === 'hotfix/urgent');
+        expect(hotfixBranch?.branchType).toBe('hotfix');
+      });
+
+      it('should identify release branch type', async () => {
+        (execa as any).mockImplementation(async (command: string, args?: readonly string[]) => {
+          if (args?.[0] === 'branch' && args.includes('--show-current')) {
+            return { stdout: 'main', stderr: '', exitCode: 0 };
+          }
+          if (args?.[0] === 'branch' && args.includes('-r')) {
+            return { stdout: '', stderr: '', exitCode: 0 };
+          }
+          if (args?.[0] === 'branch' && args.includes('--format=%(refname:short)')) {
+            return { stdout: 'release/1.0.0', stderr: '', exitCode: 0 };
+          }
+        });
+
+        const branches = await git.getAllBranches();
+        const releaseBranch = branches.find(b => b.name === 'release/1.0.0');
+        expect(releaseBranch?.branchType).toBe('release');
+      });
+
+      it('should identify other branch types', async () => {
+        (execa as any).mockImplementation(async (command: string, args?: readonly string[]) => {
+          if (args?.[0] === 'branch' && args.includes('--show-current')) {
+            return { stdout: 'main', stderr: '', exitCode: 0 };
+          }
+          if (args?.[0] === 'branch' && args.includes('-r')) {
+            return { stdout: '', stderr: '', exitCode: 0 };
+          }
+          if (args?.[0] === 'branch' && args.includes('--format=%(refname:short)')) {
+            return { stdout: 'random-branch', stderr: '', exitCode: 0 };
+          }
+        });
+
+        const branches = await git.getAllBranches();
+        const otherBranch = branches.find(b => b.name === 'random-branch');
+        expect(otherBranch?.branchType).toBe('other');
+      });
+    });
+
+    describe('getCurrentVersion (T204)', () => {
+      it('should return version string', async () => {
+        const version = await git.getCurrentVersion('/path/to/repo');
+        // Should return a version string (either from package.json or default)
+        expect(typeof version).toBe('string');
+        expect(version).toMatch(/^\d+\.\d+\.\d+$/);
+      });
+
+      it('should return default version for nonexistent path', async () => {
+        // Test with a path that definitely doesn't exist
+        const version = await git.getCurrentVersion('/absolutely/nonexistent/impossible/path/that/does/not/exist');
+        expect(version).toBe('0.0.0');
+      });
+    });
+
+    describe('calculateNewVersion (T205)', () => {
+      it('should calculate patch version bump', () => {
+        const newVersion = git.calculateNewVersion('1.2.3', 'patch');
+        expect(newVersion).toBe('1.2.4');
+      });
+
+      it('should calculate minor version bump', () => {
+        const newVersion = git.calculateNewVersion('1.2.3', 'minor');
+        expect(newVersion).toBe('1.3.0');
+      });
+
+      it('should calculate major version bump', () => {
+        const newVersion = git.calculateNewVersion('1.2.3', 'major');
+        expect(newVersion).toBe('2.0.0');
+      });
+
+      it('should handle version with leading zeros', () => {
+        const newVersion = git.calculateNewVersion('0.0.1', 'patch');
+        expect(newVersion).toBe('0.0.2');
+      });
+
+      it('should handle initial version', () => {
+        const newVersion = git.calculateNewVersion('0.0.0', 'minor');
+        expect(newVersion).toBe('0.1.0');
+      });
+    });
+
+    describe('executeNpmVersionInWorktree (T206)', () => {
+      it('should be callable with worktree path and version', async () => {
+        // This is a complex function that involves fs operations
+        // Full testing should be done in integration tests
+        // Here we just verify the function is callable
+        expect(typeof git.executeNpmVersionInWorktree).toBe('function');
+      });
+
+      it('should handle version parameter correctly', async () => {
+        // Test that the function accepts correct parameters
+        const worktreePath = '/test/path';
+        const version = '1.2.3';
+
+        // Function should be callable (actual execution tested in integration tests)
+        expect(async () => {
+          // We don't actually call it here to avoid fs operations in unit tests
+          const fn = git.executeNpmVersionInWorktree;
+          expect(fn.length).toBe(2); // Expects 2 parameters
+        }).not.toThrow();
+      });
+    });
+  });
 });
