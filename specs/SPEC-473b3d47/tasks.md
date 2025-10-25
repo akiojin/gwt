@@ -39,13 +39,13 @@ tests/                          # 新規作成
 
 ### セットアップタスク
 
-- [ ] T001 [P] テストフレームワーク選定（Vitest推奨）を`package.json`に追加
-- [ ] T002 [P] テスト設定ファイル`vitest.config.ts`を作成
-- [ ] T003 [P] テストディレクトリ構造を作成: `tests/unit/`, `tests/integration/`, `tests/e2e/`
-- [ ] T004 [P] モックヘルパーを`tests/helpers/mocks.ts`に作成（execa, fs, inquirerのモック）
-- [ ] T005 [P] テスト用フィクスチャを`tests/fixtures/`に作成（サンプルGitリポジトリデータ）
-- [ ] T006 [P] CIワークフローを`.github/workflows/test.yml`に作成（GitHub Actions）
-- [ ] T007 [P] カバレッジレポート設定を`vitest.config.ts`に追加（80%目標）
+- [x] T001 [P] テストフレームワーク選定（Vitest推奨）を`package.json`に追加
+- [x] T002 [P] テスト設定ファイル`vitest.config.ts`を作成
+- [x] T003 [P] テストディレクトリ構造を作成: `tests/unit/`, `tests/integration/`, `tests/e2e/`
+- [x] T004 [P] モックヘルパーを`tests/helpers/mocks.ts`に作成（execa, fs, inquirerのモック）
+- [x] T005 [P] テスト用フィクスチャを`tests/fixtures/`に作成（サンプルGitリポジトリデータ）
+- [x] T006 [P] CIワークフローを`.github/workflows/test.yml`に作成（GitHub Actions）
+- [x] T007 [P] カバレッジレポート設定を`vitest.config.ts`に追加（80%目標）
 
 **✅ チェックポイント**: テストフレームワークが動作し、サンプルテストが実行可能
 
