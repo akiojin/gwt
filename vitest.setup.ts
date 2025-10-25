@@ -1,12 +1,8 @@
 import '@testing-library/jest-dom';
+import { cleanup } from '@testing-library/react';
+import { afterEach } from 'vitest';
 
-// Ensure jsdom is loaded
-if (typeof document === 'undefined') {
-  // Force jsdom environment
-  const { JSDOM } = require('jsdom');
-  const dom = new JSDOM('<!DOCTYPE html><html><body></body></html>', {
-    url: 'http://localhost',
-  });
-  global.document = dom.window.document;
-  global.window = dom.window as any;
-}
+// Cleanup after each test
+afterEach(() => {
+  cleanup();
+});

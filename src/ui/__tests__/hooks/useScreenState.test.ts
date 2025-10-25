@@ -1,12 +1,19 @@
 /**
- * @vitest-environment jsdom
+ * @vitest-environment happy-dom
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { useScreenState } from '../../hooks/useScreenState.js';
 import type { ScreenType } from '../../types.js';
+import { Window } from 'happy-dom';
 
 describe('useScreenState', () => {
+  beforeEach(() => {
+    // Setup happy-dom
+    const window = new Window();
+    globalThis.window = window as any;
+    globalThis.document = window.document as any;
+  });
   it('should initialize with branch-list as active screen', () => {
     const { result } = renderHook(() => useScreenState());
 

@@ -1,15 +1,21 @@
 /**
- * @vitest-environment jsdom
+ * @vitest-environment happy-dom
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
+import { Window } from 'happy-dom';
 
 describe('useTerminalSize', () => {
   const originalRows = process.stdout.rows;
   const originalColumns = process.stdout.columns;
 
   beforeEach(() => {
+    // Setup happy-dom
+    const window = new Window();
+    globalThis.window = window as any;
+    globalThis.document = window.document as any;
+
     // デフォルト値を設定
     process.stdout.rows = 24;
     process.stdout.columns = 80;

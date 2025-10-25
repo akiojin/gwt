@@ -57,10 +57,10 @@
 
 ### カスタムフック（TDD）
 
-- [ ] T012 [P] src/ui/hooks/useTerminalSize.tsのテストを作成
-- [ ] T013 [P] T012の後にsrc/ui/hooks/useTerminalSize.tsを実装（ターミナルサイズ取得とresize監視）
-- [ ] T014 [P] src/ui/hooks/useScreenState.tsのテストを作成
-- [ ] T015 [P] T014の後にsrc/ui/hooks/useScreenState.tsを実装（画面状態管理）
+- [x] T012 [P] src/ui/hooks/useTerminalSize.tsのテストを作成
+- [x] T013 [P] T012の後にsrc/ui/hooks/useTerminalSize.tsを実装（ターミナルサイズ取得とresize監視）
+- [x] T014 [P] src/ui/hooks/useScreenState.tsのテストを作成
+- [x] T015 [P] T014の後にsrc/ui/hooks/useScreenState.tsを実装（画面状態管理）
 
 ### 共通コンポーネント（TDD）
 
