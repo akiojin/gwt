@@ -1,10 +1,6 @@
 import { select, input, confirm, checkbox } from "@inquirer/prompts";
 import chalk from "chalk";
 import stringWidth from "string-width";
-
-function stripAnsi(value: string): string {
-  return value.replace(/\u001B\[[0-9;]*m/g, "");
-}
 import {
   BranchInfo,
   BranchType,
@@ -12,6 +8,10 @@ import {
   CleanupTarget,
 } from "./types.js";
 import { SessionData } from "../config/index.js";
+
+function stripAnsi(value: string): string {
+  return value.replace(/\u001B\[[0-9;]*m/g, "");
+}
 
 type SelectChoice<TValue> = {
   name: string;
