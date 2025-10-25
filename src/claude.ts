@@ -40,9 +40,13 @@ export async function launchClaudeCode(
         console.log(chalk.cyan("   📱 Continuing most recent conversation"));
         break;
       case "resume":
-        // Use our custom conversation selection instead of claude -r
-        console.log(chalk.cyan("   🔄 Selecting conversation to resume"));
+        // TODO: Implement conversation selection with Ink UI
+        // Legacy UI removed - this feature needs to be reimplemented
+        console.log(chalk.yellow("   ⚠️  Resume conversation feature temporarily disabled (Ink UI migration)"));
+        console.log(chalk.cyan("   ℹ️  Using default Claude Code resume behavior"));
 
+        // Fallback to default Claude Code resume
+        /*
         try {
           const { selectClaudeConversation } = await import("./ui/legacy/prompts.js");
           const selectedConversation =
@@ -86,6 +90,9 @@ export async function launchClaudeCode(
           );
           args.push("-r");
         }
+        */
+        // Use standard Claude Code resume for now
+        args.push("-r");
         break;
       case "normal":
       default:

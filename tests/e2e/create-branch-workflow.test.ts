@@ -12,7 +12,6 @@ vi.mock("node:fs", () => ({
 import { execa } from "execa";
 import * as git from "../../src/git";
 import * as worktree from "../../src/worktree";
-import { createBranchTable } from "../../src/ui/legacy/table";
 
 describe("E2E: Create Branch Workflow (T209)", () => {
   beforeEach(() => {

@@ -12,7 +12,6 @@ vi.mock("node:fs", () => ({
 import { execa } from "execa";
 import * as git from "../../src/git";
 import * as worktree from "../../src/worktree";
-import { createBranchTable } from "../../src/ui/legacy/table";
 
 const stripAnsi = (value: string) => value.replace(/\u001B\[[0-9;]*m/g, "");
 
@@ -117,15 +116,8 @@ branch refs/heads/feature/user-auth
       expect(existingWorktrees.length).toBeGreaterThanOrEqual(0);
 
       // === STEP 3: Create branch table for display ===
-      const branchTable = await createBranchTable(
-        allBranches,
-        existingWorktrees,
-      );
-      expect(branchTable.length).toBeGreaterThan(0);
-
-      // Verify first row follows icon+name format
-      const firstRow = stripAnsi(branchTable[0]?.name ?? "");
-      expect(firstRow.startsWith("⚡🟢⭐  ")).toBe(true);
+      // NOTE: Skipped - legacy UI table display removed in Ink.js migration
+      // The Ink UI handles display differently via React components
 
       // === STEP 4: User selects a branch ===
       const selectedBranchName = "feature/dashboard";
