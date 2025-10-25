@@ -4,6 +4,11 @@ import { BranchListScreen } from './screens/BranchListScreen.js';
 import { WorktreeManagerScreen } from './screens/WorktreeManagerScreen.js';
 import { BranchCreatorScreen } from './screens/BranchCreatorScreen.js';
 import { PRCleanupScreen } from './screens/PRCleanupScreen.js';
+import { AIToolSelectorScreen } from './screens/AIToolSelectorScreen.js';
+import { SessionSelectorScreen } from './screens/SessionSelectorScreen.js';
+import { ExecutionModeSelectorScreen } from './screens/ExecutionModeSelectorScreen.js';
+import type { AITool } from './screens/AIToolSelectorScreen.js';
+import type { ExecutionMode } from './screens/ExecutionModeSelectorScreen.js';
 import type { WorktreeItem } from './screens/WorktreeManagerScreen.js';
 import { useGitData } from '../hooks/useGitData.js';
 import { useScreenState } from '../hooks/useScreenState.js';
@@ -83,6 +88,36 @@ export function App({ onExit }: AppProps) {
     [goBack, refresh]
   );
 
+  // Handle AI tool selection
+  const handleToolSelect = useCallback(
+    (tool: AITool) => {
+      // TODO: Store selected tool and navigate to next screen
+      // For now, just go back to branch list
+      goBack();
+    },
+    [goBack]
+  );
+
+  // Handle session selection
+  const handleSessionSelect = useCallback(
+    (session: string) => {
+      // TODO: Load selected session and navigate to next screen
+      // For now, just go back to branch list
+      goBack();
+    },
+    [goBack]
+  );
+
+  // Handle execution mode selection
+  const handleModeSelect = useCallback(
+    (mode: ExecutionMode) => {
+      // TODO: Store selected mode and start execution
+      // For now, just go back to branch list
+      goBack();
+    },
+    [goBack]
+  );
+
   // Render screen based on currentScreen
   const renderScreen = () => {
     switch (currentScreen) {
@@ -119,16 +154,22 @@ export function App({ onExit }: AppProps) {
         return <PRCleanupScreen pullRequests={[]} onBack={goBack} onCleanup={handleCleanup} />;
 
       case 'ai-tool-selector':
-        // TODO: Implement AIToolSelectorScreen
-        return <BranchListScreen branches={branchItems} stats={stats} onSelect={handleSelect} />;
+        return <AIToolSelectorScreen onBack={goBack} onSelect={handleToolSelect} />;
 
       case 'session-selector':
-        // TODO: Implement SessionSelectorScreen
-        return <BranchListScreen branches={branchItems} stats={stats} onSelect={handleSelect} />;
+        // TODO: Implement session data fetching
+        return (
+          <SessionSelectorScreen
+            sessions={[]}
+            onBack={goBack}
+            onSelect={handleSessionSelect}
+          />
+        );
 
       case 'execution-mode-selector':
-        // TODO: Implement ExecutionModeSelectorScreen
-        return <BranchListScreen branches={branchItems} stats={stats} onSelect={handleSelect} />;
+        return (
+          <ExecutionModeSelectorScreen onBack={goBack} onSelect={handleModeSelect} />
+        );
 
       default:
         return (
