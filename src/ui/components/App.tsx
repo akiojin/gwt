@@ -3,12 +3,13 @@ import { ErrorBoundary } from './common/ErrorBoundary.js';
 import { BranchListScreen } from './screens/BranchListScreen.js';
 import { WorktreeManagerScreen } from './screens/WorktreeManagerScreen.js';
 import { BranchCreatorScreen } from './screens/BranchCreatorScreen.js';
+import { PRCleanupScreen } from './screens/PRCleanupScreen.js';
 import type { WorktreeItem } from './screens/WorktreeManagerScreen.js';
 import { useGitData } from '../hooks/useGitData.js';
 import { useScreenState } from '../hooks/useScreenState.js';
 import { formatBranchItems } from '../utils/branchFormatter.js';
 import { calculateStatistics } from '../utils/statisticsCalculator.js';
-import type { BranchItem } from '../types.js';
+import type { BranchItem, MergedPullRequest } from '../types.js';
 
 export interface AppProps {
   onExit: (selectedBranch?: string) => void;
@@ -71,6 +72,17 @@ export function App({ onExit }: AppProps) {
     [goBack, refresh]
   );
 
+  // Handle PR cleanup
+  const handleCleanup = useCallback(
+    (pr: MergedPullRequest) => {
+      // TODO: Implement PR cleanup logic (github.js integration)
+      // For now, just go back to branch list
+      goBack();
+      refresh();
+    },
+    [goBack, refresh]
+  );
+
   // Render screen based on currentScreen
   const renderScreen = () => {
     switch (currentScreen) {
@@ -103,8 +115,8 @@ export function App({ onExit }: AppProps) {
         return <BranchCreatorScreen onBack={goBack} onCreate={handleCreate} />;
 
       case 'pr-cleanup':
-        // TODO: Implement PRCleanupScreen
-        return <BranchListScreen branches={branchItems} stats={stats} onSelect={handleSelect} />;
+        // TODO: Implement merged PR data fetching
+        return <PRCleanupScreen pullRequests={[]} onBack={goBack} onCleanup={handleCleanup} />;
 
       case 'ai-tool-selector':
         // TODO: Implement AIToolSelectorScreen
