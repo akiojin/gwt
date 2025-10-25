@@ -1,6 +1,8 @@
-import React, { useCallback } from 'react';
+import React, { useCallback, useMemo } from 'react';
 import { ErrorBoundary } from './common/ErrorBoundary.js';
 import { BranchListScreen } from './screens/BranchListScreen.js';
+import { WorktreeManagerScreen } from './screens/WorktreeManagerScreen.js';
+import type { WorktreeItem } from './screens/WorktreeManagerScreen.js';
 import { useGitData } from '../hooks/useGitData.js';
 import { useScreenState } from '../hooks/useScreenState.js';
 import { formatBranchItems } from '../utils/branchFormatter.js';
@@ -16,7 +18,7 @@ export interface AppProps {
  * Integrates ErrorBoundary, data fetching, screen navigation, and all screens
  */
 export function App({ onExit }: AppProps) {
-  const { branches, loading, error, refresh } = useGitData();
+  const { branches, worktrees, loading, error, refresh } = useGitData();
   const { currentScreen, navigateTo, goBack, reset } = useScreenState();
 
   // Format branches to BranchItems
@@ -25,6 +27,17 @@ export function App({ onExit }: AppProps) {
   // Calculate statistics
   const stats = calculateStatistics(branches);
 
+  // Format worktrees to WorktreeItems
+  const worktreeItems: WorktreeItem[] = useMemo(
+    () =>
+      worktrees.map((wt): WorktreeItem => ({
+        branch: wt.branch,
+        path: wt.path,
+        isAccessible: wt.isAccessible ?? true,
+      })),
+    [worktrees]
+  );
+
   // Handle branch selection
   const handleSelect = useCallback(
     (item: BranchItem) => {
@@ -32,6 +45,19 @@ export function App({ onExit }: AppProps) {
     },
     [onExit]
   );
+
+  // Handle navigation
+  const handleNavigate = useCallback(
+    (screen: string) => {
+      navigateTo(screen as any);
+    },
+    [navigateTo]
+  );
+
+  // Handle quit
+  const handleQuit = useCallback(() => {
+    onExit();
+  }, [onExit]);
 
   // Render screen based on currentScreen
   const renderScreen = () => {
@@ -42,14 +68,24 @@ export function App({ onExit }: AppProps) {
             branches={branchItems}
             stats={stats}
             onSelect={handleSelect}
+            onNavigate={handleNavigate}
+            onQuit={handleQuit}
             loading={loading}
             error={error}
           />
         );
 
       case 'worktree-manager':
-        // TODO: Implement WorktreeManagerScreen
-        return <BranchListScreen branches={branchItems} stats={stats} onSelect={handleSelect} />;
+        return (
+          <WorktreeManagerScreen
+            worktrees={worktreeItems}
+            onBack={goBack}
+            onSelect={(worktree) => {
+              // TODO: Implement worktree selection logic
+              goBack();
+            }}
+          />
+        );
 
       case 'branch-creator':
         // TODO: Implement BranchCreatorScreen

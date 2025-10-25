@@ -43,6 +43,7 @@ describe('useGitData', () => {
     });
 
     expect(result.current.branches).toEqual([]);
+    expect(result.current.worktrees).toEqual([]);
     expect(result.current.error).toBeNull();
   });
 
@@ -83,11 +84,14 @@ describe('useGitData', () => {
     expect(result.current.branches).toHaveLength(2);
     expect(result.current.branches[1].worktree).toBeDefined();
     expect(result.current.branches[1].worktree?.path).toBe('/path/to/worktree');
+    expect(result.current.worktrees).toHaveLength(1);
+    expect(result.current.worktrees[0].branch).toBe('feature/test');
     expect(result.current.error).toBeNull();
   });
 
   it('should handle errors', async () => {
     (getAllBranches as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('Git error'));
+    (listAdditionalWorktrees as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 
     const { result } = renderHook(() => useGitData());
 
@@ -98,6 +102,7 @@ describe('useGitData', () => {
     expect(result.current.error).toBeDefined();
     expect(result.current.error?.message).toBe('Git error');
     expect(result.current.branches).toEqual([]);
+    expect(result.current.worktrees).toEqual([]);
   });
 
   it('should support manual refresh', async () => {

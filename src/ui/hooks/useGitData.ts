@@ -2,9 +2,11 @@ import { useState, useEffect, useCallback } from 'react';
 import { getAllBranches } from '../../git.js';
 import { listAdditionalWorktrees } from '../../worktree.js';
 import type { BranchInfo, WorktreeInfo } from '../types.js';
+import type { WorktreeInfo as GitWorktreeInfo } from '../../worktree.js';
 
 export interface UseGitDataResult {
   branches: BranchInfo[];
+  worktrees: GitWorktreeInfo[];
   loading: boolean;
   error: Error | null;
   refresh: () => void;
@@ -15,6 +17,7 @@ export interface UseGitDataResult {
  */
 export function useGitData(): UseGitDataResult {
   const [branches, setBranches] = useState<BranchInfo[]>([]);
+  const [worktrees, setWorktrees] = useState<GitWorktreeInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
 
@@ -27,6 +30,9 @@ export function useGitData(): UseGitDataResult {
         getAllBranches(),
         listAdditionalWorktrees(),
       ]);
+
+      // Store worktrees separately
+      setWorktrees(worktreesData);
 
       // Map worktrees to branches
       const worktreeMap = new Map<string, WorktreeInfo>();
@@ -56,6 +62,7 @@ export function useGitData(): UseGitDataResult {
     } catch (err) {
       setError(err instanceof Error ? err : new Error(String(err)));
       setBranches([]);
+      setWorktrees([]);
     } finally {
       setLoading(false);
     }
@@ -71,6 +78,7 @@ export function useGitData(): UseGitDataResult {
 
   return {
     branches,
+    worktrees,
     loading,
     error,
     refresh,

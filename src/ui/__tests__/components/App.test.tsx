@@ -47,6 +47,7 @@ describe('App', () => {
       branches: mockBranches,
       loading: false,
       error: null,
+      worktrees: [],
       refresh: mockRefresh,
     });
 
@@ -64,6 +65,7 @@ describe('App', () => {
       branches: [],
       loading: true,
       error: null,
+      worktrees: [],
       refresh: mockRefresh,
     });
 
@@ -79,6 +81,7 @@ describe('App', () => {
       branches: [],
       loading: false,
       error,
+      worktrees: [],
       refresh: mockRefresh,
     });
 
@@ -120,6 +123,7 @@ describe('App', () => {
       branches: branchesWithWorktree,
       loading: false,
       error: null,
+      worktrees: [],
       refresh: mockRefresh,
     });
 
@@ -139,6 +143,7 @@ describe('App', () => {
       branches: mockBranches,
       loading: false,
       error: null,
+      worktrees: [],
       refresh: mockRefresh,
     });
 
@@ -155,6 +160,7 @@ describe('App', () => {
       branches: [],
       loading: false,
       error: null,
+      worktrees: [],
       refresh: mockRefresh,
     });
 
@@ -171,6 +177,7 @@ describe('App', () => {
       branches: mockBranches,
       loading: false,
       error: null,
+      worktrees: [],
       refresh: mockRefresh,
     });
 
@@ -185,6 +192,7 @@ describe('App', () => {
       branches: mockBranches,
       loading: false,
       error: null,
+      worktrees: [],
       refresh: mockRefresh,
     });
 

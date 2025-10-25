@@ -1,5 +1,5 @@
 import React from 'react';
-import { Box, Text } from 'ink';
+import { Box, Text, useInput } from 'ink';
 import { Header } from '../parts/Header.js';
 import { Footer } from '../parts/Footer.js';
 import { Select } from '../common/Select.js';
@@ -29,6 +29,13 @@ export function WorktreeManagerScreen({
   onSelect,
 }: WorktreeManagerScreenProps) {
   const { rows } = useTerminalSize();
+
+  // Handle keyboard input
+  useInput((input, key) => {
+    if (input === 'q') {
+      onBack();
+    }
+  });
 
   // Calculate accessible and inaccessible counts
   const accessibleCount = worktrees.filter((w) => w.isAccessible).length;

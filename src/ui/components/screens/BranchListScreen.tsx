@@ -1,5 +1,5 @@
 import React from 'react';
-import { Box, Text } from 'ink';
+import { Box, Text, useInput } from 'ink';
 import { Header } from '../parts/Header.js';
 import { Stats } from '../parts/Stats.js';
 import { Footer } from '../parts/Footer.js';
@@ -11,6 +11,8 @@ export interface BranchListScreenProps {
   branches: BranchItem[];
   stats: Statistics;
   onSelect: (branch: BranchItem) => void;
+  onNavigate?: (screen: string) => void;
+  onQuit?: () => void;
   loading?: boolean;
   error?: Error | null;
 }
@@ -23,10 +25,25 @@ export function BranchListScreen({
   branches,
   stats,
   onSelect,
+  onNavigate,
+  onQuit,
   loading = false,
   error = null,
 }: BranchListScreenProps) {
   const { rows } = useTerminalSize();
+
+  // Handle keyboard input
+  useInput((input, key) => {
+    if (input === 'm' && onNavigate) {
+      onNavigate('worktree-manager');
+    } else if (input === 'n' && onNavigate) {
+      onNavigate('branch-creator');
+    } else if (input === 'c' && onNavigate) {
+      onNavigate('pr-cleanup');
+    } else if (input === 'q' && onQuit) {
+      onQuit();
+    }
+  });
 
   // Calculate available space for branch list
   // Header: 2 lines (title + divider)
@@ -45,6 +62,9 @@ export function BranchListScreen({
   // Footer actions
   const footerActions = [
     { key: 'enter', description: 'Select' },
+    { key: 'n', description: 'New branch' },
+    { key: 'm', description: 'Manage worktrees' },
+    { key: 'c', description: 'Cleanup PRs' },
     { key: 'q', description: 'Quit' },
   ];
 
