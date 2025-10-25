@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { createBranchTable } from "../../../src/ui/table";
+import { createBranchTable } from "../../../src/ui/legacy/table";
 import { localBranches, remoteBranches } from "../../fixtures/branches";
 import { worktrees } from "../../fixtures/worktrees";
 

@@ -9,22 +9,10 @@ vi.mock("node:fs", () => ({
   existsSync: vi.fn(() => true),
 }));
 
-vi.mock("../../src/git.js", async () => {
-  const actual =
-    await vi.importActual<typeof import("../../src/git.js")>(
-      "../../src/git.js",
-    );
-  return {
-    ...actual,
-    getChangedFilesCount: vi.fn(() => Promise.resolve(0)),
-    getRepositoryRoot: vi.fn(() => Promise.resolve("/path/to/repo")),
-  };
-});
-
 import { execa } from "execa";
 import * as git from "../../src/git";
 import * as worktree from "../../src/worktree";
-import { createBranchTable } from "../../src/ui/table";
+import { createBranchTable } from "../../src/ui/legacy/table";
 
 describe("E2E: Create Branch Workflow (T209)", () => {
   beforeEach(() => {

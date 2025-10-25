@@ -152,8 +152,8 @@ async function mainInkUI(): Promise<void> {
 
 export async function main(): Promise<void> {
   try {
-    // Check for Ink UI feature flag
-    const useInkUI = process.env.USE_INK_UI === 'true';
+    // Check for Ink UI feature flag (default: true, set USE_INK_UI=false to use legacy UI)
+    const useInkUI = process.env.USE_INK_UI !== 'false';
 
     if (useInkUI) {
       await mainInkUI();

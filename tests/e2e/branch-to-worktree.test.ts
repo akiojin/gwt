@@ -12,7 +12,7 @@ vi.mock("node:fs", () => ({
 import { execa } from "execa";
 import * as git from "../../src/git";
 import * as worktree from "../../src/worktree";
-import { createBranchTable } from "../../src/ui/table";
+import { createBranchTable } from "../../src/ui/legacy/table";
 
 const stripAnsi = (value: string) => value.replace(/\u001B\[[0-9;]*m/g, "");
 

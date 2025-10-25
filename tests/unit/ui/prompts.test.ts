@@ -1,6 +1,6 @@
 import stringWidth from "string-width";
 import { describe, it, expect } from "vitest";
-import { formatBranchChoiceLine } from "../../../src/ui/prompts";
+import { formatBranchChoiceLine } from "../../../src/ui/legacy/prompts";
 
 const stripAnsi = (value: string) => value.replace(/\u001B\[[0-9;]*m/g, "");
 
