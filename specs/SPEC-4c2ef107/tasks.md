@@ -75,14 +75,14 @@
 
 ### UI部品コンポーネント（TDD）
 
-- [ ] T024 [P] src/ui/components/parts/Header.tsxのテストを作成
-- [ ] T025 T024の後にsrc/ui/components/parts/Header.tsxを実装（タイトルと区切り線）
-- [ ] T026 [P] src/ui/components/parts/Footer.tsxのテストを作成
-- [ ] T027 T026の後にsrc/ui/components/parts/Footer.tsxを実装（アクション説明）
-- [ ] T028 [P] src/ui/components/parts/Stats.tsxのテストを作成
-- [ ] T029 T028の後にsrc/ui/components/parts/Stats.tsxを実装（統計情報1行表示）
-- [ ] T030 [P] src/ui/components/parts/ScrollableList.tsxのテストを作成
-- [ ] T031 T030の後にsrc/ui/components/parts/ScrollableList.tsxを実装（スクロール可能リストコンテナ）
+- [x] T024 [P] src/ui/components/parts/Header.tsxのテストを作成
+- [x] T025 T024の後にsrc/ui/components/parts/Header.tsxを実装（タイトルと区切り線）
+- [x] T026 [P] src/ui/components/parts/Footer.tsxのテストを作成
+- [x] T027 T026の後にsrc/ui/components/parts/Footer.tsxを実装（アクション説明）
+- [x] T028 [P] src/ui/components/parts/Stats.tsxのテストを作成
+- [x] T029 T028の後にsrc/ui/components/parts/Stats.tsxを実装（統計情報1行表示）
+- [x] T030 [P] src/ui/components/parts/ScrollableList.tsxのテストを作成
+- [x] T031 T030の後にsrc/ui/components/parts/ScrollableList.tsxを実装（スクロール可能リストコンテナ）
 
 ---
 
