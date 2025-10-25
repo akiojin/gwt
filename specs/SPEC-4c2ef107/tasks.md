@@ -113,9 +113,9 @@
 
 ### メインアプリケーション（TDD）
 
-- [ ] T042 [US1] src/ui/components/App.tsxのテストを作成
-- [ ] T043 [US1] T042の後にsrc/ui/components/App.tsxを実装（ErrorBoundary + BranchListScreenを統合）
-- [ ] T044 [US1] T043の後にsrc/index.tsを更新（フィーチャーフラグでInk Appを起動）
+- [x] T042 [US1] src/ui/components/App.tsxのテストを作成
+- [x] T043 [US1] T042の後にsrc/ui/components/App.tsxを実装（ErrorBoundary + BranchListScreenを統合）
+- [x] T044 [US1] T043の後にsrc/index.tsを更新（フィーチャーフラグでInk Appを起動）
 
 ### 統合テスト
 

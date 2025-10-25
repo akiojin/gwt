@@ -114,8 +114,53 @@ Pass-through:
 `);
 }
 
+/**
+ * Main function for Ink.js UI (new UI)
+ */
+async function mainInkUI(): Promise<void> {
+  const { render } = await import('ink');
+  const React = await import('react');
+  const { App } = await import('./ui/components/App.js');
+
+  // Check if current directory is a Git repository
+  if (!(await isGitRepository())) {
+    printError("Current directory is not a Git repository.");
+    process.exit(1);
+  }
+
+  let selectedBranch: string | undefined;
+
+  const { unmount, waitUntilExit } = render(
+    React.createElement(App, {
+      onExit: (branch?: string) => {
+        selectedBranch = branch;
+      },
+    })
+  );
+
+  // Wait for user to exit
+  await waitUntilExit();
+  unmount();
+
+  // If a branch was selected, handle it
+  if (selectedBranch) {
+    printInfo(`Selected branch: ${selectedBranch}`);
+    // TODO: Implement branch handling logic
+    // For now, just exit
+  }
+}
+
 export async function main(): Promise<void> {
   try {
+    // Check for Ink UI feature flag
+    const useInkUI = process.env.USE_INK_UI === 'true';
+
+    if (useInkUI) {
+      await mainInkUI();
+      return;
+    }
+
+    // Legacy UI (original implementation)
     // Parse command line arguments
     const args = process.argv.slice(2);
     const continueLastSession = args.includes("-c");

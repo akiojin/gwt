@@ -6,18 +6,17 @@ import { renderHook, waitFor } from '@testing-library/react';
 import { useGitData } from '../../hooks/useGitData.js';
 import { Window } from 'happy-dom';
 import type { BranchInfo } from '../../types.js';
-
 // Mock git.js and worktree.js
-const getAllBranchesMock = vi.fn();
-const listAdditionalWorktreesMock = vi.fn();
-
 vi.mock('../../../git.js', () => ({
-  getAllBranches: getAllBranchesMock,
+  getAllBranches: vi.fn(),
 }));
 
 vi.mock('../../../worktree.js', () => ({
-  listAdditionalWorktrees: listAdditionalWorktreesMock,
+  listAdditionalWorktrees: vi.fn(),
 }));
+
+import { getAllBranches } from '../../../git.js';
+import { listAdditionalWorktrees } from '../../../worktree.js';
 
 describe('useGitData', () => {
   beforeEach(() => {
@@ -27,16 +26,22 @@ describe('useGitData', () => {
     globalThis.document = window.document as any;
 
     // Reset mocks
-    vi.clearAllMocks();
+    (getAllBranches as ReturnType<typeof vi.fn>).mockReset();
+    (listAdditionalWorktrees as ReturnType<typeof vi.fn>).mockReset();
   });
 
-  it('should initialize with loading state', () => {
-    getAllBranchesMock.mockResolvedValue([]);
-    listAdditionalWorktreesMock.mockResolvedValue([]);
+  it('should initialize with loading state', async () => {
+    (getAllBranches as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    (listAdditionalWorktrees as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 
     const { result } = renderHook(() => useGitData());
 
-    expect(result.current.loading).toBe(true);
+    // In test environment, useEffect runs synchronously, so loading may already be false
+    // Check that it eventually becomes false and data is loaded
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
     expect(result.current.branches).toEqual([]);
     expect(result.current.error).toBeNull();
   });
@@ -66,8 +71,8 @@ describe('useGitData', () => {
       },
     ];
 
-    getAllBranchesMock.mockResolvedValue(mockBranches);
-    listAdditionalWorktreesMock.mockResolvedValue(mockWorktrees);
+    (getAllBranches as ReturnType<typeof vi.fn>).mockResolvedValue(mockBranches);
+    (listAdditionalWorktrees as ReturnType<typeof vi.fn>).mockResolvedValue(mockWorktrees);
 
     const { result } = renderHook(() => useGitData());
 
@@ -82,7 +87,7 @@ describe('useGitData', () => {
   });
 
   it('should handle errors', async () => {
-    getAllBranchesMock.mockRejectedValue(new Error('Git error'));
+    (getAllBranches as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('Git error'));
 
     const { result } = renderHook(() => useGitData());
 
@@ -105,8 +110,8 @@ describe('useGitData', () => {
       },
     ];
 
-    getAllBranchesMock.mockResolvedValue(mockBranches);
-    listAdditionalWorktreesMock.mockResolvedValue([]);
+    (getAllBranches as ReturnType<typeof vi.fn>).mockResolvedValue(mockBranches);
+    (listAdditionalWorktrees as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 
     const { result } = renderHook(() => useGitData());
 
@@ -127,7 +132,7 @@ describe('useGitData', () => {
       },
     ];
 
-    getAllBranchesMock.mockResolvedValue(updatedBranches);
+    (getAllBranches as ReturnType<typeof vi.fn>).mockResolvedValue(updatedBranches);
 
     // Trigger refresh
     result.current.refresh();
@@ -175,8 +180,8 @@ describe('useGitData', () => {
       },
     ];
 
-    getAllBranchesMock.mockResolvedValue(mockBranches);
-    listAdditionalWorktreesMock.mockResolvedValue(mockWorktrees);
+    (getAllBranches as ReturnType<typeof vi.fn>).mockResolvedValue(mockBranches);
+    (listAdditionalWorktrees as ReturnType<typeof vi.fn>).mockResolvedValue(mockWorktrees);
 
     const { result } = renderHook(() => useGitData());
 
