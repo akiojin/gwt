@@ -10,7 +10,8 @@ Interactive Git worktree manager with AI tool selection (Claude Code / Codex CLI
 
 ## ✨ Key Features
 
-- 🎯 **Interactive Branch Selection**: Navigate through local and remote branches with an elegant table-based interface
+- 🎯 **Modern React-based UI**: Built with Ink.js for a smooth, responsive terminal interface with real-time updates
+- 🖼️ **Full-screen Layout**: Persistent header with statistics, scrollable branch list, and always-visible footer with keyboard shortcuts
 - 🌟 **Smart Branch Creation**: Create feature, hotfix, or release branches with guided prompts and automatic base branch selection
 - 🔄 **Advanced Worktree Management**: Complete lifecycle management including creation, cleanup, and path optimization
 - 🤖 **AI Tool Selection**: Choose between Claude Code / Codex CLI at launch, or use `--tool` (with `--` to pass arguments through to the tool)
@@ -18,7 +19,7 @@ Interactive Git worktree manager with AI tool selection (Claude Code / Codex CLI
 - 📊 **GitHub PR Integration**: Automatic cleanup of merged pull request branches and worktrees
 - 🛠️ **Change Management**: Built-in support for committing, stashing, or discarding changes after development sessions
 - 📦 **Universal Package**: Install once, use across all your projects with consistent behavior
-- 🔍 **Repository Statistics**: Real-time display of branch and worktree counts for better project overview
+- 🔍 **Real-time Statistics**: Live updates of branch and worktree counts with automatic terminal resize handling
 
 ## Installation
 
