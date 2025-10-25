@@ -14,9 +14,6 @@ on:
     workflows: ["Test", "Lint"]
     types:
       - completed
-    branches:
-      - main
-      - develop
 ```
 
 ## イベントペイロード構造

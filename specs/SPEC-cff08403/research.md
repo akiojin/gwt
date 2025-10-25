@@ -49,9 +49,6 @@ on:
     workflows: ["Test", "Lint"]
     types:
       - completed
-    branches:
-      - main
-      - develop
 ```
 
 ### 1.3 ブランチ保護ルールとの統合
