@@ -39,8 +39,6 @@
     "bun": ">=1.0.0"
   },
   "dependencies": {
-    "@inquirer/core": "^10.1.15",
-    "@inquirer/prompts": "^6.0.1",
     "chalk": "^5.4.1",
     "execa": "^9.6.0",
     "ink": "^6.3.1",
