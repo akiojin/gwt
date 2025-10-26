@@ -290,10 +290,12 @@ npm registry
 
 ```text
 .github/workflows/release.yml
-    ↓ (トリガー: on.push.branches: [main])
+    ↓ (トリガー: push to main / Auto Merge workflow_run success)
 GitHub Actions Runner
     ↓ (実行)
-bunx semantic-release
+Checkout main@SHA (push) または Auto Merge の head_sha (workflow_run)
+    ↓ (実行)
+node node_modules/semantic-release/bin/semantic-release.js
     ↓ (設定読み込み)
 .releaserc.json
     ↓ (環境変数読み込み)

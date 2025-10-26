@@ -350,6 +350,10 @@ name: Release
 on:
   push:
     branches: [main]
+  workflow_run:
+    workflows: ["Auto Merge"]
+    types:
+      - completed
 
 permissions:
   contents: write
@@ -361,6 +365,11 @@ jobs:
   release:
     name: Release
     runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main')
 
     steps:
       - name: Checkout code
@@ -368,11 +377,17 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.14.0"
 
       - name: Install dependencies
         run: bun install
@@ -388,7 +403,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          bunx semantic-release
+          node node_modules/semantic-release/bin/semantic-release.js
 ```
 
 ## 参考資料
