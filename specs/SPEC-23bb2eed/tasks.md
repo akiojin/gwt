@@ -60,7 +60,7 @@ description: "SPEC-23bb2eed実装のためのタスクリスト: semantic-releas
 ### ローカル検証
 
 - [x] T103 [US1] ローカル環境で設定ファイルの読み込み確認（プロジェクトルート）
-  - `bunx semantic-release --dry-run` を実行 ✓
+  - `node node_modules/semantic-release/bin/semantic-release.js --dry-run` を実行 ✓
   - .releaserc.json が正しく読み込まれることを確認 ✓
   - エラーがないことを確認 ✓
   - package.json に semantic-release とプラグインを追加 ✓
@@ -116,7 +116,7 @@ description: "SPEC-23bb2eed実装のためのタスクリスト: semantic-releas
 ### GitHub Actions での検証
 
 - [x] T301 [US3] GitHub Actions でのドライラン実行確認（.github/workflows/release.yml）
-  - `bunx semantic-release --dry-run` がワークフロー内で正常に実行されるか確認 ✓
+  - `node node_modules/semantic-release/bin/semantic-release.js --dry-run` がワークフロー内で正常に実行されるか確認 ✓
   - .releaserc.json が正しく読み込まれることを確認 ✓
   - エラーログがないことを確認 ✓
 
@@ -268,7 +268,7 @@ Phase 5 (最終確認) - コミット
 
 - [ ] .releaserc.json が作成され、正しい JSON フォーマットである
 - [ ] .releaserc.json の全フィールドが data-model.md の仕様に準拠している
-- [ ] `bunx semantic-release --dry-run` が成功する
+- [ ] `node node_modules/semantic-release/bin/semantic-release.js --dry-run` が成功する
 - [ ] README.md にリリースプロセスが記載されている
 - [ ] CHANGELOG.md に今回の変更が記録されている
 - [ ] すべてのテストが成功（`bun run test`）
