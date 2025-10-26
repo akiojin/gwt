@@ -270,8 +270,8 @@
 
 ### CI/CD検証
 
-- [ ] T105 CI/CDテスト完走確認（`.github/workflows/test.yml`に合わせて`bun run type-check` / `bun run lint` / `bun run test` / `bun run test:coverage` / `bun run build`をローカルで完走、失敗時は修正）
-- [ ] T106 Markdown Lint完走確認（`.github/workflows/lint.yml`に合わせて`bun run format:check`と`bunx --bun markdownlint-cli "**/*.md" --config .markdownlint.json --ignore-path .markdownlintignore`をローカルで完走、失敗時は修正）
+- [x] T105 CI/CDテスト完走確認（`.github/workflows/test.yml`に合わせて`bun run type-check` / `bun run lint` / `bun run test` / `bun run test:coverage` / `bun run build`をローカルで完走、失敗時は修正）✅ すべて成功
+- [x] T106 Markdown Lint完走確認（`.github/workflows/lint.yml`に合わせて`bun run format:check`と`bunx --bun markdownlint-cli "**/*.md" --config .markdownlint.json --ignore-path .markdownlintignore`をローカルで完走、失敗時は修正）✅ すべて成功
 
 ### 最終検証
 
