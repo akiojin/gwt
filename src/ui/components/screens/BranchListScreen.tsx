@@ -97,6 +97,11 @@ export function BranchListScreen({
             <Text color="red" bold>
               Error: {error.message}
             </Text>
+            {process.env.DEBUG && error.stack && (
+              <Box marginTop={1}>
+                <Text color="gray">{error.stack}</Text>
+              </Box>
+            )}
           </Box>
         )}
 
