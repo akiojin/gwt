@@ -1,7 +1,7 @@
 /**
  * @vitest-environment happy-dom
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { act, render } from '@testing-library/react';
 import React from 'react';
 import { BranchListScreen } from '../../../components/screens/BranchListScreen.js';
@@ -10,10 +10,15 @@ import { Window } from 'happy-dom';
 
 describe('BranchListScreen', () => {
   beforeEach(() => {
+    vi.useFakeTimers();
     // Setup happy-dom
     const window = new Window();
     globalThis.window = window as any;
     globalThis.document = window.document as any;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   const mockBranches: BranchItem[] = [
@@ -121,13 +126,13 @@ describe('BranchListScreen', () => {
     expect(queryByText(/Git情報を読み込んでいます/i)).toBeNull();
 
     await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 5));
+      vi.advanceTimersByTime(5);
     });
 
     expect(queryByText(/Git情報を読み込んでいます/i)).toBeNull();
 
     await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 15));
+      vi.advanceTimersByTime(10);
     });
 
     expect(getByText(/Git情報を読み込んでいます/i)).toBeDefined();
