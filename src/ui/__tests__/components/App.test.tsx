@@ -2,7 +2,7 @@
  * @vitest-environment happy-dom
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { render } from '@testing-library/react';
+import { act, render } from '@testing-library/react';
 import React from 'react';
 import { App } from '../../components/App.js';
 import { Window } from 'happy-dom';
@@ -61,7 +61,7 @@ describe('App', () => {
     expect(getByText(/feature\/test/)).toBeDefined();
   });
 
-  it('should show loading state initially', () => {
+  it('should show loading state initially', async () => {
     mockUseGitData.mockReturnValue({
       branches: [],
       loading: true,
@@ -71,9 +71,17 @@ describe('App', () => {
     });
 
     const onExit = vi.fn();
-    const { getByText } = render(<App onExit={onExit} />);
+    const { queryByText, getByText } = render(
+      <App onExit={onExit} loadingIndicatorDelay={10} />
+    );
 
-    expect(getByText(/Loading/i)).toBeDefined();
+    expect(queryByText(/Git情報を読み込んでいます/i)).toBeNull();
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 15));
+    });
+
+    expect(getByText(/Git情報を読み込んでいます/i)).toBeDefined();
   });
 
   it('should show error state when Git data fails to load', () => {
