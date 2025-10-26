@@ -1,3 +1,38 @@
+# [1.3.0](https://github.com/akiojin/claude-worktree/compare/v1.2.1...v1.3.0) (2025-10-26)
+
+
+### Features
+
+* SPEC-6d501fd0仕様・計画・タスクの詳細化と品質分析 ([7ff3aa0](https://github.com/akiojin/claude-worktree/commit/7ff3aa03ffa3f3846c8d94d11ae6dcf44ca3498a))
+
+## [1.2.1](https://github.com/akiojin/claude-worktree/compare/v1.2.0...v1.2.1) (2025-10-26)
+
+
+### Bug Fixes
+
+* Spec Kitのブランチ自動作成を無効化 ([a459682](https://github.com/akiojin/claude-worktree/commit/a459682610fd0553e41bde6815fcef7d68509c3d))
+
+# [1.2.0](https://github.com/akiojin/claude-worktree/compare/v1.1.0...v1.2.0) (2025-10-26)
+
+
+### Bug Fixes
+
+* Docker環境でのGitリポジトリ検出エラーメッセージを改善 ([338d626](https://github.com/akiojin/claude-worktree/commit/338d626f73d0140af1844b522b710934fc0588d0))
+* LintワークフローにMarkdownlintを統合 ([55f446e](https://github.com/akiojin/claude-worktree/commit/55f446ee71a45d958e1b5d5a2e7b74d8047e1a54))
+* WorktreeConfig型のエクスポートとフォーマット修正 ([13252a2](https://github.com/akiojin/claude-worktree/commit/13252a2c2e246669212d092e831b3debedd92072))
+* WorktreeディレクトリでのisGitRepository()動作を修正 ([4d36898](https://github.com/akiojin/claude-worktree/commit/4d3689846380acc5d2a0075bea41665588550a7e))
+* エラー表示にデバッグモード時のスタックトレース表示を追加 ([dd68436](https://github.com/akiojin/claude-worktree/commit/dd68436a0707d0dd808a7a4b0fb076e1b3e757d0))
+* リモートブランチ表示のアイコン幅を調整 ([5b7fc35](https://github.com/akiojin/claude-worktree/commit/5b7fc354d3f9dad786ebad06cce74d543e700c4d))
+* リリースワークフローの認証設定を追加 ([52683cf](https://github.com/akiojin/claude-worktree/commit/52683cf150cc2be9c4e8d76dbff68cbf89800aac))
+
+
+### Features
+
+* add git loading indicator with tdd coverage ([#104](https://github.com/akiojin/claude-worktree/issues/104)) ([1432d06](https://github.com/akiojin/claude-worktree/commit/1432d064448cb9496d5fcd3b9e470c6b2ff8c28d))
+* skipPermissions選択機能とAIツール終了後のメイン画面復帰を実装 ([63f6f7d](https://github.com/akiojin/claude-worktree/commit/63f6f7db0987fe8d89a63a98bcaf689fa6ec4247))
+* ブランチ作成機能を実装（FR-007完全対応） ([88633bf](https://github.com/akiojin/claude-worktree/commit/88633bf10f72680d47dd8efd1014fdc958c99f04))
+* ブランチ選択後のワークフロー統合（AIツール選択→実行モード選択→起動） ([fbea71c](https://github.com/akiojin/claude-worktree/commit/fbea71cef09807b19dbfb2cd73f95c79e1fa691e))
+
 # [1.1.0](https://github.com/akiojin/claude-worktree/compare/v1.0.0...v1.1.0) (2025-10-26)
 
 
