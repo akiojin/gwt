@@ -1,8 +1,8 @@
-import { useState, useEffect, useCallback } from 'react';
-import { getAllBranches } from '../../git.js';
-import { listAdditionalWorktrees } from '../../worktree.js';
-import type { BranchInfo, WorktreeInfo } from '../types.js';
-import type { WorktreeInfo as GitWorktreeInfo } from '../../worktree.js';
+import { useState, useEffect, useCallback } from "react";
+import { getAllBranches } from "../../git.js";
+import { listAdditionalWorktrees } from "../../worktree.js";
+import type { BranchInfo, WorktreeInfo } from "../types.js";
+import type { WorktreeInfo as GitWorktreeInfo } from "../../worktree.js";
 
 export interface UseGitDataOptions {
   enableAutoRefresh?: boolean;

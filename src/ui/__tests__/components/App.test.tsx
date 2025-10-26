@@ -10,11 +10,12 @@ import type { BranchInfo } from '../../types.js';
 
 // Mock useGitData hook
 const mockRefresh = vi.fn();
-const mockUseGitData = vi.fn();
-
 vi.mock('../../hooks/useGitData.js', () => ({
-  useGitData: mockUseGitData,
+  useGitData: vi.fn(),
 }));
+
+import { useGitData } from '../../hooks/useGitData.js';
+const mockUseGitData = useGitData as ReturnType<typeof vi.fn>;
 
 describe('App', () => {
   beforeEach(() => {

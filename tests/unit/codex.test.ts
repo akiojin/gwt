@@ -1,30 +1,23 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-const mockExeca = vi.fn();
-
+// Mock modules before importing
 vi.mock("execa", () => ({
-  execa: mockExeca,
-  default: { execa: mockExeca },
+  execa: vi.fn(),
 }));
 
-vi.mock("fs", () => {
-  const existsSync = vi.fn(() => true);
-  return {
-    existsSync,
-    default: { existsSync },
-  };
-});
+vi.mock("fs", () => ({
+  existsSync: vi.fn(() => true),
+}));
 
-vi.mock("os", () => {
-  const platform = vi.fn(() => "darwin");
-  return {
-    platform,
-    default: { platform },
-  };
-});
+vi.mock("os", () => ({
+  platform: vi.fn(() => "darwin"),
+}));
 
 import { execa } from "execa";
 import { launchCodexCLI } from "../../src/codex";
+
+// Get typed mock
+const mockExeca = execa as ReturnType<typeof vi.fn>;
 
 const DEFAULT_CODEX_ARGS = [
   "--search",

@@ -1,4 +1,4 @@
-import type { BranchInfo, Statistics } from '../types.js';
+import type { BranchInfo, Statistics } from "../types.js";
 
 /**
  * Calculates statistics from branch data
@@ -8,7 +8,7 @@ import type { BranchInfo, Statistics } from '../types.js';
  */
 export function calculateStatistics(
   branches: BranchInfo[],
-  changedBranches: Set<string> = new Set()
+  changedBranches: Set<string> = new Set(),
 ): Statistics {
   let localCount = 0;
   let remoteCount = 0;
@@ -17,7 +17,7 @@ export function calculateStatistics(
 
   for (const branch of branches) {
     // Count by type
-    if (branch.type === 'local') {
+    if (branch.type === "local") {
       localCount++;
 
       // Count worktrees (only for local branches)
@@ -29,7 +29,7 @@ export function calculateStatistics(
           changesCount++;
         }
       }
-    } else if (branch.type === 'remote') {
+    } else if (branch.type === "remote") {
       remoteCount++;
     }
   }

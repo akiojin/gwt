@@ -1,6 +1,5 @@
 # 1.0.0 (2025-10-26)
 
-
 ### Bug Fixes
 
 * Claude Codeコマンドが見つからない場合の適切なエラーハンドリングを追加 ([372c123](https://github.com/akiojin/claude-worktree/commit/372c1234c18d253c5e67e7f7f3dacb9e4665f260))
