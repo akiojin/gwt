@@ -51,7 +51,15 @@ async function mainInkUI(): Promise<void> {
 
   // Check if current directory is a Git repository
   if (!(await isGitRepository())) {
-    printError("Current directory is not a Git repository.");
+    printError(`Current directory is not a Git repository: ${process.cwd()}`);
+    printInfo("Please run this command from within a Git repository or worktree directory.");
+
+    // Docker環境でよくある問題: safe.directory設定
+    printInfo("\nIf you're running in Docker, you may need to configure Git safe.directory:");
+    printInfo("  git config --global --add safe.directory '*'");
+    printInfo("\nOr run with DEBUG=1 for more information:");
+    printInfo("  DEBUG=1 bun run start");
+
     process.exit(1);
   }
 

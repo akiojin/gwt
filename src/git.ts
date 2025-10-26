@@ -18,9 +18,20 @@ export class GitError extends Error {
  */
 export async function isGitRepository(): Promise<boolean> {
   try {
-    await execa("git", ["rev-parse", "--git-dir"]);
+    const result = await execa("git", ["rev-parse", "--git-dir"]);
+    // Debug: log the result for troubleshooting
+    if (process.env.DEBUG) {
+      console.error(`[DEBUG] git rev-parse --git-dir: ${result.stdout}`);
+    }
     return true;
-  } catch {
+  } catch (error: any) {
+    // Debug: log the error for troubleshooting
+    if (process.env.DEBUG) {
+      console.error(`[DEBUG] git rev-parse --git-dir failed:`, error.message);
+      if (error.stderr) {
+        console.error(`[DEBUG] stderr:`, error.stderr);
+      }
+    }
     return false;
   }
 }
