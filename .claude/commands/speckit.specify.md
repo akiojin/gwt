@@ -16,19 +16,20 @@ $ARGUMENTS
 
 機能の説明が与えられた場合、以下を実行します：
 
-1. **SPEC IDベースのブランチを作成**:
+1. **SPEC IDを生成（ブランチは作成しない）**:
 
    a. まず、すべてのリモートブランチをフェッチして最新情報を取得します：
       ```bash
       git fetch --all --prune
       ```
 
-   b. スクリプトを実行して新しいSPEC IDを生成します：
-      `.specify/scripts/bash/create-new-feature.sh --json "$ARGUMENTS"`
+   b. スクリプトを実行して新しいSPEC IDを生成します（**--no-branch オプションを必ず指定**）：
+      `.specify/scripts/bash/create-new-feature.sh --json --no-branch "$ARGUMENTS"`
 
-      - 例: `.specify/scripts/bash/create-new-feature.sh --json "ユーザー認証を追加"`
+      - 例: `.specify/scripts/bash/create-new-feature.sh --json --no-branch "ユーザー認証を追加"`
 
    **重要**:
+   - **--no-branch オプション**: ブランチを作成せず、現在のブランチで作業を続けます（worktree設計思想に準拠）
    - このスクリプトは機能ごとに1回だけ実行する必要があります
    - JSONは端末に出力として提供されます - 探しているコンテンツを取得するために常にそれを参照してください
    - JSON出力にはBRANCH_NAME、SPEC_FILE、SPEC_IDが含まれます
@@ -157,9 +158,9 @@ $ARGUMENTS
 
    d. **Update Checklist**: After each validation iteration, update the checklist file with current pass/fail status
 
-7. Report completion with branch name, spec file path, checklist results, and readiness for the next phase (`/speckit.clarify` or `/speckit.plan`).
+7. Report completion with SPEC ID, spec file path, checklist results, and readiness for the next phase (`/speckit.clarify` or `/speckit.plan`).
 
-**NOTE:** The script creates and checks out the new branch and initializes the spec file before writing.
+**NOTE:** The script generates a SPEC ID and initializes the spec file in the specs/ directory. It does NOT create or checkout any branches (worktree design principle).
 
 ## General Guidelines
 
