@@ -16,6 +16,8 @@ export interface BranchListScreenProps {
   loading?: boolean;
   error?: Error | null;
   lastUpdated?: Date | null;
+  infoMessage?: string | null;
+  statusMessage?: string | null;
 }
 
 /**
@@ -31,6 +33,8 @@ export function BranchListScreen({
   loading = false,
   error = null,
   lastUpdated = null,
+  infoMessage = null,
+  statusMessage = null,
 }: BranchListScreenProps) {
   const { rows } = useTerminalSize();
 
@@ -85,6 +89,18 @@ export function BranchListScreen({
 
       {/* Content */}
       <Box flexDirection="column" flexGrow={1}>
+        {infoMessage && (
+          <Box marginBottom={1}>
+            <Text color="yellow">{infoMessage}</Text>
+          </Box>
+        )}
+
+        {statusMessage && (
+          <Box marginBottom={1}>
+            <Text color="cyan">{statusMessage}</Text>
+          </Box>
+        )}
+
         {loading && (
           <Box>
             <Text color="yellow">Loading branches...</Text>

@@ -15,7 +15,26 @@ describe('SessionSelectorScreen', () => {
     globalThis.document = window.document as any;
   });
 
-  const mockSessions = ['session-1', 'session-2', 'session-3'];
+  const mockSessions = [
+    {
+      id: 'session-1',
+      branchName: 'feature/login',
+      worktreePath: '/tmp/worktree1',
+      formattedTimestamp: '2025-10-24 10:00',
+    },
+    {
+      id: 'session-2',
+      branchName: 'bugfix/payment',
+      worktreePath: '/tmp/worktree2',
+      formattedTimestamp: '2025-10-24 12:00',
+    },
+    {
+      id: 'session-3',
+      branchName: 'release/1.2.3',
+      worktreePath: '/tmp/worktree3',
+      formattedTimestamp: '2025-10-23 09:00',
+    },
+  ];
 
   it('should render header with title', () => {
     const onBack = vi.fn();
@@ -34,9 +53,9 @@ describe('SessionSelectorScreen', () => {
       <SessionSelectorScreen sessions={mockSessions} onBack={onBack} onSelect={onSelect} />
     );
 
-    expect(getByText(/session-1/i)).toBeDefined();
-    expect(getByText(/session-2/i)).toBeDefined();
-    expect(getByText(/session-3/i)).toBeDefined();
+    expect(getByText(/feature\/login/i)).toBeDefined();
+    expect(getByText(/bugfix\/payment/i)).toBeDefined();
+    expect(getByText(/release\/1.2.3/i)).toBeDefined();
   });
 
   it('should render footer with actions', () => {

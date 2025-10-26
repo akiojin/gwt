@@ -8,7 +8,7 @@ export interface ScreenStateResult {
   reset: () => void;
 }
 
-const INITIAL_SCREEN: ScreenType = 'branch-list';
+const INITIAL_SCREEN: ScreenType = 'execution-mode-selector';
 
 /**
  * Hook to manage screen navigation state with history

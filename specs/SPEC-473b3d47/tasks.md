@@ -147,7 +147,7 @@ tests/                          # 新規作成
 
 - [ ] T405 [US7] T401-T402完了後、Claude Code起動フローをテスト: `tests/integration/claude-launch.test.ts`
 - [ ] T406 [US7] T403-T404完了後、Codex CLI起動フローをテスト: `tests/integration/codex-launch.test.ts`
-- [ ] T407 [US7] T405-T406完了後、`--tool`オプションによる直接指定をテスト: `tests/integration/tool-selection.test.ts`
+- [ ] T407 [US7] T405-T406完了後、Ink UI経由のツール選択フローをテスト: `tests/integration/tool-selection.test.ts`
 - [ ] T408 [US7] T405-T406完了後、引数パススルー（`--`以降）をテスト: `tests/integration/tool-passthrough.test.ts`
 
 ### E2Eテスト

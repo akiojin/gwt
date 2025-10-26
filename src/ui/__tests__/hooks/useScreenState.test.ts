@@ -14,10 +14,10 @@ describe('useScreenState', () => {
     globalThis.window = window as any;
     globalThis.document = window.document as any;
   });
-  it('should initialize with branch-list as active screen', () => {
+  it('should initialize with execution-mode-selector as active screen', () => {
     const { result } = renderHook(() => useScreenState());
 
-    expect(result.current.currentScreen).toBe('branch-list');
+    expect(result.current.currentScreen).toBe('execution-mode-selector');
   });
 
   it('should navigate to a new screen', () => {
@@ -43,7 +43,7 @@ describe('useScreenState', () => {
       result.current.goBack();
     });
 
-    expect(result.current.currentScreen).toBe('branch-list');
+    expect(result.current.currentScreen).toBe('execution-mode-selector');
   });
 
   it('should maintain screen history', () => {
@@ -69,19 +69,19 @@ describe('useScreenState', () => {
       result.current.goBack();
     });
 
-    expect(result.current.currentScreen).toBe('branch-list');
+    expect(result.current.currentScreen).toBe('execution-mode-selector');
   });
 
   it('should not go back when at initial screen', () => {
     const { result } = renderHook(() => useScreenState());
 
-    expect(result.current.currentScreen).toBe('branch-list');
+    expect(result.current.currentScreen).toBe('execution-mode-selector');
 
     act(() => {
       result.current.goBack();
     });
 
-    expect(result.current.currentScreen).toBe('branch-list');
+    expect(result.current.currentScreen).toBe('execution-mode-selector');
   });
 
   it('should handle multiple navigations correctly', () => {
@@ -121,7 +121,7 @@ describe('useScreenState', () => {
     act(() => {
       result.current.goBack();
     });
-    expect(result.current.currentScreen).toBe('branch-list');
+    expect(result.current.currentScreen).toBe('execution-mode-selector');
   });
 
   it('should reset to initial screen', () => {
@@ -141,6 +141,6 @@ describe('useScreenState', () => {
       result.current.reset();
     });
 
-    expect(result.current.currentScreen).toBe('branch-list');
+    expect(result.current.currentScreen).toBe('execution-mode-selector');
   });
 });

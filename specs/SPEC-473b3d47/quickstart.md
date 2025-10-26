@@ -145,40 +145,17 @@ claude-worktree -c
 
 過去のセッションから選択：
 
-```bash
-claude-worktree -r
-```
-
-```text
-セッションを選択してください:
-> feature/user-auth - 2時間前
-  hotfix/bug-123 - 昨日
-  release/1.0.0 - 3日前
-```
+1. 起動直後の実行モード画面で「セッション再開」を選択
+2. 直近24時間のセッション一覧から目的のセッションを選択
+3. 選択したセッションのワークツリーでAIツールが起動
 
 ## 高度な使い方
 
-### AIツールを直接指定
+### AIツール選択のヒント
 
-```bash
-# Claude Codeを直接起動
-claude-worktree --tool claude
-
-# Codex CLIを直接起動
-claude-worktree --tool codex
-```
-
-### AIツールに引数を渡す
-
-`--`以降の引数はAIツールに直接渡されます：
-
-```bash
-# Claude Codeをresumeモードで起動
-claude-worktree --tool claude -- -r
-
-# Codex CLIをcontinueモードで起動
-claude-worktree --tool codex -- --continue
-```
+- Claude Code と Codex CLI の両方が検出された場合、ツール選択画面で上下キーを使って切り替えできます。
+- 権限確認をスキップしたい場合は、ツール選択画面で `s` キーを押してトグルします。
+- 利用可能なツールが1つだけの場合は自動的に選択されます。
 
 ### ワークツリー管理
 

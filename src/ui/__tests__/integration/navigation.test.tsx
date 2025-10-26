@@ -47,18 +47,16 @@ describe('Navigation Integration Tests', () => {
     },
   ];
 
-  it('should start with branch-list screen', async () => {
+  it('should start with execution mode screen', async () => {
     (getAllBranches as ReturnType<typeof vi.fn>).mockResolvedValue(mockBranches);
     (listAdditionalWorktrees as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 
     const onExit = vi.fn();
-    const { getByText } = render(<App onExit={onExit} />);
+    const { getAllByText } = render(<App repoRoot="/repo" onExit={onExit} />);
 
     await waitFor(() => {
-      expect(getByText(/Claude Worktree/i)).toBeDefined();
+      expect(getAllByText(/Execution Mode/i).length).toBeGreaterThan(0);
     });
-
-    expect(getByText(/main/)).toBeDefined();
   });
 
   it('should support navigation between screens', async () => {
@@ -66,7 +64,7 @@ describe('Navigation Integration Tests', () => {
     (listAdditionalWorktrees as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 
     const onExit = vi.fn();
-    const { container } = render(<App onExit={onExit} />);
+    const { container } = render(<App repoRoot="/repo" onExit={onExit} />);
 
     await waitFor(() => {
       expect(container).toBeDefined();
@@ -81,7 +79,7 @@ describe('Navigation Integration Tests', () => {
     (listAdditionalWorktrees as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 
     const onExit = vi.fn();
-    const { container } = render(<App onExit={onExit} />);
+    const { container } = render(<App repoRoot="/repo" onExit={onExit} />);
 
     await waitFor(() => {
       expect(container).toBeDefined();
@@ -96,7 +94,7 @@ describe('Navigation Integration Tests', () => {
     (listAdditionalWorktrees as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 
     const onExit = vi.fn();
-    const { container } = render(<App onExit={onExit} />);
+    const { container } = render(<App repoRoot="/repo" onExit={onExit} />);
 
     await waitFor(() => {
       expect(container).toBeDefined();
@@ -111,7 +109,7 @@ describe('Navigation Integration Tests', () => {
     (listAdditionalWorktrees as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 
     const onExit = vi.fn();
-    const { container } = render(<App onExit={onExit} />);
+    const { container } = render(<App repoRoot="/repo" onExit={onExit} />);
 
     await waitFor(() => {
       expect(container).toBeDefined();
@@ -126,7 +124,7 @@ describe('Navigation Integration Tests', () => {
     (listAdditionalWorktrees as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 
     const onExit = vi.fn();
-    const { container } = render(<App onExit={onExit} />);
+    const { container } = render(<App repoRoot="/repo" onExit={onExit} />);
 
     await waitFor(() => {
       expect(container).toBeDefined();
@@ -141,7 +139,7 @@ describe('Navigation Integration Tests', () => {
     (listAdditionalWorktrees as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 
     const onExit = vi.fn();
-    const { container } = render(<App onExit={onExit} />);
+    const { container } = render(<App repoRoot="/repo" onExit={onExit} />);
 
     await waitFor(() => {
       expect(container).toBeDefined();

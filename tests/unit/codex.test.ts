@@ -1,16 +1,28 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
+const { mockExeca } = vi.hoisted(() => ({
+  mockExeca: vi.fn(),
+}));
+
 vi.mock("execa", () => ({
-  execa: vi.fn(),
+  execa: mockExeca,
 }));
 
-vi.mock("fs", () => ({
-  existsSync: vi.fn(() => true),
-}));
+vi.mock("fs", () => {
+  const existsSync = vi.fn(() => true);
+  return {
+    existsSync,
+    default: { existsSync },
+  };
+});
 
-vi.mock("os", () => ({
-  platform: vi.fn(() => "darwin"),
-}));
+vi.mock("os", () => {
+  const platform = vi.fn(() => "darwin");
+  return {
+    platform,
+    default: { platform },
+  };
+});
 
 import { execa } from "execa";
 import { launchCodexCLI } from "../../src/codex";
@@ -39,7 +51,7 @@ describe("codex.ts", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    (execa as any).mockResolvedValue({
+    mockExeca.mockResolvedValue({
       stdout: "",
       stderr: "",
       exitCode: 0,
@@ -49,8 +61,8 @@ describe("codex.ts", () => {
   it("should append default Codex CLI arguments on launch", async () => {
     await launchCodexCLI(worktreePath);
 
-    expect(execa).toHaveBeenCalledTimes(1);
-    const [, args, options] = (execa as any).mock.calls[0];
+    expect(mockExeca).toHaveBeenCalledTimes(1);
+    const [, args, options] = mockExeca.mock.calls[0];
 
     expect(args).toEqual(["@openai/codex@latest", ...DEFAULT_CODEX_ARGS]);
     expect(options).toMatchObject({
@@ -63,7 +75,7 @@ describe("codex.ts", () => {
   it("should place extra arguments before the default set", async () => {
     await launchCodexCLI(worktreePath, { extraArgs: ["--custom-flag"] });
 
-    const [, args] = (execa as any).mock.calls[0];
+    const [, args] = mockExeca.mock.calls[0];
     expect(args).toEqual([
       "@openai/codex@latest",
       "--custom-flag",
@@ -74,7 +86,7 @@ describe("codex.ts", () => {
   it("should include resume command arguments before defaults when continuing", async () => {
     await launchCodexCLI(worktreePath, { mode: "continue" });
 
-    const [, args] = (execa as any).mock.calls[0];
+    const [, args] = mockExeca.mock.calls[0];
     expect(args).toEqual([
       "@openai/codex@latest",
       "resume",
