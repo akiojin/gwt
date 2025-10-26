@@ -1,4 +1,5 @@
 import type { BranchInfo, BranchItem, BranchType, WorktreeStatus } from '../types.js';
+import stringWidth from 'string-width';
 
 // Icon mappings
 const branchIcons: Record<BranchType, string> = {
@@ -58,9 +59,13 @@ export function formatBranchItem(
     icons.push(remoteIcon);
   }
 
-  // Create label from icons + branch name
+  // Create label from icons + branch name with fixed-width icon area
+  // Icon width: max 4 icons * 2 (emoji width) + 3 spaces = 11 characters
+  const ICON_AREA_WIDTH = 11;
   const iconsStr = icons.join(' ');
-  const label = `${iconsStr} ${branch.name}`;
+  const currentWidth = stringWidth(iconsStr);
+  const padding = ' '.repeat(Math.max(0, ICON_AREA_WIDTH - currentWidth));
+  const label = `${iconsStr}${padding} ${branch.name}`;
 
   return {
     // Copy all properties from BranchInfo
