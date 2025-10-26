@@ -178,6 +178,8 @@ export function App({ onExit }: AppProps) {
             branches={branchItems}
             stats={stats}
             onSelect={handleSelect}
+            onNavigate={handleNavigate}
+            onQuit={handleQuit}
             loading={loading}
             error={error}
             lastUpdated={lastUpdated}

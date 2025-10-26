@@ -1,16 +1,29 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
+const { mockExeca } = vi.hoisted(() => ({
+  mockExeca: vi.fn(),
+}));
+
 vi.mock("execa", () => ({
-  execa: vi.fn(),
+  execa: mockExeca,
+  default: { execa: mockExeca },
 }));
 
-vi.mock("fs", () => ({
-  existsSync: vi.fn(() => true),
-}));
+vi.mock("fs", () => {
+  const existsSync = vi.fn(() => true);
+  return {
+    existsSync,
+    default: { existsSync },
+  };
+});
 
-vi.mock("os", () => ({
-  platform: vi.fn(() => "darwin"),
-}));
+vi.mock("os", () => {
+  const platform = vi.fn(() => "darwin");
+  return {
+    platform,
+    default: { platform },
+  };
+});
 
 import { execa } from "execa";
 import { launchCodexCLI } from "../../src/codex";

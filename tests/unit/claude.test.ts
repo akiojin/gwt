@@ -12,9 +12,13 @@ vi.mock("execa", () => ({
 }));
 
 // Mock fs
-vi.mock("fs", () => ({
-  existsSync: vi.fn(() => true),
-}));
+vi.mock("fs", () => {
+  const existsSync = vi.fn(() => true);
+  return {
+    existsSync,
+    default: { existsSync },
+  };
+});
 
 // Mock console.log to avoid test output clutter
 const consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
