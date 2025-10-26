@@ -2,10 +2,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { launchClaudeCode } from "../../src/claude.js";
 import { existsSync } from "fs";
 
-// Mock execa
-const mockExeca = vi.fn();
+const { mockExeca } = vi.hoisted(() => ({
+  mockExeca: vi.fn(),
+}));
+
 vi.mock("execa", () => ({
   execa: mockExeca,
+  default: { execa: mockExeca },
 }));
 
 // Mock fs
