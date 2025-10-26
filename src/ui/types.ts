@@ -2,6 +2,7 @@ export interface WorktreeInfo {
   path: string;
   locked: boolean;
   prunable: boolean;
+  isAccessible?: boolean;
 }
 
 export interface BranchInfo {

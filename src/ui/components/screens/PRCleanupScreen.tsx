@@ -25,6 +25,7 @@ export function PRCleanupScreen({ pullRequests, onBack, onCleanup }: PRCleanupSc
   const { rows } = useTerminalSize();
 
   // Handle keyboard input
+  // Note: Select component handles Enter and arrow keys
   useInput((input, key) => {
     if (input === 'q') {
       onBack();

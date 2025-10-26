@@ -34,38 +34,70 @@ export function formatBranchItem(
   branch: BranchInfo,
   options: FormatOptions = {}
 ): BranchItem {
-  const icons: string[] = [];
   const hasChanges = options.hasChanges ?? false;
+  const COLUMN_WIDTH = 2; // Fixed width for each icon column
 
-  // Branch type icon
-  icons.push(branchIcons[branch.branchType]);
+  // Helper to pad icon to fixed width
+  const padIcon = (icon: string): string => {
+    const width = stringWidth(icon);
+    const padding = Math.max(0, COLUMN_WIDTH - width);
+    return icon + ' '.repeat(padding);
+  };
 
-  // Worktree status icon
+  // Column 1: Branch type icon (always present)
+  const branchTypeIcon = padIcon(branchIcons[branch.branchType]);
+
+  // Column 2: Worktree status icon
   let worktreeStatus: WorktreeStatus;
+  let worktreeIcon: string;
   if (branch.worktree) {
-    worktreeStatus = 'active';
-    icons.push(worktreeIcons.active);
+    if (branch.worktree.isAccessible === false) {
+      worktreeStatus = 'inaccessible';
+      worktreeIcon = padIcon(worktreeIcons.inaccessible);
+    } else {
+      worktreeStatus = 'active';
+      worktreeIcon = padIcon(worktreeIcons.active);
+    }
+  } else {
+    worktreeIcon = ' '.repeat(COLUMN_WIDTH);
   }
 
-  // Current branch icon or changes icon
+  // Column 3: Uncommitted changes / current branch icon
+  let changesIcon: string;
+  if (branch.isCurrent) {
+    changesIcon = padIcon(changeIcons.current);
+  } else if (hasChanges) {
+    changesIcon = padIcon(changeIcons.hasChanges);
+  } else {
+    changesIcon = ' '.repeat(COLUMN_WIDTH);
+  }
+
+  // Column 4: Remote icon
+  let remoteIconStr: string;
+  if (branch.type === 'remote') {
+    remoteIconStr = padIcon(remoteIcon);
+  } else {
+    remoteIconStr = ' '.repeat(COLUMN_WIDTH);
+  }
+
+  // Build label with fixed-width columns
+  // Format: [Type] [Worktree] [Changes] [Remote] BranchName
+  const label = `${branchTypeIcon} ${worktreeIcon} ${changesIcon} ${remoteIconStr} ${branch.name}`;
+
+  // Collect icons for compatibility
+  const icons: string[] = [];
+  icons.push(branchIcons[branch.branchType]);
+  if (worktreeStatus) {
+    icons.push(worktreeStatus === 'active' ? worktreeIcons.active : worktreeIcons.inaccessible);
+  }
   if (branch.isCurrent) {
     icons.push(changeIcons.current);
   } else if (hasChanges) {
     icons.push(changeIcons.hasChanges);
   }
-
-  // Remote icon
   if (branch.type === 'remote') {
     icons.push(remoteIcon);
   }
-
-  // Create label from icons + branch name with fixed-width icon area
-  // Icon width: max 4 icons * 2 (emoji width) + 3 spaces = 11 characters
-  const ICON_AREA_WIDTH = 11;
-  const iconsStr = icons.join(' ');
-  const currentWidth = stringWidth(iconsStr);
-  const padding = ' '.repeat(Math.max(0, ICON_AREA_WIDTH - currentWidth));
-  const label = `${iconsStr}${padding} ${branch.name}`;
 
   return {
     // Copy all properties from BranchInfo

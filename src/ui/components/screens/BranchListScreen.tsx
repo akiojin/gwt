@@ -35,6 +35,7 @@ export function BranchListScreen({
   const { rows } = useTerminalSize();
 
   // Handle keyboard input
+  // Note: Select component handles Enter and arrow keys
   useInput((input, key) => {
     if (input === 'm' && onNavigate) {
       onNavigate('worktree-manager');
