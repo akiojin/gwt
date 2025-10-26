@@ -1,57 +1,52 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { WorktreeOrchestrator } from './WorktreeOrchestrator.js';
-
-// Mock worktree module
-const mockWorktreeExists = vi.fn();
-const mockGenerateWorktreePath = vi.fn();
-const mockCreateWorktree = vi.fn();
-
-vi.mock('../worktree.js', () => ({
-  worktreeExists: mockWorktreeExists,
-  generateWorktreePath: mockGenerateWorktreePath,
-  createWorktree: mockCreateWorktree,
-}));
+import { WorktreeOrchestrator, type WorktreeService } from '../WorktreeOrchestrator.js';
 
 describe('WorktreeOrchestrator', () => {
   let orchestrator: WorktreeOrchestrator;
+  let mockWorktreeService: WorktreeService;
   const mockRepoRoot = '/mock/repo';
   const mockBranch = 'feature-test';
   const mockWorktreePath = '/mock/repo/.git/worktree/feature-test';
 
   beforeEach(() => {
-    orchestrator = new WorktreeOrchestrator();
-    vi.clearAllMocks();
+    // Create mock service without vi.mock()
+    mockWorktreeService = {
+      worktreeExists: vi.fn(),
+      generateWorktreePath: vi.fn(),
+      createWorktree: vi.fn(),
+    };
+    orchestrator = new WorktreeOrchestrator(mockWorktreeService);
   });
 
   describe('ensureWorktree', () => {
     it('should return existing worktree path if worktree exists', async () => {
       // Arrange
-      mockWorktreeExists.mockResolvedValue(mockWorktreePath);
+      (mockWorktreeService.worktreeExists as any).mockResolvedValue(mockWorktreePath);
 
       // Act
       const result = await orchestrator.ensureWorktree(mockBranch, mockRepoRoot);
 
       // Assert
       expect(result).toBe(mockWorktreePath);
-      expect(mockWorktreeExists).toHaveBeenCalledWith(mockBranch);
-      expect(mockGenerateWorktreePath).not.toHaveBeenCalled();
-      expect(mockCreateWorktree).not.toHaveBeenCalled();
+      expect(mockWorktreeService.worktreeExists).toHaveBeenCalledWith(mockBranch);
+      expect(mockWorktreeService.generateWorktreePath).not.toHaveBeenCalled();
+      expect(mockWorktreeService.createWorktree).not.toHaveBeenCalled();
     });
 
     it('should create new worktree if it does not exist', async () => {
       // Arrange
-      mockWorktreeExists.mockResolvedValue(null);
-      mockGenerateWorktreePath.mockResolvedValue(mockWorktreePath);
-      mockCreateWorktree.mockResolvedValue(undefined);
+      (mockWorktreeService.worktreeExists as any).mockResolvedValue(null);
+      (mockWorktreeService.generateWorktreePath as any).mockResolvedValue(mockWorktreePath);
+      (mockWorktreeService.createWorktree as any).mockResolvedValue(undefined);
 
       // Act
       const result = await orchestrator.ensureWorktree(mockBranch, mockRepoRoot);
 
       // Assert
       expect(result).toBe(mockWorktreePath);
-      expect(mockWorktreeExists).toHaveBeenCalledWith(mockBranch);
-      expect(mockGenerateWorktreePath).toHaveBeenCalledWith(mockBranch, mockRepoRoot);
-      expect(mockCreateWorktree).toHaveBeenCalledWith({
+      expect(mockWorktreeService.worktreeExists).toHaveBeenCalledWith(mockBranch);
+      expect(mockWorktreeService.generateWorktreePath).toHaveBeenCalledWith(mockRepoRoot, mockBranch);
+      expect(mockWorktreeService.createWorktree).toHaveBeenCalledWith({
         branchName: mockBranch,
         worktreePath: mockWorktreePath,
         repoRoot: mockRepoRoot,
@@ -62,9 +57,9 @@ describe('WorktreeOrchestrator', () => {
 
     it('should use custom base branch when provided', async () => {
       // Arrange
-      mockWorktreeExists.mockResolvedValue(null);
-      mockGenerateWorktreePath.mockResolvedValue(mockWorktreePath);
-      mockCreateWorktree.mockResolvedValue(undefined);
+      (mockWorktreeService.worktreeExists as any).mockResolvedValue(null);
+      (mockWorktreeService.generateWorktreePath as any).mockResolvedValue(mockWorktreePath);
+      (mockWorktreeService.createWorktree as any).mockResolvedValue(undefined);
       const customBaseBranch = 'develop';
 
       // Act
@@ -76,7 +71,7 @@ describe('WorktreeOrchestrator', () => {
 
       // Assert
       expect(result).toBe(mockWorktreePath);
-      expect(mockCreateWorktree).toHaveBeenCalledWith({
+      expect(mockWorktreeService.createWorktree).toHaveBeenCalledWith({
         branchName: mockBranch,
         worktreePath: mockWorktreePath,
         repoRoot: mockRepoRoot,
@@ -87,10 +82,10 @@ describe('WorktreeOrchestrator', () => {
 
     it('should throw error if worktree creation fails', async () => {
       // Arrange
-      mockWorktreeExists.mockResolvedValue(null);
-      mockGenerateWorktreePath.mockResolvedValue(mockWorktreePath);
+      (mockWorktreeService.worktreeExists as any).mockResolvedValue(null);
+      (mockWorktreeService.generateWorktreePath as any).mockResolvedValue(mockWorktreePath);
       const mockError = new Error('Failed to create worktree');
-      mockCreateWorktree.mockRejectedValue(mockError);
+      (mockWorktreeService.createWorktree as any).mockRejectedValue(mockError);
 
       // Act & Assert
       await expect(

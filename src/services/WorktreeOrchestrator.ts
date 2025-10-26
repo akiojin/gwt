@@ -1,4 +1,14 @@
+import type { CreateWorktreeConfig } from '../worktree.js';
 import { worktreeExists, generateWorktreePath, createWorktree } from '../worktree.js';
+
+/**
+ * WorktreeService interface for dependency injection
+ */
+export interface WorktreeService {
+  worktreeExists: (branch: string) => Promise<string | null>;
+  generateWorktreePath: (repoRoot: string, branch: string) => Promise<string>;
+  createWorktree: (config: CreateWorktreeConfig) => Promise<void>;
+}
 
 /**
  * WorktreeOrchestrator - Manages worktree existence checks and creation
@@ -9,6 +19,16 @@ import { worktreeExists, generateWorktreePath, createWorktree } from '../worktre
  * - Return worktree path
  */
 export class WorktreeOrchestrator {
+  private worktreeService: WorktreeService;
+
+  constructor(worktreeService?: WorktreeService) {
+    this.worktreeService = worktreeService || {
+      worktreeExists,
+      generateWorktreePath,
+      createWorktree,
+    };
+  }
+
   /**
    * Ensure worktree exists for the given branch
    * If worktree exists, return its path
@@ -25,17 +45,17 @@ export class WorktreeOrchestrator {
     baseBranch: string = 'main'
   ): Promise<string> {
     // Check if worktree already exists
-    const existingPath = await worktreeExists(branch);
+    const existingPath = await this.worktreeService.worktreeExists(branch);
 
     if (existingPath) {
       return existingPath;
     }
 
     // Generate worktree path
-    const worktreePath = await generateWorktreePath(branch, repoRoot);
+    const worktreePath = await this.worktreeService.generateWorktreePath(repoRoot, branch);
 
     // Create worktree
-    await createWorktree({
+    await this.worktreeService.createWorktree({
       branchName: branch,
       worktreePath,
       repoRoot,
