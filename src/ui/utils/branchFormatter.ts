@@ -28,6 +28,15 @@ const changeIcons = {
 
 const remoteIcon = "☁";
 
+// Some icons are treated as double-width by string-width even though they render
+// as a single column in many terminals (e.g. ☁). Provide explicit overrides to
+// keep the column layout consistent across environments.
+const iconWidthOverrides: Record<string, number> = {
+  [remoteIcon]: 1,
+  "☁️": 1,
+  "☁︎": 1,
+};
+
 export interface FormatOptions {
   hasChanges?: boolean;
 }
@@ -44,7 +53,7 @@ export function formatBranchItem(
 
   // Helper to pad icon to fixed width
   const padIcon = (icon: string): string => {
-    const width = stringWidth(icon);
+    const width = iconWidthOverrides[icon] ?? stringWidth(icon);
     const padding = Math.max(0, COLUMN_WIDTH - width);
     return icon + " ".repeat(padding);
   };

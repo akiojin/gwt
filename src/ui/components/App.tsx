@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import { useApp } from 'ink';
 import { ErrorBoundary } from './common/ErrorBoundary.js';
 import { BranchListScreen } from './screens/BranchListScreen.js';
@@ -17,8 +17,14 @@ import { formatBranchItems } from '../utils/branchFormatter.js';
 import { calculateStatistics } from '../utils/statisticsCalculator.js';
 import type { BranchItem, MergedPullRequest } from '../types.js';
 
+export interface SelectionResult {
+  branch: string;
+  tool: AITool;
+  mode: ExecutionMode;
+}
+
 export interface AppProps {
-  onExit: (selectedBranch?: string) => void;
+  onExit: (result?: SelectionResult) => void;
 }
 
 /**
@@ -29,6 +35,10 @@ export function App({ onExit }: AppProps) {
   const { exit } = useApp();
   const { branches, worktrees, loading, error, refresh, lastUpdated } = useGitData();
   const { currentScreen, navigateTo, goBack, reset } = useScreenState();
+
+  // Selection state (for branch → tool → mode flow)
+  const [selectedBranch, setSelectedBranch] = useState<string | null>(null);
+  const [selectedTool, setSelectedTool] = useState<AITool | null>(null);
 
   // Format branches to BranchItems (memoized for performance)
   const branchItems: BranchItem[] = useMemo(() => formatBranchItems(branches), [branches]);
@@ -50,10 +60,10 @@ export function App({ onExit }: AppProps) {
   // Handle branch selection
   const handleSelect = useCallback(
     (item: BranchItem) => {
-      onExit(item.name);
-      exit();
+      setSelectedBranch(item.name);
+      navigateTo('ai-tool-selector');
     },
-    [onExit, exit]
+    [navigateTo]
   );
 
   // Handle navigation
@@ -95,11 +105,10 @@ export function App({ onExit }: AppProps) {
   // Handle AI tool selection
   const handleToolSelect = useCallback(
     (tool: AITool) => {
-      // TODO: Store selected tool and navigate to next screen
-      // For now, just go back to branch list
-      goBack();
+      setSelectedTool(tool);
+      navigateTo('execution-mode-selector');
     },
-    [goBack]
+    [navigateTo]
   );
 
   // Handle session selection
@@ -115,11 +124,17 @@ export function App({ onExit }: AppProps) {
   // Handle execution mode selection
   const handleModeSelect = useCallback(
     (mode: ExecutionMode) => {
-      // TODO: Store selected mode and start execution
-      // For now, just go back to branch list
-      goBack();
+      // All selections complete - exit with result
+      if (selectedBranch && selectedTool) {
+        onExit({
+          branch: selectedBranch,
+          tool: selectedTool,
+          mode,
+        });
+        exit();
+      }
     },
-    [goBack]
+    [selectedBranch, selectedTool, onExit, exit]
   );
 
   // Render screen based on currentScreen
