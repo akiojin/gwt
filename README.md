@@ -348,6 +348,10 @@ Each execution performs the following steps:
 2. Build project (`bun run build`)
 3. Execute semantic-release (version, changelog, publish)
 
+> **Secrets required:**  
+> - `NPM_TOKEN` – npm publish token with `automation` scope  
+> - `SEMANTIC_RELEASE_TOKEN` – GitHub personal access token (classic) with `repo` scope. After registering the secret, add the tokenの所有ユーザー、または「Allow GitHub Actions to bypass branch protection」を `main` ブランチ保護ルールに設定し、リリースコミットの push が拒否されないようにしてください。シークレットが存在しない場合、ワークフローは早期に失敗します。
+
 ### Manual Verification
 
 To verify the release configuration locally:
