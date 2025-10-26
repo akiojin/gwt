@@ -1,3 +1,11 @@
+## [1.3.1](https://github.com/akiojin/claude-worktree/compare/v1.3.0...v1.3.1) (2025-10-26)
+
+
+### Bug Fixes
+
+* Bunテスト互換のモック復元処理を整備 ([68f46a0](https://github.com/akiojin/claude-worktree/commit/68f46a0895e673dcfe9db8a7c3ebeb156c2529dd))
+* Ink UIショートカットの動作を修正 ([038323b](https://github.com/akiojin/claude-worktree/commit/038323ba1a5d076d66f027bea5bfc61888c9ce01))
+
 # [1.3.0](https://github.com/akiojin/claude-worktree/compare/v1.2.1...v1.3.0) (2025-10-26)
 
 
