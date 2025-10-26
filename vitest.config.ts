@@ -8,8 +8,6 @@ export default defineConfig({
     setupFiles: ["./vitest.setup.ts"],
     include: ["tests/**/*.test.ts", "tests/**/*.spec.ts", "src/**/*.test.ts", "src/**/*.test.tsx"],
     exclude: ["node_modules", "dist", "build"],
-    // Note: retry is not supported in bun's vitest yet
-    // retry: 3, // Retry flaky tests (especially timing-based tests like useGitData auto-refresh)
     coverage: {
       provider: "v8",
       reporter: ["text", "json", "html", "lcov"],
