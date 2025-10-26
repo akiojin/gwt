@@ -1,4 +1,5 @@
 import React, { useCallback, useMemo } from 'react';
+import { useApp } from 'ink';
 import { ErrorBoundary } from './common/ErrorBoundary.js';
 import { BranchListScreen } from './screens/BranchListScreen.js';
 import { WorktreeManagerScreen } from './screens/WorktreeManagerScreen.js';
@@ -25,6 +26,7 @@ export interface AppProps {
  * Integrates ErrorBoundary, data fetching, screen navigation, and all screens
  */
 export function App({ onExit }: AppProps) {
+  const { exit } = useApp();
   const { branches, worktrees, loading, error, refresh, lastUpdated } = useGitData();
   const { currentScreen, navigateTo, goBack, reset } = useScreenState();
 
@@ -49,8 +51,9 @@ export function App({ onExit }: AppProps) {
   const handleSelect = useCallback(
     (item: BranchItem) => {
       onExit(item.name);
+      exit();
     },
-    [onExit]
+    [onExit, exit]
   );
 
   // Handle navigation
@@ -64,7 +67,8 @@ export function App({ onExit }: AppProps) {
   // Handle quit
   const handleQuit = useCallback(() => {
     onExit();
-  }, [onExit]);
+    exit();
+  }, [onExit, exit]);
 
   // Handle branch creation
   const handleCreate = useCallback(

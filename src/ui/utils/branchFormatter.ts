@@ -86,8 +86,8 @@ export function formatBranchItem(
   }
 
   // Build label with fixed-width columns
-  // Format: [Type] [Worktree] [Changes] [Remote] BranchName
-  const label = `${branchTypeIcon} ${worktreeIcon} ${changesIcon} ${remoteIconStr} ${branch.name}`;
+  // Format: [Type][Worktree][Changes][Remote] BranchName
+  const label = `${branchTypeIcon}${worktreeIcon}${changesIcon}${remoteIconStr}${branch.name}`;
 
   // Collect icons for compatibility
   const icons: string[] = [];
