@@ -32,6 +32,11 @@ export function WorktreeManagerScreen({
 
   // Handle keyboard input
   useInput((input, key) => {
+    // Skip Enter and arrow keys - let SelectInput handle them
+    if (key.return || key.upArrow || key.downArrow) {
+      return;
+    }
+
     if (input === 'q') {
       onBack();
     }

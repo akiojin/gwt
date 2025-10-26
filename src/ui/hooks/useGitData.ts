@@ -51,6 +51,7 @@ export function useGitData(options?: UseGitDataOptions): UseGitDataResult {
           path: worktree.path,
           locked: false, // worktree.ts doesn't expose locked status
           prunable: worktree.isAccessible === false,
+          isAccessible: worktree.isAccessible ?? true, // Default to true if undefined
         };
         worktreeMap.set(worktree.branch, uiWorktreeInfo);
       }

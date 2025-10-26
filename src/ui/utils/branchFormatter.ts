@@ -43,8 +43,13 @@ export function formatBranchItem(
   // Worktree status icon
   let worktreeStatus: WorktreeStatus;
   if (branch.worktree) {
-    worktreeStatus = 'active';
-    icons.push(worktreeIcons.active);
+    if (branch.worktree.isAccessible === false) {
+      worktreeStatus = 'inaccessible';
+      icons.push(worktreeIcons.inaccessible);
+    } else {
+      worktreeStatus = 'active';
+      icons.push(worktreeIcons.active);
+    }
   }
 
   // Current branch icon or changes icon
