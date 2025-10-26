@@ -1,5 +1,9 @@
-import type { CreateWorktreeConfig } from '../worktree.js';
-import { worktreeExists, generateWorktreePath, createWorktree } from '../worktree.js';
+import type { WorktreeConfig } from "../worktree.js";
+import {
+  worktreeExists,
+  generateWorktreePath,
+  createWorktree,
+} from "../worktree.js";
 
 /**
  * WorktreeService interface for dependency injection
@@ -7,7 +11,7 @@ import { worktreeExists, generateWorktreePath, createWorktree } from '../worktre
 export interface WorktreeService {
   worktreeExists: (branch: string) => Promise<string | null>;
   generateWorktreePath: (repoRoot: string, branch: string) => Promise<string>;
-  createWorktree: (config: CreateWorktreeConfig) => Promise<void>;
+  createWorktree: (config: WorktreeConfig) => Promise<void>;
 }
 
 /**
@@ -42,7 +46,7 @@ export class WorktreeOrchestrator {
   async ensureWorktree(
     branch: string,
     repoRoot: string,
-    baseBranch: string = 'main'
+    baseBranch: string = "main",
   ): Promise<string> {
     // Check if worktree already exists
     const existingPath = await this.worktreeService.worktreeExists(branch);
@@ -52,7 +56,10 @@ export class WorktreeOrchestrator {
     }
 
     // Generate worktree path
-    const worktreePath = await this.worktreeService.generateWorktreePath(repoRoot, branch);
+    const worktreePath = await this.worktreeService.generateWorktreePath(
+      repoRoot,
+      branch,
+    );
 
     // Create worktree
     await this.worktreeService.createWorktree({

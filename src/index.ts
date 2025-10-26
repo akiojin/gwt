@@ -74,10 +74,12 @@ async function mainInkUI(): Promise<SelectionResult | undefined> {
 /**
  * Handle AI tool workflow
  */
-async function handleAIToolWorkflow(selectionResult: SelectionResult): Promise<void> {
+async function handleAIToolWorkflow(
+  selectionResult: SelectionResult,
+): Promise<void> {
   const { branch, tool, mode, skipPermissions } = selectionResult;
   printInfo(
-    `Selected: ${branch} with ${tool} (${mode} mode, skipPermissions: ${skipPermissions})`
+    `Selected: ${branch} with ${tool} (${mode} mode, skipPermissions: ${skipPermissions})`,
   );
 
   try {
@@ -92,12 +94,22 @@ async function handleAIToolWorkflow(selectionResult: SelectionResult): Promise<v
     // Launch selected AI tool
     if (tool === "claude-code") {
       await launchClaudeCode(worktreePath, {
-        mode: mode === "resume" ? "resume" : mode === "continue" ? "continue" : "normal",
+        mode:
+          mode === "resume"
+            ? "resume"
+            : mode === "continue"
+              ? "continue"
+              : "normal",
         skipPermissions,
       });
     } else if (tool === "codex-cli") {
       await launchCodexCLI(worktreePath, {
-        mode: mode === "resume" ? "resume" : mode === "continue" ? "continue" : "normal",
+        mode:
+          mode === "resume"
+            ? "resume"
+            : mode === "continue"
+              ? "continue"
+              : "normal",
         bypassApprovals: skipPermissions,
       });
     }
@@ -130,10 +142,14 @@ export async function main(): Promise<void> {
     // Check if current directory is a Git repository
     if (!(await isGitRepository())) {
       printError(`Current directory is not a Git repository: ${process.cwd()}`);
-      printInfo("Please run this command from within a Git repository or worktree directory.");
+      printInfo(
+        "Please run this command from within a Git repository or worktree directory.",
+      );
 
       // Docker環境でよくある問題: safe.directory設定
-      printInfo("\\nIf you're running in Docker, you may need to configure Git safe.directory:");
+      printInfo(
+        "\\nIf you're running in Docker, you may need to configure Git safe.directory:",
+      );
       printInfo("  git config --global --add safe.directory '*'");
       printInfo("\\nOr run with DEBUG=1 for more information:");
       printInfo("  DEBUG=1 bun run start");
