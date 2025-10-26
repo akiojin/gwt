@@ -32,6 +32,18 @@ jobs:
           persist-credentials: false
           ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
 
+      - name: Configure git credentials
+        env:
+          GH_RELEASE_TOKEN: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
+        run: |
+          if [ -z "$GH_RELEASE_TOKEN" ]; then
+            echo "SEMANTIC_RELEASE_TOKEN secret is not configured"
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${GH_RELEASE_TOKEN}@github.com/${{ github.repository }}.git"
+
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
@@ -61,7 +73,8 @@ jobs:
 
       - name: Semantic Release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           node node_modules/semantic-release/bin/semantic-release.js
