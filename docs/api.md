@@ -356,21 +356,25 @@ try {
 
 ## CLI Usage
 
-`claude-worktree` はコマンドライン引数を受け付けず、起動すると Ink ベースのUIが表示されます。操作はすべて画面上で完結します。
+コマンドライン引数:
 
-**主なフロー:**
+- `-c, --continue`: 最後のセッションを継続
+- `-r, --resume`: セッションを選択して再開
+- `--tool <tool>`: AIツールを直接指定 (`claude-code` | `codex-cli`)
+- `-- <args>`: AIツールに渡す追加引数
 
-1. 実行モードを選択する（Normal / Continue / Resume）
-2. ブランチまたはセッションを選ぶ（必要に応じてワークツリーを自動作成）
-3. Claude Code もしくは Codex CLI を選択し、権限スキップの有無を切り替える
-4. 選択したツールが対象ワークツリーで起動
-
-**起動例:**
+**例:**
 
 ```bash
-# Claude Worktree UI を起動
+# Claude Codeで新規ワークツリー作成
 claude-worktree
 
-# bunx で一回限り実行
-bunx @akiojin/claude-worktree
+# 最後のセッションを継続
+claude-worktree -c
+
+# 特定のツールを指定
+claude-worktree --tool codex-cli
+
+# ツールに引数を渡す
+claude-worktree --tool claude-code -- --verbose
 ```

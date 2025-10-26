@@ -59,7 +59,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Bunインストール: `curl -fsSL https://bun.sh/install | bash` (macOS/Linux)
   - Bunインストール: `powershell -c "irm bun.sh/install.ps1|iex"` (Windows)
   - エラー時に詳細なインストール手順を表示
-- **CLIフラグの廃止**: `-c`, `-r/--resume`, `--tool`, `--` 以降のパススルー引数を削除し、すべての操作をInk UIに統合
 
 ## [0.6.1] - 2024-09-06
 

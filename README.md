@@ -14,7 +14,7 @@ Interactive Git worktree manager with AI tool selection (Claude Code / Codex CLI
 - 🖼️ **Full-screen Layout**: Persistent header with statistics, scrollable branch list, and always-visible footer with keyboard shortcuts
 - 🌟 **Smart Branch Creation**: Create feature, hotfix, or release branches with guided prompts and automatic base branch selection
 - 🔄 **Advanced Worktree Management**: Complete lifecycle management including creation, cleanup, and path optimization
-- 🤖 **AI Tool Selection**: Pick Claude Code or Codex CLI directly in the UI, with execution mode and permission toggles
+- 🤖 **AI Tool Selection**: Choose between Claude Code / Codex CLI at launch, or use `--tool` (with `--` to pass arguments through to the tool)
 - 🚀 **AI Tool Integration**: Launch the selected tool in the worktree (Claude Code includes permission handling and post-change flow)
 - 📊 **GitHub PR Integration**: Automatic cleanup of merged pull request branches and worktrees
 - 🛠️ **Change Management**: Built-in support for committing, stashing, or discarding changes after development sessions
@@ -47,22 +47,30 @@ bunx @akiojin/claude-worktree
 
 Run in any Git repository:
 
-```bash
+````bash
 # If installed globally
 claude-worktree
 
 # Or use bunx for one-time execution
 bunx @akiojin/claude-worktree
-```
 
-The Ink UI guides you through the workflow:
+### AI Tool Selection and Direct Launch
 
-1. **Select execution mode** – choose *Normal*, *Continue*, or *Resume*
-2. **Pick a branch or session** – worktrees are created or reused automatically
-3. **Choose the AI tool** – toggle permission bypass and confirm the launch target
-4. **Start working** – Claude Code or Codex CLI opens inside the prepared worktree
+```bash
+# Interactive selection (Claude / Codex)
+claude-worktree
 
-> **Important:** Command-line flags such as `-c`, `-r/--resume`, `--tool`, or pass-through arguments are no longer supported. All operations are driven from the interactive UI.
+# Direct selection
+claude-worktree --tool claude
+claude-worktree --tool codex
+
+# Pass tool-specific options (after "--")
+claude-worktree --tool claude -- -r          # Resume in Claude Code
+claude-worktree --tool codex -- resume --last  # Resume last Codex session
+claude-worktree --tool codex -- resume <id>  # Resume specific Codex session
+````
+
+````
 
 The tool presents an interactive interface with the following options:
 

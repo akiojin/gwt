@@ -14,7 +14,6 @@ claude-worktreeの現在のCLI UIを、inquirer/chalkベースからInk.js（Rea
 - **全画面レイアウト**: ヘッダー固定、スクロール可能コンテンツ、フッター固定
 - **TDD対応**: Vitestでコンポーネント単体テスト（80%以上カバレッジ）
 - **既存機能維持**: すべての既存機能を後退なく移行
-- **CLIフロー一元化**: 旧CLIフラグで提供していた継続/再開/ツール起動の導線をInk UI内アクションへ集約し、フラグ経路を段階的に廃止
 
 ## 技術コンテキスト
 
@@ -43,7 +42,6 @@ claude-worktreeの現在のCLI UIを、inquirer/chalkベースからInk.js（Rea
   - 既存のGit/Worktreeロジックは変更不可（UIレイヤーのみ）
   - 段階的移行可能な設計
   - Vitest使用（新しいテストツール導入不可）
-  - 最終リリースではCLIオプションによる非対話型操作を提供せず、Ink UI起動を唯一の公式エントリーポイントとする
 
 **スケール/範囲**:
   - 画面数: 7画面（BranchList, WorktreeManager, BranchCreator, PRCleanup, AIToolSelector, SessionSelector, ExecutionModeSelector）

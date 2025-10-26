@@ -13,7 +13,7 @@ Claude Code / Codex CLI 対応の対話型Gitワークツリーマネージャ�
 - 🎯 **対話型ブランチ選択**: ブランチ種別・ワークツリー・変更状態アイコンに加え配置インジケータ枠（左=L, 右=R, リモートのみ=☁）で所在を示し、リモート名の `origin/` を省いたシンプルなリストで判別しやすく、現在の選択は `>` プレフィックスで強調されるため誤操作を防止
 - 🌟 **スマートブランチ作成**: ガイド付きプロンプトと自動ベースブランチ選択でfeature、hotfix、releaseブランチを作成
 - 🔄 **高度なワークツリー管理**: 作成、クリーンアップ、パス最適化を含む完全なライフサイクル管理
-- 🤖 **AIツール選択**: Ink UI 内で Claude Code / Codex CLI を直接選択し、実行モードや権限スキップを切り替え可能
+- 🤖 **AIツール選択**: 起動時に Claude Code / Codex CLI を選択、または `--tool` で直接指定（`--` 以降は各ツールへ引数パススルー）
 - 🚀 **AIツール統合**: 選択したツールをワークツリーで起動（Claude Codeは権限設定・変更処理の統合あり）
 - 📊 **GitHub PR統合**: マージされたプルリクエストのブランチとワークツリーの自動クリーンアップ
 - 🛠️ **変更管理**: 開発セッション後のコミット、stash、破棄の内蔵サポート
@@ -54,14 +54,21 @@ claude-worktree
 bunx @akiojin/claude-worktree
 ```
 
-InkベースのUIは以下の流れで操作します:
+### AIツール選択と直接指定
 
-1. **実行モードの選択** – *通常* / *続きから再開* / *セッション再開* を選択
-2. **ブランチまたはセッションを選択** – ワークツリーは自動的に作成/再利用されます
-3. **AIツールを選択** – 権限スキップの有無を切り替えて起動対象を確定
-4. **開発開始** – 準備されたワークツリー内で Claude Code または Codex CLI が起動します
+```bash
+# 対話的にツールを選ぶ（Claude / Codex）
+claude-worktree
 
-> **重要:** `-c`, `-r/--resume`, `--tool`, `--` 以降のパススルー引数は廃止されました。すべての操作はUI上で完結します。
+# 直接指定
+claude-worktree --tool claude
+claude-worktree --tool codex
+
+# ツール固有オプションを渡す（"--" 以降はツールへパススルー）
+claude-worktree --tool claude -- -r      # Claude Code を resume
+claude-worktree --tool codex -- resume --last  # Codex CLI の直近セッションを再開
+claude-worktree --tool codex -- resume <id>  # Codex CLI の特定セッションを再開
+```
 
 ツールは以下のオプションを持つ対話型インターフェースを提供します:
 

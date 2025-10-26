@@ -8,15 +8,15 @@ import { App } from '../../components/App.js';
 import { Window } from 'happy-dom';
 import type { BranchInfo } from '../../types.js';
 
-const { mockUseGitData } = vi.hoisted(() => ({
-  mockUseGitData: vi.fn(),
-}));
+// Mock useGitData hook
+const mockRefresh = vi.fn();
+const mockUseGitData = vi.fn();
 
 vi.mock('../../hooks/useGitData.js', () => ({
   useGitData: mockUseGitData,
 }));
 
-describe.skip('App', () => {
+describe('App', () => {
   beforeEach(() => {
     // Setup happy-dom
     const window = new Window();
@@ -43,7 +43,6 @@ describe.skip('App', () => {
   ];
 
   it('should render BranchListScreen when data is loaded', () => {
-    const mockRefresh = vi.fn();
     mockUseGitData.mockReturnValue({
       branches: mockBranches,
       loading: false,
@@ -62,7 +61,6 @@ describe.skip('App', () => {
   });
 
   it('should show loading state initially', () => {
-    const mockRefresh = vi.fn();
     mockUseGitData.mockReturnValue({
       branches: [],
       loading: true,
@@ -79,7 +77,6 @@ describe.skip('App', () => {
 
   it('should show error state when Git data fails to load', () => {
     const error = new Error('Failed to fetch branches');
-    const mockRefresh = vi.fn();
     mockUseGitData.mockReturnValue({
       branches: [],
       loading: false,
@@ -122,7 +119,6 @@ describe.skip('App', () => {
       },
     ];
 
-    const mockRefresh = vi.fn();
     mockUseGitData.mockReturnValue({
       branches: branchesWithWorktree,
       loading: false,
@@ -143,7 +139,6 @@ describe.skip('App', () => {
   });
 
   it('should call onExit when branch is selected', () => {
-    const mockRefresh = vi.fn();
     mockUseGitData.mockReturnValue({
       branches: mockBranches,
       loading: false,
