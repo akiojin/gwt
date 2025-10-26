@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useApp } from 'ink';
 import { ErrorBoundary } from './common/ErrorBoundary.js';
 import { BranchListScreen } from './screens/BranchListScreen.js';
@@ -15,8 +15,14 @@ import { useGitData } from '../hooks/useGitData.js';
 import { useScreenState } from '../hooks/useScreenState.js';
 import { formatBranchItems } from '../utils/branchFormatter.js';
 import { calculateStatistics } from '../utils/statisticsCalculator.js';
-import type { BranchItem, MergedPullRequest } from '../types.js';
-import { createBranch } from '../../git.js';
+import type { BranchItem, CleanupTarget } from '../types.js';
+import { getRepositoryRoot, deleteBranch } from '../../git.js';
+import {
+  createWorktree,
+  generateWorktreePath,
+  getMergedPRWorktrees,
+  removeWorktree,
+} from '../../worktree.js';
 
 export interface SelectionResult {
   branch: string;
@@ -43,6 +49,12 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
   const [selectedBranch, setSelectedBranch] = useState<string | null>(null);
   const [selectedTool, setSelectedTool] = useState<AITool | null>(null);
 
+  // PR cleanup state
+  const [cleanupTargets, setCleanupTargets] = useState<CleanupTarget[]>([]);
+  const [cleanupLoading, setCleanupLoading] = useState(false);
+  const [cleanupError, setCleanupError] = useState<Error | null>(null);
+  const [cleanupStatus, setCleanupStatus] = useState<string | null>(null);
+
   // Format branches to BranchItems (memoized for performance)
   const branchItems: BranchItem[] = useMemo(() => formatBranchItems(branches), [branches]);
 
@@ -60,6 +72,25 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     [worktrees]
   );
 
+  const resolveBaseBranch = useCallback(() => {
+    const localMain = branches.find(
+      (branch) =>
+        branch.type === 'local' && (branch.name === 'main' || branch.name === 'master')
+    );
+    if (localMain) {
+      return localMain.name;
+    }
+
+    const develop = branches.find(
+      (branch) => branch.type === 'local' && (branch.name === 'develop' || branch.name === 'dev')
+    );
+    if (develop) {
+      return develop.name;
+    }
+
+    return 'main';
+  }, [branches]);
+
   // Handle branch selection
   const handleSelect = useCallback(
     (item: BranchItem) => {
@@ -69,13 +100,50 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     [navigateTo]
   );
 
+  const loadCleanupTargets = useCallback(async () => {
+    setCleanupLoading(true);
+    setCleanupError(null);
+    try {
+      const targets = await getMergedPRWorktrees();
+      setCleanupTargets(targets);
+    } catch (err) {
+      setCleanupTargets([]);
+      setCleanupError(err instanceof Error ? err : new Error(String(err)));
+    } finally {
+      setCleanupLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (currentScreen === 'pr-cleanup') {
+      loadCleanupTargets();
+    }
+  }, [currentScreen, loadCleanupTargets]);
+
   // Handle navigation
   const handleNavigate = useCallback(
     (screen: string) => {
+      if (screen === 'pr-cleanup') {
+        setCleanupStatus(null);
+      }
       navigateTo(screen as any);
     },
     [navigateTo]
   );
+
+  const handleWorktreeSelect = useCallback(
+    (worktree: WorktreeItem) => {
+      setSelectedBranch(worktree.branch);
+      navigateTo('ai-tool-selector');
+    },
+    [navigateTo]
+  );
+
+  const handleCleanupRefresh = useCallback(() => {
+    setCleanupStatus(null);
+    setCleanupError(null);
+    loadCleanupTargets();
+  }, [loadCleanupTargets]);
 
   // Handle quit
   const handleQuit = useCallback(() => {
@@ -87,13 +155,21 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
   const handleCreate = useCallback(
     async (branchName: string) => {
       try {
-        // 1. Create branch using git.js
-        await createBranch(branchName, 'main');
+        const repoRoot = await getRepositoryRoot();
+        const worktreePath = await generateWorktreePath(repoRoot, branchName);
+        const baseBranch = resolveBaseBranch();
 
-        // 2. Set the newly created branch as selected
+        await createWorktree({
+          branchName,
+          worktreePath,
+          repoRoot,
+          isNewBranch: true,
+          baseBranch,
+        });
+
+        refresh();
         setSelectedBranch(branchName);
 
-        // 3. Navigate to AI tool selector (same flow as branch selection)
         navigateTo('ai-tool-selector');
       } catch (error) {
         // On error, go back to branch list
@@ -102,18 +178,58 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         refresh();
       }
     },
-    [navigateTo, goBack, refresh]
+    [navigateTo, goBack, refresh, resolveBaseBranch]
   );
 
   // Handle PR cleanup
   const handleCleanup = useCallback(
-    (pr: MergedPullRequest) => {
-      // TODO: Implement PR cleanup logic (github.js integration)
-      // For now, just go back to branch list
-      goBack();
-      refresh();
+    async (target: CleanupTarget) => {
+      setCleanupError(null);
+
+      if (target.hasUncommittedChanges || target.hasUnpushedCommits) {
+        setCleanupStatus(
+          `[WARN] ${target.branch} に未コミットまたは未プッシュの変更があるためクリーンアップをスキップしました。`
+        );
+        return;
+      }
+
+      if (target.cleanupType === 'worktree-and-branch') {
+        if (!target.worktreePath) {
+          setCleanupStatus(
+            `[WARN] ${target.branch} のworktreeパスが特定できないためクリーンアップをスキップしました。`
+          );
+          return;
+        }
+
+        if (target.isAccessible === false) {
+          setCleanupStatus(
+            `[WARN] ${target.branch} のworktreeにアクセスできないためクリーンアップをスキップしました。`
+          );
+          return;
+        }
+
+        try {
+          await removeWorktree(target.worktreePath, true);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          setCleanupError(new Error(message));
+          setCleanupStatus(`[ERROR] ${target.branch} のworktree削除に失敗しました。`);
+          return;
+        }
+      }
+
+      try {
+        await deleteBranch(target.branch, true);
+        setCleanupStatus(`[OK] ${target.branch} をクリーンアップしました。`);
+        await loadCleanupTargets();
+        refresh();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        setCleanupError(new Error(message));
+        setCleanupStatus(`[ERROR] ${target.branch} のブランチ削除に失敗しました。`);
+      }
     },
-    [goBack, refresh]
+    [deleteBranch, loadCleanupTargets, refresh, removeWorktree]
   );
 
   // Handle AI tool selection
@@ -175,10 +291,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
           <WorktreeManagerScreen
             worktrees={worktreeItems}
             onBack={goBack}
-            onSelect={(worktree) => {
-              // TODO: Implement worktree selection logic
-              goBack();
-            }}
+            onSelect={handleWorktreeSelect}
           />
         );
 
@@ -186,8 +299,17 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         return <BranchCreatorScreen onBack={goBack} onCreate={handleCreate} />;
 
       case 'pr-cleanup':
-        // TODO: Implement merged PR data fetching
-        return <PRCleanupScreen pullRequests={[]} onBack={goBack} onCleanup={handleCleanup} />;
+        return (
+          <PRCleanupScreen
+            targets={cleanupTargets}
+            loading={cleanupLoading}
+            error={cleanupError}
+            statusMessage={cleanupStatus}
+            onBack={goBack}
+            onRefresh={handleCleanupRefresh}
+            onCleanup={handleCleanup}
+          />
+        );
 
       case 'ai-tool-selector':
         return <AIToolSelectorScreen onBack={goBack} onSelect={handleToolSelect} />;

@@ -126,13 +126,21 @@ describe('BranchListScreen', () => {
     expect(queryByText(/Git情報を読み込んでいます/i)).toBeNull();
 
     await act(async () => {
-      vi.advanceTimersByTime(5);
+      if (typeof (vi as any).advanceTimersByTime === 'function') {
+        (vi as any).advanceTimersByTime(5);
+      } else {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
     });
 
     expect(queryByText(/Git情報を読み込んでいます/i)).toBeNull();
 
     await act(async () => {
-      vi.advanceTimersByTime(10);
+      if (typeof (vi as any).advanceTimersByTime === 'function') {
+        (vi as any).advanceTimersByTime(10);
+      } else {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
     });
 
     expect(getByText(/Git情報を読み込んでいます/i)).toBeDefined();
