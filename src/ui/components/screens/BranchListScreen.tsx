@@ -4,6 +4,7 @@ import { Header } from '../parts/Header.js';
 import { Stats } from '../parts/Stats.js';
 import { Footer } from '../parts/Footer.js';
 import { Select } from '../common/Select.js';
+import { LoadingIndicator } from '../common/LoadingIndicator.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import type { BranchItem, Statistics } from '../../types.js';
 
@@ -16,6 +17,7 @@ export interface BranchListScreenProps {
   loading?: boolean;
   error?: Error | null;
   lastUpdated?: Date | null;
+  loadingIndicatorDelay?: number;
 }
 
 /**
@@ -31,6 +33,7 @@ export function BranchListScreen({
   loading = false,
   error = null,
   lastUpdated = null,
+  loadingIndicatorDelay = 300,
 }: BranchListScreenProps) {
   const { rows } = useTerminalSize();
 
@@ -86,11 +89,11 @@ export function BranchListScreen({
 
       {/* Content */}
       <Box flexDirection="column" flexGrow={1}>
-        {loading && (
-          <Box>
-            <Text color="yellow">Loading branches...</Text>
-          </Box>
-        )}
+        <LoadingIndicator
+          isLoading={Boolean(loading)}
+          delay={loadingIndicatorDelay}
+          message="Git情報を読み込んでいます..."
+        />
 
         {error && (
           <Box flexDirection="column">

@@ -26,13 +26,14 @@ export interface SelectionResult {
 
 export interface AppProps {
   onExit: (result?: SelectionResult) => void;
+  loadingIndicatorDelay?: number;
 }
 
 /**
  * App - Top-level component for Ink.js UI
  * Integrates ErrorBoundary, data fetching, screen navigation, and all screens
  */
-export function App({ onExit }: AppProps) {
+export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
   const { exit } = useApp();
   const { branches, worktrees, loading, error, refresh, lastUpdated } = useGitData();
   const { currentScreen, navigateTo, goBack, reset } = useScreenState();
@@ -153,6 +154,7 @@ export function App({ onExit }: AppProps) {
             loading={loading}
             error={error}
             lastUpdated={lastUpdated}
+            loadingIndicatorDelay={loadingIndicatorDelay}
           />
         );
 
@@ -204,6 +206,7 @@ export function App({ onExit }: AppProps) {
             loading={loading}
             error={error}
             lastUpdated={lastUpdated}
+            loadingIndicatorDelay={loadingIndicatorDelay}
           />
         );
     }

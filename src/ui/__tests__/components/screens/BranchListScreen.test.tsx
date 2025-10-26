@@ -2,7 +2,7 @@
  * @vitest-environment happy-dom
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { render } from '@testing-library/react';
+import { act, render } from '@testing-library/react';
 import React from 'react';
 import { BranchListScreen } from '../../../components/screens/BranchListScreen.js';
 import type { BranchItem, Statistics } from '../../../types.js';
@@ -106,18 +106,31 @@ describe('BranchListScreen', () => {
     expect(container).toBeDefined();
   });
 
-  it('should display loading state', () => {
+  it('should display loading indicator after the configured delay', async () => {
     const onSelect = vi.fn();
-    const { getByText } = render(
+    const { queryByText, getByText } = render(
       <BranchListScreen
         branches={mockBranches}
         stats={mockStats}
         onSelect={onSelect}
         loading={true}
+        loadingIndicatorDelay={10}
       />
     );
 
-    expect(getByText(/Loading/i)).toBeDefined();
+    expect(queryByText(/Git情報を読み込んでいます/i)).toBeNull();
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    });
+
+    expect(queryByText(/Git情報を読み込んでいます/i)).toBeNull();
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 15));
+    });
+
+    expect(getByText(/Git情報を読み込んでいます/i)).toBeDefined();
   });
 
   it('should display error state', () => {
