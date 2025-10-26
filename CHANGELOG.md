@@ -26,6 +26,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **🎨 UI Framework Migration to Ink.js (React-based)**: Complete redesign of CLI interface
+  - **Before**: inquirer/chalk-based UI (2,522 lines)
+  - **After**: Ink.js v6.3.1 + React v19.2.0 (113 lines in index.ts, 92.7% reduction)
+  - **Benefits**:
+    - Full-screen layout with persistent header, scrollable content, and fixed footer
+    - Real-time statistics updates without screen refresh
+    - Smooth terminal resize handling
+    - Component-based architecture for better maintainability
+    - 81.78% test coverage achieved
+  - **Dependencies Removed**: @inquirer/core, @inquirer/prompts (2 packages)
+  - **Dependencies Added**: ink, react, ink-select-input, ink-text-input
+  - **Code Quality**: Simplified from 2,522 lines to ~760 lines (70% reduction target achieved)
 - **リリースプロセスのドキュメント化**
   - README.md にリリースプロセスセクションを追加
   - Conventional Commits のガイドライン記載

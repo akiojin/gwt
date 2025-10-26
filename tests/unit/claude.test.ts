@@ -1,10 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { launchClaudeCode } from "../../src/claude.js";
-import { execa } from "execa";
 import { existsSync } from "fs";
 
 // Mock execa
-vi.mock("execa");
+const mockExeca = vi.fn();
+vi.mock("execa", () => ({
+  execa: mockExeca,
+}));
 
 // Mock fs
 vi.mock("fs", () => ({
@@ -15,23 +17,30 @@ vi.mock("fs", () => ({
 const consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
 describe("launchClaudeCode - Root User Detection", () => {
+  let originalGetuid: (() => number) | undefined;
+
   beforeEach(() => {
     vi.clearAllMocks();
     consoleLogSpy.mockClear();
+    // Store original getuid
+    originalGetuid = process.getuid;
   });
 
   afterEach(() => {
-    // Don't restore all mocks - keep consoleLogSpy active
-    vi.unstubAllGlobals();
+    // Restore original getuid
+    if (originalGetuid !== undefined) {
+      process.getuid = originalGetuid;
+    } else {
+      delete (process as any).getuid;
+    }
   });
 
   describe("T104: Root user detection logic", () => {
     it("should detect root user when process.getuid() returns 0", async () => {
       // Mock process.getuid to return 0 (root user)
-      const mockGetuid = vi.fn(() => 0);
-      vi.stubGlobal("process", { ...process, getuid: mockGetuid });
+      process.getuid = () => 0;
 
-      vi.mocked(execa).mockResolvedValue({
+      mockExeca.mockResolvedValue({
         stdout: "",
         stderr: "",
         exitCode: 0,
@@ -40,7 +49,7 @@ describe("launchClaudeCode - Root User Detection", () => {
       await launchClaudeCode("/test/path", { skipPermissions: true });
 
       // Verify execa was called with IS_SANDBOX=1 in env
-      expect(execa).toHaveBeenCalledWith(
+      expect(mockExeca).toHaveBeenCalledWith(
         "bunx",
         expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
         expect.objectContaining({
@@ -49,16 +58,13 @@ describe("launchClaudeCode - Root User Detection", () => {
           }),
         }),
       );
-
-      vi.unstubAllGlobals();
     });
 
     it("should not detect root user when process.getuid() returns non-zero", async () => {
       // Mock process.getuid to return 1000 (non-root user)
-      const mockGetuid = vi.fn(() => 1000);
-      vi.stubGlobal("process", { ...process, getuid: mockGetuid });
+      process.getuid = () => 1000;
 
-      vi.mocked(execa).mockResolvedValue({
+      mockExeca.mockResolvedValue({
         stdout: "",
         stderr: "",
         exitCode: 0,
@@ -67,22 +73,20 @@ describe("launchClaudeCode - Root User Detection", () => {
       await launchClaudeCode("/test/path", { skipPermissions: true });
 
       // Verify execa was called without IS_SANDBOX=1
-      expect(execa).toHaveBeenCalledWith(
+      expect(mockExeca).toHaveBeenCalledWith(
         "bunx",
         expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
         expect.objectContaining({
           env: process.env,
         }),
       );
-
-      vi.unstubAllGlobals();
     });
 
     it("should handle environments where process.getuid() is not available", async () => {
       // Mock process without getuid (e.g., Windows)
-      vi.stubGlobal("process", { ...process, getuid: undefined });
+      delete (process as any).getuid;
 
-      vi.mocked(execa).mockResolvedValue({
+      mockExeca.mockResolvedValue({
         stdout: "",
         stderr: "",
         exitCode: 0,
@@ -91,25 +95,22 @@ describe("launchClaudeCode - Root User Detection", () => {
       await launchClaudeCode("/test/path", { skipPermissions: true });
 
       // Verify execa was called without IS_SANDBOX=1 (fallback to non-root)
-      expect(execa).toHaveBeenCalledWith(
+      expect(mockExeca).toHaveBeenCalledWith(
         "bunx",
         expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
         expect.objectContaining({
           env: process.env,
         }),
       );
-
-      vi.unstubAllGlobals();
     });
   });
 
   describe("T105: IS_SANDBOX=1 set when skipPermissions=true and root", () => {
     it("should set IS_SANDBOX=1 when both root user and skipPermissions=true", async () => {
       // Mock root user
-      const mockGetuid = vi.fn(() => 0);
-      vi.stubGlobal("process", { ...process, getuid: mockGetuid });
+      process.getuid = () => 0;
 
-      vi.mocked(execa).mockResolvedValue({
+      mockExeca.mockResolvedValue({
         stdout: "",
         stderr: "",
         exitCode: 0,
@@ -118,7 +119,7 @@ describe("launchClaudeCode - Root User Detection", () => {
       await launchClaudeCode("/test/path", { skipPermissions: true });
 
       // Verify IS_SANDBOX=1 is set
-      expect(execa).toHaveBeenCalledWith(
+      expect(mockExeca).toHaveBeenCalledWith(
         "bunx",
         expect.arrayContaining([
           "@anthropic-ai/claude-code@latest",
@@ -130,18 +131,15 @@ describe("launchClaudeCode - Root User Detection", () => {
           }),
         }),
       );
-
-      vi.unstubAllGlobals();
     });
   });
 
   describe("T106: IS_SANDBOX=1 not set when skipPermissions=false", () => {
     it("should not set IS_SANDBOX=1 when skipPermissions=false even if root", async () => {
       // Mock root user
-      const mockGetuid = vi.fn(() => 0);
-      vi.stubGlobal("process", { ...process, getuid: mockGetuid });
+      process.getuid = () => 0;
 
-      vi.mocked(execa).mockResolvedValue({
+      mockExeca.mockResolvedValue({
         stdout: "",
         stderr: "",
         exitCode: 0,
@@ -150,7 +148,7 @@ describe("launchClaudeCode - Root User Detection", () => {
       await launchClaudeCode("/test/path", { skipPermissions: false });
 
       // Verify IS_SANDBOX=1 is NOT set
-      expect(execa).toHaveBeenCalledWith(
+      expect(mockExeca).toHaveBeenCalledWith(
         "bunx",
         expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
         expect.objectContaining({
@@ -159,21 +157,18 @@ describe("launchClaudeCode - Root User Detection", () => {
       );
 
       // Verify --dangerously-skip-permissions is NOT in args
-      expect(execa).toHaveBeenCalledWith(
+      expect(mockExeca).toHaveBeenCalledWith(
         "bunx",
         expect.not.arrayContaining(["--dangerously-skip-permissions"]),
         expect.anything(),
       );
-
-      vi.unstubAllGlobals();
     });
 
     it("should not set IS_SANDBOX=1 when skipPermissions is undefined", async () => {
       // Mock root user
-      const mockGetuid = vi.fn(() => 0);
-      vi.stubGlobal("process", { ...process, getuid: mockGetuid });
+      process.getuid = () => 0;
 
-      vi.mocked(execa).mockResolvedValue({
+      mockExeca.mockResolvedValue({
         stdout: "",
         stderr: "",
         exitCode: 0,
@@ -182,25 +177,22 @@ describe("launchClaudeCode - Root User Detection", () => {
       await launchClaudeCode("/test/path", {});
 
       // Verify IS_SANDBOX=1 is NOT set
-      expect(execa).toHaveBeenCalledWith(
+      expect(mockExeca).toHaveBeenCalledWith(
         "bunx",
         expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
         expect.objectContaining({
           env: process.env,
         }),
       );
-
-      vi.unstubAllGlobals();
     });
   });
 
   describe("T203-T205: Warning message display", () => {
     it("T204: should display warning message when root user and skipPermissions=true", async () => {
       // Mock root user
-      const mockGetuid = vi.fn(() => 0);
-      vi.stubGlobal("process", { ...process, getuid: mockGetuid });
+      process.getuid = () => 0;
 
-      vi.mocked(execa).mockResolvedValue({
+      mockExeca.mockResolvedValue({
         stdout: "",
         stderr: "",
         exitCode: 0,
@@ -217,16 +209,13 @@ describe("launchClaudeCode - Root User Detection", () => {
           "⚠️  Docker/サンドボックス環境として実行中（IS_SANDBOX=1）",
         ),
       );
-
-      vi.unstubAllGlobals();
     });
 
     it("T205: should not display sandbox warning when non-root user", async () => {
       // Mock non-root user
-      const mockGetuid = vi.fn(() => 1000);
-      vi.stubGlobal("process", { ...process, getuid: mockGetuid });
+      process.getuid = () => 1000;
 
-      vi.mocked(execa).mockResolvedValue({
+      mockExeca.mockResolvedValue({
         stdout: "",
         stderr: "",
         exitCode: 0,
@@ -245,16 +234,13 @@ describe("launchClaudeCode - Root User Detection", () => {
           "⚠️  Docker/サンドボックス環境として実行中（IS_SANDBOX=1）",
         ),
       );
-
-      vi.unstubAllGlobals();
     });
 
     it("should not display any warning when skipPermissions=false", async () => {
       // Mock root user
-      const mockGetuid = vi.fn(() => 0);
-      vi.stubGlobal("process", { ...process, getuid: mockGetuid });
+      process.getuid = () => 0;
 
-      vi.mocked(execa).mockResolvedValue({
+      mockExeca.mockResolvedValue({
         stdout: "",
         stderr: "",
         exitCode: 0,
@@ -273,8 +259,6 @@ describe("launchClaudeCode - Root User Detection", () => {
           "⚠️  Docker/サンドボックス環境として実行中（IS_SANDBOX=1）",
         ),
       );
-
-      vi.unstubAllGlobals();
     });
   });
 });

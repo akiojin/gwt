@@ -39,10 +39,12 @@
     "bun": ">=1.0.0"
   },
   "dependencies": {
-    "@inquirer/core": "^10.1.15",
-    "@inquirer/prompts": "^6.0.1",
     "chalk": "^5.4.1",
     "execa": "^9.6.0",
+    "ink": "^6.3.1",
+    "ink-select-input": "^6.2.0",
+    "ink-text-input": "^6.0.0",
+    "react": "^19.2.0",
     "string-width": "^7.2.0"
   },
   "devDependencies": {
@@ -52,12 +54,18 @@
     "@semantic-release/github": "^12.0.0",
     "@semantic-release/npm": "^13.1.1",
     "@semantic-release/release-notes-generator": "^14.1.0",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.0",
     "@types/node": "^22.16.5",
+    "@types/react": "^19.2.2",
     "@typescript-eslint/eslint-plugin": "^8.38.0",
     "@typescript-eslint/parser": "^8.38.0",
     "@vitest/coverage-v8": "^2.1.8",
     "@vitest/ui": "^2.1.8",
     "eslint": "^9.31.0",
+    "happy-dom": "^20.0.8",
+    "ink-testing-library": "^4.0.0",
+    "jsdom": "^27.0.1",
     "prettier": "^3.6.2",
     "rimraf": "^6.0.1",
     "semantic-release": "^25.0.1",

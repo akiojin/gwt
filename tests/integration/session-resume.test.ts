@@ -8,9 +8,13 @@ vi.mock("node:fs/promises", () => ({
   readdir: vi.fn(),
 }));
 
-vi.mock("node:os", () => ({
-  homedir: vi.fn(() => "/home/testuser"),
-}));
+vi.mock("node:os", () => {
+  const homedir = vi.fn(() => "/home/testuser");
+  return {
+    homedir,
+    default: { homedir },
+  };
+});
 
 import { readFile, readdir } from "node:fs/promises";
 
