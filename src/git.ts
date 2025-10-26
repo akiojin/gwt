@@ -14,12 +14,26 @@ export class GitError extends Error {
 
 /**
  * 現在のディレクトリがGitリポジトリかどうかを確認
+ * Worktree環境でも動作するように、.gitファイルの存在も確認します
  * @returns {Promise<boolean>} Gitリポジトリの場合true
  */
 export async function isGitRepository(): Promise<boolean> {
   try {
+    // まず.gitの存在を確認（ディレクトリまたはファイル）
+    const fs = await import("node:fs");
+    const gitPath = path.join(process.cwd(), ".git");
+
+    if (fs.existsSync(gitPath)) {
+      // .gitが存在する場合、Git環境として認識
+      if (process.env.DEBUG) {
+        const stats = fs.statSync(gitPath);
+        console.error(`[DEBUG] .git exists: ${gitPath} (${stats.isDirectory() ? 'directory' : 'file'})`);
+      }
+      return true;
+    }
+
+    // .gitが存在しない場合、git rev-parseで確認
     const result = await execa("git", ["rev-parse", "--git-dir"]);
-    // Debug: log the result for troubleshooting
     if (process.env.DEBUG) {
       console.error(`[DEBUG] git rev-parse --git-dir: ${result.stdout}`);
     }
