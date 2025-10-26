@@ -84,4 +84,78 @@ describe('ExecutionModeSelectorScreen', () => {
     // Test will verify onSelect is called with correct mode
     expect(container).toBeDefined();
   });
+
+  // TDD: Tests for 2-step selection (mode + skipPermissions)
+  // TODO: Implement integration tests with user interaction simulation
+  describe.skip('Skip Permissions Selection', () => {
+    it('should render skip permissions prompt after mode selection', () => {
+      const onBack = vi.fn();
+      const onSelect = vi.fn();
+      const { getByText } = render(
+        <ExecutionModeSelectorScreen onBack={onBack} onSelect={onSelect} />
+      );
+
+      // After selecting a mode, should show skip permissions prompt
+      // This test will fail until we implement the 2-step UI
+      expect(getByText(/Skip permission checks/i)).toBeDefined();
+    });
+
+    it('should show correct flag hints for skipPermissions prompt', () => {
+      const onBack = vi.fn();
+      const onSelect = vi.fn();
+      const { getByText } = render(
+        <ExecutionModeSelectorScreen onBack={onBack} onSelect={onSelect} />
+      );
+
+      // Should show both --dangerously-skip-permissions and --yolo hints
+      expect(getByText(/--dangerously-skip-permissions/i)).toBeDefined();
+      expect(getByText(/--yolo/i)).toBeDefined();
+    });
+
+    it('should call onSelect with mode and skipPermissions=true when Yes is selected', () => {
+      const onBack = vi.fn();
+      const onSelect = vi.fn();
+      render(<ExecutionModeSelectorScreen onBack={onBack} onSelect={onSelect} />);
+
+      // After selecting mode and Yes for skipPermissions
+      // onSelect should be called with { mode: 'normal', skipPermissions: true }
+      // This test will fail until implementation
+      expect(onSelect).toHaveBeenCalledWith(
+        expect.objectContaining({
+          mode: expect.any(String),
+          skipPermissions: true,
+        })
+      );
+    });
+
+    it('should call onSelect with mode and skipPermissions=false when No is selected', () => {
+      const onBack = vi.fn();
+      const onSelect = vi.fn();
+      render(<ExecutionModeSelectorScreen onBack={onBack} onSelect={onSelect} />);
+
+      // After selecting mode and No for skipPermissions
+      // onSelect should be called with { mode: 'normal', skipPermissions: false }
+      // This test will fail until implementation
+      expect(onSelect).toHaveBeenCalledWith(
+        expect.objectContaining({
+          mode: expect.any(String),
+          skipPermissions: false,
+        })
+      );
+    });
+
+    it('should default skipPermissions to false', () => {
+      const onBack = vi.fn();
+      const onSelect = vi.fn();
+      render(<ExecutionModeSelectorScreen onBack={onBack} onSelect={onSelect} />);
+
+      // Default should be No (skipPermissions: false)
+      // This test will fail until implementation
+      expect(onSelect).toHaveBeenCalledWith(
+        expect.objectContaining({
+          skipPermissions: false,
+        })
+      );
+    });
+  });
 });

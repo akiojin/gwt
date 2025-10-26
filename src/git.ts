@@ -27,7 +27,9 @@ export async function isGitRepository(): Promise<boolean> {
       // .gitが存在する場合、Git環境として認識
       if (process.env.DEBUG) {
         const stats = fs.statSync(gitPath);
-        console.error(`[DEBUG] .git exists: ${gitPath} (${stats.isDirectory() ? 'directory' : 'file'})`);
+        console.error(
+          `[DEBUG] .git exists: ${gitPath} (${stats.isDirectory() ? "directory" : "file"})`,
+        );
       }
       return true;
     }

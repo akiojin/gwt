@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
 import { isGitRepository, getRepositoryRoot } from "./git.js";
-import { worktreeExists, createWorktree, generateWorktreePath } from "./worktree.js";
 import { launchClaudeCode } from "./claude.js";
 import { launchCodexCLI } from "./codex.js";
+import { WorktreeOrchestrator } from "./services/WorktreeOrchestrator.js";
 import chalk from "chalk";
 import type { SelectionResult } from "./ui/components/App.js";
 
@@ -47,25 +47,12 @@ Pass-through:
 
 /**
  * Main function for Ink.js UI
+ * Returns SelectionResult if user made selections, undefined if user quit
  */
-async function mainInkUI(): Promise<void> {
+async function mainInkUI(): Promise<SelectionResult | undefined> {
   const { render } = await import("ink");
   const React = await import("react");
   const { App } = await import("./ui/components/App.js");
-
-  // Check if current directory is a Git repository
-  if (!(await isGitRepository())) {
-    printError(`Current directory is not a Git repository: ${process.cwd()}`);
-    printInfo("Please run this command from within a Git repository or worktree directory.");
-
-    // Docker環境でよくある問題: safe.directory設定
-    printInfo("\nIf you're running in Docker, you may need to configure Git safe.directory:");
-    printInfo("  git config --global --add safe.directory '*'");
-    printInfo("\nOr run with DEBUG=1 for more information:");
-    printInfo("  DEBUG=1 bun run start");
-
-    process.exit(1);
-  }
 
   let selectionResult: SelectionResult | undefined;
 
@@ -81,61 +68,65 @@ async function mainInkUI(): Promise<void> {
   await waitUntilExit();
   unmount();
 
-  // If selections were made, handle the workflow
-  if (selectionResult) {
-    const { branch, tool, mode } = selectionResult;
-    printInfo(`Selected: ${branch} with ${tool} (${mode} mode)`);
+  return selectionResult;
+}
 
-    try {
-      // Get repository root
-      const repoRoot = await getRepositoryRoot();
+/**
+ * Handle AI tool workflow
+ */
+async function handleAIToolWorkflow(
+  selectionResult: SelectionResult,
+): Promise<void> {
+  const { branch, tool, mode, skipPermissions } = selectionResult;
+  printInfo(
+    `Selected: ${branch} with ${tool} (${mode} mode, skipPermissions: ${skipPermissions})`,
+  );
 
-      // Check if worktree exists, create if needed
-      let worktreePath = await worktreeExists(branch);
-      if (worktreePath) {
-        printInfo(`Using existing worktree: ${worktreePath}`);
-      } else {
-        printInfo(`Creating worktree for ${branch}...`);
-        const baseBranch = "main"; // TODO: Detect base branch
-        worktreePath = await generateWorktreePath(branch, repoRoot);
-        await createWorktree({
-          branchName: branch,
-          worktreePath,
-          repoRoot,
-          isNewBranch: false,
-          baseBranch,
-        });
-        printInfo(`Worktree created: ${worktreePath}`);
-      }
+  try {
+    // Get repository root
+    const repoRoot = await getRepositoryRoot();
 
-      // Launch selected AI tool
-      const skipPermissions = mode === "continue" || mode === "resume";
-      if (tool === "claude-code") {
-        await launchClaudeCode(worktreePath, {
-          mode: mode === "resume" ? "resume" : mode === "continue" ? "continue" : "normal",
-          skipPermissions,
-        });
-      } else if (tool === "codex-cli") {
-        await launchCodexCLI(worktreePath, {
-          mode: mode === "resume" ? "resume" : mode === "continue" ? "continue" : "normal",
-          bypassApprovals: skipPermissions,
-        });
-      }
+    // Ensure worktree exists (using orchestrator)
+    const orchestrator = new WorktreeOrchestrator();
+    const worktreePath = await orchestrator.ensureWorktree(branch, repoRoot);
+    printInfo(`Worktree ready: ${worktreePath}`);
 
-      printInfo("Session completed successfully.");
-    } catch (error) {
-      if (error instanceof Error) {
-        printError(`Error during workflow: ${error.message}`);
-      } else {
-        printError(`Unexpected error: ${String(error)}`);
-      }
-      process.exit(1);
+    // Launch selected AI tool
+    if (tool === "claude-code") {
+      await launchClaudeCode(worktreePath, {
+        mode:
+          mode === "resume"
+            ? "resume"
+            : mode === "continue"
+              ? "continue"
+              : "normal",
+        skipPermissions,
+      });
+    } else if (tool === "codex-cli") {
+      await launchCodexCLI(worktreePath, {
+        mode:
+          mode === "resume"
+            ? "resume"
+            : mode === "continue"
+              ? "continue"
+              : "normal",
+        bypassApprovals: skipPermissions,
+      });
     }
+
+    printInfo("Session completed successfully. Returning to main menu...");
+  } catch (error) {
+    if (error instanceof Error) {
+      printError(`Error during workflow: ${error.message}`);
+    } else {
+      printError(`Unexpected error: ${String(error)}`);
+    }
+    throw error; // Re-throw to handle in main loop
   }
 }
 
 /**
- * Main entry point
+ * Main entry point with loop
  */
 export async function main(): Promise<void> {
   try {
@@ -148,8 +139,43 @@ export async function main(): Promise<void> {
       return;
     }
 
-    // Run Ink UI
-    await mainInkUI();
+    // Check if current directory is a Git repository
+    if (!(await isGitRepository())) {
+      printError(`Current directory is not a Git repository: ${process.cwd()}`);
+      printInfo(
+        "Please run this command from within a Git repository or worktree directory.",
+      );
+
+      // Docker環境でよくある問題: safe.directory設定
+      printInfo(
+        "\\nIf you're running in Docker, you may need to configure Git safe.directory:",
+      );
+      printInfo("  git config --global --add safe.directory '*'");
+      printInfo("\\nOr run with DEBUG=1 for more information:");
+      printInfo("  DEBUG=1 bun run start");
+
+      process.exit(1);
+    }
+
+    // Main loop: UI → AI Tool → back to UI
+    while (true) {
+      const selectionResult = await mainInkUI();
+
+      if (!selectionResult) {
+        // User quit (pressed q without making selections)
+        printInfo("Goodbye!");
+        break;
+      }
+
+      // Handle AI tool workflow
+      try {
+        await handleAIToolWorkflow(selectionResult);
+        // After AI tool completes, loop back to UI
+      } catch (error) {
+        // Error during workflow, but don't exit - return to UI
+        printError("Workflow error, returning to main menu...");
+      }
+    }
   } catch (error) {
     if (error instanceof Error) {
       printError(error.message);

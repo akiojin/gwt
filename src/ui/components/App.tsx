@@ -21,6 +21,7 @@ export interface SelectionResult {
   branch: string;
   tool: AITool;
   mode: ExecutionMode;
+  skipPermissions: boolean;
 }
 
 export interface AppProps {
@@ -121,15 +122,16 @@ export function App({ onExit }: AppProps) {
     [goBack]
   );
 
-  // Handle execution mode selection
+  // Handle execution mode and skipPermissions selection
   const handleModeSelect = useCallback(
-    (mode: ExecutionMode) => {
+    (result: { mode: ExecutionMode; skipPermissions: boolean }) => {
       // All selections complete - exit with result
       if (selectedBranch && selectedTool) {
         onExit({
           branch: selectedBranch,
           tool: selectedTool,
-          mode,
+          mode: result.mode,
+          skipPermissions: result.skipPermissions,
         });
         exit();
       }

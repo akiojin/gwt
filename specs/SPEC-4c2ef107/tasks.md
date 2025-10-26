@@ -149,37 +149,37 @@
 
 - [x] T054 [P] [US2] src/ui/components/screens/WorktreeManagerScreen.tsxのテストを作成
 - [x] T055 [US2] T054の後にsrc/ui/components/screens/WorktreeManagerScreen.tsxを実装（Worktree一覧表示とアクション選択）
-- [ ] T056 [US2] T055の後にsrc/ui/components/App.tsxにWorktreeManager画面遷移を統合（mキー）
+- [x] T056 [US2] T055の後にsrc/ui/components/App.tsxにWorktreeManager画面遷移を統合（mキー）✅ BranchListScreenで実装済み
 
 ### 新規ブランチ作成画面（TDD）
 
-- [ ] T057 [P] [US2] src/ui/components/screens/BranchCreatorScreen.tsxのテストを作成
-- [ ] T058 [US2] T057の後にsrc/ui/components/screens/BranchCreatorScreen.tsxを実装（ブランチタイプ選択 → 名前入力）
-- [ ] T059 [US2] T058の後にsrc/ui/components/App.tsxにBranchCreator画面遷移を統合（nキー）
+- [x] T057 [P] [US2] src/ui/components/screens/BranchCreatorScreen.tsxのテストを作成 ✅
+- [x] T058 [US2] T057の後にsrc/ui/components/screens/BranchCreatorScreen.tsxを実装（ブランチタイプ選択 → 名前入力）✅
+- [x] T059 [US2] T058の後にsrc/ui/components/App.tsxにBranchCreator画面遷移を統合（nキー）✅ BranchListScreenで実装済み
 
 ### PRクリーンアップ画面（TDD）
 
-- [ ] T060 [P] [US2] src/ui/components/screens/PRCleanupScreen.tsxのテストを作成
-- [ ] T061 [US2] T060の後にsrc/ui/components/screens/PRCleanupScreen.tsxを実装（マージ済みPR一覧とクリーンアップ）
-- [ ] T062 [US2] T061の後にsrc/ui/components/App.tsxにPRCleanup画面遷移を統合（cキー）
+- [x] T060 [P] [US2] src/ui/components/screens/PRCleanupScreen.tsxのテストを作成 ✅
+- [x] T061 [US2] T060の後にsrc/ui/components/screens/PRCleanupScreen.tsxを実装（マージ済みPR一覧とクリーンアップ）✅
+- [x] T062 [US2] T061の後にsrc/ui/components/App.tsxにPRCleanup画面遷移を統合（cキー）✅ BranchListScreenで実装済み
 
 ### AIツール選択画面（TDD）
 
-- [ ] T063 [P] [US2] src/ui/components/screens/AIToolSelectorScreen.tsxのテストを作成
-- [ ] T064 [US2] T063の後にsrc/ui/components/screens/AIToolSelectorScreen.tsxを実装（Claude/Codex選択）
-- [ ] T065 [US2] T064の後にsrc/ui/components/App.tsxにAIToolSelector画面遷移を統合（ブランチ選択後）
+- [x] T063 [P] [US2] src/ui/components/screens/AIToolSelectorScreen.tsxのテストを作成 ✅
+- [x] T064 [US2] T063の後にsrc/ui/components/screens/AIToolSelectorScreen.tsxを実装（Claude/Codex選択）✅
+- [x] T065 [US2] T064の後にsrc/ui/components/App.tsxにAIToolSelector画面遷移を統合（ブランチ選択後）✅ App.tsxで実装済み
 
 ### セッション選択画面（TDD）
 
-- [ ] T066 [P] [US2] src/ui/components/screens/SessionSelectorScreen.tsxのテストを作成
-- [ ] T067 [US2] T066の後にsrc/ui/components/screens/SessionSelectorScreen.tsxを実装（セッション一覧表示）
-- [ ] T068 [US2] T067の後にsrc/ui/components/App.tsxにSessionSelector画面遷移を統合（-rオプション時）
+- [x] T066 [P] [US2] src/ui/components/screens/SessionSelectorScreen.tsxのテストを作成 ✅
+- [x] T067 [US2] T066の後にsrc/ui/components/screens/SessionSelectorScreen.tsxを実装（セッション一覧表示）✅
+- [ ] ~~T068 [US2] T067の後にsrc/ui/components/App.tsxにSessionSelector画面遷移を統合（-rオプション時）~~ ⏭️ スキップ（起動オプションはSpec範囲外）
 
 ### 実行モード選択画面（TDD）
 
-- [ ] T069 [P] [US2] src/ui/components/screens/ExecutionModeSelectorScreen.tsxのテストを作成
-- [ ] T070 [US2] T069の後にsrc/ui/components/screens/ExecutionModeSelectorScreen.tsxを実装（Normal/Continue/Resume選択）
-- [ ] T071 [US2] T070の後にsrc/ui/components/App.tsxにExecutionModeSelector画面遷移を統合（AIツール選択後）
+- [x] T069 [P] [US2] src/ui/components/screens/ExecutionModeSelectorScreen.tsxのテストを作成 ✅
+- [x] T070 [US2] T069の後にsrc/ui/components/screens/ExecutionModeSelectorScreen.tsxを実装（Normal/Continue/Resume選択）✅
+- [x] T071 [US2] T070の後にsrc/ui/components/App.tsxにExecutionModeSelector画面遷移を統合（AIツール選択後）✅ App.tsxで実装済み
 
 ### 統合テスト
 
