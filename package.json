@@ -66,6 +66,7 @@
     "happy-dom": "^20.0.8",
     "ink-testing-library": "^4.0.0",
     "jsdom": "^27.0.1",
+    "prettier": "^3.6.2",
     "rimraf": "^6.0.1",
     "semantic-release": "^25.0.1",
     "typescript": "^5.8.3",

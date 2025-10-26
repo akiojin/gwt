@@ -31,6 +31,18 @@ export default [
     },
   },
   {
-    ignores: ["dist/", "node_modules/", "*.js"],
+    ignores: [
+      "dist/**",
+      "build/**",
+      "coverage/**",
+      "node_modules/**",
+      "**/*.d.ts",
+      "**/*.min.js",
+      "*.config.js",
+      "*.config.ts",
+      "specs/**",
+      ".serena/**",
+      ".claude/**",
+    ],
   },
 ];
