@@ -16,6 +16,7 @@ import { useScreenState } from '../hooks/useScreenState.js';
 import { formatBranchItems } from '../utils/branchFormatter.js';
 import { calculateStatistics } from '../utils/statisticsCalculator.js';
 import type { BranchItem, MergedPullRequest } from '../types.js';
+import { createBranch } from '../../git.js';
 
 export interface SelectionResult {
   branch: string;
@@ -83,13 +84,24 @@ export function App({ onExit }: AppProps) {
 
   // Handle branch creation
   const handleCreate = useCallback(
-    (branchName: string) => {
-      // TODO: Implement branch creation logic (git.js integration)
-      // For now, just go back to branch list
-      goBack();
-      refresh();
+    async (branchName: string) => {
+      try {
+        // 1. Create branch using git.js
+        await createBranch(branchName, 'main');
+
+        // 2. Set the newly created branch as selected
+        setSelectedBranch(branchName);
+
+        // 3. Navigate to AI tool selector (same flow as branch selection)
+        navigateTo('ai-tool-selector');
+      } catch (error) {
+        // On error, go back to branch list
+        console.error('Failed to create branch:', error);
+        goBack();
+        refresh();
+      }
     },
-    [goBack, refresh]
+    [navigateTo, goBack, refresh]
   );
 
   // Handle PR cleanup
