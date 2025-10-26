@@ -1,43 +1,47 @@
 /**
  * @vitest-environment happy-dom
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest';
+import type { Mock } from 'vitest';
 import { render, waitFor } from '@testing-library/react';
 import React from 'react';
 import { App } from '../../components/App.js';
 import { Window } from 'happy-dom';
 import type { BranchInfo } from '../../types.js';
 
-// Mock git.js and worktree.js
-const hoisted = vi.hoisted(() => ({
-  mockGetAllBranches: vi.fn(),
-  mockGetRepositoryRoot: vi.fn(async () => '/repo'),
-  mockDeleteBranch: vi.fn(async () => undefined),
-  mockListAdditionalWorktrees: vi.fn(),
-  mockCreateWorktree: vi.fn(async () => undefined),
-  mockGenerateWorktreePath: vi.fn(async () => '/repo/.git/worktree/test'),
-  mockGetMergedPRWorktrees: vi.fn(async () => []),
-  mockRemoveWorktree: vi.fn(async () => undefined),
-}));
-
 vi.mock('../../../git.js', () => ({
   __esModule: true,
-  getAllBranches: hoisted.mockGetAllBranches,
-  getRepositoryRoot: hoisted.mockGetRepositoryRoot,
-  deleteBranch: hoisted.mockDeleteBranch,
+  getAllBranches: vi.fn(),
+  getRepositoryRoot: vi.fn(async () => '/repo'),
+  deleteBranch: vi.fn(async () => undefined),
 }));
 
 vi.mock('../../../worktree.js', () => ({
   __esModule: true,
-  listAdditionalWorktrees: hoisted.mockListAdditionalWorktrees,
-  createWorktree: hoisted.mockCreateWorktree,
-  generateWorktreePath: hoisted.mockGenerateWorktreePath,
-  getMergedPRWorktrees: hoisted.mockGetMergedPRWorktrees,
-  removeWorktree: hoisted.mockRemoveWorktree,
+  listAdditionalWorktrees: vi.fn(),
+  createWorktree: vi.fn(async () => undefined),
+  generateWorktreePath: vi.fn(async () => '/repo/.git/worktree/test'),
+  getMergedPRWorktrees: vi.fn(async () => []),
+  removeWorktree: vi.fn(async () => undefined),
 }));
 
-import { getAllBranches } from '../../../git.js';
-import { listAdditionalWorktrees } from '../../../worktree.js';
+import { getAllBranches, getRepositoryRoot, deleteBranch } from '../../../git.js';
+import {
+  listAdditionalWorktrees,
+  createWorktree,
+  generateWorktreePath,
+  getMergedPRWorktrees,
+  removeWorktree,
+} from '../../../worktree.js';
+
+const mockedGetAllBranches = getAllBranches as Mock;
+const mockedGetRepositoryRoot = getRepositoryRoot as Mock;
+const mockedDeleteBranch = deleteBranch as Mock;
+const mockedListAdditionalWorktrees = listAdditionalWorktrees as Mock;
+const mockedCreateWorktree = createWorktree as Mock;
+const mockedGenerateWorktreePath = generateWorktreePath as Mock;
+const mockedGetMergedPRWorktrees = getMergedPRWorktrees as Mock;
+const mockedRemoveWorktree = removeWorktree as Mock;
 
 describe('Navigation Integration Tests', () => {
   beforeEach(() => {
@@ -47,16 +51,14 @@ describe('Navigation Integration Tests', () => {
     globalThis.document = window.document as any;
 
     // Reset mocks
-    (getAllBranches as ReturnType<typeof vi.fn>).mockReset();
-    (listAdditionalWorktrees as ReturnType<typeof vi.fn>).mockReset();
-    hoisted.mockListAdditionalWorktrees.mockReset();
-    hoisted.mockGetAllBranches.mockReset();
-    hoisted.mockGetRepositoryRoot.mockReset();
-    hoisted.mockDeleteBranch.mockReset();
-    hoisted.mockCreateWorktree.mockReset();
-    hoisted.mockGenerateWorktreePath.mockReset();
-    hoisted.mockGetMergedPRWorktrees.mockReset();
-    hoisted.mockRemoveWorktree.mockReset();
+    mockedGetAllBranches.mockReset();
+    mockedListAdditionalWorktrees.mockReset();
+    mockedGetRepositoryRoot.mockReset();
+    mockedDeleteBranch.mockReset();
+    mockedCreateWorktree.mockReset();
+    mockedGenerateWorktreePath.mockReset();
+    mockedGetMergedPRWorktrees.mockReset();
+    mockedRemoveWorktree.mockReset();
   });
 
   const mockBranches: BranchInfo[] = [
@@ -177,4 +179,8 @@ describe('Navigation Integration Tests', () => {
     // Test will verify onExit is called
     expect(container).toBeDefined();
   });
+});
+
+afterAll(() => {
+  vi.restoreAllMocks();
 });

@@ -2,22 +2,18 @@
  * @vitest-environment happy-dom
  * Edge case tests for UI components
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from 'vitest';
 import { render, waitFor } from '@testing-library/react';
 import React from 'react';
 import { App } from '../../components/App.js';
 import { BranchListScreen } from '../../components/screens/BranchListScreen.js';
 import { Window } from 'happy-dom';
 import type { BranchInfo, BranchItem, Statistics } from '../../types.js';
+import * as useGitDataModule from '../../hooks/useGitData.js';
 
-// Mock useGitData hook
 const mockRefresh = vi.fn();
-vi.mock('../../hooks/useGitData.js', () => ({
-  useGitData: vi.fn(),
-}));
-
-import { useGitData } from '../../hooks/useGitData.js';
-const mockUseGitData = useGitData as ReturnType<typeof vi.fn>;
+const originalUseGitData = useGitDataModule.useGitData;
+const useGitDataSpy = vi.spyOn(useGitDataModule, 'useGitData');
 
 describe('Edge Cases Integration Tests', () => {
   beforeEach(() => {
@@ -28,6 +24,8 @@ describe('Edge Cases Integration Tests', () => {
 
     // Reset mocks
     vi.clearAllMocks();
+    useGitDataSpy.mockReset();
+    useGitDataSpy.mockImplementation(originalUseGitData);
   });
 
   /**
@@ -161,7 +159,7 @@ describe('Edge Cases Integration Tests', () => {
   it('[T093] should catch errors in App component', async () => {
     // Mock useGitData to throw an error after initial render
     let callCount = 0;
-    mockUseGitData.mockImplementation(() => {
+    useGitDataSpy.mockImplementation(() => {
       callCount++;
       if (callCount > 1) {
         throw new Error('Simulated error');
@@ -185,7 +183,7 @@ describe('Edge Cases Integration Tests', () => {
 
   it('[T093] should display error message when data loading fails', () => {
     const testError = new Error('Test error: Failed to load Git data');
-    mockUseGitData.mockReturnValue({
+    useGitDataSpy.mockReturnValue({
       branches: [],
       worktrees: [],
       loading: false,
@@ -203,7 +201,7 @@ describe('Edge Cases Integration Tests', () => {
   });
 
   it('[T093] should handle empty branches list gracefully', () => {
-    mockUseGitData.mockReturnValue({
+    useGitDataSpy.mockReturnValue({
       branches: [],
       worktrees: [],
       loading: false,
@@ -230,7 +228,7 @@ describe('Edge Cases Integration Tests', () => {
       isCurrent: false,
     }));
 
-    mockUseGitData.mockReturnValue({
+    useGitDataSpy.mockReturnValue({
       branches: mockBranches,
       worktrees: Array.from({ length: 30 }, (_, i) => ({
         branch: `feature/branch-${i}`,
@@ -285,4 +283,13 @@ describe('Edge Cases Integration Tests', () => {
 
     process.stdout.rows = originalRows;
   });
+
+  afterEach(() => {
+    useGitDataSpy.mockReset();
+    useGitDataSpy.mockImplementation(originalUseGitData);
+  });
+});
+
+afterAll(() => {
+  useGitDataSpy.mockRestore();
 });

@@ -1,10 +1,20 @@
 /**
  * @vitest-environment happy-dom
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from 'vitest';
+import type { Mock } from 'vitest';
 import { render, act, waitFor } from '@testing-library/react';
 import React from 'react';
 import type { CleanupTarget } from '../../types.js';
+import { Window } from 'happy-dom';
+import * as useGitDataModule from '../../hooks/useGitData.js';
+import * as useScreenStateModule from '../../hooks/useScreenState.js';
+import * as WorktreeManagerScreenModule from '../../components/screens/WorktreeManagerScreen.js';
+import * as BranchCreatorScreenModule from '../../components/screens/BranchCreatorScreen.js';
+import * as PRCleanupScreenModule from '../../components/screens/PRCleanupScreen.js';
+import * as worktreeModule from '../../../worktree.js';
+import * as gitModule from '../../../git.js';
+import { App } from '../../components/App.js';
 
 const navigateToMock = vi.fn();
 const goBackMock = vi.fn();
@@ -14,128 +24,123 @@ const worktreeScreenProps: any[] = [];
 const branchCreatorProps: any[] = [];
 const prCleanupProps: any[] = [];
 
-const hoisted = vi.hoisted(() => {
-  const mockedGetMergedPRWorktrees = vi.fn(async (): Promise<CleanupTarget[]> => [
-    {
-      branch: 'feature/add-new-feature',
-      cleanupType: 'worktree-and-branch',
-      pullRequest: {
-        number: 123,
-        title: 'Add new feature',
-        branch: 'feature/add-new-feature',
-        mergedAt: '2025-01-20T10:00:00Z',
-        author: 'user1',
-      },
-      worktreePath: '/worktrees/feature-add-new-feature',
-      hasUncommittedChanges: false,
-      hasUnpushedCommits: false,
-      hasRemoteBranch: true,
-      isAccessible: true,
-    },
-  ]);
-  return {
-    mockedGetMergedPRWorktrees,
-    mockedGenerateWorktreePath: vi.fn(async () => '/worktrees/new-branch'),
-    mockedCreateWorktree: vi.fn(async () => undefined),
-    mockedRemoveWorktree: vi.fn(async () => undefined),
-    mockedGetRepositoryRoot: vi.fn(async () => '/repo'),
-    mockedDeleteBranch: vi.fn(async () => undefined),
-  };
-});
+const originalUseGitData = useGitDataModule.useGitData;
+const originalUseScreenState = useScreenStateModule.useScreenState;
+const originalWorktreeManagerScreen = WorktreeManagerScreenModule.WorktreeManagerScreen;
+const originalBranchCreatorScreen = BranchCreatorScreenModule.BranchCreatorScreen;
+const originalPRCleanupScreen = PRCleanupScreenModule.PRCleanupScreen;
+const originalGetMergedPRWorktrees = worktreeModule.getMergedPRWorktrees;
+const originalGenerateWorktreePath = worktreeModule.generateWorktreePath;
+const originalCreateWorktree = worktreeModule.createWorktree;
+const originalRemoveWorktree = worktreeModule.removeWorktree;
+const originalGetRepositoryRoot = gitModule.getRepositoryRoot;
+const originalDeleteBranch = gitModule.deleteBranch;
 
-const {
-  mockedGetMergedPRWorktrees,
-  mockedGenerateWorktreePath,
-  mockedCreateWorktree,
-  mockedRemoveWorktree,
-} = hoisted;
-
-vi.mock('../../hooks/useGitData.js', () => ({
-  useGitData: vi.fn(() => ({
-    branches: [],
-    worktrees: [
-      {
-        branch: 'feature/existing',
-        path: '/worktrees/feature-existing',
-        isAccessible: true,
-      },
-    ],
-    loading: false,
-    error: null,
-    refresh: vi.fn(),
-    lastUpdated: null,
-  })),
-}));
-
-vi.mock('../../hooks/useScreenState.js', () => ({
-  useScreenState: vi.fn(() => ({
-    currentScreen: 'worktree-manager',
-    navigateTo: navigateToMock,
-    goBack: goBackMock,
-    reset: resetMock,
-  })),
-}));
-
-vi.mock('../../components/screens/WorktreeManagerScreen.js', () => ({
-  WorktreeManagerScreen: (props: any) => {
-    worktreeScreenProps.push(props);
-    return null;
-  },
-}));
-
-vi.mock('../../components/screens/BranchCreatorScreen.js', () => ({
-  BranchCreatorScreen: (props: any) => {
-    branchCreatorProps.push(props);
-    return null;
-  },
-}));
-
-vi.mock('../../components/screens/PRCleanupScreen.js', () => ({
-  PRCleanupScreen: (props: any) => {
-    prCleanupProps.push(props);
-    return null;
-  },
-}));
-
-vi.mock('../../../worktree.js', () => ({
-  __esModule: true,
-  getMergedPRWorktrees: hoisted.mockedGetMergedPRWorktrees,
-  generateWorktreePath: hoisted.mockedGenerateWorktreePath,
-  createWorktree: hoisted.mockedCreateWorktree,
-  removeWorktree: hoisted.mockedRemoveWorktree,
-}));
-
-vi.mock('../../../git.js', () => ({
-  __esModule: true,
-  getRepositoryRoot: hoisted.mockedGetRepositoryRoot,
-  deleteBranch: hoisted.mockedDeleteBranch,
-}));
-
-import { useScreenState } from '../../hooks/useScreenState.js';
-import { App } from '../../components/App.js';
-
-const mockedUseScreenState = useScreenState as unknown as vi.Mock;
+const useGitDataSpy = vi.spyOn(useGitDataModule, 'useGitData');
+const useScreenStateSpy = vi.spyOn(useScreenStateModule, 'useScreenState');
+const worktreeManagerScreenSpy = vi.spyOn(WorktreeManagerScreenModule, 'WorktreeManagerScreen');
+const branchCreatorScreenSpy = vi.spyOn(BranchCreatorScreenModule, 'BranchCreatorScreen');
+const prCleanupScreenSpy = vi.spyOn(PRCleanupScreenModule, 'PRCleanupScreen');
+const getMergedPRWorktreesSpy = vi.spyOn(worktreeModule, 'getMergedPRWorktrees');
+const generateWorktreePathSpy = vi.spyOn(worktreeModule, 'generateWorktreePath');
+const createWorktreeSpy = vi.spyOn(worktreeModule, 'createWorktree');
+const removeWorktreeSpy = vi.spyOn(worktreeModule, 'removeWorktree');
+const getRepositoryRootSpy = vi.spyOn(gitModule, 'getRepositoryRoot');
+const deleteBranchSpy = vi.spyOn(gitModule, 'deleteBranch');
 
 describe('App shortcuts integration', () => {
   beforeEach(() => {
+    if (typeof globalThis.document === 'undefined') {
+      const window = new Window();
+      globalThis.window = window as any;
+      globalThis.document = window.document as any;
+    }
     worktreeScreenProps.length = 0;
     branchCreatorProps.length = 0;
     prCleanupProps.length = 0;
     navigateToMock.mockClear();
     goBackMock.mockClear();
     resetMock.mockClear();
-    hoisted.mockedGetMergedPRWorktrees.mockClear();
-    hoisted.mockedGenerateWorktreePath.mockClear();
-    hoisted.mockedCreateWorktree.mockClear();
-    hoisted.mockedRemoveWorktree.mockClear();
-    hoisted.mockedGetRepositoryRoot.mockClear();
-    hoisted.mockedDeleteBranch.mockClear();
-    mockedUseScreenState.mockReturnValue({
+    useGitDataSpy.mockImplementation(() => ({
+      branches: [],
+      worktrees: [
+        {
+          branch: 'feature/existing',
+          path: '/worktrees/feature-existing',
+          isAccessible: true,
+        },
+      ],
+      loading: false,
+      error: null,
+      refresh: vi.fn(),
+      lastUpdated: null,
+    }));
+    useScreenStateSpy.mockImplementation(() => ({
       currentScreen: 'worktree-manager',
       navigateTo: navigateToMock,
       goBack: goBackMock,
       reset: resetMock,
+    }));
+    worktreeManagerScreenSpy.mockImplementation((props: any) => {
+      worktreeScreenProps.push(props);
+      return React.createElement(originalWorktreeManagerScreen, props);
     });
+    branchCreatorScreenSpy.mockImplementation((props: any) => {
+      branchCreatorProps.push(props);
+      return React.createElement(originalBranchCreatorScreen, props);
+    });
+    prCleanupScreenSpy.mockImplementation((props: any) => {
+      prCleanupProps.push(props);
+      return React.createElement(originalPRCleanupScreen, props);
+    });
+    getMergedPRWorktreesSpy.mockResolvedValue([
+      {
+        branch: 'feature/add-new-feature',
+        cleanupType: 'worktree-and-branch',
+        pullRequest: {
+          number: 123,
+          title: 'Add new feature',
+          branch: 'feature/add-new-feature',
+          mergedAt: '2025-01-20T10:00:00Z',
+          author: 'user1',
+        },
+        worktreePath: '/worktrees/feature-add-new-feature',
+        hasUncommittedChanges: false,
+        hasUnpushedCommits: false,
+        hasRemoteBranch: true,
+        isAccessible: true,
+      },
+    ] as CleanupTarget[]);
+    generateWorktreePathSpy.mockResolvedValue('/worktrees/new-branch');
+    createWorktreeSpy.mockResolvedValue(undefined);
+    removeWorktreeSpy.mockResolvedValue(undefined);
+    getRepositoryRootSpy.mockResolvedValue('/repo');
+    deleteBranchSpy.mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    useGitDataSpy.mockReset();
+    useScreenStateSpy.mockReset();
+    worktreeManagerScreenSpy.mockReset();
+    branchCreatorScreenSpy.mockReset();
+    prCleanupScreenSpy.mockReset();
+    getMergedPRWorktreesSpy.mockReset();
+    generateWorktreePathSpy.mockReset();
+    createWorktreeSpy.mockReset();
+    removeWorktreeSpy.mockReset();
+    getRepositoryRootSpy.mockReset();
+    deleteBranchSpy.mockReset();
+    useGitDataSpy.mockImplementation(originalUseGitData);
+    useScreenStateSpy.mockImplementation(originalUseScreenState);
+    worktreeManagerScreenSpy.mockImplementation(originalWorktreeManagerScreen as any);
+    branchCreatorScreenSpy.mockImplementation(originalBranchCreatorScreen as any);
+    prCleanupScreenSpy.mockImplementation(originalPRCleanupScreen as any);
+    getMergedPRWorktreesSpy.mockImplementation(originalGetMergedPRWorktrees as any);
+    generateWorktreePathSpy.mockImplementation(originalGenerateWorktreePath as any);
+    createWorktreeSpy.mockImplementation(originalCreateWorktree as any);
+    removeWorktreeSpy.mockImplementation(originalRemoveWorktree as any);
+    getRepositoryRootSpy.mockImplementation(originalGetRepositoryRoot as any);
+    deleteBranchSpy.mockImplementation(originalDeleteBranch as any);
   });
 
   it('navigates to AI tool selector when worktree is selected', () => {
@@ -155,7 +160,7 @@ describe('App shortcuts integration', () => {
     const onExit = vi.fn();
 
     // Update screen state mock to branch-creator for this test
-    mockedUseScreenState.mockReturnValue({
+    useScreenStateSpy.mockReturnValue({
       currentScreen: 'branch-creator',
       navigateTo: navigateToMock,
       goBack: goBackMock,
@@ -171,7 +176,7 @@ describe('App shortcuts integration', () => {
       await onCreate('feature/new-branch');
     });
 
-    expect(hoisted.mockedCreateWorktree).toHaveBeenCalledWith(
+    expect(createWorktreeSpy).toHaveBeenCalledWith(
       expect.objectContaining({
         branchName: 'feature/new-branch',
         isNewBranch: true,
@@ -183,7 +188,7 @@ describe('App shortcuts integration', () => {
   it('loads cleanup targets when PR cleanup screen is active', async () => {
     const onExit = vi.fn();
 
-    mockedUseScreenState.mockReturnValue({
+    useScreenStateSpy.mockReturnValue({
       currentScreen: 'pr-cleanup',
       navigateTo: navigateToMock,
       goBack: goBackMock,
@@ -205,4 +210,18 @@ describe('App shortcuts integration', () => {
       expect(props.loading).toBe(false);
     });
   });
+});
+
+afterAll(() => {
+  useGitDataSpy.mockRestore();
+  useScreenStateSpy.mockRestore();
+  worktreeManagerScreenSpy.mockRestore();
+  branchCreatorScreenSpy.mockRestore();
+  prCleanupScreenSpy.mockRestore();
+  getMergedPRWorktreesSpy.mockRestore();
+  generateWorktreePathSpy.mockRestore();
+  createWorktreeSpy.mockRestore();
+  removeWorktreeSpy.mockRestore();
+  getRepositoryRootSpy.mockRestore();
+  deleteBranchSpy.mockRestore();
 });
