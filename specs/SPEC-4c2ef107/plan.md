@@ -20,33 +20,37 @@ claude-worktreeの現在のCLI UIを、inquirer/chalkベースからInk.js（Rea
 **言語/バージョン**: TypeScript（既存プロジェクトに準拠）
 **ランタイム**: bun（Node.jsではない - プロジェクト制約）
 **主要な依存関係**:
-  - ink: ^5.0.0（メインUIフレームワーク）
-  - react: ^18.3.1（Inkの依存関係）
-  - ink-select-input: ^6.0.0（選択UI） - [要確認: スクロール機能の詳細]
-  - ink-text-input: ^6.0.0（テキスト入力）
-  - @types/react: ^18.3.0（TypeScript型定義）
-  - 既存の依存関係（chalk, execa等）は保持
+
+- ink: ^5.0.0（メインUIフレームワーク）
+- react: ^18.3.1（Inkの依存関係）
+- ink-select-input: ^6.0.0（選択UI） - [要確認: スクロール機能の詳細]
+- ink-text-input: ^6.0.0（テキスト入力）
+- @types/react: ^18.3.0（TypeScript型定義）
+- 既存の依存関係（chalk, execa等）は保持
 
 **ストレージ**: ファイルベース（セッション管理に使用、既存実装を維持）
 **テスト**: Vitest（既存のテストフレームワーク） - [要確認: Inkコンポーネントのテスト方法]
 **ターゲットプラットフォーム**: bun実行環境（Linux/macOS/Windows CLI）
 **プロジェクトタイプ**: 単一プロジェクト（CLIツール）
 **パフォーマンス目標**:
-  - 起動時間: <1秒
-  - スクロールレスポンス: <50ms
-  - リサイズ反応: <500ms
-  - 100+ブランチでもスムーズ動作
+
+- 起動時間: <1秒
+- スクロールレスポンス: <50ms
+- リサイズ反応: <500ms
+- 100+ブランチでもスムーズ動作
 
 **制約**:
-  - bun実行環境必須（Node.js不可）
-  - 既存のGit/Worktreeロジックは変更不可（UIレイヤーのみ）
-  - 段階的移行可能な設計
-  - Vitest使用（新しいテストツール導入不可）
+
+- bun実行環境必須（Node.js不可）
+- 既存のGit/Worktreeロジックは変更不可（UIレイヤーのみ）
+- 段階的移行可能な設計
+- Vitest使用（新しいテストツール導入不可）
 
 **スケール/範囲**:
-  - 画面数: 7画面（BranchList, WorktreeManager, BranchCreator, PRCleanup, AIToolSelector, SessionSelector, ExecutionModeSelector）
-  - コンポーネント数: 約15-20個（共通コンポーネント含む）
-  - コード削減目標: 2522行 → 760行以下（70%削減）
+
+- 画面数: 7画面（BranchList, WorktreeManager, BranchCreator, PRCleanup, AIToolSelector, SessionSelector, ExecutionModeSelector）
+- コンポーネント数: 約15-20個（共通コンポーネント含む）
+- コード削減目標: 2522行 → 760行以下（70%削減）
 
 ## 原則チェック
 

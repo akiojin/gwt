@@ -119,7 +119,7 @@
 
 ### 統合テスト
 
-- [x] T045 [US1] src/ui/__tests__/integration/branchList.test.tsxを作成（ブランチ一覧画面の統合テスト）
+- [x] T045 [US1] `src/ui/__tests__/integration/branchList.test.tsx`を作成（ブランチ一覧画面の統合テスト）
 - [x] T046 [US1] T045の後にE2Eテストを実行（実際のGitリポジトリで動作確認）
 
 **✅ MVP1チェックポイント**: US1完了後、ブランチ選択機能が独立して動作可能
@@ -183,7 +183,7 @@
 
 ### 統合テスト
 
-- [ ] T072 [US2] src/ui/__tests__/integration/navigation.test.tsxを作成（画面遷移フローのテスト）
+- [ ] T072 [US2] `src/ui/__tests__/integration/navigation.test.tsx`を作成（画面遷移フローのテスト）
 - [ ] T073 [US2] T072の後にすべてのサブ画面でE2Eテストを実行
 
 **✅ MVP2チェックポイント**: US2完了後、すべての既存機能が新UIで動作
@@ -220,7 +220,7 @@
 
 ### 統合テスト
 
-- [ ] T084 [US3] src/ui/__tests__/integration/realtimeUpdate.test.tsxを作成（リアルタイム更新のテスト）
+- [ ] T084 [US3] `src/ui/__tests__/integration/realtimeUpdate.test.tsx`を作成（リアルタイム更新のテスト）
 
 **✅ 完全な機能**: US3完了後、すべての要件が満たされる
 
@@ -265,6 +265,11 @@
 - [x] T100 UIコードの総行数を測定（目標: 760行以下）⚠️ 1,732行（31.2%削減）
 - [x] T101 T100の後に70%削減達成を確認 ❌ 未達（品質優先で構造化）
 
+### CI/CD検証
+
+- [ ] T105 CI/CDテスト完走確認（`.github/workflows/test.yml`に合わせて`bun run type-check` / `bun run lint` / `bun run test` / `bun run test:coverage` / `bun run build`をローカルで完走、失敗時は修正）
+- [ ] T106 Markdown Lint完走確認（`.github/workflows/lint.yml`に合わせて`bun run format:check`と`bunx --bun markdownlint-cli "**/*.md" --config .markdownlint.json --ignore-path .markdownlintignore`をローカルで完走、失敗時は修正）
+
 ### 最終検証
 
 - [x] T102 すべての既存機能が正常動作することを確認（regressionゼロ）✅ UI層のみ
@@ -275,7 +280,7 @@
 
 ## タスク統計
 
-**総タスク数**: 104タスク
+**総タスク数**: 106タスク
 
 **ストーリー別内訳**:
 - セットアップ（Phase 1）: 10タスク
@@ -283,7 +288,7 @@
 - US1（Phase 3）: 20タスク
 - US2（Phase 4）: 25タスク
 - US3（Phase 5）: 10タスク
-- 統合・ポリッシュ（Phase 6）: 18タスク
+- 統合・ポリッシュ（Phase 6）: 20タスク（T105-T106追加: CI/CD検証）
 
 **並列実行可能タスク**: 42タスク（[P]マーク付き）
 
