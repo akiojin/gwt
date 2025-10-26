@@ -1,7 +1,11 @@
 #!/usr/bin/env node
 
-import { isGitRepository } from "./git.js";
+import { isGitRepository, getRepositoryRoot } from "./git.js";
+import { worktreeExists, createWorktree, generateWorktreePath } from "./worktree.js";
+import { launchClaudeCode } from "./claude.js";
+import { launchCodexCLI } from "./codex.js";
 import chalk from "chalk";
+import type { SelectionResult } from "./ui/components/App.js";
 
 /**
  * Simple print functions (replacing legacy UI display functions)
@@ -63,12 +67,12 @@ async function mainInkUI(): Promise<void> {
     process.exit(1);
   }
 
-  let selectedBranch: string | undefined;
+  let selectionResult: SelectionResult | undefined;
 
   const { unmount, waitUntilExit } = render(
     React.createElement(App, {
-      onExit: (branch?: string) => {
-        selectedBranch = branch;
+      onExit: (result?: SelectionResult) => {
+        selectionResult = result;
       },
     }),
   );
@@ -77,11 +81,56 @@ async function mainInkUI(): Promise<void> {
   await waitUntilExit();
   unmount();
 
-  // If a branch was selected, handle it
-  if (selectedBranch) {
-    printInfo(`Selected branch: ${selectedBranch}`);
-    // TODO: Implement branch handling logic
-    // For now, just exit
+  // If selections were made, handle the workflow
+  if (selectionResult) {
+    const { branch, tool, mode } = selectionResult;
+    printInfo(`Selected: ${branch} with ${tool} (${mode} mode)`);
+
+    try {
+      // Get repository root
+      const repoRoot = await getRepositoryRoot();
+
+      // Check if worktree exists, create if needed
+      let worktreePath = await worktreeExists(branch);
+      if (worktreePath) {
+        printInfo(`Using existing worktree: ${worktreePath}`);
+      } else {
+        printInfo(`Creating worktree for ${branch}...`);
+        const baseBranch = "main"; // TODO: Detect base branch
+        worktreePath = await generateWorktreePath(branch, repoRoot);
+        await createWorktree({
+          branchName: branch,
+          worktreePath,
+          repoRoot,
+          isNewBranch: false,
+          baseBranch,
+        });
+        printInfo(`Worktree created: ${worktreePath}`);
+      }
+
+      // Launch selected AI tool
+      const skipPermissions = mode === "continue" || mode === "resume";
+      if (tool === "claude-code") {
+        await launchClaudeCode(worktreePath, {
+          mode: mode === "resume" ? "resume" : mode === "continue" ? "continue" : "normal",
+          skipPermissions,
+        });
+      } else if (tool === "codex-cli") {
+        await launchCodexCLI(worktreePath, {
+          mode: mode === "resume" ? "resume" : mode === "continue" ? "continue" : "normal",
+          bypassApprovals: skipPermissions,
+        });
+      }
+
+      printInfo("Session completed successfully.");
+    } catch (error) {
+      if (error instanceof Error) {
+        printError(`Error during workflow: ${error.message}`);
+      } else {
+        printError(`Unexpected error: ${String(error)}`);
+      }
+      process.exit(1);
+    }
   }
 }
 
