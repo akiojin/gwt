@@ -9,14 +9,13 @@ import { Window } from 'happy-dom';
 import type { BranchInfo } from '../../types.js';
 
 // Mock useGitData hook
-const { mockRefresh, mockUseGitData } = vi.hoisted(() => ({
-  mockRefresh: vi.fn(),
-  mockUseGitData: vi.fn(),
+const mockRefresh = vi.fn();
+vi.mock('../../hooks/useGitData.js', () => ({
+  useGitData: vi.fn(),
 }));
 
-vi.mock('../../hooks/useGitData.js', () => ({
-  useGitData: mockUseGitData,
-}));
+import { useGitData } from '../../hooks/useGitData.js';
+const mockUseGitData = useGitData as ReturnType<typeof vi.fn>;
 
 describe('App', () => {
   beforeEach(() => {

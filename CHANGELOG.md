@@ -1,5 +1,4 @@
-# 1.0.0 (2025-10-26)
-
+## 1.0.0 (2025-10-26)
 
 ### Bug Fixes
 
@@ -77,7 +76,6 @@
 * 独自履歴選択後のclaude -r重複実行を修正 ([fc53467](https://github.com/akiojin/claude-worktree/commit/fc534673709a9cacdd26dc82f5eaf7df8b0bb31d))
 * 現在のブランチがCURRENTとして表示されない問題を修正 ([f75cbdc](https://github.com/akiojin/claude-worktree/commit/f75cbdc6fab01663e3161a0cdc139f1a2d34a3ef))
 * 自動マージワークフローのトリガー条件を修正 ([baedfeb](https://github.com/akiojin/claude-worktree/commit/baedfeb69b7867ce717305cd2efad33d1cb23f64))
-
 
 ### Features
 
@@ -163,36 +161,28 @@
 * 表デザインをモダンでより見やすいスタイルに改善 ([e97351d](https://github.com/akiojin/claude-worktree/commit/e97351dc0013790a42064b3b34cbcab8eba4b229))
 * 表デザインをモダンでより見やすいスタイルに改善 ([ca9b2f7](https://github.com/akiojin/claude-worktree/commit/ca9b2f7328acff3259f8762c7bf386f57489408a))
 
-
 ### Reverts
 
 * Claude Codeアカウント切り替え機能を完全に削除 ([7c87127](https://github.com/akiojin/claude-worktree/commit/7c87127a6a39c44561966d833be0733de137ff14))
-
-# Changelog
-
-All notable changes to this project will be documented in this file.
-
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
 ### Added
 
-- **`.releaserc.json` による semantic-release 設定の明示化**
-  - デフォルト設定への暗黙的な依存を排除
-  - リリースプロセスの可視化と保守性向上
-  - 全6つのプラグイン設定を明示的に定義 (commit-analyzer, release-notes-generator, changelog, npm, git, github)
-- semantic-release と必要なプラグインを devDependencies に追加
-- 完全なテストカバレッジ（104+ tests）
-  - ユニットテスト: Git operations, Worktree management, UI components
-  - 統合テスト: Branch selection, Remote branch handling, Branch creation workflows
-  - E2Eテスト: Complete user workflows
-- 包括的なドキュメント
-  - API documentation (docs/api.md)
-  - Architecture documentation (docs/architecture.md)
-  - Contributing guidelines (CONTRIBUTING.md)
-  - Troubleshooting guide (docs/troubleshooting.md)
+* **`.releaserc.json` による semantic-release 設定の明示化**
+  * デフォルト設定への暗黙的な依存を排除
+  * リリースプロセスの可視化と保守性向上
+  * 全6つのプラグイン設定を明示的に定義 (commit-analyzer, release-notes-generator, changelog, npm, git, github)
+* semantic-release と必要なプラグインを devDependencies に追加
+* 完全なテストカバレッジ（104+ tests）
+  * ユニットテスト: Git operations, Worktree management, UI components
+  * 統合テスト: Branch selection, Remote branch handling, Branch creation workflows
+  * E2Eテスト: Complete user workflows
+* 包括的なドキュメント
+  * API documentation (docs/api.md)
+  * Architecture documentation (docs/architecture.md)
+  * Contributing guidelines (CONTRIBUTING.md)
+  * Troubleshooting guide (docs/troubleshooting.md)
 
 ### Changed
 

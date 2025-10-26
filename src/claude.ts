@@ -42,8 +42,14 @@ export async function launchClaudeCode(
       case "resume":
         // TODO: Implement conversation selection with Ink UI
         // Legacy UI removed - this feature needs to be reimplemented
-        console.log(chalk.yellow("   ⚠️  Resume conversation feature temporarily disabled (Ink UI migration)"));
-        console.log(chalk.cyan("   ℹ️  Using default Claude Code resume behavior"));
+        console.log(
+          chalk.yellow(
+            "   ⚠️  Resume conversation feature temporarily disabled (Ink UI migration)",
+          ),
+        );
+        console.log(
+          chalk.cyan("   ℹ️  Using default Claude Code resume behavior"),
+        );
 
         // Fallback to default Claude Code resume
         /*

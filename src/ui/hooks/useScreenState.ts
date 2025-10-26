@@ -1,5 +1,5 @@
-import { useState, useCallback } from 'react';
-import type { ScreenType } from '../types.js';
+import { useState, useCallback } from "react";
+import type { ScreenType } from "../types.js";
 
 export interface ScreenStateResult {
   currentScreen: ScreenType;
@@ -8,7 +8,7 @@ export interface ScreenStateResult {
   reset: () => void;
 }
 
-const INITIAL_SCREEN: ScreenType = 'branch-list';
+const INITIAL_SCREEN: ScreenType = "branch-list";
 
 /**
  * Hook to manage screen navigation state with history

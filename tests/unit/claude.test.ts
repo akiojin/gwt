@@ -1,24 +1,21 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { launchClaudeCode } from "../../src/claude.js";
-import { existsSync } from "fs";
 
-const { mockExeca } = vi.hoisted(() => ({
-  mockExeca: vi.fn(),
-}));
-
+// Mock execa before importing
 vi.mock("execa", () => ({
-  execa: mockExeca,
-  default: { execa: mockExeca },
+  execa: vi.fn(),
+  default: { execa: vi.fn() },
 }));
 
-// Mock fs
-vi.mock("fs", () => {
-  const existsSync = vi.fn(() => true);
-  return {
-    existsSync,
-    default: { existsSync },
-  };
-});
+vi.mock("fs", () => ({
+  existsSync: vi.fn(() => true),
+  default: { existsSync: vi.fn(() => true) },
+}));
+
+import { launchClaudeCode } from "../../src/claude.js";
+import { execa } from "execa";
+
+// Get typed mock
+const mockExeca = execa as ReturnType<typeof vi.fn>;
 
 // Mock console.log to avoid test output clutter
 const consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});

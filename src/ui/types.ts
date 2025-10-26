@@ -29,7 +29,13 @@ export interface EnhancedBranchChoice extends BranchChoice {
   isCurrent: boolean;
 }
 
-export type BranchType = "feature" | "hotfix" | "release" | "main" | "develop" | "other";
+export type BranchType =
+  | "feature"
+  | "hotfix"
+  | "release"
+  | "main"
+  | "develop"
+  | "other";
 
 export interface NewBranchConfig {
   type: BranchType;

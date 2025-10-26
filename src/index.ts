@@ -45,9 +45,9 @@ Pass-through:
  * Main function for Ink.js UI
  */
 async function mainInkUI(): Promise<void> {
-  const { render } = await import('ink');
-  const React = await import('react');
-  const { App } = await import('./ui/components/App.js');
+  const { render } = await import("ink");
+  const React = await import("react");
+  const { App } = await import("./ui/components/App.js");
 
   // Check if current directory is a Git repository
   if (!(await isGitRepository())) {
@@ -62,7 +62,7 @@ async function mainInkUI(): Promise<void> {
       onExit: (branch?: string) => {
         selectedBranch = branch;
       },
-    })
+    }),
   );
 
   // Wait for user to exit
