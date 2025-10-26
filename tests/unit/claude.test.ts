@@ -3,10 +3,12 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 // Mock execa before importing
 vi.mock("execa", () => ({
   execa: vi.fn(),
+  default: { execa: vi.fn() },
 }));
 
 vi.mock("fs", () => ({
   existsSync: vi.fn(() => true),
+  default: { existsSync: vi.fn(() => true) },
 }));
 
 import { launchClaudeCode } from "../../src/claude.js";
