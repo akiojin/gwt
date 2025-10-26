@@ -83,6 +83,8 @@ The tool presents an interactive interface with the following options:
 
 ### Branch Creation Workflow
 
+> **Important**: This workflow is intended for human developers. Autonomous agents must never create or delete branches unless a human gives explicit, task-specific instructions.
+
 1. Select "Create new branch" from the main menu
 2. Choose branch type (feature, hotfix, release)
 3. Enter branch name with automatic prefix application
