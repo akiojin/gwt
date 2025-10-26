@@ -358,6 +358,15 @@ T056 → T059 → T062 → T065 → T068 → T071
 
 ---
 
+## 2025-10-26: バグ修正 - メイン画面ショートカット復旧
+
+**背景**: Ink UI移行後、BranchListScreenのショートカット（`c`/`m`/`n`）が期待する処理を呼び出さず、ユーザーが作業フローを進められない不具合が報告された。
+
+- [x] T601 [P] BranchListScreenの`c`操作でPRクリーンアップ候補を読み込み表示する処理を実装・テスト (src/ui/components/App.tsx, src/ui/components/screens/PRCleanupScreen.tsx)
+- [x] T602 WorktreeManagerScreenでの選択時に対象ブランチをAIツール選択フローへ引き継ぐ処理を実装・テスト (src/ui/components/App.tsx)
+- [x] T603 新規ブランチ作成フローでworktree作成まで自動化し、完了後にAIツール選択へ遷移する処理を実装・テスト (src/ui/components/App.tsx, src/worktree.ts)
+- [x] T604 クリーニング処理でローカルworktree削除とブランチ削除を安全に行うテストを追加 (src/ui/components/App.tsx, src/ui/components/screens/PRCleanupScreen.tsx, src/ui/__tests__)
+
 ## 進捗追跡
 
 - **完了したタスク**: `[x]` でマーク

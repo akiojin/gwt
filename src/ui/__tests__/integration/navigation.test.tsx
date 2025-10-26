@@ -9,12 +9,31 @@ import { Window } from 'happy-dom';
 import type { BranchInfo } from '../../types.js';
 
 // Mock git.js and worktree.js
+const hoisted = vi.hoisted(() => ({
+  mockGetAllBranches: vi.fn(),
+  mockGetRepositoryRoot: vi.fn(async () => '/repo'),
+  mockDeleteBranch: vi.fn(async () => undefined),
+  mockListAdditionalWorktrees: vi.fn(),
+  mockCreateWorktree: vi.fn(async () => undefined),
+  mockGenerateWorktreePath: vi.fn(async () => '/repo/.git/worktree/test'),
+  mockGetMergedPRWorktrees: vi.fn(async () => []),
+  mockRemoveWorktree: vi.fn(async () => undefined),
+}));
+
 vi.mock('../../../git.js', () => ({
-  getAllBranches: vi.fn(),
+  __esModule: true,
+  getAllBranches: hoisted.mockGetAllBranches,
+  getRepositoryRoot: hoisted.mockGetRepositoryRoot,
+  deleteBranch: hoisted.mockDeleteBranch,
 }));
 
 vi.mock('../../../worktree.js', () => ({
-  listAdditionalWorktrees: vi.fn(),
+  __esModule: true,
+  listAdditionalWorktrees: hoisted.mockListAdditionalWorktrees,
+  createWorktree: hoisted.mockCreateWorktree,
+  generateWorktreePath: hoisted.mockGenerateWorktreePath,
+  getMergedPRWorktrees: hoisted.mockGetMergedPRWorktrees,
+  removeWorktree: hoisted.mockRemoveWorktree,
 }));
 
 import { getAllBranches } from '../../../git.js';
@@ -30,6 +49,14 @@ describe('Navigation Integration Tests', () => {
     // Reset mocks
     (getAllBranches as ReturnType<typeof vi.fn>).mockReset();
     (listAdditionalWorktrees as ReturnType<typeof vi.fn>).mockReset();
+    hoisted.mockListAdditionalWorktrees.mockReset();
+    hoisted.mockGetAllBranches.mockReset();
+    hoisted.mockGetRepositoryRoot.mockReset();
+    hoisted.mockDeleteBranch.mockReset();
+    hoisted.mockCreateWorktree.mockReset();
+    hoisted.mockGenerateWorktreePath.mockReset();
+    hoisted.mockGetMergedPRWorktrees.mockReset();
+    hoisted.mockRemoveWorktree.mockReset();
   });
 
   const mockBranches: BranchInfo[] = [
