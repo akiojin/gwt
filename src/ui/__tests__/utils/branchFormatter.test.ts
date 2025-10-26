@@ -88,6 +88,31 @@ describe("branchFormatter", () => {
       expect(result.label).toContain("origin/main");
     });
 
+    it("should align branch names regardless of remote icon presence", () => {
+      const localBranch: BranchInfo = {
+        name: "feature/foo",
+        type: "local",
+        branchType: "feature",
+        isCurrent: false,
+      };
+      const remoteBranch: BranchInfo = {
+        name: "origin/feature/foo",
+        type: "remote",
+        branchType: "feature",
+        isCurrent: false,
+      };
+
+      const localResult = formatBranchItem(localBranch);
+      const remoteResult = formatBranchItem(remoteBranch);
+
+      const localNameIndex = localResult.label.indexOf(localResult.name);
+      const remoteNameIndex = remoteResult.label.indexOf(remoteResult.name);
+
+      expect(localNameIndex).toBeGreaterThan(0);
+      expect(localNameIndex).toBe(remoteNameIndex);
+      expect(remoteResult.label).toMatch(/☁(?:️|︎)?\s+origin/);
+    });
+
     it("should include worktree status icon when provided", () => {
       const branchInfo: BranchInfo = {
         name: "feature/test",
