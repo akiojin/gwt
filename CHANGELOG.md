@@ -1,3 +1,10 @@
+# [1.3.0](https://github.com/akiojin/claude-worktree/compare/v1.2.1...v1.3.0) (2025-10-26)
+
+
+### Features
+
+* SPEC-6d501fd0仕様・計画・タスクの詳細化と品質分析 ([7ff3aa0](https://github.com/akiojin/claude-worktree/commit/7ff3aa03ffa3f3846c8d94d11ae6dcf44ca3498a))
+
 ## [1.2.1](https://github.com/akiojin/claude-worktree/compare/v1.2.0...v1.2.1) (2025-10-26)
 
 
