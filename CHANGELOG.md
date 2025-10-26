@@ -1,3 +1,10 @@
+## [1.2.1](https://github.com/akiojin/claude-worktree/compare/v1.2.0...v1.2.1) (2025-10-26)
+
+
+### Bug Fixes
+
+* Spec Kitのブランチ自動作成を無効化 ([a459682](https://github.com/akiojin/claude-worktree/commit/a459682610fd0553e41bde6815fcef7d68509c3d))
+
 # [1.2.0](https://github.com/akiojin/claude-worktree/compare/v1.1.0...v1.2.0) (2025-10-26)
 
 
