@@ -1,8 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-const { mockExeca } = vi.hoisted(() => ({
-  mockExeca: vi.fn(),
-}));
+const mockExeca = vi.fn();
 
 vi.mock("execa", () => ({
   execa: mockExeca,

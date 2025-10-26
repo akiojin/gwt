@@ -9,10 +9,8 @@ import { Window } from 'happy-dom';
 import type { BranchInfo } from '../../types.js';
 
 // Mock useGitData hook
-const { mockRefresh, mockUseGitData } = vi.hoisted(() => ({
-  mockRefresh: vi.fn(),
-  mockUseGitData: vi.fn(),
-}));
+const mockRefresh = vi.fn();
+const mockUseGitData = vi.fn();
 
 vi.mock('../../hooks/useGitData.js', () => ({
   useGitData: mockUseGitData,
