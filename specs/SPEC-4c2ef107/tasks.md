@@ -365,7 +365,7 @@ T056 → T059 → T062 → T065 → T068 → T071
 - [x] T601 [P] BranchListScreenの`c`操作でPRクリーンアップ候補を読み込み表示する処理を実装・テスト (src/ui/components/App.tsx, src/ui/components/screens/PRCleanupScreen.tsx)
 - [x] T602 WorktreeManagerScreenでの選択時に対象ブランチをAIツール選択フローへ引き継ぐ処理を実装・テスト (src/ui/components/App.tsx)
 - [x] T603 新規ブランチ作成フローでworktree作成まで自動化し、完了後にAIツール選択へ遷移する処理を実装・テスト (src/ui/components/App.tsx, src/worktree.ts)
-- [x] T604 クリーニング処理でローカルworktree削除とブランチ削除を安全に行うテストを追加 (src/ui/components/App.tsx, src/ui/components/screens/PRCleanupScreen.tsx, src/ui/__tests__)
+- [x] T604 クリーニング処理でローカルworktree削除とブランチ削除を安全に行うテストを追加 (`src/ui/components/App.tsx`, `src/ui/components/screens/PRCleanupScreen.tsx`, `src/ui/__tests__`)
 
 ## 進捗追跡
 
