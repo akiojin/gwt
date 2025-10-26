@@ -11,7 +11,9 @@ const normalizeName = (name: string) => {
   return slashIndex === -1 ? name : name.slice(slashIndex + 1);
 };
 
-const makeBranch = (overrides: Partial<BranchInfo> & { name: string }): BranchInfo => {
+const makeBranch = (
+  overrides: Partial<BranchInfo> & { name: string },
+): BranchInfo => {
   return {
     name: overrides.name,
     type: overrides.type ?? "local",
@@ -151,9 +153,7 @@ describe("table.ts - Branch Table Operations", () => {
         makeBranch({ name: "feature/with-worktree" }),
         makeBranch({ name: "feature/no-worktree" }),
       ];
-      const worktreeList = [
-        makeWorktree({ branch: "feature/with-worktree" }),
-      ];
+      const worktreeList = [makeWorktree({ branch: "feature/with-worktree" })];
 
       const order = await branchOrder(branches, worktreeList);
       expect(order).toEqual(["feature/with-worktree", "feature/no-worktree"]);
@@ -170,10 +170,7 @@ describe("table.ts - Branch Table Operations", () => {
       ];
 
       const order = await branchOrder(branches);
-      expect(order).toEqual([
-        "feature/local",
-        "origin/feature/remote-only",
-      ]);
+      expect(order).toEqual(["feature/local", "origin/feature/remote-only"]);
     });
 
     it("maintains current → main → develop priority before other conditions", async () => {
@@ -217,11 +214,7 @@ describe("table.ts - Branch Table Operations", () => {
       ];
 
       const order = await branchOrder(branches);
-      expect(order).toEqual([
-        "feature/alpha",
-        "feature/omega",
-        "feature/zeta",
-      ]);
+      expect(order).toEqual(["feature/alpha", "feature/omega", "feature/zeta"]);
     });
   });
 });
