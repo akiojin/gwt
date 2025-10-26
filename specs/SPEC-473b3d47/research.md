@@ -269,7 +269,7 @@ jobs:
   release:
     steps:
       - name: Semantic Release
-        run: bunx semantic-release
+        run: node node_modules/semantic-release/bin/semantic-release.js
 
 # 変更後（タグトリガーの場合）
 on:

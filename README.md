@@ -337,7 +337,12 @@ For detailed configuration specifications, see [specs/SPEC-23bb2eed/data-model.m
 
 #### GitHub Actions Workflow
 
-The release workflow (`.github/workflows/release.yml`) runs on every push to `main`:
+The release workflow (`.github/workflows/release.yml`) runs whenever either condition is met:
+
+1. A commit is pushed to `main`
+2. The **Auto Merge** workflow finishes successfully for `main`
+
+Each execution performs the following steps:
 
 1. Run tests (`bun run test`)
 2. Build project (`bun run build`)
@@ -349,8 +354,10 @@ To verify the release configuration locally:
 
 ```bash
 # Dry-run to test configuration
-bunx semantic-release --dry-run
+node node_modules/semantic-release/bin/semantic-release.js --dry-run
 ```
+
+> **Note:** semantic-release v25 requires Node.js 22.14+ even when the project itself uses Bun. The GitHub Actions workflow installs this version automatically; run the same locally before invoking the command above.
 
 ### Resources
 
