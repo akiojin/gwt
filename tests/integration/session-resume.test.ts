@@ -1,16 +1,27 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import * as config from "../../src/config/index";
 
-vi.mock("node:fs/promises", () => ({
-  readFile: vi.fn(),
-  writeFile: vi.fn(),
-  mkdir: vi.fn(),
-  readdir: vi.fn(),
-}));
+vi.mock("node:fs/promises", () => {
+  const readFile = vi.fn();
+  const writeFile = vi.fn();
+  const mkdir = vi.fn();
+  const readdir = vi.fn();
+  return {
+    readFile,
+    writeFile,
+    mkdir,
+    readdir,
+    default: { readFile, writeFile, mkdir, readdir },
+  };
+});
 
-vi.mock("node:os", () => ({
-  homedir: vi.fn(() => "/home/testuser"),
-}));
+vi.mock("node:os", () => {
+  const homedir = vi.fn(() => "/home/testuser");
+  return {
+    homedir,
+    default: { homedir },
+  };
+});
 
 import { readFile, readdir } from "node:fs/promises";
 

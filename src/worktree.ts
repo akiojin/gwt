@@ -15,6 +15,9 @@ import {
   checkRemoteBranchExists,
 } from "./git.js";
 
+// Re-export WorktreeConfig for external use
+export type { WorktreeConfig };
+
 // 保護対象のブランチ（クリーンアップから除外）
 const PROTECTED_BRANCHES = ["main", "master", "develop"];
 export class WorktreeError extends Error {

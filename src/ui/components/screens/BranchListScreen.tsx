@@ -1,0 +1,126 @@
+import React from 'react';
+import { Box, Text, useInput } from 'ink';
+import { Header } from '../parts/Header.js';
+import { Stats } from '../parts/Stats.js';
+import { Footer } from '../parts/Footer.js';
+import { Select } from '../common/Select.js';
+import { LoadingIndicator } from '../common/LoadingIndicator.js';
+import { useTerminalSize } from '../../hooks/useTerminalSize.js';
+import type { BranchItem, Statistics } from '../../types.js';
+
+export interface BranchListScreenProps {
+  branches: BranchItem[];
+  stats: Statistics;
+  onSelect: (branch: BranchItem) => void;
+  onNavigate?: (screen: string) => void;
+  onQuit?: () => void;
+  loading?: boolean;
+  error?: Error | null;
+  lastUpdated?: Date | null;
+  loadingIndicatorDelay?: number;
+}
+
+/**
+ * BranchListScreen - Main screen for branch selection
+ * Layout: Header + Stats + Branch List + Footer
+ */
+export function BranchListScreen({
+  branches,
+  stats,
+  onSelect,
+  onNavigate,
+  onQuit,
+  loading = false,
+  error = null,
+  lastUpdated = null,
+  loadingIndicatorDelay = 300,
+}: BranchListScreenProps) {
+  const { rows } = useTerminalSize();
+
+  // Handle keyboard input
+  // Note: Select component handles Enter and arrow keys
+  useInput((input, key) => {
+    if (input === 'm' && onNavigate) {
+      onNavigate('worktree-manager');
+    } else if (input === 'n' && onNavigate) {
+      onNavigate('branch-creator');
+    } else if (input === 'c' && onNavigate) {
+      onNavigate('pr-cleanup');
+    } else if (input === 'q' && onQuit) {
+      onQuit();
+    }
+  });
+
+  // Calculate available space for branch list
+  // Header: 2 lines (title + divider)
+  // Stats: 1 line
+  // Empty line: 1 line
+  // Footer: 1 line
+  // Total fixed: 5 lines
+  const headerLines = 2;
+  const statsLines = 1;
+  const emptyLine = 1;
+  const footerLines = 1;
+  const fixedLines = headerLines + statsLines + emptyLine + footerLines;
+  const contentHeight = rows - fixedLines;
+  const limit = Math.max(5, contentHeight); // Minimum 5 items visible
+
+  // Footer actions
+  const footerActions = [
+    { key: 'enter', description: 'Select' },
+    { key: 'n', description: 'New branch' },
+    { key: 'm', description: 'Manage worktrees' },
+    { key: 'c', description: 'Cleanup PRs' },
+    { key: 'q', description: 'Quit' },
+  ];
+
+  return (
+    <Box flexDirection="column" height={rows}>
+      {/* Header */}
+      <Header title="Claude Worktree - Branch Selection" titleColor="cyan" />
+
+      {/* Stats */}
+      <Box marginTop={1}>
+        <Stats stats={stats} lastUpdated={lastUpdated} />
+      </Box>
+
+      {/* Empty line */}
+      <Box height={1} />
+
+      {/* Content */}
+      <Box flexDirection="column" flexGrow={1}>
+        <LoadingIndicator
+          isLoading={Boolean(loading)}
+          delay={loadingIndicatorDelay}
+          message="Git情報を読み込んでいます..."
+        />
+
+        {error && (
+          <Box flexDirection="column">
+            <Text color="red" bold>
+              Error: {error.message}
+            </Text>
+            {process.env.DEBUG && error.stack && (
+              <Box marginTop={1}>
+                <Text color="gray">{error.stack}</Text>
+              </Box>
+            )}
+          </Box>
+        )}
+
+        {!loading && !error && branches.length === 0 && (
+          <Box>
+            <Text dimColor>No branches found</Text>
+          </Box>
+        )}
+
+        {!loading && !error && branches.length > 0 && (
+          <Select items={branches} onSelect={onSelect} limit={limit} />
+        )}
+      </Box>
+
+      {/* Footer */}
+      <Footer actions={footerActions} />
+    </Box>
+  );
+}

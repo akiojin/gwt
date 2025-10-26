@@ -145,16 +145,18 @@ description: "機能実装のためのタスクリストテンプレート"
 
 - [ ] **T401** [統合] エンドツーエンドの統合テストを実行
 - [ ] **T402** [統合] エッジケースと境界条件を処理
+- [ ] **T403** [統合] `.github/workflows/test.yml` に合わせて `bun run type-check` / `bun run lint` / `bun run test` / `bun run test:coverage` / `bun run build` をローカルで完走させ、失敗時は修正
+- [ ] **T404** [統合] `.github/workflows/lint.yml` に合わせて `bun run format:check` と `bunx --bun markdownlint-cli "**/*.md" --config .markdownlint.json --ignore-path .markdownlintignore` をローカルで完走させ、失敗時は修正
 
 ### ドキュメント
 
-- [ ] **T403** [P] [ドキュメント] `docs/api.md` にAPIドキュメントを更新
-- [ ] **T404** [P] [ドキュメント] `README.md` にユーザーガイドを更新
+- [ ] **T405** [P] [ドキュメント] `docs/api.md` にAPIドキュメントを更新
+- [ ] **T406** [P] [ドキュメント] `README.md` にユーザーガイドを更新
 
 ### デプロイメント準備
 
-- [ ] **T405** [デプロイ] デプロイメント設定を検証
-- [ ] **T406** [デプロイ] プロダクション環境でテスト
+- [ ] **T407** [デプロイ] デプロイメント設定を検証
+- [ ] **T408** [デプロイ] プロダクション環境でテスト
 
 ## タスク凡例
 

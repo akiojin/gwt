@@ -4,8 +4,9 @@ import path from "path";
 export default defineConfig({
   test: {
     globals: true,
-    environment: "node",
-    include: ["tests/**/*.test.ts", "tests/**/*.spec.ts"],
+    environment: "happy-dom",
+    setupFiles: ["./vitest.setup.ts"],
+    include: ["tests/**/*.test.ts", "tests/**/*.spec.ts", "src/**/*.test.ts", "src/**/*.test.tsx"],
     exclude: ["node_modules", "dist", "build"],
     coverage: {
       provider: "v8",

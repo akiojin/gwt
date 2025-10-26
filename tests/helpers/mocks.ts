@@ -97,30 +97,6 @@ export function mockExeca(
 }
 
 /**
- * inquirerのプロンプトモック
- */
-export function mockInquirerPrompts<T = any>(responses: Record<string, T>) {
-  return {
-    select: vi.fn(async (config: any) => {
-      const key = config.message || config.name;
-      return responses[key] || config.choices?.[0]?.value;
-    }),
-    input: vi.fn(async (config: any) => {
-      const key = config.message || config.name;
-      return responses[key] || "";
-    }),
-    confirm: vi.fn(async (config: any) => {
-      const key = config.message || config.name;
-      return responses[key] !== undefined ? responses[key] : true;
-    }),
-    checkbox: vi.fn(async (config: any) => {
-      const key = config.message || config.name;
-      return responses[key] || [];
-    }),
-  };
-}
-
-/**
  * ファイルシステム操作のモック
  */
 export function mockFileSystem() {

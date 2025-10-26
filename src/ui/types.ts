@@ -1,9 +1,17 @@
+export interface WorktreeInfo {
+  path: string;
+  locked: boolean;
+  prunable: boolean;
+  isAccessible?: boolean;
+}
+
 export interface BranchInfo {
   name: string;
   type: "local" | "remote";
   branchType: "feature" | "hotfix" | "release" | "main" | "develop" | "other";
   isCurrent: boolean;
   description?: string;
+  worktree?: WorktreeInfo;
 }
 
 export interface BranchChoice {
@@ -21,7 +29,13 @@ export interface EnhancedBranchChoice extends BranchChoice {
   isCurrent: boolean;
 }
 
-export type BranchType = "feature" | "hotfix" | "release";
+export type BranchType =
+  | "feature"
+  | "hotfix"
+  | "release"
+  | "main"
+  | "develop"
+  | "other";
 
 export interface NewBranchConfig {
   type: BranchType;
@@ -107,4 +121,64 @@ export interface GitHubPRResponse {
   headRefName: string;
   mergedAt: string | null;
   author: GitHubPRAuthor | null;
+}
+
+// ========================================
+// Ink.js UI Types (Phase 2+)
+// ========================================
+
+/**
+ * Screen types for Ink.js UI
+ */
+export type ScreenType =
+  | "branch-list"
+  | "worktree-manager"
+  | "branch-creator"
+  | "pr-cleanup"
+  | "ai-tool-selector"
+  | "session-selector"
+  | "execution-mode-selector";
+
+export type ScreenState = "active" | "hidden";
+
+export interface Screen {
+  type: ScreenType;
+  state: ScreenState;
+  data?: unknown;
+}
+
+/**
+ * BranchItem - Extended BranchInfo for display purposes
+ */
+export type WorktreeStatus = "active" | "inaccessible" | undefined;
+
+export interface BranchItem extends BranchInfo {
+  // Display properties
+  icons: string[];
+  worktreeStatus?: WorktreeStatus;
+  hasChanges: boolean;
+  label: string;
+  value: string;
+}
+
+/**
+ * Statistics - Real-time statistics
+ */
+export interface Statistics {
+  localCount: number;
+  remoteCount: number;
+  worktreeCount: number;
+  changesCount: number;
+  lastUpdated: Date;
+}
+
+/**
+ * Layout - Dynamic layout information
+ */
+export interface Layout {
+  terminalHeight: number;
+  terminalWidth: number;
+  headerLines: number;
+  footerLines: number;
+  contentHeight: number;
 }
