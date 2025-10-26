@@ -1,3 +1,22 @@
+# [1.1.0](https://github.com/akiojin/claude-worktree/compare/v1.0.0...v1.1.0) (2025-10-26)
+
+
+### Bug Fixes
+
+* CHANGELOG.mdの全リストマーカーをアスタリスクに統一 ([d39c01b](https://github.com/akiojin/claude-worktree/commit/d39c01b4de28d018565f336d3a2e06b178ba5920))
+* CIエラーを修正（Markdown Lint + Test） ([b9e8b50](https://github.com/akiojin/claude-worktree/commit/b9e8b50a5b8f1fdc7d5c9a2755ca4e09306720ee))
+* CIエラー修正（Markdown LintとVitest mock） ([edef82e](https://github.com/akiojin/claude-worktree/commit/edef82e6a721bd87d847172619ccaa1fd8238736))
+* Ink.js UIのブランチ表示位置とキーボード操作を修正 ([d88108b](https://github.com/akiojin/claude-worktree/commit/d88108b7458100d207ced5717e1ed1bfb730a3c1))
+* qキーとEnterキーが正常に動作するように修正 ([f2cb6b5](https://github.com/akiojin/claude-worktree/commit/f2cb6b5093d53e9cd2069f03a7b03a56ba7f48c3))
+* vi.hoistedエラーを修正してテストを全て成功させる ([6b8cac0](https://github.com/akiojin/claude-worktree/commit/6b8cac0d1d585734d2ea49ad255560c707c0e0fe))
+* キーボードハンドリング競合とWorktreeアイコン表示を修正 ([2ea4624](https://github.com/akiojin/claude-worktree/commit/2ea46241bd5830d029a8fae5d74ae7522f101e36))
+
+
+### Features
+
+* カーソルのループ動作を無効化したカスタムSelectコンポーネントを実装 ([10920ce](https://github.com/akiojin/claude-worktree/commit/10920ce0db6f383e26264fa6f69e8dcc0cb4e909))
+* カスタムSelectコンポーネントのテスト実装とUI 5カラム表示構造への修正 ([8b65385](https://github.com/akiojin/claude-worktree/commit/8b6538538fd3fb218e86b0f1e85589b0e504d307))
+
 ## 1.0.0 (2025-10-26)
 
 ### Bug Fixes
