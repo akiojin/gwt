@@ -31,12 +31,8 @@ export function WorktreeManagerScreen({
   const { rows } = useTerminalSize();
 
   // Handle keyboard input
+  // Note: Select component handles Enter and arrow keys
   useInput((input, key) => {
-    // Skip Enter and arrow keys - let SelectInput handle them
-    if (key.return || key.upArrow || key.downArrow) {
-      return;
-    }
-
     if (input === 'q') {
       onBack();
     }

@@ -27,6 +27,8 @@ export function Select<T extends SelectItem = SelectItem>({
   const [offset, setOffset] = useState(0);
 
   useInput((input, key) => {
+    // Only handle navigation and selection keys
+    // Let other keys (q, m, n, c, etc.) propagate to parent components
     if (key.upArrow || input === 'k') {
       // Move up but don't loop - stop at 0
       setSelectedIndex((current) => {
@@ -58,6 +60,7 @@ export function Select<T extends SelectItem = SelectItem>({
         onSelect(selectedItem);
       }
     }
+    // All other keys are ignored and will propagate to parent components
   });
 
   // Determine visible items based on limit
