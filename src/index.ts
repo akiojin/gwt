@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
 import { isGitRepository, getRepositoryRoot } from "./git.js";
-import { worktreeExists, createWorktree, generateWorktreePath } from "./worktree.js";
 import { launchClaudeCode } from "./claude.js";
 import { launchCodexCLI } from "./codex.js";
+import { WorktreeOrchestrator } from "./services/WorktreeOrchestrator.js";
 import chalk from "chalk";
 import type { SelectionResult } from "./ui/components/App.js";
 
@@ -84,23 +84,10 @@ async function handleAIToolWorkflow(selectionResult: SelectionResult): Promise<v
     // Get repository root
     const repoRoot = await getRepositoryRoot();
 
-    // Check if worktree exists, create if needed
-    let worktreePath = await worktreeExists(branch);
-    if (worktreePath) {
-      printInfo(`Using existing worktree: ${worktreePath}`);
-    } else {
-      printInfo(`Creating worktree for ${branch}...`);
-      const baseBranch = "main"; // TODO: Detect base branch
-      worktreePath = await generateWorktreePath(branch, repoRoot);
-      await createWorktree({
-        branchName: branch,
-        worktreePath,
-        repoRoot,
-        isNewBranch: false,
-        baseBranch,
-      });
-      printInfo(`Worktree created: ${worktreePath}`);
-    }
+    // Ensure worktree exists (using orchestrator)
+    const orchestrator = new WorktreeOrchestrator();
+    const worktreePath = await orchestrator.ensureWorktree(branch, repoRoot);
+    printInfo(`Worktree ready: ${worktreePath}`);
 
     // Launch selected AI tool
     if (tool === "claude-code") {
