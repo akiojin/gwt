@@ -80,7 +80,9 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
   const completionTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
-    if (!cleanupProcessingBranch) {
+    if (!cleanupInputLocked) {
+      spinnerFrameIndexRef.current = 0;
+      setSpinnerFrameIndex(0);
       return undefined;
     }
 
@@ -94,34 +96,33 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       spinnerFrameIndexRef.current = 0;
       setSpinnerFrameIndex(0);
     };
-  }, [cleanupProcessingBranch]);
+  }, [cleanupInputLocked]);
 
   useEffect(() => {
-    if (!cleanupProcessingBranch) {
+    if (!cleanupInputLocked) {
       return;
     }
 
     const frame = getSpinnerFrame(spinnerFrameIndex);
-    setCleanupIndicators((prev) => {
-      if (!cleanupProcessingBranch) {
-        return prev;
-      }
 
-      const current = prev[cleanupProcessingBranch];
-      if (current && current.icon === frame && current.color === 'cyan') {
-        return prev;
-      }
+    if (cleanupProcessingBranch) {
+      setCleanupIndicators((prev) => {
+        const current = prev[cleanupProcessingBranch];
+        if (current && current.icon === frame && current.color === 'cyan') {
+          return prev;
+        }
 
-      const next: Record<string, { icon: string; color?: 'cyan' | 'green' | 'yellow' | 'red' }> = {
-        ...prev,
-        [cleanupProcessingBranch]: { icon: frame, color: 'cyan' },
-      };
+        const next: Record<string, { icon: string; color?: 'cyan' | 'green' | 'yellow' | 'red' }> = {
+          ...prev,
+          [cleanupProcessingBranch]: { icon: frame, color: 'cyan' },
+        };
 
-      return next;
-    });
+        return next;
+      });
+    }
 
     setCleanupFooterMessage({ text: `Processing... ${frame}`, color: 'cyan' });
-  }, [cleanupProcessingBranch, spinnerFrameIndex]);
+  }, [cleanupInputLocked, cleanupProcessingBranch, spinnerFrameIndex]);
 
   useEffect(() => {
     if (!hiddenBranches.length) {
