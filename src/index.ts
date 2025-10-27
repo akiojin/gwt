@@ -1,11 +1,15 @@
 #!/usr/bin/env node
 
-import { isGitRepository, getRepositoryRoot } from "./git.js";
+import { isGitRepository, getRepositoryRoot, branchExists } from "./git.js";
 import { launchClaudeCode } from "./claude.js";
 import { launchCodexCLI } from "./codex.js";
-import { WorktreeOrchestrator } from "./services/WorktreeOrchestrator.js";
+import {
+  WorktreeOrchestrator,
+  type EnsureWorktreeOptions,
+} from "./services/WorktreeOrchestrator.js";
 import chalk from "chalk";
 import type { SelectionResult } from "./ui/components/App.js";
+import { worktreeExists } from "./worktree.js";
 import { getTerminalStreams } from "./utils/terminal.js";
 
 /**
@@ -99,18 +103,54 @@ async function mainInkUI(): Promise<SelectionResult | undefined> {
 async function handleAIToolWorkflow(
   selectionResult: SelectionResult,
 ): Promise<void> {
-  const { branch, tool, mode, skipPermissions } = selectionResult;
+  const {
+    branch,
+    displayName,
+    branchType,
+    remoteBranch,
+    tool,
+    mode,
+    skipPermissions,
+  } = selectionResult;
+
+  const branchLabel = displayName ?? branch;
   printInfo(
-    `Selected: ${branch} with ${tool} (${mode} mode, skipPermissions: ${skipPermissions})`,
+    `Selected: ${branchLabel} with ${tool} (${mode} mode, skipPermissions: ${skipPermissions})`,
   );
 
   try {
     // Get repository root
     const repoRoot = await getRepositoryRoot();
 
-    // Ensure worktree exists (using orchestrator)
+    // Determine ensure options (local vs remote branch)
+    const ensureOptions: EnsureWorktreeOptions = {};
+
+    if (branchType === "remote") {
+      const remoteRef = remoteBranch ?? branch;
+      const localExists = await branchExists(branch);
+
+      ensureOptions.baseBranch = remoteRef;
+      ensureOptions.isNewBranch = !localExists;
+    }
+
     const orchestrator = new WorktreeOrchestrator();
-    const worktreePath = await orchestrator.ensureWorktree(branch, repoRoot);
+
+    const existingWorktree = await worktreeExists(branch);
+
+    // Ensure worktree exists (using orchestrator)
+    const worktreePath = await orchestrator.ensureWorktree(
+      branch,
+      repoRoot,
+      ensureOptions,
+    );
+
+    if (existingWorktree) {
+      printInfo(`Reusing existing worktree: ${existingWorktree}`);
+    } else if (ensureOptions.isNewBranch) {
+      const base = ensureOptions.baseBranch ?? "";
+      printInfo(`Created new worktree from ${base}: ${worktreePath}`);
+    }
+
     printInfo(`Worktree ready: ${worktreePath}`);
 
     // Launch selected AI tool

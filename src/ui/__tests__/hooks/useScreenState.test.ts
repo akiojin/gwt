@@ -90,8 +90,8 @@ describe("useScreenState", () => {
     const screens: ScreenType[] = [
       "worktree-manager",
       "branch-creator",
-      "pr-cleanup",
       "ai-tool-selector",
+      "execution-mode-selector",
     ];
 
     screens.forEach((screen) => {
@@ -100,13 +100,13 @@ describe("useScreenState", () => {
       });
     });
 
-    expect(result.current.currentScreen).toBe("ai-tool-selector");
+    expect(result.current.currentScreen).toBe("execution-mode-selector");
 
     // Go back through all screens
     act(() => {
       result.current.goBack();
     });
-    expect(result.current.currentScreen).toBe("pr-cleanup");
+    expect(result.current.currentScreen).toBe("ai-tool-selector");
 
     act(() => {
       result.current.goBack();

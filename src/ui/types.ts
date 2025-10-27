@@ -134,7 +134,6 @@ export type ScreenType =
   | "branch-list"
   | "worktree-manager"
   | "branch-creator"
-  | "pr-cleanup"
   | "ai-tool-selector"
   | "session-selector"
   | "execution-mode-selector";
