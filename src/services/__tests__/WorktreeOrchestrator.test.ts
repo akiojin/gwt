@@ -85,11 +85,9 @@ describe("WorktreeOrchestrator", () => {
       const customBaseBranch = "develop";
 
       // Act
-      const result = await orchestrator.ensureWorktree(
-        mockBranch,
-        mockRepoRoot,
-        customBaseBranch,
-      );
+      const result = await orchestrator.ensureWorktree(mockBranch, mockRepoRoot, {
+        baseBranch: customBaseBranch,
+      });
 
       // Assert
       expect(result).toBe(mockWorktreePath);
@@ -99,6 +97,29 @@ describe("WorktreeOrchestrator", () => {
         repoRoot: mockRepoRoot,
         isNewBranch: false,
         baseBranch: customBaseBranch,
+      });
+    });
+
+    it("should mark worktree creation as new branch when requested", async () => {
+      (mockWorktreeService.worktreeExists as any).mockResolvedValue(null);
+      (mockWorktreeService.generateWorktreePath as any).mockResolvedValue(
+        mockWorktreePath,
+      );
+
+      (mockWorktreeService.createWorktree as any).mockResolvedValue(undefined);
+
+      const result = await orchestrator.ensureWorktree(mockBranch, mockRepoRoot, {
+        baseBranch: "origin/feature-test",
+        isNewBranch: true,
+      });
+
+      expect(result).toBe(mockWorktreePath);
+      expect(mockWorktreeService.createWorktree).toHaveBeenCalledWith({
+        branchName: mockBranch,
+        worktreePath: mockWorktreePath,
+        repoRoot: mockRepoRoot,
+        isNewBranch: true,
+        baseBranch: "origin/feature-test",
       });
     });
 
@@ -115,6 +136,35 @@ describe("WorktreeOrchestrator", () => {
       await expect(
         orchestrator.ensureWorktree(mockBranch, mockRepoRoot),
       ).rejects.toThrow("Failed to create worktree");
+    });
+
+    it("should reuse existing worktree if creation reports branch already checked out", async () => {
+      const existingPath = "/mock/repo/.git/worktree/feature-test-existing";
+
+      (mockWorktreeService.worktreeExists as any)
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(existingPath);
+
+      (mockWorktreeService.generateWorktreePath as any).mockResolvedValue(
+        mockWorktreePath,
+      );
+
+      const alreadyCheckedOutError = new Error(
+        "fatal: 'feature-test' is already checked out at '/mock/repo/.git/worktree/feature-test-existing'",
+      );
+
+      (mockWorktreeService.createWorktree as any).mockRejectedValue(
+        alreadyCheckedOutError,
+      );
+
+      const result = await orchestrator.ensureWorktree(
+        mockBranch,
+        mockRepoRoot,
+      );
+
+      expect(result).toBe(existingPath);
+      expect(mockWorktreeService.worktreeExists).toHaveBeenCalledTimes(2);
+      expect(mockWorktreeService.createWorktree).toHaveBeenCalledTimes(1);
     });
   });
 });

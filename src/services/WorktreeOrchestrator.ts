@@ -14,6 +14,11 @@ export interface WorktreeService {
   createWorktree: (config: WorktreeConfig) => Promise<void>;
 }
 
+export interface EnsureWorktreeOptions {
+  baseBranch?: string;
+  isNewBranch?: boolean;
+}
+
 /**
  * WorktreeOrchestrator - Manages worktree existence checks and creation
  *
@@ -40,14 +45,17 @@ export class WorktreeOrchestrator {
    *
    * @param branch - Branch name
    * @param repoRoot - Repository root path
-   * @param baseBranch - Base branch for new worktree (default: 'main')
+   * @param options - Creation options (base branch, new branch flag)
    * @returns Worktree path
    */
   async ensureWorktree(
     branch: string,
     repoRoot: string,
-    baseBranch: string = "main",
+    options: EnsureWorktreeOptions = {},
   ): Promise<string> {
+    const baseBranch = options.baseBranch ?? "main";
+    const isNewBranch = options.isNewBranch ?? false;
+
     // Check if worktree already exists
     const existingPath = await this.worktreeService.worktreeExists(branch);
 
@@ -61,15 +69,33 @@ export class WorktreeOrchestrator {
       branch,
     );
 
-    // Create worktree
-    await this.worktreeService.createWorktree({
-      branchName: branch,
-      worktreePath,
-      repoRoot,
-      isNewBranch: false,
-      baseBranch,
-    });
+    try {
+      // Create worktree (or branch)
+      await this.worktreeService.createWorktree({
+        branchName: branch,
+        worktreePath,
+        repoRoot,
+        isNewBranch,
+        baseBranch,
+      });
 
-    return worktreePath;
+      return worktreePath;
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error ? error.message : String(error ?? "");
+      const normalized = message.toLowerCase();
+      const alreadyExists =
+        normalized.includes("already checked out") ||
+        normalized.includes("already exists");
+
+      if (alreadyExists) {
+        const fallbackPath = await this.worktreeService.worktreeExists(branch);
+        if (fallbackPath) {
+          return fallbackPath;
+        }
+      }
+
+      throw error;
+    }
   }
 }

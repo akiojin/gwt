@@ -8,16 +8,36 @@ import { LoadingIndicator } from '../common/LoadingIndicator.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import type { BranchItem, Statistics } from '../../types.js';
 
+type IndicatorColor = 'cyan' | 'green' | 'yellow' | 'red';
+
+interface CleanupIndicator {
+  icon: string;
+  color?: IndicatorColor;
+}
+
+interface CleanupFooterMessage {
+  text: string;
+  color?: IndicatorColor;
+}
+
+interface CleanupUIState {
+  indicators: Record<string, CleanupIndicator>;
+  footerMessage: CleanupFooterMessage | null;
+  inputLocked: boolean;
+}
+
 export interface BranchListScreenProps {
   branches: BranchItem[];
   stats: Statistics;
   onSelect: (branch: BranchItem) => void;
   onNavigate?: (screen: string) => void;
   onQuit?: () => void;
+  onCleanupCommand?: () => void;
   loading?: boolean;
   error?: Error | null;
   lastUpdated?: Date | null;
   loadingIndicatorDelay?: number;
+  cleanupUI?: CleanupUIState;
 }
 
 /**
@@ -30,22 +50,28 @@ export function BranchListScreen({
   onSelect,
   onNavigate,
   onQuit,
+  onCleanupCommand,
   loading = false,
   error = null,
   lastUpdated = null,
   loadingIndicatorDelay = 300,
+  cleanupUI,
 }: BranchListScreenProps) {
   const { rows } = useTerminalSize();
 
   // Handle keyboard input
   // Note: Select component handles Enter and arrow keys
   useInput((input, key) => {
+    if (cleanupUI?.inputLocked) {
+      return;
+    }
+
     if (input === 'm' && onNavigate) {
       onNavigate('worktree-manager');
     } else if (input === 'n' && onNavigate) {
       onNavigate('branch-creator');
-    } else if (input === 'c' && onNavigate) {
-      onNavigate('pr-cleanup');
+    } else if (input === 'c') {
+      onCleanupCommand?.();
     } else if (input === 'q' && onQuit) {
       onQuit();
     }
@@ -74,6 +100,20 @@ export function BranchListScreen({
     { key: 'q', description: 'Quit' },
   ];
 
+  const renderIndicator = (item: BranchItem, isSelected: boolean) => {
+    const indicator = cleanupUI?.indicators?.[item.name];
+
+    if (indicator) {
+      const color = indicator.color ?? (isSelected ? 'cyan' : undefined);
+      if (color) {
+        return <Text color={color}>{indicator.icon}</Text>;
+      }
+      return <Text>{indicator.icon}</Text>;
+    }
+
+    return isSelected ? <Text color="cyan">›</Text> : <Text> </Text>;
+  };
+
   return (
     <Box flexDirection="column" height={rows}>
       {/* Header */}
@@ -83,9 +123,6 @@ export function BranchListScreen({
       <Box marginTop={1}>
         <Stats stats={stats} lastUpdated={lastUpdated} />
       </Box>
-
-      {/* Empty line */}
-      <Box height={1} />
 
       {/* Content */}
       <Box flexDirection="column" flexGrow={1}>
@@ -115,9 +152,27 @@ export function BranchListScreen({
         )}
 
         {!loading && !error && branches.length > 0 && (
-          <Select items={branches} onSelect={onSelect} limit={limit} />
+          <Select
+            items={branches}
+            onSelect={onSelect}
+            limit={limit}
+            disabled={Boolean(cleanupUI?.inputLocked)}
+            renderIndicator={renderIndicator}
+          />
         )}
       </Box>
+
+      {cleanupUI?.footerMessage && (
+        <Box marginBottom={1}>
+          {cleanupUI.footerMessage.color ? (
+            <Text color={cleanupUI.footerMessage.color}>
+              {cleanupUI.footerMessage.text}
+            </Text>
+          ) : (
+            <Text>{cleanupUI.footerMessage.text}</Text>
+          )}
+        </Box>
+      )}
 
       {/* Footer */}
       <Footer actions={footerActions} />
