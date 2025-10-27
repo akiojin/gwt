@@ -12,6 +12,8 @@ vi.mock("../../git", () => ({
   getMergeStatus: vi.fn(),
   getRepositoryRoot: vi.fn(),
   resetToHead: vi.fn(),
+  getCurrentBranchName: vi.fn(),
+  pushBranchToRemote: vi.fn(),
 }));
 
 // Mock worktree module
@@ -352,6 +354,72 @@ describe("BatchMergeService", () => {
       expect(status.status).toBe("skipped");
       expect(git.abortMerge).toHaveBeenCalledWith("/repo/.worktrees/feature-a");
       expect(git.resetToHead).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("mergeBranch - Auto-push mode (T401-T404)", () => {
+    const autoPushConfig: BatchMergeConfig = {
+      sourceBranch: "main",
+      targetBranches: ["feature/a"],
+      dryRun: false,
+      autoPush: true,
+      remote: "origin",
+    };
+
+    beforeEach(() => {
+      (worktree.listAdditionalWorktrees as ReturnType<typeof vi.fn>).mockResolvedValue([
+        {
+          path: "/repo/.worktrees/feature-a",
+          locked: false,
+          prunable: false,
+        },
+      ]);
+    });
+
+    it("should push successfully after merge when autoPush is enabled", async () => {
+      (git.mergeFromBranch as ReturnType<typeof vi.fn>).mockResolvedValue();
+      (git.hasMergeConflict as ReturnType<typeof vi.fn>).mockResolvedValue(false);
+      (git.getCurrentBranchName as ReturnType<typeof vi.fn>).mockResolvedValue("feature/a");
+      (git.pushBranchToRemote as ReturnType<typeof vi.fn>).mockResolvedValue();
+
+      const status = await service.mergeBranch("feature/a", "main", autoPushConfig);
+
+      expect(status.branchName).toBe("feature/a");
+      expect(status.status).toBe("success");
+      expect(status.pushStatus).toBe("success");
+      expect(git.pushBranchToRemote).toHaveBeenCalledWith(
+        "/repo/.worktrees/feature-a",
+        "feature/a",
+        "origin",
+      );
+    });
+
+    it("should handle push failure without failing merge", async () => {
+      (git.mergeFromBranch as ReturnType<typeof vi.fn>).mockResolvedValue();
+      (git.hasMergeConflict as ReturnType<typeof vi.fn>).mockResolvedValue(false);
+      (git.getCurrentBranchName as ReturnType<typeof vi.fn>).mockResolvedValue("feature/a");
+      (git.pushBranchToRemote as ReturnType<typeof vi.fn>).mockRejectedValue(
+        new Error("Push failed: permission denied"),
+      );
+
+      const status = await service.mergeBranch("feature/a", "main", autoPushConfig);
+
+      expect(status.branchName).toBe("feature/a");
+      expect(status.status).toBe("success");
+      expect(status.pushStatus).toBe("failed");
+    });
+
+    it("should not push when autoPush is false", async () => {
+      const noPushConfig = { ...autoPushConfig, autoPush: false };
+      (git.mergeFromBranch as ReturnType<typeof vi.fn>).mockResolvedValue();
+      (git.hasMergeConflict as ReturnType<typeof vi.fn>).mockResolvedValue(false);
+
+      const status = await service.mergeBranch("feature/a", "main", noPushConfig);
+
+      expect(status.branchName).toBe("feature/a");
+      expect(status.status).toBe("success");
+      expect(status.pushStatus).toBe("not_executed");
+      expect(git.pushBranchToRemote).not.toHaveBeenCalled();
     });
   });
 

@@ -128,9 +128,27 @@ export class BatchMergeService {
         await git.resetToHead(worktreePath);
       }
 
+      // Auto-push after successful merge
+      let pushStatus: "success" | "failed" | "not_executed" = "not_executed";
+      if (config.autoPush && !config.dryRun) {
+        try {
+          const currentBranch = await git.getCurrentBranchName(worktreePath);
+          await git.pushBranchToRemote(
+            worktreePath,
+            currentBranch,
+            config.remote || "origin",
+          );
+          pushStatus = "success";
+        } catch {
+          // Push failure should not fail the merge
+          pushStatus = "failed";
+        }
+      }
+
       return {
         branchName,
         status: "success",
+        pushStatus,
         worktreeCreated,
         durationSeconds: (Date.now() - startTime) / 1000,
       };
