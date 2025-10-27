@@ -17,6 +17,13 @@ const DEV_TTY_PATH = "/dev/tty";
 
 let cachedStreams: TerminalStreams | null = null;
 
+export interface ChildStdio {
+  stdin: "inherit" | number;
+  stdout: "inherit" | number;
+  stderr: "inherit" | number;
+  cleanup: () => void;
+}
+
 function isProcessTTY(): boolean {
   return Boolean(
     process.stdin.isTTY &&
@@ -160,4 +167,54 @@ export function getTerminalStreams(): TerminalStreams {
     cachedStreams = createTerminalStreams();
   }
   return cachedStreams;
+}
+
+export function createChildStdio(): ChildStdio {
+  const terminal = getTerminalStreams();
+
+  if (!terminal.usingFallback) {
+    return {
+      stdin: "inherit",
+      stdout: "inherit",
+      stderr: "inherit",
+      cleanup: () => {},
+    };
+  }
+
+  let fdIn: number | null = null;
+  let fdOut: number | null = null;
+  let fdErr: number | null = null;
+
+  const cleanup = () => {
+    for (const fd of [fdIn, fdOut, fdErr]) {
+      if (fd !== null) {
+        try {
+          fs.closeSync(fd);
+        } catch {
+          // Ignore close errors.
+        }
+      }
+    }
+  };
+
+  try {
+    fdIn = fs.openSync(DEV_TTY_PATH, "r");
+    fdOut = fs.openSync(DEV_TTY_PATH, "w");
+    fdErr = fs.openSync(DEV_TTY_PATH, "w");
+
+    return {
+      stdin: fdIn,
+      stdout: fdOut,
+      stderr: fdErr,
+      cleanup,
+    };
+  } catch {
+    cleanup();
+    return {
+      stdin: "inherit",
+      stdout: "inherit",
+      stderr: "inherit",
+      cleanup: () => {},
+    };
+  }
 }

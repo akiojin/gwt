@@ -27,8 +27,16 @@ const mockTerminalStreams = {
   exitRawMode: vi.fn(),
 };
 
+const mockChildStdio = {
+  stdin: "inherit" as const,
+  stdout: "inherit" as const,
+  stderr: "inherit" as const,
+  cleanup: vi.fn(),
+};
+
 vi.mock("../../src/utils/terminal", () => ({
   getTerminalStreams: vi.fn(() => mockTerminalStreams),
+  createChildStdio: vi.fn(() => mockChildStdio),
 }));
 
 import { execa } from "execa";
@@ -62,6 +70,10 @@ describe("codex.ts", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockTerminalStreams.exitRawMode.mockClear();
+    mockChildStdio.cleanup.mockClear();
+    mockChildStdio.stdin = "inherit";
+    mockChildStdio.stdout = "inherit";
+    mockChildStdio.stderr = "inherit";
     (execa as any).mockResolvedValue({
       stdout: "",
       stderr: "",
@@ -84,6 +96,7 @@ describe("codex.ts", () => {
       stderr: "inherit",
     });
     expect(mockTerminalStreams.exitRawMode).toHaveBeenCalledTimes(2);
+    expect(mockChildStdio.cleanup).toHaveBeenCalledTimes(1);
   });
 
   it("should place extra arguments before the default set", async () => {
@@ -111,9 +124,9 @@ describe("codex.ts", () => {
 
   it("should hand off fallback file descriptors when stdin is not a TTY", async () => {
     mockTerminalStreams.usingFallback = true;
-    mockTerminalStreams.stdinFd = 11;
-    mockTerminalStreams.stdoutFd = 12;
-    mockTerminalStreams.stderrFd = 13;
+    mockChildStdio.stdin = 11 as unknown as any;
+    mockChildStdio.stdout = 12 as unknown as any;
+    mockChildStdio.stderr = 13 as unknown as any;
 
     await launchCodexCLI(worktreePath);
 
@@ -123,10 +136,11 @@ describe("codex.ts", () => {
       stdout: 12,
       stderr: 13,
     });
+    expect(mockChildStdio.cleanup).toHaveBeenCalledTimes(1);
 
     mockTerminalStreams.usingFallback = false;
-    mockTerminalStreams.stdinFd = undefined;
-    mockTerminalStreams.stdoutFd = undefined;
-    mockTerminalStreams.stderrFd = undefined;
+    mockChildStdio.stdin = "inherit";
+    mockChildStdio.stdout = "inherit";
+    mockChildStdio.stderr = "inherit";
   });
 });

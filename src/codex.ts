@@ -2,7 +2,7 @@ import { execa } from "execa";
 import chalk from "chalk";
 import { platform } from "os";
 import { existsSync } from "fs";
-import { getTerminalStreams } from "./utils/terminal.js";
+import { createChildStdio, getTerminalStreams } from "./utils/terminal.js";
 
 const CODEX_CLI_PACKAGE = "@openai/codex@latest";
 const DEFAULT_CODEX_ARGS = [
@@ -82,24 +82,19 @@ export async function launchCodexCLI(
 
     terminal.exitRawMode();
 
-    const execaOptions = {
-      cwd: worktreePath,
-      shell: true,
-      stdin:
-        terminal.usingFallback && terminal.stdinFd !== undefined
-          ? terminal.stdinFd
-          : "inherit",
-      stdout:
-        terminal.usingFallback && terminal.stdoutFd !== undefined
-          ? terminal.stdoutFd
-          : "inherit",
-      stderr:
-        terminal.usingFallback && terminal.stderrFd !== undefined
-          ? terminal.stderrFd
-          : "inherit",
-    } as const;
+    const childStdio = createChildStdio();
 
-    await execa("bunx", [CODEX_CLI_PACKAGE, ...args], execaOptions as any);
+    try {
+      await execa("bunx", [CODEX_CLI_PACKAGE, ...args], {
+        cwd: worktreePath,
+        shell: true,
+        stdin: childStdio.stdin,
+        stdout: childStdio.stdout,
+        stderr: childStdio.stderr,
+      } as any);
+    } finally {
+      childStdio.cleanup();
+    }
   } catch (error: any) {
     const errorMessage =
       error.code === "ENOENT"
