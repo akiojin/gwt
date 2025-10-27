@@ -1,18 +1,19 @@
-import React from 'react';
-import { Box, Text, useInput } from 'ink';
-import { Header } from '../parts/Header.js';
-import { Stats } from '../parts/Stats.js';
-import { Footer } from '../parts/Footer.js';
-import { Select } from '../common/Select.js';
-import { LoadingIndicator } from '../common/LoadingIndicator.js';
-import { useTerminalSize } from '../../hooks/useTerminalSize.js';
-import type { BranchItem, Statistics } from '../../types.js';
+import React from "react";
+import { Box, Text, useInput } from "ink";
+import { Header } from "../parts/Header.js";
+import { Stats } from "../parts/Stats.js";
+import { Footer } from "../parts/Footer.js";
+import { Select } from "../common/Select.js";
+import { LoadingIndicator } from "../common/LoadingIndicator.js";
+import { useTerminalSize } from "../../hooks/useTerminalSize.js";
+import type { BranchItem, Statistics } from "../../types.js";
 
 export interface BranchListScreenProps {
   branches: BranchItem[];
   stats: Statistics;
   onSelect: (branch: BranchItem) => void;
   onNavigate?: (screen: string) => void;
+  onBatchMerge?: () => void;
   onQuit?: () => void;
   loading?: boolean;
   error?: Error | null;
@@ -29,6 +30,7 @@ export function BranchListScreen({
   stats,
   onSelect,
   onNavigate,
+  onBatchMerge,
   onQuit,
   loading = false,
   error = null,
@@ -40,13 +42,15 @@ export function BranchListScreen({
   // Handle keyboard input
   // Note: Select component handles Enter and arrow keys
   useInput((input, key) => {
-    if (input === 'm' && onNavigate) {
-      onNavigate('worktree-manager');
-    } else if (input === 'n' && onNavigate) {
-      onNavigate('branch-creator');
-    } else if (input === 'c' && onNavigate) {
-      onNavigate('pr-cleanup');
-    } else if (input === 'q' && onQuit) {
+    if (input === "m" && onNavigate) {
+      onNavigate("worktree-manager");
+    } else if (input === "n" && onNavigate) {
+      onNavigate("branch-creator");
+    } else if (input === "c" && onNavigate) {
+      onNavigate("pr-cleanup");
+    } else if (input === "p" && onBatchMerge) {
+      onBatchMerge();
+    } else if (input === "q" && onQuit) {
       onQuit();
     }
   });
@@ -67,11 +71,12 @@ export function BranchListScreen({
 
   // Footer actions
   const footerActions = [
-    { key: 'enter', description: 'Select' },
-    { key: 'n', description: 'New branch' },
-    { key: 'm', description: 'Manage worktrees' },
-    { key: 'c', description: 'Cleanup PRs' },
-    { key: 'q', description: 'Quit' },
+    { key: "enter", description: "Select" },
+    { key: "n", description: "New branch" },
+    { key: "m", description: "Manage worktrees" },
+    { key: "c", description: "Cleanup PRs" },
+    { key: "p", description: "Batch merge" },
+    { key: "q", description: "Quit" },
   ];
 
   return (

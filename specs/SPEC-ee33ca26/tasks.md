@@ -93,21 +93,21 @@
 
 ### UI部品タスク（TDD）
 
-- [ ] **T215** [US4] [P] src/ui/components/parts/ProgressBar.tsx を作成し、進捗バーコンポーネントを実装
-- [ ] **T216** [US4] [P] src/ui/components/parts/MergeStatusList.tsx を作成し、マージステータスリストコンポーネントを実装
+- [X] **T215** [US4] [P] src/ui/components/parts/ProgressBar.tsx を作成し、進捗バーコンポーネントを実装
+- [X] **T216** [US4] [P] src/ui/components/parts/MergeStatusList.tsx を作成し、マージステータスリストコンポーネントを実装
 
 ### UI画面タスク（TDD）
 
-- [ ] **T217** [US4] src/ui/components/screens/BatchMergeProgressScreen.tsx を作成し、進捗表示画面を実装
-- [ ] **T218** [US1] src/ui/components/screens/BatchMergeResultScreen.tsx を作成し、結果サマリー画面を実装
+- [X] **T217** [US4] src/ui/components/screens/BatchMergeProgressScreen.tsx を作成し、進捗表示画面を実装
+- [X] **T218** [US1] src/ui/components/screens/BatchMergeResultScreen.tsx を作成し、結果サマリー画面を実装
 - [ ] **T219** [US1] [US4] tests/e2e/batch-merge-workflow.test.ts を作成し、'p'キー押下から結果表示までのE2Eテストを追加
 - [ ] **T219.5** [US1] [US4] T219の後に確認ダイアログコンポーネントを作成し、実行前に「対象ブランチ数: N件」「マージ元: main」「オプション: ドライラン/自動プッシュ」を表示する機能を実装（FR-002対応）
-- [ ] **T220** [US1] [US4] T219.5の後に src/ui/components/screens/BranchListScreen.tsx に'p'キーハンドラを追加
+- [X] **T220** [US1] [US4] T219.5の後に src/ui/components/screens/BranchListScreen.tsx に'p'キーハンドラを追加
 - [ ] **T221** [US1] [US4] T220の後に src/ui/components/App.tsx にBatchMergeProgressScreenとBatchMergeResultScreenへの画面遷移を追加
 
 ### カスタムフックタスク（TDD）
 
-- [ ] **T222** [US1] [US4] [P] src/ui/hooks/useBatchMerge.ts を作成し、バッチマージロジックフックを実装
+- [X] **T222** [US1] [US4] [P] src/ui/hooks/useBatchMerge.ts を作成し、バッチマージロジックフックを実装
 
 ### 統合テストタスク
 

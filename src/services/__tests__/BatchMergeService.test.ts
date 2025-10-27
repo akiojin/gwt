@@ -10,11 +10,13 @@ vi.mock("../../git", () => ({
   hasMergeConflict: vi.fn(),
   abortMerge: vi.fn(),
   getMergeStatus: vi.fn(),
+  getRepositoryRoot: vi.fn(),
 }));
 
 // Mock worktree module
 vi.mock("../../worktree", () => ({
-  getWorktrees: vi.fn(),
+  listAdditionalWorktrees: vi.fn(),
+  generateWorktreePath: vi.fn(),
   createWorktree: vi.fn(),
 }));
 
@@ -53,7 +55,7 @@ describe("BatchMergeService", () => {
 
   describe("determineSourceBranch (T203)", () => {
     it("should return 'main' when main branch exists", async () => {
-      vi.mocked(git.getLocalBranches).mockResolvedValue([
+      (git.getLocalBranches as ReturnType<typeof vi.fn>).mockResolvedValue([
         {
           name: "main",
           type: "local",
@@ -80,7 +82,7 @@ describe("BatchMergeService", () => {
     });
 
     it("should return 'develop' when main does not exist but develop exists", async () => {
-      vi.mocked(git.getLocalBranches).mockResolvedValue([
+      (git.getLocalBranches as ReturnType<typeof vi.fn>).mockResolvedValue([
         {
           name: "develop",
           type: "local",
@@ -101,7 +103,7 @@ describe("BatchMergeService", () => {
     });
 
     it("should return 'master' when main and develop do not exist", async () => {
-      vi.mocked(git.getLocalBranches).mockResolvedValue([
+      (git.getLocalBranches as ReturnType<typeof vi.fn>).mockResolvedValue([
         {
           name: "master",
           type: "local",
@@ -122,7 +124,7 @@ describe("BatchMergeService", () => {
     });
 
     it("should throw error when no source branch found", async () => {
-      vi.mocked(git.getLocalBranches).mockResolvedValue([
+      (git.getLocalBranches as ReturnType<typeof vi.fn>).mockResolvedValue([
         {
           name: "feature/test",
           type: "local",
@@ -139,7 +141,7 @@ describe("BatchMergeService", () => {
 
   describe("getTargetBranches (T205)", () => {
     it("should return all local branches excluding main, develop, master", async () => {
-      vi.mocked(git.getLocalBranches).mockResolvedValue([
+      (git.getLocalBranches as ReturnType<typeof vi.fn>).mockResolvedValue([
         {
           name: "main",
           type: "local",
@@ -180,7 +182,7 @@ describe("BatchMergeService", () => {
     });
 
     it("should return empty array when only main/develop/master exist", async () => {
-      vi.mocked(git.getLocalBranches).mockResolvedValue([
+      (git.getLocalBranches as ReturnType<typeof vi.fn>).mockResolvedValue([
         {
           name: "main",
           type: "local",
@@ -203,7 +205,7 @@ describe("BatchMergeService", () => {
 
   describe("ensureWorktree (T207)", () => {
     it("should return existing worktree path if worktree exists", async () => {
-      vi.mocked(worktree.getWorktrees).mockResolvedValue([
+      (worktree.listAdditionalWorktrees as ReturnType<typeof vi.fn>).mockResolvedValue([
         {
           path: "/repo/.worktrees/feature-a",
           locked: false,
@@ -219,15 +221,23 @@ describe("BatchMergeService", () => {
     });
 
     it("should create worktree if it does not exist", async () => {
-      vi.mocked(worktree.getWorktrees).mockResolvedValue([]);
-      vi.mocked(worktree.createWorktree).mockResolvedValue(
+      (worktree.listAdditionalWorktrees as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      (git.getRepositoryRoot as ReturnType<typeof vi.fn>).mockResolvedValue("/repo");
+      (worktree.generateWorktreePath as ReturnType<typeof vi.fn>).mockResolvedValue(
         "/repo/.worktrees/feature-b",
       );
+      (worktree.createWorktree as ReturnType<typeof vi.fn>).mockResolvedValue();
 
       const worktreePath = await service.ensureWorktree("feature/b");
 
       expect(worktreePath).toBe("/repo/.worktrees/feature-b");
-      expect(worktree.createWorktree).toHaveBeenCalledWith("feature/b");
+      expect(worktree.createWorktree).toHaveBeenCalledWith({
+        branchName: "feature/b",
+        worktreePath: "/repo/.worktrees/feature-b",
+        repoRoot: "/repo",
+        isNewBranch: false,
+        baseBranch: "",
+      });
     });
   });
 
@@ -240,7 +250,7 @@ describe("BatchMergeService", () => {
     };
 
     beforeEach(() => {
-      vi.mocked(worktree.getWorktrees).mockResolvedValue([
+      (worktree.listAdditionalWorktrees as ReturnType<typeof vi.fn>).mockResolvedValue([
         {
           path: "/repo/.worktrees/feature-a",
           locked: false,
@@ -250,8 +260,8 @@ describe("BatchMergeService", () => {
     });
 
     it("should successfully merge without conflicts", async () => {
-      vi.mocked(git.mergeFromBranch).mockResolvedValue();
-      vi.mocked(git.hasMergeConflict).mockResolvedValue(false);
+      (git.mergeFromBranch as ReturnType<typeof vi.fn>).mockResolvedValue();
+      (git.hasMergeConflict as ReturnType<typeof vi.fn>).mockResolvedValue(false);
 
       const status = await service.mergeBranch("feature/a", "main", config);
 
@@ -266,11 +276,11 @@ describe("BatchMergeService", () => {
     });
 
     it("should skip branch on merge conflict", async () => {
-      vi.mocked(git.mergeFromBranch).mockRejectedValue(
+      (git.mergeFromBranch as ReturnType<typeof vi.fn>).mockRejectedValue(
         new Error("Merge conflict"),
       );
-      vi.mocked(git.hasMergeConflict).mockResolvedValue(true);
-      vi.mocked(git.abortMerge).mockResolvedValue();
+      (git.hasMergeConflict as ReturnType<typeof vi.fn>).mockResolvedValue(true);
+      (git.abortMerge as ReturnType<typeof vi.fn>).mockResolvedValue();
 
       const status = await service.mergeBranch("feature/a", "main", config);
 
@@ -280,10 +290,10 @@ describe("BatchMergeService", () => {
     });
 
     it("should handle other errors as failed", async () => {
-      vi.mocked(git.mergeFromBranch).mockRejectedValue(
+      (git.mergeFromBranch as ReturnType<typeof vi.fn>).mockRejectedValue(
         new Error("Network error"),
       );
-      vi.mocked(git.hasMergeConflict).mockResolvedValue(false);
+      (git.hasMergeConflict as ReturnType<typeof vi.fn>).mockResolvedValue(false);
 
       const status = await service.mergeBranch("feature/a", "main", config);
 
@@ -302,13 +312,15 @@ describe("BatchMergeService", () => {
         autoPush: false,
       };
 
-      vi.mocked(git.fetchAllRemotes).mockResolvedValue();
-      vi.mocked(worktree.getWorktrees).mockResolvedValue([]);
-      vi.mocked(worktree.createWorktree)
+      (git.fetchAllRemotes as ReturnType<typeof vi.fn>).mockResolvedValue();
+      (git.getRepositoryRoot as ReturnType<typeof vi.fn>).mockResolvedValue("/repo");
+      (worktree.listAdditionalWorktrees as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      (worktree.generateWorktreePath as ReturnType<typeof vi.fn>)
         .mockResolvedValueOnce("/repo/.worktrees/feature-a")
         .mockResolvedValueOnce("/repo/.worktrees/feature-b");
-      vi.mocked(git.mergeFromBranch).mockResolvedValue();
-      vi.mocked(git.hasMergeConflict).mockResolvedValue(false);
+      (worktree.createWorktree as ReturnType<typeof vi.fn>).mockResolvedValue();
+      (git.mergeFromBranch as ReturnType<typeof vi.fn>).mockResolvedValue();
+      (git.hasMergeConflict as ReturnType<typeof vi.fn>).mockResolvedValue(false);
 
       const progressUpdates: BatchMergeProgress[] = [];
       const result = await service.executeBatchMerge(config, (progress) => {

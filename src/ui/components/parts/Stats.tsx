@@ -1,6 +1,6 @@
-import React from 'react';
-import { Box, Text } from 'ink';
-import type { Statistics } from '../../types.js';
+import React from "react";
+import { Box, Text } from "ink";
+import type { Statistics } from "../../types.js";
 
 export interface StatsProps {
   stats: Statistics;
@@ -33,12 +33,16 @@ function formatRelativeTime(date: Date): string {
  * Stats component - displays statistics in one line
  * Optimized with React.memo to prevent unnecessary re-renders
  */
-export const Stats = React.memo(function Stats({ stats, separator = '  ', lastUpdated = null }: StatsProps) {
+export const Stats = React.memo(function Stats({
+  stats,
+  separator = "  ",
+  lastUpdated = null,
+}: StatsProps) {
   const items = [
-    { label: 'Local', value: stats.localCount, color: 'cyan' },
-    { label: 'Remote', value: stats.remoteCount, color: 'green' },
-    { label: 'Worktrees', value: stats.worktreeCount, color: 'yellow' },
-    { label: 'Changes', value: stats.changesCount, color: 'magenta' },
+    { label: "Local", value: stats.localCount, color: "cyan" },
+    { label: "Remote", value: stats.remoteCount, color: "green" },
+    { label: "Worktrees", value: stats.worktreeCount, color: "yellow" },
+    { label: "Changes", value: stats.changesCount, color: "magenta" },
   ];
 
   return (

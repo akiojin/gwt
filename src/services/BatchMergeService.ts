@@ -58,8 +58,8 @@ export class BatchMergeService {
    * @see specs/SPEC-ee33ca26/spec.md - FR-006
    */
   async ensureWorktree(branchName: string): Promise<string> {
-    const worktrees = await worktree.getWorktrees();
-    const existingWorktree = worktrees.find((w) =>
+    const worktrees = await worktree.listAdditionalWorktrees();
+    const existingWorktree = worktrees.find((w: { path: string }) =>
       w.path.includes(branchName.replace(/\//g, "-")),
     );
 
@@ -68,7 +68,19 @@ export class BatchMergeService {
     }
 
     // Create new worktree
-    return await worktree.createWorktree(branchName);
+    const repoRoot = await git.getRepositoryRoot();
+    const worktreePath = await worktree.generateWorktreePath(
+      repoRoot,
+      branchName,
+    );
+    await worktree.createWorktree({
+      branchName,
+      worktreePath,
+      repoRoot,
+      isNewBranch: false,
+      baseBranch: "",
+    });
+    return worktreePath;
   }
 
   /**
@@ -89,9 +101,11 @@ export class BatchMergeService {
 
     try {
       // Ensure worktree exists
+      const worktrees = await worktree.listAdditionalWorktrees();
       const worktreePath = await this.ensureWorktree(branchName);
-      const worktrees = await worktree.getWorktrees();
-      worktreeCreated = !worktrees.some((w) => w.path === worktreePath);
+      worktreeCreated = !worktrees.some(
+        (w: { path: string }) => w.path === worktreePath,
+      );
 
       // Execute merge
       await git.mergeFromBranch(worktreePath, sourceBranch, config.dryRun);
@@ -166,7 +180,7 @@ export class BatchMergeService {
     const totalBranches = config.targetBranches.length;
 
     for (let i = 0; i < totalBranches; i++) {
-      const branchName = config.targetBranches[i];
+      const branchName = config.targetBranches[i] || "";
       const elapsedSeconds = (Date.now() - startTime) / 1000;
 
       // Report progress
@@ -183,12 +197,14 @@ export class BatchMergeService {
       }
 
       // Merge branch
-      const status = await this.mergeBranch(
-        branchName,
-        config.sourceBranch,
-        config,
-      );
-      statuses.push(status);
+      if (branchName) {
+        const status = await this.mergeBranch(
+          branchName,
+          config.sourceBranch,
+          config,
+        );
+        statuses.push(status);
+      }
     }
 
     // Calculate summary

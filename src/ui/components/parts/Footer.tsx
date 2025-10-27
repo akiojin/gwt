@@ -1,5 +1,5 @@
-import React from 'react';
-import { Box, Text } from 'ink';
+import React from "react";
+import { Box, Text } from "ink";
 
 export interface FooterAction {
   key: string;
@@ -15,7 +15,10 @@ export interface FooterProps {
  * Footer component - displays keyboard actions
  * Optimized with React.memo to prevent unnecessary re-renders
  */
-export const Footer = React.memo(function Footer({ actions, separator = '  ' }: FooterProps) {
+export const Footer = React.memo(function Footer({
+  actions,
+  separator = "  ",
+}: FooterProps) {
   if (actions.length === 0) {
     return null;
   }

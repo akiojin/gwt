@@ -1,5 +1,5 @@
-import React, { type ReactNode } from 'react';
-import { Box } from 'ink';
+import React, { type ReactNode } from "react";
+import { Box } from "ink";
 
 export interface ScrollableListProps {
   children: ReactNode;
