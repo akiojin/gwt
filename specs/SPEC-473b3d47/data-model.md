@@ -345,11 +345,17 @@ For each MergedPullRequest:
     ↓
     Find matching WorktreeInfo (by branch)
     ↓
-    Create CleanupTarget
+    Create CleanupTarget (auto-cleanup candidate)
     ↓
-User selects CleanupTarget[]
+Mark targets as pending (⏳) in UI state
     ↓
-Delete worktrees and branches
+Execute cleanup sequentially (no manual selection)
+    ↓
+Update UI state per target (⠋→✅/⏭️/❌)
+    ↓
+Skip targets with pending changes or inaccessible paths
+    ↓
+Hold final result icons for 3 seconds, then restore cursor and prune removed branches
 ```
 
 ## 実装ファイルマッピング
