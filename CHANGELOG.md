@@ -1,3 +1,18 @@
+# [1.4.0](https://github.com/akiojin/claude-worktree/compare/v1.3.1...v1.4.0) (2025-10-27)
+
+
+### Bug Fixes
+
+* Ink UIのTTY制御を安定化 ([290b9e2](https://github.com/akiojin/claude-worktree/commit/290b9e2f183a7fbf4bb1ba4d0ed047381c2c6593))
+* TTYフォールバックの標準入出力を引き渡す ([19aaed1](https://github.com/akiojin/claude-worktree/commit/19aaed1ac186d9a6f3b281b65f482c3e10e59500))
+
+
+### Features
+
+* **ui:** PRクリーンアップ実行中のフィードバックを改善 ([c8f5259](https://github.com/akiojin/claude-worktree/commit/c8f525914112ac770e2aae8a730c127cd9f0d68b))
+* **ui:** PRクリーンアップ実行中のフィードバックを改善 ([caa19eb](https://github.com/akiojin/claude-worktree/commit/caa19ebaa341e34dad5dc3a3629a13890f329a5a))
+* **ui:** 即時スピナー更新と入力ロックのレスポンス改善 ([43d7577](https://github.com/akiojin/claude-worktree/commit/43d75776a0c6fd007e17004aac1c499668808b48))
+
 ## [1.3.1](https://github.com/akiojin/claude-worktree/compare/v1.3.0...v1.3.1) (2025-10-26)
 
 
