@@ -280,7 +280,7 @@ describe('App shortcuts integration', () => {
         'feature/add-new-feature': { icon: '✅' },
         'hotfix/urgent-fix': { icon: '⏭️' },
       });
-      expect(latestProps?.cleanupUI?.inputLocked).toBe(true);
+      expect(latestProps?.cleanupUI?.inputLocked).toBe(false);
 
       // Advance 3 seconds to allow UI to clear
       await act(async () => {

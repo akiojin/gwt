@@ -420,6 +420,8 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       setCleanupProcessingBranch(null);
     }
 
+    setCleanupProcessingBranch(null);
+    setCleanupInputLocked(false);
     setCleanupFooterMessage({ text: 'Cleanup completed. Finalizing...', color: 'green' });
 
     completionTimerRef.current = setTimeout(resetAfterWait, COMPLETION_HOLD_DURATION_MS);

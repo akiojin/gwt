@@ -311,7 +311,46 @@ export async function hasUnpushedCommits(
     );
     return stdout.trim().length > 0;
   } catch {
-    // If the branch doesn't exist on remote, consider it has unpushed commits
+    const candidates = [
+      `origin/${branch}`,
+      "origin/main",
+      "origin/master",
+      "origin/develop",
+      "origin/dev",
+      branch,
+      "main",
+      "master",
+      "develop",
+      "dev",
+    ];
+
+    for (const candidate of candidates) {
+      try {
+        await execa("git", ["rev-parse", "--verify", candidate], {
+          cwd: worktreePath,
+        });
+
+        // If we are checking the same branch again, we already know the remote ref is missing.
+        if (candidate === `origin/${branch}` || candidate === branch) {
+          continue;
+        }
+
+        try {
+          await execa(
+            "git",
+            ["merge-base", "--is-ancestor", branch, candidate],
+            { cwd: worktreePath },
+          );
+          return false;
+        } catch {
+          // Not merged into this candidate, try next one.
+        }
+      } catch {
+        // Candidate ref does not exist. Try the next candidate.
+      }
+    }
+
+    // Could not prove that the branch is merged anywhere safe, treat as unpushed commits.
     return true;
   }
 }

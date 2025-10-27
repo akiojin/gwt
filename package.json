@@ -11,6 +11,7 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "start": "bun ./dist/index.js",
+    "pretest": "bun run build",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:ui": "vitest --ui",
