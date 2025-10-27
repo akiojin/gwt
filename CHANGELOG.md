@@ -1,3 +1,12 @@
+## [1.4.2](https://github.com/akiojin/claude-worktree/compare/v1.4.1...v1.4.2) (2025-10-27)
+
+
+### Bug Fixes
+
+* PRクリーンアップ時の未プッシュ判定をマージ済みブランチに対応 ([b9fe8bb](https://github.com/akiojin/claude-worktree/commit/b9fe8bbd58eb60154a3bebf7d694a1dc9555e2f2))
+* semantic-releaseがdetached HEAD状態で動作しない問題を修正 ([5ce7549](https://github.com/akiojin/claude-worktree/commit/5ce7549d903507cb0b1a23fb8fa0238c34e449fb))
+* **ui:** stop spinner once cleanup completes ([602b3ce](https://github.com/akiojin/claude-worktree/commit/602b3ceae51b967e885ddb239e739091d06f1f4e))
+
 ## [1.4.1](https://github.com/akiojin/claude-worktree/compare/v1.4.0...v1.4.1) (2025-10-27)
 
 
