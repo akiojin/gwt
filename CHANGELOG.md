@@ -1,3 +1,10 @@
+## [1.4.4](https://github.com/akiojin/claude-worktree/compare/v1.4.3...v1.4.4) (2025-10-27)
+
+
+### Bug Fixes
+
+* NPM Token更新後の自動公開を有効化 ([3161265](https://github.com/akiojin/claude-worktree/commit/3161265b370bfbcb62781cd2fa5e8d7107617b43))
+
 ## [1.4.3](https://github.com/akiojin/claude-worktree/compare/v1.4.2...v1.4.3) (2025-10-27)
 
 
