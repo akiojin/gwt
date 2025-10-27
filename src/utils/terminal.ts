@@ -6,6 +6,9 @@ export interface TerminalStreams {
   stdin: NodeJS.ReadStream;
   stdout: NodeJS.WriteStream;
   stderr: NodeJS.WriteStream;
+  stdinFd?: number;
+  stdoutFd?: number;
+  stderrFd?: number;
   usingFallback: boolean;
   exitRawMode: () => void;
 }
@@ -124,6 +127,9 @@ function createTerminalStreams(): TerminalStreams {
       stdin,
       stdout,
       stderr,
+      stdinFd: fdIn,
+      stdoutFd: fdOut,
+      stderrFd: fdErr,
       usingFallback: true,
       exitRawMode,
     };

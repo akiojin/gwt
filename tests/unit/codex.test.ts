@@ -20,6 +20,9 @@ const mockTerminalStreams = {
   stdin: { id: "stdin" } as unknown as NodeJS.ReadStream,
   stdout: { id: "stdout" } as unknown as NodeJS.WriteStream,
   stderr: { id: "stderr" } as unknown as NodeJS.WriteStream,
+  stdinFd: undefined as number | undefined,
+  stdoutFd: undefined as number | undefined,
+  stderrFd: undefined as number | undefined,
   usingFallback: false,
   exitRawMode: vi.fn(),
 };
@@ -76,9 +79,9 @@ describe("codex.ts", () => {
     expect(options).toMatchObject({
       cwd: worktreePath,
       shell: true,
-      stdin: mockTerminalStreams.stdin,
-      stdout: mockTerminalStreams.stdout,
-      stderr: mockTerminalStreams.stderr,
+      stdin: "inherit",
+      stdout: "inherit",
+      stderr: "inherit",
     });
     expect(mockTerminalStreams.exitRawMode).toHaveBeenCalledTimes(2);
   });
@@ -104,5 +107,26 @@ describe("codex.ts", () => {
       "--last",
       ...DEFAULT_CODEX_ARGS,
     ]);
+  });
+
+  it("should hand off fallback file descriptors when stdin is not a TTY", async () => {
+    mockTerminalStreams.usingFallback = true;
+    mockTerminalStreams.stdinFd = 11;
+    mockTerminalStreams.stdoutFd = 12;
+    mockTerminalStreams.stderrFd = 13;
+
+    await launchCodexCLI(worktreePath);
+
+    const [, , options] = (execa as any).mock.calls[0];
+    expect(options).toMatchObject({
+      stdin: 11,
+      stdout: 12,
+      stderr: 13,
+    });
+
+    mockTerminalStreams.usingFallback = false;
+    mockTerminalStreams.stdinFd = undefined;
+    mockTerminalStreams.stdoutFd = undefined;
+    mockTerminalStreams.stderrFd = undefined;
   });
 });

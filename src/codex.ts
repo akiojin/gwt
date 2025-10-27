@@ -82,13 +82,24 @@ export async function launchCodexCLI(
 
     terminal.exitRawMode();
 
-    await execa("bunx", [CODEX_CLI_PACKAGE, ...args], {
+    const execaOptions = {
       cwd: worktreePath,
       shell: true,
-      stdin: terminal.stdin,
-      stdout: terminal.stdout,
-      stderr: terminal.stderr,
-    });
+      stdin:
+        terminal.usingFallback && terminal.stdinFd !== undefined
+          ? terminal.stdinFd
+          : "inherit",
+      stdout:
+        terminal.usingFallback && terminal.stdoutFd !== undefined
+          ? terminal.stdoutFd
+          : "inherit",
+      stderr:
+        terminal.usingFallback && terminal.stderrFd !== undefined
+          ? terminal.stderrFd
+          : "inherit",
+    } as const;
+
+    await execa("bunx", [CODEX_CLI_PACKAGE, ...args], execaOptions as any);
   } catch (error: any) {
     const errorMessage =
       error.code === "ENOENT"
