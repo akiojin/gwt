@@ -1,3 +1,10 @@
+## [1.4.3](https://github.com/akiojin/claude-worktree/compare/v1.4.2...v1.4.3) (2025-10-27)
+
+
+### Bug Fixes
+
+* npm publishでOIDC provenanceを有効化 ([c296899](https://github.com/akiojin/claude-worktree/commit/c2968993240095e4914457d7d7dcf06a2449651f))
+
 ## [1.4.2](https://github.com/akiojin/claude-worktree/compare/v1.4.1...v1.4.2) (2025-10-27)
 
 
