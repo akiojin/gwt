@@ -653,3 +653,186 @@ origin/develop`;
     });
   });
 });
+
+// ========================================
+// Batch Merge Operations (SPEC-ee33ca26)
+// ========================================
+
+describe("git.ts - Batch Merge Operations", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  describe("mergeFromBranch (T108-T109)", () => {
+    it("should execute git merge command in worktree", async () => {
+      (execa as any).mockResolvedValue({
+        stdout: "Merge made by the 'recursive' strategy.",
+        stderr: "",
+        exitCode: 0,
+      });
+
+      await git.mergeFromBranch("/path/to/worktree", "main");
+
+      expect(execa).toHaveBeenCalledWith("git", ["merge", "main"], {
+        cwd: "/path/to/worktree",
+      });
+    });
+
+    it("should throw error when merge fails", async () => {
+      (execa as any).mockRejectedValue(
+        new Error("error: Merge conflict in file.txt"),
+      );
+
+      await expect(
+        git.mergeFromBranch("/path/to/worktree", "main"),
+      ).rejects.toThrow();
+
+      expect(execa).toHaveBeenCalledWith("git", ["merge", "main"], {
+        cwd: "/path/to/worktree",
+      });
+    });
+
+    it("should support dry-run mode with --no-commit flag", async () => {
+      (execa as any).mockResolvedValue({
+        stdout:
+          "Automatic merge went well; stopped before committing as requested",
+        stderr: "",
+        exitCode: 0,
+      });
+
+      await git.mergeFromBranch("/path/to/worktree", "main", true);
+
+      expect(execa).toHaveBeenCalledWith(
+        "git",
+        ["merge", "--no-commit", "main"],
+        {
+          cwd: "/path/to/worktree",
+        },
+      );
+    });
+  });
+
+  describe("hasMergeConflict (T110-T111)", () => {
+    it("should return true when MERGE_HEAD exists", async () => {
+      (execa as any).mockResolvedValue({
+        stdout: ".git/MERGE_HEAD",
+        stderr: "",
+        exitCode: 0,
+      });
+
+      const hasConflict = await git.hasMergeConflict("/path/to/worktree");
+
+      expect(hasConflict).toBe(true);
+      expect(execa).toHaveBeenCalledWith(
+        "git",
+        ["rev-parse", "--git-path", "MERGE_HEAD"],
+        {
+          cwd: "/path/to/worktree",
+        },
+      );
+    });
+
+    it("should return false when MERGE_HEAD does not exist", async () => {
+      (execa as any).mockRejectedValue(new Error("fatal: not in a merge"));
+
+      const hasConflict = await git.hasMergeConflict("/path/to/worktree");
+
+      expect(hasConflict).toBe(false);
+    });
+  });
+
+  describe("abortMerge (T112-T113)", () => {
+    it("should execute git merge --abort command", async () => {
+      (execa as any).mockResolvedValue({
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+      });
+
+      await git.abortMerge("/path/to/worktree");
+
+      expect(execa).toHaveBeenCalledWith("git", ["merge", "--abort"], {
+        cwd: "/path/to/worktree",
+      });
+    });
+
+    it("should throw error when abort fails", async () => {
+      (execa as any).mockRejectedValue(
+        new Error("fatal: There is no merge to abort"),
+      );
+
+      await expect(git.abortMerge("/path/to/worktree")).rejects.toThrow();
+    });
+  });
+
+  describe("getMergeStatus (T114-T115)", () => {
+    it("should return inProgress=true and hasConflict=true during conflicted merge", async () => {
+      // Mock for MERGE_HEAD check (inProgress)
+      (execa as any).mockResolvedValueOnce({
+        stdout: ".git/MERGE_HEAD",
+        stderr: "",
+        exitCode: 0,
+      });
+
+      // Mock for git status check (hasConflict)
+      (execa as any).mockResolvedValueOnce({
+        stdout: "UU conflict.txt\n",
+        stderr: "",
+        exitCode: 0,
+      });
+
+      const status = await git.getMergeStatus("/path/to/worktree");
+
+      expect(status).toEqual({
+        inProgress: true,
+        hasConflict: true,
+      });
+    });
+
+    it("should return inProgress=false and hasConflict=false when no merge", async () => {
+      // Mock for MERGE_HEAD check
+      (execa as any).mockRejectedValueOnce(new Error("fatal: not in a merge"));
+
+      // Mock for git status check
+      (execa as any).mockResolvedValueOnce({
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+      });
+
+      const status = await git.getMergeStatus("/path/to/worktree");
+
+      expect(status).toEqual({
+        inProgress: false,
+        hasConflict: false,
+      });
+    });
+
+    it("should return inProgress=true and hasConflict=false during clean merge", async () => {
+      // Mock for MERGE_HEAD check
+      (execa as any).mockResolvedValueOnce({
+        stdout: ".git/MERGE_HEAD",
+        stderr: "",
+        exitCode: 0,
+      });
+
+      // Mock for git status check (no conflicts)
+      (execa as any).mockResolvedValueOnce({
+        stdout: "M  modified.txt\n",
+        stderr: "",
+        exitCode: 0,
+      });
+
+      const status = await git.getMergeStatus("/path/to/worktree");
+
+      expect(status).toEqual({
+        inProgress: true,
+        hasConflict: false,
+      });
+    });
+  });
+});

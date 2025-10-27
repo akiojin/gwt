@@ -666,3 +666,98 @@ export async function isInWorktree(): Promise<boolean> {
     return false;
   }
 }
+
+// ========================================
+// Batch Merge Operations (SPEC-ee33ca26)
+// ========================================
+
+/**
+ * Merge from source branch to current branch in worktree
+ * @param worktreePath - Path to worktree directory
+ * @param sourceBranch - Source branch to merge from
+ * @param dryRun - If true, use --no-commit flag for dry-run mode
+ * @see specs/SPEC-ee33ca26/research.md - Decision 3: Dry-run implementation
+ */
+export async function mergeFromBranch(
+  worktreePath: string,
+  sourceBranch: string,
+  dryRun = false,
+): Promise<void> {
+  try {
+    const args = ["merge"];
+    if (dryRun) {
+      args.push("--no-commit");
+    }
+    args.push(sourceBranch);
+
+    await execa("git", args, { cwd: worktreePath });
+  } catch (error) {
+    throw new GitError(
+      `Failed to merge from ${sourceBranch} in ${worktreePath}`,
+      error,
+    );
+  }
+}
+
+/**
+ * Check if there is a merge in progress in worktree
+ * @param worktreePath - Path to worktree directory
+ * @returns true if MERGE_HEAD exists (merge in progress)
+ * @see specs/SPEC-ee33ca26/research.md - Best practices: Git state confirmation
+ */
+export async function hasMergeConflict(worktreePath: string): Promise<boolean> {
+  try {
+    await execa("git", ["rev-parse", "--git-path", "MERGE_HEAD"], {
+      cwd: worktreePath,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Abort current merge operation in worktree
+ * @param worktreePath - Path to worktree directory
+ * @see specs/SPEC-ee33ca26/research.md - Decision 3: Dry-run rollback
+ */
+export async function abortMerge(worktreePath: string): Promise<void> {
+  try {
+    await execa("git", ["merge", "--abort"], { cwd: worktreePath });
+  } catch (error) {
+    throw new GitError(`Failed to abort merge in ${worktreePath}`, error);
+  }
+}
+
+/**
+ * Get current merge status in worktree
+ * @param worktreePath - Path to worktree directory
+ * @returns Object with inProgress and hasConflict flags
+ * @see specs/SPEC-ee33ca26/research.md - Best practices: Git state confirmation
+ */
+export async function getMergeStatus(worktreePath: string): Promise<{
+  inProgress: boolean;
+  hasConflict: boolean;
+}> {
+  // Check if merge is in progress (MERGE_HEAD exists)
+  const inProgress = await hasMergeConflict(worktreePath);
+
+  // Check if there are conflicts (git status --porcelain shows UU)
+  let hasConflict = false;
+  if (inProgress) {
+    try {
+      const { stdout } = await execa("git", ["status", "--porcelain"], {
+        cwd: worktreePath,
+      });
+      // UU indicates unmerged paths (conflicts)
+      hasConflict = stdout.includes("UU ");
+    } catch {
+      hasConflict = false;
+    }
+  }
+
+  return {
+    inProgress,
+    hasConflict,
+  };
+}

@@ -33,8 +33,8 @@
 
 ### セットアップタスク
 
-- [ ] **T001** 開発環境の確認（Bun 1.0+, TypeScript 5.8+, 依存関係インストール済み）
-- [ ] **T002** 既存のテストフレームワーク動作確認（`bun run test` 実行）
+- [X] **T001** 開発環境の確認（Bun 1.0+, TypeScript 5.8+, 依存関係インストール済み）
+- [X] **T002** 既存のテストフレームワーク動作確認（`bun run test` 実行）
 
 ## フェーズ2: 基盤（Foundational）
 
@@ -42,24 +42,24 @@
 
 ### 型定義タスク
 
-- [ ] **T101** [P] src/ui/types.ts に BatchMergeConfig 型を追加
-- [ ] **T102** [P] src/ui/types.ts に MergePhase 型を追加
-- [ ] **T103** [P] src/ui/types.ts に BatchMergeProgress 型を追加
-- [ ] **T104** [P] src/ui/types.ts に MergeStatus と PushStatus 型を追加
-- [ ] **T105** [P] src/ui/types.ts に BranchMergeStatus 型を追加
-- [ ] **T106** [P] src/ui/types.ts に BatchMergeSummary 型を追加
-- [ ] **T107** [P] src/ui/types.ts に BatchMergeResult 型を追加
+- [X] **T101** [P] src/ui/types.ts に BatchMergeConfig 型を追加
+- [X] **T102** [P] src/ui/types.ts に MergePhase 型を追加
+- [X] **T103** [P] src/ui/types.ts に BatchMergeProgress 型を追加
+- [X] **T104** [P] src/ui/types.ts に MergeStatus と PushStatus 型を追加
+- [X] **T105** [P] src/ui/types.ts に BranchMergeStatus 型を追加
+- [X] **T106** [P] src/ui/types.ts に BatchMergeSummary 型を追加
+- [X] **T107** [P] src/ui/types.ts に BatchMergeResult 型を追加
 
 ### Git操作基盤タスク（TDD）
 
-- [ ] **T108** tests/unit/git.test.ts に mergeFromBranch 関数のテストケースを追加
-- [ ] **T109** T108の後に src/git.ts に mergeFromBranch 関数を実装
-- [ ] **T110** [P] tests/unit/git.test.ts に hasMergeConflict 関数のテストケースを追加
-- [ ] **T111** T110の後に src/git.ts に hasMergeConflict 関数を実装
-- [ ] **T112** [P] tests/unit/git.test.ts に abortMerge 関数のテストケースを追加
-- [ ] **T113** T112の後に src/git.ts に abortMerge 関数を実装
-- [ ] **T114** [P] tests/unit/git.test.ts に getMergeStatus 関数のテストケースを追加
-- [ ] **T115** T114の後に src/git.ts に getMergeStatus 関数を実装
+- [X] **T108** tests/unit/git.test.ts に mergeFromBranch 関数のテストケースを追加
+- [X] **T109** T108の後に src/git.ts に mergeFromBranch 関数を実装
+- [X] **T110** [P] tests/unit/git.test.ts に hasMergeConflict 関数のテストケースを追加
+- [X] **T111** T110の後に src/git.ts に hasMergeConflict 関数を実装
+- [X] **T112** [P] tests/unit/git.test.ts に abortMerge 関数のテストケースを追加
+- [X] **T113** T112の後に src/git.ts に abortMerge 関数を実装
+- [X] **T114** [P] tests/unit/git.test.ts に getMergeStatus 関数のテストケースを追加
+- [X] **T115** T114の後に src/git.ts に getMergeStatus 関数を実装
 
 ## フェーズ3: ユーザーストーリー1 + 4 (P1) - 基本一括マージ + リアルタイム進捗表示
 
