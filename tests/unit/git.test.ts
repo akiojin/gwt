@@ -835,4 +835,28 @@ describe("git.ts - Batch Merge Operations", () => {
       });
     });
   });
+
+  describe("resetToHead (T301-T302)", () => {
+    it("should reset worktree to HEAD", async () => {
+      (execa as any).mockResolvedValue({
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+      });
+
+      await git.resetToHead("/path/to/worktree");
+
+      expect(execa).toHaveBeenCalledWith("git", ["reset", "--hard", "HEAD"], {
+        cwd: "/path/to/worktree",
+      });
+    });
+
+    it("should throw error when reset fails", async () => {
+      (execa as any).mockRejectedValue(
+        new Error("fatal: Failed to reset"),
+      );
+
+      await expect(git.resetToHead("/path/to/worktree")).rejects.toThrow();
+    });
+  });
 });

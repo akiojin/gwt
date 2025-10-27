@@ -11,6 +11,7 @@ vi.mock("../../git", () => ({
   abortMerge: vi.fn(),
   getMergeStatus: vi.fn(),
   getRepositoryRoot: vi.fn(),
+  resetToHead: vi.fn(),
 }));
 
 // Mock worktree module
@@ -300,6 +301,57 @@ describe("BatchMergeService", () => {
       expect(status.branchName).toBe("feature/a");
       expect(status.status).toBe("failed");
       expect(status.error).toContain("Network error");
+    });
+  });
+
+  describe("mergeBranch - Dry-run mode (T303-T304)", () => {
+    const dryRunConfig: BatchMergeConfig = {
+      sourceBranch: "main",
+      targetBranches: ["feature/a"],
+      dryRun: true,
+      autoPush: false,
+    };
+
+    beforeEach(() => {
+      (worktree.listAdditionalWorktrees as ReturnType<typeof vi.fn>).mockResolvedValue([
+        {
+          path: "/repo/.worktrees/feature-a",
+          locked: false,
+          prunable: false,
+        },
+      ]);
+    });
+
+    it("should rollback with resetToHead after successful dry-run merge", async () => {
+      (git.mergeFromBranch as ReturnType<typeof vi.fn>).mockResolvedValue();
+      (git.hasMergeConflict as ReturnType<typeof vi.fn>).mockResolvedValue(false);
+      (git.resetToHead as ReturnType<typeof vi.fn>).mockResolvedValue();
+
+      const status = await service.mergeBranch("feature/a", "main", dryRunConfig);
+
+      expect(status.branchName).toBe("feature/a");
+      expect(status.status).toBe("success");
+      expect(git.mergeFromBranch).toHaveBeenCalledWith(
+        "/repo/.worktrees/feature-a",
+        "main",
+        true,
+      );
+      expect(git.resetToHead).toHaveBeenCalledWith("/repo/.worktrees/feature-a");
+    });
+
+    it("should rollback with abortMerge after dry-run merge conflict", async () => {
+      (git.mergeFromBranch as ReturnType<typeof vi.fn>).mockRejectedValue(
+        new Error("CONFLICT (content)"),
+      );
+      (git.hasMergeConflict as ReturnType<typeof vi.fn>).mockResolvedValue(true);
+      (git.abortMerge as ReturnType<typeof vi.fn>).mockResolvedValue();
+
+      const status = await service.mergeBranch("feature/a", "main", dryRunConfig);
+
+      expect(status.branchName).toBe("feature/a");
+      expect(status.status).toBe("skipped");
+      expect(git.abortMerge).toHaveBeenCalledWith("/repo/.worktrees/feature-a");
+      expect(git.resetToHead).not.toHaveBeenCalled();
     });
   });
 

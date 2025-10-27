@@ -761,3 +761,22 @@ export async function getMergeStatus(worktreePath: string): Promise<{
     hasConflict,
   };
 }
+
+/**
+ * Reset worktree to HEAD (rollback all changes)
+ * Used for dry-run cleanup after git merge --no-commit
+ * @param worktreePath - Path to worktree directory
+ * @see specs/SPEC-ee33ca26/research.md - Dry-run implementation: --no-commit + rollback
+ */
+export async function resetToHead(worktreePath: string): Promise<void> {
+  try {
+    await execa("git", ["reset", "--hard", "HEAD"], {
+      cwd: worktreePath,
+    });
+  } catch (error) {
+    throw new GitError(
+      `Failed to reset worktree to HEAD in ${worktreePath}`,
+      error,
+    );
+  }
+}

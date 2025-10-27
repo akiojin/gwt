@@ -123,6 +123,11 @@ export class BatchMergeService {
         };
       }
 
+      // Rollback dry-run merge
+      if (config.dryRun) {
+        await git.resetToHead(worktreePath);
+      }
+
       return {
         branchName,
         status: "success",
