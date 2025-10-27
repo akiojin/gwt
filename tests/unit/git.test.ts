@@ -401,6 +401,85 @@ origin/develop`;
     });
   });
 
+  describe("hasUnpushedCommits", () => {
+    it("returns false when remote branch is in sync", async () => {
+      (execa as any).mockResolvedValue({
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+      } as any);
+
+      await expect(
+        git.hasUnpushedCommits("/worktrees/feature-branch", "feature/branch"),
+      ).resolves.toBe(false);
+
+      expect(execa).toHaveBeenCalledWith(
+        "git",
+        ["log", "origin/feature/branch..feature/branch", "--oneline"],
+        { cwd: "/worktrees/feature-branch" },
+      );
+    });
+
+    it("returns false when remote branch is deleted but branch is merged into origin/main", async () => {
+      (execa as any).mockImplementation(
+        async (_command: string, args: readonly string[], options: any) => {
+          if (args[0] === "log") {
+            throw new Error("remote branch missing");
+          }
+
+          if (args[0] === "rev-parse") {
+            if (args[2] === "origin/main") {
+              return { stdout: "5819116", stderr: "", exitCode: 0 } as any;
+            }
+            throw new Error("ref not found");
+          }
+
+          if (args[0] === "merge-base") {
+            expect(args).toEqual([
+              "merge-base",
+              "--is-ancestor",
+              "feature/branch",
+              "origin/main",
+            ]);
+            expect(options.cwd).toBe("/worktrees/feature-branch");
+            return { stdout: "", stderr: "", exitCode: 0 } as any;
+          }
+
+          throw new Error(`Unexpected git command: ${args.join(" ")}`);
+        },
+      );
+
+      await expect(
+        git.hasUnpushedCommits("/worktrees/feature-branch", "feature/branch"),
+      ).resolves.toBe(false);
+    });
+
+    it("returns true when remote branch is deleted and branch is not merged", async () => {
+      (execa as any).mockImplementation(async (_command: string, args: readonly string[]) => {
+        if (args[0] === "log") {
+          throw new Error("remote branch missing");
+        }
+
+        if (args[0] === "rev-parse") {
+          if (args[2] === "origin/main") {
+            return { stdout: "5819116", stderr: "", exitCode: 0 } as any;
+          }
+          throw new Error("ref not found");
+        }
+
+        if (args[0] === "merge-base") {
+          throw new Error("not merged");
+        }
+
+        throw new Error(`Unexpected git command: ${args.join(" ")}`);
+      });
+
+      await expect(
+        git.hasUnpushedCommits("/worktrees/feature-branch", "feature/branch"),
+      ).resolves.toBe(true);
+    });
+  });
+
   describe("US2: Smart Branch Creation Workflow", () => {
     describe("createBranch (T201)", () => {
       it("should create branch from default base branch (main)", async () => {
