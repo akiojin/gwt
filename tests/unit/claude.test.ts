@@ -22,8 +22,16 @@ const mockTerminalStreams = {
   exitRawMode: vi.fn(),
 };
 
+const mockChildStdio = {
+  stdin: "inherit" as const,
+  stdout: "inherit" as const,
+  stderr: "inherit" as const,
+  cleanup: vi.fn(),
+};
+
 vi.mock("../../src/utils/terminal", () => ({
   getTerminalStreams: vi.fn(() => mockTerminalStreams),
+  createChildStdio: vi.fn(() => mockChildStdio),
 }));
 
 import { launchClaudeCode } from "../../src/claude.js";
@@ -42,6 +50,10 @@ describe("launchClaudeCode - Root User Detection", () => {
     vi.clearAllMocks();
     consoleLogSpy.mockClear();
     mockTerminalStreams.exitRawMode.mockClear();
+    mockChildStdio.cleanup.mockClear();
+    mockChildStdio.stdin = "inherit";
+    mockChildStdio.stdout = "inherit";
+    mockChildStdio.stderr = "inherit";
     // Store original getuid
     originalGetuid = process.getuid;
   });
@@ -152,6 +164,9 @@ describe("launchClaudeCode - Root User Detection", () => {
           "--dangerously-skip-permissions",
         ]),
         expect.objectContaining({
+          stdin: "inherit",
+          stdout: "inherit",
+          stderr: "inherit",
           env: expect.objectContaining({
             IS_SANDBOX: "1",
           }),
@@ -178,6 +193,9 @@ describe("launchClaudeCode - Root User Detection", () => {
         "bunx",
         expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
         expect.objectContaining({
+          stdin: "inherit",
+          stdout: "inherit",
+          stderr: "inherit",
           env: process.env,
         }),
       );
@@ -207,6 +225,9 @@ describe("launchClaudeCode - Root User Detection", () => {
         "bunx",
         expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
         expect.objectContaining({
+          stdin: "inherit",
+          stdout: "inherit",
+          stderr: "inherit",
           env: process.env,
         }),
       );
@@ -291,9 +312,9 @@ describe("launchClaudeCode - Root User Detection", () => {
   describe("TTY handoff", () => {
     it("should pass fallback file descriptors when usingFallback is true", async () => {
       mockTerminalStreams.usingFallback = true;
-      mockTerminalStreams.stdinFd = 101;
-      mockTerminalStreams.stdoutFd = 102;
-      mockTerminalStreams.stderrFd = 103;
+      mockChildStdio.stdin = 101 as unknown as any;
+      mockChildStdio.stdout = 102 as unknown as any;
+      mockChildStdio.stderr = 103 as unknown as any;
 
       mockExeca.mockResolvedValue({
         stdout: "",
@@ -313,10 +334,12 @@ describe("launchClaudeCode - Root User Detection", () => {
         }),
       );
 
+      expect(mockChildStdio.cleanup).toHaveBeenCalledTimes(1);
+
       mockTerminalStreams.usingFallback = false;
-      mockTerminalStreams.stdinFd = undefined;
-      mockTerminalStreams.stdoutFd = undefined;
-      mockTerminalStreams.stderrFd = undefined;
+      mockChildStdio.stdin = "inherit";
+      mockChildStdio.stdout = "inherit";
+      mockChildStdio.stderr = "inherit";
     });
   });
 });
