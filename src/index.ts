@@ -80,6 +80,13 @@ async function mainInkUI(): Promise<SelectionResult | undefined> {
     await waitUntilExit();
   } finally {
     terminal.exitRawMode();
+    if (typeof terminal.stdin.pause === "function") {
+      terminal.stdin.pause();
+    }
+    // Inkが残した data リスナーが子プロセス入力を奪わないようクリーンアップ
+    terminal.stdin.removeAllListeners?.("data");
+    terminal.stdin.removeAllListeners?.("keypress");
+    terminal.stdin.removeAllListeners?.("readable");
     unmount();
   }
 
