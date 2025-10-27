@@ -1,3 +1,11 @@
+## [1.4.1](https://github.com/akiojin/claude-worktree/compare/v1.4.0...v1.4.1) (2025-10-27)
+
+
+### Bug Fixes
+
+* Ink UI終了時にTTYリスナーを解放 ([c6c5392](https://github.com/akiojin/claude-worktree/commit/c6c53921b6d17ffc5cce3cc3bc399ff8bac38683))
+* 子プロセス用TTYを安全に引き渡す ([5168007](https://github.com/akiojin/claude-worktree/commit/5168007d0c37ba17fd923741b83728610aa56d8c))
+
 # [1.4.0](https://github.com/akiojin/claude-worktree/compare/v1.3.1...v1.4.0) (2025-10-27)
 
 
