@@ -76,20 +76,20 @@
 
 ### サービス層タスク（TDD）
 
-- [ ] **T201** [US1] [US4] tests/unit/services/BatchMergeService.test.ts を作成し、BatchMergeService の初期化テストを追加
-- [ ] **T202** [US1] [US4] T201の後に src/services/BatchMergeService.ts を作成し、基本構造を実装
-- [ ] **T203** [US1] [US4] [P] tests/unit/services/BatchMergeService.test.ts に determineSourceBranch メソッドのテストを追加
-- [ ] **T204** [US1] [US4] T203の後に src/services/BatchMergeService.ts に determineSourceBranch メソッドを実装
-- [ ] **T205** [US1] [US4] [P] tests/unit/services/BatchMergeService.test.ts に getTargetBranches メソッドのテストを追加
-- [ ] **T206** [US1] [US4] T205の後に src/services/BatchMergeService.ts に getTargetBranches メソッドを実装
-- [ ] **T207** [US1] [US4] [P] tests/unit/services/BatchMergeService.test.ts に ensureWorktree メソッドのテストを追加
-- [ ] **T208** [US1] [US4] T207の後に src/services/BatchMergeService.ts に ensureWorktree メソッドを実装
-- [ ] **T209** [US1] [US4] [P] tests/unit/services/BatchMergeService.test.ts に mergeBranch メソッドのテストを追加（成功ケース）
-- [ ] **T210** [US1] [US4] T209の後に src/services/BatchMergeService.ts に mergeBranch メソッドを実装
-- [ ] **T211** [US1] [US4] [P] tests/unit/services/BatchMergeService.test.ts に mergeBranch メソッドのテスト（コンフリクトケース）を追加
-- [ ] **T212** [US1] [US4] T211の後に src/services/BatchMergeService.ts の mergeBranch メソッドにコンフリクト処理を追加
-- [ ] **T213** [US1] [US4] [P] tests/unit/services/BatchMergeService.test.ts に executeBatchMerge メソッドのテストを追加
-- [ ] **T214** [US1] [US4] T213の後に src/services/BatchMergeService.ts に executeBatchMerge メソッドを実装（進捗コールバック含む）
+- [X] **T201** [US1] [US4] tests/unit/services/BatchMergeService.test.ts を作成し、BatchMergeService の初期化テストを追加
+- [X] **T202** [US1] [US4] T201の後に src/services/BatchMergeService.ts を作成し、基本構造を実装
+- [X] **T203** [US1] [US4] [P] tests/unit/services/BatchMergeService.test.ts に determineSourceBranch メソッドのテストを追加
+- [X] **T204** [US1] [US4] T203の後に src/services/BatchMergeService.ts に determineSourceBranch メソッドを実装
+- [X] **T205** [US1] [US4] [P] tests/unit/services/BatchMergeService.test.ts に getTargetBranches メソッドのテストを追加
+- [X] **T206** [US1] [US4] T205の後に src/services/BatchMergeService.ts に getTargetBranches メソッドを実装
+- [X] **T207** [US1] [US4] [P] tests/unit/services/BatchMergeService.test.ts に ensureWorktree メソッドのテストを追加
+- [X] **T208** [US1] [US4] T207の後に src/services/BatchMergeService.ts に ensureWorktree メソッドを実装
+- [X] **T209** [US1] [US4] [P] tests/unit/services/BatchMergeService.test.ts に mergeBranch メソッドのテストを追加（成功ケース）
+- [X] **T210** [US1] [US4] T209の後に src/services/BatchMergeService.ts に mergeBranch メソッドを実装
+- [X] **T211** [US1] [US4] [P] tests/unit/services/BatchMergeService.test.ts に mergeBranch メソッドのテスト（コンフリクトケース）を追加
+- [X] **T212** [US1] [US4] T211の後に src/services/BatchMergeService.ts の mergeBranch メソッドにコンフリクト処理を追加
+- [X] **T213** [US1] [US4] [P] tests/unit/services/BatchMergeService.test.ts に executeBatchMerge メソッドのテストを追加
+- [X] **T214** [US1] [US4] T213の後に src/services/BatchMergeService.ts に executeBatchMerge メソッドを実装（進捗コールバック含む）
 
 ### UI部品タスク（TDD）
 
