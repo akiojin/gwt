@@ -137,7 +137,9 @@ export type ScreenType =
   | "pr-cleanup"
   | "ai-tool-selector"
   | "session-selector"
-  | "execution-mode-selector";
+  | "execution-mode-selector"
+  | "batch-merge-progress"
+  | "batch-merge-result";
 
 export type ScreenState = "active" | "hidden";
 

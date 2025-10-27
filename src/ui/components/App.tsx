@@ -8,11 +8,14 @@ import { PRCleanupScreen } from './screens/PRCleanupScreen.js';
 import { AIToolSelectorScreen } from './screens/AIToolSelectorScreen.js';
 import { SessionSelectorScreen } from './screens/SessionSelectorScreen.js';
 import { ExecutionModeSelectorScreen } from './screens/ExecutionModeSelectorScreen.js';
+import { BatchMergeProgressScreen } from './screens/BatchMergeProgressScreen.js';
+import { BatchMergeResultScreen } from './screens/BatchMergeResultScreen.js';
 import type { AITool } from './screens/AIToolSelectorScreen.js';
 import type { ExecutionMode } from './screens/ExecutionModeSelectorScreen.js';
 import type { WorktreeItem } from './screens/WorktreeManagerScreen.js';
 import { useGitData } from '../hooks/useGitData.js';
 import { useScreenState } from '../hooks/useScreenState.js';
+import { useBatchMerge } from '../hooks/useBatchMerge.js';
 import { formatBranchItems } from '../utils/branchFormatter.js';
 import { calculateStatistics } from '../utils/statisticsCalculator.js';
 import type { BranchItem, CleanupTarget } from '../types.js';
@@ -44,6 +47,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
   const { exit } = useApp();
   const { branches, worktrees, loading, error, refresh, lastUpdated } = useGitData();
   const { currentScreen, navigateTo, goBack, reset } = useScreenState();
+  const { isExecuting, progress, statuses, result, executeBatchMerge, reset: resetBatchMerge } = useBatchMerge();
 
   // Selection state (for branch → tool → mode flow)
   const [selectedBranch, setSelectedBranch] = useState<string | null>(null);
@@ -120,6 +124,15 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     }
   }, [currentScreen, loadCleanupTargets]);
 
+  // Handle batch merge state transitions
+  useEffect(() => {
+    if (isExecuting && currentScreen !== 'batch-merge-progress') {
+      navigateTo('batch-merge-progress' as any);
+    } else if (result && currentScreen === 'batch-merge-progress') {
+      navigateTo('batch-merge-result' as any);
+    }
+  }, [isExecuting, result, currentScreen, navigateTo]);
+
   // Handle navigation
   const handleNavigate = useCallback(
     (screen: string) => {
@@ -150,6 +163,41 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     onExit();
     exit();
   }, [onExit, exit]);
+
+  // Handle batch merge
+  const handleBatchMerge = useCallback(async () => {
+    try {
+      // Auto-detect source branch (main > develop > master)
+      const mainBranch = branches.find(b => b.name === 'main' && b.type === 'local');
+      const developBranch = branches.find(b => b.name === 'develop' && b.type === 'local');
+      const masterBranch = branches.find(b => b.name === 'master' && b.type === 'local');
+      const sourceBranch = mainBranch?.name || developBranch?.name || masterBranch?.name;
+
+      if (!sourceBranch) {
+        console.error('No source branch found (main/develop/master)');
+        return;
+      }
+
+      // Get all local branches excluding main/develop/master
+      const targetBranches = branches
+        .filter(b => b.type === 'local' && !['main', 'develop', 'master'].includes(b.name))
+        .map(b => b.name);
+
+      if (targetBranches.length === 0) {
+        console.error('No target branches found');
+        return;
+      }
+
+      await executeBatchMerge({
+        sourceBranch,
+        targetBranches,
+        dryRun: false,
+        autoPush: false,
+      });
+    } catch (err) {
+      console.error('Batch merge failed:', err);
+    }
+  }, [executeBatchMerge, branches]);
 
   // Handle branch creation
   const handleCreate = useCallback(
@@ -278,6 +326,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
             stats={stats}
             onSelect={handleSelect}
             onNavigate={handleNavigate}
+            onBatchMerge={handleBatchMerge}
             onQuit={handleQuit}
             loading={loading}
             error={error}
@@ -329,6 +378,31 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
           <ExecutionModeSelectorScreen onBack={goBack} onSelect={handleModeSelect} />
         );
 
+      case 'batch-merge-progress':
+        return (
+          <BatchMergeProgressScreen
+            progress={progress!}
+            statuses={statuses}
+            onCancel={() => {
+              // TODO: Implement cancel logic
+              goBack();
+            }}
+          />
+        );
+
+      case 'batch-merge-result':
+        return (
+          <BatchMergeResultScreen
+            result={result!}
+            onBack={() => {
+              resetBatchMerge();
+              refresh();
+              goBack();
+            }}
+            onQuit={handleQuit}
+          />
+        );
+
       default:
         return (
           <BranchListScreen
@@ -336,6 +410,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
             stats={stats}
             onSelect={handleSelect}
             onNavigate={handleNavigate}
+            onBatchMerge={handleBatchMerge}
             onQuit={handleQuit}
             loading={loading}
             error={error}
