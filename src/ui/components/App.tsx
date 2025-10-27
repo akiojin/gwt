@@ -308,6 +308,15 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       completionTimerRef.current = null;
     };
 
+    // Provide immediate feedback before fetching targets
+    setCleanupInputLocked(true);
+    setCleanupIndicators({});
+    const initialFrame = getSpinnerFrame(0);
+    setCleanupFooterMessage({ text: `Processing... ${initialFrame}`, color: 'cyan' });
+    setCleanupProcessingBranch(null);
+    spinnerFrameIndexRef.current = 0;
+    setSpinnerFrameIndex(0);
+
     let targets;
     try {
       targets = await getMergedPRWorktrees();
@@ -345,13 +354,11 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     }, {});
 
     setCleanupIndicators(initialIndicators);
-    setCleanupInputLocked(true);
     const firstTarget = targets.length > 0 ? targets[0] : undefined;
     setCleanupProcessingBranch(firstTarget ? firstTarget.branch : null);
     spinnerFrameIndexRef.current = 0;
     setSpinnerFrameIndex(0);
-    const initialFrame = getSpinnerFrame(0);
-    setCleanupFooterMessage({ text: `Processing... ${initialFrame}`, color: 'cyan' });
+    setCleanupFooterMessage({ text: `Processing... ${getSpinnerFrame(0)}`, color: 'cyan' });
 
     for (let index = 0; index < targets.length; index += 1) {
       const currentTarget = targets[index];
