@@ -1,3 +1,10 @@
+## [1.4.5](https://github.com/akiojin/claude-worktree/compare/v1.4.4...v1.4.5) (2025-10-27)
+
+
+### Bug Fixes
+
+* テストファイルを削除してnpm自動公開を確認 ([613f404](https://github.com/akiojin/claude-worktree/commit/613f404003edb576bba5592bb08829377cac5cf1))
+
 ## [1.4.4](https://github.com/akiojin/claude-worktree/compare/v1.4.3...v1.4.4) (2025-10-27)
 
 
