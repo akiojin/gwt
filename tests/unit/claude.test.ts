@@ -11,6 +11,18 @@ vi.mock("fs", () => ({
   default: { existsSync: vi.fn(() => true) },
 }));
 
+const mockTerminalStreams = {
+  stdin: { id: "stdin" } as unknown as NodeJS.ReadStream,
+  stdout: { id: "stdout" } as unknown as NodeJS.WriteStream,
+  stderr: { id: "stderr" } as unknown as NodeJS.WriteStream,
+  usingFallback: false,
+  exitRawMode: vi.fn(),
+};
+
+vi.mock("../../src/utils/terminal", () => ({
+  getTerminalStreams: vi.fn(() => mockTerminalStreams),
+}));
+
 import { launchClaudeCode } from "../../src/claude.js";
 import { execa } from "execa";
 
@@ -26,6 +38,7 @@ describe("launchClaudeCode - Root User Detection", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     consoleLogSpy.mockClear();
+    mockTerminalStreams.exitRawMode.mockClear();
     // Store original getuid
     originalGetuid = process.getuid;
   });

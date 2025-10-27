@@ -2,6 +2,7 @@ import { execa } from "execa";
 import chalk from "chalk";
 import { platform } from "os";
 import { existsSync } from "fs";
+import { getTerminalStreams } from "./utils/terminal.js";
 
 const CLAUDE_CLI_PACKAGE = "@anthropic-ai/claude-code@latest";
 export class ClaudeError extends Error {
@@ -22,6 +23,8 @@ export async function launchClaudeCode(
     extraArgs?: string[];
   } = {},
 ): Promise<void> {
+  const terminal = getTerminalStreams();
+
   try {
     // Check if the worktree path exists
     if (!existsSync(worktreePath)) {
@@ -133,10 +136,14 @@ export async function launchClaudeCode(
       args.push(...options.extraArgs);
     }
 
+    terminal.exitRawMode();
+
     await execa("bunx", [CLAUDE_CLI_PACKAGE, ...args], {
       cwd: worktreePath,
-      stdio: "inherit",
       shell: true,
+      stdin: terminal.stdin,
+      stdout: terminal.stdout,
+      stderr: terminal.stderr,
       env:
         isRoot && options.skipPermissions
           ? { ...process.env, IS_SANDBOX: "1" }
@@ -164,6 +171,8 @@ export async function launchClaudeCode(
     }
 
     throw new ClaudeError(errorMessage, error);
+  } finally {
+    terminal.exitRawMode();
   }
 }
 

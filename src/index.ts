@@ -6,6 +6,7 @@ import { launchCodexCLI } from "./codex.js";
 import { WorktreeOrchestrator } from "./services/WorktreeOrchestrator.js";
 import chalk from "chalk";
 import type { SelectionResult } from "./ui/components/App.js";
+import { getTerminalStreams } from "./utils/terminal.js";
 
 /**
  * Simple print functions (replacing legacy UI display functions)
@@ -53,8 +54,13 @@ async function mainInkUI(): Promise<SelectionResult | undefined> {
   const { render } = await import("ink");
   const React = await import("react");
   const { App } = await import("./ui/components/App.js");
+  const terminal = getTerminalStreams();
 
   let selectionResult: SelectionResult | undefined;
+
+  if (typeof terminal.stdin.resume === "function") {
+    terminal.stdin.resume();
+  }
 
   const { unmount, waitUntilExit } = render(
     React.createElement(App, {
@@ -62,11 +68,20 @@ async function mainInkUI(): Promise<SelectionResult | undefined> {
         selectionResult = result;
       },
     }),
+    {
+      stdin: terminal.stdin,
+      stdout: terminal.stdout,
+      stderr: terminal.stderr,
+    },
   );
 
   // Wait for user to exit
-  await waitUntilExit();
-  unmount();
+  try {
+    await waitUntilExit();
+  } finally {
+    terminal.exitRawMode();
+    unmount();
+  }
 
   return selectionResult;
 }
