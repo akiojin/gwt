@@ -45,6 +45,7 @@ claude-worktreeの現在のCLI UIを、inquirer/chalkベースからInk.js（Rea
 - 既存のGit/Worktreeロジックは変更不可（UIレイヤーのみ）
 - 段階的移行可能な設計
 - Vitest使用（新しいテストツール導入不可）
+- Ink UIはTTY制御を一元化し、セッション終了時にraw modeを確実に解除すること（子プロセス起動時の入力欠落を防ぐ）
 
 **スケール/範囲**:
 

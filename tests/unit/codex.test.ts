@@ -16,6 +16,18 @@ vi.mock("os", () => ({
   default: { platform: vi.fn(() => "darwin") },
 }));
 
+const mockTerminalStreams = {
+  stdin: { id: "stdin" } as unknown as NodeJS.ReadStream,
+  stdout: { id: "stdout" } as unknown as NodeJS.WriteStream,
+  stderr: { id: "stderr" } as unknown as NodeJS.WriteStream,
+  usingFallback: false,
+  exitRawMode: vi.fn(),
+};
+
+vi.mock("../../src/utils/terminal", () => ({
+  getTerminalStreams: vi.fn(() => mockTerminalStreams),
+}));
+
 import { execa } from "execa";
 import { launchCodexCLI } from "../../src/codex";
 
@@ -46,6 +58,7 @@ describe("codex.ts", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockTerminalStreams.exitRawMode.mockClear();
     (execa as any).mockResolvedValue({
       stdout: "",
       stderr: "",
@@ -62,9 +75,12 @@ describe("codex.ts", () => {
     expect(args).toEqual(["@openai/codex@latest", ...DEFAULT_CODEX_ARGS]);
     expect(options).toMatchObject({
       cwd: worktreePath,
-      stdio: "inherit",
       shell: true,
+      stdin: mockTerminalStreams.stdin,
+      stdout: mockTerminalStreams.stdout,
+      stderr: mockTerminalStreams.stderr,
     });
+    expect(mockTerminalStreams.exitRawMode).toHaveBeenCalledTimes(2);
   });
 
   it("should place extra arguments before the default set", async () => {

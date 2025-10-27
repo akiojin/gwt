@@ -2,6 +2,7 @@ import { execa } from "execa";
 import chalk from "chalk";
 import { platform } from "os";
 import { existsSync } from "fs";
+import { getTerminalStreams } from "./utils/terminal.js";
 
 const CODEX_CLI_PACKAGE = "@openai/codex@latest";
 const DEFAULT_CODEX_ARGS = [
@@ -41,6 +42,8 @@ export async function launchCodexCLI(
     bypassApprovals?: boolean;
   } = {},
 ): Promise<void> {
+  const terminal = getTerminalStreams();
+
   try {
     if (!existsSync(worktreePath)) {
       throw new Error(`Worktree path does not exist: ${worktreePath}`);
@@ -77,10 +80,14 @@ export async function launchCodexCLI(
 
     args.push(...DEFAULT_CODEX_ARGS);
 
+    terminal.exitRawMode();
+
     await execa("bunx", [CODEX_CLI_PACKAGE, ...args], {
       cwd: worktreePath,
-      stdio: "inherit",
       shell: true,
+      stdin: terminal.stdin,
+      stdout: terminal.stdout,
+      stderr: terminal.stderr,
     });
   } catch (error: any) {
     const errorMessage =
@@ -104,6 +111,8 @@ export async function launchCodexCLI(
     }
 
     throw new CodexError(errorMessage, error);
+  } finally {
+    terminal.exitRawMode();
   }
 }
 
