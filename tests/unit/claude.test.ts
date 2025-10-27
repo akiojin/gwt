@@ -15,6 +15,9 @@ const mockTerminalStreams = {
   stdin: { id: "stdin" } as unknown as NodeJS.ReadStream,
   stdout: { id: "stdout" } as unknown as NodeJS.WriteStream,
   stderr: { id: "stderr" } as unknown as NodeJS.WriteStream,
+  stdinFd: undefined as number | undefined,
+  stdoutFd: undefined as number | undefined,
+  stderrFd: undefined as number | undefined,
   usingFallback: false,
   exitRawMode: vi.fn(),
 };
@@ -94,6 +97,9 @@ describe("launchClaudeCode - Root User Detection", () => {
         "bunx",
         expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
         expect.objectContaining({
+          stdin: "inherit",
+          stdout: "inherit",
+          stderr: "inherit",
           env: process.env,
         }),
       );
@@ -116,6 +122,9 @@ describe("launchClaudeCode - Root User Detection", () => {
         "bunx",
         expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
         expect.objectContaining({
+          stdin: "inherit",
+          stdout: "inherit",
+          stderr: "inherit",
           env: process.env,
         }),
       );
@@ -276,6 +285,38 @@ describe("launchClaudeCode - Root User Detection", () => {
           "⚠️  Docker/サンドボックス環境として実行中（IS_SANDBOX=1）",
         ),
       );
+    });
+  });
+
+  describe("TTY handoff", () => {
+    it("should pass fallback file descriptors when usingFallback is true", async () => {
+      mockTerminalStreams.usingFallback = true;
+      mockTerminalStreams.stdinFd = 101;
+      mockTerminalStreams.stdoutFd = 102;
+      mockTerminalStreams.stderrFd = 103;
+
+      mockExeca.mockResolvedValue({
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+      } as any);
+
+      await launchClaudeCode("/test/path");
+
+      expect(mockExeca).toHaveBeenCalledWith(
+        "bunx",
+        expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
+        expect.objectContaining({
+          stdin: 101,
+          stdout: 102,
+          stderr: 103,
+        }),
+      );
+
+      mockTerminalStreams.usingFallback = false;
+      mockTerminalStreams.stdinFd = undefined;
+      mockTerminalStreams.stdoutFd = undefined;
+      mockTerminalStreams.stderrFd = undefined;
     });
   });
 });
