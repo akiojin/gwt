@@ -45,7 +45,7 @@ describe('ExecutionModeSelectorScreen', () => {
     );
 
     expect(getAllByText(/enter/i).length).toBeGreaterThan(0);
-    expect(getAllByText(/q/i).length).toBeGreaterThan(0);
+    expect(getAllByText(/esc/i).length).toBeGreaterThan(0);
   });
 
   it('should use terminal height for layout calculation', () => {
@@ -63,14 +63,14 @@ describe('ExecutionModeSelectorScreen', () => {
     process.stdout.rows = originalRows;
   });
 
-  it('should handle back navigation with q key', () => {
+  it('should handle back navigation with ESC key', () => {
     const onBack = vi.fn();
     const onSelect = vi.fn();
     const { container } = render(
       <ExecutionModeSelectorScreen onBack={onBack} onSelect={onSelect} />
     );
 
-    // Test will verify onBack is called when q is pressed
+    // Test will verify onBack is called when ESC is pressed
     expect(container).toBeDefined();
   });
 

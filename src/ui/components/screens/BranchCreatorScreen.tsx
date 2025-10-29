@@ -35,7 +35,7 @@ export function BranchCreatorScreen({ onBack, onCreate, baseBranch }: BranchCrea
 
   // Handle keyboard input for back navigation
   useInput((input, key) => {
-    if (input === 'q') {
+    if (key.escape) {
       onBack();
     }
   });
@@ -84,11 +84,11 @@ export function BranchCreatorScreen({ onBack, onCreate, baseBranch }: BranchCrea
     step === 'type-selection'
       ? [
           { key: 'enter', description: 'Select' },
-          { key: 'q', description: 'Back' },
+          { key: 'esc', description: 'Back' },
         ]
       : [
           { key: 'enter', description: 'Create' },
-          { key: 'q', description: 'Back' },
+          { key: 'esc', description: 'Back' },
         ];
 
   return (

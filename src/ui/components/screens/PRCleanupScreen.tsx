@@ -40,7 +40,7 @@ export function PRCleanupScreen({
   // Handle keyboard input
   // Note: Select component handles Enter and arrow keys
   useInput((input, key) => {
-    if (input === 'q') {
+    if (key.escape) {
       onBack();
     } else if (input === 'r') {
       onRefresh();
@@ -92,7 +92,7 @@ export function PRCleanupScreen({
   const footerActions = [
     { key: 'enter', description: 'Cleanup' },
     { key: 'r', description: 'Refresh' },
-    { key: 'q', description: 'Back' },
+    { key: 'esc', description: 'Back' },
   ];
 
   return (
