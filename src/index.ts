@@ -13,6 +13,7 @@ import { worktreeExists } from "./worktree.js";
 import { getTerminalStreams } from "./utils/terminal.js";
 import { getToolById } from "./config/tools.js";
 import { launchCustomAITool } from "./launcher.js";
+import { saveSession } from "./config/index.js";
 
 /**
  * Simple print functions (replacing legacy UI display functions)
@@ -199,6 +200,15 @@ async function handleAIToolWorkflow(
         cwd: worktreePath,
       });
     }
+
+    // Save session with lastUsedTool
+    await saveSession({
+      lastWorktreePath: worktreePath,
+      lastBranch: branch,
+      lastUsedTool: tool,
+      timestamp: Date.now(),
+      repositoryRoot: repoRoot,
+    });
 
     printInfo("Session completed successfully. Returning to main menu...");
   } catch (error) {

@@ -455,24 +455,26 @@ origin/develop`;
     });
 
     it("returns true when remote branch is deleted and branch is not merged", async () => {
-      (execa as any).mockImplementation(async (_command: string, args: readonly string[]) => {
-        if (args[0] === "log") {
-          throw new Error("remote branch missing");
-        }
-
-        if (args[0] === "rev-parse") {
-          if (args[2] === "origin/main") {
-            return { stdout: "5819116", stderr: "", exitCode: 0 } as any;
+      (execa as any).mockImplementation(
+        async (_command: string, args: readonly string[]) => {
+          if (args[0] === "log") {
+            throw new Error("remote branch missing");
           }
-          throw new Error("ref not found");
-        }
 
-        if (args[0] === "merge-base") {
-          throw new Error("not merged");
-        }
+          if (args[0] === "rev-parse") {
+            if (args[2] === "origin/main") {
+              return { stdout: "5819116", stderr: "", exitCode: 0 } as any;
+            }
+            throw new Error("ref not found");
+          }
 
-        throw new Error(`Unexpected git command: ${args.join(" ")}`);
-      });
+          if (args[0] === "merge-base") {
+            throw new Error("not merged");
+          }
+
+          throw new Error(`Unexpected git command: ${args.join(" ")}`);
+        },
+      );
 
       await expect(
         git.hasUnpushedCommits("/worktrees/feature-branch", "feature/branch"),

@@ -41,7 +41,4 @@ export const CODEX_CLI_TOOL: CustomAITool = {
 /**
  * すべてのビルトインツール
  */
-export const BUILTIN_TOOLS: CustomAITool[] = [
-  CLAUDE_CODE_TOOL,
-  CODEX_CLI_TOOL,
-];
+export const BUILTIN_TOOLS: CustomAITool[] = [CLAUDE_CODE_TOOL, CODEX_CLI_TOOL];

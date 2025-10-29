@@ -18,7 +18,11 @@ import { BUILTIN_TOOLS } from "./builtin-tools.js";
 /**
  * ツール設定ファイルのパス
  */
-const TOOLS_CONFIG_PATH = path.join(homedir(), ".claude-worktree", "tools.json");
+const TOOLS_CONFIG_PATH = path.join(
+  homedir(),
+  ".claude-worktree",
+  "tools.json",
+);
 
 /**
  * ツール設定を読み込む
@@ -147,11 +151,7 @@ function validateCustomAITool(tool: unknown): asserts tool is CustomAITool {
   }
 
   // modeArgsの検証（少なくとも1つのモードが定義されている）
-  if (
-    !t.modeArgs.normal &&
-    !t.modeArgs.continue &&
-    !t.modeArgs.resume
-  ) {
+  if (!t.modeArgs.normal && !t.modeArgs.continue && !t.modeArgs.resume) {
     throw new Error(
       `modeArgs must define at least one mode (normal, continue, or resume) for tool "${t.id}"`,
     );
