@@ -1,3 +1,17 @@
+# [1.9.0](https://github.com/akiojin/claude-worktree/compare/v1.8.0...v1.9.0) (2025-10-29)
+
+
+### Bug Fixes
+
+* AIToolSelectorScreenテストを非同期読み込みに対応 ([0114eeb](https://github.com/akiojin/claude-worktree/commit/0114eebf82e44f9e71d91a9903993f088fdc959a))
+
+
+### Features
+
+* カスタムAIツール対応機能を実装（設定管理・UI統合・起動機能） ([bce4292](https://github.com/akiojin/claude-worktree/commit/bce4292a11122556373f787ecddf4a656452e309))
+* カスタムツール統合と実行オプション拡張（Phase 4-6完了） ([c769f5d](https://github.com/akiojin/claude-worktree/commit/c769f5dba5a6a7d73b1e88dea7d1d3b7bd8a847f))
+* セッション管理拡張とコード品質改善（Phase 7-8完了） ([6e5b1cf](https://github.com/akiojin/claude-worktree/commit/6e5b1cf0ea1382535b21f2b32a9c2689a443789d))
+
 # [1.8.0](https://github.com/akiojin/claude-worktree/compare/v1.7.1...v1.8.0) (2025-10-29)
 
 
