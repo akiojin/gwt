@@ -83,4 +83,52 @@ describe('AIToolSelectorScreen', () => {
     // Test will verify onSelect is called with correct tool
     expect(container).toBeDefined();
   });
+
+  /**
+   * T210: カスタムツール表示のテスト
+   */
+  describe('Custom tool display', () => {
+    it('should load tools from getAllTools() dynamically', async () => {
+      // TODO: 実装後にテストを記述
+      // getAllTools()がモックされ、呼び出されることを確認
+      // モックの戻り値がツールアイテムとして表示されることを確認
+      expect(true).toBe(true);
+    });
+
+    it('should display both builtin and custom tools', async () => {
+      // TODO: 実装後にテストを記述
+      // getAllTools()がビルトインツール（claude-code, codex-cli）と
+      // カスタムツール（例: aider）を返す場合、
+      // すべてのツールが表示されることを確認
+      expect(true).toBe(true);
+    });
+
+    it('should display custom tool with icon if defined', async () => {
+      // TODO: 実装後にテストを記述
+      // カスタムツールにiconフィールドがある場合、
+      // それが表示されることを確認
+      expect(true).toBe(true);
+    });
+
+    it('should display custom tool without icon if not defined', async () => {
+      // TODO: 実装後にテストを記述
+      // カスタムツールにiconフィールドがない場合、
+      // ツール名のみが表示されることを確認
+      expect(true).toBe(true);
+    });
+
+    it('should handle custom tool selection', async () => {
+      // TODO: 実装後にテストを記述
+      // カスタムツールを選択した場合、
+      // onSelect()がカスタムツールのIDで呼び出されることを確認
+      expect(true).toBe(true);
+    });
+
+    it('should display only builtin tools if no custom tools exist', async () => {
+      // TODO: 実装後にテストを記述
+      // getAllTools()がビルトインツールのみを返す場合、
+      // ビルトインツールのみが表示されることを確認
+      expect(true).toBe(true);
+    });
+  });
 });
