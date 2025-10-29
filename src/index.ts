@@ -30,23 +30,11 @@ Worktree Manager
 Usage: claude-worktree [options]
 
 Options:
-  -c              Continue from the last session (automatically open the last used worktree)
-  -r, --resume    Resume a session - interactively select from available sessions
-  --tool <name>   Select AI tool to launch in worktree (claude|codex)
   -h, --help      Show this help message
 
 Description:
   Interactive Git worktree manager with AI tool selection (Claude Code / Codex CLI) and graphical branch selection.
-
-  Without options: Opens the interactive menu to select branches and manage worktrees.
-  With -c option: Automatically continues from where you left off in the last session.
-  With -r option: Shows a list of recent sessions to choose from and resume.
-
-Pass-through:
-  Use "--" to pass additional args directly to the selected tool.
-  Examples:
-    claude-worktree --tool claude -- -r
-    claude-worktree --tool codex -- resume --last
+  Launch without additional options to open the interactive menu.
 `);
 }
 
