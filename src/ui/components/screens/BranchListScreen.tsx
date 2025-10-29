@@ -68,8 +68,6 @@ export function BranchListScreen({
 
     if (input === 'm' && onNavigate) {
       onNavigate('worktree-manager');
-    } else if (input === 'n' && onNavigate) {
-      onNavigate('branch-creator');
     } else if (input === 'c') {
       onCleanupCommand?.();
     } else if (input === 'q' && onQuit) {
@@ -94,7 +92,6 @@ export function BranchListScreen({
   // Footer actions
   const footerActions = [
     { key: 'enter', description: 'Select' },
-    { key: 'n', description: 'New branch' },
     { key: 'm', description: 'Manage worktrees' },
     { key: 'c', description: 'Cleanup PRs' },
     { key: 'q', description: 'Quit' },
