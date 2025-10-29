@@ -106,7 +106,7 @@ export async function getRemoteBranches(): Promise<BranchInfo[]> {
   }
 }
 
-async function getCurrentBranch(): Promise<string | null> {
+export async function getCurrentBranch(): Promise<string | null> {
   try {
     const { stdout } = await execa("git", ["branch", "--show-current"]);
     return stdout.trim() || null;

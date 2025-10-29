@@ -134,9 +134,15 @@ export type ScreenType =
   | "branch-list"
   | "worktree-manager"
   | "branch-creator"
+  | "branch-action-selector"
   | "ai-tool-selector"
   | "session-selector"
   | "execution-mode-selector";
+
+/**
+ * Branch action types for action selector screen
+ */
+export type BranchAction = "use-existing" | "create-new";
 
 export type ScreenState = "active" | "hidden";
 
