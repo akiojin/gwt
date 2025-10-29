@@ -150,10 +150,19 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
   );
 
   // Format branches to BranchItems (memoized for performance)
-  const branchItems: BranchItem[] = useMemo(
-    () => formatBranchItems(visibleBranches),
-    [visibleBranches]
-  );
+  const branchItems: BranchItem[] = useMemo(() => {
+    // Build worktreeMap for sorting
+    const worktreeMap = new Map();
+    for (const wt of worktrees) {
+      worktreeMap.set(wt.branch, {
+        path: wt.path,
+        locked: false,
+        prunable: wt.isAccessible === false,
+        isAccessible: wt.isAccessible ?? true,
+      });
+    }
+    return formatBranchItems(visibleBranches, worktreeMap);
+  }, [visibleBranches, worktrees]);
 
   // Calculate statistics (memoized for performance)
   const stats = useMemo(() => calculateStatistics(visibleBranches), [visibleBranches]);
