@@ -4,6 +4,8 @@ import {
   generateWorktreePath,
   createWorktree,
 } from "../worktree.js";
+import { getCurrentBranch } from "../git.js";
+import chalk from "chalk";
 
 /**
  * WorktreeService interface for dependency injection
@@ -55,6 +57,18 @@ export class WorktreeOrchestrator {
   ): Promise<string> {
     const baseBranch = options.baseBranch ?? "main";
     const isNewBranch = options.isNewBranch ?? false;
+
+    // Check if selected branch is current branch
+    const currentBranch = await getCurrentBranch();
+    if (currentBranch === branch) {
+      // Current branch selected: use repository root
+      console.log(
+        chalk.gray(
+          `   ℹ️  Current branch '${branch}' selected - using repository root`,
+        ),
+      );
+      return repoRoot;
+    }
 
     // Check if worktree already exists
     const existingPath = await this.worktreeService.worktreeExists(branch);
