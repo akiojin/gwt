@@ -1,3 +1,10 @@
+# [1.5.0](https://github.com/akiojin/claude-worktree/compare/v1.4.5...v1.5.0) (2025-10-29)
+
+
+### Features
+
+* ブランチ一覧のソート機能を実装 ([3c23747](https://github.com/akiojin/claude-worktree/commit/3c237474ca30756bc2e06ba958036af38238a6e2))
+
 ## [1.4.5](https://github.com/akiojin/claude-worktree/compare/v1.4.4...v1.4.5) (2025-10-27)
 
 
