@@ -25,12 +25,10 @@ export function BranchActionSelectorScreen({
     {
       label: "既存のブランチで続行",
       value: "use-existing",
-      description: "選択したブランチでそのまま作業を開始",
     },
     {
       label: "新しいブランチを作成",
       value: "create-new",
-      description: "選択したブランチをベースに新しいブランチを作成",
     },
   ];
 

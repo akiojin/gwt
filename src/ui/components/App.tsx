@@ -528,7 +528,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
           <BranchCreatorScreen
             onBack={goBack}
             onCreate={handleCreate}
-            baseBranch={selectedBranch?.displayName}
+            {...(selectedBranch?.displayName && { baseBranch: selectedBranch.displayName })}
           />
         );
 
