@@ -91,9 +91,13 @@ describe("WorktreeOrchestrator", () => {
       const customBaseBranch = "develop";
 
       // Act
-      const result = await orchestrator.ensureWorktree(mockBranch, mockRepoRoot, {
-        baseBranch: customBaseBranch,
-      });
+      const result = await orchestrator.ensureWorktree(
+        mockBranch,
+        mockRepoRoot,
+        {
+          baseBranch: customBaseBranch,
+        },
+      );
 
       // Assert
       expect(result).toBe(mockWorktreePath);
@@ -114,10 +118,14 @@ describe("WorktreeOrchestrator", () => {
 
       (mockWorktreeService.createWorktree as any).mockResolvedValue(undefined);
 
-      const result = await orchestrator.ensureWorktree(mockBranch, mockRepoRoot, {
-        baseBranch: "origin/feature-test",
-        isNewBranch: true,
-      });
+      const result = await orchestrator.ensureWorktree(
+        mockBranch,
+        mockRepoRoot,
+        {
+          baseBranch: "origin/feature-test",
+          isNewBranch: true,
+        },
+      );
 
       expect(result).toBe(mockWorktreePath);
       expect(mockWorktreeService.createWorktree).toHaveBeenCalledWith({
