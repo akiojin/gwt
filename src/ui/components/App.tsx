@@ -272,7 +272,8 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       try {
         const repoRoot = await getRepositoryRoot();
         const worktreePath = await generateWorktreePath(repoRoot, branchName);
-        const baseBranch = resolveBaseBranch();
+        // Use selectedBranch as base if available, otherwise resolve from repo
+        const baseBranch = selectedBranch?.name ?? resolveBaseBranch();
 
         await createWorktree({
           branchName,
@@ -298,7 +299,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         refresh();
       }
     },
-    [navigateTo, goBack, refresh, resolveBaseBranch]
+    [navigateTo, goBack, refresh, resolveBaseBranch, selectedBranch]
   );
 
   const handleCleanupCommand = useCallback(async () => {
@@ -523,7 +524,13 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         );
 
       case 'branch-creator':
-        return <BranchCreatorScreen onBack={goBack} onCreate={handleCreate} />;
+        return (
+          <BranchCreatorScreen
+            onBack={goBack}
+            onCreate={handleCreate}
+            baseBranch={selectedBranch?.displayName}
+          />
+        );
 
       case 'branch-action-selector':
         return (

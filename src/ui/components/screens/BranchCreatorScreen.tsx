@@ -13,6 +13,7 @@ type Step = 'type-selection' | 'name-input';
 export interface BranchCreatorScreenProps {
   onBack: () => void;
   onCreate: (branchName: string) => void;
+  baseBranch?: string;
 }
 
 interface BranchTypeItem {
@@ -26,7 +27,7 @@ interface BranchTypeItem {
  * Layout: Header + Type Selection or Name Input + Footer
  * Flow: Type Selection → Name Input → onCreate
  */
-export function BranchCreatorScreen({ onBack, onCreate }: BranchCreatorScreenProps) {
+export function BranchCreatorScreen({ onBack, onCreate, baseBranch }: BranchCreatorScreenProps) {
   const { rows } = useTerminalSize();
   const [step, setStep] = useState<Step>('type-selection');
   const [selectedType, setSelectedType] = useState<BranchType>('feature');
@@ -97,6 +98,13 @@ export function BranchCreatorScreen({ onBack, onCreate }: BranchCreatorScreenPro
 
       {/* Content */}
       <Box flexDirection="column" flexGrow={1} marginTop={1}>
+        {baseBranch && (
+          <Box marginBottom={1}>
+            <Text>
+              Base branch: <Text bold color="cyan">{baseBranch}</Text>
+            </Text>
+          </Box>
+        )}
         {step === 'type-selection' ? (
           <Box flexDirection="column">
             <Box marginBottom={1}>
