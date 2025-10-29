@@ -2,10 +2,26 @@
  * @vitest-environment happy-dom
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { render } from '@testing-library/react';
+import { render, waitFor } from '@testing-library/react';
 import React from 'react';
 import { AIToolSelectorScreen } from '../../../components/screens/AIToolSelectorScreen.js';
 import { Window } from 'happy-dom';
+
+// Mock getAllTools
+vi.mock('../../../config/tools.js', () => ({
+  getAllTools: vi.fn().mockResolvedValue([
+    {
+      id: 'claude-code',
+      displayName: 'Claude Code',
+      isBuiltin: true,
+    },
+    {
+      id: 'codex-cli',
+      displayName: 'Codex CLI',
+      isBuiltin: true,
+    },
+  ]),
+}));
 
 describe('AIToolSelectorScreen', () => {
   beforeEach(() => {
@@ -25,15 +41,18 @@ describe('AIToolSelectorScreen', () => {
     expect(getByText(/AI Tool Selection/i)).toBeDefined();
   });
 
-  it('should render AI tool options', () => {
+  it('should render AI tool options', async () => {
     const onBack = vi.fn();
     const onSelect = vi.fn();
     const { getByText } = render(
       <AIToolSelectorScreen onBack={onBack} onSelect={onSelect} />
     );
 
-    expect(getByText(/Claude Code/i)).toBeDefined();
-    expect(getByText(/Codex CLI/i)).toBeDefined();
+    // Wait for tools to load
+    await waitFor(() => {
+      expect(getByText(/Claude Code/i)).toBeDefined();
+      expect(getByText(/Codex CLI/i)).toBeDefined();
+    });
   });
 
   it('should render footer with actions', () => {
