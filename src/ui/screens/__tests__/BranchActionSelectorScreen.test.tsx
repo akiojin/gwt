@@ -18,11 +18,13 @@ describe("BranchActionSelectorScreen", () => {
   it("should render the screen", () => {
     const onUseExisting = vi.fn();
     const onCreateNew = vi.fn();
+    const onBack = vi.fn();
     const { container } = render(
       <BranchActionSelectorScreen
         selectedBranch="feature-test"
         onUseExisting={onUseExisting}
         onCreateNew={onCreateNew}
+        onBack={onBack}
       />,
     );
 
@@ -32,11 +34,13 @@ describe("BranchActionSelectorScreen", () => {
   it("should display the message with selected branch name", () => {
     const onUseExisting = vi.fn();
     const onCreateNew = vi.fn();
+    const onBack = vi.fn();
     const { getByText } = render(
       <BranchActionSelectorScreen
         selectedBranch="feature-test"
         onUseExisting={onUseExisting}
         onCreateNew={onCreateNew}
+        onBack={onBack}
       />,
     );
 
@@ -48,30 +52,34 @@ describe("BranchActionSelectorScreen", () => {
   it("should display two action options", () => {
     const onUseExisting = vi.fn();
     const onCreateNew = vi.fn();
+    const onBack = vi.fn();
     const { getByText } = render(
       <BranchActionSelectorScreen
         selectedBranch="feature-test"
         onUseExisting={onUseExisting}
         onCreateNew={onCreateNew}
+        onBack={onBack}
       />,
     );
 
     // Should show "Use existing branch" option
-    expect(getByText(/既存のブランチで続行/)).toBeDefined();
+    expect(getByText(/Use existing branch/)).toBeDefined();
 
     // Should show "Create new branch" option
-    expect(getByText(/新しいブランチを作成/)).toBeDefined();
+    expect(getByText(/Create new branch/)).toBeDefined();
   });
 
   it("should call onUseExisting when existing branch option is selected", () => {
     const onUseExisting = vi.fn();
     const onCreateNew = vi.fn();
+    const onBack = vi.fn();
 
     render(
       <BranchActionSelectorScreen
         selectedBranch="feature-test"
         onUseExisting={onUseExisting}
         onCreateNew={onCreateNew}
+        onBack={onBack}
       />,
     );
 
@@ -83,12 +91,14 @@ describe("BranchActionSelectorScreen", () => {
   it("should call onCreateNew when create new branch option is selected", () => {
     const onUseExisting = vi.fn();
     const onCreateNew = vi.fn();
+    const onBack = vi.fn();
 
     render(
       <BranchActionSelectorScreen
         selectedBranch="feature-test"
         onUseExisting={onUseExisting}
         onCreateNew={onCreateNew}
+        onBack={onBack}
       />,
     );
 

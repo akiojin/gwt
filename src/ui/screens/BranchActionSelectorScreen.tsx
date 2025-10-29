@@ -1,5 +1,5 @@
 import React from "react";
-import { Box, Text } from "ink";
+import { Box, Text, useInput } from "ink";
 import { Select, type SelectItem } from "../components/common/Select.js";
 import type { BranchAction } from "../types.js";
 
@@ -7,6 +7,7 @@ export interface BranchActionSelectorScreenProps {
   selectedBranch: string;
   onUseExisting: () => void;
   onCreateNew: () => void;
+  onBack: () => void;
 }
 
 /**
@@ -20,14 +21,22 @@ export function BranchActionSelectorScreen({
   selectedBranch,
   onUseExisting,
   onCreateNew,
+  onBack,
 }: BranchActionSelectorScreenProps) {
+  // Handle keyboard input for back navigation
+  useInput((input, key) => {
+    if (input === 'q') {
+      onBack();
+    }
+  });
+
   const items: SelectItem[] = [
     {
-      label: "既存のブランチで続行",
+      label: "Use existing branch",
       value: "use-existing",
     },
     {
-      label: "新しいブランチを作成",
+      label: "Create new branch",
       value: "create-new",
     },
   ];
@@ -46,11 +55,11 @@ export function BranchActionSelectorScreen({
     <Box flexDirection="column">
       <Box marginBottom={1}>
         <Text>
-          ブランチ <Text bold color="cyan">{selectedBranch}</Text> を選択しました
+          Selected branch: <Text bold color="cyan">{selectedBranch}</Text>
         </Text>
       </Box>
       <Box marginBottom={1}>
-        <Text color="gray">次のアクションを選択してください:</Text>
+        <Text color="gray">Choose an action:</Text>
       </Box>
       <Select items={items} onSelect={handleSelect} />
     </Box>

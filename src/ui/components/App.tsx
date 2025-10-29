@@ -538,6 +538,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
             selectedBranch={selectedBranch?.displayName ?? ''}
             onUseExisting={handleUseExistingBranch}
             onCreateNew={handleCreateNewBranch}
+            onBack={goBack}
           />
         );
 
