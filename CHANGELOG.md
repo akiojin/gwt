@@ -1,3 +1,16 @@
+# [1.7.0](https://github.com/akiojin/claude-worktree/compare/v1.6.0...v1.7.0) (2025-10-29)
+
+
+### Bug Fixes
+
+* TypeScript型エラーを修正してビルドを通す ([e9564ee](https://github.com/akiojin/claude-worktree/commit/e9564ee6c95390d8dda0eb73d5f454a1c8596e4d))
+
+
+### Features
+
+* ブランチ選択後にアクション選択画面を追加（MVP2） ([54eae36](https://github.com/akiojin/claude-worktree/commit/54eae367045945bd45fa4a905f20a96e6a04bd8f))
+* 選択したブランチをベースブランチとして新規ブランチ作成に使用 ([2ee8eb5](https://github.com/akiojin/claude-worktree/commit/2ee8eb5b1d06ac2e7b24a7cada91989ec023b3ac))
+
 # [1.6.0](https://github.com/akiojin/claude-worktree/compare/v1.5.0...v1.6.0) (2025-10-29)
 
 
