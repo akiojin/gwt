@@ -1,3 +1,10 @@
+# [1.8.0](https://github.com/akiojin/claude-worktree/compare/v1.7.1...v1.8.0) (2025-10-29)
+
+
+### Features
+
+* 戻るキーをqからESCに変更、終了はCtrl+Cに統一 ([2b9d82b](https://github.com/akiojin/claude-worktree/commit/2b9d82bca649a1edd06d800c58f629aa469a3074))
+
 ## [1.7.1](https://github.com/akiojin/claude-worktree/compare/v1.7.0...v1.7.1) (2025-10-29)
 
 
