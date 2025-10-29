@@ -1,3 +1,10 @@
+## [1.7.1](https://github.com/akiojin/claude-worktree/compare/v1.7.0...v1.7.1) (2025-10-29)
+
+
+### Bug Fixes
+
+* BranchActionSelectorScreenでqキーで戻る機能と英語化を実装 ([c7860aa](https://github.com/akiojin/claude-worktree/commit/c7860aa2a0c3cbee359c7d830406c6124b4106f4))
+
 # [1.7.0](https://github.com/akiojin/claude-worktree/compare/v1.6.0...v1.7.0) (2025-10-29)
 
 
