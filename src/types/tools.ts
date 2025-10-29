@@ -210,4 +210,11 @@ export interface LaunchOptions {
    * コマンドラインから -- 以降に渡された引数。
    */
   extraArgs?: string[];
+
+  /**
+   * 作業ディレクトリ（ワークツリーパス）
+   *
+   * ツール起動時のcwdとして使用されます。
+   */
+  cwd?: string;
 }

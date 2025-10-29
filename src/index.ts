@@ -11,6 +11,8 @@ import chalk from "chalk";
 import type { SelectionResult } from "./ui/components/App.js";
 import { worktreeExists } from "./worktree.js";
 import { getTerminalStreams } from "./utils/terminal.js";
+import { getToolById } from "./config/tools.js";
+import { launchCustomAITool } from "./launcher.js";
 
 /**
  * Simple print functions (replacing legacy UI display functions)
@@ -153,7 +155,16 @@ async function handleAIToolWorkflow(
 
     printInfo(`Worktree ready: ${worktreePath}`);
 
+    // Get tool definition
+    const toolConfig = await getToolById(tool);
+
+    if (!toolConfig) {
+      throw new Error(`Tool not found: ${tool}`);
+    }
+
     // Launch selected AI tool
+    // Builtin tools use their dedicated launch functions
+    // Custom tools use the generic launchCustomAITool function
     if (tool === "claude-code") {
       await launchClaudeCode(worktreePath, {
         mode:
@@ -173,6 +184,19 @@ async function handleAIToolWorkflow(
               ? "continue"
               : "normal",
         bypassApprovals: skipPermissions,
+      });
+    } else {
+      // Custom tool
+      printInfo(`Launching custom tool: ${toolConfig.displayName}`);
+      await launchCustomAITool(toolConfig, {
+        mode:
+          mode === "resume"
+            ? "resume"
+            : mode === "continue"
+              ? "continue"
+              : "normal",
+        skipPermissions,
+        cwd: worktreePath,
       });
     }
 

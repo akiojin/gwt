@@ -97,30 +97,34 @@ export async function launchCustomAITool(
 ): Promise<void> {
   const args = buildArgs(tool, options);
 
+  // 環境変数の構築
+  const env = tool.env ? { ...process.env, ...tool.env } : process.env;
+
+  // execa共通オプション（cwdがundefinedの場合は含めない）
+  const execaOptions = {
+    stdio: "inherit" as const,
+    ...(options.cwd ? { cwd: options.cwd } : {}),
+    env,
+  };
+
   switch (tool.type) {
     case "path": {
       // 絶対パスで直接実行
-      await execa(tool.command, args, {
-        stdio: "inherit",
-      });
+      await execa(tool.command, args, execaOptions);
       break;
     }
 
     case "bunx": {
       // bunx経由でパッケージ実行
       // bunx [package] [args...]
-      await execa("bunx", [tool.command, ...args], {
-        stdio: "inherit",
-      });
+      await execa("bunx", [tool.command, ...args], execaOptions);
       break;
     }
 
     case "command": {
       // PATH解決 → 実行
       const resolvedPath = await resolveCommand(tool.command);
-      await execa(resolvedPath, args, {
-        stdio: "inherit",
-      });
+      await execa(resolvedPath, args, execaOptions);
       break;
     }
 
