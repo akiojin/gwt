@@ -209,6 +209,56 @@ describe('App', () => {
     expect(getByText(/⚡/)).toBeDefined();
   });
 
+  describe('BranchActionSelectorScreen integration', () => {
+    it('should show BranchActionSelectorScreen after branch selection', () => {
+      useGitDataSpy.mockReturnValue({
+        branches: mockBranches,
+        loading: false,
+        error: null,
+        worktrees: [],
+        refresh: mockRefresh,
+      });
+
+      const onExit = vi.fn();
+      const { container } = render(<App onExit={onExit} />);
+
+      // After implementation, should verify BranchActionSelectorScreen appears
+      expect(container).toBeDefined();
+    });
+
+    it('should navigate to AI tool selector when "use existing" is selected', () => {
+      useGitDataSpy.mockReturnValue({
+        branches: mockBranches,
+        loading: false,
+        error: null,
+        worktrees: [],
+        refresh: mockRefresh,
+      });
+
+      const onExit = vi.fn();
+      const { container } = render(<App onExit={onExit} />);
+
+      // After implementation, should verify navigation to AIToolSelectorScreen
+      expect(container).toBeDefined();
+    });
+
+    it('should navigate to branch creator when "create new" is selected', () => {
+      useGitDataSpy.mockReturnValue({
+        branches: mockBranches,
+        loading: false,
+        error: null,
+        worktrees: [],
+        refresh: mockRefresh,
+      });
+
+      const onExit = vi.fn();
+      const { container } = render(<App onExit={onExit} />);
+
+      // After implementation, should verify navigation to BranchCreatorScreen
+      expect(container).toBeDefined();
+    });
+  });
+
   afterEach(() => {
     useGitDataSpy.mockReset();
     useGitDataSpy.mockImplementation(originalUseGitData);

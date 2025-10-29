@@ -4,6 +4,7 @@ import { ErrorBoundary } from './common/ErrorBoundary.js';
 import { BranchListScreen } from './screens/BranchListScreen.js';
 import { WorktreeManagerScreen } from './screens/WorktreeManagerScreen.js';
 import { BranchCreatorScreen } from './screens/BranchCreatorScreen.js';
+import { BranchActionSelectorScreen } from '../screens/BranchActionSelectorScreen.js';
 import { AIToolSelectorScreen } from './screens/AIToolSelectorScreen.js';
 import { SessionSelectorScreen } from './screens/SessionSelectorScreen.js';
 import { ExecutionModeSelectorScreen } from './screens/ExecutionModeSelectorScreen.js';
@@ -224,7 +225,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
 
       setSelectedBranch(selection);
       setSelectedTool(null);
-      navigateTo('ai-tool-selector');
+      navigateTo('branch-action-selector');
     },
     [navigateTo, setSelectedTool, toLocalBranchName]
   );
@@ -249,6 +250,15 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     },
     [navigateTo]
   );
+
+  // Handle branch action selection
+  const handleUseExistingBranch = useCallback(() => {
+    navigateTo('ai-tool-selector');
+  }, [navigateTo]);
+
+  const handleCreateNewBranch = useCallback(() => {
+    navigateTo('branch-creator');
+  }, [navigateTo]);
 
   // Handle quit
   const handleQuit = useCallback(() => {
@@ -514,6 +524,15 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
 
       case 'branch-creator':
         return <BranchCreatorScreen onBack={goBack} onCreate={handleCreate} />;
+
+      case 'branch-action-selector':
+        return (
+          <BranchActionSelectorScreen
+            selectedBranch={selectedBranch?.displayName ?? ''}
+            onUseExisting={handleUseExistingBranch}
+            onCreateNew={handleCreateNewBranch}
+          />
+        );
 
       case 'ai-tool-selector':
         return <AIToolSelectorScreen onBack={goBack} onSelect={handleToolSelect} />;
