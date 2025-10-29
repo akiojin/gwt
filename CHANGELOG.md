@@ -1,3 +1,10 @@
+# [1.10.0](https://github.com/akiojin/claude-worktree/compare/v1.9.0...v1.10.0) (2025-10-29)
+
+
+### Features
+
+* cコマンドでベース差分なしブランチもクリーンアップ対象に追加 ([4ff79b7](https://github.com/akiojin/claude-worktree/commit/4ff79b76ebbc2b2d2a40ccf250eba8d1a165abb9))
+
 # [1.9.0](https://github.com/akiojin/claude-worktree/compare/v1.8.0...v1.9.0) (2025-10-29)
 
 
