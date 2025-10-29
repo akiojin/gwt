@@ -1,3 +1,11 @@
+# [1.6.0](https://github.com/akiojin/claude-worktree/compare/v1.5.0...v1.6.0) (2025-10-29)
+
+
+### Features
+
+* カレントブランチ選択時にWorktree作成をスキップする機能を実装 ([e6bfec2](https://github.com/akiojin/claude-worktree/commit/e6bfec28562a1a7bfba32c06b7002e34a04d513c))
+* 型定義を追加（BranchAction, ScreenType拡張, getCurrentBranch export） ([da38caf](https://github.com/akiojin/claude-worktree/commit/da38cafca4946e272f2836a12a4ccd6f9c5c706a))
+
 # [1.5.0](https://github.com/akiojin/claude-worktree/compare/v1.4.5...v1.5.0) (2025-10-29)
 
 
