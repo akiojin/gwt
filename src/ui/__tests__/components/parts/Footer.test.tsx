@@ -17,7 +17,7 @@ describe('Footer', () => {
 
   const mockActions = [
     { key: 'enter', description: 'Select' },
-    { key: 'q', description: 'Quit' },
+    { key: 'esc', description: 'Back' },
     { key: 'h', description: 'Help' },
   ];
 
@@ -26,8 +26,8 @@ describe('Footer', () => {
 
     expect(getByText(/enter/)).toBeDefined();
     expect(getByText(/Select/)).toBeDefined();
-    expect(getByText(/q/)).toBeDefined();
-    expect(getByText(/Quit/)).toBeDefined();
+    expect(getByText(/esc/)).toBeDefined();
+    expect(getByText(/Back/)).toBeDefined();
     expect(getByText(/h/)).toBeDefined();
     expect(getByText(/Help/)).toBeDefined();
   });

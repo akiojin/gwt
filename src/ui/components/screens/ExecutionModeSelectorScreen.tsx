@@ -45,7 +45,7 @@ export function ExecutionModeSelectorScreen({
 
   // Handle keyboard input
   useInput((input, key) => {
-    if (input === 'q') {
+    if (key.escape) {
       if (step === 2) {
         // Go back to step 1
         setStep(1);
@@ -109,7 +109,7 @@ export function ExecutionModeSelectorScreen({
   // Footer actions
   const footerActions = [
     { key: 'enter', description: 'Select' },
-    { key: 'q', description: step === 2 ? 'Back to mode selection' : 'Back' },
+    { key: 'esc', description: step === 2 ? 'Back to mode selection' : 'Back' },
   ];
 
   return (

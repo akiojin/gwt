@@ -1,6 +1,7 @@
 import React from "react";
 import { Box, Text, useInput } from "ink";
 import { Select, type SelectItem } from "../components/common/Select.js";
+import { Footer } from "../components/parts/Footer.js";
 import type { BranchAction } from "../types.js";
 
 export interface BranchActionSelectorScreenProps {
@@ -25,7 +26,7 @@ export function BranchActionSelectorScreen({
 }: BranchActionSelectorScreenProps) {
   // Handle keyboard input for back navigation
   useInput((input, key) => {
-    if (input === 'q') {
+    if (key.escape) {
       onBack();
     }
   });
@@ -51,6 +52,12 @@ export function BranchActionSelectorScreen({
     }
   };
 
+  // Footer actions
+  const footerActions = [
+    { key: 'enter', description: 'Select' },
+    { key: 'esc', description: 'Back' },
+  ];
+
   return (
     <Box flexDirection="column">
       <Box marginBottom={1}>
@@ -62,6 +69,9 @@ export function BranchActionSelectorScreen({
         <Text color="gray">Choose an action:</Text>
       </Box>
       <Select items={items} onSelect={handleSelect} />
+
+      {/* Footer */}
+      <Footer actions={footerActions} />
     </Box>
   );
 }
