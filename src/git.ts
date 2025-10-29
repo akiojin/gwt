@@ -299,15 +299,17 @@ function getBranchType(branchName: string): BranchInfo["branchType"] {
   return "other";
 }
 
-export async function hasUnpushedCommits(
-  worktreePath: string,
+async function hasUnpushedCommitsInternal(
   branch: string,
+  options: { cwd?: string } = {},
 ): Promise<boolean> {
+  const { cwd } = options;
+  const execOptions = cwd ? { cwd } : undefined;
   try {
     const { stdout } = await execa(
       "git",
       ["log", `origin/${branch}..${branch}`, "--oneline"],
-      { cwd: worktreePath },
+      execOptions,
     );
     return stdout.trim().length > 0;
   } catch {
@@ -326,9 +328,7 @@ export async function hasUnpushedCommits(
 
     for (const candidate of candidates) {
       try {
-        await execa("git", ["rev-parse", "--verify", candidate], {
-          cwd: worktreePath,
-        });
+        await execa("git", ["rev-parse", "--verify", candidate], execOptions);
 
         // If we are checking the same branch again, we already know the remote ref is missing.
         if (candidate === `origin/${branch}` || candidate === branch) {
@@ -339,7 +339,7 @@ export async function hasUnpushedCommits(
           await execa(
             "git",
             ["merge-base", "--is-ancestor", branch, candidate],
-            { cwd: worktreePath },
+            execOptions,
           );
           return false;
         } catch {
@@ -353,6 +353,80 @@ export async function hasUnpushedCommits(
     // Could not prove that the branch is merged anywhere safe, treat as unpushed commits.
     return true;
   }
+}
+
+export async function hasUnpushedCommits(
+  worktreePath: string,
+  branch: string,
+): Promise<boolean> {
+  return hasUnpushedCommitsInternal(branch, { cwd: worktreePath });
+}
+
+export async function hasUnpushedCommitsInRepo(
+  branch: string,
+  repoRoot?: string,
+): Promise<boolean> {
+  return hasUnpushedCommitsInternal(
+    branch,
+    repoRoot ? { cwd: repoRoot } : {},
+  );
+}
+
+export async function branchHasUniqueCommitsComparedToBase(
+  branch: string,
+  baseBranch: string,
+  repoRoot?: string,
+): Promise<boolean> {
+  const execOptions = repoRoot ? { cwd: repoRoot } : undefined;
+  try {
+    await execa("git", ["rev-parse", "--verify", branch], execOptions);
+  } catch {
+    return true;
+  }
+
+  const normalizedBase = baseBranch.trim();
+  if (!normalizedBase) {
+    return true;
+  }
+
+  const candidates = new Set<string>();
+  candidates.add(normalizedBase);
+
+  if (!normalizedBase.startsWith("origin/")) {
+    candidates.add(`origin/${normalizedBase}`);
+  } else {
+    const localEquivalent = normalizedBase.replace(/^origin\//, "");
+    if (localEquivalent) {
+      candidates.add(localEquivalent);
+    }
+  }
+
+  for (const candidate of candidates) {
+    try {
+      await execa("git", ["rev-parse", "--verify", candidate], execOptions);
+    } catch {
+      continue;
+    }
+
+    try {
+      const { stdout } = await execa(
+        "git",
+        ["log", `${candidate}..${branch}`, "--oneline"],
+        execOptions,
+      );
+
+      if (stdout.trim().length > 0) {
+        return true;
+      }
+
+      return false;
+    } catch {
+      // Comparison failed for this candidate, try next one.
+    }
+  }
+
+  // If no valid base candidate was found, treat the branch as having unique commits.
+  return true;
 }
 
 /**

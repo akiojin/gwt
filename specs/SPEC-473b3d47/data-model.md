@@ -182,13 +182,16 @@ interface SessionData {
 
 ```typescript
 interface CleanupTarget {
-  branch: string;                              // ブランチ名
-  worktreePath?: string;                       // ワークツリーパス（オプション）
-  prNumber: number;                            // PR番号
-  prUrl: string;                               // PR URL
-  hasUnpushedCommits: boolean;                 // 未プッシュコミット有無
-  hasRemoteBranch: boolean;                    // リモートブランチ有無
-  cleanupType: 'worktree-and-branch' | 'branch-only';  // クリーンアップタイプ
+  worktreePath: string | null;  // ワークツリーパス（nullの場合はローカルブランチのみ）
+  branch: string;               // ブランチ名
+  pullRequest: MergedPullRequest | null; // 紐付くPR情報（存在しない場合はnull）
+  hasUncommittedChanges: boolean; // 未コミット変更の有無
+  hasUnpushedCommits: boolean;    // 未プッシュコミットの有無
+  cleanupType: 'worktree-and-branch' | 'branch-only'; // クリーンアップタイプ
+  hasRemoteBranch?: boolean;     // リモートブランチの有無
+  isAccessible?: boolean;        // ワークツリーパス参照可否（falseの場合は後続処理でスキップ）
+  invalidReason?: string;        // 無効理由（ログ用）
+  reasons?: ('merged-pr' | 'no-diff-with-base')[]; // 検出理由
 }
 ```
 
@@ -196,13 +199,16 @@ interface CleanupTarget {
 
 | フィールド | 型 | 必須 | 説明 | 検証ルール |
 |-----------|------|------|------|------------|
+| `worktreePath` | string / null | ✓ | ワークツリーパス（ブランチのみの場合はnull） | - |
 | `branch` | string | ✓ | ブランチ名 | 空文字列不可 |
-| `worktreePath` | string | - | ワークツリーパス | 存在する場合のみ設定 |
-| `prNumber` | number | ✓ | PR番号 | 正の整数 |
-| `prUrl` | string | ✓ | PR URL | 有効なURL |
-| `hasUnpushedCommits` | boolean | ✓ | 未プッシュコミット有無 | - |
-| `hasRemoteBranch` | boolean | ✓ | リモートブランチ有無 | - |
+| `pullRequest` | object / null | ✓ | 紐付くマージ済みPR情報 | PRがない場合はnull |
+| `hasUncommittedChanges` | boolean | ✓ | 未コミット変更の有無 | - |
+| `hasUnpushedCommits` | boolean | ✓ | 未プッシュコミットの有無 | - |
 | `cleanupType` | enum | ✓ | クリーンアップタイプ | 'worktree-and-branch'または'branch-only' |
+| `hasRemoteBranch` | boolean | - | リモートブランチの存在可否 | - |
+| `isAccessible` | boolean | - | ワークツリーのパス解決可否 | falseの場合は削除処理をスキップ |
+| `invalidReason` | string | - | 無効理由の説明 | - |
+| `reasons` | string[] | - | 検出理由（'merged-pr', 'no-diff-with-base'） | - |
 
 **cleanupTypeの決定ロジック**:
 

@@ -64,7 +64,7 @@ describe('PRCleanupScreen', () => {
       />
     );
 
-    expect(getByText(/PR Cleanup/i)).toBeDefined();
+    expect(getByText(/Branch Cleanup/i)).toBeDefined();
   });
 
   it('should render PR list', () => {
@@ -117,7 +117,7 @@ describe('PRCleanupScreen', () => {
       />
     );
 
-    expect(getByText(/No merged pull requests found/i)).toBeDefined();
+    expect(getByText(/No cleanup targets found/i)).toBeDefined();
   });
 
   it('should display PR count in stats', () => {
@@ -210,6 +210,6 @@ describe('PRCleanupScreen', () => {
       />
     );
 
-    expect(getByText(/Loading merged pull requests/i)).toBeDefined();
+    expect(getByText(/Loading cleanup targets/i)).toBeDefined();
   });
 });

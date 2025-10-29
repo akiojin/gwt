@@ -56,6 +56,12 @@ export function PRCleanupScreen({
     } else {
       flags.push('branch');
     }
+    if (target.reasons?.includes('merged-pr')) {
+      flags.push('merged');
+    }
+    if (target.reasons?.includes('no-diff-with-base')) {
+      flags.push('base');
+    }
     if (target.hasUncommittedChanges) {
       flags.push('changes');
     }
@@ -98,7 +104,7 @@ export function PRCleanupScreen({
   return (
     <Box flexDirection="column" height={rows}>
       {/* Header */}
-      <Header title="PR Cleanup" titleColor="yellow" />
+      <Header title="Branch Cleanup" titleColor="yellow" />
 
       {/* Stats */}
       <Box marginTop={1}>
@@ -137,11 +143,11 @@ export function PRCleanupScreen({
       <Box flexDirection="column" flexGrow={1}>
         {loading ? (
           <Box>
-            <Text dimColor>Loading merged pull requests...</Text>
+            <Text dimColor>Loading cleanup targets...</Text>
           </Box>
         ) : targets.length === 0 ? (
           <Box>
-            <Text dimColor>No merged pull requests found</Text>
+            <Text dimColor>No cleanup targets found</Text>
           </Box>
         ) : (
           <Select<PRItem>

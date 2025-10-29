@@ -355,7 +355,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
 
     if (targets.length === 0) {
       setCleanupIndicators({});
-      setCleanupFooterMessage({ text: '✅ クリーンアップ対象のマージ済みPRはありません。', color: 'green' });
+      setCleanupFooterMessage({ text: '✅ クリーンアップ対象はありません。', color: 'green' });
       setCleanupInputLocked(false);
       completionTimerRef.current = setTimeout(() => {
         setCleanupFooterMessage(null);
