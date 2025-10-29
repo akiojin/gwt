@@ -95,16 +95,19 @@ export interface WorktreeWithPR {
   pullRequest: PullRequest | null;
 }
 
+export type CleanupReason = "merged-pr" | "no-diff-with-base";
+
 export interface CleanupTarget {
   worktreePath: string | null; // null for local branch only cleanup
   branch: string;
-  pullRequest: MergedPullRequest;
+  pullRequest: MergedPullRequest | null;
   hasUncommittedChanges: boolean;
   hasUnpushedCommits: boolean;
   cleanupType: "worktree-and-branch" | "branch-only";
   hasRemoteBranch?: boolean;
   isAccessible?: boolean;
   invalidReason?: string;
+  reasons?: CleanupReason[];
 }
 
 export interface GitHubPRAuthor {

@@ -8,12 +8,19 @@ vi.mock("execa", () => ({
 }));
 
 // Mock node:fs
-vi.mock("node:fs", () => ({
-  existsSync: vi.fn(),
-}));
+vi.mock("node:fs", () => {
+  const existsSync = vi.fn();
+  return {
+    existsSync,
+    default: { existsSync },
+  };
+});
 
 import { execa } from "execa";
 import fs from "node:fs";
+import * as git from "../../src/git";
+import * as github from "../../src/github";
+import * as configModule from "../../src/config/index";
 
 describe("worktree.ts - Worktree Operations", () => {
   beforeEach(() => {
@@ -326,6 +333,134 @@ branch refs/heads/feature/test
 
       // Should return empty array
       expect(Array.isArray(worktreeList)).toBe(true);
+    });
+  });
+
+  describe("getMergedPRWorktrees", () => {
+    it("includes branches identical to the base branch when there are no local-only commits", async () => {
+      const configSpy = vi
+        .spyOn(configModule, "getConfig")
+        .mockResolvedValue({
+          defaultBaseBranch: "main",
+          skipPermissions: false,
+          enableGitHubIntegration: true,
+          enableDebugMode: false,
+          worktreeNamingPattern: "{repo}-{branch}",
+        });
+
+      const repoRootSpy = vi
+        .spyOn(git, "getRepositoryRoot")
+        .mockResolvedValue("/repo");
+
+      const mergedPRsSpy = vi
+        .spyOn(github, "getMergedPullRequests")
+        .mockResolvedValue([]);
+
+      const pullRequestByBranchSpy = vi
+        .spyOn(github, "getPullRequestByBranch")
+        .mockResolvedValue(null);
+
+      const getLocalBranchesSpy = vi
+        .spyOn(git, "getLocalBranches")
+        .mockResolvedValue([
+          {
+            name: "feature/no-diff",
+            type: "local",
+            branchType: "feature",
+            isCurrent: false,
+          },
+          {
+            name: "feature/orphan",
+            type: "local",
+            branchType: "feature",
+            isCurrent: false,
+          },
+          {
+            name: "main",
+            type: "local",
+            branchType: "main",
+            isCurrent: true,
+          },
+        ]);
+
+      const hasUncommittedSpy = vi
+        .spyOn(git, "hasUncommittedChanges")
+        .mockResolvedValue(false);
+
+      const hasUnpushedSpy = vi
+        .spyOn(git, "hasUnpushedCommits")
+        .mockResolvedValue(false);
+
+      const hasUnpushedRepoSpy = vi
+        .spyOn(git, "hasUnpushedCommitsInRepo")
+        .mockResolvedValue(false);
+
+      const branchHasUniqueSpy = vi
+        .spyOn(git, "branchHasUniqueCommitsComparedToBase")
+        .mockImplementation(async (branch) => {
+          if (branch === "feature/no-diff" || branch === "feature/orphan") {
+            return false;
+          }
+          return true;
+        });
+
+      const remoteExistsSpy = vi
+        .spyOn(git, "checkRemoteBranchExists")
+        .mockResolvedValue(false);
+
+      (execa as any).mockImplementation(
+        async (command: string, args?: readonly string[]) => {
+          if (command === "git" && args?.[0] === "worktree" && args[1] === "list") {
+            return {
+              stdout: `worktree /repo
+HEAD 0000000
+branch refs/heads/main
+
+worktree /repo/.git/worktree/feature-no-diff
+HEAD abc1234
+branch refs/heads/feature/no-diff
+`,
+              stderr: "",
+              exitCode: 0,
+            };
+          }
+          return { stdout: "", stderr: "", exitCode: 0 };
+        },
+      );
+
+      (fs.existsSync as any).mockReturnValue(true);
+
+      const targets = await worktree.getMergedPRWorktrees();
+
+      expect(targets).toHaveLength(2);
+
+      const worktreeTarget = targets.find(
+        (target) => target.branch === "feature/no-diff",
+      );
+      expect(worktreeTarget).toBeDefined();
+      expect(worktreeTarget?.cleanupType).toBe("worktree-and-branch");
+      expect(worktreeTarget?.pullRequest).toBeNull();
+      expect(worktreeTarget?.reasons).toContain("no-diff-with-base");
+      expect(worktreeTarget?.reasons).not.toContain("merged-pr");
+
+      const orphanTarget = targets.find(
+        (target) => target.branch === "feature/orphan",
+      );
+      expect(orphanTarget).toBeDefined();
+      expect(orphanTarget?.cleanupType).toBe("branch-only");
+      expect(orphanTarget?.pullRequest).toBeNull();
+      expect(orphanTarget?.reasons).toContain("no-diff-with-base");
+
+      expect(configSpy).toHaveBeenCalled();
+      expect(repoRootSpy).toHaveBeenCalled();
+      expect(mergedPRsSpy).toHaveBeenCalled();
+      expect(pullRequestByBranchSpy).toHaveBeenCalled();
+      expect(getLocalBranchesSpy).toHaveBeenCalled();
+      expect(hasUncommittedSpy).toHaveBeenCalled();
+      expect(hasUnpushedSpy).toHaveBeenCalled();
+      expect(hasUnpushedRepoSpy).toHaveBeenCalled();
+      expect(branchHasUniqueSpy).toHaveBeenCalled();
+      expect(remoteExistsSpy).toHaveBeenCalled();
     });
   });
 });

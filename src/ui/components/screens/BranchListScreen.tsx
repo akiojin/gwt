@@ -91,7 +91,7 @@ export function BranchListScreen({
   const footerActions = [
     { key: 'enter', description: 'Select' },
     { key: 'm', description: 'Manage worktrees' },
-    { key: 'c', description: 'Cleanup PRs' },
+    { key: 'c', description: 'Cleanup branches' },
   ];
 
   const renderIndicator = (item: BranchItem, isSelected: boolean) => {

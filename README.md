@@ -68,7 +68,7 @@ The tool presents an interactive interface with the following options:
 1. **Select Existing Branch**: Choose from local or remote branches with worktree auto-creation
 2. **Create New Branch**: Guided branch creation with type selection (feature/hotfix/release)
 3. **Manage Worktrees**: View, open, or remove existing worktrees
-4. **Cleanup Merged PRs**: Automatically remove branches and worktrees for merged GitHub pull requests
+4. **Cleanup Branches**: Remove merged PR branches or branches identical to their base directly from the CLI
 
 ## Advanced Workflows
 
@@ -91,7 +91,7 @@ The tool presents an interactive interface with the following options:
 
 ### GitHub Integration
 
-- **Merged PR Cleanup**: Automatically detect and remove merged pull request branches
+- **Branch Cleanup**: Automatically detect and remove merged pull request branches or branches that no longer differ from their base
 - **Authentication Check**: Verify GitHub CLI setup before operations
 - **Remote Sync**: Fetch latest changes before cleanup operations
 
