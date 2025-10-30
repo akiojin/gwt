@@ -46,7 +46,7 @@ describe('BranchCreatorScreen', () => {
     );
 
     expect(getAllByText(/enter/i).length).toBeGreaterThan(0);
-    expect(getAllByText(/q/i).length).toBeGreaterThan(0);
+    expect(getAllByText(/esc/i).length).toBeGreaterThan(0);
   });
 
   it('should show branch name input after type selection', () => {
@@ -86,14 +86,14 @@ describe('BranchCreatorScreen', () => {
     process.stdout.rows = originalRows;
   });
 
-  it('should handle back navigation with q key', () => {
+  it('should handle back navigation with ESC key', () => {
     const onBack = vi.fn();
     const onCreate = vi.fn();
     const { container } = render(
       <BranchCreatorScreen onBack={onBack} onCreate={onCreate} />
     );
 
-    // Test will verify onBack is called when q is pressed
+    // Test will verify onBack is called when ESC is pressed
     expect(container).toBeDefined();
   });
 });

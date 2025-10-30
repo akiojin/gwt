@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 
 export interface SelectItem {
@@ -11,6 +11,8 @@ export interface SelectProps<T extends SelectItem = SelectItem> {
   onSelect: (item: T) => void;
   limit?: number;
   initialIndex?: number;
+  disabled?: boolean;
+  renderIndicator?: (item: T, isSelected: boolean) => React.ReactNode;
 }
 
 /**
@@ -22,11 +24,40 @@ export function Select<T extends SelectItem = SelectItem>({
   onSelect,
   limit,
   initialIndex = 0,
+  disabled = false,
+  renderIndicator,
 }: SelectProps<T>) {
   const [selectedIndex, setSelectedIndex] = useState(initialIndex);
   const [offset, setOffset] = useState(0);
 
+  useEffect(() => {
+    if (items.length === 0) {
+      setSelectedIndex(0);
+      setOffset(0);
+      return;
+    }
+
+    setSelectedIndex((current) => {
+      const clamped = Math.min(current, items.length - 1);
+      return clamped < 0 ? 0 : clamped;
+    });
+
+    if (limit) {
+      setOffset((current) => {
+        if (current <= items.length - limit) {
+          return current < 0 ? 0 : current;
+        }
+        const newOffset = Math.max(0, items.length - limit);
+        return newOffset;
+      });
+    }
+  }, [items, limit]);
+
   useInput((input, key) => {
+    if (disabled) {
+      return;
+    }
+
     // Only handle navigation and selection keys
     // Let other keys (q, m, n, c, etc.) propagate to parent components
     if (key.upArrow || input === 'k') {
@@ -56,7 +87,7 @@ export function Select<T extends SelectItem = SelectItem>({
     } else if (key.return) {
       // Select current item
       const selectedItem = items[selectedIndex];
-      if (selectedItem) {
+      if (selectedItem && !disabled) {
         onSelect(selectedItem);
       }
     }
@@ -75,14 +106,16 @@ export function Select<T extends SelectItem = SelectItem>({
         const actualIndex = visibleStartIndex + index;
         const isSelected = actualIndex === selectedIndex;
 
+        const indicatorElement = renderIndicator
+          ? renderIndicator(item, isSelected)
+          : isSelected
+            ? <Text color="cyan">›</Text>
+            : <Text> </Text>;
+
         return (
           <Box key={item.value}>
             <Box marginRight={1}>
-              {isSelected ? (
-                <Text color="cyan">›</Text>
-              ) : (
-                <Text> </Text>
-              )}
+              {indicatorElement ?? <Text> </Text>}
             </Box>
             {isSelected ? (
               <Text color="cyan">{item.label}</Text>

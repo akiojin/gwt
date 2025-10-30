@@ -3,6 +3,7 @@
 set -e
 
 JSON_MODE=false
+NO_BRANCH=false
 SPEC_ID=""
 ARGS=()
 i=1
@@ -11,6 +12,9 @@ while [ $i -le $# ]; do
     case "$arg" in
         --json)
             JSON_MODE=true
+            ;;
+        --no-branch)
+            NO_BRANCH=true
             ;;
         --spec-id)
             if [ $((i + 1)) -gt $# ]; then
@@ -27,15 +31,17 @@ while [ $i -le $# ]; do
             SPEC_ID="$next_arg"
             ;;
         --help|-h)
-            echo "使い方: $0 [--json] [--spec-id <id>] <機能の説明>"
+            echo "使い方: $0 [--json] [--no-branch] [--spec-id <id>] <機能の説明>"
             echo ""
             echo "オプション:"
             echo "  --json          JSON形式で出力"
+            echo "  --no-branch     ブランチを作成せず、現在のブランチで作業"
             echo "  --spec-id <id>  カスタムSPEC IDを指定（例: SPEC-12345678）"
             echo "  --help, -h      このヘルプメッセージを表示"
             echo ""
             echo "例:"
             echo "  $0 'ユーザー認証システムを追加'"
+            echo "  $0 --no-branch 'API用のOAuth2統合を実装'"
             echo "  $0 'API用のOAuth2統合を実装' --spec-id SPEC-abcd1234"
             exit 0
             ;;
@@ -157,7 +163,9 @@ fi
 
 BRANCH_NAME="$SPEC_ID"
 
-if [ "$HAS_GIT" = true ]; then
+if [ "$NO_BRANCH" = true ]; then
+    >&2 echo "[specify] ブランチ作成をスキップ: --no-branch が指定されました。現在のブランチで作業を続けます。"
+elif [ "$HAS_GIT" = true ]; then
     git checkout -b "$BRANCH_NAME"
 else
     >&2 echo "[specify] 警告: Gitリポジトリが検出されませんでした。ブランチ $BRANCH_NAME の作成をスキップしました。"

@@ -11,6 +11,29 @@ vi.mock("fs", () => ({
   default: { existsSync: vi.fn(() => true) },
 }));
 
+const mockTerminalStreams = {
+  stdin: { id: "stdin" } as unknown as NodeJS.ReadStream,
+  stdout: { id: "stdout" } as unknown as NodeJS.WriteStream,
+  stderr: { id: "stderr" } as unknown as NodeJS.WriteStream,
+  stdinFd: undefined as number | undefined,
+  stdoutFd: undefined as number | undefined,
+  stderrFd: undefined as number | undefined,
+  usingFallback: false,
+  exitRawMode: vi.fn(),
+};
+
+const mockChildStdio = {
+  stdin: "inherit" as const,
+  stdout: "inherit" as const,
+  stderr: "inherit" as const,
+  cleanup: vi.fn(),
+};
+
+vi.mock("../../src/utils/terminal", () => ({
+  getTerminalStreams: vi.fn(() => mockTerminalStreams),
+  createChildStdio: vi.fn(() => mockChildStdio),
+}));
+
 import { launchClaudeCode } from "../../src/claude.js";
 import { execa } from "execa";
 
@@ -26,6 +49,11 @@ describe("launchClaudeCode - Root User Detection", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     consoleLogSpy.mockClear();
+    mockTerminalStreams.exitRawMode.mockClear();
+    mockChildStdio.cleanup.mockClear();
+    mockChildStdio.stdin = "inherit";
+    mockChildStdio.stdout = "inherit";
+    mockChildStdio.stderr = "inherit";
     // Store original getuid
     originalGetuid = process.getuid;
   });
@@ -81,6 +109,9 @@ describe("launchClaudeCode - Root User Detection", () => {
         "bunx",
         expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
         expect.objectContaining({
+          stdin: "inherit",
+          stdout: "inherit",
+          stderr: "inherit",
           env: process.env,
         }),
       );
@@ -103,6 +134,9 @@ describe("launchClaudeCode - Root User Detection", () => {
         "bunx",
         expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
         expect.objectContaining({
+          stdin: "inherit",
+          stdout: "inherit",
+          stderr: "inherit",
           env: process.env,
         }),
       );
@@ -130,6 +164,9 @@ describe("launchClaudeCode - Root User Detection", () => {
           "--dangerously-skip-permissions",
         ]),
         expect.objectContaining({
+          stdin: "inherit",
+          stdout: "inherit",
+          stderr: "inherit",
           env: expect.objectContaining({
             IS_SANDBOX: "1",
           }),
@@ -156,6 +193,9 @@ describe("launchClaudeCode - Root User Detection", () => {
         "bunx",
         expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
         expect.objectContaining({
+          stdin: "inherit",
+          stdout: "inherit",
+          stderr: "inherit",
           env: process.env,
         }),
       );
@@ -185,6 +225,9 @@ describe("launchClaudeCode - Root User Detection", () => {
         "bunx",
         expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
         expect.objectContaining({
+          stdin: "inherit",
+          stdout: "inherit",
+          stderr: "inherit",
           env: process.env,
         }),
       );
@@ -263,6 +306,40 @@ describe("launchClaudeCode - Root User Detection", () => {
           "⚠️  Docker/サンドボックス環境として実行中（IS_SANDBOX=1）",
         ),
       );
+    });
+  });
+
+  describe("TTY handoff", () => {
+    it("should pass fallback file descriptors when usingFallback is true", async () => {
+      mockTerminalStreams.usingFallback = true;
+      mockChildStdio.stdin = 101 as unknown as any;
+      mockChildStdio.stdout = 102 as unknown as any;
+      mockChildStdio.stderr = 103 as unknown as any;
+
+      mockExeca.mockResolvedValue({
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+      } as any);
+
+      await launchClaudeCode("/test/path");
+
+      expect(mockExeca).toHaveBeenCalledWith(
+        "bunx",
+        expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
+        expect.objectContaining({
+          stdin: 101,
+          stdout: 102,
+          stderr: 103,
+        }),
+      );
+
+      expect(mockChildStdio.cleanup).toHaveBeenCalledTimes(1);
+
+      mockTerminalStreams.usingFallback = false;
+      mockChildStdio.stdin = "inherit";
+      mockChildStdio.stdout = "inherit";
+      mockChildStdio.stderr = "inherit";
     });
   });
 });

@@ -208,6 +208,8 @@ tests/                          # 新規作成
 ### E2Eテスト
 
 - [ ] T612 [US4] T608-T611完了後、PRクリーンアップの完全なフローをテスト: `tests/e2e/pr-cleanup.test.ts`
+- [x] T613 [US4] dist版UIがBranchList上でのクリーンアップUI仕様に一致することを検証するテストを追加: `tests/quality/dist-app-bundle.test.ts`
+- [x] T614 [US4] `bun run build`で最新仕様を反映したdist成果物を作成し、バンドル差分を検証
 
 **✅ チェックポイント**: US4の全受け入れシナリオがテストでカバーされ、独立して検証可能
 

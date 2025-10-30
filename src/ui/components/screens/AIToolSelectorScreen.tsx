@@ -1,11 +1,13 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { Header } from '../parts/Header.js';
 import { Footer } from '../parts/Footer.js';
 import { Select } from '../common/Select.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
+import { getAllTools } from '../../../config/tools.js';
+import type { AIToolConfig } from '../../../types/tools.js';
 
-export type AITool = 'claude-code' | 'codex-cli';
+export type AITool = string;
 
 export interface AIToolItem {
   label: string;
@@ -19,33 +21,62 @@ export interface AIToolSelectorScreenProps {
 }
 
 /**
- * AIToolSelectorScreen - Screen for selecting AI tool (Claude Code or Codex CLI)
+ * AIToolSelectorScreen - Screen for selecting AI tool (Claude Code, Codex CLI, or custom tools)
  * Layout: Header + Tool Selection + Footer
+ *
+ * This screen dynamically loads available tools from the configuration (builtin + custom).
  */
 export function AIToolSelectorScreen({ onBack, onSelect }: AIToolSelectorScreenProps) {
   const { rows } = useTerminalSize();
+  const [toolItems, setToolItems] = useState<AIToolItem[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+
+  // Load tools from getAllTools()
+  useEffect(() => {
+    const loadTools = async () => {
+      try {
+        const tools = await getAllTools();
+
+        // Convert AIToolConfig[] to AIToolItem[]
+        const items: AIToolItem[] = tools.map((tool: AIToolConfig) => {
+          // Generate description based on whether it's builtin or custom
+          const description = tool.isBuiltin
+            ? `Official ${tool.displayName} tool`
+            : `Custom AI tool`;
+
+          // Add icon to label if present
+          const label = tool.icon
+            ? `${tool.icon} ${tool.displayName}`
+            : tool.displayName;
+
+          return {
+            label,
+            value: tool.id,
+            description,
+          };
+        });
+
+        setToolItems(items);
+      } catch (error) {
+        // If loading fails, show error in console but don't crash
+        console.error('Failed to load tools:', error);
+        // Fall back to empty array
+        setToolItems([]);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    loadTools();
+  }, []);
 
   // Handle keyboard input
   // Note: Select component handles Enter and arrow keys
   useInput((input, key) => {
-    if (input === 'q') {
+    if (key.escape) {
       onBack();
     }
   });
-
-  // AI tool options
-  const toolItems: AIToolItem[] = [
-    {
-      label: 'Claude Code',
-      value: 'claude-code',
-      description: 'Official Claude CLI tool',
-    },
-    {
-      label: 'Codex CLI',
-      value: 'codex-cli',
-      description: 'Alternative AI coding assistant',
-    },
-  ];
 
   // Handle tool selection
   const handleSelect = (item: AIToolItem) => {
@@ -55,7 +86,7 @@ export function AIToolSelectorScreen({ onBack, onSelect }: AIToolSelectorScreenP
   // Footer actions
   const footerActions = [
     { key: 'enter', description: 'Select' },
-    { key: 'q', description: 'Back' },
+    { key: 'esc', description: 'Back' },
   ];
 
   return (
@@ -68,7 +99,13 @@ export function AIToolSelectorScreen({ onBack, onSelect }: AIToolSelectorScreenP
         <Box marginBottom={1}>
           <Text>Select AI tool to use:</Text>
         </Box>
-        <Select items={toolItems} onSelect={handleSelect} />
+        {isLoading ? (
+          <Text>Loading tools...</Text>
+        ) : toolItems.length === 0 ? (
+          <Text color="yellow">No tools available. Please check your configuration.</Text>
+        ) : (
+          <Select items={toolItems} onSelect={handleSelect} />
+        )}
       </Box>
 
       {/* Footer */}

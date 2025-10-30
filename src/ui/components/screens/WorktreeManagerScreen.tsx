@@ -33,7 +33,7 @@ export function WorktreeManagerScreen({
   // Handle keyboard input
   // Note: Select component handles Enter and arrow keys
   useInput((input, key) => {
-    if (input === 'q') {
+    if (key.escape) {
       onBack();
     }
   });
@@ -63,7 +63,7 @@ export function WorktreeManagerScreen({
   // Footer actions
   const footerActions = [
     { key: 'enter', description: 'Select' },
-    { key: 'q', description: 'Back' },
+    { key: 'esc', description: 'Back' },
   ];
 
   return (

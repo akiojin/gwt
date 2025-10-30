@@ -14,7 +14,7 @@ Interactive Git worktree manager with AI tool selection (Claude Code / Codex CLI
 - 🖼️ **Full-screen Layout**: Persistent header with statistics, scrollable branch list, and always-visible footer with keyboard shortcuts
 - 🌟 **Smart Branch Creation**: Create feature, hotfix, or release branches with guided prompts and automatic base branch selection
 - 🔄 **Advanced Worktree Management**: Complete lifecycle management including creation, cleanup, and path optimization
-- 🤖 **AI Tool Selection**: Choose between Claude Code / Codex CLI at launch, or use `--tool` (with `--` to pass arguments through to the tool)
+- 🤖 **AI Tool Selection**: Choose between Claude Code / Codex CLI through the interactive launcher
 - 🚀 **AI Tool Integration**: Launch the selected tool in the worktree (Claude Code includes permission handling and post-change flow)
 - 📊 **GitHub PR Integration**: Automatic cleanup of merged pull request branches and worktrees
 - 🛠️ **Change Management**: Built-in support for committing, stashing, or discarding changes after development sessions
@@ -47,41 +47,34 @@ bunx @akiojin/claude-worktree
 
 Run in any Git repository:
 
-````bash
+```bash
 # If installed globally
 claude-worktree
 
 # Or use bunx for one-time execution
 bunx @akiojin/claude-worktree
+```
 
-### AI Tool Selection and Direct Launch
+The CLI currently supports only the help option:
 
 ```bash
-# Interactive selection (Claude / Codex)
-claude-worktree
+claude-worktree --help
+```
 
-# Direct selection
-claude-worktree --tool claude
-claude-worktree --tool codex
-
-# Pass tool-specific options (after "--")
-claude-worktree --tool claude -- -r          # Resume in Claude Code
-claude-worktree --tool codex -- resume --last  # Resume last Codex session
-claude-worktree --tool codex -- resume <id>  # Resume specific Codex session
-````
-
-````
+To view usage information, run `claude-worktree --help`.
 
 The tool presents an interactive interface with the following options:
 
 1. **Select Existing Branch**: Choose from local or remote branches with worktree auto-creation
 2. **Create New Branch**: Guided branch creation with type selection (feature/hotfix/release)
 3. **Manage Worktrees**: View, open, or remove existing worktrees
-4. **Cleanup Merged PRs**: Automatically remove branches and worktrees for merged GitHub pull requests
+4. **Cleanup Branches**: Remove merged PR branches or branches identical to their base directly from the CLI
 
 ## Advanced Workflows
 
 ### Branch Creation Workflow
+
+> **Important**: This workflow is intended for human developers. Autonomous agents must never create or delete branches unless a human gives explicit, task-specific instructions.
 
 1. Select "Create new branch" from the main menu
 2. Choose branch type (feature, hotfix, release)
@@ -98,7 +91,7 @@ The tool presents an interactive interface with the following options:
 
 ### GitHub Integration
 
-- **Merged PR Cleanup**: Automatically detect and remove merged pull request branches
+- **Branch Cleanup**: Automatically detect and remove merged pull request branches or branches that no longer differ from their base
 - **Authentication Check**: Verify GitHub CLI setup before operations
 - **Remote Sync**: Fetch latest changes before cleanup operations
 
@@ -348,6 +341,10 @@ Each execution performs the following steps:
 1. Run tests (`bun run test`)
 2. Build project (`bun run build`)
 3. Execute semantic-release (version, changelog, publish)
+
+> **Secrets required:**  
+> - `NPM_TOKEN` – npm publish token with `automation` scope  
+> - `SEMANTIC_RELEASE_TOKEN` – GitHub personal access token (classic) with `repo` scope. After registering the secret, add the tokenの所有ユーザー、または「Allow GitHub Actions to bypass branch protection」を `main` ブランチ保護ルールに設定し、リリースコミットの push が拒否されないようにしてください。シークレットが存在しない場合、ワークフローは早期に失敗します。
 
 ### Manual Verification
 

@@ -358,6 +358,24 @@ T056 → T059 → T062 → T065 → T068 → T071
 
 ---
 
+## 2025-10-26: バグ修正 - メイン画面ショートカット復旧
+
+**背景**: Ink UI移行後、BranchListScreenのショートカット（`c`/`m`/`n`）が期待する処理を呼び出さず、ユーザーが作業フローを進められない不具合が報告された。
+
+- [x] T601 [P] BranchListScreenの`c`操作でPRクリーンアップ候補を読み込み表示する処理を実装・テスト (src/ui/components/App.tsx, src/ui/components/screens/PRCleanupScreen.tsx)
+- [x] T602 WorktreeManagerScreenでの選択時に対象ブランチをAIツール選択フローへ引き継ぐ処理を実装・テスト (src/ui/components/App.tsx)
+- [x] T603 新規ブランチ作成フローでworktree作成まで自動化し、完了後にAIツール選択へ遷移する処理を実装・テスト (src/ui/components/App.tsx, src/worktree.ts)
+- [x] T604 クリーニング処理でローカルworktree削除とブランチ削除を安全に行うテストを追加 (`src/ui/components/App.tsx`, `src/ui/components/screens/PRCleanupScreen.tsx`, `src/ui/__tests__`)
+
+## 2025-10-27: バグ修正 - Raw Mode解除漏れによる入力欠落
+
+**背景**: Ink UI終了後に`process.stdin`がrawモードのまま残り、AIツール起動時にキーボード入力が欠落する不具合が発生した。
+
+- [x] T701 [P] 端末制御ユーティリティを追加しTTYフォールバック・raw mode解除処理を集約 (src/utils/terminal.ts)
+- [x] T702 Ink UI初期化時に新ユーティリティを使用し、終了時にraw modeを確実に解除 (src/index.ts)
+- [x] T703 AIツール起動処理で端末ストリームを共有しつつ起動前後にraw modeをリセット (src/claude.ts, src/codex.ts)
+- [x] T704 端末制御のユニットテストを追加し、execa呼び出し時のTTY引き継ぎとraw mode解除を検証 (tests/unit/claude.test.ts, tests/unit/codex.test.ts)
+
 ## 進捗追跡
 
 - **完了したタスク**: `[x]` でマーク

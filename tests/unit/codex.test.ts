@@ -16,6 +16,29 @@ vi.mock("os", () => ({
   default: { platform: vi.fn(() => "darwin") },
 }));
 
+const mockTerminalStreams = {
+  stdin: { id: "stdin" } as unknown as NodeJS.ReadStream,
+  stdout: { id: "stdout" } as unknown as NodeJS.WriteStream,
+  stderr: { id: "stderr" } as unknown as NodeJS.WriteStream,
+  stdinFd: undefined as number | undefined,
+  stdoutFd: undefined as number | undefined,
+  stderrFd: undefined as number | undefined,
+  usingFallback: false,
+  exitRawMode: vi.fn(),
+};
+
+const mockChildStdio = {
+  stdin: "inherit" as const,
+  stdout: "inherit" as const,
+  stderr: "inherit" as const,
+  cleanup: vi.fn(),
+};
+
+vi.mock("../../src/utils/terminal", () => ({
+  getTerminalStreams: vi.fn(() => mockTerminalStreams),
+  createChildStdio: vi.fn(() => mockChildStdio),
+}));
+
 import { execa } from "execa";
 import { launchCodexCLI } from "../../src/codex";
 
@@ -46,6 +69,11 @@ describe("codex.ts", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockTerminalStreams.exitRawMode.mockClear();
+    mockChildStdio.cleanup.mockClear();
+    mockChildStdio.stdin = "inherit";
+    mockChildStdio.stdout = "inherit";
+    mockChildStdio.stderr = "inherit";
     (execa as any).mockResolvedValue({
       stdout: "",
       stderr: "",
@@ -62,9 +90,13 @@ describe("codex.ts", () => {
     expect(args).toEqual(["@openai/codex@latest", ...DEFAULT_CODEX_ARGS]);
     expect(options).toMatchObject({
       cwd: worktreePath,
-      stdio: "inherit",
       shell: true,
+      stdin: "inherit",
+      stdout: "inherit",
+      stderr: "inherit",
     });
+    expect(mockTerminalStreams.exitRawMode).toHaveBeenCalledTimes(2);
+    expect(mockChildStdio.cleanup).toHaveBeenCalledTimes(1);
   });
 
   it("should place extra arguments before the default set", async () => {
@@ -88,5 +120,27 @@ describe("codex.ts", () => {
       "--last",
       ...DEFAULT_CODEX_ARGS,
     ]);
+  });
+
+  it("should hand off fallback file descriptors when stdin is not a TTY", async () => {
+    mockTerminalStreams.usingFallback = true;
+    mockChildStdio.stdin = 11 as unknown as any;
+    mockChildStdio.stdout = 12 as unknown as any;
+    mockChildStdio.stderr = 13 as unknown as any;
+
+    await launchCodexCLI(worktreePath);
+
+    const [, , options] = (execa as any).mock.calls[0];
+    expect(options).toMatchObject({
+      stdin: 11,
+      stdout: 12,
+      stderr: 13,
+    });
+    expect(mockChildStdio.cleanup).toHaveBeenCalledTimes(1);
+
+    mockTerminalStreams.usingFallback = false;
+    mockChildStdio.stdin = "inherit";
+    mockChildStdio.stdout = "inherit";
+    mockChildStdio.stderr = "inherit";
   });
 });
