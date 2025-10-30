@@ -14,6 +14,18 @@
   - 既存の`.git/worktree`パスのWorktreeが正常に動作することを検証
   - 新旧パスのWorktreeが共存できることを検証
 
+# [1.11.0](https://github.com/akiojin/claude-worktree/compare/v1.10.0...v1.11.0) (2025-10-30)
+
+
+### Bug Fixes
+
+* realtimeUpdate.test.tsxのテストアプローチを修正 ([54a4502](https://github.com/akiojin/claude-worktree/commit/54a4502a9a614739dc88b5a5be01973656c805ee))
+
+
+### Features
+
+* リアルタイム更新機能を実装（FR-009対応） ([9dd057a](https://github.com/akiojin/claude-worktree/commit/9dd057a6fe6a62e4e0c86a948826c0f77fcdb145))
+
 # [1.10.0](https://github.com/akiojin/claude-worktree/compare/v1.9.0...v1.10.0) (2025-10-29)
 
 
