@@ -519,4 +519,129 @@ branch refs/heads/feature/no-diff
       expect(remoteExistsSpy).toHaveBeenCalled();
     });
   });
+
+  describe("Backward Compatibility (US3)", () => {
+    describe("listAdditionalWorktrees with legacy .git/worktree paths", () => {
+      it("should list worktrees from legacy .git/worktree path", async () => {
+        const mockWorktreeOutput = `worktree /path/to/repo
+HEAD abc1234
+branch refs/heads/main
+
+worktree /path/to/repo/.git/worktree/feature-old
+HEAD def5678
+branch refs/heads/feature/old
+`;
+
+        (execa as any).mockResolvedValue({
+          stdout: mockWorktreeOutput,
+          stderr: "",
+          exitCode: 0,
+        });
+
+        vi.spyOn(git, "getRepositoryRoot").mockResolvedValue("/path/to/repo");
+        (fs.existsSync as any).mockReturnValue(true);
+
+        const worktreeList = await worktree.listAdditionalWorktrees();
+
+        expect(worktreeList).toHaveLength(1);
+        expect(worktreeList[0].path).toBe(
+          "/path/to/repo/.git/worktree/feature-old",
+        );
+        expect(worktreeList[0].branch).toBe("feature/old");
+        expect(worktreeList[0].isAccessible).toBe(true);
+      });
+
+      it("should list both legacy and new worktree paths together", async () => {
+        const mockWorktreeOutput = `worktree /path/to/repo
+HEAD abc1234
+branch refs/heads/main
+
+worktree /path/to/repo/.git/worktree/feature-old
+HEAD def5678
+branch refs/heads/feature/old
+
+worktree /path/to/repo/.worktrees/feature-new
+HEAD ghi9012
+branch refs/heads/feature/new
+`;
+
+        (execa as any).mockResolvedValue({
+          stdout: mockWorktreeOutput,
+          stderr: "",
+          exitCode: 0,
+        });
+
+        vi.spyOn(git, "getRepositoryRoot").mockResolvedValue("/path/to/repo");
+        (fs.existsSync as any).mockReturnValue(true);
+
+        const worktreeList = await worktree.listAdditionalWorktrees();
+
+        expect(worktreeList).toHaveLength(2);
+
+        const oldWorktree = worktreeList.find(
+          (w) => w.branch === "feature/old",
+        );
+        expect(oldWorktree).toBeDefined();
+        expect(oldWorktree?.path).toBe(
+          "/path/to/repo/.git/worktree/feature-old",
+        );
+
+        const newWorktree = worktreeList.find(
+          (w) => w.branch === "feature/new",
+        );
+        expect(newWorktree).toBeDefined();
+        expect(newWorktree?.path).toBe("/path/to/repo/.worktrees/feature-new");
+      });
+    });
+
+    describe("worktreeExists with legacy .git/worktree paths", () => {
+      it("should find worktree in legacy .git/worktree path", async () => {
+        const mockWorktreeOutput = `worktree /path/to/repo
+HEAD abc1234
+branch refs/heads/main
+
+worktree /path/to/repo/.git/worktree/feature-old
+HEAD def5678
+branch refs/heads/feature/old
+`;
+
+        (execa as any).mockResolvedValue({
+          stdout: mockWorktreeOutput,
+          stderr: "",
+          exitCode: 0,
+        });
+
+        const path = await worktree.worktreeExists("feature/old");
+
+        expect(path).toBe("/path/to/repo/.git/worktree/feature-old");
+      });
+
+      it("should distinguish between legacy and new worktree paths", async () => {
+        const mockWorktreeOutput = `worktree /path/to/repo
+HEAD abc1234
+branch refs/heads/main
+
+worktree /path/to/repo/.git/worktree/feature-old
+HEAD def5678
+branch refs/heads/feature/old
+
+worktree /path/to/repo/.worktrees/feature-new
+HEAD ghi9012
+branch refs/heads/feature/new
+`;
+
+        (execa as any).mockResolvedValue({
+          stdout: mockWorktreeOutput,
+          stderr: "",
+          exitCode: 0,
+        });
+
+        const oldPath = await worktree.worktreeExists("feature/old");
+        expect(oldPath).toBe("/path/to/repo/.git/worktree/feature-old");
+
+        const newPath = await worktree.worktreeExists("feature/new");
+        expect(newPath).toBe("/path/to/repo/.worktrees/feature-new");
+      });
+    });
+  });
 });
