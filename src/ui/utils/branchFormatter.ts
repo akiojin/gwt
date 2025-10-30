@@ -141,7 +141,7 @@ export function formatBranchItem(
  */
 function sortBranches(
   branches: BranchInfo[],
-  worktreeMap: Map<string, WorktreeInfo>
+  worktreeMap: Map<string, WorktreeInfo>,
 ): BranchInfo[] {
   // Check if main branch exists
   const hasMainBranch = branches.some((b) => b.branchType === "main");
@@ -183,7 +183,7 @@ function sortBranches(
  */
 export function formatBranchItems(
   branches: BranchInfo[],
-  worktreeMap: Map<string, WorktreeInfo> = new Map()
+  worktreeMap: Map<string, WorktreeInfo> = new Map(),
 ): BranchItem[] {
   const sortedBranches = sortBranches(branches, worktreeMap);
   return sortedBranches.map((branch) => formatBranchItem(branch));

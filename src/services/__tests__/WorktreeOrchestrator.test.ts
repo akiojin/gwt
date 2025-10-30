@@ -209,7 +209,9 @@ describe("WorktreeOrchestrator", () => {
         (mockWorktreeService.generateWorktreePath as any).mockResolvedValue(
           mockWorktreePath,
         );
-        (mockWorktreeService.createWorktree as any).mockResolvedValue(undefined);
+        (mockWorktreeService.createWorktree as any).mockResolvedValue(
+          undefined,
+        );
 
         // Act
         const result = await orchestrator.ensureWorktree(
@@ -233,7 +235,9 @@ describe("WorktreeOrchestrator", () => {
         (mockWorktreeService.generateWorktreePath as any).mockResolvedValue(
           mockWorktreePath,
         );
-        (mockWorktreeService.createWorktree as any).mockResolvedValue(undefined);
+        (mockWorktreeService.createWorktree as any).mockResolvedValue(
+          undefined,
+        );
 
         // Act
         const result = await orchestrator.ensureWorktree(

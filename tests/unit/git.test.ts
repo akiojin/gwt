@@ -734,3 +734,88 @@ origin/develop`;
     });
   });
 });
+
+describe("git.ts - Gitignore Operations", () => {
+  describe("ensureGitignoreEntry", () => {
+    const fs = require("node:fs/promises");
+    const path = require("node:path");
+    const os = require("node:os");
+    let tempDir: string;
+
+    beforeEach(async () => {
+      // Create temporary directory for tests
+      tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "git-test-"));
+    });
+
+    afterEach(async () => {
+      // Clean up temporary directory
+      try {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      } catch (error) {
+        // Ignore cleanup errors
+      }
+    });
+
+    it("should add entry to .gitignore when file exists and entry does not exist", async () => {
+      const entry = ".worktrees/";
+      const gitignorePath = path.join(tempDir, ".gitignore");
+
+      // Create existing .gitignore
+      await fs.writeFile(gitignorePath, "node_modules/\ndist/\n", "utf-8");
+
+      await git.ensureGitignoreEntry(tempDir, entry);
+
+      const content = await fs.readFile(gitignorePath, "utf-8");
+      expect(content).toBe("node_modules/\ndist/\n.worktrees/\n");
+    });
+
+    it("should not add entry when it already exists", async () => {
+      const entry = ".worktrees/";
+      const gitignorePath = path.join(tempDir, ".gitignore");
+
+      // Create .gitignore with entry already present
+      const initialContent = "node_modules/\n.worktrees/\ndist/\n";
+      await fs.writeFile(gitignorePath, initialContent, "utf-8");
+
+      await git.ensureGitignoreEntry(tempDir, entry);
+
+      const content = await fs.readFile(gitignorePath, "utf-8");
+      expect(content).toBe(initialContent);
+    });
+
+    it("should create .gitignore with entry when file does not exist", async () => {
+      const entry = ".worktrees/";
+      const gitignorePath = path.join(tempDir, ".gitignore");
+
+      await git.ensureGitignoreEntry(tempDir, entry);
+
+      const content = await fs.readFile(gitignorePath, "utf-8");
+      expect(content).toBe(".worktrees/\n");
+    });
+
+    it("should throw GitError when file read fails with non-ENOENT error", async () => {
+      const entry = ".worktrees/";
+      const gitignorePath = path.join(tempDir, ".gitignore");
+
+      // Create a directory with the same name to cause EISDIR error
+      await fs.mkdir(gitignorePath);
+
+      await expect(git.ensureGitignoreEntry(tempDir, entry)).rejects.toThrow(
+        "Failed to update .gitignore",
+      );
+    });
+
+    it("should handle .gitignore without trailing newline", async () => {
+      const entry = ".worktrees/";
+      const gitignorePath = path.join(tempDir, ".gitignore");
+
+      // Create .gitignore without trailing newline
+      await fs.writeFile(gitignorePath, "node_modules/", "utf-8");
+
+      await git.ensureGitignoreEntry(tempDir, entry);
+
+      const content = await fs.readFile(gitignorePath, "utf-8");
+      expect(content).toBe("node_modules/\n.worktrees/\n");
+    });
+  });
+});

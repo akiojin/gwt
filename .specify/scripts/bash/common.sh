@@ -68,11 +68,19 @@ check_feature_branch() {
         return 0
     fi
 
-    # SPEC-UUID形式のチェック
+    # SPECIFY_FEATURE環境変数が設定されている場合は優先
+    if [[ -n "${SPECIFY_FEATURE:-}" ]]; then
+        echo "[specify] SPECIFY_FEATURE環境変数を使用: $SPECIFY_FEATURE" >&2
+        return 0
+    fi
+
+    # SPEC-UUID形式のチェック（警告のみ、エラーにはしない）
     if [[ ! "$branch" =~ ^SPEC-[a-f0-9]{8}$ ]]; then
-        echo "エラー: 機能ブランチ上にありません。現在のブランチ: $branch" >&2
-        echo "機能ブランチは次のように命名する必要があります: SPEC-xxxxxxxx" >&2
-        return 1
+        echo "[specify] 警告: ブランチ名がSPEC形式ではありません: $branch" >&2
+        echo "[specify] Worktree設計思想に従い、任意のブランチ名で作業を続けます" >&2
+        echo "[specify] 注意: specsディレクトリにSPEC-*形式のディレクトリが存在する必要があります" >&2
+        # エラーではなく警告として続行
+        return 0
     fi
 
     return 0

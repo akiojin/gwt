@@ -103,7 +103,7 @@ branch refs/heads/main
 
       const path = await worktree.generateWorktreePath(repoRoot, branchName);
 
-      expect(path).toBe("/path/to/repo/.git/worktree/feature-user-auth");
+      expect(path).toBe("/path/to/repo/.worktrees/feature-user-auth");
     });
 
     it("should sanitize special characters in branch name", async () => {
@@ -113,7 +113,7 @@ branch refs/heads/main
       const path = await worktree.generateWorktreePath(repoRoot, branchName);
 
       expect(path).toBe(
-        "/path/to/repo/.git/worktree/feature-user-auth-with-special-chars-",
+        "/path/to/repo/.worktrees/feature-user-auth-with-special-chars-",
       );
     });
 
@@ -223,6 +223,60 @@ branch refs/heads/main
       await expect(worktree.createWorktree(config)).rejects.toThrow(
         "Failed to create worktree for feature/test",
       );
+    });
+
+    it("should update .gitignore after successful worktree creation", async () => {
+      (execa as any).mockResolvedValue({
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+      });
+
+      const ensureGitignoreSpy = vi
+        .spyOn(git, "ensureGitignoreEntry")
+        .mockResolvedValue();
+
+      const config = {
+        branchName: "feature/test",
+        worktreePath: "/path/to/repo/.worktrees/feature-test",
+        repoRoot: "/path/to/repo",
+        isNewBranch: false,
+        baseBranch: "main",
+      };
+
+      await worktree.createWorktree(config);
+
+      expect(ensureGitignoreSpy).toHaveBeenCalledWith(
+        "/path/to/repo",
+        ".worktrees/",
+      );
+    });
+
+    it("should not fail worktree creation if .gitignore update fails", async () => {
+      (execa as any).mockResolvedValue({
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+      });
+
+      // .gitignore更新が失敗してもworktree作成は成功する
+      vi.spyOn(git, "ensureGitignoreEntry").mockRejectedValue(
+        new Error("Permission denied"),
+      );
+
+      const config = {
+        branchName: "feature/test",
+        worktreePath: "/path/to/repo/.worktrees/feature-test",
+        repoRoot: "/path/to/repo",
+        isNewBranch: false,
+        baseBranch: "main",
+      };
+
+      // エラーなく完了する(エラーがスローされない)
+      await worktree.createWorktree(config);
+
+      // execaが正常に呼ばれたことを確認
+      expect(execa).toHaveBeenCalled();
     });
   });
 
@@ -338,15 +392,13 @@ branch refs/heads/feature/test
 
   describe("getMergedPRWorktrees", () => {
     it("includes branches identical to the base branch when there are no local-only commits", async () => {
-      const configSpy = vi
-        .spyOn(configModule, "getConfig")
-        .mockResolvedValue({
-          defaultBaseBranch: "main",
-          skipPermissions: false,
-          enableGitHubIntegration: true,
-          enableDebugMode: false,
-          worktreeNamingPattern: "{repo}-{branch}",
-        });
+      const configSpy = vi.spyOn(configModule, "getConfig").mockResolvedValue({
+        defaultBaseBranch: "main",
+        skipPermissions: false,
+        enableGitHubIntegration: true,
+        enableDebugMode: false,
+        worktreeNamingPattern: "{repo}-{branch}",
+      });
 
       const repoRootSpy = vi
         .spyOn(git, "getRepositoryRoot")
@@ -410,7 +462,11 @@ branch refs/heads/feature/test
 
       (execa as any).mockImplementation(
         async (command: string, args?: readonly string[]) => {
-          if (command === "git" && args?.[0] === "worktree" && args[1] === "list") {
+          if (
+            command === "git" &&
+            args?.[0] === "worktree" &&
+            args[1] === "list"
+          ) {
             return {
               stdout: `worktree /repo
 HEAD 0000000
@@ -461,6 +517,131 @@ branch refs/heads/feature/no-diff
       expect(hasUnpushedRepoSpy).toHaveBeenCalled();
       expect(branchHasUniqueSpy).toHaveBeenCalled();
       expect(remoteExistsSpy).toHaveBeenCalled();
+    });
+  });
+
+  describe("Backward Compatibility (US3)", () => {
+    describe("listAdditionalWorktrees with legacy .git/worktree paths", () => {
+      it("should list worktrees from legacy .git/worktree path", async () => {
+        const mockWorktreeOutput = `worktree /path/to/repo
+HEAD abc1234
+branch refs/heads/main
+
+worktree /path/to/repo/.git/worktree/feature-old
+HEAD def5678
+branch refs/heads/feature/old
+`;
+
+        (execa as any).mockResolvedValue({
+          stdout: mockWorktreeOutput,
+          stderr: "",
+          exitCode: 0,
+        });
+
+        vi.spyOn(git, "getRepositoryRoot").mockResolvedValue("/path/to/repo");
+        (fs.existsSync as any).mockReturnValue(true);
+
+        const worktreeList = await worktree.listAdditionalWorktrees();
+
+        expect(worktreeList).toHaveLength(1);
+        expect(worktreeList[0].path).toBe(
+          "/path/to/repo/.git/worktree/feature-old",
+        );
+        expect(worktreeList[0].branch).toBe("feature/old");
+        expect(worktreeList[0].isAccessible).toBe(true);
+      });
+
+      it("should list both legacy and new worktree paths together", async () => {
+        const mockWorktreeOutput = `worktree /path/to/repo
+HEAD abc1234
+branch refs/heads/main
+
+worktree /path/to/repo/.git/worktree/feature-old
+HEAD def5678
+branch refs/heads/feature/old
+
+worktree /path/to/repo/.worktrees/feature-new
+HEAD ghi9012
+branch refs/heads/feature/new
+`;
+
+        (execa as any).mockResolvedValue({
+          stdout: mockWorktreeOutput,
+          stderr: "",
+          exitCode: 0,
+        });
+
+        vi.spyOn(git, "getRepositoryRoot").mockResolvedValue("/path/to/repo");
+        (fs.existsSync as any).mockReturnValue(true);
+
+        const worktreeList = await worktree.listAdditionalWorktrees();
+
+        expect(worktreeList).toHaveLength(2);
+
+        const oldWorktree = worktreeList.find(
+          (w) => w.branch === "feature/old",
+        );
+        expect(oldWorktree).toBeDefined();
+        expect(oldWorktree?.path).toBe(
+          "/path/to/repo/.git/worktree/feature-old",
+        );
+
+        const newWorktree = worktreeList.find(
+          (w) => w.branch === "feature/new",
+        );
+        expect(newWorktree).toBeDefined();
+        expect(newWorktree?.path).toBe("/path/to/repo/.worktrees/feature-new");
+      });
+    });
+
+    describe("worktreeExists with legacy .git/worktree paths", () => {
+      it("should find worktree in legacy .git/worktree path", async () => {
+        const mockWorktreeOutput = `worktree /path/to/repo
+HEAD abc1234
+branch refs/heads/main
+
+worktree /path/to/repo/.git/worktree/feature-old
+HEAD def5678
+branch refs/heads/feature/old
+`;
+
+        (execa as any).mockResolvedValue({
+          stdout: mockWorktreeOutput,
+          stderr: "",
+          exitCode: 0,
+        });
+
+        const path = await worktree.worktreeExists("feature/old");
+
+        expect(path).toBe("/path/to/repo/.git/worktree/feature-old");
+      });
+
+      it("should distinguish between legacy and new worktree paths", async () => {
+        const mockWorktreeOutput = `worktree /path/to/repo
+HEAD abc1234
+branch refs/heads/main
+
+worktree /path/to/repo/.git/worktree/feature-old
+HEAD def5678
+branch refs/heads/feature/old
+
+worktree /path/to/repo/.worktrees/feature-new
+HEAD ghi9012
+branch refs/heads/feature/new
+`;
+
+        (execa as any).mockResolvedValue({
+          stdout: mockWorktreeOutput,
+          stderr: "",
+          exitCode: 0,
+        });
+
+        const oldPath = await worktree.worktreeExists("feature/old");
+        expect(oldPath).toBe("/path/to/repo/.git/worktree/feature-old");
+
+        const newPath = await worktree.worktreeExists("feature/new");
+        expect(newPath).toBe("/path/to/repo/.worktrees/feature-new");
+      });
     });
   });
 });

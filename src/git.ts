@@ -366,10 +366,7 @@ export async function hasUnpushedCommitsInRepo(
   branch: string,
   repoRoot?: string,
 ): Promise<boolean> {
-  return hasUnpushedCommitsInternal(
-    branch,
-    repoRoot ? { cwd: repoRoot } : {},
-  );
+  return hasUnpushedCommitsInternal(branch, repoRoot ? { cwd: repoRoot } : {});
 }
 
 export async function branchHasUniqueCommitsComparedToBase(
@@ -777,5 +774,47 @@ export async function isInWorktree(): Promise<boolean> {
     return false;
   } catch {
     return false;
+  }
+}
+
+/**
+ * .gitignoreファイルに指定されたエントリーが存在することを保証します
+ * エントリーが既に存在する場合は何もしません
+ * @param {string} repoRoot - リポジトリのルートディレクトリ
+ * @param {string} entry - 追加するエントリー（例: ".worktrees/"）
+ * @throws {GitError} ファイルの読み書きに失敗した場合
+ */
+export async function ensureGitignoreEntry(
+  repoRoot: string,
+  entry: string,
+): Promise<void> {
+  const fs = await import("node:fs/promises");
+  const gitignorePath = path.join(repoRoot, ".gitignore");
+
+  try {
+    // .gitignoreファイルを読み込む（存在しない場合は空文字列）
+    let content = "";
+    try {
+      content = await fs.readFile(gitignorePath, "utf-8");
+    } catch (error: any) {
+      // ENOENTエラー（ファイルが存在しない）は無視
+      if (error.code !== "ENOENT") {
+        throw error;
+      }
+    }
+
+    // エントリーの重複チェック
+    const lines = content.split("\n");
+    if (lines.includes(entry)) {
+      // 既に存在する場合は何もしない
+      return;
+    }
+
+    // エントリーを追加（改行を含める）
+    const newContent =
+      content + (content && !content.endsWith("\n") ? "\n" : "") + entry + "\n";
+    await fs.writeFile(gitignorePath, newContent, "utf-8");
+  } catch (error: any) {
+    throw new GitError(`Failed to update .gitignore: ${error.message}`, error);
   }
 }

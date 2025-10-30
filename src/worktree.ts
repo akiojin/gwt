@@ -17,6 +17,7 @@ import {
   checkRemoteBranchExists,
   branchHasUniqueCommitsComparedToBase,
   getRepositoryRoot,
+  ensureGitignoreEntry,
 } from "./git.js";
 import { getConfig } from "./config/index.js";
 import { GIT_CONFIG } from "./config/constants.js";
@@ -132,7 +133,7 @@ export async function generateWorktreePath(
   branchName: string,
 ): Promise<string> {
   const sanitizedBranchName = branchName.replace(/[\/\\:*?"<>|]/g, "-");
-  const worktreeDir = path.join(repoRoot, ".git", "worktree");
+  const worktreeDir = path.join(repoRoot, ".worktrees");
   return path.join(worktreeDir, sanitizedBranchName);
 }
 
@@ -191,6 +192,16 @@ export async function createWorktree(config: WorktreeConfig): Promise<void> {
     }
 
     await execa("git", args);
+
+    // .gitignoreに.worktrees/を追加(エラーは警告として扱う)
+    try {
+      await ensureGitignoreEntry(config.repoRoot, ".worktrees/");
+    } catch (error: any) {
+      // .gitignoreの更新失敗は警告としてログに出すが、worktree作成は成功とする
+      console.warn(
+        `Warning: Failed to update .gitignore: ${error.message || error}`,
+      );
+    }
   } catch (error: any) {
     // Extract more detailed error information from git command
     const gitError =
@@ -310,12 +321,11 @@ async function getOrphanedLocalBranches({
         }
 
         if (!hasUnpushed) {
-          const hasUniqueCommits =
-            await branchHasUniqueCommitsComparedToBase(
-              localBranch.name,
-              baseBranch,
-              repoRoot,
-            );
+          const hasUniqueCommits = await branchHasUniqueCommitsComparedToBase(
+            localBranch.name,
+            baseBranch,
+            repoRoot,
+          );
 
           if (!hasUniqueCommits) {
             reasons.push("no-diff-with-base");
@@ -404,8 +414,7 @@ export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
     getConfig(),
     getRepositoryRoot(),
   ]);
-  const baseBranch =
-    config.defaultBaseBranch || GIT_CONFIG.DEFAULT_BASE_BRANCH;
+  const baseBranch = config.defaultBaseBranch || GIT_CONFIG.DEFAULT_BASE_BRANCH;
 
   // 並列実行で高速化 - worktreeとマージ済みPRの両方を取得
   const [mergedPRs, worktreesWithPR] = await Promise.all([
