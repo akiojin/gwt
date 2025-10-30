@@ -1,3 +1,18 @@
+# [1.12.0](https://github.com/akiojin/claude-worktree/compare/v1.11.0...v1.12.0) (2025-10-30)
+
+
+### Bug Fixes
+
+* ensureGitignoreEntryテストを統合テストに変更 ([2727353](https://github.com/akiojin/claude-worktree/commit/2727353744d5eb23eb7b0cda5329dadd11479253))
+* Spec Kitスクリプトのデフォルト動作をブランチ作成なしに変更 ([e7627ec](https://github.com/akiojin/claude-worktree/commit/e7627ecf11c40da4f98a1203d7745a881117f70e))
+* Spec Kitスクリプトのブランチ名制約を緩和 ([fb7118a](https://github.com/akiojin/claude-worktree/commit/fb7118a97620d5d0d35df13004bdbcefd83ea2cb))
+
+
+### Features
+
+* Worktreeディレクトリパスを.git/worktreeから.worktreesに変更 ([da46aa1](https://github.com/akiojin/claude-worktree/commit/da46aa1385fdd420072c12a6f3a70a5400a02675))
+* worktree作成時に.gitignoreへ.worktrees/を自動追加 ([aabfaee](https://github.com/akiojin/claude-worktree/commit/aabfaee47aca3660398b1860f2b51b4762f99f57))
+
 ## [Unreleased]
 
 ### Features
