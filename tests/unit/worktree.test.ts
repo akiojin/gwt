@@ -103,7 +103,7 @@ branch refs/heads/main
 
       const path = await worktree.generateWorktreePath(repoRoot, branchName);
 
-      expect(path).toBe("/path/to/repo/.git/worktree/feature-user-auth");
+      expect(path).toBe("/path/to/repo/.worktrees/feature-user-auth");
     });
 
     it("should sanitize special characters in branch name", async () => {
@@ -113,7 +113,7 @@ branch refs/heads/main
       const path = await worktree.generateWorktreePath(repoRoot, branchName);
 
       expect(path).toBe(
-        "/path/to/repo/.git/worktree/feature-user-auth-with-special-chars-",
+        "/path/to/repo/.worktrees/feature-user-auth-with-special-chars-",
       );
     });
 
@@ -338,15 +338,13 @@ branch refs/heads/feature/test
 
   describe("getMergedPRWorktrees", () => {
     it("includes branches identical to the base branch when there are no local-only commits", async () => {
-      const configSpy = vi
-        .spyOn(configModule, "getConfig")
-        .mockResolvedValue({
-          defaultBaseBranch: "main",
-          skipPermissions: false,
-          enableGitHubIntegration: true,
-          enableDebugMode: false,
-          worktreeNamingPattern: "{repo}-{branch}",
-        });
+      const configSpy = vi.spyOn(configModule, "getConfig").mockResolvedValue({
+        defaultBaseBranch: "main",
+        skipPermissions: false,
+        enableGitHubIntegration: true,
+        enableDebugMode: false,
+        worktreeNamingPattern: "{repo}-{branch}",
+      });
 
       const repoRootSpy = vi
         .spyOn(git, "getRepositoryRoot")
@@ -410,7 +408,11 @@ branch refs/heads/feature/test
 
       (execa as any).mockImplementation(
         async (command: string, args?: readonly string[]) => {
-          if (command === "git" && args?.[0] === "worktree" && args[1] === "list") {
+          if (
+            command === "git" &&
+            args?.[0] === "worktree" &&
+            args[1] === "list"
+          ) {
             return {
               stdout: `worktree /repo
 HEAD 0000000
