@@ -734,3 +734,109 @@ origin/develop`;
     });
   });
 });
+
+describe("git.ts - Gitignore Operations", () => {
+  describe("ensureGitignoreEntry", () => {
+    let readFileSpy: any;
+    let writeFileSpy: any;
+
+    beforeEach(async () => {
+      vi.clearAllMocks();
+      // Import and spy on fs/promises
+      const fs = await import("node:fs/promises");
+      readFileSpy = vi.spyOn(fs, "readFile");
+      writeFileSpy = vi.spyOn(fs, "writeFile");
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it("should add entry to .gitignore when file exists and entry does not exist", async () => {
+      const repoRoot = "/path/to/repo";
+      const entry = ".worktrees/";
+
+      readFileSpy.mockResolvedValue("node_modules/\ndist/\n");
+      writeFileSpy.mockResolvedValue(undefined);
+
+      await git.ensureGitignoreEntry(repoRoot, entry);
+
+      expect(readFileSpy).toHaveBeenCalled();
+      expect(writeFileSpy).toHaveBeenCalledWith(
+        expect.stringContaining(".gitignore"),
+        "node_modules/\ndist/\n.worktrees/\n",
+        "utf-8",
+      );
+    });
+
+    it("should not add entry when it already exists", async () => {
+      const repoRoot = "/path/to/repo";
+      const entry = ".worktrees/";
+
+      readFileSpy.mockResolvedValue("node_modules/\n.worktrees/\ndist/\n");
+
+      await git.ensureGitignoreEntry(repoRoot, entry);
+
+      expect(readFileSpy).toHaveBeenCalled();
+      expect(writeFileSpy).not.toHaveBeenCalled();
+    });
+
+    it("should create .gitignore with entry when file does not exist", async () => {
+      const repoRoot = "/path/to/repo";
+      const entry = ".worktrees/";
+
+      readFileSpy.mockRejectedValue({ code: "ENOENT" });
+      writeFileSpy.mockResolvedValue(undefined);
+
+      await git.ensureGitignoreEntry(repoRoot, entry);
+
+      expect(writeFileSpy).toHaveBeenCalledWith(
+        expect.stringContaining(".gitignore"),
+        ".worktrees/\n",
+        "utf-8",
+      );
+    });
+
+    it("should throw GitError when file read fails with non-ENOENT error", async () => {
+      const repoRoot = "/path/to/repo";
+      const entry = ".worktrees/";
+
+      readFileSpy.mockRejectedValue({
+        code: "EACCES",
+        message: "Permission denied",
+      });
+
+      await expect(git.ensureGitignoreEntry(repoRoot, entry)).rejects.toThrow(
+        "Failed to update .gitignore",
+      );
+    });
+
+    it("should throw GitError when file write fails", async () => {
+      const repoRoot = "/path/to/repo";
+      const entry = ".worktrees/";
+
+      readFileSpy.mockResolvedValue("node_modules/\n");
+      writeFileSpy.mockRejectedValue(new Error("Disk full"));
+
+      await expect(git.ensureGitignoreEntry(repoRoot, entry)).rejects.toThrow(
+        "Failed to update .gitignore",
+      );
+    });
+
+    it("should handle .gitignore without trailing newline", async () => {
+      const repoRoot = "/path/to/repo";
+      const entry = ".worktrees/";
+
+      readFileSpy.mockResolvedValue("node_modules/");
+      writeFileSpy.mockResolvedValue(undefined);
+
+      await git.ensureGitignoreEntry(repoRoot, entry);
+
+      expect(writeFileSpy).toHaveBeenCalledWith(
+        expect.stringContaining(".gitignore"),
+        "node_modules/\n.worktrees/\n",
+        "utf-8",
+      );
+    });
+  });
+});

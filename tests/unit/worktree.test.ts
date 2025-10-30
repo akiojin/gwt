@@ -224,6 +224,60 @@ branch refs/heads/main
         "Failed to create worktree for feature/test",
       );
     });
+
+    it("should update .gitignore after successful worktree creation", async () => {
+      (execa as any).mockResolvedValue({
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+      });
+
+      const ensureGitignoreSpy = vi
+        .spyOn(git, "ensureGitignoreEntry")
+        .mockResolvedValue();
+
+      const config = {
+        branchName: "feature/test",
+        worktreePath: "/path/to/repo/.worktrees/feature-test",
+        repoRoot: "/path/to/repo",
+        isNewBranch: false,
+        baseBranch: "main",
+      };
+
+      await worktree.createWorktree(config);
+
+      expect(ensureGitignoreSpy).toHaveBeenCalledWith(
+        "/path/to/repo",
+        ".worktrees/",
+      );
+    });
+
+    it("should not fail worktree creation if .gitignore update fails", async () => {
+      (execa as any).mockResolvedValue({
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+      });
+
+      // .gitignore更新が失敗してもworktree作成は成功する
+      vi.spyOn(git, "ensureGitignoreEntry").mockRejectedValue(
+        new Error("Permission denied"),
+      );
+
+      const config = {
+        branchName: "feature/test",
+        worktreePath: "/path/to/repo/.worktrees/feature-test",
+        repoRoot: "/path/to/repo",
+        isNewBranch: false,
+        baseBranch: "main",
+      };
+
+      // エラーなく完了する(エラーがスローされない)
+      await worktree.createWorktree(config);
+
+      // execaが正常に呼ばれたことを確認
+      expect(execa).toHaveBeenCalled();
+    });
   });
 
   describe("removeWorktree (T702)", () => {

@@ -17,6 +17,7 @@ import {
   checkRemoteBranchExists,
   branchHasUniqueCommitsComparedToBase,
   getRepositoryRoot,
+  ensureGitignoreEntry,
 } from "./git.js";
 import { getConfig } from "./config/index.js";
 import { GIT_CONFIG } from "./config/constants.js";
@@ -191,6 +192,16 @@ export async function createWorktree(config: WorktreeConfig): Promise<void> {
     }
 
     await execa("git", args);
+
+    // .gitignoreに.worktrees/を追加(エラーは警告として扱う)
+    try {
+      await ensureGitignoreEntry(config.repoRoot, ".worktrees/");
+    } catch (error: any) {
+      // .gitignoreの更新失敗は警告としてログに出すが、worktree作成は成功とする
+      console.warn(
+        `Warning: Failed to update .gitignore: ${error.message || error}`,
+      );
+    }
   } catch (error: any) {
     // Extract more detailed error information from git command
     const gitError =

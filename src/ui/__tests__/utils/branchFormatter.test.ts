@@ -358,12 +358,15 @@ describe("branchFormatter", () => {
 
     it("should prioritize branches with worktree", () => {
       const worktreeMap = new Map([
-        ["feature/with-worktree", {
-          path: "/path/to/worktree",
-          locked: false,
-          prunable: false,
-          isAccessible: true,
-        }],
+        [
+          "feature/with-worktree",
+          {
+            path: "/path/to/worktree",
+            locked: false,
+            prunable: false,
+            isAccessible: true,
+          },
+        ],
       ]);
 
       const branches: BranchInfo[] = [
@@ -419,12 +422,15 @@ describe("branchFormatter", () => {
 
     it("should apply all sorting rules in correct priority order", () => {
       const worktreeMap = new Map([
-        ["feature/with-worktree", {
-          path: "/path/to/worktree",
-          locked: false,
-          prunable: false,
-          isAccessible: true,
-        }],
+        [
+          "feature/with-worktree",
+          {
+            path: "/path/to/worktree",
+            locked: false,
+            prunable: false,
+            isAccessible: true,
+          },
+        ],
       ]);
 
       const branches: BranchInfo[] = [
