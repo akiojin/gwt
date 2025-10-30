@@ -1,3 +1,19 @@
+## [Unreleased]
+
+### Features
+
+* **worktree**: Worktreeディレクトリを`.git/worktree`から`.worktrees`に変更
+  - 新規Worktreeは`.worktrees/`配下に作成されます
+  - `.gitignore`に`.worktrees/`が自動的に追加されます
+  - 既存の`.git/worktree`配下のWorktreeは影響を受けず、引き続き動作します
+  - 新旧両方のパスのWorktreeが共存可能です
+
+### Tests
+
+* **worktree**: 後方互換性テストを追加
+  - 既存の`.git/worktree`パスのWorktreeが正常に動作することを検証
+  - 新旧パスのWorktreeが共存できることを検証
+
 # [1.10.0](https://github.com/akiojin/claude-worktree/compare/v1.9.0...v1.10.0) (2025-10-29)
 
 
