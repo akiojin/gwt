@@ -35,7 +35,10 @@ export interface AppProps {
  */
 export function App({ onExit }: AppProps) {
   const { exit } = useApp();
-  const { branches, worktrees, loading, error, refresh, lastUpdated } = useGitData();
+  const { branches, worktrees, loading, error, refresh, lastUpdated } = useGitData({
+    enableAutoRefresh: true,
+    refreshInterval: 5000, // 5 seconds
+  });
   const { currentScreen, navigateTo, goBack, reset } = useScreenState();
 
   // Selection state (for branch → tool → mode flow)
