@@ -7,6 +7,14 @@ export interface HeaderProps {
   dividerChar?: string;
   showDivider?: boolean;
   width?: number;
+  /**
+   * アプリケーションのバージョン文字列
+   * - string: バージョンが利用可能（例: "1.12.3"）
+   * - null: バージョン取得失敗
+   * - undefined: バージョン未提供（後方互換性のため）
+   * @default undefined
+   */
+  version?: string | null | undefined;
 }
 
 /**
@@ -19,14 +27,16 @@ export const Header = React.memo(function Header({
   dividerChar = '─',
   showDivider = true,
   width = 80,
+  version,
 }: HeaderProps) {
   const divider = dividerChar.repeat(width);
+  const displayTitle = version ? `${title} v${version}` : title;
 
   return (
     <Box flexDirection="column">
       <Box>
         <Text bold color={titleColor}>
-          {title}
+          {displayTitle}
         </Text>
       </Box>
       {showDivider && (

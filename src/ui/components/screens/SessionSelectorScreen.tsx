@@ -14,6 +14,7 @@ export interface SessionSelectorScreenProps {
   sessions: string[];
   onBack: () => void;
   onSelect: (session: string) => void;
+  version?: string | null;
 }
 
 /**
@@ -24,6 +25,7 @@ export function SessionSelectorScreen({
   sessions,
   onBack,
   onSelect,
+  version,
 }: SessionSelectorScreenProps) {
   const { rows } = useTerminalSize();
 
@@ -64,7 +66,7 @@ export function SessionSelectorScreen({
   return (
     <Box flexDirection="column" height={rows}>
       {/* Header */}
-      <Header title="Session Selection" titleColor="cyan" />
+      <Header title="Session Selection" titleColor="cyan" version={version} />
 
       {/* Stats */}
       <Box marginTop={1}>

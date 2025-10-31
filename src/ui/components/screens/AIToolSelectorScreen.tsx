@@ -18,6 +18,7 @@ export interface AIToolItem {
 export interface AIToolSelectorScreenProps {
   onBack: () => void;
   onSelect: (tool: AITool) => void;
+  version?: string | null;
 }
 
 /**
@@ -26,7 +27,7 @@ export interface AIToolSelectorScreenProps {
  *
  * This screen dynamically loads available tools from the configuration (builtin + custom).
  */
-export function AIToolSelectorScreen({ onBack, onSelect }: AIToolSelectorScreenProps) {
+export function AIToolSelectorScreen({ onBack, onSelect, version }: AIToolSelectorScreenProps) {
   const { rows } = useTerminalSize();
   const [toolItems, setToolItems] = useState<AIToolItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -92,7 +93,7 @@ export function AIToolSelectorScreen({ onBack, onSelect }: AIToolSelectorScreenP
   return (
     <Box flexDirection="column" height={rows}>
       {/* Header */}
-      <Header title="AI Tool Selection" titleColor="blue" />
+      <Header title="AI Tool Selection" titleColor="blue" version={version} />
 
       {/* Content */}
       <Box flexDirection="column" flexGrow={1} marginTop={1}>

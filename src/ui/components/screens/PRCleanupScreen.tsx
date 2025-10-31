@@ -20,6 +20,7 @@ export interface PRCleanupScreenProps {
   onBack: () => void;
   onRefresh: () => void;
   onCleanup: (target: CleanupTarget) => void;
+  version?: string | null;
 }
 
 /**
@@ -34,6 +35,7 @@ export function PRCleanupScreen({
   onBack,
   onRefresh,
   onCleanup,
+  version,
 }: PRCleanupScreenProps) {
   const { rows } = useTerminalSize();
 
@@ -104,7 +106,7 @@ export function PRCleanupScreen({
   return (
     <Box flexDirection="column" height={rows}>
       {/* Header */}
-      <Header title="Branch Cleanup" titleColor="yellow" />
+      <Header title="Branch Cleanup" titleColor="yellow" version={version} />
 
       {/* Stats */}
       <Box marginTop={1}>

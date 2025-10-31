@@ -14,6 +14,7 @@ export interface BranchCreatorScreenProps {
   onBack: () => void;
   onCreate: (branchName: string) => void;
   baseBranch?: string;
+  version?: string | null;
 }
 
 interface BranchTypeItem {
@@ -27,7 +28,7 @@ interface BranchTypeItem {
  * Layout: Header + Type Selection or Name Input + Footer
  * Flow: Type Selection → Name Input → onCreate
  */
-export function BranchCreatorScreen({ onBack, onCreate, baseBranch }: BranchCreatorScreenProps) {
+export function BranchCreatorScreen({ onBack, onCreate, baseBranch, version }: BranchCreatorScreenProps) {
   const { rows } = useTerminalSize();
   const [step, setStep] = useState<Step>('type-selection');
   const [selectedType, setSelectedType] = useState<BranchType>('feature');
@@ -94,7 +95,7 @@ export function BranchCreatorScreen({ onBack, onCreate, baseBranch }: BranchCrea
   return (
     <Box flexDirection="column" height={rows}>
       {/* Header */}
-      <Header title="New Branch" titleColor="green" />
+      <Header title="New Branch" titleColor="green" version={version} />
 
       {/* Content */}
       <Box flexDirection="column" flexGrow={1} marginTop={1}>

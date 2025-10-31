@@ -23,6 +23,7 @@ import {
   getMergedPRWorktrees,
   removeWorktree,
 } from '../../worktree.js';
+import { getPackageVersion } from '../../utils.js';
 
 const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'];
 const COMPLETION_HOLD_DURATION_MS = 3000;
@@ -68,6 +69,9 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
   });
   const { currentScreen, navigateTo, goBack, reset } = useScreenState();
 
+  // Version state
+  const [version, setVersion] = useState<string | null>(null);
+
   // Selection state (for branch → tool → mode flow)
   const [selectedBranch, setSelectedBranch] = useState<SelectedBranchState | null>(null);
   const [selectedTool, setSelectedTool] = useState<AITool | null>(null);
@@ -81,6 +85,13 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
   const spinnerFrameIndexRef = useRef(0);
   const [spinnerFrameIndex, setSpinnerFrameIndex] = useState(0);
   const completionTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Fetch version on mount
+  useEffect(() => {
+    getPackageVersion()
+      .then(setVersion)
+      .catch(() => setVersion(null));
+  }, []);
 
   useEffect(() => {
     if (!cleanupInputLocked) {
@@ -526,6 +537,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
               footerMessage: cleanupFooterMessage,
               inputLocked: cleanupInputLocked,
             }}
+            version={version}
           />
         );
 
@@ -535,6 +547,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
             worktrees={worktreeItems}
             onBack={goBack}
             onSelect={handleWorktreeSelect}
+            version={version}
           />
         );
 
@@ -544,6 +557,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
             onBack={goBack}
             onCreate={handleCreate}
             {...(selectedBranch?.displayName && { baseBranch: selectedBranch.displayName })}
+            version={version}
           />
         );
 
@@ -558,7 +572,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         );
 
       case 'ai-tool-selector':
-        return <AIToolSelectorScreen onBack={goBack} onSelect={handleToolSelect} />;
+        return <AIToolSelectorScreen onBack={goBack} onSelect={handleToolSelect} version={version} />;
 
       case 'session-selector':
         // TODO: Implement session data fetching
@@ -567,12 +581,13 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
             sessions={[]}
             onBack={goBack}
             onSelect={handleSessionSelect}
+            version={version}
           />
         );
 
       case 'execution-mode-selector':
         return (
-          <ExecutionModeSelectorScreen onBack={goBack} onSelect={handleModeSelect} />
+          <ExecutionModeSelectorScreen onBack={goBack} onSelect={handleModeSelect} version={version} />
         );
 
       default:
@@ -588,6 +603,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
             error={error}
             lastUpdated={lastUpdated}
             loadingIndicatorDelay={loadingIndicatorDelay}
+            version={version}
           />
         );
     }

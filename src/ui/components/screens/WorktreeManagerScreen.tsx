@@ -17,6 +17,7 @@ export interface WorktreeManagerScreenProps {
   worktrees: WorktreeItem[];
   onBack: () => void;
   onSelect: (worktree: WorktreeItem) => void;
+  version?: string | null;
 }
 
 /**
@@ -27,6 +28,7 @@ export function WorktreeManagerScreen({
   worktrees,
   onBack,
   onSelect,
+  version,
 }: WorktreeManagerScreenProps) {
   const { rows } = useTerminalSize();
 
@@ -69,7 +71,7 @@ export function WorktreeManagerScreen({
   return (
     <Box flexDirection="column" height={rows}>
       {/* Header */}
-      <Header title="Worktree Manager" titleColor="magenta" />
+      <Header title="Worktree Manager" titleColor="magenta" version={version} />
 
       {/* Stats */}
       <Box marginTop={1}>
