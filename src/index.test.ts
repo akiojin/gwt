@@ -14,9 +14,7 @@ describe("showVersion via CLI args", () => {
   beforeEach(() => {
     // console.log, console.error, process.exitをモック
     consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-    consoleErrorSpy = vi
-      .spyOn(console, "error")
-      .mockImplementation(() => {});
+    consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     processExitSpy = vi
       .spyOn(process, "exit")
       .mockImplementation((() => {}) as any);
@@ -83,7 +81,7 @@ describe("showVersion via CLI args", () => {
 
     // Assert: エラーメッセージが標準エラー出力に表示され、exit(1)が呼ばれることを期待
     expect(consoleErrorSpy).toHaveBeenCalledWith(
-      expect.stringContaining("Error")
+      expect.stringContaining("Error"),
     );
     expect(processExitSpy).toHaveBeenCalledWith(1);
   });

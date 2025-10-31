@@ -54,10 +54,16 @@ claude-worktree
 bunx @akiojin/claude-worktree
 ```
 
-CLIオプションは現在 `--help` のみサポートされています:
+CLIオプション:
 
 ```bash
+# ヘルプを表示
 claude-worktree --help
+
+# バージョンを確認
+claude-worktree --version
+# または
+claude-worktree -v
 ```
 
 ツールは以下のオプションを持つ対話型インターフェースを提供します:

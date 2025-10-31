@@ -23,7 +23,7 @@ describe("getPackageVersion", () => {
     // package.jsonから直接読み取ってバージョンを確認
     const packageJsonContent = await readFile(
       path.resolve(process.cwd(), "package.json"),
-      "utf-8"
+      "utf-8",
     );
     const packageJson = JSON.parse(packageJsonContent);
 
