@@ -1,3 +1,10 @@
+## [1.12.3](https://github.com/akiojin/claude-worktree/compare/v1.12.2...v1.12.3) (2025-10-31)
+
+
+### Bug Fixes
+
+* Codex CLIのweb検索フラグを正しく有効化 ([7319690](https://github.com/akiojin/claude-worktree/commit/7319690d1d4bee5978b49390f797bc471164b683))
+
 ## [1.12.2](https://github.com/akiojin/claude-worktree/compare/v1.12.1...v1.12.2) (2025-10-31)
 
 
