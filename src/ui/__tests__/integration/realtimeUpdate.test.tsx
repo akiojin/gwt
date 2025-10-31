@@ -37,7 +37,7 @@ describe('Real-time Update Integration', () => {
     vi.restoreAllMocks();
   });
 
-  it('T084: should enable auto-refresh with correct interval', () => {
+  it('T084: should disable auto-refresh (manual refresh with r key)', () => {
     const mockBranches: BranchInfo[] = [
       {
         name: 'main',
@@ -65,10 +65,9 @@ describe('Real-time Update Integration', () => {
     const onExit = vi.fn();
     render(<App onExit={onExit} />);
 
-    // Verify useGitData was called with auto-refresh options
+    // Verify useGitData was called with auto-refresh disabled (manual refresh with r key)
     expect(mockUseGitData).toHaveBeenCalledWith({
-      enableAutoRefresh: true,
-      refreshInterval: 5000,
+      enableAutoRefresh: false,
     });
   });
 
