@@ -25,6 +25,10 @@ const worktreeIcons: Record<Exclude<WorktreeStatus, undefined>, string> = {
 const changeIcons = {
   current: "⭐",
   hasChanges: "✏️",
+  unpushed: "⬆️",
+  openPR: "🔀",
+  mergedPR: "✅",
+  warning: "⚠️",
 };
 
 const remoteIcon = "☁";
@@ -77,12 +81,20 @@ export function formatBranchItem(
     worktreeIcon = " ".repeat(COLUMN_WIDTH);
   }
 
-  // Column 3: Uncommitted changes / current branch icon
+  // Column 3: Change status icon (priority: ✏️ > ⬆️ > 🔀 > ✅ > ⚠️ > ⭐)
   let changesIcon: string;
-  if (branch.isCurrent) {
-    changesIcon = padIcon(changeIcons.current);
-  } else if (hasChanges) {
+  if (hasChanges) {
     changesIcon = padIcon(changeIcons.hasChanges);
+  } else if (branch.hasUnpushedCommits) {
+    changesIcon = padIcon(changeIcons.unpushed);
+  } else if (branch.openPR) {
+    changesIcon = padIcon(changeIcons.openPR);
+  } else if (branch.mergedPR) {
+    changesIcon = padIcon(changeIcons.mergedPR);
+  } else if (branch.worktree?.isAccessible === false) {
+    changesIcon = padIcon(changeIcons.warning);
+  } else if (branch.isCurrent) {
+    changesIcon = padIcon(changeIcons.current);
   } else {
     changesIcon = " ".repeat(COLUMN_WIDTH);
   }
@@ -109,10 +121,19 @@ export function formatBranchItem(
         : worktreeIcons.inaccessible,
     );
   }
-  if (branch.isCurrent) {
-    icons.push(changeIcons.current);
-  } else if (hasChanges) {
+  // Add change icon based on priority
+  if (hasChanges) {
     icons.push(changeIcons.hasChanges);
+  } else if (branch.hasUnpushedCommits) {
+    icons.push(changeIcons.unpushed);
+  } else if (branch.openPR) {
+    icons.push(changeIcons.openPR);
+  } else if (branch.mergedPR) {
+    icons.push(changeIcons.mergedPR);
+  } else if (branch.worktree?.isAccessible === false) {
+    icons.push(changeIcons.warning);
+  } else if (branch.isCurrent) {
+    icons.push(changeIcons.current);
   }
   if (branch.type === "remote") {
     icons.push(remoteIcon);
