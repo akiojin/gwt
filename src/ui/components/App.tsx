@@ -153,7 +153,19 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     [branches, hiddenBranches]
   );
 
-  // Format branches to BranchItems (memoized for performance)
+  // Helper function to create content-based hash for branches
+  const branchHash = useMemo(
+    () => visibleBranches.map((b) => `${b.name}-${b.type}-${b.isCurrent}`).join(','),
+    [visibleBranches]
+  );
+
+  // Helper function to create content-based hash for worktrees
+  const worktreeHash = useMemo(
+    () => worktrees.map((w) => `${w.branch}-${w.path}`).join(','),
+    [worktrees]
+  );
+
+  // Format branches to BranchItems (memoized for performance with content-based dependencies)
   const branchItems: BranchItem[] = useMemo(() => {
     // Build worktreeMap for sorting
     const worktreeMap = new Map();
@@ -166,7 +178,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       });
     }
     return formatBranchItems(visibleBranches, worktreeMap);
-  }, [visibleBranches, worktrees]);
+  }, [branchHash, worktreeHash, visibleBranches, worktrees]);
 
   // Calculate statistics (memoized for performance)
   const stats = useMemo(() => calculateStatistics(visibleBranches), [visibleBranches]);

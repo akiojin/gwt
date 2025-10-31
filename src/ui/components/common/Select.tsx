@@ -13,31 +13,98 @@ export interface SelectProps<T extends SelectItem = SelectItem> {
   initialIndex?: number;
   disabled?: boolean;
   renderIndicator?: (item: T, isSelected: boolean) => React.ReactNode;
+  // Optional controlled component props for cursor position
+  selectedIndex?: number;
+  onSelectedIndexChange?: (index: number) => void;
+}
+
+/**
+ * Custom comparison function for React.memo
+ * Compares items array by content (value and label) instead of reference
+ */
+function arePropsEqual<T extends SelectItem = SelectItem>(
+  prevProps: SelectProps<T>,
+  nextProps: SelectProps<T>
+): boolean {
+  // Check if non-array props are the same
+  if (
+    prevProps.limit !== nextProps.limit ||
+    prevProps.disabled !== nextProps.disabled ||
+    prevProps.initialIndex !== nextProps.initialIndex ||
+    prevProps.selectedIndex !== nextProps.selectedIndex ||
+    prevProps.onSelect !== nextProps.onSelect ||
+    prevProps.onSelectedIndexChange !== nextProps.onSelectedIndexChange ||
+    prevProps.renderIndicator !== nextProps.renderIndicator
+  ) {
+    return false;
+  }
+
+  // Check if items arrays have the same length
+  if (prevProps.items.length !== nextProps.items.length) {
+    return false;
+  }
+
+  // Compare items by content (value and label)
+  for (let i = 0; i < prevProps.items.length; i++) {
+    const prevItem = prevProps.items[i];
+    const nextItem = nextProps.items[i];
+
+    if (!prevItem || !nextItem) {
+      return false;
+    }
+
+    if (prevItem.value !== nextItem.value || prevItem.label !== nextItem.label) {
+      return false;
+    }
+  }
+
+  // All props are equal
+  return true;
 }
 
 /**
  * Select component - custom implementation with no looping
  * Cursor stops at top and bottom instead of wrapping around
+ * Wrapped with React.memo for performance optimization
  */
-export function Select<T extends SelectItem = SelectItem>({
+const SelectComponent = <T extends SelectItem = SelectItem,>({
   items,
   onSelect,
   limit,
   initialIndex = 0,
   disabled = false,
   renderIndicator,
-}: SelectProps<T>) {
-  const [selectedIndex, setSelectedIndex] = useState(initialIndex);
+  selectedIndex: externalSelectedIndex,
+  onSelectedIndexChange,
+}: SelectProps<T>) => {
+  // Support both controlled and uncontrolled modes
+  const [internalSelectedIndex, setInternalSelectedIndex] = useState(initialIndex);
   const [offset, setOffset] = useState(0);
+
+  // Use external selectedIndex if provided (controlled mode), otherwise use internal state
+  const isControlled = externalSelectedIndex !== undefined;
+  const selectedIndex = isControlled ? externalSelectedIndex : internalSelectedIndex;
+
+  const updateSelectedIndex = (value: number | ((prev: number) => number)) => {
+    const newIndex = typeof value === 'function' ? value(selectedIndex) : value;
+
+    if (!isControlled) {
+      setInternalSelectedIndex(newIndex);
+    }
+
+    if (onSelectedIndexChange) {
+      onSelectedIndexChange(newIndex);
+    }
+  };
 
   useEffect(() => {
     if (items.length === 0) {
-      setSelectedIndex(0);
+      updateSelectedIndex(0);
       setOffset(0);
       return;
     }
 
-    setSelectedIndex((current) => {
+    updateSelectedIndex((current) => {
       const clamped = Math.min(current, items.length - 1);
       return clamped < 0 ? 0 : clamped;
     });
@@ -62,7 +129,7 @@ export function Select<T extends SelectItem = SelectItem>({
     // Let other keys (q, m, n, c, etc.) propagate to parent components
     if (key.upArrow || input === 'k') {
       // Move up but don't loop - stop at 0
-      setSelectedIndex((current) => {
+      updateSelectedIndex((current) => {
         const newIndex = Math.max(0, current - 1);
 
         // Adjust offset if needed for scrolling
@@ -74,7 +141,7 @@ export function Select<T extends SelectItem = SelectItem>({
       });
     } else if (key.downArrow || input === 'j') {
       // Move down but don't loop - stop at last item
-      setSelectedIndex((current) => {
+      updateSelectedIndex((current) => {
         const newIndex = Math.min(items.length - 1, current + 1);
 
         // Adjust offset if needed for scrolling
@@ -127,4 +194,9 @@ export function Select<T extends SelectItem = SelectItem>({
       })}
     </Box>
   );
-}
+};
+
+/**
+ * Export memoized Select component
+ */
+export const Select = React.memo(SelectComponent, arePropsEqual) as typeof SelectComponent;
