@@ -64,8 +64,7 @@ interface SelectedBranchState {
 export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
   const { exit } = useApp();
   const { branches, worktrees, loading, error, refresh, lastUpdated } = useGitData({
-    enableAutoRefresh: true,
-    refreshInterval: 5000, // 5 seconds
+    enableAutoRefresh: false, // Manual refresh with 'r' key
   });
   const { currentScreen, navigateTo, goBack, reset } = useScreenState();
 
@@ -153,7 +152,19 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     [branches, hiddenBranches]
   );
 
-  // Format branches to BranchItems (memoized for performance)
+  // Helper function to create content-based hash for branches
+  const branchHash = useMemo(
+    () => visibleBranches.map((b) => `${b.name}-${b.type}-${b.isCurrent}`).join(','),
+    [visibleBranches]
+  );
+
+  // Helper function to create content-based hash for worktrees
+  const worktreeHash = useMemo(
+    () => worktrees.map((w) => `${w.branch}-${w.path}`).join(','),
+    [worktrees]
+  );
+
+  // Format branches to BranchItems (memoized for performance with content-based dependencies)
   const branchItems: BranchItem[] = useMemo(() => {
     // Build worktreeMap for sorting
     const worktreeMap = new Map();
@@ -166,7 +177,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       });
     }
     return formatBranchItems(visibleBranches, worktreeMap);
-  }, [visibleBranches, worktrees]);
+  }, [branchHash, worktreeHash, visibleBranches, worktrees]);
 
   // Calculate statistics (memoized for performance)
   const stats = useMemo(() => calculateStatistics(visibleBranches), [visibleBranches]);
@@ -505,6 +516,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
             onNavigate={handleNavigate}
             onQuit={handleQuit}
             onCleanupCommand={handleCleanupCommand}
+            onRefresh={refresh}
             loading={loading}
             error={error}
             lastUpdated={lastUpdated}
@@ -571,6 +583,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
             onSelect={handleSelect}
             onNavigate={handleNavigate}
             onQuit={handleQuit}
+            onRefresh={refresh}
             loading={loading}
             error={error}
             lastUpdated={lastUpdated}

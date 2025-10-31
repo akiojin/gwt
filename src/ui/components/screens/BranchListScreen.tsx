@@ -33,6 +33,7 @@ export interface BranchListScreenProps {
   onNavigate?: (screen: string) => void;
   onQuit?: () => void;
   onCleanupCommand?: () => void;
+  onRefresh?: () => void;
   loading?: boolean;
   error?: Error | null;
   lastUpdated?: Date | null;
@@ -51,6 +52,7 @@ export function BranchListScreen({
   onNavigate,
   onQuit,
   onCleanupCommand,
+  onRefresh,
   loading = false,
   error = null,
   lastUpdated = null,
@@ -70,6 +72,8 @@ export function BranchListScreen({
       onNavigate('worktree-manager');
     } else if (input === 'c') {
       onCleanupCommand?.();
+    } else if (input === 'r' && onRefresh) {
+      onRefresh();
     }
   });
 
@@ -90,6 +94,7 @@ export function BranchListScreen({
   // Footer actions
   const footerActions = [
     { key: 'enter', description: 'Select' },
+    { key: 'r', description: 'Refresh' },
     { key: 'm', description: 'Manage worktrees' },
     { key: 'c', description: 'Cleanup branches' },
   ];
