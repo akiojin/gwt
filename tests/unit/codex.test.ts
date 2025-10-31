@@ -46,7 +46,8 @@ import { launchCodexCLI } from "../../src/codex";
 const mockExeca = execa as ReturnType<typeof vi.fn>;
 
 const DEFAULT_CODEX_ARGS = [
-  "--search",
+  "-c",
+  "web_search_request=true",
   '--model="gpt-5-codex"',
   "--sandbox",
   "workspace-write",
