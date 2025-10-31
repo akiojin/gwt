@@ -12,6 +12,9 @@ export interface BranchInfo {
   isCurrent: boolean;
   description?: string;
   worktree?: WorktreeInfo;
+  hasUnpushedCommits?: boolean;
+  openPR?: { number: number; title: string };
+  mergedPR?: { number: number; mergedAt: string };
 }
 
 export interface BranchChoice {

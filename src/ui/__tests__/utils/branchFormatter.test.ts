@@ -146,6 +146,163 @@ describe("branchFormatter", () => {
       expect(result.hasChanges).toBe(true);
     });
 
+    it("should show unpushed commits icon", () => {
+      const branchInfo: BranchInfo = {
+        name: "feature/unpushed",
+        type: "local",
+        branchType: "feature",
+        isCurrent: false,
+        hasUnpushedCommits: true,
+      };
+
+      const result = formatBranchItem(branchInfo);
+
+      expect(result.icons).toContain("⬆️"); // unpushed icon
+      expect(result.label).toContain("⬆️");
+    });
+
+    it("should show open PR icon", () => {
+      const branchInfo: BranchInfo = {
+        name: "feature/pr-open",
+        type: "local",
+        branchType: "feature",
+        isCurrent: false,
+        openPR: { number: 123, title: "Test PR" },
+      };
+
+      const result = formatBranchItem(branchInfo);
+
+      expect(result.icons).toContain("🔀"); // open PR icon
+      expect(result.label).toContain("🔀");
+    });
+
+    it("should show merged PR icon", () => {
+      const branchInfo: BranchInfo = {
+        name: "feature/pr-merged",
+        type: "local",
+        branchType: "feature",
+        isCurrent: false,
+        mergedPR: { number: 456, mergedAt: "2025-10-31T00:00:00Z" },
+      };
+
+      const result = formatBranchItem(branchInfo);
+
+      expect(result.icons).toContain("✅"); // merged PR icon
+      expect(result.label).toContain("✅");
+    });
+
+    it("should show warning icon for inaccessible worktree", () => {
+      const branchInfo: BranchInfo = {
+        name: "feature/broken-worktree",
+        type: "local",
+        branchType: "feature",
+        isCurrent: false,
+        worktree: {
+          path: "/path/to/worktree",
+          locked: false,
+          prunable: false,
+          isAccessible: false,
+        },
+      };
+
+      const result = formatBranchItem(branchInfo);
+
+      expect(result.icons).toContain("🟠"); // inaccessible worktree icon
+      expect(result.icons).toContain("⚠️"); // warning icon
+      expect(result.worktreeStatus).toBe("inaccessible");
+    });
+
+    it("should prioritize hasChanges over unpushed commits", () => {
+      const branchInfo: BranchInfo = {
+        name: "feature/both",
+        type: "local",
+        branchType: "feature",
+        isCurrent: false,
+        hasUnpushedCommits: true,
+      };
+
+      const resultWithChanges = formatBranchItem(branchInfo, { hasChanges: true });
+      expect(resultWithChanges.icons).toContain("✏️");
+      expect(resultWithChanges.icons).not.toContain("⬆️");
+
+      const resultWithoutChanges = formatBranchItem(branchInfo);
+      expect(resultWithoutChanges.icons).toContain("⬆️");
+      expect(resultWithoutChanges.icons).not.toContain("✏️");
+    });
+
+    it("should prioritize unpushed over open PR", () => {
+      const branchInfo: BranchInfo = {
+        name: "feature/unpushed-pr",
+        type: "local",
+        branchType: "feature",
+        isCurrent: false,
+        hasUnpushedCommits: true,
+        openPR: { number: 123, title: "Test PR" },
+      };
+
+      const result = formatBranchItem(branchInfo);
+
+      expect(result.icons).toContain("⬆️");
+      expect(result.icons).not.toContain("🔀");
+    });
+
+    it("should prioritize open PR over merged PR", () => {
+      const branchInfo: BranchInfo = {
+        name: "feature/both-pr",
+        type: "local",
+        branchType: "feature",
+        isCurrent: false,
+        openPR: { number: 123, title: "Test PR" },
+        mergedPR: { number: 456, mergedAt: "2025-10-31T00:00:00Z" },
+      };
+
+      const result = formatBranchItem(branchInfo);
+
+      expect(result.icons).toContain("🔀");
+      expect(result.icons).not.toContain("✅");
+    });
+
+    it("should prioritize merged PR over warning", () => {
+      const branchInfo: BranchInfo = {
+        name: "feature/merged-broken",
+        type: "local",
+        branchType: "feature",
+        isCurrent: false,
+        mergedPR: { number: 456, mergedAt: "2025-10-31T00:00:00Z" },
+        worktree: {
+          path: "/path/to/worktree",
+          locked: false,
+          prunable: false,
+          isAccessible: false,
+        },
+      };
+
+      const result = formatBranchItem(branchInfo);
+
+      expect(result.icons).toContain("✅");
+      expect(result.icons).not.toContain("⚠️");
+    });
+
+    it("should prioritize warning over current branch icon", () => {
+      const branchInfo: BranchInfo = {
+        name: "feature/current-broken",
+        type: "local",
+        branchType: "feature",
+        isCurrent: true,
+        worktree: {
+          path: "/path/to/worktree",
+          locked: false,
+          prunable: false,
+          isAccessible: false,
+        },
+      };
+
+      const result = formatBranchItem(branchInfo);
+
+      expect(result.icons).toContain("⚠️");
+      expect(result.icons).not.toContain("⭐");
+    });
+
     it("should handle develop branch", () => {
       const branchInfo: BranchInfo = {
         name: "develop",
