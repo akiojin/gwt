@@ -64,8 +64,7 @@ interface SelectedBranchState {
 export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
   const { exit } = useApp();
   const { branches, worktrees, loading, error, refresh, lastUpdated } = useGitData({
-    enableAutoRefresh: true,
-    refreshInterval: 5000, // 5 seconds
+    enableAutoRefresh: false, // Manual refresh with 'r' key
   });
   const { currentScreen, navigateTo, goBack, reset } = useScreenState();
 
@@ -517,6 +516,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
             onNavigate={handleNavigate}
             onQuit={handleQuit}
             onCleanupCommand={handleCleanupCommand}
+            onRefresh={refresh}
             loading={loading}
             error={error}
             lastUpdated={lastUpdated}
@@ -583,6 +583,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
             onSelect={handleSelect}
             onNavigate={handleNavigate}
             onQuit={handleQuit}
+            onRefresh={refresh}
             loading={loading}
             error={error}
             lastUpdated={lastUpdated}
