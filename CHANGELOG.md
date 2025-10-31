@@ -1,3 +1,10 @@
+## [1.12.1](https://github.com/akiojin/claude-worktree/compare/v1.12.0...v1.12.1) (2025-10-31)
+
+
+### Bug Fixes
+
+* Codex CLIのweb_search_request対応 ([efe151e](https://github.com/akiojin/claude-worktree/commit/efe151e8d4800b43399bd9e9718a4c777f2ebe8e))
+
 # [1.12.0](https://github.com/akiojin/claude-worktree/compare/v1.11.0...v1.12.0) (2025-10-30)
 
 
