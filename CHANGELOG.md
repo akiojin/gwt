@@ -1,3 +1,10 @@
+## [1.12.2](https://github.com/akiojin/claude-worktree/compare/v1.12.1...v1.12.2) (2025-10-31)
+
+
+### Bug Fixes
+
+* 自動更新時のカーソル位置リセット問題を解決 ([ee54c1a](https://github.com/akiojin/claude-worktree/commit/ee54c1a396c1905080f44558c1952daeaa594af1))
+
 ## [1.12.1](https://github.com/akiojin/claude-worktree/compare/v1.12.0...v1.12.1) (2025-10-31)
 
 
