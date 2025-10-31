@@ -1,3 +1,11 @@
+# [1.13.0](https://github.com/akiojin/claude-worktree/compare/v1.12.3...v1.13.0) (2025-10-31)
+
+
+### Features
+
+* UIヘッダーにバージョン表示機能を追加 (US2) ([17e8a6d](https://github.com/akiojin/claude-worktree/commit/17e8a6dfb7cb84b7e6bcbb472d17a136ff8b4e45))
+* **version:** add CLI version flag (--version/-v) ([351d702](https://github.com/akiojin/claude-worktree/commit/351d7026d97e02ee1c1babcc3d6c0d70dabe14be))
+
 ## [1.12.3](https://github.com/akiojin/claude-worktree/compare/v1.12.2...v1.12.3) (2025-10-31)
 
 
