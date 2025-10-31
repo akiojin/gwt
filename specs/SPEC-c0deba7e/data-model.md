@@ -95,9 +95,9 @@ if (extraArgs) {
   args.push(...extraArgs);
 }
 
-args.push('-c', 'web_search_request=true');
+args.push('--enable', 'web_search_request');
 
-// 最終コマンド: bunx @openai/codex@latest [args] -c web_search_request=true
+// 最終コマンド: bunx @openai/codex@latest [args] --enable web_search_request
 ```
 
 ---

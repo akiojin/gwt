@@ -243,7 +243,7 @@ Processing... ⠙
 
 #### Codex CLI起動設定
 
-- **FR-037**: システムは、Codex CLIを`bunx @openai/codex@latest`で起動する際に、次の引数を常に付与しなければならない：`-c web_search_request=true`、`--model="gpt-5-codex"`、`--sandbox workspace-write`、`-c model_reasoning_effort="high"`、`-c model_reasoning_summaries="detailed"`、`-c sandbox_workspace_write.network_access=true`、`-c shell_environment_policy.inherit=all`、`-c shell_environment_policy.ignore_default_excludes=true`、`-c shell_environment_policy.experimental_use_profile=true`
+- **FR-037**: システムは、Codex CLIを`bunx @openai/codex@latest`で起動する際に、次の引数を常に付与しなければならない：`--enable web_search_request`、`--model="gpt-5-codex"`、`--sandbox workspace-write`、`-c model_reasoning_effort="high"`、`-c model_reasoning_summaries="detailed"`、`-c sandbox_workspace_write.network_access=true`、`-c shell_environment_policy.inherit=all`、`-c shell_environment_policy.ignore_default_excludes=true`、`-c shell_environment_policy.experimental_use_profile=true`
 
 ### 主要エンティティ
 
