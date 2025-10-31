@@ -55,13 +55,17 @@ claude-worktree
 bunx @akiojin/claude-worktree
 ```
 
-The CLI currently supports only the help option:
+CLI options:
 
 ```bash
+# Display help
 claude-worktree --help
-```
 
-To view usage information, run `claude-worktree --help`.
+# Check version
+claude-worktree --version
+# or
+claude-worktree -v
+```
 
 The tool presents an interactive interface with the following options:
 

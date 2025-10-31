@@ -38,6 +38,11 @@
 
 ### Features
 
+* Add version display in CLI flag (`--version` / `-v`) and UI header
+  - CLI: Display package version with `claude-worktree --version` or `-v` flag
+  - UI: Show version in all screen headers (e.g., "Claude Worktree v1.12.3")
+  - Graceful handling when version cannot be retrieved
+
 * **worktree**: Worktreeディレクトリを`.git/worktree`から`.worktrees`に変更
   - 新規Worktreeは`.worktrees/`配下に作成されます
   - `.gitignore`に`.worktrees/`が自動的に追加されます

@@ -27,6 +27,7 @@ export interface ExecutionModeResult {
 export interface ExecutionModeSelectorScreenProps {
   onBack: () => void;
   onSelect: (result: ExecutionModeResult) => void;
+  version?: string | null;
 }
 
 /**
@@ -38,6 +39,7 @@ export interface ExecutionModeSelectorScreenProps {
 export function ExecutionModeSelectorScreen({
   onBack,
   onSelect,
+  version,
 }: ExecutionModeSelectorScreenProps) {
   const { rows } = useTerminalSize();
   const [step, setStep] = useState<1 | 2>(1);
@@ -118,6 +120,7 @@ export function ExecutionModeSelectorScreen({
       <Header
         title={step === 1 ? 'Execution Mode' : 'Skip Permissions'}
         titleColor="magenta"
+        version={version}
       />
 
       {/* Content */}

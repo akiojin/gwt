@@ -14,6 +14,7 @@ import { getTerminalStreams } from "./utils/terminal.js";
 import { getToolById } from "./config/tools.js";
 import { launchCustomAITool } from "./launcher.js";
 import { saveSession } from "./config/index.js";
+import { getPackageVersion } from "./utils.js";
 
 /**
  * Simple print functions (replacing legacy UI display functions)
@@ -34,11 +35,27 @@ Usage: claude-worktree [options]
 
 Options:
   -h, --help      Show this help message
+  -v, --version   Show version information
 
 Description:
   Interactive Git worktree manager with AI tool selection (Claude Code / Codex CLI) and graphical branch selection.
   Launch without additional options to open the interactive menu.
 `);
+}
+
+/**
+ * Display application version
+ * Reads version from package.json and outputs to stdout
+ * Exits with code 1 if version cannot be retrieved
+ */
+async function showVersion(): Promise<void> {
+  const version = await getPackageVersion();
+  if (version) {
+    console.log(version);
+  } else {
+    console.error("Error: Unable to retrieve version information");
+    process.exit(1);
+  }
 }
 
 /**
@@ -216,7 +233,14 @@ export async function main(): Promise<void> {
   try {
     // Parse command line arguments
     const args = process.argv.slice(2);
+    const showVersionFlag = args.includes("-v") || args.includes("--version");
     const showHelpFlag = args.includes("-h") || args.includes("--help");
+
+    // Version flag has higher priority than help
+    if (showVersionFlag) {
+      await showVersion();
+      return;
+    }
 
     if (showHelpFlag) {
       showHelp();

@@ -39,6 +39,7 @@ export interface BranchListScreenProps {
   lastUpdated?: Date | null;
   loadingIndicatorDelay?: number;
   cleanupUI?: CleanupUIState;
+  version?: string | null;
 }
 
 /**
@@ -58,6 +59,7 @@ export function BranchListScreen({
   lastUpdated = null,
   loadingIndicatorDelay = 300,
   cleanupUI,
+  version,
 }: BranchListScreenProps) {
   const { rows } = useTerminalSize();
 
@@ -116,7 +118,7 @@ export function BranchListScreen({
   return (
     <Box flexDirection="column" height={rows}>
       {/* Header */}
-      <Header title="Claude Worktree - Branch Selection" titleColor="cyan" />
+      <Header title="Claude Worktree - Branch Selection" titleColor="cyan" version={version} />
 
       {/* Stats */}
       <Box marginTop={1}>
