@@ -1,7 +1,7 @@
 /**
  * @vitest-environment happy-dom
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { act, render } from '@testing-library/react';
 import React from 'react';
 import { BranchListScreen } from '../../../components/screens/BranchListScreen.js';
@@ -10,10 +10,15 @@ import { Window } from 'happy-dom';
 
 describe('BranchListScreen', () => {
   beforeEach(() => {
+    vi.useFakeTimers();
     // Setup happy-dom
     const window = new Window();
     globalThis.window = window as any;
     globalThis.document = window.document as any;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   const mockBranches: BranchItem[] = [
@@ -83,10 +88,8 @@ describe('BranchListScreen', () => {
       <BranchListScreen branches={mockBranches} stats={mockStats} onSelect={onSelect} />
     );
 
-    // Check for enter and q keys
+    // Check for enter key (main screen doesn't have q key, exit is Ctrl+C only)
     expect(getAllByText(/enter/i).length).toBeGreaterThan(0);
-    expect(getAllByText(/q/i).length).toBeGreaterThan(0);
-    expect(getAllByText(/Quit/i).length).toBeGreaterThan(0);
   });
 
   it('should handle empty branch list', () => {
@@ -121,13 +124,21 @@ describe('BranchListScreen', () => {
     expect(queryByText(/Git情報を読み込んでいます/i)).toBeNull();
 
     await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 5));
+      if (typeof (vi as any).advanceTimersByTime === 'function') {
+        (vi as any).advanceTimersByTime(5);
+      } else {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
     });
 
     expect(queryByText(/Git情報を読み込んでいます/i)).toBeNull();
 
     await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 15));
+      if (typeof (vi as any).advanceTimersByTime === 'function') {
+        (vi as any).advanceTimersByTime(10);
+      } else {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
     });
 
     expect(getByText(/Git情報を読み込んでいます/i)).toBeDefined();

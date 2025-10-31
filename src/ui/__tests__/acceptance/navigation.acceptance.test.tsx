@@ -2,7 +2,8 @@
  * @vitest-environment happy-dom
  * Acceptance tests for User Story 2: Sub-screen Navigation
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest';
+import type { Mock } from 'vitest';
 import { render, waitFor } from '@testing-library/react';
 import React from 'react';
 import { App } from '../../components/App.js';
@@ -11,15 +12,38 @@ import type { BranchInfo } from '../../types.js';
 
 // Mock git.js and worktree.js
 vi.mock('../../../git.js', () => ({
+  __esModule: true,
   getAllBranches: vi.fn(),
+  getRepositoryRoot: vi.fn(async () => '/repo'),
+  deleteBranch: vi.fn(async () => undefined),
 }));
 
 vi.mock('../../../worktree.js', () => ({
+  __esModule: true,
   listAdditionalWorktrees: vi.fn(),
+  createWorktree: vi.fn(async () => undefined),
+  generateWorktreePath: vi.fn(async () => '/repo/.git/worktree/test'),
+  getMergedPRWorktrees: vi.fn(async () => []),
+  removeWorktree: vi.fn(async () => undefined),
 }));
 
-import { getAllBranches } from '../../../git.js';
-import { listAdditionalWorktrees } from '../../../worktree.js';
+import { getAllBranches, getRepositoryRoot, deleteBranch } from '../../../git.js';
+import {
+  listAdditionalWorktrees,
+  createWorktree,
+  generateWorktreePath,
+  getMergedPRWorktrees,
+  removeWorktree,
+} from '../../../worktree.js';
+
+const mockedGetAllBranches = getAllBranches as Mock;
+const mockedGetRepositoryRoot = getRepositoryRoot as Mock;
+const mockedDeleteBranch = deleteBranch as Mock;
+const mockedListAdditionalWorktrees = listAdditionalWorktrees as Mock;
+const mockedCreateWorktree = createWorktree as Mock;
+const mockedGenerateWorktreePath = generateWorktreePath as Mock;
+const mockedGetMergedPRWorktrees = getMergedPRWorktrees as Mock;
+const mockedRemoveWorktree = removeWorktree as Mock;
 
 describe('Acceptance: Navigation (User Story 2)', () => {
   beforeEach(() => {
@@ -29,8 +53,14 @@ describe('Acceptance: Navigation (User Story 2)', () => {
     globalThis.document = window.document as any;
 
     // Reset mocks
-    (getAllBranches as ReturnType<typeof vi.fn>).mockReset();
-    (listAdditionalWorktrees as ReturnType<typeof vi.fn>).mockReset();
+    mockedGetAllBranches.mockReset();
+    mockedListAdditionalWorktrees.mockReset();
+    mockedGetRepositoryRoot.mockReset();
+    mockedDeleteBranch.mockReset();
+    mockedCreateWorktree.mockReset();
+    mockedGenerateWorktreePath.mockReset();
+    mockedGetMergedPRWorktrees.mockReset();
+    mockedRemoveWorktree.mockReset();
   });
 
   const mockBranches: BranchInfo[] = [
@@ -77,22 +107,24 @@ describe('Acceptance: Navigation (User Story 2)', () => {
 
   /**
    * T075: Acceptance Scenario 2
-   * qキー/ESCキーでメイン画面に戻る
+   * メイン画面にはqキーが存在しない（終了はCtrl+Cのみ）
    */
-  it('[AC2] should return to main screen on q key', async () => {
+  it('[AC2] should not have q key on main screen', async () => {
     (getAllBranches as ReturnType<typeof vi.fn>).mockResolvedValue(mockBranches);
     (listAdditionalWorktrees as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 
     const onExit = vi.fn();
-    const { getAllByText, container } = render(<App onExit={onExit} />);
+    const { container } = render(<App onExit={onExit} />);
 
     await waitFor(() => {
       expect(container).toBeDefined();
     });
 
-    // Verify q key action is available in footer
-    const qKeyElements = getAllByText(/q/i);
-    expect(qKeyElements.length).toBeGreaterThan(0);
+    // Verify q key is NOT in the footer (main screen uses Ctrl+C for exit)
+    const footerText = container.textContent || '';
+    // Main screen should not have 'q' for quit, but should have other keys
+    expect(footerText.toLowerCase()).not.toMatch(/\[q\]/);
+    expect(footerText.toLowerCase()).toContain('enter');
   });
 
   /**
@@ -140,12 +172,10 @@ describe('Acceptance: Navigation (User Story 2)', () => {
       expect(getByText(/Claude Worktree/i)).toBeDefined();
     });
 
-    // Verify all navigation keys are available
+    // Verify navigation keys are available (main screen doesn't have q key)
     const enterKeys = getAllByText(/enter/i);
-    const qKeys = getAllByText(/q/i);
 
     expect(enterKeys.length).toBeGreaterThan(0);
-    expect(qKeys.length).toBeGreaterThan(0);
   });
 
   it('[Integration] should display correct footer actions', async () => {
@@ -159,9 +189,13 @@ describe('Acceptance: Navigation (User Story 2)', () => {
       expect(container).toBeDefined();
     });
 
-    // Verify footer has multiple action keys
+    // Verify footer has multiple action keys (main screen doesn't have q key)
     const footerText = container.textContent || '';
     expect(footerText.toLowerCase()).toContain('enter');
-    expect(footerText.toLowerCase()).toContain('q');
+    expect(footerText.toLowerCase()).toContain('m'); // Manage worktrees
   });
+});
+
+afterAll(() => {
+  vi.restoreAllMocks();
 });

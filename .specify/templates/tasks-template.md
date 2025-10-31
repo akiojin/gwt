@@ -23,6 +23,13 @@ description: "機能実装のためのタスクリストテンプレート"
 - 件名は100文字以内に収めてください（`subject-max-length`ルール）。
 - タスク生成時は、これらのルールを満たすコミットメッセージが書けるよう変更内容を整理してください。
 
+## Lint最小要件
+
+- `.github/workflows/lint.yml` に対応するため、以下のチェックがローカルで成功することをタスク完了条件に含めてください。
+  - `bun run format:check`
+  - `bunx --bun markdownlint-cli "**/*.md" --config .markdownlint.json --ignore-path .markdownlintignore`
+  - `bun run lint`
+
 > ⚠️ Markdown整形ヒント  
 > - ネストした箇条書きは 2 スペースでインデントしてください。  
 > - 外部リンクは `[タイトル](https://example.com)` 形式で記載し、裸URLを避けてください。

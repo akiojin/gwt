@@ -2,6 +2,7 @@ import { execa } from "execa";
 import chalk from "chalk";
 import { platform } from "os";
 import { existsSync } from "fs";
+import { createChildStdio, getTerminalStreams } from "./utils/terminal.js";
 
 const CLAUDE_CLI_PACKAGE = "@anthropic-ai/claude-code@latest";
 export class ClaudeError extends Error {
@@ -22,6 +23,8 @@ export async function launchClaudeCode(
     extraArgs?: string[];
   } = {},
 ): Promise<void> {
+  const terminal = getTerminalStreams();
+
   try {
     // Check if the worktree path exists
     if (!existsSync(worktreePath)) {
@@ -133,15 +136,25 @@ export async function launchClaudeCode(
       args.push(...options.extraArgs);
     }
 
-    await execa("bunx", [CLAUDE_CLI_PACKAGE, ...args], {
-      cwd: worktreePath,
-      stdio: "inherit",
-      shell: true,
-      env:
-        isRoot && options.skipPermissions
-          ? { ...process.env, IS_SANDBOX: "1" }
-          : process.env,
-    });
+    terminal.exitRawMode();
+
+    const childStdio = createChildStdio();
+
+    try {
+      await execa("bunx", [CLAUDE_CLI_PACKAGE, ...args], {
+        cwd: worktreePath,
+        shell: true,
+        stdin: childStdio.stdin,
+        stdout: childStdio.stdout,
+        stderr: childStdio.stderr,
+        env:
+          isRoot && options.skipPermissions
+            ? { ...process.env, IS_SANDBOX: "1" }
+            : process.env,
+      } as any);
+    } finally {
+      childStdio.cleanup();
+    }
   } catch (error: any) {
     const errorMessage =
       error.code === "ENOENT"
@@ -164,6 +177,8 @@ export async function launchClaudeCode(
     }
 
     throw new ClaudeError(errorMessage, error);
+  } finally {
+    terminal.exitRawMode();
   }
 }
 

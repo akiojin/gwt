@@ -1,5 +1,6 @@
 import { vi } from "vitest";
 import type { ExecaReturnValue } from "execa";
+import type { CleanupTarget } from "../../src/ui/types";
 
 /**
  * execaのモック - Gitコマンド、GitHub CLI、AIツールの実行をモック
@@ -184,24 +185,23 @@ export function createMockSessionData(
  * テスト用のCleanupTarget生成ヘルパー
  */
 export function createMockCleanupTarget(
-  overrides?: Partial<{
-    branch: string;
-    worktreePath: string | undefined;
-    prNumber: number;
-    prUrl: string;
-    hasUnpushedCommits: boolean;
-    hasRemoteBranch: boolean;
-    cleanupType: "worktree-and-branch" | "branch-only";
-  }>,
-) {
+  overrides?: Partial<CleanupTarget>,
+): CleanupTarget {
   return {
     branch: "feature/test",
     worktreePath: "/path/to/worktree",
-    prNumber: 123,
-    prUrl: "https://github.com/test/repo/pull/123",
+    pullRequest: {
+      number: 123,
+      title: "Test PR",
+      branch: "feature/test",
+      mergedAt: "2025-01-01T00:00:00Z",
+      author: "tester",
+    },
+    hasUncommittedChanges: false,
     hasUnpushedCommits: false,
     hasRemoteBranch: true,
     cleanupType: "worktree-and-branch" as const,
+    reasons: ["merged-pr"],
     ...overrides,
   };
 }

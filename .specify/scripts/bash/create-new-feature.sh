@@ -3,6 +3,7 @@
 set -e
 
 JSON_MODE=false
+NO_BRANCH=true
 SPEC_ID=""
 ARGS=()
 i=1
@@ -11,6 +12,13 @@ while [ $i -le $# ]; do
     case "$arg" in
         --json)
             JSON_MODE=true
+            ;;
+        --branch)
+            NO_BRANCH=false
+            ;;
+        --no-branch)
+            # 後方互換性のため残す（非推奨）
+            NO_BRANCH=true
             ;;
         --spec-id)
             if [ $((i + 1)) -gt $# ]; then
@@ -27,15 +35,22 @@ while [ $i -le $# ]; do
             SPEC_ID="$next_arg"
             ;;
         --help|-h)
-            echo "使い方: $0 [--json] [--spec-id <id>] <機能の説明>"
+            echo "使い方: $0 [--json] [--branch] [--spec-id <id>] <機能の説明>"
             echo ""
             echo "オプション:"
             echo "  --json          JSON形式で出力"
+            echo "  --branch        ブランチを作成（デフォルトは作成しない）"
             echo "  --spec-id <id>  カスタムSPEC IDを指定（例: SPEC-12345678）"
             echo "  --help, -h      このヘルプメッセージを表示"
             echo ""
+            echo "注意:"
+            echo "  デフォルトではブランチを作成せず、現在のブランチで作業します。"
+            echo "  これはWorktree設計思想に基づき、エージェントが自動的にブランチを"
+            echo "  作成しないようにするためです。"
+            echo ""
             echo "例:"
             echo "  $0 'ユーザー認証システムを追加'"
+            echo "  $0 --branch 'API用のOAuth2統合を実装'"
             echo "  $0 'API用のOAuth2統合を実装' --spec-id SPEC-abcd1234"
             exit 0
             ;;
@@ -157,8 +172,11 @@ fi
 
 BRANCH_NAME="$SPEC_ID"
 
-if [ "$HAS_GIT" = true ]; then
+if [ "$NO_BRANCH" = true ]; then
+    >&2 echo "[specify] ブランチ作成をスキップ: 現在のブランチで作業を続けます（Worktree設計思想に準拠）。"
+elif [ "$HAS_GIT" = true ]; then
     git checkout -b "$BRANCH_NAME"
+    >&2 echo "[specify] ブランチ $BRANCH_NAME を作成しました。"
 else
     >&2 echo "[specify] 警告: Gitリポジトリが検出されませんでした。ブランチ $BRANCH_NAME の作成をスキップしました。"
 fi

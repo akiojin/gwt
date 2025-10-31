@@ -3,6 +3,7 @@ import type {
   BranchItem,
   BranchType,
   WorktreeStatus,
+  WorktreeInfo,
 } from "../types.js";
 import stringWidth from "string-width";
 
@@ -130,8 +131,60 @@ export function formatBranchItem(
 }
 
 /**
- * Converts an array of BranchInfo to BranchItem array
+ * Sorts branches according to the priority rules:
+ * 1. Current branch (highest priority)
+ * 2. main branch
+ * 3. develop branch (only if main exists)
+ * 4. Branches with worktree
+ * 5. Local branches
+ * 6. Alphabetical order by name
  */
-export function formatBranchItems(branches: BranchInfo[]): BranchItem[] {
-  return branches.map((branch) => formatBranchItem(branch));
+function sortBranches(
+  branches: BranchInfo[],
+  worktreeMap: Map<string, WorktreeInfo>,
+): BranchInfo[] {
+  // Check if main branch exists
+  const hasMainBranch = branches.some((b) => b.branchType === "main");
+
+  return [...branches].sort((a, b) => {
+    // 1. Current branch is highest priority
+    if (a.isCurrent && !b.isCurrent) return -1;
+    if (!a.isCurrent && b.isCurrent) return 1;
+
+    // 2. main branch is second priority
+    if (a.branchType === "main" && b.branchType !== "main") return -1;
+    if (a.branchType !== "main" && b.branchType === "main") return 1;
+
+    // 3. develop branch is third priority (only if main exists)
+    if (hasMainBranch) {
+      if (a.branchType === "develop" && b.branchType !== "develop") return -1;
+      if (a.branchType !== "develop" && b.branchType === "develop") return 1;
+    }
+
+    // 4. Branches with worktree are prioritized
+    const aHasWorktree = worktreeMap.has(a.name) || !!a.worktree;
+    const bHasWorktree = worktreeMap.has(b.name) || !!b.worktree;
+    if (aHasWorktree && !bHasWorktree) return -1;
+    if (!aHasWorktree && bHasWorktree) return 1;
+
+    // 5. Local branches are prioritized over remote-only
+    const aIsLocal = a.type === "local";
+    const bIsLocal = b.type === "local";
+    if (aIsLocal && !bIsLocal) return -1;
+    if (!aIsLocal && bIsLocal) return 1;
+
+    // 6. Alphabetical order by name
+    return a.name.localeCompare(b.name);
+  });
+}
+
+/**
+ * Converts an array of BranchInfo to BranchItem array with sorting
+ */
+export function formatBranchItems(
+  branches: BranchInfo[],
+  worktreeMap: Map<string, WorktreeInfo> = new Map(),
+): BranchItem[] {
+  const sortedBranches = sortBranches(branches, worktreeMap);
+  return sortedBranches.map((branch) => formatBranchItem(branch));
 }
