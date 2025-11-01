@@ -180,6 +180,11 @@ export async function launchClaudeCode(
             "      or: curl -fsSL https://claude.ai/install.sh | bash",
           ),
         );
+        console.log(
+          chalk.yellow(
+            "      Windows: irm https://claude.ai/install.ps1 | iex",
+          ),
+        );
         console.log("");
         // Wait 2 seconds to let user read the message
         await new Promise((resolve) => setTimeout(resolve, 2000));
