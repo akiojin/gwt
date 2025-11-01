@@ -168,19 +168,19 @@ export async function launchClaudeCode(
           ),
         );
         console.log(
-          chalk.gray(
+          chalk.yellow(
             "   💡 Recommended: Install Claude Code via official method for faster startup",
           ),
         );
         console.log(
-          chalk.gray("      macOS/Linux: brew install --cask claude-code"),
+          chalk.yellow("      macOS/Linux: brew install --cask claude-code"),
         );
         console.log(
-          chalk.gray(
+          chalk.yellow(
             "      or: curl -fsSL https://claude.ai/install.sh | bash",
           ),
         );
-        console.log(chalk.gray(""));
+        console.log("");
         // Wait 2 seconds to let user read the message
         await new Promise((resolve) => setTimeout(resolve, 2000));
         await execa("bunx", [CLAUDE_CLI_PACKAGE, ...args], {
