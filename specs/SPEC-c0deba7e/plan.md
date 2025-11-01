@@ -121,7 +121,7 @@ tests/
    - PATH更新手順の説明
 
 5. **Claude Code公式インストール方法の確認**
-   - 公式ドキュメント（https://docs.claude.com/en/docs/claude-code/setup）の起動方法確認
+   - 公式ドキュメント（<https://docs.claude.com/en/docs/claude-code/setup>）の起動方法確認
    - `claude`コマンドのインストールパス調査
    - `which`/`where`コマンドでの検出方法確認
 
