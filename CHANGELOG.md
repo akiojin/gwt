@@ -1,3 +1,10 @@
+# [1.15.0](https://github.com/akiojin/claude-worktree/compare/v1.14.0...v1.15.0) (2025-11-01)
+
+
+### Features
+
+* Claude Code自動検出機能を追加（US4: ローカルインストール版優先） ([17e3279](https://github.com/akiojin/claude-worktree/commit/17e3279d8d73df11bcd8a0f009a53ab2a74a6e8e))
+
 # [1.14.0](https://github.com/akiojin/claude-worktree/compare/v1.13.0...v1.14.0) (2025-10-31)
 
 
