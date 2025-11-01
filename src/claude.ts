@@ -167,6 +167,19 @@ export async function launchClaudeCode(
             "   🔄 Falling back to bunx @anthropic-ai/claude-code@latest",
           ),
         );
+        console.log(
+          chalk.gray(
+            "   💡 Recommended: Install Claude Code via official method for faster startup",
+          ),
+        );
+        console.log(
+          chalk.gray("      macOS/Linux: brew install --cask claude-code"),
+        );
+        console.log(
+          chalk.gray(
+            "      or: curl -fsSL https://claude.ai/install.sh | bash",
+          ),
+        );
         await execa("bunx", [CLAUDE_CLI_PACKAGE, ...args], {
           cwd: worktreePath,
           shell: true,
