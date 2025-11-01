@@ -1,5 +1,9 @@
 import { useState, useEffect, useCallback } from "react";
-import { getAllBranches, hasUnpushedCommitsInRepo, getRepositoryRoot } from "../../git.js";
+import {
+  getAllBranches,
+  hasUnpushedCommitsInRepo,
+  getRepositoryRoot,
+} from "../../git.js";
 import { listAdditionalWorktrees } from "../../worktree.js";
 import { getPullRequestByBranch } from "../../github.js";
 import type { BranchInfo, WorktreeInfo } from "../types.js";
@@ -71,14 +75,20 @@ export function useGitData(options?: UseGitDataOptions): UseGitDataResult {
           if (branch.type === "local") {
             try {
               // Check for unpushed commits
-              hasUnpushed = await hasUnpushedCommitsInRepo(branch.name, repoRoot);
+              hasUnpushed = await hasUnpushedCommitsInRepo(
+                branch.name,
+                repoRoot,
+              );
 
               // Check for PR status
               prInfo = await getPullRequestByBranch(branch.name);
             } catch (error) {
               // Silently ignore errors to avoid breaking the UI
               if (process.env.DEBUG) {
-                console.error(`Failed to check status for ${branch.name}:`, error);
+                console.error(
+                  `Failed to check status for ${branch.name}:`,
+                  error,
+                );
               }
             }
           }
@@ -87,10 +97,19 @@ export function useGitData(options?: UseGitDataOptions): UseGitDataResult {
             ...branch,
             ...(worktreeInfo ? { worktree: worktreeInfo } : {}),
             ...(hasUnpushed ? { hasUnpushedCommits: true } : {}),
-            ...(prInfo?.state === "OPEN" ? { openPR: { number: prInfo.number, title: prInfo.title } } : {}),
-            ...(prInfo?.state === "MERGED" && prInfo.mergedAt ? { mergedPR: { number: prInfo.number, mergedAt: prInfo.mergedAt } } : {}),
+            ...(prInfo?.state === "OPEN"
+              ? { openPR: { number: prInfo.number, title: prInfo.title } }
+              : {}),
+            ...(prInfo?.state === "MERGED" && prInfo.mergedAt
+              ? {
+                  mergedPR: {
+                    number: prInfo.number,
+                    mergedAt: prInfo.mergedAt,
+                  },
+                }
+              : {}),
           };
-        })
+        }),
       );
 
       setBranches(enrichedBranches);

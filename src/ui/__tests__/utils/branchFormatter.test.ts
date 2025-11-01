@@ -221,7 +221,9 @@ describe("branchFormatter", () => {
         hasUnpushedCommits: true,
       };
 
-      const resultWithChanges = formatBranchItem(branchInfo, { hasChanges: true });
+      const resultWithChanges = formatBranchItem(branchInfo, {
+        hasChanges: true,
+      });
       expect(resultWithChanges.icons).toContain("✏️");
       expect(resultWithChanges.icons).not.toContain("⬆️");
 
