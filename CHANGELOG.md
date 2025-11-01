@@ -1,3 +1,10 @@
+# [1.17.0](https://github.com/akiojin/claude-worktree/compare/v1.16.0...v1.17.0) (2025-11-01)
+
+
+### Features
+
+* Windows向けインストール方法を推奨メッセージに追加 ([d6cda00](https://github.com/akiojin/claude-worktree/commit/d6cda009fdef7e871f23d522475fe332c0a17f90))
+
 # [1.16.0](https://github.com/akiojin/claude-worktree/compare/v1.15.0...v1.16.0) (2025-11-01)
 
 
