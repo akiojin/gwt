@@ -1,3 +1,11 @@
+# [1.16.0](https://github.com/akiojin/claude-worktree/compare/v1.15.0...v1.16.0) (2025-11-01)
+
+
+### Features
+
+* bunxフォールバック時に公式インストール方法を推奨 ([e79f151](https://github.com/akiojin/claude-worktree/commit/e79f151d292451c4ad4757770e2b4e053ad33e61))
+* bunxフォールバック時のメッセージに2秒待機を追加 ([ba60cad](https://github.com/akiojin/claude-worktree/commit/ba60cad50580e5fa2f52aa54bef92a255c973c03))
+
 # [1.15.0](https://github.com/akiojin/claude-worktree/compare/v1.14.0...v1.15.0) (2025-11-01)
 
 
