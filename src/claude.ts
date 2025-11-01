@@ -180,6 +180,9 @@ export async function launchClaudeCode(
             "      or: curl -fsSL https://claude.ai/install.sh | bash",
           ),
         );
+        console.log(chalk.gray(""));
+        // Wait 2 seconds to let user read the message
+        await new Promise((resolve) => setTimeout(resolve, 2000));
         await execa("bunx", [CLAUDE_CLI_PACKAGE, ...args], {
           cwd: worktreePath,
           shell: true,
