@@ -167,6 +167,22 @@ export async function launchClaudeCode(
             "   🔄 Falling back to bunx @anthropic-ai/claude-code@latest",
           ),
         );
+        console.log(
+          chalk.gray(
+            "   💡 Recommended: Install Claude Code via official method for faster startup",
+          ),
+        );
+        console.log(
+          chalk.gray("      macOS/Linux: brew install --cask claude-code"),
+        );
+        console.log(
+          chalk.gray(
+            "      or: curl -fsSL https://claude.ai/install.sh | bash",
+          ),
+        );
+        console.log(chalk.gray(""));
+        // Wait 2 seconds to let user read the message
+        await new Promise((resolve) => setTimeout(resolve, 2000));
         await execa("bunx", [CLAUDE_CLI_PACKAGE, ...args], {
           cwd: worktreePath,
           shell: true,
