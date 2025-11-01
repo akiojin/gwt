@@ -207,9 +207,7 @@ export async function launchClaudeCode(
           ),
         );
         console.error(
-          chalk.yellow(
-            '   2. "claude --version" を実行してセットアップを確認',
-          ),
+          chalk.yellow('   2. "claude --version" を実行してセットアップを確認'),
         );
       } else {
         console.error(
