@@ -1,6 +1,6 @@
 {
   "name": "@akiojin/claude-worktree",
-  "version": "1.13.0",
+  "version": "1.14.0",
   "description": "Interactive Git worktree manager for Claude Code with graphical branch selection",
   "main": "dist/index.js",
   "bin": {

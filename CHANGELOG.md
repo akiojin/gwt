@@ -1,3 +1,11 @@
+# [1.14.0](https://github.com/akiojin/claude-worktree/compare/v1.13.0...v1.14.0) (2025-10-31)
+
+
+### Features
+
+* add git loading indicator with tdd coverage ([ca9faa9](https://github.com/akiojin/claude-worktree/commit/ca9faa9ea85be3abbd8cec8043bb005cf25731d1))
+* ブランチ一覧に未プッシュ・PR状態アイコンを追加 ([404af59](https://github.com/akiojin/claude-worktree/commit/404af5934ec9ac8ac9b382422913228fd8707f34))
+
 # [1.13.0](https://github.com/akiojin/claude-worktree/compare/v1.12.3...v1.13.0) (2025-10-31)
 
 
