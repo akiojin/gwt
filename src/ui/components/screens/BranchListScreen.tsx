@@ -10,6 +10,24 @@ import type { BranchItem, Statistics } from '../../types.js';
 import stringWidth from 'string-width';
 import chalk from 'chalk';
 
+const WIDTH_OVERRIDES: Record<string, number> = {
+  '⬆': 1,
+  '☁': 1,
+};
+
+const measureDisplayWidth = (value: string): number => {
+  let width = 0;
+  for (const char of Array.from(value)) {
+    const override = WIDTH_OVERRIDES[char];
+    if (override !== undefined) {
+      width += override;
+      continue;
+    }
+    width += stringWidth(char);
+  }
+  return width;
+};
+
 type IndicatorColor = 'cyan' | 'green' | 'yellow' | 'red';
 
 interface CleanupIndicator {
@@ -107,7 +125,7 @@ export function BranchListScreen({
 
   const formatLatestCommit = useCallback((timestamp?: number) => {
     if (!timestamp || Number.isNaN(timestamp)) {
-      return '最終更新: ---';
+      return '---';
     }
 
     const date = new Date(timestamp * 1000);
@@ -117,7 +135,7 @@ export function BranchListScreen({
     const hours = String(date.getHours()).padStart(2, '0');
     const minutes = String(date.getMinutes()).padStart(2, '0');
 
-    return `最終更新: ${year}-${month}-${day} ${hours}:${minutes}`;
+    return `${year}-${month}-${day} ${hours}:${minutes}`;
   }, []);
 
   const truncateToWidth = useCallback((value: string, maxWidth: number) => {
@@ -181,14 +199,21 @@ export function BranchListScreen({
       const staticPrefix = `${arrow} ${indicatorPrefix}`;
       const staticPrefixWidth = stringWidth(staticPrefix);
 
-      const maxLeftTextWidth = Math.max(staticPrefixWidth, columns - timestampWidth - 1);
-      const maxLabelWidth = Math.max(0, maxLeftTextWidth - staticPrefixWidth);
+      const availableLeftWidth = Math.max(staticPrefixWidth, columns - timestampWidth - 1);
+      const maxLabelWidth = Math.max(0, availableLeftWidth - staticPrefixWidth);
       const truncatedLabel = truncateToWidth(item.label, maxLabelWidth);
       const leftText = `${staticPrefix}${truncatedLabel}`;
 
-      const gapWidth = Math.max(1, columns - stringWidth(leftText) - timestampWidth);
-      const gap = ' '.repeat(gapWidth);
-      let line = `${leftText}${gap}${timestampText}`;
+      const leftMeasuredWidth = stringWidth(leftText);
+      const leftDisplayWidth = measureDisplayWidth(leftText);
+      const baseGapWidth = Math.max(1, columns - leftMeasuredWidth - timestampWidth);
+      const displayGapWidth = Math.max(1, columns - leftDisplayWidth - timestampWidth);
+      const cursorShift = Math.max(0, displayGapWidth - baseGapWidth);
+
+      const gap = ' '.repeat(baseGapWidth);
+      const cursorAdjust = cursorShift > 0 ? `\u001b[${cursorShift}C` : '';
+
+      let line = `${leftText}${gap}${cursorAdjust}${timestampText}`;
       const paddingWidth = Math.max(0, columns - stringWidth(line));
       if (paddingWidth > 0) {
         line += ' '.repeat(paddingWidth);
