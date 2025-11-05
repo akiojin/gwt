@@ -24,25 +24,25 @@
 **言語/バージョン**: TypeScript 5.8+ (target: ES2022, module: ESNext)
 **ランタイム**: Bun 1.0+
 **主要な依存関係**:
-  - Ink.js 6.3+ (React for CLI UI)
-  - execa 9.6+ (git コマンド実行)
-  - React 19.2+ (Ink.jsのベース)
-  - Vitest 2.1+ (テストフレームワーク)
+- Ink.js 6.3+ (React for CLI UI)
+- execa 9.6+ (git コマンド実行)
+- React 19.2+ (Ink.jsのベース)
+- Vitest 2.1+ (テストフレームワーク)
 **ストレージ**: N/A (全てgitリポジトリ操作)
 **テスト**: Vitest (unit + integration + e2e), ink-testing-library, @testing-library/react
 **ターゲットプラットフォーム**: CLI (Linux, macOS, Windows via Bun)
 **プロジェクトタイプ**: 単一CLIアプリケーション
 **パフォーマンス目標**:
-  - 5ブランチを1分以内に処理
-  - 20ブランチの同時処理サポート
-  - リアルタイム進捗更新（500ms以内）
+- 5ブランチを1分以内に処理
+- 20ブランチの同時処理サポート
+- リアルタイム進捗更新（500ms以内）
 **制約**:
-  - Worktree設計思想準拠（ブランチ切り替え禁止）
-  - コンフリクトは手動解決のみ
-  - 既存のgit.ts、worktree.tsモジュールと統合
+- Worktree設計思想準拠（ブランチ切り替え禁止）
+- コンフリクトは手動解決のみ
+- 既存のgit.ts、worktree.tsモジュールと統合
 **スケール/範囲**:
-  - 想定対象ブランチ数: 1〜50ブランチ
-  - 1ブランチあたりの処理時間: 5〜10秒
+- 想定対象ブランチ数: 1〜50ブランチ
+- 1ブランチあたりの処理時間: 5〜10秒
 
 ## 原則チェック
 

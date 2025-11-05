@@ -66,7 +66,7 @@ describe('mergeFromBranch', () => {
 });
 ```
 
-3. テスト実行（失敗することを確認）:
+1. テスト実行（失敗することを確認）:
 
 ```bash
 bun run test tests/unit/git.test.ts
