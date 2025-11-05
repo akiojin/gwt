@@ -50,8 +50,8 @@
 - [x] T021 [US4] `src/ui/utils/branchFormatter.ts` のソート処理に最新コミット降順ロジックを追加し、worktree優先とローカル優先との優先順位を整理する
 - [x] T022 [US4] `src/ui/__tests__/utils/branchFormatter.test.ts` に最新コミット順を検証するテスト（worktreeあり/なし双方のケース）を追加する
 - [x] T023 [US4] `bun test src/ui/__tests__/utils/branchFormatter.test.ts` を実行し、新規テストがパスすることを確認する
-- [x] T024 [US4] `src/ui/components/common/Select.tsx` と `src/ui/components/screens/BranchListScreen.tsx` を更新し、最終更新時刻の表示と行全体の背景ハイライトを実装する
-- [x] T025 [US4] `src/ui/__tests__/components/screens/BranchListScreen.test.tsx` に最終更新表示と背景ハイライトを検証するテストを追加する
+- [x] T024 [US4] `src/ui/components/common/Select.tsx` と `src/ui/components/screens/BranchListScreen.tsx` を更新し、最新コミット時刻の表示と行全体の背景ハイライトを実装する
+- [x] T025 [US4] `src/ui/__tests__/components/screens/BranchListScreen.test.tsx` に最新コミット表示と背景ハイライトを検証するテストを追加する
 - [x] T026 [US4] `bun test src/ui/__tests__/components/screens/BranchListScreen.test.tsx` を実行し、UI テストが成功することを確認する
 
 ## フェーズ6: ユーザーストーリー3 (P3) - 既存優先順位の維持
@@ -83,7 +83,7 @@
 - US1: worktree 付きブランチが最上位グループに並ぶことをテストで検証
 - US2: ローカルブランチがリモートオンリーより上に並ぶことをテストで検証
 - US3: 現在→main→develop→worktree→最新コミット降順→ローカル→その他→名前順 が維持され、release/hotfix が一般ルールに従うことをテストで検証
-- US4: worktree有無が同じブランチ群で最新コミットタイムスタンプの降順になること、各行に「最終更新:」が表示され選択行のみ背景色が変化することをテストで検証
+- US4: worktree有無が同じブランチ群で最新コミットタイムスタンプの降順になること、各行に最新コミット時刻が表示され選択行のみ背景色が変化することをテストで検証
 
 ## 推奨MVP範囲
 

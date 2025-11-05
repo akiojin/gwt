@@ -107,7 +107,7 @@ export function BranchListScreen({
 
   const formatLatestCommit = useCallback((timestamp?: number) => {
     if (!timestamp || Number.isNaN(timestamp)) {
-      return '最終更新: ---';
+      return '---';
     }
 
     const date = new Date(timestamp * 1000);
@@ -117,7 +117,7 @@ export function BranchListScreen({
     const hours = String(date.getHours()).padStart(2, '0');
     const minutes = String(date.getMinutes()).padStart(2, '0');
 
-    return `最終更新: ${year}-${month}-${day} ${hours}:${minutes}`;
+    return `${year}-${month}-${day} ${hours}:${minutes}`;
   }, []);
 
   const truncateToWidth = useCallback((value: string, maxWidth: number) => {
@@ -181,8 +181,8 @@ export function BranchListScreen({
       const staticPrefix = `${arrow} ${indicatorPrefix}`;
       const staticPrefixWidth = stringWidth(staticPrefix);
 
-      const maxLeftTextWidth = Math.max(staticPrefixWidth, columns - timestampWidth - 1);
-      const maxLabelWidth = Math.max(0, maxLeftTextWidth - staticPrefixWidth);
+      const availableLeftWidth = Math.max(staticPrefixWidth, columns - timestampWidth - 1);
+      const maxLabelWidth = Math.max(0, availableLeftWidth - staticPrefixWidth);
       const truncatedLabel = truncateToWidth(item.label, maxLabelWidth);
       const leftText = `${staticPrefix}${truncatedLabel}`;
 

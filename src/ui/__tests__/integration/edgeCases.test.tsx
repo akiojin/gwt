@@ -117,7 +117,7 @@ describe('Edge Cases Integration Tests', () => {
     );
 
     // Long branch name should be displayed (Ink will handle wrapping/truncation)
-    expect(container.textContent).toContain('最終更新:');
+    expect(container.textContent).toMatch(/\d{4}-\d{2}-\d{2} \d{2}:\d{2}/);
   });
 
   it('[T092] should handle branch names with special characters', () => {

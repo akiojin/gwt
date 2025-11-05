@@ -145,7 +145,7 @@ bun run test tests/unit/ui/table.test.ts
 **ファイル**: `src/ui/components/common/Select.tsx`, `src/ui/components/screens/BranchListScreen.tsx`
 
 - `Select` コンポーネントに `renderItem` を追加し、ターミナル幅を考慮したカスタム描画を可能にする
-- 各ブランチ行に「最終更新: YYYY-MM-DD HH:mm」を右寄せで表示する
+- 各ブランチ行に「YYYY-MM-DD HH:mm」形式の時刻を右寄せで表示する
 - 選択中の行は背景色をシアンに変更し、非選択行では既存の配色を維持する
 - 既存のインジケータアイコンは保持しつつ、`cleanupUI` の配色指定を尊重する
 
