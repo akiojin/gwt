@@ -9,36 +9,33 @@ on:
       - synchronize
 
 jobs:
+  warn-missing-token:
+    if: >-
+      github.event.pull_request.draft == false &&
+      (github.event.pull_request.base.ref == 'main' ||
+       github.event.pull_request.base.ref == 'develop') &&
+      secrets.AUTO_MERGE_TOKEN == ''
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "::notice::AUTO_MERGE_TOKEN is not configured; skipping auto-merge enablement for this pull request." >&2
+
   enable-auto-merge:
     if: >-
       github.event.pull_request.draft == false &&
       (github.event.pull_request.base.ref == 'main' ||
-       github.event.pull_request.base.ref == 'develop')
+       github.event.pull_request.base.ref == 'develop') &&
+      secrets.AUTO_MERGE_TOKEN != ''
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: write
     env:
       GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ secrets.AUTO_MERGE_TOKEN }}
     steps:
-      - name: Check auto merge token
-        id: token
-        env:
-          AUTO_MERGE_TOKEN: ${{ secrets.AUTO_MERGE_TOKEN }}
-        run: |
-          if [ -z "$AUTO_MERGE_TOKEN" ]; then
-            echo "::warning::AUTO_MERGE_TOKEN is not configured; skipping auto-merge enablement." >&2
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-            echo "gh-token=$AUTO_MERGE_TOKEN" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Skip when auto-merge already enabled
         id: check
-        if: steps.token.outputs.skip != 'true'
         env:
-          GH_TOKEN: ${{ steps.token.outputs.gh-token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
@@ -49,9 +46,8 @@ jobs:
           fi
 
       - name: Enable auto merge
-        if: steps.token.outputs.skip != 'true' && steps.check.outputs.already-enabled == 'false'
+        if: steps.check.outputs.already-enabled == 'false'
         env:
-          GH_TOKEN: ${{ steps.token.outputs.gh-token }}
           PR_ID: ${{ github.event.pull_request.node_id }}
         run: |
           set -euo pipefail
