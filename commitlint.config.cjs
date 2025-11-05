@@ -1,5 +1,6 @@
 module.exports = {
   extends: ["@commitlint/config-conventional"],
+  ignores: [(message) => message.startsWith("chore(release):")],
   rules: {
     "subject-empty": [2, "never"],
     "subject-max-length": [2, "always", 100],
