@@ -6,8 +6,20 @@ import { act, render } from '@testing-library/react';
 import { render as inkRender } from 'ink-testing-library';
 import React from 'react';
 import { BranchListScreen } from '../../../components/screens/BranchListScreen.js';
-import type { BranchItem, Statistics } from '../../../types.js';
+import type { BranchInfo, BranchItem, Statistics } from '../../../types.js';
+import { formatBranchItem } from '../../../utils/branchFormatter.js';
+import stringWidth from 'string-width';
 import { Window } from 'happy-dom';
+
+const stripAnsi = (value: string): string => value.replace(/\u001b\[[0-9;]*m/g, '');
+const stripControlSequences = (value: string): string =>
+  value.replace(/\u001b\[([0-9;?]*)([A-Za-z])/g, (_, params, command) => {
+    if (command === 'C') {
+      const count = Number(params || '1');
+      return ' '.repeat(Number.isNaN(count) ? 0 : count);
+    }
+    return '';
+  });
 
 describe('BranchListScreen', () => {
   beforeEach(() => {
@@ -185,7 +197,7 @@ describe('BranchListScreen', () => {
     expect(matches.length).toBe(mockBranches.length);
   });
 
-  it('should highlight the selected branch with cyan background', () => {
+  it('should highlight the selected branch with cyan background', async () => {
     process.env.FORCE_COLOR = '1';
     const onSelect = vi.fn();
     let renderResult: ReturnType<typeof inkRender>;
@@ -198,5 +210,84 @@ describe('BranchListScreen', () => {
 
     const frame = renderResult!.lastFrame() ?? '';
     expect(frame).toContain('\u001b[46m'); // cyan background ANSI code
+  });
+
+  it('should align timestamps even when unpushed icon is displayed', async () => {
+    process.env.FORCE_COLOR = '1';
+    const onSelect = vi.fn();
+
+    const originalColumns = process.stdout.columns;
+    process.stdout.columns = 94;
+
+    const branchInfos: BranchInfo[] = [
+      {
+        name: 'feature/update-ui',
+        type: 'local',
+        branchType: 'feature',
+        isCurrent: false,
+        hasUnpushedCommits: true,
+        latestCommitTimestamp: 1_700_000_000,
+      },
+      {
+        name: 'origin/main',
+        type: 'remote',
+        branchType: 'main',
+        isCurrent: false,
+        hasUnpushedCommits: false,
+        latestCommitTimestamp: 1_699_999_000,
+      },
+      {
+        name: 'main',
+        type: 'local',
+        branchType: 'main',
+        isCurrent: true,
+        hasUnpushedCommits: false,
+        latestCommitTimestamp: 1_699_998_000,
+      },
+    ];
+
+    const branchesWithUnpushed: BranchItem[] = branchInfos.map((branch) =>
+      formatBranchItem(branch)
+    );
+
+    try {
+      let renderResult: ReturnType<typeof inkRender>;
+      await act(async () => {
+        renderResult = inkRender(
+          <BranchListScreen branches={branchesWithUnpushed} stats={mockStats} onSelect={onSelect} />,
+          { stripAnsi: false }
+        );
+      });
+
+      const frame = renderResult!.lastFrame() ?? '';
+      const timestampLines = frame
+        .split('\n')
+        .map((line) => stripControlSequences(stripAnsi(line)))
+        .filter((line) => /\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(line));
+
+      expect(timestampLines.length).toBeGreaterThanOrEqual(3);
+
+      const timestampWidths = timestampLines.map((line) => {
+        const match = line.match(/\d{4}-\d{2}-\d{2} \d{2}:\d{2}/);
+        const index = match?.index ?? 0;
+        const beforeTimestamp = line.slice(0, index);
+
+        let width = 0;
+        for (const char of Array.from(beforeTimestamp)) {
+          if (char === '\u2B06' || char === '\u2601') {
+            width += 1;
+            continue;
+          }
+          width += stringWidth(char);
+        }
+        return width;
+      });
+
+      const uniquePositions = new Set(timestampWidths);
+
+      expect(uniquePositions.size).toBe(1);
+    } finally {
+      process.stdout.columns = originalColumns;
+    }
   });
 });

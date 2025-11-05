@@ -72,6 +72,12 @@
 - [x] T018 [P] `specs/SPEC-a5ae4916/quickstart.md` を更新し、手順やチェックリストに変更があれば追記する
 - [x] T019 [P] `docs/troubleshooting.md` のブランチ表示に関する節を確認し、必要なら新しい優先ルールを反映する
 
+## フェーズ8: 表示ずれ回帰対応
+
+- [x] T027 `src/ui/components/screens/BranchListScreen.tsx` のアイコン幅補正を見直し、`⬆️` などが原因で最新更新時刻の右寄せが崩れないよう調整する
+- [x] T028 `src/ui/__tests__/components/screens/BranchListScreen.test.tsx` に未プッシュアイコンを含む行でも時刻列が揃うことを確認するテストを追加する
+- [x] T029 `bun run test src/ui/__tests__/components/screens/BranchListScreen.test.tsx` を実行し、レイアウト調整の回帰を防止する
+
 ## 実装戦略 & 依存関係
 
 - MVP: フェーズ3 (US1) 完了時点で最小価値を提供

@@ -99,8 +99,18 @@ describe('Edge Cases Integration Tests', () => {
       'feature/very-long-branch-name-that-exceeds-normal-terminal-width-and-should-be-handled-gracefully';
 
     const mockBranches: BranchItem[] = [
-      { name: 'main', label: 'main', value: 'main' },
-      { name: longBranchName, label: longBranchName, value: longBranchName },
+      {
+        name: 'main',
+        label: 'main',
+        value: 'main',
+        latestCommitTimestamp: 1_700_000_000,
+      },
+      {
+        name: longBranchName,
+        label: longBranchName,
+        value: longBranchName,
+        latestCommitTimestamp: 1_700_000_600,
+      },
     ];
 
     const mockStats: Statistics = {
@@ -128,10 +138,11 @@ describe('Edge Cases Integration Tests', () => {
       'feature/改善-日本語',
     ];
 
-    const mockBranches: BranchItem[] = specialBranchNames.map((name) => ({
+    const mockBranches: BranchItem[] = specialBranchNames.map((name, index) => ({
       name,
       label: name,
       value: name,
+      latestCommitTimestamp: 1_700_001_000 + index * 60,
     }));
 
     const mockStats: Statistics = {

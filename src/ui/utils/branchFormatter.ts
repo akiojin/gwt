@@ -40,6 +40,9 @@ const iconWidthOverrides: Record<string, number> = {
   [remoteIcon]: 1,
   "☁️": 1,
   "☁︎": 1,
+  "⬆️": 1,
+  "⬆︎": 1,
+  "⬆": 1,
 };
 
 export interface FormatOptions {
