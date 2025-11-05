@@ -1,3 +1,9 @@
+# [1.19.0](https://github.com/akiojin/claude-worktree/compare/v1.18.1...v1.19.0) (2025-11-05)
+
+### Features
+
+- PR作成時に自動マージを有効化 ([233266a](https://github.com/akiojin/claude-worktree/commit/233266a1e99547c2e6f1ddbf91fbb283b1c84435))
+
 ## [1.18.1](https://github.com/akiojin/claude-worktree/compare/v1.18.0...v1.18.1) (2025-11-05)
 
 ### Bug Fixes
