@@ -194,15 +194,10 @@ export function BranchListScreen({
         line += ' '.repeat(paddingWidth);
       }
 
-      if (isSelected) {
-        return (
-          <Text backgroundColor="cyan" color="black">
-            {line}
-          </Text>
-        );
-      }
-
-      return <Text>{line}</Text>;
+      const output = isSelected
+        ? `[46m[30m${line}[0m`
+        : line;
+      return <Text>{output}</Text>;
     },
     [cleanupUI, formatLatestCommit, truncateToWidth]
   );

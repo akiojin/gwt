@@ -3,6 +3,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { act, render } from '@testing-library/react';
+import { render as inkRender } from 'ink-testing-library';
 import React from 'react';
 import { BranchListScreen } from '../../../components/screens/BranchListScreen.js';
 import type { BranchItem, Statistics } from '../../../types.js';
@@ -185,12 +186,13 @@ describe('BranchListScreen', () => {
   });
 
   it('should highlight the selected branch with cyan background', () => {
+    process.env.FORCE_COLOR = '1';
     const onSelect = vi.fn();
-    const { container } = render(
+    const { lastFrame } = inkRender(
       <BranchListScreen branches={mockBranches} stats={mockStats} onSelect={onSelect} />
     );
 
-    const textContent = container.textContent ?? '';
-    expect(textContent).toContain('\u001b[46m'); // ANSI code for cyan background
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('\u001b[46m'); // cyan background ANSI code
   });
 });
