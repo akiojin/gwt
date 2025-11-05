@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cmd=$(echo \"$CLAUDE_TOOL_INPUT\" | jq -r '.tool_input.command // empty'); if echo \"$cmd\" | grep -qE 'git\\s+(checkout|switch|branch)'; then echo '{\"decision\":\"block\",\"reason\":\"🚫 ブランチ切り替え・作成コマンドは禁止されています / Branch switching and creation commands are not allowed: '\"$cmd\"'\",\"stopReason\":\"Worktreeは起動したブランチで作業を完結させる設計です。git checkout、git switch、git branch 等のブランチ操作は実行できません。\\n\\nReason: Worktree is designed to complete work on the launched branch. Branch operations such as git checkout, git switch, and git branch cannot be executed.\"}'; exit 2; fi"
+            "command": ".claude/hooks/block-git-branch-ops.sh"
           }
         ]
       }
