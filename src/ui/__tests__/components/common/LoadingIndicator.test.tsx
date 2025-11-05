@@ -2,15 +2,27 @@
  * @vitest-environment happy-dom
  */
 import React from 'react';
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { act, render } from '@testing-library/react';
 import { LoadingIndicator } from '../../../components/common/LoadingIndicator.js';
 import { Window } from 'happy-dom';
 
+const advanceTimersBy = async (ms: number) => {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(ms);
+  });
+};
+
 beforeEach(() => {
+  vi.useFakeTimers();
   const window = new Window();
   globalThis.window = window as any;
   globalThis.document = window.document as any;
+});
+
+afterEach(() => {
+  vi.clearAllTimers();
+  vi.useRealTimers();
 });
 
 describe('LoadingIndicator', () => {
@@ -30,9 +42,7 @@ describe('LoadingIndicator', () => {
 
     expect(container.textContent).toBe('');
 
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    });
+    await advanceTimersBy(20);
 
     expect(container.textContent).toBe('');
   });
@@ -42,9 +52,7 @@ describe('LoadingIndicator', () => {
       <LoadingIndicator isLoading={true} message="読み込み中" delay={30} />
     );
 
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 40));
-    });
+    await advanceTimersBy(30);
 
     expect(getMessageText(container)).toContain('読み込み中');
   });
@@ -54,15 +62,13 @@ describe('LoadingIndicator', () => {
       <LoadingIndicator isLoading={true} message="読み込み中" delay={10} />
     );
 
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 15));
-    });
+    await advanceTimersBy(10);
 
     expect(getMessageText(container)).toContain('読み込み中');
 
     await act(async () => {
       rerender(<LoadingIndicator isLoading={false} message="読み込み中" delay={10} />);
-      await new Promise((resolve) => setTimeout(resolve, 5));
+      await vi.advanceTimersByTimeAsync(0);
     });
 
     expect(container.textContent).toBe('');
@@ -80,21 +86,15 @@ describe('LoadingIndicator', () => {
       />
     );
 
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 6));
-    });
+    await advanceTimersBy(0);
 
     const firstFrame = getSpinnerText(container);
 
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 6));
-    });
+    await advanceTimersBy(5);
 
     const secondFrame = getSpinnerText(container);
 
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 6));
-    });
+    await advanceTimersBy(5);
 
     const thirdFrame = getSpinnerText(container);
 
@@ -103,6 +103,25 @@ describe('LoadingIndicator', () => {
     expect(customFrames).toContain(firstFrame ?? '');
     expect(customFrames).toContain(secondFrame ?? '');
     expect(customFrames).toContain(thirdFrame ?? '');
+    expect(getMessageText(container)).toContain('読み込み中');
+  });
+
+  it('keeps rendering even when only a single frame is provided', async () => {
+    const { container } = render(
+      <LoadingIndicator
+        isLoading={true}
+        message="読み込み中"
+        delay={0}
+        interval={10}
+        frames={['*']}
+      />
+    );
+
+    await advanceTimersBy(0);
+    expect(getSpinnerText(container)).toBe('*');
+
+    await advanceTimersBy(30);
+    expect(getSpinnerText(container)).toBe('*');
     expect(getMessageText(container)).toContain('読み込み中');
   });
 });
