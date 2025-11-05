@@ -1,3 +1,10 @@
+## [1.19.1](https://github.com/akiojin/claude-worktree/compare/v1.19.0...v1.19.1) (2025-11-05)
+
+### Bug Fixes
+
+- adjust auto merge workflow permissions ([49a122b](https://github.com/akiojin/claude-worktree/commit/49a122b5ae0eb706baf56e9de8d0b0b339b1537c))
+- guard auto merge workflow when token missing ([6834305](https://github.com/akiojin/claude-worktree/commit/68343050fdb74af22c8276d3ed57ba8ff1015e2e))
+
 # [1.19.0](https://github.com/akiojin/claude-worktree/compare/v1.18.1...v1.19.0) (2025-11-05)
 
 ### Features
