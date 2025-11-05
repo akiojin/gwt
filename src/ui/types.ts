@@ -144,7 +144,9 @@ export type ScreenType =
   | "branch-action-selector"
   | "ai-tool-selector"
   | "session-selector"
-  | "execution-mode-selector";
+  | "execution-mode-selector"
+  | "batch-merge-progress"
+  | "batch-merge-result";
 
 /**
  * Branch action types for action selector screen
@@ -193,4 +195,91 @@ export interface Layout {
   headerLines: number;
   footerLines: number;
   contentHeight: number;
+}
+
+// ========================================
+// Batch Merge Types (SPEC-ee33ca26)
+// ========================================
+
+/**
+ * BatchMergeConfig - Configuration for batch merge execution
+ * @see specs/SPEC-ee33ca26/data-model.md
+ */
+export interface BatchMergeConfig {
+  sourceBranch: string;
+  targetBranches: string[];
+  dryRun: boolean;
+  autoPush: boolean;
+  remote?: string; // default: "origin"
+}
+
+/**
+ * MergePhase - Current phase of merge operation
+ * @see specs/SPEC-ee33ca26/data-model.md
+ */
+export type MergePhase = "fetch" | "worktree" | "merge" | "push" | "cleanup";
+
+/**
+ * BatchMergeProgress - Real-time progress information
+ * @see specs/SPEC-ee33ca26/data-model.md
+ */
+export interface BatchMergeProgress {
+  currentBranch: string;
+  currentIndex: number;
+  totalBranches: number;
+  percentage: number; // 0-100
+  elapsedSeconds: number;
+  estimatedRemainingSeconds?: number;
+  currentPhase: MergePhase;
+}
+
+/**
+ * MergeStatus - Status of individual branch merge
+ * @see specs/SPEC-ee33ca26/data-model.md
+ */
+export type MergeStatus = "success" | "skipped" | "failed";
+
+/**
+ * PushStatus - Status of push operation
+ * @see specs/SPEC-ee33ca26/data-model.md
+ */
+export type PushStatus = "success" | "failed" | "not_executed";
+
+/**
+ * BranchMergeStatus - Individual branch merge result
+ * @see specs/SPEC-ee33ca26/data-model.md
+ */
+export interface BranchMergeStatus {
+  branchName: string;
+  status: MergeStatus;
+  error?: string;
+  conflictFiles?: string[];
+  pushStatus?: PushStatus;
+  worktreeCreated: boolean;
+  durationSeconds: number;
+}
+
+/**
+ * BatchMergeSummary - Summary statistics
+ * @see specs/SPEC-ee33ca26/data-model.md
+ */
+export interface BatchMergeSummary {
+  totalCount: number;
+  successCount: number;
+  skippedCount: number;
+  failedCount: number;
+  pushedCount: number;
+  pushFailedCount: number;
+}
+
+/**
+ * BatchMergeResult - Final batch merge result
+ * @see specs/SPEC-ee33ca26/data-model.md
+ */
+export interface BatchMergeResult {
+  statuses: BranchMergeStatus[];
+  summary: BatchMergeSummary;
+  totalDurationSeconds: number;
+  cancelled: boolean;
+  config: BatchMergeConfig;
 }

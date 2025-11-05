@@ -1,6 +1,13 @@
 #!/usr/bin/env node
 
-import { isGitRepository, getRepositoryRoot, branchExists } from "./git.js";
+import {
+  isGitRepository,
+  getRepositoryRoot,
+  branchExists,
+  fetchAllRemotes,
+  pullFastForward,
+  getBranchDivergenceStatuses,
+} from "./git.js";
 import { launchClaudeCode } from "./claude.js";
 import { launchCodexCLI } from "./codex.js";
 import {
@@ -15,6 +22,7 @@ import { getToolById } from "./config/tools.js";
 import { launchCustomAITool } from "./launcher.js";
 import { saveSession } from "./config/index.js";
 import { getPackageVersion } from "./utils.js";
+import readline from "node:readline";
 
 /**
  * Simple print functions (replacing legacy UI display functions)
@@ -25,6 +33,28 @@ function printError(message: string): void {
 
 function printInfo(message: string): void {
   console.log(chalk.blue(`ℹ️  ${message}`));
+}
+
+function printWarning(message: string): void {
+  console.warn(chalk.yellow(`⚠️  ${message}`));
+}
+
+async function waitForEnter(promptMessage: string): Promise<void> {
+  if (!process.stdin.isTTY) {
+    return;
+  }
+
+  await new Promise<void>((resolve) => {
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+
+    rl.question(`${promptMessage}\n`, () => {
+      rl.close();
+      resolve();
+    });
+  });
 }
 
 function showHelp(): void {
@@ -160,6 +190,49 @@ async function handleAIToolWorkflow(
     }
 
     printInfo(`Worktree ready: ${worktreePath}`);
+
+    // Update remotes and attempt fast-forward pull
+    await fetchAllRemotes({ cwd: repoRoot });
+
+    let fastForwardError: Error | null = null;
+    try {
+      await pullFastForward(worktreePath);
+      printInfo(`Fast-forward pull finished for ${branch}.`);
+    } catch (error) {
+      fastForwardError = error instanceof Error ? error : new Error(String(error));
+      printWarning(
+        `Fast-forward pull failed for ${branch}. Checking for divergence before continuing...`,
+      );
+    }
+
+    const divergenceStatuses = await getBranchDivergenceStatuses({ cwd: repoRoot });
+    const divergedBranches = divergenceStatuses.filter(
+      (status) => status.remoteAhead > 0 && status.localAhead > 0,
+    );
+
+    if (divergedBranches.length > 0) {
+      printWarning(
+        "Potential merge conflicts detected when pulling the following local branches:",
+      );
+
+      divergedBranches.forEach(({ branch: divergedBranch, remoteAhead, localAhead }) => {
+        const highlight = divergedBranch === branch ? " (selected branch)" : "";
+        console.warn(
+          chalk.yellow(
+            `   • ${divergedBranch}${highlight}  remote:+${remoteAhead}  local:+${localAhead}`,
+          ),
+        );
+      });
+
+      printWarning(
+        "Resolve these divergences (e.g., rebase or merge) before launching to avoid conflicts.",
+      );
+      await waitForEnter("Press Enter to continue anyway, or Ctrl+C to abort.");
+    } else if (fastForwardError) {
+      printWarning(
+        `Fast-forward pull could not complete (${fastForwardError.message}). Continuing without blocking.`,
+      );
+    }
 
     // Get tool definition
     const toolConfig = await getToolById(tool);

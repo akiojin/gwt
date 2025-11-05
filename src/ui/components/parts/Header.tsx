@@ -1,5 +1,5 @@
-import React from 'react';
-import { Box, Text } from 'ink';
+import React from "react";
+import { Box, Text } from "ink";
 
 export interface HeaderProps {
   title: string;
@@ -30,8 +30,8 @@ export interface HeaderProps {
  */
 export const Header = React.memo(function Header({
   title,
-  titleColor = 'cyan',
-  dividerChar = '─',
+  titleColor = "cyan",
+  dividerChar = "─",
   showDivider = true,
   width = 80,
   version,

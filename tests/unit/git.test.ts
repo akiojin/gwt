@@ -944,3 +944,297 @@ describe("git.ts - Gitignore Operations", () => {
     });
   });
 });
+
+// ========================================
+// Batch Merge Operations (SPEC-ee33ca26)
+// ========================================
+
+describe("git.ts - Batch Merge Operations", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  describe("mergeFromBranch (T108-T109)", () => {
+    it("should execute git merge command in worktree", async () => {
+      (execa as any).mockResolvedValue({
+        stdout: "Merge made by the 'recursive' strategy.",
+        stderr: "",
+        exitCode: 0,
+      });
+
+      await git.mergeFromBranch("/path/to/worktree", "main");
+
+      expect(execa).toHaveBeenCalledWith("git", ["merge", "main"], {
+        cwd: "/path/to/worktree",
+      });
+    });
+
+    it("should throw error when merge fails", async () => {
+      (execa as any).mockRejectedValue(
+        new Error("error: Merge conflict in file.txt"),
+      );
+
+      await expect(
+        git.mergeFromBranch("/path/to/worktree", "main"),
+      ).rejects.toThrow();
+
+      expect(execa).toHaveBeenCalledWith("git", ["merge", "main"], {
+        cwd: "/path/to/worktree",
+      });
+    });
+
+    it("should support dry-run mode with --no-commit flag", async () => {
+      (execa as any).mockResolvedValue({
+        stdout:
+          "Automatic merge went well; stopped before committing as requested",
+        stderr: "",
+        exitCode: 0,
+      });
+
+      await git.mergeFromBranch("/path/to/worktree", "main", true);
+
+      expect(execa).toHaveBeenCalledWith(
+        "git",
+        ["merge", "--no-commit", "main"],
+        {
+          cwd: "/path/to/worktree",
+        },
+      );
+    });
+  });
+
+  describe("hasMergeConflict (T110-T111)", () => {
+    it("should return true when MERGE_HEAD exists", async () => {
+      (execa as any).mockResolvedValue({
+        stdout: ".git/MERGE_HEAD",
+        stderr: "",
+        exitCode: 0,
+      });
+
+      const hasConflict = await git.hasMergeConflict("/path/to/worktree");
+
+      expect(hasConflict).toBe(true);
+      expect(execa).toHaveBeenCalledWith(
+        "git",
+        ["rev-parse", "--git-path", "MERGE_HEAD"],
+        {
+          cwd: "/path/to/worktree",
+        },
+      );
+    });
+
+    it("should return false when MERGE_HEAD does not exist", async () => {
+      (execa as any).mockRejectedValue(new Error("fatal: not in a merge"));
+
+      const hasConflict = await git.hasMergeConflict("/path/to/worktree");
+
+      expect(hasConflict).toBe(false);
+    });
+  });
+
+  describe("abortMerge (T112-T113)", () => {
+    it("should execute git merge --abort command", async () => {
+      (execa as any).mockResolvedValue({
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+      });
+
+      await git.abortMerge("/path/to/worktree");
+
+      expect(execa).toHaveBeenCalledWith("git", ["merge", "--abort"], {
+        cwd: "/path/to/worktree",
+      });
+    });
+
+    it("should throw error when abort fails", async () => {
+      (execa as any).mockRejectedValue(
+        new Error("fatal: There is no merge to abort"),
+      );
+
+      await expect(git.abortMerge("/path/to/worktree")).rejects.toThrow();
+    });
+  });
+
+  describe("getMergeStatus (T114-T115)", () => {
+    it("should return inProgress=true and hasConflict=true during conflicted merge", async () => {
+      (execa as any).mockResolvedValueOnce({
+        stdout: ".git/MERGE_HEAD",
+        stderr: "",
+        exitCode: 0,
+      });
+
+      (execa as any).mockResolvedValueOnce({
+        stdout: "UU conflict.txt\n",
+        stderr: "",
+        exitCode: 0,
+      });
+
+      const status = await git.getMergeStatus("/path/to/worktree");
+
+      expect(status).toEqual({
+        inProgress: true,
+        hasConflict: true,
+      });
+    });
+
+    it("should return inProgress=false and hasConflict=false when no merge", async () => {
+      (execa as any).mockRejectedValueOnce(new Error("fatal: not in a merge"));
+
+      (execa as any).mockResolvedValueOnce({
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+      });
+
+      const status = await git.getMergeStatus("/path/to/worktree");
+
+      expect(status).toEqual({
+        inProgress: false,
+        hasConflict: false,
+      });
+    });
+
+    it("should return inProgress=true and hasConflict=false during clean merge", async () => {
+      (execa as any).mockResolvedValueOnce({
+        stdout: ".git/MERGE_HEAD",
+        stderr: "",
+        exitCode: 0,
+      });
+
+      (execa as any).mockResolvedValueOnce({
+        stdout: "M  modified.txt\n",
+        stderr: "",
+        exitCode: 0,
+      });
+
+      const status = await git.getMergeStatus("/path/to/worktree");
+
+      expect(status).toEqual({
+        inProgress: true,
+        hasConflict: false,
+      });
+    });
+  });
+
+  describe("resetToHead (T301-T302)", () => {
+    it("should reset worktree to HEAD", async () => {
+      (execa as any).mockResolvedValue({
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+      });
+
+      await git.resetToHead("/path/to/worktree");
+
+      expect(execa).toHaveBeenCalledWith("git", ["reset", "--hard", "HEAD"], {
+        cwd: "/path/to/worktree",
+      });
+    });
+
+    it("should throw error when reset fails", async () => {
+      (execa as any).mockRejectedValue(
+        new Error("fatal: Failed to reset"),
+      );
+
+      await expect(git.resetToHead("/path/to/worktree")).rejects.toThrow();
+    });
+  });
+});
+
+describe("getBranchDivergenceStatuses", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("should return divergence counts for branches with remotes", async () => {
+    (execa as any)
+      .mockResolvedValueOnce({
+        stdout: "main\nfeature/login",
+        stderr: "",
+        exitCode: 0,
+      })
+      .mockResolvedValueOnce({
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+      })
+      .mockResolvedValueOnce({
+        stdout: "2\t1",
+        stderr: "",
+        exitCode: 0,
+      })
+      .mockRejectedValueOnce(new Error("remote branch missing"));
+
+    const result = await git.getBranchDivergenceStatuses({ cwd: "/repo" });
+
+    expect(result).toEqual([
+      {
+        branch: "main",
+        remoteAhead: 2,
+        localAhead: 1,
+      },
+    ]);
+
+    expect(execa).toHaveBeenNthCalledWith(1, "git", [
+      "branch",
+      "--format=%(refname:short)",
+    ], {
+      cwd: "/repo",
+    });
+
+    expect(execa).toHaveBeenNthCalledWith(2, "git", [
+      "show-ref",
+      "--verify",
+      "--quiet",
+      "refs/remotes/origin/main",
+    ], {
+      cwd: "/repo",
+    });
+
+    expect(execa).toHaveBeenNthCalledWith(3, "git", [
+      "rev-list",
+      "--left-right",
+      "--count",
+      "origin/main...main",
+    ], {
+      cwd: "/repo",
+    });
+  });
+});
+
+describe("pullFastForward", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("should call git pull with --ff-only", async () => {
+    (execa as any).mockResolvedValue({
+      stdout: "",
+      stderr: "",
+      exitCode: 0,
+    });
+
+    await git.pullFastForward("/repo/worktree");
+
+    expect(execa).toHaveBeenCalledWith(
+      "git",
+      ["pull", "--ff-only", "origin"],
+      { cwd: "/repo/worktree" },
+    );
+  });
+
+  it("should throw error when pull fails", async () => {
+    (execa as any).mockRejectedValue(
+      new Error("fatal: Not possible to fast-forward."),
+    );
+
+    await expect(
+      git.pullFastForward("/repo/worktree"),
+    ).rejects.toThrow("Failed to fast-forward pull");
+  });
+});

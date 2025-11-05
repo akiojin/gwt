@@ -606,9 +606,15 @@ export async function getEnhancedSessionInfo(
   }
 }
 
-export async function fetchAllRemotes(): Promise<void> {
+export async function fetchAllRemotes(options?: { cwd?: string }): Promise<void> {
   try {
-    await execa("git", ["fetch", "--all", "--prune"]);
+    const execOptions = options?.cwd ? { cwd: options.cwd } : undefined;
+    const args = ["fetch", "--all", "--prune"];
+    if (execOptions) {
+      await execa("git", args, execOptions);
+    } else {
+      await execa("git", args);
+    }
   } catch (error) {
     throw new GitError("Failed to fetch remote branches", error);
   }
@@ -751,6 +757,7 @@ export async function pushBranchToRemote(
     const remoteBranchExists = await checkRemoteBranchExists(
       branchName,
       remote,
+      { cwd: worktreePath },
     );
 
     if (remoteBranchExists) {
@@ -773,14 +780,21 @@ export async function pushBranchToRemote(
 export async function checkRemoteBranchExists(
   branchName: string,
   remote = "origin",
+  options?: { cwd?: string },
 ): Promise<boolean> {
   try {
-    await execa("git", [
+    const execOptions = options?.cwd ? { cwd: options.cwd } : undefined;
+    const args = [
       "show-ref",
       "--verify",
       "--quiet",
       `refs/remotes/${remote}/${branchName}`,
-    ]);
+    ];
+    if (execOptions) {
+      await execa("git", args, execOptions);
+    } else {
+      await execa("git", args);
+    }
     return true;
   } catch {
     return false;
@@ -823,6 +837,200 @@ export async function isInWorktree(): Promise<boolean> {
  * @param {string} entry - 追加するエントリー（例: ".worktrees/"）
  * @throws {GitError} ファイルの読み書きに失敗した場合
  */
+// ========================================
+// Batch Merge Operations (SPEC-ee33ca26)
+// ========================================
+
+/**
+ * Merge from source branch to current branch in worktree
+ * @param worktreePath - Path to worktree directory
+ * @param sourceBranch - Source branch to merge from
+ * @param dryRun - If true, use --no-commit flag for dry-run mode
+ * @see specs/SPEC-ee33ca26/research.md - Decision 3: Dry-run implementation
+ */
+export async function mergeFromBranch(
+  worktreePath: string,
+  sourceBranch: string,
+  dryRun = false,
+): Promise<void> {
+  try {
+    const args = ["merge"];
+    if (dryRun) {
+      args.push("--no-commit");
+    }
+    args.push(sourceBranch);
+
+    await execa("git", args, { cwd: worktreePath });
+  } catch (error) {
+    throw new GitError(
+      `Failed to merge from ${sourceBranch} in ${worktreePath}`,
+      error,
+    );
+  }
+}
+
+/**
+ * Check if there is a merge in progress in worktree
+ * @param worktreePath - Path to worktree directory
+ * @returns true if MERGE_HEAD exists (merge in progress)
+ * @see specs/SPEC-ee33ca26/research.md - Best practices: Git state confirmation
+ */
+export async function hasMergeConflict(worktreePath: string): Promise<boolean> {
+  try {
+    await execa("git", ["rev-parse", "--git-path", "MERGE_HEAD"], {
+      cwd: worktreePath,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Abort current merge operation in worktree
+ * @param worktreePath - Path to worktree directory
+ * @see specs/SPEC-ee33ca26/research.md - Decision 3: Dry-run rollback
+ */
+export async function abortMerge(worktreePath: string): Promise<void> {
+  try {
+    await execa("git", ["merge", "--abort"], { cwd: worktreePath });
+  } catch (error) {
+    throw new GitError(`Failed to abort merge in ${worktreePath}`, error);
+  }
+}
+
+/**
+ * Get current merge status in worktree
+ * @param worktreePath - Path to worktree directory
+ * @returns Object with inProgress and hasConflict flags
+ * @see specs/SPEC-ee33ca26/research.md - Best practices: Git state confirmation
+ */
+export async function getMergeStatus(worktreePath: string): Promise<{
+  inProgress: boolean;
+  hasConflict: boolean;
+}> {
+  // Check if merge is in progress (MERGE_HEAD exists)
+  const inProgress = await hasMergeConflict(worktreePath);
+
+  // Check if there are conflicts (git status --porcelain shows UU)
+  let hasConflict = false;
+  if (inProgress) {
+    try {
+      const { stdout } = await execa("git", ["status", "--porcelain"], {
+        cwd: worktreePath,
+      });
+      // UU indicates unmerged paths (conflicts)
+      hasConflict = stdout.includes("UU ");
+    } catch {
+      hasConflict = false;
+    }
+  }
+
+  return {
+    inProgress,
+    hasConflict,
+  };
+}
+
+/**
+ * Reset worktree to HEAD (rollback all changes)
+ * Used for dry-run cleanup after git merge --no-commit
+ * @param worktreePath - Path to worktree directory
+ * @see specs/SPEC-ee33ca26/research.md - Dry-run implementation: --no-commit + rollback
+ */
+export async function resetToHead(worktreePath: string): Promise<void> {
+  try {
+    await execa("git", ["reset", "--hard", "HEAD"], {
+      cwd: worktreePath,
+    });
+  } catch (error) {
+    throw new GitError(
+      `Failed to reset worktree to HEAD in ${worktreePath}`,
+      error,
+    );
+  }
+}
+
+export interface BranchDivergenceStatus {
+  branch: string;
+  remoteAhead: number;
+  localAhead: number;
+}
+
+export async function getBranchDivergenceStatuses(options?: {
+  cwd?: string;
+  remote?: string;
+}): Promise<BranchDivergenceStatus[]> {
+  const cwd = options?.cwd;
+  const remote = options?.remote ?? "origin";
+  const execOptions = cwd ? { cwd } : undefined;
+
+  const branchArgs = ["branch", "--format=%(refname:short)"];
+  const { stdout: localBranchOutput } = execOptions
+    ? await execa("git", branchArgs, execOptions)
+    : await execa("git", branchArgs);
+
+  const branchNames = localBranchOutput
+    .split("\n")
+    .map((name) => name.trim())
+    .filter(Boolean);
+
+  const results: BranchDivergenceStatus[] = [];
+
+  for (const branchName of branchNames) {
+    const remoteExists = await checkRemoteBranchExists(
+      branchName,
+      remote,
+      cwd ? { cwd } : undefined,
+    );
+
+    if (!remoteExists) {
+      continue;
+    }
+
+    try {
+      const revListArgs = [
+        "rev-list",
+        "--left-right",
+        "--count",
+        `${remote}/${branchName}...${branchName}`,
+      ];
+      const { stdout } = execOptions
+        ? await execa("git", revListArgs, execOptions)
+        : await execa("git", revListArgs);
+
+      const [remoteAheadRaw, localAheadRaw] = stdout.trim().split(/\s+/);
+      const remoteAhead = Number.parseInt(remoteAheadRaw || "0", 10) || 0;
+      const localAhead = Number.parseInt(localAheadRaw || "0", 10) || 0;
+
+      results.push({ branch: branchName, remoteAhead, localAhead });
+    } catch (error) {
+      throw new GitError(
+        `Failed to inspect divergence for ${branchName}`,
+        error,
+      );
+    }
+  }
+
+  return results;
+}
+
+export async function pullFastForward(
+  worktreePath: string,
+  remote = "origin",
+): Promise<void> {
+  try {
+    await execa("git", ["pull", "--ff-only", remote], {
+      cwd: worktreePath,
+    });
+  } catch (error) {
+    throw new GitError(
+      `Failed to fast-forward pull in ${worktreePath}`,
+      error,
+    );
+  }
+}
+
 export async function ensureGitignoreEntry(
   repoRoot: string,
   entry: string,
