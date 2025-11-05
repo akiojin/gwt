@@ -1205,6 +1205,65 @@ describe("getBranchDivergenceStatuses", () => {
       cwd: "/repo",
     });
   });
+
+  it("should only inspect requested branches when branch filter is provided", async () => {
+    (execa as any)
+      .mockResolvedValueOnce({
+        stdout: "main\nfeature/login",
+        stderr: "",
+        exitCode: 0,
+      })
+      .mockResolvedValueOnce({
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+      })
+      .mockResolvedValueOnce({
+        stdout: "0\t0",
+        stderr: "",
+        exitCode: 0,
+      })
+      .mockImplementation(() => {
+        throw new Error("should not inspect other branches");
+      });
+
+    const result = await git.getBranchDivergenceStatuses({
+      cwd: "/repo",
+      branches: ["main"],
+    });
+
+    expect(result).toEqual([
+      {
+        branch: "main",
+        remoteAhead: 0,
+        localAhead: 0,
+      },
+    ]);
+
+    expect(execa).toHaveBeenCalledTimes(3);
+    expect(execa).toHaveBeenNthCalledWith(1, "git", [
+      "branch",
+      "--format=%(refname:short)",
+    ], {
+      cwd: "/repo",
+    });
+    expect(execa).toHaveBeenNthCalledWith(2, "git", [
+      "show-ref",
+      "--verify",
+      "--quiet",
+      "refs/remotes/origin/main",
+    ], {
+      cwd: "/repo",
+    });
+    expect(execa).toHaveBeenNthCalledWith(3, "git", [
+      "rev-list",
+      "--left-right",
+      "--count",
+      "origin/main...main",
+    ], {
+      cwd: "/repo",
+    });
+  });
 });
 
 describe("pullFastForward", () => {
