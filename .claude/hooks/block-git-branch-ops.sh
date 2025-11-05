@@ -17,8 +17,12 @@ fi
 # コマンドを取得
 command=$(echo "$json_input" | jq -r '.tool_input.command // empty')
 
+# パイプライン、リダイレクト、heredocの前でコマンドを切り出す
+# &&, ||, ;, |, >, <, << で分割して最初の実際のコマンドを取得
+actual_command=$(echo "$command" | sed 's/[|&;].*//; s/[<>].*//; s/<<.*//' | head -n 1 | xargs)
+
 # ブランチ切り替え/作成/worktreeコマンドをチェック
-if echo "$command" | grep -qE '\bgit\s+(checkout|switch|branch|worktree)\b'; then
+if echo "$actual_command" | grep -qE '^git\s+(checkout|switch|branch|worktree)\b'; then
     # JSON応答を返す
     cat <<EOF
 {
