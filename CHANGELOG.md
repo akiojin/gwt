@@ -1,3 +1,9 @@
+## [1.19.2](https://github.com/akiojin/claude-worktree/compare/v1.19.1...v1.19.2) (2025-11-05)
+
+### Bug Fixes
+
+- login gh before enabling auto merge ([9ff2afc](https://github.com/akiojin/claude-worktree/commit/9ff2afc1b9a0883f566dac8d33ce83ac5745f3f6))
+
 ## [1.19.1](https://github.com/akiojin/claude-worktree/compare/v1.19.0...v1.19.1) (2025-11-05)
 
 ### Bug Fixes
