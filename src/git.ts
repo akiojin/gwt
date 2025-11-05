@@ -128,13 +128,18 @@ export async function getLocalBranches(): Promise<BranchInfo[]> {
     return stdout
       .split("\n")
       .filter((line) => line.trim())
-      .map((name) => ({
-        name: name.trim(),
-        type: "local" as const,
-        branchType: getBranchType(name.trim()),
-        isCurrent: false,
-        latestCommitTimestamp: commitMap.get(name.trim()),
-      }));
+      .map((name) => {
+        const trimmed = name.trim();
+        const timestamp = commitMap.get(trimmed);
+
+        return {
+          name: trimmed,
+          type: "local" as const,
+          branchType: getBranchType(trimmed),
+          isCurrent: false,
+          ...(timestamp !== undefined ? { latestCommitTimestamp: timestamp } : {}),
+        } satisfies BranchInfo;
+      });
   } catch (error) {
     throw new GitError("Failed to get local branches", error);
   }
@@ -154,13 +159,15 @@ export async function getRemoteBranches(): Promise<BranchInfo[]> {
       .map((line) => {
         const name = line.trim();
         const branchName = name.replace(/^origin\//, "");
+        const timestamp = commitMap.get(name);
+
         return {
           name,
           type: "remote" as const,
           branchType: getBranchType(branchName),
           isCurrent: false,
-          latestCommitTimestamp: commitMap.get(name),
-        };
+          ...(timestamp !== undefined ? { latestCommitTimestamp: timestamp } : {}),
+        } satisfies BranchInfo;
       });
   } catch (error) {
     throw new GitError("Failed to get remote branches", error);
