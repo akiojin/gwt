@@ -1,3 +1,9 @@
+## [1.20.2](https://github.com/akiojin/claude-worktree/compare/v1.20.1...v1.20.2) (2025-11-05)
+
+### Bug Fixes
+
+- Bashフックで連結コマンドのgit操作を検知 ([31da6a7](https://github.com/akiojin/claude-worktree/commit/31da6a76d36139ca9a9a84781251f553abf50d6e))
+
 ## [1.20.1](https://github.com/akiojin/claude-worktree/compare/v1.20.0...v1.20.1) (2025-11-05)
 
 ### Bug Fixes
