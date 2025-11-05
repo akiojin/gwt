@@ -1,3 +1,13 @@
+# [1.20.0](https://github.com/akiojin/claude-worktree/compare/v1.19.3...v1.20.0) (2025-11-05)
+
+### Bug Fixes
+
+- ブランチ行レンダリングのハイライト表示を調整 ([d20ca27](https://github.com/akiojin/claude-worktree/commit/d20ca27b52be87bb56ee05a716594ecfb5848d01))
+
+### Features
+
+- ブランチ一覧に最終更新時刻を表示 ([c19e504](https://github.com/akiojin/claude-worktree/commit/c19e5043075f8adc89260cb6e5ada5b74c8fb813))
+
 ## [1.19.3](https://github.com/akiojin/claude-worktree/compare/v1.19.2...v1.19.3) (2025-11-05)
 
 ### Bug Fixes
