@@ -32,7 +32,7 @@
 
 ### セットアップタスク
 
-- [ ] **T001** [共通] ビルドとlintの初期確認: `bun run build && bun run lint && bun run format:check`
+- [x] **T001** [共通] ビルドとlintの初期確認: `bun run build && bun run lint && bun run format:check`
 
 ## フェーズ2: ユーザーストーリー1 - 現在の作業ディレクトリの即座確認 (優先度: P1)
 
@@ -42,25 +42,25 @@
 
 ### UIコンポーネント変更
 
-- [ ] **T101** [US1] Header.tsxのHeaderPropsインターフェースに`workingDirectory?: string`プロパティを追加: `src/ui/components/parts/Header.tsx`
-- [ ] **T102** [US1] Header.tsxのHeader関数コンポーネントのprops分割代入に`workingDirectory`を追加: `src/ui/components/parts/Header.tsx`
-- [ ] **T103** [US1] T102の後にHeader.tsxのレンダリングロジックでdivider直後にworking directory表示を追加: `src/ui/components/parts/Header.tsx`
+- [x] **T101** [US1] Header.tsxのHeaderPropsインターフェースに`workingDirectory?: string`プロパティを追加: `src/ui/components/parts/Header.tsx`
+- [x] **T102** [US1] Header.tsxのHeader関数コンポーネントのprops分割代入に`workingDirectory`を追加: `src/ui/components/parts/Header.tsx`
+- [x] **T103** [US1] T102の後にHeader.tsxのレンダリングロジックでdivider直後にworking directory表示を追加: `src/ui/components/parts/Header.tsx`
 
 ### データフロー実装
 
-- [ ] **T104** [P] [US1] App.tsxでprocess.cwd()を使用して起動ディレクトリを取得: `src/ui/components/App.tsx`
-- [ ] **T105** [P] [US1] BranchListScreen.tsxのBranchListScreenPropsインターフェースに`workingDirectory?: string`を追加: `src/ui/components/screens/BranchListScreen.tsx`
-- [ ] **T106** [US1] BranchListScreen.tsxのBranchListScreen関数コンポーネントのprops分割代入に`workingDirectory`を追加: `src/ui/components/screens/BranchListScreen.tsx`
+- [x] **T104** [P] [US1] App.tsxでprocess.cwd()を使用して起動ディレクトリを取得: `src/ui/components/App.tsx`
+- [x] **T105** [P] [US1] BranchListScreen.tsxのBranchListScreenPropsインターフェースに`workingDirectory?: string`を追加: `src/ui/components/screens/BranchListScreen.tsx`
+- [x] **T106** [US1] BranchListScreen.tsxのBranchListScreen関数コンポーネントのprops分割代入に`workingDirectory`を追加: `src/ui/components/screens/BranchListScreen.tsx`
 
 ### 統合
 
-- [ ] **T107** [US1] T104とT106の後にApp.tsxからBranchListScreenへworkingDirectoryをpropsで渡す: `src/ui/components/App.tsx`
-- [ ] **T108** [US1] T103とT107の後にBranchListScreenからHeaderへworkingDirectoryをpropsで渡す: `src/ui/components/screens/BranchListScreen.tsx`
+- [x] **T107** [US1] T104とT106の後にApp.tsxからBranchListScreenへworkingDirectoryをpropsで渡す: `src/ui/components/App.tsx`
+- [x] **T108** [US1] T103とT107の後にBranchListScreenからHeaderへworkingDirectoryをpropsで渡す: `src/ui/components/screens/BranchListScreen.tsx`
 
 ### ビルドとLint確認
 
-- [ ] **T109** [US1] T108の後にTypeScriptビルドを実行してエラーがないことを確認: `bun run build`
-- [ ] **T110** [US1] T109の後にlintとフォーマットチェックを実行: `bun run lint && bun run format:check`
+- [x] **T109** [US1] T108の後にTypeScriptビルドを実行してエラーがないことを確認: `bun run build`
+- [x] **T110** [US1] T109の後にlintとフォーマットチェックを実行: `bun run lint && bun run format:check`
 
 ### 手動テスト
 

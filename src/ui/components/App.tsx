@@ -64,6 +64,10 @@ interface SelectedBranchState {
  */
 export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
   const { exit } = useApp();
+
+  // 起動ディレクトリの取得
+  const workingDirectory = process.cwd();
+
   const { branches, worktrees, loading, error, refresh, lastUpdated } = useGitData({
     enableAutoRefresh: false, // Manual refresh with 'r' key
   });
@@ -538,6 +542,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
               inputLocked: cleanupInputLocked,
             }}
             version={version}
+            workingDirectory={workingDirectory}
           />
         );
 
@@ -604,6 +609,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
             lastUpdated={lastUpdated}
             loadingIndicatorDelay={loadingIndicatorDelay}
             version={version}
+            workingDirectory={workingDirectory}
           />
         );
     }
