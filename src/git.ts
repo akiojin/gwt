@@ -960,10 +960,13 @@ export interface BranchDivergenceStatus {
 export async function getBranchDivergenceStatuses(options?: {
   cwd?: string;
   remote?: string;
+  branches?: string[];
 }): Promise<BranchDivergenceStatus[]> {
   const cwd = options?.cwd;
   const remote = options?.remote ?? "origin";
   const execOptions = cwd ? { cwd } : undefined;
+  const branchFilter = options?.branches?.filter((name) => name.trim().length > 0);
+  const filterSet = branchFilter && branchFilter.length > 0 ? new Set(branchFilter) : null;
 
   const branchArgs = ["branch", "--format=%(refname:short)"];
   const { stdout: localBranchOutput } = execOptions
@@ -973,7 +976,12 @@ export async function getBranchDivergenceStatuses(options?: {
   const branchNames = localBranchOutput
     .split("\n")
     .map((name) => name.trim())
-    .filter(Boolean);
+    .filter(Boolean)
+    .filter((name) => !filterSet || filterSet.has(name));
+
+  if (filterSet && branchNames.length === 0) {
+    return [];
+  }
 
   const results: BranchDivergenceStatus[] = [];
 

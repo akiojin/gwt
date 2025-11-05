@@ -205,7 +205,26 @@ async function handleAIToolWorkflow(
       );
     }
 
-    const divergenceStatuses = await getBranchDivergenceStatuses({ cwd: repoRoot });
+    const divergenceBranches = new Set<string>();
+    const sanitizeBranchName = (value: string | null | undefined) => {
+      if (!value) return null;
+      return value.replace(/^origin\//, "");
+    };
+
+    const sanitizedBranch = sanitizeBranchName(branch);
+    if (sanitizedBranch) {
+      divergenceBranches.add(sanitizedBranch);
+    }
+
+    const sanitizedRemoteBranch = sanitizeBranchName(remoteBranch);
+    if (sanitizedRemoteBranch) {
+      divergenceBranches.add(sanitizedRemoteBranch);
+    }
+
+    const divergenceStatuses = await getBranchDivergenceStatuses({
+      cwd: repoRoot,
+      branches: Array.from(divergenceBranches),
+    });
     const divergedBranches = divergenceStatuses.filter(
       (status) => status.remoteAhead > 0 && status.localAhead > 0,
     );
@@ -227,7 +246,7 @@ async function handleAIToolWorkflow(
       printWarning(
         "Resolve these divergences (e.g., rebase or merge) before launching to avoid conflicts.",
       );
-      await waitForEnter("Press Enter to continue anyway, or Ctrl+C to abort.");
+      await waitForEnter("Press Enter to continue.");
     } else if (fastForwardError) {
       printWarning(
         `Fast-forward pull could not complete (${fastForwardError.message}). Continuing without blocking.`,
