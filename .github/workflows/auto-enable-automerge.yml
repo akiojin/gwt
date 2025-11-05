@@ -34,18 +34,12 @@ jobs:
             echo "token=$AUTO_MERGE_TOKEN" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Authenticate GitHub CLI
-        if: steps.token.outputs.skip != 'true'
-        env:
-          GH_TOKEN: ${{ steps.token.outputs.token }}
-        run: |
-          echo "$GH_TOKEN" | gh auth login --with-token --hostname github.com
-
       - name: Skip when auto-merge already enabled
         id: check
         if: steps.token.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ steps.token.outputs.token }}
+          GITHUB_TOKEN: ${{ steps.token.outputs.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
@@ -59,6 +53,7 @@ jobs:
         if: steps.token.outputs.skip != 'true' && steps.check.outputs.already-enabled == 'false'
         env:
           GH_TOKEN: ${{ steps.token.outputs.token }}
+          GITHUB_TOKEN: ${{ steps.token.outputs.token }}
           PR_ID: ${{ github.event.pull_request.node_id }}
         run: |
           set -euo pipefail
