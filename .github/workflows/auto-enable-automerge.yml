@@ -1,0 +1,44 @@
+name: Enable Auto Merge
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - reopened
+      - ready_for_review
+      - synchronize
+
+jobs:
+  enable-auto-merge:
+    if: >-
+      github.event.pull_request.draft == false &&
+      (github.event.pull_request.base.ref == 'main' ||
+       github.event.pull_request.base.ref == 'develop')
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Skip when auto-merge already enabled
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          if gh pr view "$PR_NUMBER" --json autoMergeRequest --jq '.autoMergeRequest != null' | grep -q true; then
+            echo "already-enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "already-enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Enable auto merge
+        if: steps.check.outputs.already-enabled == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_ID: ${{ github.event.pull_request.node_id }}
+        run: |
+          set -euo pipefail
+          gh api graphql \
+            -f query='mutation($pr:ID!,$method:PullRequestMergeMethod!){enablePullRequestAutoMerge(input:{pullRequestId:$pr,mergeMethod:$method}){pullRequest{number}}}' \
+            -F pr="$PR_ID" \
+            -F method=MERGE
