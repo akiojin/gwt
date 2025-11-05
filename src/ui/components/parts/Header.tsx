@@ -15,6 +15,13 @@ export interface HeaderProps {
    * @default undefined
    */
   version?: string | null | undefined;
+  /**
+   * 起動時の作業ディレクトリの絶対パス
+   * - string: ディレクトリパスが利用可能
+   * - undefined: ディレクトリ情報未提供
+   * @default undefined
+   */
+  workingDirectory?: string;
 }
 
 /**
@@ -28,6 +35,7 @@ export const Header = React.memo(function Header({
   showDivider = true,
   width = 80,
   version,
+  workingDirectory,
 }: HeaderProps) {
   const divider = dividerChar.repeat(width);
   const displayTitle = version ? `${title} v${version}` : title;
@@ -42,6 +50,12 @@ export const Header = React.memo(function Header({
       {showDivider && (
         <Box>
           <Text dimColor>{divider}</Text>
+        </Box>
+      )}
+      {workingDirectory && (
+        <Box>
+          <Text dimColor>Working Directory: </Text>
+          <Text>{workingDirectory}</Text>
         </Box>
       )}
     </Box>

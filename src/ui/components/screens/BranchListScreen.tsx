@@ -40,6 +40,7 @@ export interface BranchListScreenProps {
   loadingIndicatorDelay?: number;
   cleanupUI?: CleanupUIState;
   version?: string | null;
+  workingDirectory?: string;
 }
 
 /**
@@ -60,6 +61,7 @@ export function BranchListScreen({
   loadingIndicatorDelay = 300,
   cleanupUI,
   version,
+  workingDirectory,
 }: BranchListScreenProps) {
   const { rows } = useTerminalSize();
 
@@ -118,7 +120,12 @@ export function BranchListScreen({
   return (
     <Box flexDirection="column" height={rows}>
       {/* Header */}
-      <Header title="Claude Worktree - Branch Selection" titleColor="cyan" version={version} />
+      <Header
+        title="Claude Worktree - Branch Selection"
+        titleColor="cyan"
+        version={version}
+        {...(workingDirectory !== undefined && { workingDirectory })}
+      />
 
       {/* Stats */}
       <Box marginTop={1}>
