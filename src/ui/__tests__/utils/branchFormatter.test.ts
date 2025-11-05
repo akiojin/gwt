@@ -555,6 +555,63 @@ describe("branchFormatter", () => {
       expect(results[1].name).toBe("feature/no-worktree");
     });
 
+    it("should sort branches with worktree by latest commit timestamp", () => {
+      const worktreeMap = new Map([
+        [
+          "feature/recent",
+          {
+            path: "/path/to/recent",
+            locked: false,
+            prunable: false,
+            isAccessible: true,
+          },
+        ],
+        [
+          "feature/older",
+          {
+            path: "/path/to/older",
+            locked: false,
+            prunable: false,
+            isAccessible: true,
+          },
+        ],
+      ]);
+
+      const branches: BranchInfo[] = [
+        {
+          name: "feature/older",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+          worktree: {
+            path: "/path/to/older",
+            locked: false,
+            prunable: false,
+            isAccessible: true,
+          },
+          latestCommitTimestamp: 1_700_000_000,
+        },
+        {
+          name: "feature/recent",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+          worktree: {
+            path: "/path/to/recent",
+            locked: false,
+            prunable: false,
+            isAccessible: true,
+          },
+          latestCommitTimestamp: 1_800_000_000,
+        },
+      ];
+
+      const results = formatBranchItems(branches, worktreeMap);
+
+      expect(results[0].name).toBe("feature/recent");
+      expect(results[1].name).toBe("feature/older");
+    });
+
     it("should prioritize local branches over remote branches", () => {
       const branches: BranchInfo[] = [
         {
@@ -577,6 +634,30 @@ describe("branchFormatter", () => {
       expect(results[0].type).toBe("local");
       expect(results[1].name).toBe("origin/feature/remote");
       expect(results[1].type).toBe("remote");
+    });
+
+    it("should sort by latest commit timestamp when worktree status matches", () => {
+      const branches: BranchInfo[] = [
+        {
+          name: "origin/feature/newer",
+          type: "remote",
+          branchType: "feature",
+          isCurrent: false,
+          latestCommitTimestamp: 1_900_000_000,
+        },
+        {
+          name: "feature/local-older",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+          latestCommitTimestamp: 1_800_000_000,
+        },
+      ];
+
+      const results = formatBranchItems(branches);
+
+      expect(results[0].name).toBe("origin/feature/newer");
+      expect(results[1].name).toBe("feature/local-older");
     });
 
     it("should apply all sorting rules in correct priority order", () => {

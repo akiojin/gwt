@@ -15,6 +15,7 @@ export interface BranchInfo {
   hasUnpushedCommits?: boolean;
   openPR?: { number: number; title: string };
   mergedPR?: { number: number; mergedAt: string };
+  latestCommitTimestamp?: number;
 }
 
 export interface BranchChoice {
