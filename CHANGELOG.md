@@ -1,3 +1,9 @@
+## [1.19.3](https://github.com/akiojin/claude-worktree/compare/v1.19.2...v1.19.3) (2025-11-05)
+
+### Bug Fixes
+
+- rely on GH_TOKEN env directly ([ed523fe](https://github.com/akiojin/claude-worktree/commit/ed523fefe62d9cfe6768723c30a7db6b6722ea00))
+
 ## [1.19.2](https://github.com/akiojin/claude-worktree/compare/v1.19.1...v1.19.2) (2025-11-05)
 
 ### Bug Fixes
