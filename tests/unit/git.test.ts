@@ -859,4 +859,89 @@ describe("git.ts - Batch Merge Operations", () => {
       await expect(git.resetToHead("/path/to/worktree")).rejects.toThrow();
     });
   });
+
+  describe("getBranchDivergenceStatuses", () => {
+    it("should return divergence counts for branches with remotes", async () => {
+      (execa as any)
+        .mockResolvedValueOnce({
+          stdout: "main\nfeature/login",
+          stderr: "",
+          exitCode: 0,
+        })
+        .mockResolvedValueOnce({
+          stdout: "",
+          stderr: "",
+          exitCode: 0,
+        })
+        .mockResolvedValueOnce({
+          stdout: "2\t1",
+          stderr: "",
+          exitCode: 0,
+        })
+        .mockRejectedValueOnce(new Error("remote branch missing"));
+
+      const result = await git.getBranchDivergenceStatuses({ cwd: "/repo" });
+
+      expect(result).toEqual([
+        {
+          branch: "main",
+          remoteAhead: 2,
+          localAhead: 1,
+        },
+      ]);
+
+      expect(execa).toHaveBeenNthCalledWith(1, "git", [
+        "branch",
+        "--format=%(refname:short)",
+      ], {
+        cwd: "/repo",
+      });
+
+      expect(execa).toHaveBeenNthCalledWith(2, "git", [
+        "show-ref",
+        "--verify",
+        "--quiet",
+        "refs/remotes/origin/main",
+      ], {
+        cwd: "/repo",
+      });
+
+      expect(execa).toHaveBeenNthCalledWith(3, "git", [
+        "rev-list",
+        "--left-right",
+        "--count",
+        "origin/main...main",
+      ], {
+        cwd: "/repo",
+      });
+    });
+  });
+
+  describe("pullFastForward", () => {
+    it("should call git pull with --ff-only", async () => {
+      (execa as any).mockResolvedValue({
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+      });
+
+      await git.pullFastForward("/repo/worktree");
+
+      expect(execa).toHaveBeenCalledWith(
+        "git",
+        ["pull", "--ff-only", "origin"],
+        { cwd: "/repo/worktree" },
+      );
+    });
+
+    it("should throw error when pull fails", async () => {
+      (execa as any).mockRejectedValue(
+        new Error("fatal: Not possible to fast-forward."),
+      );
+
+      await expect(
+        git.pullFastForward("/repo/worktree"),
+      ).rejects.toThrow("Failed to fast-forward pull");
+    });
+  });
 });

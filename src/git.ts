@@ -81,13 +81,15 @@ export async function getRepositoryRoot(): Promise<string> {
   }
 }
 
-export async function getRemoteBranches(): Promise<BranchInfo[]> {
+export async function getRemoteBranches(
+  options?: { cwd?: string },
+): Promise<BranchInfo[]> {
   try {
-    const { stdout } = await execa("git", [
-      "branch",
-      "-r",
-      "--format=%(refname:short)",
-    ]);
+    const execOptions = options?.cwd ? { cwd: options.cwd } : undefined;
+    const args = ["branch", "-r", "--format=%(refname:short)"];
+    const { stdout } = execOptions
+      ? await execa("git", args, execOptions)
+      : await execa("git", args);
     return stdout
       .split("\n")
       .filter((line) => line.trim() && !line.includes("HEAD"))
@@ -115,12 +117,15 @@ async function getCurrentBranch(): Promise<string | null> {
   }
 }
 
-export async function getLocalBranches(): Promise<BranchInfo[]> {
+export async function getLocalBranches(
+  options?: { cwd?: string },
+): Promise<BranchInfo[]> {
   try {
-    const { stdout } = await execa("git", [
-      "branch",
-      "--format=%(refname:short)",
-    ]);
+    const execOptions = options?.cwd ? { cwd: options.cwd } : undefined;
+    const args = ["branch", "--format=%(refname:short)"];
+    const { stdout } = execOptions
+      ? await execa("git", args, execOptions)
+      : await execa("git", args);
     return stdout
       .split("\n")
       .filter((line) => line.trim())
@@ -457,9 +462,17 @@ export async function getEnhancedSessionInfo(
   }
 }
 
-export async function fetchAllRemotes(): Promise<void> {
+export async function fetchAllRemotes(
+  options?: { cwd?: string },
+): Promise<void> {
   try {
-    await execa("git", ["fetch", "--all", "--prune"]);
+    const execOptions = options?.cwd ? { cwd: options.cwd } : undefined;
+    const args = ["fetch", "--all", "--prune"];
+    if (execOptions) {
+      await execa("git", args, execOptions);
+    } else {
+      await execa("git", args);
+    }
   } catch (error) {
     throw new GitError("Failed to fetch remote branches", error);
   }
@@ -624,14 +637,21 @@ export async function pushBranchToRemote(
 export async function checkRemoteBranchExists(
   branchName: string,
   remote = "origin",
+  options?: { cwd?: string },
 ): Promise<boolean> {
   try {
-    await execa("git", [
+    const execOptions = options?.cwd ? { cwd: options.cwd } : undefined;
+    const args = [
       "show-ref",
       "--verify",
       "--quiet",
       `refs/remotes/${remote}/${branchName}`,
-    ]);
+    ];
+    if (execOptions) {
+      await execa("git", args, execOptions);
+    } else {
+      await execa("git", args);
+    }
     return true;
   } catch {
     return false;
@@ -776,6 +796,76 @@ export async function resetToHead(worktreePath: string): Promise<void> {
   } catch (error) {
     throw new GitError(
       `Failed to reset worktree to HEAD in ${worktreePath}`,
+      error,
+    );
+  }
+}
+
+export interface BranchDivergenceStatus {
+  branch: string;
+  remoteAhead: number;
+  localAhead: number;
+}
+
+export async function getBranchDivergenceStatuses(options?: {
+  cwd?: string;
+  remote?: string;
+}): Promise<BranchDivergenceStatus[]> {
+  const cwd = options?.cwd;
+  const remote = options?.remote ?? "origin";
+  const execOptions = cwd ? { cwd } : undefined;
+
+  const localBranches = await getLocalBranches({ cwd });
+  const results: BranchDivergenceStatus[] = [];
+
+  for (const branch of localBranches) {
+    const branchName = branch.name;
+    const remoteExists = await checkRemoteBranchExists(branchName, remote, {
+      cwd,
+    });
+
+    if (!remoteExists) {
+      continue;
+    }
+
+    try {
+      const revListArgs = [
+        "rev-list",
+        "--left-right",
+        "--count",
+        `${remote}/${branchName}...${branchName}`,
+      ];
+      const { stdout } = execOptions
+        ? await execa("git", revListArgs, execOptions)
+        : await execa("git", revListArgs);
+
+      const [remoteAheadRaw, localAheadRaw] = stdout.trim().split(/\s+/);
+      const remoteAhead = Number.parseInt(remoteAheadRaw || "0", 10) || 0;
+      const localAhead = Number.parseInt(localAheadRaw || "0", 10) || 0;
+
+      results.push({ branch: branchName, remoteAhead, localAhead });
+    } catch (error) {
+      throw new GitError(
+        `Failed to inspect divergence for ${branchName}`,
+        error,
+      );
+    }
+  }
+
+  return results;
+}
+
+export async function pullFastForward(
+  worktreePath: string,
+  remote = "origin",
+): Promise<void> {
+  try {
+    await execa("git", ["pull", "--ff-only", remote], {
+      cwd: worktreePath,
+    });
+  } catch (error) {
+    throw new GitError(
+      `Failed to fast-forward pull in ${worktreePath}`,
       error,
     );
   }
