@@ -27,5 +27,5 @@
 
 ## フェーズ5: 最終確認
 
-- [ ] T401 Markdownlint とフォーマット検証を実施しドキュメント品質を確認する (`specs/SPEC-78e66d9a/*.md`)
+- [x] T401 Markdownlint とフォーマット検証を実施しドキュメント品質を確認する (`specs/SPEC-78e66d9a/*.md`)
 - [ ] T402 CI 成功確認: release ワークフローを再実行し結果を記録する (`.github/workflows/release.yml`)

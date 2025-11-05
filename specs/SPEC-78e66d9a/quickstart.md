@@ -20,7 +20,7 @@ bun install
 bun run test src/ui/__tests__/components/common/LoadingIndicator.test.tsx
 ```
 
-2. CI で失敗したケースではタイマー遅延によりスピナーのフレームが更新されずテストが失敗する。ローカルで再現しづらい場合は `--repeat 20` を付与して繰り返し実行する。
+1. CI で失敗したケースではタイマー遅延によりスピナーのフレームが更新されずテストが失敗する。ローカルで再現しづらい場合は `--repeat 20` を付与して繰り返し実行する。
 
 ## 3. 修正後の検証
 
@@ -36,8 +36,8 @@ bun run test src/ui/__tests__/components/common/LoadingIndicator.test.tsx
 ### GitHub Actions
 
 1. Pull Request を作成して `release` ワークフローをトリガー。
-2. ワークフローページで `Test` ジョブが成功し、`semantic-release` まで到達することを確認。
-3. 必要に応じてワークフローを手動再実行しても成功することを確認。
+1. ワークフローページで `Test` ジョブが成功し、`semantic-release` まで到達することを確認。
+1. 必要に応じてワークフローを手動再実行しても成功することを確認。
 
 ## 4. トラブルシューティング
 

@@ -16,13 +16,13 @@ stateDiagram-v2
 
 ### 状態変数
 
-| 変数名        | 型        | 説明                                   |
-|---------------|-----------|----------------------------------------|
-| `visible`     | boolean   | スピナー描画の有無                     |
-| `frameIndex`  | number    | `safeFrames` の現在位置 (0-based)      |
-| `safeFrames`  | string[]  | 表示に使用するフレーム配列 (>=1 要素)  |
-| `delayTimerRef` | `Timeout | null` | 表示遅延用タイマー参照          |
-| `intervalRef` | `Interval | null` | スピナー更新タイマー参照        |
+| 変数名          | 型             | 説明                                   |
+|-----------------|----------------|----------------------------------------|
+| `visible`       | boolean        | スピナー描画の有無                     |
+| `frameIndex`    | number         | `safeFrames` の現在位置 (0-based)      |
+| `safeFrames`    | string[]       | 表示に使用するフレーム配列 (>=1 要素)  |
+| `delayTimerRef` | Timeout \| null | 表示遅延用タイマー参照                |
+| `intervalRef`   | Interval \| null | スピナー更新タイマー参照             |
 
 ## 2. タイマーライフサイクル
 
@@ -47,13 +47,13 @@ stateDiagram-v2
 
 `LoadingIndicatorProps` (既存)
 
-| プロパティ | 型        | デフォルト | 説明                         |
-|------------|-----------|------------|------------------------------|
-| `isLoading`| boolean   | -          | ローディング状態フラグ       |
-| `delay`    | number    | 300        | 表示前に待機するミリ秒       |
-| `message`  | string    | "Loading..." | 表示メッセージ             |
-| `interval` | number    | 80         | フレーム更新間隔             |
-| `frames`   | string[]  | `['|','/','-','\\']` | 使用するフレーム群 |
+| プロパティ | 型       | デフォルト             | 説明                                       |
+|------------|----------|------------------------|--------------------------------------------|
+| `isLoading`| boolean  | -                      | ローディング状態フラグ                     |
+| `delay`    | number   | 300                    | 表示前に待機するミリ秒                     |
+| `message`  | string   | `Loading...`           | 表示メッセージ                             |
+| `interval` | number   | 80                     | フレーム更新間隔                           |
+| `frames`   | string[] | ["&#124;","/","-","\\"]| 使用するフレーム群 (`DEFAULT_FRAMES`)      |
 
 ## 5. テスト補助ユーティリティ
 
