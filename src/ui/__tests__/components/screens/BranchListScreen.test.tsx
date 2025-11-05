@@ -188,11 +188,15 @@ describe('BranchListScreen', () => {
   it('should highlight the selected branch with cyan background', () => {
     process.env.FORCE_COLOR = '1';
     const onSelect = vi.fn();
-    const { lastFrame } = inkRender(
-      <BranchListScreen branches={mockBranches} stats={mockStats} onSelect={onSelect} />
-    );
+    let renderResult: ReturnType<typeof inkRender>;
+    await act(async () => {
+      renderResult = inkRender(
+        <BranchListScreen branches={mockBranches} stats={mockStats} onSelect={onSelect} />,
+        { stripAnsi: false }
+      );
+    });
 
-    const frame = lastFrame() ?? '';
+    const frame = renderResult!.lastFrame() ?? '';
     expect(frame).toContain('\u001b[46m'); // cyan background ANSI code
   });
 });
