@@ -172,4 +172,25 @@ describe('BranchListScreen', () => {
     expect(getByText(/⭐/)).toBeDefined(); // current icon
     expect(getByText(/✨/)).toBeDefined(); // feature icon
   });
+
+  it('should render latest commit timestamp for each branch', () => {
+    const onSelect = vi.fn();
+    const { container } = render(
+      <BranchListScreen branches={mockBranches} stats={mockStats} onSelect={onSelect} />
+    );
+
+    const textContent = container.textContent ?? '';
+    const matches = textContent.match(/最終更新:/g) ?? [];
+    expect(matches.length).toBe(mockBranches.length);
+  });
+
+  it('should highlight the selected branch with cyan background', () => {
+    const onSelect = vi.fn();
+    const { container } = render(
+      <BranchListScreen branches={mockBranches} stats={mockStats} onSelect={onSelect} />
+    );
+
+    const textContent = container.textContent ?? '';
+    expect(textContent).toContain('\u001b[46m'); // ANSI code for cyan background
+  });
 });

@@ -8,6 +8,7 @@ import { LoadingIndicator } from '../common/LoadingIndicator.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import type { BranchItem, Statistics } from '../../types.js';
 import stringWidth from 'string-width';
+import chalk from 'chalk';
 
 type IndicatorColor = 'cyan' | 'green' | 'yellow' | 'red';
 
@@ -156,7 +157,26 @@ export function BranchListScreen({
       const timestampText = formatLatestCommit(item.latestCommitTimestamp);
       const timestampWidth = stringWidth(timestampText);
 
-      const indicatorIcon = cleanupUI?.indicators?.[item.name]?.icon ?? '';
+      const indicatorInfo = cleanupUI?.indicators?.[item.name];
+      let indicatorIcon = indicatorInfo?.icon ?? '';
+      if (indicatorIcon && indicatorInfo?.color && !isSelected) {
+        switch (indicatorInfo.color) {
+          case 'cyan':
+            indicatorIcon = chalk.cyan(indicatorIcon);
+            break;
+          case 'green':
+            indicatorIcon = chalk.green(indicatorIcon);
+            break;
+          case 'yellow':
+            indicatorIcon = chalk.yellow(indicatorIcon);
+            break;
+          case 'red':
+            indicatorIcon = chalk.red(indicatorIcon);
+            break;
+          default:
+            break;
+        }
+      }
       const indicatorPrefix = indicatorIcon ? `${indicatorIcon} ` : '';
       const staticPrefix = `${arrow} ${indicatorPrefix}`;
       const staticPrefixWidth = stringWidth(staticPrefix);
