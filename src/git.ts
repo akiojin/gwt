@@ -81,8 +81,73 @@ export async function getRepositoryRoot(): Promise<string> {
   }
 }
 
+export async function getCurrentBranch(): Promise<string | null> {
+  try {
+    const { stdout } = await execa("git", ["branch", "--show-current"]);
+    return stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+async function getBranchCommitTimestamps(
+  refs: string[],
+): Promise<Map<string, number>> {
+  try {
+    const { stdout } = await execa("git", [
+      "for-each-ref",
+      "--format=%(refname:short)%00%(committerdate:unix)",
+      ...refs,
+    ]);
+
+    const map = new Map<string, number>();
+
+    for (const line of stdout.split("\n")) {
+      if (!line) continue;
+      const [ref, timestamp] = line.split("\0");
+      if (!ref || !timestamp) continue;
+      if (ref.endsWith("/HEAD")) continue;
+      const parsed = Number.parseInt(timestamp, 10);
+      if (Number.isNaN(parsed)) continue;
+      map.set(ref, parsed);
+    }
+
+    return map;
+  } catch (error) {
+    throw new GitError("Failed to get branch commit timestamps", error);
+  }
+}
+
+export async function getLocalBranches(): Promise<BranchInfo[]> {
+  try {
+    const commitMap = await getBranchCommitTimestamps(["refs/heads"]);
+    const { stdout } = await execa("git", [
+      "branch",
+      "--format=%(refname:short)",
+    ]);
+    return stdout
+      .split("\n")
+      .filter((line) => line.trim())
+      .map((name) => {
+        const trimmed = name.trim();
+        const timestamp = commitMap.get(trimmed);
+
+        return {
+          name: trimmed,
+          type: "local" as const,
+          branchType: getBranchType(trimmed),
+          isCurrent: false,
+          ...(timestamp !== undefined ? { latestCommitTimestamp: timestamp } : {}),
+        } satisfies BranchInfo;
+      });
+  } catch (error) {
+    throw new GitError("Failed to get local branches", error);
+  }
+}
+
 export async function getRemoteBranches(): Promise<BranchInfo[]> {
   try {
+    const commitMap = await getBranchCommitTimestamps(["refs/remotes"]);
     const { stdout } = await execa("git", [
       "branch",
       "-r",
@@ -94,44 +159,18 @@ export async function getRemoteBranches(): Promise<BranchInfo[]> {
       .map((line) => {
         const name = line.trim();
         const branchName = name.replace(/^origin\//, "");
+        const timestamp = commitMap.get(name);
+
         return {
           name,
           type: "remote" as const,
           branchType: getBranchType(branchName),
           isCurrent: false,
-        };
+          ...(timestamp !== undefined ? { latestCommitTimestamp: timestamp } : {}),
+        } satisfies BranchInfo;
       });
   } catch (error) {
     throw new GitError("Failed to get remote branches", error);
-  }
-}
-
-export async function getCurrentBranch(): Promise<string | null> {
-  try {
-    const { stdout } = await execa("git", ["branch", "--show-current"]);
-    return stdout.trim() || null;
-  } catch {
-    return null;
-  }
-}
-
-export async function getLocalBranches(): Promise<BranchInfo[]> {
-  try {
-    const { stdout } = await execa("git", [
-      "branch",
-      "--format=%(refname:short)",
-    ]);
-    return stdout
-      .split("\n")
-      .filter((line) => line.trim())
-      .map((name) => ({
-        name: name.trim(),
-        type: "local" as const,
-        branchType: getBranchType(name.trim()),
-        isCurrent: false,
-      }));
-  } catch (error) {
-    throw new GitError("Failed to get local branches", error);
   }
 }
 

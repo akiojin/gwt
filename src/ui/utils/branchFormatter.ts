@@ -157,8 +157,9 @@ export function formatBranchItem(
  * 2. main branch
  * 3. develop branch (only if main exists)
  * 4. Branches with worktree
- * 5. Local branches
- * 6. Alphabetical order by name
+ * 5. Latest commit timestamp (descending) within same worktree status
+ * 6. Local branches
+ * 7. Alphabetical order by name
  */
 function sortBranches(
   branches: BranchInfo[],
@@ -188,13 +189,20 @@ function sortBranches(
     if (aHasWorktree && !bHasWorktree) return -1;
     if (!aHasWorktree && bHasWorktree) return 1;
 
-    // 5. Local branches are prioritized over remote-only
+    // 5. Prioritize most recent commit within same worktree status
+    const aCommit = a.latestCommitTimestamp ?? 0;
+    const bCommit = b.latestCommitTimestamp ?? 0;
+    if (aCommit !== bCommit) {
+      return bCommit - aCommit;
+    }
+
+    // 6. Local branches are prioritized over remote-only
     const aIsLocal = a.type === "local";
     const bIsLocal = b.type === "local";
     if (aIsLocal && !bIsLocal) return -1;
     if (!aIsLocal && bIsLocal) return 1;
 
-    // 6. Alphabetical order by name
+    // 7. Alphabetical order by name
     return a.name.localeCompare(b.name);
   });
 }
