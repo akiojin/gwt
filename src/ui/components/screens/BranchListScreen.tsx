@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useCallback } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { Header } from '../parts/Header.js';
 import { Stats } from '../parts/Stats.js';
@@ -7,6 +7,7 @@ import { Select } from '../common/Select.js';
 import { LoadingIndicator } from '../common/LoadingIndicator.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import type { BranchItem, Statistics } from '../../types.js';
+import stringWidth from 'string-width';
 
 type IndicatorColor = 'cyan' | 'green' | 'yellow' | 'red';
 
@@ -103,19 +104,88 @@ export function BranchListScreen({
     { key: 'c', description: 'Cleanup branches' },
   ];
 
-  const renderIndicator = (item: BranchItem, isSelected: boolean) => {
-    const indicator = cleanupUI?.indicators?.[item.name];
-
-    if (indicator) {
-      const color = indicator.color ?? (isSelected ? 'cyan' : undefined);
-      if (color) {
-        return <Text color={color}>{indicator.icon}</Text>;
-      }
-      return <Text>{indicator.icon}</Text>;
+  const formatLatestCommit = useCallback((timestamp?: number) => {
+    if (!timestamp || Number.isNaN(timestamp)) {
+      return '最終更新: ---';
     }
 
-    return isSelected ? <Text color="cyan">›</Text> : <Text> </Text>;
-  };
+    const date = new Date(timestamp * 1000);
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    const hours = String(date.getHours()).padStart(2, '0');
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+
+    return `最終更新: ${year}-${month}-${day} ${hours}:${minutes}`;
+  }, []);
+
+  const truncateToWidth = useCallback((value: string, maxWidth: number) => {
+    if (maxWidth <= 0) {
+      return '';
+    }
+
+    if (stringWidth(value) <= maxWidth) {
+      return value;
+    }
+
+    const ellipsis = '…';
+    const ellipsisWidth = stringWidth(ellipsis);
+    if (ellipsisWidth >= maxWidth) {
+      return ellipsis;
+    }
+
+    let currentWidth = 0;
+    let result = '';
+
+    for (const char of value) {
+      const charWidth = stringWidth(char);
+      if (currentWidth + charWidth + ellipsisWidth > maxWidth) {
+        break;
+      }
+      result += char;
+      currentWidth += charWidth;
+    }
+
+    return result + ellipsis;
+  }, []);
+
+  const renderBranchRow = useCallback(
+    (item: BranchItem, isSelected: boolean, context: { columns: number }) => {
+      const columns = Math.max(20, context.columns);
+      const arrow = isSelected ? '>' : ' ';
+      const timestampText = formatLatestCommit(item.latestCommitTimestamp);
+      const timestampWidth = stringWidth(timestampText);
+
+      const indicatorIcon = cleanupUI?.indicators?.[item.name]?.icon ?? '';
+      const indicatorPrefix = indicatorIcon ? `${indicatorIcon} ` : '';
+      const staticPrefix = `${arrow} ${indicatorPrefix}`;
+      const staticPrefixWidth = stringWidth(staticPrefix);
+
+      const maxLeftTextWidth = Math.max(staticPrefixWidth, columns - timestampWidth - 1);
+      const maxLabelWidth = Math.max(0, maxLeftTextWidth - staticPrefixWidth);
+      const truncatedLabel = truncateToWidth(item.label, maxLabelWidth);
+      const leftText = `${staticPrefix}${truncatedLabel}`;
+
+      const gapWidth = Math.max(1, columns - stringWidth(leftText) - timestampWidth);
+      const gap = ' '.repeat(gapWidth);
+      let line = `${leftText}${gap}${timestampText}`;
+      const paddingWidth = Math.max(0, columns - stringWidth(line));
+      if (paddingWidth > 0) {
+        line += ' '.repeat(paddingWidth);
+      }
+
+      if (isSelected) {
+        return (
+          <Text backgroundColor="cyan" color="black">
+            {line}
+          </Text>
+        );
+      }
+
+      return <Text>{line}</Text>;
+    },
+    [cleanupUI, formatLatestCommit, truncateToWidth]
+  );
 
   return (
     <Box flexDirection="column" height={rows}>
@@ -165,7 +235,8 @@ export function BranchListScreen({
             onSelect={onSelect}
             limit={limit}
             disabled={Boolean(cleanupUI?.inputLocked)}
-            renderIndicator={renderIndicator}
+            renderIndicator={() => null}
+            renderItem={renderBranchRow}
           />
         )}
       </Box>

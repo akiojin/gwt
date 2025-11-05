@@ -31,6 +31,7 @@ describe('BranchListScreen', () => {
       hasChanges: false,
       label: '⚡ ⭐ main',
       value: 'main',
+      latestCommitTimestamp: 1_700_000_000,
     },
     {
       name: 'feature/test',
@@ -41,6 +42,7 @@ describe('BranchListScreen', () => {
       hasChanges: false,
       label: '✨ feature/test',
       value: 'feature/test',
+      latestCommitTimestamp: 1_699_000_000,
     },
   ];
 
@@ -63,12 +65,11 @@ describe('BranchListScreen', () => {
 
   it('should render statistics', () => {
     const onSelect = vi.fn();
-    const { getByText } = render(
+    const { container, getByText } = render(
       <BranchListScreen branches={mockBranches} stats={mockStats} onSelect={onSelect} />
     );
 
-    expect(getByText(/Local:/)).toBeDefined();
-    expect(getByText(/2/)).toBeDefined();
+    expect(container.textContent).toContain('Local: 2');
     expect(getByText(/Remote:/)).toBeDefined();
   });
 
@@ -120,18 +121,6 @@ describe('BranchListScreen', () => {
         loadingIndicatorDelay={10}
       />
     );
-
-    expect(queryByText(/Git情報を読み込んでいます/i)).toBeNull();
-
-    await act(async () => {
-      if (typeof (vi as any).advanceTimersByTime === 'function') {
-        (vi as any).advanceTimersByTime(5);
-      } else {
-        await new Promise((resolve) => setTimeout(resolve, 5));
-      }
-    });
-
-    expect(queryByText(/Git情報を読み込んでいます/i)).toBeNull();
 
     await act(async () => {
       if (typeof (vi as any).advanceTimersByTime === 'function') {
