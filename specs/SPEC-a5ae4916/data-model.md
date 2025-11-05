@@ -22,6 +22,7 @@
 | `type` | `"local" \| "remote"` | ブランチのタイプ | ローカルブランチ優先判定で使用 |
 | `isCurrent` | `boolean` | 現在のブランチかどうか | 最優先表示の判定で使用 |
 | `branchType` | `"main" \| "develop" \| "feature" \| "hotfix" \| "release" \| "other"` | ブランチの種類 | main / develop 優先判定で使用 |
+| `latestCommitTimestamp` | `number \| undefined` | 最新コミットのUNIXタイムスタンプ | worktree有無が同じグループ内での最新順ソートに使用 |
 
 **ソートでの使用例**:
 
@@ -38,7 +39,12 @@ if (a.branchType !== "main" && b.branchType === "main") return 1;
 if (a.branchType === "develop" && b.branchType !== "develop") return -1;
 if (a.branchType !== "develop" && b.branchType === "develop") return 1;
 
-// ローカルブランチ判定（新機能）
+// 最新コミット時刻で降順ソート（新機能）
+const aCommit = a.latestCommitTimestamp ?? 0;
+const bCommit = b.latestCommitTimestamp ?? 0;
+if (aCommit !== bCommit) return bCommit - aCommit;
+
+// ローカルブランチ判定（Clarify結果）
 const aIsLocal = a.type === "local";
 const bIsLocal = b.type === "local";
 if (aIsLocal && !bIsLocal) return -1;
@@ -157,12 +163,17 @@ const sortedBranches = [...filteredBranches].sort((a, b) => {
   const bHasWorktree = worktreeMap.has(b.name);
   if (aHasWorktree !== bHasWorktree) { /* ... */ }
 
-  // 4. type プロパティで判定（新機能）
+  // 4. 最新コミットタイムスタンプで降順判定（新機能）
+  const aCommit = a.latestCommitTimestamp ?? 0;
+  const bCommit = b.latestCommitTimestamp ?? 0;
+  if (aCommit !== bCommit) { /* ... */ }
+
+  // 5. type プロパティで判定（Clarify結果）
   const aIsLocal = a.type === "local";
   const bIsLocal = b.type === "local";
   if (aIsLocal !== bIsLocal) { /* ... */ }
 
-  // 5. name プロパティで判定
+  // 6. name プロパティで判定
   return a.name.localeCompare(b.name);
 });
 ```

@@ -66,10 +66,11 @@ cat tests/unit/ui/table.test.ts
 
 **テストケース**:
 1. Worktree付きブランチがworktreeなしブランチより上に表示される
-2. ローカルブランチがリモートオンリーブランチより上に表示される
+2. ローカルブランチがリモートオンリーブランチより上に表示される（最新コミット時刻が同一の場合）
 3. 現在のブランチ → main → develop の順が維持される
 4. release/hotfix ブランチは worktree が無い場合に一般ルールへ従う
-5. 同条件のブランチは名前順でソートされる
+5. worktree有無が同じブランチ群は最新コミット時刻の降順で並ぶ
+6. 最新コミット時刻も同一の場合は名前順でソートされる
 
 #### 1.3 テストの実行（失敗することを確認）
 
@@ -116,13 +117,18 @@ const sortedBranches = [...filteredBranches].sort((a, b) => {
   if (aHasWorktree && !bHasWorktree) return -1;
   if (!aHasWorktree && bHasWorktree) return 1;
 
-  // 5. ローカルブランチを優先
+  // 5. 最新コミット時刻が新しいブランチを優先
+  const aCommit = a.latestCommitTimestamp ?? 0;
+  const bCommit = b.latestCommitTimestamp ?? 0;
+  if (aCommit !== bCommit) return bCommit - aCommit;
+
+  // 6. ローカルブランチを優先
   const aIsLocal = a.type === "local";
   const bIsLocal = b.type === "local";
   if (aIsLocal && !bIsLocal) return -1;
   if (!aIsLocal && bIsLocal) return 1;
 
-  // 6. 名前順
+  // 7. 名前順
   return a.name.localeCompare(b.name);
 });
 ```
