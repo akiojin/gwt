@@ -17,14 +17,23 @@ fi
 # コマンドを取得
 command=$(echo "$json_input" | jq -r '.tool_input.command // empty')
 
-# パイプライン、リダイレクト、heredocの前でコマンドを切り出す
-# &&, ||, ;, |, >, <, << で分割して最初の実際のコマンドを取得
-actual_command=$(echo "$command" | sed 's/[|&;].*//; s/[<>].*//; s/<<.*//' | head -n 1 | xargs)
+# 演算子で連結された各コマンドを個別にチェックするために分割
+# &&, ||, ;, |, |&, &, 改行などで区切って先頭トークンを判定する
+command_segments=$(printf '%s\n' "$command" | sed -E 's/\|&/\n/g; s/\|\|/\n/g; s/&&/\n/g; s/[;|&]/\n/g')
 
-# ブランチ切り替え/作成/worktreeコマンドをチェック
-if echo "$actual_command" | grep -qE '^git\s+(checkout|switch|branch|worktree)\b'; then
-    # JSON応答を返す
-    cat <<EOF
+while IFS= read -r segment; do
+    # リダイレクトやheredoc以降を落としてトリミング
+    trimmed_segment=$(echo "$segment" | sed 's/[<>].*//; s/<<.*//' | xargs)
+
+    # 空行はスキップ
+    if [ -z "$trimmed_segment" ]; then
+        continue
+    fi
+
+    # ブランチ切り替え/作成/worktreeコマンドをチェック
+    if echo "$trimmed_segment" | grep -qE '^git\s+(checkout|switch|branch|worktree)\b'; then
+        # JSON応答を返す
+        cat <<EOF
 {
   "decision": "block",
   "reason": "🚫 ブランチ切り替え・作成・worktreeコマンドは禁止されています / Branch switching, creation, and worktree commands are not allowed",
@@ -37,7 +46,8 @@ EOF
     echo "理由: Worktreeは起動したブランチで作業を完結させる設計です。" >&2
 
     exit 2  # ブロック
-fi
+    fi
+done <<< "$command_segments"
 
 # 許可
 exit 0
