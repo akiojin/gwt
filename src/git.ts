@@ -815,14 +815,18 @@ export async function getBranchDivergenceStatuses(options?: {
   const remote = options?.remote ?? "origin";
   const execOptions = cwd ? { cwd } : undefined;
 
-  const localBranches = await getLocalBranches({ cwd });
+  const localBranches = await getLocalBranches(
+    cwd ? { cwd } : undefined,
+  );
   const results: BranchDivergenceStatus[] = [];
 
   for (const branch of localBranches) {
     const branchName = branch.name;
-    const remoteExists = await checkRemoteBranchExists(branchName, remote, {
-      cwd,
-    });
+    const remoteExists = await checkRemoteBranchExists(
+      branchName,
+      remote,
+      cwd ? { cwd } : undefined,
+    );
 
     if (!remoteExists) {
       continue;
