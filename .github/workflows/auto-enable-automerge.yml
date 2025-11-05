@@ -16,29 +16,39 @@ jobs:
        github.event.pull_request.base.ref == 'develop')
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       pull-requests: write
+    env:
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ secrets.AUTO_MERGE_TOKEN != '' && secrets.AUTO_MERGE_TOKEN || secrets.GITHUB_TOKEN }}
     steps:
+      - name: Check auto merge token
+        id: token
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::GH_TOKEN is not configured. Set AUTO_MERGE_TOKEN or rely on GITHUB_TOKEN." >&2
+            exit 1
+          fi
+
       - name: Skip when auto-merge already enabled
         id: check
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
-          if gh pr view "$PR_NUMBER" --json autoMergeRequest --jq '.autoMergeRequest != null' | grep -q true; then
+          if gh pr view "$PR_NUMBER" --repo "$GH_REPO" --json autoMergeRequest --jq '.autoMergeRequest != null' | grep -q true; then
             echo "already-enabled=true" >> "$GITHUB_OUTPUT"
           else
             echo "already-enabled=false" >> "$GITHUB_OUTPUT"
           fi
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
 
       - name: Enable auto merge
         if: steps.check.outputs.already-enabled == 'false'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_ID: ${{ github.event.pull_request.node_id }}
         run: |
           set -euo pipefail
-          gh api graphql \
+          gh api graphql --method POST \
             -f query='mutation($pr:ID!,$method:PullRequestMergeMethod!){enablePullRequestAutoMerge(input:{pullRequestId:$pr,mergeMethod:$method}){pullRequest{number}}}' \
             -F pr="$PR_ID" \
             -F method=MERGE
+        env:
+          PR_ID: ${{ github.event.pull_request.node_id }}
