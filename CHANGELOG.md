@@ -1,3 +1,226 @@
+# [1.17.0](https://github.com/akiojin/claude-worktree/compare/v1.16.0...v1.17.0) (2025-11-01)
+
+
+### Features
+
+* Windows向けインストール方法を推奨メッセージに追加 ([d6cda00](https://github.com/akiojin/claude-worktree/commit/d6cda009fdef7e871f23d522475fe332c0a17f90))
+
+# [1.16.0](https://github.com/akiojin/claude-worktree/compare/v1.15.0...v1.16.0) (2025-11-01)
+
+
+### Features
+
+* bunxフォールバック時に公式インストール方法を推奨 ([e79f151](https://github.com/akiojin/claude-worktree/commit/e79f151d292451c4ad4757770e2b4e053ad33e61))
+* bunxフォールバック時のメッセージに2秒待機を追加 ([ba60cad](https://github.com/akiojin/claude-worktree/commit/ba60cad50580e5fa2f52aa54bef92a255c973c03))
+
+# [1.15.0](https://github.com/akiojin/claude-worktree/compare/v1.14.0...v1.15.0) (2025-11-01)
+
+
+### Features
+
+* Claude Code自動検出機能を追加（US4: ローカルインストール版優先） ([17e3279](https://github.com/akiojin/claude-worktree/commit/17e3279d8d73df11bcd8a0f009a53ab2a74a6e8e))
+
+# [1.14.0](https://github.com/akiojin/claude-worktree/compare/v1.13.0...v1.14.0) (2025-10-31)
+
+
+### Features
+
+* add git loading indicator with tdd coverage ([ca9faa9](https://github.com/akiojin/claude-worktree/commit/ca9faa9ea85be3abbd8cec8043bb005cf25731d1))
+* ブランチ一覧に未プッシュ・PR状態アイコンを追加 ([404af59](https://github.com/akiojin/claude-worktree/commit/404af5934ec9ac8ac9b382422913228fd8707f34))
+
+# [1.13.0](https://github.com/akiojin/claude-worktree/compare/v1.12.3...v1.13.0) (2025-10-31)
+
+
+### Features
+
+* UIヘッダーにバージョン表示機能を追加 (US2) ([17e8a6d](https://github.com/akiojin/claude-worktree/commit/17e8a6dfb7cb84b7e6bcbb472d17a136ff8b4e45))
+* **version:** add CLI version flag (--version/-v) ([351d702](https://github.com/akiojin/claude-worktree/commit/351d7026d97e02ee1c1babcc3d6c0d70dabe14be))
+
+## [1.12.3](https://github.com/akiojin/claude-worktree/compare/v1.12.2...v1.12.3) (2025-10-31)
+
+
+### Bug Fixes
+
+* Codex CLIのweb検索フラグを正しく有効化 ([7319690](https://github.com/akiojin/claude-worktree/commit/7319690d1d4bee5978b49390f797bc471164b683))
+
+## [1.12.2](https://github.com/akiojin/claude-worktree/compare/v1.12.1...v1.12.2) (2025-10-31)
+
+
+### Bug Fixes
+
+* 自動更新時のカーソル位置リセット問題を解決 ([ee54c1a](https://github.com/akiojin/claude-worktree/commit/ee54c1a396c1905080f44558c1952daeaa594af1))
+
+## [1.12.1](https://github.com/akiojin/claude-worktree/compare/v1.12.0...v1.12.1) (2025-10-31)
+
+
+### Bug Fixes
+
+* Codex CLIのweb_search_request対応 ([efe151e](https://github.com/akiojin/claude-worktree/commit/efe151e8d4800b43399bd9e9718a4c777f2ebe8e))
+
+# [1.12.0](https://github.com/akiojin/claude-worktree/compare/v1.11.0...v1.12.0) (2025-10-30)
+
+
+### Bug Fixes
+
+* ensureGitignoreEntryテストを統合テストに変更 ([2727353](https://github.com/akiojin/claude-worktree/commit/2727353744d5eb23eb7b0cda5329dadd11479253))
+* Spec Kitスクリプトのデフォルト動作をブランチ作成なしに変更 ([e7627ec](https://github.com/akiojin/claude-worktree/commit/e7627ecf11c40da4f98a1203d7745a881117f70e))
+* Spec Kitスクリプトのブランチ名制約を緩和 ([fb7118a](https://github.com/akiojin/claude-worktree/commit/fb7118a97620d5d0d35df13004bdbcefd83ea2cb))
+
+
+### Features
+
+* Worktreeディレクトリパスを.git/worktreeから.worktreesに変更 ([da46aa1](https://github.com/akiojin/claude-worktree/commit/da46aa1385fdd420072c12a6f3a70a5400a02675))
+* worktree作成時に.gitignoreへ.worktrees/を自動追加 ([aabfaee](https://github.com/akiojin/claude-worktree/commit/aabfaee47aca3660398b1860f2b51b4762f99f57))
+
+## [Unreleased]
+
+### Features
+
+* Add version display in CLI flag (`--version` / `-v`) and UI header
+  - CLI: Display package version with `claude-worktree --version` or `-v` flag
+  - UI: Show version in all screen headers (e.g., "Claude Worktree v1.12.3")
+  - Graceful handling when version cannot be retrieved
+
+* **worktree**: Worktreeディレクトリを`.git/worktree`から`.worktrees`に変更
+  - 新規Worktreeは`.worktrees/`配下に作成されます
+  - `.gitignore`に`.worktrees/`が自動的に追加されます
+  - 既存の`.git/worktree`配下のWorktreeは影響を受けず、引き続き動作します
+  - 新旧両方のパスのWorktreeが共存可能です
+
+### Tests
+
+* **worktree**: 後方互換性テストを追加
+  - 既存の`.git/worktree`パスのWorktreeが正常に動作することを検証
+  - 新旧パスのWorktreeが共存できることを検証
+
+# [1.11.0](https://github.com/akiojin/claude-worktree/compare/v1.10.0...v1.11.0) (2025-10-30)
+
+
+### Bug Fixes
+
+* realtimeUpdate.test.tsxのテストアプローチを修正 ([54a4502](https://github.com/akiojin/claude-worktree/commit/54a4502a9a614739dc88b5a5be01973656c805ee))
+
+
+### Features
+
+* リアルタイム更新機能を実装（FR-009対応） ([9dd057a](https://github.com/akiojin/claude-worktree/commit/9dd057a6fe6a62e4e0c86a948826c0f77fcdb145))
+
+# [1.10.0](https://github.com/akiojin/claude-worktree/compare/v1.9.0...v1.10.0) (2025-10-29)
+
+
+### Features
+
+* cコマンドでベース差分なしブランチもクリーンアップ対象に追加 ([4ff79b7](https://github.com/akiojin/claude-worktree/commit/4ff79b76ebbc2b2d2a40ccf250eba8d1a165abb9))
+
+# [1.9.0](https://github.com/akiojin/claude-worktree/compare/v1.8.0...v1.9.0) (2025-10-29)
+
+
+### Bug Fixes
+
+* AIToolSelectorScreenテストを非同期読み込みに対応 ([0114eeb](https://github.com/akiojin/claude-worktree/commit/0114eebf82e44f9e71d91a9903993f088fdc959a))
+
+
+### Features
+
+* カスタムAIツール対応機能を実装（設定管理・UI統合・起動機能） ([bce4292](https://github.com/akiojin/claude-worktree/commit/bce4292a11122556373f787ecddf4a656452e309))
+* カスタムツール統合と実行オプション拡張（Phase 4-6完了） ([c769f5d](https://github.com/akiojin/claude-worktree/commit/c769f5dba5a6a7d73b1e88dea7d1d3b7bd8a847f))
+* セッション管理拡張とコード品質改善（Phase 7-8完了） ([6e5b1cf](https://github.com/akiojin/claude-worktree/commit/6e5b1cf0ea1382535b21f2b32a9c2689a443789d))
+
+# [1.8.0](https://github.com/akiojin/claude-worktree/compare/v1.7.1...v1.8.0) (2025-10-29)
+
+
+### Features
+
+* 戻るキーをqからESCに変更、終了はCtrl+Cに統一 ([2b9d82b](https://github.com/akiojin/claude-worktree/commit/2b9d82bca649a1edd06d800c58f629aa469a3074))
+
+## [1.7.1](https://github.com/akiojin/claude-worktree/compare/v1.7.0...v1.7.1) (2025-10-29)
+
+
+### Bug Fixes
+
+* BranchActionSelectorScreenでqキーで戻る機能と英語化を実装 ([c7860aa](https://github.com/akiojin/claude-worktree/commit/c7860aa2a0c3cbee359c7d830406c6124b4106f4))
+
+# [1.7.0](https://github.com/akiojin/claude-worktree/compare/v1.6.0...v1.7.0) (2025-10-29)
+
+
+### Bug Fixes
+
+* TypeScript型エラーを修正してビルドを通す ([e9564ee](https://github.com/akiojin/claude-worktree/commit/e9564ee6c95390d8dda0eb73d5f454a1c8596e4d))
+
+
+### Features
+
+* ブランチ選択後にアクション選択画面を追加（MVP2） ([54eae36](https://github.com/akiojin/claude-worktree/commit/54eae367045945bd45fa4a905f20a96e6a04bd8f))
+* 選択したブランチをベースブランチとして新規ブランチ作成に使用 ([2ee8eb5](https://github.com/akiojin/claude-worktree/commit/2ee8eb5b1d06ac2e7b24a7cada91989ec023b3ac))
+
+# [1.6.0](https://github.com/akiojin/claude-worktree/compare/v1.5.0...v1.6.0) (2025-10-29)
+
+
+### Features
+
+* カレントブランチ選択時にWorktree作成をスキップする機能を実装 ([e6bfec2](https://github.com/akiojin/claude-worktree/commit/e6bfec28562a1a7bfba32c06b7002e34a04d513c))
+* 型定義を追加（BranchAction, ScreenType拡張, getCurrentBranch export） ([da38caf](https://github.com/akiojin/claude-worktree/commit/da38cafca4946e272f2836a12a4ccd6f9c5c706a))
+
+# [1.5.0](https://github.com/akiojin/claude-worktree/compare/v1.4.5...v1.5.0) (2025-10-29)
+
+
+### Features
+
+* ブランチ一覧のソート機能を実装 ([3c23747](https://github.com/akiojin/claude-worktree/commit/3c237474ca30756bc2e06ba958036af38238a6e2))
+
+## [1.4.5](https://github.com/akiojin/claude-worktree/compare/v1.4.4...v1.4.5) (2025-10-27)
+
+
+### Bug Fixes
+
+* テストファイルを削除してnpm自動公開を確認 ([613f404](https://github.com/akiojin/claude-worktree/commit/613f404003edb576bba5592bb08829377cac5cf1))
+
+## [1.4.4](https://github.com/akiojin/claude-worktree/compare/v1.4.3...v1.4.4) (2025-10-27)
+
+
+### Bug Fixes
+
+* NPM Token更新後の自動公開を有効化 ([3161265](https://github.com/akiojin/claude-worktree/commit/3161265b370bfbcb62781cd2fa5e8d7107617b43))
+
+## [1.4.3](https://github.com/akiojin/claude-worktree/compare/v1.4.2...v1.4.3) (2025-10-27)
+
+
+### Bug Fixes
+
+* npm publishでOIDC provenanceを有効化 ([c296899](https://github.com/akiojin/claude-worktree/commit/c2968993240095e4914457d7d7dcf06a2449651f))
+
+## [1.4.2](https://github.com/akiojin/claude-worktree/compare/v1.4.1...v1.4.2) (2025-10-27)
+
+
+### Bug Fixes
+
+* PRクリーンアップ時の未プッシュ判定をマージ済みブランチに対応 ([b9fe8bb](https://github.com/akiojin/claude-worktree/commit/b9fe8bbd58eb60154a3bebf7d694a1dc9555e2f2))
+* semantic-releaseがdetached HEAD状態で動作しない問題を修正 ([5ce7549](https://github.com/akiojin/claude-worktree/commit/5ce7549d903507cb0b1a23fb8fa0238c34e449fb))
+* **ui:** stop spinner once cleanup completes ([602b3ce](https://github.com/akiojin/claude-worktree/commit/602b3ceae51b967e885ddb239e739091d06f1f4e))
+
+## [1.4.1](https://github.com/akiojin/claude-worktree/compare/v1.4.0...v1.4.1) (2025-10-27)
+
+
+### Bug Fixes
+
+* Ink UI終了時にTTYリスナーを解放 ([c6c5392](https://github.com/akiojin/claude-worktree/commit/c6c53921b6d17ffc5cce3cc3bc399ff8bac38683))
+* 子プロセス用TTYを安全に引き渡す ([5168007](https://github.com/akiojin/claude-worktree/commit/5168007d0c37ba17fd923741b83728610aa56d8c))
+
+# [1.4.0](https://github.com/akiojin/claude-worktree/compare/v1.3.1...v1.4.0) (2025-10-27)
+
+
+### Bug Fixes
+
+* Ink UIのTTY制御を安定化 ([290b9e2](https://github.com/akiojin/claude-worktree/commit/290b9e2f183a7fbf4bb1ba4d0ed047381c2c6593))
+* TTYフォールバックの標準入出力を引き渡す ([19aaed1](https://github.com/akiojin/claude-worktree/commit/19aaed1ac186d9a6f3b281b65f482c3e10e59500))
+
+
+### Features
+
+* **ui:** PRクリーンアップ実行中のフィードバックを改善 ([c8f5259](https://github.com/akiojin/claude-worktree/commit/c8f525914112ac770e2aae8a730c127cd9f0d68b))
+* **ui:** PRクリーンアップ実行中のフィードバックを改善 ([caa19eb](https://github.com/akiojin/claude-worktree/commit/caa19ebaa341e34dad5dc3a3629a13890f329a5a))
+* **ui:** 即時スピナー更新と入力ロックのレスポンス改善 ([43d7577](https://github.com/akiojin/claude-worktree/commit/43d75776a0c6fd007e17004aac1c499668808b48))
+
 ## [1.3.1](https://github.com/akiojin/claude-worktree/compare/v1.3.0...v1.3.1) (2025-10-26)
 
 

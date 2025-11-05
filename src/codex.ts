@@ -2,10 +2,12 @@ import { execa } from "execa";
 import chalk from "chalk";
 import { platform } from "os";
 import { existsSync } from "fs";
+import { createChildStdio, getTerminalStreams } from "./utils/terminal.js";
 
 const CODEX_CLI_PACKAGE = "@openai/codex@latest";
 const DEFAULT_CODEX_ARGS = [
-  "--search",
+  "--enable",
+  "web_search_request",
   '--model="gpt-5-codex"',
   "--sandbox",
   "workspace-write",
@@ -41,6 +43,8 @@ export async function launchCodexCLI(
     bypassApprovals?: boolean;
   } = {},
 ): Promise<void> {
+  const terminal = getTerminalStreams();
+
   try {
     if (!existsSync(worktreePath)) {
       throw new Error(`Worktree path does not exist: ${worktreePath}`);
@@ -77,11 +81,21 @@ export async function launchCodexCLI(
 
     args.push(...DEFAULT_CODEX_ARGS);
 
-    await execa("bunx", [CODEX_CLI_PACKAGE, ...args], {
-      cwd: worktreePath,
-      stdio: "inherit",
-      shell: true,
-    });
+    terminal.exitRawMode();
+
+    const childStdio = createChildStdio();
+
+    try {
+      await execa("bunx", [CODEX_CLI_PACKAGE, ...args], {
+        cwd: worktreePath,
+        shell: true,
+        stdin: childStdio.stdin,
+        stdout: childStdio.stdout,
+        stderr: childStdio.stderr,
+      } as any);
+    } finally {
+      childStdio.cleanup();
+    }
   } catch (error: any) {
     const errorMessage =
       error.code === "ENOENT"
@@ -104,6 +118,8 @@ export async function launchCodexCLI(
     }
 
     throw new CodexError(errorMessage, error);
+  } finally {
+    terminal.exitRawMode();
   }
 }
 

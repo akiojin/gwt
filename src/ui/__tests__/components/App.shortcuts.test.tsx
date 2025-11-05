@@ -5,13 +5,13 @@ import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from 'vites
 import type { Mock } from 'vitest';
 import { render, act, waitFor } from '@testing-library/react';
 import React from 'react';
-import type { CleanupTarget } from '../../types.js';
+import type { BranchItem, CleanupTarget } from '../../types.js';
 import { Window } from 'happy-dom';
 import * as useGitDataModule from '../../hooks/useGitData.js';
 import * as useScreenStateModule from '../../hooks/useScreenState.js';
 import * as WorktreeManagerScreenModule from '../../components/screens/WorktreeManagerScreen.js';
 import * as BranchCreatorScreenModule from '../../components/screens/BranchCreatorScreen.js';
-import * as PRCleanupScreenModule from '../../components/screens/PRCleanupScreen.js';
+import * as BranchListScreenModule from '../../components/screens/BranchListScreen.js';
 import * as worktreeModule from '../../../worktree.js';
 import * as gitModule from '../../../git.js';
 import { App } from '../../components/App.js';
@@ -22,13 +22,13 @@ const resetMock = vi.fn();
 
 const worktreeScreenProps: any[] = [];
 const branchCreatorProps: any[] = [];
-const prCleanupProps: any[] = [];
+const branchListProps: any[] = [];
 
 const originalUseGitData = useGitDataModule.useGitData;
 const originalUseScreenState = useScreenStateModule.useScreenState;
 const originalWorktreeManagerScreen = WorktreeManagerScreenModule.WorktreeManagerScreen;
 const originalBranchCreatorScreen = BranchCreatorScreenModule.BranchCreatorScreen;
-const originalPRCleanupScreen = PRCleanupScreenModule.PRCleanupScreen;
+const originalBranchListScreen = BranchListScreenModule.BranchListScreen;
 const originalGetMergedPRWorktrees = worktreeModule.getMergedPRWorktrees;
 const originalGenerateWorktreePath = worktreeModule.generateWorktreePath;
 const originalCreateWorktree = worktreeModule.createWorktree;
@@ -40,7 +40,7 @@ const useGitDataSpy = vi.spyOn(useGitDataModule, 'useGitData');
 const useScreenStateSpy = vi.spyOn(useScreenStateModule, 'useScreenState');
 const worktreeManagerScreenSpy = vi.spyOn(WorktreeManagerScreenModule, 'WorktreeManagerScreen');
 const branchCreatorScreenSpy = vi.spyOn(BranchCreatorScreenModule, 'BranchCreatorScreen');
-const prCleanupScreenSpy = vi.spyOn(PRCleanupScreenModule, 'PRCleanupScreen');
+const branchListScreenSpy = vi.spyOn(BranchListScreenModule, 'BranchListScreen');
 const getMergedPRWorktreesSpy = vi.spyOn(worktreeModule, 'getMergedPRWorktrees');
 const generateWorktreePathSpy = vi.spyOn(worktreeModule, 'generateWorktreePath');
 const createWorktreeSpy = vi.spyOn(worktreeModule, 'createWorktree');
@@ -57,7 +57,7 @@ describe('App shortcuts integration', () => {
     }
     worktreeScreenProps.length = 0;
     branchCreatorProps.length = 0;
-    prCleanupProps.length = 0;
+    branchListProps.length = 0;
     navigateToMock.mockClear();
     goBackMock.mockClear();
     resetMock.mockClear();
@@ -89,9 +89,9 @@ describe('App shortcuts integration', () => {
       branchCreatorProps.push(props);
       return React.createElement(originalBranchCreatorScreen, props);
     });
-    prCleanupScreenSpy.mockImplementation((props: any) => {
-      prCleanupProps.push(props);
-      return React.createElement(originalPRCleanupScreen, props);
+    branchListScreenSpy.mockImplementation((props: any) => {
+      branchListProps.push(props);
+      return React.createElement(originalBranchListScreen, props);
     });
     getMergedPRWorktreesSpy.mockResolvedValue([
       {
@@ -110,6 +110,22 @@ describe('App shortcuts integration', () => {
         hasRemoteBranch: true,
         isAccessible: true,
       },
+      {
+        branch: 'hotfix/urgent-fix',
+        cleanupType: 'worktree-and-branch',
+        pullRequest: {
+          number: 456,
+          title: 'Urgent fix',
+          branch: 'hotfix/urgent-fix',
+          mergedAt: '2025-01-21T09:00:00Z',
+          author: 'user2',
+        },
+        worktreePath: '/worktrees/hotfix-urgent-fix',
+        hasUncommittedChanges: true,
+        hasUnpushedCommits: false,
+        hasRemoteBranch: true,
+        isAccessible: true,
+      },
     ] as CleanupTarget[]);
     generateWorktreePathSpy.mockResolvedValue('/worktrees/new-branch');
     createWorktreeSpy.mockResolvedValue(undefined);
@@ -123,7 +139,7 @@ describe('App shortcuts integration', () => {
     useScreenStateSpy.mockReset();
     worktreeManagerScreenSpy.mockReset();
     branchCreatorScreenSpy.mockReset();
-    prCleanupScreenSpy.mockReset();
+    branchListScreenSpy.mockReset();
     getMergedPRWorktreesSpy.mockReset();
     generateWorktreePathSpy.mockReset();
     createWorktreeSpy.mockReset();
@@ -134,7 +150,7 @@ describe('App shortcuts integration', () => {
     useScreenStateSpy.mockImplementation(originalUseScreenState);
     worktreeManagerScreenSpy.mockImplementation(originalWorktreeManagerScreen as any);
     branchCreatorScreenSpy.mockImplementation(originalBranchCreatorScreen as any);
-    prCleanupScreenSpy.mockImplementation(originalPRCleanupScreen as any);
+    branchListScreenSpy.mockImplementation(originalBranchListScreen as any);
     getMergedPRWorktreesSpy.mockImplementation(originalGetMergedPRWorktrees as any);
     generateWorktreePathSpy.mockImplementation(originalGenerateWorktreePath as any);
     createWorktreeSpy.mockImplementation(originalCreateWorktree as any);
@@ -185,30 +201,100 @@ describe('App shortcuts integration', () => {
     expect(navigateToMock).toHaveBeenCalledWith('ai-tool-selector');
   });
 
-  it('loads cleanup targets when PR cleanup screen is active', async () => {
-    const onExit = vi.fn();
+  it('displays per-branch cleanup indicators and waits before clearing results', async () => {
+    vi.useFakeTimers();
 
-    useScreenStateSpy.mockReturnValue({
-      currentScreen: 'pr-cleanup',
-      navigateTo: navigateToMock,
-      goBack: goBackMock,
-      reset: resetMock,
-    });
+    try {
+      const onExit = vi.fn();
 
-    render(<App onExit={onExit} />);
+      let resolveRemoveWorktree: (() => void) | undefined;
+      let resolveDeleteBranch: (() => void) | undefined;
 
-    await act(async () => {
-      await Promise.resolve();
-    });
+      removeWorktreeSpy.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveRemoveWorktree = resolve;
+          })
+      );
 
-    await waitFor(() => {
-      expect(prCleanupProps).not.toHaveLength(0);
-      const props = prCleanupProps.at(-1);
-      expect(props).toBeDefined();
-      if (!props) throw new Error('PRCleanupScreen props missing');
-      expect(props.targets).toHaveLength(1);
-      expect(props.loading).toBe(false);
-    });
+      deleteBranchSpy.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveDeleteBranch = resolve;
+          })
+      );
+
+      useScreenStateSpy.mockReturnValue({
+        currentScreen: 'branch-list',
+        navigateTo: navigateToMock,
+        goBack: goBackMock,
+        reset: resetMock,
+      });
+
+      render(<App onExit={onExit} />);
+
+      expect(branchListProps).not.toHaveLength(0);
+      const initialProps = branchListProps.at(-1);
+      expect(initialProps).toBeDefined();
+      if (!initialProps) {
+        throw new Error('BranchListScreen props missing');
+      }
+
+      act(() => {
+        initialProps.onCleanupCommand?.();
+      });
+
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      let latestProps = branchListProps.at(-1);
+      expect(latestProps?.cleanupUI?.inputLocked).toBe(true);
+      expect(latestProps?.cleanupUI?.footerMessage?.text).toBeTruthy();
+      expect(latestProps?.cleanupUI?.indicators).toMatchObject({
+        'feature/add-new-feature': expect.objectContaining({ icon: expect.stringMatching(/⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧/) }),
+        'hotfix/urgent-fix': expect.objectContaining({ icon: '⏳' }),
+      });
+
+      resolveRemoveWorktree?.();
+
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      resolveDeleteBranch?.();
+
+      expect(removeWorktreeSpy).toHaveBeenCalledWith(
+        '/worktrees/feature-add-new-feature',
+        true
+      );
+      expect(deleteBranchSpy).toHaveBeenCalledWith('feature/add-new-feature', true);
+
+      // Flush state updates after processing first target
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      latestProps = branchListProps.at(-1);
+      expect(latestProps?.cleanupUI?.indicators).toMatchObject({
+        'feature/add-new-feature': { icon: '✅' },
+        'hotfix/urgent-fix': { icon: '⏭️' },
+      });
+      expect(latestProps?.cleanupUI?.inputLocked).toBe(false);
+
+      // Advance 3 seconds to allow UI to clear
+      await act(async () => {
+        vi.advanceTimersByTime(3000);
+        await Promise.resolve();
+      });
+
+      latestProps = branchListProps.at(-1);
+      expect(latestProps?.cleanupUI?.indicators).toEqual({});
+      expect(latestProps?.cleanupUI?.inputLocked).toBe(false);
+      expect(latestProps?.branches?.some((branch: BranchItem) => branch.name === 'feature/add-new-feature')).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -217,7 +303,7 @@ afterAll(() => {
   useScreenStateSpy.mockRestore();
   worktreeManagerScreenSpy.mockRestore();
   branchCreatorScreenSpy.mockRestore();
-  prCleanupScreenSpy.mockRestore();
+    branchListScreenSpy.mockRestore();
   getMergedPRWorktreesSpy.mockRestore();
   generateWorktreePathSpy.mockRestore();
   createWorktreeSpy.mockRestore();

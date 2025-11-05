@@ -17,6 +17,7 @@ export interface WorktreeManagerScreenProps {
   worktrees: WorktreeItem[];
   onBack: () => void;
   onSelect: (worktree: WorktreeItem) => void;
+  version?: string | null;
 }
 
 /**
@@ -27,13 +28,14 @@ export function WorktreeManagerScreen({
   worktrees,
   onBack,
   onSelect,
+  version,
 }: WorktreeManagerScreenProps) {
   const { rows } = useTerminalSize();
 
   // Handle keyboard input
   // Note: Select component handles Enter and arrow keys
   useInput((input, key) => {
-    if (input === 'q') {
+    if (key.escape) {
       onBack();
     }
   });
@@ -63,13 +65,13 @@ export function WorktreeManagerScreen({
   // Footer actions
   const footerActions = [
     { key: 'enter', description: 'Select' },
-    { key: 'q', description: 'Back' },
+    { key: 'esc', description: 'Back' },
   ];
 
   return (
     <Box flexDirection="column" height={rows}>
       {/* Header */}
-      <Header title="Worktree Manager" titleColor="magenta" />
+      <Header title="Worktree Manager" titleColor="magenta" version={version} />
 
       {/* Stats */}
       <Box marginTop={1}>

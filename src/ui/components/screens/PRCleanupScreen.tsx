@@ -20,6 +20,7 @@ export interface PRCleanupScreenProps {
   onBack: () => void;
   onRefresh: () => void;
   onCleanup: (target: CleanupTarget) => void;
+  version?: string | null;
 }
 
 /**
@@ -34,13 +35,14 @@ export function PRCleanupScreen({
   onBack,
   onRefresh,
   onCleanup,
+  version,
 }: PRCleanupScreenProps) {
   const { rows } = useTerminalSize();
 
   // Handle keyboard input
   // Note: Select component handles Enter and arrow keys
   useInput((input, key) => {
-    if (input === 'q') {
+    if (key.escape) {
       onBack();
     } else if (input === 'r') {
       onRefresh();
@@ -55,6 +57,12 @@ export function PRCleanupScreen({
       flags.push('worktree');
     } else {
       flags.push('branch');
+    }
+    if (target.reasons?.includes('merged-pr')) {
+      flags.push('merged');
+    }
+    if (target.reasons?.includes('no-diff-with-base')) {
+      flags.push('base');
     }
     if (target.hasUncommittedChanges) {
       flags.push('changes');
@@ -92,13 +100,13 @@ export function PRCleanupScreen({
   const footerActions = [
     { key: 'enter', description: 'Cleanup' },
     { key: 'r', description: 'Refresh' },
-    { key: 'q', description: 'Back' },
+    { key: 'esc', description: 'Back' },
   ];
 
   return (
     <Box flexDirection="column" height={rows}>
       {/* Header */}
-      <Header title="PR Cleanup" titleColor="yellow" />
+      <Header title="Branch Cleanup" titleColor="yellow" version={version} />
 
       {/* Stats */}
       <Box marginTop={1}>
@@ -137,11 +145,11 @@ export function PRCleanupScreen({
       <Box flexDirection="column" flexGrow={1}>
         {loading ? (
           <Box>
-            <Text dimColor>Loading merged pull requests...</Text>
+            <Text dimColor>Loading cleanup targets...</Text>
           </Box>
         ) : targets.length === 0 ? (
           <Box>
-            <Text dimColor>No merged pull requests found</Text>
+            <Text dimColor>No cleanup targets found</Text>
           </Box>
         ) : (
           <Select<PRItem>

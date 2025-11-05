@@ -57,7 +57,7 @@ describe('WorktreeManagerScreen', () => {
     );
 
     expect(getAllByText(/enter/i).length).toBeGreaterThan(0);
-    expect(getAllByText(/q/i).length).toBeGreaterThan(0);
+    expect(getAllByText(/esc/i).length).toBeGreaterThan(0);
   });
 
   it('should handle empty worktree list', () => {

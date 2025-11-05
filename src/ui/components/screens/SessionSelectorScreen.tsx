@@ -14,6 +14,7 @@ export interface SessionSelectorScreenProps {
   sessions: string[];
   onBack: () => void;
   onSelect: (session: string) => void;
+  version?: string | null;
 }
 
 /**
@@ -24,13 +25,14 @@ export function SessionSelectorScreen({
   sessions,
   onBack,
   onSelect,
+  version,
 }: SessionSelectorScreenProps) {
   const { rows } = useTerminalSize();
 
   // Handle keyboard input
   // Note: Select component handles Enter and arrow keys
   useInput((input, key) => {
-    if (input === 'q') {
+    if (key.escape) {
       onBack();
     }
   });
@@ -58,13 +60,13 @@ export function SessionSelectorScreen({
   // Footer actions
   const footerActions = [
     { key: 'enter', description: 'Select' },
-    { key: 'q', description: 'Back' },
+    { key: 'esc', description: 'Back' },
   ];
 
   return (
     <Box flexDirection="column" height={rows}>
       {/* Header */}
-      <Header title="Session Selection" titleColor="cyan" />
+      <Header title="Session Selection" titleColor="cyan" version={version} />
 
       {/* Stats */}
       <Box marginTop={1}>

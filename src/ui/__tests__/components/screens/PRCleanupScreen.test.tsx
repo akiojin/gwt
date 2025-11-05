@@ -64,7 +64,7 @@ describe('PRCleanupScreen', () => {
       />
     );
 
-    expect(getByText(/PR Cleanup/i)).toBeDefined();
+    expect(getByText(/Branch Cleanup/i)).toBeDefined();
   });
 
   it('should render PR list', () => {
@@ -100,7 +100,7 @@ describe('PRCleanupScreen', () => {
     );
 
     expect(getAllByText(/enter/i).length).toBeGreaterThan(0);
-    expect(getAllByText(/q/i).length).toBeGreaterThan(0);
+    expect(getAllByText(/esc/i).length).toBeGreaterThan(0);
   });
 
   it('should handle empty PR list', () => {
@@ -117,7 +117,7 @@ describe('PRCleanupScreen', () => {
       />
     );
 
-    expect(getByText(/No merged pull requests found/i)).toBeDefined();
+    expect(getByText(/No cleanup targets found/i)).toBeDefined();
   });
 
   it('should display PR count in stats', () => {
@@ -160,7 +160,7 @@ describe('PRCleanupScreen', () => {
     process.stdout.rows = originalRows;
   });
 
-  it('should handle back navigation with q key', () => {
+  it('should handle back navigation with ESC key', () => {
     const onBack = vi.fn();
     const onCleanup = vi.fn();
     const { container } = render(
@@ -174,7 +174,7 @@ describe('PRCleanupScreen', () => {
       />
     );
 
-    // Test will verify onBack is called when q is pressed
+    // Test will verify onBack is called when ESC is pressed
     expect(container).toBeDefined();
   });
 
@@ -210,6 +210,6 @@ describe('PRCleanupScreen', () => {
       />
     );
 
-    expect(getByText(/Loading merged pull requests/i)).toBeDefined();
+    expect(getByText(/Loading cleanup targets/i)).toBeDefined();
   });
 });

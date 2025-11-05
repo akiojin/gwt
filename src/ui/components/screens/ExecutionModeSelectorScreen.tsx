@@ -27,6 +27,7 @@ export interface ExecutionModeResult {
 export interface ExecutionModeSelectorScreenProps {
   onBack: () => void;
   onSelect: (result: ExecutionModeResult) => void;
+  version?: string | null;
 }
 
 /**
@@ -38,6 +39,7 @@ export interface ExecutionModeSelectorScreenProps {
 export function ExecutionModeSelectorScreen({
   onBack,
   onSelect,
+  version,
 }: ExecutionModeSelectorScreenProps) {
   const { rows } = useTerminalSize();
   const [step, setStep] = useState<1 | 2>(1);
@@ -45,7 +47,7 @@ export function ExecutionModeSelectorScreen({
 
   // Handle keyboard input
   useInput((input, key) => {
-    if (input === 'q') {
+    if (key.escape) {
       if (step === 2) {
         // Go back to step 1
         setStep(1);
@@ -109,7 +111,7 @@ export function ExecutionModeSelectorScreen({
   // Footer actions
   const footerActions = [
     { key: 'enter', description: 'Select' },
-    { key: 'q', description: step === 2 ? 'Back to mode selection' : 'Back' },
+    { key: 'esc', description: step === 2 ? 'Back to mode selection' : 'Back' },
   ];
 
   return (
@@ -118,6 +120,7 @@ export function ExecutionModeSelectorScreen({
       <Header
         title={step === 1 ? 'Execution Mode' : 'Skip Permissions'}
         titleColor="magenta"
+        version={version}
       />
 
       {/* Content */}

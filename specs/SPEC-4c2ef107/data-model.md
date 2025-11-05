@@ -29,7 +29,6 @@ type ScreenType =
   | 'branch-list'
   | 'worktree-manager'
   | 'branch-creator'
-  | 'pr-cleanup'
   | 'ai-tool-selector'
   | 'session-selector'
   | 'execution-mode-selector';
@@ -49,9 +48,10 @@ interface Screen {
 branch-list (初期画面)
   ├─> worktree-manager (mキー)
   ├─> branch-creator (nキー)
-  ├─> pr-cleanup (cキー)
   ├─> ai-tool-selector (ブランチ選択時)
   └─> session-selector (-rオプション時)
+
+（補足）`c` キーは画面遷移せずにブランチ一覧上で自動クリーンアップ処理を実行し、結果メッセージのみを表示する。
 
 ai-tool-selector
   └─> execution-mode-selector

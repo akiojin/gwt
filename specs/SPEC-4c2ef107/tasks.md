@@ -219,6 +219,23 @@
 
 - [ ] T081 [P] [US3] React.memoを適用（BranchItem等の頻繁に再レンダリングされるコンポーネント）
 - [ ] T082 [P] [US3] useMemo/useCallbackを適用（高コストな計算とコールバック）
+
+#### カーソル位置保持の最適化（T081-T082の詳細化）
+
+**背景**: 自動更新（5秒ごと）により`branchItems`配列が新しい参照として生成され、Selectコンポーネントが再レンダリングされることでカーソル位置がリセットされる問題を解決
+
+**実装タスク**:
+
+- [ ] T081-1 [US3] App.tsxのbranchItemsのuseMemoを最適化（データ内容のハッシュ値ベースの比較に変更）
+- [ ] T081-2 [US3] SelectコンポーネントをReact.memoでラップし、内容ベースの比較関数を実装
+- [ ] T081-3 [US3] カーソル位置の外部管理を実装（Select.tsxに selectedIndex/onSelectedIndexChange props追加、BranchListScreenで状態管理）
+
+**テストタスク**:
+
+- [ ] T082-1 [US3] useMemo最適化の単体テストを作成（branchItems配列が不必要に再生成されないことを検証）
+- [ ] T082-2 [US3] React.memoの動作テストを作成（Selectコンポーネントが同じitemsで再レンダリングされないことを検証）
+- [ ] T082-3 [US3] カーソル位置保持のE2Eテストを作成（自動更新中にカーソル位置が維持されることを検証）
+
 - [ ] T083 [US3] T081, T082の後にパフォーマンステストを実行（100+ブランチで動作確認）
 
 ### 統合テスト
@@ -366,6 +383,15 @@ T056 → T059 → T062 → T065 → T068 → T071
 - [x] T602 WorktreeManagerScreenでの選択時に対象ブランチをAIツール選択フローへ引き継ぐ処理を実装・テスト (src/ui/components/App.tsx)
 - [x] T603 新規ブランチ作成フローでworktree作成まで自動化し、完了後にAIツール選択へ遷移する処理を実装・テスト (src/ui/components/App.tsx, src/worktree.ts)
 - [x] T604 クリーニング処理でローカルworktree削除とブランチ削除を安全に行うテストを追加 (`src/ui/components/App.tsx`, `src/ui/components/screens/PRCleanupScreen.tsx`, `src/ui/__tests__`)
+
+## 2025-10-27: バグ修正 - Raw Mode解除漏れによる入力欠落
+
+**背景**: Ink UI終了後に`process.stdin`がrawモードのまま残り、AIツール起動時にキーボード入力が欠落する不具合が発生した。
+
+- [x] T701 [P] 端末制御ユーティリティを追加しTTYフォールバック・raw mode解除処理を集約 (src/utils/terminal.ts)
+- [x] T702 Ink UI初期化時に新ユーティリティを使用し、終了時にraw modeを確実に解除 (src/index.ts)
+- [x] T703 AIツール起動処理で端末ストリームを共有しつつ起動前後にraw modeをリセット (src/claude.ts, src/codex.ts)
+- [x] T704 端末制御のユニットテストを追加し、execa呼び出し時のTTY引き継ぎとraw mode解除を検証 (tests/unit/claude.test.ts, tests/unit/codex.test.ts)
 
 ## 進捗追跡
 

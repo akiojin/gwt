@@ -81,34 +81,7 @@ export async function getRepositoryRoot(): Promise<string> {
   }
 }
 
-export async function getRemoteBranches(
-  options?: { cwd?: string },
-): Promise<BranchInfo[]> {
-  try {
-    const execOptions = options?.cwd ? { cwd: options.cwd } : undefined;
-    const args = ["branch", "-r", "--format=%(refname:short)"];
-    const { stdout } = execOptions
-      ? await execa("git", args, execOptions)
-      : await execa("git", args);
-    return stdout
-      .split("\n")
-      .filter((line) => line.trim() && !line.includes("HEAD"))
-      .map((line) => {
-        const name = line.trim();
-        const branchName = name.replace(/^origin\//, "");
-        return {
-          name,
-          type: "remote" as const,
-          branchType: getBranchType(branchName),
-          isCurrent: false,
-        };
-      });
-  } catch (error) {
-    throw new GitError("Failed to get remote branches", error);
-  }
-}
-
-async function getCurrentBranch(): Promise<string | null> {
+export async function getCurrentBranch(): Promise<string | null> {
   try {
     const { stdout } = await execa("git", ["branch", "--show-current"]);
     return stdout.trim() || null;
@@ -117,26 +90,87 @@ async function getCurrentBranch(): Promise<string | null> {
   }
 }
 
-export async function getLocalBranches(
-  options?: { cwd?: string },
-): Promise<BranchInfo[]> {
+async function getBranchCommitTimestamps(
+  refs: string[],
+): Promise<Map<string, number>> {
   try {
-    const execOptions = options?.cwd ? { cwd: options.cwd } : undefined;
-    const args = ["branch", "--format=%(refname:short)"];
-    const { stdout } = execOptions
-      ? await execa("git", args, execOptions)
-      : await execa("git", args);
+    const { stdout } = await execa("git", [
+      "for-each-ref",
+      "--format=%(refname:short)%00%(committerdate:unix)",
+      ...refs,
+    ]);
+
+    const map = new Map<string, number>();
+
+    for (const line of stdout.split("\n")) {
+      if (!line) continue;
+      const [ref, timestamp] = line.split("\0");
+      if (!ref || !timestamp) continue;
+      if (ref.endsWith("/HEAD")) continue;
+      const parsed = Number.parseInt(timestamp, 10);
+      if (Number.isNaN(parsed)) continue;
+      map.set(ref, parsed);
+    }
+
+    return map;
+  } catch (error) {
+    throw new GitError("Failed to get branch commit timestamps", error);
+  }
+}
+
+export async function getLocalBranches(): Promise<BranchInfo[]> {
+  try {
+    const commitMap = await getBranchCommitTimestamps(["refs/heads"]);
+    const { stdout } = await execa("git", [
+      "branch",
+      "--format=%(refname:short)",
+    ]);
     return stdout
       .split("\n")
       .filter((line) => line.trim())
-      .map((name) => ({
-        name: name.trim(),
-        type: "local" as const,
-        branchType: getBranchType(name.trim()),
-        isCurrent: false,
-      }));
+      .map((name) => {
+        const trimmed = name.trim();
+        const timestamp = commitMap.get(trimmed);
+
+        return {
+          name: trimmed,
+          type: "local" as const,
+          branchType: getBranchType(trimmed),
+          isCurrent: false,
+          ...(timestamp !== undefined ? { latestCommitTimestamp: timestamp } : {}),
+        } satisfies BranchInfo;
+      });
   } catch (error) {
     throw new GitError("Failed to get local branches", error);
+  }
+}
+
+export async function getRemoteBranches(): Promise<BranchInfo[]> {
+  try {
+    const commitMap = await getBranchCommitTimestamps(["refs/remotes"]);
+    const { stdout } = await execa("git", [
+      "branch",
+      "-r",
+      "--format=%(refname:short)",
+    ]);
+    return stdout
+      .split("\n")
+      .filter((line) => line.trim() && !line.includes("HEAD"))
+      .map((line) => {
+        const name = line.trim();
+        const branchName = name.replace(/^origin\//, "");
+        const timestamp = commitMap.get(name);
+
+        return {
+          name,
+          type: "remote" as const,
+          branchType: getBranchType(branchName),
+          isCurrent: false,
+          ...(timestamp !== undefined ? { latestCommitTimestamp: timestamp } : {}),
+        } satisfies BranchInfo;
+      });
+  } catch (error) {
+    throw new GitError("Failed to get remote branches", error);
   }
 }
 
@@ -304,21 +338,131 @@ function getBranchType(branchName: string): BranchInfo["branchType"] {
   return "other";
 }
 
-export async function hasUnpushedCommits(
-  worktreePath: string,
+async function hasUnpushedCommitsInternal(
   branch: string,
+  options: { cwd?: string } = {},
 ): Promise<boolean> {
+  const { cwd } = options;
+  const execOptions = cwd ? { cwd } : undefined;
   try {
     const { stdout } = await execa(
       "git",
       ["log", `origin/${branch}..${branch}`, "--oneline"],
-      { cwd: worktreePath },
+      execOptions,
     );
     return stdout.trim().length > 0;
   } catch {
-    // If the branch doesn't exist on remote, consider it has unpushed commits
+    const candidates = [
+      `origin/${branch}`,
+      "origin/main",
+      "origin/master",
+      "origin/develop",
+      "origin/dev",
+      branch,
+      "main",
+      "master",
+      "develop",
+      "dev",
+    ];
+
+    for (const candidate of candidates) {
+      try {
+        await execa("git", ["rev-parse", "--verify", candidate], execOptions);
+
+        // If we are checking the same branch again, we already know the remote ref is missing.
+        if (candidate === `origin/${branch}` || candidate === branch) {
+          continue;
+        }
+
+        try {
+          await execa(
+            "git",
+            ["merge-base", "--is-ancestor", branch, candidate],
+            execOptions,
+          );
+          return false;
+        } catch {
+          // Not merged into this candidate, try next one.
+        }
+      } catch {
+        // Candidate ref does not exist. Try the next candidate.
+      }
+    }
+
+    // Could not prove that the branch is merged anywhere safe, treat as unpushed commits.
     return true;
   }
+}
+
+export async function hasUnpushedCommits(
+  worktreePath: string,
+  branch: string,
+): Promise<boolean> {
+  return hasUnpushedCommitsInternal(branch, { cwd: worktreePath });
+}
+
+export async function hasUnpushedCommitsInRepo(
+  branch: string,
+  repoRoot?: string,
+): Promise<boolean> {
+  return hasUnpushedCommitsInternal(branch, repoRoot ? { cwd: repoRoot } : {});
+}
+
+export async function branchHasUniqueCommitsComparedToBase(
+  branch: string,
+  baseBranch: string,
+  repoRoot?: string,
+): Promise<boolean> {
+  const execOptions = repoRoot ? { cwd: repoRoot } : undefined;
+  try {
+    await execa("git", ["rev-parse", "--verify", branch], execOptions);
+  } catch {
+    return true;
+  }
+
+  const normalizedBase = baseBranch.trim();
+  if (!normalizedBase) {
+    return true;
+  }
+
+  const candidates = new Set<string>();
+  candidates.add(normalizedBase);
+
+  if (!normalizedBase.startsWith("origin/")) {
+    candidates.add(`origin/${normalizedBase}`);
+  } else {
+    const localEquivalent = normalizedBase.replace(/^origin\//, "");
+    if (localEquivalent) {
+      candidates.add(localEquivalent);
+    }
+  }
+
+  for (const candidate of candidates) {
+    try {
+      await execa("git", ["rev-parse", "--verify", candidate], execOptions);
+    } catch {
+      continue;
+    }
+
+    try {
+      const { stdout } = await execa(
+        "git",
+        ["log", `${candidate}..${branch}`, "--oneline"],
+        execOptions,
+      );
+
+      if (stdout.trim().length > 0) {
+        return true;
+      }
+
+      return false;
+    } catch {
+      // Comparison failed for this candidate, try next one.
+    }
+  }
+
+  // If no valid base candidate was found, treat the branch as having unique commits.
+  return true;
 }
 
 /**
@@ -462,9 +606,7 @@ export async function getEnhancedSessionInfo(
   }
 }
 
-export async function fetchAllRemotes(
-  options?: { cwd?: string },
-): Promise<void> {
+export async function fetchAllRemotes(options?: { cwd?: string }): Promise<void> {
   try {
     const execOptions = options?.cwd ? { cwd: options.cwd } : undefined;
     const args = ["fetch", "--all", "--prune"];
@@ -615,6 +757,7 @@ export async function pushBranchToRemote(
     const remoteBranchExists = await checkRemoteBranchExists(
       branchName,
       remote,
+      { cwd: worktreePath },
     );
 
     if (remoteBranchExists) {
@@ -687,6 +830,13 @@ export async function isInWorktree(): Promise<boolean> {
   }
 }
 
+/**
+ * .gitignoreファイルに指定されたエントリーが存在することを保証します
+ * エントリーが既に存在する場合は何もしません
+ * @param {string} repoRoot - リポジトリのルートディレクトリ
+ * @param {string} entry - 追加するエントリー（例: ".worktrees/"）
+ * @throws {GitError} ファイルの読み書きに失敗した場合
+ */
 // ========================================
 // Batch Merge Operations (SPEC-ee33ca26)
 // ========================================
@@ -815,13 +965,19 @@ export async function getBranchDivergenceStatuses(options?: {
   const remote = options?.remote ?? "origin";
   const execOptions = cwd ? { cwd } : undefined;
 
-  const localBranches = await getLocalBranches(
-    cwd ? { cwd } : undefined,
-  );
+  const branchArgs = ["branch", "--format=%(refname:short)"];
+  const { stdout: localBranchOutput } = execOptions
+    ? await execa("git", branchArgs, execOptions)
+    : await execa("git", branchArgs);
+
+  const branchNames = localBranchOutput
+    .split("\n")
+    .map((name) => name.trim())
+    .filter(Boolean);
+
   const results: BranchDivergenceStatus[] = [];
 
-  for (const branch of localBranches) {
-    const branchName = branch.name;
+  for (const branchName of branchNames) {
     const remoteExists = await checkRemoteBranchExists(
       branchName,
       remote,
@@ -872,5 +1028,40 @@ export async function pullFastForward(
       `Failed to fast-forward pull in ${worktreePath}`,
       error,
     );
+  }
+}
+
+export async function ensureGitignoreEntry(
+  repoRoot: string,
+  entry: string,
+): Promise<void> {
+  const fs = await import("node:fs/promises");
+  const gitignorePath = path.join(repoRoot, ".gitignore");
+
+  try {
+    // .gitignoreファイルを読み込む（存在しない場合は空文字列）
+    let content = "";
+    try {
+      content = await fs.readFile(gitignorePath, "utf-8");
+    } catch (error: any) {
+      // ENOENTエラー（ファイルが存在しない）は無視
+      if (error.code !== "ENOENT") {
+        throw error;
+      }
+    }
+
+    // エントリーの重複チェック
+    const lines = content.split("\n");
+    if (lines.includes(entry)) {
+      // 既に存在する場合は何もしない
+      return;
+    }
+
+    // エントリーを追加（改行を含める）
+    const newContent =
+      content + (content && !content.endsWith("\n") ? "\n" : "") + entry + "\n";
+    await fs.writeFile(gitignorePath, newContent, "utf-8");
+  } catch (error: any) {
+    throw new GitError(`Failed to update .gitignore: ${error.message}`, error);
   }
 }

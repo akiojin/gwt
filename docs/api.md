@@ -356,25 +356,16 @@ try {
 
 ## CLI Usage
 
-コマンドライン引数:
+現在サポートされているコマンドライン引数:
 
-- `-c, --continue`: 最後のセッションを継続
-- `-r, --resume`: セッションを選択して再開
-- `--tool <tool>`: AIツールを直接指定 (`claude-code` | `codex-cli`)
-- `-- <args>`: AIツールに渡す追加引数
+- `-h, --help`: ヘルプを表示
 
 **例:**
 
 ```bash
-# Claude Codeで新規ワークツリー作成
+# 対話型ランチャーを起動
 claude-worktree
 
-# 最後のセッションを継続
-claude-worktree -c
-
-# 特定のツールを指定
-claude-worktree --tool codex-cli
-
-# ツールに引数を渡す
-claude-worktree --tool claude-code -- --verbose
+# ヘルプを表示
+claude-worktree --help
 ```

@@ -4,6 +4,8 @@ import {
   generateWorktreePath,
   createWorktree,
 } from "../worktree.js";
+import { getCurrentBranch } from "../git.js";
+import chalk from "chalk";
 
 /**
  * WorktreeService interface for dependency injection
@@ -12,6 +14,11 @@ export interface WorktreeService {
   worktreeExists: (branch: string) => Promise<string | null>;
   generateWorktreePath: (repoRoot: string, branch: string) => Promise<string>;
   createWorktree: (config: WorktreeConfig) => Promise<void>;
+}
+
+export interface EnsureWorktreeOptions {
+  baseBranch?: string;
+  isNewBranch?: boolean;
 }
 
 /**
@@ -40,14 +47,29 @@ export class WorktreeOrchestrator {
    *
    * @param branch - Branch name
    * @param repoRoot - Repository root path
-   * @param baseBranch - Base branch for new worktree (default: 'main')
+   * @param options - Creation options (base branch, new branch flag)
    * @returns Worktree path
    */
   async ensureWorktree(
     branch: string,
     repoRoot: string,
-    baseBranch: string = "main",
+    options: EnsureWorktreeOptions = {},
   ): Promise<string> {
+    const baseBranch = options.baseBranch ?? "main";
+    const isNewBranch = options.isNewBranch ?? false;
+
+    // Check if selected branch is current branch
+    const currentBranch = await getCurrentBranch();
+    if (currentBranch === branch) {
+      // Current branch selected: use repository root
+      console.log(
+        chalk.gray(
+          `   ℹ️  Current branch '${branch}' selected - using repository root`,
+        ),
+      );
+      return repoRoot;
+    }
+
     // Check if worktree already exists
     const existingPath = await this.worktreeService.worktreeExists(branch);
 
@@ -61,15 +83,33 @@ export class WorktreeOrchestrator {
       branch,
     );
 
-    // Create worktree
-    await this.worktreeService.createWorktree({
-      branchName: branch,
-      worktreePath,
-      repoRoot,
-      isNewBranch: false,
-      baseBranch,
-    });
+    try {
+      // Create worktree (or branch)
+      await this.worktreeService.createWorktree({
+        branchName: branch,
+        worktreePath,
+        repoRoot,
+        isNewBranch,
+        baseBranch,
+      });
 
-    return worktreePath;
+      return worktreePath;
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error ? error.message : String(error ?? "");
+      const normalized = message.toLowerCase();
+      const alreadyExists =
+        normalized.includes("already checked out") ||
+        normalized.includes("already exists");
+
+      if (alreadyExists) {
+        const fallbackPath = await this.worktreeService.worktreeExists(branch);
+        if (fallbackPath) {
+          return fallbackPath;
+        }
+      }
+
+      throw error;
+    }
   }
 }

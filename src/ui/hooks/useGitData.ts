@@ -1,6 +1,11 @@
 import { useState, useEffect, useCallback } from "react";
-import { getAllBranches } from "../../git.js";
+import {
+  getAllBranches,
+  hasUnpushedCommitsInRepo,
+  getRepositoryRoot,
+} from "../../git.js";
 import { listAdditionalWorktrees } from "../../worktree.js";
+import { getPullRequestByBranch } from "../../github.js";
 import type { BranchInfo, WorktreeInfo } from "../types.js";
 import type { WorktreeInfo as GitWorktreeInfo } from "../../worktree.js";
 
@@ -56,17 +61,56 @@ export function useGitData(options?: UseGitDataOptions): UseGitDataResult {
         worktreeMap.set(worktree.branch, uiWorktreeInfo);
       }
 
-      // Attach worktree info to matching branches
-      const enrichedBranches = branchesData.map((branch) => {
-        const worktreeInfo = worktreeMap.get(branch.name);
-        if (worktreeInfo) {
+      // Get repository root for unpushed commits check
+      const repoRoot = await getRepositoryRoot();
+
+      // Attach worktree info and check unpushed/PR status for local branches
+      const enrichedBranches = await Promise.all(
+        branchesData.map(async (branch) => {
+          const worktreeInfo = worktreeMap.get(branch.name);
+          let hasUnpushed = false;
+          let prInfo = null;
+
+          // Only check unpushed commits and PR status for local branches
+          if (branch.type === "local") {
+            try {
+              // Check for unpushed commits
+              hasUnpushed = await hasUnpushedCommitsInRepo(
+                branch.name,
+                repoRoot,
+              );
+
+              // Check for PR status
+              prInfo = await getPullRequestByBranch(branch.name);
+            } catch (error) {
+              // Silently ignore errors to avoid breaking the UI
+              if (process.env.DEBUG) {
+                console.error(
+                  `Failed to check status for ${branch.name}:`,
+                  error,
+                );
+              }
+            }
+          }
+
           return {
             ...branch,
-            worktree: worktreeInfo,
+            ...(worktreeInfo ? { worktree: worktreeInfo } : {}),
+            ...(hasUnpushed ? { hasUnpushedCommits: true } : {}),
+            ...(prInfo?.state === "OPEN"
+              ? { openPR: { number: prInfo.number, title: prInfo.title } }
+              : {}),
+            ...(prInfo?.state === "MERGED" && prInfo.mergedAt
+              ? {
+                  mergedPR: {
+                    number: prInfo.number,
+                    mergedAt: prInfo.mergedAt,
+                  },
+                }
+              : {}),
           };
-        }
-        return branch;
-      });
+        }),
+      );
 
       setBranches(enrichedBranches);
       setLastUpdated(new Date());

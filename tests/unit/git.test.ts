@@ -20,46 +20,56 @@ describe("git.ts - Branch Operations", () => {
 
   describe("getLocalBranches (T102)", () => {
     it("should return list of local branches", async () => {
-      const mockOutput = `main
-develop
-feature/user-auth
-feature/dashboard
-hotfix/security-patch
-release/1.2.0`;
+      const responses = [
+        {
+          stdout: `main\0${1700000000}\nfeature/user-auth\0${1690000000}`,
+          stderr: "",
+          exitCode: 0,
+        },
+        {
+          stdout: `main\ndevelop\nfeature/user-auth\nfeature/dashboard\nhotfix/security-patch\nrelease/1.2.0`,
+          stderr: "",
+          exitCode: 0,
+        },
+      ];
 
-      (execa as any).mockResolvedValue({
-        stdout: mockOutput,
-        stderr: "",
-        exitCode: 0,
-      });
+      (execa as any).mockImplementation(() => responses.shift());
 
       const branches = await git.getLocalBranches();
 
       expect(branches).toHaveLength(6);
-      expect(branches[0]).toEqual({
+      expect(branches[0]).toMatchObject({
         name: "main",
         type: "local",
         branchType: "main",
         isCurrent: false,
+        latestCommitTimestamp: 1700000000,
       });
-      expect(branches[2]).toEqual({
+      expect(branches[2]).toMatchObject({
         name: "feature/user-auth",
         type: "local",
         branchType: "feature",
         isCurrent: false,
+        latestCommitTimestamp: 1690000000,
       });
-      expect(execa).toHaveBeenCalledWith("git", [
+      expect(execa).toHaveBeenNthCalledWith(1, "git", [
+        "for-each-ref",
+        "--format=%(refname:short)%00%(committerdate:unix)",
+        "refs/heads",
+      ]);
+      expect(execa).toHaveBeenNthCalledWith(2, "git", [
         "branch",
         "--format=%(refname:short)",
       ]);
     });
 
     it("should handle empty branch list", async () => {
-      (execa as any).mockResolvedValue({
-        stdout: "",
-        stderr: "",
-        exitCode: 0,
-      } as any);
+      const responses = [
+        { stdout: "", stderr: "", exitCode: 0 },
+        { stdout: "", stderr: "", exitCode: 0 },
+      ];
+
+      (execa as any).mockImplementation(() => responses.shift());
 
       const branches = await git.getLocalBranches();
 
@@ -67,7 +77,9 @@ release/1.2.0`;
     });
 
     it("should throw GitError on failure", async () => {
-      (execa as any).mockRejectedValue(new Error("Git command failed"));
+      (execa as any)
+        .mockRejectedValueOnce(new Error("commit map failed"))
+        .mockResolvedValue({ stdout: "", stderr: "", exitCode: 0 });
 
       await expect(git.getLocalBranches()).rejects.toThrow(
         "Failed to get local branches",
@@ -77,33 +89,44 @@ release/1.2.0`;
 
   describe("getRemoteBranches (T103)", () => {
     it("should return list of remote branches", async () => {
-      const mockOutput = `origin/main
-origin/develop
-origin/feature/api-integration
-origin/hotfix/bug-123`;
+      const responses = [
+        {
+          stdout: `origin/main\0${1705000000}\norigin/feature/api-integration\0${1695000000}`,
+          stderr: "",
+          exitCode: 0,
+        },
+        {
+          stdout: `origin/main\norigin/develop\norigin/feature/api-integration\norigin/hotfix/bug-123`,
+          stderr: "",
+          exitCode: 0,
+        },
+      ];
 
-      (execa as any).mockResolvedValue({
-        stdout: mockOutput,
-        stderr: "",
-        exitCode: 0,
-      } as any);
+      (execa as any).mockImplementation(() => responses.shift());
 
       const branches = await git.getRemoteBranches();
 
       expect(branches).toHaveLength(4);
-      expect(branches[0]).toEqual({
+      expect(branches[0]).toMatchObject({
         name: "origin/main",
         type: "remote",
         branchType: "main",
         isCurrent: false,
+        latestCommitTimestamp: 1705000000,
       });
-      expect(branches[2]).toEqual({
+      expect(branches[2]).toMatchObject({
         name: "origin/feature/api-integration",
         type: "remote",
         branchType: "feature",
         isCurrent: false,
+        latestCommitTimestamp: 1695000000,
       });
-      expect(execa).toHaveBeenCalledWith("git", [
+      expect(execa).toHaveBeenNthCalledWith(1, "git", [
+        "for-each-ref",
+        "--format=%(refname:short)%00%(committerdate:unix)",
+        "refs/remotes",
+      ]);
+      expect(execa).toHaveBeenNthCalledWith(2, "git", [
         "branch",
         "-r",
         "--format=%(refname:short)",
@@ -111,15 +134,16 @@ origin/hotfix/bug-123`;
     });
 
     it("should filter out HEAD references", async () => {
-      const mockOutput = `origin/HEAD -> origin/main
-origin/main
-origin/develop`;
+      const responses = [
+        { stdout: "", stderr: "", exitCode: 0 },
+        {
+          stdout: `origin/HEAD -> origin/main\norigin/main\norigin/develop`,
+          stderr: "",
+          exitCode: 0,
+        },
+      ];
 
-      (execa as any).mockResolvedValue({
-        stdout: mockOutput,
-        stderr: "",
-        exitCode: 0,
-      } as any);
+      (execa as any).mockImplementation(() => responses.shift());
 
       const branches = await git.getRemoteBranches();
 
@@ -128,7 +152,9 @@ origin/develop`;
     });
 
     it("should throw GitError on failure", async () => {
-      (execa as any).mockRejectedValue(new Error("Git command failed"));
+      (execa as any)
+        .mockRejectedValueOnce(new Error("commit map failed"))
+        .mockResolvedValue({ stdout: "", stderr: "", exitCode: 0 });
 
       await expect(git.getRemoteBranches()).rejects.toThrow(
         "Failed to get remote branches",
@@ -142,6 +168,23 @@ origin/develop`;
       (execa as any).mockImplementation(
         async (command: string, args?: readonly string[]) => {
           callCount++;
+
+          if (args?.[0] === "for-each-ref") {
+            if (args.includes("refs/heads")) {
+              return {
+                stdout: "main\0${1700000000}\nfeature/test\0${1690000000}",
+                stderr: "",
+                exitCode: 0,
+              } as any;
+            }
+            if (args.includes("refs/remotes")) {
+              return {
+                stdout: "origin/main\0${1705000000}\norigin/develop\0${1704000000}",
+                stderr: "",
+                exitCode: 0,
+              } as any;
+            }
+          }
 
           // getCurrentBranch call (check this first as it's most specific)
           if (args?.[0] === "branch" && args.includes("--show-current")) {
@@ -197,6 +240,23 @@ origin/develop`;
     it("should mark current branch as isCurrent", async () => {
       (execa as any).mockImplementation(
         async (command: string, args?: readonly string[]) => {
+          if (args?.[0] === "for-each-ref") {
+            if (args.includes("refs/heads")) {
+              return {
+                stdout: "main\0${1700000000}\nfeature/test\0${1690000000}",
+                stderr: "",
+                exitCode: 0,
+              } as any;
+            }
+            if (args.includes("refs/remotes")) {
+              return {
+                stdout: "origin/main\0${1705000000}",
+                stderr: "",
+                exitCode: 0,
+              } as any;
+            }
+          }
+
           if (
             args?.[0] === "branch" &&
             !args.includes("-r") &&
@@ -245,6 +305,23 @@ origin/develop`;
     it("should handle no current branch (detached HEAD)", async () => {
       (execa as any).mockImplementation(
         async (command: string, args?: readonly string[]) => {
+          if (args?.[0] === "for-each-ref") {
+            if (args.includes("refs/heads")) {
+              return {
+                stdout: "main\0${1700000000}",
+                stderr: "",
+                exitCode: 0,
+              } as any;
+            }
+            if (args.includes("refs/remotes")) {
+              return {
+                stdout: "",
+                stderr: "",
+                exitCode: 0,
+              } as any;
+            }
+          }
+
           if (
             args?.[0] === "branch" &&
             !args.includes("-r") &&
@@ -401,6 +478,87 @@ origin/develop`;
     });
   });
 
+  describe("hasUnpushedCommits", () => {
+    it("returns false when remote branch is in sync", async () => {
+      (execa as any).mockResolvedValue({
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+      } as any);
+
+      await expect(
+        git.hasUnpushedCommits("/worktrees/feature-branch", "feature/branch"),
+      ).resolves.toBe(false);
+
+      expect(execa).toHaveBeenCalledWith(
+        "git",
+        ["log", "origin/feature/branch..feature/branch", "--oneline"],
+        { cwd: "/worktrees/feature-branch" },
+      );
+    });
+
+    it("returns false when remote branch is deleted but branch is merged into origin/main", async () => {
+      (execa as any).mockImplementation(
+        async (_command: string, args: readonly string[], options: any) => {
+          if (args[0] === "log") {
+            throw new Error("remote branch missing");
+          }
+
+          if (args[0] === "rev-parse") {
+            if (args[2] === "origin/main") {
+              return { stdout: "5819116", stderr: "", exitCode: 0 } as any;
+            }
+            throw new Error("ref not found");
+          }
+
+          if (args[0] === "merge-base") {
+            expect(args).toEqual([
+              "merge-base",
+              "--is-ancestor",
+              "feature/branch",
+              "origin/main",
+            ]);
+            expect(options.cwd).toBe("/worktrees/feature-branch");
+            return { stdout: "", stderr: "", exitCode: 0 } as any;
+          }
+
+          throw new Error(`Unexpected git command: ${args.join(" ")}`);
+        },
+      );
+
+      await expect(
+        git.hasUnpushedCommits("/worktrees/feature-branch", "feature/branch"),
+      ).resolves.toBe(false);
+    });
+
+    it("returns true when remote branch is deleted and branch is not merged", async () => {
+      (execa as any).mockImplementation(
+        async (_command: string, args: readonly string[]) => {
+          if (args[0] === "log") {
+            throw new Error("remote branch missing");
+          }
+
+          if (args[0] === "rev-parse") {
+            if (args[2] === "origin/main") {
+              return { stdout: "5819116", stderr: "", exitCode: 0 } as any;
+            }
+            throw new Error("ref not found");
+          }
+
+          if (args[0] === "merge-base") {
+            throw new Error("not merged");
+          }
+
+          throw new Error(`Unexpected git command: ${args.join(" ")}`);
+        },
+      );
+
+      await expect(
+        git.hasUnpushedCommits("/worktrees/feature-branch", "feature/branch"),
+      ).resolves.toBe(true);
+    });
+  });
+
   describe("US2: Smart Branch Creation Workflow", () => {
     describe("createBranch (T201)", () => {
       it("should create branch from default base branch (main)", async () => {
@@ -450,6 +608,14 @@ origin/develop`;
       it("should identify main branch type", async () => {
         (execa as any).mockImplementation(
           async (command: string, args?: readonly string[]) => {
+            if (args?.[0] === "for-each-ref") {
+              if (args.includes("refs/heads")) {
+                return { stdout: "main\0${1700000000}", stderr: "", exitCode: 0 } as any;
+              }
+              if (args.includes("refs/remotes")) {
+                return { stdout: "", stderr: "", exitCode: 0 } as any;
+              }
+            }
             if (args?.[0] === "branch" && args.includes("--show-current")) {
               return { stdout: "main", stderr: "", exitCode: 0 };
             }
@@ -473,6 +639,14 @@ origin/develop`;
       it("should identify develop branch type", async () => {
         (execa as any).mockImplementation(
           async (command: string, args?: readonly string[]) => {
+            if (args?.[0] === "for-each-ref") {
+              if (args.includes("refs/heads")) {
+                return { stdout: "develop\0${1700000000}", stderr: "", exitCode: 0 } as any;
+              }
+              if (args.includes("refs/remotes")) {
+                return { stdout: "", stderr: "", exitCode: 0 } as any;
+              }
+            }
             if (args?.[0] === "branch" && args.includes("--show-current")) {
               return { stdout: "main", stderr: "", exitCode: 0 };
             }
@@ -496,6 +670,14 @@ origin/develop`;
       it("should identify feature branch type", async () => {
         (execa as any).mockImplementation(
           async (command: string, args?: readonly string[]) => {
+            if (args?.[0] === "for-each-ref") {
+              if (args.includes("refs/heads")) {
+                return { stdout: "feature/test\0${1700000000}", stderr: "", exitCode: 0 } as any;
+              }
+              if (args.includes("refs/remotes")) {
+                return { stdout: "", stderr: "", exitCode: 0 } as any;
+              }
+            }
             if (args?.[0] === "branch" && args.includes("--show-current")) {
               return { stdout: "main", stderr: "", exitCode: 0 };
             }
@@ -519,6 +701,14 @@ origin/develop`;
       it("should identify hotfix branch type", async () => {
         (execa as any).mockImplementation(
           async (command: string, args?: readonly string[]) => {
+            if (args?.[0] === "for-each-ref") {
+              if (args.includes("refs/heads")) {
+                return { stdout: "hotfix/urgent\0${1700000000}", stderr: "", exitCode: 0 } as any;
+              }
+              if (args.includes("refs/remotes")) {
+                return { stdout: "", stderr: "", exitCode: 0 } as any;
+              }
+            }
             if (args?.[0] === "branch" && args.includes("--show-current")) {
               return { stdout: "main", stderr: "", exitCode: 0 };
             }
@@ -542,6 +732,14 @@ origin/develop`;
       it("should identify release branch type", async () => {
         (execa as any).mockImplementation(
           async (command: string, args?: readonly string[]) => {
+            if (args?.[0] === "for-each-ref") {
+              if (args.includes("refs/heads")) {
+                return { stdout: "release/v1.0\0${1700000000}", stderr: "", exitCode: 0 } as any;
+              }
+              if (args.includes("refs/remotes")) {
+                return { stdout: "", stderr: "", exitCode: 0 } as any;
+              }
+            }
             if (args?.[0] === "branch" && args.includes("--show-current")) {
               return { stdout: "main", stderr: "", exitCode: 0 };
             }
@@ -565,6 +763,14 @@ origin/develop`;
       it("should identify other branch types", async () => {
         (execa as any).mockImplementation(
           async (command: string, args?: readonly string[]) => {
+            if (args?.[0] === "for-each-ref") {
+              if (args.includes("refs/heads")) {
+                return { stdout: "random-branch\0${1700000000}", stderr: "", exitCode: 0 } as any;
+              }
+              if (args.includes("refs/remotes")) {
+                return { stdout: "", stderr: "", exitCode: 0 } as any;
+              }
+            }
             if (args?.[0] === "branch" && args.includes("--show-current")) {
               return { stdout: "main", stderr: "", exitCode: 0 };
             }
@@ -650,6 +856,91 @@ origin/develop`;
           expect(fn.length).toBe(2); // Expects 2 parameters
         }).not.toThrow();
       });
+    });
+  });
+});
+
+describe("git.ts - Gitignore Operations", () => {
+  describe("ensureGitignoreEntry", () => {
+    const fs = require("node:fs/promises");
+    const path = require("node:path");
+    const os = require("node:os");
+    let tempDir: string;
+
+    beforeEach(async () => {
+      // Create temporary directory for tests
+      tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "git-test-"));
+    });
+
+    afterEach(async () => {
+      // Clean up temporary directory
+      try {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      } catch (error) {
+        // Ignore cleanup errors
+      }
+    });
+
+    it("should add entry to .gitignore when file exists and entry does not exist", async () => {
+      const entry = ".worktrees/";
+      const gitignorePath = path.join(tempDir, ".gitignore");
+
+      // Create existing .gitignore
+      await fs.writeFile(gitignorePath, "node_modules/\ndist/\n", "utf-8");
+
+      await git.ensureGitignoreEntry(tempDir, entry);
+
+      const content = await fs.readFile(gitignorePath, "utf-8");
+      expect(content).toBe("node_modules/\ndist/\n.worktrees/\n");
+    });
+
+    it("should not add entry when it already exists", async () => {
+      const entry = ".worktrees/";
+      const gitignorePath = path.join(tempDir, ".gitignore");
+
+      // Create .gitignore with entry already present
+      const initialContent = "node_modules/\n.worktrees/\ndist/\n";
+      await fs.writeFile(gitignorePath, initialContent, "utf-8");
+
+      await git.ensureGitignoreEntry(tempDir, entry);
+
+      const content = await fs.readFile(gitignorePath, "utf-8");
+      expect(content).toBe(initialContent);
+    });
+
+    it("should create .gitignore with entry when file does not exist", async () => {
+      const entry = ".worktrees/";
+      const gitignorePath = path.join(tempDir, ".gitignore");
+
+      await git.ensureGitignoreEntry(tempDir, entry);
+
+      const content = await fs.readFile(gitignorePath, "utf-8");
+      expect(content).toBe(".worktrees/\n");
+    });
+
+    it("should throw GitError when file read fails with non-ENOENT error", async () => {
+      const entry = ".worktrees/";
+      const gitignorePath = path.join(tempDir, ".gitignore");
+
+      // Create a directory with the same name to cause EISDIR error
+      await fs.mkdir(gitignorePath);
+
+      await expect(git.ensureGitignoreEntry(tempDir, entry)).rejects.toThrow(
+        "Failed to update .gitignore",
+      );
+    });
+
+    it("should handle .gitignore without trailing newline", async () => {
+      const entry = ".worktrees/";
+      const gitignorePath = path.join(tempDir, ".gitignore");
+
+      // Create .gitignore without trailing newline
+      await fs.writeFile(gitignorePath, "node_modules/", "utf-8");
+
+      await git.ensureGitignoreEntry(tempDir, entry);
+
+      const content = await fs.readFile(gitignorePath, "utf-8");
+      expect(content).toBe("node_modules/\n.worktrees/\n");
     });
   });
 });
@@ -771,14 +1062,12 @@ describe("git.ts - Batch Merge Operations", () => {
 
   describe("getMergeStatus (T114-T115)", () => {
     it("should return inProgress=true and hasConflict=true during conflicted merge", async () => {
-      // Mock for MERGE_HEAD check (inProgress)
       (execa as any).mockResolvedValueOnce({
         stdout: ".git/MERGE_HEAD",
         stderr: "",
         exitCode: 0,
       });
 
-      // Mock for git status check (hasConflict)
       (execa as any).mockResolvedValueOnce({
         stdout: "UU conflict.txt\n",
         stderr: "",
@@ -794,10 +1083,8 @@ describe("git.ts - Batch Merge Operations", () => {
     });
 
     it("should return inProgress=false and hasConflict=false when no merge", async () => {
-      // Mock for MERGE_HEAD check
       (execa as any).mockRejectedValueOnce(new Error("fatal: not in a merge"));
 
-      // Mock for git status check
       (execa as any).mockResolvedValueOnce({
         stdout: "",
         stderr: "",
@@ -813,14 +1100,12 @@ describe("git.ts - Batch Merge Operations", () => {
     });
 
     it("should return inProgress=true and hasConflict=false during clean merge", async () => {
-      // Mock for MERGE_HEAD check
       (execa as any).mockResolvedValueOnce({
         stdout: ".git/MERGE_HEAD",
         stderr: "",
         exitCode: 0,
       });
 
-      // Mock for git status check (no conflicts)
       (execa as any).mockResolvedValueOnce({
         stdout: "M  modified.txt\n",
         stderr: "",
@@ -859,89 +1144,97 @@ describe("git.ts - Batch Merge Operations", () => {
       await expect(git.resetToHead("/path/to/worktree")).rejects.toThrow();
     });
   });
+});
 
-  describe("getBranchDivergenceStatuses", () => {
-    it("should return divergence counts for branches with remotes", async () => {
-      (execa as any)
-        .mockResolvedValueOnce({
-          stdout: "main\nfeature/login",
-          stderr: "",
-          exitCode: 0,
-        })
-        .mockResolvedValueOnce({
-          stdout: "",
-          stderr: "",
-          exitCode: 0,
-        })
-        .mockResolvedValueOnce({
-          stdout: "2\t1",
-          stderr: "",
-          exitCode: 0,
-        })
-        .mockRejectedValueOnce(new Error("remote branch missing"));
-
-      const result = await git.getBranchDivergenceStatuses({ cwd: "/repo" });
-
-      expect(result).toEqual([
-        {
-          branch: "main",
-          remoteAhead: 2,
-          localAhead: 1,
-        },
-      ]);
-
-      expect(execa).toHaveBeenNthCalledWith(1, "git", [
-        "branch",
-        "--format=%(refname:short)",
-      ], {
-        cwd: "/repo",
-      });
-
-      expect(execa).toHaveBeenNthCalledWith(2, "git", [
-        "show-ref",
-        "--verify",
-        "--quiet",
-        "refs/remotes/origin/main",
-      ], {
-        cwd: "/repo",
-      });
-
-      expect(execa).toHaveBeenNthCalledWith(3, "git", [
-        "rev-list",
-        "--left-right",
-        "--count",
-        "origin/main...main",
-      ], {
-        cwd: "/repo",
-      });
-    });
+describe("getBranchDivergenceStatuses", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
   });
 
-  describe("pullFastForward", () => {
-    it("should call git pull with --ff-only", async () => {
-      (execa as any).mockResolvedValue({
+  it("should return divergence counts for branches with remotes", async () => {
+    (execa as any)
+      .mockResolvedValueOnce({
+        stdout: "main\nfeature/login",
+        stderr: "",
+        exitCode: 0,
+      })
+      .mockResolvedValueOnce({
         stdout: "",
         stderr: "",
         exitCode: 0,
-      });
+      })
+      .mockResolvedValueOnce({
+        stdout: "2\t1",
+        stderr: "",
+        exitCode: 0,
+      })
+      .mockRejectedValueOnce(new Error("remote branch missing"));
 
-      await git.pullFastForward("/repo/worktree");
+    const result = await git.getBranchDivergenceStatuses({ cwd: "/repo" });
 
-      expect(execa).toHaveBeenCalledWith(
-        "git",
-        ["pull", "--ff-only", "origin"],
-        { cwd: "/repo/worktree" },
-      );
+    expect(result).toEqual([
+      {
+        branch: "main",
+        remoteAhead: 2,
+        localAhead: 1,
+      },
+    ]);
+
+    expect(execa).toHaveBeenNthCalledWith(1, "git", [
+      "branch",
+      "--format=%(refname:short)",
+    ], {
+      cwd: "/repo",
     });
 
-    it("should throw error when pull fails", async () => {
-      (execa as any).mockRejectedValue(
-        new Error("fatal: Not possible to fast-forward."),
-      );
-
-      await expect(
-        git.pullFastForward("/repo/worktree"),
-      ).rejects.toThrow("Failed to fast-forward pull");
+    expect(execa).toHaveBeenNthCalledWith(2, "git", [
+      "show-ref",
+      "--verify",
+      "--quiet",
+      "refs/remotes/origin/main",
+    ], {
+      cwd: "/repo",
     });
+
+    expect(execa).toHaveBeenNthCalledWith(3, "git", [
+      "rev-list",
+      "--left-right",
+      "--count",
+      "origin/main...main",
+    ], {
+      cwd: "/repo",
+    });
+  });
+});
+
+describe("pullFastForward", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("should call git pull with --ff-only", async () => {
+    (execa as any).mockResolvedValue({
+      stdout: "",
+      stderr: "",
+      exitCode: 0,
+    });
+
+    await git.pullFastForward("/repo/worktree");
+
+    expect(execa).toHaveBeenCalledWith(
+      "git",
+      ["pull", "--ff-only", "origin"],
+      { cwd: "/repo/worktree" },
+    );
+  });
+
+  it("should throw error when pull fails", async () => {
+    (execa as any).mockRejectedValue(
+      new Error("fatal: Not possible to fast-forward."),
+    );
+
+    await expect(
+      git.pullFastForward("/repo/worktree"),
+    ).rejects.toThrow("Failed to fast-forward pull");
   });
 });

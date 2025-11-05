@@ -1,13 +1,26 @@
 module.exports = {
-  parserPreset: {
-    name: "subject-only",
-    parserOpts: {
-      headerPattern: /^(.*)$/,
-      headerCorrespondence: ["subject"],
-    },
-  },
+  extends: ["@commitlint/config-conventional"],
   rules: {
     "subject-empty": [2, "never"],
     "subject-max-length": [2, "always", 100],
+    "header-max-length": [2, "always", 100],
+    "subject-case": [0],
+    "type-enum": [
+      2,
+      "always",
+      [
+        "feat",
+        "fix",
+        "docs",
+        "style",
+        "refactor",
+        "perf",
+        "test",
+        "build",
+        "ci",
+        "chore",
+        "revert",
+      ],
+    ],
   },
 };

@@ -3,6 +3,7 @@ import type {
   BranchItem,
   BranchType,
   WorktreeStatus,
+  WorktreeInfo,
 } from "../types.js";
 import stringWidth from "string-width";
 
@@ -24,6 +25,10 @@ const worktreeIcons: Record<Exclude<WorktreeStatus, undefined>, string> = {
 const changeIcons = {
   current: "⭐",
   hasChanges: "✏️",
+  unpushed: "⬆️",
+  openPR: "🔀",
+  mergedPR: "✅",
+  warning: "⚠️",
 };
 
 const remoteIcon = "☁";
@@ -76,12 +81,20 @@ export function formatBranchItem(
     worktreeIcon = " ".repeat(COLUMN_WIDTH);
   }
 
-  // Column 3: Uncommitted changes / current branch icon
+  // Column 3: Change status icon (priority: ✏️ > ⬆️ > 🔀 > ✅ > ⚠️ > ⭐)
   let changesIcon: string;
-  if (branch.isCurrent) {
-    changesIcon = padIcon(changeIcons.current);
-  } else if (hasChanges) {
+  if (hasChanges) {
     changesIcon = padIcon(changeIcons.hasChanges);
+  } else if (branch.hasUnpushedCommits) {
+    changesIcon = padIcon(changeIcons.unpushed);
+  } else if (branch.openPR) {
+    changesIcon = padIcon(changeIcons.openPR);
+  } else if (branch.mergedPR) {
+    changesIcon = padIcon(changeIcons.mergedPR);
+  } else if (branch.worktree?.isAccessible === false) {
+    changesIcon = padIcon(changeIcons.warning);
+  } else if (branch.isCurrent) {
+    changesIcon = padIcon(changeIcons.current);
   } else {
     changesIcon = " ".repeat(COLUMN_WIDTH);
   }
@@ -108,10 +121,19 @@ export function formatBranchItem(
         : worktreeIcons.inaccessible,
     );
   }
-  if (branch.isCurrent) {
-    icons.push(changeIcons.current);
-  } else if (hasChanges) {
+  // Add change icon based on priority
+  if (hasChanges) {
     icons.push(changeIcons.hasChanges);
+  } else if (branch.hasUnpushedCommits) {
+    icons.push(changeIcons.unpushed);
+  } else if (branch.openPR) {
+    icons.push(changeIcons.openPR);
+  } else if (branch.mergedPR) {
+    icons.push(changeIcons.mergedPR);
+  } else if (branch.worktree?.isAccessible === false) {
+    icons.push(changeIcons.warning);
+  } else if (branch.isCurrent) {
+    icons.push(changeIcons.current);
   }
   if (branch.type === "remote") {
     icons.push(remoteIcon);
@@ -130,8 +152,60 @@ export function formatBranchItem(
 }
 
 /**
- * Converts an array of BranchInfo to BranchItem array
+ * Sorts branches according to the priority rules:
+ * 1. Current branch (highest priority)
+ * 2. main branch
+ * 3. develop branch (only if main exists)
+ * 4. Branches with worktree
+ * 5. Local branches
+ * 6. Alphabetical order by name
  */
-export function formatBranchItems(branches: BranchInfo[]): BranchItem[] {
-  return branches.map((branch) => formatBranchItem(branch));
+function sortBranches(
+  branches: BranchInfo[],
+  worktreeMap: Map<string, WorktreeInfo>,
+): BranchInfo[] {
+  // Check if main branch exists
+  const hasMainBranch = branches.some((b) => b.branchType === "main");
+
+  return [...branches].sort((a, b) => {
+    // 1. Current branch is highest priority
+    if (a.isCurrent && !b.isCurrent) return -1;
+    if (!a.isCurrent && b.isCurrent) return 1;
+
+    // 2. main branch is second priority
+    if (a.branchType === "main" && b.branchType !== "main") return -1;
+    if (a.branchType !== "main" && b.branchType === "main") return 1;
+
+    // 3. develop branch is third priority (only if main exists)
+    if (hasMainBranch) {
+      if (a.branchType === "develop" && b.branchType !== "develop") return -1;
+      if (a.branchType !== "develop" && b.branchType === "develop") return 1;
+    }
+
+    // 4. Branches with worktree are prioritized
+    const aHasWorktree = worktreeMap.has(a.name) || !!a.worktree;
+    const bHasWorktree = worktreeMap.has(b.name) || !!b.worktree;
+    if (aHasWorktree && !bHasWorktree) return -1;
+    if (!aHasWorktree && bHasWorktree) return 1;
+
+    // 5. Local branches are prioritized over remote-only
+    const aIsLocal = a.type === "local";
+    const bIsLocal = b.type === "local";
+    if (aIsLocal && !bIsLocal) return -1;
+    if (!aIsLocal && bIsLocal) return 1;
+
+    // 6. Alphabetical order by name
+    return a.name.localeCompare(b.name);
+  });
+}
+
+/**
+ * Converts an array of BranchInfo to BranchItem array with sorting
+ */
+export function formatBranchItems(
+  branches: BranchInfo[],
+  worktreeMap: Map<string, WorktreeInfo> = new Map(),
+): BranchItem[] {
+  const sortedBranches = sortBranches(branches, worktreeMap);
+  return sortedBranches.map((branch) => formatBranchItem(branch));
 }

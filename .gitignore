@@ -77,3 +77,4 @@ coverage/
 # Temporary folders
 tmp/
 temp/
+.worktrees/

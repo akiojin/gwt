@@ -88,10 +88,8 @@ describe('BranchListScreen', () => {
       <BranchListScreen branches={mockBranches} stats={mockStats} onSelect={onSelect} />
     );
 
-    // Check for enter and q keys
+    // Check for enter key (main screen doesn't have q key, exit is Ctrl+C only)
     expect(getAllByText(/enter/i).length).toBeGreaterThan(0);
-    expect(getAllByText(/q/i).length).toBeGreaterThan(0);
-    expect(getAllByText(/Quit/i).length).toBeGreaterThan(0);
   });
 
   it('should handle empty branch list', () => {

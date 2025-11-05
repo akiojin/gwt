@@ -13,6 +13,7 @@ export interface AppConfig {
 export interface SessionData {
   lastWorktreePath: string | null;
   lastBranch: string | null;
+  lastUsedTool?: string;
   timestamp: number;
   repositoryRoot: string;
 }

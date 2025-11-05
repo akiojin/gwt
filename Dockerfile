@@ -14,10 +14,7 @@ RUN npm i -g \
     bun@latest \
     typescript@latest \
     eslint@latest \
-    prettier@latest \
-    @anthropic-ai/claude-code@latest \
-    @openai/codex@latest \
-    @google/gemini-cli@latest
+    prettier@latest 
 
 # Install uv/uvx
 RUN curl -fsSL https://astral.sh/uv/install.sh | bash

@@ -146,6 +146,165 @@ describe("branchFormatter", () => {
       expect(result.hasChanges).toBe(true);
     });
 
+    it("should show unpushed commits icon", () => {
+      const branchInfo: BranchInfo = {
+        name: "feature/unpushed",
+        type: "local",
+        branchType: "feature",
+        isCurrent: false,
+        hasUnpushedCommits: true,
+      };
+
+      const result = formatBranchItem(branchInfo);
+
+      expect(result.icons).toContain("⬆️"); // unpushed icon
+      expect(result.label).toContain("⬆️");
+    });
+
+    it("should show open PR icon", () => {
+      const branchInfo: BranchInfo = {
+        name: "feature/pr-open",
+        type: "local",
+        branchType: "feature",
+        isCurrent: false,
+        openPR: { number: 123, title: "Test PR" },
+      };
+
+      const result = formatBranchItem(branchInfo);
+
+      expect(result.icons).toContain("🔀"); // open PR icon
+      expect(result.label).toContain("🔀");
+    });
+
+    it("should show merged PR icon", () => {
+      const branchInfo: BranchInfo = {
+        name: "feature/pr-merged",
+        type: "local",
+        branchType: "feature",
+        isCurrent: false,
+        mergedPR: { number: 456, mergedAt: "2025-10-31T00:00:00Z" },
+      };
+
+      const result = formatBranchItem(branchInfo);
+
+      expect(result.icons).toContain("✅"); // merged PR icon
+      expect(result.label).toContain("✅");
+    });
+
+    it("should show warning icon for inaccessible worktree", () => {
+      const branchInfo: BranchInfo = {
+        name: "feature/broken-worktree",
+        type: "local",
+        branchType: "feature",
+        isCurrent: false,
+        worktree: {
+          path: "/path/to/worktree",
+          locked: false,
+          prunable: false,
+          isAccessible: false,
+        },
+      };
+
+      const result = formatBranchItem(branchInfo);
+
+      expect(result.icons).toContain("🟠"); // inaccessible worktree icon
+      expect(result.icons).toContain("⚠️"); // warning icon
+      expect(result.worktreeStatus).toBe("inaccessible");
+    });
+
+    it("should prioritize hasChanges over unpushed commits", () => {
+      const branchInfo: BranchInfo = {
+        name: "feature/both",
+        type: "local",
+        branchType: "feature",
+        isCurrent: false,
+        hasUnpushedCommits: true,
+      };
+
+      const resultWithChanges = formatBranchItem(branchInfo, {
+        hasChanges: true,
+      });
+      expect(resultWithChanges.icons).toContain("✏️");
+      expect(resultWithChanges.icons).not.toContain("⬆️");
+
+      const resultWithoutChanges = formatBranchItem(branchInfo);
+      expect(resultWithoutChanges.icons).toContain("⬆️");
+      expect(resultWithoutChanges.icons).not.toContain("✏️");
+    });
+
+    it("should prioritize unpushed over open PR", () => {
+      const branchInfo: BranchInfo = {
+        name: "feature/unpushed-pr",
+        type: "local",
+        branchType: "feature",
+        isCurrent: false,
+        hasUnpushedCommits: true,
+        openPR: { number: 123, title: "Test PR" },
+      };
+
+      const result = formatBranchItem(branchInfo);
+
+      expect(result.icons).toContain("⬆️");
+      expect(result.icons).not.toContain("🔀");
+    });
+
+    it("should prioritize open PR over merged PR", () => {
+      const branchInfo: BranchInfo = {
+        name: "feature/both-pr",
+        type: "local",
+        branchType: "feature",
+        isCurrent: false,
+        openPR: { number: 123, title: "Test PR" },
+        mergedPR: { number: 456, mergedAt: "2025-10-31T00:00:00Z" },
+      };
+
+      const result = formatBranchItem(branchInfo);
+
+      expect(result.icons).toContain("🔀");
+      expect(result.icons).not.toContain("✅");
+    });
+
+    it("should prioritize merged PR over warning", () => {
+      const branchInfo: BranchInfo = {
+        name: "feature/merged-broken",
+        type: "local",
+        branchType: "feature",
+        isCurrent: false,
+        mergedPR: { number: 456, mergedAt: "2025-10-31T00:00:00Z" },
+        worktree: {
+          path: "/path/to/worktree",
+          locked: false,
+          prunable: false,
+          isAccessible: false,
+        },
+      };
+
+      const result = formatBranchItem(branchInfo);
+
+      expect(result.icons).toContain("✅");
+      expect(result.icons).not.toContain("⚠️");
+    });
+
+    it("should prioritize warning over current branch icon", () => {
+      const branchInfo: BranchInfo = {
+        name: "feature/current-broken",
+        type: "local",
+        branchType: "feature",
+        isCurrent: true,
+        worktree: {
+          path: "/path/to/worktree",
+          locked: false,
+          prunable: false,
+          isAccessible: false,
+        },
+      };
+
+      const result = formatBranchItem(branchInfo);
+
+      expect(result.icons).toContain("⚠️");
+      expect(result.icons).not.toContain("⭐");
+    });
+
     it("should handle develop branch", () => {
       const branchInfo: BranchInfo = {
         name: "develop",
@@ -176,7 +335,7 @@ describe("branchFormatter", () => {
   });
 
   describe("formatBranchItems", () => {
-    it("should format multiple branches", () => {
+    it("should format multiple branches with sorting", () => {
       const branches: BranchInfo[] = [
         {
           name: "main",
@@ -201,11 +360,14 @@ describe("branchFormatter", () => {
       const results = formatBranchItems(branches);
 
       expect(results).toHaveLength(3);
+      // Current branch (main) should be first
       expect(results[0].name).toBe("main");
       expect(results[0].isCurrent).toBe(true);
-      expect(results[1].name).toBe("feature/test");
-      expect(results[2].name).toBe("origin/main");
-      expect(results[2].type).toBe("remote");
+      // origin/main is also main branch, so it comes second
+      expect(results[1].name).toBe("origin/main");
+      expect(results[1].type).toBe("remote");
+      // feature/test comes last
+      expect(results[2].name).toBe("feature/test");
     });
 
     it("should handle empty array", () => {
@@ -214,7 +376,7 @@ describe("branchFormatter", () => {
       expect(results).toHaveLength(0);
     });
 
-    it("should preserve branch order", () => {
+    it("should sort branches alphabetically when no other priority applies", () => {
       const branches: BranchInfo[] = [
         {
           name: "z-branch",
@@ -232,8 +394,301 @@ describe("branchFormatter", () => {
 
       const results = formatBranchItems(branches);
 
-      expect(results[0].name).toBe("z-branch");
-      expect(results[1].name).toBe("a-branch");
+      expect(results[0].name).toBe("a-branch");
+      expect(results[1].name).toBe("z-branch");
+    });
+  });
+
+  describe("formatBranchItems - sorting", () => {
+    it("should prioritize current branch at the top", () => {
+      const branches: BranchInfo[] = [
+        {
+          name: "feature/a",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+        },
+        {
+          name: "feature/current",
+          type: "local",
+          branchType: "feature",
+          isCurrent: true,
+        },
+        {
+          name: "main",
+          type: "local",
+          branchType: "main",
+          isCurrent: false,
+        },
+      ];
+
+      const results = formatBranchItems(branches);
+
+      expect(results[0].name).toBe("feature/current");
+      expect(results[0].isCurrent).toBe(true);
+    });
+
+    it("should prioritize main branch as second (after current)", () => {
+      const branches: BranchInfo[] = [
+        {
+          name: "feature/test",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+        },
+        {
+          name: "main",
+          type: "local",
+          branchType: "main",
+          isCurrent: false,
+        },
+        {
+          name: "develop",
+          type: "local",
+          branchType: "develop",
+          isCurrent: false,
+        },
+      ];
+
+      const results = formatBranchItems(branches);
+
+      expect(results[0].name).toBe("main");
+      expect(results[1].name).toBe("develop");
+    });
+
+    it("should prioritize develop branch after main (when main exists)", () => {
+      const branches: BranchInfo[] = [
+        {
+          name: "feature/test",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+        },
+        {
+          name: "develop",
+          type: "local",
+          branchType: "develop",
+          isCurrent: false,
+        },
+        {
+          name: "main",
+          type: "local",
+          branchType: "main",
+          isCurrent: false,
+        },
+      ];
+
+      const results = formatBranchItems(branches);
+
+      expect(results[0].name).toBe("main");
+      expect(results[1].name).toBe("develop");
+      expect(results[2].name).toBe("feature/test");
+    });
+
+    it("should NOT prioritize develop branch when main does not exist", () => {
+      const branches: BranchInfo[] = [
+        {
+          name: "feature/a",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+        },
+        {
+          name: "develop",
+          type: "local",
+          branchType: "develop",
+          isCurrent: false,
+        },
+        {
+          name: "feature/z",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+        },
+      ];
+
+      const results = formatBranchItems(branches);
+
+      // develop should be sorted alphabetically, not prioritized
+      expect(results[0].name).toBe("develop");
+      expect(results[1].name).toBe("feature/a");
+      expect(results[2].name).toBe("feature/z");
+    });
+
+    it("should prioritize branches with worktree", () => {
+      const worktreeMap = new Map([
+        [
+          "feature/with-worktree",
+          {
+            path: "/path/to/worktree",
+            locked: false,
+            prunable: false,
+            isAccessible: true,
+          },
+        ],
+      ]);
+
+      const branches: BranchInfo[] = [
+        {
+          name: "feature/no-worktree",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+        },
+        {
+          name: "feature/with-worktree",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+          worktree: {
+            path: "/path/to/worktree",
+            locked: false,
+            prunable: false,
+            isAccessible: true,
+          },
+        },
+      ];
+
+      const results = formatBranchItems(branches, worktreeMap);
+
+      expect(results[0].name).toBe("feature/with-worktree");
+      expect(results[1].name).toBe("feature/no-worktree");
+    });
+
+    it("should prioritize local branches over remote branches", () => {
+      const branches: BranchInfo[] = [
+        {
+          name: "origin/feature/remote",
+          type: "remote",
+          branchType: "feature",
+          isCurrent: false,
+        },
+        {
+          name: "feature/local",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+        },
+      ];
+
+      const results = formatBranchItems(branches);
+
+      expect(results[0].name).toBe("feature/local");
+      expect(results[0].type).toBe("local");
+      expect(results[1].name).toBe("origin/feature/remote");
+      expect(results[1].type).toBe("remote");
+    });
+
+    it("should apply all sorting rules in correct priority order", () => {
+      const worktreeMap = new Map([
+        [
+          "feature/with-worktree",
+          {
+            path: "/path/to/worktree",
+            locked: false,
+            prunable: false,
+            isAccessible: true,
+          },
+        ],
+      ]);
+
+      const branches: BranchInfo[] = [
+        {
+          name: "origin/feature/z-remote",
+          type: "remote",
+          branchType: "feature",
+          isCurrent: false,
+        },
+        {
+          name: "feature/with-worktree",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+          worktree: {
+            path: "/path/to/worktree",
+            locked: false,
+            prunable: false,
+            isAccessible: true,
+          },
+        },
+        {
+          name: "feature/z-local-no-worktree",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+        },
+        {
+          name: "feature/a-local-no-worktree",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+        },
+        {
+          name: "develop",
+          type: "local",
+          branchType: "develop",
+          isCurrent: false,
+        },
+        {
+          name: "main",
+          type: "local",
+          branchType: "main",
+          isCurrent: false,
+        },
+        {
+          name: "feature/current",
+          type: "local",
+          branchType: "feature",
+          isCurrent: true,
+        },
+      ];
+
+      const results = formatBranchItems(branches, worktreeMap);
+
+      // Expected order:
+      // 1. Current branch
+      // 2. main
+      // 3. develop (because main exists)
+      // 4. Branches with worktree
+      // 5. Local branches (alphabetically)
+      // 6. Remote branches
+      expect(results[0].name).toBe("feature/current");
+      expect(results[1].name).toBe("main");
+      expect(results[2].name).toBe("develop");
+      expect(results[3].name).toBe("feature/with-worktree");
+      expect(results[4].name).toBe("feature/a-local-no-worktree");
+      expect(results[5].name).toBe("feature/z-local-no-worktree");
+      expect(results[6].name).toBe("origin/feature/z-remote");
+    });
+
+    it("should handle release and hotfix branches without special priority", () => {
+      const branches: BranchInfo[] = [
+        {
+          name: "feature/test",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+        },
+        {
+          name: "hotfix/urgent",
+          type: "local",
+          branchType: "hotfix",
+          isCurrent: false,
+        },
+        {
+          name: "release/v1.0",
+          type: "local",
+          branchType: "release",
+          isCurrent: false,
+        },
+      ];
+
+      const results = formatBranchItems(branches);
+
+      // Should be sorted alphabetically (no special priority)
+      expect(results[0].name).toBe("feature/test");
+      expect(results[1].name).toBe("hotfix/urgent");
+      expect(results[2].name).toBe("release/v1.0");
     });
   });
 });

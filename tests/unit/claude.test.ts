@@ -11,6 +11,29 @@ vi.mock("fs", () => ({
   default: { existsSync: vi.fn(() => true) },
 }));
 
+const mockTerminalStreams = {
+  stdin: { id: "stdin" } as unknown as NodeJS.ReadStream,
+  stdout: { id: "stdout" } as unknown as NodeJS.WriteStream,
+  stderr: { id: "stderr" } as unknown as NodeJS.WriteStream,
+  stdinFd: undefined as number | undefined,
+  stdoutFd: undefined as number | undefined,
+  stderrFd: undefined as number | undefined,
+  usingFallback: false,
+  exitRawMode: vi.fn(),
+};
+
+const mockChildStdio = {
+  stdin: "inherit" as const,
+  stdout: "inherit" as const,
+  stderr: "inherit" as const,
+  cleanup: vi.fn(),
+};
+
+vi.mock("../../src/utils/terminal", () => ({
+  getTerminalStreams: vi.fn(() => mockTerminalStreams),
+  createChildStdio: vi.fn(() => mockChildStdio),
+}));
+
 import { launchClaudeCode } from "../../src/claude.js";
 import { execa } from "execa";
 
@@ -26,6 +49,11 @@ describe("launchClaudeCode - Root User Detection", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     consoleLogSpy.mockClear();
+    mockTerminalStreams.exitRawMode.mockClear();
+    mockChildStdio.cleanup.mockClear();
+    mockChildStdio.stdin = "inherit";
+    mockChildStdio.stdout = "inherit";
+    mockChildStdio.stderr = "inherit";
     // Store original getuid
     originalGetuid = process.getuid;
   });
@@ -44,16 +72,22 @@ describe("launchClaudeCode - Root User Detection", () => {
       // Mock process.getuid to return 0 (root user)
       process.getuid = () => 0;
 
-      mockExeca.mockResolvedValue({
-        stdout: "",
-        stderr: "",
-        exitCode: 0,
-      } as any);
+      // Mock which/where to fail (claude not available) and bunx to succeed
+      mockExeca
+        .mockRejectedValueOnce(new Error("Command not found")) // which/where
+        .mockResolvedValue({
+          // bunx
+          stdout: "",
+          stderr: "",
+          exitCode: 0,
+        } as any);
 
       await launchClaudeCode("/test/path", { skipPermissions: true });
 
       // Verify execa was called with IS_SANDBOX=1 in env
-      expect(mockExeca).toHaveBeenCalledWith(
+      // 2nd call should be bunx (1st call is which/where check)
+      expect(mockExeca).toHaveBeenNthCalledWith(
+        2,
         "bunx",
         expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
         expect.objectContaining({
@@ -68,19 +102,28 @@ describe("launchClaudeCode - Root User Detection", () => {
       // Mock process.getuid to return 1000 (non-root user)
       process.getuid = () => 1000;
 
-      mockExeca.mockResolvedValue({
-        stdout: "",
-        stderr: "",
-        exitCode: 0,
-      } as any);
+      // Mock which/where to fail (claude not available) and bunx to succeed
+      mockExeca
+        .mockRejectedValueOnce(new Error("Command not found")) // which/where
+        .mockResolvedValue({
+          // bunx
+          stdout: "",
+          stderr: "",
+          exitCode: 0,
+        } as any);
 
       await launchClaudeCode("/test/path", { skipPermissions: true });
 
       // Verify execa was called without IS_SANDBOX=1
-      expect(mockExeca).toHaveBeenCalledWith(
+      // 2nd call should be bunx (1st call is which/where check)
+      expect(mockExeca).toHaveBeenNthCalledWith(
+        2,
         "bunx",
         expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
         expect.objectContaining({
+          stdin: "inherit",
+          stdout: "inherit",
+          stderr: "inherit",
           env: process.env,
         }),
       );
@@ -90,19 +133,28 @@ describe("launchClaudeCode - Root User Detection", () => {
       // Mock process without getuid (e.g., Windows)
       delete (process as any).getuid;
 
-      mockExeca.mockResolvedValue({
-        stdout: "",
-        stderr: "",
-        exitCode: 0,
-      } as any);
+      // Mock which/where to fail (claude not available) and bunx to succeed
+      mockExeca
+        .mockRejectedValueOnce(new Error("Command not found")) // which/where
+        .mockResolvedValue({
+          // bunx
+          stdout: "",
+          stderr: "",
+          exitCode: 0,
+        } as any);
 
       await launchClaudeCode("/test/path", { skipPermissions: true });
 
       // Verify execa was called without IS_SANDBOX=1 (fallback to non-root)
-      expect(mockExeca).toHaveBeenCalledWith(
+      // 2nd call should be bunx (1st call is which/where check)
+      expect(mockExeca).toHaveBeenNthCalledWith(
+        2,
         "bunx",
         expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
         expect.objectContaining({
+          stdin: "inherit",
+          stdout: "inherit",
+          stderr: "inherit",
           env: process.env,
         }),
       );
@@ -114,22 +166,31 @@ describe("launchClaudeCode - Root User Detection", () => {
       // Mock root user
       process.getuid = () => 0;
 
-      mockExeca.mockResolvedValue({
-        stdout: "",
-        stderr: "",
-        exitCode: 0,
-      } as any);
+      // Mock which/where to fail (claude not available) and bunx to succeed
+      mockExeca
+        .mockRejectedValueOnce(new Error("Command not found")) // which/where
+        .mockResolvedValue({
+          // bunx
+          stdout: "",
+          stderr: "",
+          exitCode: 0,
+        } as any);
 
       await launchClaudeCode("/test/path", { skipPermissions: true });
 
       // Verify IS_SANDBOX=1 is set
-      expect(mockExeca).toHaveBeenCalledWith(
+      // 2nd call should be bunx (1st call is which/where check)
+      expect(mockExeca).toHaveBeenNthCalledWith(
+        2,
         "bunx",
         expect.arrayContaining([
           "@anthropic-ai/claude-code@latest",
           "--dangerously-skip-permissions",
         ]),
         expect.objectContaining({
+          stdin: "inherit",
+          stdout: "inherit",
+          stderr: "inherit",
           env: expect.objectContaining({
             IS_SANDBOX: "1",
           }),
@@ -143,25 +204,35 @@ describe("launchClaudeCode - Root User Detection", () => {
       // Mock root user
       process.getuid = () => 0;
 
-      mockExeca.mockResolvedValue({
-        stdout: "",
-        stderr: "",
-        exitCode: 0,
-      } as any);
+      // Mock which/where to fail (claude not available) and bunx to succeed
+      mockExeca
+        .mockRejectedValueOnce(new Error("Command not found")) // which/where
+        .mockResolvedValue({
+          // bunx
+          stdout: "",
+          stderr: "",
+          exitCode: 0,
+        } as any);
 
       await launchClaudeCode("/test/path", { skipPermissions: false });
 
       // Verify IS_SANDBOX=1 is NOT set
-      expect(mockExeca).toHaveBeenCalledWith(
+      // 2nd call should be bunx (1st call is which/where check)
+      expect(mockExeca).toHaveBeenNthCalledWith(
+        2,
         "bunx",
         expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
         expect.objectContaining({
+          stdin: "inherit",
+          stdout: "inherit",
+          stderr: "inherit",
           env: process.env,
         }),
       );
 
       // Verify --dangerously-skip-permissions is NOT in args
-      expect(mockExeca).toHaveBeenCalledWith(
+      expect(mockExeca).toHaveBeenNthCalledWith(
+        2,
         "bunx",
         expect.not.arrayContaining(["--dangerously-skip-permissions"]),
         expect.anything(),
@@ -172,19 +243,28 @@ describe("launchClaudeCode - Root User Detection", () => {
       // Mock root user
       process.getuid = () => 0;
 
-      mockExeca.mockResolvedValue({
-        stdout: "",
-        stderr: "",
-        exitCode: 0,
-      } as any);
+      // Mock which/where to fail (claude not available) and bunx to succeed
+      mockExeca
+        .mockRejectedValueOnce(new Error("Command not found")) // which/where
+        .mockResolvedValue({
+          // bunx
+          stdout: "",
+          stderr: "",
+          exitCode: 0,
+        } as any);
 
       await launchClaudeCode("/test/path", {});
 
       // Verify IS_SANDBOX=1 is NOT set
-      expect(mockExeca).toHaveBeenCalledWith(
+      // 2nd call should be bunx (1st call is which/where check)
+      expect(mockExeca).toHaveBeenNthCalledWith(
+        2,
         "bunx",
         expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
         expect.objectContaining({
+          stdin: "inherit",
+          stdout: "inherit",
+          stderr: "inherit",
           env: process.env,
         }),
       );
@@ -196,11 +276,15 @@ describe("launchClaudeCode - Root User Detection", () => {
       // Mock root user
       process.getuid = () => 0;
 
-      mockExeca.mockResolvedValue({
-        stdout: "",
-        stderr: "",
-        exitCode: 0,
-      } as any);
+      // Mock which/where to fail (claude not available) and bunx to succeed
+      mockExeca
+        .mockRejectedValueOnce(new Error("Command not found")) // which/where
+        .mockResolvedValue({
+          // bunx
+          stdout: "",
+          stderr: "",
+          exitCode: 0,
+        } as any);
 
       await launchClaudeCode("/test/path", { skipPermissions: true });
 
@@ -219,11 +303,15 @@ describe("launchClaudeCode - Root User Detection", () => {
       // Mock non-root user
       process.getuid = () => 1000;
 
-      mockExeca.mockResolvedValue({
-        stdout: "",
-        stderr: "",
-        exitCode: 0,
-      } as any);
+      // Mock which/where to fail (claude not available) and bunx to succeed
+      mockExeca
+        .mockRejectedValueOnce(new Error("Command not found")) // which/where
+        .mockResolvedValue({
+          // bunx
+          stdout: "",
+          stderr: "",
+          exitCode: 0,
+        } as any);
 
       consoleLogSpy.mockClear();
 
@@ -244,11 +332,15 @@ describe("launchClaudeCode - Root User Detection", () => {
       // Mock root user
       process.getuid = () => 0;
 
-      mockExeca.mockResolvedValue({
-        stdout: "",
-        stderr: "",
-        exitCode: 0,
-      } as any);
+      // Mock which/where to fail (claude not available) and bunx to succeed
+      mockExeca
+        .mockRejectedValueOnce(new Error("Command not found")) // which/where
+        .mockResolvedValue({
+          // bunx
+          stdout: "",
+          stderr: "",
+          exitCode: 0,
+        } as any);
 
       consoleLogSpy.mockClear();
 
@@ -262,6 +354,203 @@ describe("launchClaudeCode - Root User Detection", () => {
         expect.stringContaining(
           "⚠️  Docker/サンドボックス環境として実行中（IS_SANDBOX=1）",
         ),
+      );
+    });
+  });
+
+  describe("TTY handoff", () => {
+    it("should pass fallback file descriptors when usingFallback is true", async () => {
+      mockTerminalStreams.usingFallback = true;
+      mockChildStdio.stdin = 101 as unknown as any;
+      mockChildStdio.stdout = 102 as unknown as any;
+      mockChildStdio.stderr = 103 as unknown as any;
+
+      // Mock which/where to fail (claude not available) and bunx to succeed
+      mockExeca
+        .mockRejectedValueOnce(new Error("Command not found")) // which/where
+        .mockResolvedValue({
+          // bunx
+          stdout: "",
+          stderr: "",
+          exitCode: 0,
+        } as any);
+
+      await launchClaudeCode("/test/path");
+
+      // 2nd call should be bunx (1st call is which/where check)
+      expect(mockExeca).toHaveBeenNthCalledWith(
+        2,
+        "bunx",
+        expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
+        expect.objectContaining({
+          stdin: 101,
+          stdout: 102,
+          stderr: 103,
+        }),
+      );
+
+      expect(mockChildStdio.cleanup).toHaveBeenCalledTimes(1);
+
+      mockTerminalStreams.usingFallback = false;
+      mockChildStdio.stdin = "inherit";
+      mockChildStdio.stdout = "inherit";
+      mockChildStdio.stderr = "inherit";
+    });
+  });
+
+  describe("T504: Claude command auto-detection", () => {
+    // Clear the default mock from parent beforeEach for these tests
+    beforeEach(() => {
+      vi.clearAllMocks();
+      consoleLogSpy.mockClear();
+    });
+
+    it("should use locally installed claude command when available", async () => {
+      // Mock which/where command to indicate claude is available
+      mockExeca
+        .mockResolvedValueOnce({
+          // First call: which/where claude (success)
+          stdout: "/usr/local/bin/claude",
+          stderr: "",
+          exitCode: 0,
+        } as any)
+        .mockResolvedValueOnce({
+          // Second call: claude execution
+          stdout: "",
+          stderr: "",
+          exitCode: 0,
+        } as any);
+
+      await launchClaudeCode("/test/path");
+
+      // First call should be which/where to check claude availability
+      expect(mockExeca).toHaveBeenNthCalledWith(
+        1,
+        expect.stringMatching(/which|where/),
+        ["claude"],
+        expect.objectContaining({ shell: true }),
+      );
+
+      // Second call should be the actual claude command (not bunx)
+      expect(mockExeca).toHaveBeenNthCalledWith(
+        2,
+        "claude",
+        expect.any(Array),
+        expect.objectContaining({
+          cwd: "/test/path",
+        }),
+      );
+
+      // Verify log message for using local claude
+      expect(consoleLogSpy).toHaveBeenCalledWith(
+        expect.stringContaining("Using locally installed claude command"),
+      );
+    });
+
+    it("should fallback to bunx when claude command is not available", async () => {
+      // Mock which/where command to indicate claude is NOT available
+      mockExeca
+        .mockRejectedValueOnce(
+          // First call: which/where claude (failure)
+          new Error("Command not found"),
+        )
+        .mockResolvedValueOnce({
+          // Second call: bunx execution
+          stdout: "",
+          stderr: "",
+          exitCode: 0,
+        } as any);
+
+      await launchClaudeCode("/test/path");
+
+      // First call should be which/where to check claude availability
+      expect(mockExeca).toHaveBeenNthCalledWith(
+        1,
+        expect.stringMatching(/which|where/),
+        ["claude"],
+        expect.objectContaining({ shell: true }),
+      );
+
+      // Second call should be bunx (fallback)
+      expect(mockExeca).toHaveBeenNthCalledWith(
+        2,
+        "bunx",
+        expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
+        expect.objectContaining({
+          cwd: "/test/path",
+        }),
+      );
+
+      // Verify log message for bunx fallback
+      expect(consoleLogSpy).toHaveBeenCalledWith(
+        expect.stringContaining("Falling back to bunx"),
+      );
+    });
+
+    it("should pass arguments correctly when using local claude command", async () => {
+      // Mock which/where command to indicate claude is available
+      mockExeca
+        .mockResolvedValueOnce({
+          // First call: which/where claude
+          stdout: "/usr/local/bin/claude",
+          stderr: "",
+          exitCode: 0,
+        } as any)
+        .mockResolvedValueOnce({
+          // Second call: claude execution
+          stdout: "",
+          stderr: "",
+          exitCode: 0,
+        } as any);
+
+      await launchClaudeCode("/test/path", {
+        mode: "continue",
+        skipPermissions: true,
+        extraArgs: ["--verbose"],
+      });
+
+      // Verify arguments are passed correctly to claude command
+      expect(mockExeca).toHaveBeenNthCalledWith(
+        2,
+        "claude",
+        expect.arrayContaining([
+          "-c", // continue mode
+          "--dangerously-skip-permissions",
+          "--verbose", // extra args
+        ]),
+        expect.anything(),
+      );
+    });
+
+    it("should pass arguments correctly when using bunx fallback", async () => {
+      // Mock which/where command to indicate claude is NOT available
+      mockExeca
+        .mockRejectedValueOnce(
+          // First call: which/where claude (failure)
+          new Error("Command not found"),
+        )
+        .mockResolvedValueOnce({
+          // Second call: bunx execution
+          stdout: "",
+          stderr: "",
+          exitCode: 0,
+        } as any);
+
+      await launchClaudeCode("/test/path", {
+        mode: "resume",
+        extraArgs: ["--debug"],
+      });
+
+      // Verify arguments are passed correctly to bunx command
+      expect(mockExeca).toHaveBeenNthCalledWith(
+        2,
+        "bunx",
+        expect.arrayContaining([
+          "@anthropic-ai/claude-code@latest",
+          "-r", // resume mode
+          "--debug", // extra args
+        ]),
+        expect.anything(),
       );
     });
   });

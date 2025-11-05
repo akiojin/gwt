@@ -30,7 +30,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+          ref: main
 
       - name: Configure git credentials
         env:
@@ -43,6 +43,11 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git remote set-url origin "https://x-access-token:${GH_RELEASE_TOKEN}@github.com/${{ github.repository }}.git"
+
+      - name: Ensure on main branch
+        run: |
+          git checkout main
+          git pull origin main
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
