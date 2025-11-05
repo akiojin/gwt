@@ -1,3 +1,13 @@
+# [1.21.0](https://github.com/akiojin/claude-worktree/compare/v1.20.2...v1.21.0) (2025-11-05)
+
+### Bug Fixes
+
+- align timestamp column for branch list ([5d49b8c](https://github.com/akiojin/claude-worktree/commit/5d49b8c0e91cc599b7fe4066616756ae43c984bf))
+
+### Features
+
+- ブランチ行の最終更新表示を整形し右寄せを改善 ([5f97b67](https://github.com/akiojin/claude-worktree/commit/5f97b67485d58823bc73472141f3bec38e2994d6))
+
 ## [1.20.2](https://github.com/akiojin/claude-worktree/compare/v1.20.1...v1.20.2) (2025-11-05)
 
 ### Bug Fixes
