@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Box, Text, useInput } from 'ink';
+import { Box, Text, useInput, useStdout } from 'ink';
 
 export interface SelectItem {
   label: string;
@@ -13,6 +13,11 @@ export interface SelectProps<T extends SelectItem = SelectItem> {
   initialIndex?: number;
   disabled?: boolean;
   renderIndicator?: (item: T, isSelected: boolean) => React.ReactNode;
+  renderItem?: (
+    item: T,
+    isSelected: boolean,
+    context: { columns: number }
+  ) => React.ReactNode;
   // Optional controlled component props for cursor position
   selectedIndex?: number;
   onSelectedIndexChange?: (index: number) => void;
@@ -34,7 +39,8 @@ function arePropsEqual<T extends SelectItem = SelectItem>(
     prevProps.selectedIndex !== nextProps.selectedIndex ||
     prevProps.onSelect !== nextProps.onSelect ||
     prevProps.onSelectedIndexChange !== nextProps.onSelectedIndexChange ||
-    prevProps.renderIndicator !== nextProps.renderIndicator
+    prevProps.renderIndicator !== nextProps.renderIndicator ||
+    prevProps.renderItem !== nextProps.renderItem
   ) {
     return false;
   }
@@ -74,6 +80,7 @@ const SelectComponent = <T extends SelectItem = SelectItem,>({
   initialIndex = 0,
   disabled = false,
   renderIndicator,
+  renderItem,
   selectedIndex: externalSelectedIndex,
   onSelectedIndexChange,
 }: SelectProps<T>) => {
@@ -162,16 +169,25 @@ const SelectComponent = <T extends SelectItem = SelectItem,>({
   });
 
   // Determine visible items based on limit
-  const visibleItems = limit
-    ? items.slice(offset, offset + limit)
-    : items;
+  const visibleItems = limit ? items.slice(offset, offset + limit) : items;
   const visibleStartIndex = limit ? offset : 0;
+
+  const { stdout } = useStdout();
+  const columns = stdout?.columns ?? 80;
 
   return (
     <Box flexDirection="column">
       {visibleItems.map((item, index) => {
         const actualIndex = visibleStartIndex + index;
         const isSelected = actualIndex === selectedIndex;
+
+        if (renderItem) {
+          return (
+            <Box key={item.value} flexDirection="row">
+              {renderItem(item, isSelected, { columns })}
+            </Box>
+          );
+        }
 
         const indicatorElement = renderIndicator
           ? renderIndicator(item, isSelected)
@@ -180,10 +196,8 @@ const SelectComponent = <T extends SelectItem = SelectItem,>({
             : <Text> </Text>;
 
         return (
-          <Box key={item.value}>
-            <Box marginRight={1}>
-              {indicatorElement ?? <Text> </Text>}
-            </Box>
+          <Box key={item.value} flexDirection="row">
+            <Box marginRight={1}>{indicatorElement ?? <Text> </Text>}</Box>
             {isSelected ? (
               <Text color="cyan">{item.label}</Text>
             ) : (

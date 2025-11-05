@@ -140,7 +140,22 @@ const sortedBranches = [...filteredBranches].sort((a, b) => {
 bun run test tests/unit/ui/table.test.ts
 ```
 
-#### 2.3 リファクタリング
+#### 2.3 ブランチ一覧 UI の更新
+
+**ファイル**: `src/ui/components/common/Select.tsx`, `src/ui/components/screens/BranchListScreen.tsx`
+
+- `Select` コンポーネントに `renderItem` を追加し、ターミナル幅を考慮したカスタム描画を可能にする
+- 各ブランチ行に「最終更新: YYYY-MM-DD HH:mm」を右寄せで表示する
+- 選択中の行は背景色をシアンに変更し、非選択行では既存の配色を維持する
+- 既存のインジケータアイコンは保持しつつ、`cleanupUI` の配色指定を尊重する
+
+#### 2.4 UI テストの実行（Greenフェーズ）
+
+```bash
+bun test src/ui/__tests__/components/screens/BranchListScreen.test.tsx
+```
+
+#### 2.5 リファクタリング
 
 - コードの可読性を向上
 - 不要なコメントを削除
@@ -156,6 +171,9 @@ bun run test
 
 # カバレッジを確認
 bun run test:coverage
+
+# Lint でフォーマットと静的解析を確認
+bun run lint
 ```
 
 #### 3.2 型チェック

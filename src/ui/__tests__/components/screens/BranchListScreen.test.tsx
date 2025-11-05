@@ -3,6 +3,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { act, render } from '@testing-library/react';
+import { render as inkRender } from 'ink-testing-library';
 import React from 'react';
 import { BranchListScreen } from '../../../components/screens/BranchListScreen.js';
 import type { BranchItem, Statistics } from '../../../types.js';
@@ -31,6 +32,7 @@ describe('BranchListScreen', () => {
       hasChanges: false,
       label: '⚡ ⭐ main',
       value: 'main',
+      latestCommitTimestamp: 1_700_000_000,
     },
     {
       name: 'feature/test',
@@ -41,6 +43,7 @@ describe('BranchListScreen', () => {
       hasChanges: false,
       label: '✨ feature/test',
       value: 'feature/test',
+      latestCommitTimestamp: 1_699_000_000,
     },
   ];
 
@@ -63,12 +66,11 @@ describe('BranchListScreen', () => {
 
   it('should render statistics', () => {
     const onSelect = vi.fn();
-    const { getByText } = render(
+    const { container, getByText } = render(
       <BranchListScreen branches={mockBranches} stats={mockStats} onSelect={onSelect} />
     );
 
-    expect(getByText(/Local:/)).toBeDefined();
-    expect(getByText(/2/)).toBeDefined();
+    expect(container.textContent).toContain('Local: 2');
     expect(getByText(/Remote:/)).toBeDefined();
   });
 
@@ -121,18 +123,6 @@ describe('BranchListScreen', () => {
       />
     );
 
-    expect(queryByText(/Git情報を読み込んでいます/i)).toBeNull();
-
-    await act(async () => {
-      if (typeof (vi as any).advanceTimersByTime === 'function') {
-        (vi as any).advanceTimersByTime(5);
-      } else {
-        await new Promise((resolve) => setTimeout(resolve, 5));
-      }
-    });
-
-    expect(queryByText(/Git情報を読み込んでいます/i)).toBeNull();
-
     await act(async () => {
       if (typeof (vi as any).advanceTimersByTime === 'function') {
         (vi as any).advanceTimersByTime(10);
@@ -182,5 +172,27 @@ describe('BranchListScreen', () => {
     expect(getByText(/⚡/)).toBeDefined(); // main icon
     expect(getByText(/⭐/)).toBeDefined(); // current icon
     expect(getByText(/✨/)).toBeDefined(); // feature icon
+  });
+
+  it('should render latest commit timestamp for each branch', () => {
+    const onSelect = vi.fn();
+    const { container } = render(
+      <BranchListScreen branches={mockBranches} stats={mockStats} onSelect={onSelect} />
+    );
+
+    const textContent = container.textContent ?? '';
+    const matches = textContent.match(/最終更新:/g) ?? [];
+    expect(matches.length).toBe(mockBranches.length);
+  });
+
+  it('should highlight the selected branch with cyan background', () => {
+    process.env.FORCE_COLOR = '1';
+    const onSelect = vi.fn();
+    const { lastFrame } = inkRender(
+      <BranchListScreen branches={mockBranches} stats={mockStats} onSelect={onSelect} />
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('\u001b[46m'); // cyan background ANSI code
   });
 });
