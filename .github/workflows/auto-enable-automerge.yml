@@ -34,6 +34,13 @@ jobs:
             echo "token=$AUTO_MERGE_TOKEN" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Authenticate GitHub CLI
+        if: steps.token.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          echo "$GH_TOKEN" | gh auth login --with-token --hostname github.com
+
       - name: Skip when auto-merge already enabled
         id: check
         if: steps.token.outputs.skip != 'true'
