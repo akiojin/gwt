@@ -22,7 +22,7 @@
 | `type` | `"local" \| "remote"` | ブランチのタイプ | ローカルブランチ優先判定で使用 |
 | `isCurrent` | `boolean` | 現在のブランチかどうか | 最優先表示の判定で使用 |
 | `branchType` | `"main" \| "develop" \| "feature" \| "hotfix" \| "release" \| "other"` | ブランチの種類 | main / develop 優先判定で使用 |
-| `latestCommitTimestamp` | `number \| undefined` | 最新コミットのUNIXタイムスタンプ | worktree有無が同じグループ内での最新順ソートに使用 |
+| `latestCommitTimestamp` | `number \| undefined` | 最新コミットのUNIXタイムスタンプ（UIで「最終更新」を表示する際にも使用） | worktree有無が同じグループ内での最新順ソートに使用 |
 
 **ソートでの使用例**:
 
@@ -184,6 +184,8 @@ const sortedBranches = [...filteredBranches].sort((a, b) => {
 const choices = await createBranchTable(branches, worktrees);
 // → Array<{ name: string; value: string; description?: string }>
 ```
+
+最新コミット時刻は UI レイヤーで `最終更新: YYYY-MM-DD HH:mm` 形式に整形し、選択行は背景色をシアンに設定する。`Select` コンポーネントにはカスタム `renderItem` を渡し、ターミナル幅に合わせた右寄せと省略表示（`…`）を行う。
 
 ## データの制約
 
