@@ -1,3 +1,9 @@
+## [1.18.1](https://github.com/akiojin/claude-worktree/compare/v1.18.0...v1.18.1) (2025-11-05)
+
+### Bug Fixes
+
+- heredoc内のgit文字列に誤反応しないようフック検知ロジックを改善 ([8453ce2](https://github.com/akiojin/claude-worktree/commit/8453ce2ef08c39113e06a7d23dcbe0aa5f6a84ce))
+
 # [1.18.0](https://github.com/akiojin/claude-worktree/compare/v1.17.0...v1.18.0) (2025-11-05)
 
 ### Bug Fixes
