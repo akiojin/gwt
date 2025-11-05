@@ -20,18 +20,26 @@ jobs:
       pull-requests: write
     env:
       GH_REPO: ${{ github.repository }}
-      GH_TOKEN: ${{ secrets.AUTO_MERGE_TOKEN != '' && secrets.AUTO_MERGE_TOKEN || secrets.GITHUB_TOKEN }}
     steps:
       - name: Check auto merge token
         id: token
+        env:
+          AUTO_MERGE_TOKEN: ${{ secrets.AUTO_MERGE_TOKEN }}
         run: |
-          if [ -z "$GH_TOKEN" ]; then
-            echo "::error::GH_TOKEN is not configured. Set AUTO_MERGE_TOKEN or rely on GITHUB_TOKEN." >&2
-            exit 1
+          if [ -z "$AUTO_MERGE_TOKEN" ]; then
+            echo "::warning::AUTO_MERGE_TOKEN is not configured; skipping auto-merge enablement." >&2
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "gh-token=$AUTO_MERGE_TOKEN" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Skip when auto-merge already enabled
         id: check
+        if: steps.token.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.gh-token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
           if gh pr view "$PR_NUMBER" --repo "$GH_REPO" --json autoMergeRequest --jq '.autoMergeRequest != null' | grep -q true; then
@@ -39,16 +47,15 @@ jobs:
           else
             echo "already-enabled=false" >> "$GITHUB_OUTPUT"
           fi
-        env:
-          PR_NUMBER: ${{ github.event.pull_request.number }}
 
       - name: Enable auto merge
-        if: steps.check.outputs.already-enabled == 'false'
+        if: steps.token.outputs.skip != 'true' && steps.check.outputs.already-enabled == 'false'
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.gh-token }}
+          PR_ID: ${{ github.event.pull_request.node_id }}
         run: |
           set -euo pipefail
           gh api graphql --method POST \
             -f query='mutation($pr:ID!,$method:PullRequestMergeMethod!){enablePullRequestAutoMerge(input:{pullRequestId:$pr,mergeMethod:$method}){pullRequest{number}}}' \
             -F pr="$PR_ID" \
             -F method=MERGE
-        env:
-          PR_ID: ${{ github.event.pull_request.node_id }}
