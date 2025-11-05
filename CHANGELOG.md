@@ -1,3 +1,9 @@
+## [1.20.1](https://github.com/akiojin/claude-worktree/compare/v1.20.0...v1.20.1) (2025-11-05)
+
+### Bug Fixes
+
+- limit divergence checks to selected branch ([11e1115](https://github.com/akiojin/claude-worktree/commit/11e1115117aa37e389a3009eb67ebfa0c35cddf3))
+
 # [1.20.0](https://github.com/akiojin/claude-worktree/compare/v1.19.3...v1.20.0) (2025-11-05)
 
 ### Bug Fixes
