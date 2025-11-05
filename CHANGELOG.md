@@ -1,3 +1,9 @@
+## [1.21.1](https://github.com/akiojin/claude-worktree/compare/v1.21.0...v1.21.1) (2025-11-05)
+
+### Bug Fixes
+
+- show pending state during branch creation ([a4dbc3f](https://github.com/akiojin/claude-worktree/commit/a4dbc3fb0a63a78b76e47994319f95759f7cac66))
+
 # [1.21.0](https://github.com/akiojin/claude-worktree/compare/v1.20.2...v1.21.0) (2025-11-05)
 
 ### Bug Fixes
