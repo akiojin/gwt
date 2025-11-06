@@ -15,12 +15,13 @@ import { useGitData } from '../hooks/useGitData.js';
 import { useScreenState } from '../hooks/useScreenState.js';
 import { formatBranchItems } from '../utils/branchFormatter.js';
 import { calculateStatistics } from '../utils/statisticsCalculator.js';
-import type { BranchItem, SelectedBranchState } from '../types.js';
+import type { BranchInfo, BranchItem, SelectedBranchState } from '../types.js';
 import { getRepositoryRoot, deleteBranch } from '../../git.js';
 import {
   createWorktree,
   generateWorktreePath,
   getMergedPRWorktrees,
+  isProtectedBranchName,
   removeWorktree,
 } from '../../worktree.js';
 import { getPackageVersion } from '../../utils.js';
@@ -31,6 +32,8 @@ import {
 
 const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'];
 const COMPLETION_HOLD_DURATION_MS = 3000;
+const PROTECTED_BRANCH_WARNING =
+  'ルートブランチはWorktree化できません。ルートワークツリーを切り替えてください。';
 
 const getSpinnerFrame = (index: number): string => {
   const frame = SPINNER_FRAMES[index];
@@ -239,6 +242,48 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     return segments.slice(1).join('/');
   }, []);
 
+  const inferBranchCategory = useCallback(
+    (branchName: string): BranchInfo['branchType'] => {
+      const matched = branches.find((branch) => branch.name === branchName);
+      if (matched) {
+        return matched.branchType;
+      }
+      if (branchName === 'main' || branchName === 'master') {
+        return 'main';
+      }
+      if (branchName === 'develop' || branchName === 'dev') {
+        return 'develop';
+      }
+      if (branchName.startsWith('feature/')) {
+        return 'feature';
+      }
+      if (branchName.startsWith('hotfix/')) {
+        return 'hotfix';
+      }
+      if (branchName.startsWith('release/')) {
+        return 'release';
+      }
+      return 'other';
+    },
+    [branches]
+  );
+
+  const isProtectedSelection = useCallback(
+    (branch: SelectedBranchState | null): boolean => {
+      if (!branch) {
+        return false;
+      }
+      return (
+        isProtectedBranchName(branch.name) ||
+        isProtectedBranchName(branch.displayName) ||
+        (branch.remoteBranch ? isProtectedBranchName(branch.remoteBranch) : false) ||
+        branch.branchCategory === 'main' ||
+        branch.branchCategory === 'develop'
+      );
+    },
+    [isProtectedBranchName]
+  );
+
   const handleSelect = useCallback(
     (item: BranchItem) => {
       const selection: SelectedBranchState =
@@ -247,19 +292,40 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
               name: toLocalBranchName(item.name),
               displayName: item.name,
               branchType: 'remote',
+              branchCategory: item.branchType,
               remoteBranch: item.name,
             }
           : {
               name: item.name,
               displayName: item.name,
               branchType: 'local',
+              branchCategory: item.branchType,
             };
 
       setSelectedBranch(selection);
       setSelectedTool(null);
+      setCreationSourceBranch(null);
+
+      if (isProtectedSelection(selection)) {
+        setCleanupFooterMessage({
+          text: PROTECTED_BRANCH_WARNING,
+          color: 'yellow',
+        });
+        navigateTo('ai-tool-selector');
+        return;
+      }
+
+      setCleanupFooterMessage(null);
       navigateTo('branch-action-selector');
     },
-    [navigateTo, setSelectedTool, toLocalBranchName]
+    [
+      isProtectedSelection,
+      navigateTo,
+      setCleanupFooterMessage,
+      setCreationSourceBranch,
+      setSelectedTool,
+      toLocalBranchName,
+    ]
   );
 
   // Handle navigation
@@ -276,11 +342,14 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         name: worktree.branch,
         displayName: worktree.branch,
         branchType: 'local',
+        branchCategory: inferBranchCategory(worktree.branch),
       });
       setSelectedTool(null);
+      setCreationSourceBranch(null);
+      setCleanupFooterMessage(null);
       navigateTo('ai-tool-selector');
     },
-    [navigateTo]
+    [inferBranchCategory, navigateTo, setCleanupFooterMessage, setCreationSourceBranch]
   );
 
   // Handle branch action selection
@@ -326,8 +395,10 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
           name: branchName,
           displayName: branchName,
           branchType: 'local',
+          branchCategory: inferBranchCategory(branchName),
         });
         setSelectedTool(null);
+        setCleanupFooterMessage(null);
 
         navigateTo('ai-tool-selector');
       } catch (error) {
@@ -344,6 +415,8 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       resolveBaseBranch,
       selectedBranch,
       creationSourceBranch,
+      inferBranchCategory,
+      setCleanupFooterMessage,
     ]
   );
 
@@ -489,7 +562,12 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     setCleanupInputLocked(false);
     setCleanupFooterMessage({ text: 'Cleanup completed. Finalizing...', color: 'green' });
 
-    completionTimerRef.current = setTimeout(resetAfterWait, COMPLETION_HOLD_DURATION_MS);
+    const holdDuration =
+      typeof process !== 'undefined' && process.env?.NODE_ENV === 'test'
+        ? 0
+        : COMPLETION_HOLD_DURATION_MS;
+
+    completionTimerRef.current = setTimeout(resetAfterWait, holdDuration);
   }, [cleanupInputLocked, deleteBranch, getMergedPRWorktrees, refresh, removeWorktree]);
 
   // Handle AI tool selection
@@ -589,6 +667,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
             onUseExisting={handleUseExistingBranch}
             onCreateNew={handleCreateNewBranch}
             onBack={goBack}
+            canCreateNew={!isProtectedSelection(selectedBranch)}
           />
         );
 

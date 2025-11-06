@@ -27,7 +27,14 @@ import { GIT_CONFIG } from "./config/constants.js";
 export type { WorktreeConfig };
 
 // 保護対象のブランチ（クリーンアップから除外）
-const PROTECTED_BRANCHES = ["main", "master", "develop"];
+export const PROTECTED_BRANCHES = ["main", "master", "develop"];
+
+export function isProtectedBranchName(branchName: string): boolean {
+  const normalized = branchName
+    .replace(/^refs\/heads\//, "")
+    .replace(/^origin\//, "");
+  return PROTECTED_BRANCHES.includes(normalized);
+}
 export class WorktreeError extends Error {
   constructor(
     message: string,
@@ -177,6 +184,12 @@ export async function generateAlternativeWorktreePath(
  * @throws {WorktreeError} worktreeの作成に失敗した場合
  */
 export async function createWorktree(config: WorktreeConfig): Promise<void> {
+  if (isProtectedBranchName(config.branchName)) {
+    throw new WorktreeError(
+      `Branch "${config.branchName}" is protected and cannot be used to create a worktree`,
+    );
+  }
+
   try {
     const worktreeParentDir = path.dirname(config.worktreePath);
 
@@ -307,7 +320,7 @@ async function getOrphanedLocalBranches({
 
     for (const localBranch of localBranches) {
       // 保護対象ブランチはスキップ
-      if (PROTECTED_BRANCHES.includes(localBranch.name)) {
+      if (isProtectedBranchName(localBranch.name)) {
         if (process.env.DEBUG_CLEANUP) {
           console.log(
             chalk.yellow(
@@ -456,7 +469,7 @@ export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
 
   for (const worktree of worktreesWithPR) {
     // 保護対象ブランチはスキップ
-    if (PROTECTED_BRANCHES.includes(worktree.branch)) {
+    if (isProtectedBranchName(worktree.branch)) {
       if (process.env.DEBUG_CLEANUP) {
         console.log(
           chalk.yellow(`Debug: Skipping protected branch ${worktree.branch}`),

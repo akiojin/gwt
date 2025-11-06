@@ -9,6 +9,7 @@ export interface BranchActionSelectorScreenProps {
   onUseExisting: () => void;
   onCreateNew: () => void;
   onBack: () => void;
+  canCreateNew?: boolean;
 }
 
 /**
@@ -23,6 +24,7 @@ export function BranchActionSelectorScreen({
   onUseExisting,
   onCreateNew,
   onBack,
+  canCreateNew = true,
 }: BranchActionSelectorScreenProps) {
   // Handle keyboard input for back navigation
   useInput((input, key) => {
@@ -36,11 +38,14 @@ export function BranchActionSelectorScreen({
       label: "Use existing branch",
       value: "use-existing",
     },
-    {
+  ];
+
+  if (canCreateNew) {
+    items.push({
       label: "Create new branch",
       value: "create-new",
-    },
-  ];
+    });
+  }
 
   const handleSelect = (item: SelectItem) => {
     const action = item.value as BranchAction;

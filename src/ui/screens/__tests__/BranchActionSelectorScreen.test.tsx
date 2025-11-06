@@ -69,6 +69,24 @@ describe("BranchActionSelectorScreen", () => {
     expect(getByText(/Create new branch/)).toBeDefined();
   });
 
+  it("should hide create option when canCreateNew is false", () => {
+    const onUseExisting = vi.fn();
+    const onCreateNew = vi.fn();
+    const onBack = vi.fn();
+    const { getByText, queryByText } = render(
+      <BranchActionSelectorScreen
+        selectedBranch="main"
+        onUseExisting={onUseExisting}
+        onCreateNew={onCreateNew}
+        onBack={onBack}
+        canCreateNew={false}
+      />,
+    );
+
+    expect(getByText(/Use existing branch/)).toBeDefined();
+    expect(queryByText(/Create new branch/)).toBeNull();
+  });
+
   it("should call onUseExisting when existing branch option is selected", () => {
     const onUseExisting = vi.fn();
     const onCreateNew = vi.fn();

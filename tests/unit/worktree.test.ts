@@ -229,6 +229,51 @@ branch refs/heads/main
       ]);
     });
 
+    it("should reject worktree creation for protected branch \"main\"", async () => {
+      const config = {
+        branchName: "main",
+        worktreePath: "/path/to/repo/.worktrees/main",
+        repoRoot: "/path/to/repo",
+        isNewBranch: false,
+        baseBranch: "main",
+      };
+
+      await expect(worktree.createWorktree(config)).rejects.toThrow(
+        'Branch "main" is protected and cannot be used to create a worktree',
+      );
+      expect(execa).not.toHaveBeenCalled();
+    });
+
+    it("should reject worktree creation for protected branch \"develop\"", async () => {
+      const config = {
+        branchName: "develop",
+        worktreePath: "/path/to/repo/.worktrees/develop",
+        repoRoot: "/path/to/repo",
+        isNewBranch: false,
+        baseBranch: "develop",
+      };
+
+      await expect(worktree.createWorktree(config)).rejects.toThrow(
+        'Branch "develop" is protected and cannot be used to create a worktree',
+      );
+      expect(execa).not.toHaveBeenCalled();
+    });
+
+    it("should reject worktree creation for protected branch \"master\"", async () => {
+      const config = {
+        branchName: "master",
+        worktreePath: "/path/to/repo/.worktrees/master",
+        repoRoot: "/path/to/repo",
+        isNewBranch: false,
+        baseBranch: "main",
+      };
+
+      await expect(worktree.createWorktree(config)).rejects.toThrow(
+        'Branch "master" is protected and cannot be used to create a worktree',
+      );
+      expect(execa).not.toHaveBeenCalled();
+    });
+
     it("should throw WorktreeError when worktree directory preparation fails", async () => {
       mkdirSpy.mockRejectedValueOnce(
         Object.assign(new Error("EEXIST"), { code: "EEXIST" }),
