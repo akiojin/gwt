@@ -10,11 +10,19 @@ import {
 import chalk from "chalk";
 import type { SelectionResult } from "./ui/components/App.js";
 import { worktreeExists } from "./worktree.js";
-import { getTerminalStreams } from "./utils/terminal.js";
+import { getTerminalStreams, waitForUserAcknowledgement } from "./utils/terminal.js";
 import { getToolById } from "./config/tools.js";
 import { launchCustomAITool } from "./launcher.js";
 import { saveSession } from "./config/index.js";
 import { getPackageVersion } from "./utils.js";
+
+const ERROR_PROMPT = chalk.yellow(
+  "エラー内容を確認したら Enter キーを押してください。",
+);
+
+async function waitForErrorAcknowledgement(): Promise<void> {
+  await waitForUserAcknowledgement(ERROR_PROMPT);
+}
 
 /**
  * Simple print functions (replacing legacy UI display functions)
@@ -54,6 +62,7 @@ async function showVersion(): Promise<void> {
     console.log(version);
   } else {
     console.error("Error: Unable to retrieve version information");
+    await waitForErrorAcknowledgement();
     process.exit(1);
   }
 }
@@ -262,6 +271,7 @@ export async function main(): Promise<void> {
       printInfo("\\nOr run with DEBUG=1 for more information:");
       printInfo("  DEBUG=1 bun run start");
 
+      await waitForErrorAcknowledgement();
       process.exit(1);
     }
 
@@ -282,6 +292,7 @@ export async function main(): Promise<void> {
       } catch (error) {
         // Error during workflow, but don't exit - return to UI
         printError("Workflow error, returning to main menu...");
+        await waitForErrorAcknowledgement();
       }
     }
   } catch (error) {
@@ -290,14 +301,16 @@ export async function main(): Promise<void> {
     } else {
       printError(String(error));
     }
+    await waitForErrorAcknowledgement();
     process.exit(1);
   }
 }
 
 // Run the application if this module is executed directly
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main().catch((error) => {
+  main().catch(async (error) => {
     console.error("Fatal error:", error);
+    await waitForErrorAcknowledgement();
     process.exit(1);
   });
 }
