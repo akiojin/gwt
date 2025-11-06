@@ -67,6 +67,13 @@ export interface BranchGroup {
   priority: number;
 }
 
+export interface SelectedBranchState {
+  name: string;
+  displayName: string;
+  branchType: "local" | "remote";
+  remoteBranch?: string;
+}
+
 export interface UIFilter {
   showWithWorktree: boolean;
   showWithoutWorktree: boolean;

@@ -15,7 +15,7 @@ import { useGitData } from '../hooks/useGitData.js';
 import { useScreenState } from '../hooks/useScreenState.js';
 import { formatBranchItems } from '../utils/branchFormatter.js';
 import { calculateStatistics } from '../utils/statisticsCalculator.js';
-import type { BranchItem } from '../types.js';
+import type { BranchItem, SelectedBranchState } from '../types.js';
 import { getRepositoryRoot, deleteBranch } from '../../git.js';
 import {
   createWorktree,
@@ -24,6 +24,10 @@ import {
   removeWorktree,
 } from '../../worktree.js';
 import { getPackageVersion } from '../../utils.js';
+import {
+  resolveBaseBranchLabel,
+  resolveBaseBranchRef,
+} from '../utils/baseBranch.js';
 
 const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'];
 const COMPLETION_HOLD_DURATION_MS = 3000;
@@ -51,13 +55,6 @@ export interface AppProps {
   loadingIndicatorDelay?: number;
 }
 
-interface SelectedBranchState {
-  name: string;
-  displayName: string;
-  branchType: 'local' | 'remote';
-  remoteBranch?: string;
-}
-
 /**
  * App - Top-level component for Ink.js UI
  * Integrates ErrorBoundary, data fetching, screen navigation, and all screens
@@ -74,6 +71,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
 
   // Selection state (for branch → tool → mode flow)
   const [selectedBranch, setSelectedBranch] = useState<SelectedBranchState | null>(null);
+  const [creationSourceBranch, setCreationSourceBranch] = useState<SelectedBranchState | null>(null);
   const [selectedTool, setSelectedTool] = useState<AITool | null>(null);
 
   // PR cleanup feedback
@@ -223,6 +221,11 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     return 'main';
   }, [branches]);
 
+  const baseBranchLabel = useMemo(
+    () => resolveBaseBranchLabel(creationSourceBranch, selectedBranch, resolveBaseBranch),
+    [creationSourceBranch, resolveBaseBranch, selectedBranch]
+  );
+
   // Handle branch selection
   const toLocalBranchName = useCallback((remoteName: string) => {
     const segments = remoteName.split('/');
@@ -282,8 +285,9 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
   }, [navigateTo]);
 
   const handleCreateNewBranch = useCallback(() => {
+    setCreationSourceBranch(selectedBranch);
     navigateTo('branch-creator');
-  }, [navigateTo]);
+  }, [navigateTo, selectedBranch]);
 
   // Handle quit
   const handleQuit = useCallback(() => {
@@ -298,7 +302,11 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         const repoRoot = await getRepositoryRoot();
         const worktreePath = await generateWorktreePath(repoRoot, branchName);
         // Use selectedBranch as base if available, otherwise resolve from repo
-        const baseBranch = selectedBranch?.name ?? resolveBaseBranch();
+        const baseBranch = resolveBaseBranchRef(
+          creationSourceBranch,
+          selectedBranch,
+          resolveBaseBranch,
+        );
 
         await createWorktree({
           branchName,
@@ -309,6 +317,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         });
 
         refresh();
+        setCreationSourceBranch(null);
         setSelectedBranch({
           name: branchName,
           displayName: branchName,
@@ -324,7 +333,14 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         refresh();
       }
     },
-    [navigateTo, goBack, refresh, resolveBaseBranch, selectedBranch]
+    [
+      navigateTo,
+      goBack,
+      refresh,
+      resolveBaseBranch,
+      selectedBranch,
+      creationSourceBranch,
+    ]
   );
 
   const handleCleanupCommand = useCallback(async () => {
@@ -556,7 +572,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
           <BranchCreatorScreen
             onBack={goBack}
             onCreate={handleCreate}
-            {...(selectedBranch?.displayName && { baseBranch: selectedBranch.displayName })}
+            baseBranch={baseBranchLabel}
             version={version}
           />
         );
