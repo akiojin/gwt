@@ -69,6 +69,30 @@ describe("BranchActionSelectorScreen", () => {
     expect(getByText(/Create new branch/)).toBeDefined();
   });
 
+  it("should render protected mode labels and info message", () => {
+    const onUseExisting = vi.fn();
+    const onCreateNew = vi.fn();
+    const onBack = vi.fn();
+    const { getByText } = render(
+      <BranchActionSelectorScreen
+        selectedBranch="main"
+        onUseExisting={onUseExisting}
+        onCreateNew={onCreateNew}
+        onBack={onBack}
+        mode="protected"
+        infoMessage="Root branches are handled in the repository root."
+        primaryLabel="Use root branch"
+        secondaryLabel="Create new branch from root"
+      />,
+    );
+
+    expect(getByText(/Use root branch/)).toBeDefined();
+    expect(getByText(/Create new branch from root/)).toBeDefined();
+    expect(
+      getByText(/Root branches are handled in the repository root./),
+    ).toBeDefined();
+  });
+
   it("should hide create option when canCreateNew is false", () => {
     const onUseExisting = vi.fn();
     const onCreateNew = vi.fn();

@@ -10,6 +10,7 @@ const getBranchDivergenceStatusesMock = vi.fn(async () => []);
 const launchClaudeCodeMock = vi.fn(async () => undefined);
 const saveSessionMock = vi.fn(async () => undefined);
 const worktreeExistsMock = vi.fn(async () => null);
+const switchToProtectedBranchMock = vi.fn(async () => "local");
 const branchExistsMock = vi.fn(async () => true);
 const getRepositoryRootMock = vi.fn(async () => "/repo");
 const getCurrentBranchMock = vi.fn(async () => "develop");
@@ -34,6 +35,7 @@ vi.mock("../../src/worktree.js", () => ({
   worktreeExists: worktreeExistsMock,
   isProtectedBranchName: (name: string) =>
     name === "main" || name === "origin/main",
+  switchToProtectedBranch: switchToProtectedBranchMock,
 }));
 
 vi.mock("../../src/services/WorktreeOrchestrator.js", () => ({
@@ -81,6 +83,8 @@ describe("handleAIToolWorkflow - protected branches", () => {
     branchExistsMock.mockClear();
     getRepositoryRootMock.mockClear();
     getCurrentBranchMock.mockClear();
+    switchToProtectedBranchMock.mockClear();
+    switchToProtectedBranchMock.mockResolvedValue("local");
     branchExistsMock.mockResolvedValue(true);
     getCurrentBranchMock.mockResolvedValue("develop");
   });
@@ -96,8 +100,10 @@ describe("handleAIToolWorkflow - protected branches", () => {
     };
     await handleAIToolWorkflow(selection);
 
-    expect(execaMock).toHaveBeenCalledWith("git", ["checkout", "main"], {
-      cwd: "/repo",
+    expect(switchToProtectedBranchMock).toHaveBeenCalledWith({
+      branchName: "main",
+      repoRoot: "/repo",
+      remoteRef: undefined,
     });
     expect(ensureWorktreeMock).toHaveBeenCalledWith(
       "main",
@@ -115,6 +121,7 @@ describe("handleAIToolWorkflow - protected branches", () => {
   it("creates local tracking branch when only remote protected branch exists", async () => {
     branchExistsMock.mockResolvedValue(false);
     getCurrentBranchMock.mockResolvedValue("develop");
+    switchToProtectedBranchMock.mockResolvedValueOnce("remote");
 
     const selection: SelectionResult = {
       branch: "main",
@@ -127,22 +134,11 @@ describe("handleAIToolWorkflow - protected branches", () => {
     };
     await handleAIToolWorkflow(selection);
 
-    expect(execaMock).toHaveBeenNthCalledWith(
-      1,
-      "git",
-      ["fetch", "origin", "main"],
-      {
-        cwd: "/repo",
-      },
-    );
-    expect(execaMock).toHaveBeenNthCalledWith(
-      2,
-      "git",
-      ["checkout", "-b", "main", "origin/main"],
-      {
-        cwd: "/repo",
-      },
-    );
+    expect(switchToProtectedBranchMock).toHaveBeenCalledWith({
+      branchName: "main",
+      repoRoot: "/repo",
+      remoteRef: "origin/main",
+    });
     expect(ensureWorktreeMock).toHaveBeenCalledWith(
       "main",
       "/repo",

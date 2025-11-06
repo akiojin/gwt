@@ -19,6 +19,8 @@ import {
   branchHasUniqueCommitsComparedToBase,
   getRepositoryRoot,
   ensureGitignoreEntry,
+  branchExists,
+  getCurrentBranch,
 } from "./git.js";
 import { getConfig } from "./config/index.js";
 import { GIT_CONFIG } from "./config/constants.js";
@@ -34,6 +36,45 @@ export function isProtectedBranchName(branchName: string): boolean {
     .replace(/^refs\/heads\//, "")
     .replace(/^origin\//, "");
   return PROTECTED_BRANCHES.includes(normalized);
+}
+
+export async function switchToProtectedBranch({
+  branchName,
+  repoRoot,
+  remoteRef,
+}: {
+  branchName: string;
+  repoRoot: string;
+  remoteRef?: string | null;
+}): Promise<"none" | "local" | "remote"> {
+  const currentBranch = await getCurrentBranch();
+  if (currentBranch === branchName) {
+    return "none";
+  }
+
+  const runGit = async (args: string[]) => {
+    try {
+      await execa("git", args, { cwd: repoRoot });
+    } catch (error) {
+      throw new WorktreeError(
+        `Failed to execute git ${args.join(" ")} for protected branch ${branchName}`,
+        error,
+      );
+    }
+  };
+
+  if (await branchExists(branchName)) {
+    await runGit(["checkout", branchName]);
+    return "local";
+  }
+
+  const targetRemote = remoteRef ?? `origin/${branchName}`;
+  const fetchRef = targetRemote.replace(/^origin\//, "");
+
+  await runGit(["fetch", "origin", fetchRef]);
+  await runGit(["checkout", "-b", branchName, targetRemote]);
+
+  return "remote";
 }
 export class WorktreeError extends Error {
   constructor(
@@ -140,7 +181,7 @@ export async function generateWorktreePath(
   repoRoot: string,
   branchName: string,
 ): Promise<string> {
-  const sanitizedBranchName = branchName.replace(/[\/\\:*?"<>|]/g, "-");
+  const sanitizedBranchName = branchName.replace(/[/\\:*?"<>|]/g, "-");
   const worktreeDir = path.join(repoRoot, ".worktrees");
   return path.join(worktreeDir, sanitizedBranchName);
 }

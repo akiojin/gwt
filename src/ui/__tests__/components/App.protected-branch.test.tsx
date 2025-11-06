@@ -10,17 +10,23 @@ import type { BranchInfo, BranchItem } from '../../types.js';
 import * as useGitDataModule from '../../hooks/useGitData.js';
 import * as useScreenStateModule from '../../hooks/useScreenState.js';
 import * as BranchListScreenModule from '../../components/screens/BranchListScreen.js';
+import * as BranchActionSelectorScreenModule from '../../components/screens/BranchActionSelectorScreen.js';
+import * as worktreeModule from '../../../worktree.js';
 
 const navigateToMock = vi.fn();
 const originalUseGitData = useGitDataModule.useGitData;
 const originalUseScreenState = useScreenStateModule.useScreenState;
 const originalBranchListScreen = BranchListScreenModule.BranchListScreen;
+const originalBranchActionSelector = BranchActionSelectorScreenModule.BranchActionSelectorScreen;
 
 const useGitDataSpy = vi.spyOn(useGitDataModule, 'useGitData');
 const useScreenStateSpy = vi.spyOn(useScreenStateModule, 'useScreenState');
 const branchListScreenSpy = vi.spyOn(BranchListScreenModule, 'BranchListScreen');
+const branchActionSelectorSpy = vi.spyOn(BranchActionSelectorScreenModule, 'BranchActionSelectorScreen');
+const switchToProtectedBranchSpy = vi.spyOn(worktreeModule, 'switchToProtectedBranch');
 
 const branchListProps: any[] = [];
+const branchActionProps: any[] = [];
 
 describe('App protected branch handling', () => {
   beforeEach(() => {
@@ -30,9 +36,11 @@ describe('App protected branch handling', () => {
 
     navigateToMock.mockReset();
     branchListProps.length = 0;
+    branchActionProps.length = 0;
 
     useGitDataSpy.mockReset();
     useScreenStateSpy.mockReset();
+    switchToProtectedBranchSpy.mockReset();
 
     useScreenStateSpy.mockImplementation(() => ({
       currentScreen: 'branch-list',
@@ -45,6 +53,11 @@ describe('App protected branch handling', () => {
       branchListProps.push(props);
       return React.createElement(originalBranchListScreen, props);
     });
+    branchActionSelectorSpy.mockImplementation((props: any) => {
+      branchActionProps.push(props);
+      return React.createElement(originalBranchActionSelector, props);
+    });
+    switchToProtectedBranchSpy.mockResolvedValue('local');
   });
 
   afterEach(() => {
@@ -53,15 +66,20 @@ describe('App protected branch handling', () => {
     useScreenStateSpy.mockReset();
     useScreenStateSpy.mockImplementation(originalUseScreenState);
     branchListScreenSpy.mockImplementation(originalBranchListScreen as any);
+    branchActionSelectorSpy.mockImplementation(originalBranchActionSelector as any);
+    switchToProtectedBranchSpy.mockReset();
+    branchActionProps.length = 0;
   });
 
   afterAll(() => {
     useGitDataSpy.mockRestore();
     useScreenStateSpy.mockRestore();
     branchListScreenSpy.mockRestore();
+    branchActionSelectorSpy.mockRestore();
+    switchToProtectedBranchSpy.mockRestore();
   });
 
-  it('skips action selector for protected branches and shows warning', async () => {
+  it('shows protected branch warning and switches root without launching AI tool', async () => {
     const branches: BranchInfo[] = [
       {
         name: 'main',
@@ -108,12 +126,31 @@ describe('App protected branch handling', () => {
       await Promise.resolve();
     });
 
-    expect(navigateToMock).toHaveBeenCalledWith('ai-tool-selector');
+    expect(navigateToMock).toHaveBeenCalledWith('branch-action-selector');
+    expect(branchActionProps).not.toHaveLength(0);
+    const actionProps = branchActionProps.at(-1);
+    expect(actionProps?.mode).toBe('protected');
+    expect(actionProps?.infoMessage).toContain('ルートブランチ');
 
     const nextProps = branchListProps.at(-1);
     expect(nextProps?.cleanupUI?.footerMessage?.text).toContain(
-      'ルートブランチはWorktree化できません'
+      'ルートブランチはワークツリーを作成せず'
     );
     expect(nextProps?.cleanupUI?.footerMessage?.color).toBe('yellow');
+
+    await act(async () => {
+      actionProps?.onUseExisting();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(switchToProtectedBranchSpy).toHaveBeenCalledWith({
+      branchName: 'main',
+      repoRoot: expect.any(String),
+      remoteRef: undefined,
+    });
+
+    const postSwitchProps = branchListProps.at(-1);
+    expect(postSwitchProps?.cleanupUI?.footerMessage?.color).toBe('green');
   });
 });

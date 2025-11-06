@@ -7,7 +7,6 @@ import {
   fetchAllRemotes,
   pullFastForward,
   getBranchDivergenceStatuses,
-  getCurrentBranch,
 } from "./git.js";
 import { launchClaudeCode } from "./claude.js";
 import { launchCodexCLI } from "./codex.js";
@@ -17,7 +16,11 @@ import {
 } from "./services/WorktreeOrchestrator.js";
 import chalk from "chalk";
 import type { SelectionResult } from "./ui/components/App.js";
-import { worktreeExists, isProtectedBranchName } from "./worktree.js";
+import {
+  worktreeExists,
+  isProtectedBranchName,
+  switchToProtectedBranch,
+} from "./worktree.js";
 import {
   getTerminalStreams,
   waitForUserAcknowledgement,
@@ -27,7 +30,6 @@ import { launchCustomAITool } from "./launcher.js";
 import { saveSession } from "./config/index.js";
 import { getPackageVersion } from "./utils.js";
 import readline from "node:readline";
-import { execa } from "execa";
 
 const ERROR_PROMPT = chalk.yellow(
   "エラー内容を確認したら Enter キーを押してください。",
@@ -50,47 +52,6 @@ function printInfo(message: string): void {
 
 function printWarning(message: string): void {
   console.warn(chalk.yellow(`⚠️  ${message}`));
-}
-
-async function checkoutProtectedBranch(
-  repoRoot: string,
-  branch: string,
-  remoteBranch?: string | null,
-): Promise<"none" | "local" | "remote"> {
-  const currentBranch = await getCurrentBranch();
-  if (currentBranch === branch) {
-    return "none";
-  }
-
-  const runGit = async (args: string[]) => {
-    try {
-      await execa("git", args, { cwd: repoRoot });
-    } catch (error: unknown) {
-      const message =
-        error instanceof Error ? error.message : String(error ?? "");
-      throw new Error(
-        `Failed to execute 'git ${args.join(" ")}' while preparing protected branch "${branch}": ${message}`,
-      );
-    }
-  };
-
-  const localExists = await branchExists(branch);
-  if (localExists) {
-    await runGit(["checkout", branch]);
-    return "local";
-  }
-
-  if (remoteBranch) {
-    const remoteRef = remoteBranch;
-    const fetchRef = remoteRef.replace(/^origin\//, "");
-    await runGit(["fetch", "origin", fetchRef]);
-    await runGit(["checkout", "-b", branch, remoteRef]);
-    return "remote";
-  }
-
-  throw new Error(
-    `Protected branch "${branch}" does not exist locally and no remote reference was provided.`,
-  );
 }
 
 async function waitForEnter(promptMessage: string): Promise<void> {
@@ -232,11 +193,11 @@ export async function handleAIToolWorkflow(
 
     let protectedCheckoutResult: "none" | "local" | "remote" = "none";
     if (isProtectedBranch) {
-      protectedCheckoutResult = await checkoutProtectedBranch(
+      protectedCheckoutResult = await switchToProtectedBranch({
+        branchName: branch,
         repoRoot,
-        branch,
-        remoteBranch,
-      );
+        remoteRef: remoteBranch,
+      });
       ensureOptions.isNewBranch = false;
     }
 
