@@ -17,9 +17,17 @@ vi.mock("node:fs/promises", async () => {
       "node:fs/promises",
     );
 
-  return {
+  const mocked = {
     ...actual,
     mkdir: mkdirMock,
+  };
+
+  return {
+    ...mocked,
+    default: {
+      ...actual.default,
+      mkdir: mkdirMock,
+    },
   };
 });
 
