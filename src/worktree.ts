@@ -22,6 +22,7 @@ import {
 } from "./git.js";
 import { getConfig } from "./config/index.js";
 import { GIT_CONFIG } from "./config/constants.js";
+import { startSpinner } from "./utils/spinner.js";
 
 // Re-export WorktreeConfig for external use
 export type { WorktreeConfig };
@@ -208,7 +209,51 @@ export async function createWorktree(config: WorktreeConfig): Promise<void> {
       args.push(config.branchName);
     }
 
-    await execa("git", args);
+    const spinnerMessage = `Creating worktree for ${config.branchName}`;
+    let stopSpinner: (() => void) | undefined;
+
+    try {
+      stopSpinner = startSpinner(spinnerMessage);
+    } catch {
+      stopSpinner = undefined;
+    }
+
+    const stopActiveSpinner = () => {
+      if (stopSpinner) {
+        stopSpinner();
+        stopSpinner = undefined;
+      }
+    };
+
+    const gitProcess = execa("git", args);
+
+    // パイプでリアルタイムに進捗を表示する
+    const childProcess = gitProcess as typeof gitProcess & {
+      stdout?: NodeJS.ReadableStream;
+      stderr?: NodeJS.ReadableStream;
+    };
+
+    const attachStream = (
+      stream: NodeJS.ReadableStream | undefined,
+      pipeTarget: NodeJS.WriteStream,
+    ) => {
+      if (!stream) return;
+      if (typeof stream.once === "function") {
+        stream.once("data", stopActiveSpinner);
+      }
+      if (typeof stream.pipe === "function") {
+        stream.pipe(pipeTarget);
+      }
+    };
+
+    attachStream(childProcess.stdout, process.stdout);
+    attachStream(childProcess.stderr, process.stderr);
+
+    try {
+      await gitProcess;
+    } finally {
+      stopActiveSpinner();
+    }
 
     // .gitignoreに.worktrees/を追加(エラーは警告として扱う)
     try {
