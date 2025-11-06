@@ -1,3 +1,9 @@
+# [1.22.0](https://github.com/akiojin/claude-worktree/compare/v1.21.3...v1.22.0) (2025-11-06)
+
+### Features
+
+- develop-to-main手動リリースフローの実装 ([8f0efec](https://github.com/akiojin/claude-worktree/commit/8f0efec9b6f52500f097d2f1b53d892d43c8b6ac))
+
 ## [1.21.3](https://github.com/akiojin/claude-worktree/compare/v1.21.2...v1.21.3) (2025-11-06)
 
 ### Bug Fixes
