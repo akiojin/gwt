@@ -1,10 +1,20 @@
 ---
-description: "SPEC-23bb2eed実装のためのタスクリスト: semantic-release 設定明示化"
+description: "SPEC-23bb2eed実装のためのタスクリスト: develop-to-main手動リリースフロー"
+status: "✅ 実装完了（2025-01-06）"
 ---
 
-# タスク: semantic-release 設定明示化（現状維持アプローチ）
+# タスク: develop-to-main手動リリースフロー（2025-01-06実装済み）
 
-**入力**: `/specs/SPEC-23bb2eed/` からの設計ドキュメント
+**注**: このタスクリストは旧仕様（semantic-release設定明示化）に基づいています。実際には2025-01-06にdevelop-to-main手動リリースフローとして実装完了しました。
+
+**実装済み内容**:
+- developブランチ作成
+- release-trigger.ymlワークフロー作成
+- /releaseスラッシュコマンド作成
+- release.ymlワークフロー修正（mainプッシュのみトリガー）
+- ドキュメント更新（README.md、README.ja.md、CLAUDE.md）
+
+**入力**: `/specs/SPEC-23bb2eed/` からの設計ドキュメント（2025-01-06更新）
 **前提条件**: plan.md、spec.md、research.md、data-model.md、quickstart.md
 
 **構成**: タスクは実装の論理的な順序でグループ化され、各段階の独立した実装とテストを可能にします。
