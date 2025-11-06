@@ -37,6 +37,7 @@ describe('App protected branch handling', () => {
     navigateToMock.mockReset();
     branchListProps.length = 0;
     branchActionProps.length = 0;
+    branchActionProps.length = 0;
 
     useGitDataSpy.mockReset();
     useScreenStateSpy.mockReset();
@@ -147,7 +148,7 @@ describe('App protected branch handling', () => {
     expect(switchToProtectedBranchSpy).toHaveBeenCalledWith({
       branchName: 'main',
       repoRoot: expect.any(String),
-      remoteRef: undefined,
+      remoteRef: null,
     });
 
     const postSwitchProps = branchListProps.at(-1);

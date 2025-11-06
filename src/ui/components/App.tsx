@@ -377,12 +377,12 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         selectedBranch.remoteBranch ??
         (selectedBranch.branchType === 'remote'
           ? selectedBranch.displayName ?? selectedBranch.name
-          : undefined);
+          : null);
 
       const result = await switchToProtectedBranch({
         branchName: selectedBranch.name,
         repoRoot,
-        remoteRef,
+        remoteRef: remoteRef ?? null,
       });
 
       let successMessage = `'${selectedBranch.displayName ?? selectedBranch.name}' をルートブランチとして使用します。`;
@@ -734,6 +734,15 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
 
       case 'branch-action-selector': {
         const isProtected = Boolean(protectedBranchInfo);
+        const protectedSelectorProps = isProtected
+          ? {
+              mode: 'protected' as const,
+              infoMessage: protectedBranchInfo?.message ?? null,
+              primaryLabel: 'Use root branch (no worktree)',
+              secondaryLabel: 'Create new branch from this branch',
+            }
+          : {};
+
         return (
           <BranchActionSelectorScreen
             selectedBranch={selectedBranch?.displayName ?? ''}
@@ -741,14 +750,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
             onCreateNew={handleCreateNewBranch}
             onBack={goBack}
             canCreateNew={Boolean(selectedBranch)}
-            mode={isProtected ? 'protected' : 'default'}
-            infoMessage={isProtected ? protectedBranchInfo?.message ?? null : null}
-            primaryLabel={
-              isProtected ? 'Use root branch (no worktree)' : undefined
-            }
-            secondaryLabel={
-              isProtected ? 'Create new branch from this branch' : undefined
-            }
+            {...protectedSelectorProps}
           />
         );
       }

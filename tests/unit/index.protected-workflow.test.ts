@@ -103,7 +103,7 @@ describe("handleAIToolWorkflow - protected branches", () => {
     expect(switchToProtectedBranchMock).toHaveBeenCalledWith({
       branchName: "main",
       repoRoot: "/repo",
-      remoteRef: undefined,
+      remoteRef: null,
     });
     expect(ensureWorktreeMock).toHaveBeenCalledWith(
       "main",

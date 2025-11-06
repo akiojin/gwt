@@ -193,10 +193,13 @@ export async function handleAIToolWorkflow(
 
     let protectedCheckoutResult: "none" | "local" | "remote" = "none";
     if (isProtectedBranch) {
+      const protectedRemoteRef =
+        remoteBranch ??
+        (branchType === "remote" ? (displayName ?? branch) : null);
       protectedCheckoutResult = await switchToProtectedBranch({
         branchName: branch,
         repoRoot,
-        remoteRef: remoteBranch,
+        remoteRef: protectedRemoteRef ?? null,
       });
       ensureOptions.isNewBranch = false;
     }
