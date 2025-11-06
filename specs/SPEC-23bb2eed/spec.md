@@ -1,32 +1,67 @@
-# 機能仕様: semantic-releaseによる自動リリース機能
+# 機能仕様: develop-to-main手動リリースフローとsemantic-release統合
 
 **仕様ID**: `SPEC-23bb2eed`
 **作成日**: 2025-10-25
-**更新日**: 2025-10-25
-**ステータス**: ドラフト
-**入力**: ユーザー説明: "semantic-releaseを使用して、mainブランチへのマージ時にコミットメッセージから自動的にバージョンを決定し、npm registryとGitHub Releasesに公開する。feat:でminor、fix:でpatch、BREAKING CHANGEでmajorバージョンアップを自動実行する。"
+**更新日**: 2025-01-06
+**ステータス**: 承認済み
+**入力**: ユーザー説明: "developブランチを導入し、任意のタイミングでリリースを実行できるようにする。feature→develop(Auto Merge)→/releaseコマンド→develop→mainマージ→semantic-release自動実行。feat:でminor、fix:でpatch、BREAKING CHANGEでmajorバージョンアップを自動実行する。"
 
 ## ユーザーシナリオとテスト *(必須)*
 
-### ユーザーストーリー 1 - コミットメッセージベースの自動バージョン決定 (優先度: P1)
+### ユーザーストーリー 1 - develop→mainへの手動リリーストリガー (優先度: P0)
 
-開発者として、PRをmainブランチにマージした時に、コミットメッセージの種類（feat、fix、BREAKING CHANGE）に基づいて自動的にバージョンが決定され、リリースされてほしい。
+開発者として、developブランチに蓄積した変更を任意のタイミングで/releaseコマンドを実行してmainにマージし、リリースを開始したい。
 
-**この優先度の理由**: バージョン管理の自動化は、手動でのバージョン決定ミスを防ぎ、セマンティックバージョニングを一貫して適用できる最も重要な機能。
+**この優先度の理由**: リリースタイミングのコントロールは、計画的なリリース管理とリスク軽減に不可欠。
 
-**独立したテスト**: feat:コミットをmainにマージし、GitHub Actionsでminorバージョンがアップされることを確認することで完全にテスト可能。
+**独立したテスト**: developブランチで/releaseコマンドを実行し、GitHub Actionsでdevelop→mainマージとsemantic-release実行が確認できることで完全にテスト可能。
 
 **受け入れシナリオ**:
 
-1. **前提条件** 前回リリースがv1.2.0、**操作** `feat: 新機能追加`コミットをmainにマージ、**期待結果** v1.3.0がリリースされ、npmとGitHub Releasesに公開される
-2. **前提条件** 前回リリースがv1.2.0、**操作** `fix: バグ修正`コミットをmainにマージ、**期待結果** v1.2.1がリリースされる
-3. **前提条件** 前回リリースがv1.2.0、**操作** `feat!: 破壊的変更`またはBREAKING CHANGEを含むコミットをmainにマージ、**期待結果** v2.0.0がリリースされる
-4. **前提条件** 前回リリースがv1.2.0、**操作** `docs: ドキュメント更新`のみをmainにマージ、**期待結果** リリースはスキップされ、バージョンは1.2.0のまま
-5. **前提条件** 前回リリースがv1.2.0、**操作** `feat: 機能A`と`fix: バグB`をmainにマージ、**期待結果** v1.3.0がリリースされる（minorが優先）
+1. **前提条件** developブランチに複数のfeat:コミットが蓄積、**操作** `/release`コマンドを実行、**期待結果** release-triggerワークフローが起動し、developがmainにマージされる
+2. **前提条件** release-triggerワークフローが成功、**操作** releaseワークフローの実行を確認、**期待結果** semantic-releaseが自動実行され、バージョンがアップされる
+3. **前提条件** developとmainが同一状態、**操作** `/release`コマンドを実行、**期待結果** マージは成功するが、semantic-releaseはリリースをスキップ
+4. **前提条件** developとmainに競合がある、**操作** `/release`コマンドを実行、**期待結果** マージコミットが作成され、mainにpushされる
+5. **前提条件** 任意のブランチからClaude Codeを起動、**操作** `/release`コマンドを実行、**期待結果** gh workflow runでrelease-triggerワークフローが起動される
 
 ---
 
-### ユーザーストーリー 2 - 自動CHANGELOG生成とパッケージ更新 (優先度: P1)
+### ユーザーストーリー 2 - developブランチへのAuto Merge (優先度: P1)
+
+開発者として、feature→developへのPRがCI成功時に自動マージされ、リリース準備が整うまでdevelopで変更を蓄積したい。
+
+**この優先度の理由**: 開発フローの効率化と、リリース前の統合テストを可能にする。
+
+**独立したテスト**: feature/*ブランチからdevelopへPRを作成し、CI成功後に自動マージされることを確認。
+
+**受け入れシナリオ**:
+
+1. **前提条件** feature/new-featureブランチを作成、**操作** developへPRを作成しCIが成功、**期待結果** Auto MergeワークフローでdevelopにマージされるGitHub Actionsでdevelopにマージされる
+2. **前提条件** developブランチで複数のfeature PRがマージ済み、**操作** developブランチのコミット履歴を確認、**期待結果** 複数のfeat:、fix:コミットが蓄積されている
+3. **前提条件** featureブランチのCI失敗、**操作** developへPRを作成、**期待結果** Auto Mergeがスキップされる
+4. **前提条件** developへのPRが競合状態、**操作** PRを確認、**期待結果** Auto Mergeがスキップされ、手動解決が必要と表示される
+
+---
+
+### ユーザーストーリー 3 - コミットメッセージベースの自動バージョン決定 (優先度: P1)
+
+開発者として、developからmainへマージされた時に、コミットメッセージの種類（feat、fix、BREAKING CHANGE）に基づいて自動的にバージョンが決定され、リリースされてほしい。
+
+**この優先度の理由**: バージョン管理の自動化は、手動でのバージョン決定ミスを防ぎ、セマンティックバージョニングを一貫して適用できる最も重要な機能。
+
+**独立したテスト**: feat:コミットを含むdevelopをmainにマージし、GitHub Actionsでminorバージョンがアップされることを確認することで完全にテスト可能。
+
+**受け入れシナリオ**:
+
+1. **前提条件** 前回リリースがv1.2.0、developに`feat: 新機能追加`コミット、**操作** `/release`でmainにマージ、**期待結果** v1.3.0がリリースされ、npmとGitHub Releasesに公開される
+2. **前提条件** 前回リリースがv1.2.0、developに`fix: バグ修正`コミット、**操作** `/release`でmainにマージ、**期待結果** v1.2.1がリリースされる
+3. **前提条件** 前回リリースがv1.2.0、developに`feat!: 破壊的変更`コミット、**操作** `/release`でmainにマージ、**期待結果** v2.0.0がリリースされる
+4. **前提条件** 前回リリースがv1.2.0、developに`docs: ドキュメント更新`のみ、**操作** `/release`でmainにマージ、**期待結果** リリースはスキップされ、バージョンは1.2.0のまま
+5. **前提条件** 前回リリースがv1.2.0、developに`feat: 機能A`と`fix: バグB`、**操作** `/release`でmainにマージ、**期待結果** v1.3.0がリリースされる（minorが優先）
+
+---
+
+### ユーザーストーリー 4 - 自動CHANGELOG生成とパッケージ更新 (優先度: P1)
 
 開発者として、リリース時にCHANGELOG.mdが自動生成され、package.jsonのバージョンが自動更新されてほしい。
 
@@ -43,7 +78,7 @@
 
 ---
 
-### ユーザーストーリー 3 - npm registryとGitHub Releasesへの自動公開 (優先度: P1)
+### ユーザーストーリー 5 - npm registryとGitHub Releasesへの自動公開 (優先度: P1)
 
 開発者として、リリース時に自動的にnpm registryとGitHub Releasesに公開されてほしい。
 
@@ -59,7 +94,7 @@
 
 ---
 
-### ユーザーストーリー 4 - リリース対象外コミットの適切な処理 (優先度: P2)
+### ユーザーストーリー 6 - リリース対象外コミットの適切な処理 (優先度: P2)
 
 開発者として、docs:やchore:などのリリース対象外コミットのみがmainにマージされた場合、リリースがスキップされてほしい。
 
@@ -86,16 +121,26 @@
 
 ### 機能要件
 
-- **FR-001**: mainブランチへのプッシュ時に、semantic-releaseが自動的に実行され**なければならない**
-- **FR-002**: feat:コミットはminorバージョンアップをトリガーし**なければならない**
-- **FR-003**: fix:コミットはpatchバージョンアップをトリガーし**なければならない**
-- **FR-004**: BREAKING CHANGEまたはfeat!:コミットはmajorバージョンアップをトリガーし**なければならない**
-- **FR-005**: docs:、chore:、test:などのコミットはバージョンアップをトリガーし**てはならない**
-- **FR-006**: リリース時にCHANGELOG.mdが自動生成され**なければならない**
-- **FR-007**: リリース時にpackage.jsonのバージョンが自動更新され**なければならない**
-- **FR-008**: リリース時にnpm registryへの公開が自動実行され**なければならない**
-- **FR-009**: リリース時にGitHub Releasesが自動作成され**なければならない**
-- **FR-010**: リリース時にvX.Y.Z形式のGitタグが自動作成され**なければならない**
+#### ブランチ戦略とワークフロー
+- **FR-001**: developブランチが存在し、feature→developへのPRマージポイントとなり**なければならない**
+- **FR-002**: feature/*ブランチからdevelopへのPRがCI成功時に自動マージされ**なければならない**
+- **FR-003**: `/release`コマンドがClaude Codeで実行可能であり、release-triggerワークフローを起動し**なければならない**
+- **FR-004**: release-triggerワークフローはdevelopブランチをmainブランチにマージし**なければならない**
+- **FR-005**: developとmainに競合がある場合、マージコミットを作成してマージし**なければならない**
+
+#### semantic-releaseの実行
+- **FR-006**: mainブランチへのプッシュ時に、semantic-releaseが自動的に実行され**なければならない**
+- **FR-007**: feat:コミットはminorバージョンアップをトリガーし**なければならない**
+- **FR-008**: fix:コミットはpatchバージョンアップをトリガーし**なければならない**
+- **FR-009**: BREAKING CHANGEまたはfeat!:コミットはmajorバージョンアップをトリガーし**なければならない**
+- **FR-010**: docs:、chore:、test:などのコミットはバージョンアップをトリガーし**てはならない**
+
+#### 自動生成と公開
+- **FR-011**: リリース時にCHANGELOG.mdが自動生成され**なければならない**
+- **FR-012**: リリース時にpackage.jsonのバージョンが自動更新され**なければならない**
+- **FR-013**: リリース時にnpm registryへの公開が自動実行され**なければならない**
+- **FR-014**: リリース時にGitHub Releasesが自動作成され**なければならない**
+- **FR-015**: リリース時にvX.Y.Z形式のGitタグが自動作成され**なければならない**
 
 ### 非機能要件
 
@@ -105,9 +150,14 @@
 
 ### 主要エンティティ
 
+- **developブランチ**: feature/*ブランチのマージ先であり、リリース前の統合ブランチ
+- **mainブランチ**: プロダクション環境と同期し、リリース時のみ更新されるブランチ
+- **/releaseコマンド**: Claude Codeスラッシュコマンド、release-triggerワークフローを起動
+- **release-triggerワークフロー**: developをmainにマージする手動トリガーワークフロー（`.github/workflows/release-trigger.yml`）
+- **releaseワークフロー**: mainプッシュ時にsemantic-releaseを実行するワークフロー（`.github/workflows/release.yml`）
+- **Auto Mergeワークフロー**: feature→develop PRのCI成功時に自動マージするワークフロー（`.github/workflows/auto-merge.yml`）
 - **semantic-release**: コミットメッセージを分析し、バージョン決定、CHANGELOG生成、公開を自動実行するツール
 - **コミットメッセージ規約**: Conventional Commits形式（feat:、fix:、BREAKING CHANGE:など）
-- **リリースワークフロー**: GitHub Actionsで定義された自動リリースプロセス（`.github/workflows/release.yml`）
 - **CHANGELOG.md**: リリースノートを記録するMarkdownファイル
 - **package.json**: パッケージのバージョン情報とメタデータを含むファイル
 
@@ -115,36 +165,44 @@
 
 ### 測定可能な成果
 
-- **SC-001**: feat:コミットをmainにマージした時、自動的にminorバージョンがアップされ、npm registryとGitHub Releasesに公開される
-- **SC-002**: fix:コミットをmainにマージした時、自動的にpatchバージョンがアップされる
-- **SC-003**: BREAKING CHANGEコミットをmainにマージした時、自動的にmajorバージョンがアップされる
-- **SC-004**: docs:のみのコミットをmainにマージした時、リリースがスキップされる
-- **SC-005**: リリース後、CHANGELOG.mdとpackage.jsonが自動更新され、Gitにコミットされる
-- **SC-006**: リリース成功率が95%以上を維持する
+- **SC-001**: feature/*ブランチからdevelopへのPR作成後、CI成功時に自動マージされる
+- **SC-002**: `/release`コマンド実行時、release-triggerワークフローが起動し、developがmainにマージされる
+- **SC-003**: developからmainへのマージ後、feat:コミットがあれば自動的にminorバージョンがアップされ、npm registryとGitHub Releasesに公開される
+- **SC-004**: fix:コミットがdevelopからmainにマージされた時、自動的にpatchバージョンがアップされる
+- **SC-005**: BREAKING CHANGEコミットがdevelopからmainにマージされた時、自動的にmajorバージョンがアップされる
+- **SC-006**: docs:のみのコミットがdevelopからmainにマージされた時、リリースがスキップされる
+- **SC-007**: リリース後、CHANGELOG.mdとpackage.jsonが自動更新され、mainブランチにコミットされる
+- **SC-008**: リリース成功率が95%以上を維持する
 
 ## 制約と仮定 *(該当する場合)*
 
 ### 制約
 
-- GitHub Actionsワークフローファイル（`.github/workflows/release.yml`）が存在すること
-- NPM_TOKENとGITHUB_TOKENがGitHub Secretsに設定されていること
-- mainブランチへのプッシュ時にCIワークフロー（test、lint）が実行されること
+- developブランチが存在し、GitHubリポジトリにpush済みであること
+- GitHub Actionsワークフローファイル（`.github/workflows/release.yml`、`.github/workflows/release-trigger.yml`、`.github/workflows/auto-merge.yml`）が存在すること
+- SEMANTIC_RELEASE_TOKENとNPM_TOKENがGitHub Secretsに設定されていること
+- mainとdevelopブランチへのプッシュ時にCIワークフロー（test、lint）が実行されること
+- Claude Codeでgh CLIが利用可能であること
 
 ### 仮定
 
 - 開発者はConventional Commits形式でコミットメッセージを書いている
-- PRマージは主にsquash mergeまたはmerge commitで行われる
-- semantic-releaseの.releaserc.jsonファイルが適切に構成されている
+- feature/*ブランチはdevelopブランチをベースに作成される
+- Auto Mergeワークフローは全ブランチのPRに対して動作するが、実際にはdevelop向けPRでのみ使用される
+- semantic-releaseの.releaserc.jsonファイルが適切に構成されている（branches: ["main"]）
+- /releaseコマンドはClaude Codeから実行されることを想定している
 
 ## 範囲外 *(必須)*
 
 次の項目は、この機能の範囲外です：
 
-- コミットメッセージの自動検証（commitlintなど）
+- コミットメッセージの自動検証（commitlintなど）- 別機能として既に実装済み
 - プレリリース版（beta、alpha）の自動管理
 - 手動でのバージョン指定機能
 - 他のパッケージレジストリ（GitHub Packages、Yarnなど）への公開
 - リリースノートのカスタムテンプレート
+- mainブランチへの直接PR（developを経由しないワークフロー）
+- /releaseコマンド以外の手動リリーストリガー方法（GitHub UI、gh CLI直接実行は可能だが推奨しない）
 
 ## セキュリティとプライバシーの考慮事項 *(該当する場合)*
 

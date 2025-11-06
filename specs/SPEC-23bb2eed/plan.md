@@ -1,13 +1,16 @@
-# 実装計画: semantic-releaseによる自動リリース機能
+# 実装計画: develop-to-main手動リリースフローとsemantic-release統合
 
-**仕様ID**: `SPEC-23bb2eed` | **日付**: 2025-10-25 | **仕様書**: [spec.md](./spec.md)
+**仕様ID**: `SPEC-23bb2eed` | **日付**: 2025-01-06（更新） | **仕様書**: [spec.md](./spec.md)
 **入力**: `/specs/SPEC-23bb2eed/spec.md` からの機能仕様
 
 ## 概要
 
-semantic-releaseを使用して、mainブランチへのマージ時にコミットメッセージから自動的にバージョンを決定し、npm registryとGitHub Releasesに公開する機能を実装します。
+developブランチを導入し、feature→develop(Auto Merge)→/releaseコマンド→develop→mainマージ→semantic-release自動実行というワークフローを実装します。これにより、任意のタイミングでリリースを実行可能にします。
 
 **主要な目標**:
+- developブランチの作成とfeature→develop Auto Mergeの設定
+- /releaseコマンドによる手動リリーストリガーの実装
+- develop→mainマージ時のsemantic-release自動実行
 - コミットメッセージベースの自動バージョン決定
 - CHANGELOG.mdとpackage.jsonの自動更新
 - npm registryとGitHub Releasesへの自動公開
@@ -31,8 +34,9 @@ semantic-releaseを使用して、mainブランチへのマージ時にコミッ
 
 **制約**:
 - Conventional Commits形式のコミットメッセージが必要
-- NPM_TOKENとGITHUB_TOKENがGitHub Secretsに設定されていること
-- mainブランチへのプッシュ時にCIワークフロー（test、lint）が実行されること
+- SEMANTIC_RELEASE_TOKENとNPM_TOKENがGitHub Secretsに設定されていること
+- mainとdevelopブランチへのプッシュ時にCIワークフロー（test、lint）が実行されること
+- Claude Codeでgh CLIが利用可能であること
 
 ## 原則チェック
 
@@ -44,8 +48,9 @@ semantic-releaseを使用して、mainブランチへのマージ時にコミッ
 
 **評価**:
 - ✅ semantic-releaseの既存設定を活用
-- ✅ 必要な依存パッケージを追加するのみ
-- ✅ 既存のワークフローから冗長な部分を削除
+- ✅ developブランチ作成のみで既存機能は維持
+- ✅ 既存のAuto Mergeワークフローを再利用
+- ✅ /releaseコマンドはgh workflow runの薄いラッパー
 
 **結論**: 原則に整合
 
@@ -54,7 +59,9 @@ semantic-releaseを使用して、mainブランチへのマージ時にコミッ
 **原則**: "ただし、ユーザビリティと開発者体験の品質は決して妥協しない"
 
 **評価**:
-- ✅ PRマージのみで自動リリース（手動操作不要）
+- ✅ /releaseコマンド1つでリリース実行（直感的）
+- ✅ developブランチで変更を蓄積可能（柔軟なリリースタイミング）
+- ✅ Auto Mergeでfeature→develop統合自動化
 - ✅ 自動CHANGELOG生成（ドキュメント作成の手間削減）
 - ✅ セマンティックバージョニングの自動適用（ミス防止）
 
@@ -91,12 +98,20 @@ specs/SPEC-23bb2eed/
 
 ```text
 .github/workflows/
-├── release.yml            # 変更対象: publish-npmジョブを削除
-├── test.yml               # 影響なし
-└── lint.yml               # 影響なし
+├── release.yml            # 変更済み: workflow_runトリガーを削除、mainプッシュのみ
+├── release-trigger.yml    # 新規: develop→mainマージワークフロー
+├── auto-merge.yml         # 既存: 全ブランチ対象（変更不要）
+├── test.yml               # 既存: develop対応済み（変更不要）
+└── lint.yml               # 既存: develop対応済み（変更不要）
 
-package.json               # 変更対象: semantic-release依存を追加
+.claude/commands/
+└── release.md             # 新規: /releaseスラッシュコマンド
+
+package.json               # 既存: semantic-release依存済み（変更不要）
 .releaserc.json            # 既存: 設定は適切（変更不要）
+README.md                  # 変更済み: リリースフロー説明を更新
+README.ja.md               # 変更済み: リリースフロー説明を追加
+CLAUDE.md                  # 変更済み: リリースワークフロー説明を追加
 ```
 
 ## フェーズ0: 調査（技術スタック選定）
