@@ -103,13 +103,19 @@ describe("main error handling", () => {
       getCurrentBranch: vi.fn(async () => "main"),
     }));
 
-    viWithDoMock.doMock?.("../../src/worktree.js", () => ({
-      worktreeExists: vi.fn(async () => null),
-      generateWorktreePath: vi.fn(
-        async (_repo: string, branch: string) => `/worktrees/${branch}`,
-      ),
-      createWorktree: vi.fn(async () => {}),
-    }));
+    viWithDoMock.doMock?.("../../src/worktree.js", async () => {
+      const actual = await vi.importActual<
+        typeof import("../../src/worktree.js")
+      >("../../src/worktree.js");
+      return {
+        ...actual,
+        worktreeExists: vi.fn(async () => null),
+        generateWorktreePath: vi.fn(
+          async (_repo: string, branch: string) => `/worktrees/${branch}`,
+        ),
+        createWorktree: vi.fn(async () => {}),
+      };
+    });
 
     const ensureWorktreeMock = vi.fn(async () => "/tmp/worktree");
     viWithDoMock.doMock?.("../../src/services/WorktreeOrchestrator.js", () => ({
