@@ -187,6 +187,8 @@ export async function handleAIToolWorkflow(
       ensureOptions.isNewBranch = !localExists;
     }
 
+    const existingWorktree = await worktreeExists(branch);
+
     const isProtectedBranch =
       isProtectedBranchName(branch) ||
       (remoteBranch ? isProtectedBranchName(remoteBranch) : false);
@@ -204,11 +206,20 @@ export async function handleAIToolWorkflow(
       ensureOptions.isNewBranch = false;
     }
 
+    const willCreateWorktree = !existingWorktree && !isProtectedBranch;
+
     const orchestrator = new WorktreeOrchestrator();
 
-    const existingWorktree = await worktreeExists(branch);
-
     // Ensure worktree exists (using orchestrator)
+    if (willCreateWorktree) {
+      const targetLabel = ensureOptions.isNewBranch
+        ? `base ${ensureOptions.baseBranch ?? branch}`
+        : `branch ${branch}`;
+      printInfo(
+        `Creating worktree for ${targetLabel}. Progress indicator running...`,
+      );
+    }
+
     const worktreePath = await orchestrator.ensureWorktree(
       branch,
       repoRoot,
@@ -232,6 +243,8 @@ export async function handleAIToolWorkflow(
     } else if (ensureOptions.isNewBranch) {
       const base = ensureOptions.baseBranch ?? "";
       printInfo(`Created new worktree from ${base}: ${worktreePath}`);
+    } else if (willCreateWorktree) {
+      printInfo(`Created worktree: ${worktreePath}`);
     }
 
     printInfo(`Worktree ready: ${worktreePath}`);
@@ -357,13 +370,15 @@ export async function handleAIToolWorkflow(
     });
 
     printInfo("Session completed successfully. Returning to main menu...");
+    return;
   } catch (error) {
     if (error instanceof Error) {
       printError(`Error during workflow: ${error.message}`);
     } else {
       printError(`Unexpected error: ${String(error)}`);
     }
-    throw error; // Re-throw to handle in main loop
+    await waitForErrorAcknowledgement();
+    return;
   }
 }
 
@@ -417,15 +432,9 @@ export async function main(): Promise<void> {
         break;
       }
 
-      // Handle AI tool workflow
-      try {
-        await handleAIToolWorkflow(selectionResult);
-        // After AI tool completes, loop back to UI
-      } catch {
-        // Error during workflow, but don't exit - return to UI
-        printError("Workflow error, returning to main menu...");
-        await waitForErrorAcknowledgement();
-      }
+      // Handle AI tool workflow. The function internally manages error acknowledgement
+      // and always resolves, so we can safely continue the loop afterwards.
+      await handleAIToolWorkflow(selectionResult);
     }
   } catch (error) {
     if (error instanceof Error) {

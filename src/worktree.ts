@@ -24,6 +24,7 @@ import {
 } from "./git.js";
 import { getConfig } from "./config/index.js";
 import { GIT_CONFIG } from "./config/constants.js";
+import { startSpinner } from "./utils/spinner.js";
 
 // Re-export WorktreeConfig for external use
 export type { WorktreeConfig };
@@ -236,11 +237,22 @@ export async function createWorktree(config: WorktreeConfig): Promise<void> {
 
     try {
       await fs.mkdir(worktreeParentDir, { recursive: true });
-    } catch (error: any) {
+    } catch (error: unknown) {
+      const errorWithCode = error as { code?: unknown; message?: unknown };
+      const code =
+        errorWithCode && typeof errorWithCode.code === "string"
+          ? errorWithCode.code
+          : undefined;
+      const message =
+        error instanceof Error
+          ? error.message
+          : typeof errorWithCode?.message === "string"
+            ? errorWithCode.message
+            : String(error);
       const reason =
-        error?.code === "EEXIST"
+        code === "EEXIST"
           ? `${worktreeParentDir} already exists and is not a directory`
-          : error?.message || String(error);
+          : message;
 
       throw new WorktreeError(
         `Failed to prepare worktree directory for ${config.branchName}: ${reason}`,
@@ -262,21 +274,68 @@ export async function createWorktree(config: WorktreeConfig): Promise<void> {
       args.push(config.branchName);
     }
 
-    await execa("git", args);
+    const spinnerMessage = `Creating worktree for ${config.branchName}`;
+    let stopSpinner: (() => void) | undefined;
+
+    try {
+      stopSpinner = startSpinner(spinnerMessage);
+    } catch {
+      stopSpinner = undefined;
+    }
+
+    const stopActiveSpinner = () => {
+      if (stopSpinner) {
+        stopSpinner();
+        stopSpinner = undefined;
+      }
+    };
+
+    const gitProcess = execa("git", args);
+
+    // パイプでリアルタイムに進捗を表示する
+    const childProcess = gitProcess as typeof gitProcess & {
+      stdout?: NodeJS.ReadableStream;
+      stderr?: NodeJS.ReadableStream;
+    };
+
+    const attachStream = (
+      stream: NodeJS.ReadableStream | undefined,
+      pipeTarget: NodeJS.WriteStream,
+    ) => {
+      if (!stream) return;
+      if (typeof stream.once === "function") {
+        stream.once("data", stopActiveSpinner);
+      }
+      if (typeof stream.pipe === "function") {
+        stream.pipe(pipeTarget);
+      }
+    };
+
+    attachStream(childProcess.stdout, process.stdout);
+    attachStream(childProcess.stderr, process.stderr);
+
+    try {
+      await gitProcess;
+    } finally {
+      stopActiveSpinner();
+    }
 
     // .gitignoreに.worktrees/を追加(エラーは警告として扱う)
     try {
       await ensureGitignoreEntry(config.repoRoot, ".worktrees/");
-    } catch (error: any) {
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
       // .gitignoreの更新失敗は警告としてログに出すが、worktree作成は成功とする
-      console.warn(
-        `Warning: Failed to update .gitignore: ${error.message || error}`,
-      );
+      console.warn(`Warning: Failed to update .gitignore: ${message}`);
     }
-  } catch (error: any) {
+  } catch (error: unknown) {
     // Extract more detailed error information from git command
+    const errorOutput = (value: unknown) =>
+      typeof value === "string" && value.trim().length > 0 ? value : null;
     const gitError =
-      error?.stderr || error?.stdout || error?.message || String(error);
+      errorOutput((error as { stderr?: unknown })?.stderr) ??
+      errorOutput((error as { stdout?: unknown })?.stdout) ??
+      (error instanceof Error ? error.message : String(error));
     const errorMessage = `Failed to create worktree for ${config.branchName}\nGit error: ${gitError}`;
     throw new WorktreeError(errorMessage, error);
   }

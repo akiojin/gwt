@@ -1,3 +1,14 @@
+# [1.23.0](https://github.com/akiojin/claude-worktree/compare/v1.22.0...v1.23.0) (2025-11-06)
+
+### Bug Fixes
+
+- AIツール起動失敗時もCLIを継続 ([ffa9398](https://github.com/akiojin/claude-worktree/commit/ffa9398e9f3e891661c08a0b9f6d0ecab89cdae8))
+- worktree作成時の進捗表示を改善 ([4bf26b7](https://github.com/akiojin/claude-worktree/commit/4bf26b797d8f60c14fa6e217e6a42ea59dfbbd6d))
+
+### Features
+
+- worktree作成中にスピナーを表示 ([d65f506](https://github.com/akiojin/claude-worktree/commit/d65f506fbc726991fecb71a1ce6730742a49a148))
+
 # [1.22.0](https://github.com/akiojin/claude-worktree/compare/v1.21.3...v1.22.0) (2025-11-06)
 
 ### Features
