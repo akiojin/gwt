@@ -191,7 +191,17 @@ export async function createWorktree(config: WorktreeConfig): Promise<void> {
       args.push(config.branchName);
     }
 
-    await execa("git", args);
+    const gitProcess = execa("git", args);
+
+    // パイプでリアルタイムに進捗を表示する
+    if (gitProcess.stdout && typeof gitProcess.stdout.pipe === "function") {
+      gitProcess.stdout.pipe(process.stdout);
+    }
+    if (gitProcess.stderr && typeof gitProcess.stderr.pipe === "function") {
+      gitProcess.stderr.pipe(process.stderr);
+    }
+
+    await gitProcess;
 
     // .gitignoreに.worktrees/を追加(エラーは警告として扱う)
     try {

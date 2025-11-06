@@ -153,8 +153,18 @@ async function handleAIToolWorkflow(
     const orchestrator = new WorktreeOrchestrator();
 
     const existingWorktree = await worktreeExists(branch);
+    const willCreateWorktree = !existingWorktree;
 
     // Ensure worktree exists (using orchestrator)
+    if (willCreateWorktree) {
+      const targetLabel = ensureOptions.isNewBranch
+        ? `base ${ensureOptions.baseBranch ?? branch}`
+        : `branch ${branch}`;
+      printInfo(
+        `Creating worktree for ${targetLabel}. Git output will follow...`,
+      );
+    }
+
     const worktreePath = await orchestrator.ensureWorktree(
       branch,
       repoRoot,
@@ -166,6 +176,8 @@ async function handleAIToolWorkflow(
     } else if (ensureOptions.isNewBranch) {
       const base = ensureOptions.baseBranch ?? "";
       printInfo(`Created new worktree from ${base}: ${worktreePath}`);
+    } else if (willCreateWorktree) {
+      printInfo(`Created worktree: ${worktreePath}`);
     }
 
     printInfo(`Worktree ready: ${worktreePath}`);
