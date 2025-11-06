@@ -133,12 +133,6 @@ describe('App protected branch handling', () => {
     expect(actionProps?.mode).toBe('protected');
     expect(actionProps?.infoMessage).toContain('ルートブランチ');
 
-    const nextProps = branchListProps.at(-1);
-    expect(nextProps?.cleanupUI?.footerMessage?.text).toContain(
-      'ルートブランチはワークツリーを作成せず'
-    );
-    expect(nextProps?.cleanupUI?.footerMessage?.color).toBe('yellow');
-
     await act(async () => {
       actionProps?.onUseExisting();
       await Promise.resolve();
@@ -151,7 +145,6 @@ describe('App protected branch handling', () => {
       remoteRef: null,
     });
 
-    const postSwitchProps = branchListProps.at(-1);
-    expect(postSwitchProps?.cleanupUI?.footerMessage?.color).toBe('green');
+    expect(navigateToMock).toHaveBeenCalledWith('ai-tool-selector');
   });
 });

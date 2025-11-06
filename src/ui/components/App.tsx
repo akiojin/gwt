@@ -382,7 +382,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       const result = await switchToProtectedBranch({
         branchName: selectedBranch.name,
         repoRoot,
-        remoteRef: remoteRef ?? null,
+        remoteRef,
       });
 
       let successMessage = `'${selectedBranch.displayName ?? selectedBranch.name}' をルートブランチとして使用します。`;
@@ -397,6 +397,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         color: 'green',
       });
       refresh();
+      navigateTo('ai-tool-selector');
     } catch (error) {
       const message =
         error instanceof Error ? error.message : String(error);
@@ -405,18 +406,10 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         color: 'red',
       });
       console.error('Failed to switch protected branch:', error);
-    } finally {
-      setSelectedTool(null);
-      setCreationSourceBranch(null);
-      setSelectedBranch(null);
-      goBack();
     }
   }, [
-    goBack,
+    navigateTo,
     refresh,
-    setCreationSourceBranch,
-    setSelectedBranch,
-    setSelectedTool,
     selectedBranch,
     setCleanupFooterMessage,
   ]);
