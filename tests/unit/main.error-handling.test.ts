@@ -90,7 +90,9 @@ describe("main error handling", () => {
 
     vi.doMock("../../src/worktree.js", () => ({
       worktreeExists: vi.fn(async () => null),
-      generateWorktreePath: vi.fn(async (_repo: string, branch: string) => `/worktrees/${branch}`),
+      generateWorktreePath: vi.fn(
+        async (_repo: string, branch: string) => `/worktrees/${branch}`,
+      ),
       createWorktree: vi.fn(async () => {}),
     }));
 
@@ -132,9 +134,13 @@ describe("main error handling", () => {
 
     const processExitSpy = vi
       .spyOn(process, "exit")
-      .mockImplementation((() => undefined) as unknown as (code?: number) => never);
+      .mockImplementation(
+        (() => undefined) as unknown as (code?: number) => never,
+      );
 
-    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const consoleErrorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
 
     const { main } = await import("../../src/index.js");
 
@@ -143,9 +149,13 @@ describe("main error handling", () => {
     expect(waitForUserAcknowledgement).toHaveBeenCalled();
     expect(processExitSpy).not.toHaveBeenCalledWith(1);
     expect(consoleErrorSpy).toHaveBeenCalled();
-    const errorMessages = consoleErrorSpy.mock.calls.map(([msg]) => String(msg ?? ""));
+    const errorMessages = consoleErrorSpy.mock.calls.map(([msg]) =>
+      String(msg ?? ""),
+    );
     expect(
-      errorMessages.some((msg) => msg.includes("Workflow error, returning to main menu")),
+      errorMessages.some((msg) =>
+        msg.includes("Workflow error, returning to main menu"),
+      ),
     ).toBe(false);
     expect(renderSpy).toHaveBeenCalledTimes(2);
 

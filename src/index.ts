@@ -10,7 +10,10 @@ import {
 import chalk from "chalk";
 import type { SelectionResult } from "./ui/components/App.js";
 import { worktreeExists } from "./worktree.js";
-import { getTerminalStreams, waitForUserAcknowledgement } from "./utils/terminal.js";
+import {
+  getTerminalStreams,
+  waitForUserAcknowledgement,
+} from "./utils/terminal.js";
 import { getToolById } from "./config/tools.js";
 import { launchCustomAITool } from "./launcher.js";
 import { saveSession } from "./config/index.js";
@@ -161,7 +164,7 @@ async function handleAIToolWorkflow(
         ? `base ${ensureOptions.baseBranch ?? branch}`
         : `branch ${branch}`;
       printInfo(
-        `Creating worktree for ${targetLabel}. Git output will follow...`,
+        `Creating worktree for ${targetLabel}. Progress indicator running...`,
       );
     }
 
