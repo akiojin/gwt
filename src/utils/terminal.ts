@@ -24,6 +24,9 @@ export interface ChildStdio {
   cleanup: () => void;
 }
 
+const DEFAULT_ACK_MESSAGE =
+  "エラー内容を確認したら Enter キーを押してください...";
+
 function isProcessTTY(): boolean {
   return Boolean(
     process.stdin.isTTY &&
@@ -217,4 +220,53 @@ export function createChildStdio(): ChildStdio {
       cleanup: () => {},
     };
   }
+}
+
+function isInteractive(stream: NodeJS.ReadStream): boolean {
+  return Boolean(stream.isTTY);
+}
+
+export async function waitForUserAcknowledgement(
+  message: string = DEFAULT_ACK_MESSAGE,
+): Promise<void> {
+  const terminal = getTerminalStreams();
+  const stdin = terminal.stdin as NodeJS.ReadStream;
+  const stdout = terminal.stdout as NodeJS.WriteStream;
+
+  if (!stdin || typeof stdin.on !== "function") {
+    return;
+  }
+
+  if (!isInteractive(stdin)) {
+    return;
+  }
+
+  terminal.exitRawMode();
+
+  await new Promise<void>((resolve) => {
+    const cleanup = () => {
+      stdin.removeListener("data", onData);
+      if (typeof stdin.pause === "function") {
+        stdin.pause();
+      }
+    };
+
+    const onData = (chunk: Buffer | string) => {
+      const data = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+      if (data.includes("\n") || data.includes("\r")) {
+        cleanup();
+        resolve();
+      }
+    };
+
+    if (typeof stdout?.write === "function") {
+      stdout.write(`\n${message}\n`);
+    }
+
+    if (typeof stdin.resume === "function") {
+      stdin.resume();
+    }
+
+    stdin.on("data", onData);
+  });
 }
