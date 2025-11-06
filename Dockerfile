@@ -14,7 +14,9 @@ RUN npm i -g \
     bun@latest \
     typescript@latest \
     eslint@latest \
-    prettier@latest 
+    prettier@latest \
+    @commitlint/cli@latest \
+    @commitlint/config-conventional@latest 
 
 # Install uv/uvx
 RUN curl -fsSL https://astral.sh/uv/install.sh | bash
