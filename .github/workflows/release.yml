@@ -3,10 +3,6 @@ name: Release
 on:
   push:
     branches: [main]
-  workflow_run:
-    workflows: ["Auto Merge"]
-    types:
-      - completed
 
 permissions:
   contents: write
@@ -18,11 +14,6 @@ jobs:
   release:
     name: Release
     runs-on: ubuntu-latest
-    if: >
-      github.event_name == 'push' ||
-      (github.event_name == 'workflow_run' &&
-       github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.head_branch == 'main')
 
     steps:
       - name: Checkout code
