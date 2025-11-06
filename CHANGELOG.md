@@ -1,3 +1,9 @@
+## [1.21.2](https://github.com/akiojin/claude-worktree/compare/v1.21.1...v1.21.2) (2025-11-06)
+
+### Bug Fixes
+
+- エラー発生時の入力待機処理を追加 ([5eeb28e](https://github.com/akiojin/claude-worktree/commit/5eeb28e04a6448f62790cea9feba5bfd9793f6fc))
+
 ## [1.21.1](https://github.com/akiojin/claude-worktree/compare/v1.21.0...v1.21.1) (2025-11-05)
 
 ### Bug Fixes
