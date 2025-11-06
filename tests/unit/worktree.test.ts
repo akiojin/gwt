@@ -18,6 +18,7 @@ vi.mock("node:fs", () => {
 
 import { execa } from "execa";
 import fs from "node:fs";
+import fsPromises from "node:fs/promises";
 import * as git from "../../src/git";
 import * as github from "../../src/github";
 import * as configModule from "../../src/config/index";
@@ -130,6 +131,16 @@ branch refs/heads/main
   });
 
   describe("createWorktree (T106)", () => {
+    let mkdirSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      mkdirSpy = vi.spyOn(fsPromises, "mkdir").mockResolvedValue(undefined);
+    });
+
+    afterEach(() => {
+      mkdirSpy.mockRestore();
+    });
+
     it("should create worktree for existing branch", async () => {
       (execa as any).mockResolvedValue({
         stdout: "",
@@ -139,7 +150,7 @@ branch refs/heads/main
 
       const config = {
         branchName: "feature/test",
-        worktreePath: "/path/to/worktree",
+        worktreePath: "/path/to/repo/.worktrees/feature-test",
         repoRoot: "/path/to/repo",
         isNewBranch: false,
         baseBranch: "main",
@@ -147,10 +158,13 @@ branch refs/heads/main
 
       await worktree.createWorktree(config);
 
+      expect(mkdirSpy).toHaveBeenCalledWith("/path/to/repo/.worktrees", {
+        recursive: true,
+      });
       expect(execa).toHaveBeenCalledWith("git", [
         "worktree",
         "add",
-        "/path/to/worktree",
+        "/path/to/repo/.worktrees/feature-test",
         "feature/test",
       ]);
     });
@@ -164,7 +178,7 @@ branch refs/heads/main
 
       const config = {
         branchName: "feature/new-feature",
-        worktreePath: "/path/to/worktree",
+        worktreePath: "/path/to/repo/.worktrees/feature-new-feature",
         repoRoot: "/path/to/repo",
         isNewBranch: true,
         baseBranch: "main",
@@ -172,12 +186,15 @@ branch refs/heads/main
 
       await worktree.createWorktree(config);
 
+      expect(mkdirSpy).toHaveBeenCalledWith("/path/to/repo/.worktrees", {
+        recursive: true,
+      });
       expect(execa).toHaveBeenCalledWith("git", [
         "worktree",
         "add",
         "-b",
         "feature/new-feature",
-        "/path/to/worktree",
+        "/path/to/repo/.worktrees/feature-new-feature",
         "main",
       ]);
     });
@@ -191,7 +208,7 @@ branch refs/heads/main
 
       const config = {
         branchName: "hotfix/bug-fix",
-        worktreePath: "/path/to/worktree",
+        worktreePath: "/path/to/repo/.worktrees/hotfix-bug-fix",
         repoRoot: "/path/to/repo",
         isNewBranch: true,
         baseBranch: "develop",
@@ -199,14 +216,37 @@ branch refs/heads/main
 
       await worktree.createWorktree(config);
 
+      expect(mkdirSpy).toHaveBeenCalledWith("/path/to/repo/.worktrees", {
+        recursive: true,
+      });
       expect(execa).toHaveBeenCalledWith("git", [
         "worktree",
         "add",
         "-b",
         "hotfix/bug-fix",
-        "/path/to/worktree",
+        "/path/to/repo/.worktrees/hotfix-bug-fix",
         "develop",
       ]);
+    });
+
+    it("should throw WorktreeError when worktree directory preparation fails", async () => {
+      mkdirSpy.mockRejectedValueOnce(
+        Object.assign(new Error("EEXIST"), { code: "EEXIST" }),
+      );
+
+      const config = {
+        branchName: "feature/test",
+        worktreePath: "/path/to/repo/.worktrees/feature-test",
+        repoRoot: "/path/to/repo",
+        isNewBranch: false,
+        baseBranch: "main",
+      };
+
+      await expect(worktree.createWorktree(config)).rejects.toThrow(
+        "Failed to prepare worktree directory for feature/test",
+      );
+
+      expect(execa).not.toHaveBeenCalled();
     });
 
     it("should throw WorktreeError on failure", async () => {
@@ -214,7 +254,7 @@ branch refs/heads/main
 
       const config = {
         branchName: "feature/test",
-        worktreePath: "/path/to/worktree",
+        worktreePath: "/path/to/repo/.worktrees/feature-test",
         repoRoot: "/path/to/repo",
         isNewBranch: false,
         baseBranch: "main",
@@ -246,6 +286,9 @@ branch refs/heads/main
 
       await worktree.createWorktree(config);
 
+      expect(mkdirSpy).toHaveBeenCalledWith("/path/to/repo/.worktrees", {
+        recursive: true,
+      });
       expect(ensureGitignoreSpy).toHaveBeenCalledWith(
         "/path/to/repo",
         ".worktrees/",
@@ -275,6 +318,9 @@ branch refs/heads/main
       // エラーなく完了する(エラーがスローされない)
       await worktree.createWorktree(config);
 
+      expect(mkdirSpy).toHaveBeenCalledWith("/path/to/repo/.worktrees", {
+        recursive: true,
+      });
       // execaが正常に呼ばれたことを確認
       expect(execa).toHaveBeenCalled();
     });

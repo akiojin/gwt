@@ -9,6 +9,28 @@ vi.mock("node:fs", () => ({
   existsSync: vi.fn(() => true),
 }));
 
+const mkdirMock = vi.hoisted(() => vi.fn(async () => undefined));
+
+vi.mock("node:fs/promises", async () => {
+  const actual =
+    await vi.importActual<typeof import("node:fs/promises")>(
+      "node:fs/promises",
+    );
+
+  const mocked = {
+    ...actual,
+    mkdir: mkdirMock,
+  };
+
+  return {
+    ...mocked,
+    default: {
+      ...actual.default,
+      mkdir: mkdirMock,
+    },
+  };
+});
+
 import { execa } from "execa";
 import * as git from "../../src/git";
 import * as worktree from "../../src/worktree";
@@ -16,6 +38,7 @@ import * as worktree from "../../src/worktree";
 describe("E2E: Create Branch Workflow (T209)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mkdirMock.mockClear();
   });
 
   afterEach(() => {
