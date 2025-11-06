@@ -382,7 +382,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       const result = await switchToProtectedBranch({
         branchName: selectedBranch.name,
         repoRoot,
-        remoteRef,
+        remoteRef: remoteRef ?? null,
       });
 
       let successMessage = `'${selectedBranch.displayName ?? selectedBranch.name}' をルートブランチとして使用します。`;
@@ -727,25 +727,27 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
 
       case 'branch-action-selector': {
         const isProtected = Boolean(protectedBranchInfo);
-        const protectedSelectorProps = isProtected
-          ? {
-              mode: 'protected' as const,
-              infoMessage: protectedBranchInfo?.message ?? null,
-              primaryLabel: 'Use root branch (no worktree)',
-              secondaryLabel: 'Create new branch from this branch',
-            }
-          : {};
+        const baseProps = {
+          selectedBranch: selectedBranch?.displayName ?? '',
+          onUseExisting: handleUseExistingBranch,
+          onCreateNew: handleCreateNewBranch,
+          onBack: goBack,
+          canCreateNew: Boolean(selectedBranch),
+        };
 
-        return (
-          <BranchActionSelectorScreen
-            selectedBranch={selectedBranch?.displayName ?? ''}
-            onUseExisting={handleUseExistingBranch}
-            onCreateNew={handleCreateNewBranch}
-            onBack={goBack}
-            canCreateNew={Boolean(selectedBranch)}
-            {...protectedSelectorProps}
-          />
-        );
+        if (isProtected) {
+          return (
+            <BranchActionSelectorScreen
+              {...baseProps}
+              mode="protected"
+              infoMessage={protectedBranchInfo?.message ?? null}
+              primaryLabel="Use root branch (no worktree)"
+              secondaryLabel="Create new branch from this branch"
+            />
+          );
+        }
+
+        return <BranchActionSelectorScreen {...baseProps} />;
       }
 
       case 'ai-tool-selector':
