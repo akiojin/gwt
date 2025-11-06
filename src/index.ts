@@ -16,8 +16,15 @@ import {
 } from "./services/WorktreeOrchestrator.js";
 import chalk from "chalk";
 import type { SelectionResult } from "./ui/components/App.js";
-import { worktreeExists } from "./worktree.js";
-import { getTerminalStreams, waitForUserAcknowledgement } from "./utils/terminal.js";
+import {
+  worktreeExists,
+  isProtectedBranchName,
+  switchToProtectedBranch,
+} from "./worktree.js";
+import {
+  getTerminalStreams,
+  waitForUserAcknowledgement,
+} from "./utils/terminal.js";
 import { getToolById } from "./config/tools.js";
 import { launchCustomAITool } from "./launcher.js";
 import { saveSession } from "./config/index.js";
@@ -147,7 +154,7 @@ async function mainInkUI(): Promise<SelectionResult | undefined> {
 /**
  * Handle AI tool workflow
  */
-async function handleAIToolWorkflow(
+export async function handleAIToolWorkflow(
   selectionResult: SelectionResult,
 ): Promise<void> {
   const {
@@ -180,22 +187,64 @@ async function handleAIToolWorkflow(
       ensureOptions.isNewBranch = !localExists;
     }
 
-    const orchestrator = new WorktreeOrchestrator();
-
     const existingWorktree = await worktreeExists(branch);
 
+    const isProtectedBranch =
+      isProtectedBranchName(branch) ||
+      (remoteBranch ? isProtectedBranchName(remoteBranch) : false);
+
+    let protectedCheckoutResult: "none" | "local" | "remote" = "none";
+    if (isProtectedBranch) {
+      const protectedRemoteRef =
+        remoteBranch ??
+        (branchType === "remote" ? (displayName ?? branch) : null);
+      protectedCheckoutResult = await switchToProtectedBranch({
+        branchName: branch,
+        repoRoot,
+        remoteRef: protectedRemoteRef ?? null,
+      });
+      ensureOptions.isNewBranch = false;
+    }
+
+    const willCreateWorktree = !existingWorktree && !isProtectedBranch;
+
+    const orchestrator = new WorktreeOrchestrator();
+
     // Ensure worktree exists (using orchestrator)
+    if (willCreateWorktree) {
+      const targetLabel = ensureOptions.isNewBranch
+        ? `base ${ensureOptions.baseBranch ?? branch}`
+        : `branch ${branch}`;
+      printInfo(
+        `Creating worktree for ${targetLabel}. Progress indicator running...`,
+      );
+    }
+
     const worktreePath = await orchestrator.ensureWorktree(
       branch,
       repoRoot,
       ensureOptions,
     );
 
-    if (existingWorktree) {
+    if (isProtectedBranch) {
+      if (protectedCheckoutResult === "remote" && remoteBranch) {
+        printInfo(
+          `Created local tracking branch '${branch}' from ${remoteBranch} in repository root.`,
+        );
+      } else if (protectedCheckoutResult === "local") {
+        printInfo(
+          `Checked out protected branch '${branch}' in repository root.`,
+        );
+      } else {
+        printInfo(`Using repository root for protected branch '${branch}'.`);
+      }
+    } else if (existingWorktree) {
       printInfo(`Reusing existing worktree: ${existingWorktree}`);
     } else if (ensureOptions.isNewBranch) {
       const base = ensureOptions.baseBranch ?? "";
       printInfo(`Created new worktree from ${base}: ${worktreePath}`);
+    } else if (willCreateWorktree) {
+      printInfo(`Created worktree: ${worktreePath}`);
     }
 
     printInfo(`Worktree ready: ${worktreePath}`);
@@ -208,7 +257,8 @@ async function handleAIToolWorkflow(
       await pullFastForward(worktreePath);
       printInfo(`Fast-forward pull finished for ${branch}.`);
     } catch (error) {
-      fastForwardError = error instanceof Error ? error : new Error(String(error));
+      fastForwardError =
+        error instanceof Error ? error : new Error(String(error));
       printWarning(
         `Fast-forward pull failed for ${branch}. Checking for divergence before continuing...`,
       );
@@ -243,14 +293,17 @@ async function handleAIToolWorkflow(
         "Potential merge conflicts detected when pulling the following local branches:",
       );
 
-      divergedBranches.forEach(({ branch: divergedBranch, remoteAhead, localAhead }) => {
-        const highlight = divergedBranch === branch ? " (selected branch)" : "";
-        console.warn(
-          chalk.yellow(
-            `   • ${divergedBranch}${highlight}  remote:+${remoteAhead}  local:+${localAhead}`,
-          ),
-        );
-      });
+      divergedBranches.forEach(
+        ({ branch: divergedBranch, remoteAhead, localAhead }) => {
+          const highlight =
+            divergedBranch === branch ? " (selected branch)" : "";
+          console.warn(
+            chalk.yellow(
+              `   • ${divergedBranch}${highlight}  remote:+${remoteAhead}  local:+${localAhead}`,
+            ),
+          );
+        },
+      );
 
       printWarning(
         "Resolve these divergences (e.g., rebase or merge) before launching to avoid conflicts.",
@@ -317,13 +370,15 @@ async function handleAIToolWorkflow(
     });
 
     printInfo("Session completed successfully. Returning to main menu...");
+    return;
   } catch (error) {
     if (error instanceof Error) {
       printError(`Error during workflow: ${error.message}`);
     } else {
       printError(`Unexpected error: ${String(error)}`);
     }
-    throw error; // Re-throw to handle in main loop
+    await waitForErrorAcknowledgement();
+    return;
   }
 }
 
@@ -377,15 +432,9 @@ export async function main(): Promise<void> {
         break;
       }
 
-      // Handle AI tool workflow
-      try {
-        await handleAIToolWorkflow(selectionResult);
-        // After AI tool completes, loop back to UI
-      } catch (error) {
-        // Error during workflow, but don't exit - return to UI
-        printError("Workflow error, returning to main menu...");
-        await waitForErrorAcknowledgement();
-      }
+      // Handle AI tool workflow. The function internally manages error acknowledgement
+      // and always resolves, so we can safely continue the loop afterwards.
+      await handleAIToolWorkflow(selectionResult);
     }
   } catch (error) {
     if (error instanceof Error) {

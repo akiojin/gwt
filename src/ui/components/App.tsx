@@ -15,13 +15,15 @@ import { useGitData } from '../hooks/useGitData.js';
 import { useScreenState } from '../hooks/useScreenState.js';
 import { formatBranchItems } from '../utils/branchFormatter.js';
 import { calculateStatistics } from '../utils/statisticsCalculator.js';
-import type { BranchItem, SelectedBranchState } from '../types.js';
+import type { BranchInfo, BranchItem, SelectedBranchState } from '../types.js';
 import { getRepositoryRoot, deleteBranch } from '../../git.js';
 import {
   createWorktree,
   generateWorktreePath,
   getMergedPRWorktrees,
+  isProtectedBranchName,
   removeWorktree,
+  switchToProtectedBranch,
 } from '../../worktree.js';
 import { getPackageVersion } from '../../utils.js';
 import {
@@ -31,6 +33,8 @@ import {
 
 const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'];
 const COMPLETION_HOLD_DURATION_MS = 3000;
+const PROTECTED_BRANCH_WARNING =
+  'ルートブランチはワークツリーを作成せず、ルートディレクトリでの作業切替のみ対応します。必要に応じて新しいブランチを作成してください。';
 
 const getSpinnerFrame = (index: number): string => {
   const frame = SPINNER_FRAMES[index];
@@ -239,6 +243,62 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     return segments.slice(1).join('/');
   }, []);
 
+  const inferBranchCategory = useCallback(
+    (branchName: string): BranchInfo['branchType'] => {
+      const matched = branches.find((branch) => branch.name === branchName);
+      if (matched) {
+        return matched.branchType;
+      }
+      if (branchName === 'main' || branchName === 'master') {
+        return 'main';
+      }
+      if (branchName === 'develop' || branchName === 'dev') {
+        return 'develop';
+      }
+      if (branchName.startsWith('feature/')) {
+        return 'feature';
+      }
+      if (branchName.startsWith('hotfix/')) {
+        return 'hotfix';
+      }
+      if (branchName.startsWith('release/')) {
+        return 'release';
+      }
+      return 'other';
+    },
+    [branches]
+  );
+
+  const isProtectedSelection = useCallback(
+    (branch: SelectedBranchState | null): boolean => {
+      if (!branch) {
+        return false;
+      }
+      return (
+        isProtectedBranchName(branch.name) ||
+        isProtectedBranchName(branch.displayName) ||
+        (branch.remoteBranch ? isProtectedBranchName(branch.remoteBranch) : false) ||
+        branch.branchCategory === 'main' ||
+        branch.branchCategory === 'develop'
+      );
+    },
+    [isProtectedBranchName]
+  );
+
+  const protectedBranchInfo = useMemo(() => {
+    if (!selectedBranch) {
+      return null;
+    }
+    if (!isProtectedSelection(selectedBranch)) {
+      return null;
+    }
+    const label = selectedBranch.displayName ?? selectedBranch.name;
+    return {
+      label,
+      message: `${label} はルートブランチです。ワークツリーを作成せず、ルートディレクトリで切り替えてください。`,
+    };
+  }, [selectedBranch, isProtectedSelection]);
+
   const handleSelect = useCallback(
     (item: BranchItem) => {
       const selection: SelectedBranchState =
@@ -247,19 +307,34 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
               name: toLocalBranchName(item.name),
               displayName: item.name,
               branchType: 'remote',
+              branchCategory: item.branchType,
               remoteBranch: item.name,
             }
           : {
               name: item.name,
               displayName: item.name,
               branchType: 'local',
+              branchCategory: item.branchType,
             };
+
+      const protectedSelected = isProtectedSelection(selection);
 
       setSelectedBranch(selection);
       setSelectedTool(null);
+      setCreationSourceBranch(null);
+
+      if (protectedSelected) {
+        setCleanupFooterMessage({
+          text: PROTECTED_BRANCH_WARNING,
+          color: 'yellow',
+        });
+      } else {
+        setCleanupFooterMessage(null);
+      }
+
       navigateTo('branch-action-selector');
     },
-    [navigateTo, setSelectedTool, toLocalBranchName]
+    [isProtectedSelection, navigateTo, setCleanupFooterMessage, setCreationSourceBranch, setSelectedTool, toLocalBranchName]
   );
 
   // Handle navigation
@@ -276,17 +351,83 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         name: worktree.branch,
         displayName: worktree.branch,
         branchType: 'local',
+        branchCategory: inferBranchCategory(worktree.branch),
       });
       setSelectedTool(null);
+      setCreationSourceBranch(null);
+      setCleanupFooterMessage(null);
       navigateTo('ai-tool-selector');
     },
-    [navigateTo]
+    [inferBranchCategory, navigateTo, setCleanupFooterMessage, setCreationSourceBranch]
   );
 
   // Handle branch action selection
+  const handleProtectedBranchSwitch = useCallback(async () => {
+    if (!selectedBranch) {
+      return;
+    }
+
+    try {
+      setCleanupFooterMessage({
+        text: `ルートブランチ '${selectedBranch.displayName ?? selectedBranch.name}' を準備しています...`,
+        color: 'cyan',
+      });
+      const repoRoot = await getRepositoryRoot();
+      const remoteRef =
+        selectedBranch.remoteBranch ??
+        (selectedBranch.branchType === 'remote'
+          ? selectedBranch.displayName ?? selectedBranch.name
+          : null);
+
+      const result = await switchToProtectedBranch({
+        branchName: selectedBranch.name,
+        repoRoot,
+        remoteRef: remoteRef ?? null,
+      });
+
+      let successMessage = `'${selectedBranch.displayName ?? selectedBranch.name}' をルートブランチとして使用します。`;
+      if (result === 'remote') {
+        successMessage = `'${selectedBranch.displayName ?? selectedBranch.name}' のローカル追跡ブランチを作成し、ルートブランチを切り替えました。`;
+      } else if (result === 'local') {
+        successMessage = `'${selectedBranch.displayName ?? selectedBranch.name}' をルートディレクトリでチェックアウトしました。`;
+      }
+
+      setCleanupFooterMessage({
+        text: successMessage,
+        color: 'green',
+      });
+      refresh();
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : String(error);
+      setCleanupFooterMessage({
+        text: `ルートブランチ切り替えに失敗しました: ${message}`,
+        color: 'red',
+      });
+      console.error('Failed to switch protected branch:', error);
+    } finally {
+      setSelectedTool(null);
+      setCreationSourceBranch(null);
+      setSelectedBranch(null);
+      goBack();
+    }
+  }, [
+    goBack,
+    refresh,
+    setCreationSourceBranch,
+    setSelectedBranch,
+    setSelectedTool,
+    selectedBranch,
+    setCleanupFooterMessage,
+  ]);
+
   const handleUseExistingBranch = useCallback(() => {
+    if (selectedBranch && isProtectedSelection(selectedBranch)) {
+      void handleProtectedBranchSwitch();
+      return;
+    }
     navigateTo('ai-tool-selector');
-  }, [navigateTo]);
+  }, [handleProtectedBranchSwitch, isProtectedSelection, navigateTo, selectedBranch]);
 
   const handleCreateNewBranch = useCallback(() => {
     setCreationSourceBranch(selectedBranch);
@@ -326,8 +467,10 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
           name: branchName,
           displayName: branchName,
           branchType: 'local',
+          branchCategory: inferBranchCategory(branchName),
         });
         setSelectedTool(null);
+        setCleanupFooterMessage(null);
 
         navigateTo('ai-tool-selector');
       } catch (error) {
@@ -344,6 +487,8 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       resolveBaseBranch,
       selectedBranch,
       creationSourceBranch,
+      inferBranchCategory,
+      setCleanupFooterMessage,
     ]
   );
 
@@ -489,7 +634,12 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     setCleanupInputLocked(false);
     setCleanupFooterMessage({ text: 'Cleanup completed. Finalizing...', color: 'green' });
 
-    completionTimerRef.current = setTimeout(resetAfterWait, COMPLETION_HOLD_DURATION_MS);
+    const holdDuration =
+      typeof process !== 'undefined' && process.env?.NODE_ENV === 'test'
+        ? 0
+        : COMPLETION_HOLD_DURATION_MS;
+
+    completionTimerRef.current = setTimeout(resetAfterWait, holdDuration);
   }, [cleanupInputLocked, deleteBranch, getMergedPRWorktrees, refresh, removeWorktree]);
 
   // Handle AI tool selection
@@ -582,15 +732,28 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
           />
         );
 
-      case 'branch-action-selector':
+      case 'branch-action-selector': {
+        const isProtected = Boolean(protectedBranchInfo);
+        const protectedSelectorProps = isProtected
+          ? {
+              mode: 'protected' as const,
+              infoMessage: protectedBranchInfo?.message ?? null,
+              primaryLabel: 'Use root branch (no worktree)',
+              secondaryLabel: 'Create new branch from this branch',
+            }
+          : {};
+
         return (
           <BranchActionSelectorScreen
             selectedBranch={selectedBranch?.displayName ?? ''}
             onUseExisting={handleUseExistingBranch}
             onCreateNew={handleCreateNewBranch}
             onBack={goBack}
+            canCreateNew={Boolean(selectedBranch)}
+            {...protectedSelectorProps}
           />
         );
+      }
 
       case 'ai-tool-selector':
         return <AIToolSelectorScreen onBack={goBack} onSelect={handleToolSelect} version={version} />;

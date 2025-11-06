@@ -9,6 +9,11 @@ export interface BranchActionSelectorScreenProps {
   onUseExisting: () => void;
   onCreateNew: () => void;
   onBack: () => void;
+  canCreateNew?: boolean;
+  mode?: "default" | "protected";
+  infoMessage?: string | null;
+  primaryLabel?: string;
+  secondaryLabel?: string;
 }
 
 /**
@@ -23,6 +28,11 @@ export function BranchActionSelectorScreen({
   onUseExisting,
   onCreateNew,
   onBack,
+  canCreateNew = true,
+  mode = "default",
+  infoMessage,
+  primaryLabel,
+  secondaryLabel,
 }: BranchActionSelectorScreenProps) {
   // Handle keyboard input for back navigation
   useInput((input, key) => {
@@ -31,16 +41,26 @@ export function BranchActionSelectorScreen({
     }
   });
 
+  const primaryActionLabel =
+    primaryLabel ??
+    (mode === "protected" ? "Switch to root branch" : "Use existing branch");
+  const secondaryActionLabel =
+    secondaryLabel ??
+    (mode === "protected" ? "Create new branch from this branch" : "Create new branch");
+
   const items: SelectItem[] = [
     {
-      label: "Use existing branch",
+      label: primaryActionLabel,
       value: "use-existing",
     },
-    {
-      label: "Create new branch",
-      value: "create-new",
-    },
   ];
+
+  if (canCreateNew) {
+    items.push({
+      label: secondaryActionLabel,
+      value: "create-new",
+    });
+  }
 
   const handleSelect = (item: SelectItem) => {
     const action = item.value as BranchAction;
@@ -65,6 +85,11 @@ export function BranchActionSelectorScreen({
           Selected branch: <Text bold color="cyan">{selectedBranch}</Text>
         </Text>
       </Box>
+      {infoMessage ? (
+        <Box marginBottom={1}>
+          <Text color="yellow">{infoMessage}</Text>
+        </Box>
+      ) : null}
       <Box marginBottom={1}>
         <Text color="gray">Choose an action:</Text>
       </Box>

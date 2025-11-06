@@ -1,6 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import * as worktree from "../../src/worktree";
-import { worktrees } from "../fixtures/worktrees";
 
 // Mock execa
 vi.mock("execa", () => ({
@@ -229,6 +228,51 @@ branch refs/heads/main
       ]);
     });
 
+    it('should reject worktree creation for protected branch "main"', async () => {
+      const config = {
+        branchName: "main",
+        worktreePath: "/path/to/repo/.worktrees/main",
+        repoRoot: "/path/to/repo",
+        isNewBranch: false,
+        baseBranch: "main",
+      };
+
+      await expect(worktree.createWorktree(config)).rejects.toThrow(
+        'Branch "main" is protected and cannot be used to create a worktree',
+      );
+      expect(execa).not.toHaveBeenCalled();
+    });
+
+    it('should reject worktree creation for protected branch "develop"', async () => {
+      const config = {
+        branchName: "develop",
+        worktreePath: "/path/to/repo/.worktrees/develop",
+        repoRoot: "/path/to/repo",
+        isNewBranch: false,
+        baseBranch: "develop",
+      };
+
+      await expect(worktree.createWorktree(config)).rejects.toThrow(
+        'Branch "develop" is protected and cannot be used to create a worktree',
+      );
+      expect(execa).not.toHaveBeenCalled();
+    });
+
+    it('should reject worktree creation for protected branch "master"', async () => {
+      const config = {
+        branchName: "master",
+        worktreePath: "/path/to/repo/.worktrees/master",
+        repoRoot: "/path/to/repo",
+        isNewBranch: false,
+        baseBranch: "main",
+      };
+
+      await expect(worktree.createWorktree(config)).rejects.toThrow(
+        'Branch "master" is protected and cannot be used to create a worktree',
+      );
+      expect(execa).not.toHaveBeenCalled();
+    });
+
     it("should throw WorktreeError when worktree directory preparation fails", async () => {
       mkdirSpy.mockRejectedValueOnce(
         Object.assign(new Error("EEXIST"), { code: "EEXIST" }),
@@ -323,6 +367,79 @@ branch refs/heads/main
       });
       // execaが正常に呼ばれたことを確認
       expect(execa).toHaveBeenCalled();
+    });
+  });
+
+  describe("switchToProtectedBranch", () => {
+    let branchExistsSpy: ReturnType<typeof vi.spyOn>;
+    let getCurrentBranchSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      branchExistsSpy = vi.spyOn(git, "branchExists").mockResolvedValue(false);
+      getCurrentBranchSpy = vi
+        .spyOn(git, "getCurrentBranch")
+        .mockResolvedValue("develop");
+      (execa as any).mockResolvedValue({
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+      });
+    });
+
+    afterEach(() => {
+      branchExistsSpy.mockRestore();
+      getCurrentBranchSpy.mockRestore();
+      (execa as any).mockReset();
+    });
+
+    it("returns none when already on the protected branch", async () => {
+      getCurrentBranchSpy.mockResolvedValue("main");
+
+      const result = await worktree.switchToProtectedBranch({
+        branchName: "main",
+        repoRoot: "/repo",
+      });
+
+      expect(result).toBe("none");
+      expect(execa).not.toHaveBeenCalled();
+    });
+
+    it("checks out the local branch when it exists", async () => {
+      branchExistsSpy.mockResolvedValue(true);
+
+      const result = await worktree.switchToProtectedBranch({
+        branchName: "main",
+        repoRoot: "/repo",
+      });
+
+      expect(result).toBe("local");
+      expect(execa).toHaveBeenCalledWith("git", ["checkout", "main"], {
+        cwd: "/repo",
+      });
+    });
+
+    it("creates tracking branch from remote when local branch is missing", async () => {
+      branchExistsSpy.mockResolvedValue(false);
+
+      const result = await worktree.switchToProtectedBranch({
+        branchName: "main",
+        repoRoot: "/repo",
+        remoteRef: "origin/main",
+      });
+
+      expect(result).toBe("remote");
+      expect(execa).toHaveBeenNthCalledWith(
+        1,
+        "git",
+        ["fetch", "origin", "main"],
+        { cwd: "/repo" },
+      );
+      expect(execa).toHaveBeenNthCalledWith(
+        2,
+        "git",
+        ["checkout", "-b", "main", "origin/main"],
+        { cwd: "/repo" },
+      );
     });
   });
 

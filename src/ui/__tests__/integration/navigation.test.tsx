@@ -16,6 +16,9 @@ vi.mock('../../../git.js', () => ({
   deleteBranch: vi.fn(async () => undefined),
 }));
 
+const mockIsProtectedBranchName = vi.fn(() => false);
+const mockSwitchToProtectedBranch = vi.fn(async () => 'none' as const);
+
 vi.mock('../../../worktree.js', () => ({
   __esModule: true,
   listAdditionalWorktrees: vi.fn(),
@@ -23,6 +26,8 @@ vi.mock('../../../worktree.js', () => ({
   generateWorktreePath: vi.fn(async () => '/repo/.git/worktree/test'),
   getMergedPRWorktrees: vi.fn(async () => []),
   removeWorktree: vi.fn(async () => undefined),
+  isProtectedBranchName: mockIsProtectedBranchName,
+  switchToProtectedBranch: mockSwitchToProtectedBranch,
 }));
 
 import { getAllBranches, getRepositoryRoot, deleteBranch } from '../../../git.js';
@@ -42,6 +47,8 @@ const mockedCreateWorktree = createWorktree as Mock;
 const mockedGenerateWorktreePath = generateWorktreePath as Mock;
 const mockedGetMergedPRWorktrees = getMergedPRWorktrees as Mock;
 const mockedRemoveWorktree = removeWorktree as Mock;
+const mockedIsProtectedBranchName = mockIsProtectedBranchName as Mock;
+const mockedSwitchToProtectedBranch = mockSwitchToProtectedBranch as Mock;
 
 describe('Navigation Integration Tests', () => {
   beforeEach(() => {
@@ -59,6 +66,8 @@ describe('Navigation Integration Tests', () => {
     mockedGenerateWorktreePath.mockReset();
     mockedGetMergedPRWorktrees.mockReset();
     mockedRemoveWorktree.mockReset();
+    mockedIsProtectedBranchName.mockReset();
+    mockedSwitchToProtectedBranch.mockReset();
   });
 
   const mockBranches: BranchInfo[] = [

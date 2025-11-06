@@ -19,15 +19,64 @@ import {
   branchHasUniqueCommitsComparedToBase,
   getRepositoryRoot,
   ensureGitignoreEntry,
+  branchExists,
+  getCurrentBranch,
 } from "./git.js";
 import { getConfig } from "./config/index.js";
 import { GIT_CONFIG } from "./config/constants.js";
+import { startSpinner } from "./utils/spinner.js";
 
 // Re-export WorktreeConfig for external use
 export type { WorktreeConfig };
 
 // 保護対象のブランチ（クリーンアップから除外）
-const PROTECTED_BRANCHES = ["main", "master", "develop"];
+export const PROTECTED_BRANCHES = ["main", "master", "develop"];
+
+export function isProtectedBranchName(branchName: string): boolean {
+  const normalized = branchName
+    .replace(/^refs\/heads\//, "")
+    .replace(/^origin\//, "");
+  return PROTECTED_BRANCHES.includes(normalized);
+}
+
+export async function switchToProtectedBranch({
+  branchName,
+  repoRoot,
+  remoteRef,
+}: {
+  branchName: string;
+  repoRoot: string;
+  remoteRef?: string | null;
+}): Promise<"none" | "local" | "remote"> {
+  const currentBranch = await getCurrentBranch();
+  if (currentBranch === branchName) {
+    return "none";
+  }
+
+  const runGit = async (args: string[]) => {
+    try {
+      await execa("git", args, { cwd: repoRoot });
+    } catch (error) {
+      throw new WorktreeError(
+        `Failed to execute git ${args.join(" ")} for protected branch ${branchName}`,
+        error,
+      );
+    }
+  };
+
+  if (await branchExists(branchName)) {
+    await runGit(["checkout", branchName]);
+    return "local";
+  }
+
+  const targetRemote = remoteRef ?? `origin/${branchName}`;
+  const fetchRef = targetRemote.replace(/^origin\//, "");
+
+  await runGit(["fetch", "origin", fetchRef]);
+  await runGit(["checkout", "-b", branchName, targetRemote]);
+
+  return "remote";
+}
 export class WorktreeError extends Error {
   constructor(
     message: string,
@@ -133,7 +182,7 @@ export async function generateWorktreePath(
   repoRoot: string,
   branchName: string,
 ): Promise<string> {
-  const sanitizedBranchName = branchName.replace(/[\/\\:*?"<>|]/g, "-");
+  const sanitizedBranchName = branchName.replace(/[/\\:*?"<>|]/g, "-");
   const worktreeDir = path.join(repoRoot, ".worktrees");
   return path.join(worktreeDir, sanitizedBranchName);
 }
@@ -177,16 +226,33 @@ export async function generateAlternativeWorktreePath(
  * @throws {WorktreeError} worktreeの作成に失敗した場合
  */
 export async function createWorktree(config: WorktreeConfig): Promise<void> {
+  if (isProtectedBranchName(config.branchName)) {
+    throw new WorktreeError(
+      `Branch "${config.branchName}" is protected and cannot be used to create a worktree`,
+    );
+  }
+
   try {
     const worktreeParentDir = path.dirname(config.worktreePath);
 
     try {
       await fs.mkdir(worktreeParentDir, { recursive: true });
-    } catch (error: any) {
+    } catch (error: unknown) {
+      const errorWithCode = error as { code?: unknown; message?: unknown };
+      const code =
+        errorWithCode && typeof errorWithCode.code === "string"
+          ? errorWithCode.code
+          : undefined;
+      const message =
+        error instanceof Error
+          ? error.message
+          : typeof errorWithCode?.message === "string"
+            ? errorWithCode.message
+            : String(error);
       const reason =
-        error?.code === "EEXIST"
+        code === "EEXIST"
           ? `${worktreeParentDir} already exists and is not a directory`
-          : error?.message || String(error);
+          : message;
 
       throw new WorktreeError(
         `Failed to prepare worktree directory for ${config.branchName}: ${reason}`,
@@ -208,21 +274,68 @@ export async function createWorktree(config: WorktreeConfig): Promise<void> {
       args.push(config.branchName);
     }
 
-    await execa("git", args);
+    const spinnerMessage = `Creating worktree for ${config.branchName}`;
+    let stopSpinner: (() => void) | undefined;
+
+    try {
+      stopSpinner = startSpinner(spinnerMessage);
+    } catch {
+      stopSpinner = undefined;
+    }
+
+    const stopActiveSpinner = () => {
+      if (stopSpinner) {
+        stopSpinner();
+        stopSpinner = undefined;
+      }
+    };
+
+    const gitProcess = execa("git", args);
+
+    // パイプでリアルタイムに進捗を表示する
+    const childProcess = gitProcess as typeof gitProcess & {
+      stdout?: NodeJS.ReadableStream;
+      stderr?: NodeJS.ReadableStream;
+    };
+
+    const attachStream = (
+      stream: NodeJS.ReadableStream | undefined,
+      pipeTarget: NodeJS.WriteStream,
+    ) => {
+      if (!stream) return;
+      if (typeof stream.once === "function") {
+        stream.once("data", stopActiveSpinner);
+      }
+      if (typeof stream.pipe === "function") {
+        stream.pipe(pipeTarget);
+      }
+    };
+
+    attachStream(childProcess.stdout, process.stdout);
+    attachStream(childProcess.stderr, process.stderr);
+
+    try {
+      await gitProcess;
+    } finally {
+      stopActiveSpinner();
+    }
 
     // .gitignoreに.worktrees/を追加(エラーは警告として扱う)
     try {
       await ensureGitignoreEntry(config.repoRoot, ".worktrees/");
-    } catch (error: any) {
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
       // .gitignoreの更新失敗は警告としてログに出すが、worktree作成は成功とする
-      console.warn(
-        `Warning: Failed to update .gitignore: ${error.message || error}`,
-      );
+      console.warn(`Warning: Failed to update .gitignore: ${message}`);
     }
-  } catch (error: any) {
+  } catch (error: unknown) {
     // Extract more detailed error information from git command
+    const errorOutput = (value: unknown) =>
+      typeof value === "string" && value.trim().length > 0 ? value : null;
     const gitError =
-      error?.stderr || error?.stdout || error?.message || String(error);
+      errorOutput((error as { stderr?: unknown })?.stderr) ??
+      errorOutput((error as { stdout?: unknown })?.stdout) ??
+      (error instanceof Error ? error.message : String(error));
     const errorMessage = `Failed to create worktree for ${config.branchName}\nGit error: ${gitError}`;
     throw new WorktreeError(errorMessage, error);
   }
@@ -307,7 +420,7 @@ async function getOrphanedLocalBranches({
 
     for (const localBranch of localBranches) {
       // 保護対象ブランチはスキップ
-      if (PROTECTED_BRANCHES.includes(localBranch.name)) {
+      if (isProtectedBranchName(localBranch.name)) {
         if (process.env.DEBUG_CLEANUP) {
           console.log(
             chalk.yellow(
@@ -456,7 +569,7 @@ export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
 
   for (const worktree of worktreesWithPR) {
     // 保護対象ブランチはスキップ
-    if (PROTECTED_BRANCHES.includes(worktree.branch)) {
+    if (isProtectedBranchName(worktree.branch)) {
       if (process.env.DEBUG_CLEANUP) {
         console.log(
           chalk.yellow(`Debug: Skipping protected branch ${worktree.branch}`),

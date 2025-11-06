@@ -72,6 +72,7 @@ export interface SelectedBranchState {
   name: string;
   displayName: string;
   branchType: "local" | "remote";
+  branchCategory: BranchInfo["branchType"];
   remoteBranch?: string;
 }
 
