@@ -11,7 +11,7 @@ vi.mock("node:fs", () => ({
   existsSync: vi.fn(() => true),
 }));
 
-const mkdirMock = vi.fn(async () => undefined);
+const mkdirMock = vi.hoisted(() => vi.fn(async () => undefined));
 
 vi.mock("node:fs/promises", async () => {
   const actual =
