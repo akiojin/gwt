@@ -76,6 +76,29 @@ The tool presents an interactive interface with the following options:
 
 ## Advanced Workflows
 
+### Branch Strategy
+
+This repository follows a structured branching strategy:
+
+- **`main`**: Production-ready code. Protected branch for releases only.
+- **`develop`**: Integration branch for features. All feature branches merge here.
+- **`feature/*`**: New features and enhancements. **Must be based on and target `develop`**.
+- **`hotfix/*`**: Critical production fixes. Based on and target `main`.
+- **`release/*`**: Release preparation branches.
+
+**Important**: When creating feature branches, always use `develop` as the base branch:
+
+```bash
+# Correct: Create feature branch from develop
+git checkout develop
+git pull origin develop
+git checkout -b feature/my-feature
+
+# Or use this tool which handles it automatically
+claude-worktree
+# → Select "Create new branch" → "feature" → automatically uses develop as base
+```
+
 ### Branch Creation Workflow
 
 > **Important**: This workflow is intended for human developers. Autonomous agents must never create or delete branches unless a human gives explicit, task-specific instructions.
@@ -83,7 +106,7 @@ The tool presents an interactive interface with the following options:
 1. Select "Create new branch" from the main menu
 2. Choose branch type (feature, hotfix, release)
 3. Enter branch name with automatic prefix application
-4. Select base branch from available options
+4. Select base branch from available options (feature → develop, hotfix → main)
 5. Confirm worktree creation path
 6. Automatic worktree setup and selected tool launch
 
