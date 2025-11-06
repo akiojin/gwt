@@ -1,3 +1,9 @@
+## [1.21.3](https://github.com/akiojin/claude-worktree/compare/v1.21.2...v1.21.3) (2025-11-06)
+
+### Bug Fixes
+
+- ensure worktree directory exists before creation ([ea78df2](https://github.com/akiojin/claude-worktree/commit/ea78df27421bddb7cb3148fc2c9bebad81ad74aa))
+
 ## [1.21.2](https://github.com/akiojin/claude-worktree/compare/v1.21.1...v1.21.2) (2025-11-06)
 
 ### Bug Fixes
