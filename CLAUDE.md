@@ -73,6 +73,14 @@
 
 - README.mdには設計などは書いてはいけない。プロジェクトの説明やディレクトリ構成などの説明のみに徹底する。設計などは、適切なファイルへのリンクを書く。
 
+## リリースワークフロー
+
+- リリースは develop → main への手動マージでトリガーされる
+- feature/* ブランチは develop へマージ（Auto Merge）
+- develop での蓄積後、`/release` コマンドで develop → main マージ＋リリース実行
+- リリースコマンド: Claude Code で `/release` 実行、または `gh workflow run release-trigger.yml --ref develop -f confirm=release`
+- mainブランチへのpush時に semantic-release が自動実行され、npm公開とGitHubリリースを作成
+
 ## 最近の変更
 
 ### 2025-01-06: Codex CLI対応機能の計画
@@ -80,3 +88,9 @@
 - worktree起動時にClaude CodeとCodex CLIを選択可能にする機能を計画中
 - 詳細: `/specs/001-codex-cli-worktree/`
 - 技術スタック: Bun 1.0+, TypeScript, inquirer（必要に応じてNode.js 18+を併用）
+
+### 2025-01-06: リリースフロー変更
+
+- develop ブランチを導入し、手動リリースフローに移行
+- feature → develop (Auto Merge) → /release → main → リリース
+- 詳細: `.github/workflows/release-trigger.yml`, `.claude/commands/release.md`

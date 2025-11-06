@@ -105,15 +105,16 @@ claude-worktree -v
 - **自動マージ**: すべてのCIチェック（Test、Lint）が成功し、競合がない場合、PRを自動的にマージ
 - **マージ方法**: マージコミットを使用して完全なコミット履歴を保持
 - **スマートスキップロジック**: ドラフトPR、競合のあるPR、CI失敗時は自動的にスキップ
-- **対象ブランチ**: `main`および`develop`ブランチへのPRで有効
+- **対象ブランチ**: `develop`ブランチへのPRで有効（機能統合）
 - **安全第一**: ブランチ保護ルールを尊重し、CI成功を必須条件とする
 
 **動作の仕組み:**
 
-1. `main`または`develop`を対象とするPRを作成
+1. `develop`を対象とするPRを作成
 2. CIワークフロー（Test、Lint）が自動実行
-3. すべてのCIチェックが成功し、競合がない場合、PRが自動的にマージされる
-4. 手動介入は不要 - PRを作成してCIに任せるだけ
+3. すべてのCIチェックが成功し、競合がない場合、PRが自動的に`develop`にマージされる
+4. 変更は`develop`に蓄積され、リリース準備ができるまで待機
+5. `/release`コマンドを使用して`develop`を`main`にマージし、semantic-releaseをトリガー
 
 **自動マージの無効化:**
 
@@ -268,6 +269,139 @@ bun run start
   }
 }
 ```
+
+## リリースプロセス
+
+このプロジェクトは **semantic-release** を使用して、自動的なバージョン管理、CHANGELOG生成、npm公開を行っています。リリースプロセスは develop-to-main ワークフローに従い、準備ができたタイミングで手動でトリガーされます。
+
+### リリースワークフロー
+
+```
+feature/* → PR → develop (自動マージ) → テスト/ビルド
+                                        ↓ (手動トリガー)
+                             /release コマンド → develop→main → リリース
+```
+
+### リリースの仕組み
+
+1. **開発**: featureブランチを作成し、PRを通じて`develop`にマージ
+2. **自動マージ**: CIが成功すると、PRは自動的に`develop`にマージされる
+3. **テスト**: `develop`ブランチで変更がテスト・ビルドされる
+4. **手動リリース**: リリース準備ができたら、Claude Codeで`/release`コマンドを実行
+5. **自動処理**: リリースワークフローが以下を実行:
+   - `develop`を`main`にマージ
+   - テストとビルドを実行
+   - semantic-releaseがコミットを分析してバージョンを決定
+     - `feat:` → マイナーバージョン (1.0.0 → 1.1.0)
+     - `fix:` → パッチバージョン (1.0.0 → 1.0.1)
+     - `BREAKING CHANGE:` → メジャーバージョン (1.0.0 → 2.0.0)
+   - CHANGELOG.mdを生成
+   - npmレジストリに公開
+   - リリースノート付きのGitHubリリースを作成
+
+### Conventional Commits
+
+semantic-releaseはコミットメッセージを使用してリリースタイプを決定します:
+
+| タイプ                                                | 説明         | バージョンへの影響        |
+| ----------------------------------------------------- | ------------ | ------------------------- |
+| `feat:`                                               | 新機能       | マイナー (1.0.0 → 1.1.0)  |
+| `fix:`                                                | バグ修正     | パッチ (1.0.0 → 1.0.1)    |
+| `BREAKING CHANGE:`                                    | 破壊的変更   | メジャー (1.0.0 → 2.0.0)  |
+| `chore:`, `docs:`, `style:`, `refactor:`, `test:`    | リリースなし | -                         |
+
+**コミット例**:
+
+```bash
+# 機能追加（マイナーリリース）
+git commit -m "feat: セッション管理機能を追加"
+
+# バグ修正（パッチリリース）
+git commit -m "fix: Dockerパス処理の問題を解決"
+
+# 破壊的変更（メジャーリリース）
+git commit -m "feat!: Bun 1.0+を必須に
+
+BREAKING CHANGE: npxサポートを削除、bunxが必須"
+```
+
+### 設定ファイル
+
+#### .releaserc.json
+
+semantic-releaseの設定ファイルはリリースプロセスを定義します:
+
+```json
+{
+  "branches": ["main"],
+  "tagFormat": "v${version}",
+  "plugins": [
+    "@semantic-release/commit-analyzer",
+    "@semantic-release/release-notes-generator",
+    "@semantic-release/changelog",
+    "@semantic-release/npm",
+    "@semantic-release/git",
+    "@semantic-release/github"
+  ]
+}
+```
+
+詳細な設定仕様については、[specs/SPEC-23bb2eed/data-model.md](./specs/SPEC-23bb2eed/data-model.md)を参照してください。
+
+#### GitHub Actionsワークフロー
+
+**リリーストリガーワークフロー** (`.github/workflows/release-trigger.yml`)
+
+`develop`を`main`にマージする手動トリガーワークフロー:
+
+- `/release`コマンド（Claude Code）または`gh workflow run release-trigger.yml --ref develop -f confirm=release`で起動
+- `develop`ブランチを`main`にマージ（可能ならfast-forward、不可能ならマージコミット）
+- `main`へpushし、Releaseワークフローをトリガー
+
+**リリースワークフロー** (`.github/workflows/release.yml`)
+
+`main`にコミットがpushされたときに自動実行:
+
+1. テストを実行 (`bun run test`)
+2. プロジェクトをビルド (`bun run build`)
+3. semantic-releaseを実行（バージョン、CHANGELOG、公開）
+
+> **必要なシークレット:**
+> - `NPM_TOKEN` – `automation`スコープを持つnpm公開トークン
+> - `SEMANTIC_RELEASE_TOKEN` – `repo`スコープを持つGitHub個人アクセストークン（classic）。シークレット登録後、トークン所有ユーザー、または「Allow GitHub Actions to bypass branch protection」を`main`ブランチ保護ルールに設定し、リリースコミットのpushが拒否されないようにしてください。シークレットが存在しない場合、ワークフローは早期に失敗します。
+
+### /releaseコマンドの使用
+
+Claude Codeからリリースプロセスを実行:
+
+1. `develop`ブランチ、またはClaude Codeコマンドにアクセスできる任意のブランチにいることを確認
+2. `/release`コマンドを実行
+3. Claude CodeがGitHub Actionsワークフローをトリガー
+4. GitHub Actions UIでワークフローの進行状況を監視
+5. semantic-releaseがリリース可能なコミットを検出すると、自動的にリリースが公開される
+
+または、gh CLIで手動トリガー:
+
+```bash
+gh workflow run release-trigger.yml --ref develop -f confirm=release
+```
+
+### 手動検証
+
+リリース設定をローカルで検証するには:
+
+```bash
+# 設定をテストするためのドライラン
+node node_modules/semantic-release/bin/semantic-release.js --dry-run
+```
+
+> **注意:** semantic-release v25はプロジェクト自体がBunを使用している場合でもNode.js 22.14+を必要とします。GitHub Actionsワークフローは自動的にこのバージョンをインストールします。上記コマンドを実行する前にローカルでも同じバージョンを使用してください。
+
+### リソース
+
+- [semantic-releaseドキュメント](https://semantic-release.gitbook.io/)
+- [Conventional Commits仕様](https://www.conventionalcommits.org/)
+- [リリースプロセスガイド](./specs/SPEC-23bb2eed/quickstart.md)
 
 ## トラブルシューティング
 
