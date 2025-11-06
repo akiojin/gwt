@@ -8,13 +8,17 @@ RUN apt-get update && apt-get install -y \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Global tools with bun
-RUN npm i -g \
-    npm@latest \
+# Install pnpm first
+RUN npm i -g pnpm@latest
+
+# Global tools with pnpm
+RUN pnpm add -g \
     bun@latest \
     typescript@latest \
     eslint@latest \
-    prettier@latest 
+    prettier@latest \
+    @commitlint/cli@latest \
+    @commitlint/config-conventional@latest 
 
 # Install uv/uvx
 RUN curl -fsSL https://astral.sh/uv/install.sh | bash

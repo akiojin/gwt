@@ -12,6 +12,11 @@ package-lock.json
 yarn-debug.log*
 yarn-error.log*
 
+# pnpm
+pnpm-lock.yaml
+.pnpm-store/
+.pnpm-debug.log*
+
 # Build output
 dist/
 build/

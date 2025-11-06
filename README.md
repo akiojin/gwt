@@ -125,6 +125,7 @@ For technical details, see [specs/SPEC-cff08403/](specs/SPEC-cff08403/).
 
 - **Bun**: >= 1.0.0
 - **Node.js** (optional): Recommended >= 18.0.0 when working with Node-based tooling
+- **pnpm**: >= 8.0.0 (for CI/CD and Docker environments - uses hardlinked node_modules)
 - **Git**: Latest version with worktree support
 - **AI Tool**: At least one of Claude Code or Codex CLI should be available
 - **GitHub CLI**: Required for PR cleanup features (optional)

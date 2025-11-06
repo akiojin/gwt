@@ -48,7 +48,7 @@
 - ビルド: `bun run build`
 - 実行: `bunx .`（一発実行）または `bun run start`
 - グローバル実行: `bun add -g @akiojin/claude-worktree` → `claude-worktree`
-- npm/pnpm は使用しない（ドキュメント・ログにも記載しない）
+- CI/CD・Docker環境ではpnpmを使用（ハードリンクによるnode_modules効率化のため）
 
 ## コミュニケーションガイドライン
 
