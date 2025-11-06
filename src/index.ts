@@ -7,6 +7,7 @@ import {
   fetchAllRemotes,
   pullFastForward,
   getBranchDivergenceStatuses,
+  getCurrentBranch,
 } from "./git.js";
 import { launchClaudeCode } from "./claude.js";
 import { launchCodexCLI } from "./codex.js";
@@ -16,13 +17,17 @@ import {
 } from "./services/WorktreeOrchestrator.js";
 import chalk from "chalk";
 import type { SelectionResult } from "./ui/components/App.js";
-import { worktreeExists } from "./worktree.js";
-import { getTerminalStreams, waitForUserAcknowledgement } from "./utils/terminal.js";
+import { worktreeExists, isProtectedBranchName } from "./worktree.js";
+import {
+  getTerminalStreams,
+  waitForUserAcknowledgement,
+} from "./utils/terminal.js";
 import { getToolById } from "./config/tools.js";
 import { launchCustomAITool } from "./launcher.js";
 import { saveSession } from "./config/index.js";
 import { getPackageVersion } from "./utils.js";
 import readline from "node:readline";
+import { execa } from "execa";
 
 const ERROR_PROMPT = chalk.yellow(
   "エラー内容を確認したら Enter キーを押してください。",
@@ -45,6 +50,47 @@ function printInfo(message: string): void {
 
 function printWarning(message: string): void {
   console.warn(chalk.yellow(`⚠️  ${message}`));
+}
+
+async function checkoutProtectedBranch(
+  repoRoot: string,
+  branch: string,
+  remoteBranch?: string | null,
+): Promise<"none" | "local" | "remote"> {
+  const currentBranch = await getCurrentBranch();
+  if (currentBranch === branch) {
+    return "none";
+  }
+
+  const runGit = async (args: string[]) => {
+    try {
+      await execa("git", args, { cwd: repoRoot });
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error ? error.message : String(error ?? "");
+      throw new Error(
+        `Failed to execute 'git ${args.join(" ")}' while preparing protected branch "${branch}": ${message}`,
+      );
+    }
+  };
+
+  const localExists = await branchExists(branch);
+  if (localExists) {
+    await runGit(["checkout", branch]);
+    return "local";
+  }
+
+  if (remoteBranch) {
+    const remoteRef = remoteBranch;
+    const fetchRef = remoteRef.replace(/^origin\//, "");
+    await runGit(["fetch", "origin", fetchRef]);
+    await runGit(["checkout", "-b", branch, remoteRef]);
+    return "remote";
+  }
+
+  throw new Error(
+    `Protected branch "${branch}" does not exist locally and no remote reference was provided.`,
+  );
 }
 
 async function waitForEnter(promptMessage: string): Promise<void> {
@@ -147,7 +193,7 @@ async function mainInkUI(): Promise<SelectionResult | undefined> {
 /**
  * Handle AI tool workflow
  */
-async function handleAIToolWorkflow(
+export async function handleAIToolWorkflow(
   selectionResult: SelectionResult,
 ): Promise<void> {
   const {
@@ -180,6 +226,20 @@ async function handleAIToolWorkflow(
       ensureOptions.isNewBranch = !localExists;
     }
 
+    const isProtectedBranch =
+      isProtectedBranchName(branch) ||
+      (remoteBranch ? isProtectedBranchName(remoteBranch) : false);
+
+    let protectedCheckoutResult: "none" | "local" | "remote" = "none";
+    if (isProtectedBranch) {
+      protectedCheckoutResult = await checkoutProtectedBranch(
+        repoRoot,
+        branch,
+        remoteBranch,
+      );
+      ensureOptions.isNewBranch = false;
+    }
+
     const orchestrator = new WorktreeOrchestrator();
 
     const existingWorktree = await worktreeExists(branch);
@@ -191,7 +251,19 @@ async function handleAIToolWorkflow(
       ensureOptions,
     );
 
-    if (existingWorktree) {
+    if (isProtectedBranch) {
+      if (protectedCheckoutResult === "remote" && remoteBranch) {
+        printInfo(
+          `Created local tracking branch '${branch}' from ${remoteBranch} in repository root.`,
+        );
+      } else if (protectedCheckoutResult === "local") {
+        printInfo(
+          `Checked out protected branch '${branch}' in repository root.`,
+        );
+      } else {
+        printInfo(`Using repository root for protected branch '${branch}'.`);
+      }
+    } else if (existingWorktree) {
       printInfo(`Reusing existing worktree: ${existingWorktree}`);
     } else if (ensureOptions.isNewBranch) {
       const base = ensureOptions.baseBranch ?? "";
@@ -208,7 +280,8 @@ async function handleAIToolWorkflow(
       await pullFastForward(worktreePath);
       printInfo(`Fast-forward pull finished for ${branch}.`);
     } catch (error) {
-      fastForwardError = error instanceof Error ? error : new Error(String(error));
+      fastForwardError =
+        error instanceof Error ? error : new Error(String(error));
       printWarning(
         `Fast-forward pull failed for ${branch}. Checking for divergence before continuing...`,
       );
@@ -243,14 +316,17 @@ async function handleAIToolWorkflow(
         "Potential merge conflicts detected when pulling the following local branches:",
       );
 
-      divergedBranches.forEach(({ branch: divergedBranch, remoteAhead, localAhead }) => {
-        const highlight = divergedBranch === branch ? " (selected branch)" : "";
-        console.warn(
-          chalk.yellow(
-            `   • ${divergedBranch}${highlight}  remote:+${remoteAhead}  local:+${localAhead}`,
-          ),
-        );
-      });
+      divergedBranches.forEach(
+        ({ branch: divergedBranch, remoteAhead, localAhead }) => {
+          const highlight =
+            divergedBranch === branch ? " (selected branch)" : "";
+          console.warn(
+            chalk.yellow(
+              `   • ${divergedBranch}${highlight}  remote:+${remoteAhead}  local:+${localAhead}`,
+            ),
+          );
+        },
+      );
 
       printWarning(
         "Resolve these divergences (e.g., rebase or merge) before launching to avoid conflicts.",
@@ -381,7 +457,7 @@ export async function main(): Promise<void> {
       try {
         await handleAIToolWorkflow(selectionResult);
         // After AI tool completes, loop back to UI
-      } catch (error) {
+      } catch {
         // Error during workflow, but don't exit - return to UI
         printError("Workflow error, returning to main menu...");
         await waitForErrorAcknowledgement();
