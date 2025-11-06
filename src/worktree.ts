@@ -1,4 +1,5 @@
 import { execa } from "execa";
+import fs from "node:fs/promises";
 import path from "node:path";
 import chalk from "chalk";
 import {
@@ -177,6 +178,22 @@ export async function generateAlternativeWorktreePath(
  */
 export async function createWorktree(config: WorktreeConfig): Promise<void> {
   try {
+    const worktreeParentDir = path.dirname(config.worktreePath);
+
+    try {
+      await fs.mkdir(worktreeParentDir, { recursive: true });
+    } catch (error: any) {
+      const reason =
+        error?.code === "EEXIST"
+          ? `${worktreeParentDir} already exists and is not a directory`
+          : error?.message || String(error);
+
+      throw new WorktreeError(
+        `Failed to prepare worktree directory for ${config.branchName}: ${reason}`,
+        error,
+      );
+    }
+
     const args = ["worktree", "add"];
 
     if (config.isNewBranch) {
