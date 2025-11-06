@@ -11,11 +11,26 @@ vi.mock("node:fs", () => ({
   existsSync: vi.fn(() => true),
 }));
 
+const mkdirMock = vi.fn(async () => undefined);
+
+vi.mock("node:fs/promises", async () => {
+  const actual =
+    await vi.importActual<typeof import("node:fs/promises")>(
+      "node:fs/promises",
+    );
+
+  return {
+    ...actual,
+    mkdir: mkdirMock,
+  };
+});
+
 import { execa } from "execa";
 
 describe("Integration: Branch Selection to Worktree Creation", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mkdirMock.mockClear();
   });
 
   afterEach(() => {

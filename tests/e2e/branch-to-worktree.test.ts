@@ -9,6 +9,20 @@ vi.mock("node:fs", () => ({
   existsSync: vi.fn(() => true),
 }));
 
+const mkdirMock = vi.fn(async () => undefined);
+
+vi.mock("node:fs/promises", async () => {
+  const actual =
+    await vi.importActual<typeof import("node:fs/promises")>(
+      "node:fs/promises",
+    );
+
+  return {
+    ...actual,
+    mkdir: mkdirMock,
+  };
+});
+
 import { execa } from "execa";
 import * as git from "../../src/git";
 import * as worktree from "../../src/worktree";
@@ -18,6 +32,7 @@ const stripAnsi = (value: string) => value.replace(/\u001B\[[0-9;]*m/g, "");
 describe("E2E: Complete Branch to Worktree Flow", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mkdirMock.mockClear();
   });
 
   afterEach(() => {
