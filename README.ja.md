@@ -126,6 +126,7 @@ claude-worktree -v
 
 - **Bun**: >= 1.0.0
 - **Node.js**（任意）: Nodeベースの開発ツール利用時は >= 18.0.0 を推奨
+- **pnpm**: >= 8.0.0（CI/CD・Docker環境用 - ハードリンクによるnode_modules効率化）
 - **Git**: ワークツリーサポート付き最新版
 - **AIツール**: 少なくともいずれかが必要（Claude Code もしくは Codex CLI）
 - **GitHub CLI**: PR クリーンアップ機能に必要（オプション）
