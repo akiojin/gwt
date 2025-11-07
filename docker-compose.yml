@@ -8,13 +8,12 @@ services:
       - ./.docker/bash_history:/root/.bash_history
       - claude-config:/root/.claude
       - codex-config:/root/.codex
-      - ~/.codex/auth.json:/root/.codex/auth.json
+      - ${HOME:-~}/.codex:/root/.codex-host:ro
+      - ~/.serena:/root/.serena
     environment:
       - NPM_USER
       - NPM_EMAIL
       - NPM_PASS
-      - OPENAI_API_KEY
-      - ANTHROPIC_API_KEY
       - GITHUB_TOKEN
       - GITHUB_PERSONAL_ACCESS_TOKEN
       - GITHUB_USERNAME

@@ -11,6 +11,15 @@ RUN apt-get update && apt-get install -y \
 # Install pnpm first
 RUN npm i -g pnpm@latest
 
+# Setup pnpm global bin directory manually
+ENV PNPM_HOME="/root/.local/share/pnpm"
+ENV PATH="$PNPM_HOME:$PATH"
+
+RUN mkdir -p "$PNPM_HOME" && \
+    pnpm config set global-bin-dir "$PNPM_HOME" && \
+    echo 'export PNPM_HOME="/root/.local/share/pnpm"' >> /root/.bashrc && \
+    echo 'export PATH="$PNPM_HOME:$PATH"' >> /root/.bashrc
+
 # Global tools with pnpm
 RUN pnpm add -g \
     bun@latest \

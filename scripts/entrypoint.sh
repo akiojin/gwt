@@ -26,10 +26,28 @@ if [ -n "$GITHUB_TOKEN" ] && command -v gh &> /dev/null; then
     echo "$GITHUB_TOKEN" | gh auth login --with-token 2>/dev/null || true
 fi
 
-# プロジェクトディレクトリに移動
-cd /claude-worktree
+# .codexディレクトリのセットアップ
+# auth.jsonをホストと同期（クロスプラットフォーム対応）
+if [ -f /root/.codex-host/auth.json ]; then
+    # auth.jsonが誤ってディレクトリとして作成されている場合は削除
+    if [ -d /root/.codex/auth.json ]; then
+        echo "⚠️  Removing incorrectly created auth.json directory"
+        rm -rf /root/.codex/auth.json
+    fi
 
-echo "🚀 Claude Worktree Docker environment is ready!"
+    # ホストのauth.jsonが存在しない、または空、またはホスト側が新しい場合はコピー
+    if [ ! -f /root/.codex/auth.json ] || [ ! -s /root/.codex/auth.json ] || [ /root/.codex-host/auth.json -nt /root/.codex/auth.json ]; then
+        cp /root/.codex-host/auth.json /root/.codex/auth.json
+        chmod 600 /root/.codex/auth.json
+        echo "✅ Codex auth.json synced from host"
+    else
+        echo "✅ Codex auth.json is up to date"
+    fi
+else
+    echo "ℹ️  INFO: Codex auth.json not found on host (optional)"
+fi
+
+echo "🚀 Docker environment is ready!"
 echo ""
 
 # コマンドの実行（デフォルトはbash）
