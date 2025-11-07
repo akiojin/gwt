@@ -34,16 +34,20 @@ jobs:
 
       - name: Configure git credentials
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_RELEASE_TOKEN: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
         run: |
+          if [ -z "$GH_RELEASE_TOKEN" ]; then
+            echo "SEMANTIC_RELEASE_TOKEN secret is not configured"
+            exit 1
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
+          git remote set-url origin "https://x-access-token:${GH_RELEASE_TOKEN}@github.com/${{ github.repository }}.git"
 
       - name: Run semantic-release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
+          GH_TOKEN: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           HUSKY: 0
           GIT_AUTHOR_NAME: github-actions[bot]
@@ -55,7 +59,7 @@ jobs:
       - name: Sync develop branch
         if: success()
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
         run: |
           set -euo pipefail
           git fetch origin main:main
