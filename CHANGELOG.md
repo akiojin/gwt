@@ -1,3 +1,19 @@
+# [1.25.0](https://github.com/akiojin/claude-worktree/compare/v1.24.2...v1.25.0) (2025-11-07)
+
+
+### Bug Fixes
+
+* disable husky in release workflow ([a5e1548](https://github.com/akiojin/claude-worktree/commit/a5e1548852b72007faec1735983ea52edacd7205))
+* Docker環境でのpnpmセットアップとプロジェクトビルドを修正 ([a5b40f3](https://github.com/akiojin/claude-worktree/commit/a5b40f35d4b3f43efa475e4e91905908a7bce9e9))
+* update Dockerfile to use npm for global tool installation ([25b0410](https://github.com/akiojin/claude-worktree/commit/25b04108cda872c10c07f91fa8211b08c99aa1c7))
+* use node 22 for release workflow ([cb05bea](https://github.com/akiojin/claude-worktree/commit/cb05bea7eaacc807587efb8652b8612865e19e24))
+* use PAT for release pushes ([ef8027b](https://github.com/akiojin/claude-worktree/commit/ef8027be707e505b99464959118f1ada73e0b9f9))
+
+
+### Features
+
+* orchestrate release branch auto merge flow ([82e19aa](https://github.com/akiojin/claude-worktree/commit/82e19aa2a344f8d1022bd21b58639bf942e6cd50))
+
 ## [1.24.2](https://github.com/akiojin/claude-worktree/compare/v1.24.1...v1.24.2) (2025-11-07)
 
 ### Bug Fixes
