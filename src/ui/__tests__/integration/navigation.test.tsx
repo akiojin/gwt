@@ -19,10 +19,8 @@ vi.mock('../../../git.js', () => ({
   deleteBranch: vi.fn(async () => undefined),
 }));
 
-const { mockIsProtectedBranchName, mockSwitchToProtectedBranch } = vi.hoisted(() => ({
-  mockIsProtectedBranchName: vi.fn(() => false),
-  mockSwitchToProtectedBranch: vi.fn(async () => 'none' as const),
-}));
+const mockIsProtectedBranchName = vi.fn(() => false);
+const mockSwitchToProtectedBranch = vi.fn(async () => 'none' as const);
 
 vi.mock('../../../worktree.js', () => ({
   __esModule: true,

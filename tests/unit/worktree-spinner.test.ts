@@ -1,26 +1,18 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { PassThrough } from "node:stream";
 
-const { execaMock } = vi.hoisted(() => ({
-  execaMock: vi.fn(),
-}));
-
+// execa を事前にモック
 vi.mock("execa", () => ({
-  execa: execaMock,
+  execa: vi.fn(),
 }));
 
 describe("worktree spinner integration", () => {
   beforeEach(() => {
-    if (
-      typeof (vi as { resetModules?: () => void }).resetModules === "function"
-    ) {
-      (vi as { resetModules: () => void }).resetModules();
-    }
+    vi.clearAllMocks();
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
-    execaMock.mockReset();
   });
 
   it("should start and stop spinner during worktree creation", async () => {
@@ -37,6 +29,8 @@ describe("worktree spinner integration", () => {
     const gitModule = await import("../../src/git.js");
     vi.spyOn(gitModule, "ensureGitignoreEntry").mockResolvedValue(undefined);
 
+    const execaModule = await import("execa");
+    const execaMock = execaModule.execa as any as ReturnType<typeof vi.fn>;
     execaMock.mockImplementation(() => {
       let resolvePromise: (value: unknown) => void = () => {};
       const stdout = new PassThrough();
