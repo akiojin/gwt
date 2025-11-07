@@ -74,11 +74,12 @@
 
 ## リリースワークフロー
 
-- feature/\* ブランチは引き続き develop へ Auto Merge し、develop で次回リリース候補を蓄積する。
-- `/release` コマンド（または `gh workflow run release-trigger.yml --ref develop -f confirm=release` / `scripts/create-release-pr.sh`）で develop → main のリリースPRを作成/更新し、Requiredチェックを条件に Auto Merge を設定する。
-- main への直接 push は禁止し、リリースPRがマージされたタイミングでのみ main が更新される。
-- `.github/workflows/release.yml` は main への push をトリガーに `npm ci` → semantic-release → CHANGELOG/タグ作成 → GitHub Release → npm publish（設定時）→ develop への自動バックマージを実行する。
-- semantic-release で発行されたリリースコミットは同じワークフロー内で develop にも取り込まれる。コンフリクト時は自動生成される sync PR をレビューして解消する。
+- feature/\* ブランチは develop へ Auto Merge し、develop で次回リリース候補を蓄積する。
+- `/release` コマンド（または `gh workflow run create-release.yml --ref develop`）で semantic-release のドライランを実行し、次のバージョンを決定して `release/vX.Y.Z` ブランチを自動作成する。
+- `release/vX.Y.Z` ブランチへの push をトリガーに `.github/workflows/release.yml` が semantic-release を実行し、CHANGELOG/タグ/GitHub Release を作成後、`release/vX.Y.Z` → `main` の PR を自動作成する。
+- `.github/workflows/auto-merge.yml` が PR に auto-merge を設定し、Required チェック通過後に自動的に main へマージされる。
+- main への push をトリガーに `.github/workflows/publish.yml` が npm publish（設定時）と develop への自動バックマージを実行する。
+- バックマージ時のコンフリクトは自動生成される `sync/main-to-develop-<timestamp>` PR で解消する。
 
 ## 最近の変更
 
@@ -87,6 +88,13 @@
 - worktree起動時にClaude CodeとCodex CLIを選択可能にする機能を計画中
 - 詳細: `/specs/001-codex-cli-worktree/`
 - 技術スタック: Bun 1.0+, TypeScript, inquirer（必要に応じてNode.js 18+を併用）
+
+### 2025-01-07: リリースフロー完全自動化（unity-mcp-server型）
+
+- unity-mcp-server の3段階リリースフロー（develop → release/v* → main）を完全導入
+- semantic-release を release/* ブランチで実行し、main は常にクリーンな状態を維持
+- リリースPRの自動作成・自動マージ機能を実装
+- 詳細: `.github/workflows/create-release.yml`, `.github/workflows/release.yml`, `.github/workflows/publish.yml`, `.github/workflows/auto-merge.yml`
 
 ### 2025-01-06: リリースフロー変更
 
