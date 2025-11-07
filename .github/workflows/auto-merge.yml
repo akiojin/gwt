@@ -1,7 +1,7 @@
-name: Auto Merge PR
+name: Auto Merge
 
 on:
-  pull_request_target:
+  pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     branches:
       - main
@@ -15,11 +15,25 @@ jobs:
   auto-merge:
     name: Enable Auto Merge
     runs-on: ubuntu-latest
-    if: github.event.pull_request.draft == false
+    if: ${{ !github.event.pull_request.draft }}
 
     steps:
       - name: Enable auto-merge
         env:
           GH_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
-          gh pr merge --auto --merge ${{ github.event.pull_request.number }} --repo ${{ github.repository }}
+          gh pr merge --auto --merge "${{ github.event.pull_request.number }}" \
+            --repo "${{ github.repository }}"
+
+      - name: Summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY <<EOF
+          ## Auto Merge Enabled
+
+          - **PR**: #${{ github.event.pull_request.number }}
+          - **Title**: ${{ github.event.pull_request.title }}
+          - **Base**: ${{ github.event.pull_request.base.ref }}
+          - **Head**: ${{ github.event.pull_request.head.ref }}
+
+          The PR will automatically merge when all required checks pass.
+          EOF
