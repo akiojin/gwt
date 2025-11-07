@@ -2,7 +2,8 @@ name: Release
 
 on:
   push:
-    branches: [main]
+    branches: [release]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -11,8 +12,8 @@ permissions:
   id-token: write
 
 jobs:
-  release:
-    name: Release
+  lint:
+    name: lint
     runs-on: ubuntu-latest
 
     steps:
@@ -20,25 +21,40 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          persist-credentials: false
-          ref: main
+          ref: ${{ github.ref }}
 
-      - name: Configure git credentials
-        env:
-          GH_RELEASE_TOKEN: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
-        run: |
-          if [ -z "$GH_RELEASE_TOKEN" ]; then
-            echo "SEMANTIC_RELEASE_TOKEN secret is not configured"
-            exit 1
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git remote set-url origin "https://x-access-token:${GH_RELEASE_TOKEN}@github.com/${{ github.repository }}.git"
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
 
-      - name: Ensure on main branch
-        run: |
-          git checkout main
-          git pull origin main
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.14.0"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Run lint
+        run: bun run lint
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    needs: lint
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref }}
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -61,6 +77,49 @@ jobs:
       - name: Run tests
         run: bun run test
 
+  semantic-release:
+    name: semantic-release
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref }}
+          persist-credentials: false
+
+      - name: Configure git credentials
+        env:
+          GH_RELEASE_TOKEN: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
+        run: |
+          if [ -z "$GH_RELEASE_TOKEN" ]; then
+            echo "SEMANTIC_RELEASE_TOKEN secret is not configured"
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${GH_RELEASE_TOKEN}@github.com/${{ github.repository }}.git"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.14.0"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: latest
+
+      - name: Install dependencies
+        run: bun install
+
       - name: Build
         run: bun run build
 
@@ -79,3 +138,10 @@ jobs:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           node node_modules/semantic-release/bin/semantic-release.js
+      
+      - name: Summary
+        run: |
+          echo "## Release workflow" >> $GITHUB_STEP_SUMMARY
+          echo "- Branch: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Semantic-release executed with required checks (lint/test/semantic-release)" >> $GITHUB_STEP_SUMMARY
+          echo "- Ensure release→main PR auto-merge completes after this run" >> $GITHUB_STEP_SUMMARY

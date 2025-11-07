@@ -334,7 +334,14 @@ semantic-releaseの設定ファイルはリリースプロセスを定義しま�
 
 ```json
 {
-  "branches": ["main"],
+  "branches": [
+    "release",
+    {
+      "name": "main",
+      "channel": "main",
+      "prerelease": false
+    }
+  ],
   "tagFormat": "v${version}",
   "plugins": [
     "@semantic-release/commit-analyzer",
@@ -353,33 +360,33 @@ semantic-releaseの設定ファイルはリリースプロセスを定義しま�
 
 **リリーストリガーワークフロー** (`.github/workflows/release-trigger.yml`)
 
-`develop`を`main`にマージする手動トリガーワークフロー:
+`develop`を `release` ブランチへ同期し、release→main PR を自動化する手動トリガーワークフロー:
 
-- `/release`コマンド（Claude Code）または`gh workflow run release-trigger.yml --ref develop -f confirm=release`で起動
-- `develop`ブランチを`main`にマージ（可能ならfast-forward、不可能ならマージコミット）
-- `main`へpushし、Releaseワークフローをトリガー
+- `/release`コマンド（Claude Code）または `gh workflow run release-trigger.yml --ref develop -f confirm=release` で起動
+- `git push origin develop:release --force-with-lease` で release ブランチを最新化し、main との差分ログを記録
+- release→main の PR を作成/更新し、`release` / `auto-merge` ラベルと Required チェック（lint/test/semantic-release）のみを条件とした Auto Merge を設定
 
 **リリースワークフロー** (`.github/workflows/release.yml`)
 
-`main`にコミットがpushされたときに自動実行:
+`release` にコミットが push されたとき（または手動トリガー時）に自動実行:
 
-1. テストを実行 (`bun run test`)
-2. プロジェクトをビルド (`bun run build`)
-3. semantic-releaseを実行（バージョン、CHANGELOG、公開）
+1. **lint ジョブ** – 依存関係をインストールし `bun run lint` を実行
+2. **test ジョブ** – lint 完了後に `bun run test` を実行
+3. **semantic-release ジョブ** – ビルドと `dist/` 検証を行い、semantic-release（バージョン、CHANGELOG、npm/GitHub 公開）を実行
 
 > **必要なシークレット:**
 > - `NPM_TOKEN` – `automation`スコープを持つnpm公開トークン
-> - `SEMANTIC_RELEASE_TOKEN` – `repo`スコープを持つGitHub個人アクセストークン（classic）。シークレット登録後、トークン所有ユーザー、または「Allow GitHub Actions to bypass branch protection」を`main`ブランチ保護ルールに設定し、リリースコミットのpushが拒否されないようにしてください。シークレットが存在しない場合、ワークフローは早期に失敗します。
+> - `SEMANTIC_RELEASE_TOKEN` – `repo`スコープを持つGitHub個人アクセストークン（classic）。`release` ブランチの保護ルールで GitHub Actions が push できるように設定（または「Allow GitHub Actions to bypass branch protection」を有効化）してください。シークレットがない場合、ワークフローは即座に失敗します。
 
 ### /releaseコマンドの使用
 
 Claude Codeからリリースプロセスを実行:
 
-1. `develop`ブランチ、またはClaude Codeコマンドにアクセスできる任意のブランチにいることを確認
-2. `/release`コマンドを実行
-3. Claude CodeがGitHub Actionsワークフローをトリガー
-4. GitHub Actions UIでワークフローの進行状況を監視
-5. semantic-releaseがリリース可能なコミットを検出すると、自動的にリリースが公開される
+1. `develop` が最新のリリース候補コミットを含むことを確認
+2. `/release` コマンドを実行
+3. `release-trigger.yml` が起動し、`release` ブランチを fast-forward、release→main PR を作成/更新して Auto Merge を有効化
+4. `.github/workflows/release.yml`（lint → test → semantic-release）が release ブランチ push を処理するのを監視
+5. Required チェックが成功すると、PR が自動的に `main` にマージされ、リリースが確定
 
 または、gh CLIで手動トリガー:
 

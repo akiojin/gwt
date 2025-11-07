@@ -356,7 +356,14 @@ The semantic-release configuration file defines the release process:
 
 ```json
 {
-  "branches": ["main"],
+  "branches": [
+    "release",
+    {
+      "name": "main",
+      "channel": "main",
+      "prerelease": false
+    }
+  ],
   "tagFormat": "v${version}",
   "plugins": [
     "@semantic-release/commit-analyzer",
@@ -375,33 +382,34 @@ For detailed configuration specifications, see [specs/SPEC-23bb2eed/data-model.m
 
 **Release Trigger Workflow** (`.github/workflows/release-trigger.yml`)
 
-Manually triggered workflow that merges `develop` to `main`:
+Manually triggered workflow that turns `develop` into a releasable `release` branch:
 
 - Triggered via `/release` command in Claude Code or `gh workflow run release-trigger.yml --ref develop -f confirm=release`
-- Merges `develop` branch into `main` (fast-forward if possible, merge commit otherwise)
-- Pushes to `main`, triggering the Release workflow
+- Fast-forwards `release` so it points to the current `develop` commit (using `git push origin develop:release --force-with-lease`)
+- Logs the diff between `release` and `main` for auditing
+- Creates or updates the release→main PR, applies `release` / `auto-merge` labels, and enables Auto Merge (merge method) guarded only by Required checks (`lint`, `test`, `semantic-release`)
 
 **Release Workflow** (`.github/workflows/release.yml`)
 
-Automatically runs when commits are pushed to `main`:
+Automatically runs when commits are pushed to `release` (or when manually dispatched):
 
-1. Run tests (`bun run test`)
-2. Build project (`bun run build`)
-3. Execute semantic-release (version, changelog, publish)
+1. **lint job** – installs dependencies on `release` and runs `bun run lint`
+2. **test job** – runs `bun run test` after lint finishes
+3. **semantic-release job** – depends on both jobs, builds the project, verifies `dist/`, then runs semantic-release (version, changelog, npm publish, GitHub Release)
 
 > **Secrets required:**
 > - `NPM_TOKEN` – npm publish token with `automation` scope
-> - `SEMANTIC_RELEASE_TOKEN` – GitHub personal access token (classic) with `repo` scope. After registering the secret, add the token所有ユーザー、または「Allow GitHub Actions to bypass branch protection」を `main` ブランチ保護ルールに設定し、リリースコミットの push が拒否されないようにしてください。シークレットが存在しない場合、ワークフローは早期に失敗します。
+> - `SEMANTIC_RELEASE_TOKEN` – GitHub personal access token (classic) with `repo` scope. Add this token to the `release` branch protection rule (或いは「Allow GitHub Actions to bypass branch protection」を付与) so semantic-release can push CHANGELOG/package.json commits. Without the secret, the workflow fails fast.
 
 ### Using the /release Command
 
 Execute the release process from Claude Code:
 
-1. Ensure you're on the `develop` branch or any branch with access to Claude Code commands
-2. Run `/release` command
-3. Claude Code will trigger the GitHub Actions workflow
-4. Monitor the workflow progress via GitHub Actions UI
-5. Release will be automatically published when semantic-release detects releasable commits
+1. Ensure `develop` is up to date (all releasable commits merged)
+2. Run the `/release` command
+3. Claude Code triggers `release-trigger.yml`, which fast-forwards `release` and sets up/refreshes the release→main PR with Auto Merge enabled
+4. Monitor `.github/workflows/release.yml` (lint → test → semantic-release) that runs on the `release` branch push
+5. When all Required checks succeed, GitHub automatically merges the PR into `main`; no manual approval is required
 
 Alternatively, trigger manually via gh CLI:
 

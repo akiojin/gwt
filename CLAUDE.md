@@ -74,11 +74,11 @@
 
 ## リリースワークフロー
 
-- リリースは develop → main への手動マージでトリガーされる
-- feature/* ブランチは develop へマージ（Auto Merge）
-- develop での蓄積後、`/release` コマンドで develop → main マージ＋リリース実行
-- リリースコマンド: Claude Code で `/release` 実行、または `gh workflow run release-trigger.yml --ref develop -f confirm=release`
-- mainブランチへのpush時に semantic-release が自動実行され、npm公開とGitHubリリースを作成
+- feature/* ブランチはこれまで通り develop へマージ（Auto Merge）し、develop でリリース候補を蓄積する
+- `/release` コマンド（または `gh workflow run release-trigger.yml --ref develop -f confirm=release`）で develop を release ブランチへ fast-forward し、release→main PR を作成/更新して Auto Merge を有効化する
+- release ブランチへの push で `.github/workflows/release.yml` が走り、`lint` → `test` → `semantic-release` の Required チェックを実行する
+- Required チェックが全て成功すると release→main PR が自動マージされ、main への直接 push は Branch Protection で禁止する
+- semantic-release は release ブランチ上で CHANGELOG/タグ/npm/GitHub Release を生成し、その結果が PR マージで main に取り込まれる
 
 ## 最近の変更
 
@@ -96,6 +96,7 @@
 
 ## Active Technologies
 - TypeScript 5.8.x / React 19 / Ink 6 / Bun 1.0+ + Vitest 2.1.x, happy-dom 20.0.8, @testing-library/react 16.3.0, execa 9.6.0 (SPEC-a5a44f4c)
+- TypeScript 5.8.x / Bun 1.0+ / GitHub Actions YAML + semantic-release 22.x, gh CLI, GitHub Actions (`actions/checkout`, `actions/github-script`) (SPEC-57fde06f)
 
 ## Recent Changes
 - SPEC-a5a44f4c: Added TypeScript 5.8.x / React 19 / Ink 6 / Bun 1.0+ + Vitest 2.1.x, happy-dom 20.0.8, @testing-library/react 16.3.0, execa 9.6.0

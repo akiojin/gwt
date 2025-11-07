@@ -13,8 +13,8 @@ permissions:
   pull-requests: write
 
 jobs:
-  merge-and-release:
-    name: Merge develop to main
+  sync-and-pr:
+    name: Sync develop to release
     runs-on: ubuntu-latest
     if: github.event.inputs.confirm == 'release'
 
@@ -38,32 +38,91 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git remote set-url origin "https://x-access-token:${GH_RELEASE_TOKEN}@github.com/${{ github.repository }}.git"
 
-      - name: Fetch main branch
+      - name: Sync develop -> release branch
+        id: sync
+        env:
+          RELEASE_BRANCH: release
+        run: |
+          set -euo pipefail
+          git fetch origin "$RELEASE_BRANCH" || true
+          RELEASE_SHA="$(git rev-parse HEAD)"
+          if git ls-remote --exit-code origin "$RELEASE_BRANCH" >/dev/null 2>&1; then
+            git push origin HEAD:refs/heads/"$RELEASE_BRANCH" --force-with-lease=refs/heads/"$RELEASE_BRANCH"
+          else
+            git push origin HEAD:refs/heads/"$RELEASE_BRANCH"
+          fi
+          echo "release_branch=$RELEASE_BRANCH" >> "$GITHUB_OUTPUT"
+          echo "release_sha=$RELEASE_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Capture release vs main diff
+        id: diff
+        env:
+          RELEASE_BRANCH: ${{ steps.sync.outputs.release_branch }}
         run: |
           git fetch origin main:main
+          git fetch origin "$RELEASE_BRANCH":"$RELEASE_BRANCH"
+          echo "Release branch commits ahead of main:" >> diff.txt
+          git log --oneline origin/main.."$RELEASE_BRANCH" >> diff.txt || echo "(no new commits)" >> diff.txt
+          cat diff.txt
+          echo "diff_log<<'DIFF'" >> "$GITHUB_OUTPUT"
+          cat diff.txt >> "$GITHUB_OUTPUT"
+          echo 'DIFF' >> "$GITHUB_OUTPUT"
 
-      - name: Merge develop into main
+      - name: Create or update release → main PR
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
+          RELEASE_SHA: ${{ steps.sync.outputs.release_sha }}
         run: |
-          git checkout main
-          git merge --ff-only develop || {
-            echo "Fast-forward merge failed. Creating merge commit..."
-            git merge develop --no-ff -m "chore: merge develop into main for release"
-          }
+          set -euo pipefail
+          DATE_LABEL="$(date -u +%Y-%m-%d)"
+          SHORT_SHA="${RELEASE_SHA:0:7}"
+          TITLE="Release ${DATE_LABEL} (${SHORT_SHA})"
+          REQUIRED_CHECKS="- lint\n- test\n- semantic-release"
+          WORKFLOW_URL="https://github.com/${{ github.repository }}/actions/workflows/release.yml"
+          BODY=$(cat <<'BODY'
+## Summary
+- Sync develop to release for semantic-release
+- Auto-merge is enabled once required checks succeed.
 
-      - name: Push to main
-        run: |
-          git push origin main
-          echo "Successfully pushed to main. Release workflow will be triggered automatically."
+## Required Checks
+- lint
+- test
+- semantic-release
+
+## Monitoring
+- Release workflow: WORKFLOW_URL
+BODY
+)
+          BODY=${BODY//WORKFLOW_URL/$WORKFLOW_URL}
+          EXISTING_NUMBER=$(gh pr list --base main --head release --state open --json number --jq '.[0].number' 2>/dev/null || true)
+          if [ -z "$EXISTING_NUMBER" ]; then
+            PR_URL=$(gh pr create --base main --head release --title "$TITLE" --body "$BODY" --label release --label auto-merge)
+            PR_NUMBER=$(gh pr view "$PR_URL" --json number --jq '.number')
+          else
+            PR_NUMBER="$EXISTING_NUMBER"
+            gh pr edit "$PR_NUMBER" --title "$TITLE" --body "$BODY" --add-label release --add-label auto-merge >/dev/null
+            PR_URL=$(gh pr view "$PR_NUMBER" --json url --jq '.url')
+          fi
+          if ! gh pr merge "$PR_NUMBER" --auto --merge >/dev/null; then
+            echo "Auto-merge already requested or not permitted; please verify settings."
+          fi
+          echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "url=$PR_URL" >> "$GITHUB_OUTPUT"
 
       - name: Summary
+        env:
+          RELEASE_SHA: ${{ steps.sync.outputs.release_sha }}
+          PR_URL: ${{ steps.pr.outputs.url }}
+          RELEASE_BRANCH: ${{ steps.sync.outputs.release_branch }}
         run: |
-          echo "## Release Triggered" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "develop branch has been merged into main." >> $GITHUB_STEP_SUMMARY
-          echo "The Release workflow will now automatically:" >> $GITHUB_STEP_SUMMARY
-          echo "- Run tests and build" >> $GITHUB_STEP_SUMMARY
-          echo "- Execute semantic-release" >> $GITHUB_STEP_SUMMARY
-          echo "- Publish to npm" >> $GITHUB_STEP_SUMMARY
-          echo "- Create GitHub release" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Check the [Release workflow](https://github.com/${{ github.repository }}/actions/workflows/release.yml) for progress." >> $GITHUB_STEP_SUMMARY
+          cat <<'SUMMARY' >> "$GITHUB_STEP_SUMMARY"
+## Release trigger
+- Source branch: develop
+- Target release branch: ${RELEASE_BRANCH}
+- Release branch SHA: ${RELEASE_SHA}
+- Release workflow: https://github.com/${{ github.repository }}/actions/workflows/release.yml
+- Auto-merge PR: ${PR_URL}
+
+Re-run the release workflow if any required check fails, then rerun `/release` (this workflow) to refresh release→main.
+SUMMARY
