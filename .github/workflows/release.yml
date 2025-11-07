@@ -62,16 +62,20 @@ jobs:
           GH_TOKEN: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
         run: |
           set -euo pipefail
-          git fetch origin main:main
+          git fetch origin main develop
           if git ls-remote --exit-code origin develop >/dev/null 2>&1; then
-            git fetch origin develop:develop
+            if git show-ref --verify --quiet refs/heads/develop; then
+              git checkout develop
+              git reset --hard origin/develop
+            else
+              git checkout -b develop origin/develop
+            fi
           else
             echo "develop branch not found on origin; skipping sync."
             exit 0
           fi
-          git checkout develop
-          if git merge main --no-edit; then
-            git push origin develop
+          if git merge origin/main --no-edit; then
+            git push origin HEAD:develop
           else
             echo "Merge conflict - creating sync PR"
             git merge --abort
