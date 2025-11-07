@@ -21,7 +21,7 @@ RUN mkdir -p "$PNPM_HOME" && \
     echo 'export PATH="$PNPM_HOME:$PATH"' >> /root/.bashrc
 
 # Global tools with pnpm
-RUN pnpm add -g \
+RUN npm add -g \
     bun@latest \
     typescript@latest \
     eslint@latest \
