@@ -1,7 +1,7 @@
 /**
  * @vitest-environment happy-dom
  */
-import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from 'vitest';
 import type { Mock } from 'vitest';
 import { render, waitFor } from '@testing-library/react';
 import { act } from 'react-dom/test-utils';
@@ -115,9 +115,8 @@ describe('Navigation Integration Tests', () => {
 
     await waitFor(() => {
       expect(getByText(/Claude Worktree/i)).toBeDefined();
+      expect(getByText(/main/)).toBeDefined();
     });
-
-    expect(getByText(/main/)).toBeDefined();
   });
 
   it('should support navigation between screens', async () => {
@@ -246,6 +245,7 @@ describe('Protected Branch Navigation (T103)', () => {
     mockedRemoveWorktree.mockReset();
     mockedIsProtectedBranchName.mockReset();
     mockedSwitchToProtectedBranch.mockReset();
+    mockedGetRepositoryRoot.mockResolvedValue('/repo');
     branchListProps.length = 0;
     branchActionProps.length = 0;
     aiToolScreenProps.length = 0;
@@ -283,6 +283,15 @@ describe('Protected Branch Navigation (T103)', () => {
 
     await waitFor(() => {
       expect(branchListProps.length).toBeGreaterThan(0);
+    });
+
+    await waitFor(() => {
+      const latest = branchListProps.at(-1);
+      const names = (latest?.branches as BranchItem[] | undefined)?.map(
+        (item) => item.name
+      );
+      expect(names).toBeDefined();
+      expect(names).toContain('main');
     });
 
     const latestProps = branchListProps.at(-1);
@@ -344,6 +353,15 @@ describe('Protected Branch Navigation (T103)', () => {
 
     await waitFor(() => {
       expect(branchListProps.length).toBeGreaterThan(0);
+    });
+
+    await waitFor(() => {
+      const latest = branchListProps.at(-1);
+      const names = (latest?.branches as BranchItem[] | undefined)?.map(
+        (item) => item.name
+      );
+      expect(names).toBeDefined();
+      expect(names).toContain('origin/develop');
     });
 
     const latestProps = branchListProps.at(-1);
