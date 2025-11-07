@@ -19,6 +19,11 @@ vi.mock('../../../git.js', () => ({
   deleteBranch: vi.fn(async () => undefined),
 }));
 
+const { mockIsProtectedBranchName, mockSwitchToProtectedBranch } = vi.hoisted(() => ({
+  mockIsProtectedBranchName: vi.fn(() => false),
+  mockSwitchToProtectedBranch: vi.fn(async () => 'none' as const),
+}));
+
 vi.mock('../../../worktree.js', () => ({
   __esModule: true,
   listAdditionalWorktrees: vi.fn(),
@@ -26,8 +31,8 @@ vi.mock('../../../worktree.js', () => ({
   generateWorktreePath: vi.fn(async () => '/repo/.git/worktree/test'),
   getMergedPRWorktrees: vi.fn(async () => []),
   removeWorktree: vi.fn(async () => undefined),
-  isProtectedBranchName: vi.fn(() => false),
-  switchToProtectedBranch: vi.fn(async () => 'none' as const),
+  isProtectedBranchName: mockIsProtectedBranchName,
+  switchToProtectedBranch: mockSwitchToProtectedBranch,
 }));
 
 const aiToolScreenProps: unknown[] = [];
@@ -48,8 +53,6 @@ import {
   generateWorktreePath,
   getMergedPRWorktrees,
   removeWorktree,
-  isProtectedBranchName,
-  switchToProtectedBranch,
 } from '../../../worktree.js';
 
 const mockedGetAllBranches = getAllBranches as Mock;
@@ -60,8 +63,8 @@ const mockedCreateWorktree = createWorktree as Mock;
 const mockedGenerateWorktreePath = generateWorktreePath as Mock;
 const mockedGetMergedPRWorktrees = getMergedPRWorktrees as Mock;
 const mockedRemoveWorktree = removeWorktree as Mock;
-const mockedIsProtectedBranchName = isProtectedBranchName as Mock;
-const mockedSwitchToProtectedBranch = switchToProtectedBranch as Mock;
+const mockedIsProtectedBranchName = mockIsProtectedBranchName as Mock;
+const mockedSwitchToProtectedBranch = mockSwitchToProtectedBranch as Mock;
 const originalBranchListScreen = BranchListScreenModule.BranchListScreen;
 const originalBranchActionSelectorScreen =
   BranchActionSelectorScreenModule.BranchActionSelectorScreen;
@@ -85,6 +88,7 @@ describe('Navigation Integration Tests', () => {
     mockedIsProtectedBranchName.mockReset();
     mockedSwitchToProtectedBranch.mockReset();
     mockedGetRepositoryRoot.mockResolvedValue('/repo');
+    mockedSwitchToProtectedBranch.mockResolvedValue('local');
   });
 
   const mockBranches: BranchInfo[] = [
@@ -262,6 +266,7 @@ describe('Protected Branch Navigation (T103)', () => {
       ['main', 'develop', 'origin/main', 'origin/develop'].includes(name)
     );
     mockedSwitchToProtectedBranch.mockResolvedValue('local');
+    mockedGetRepositoryRoot.mockResolvedValue('/repo');
   });
 
   afterEach(() => {

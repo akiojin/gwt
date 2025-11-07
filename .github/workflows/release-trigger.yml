@@ -13,8 +13,8 @@ permissions:
   pull-requests: write
 
 jobs:
-  merge-and-release:
-    name: Merge develop to main
+  create-release-pr:
+    name: Create develop → main PR
     runs-on: ubuntu-latest
     if: github.event.inputs.confirm == 'release'
 
@@ -24,46 +24,56 @@ jobs:
         with:
           fetch-depth: 0
           ref: develop
-          token: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
+          persist-credentials: false
 
-      - name: Configure git credentials
+      - name: Prepare metadata
+        id: meta
+        run: |
+          echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update release PR
+        id: pr
         env:
-          GH_RELEASE_TOKEN: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [ -z "$GH_RELEASE_TOKEN" ]; then
-            echo "SEMANTIC_RELEASE_TOKEN secret is not configured"
-            exit 1
+          set -euo pipefail
+          TITLE="Release: ${{ steps.meta.outputs.date }} (${{ steps.meta.outputs.sha }})"
+          BODY=$(cat <<'BODY'
+Automatic release PR from develop to main.
+
+After merge, semantic-release will:
+- Determine version from Conventional Commits
+- Update package.json and CHANGELOG.md
+- Create Git tag (e.g., v1.2.0) and GitHub Release
+- Publish to npm (enable via configuration)
+- Back-merge release commit to develop
+BODY
+)
+          EXISTING_NUMBER=$(gh pr list --base main --head develop --state open --json number --jq '.[0].number' 2>/dev/null || true)
+          if [ -z "$EXISTING_NUMBER" ]; then
+            PR_URL=$(gh pr create --base main --head develop --title "$TITLE" --body "$BODY" --label release --label auto-merge)
+            PR_NUMBER=$(gh pr view "$PR_URL" --json number --jq '.number')
+          else
+            PR_NUMBER="$EXISTING_NUMBER"
+            gh pr edit "$PR_NUMBER" --title "$TITLE" --body "$BODY" --add-label release --add-label auto-merge >/dev/null
+            PR_URL=$(gh pr view "$PR_NUMBER" --json url --jq '.url')
           fi
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git remote set-url origin "https://x-access-token:${GH_RELEASE_TOKEN}@github.com/${{ github.repository }}.git"
-
-      - name: Fetch main branch
-        run: |
-          git fetch origin main:main
-
-      - name: Merge develop into main
-        run: |
-          git checkout main
-          git merge --ff-only develop || {
-            echo "Fast-forward merge failed. Creating merge commit..."
-            git merge develop --no-ff -m "chore: merge develop into main for release"
-          }
-
-      - name: Push to main
-        run: |
-          git push origin main
-          echo "Successfully pushed to main. Release workflow will be triggered automatically."
+          gh pr merge "$PR_NUMBER" --auto --merge >/dev/null || true
+          echo "url=$PR_URL" >> "$GITHUB_OUTPUT"
+          echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
 
       - name: Summary
+        env:
+          PR_URL: ${{ steps.pr.outputs.url }}
+          SHA: ${{ steps.meta.outputs.sha }}
         run: |
-          echo "## Release Triggered" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "develop branch has been merged into main." >> $GITHUB_STEP_SUMMARY
-          echo "The Release workflow will now automatically:" >> $GITHUB_STEP_SUMMARY
-          echo "- Run tests and build" >> $GITHUB_STEP_SUMMARY
-          echo "- Execute semantic-release" >> $GITHUB_STEP_SUMMARY
-          echo "- Publish to npm" >> $GITHUB_STEP_SUMMARY
-          echo "- Create GitHub release" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Check the [Release workflow](https://github.com/${{ github.repository }}/actions/workflows/release.yml) for progress." >> $GITHUB_STEP_SUMMARY
+          cat <<'SUMMARY' >> "$GITHUB_STEP_SUMMARY"
+## Release trigger
+- Source branch: develop
+- Target branch: main
+- Head commit: ${SHA}
+- Release PR: ${PR_URL}
+
+Ensure the Release workflow (push to main) succeeds to complete semantic-release.
+SUMMARY

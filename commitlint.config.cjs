@@ -1,27 +1,3 @@
-module.exports = {
-  extends: ["@commitlint/config-conventional"],
-  ignores: [(message) => message.startsWith("chore(release):")],
-  rules: {
-    "subject-empty": [2, "never"],
-    "subject-max-length": [2, "always", 100],
-    "header-max-length": [2, "always", 100],
-    "subject-case": [0],
-    "type-enum": [
-      2,
-      "always",
-      [
-        "feat",
-        "fix",
-        "docs",
-        "style",
-        "refactor",
-        "perf",
-        "test",
-        "build",
-        "ci",
-        "chore",
-        "revert",
-      ],
-    ],
-  },
-};
+const config = require("./.commitlintrc.json");
+
+module.exports = config;

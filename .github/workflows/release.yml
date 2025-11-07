@@ -2,80 +2,78 @@ name: Release
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
 
 permissions:
   contents: write
   issues: write
   pull-requests: write
-  id-token: write
 
 jobs:
   release:
-    name: Release
+    name: Semantic Release
     runs-on: ubuntu-latest
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
 
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           persist-credentials: false
-          ref: main
-
-      - name: Configure git credentials
-        env:
-          GH_RELEASE_TOKEN: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
-        run: |
-          if [ -z "$GH_RELEASE_TOKEN" ]; then
-            echo "SEMANTIC_RELEASE_TOKEN secret is not configured"
-            exit 1
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git remote set-url origin "https://x-access-token:${GH_RELEASE_TOKEN}@github.com/${{ github.repository }}.git"
-
-      - name: Ensure on main branch
-        run: |
-          git checkout main
-          git pull origin main
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "22.14.0"
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: latest
+          node-version: 20
+          cache: 'npm'
 
       - name: Install dependencies
-        run: bun install
+        run: npm ci
 
-      - name: Run tests
-        run: bun run test
-
-      - name: Build
-        run: bun run build
-
-      - name: Verify build
-        run: |
-          if [ ! -d "dist" ]; then
-            echo "Build failed: dist directory not found"
-            exit 1
-          fi
-          echo "Build verified successfully"
-
-      - name: Semantic Release
+      - name: Configure git credentials
         env:
-          GH_TOKEN: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
-          GITHUB_TOKEN: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          node node_modules/semantic-release/bin/semantic-release.js
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
+
+      - name: Run semantic-release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: github-actions[bot]@users.noreply.github.com
+        run: npx semantic-release
+
+      - name: Sync develop branch
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git fetch origin main:main
+          if git ls-remote --exit-code origin develop >/dev/null 2>&1; then
+            git fetch origin develop:develop
+          else
+            echo "develop branch not found on origin; skipping sync."
+            exit 0
+          fi
+          git checkout develop
+          if git merge main --no-edit; then
+            git push origin develop
+          else
+            echo "Merge conflict - creating sync PR"
+            git merge --abort
+            SYNC_BRANCH="sync/main-to-develop-$(date +%s)"
+            git checkout -b "$SYNC_BRANCH" main
+            git push origin "$SYNC_BRANCH"
+            gh pr create --base develop --head "$SYNC_BRANCH" \
+              --title "Sync main → develop after release" \
+              --body "Automatic sync after release." || true
+          fi

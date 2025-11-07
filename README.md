@@ -133,6 +133,7 @@ The repository includes an automated PR merge workflow that streamlines the deve
 - **Safety First**: Respects branch protection rules and requires successful CI completion
 
 **How it works:**
+
 1. PR is created targeting `develop`
 2. CI workflows (Test, Lint) run automatically
 3. When all CI checks pass and no conflicts exist, the PR is automatically merged to `develop`
@@ -140,6 +141,7 @@ The repository includes an automated PR merge workflow that streamlines the deve
 5. Use `/release` command to merge `develop` to `main` and trigger semantic-release
 
 **Disabling auto-merge:**
+
 - Create PRs as drafts to prevent auto-merge: `gh pr create --draft`
 - The auto-merge workflow respects this setting and will skip draft PRs
 
@@ -168,7 +170,7 @@ uv tool install specify-cli --from git+https://github.com/akiojin/spec-kit.git
 
 # Verify installation
 specify --help
-````
+```
 
 ### Available Spec Kit Commands
 
@@ -295,32 +297,37 @@ bun run start
 
 ## Release Process
 
-This project uses **semantic-release** for automated version management, changelog generation, and npm publishing. The release process follows a develop-to-main workflow, where releases are triggered manually when ready.
+This project uses **semantic-release** for automated versioning, changelog generation, tagging, and optional npm publishing. Releases follow a `develop → main` promotion flow: `/release` opens a `develop` → `main` PR, Required checks pass, the PR auto-merges, and a push to `main` triggers semantic-release.
 
 ### Release Workflow
 
 ```
-feature/* → PR → develop (Auto Merge) → Test/Build
-                                        ↓ (Manual trigger)
-                             /release command → develop→main → Release
+feature/* → PR → develop (Auto Merge)
+                            ↓ (/release)
+                develop → main PR (lint/test Required checks)
+                            ↓ (Auto merge)
+                          main push
+                            ↓
+                  semantic-release on main
+                            ↓
+      version bump + CHANGELOG + tag + GitHub Release + npm (opt)
+                            ↓
+                 automatic back-merge to develop
 ```
 
 ### How Releases Work
 
-1. **Development**: Create feature branches and merge to `develop` via PR
-2. **Auto Merge**: PRs are automatically merged to `develop` when CI passes
-3. **Testing**: Changes are tested and built on `develop` branch
-4. **Manual Release**: Execute `/release` command in Claude Code when ready to release
-5. **Automatic Process**: Release workflow executes:
-   - Merges `develop` to `main`
-   - Runs tests and build
-   - semantic-release analyzes commits and determines version
-     - `feat:` → minor version (1.0.0 → 1.1.0)
-     - `fix:` → patch version (1.0.0 → 1.0.1)
-     - `BREAKING CHANGE:` → major version (1.0.0 → 2.0.0)
-   - Generates CHANGELOG.md updates
-   - Publishes to npm registry
-   - Creates GitHub release with notes
+1. **Development**: Feature branches merge into `develop` once CI succeeds.
+2. **Staging**: `develop` always reflects the next potential release.
+3. **Trigger**: Run `/release` (or `scripts/create-release-pr.sh`) to open/refresh a `develop` → `main` PR with Auto Merge enabled.
+4. **Validation**: Required checks (`lint`, `test`, plus any repo rules) must pass on the PR before it merges into `main`.
+5. **semantic-release on main**: When the PR merges, `.github/workflows/release.yml` runs on `main` and automatically:
+   - Derives the next version from Conventional Commits
+   - Updates `package.json` and `CHANGELOG.md`
+   - Commits those artifacts back to `main` (using GitHub Actions token)
+   - Creates an annotated tag (`vX.Y.Z`) and GitHub Release
+   - Publishes to npm if `@semantic-release/npm`'s `npmPublish` flag is enabled
+   - Syncs the resulting release commit back into `develop` (fast-forward if possible, otherwise opens a sync PR)
 
 ### Conventional Commits
 
@@ -352,7 +359,7 @@ BREAKING CHANGE: npx support removed, bunx required"
 
 #### .releaserc.json
 
-The semantic-release configuration file defines the release process:
+The semantic-release configuration defines the automation that runs on `main` pushes:
 
 ```json
 {
@@ -361,9 +368,25 @@ The semantic-release configuration file defines the release process:
   "plugins": [
     "@semantic-release/commit-analyzer",
     "@semantic-release/release-notes-generator",
-    "@semantic-release/changelog",
-    "@semantic-release/npm",
-    "@semantic-release/git",
+    [
+      "@semantic-release/changelog",
+      {
+        "changelogFile": "CHANGELOG.md"
+      }
+    ],
+    [
+      "@semantic-release/npm",
+      {
+        "npmPublish": false
+      }
+    ],
+    [
+      "@semantic-release/git",
+      {
+        "assets": ["CHANGELOG.md", "package.json", "package-lock.json"],
+        "message": "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
+      }
+    ],
     "@semantic-release/github"
   ]
 }
@@ -373,35 +396,42 @@ For detailed configuration specifications, see [specs/SPEC-23bb2eed/data-model.m
 
 #### GitHub Actions Workflows
 
-**Release Trigger Workflow** (`.github/workflows/release-trigger.yml`)
-
-Manually triggered workflow that merges `develop` to `main`:
-
-- Triggered via `/release` command in Claude Code or `gh workflow run release-trigger.yml --ref develop -f confirm=release`
-- Merges `develop` branch into `main` (fast-forward if possible, merge commit otherwise)
-- Pushes to `main`, triggering the Release workflow
-
 **Release Workflow** (`.github/workflows/release.yml`)
 
-Automatically runs when commits are pushed to `main`:
+- Trigger: `push` events on `main` (and only when the head commit message does **not** contain `[skip ci]`).
+- Steps: checkout (`fetch-depth: 0`), install Node.js 20 with npm cache, run `npm ci`, configure Git credentials, execute `npx semantic-release`, and finally sync the resulting release commit back to `develop` (opens a sync PR if conflicts occur).
+- Secrets: `GITHUB_TOKEN` is provided automatically; add `NPM_TOKEN` only when enabling npm publish.
 
-1. Run tests (`bun run test`)
-2. Build project (`bun run build`)
-3. Execute semantic-release (version, changelog, publish)
+**Release Trigger Workflow** (`.github/workflows/release-trigger.yml`)
 
-> **Secrets required:**
-> - `NPM_TOKEN` – npm publish token with `automation` scope
-> - `SEMANTIC_RELEASE_TOKEN` – GitHub personal access token (classic) with `repo` scope. After registering the secret, add the token所有ユーザー、または「Allow GitHub Actions to bypass branch protection」を `main` ブランチ保護ルールに設定し、リリースコミットの push が拒否されないようにしてください。シークレットが存在しない場合、ワークフローは早期に失敗します。
+- Triggered manually via `/release` or `gh workflow run release-trigger.yml --ref develop -f confirm=release`.
+- Operates exclusively on `develop`: updates metadata, creates/refreshes the `develop` → `main` PR with a standardized body, and enables Auto Merge guarded by the repository's Required checks.
+- No branch rewrites occur; the workflow simply orchestrates the PR so that merging to `main` will later activate semantic-release.
+
+### Release Helper Script
+
+Use `scripts/create-release-pr.sh` to perform the same automation from a local terminal. The script:
+
+- Verifies you are on the `develop` branch
+- Pulls the latest `origin/develop`
+- Detects an existing open `develop` → `main` PR (to avoid duplicates)
+- Creates a release PR with the expected title/body, mirroring the workflow-dispatched version
+
+```bash
+./scripts/create-release-pr.sh
+```
+
+Ensure `gh auth login` was run beforehand so the GitHub CLI can create the PR.
 
 ### Using the /release Command
 
 Execute the release process from Claude Code:
 
-1. Ensure you're on the `develop` branch or any branch with access to Claude Code commands
-2. Run `/release` command
-3. Claude Code will trigger the GitHub Actions workflow
-4. Monitor the workflow progress via GitHub Actions UI
-5. Release will be automatically published when semantic-release detects releasable commits
+1. Ensure `develop` contains every change you want to release.
+2. Run the `/release` command (or execute `scripts/create-release-pr.sh`).
+3. The helper creates/refreshes a `develop` → `main` PR and enables Auto Merge guarded by the repo's Required checks (typically `lint` and `test`).
+4. Monitor the PR until all checks pass and it merges into `main`.
+5. Observe `.github/workflows/release.yml`, which runs on the subsequent `main` push and publishes the release through semantic-release.
 
 Alternatively, trigger manually via gh CLI:
 
