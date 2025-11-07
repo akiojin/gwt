@@ -19,19 +19,24 @@ vi.mock('../../../git.js', () => ({
   deleteBranch: vi.fn(async () => undefined),
 }));
 
-const mockIsProtectedBranchName = vi.fn(() => false);
-const mockSwitchToProtectedBranch = vi.fn(async () => 'none' as const);
+let mockIsProtectedBranchName: Mock = vi.fn(() => false);
+let mockSwitchToProtectedBranch: Mock = vi.fn(async () => 'none' as const);
 
-vi.mock('../../../worktree.js', () => ({
-  __esModule: true,
-  listAdditionalWorktrees: vi.fn(),
-  createWorktree: vi.fn(async () => undefined),
-  generateWorktreePath: vi.fn(async () => '/repo/.git/worktree/test'),
-  getMergedPRWorktrees: vi.fn(async () => []),
-  removeWorktree: vi.fn(async () => undefined),
-  isProtectedBranchName: mockIsProtectedBranchName,
-  switchToProtectedBranch: mockSwitchToProtectedBranch,
-}));
+vi.mock('../../../worktree.js', () => {
+  mockIsProtectedBranchName = vi.fn(() => false);
+  mockSwitchToProtectedBranch = vi.fn(async () => 'none' as const);
+
+  return {
+    __esModule: true,
+    listAdditionalWorktrees: vi.fn(),
+    createWorktree: vi.fn(async () => undefined),
+    generateWorktreePath: vi.fn(async () => '/repo/.git/worktree/test'),
+    getMergedPRWorktrees: vi.fn(async () => []),
+    removeWorktree: vi.fn(async () => undefined),
+    isProtectedBranchName: mockIsProtectedBranchName,
+    switchToProtectedBranch: mockSwitchToProtectedBranch,
+  };
+});
 
 const aiToolScreenProps: unknown[] = [];
 
@@ -61,8 +66,6 @@ const mockedCreateWorktree = createWorktree as Mock;
 const mockedGenerateWorktreePath = generateWorktreePath as Mock;
 const mockedGetMergedPRWorktrees = getMergedPRWorktrees as Mock;
 const mockedRemoveWorktree = removeWorktree as Mock;
-const mockedIsProtectedBranchName = mockIsProtectedBranchName as Mock;
-const mockedSwitchToProtectedBranch = mockSwitchToProtectedBranch as Mock;
 const originalBranchListScreen = BranchListScreenModule.BranchListScreen;
 const originalBranchActionSelectorScreen =
   BranchActionSelectorScreenModule.BranchActionSelectorScreen;
@@ -83,8 +86,8 @@ describe('Navigation Integration Tests', () => {
     mockedGenerateWorktreePath.mockReset();
     mockedGetMergedPRWorktrees.mockReset();
     mockedRemoveWorktree.mockReset();
-    mockedIsProtectedBranchName.mockReset();
-    mockedSwitchToProtectedBranch.mockReset();
+    mockIsProtectedBranchName.mockReset();
+    mockSwitchToProtectedBranch.mockReset();
   });
 
   const mockBranches: BranchInfo[] = [
@@ -240,8 +243,8 @@ describe('Protected Branch Navigation (T103)', () => {
     mockedGenerateWorktreePath.mockReset();
     mockedGetMergedPRWorktrees.mockReset();
     mockedRemoveWorktree.mockReset();
-    mockedIsProtectedBranchName.mockReset();
-    mockedSwitchToProtectedBranch.mockReset();
+    mockIsProtectedBranchName.mockReset();
+    mockSwitchToProtectedBranch.mockReset();
     branchListProps.length = 0;
     branchActionProps.length = 0;
     aiToolScreenProps.length = 0;
@@ -258,10 +261,10 @@ describe('Protected Branch Navigation (T103)', () => {
         return React.createElement(originalBranchActionSelectorScreen, props);
       });
 
-    mockedIsProtectedBranchName.mockImplementation((name: string) =>
+    mockIsProtectedBranchName.mockImplementation((name: string) =>
       ['main', 'develop', 'origin/main', 'origin/develop'].includes(name)
     );
-    mockedSwitchToProtectedBranch.mockResolvedValue('local');
+    mockSwitchToProtectedBranch.mockResolvedValue('local');
   });
 
   afterEach(() => {
@@ -304,7 +307,7 @@ describe('Protected Branch Navigation (T103)', () => {
       await Promise.resolve();
     });
 
-    expect(mockedSwitchToProtectedBranch).toHaveBeenCalledWith({
+    expect(mockSwitchToProtectedBranch).toHaveBeenCalledWith({
       branchName: 'main',
       repoRoot: '/repo',
       remoteRef: null,
@@ -332,7 +335,7 @@ describe('Protected Branch Navigation (T103)', () => {
     ];
     mockedGetAllBranches.mockResolvedValue(remoteBranches);
     mockedListAdditionalWorktrees.mockResolvedValue([]);
-    mockedSwitchToProtectedBranch.mockResolvedValue('remote');
+    mockSwitchToProtectedBranch.mockResolvedValue('remote');
 
     const onExit = vi.fn();
     render(<App onExit={onExit} />);
@@ -365,7 +368,7 @@ describe('Protected Branch Navigation (T103)', () => {
       await Promise.resolve();
     });
 
-    expect(mockedSwitchToProtectedBranch).toHaveBeenCalledWith({
+    expect(mockSwitchToProtectedBranch).toHaveBeenCalledWith({
       branchName: 'develop',
       repoRoot: '/repo',
       remoteRef: 'origin/develop',
