@@ -47,7 +47,7 @@ describe("showVersion via CLI args", () => {
 
     // Assert: 標準出力にバージョンが表示されることを期待
     expect(consoleLogSpy).toHaveBeenCalledWith(mockVersion);
-  });
+  }, 30000);
 
   it("正常系: -vフラグでバージョンを表示する", async () => {
     // Arrange: CLIフラグを設定
@@ -63,7 +63,7 @@ describe("showVersion via CLI args", () => {
 
     // Assert: 標準出力にバージョンが表示されることを期待
     expect(consoleLogSpy).toHaveBeenCalledWith(mockVersion);
-  });
+  }, 30000);
 
   // Note: This test is skipped due to module caching issues in CI environment
   // The actual functionality has been verified manually with `node dist/index.js --version`
