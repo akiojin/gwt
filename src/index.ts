@@ -382,69 +382,89 @@ export async function handleAIToolWorkflow(
   }
 }
 
+type UIHandler = () => Promise<SelectionResult | undefined>;
+type WorkflowHandler = (selection: SelectionResult) => Promise<void>;
+
+function logLoopError(error: unknown, context: "ui" | "workflow"): void {
+  const label = context === "ui" ? "UI" : "workflow";
+  if (error instanceof Error) {
+    printError(`${label} error: ${error.message}`);
+  } else {
+    printError(`${label} error: ${String(error)}`);
+  }
+}
+
+export async function runInteractiveLoop(
+  uiHandler: UIHandler = mainInkUI,
+  workflowHandler: WorkflowHandler = handleAIToolWorkflow,
+): Promise<void> {
+  // Main loop: UI → AI Tool → back to UI
+  while (true) {
+    let selectionResult: SelectionResult | undefined;
+
+    try {
+      selectionResult = await uiHandler();
+    } catch (error) {
+      logLoopError(error, "ui");
+      await waitForErrorAcknowledgement();
+      continue;
+    }
+
+    if (!selectionResult) {
+      // User quit (pressed q without making selections)
+      printInfo("Goodbye!");
+      break;
+    }
+
+    try {
+      await workflowHandler(selectionResult);
+    } catch (error) {
+      logLoopError(error, "workflow");
+      await waitForErrorAcknowledgement();
+    }
+  }
+}
+
 /**
- * Main entry point with loop
+ * Main entry point
  */
 export async function main(): Promise<void> {
-  try {
-    // Parse command line arguments
-    const args = process.argv.slice(2);
-    const showVersionFlag = args.includes("-v") || args.includes("--version");
-    const showHelpFlag = args.includes("-h") || args.includes("--help");
+  // Parse command line arguments
+  const args = process.argv.slice(2);
+  const showVersionFlag = args.includes("-v") || args.includes("--version");
+  const showHelpFlag = args.includes("-h") || args.includes("--help");
 
-    // Version flag has higher priority than help
-    if (showVersionFlag) {
-      await showVersion();
-      return;
-    }
+  // Version flag has higher priority than help
+  if (showVersionFlag) {
+    await showVersion();
+    return;
+  }
 
-    if (showHelpFlag) {
-      showHelp();
-      return;
-    }
+  if (showHelpFlag) {
+    showHelp();
+    return;
+  }
 
-    // Check if current directory is a Git repository
-    if (!(await isGitRepository())) {
-      printError(`Current directory is not a Git repository: ${process.cwd()}`);
-      printInfo(
-        "Please run this command from within a Git repository or worktree directory.",
-      );
+  // Check if current directory is a Git repository
+  if (!(await isGitRepository())) {
+    printError(`Current directory is not a Git repository: ${process.cwd()}`);
+    printInfo(
+      "Please run this command from within a Git repository or worktree directory.",
+    );
 
-      // Docker環境でよくある問題: safe.directory設定
-      printInfo(
-        "\\nIf you're running in Docker, you may need to configure Git safe.directory:",
-      );
-      printInfo("  git config --global --add safe.directory '*'");
-      printInfo("\\nOr run with DEBUG=1 for more information:");
-      printInfo("  DEBUG=1 bun run start");
+    // Docker環境でよくある問題: safe.directory設定
+    printInfo(
+      "\\nIf you're running in Docker, you may need to configure Git safe.directory:",
+    );
+    printInfo("  git config --global --add safe.directory '*'");
+    printInfo("\\nOr run with DEBUG=1 for more information:");
+    printInfo("  DEBUG=1 bun run start");
 
-      await waitForErrorAcknowledgement();
-      process.exit(1);
-    }
-
-    // Main loop: UI → AI Tool → back to UI
-    while (true) {
-      const selectionResult = await mainInkUI();
-
-      if (!selectionResult) {
-        // User quit (pressed q without making selections)
-        printInfo("Goodbye!");
-        break;
-      }
-
-      // Handle AI tool workflow. The function internally manages error acknowledgement
-      // and always resolves, so we can safely continue the loop afterwards.
-      await handleAIToolWorkflow(selectionResult);
-    }
-  } catch (error) {
-    if (error instanceof Error) {
-      printError(error.message);
-    } else {
-      printError(String(error));
-    }
     await waitForErrorAcknowledgement();
     process.exit(1);
   }
+
+  await runInteractiveLoop();
 }
 
 // Run the application if this module is executed directly
