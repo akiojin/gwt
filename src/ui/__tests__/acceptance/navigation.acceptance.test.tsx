@@ -18,9 +18,6 @@ vi.mock('../../../git.js', () => ({
   deleteBranch: vi.fn(async () => undefined),
 }));
 
-const acceptanceIsProtectedBranchName = vi.fn(() => false);
-const acceptanceSwitchToProtectedBranch = vi.fn(async () => 'none' as const);
-
 vi.mock('../../../worktree.js', () => ({
   __esModule: true,
   listAdditionalWorktrees: vi.fn(),
@@ -28,8 +25,8 @@ vi.mock('../../../worktree.js', () => ({
   generateWorktreePath: vi.fn(async () => '/repo/.git/worktree/test'),
   getMergedPRWorktrees: vi.fn(async () => []),
   removeWorktree: vi.fn(async () => undefined),
-  isProtectedBranchName: acceptanceIsProtectedBranchName,
-  switchToProtectedBranch: acceptanceSwitchToProtectedBranch,
+  isProtectedBranchName: vi.fn(() => false),
+  switchToProtectedBranch: vi.fn(async () => 'none' as const),
 }));
 
 import { getAllBranches, getRepositoryRoot, deleteBranch } from '../../../git.js';
@@ -39,6 +36,8 @@ import {
   generateWorktreePath,
   getMergedPRWorktrees,
   removeWorktree,
+  isProtectedBranchName,
+  switchToProtectedBranch,
 } from '../../../worktree.js';
 
 const mockedGetAllBranches = getAllBranches as Mock;
@@ -49,8 +48,8 @@ const mockedCreateWorktree = createWorktree as Mock;
 const mockedGenerateWorktreePath = generateWorktreePath as Mock;
 const mockedGetMergedPRWorktrees = getMergedPRWorktrees as Mock;
 const mockedRemoveWorktree = removeWorktree as Mock;
-const mockedIsProtectedBranchName = acceptanceIsProtectedBranchName as Mock;
-const mockedSwitchToProtectedBranch = acceptanceSwitchToProtectedBranch as Mock;
+const mockedIsProtectedBranchName = isProtectedBranchName as Mock;
+const mockedSwitchToProtectedBranch = switchToProtectedBranch as Mock;
 
 describe('Acceptance: Navigation (User Story 2)', () => {
   beforeEach(() => {

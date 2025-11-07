@@ -19,9 +19,6 @@ vi.mock('../../../git.js', () => ({
   deleteBranch: vi.fn(async () => undefined),
 }));
 
-const mockIsProtectedBranchName = vi.fn(() => false);
-const mockSwitchToProtectedBranch = vi.fn(async () => 'none' as const);
-
 vi.mock('../../../worktree.js', () => ({
   __esModule: true,
   listAdditionalWorktrees: vi.fn(),
@@ -29,8 +26,8 @@ vi.mock('../../../worktree.js', () => ({
   generateWorktreePath: vi.fn(async () => '/repo/.git/worktree/test'),
   getMergedPRWorktrees: vi.fn(async () => []),
   removeWorktree: vi.fn(async () => undefined),
-  isProtectedBranchName: mockIsProtectedBranchName,
-  switchToProtectedBranch: mockSwitchToProtectedBranch,
+  isProtectedBranchName: vi.fn(() => false),
+  switchToProtectedBranch: vi.fn(async () => 'none' as const),
 }));
 
 const aiToolScreenProps: unknown[] = [];
@@ -51,6 +48,8 @@ import {
   generateWorktreePath,
   getMergedPRWorktrees,
   removeWorktree,
+  isProtectedBranchName,
+  switchToProtectedBranch,
 } from '../../../worktree.js';
 
 const mockedGetAllBranches = getAllBranches as Mock;
@@ -61,8 +60,8 @@ const mockedCreateWorktree = createWorktree as Mock;
 const mockedGenerateWorktreePath = generateWorktreePath as Mock;
 const mockedGetMergedPRWorktrees = getMergedPRWorktrees as Mock;
 const mockedRemoveWorktree = removeWorktree as Mock;
-const mockedIsProtectedBranchName = mockIsProtectedBranchName as Mock;
-const mockedSwitchToProtectedBranch = mockSwitchToProtectedBranch as Mock;
+const mockedIsProtectedBranchName = isProtectedBranchName as Mock;
+const mockedSwitchToProtectedBranch = switchToProtectedBranch as Mock;
 const originalBranchListScreen = BranchListScreenModule.BranchListScreen;
 const originalBranchActionSelectorScreen =
   BranchActionSelectorScreenModule.BranchActionSelectorScreen;
