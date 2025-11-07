@@ -1,3 +1,10 @@
+## [1.25.1](https://github.com/akiojin/claude-worktree/compare/v1.25.0...v1.25.1) (2025-11-07)
+
+
+### Bug Fixes
+
+* make release sync safe for develop ([a8b1059](https://github.com/akiojin/claude-worktree/commit/a8b1059df4ab93a37f4791f62fb9d82caa7cdc02))
+
 # [1.25.0](https://github.com/akiojin/claude-worktree/compare/v1.24.2...v1.25.0) (2025-11-07)
 
 
