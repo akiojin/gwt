@@ -18,6 +18,11 @@ vi.mock('../../../git.js', () => ({
   deleteBranch: vi.fn(async () => undefined),
 }));
 
+const { acceptanceIsProtectedBranchName, acceptanceSwitchToProtectedBranch } = vi.hoisted(() => ({
+  acceptanceIsProtectedBranchName: vi.fn(() => false),
+  acceptanceSwitchToProtectedBranch: vi.fn(async () => 'none' as const),
+}));
+
 vi.mock('../../../worktree.js', () => ({
   __esModule: true,
   listAdditionalWorktrees: vi.fn(),
@@ -25,8 +30,8 @@ vi.mock('../../../worktree.js', () => ({
   generateWorktreePath: vi.fn(async () => '/repo/.git/worktree/test'),
   getMergedPRWorktrees: vi.fn(async () => []),
   removeWorktree: vi.fn(async () => undefined),
-  isProtectedBranchName: vi.fn(() => false),
-  switchToProtectedBranch: vi.fn(async () => 'none' as const),
+  isProtectedBranchName: acceptanceIsProtectedBranchName,
+  switchToProtectedBranch: acceptanceSwitchToProtectedBranch,
 }));
 
 import { getAllBranches, getRepositoryRoot, deleteBranch } from '../../../git.js';
@@ -36,8 +41,6 @@ import {
   generateWorktreePath,
   getMergedPRWorktrees,
   removeWorktree,
-  isProtectedBranchName,
-  switchToProtectedBranch,
 } from '../../../worktree.js';
 
 const mockedGetAllBranches = getAllBranches as Mock;
@@ -48,8 +51,8 @@ const mockedCreateWorktree = createWorktree as Mock;
 const mockedGenerateWorktreePath = generateWorktreePath as Mock;
 const mockedGetMergedPRWorktrees = getMergedPRWorktrees as Mock;
 const mockedRemoveWorktree = removeWorktree as Mock;
-const mockedIsProtectedBranchName = isProtectedBranchName as Mock;
-const mockedSwitchToProtectedBranch = switchToProtectedBranch as Mock;
+const mockedIsProtectedBranchName = acceptanceIsProtectedBranchName as Mock;
+const mockedSwitchToProtectedBranch = acceptanceSwitchToProtectedBranch as Mock;
 
 describe('Acceptance: Navigation (User Story 2)', () => {
   beforeEach(() => {
@@ -70,6 +73,7 @@ describe('Acceptance: Navigation (User Story 2)', () => {
     mockedIsProtectedBranchName.mockReset();
     mockedSwitchToProtectedBranch.mockReset();
     mockedGetRepositoryRoot.mockResolvedValue('/repo');
+    mockedSwitchToProtectedBranch.mockResolvedValue('none');
   });
 
   const mockBranches: BranchInfo[] = [

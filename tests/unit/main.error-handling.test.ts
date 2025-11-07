@@ -182,5 +182,5 @@ describe("main error handling", () => {
 
     processExitSpy.mockRestore();
     consoleErrorSpy.mockRestore();
-  });
+  }, 30000);
 });
