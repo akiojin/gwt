@@ -1,3 +1,9 @@
+## [1.24.2](https://github.com/akiojin/claude-worktree/compare/v1.24.1...v1.24.2) (2025-11-07)
+
+### Bug Fixes
+
+- Codexエラー時でもCLIを継続 ([6b5d537](https://github.com/akiojin/claude-worktree/commit/6b5d537192d2a1b48c8cffd89b488aabb2b1dca2))
+
 ## [1.24.1](https://github.com/akiojin/claude-worktree/compare/v1.24.0...v1.24.1) (2025-11-07)
 
 ### Bug Fixes
