@@ -1,3 +1,9 @@
+## [1.24.1](https://github.com/akiojin/claude-worktree/compare/v1.24.0...v1.24.1) (2025-11-07)
+
+### Bug Fixes
+
+- scope gitignore updates to active worktree ([e176d5b](https://github.com/akiojin/claude-worktree/commit/e176d5b4c82752e849a4b41142e28ae6418b4802))
+
 # [1.24.0](https://github.com/akiojin/claude-worktree/compare/v1.23.0...v1.24.0) (2025-11-07)
 
 ### Bug Fixes
