@@ -1,6 +1,8 @@
 import type { SelectedBranchState } from "../types.js";
 
-function getBranchRef(branch: SelectedBranchState | null | undefined): string | null {
+function getBranchRef(
+  branch: SelectedBranchState | null | undefined,
+): string | null {
   if (!branch) {
     return null;
   }
