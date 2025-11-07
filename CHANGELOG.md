@@ -1,3 +1,22 @@
+# [1.24.0](https://github.com/akiojin/claude-worktree/compare/v1.23.0...v1.24.0) (2025-11-07)
+
+### Bug Fixes
+
+- allow protected branches to launch ai tools ([9b32f21](https://github.com/akiojin/claude-worktree/commit/9b32f2124a395d5a1d916fb7899e803952d08935))
+- correct protected branch type handling ([1444863](https://github.com/akiojin/claude-worktree/commit/14448634827c5742faa0920e42be129d9cf50bea))
+- git branch参照コマンドのブロックを解除 ([23e8777](https://github.com/akiojin/claude-worktree/commit/23e87775553cfe8bd8797b89f6775c8dfcaaca94))
+- move mock functions inside vi.mock factory ([f52a2a8](https://github.com/akiojin/claude-worktree/commit/f52a2a8772772ef33beb09abf3b21dead4505442))
+- replace vi.hoisted() with direct mock definitions ([4c61bbe](https://github.com/akiojin/claude-worktree/commit/4c61bbedc2ffa4d612ff9bd8bb5e316425e19cc7))
+- reuse repository root for protected branches ([2464b98](https://github.com/akiojin/claude-worktree/commit/2464b983837ff1efcaff4c7f03f8cb6a418c76b6))
+- stabilize release test suites ([9c5177c](https://github.com/akiojin/claude-worktree/commit/9c5177c9418097cd22fd2e586a1962204dd86e85))
+- 保護ブランチ選択時のルート切替とUIを整備 ([8798074](https://github.com/akiojin/claude-worktree/commit/8798074434ccea00afdd83cc9350d57d9602b54c))
+
+### Features
+
+- clarify protected branch workflow in ui ([a191845](https://github.com/akiojin/claude-worktree/commit/a191845468b9cc91418d274cca091ea19d22153e))
+- guard protected branches from worktree creation ([eeb9c45](https://github.com/akiojin/claude-worktree/commit/eeb9c45d6c58d961dec7f36ee0d3dbf537ed5c3b))
+- PRベースブランチ検証とブランチ戦略の明確化 ([daf57d2](https://github.com/akiojin/claude-worktree/commit/daf57d237f0f7edb3411e5b1ba480f7c1a81a2e4))
+
 # [1.23.0](https://github.com/akiojin/claude-worktree/compare/v1.22.0...v1.23.0) (2025-11-06)
 
 ### Bug Fixes

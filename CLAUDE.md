@@ -93,3 +93,9 @@
 - develop ブランチを導入し、手動リリースフローに移行
 - feature → develop (Auto Merge) → /release → main → リリース
 - 詳細: `.github/workflows/release-trigger.yml`, `.claude/commands/release.md`
+
+## Active Technologies
+- TypeScript 5.8.x / React 19 / Ink 6 / Bun 1.0+ + Vitest 2.1.x, happy-dom 20.0.8, @testing-library/react 16.3.0, execa 9.6.0 (SPEC-a5a44f4c)
+
+## Recent Changes
+- SPEC-a5a44f4c: Added TypeScript 5.8.x / React 19 / Ink 6 / Bun 1.0+ + Vitest 2.1.x, happy-dom 20.0.8, @testing-library/react 16.3.0, execa 9.6.0

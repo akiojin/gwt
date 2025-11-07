@@ -18,27 +18,16 @@ vi.mock('../../../git.js', () => ({
   deleteBranch: vi.fn(async () => undefined),
 }));
 
-let acceptanceIsProtectedBranchName: Mock = vi.fn(() => false);
-let acceptanceSwitchToProtectedBranch: Mock = vi.fn(
-  async () => 'none' as const,
-);
-
-vi.mock('../../../worktree.js', () => {
-  acceptanceIsProtectedBranchName = vi.fn(() => false);
-  acceptanceSwitchToProtectedBranch = vi.fn(async () => 'none' as const);
-
-  return {
-    __esModule: true,
-    listAdditionalWorktrees: vi.fn(),
-    createWorktree: vi.fn(async () => undefined),
-    generateWorktreePath: vi.fn(async () => '/repo/.git/worktree/test'),
-    getMergedPRWorktrees: vi.fn(async () => []),
-    removeWorktree: vi.fn(async () => undefined),
-    isProtectedBranchName: acceptanceIsProtectedBranchName,
-    switchToProtectedBranch: acceptanceSwitchToProtectedBranch,
-  };
-});
-
+vi.mock('../../../worktree.js', () => ({
+  __esModule: true,
+  listAdditionalWorktrees: vi.fn(),
+  createWorktree: vi.fn(async () => undefined),
+  generateWorktreePath: vi.fn(async () => '/repo/.git/worktree/test'),
+  getMergedPRWorktrees: vi.fn(async () => []),
+  removeWorktree: vi.fn(async () => undefined),
+  isProtectedBranchName: vi.fn(() => false),
+  switchToProtectedBranch: vi.fn(async () => 'none' as const),
+}));
 
 import { getAllBranches, getRepositoryRoot, deleteBranch } from '../../../git.js';
 import {
@@ -47,6 +36,8 @@ import {
   generateWorktreePath,
   getMergedPRWorktrees,
   removeWorktree,
+  isProtectedBranchName,
+  switchToProtectedBranch,
 } from '../../../worktree.js';
 
 const mockedGetAllBranches = getAllBranches as Mock;
@@ -57,6 +48,8 @@ const mockedCreateWorktree = createWorktree as Mock;
 const mockedGenerateWorktreePath = generateWorktreePath as Mock;
 const mockedGetMergedPRWorktrees = getMergedPRWorktrees as Mock;
 const mockedRemoveWorktree = removeWorktree as Mock;
+const mockedIsProtectedBranchName = isProtectedBranchName as Mock;
+const mockedSwitchToProtectedBranch = switchToProtectedBranch as Mock;
 
 describe('Acceptance: Navigation (User Story 2)', () => {
   beforeEach(() => {
@@ -74,8 +67,9 @@ describe('Acceptance: Navigation (User Story 2)', () => {
     mockedGenerateWorktreePath.mockReset();
     mockedGetMergedPRWorktrees.mockReset();
     mockedRemoveWorktree.mockReset();
-    acceptanceIsProtectedBranchName.mockReset();
-    acceptanceSwitchToProtectedBranch.mockReset();
+    mockedIsProtectedBranchName.mockReset();
+    mockedSwitchToProtectedBranch.mockReset();
+    mockedGetRepositoryRoot.mockResolvedValue('/repo');
   });
 
   const mockBranches: BranchInfo[] = [
