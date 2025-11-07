@@ -74,11 +74,11 @@
 
 ## リリースワークフロー
 
-- feature/* ブランチはこれまで通り develop へマージ（Auto Merge）し、develop でリリース候補を蓄積する
-- `/release` コマンド（または `gh workflow run release-trigger.yml --ref develop -f confirm=release`）で develop を release ブランチへ fast-forward し、release→main PR を作成/更新して Auto Merge を有効化する
-- release ブランチへの push で `.github/workflows/release.yml` が走り、`lint` → `test` → `semantic-release` の Required チェックを実行する
-- Required チェックが全て成功すると release→main PR が自動マージされ、main への直接 push は Branch Protection で禁止する
-- semantic-release は release ブランチ上で CHANGELOG/タグ/npm/GitHub Release を生成し、その結果が PR マージで main に取り込まれる
+- feature/\* ブランチは引き続き develop へ Auto Merge し、develop で次回リリース候補を蓄積する。
+- `/release` コマンド（または `gh workflow run release-trigger.yml --ref develop -f confirm=release` / `scripts/create-release-pr.sh`）で develop → main のリリースPRを作成/更新し、Requiredチェックを条件に Auto Merge を設定する。
+- main への直接 push は禁止し、リリースPRがマージされたタイミングでのみ main が更新される。
+- `.github/workflows/release.yml` は main への push をトリガーに `npm ci` → semantic-release → CHANGELOG/タグ作成 → GitHub Release → npm publish（設定時）→ develop への自動バックマージを実行する。
+- semantic-release で発行されたリリースコミットは同じワークフロー内で develop にも取り込まれる。コンフリクト時は自動生成される sync PR をレビューして解消する。
 
 ## 最近の変更
 
@@ -91,12 +91,14 @@
 ### 2025-01-06: リリースフロー変更
 
 - develop ブランチを導入し、手動リリースフローに移行
-- feature → develop (Auto Merge) → /release → main → リリース
-- 詳細: `.github/workflows/release-trigger.yml`, `.claude/commands/release.md`
+- feature → develop (Auto Merge) → /release（develop→main PR）→ main push → semantic-release
+- 詳細: `.github/workflows/release-trigger.yml`, `.claude/commands/release.md`, `scripts/create-release-pr.sh`
 
 ## Active Technologies
+
 - TypeScript 5.8.x / React 19 / Ink 6 / Bun 1.0+ + Vitest 2.1.x, happy-dom 20.0.8, @testing-library/react 16.3.0, execa 9.6.0 (SPEC-a5a44f4c)
 - TypeScript 5.8.x / Bun 1.0+ / GitHub Actions YAML + semantic-release 22.x, gh CLI, GitHub Actions (`actions/checkout`, `actions/github-script`) (SPEC-57fde06f)
 
 ## Recent Changes
+
 - SPEC-a5a44f4c: Added TypeScript 5.8.x / React 19 / Ink 6 / Bun 1.0+ + Vitest 2.1.x, happy-dom 20.0.8, @testing-library/react 16.3.0, execa 9.6.0

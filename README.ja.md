@@ -273,43 +273,47 @@ bun run start
 
 ## リリースプロセス
 
-このプロジェクトは **semantic-release** を使用して、自動的なバージョン管理、CHANGELOG生成、npm公開を行っています。リリースプロセスは develop-to-main ワークフローに従い、準備ができたタイミングで手動でトリガーされます。
+このプロジェクトは **semantic-release** を用いてバージョン決定、CHANGELOG更新、タグ作成、GitHub Release作成、オプションでのnpm公開を自動化しています。フローは `develop → main` の昇格モデルで、`/release` が `develop` → `main` のPRを作成し、Requiredチェック完了後にマージされると `main` へのpushをトリガーに semantic-release が実行されます。
 
 ### リリースワークフロー
 
 ```
-feature/* → PR → develop (自動マージ) → テスト/ビルド
-                                        ↓ (手動トリガー)
-                             /release コマンド → develop→main → リリース
+feature/* → PR → develop (自動マージ)
+                             ↓ (/release)
+                  develop → main PR (Requiredチェック)
+                             ↓ (Auto Merge)
+                           main push
+                             ↓
+                   semantic-release on main
+                             ↓
+      バージョン更新 + CHANGELOG + タグ + GitHub Release + npm(任意)
+                             ↓
+                    mainのリリースコミットをdevelopへ戻す
 ```
 
 ### リリースの仕組み
 
-1. **開発**: featureブランチを作成し、PRを通じて`develop`にマージ
-2. **自動マージ**: CIが成功すると、PRは自動的に`develop`にマージされる
-3. **テスト**: `develop`ブランチで変更がテスト・ビルドされる
-4. **手動リリース**: リリース準備ができたら、Claude Codeで`/release`コマンドを実行
-5. **自動処理**: リリースワークフローが以下を実行:
-   - `develop`を`main`にマージ
-   - テストとビルドを実行
-   - semantic-releaseがコミットを分析してバージョンを決定
-     - `feat:` → マイナーバージョン (1.0.0 → 1.1.0)
-     - `fix:` → パッチバージョン (1.0.0 → 1.0.1)
-     - `BREAKING CHANGE:` → メジャーバージョン (1.0.0 → 2.0.0)
-   - CHANGELOG.mdを生成
-   - npmレジストリに公開
-   - リリースノート付きのGitHubリリースを作成
+1. **開発**: featureブランチの変更はCI通過後に`develop`へ自動マージされる。
+2. **ステージング**: `develop`は常に次回リリース候補を保持する。
+3. **トリガー**: `/release`（または `scripts/create-release-pr.sh`）を実行して `develop` → `main` PR を作成/更新し、Auto Mergeを有効化する。
+4. **検証**: PRでは `lint` / `test` などブランチ保護で定義された Required チェックが走り、すべて成功すると `main` にマージされる。
+5. **semantic-release**: `main` への push が `.github/workflows/release.yml` を起動し、以下を自動実行する。
+   - Conventional Commits から次バージョンを決定
+   - `package.json` と `CHANGELOG.md` を更新して直接 `main` にコミット
+   - `vX.Y.Z` タグと GitHub Release を作成
+   - 設定で有効化した場合のみ npm publish を実行
+   - 作成されたリリースコミットを `develop` へ自動バックマージ（衝突時は同期PRを作成）
 
 ### Conventional Commits
 
 semantic-releaseはコミットメッセージを使用してリリースタイプを決定します:
 
-| タイプ                                                | 説明         | バージョンへの影響        |
-| ----------------------------------------------------- | ------------ | ------------------------- |
-| `feat:`                                               | 新機能       | マイナー (1.0.0 → 1.1.0)  |
-| `fix:`                                                | バグ修正     | パッチ (1.0.0 → 1.0.1)    |
-| `BREAKING CHANGE:`                                    | 破壊的変更   | メジャー (1.0.0 → 2.0.0)  |
-| `chore:`, `docs:`, `style:`, `refactor:`, `test:`    | リリースなし | -                         |
+| タイプ                                            | 説明         | バージョンへの影響       |
+| ------------------------------------------------- | ------------ | ------------------------ |
+| `feat:`                                           | 新機能       | マイナー (1.0.0 → 1.1.0) |
+| `fix:`                                            | バグ修正     | パッチ (1.0.0 → 1.0.1)   |
+| `BREAKING CHANGE:`                                | 破壊的変更   | メジャー (1.0.0 → 2.0.0) |
+| `chore:`, `docs:`, `style:`, `refactor:`, `test:` | リリースなし | -                        |
 
 **コミット例**:
 
@@ -330,25 +334,34 @@ BREAKING CHANGE: npxサポートを削除、bunxが必須"
 
 #### .releaserc.json
 
-semantic-releaseの設定ファイルはリリースプロセスを定義します:
+semantic-releaseの設定ファイルは `main` ブランチで実行される自動処理を定義します:
 
 ```json
 {
-  "branches": [
-    "release",
-    {
-      "name": "main",
-      "channel": "main",
-      "prerelease": false
-    }
-  ],
+  "branches": ["main"],
   "tagFormat": "v${version}",
   "plugins": [
     "@semantic-release/commit-analyzer",
     "@semantic-release/release-notes-generator",
-    "@semantic-release/changelog",
-    "@semantic-release/npm",
-    "@semantic-release/git",
+    [
+      "@semantic-release/changelog",
+      {
+        "changelogFile": "CHANGELOG.md"
+      }
+    ],
+    [
+      "@semantic-release/npm",
+      {
+        "npmPublish": false
+      }
+    ],
+    [
+      "@semantic-release/git",
+      {
+        "assets": ["CHANGELOG.md", "package.json", "package-lock.json"],
+        "message": "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
+      }
+    ],
     "@semantic-release/github"
   ]
 }
@@ -358,35 +371,42 @@ semantic-releaseの設定ファイルはリリースプロセスを定義しま�
 
 #### GitHub Actionsワークフロー
 
-**リリーストリガーワークフロー** (`.github/workflows/release-trigger.yml`)
-
-`develop`を `release` ブランチへ同期し、release→main PR を自動化する手動トリガーワークフロー:
-
-- `/release`コマンド（Claude Code）または `gh workflow run release-trigger.yml --ref develop -f confirm=release` で起動
-- `git push origin develop:release --force-with-lease` で release ブランチを最新化し、main との差分ログを記録
-- release→main の PR を作成/更新し、`release` / `auto-merge` ラベルと Required チェック（lint/test/semantic-release）のみを条件とした Auto Merge を設定
-
 **リリースワークフロー** (`.github/workflows/release.yml`)
 
-`release` にコミットが push されたとき（または手動トリガー時）に自動実行:
+- トリガー: `main` ブランチへの `push`（commit message が `[skip ci]` を含む場合はスキップ）。
+- ステップ: `actions/checkout@v4`（`fetch-depth: 0`）、Node.js 20 セットアップ（npmキャッシュ有効）、`npm ci`、Git認証設定、`npx semantic-release` 実行、最後に `develop` への同期（衝突時は同期PRを作成）。
+- シークレット: `GITHUB_TOKEN` はデフォルトで提供される。npm publish を有効化する場合のみ `NPM_TOKEN` を設定する。
 
-1. **lint ジョブ** – 依存関係をインストールし `bun run lint` を実行
-2. **test ジョブ** – lint 完了後に `bun run test` を実行
-3. **semantic-release ジョブ** – ビルドと `dist/` 検証を行い、semantic-release（バージョン、CHANGELOG、npm/GitHub 公開）を実行
+**リリーストリガーワークフロー** (`.github/workflows/release-trigger.yml`)
 
-> **必要なシークレット:**
-> - `NPM_TOKEN` – `automation`スコープを持つnpm公開トークン
-> - `SEMANTIC_RELEASE_TOKEN` – `repo`スコープを持つGitHub個人アクセストークン（classic）。`release` ブランチの保護ルールで GitHub Actions が push できるように設定（または「Allow GitHub Actions to bypass branch protection」を有効化）してください。シークレットがない場合、ワークフローは即座に失敗します。
+- `/release` コマンドまたは `gh workflow run release-trigger.yml --ref develop -f confirm=release` で手動起動。
+- `develop` の最新コミットを読み取り、`develop` → `main` PR を作成/更新し、標準化された本文・Auto Merge設定を適用。
+- ブランチの強制pushは行わず、PR作成（および Required チェック監視）のみに特化。
+
+### リリース支援スクリプト
+
+ローカル環境で同じ処理を実行する場合は `scripts/create-release-pr.sh` を利用します。スクリプトは以下を自動化します:
+
+- `develop` ブランチ上で実行しているか検証
+- `origin/develop` を fast-forward で取得
+- 既存の `develop` → `main` PR があれば再利用（重複作成を防止）
+- 規定のタイトル/本文でリリースPRを作成し、結果URLを表示
+
+```bash
+./scripts/create-release-pr.sh
+```
+
+実行前に `gh auth login` を済ませ、GitHub CLI がPR作成できるようにしてください。
 
 ### /releaseコマンドの使用
 
-Claude Codeからリリースプロセスを実行:
+Claude Codeからリリースプロセスを実行する手順:
 
-1. `develop` が最新のリリース候補コミットを含むことを確認
-2. `/release` コマンドを実行
-3. `release-trigger.yml` が起動し、`release` ブランチを fast-forward、release→main PR を作成/更新して Auto Merge を有効化
-4. `.github/workflows/release.yml`（lint → test → semantic-release）が release ブランチ push を処理するのを監視
-5. Required チェックが成功すると、PR が自動的に `main` にマージされ、リリースが確定
+1. `develop` にリリース対象コミットが揃っていることを確認
+2. `/release` コマンド（または `scripts/create-release-pr.sh`）を実行
+3. `develop` → `main` PR が作成/更新され、Requiredチェックを条件とした Auto Merge が設定される
+4. PRが`main`へマージされると `.github/workflows/release.yml` が自動実行され、semantic-release が公開フローを完了する
+5. リリースコミットはワークフロー内で `develop` に自動反映される
 
 または、gh CLIで手動トリガー:
 

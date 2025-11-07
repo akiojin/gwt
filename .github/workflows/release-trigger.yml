@@ -13,8 +13,8 @@ permissions:
   pull-requests: write
 
 jobs:
-  sync-and-pr:
-    name: Sync develop to release
+  create-release-pr:
+    name: Create develop → main PR
     runs-on: ubuntu-latest
     if: github.event.inputs.confirm == 'release'
 
@@ -24,105 +24,56 @@ jobs:
         with:
           fetch-depth: 0
           ref: develop
-          token: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
+          persist-credentials: false
 
-      - name: Configure git credentials
-        env:
-          GH_RELEASE_TOKEN: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
+      - name: Prepare metadata
+        id: meta
         run: |
-          if [ -z "$GH_RELEASE_TOKEN" ]; then
-            echo "SEMANTIC_RELEASE_TOKEN secret is not configured"
-            exit 1
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git remote set-url origin "https://x-access-token:${GH_RELEASE_TOKEN}@github.com/${{ github.repository }}.git"
+          echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
-      - name: Sync develop -> release branch
-        id: sync
-        env:
-          RELEASE_BRANCH: release
-        run: |
-          set -euo pipefail
-          git fetch origin "$RELEASE_BRANCH" || true
-          RELEASE_SHA="$(git rev-parse HEAD)"
-          if git ls-remote --exit-code origin "$RELEASE_BRANCH" >/dev/null 2>&1; then
-            git push origin HEAD:refs/heads/"$RELEASE_BRANCH" --force-with-lease=refs/heads/"$RELEASE_BRANCH"
-          else
-            git push origin HEAD:refs/heads/"$RELEASE_BRANCH"
-          fi
-          echo "release_branch=$RELEASE_BRANCH" >> "$GITHUB_OUTPUT"
-          echo "release_sha=$RELEASE_SHA" >> "$GITHUB_OUTPUT"
-
-      - name: Capture release vs main diff
-        id: diff
-        env:
-          RELEASE_BRANCH: ${{ steps.sync.outputs.release_branch }}
-        run: |
-          git fetch origin main:main
-          git fetch origin "$RELEASE_BRANCH":"$RELEASE_BRANCH"
-          echo "Release branch commits ahead of main:" >> diff.txt
-          git log --oneline origin/main.."$RELEASE_BRANCH" >> diff.txt || echo "(no new commits)" >> diff.txt
-          cat diff.txt
-          echo "diff_log<<'DIFF'" >> "$GITHUB_OUTPUT"
-          cat diff.txt >> "$GITHUB_OUTPUT"
-          echo 'DIFF' >> "$GITHUB_OUTPUT"
-
-      - name: Create or update release → main PR
+      - name: Create or update release PR
         id: pr
         env:
-          GH_TOKEN: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
-          RELEASE_SHA: ${{ steps.sync.outputs.release_sha }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          DATE_LABEL="$(date -u +%Y-%m-%d)"
-          SHORT_SHA="${RELEASE_SHA:0:7}"
-          TITLE="Release ${DATE_LABEL} (${SHORT_SHA})"
-          REQUIRED_CHECKS="- lint\n- test\n- semantic-release"
-          WORKFLOW_URL="https://github.com/${{ github.repository }}/actions/workflows/release.yml"
+          TITLE="Release: ${{ steps.meta.outputs.date }} (${{ steps.meta.outputs.sha }})"
           BODY=$(cat <<'BODY'
-## Summary
-- Sync develop to release for semantic-release
-- Auto-merge is enabled once required checks succeed.
+Automatic release PR from develop to main.
 
-## Required Checks
-- lint
-- test
-- semantic-release
-
-## Monitoring
-- Release workflow: WORKFLOW_URL
+After merge, semantic-release will:
+- Determine version from Conventional Commits
+- Update package.json and CHANGELOG.md
+- Create Git tag (e.g., v1.2.0) and GitHub Release
+- Publish to npm (enable via configuration)
+- Back-merge release commit to develop
 BODY
 )
-          BODY=${BODY//WORKFLOW_URL/$WORKFLOW_URL}
-          EXISTING_NUMBER=$(gh pr list --base main --head release --state open --json number --jq '.[0].number' 2>/dev/null || true)
+          EXISTING_NUMBER=$(gh pr list --base main --head develop --state open --json number --jq '.[0].number' 2>/dev/null || true)
           if [ -z "$EXISTING_NUMBER" ]; then
-            PR_URL=$(gh pr create --base main --head release --title "$TITLE" --body "$BODY" --label release --label auto-merge)
+            PR_URL=$(gh pr create --base main --head develop --title "$TITLE" --body "$BODY" --label release --label auto-merge)
             PR_NUMBER=$(gh pr view "$PR_URL" --json number --jq '.number')
           else
             PR_NUMBER="$EXISTING_NUMBER"
             gh pr edit "$PR_NUMBER" --title "$TITLE" --body "$BODY" --add-label release --add-label auto-merge >/dev/null
             PR_URL=$(gh pr view "$PR_NUMBER" --json url --jq '.url')
           fi
-          if ! gh pr merge "$PR_NUMBER" --auto --merge >/dev/null; then
-            echo "Auto-merge already requested or not permitted; please verify settings."
-          fi
-          echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          gh pr merge "$PR_NUMBER" --auto --merge >/dev/null || true
           echo "url=$PR_URL" >> "$GITHUB_OUTPUT"
+          echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
 
       - name: Summary
         env:
-          RELEASE_SHA: ${{ steps.sync.outputs.release_sha }}
           PR_URL: ${{ steps.pr.outputs.url }}
-          RELEASE_BRANCH: ${{ steps.sync.outputs.release_branch }}
+          SHA: ${{ steps.meta.outputs.sha }}
         run: |
           cat <<'SUMMARY' >> "$GITHUB_STEP_SUMMARY"
 ## Release trigger
 - Source branch: develop
-- Target release branch: ${RELEASE_BRANCH}
-- Release branch SHA: ${RELEASE_SHA}
-- Release workflow: https://github.com/${{ github.repository }}/actions/workflows/release.yml
-- Auto-merge PR: ${PR_URL}
+- Target branch: main
+- Head commit: ${SHA}
+- Release PR: ${PR_URL}
 
-Re-run the release workflow if any required check fails, then rerun `/release` (this workflow) to refresh release→main.
+Ensure the Release workflow (push to main) succeeds to complete semantic-release.
 SUMMARY
