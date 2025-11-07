@@ -131,13 +131,23 @@ branch refs/heads/main
 
   describe("createWorktree (T106)", () => {
     let mkdirSpy: ReturnType<typeof vi.spyOn>;
+    let getWorktreeRootSpy: ReturnType<typeof vi.spyOn>;
+    let ensureGitignoreEntrySpy: ReturnType<typeof vi.spyOn>;
 
     beforeEach(() => {
       mkdirSpy = vi.spyOn(fsPromises, "mkdir").mockResolvedValue(undefined);
+      getWorktreeRootSpy = vi
+        .spyOn(git, "getWorktreeRoot")
+        .mockResolvedValue("/path/to/worktree-current");
+      ensureGitignoreEntrySpy = vi
+        .spyOn(git, "ensureGitignoreEntry")
+        .mockResolvedValue();
     });
 
     afterEach(() => {
       mkdirSpy.mockRestore();
+      getWorktreeRootSpy.mockRestore();
+      ensureGitignoreEntrySpy.mockRestore();
     });
 
     it("should create worktree for existing branch", async () => {
@@ -316,9 +326,36 @@ branch refs/heads/main
         exitCode: 0,
       });
 
-      const ensureGitignoreSpy = vi
-        .spyOn(git, "ensureGitignoreEntry")
-        .mockResolvedValue();
+      const config = {
+        branchName: "feature/test",
+        worktreePath: "/path/to/repo/.worktrees/feature-test",
+        repoRoot: "/path/to/repo",
+        isNewBranch: false,
+        baseBranch: "main",
+      };
+
+      ensureGitignoreEntrySpy.mockClear();
+      await worktree.createWorktree(config);
+
+      expect(mkdirSpy).toHaveBeenCalledWith("/path/to/repo/.worktrees", {
+        recursive: true,
+      });
+      expect(ensureGitignoreEntrySpy).toHaveBeenCalledWith(
+        "/path/to/worktree-current",
+        ".worktrees/",
+      );
+    });
+
+    it("should fall back to repoRoot when worktree root resolution fails", async () => {
+      (execa as any).mockResolvedValue({
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+      });
+
+      getWorktreeRootSpy.mockRejectedValueOnce(
+        new Error("git rev-parse failed"),
+      );
 
       const config = {
         branchName: "feature/test",
@@ -328,12 +365,10 @@ branch refs/heads/main
         baseBranch: "main",
       };
 
+      ensureGitignoreEntrySpy.mockClear();
       await worktree.createWorktree(config);
 
-      expect(mkdirSpy).toHaveBeenCalledWith("/path/to/repo/.worktrees", {
-        recursive: true,
-      });
-      expect(ensureGitignoreSpy).toHaveBeenCalledWith(
+      expect(ensureGitignoreEntrySpy).toHaveBeenCalledWith(
         "/path/to/repo",
         ".worktrees/",
       );
@@ -347,9 +382,7 @@ branch refs/heads/main
       });
 
       // .gitignore更新が失敗してもworktree作成は成功する
-      vi.spyOn(git, "ensureGitignoreEntry").mockRejectedValue(
-        new Error("Permission denied"),
-      );
+      ensureGitignoreEntrySpy.mockRejectedValue(new Error("Permission denied"));
 
       const config = {
         branchName: "feature/test",

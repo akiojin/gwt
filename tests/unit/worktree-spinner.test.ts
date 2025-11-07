@@ -1,14 +1,24 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { PassThrough } from "node:stream";
 
-// execa を事前にモック
-vi.mock("execa", () => ({
-  execa: vi.fn(),
-}));
+let execaMock: ReturnType<typeof vi.fn> | undefined;
+
+vi.mock("execa", () => {
+  execaMock = vi.fn();
+  return {
+    execa: execaMock,
+  };
+});
 
 describe("worktree spinner integration", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    if (
+      typeof (vi as { resetModules?: () => void }).resetModules === "function"
+    ) {
+      (vi as { resetModules: () => void }).resetModules();
+    }
+
+    execaMock?.mockReset();
   });
 
   afterEach(() => {
@@ -29,8 +39,9 @@ describe("worktree spinner integration", () => {
     const gitModule = await import("../../src/git.js");
     vi.spyOn(gitModule, "ensureGitignoreEntry").mockResolvedValue(undefined);
 
-    const execaModule = await import("execa");
-    const execaMock = execaModule.execa as any as ReturnType<typeof vi.fn>;
+    if (!execaMock) {
+      throw new Error("execa mock was not initialized");
+    }
     execaMock.mockImplementation(() => {
       let resolvePromise: (value: unknown) => void = () => {};
       const stdout = new PassThrough();

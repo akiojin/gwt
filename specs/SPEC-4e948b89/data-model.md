@@ -6,8 +6,8 @@
 | --- | --- | --- |
 | `name` | `string` | ローカルブランチ名 |
 | `displayName` | `string` | UI表示用（リモートの場合は`origin/xxx`） |
-| `branchType` | `'local' | 'remote'` | 取得元を表す既存フィールド |
-| `branchCategory` | `'main' | 'develop' | 'feature' | 'hotfix' | 'release' | 'other'` | 新規追加。`BranchInfo.branchType`をそのまま保持し、保護判定に使用する |
+| `branchType` | `'local' &#124; 'remote'` | 取得元を表す既存フィールド |
+| `branchCategory` | `'main' &#124; 'develop' &#124; 'feature' &#124; 'hotfix' &#124; 'release' &#124; 'other'` | 新規追加。`BranchInfo.branchType`をそのまま保持し、保護判定に使用する |
 | `remoteBranch?` | `string` | リモートブランチのフル名 |
 
 ### バリデーション

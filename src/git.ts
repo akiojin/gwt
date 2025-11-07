@@ -81,6 +81,20 @@ export async function getRepositoryRoot(): Promise<string> {
   }
 }
 
+/**
+ * 現在の作業ツリー(root branch か worktree かを問わず)のルートディレクトリを取得
+ * @returns {Promise<string>} カレントWorktreeのルートパス
+ * @throws {GitError} 取得に失敗した場合
+ */
+export async function getWorktreeRoot(): Promise<string> {
+  try {
+    const { stdout } = await execa("git", ["rev-parse", "--show-toplevel"]);
+    return stdout.trim();
+  } catch (error) {
+    throw new GitError("Failed to get worktree root", error);
+  }
+}
+
 export async function getCurrentBranch(): Promise<string | null> {
   try {
     const { stdout } = await execa("git", ["branch", "--show-current"]);
@@ -137,7 +151,9 @@ export async function getLocalBranches(): Promise<BranchInfo[]> {
           type: "local" as const,
           branchType: getBranchType(trimmed),
           isCurrent: false,
-          ...(timestamp !== undefined ? { latestCommitTimestamp: timestamp } : {}),
+          ...(timestamp !== undefined
+            ? { latestCommitTimestamp: timestamp }
+            : {}),
         } satisfies BranchInfo;
       });
   } catch (error) {
@@ -166,7 +182,9 @@ export async function getRemoteBranches(): Promise<BranchInfo[]> {
           type: "remote" as const,
           branchType: getBranchType(branchName),
           isCurrent: false,
-          ...(timestamp !== undefined ? { latestCommitTimestamp: timestamp } : {}),
+          ...(timestamp !== undefined
+            ? { latestCommitTimestamp: timestamp }
+            : {}),
         } satisfies BranchInfo;
       });
   } catch (error) {
@@ -606,7 +624,9 @@ export async function getEnhancedSessionInfo(
   }
 }
 
-export async function fetchAllRemotes(options?: { cwd?: string }): Promise<void> {
+export async function fetchAllRemotes(options?: {
+  cwd?: string;
+}): Promise<void> {
   try {
     const execOptions = options?.cwd ? { cwd: options.cwd } : undefined;
     const args = ["fetch", "--all", "--prune"];
@@ -965,8 +985,11 @@ export async function getBranchDivergenceStatuses(options?: {
   const cwd = options?.cwd;
   const remote = options?.remote ?? "origin";
   const execOptions = cwd ? { cwd } : undefined;
-  const branchFilter = options?.branches?.filter((name) => name.trim().length > 0);
-  const filterSet = branchFilter && branchFilter.length > 0 ? new Set(branchFilter) : null;
+  const branchFilter = options?.branches?.filter(
+    (name) => name.trim().length > 0,
+  );
+  const filterSet =
+    branchFilter && branchFilter.length > 0 ? new Set(branchFilter) : null;
 
   const branchArgs = ["branch", "--format=%(refname:short)"];
   const { stdout: localBranchOutput } = execOptions
@@ -1032,10 +1055,7 @@ export async function pullFastForward(
       cwd: worktreePath,
     });
   } catch (error) {
-    throw new GitError(
-      `Failed to fast-forward pull in ${worktreePath}`,
-      error,
-    );
+    throw new GitError(`Failed to fast-forward pull in ${worktreePath}`, error);
   }
 }
 
@@ -1049,8 +1069,12 @@ export async function ensureGitignoreEntry(
   try {
     // .gitignoreファイルを読み込む（存在しない場合は空文字列）
     let content = "";
+    let eol = "\n";
     try {
       content = await fs.readFile(gitignorePath, "utf-8");
+      if (content.includes("\r\n")) {
+        eol = "\r\n";
+      }
     } catch (error: any) {
       // ENOENTエラー（ファイルが存在しない）は無視
       if (error.code !== "ENOENT") {
@@ -1058,16 +1082,19 @@ export async function ensureGitignoreEntry(
       }
     }
 
-    // エントリーの重複チェック
-    const lines = content.split("\n");
-    if (lines.includes(entry)) {
+    const normalizedEntry = entry.trim();
+    const normalizedLines = content.split(/\r?\n/).map((line) => line.trim());
+
+    if (normalizedLines.includes(normalizedEntry)) {
       // 既に存在する場合は何もしない
       return;
     }
 
-    // エントリーを追加（改行を含める）
-    const newContent =
-      content + (content && !content.endsWith("\n") ? "\n" : "") + entry + "\n";
+    const needsSeparator =
+      content.length > 0 && !content.endsWith("\n") && !content.endsWith("\r");
+    const separator = needsSeparator ? eol : "";
+
+    const newContent = `${content}${separator}${entry}${eol}`;
     await fs.writeFile(gitignorePath, newContent, "utf-8");
   } catch (error: any) {
     throw new GitError(`Failed to update .gitignore: ${error.message}`, error);

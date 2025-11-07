@@ -179,7 +179,8 @@ describe("git.ts - Branch Operations", () => {
             }
             if (args.includes("refs/remotes")) {
               return {
-                stdout: "origin/main\0${1705000000}\norigin/develop\0${1704000000}",
+                stdout:
+                  "origin/main\0${1705000000}\norigin/develop\0${1704000000}",
                 stderr: "",
                 exitCode: 0,
               } as any;
@@ -610,7 +611,11 @@ describe("git.ts - Branch Operations", () => {
           async (command: string, args?: readonly string[]) => {
             if (args?.[0] === "for-each-ref") {
               if (args.includes("refs/heads")) {
-                return { stdout: "main\0${1700000000}", stderr: "", exitCode: 0 } as any;
+                return {
+                  stdout: "main\0${1700000000}",
+                  stderr: "",
+                  exitCode: 0,
+                } as any;
               }
               if (args.includes("refs/remotes")) {
                 return { stdout: "", stderr: "", exitCode: 0 } as any;
@@ -641,7 +646,11 @@ describe("git.ts - Branch Operations", () => {
           async (command: string, args?: readonly string[]) => {
             if (args?.[0] === "for-each-ref") {
               if (args.includes("refs/heads")) {
-                return { stdout: "develop\0${1700000000}", stderr: "", exitCode: 0 } as any;
+                return {
+                  stdout: "develop\0${1700000000}",
+                  stderr: "",
+                  exitCode: 0,
+                } as any;
               }
               if (args.includes("refs/remotes")) {
                 return { stdout: "", stderr: "", exitCode: 0 } as any;
@@ -672,7 +681,11 @@ describe("git.ts - Branch Operations", () => {
           async (command: string, args?: readonly string[]) => {
             if (args?.[0] === "for-each-ref") {
               if (args.includes("refs/heads")) {
-                return { stdout: "feature/test\0${1700000000}", stderr: "", exitCode: 0 } as any;
+                return {
+                  stdout: "feature/test\0${1700000000}",
+                  stderr: "",
+                  exitCode: 0,
+                } as any;
               }
               if (args.includes("refs/remotes")) {
                 return { stdout: "", stderr: "", exitCode: 0 } as any;
@@ -703,7 +716,11 @@ describe("git.ts - Branch Operations", () => {
           async (command: string, args?: readonly string[]) => {
             if (args?.[0] === "for-each-ref") {
               if (args.includes("refs/heads")) {
-                return { stdout: "hotfix/urgent\0${1700000000}", stderr: "", exitCode: 0 } as any;
+                return {
+                  stdout: "hotfix/urgent\0${1700000000}",
+                  stderr: "",
+                  exitCode: 0,
+                } as any;
               }
               if (args.includes("refs/remotes")) {
                 return { stdout: "", stderr: "", exitCode: 0 } as any;
@@ -734,7 +751,11 @@ describe("git.ts - Branch Operations", () => {
           async (command: string, args?: readonly string[]) => {
             if (args?.[0] === "for-each-ref") {
               if (args.includes("refs/heads")) {
-                return { stdout: "release/v1.0\0${1700000000}", stderr: "", exitCode: 0 } as any;
+                return {
+                  stdout: "release/v1.0\0${1700000000}",
+                  stderr: "",
+                  exitCode: 0,
+                } as any;
               }
               if (args.includes("refs/remotes")) {
                 return { stdout: "", stderr: "", exitCode: 0 } as any;
@@ -765,7 +786,11 @@ describe("git.ts - Branch Operations", () => {
           async (command: string, args?: readonly string[]) => {
             if (args?.[0] === "for-each-ref") {
               if (args.includes("refs/heads")) {
-                return { stdout: "random-branch\0${1700000000}", stderr: "", exitCode: 0 } as any;
+                return {
+                  stdout: "random-branch\0${1700000000}",
+                  stderr: "",
+                  exitCode: 0,
+                } as any;
               }
               if (args.includes("refs/remotes")) {
                 return { stdout: "", stderr: "", exitCode: 0 } as any;
@@ -916,6 +941,31 @@ describe("git.ts - Gitignore Operations", () => {
 
       const content = await fs.readFile(gitignorePath, "utf-8");
       expect(content).toBe(".worktrees/\n");
+    });
+
+    it("should not duplicate entry when file uses CRLF line endings", async () => {
+      const entry = ".worktrees/";
+      const gitignorePath = path.join(tempDir, ".gitignore");
+
+      const initialContent = "node_modules/\r\n.worktrees/\r\ndist/\r\n";
+      await fs.writeFile(gitignorePath, initialContent, "utf-8");
+
+      await git.ensureGitignoreEntry(tempDir, entry);
+
+      const content = await fs.readFile(gitignorePath, "utf-8");
+      expect(content).toBe(initialContent);
+    });
+
+    it("should respect existing CRLF style when appending entry", async () => {
+      const entry = ".worktrees/";
+      const gitignorePath = path.join(tempDir, ".gitignore");
+
+      await fs.writeFile(gitignorePath, "node_modules/\r\n", "utf-8");
+
+      await git.ensureGitignoreEntry(tempDir, entry);
+
+      const content = await fs.readFile(gitignorePath, "utf-8");
+      expect(content).toBe("node_modules/\r\n.worktrees/\r\n");
     });
 
     it("should throw GitError when file read fails with non-ENOENT error", async () => {
@@ -1137,9 +1187,7 @@ describe("git.ts - Batch Merge Operations", () => {
     });
 
     it("should throw error when reset fails", async () => {
-      (execa as any).mockRejectedValue(
-        new Error("fatal: Failed to reset"),
-      );
+      (execa as any).mockRejectedValue(new Error("fatal: Failed to reset"));
 
       await expect(git.resetToHead("/path/to/worktree")).rejects.toThrow();
     });
@@ -1180,30 +1228,32 @@ describe("getBranchDivergenceStatuses", () => {
       },
     ]);
 
-    expect(execa).toHaveBeenNthCalledWith(1, "git", [
-      "branch",
-      "--format=%(refname:short)",
-    ], {
-      cwd: "/repo",
-    });
+    expect(execa).toHaveBeenNthCalledWith(
+      1,
+      "git",
+      ["branch", "--format=%(refname:short)"],
+      {
+        cwd: "/repo",
+      },
+    );
 
-    expect(execa).toHaveBeenNthCalledWith(2, "git", [
-      "show-ref",
-      "--verify",
-      "--quiet",
-      "refs/remotes/origin/main",
-    ], {
-      cwd: "/repo",
-    });
+    expect(execa).toHaveBeenNthCalledWith(
+      2,
+      "git",
+      ["show-ref", "--verify", "--quiet", "refs/remotes/origin/main"],
+      {
+        cwd: "/repo",
+      },
+    );
 
-    expect(execa).toHaveBeenNthCalledWith(3, "git", [
-      "rev-list",
-      "--left-right",
-      "--count",
-      "origin/main...main",
-    ], {
-      cwd: "/repo",
-    });
+    expect(execa).toHaveBeenNthCalledWith(
+      3,
+      "git",
+      ["rev-list", "--left-right", "--count", "origin/main...main"],
+      {
+        cwd: "/repo",
+      },
+    );
   });
 
   it("should only inspect requested branches when branch filter is provided", async () => {
@@ -1241,28 +1291,30 @@ describe("getBranchDivergenceStatuses", () => {
     ]);
 
     expect(execa).toHaveBeenCalledTimes(3);
-    expect(execa).toHaveBeenNthCalledWith(1, "git", [
-      "branch",
-      "--format=%(refname:short)",
-    ], {
-      cwd: "/repo",
-    });
-    expect(execa).toHaveBeenNthCalledWith(2, "git", [
-      "show-ref",
-      "--verify",
-      "--quiet",
-      "refs/remotes/origin/main",
-    ], {
-      cwd: "/repo",
-    });
-    expect(execa).toHaveBeenNthCalledWith(3, "git", [
-      "rev-list",
-      "--left-right",
-      "--count",
-      "origin/main...main",
-    ], {
-      cwd: "/repo",
-    });
+    expect(execa).toHaveBeenNthCalledWith(
+      1,
+      "git",
+      ["branch", "--format=%(refname:short)"],
+      {
+        cwd: "/repo",
+      },
+    );
+    expect(execa).toHaveBeenNthCalledWith(
+      2,
+      "git",
+      ["show-ref", "--verify", "--quiet", "refs/remotes/origin/main"],
+      {
+        cwd: "/repo",
+      },
+    );
+    expect(execa).toHaveBeenNthCalledWith(
+      3,
+      "git",
+      ["rev-list", "--left-right", "--count", "origin/main...main"],
+      {
+        cwd: "/repo",
+      },
+    );
   });
 });
 
@@ -1280,11 +1332,9 @@ describe("pullFastForward", () => {
 
     await git.pullFastForward("/repo/worktree");
 
-    expect(execa).toHaveBeenCalledWith(
-      "git",
-      ["pull", "--ff-only", "origin"],
-      { cwd: "/repo/worktree" },
-    );
+    expect(execa).toHaveBeenCalledWith("git", ["pull", "--ff-only", "origin"], {
+      cwd: "/repo/worktree",
+    });
   });
 
   it("should throw error when pull fails", async () => {
@@ -1292,8 +1342,8 @@ describe("pullFastForward", () => {
       new Error("fatal: Not possible to fast-forward."),
     );
 
-    await expect(
-      git.pullFastForward("/repo/worktree"),
-    ).rejects.toThrow("Failed to fast-forward pull");
+    await expect(git.pullFastForward("/repo/worktree")).rejects.toThrow(
+      "Failed to fast-forward pull",
+    );
   });
 });

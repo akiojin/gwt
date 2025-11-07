@@ -18,6 +18,7 @@ import {
   checkRemoteBranchExists,
   branchHasUniqueCommitsComparedToBase,
   getRepositoryRoot,
+  getWorktreeRoot,
   ensureGitignoreEntry,
   branchExists,
   getCurrentBranch,
@@ -322,7 +323,22 @@ export async function createWorktree(config: WorktreeConfig): Promise<void> {
 
     // .gitignoreに.worktrees/を追加(エラーは警告として扱う)
     try {
-      await ensureGitignoreEntry(config.repoRoot, ".worktrees/");
+      let gitignoreRoot = config.repoRoot;
+      try {
+        gitignoreRoot = await getWorktreeRoot();
+      } catch (resolveError) {
+        if (process.env.DEBUG) {
+          const reason =
+            resolveError instanceof Error
+              ? resolveError.message
+              : String(resolveError);
+          console.warn(
+            `Debug: Failed to resolve current worktree root for .gitignore update. Falling back to ${gitignoreRoot}. Reason: ${reason}`,
+          );
+        }
+      }
+
+      await ensureGitignoreEntry(gitignoreRoot, ".worktrees/");
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
       // .gitignoreの更新失敗は警告としてログに出すが、worktree作成は成功とする
