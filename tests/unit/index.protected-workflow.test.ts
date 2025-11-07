@@ -2,18 +2,33 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { SelectionResult } from "../../src/ui/components/App.js";
 import type { ExecutionMode } from "../../src/ui/components/screens/ExecutionModeSelectorScreen.js";
 
-const execaMock = vi.fn(async () => ({ stdout: "" }));
-const ensureWorktreeMock = vi.fn(async () => "/repo");
-const fetchAllRemotesMock = vi.fn(async () => undefined);
-const pullFastForwardMock = vi.fn(async () => undefined);
-const getBranchDivergenceStatusesMock = vi.fn(async () => []);
-const launchClaudeCodeMock = vi.fn(async () => undefined);
-const saveSessionMock = vi.fn(async () => undefined);
-const worktreeExistsMock = vi.fn(async () => null);
-const switchToProtectedBranchMock = vi.fn(async () => "local");
-const branchExistsMock = vi.fn(async () => true);
-const getRepositoryRootMock = vi.fn(async () => "/repo");
-const getCurrentBranchMock = vi.fn(async () => "develop");
+const {
+  execaMock,
+  ensureWorktreeMock,
+  fetchAllRemotesMock,
+  pullFastForwardMock,
+  getBranchDivergenceStatusesMock,
+  launchClaudeCodeMock,
+  saveSessionMock,
+  worktreeExistsMock,
+  switchToProtectedBranchMock,
+  branchExistsMock,
+  getRepositoryRootMock,
+  getCurrentBranchMock,
+} = vi.hoisted(() => ({
+  execaMock: vi.fn(async () => ({ stdout: "" })),
+  ensureWorktreeMock: vi.fn(async () => "/repo"),
+  fetchAllRemotesMock: vi.fn(async () => undefined),
+  pullFastForwardMock: vi.fn(async () => undefined),
+  getBranchDivergenceStatusesMock: vi.fn(async () => []),
+  launchClaudeCodeMock: vi.fn(async () => undefined),
+  saveSessionMock: vi.fn(async () => undefined),
+  worktreeExistsMock: vi.fn(async () => null),
+  switchToProtectedBranchMock: vi.fn(async () => "local" as const),
+  branchExistsMock: vi.fn(async () => true),
+  getRepositoryRootMock: vi.fn(async () => "/repo"),
+  getCurrentBranchMock: vi.fn(async () => "develop"),
+}));
 
 vi.mock("execa", () => ({
   execa: execaMock,

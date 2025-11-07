@@ -12,6 +12,7 @@ import * as useScreenStateModule from '../../hooks/useScreenState.js';
 import * as BranchListScreenModule from '../../components/screens/BranchListScreen.js';
 import * as BranchActionSelectorScreenModule from '../../screens/BranchActionSelectorScreen.js';
 import * as worktreeModule from '../../../worktree.js';
+import * as gitModule from '../../../git.js';
 import type { ScreenType } from '../../types.js';
 
 const navigateToMock = vi.fn();
@@ -22,12 +23,14 @@ const originalUseGitData = useGitDataModule.useGitData;
 const originalUseScreenState = useScreenStateModule.useScreenState;
 const originalBranchListScreen = BranchListScreenModule.BranchListScreen;
 const originalBranchActionSelector = BranchActionSelectorScreenModule.BranchActionSelectorScreen;
+const originalGetRepositoryRoot = gitModule.getRepositoryRoot;
 
 const useGitDataSpy = vi.spyOn(useGitDataModule, 'useGitData');
 const useScreenStateSpy = vi.spyOn(useScreenStateModule, 'useScreenState');
 const branchListScreenSpy = vi.spyOn(BranchListScreenModule, 'BranchListScreen');
 const branchActionSelectorSpy = vi.spyOn(BranchActionSelectorScreenModule, 'BranchActionSelectorScreen');
 const switchToProtectedBranchSpy = vi.spyOn(worktreeModule, 'switchToProtectedBranch');
+const getRepositoryRootSpy = vi.spyOn(gitModule, 'getRepositoryRoot');
 
 const branchListProps: any[] = [];
 const branchActionProps: any[] = [];
@@ -59,6 +62,7 @@ describe('App protected branch handling', () => {
 
     useGitDataSpy.mockReset();
     switchToProtectedBranchSpy.mockReset();
+    getRepositoryRootSpy.mockReset();
 
     useScreenStateSpy.mockImplementation(() => ({
       currentScreen: currentScreenState,
@@ -82,6 +86,7 @@ describe('App protected branch handling', () => {
       return React.createElement(originalBranchActionSelector, props);
     });
     switchToProtectedBranchSpy.mockResolvedValue('local');
+    getRepositoryRootSpy.mockResolvedValue('/repo');
   });
 
   afterEach(() => {
@@ -92,6 +97,7 @@ describe('App protected branch handling', () => {
     branchListScreenSpy.mockImplementation(originalBranchListScreen as any);
     branchActionSelectorSpy.mockImplementation(originalBranchActionSelector as any);
     switchToProtectedBranchSpy.mockReset();
+    getRepositoryRootSpy.mockReset();
     branchActionProps.length = 0;
   });
 
@@ -101,6 +107,7 @@ describe('App protected branch handling', () => {
     branchListScreenSpy.mockRestore();
     branchActionSelectorSpy.mockRestore();
     switchToProtectedBranchSpy.mockRestore();
+    getRepositoryRootSpy.mockRestore();
   });
 
   it('shows protected branch warning and switches root without launching AI tool', async () => {

@@ -19,8 +19,10 @@ vi.mock('../../../git.js', () => ({
   deleteBranch: vi.fn(async () => undefined),
 }));
 
-const mockIsProtectedBranchName = vi.fn(() => false);
-const mockSwitchToProtectedBranch = vi.fn(async () => 'none' as const);
+const { mockIsProtectedBranchName, mockSwitchToProtectedBranch } = vi.hoisted(() => ({
+  mockIsProtectedBranchName: vi.fn(() => false),
+  mockSwitchToProtectedBranch: vi.fn(async () => 'none' as const),
+}));
 
 vi.mock('../../../worktree.js', () => ({
   __esModule: true,
@@ -85,6 +87,8 @@ describe('Navigation Integration Tests', () => {
     mockedRemoveWorktree.mockReset();
     mockedIsProtectedBranchName.mockReset();
     mockedSwitchToProtectedBranch.mockReset();
+    mockedGetRepositoryRoot.mockResolvedValue('/repo');
+    mockedSwitchToProtectedBranch.mockResolvedValue('local');
   });
 
   const mockBranches: BranchInfo[] = [
@@ -262,6 +266,7 @@ describe('Protected Branch Navigation (T103)', () => {
       ['main', 'develop', 'origin/main', 'origin/develop'].includes(name)
     );
     mockedSwitchToProtectedBranch.mockResolvedValue('local');
+    mockedGetRepositoryRoot.mockResolvedValue('/repo');
   });
 
   afterEach(() => {
