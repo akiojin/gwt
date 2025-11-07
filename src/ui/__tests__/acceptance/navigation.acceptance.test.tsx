@@ -18,8 +18,10 @@ vi.mock('../../../git.js', () => ({
   deleteBranch: vi.fn(async () => undefined),
 }));
 
-const acceptanceIsProtectedBranchName = vi.fn(() => false);
-const acceptanceSwitchToProtectedBranch = vi.fn(async () => 'none' as const);
+const { acceptanceIsProtectedBranchName, acceptanceSwitchToProtectedBranch } = vi.hoisted(() => ({
+  acceptanceIsProtectedBranchName: vi.fn(() => false),
+  acceptanceSwitchToProtectedBranch: vi.fn(async () => 'none' as const),
+}));
 
 vi.mock('../../../worktree.js', () => ({
   __esModule: true,
@@ -70,6 +72,7 @@ describe('Acceptance: Navigation (User Story 2)', () => {
     mockedRemoveWorktree.mockReset();
     mockedIsProtectedBranchName.mockReset();
     mockedSwitchToProtectedBranch.mockReset();
+    mockedGetRepositoryRoot.mockResolvedValue('/repo');
   });
 
   const mockBranches: BranchInfo[] = [
