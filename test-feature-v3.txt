@@ -1,0 +1,3 @@
+Test feature for minor version release v3 (v1.28.0)
+
+This is the third test demonstrating a new feature addition that should trigger a minor version bump.
