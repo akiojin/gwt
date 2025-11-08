@@ -1,5 +1,10 @@
 name: Release
 
+# This workflow handles the automated release process:
+# 1. semantic-release creates version, tag, and GitHub Release
+# 2. Direct merge to main (no PR to avoid GitHub Actions event limitations)
+# 3. Backmerge to develop
+# 4. Release branch cleanup
 on:
   push:
     branches:
@@ -25,6 +30,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.ref }}
           fetch-depth: 0
           token: ${{ secrets.PERSONAL_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
 
@@ -49,12 +55,14 @@ jobs:
           GIT_COMMITTER_NAME: github-actions[bot]
           GIT_COMMITTER_EMAIL: github-actions[bot]@users.noreply.github.com
         run: |
+          # semantic-releaseを実行して出力を取得
           npx semantic-release > release-output.txt 2>&1
           RELEASE_EXIT_CODE=$?
           cat release-output.txt
 
+          # semantic-releaseの出力を解析して新しいリリースが作成されたか確認
           if [ $RELEASE_EXIT_CODE -eq 0 ] && grep -q "Published release" release-output.txt; then
-            VERSION=$(grep "Published release" release-output.txt | sed -n 's/.*Published release \([0-9.]*\).*/\1/p' | head -n 1)
+            VERSION=$(grep -oP 'Published release \K[0-9]+\.[0-9]+\.[0-9]+' release-output.txt | head -1)
             echo "new_release_published=true" >> $GITHUB_OUTPUT
             echo "new_release_version=$VERSION" >> $GITHUB_OUTPUT
             echo "new_release_git_tag=v$VERSION" >> $GITHUB_OUTPUT
