@@ -30,11 +30,19 @@ const {
   getCurrentBranchMock: vi.fn(async () => "develop"),
 }));
 
+const waitForUserAcknowledgementMock = vi.hoisted(() =>
+  vi.fn<() => Promise<void>>(),
+);
+
 vi.mock("execa", () => ({
   execa: execaMock,
 }));
 
 vi.mock("../../src/git.js", async () => {
+  const actual =
+    await vi.importActual<typeof import("../../src/git.js")>(
+      "../../src/git.js",
+    );
   return {
     isGitRepository: vi.fn(),
     getRepositoryRoot: getRepositoryRootMock,
@@ -43,15 +51,22 @@ vi.mock("../../src/git.js", async () => {
     pullFastForward: pullFastForwardMock,
     getBranchDivergenceStatuses: getBranchDivergenceStatusesMock,
     getCurrentBranch: getCurrentBranchMock,
+    GitError: actual.GitError,
   };
 });
 
-vi.mock("../../src/worktree.js", () => ({
-  worktreeExists: worktreeExistsMock,
-  isProtectedBranchName: (name: string) =>
-    name === "main" || name === "origin/main",
-  switchToProtectedBranch: switchToProtectedBranchMock,
-}));
+vi.mock("../../src/worktree.js", async () => {
+  const actual = await vi.importActual<typeof import("../../src/worktree.js")>(
+    "../../src/worktree.js",
+  );
+  return {
+    worktreeExists: worktreeExistsMock,
+    isProtectedBranchName: (name: string) =>
+      name === "main" || name === "origin/main",
+    switchToProtectedBranch: switchToProtectedBranchMock,
+    WorktreeError: actual.WorktreeError,
+  };
+});
 
 vi.mock("../../src/services/WorktreeOrchestrator.js", () => ({
   WorktreeOrchestrator: vi.fn().mockImplementation(() => ({
@@ -82,28 +97,40 @@ vi.mock("../../src/config/index.js", () => ({
   saveSession: saveSessionMock,
 }));
 
+vi.mock("../../src/utils/terminal.js", async () => {
+  const actual = await vi.importActual<
+    typeof import("../../src/utils/terminal.js")
+  >("../../src/utils/terminal.js");
+  return {
+    ...actual,
+    waitForUserAcknowledgement: waitForUserAcknowledgementMock,
+  };
+});
+
 // Import after mocks are set up
 import { handleAIToolWorkflow } from "../../src/index.js";
 
-describe("handleAIToolWorkflow - protected branches", () => {
-  beforeEach(() => {
-    execaMock.mockClear();
-    ensureWorktreeMock.mockClear();
-    fetchAllRemotesMock.mockClear();
-    pullFastForwardMock.mockClear();
-    getBranchDivergenceStatusesMock.mockClear();
-    launchClaudeCodeMock.mockClear();
-    saveSessionMock.mockClear();
-    worktreeExistsMock.mockClear();
-    branchExistsMock.mockClear();
-    getRepositoryRootMock.mockClear();
-    getCurrentBranchMock.mockClear();
-    switchToProtectedBranchMock.mockClear();
-    switchToProtectedBranchMock.mockResolvedValue("local");
-    branchExistsMock.mockResolvedValue(true);
-    getCurrentBranchMock.mockResolvedValue("develop");
-  });
+beforeEach(() => {
+  execaMock.mockClear();
+  ensureWorktreeMock.mockClear();
+  fetchAllRemotesMock.mockClear();
+  pullFastForwardMock.mockClear();
+  getBranchDivergenceStatusesMock.mockClear();
+  launchClaudeCodeMock.mockClear();
+  saveSessionMock.mockClear();
+  worktreeExistsMock.mockClear();
+  branchExistsMock.mockClear();
+  getRepositoryRootMock.mockClear();
+  getCurrentBranchMock.mockClear();
+  switchToProtectedBranchMock.mockClear();
+  waitForUserAcknowledgementMock.mockClear();
+  waitForUserAcknowledgementMock.mockResolvedValue(undefined);
+  switchToProtectedBranchMock.mockResolvedValue("local");
+  branchExistsMock.mockResolvedValue(true);
+  getCurrentBranchMock.mockResolvedValue("develop");
+});
 
+describe("handleAIToolWorkflow - protected branches", () => {
   it("checks out protected branch in repository root instead of creating worktree", async () => {
     const selection: SelectionResult = {
       branch: "main",
@@ -162,5 +189,54 @@ describe("handleAIToolWorkflow - protected branches", () => {
         isNewBranch: false,
       }),
     );
+  });
+});
+
+describe("handleAIToolWorkflow - divergence handling", () => {
+  it("skips AI tool launch when divergence is detected", async () => {
+    getBranchDivergenceStatusesMock.mockResolvedValue([
+      { branch: "feature/diverged", remoteAhead: 7, localAhead: 2 },
+    ]);
+
+    const selection: SelectionResult = {
+      branch: "feature/diverged",
+      displayName: "feature/diverged",
+      branchType: "local",
+      tool: "claude-code",
+      mode: "normal" as ExecutionMode,
+      skipPermissions: false,
+    };
+
+    await handleAIToolWorkflow(selection);
+
+    expect(fetchAllRemotesMock).toHaveBeenCalled();
+    expect(pullFastForwardMock).toHaveBeenCalledWith("/repo");
+    expect(launchClaudeCodeMock).not.toHaveBeenCalled();
+    expect(saveSessionMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("handleAIToolWorkflow - git failure tolerance", () => {
+  it("aborts workflow gracefully when fetchAllRemotes fails", async () => {
+    const gitError = Object.assign(new Error("fetch failed"), {
+      name: "GitError",
+    });
+    fetchAllRemotesMock.mockRejectedValueOnce(gitError);
+
+    const selection: SelectionResult = {
+      branch: "feature/network-issue",
+      displayName: "feature/network-issue",
+      branchType: "local",
+      tool: "claude-code",
+      mode: "normal" as ExecutionMode,
+      skipPermissions: false,
+    };
+
+    await handleAIToolWorkflow(selection);
+
+    expect(fetchAllRemotesMock).toHaveBeenCalled();
+    expect(launchClaudeCodeMock).not.toHaveBeenCalled();
+    expect(saveSessionMock).not.toHaveBeenCalled();
+    expect(waitForUserAcknowledgementMock).toHaveBeenCalledTimes(1);
   });
 });
