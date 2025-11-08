@@ -11,8 +11,9 @@ permissions:
   pull-requests: write
 
 jobs:
-  # npm publish job (currently disabled in .releaserc.json)
-  # Enable by setting npmPublish: true in .releaserc.json and configuring NPM_TOKEN
+  # npm publish job
+  # Publishes to npm when a release commit is detected on main branch
+  # Requires NPM_TOKEN secret to be configured in repository settings
   npm-publish:
     name: NPM Publish
     runs-on: ubuntu-latest
