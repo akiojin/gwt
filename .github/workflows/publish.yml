@@ -1,0 +1,50 @@
+name: Publish
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  # npm publish job (currently disabled in .releaserc.json)
+  # Enable by setting npmPublish: true in .releaserc.json and configuring NPM_TOKEN
+  npm-publish:
+    name: NPM Publish
+    runs-on: ubuntu-latest
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.14.0
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check if release commit
+        id: check_release
+        run: |
+          if git log -1 --pretty=%B | grep -q '^chore(release):'; then
+            echo "is_release=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_release=false" >> $GITHUB_OUTPUT
+          fi
+
+      # Uncomment when ready to publish to npm
+      # - name: Publish to npm
+      #   if: steps.check_release.outputs.is_release == 'true'
+      #   env:
+      #     NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+      #   run: npm publish --access public
