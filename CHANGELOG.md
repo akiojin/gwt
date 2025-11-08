@@ -1,3 +1,10 @@
+# [1.28.0](https://github.com/akiojin/claude-worktree/compare/v1.27.1...v1.28.0) (2025-11-08)
+
+
+### Features
+
+* 3回目のマイナーバージョンテスト機能追加 ([cb2a689](https://github.com/akiojin/claude-worktree/commit/cb2a6896d00474a9a3a922bfb466b5e9da59d9ce))
+
 ## [1.27.1](https://github.com/akiojin/claude-worktree/compare/v1.27.0...v1.27.1) (2025-11-08)
 
 
