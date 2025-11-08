@@ -23,9 +23,9 @@ Interactive Git worktree manager with AI tool selection (Claude Code / Codex CLI
 
 ## Installation
 
-### Global Installation
+### Global Installation (Recommended)
 
-Install globally with bun:
+Install globally with your preferred package manager:
 
 #### bun (global install)
 
