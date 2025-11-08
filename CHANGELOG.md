@@ -1,3 +1,10 @@
+## [1.28.2](https://github.com/akiojin/claude-worktree/compare/v1.28.1...v1.28.2) (2025-11-08)
+
+
+### Bug Fixes
+
+* publish.ymlへのバックマージ処理の移行 ([3a12077](https://github.com/akiojin/claude-worktree/commit/3a12077ad597cc7ebdfe035e8ce81fb762165c7e))
+
 ## [1.28.1](https://github.com/akiojin/claude-worktree/compare/v1.28.0...v1.28.1) (2025-11-08)
 
 
