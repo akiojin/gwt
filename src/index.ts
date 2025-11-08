@@ -71,7 +71,10 @@ function isGitRelatedError(error: unknown): boolean {
     return error.name === "GitError" || error.name === "WorktreeError";
   }
 
-  if (typeof error === "object" && "name" in (error as Record<string, unknown>)) {
+  if (
+    typeof error === "object" &&
+    "name" in (error as Record<string, unknown>)
+  ) {
     const name = (error as { name?: string }).name;
     return name === "GitError" || name === "WorktreeError";
   }
@@ -89,7 +92,9 @@ async function runGitStep<T>(
   } catch (error) {
     if (isGitRelatedError(error)) {
       const details = error instanceof Error ? error.message : String(error);
-      printWarning(`Git操作に失敗しました (${description}). エラー: ${details}`);
+      printWarning(
+        `Git操作に失敗しました (${description}). エラー: ${details}`,
+      );
       await waitForErrorAcknowledgement();
       return { ok: false };
     }
@@ -217,9 +222,8 @@ export async function handleAIToolWorkflow(
 
   try {
     // Get repository root
-    const repoRootResult = await runGitStep(
-      "リポジトリルートの取得",
-      () => getRepositoryRoot(),
+    const repoRootResult = await runGitStep("リポジトリルートの取得", () =>
+      getRepositoryRoot(),
     );
     if (!repoRootResult.ok) {
       return;
@@ -311,9 +315,8 @@ export async function handleAIToolWorkflow(
     printInfo(`Worktree ready: ${worktreePath}`);
 
     // Update remotes and attempt fast-forward pull
-    const fetchResult = await runGitStep(
-      "リモートの取得",
-      () => fetchAllRemotes({ cwd: repoRoot }),
+    const fetchResult = await runGitStep("リモートの取得", () =>
+      fetchAllRemotes({ cwd: repoRoot }),
     );
     if (!fetchResult.ok) {
       return;
@@ -347,13 +350,11 @@ export async function handleAIToolWorkflow(
       divergenceBranches.add(sanitizedRemoteBranch);
     }
 
-    const divergenceResult = await runGitStep(
-      "ブランチの差分確認",
-      () =>
-        getBranchDivergenceStatuses({
-          cwd: repoRoot,
-          branches: Array.from(divergenceBranches),
-        }),
+    const divergenceResult = await runGitStep("ブランチの差分確認", () =>
+      getBranchDivergenceStatuses({
+        cwd: repoRoot,
+        branches: Array.from(divergenceBranches),
+      }),
     );
     if (!divergenceResult.ok) {
       return;

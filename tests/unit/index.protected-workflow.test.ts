@@ -39,9 +39,10 @@ vi.mock("execa", () => ({
 }));
 
 vi.mock("../../src/git.js", async () => {
-  const actual = await vi.importActual<typeof import("../../src/git.js")>(
-    "../../src/git.js",
-  );
+  const actual =
+    await vi.importActual<typeof import("../../src/git.js")>(
+      "../../src/git.js",
+    );
   return {
     isGitRepository: vi.fn(),
     getRepositoryRoot: getRepositoryRootMock,
@@ -109,9 +110,9 @@ vi.mock("../../src/utils/terminal.js", async () => {
 // Import after mocks are set up
 import { handleAIToolWorkflow } from "../../src/index.js";
 
-  beforeEach(() => {
-    execaMock.mockClear();
-    ensureWorktreeMock.mockClear();
+beforeEach(() => {
+  execaMock.mockClear();
+  ensureWorktreeMock.mockClear();
   fetchAllRemotesMock.mockClear();
   pullFastForwardMock.mockClear();
   getBranchDivergenceStatusesMock.mockClear();
@@ -119,18 +120,17 @@ import { handleAIToolWorkflow } from "../../src/index.js";
   saveSessionMock.mockClear();
   worktreeExistsMock.mockClear();
   branchExistsMock.mockClear();
-    getRepositoryRootMock.mockClear();
-    getCurrentBranchMock.mockClear();
-    switchToProtectedBranchMock.mockClear();
-    waitForUserAcknowledgementMock.mockClear();
-    waitForUserAcknowledgementMock.mockResolvedValue(undefined);
-    switchToProtectedBranchMock.mockResolvedValue("local");
-    branchExistsMock.mockResolvedValue(true);
-    getCurrentBranchMock.mockResolvedValue("develop");
-  });
+  getRepositoryRootMock.mockClear();
+  getCurrentBranchMock.mockClear();
+  switchToProtectedBranchMock.mockClear();
+  waitForUserAcknowledgementMock.mockClear();
+  waitForUserAcknowledgementMock.mockResolvedValue(undefined);
+  switchToProtectedBranchMock.mockResolvedValue("local");
+  branchExistsMock.mockResolvedValue(true);
+  getCurrentBranchMock.mockResolvedValue("develop");
+});
 
 describe("handleAIToolWorkflow - protected branches", () => {
-  
   it("checks out protected branch in repository root instead of creating worktree", async () => {
     const selection: SelectionResult = {
       branch: "main",
