@@ -24,7 +24,7 @@ const {
   launchClaudeCodeMock: vi.fn(async () => undefined),
   saveSessionMock: vi.fn(async () => undefined),
   worktreeExistsMock: vi.fn(async () => null),
-  switchToProtectedBranchMock: vi.fn(async () => "local"),
+  switchToProtectedBranchMock: vi.fn(async () => "local" as const),
   branchExistsMock: vi.fn(async () => true),
   getRepositoryRootMock: vi.fn(async () => "/repo"),
   getCurrentBranchMock: vi.fn(async () => "develop"),
