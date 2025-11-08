@@ -1,6 +1,6 @@
 {
   "name": "@akiojin/claude-worktree",
-  "version": "1.26.0",
+  "version": "1.26.1",
   "description": "Interactive Git worktree manager for Claude Code with graphical branch selection",
   "main": "dist/index.js",
   "bin": {
@@ -64,8 +64,8 @@
     "@types/react": "^19.2.2",
     "@typescript-eslint/eslint-plugin": "^8.38.0",
     "@typescript-eslint/parser": "^8.38.0",
-    "@vitest/coverage-v8": "^2.1.8",
-    "@vitest/ui": "^2.1.8",
+    "@vitest/coverage-v8": "^4.0.8",
+    "@vitest/ui": "^4.0.8",
     "eslint": "^9.31.0",
     "happy-dom": "^20.0.8",
     "husky": "^9.1.7",
@@ -76,7 +76,7 @@
     "rimraf": "^6.0.1",
     "semantic-release": "^25.0.1",
     "typescript": "^5.8.3",
-    "vitest": "^2.1.8"
+    "vitest": "^4.0.8"
   },
   "files": [
     "dist/",

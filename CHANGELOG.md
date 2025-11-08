@@ -1,3 +1,13 @@
+## [1.26.1](https://github.com/akiojin/claude-worktree/compare/v1.26.0...v1.26.1) (2025-11-08)
+
+
+### Bug Fixes
+
+* format entry workflow tests ([32853c5](https://github.com/akiojin/claude-worktree/commit/32853c5eaa60cf9e2f8b0bca9bed86338b7e956d))
+* WorktreeOrchestratorモックをクラスベースに修正 ([0f058a1](https://github.com/akiojin/claude-worktree/commit/0f058a10fbb2652e790df198b5ed816583210da2))
+* カバレッジレポート生成失敗を許容 ([a34fcf6](https://github.com/akiojin/claude-worktree/commit/a34fcf62e1496c45a09eec5fd860af344da6a4df))
+* パッチバージョンリリーステスト用ファイル追加 ([be7e853](https://github.com/akiojin/claude-worktree/commit/be7e8533f9c85fb8ede07f94866e6651d2c9c8f5))
+
 # [1.26.0](https://github.com/akiojin/claude-worktree/compare/v1.25.1...v1.26.0) (2025-11-08)
 
 
