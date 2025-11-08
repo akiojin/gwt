@@ -15,6 +15,7 @@ jobs:
   semantic-release:
     name: Semantic Release
     runs-on: ubuntu-latest
+    if: "!startsWith(github.event.head_commit.message, 'chore(release):')"
     outputs:
       new_release_published: ${{ steps.semantic_release.outputs.new_release_published }}
       new_release_version: ${{ steps.semantic_release.outputs.new_release_version }}
@@ -48,15 +49,22 @@ jobs:
           GIT_COMMITTER_NAME: github-actions[bot]
           GIT_COMMITTER_EMAIL: github-actions[bot]@users.noreply.github.com
         run: |
-          npx semantic-release | tee release-output.txt
+          npx semantic-release > release-output.txt 2>&1
+          RELEASE_EXIT_CODE=$?
+          cat release-output.txt
 
-          if grep -q "Published release" release-output.txt; then
-            echo "new_release_published=true" >> $GITHUB_OUTPUT
+          if [ $RELEASE_EXIT_CODE -eq 0 ] && grep -q "Published release" release-output.txt; then
             VERSION=$(grep "Published release" release-output.txt | sed -n 's/.*Published release \([0-9.]*\).*/\1/p' | head -n 1)
+            echo "new_release_published=true" >> $GITHUB_OUTPUT
             echo "new_release_version=$VERSION" >> $GITHUB_OUTPUT
             echo "new_release_git_tag=v$VERSION" >> $GITHUB_OUTPUT
+            echo "✓ New release published: v$VERSION"
           else
             echo "new_release_published=false" >> $GITHUB_OUTPUT
+            echo "No new release published"
+            if [ $RELEASE_EXIT_CODE -ne 0 ]; then
+              exit $RELEASE_EXIT_CODE
+            fi
           fi
 
   create-release-to-main-pr:
