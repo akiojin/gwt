@@ -25,13 +25,12 @@ release/vX.Y.Z (作成)
   - CHANGELOG.md, package.json 更新
   - Git タグ作成
   - GitHub Release 作成
-  - release/vX.Y.Z → main PR 自動作成
-  ↓ auto-merge.yml
-  - Required checks 通過後に自動マージ
+  - release/vX.Y.Z → main へ直接マージ
+  - main → develop へバックマージ
+  - release/vX.Y.Z ブランチ削除
 main
   ↓ publish.yml 自動実行
   - npm publish (設定時)
-  - main → develop バックマージ
 develop (最新状態に戻る)
 ```
 
@@ -40,11 +39,12 @@ develop (最新状態に戻る)
 1. develop ブランチを最新化し、リリースしたいコミットが揃っていることを確認します。
 2. Claude Code で `/release` コマンドを実行するか、`gh workflow run create-release.yml --ref develop` を使って GitHub Actions から起動します。
 3. `create-release.yml` が semantic-release をドライラン実行し、次のバージョンを決定して `release/vX.Y.Z` ブランチを作成します。
-4. `release.yml` が自動的にトリガーされ、semantic-release を実行します。
-5. `release.yml` が `release/vX.Y.Z` → `main` の PR を自動作成します。
-6. `auto-merge.yml` が PR に auto-merge を設定します。
-7. Required チェック通過後、PR が自動的に main にマージされます。
-8. `publish.yml` が main への push をトリガーに実行され、develop へバックマージします。
+4. `release.yml` が自動的にトリガーされ、以下を順次実行します：
+   - semantic-release による CHANGELOG/タグ/GitHub Release 作成
+   - release/vX.Y.Z → main への直接マージ
+   - main → develop へのバックマージ
+   - release/vX.Y.Z ブランチの削除
+5. `publish.yml` が main への push をトリガーに実行され、npm publish（設定時）を行います。
 
 ## 実行内容
 
@@ -68,9 +68,9 @@ gh workflow run create-release.yml --ref develop
 
 - semantic-release は `release/*` ブランチで実行されます (`.releaserc.json` で設定)。
 - main ブランチは常にクリーンな状態を保ち、リリース済みのコードのみが含まれます。
-- Required チェックはリポジトリの Branch Protection で定義されたジョブ (例: `lint`, `test`)。
+- **PR を経由せず直接マージ**されるため、高速にリリースが完了します。
 - npm publish を有効化する場合は `.releaserc.json` の `@semantic-release/npm` セクションで `npmPublish: true` に変更し、`NPM_TOKEN` シークレットを設定してください。
-- バックマージに失敗した場合、`sync/main-to-develop-<timestamp>` ブランチが作成され、手動でコンフリクトを解消する PR が自動生成されます。
-- `PERSONAL_ACCESS_TOKEN` シークレットが設定されていることを確認してください (auto-merge とバックマージに必要)。
+- バックマージは release.yml 内で自動実行されます。コンフリクトが発生した場合はワークフローが失敗します。
+- `PERSONAL_ACCESS_TOKEN` シークレットが設定されていることを確認してください (マージとバックマージに必要)。
 
 実行してください。

@@ -1,5 +1,10 @@
 name: Release
 
+# This workflow handles the automated release process:
+# 1. semantic-release creates version, tag, and GitHub Release
+# 2. Direct merge to main (no PR to avoid GitHub Actions event limitations)
+# 3. Backmerge to develop
+# 4. Release branch cleanup
 on:
   push:
     branches:
@@ -15,6 +20,7 @@ jobs:
   semantic-release:
     name: Semantic Release
     runs-on: ubuntu-latest
+    if: "!startsWith(github.event.head_commit.message, 'chore(release):')"
     outputs:
       new_release_published: ${{ steps.semantic_release.outputs.new_release_published }}
       new_release_version: ${{ steps.semantic_release.outputs.new_release_version }}
@@ -24,6 +30,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.ref }}
           fetch-depth: 0
           token: ${{ secrets.PERSONAL_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
 
@@ -48,44 +55,77 @@ jobs:
           GIT_COMMITTER_NAME: github-actions[bot]
           GIT_COMMITTER_EMAIL: github-actions[bot]@users.noreply.github.com
         run: |
-          npx semantic-release | tee release-output.txt
+          # semantic-releaseを実行して出力を取得
+          npx semantic-release > release-output.txt 2>&1
+          RELEASE_EXIT_CODE=$?
+          cat release-output.txt
 
-          if grep -q "Published release" release-output.txt; then
+          # semantic-releaseの出力を解析して新しいリリースが作成されたか確認
+          if [ $RELEASE_EXIT_CODE -eq 0 ] && grep -q "Published release" release-output.txt; then
+            VERSION=$(grep -oP 'Published release \K[0-9]+\.[0-9]+\.[0-9]+' release-output.txt | head -1)
             echo "new_release_published=true" >> $GITHUB_OUTPUT
-            VERSION=$(grep "Published release" release-output.txt | sed -n 's/.*Published release \([0-9.]*\).*/\1/p' | head -n 1)
             echo "new_release_version=$VERSION" >> $GITHUB_OUTPUT
             echo "new_release_git_tag=v$VERSION" >> $GITHUB_OUTPUT
+            echo "✓ New release published: v$VERSION"
           else
             echo "new_release_published=false" >> $GITHUB_OUTPUT
+            echo "No new release published"
+            if [ $RELEASE_EXIT_CODE -ne 0 ]; then
+              exit $RELEASE_EXIT_CODE
+            fi
           fi
 
-  create-release-to-main-pr:
-    name: Create Release PR to main
-    runs-on: ubuntu-latest
+  merge-to-main:
+    name: Merge to main
     needs: semantic-release
+    runs-on: ubuntu-latest
     if: needs.semantic-release.outputs.new_release_published == 'true'
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.PERSONAL_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
 
-      - name: Create PR to main
-        env:
-          GH_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Merge release branch to main
         run: |
           RELEASE_BRANCH="${GITHUB_REF#refs/heads/}"
           VERSION="${{ needs.semantic-release.outputs.new_release_version }}"
-          TAG="${{ needs.semantic-release.outputs.new_release_git_tag }}"
 
-          gh pr create \
-            --base main \
-            --head "$RELEASE_BRANCH" \
-            --title "chore(release): $VERSION" \
-            --body "Automated release PR for version $VERSION
+          echo "Merging $RELEASE_BRANCH to main (version: $VERSION)..."
+          git fetch origin "$RELEASE_BRANCH"
+          git merge "origin/$RELEASE_BRANCH" --no-ff -m "chore(release): merge v${VERSION} to main
 
-          This PR merges the release branch to main for final deployment.
+          Automated merge of release branch for version ${VERSION}
 
-          ## Release Notes
-          See [GitHub Release](https://github.com/${{ github.repository }}/releases/tag/$TAG) for details.
+          🤖 Generated with GitHub Actions"
 
-          🤖 Generated with GitHub Actions" || echo "PR already exists"
+          echo "Pushing to main..."
+          git push origin main
+
+      - name: Backmerge main to develop
+        run: |
+          echo "Checking out develop..."
+          git fetch origin develop
+          git checkout develop
+
+          echo "Merging main to develop..."
+          git merge origin/main --no-ff -m "chore: backmerge main to develop after release
+
+          🤖 Generated with GitHub Actions"
+
+          echo "Pushing to develop..."
+          git push origin develop
+
+      - name: Delete release branch
+        run: |
+          RELEASE_BRANCH="${GITHUB_REF#refs/heads/}"
+          echo "Deleting $RELEASE_BRANCH..."
+          git push origin --delete "$RELEASE_BRANCH"
