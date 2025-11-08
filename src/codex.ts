@@ -88,7 +88,6 @@ export async function launchCodexCLI(
     try {
       await execa("bunx", [CODEX_CLI_PACKAGE, ...args], {
         cwd: worktreePath,
-        shell: true,
         stdin: childStdio.stdin,
         stdout: childStdio.stdout,
         stderr: childStdio.stderr,
@@ -125,7 +124,7 @@ export async function launchCodexCLI(
 
 export async function isCodexAvailable(): Promise<boolean> {
   try {
-    await execa("bunx", [CODEX_CLI_PACKAGE, "--help"], { shell: true });
+    await execa("bunx", [CODEX_CLI_PACKAGE, "--help"]);
     return true;
   } catch (error: any) {
     if (error.code === "ENOENT") {
