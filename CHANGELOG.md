@@ -1,3 +1,20 @@
+# [1.26.0](https://github.com/akiojin/claude-worktree/compare/v1.25.1...v1.26.0) (2025-11-08)
+
+
+### Bug Fixes
+
+* add test file for patch version release ([3e1ecc3](https://github.com/akiojin/claude-worktree/commit/3e1ecc39877eac1dc5bb6653f2a26870230bbad0))
+* auto-mergeをpull_request_targetに変更 ([79f5798](https://github.com/akiojin/claude-worktree/commit/79f5798f63c0d1f55b46c05af2fe143d6cad3507))
+* keep cli running on git failures ([80bd4f6](https://github.com/akiojin/claude-worktree/commit/80bd4f68a619c50fa80f52f50709596232e5b91e))
+* semantic-releaseのドライラン実行時にGITHUB_TOKENを設定 ([e840130](https://github.com/akiojin/claude-worktree/commit/e8401306bf60538ca828b60f6d57dc57e2710bcf))
+* unity-mcp-serverとの完全統一（残り20%の修正） ([3172f4b](https://github.com/akiojin/claude-worktree/commit/3172f4bd5dd30518c1e12f3559d1b8c6e901f9bc))
+* unity-mcp-serverとの差分を修正 ([4036b06](https://github.com/akiojin/claude-worktree/commit/4036b06c30e78babaf3ba25b9c6db973adabcfcb))
+
+
+### Features
+
+* unity-mcp-server型自動リリースフロー完全導入 ([e146bed](https://github.com/akiojin/claude-worktree/commit/e146bedc4fa2abd59e2618426d7f8617cd661f5d))
+
 ## [1.25.1](https://github.com/akiojin/claude-worktree/compare/v1.25.0...v1.25.1) (2025-11-07)
 
 

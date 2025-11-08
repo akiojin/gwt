@@ -61,9 +61,9 @@ describe("runInteractiveLoop", () => {
       .mockRejectedValueOnce(new Error("ui crash"))
       .mockResolvedValueOnce(undefined);
 
-    const workflowHandler = vi.fn<(selection: SelectionResult) => Promise<void>>(
-      async () => {},
-    );
+    const workflowHandler = vi.fn<
+      (selection: SelectionResult) => Promise<void>
+    >(async () => {});
 
     await runInteractiveLoop(uiHandler, workflowHandler);
 
