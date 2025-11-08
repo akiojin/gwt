@@ -1,3 +1,15 @@
+# [1.29.0](https://github.com/akiojin/claude-worktree/compare/v1.28.2...v1.29.0) (2025-11-08)
+
+
+### Bug Fixes
+
+* Codex起動時のJSON構文エラー修正とエラー時のCLI継続 ([ef40e6d](https://github.com/akiojin/claude-worktree/commit/ef40e6dd09a695231f0adb264fea630d76c8240d))
+
+
+### Features
+
+* npm公開機能を有効化 ([20df08a](https://github.com/akiojin/claude-worktree/commit/20df08ab66a64525009c71574e459e53540c598e))
+
 ## [1.28.2](https://github.com/akiojin/claude-worktree/compare/v1.28.1...v1.28.2) (2025-11-08)
 
 
