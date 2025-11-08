@@ -95,7 +95,7 @@ describe("codex.ts", () => {
       stdout: "inherit",
       stderr: "inherit",
     });
-    expect(mockTerminalStreams.exitRawMode).toHaveBeenCalledTimes(2);
+    expect(mockTerminalStreams.exitRawMode).toHaveBeenCalledTimes(1);
     expect(mockChildStdio.cleanup).toHaveBeenCalledTimes(1);
   });
 
