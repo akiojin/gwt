@@ -68,9 +68,9 @@ vi.mock("../../src/worktree.js", async () => {
 });
 
 vi.mock("../../src/services/WorktreeOrchestrator.js", () => ({
-  WorktreeOrchestrator: vi.fn().mockImplementation(() => ({
-    ensureWorktree: ensureWorktreeMock,
-  })),
+  WorktreeOrchestrator: class {
+    ensureWorktree = ensureWorktreeMock;
+  },
 }));
 
 vi.mock("../../src/claude.js", () => ({
