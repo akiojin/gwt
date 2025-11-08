@@ -1,3 +1,11 @@
+## [1.29.1](https://github.com/akiojin/claude-worktree/compare/v1.29.0...v1.29.1) (2025-11-08)
+
+
+### Bug Fixes
+
+* npm publish時の認証設定を修正 ([3e4208b](https://github.com/akiojin/claude-worktree/commit/3e4208bb25c3fbe609cfec45e8ede3a17e2858c1))
+* remove redundant terminal.exitRawMode() call in error path ([60ae16d](https://github.com/akiojin/claude-worktree/commit/60ae16d13feacb33b3494f0730c65253d0b84b6e))
+
 # [1.29.0](https://github.com/akiojin/claude-worktree/compare/v1.28.2...v1.29.0) (2025-11-08)
 
 
