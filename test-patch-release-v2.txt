@@ -1,0 +1,2 @@
+This is a test file for patch version release (v2).
+Testing semantic-release with fix: commit type.
