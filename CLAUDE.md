@@ -76,10 +76,13 @@
 
 - feature/\* ブランチは develop へ Auto Merge し、develop で次回リリース候補を蓄積する。
 - `/release` コマンド（または `gh workflow run create-release.yml --ref develop`）で semantic-release のドライランを実行し、次のバージョンを決定して `release/vX.Y.Z` ブランチを自動作成する。
-- `release/vX.Y.Z` ブランチへの push をトリガーに `.github/workflows/release.yml` が semantic-release を実行し、CHANGELOG/タグ/GitHub Release を作成後、`release/vX.Y.Z` → `main` の PR を自動作成する。
-- `.github/workflows/auto-merge.yml` が PR に auto-merge を設定し、Required チェック通過後に自動的に main へマージされる。
-- main への push をトリガーに `.github/workflows/publish.yml` が npm publish（設定時）と develop への自動バックマージを実行する。
-- バックマージ時のコンフリクトは自動生成される `sync/main-to-develop-<timestamp>` PR で解消する。
+- `release/vX.Y.Z` ブランチへの push をトリガーに `.github/workflows/release.yml` が以下を実行：
+  1. semantic-release で CHANGELOG/タグ/GitHub Release を作成
+  2. `release/vX.Y.Z` → `main` へ直接マージ
+  3. `main` → `develop` へバックマージ
+  4. `release/vX.Y.Z` ブランチを削除
+- すべての処理が release.yml 内で完結し、PR を経由せずに高速に実行される。
+- main への push をトリガーに `.github/workflows/publish.yml` が npm publish（設定時）を実行する。
 
 ## 最近の変更
 
@@ -89,12 +92,12 @@
 - 詳細: `/specs/001-codex-cli-worktree/`
 - 技術スタック: Bun 1.0+, TypeScript, inquirer（必要に応じてNode.js 18+を併用）
 
-### 2025-01-07: リリースフロー完全自動化（unity-mcp-server型）
+### 2025-01-07: unity-mcp-server型リリースフロー完全導入
 
-- unity-mcp-server の3段階リリースフロー（develop → release/v* → main）を完全導入
-- semantic-release を release/* ブランチで実行し、main は常にクリーンな状態を維持
-- リリースPRの自動作成・自動マージ機能を実装
-- 詳細: `.github/workflows/create-release.yml`, `.github/workflows/release.yml`, `.github/workflows/publish.yml`, `.github/workflows/auto-merge.yml`
+- unity-mcp-serverの直接マージ方式を完全導入（PRを経由せず高速化）
+- release.yml内で semantic-release → main直接マージ → developバックマージ → ブランチ削除を一括実行
+- PRベース方式から直接マージ方式に変更し、シンプルで高速なリリースフローを実現
+- 詳細: `.github/workflows/create-release.yml`, `.github/workflows/release.yml`, `.github/workflows/publish.yml`
 
 ### 2025-01-06: リリースフロー変更
 
