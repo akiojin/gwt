@@ -91,7 +91,6 @@ describe("codex.ts", () => {
     expect(args).toEqual(["@openai/codex@latest", ...DEFAULT_CODEX_ARGS]);
     expect(options).toMatchObject({
       cwd: worktreePath,
-      shell: true,
       stdin: "inherit",
       stdout: "inherit",
       stderr: "inherit",
