@@ -110,20 +110,6 @@ jobs:
           echo "Pushing to main..."
           git push origin main
 
-      - name: Backmerge main to develop
-        run: |
-          echo "Checking out develop..."
-          git fetch origin develop
-          git checkout develop
-
-          echo "Merging main to develop..."
-          git merge origin/main --no-ff -m "chore: backmerge main to develop after release
-
-          🤖 Generated with GitHub Actions"
-
-          echo "Pushing to develop..."
-          git push origin develop
-
       - name: Delete release branch
         run: |
           RELEASE_BRANCH="${GITHUB_REF#refs/heads/}"
