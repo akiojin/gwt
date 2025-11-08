@@ -23,13 +23,13 @@ const originalUseGitData = useGitDataModule.useGitData;
 const originalUseScreenState = useScreenStateModule.useScreenState;
 const originalBranchListScreen = BranchListScreenModule.BranchListScreen;
 const originalBranchActionSelector = BranchActionSelectorScreenModule.BranchActionSelectorScreen;
+const originalGetRepositoryRoot = gitModule.getRepositoryRoot;
 
 const useGitDataSpy = vi.spyOn(useGitDataModule, 'useGitData');
 const useScreenStateSpy = vi.spyOn(useScreenStateModule, 'useScreenState');
 const branchListScreenSpy = vi.spyOn(BranchListScreenModule, 'BranchListScreen');
 const branchActionSelectorSpy = vi.spyOn(BranchActionSelectorScreenModule, 'BranchActionSelectorScreen');
 const switchToProtectedBranchSpy = vi.spyOn(worktreeModule, 'switchToProtectedBranch');
-const originalGetRepositoryRoot = gitModule.getRepositoryRoot;
 const getRepositoryRootSpy = vi.spyOn(gitModule, 'getRepositoryRoot');
 
 const branchListProps: any[] = [];
@@ -62,7 +62,7 @@ describe('App protected branch handling', () => {
 
     useGitDataSpy.mockReset();
     switchToProtectedBranchSpy.mockReset();
-    getRepositoryRootSpy.mockResolvedValue('/repo');
+    getRepositoryRootSpy.mockReset();
 
     useScreenStateSpy.mockImplementation(() => ({
       currentScreen: currentScreenState,
@@ -86,6 +86,7 @@ describe('App protected branch handling', () => {
       return React.createElement(originalBranchActionSelector, props);
     });
     switchToProtectedBranchSpy.mockResolvedValue('local');
+    getRepositoryRootSpy.mockResolvedValue('/repo');
   });
 
   afterEach(() => {
@@ -97,7 +98,6 @@ describe('App protected branch handling', () => {
     branchActionSelectorSpy.mockImplementation(originalBranchActionSelector as any);
     switchToProtectedBranchSpy.mockReset();
     getRepositoryRootSpy.mockReset();
-    getRepositoryRootSpy.mockImplementation(originalGetRepositoryRoot);
     branchActionProps.length = 0;
   });
 

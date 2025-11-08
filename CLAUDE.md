@@ -74,11 +74,15 @@
 
 ## リリースワークフロー
 
-- リリースは develop → main への手動マージでトリガーされる
-- feature/* ブランチは develop へマージ（Auto Merge）
-- develop での蓄積後、`/release` コマンドで develop → main マージ＋リリース実行
-- リリースコマンド: Claude Code で `/release` 実行、または `gh workflow run release-trigger.yml --ref develop -f confirm=release`
-- mainブランチへのpush時に semantic-release が自動実行され、npm公開とGitHubリリースを作成
+- feature/\* ブランチは develop へ Auto Merge し、develop で次回リリース候補を蓄積する。
+- `/release` コマンド（または `gh workflow run create-release.yml --ref develop`）で semantic-release のドライランを実行し、次のバージョンを決定して `release/vX.Y.Z` ブランチを自動作成する。
+- `release/vX.Y.Z` ブランチへの push をトリガーに `.github/workflows/release.yml` が以下を実行：
+  1. semantic-release で CHANGELOG/タグ/GitHub Release を作成
+  2. `release/vX.Y.Z` → `main` へ直接マージ
+  3. `main` → `develop` へバックマージ
+  4. `release/vX.Y.Z` ブランチを削除
+- すべての処理が release.yml 内で完結し、PR を経由せずに高速に実行される。
+- main への push をトリガーに `.github/workflows/publish.yml` が npm publish（設定時）を実行する。
 
 ## 最近の変更
 
@@ -88,14 +92,24 @@
 - 詳細: `/specs/001-codex-cli-worktree/`
 - 技術スタック: Bun 1.0+, TypeScript, inquirer（必要に応じてNode.js 18+を併用）
 
+### 2025-01-07: unity-mcp-server型リリースフロー完全導入
+
+- unity-mcp-serverの直接マージ方式を完全導入（PRを経由せず高速化）
+- release.yml内で semantic-release → main直接マージ → developバックマージ → ブランチ削除を一括実行
+- PRベース方式から直接マージ方式に変更し、シンプルで高速なリリースフローを実現
+- 詳細: `.github/workflows/create-release.yml`, `.github/workflows/release.yml`, `.github/workflows/publish.yml`
+
 ### 2025-01-06: リリースフロー変更
 
 - develop ブランチを導入し、手動リリースフローに移行
-- feature → develop (Auto Merge) → /release → main → リリース
-- 詳細: `.github/workflows/release-trigger.yml`, `.claude/commands/release.md`
+- feature → develop (Auto Merge) → /release（develop→main PR）→ main push → semantic-release
+- 詳細: `.github/workflows/release-trigger.yml`, `.claude/commands/release.md`, `scripts/create-release-pr.sh`
 
 ## Active Technologies
+
 - TypeScript 5.8.x / React 19 / Ink 6 / Bun 1.0+ + Vitest 2.1.x, happy-dom 20.0.8, @testing-library/react 16.3.0, execa 9.6.0 (SPEC-a5a44f4c)
+- TypeScript 5.8.x / Bun 1.0+ / GitHub Actions YAML + semantic-release 22.x, gh CLI, GitHub Actions (`actions/checkout`, `actions/github-script`) (SPEC-57fde06f)
 
 ## Recent Changes
+
 - SPEC-a5a44f4c: Added TypeScript 5.8.x / React 19 / Ink 6 / Bun 1.0+ + Vitest 2.1.x, happy-dom 20.0.8, @testing-library/react 16.3.0, execa 9.6.0

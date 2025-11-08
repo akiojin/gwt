@@ -1,0 +1,100 @@
+name: Create Release Branch
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  create-release-branch:
+    name: Create Release Branch
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout develop
+        uses: actions/checkout@v4
+        with:
+          ref: develop
+          fetch-depth: 0
+          token: ${{ secrets.PERSONAL_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.14.0
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Determine next version
+        id: next_version
+        env:
+          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Running semantic-release in dry-run mode..."
+          OUTPUT=$(npx semantic-release --dry-run --branches develop 2>&1 || true)
+          echo "$OUTPUT"
+
+          # Check for non-compliant commits
+          if echo "$OUTPUT" | grep -q "not following the Conventional Commits"; then
+            echo "❌ Error: Commits not following Conventional Commits format detected"
+            echo "$OUTPUT" | grep "not following"
+            exit 1
+          fi
+
+          # Extract version
+          VERSION=$(echo "$OUTPUT" | grep "The next release version is" | sed -n 's/.*The next release version is \([0-9.]*\).*/\1/p')
+
+          if [ -z "$VERSION" ]; then
+            echo "❌ Error: Could not determine next version"
+            echo "Semantic-release output:"
+            echo "$OUTPUT"
+            exit 1
+          fi
+
+          echo "next_version=$VERSION" >> $GITHUB_OUTPUT
+          echo "✓ Next version: $VERSION"
+
+      - name: Create release branch
+        env:
+          VERSION: ${{ steps.next_version.outputs.next_version }}
+          GH_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          RELEASE_BRANCH="release/v$VERSION"
+
+          # Check if branch already exists
+          if git ls-remote --exit-code origin "$RELEASE_BRANCH" >/dev/null 2>&1; then
+            echo "❌ Error: Release branch $RELEASE_BRANCH already exists"
+            exit 1
+          fi
+
+          # Create and push release branch
+          git checkout -b "$RELEASE_BRANCH"
+          git push origin "$RELEASE_BRANCH"
+
+          echo "✓ Created release branch: $RELEASE_BRANCH"
+          echo "✓ The release.yml workflow will now run automatically"
+
+      - name: Summary
+        if: success()
+        env:
+          VERSION: ${{ steps.next_version.outputs.next_version }}
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY <<EOF
+          ## Release Branch Created
+
+          - **Version**: v$VERSION
+          - **Branch**: \`release/v$VERSION\`
+          - **Next Steps**:
+            1. The \`release.yml\` workflow will run automatically
+            2. semantic-release will create CHANGELOG, tags, and GitHub Release
+            3. A PR to \`main\` will be created automatically
+            4. After Required checks pass, the PR will auto-merge
+            5. \`publish.yml\` will run on main to backmerge to develop
+
+          Monitor the workflow progress:
+          https://github.com/${{ github.repository }}/actions
+          EOF

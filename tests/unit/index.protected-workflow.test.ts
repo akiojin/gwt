@@ -24,7 +24,7 @@ const {
   launchClaudeCodeMock: vi.fn(async () => undefined),
   saveSessionMock: vi.fn(async () => undefined),
   worktreeExistsMock: vi.fn(async () => null),
-  switchToProtectedBranchMock: vi.fn(async () => "local"),
+  switchToProtectedBranchMock: vi.fn(async () => "local" as const),
   branchExistsMock: vi.fn(async () => true),
   getRepositoryRootMock: vi.fn(async () => "/repo"),
   getCurrentBranchMock: vi.fn(async () => "develop"),
@@ -69,9 +69,9 @@ vi.mock("../../src/worktree.js", async () => {
 });
 
 vi.mock("../../src/services/WorktreeOrchestrator.js", () => ({
-  WorktreeOrchestrator: vi.fn().mockImplementation(() => ({
-    ensureWorktree: ensureWorktreeMock,
-  })),
+  WorktreeOrchestrator: class {
+    ensureWorktree = ensureWorktreeMock;
+  },
 }));
 
 vi.mock("../../src/claude.js", () => ({

@@ -1,3 +1,87 @@
+## [1.28.1](https://github.com/akiojin/claude-worktree/compare/v1.28.0...v1.28.1) (2025-11-08)
+
+
+### Bug Fixes
+
+* 3回目のパッチバージョンテスト修正追加 ([e96ebe8](https://github.com/akiojin/claude-worktree/commit/e96ebe81cd95c7dfc9162ebc540bdce47e303f05))
+
+# [1.28.0](https://github.com/akiojin/claude-worktree/compare/v1.27.1...v1.28.0) (2025-11-08)
+
+
+### Features
+
+* 3回目のマイナーバージョンテスト機能追加 ([cb2a689](https://github.com/akiojin/claude-worktree/commit/cb2a6896d00474a9a3a922bfb466b5e9da59d9ce))
+
+## [1.27.1](https://github.com/akiojin/claude-worktree/compare/v1.27.0...v1.27.1) (2025-11-08)
+
+
+### Bug Fixes
+
+* パッチバージョンリリーステスト用修正追加 ([766f97d](https://github.com/akiojin/claude-worktree/commit/766f97d1016e1aa0cae42d4183a2ec80fe4dda50))
+
+# [1.27.0](https://github.com/akiojin/claude-worktree/compare/v1.26.1...v1.27.0) (2025-11-08)
+
+
+### Features
+
+* マイナーバージョンリリーステスト機能追加 ([c8afaf0](https://github.com/akiojin/claude-worktree/commit/c8afaf0563cea104bb620c879a0dd4df3f432f1d))
+
+## [1.26.1](https://github.com/akiojin/claude-worktree/compare/v1.26.0...v1.26.1) (2025-11-08)
+
+
+### Bug Fixes
+
+* format entry workflow tests ([32853c5](https://github.com/akiojin/claude-worktree/commit/32853c5eaa60cf9e2f8b0bca9bed86338b7e956d))
+* WorktreeOrchestratorモックをクラスベースに修正 ([0f058a1](https://github.com/akiojin/claude-worktree/commit/0f058a10fbb2652e790df198b5ed816583210da2))
+* カバレッジレポート生成失敗を許容 ([a34fcf6](https://github.com/akiojin/claude-worktree/commit/a34fcf62e1496c45a09eec5fd860af344da6a4df))
+* パッチバージョンリリーステスト用ファイル追加 ([be7e853](https://github.com/akiojin/claude-worktree/commit/be7e8533f9c85fb8ede07f94866e6651d2c9c8f5))
+
+# [1.26.0](https://github.com/akiojin/claude-worktree/compare/v1.25.1...v1.26.0) (2025-11-08)
+
+
+### Bug Fixes
+
+* add test file for patch version release ([3e1ecc3](https://github.com/akiojin/claude-worktree/commit/3e1ecc39877eac1dc5bb6653f2a26870230bbad0))
+* auto-mergeをpull_request_targetに変更 ([79f5798](https://github.com/akiojin/claude-worktree/commit/79f5798f63c0d1f55b46c05af2fe143d6cad3507))
+* keep cli running on git failures ([80bd4f6](https://github.com/akiojin/claude-worktree/commit/80bd4f68a619c50fa80f52f50709596232e5b91e))
+* semantic-releaseのドライラン実行時にGITHUB_TOKENを設定 ([e840130](https://github.com/akiojin/claude-worktree/commit/e8401306bf60538ca828b60f6d57dc57e2710bcf))
+* unity-mcp-serverとの完全統一（残り20%の修正） ([3172f4b](https://github.com/akiojin/claude-worktree/commit/3172f4bd5dd30518c1e12f3559d1b8c6e901f9bc))
+* unity-mcp-serverとの差分を修正 ([4036b06](https://github.com/akiojin/claude-worktree/commit/4036b06c30e78babaf3ba25b9c6db973adabcfcb))
+
+
+### Features
+
+* unity-mcp-server型自動リリースフロー完全導入 ([e146bed](https://github.com/akiojin/claude-worktree/commit/e146bedc4fa2abd59e2618426d7f8617cd661f5d))
+
+## [1.25.1](https://github.com/akiojin/claude-worktree/compare/v1.25.0...v1.25.1) (2025-11-07)
+
+
+### Bug Fixes
+
+* make release sync safe for develop ([a8b1059](https://github.com/akiojin/claude-worktree/commit/a8b1059df4ab93a37f4791f62fb9d82caa7cdc02))
+
+# [1.25.0](https://github.com/akiojin/claude-worktree/compare/v1.24.2...v1.25.0) (2025-11-07)
+
+
+### Bug Fixes
+
+* disable husky in release workflow ([a5e1548](https://github.com/akiojin/claude-worktree/commit/a5e1548852b72007faec1735983ea52edacd7205))
+* Docker環境でのpnpmセットアップとプロジェクトビルドを修正 ([a5b40f3](https://github.com/akiojin/claude-worktree/commit/a5b40f35d4b3f43efa475e4e91905908a7bce9e9))
+* update Dockerfile to use npm for global tool installation ([25b0410](https://github.com/akiojin/claude-worktree/commit/25b04108cda872c10c07f91fa8211b08c99aa1c7))
+* use node 22 for release workflow ([cb05bea](https://github.com/akiojin/claude-worktree/commit/cb05bea7eaacc807587efb8652b8612865e19e24))
+* use PAT for release pushes ([ef8027b](https://github.com/akiojin/claude-worktree/commit/ef8027be707e505b99464959118f1ada73e0b9f9))
+
+
+### Features
+
+* orchestrate release branch auto merge flow ([82e19aa](https://github.com/akiojin/claude-worktree/commit/82e19aa2a344f8d1022bd21b58639bf942e6cd50))
+
+## [1.24.2](https://github.com/akiojin/claude-worktree/compare/v1.24.1...v1.24.2) (2025-11-07)
+
+### Bug Fixes
+
+- Codexエラー時でもCLIを継続 ([6b5d537](https://github.com/akiojin/claude-worktree/commit/6b5d537192d2a1b48c8cffd89b488aabb2b1dca2))
+
 ## [1.24.1](https://github.com/akiojin/claude-worktree/compare/v1.24.0...v1.24.1) (2025-11-07)
 
 ### Bug Fixes
