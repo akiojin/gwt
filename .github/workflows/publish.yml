@@ -14,6 +14,7 @@ jobs:
   # npm publish job
   # Publishes to npm when a release commit is detected on main branch
   # Requires NPM_TOKEN secret to be configured in repository settings
+  # Uses NODE_AUTH_TOKEN with registry-url for npm authentication
   npm-publish:
     name: NPM Publish
     runs-on: ubuntu-latest
