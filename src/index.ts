@@ -10,7 +10,7 @@ import {
   GitError,
 } from "./git.js";
 import { launchClaudeCode } from "./claude.js";
-import { launchCodexCLI } from "./codex.js";
+import { launchCodexCLI, CodexError } from "./codex.js";
 import {
   WorktreeOrchestrator,
   type EnsureWorktreeOptions,
@@ -77,6 +77,40 @@ function isGitRelatedError(error: unknown): boolean {
   ) {
     const name = (error as { name?: string }).name;
     return name === "GitError" || name === "WorktreeError";
+  }
+
+  return false;
+}
+
+function isRecoverableError(error: unknown): boolean {
+  if (!error) {
+    return false;
+  }
+
+  if (
+    error instanceof GitError ||
+    error instanceof WorktreeError ||
+    error instanceof CodexError
+  ) {
+    return true;
+  }
+
+  if (error instanceof Error) {
+    return (
+      error.name === "GitError" ||
+      error.name === "WorktreeError" ||
+      error.name === "CodexError"
+    );
+  }
+
+  if (
+    typeof error === "object" &&
+    "name" in (error as Record<string, unknown>)
+  ) {
+    const name = (error as { name?: string }).name;
+    return (
+      name === "GitError" || name === "WorktreeError" || name === "CodexError"
+    );
   }
 
   return false;
@@ -452,13 +486,15 @@ export async function handleAIToolWorkflow(
     printInfo("Session completed successfully. Returning to main menu...");
     return;
   } catch (error) {
-    if (error instanceof Error) {
-      printError(`Error during workflow: ${error.message}`);
-    } else {
-      printError(`Unexpected error: ${String(error)}`);
+    // Handle recoverable errors (Git, Worktree, Codex errors)
+    if (isRecoverableError(error)) {
+      const details = error instanceof Error ? error.message : String(error);
+      printError(`Error during workflow: ${details}`);
+      await waitForErrorAcknowledgement();
+      return;
     }
-    await waitForErrorAcknowledgement();
-    return;
+    // Re-throw non-recoverable errors
+    throw error;
   }
 }
 
