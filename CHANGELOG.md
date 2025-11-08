@@ -1,3 +1,10 @@
+## [1.27.1](https://github.com/akiojin/claude-worktree/compare/v1.27.0...v1.27.1) (2025-11-08)
+
+
+### Bug Fixes
+
+* パッチバージョンリリーステスト用修正追加 ([766f97d](https://github.com/akiojin/claude-worktree/commit/766f97d1016e1aa0cae42d4183a2ec80fe4dda50))
+
 # [1.27.0](https://github.com/akiojin/claude-worktree/compare/v1.26.1...v1.27.0) (2025-11-08)
 
 
