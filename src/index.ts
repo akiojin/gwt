@@ -7,6 +7,7 @@ import {
   fetchAllRemotes,
   pullFastForward,
   getBranchDivergenceStatuses,
+  GitError,
 } from "./git.js";
 import { launchClaudeCode } from "./claude.js";
 import { launchCodexCLI } from "./codex.js";
@@ -20,6 +21,7 @@ import {
   worktreeExists,
   isProtectedBranchName,
   switchToProtectedBranch,
+  WorktreeError,
 } from "./worktree.js";
 import {
   getTerminalStreams,
@@ -52,6 +54,47 @@ function printInfo(message: string): void {
 
 function printWarning(message: string): void {
   console.warn(chalk.yellow(`⚠️  ${message}`));
+}
+
+type GitStepResult<T> = { ok: true; value: T } | { ok: false };
+
+function isGitRelatedError(error: unknown): boolean {
+  if (!error) {
+    return false;
+  }
+
+  if (error instanceof GitError || error instanceof WorktreeError) {
+    return true;
+  }
+
+  if (error instanceof Error) {
+    return error.name === "GitError" || error.name === "WorktreeError";
+  }
+
+  if (typeof error === "object" && "name" in (error as Record<string, unknown>)) {
+    const name = (error as { name?: string }).name;
+    return name === "GitError" || name === "WorktreeError";
+  }
+
+  return false;
+}
+
+async function runGitStep<T>(
+  description: string,
+  step: () => Promise<T>,
+): Promise<GitStepResult<T>> {
+  try {
+    const value = await step();
+    return { ok: true, value };
+  } catch (error) {
+    if (isGitRelatedError(error)) {
+      const details = error instanceof Error ? error.message : String(error);
+      printWarning(`Git操作に失敗しました (${description}). エラー: ${details}`);
+      await waitForErrorAcknowledgement();
+      return { ok: false };
+    }
+    throw error;
+  }
 }
 
 async function waitForEnter(promptMessage: string): Promise<void> {
@@ -174,7 +217,14 @@ export async function handleAIToolWorkflow(
 
   try {
     // Get repository root
-    const repoRoot = await getRepositoryRoot();
+    const repoRootResult = await runGitStep(
+      "リポジトリルートの取得",
+      () => getRepositoryRoot(),
+    );
+    if (!repoRootResult.ok) {
+      return;
+    }
+    const repoRoot = repoRootResult.value;
 
     // Determine ensure options (local vs remote branch)
     const ensureOptions: EnsureWorktreeOptions = {};
@@ -198,11 +248,19 @@ export async function handleAIToolWorkflow(
       const protectedRemoteRef =
         remoteBranch ??
         (branchType === "remote" ? (displayName ?? branch) : null);
-      protectedCheckoutResult = await switchToProtectedBranch({
-        branchName: branch,
-        repoRoot,
-        remoteRef: protectedRemoteRef ?? null,
-      });
+      const switchResult = await runGitStep(
+        `保護ブランチ '${branch}' のチェックアウト`,
+        () =>
+          switchToProtectedBranch({
+            branchName: branch,
+            repoRoot,
+            remoteRef: protectedRemoteRef ?? null,
+          }),
+      );
+      if (!switchResult.ok) {
+        return;
+      }
+      protectedCheckoutResult = switchResult.value;
       ensureOptions.isNewBranch = false;
     }
 
@@ -220,11 +278,14 @@ export async function handleAIToolWorkflow(
       );
     }
 
-    const worktreePath = await orchestrator.ensureWorktree(
-      branch,
-      repoRoot,
-      ensureOptions,
+    const worktreeResult = await runGitStep(
+      `ワークツリーの準備 (${branch})`,
+      () => orchestrator.ensureWorktree(branch, repoRoot, ensureOptions),
     );
+    if (!worktreeResult.ok) {
+      return;
+    }
+    const worktreePath = worktreeResult.value;
 
     if (isProtectedBranch) {
       if (protectedCheckoutResult === "remote" && remoteBranch) {
@@ -250,7 +311,13 @@ export async function handleAIToolWorkflow(
     printInfo(`Worktree ready: ${worktreePath}`);
 
     // Update remotes and attempt fast-forward pull
-    await fetchAllRemotes({ cwd: repoRoot });
+    const fetchResult = await runGitStep(
+      "リモートの取得",
+      () => fetchAllRemotes({ cwd: repoRoot }),
+    );
+    if (!fetchResult.ok) {
+      return;
+    }
 
     let fastForwardError: Error | null = null;
     try {
@@ -280,10 +347,18 @@ export async function handleAIToolWorkflow(
       divergenceBranches.add(sanitizedRemoteBranch);
     }
 
-    const divergenceStatuses = await getBranchDivergenceStatuses({
-      cwd: repoRoot,
-      branches: Array.from(divergenceBranches),
-    });
+    const divergenceResult = await runGitStep(
+      "ブランチの差分確認",
+      () =>
+        getBranchDivergenceStatuses({
+          cwd: repoRoot,
+          branches: Array.from(divergenceBranches),
+        }),
+    );
+    if (!divergenceResult.ok) {
+      return;
+    }
+    const divergenceStatuses = divergenceResult.value;
     const divergedBranches = divergenceStatuses.filter(
       (status) => status.remoteAhead > 0 && status.localAhead > 0,
     );
@@ -309,6 +384,10 @@ export async function handleAIToolWorkflow(
         "Resolve these divergences (e.g., rebase or merge) before launching to avoid conflicts.",
       );
       await waitForEnter("Press Enter to continue.");
+      printWarning(
+        "Skipping AI tool launch until divergences are resolved. Returning to main menu...",
+      );
+      return;
     } else if (fastForwardError) {
       printWarning(
         `Fast-forward pull could not complete (${fastForwardError.message}). Continuing without blocking.`,
