@@ -16,6 +16,7 @@ Interactive Git worktree manager with AI tool selection (Claude Code / Codex CLI
 - 🔄 **Advanced Worktree Management**: Complete lifecycle management including creation, cleanup, and path optimization
 - 🤖 **AI Tool Selection**: Choose between Claude Code / Codex CLI through the interactive launcher
 - 🚀 **AI Tool Integration**: Launch the selected tool in the worktree (Claude Code includes permission handling and post-change flow)
+- 🔒 **Worktree Command Restriction**: PreToolUse hooks enforce worktree boundaries, blocking directory navigation, branch switching, and file operations outside the worktree
 - 📊 **GitHub PR Integration**: Automatic cleanup of merged pull request branches and worktrees
 - 🛠️ **Change Management**: Built-in support for committing, stashing, or discarding changes after development sessions
 - 📦 **Universal Package**: Install once, use across all your projects with consistent behavior
@@ -218,7 +219,12 @@ For more details, see the [Spec Kit documentation](https://github.com/akiojin/sp
 ├── bin/
 │   └── claude-worktree.js # Executable wrapper
 ├── .claude/             # Claude Code configuration
-│   └── commands/        # Spec Kit slash commands
+│   ├── commands/        # Spec Kit slash commands
+│   ├── settings.json    # Hook configuration
+│   └── hooks/           # PreToolUse hooks for command restriction
+│       ├── block-cd-command.sh        # Restricts cd commands to worktree
+│       ├── block-git-branch-ops.sh    # Controls git branch operations
+│       └── block-file-ops.sh          # Restricts file operations to worktree
 ├── .specify/            # Spec Kit scripts and templates
 │   ├── memory/          # Project memory files
 │   ├── scripts/         # Automation scripts
