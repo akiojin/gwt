@@ -78,6 +78,13 @@
     "typescript": "^5.8.3",
     "vitest": "^4.0.8"
   },
+  "lint-staged": {
+    "*.md": "bunx --bun markdownlint-cli -c .markdownlint.json",
+    "*.{ts,tsx}": [
+      "bunx eslint --max-warnings=0",
+      "bunx prettier --check"
+    ]
+  },
   "files": [
     "dist/",
     "src/",
