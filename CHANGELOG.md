@@ -1,3 +1,25 @@
+## [1.29.1](https://github.com/akiojin/claude-worktree/compare/v1.29.0...v1.29.1) (2025-11-08)
+
+
+### Bug Fixes
+
+* npm publish時の認証設定を修正 ([3e4208b](https://github.com/akiojin/claude-worktree/commit/3e4208bb25c3fbe609cfec45e8ede3a17e2858c1))
+* remove redundant terminal.exitRawMode() call in error path ([60ae16d](https://github.com/akiojin/claude-worktree/commit/60ae16d13feacb33b3494f0730c65253d0b84b6e))
+
+# [1.29.0](https://github.com/akiojin/claude-worktree/compare/v1.28.2...v1.29.0) (2025-11-08)
+
+
+### Bug Fixes
+
+* Codex起動時のJSON構文エラー修正とエラー時のCLI継続 ([ef40e6d](https://github.com/akiojin/claude-worktree/commit/ef40e6dd09a695231f0adb264fea630d76c8240d))
+* execaのshell: trueオプションを削除してCodex CLI起動エラーを修正 ([08cc1fd](https://github.com/akiojin/claude-worktree/commit/08cc1fd046a3484db0621f808fbaff4889f63859))
+* npm publish時の認証設定を修正 ([#203](https://github.com/akiojin/claude-worktree/issues/203)) ([99f78b4](https://github.com/akiojin/claude-worktree/commit/99f78b42202e12026796c2ac67a49433839ed532))
+
+
+### Features
+
+* npm公開機能を有効化 ([20df08a](https://github.com/akiojin/claude-worktree/commit/20df08ab66a64525009c71574e459e53540c598e))
+
 ## [1.28.2](https://github.com/akiojin/claude-worktree/compare/v1.28.1...v1.28.2) (2025-11-08)
 
 

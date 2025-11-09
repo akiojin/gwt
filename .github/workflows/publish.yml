@@ -11,8 +11,10 @@ permissions:
   pull-requests: write
 
 jobs:
-  # npm publish job (currently disabled in .releaserc.json)
-  # Enable by setting npmPublish: true in .releaserc.json and configuring NPM_TOKEN
+  # npm publish job
+  # Publishes to npm when a release commit is detected on main branch
+  # Requires NPM_TOKEN secret to be configured in repository settings
+  # Uses NODE_AUTH_TOKEN with registry-url for npm authentication
   npm-publish:
     name: NPM Publish
     runs-on: ubuntu-latest
@@ -28,6 +30,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22.14.0
+          registry-url: 'https://registry.npmjs.org'
           cache: 'npm'
 
       - name: Install dependencies
@@ -42,12 +45,11 @@ jobs:
             echo "is_release=false" >> $GITHUB_OUTPUT
           fi
 
-      # Uncomment when ready to publish to npm
-      # - name: Publish to npm
-      #   if: steps.check_release.outputs.is_release == 'true'
-      #   env:
-      #     NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-      #   run: npm publish --access public
+      - name: Publish to npm
+        if: steps.check_release.outputs.is_release == 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public
 
   backmerge-to-develop:
     name: Backmerge to develop
