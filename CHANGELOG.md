@@ -1,3 +1,10 @@
+# [1.32.0](https://github.com/akiojin/claude-worktree/compare/v1.31.0...v1.32.0) (2025-11-09)
+
+
+### Features
+
+* ワークツリー依存を自動同期 ([73bed39](https://github.com/akiojin/claude-worktree/commit/73bed39ffa49ceef85d839891a9f279947bd7210))
+
 # [1.31.0](https://github.com/akiojin/claude-worktree/compare/v1.30.0...v1.31.0) (2025-11-09)
 
 
