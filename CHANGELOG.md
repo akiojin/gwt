@@ -1,3 +1,10 @@
+## [1.32.1](https://github.com/akiojin/claude-worktree/compare/v1.32.0...v1.32.1) (2025-11-09)
+
+
+### Bug Fixes
+
+* parseInt関数に基数パラメータを明示的に指定 ([ae283d9](https://github.com/akiojin/claude-worktree/commit/ae283d907903d8cc9ea1f6a92231a5273e993765))
+
 # [1.32.0](https://github.com/akiojin/claude-worktree/compare/v1.31.0...v1.32.0) (2025-11-09)
 
 
