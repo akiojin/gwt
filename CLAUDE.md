@@ -84,10 +84,8 @@
 - `release/vX.Y.Z` ブランチへの push をトリガーに `.github/workflows/release.yml` が以下を実行：
   1. semantic-release で CHANGELOG/タグ/GitHub Release を作成
   2. `release/vX.Y.Z` → `main` へ直接マージ
-  3. `main` → `develop` へバックマージ
-  4. `release/vX.Y.Z` ブランチを削除
-- すべての処理が release.yml 内で完結し、PR を経由せずに高速に実行される。
-- main への push をトリガーに `.github/workflows/publish.yml` が npm publish（設定時）を実行する。
+  3. `release/vX.Y.Z` ブランチを削除
+- main への push をトリガーに `.github/workflows/publish.yml` が npm publish（設定時）と `main` → `develop` のバックマージを実行する。
 
 ## 最近の変更
 
@@ -106,9 +104,9 @@
 
 ### 2025-01-06: リリースフロー変更
 
-- develop ブランチを導入し、手動リリースフローに移行
-- feature → develop (Auto Merge) → /release（develop→main PR）→ main push → semantic-release
-- 詳細: `.github/workflows/release-trigger.yml`, `.claude/commands/release.md`, `scripts/create-release-pr.sh`
+- develop ブランチを導入し、手動リリーストリガー方式へ移行（現在は unity-mcp-server 型 release ブランチ方式に統一済み）
+- feature → develop (Auto Merge) → /release（release ブランチ作成）→ release push → semantic-release
+- 詳細: `.github/workflows/create-release.yml`, `.claude/commands/release.md`, `scripts/create-release-branch.sh`
 
 ## Active Technologies
 

@@ -90,10 +90,9 @@ jobs:
           - **Branch**: \`release/v$VERSION\`
           - **Next Steps**:
             1. The \`release.yml\` workflow will run automatically
-            2. semantic-release will create CHANGELOG, tags, and GitHub Release
-            3. A PR to \`main\` will be created automatically
-            4. After Required checks pass, the PR will auto-merge
-            5. \`publish.yml\` will run on main to backmerge to develop
+            2. semantic-release will create CHANGELOG, tags, and a GitHub Release
+            3. The release branch will be merged directly into \`main\` and deleted
+            4. \`publish.yml\` will run on \`main\` for npm publish (optional) and the develop back-merge
 
           Monitor the workflow progress:
           https://github.com/${{ github.repository }}/actions

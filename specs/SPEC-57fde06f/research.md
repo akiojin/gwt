@@ -1,31 +1,25 @@
 # Research: releaseブランチ経由の自動リリース＆Auto Mergeフロー
 
-## Decision 1: develop→release は fast-forward + force-with-lease ではなく `git push --force-with-lease` を避ける
-- **Rationale**: release ブランチは develop の公開済み履歴のみを含むべきなので、`git merge` や `--force` を行うと release 駆動のタグ履歴が乱れる。`git fetch origin release` → `git checkout release` → `git reset --hard origin/develop` では書き換えリスクがあるため、`git push origin develop:release` で fast-forward を強制するのが最も安全。`/release` コマンドからは `git update-ref refs/heads/release $(git rev-parse develop)` と同等の操作を gh CLI (`gh api repos/{owner}/{repo}/git/refs/heads/release -X PATCH`) で行い、失敗時は差分を出して中断する。
-- **Alternatives considered**:
-  - GitHub Actions 内で develop を release にマージ → CLI 実行から結果が見えにくくなるため却下。
-  - release ブランチを一度削除して再作成 → 権限が必要で履歴閲覧性が失われる。
+## Decision 1: release ブランチ生成は GitHub Actions (`create-release.yml`) で統一
+- **Rationale**: unity-mcp-server と同じく、release/vX.Y.Z の作成と semantic-release dry-run を GitHub Actions に任せればローカル/Claude どちらからでも同じ処理になる。CLI からは `gh workflow run create-release.yml --ref develop` を呼ぶだけで済む。
+- **Alternatives considered**: ローカルで release ブランチを直接 push する案 → 実行者の環境に依存し、履歴の再現性が下がるため却下。
 
-## Decision 2: semantic-release は release ブランチ push で実行し main は PR マージのみ
-- **Rationale**: release ブランチで version 決定とタグ付けを行えば、main は単に release の内容を受け取るだけでよくなる。`release.yml` の `on` に `push: branches: [release]` を追加し main を除外。タグは release ブランチ上に作成されるが、release→main PR マージ時に main も同じタグを含むため整合が取れる。
-- **Alternatives considered**:
-  - semantic-release を main で継続し release は中継のみ → main への直接 push が必要になるため本仕様と矛盾。
-  - release 専用ワークフローを新設 → 既存 `release.yml` を拡張したほうがメンテが容易。
+## Decision 2: semantic-release は release ブランチ push で実行し main を直接更新
+- **Rationale**: release ブランチ上で CHANGELOG/タグ生成まで完結すれば main へ PR を経由せず直接反映できる。`release.yml` が成功した場合のみ main に `chore(release)` コミットを push し、失敗時は main を触らず再実行できる。
+- **Alternatives considered**: main push で semantic-release を実行（従来方式） → main への直接 push が必要になり Branch Protection と矛盾。
 
-## Decision 3: Auto Merge は `gh pr merge --auto --merge` を CLI から設定
-- **Rationale**: GitHub UI での手動操作はヒューマンエラーを生む。`/release` コマンド完了時に `gh pr create --fill --base main --head release --label release --title "Release ${tag}" --body <notes>` を実行し、既存 PR があれば `gh pr edit` で更新。Auto Merge は `gh pr merge --auto --merge <PR#>` を即時有効化でき、Required チェック成功後に自動マージされる。
-- **Alternatives considered**:
-  - `github-script` step で GraphQL Mutation を呼ぶ → CLI のほうがローカルからも同じ操作ができ、スクリプト流用が容易。
-  - Merge Queue を使う → 追加設定が増え、小規模プロジェクトではオーバーキル。
+## Decision 3: publish.yml で npm + develop back-merge を担保
+- **Rationale**: release ブランチ削除後に main の結果を develop と npm に反映する責務を 1 つの workflow にまとめることで可視性を上げる。npm publish は任意なので `chore(release):` コミット検知時のみ実行し、常に `main → develop` のバックマージを行う。
+- **Alternatives considered**: release.yml 内で back-merge まで済ませる → main push がトリガーされず npm publish のタイミングが曖昧になる。
 
-## Decision 4: Required チェックは semantic-release job + `bun run lint` + `bun run test`
-- **Rationale**: release PR が main へ入る前に最小限の品質ゲートを残したい。既存 CI では lint/test が release workflow に含まれているため、同じジョブ名を `required_status_checks` に登録すれば Auto Merge 条件を満たせる。semantic-release job の完了は release.yml 内の `semantic-release` ステップ成功で代替可能。
-- **Alternatives considered**:
-  - `release-trigger.yml` 内で個別ジョブを走らせる → リリース処理とテストが同一 workflow に閉じないためロギングが散逸。
-  - Required チェックを 1 つの aggregate job にまとめる → 失敗原因特定が難しくなる。
+## Decision 4: Branch Protection で main への直接 push を禁止
+- **Rationale**: CI 以外が main を更新できないようにすることで release ブランチ経由フローを強制できる。Required Checks は `release.yml` 内の `lint`, `test`, `semantic-release` job 名と一致させる。
+- **Alternatives considered**: ブランチ保護なし（運用ルールのみ） → 手作業ミスで main が汚染される恐れが高い。
 
-## Decision 5: Branch Protection は手動設定 + ドキュメント化
-- **Rationale**: API で Branch Protection を変更するには管理者トークンが必要で自動化のコストが高い。今回は main への直接 push 禁止と Auto Merge 許可を管理者が一度設定し、その手順を CLAUDE.md / quickstart に明示。release ブランチには Required チェックは課さず、main のみ保護対象とする。
-- **Alternatives considered**:
-  - `gh api` を使って自動化 → PAT の権限管理が複雑化し、本機能のスコープを超える。
-  - Branch Protection なし（レビューのみ） → Auto Merge が無秩序になり品質保証ができない。
+## Decision 5: ドキュメント分離（README は概要、詳細は specs/ & docs/）
+- **Rationale**: 利用者向け README を簡潔に保ちつつ、開発者向け詳細は `specs/SPEC-57fde06f/` と `docs/release-guide*.md` に集約する。unity-mcp-server と同じ情報密度を確保しつつ、利用者が読む必要のない設計情報を分離。
+- **Alternatives considered**: README にすべて記載 → 変更多発時にメンテ難易度が高い。
+
+## Decision 6: ヘルパースクリプトは `scripts/create-release-branch.sh` に一本化
+- **Rationale**: 旧 `create-release-pr.sh` は develop→main PR 手順に依存していたため削除。unity 側と同じシンプルなワークフロー起動スクリプトに合わせることで、CLI / Claude どちらからでも同じ挙動を保証する。
+- **Alternatives considered**: `/release` コマンドだけに頼る → ローカル作業者がブラウザ無しで実行できず UX が下がる。
