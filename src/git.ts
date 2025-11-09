@@ -515,7 +515,7 @@ export async function getUnpushedCommitsCount(
       ["rev-list", "--count", `origin/${branch}..${branch}`],
       { cwd: worktreePath },
     );
-    return parseInt(stdout.trim()) || 0;
+    return parseInt(stdout.trim(), 10) || 0;
   } catch {
     return 0;
   }
@@ -611,7 +611,7 @@ export async function getEnhancedSessionInfo(
       latestCommitMessage: latestCommit,
       branchType,
     };
-  } catch (error) {
+  } catch {
     // Return safe defaults if any operation fails
     return {
       hasUncommittedChanges: false,
@@ -648,7 +648,7 @@ export async function getCurrentVersion(repoRoot: string): Promise<string> {
       await fs.promises.readFile(packageJsonPath, "utf-8"),
     );
     return packageJson.version || "0.0.0";
-  } catch (error) {
+  } catch {
     // package.jsonが存在しない場合はデフォルトバージョンを返す
     return "0.0.0";
   }
@@ -659,9 +659,9 @@ export function calculateNewVersion(
   versionBump: "patch" | "minor" | "major",
 ): string {
   const versionParts = currentVersion.split(".");
-  const major = parseInt(versionParts[0] || "0");
-  const minor = parseInt(versionParts[1] || "0");
-  const patch = parseInt(versionParts[2] || "0");
+  const major = parseInt(versionParts[0] || "0", 10);
+  const minor = parseInt(versionParts[1] || "0", 10);
+  const patch = parseInt(versionParts[2] || "0", 10);
 
   switch (versionBump) {
     case "major":
