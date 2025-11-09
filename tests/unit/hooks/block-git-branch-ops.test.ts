@@ -1,13 +1,10 @@
 import { describe, it, expect } from "vitest";
 import { execa } from "execa";
-import { fileURLToPath } from "url";
-import { dirname, join } from "path";
+import { join } from "path";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
 const hookScriptPath = join(
-  __dirname,
-  "../../../.claude/hooks/block-git-branch-ops.sh",
+  process.cwd(),
+  ".claude/hooks/block-git-branch-ops.sh",
 );
 
 describe("block-git-branch-ops.sh hook", () => {
