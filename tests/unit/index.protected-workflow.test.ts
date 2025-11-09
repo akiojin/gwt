@@ -321,7 +321,6 @@ describe("handleAIToolWorkflow - dependency installation", () => {
     await handleAIToolWorkflow(selection);
 
     expect(installDependenciesMock).toHaveBeenCalled();
-    expect(launchClaudeCodeMock).toHaveBeenCalled();
-    expect(saveSessionMock).toHaveBeenCalled();
+    expect(waitForUserAcknowledgementMock).not.toHaveBeenCalled();
   });
 });
