@@ -22,18 +22,18 @@
 
 ---
 
-### ユーザーストーリー 2 - release→main PR を Required チェック完了後に自動マージ (優先度: P1)
+### ユーザーストーリー 2 - release ブランチの CI 完了後に main へ自動反映 (優先度: P1)
 
-リリース担当者は release ブランチから main への PR が作成され Auto Merge が設定されていることを確認するだけで、Required チェック（テスト、semantic-release 完了など）が通れば人手を介さず main に取り込まれる。
+リリース担当者は release/vX.Y.Z ブランチが push されたあと、`release.yml` が semantic-release を完走し、成功時のみ `main` へ直接マージされることを確認するだけで済む。ワークフローが失敗した場合は `main` が書き換わらず、ログから原因を特定できる。
 
-**この優先度の理由**: main への直接 push を禁止しつつ手動作業を増やさないため。
+**この優先度の理由**: PR を経由せずに高速化しつつ、失敗時には main を汚さない安全網が必要なため。
 
-**独立したテスト**: release→main PR で必要チェックが成功したときに自動的にマージされたこと、チェックが失敗するとマージが保留されることを確認する。
+**独立したテスト**: ダミー release ブランチを push し、`release.yml` が成功した場合のみ `main` に `chore(release):` コミットが現れること、失敗時は main が無変更のまま残ることを確認する。
 
 **受け入れシナリオ**:
 
-1. **前提条件** release→main PR が存在し Required チェックが pending、**操作** チェックが成功するまで待機、**期待結果** 人手操作なしで PR が main にマージされタグが main に反映される。
-2. **前提条件** Required チェックの一つが失敗、**操作** 失敗したチェックを再実行、**期待結果** Auto Merge が解除されず、全チェック成功後にのみマージが実行される。
+1. **前提条件** release/vX.Y.Z が push 済みで `release.yml` が実行中、**操作** ジョブ完了まで待機、**期待結果** semantic-release が成功した場合のみ release ブランチが main にマージされタグが発行される。
+2. **前提条件** `release.yml` の semantic-release ステップが失敗、**操作** ログを確認し修正後に workflow を再実行、**期待結果** main は書き換わらず、再実行が成功すると自動で merge + tag 発行が行われる。
 
 ---
 
@@ -62,12 +62,12 @@
 
 - **FR-001**: `/release` 実行時に develop の HEAD を release ブランチへ fast-forward し、タグやメタ情報が重複しないようにする。
 - **FR-002**: release ブランチへの push をトリガーに semantic-release（npm publish、GitHub Release 作成を含む）が実行されるよう CI 設定を変更する。
-- **FR-003**: release→main の PR を作成または更新し、PR タイトル・本文に今回のリリースノート要約と semantic-release 実行結果を記載する。
-- **FR-004**: release→main PR に GitHub Auto Merge（squash もしくは merge queue）を自動で有効化し、Required チェックのみをマージ条件として設定する。
-- **FR-005**: main ブランチへの直接 push を Branch Protection で禁止し、release ブランチのみ main への PR 作成を許可する。
-- **FR-006**: Required チェックの一覧（例: lint、test、semantic-release 完了）を定義し PR 作成時に自動で適用する。
-- **FR-007**: 新フローと制約を CLAUDE.md、`.claude/commands/release.md`、関連 README に追記し、開発者が参照できるようにする。
-- **FR-008**: 失敗時のリカバリー手順（再実行、Auto Merge 再設定、release→main PR の手動更新方法）をドキュメント化する。
+- **FR-003**: `release.yml` が release ブランチで semantic-release を実行し、成功時のみ release/vX.Y.Z を main へ直接マージしてブランチを削除するよう実装する。
+- **FR-004**: `release.yml` の失敗時に main が更新されないようガードし、再実行に必要なログ/URL を Summary に出力する。
+- **FR-005**: main ブランチへの直接 push を Branch Protection で禁止し、CI 以外の書き込みは release ブランチ経由に限定する。
+- **FR-006**: Required チェックの一覧（例: lint、test、release workflow 完了）を定義し、分岐条件を CLAUDE.md / docs へ反映する。
+- **FR-007**: 新フローと制約を CLAUDE.md、`.claude/commands/release.md`、README でユーザー向けに案内し、詳細な手順を specs 配下に残す。
+- **FR-008**: 失敗時のリカバリー手順（workflow 再実行、release ブランチ再 push）を specs/quickstart と docs ガイドラインに記載する。
 
 ### 主要エンティティ *(機能がデータを含む場合は含める)*
 
@@ -111,12 +111,14 @@
 
 ## 依存関係 *(該当する場合)*
 
-- GitHub の Auto Merge / Branch Protection 機能。
-- semantic-release の `branches` 設定と GitHub Actions ワークフロー。
-- `.claude/commands/release.md` および `release-trigger.yml` の既存実装。
+- GitHub の Branch Protection / Required Status Checks。
+- semantic-release の `branches` 設定と GitHub Actions ワークフロー（`create-release.yml`, `release.yml`, `publish.yml`）。
+- `.claude/commands/release.md` と `scripts/create-release-branch.sh` の実装。
 
 ## 参考資料 *(該当する場合)*
 
 - [既存リリース手順 (`CLAUDE.md`)](../../CLAUDE.md)
 - [release コマンドドキュメント (`.claude/commands/release.md`)](../../.claude/commands/release.md)
-- [release-trigger ワークフロー (`.github/workflows/release-trigger.yml`)](../../.github/workflows/release-trigger.yml)
+- [create-release ワークフロー (`.github/workflows/create-release.yml`)](../../.github/workflows/create-release.yml)
+- [release ワークフロー (`.github/workflows/release.yml`)](../../.github/workflows/release.yml)
+- [publish ワークフロー (`.github/workflows/publish.yml`)](../../.github/workflows/publish.yml)

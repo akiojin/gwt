@@ -5,7 +5,7 @@
 
 ## 概要
 
-現状の `/release` コマンドと `release-trigger` ワークフローは develop→main を直接マージし main push で semantic-release を実行している。本計画では release ブランチを常設し、(1) `/release` が develop を release に fast-forward、(2) release ブランチ push をトリガーに semantic-release と検証ジョブを実行、(3) release→main PR を自動作成して Required チェック通過後に Auto Merge させる、という 3 層構造へ置き換える。GitHub Branch Protection で main への直接 push を禁止し、ドキュメントと CLI 手順を release フローへ合わせて更新する。
+現状の `/release` コマンドは develop→main PR を生成する旧フローが残っている。本計画では unity-mcp-server と同じ release ブランチ方式を完全導入し、(1) `/release` / helper script が `create-release.yml` を介して `release/vX.Y.Z` を生成、(2) `release.yml` が release ブランチ上で semantic-release を実行して main へ直接マージ、(3) `publish.yml` が npm publish（任意）と develop へのバックマージを自動化するという流れへ統一する。GitHub Branch Protection では main への直接 push を禁止し、CI のみが変更できる設計とする。
 
 ## 技術コンテキスト
 
@@ -42,23 +42,24 @@
 specs/SPEC-57fde06f/
 ├── spec.md
 ├── plan.md
-├── research.md              # Phase 0 で作成
-├── data-model.md            # Phase 1 で作成
-├── quickstart.md            # Phase 1 で作成
+├── research.md
+├── data-model.md
+├── quickstart.md
 ├── contracts/
 │   └── release-automation.md
-└── tasks.md                 # /speckit.tasks で生成
+└── tasks.md
 ```
 
 ### ソースコード（リポジトリルート）
 
 ```text
-.claude/commands/release.md          # CLIドキュメント
-.github/workflows/release-trigger.yml
-.github/workflows/release.yml        # semantic-release 実行ワークフロー
-scripts/                             # release コマンド実装（gh呼び出し等）
-CLAUDE.md / README.*                 # ルール・フローの周知
-.releaserc.json                      # semantic-release 対象ブランチ定義
+.claude/commands/release.md          # CLI スラッシュコマンドの説明
+.github/workflows/create-release.yml # release ブランチ生成
+.github/workflows/release.yml        # semantic-release + main merge
+.github/workflows/publish.yml        # npm publish + develop back-merge
+scripts/create-release-branch.sh     # ローカル helper
+CLAUDE.md / README.* / docs/release-guide*.md
+.releaserc.json                      # release/* ブランチを対象にする設定
 ```
 
 ## フェーズ0: 調査（技術スタック選定）
@@ -70,9 +71,9 @@ CLAUDE.md / README.*                 # ルール・フローの周知
 ### 調査項目
 
 1. **既存のコードベース分析**
-   - `/release` コマンドの実装箇所（scripts or CLAUDE command）とワークフロー連携
-   - 現行 `release-trigger.yml` のステップと権限
-   - `.releaserc.json` の `branches` 設定（現在は `main` のみ）
+   - `/release` コマンドと `scripts/create-release-branch.sh` の役割分担
+   - `create-release.yml` / `release.yml` / `publish.yml` の依存関係と権限
+   - `.releaserc.json` の `branches` 設定が `release/*` になっているか
 
 2. **技術的決定**
    - release ブランチ更新方式：gh CLI の merge? git fetch & push? fast-forward enforce?（現状 CLI vs Actions どちら）
@@ -91,23 +92,24 @@ CLAUDE.md / README.*                 # ルール・フローの周知
 
 ### 1.1 データモデル設計
 
-- `ReleaseBranchState`: develop との差分、バージョンタグ、semantic-release 成功状態
-- `ReleasePullRequest`: release→main PR のラベル、Auto Merge 設定、Required チェック結果
-- `RequiredCheck`: lint/test/semantic-release job の名前と Gate 条件
-- `BranchProtectionConfig`: main/release 双方の保護設定（direct push 禁止、auto-merge 許可）
+- `ReleaseBranchState`: develop と release ブランチの整合状態、semantic-release の最新結果
+- `ReleaseWorkflowRun`: `release.yml` の実行ステータス、ジョブ URL、出力されたバージョン
+- `PublishWorkflowRun`: `publish.yml` の結果、npm publish 成否、バックマージ結果
+- `BranchProtectionConfig`: main の Required Checks / push 制限設定
+- `ReleaseCommandInvocation`: `/release` もしくは helper script の実行メタデータ
 
 ### 1.2 クイックスタートガイド
 
-- `/release` コマンド実行前の前提（develop up-to-date, `git status` clean）
-- release ブランチ同期コマンド例（gh / git）
-- release→main PR 監視と Required チェック再実行フロー
+- `/release` 実行前の前提（develop clean、`gh auth login` 済み）
+- `scripts/create-release-branch.sh` の利用手順と `create-release.yml` 監視方法
+- `release.yml` / `publish.yml` の確認ポイント（成功/失敗時の対応）
 - main で hotfix が必要なときのエスカレーション手順
 
 ### 1.3 契約/インターフェース
 
-- release コマンド契約: 入力（develop HEAD, confirm flag）、出力（release push, PR URL）
-- GitHub Actions 契約: release push 時の job 群、Required チェック ID、Artifact
-- Branch Protection 契約: main への禁止アクション、Auto Merge 設定手順
+- release コマンド契約: 入力（develop HEAD), 出力（release branch ref, workflow run IDs）
+- GitHub Actions 契約: `create-release.yml` → `release.yml` → `publish.yml` の順序と必要な secrets
+- Branch Protection 契約: main の `required_status_checks`, direct push 禁止, workflow 書き込み権限
 
 ### Agent Context Update
 
@@ -120,28 +122,28 @@ CLAUDE.md / README.*                 # ルール・フローの周知
 
 ## 実装戦略
 
-1. **P1-1: release ブランチ同期 + semantic-release 移行**
-   - `/release` コマンドと `release-trigger.yml` を release ブランチ更新用に書き換え
-   - `.releaserc.json` で `release` をリリース対象ブランチに設定
-2. **P1-2: release→main Auto Merge**
-   - release branch push 後に PR を作成/更新し `gh pr merge --auto --squash` または `github-script` で Auto Merge を ON
-   - Branch Protection を Required チェック（lint/test/semantic-release）に制限
-3. **P2: ドキュメントと運用**
-   - CLAUDE.md / `.claude/commands/release.md` / README のリリースフロー節を更新
-   - トラブルシュート（チェック失敗時のリカバリ）を quickstart.md と docs に反映
+1. **P1-1: release ブランチ生成パイプライン**
+   - `/release` コマンド + `scripts/create-release-branch.sh` を `create-release.yml` 起動用に統一
+   - `.releaserc.json` を `release/*` ターゲットへ固定し、ワークフローの secrets/権限を整理
+2. **P1-2: release.yml / publish.yml オーケストレーション**
+   - release push で semantic-release を実行し main へ直接マージ、publish で npm + back-merge を保証
+   - 失敗時のリカバリー手順とログ出力を整備
+3. **P2: ドキュメントと Spec 整備**
+   - CLAUDE.md / `.claude/commands/release.md` / README / docs を最新フローで同期
+   - specs/quickstart/contracts で回復手順やチェックリストを明文化
 
 ## テスト戦略
 
 - **ユニットテスト**: release CLI (if scripted) の関数を Vitest でモックし develop→release push ロジックを検証。
-- **統合テスト**: GitHub Actions の dry-run / `workflow_dispatch` で release trigger を実行し release branch push → release PR Auto Merge を確認。
-- **エンドツーエンド**: 手動で `/release` を走らせ、release PR が Required チェック後に自動マージされることを監視。
+- **統合テスト**: GitHub Actions の `workflow_dispatch` で `create-release.yml` → `release.yml` → `publish.yml` の連携を確認。
+- **エンドツーエンド**: 手動で `/release` を走らせ、release ブランチ push → semantic-release 成功 → main への直接コミット → develop バックマージまでを監視。
 - **パフォーマンス**: release job 所要時間と Auto Merge までの時間を計測し、SC-002 (≤10分) を満たす。
 
 ## リスクと緩和策
 
-1. **Auto Merge が無効化されるリスク**: 既存 Branch Protection が Auto Merge を許さない場合。→ 緩和: 設定変更手順を docs に追加し、gh CLI で `gh pr merge --auto` を即時実行。
-2. **semantic-release のブランチ切替リスク**: main 以外で実行するとタグ/CHANGELOG が release のみに残る。→ 緩和: release job 後に PR マージで main へ反映し、`.releaserc.json` の `branches` に `release` + `main` (maintenance) を記載。
-3. **直接 push 禁止による運用混乱**: 既存スクリプトが main へ push しようとして失敗。→ 緩和: CLI と docs を更新し、CI で main push を検出したら失敗ロギング。
+1. **release.yml が main merge に失敗するリスク**: 権限不足やコンフリクトで main 更新が止まる。→ 緩和: PAT の権限チェックを実装し、失敗時は release branch を保持したままログ出力。
+2. **semantic-release のブランチ切替リスク**: `branches` 設定が誤っていると main で再実行される。→ 緩和: `.releaserc.json` を `release/*` 固定にし、テストで dry-run を実施。
+3. **直接 push 禁止による運用混乱**: 既存スクリプトが main へ push しようとして失敗。→ 緩和: CLI と docs を更新し、main push を検出したらガイドへ誘導する。
 
 ### 依存関係リスク
 
