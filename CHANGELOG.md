@@ -1,3 +1,17 @@
+# [1.31.0](https://github.com/akiojin/claude-worktree/compare/v1.30.0...v1.31.0) (2025-11-09)
+
+
+### Bug Fixes
+
+* block interactive rebase ([9d32f8d](https://github.com/akiojin/claude-worktree/commit/9d32f8d0183995f17d6d33a85735920146e23ace))
+* use process.cwd() for hook script path resolution ([d129663](https://github.com/akiojin/claude-worktree/commit/d12966359b81b1ee156394356c6f7c434d9c9ad5))
+
+
+### Features
+
+* add comprehensive TDD and spec for git operations hook ([a2190bd](https://github.com/akiojin/claude-worktree/commit/a2190bdfd1cb6eef138af56bcb812f38e94e6e40))
+* Worktree内でのファイル操作制限機能を追加 ([8d014ca](https://github.com/akiojin/claude-worktree/commit/8d014cae5c915c6b068fba81bb088c444f5a1995))
+
 # [1.30.0](https://github.com/akiojin/claude-worktree/compare/v1.29.1...v1.30.0) (2025-11-09)
 
 
