@@ -1,3 +1,10 @@
+## [1.32.2](https://github.com/akiojin/claude-worktree/compare/v1.32.1...v1.32.2) (2025-11-09)
+
+
+### Bug Fixes
+
+* **workflows:** リリースフローの依存関係と重複実行を最適化 ([a40b9b3](https://github.com/akiojin/claude-worktree/commit/a40b9b3b1a6f4d0ba22630f172f95b8b5a30bb05))
+
 ## [1.32.1](https://github.com/akiojin/claude-worktree/compare/v1.32.0...v1.32.1) (2025-11-09)
 
 
