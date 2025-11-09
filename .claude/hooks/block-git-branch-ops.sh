@@ -151,13 +151,13 @@ while IFS= read -r segment; do
             cat <<EOF
 {
   "decision": "block",
-  "reason": "🚫 git rebase -i origin/mainは禁止されています / Interactive rebase against origin/main is not allowed",
-  "stopReason": "LLMによる git rebase -i origin/main は成功率が低く、作業が中断されるため禁止されています。\n\nInteractive rebase against origin/main initiated by LLMs is blocked because it frequently fails and disrupts sessions.\n\nBlocked command: $command"
+  "reason": "🚫 Interactive rebase against origin/main is not allowed",
+  "stopReason": "Interactive rebase against origin/main initiated by LLMs is blocked because it frequently fails and disrupts sessions.\n\nBlocked command: $command"
 }
 EOF
 
-            echo "🚫 ブロック: $command" >&2
-            echo "理由: git rebase -i origin/main は Worktree内で禁止されています。" >&2
+            echo "🚫 Blocked: $command" >&2
+            echo "Reason: Interactive rebase against origin/main is not allowed in Worktree." >&2
             exit 2
         fi
     fi
@@ -174,14 +174,14 @@ EOF
         cat <<EOF
 {
   "decision": "block",
-  "reason": "🚫 ブランチ切り替え・作成・worktreeコマンドは禁止されています / Branch switching, creation, and worktree commands are not allowed",
-  "stopReason": "Worktreeは起動したブランチで作業を完結させる設計です。git checkout、git switch、git branch、git worktree 等の操作は実行できません。\n\nReason: Worktree is designed to complete work on the launched branch. Branch operations such as git checkout, git switch, git branch, and git worktree cannot be executed.\n\nBlocked command: $command"
+  "reason": "🚫 Branch switching, creation, and worktree commands are not allowed",
+  "stopReason": "Worktree is designed to complete work on the launched branch. Branch operations such as git checkout, git switch, git branch, and git worktree cannot be executed.\n\nBlocked command: $command"
 }
 EOF
 
     # stderrにもメッセージを出力
-    echo "🚫 ブロック: $command" >&2
-    echo "理由: Worktreeは起動したブランチで作業を完結させる設計です。" >&2
+    echo "🚫 Blocked: $command" >&2
+    echo "Reason: Worktree is designed to complete work on the launched branch." >&2
 
     exit 2  # ブロック
     fi
