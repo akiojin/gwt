@@ -74,6 +74,12 @@ tests/                          # 新規作成
 
 - [x] T110 [US1] T108-T109完了後、完全なユーザーフローをテスト（モックAIツール使用）: `tests/e2e/branch-to-worktree.test.ts`
 
+### 依存インストール自動化（TDD）
+
+- [ ] T111 [US1/Red] ワークツリー作成時にロックファイルを検出して `bun install` / `pnpm install` / `npm ci` を呼び出すことを検証するユニットテストを追加: `tests/unit/worktree.install.test.ts`
+- [ ] T112 [US1/Green] `src/worktree.ts` / `src/services/worktree.service.ts` にパッケージマネージャー自動判別ロジックと `execa` 呼び出しを実装し、T111をグリーンにする
+- [ ] T113 [US1/Refactor] `tests/integration/branch-selection.test.ts` に依存インストール自動実行の統合テストを追加し、失敗時のエラーハンドリングを確認する
+
 **✅ MVP1チェックポイント**: US1の全受け入れシナリオがテストでカバーされ、独立して検証可能
 
 ## フェーズ3: US2 - スマートブランチ作成ワークフローのテスト (優先度: P1)

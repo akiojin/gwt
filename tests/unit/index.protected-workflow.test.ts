@@ -15,6 +15,7 @@ const {
   branchExistsMock,
   getRepositoryRootMock,
   getCurrentBranchMock,
+  installDependenciesMock,
 } = vi.hoisted(() => ({
   execaMock: vi.fn(async () => ({ stdout: "" })),
   ensureWorktreeMock: vi.fn(async () => "/repo"),
@@ -28,7 +29,21 @@ const {
   branchExistsMock: vi.fn(async () => true),
   getRepositoryRootMock: vi.fn(async () => "/repo"),
   getCurrentBranchMock: vi.fn(async () => "develop"),
+  installDependenciesMock: vi.fn(async () => ({
+    manager: "bun" as const,
+    lockfile: "/repo/bun.lock",
+  })),
 }));
+
+const DependencyInstallErrorMock = vi.hoisted(
+  () =>
+    class extends Error {
+      constructor(message?: string) {
+        super(message);
+        this.name = "DependencyInstallError";
+      }
+    },
+);
 
 const waitForUserAcknowledgementMock = vi.hoisted(() =>
   vi.fn<() => Promise<void>>(),
@@ -72,6 +87,11 @@ vi.mock("../../src/services/WorktreeOrchestrator.js", () => ({
   WorktreeOrchestrator: class {
     ensureWorktree = ensureWorktreeMock;
   },
+}));
+
+vi.mock("../../src/services/dependency-installer.js", () => ({
+  installDependenciesForWorktree: installDependenciesMock,
+  DependencyInstallError: DependencyInstallErrorMock,
 }));
 
 vi.mock("../../src/claude.js", () => ({
@@ -123,6 +143,11 @@ beforeEach(() => {
   getRepositoryRootMock.mockClear();
   getCurrentBranchMock.mockClear();
   switchToProtectedBranchMock.mockClear();
+  installDependenciesMock.mockClear();
+  installDependenciesMock.mockResolvedValue({
+    manager: "bun",
+    lockfile: "/repo/bun.lock",
+  });
   waitForUserAcknowledgementMock.mockClear();
   waitForUserAcknowledgementMock.mockResolvedValue(undefined);
   switchToProtectedBranchMock.mockResolvedValue("local");
@@ -238,5 +263,64 @@ describe("handleAIToolWorkflow - git failure tolerance", () => {
     expect(launchClaudeCodeMock).not.toHaveBeenCalled();
     expect(saveSessionMock).not.toHaveBeenCalled();
     expect(waitForUserAcknowledgementMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("handleAIToolWorkflow - dependency installation", () => {
+  it("installs dependencies before launching the AI tool", async () => {
+    const selection: SelectionResult = {
+      branch: "feature/test",
+      displayName: "feature/test",
+      branchType: "local",
+      tool: "claude-code",
+      mode: "normal" as ExecutionMode,
+      skipPermissions: true,
+    };
+
+    await handleAIToolWorkflow(selection);
+    expect(installDependenciesMock).toHaveBeenCalledWith("/repo");
+  });
+
+  it("prompts the user and aborts when install fails", async () => {
+    installDependenciesMock.mockRejectedValueOnce(
+      new DependencyInstallErrorMock("install failed"),
+    );
+
+    const selection: SelectionResult = {
+      branch: "feature/test",
+      displayName: "feature/test",
+      branchType: "local",
+      tool: "claude-code",
+      mode: "normal" as ExecutionMode,
+      skipPermissions: false,
+    };
+
+    await handleAIToolWorkflow(selection);
+
+    expect(waitForUserAcknowledgementMock).toHaveBeenCalled();
+    expect(launchClaudeCodeMock).not.toHaveBeenCalled();
+    expect(saveSessionMock).not.toHaveBeenCalled();
+  });
+
+  it("continues when dependency install is skipped due to missing binary", async () => {
+    installDependenciesMock.mockResolvedValueOnce({
+      manager: "bun",
+      lockfile: "/repo/bun.lock",
+      skipped: true,
+    });
+
+    const selection: SelectionResult = {
+      branch: "feature/test",
+      displayName: "feature/test",
+      branchType: "local",
+      tool: "claude-code",
+      mode: "normal" as ExecutionMode,
+      skipPermissions: false,
+    };
+
+    await handleAIToolWorkflow(selection);
+
+    expect(installDependenciesMock).toHaveBeenCalled();
+    expect(waitForUserAcknowledgementMock).not.toHaveBeenCalled();
   });
 });

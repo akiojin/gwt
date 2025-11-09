@@ -1,3 +1,0 @@
-Test fix for patch version release v3 (v1.28.1)
-
-This is the third test demonstrating a bug fix that should trigger a patch version bump.
