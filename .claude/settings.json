@@ -7,6 +7,14 @@
           {
             "type": "command",
             "command": ".claude/hooks/block-git-branch-ops.sh"
+          },
+          {
+            "type": "command",
+            "command": ".claude/hooks/block-cd-command.sh"
+          },
+          {
+            "type": "command",
+            "command": ".claude/hooks/block-file-ops.sh"
           }
         ]
       }

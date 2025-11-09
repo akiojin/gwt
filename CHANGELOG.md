@@ -1,3 +1,22 @@
+# [1.30.0](https://github.com/akiojin/claude-worktree/compare/v1.29.1...v1.30.0) (2025-11-09)
+
+
+### Bug Fixes
+
+* execaをchild_process.spawnに置き換えてCodex CLI起動の互換性問題を解決 ([c95dd86](https://github.com/akiojin/claude-worktree/commit/c95dd86237e4087b3419fa98162f72e8bbd33572))
+* ShellCheck警告を修正（SC2155, SC2269） ([afb9703](https://github.com/akiojin/claude-worktree/commit/afb97035a4b76afe5f3bec2b0691687fd26652c5))
+* Worktree外へのcd制限とメッセージ英語化 ([fc5410f](https://github.com/akiojin/claude-worktree/commit/fc5410fd9f94a9282e12e53dc467550eadc03d3d))
+
+
+### Features
+
+* Worktree内でのcdコマンド使用を禁止するフックを追加 ([82ebbf9](https://github.com/akiojin/claude-worktree/commit/82ebbf96df7cad7dba12d6fd613beb681ef0559a))
+
+
+### Reverts
+
+* execaからchild_process.spawnへの変更を元に戻す ([73aabca](https://github.com/akiojin/claude-worktree/commit/73aabca97e0ed91d8316654d45852332b2a89f9b))
+
 ## [1.29.1](https://github.com/akiojin/claude-worktree/compare/v1.29.0...v1.29.1) (2025-11-08)
 
 
