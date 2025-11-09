@@ -1,3 +1,0 @@
-Test fix for patch version release (v1.27.1)
-
-This file demonstrates a bug fix that should trigger a patch version bump.

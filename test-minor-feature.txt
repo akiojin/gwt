@@ -1,3 +1,0 @@
-Test feature for minor version release (v1.27.0)
-
-This file demonstrates a new feature addition that should trigger a minor version bump.
