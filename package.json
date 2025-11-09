@@ -1,6 +1,6 @@
 {
   "name": "@akiojin/claude-worktree",
-  "version": "1.31.0",
+  "version": "1.32.0",
   "description": "Interactive Git worktree manager for Claude Code with graphical branch selection",
   "main": "dist/index.js",
   "bin": {
@@ -77,6 +77,13 @@
     "semantic-release": "^25.0.1",
     "typescript": "^5.8.3",
     "vitest": "^4.0.8"
+  },
+  "lint-staged": {
+    "*.md": "bunx --bun markdownlint-cli -c .markdownlint.json",
+    "*.{ts,tsx}": [
+      "bunx eslint --max-warnings=0",
+      "bunx prettier --check"
+    ]
   },
   "files": [
     "dist/",

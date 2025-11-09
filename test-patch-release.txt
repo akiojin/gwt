@@ -1,2 +1,0 @@
-This is a test file for patch version release.
-This file will be used to trigger a patch version bump (fix: commit).

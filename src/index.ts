@@ -32,6 +32,10 @@ import { launchCustomAITool } from "./launcher.js";
 import { saveSession } from "./config/index.js";
 import { getPackageVersion } from "./utils.js";
 import readline from "node:readline";
+import {
+  installDependenciesForWorktree,
+  DependencyInstallError,
+} from "./services/dependency-installer.js";
 
 const ERROR_PROMPT = chalk.yellow(
   "エラー内容を確認したら Enter キーを押してください。",
@@ -90,7 +94,8 @@ function isRecoverableError(error: unknown): boolean {
   if (
     error instanceof GitError ||
     error instanceof WorktreeError ||
-    error instanceof CodexError
+    error instanceof CodexError ||
+    error instanceof DependencyInstallError
   ) {
     return true;
   }
@@ -99,7 +104,8 @@ function isRecoverableError(error: unknown): boolean {
     return (
       error.name === "GitError" ||
       error.name === "WorktreeError" ||
-      error.name === "CodexError"
+      error.name === "CodexError" ||
+      error.name === "DependencyInstallError"
     );
   }
 
@@ -109,7 +115,10 @@ function isRecoverableError(error: unknown): boolean {
   ) {
     const name = (error as { name?: string }).name;
     return (
-      name === "GitError" || name === "WorktreeError" || name === "CodexError"
+      name === "GitError" ||
+      name === "WorktreeError" ||
+      name === "CodexError" ||
+      name === "DependencyInstallError"
     );
   }
 
@@ -129,6 +138,24 @@ async function runGitStep<T>(
       printWarning(
         `Git操作に失敗しました (${description}). エラー: ${details}`,
       );
+      await waitForErrorAcknowledgement();
+      return { ok: false };
+    }
+    throw error;
+  }
+}
+
+async function runDependencyInstallStep<T>(
+  description: string,
+  step: () => Promise<T>,
+): Promise<GitStepResult<T>> {
+  try {
+    const value = await step();
+    return { ok: true, value };
+  } catch (error) {
+    if (error instanceof DependencyInstallError) {
+      const details = error.message ?? "";
+      printError(`${description} に失敗しました。${details}`);
       await waitForErrorAcknowledgement();
       return { ok: false };
     }
@@ -347,6 +374,23 @@ export async function handleAIToolWorkflow(
     }
 
     printInfo(`Worktree ready: ${worktreePath}`);
+
+    const dependencyResult = await runDependencyInstallStep(
+      `依存関係インストール (${branch})`,
+      () => installDependenciesForWorktree(worktreePath),
+    );
+    if (!dependencyResult.ok) {
+      return;
+    }
+    if (dependencyResult.value.skipped) {
+      printWarning(
+        `${dependencyResult.value.manager} が環境に存在しないため、依存インストールをスキップしました。`,
+      );
+    } else {
+      printInfo(
+        `Dependencies synced via ${dependencyResult.value.manager}.`,
+      );
+    }
 
     // Update remotes and attempt fast-forward pull
     const fetchResult = await runGitStep("リモートの取得", () =>
