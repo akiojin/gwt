@@ -11,6 +11,10 @@
           {
             "type": "command",
             "command": ".claude/hooks/block-cd-command.sh"
+          },
+          {
+            "type": "command",
+            "command": ".claude/hooks/block-file-ops.sh"
           }
         ]
       }
