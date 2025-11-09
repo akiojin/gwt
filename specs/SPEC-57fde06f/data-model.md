@@ -2,33 +2,31 @@
 
 | Entity | Description | Key Fields | Relationships |
 | --- | --- | --- | --- |
-| `ReleaseBranchState` | develop から同期された release ブランチの最新情報 | `headSha`, `sourceSha` (develop), `lastSemanticReleaseTag`, `status` (clean/dirty) | `/release` コマンドが develop HEAD を読み取り release に書き込む。`ReleasePullRequest` が参照。
-| `ReleasePullRequest` | release→main の単一 PR。Auto Merge と Required チェックの状態を保持 | `number`, `title`, `autoMerge` (enabled/disabled), `requiredChecks` (array), `lastUpdated` | `ReleaseBranchState` から生成。`RequiredCheck` を内包し main Branch Protection と連動。
-| `RequiredCheck` | Auto Merge を許可するために必須の CI ジョブ | `name` (e.g. `lint`, `test`, `semantic-release`), `status`, `url` | GitHub Actions workflow run と 1:1 対応し、`ReleasePullRequest.requiredChecks` 配列に含まれる。
-| `BranchProtectionConfig` | main ブランチの保護条件 | `directPushAllowed` (bool), `autoMergeAllowed`, `requiredChecks` | Release PR の Auto Merge 条件を決定。`ReleasePullRequest` 作成時に前提として確認。
-| `ReleaseAutomationCommand` | `/release` 実行時の入力/出力スキーマ | `runBy`, `timestamp`, `developSha`, `releaseSha`, `prUrl`, `ghWorkflowUrl` | CLI 実行ログに保存され、スクリプト・ドキュメント双方で参照。
+| `ReleaseBranchState` | develop と release/vX.Y.Z の整合状態 | `developSha`, `releaseSha`, `status`(in-sync/outdated), `lastVersion` | `/release` コマンドが更新し、`ReleaseWorkflowRun` が参照する。
+| `ReleaseWorkflowRun` | `release.yml` の実行結果 | `runId`, `version`, `semanticReleaseStatus`, `logsUrl` | 成功時に release ブランチを main へマージし、タグ/リリース情報を残す。
+| `PublishWorkflowRun` | `publish.yml` の実行結果 | `runId`, `npmPublished`, `backmergeStatus`, `logsUrl` | `release.yml` 後に走り、`develop` へのバックマージと npm publish を管理。
+| `BranchProtectionConfig` | main ブランチの保護条件 | `directPushAllowed`, `requiredChecks`, `enforceAdmins` | release automation の前提。CI が失敗すると main 更新をブロック。
+| `ReleaseCommandInvocation` | `/release` または helper script の実行情報 | `invokedBy`, `timestamp`, `developSha`, `releaseBranch`, `workflowRunUrl` | `create-release.yml` を起動するたびに記録され、監査に利用。
 
 ## State Transitions
 
 1. **Sync Stage**
-   - develop でリリース対象コミットを作成 → `/release` が `git fetch origin release` → `git push origin develop:release` を実行。
-   - `ReleaseBranchState.headSha` が `developSha` と一致すると state=`clean`。
+   - `/release` または helper script が `create-release.yml` を起動し、semantic-release dry-run で次バージョンを決定して `release/vX.Y.Z` を push。
+   - `ReleaseBranchState.releaseSha` が `developSha` と一致した時点で `status=in-sync`。
 
-2. **CI Stage**
-   - release ブランチ push → `release.yml` が起動 → `lint`/`test`/`semantic-release` ジョブが走り、`RequiredCheck.status` を success/failure に更新。
-   - semantic-release 成功時にタグと GitHub Release、npm publish が行われ、`ReleaseBranchState.lastSemanticReleaseTag` が更新。
+2. **Release Stage**
+   - `release.yml` が起動し、lint/test/semantic-release を実行。成功すると version を記録し、release ブランチを main へマージして削除する。
+   - 失敗した場合は main が更新されず、`ReleaseWorkflowRun.semanticReleaseStatus=failed` のまま保持される。
 
-3. **PR Stage**
-   - `/release` が release→main PR を作成/更新し `autoMerge=enabled`。PR 本文にリリースノートと CI リンクを記載。
-   - Required チェック成功で Auto Merge が main にコミットを取り込み、PR は close 状態になる。
+3. **Publish Stage**
+   - main への push が `publish.yml` を起動。`npm publish`（任意）と `main` → `develop` のバックマージを実施し、結果を `PublishWorkflowRun` に記録。
 
-4. **Post-Merge Stage**
-   - main が release と同じ SHA になる → develop に main を逆マージするかどうかは既存ポリシーに従う。
-   - `ReleaseBranchState.status` は `waiting`（次回リリース待ち）へ遷移。
+4. **Idle Stage**
+   - すべて完了後、`ReleaseBranchState.status` は `waiting` に戻り、次の `/release` を待つ。
 
 ## Validation Rules
 
-- release ブランチには必ず 1 件の Release PR が紐づく（複数存在した場合は `/release` が古いものを close する）。
-- `RequiredCheck` は Branch Protection に登録されたジョブ名と一致していなければならない。
-- semantic-release がタグを作成したら release→main PR の本文にタグとリリースノートリンクを含める。
-- main への直接 push を検出した場合は CI でエラーを出し、ドキュメントに従い release フローへ誘導する。
+- release/vX.Y.Z ブランチは 1 リリースにつき 1 度だけ生成され、`release.yml` 成功後に必ず削除する。
+- `ReleaseWorkflowRun.version` が存在する場合、Git タグ `v${version}` と GitHub Release が必須。
+- `PublishWorkflowRun.backmergeStatus` が `failed` の場合は develop を手動で同期し、workflow を再実行するまで新規リリースを行わない。
+- main への直接 push を検出した場合は Branch Protection が拒否し、CLAUDE.md で案内している release フローに従う。
