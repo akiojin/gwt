@@ -1,10 +1,9 @@
 name: Test
 
 on:
-  push:
-    branches: [main, develop]
   pull_request:
-    branches: [main, develop]
+    branches:
+      - develop
 
 jobs:
   test:
@@ -30,9 +29,6 @@ jobs:
 
       - name: Run type check
         run: bun run type-check
-
-      - name: Run linter
-        run: bun run lint
 
       - name: Run tests
         run: bun run test

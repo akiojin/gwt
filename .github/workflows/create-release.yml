@@ -92,7 +92,9 @@ jobs:
             1. The \`release.yml\` workflow will run automatically
             2. semantic-release will create CHANGELOG, tags, and a GitHub Release
             3. The release branch will be merged directly into \`main\` and deleted
-            4. \`publish.yml\` will run on \`main\` for npm publish (optional) and the develop back-merge
+            4. \`publish.yml\` will run on \`main\` for:
+               - npm publish (if NPM_TOKEN is configured and commit is a release commit)
+               - Automatic back-merge to \`develop\` (always executed)
 
           Monitor the workflow progress:
           https://github.com/${{ github.repository }}/actions
