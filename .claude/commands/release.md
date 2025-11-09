@@ -9,19 +9,16 @@ developブランチから`release/vX.Y.Z`ブランチを自動作成し、unity-
 
 ## 実行内容
 
-1. 現在のブランチがdevelopであることを確認
-2. developブランチを最新に更新（`git pull`）
-3. `npx semantic-release --dry-run --branches develop` を実行してバージョン番号を判定
-4. `release/vX.Y.Z` ブランチを develop から作成
-5. リモートに push (`origin/release/vX.Y.Z`)
-6. GitHub Actions が以下を自動実行:
+1. `gh workflow run create-release.yml --ref develop` を実行して semantic-release の dry-run を行い、次バージョンを判定
+2. `create-release.yml` が `release/vX.Y.Z` ブランチを作成して `origin` へ push
+3. GitHub Actions が以下を自動実行:
    - **create-release.yml**: releaseブランチ作成フェーズのログを記録
    - **release.yml (release/**)**: semantic-releaseで CHANGELOG とタグを生成し、release → main を直接マージ
    - **publish.yml (main)**: npm publish（必要に応じて）、main → develop バックマージ
 
 ## 前提条件
 
-- develop ブランチ上でクリーンな作業ツリーになっていること
+- develop ブランチにリリース対象コミットが揃っていること
 - GitHub CLI (`gh`) が認証済み (`gh auth login`)
 - 最新コミットが Conventional Commits 形式であること
 - semantic-release がバージョンを決定できる差分が存在すること
