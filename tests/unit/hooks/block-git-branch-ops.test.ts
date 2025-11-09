@@ -38,7 +38,7 @@ describe("block-git-branch-ops.sh hook", () => {
       return {
         exitCode: error.exitCode || 1,
         stdout: error.stdout || "",
-        stderr: error.stderr || "",
+        stderr: error.stderr || error.message || "",
       };
     }
   }
@@ -46,6 +46,13 @@ describe("block-git-branch-ops.sh hook", () => {
   describe("Interactive rebase blocking", () => {
     it("should block 'git rebase -i origin/main'", async () => {
       const result = await runHook("Bash", "git rebase -i origin/main");
+
+      if (result.exitCode !== 2) {
+        console.error("Hook script path:", hookScriptPath);
+        console.error("Exit code:", result.exitCode);
+        console.error("stdout:", result.stdout);
+        console.error("stderr:", result.stderr);
+      }
 
       expect(result.exitCode).toBe(2);
       const jsonOutput = JSON.parse(result.stdout);
