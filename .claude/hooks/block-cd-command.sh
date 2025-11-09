@@ -25,7 +25,8 @@ is_within_worktree() {
         local abs_path="$target_path"
     else
         # 相対パスの場合は現在のディレクトリ基準で解決
-        local abs_path="$(cd "$(pwd)" && cd "$target_path" 2>/dev/null && pwd)" 2>/dev/null
+        local abs_path
+        abs_path=$(cd -- "$target_path" 2>/dev/null && pwd)
         if [ -z "$abs_path" ]; then
             # ディレクトリが存在しない場合は現在のディレクトリからの相対パスとして計算
             abs_path="$(pwd)/$target_path"
@@ -34,7 +35,8 @@ is_within_worktree() {
 
     # シンボリックリンクを解決して正規化
     if command -v realpath >/dev/null 2>&1; then
-        abs_path=$(realpath -m "$abs_path" 2>/dev/null) || abs_path="$abs_path"
+        local resolved_path
+        resolved_path=$(realpath -m "$abs_path" 2>/dev/null) && abs_path="$resolved_path"
     fi
 
     # Worktreeルートのプレフィックスチェック
