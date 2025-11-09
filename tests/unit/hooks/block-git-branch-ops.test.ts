@@ -5,13 +5,19 @@ import { dirname, join } from "path";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const hookScriptPath = join(__dirname, "../../../.claude/hooks/block-git-branch-ops.sh");
+const hookScriptPath = join(
+  __dirname,
+  "../../../.claude/hooks/block-git-branch-ops.sh",
+);
 
 describe("block-git-branch-ops.sh hook", () => {
   /**
    * Helper function to execute the hook script with a given tool input
    */
-  async function runHook(toolName: string, command: string): Promise<{
+  async function runHook(
+    toolName: string,
+    command: string,
+  ): Promise<{
     exitCode: number;
     stdout: string;
     stderr: string;
@@ -47,12 +53,19 @@ describe("block-git-branch-ops.sh hook", () => {
       expect(result.exitCode).toBe(2);
       const jsonOutput = JSON.parse(result.stdout);
       expect(jsonOutput.decision).toBe("block");
-      expect(jsonOutput.reason).toContain("Interactive rebase against origin/main is not allowed");
-      expect(jsonOutput.stopReason).toContain("Interactive rebase against origin/main initiated by LLMs is blocked");
+      expect(jsonOutput.reason).toContain(
+        "Interactive rebase against origin/main is not allowed",
+      );
+      expect(jsonOutput.stopReason).toContain(
+        "Interactive rebase against origin/main initiated by LLMs is blocked",
+      );
     });
 
     it("should block 'git rebase --interactive origin/main'", async () => {
-      const result = await runHook("Bash", "git rebase --interactive origin/main");
+      const result = await runHook(
+        "Bash",
+        "git rebase --interactive origin/main",
+      );
 
       expect(result.exitCode).toBe(2);
       const jsonOutput = JSON.parse(result.stdout);
@@ -79,7 +92,9 @@ describe("block-git-branch-ops.sh hook", () => {
       expect(result.exitCode).toBe(2);
       const jsonOutput = JSON.parse(result.stdout);
       expect(jsonOutput.decision).toBe("block");
-      expect(jsonOutput.reason).toContain("Branch switching, creation, and worktree commands are not allowed");
+      expect(jsonOutput.reason).toContain(
+        "Branch switching, creation, and worktree commands are not allowed",
+      );
     });
 
     it("should block 'git switch develop'", async () => {
@@ -233,7 +248,10 @@ describe("block-git-branch-ops.sh hook", () => {
     });
 
     it("should allow safe command chains", async () => {
-      const result = await runHook("Bash", "git add . && git commit -m 'test' && git push");
+      const result = await runHook(
+        "Bash",
+        "git add . && git commit -m 'test' && git push",
+      );
 
       expect(result.exitCode).toBe(0);
     });
