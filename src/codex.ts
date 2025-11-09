@@ -1,4 +1,4 @@
-import { spawn } from "child_process";
+import { execa } from "execa";
 import chalk from "chalk";
 import { platform } from "os";
 import { existsSync } from "fs";
@@ -83,31 +83,15 @@ export async function launchCodexCLI(
 
     terminal.exitRawMode();
 
-    const fullArgs = [CODEX_CLI_PACKAGE, ...args];
-
     const childStdio = createChildStdio();
 
     try {
-      // Use child_process.spawn directly to avoid execa+Bun compatibility issues
-      await new Promise<void>((resolve, reject) => {
-        const child = spawn("bunx", fullArgs, {
-          cwd: worktreePath,
-          stdio: [childStdio.stdin, childStdio.stdout, childStdio.stderr],
-          shell: false,
-        });
-
-        child.on("exit", (code) => {
-          if (code === 0) {
-            resolve();
-          } else {
-            reject(new Error(`Command failed with exit code ${code}`));
-          }
-        });
-
-        child.on("error", (err) => {
-          reject(err);
-        });
-      });
+      await execa("bunx", [CODEX_CLI_PACKAGE, ...args], {
+        cwd: worktreePath,
+        stdin: childStdio.stdin,
+        stdout: childStdio.stdout,
+        stderr: childStdio.stderr,
+      } as any);
     } finally {
       childStdio.cleanup();
     }
@@ -140,24 +124,7 @@ export async function launchCodexCLI(
 
 export async function isCodexAvailable(): Promise<boolean> {
   try {
-    await new Promise<void>((resolve, reject) => {
-      const child = spawn("bunx", [CODEX_CLI_PACKAGE, "--help"], {
-        stdio: "ignore",
-        shell: false,
-      });
-
-      child.on("exit", (code) => {
-        if (code === 0) {
-          resolve();
-        } else {
-          reject(new Error(`Command failed with exit code ${code}`));
-        }
-      });
-
-      child.on("error", (err) => {
-        reject(err);
-      });
-    });
+    await execa("bunx", [CODEX_CLI_PACKAGE, "--help"]);
     return true;
   } catch (error: any) {
     if (error.code === "ENOENT") {
