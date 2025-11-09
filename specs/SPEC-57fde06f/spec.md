@@ -67,9 +67,11 @@
 
 ### エッジケース
 
-- release ブランチに semantic-release が失敗した場合、Auto Merge も保留になり再実行手順が案内される必要がある。
-- develop が release より進んでいない状態で `/release` を実行した場合は何も更新されず既存 PR がそのまま維持される。
+- release ブランチに semantic-release が失敗した場合、main へのマージも実行されず、再実行手順が案内される必要がある。
+- develop が release より進んでいない状態で `/release` を実行した場合は何も更新されず既存 release ブランチがそのまま維持される。
 - main で緊急 hotfix が必要になった場合は既存手順（例: hotfix ブランチ）を用い、release ブランチへ逆マージするガードレールが必要。
+- npm publish が失敗した場合でも、main → develop のバックマージは必ず実行される（publish.yml の backmerge-to-develop ジョブは npm-publish に依存しない）。
+- Test ワークフローは release ブランチでは実行されない（release.yml の pre-release-tests で既に実行済み）ため、test.yml のトリガーには release/** が含まれない。
 - Lint/Test のトリガー設定が誤って main への push を拾ってしまった場合、リリース時に不要な CI 待ちが発生するため監視が必要。
 
 ## 要件 *(必須)*
@@ -77,7 +79,7 @@
 ### 機能要件
 
 - **FR-001**: `/release` 実行時に develop の HEAD を release ブランチへ fast-forward し、タグやメタ情報が重複しないようにする。
-- **FR-002**: release ブランチへの push をトリガーに semantic-release（npm publish、GitHub Release 作成を含む）が実行されるよう CI 設定を変更する。
+- **FR-002**: release ブランチへの push をトリガーに semantic-release（CHANGELOG 生成、タグ作成、GitHub Release 作成）が実行されるよう CI 設定を変更する。npm publish は main ブランチへのマージ後に publish.yml で実行される。
 - **FR-003**: `release.yml` が release ブランチで semantic-release を実行し、成功時のみ release/vX.Y.Z を main へ直接マージしてブランチを削除するよう実装する（バックマージは publish.yml で実行）。
 - **FR-004**: `release.yml` の失敗時に main が更新されないようガードし、再実行に必要なログ/URL を Summary に出力する。
 - **FR-005**: main ブランチへの直接 push を Branch Protection で禁止し、CI 以外の書き込みは release ブランチ経由に限定する。
