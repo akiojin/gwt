@@ -47,6 +47,7 @@
         "@vitest/coverage-v8": "^4.0.8",
         "@vitest/ui": "^4.0.8",
         "concurrently": "^9.1.2",
+        "esbuild": "0.25.12",
         "eslint": "^9.31.0",
         "happy-dom": "^20.0.8",
         "husky": "^9.1.7",
