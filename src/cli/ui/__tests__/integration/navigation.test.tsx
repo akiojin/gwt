@@ -12,7 +12,7 @@ import type { BranchInfo, BranchItem } from '../../types.js';
 import * as BranchListScreenModule from '../../components/screens/BranchListScreen.js';
 import * as BranchActionSelectorScreenModule from '../../screens/BranchActionSelectorScreen.js';
 
-vi.mock('../../../git.js', () => ({
+vi.mock('../../../../cli/git.js', () => ({
   __esModule: true,
   getAllBranches: vi.fn(),
   getRepositoryRoot: vi.fn(async () => '/repo'),
@@ -24,7 +24,7 @@ const { mockIsProtectedBranchName, mockSwitchToProtectedBranch } = vi.hoisted(()
   mockSwitchToProtectedBranch: vi.fn(async () => 'none' as const),
 }));
 
-vi.mock('../../../worktree.js', () => ({
+vi.mock('../../../../cli/worktree.js', () => ({
   __esModule: true,
   listAdditionalWorktrees: vi.fn(),
   createWorktree: vi.fn(async () => undefined),

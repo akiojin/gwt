@@ -11,7 +11,7 @@ import { Window } from 'happy-dom';
 import type { BranchInfo } from '../../types.js';
 
 // Mock git.js and worktree.js
-vi.mock('../../../git.js', () => ({
+vi.mock('../../../../cli/git.js', () => ({
   __esModule: true,
   getAllBranches: vi.fn(),
   getRepositoryRoot: vi.fn(async () => '/repo'),
@@ -23,7 +23,7 @@ const { acceptanceIsProtectedBranchName, acceptanceSwitchToProtectedBranch } = v
   acceptanceSwitchToProtectedBranch: vi.fn(async () => 'none' as const),
 }));
 
-vi.mock('../../../worktree.js', () => ({
+vi.mock('../../../../cli/worktree.js', () => ({
   __esModule: true,
   listAdditionalWorktrees: vi.fn(),
   createWorktree: vi.fn(async () => undefined),
