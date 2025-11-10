@@ -4,7 +4,7 @@ import type {
   BatchMergeResult,
   BranchMergeStatus,
   BatchMergeSummary,
-} from "../ui/types";
+} from "../cli/ui/types";
 import * as git from "../git";
 import * as worktree from "../worktree";
 
