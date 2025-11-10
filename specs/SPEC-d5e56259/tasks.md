@@ -36,8 +36,8 @@
 - [ ] **T002** [P] 共通ビジネスロジックを`src/core/`に抽出（git.ts, worktree.ts, claude.ts, codex.ts, launcher.ts, services/, repositories/）
 - [ ] **T003** `src/index.ts`に`serve`サブコマンド分岐ロジックを追加（CLI/Web判定）
 - [X] **T004** [P] Web UIの依存関係をpackage.jsonに追加（Fastify 5, @fastify/websocket, @fastify/static, node-pty, xterm.js, Vite, TanStack Query, Zustand）
-- [ ] **T005** [P] `src/web/`ディレクトリ構造を作成（server/, client/）
-- [ ] **T006** [P] `src/types/api.ts`に共通型定義を作成（Branch, Worktree, AIToolSession, CustomAITool）
+- [X] **T005** [P] `src/web/`ディレクトリ構造を作成（server/, client/）
+- [X] **T006** [P] `src/types/api.ts`に共通型定義を作成（Branch, Worktree, AIToolSession, CustomAITool）
 
 ## フェーズ2: 基盤（ブロッキング前提条件）
 
