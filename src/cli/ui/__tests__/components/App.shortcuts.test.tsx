@@ -77,9 +77,9 @@ describe('App shortcuts integration', () => {
     }));
     useScreenStateSpy.mockImplementation(() => ({
       currentScreen: 'worktree-manager',
-      navigateTo: navigateToMock,
-      goBack: goBackMock,
-      reset: resetMock,
+      navigateTo: navigateToMock as _Mock,
+      goBack: goBackMock as _Mock,
+      reset: resetMock as _Mock,
     }));
     worktreeManagerScreenSpy.mockImplementation((props: any) => {
       worktreeScreenProps.push(props);
@@ -178,9 +178,9 @@ describe('App shortcuts integration', () => {
     // Update screen state mock to branch-creator for this test
     useScreenStateSpy.mockReturnValue({
       currentScreen: 'branch-creator',
-      navigateTo: navigateToMock,
-      goBack: goBackMock,
-      reset: resetMock,
+      navigateTo: navigateToMock as _Mock,
+      goBack: goBackMock as _Mock,
+      reset: resetMock as _Mock,
     });
 
     render(<App onExit={onExit} />);
@@ -226,9 +226,9 @@ describe('App shortcuts integration', () => {
 
       useScreenStateSpy.mockReturnValue({
         currentScreen: 'branch-list',
-        navigateTo: navigateToMock,
-        goBack: goBackMock,
-        reset: resetMock,
+        navigateTo: navigateToMock as _Mock,
+        goBack: goBackMock as _Mock,
+        reset: resetMock as _Mock,
       });
 
       render(<App onExit={onExit} />);

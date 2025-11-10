@@ -1,6 +1,7 @@
 /**
  * @vitest-environment happy-dom
  */
+/* eslint-disable no-control-regex */
 import { describe, it, expect, vi } from 'vitest';
 import { render } from 'ink-testing-library';
 import React from 'react';
