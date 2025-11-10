@@ -46,14 +46,14 @@ vi.mock('../../components/screens/AIToolSelectorScreen.js', () => {
   };
 });
 
-import { getAllBranches, getRepositoryRoot, deleteBranch } from '../../../git.js';
+import { getAllBranches, getRepositoryRoot, deleteBranch } from '../../../../cli/git.js';
 import {
   listAdditionalWorktrees,
   createWorktree,
   generateWorktreePath,
   getMergedPRWorktrees,
   removeWorktree,
-} from '../../../worktree.js';
+} from '../../../../cli/worktree.js';
 
 const mockedGetAllBranches = getAllBranches as Mock;
 const mockedGetRepositoryRoot = getRepositoryRoot as Mock;
