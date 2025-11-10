@@ -1,6 +1,6 @@
 import { execa } from "execa";
 import path from "node:path";
-import { BranchInfo } from "./ui/types.js";
+import { BranchInfo } from "./cli/ui/types.js";
 
 export class GitError extends Error {
   constructor(

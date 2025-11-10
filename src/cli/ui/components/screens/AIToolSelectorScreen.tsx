@@ -4,8 +4,8 @@ import { Header } from '../parts/Header.js';
 import { Footer } from '../parts/Footer.js';
 import { Select } from '../common/Select.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
-import { getAllTools } from '../../../config/tools.js';
-import type { AIToolConfig } from '../../../types/tools.js';
+import { getAllTools } from '../../../../config/tools.js';
+import type { AIToolConfig } from '../../../../types/tools.js';
 
 export type AITool = string;
 

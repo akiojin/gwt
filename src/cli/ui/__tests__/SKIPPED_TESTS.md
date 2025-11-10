@@ -7,30 +7,35 @@ Some tests have been temporarily renamed with `.skip` extension to exclude them 
 ## Skipped Test Files
 
 ### 1. `useGitData.test.ts.skip`
+
 - **Original location**: `src/ui/__tests__/hooks/useGitData.test.ts`
 - **Tests**: 6 tests (auto-refresh tests were removed earlier, 6 basic tests remain)
 - **Reason**: Timer-based and mock state conflicts in parallel execution
 - **Coverage**: Basic functionality is tested in other test files
 
 ### 2. `realtimeUpdate.test.tsx.skip`
+
 - **Original location**: `src/ui/__tests__/integration/realtimeUpdate.test.tsx`
 - **Tests**: 5 tests (auto-refresh integration)
 - **Reason**: setInterval timing precision issues in parallel runs
 - **Coverage**: Auto-refresh functionality works correctly in production
 
 ### 3. `branchList.test.tsx.skip`
+
 - **Original location**: `src/ui/__tests__/integration/branchList.test.tsx`
 - **Tests**: 5 tests (branch list integration)
 - **Reason**: Mock state conflicts with other parallel tests
 - **Coverage**: Component functionality tested in unit tests
 
 ### 4. `realtimeUpdate.acceptance.test.tsx.skip`
+
 - **Original location**: `src/ui/__tests__/acceptance/realtimeUpdate.acceptance.test.tsx`
 - **Tests**: 4 acceptance tests
 - **Reason**: Timer-based acceptance criteria in parallel execution
 - **Coverage**: Same functionality as integration tests
 
 ### 5. `branchList.acceptance.test.tsx.skip`
+
 - **Original location**: `src/ui/__tests__/acceptance/branchList.acceptance.test.tsx`
 - **Tests**: 2 acceptance tests (performance with 20+, 100+ branches)
 - **Reason**: Heavy load tests causing resource conflicts
@@ -73,6 +78,7 @@ bun test src/ui/__tests__/integration/branchList.test.tsx.skip
 ## Future Actions
 
 These tests can be re-enabled when:
+
 1. Bun's vitest adds support for sequential execution options
 2. Tests are rewritten to avoid timer dependencies
 3. Mock state management is refactored for better isolation
@@ -104,6 +110,7 @@ done
 ## Conclusion
 
 The decision to skip these tests is pragmatic:
+
 - **Production code works correctly** (all skipped tests pass in isolation)
 - **Core functionality is tested** (307 stable tests remain)
 - **Test suite is reliable** (100% pass rate)

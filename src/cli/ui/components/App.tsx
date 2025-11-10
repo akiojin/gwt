@@ -16,7 +16,7 @@ import { useScreenState } from '../hooks/useScreenState.js';
 import { formatBranchItems } from '../utils/branchFormatter.js';
 import { calculateStatistics } from '../utils/statisticsCalculator.js';
 import type { BranchInfo, BranchItem, SelectedBranchState } from '../types.js';
-import { getRepositoryRoot, deleteBranch } from '../../git.js';
+import { getRepositoryRoot, deleteBranch } from '../../../git.js';
 import {
   createWorktree,
   generateWorktreePath,
@@ -24,8 +24,8 @@ import {
   isProtectedBranchName,
   removeWorktree,
   switchToProtectedBranch,
-} from '../../worktree.js';
-import { getPackageVersion } from '../../utils.js';
+} from '../../../worktree.js';
+import { getPackageVersion } from '../../../utils.js';
 import {
   resolveBaseBranchLabel,
   resolveBaseBranchRef,

@@ -1,5 +1,5 @@
 import { useState, useCallback } from "react";
-import { BatchMergeService } from "../../services/BatchMergeService.js";
+import { BatchMergeService } from "../../../services/BatchMergeService.js";
 import type {
   BatchMergeConfig,
   BatchMergeProgress,

@@ -16,7 +16,7 @@ import {
   type EnsureWorktreeOptions,
 } from "./services/WorktreeOrchestrator.js";
 import chalk from "chalk";
-import type { SelectionResult } from "./ui/components/App.js";
+import type { SelectionResult } from "./cli/ui/components/App.js";
 import {
   worktreeExists,
   isProtectedBranchName,
@@ -220,7 +220,7 @@ async function showVersion(): Promise<void> {
 async function mainInkUI(): Promise<SelectionResult | undefined> {
   const { render } = await import("ink");
   const React = await import("react");
-  const { App } = await import("./ui/components/App.js");
+  const { App } = await import("./cli/ui/components/App.js");
   const terminal = getTerminalStreams();
 
   let selectionResult: SelectionResult | undefined;
@@ -387,9 +387,7 @@ export async function handleAIToolWorkflow(
         `${dependencyResult.value.manager} が環境に存在しないため、依存インストールをスキップしました。`,
       );
     } else {
-      printInfo(
-        `Dependencies synced via ${dependencyResult.value.manager}.`,
-      );
+      printInfo(`Dependencies synced via ${dependencyResult.value.manager}.`);
     }
 
     // Update remotes and attempt fast-forward pull

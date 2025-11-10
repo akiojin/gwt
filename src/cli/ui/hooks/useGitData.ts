@@ -3,11 +3,11 @@ import {
   getAllBranches,
   hasUnpushedCommitsInRepo,
   getRepositoryRoot,
-} from "../../git.js";
-import { listAdditionalWorktrees } from "../../worktree.js";
-import { getPullRequestByBranch } from "../../github.js";
+} from "../../../git.js";
+import { listAdditionalWorktrees } from "../../../worktree.js";
+import { getPullRequestByBranch } from "../../../github.js";
 import type { BranchInfo, WorktreeInfo } from "../types.js";
-import type { WorktreeInfo as GitWorktreeInfo } from "../../worktree.js";
+import type { WorktreeInfo as GitWorktreeInfo } from "../../../worktree.js";
 
 export interface UseGitDataOptions {
   enableAutoRefresh?: boolean;

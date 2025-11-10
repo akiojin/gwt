@@ -3,7 +3,7 @@ import {
   formatBranchItem,
   formatBranchItems,
 } from "../../utils/branchFormatter.js";
-import type { BranchInfo, BranchItem } from "../../types.js";
+import type { BranchInfo } from "../../types.js";
 
 describe("branchFormatter", () => {
   describe("formatBranchItem", () => {

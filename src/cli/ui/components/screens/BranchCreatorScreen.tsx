@@ -5,7 +5,7 @@ import { Footer } from '../parts/Footer.js';
 import { Select } from '../common/Select.js';
 import { Input } from '../common/Input.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
-import { BRANCH_PREFIXES } from '../../../config/constants.js';
+import { BRANCH_PREFIXES } from '../../../../config/constants.js';
 
 type BranchType = 'feature' | 'hotfix' | 'release';
 type Step = 'type-selection' | 'name-input';
