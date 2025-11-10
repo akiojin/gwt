@@ -17,8 +17,8 @@
 
 **受け入れシナリオ**:
 
-1. **前提条件** ターミナルでclaude-worktreeがインストール済み、**操作** `claude-worktree serve`を実行、**期待結果** "Server running at http://localhost:3000"のようなメッセージが表示され、サーバーが起動する
-2. **前提条件** Webサーバーが起動中、**操作** ブラウザで`http://localhost:3000`にアクセス、**期待結果** Worktree管理のWebインターフェースが表示される
+1. **前提条件** ターミナルでclaude-worktreeがインストール済み、**操作** `claude-worktree serve`を実行、**期待結果** "Server running at <http://localhost:3000>"のようなメッセージが表示され、サーバーが起動する
+2. **前提条件** Webサーバーが起動中、**操作** ブラウザで `<http://localhost:3000>` にアクセス、**期待結果** Worktree管理のWebインターフェースが表示される
 3. **前提条件** Webサーバーが起動中、**操作** `Ctrl+C`でサーバーを停止、**期待結果** サーバーが正常にシャットダウンし、ブラウザからアクセスできなくなる
 
 ---

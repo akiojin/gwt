@@ -1432,46 +1432,46 @@ export async function createBranch(data: CreateBranchRequest): Promise<void> {
 ### 5.1 既存プロジェクトの調査
 
 **VS Code Server (code-server)**:
-- GitHub: https://github.com/coder/code-server
+- GitHub: <https://github.com/coder/code-server>
 - PTY実装: node-ptyを使用
 - WebSocket: ws を使用
 - ターミナル: xterm.jsを使用
 
 **Gotty**:
-- GitHub: https://github.com/yudai/gotty
+- GitHub: <https://github.com/yudai/gotty>
 - Go言語実装（参考程度）
 - WebSocket経由でターミナルを公開
 
 **ttyd**:
-- GitHub: https://github.com/tsl0922/ttyd
+- GitHub: <https://github.com/tsl0922/ttyd>
 - C言語実装（参考程度）
 - libwebsockets + libuvでWebSocketターミナル
 
 **GitHub Codespaces**:
-- 公式ドキュメント: https://docs.github.com/en/codespaces
+- 公式ドキュメント: <https://docs.github.com/en/codespaces>
 - VS Code Server + Dev Containers
 - ポートフォワーディング（WebSocket対応）
 
 ### 5.2 技術ドキュメント
 
 **Fastify**:
-- 公式ドキュメント: https://fastify.dev/
-- WebSocketプラグイン: https://github.com/fastify/fastify-websocket
+- 公式ドキュメント: <https://fastify.dev/>
+- WebSocketプラグイン: <https://github.com/fastify/fastify>-websocket
 
 **node-pty**:
-- GitHub: https://github.com/microsoft/node-pty
-- Windows ConPTY: https://devblogs.microsoft.com/commandline/windows-command-line-introducing-the-windows-pseudo-console-conpty/
+- GitHub: <https://github.com/microsoft/node-pty>
+- Windows ConPTY: <https://devblogs.microsoft.com>/commandline/windows-command-line-introducing-the-windows-pseudo-console-conpty/
 
 **xterm.js**:
-- 公式ドキュメント: https://xtermjs.org/
-- API Reference: https://github.com/xtermjs/xterm.js/blob/master/typings/xterm.d.ts
+- 公式ドキュメント: <https://xtermjs.org/>
+- API Reference: <https://github.com/xtermjs/xterm.js>/blob/master/typings/xterm.d.ts
 
 **TanStack Query**:
-- 公式ドキュメント: https://tanstack.com/query/latest
-- React Query Tutorial: https://tkdodo.eu/blog/practical-react-query
+- 公式ドキュメント: <https://tanstack.com/query>/latest
+- React Query Tutorial: <https://tkdodo.eu/blog>/practical-react-query
 
 **Zustand**:
-- 公式ドキュメント: https://github.com/pmndrs/zustand
+- 公式ドキュメント: <https://github.com/pmndrs/zustand>
 
 ### 5.3 関連技術の比較
 
