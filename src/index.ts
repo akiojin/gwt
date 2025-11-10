@@ -591,6 +591,7 @@ export async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const showVersionFlag = args.includes("-v") || args.includes("--version");
   const showHelpFlag = args.includes("-h") || args.includes("--help");
+  const serveCommand = args.includes("serve");
 
   // Version flag has higher priority than help
   if (showVersionFlag) {
@@ -600,6 +601,13 @@ export async function main(): Promise<void> {
 
   if (showHelpFlag) {
     showHelp();
+    return;
+  }
+
+  // Start Web UI server if 'serve' command is provided
+  if (serveCommand) {
+    const { startWebServer } = await import("./web/server/index.js");
+    await startWebServer();
     return;
   }
 
