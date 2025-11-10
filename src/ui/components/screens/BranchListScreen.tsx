@@ -247,7 +247,7 @@ export function BranchListScreen({
         <LoadingIndicator
           isLoading={Boolean(loading)}
           delay={loadingIndicatorDelay}
-          message="Git情報を読み込んでいます..."
+          message="Loading Git information..."
         />
 
         {error && (

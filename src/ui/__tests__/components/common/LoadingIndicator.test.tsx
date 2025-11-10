@@ -37,7 +37,7 @@ describe('LoadingIndicator', () => {
 
   it('does not render before the delay elapses', async () => {
     const { container } = render(
-      <LoadingIndicator isLoading={true} message="読み込み中" delay={50} />
+      <LoadingIndicator isLoading={true} message="Loading data" delay={50} />
     );
 
     expect(container.textContent).toBe('');
@@ -49,25 +49,25 @@ describe('LoadingIndicator', () => {
 
   it('renders after the delay elapses', async () => {
     const { container } = render(
-      <LoadingIndicator isLoading={true} message="読み込み中" delay={30} />
+      <LoadingIndicator isLoading={true} message="Loading data" delay={30} />
     );
 
     await advanceTimersBy(30);
 
-    expect(getMessageText(container)).toContain('読み込み中');
+    expect(getMessageText(container)).toContain('Loading data');
   });
 
   it('stops rendering when loading becomes false', async () => {
     const { container, rerender } = render(
-      <LoadingIndicator isLoading={true} message="読み込み中" delay={10} />
+      <LoadingIndicator isLoading={true} message="Loading data" delay={10} />
     );
 
     await advanceTimersBy(10);
 
-    expect(getMessageText(container)).toContain('読み込み中');
+    expect(getMessageText(container)).toContain('Loading data');
 
     await act(async () => {
-      rerender(<LoadingIndicator isLoading={false} message="読み込み中" delay={10} />);
+      rerender(<LoadingIndicator isLoading={false} message="Loading data" delay={10} />);
       await vi.advanceTimersByTimeAsync(0);
     });
 
@@ -79,7 +79,7 @@ describe('LoadingIndicator', () => {
     const { container } = render(
       <LoadingIndicator
         isLoading={true}
-        message="読み込み中"
+        message="Loading data"
         delay={0}
         interval={5}
         frames={customFrames}
@@ -103,14 +103,14 @@ describe('LoadingIndicator', () => {
     expect(customFrames).toContain(firstFrame ?? '');
     expect(customFrames).toContain(secondFrame ?? '');
     expect(customFrames).toContain(thirdFrame ?? '');
-    expect(getMessageText(container)).toContain('読み込み中');
+    expect(getMessageText(container)).toContain('Loading data');
   });
 
   it('keeps rendering even when only a single frame is provided', async () => {
     const { container } = render(
       <LoadingIndicator
         isLoading={true}
-        message="読み込み中"
+        message="Loading data"
         delay={0}
         interval={10}
         frames={['*']}
@@ -122,6 +122,6 @@ describe('LoadingIndicator', () => {
 
     await advanceTimersBy(30);
     expect(getSpinnerText(container)).toBe('*');
-    expect(getMessageText(container)).toContain('読み込み中');
+    expect(getMessageText(container)).toContain('Loading data');
   });
 });

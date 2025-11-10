@@ -75,28 +75,26 @@ export const MESSAGE_KEYS = {
   },
 } as const;
 
-// 日本語メッセージ（デフォルト）
-export const MESSAGES_JA = {
-  [MESSAGE_KEYS.ERROR.NOT_GIT_REPO]:
-    "このディレクトリはGitリポジトリではありません",
-  [MESSAGE_KEYS.ERROR.GIT_COMMAND_FAILED]: "Gitコマンドの実行に失敗しました",
-  [MESSAGE_KEYS.ERROR.WORKTREE_CREATE_FAILED]: "worktreeの作成に失敗しました",
-  [MESSAGE_KEYS.ERROR.GITHUB_CLI_NOT_AVAILABLE]:
-    "GitHub CLIがインストールされていません",
+// English messages (default)
+export const MESSAGES_EN = {
+  [MESSAGE_KEYS.ERROR.NOT_GIT_REPO]: "This directory is not a Git repository",
+  [MESSAGE_KEYS.ERROR.GIT_COMMAND_FAILED]: "Failed to run the Git command",
+  [MESSAGE_KEYS.ERROR.WORKTREE_CREATE_FAILED]: "Failed to create the worktree",
+  [MESSAGE_KEYS.ERROR.GITHUB_CLI_NOT_AVAILABLE]: "GitHub CLI is not installed",
   [MESSAGE_KEYS.ERROR.GITHUB_AUTH_REQUIRED]:
-    "GitHub認証が必要です。gh auth login を実行してください",
-  [MESSAGE_KEYS.SUCCESS.WORKTREE_CREATED]: "worktreeを作成しました",
-  [MESSAGE_KEYS.SUCCESS.BRANCH_CREATED]: "ブランチを作成しました",
-  [MESSAGE_KEYS.SUCCESS.CHANGES_COMMITTED]: "変更をコミットしました",
-  [MESSAGE_KEYS.SUCCESS.CHANGES_PUSHED]: "変更をプッシュしました",
-  [MESSAGE_KEYS.SUCCESS.CLEANUP_COMPLETED]: "クリーンアップが完了しました",
-  [MESSAGE_KEYS.INFO.LOADING]: "読み込み中...",
-  [MESSAGE_KEYS.INFO.PROCESSING]: "処理中...",
-  [MESSAGE_KEYS.INFO.FETCHING_DATA]: "データを取得中...",
+    "GitHub authentication is required. Please run 'gh auth login'",
+  [MESSAGE_KEYS.SUCCESS.WORKTREE_CREATED]: "Worktree created",
+  [MESSAGE_KEYS.SUCCESS.BRANCH_CREATED]: "Branch created",
+  [MESSAGE_KEYS.SUCCESS.CHANGES_COMMITTED]: "Changes committed",
+  [MESSAGE_KEYS.SUCCESS.CHANGES_PUSHED]: "Changes pushed",
+  [MESSAGE_KEYS.SUCCESS.CLEANUP_COMPLETED]: "Cleanup completed",
+  [MESSAGE_KEYS.INFO.LOADING]: "Loading...",
+  [MESSAGE_KEYS.INFO.PROCESSING]: "Processing...",
+  [MESSAGE_KEYS.INFO.FETCHING_DATA]: "Fetching data...",
 } as const;
 
-// メッセージ取得関数（将来的に多言語対応可能）
+// Message lookup helper (multi-language ready)
 export function getMessage(key: string): string {
-  // 現時点では日本語のみサポート
-  return MESSAGES_JA[key as keyof typeof MESSAGES_JA] || key;
+  // Currently only English is provided
+  return MESSAGES_EN[key as keyof typeof MESSAGES_EN] || key;
 }

@@ -311,7 +311,7 @@ describe('Protected Branch Navigation (T103)', () => {
 
     const actionProps = branchActionProps.at(-1);
     expect(actionProps?.mode).toBe('protected');
-    expect(actionProps?.infoMessage).toContain('ルートブランチ');
+    expect(actionProps?.infoMessage).toContain('is a root branch');
 
     await act(async () => {
       await actionProps?.onUseExisting();
