@@ -58,15 +58,9 @@ else
     echo "   ✅ Dependencies already installed"
 fi
 
-# distディレクトリが存在しない、またはsrcが更新されている場合はビルド
-if [ ! -d "/claude-worktree/dist" ] || [ -n "$(find /claude-worktree/src -type f -newer /claude-worktree/dist 2>/dev/null)" ]; then
-    echo "   Building project..."
-    cd /claude-worktree && bun run build
-else
-    echo "   ✅ Build artifacts up to date"
-fi
-
-echo "🚀 Docker environment is ready!"
+echo "🚀 Docker development environment is ready!"
+echo "   You can now build the project with: bun run build"
+echo "   Or start development with: bun run dev"
 echo ""
 
 # コマンドの実行（デフォルトはbash）
