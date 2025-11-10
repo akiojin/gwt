@@ -10,6 +10,8 @@ services:
       - codex-config:/root/.codex
       - ${HOME:-~}/.codex:/root/.codex-host:ro
       - ~/.serena:/root/.serena
+    ports:
+      - "3000:3000"
     environment:
       - NPM_USER
       - NPM_EMAIL
