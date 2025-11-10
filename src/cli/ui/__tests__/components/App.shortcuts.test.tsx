@@ -12,8 +12,8 @@ import * as useScreenStateModule from '../../hooks/useScreenState.js';
 import * as WorktreeManagerScreenModule from '../../components/screens/WorktreeManagerScreen.js';
 import * as BranchCreatorScreenModule from '../../components/screens/BranchCreatorScreen.js';
 import * as BranchListScreenModule from '../../components/screens/BranchListScreen.js';
-import * as worktreeModule from '../../../worktree.js';
-import * as gitModule from '../../../git.js';
+import * as worktreeModule from '../../../../worktree.ts';
+import * as gitModule from '../../../../git.ts';
 import { App } from '../../components/App.js';
 
 const navigateToMock = vi.fn();
