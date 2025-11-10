@@ -12,7 +12,7 @@ import type { BranchInfo, BranchItem } from '../../types.js';
 import * as BranchListScreenModule from '../../components/screens/BranchListScreen.js';
 import * as BranchActionSelectorScreenModule from '../../screens/BranchActionSelectorScreen.js';
 
-vi.mock('../../../../cli/git.js', () => ({
+vi.mock('../../../git.js', () => ({
   __esModule: true,
   getAllBranches: vi.fn(),
   getRepositoryRoot: vi.fn(async () => '/repo'),
@@ -24,7 +24,7 @@ const { mockIsProtectedBranchName, mockSwitchToProtectedBranch } = vi.hoisted(()
   mockSwitchToProtectedBranch: vi.fn(async () => 'none' as const),
 }));
 
-vi.mock('../../../../cli/worktree.js', () => ({
+vi.mock('../../../worktree.js', () => ({
   __esModule: true,
   listAdditionalWorktrees: vi.fn(),
   createWorktree: vi.fn(async () => undefined),
@@ -46,14 +46,14 @@ vi.mock('../../components/screens/AIToolSelectorScreen.js', () => {
   };
 });
 
-import { getAllBranches, getRepositoryRoot, deleteBranch } from '../../../../cli/git.js';
+import { getAllBranches, getRepositoryRoot, deleteBranch } from '../../../git.js';
 import {
   listAdditionalWorktrees,
   createWorktree,
   generateWorktreePath,
   getMergedPRWorktrees,
   removeWorktree,
-} from '../../../../cli/worktree.js';
+} from '../../../worktree.js';
 
 const mockedGetAllBranches = getAllBranches as Mock;
 const mockedGetRepositoryRoot = getRepositoryRoot as Mock;

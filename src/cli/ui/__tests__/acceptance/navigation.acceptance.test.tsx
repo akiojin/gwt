@@ -11,7 +11,7 @@ import { Window } from 'happy-dom';
 import type { BranchInfo } from '../../types.js';
 
 // Mock git.js and worktree.js
-vi.mock('../../../../cli/git.js', () => ({
+vi.mock('../../../git.js', () => ({
   __esModule: true,
   getAllBranches: vi.fn(),
   getRepositoryRoot: vi.fn(async () => '/repo'),
@@ -23,7 +23,7 @@ const { acceptanceIsProtectedBranchName, acceptanceSwitchToProtectedBranch } = v
   acceptanceSwitchToProtectedBranch: vi.fn(async () => 'none' as const),
 }));
 
-vi.mock('../../../../cli/worktree.js', () => ({
+vi.mock('../../../worktree.js', () => ({
   __esModule: true,
   listAdditionalWorktrees: vi.fn(),
   createWorktree: vi.fn(async () => undefined),
@@ -34,14 +34,14 @@ vi.mock('../../../../cli/worktree.js', () => ({
   switchToProtectedBranch: acceptanceSwitchToProtectedBranch,
 }));
 
-import { getAllBranches, getRepositoryRoot, deleteBranch } from '../../../../cli/git.js';
+import { getAllBranches, getRepositoryRoot, deleteBranch } from '../../../git.js';
 import {
   listAdditionalWorktrees,
   createWorktree,
   generateWorktreePath,
   getMergedPRWorktrees,
   removeWorktree,
-} from '../../../../cli/worktree.js';
+} from '../../../worktree.js';
 
 const mockedGetAllBranches = getAllBranches as Mock;
 const mockedGetRepositoryRoot = getRepositoryRoot as Mock;
