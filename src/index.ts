@@ -38,7 +38,7 @@ import {
 } from "./services/dependency-installer.js";
 
 const ERROR_PROMPT = chalk.yellow(
-  "エラー内容を確認したら Enter キーを押してください。",
+  "Review the error details, then press Enter to continue.",
 );
 
 async function waitForErrorAcknowledgement(): Promise<void> {
@@ -135,9 +135,7 @@ async function runGitStep<T>(
   } catch (error) {
     if (isGitRelatedError(error)) {
       const details = error instanceof Error ? error.message : String(error);
-      printWarning(
-        `Git操作に失敗しました (${description}). エラー: ${details}`,
-      );
+      printWarning(`Git operation failed (${description}). Error: ${details}`);
       await waitForErrorAcknowledgement();
       return { ok: false };
     }
@@ -155,7 +153,7 @@ async function runDependencyInstallStep<T>(
   } catch (error) {
     if (error instanceof DependencyInstallError) {
       const details = error.message ?? "";
-      printError(`${description} に失敗しました。${details}`);
+      printError(`Failed to complete ${description}. ${details}`);
       await waitForErrorAcknowledgement();
       return { ok: false };
     }
@@ -283,7 +281,7 @@ export async function handleAIToolWorkflow(
 
   try {
     // Get repository root
-    const repoRootResult = await runGitStep("リポジトリルートの取得", () =>
+    const repoRootResult = await runGitStep("retrieve repository root", () =>
       getRepositoryRoot(),
     );
     if (!repoRootResult.ok) {
@@ -314,7 +312,7 @@ export async function handleAIToolWorkflow(
         remoteBranch ??
         (branchType === "remote" ? (displayName ?? branch) : null);
       const switchResult = await runGitStep(
-        `保護ブランチ '${branch}' のチェックアウト`,
+        `check out protected branch '${branch}'`,
         () =>
           switchToProtectedBranch({
             branchName: branch,
@@ -344,7 +342,7 @@ export async function handleAIToolWorkflow(
     }
 
     const worktreeResult = await runGitStep(
-      `ワークツリーの準備 (${branch})`,
+      `prepare worktree (${branch})`,
       () => orchestrator.ensureWorktree(branch, repoRoot, ensureOptions),
     );
     if (!worktreeResult.ok) {
@@ -376,7 +374,7 @@ export async function handleAIToolWorkflow(
     printInfo(`Worktree ready: ${worktreePath}`);
 
     const dependencyResult = await runDependencyInstallStep(
-      `依存関係インストール (${branch})`,
+      `dependency installation (${branch})`,
       () => installDependenciesForWorktree(worktreePath),
     );
     if (!dependencyResult.ok) {
@@ -384,16 +382,14 @@ export async function handleAIToolWorkflow(
     }
     if (dependencyResult.value.skipped) {
       printWarning(
-        `${dependencyResult.value.manager} が環境に存在しないため、依存インストールをスキップしました。`,
+        `Package manager '${dependencyResult.value.manager}' is not available in this environment; skipping automatic install.`,
       );
     } else {
-      printInfo(
-        `Dependencies synced via ${dependencyResult.value.manager}.`,
-      );
+      printInfo(`Dependencies synced via ${dependencyResult.value.manager}.`);
     }
 
     // Update remotes and attempt fast-forward pull
-    const fetchResult = await runGitStep("リモートの取得", () =>
+    const fetchResult = await runGitStep("fetch remotes", () =>
       fetchAllRemotes({ cwd: repoRoot }),
     );
     if (!fetchResult.ok) {
@@ -428,7 +424,7 @@ export async function handleAIToolWorkflow(
       divergenceBranches.add(sanitizedRemoteBranch);
     }
 
-    const divergenceResult = await runGitStep("ブランチの差分確認", () =>
+    const divergenceResult = await runGitStep("check branch divergence", () =>
       getBranchDivergenceStatuses({
         cwd: repoRoot,
         branches: Array.from(divergenceBranches),

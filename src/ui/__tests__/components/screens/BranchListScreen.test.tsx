@@ -143,7 +143,7 @@ describe('BranchListScreen', () => {
       }
     });
 
-    expect(getByText(/Git情報を読み込んでいます/i)).toBeDefined();
+    expect(getByText(/Loading Git information/i)).toBeDefined();
   });
 
   it('should display error state', () => {

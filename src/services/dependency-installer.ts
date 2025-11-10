@@ -18,7 +18,10 @@ export interface DependencyInstallResult {
 }
 
 export class DependencyInstallError extends Error {
-  constructor(message: string, public cause?: unknown) {
+  constructor(
+    message: string,
+    public cause?: unknown,
+  ) {
     super(message);
     this.name = "DependencyInstallError";
   }
@@ -65,7 +68,9 @@ async function fileExists(targetPath: string): Promise<boolean> {
 
 export async function detectPackageManager(
   worktreePath: string,
-): Promise<(DependencyInstallResult & { command: [string, ...string[]] }) | null> {
+): Promise<
+  (DependencyInstallResult & { command: [string, ...string[]] }) | null
+> {
   const normalized = path.resolve(worktreePath);
 
   for (const candidate of INSTALL_CANDIDATES) {
@@ -90,9 +95,9 @@ export async function installDependenciesForWorktree(
   if (!detection) {
     throw new DependencyInstallError(
       [
-        "依存関係ロックファイル (bun.lock / pnpm-lock.yaml / package-lock.json) または package.json が見つかりません。",
-        `ワークツリーディレクトリ: ${worktreePath}`,
-        "手動で適切なパッケージマネージャーの install コマンドを実行してください。",
+        "No dependency lockfiles (bun.lock / pnpm-lock.yaml / package-lock.json) or package.json were found.",
+        `Worktree directory: ${worktreePath}`,
+        "Please run the appropriate package-manager install command manually.",
       ].join("\n"),
     );
   }
@@ -114,7 +119,7 @@ export async function installDependenciesForWorktree(
 
     if (code === "ENOENT") {
       console.warn(
-        `パッケージマネージャー '${binary}' が見つからないため自動インストールをスキップします。`,
+        `Package manager '${binary}' was not found; skipping automatic install.`,
       );
       return {
         manager: detection.manager,
@@ -124,8 +129,8 @@ export async function installDependenciesForWorktree(
     }
 
     const messageParts = [
-      `依存関係のインストールに失敗しました (${detection.manager}).`,
-      `実行コマンド: ${binary} ${args.join(" ")}`,
+      `Dependency installation failed (${detection.manager}).`,
+      `Command: ${binary} ${args.join(" ")}`,
     ];
 
     const stderr = (error as { stderr?: string })?.stderr;
