@@ -2,8 +2,8 @@ import { describe, it, expect, vi } from "vitest";
 import {
   resolveBaseBranchRef,
   resolveBaseBranchLabel,
-} from "../../../src/ui/utils/baseBranch.js";
-import type { SelectedBranchState } from "../../../src/ui/types.js";
+} from "../../../src/cli/ui/utils/baseBranch.js";
+import type { SelectedBranchState } from "../../../src/cli/ui/types.js";
 
 const localBranch: SelectedBranchState = {
   name: "feature/feature1",
