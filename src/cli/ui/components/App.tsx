@@ -34,7 +34,7 @@ import {
 const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'];
 const COMPLETION_HOLD_DURATION_MS = 3000;
 const PROTECTED_BRANCH_WARNING =
-  'ルートブランチはワークツリーを作成せず、ルートディレクトリでの作業切替のみ対応します。必要に応じて新しいブランチを作成してください。';
+  'Root branches operate directly in the repository root. Create a new branch if you need a dedicated worktree.';
 
 const getSpinnerFrame = (index: number): string => {
   const frame = SPINNER_FRAMES[index];
@@ -295,7 +295,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     const label = selectedBranch.displayName ?? selectedBranch.name;
     return {
       label,
-      message: `${label} はルートブランチです。ワークツリーを作成せず、ルートディレクトリで切り替えてください。`,
+      message: `${label} is a root branch. Switch within the repository root instead of creating a worktree.`,
     };
   }, [selectedBranch, isProtectedSelection]);
 
@@ -369,7 +369,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
 
     try {
       setCleanupFooterMessage({
-        text: `ルートブランチ '${selectedBranch.displayName ?? selectedBranch.name}' を準備しています...`,
+        text: `Preparing root branch '${selectedBranch.displayName ?? selectedBranch.name}'...`,
         color: 'cyan',
       });
       const repoRoot = await getRepositoryRoot();
@@ -385,11 +385,11 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         remoteRef: remoteRef ?? null,
       });
 
-      let successMessage = `'${selectedBranch.displayName ?? selectedBranch.name}' をルートブランチとして使用します。`;
+      let successMessage = `'${selectedBranch.displayName ?? selectedBranch.name}' will use the repository root.`;
       if (result === 'remote') {
-        successMessage = `'${selectedBranch.displayName ?? selectedBranch.name}' のローカル追跡ブランチを作成し、ルートブランチを切り替えました。`;
+        successMessage = `Created a local tracking branch for '${selectedBranch.displayName ?? selectedBranch.name}' and switched to the protected branch.`;
       } else if (result === 'local') {
-        successMessage = `'${selectedBranch.displayName ?? selectedBranch.name}' をルートディレクトリでチェックアウトしました。`;
+        successMessage = `Checked out '${selectedBranch.displayName ?? selectedBranch.name}' in the repository root.`;
       }
 
       setCleanupFooterMessage({
@@ -402,7 +402,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       const message =
         error instanceof Error ? error.message : String(error);
       setCleanupFooterMessage({
-        text: `ルートブランチ切り替えに失敗しました: ${message}`,
+        text: `Failed to switch root branch: ${message}`,
         color: 'red',
       });
       console.error('Failed to switch protected branch:', error);
@@ -538,7 +538,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
 
     if (targets.length === 0) {
       setCleanupIndicators({});
-      setCleanupFooterMessage({ text: '✅ クリーンアップ対象はありません。', color: 'green' });
+      setCleanupFooterMessage({ text: '✅ Nothing to clean up.', color: 'green' });
       setCleanupInputLocked(false);
       completionTimerRef.current = setTimeout(() => {
         setCleanupFooterMessage(null);

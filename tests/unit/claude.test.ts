@@ -294,7 +294,7 @@ describe("launchClaudeCode - Root User Detection", () => {
       );
       expect(consoleLogSpy).toHaveBeenCalledWith(
         expect.stringContaining(
-          "⚠️  Docker/サンドボックス環境として実行中（IS_SANDBOX=1）",
+          "⚠️  Running as Docker/sandbox environment (IS_SANDBOX=1)",
         ),
       );
     });
@@ -323,7 +323,7 @@ describe("launchClaudeCode - Root User Detection", () => {
       );
       expect(consoleLogSpy).not.toHaveBeenCalledWith(
         expect.stringContaining(
-          "⚠️  Docker/サンドボックス環境として実行中（IS_SANDBOX=1）",
+          "⚠️  Running as Docker/sandbox environment (IS_SANDBOX=1)",
         ),
       );
     });
@@ -352,7 +352,7 @@ describe("launchClaudeCode - Root User Detection", () => {
       );
       expect(consoleLogSpy).not.toHaveBeenCalledWith(
         expect.stringContaining(
-          "⚠️  Docker/サンドボックス環境として実行中（IS_SANDBOX=1）",
+          "⚠️  Running as Docker/sandbox environment (IS_SANDBOX=1)",
         ),
       );
     });

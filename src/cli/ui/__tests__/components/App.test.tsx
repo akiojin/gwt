@@ -72,13 +72,13 @@ describe('App', () => {
       <App onExit={onExit} loadingIndicatorDelay={10} />
     );
 
-    expect(queryByText(/Git情報を読み込んでいます/i)).toBeNull();
+    expect(queryByText(/Loading Git information/i)).toBeNull();
 
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 15));
     });
 
-    expect(getByText(/Git情報を読み込んでいます/i)).toBeDefined();
+    expect(getByText(/Loading Git information/i)).toBeDefined();
   });
 
   it('should show error state when Git data fails to load', () => {

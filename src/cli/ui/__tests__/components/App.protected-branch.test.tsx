@@ -161,7 +161,7 @@ describe('App protected branch handling', () => {
     expect(branchActionProps).not.toHaveLength(0);
     const actionProps = branchActionProps.at(-1);
     expect(actionProps?.mode).toBe('protected');
-    expect(actionProps?.infoMessage).toContain('ルートブランチ');
+    expect(actionProps?.infoMessage).toContain('is a root branch');
     expect(actionProps?.primaryLabel).toBe('Use root branch (no worktree)');
     expect(actionProps?.secondaryLabel).toBe('Create new branch from this branch');
 
