@@ -6,7 +6,7 @@
 
 import type { FastifyInstance } from "fastify";
 import { listBranches, getBranchByName } from "../services/branches.js";
-import type { BranchListResponse, BranchResponse } from "../../../types/api.js";
+import type { ApiResponse, Branch } from "../../../types/api.js";
 
 /**
  * ブランチ関連のルートを登録
@@ -15,7 +15,7 @@ export async function registerBranchRoutes(
   fastify: FastifyInstance,
 ): Promise<void> {
   // GET /api/branches - すべてのブランチ一覧を取得
-  fastify.get<{ Reply: BranchListResponse }>(
+  fastify.get<{ Reply: ApiResponse<Branch[]> }>(
     "/api/branches",
     async (request, reply) => {
       try {
@@ -36,7 +36,7 @@ export async function registerBranchRoutes(
   // GET /api/branches/:branchName - 特定のブランチ情報を取得
   fastify.get<{
     Params: { branchName: string };
-    Reply: BranchResponse;
+    Reply: ApiResponse<Branch>;
   }>("/api/branches/:branchName", async (request, reply) => {
     try {
       const { branchName } = request.params;

@@ -7,8 +7,8 @@
 import type { FastifyInstance } from "fastify";
 import type { PTYManager } from "../pty/manager.js";
 import type {
-  SessionListResponse,
-  SessionResponse,
+  ApiResponse,
+  AIToolSession,
   StartSessionRequest,
 } from "../../../types/api.js";
 
@@ -20,7 +20,7 @@ export async function registerSessionRoutes(
   ptyManager: PTYManager,
 ): Promise<void> {
   // GET /api/sessions - すべてのセッション一覧を取得
-  fastify.get<{ Reply: SessionListResponse }>(
+  fastify.get<{ Reply: ApiResponse<AIToolSession[]> }>(
     "/api/sessions",
     async (request, reply) => {
       try {
@@ -41,7 +41,7 @@ export async function registerSessionRoutes(
   // POST /api/sessions - 新しいセッションを開始
   fastify.post<{
     Body: StartSessionRequest;
-    Reply: SessionResponse;
+    Reply: ApiResponse<AIToolSession>;
   }>("/api/sessions", async (request, reply) => {
     try {
       const { toolType, toolName, mode, worktreePath } = request.body;
@@ -69,7 +69,7 @@ export async function registerSessionRoutes(
   // GET /api/sessions/:sessionId - 特定のセッション情報を取得
   fastify.get<{
     Params: { sessionId: string };
-    Reply: SessionResponse;
+    Reply: ApiResponse<AIToolSession>;
   }>("/api/sessions/:sessionId", async (request, reply) => {
     try {
       const { sessionId } = request.params;

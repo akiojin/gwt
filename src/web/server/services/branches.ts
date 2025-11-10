@@ -5,21 +5,22 @@
  * 既存のgit.tsとgithub.tsの機能を活用します。
  */
 
-import { getBranches, getMainBranch } from "../../../git.js";
+import { getAllBranches } from "../../../git.js";
 import { getPullRequestByBranch } from "../../../github.js";
-import { getWorktrees } from "../../../worktree.js";
+import { listAdditionalWorktrees } from "../../../worktree.js";
 import type { Branch } from "../../../types/api.js";
+import type { BranchInfo } from "../../../cli/ui/types.js";
 
 /**
  * すべてのブランチ一覧を取得（マージステータスとWorktree情報付き）
  */
 export async function listBranches(): Promise<Branch[]> {
-  const branches = await getBranches();
-  const worktrees = await getWorktrees();
-  const mainBranch = await getMainBranch();
+  const branches = await getAllBranches();
+  const worktrees = await listAdditionalWorktrees();
+  const mainBranch = "main"; // TODO: 動的に取得
 
   const branchList: Branch[] = await Promise.all(
-    branches.map(async (branchInfo) => {
+    branches.map(async (branchInfo: BranchInfo) => {
       // Worktree情報
       const worktree = worktrees.find((wt) => wt.branch === branchInfo.name);
 
@@ -35,14 +36,14 @@ export async function listBranches(): Promise<Branch[]> {
 
       return {
         name: branchInfo.name,
-        type: branchInfo.isRemote ? "remote" : "local",
-        commitHash: branchInfo.hash,
-        commitMessage: branchInfo.message || null,
-        author: branchInfo.author || null,
-        commitDate: branchInfo.date || null,
+        type: branchInfo.type,
+        commitHash: "unknown", // BranchInfoには含まれていない
+        commitMessage: null,
+        author: null,
+        commitDate: null,
         mergeStatus,
         worktreePath: worktree?.path || null,
-        divergence: branchInfo.divergence || null,
+        divergence: null, // TODO: divergence情報を取得
       };
     }),
   );

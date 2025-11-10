@@ -12,8 +12,8 @@ import {
   removeWorktree,
 } from "../services/worktrees.js";
 import type {
-  WorktreeListResponse,
-  WorktreeResponse,
+  ApiResponse,
+  Worktree,
   CreateWorktreeRequest,
 } from "../../../types/api.js";
 
@@ -24,7 +24,7 @@ export async function registerWorktreeRoutes(
   fastify: FastifyInstance,
 ): Promise<void> {
   // GET /api/worktrees - すべてのWorktree一覧を取得
-  fastify.get<{ Reply: WorktreeListResponse }>(
+  fastify.get<{ Reply: ApiResponse<Worktree[]> }>(
     "/api/worktrees",
     async (request, reply) => {
       try {
@@ -45,7 +45,7 @@ export async function registerWorktreeRoutes(
   // POST /api/worktrees - 新しいWorktreeを作成
   fastify.post<{
     Body: CreateWorktreeRequest;
-    Reply: WorktreeResponse;
+    Reply: ApiResponse<Worktree>;
   }>("/api/worktrees", async (request, reply) => {
     try {
       const { branchName, createBranch = false } = request.body;

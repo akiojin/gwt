@@ -116,8 +116,11 @@ export class WebSocketHandler {
         this.sendPong(connection);
         break;
       }
-      default:
-        this.sendError(connection, `Unknown message type: ${message.type}`);
+      default: {
+        const unknownMsg = message as { type: string };
+        this.sendError(connection, `Unknown message type: ${unknownMsg.type}`);
+        break;
+      }
     }
   }
 
@@ -137,12 +140,14 @@ export class WebSocketHandler {
    * 終了メッセージを送信
    */
   private sendExit(connection: WebSocket, code: number, signal?: number): void {
+    const exitData: { code: number; signal?: string } = { code };
+    if (signal !== undefined) {
+      exitData.signal = String(signal);
+    }
+
     const message: ExitMessage = {
       type: "exit",
-      data: {
-        code,
-        signal: signal !== undefined ? String(signal) : undefined,
-      },
+      data: exitData,
       timestamp: new Date().toISOString(),
     };
     connection.send(JSON.stringify(message));

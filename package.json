@@ -10,9 +10,9 @@
   "scripts": {
     "build": "bun run build:cli && bun run build:web",
     "build:cli": "tsc",
-    "build:server": "tsc && tsc -p src/web/server/tsconfig.json",
+    "build:server": "tsc",
     "build:client": "vite build src/web/client",
-    "build:web": "bun run build:server && bun run build:client",
+    "build:web": "bun run build:client",
     "dev": "tsc --watch",
     "dev:server": "bun run build:server && bun --watch src/web/server/index.ts",
     "dev:client": "vite src/web/client",

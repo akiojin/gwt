@@ -6,7 +6,8 @@
 
 import type { FastifyInstance } from "fastify";
 import type {
-  ConfigResponse,
+  ApiResponse,
+  CustomAITool,
   UpdateConfigRequest,
 } from "../../../types/api.js";
 
@@ -17,21 +18,24 @@ export async function registerConfigRoutes(
   fastify: FastifyInstance,
 ): Promise<void> {
   // GET /api/config - カスタムAI Tool設定を取得
-  fastify.get<{ Reply: ConfigResponse }>("/api/config", async () => {
-    // TODO: config.jsonから設定を読み込む
-    // 現在は空の配列を返す
-    return {
-      success: true,
-      data: {
-        tools: [],
-      },
-    };
-  });
+  fastify.get<{ Reply: ApiResponse<{ tools: CustomAITool[] }> }>(
+    "/api/config",
+    async () => {
+      // TODO: config.jsonから設定を読み込む
+      // 現在は空の配列を返す
+      return {
+        success: true,
+        data: {
+          tools: [],
+        },
+      };
+    },
+  );
 
   // PUT /api/config - カスタムAI Tool設定を更新
   fastify.put<{
     Body: UpdateConfigRequest;
-    Reply: ConfigResponse;
+    Reply: ApiResponse<{ tools: CustomAITool[] }>;
   }>("/api/config", async (request, reply) => {
     try {
       const { tools } = request.body;
