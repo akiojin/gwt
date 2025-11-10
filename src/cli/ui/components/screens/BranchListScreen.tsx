@@ -72,7 +72,6 @@ export function BranchListScreen({
   stats,
   onSelect,
   onNavigate,
-  onQuit,
   onCleanupCommand,
   onRefresh,
   loading = false,
@@ -87,7 +86,7 @@ export function BranchListScreen({
 
   // Handle keyboard input
   // Note: Select component handles Enter and arrow keys
-  useInput((input, key) => {
+  useInput((input) => {
     if (cleanupUI?.inputLocked) {
       return;
     }

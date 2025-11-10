@@ -26,7 +26,7 @@ describe.skip('Select Component React.memo (T082-2)', () => {
 
   it('should not re-render when items array reference changes but content is the same', () => {
     const onSelect = vi.fn();
-    let renderCount = 0;
+    const renderCount = 0;
 
     // Wrapper component to track renders
     function TestWrapper() {

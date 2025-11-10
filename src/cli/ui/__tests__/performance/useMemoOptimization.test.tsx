@@ -19,7 +19,7 @@ vi.mock('../../hooks/useGitData.js', () => ({
 }));
 
 import { useGitData } from '../../hooks/useGitData.js';
-const mockUseGitData = useGitData as ReturnType<typeof vi.fn>;
+// const mockUseGitData = useGitData as ReturnType<typeof vi.fn>;
 
 // Helper function to create a stable hash of branch data
 function createBranchHash(branches: BranchInfo[]): string {

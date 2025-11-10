@@ -3,7 +3,7 @@
  * Edge case tests for UI components
  */
 import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from 'vitest';
-import { render, waitFor } from '@testing-library/react';
+import { render } from '@testing-library/react';
 import React from 'react';
 import { App } from '../../components/App.js';
 import { BranchListScreen } from '../../components/screens/BranchListScreen.js';

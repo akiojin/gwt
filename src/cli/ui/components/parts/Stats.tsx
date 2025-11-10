@@ -47,7 +47,7 @@ export const Stats = React.memo(function Stats({
 
   return (
     <Box>
-      {items.map((item, index) => (
+      {items.map((item) => (
         <Box key={item.label}>
           <Text dimColor>{item.label}: </Text>
           <Text bold color={item.color}>

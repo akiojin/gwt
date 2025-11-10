@@ -72,7 +72,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
   const { branches, worktrees, loading, error, refresh, lastUpdated } = useGitData({
     enableAutoRefresh: false, // Manual refresh with 'r' key
   });
-  const { currentScreen, navigateTo, goBack, reset } = useScreenState();
+  const { currentScreen, navigateTo, goBack } = useScreenState();
 
   // Version state
   const [version, setVersion] = useState<string | null>(null);
@@ -612,7 +612,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
           ...prev,
           [target.branch]: { icon: '✅', color: 'green' },
         }));
-      } catch (error) {
+      } catch {
         const icon = '❌';
         setCleanupIndicators((prev) => ({
           ...prev,
@@ -646,7 +646,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
 
   // Handle session selection
   const handleSessionSelect = useCallback(
-    (session: string) => {
+    (_session: string) => {
       // TODO: Load selected session and navigate to next screen
       // For now, just go back to branch list
       goBack();

@@ -40,16 +40,17 @@ function generateMockBranches(count: number): BranchItem[] {
   return branches;
 }
 
-const mockStats: Statistics = {
-  total: 0,
-  local: 0,
-  remote: 0,
-  current: 0,
-  feature: 0,
-  hotfix: 0,
-  release: 0,
-  worktree: 0,
-};
+// Unused for now - keeping for potential future use
+// const mockStats: Statistics = {
+//   total: 0,
+//   local: 0,
+//   remote: 0,
+//   current: 0,
+//   feature: 0,
+//   hotfix: 0,
+//   release: 0,
+//   worktree: 0,
+// };
 
 describe('BranchListScreen Performance', () => {
   it('should render 100+ branches within acceptable time', () => {
