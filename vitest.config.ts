@@ -6,7 +6,12 @@ export default defineConfig({
     globals: true,
     environment: "happy-dom",
     setupFiles: ["./vitest.setup.ts"],
-    include: ["tests/**/*.test.ts", "tests/**/*.spec.ts", "src/**/*.test.ts", "src/**/*.test.tsx"],
+    include: [
+      "tests/**/*.test.ts",
+      "tests/**/*.spec.ts",
+      "src/**/*.test.ts",
+      "src/**/*.test.tsx",
+    ],
     exclude: ["node_modules", "dist", "build"],
     coverage: {
       provider: "v8",
@@ -48,5 +53,6 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src"),
       "@tests": path.resolve(__dirname, "./tests"),
     },
+    extensions: [".ts", ".tsx", ".js", ".jsx", ".json"],
   },
 });
