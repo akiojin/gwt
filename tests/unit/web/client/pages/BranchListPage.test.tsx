@@ -205,4 +205,23 @@ describe("BranchListPage", () => {
 
     expect(screen.getByText("hotfix/security")).toBeInTheDocument();
   });
+
+  it("applies divergence filters and dims unmatched nodes", () => {
+    renderPage();
+
+    const aheadFilter = screen.getByRole("button", { name: "Ahead" });
+    fireEvent.click(aheadFilter);
+
+    switchToListView();
+
+    expect(screen.getByText("feature/design-refresh")).toBeInTheDocument();
+    expect(screen.queryByText("hotfix/security")).toBeNull();
+    expect(screen.queryByText("release/v1.0.0")).toBeNull();
+
+    const clearButton = screen.getByRole("button", {
+      name: "divergence ahead のフィルターを解除",
+    });
+    fireEvent.click(clearButton);
+    expect(screen.getByText("hotfix/security")).toBeInTheDocument();
+  });
 });

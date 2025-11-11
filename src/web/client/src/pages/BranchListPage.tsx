@@ -32,6 +32,7 @@ interface PageStateMessage {
 const SEARCH_PLACEHOLDER = "ブランチ名やタイプで検索...";
 
 type ViewMode = "graph" | "list";
+type DivergenceFilter = "ahead" | "behind" | "upToDate";
 
 export function BranchListPage() {
   const { data, isLoading, error } = useBranches();
@@ -39,6 +40,7 @@ export function BranchListPage() {
   const [selectedBranch, setSelectedBranch] = useState<Branch | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("graph");
   const [baseFilter, setBaseFilter] = useState<string | null>(null);
+  const [divergenceFilter, setDivergenceFilter] = useState<DivergenceFilter | null>(null);
 
   const handleBranchSelection = useCallback((branch: Branch) => {
     setSelectedBranch(branch);
@@ -71,6 +73,25 @@ export function BranchListPage() {
 
   const normalizedQuery = query.trim().toLowerCase();
 
+  const matchesDivergence = (branch: Branch) => {
+    if (!divergenceFilter) {
+      return true;
+    }
+    if (!branch.divergence) {
+      return false;
+    }
+    switch (divergenceFilter) {
+      case "upToDate":
+        return Boolean(branch.divergence.upToDate);
+      case "ahead":
+        return (branch.divergence.ahead ?? 0) > 0;
+      case "behind":
+        return (branch.divergence.behind ?? 0) > 0;
+      default:
+        return true;
+    }
+  };
+
   const filteredBranches = useMemo(() => {
     const baseQueryFiltered = branches.filter((branch) => {
       const haystack = [
@@ -85,20 +106,20 @@ export function BranchListPage() {
       return haystack.includes(normalizedQuery);
     });
 
-    if (!baseFilter) {
-      return baseQueryFiltered;
-    }
+    const baseMatched = baseFilter
+      ? baseQueryFiltered.filter((branch) => {
+          if (branch.name === baseFilter) {
+            return true;
+          }
+          if (baseFilter === "detached") {
+            return !branch.baseBranch;
+          }
+          return branch.baseBranch === baseFilter;
+        })
+      : baseQueryFiltered;
 
-    return baseQueryFiltered.filter((branch) => {
-      if (branch.name === baseFilter) {
-        return true;
-      }
-      if (baseFilter === "detached") {
-        return !branch.baseBranch;
-      }
-      return branch.baseBranch === baseFilter;
-    });
-  }, [branches, normalizedQuery, baseFilter]);
+    return baseMatched.filter(matchesDivergence);
+  }, [branches, normalizedQuery, baseFilter, divergenceFilter]);
 
   const pageState: PageStateMessage | null = useMemo(() => {
     if (isLoading) {
@@ -149,6 +170,8 @@ export function BranchListPage() {
             branches={filteredBranches.length ? filteredBranches : branches}
             activeBase={baseFilter}
             onBaseFilterChange={setBaseFilter}
+            activeDivergence={divergenceFilter}
+            onDivergenceFilterChange={setDivergenceFilter}
             onSelectBranch={handleBranchSelection}
           />
         )}
@@ -219,17 +242,30 @@ export function BranchListPage() {
               リストビュー
             </button>
           </div>
-          {baseFilter && (
-            <button
-              type="button"
-              className="filter-pill"
-              onClick={() => setBaseFilter(null)}
-              aria-label={`${baseFilter} のフィルターを解除`}
-            >
-              {baseFilter}
-              <span aria-hidden="true">×</span>
-            </button>
-          )}
+          <div className="filter-pill-group">
+            {baseFilter && (
+              <button
+                type="button"
+                className="filter-pill"
+                onClick={() => setBaseFilter(null)}
+                aria-label={`${baseFilter} のフィルターを解除`}
+              >
+                base: {baseFilter}
+                <span aria-hidden="true">×</span>
+              </button>
+            )}
+            {divergenceFilter && (
+              <button
+                type="button"
+                className="filter-pill"
+                onClick={() => setDivergenceFilter(null)}
+                aria-label={`divergence ${divergenceFilter} のフィルターを解除`}
+              >
+                divergence: {divergenceFilter}
+                <span aria-hidden="true">×</span>
+              </button>
+            )}
+          </div>
         </section>
 
         {pageState ? (

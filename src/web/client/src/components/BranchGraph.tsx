@@ -9,6 +9,8 @@ interface BranchGraphProps {
   onSelectBranch?: (branch: Branch) => void;
   activeBase?: string | null;
   onBaseFilterChange?: (base: string | null) => void;
+  activeDivergence?: DivergenceFilter | null;
+  onDivergenceFilterChange?: (filter: DivergenceFilter | null) => void;
 }
 
 interface CenterNodeDescriptor {
@@ -26,7 +28,14 @@ interface RadialNodeDescriptor {
   isPrimaryOrbit: boolean;
 }
 
+type DivergenceFilter = "ahead" | "behind" | "upToDate";
+
 const PRIMARY_BASES = ["main", "origin/main", "develop", "origin/develop"] as const;
+const DIVERGENCE_FILTERS: { id: DivergenceFilter; label: string }[] = [
+  { id: "ahead", label: "Ahead" },
+  { id: "behind", label: "Behind" },
+  { id: "upToDate", label: "最新" },
+];
 
 function formatBranchLabel(branch: Branch): string {
   return branch.name.length > 32
@@ -50,6 +59,8 @@ export function BranchGraph({
   onSelectBranch,
   activeBase,
   onBaseFilterChange,
+  activeDivergence,
+  onDivergenceFilterChange,
 }: BranchGraphProps) {
   const branchMap = useMemo(() => {
     return new Map(branches.map((branch) => [branch.name, branch]));
@@ -168,6 +179,13 @@ export function BranchGraph({
     [onBaseFilterChange],
   );
 
+  const handleDivergenceChipClick = useCallback(
+    (filter: DivergenceFilter | null) => {
+      onDivergenceFilterChange?.(filter);
+    },
+    [onDivergenceFilterChange],
+  );
+
   return (
     <section className="branch-graph-panel">
       <header className="branch-graph-panel__header">
@@ -210,6 +228,31 @@ export function BranchGraph({
             ))}
           </div>
         )}
+        <div className="branch-graph__filters" role="group" aria-label="差分フィルター">
+          <button
+            type="button"
+            className={`branch-graph__filter ${!activeDivergence ? "is-active" : ""}`}
+            onClick={() => handleDivergenceChipClick(null)}
+            aria-pressed={!activeDivergence}
+          >
+            divergence: ALL
+          </button>
+          {DIVERGENCE_FILTERS.map((option) => (
+            <button
+              key={option.id}
+              type="button"
+              className={`branch-graph__filter ${activeDivergence === option.id ? "is-active" : ""}`}
+              onClick={() =>
+                handleDivergenceChipClick(
+                  activeDivergence === option.id ? null : option.id,
+                )
+              }
+              aria-pressed={activeDivergence === option.id}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
       </header>
 
       <div className="radial-graph">
@@ -218,7 +261,10 @@ export function BranchGraph({
             <RadialBranchNode
               key={node.branch.name}
               node={node}
-              isDimmed={Boolean(activeBase && node.baseLabel !== activeBase)}
+              isDimmed={
+                Boolean(activeBase && node.baseLabel !== activeBase) ||
+                Boolean(activeDivergence && !matchesDivergence(node.branch, activeDivergence))
+              }
               onSelect={handleNodeSelect}
             />
           ))}
@@ -349,4 +395,20 @@ function RadialBranchNode({
       </div>
     </div>
   );
+}
+
+function matchesDivergence(branch: Branch, filter: DivergenceFilter): boolean {
+  if (!branch.divergence) {
+    return false;
+  }
+  if (filter === "upToDate") {
+    return Boolean(branch.divergence.upToDate);
+  }
+  if (filter === "ahead") {
+    return (branch.divergence.ahead ?? 0) > 0;
+  }
+  if (filter === "behind") {
+    return (branch.divergence.behind ?? 0) > 0;
+  }
+  return false;
 }
