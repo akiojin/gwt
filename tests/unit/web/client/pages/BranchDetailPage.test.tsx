@@ -2,6 +2,7 @@ import React from "react";
 import type { Mock } from "vitest";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import type { Branch } from "../../../../../src/types/api.js";
 import { BranchDetailPage } from "../../../../../src/web/client/src/pages/BranchDetailPage.js";
@@ -88,14 +89,20 @@ const baseBranch: Branch = {
   prInfo: null,
 };
 
-const renderPage = () =>
-  render(
-    <MemoryRouter initialEntries={["/feature%2Fdesign-refresh"]}>
-      <Routes>
-        <Route path="/:branchName" element={<BranchDetailPage />} />
-      </Routes>
-    </MemoryRouter>,
+const createTestClient = () => new QueryClient();
+
+const renderPage = () => {
+  const client = createTestClient();
+  return render(
+    <QueryClientProvider client={client}>
+      <MemoryRouter initialEntries={["/feature%2Fdesign-refresh"]}>
+        <Routes>
+          <Route path="/:branchName" element={<BranchDetailPage />} />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
   );
+};
 
 describe("BranchDetailPage", () => {
   beforeEach(() => {
@@ -123,7 +130,7 @@ describe("BranchDetailPage", () => {
     });
 
     mockedUseConfig.mockReturnValue({
-      data: { tools: [] },
+      data: { tools: [], env: {} },
       isLoading: false,
       error: null,
     });
