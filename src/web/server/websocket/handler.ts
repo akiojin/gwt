@@ -5,7 +5,7 @@
  * 仕様: specs/SPEC-d5e56259/contracts/websocket.md
  */
 
-import type { FastifyRequest } from "fastify";
+import type { FastifyRequest, FastifyBaseLogger } from "fastify";
 import type { WebSocket } from "@fastify/websocket";
 import type { PTYManager } from "../pty/manager.js";
 import type {
@@ -24,7 +24,10 @@ import type {
 export class WebSocketHandler {
   private cleanupTimers: Map<string, NodeJS.Timeout> = new Map();
 
-  constructor(private ptyManager: PTYManager) {}
+  constructor(
+    private ptyManager: PTYManager,
+    private logger: FastifyBaseLogger,
+  ) {}
 
   /**
    * WebSocket接続を処理
@@ -45,7 +48,7 @@ export class WebSocketHandler {
       return;
     }
 
-    console.log(
+    this.logger.info(
       `WebSocket connection established for session ${sessionId} (pid=${instance.ptyProcess.pid})`,
     );
 
@@ -88,7 +91,10 @@ export class WebSocketHandler {
 
     // 接続エラー時の処理
     connection.on("error", (error) => {
-      console.error(`WebSocket error for session ${sessionId}:`, error);
+      this.logger.error(
+        { err: error, sessionId },
+        `WebSocket error for session ${sessionId}`,
+      );
       this.ptyManager.updateStatus(
         sessionId,
         "failed",
@@ -100,7 +106,7 @@ export class WebSocketHandler {
     // 接続クローズ時の処理
     connection.on("close", (code, reason) => {
       const reasonText = reason?.toString()?.trim();
-      console.log(
+      this.logger.info(
         `WebSocket closed for session ${sessionId} (code=${code}${reasonText ? `, reason=${reasonText}` : ""})`,
       );
 
@@ -220,7 +226,7 @@ export class WebSocketHandler {
         tracked.session.status === "running" ||
         tracked.session.status === "pending"
       ) {
-        console.warn(
+        this.logger.warn(
           `Auto-cleaning session ${sessionId} after unexpected client disconnect`,
         );
         this.ptyManager.updateStatus(
@@ -240,7 +246,7 @@ export class WebSocketHandler {
     if (timer) {
       clearTimeout(timer);
       this.cleanupTimers.delete(sessionId);
-      console.log(`Cleared cleanup timer for session ${sessionId}`);
+      this.logger.info(`Cleared cleanup timer for session ${sessionId}`);
     }
   }
 }

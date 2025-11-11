@@ -31,7 +31,7 @@ export async function startWebServer(): Promise<void> {
 
   // PTYマネージャーとWebSocketハンドラーを初期化
   const ptyManager = new PTYManager();
-  const wsHandler = new WebSocketHandler(ptyManager);
+  const wsHandler = new WebSocketHandler(ptyManager, fastify.log);
 
   // WebSocketサポートを追加
   await fastify.register(fastifyWebsocket);
