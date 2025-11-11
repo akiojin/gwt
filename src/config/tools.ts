@@ -18,13 +18,13 @@ import { BUILTIN_TOOLS } from "./builtin-tools.js";
 /**
  * ツール設定ファイルのパス
  */
-const WORKTREE_HOME =
+export const WORKTREE_HOME =
   process.env.CLAUDE_WORKTREE_HOME &&
   process.env.CLAUDE_WORKTREE_HOME.trim().length > 0
     ? process.env.CLAUDE_WORKTREE_HOME
     : homedir();
-const CONFIG_DIR = path.join(WORKTREE_HOME, ".claude-worktree");
-const TOOLS_CONFIG_PATH = path.join(CONFIG_DIR, "tools.json");
+export const CONFIG_DIR = path.join(WORKTREE_HOME, ".claude-worktree");
+export const TOOLS_CONFIG_PATH = path.join(CONFIG_DIR, "tools.json");
 const TEMP_CONFIG_PATH = `${TOOLS_CONFIG_PATH}.tmp`;
 
 const DEFAULT_CONFIG: ToolsConfig = {

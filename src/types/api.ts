@@ -73,6 +73,7 @@ export interface EnvironmentVariable {
   key: string;
   value: string;
   lastUpdated?: string | null;
+  importedFromOs?: boolean;
 }
 
 export interface EnvironmentHistoryEntry {

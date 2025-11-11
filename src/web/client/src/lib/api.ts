@@ -9,13 +9,12 @@ import type {
   Branch,
   Worktree,
   AIToolSession,
-  CustomAITool,
   HealthResponse,
   CreateWorktreeRequest,
   StartSessionRequest,
-  UpdateConfigRequest,
   BranchSyncRequest,
   BranchSyncResult,
+  ConfigPayload,
 } from "../../../../types/api.js";
 
 const API_BASE = "/api";
@@ -176,19 +175,10 @@ export const configApi = {
   /**
    * カスタムAI Tool設定を取得
    */
-  get: async (): Promise<{ tools: CustomAITool[] }> => {
-    return apiFetch<{ tools: CustomAITool[] }>(`${API_BASE}/config`);
-  },
-
-  /**
-   * カスタムAI Tool設定を更新
-   */
-  update: async (
-    request: UpdateConfigRequest,
-  ): Promise<{ tools: CustomAITool[] }> => {
-    return apiFetch<{ tools: CustomAITool[] }>(`${API_BASE}/config`, {
+  get: async (): Promise<ConfigPayload> => apiFetch(`${API_BASE}/config`),
+  update: async (request: ConfigPayload): Promise<ConfigPayload> =>
+    apiFetch(`${API_BASE}/config`, {
       method: "PUT",
       body: JSON.stringify(request),
-    });
-  },
+    }),
 };

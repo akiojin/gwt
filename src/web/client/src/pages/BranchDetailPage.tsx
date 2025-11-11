@@ -172,12 +172,12 @@ export function BranchDetailPage() {
   );
   const isSyncingBranch = syncBranch.isPending;
 
-  const customTools = config?.tools ?? [];
+  const customTools: CustomAITool[] = config?.tools ?? [];
   const availableTools: SelectableTool[] = useMemo(
     () => [
       { id: "claude-code", label: "Claude Code", target: "claude" },
       { id: "codex-cli", label: "Codex CLI", target: "codex" },
-      ...customTools.map((tool) => ({
+      ...customTools.map((tool): SelectableTool => ({
         id: tool.id,
         label: tool.displayName,
         target: "custom" as const,
