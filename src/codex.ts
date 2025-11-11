@@ -25,6 +25,7 @@ export async function launchCodexCLI(
     mode?: "normal" | "continue" | "resume";
     extraArgs?: string[];
     bypassApprovals?: boolean;
+    envOverrides?: Record<string, string>;
   } = {},
 ): Promise<void> {
   const terminal = getTerminalStreams();
@@ -58,6 +59,8 @@ export async function launchCodexCLI(
     terminal.exitRawMode();
 
     const childStdio = createChildStdio();
+
+    const env = { ...process.env, ...(options.envOverrides ?? {}) };
 
     try {
       const resolverOptions: {

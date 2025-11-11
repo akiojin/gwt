@@ -17,6 +17,7 @@ import { dirname, join } from "node:path";
 import { PTYManager } from "./pty/manager.js";
 import { WebSocketHandler } from "./websocket/handler.js";
 import { registerRoutes } from "./routes/index.js";
+import { importOsEnvIntoSharedConfig } from "./env/importer.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -48,6 +49,7 @@ export async function startWebServer(): Promise<void> {
   });
 
   // REST APIルートを登録
+  await importOsEnvIntoSharedConfig();
   await registerRoutes(fastify, ptyManager);
 
   // 静的ファイル配信（Viteビルド成果物）

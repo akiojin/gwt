@@ -27,15 +27,22 @@ export async function launchCustomAITool(
   options: LaunchOptions = {},
 ): Promise<void> {
   const execution = await prepareCustomToolExecution(tool, options);
+  const mergedEnvSources = {
+    ...(options.sharedEnv ?? {}),
+    ...(execution.env ?? {}),
+  };
   const childEnv =
-    execution.env && Object.keys(execution.env).length > 0
-      ? { ...process.env, ...execution.env }
+    Object.keys(mergedEnvSources).length > 0
+      ? ({ ...process.env, ...mergedEnvSources } as NodeJS.ProcessEnv)
       : undefined;
 
-  await execa(execution.command, execution.args, {
-    stdio: "inherit",
+  // execa共通オプション（cwdがundefinedの場合は含めない）
+  const execaOptions = {
+    stdio: "inherit" as const,
     ...(options.cwd ? { cwd: options.cwd } : {}),
     ...(childEnv ? { env: childEnv } : {}),
-  });
+  };
+
+  await execa(execution.command, execution.args, execaOptions);
 }
 export { resolveCommandPath as resolveCommand };

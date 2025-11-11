@@ -7,6 +7,7 @@ import {
   resolveClaudeCommand,
   AIToolResolutionError,
   type ResolvedCommand,
+  CLAUDE_CLI_PACKAGE,
 } from "./services/aiToolResolver.js";
 export class ClaudeError extends Error {
   constructor(
@@ -24,6 +25,7 @@ export async function launchClaudeCode(
     skipPermissions?: boolean;
     mode?: "normal" | "continue" | "resume";
     extraArgs?: string[];
+    envOverrides?: Record<string, string>;
   } = {},
 ): Promise<void> {
   const terminal = getTerminalStreams();
@@ -85,6 +87,12 @@ export async function launchClaudeCode(
     }
 
     terminal.exitRawMode();
+
+    const baseEnv = {
+      ...process.env,
+      ...(options.envOverrides ?? {}),
+    };
+
     const childStdio = createChildStdio();
 
     try {
@@ -96,9 +104,7 @@ export async function launchClaudeCode(
         );
       } else {
         console.log(
-          chalk.cyan(
-            "   🔄 Falling back to bunx @anthropic-ai/claude-code@latest",
-          ),
+          chalk.cyan(`   🔄 Falling back to bunx ${CLAUDE_CLI_PACKAGE}`),
         );
         console.log(
           chalk.yellow(
@@ -122,9 +128,10 @@ export async function launchClaudeCode(
         await new Promise((resolve) => setTimeout(resolve, 2000));
       }
 
-      const env = lastResolvedCommand.env
-        ? { ...lastResolvedCommand.env }
-        : { ...process.env };
+      const env = {
+        ...baseEnv,
+        ...(lastResolvedCommand.env ?? {}),
+      };
       if (isRoot && options.skipPermissions) {
         env.IS_SANDBOX = "1";
       }

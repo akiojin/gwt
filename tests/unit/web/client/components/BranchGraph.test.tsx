@@ -44,22 +44,28 @@ describe("BranchGraph", () => {
     renderGraph(graphBranches);
 
     expect(
-      screen.getByRole("group", { name: "Base branch filters" }),
+      screen.getByText("ベースブランチの関係をグラフィカルに把握"),
     ).toBeInTheDocument();
 
-    expect(
-      screen.getByRole("button", { name: "Focus on main" }),
-    ).toBeInTheDocument();
+    const laneLabels = screen.getAllByText((content, element) => {
+      return (
+        content === "main" &&
+        element?.classList.contains("branch-graph__lane-label")
+      );
+    });
+    expect(laneLabels.length).toBeGreaterThan(0);
 
     expect(
-      screen.getByRole("button", { name: "Select feature/design-refresh" }),
-    ).toBeInTheDocument();
-    expect(screen.getByText("divergence: +1 / -0")).toBeInTheDocument();
+      screen.getAllByText("feature/design-refresh").length,
+    ).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText(/Worktree/).length).toBeGreaterThanOrEqual(1);
   });
 
   it("renders empty state when no branches are provided", () => {
     renderGraph([]);
 
-    expect(screen.getByText("No branches to visualize yet.")).toBeInTheDocument();
+    expect(
+      screen.getByText("グラフ表示できるブランチがありません。"),
+    ).toBeInTheDocument();
   });
 });

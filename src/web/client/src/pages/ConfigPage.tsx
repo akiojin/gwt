@@ -1,6 +1,9 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import type { CustomAITool } from "../../../../types/api.js";
+import type {
+  CustomAITool,
+  EnvironmentVariable,
+} from "../../../../types/api.js";
 import { useConfig, useUpdateConfig } from "../hooks/useConfig";
 import { CustomToolList } from "../components/CustomToolList";
 import { CustomToolForm, type CustomToolFormValue } from "../components/CustomToolForm";
@@ -31,10 +34,10 @@ export function ConfigPage() {
     if (data?.tools) {
       setTools(data.tools);
     }
-    if (data?.env) {
-      setEnvEntries(entriesFromRecord(data.env));
+    if (data) {
+      setEnvEntries(entriesFromVariables(data.env));
     }
-  }, [data?.tools, data?.env]);
+  }, [data]);
 
   const sortedTools = useMemo(() => {
     return [...tools].sort((a, b) => a.displayName.localeCompare(b.displayName, "ja"));
@@ -94,20 +97,21 @@ export function ConfigPage() {
     successMessage: string,
     options?: { resetToolForm?: boolean },
   ) => {
-    let envPayload: Record<string, string>;
+    let envPayload: EnvironmentVariable[];
     try {
-      envPayload = buildEnvRecord(nextEnvEntries);
+      envPayload = buildEnvVariables(nextEnvEntries);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setBanner({ type: "error", message });
       return;
     }
 
+    const nextVersion = data?.version ?? "1.0.0";
     updateConfig
-      .mutateAsync({ tools: nextTools, env: envPayload })
+      .mutateAsync({ version: nextVersion, tools: nextTools, env: envPayload })
       .then((response) => {
         setTools(response.tools);
-        setEnvEntries(entriesFromRecord(response.env ?? {}));
+        setEnvEntries(entriesFromVariables(response.env));
         setBanner({ type: "success", message: successMessage });
         if (options?.resetToolForm ?? true) {
           setEditingTool(undefined);
@@ -278,14 +282,28 @@ function createEnvEntryId(seed?: string): string {
   return `${seed ?? "env"}-${random}${timestamp}`;
 }
 
-function entriesFromRecord(record: Record<string, string>): EnvEntry[] {
-  return Object.entries(record)
-    .sort(([a], [b]) => a.localeCompare(b, "en"))
-    .map(([key, value]) => createEnvEntry({ key, value }));
+function entriesFromVariables(
+  variables?: EnvironmentVariable[] | null,
+): EnvEntry[] {
+  if (!variables || variables.length === 0) {
+    return [];
+  }
+
+  return [...variables]
+    .sort((a, b) => a.key.localeCompare(b.key, "en"))
+    .map((variable) =>
+      createEnvEntry({
+        key: variable.key,
+        value: variable.value,
+      }),
+    );
 }
 
-function buildEnvRecord(entries: EnvEntry[]): Record<string, string> {
-  const result: Record<string, string> = {};
+function buildEnvVariables(entries: EnvEntry[]): EnvironmentVariable[] {
+  const result: EnvironmentVariable[] = [];
+  const seen = new Set<string>();
+  const timestamp = new Date().toISOString();
+
   for (const entry of entries) {
     const key = entry.key.trim();
     const value = entry.value;
@@ -311,10 +329,17 @@ function buildEnvRecord(entries: EnvEntry[]): Record<string, string> {
     if (value.length > ENV_VALUE_MAX) {
       throw new Error(`${key} の値は最大${ENV_VALUE_MAX}文字です。`);
     }
-    if (result[key] !== undefined) {
+    if (seen.has(key)) {
       throw new Error(`環境変数キー "${key}" が重複しています。`);
     }
-    result[key] = value;
+    seen.add(key);
+
+    result.push({
+      key,
+      value,
+      lastUpdated: timestamp,
+    });
   }
+
   return result;
 }
