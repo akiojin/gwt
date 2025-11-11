@@ -4,7 +4,7 @@ import type {
   PullRequest,
   MergedPullRequest,
   GitHubPRResponse,
-} from "./ui/types.js";
+} from "./cli/ui/types.js";
 
 /**
  * GitHub CLIがインストールされているかを確認
@@ -28,7 +28,7 @@ export async function getMergedPullRequests(): Promise<MergedPullRequest[]> {
     // リモート情報を更新してから マージ済みPR を取得
     try {
       await execa("git", ["fetch", "--all", "--prune"]);
-    } catch (fetchError) {
+    } catch {
       if (process.env.DEBUG_CLEANUP) {
         console.log(
           chalk.yellow(
@@ -138,7 +138,7 @@ export async function getPullRequestByBranch(
       mergedAt: pr.mergedAt,
       author: pr.author?.login || "unknown",
     };
-  } catch (error) {
+  } catch {
     return null;
   }
 }

@@ -1,6 +1,6 @@
 import { execa } from "execa";
 import chalk from "chalk";
-import type { GitHubPRResponse } from "../ui/types.js";
+import type { GitHubPRResponse } from "../cli/ui/types.js";
 
 /**
  * GitHub CLI操作のための低レベルRepository

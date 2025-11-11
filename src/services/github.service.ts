@@ -1,5 +1,5 @@
 import { GitHubRepository } from "../repositories/github.repository.js";
-import type { PullRequest, MergedPullRequest } from "../ui/types.js";
+import type { PullRequest, MergedPullRequest } from "../cli/ui/types.js";
 
 /**
  * GitHub操作のビジネスロジックを管理するService

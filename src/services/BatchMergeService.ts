@@ -4,7 +4,7 @@ import type {
   BatchMergeResult,
   BranchMergeStatus,
   BatchMergeSummary,
-} from "../ui/types";
+} from "../cli/ui/types";
 import * as git from "../git";
 import * as worktree from "../worktree";
 
@@ -34,7 +34,7 @@ export class BatchMergeService {
       return "master";
     }
 
-    throw new Error("マージ元ブランチを特定できません");
+    throw new Error("Unable to determine source branch");
   }
 
   /**

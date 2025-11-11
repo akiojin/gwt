@@ -88,9 +88,16 @@ describe("main error handling", () => {
       render: renderSpy,
     }));
 
-    viWithDoMock.doMock?.("react", () => ({
-      createElement: <P>(type: unknown, props: P) => ({ type, props }),
-    }));
+    viWithDoMock.doMock?.("react", () => {
+      const createElement = <P>(type: unknown, props: P) => ({ type, props });
+      const memo = <P>(component: P) => component;
+      return {
+        default: { createElement, memo },
+        createElement,
+        memo,
+        Component: class Component {},
+      };
+    });
 
     viWithDoMock.doMock?.("../../src/ui/components/App.js", () => ({
       App: (props: unknown) => props,

@@ -113,24 +113,26 @@ export async function launchCodexCLI(
       if (lastResolvedCommand && !lastResolvedCommand.usesFallback) {
         console.error(
           chalk.yellow(
-            "   1. Codex CLI がインストールされ codex コマンドが利用可能か確認",
+            "   1. Confirm that Codex CLI is installed and the 'codex' command is on PATH",
           ),
         );
         console.error(
-          chalk.yellow('   2. "codex --help" を実行してセットアップを確認'),
+          chalk.yellow('   2. Run "codex --help" to verify the setup'),
         );
       } else {
         console.error(
-          chalk.yellow("   1. Bun がインストールされ bunx が利用可能か確認"),
+          chalk.yellow(
+            "   1. Confirm that Bun is installed and bunx is available",
+          ),
         );
         console.error(
           chalk.yellow(
-            '   2. "bunx @openai/codex@latest -- --help" を実行してセットアップを確認',
+            '   2. Run "bunx @openai/codex@latest -- --help" to verify the setup',
           ),
         );
       }
       console.error(
-        chalk.yellow("   3. ターミナルやIDEを再起動して PATH を更新"),
+        chalk.yellow("   3. Restart your terminal or IDE to refresh PATH"),
       );
     }
 

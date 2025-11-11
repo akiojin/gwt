@@ -25,7 +25,7 @@ export interface ChildStdio {
 }
 
 const DEFAULT_ACK_MESSAGE =
-  "エラー内容を確認したら Enter キーを押してください...";
+  "Review the error details, then press Enter to continue...";
 
 function isProcessTTY(): boolean {
   return Boolean(

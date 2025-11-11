@@ -77,7 +77,7 @@ export async function launchClaudeCode(
       if (isRoot) {
         console.log(
           chalk.yellow(
-            "   ⚠️  Docker/サンドボックス環境として実行中（IS_SANDBOX=1）",
+            "   ⚠️  Running as Docker/sandbox environment (IS_SANDBOX=1)",
           ),
         );
       }
@@ -179,24 +179,26 @@ export async function launchClaudeCode(
       if (lastResolvedCommand && !lastResolvedCommand.usesFallback) {
         console.error(
           chalk.yellow(
-            "   1. Claude Code がインストールされ claude コマンドが利用可能か確認",
+            "   1. Confirm that Claude Code is installed and the 'claude' command is on PATH",
           ),
         );
         console.error(
-          chalk.yellow('   2. "claude --version" を実行してセットアップを確認'),
+          chalk.yellow('   2. Run "claude --version" to verify the setup'),
         );
       } else {
         console.error(
-          chalk.yellow("   1. Bun がインストールされ bunx が利用可能か確認"),
+          chalk.yellow(
+            "   1. Confirm that Bun is installed and bunx is available",
+          ),
         );
         console.error(
           chalk.yellow(
-            '   2. "bunx @anthropic-ai/claude-code@latest -- --version" を実行してセットアップを確認',
+            '   2. Run "bunx @anthropic-ai/claude-code@latest -- --version" to verify the setup',
           ),
         );
       }
       console.error(
-        chalk.yellow("   3. ターミナルやIDEを再起動して PATH を更新"),
+        chalk.yellow("   3. Restart your terminal or IDE to refresh PATH"),
       );
     }
 
@@ -205,5 +207,4 @@ export async function launchClaudeCode(
     terminal.exitRawMode();
   }
 }
-
 export { isClaudeCodeAvailable } from "./services/aiToolResolver.js";
