@@ -94,8 +94,11 @@ export class WebSocketHandler {
     });
 
     // 接続クローズ時の処理
-    connection.on("close", () => {
-      console.log(`WebSocket closed for session ${sessionId}`);
+    connection.on("close", (code, reason) => {
+      const reasonText = reason?.toString()?.trim();
+      console.log(
+        `WebSocket closed for session ${sessionId} (code=${code}${reasonText ? `, reason=${reasonText}` : ""})`,
+      );
 
       if (hasExited) {
         return;
