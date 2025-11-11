@@ -419,14 +419,15 @@ export function BranchGraph({
               const resolvedPosition =
                 nodePositions[node.branch.name] ?? defaultPositions[node.branch.name] ?? { x: 0, y: 0 };
               const center = orbitSize / 2;
+              const baseCenter = baseCenterPosition(centerNodes, node.baseLabel, center);
               const dimmed =
                 Boolean(activeBase && node.baseLabel !== activeBase) ||
                 Boolean(activeDivergence && !matchesDivergence(node.branch, activeDivergence));
               return (
                 <line
                   key={`line-${node.branch.name}`}
-                  x1={center}
-                  y1={center}
+                  x1={baseCenter.x}
+                  y1={baseCenter.y}
                   x2={center + resolvedPosition.x}
                   y2={center + resolvedPosition.y}
                   className={`radial-graph__connection ${dimmed ? "is-dimmed" : ""}`}
@@ -602,4 +603,24 @@ function matchesDivergence(branch: Branch, filter: DivergenceFilter): boolean {
     return (branch.divergence.behind ?? 0) > 0;
   }
   return false;
+}
+
+function baseCenterPosition(
+  centers: CenterNodeDescriptor[],
+  baseLabel: string,
+  fallback: number,
+): { x: number; y: number } {
+  const center = centers.find((c) => c.label === baseLabel);
+  if (!center) {
+    return { x: fallback, y: fallback };
+  }
+
+  // distribute core slots evenly in circle (simple heuristic)
+  const index = centers.indexOf(center);
+  const angle = (index / centers.length) * 2 * Math.PI;
+  const radius = 40;
+  return {
+    x: fallback + radius * Math.cos(angle),
+    y: fallback + radius * Math.sin(angle),
+  };
 }
