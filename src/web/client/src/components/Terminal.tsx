@@ -22,6 +22,14 @@ export function Terminal({ sessionId, onExit, onError }: TerminalProps) {
   const xtermRef = useRef<XTerm | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const wsRef = useRef<PTYWebSocket | null>(null);
+  const onExitRef = useRef(onExit);
+  const onErrorRef = useRef(onError);
+
+  // Keep refs up to date
+  useEffect(() => {
+    onExitRef.current = onExit;
+    onErrorRef.current = onError;
+  }, [onExit, onError]);
 
   useEffect(() => {
     if (!terminalRef.current) {
@@ -74,11 +82,11 @@ export function Terminal({ sessionId, onExit, onError }: TerminalProps) {
       },
       onExit: (code) => {
         xterm.write(`\r\n\r\n[Process exited with code ${code}]\r\n`);
-        onExit?.(code);
+        onExitRef.current?.(code);
       },
       onError: (message) => {
         xterm.write(`\r\n\r\n[Error: ${message}]\r\n`);
-        onError?.(message);
+        onErrorRef.current?.(message);
       },
       onOpen: () => {
         xterm.write("Connected to session...\r\n");
@@ -121,7 +129,7 @@ export function Terminal({ sessionId, onExit, onError }: TerminalProps) {
       ws.disconnect();
       xterm.dispose();
     };
-  }, [sessionId, onExit, onError]);
+  }, [sessionId]);
 
   return (
     <div
