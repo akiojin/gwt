@@ -198,7 +198,7 @@ describe("BranchListPage", () => {
     switchToListView();
 
     expect(screen.getByText("feature/design-refresh")).toBeInTheDocument();
-    expect(screen.queryByText("hotfix/security")).toBeNull();
+    expect(screen.getByText("hotfix/security")).toBeInTheDocument();
 
     const clearFilter = screen.getByRole("button", { name: "main のフィルターを解除" });
     fireEvent.click(clearFilter);

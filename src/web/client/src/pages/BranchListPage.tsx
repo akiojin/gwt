@@ -34,6 +34,13 @@ const SEARCH_PLACEHOLDER = "ブランチ名やタイプで検索...";
 type ViewMode = "graph" | "list";
 type DivergenceFilter = "ahead" | "behind" | "upToDate";
 
+function canonicalName(name?: string | null): string | null {
+  if (!name) {
+    return null;
+  }
+  return name.replace(/^origin\//, "");
+}
+
 export function BranchListPage() {
   const { data, isLoading, error } = useBranches();
   const [query, setQuery] = useState("");
@@ -108,13 +115,14 @@ export function BranchListPage() {
 
     const baseMatched = baseFilter
       ? baseQueryFiltered.filter((branch) => {
-          if (branch.name === baseFilter) {
+          const canonicalBranchName = canonicalName(branch.name);
+          if (canonicalBranchName === baseFilter) {
             return true;
           }
           if (baseFilter === "detached") {
-            return !branch.baseBranch;
+            return !canonicalName(branch.baseBranch);
           }
-          return branch.baseBranch === baseFilter;
+          return canonicalName(branch.baseBranch) === baseFilter;
         })
       : baseQueryFiltered;
 

@@ -41,10 +41,19 @@ const MIN_PRIMARY_RADIUS = 200;
 const MAX_PRIMARY_RADIUS = 360;
 const SECONDARY_RING_OFFSET = 100;
 
+function canonicalName(name?: string | null): string | null {
+  if (!name) {
+    return null;
+  }
+  return name.replace(/^origin\//, "");
+}
+
 function formatBranchLabel(branch: Branch): string {
-  return branch.name.length > 32
-    ? `${branch.name.slice(0, 29)}...`
-    : branch.name;
+  const canonical = canonicalName(branch.name);
+  const label = canonical ?? branch.name;
+  return label.length > 32
+    ? `${label.slice(0, 29)}...`
+    : label;
 }
 
 function getDivergenceLabel(branch: Branch): string {
@@ -69,53 +78,84 @@ export function BranchGraph({
   const orbitRef = useRef<HTMLDivElement | null>(null);
   const [nodePositions, setNodePositions] = useState<Record<string, { x: number; y: number }>>({});
   const [draggingNode, setDraggingNode] = useState<string | null>(null);
-  const branchMap = useMemo(() => {
-    return new Map(branches.map((branch) => [branch.name, branch]));
+  const normalizedBranches = useMemo(() => {
+    const map = new Map<string, Branch>();
+    branches.forEach((branch) => {
+      const key = canonicalName(branch.name) ?? branch.name;
+      const existing = map.get(key);
+      if (!existing) {
+        map.set(key, branch);
+      } else if (existing.type === "remote" && branch.type !== "remote") {
+        map.set(key, branch);
+      }
+    });
+    return Array.from(map.values());
   }, [branches]);
+
+  const branchMap = useMemo(() => {
+    return new Map(
+      normalizedBranches.map((branch) => [canonicalName(branch.name) ?? branch.name, branch]),
+    );
+  }, [normalizedBranches]);
 
   const referencedBases = useMemo(() => {
     const baseSet = new Set<string>();
-    branches.forEach((branch) => {
-      if (branch.baseBranch) {
-        baseSet.add(branch.baseBranch);
+    normalizedBranches.forEach((branch) => {
+      const canonicalBase = canonicalName(branch.baseBranch);
+      if (canonicalBase) {
+        baseSet.add(canonicalBase);
       }
     });
     return baseSet;
-  }, [branches]);
+  }, [normalizedBranches]);
 
   const { centerNodes, radialNodes, primaryRadius, secondaryRadius } = useMemo(() => {
     const centers: CenterNodeDescriptor[] = [];
+    const centerIds = new Set<string>();
 
     PRIMARY_BASES.forEach((base) => {
-      const branch = branchMap.get(base) ?? null;
-      if (branch || referencedBases.has(base)) {
+      const canonical = canonicalName(base) ?? base;
+      if (centerIds.has(canonical)) {
+        return;
+      }
+      const branch = branchMap.get(canonical) ?? null;
+      if (branch || referencedBases.has(canonical)) {
         centers.push({
-          id: base,
-          label: base,
+          id: canonical,
+          label: canonical,
           branch,
           isSynthetic: !branch,
         });
+        centerIds.add(canonical);
       }
     });
 
-    if (!centers.length && branches.length) {
+    if (!centers.length && normalizedBranches.length) {
       const fallback =
-        branches.find((branch) => /main|develop/i.test(branch.name)) ?? branches[0];
+        normalizedBranches.find((branch) => /main|develop/i.test(branch.name)) ?? normalizedBranches[0];
       if (fallback) {
-        centers.push({
-          id: fallback.name,
-          label: fallback.name,
+        const canonical = canonicalName(fallback.name) ?? fallback.name;
+        if (!centerIds.has(canonical)) {
+          centers.push({
+          id: canonical,
+          label: canonical,
           branch: fallback,
           isSynthetic: false,
         });
+          centerIds.add(canonical);
+        }
       }
     }
 
-    const centerNames = new Set(centers.map((center) => center.branch?.name ?? center.label));
-    const orbitalBranches = branches.filter((branch) => !centerNames.has(branch.name));
+    const centerNames = new Set(centers.map((center) => center.label));
+    const orbitalBranches = normalizedBranches.filter((branch) => {
+      const canonical = canonicalName(branch.name) ?? branch.name;
+      return !centerNames.has(canonical);
+    });
 
     const grouped = orbitalBranches.reduce<Map<string, Branch[]>>((map, branch) => {
-      const base = branch.baseBranch ?? UNKNOWN_BASE;
+      const canonicalBase = canonicalName(branch.baseBranch);
+      const base = canonicalBase ?? (branch.baseBranch ? branch.baseBranch : UNKNOWN_BASE);
       if (!map.has(base)) {
         map.set(base, []);
       }
@@ -163,7 +203,7 @@ export function BranchGraph({
       primaryRadius: computedPrimaryRadius,
       secondaryRadius: computedSecondaryRadius,
     };
-  }, [branches, branchMap, referencedBases]);
+  }, [normalizedBranches, branchMap, referencedBases]);
 
   const defaultPositions = useMemo(() => {
     const map: Record<string, { x: number; y: number }> = {};
@@ -209,7 +249,7 @@ export function BranchGraph({
     return Array.from(labels).sort((a, b) => a.localeCompare(b, "ja"));
   }, [radialNodes]);
 
-  if (!branches.length) {
+  if (!normalizedBranches.length) {
     return (
       <section className="branch-graph-panel">
         <div className="branch-graph-panel__empty">
@@ -324,7 +364,7 @@ export function BranchGraph({
             </button>
             {baseFilters.map((base) => (
               <button
-                key={base}
+                key={`base-filter-${base}`}
                 type="button"
                 className={`branch-graph__filter ${activeBase === base ? "is-active" : ""}`}
                 onClick={() => handleBaseChipClick(activeBase === base ? null : base)}
@@ -529,7 +569,7 @@ function RadialBranchNode({
       <div className="radial-node__content">
         <span className="radial-node__label">{formatBranchLabel(node.branch)}</span>
         <span className="radial-node__meta">
-          {node.branch.baseBranch ?? "ベース不明"}
+          {canonicalName(node.branch.baseBranch) ?? node.branch.baseBranch ?? "ベース不明"}
         </span>
         <div className="radial-node__tooltip">
           <p>{node.branch.name}</p>
