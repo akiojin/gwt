@@ -159,8 +159,19 @@ export function BranchDetailPage() {
       );
   }
 
+  const PROTECTED_BRANCHES = ["main", "master", "develop"];
+  const isProtectedBranch = PROTECTED_BRANCHES.includes(
+    branch.name.replace(/^origin\//, ""),
+  );
   const canStartSession = Boolean(branch.worktreePath);
   const handleCreateWorktree = async () => {
+    if (isProtectedBranch) {
+      setBanner({
+        type: "error",
+        message: `Cannot create worktree for protected branch: ${branch.name}. Protected branches must remain in the main repository.`,
+      });
+      return;
+    }
     try {
       await createWorktree.mutateAsync({
         branchName: branch.name,
@@ -248,7 +259,12 @@ export function BranchDetailPage() {
               type="button"
               className="button button--primary"
               onClick={handleCreateWorktree}
-              disabled={createWorktree.isPending}
+              disabled={createWorktree.isPending || isProtectedBranch}
+              title={
+                isProtectedBranch
+                  ? "Cannot create worktree for protected branches (main, develop, master)"
+                  : undefined
+              }
             >
               {createWorktree.isPending ? "Creating..." : "Create worktree"}
             </button>

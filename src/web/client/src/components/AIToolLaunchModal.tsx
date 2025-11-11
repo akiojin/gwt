@@ -138,6 +138,10 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
     return { command: selectedToolSummary.command, args };
   }, [selectedToolSummary, selectedMode, skipPermissions, extraArgsText]);
 
+  const PROTECTED_BRANCHES = ["main", "master", "develop"];
+  const isProtectedBranch = PROTECTED_BRANCHES.includes(
+    branch.name.replace(/^origin\//, ""),
+  );
   const divergenceInfo = branch.divergence ?? null;
   const hasBlockingDivergence = Boolean(
     divergenceInfo && divergenceInfo.ahead > 0 && divergenceInfo.behind > 0,
@@ -164,6 +168,13 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
   };
 
   const handleCreateWorktree = async () => {
+    if (isProtectedBranch) {
+      setBanner({
+        type: "error",
+        message: `Cannot create worktree for protected branch: ${branch.name}. Protected branches (main, develop, master) must remain in the main repository.`,
+      });
+      return;
+    }
     setIsCreatingWorktree(true);
     try {
       await createWorktree.mutateAsync({ branchName: branch.name, createBranch: false });
@@ -276,16 +287,27 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
         )}
 
         {!branch.worktreePath && (
-          <div className="inline-banner inline-banner--warning">
-            <p>Worktree is missing. Create it before launching AI tools.</p>
-            <button
-              type="button"
-              className="button button--secondary"
-              onClick={handleCreateWorktree}
-              disabled={isCreatingWorktree}
-            >
-              {isCreatingWorktree ? "Creating..." : "Create worktree"}
-            </button>
+          <div
+            className={`inline-banner inline-banner--${isProtectedBranch ? "error" : "warning"}`}
+          >
+            {isProtectedBranch ? (
+              <p>
+                Cannot create worktree for protected branches (main, develop, master).
+                Protected branches must remain in the main repository.
+              </p>
+            ) : (
+              <>
+                <p>Worktree is missing. Create it before launching AI tools.</p>
+                <button
+                  type="button"
+                  className="button button--secondary"
+                  onClick={handleCreateWorktree}
+                  disabled={isCreatingWorktree}
+                >
+                  {isCreatingWorktree ? "Creating..." : "Create worktree"}
+                </button>
+              </>
+            )}
           </div>
         )}
 

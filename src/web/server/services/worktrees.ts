@@ -52,6 +52,13 @@ export async function createNewWorktree(
   branchName: string,
   createBranch: boolean,
 ): Promise<Worktree> {
+  // 保護ブランチのチェック
+  if (isProtectedBranchName(branchName)) {
+    throw new Error(
+      `Cannot create worktree for protected branch: ${branchName}. Protected branches (main, develop, master) must remain in the main repository.`,
+    );
+  }
+
   const { getRepositoryRoot, getCurrentBranch } = await import(
     "../../../git.js"
   );
