@@ -865,6 +865,21 @@ button {
   border: 1px dashed rgba(148, 163, 184, 0.35);
 }
 
+.radial-graph__connections {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.radial-graph__connection {
+  stroke: rgba(148, 163, 184, 0.35);
+  stroke-width: 2px;
+}
+
+.radial-graph__connection.is-dimmed {
+  stroke-opacity: 0.15;
+}
+
 .radial-graph__core {
   position: absolute;
   left: 50%;

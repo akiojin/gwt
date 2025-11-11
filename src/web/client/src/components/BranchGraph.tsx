@@ -369,6 +369,32 @@ export function BranchGraph({
           style={{ width: `${orbitSize}px`, height: `${orbitSize}px` }}
           ref={orbitRef}
         >
+          <svg
+            className="radial-graph__connections"
+            width={orbitSize}
+            height={orbitSize}
+            viewBox={`0 0 ${orbitSize} ${orbitSize}`}
+          >
+            {radialNodes.map((node) => {
+              const resolvedPosition =
+                nodePositions[node.branch.name] ?? defaultPositions[node.branch.name] ?? { x: 0, y: 0 };
+              const center = orbitSize / 2;
+              const dimmed =
+                Boolean(activeBase && node.baseLabel !== activeBase) ||
+                Boolean(activeDivergence && !matchesDivergence(node.branch, activeDivergence));
+              return (
+                <line
+                  key={`line-${node.branch.name}`}
+                  x1={center}
+                  y1={center}
+                  x2={center + resolvedPosition.x}
+                  y2={center + resolvedPosition.y}
+                  className={`radial-graph__connection ${dimmed ? "is-dimmed" : ""}`}
+                  strokeLinecap="round"
+                />
+              );
+            })}
+          </svg>
           {radialNodes.map((node) => {
             const resolvedPosition =
               nodePositions[node.branch.name] ?? defaultPositions[node.branch.name] ?? { x: 0, y: 0 };
