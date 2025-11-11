@@ -8,7 +8,9 @@ export default defineConfig({
     setupFiles: ["./vitest.setup.ts"],
     include: [
       "tests/**/*.test.ts",
+      "tests/**/*.test.tsx",
       "tests/**/*.spec.ts",
+      "tests/**/*.spec.tsx",
       "src/**/*.test.ts",
       "src/**/*.test.tsx",
     ],
