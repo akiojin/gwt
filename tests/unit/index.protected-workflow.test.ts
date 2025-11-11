@@ -117,6 +117,7 @@ vi.mock("../../src/config/tools.js", () => ({
     id: "claude-code",
     displayName: "Claude Code",
   })),
+  getSharedEnvironment: vi.fn(async () => ({})),
 }));
 
 vi.mock("../../src/config/index.js", () => ({
