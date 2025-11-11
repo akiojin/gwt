@@ -27,7 +27,7 @@ import {
   getTerminalStreams,
   waitForUserAcknowledgement,
 } from "./utils/terminal.js";
-import { getToolById } from "./config/tools.js";
+import { getToolById, getSharedEnvironment } from "./config/tools.js";
 import { launchCustomAITool } from "./launcher.js";
 import { saveSession } from "./config/index.js";
 import { getPackageVersion } from "./utils.js";
@@ -469,8 +469,11 @@ export async function handleAIToolWorkflow(
       );
     }
 
-    // Get tool definition
-    const toolConfig = await getToolById(tool);
+    // Get tool definition and shared environment overrides
+    const [toolConfig, sharedEnv] = await Promise.all([
+      getToolById(tool),
+      getSharedEnvironment(),
+    ]);
 
     if (!toolConfig) {
       throw new Error(`Tool not found: ${tool}`);
@@ -488,6 +491,7 @@ export async function handleAIToolWorkflow(
               ? "continue"
               : "normal",
         skipPermissions,
+        envOverrides: sharedEnv,
       });
     } else if (tool === "codex-cli") {
       await launchCodexCLI(worktreePath, {
@@ -498,6 +502,7 @@ export async function handleAIToolWorkflow(
               ? "continue"
               : "normal",
         bypassApprovals: skipPermissions,
+        envOverrides: sharedEnv,
       });
     } else {
       // Custom tool
@@ -511,6 +516,7 @@ export async function handleAIToolWorkflow(
               : "normal",
         skipPermissions,
         cwd: worktreePath,
+        sharedEnv,
       });
     }
 

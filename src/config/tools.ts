@@ -146,6 +146,11 @@ export async function saveToolsConfig(config: ToolsConfig): Promise<void> {
   await rename(TEMP_CONFIG_PATH, TOOLS_CONFIG_PATH);
 }
 
+export async function getSharedEnvironment(): Promise<Record<string, string>> {
+  const config = await loadToolsConfig();
+  return { ...(config.env ?? {}) };
+}
+
 /**
  * CustomAITool単体を検証
  *

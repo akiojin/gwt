@@ -227,4 +227,9 @@ export interface LaunchOptions {
    * ツール起動時のcwdとして使用されます。
    */
   cwd?: string;
+
+  /**
+   * 共有環境変数（共通env + ローカル取り込み）
+   */
+  sharedEnv?: Record<string, string>;
 }
