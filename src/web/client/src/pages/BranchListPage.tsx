@@ -1,20 +1,21 @@
-import React, { useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useBranches } from "../hooks/useBranches";
 import { BranchGraph } from "../components/BranchGraph";
+import { AIToolLaunchModal } from "../components/AIToolLaunchModal";
 import type { Branch } from "../../../../types/api.js";
 
-const numberFormatter = new Intl.NumberFormat("ja-JP");
+const numberFormatter = new Intl.NumberFormat("en-US");
 
 const BRANCH_TYPE_LABEL: Record<Branch["type"], string> = {
-  local: "ローカル",
-  remote: "リモート",
+  local: "Local",
+  remote: "Remote",
 };
 
 const MERGE_STATUS_LABEL: Record<Branch["mergeStatus"], string> = {
-  merged: "マージ済み",
-  unmerged: "未マージ",
-  unknown: "状態不明",
+  merged: "Merged",
+  unmerged: "Not merged",
+  unknown: "Unknown",
 };
 
 const MERGE_STATUS_TONE: Record<Branch["mergeStatus"], "success" | "warning" | "muted"> = {
@@ -28,11 +29,77 @@ interface PageStateMessage {
   description: string;
 }
 
-const SEARCH_PLACEHOLDER = "ブランチ名やタイプで検索...";
+type ViewMode = "graph" | "list";
+type DivergenceFilter = "ahead" | "behind" | "upToDate";
+
+function canonicalName(name?: string | null): string | null {
+  if (!name) {
+    return null;
+  }
+  return name.replace(/^origin\//, "");
+}
 
 export function BranchListPage() {
   const { data, isLoading, error } = useBranches();
   const [query, setQuery] = useState("");
+  const [selectedBranch, setSelectedBranch] = useState<Branch | null>(null);
+  const [viewMode, setViewMode] = useState<ViewMode>("graph");
+  const [baseFilter, setBaseFilter] = useState<string | null>(null);
+  const [divergenceFilter, setDivergenceFilter] = useState<DivergenceFilter | null>(null);
+  const [showStats, setShowStats] = useState(true);
+  const [statsPosition, setStatsPosition] = useState({ x: 20, y: 20 });
+  const [isDragging, setIsDragging] = useState(false);
+  const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
+
+  const handleBranchSelection = useCallback((branch: Branch) => {
+    setSelectedBranch(branch);
+  }, []);
+
+  const handleCardKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLElement>, branch: Branch) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        handleBranchSelection(branch);
+      }
+    },
+    [handleBranchSelection],
+  );
+
+  const handleStatsMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    if ((e.target as HTMLElement).closest('.overlay-panel__close')) {
+      return;
+    }
+    setIsDragging(true);
+    const rect = e.currentTarget.getBoundingClientRect();
+    setDragOffset({
+      x: e.clientX - rect.left,
+      y: e.clientY - rect.top,
+    });
+  };
+
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isDragging) return;
+      setStatsPosition({
+        x: e.clientX - dragOffset.x,
+        y: e.clientY - dragOffset.y,
+      });
+    };
+
+    const handleMouseUp = () => {
+      setIsDragging(false);
+    };
+
+    if (isDragging) {
+      document.addEventListener('mousemove', handleMouseMove);
+      document.addEventListener('mouseup', handleMouseUp);
+    }
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isDragging, dragOffset]);
 
   const branches = data ?? [];
 
@@ -51,12 +118,27 @@ export function BranchListPage() {
 
   const normalizedQuery = query.trim().toLowerCase();
 
-  const filteredBranches = useMemo(() => {
-    if (!normalizedQuery) {
-      return branches;
+  const matchesDivergence = (branch: Branch) => {
+    if (!divergenceFilter) {
+      return true;
     }
+    if (!branch.divergence) {
+      return false;
+    }
+    switch (divergenceFilter) {
+      case "upToDate":
+        return Boolean(branch.divergence.upToDate);
+      case "ahead":
+        return (branch.divergence.ahead ?? 0) > 0;
+      case "behind":
+        return (branch.divergence.behind ?? 0) > 0;
+      default:
+        return true;
+    }
+  };
 
-    return branches.filter((branch) => {
+  const filteredBranches = useMemo(() => {
+    const baseQueryFiltered = branches.filter((branch) => {
       const haystack = [
         branch.name,
         branch.type,
@@ -68,28 +150,43 @@ export function BranchListPage() {
         .toLowerCase();
       return haystack.includes(normalizedQuery);
     });
-  }, [branches, normalizedQuery]);
+
+    const baseMatched = baseFilter
+      ? baseQueryFiltered.filter((branch) => {
+          const canonicalBranchName = canonicalName(branch.name);
+          if (canonicalBranchName === baseFilter) {
+            return true;
+          }
+          if (baseFilter === "detached") {
+            return !canonicalName(branch.baseBranch);
+          }
+          return canonicalName(branch.baseBranch) === baseFilter;
+        })
+      : baseQueryFiltered;
+
+    return baseMatched.filter(matchesDivergence);
+  }, [branches, normalizedQuery, baseFilter, divergenceFilter]);
 
   const pageState: PageStateMessage | null = useMemo(() => {
     if (isLoading) {
       return {
-        title: "データを読み込み中",
-        description: "最新のブランチ一覧を取得しています...",
+        title: "Loading",
+        description: "Fetching latest branch data...",
       };
     }
 
     if (error) {
       return {
-        title: "ブランチの取得に失敗しました",
+        title: "Failed to load branches",
         description:
-          error instanceof Error ? error.message : "未知のエラーが発生しました。",
+          error instanceof Error ? error.message : "Unknown error occurred.",
       };
     }
 
     if (!branches.length) {
       return {
-        title: "ブランチが見つかりません",
-        description: "git fetch origin などで最新のブランチを取得してください。",
+        title: "No branches found",
+        description: "Run git fetch origin to pull the latest branches.",
       };
     }
 
@@ -97,93 +194,163 @@ export function BranchListPage() {
   }, [branches.length, error, isLoading]);
 
   return (
-    <div className="app-shell">
-      <header className="page-hero">
-        <p className="page-hero__eyebrow">WORKTREE DASHBOARD</p>
-        <h1>Claude Worktree Control Center</h1>
-        <p>
-          ローカルのGitブランチとAIツールをブラウザ上で一元管理し、Worktree状態を瞬時に
-          可視化します。
-        </p>
-        <div className="page-hero__meta">リアルタイムで更新されるステータスビュー</div>
-      </header>
-
-      <main className="page-content">
-        {!pageState && filteredBranches.length > 0 && (
-          <BranchGraph branches={filteredBranches} />
+    <div className="app-shell app-shell--fullscreen">
+      <main className="page-content page-content--fullscreen">
+        {/* Stats overlay */}
+        {showStats && (
+          <div
+            className="overlay-panel overlay-panel--stats"
+            style={{
+              left: `${statsPosition.x}px`,
+              top: `${statsPosition.y}px`,
+              right: 'auto',
+              userSelect: isDragging ? 'none' : 'auto',
+            }}
+            onMouseDown={handleStatsMouseDown}
+          >
+            <div className="overlay-panel__header">
+              <h2>Statistics</h2>
+              <button
+                type="button"
+                className="overlay-panel__close"
+                onClick={() => setShowStats(false)}
+                aria-label="Close statistics"
+              >
+                ×
+              </button>
+            </div>
+            <div className="overlay-panel__content">
+              <div className="stat-item">
+                <span className="stat-item__label">Total branches</span>
+                <span className="stat-item__value">{numberFormatter.format(metrics.total)}</span>
+              </div>
+              <div className="stat-item">
+                <span className="stat-item__label">Worktrees ready</span>
+                <span className="stat-item__value">{numberFormatter.format(metrics.worktrees)}</span>
+              </div>
+              <div className="stat-item">
+                <span className="stat-item__label">Remote tracking</span>
+                <span className="stat-item__value">{numberFormatter.format(metrics.remote)}</span>
+              </div>
+              <div className="stat-item">
+                <span className="stat-item__label">Up-to-date</span>
+                <span className="stat-item__value">{numberFormatter.format(metrics.healthy)}</span>
+              </div>
+            </div>
+          </div>
         )}
 
-        <section className="metrics-grid">
-          <article className="metric-card">
-            <p className="metric-card__label">総ブランチ数</p>
-            <p className="metric-card__value" data-testid="metric-total">
-              {numberFormatter.format(metrics.total)}
-            </p>
-            <p className="metric-card__hint">ローカル + リモート</p>
-          </article>
-          <article className="metric-card">
-            <p className="metric-card__label">作成済みWorktree</p>
-            <p className="metric-card__value" data-testid="metric-worktrees">
-              {numberFormatter.format(metrics.worktrees)}
-            </p>
-            <p className="metric-card__hint">即座にAIツールを起動可能</p>
-          </article>
-          <article className="metric-card">
-            <p className="metric-card__label">リモート追跡ブランチ</p>
-            <p className="metric-card__value">
-              {numberFormatter.format(metrics.remote)}
-            </p>
-            <p className="metric-card__hint">origin との同期ステータス</p>
-          </article>
-          <article className="metric-card">
-            <p className="metric-card__label">最新コミットが最新</p>
-            <p className="metric-card__value">
-              {numberFormatter.format(metrics.healthy)}
-            </p>
-            <p className="metric-card__hint">divergence 0 のブランチ</p>
-          </article>
-        </section>
-
-        <section className="toolbar">
-          <label className="toolbar__field">
-            <span className="toolbar__icon" aria-hidden="true">
-              🔍
+        {/* Control panel */}
+        <div className="overlay-panel overlay-panel--controls">
+          <div className="control-group">
+            <label className="search-field">
+              <span className="search-field__icon">🔍</span>
+              <input
+                type="search"
+                className="search-field__input"
+                placeholder="Search branches..."
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+              />
+            </label>
+            <span className="control-badge">
+              {numberFormatter.format(filteredBranches.length)} / {numberFormatter.format(metrics.total)}
             </span>
-            <input
-              type="search"
-              className="search-input"
-              placeholder={SEARCH_PLACEHOLDER}
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-            />
-          </label>
-          <span className="toolbar__count">
-            {numberFormatter.format(filteredBranches.length)} / {" "}
-            {numberFormatter.format(metrics.total)} branches
-          </span>
-        </section>
+          </div>
 
-        {pageState ? (
-          <div className="page-state page-state--card">
-            <h2>{pageState.title}</h2>
-            <p>{pageState.description}</p>
+          <div className="control-group">
+            <div className="view-mode-toggle">
+              <button
+                type="button"
+                className={`view-mode-toggle__btn ${viewMode === "graph" ? "is-active" : ""}`}
+                onClick={() => setViewMode("graph")}
+              >
+                🌐 Graph
+              </button>
+              <button
+                type="button"
+                className={`view-mode-toggle__btn ${viewMode === "list" ? "is-active" : ""}`}
+                onClick={() => setViewMode("list")}
+              >
+                📋 List
+              </button>
+            </div>
           </div>
-        ) : filteredBranches.length === 0 ? (
-          <div className="empty-state">
-            <h3>一致するブランチがありません</h3>
-            <p>
-              検索条件を見直すか、タグ・ブランチタイプ・コミットメッセージなど別のキーワードを
-              試してください。
-            </p>
+
+          {(baseFilter || divergenceFilter) && (
+            <div className="control-group">
+              <div className="filter-chips">
+                {baseFilter && (
+                  <button
+                    type="button"
+                    className="filter-chip"
+                    onClick={() => setBaseFilter(null)}
+                  >
+                    base: {baseFilter} <span>×</span>
+                  </button>
+                )}
+                {divergenceFilter && (
+                  <button
+                    type="button"
+                    className="filter-chip"
+                    onClick={() => setDivergenceFilter(null)}
+                  >
+                    {divergenceFilter} <span>×</span>
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
+          <div className="control-group">
+            <Link to="/config" className="control-link">
+              ⚙️ Settings
+            </Link>
+            {!showStats && (
+              <button
+                type="button"
+                className="control-link"
+                onClick={() => setShowStats(true)}
+              >
+                📊 Stats
+              </button>
+            )}
           </div>
-        ) : (
-          <div className="branch-grid">
+        </div>
+
+        {/* List view overlay */}
+        {viewMode === "list" && (
+          <div className="overlay-panel overlay-panel--list">
+            <div className="overlay-panel__header">
+              <h2>Branches</h2>
+            </div>
+            <div className="overlay-panel__content overlay-panel__content--scrollable">
+              {pageState ? (
+                <div className="empty-message">
+                  <h3>{pageState.title}</h3>
+                  <p>{pageState.description}</p>
+                </div>
+              ) : filteredBranches.length === 0 ? (
+                <div className="empty-message">
+                  <h3>No branches found</h3>
+                  <p>Adjust your search or filters</p>
+                </div>
+              ) : (
+                <div className="branch-list">
             {filteredBranches.map((branch) => (
-              <article key={branch.name} className="branch-card">
+              <article
+                key={branch.name}
+                className="branch-card branch-card--interactive"
+                role="button"
+                tabIndex={0}
+                aria-label={`Configure AI tool for ${branch.name}`}
+                onClick={() => handleBranchSelection(branch)}
+                onKeyDown={(event) => handleCardKeyDown(event, branch)}
+              >
                 <div className="branch-card__header">
                   <div>
                     <p className="branch-card__eyebrow">
-                      {BRANCH_TYPE_LABEL[branch.type]}ブランチ
+                      {BRANCH_TYPE_LABEL[branch.type]} branch
                     </p>
                     <h2>{branch.name}</h2>
                   </div>
@@ -201,18 +368,18 @@ export function BranchListPage() {
                           : "status-badge--muted"
                       }`}
                     >
-                      {branch.worktreePath ? "Worktreeあり" : "Worktree未作成"}
+                      {branch.worktreePath ? "Worktree ready" : "No worktree"}
                     </span>
                   </div>
                 </div>
 
                 <p className="branch-card__commit">
-                  {branch.commitMessage ?? "コミットメッセージがありません"}
+                  {branch.commitMessage ?? "No commit message"}
                 </p>
 
                 <dl className="metadata-grid metadata-grid--compact">
                   <div>
-                    <dt>最新コミット</dt>
+                    <dt>Latest commit</dt>
                     <dd>{branch.commitHash.slice(0, 7)}</dd>
                   </div>
                   <div>
@@ -221,7 +388,7 @@ export function BranchListPage() {
                   </div>
                   <div>
                     <dt>Worktree</dt>
-                    <dd>{branch.worktreePath ?? "未作成"}</dd>
+                    <dd>{branch.worktreePath ?? "Not created"}</dd>
                   </div>
                 </dl>
 
@@ -234,31 +401,62 @@ export function BranchListPage() {
                         branch.divergence.upToDate ? "pill--success" : "pill--warning"
                       }`}
                     >
-                      {branch.divergence.upToDate ? "最新" : "更新あり"}
+                      {branch.divergence.upToDate ? "Up-to-date" : "Needs sync"}
                     </span>
                   </div>
                 )}
 
                 <div className="branch-card__actions">
+                  <button
+                    type="button"
+                    className="button button--primary"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      handleBranchSelection(branch);
+                    }}
+                  >
+                    Launch AI tool
+                  </button>
                   <Link
                     className="button button--ghost"
                     to={`/${encodeURIComponent(branch.name)}`}
+                    onClick={(event) => event.stopPropagation()}
                   >
-                    詳細を見る
+                    View session
                   </Link>
                   <span
                     className={`info-pill ${
                       branch.worktreePath ? "info-pill--success" : "info-pill--warning"
                     }`}
                   >
-                    {branch.worktreePath ?? "Worktree未作成"}
+                    {branch.worktreePath ?? "Worktree missing"}
                   </span>
                 </div>
               </article>
             ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Graph - always rendered as background */}
+        {!pageState && branches.length > 0 && (
+          <div className="graph-container">
+            <BranchGraph
+              branches={filteredBranches.length ? filteredBranches : branches}
+              activeBase={baseFilter}
+              onBaseFilterChange={setBaseFilter}
+              activeDivergence={divergenceFilter}
+              onDivergenceFilterChange={setDivergenceFilter}
+              onSelectBranch={handleBranchSelection}
+            />
           </div>
         )}
       </main>
+      {selectedBranch && (
+        <AIToolLaunchModal branch={selectedBranch} onClose={() => setSelectedBranch(null)} />
+      )}
     </div>
   );
 }

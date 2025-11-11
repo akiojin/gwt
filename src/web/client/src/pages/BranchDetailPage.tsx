@@ -1,57 +1,13 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
-import { useBranch, useSyncBranch } from "../hooks/useBranches";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
+import { useBranch } from "../hooks/useBranches";
 import { useCreateWorktree } from "../hooks/useWorktrees";
-import {
-  useStartSession,
-  useSessions,
-  useDeleteSession,
-} from "../hooks/useSessions";
+import { useSessions, useDeleteSession } from "../hooks/useSessions";
 import { useConfig } from "../hooks/useConfig";
 import { ApiError } from "../lib/api";
 import { Terminal } from "../components/Terminal";
-import type { Branch, CustomAITool } from "../../../../types/api.js";
-
-type ToolType = "claude-code" | "codex-cli" | "custom";
-type ToolMode = "normal" | "continue" | "resume";
-
-type SelectableTool =
-  | { id: "claude-code"; label: string; target: "claude" }
-  | { id: "codex-cli"; label: string; target: "codex" }
-  | { id: string; label: string; target: "custom"; definition: CustomAITool };
-
-interface ToolSummary {
-  command: string;
-  defaultArgs?: string[] | null;
-  modeArgs?: {
-    normal?: string[];
-    continue?: string[];
-    resume?: string[];
-  };
-  permissionSkipArgs?: string[] | null;
-}
-
-const BUILTIN_TOOL_SUMMARIES: Record<string, ToolSummary> = {
-  "claude-code": {
-    command: "claude",
-    defaultArgs: [],
-    modeArgs: {
-      normal: [],
-      continue: ["-c"],
-      resume: ["-r"],
-    },
-    permissionSkipArgs: ["--dangerously-skip-permissions"],
-  },
-  "codex-cli": {
-    command: "codex",
-    defaultArgs: ["--auto-approve", "--verbose"],
-    modeArgs: {
-      normal: [],
-      continue: ["resume", "--last"],
-      resume: ["resume"],
-    },
-  },
-};
+import type { Branch } from "../../../../types/api.js";
+import { useQueryClient } from "@tanstack/react-query";
 
 interface BannerState {
   type: "success" | "error" | "info";
@@ -59,14 +15,14 @@ interface BannerState {
 }
 
 const BRANCH_TYPE_LABEL: Record<Branch["type"], string> = {
-  local: "ローカル",
-  remote: "リモート",
+  local: "Local",
+  remote: "Remote",
 };
 
 const MERGE_STATUS_LABEL: Record<Branch["mergeStatus"], string> = {
-  merged: "マージ済み",
-  unmerged: "未マージ",
-  unknown: "状態不明",
+  merged: "Merged",
+  unmerged: "Not merged",
+  unknown: "Unknown",
 };
 
 const MERGE_STATUS_TONE: Record<Branch["mergeStatus"], "success" | "warning" | "muted"> = {
@@ -78,26 +34,19 @@ const MERGE_STATUS_TONE: Record<Branch["mergeStatus"], "success" | "warning" | "
 export function BranchDetailPage() {
   const { branchName } = useParams<{ branchName: string }>();
   const decodedBranchName = branchName ? decodeURIComponent(branchName) : "";
+  const navigate = useNavigate();
+  const location = useLocation();
+  const queryClient = useQueryClient();
+
   const { data: branch, isLoading, error } = useBranch(decodedBranchName);
-  const syncBranch = useSyncBranch(decodedBranchName);
   const createWorktree = useCreateWorktree();
-  const startSession = useStartSession();
   const { data: sessionsData, isLoading: isSessionsLoading } = useSessions();
   const deleteSession = useDeleteSession();
-  const {
-    data: config,
-    isLoading: isConfigLoading,
-    error: configError,
-  } = useConfig();
+  const { data: config, error: configError } = useConfig();
 
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
-  const [isStartingSession, setIsStartingSession] = useState(false);
   const [banner, setBanner] = useState<BannerState | null>(null);
   const [isTerminalFullscreen, setIsTerminalFullscreen] = useState(false);
-  const [selectedToolId, setSelectedToolId] = useState<string>("claude-code");
-  const [selectedMode, setSelectedMode] = useState<ToolMode>("normal");
-  const [skipPermissions, setSkipPermissions] = useState(false);
-  const [extraArgsText, setExtraArgsText] = useState("");
   const [terminatingSessionId, setTerminatingSessionId] = useState<string | null>(null);
 
   const formattedCommitDate = useMemo(
@@ -118,126 +67,99 @@ export function BranchDetailPage() {
     };
   }, [isTerminalFullscreen]);
 
+  const builtinTools = useMemo(
+    () => [
+      { id: "claude-code", label: "Claude Code" },
+      { id: "codex-cli", label: "Codex CLI" },
+    ],
+    [],
+  );
+  const customTools = config?.tools ?? [];
+  const branchSessions = useMemo(() => {
+    return (sessionsData ?? [])
+      .filter((session) => session.worktreePath === branch?.worktreePath)
+      .sort((a, b) => (b.startedAt ?? "").localeCompare(a.startedAt ?? ""));
+  }, [sessionsData, branch?.worktreePath]);
+
+  const focusSessionId = (location.state as { focusSessionId?: string } | null)?.focusSessionId;
+
+  useEffect(() => {
+    if (!focusSessionId) {
+      return;
+    }
+    setActiveSessionId(focusSessionId);
+    setIsTerminalFullscreen(false);
+    navigate(location.pathname + location.search, { replace: true, state: {} });
+  }, [focusSessionId, navigate, location.pathname, location.search]);
+
+  useEffect(() => {
+    if (!branchSessions.length) {
+      if (activeSessionId) {
+        setActiveSessionId(null);
+      }
+      return;
+    }
+
+    const currentSession = branchSessions.find((session) => session.sessionId === activeSessionId);
+    if (currentSession && (currentSession.status === "running" || currentSession.status === "pending")) {
+      return;
+    }
+
+    const nextSession =
+      branchSessions.find((session) => session.status === "running") ??
+      branchSessions.find((session) => session.status === "pending") ??
+      null;
+
+    if (nextSession) {
+      setActiveSessionId(nextSession.sessionId);
+      return;
+    }
+
+    if (activeSessionId) {
+      setActiveSessionId(null);
+    }
+  }, [branchSessions, activeSessionId]);
+
   if (isLoading) {
-    return (
-      <div className="app-shell">
-        <div className="page-state page-state--centered">
-          <h1>読み込み中</h1>
-          <p>ブランチ情報を取得しています...</p>
+      return (
+        <div className="app-shell">
+          <div className="page-state page-state--centered">
+            <h1>Loading</h1>
+            <p>Fetching branch details...</p>
+          </div>
         </div>
-      </div>
-    );
+      );
   }
 
   if (error) {
-    return (
-      <div className="app-shell">
-        <div className="page-state page-state--centered">
-          <h1>ブランチの取得に失敗しました</h1>
-          <p>{error instanceof Error ? error.message : "未知のエラーです"}</p>
-          <Link to="/" className="button button--ghost">
-            ブランチ一覧に戻る
-          </Link>
+      return (
+        <div className="app-shell">
+          <div className="page-state page-state--centered">
+            <h1>Failed to load branch</h1>
+            <p>{error instanceof Error ? error.message : "Unknown error"}</p>
+            <Link to="/" className="button button--ghost">
+              Back to branches
+            </Link>
+          </div>
         </div>
-      </div>
-    );
+      );
   }
 
   if (!branch) {
-    return (
-      <div className="app-shell">
-        <div className="page-state page-state--centered">
-          <h1>Branch not found</h1>
-          <p>指定されたブランチは存在しません。</p>
-          <Link to="/" className="button button--ghost">
-            ブランチ一覧に戻る
-          </Link>
+      return (
+        <div className="app-shell">
+          <div className="page-state page-state--centered">
+            <h1>Branch not found</h1>
+            <p>The requested branch does not exist.</p>
+            <Link to="/" className="button button--ghost">
+              Back to branches
+            </Link>
+          </div>
         </div>
-      </div>
-    );
+      );
   }
 
   const canStartSession = Boolean(branch.worktreePath);
-  const divergenceInfo = branch.divergence ?? null;
-  const hasBlockingDivergence = Boolean(
-    divergenceInfo && divergenceInfo.ahead > 0 && divergenceInfo.behind > 0,
-  );
-  const needsRemoteSync = Boolean(
-    branch.worktreePath &&
-      divergenceInfo &&
-      divergenceInfo.behind > 0 &&
-      divergenceInfo.ahead === 0 &&
-      !hasBlockingDivergence,
-  );
-  const isSyncingBranch = syncBranch.isPending;
-
-  const customTools: CustomAITool[] = config?.tools ?? [];
-  const availableTools: SelectableTool[] = useMemo(
-    () => [
-      { id: "claude-code", label: "Claude Code", target: "claude" },
-      { id: "codex-cli", label: "Codex CLI", target: "codex" },
-      ...customTools.map((tool): SelectableTool => ({
-        id: tool.id,
-        label: tool.displayName,
-        target: "custom" as const,
-        definition: tool,
-      })),
-    ],
-    [customTools],
-  );
-
-  useEffect(() => {
-    if (!availableTools.length) {
-      setSelectedToolId("claude-code");
-      return;
-    }
-    if (!availableTools.find((tool) => tool.id === selectedToolId)) {
-      const first = availableTools[0];
-      if (first) {
-        setSelectedToolId(first.id);
-      }
-    }
-  }, [availableTools, selectedToolId]);
-
-  const selectedTool = availableTools.find((tool) => tool.id === selectedToolId);
-
-  const selectedToolSummary: ToolSummary | null = useMemo(() => {
-    if (!selectedTool) {
-      return null;
-    }
-    if (selectedTool.target === "custom") {
-      return {
-        command: selectedTool.definition.command,
-        defaultArgs: selectedTool.definition.defaultArgs ?? null,
-        modeArgs: selectedTool.definition.modeArgs,
-        permissionSkipArgs: selectedTool.definition.permissionSkipArgs ?? null,
-      };
-    }
-    return BUILTIN_TOOL_SUMMARIES[selectedTool.id] ?? null;
-  }, [selectedTool]);
-
-  const argsPreview = useMemo(() => {
-    if (!selectedToolSummary) {
-      return null;
-    }
-    const args: string[] = [];
-    if (selectedToolSummary.defaultArgs?.length) {
-      args.push(...selectedToolSummary.defaultArgs);
-    }
-    const mode = selectedToolSummary.modeArgs?.[selectedMode];
-    if (mode?.length) {
-      args.push(...mode);
-    }
-    if (skipPermissions && selectedToolSummary.permissionSkipArgs?.length) {
-      args.push(...selectedToolSummary.permissionSkipArgs);
-    }
-    const extraArgs = parseExtraArgs(extraArgsText);
-    if (extraArgs.length) {
-      args.push(...extraArgs);
-    }
-    return { command: selectedToolSummary.command, args };
-  }, [selectedToolSummary, selectedMode, skipPermissions, extraArgsText]);
-
   const handleCreateWorktree = async () => {
     try {
       await createWorktree.mutateAsync({
@@ -246,89 +168,13 @@ export function BranchDetailPage() {
       });
       setBanner({
         type: "success",
-        message: `${branch.name} のWorktreeを作成しました。`,
+        message: `Worktree created for ${branch.name}.`,
       });
     } catch (err) {
       setBanner({
         type: "error",
-        message: formatError(err, "Worktreeの作成に失敗しました"),
+        message: err instanceof Error ? err.message : "Failed to create worktree",
       });
-    }
-  };
-
-  const handleStartSession = async () => {
-    if (!branch.worktreePath) {
-      setBanner({
-        type: "error",
-        message: "Worktreeが存在しないため、先に作成してください。",
-      });
-      return;
-    }
-
-    if (!selectedTool) {
-      setBanner({ type: "error", message: "起動するAIツールを選択してください" });
-      return;
-    }
-
-    if (needsRemoteSync) {
-      setBanner({
-        type: "error",
-        message: "リモートの更新を取り込むまでAIツールは起動できません。『最新の変更を同期』を実行してください。",
-      });
-      return;
-    }
-
-    if (hasBlockingDivergence) {
-      setBanner({
-        type: "error",
-        message:
-          "リモートとローカルの双方で進捗が発生しているため、CLIと同様にAIツールの起動をブロックしました。先に rebase/merge 等で差分を解消してください。",
-      });
-      return;
-    }
-
-    if (skipPermissions && !window.confirm("権限チェックをスキップして起動します。自己責任で実行してください。続行しますか？")) {
-      return;
-    }
-
-    setIsStartingSession(true);
-    try {
-      const toolType: ToolType =
-        selectedTool.target === "codex"
-          ? "codex-cli"
-          : selectedTool.target === "custom"
-            ? "custom"
-            : "claude-code";
-      const extraArgs = parseExtraArgs(extraArgsText);
-      const sessionRequest = {
-        toolType,
-        toolName: selectedTool.target === "custom" ? selectedTool.id : null,
-        ...(selectedTool.target === "custom"
-          ? { customToolId: selectedTool.id }
-          : {}),
-        mode: selectedMode,
-        worktreePath: branch.worktreePath,
-        skipPermissions,
-        ...(selectedTool.target === "codex"
-          ? { bypassApprovals: skipPermissions }
-          : {}),
-        ...(extraArgs.length ? { extraArgs } : {}),
-      } as const;
-
-      const session = await startSession.mutateAsync(sessionRequest);
-      setActiveSessionId(session.sessionId);
-      setIsTerminalFullscreen(false);
-      setBanner({
-        type: "info",
-        message: `${toolLabel(toolType, selectedTool)} を起動しました。`,
-      });
-    } catch (err) {
-      setBanner({
-        type: "error",
-        message: formatError(err, "セッションの起動に失敗しました"),
-      });
-    } finally {
-      setIsStartingSession(false);
     }
   };
 
@@ -336,64 +182,50 @@ export function BranchDetailPage() {
     setTerminatingSessionId(sessionId);
     try {
       await deleteSession.mutateAsync(sessionId);
-      setBanner({ type: "success", message: "セッションを終了しました" });
+      setBanner({ type: "success", message: "Session terminated" });
       if (activeSessionId === sessionId) {
         setActiveSessionId(null);
       }
+      queryClient.invalidateQueries({ queryKey: ["sessions"] });
     } catch (err) {
-      setBanner({ type: "error", message: formatError(err, "セッションの終了に失敗しました") });
+      setBanner({ type: "error", message: formatError(err, "Failed to terminate session") });
     } finally {
       setTerminatingSessionId(null);
     }
   };
 
-  const handleSyncBranch = async () => {
-    if (!branch.worktreePath) {
-      setBanner({ type: "error", message: "Worktreeが存在しないため同期できません。" });
-      return;
-    }
 
-    try {
-      const result = await syncBranch.mutateAsync({ worktreePath: branch.worktreePath });
-      if (result.pullStatus === "success") {
-        setBanner({ type: "success", message: "リモートの最新変更を取り込みました。" });
-      } else {
-        const warning = result.warnings?.join("\n") ?? "fast-forward pull が完了しませんでした";
-        setBanner({
-          type: "error",
-          message: `git pull --ff-only が失敗しました。\n${warning}`,
-        });
-      }
-    } catch (err) {
-      setBanner({ type: "error", message: formatError(err, "Git同期に失敗しました") });
-    }
-  };
-
-  const branchSessions = useMemo(() => {
-    return (sessionsData ?? [])
-      .filter((session) => session.worktreePath === branch?.worktreePath)
-      .sort((a, b) => (b.startedAt ?? "").localeCompare(a.startedAt ?? ""));
-  }, [sessionsData, branch?.worktreePath]);
 
   const handleSessionExit = (code: number) => {
     setActiveSessionId(null);
     setIsTerminalFullscreen(false);
+    queryClient.invalidateQueries({ queryKey: ["sessions"] });
     setBanner({
       type: code === 0 ? "success" : "error",
-      message: `セッションがコード ${code} で終了しました。`,
+      message: `Session exited with code ${code}.`,
     });
+    navigate("/", { replace: false });
+  };
+
+  const handleSessionError = (message: string) => {
+    setBanner({ type: "error", message: message ?? "Unknown error" });
+  };
+
+  const handleFocusSession = (sessionId: string) => {
+    setActiveSessionId(sessionId);
+    setIsTerminalFullscreen(false);
   };
 
   return (
     <div className="app-shell">
       <header className="page-hero page-hero--compact">
         <Link to="/" className="link-back">
-          ← ブランチ一覧に戻る
+          ← Back to branches
         </Link>
         <p className="page-hero__eyebrow">BRANCH DETAIL</p>
         <h1>{branch.name}</h1>
         <p className="page-hero__subtitle">
-          最新コミット {branch.commitHash.slice(0, 7)} ・ {formattedCommitDate}
+          Latest commit {branch.commitHash.slice(0, 7)} · {formattedCommitDate}
         </p>
         <div className="badge-group">
           <span className={`status-badge status-badge--${branch.type}`}>
@@ -407,7 +239,7 @@ export function BranchDetailPage() {
               branch.worktreePath ? "status-badge--success" : "status-badge--muted"
             }`}
           >
-            {branch.worktreePath ? "Worktreeあり" : "Worktree未作成"}
+            {branch.worktreePath ? "Worktree ready" : "No worktree"}
           </span>
         </div>
         <div className="page-hero__actions">
@@ -418,11 +250,11 @@ export function BranchDetailPage() {
               onClick={handleCreateWorktree}
               disabled={createWorktree.isPending}
             >
-              {createWorktree.isPending ? "作成中..." : "Worktreeを作成"}
+              {createWorktree.isPending ? "Creating..." : "Create worktree"}
             </button>
           ) : (
             <Link to="/config" className="button button--secondary">
-              カスタムツール設定を開く
+              Open custom tools
             </Link>
           )}
         </div>
@@ -447,205 +279,112 @@ export function BranchDetailPage() {
             <section className="section-card">
               <header className="terminal-section__header">
                 <div>
-                  <h2>AIツール起動</h2>
+                  <h2>AI tool settings</h2>
                   <p className="section-card__body">
-                    Web UI から直接AIツールを起動できます。設定したカスタムツールも一覧に表示されます。
+                    Launch AI tools from the branch list modal. This page shows current branch info and session status.
                   </p>
                 </div>
                 {configError && (
-                  <span className="pill pill--warning">設定の取得に失敗しました</span>
+                  <span className="pill pill--warning">Failed to load config</span>
                 )}
               </header>
 
-              {!canStartSession ? (
-                <p className="section-card__body">
-                  Worktreeが未作成のため、先にWorktreeを作成してください。
-                </p>
-              ) : (
-                <div className="tool-form">
-                  <div className="form-grid">
-                    <label className="form-field">
-                      <span>AIツール</span>
-                      <select
-                        value={selectedToolId}
-                        onChange={(event) => setSelectedToolId(event.target.value)}
-                        disabled={isConfigLoading}
-                      >
-                        {availableTools.map((tool) => (
-                          <option key={tool.id} value={tool.id}>
-                            {tool.label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-
-                    <label className="form-field">
-                      <span>起動モード</span>
-                      <select
-                        value={selectedMode}
-                        onChange={(event) => setSelectedMode(event.target.value as ToolMode)}
-                      >
-                        <option value="normal">normal</option>
-                        <option value="continue">continue</option>
-                        <option value="resume">resume</option>
-                      </select>
-                    </label>
-
-                    <label className="form-field">
-                      <span>追加引数 (スペース区切り)</span>
-                      <input
-                        type="text"
-                        value={extraArgsText}
-                        onChange={(event) => setExtraArgsText(event.target.value)}
-                        placeholder="--flag value"
-                      />
-                    </label>
-                  </div>
-
-                  <label className="form-field">
-                    <span>
-                      <input
-                        type="checkbox"
-                        checked={skipPermissions}
-                        onChange={(event) => setSkipPermissions(event.target.checked)}
-                      />
-                      <span style={{ marginLeft: "0.5rem" }}>権限チェックをスキップ (自己責任)</span>
-                    </span>
-                  </label>
-                  {skipPermissions && (
-                    <div className="inline-banner inline-banner--warning">
-                      <p>
-                        権限チェックをスキップすることで、CLI での `--dangerously-skip-permissions` 指定と同様のリスクを負います。
-                      </p>
-                    </div>
-                  )}
-                  {needsRemoteSync && (
-                    <div className="inline-banner inline-banner--info" data-testid="sync-required">
-                      <p>
-                        リモートに未取得の更新 ({branch.divergence?.behind ?? 0} commits) があるため、AIツールを起動する前に同期してください。
-                      </p>
-                      <p className="section-card__body">
-                        CLI の `git fetch --all` と `git pull --ff-only` と同じ処理を Web UI から実行できます。
-                      </p>
-                    </div>
-                  )}
-                  {hasBlockingDivergence && (
-                    <div className="inline-banner inline-banner--warning" data-testid="divergence-warning">
-                      <p>
-                        リモートとローカルの両方に未解決の差分があるため、Web UI でも CLI と同様に起動をブロックしています。
-                      </p>
-                      <ul className="list-muted">
-                        <li>git fetch && git pull --ff-only origin {branch.name}</li>
-                        <li>必要に応じて git push origin {branch.name} でローカル進捗を共有</li>
-                      </ul>
-                      <p className="section-card__body">
-                        rebase / merge などで差分を解消した後にページを更新してください。
-                      </p>
-                    </div>
-                  )}
-
-                  <div className="tool-card__actions">
-                    <button
-                      type="button"
-                      className="button button--primary"
-                      onClick={handleStartSession}
-                      disabled={
-                        isStartingSession ||
-                        !selectedTool ||
-                        hasBlockingDivergence ||
-                        needsRemoteSync ||
-                        isSyncingBranch
-                      }
-                    >
-                      {isStartingSession ? "起動中..." : "セッションを起動"}
-                    </button>
-                    <button
-                      type="button"
-                      className="button button--secondary"
-                      onClick={handleSyncBranch}
-                      disabled={!branch.worktreePath || isSyncingBranch}
-                    >
-                      {isSyncingBranch ? "同期中..." : "最新の変更を同期"}
-                    </button>
-                    <Link to="/config" className="button button--ghost">
-                      設定を編集
-                    </Link>
-                  </div>
-
-                  {selectedToolSummary && (
-                    <dl className="metadata-grid metadata-grid--compact">
-                      <div>
-                        <dt>コマンド</dt>
-                        <dd className="tool-card__command">{selectedToolSummary.command}</dd>
-                      </div>
-                      <div>
-                        <dt>defaultArgs</dt>
-                        <dd>{renderArgs(selectedToolSummary.defaultArgs)}</dd>
-                      </div>
-                      <div>
-                        <dt>permissionSkipArgs</dt>
-                        <dd>{renderArgs(selectedToolSummary.permissionSkipArgs)}</dd>
-                      </div>
-                      {argsPreview && (
-                        <div className="metadata-grid__full">
-                          <dt>最終的に実行されるコマンド</dt>
-                          <dd className="tool-card__command">
-                            {argsPreview.command} {argsPreview.args.join(" ")}
-                          </dd>
-                        </div>
-                      )}
-                    </dl>
-                  )}
+              {!branch.worktreePath && (
+                <div className="inline-banner inline-banner--warning">
+                  Worktree missing. Create one on the branch list before launching AI tools.
                 </div>
               )}
+
+              <div className="tool-summary-grid">
+                <div>
+                  <p className="tool-card__eyebrow">Built-in tools</p>
+                  <ul className="tool-summary-list">
+                    {builtinTools.map((tool) => (
+                      <li key={tool.id}>{tool.label}</li>
+                    ))}
+                  </ul>
+                </div>
+                <div>
+                  <p className="tool-card__eyebrow">Custom tools</p>
+                  {customTools.length === 0 ? (
+                    <p className="tool-card__muted">No custom tools registered.</p>
+                  ) : (
+                    <ul className="tool-summary-list">
+                      {customTools.map((tool) => (
+                        <li key={tool.id}>{tool.displayName}</li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </div>
+
+              <div className="tool-card__actions">
+                <Link to="/" className="button button--secondary">
+                  Open branch list
+                </Link>
+                <Link to="/config" className="button button--ghost">
+                  Custom tool settings
+                </Link>
+              </div>
             </section>
             <section className="section-card">
               <header className="terminal-section__header">
                 <div>
-                  <h2>セッション履歴</h2>
+                  <h2>Session history</h2>
                   <p className="section-card__body">
-                    この Worktree に紐づいた最新の AI セッションが表示されます。CLI からの起動分も共有されます。
+                    Shows the latest AI sessions tied to this worktree (including CLI launches).
                   </p>
                 </div>
-                {isSessionsLoading && <span className="pill">読み込み中...</span>}
+                {isSessionsLoading && <span className="pill">Loading...</span>}
               </header>
               {branchSessions.length === 0 ? (
-                <p className="section-card__body">セッション履歴はまだありません。</p>
+                <p className="section-card__body">No session history yet.</p>
               ) : (
                 <div className="session-table-wrapper">
                   <table className="session-table">
                     <thead>
                       <tr>
-                        <th>状態</th>
-                        <th>ツール</th>
-                        <th>モード</th>
-                        <th>開始時刻</th>
-                        <th>終了時刻</th>
-                        <th>操作</th>
+                        <th>Status</th>
+                        <th>Tool</th>
+                        <th>Mode</th>
+                        <th>Started</th>
+                        <th>Ended</th>
+                        <th>Actions</th>
                       </tr>
                     </thead>
                     <tbody>
                       {branchSessions.slice(0, 5).map((session) => (
-                        <tr key={session.sessionId}>
+                        <tr key={session.sessionId} data-testid="session-row">
                           <td>
                             <span className={`status-pill status-pill--${session.status}`}>
                               {SESSION_STATUS_LABEL[session.status]}
                             </span>
                           </td>
-                          <td>{session.toolType === "custom" ? session.toolName ?? "custom" : toolLabel(session.toolType)}</td>
+                          <td>{sessionToolLabel(session)}</td>
                           <td>{session.mode}</td>
                           <td>{formatDate(session.startedAt)}</td>
                           <td>{session.endedAt ? formatDate(session.endedAt) : "--"}</td>
                           <td>
                             {session.status === "running" ? (
-                              <button
-                                type="button"
-                                className="button button--ghost"
-                                onClick={() => handleTerminateSession(session.sessionId)}
-                                disabled={terminatingSessionId === session.sessionId || deleteSession.isPending}
-                              >
-                                {terminatingSessionId === session.sessionId ? "終了中..." : "終了"}
-                              </button>
+                              <div className="session-table__actions">
+                                <button
+                                  type="button"
+                                  className="button button--secondary"
+                                  onClick={() => handleFocusSession(session.sessionId)}
+                                  data-testid="session-focus-button"
+                                >
+                                  View
+                                </button>
+                                <button
+                                  type="button"
+                                  className="button button--ghost"
+                                  onClick={() => handleTerminateSession(session.sessionId)}
+                                  disabled={terminatingSessionId === session.sessionId || deleteSession.isPending}
+                                  data-testid="session-stop-button"
+                                >
+                                  {terminatingSessionId === session.sessionId ? "Stopping..." : "Stop"}
+                                </button>
+                              </div>
                             ) : (
                               <span className="session-table__muted">--</span>
                             )}
@@ -658,12 +397,12 @@ export function BranchDetailPage() {
               )}
             </section>
             <section className="section-card">
-              <header>
-                <h2>ブランチインサイト</h2>
+                <header>
+                  <h2>Branch insights</h2>
               </header>
               <dl className="metadata-grid">
                 <div>
-                  <dt>コミット</dt>
+                    <dt>Commit</dt>
                   <dd>{branch.commitHash}</dd>
                 </div>
                 <div>
@@ -671,29 +410,29 @@ export function BranchDetailPage() {
                   <dd>{branch.author ?? "N/A"}</dd>
                 </div>
                 <div>
-                  <dt>更新日</dt>
+                    <dt>Updated</dt>
                   <dd>{formattedCommitDate}</dd>
                 </div>
                 <div>
-                  <dt>Worktree</dt>
-                  <dd>{branch.worktreePath ?? "未作成"}</dd>
+                    <dt>Worktree</dt>
+                  <dd>{branch.worktreePath ?? "Not created"}</dd>
                 </div>
               </dl>
             </section>
 
             <section className="section-card">
-              <header>
-                <h2>コミット情報</h2>
+                <header>
+                  <h2>Commit message</h2>
               </header>
               <p className="section-card__body">
-                {branch.commitMessage ?? "コミットメッセージがありません。"}
+                  {branch.commitMessage ?? "No commit message."}
               </p>
             </section>
 
             {branch.divergence && (
               <section className="section-card">
                 <header>
-                  <h2>差分状況</h2>
+                  <h2>Divergence</h2>
                 </header>
                 <div className="pill-group">
                   <span className="pill">Ahead {branch.divergence.ahead}</span>
@@ -703,22 +442,22 @@ export function BranchDetailPage() {
                       branch.divergence.upToDate ? "pill--success" : "pill--warning"
                     }`}
                   >
-                    {branch.divergence.upToDate ? "最新" : "更新あり"}
+                    {branch.divergence.upToDate ? "Up-to-date" : "Needs sync"}
                   </span>
                 </div>
               </section>
             )}
 
             <section className="section-card">
-              <header>
-                <h2>Worktree情報</h2>
+                <header>
+                  <h2>Worktree info</h2>
               </header>
               <ul className="list-muted">
                 <li>
-                  パス: <strong>{branch.worktreePath ?? "未作成"}</strong>
+                  Path: <strong>{branch.worktreePath ?? "Not created"}</strong>
                 </li>
-                <li>AIツールの起動にはクリーンなワークツリーであることを推奨します。</li>
-                <li>Worktreeを再作成すると既存のローカル変更が失われる可能性があります。</li>
+                <li>Ensure the worktree is clean before launching AI tools.</li>
+                <li>Recreating worktrees can discard local changes.</li>
               </ul>
             </section>
           </div>
@@ -733,9 +472,9 @@ export function BranchDetailPage() {
               >
                 <div className="terminal-section__header">
                   <div>
-                    <h2>ターミナルセッション</h2>
+                    <h2>Terminal session</h2>
                     <p className="section-card__body">
-                      出力はリアルタイムにストリームされます。終了するとこのパネルは自動で閉じます。
+                      Output streams in real time. This panel closes when the session exits.
                     </p>
                   </div>
                   <div className="terminal-section__controls">
@@ -744,7 +483,7 @@ export function BranchDetailPage() {
                       className="button button--ghost"
                       onClick={() => setIsTerminalFullscreen((prev) => !prev)}
                     >
-                      {isTerminalFullscreen ? "通常表示に戻す" : "ターミナルを最大化"}
+                      {isTerminalFullscreen ? "Exit fullscreen" : "Maximize terminal"}
                     </button>
                   </div>
                 </div>
@@ -752,16 +491,14 @@ export function BranchDetailPage() {
                   <Terminal
                     sessionId={activeSessionId}
                     onExit={handleSessionExit}
-                    onError={(message) =>
-                      setBanner({ type: "error", message: message ?? "不明なエラー" })
-                    }
+                    onError={handleSessionError}
                   />
                 </div>
                 {isTerminalFullscreen && (
                   <button
                     type="button"
                     className="terminal-section__close"
-                    aria-label="ターミナルを閉じる"
+                    aria-label="Close terminal"
                     onClick={() => setIsTerminalFullscreen(false)}
                   >
                     ×
@@ -771,10 +508,10 @@ export function BranchDetailPage() {
             ) : (
               <section className="section-card session-hint">
                 <header>
-                  <h2>セッションは未起動</h2>
+                  <h2>No active session</h2>
                 </header>
                 <p className="section-card__body">
-                  上部のアクションからAIツールを起動すると、このエリアにターミナルが表示されます。
+                  Launch an AI tool from the branch list and select the running session to see live output here.
                 </p>
               </section>
             )}
@@ -787,12 +524,12 @@ export function BranchDetailPage() {
 
 function formatDate(value?: string | null) {
   if (!value) {
-    return "日時不明";
+    return "Unknown";
   }
 
   try {
     const date = new Date(value);
-    return new Intl.DateTimeFormat("ja-JP", {
+    return new Intl.DateTimeFormat("en-US", {
       year: "numeric",
       month: "short",
       day: "numeric",
@@ -814,23 +551,6 @@ function formatError(error: unknown, fallback: string) {
   return fallback;
 }
 
-function toolLabel(tool: ToolType, selectedTool?: SelectableTool) {
-  if (tool === "custom" && selectedTool?.target === "custom") {
-    return selectedTool.label;
-  }
-  if (tool === "codex-cli") {
-    return "Codex CLI";
-  }
-  return "Claude Code";
-}
-
-function renderArgs(args?: string[] | null) {
-  if (!args || args.length === 0) {
-    return <span className="tool-card__muted">未設定</span>;
-  }
-  return args.join(" ");
-}
-
 const SESSION_STATUS_LABEL: Record<"pending" | "running" | "completed" | "failed", string> = {
   pending: "pending",
   running: "running",
@@ -838,9 +558,12 @@ const SESSION_STATUS_LABEL: Record<"pending" | "running" | "completed" | "failed
   failed: "failed",
 };
 
-function parseExtraArgs(value: string): string[] {
-  return value
-    .split(/\s+/)
-    .map((chunk) => chunk.trim())
-    .filter(Boolean);
+function sessionToolLabel(session: {
+  toolType: "claude-code" | "codex-cli" | "custom";
+  toolName?: string | null;
+}): string {
+  if (session.toolType === "custom") {
+    return session.toolName ?? "Custom Tool";
+  }
+  return session.toolType === "codex-cli" ? "Codex CLI" : "Claude Code";
 }
