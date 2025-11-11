@@ -1095,6 +1095,10 @@ button {
   overflow-x: auto;
 }
 
+.graph-container {
+  margin-top: 2rem;
+}
+
 .session-table {
   width: 100%;
   border-collapse: collapse;

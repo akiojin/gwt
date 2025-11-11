@@ -337,14 +337,6 @@ export function BranchGraph({
   return (
     <section className="branch-graph-panel">
       <header className="branch-graph-panel__header">
-        <div>
-          <p className="branch-graph-panel__eyebrow">BRANCH GRAPH</p>
-          <h2>ベースブランチ中心のラジアルビュー</h2>
-          <p>
-            main / develop を中心に、派生ブランチを放射状に配置したダッシュボードです。ノードを
-            クリックすると AI ツールの起動モーダルが開き、詳細リンクからセッション画面へ遷移できます。
-          </p>
-        </div>
         <div className="branch-graph-panel__legend">
           <span className="graph-chip graph-chip--base">Base</span>
           <span className="graph-chip graph-chip--local">Local</span>

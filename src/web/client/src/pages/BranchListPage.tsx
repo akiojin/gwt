@@ -173,17 +173,6 @@ export function BranchListPage() {
       </header>
 
       <main className="page-content">
-        {!pageState && branches.length > 0 && viewMode === "graph" && (
-          <BranchGraph
-            branches={filteredBranches.length ? filteredBranches : branches}
-            activeBase={baseFilter}
-            onBaseFilterChange={setBaseFilter}
-            activeDivergence={divergenceFilter}
-            onDivergenceFilterChange={setDivergenceFilter}
-            onSelectBranch={handleBranchSelection}
-          />
-        )}
-
         <section className="metrics-grid">
           <article className="metric-card">
             <p className="metric-card__label">総ブランチ数</p>
@@ -389,7 +378,24 @@ export function BranchListPage() {
               </article>
             ))}
           </div>
-        ) : null}
+        ) : (
+          <div className="page-state page-state--card">
+            <p>グラフビューを表示しています。</p>
+          </div>
+        )}
+
+        {!pageState && branches.length > 0 && viewMode === "graph" && (
+          <div className="graph-container">
+            <BranchGraph
+              branches={filteredBranches.length ? filteredBranches : branches}
+              activeBase={baseFilter}
+              onBaseFilterChange={setBaseFilter}
+              activeDivergence={divergenceFilter}
+              onDivergenceFilterChange={setDivergenceFilter}
+              onSelectBranch={handleBranchSelection}
+            />
+          </div>
+        )}
       </main>
       {selectedBranch && (
         <AIToolLaunchModal branch={selectedBranch} onClose={() => setSelectedBranch(null)} />

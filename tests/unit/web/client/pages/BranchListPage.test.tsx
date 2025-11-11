@@ -104,10 +104,6 @@ describe("BranchListPage", () => {
       screen.getAllByText("feature/design-refresh").length,
     ).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("リモート追跡ブランチ")).toBeInTheDocument();
-    expect(
-      screen.getByText("ベースブランチ中心のラジアルビュー"),
-    ).toBeInTheDocument();
-
     // List view can still be accessed via toggle
     switchToListView();
     expect(screen.getByText("未マージ")).toBeInTheDocument();
