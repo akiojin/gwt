@@ -16,6 +16,7 @@ import {
   AIToolResolutionError,
   type ResolvedCommand,
 } from "../../../services/aiToolResolver.js";
+import { loadToolsConfig } from "../../../config/tools.js";
 
 export interface PTYInstance {
   ptyProcess: IPty;
@@ -75,9 +76,11 @@ export class PTYManager {
     }
 
     const resolved = await this.resolveCommand(toolType, mode, resolverOptions);
+    const sharedEnv = await this.loadSharedEnv();
 
     const env: NodeJS.ProcessEnv = {
       ...process.env,
+      ...sharedEnv,
       TERM: "xterm-256color",
       COLORTERM: "truecolor",
     };
@@ -242,6 +245,11 @@ export class PTYManager {
     }
 
     return resolveClaudeCommand(claudeOptions);
+  }
+
+  private async loadSharedEnv(): Promise<Record<string, string>> {
+    const config = await loadToolsConfig();
+    return { ...(config.env ?? {}) };
   }
 }
 

@@ -14,6 +14,12 @@ import type {
   AIToolConfig,
 } from "../types/tools.js";
 import { BUILTIN_TOOLS } from "./builtin-tools.js";
+import {
+  sanitizeEnvRecord,
+  validateEnvRecord,
+  mergeWithBootstrapEnv,
+  type EnvironmentRecord,
+} from "./shared-env.js";
 
 /**
  * ツール設定ファイルのパス
@@ -23,6 +29,8 @@ const TOOLS_CONFIG_PATH = path.join(
   ".claude-worktree",
   "tools.json",
 );
+
+let envBootstrapApplied = false;
 
 /**
  * ツール設定を読み込む
@@ -37,10 +45,12 @@ export async function loadToolsConfig(): Promise<ToolsConfig> {
   try {
     const content = await readFile(TOOLS_CONFIG_PATH, "utf-8");
     const parsed = JSON.parse(content) as ToolsConfig;
-    const config = normalizeToolsConfig(parsed);
+    let config = normalizeToolsConfig(parsed);
 
     // 検証
     validateToolsConfig(config);
+
+    config = await bootstrapSharedEnv(config);
 
     return config;
   } catch (error) {
@@ -49,6 +59,7 @@ export async function loadToolsConfig(): Promise<ToolsConfig> {
       return {
         version: "1.0.0",
         customTools: [],
+        env: {},
       };
     }
 
@@ -104,6 +115,10 @@ function validateToolsConfig(config: ToolsConfig): void {
           `Builtin tool IDs: ${builtinIds.join(", ")}`,
       );
     }
+  }
+
+  if (config.env) {
+    validateEnvRecord(config.env as EnvironmentRecord);
   }
 }
 
@@ -170,10 +185,12 @@ function normalizeToolsConfig(config: ToolsConfig): ToolsConfig {
       updatedAt,
     };
   });
+  const env = sanitizeEnvRecord(config.env);
 
   return {
     version,
     customTools,
+    env,
   };
 }
 
@@ -188,6 +205,35 @@ export async function saveToolsConfig(config: ToolsConfig): Promise<void> {
     JSON.stringify(normalized, null, 2),
     "utf-8",
   );
+}
+
+async function bootstrapSharedEnv(config: ToolsConfig): Promise<ToolsConfig> {
+  if (envBootstrapApplied) {
+    return config;
+  }
+
+  const currentEnv = config.env ?? {};
+  const { merged, addedKeys } = mergeWithBootstrapEnv(currentEnv, process.env);
+
+  if (addedKeys.length === 0) {
+    envBootstrapApplied = true;
+    return config;
+  }
+
+  const nextConfig: ToolsConfig = {
+    ...config,
+    env: merged,
+  };
+
+  try {
+    await saveToolsConfig(nextConfig);
+    envBootstrapApplied = true;
+  } catch (error) {
+    envBootstrapApplied = false;
+    throw error;
+  }
+
+  return nextConfig;
 }
 
 /**

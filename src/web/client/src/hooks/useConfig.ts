@@ -1,11 +1,14 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { configApi } from "../lib/api";
-import type { CustomAITool } from "../../../../types/api.js";
+import type {
+  ConfigPayload,
+  UpdateConfigRequest,
+} from "../../../../types/api.js";
 
 const QUERY_KEY = ["config"] as const;
 
 export function useConfig() {
-  return useQuery({
+  return useQuery<ConfigPayload>({
     queryKey: QUERY_KEY,
     queryFn: configApi.get,
   });
@@ -15,8 +18,8 @@ export function useUpdateConfig() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: (tools: CustomAITool[]) => configApi.update({ tools }),
-    onSuccess: (data) => {
+    mutationFn: (payload: UpdateConfigRequest) => configApi.update(payload),
+    onSuccess: (data: ConfigPayload) => {
       queryClient.setQueryData(QUERY_KEY, data);
     },
   });

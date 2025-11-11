@@ -88,6 +88,8 @@ export interface CustomAITool {
   updatedAt: string; // ISO8601
 }
 
+export type EnvironmentMap = Record<string, string>;
+
 /**
  * REST API Response wrappers
  */
@@ -120,7 +122,12 @@ export type WorktreeListResponse = SuccessResponse<Worktree[]>;
 export type WorktreeResponse = SuccessResponse<Worktree>;
 export type SessionListResponse = SuccessResponse<AIToolSession[]>;
 export type SessionResponse = SuccessResponse<AIToolSession>;
-export type ConfigResponse = SuccessResponse<{ tools: CustomAITool[] }>;
+export interface ConfigPayload {
+  tools: CustomAITool[];
+  env: EnvironmentMap;
+}
+
+export type ConfigResponse = SuccessResponse<ConfigPayload>;
 
 /**
  * API Request bodies
@@ -147,6 +154,7 @@ export interface StartSessionRequest {
 
 export interface UpdateConfigRequest {
   tools: CustomAITool[];
+  env?: EnvironmentMap;
 }
 
 export interface CleanupResponse {

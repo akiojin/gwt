@@ -4,7 +4,7 @@ import type { CustomAITool, LaunchOptions } from "../types/tools.js";
 export interface CustomToolExecutionPlan {
   command: string;
   args: string[];
-  env: NodeJS.ProcessEnv;
+  env?: NodeJS.ProcessEnv;
 }
 
 const WHICH_COMMAND = process.platform === "win32" ? "where" : "which";
@@ -63,22 +63,23 @@ export async function prepareCustomToolExecution(
   options: LaunchOptions = {},
 ): Promise<CustomToolExecutionPlan> {
   const args = buildCustomToolArgs(tool, options);
-  const baseEnv = { ...process.env } as NodeJS.ProcessEnv;
-  const env = tool.env ? { ...baseEnv, ...tool.env } : baseEnv;
+  const envOverrides: NodeJS.ProcessEnv | undefined = tool.env
+    ? ({ ...tool.env } as NodeJS.ProcessEnv)
+    : undefined;
 
   switch (tool.type) {
     case "path": {
       return {
         command: tool.command,
         args,
-        env,
+        ...(envOverrides ? { env: envOverrides } : {}),
       };
     }
     case "bunx": {
       return {
         command: "bunx",
         args: [tool.command, ...args],
-        env,
+        ...(envOverrides ? { env: envOverrides } : {}),
       };
     }
     case "command": {
@@ -86,7 +87,7 @@ export async function prepareCustomToolExecution(
       return {
         command: resolved,
         args,
-        env,
+        ...(envOverrides ? { env: envOverrides } : {}),
       };
     }
     default: {

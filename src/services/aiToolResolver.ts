@@ -78,11 +78,12 @@ async function ensureBunxAvailable(): Promise<void> {
             ],
           );
         }
-      } catch (error: any) {
+      } catch (error: unknown) {
         if (error instanceof AIToolResolutionError) {
           throw error;
         }
-        if (error?.code === "ENOENT") {
+        const err = error as NodeJS.ErrnoException;
+        if (err?.code === "ENOENT") {
           throw new AIToolResolutionError(
             "BUNX_NOT_FOUND",
             "bun command not found while verifying bunx. Install Bun 1.0+ and ensure it is on PATH.",
@@ -94,7 +95,7 @@ async function ensureBunxAvailable(): Promise<void> {
         }
         throw new AIToolResolutionError(
           "BUN_TOO_OLD",
-          `Failed to verify Bun version: ${error?.message ?? "unknown error"}`,
+          `Failed to verify Bun version: ${err?.message ?? "unknown error"}`,
         );
       }
     })();
@@ -238,7 +239,7 @@ export async function resolveCustomToolCommand(
     command: execution.command,
     args: execution.args,
     usesFallback: tool.type === "bunx",
-    env: execution.env,
+    ...(execution.env ? { env: execution.env } : {}),
   };
 }
 

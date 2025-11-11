@@ -154,6 +154,13 @@ export interface ToolsConfig {
    * 空配列も許可（ビルトインツールのみ使用）。
    */
   customTools: CustomAITool[];
+
+  /**
+   * 共有環境変数レコード
+   *
+   * Web UI から編集され、AIツール起動時に注入される。
+   */
+  env?: Record<string, string>;
 }
 
 // ============================================================================

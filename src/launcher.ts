@@ -27,11 +27,15 @@ export async function launchCustomAITool(
   options: LaunchOptions = {},
 ): Promise<void> {
   const execution = await prepareCustomToolExecution(tool, options);
+  const childEnv =
+    execution.env && Object.keys(execution.env).length > 0
+      ? { ...process.env, ...execution.env }
+      : undefined;
 
   await execa(execution.command, execution.args, {
     stdio: "inherit",
     ...(options.cwd ? { cwd: options.cwd } : {}),
-    env: execution.env,
+    ...(childEnv ? { env: childEnv } : {}),
   });
 }
 export { resolveCommandPath as resolveCommand };

@@ -4,11 +4,19 @@ import type { CustomAITool } from "../../../../types/api.js";
 import { useConfig, useUpdateConfig } from "../hooks/useConfig";
 import { CustomToolList } from "../components/CustomToolList";
 import { CustomToolForm, type CustomToolFormValue } from "../components/CustomToolForm";
+import {
+  EnvironmentEditor,
+  type EnvEntry,
+} from "../components/EnvironmentEditor";
 
 interface BannerState {
   type: "success" | "error" | "info";
   message: string;
 }
+
+const ENV_KEY_REGEX = /^[A-Z0-9_]+$/;
+const ENV_KEY_MAX = 100;
+const ENV_VALUE_MAX = 500;
 
 export function ConfigPage() {
   const { data, isLoading, error } = useConfig();
@@ -17,12 +25,16 @@ export function ConfigPage() {
   const [editingTool, setEditingTool] = useState<CustomAITool | undefined>(undefined);
   const [banner, setBanner] = useState<BannerState | null>(null);
   const [isCreating, setIsCreating] = useState(false);
+  const [envEntries, setEnvEntries] = useState<EnvEntry[]>([]);
 
   useEffect(() => {
     if (data?.tools) {
       setTools(data.tools);
     }
-  }, [data?.tools]);
+    if (data?.env) {
+      setEnvEntries(entriesFromRecord(data.env));
+    }
+  }, [data?.tools, data?.env]);
 
   const sortedTools = useMemo(() => {
     return [...tools].sort((a, b) => a.displayName.localeCompare(b.displayName, "ja"));
@@ -39,7 +51,7 @@ export function ConfigPage() {
     }
 
     const next = tools.filter((t) => t.id !== tool.id);
-    persistTools(next, `${tool.displayName} を削除しました。`);
+    persistConfig(next, envEntries, `${tool.displayName} を削除しました。`);
   };
 
   const handleCreate = () => {
@@ -73,22 +85,64 @@ export function ConfigPage() {
       ? tools.map((tool) => (tool.id === nextTool.id ? nextTool : tool))
       : [...tools, nextTool];
 
-    persistTools(nextList, `${nextTool.displayName} を保存しました。`);
+    persistConfig(nextList, envEntries, `${nextTool.displayName} を保存しました。`);
   };
 
-  const persistTools = (nextTools: CustomAITool[], successMessage: string) => {
+  const persistConfig = (
+    nextTools: CustomAITool[],
+    nextEnvEntries: EnvEntry[],
+    successMessage: string,
+    options?: { resetToolForm?: boolean },
+  ) => {
+    let envPayload: Record<string, string>;
+    try {
+      envPayload = buildEnvRecord(nextEnvEntries);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setBanner({ type: "error", message });
+      return;
+    }
+
     updateConfig
-      .mutateAsync(nextTools)
+      .mutateAsync({ tools: nextTools, env: envPayload })
       .then((response) => {
         setTools(response.tools);
+        setEnvEntries(entriesFromRecord(response.env ?? {}));
         setBanner({ type: "success", message: successMessage });
-        setEditingTool(undefined);
-        setIsCreating(false);
+        if (options?.resetToolForm ?? true) {
+          setEditingTool(undefined);
+          setIsCreating(false);
+        }
       })
       .catch((err) => {
         const message = err instanceof Error ? err.message : String(err);
         setBanner({ type: "error", message: message });
       });
+  };
+
+  const handleEnvEntryChange = (id: string, field: "key" | "value", value: string) => {
+    setEnvEntries((prev) =>
+      prev.map((entry) =>
+        entry.id === id
+          ? {
+              ...entry,
+              [field]: field === "key" ? sanitizeEnvKey(value) : value,
+            }
+          : entry,
+      ),
+    );
+  };
+
+  const handleEnvAdd = () => {
+    setEnvEntries((prev) => [...prev, createEnvEntry()]);
+  };
+
+  const handleEnvRemove = (id: string) => {
+    setEnvEntries((prev) => prev.filter((entry) => entry.id !== id));
+  };
+
+  const handleEnvSave = () => {
+    persistConfig(tools, envEntries, "環境変数を保存しました。", { resetToolForm: false });
   };
 
   const handleCancel = () => {
@@ -147,6 +201,27 @@ export function ConfigPage() {
         <section className="section-card">
           <header className="section-card__header">
             <div>
+              <h2>共有環境変数</h2>
+              <p className="section-card__body">
+                Web UI で起動する AI ツールはここに定義された環境変数を自動的に引き継ぎます。
+                OS に設定済みの ANTHROPIC_API_KEY や OPENAI_API_KEY は初回起動時に自動で取り込まれます。
+              </p>
+            </div>
+          </header>
+
+          <EnvironmentEditor
+            entries={envEntries}
+            onEntryChange={handleEnvEntryChange}
+            onAddEntry={handleEnvAdd}
+            onRemoveEntry={handleEnvRemove}
+            onSave={handleEnvSave}
+            isSaving={updateConfig.isPending}
+          />
+        </section>
+
+        <section className="section-card">
+          <header className="section-card__header">
+            <div>
               <h2>登録済みツール</h2>
               <p className="section-card__body">
                 CLI と Web UI は同じ設定を参照します。ここで更新すると ~/.claude-worktree/tools.json に保存されます。
@@ -183,4 +258,63 @@ function InlineBanner({ banner, onClose }: { banner: BannerState; onClose: () =>
       </div>
     </div>
   );
+}
+
+function sanitizeEnvKey(value: string): string {
+  return value.toUpperCase().replace(/[^A-Z0-9_]/g, "").slice(0, ENV_KEY_MAX);
+}
+
+function createEnvEntry(initial?: Partial<EnvEntry>): EnvEntry {
+  return {
+    id: createEnvEntryId(initial?.key),
+    key: initial?.key ?? "",
+    value: initial?.value ?? "",
+  };
+}
+
+function createEnvEntryId(seed?: string): string {
+  const random = Math.random().toString(36).slice(2, 8);
+  const timestamp = Date.now().toString(36);
+  return `${seed ?? "env"}-${random}${timestamp}`;
+}
+
+function entriesFromRecord(record: Record<string, string>): EnvEntry[] {
+  return Object.entries(record)
+    .sort(([a], [b]) => a.localeCompare(b, "en"))
+    .map(([key, value]) => createEnvEntry({ key, value }));
+}
+
+function buildEnvRecord(entries: EnvEntry[]): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const entry of entries) {
+    const key = entry.key.trim();
+    const value = entry.value;
+    const isBlank = key.length === 0 && value.length === 0;
+    if (isBlank) {
+      continue;
+    }
+
+    if (!key) {
+      throw new Error("環境変数のキーを入力してください。");
+    }
+    if (!ENV_KEY_REGEX.test(key)) {
+      throw new Error(
+        "環境変数キーは英大文字・数字・アンダースコアのみ使用できます。",
+      );
+    }
+    if (key.length > ENV_KEY_MAX) {
+      throw new Error(`環境変数キーは最大${ENV_KEY_MAX}文字です。(${key})`);
+    }
+    if (!value) {
+      throw new Error(`${key} の値を入力してください。`);
+    }
+    if (value.length > ENV_VALUE_MAX) {
+      throw new Error(`${key} の値は最大${ENV_VALUE_MAX}文字です。`);
+    }
+    if (result[key] !== undefined) {
+      throw new Error(`環境変数キー "${key}" が重複しています。`);
+    }
+    result[key] = value;
+  }
+  return result;
 }

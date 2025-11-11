@@ -12,6 +12,7 @@ import type {
 } from "../../../types/api.js";
 import { loadToolsConfig, saveToolsConfig } from "../../../config/tools.js";
 import type { CustomAITool as ConfigCustomAITool } from "../../../types/tools.js";
+import { sanitizeEnvRecord } from "../../../config/shared-env.js";
 
 /**
  * 設定関連のルートを登録
@@ -29,6 +30,7 @@ export async function registerConfigRoutes(
           success: true,
           data: {
             tools: config.customTools.map(mapConfigToolToApi),
+            env: config.env ?? {},
           },
         };
       } catch (error) {
@@ -49,7 +51,7 @@ export async function registerConfigRoutes(
     Reply: ApiResponse<{ tools: ApiCustomAITool[] }>;
   }>("/api/config", async (request, reply) => {
     try {
-      const { tools } = request.body;
+      const { tools, env } = request.body;
       const now = new Date().toISOString();
       const normalizedTools: ConfigCustomAITool[] = tools.map((tool) =>
         mapApiToolToConfig({
@@ -61,15 +63,18 @@ export async function registerConfigRoutes(
       );
 
       const existing = await loadToolsConfig();
+      const nextEnv = sanitizeEnvRecord(env ?? existing.env ?? {});
       await saveToolsConfig({
         version: existing.version ?? "1.0.0",
         customTools: normalizedTools,
+        env: nextEnv,
       });
 
       return {
         success: true,
         data: {
           tools: normalizedTools.map(mapConfigToolToApi),
+          env: nextEnv,
         },
       };
     } catch (error) {
@@ -132,27 +137,27 @@ function mapApiToolToConfig(tool: ApiCustomAITool): ConfigCustomAITool {
     updatedAt: tool.updatedAt,
   };
 
-  if (tool.icon ?? null) {
-    configTool.icon = tool.icon!;
+  if (tool.icon !== null && tool.icon !== undefined) {
+    configTool.icon = tool.icon;
   }
 
-  if (tool.description ?? null) {
-    configTool.description = tool.description!;
+  if (tool.description !== null && tool.description !== undefined) {
+    configTool.description = tool.description;
   }
 
   if (tool.defaultArgs !== null && tool.defaultArgs !== undefined) {
-    configTool.defaultArgs = tool.defaultArgs!;
+    configTool.defaultArgs = tool.defaultArgs;
   }
 
   if (
     tool.permissionSkipArgs !== null &&
     tool.permissionSkipArgs !== undefined
   ) {
-    configTool.permissionSkipArgs = tool.permissionSkipArgs!;
+    configTool.permissionSkipArgs = tool.permissionSkipArgs;
   }
 
   if (tool.env !== null && tool.env !== undefined) {
-    configTool.env = tool.env!;
+    configTool.env = tool.env;
   }
 
   return configTool;
