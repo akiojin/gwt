@@ -11,6 +11,17 @@ vi.mock("../../../../../src/web/client/src/hooks/useBranches.js", () => ({
   useBranches: vi.fn(),
 }));
 
+vi.mock("../../../../../src/web/client/src/components/AIToolLaunchModal.tsx", () => ({
+  AIToolLaunchModal: ({ branch, onClose }: { branch: Branch; onClose: () => void }) => (
+    <div data-testid="ai-tool-modal">
+      <p>{branch.name}</p>
+      <button type="button" onClick={onClose}>
+        モーダルを閉じる
+      </button>
+    </div>
+  ),
+}));
+
 const mockedUseBranches = useBranches as unknown as Mock;
 
 const sampleBranches: Branch[] = [
@@ -109,5 +120,34 @@ describe("BranchListPage", () => {
 
     fireEvent.change(input, { target: { value: "zzz" } });
     expect(screen.getByText("一致するブランチがありません")).toBeInTheDocument();
+  });
+
+  it("opens the launch modal when branch card is selected and closes on demand", () => {
+    renderPage();
+
+    const interactiveCard = screen.getByRole("button", {
+      name: "feature/design-refresh のAIツールを設定",
+    });
+
+    fireEvent.click(interactiveCard);
+    expect(screen.getByTestId("ai-tool-modal")).toHaveTextContent(
+      "feature/design-refresh",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "モーダルを閉じる" }));
+    expect(screen.queryByTestId("ai-tool-modal")).toBeNull();
+  });
+
+  it("supports keyboard selection of branch cards", () => {
+    renderPage();
+
+    const interactiveCard = screen.getByRole("button", {
+      name: "release/v1.0.0 のAIツールを設定",
+    });
+
+    fireEvent.keyDown(interactiveCard, { key: "Enter" });
+    expect(screen.getByTestId("ai-tool-modal")).toHaveTextContent(
+      "release/v1.0.0",
+    );
   });
 });

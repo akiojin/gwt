@@ -276,6 +276,16 @@ button {
   box-shadow: var(--shadow-soft);
 }
 
+.branch-card--interactive {
+  cursor: pointer;
+  transition: box-shadow 160ms ease, transform 160ms ease;
+}
+
+.branch-card--interactive:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 4px;
+}
+
 .branch-card__header {
   display: flex;
   justify-content: space-between;

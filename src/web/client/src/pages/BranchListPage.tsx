@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useCallback, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useBranches } from "../hooks/useBranches";
 import { BranchGraph } from "../components/BranchGraph";
@@ -35,6 +35,20 @@ export function BranchListPage() {
   const { data, isLoading, error } = useBranches();
   const [query, setQuery] = useState("");
   const [selectedBranch, setSelectedBranch] = useState<Branch | null>(null);
+
+  const handleBranchSelection = useCallback((branch: Branch) => {
+    setSelectedBranch(branch);
+  }, []);
+
+  const handleCardKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLElement>, branch: Branch) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        handleBranchSelection(branch);
+      }
+    },
+    [handleBranchSelection],
+  );
 
   const branches = data ?? [];
 
@@ -186,7 +200,15 @@ export function BranchListPage() {
         ) : (
           <div className="branch-grid">
             {filteredBranches.map((branch) => (
-              <article key={branch.name} className="branch-card">
+              <article
+                key={branch.name}
+                className="branch-card branch-card--interactive"
+                role="button"
+                tabIndex={0}
+                aria-label={`${branch.name} のAIツールを設定`}
+                onClick={() => handleBranchSelection(branch)}
+                onKeyDown={(event) => handleCardKeyDown(event, branch)}
+              >
                 <div className="branch-card__header">
                   <div>
                     <p className="branch-card__eyebrow">
@@ -250,13 +272,17 @@ export function BranchListPage() {
                   <button
                     type="button"
                     className="button button--primary"
-                    onClick={() => setSelectedBranch(branch)}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      handleBranchSelection(branch);
+                    }}
                   >
                     AIツールを起動
                   </button>
                   <Link
                     className="button button--ghost"
                     to={`/${encodeURIComponent(branch.name)}`}
+                    onClick={(event) => event.stopPropagation()}
                   >
                     セッションを表示
                   </Link>
