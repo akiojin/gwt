@@ -76,6 +76,12 @@ export interface SelectedBranchState {
   remoteBranch?: string;
 }
 
+export type SelectedBranchSet = Set<string>;
+
+export interface BranchSelectionState {
+  branches: SelectedBranchSet;
+}
+
 export interface UIFilter {
   showWithWorktree: boolean;
   showWithoutWorktree: boolean;

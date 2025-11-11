@@ -9,11 +9,14 @@ import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import type { BranchItem, Statistics } from '../../types.js';
 import stringWidth from 'string-width';
 import chalk from 'chalk';
+import { isProtectedBranchName } from '../../../worktree.js';
 
 const WIDTH_OVERRIDES: Record<string, number> = {
   '⬆': 1,
   '☁': 1,
 };
+
+const EMPTY_SELECTION = new Set<string>();
 
 const measureDisplayWidth = (value: string): number => {
   let width = 0;
@@ -61,6 +64,9 @@ export interface BranchListScreenProps {
   cleanupUI?: CleanupUIState;
   version?: string | null;
   workingDirectory?: string;
+  selectedBranches?: Set<string>;
+  onToggleSelection?: (branchName: string) => void;
+  onClearSelection?: () => void;
 }
 
 /**
@@ -82,8 +88,12 @@ export function BranchListScreen({
   cleanupUI,
   version,
   workingDirectory,
+  selectedBranches,
+  onToggleSelection,
+  onClearSelection,
 }: BranchListScreenProps) {
   const { rows } = useTerminalSize();
+  const selectionSet = selectedBranches ?? EMPTY_SELECTION;
 
   // Handle keyboard input
   // Note: Select component handles Enter and arrow keys
@@ -174,6 +184,14 @@ export function BranchListScreen({
       const arrow = isSelected ? '>' : ' ';
       const timestampText = formatLatestCommit(item.latestCommitTimestamp);
       const timestampWidth = stringWidth(timestampText);
+      const isManuallySelected = selectionSet.has(item.name);
+      const shouldWarnSelection = Boolean(item.hasUnpushedCommits) || !item.mergedPR;
+      let selectionMarker = isManuallySelected ? '*' : ' ';
+      if (isManuallySelected && shouldWarnSelection) {
+        selectionMarker = chalk.red('*');
+      } else if (isManuallySelected) {
+        selectionMarker = chalk.white('*');
+      }
 
       const indicatorInfo = cleanupUI?.indicators?.[item.name];
       let indicatorIcon = indicatorInfo?.icon ?? '';
@@ -196,7 +214,7 @@ export function BranchListScreen({
         }
       }
       const indicatorPrefix = indicatorIcon ? `${indicatorIcon} ` : '';
-      const staticPrefix = `${arrow} ${indicatorPrefix}`;
+      const staticPrefix = `${arrow} ${selectionMarker} ${indicatorPrefix}`;
       const staticPrefixWidth = stringWidth(staticPrefix);
 
       const availableLeftWidth = Math.max(staticPrefixWidth, columns - timestampWidth - 1);
@@ -224,8 +242,33 @@ export function BranchListScreen({
         : line;
       return <Text>{output}</Text>;
     },
-    [cleanupUI, formatLatestCommit, truncateToWidth]
+    [cleanupUI, formatLatestCommit, selectionSet, truncateToWidth]
   );
+
+  const handleSpace = useCallback(
+    (branch: BranchItem) => {
+      if (!onToggleSelection) {
+        return;
+      }
+      if (branch.type !== 'local') {
+        return;
+      }
+      if (isProtectedBranchName(branch.name)) {
+        return;
+      }
+      onToggleSelection(branch.name);
+    },
+    [onToggleSelection]
+  );
+
+  const handleEscape = useCallback(() => {
+    onClearSelection?.();
+  }, [onClearSelection]);
+
+  const effectiveFooterMessage = cleanupUI?.footerMessage
+    ?? (selectionSet.size > 0
+      ? { text: `選択中: ${selectionSet.size}個のブランチ` }
+      : null);
 
   return (
     <Box flexDirection="column" height={rows}>
@@ -277,18 +320,20 @@ export function BranchListScreen({
             disabled={Boolean(cleanupUI?.inputLocked)}
             renderIndicator={() => null}
             renderItem={renderBranchRow}
+            onSpace={handleSpace}
+            onEscape={handleEscape}
           />
         )}
       </Box>
 
-      {cleanupUI?.footerMessage && (
+      {effectiveFooterMessage && (
         <Box marginBottom={1}>
-          {cleanupUI.footerMessage.color ? (
-            <Text color={cleanupUI.footerMessage.color}>
-              {cleanupUI.footerMessage.text}
+          {effectiveFooterMessage.color ? (
+            <Text color={effectiveFooterMessage.color}>
+              {effectiveFooterMessage.text}
             </Text>
           ) : (
-            <Text>{cleanupUI.footerMessage.text}</Text>
+            <Text>{effectiveFooterMessage.text}</Text>
           )}
         </Box>
       )}

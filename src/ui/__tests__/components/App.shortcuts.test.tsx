@@ -5,7 +5,7 @@ import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from 'vites
 import type { Mock } from 'vitest';
 import { render, act, waitFor } from '@testing-library/react';
 import React from 'react';
-import type { BranchItem, CleanupTarget } from '../../types.js';
+import type { BranchInfo, BranchItem, CleanupTarget } from '../../types.js';
 import { Window } from 'happy-dom';
 import * as useGitDataModule from '../../hooks/useGitData.js';
 import * as useScreenStateModule from '../../hooks/useScreenState.js';
@@ -23,6 +23,20 @@ const resetMock = vi.fn();
 const worktreeScreenProps: any[] = [];
 const branchCreatorProps: any[] = [];
 const branchListProps: any[] = [];
+const cleanupBranches: BranchInfo[] = [
+  {
+    name: 'feature/add-new-feature',
+    type: 'local',
+    branchType: 'feature',
+    isCurrent: false,
+  },
+  {
+    name: 'hotfix/urgent-fix',
+    type: 'local',
+    branchType: 'hotfix',
+    isCurrent: false,
+  },
+];
 
 const originalUseGitData = useGitDataModule.useGitData;
 const originalUseScreenState = useScreenStateModule.useScreenState;
@@ -62,7 +76,7 @@ describe('App shortcuts integration', () => {
     goBackMock.mockClear();
     resetMock.mockClear();
     useGitDataSpy.mockImplementation(() => ({
-      branches: [],
+      branches: cleanupBranches,
       worktrees: [
         {
           branch: 'feature/existing',
@@ -241,7 +255,17 @@ describe('App shortcuts integration', () => {
       }
 
       act(() => {
-        initialProps.onCleanupCommand?.();
+        initialProps.onToggleSelection?.('feature/add-new-feature');
+        initialProps.onToggleSelection?.('hotfix/urgent-fix');
+      });
+
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      const updatedProps = branchListProps.at(-1);
+      act(() => {
+        updatedProps?.onCleanupCommand?.();
       });
 
       await act(async () => {
@@ -292,6 +316,40 @@ describe('App shortcuts integration', () => {
       expect(latestProps?.cleanupUI?.indicators).toEqual({});
       expect(latestProps?.cleanupUI?.inputLocked).toBe(false);
       expect(latestProps?.branches?.some((branch: BranchItem) => branch.name === 'feature/add-new-feature')).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('shows warning when cleanup is triggered without any selection', async () => {
+    vi.useFakeTimers();
+    try {
+      const onExit = vi.fn();
+      useScreenStateSpy.mockReturnValue({
+        currentScreen: 'branch-list',
+        navigateTo: navigateToMock,
+        goBack: goBackMock,
+        reset: resetMock,
+      });
+      render(<App onExit={onExit} />);
+
+      expect(branchListProps).not.toHaveLength(0);
+      const initialProps = branchListProps.at(-1);
+      if (!initialProps) {
+        throw new Error('BranchListScreen props missing');
+      }
+
+      act(() => {
+        initialProps.onCleanupCommand?.();
+      });
+
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      const latestProps = branchListProps.at(-1);
+      expect(latestProps?.cleanupUI?.inputLocked).toBe(false);
+      expect(latestProps?.cleanupUI?.footerMessage?.text).toMatch(/クリーンアップ対象が選択されていません/);
     } finally {
       vi.useRealTimers();
     }

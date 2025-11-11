@@ -1,9 +1,33 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import type { ChildStdio } from "../../src/utils/terminal.js";
+
+type ProcessWithOptionalGetuid = NodeJS.Process & { getuid?: () => number };
+
+const resetGetuid = (): void => {
+  const mutableProcess = process as ProcessWithOptionalGetuid;
+  delete mutableProcess.getuid;
+};
 
 // Mock execa before importing
 vi.mock("execa", () => ({
   execa: vi.fn(),
   default: { execa: vi.fn() },
+}));
+
+const mockResolveClaudeCommand = vi.fn().mockResolvedValue({
+  command: "bunx",
+  args: ["@anthropic-ai/claude-code@latest"],
+  usesFallback: true,
+});
+
+class MockResolutionError extends Error {
+  code = "MOCK";
+}
+
+vi.mock("../../src/services/aiToolResolver", () => ({
+  resolveClaudeCommand: mockResolveClaudeCommand,
+  AIToolResolutionError: MockResolutionError,
+  isClaudeCodeAvailable: vi.fn(),
 }));
 
 vi.mock("fs", () => ({
@@ -22,10 +46,10 @@ const mockTerminalStreams = {
   exitRawMode: vi.fn(),
 };
 
-const mockChildStdio = {
-  stdin: "inherit" as const,
-  stdout: "inherit" as const,
-  stderr: "inherit" as const,
+const mockChildStdio: ChildStdio = {
+  stdin: "inherit",
+  stdout: "inherit",
+  stderr: "inherit",
   cleanup: vi.fn(),
 };
 
@@ -54,6 +78,12 @@ describe("launchClaudeCode - Root User Detection", () => {
     mockChildStdio.stdin = "inherit";
     mockChildStdio.stdout = "inherit";
     mockChildStdio.stderr = "inherit";
+    mockResolveClaudeCommand.mockReset();
+    mockResolveClaudeCommand.mockResolvedValue({
+      command: "bunx",
+      args: ["@anthropic-ai/claude-code@latest"],
+      usesFallback: true,
+    });
     // Store original getuid
     originalGetuid = process.getuid;
   });
@@ -63,7 +93,7 @@ describe("launchClaudeCode - Root User Detection", () => {
     if (originalGetuid !== undefined) {
       process.getuid = originalGetuid;
     } else {
-      delete (process as any).getuid;
+      resetGetuid();
     }
   });
 
@@ -80,14 +110,16 @@ describe("launchClaudeCode - Root User Detection", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchClaudeCode("/test/path", { skipPermissions: true });
 
-      // Verify execa was called with IS_SANDBOX=1 in env
-      // 2nd call should be bunx (1st call is which/where check)
+      expect(mockResolveClaudeCommand).toHaveBeenCalledWith(
+        expect.objectContaining({ skipPermissions: true }),
+      );
+
       expect(mockExeca).toHaveBeenNthCalledWith(
-        2,
+        1,
         "bunx",
         expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
         expect.objectContaining({
@@ -110,14 +142,18 @@ describe("launchClaudeCode - Root User Detection", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchClaudeCode("/test/path", { skipPermissions: true });
 
       // Verify execa was called without IS_SANDBOX=1
       // 2nd call should be bunx (1st call is which/where check)
+      expect(mockResolveClaudeCommand).toHaveBeenCalledWith(
+        expect.objectContaining({ skipPermissions: true }),
+      );
+
       expect(mockExeca).toHaveBeenNthCalledWith(
-        2,
+        1,
         "bunx",
         expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
         expect.objectContaining({
@@ -131,7 +167,7 @@ describe("launchClaudeCode - Root User Detection", () => {
 
     it("should handle environments where process.getuid() is not available", async () => {
       // Mock process without getuid (e.g., Windows)
-      delete (process as any).getuid;
+      resetGetuid();
 
       // Mock which/where to fail (claude not available) and bunx to succeed
       mockExeca
@@ -141,14 +177,18 @@ describe("launchClaudeCode - Root User Detection", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchClaudeCode("/test/path", { skipPermissions: true });
 
       // Verify execa was called without IS_SANDBOX=1 (fallback to non-root)
       // 2nd call should be bunx (1st call is which/where check)
+      expect(mockResolveClaudeCommand).toHaveBeenCalledWith(
+        expect.objectContaining({ skipPermissions: true }),
+      );
+
       expect(mockExeca).toHaveBeenNthCalledWith(
-        2,
+        1,
         "bunx",
         expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
         expect.objectContaining({
@@ -174,19 +214,18 @@ describe("launchClaudeCode - Root User Detection", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchClaudeCode("/test/path", { skipPermissions: true });
 
-      // Verify IS_SANDBOX=1 is set
-      // 2nd call should be bunx (1st call is which/where check)
+      expect(mockResolveClaudeCommand).toHaveBeenCalledWith(
+        expect.objectContaining({ skipPermissions: true }),
+      );
+
       expect(mockExeca).toHaveBeenNthCalledWith(
-        2,
+        1,
         "bunx",
-        expect.arrayContaining([
-          "@anthropic-ai/claude-code@latest",
-          "--dangerously-skip-permissions",
-        ]),
+        expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
         expect.objectContaining({
           stdin: "inherit",
           stdout: "inherit",
@@ -212,7 +251,7 @@ describe("launchClaudeCode - Root User Detection", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchClaudeCode("/test/path", { skipPermissions: false });
 
@@ -251,7 +290,7 @@ describe("launchClaudeCode - Root User Detection", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchClaudeCode("/test/path", {});
 
@@ -284,7 +323,7 @@ describe("launchClaudeCode - Root User Detection", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchClaudeCode("/test/path", { skipPermissions: true });
 
@@ -311,7 +350,7 @@ describe("launchClaudeCode - Root User Detection", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       consoleLogSpy.mockClear();
 
@@ -340,7 +379,7 @@ describe("launchClaudeCode - Root User Detection", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       consoleLogSpy.mockClear();
 
@@ -361,9 +400,9 @@ describe("launchClaudeCode - Root User Detection", () => {
   describe("TTY handoff", () => {
     it("should pass fallback file descriptors when usingFallback is true", async () => {
       mockTerminalStreams.usingFallback = true;
-      mockChildStdio.stdin = 101 as unknown as any;
-      mockChildStdio.stdout = 102 as unknown as any;
-      mockChildStdio.stderr = 103 as unknown as any;
+      mockChildStdio.stdin = 101;
+      mockChildStdio.stdout = 102;
+      mockChildStdio.stderr = 103;
 
       // Mock which/where to fail (claude not available) and bunx to succeed
       mockExeca
@@ -373,7 +412,7 @@ describe("launchClaudeCode - Root User Detection", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchClaudeCode("/test/path");
 
@@ -413,13 +452,13 @@ describe("launchClaudeCode - Root User Detection", () => {
           stdout: "/usr/local/bin/claude",
           stderr: "",
           exitCode: 0,
-        } as any)
+        })
         .mockResolvedValueOnce({
           // Second call: claude execution
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchClaudeCode("/test/path");
 
@@ -459,7 +498,7 @@ describe("launchClaudeCode - Root User Detection", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchClaudeCode("/test/path");
 
@@ -495,13 +534,13 @@ describe("launchClaudeCode - Root User Detection", () => {
           stdout: "/usr/local/bin/claude",
           stderr: "",
           exitCode: 0,
-        } as any)
+        })
         .mockResolvedValueOnce({
           // Second call: claude execution
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchClaudeCode("/test/path", {
         mode: "continue",
@@ -534,7 +573,7 @@ describe("launchClaudeCode - Root User Detection", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchClaudeCode("/test/path", {
         mode: "resume",

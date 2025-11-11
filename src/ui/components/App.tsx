@@ -81,6 +81,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
   const [selectedBranch, setSelectedBranch] = useState<SelectedBranchState | null>(null);
   const [creationSourceBranch, setCreationSourceBranch] = useState<SelectedBranchState | null>(null);
   const [selectedTool, setSelectedTool] = useState<AITool | null>(null);
+  const [selectedBranches, setSelectedBranches] = useState<Set<string>>(new Set());
 
   // PR cleanup feedback
   const [cleanupIndicators, setCleanupIndicators] = useState<Record<string, { icon: string; color?: 'cyan' | 'green' | 'yellow' | 'red' }>>({});
@@ -169,6 +170,25 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     [branches, hiddenBranches]
   );
 
+  useEffect(() => {
+    setSelectedBranches((prev) => {
+      if (prev.size === 0) {
+        return prev;
+      }
+      const visibleSet = new Set(visibleBranches.map((branch) => branch.name));
+      let changed = false;
+      const next = new Set<string>();
+      for (const name of prev) {
+        if (visibleSet.has(name)) {
+          next.add(name);
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [visibleBranches]);
+
   // Helper function to create content-based hash for branches
   const branchHash = useMemo(
     () => visibleBranches.map((b) => `${b.name}-${b.type}-${b.isCurrent}`).join(','),
@@ -233,6 +253,41 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     () => resolveBaseBranchLabel(creationSourceBranch, selectedBranch, resolveBaseBranch),
     [creationSourceBranch, resolveBaseBranch, selectedBranch]
   );
+
+  const toggleBranchSelection = useCallback(
+    (branchName: string) => {
+      const branch = visibleBranches.find((item) => item.name === branchName);
+      if (!branch) {
+        return;
+      }
+      if (branch.type !== 'local') {
+        return;
+      }
+      if (isProtectedBranchName(branch.name)) {
+        return;
+      }
+
+      setSelectedBranches((prev) => {
+        const next = new Set(prev);
+        if (next.has(branchName)) {
+          next.delete(branchName);
+        } else {
+          next.add(branchName);
+        }
+        return next;
+      });
+    },
+    [visibleBranches]
+  );
+
+  const clearBranchSelection = useCallback(() => {
+    setSelectedBranches((prev) => {
+      if (prev.size === 0) {
+        return prev;
+      }
+      return new Set<string>();
+    });
+  }, []);
 
   // Handle branch selection
   const toLocalBranchName = useCallback((remoteName: string) => {
@@ -495,6 +550,16 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       completionTimerRef.current = null;
     }
 
+    if (selectedBranches.size === 0) {
+      setCleanupFooterMessage({ text: 'クリーンアップ対象が選択されていません', color: 'yellow' });
+      completionTimerRef.current = setTimeout(() => {
+        setCleanupFooterMessage(null);
+        completionTimerRef.current = null;
+      }, COMPLETION_HOLD_DURATION_MS);
+      return;
+    }
+
+    const selectedTargetSet = new Set(selectedBranches);
     const succeededBranches: string[] = [];
 
     const resetAfterWait = () => {
@@ -506,6 +571,19 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
           const merged = new Set(prev);
           succeededBranches.forEach((branch) => merged.add(branch));
           return Array.from(merged);
+        });
+        setSelectedBranches((prev) => {
+          if (prev.size === 0) {
+            return prev;
+          }
+          const next = new Set(prev);
+          let changed = false;
+          for (const branch of succeededBranches) {
+            if (next.delete(branch)) {
+              changed = true;
+            }
+          }
+          return changed ? next : prev;
         });
       }
       refresh();
@@ -547,10 +625,23 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       return;
     }
 
-    // Reset hidden branches that may already be gone
-    setHiddenBranches((prev) => prev.filter((name) => targets.find((t) => t.branch === name) === undefined));
+    const filteredTargets = targets.filter((target) => selectedTargetSet.has(target.branch));
 
-    const initialIndicators = targets.reduce<Record<string, { icon: string; color?: 'cyan' | 'green' | 'yellow' | 'red' }>>((acc, target, index) => {
+    if (filteredTargets.length === 0) {
+      setCleanupIndicators({});
+      setCleanupFooterMessage({ text: '選択したブランチはクリーンアップ対象ではありません。', color: 'yellow' });
+      setCleanupInputLocked(false);
+      completionTimerRef.current = setTimeout(() => {
+        setCleanupFooterMessage(null);
+        completionTimerRef.current = null;
+      }, COMPLETION_HOLD_DURATION_MS);
+      return;
+    }
+
+    // Reset hidden branches that may already be gone
+    setHiddenBranches((prev) => prev.filter((name) => filteredTargets.find((t) => t.branch === name) === undefined));
+
+    const initialIndicators = filteredTargets.reduce<Record<string, { icon: string; color?: 'cyan' | 'green' | 'yellow' | 'red' }>>((acc, target, index) => {
       const icon = index === 0 ? getSpinnerFrame(0) : '⏳';
       const color: 'cyan' | 'green' | 'yellow' | 'red' = index === 0 ? 'cyan' : 'yellow';
       acc[target.branch] = { icon, color };
@@ -558,18 +649,17 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     }, {});
 
     setCleanupIndicators(initialIndicators);
-    const firstTarget = targets.length > 0 ? targets[0] : undefined;
+    const firstTarget = filteredTargets[0];
     setCleanupProcessingBranch(firstTarget ? firstTarget.branch : null);
     spinnerFrameIndexRef.current = 0;
     setSpinnerFrameIndex(0);
     setCleanupFooterMessage({ text: `Processing... ${getSpinnerFrame(0)}`, color: 'cyan' });
 
-    for (let index = 0; index < targets.length; index += 1) {
-      const currentTarget = targets[index];
-      if (!currentTarget) {
+    for (let index = 0; index < filteredTargets.length; index += 1) {
+      const target = filteredTargets[index];
+      if (!target) {
         continue;
       }
-      const target = currentTarget;
 
       setCleanupProcessingBranch(target.branch);
       spinnerFrameIndexRef.current = 0;
@@ -578,7 +668,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       setCleanupIndicators((prev) => {
         const updated = { ...prev };
         updated[target.branch] = { icon: getSpinnerFrame(0), color: 'cyan' };
-        for (const pending of targets.slice(index + 1)) {
+        for (const pending of filteredTargets.slice(index + 1)) {
           const current = updated[pending.branch];
           if (!current || current.icon !== '⏳') {
             updated[pending.branch] = { icon: '⏳', color: 'yellow' };
@@ -633,7 +723,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         : COMPLETION_HOLD_DURATION_MS;
 
     completionTimerRef.current = setTimeout(resetAfterWait, holdDuration);
-  }, [cleanupInputLocked, deleteBranch, getMergedPRWorktrees, refresh, removeWorktree]);
+  }, [cleanupInputLocked, deleteBranch, getMergedPRWorktrees, refresh, removeWorktree, selectedBranches]);
 
   // Handle AI tool selection
   const handleToolSelect = useCallback(
@@ -702,6 +792,9 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
             }}
             version={version}
             workingDirectory={workingDirectory}
+            selectedBranches={selectedBranches}
+            onToggleSelection={toggleBranchSelection}
+            onClearSelection={clearBranchSelection}
           />
         );
 
@@ -784,6 +877,9 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
             loadingIndicatorDelay={loadingIndicatorDelay}
             version={version}
             workingDirectory={workingDirectory}
+            selectedBranches={selectedBranches}
+            onToggleSelection={toggleBranchSelection}
+            onClearSelection={clearBranchSelection}
           />
         );
     }

@@ -1,9 +1,28 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import type { ChildStdio } from "../../src/utils/terminal.js";
 
 // Mock modules before importing
 vi.mock("execa", () => ({
   execa: vi.fn(),
   default: { execa: vi.fn() },
+}));
+
+const hoistedMocks = vi.hoisted(() => ({
+  mockResolveCodexCommand: vi.fn().mockResolvedValue({
+    command: "bunx",
+    args: ["@openai/codex@latest"],
+    usesFallback: true,
+  }),
+}));
+
+const mockResolveCodexCommand = hoistedMocks.mockResolveCodexCommand;
+
+class MockResolutionError extends Error {}
+
+vi.mock("../../src/services/aiToolResolver", () => ({
+  resolveCodexCommand: mockResolveCodexCommand,
+  AIToolResolutionError: MockResolutionError,
+  isCodexAvailable: vi.fn(),
 }));
 
 vi.mock("fs", () => ({
@@ -27,10 +46,10 @@ const mockTerminalStreams = {
   exitRawMode: vi.fn(),
 };
 
-const mockChildStdio = {
-  stdin: "inherit" as const,
-  stdout: "inherit" as const,
-  stderr: "inherit" as const,
+const mockChildStdio: ChildStdio = {
+  stdin: "inherit",
+  stdout: "inherit",
+  stderr: "inherit",
   cleanup: vi.fn(),
 };
 
@@ -45,26 +64,6 @@ import { launchCodexCLI } from "../../src/codex";
 // Get typed mock
 const mockExeca = execa as ReturnType<typeof vi.fn>;
 
-const DEFAULT_CODEX_ARGS = [
-  "--enable",
-  "web_search_request",
-  "--model=gpt-5-codex",
-  "--sandbox",
-  "workspace-write",
-  "-c",
-  "model_reasoning_effort=high",
-  "-c",
-  "model_reasoning_summaries=detailed",
-  "-c",
-  "sandbox_workspace_write.network_access=true",
-  "-c",
-  "shell_environment_policy.inherit=all",
-  "-c",
-  "shell_environment_policy.ignore_default_excludes=true",
-  "-c",
-  "shell_environment_policy.experimental_use_profile=true",
-];
-
 describe("codex.ts", () => {
   const worktreePath = "/tmp/worktree";
 
@@ -75,20 +74,33 @@ describe("codex.ts", () => {
     mockChildStdio.stdin = "inherit";
     mockChildStdio.stdout = "inherit";
     mockChildStdio.stderr = "inherit";
-    (execa as any).mockResolvedValue({
+    mockExeca.mockResolvedValue({
       stdout: "",
       stderr: "",
       exitCode: 0,
     });
+    mockResolveCodexCommand.mockReset();
+    mockResolveCodexCommand.mockResolvedValue({
+      command: "bunx",
+      args: ["@openai/codex@latest"],
+      usesFallback: true,
+    });
   });
 
-  it("should append default Codex CLI arguments on launch", async () => {
+  it("should invoke resolver and execute the returned command", async () => {
     await launchCodexCLI(worktreePath);
 
-    expect(execa).toHaveBeenCalledTimes(1);
-    const [, args, options] = (execa as any).mock.calls[0];
+    expect(mockResolveCodexCommand).toHaveBeenCalledWith({
+      mode: undefined,
+      bypassApprovals: undefined,
+      extraArgs: undefined,
+    });
 
-    expect(args).toEqual(["@openai/codex@latest", ...DEFAULT_CODEX_ARGS]);
+    expect(execa).toHaveBeenCalledTimes(1);
+    const [command, args, options] = mockExeca.mock.calls[0];
+
+    expect(command).toBe("bunx");
+    expect(args).toEqual(["@openai/codex@latest"]);
     expect(options).toMatchObject({
       cwd: worktreePath,
       stdin: "inherit",
@@ -99,38 +111,42 @@ describe("codex.ts", () => {
     expect(mockChildStdio.cleanup).toHaveBeenCalledTimes(1);
   });
 
-  it("should place extra arguments before the default set", async () => {
+  it("should pass extra arguments through resolver", async () => {
     await launchCodexCLI(worktreePath, { extraArgs: ["--custom-flag"] });
 
-    const [, args] = (execa as any).mock.calls[0];
-    expect(args).toEqual([
-      "@openai/codex@latest",
-      "--custom-flag",
-      ...DEFAULT_CODEX_ARGS,
-    ]);
+    expect(mockResolveCodexCommand).toHaveBeenCalledWith(
+      expect.objectContaining({ extraArgs: ["--custom-flag"] }),
+    );
   });
 
-  it("should include resume command arguments before defaults when continuing", async () => {
+  it("should pass mode information to resolver", async () => {
     await launchCodexCLI(worktreePath, { mode: "continue" });
+    expect(mockResolveCodexCommand).toHaveBeenCalledWith(
+      expect.objectContaining({ mode: "continue" }),
+    );
 
-    const [, args] = (execa as any).mock.calls[0];
-    expect(args).toEqual([
-      "@openai/codex@latest",
-      "resume",
-      "--last",
-      ...DEFAULT_CODEX_ARGS,
-    ]);
+    await launchCodexCLI(worktreePath, { mode: "resume" });
+    expect(mockResolveCodexCommand).toHaveBeenLastCalledWith(
+      expect.objectContaining({ mode: "resume" }),
+    );
+  });
+
+  it("should pass bypassApprovals flag to resolver", async () => {
+    await launchCodexCLI(worktreePath, { bypassApprovals: true });
+    expect(mockResolveCodexCommand).toHaveBeenCalledWith(
+      expect.objectContaining({ bypassApprovals: true }),
+    );
   });
 
   it("should hand off fallback file descriptors when stdin is not a TTY", async () => {
     mockTerminalStreams.usingFallback = true;
-    mockChildStdio.stdin = 11 as unknown as any;
-    mockChildStdio.stdout = 12 as unknown as any;
-    mockChildStdio.stderr = 13 as unknown as any;
+    mockChildStdio.stdin = 11;
+    mockChildStdio.stdout = 12;
+    mockChildStdio.stderr = 13;
 
     await launchCodexCLI(worktreePath);
 
-    const [, , options] = (execa as any).mock.calls[0];
+    const [, , options] = mockExeca.mock.calls[0];
     expect(options).toMatchObject({
       stdin: 11,
       stdout: 12,

@@ -10,6 +10,7 @@ import type { BranchInfo, BranchItem, Statistics } from '../../../types.js';
 import { formatBranchItem } from '../../../utils/branchFormatter.js';
 import stringWidth from 'string-width';
 import { Window } from 'happy-dom';
+import chalk from 'chalk';
 
 const stripAnsi = (value: string): string => value.replace(/\u001b\[[0-9;]*m/g, '');
 const stripControlSequences = (value: string): string =>
@@ -20,6 +21,12 @@ const stripControlSequences = (value: string): string =>
     }
     return '';
   });
+
+const flushInkUpdates = async () => {
+  await act(async () => {
+    await Promise.resolve();
+  });
+};
 
 describe('BranchListScreen', () => {
   beforeEach(() => {
@@ -289,5 +296,148 @@ describe('BranchListScreen', () => {
     } finally {
       process.stdout.columns = originalColumns;
     }
+  });
+
+  describe('selection state', () => {
+    const selectableBranch: BranchItem = formatBranchItem({
+      name: 'feature/cleanup-target',
+      type: 'local',
+      branchType: 'feature',
+      isCurrent: false,
+      latestCommitTimestamp: 1_700_100_000,
+    });
+
+    it('renders selection marker when branch is selected', async () => {
+      process.env.FORCE_COLOR = '1';
+      const onSelect = vi.fn();
+      const selected = new Set(['feature/test']);
+
+      let renderResult: ReturnType<typeof inkRender>;
+      await act(async () => {
+        renderResult = inkRender(
+          <BranchListScreen
+            branches={mockBranches}
+            stats={mockStats}
+            onSelect={onSelect}
+            selectedBranches={selected}
+          />,
+          { stripAnsi: false }
+        );
+      });
+
+      const frame = renderResult!.lastFrame() ?? '';
+      const featureLine = frame.split('\n').find((line) => line.includes('feature/test')) ?? '';
+      expect(featureLine).toContain('*');
+    });
+
+    it('highlights warning selections in red when branch has issues', async () => {
+      process.env.FORCE_COLOR = '1';
+      const onSelect = vi.fn();
+      const warningBranch = formatBranchItem({
+        name: 'feature/warn',
+        type: 'local',
+        branchType: 'feature',
+        isCurrent: false,
+        hasUnpushedCommits: true,
+        latestCommitTimestamp: 1_700_200_000,
+      });
+      const selected = new Set(['feature/warn']);
+
+      let renderResult: ReturnType<typeof inkRender>;
+      await act(async () => {
+        renderResult = inkRender(
+          <BranchListScreen
+            branches={[warningBranch]}
+            stats={mockStats}
+            onSelect={onSelect}
+            selectedBranches={selected}
+          />,
+          { stripAnsi: false }
+        );
+      });
+
+      const frame = renderResult!.lastFrame() ?? '';
+      expect(frame).toContain(chalk.red('*'));
+    });
+
+    it('invokes onToggleSelection when space is pressed on a selectable branch', async () => {
+      const onToggleSelection = vi.fn();
+      let renderResult: ReturnType<typeof inkRender>;
+      await act(async () => {
+        renderResult = inkRender(
+          <BranchListScreen
+            branches={[selectableBranch]}
+            stats={mockStats}
+            onSelect={vi.fn()}
+            onToggleSelection={onToggleSelection}
+            selectedBranches={new Set()}
+          />
+        );
+      });
+
+      renderResult!.stdin.write(' ');
+      await flushInkUpdates();
+
+      expect(onToggleSelection).toHaveBeenCalledWith('feature/cleanup-target');
+    });
+
+    it('does not toggle selection for protected branches', async () => {
+      const onToggleSelection = vi.fn();
+      const protectedBranch = mockBranches[0]; // main
+      let renderResult: ReturnType<typeof inkRender>;
+      await act(async () => {
+        renderResult = inkRender(
+          <BranchListScreen
+            branches={[protectedBranch]}
+            stats={mockStats}
+            onSelect={vi.fn()}
+            onToggleSelection={onToggleSelection}
+            selectedBranches={new Set()}
+          />
+        );
+      });
+
+      renderResult!.stdin.write(' ');
+      await flushInkUpdates();
+
+      expect(onToggleSelection).not.toHaveBeenCalled();
+    });
+
+    it('invokes onClearSelection when escape key is pressed', async () => {
+      const onClearSelection = vi.fn();
+      let renderResult: ReturnType<typeof inkRender>;
+      await act(async () => {
+        renderResult = inkRender(
+          <BranchListScreen
+            branches={[selectableBranch]}
+            stats={mockStats}
+            onSelect={vi.fn()}
+            onClearSelection={onClearSelection}
+            selectedBranches={new Set(['feature/cleanup-target'])}
+          />
+        );
+      });
+
+      renderResult!.stdin.write('\u001B');
+      await flushInkUpdates();
+
+      expect(onClearSelection).toHaveBeenCalled();
+    });
+
+    it('displays selection summary message when selections exist', async () => {
+      const onSelect = vi.fn();
+      const selected = new Set(['feature/test', 'feature/cleanup-target']);
+
+      const { getByText } = render(
+        <BranchListScreen
+          branches={[...mockBranches, selectableBranch]}
+          stats={mockStats}
+          onSelect={onSelect}
+          selectedBranches={selected}
+        />
+      );
+
+      expect(getByText(/選択中: 2個のブランチ/)).toBeDefined();
+    });
   });
 });
