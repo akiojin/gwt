@@ -1,5 +1,8 @@
 import React, { useState } from "react";
-import type { CustomAITool } from "../../../../types/api.js";
+import type {
+  CustomAITool,
+  EnvironmentVariable,
+} from "../../../../types/api.js";
 
 export interface CustomToolFormValue {
   id: string;
@@ -11,7 +14,7 @@ export interface CustomToolFormValue {
   defaultArgs?: string[] | null;
   modeArgs: CustomAITool["modeArgs"];
   permissionSkipArgs?: string[] | null;
-  env?: Record<string, string> | null;
+  env?: EnvironmentVariable[] | null;
 }
 
 interface CustomToolFormProps {
@@ -54,7 +57,7 @@ export function CustomToolForm({ initialValue, onSubmit, onCancel, isSaving }: C
     }
 
     const envResult = parseEnv(formState.env);
-    let parsedEnv: Record<string, string> | null = null;
+    let parsedEnv: EnvironmentVariable[] | null = null;
     if (envResult instanceof Error) {
       nextErrors.env = envResult.message;
     } else {
@@ -238,32 +241,49 @@ function parseList(value: string): string[] | null {
   return values.length ? values : null;
 }
 
-function stringifyEnv(env?: Record<string, string> | null): string {
-  if (!env) {
+function stringifyEnv(env?: EnvironmentVariable[] | null): string {
+  if (!env || env.length === 0) {
     return "";
   }
-  return Object.entries(env)
-    .map(([key, val]) => `${key}=${val}`)
+  return env
+    .filter((variable) => variable.key)
+    .map((variable) => `${variable.key}=${variable.value}`)
     .join("\n");
 }
 
-function parseEnv(value: string): Record<string, string> | null | Error {
+function parseEnv(value: string): EnvironmentVariable[] | null | Error {
   if (!value.trim()) {
     return null;
   }
-  const entries: Record<string, string> = {};
+
+  const now = new Date().toISOString();
+  const result: EnvironmentVariable[] = [];
+  const seen = new Set<string>();
   const lines = value
     .split(/\n/)
     .map((line) => line.trim())
     .filter(Boolean);
 
   for (const line of lines) {
-    const [key, ...rest] = line.split("=");
+    const [rawKey, ...rest] = line.split("=");
+    const key = (rawKey ?? "").trim();
     if (!key || rest.length === 0) {
       return new Error("環境変数は key=value 形式で入力してください");
     }
-    entries[key] = rest.join("=");
+    const val = rest.join("=").trim();
+    if (!val) {
+      return new Error(`${key} の値を入力してください`);
+    }
+    if (seen.has(key)) {
+      return new Error(`環境変数 ${key} が重複しています`);
+    }
+    seen.add(key);
+    result.push({
+      key,
+      value: val,
+      lastUpdated: now,
+    });
   }
 
-  return entries;
+  return result;
 }

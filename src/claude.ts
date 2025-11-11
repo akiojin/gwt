@@ -7,6 +7,7 @@ import {
   resolveClaudeCommand,
   AIToolResolutionError,
   type ResolvedCommand,
+  CLAUDE_CLI_PACKAGE,
 } from "./services/aiToolResolver.js";
 export class ClaudeError extends Error {
   constructor(
@@ -101,22 +102,9 @@ export async function launchClaudeCode(
         console.log(
           chalk.green("   ✨ Using locally installed claude command"),
         );
-        await execa("claude", args, {
-          cwd: worktreePath,
-          shell: true,
-          stdin: childStdio.stdin,
-          stdout: childStdio.stdout,
-          stderr: childStdio.stderr,
-          env:
-            isRoot && options.skipPermissions
-              ? { ...baseEnv, IS_SANDBOX: "1" }
-              : baseEnv,
-        } as any);
       } else {
         console.log(
-          chalk.cyan(
-            "   🔄 Falling back to bunx @anthropic-ai/claude-code@latest",
-          ),
+          chalk.cyan(`   🔄 Falling back to bunx ${CLAUDE_CLI_PACKAGE}`),
         );
         console.log(
           chalk.yellow(
@@ -138,22 +126,12 @@ export async function launchClaudeCode(
         );
         console.log("");
         await new Promise((resolve) => setTimeout(resolve, 2000));
-        await execa("bunx", [CLAUDE_CLI_PACKAGE, ...args], {
-          cwd: worktreePath,
-          shell: true,
-          stdin: childStdio.stdin,
-          stdout: childStdio.stdout,
-          stderr: childStdio.stderr,
-          env:
-            isRoot && options.skipPermissions
-              ? { ...baseEnv, IS_SANDBOX: "1" }
-              : baseEnv,
-        } as any);
       }
 
-      const env = lastResolvedCommand.env
-        ? { ...lastResolvedCommand.env }
-        : { ...process.env };
+      const env = {
+        ...baseEnv,
+        ...(lastResolvedCommand.env ?? {}),
+      };
       if (isRoot && options.skipPermissions) {
         env.IS_SANDBOX = "1";
       }

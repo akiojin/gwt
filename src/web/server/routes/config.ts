@@ -212,80 +212,9 @@ export async function registerConfigRoutes(
       reply.code(500);
       return {
         success: false,
-        error: isValidationError
-          ? "Invalid tools configuration"
-          : "Failed to update config",
-        details: message,
+        error: "Failed to update config",
+        details: errorMsg,
       };
     }
   });
-}
-
-function mapConfigToolToApi(tool: ConfigCustomAITool): ApiCustomAITool {
-  return {
-    id: tool.id,
-    displayName: tool.displayName,
-    icon: tool.icon ?? null,
-    executionType: tool.type,
-    command: tool.command,
-    defaultArgs: tool.defaultArgs ?? null,
-    modeArgs: {
-      normal: tool.modeArgs?.normal ?? [],
-      continue: tool.modeArgs?.continue ?? [],
-      resume: tool.modeArgs?.resume ?? [],
-    },
-    permissionSkipArgs: tool.permissionSkipArgs ?? null,
-    env: tool.env ?? null,
-    description: tool.description ?? null,
-    createdAt: tool.createdAt ?? new Date(0).toISOString(),
-    updatedAt: tool.updatedAt ?? tool.createdAt ?? new Date(0).toISOString(),
-  };
-}
-
-function mapApiToolToConfig(tool: ApiCustomAITool): ConfigCustomAITool {
-  const modeArgs: ConfigCustomAITool["modeArgs"] = {};
-  if (tool.modeArgs?.normal !== undefined) {
-    modeArgs.normal = tool.modeArgs.normal;
-  }
-  if (tool.modeArgs?.continue !== undefined) {
-    modeArgs.continue = tool.modeArgs.continue;
-  }
-  if (tool.modeArgs?.resume !== undefined) {
-    modeArgs.resume = tool.modeArgs.resume;
-  }
-
-  const configTool: ConfigCustomAITool = {
-    id: tool.id,
-    displayName: tool.displayName,
-    type: tool.executionType,
-    command: tool.command,
-    modeArgs,
-    createdAt: tool.createdAt,
-    updatedAt: tool.updatedAt,
-  };
-
-  if (tool.icon !== null && tool.icon !== undefined) {
-    configTool.icon = tool.icon;
-  }
-
-  if (tool.description !== null && tool.description !== undefined) {
-    configTool.description = tool.description;
-  }
-
-  if (tool.defaultArgs !== null && tool.defaultArgs !== undefined) {
-    configTool.defaultArgs = tool.defaultArgs;
-  }
-
-  if (
-    tool.permissionSkipArgs !== null &&
-    tool.permissionSkipArgs !== undefined
-  ) {
-    configTool.permissionSkipArgs = tool.permissionSkipArgs;
-  }
-
-  if (tool.env !== null && tool.env !== undefined) {
-    configTool.env = tool.env;
-  }
-
-  return configTool;
 }

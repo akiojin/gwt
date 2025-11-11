@@ -18,7 +18,7 @@
     "dev:client": "vite src/web/client",
     "dev:web": "concurrently \"bun run dev:server\" \"bun run dev:client\"",
     "start": "bun ./dist/index.js",
-    "start:web": "node ./dist/index.js serve",
+    "start:web": "bun ./dist/index.js serve",
     "prepare": "husky",
     "pretest": "bun run build:cli",
     "test": "vitest run",

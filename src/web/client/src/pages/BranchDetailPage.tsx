@@ -78,10 +78,6 @@ const MERGE_STATUS_TONE: Record<Branch["mergeStatus"], "success" | "warning" | "
 export function BranchDetailPage() {
   const { branchName } = useParams<{ branchName: string }>();
   const decodedBranchName = branchName ? decodeURIComponent(branchName) : "";
-  const navigate = useNavigate();
-  const location = useLocation();
-  const queryClient = useQueryClient();
-
   const { data: branch, isLoading, error } = useBranch(decodedBranchName);
   const syncBranch = useSyncBranch(decodedBranchName);
   const createWorktree = useCreateWorktree();
