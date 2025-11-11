@@ -7,6 +7,8 @@ const UNKNOWN_BASE = "__unknown__";
 interface BranchGraphProps {
   branches: Branch[];
   onSelectBranch?: (branch: Branch) => void;
+  activeBase?: string | null;
+  onBaseFilterChange?: (base: string | null) => void;
 }
 
 interface CenterNodeDescriptor {
@@ -24,12 +26,7 @@ interface RadialNodeDescriptor {
   isPrimaryOrbit: boolean;
 }
 
-const PRIMARY_BASES = [
-  "main",
-  "origin/main",
-  "develop",
-  "origin/develop",
-];
+const PRIMARY_BASES = ["main", "origin/main", "develop", "origin/develop"] as const;
 
 function formatBranchLabel(branch: Branch): string {
   return branch.name.length > 32
@@ -48,7 +45,12 @@ function getDivergenceLabel(branch: Branch): string {
   return `divergence: +${ahead} / -${behind}`;
 }
 
-export function BranchGraph({ branches, onSelectBranch }: BranchGraphProps) {
+export function BranchGraph({
+  branches,
+  onSelectBranch,
+  activeBase,
+  onBaseFilterChange,
+}: BranchGraphProps) {
   const branchMap = useMemo(() => {
     return new Map(branches.map((branch) => [branch.name, branch]));
   }, [branches]);
@@ -131,6 +133,16 @@ export function BranchGraph({ branches, onSelectBranch }: BranchGraphProps) {
     return { centerNodes: centers, radialNodes: radial };
   }, [branches, branchMap, referencedBases]);
 
+  const baseFilters = useMemo(() => {
+    const labels = new Set<string>();
+    radialNodes.forEach((node) => {
+      if (node.baseLabel !== "detached") {
+        labels.add(node.baseLabel);
+      }
+    });
+    return Array.from(labels).sort((a, b) => a.localeCompare(b, "ja"));
+  }, [radialNodes]);
+
   if (!branches.length) {
     return (
       <section className="branch-graph-panel">
@@ -147,6 +159,13 @@ export function BranchGraph({ branches, onSelectBranch }: BranchGraphProps) {
       onSelectBranch?.(branch);
     },
     [onSelectBranch],
+  );
+
+  const handleBaseChipClick = useCallback(
+    (base: string | null) => {
+      onBaseFilterChange?.(base);
+    },
+    [onBaseFilterChange],
   );
 
   return (
@@ -166,6 +185,31 @@ export function BranchGraph({ branches, onSelectBranch }: BranchGraphProps) {
           <span className="graph-chip graph-chip--remote">Remote</span>
           <span className="graph-chip graph-chip--worktree">Worktree</span>
         </div>
+        {baseFilters.length > 0 && (
+          <div className="branch-graph__filters" role="group" aria-label="ベースブランチのフィルター">
+            <button
+              type="button"
+              className={`branch-graph__filter ${!activeBase ? "is-active" : ""}`}
+              onClick={() => handleBaseChipClick(null)}
+              aria-pressed={!activeBase}
+              aria-label="すべてのベースを表示"
+            >
+              すべて
+            </button>
+            {baseFilters.map((base) => (
+              <button
+                key={base}
+                type="button"
+                className={`branch-graph__filter ${activeBase === base ? "is-active" : ""}`}
+                onClick={() => handleBaseChipClick(activeBase === base ? null : base)}
+                aria-pressed={activeBase === base}
+                aria-label={`${base} を中心に表示`}
+              >
+                {base}
+              </button>
+            ))}
+          </div>
+        )}
       </header>
 
       <div className="radial-graph">
@@ -174,6 +218,7 @@ export function BranchGraph({ branches, onSelectBranch }: BranchGraphProps) {
             <RadialBranchNode
               key={node.branch.name}
               node={node}
+              isDimmed={Boolean(activeBase && node.baseLabel !== activeBase)}
               onSelect={handleNodeSelect}
             />
           ))}
@@ -186,7 +231,11 @@ export function BranchGraph({ branches, onSelectBranch }: BranchGraphProps) {
         </div>
         <div className="radial-graph__core">
           {centerNodes.map((center) => (
-            <CoreNode key={center.id} descriptor={center} />
+            <CoreNode
+              key={center.id}
+              descriptor={center}
+              isHighlighted={activeBase ? center.label === activeBase : false}
+            />
           ))}
         </div>
       </div>
@@ -194,10 +243,18 @@ export function BranchGraph({ branches, onSelectBranch }: BranchGraphProps) {
   );
 }
 
-function CoreNode({ descriptor }: { descriptor: CenterNodeDescriptor }) {
+function CoreNode({
+  descriptor,
+  isHighlighted,
+}: {
+  descriptor: CenterNodeDescriptor;
+  isHighlighted?: boolean;
+}) {
   const content = (
     <div
-      className={`radial-core__node ${descriptor.branch ? `radial-core__node--${descriptor.branch.type}` : ""}`}
+      className={`radial-core__node ${
+        descriptor.branch ? `radial-core__node--${descriptor.branch.type}` : ""
+      } ${isHighlighted ? "radial-core__node--active" : ""}`}
     >
       <p className="radial-core__label">{descriptor.label}</p>
       <p className="radial-core__meta">
@@ -232,9 +289,11 @@ function CoreNode({ descriptor }: { descriptor: CenterNodeDescriptor }) {
 function RadialBranchNode({
   node,
   onSelect,
+  isDimmed,
 }: {
   node: RadialNodeDescriptor;
   onSelect?: (branch: Branch) => void;
+  isDimmed?: boolean;
 }) {
   const handleSelect = () => {
     onSelect?.(node.branch);
@@ -259,7 +318,9 @@ function RadialBranchNode({
     <div
       className={`radial-node radial-node--${node.branch.type} ${
         node.branch.worktreePath ? "radial-node--worktree" : ""
-      } ${node.isPrimaryOrbit ? "radial-node--primary" : "radial-node--secondary"}`}
+      } ${node.isPrimaryOrbit ? "radial-node--primary" : "radial-node--secondary"} ${
+        isDimmed ? "radial-node--dimmed" : ""
+      }`}
       style={transform}
       role="button"
       tabIndex={0}

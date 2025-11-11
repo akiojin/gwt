@@ -789,6 +789,30 @@ button {
   align-items: center;
 }
 
+.branch-graph__filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.75rem;
+}
+
+.branch-graph__filter {
+  border: 1px solid rgba(148, 163, 184, 0.5);
+  background: transparent;
+  color: var(--color-muted);
+  padding: 0.25rem 0.75rem;
+  border-radius: var(--radius-pill);
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border 0.15s ease;
+}
+
+.branch-graph__filter.is-active {
+  background: rgba(59, 130, 246, 0.2);
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
 .branch-graph-panel__empty {
   text-align: center;
   color: var(--color-muted);
@@ -873,6 +897,11 @@ button {
   background: rgba(15, 23, 42, 0.6);
 }
 
+.radial-core__node--active {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+}
+
 .radial-core__node--local {
   border-color: rgba(192, 132, 252, 0.8);
 }
@@ -944,6 +973,11 @@ button {
   background: rgba(59, 130, 246, 0.2);
 }
 
+.radial-node--dimmed {
+  opacity: 0.25;
+  pointer-events: none;
+}
+
 .radial-node__label {
   font-weight: 600;
   display: block;
@@ -1004,6 +1038,18 @@ button {
   text-align: center;
   color: var(--color-muted);
   pointer-events: none;
+}
+
+.filter-pill {
+  border: 1px solid var(--color-border);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--color-text);
+  border-radius: var(--radius-pill);
+  padding: 0.3rem 0.65rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  cursor: pointer;
 }
 
 @media (max-width: 768px) {

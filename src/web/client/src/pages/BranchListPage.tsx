@@ -38,6 +38,7 @@ export function BranchListPage() {
   const [query, setQuery] = useState("");
   const [selectedBranch, setSelectedBranch] = useState<Branch | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("graph");
+  const [baseFilter, setBaseFilter] = useState<string | null>(null);
 
   const handleBranchSelection = useCallback((branch: Branch) => {
     setSelectedBranch(branch);
@@ -71,11 +72,7 @@ export function BranchListPage() {
   const normalizedQuery = query.trim().toLowerCase();
 
   const filteredBranches = useMemo(() => {
-    if (!normalizedQuery) {
-      return branches;
-    }
-
-    return branches.filter((branch) => {
+    const baseQueryFiltered = branches.filter((branch) => {
       const haystack = [
         branch.name,
         branch.type,
@@ -87,7 +84,21 @@ export function BranchListPage() {
         .toLowerCase();
       return haystack.includes(normalizedQuery);
     });
-  }, [branches, normalizedQuery]);
+
+    if (!baseFilter) {
+      return baseQueryFiltered;
+    }
+
+    return baseQueryFiltered.filter((branch) => {
+      if (branch.name === baseFilter) {
+        return true;
+      }
+      if (baseFilter === "detached") {
+        return !branch.baseBranch;
+      }
+      return branch.baseBranch === baseFilter;
+    });
+  }, [branches, normalizedQuery, baseFilter]);
 
   const pageState: PageStateMessage | null = useMemo(() => {
     if (isLoading) {
@@ -133,9 +144,11 @@ export function BranchListPage() {
       </header>
 
       <main className="page-content">
-        {!pageState && filteredBranches.length > 0 && viewMode === "graph" && (
+        {!pageState && branches.length > 0 && viewMode === "graph" && (
           <BranchGraph
-            branches={filteredBranches}
+            branches={filteredBranches.length ? filteredBranches : branches}
+            activeBase={baseFilter}
+            onBaseFilterChange={setBaseFilter}
             onSelectBranch={handleBranchSelection}
           />
         )}
@@ -206,6 +219,17 @@ export function BranchListPage() {
               リストビュー
             </button>
           </div>
+          {baseFilter && (
+            <button
+              type="button"
+              className="filter-pill"
+              onClick={() => setBaseFilter(null)}
+              aria-label={`${baseFilter} のフィルターを解除`}
+            >
+              {baseFilter}
+              <span aria-hidden="true">×</span>
+            </button>
+          )}
         </section>
 
         {pageState ? (

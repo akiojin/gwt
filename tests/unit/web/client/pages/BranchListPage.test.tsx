@@ -188,4 +188,21 @@ describe("BranchListPage", () => {
     expect(graphButton).toHaveAttribute("aria-pressed", "false");
     expect(listButton).toHaveAttribute("aria-pressed", "true");
   });
+
+  it("applies base branch filter to both graph and list views", () => {
+    renderPage();
+
+    const mainFilter = screen.getByRole("button", { name: "main を中心に表示" });
+    fireEvent.click(mainFilter);
+
+    switchToListView();
+
+    expect(screen.getByText("feature/design-refresh")).toBeInTheDocument();
+    expect(screen.queryByText("hotfix/security")).toBeNull();
+
+    const clearFilter = screen.getByRole("button", { name: "main のフィルターを解除" });
+    fireEvent.click(clearFilter);
+
+    expect(screen.getByText("hotfix/security")).toBeInTheDocument();
+  });
 });
