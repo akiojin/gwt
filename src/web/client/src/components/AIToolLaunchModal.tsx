@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import type { Branch, CustomAITool } from "../../../../types/api.js";
 import {
   CLAUDE_PERMISSION_SKIP_ARGS,
@@ -60,6 +61,7 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
   const startSession = useStartSession();
   const createWorktree = useCreateWorktree();
   const syncBranch = useSyncBranch(branch.name);
+  const navigate = useNavigate();
 
   const [selectedToolId, setSelectedToolId] = useState<string>("claude-code");
   const [selectedMode, setSelectedMode] = useState<ToolMode>("normal");
@@ -238,7 +240,7 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
 
       await startSession.mutateAsync(sessionRequest);
       setBanner({ type: "success", message: "AIツールを起動しました。セッション画面で出力を確認してください。" });
-      handleClose();
+      navigate(`/${encodeURIComponent(branch.name)}`);
     } catch (error) {
       setBanner({ type: "error", message: formatError(error, "セッションの起動に失敗しました") });
     } finally {
