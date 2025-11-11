@@ -91,7 +91,31 @@ export class WebSocketHandler {
     // 接続クローズ時の処理
     connection.on("close", () => {
       console.log(`WebSocket closed for session ${sessionId}`);
-      // PTYプロセスは残す（バックグラウンドで実行継続）
+
+      if (hasExited) {
+        return;
+      }
+
+      const tracked = this.ptyManager.get(sessionId);
+      if (!tracked) {
+        return;
+      }
+
+      if (
+        tracked.session.status === "running" ||
+        tracked.session.status === "pending"
+      ) {
+        console.warn(
+          `Auto-cleaning session ${sessionId} after unexpected client disconnect`,
+        );
+        this.ptyManager.updateStatus(
+          sessionId,
+          "failed",
+          undefined,
+          "Client disconnected",
+        );
+        this.ptyManager.delete(sessionId);
+      }
     });
   }
 
