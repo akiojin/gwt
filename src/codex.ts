@@ -41,6 +41,7 @@ export async function launchCodexCLI(
     mode?: "normal" | "continue" | "resume";
     extraArgs?: string[];
     bypassApprovals?: boolean;
+    envOverrides?: Record<string, string>;
   } = {},
 ): Promise<void> {
   const terminal = getTerminalStreams();
@@ -85,12 +86,15 @@ export async function launchCodexCLI(
 
     const childStdio = createChildStdio();
 
+    const env = { ...process.env, ...(options.envOverrides ?? {}) };
+
     try {
       await execa("bunx", [CODEX_CLI_PACKAGE, ...args], {
         cwd: worktreePath,
         stdin: childStdio.stdin,
         stdout: childStdio.stdout,
         stderr: childStdio.stderr,
+        env,
       } as any);
     } finally {
       childStdio.cleanup();

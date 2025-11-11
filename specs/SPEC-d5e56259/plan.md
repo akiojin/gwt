@@ -244,8 +244,13 @@ tests/
    - tools.json編集UI
 
 6. **P3 - ストーリー6**: Git操作ビジュアル化
-   - ブランチツリー表示
-   - 差分可視化
+   - **BranchRelationshipGraph**: Reactコンポーネントで各ベースブランチをレーン化し、ベースノード→派生ブランチをノードとエッジで表示（カラーでlocal/remote/mergedを表現）
+   - **補助情報**: ノードのツールチップに base branch / divergence / Worktree有無を表示し、クリックで`/:branchName`へ遷移
+   - **ベースブランチ推論パイプライン**:
+     1. GitHub CLI (`gh pr list`) の `baseRefName` を取得して、PRが存在するブランチのベースを確定
+     2. `git for-each-ref --format=%(refname:short)|%(upstream:short)` で取得したローカルブランチのupstream設定を使用
+     3. 残りのブランチは `main/master/develop/dev` とその `origin/` 版を候補とし、`git merge-base --is-ancestor` で最も近いベースを選択（該当なしの場合は`null`）
+   - **パフォーマンス要件**: 1000ブランチでもグラフが初期描画1秒以内になるよう、グラフ入力は`useMemo`で計算し、DOMノード数を最小化する（最大30レーン想定）
 
 ### 独立したデリバリー
 

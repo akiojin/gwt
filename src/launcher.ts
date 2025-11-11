@@ -97,8 +97,11 @@ export async function launchCustomAITool(
 ): Promise<void> {
   const args = buildArgs(tool, options);
 
-  // 環境変数の構築
-  const env = tool.env ? { ...process.env, ...tool.env } : process.env;
+  const env = {
+    ...process.env,
+    ...(options.sharedEnv ?? {}),
+    ...(tool.env ?? {}),
+  };
 
   // execa共通オプション（cwdがundefinedの場合は含めない）
   const execaOptions = {

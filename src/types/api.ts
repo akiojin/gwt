@@ -16,11 +16,19 @@ export interface Branch {
   author?: string | null;
   commitDate?: string | null; // ISO8601
   mergeStatus: "unmerged" | "merged" | "unknown";
+  hasUnpushedCommits: boolean;
   worktreePath?: string | null;
+  baseBranch?: string | null;
   divergence?: {
     ahead: number;
     behind: number;
     upToDate: boolean;
+  } | null;
+  prInfo?: {
+    number: number;
+    title: string;
+    state: "open" | "merged" | "closed";
+    mergedAt?: string | null;
   } | null;
 }
 
@@ -33,8 +41,11 @@ export interface Worktree {
   head: string;
   isLocked: boolean;
   isPrunable: boolean;
+  isProtected: boolean;
   createdAt?: string | null; // ISO8601
   lastAccessedAt?: string | null; // ISO8601
+  divergence?: Branch["divergence"];
+  prInfo?: Branch["prInfo"];
 }
 
 /**
@@ -58,16 +69,37 @@ export interface AIToolSession {
 /**
  * CustomAITool - カスタムAI Tool設定
  */
+export interface EnvironmentVariable {
+  key: string;
+  value: string;
+  lastUpdated?: string | null;
+  importedFromOs?: boolean;
+}
+
+export interface EnvironmentHistoryEntry {
+  key: string;
+  action: "add" | "update" | "delete" | "import";
+  timestamp: string;
+  source: "ui" | "os" | "cli";
+}
+
 export interface CustomAITool {
-  id: string; // UUID v4
-  name: string;
+  id: string; // UUID v4 or slug
+  displayName: string;
+  icon?: string | null;
   command: string;
   executionType: "path" | "bunx" | "command";
   defaultArgs?: string[] | null;
-  env?: Record<string, string> | null;
+  modeArgs: {
+    normal?: string[];
+    continue?: string[];
+    resume?: string[];
+  };
+  permissionSkipArgs?: string[] | null;
+  env?: EnvironmentVariable[] | null;
   description?: string | null;
-  createdAt: string; // ISO8601
-  updatedAt: string; // ISO8601
+  createdAt?: string | null; // ISO8601
+  updatedAt?: string | null; // ISO8601
 }
 
 /**
@@ -97,11 +129,20 @@ export interface HealthResponse {
 
 export type BranchListResponse = SuccessResponse<Branch[]>;
 export type BranchResponse = SuccessResponse<Branch>;
+export type BranchSyncResponse = SuccessResponse<BranchSyncResult>;
 export type WorktreeListResponse = SuccessResponse<Worktree[]>;
 export type WorktreeResponse = SuccessResponse<Worktree>;
 export type SessionListResponse = SuccessResponse<AIToolSession[]>;
 export type SessionResponse = SuccessResponse<AIToolSession>;
-export type ConfigResponse = SuccessResponse<{ tools: CustomAITool[] }>;
+export interface ConfigPayload {
+  version: string;
+  updatedAt?: string | null;
+  env?: EnvironmentVariable[] | null;
+  history?: EnvironmentHistoryEntry[] | null;
+  tools: CustomAITool[];
+}
+
+export type ConfigResponse = SuccessResponse<ConfigPayload>;
 
 /**
  * API Request bodies
@@ -111,6 +152,10 @@ export interface CreateWorktreeRequest {
   createBranch?: boolean;
 }
 
+export interface BranchSyncRequest {
+  worktreePath: string;
+}
+
 export interface StartSessionRequest {
   toolType: "claude-code" | "codex-cli" | "custom";
   toolName?: string | null;
@@ -118,15 +163,23 @@ export interface StartSessionRequest {
   worktreePath: string;
   skipPermissions?: boolean;
   bypassApprovals?: boolean;
+  extraArgs?: string[];
+  customToolId?: string | null;
 }
 
-export interface UpdateConfigRequest {
-  tools: CustomAITool[];
-}
+export type UpdateConfigRequest = ConfigPayload;
 
 export interface CleanupResponse {
   success: true;
   deleted: string[];
+}
+
+export interface BranchSyncResult {
+  branch: Branch;
+  divergence?: Branch["divergence"];
+  fetchStatus: "success";
+  pullStatus: "success" | "failed";
+  warnings?: string[];
 }
 
 /**

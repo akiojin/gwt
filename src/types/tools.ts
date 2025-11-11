@@ -134,6 +134,16 @@ export interface ToolsConfig {
   version: string;
 
   /**
+   * 設定ファイルの最終更新日時（ISO8601）
+   */
+  updatedAt?: string;
+
+  /**
+   * すべてのツールで共有する環境変数
+   */
+  env?: Record<string, string>;
+
+  /**
    * カスタムツール定義の配列
    *
    * 空配列も許可（ビルトインツールのみ使用）。
@@ -217,4 +227,9 @@ export interface LaunchOptions {
    * ツール起動時のcwdとして使用されます。
    */
   cwd?: string;
+
+  /**
+   * 共有環境変数（共通env + ローカル取り込み）
+   */
+  sharedEnv?: Record<string, string>;
 }

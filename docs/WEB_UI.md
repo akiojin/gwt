@@ -24,6 +24,8 @@ bunx . serve
 - すべてのローカル・リモートブランチを表示
 - マージステータス（merged/unmerged/unknown）
 - Worktreeの有無を表示
+- ベースブランチ推定（PR baseRef / Git upstream / merge-baseヒューリスティクス）に基づいたノードグラフ表示
+- グラフではBaseノード→派生ブランチがレーン上で接続され、ホバー時にbase/divergence/worktreeパスをツールチップ表示
 - ブランチ名クリックで詳細ページへ遷移
 
 ### 2. ブランチ詳細ページ (`/:branchName`)

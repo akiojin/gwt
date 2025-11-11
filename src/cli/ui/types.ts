@@ -91,6 +91,7 @@ export interface PullRequest {
   branch: string;
   mergedAt: string | null;
   author: string;
+  baseRefName?: string | null;
 }
 
 export interface MergedPullRequest {
@@ -136,6 +137,7 @@ export interface GitHubPRResponse {
   headRefName: string;
   mergedAt: string | null;
   author: GitHubPRAuthor | null;
+  baseRefName?: string | null;
 }
 
 // ========================================

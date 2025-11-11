@@ -107,6 +107,52 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /branches/{branchName}/sync:
+    post:
+      tags: [branches]
+      summary: Sync branch with remote
+      description: Runs git fetch --all and git pull --ff-only for the specified worktree, mirroring the CLI safety flow, and returns refreshed divergence metadata.
+      operationId: syncBranch
+      parameters:
+        - name: branchName
+          in: path
+          description: Branch name (URL-encoded)
+          required: true
+          schema:
+            type: string
+            example: 'feature%2Fwebui'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BranchSyncRequest'
+      responses:
+        '200':
+          description: Branch synced successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BranchSyncResponse'
+        '400':
+          description: Missing worktree path or invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Branch not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Git operation failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /worktrees:
     get:
       tags: [worktrees]
@@ -158,15 +204,15 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
-  /worktrees/{path}:
+  /worktrees/delete:
     delete:
       tags: [worktrees]
       summary: Delete worktree
-      description: Deletes the specified worktree
+      description: Deletes the specified worktree. Uses query parameters to avoid ambiguous path encoding.
       operationId: deleteWorktree
       parameters:
         - name: path
-          in: path
+          in: query
           description: Worktree path (URL-encoded)
           required: true
           schema:
@@ -187,13 +233,77 @@ paths:
               schema:
                 $ref: '#/components/schemas/SuccessResponse'
         '400':
-          description: Invalid request (worktree not found)
+          description: Invalid request (worktree not found, protected branch, uncommitted changes)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Worktree is locked or has pending operations
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '500':
           description: Git operation failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /worktrees/cleanup:
+    post:
+      tags: [worktrees]
+      summary: Cleanup worktrees and branches by rule
+      description: Performs cleanup (e.g., merged PR, divergence-free). Mirrors CLI cleanup targets.
+      operationId: cleanupWorktrees
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                type:
+                  type: string
+                  enum: [merged-pr, no-diff, orphaned]
+                  description: Cleanup strategy to apply
+                targets:
+                  type: array
+                  items:
+                    type: string
+                  description: Optional explicit worktree paths or branch names to cleanup
+      responses:
+        '200':
+          description: Cleanup summary
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  deleted:
+                    type: array
+                    items:
+                      type: string
+                  skipped:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        target:
+                          type: string
+                        reason:
+                          type: string
+        '400':
+          description: Invalid request (unknown type, protected branch)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Git or filesystem error
           content:
             application/json:
               schema:
@@ -442,10 +552,20 @@ components:
           type: string
           enum: [unmerged, merged, unknown]
           example: 'unmerged'
+        hasUnpushedCommits:
+          type: boolean
+          description: Indicates there are local commits not pushed to remote
+          example: false
         worktreePath:
           type: string
           nullable: true
           example: '/claude-worktree/.worktrees/feature-webui'
+        baseBranch:
+          type: string
+          nullable: true
+          example: 'main'
+          description: >
+            推定ベースブランチ（PRのbaseRef、Git upstream、merge-baseヒューリスティクスから算出）
         divergence:
           type: object
           nullable: true
@@ -462,6 +582,24 @@ components:
             upToDate:
               type: boolean
               example: false
+        prInfo:
+          type: object
+          nullable: true
+          properties:
+            number:
+              type: integer
+              example: 123
+            title:
+              type: string
+              example: 'Add web UI support'
+            state:
+              type: string
+              enum: [open, merged, closed]
+            mergedAt:
+              type: string
+              format: date-time
+              nullable: true
+              example: '2025-11-09T12:00:00Z'
 
     BranchListResponse:
       type: object
@@ -485,6 +623,44 @@ components:
         data:
           $ref: '#/components/schemas/Branch'
 
+    BranchSyncRequest:
+      type: object
+      required: [worktreePath]
+      properties:
+        worktreePath:
+          type: string
+          description: Path to the worktree associated with the branch
+          example: '/claude-worktree/.worktrees/feature-webui'
+
+    BranchSyncResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          type: object
+          required: [branch, divergence, fetchStatus, pullStatus]
+          properties:
+            branch:
+              $ref: '#/components/schemas/Branch'
+            divergence:
+              $ref: '#/components/schemas/Branch/properties/divergence'
+            fetchStatus:
+              type: string
+              enum: [success]
+              example: 'success'
+            pullStatus:
+              type: string
+              enum: [success, failed]
+              example: 'success'
+            warnings:
+              type: array
+              items:
+                type: string
+              example: ['Fast-forward pull failed; please resolve divergence manually.']
+
     Worktree:
       type: object
       required: [path, branchName, head, isLocked, isPrunable]
@@ -504,6 +680,14 @@ components:
         isPrunable:
           type: boolean
           example: false
+        isProtected:
+          type: boolean
+          description: Indicates worktree belongs to protected branch (main/master/develop)
+          example: true
+        divergence:
+          $ref: '#/components/schemas/Branch/properties/divergence'
+        prInfo:
+          $ref: '#/components/schemas/Branch/properties/prInfo'
         createdAt:
           type: string
           format: date-time
@@ -653,6 +837,15 @@ components:
         bypassApprovals:
           type: boolean
           default: false
+        extraArgs:
+          type: array
+          items:
+            type: string
+          description: Additional arguments passed to the tool (mirrors CLI extraArgs)
+        customToolId:
+          type: string
+          nullable: true
+          description: Optional identifier to reference tools.json entry when toolType is 'custom'
 
     SessionResponse:
       type: object
@@ -666,17 +859,21 @@ components:
 
     CustomAITool:
       type: object
-      required: [id, name, command, executionType, createdAt, updatedAt]
+      required: [id, displayName, command, executionType, modeArgs, createdAt, updatedAt]
       properties:
         id:
           type: string
           format: uuid
           example: '550e8400-e29b-41d4-a716-446655440000'
-        name:
+        displayName:
           type: string
           minLength: 1
           maxLength: 100
           example: 'My Custom Tool'
+        icon:
+          type: string
+          nullable: true
+          example: '🤖'
         command:
           type: string
           minLength: 1
@@ -692,6 +889,31 @@ components:
             type: string
           nullable: true
           example: ['--verbose']
+        modeArgs:
+          type: object
+          required: []
+          properties:
+            normal:
+              type: array
+              items:
+                type: string
+              description: Arguments added when launching in normal mode
+            continue:
+              type: array
+              items:
+                type: string
+              description: Arguments added for continue mode
+            resume:
+              type: array
+              items:
+                type: string
+              description: Arguments added for resume mode
+        permissionSkipArgs:
+          type: array
+          items:
+            type: string
+          nullable: true
+          description: Arguments appended when skipPermissions is true
         env:
           type: object
           additionalProperties:

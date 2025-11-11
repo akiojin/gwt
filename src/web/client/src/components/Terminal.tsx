@@ -106,9 +106,18 @@ export function Terminal({ sessionId, onExit, onError }: TerminalProps) {
 
     window.addEventListener("resize", handleResize);
 
+    let resizeObserver: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== "undefined") {
+      resizeObserver = new ResizeObserver(() => {
+        handleResize();
+      });
+      resizeObserver.observe(terminalRef.current);
+    }
+
     // クリーンアップ
     return () => {
       window.removeEventListener("resize", handleResize);
+      resizeObserver?.disconnect();
       ws.disconnect();
       xterm.dispose();
     };

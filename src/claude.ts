@@ -21,6 +21,7 @@ export async function launchClaudeCode(
     skipPermissions?: boolean;
     mode?: "normal" | "continue" | "resume";
     extraArgs?: string[];
+    envOverrides?: Record<string, string>;
   } = {},
 ): Promise<void> {
   const terminal = getTerminalStreams();
@@ -138,6 +139,11 @@ export async function launchClaudeCode(
 
     terminal.exitRawMode();
 
+    const baseEnv = {
+      ...process.env,
+      ...(options.envOverrides ?? {}),
+    };
+
     const childStdio = createChildStdio();
 
     // Auto-detect locally installed claude command
@@ -157,8 +163,8 @@ export async function launchClaudeCode(
           stderr: childStdio.stderr,
           env:
             isRoot && options.skipPermissions
-              ? { ...process.env, IS_SANDBOX: "1" }
-              : process.env,
+              ? { ...baseEnv, IS_SANDBOX: "1" }
+              : baseEnv,
         } as any);
       } else {
         // Fallback to bunx
@@ -196,8 +202,8 @@ export async function launchClaudeCode(
           stderr: childStdio.stderr,
           env:
             isRoot && options.skipPermissions
-              ? { ...process.env, IS_SANDBOX: "1" }
-              : process.env,
+              ? { ...baseEnv, IS_SANDBOX: "1" }
+              : baseEnv,
         } as any);
       }
     } finally {

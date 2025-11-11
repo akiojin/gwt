@@ -232,15 +232,19 @@
 
 **価値**: UXを大幅に向上。複雑なブランチ構造の理解が容易になる。
 
+### バックエンド実装
+
+- [ ] **T700** [US6] `src/web/server/services/branches.ts`で`baseBranch`メタデータを計算（PR baseRef → git upstream → merge-baseヒューリスティクス）、`src/types/api.ts`/REST APIスキーマに反映
+
 ### フロントエンド実装
 
-- [ ] **T701** [P] [US6] `src/web/client/src/components/BranchTree.tsx`にブランチツリー可視化コンポーネントを作成（d3.jsまたはmermaid.js使用）
-- [ ] **T702** [P] [US6] `src/web/client/src/components/BranchDetails.tsx`にブランチ詳細コンポーネントを作成（コミット履歴、差分）
-- [ ] **T703** [US6] T701, T702の後に `src/web/client/src/pages/BranchVisualization.tsx`にブランチ可視化ページを作成
+- [ ] **T701** [P] [US6] `src/web/client/src/components/BranchGraph.tsx`にノード&レーン表示コンポーネントを実装（base branchごとのレーン、コネクタ、ツールチップ含む）
+- [ ] **T702** [P] [US6] `src/web/client/src/pages/BranchListPage.tsx`にBranchGraphセクションを組み込み、検索結果と同期しつつ`/:branchName`への遷移を実装
+- [ ] **T703** [US6] `src/web/client/src/index.css`にグラフ用のトークン/スタイルを追加し、ライト/ダークテーマでも視認性を確保（レスポンシブ対応）
 
 ### テスト（US6）
 
-- [ ] **T704** [P] [US6] `tests/e2e/branch-visualization.test.ts`にE2Eテスト: ブランチツリー表示 → ブランチクリック → 詳細表示
+- [ ] **T704** [P] [US6] `tests/unit/web/client/components/BranchGraph.test.tsx`にグルーピング/ノード表示/アクセシビリティのユニットテストを追加
 
 **✅ 完全な機能**: US6完了後、すべての要件が満たされます
 
