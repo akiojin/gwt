@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { forceSimulation, forceManyBody, forceCollide, forceX, forceY } from "d3-force";
 import { Link } from "react-router-dom";
 import type { Branch } from "../../../../types/api.js";
 
@@ -27,6 +28,15 @@ interface RadialNodeDescriptor {
   baseLabel: string;
   isPrimaryOrbit: boolean;
 }
+
+interface ForceNode extends RadialNodeDescriptor {
+  x: number;
+  y: number;
+  vx?: number;
+  vy?: number;
+}
+
+type Coordinates = { x: number; y: number };
 
 type DivergenceFilter = "ahead" | "behind" | "upToDate";
 
@@ -76,7 +86,8 @@ export function BranchGraph({
   onDivergenceFilterChange,
 }: BranchGraphProps) {
   const orbitRef = useRef<HTMLDivElement | null>(null);
-  const [nodePositions, setNodePositions] = useState<Record<string, { x: number; y: number }>>({});
+  const [nodePositions, setNodePositions] = useState<Partial<Record<string, Coordinates>>>({});
+  const [layoutPositions, setLayoutPositions] = useState<Partial<Record<string, Coordinates>>>({});
   const [draggingNode, setDraggingNode] = useState<string | null>(null);
   const normalizedBranches = useMemo(() => {
     const map = new Map<string, Branch>();
@@ -223,27 +234,64 @@ export function BranchGraph({
     };
   }, [normalizedBranches, branchMap, referencedBases]);
 
-  const defaultPositions = useMemo(() => {
-    const map: Record<string, { x: number; y: number }> = {};
-    radialNodes.forEach((node) => {
-      const radians = (node.angle * Math.PI) / 180;
-      const x = node.radius * Math.cos(radians);
-      const y = node.radius * Math.sin(radians);
-      map[node.branch.name] = { x, y };
-    });
-    return map;
-  }, [radialNodes]);
-
   useEffect(() => {
     setNodePositions((prev) => {
-      const next: Record<string, { x: number; y: number }> = {};
+      const next: Partial<Record<string, Coordinates>> = {};
       radialNodes.forEach((node) => {
-        next[node.branch.name] =
-          prev[node.branch.name] ?? defaultPositions[node.branch.name] ?? { x: 0, y: 0 };
+        const existing = prev[node.branch.name];
+        if (existing) {
+          next[node.branch.name] = existing;
+        }
       });
       return next;
     });
-  }, [radialNodes, defaultPositions]);
+  }, [radialNodes]);
+
+  useEffect(() => {
+    if (!radialNodes.length) {
+      setLayoutPositions({});
+      return;
+    }
+
+    const nodes: ForceNode[] = radialNodes.map((node) => {
+      const coords = polarToCartesian(node.angle, node.radius);
+      return { ...node, x: coords.x, y: coords.y };
+    });
+
+    const simulation = forceSimulation(nodes)
+      .force("charge", forceManyBody().strength(-150))
+      .force("collide", forceCollide(NODE_WIDTH_PX * 0.65))
+      .force(
+        "x",
+        forceX<ForceNode>((d) => polarToCartesian(d.angle, d.radius).x).strength(0.12),
+      )
+      .force(
+        "y",
+        forceY<ForceNode>((d) => polarToCartesian(d.angle, d.radius).y).strength(0.12),
+      )
+      .alpha(1)
+      .alphaDecay(0.14)
+      .velocityDecay(0.35);
+
+    for (let i = 0; i < 160; i += 1) {
+      simulation.tick();
+    }
+
+    const nextPositions: Partial<Record<string, Coordinates>> = {};
+    nodes.forEach((node) => {
+      const fallback = polarToCartesian(node.angle, node.radius);
+      nextPositions[node.branch.name] = {
+        x: node.x ?? fallback.x,
+        y: node.y ?? fallback.y,
+      };
+    });
+
+    setLayoutPositions(nextPositions);
+
+    return () => {
+      simulation.stop();
+    };
+  }, [radialNodes]);
 
   const orbitSize = useMemo(() => {
     const radius = secondaryRadius ?? (MIN_PRIMARY_RADIUS + SECONDARY_RING_OFFSET);
@@ -256,6 +304,25 @@ export function BranchGraph({
     const base = primaryRadius ?? MIN_PRIMARY_RADIUS;
     return Math.min(Math.max(base * 0.9, 200), 320);
   }, [primaryRadius]);
+
+  const centerPositions = useMemo(() => {
+    if (!centerNodes.length) {
+      return new Map<string, Coordinates>();
+    }
+    const radius = Math.max(coreSize / 2 - 40, 48);
+    return new Map<string, Coordinates>(
+      centerNodes.map((center, index) => {
+        const angle = (index / centerNodes.length) * 2 * Math.PI;
+        return [
+          center.label,
+          {
+            x: radius * Math.cos(angle),
+            y: radius * Math.sin(angle),
+          },
+        ];
+      }),
+    );
+  }, [centerNodes, coreSize]);
 
   const baseFilters = useMemo(() => {
     const labels = new Set<string>();
@@ -426,10 +493,13 @@ export function BranchGraph({
             viewBox={`0 0 ${orbitSize} ${orbitSize}`}
           >
             {radialNodes.map((node) => {
+              const fallbackPosition = polarToCartesian(node.angle, node.radius);
               const resolvedPosition =
-                nodePositions[node.branch.name] ?? defaultPositions[node.branch.name] ?? { x: 0, y: 0 };
+                nodePositions[node.branch.name] ??
+                layoutPositions[node.branch.name] ??
+                fallbackPosition;
               const center = orbitSize / 2;
-              const baseCenter = baseCenterPosition(centerNodes, node.baseLabel, center);
+              const baseCenter = baseCenterPosition(centerPositions, node.baseLabel, center);
               const dimmed =
                 Boolean(activeBase && node.baseLabel !== activeBase) ||
                 Boolean(activeDivergence && !matchesDivergence(node.branch, activeDivergence));
@@ -447,8 +517,11 @@ export function BranchGraph({
             })}
           </svg>
           {radialNodes.map((node) => {
+            const fallbackPosition = polarToCartesian(node.angle, node.radius);
             const resolvedPosition =
-              nodePositions[node.branch.name] ?? defaultPositions[node.branch.name] ?? { x: 0, y: 0 };
+              nodePositions[node.branch.name] ??
+              layoutPositions[node.branch.name] ??
+              fallbackPosition;
             return (
               <RadialBranchNode
                 key={node.branch.name}
@@ -479,6 +552,7 @@ export function BranchGraph({
               key={center.id}
               descriptor={center}
               isHighlighted={activeBase ? center.label === activeBase : false}
+              position={centerPositions.get(center.label)}
             />
           ))}
         </div>
@@ -490,10 +564,18 @@ export function BranchGraph({
 function CoreNode({
   descriptor,
   isHighlighted,
+  position,
 }: {
   descriptor: CenterNodeDescriptor;
   isHighlighted?: boolean;
+  position?: Coordinates | undefined;
 }) {
+  const style = position
+    ? {
+        left: `calc(50% + ${position.x}px)`,
+        top: `calc(50% + ${position.y}px)`,
+      }
+    : undefined;
   const content = (
     <div
       className={`radial-core__node ${
@@ -515,16 +597,9 @@ function CoreNode({
     </div>
   );
 
-  if (descriptor.branch) {
-    return (
-      <div key={descriptor.id} className="radial-core__slot">
-        {content}
-      </div>
-    );
-  }
-
+  const slotClass = `radial-core__slot${descriptor.branch ? "" : " radial-core__slot--synthetic"}`;
   return (
-    <div key={descriptor.id} className="radial-core__slot radial-core__slot--synthetic">
+    <div className={slotClass} style={style}>
       {content}
     </div>
   );
@@ -540,7 +615,7 @@ function RadialBranchNode({
   node: RadialNodeDescriptor;
   onSelect?: (branch: Branch) => void;
   isDimmed?: boolean;
-  position?: { x: number; y: number };
+  position?: Coordinates;
   onPointerDown?: (branchName: string, event: React.PointerEvent) => void;
 }) {
   const handleSelect = () => {
@@ -615,22 +690,25 @@ function matchesDivergence(branch: Branch, filter: DivergenceFilter): boolean {
   return false;
 }
 
+function polarToCartesian(angleDeg: number, radius: number): Coordinates {
+  const radians = (angleDeg * Math.PI) / 180;
+  return {
+    x: radius * Math.cos(radians),
+    y: radius * Math.sin(radians),
+  };
+}
+
 function baseCenterPosition(
-  centers: CenterNodeDescriptor[],
+  positions: Map<string, Coordinates>,
   baseLabel: string,
   fallback: number,
 ): { x: number; y: number } {
-  const center = centers.find((c) => c.label === baseLabel);
-  if (!center) {
+  const position = positions.get(baseLabel);
+  if (!position) {
     return { x: fallback, y: fallback };
   }
-
-  // distribute core slots evenly in circle (simple heuristic)
-  const index = centers.indexOf(center);
-  const angle = (index / centers.length) * 2 * Math.PI;
-  const radius = 40;
   return {
-    x: fallback + radius * Math.cos(angle),
-    y: fallback + radius * Math.sin(angle),
+    x: fallback + position.x,
+    y: fallback + position.y,
   };
 }

@@ -5,7 +5,7 @@ import { BranchGraph } from "../components/BranchGraph";
 import { AIToolLaunchModal } from "../components/AIToolLaunchModal";
 import type { Branch } from "../../../../types/api.js";
 
-const numberFormatter = new Intl.NumberFormat("ja-JP");
+const numberFormatter = new Intl.NumberFormat("en-US");
 
 const BRANCH_TYPE_LABEL: Record<Branch["type"], string> = {
   local: "Local",
@@ -370,7 +370,7 @@ export function BranchListPage() {
                       branch.worktreePath ? "info-pill--success" : "info-pill--warning"
                     }`}
                   >
-                    {branch.worktreePath ?? "Worktree未作成"}
+                    {branch.worktreePath ?? "Worktree missing"}
                   </span>
                 </div>
               </article>

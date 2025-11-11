@@ -114,10 +114,10 @@ describe("BranchDetailPage", () => {
     renderPage();
 
     expect(screen.getByText("feature/design-refresh")).toBeInTheDocument();
-    expect(screen.getByText("コミット情報")).toBeInTheDocument();
-    expect(screen.getByText("差分状況")).toBeInTheDocument();
-    expect(screen.getByText("AIツール設定")).toBeInTheDocument();
-    expect(screen.getByText("ブランチ一覧を開く")).toBeInTheDocument();
+    expect(screen.getByText("AI tool settings")).toBeInTheDocument();
+    expect(screen.getByText("Branch insights")).toBeInTheDocument();
+    expect(screen.getByText("Session history")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Open branch list" })).toBeInTheDocument();
   });
 
   it("shows worktree creation CTA when no worktree is present", () => {
@@ -130,9 +130,9 @@ describe("BranchDetailPage", () => {
     renderPage();
 
     expect(
-      screen.getByRole("button", { name: "Worktreeを作成" }),
+      screen.getByRole("button", { name: "Create worktree" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("AIツール設定")).toBeInTheDocument();
+    expect(screen.getByText("AI tool settings")).toBeInTheDocument();
   });
 
   it("renders session history rows when data exists", () => {
@@ -154,7 +154,7 @@ describe("BranchDetailPage", () => {
     });
 
     renderPage();
-    expect(screen.getByText("セッション履歴")).toBeInTheDocument();
+    expect(screen.getByText("Session history")).toBeInTheDocument();
     expect(screen.getAllByTestId("session-row").length).toBe(1);
   });
 

@@ -16,7 +16,7 @@ vi.mock("../../../../../src/web/client/src/components/AIToolLaunchModal.tsx", ()
     <div data-testid="ai-tool-modal">
       <p>{branch.name}</p>
       <button type="button" onClick={onClose}>
-        モーダルを閉じる
+        Close modal
       </button>
     </div>
   ),
@@ -141,7 +141,7 @@ describe("BranchListPage", () => {
       "feature/design-refresh",
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "モーダルを閉じる" }));
+    fireEvent.click(screen.getByRole("button", { name: "Close modal" }));
     expect(screen.queryByTestId("ai-tool-modal")).toBeNull();
   });
 

@@ -167,9 +167,9 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
     setIsCreatingWorktree(true);
     try {
       await createWorktree.mutateAsync({ branchName: branch.name, createBranch: false });
-      setBanner({ type: "success", message: `${branch.name} のWorktreeを作成しました。再度同期を実行してください。` });
+      setBanner({ type: "success", message: `Worktree created for ${branch.name}. Please sync before launching.` });
     } catch (error) {
-      setBanner({ type: "error", message: formatError(error, "Worktreeの作成に失敗しました") });
+      setBanner({ type: "error", message: formatError(error, "Failed to create worktree") });
     } finally {
       setIsCreatingWorktree(false);
     }
@@ -177,44 +177,44 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
 
   const handleSyncBranch = async () => {
     if (!branch.worktreePath) {
-      setBanner({ type: "error", message: "Worktreeが存在しないため同期できません。" });
+      setBanner({ type: "error", message: "Cannot sync because worktree is missing." });
       return;
     }
     try {
       const result = await syncBranch.mutateAsync({ worktreePath: branch.worktreePath });
       if (result.pullStatus === "success") {
-        setBanner({ type: "success", message: "リモートの最新変更を取り込みました。" });
+        setBanner({ type: "success", message: "Fetched latest changes from remote." });
       } else {
-        const warning = result.warnings?.join("\n") ?? "fast-forward pull が完了しませんでした";
-        setBanner({ type: "error", message: `git pull --ff-only が失敗しました。\n${warning}` });
+        const warning = result.warnings?.join("\n") ?? "fast-forward pull did not complete.";
+        setBanner({ type: "error", message: `git pull --ff-only failed.\n${warning}` });
       }
     } catch (error) {
-      setBanner({ type: "error", message: formatError(error, "Git同期に失敗しました") });
+      setBanner({ type: "error", message: formatError(error, "Git sync failed") });
     }
   };
 
   const handleStartSession = async () => {
     if (!branch.worktreePath) {
-      setBanner({ type: "error", message: "Worktreeが存在しないため、先に作成してください。" });
+      setBanner({ type: "error", message: "Worktree missing. Create one first." });
       return;
     }
     if (!selectedTool) {
-      setBanner({ type: "error", message: "起動するAIツールを選択してください" });
+      setBanner({ type: "error", message: "Select an AI tool to launch." });
       return;
     }
     if (needsRemoteSync) {
-      setBanner({ type: "error", message: "リモートの更新を取り込むまでAIツールは起動できません。同期を実行してください。" });
+      setBanner({ type: "error", message: "Cannot launch until remote updates are synced." });
       return;
     }
     if (hasBlockingDivergence) {
       setBanner({
         type: "error",
-        message: "リモートとローカルの双方で進捗が発生しているため起動できません。rebase/merge 等で差分を解消してください。",
+        message: "Both remote and local have diverged. Resolve differences before launching.",
       });
       return;
     }
 
-    if (skipPermissions && !window.confirm("権限チェックをスキップして起動します。自己責任で実行してください。続行しますか？")) {
+    if (skipPermissions && !window.confirm("Skip permission checks? This is risky.")) {
       return;
     }
 
@@ -239,10 +239,10 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
       } as const;
 
       await startSession.mutateAsync(sessionRequest);
-      setBanner({ type: "success", message: "AIツールを起動しました。セッション画面で出力を確認してください。" });
+      handleClose();
       navigate(`/${encodeURIComponent(branch.name)}`);
     } catch (error) {
-      setBanner({ type: "error", message: formatError(error, "セッションの起動に失敗しました") });
+      setBanner({ type: "error", message: formatError(error, "Failed to start session") });
     } finally {
       setIsStartingSession(false);
     }
@@ -269,40 +269,40 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
 
         {configError && (
           <div className="inline-banner inline-banner--warning">
-            設定の取得に失敗しました: {configError instanceof Error ? configError.message : "unknown"}
+            Failed to load config: {configError instanceof Error ? configError.message : "unknown"}
           </div>
         )}
 
         {!branch.worktreePath && (
           <div className="inline-banner inline-banner--warning">
-            <p>Worktreeが未作成のため、AIツール起動の前に作成してください。</p>
+            <p>Worktree is missing. Create it before launching AI tools.</p>
             <button
               type="button"
               className="button button--secondary"
               onClick={handleCreateWorktree}
               disabled={isCreatingWorktree}
             >
-              {isCreatingWorktree ? "作成中..." : "Worktreeを作成"}
+              {isCreatingWorktree ? "Creating..." : "Create worktree"}
             </button>
           </div>
         )}
 
         {needsRemoteSync && (
           <div className="inline-banner inline-banner--info">
-            リモートに未取得の更新 ({branch.divergence?.behind ?? 0} commits) があるため、同期が必要です。
+            Remote has {branch.divergence?.behind ?? 0} commits you need to pull before launching.
           </div>
         )}
 
         {hasBlockingDivergence && (
           <div className="inline-banner inline-banner--warning">
-            リモートとローカルの両方に未解決の差分が存在します。rebase/merge 等で解消してください。
+            Both remote and local have unresolved differences. Rebase/merge before launching.
           </div>
         )}
 
         <div className="tool-form">
           <div className="form-grid">
             <label className="form-field">
-              <span>AIツール</span>
+            <span>AI tool</span>
               <select
                 value={selectedToolId}
                 onChange={(event) => setSelectedToolId(event.target.value)}
@@ -317,7 +317,7 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
             </label>
 
             <label className="form-field">
-              <span>起動モード</span>
+            <span>Launch mode</span>
               <select
                 value={selectedMode}
                 onChange={(event) => setSelectedMode(event.target.value as ToolMode)}
@@ -329,7 +329,7 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
             </label>
 
             <label className="form-field">
-              <span>追加引数 (スペース区切り)</span>
+              <span>Extra args (space separated)</span>
               <input
                 type="text"
                 value={extraArgsText}
@@ -340,14 +340,14 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
           </div>
 
           <label className="form-field">
-            <span>
-              <input
-                type="checkbox"
-                checked={skipPermissions}
-                onChange={(event) => setSkipPermissions(event.target.checked)}
-              />
-              <span style={{ marginLeft: "0.5rem" }}>権限チェックをスキップ (自己責任)</span>
-            </span>
+              <span>
+                <input
+                  type="checkbox"
+                  checked={skipPermissions}
+                  onChange={(event) => setSkipPermissions(event.target.checked)}
+                />
+                <span style={{ marginLeft: "0.5rem" }}>Skip permission checks (at your own risk)</span>
+              </span>
           </label>
 
           <div className="tool-card__actions">
@@ -357,7 +357,7 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
               onClick={handleStartSession}
               disabled={isStartingSession || !selectedTool || hasBlockingDivergence || needsRemoteSync}
             >
-              {isStartingSession ? "起動中..." : "セッションを起動"}
+              {isStartingSession ? "Launching..." : "Launch AI tool"}
             </button>
             <button
               type="button"
@@ -365,17 +365,17 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
               onClick={handleSyncBranch}
               disabled={!branch.worktreePath || syncBranch.isPending}
             >
-              {syncBranch.isPending ? "同期中..." : "最新の変更を同期"}
+              {syncBranch.isPending ? "Syncing..." : "Sync latest"}
             </button>
             <button type="button" className="button button--ghost" onClick={handleClose}>
-              キャンセル
+              Cancel
             </button>
           </div>
 
           {selectedToolSummary && (
             <dl className="metadata-grid metadata-grid--compact">
               <div>
-                <dt>コマンド</dt>
+                <dt>Command</dt>
                 <dd className="tool-card__command">{selectedToolSummary.command}</dd>
               </div>
               <div>
@@ -388,7 +388,7 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
               </div>
               {argsPreview && (
                 <div className="metadata-grid__full">
-                  <dt>最終的に実行されるコマンド</dt>
+                  <dt>Command to run</dt>
                   <dd className="tool-card__command">
                     {argsPreview.command} {argsPreview.args.join(" ")}
                   </dd>
