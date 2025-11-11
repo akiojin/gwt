@@ -45,6 +45,10 @@ export class WebSocketHandler {
       return;
     }
 
+    console.log(
+      `WebSocket connection established for session ${sessionId} (pid=${instance.ptyProcess.pid})`,
+    );
+
     this.clearCleanupTimer(sessionId);
 
     const { ptyProcess } = instance;
@@ -236,6 +240,7 @@ export class WebSocketHandler {
     if (timer) {
       clearTimeout(timer);
       this.cleanupTimers.delete(sessionId);
+      console.log(`Cleared cleanup timer for session ${sessionId}`);
     }
   }
 }
