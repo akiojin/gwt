@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { useBranch } from "../hooks/useBranches";
 import { useCreateWorktree } from "../hooks/useWorktrees";
 import { useSessions, useDeleteSession } from "../hooks/useSessions";
@@ -7,6 +7,7 @@ import { useConfig } from "../hooks/useConfig";
 import { ApiError } from "../lib/api";
 import { Terminal } from "../components/Terminal";
 import type { Branch } from "../../../../types/api.js";
+import { useQueryClient } from "@tanstack/react-query";
 
 interface BannerState {
   type: "success" | "error" | "info";
@@ -34,6 +35,8 @@ export function BranchDetailPage() {
   const { branchName } = useParams<{ branchName: string }>();
   const decodedBranchName = branchName ? decodeURIComponent(branchName) : "";
   const navigate = useNavigate();
+  const location = useLocation();
+  const queryClient = useQueryClient();
 
   const { data: branch, isLoading, error } = useBranch(decodedBranchName);
   const createWorktree = useCreateWorktree();
@@ -77,6 +80,17 @@ export function BranchDetailPage() {
       .filter((session) => session.worktreePath === branch?.worktreePath)
       .sort((a, b) => (b.startedAt ?? "").localeCompare(a.startedAt ?? ""));
   }, [sessionsData, branch?.worktreePath]);
+
+  const focusSessionId = (location.state as { focusSessionId?: string } | null)?.focusSessionId;
+
+  useEffect(() => {
+    if (!focusSessionId) {
+      return;
+    }
+    setActiveSessionId(focusSessionId);
+    setIsTerminalFullscreen(false);
+    navigate(location.pathname + location.search, { replace: true, state: {} });
+  }, [focusSessionId, navigate, location.pathname, location.search]);
 
   useEffect(() => {
     if (!branchSessions.length) {
@@ -172,6 +186,7 @@ export function BranchDetailPage() {
       if (activeSessionId === sessionId) {
         setActiveSessionId(null);
       }
+      queryClient.invalidateQueries({ queryKey: ["sessions"] });
     } catch (err) {
       setBanner({ type: "error", message: formatError(err, "Failed to terminate session") });
     } finally {
@@ -184,6 +199,7 @@ export function BranchDetailPage() {
   const handleSessionExit = (code: number) => {
     setActiveSessionId(null);
     setIsTerminalFullscreen(false);
+    queryClient.invalidateQueries({ queryKey: ["sessions"] });
     setBanner({
       type: code === 0 ? "success" : "error",
       message: `Session exited with code ${code}.`,

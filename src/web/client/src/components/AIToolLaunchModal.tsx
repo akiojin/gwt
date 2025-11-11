@@ -238,9 +238,11 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
         ...(extraArgs.length ? { extraArgs } : {}),
       } as const;
 
-      await startSession.mutateAsync(sessionRequest);
+      const session = await startSession.mutateAsync(sessionRequest);
       handleClose();
-      navigate(`/${encodeURIComponent(branch.name)}`);
+      navigate(`/${encodeURIComponent(branch.name)}`, {
+        state: { focusSessionId: session.sessionId },
+      });
     } catch (error) {
       setBanner({ type: "error", message: formatError(error, "Failed to start session") });
     } finally {
