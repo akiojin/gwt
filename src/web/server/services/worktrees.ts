@@ -61,7 +61,7 @@ export async function createNewWorktree(
     getCurrentBranch(),
   ]);
 
-  const worktreePath = await generateWorktreePath(branchName, repoRoot);
+  const worktreePath = await generateWorktreePath(repoRoot, branchName);
 
   await createWorktreeCore({
     branchName,
