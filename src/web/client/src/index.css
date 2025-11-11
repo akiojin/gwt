@@ -929,10 +929,8 @@ button {
 
 .radial-node {
   position: absolute;
-  left: 50%;
-  top: 50%;
-  transform-origin: center center;
-  transition: transform 0.2s ease, filter 0.2s ease;
+  transform: translate(-50%, -50%);
+  transition: filter 0.2s ease;
 }
 
 .radial-node__content {

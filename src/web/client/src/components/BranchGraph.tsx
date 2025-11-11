@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import type { Branch } from "../../../../types/api.js";
 
@@ -66,6 +66,9 @@ export function BranchGraph({
   activeDivergence,
   onDivergenceFilterChange,
 }: BranchGraphProps) {
+  const orbitRef = useRef<HTMLDivElement | null>(null);
+  const [nodePositions, setNodePositions] = useState<Record<string, { x: number; y: number }>>({});
+  const [draggingNode, setDraggingNode] = useState<string | null>(null);
   const branchMap = useMemo(() => {
     return new Map(branches.map((branch) => [branch.name, branch]));
   }, [branches]);
@@ -162,6 +165,28 @@ export function BranchGraph({
     };
   }, [branches, branchMap, referencedBases]);
 
+  const defaultPositions = useMemo(() => {
+    const map: Record<string, { x: number; y: number }> = {};
+    radialNodes.forEach((node) => {
+      const radians = (node.angle * Math.PI) / 180;
+      const x = node.radius * Math.cos(radians);
+      const y = node.radius * Math.sin(radians);
+      map[node.branch.name] = { x, y };
+    });
+    return map;
+  }, [radialNodes]);
+
+  useEffect(() => {
+    setNodePositions((prev) => {
+      const next: Record<string, { x: number; y: number }> = {};
+      radialNodes.forEach((node) => {
+        next[node.branch.name] =
+          prev[node.branch.name] ?? defaultPositions[node.branch.name] ?? { x: 0, y: 0 };
+      });
+      return next;
+    });
+  }, [radialNodes, defaultPositions]);
+
   const orbitSize = useMemo(() => {
     const radius = secondaryRadius ?? (MIN_PRIMARY_RADIUS + SECONDARY_RING_OFFSET);
     const diameter = (radius + 140) * 2;
@@ -200,6 +225,59 @@ export function BranchGraph({
       onSelectBranch?.(branch);
     },
     [onSelectBranch],
+  );
+
+  const updatePositionFromPointer = useCallback(
+    (clientX: number, clientY: number, branchName: string) => {
+      const orbit = orbitRef.current;
+      if (!orbit) {
+        return;
+      }
+      const rect = orbit.getBoundingClientRect();
+      const centerX = rect.left + rect.width / 2;
+      const centerY = rect.top + rect.height / 2;
+      let dx = clientX - centerX;
+      let dy = clientY - centerY;
+      const maxRadius = Math.max(Math.min(rect.width, rect.height) / 2 - 40, MIN_PRIMARY_RADIUS);
+      const distance = Math.sqrt(dx * dx + dy * dy);
+      if (distance > maxRadius) {
+        const ratio = maxRadius / distance;
+        dx *= ratio;
+        dy *= ratio;
+      }
+      setNodePositions((prev) => ({
+        ...prev,
+        [branchName]: { x: dx, y: dy },
+      }));
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (!draggingNode) {
+      return undefined;
+    }
+    const handlePointerMove = (event: PointerEvent) => {
+      updatePositionFromPointer(event.clientX, event.clientY, draggingNode);
+    };
+    const handlePointerUp = () => {
+      setDraggingNode(null);
+    };
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+    };
+  }, [draggingNode, updatePositionFromPointer]);
+
+  const handleNodePointerDown = useCallback(
+    (branchName: string, event: React.PointerEvent) => {
+      event.preventDefault();
+      setDraggingNode(branchName);
+      updatePositionFromPointer(event.clientX, event.clientY, branchName);
+    },
+    [updatePositionFromPointer],
   );
 
   const handleBaseChipClick = useCallback(
@@ -289,18 +367,25 @@ export function BranchGraph({
         <div
           className="radial-graph__orbit"
           style={{ width: `${orbitSize}px`, height: `${orbitSize}px` }}
+          ref={orbitRef}
         >
-          {radialNodes.map((node) => (
-            <RadialBranchNode
-              key={node.branch.name}
-              node={node}
-              isDimmed={
-                Boolean(activeBase && node.baseLabel !== activeBase) ||
-                Boolean(activeDivergence && !matchesDivergence(node.branch, activeDivergence))
-              }
-              onSelect={handleNodeSelect}
-            />
-          ))}
+          {radialNodes.map((node) => {
+            const resolvedPosition =
+              nodePositions[node.branch.name] ?? defaultPositions[node.branch.name] ?? { x: 0, y: 0 };
+            return (
+              <RadialBranchNode
+                key={node.branch.name}
+                node={node}
+                isDimmed={
+                  Boolean(activeBase && node.baseLabel !== activeBase) ||
+                  Boolean(activeDivergence && !matchesDivergence(node.branch, activeDivergence))
+                }
+                position={resolvedPosition}
+                onSelect={handleNodeSelect}
+                onPointerDown={handleNodePointerDown}
+              />
+            );
+          })}
           {!radialNodes.length && (
             <div className="radial-graph__empty-hint">
               <p>派生ブランチがまだありません。</p>
@@ -372,10 +457,14 @@ function RadialBranchNode({
   node,
   onSelect,
   isDimmed,
+  position,
+  onPointerDown,
 }: {
   node: RadialNodeDescriptor;
   onSelect?: (branch: Branch) => void;
   isDimmed?: boolean;
+  position?: { x: number; y: number };
+  onPointerDown?: (branchName: string, event: React.PointerEvent) => void;
 }) {
   const handleSelect = () => {
     onSelect?.(node.branch);
@@ -389,12 +478,11 @@ function RadialBranchNode({
   };
 
   const detailLink = `/${encodeURIComponent(node.branch.name)}`;
-  const transform = {
-    transform: `rotate(${node.angle}deg) translate(${node.radius}px)`
-  } as React.CSSProperties;
-  const contentRotation = {
-    transform: `rotate(${-node.angle}deg)`
-  } as React.CSSProperties;
+  const coords = position ?? { x: 0, y: 0 };
+  const nodeStyle: React.CSSProperties = {
+    left: `calc(50% + ${coords.x}px)`,
+    top: `calc(50% + ${coords.y}px)`,
+  };
 
   return (
     <div
@@ -403,15 +491,16 @@ function RadialBranchNode({
       } ${node.isPrimaryOrbit ? "radial-node--primary" : "radial-node--secondary"} ${
         isDimmed ? "radial-node--dimmed" : ""
       }`}
-      style={transform}
+      style={nodeStyle}
       role="button"
       tabIndex={0}
       aria-label={`${node.branch.name} を選択`}
       onClick={handleSelect}
       onKeyDown={handleKeyDown}
+      onPointerDown={(event) => onPointerDown?.(node.branch.name, event)}
       data-base-label={node.baseLabel}
     >
-      <div className="radial-node__content" style={contentRotation}>
+      <div className="radial-node__content">
         <span className="radial-node__label">{formatBranchLabel(node.branch)}</span>
         <span className="radial-node__meta">
           {node.branch.baseBranch ?? "ベース不明"}
