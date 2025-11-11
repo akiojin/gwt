@@ -100,6 +100,12 @@ vi.mock("../../src/claude.js", () => ({
 
 vi.mock("../../src/codex.js", () => ({
   launchCodexCLI: vi.fn(async () => undefined),
+  CodexError: class CodexError extends Error {
+    constructor(message: string, public cause?: unknown) {
+      super(message);
+      this.name = "CodexError";
+    }
+  },
 }));
 
 vi.mock("../../src/launcher.js", () => ({
@@ -111,6 +117,7 @@ vi.mock("../../src/config/tools.js", () => ({
     id: "claude-code",
     displayName: "Claude Code",
   })),
+  getSharedEnvironment: vi.fn(async () => ({})),
 }));
 
 vi.mock("../../src/config/index.js", () => ({

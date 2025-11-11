@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { render } from "ink-testing-library";
 import React from "react";
-import { Header } from "../../../../src/ui/components/parts/Header.js";
+import { Header } from "../../../../src/cli/ui/components/parts/Header.js";
 
 describe("Header Component", () => {
   describe("Basic Rendering", () => {
