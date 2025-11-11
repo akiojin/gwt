@@ -22,6 +22,8 @@ import type {
  * WebSocketハンドラー
  */
 export class WebSocketHandler {
+  private cleanupTimers: Map<string, NodeJS.Timeout> = new Map();
+
   constructor(private ptyManager: PTYManager) {}
 
   /**
@@ -43,6 +45,8 @@ export class WebSocketHandler {
       return;
     }
 
+    this.clearCleanupTimer(sessionId);
+
     const { ptyProcess } = instance;
     let hasExited = false;
 
@@ -57,6 +61,7 @@ export class WebSocketHandler {
     // PTYプロセス終了時の処理
     ptyProcess.onExit(({ exitCode, signal }) => {
       hasExited = true;
+      this.clearCleanupTimer(sessionId);
       this.ptyManager.updateStatus(sessionId, "completed", exitCode);
       this.sendExit(connection, exitCode, signal);
       connection.close();
@@ -96,26 +101,7 @@ export class WebSocketHandler {
         return;
       }
 
-      const tracked = this.ptyManager.get(sessionId);
-      if (!tracked) {
-        return;
-      }
-
-      if (
-        tracked.session.status === "running" ||
-        tracked.session.status === "pending"
-      ) {
-        console.warn(
-          `Auto-cleaning session ${sessionId} after unexpected client disconnect`,
-        );
-        this.ptyManager.updateStatus(
-          sessionId,
-          "failed",
-          undefined,
-          "Client disconnected",
-        );
-        this.ptyManager.delete(sessionId);
-      }
+      this.scheduleCleanup(sessionId);
     });
   }
 
@@ -213,7 +199,45 @@ export class WebSocketHandler {
     };
     connection.send(JSON.stringify(message));
   }
+
+  private scheduleCleanup(sessionId: string): void {
+    this.clearCleanupTimer(sessionId);
+    const timer = setTimeout(() => {
+      this.cleanupTimers.delete(sessionId);
+      const tracked = this.ptyManager.get(sessionId);
+      if (!tracked) {
+        return;
+      }
+
+      if (
+        tracked.session.status === "running" ||
+        tracked.session.status === "pending"
+      ) {
+        console.warn(
+          `Auto-cleaning session ${sessionId} after unexpected client disconnect`,
+        );
+        this.ptyManager.updateStatus(
+          sessionId,
+          "failed",
+          undefined,
+          "Client disconnected",
+        );
+        this.ptyManager.delete(sessionId);
+      }
+    }, CLEANUP_GRACE_PERIOD_MS);
+    this.cleanupTimers.set(sessionId, timer);
+  }
+
+  private clearCleanupTimer(sessionId: string): void {
+    const timer = this.cleanupTimers.get(sessionId);
+    if (timer) {
+      clearTimeout(timer);
+      this.cleanupTimers.delete(sessionId);
+    }
+  }
 }
+
+const CLEANUP_GRACE_PERIOD_MS = Number(process.env.WS_CLEANUP_GRACE_MS ?? 3000);
 
 interface RequestLike {
   params?: { sessionId?: string } | undefined;
