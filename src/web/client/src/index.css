@@ -797,171 +797,196 @@ button {
   color: var(--color-success);
 }
 
-.branch-graph {
+.radial-graph {
+  position: relative;
+  min-height: 520px;
   display: flex;
-  flex-direction: column;
-  gap: 1.25rem;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem 0;
 }
 
-.branch-graph__lane {
-  display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
-  padding-bottom: 0.75rem;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+.radial-graph__orbit {
+  position: relative;
+  width: min(640px, 85vw);
+  aspect-ratio: 1 / 1;
+  border-radius: 50%;
+  border: 1px dashed rgba(148, 163, 184, 0.35);
 }
 
-.branch-graph__lane:last-child {
-  border-bottom: none;
-  padding-bottom: 0;
-}
-
-.branch-graph__lane-heading {
+.radial-graph__core {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: min(240px, 60vw);
+  height: min(240px, 60vw);
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  border: 1px solid rgba(226, 232, 240, 0.3);
+  background: radial-gradient(circle, rgba(30, 41, 59, 0.85), rgba(15, 23, 42, 0.65));
   display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  gap: 1rem;
+  align-items: center;
+  justify-content: center;
   flex-wrap: wrap;
+  gap: 0.75rem;
+  padding: 1.5rem;
+  box-shadow: 0 25px 65px rgba(15, 23, 42, 0.45);
+  text-align: center;
 }
 
-.branch-graph__lane-label {
+.radial-core__slot {
+  flex: 1 1 45%;
+  min-width: 90px;
+}
+
+.radial-core__node {
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(148, 163, 184, 0.4);
+  padding: 0.75rem;
+  background: rgba(15, 23, 42, 0.6);
+}
+
+.radial-core__node--local {
+  border-color: rgba(192, 132, 252, 0.8);
+}
+
+.radial-core__node--remote {
+  border-color: rgba(96, 165, 250, 0.8);
+}
+
+.radial-core__label {
   font-weight: 600;
 }
 
-.branch-graph__lane-meta {
-  margin-left: 0.5rem;
+.radial-core__meta {
   font-size: 0.75rem;
-  letter-spacing: 0.1em;
   color: var(--color-muted);
 }
 
-.lane-meta--muted {
-  color: rgba(148, 163, 184, 0.6);
+.radial-core__link {
+  display: inline-flex;
+  margin-top: 0.5rem;
+  font-size: 0.75rem;
+  color: var(--color-accent);
+  text-decoration: underline;
 }
 
-.branch-graph__lane-count {
-  color: var(--color-muted);
-  font-size: 0.85rem;
-}
-
-.branch-graph__track {
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-  overflow-x: auto;
-  padding-bottom: 0.5rem;
-}
-
-.branch-graph__node-link {
-  position: relative;
-  text-decoration: none;
-  min-width: 180px;
-  flex-shrink: 0;
-}
-
-.branch-graph__node {
-  position: relative;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  padding: 0.85rem 1rem;
-  background: var(--color-surface-muted);
-  box-shadow: var(--shadow-soft);
-}
-
-.branch-graph__node::before {
-  content: "";
+.radial-node {
   position: absolute;
-  width: 28px;
-  height: 2px;
-  background: var(--color-border-strong);
-  left: -22px;
+  left: 50%;
   top: 50%;
-  transform: translateY(-50%);
-  opacity: 0.6;
+  transform-origin: center center;
+  transition: transform 0.2s ease, filter 0.2s ease;
 }
 
-.branch-graph__node--base::before {
-  display: none;
+.radial-node__content {
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+  background: rgba(15, 23, 42, 0.85);
+  box-shadow: var(--shadow-soft);
+  padding: 0.85rem 1rem;
+  min-width: 160px;
+  text-align: center;
+  cursor: pointer;
+  user-select: none;
 }
 
-.branch-graph__node--local {
-  border-color: rgba(192, 132, 252, 0.8);
-  box-shadow: 0 15px 35px rgba(148, 73, 255, 0.25);
+.radial-node:hover,
+.radial-node:focus-within {
+  filter: drop-shadow(0 12px 30px rgba(56, 189, 248, 0.5));
 }
 
-.branch-graph__node--remote {
-  border-color: rgba(96, 165, 250, 0.8);
-  box-shadow: 0 15px 35px rgba(14, 165, 233, 0.25);
+.radial-node--local .radial-node__content {
+  border-color: rgba(192, 132, 252, 0.9);
 }
 
-.branch-graph__node--merged {
-  background: rgba(37, 99, 235, 0.25);
+.radial-node--remote .radial-node__content {
+  border-color: rgba(96, 165, 250, 0.9);
 }
 
-.branch-graph__node--active {
-  background: rgba(8, 145, 178, 0.25);
+.radial-node--worktree .radial-node__content::after {
+  content: "WORKTREE";
+  display: block;
+  margin-top: 0.25rem;
+  font-size: 0.7rem;
+  color: var(--color-success);
+  letter-spacing: 0.1em;
 }
 
-.branch-graph__node-label {
+.radial-node--primary .radial-node__content {
+  background: rgba(59, 130, 246, 0.2);
+}
+
+.radial-node__label {
   font-weight: 600;
   display: block;
 }
 
-.branch-graph__node-meta {
+.radial-node__meta {
   font-size: 0.75rem;
   color: var(--color-muted);
 }
 
-.branch-graph__tooltip {
+.radial-node__tooltip {
   position: absolute;
-  bottom: calc(100% + 0.5rem);
-  left: 0;
+  top: calc(100% + 0.5rem);
+  left: 50%;
+  transform: translateX(-50%);
   background: var(--color-surface);
   border: 1px solid var(--color-border-strong);
   border-radius: var(--radius-md);
   padding: 0.75rem;
-  width: min(260px, 60vw);
-  box-shadow: var(--shadow-card);
+  min-width: 220px;
   opacity: 0;
   pointer-events: none;
-  transform: translateY(0.4rem);
-  transition:
-    opacity 0.15s ease,
-    transform 0.15s ease;
+  transition: opacity 0.15s ease;
+  box-shadow: var(--shadow-card);
   z-index: 5;
 }
 
-.branch-graph__tooltip p {
-  font-size: 0.8rem;
+.radial-node__tooltip p {
+  font-size: 0.75rem;
   color: var(--color-text);
 }
 
-.branch-graph__tooltip p + p {
-  margin-top: 0.25rem;
+.radial-node__tooltip p + p {
+  margin-top: 0.2rem;
   color: var(--color-muted);
 }
 
-.branch-graph__node:hover .branch-graph__tooltip,
-.branch-graph__node:focus-within .branch-graph__tooltip {
+.radial-node__detail-link {
+  margin-top: 0.4rem;
+  display: inline-flex;
+  font-size: 0.75rem;
+  color: var(--color-accent);
+  text-decoration: underline;
+}
+
+.radial-node:hover .radial-node__tooltip,
+.radial-node:focus-within .radial-node__tooltip {
   opacity: 1;
-  transform: translateY(0);
+}
+
+.radial-graph__empty-hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  color: var(--color-muted);
+  pointer-events: none;
 }
 
 @media (max-width: 768px) {
-  .branch-graph__track {
-    flex-direction: column;
-    align-items: flex-start;
+  .radial-graph {
+    min-height: 420px;
   }
 
-  .branch-graph__node::before {
-    width: 2px;
-    height: 24px;
-    left: 50%;
-    top: -18px;
-  }
-
-  .branch-graph__node-link {
-    width: 100%;
+  .radial-node__content {
+    min-width: 130px;
+    padding: 0.65rem 0.85rem;
   }
 }
 

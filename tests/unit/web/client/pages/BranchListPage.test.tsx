@@ -102,7 +102,7 @@ describe("BranchListPage", () => {
     expect(screen.getByText("未マージ")).toBeInTheDocument();
     expect(screen.getByText("リモート追跡ブランチ")).toBeInTheDocument();
     expect(
-      screen.getByText("ベースブランチの関係をグラフィカルに把握"),
+      screen.getByText("ベースブランチ中心のラジアルビュー"),
     ).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "AIツールを起動" }).length).toBeGreaterThan(0);
   });
@@ -149,5 +149,16 @@ describe("BranchListPage", () => {
     expect(screen.getByTestId("ai-tool-modal")).toHaveTextContent(
       "release/v1.0.0",
     );
+  });
+
+  it("allows selection directly from the radial branch graph", () => {
+    renderPage();
+
+    const radialNode = screen.getByRole("button", {
+      name: "hotfix/security を選択",
+    });
+
+    fireEvent.click(radialNode);
+    expect(screen.getByTestId("ai-tool-modal")).toHaveTextContent("hotfix/security");
   });
 });

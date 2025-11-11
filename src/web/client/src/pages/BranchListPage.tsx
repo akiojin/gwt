@@ -131,7 +131,10 @@ export function BranchListPage() {
 
       <main className="page-content">
         {!pageState && filteredBranches.length > 0 && (
-          <BranchGraph branches={filteredBranches} />
+          <BranchGraph
+            branches={filteredBranches}
+            onSelectBranch={handleBranchSelection}
+          />
         )}
 
         <section className="metrics-grid">

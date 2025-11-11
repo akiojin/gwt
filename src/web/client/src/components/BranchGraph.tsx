@@ -1,20 +1,35 @@
-import React, { useMemo } from "react";
+import React, { useCallback, useMemo } from "react";
 import { Link } from "react-router-dom";
 import type { Branch } from "../../../../types/api.js";
 
 const UNKNOWN_BASE = "__unknown__";
 
-interface Lane {
-  id: string;
-  baseLabel: string;
-  baseNode: Branch | null;
-  nodes: Branch[];
-  isSyntheticBase: boolean;
-}
-
 interface BranchGraphProps {
   branches: Branch[];
+  onSelectBranch?: (branch: Branch) => void;
 }
+
+interface CenterNodeDescriptor {
+  id: string;
+  label: string;
+  branch: Branch | null;
+  isSynthetic: boolean;
+}
+
+interface RadialNodeDescriptor {
+  branch: Branch;
+  angle: number;
+  radius: number;
+  baseLabel: string;
+  isPrimaryOrbit: boolean;
+}
+
+const PRIMARY_BASES = [
+  "main",
+  "origin/main",
+  "develop",
+  "origin/develop",
+];
 
 function formatBranchLabel(branch: Branch): string {
   return branch.name.length > 32
@@ -33,7 +48,7 @@ function getDivergenceLabel(branch: Branch): string {
   return `divergence: +${ahead} / -${behind}`;
 }
 
-export function BranchGraph({ branches }: BranchGraphProps) {
+export function BranchGraph({ branches, onSelectBranch }: BranchGraphProps) {
   const branchMap = useMemo(() => {
     return new Map(branches.map((branch) => [branch.name, branch]));
   }, [branches]);
@@ -48,44 +63,75 @@ export function BranchGraph({ branches }: BranchGraphProps) {
     return baseSet;
   }, [branches]);
 
-  const lanes = useMemo<Lane[]>(() => {
-    const laneMap = new Map<string, Lane>();
+  const { centerNodes, radialNodes } = useMemo(() => {
+    const centers: CenterNodeDescriptor[] = [];
 
-    branches.forEach((branch) => {
-      const base = branch.baseBranch ?? UNKNOWN_BASE;
-
-      if (!branch.baseBranch && referencedBases.has(branch.name)) {
-        // ベースとして参照されている場合は、グラフ上で基点ノードとしてのみ表示
-        return;
-      }
-
-      if (!laneMap.has(base)) {
-        const baseNode =
-          base !== UNKNOWN_BASE ? branchMap.get(base) ?? null : null;
-        laneMap.set(base, {
+    PRIMARY_BASES.forEach((base) => {
+      const branch = branchMap.get(base) ?? null;
+      if (branch || referencedBases.has(base)) {
+        centers.push({
           id: base,
-          baseLabel: base === UNKNOWN_BASE ? "ベース不明" : base,
-          baseNode,
-          nodes: [],
-          isSyntheticBase: baseNode === null,
+          label: base,
+          branch,
+          isSynthetic: !branch,
         });
       }
-
-      laneMap.get(base)!.nodes.push(branch);
     });
 
-    return Array.from(laneMap.values()).sort((a, b) => {
-      if (a.id === UNKNOWN_BASE) {
-        return 1;
+    if (!centers.length && branches.length) {
+      const fallback =
+        branches.find((branch) => /main|develop/i.test(branch.name)) ?? branches[0];
+      if (fallback) {
+        centers.push({
+          id: fallback.name,
+          label: fallback.name,
+          branch: fallback,
+          isSynthetic: false,
+        });
       }
-      if (b.id === UNKNOWN_BASE) {
-        return -1;
+    }
+
+    const centerNames = new Set(centers.map((center) => center.branch?.name ?? center.label));
+    const orbitalBranches = branches.filter((branch) => !centerNames.has(branch.name));
+
+    const grouped = orbitalBranches.reduce<Map<string, Branch[]>>((map, branch) => {
+      const base = branch.baseBranch ?? UNKNOWN_BASE;
+      if (!map.has(base)) {
+        map.set(base, []);
       }
-      return a.baseLabel.localeCompare(b.baseLabel, "ja");
+      map.get(base)!.push(branch);
+      return map;
+    }, new Map());
+
+    const orderedGroups = Array.from(grouped.entries()).sort((a, b) =>
+      a[0].localeCompare(b[0], "ja"),
+    );
+
+    const totalOrbitalNodes = orbitalBranches.length || 1;
+    let cursor = 0;
+
+    const radial: RadialNodeDescriptor[] = [];
+
+    orderedGroups.forEach(([base, nodes]) => {
+      nodes.forEach((branch) => {
+        const angle = (360 / totalOrbitalNodes) * cursor;
+        cursor += 1;
+        const isPrimaryOrbit = centerNames.has(base);
+        const radius = isPrimaryOrbit ? 180 : 250;
+        radial.push({
+          branch,
+          angle,
+          radius,
+          baseLabel: base === UNKNOWN_BASE ? "detached" : base,
+          isPrimaryOrbit,
+        });
+      });
     });
+
+    return { centerNodes: centers, radialNodes: radial };
   }, [branches, branchMap, referencedBases]);
 
-  if (!lanes.length) {
+  if (!branches.length) {
     return (
       <section className="branch-graph-panel">
         <div className="branch-graph-panel__empty">
@@ -96,15 +142,22 @@ export function BranchGraph({ branches }: BranchGraphProps) {
     );
   }
 
+  const handleNodeSelect = useCallback(
+    (branch: Branch) => {
+      onSelectBranch?.(branch);
+    },
+    [onSelectBranch],
+  );
+
   return (
     <section className="branch-graph-panel">
       <header className="branch-graph-panel__header">
         <div>
           <p className="branch-graph-panel__eyebrow">BRANCH GRAPH</p>
-          <h2>ベースブランチの関係をグラフィカルに把握</h2>
+          <h2>ベースブランチ中心のラジアルビュー</h2>
           <p>
-            baseRef、Git upstream、merge-baseヒューリスティクスを用いて推定したベースブランチ単位で
-            派生ノードをレーン表示します。
+            main / develop を中心に、派生ブランチを放射状に配置したダッシュボードです。ノードを
+            クリックすると AI ツールの起動モーダルが開き、詳細リンクからセッション画面へ遷移できます。
           </p>
         </div>
         <div className="branch-graph-panel__legend">
@@ -115,117 +168,124 @@ export function BranchGraph({ branches }: BranchGraphProps) {
         </div>
       </header>
 
-      <div className="branch-graph">
-        {lanes.map((lane) => (
-          <article className="branch-graph__lane" key={lane.id}>
-            <div className="branch-graph__lane-heading">
-              <p className="branch-graph__lane-label">
-                {lane.baseLabel}
-                {lane.baseNode && (
-                  <span className="branch-graph__lane-meta">
-                    {lane.baseNode.type === "local" ? "LOCAL" : "REMOTE"}
-                  </span>
-                )}
-                {lane.isSyntheticBase && (
-                  <span className="branch-graph__lane-meta lane-meta--muted">
-                    推定のみ
-                  </span>
-                )}
-              </p>
-              <span className="branch-graph__lane-count">
-                {lane.nodes.length} branch
-                {lane.nodes.length > 1 ? "es" : ""}
-              </span>
+      <div className="radial-graph">
+        <div className="radial-graph__orbit">
+          {radialNodes.map((node) => (
+            <RadialBranchNode
+              key={node.branch.name}
+              node={node}
+              onSelect={handleNodeSelect}
+            />
+          ))}
+          {!radialNodes.length && (
+            <div className="radial-graph__empty-hint">
+              <p>派生ブランチがまだありません。</p>
+              <p>main / develop 以外のブランチが追加されると外周に表示されます。</p>
             </div>
-
-            <div className="branch-graph__track">
-              {renderBaseNode(lane)}
-              {lane.nodes.map((branch) => (
-                <BranchNode key={branch.name} branch={branch} />
-              ))}
-            </div>
-          </article>
-        ))}
+          )}
+        </div>
+        <div className="radial-graph__core">
+          {centerNodes.map((center) => (
+            <CoreNode key={center.id} descriptor={center} />
+          ))}
+        </div>
       </div>
     </section>
   );
 }
 
-function renderBaseNode(lane: Lane) {
-  const label =
-    lane.baseLabel === "ベース不明" ? "Unknown base" : lane.baseLabel;
+function CoreNode({ descriptor }: { descriptor: CenterNodeDescriptor }) {
   const content = (
     <div
-      className={`branch-graph__node branch-graph__node--base ${
-        lane.baseNode ? `branch-graph__node--${lane.baseNode.type}` : ""
-      }`}
+      className={`radial-core__node ${descriptor.branch ? `radial-core__node--${descriptor.branch.type}` : ""}`}
     >
-      <span className="branch-graph__node-label">{label}</span>
-      <span className="branch-graph__node-meta">BASE</span>
-      <div className="branch-graph__tooltip">
-        <p>{label}</p>
-        <p>
-          {lane.baseNode
-            ? `type: ${lane.baseNode.type}`
-            : "推定されたベースブランチ"}
-        </p>
-      </div>
+      <p className="radial-core__label">{descriptor.label}</p>
+      <p className="radial-core__meta">
+        {descriptor.branch ? descriptor.branch.type.toUpperCase() : "ESTIMATED"}
+      </p>
+      {descriptor.branch && (
+        <Link
+          to={`/${encodeURIComponent(descriptor.branch.name)}`}
+          className="radial-core__link"
+        >
+          セッションを表示
+        </Link>
+      )}
     </div>
   );
 
-  if (lane.baseNode) {
+  if (descriptor.branch) {
     return (
-      <Link
-        key={`base-${lane.id}`}
-        to={`/${encodeURIComponent(lane.baseNode.name)}`}
-        className="branch-graph__node-link"
-        aria-label={`ベースブランチ ${lane.baseNode.name} を開く`}
-      >
+      <div key={descriptor.id} className="radial-core__slot">
         {content}
-      </Link>
+      </div>
     );
   }
 
   return (
-    <div key={`base-${lane.id}`} className="branch-graph__node-link">
+    <div key={descriptor.id} className="radial-core__slot radial-core__slot--synthetic">
       {content}
     </div>
   );
 }
 
-function BranchNode({ branch }: { branch: Branch }) {
-  const node = (
-    <div
-      className={`branch-graph__node branch-graph__node--${branch.type} ${
-        branch.mergeStatus === "merged"
-          ? "branch-graph__node--merged"
-          : branch.mergeStatus === "unmerged"
-            ? "branch-graph__node--active"
-            : ""
-      }`}
-    >
-      <span className="branch-graph__node-label">
-        {formatBranchLabel(branch)}
-      </span>
-      <span className="branch-graph__node-meta">
-        {branch.worktreePath ? "Worktree" : "No Worktree"}
-      </span>
-      <div className="branch-graph__tooltip">
-        <p>{branch.name}</p>
-        <p>base: {branch.baseBranch ?? "unknown"}</p>
-        <p>{getDivergenceLabel(branch)}</p>
-        <p>{branch.worktreePath ?? "Worktree未作成"}</p>
-      </div>
-    </div>
-  );
+function RadialBranchNode({
+  node,
+  onSelect,
+}: {
+  node: RadialNodeDescriptor;
+  onSelect?: (branch: Branch) => void;
+}) {
+  const handleSelect = () => {
+    onSelect?.(node.branch);
+  };
+
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      handleSelect();
+    }
+  };
+
+  const detailLink = `/${encodeURIComponent(node.branch.name)}`;
+  const transform = {
+    transform: `rotate(${node.angle}deg) translate(${node.radius}px)`
+  } as React.CSSProperties;
+  const contentRotation = {
+    transform: `rotate(${-node.angle}deg)`
+  } as React.CSSProperties;
 
   return (
-    <Link
-      to={`/${encodeURIComponent(branch.name)}`}
-      className="branch-graph__node-link"
-      aria-label={`${branch.name} の詳細を開く`}
+    <div
+      className={`radial-node radial-node--${node.branch.type} ${
+        node.branch.worktreePath ? "radial-node--worktree" : ""
+      } ${node.isPrimaryOrbit ? "radial-node--primary" : "radial-node--secondary"}`}
+      style={transform}
+      role="button"
+      tabIndex={0}
+      aria-label={`${node.branch.name} を選択`}
+      onClick={handleSelect}
+      onKeyDown={handleKeyDown}
+      data-base-label={node.baseLabel}
     >
-      {node}
-    </Link>
+      <div className="radial-node__content" style={contentRotation}>
+        <span className="radial-node__label">{formatBranchLabel(node.branch)}</span>
+        <span className="radial-node__meta">
+          {node.branch.baseBranch ?? "ベース不明"}
+        </span>
+        <div className="radial-node__tooltip">
+          <p>{node.branch.name}</p>
+          <p>{getDivergenceLabel(node.branch)}</p>
+          <p>{node.branch.worktreePath ?? "Worktree未作成"}</p>
+          <Link
+            to={detailLink}
+            className="radial-node__detail-link"
+            onClick={(event) => event.stopPropagation()}
+          >
+            詳細を開く
+          </Link>
+        </div>
+      </div>
+    </div>
   );
 }
