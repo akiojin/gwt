@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useBranches } from "../hooks/useBranches";
 import { BranchGraph } from "../components/BranchGraph";
