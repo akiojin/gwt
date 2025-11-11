@@ -1,7 +1,7 @@
 import React from "react";
 import type { Mock } from "vitest";
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import type { Branch } from "../../../../../src/types/api.js";
 import { BranchDetailPage } from "../../../../../src/web/client/src/pages/BranchDetailPage.js";
@@ -9,6 +9,24 @@ import { useBranch } from "../../../../../src/web/client/src/hooks/useBranches.j
 import { useCreateWorktree } from "../../../../../src/web/client/src/hooks/useWorktrees.js";
 import { useSessions, useDeleteSession } from "../../../../../src/web/client/src/hooks/useSessions.js";
 import { useConfig } from "../../../../../src/web/client/src/hooks/useConfig.js";
+
+const mockNavigate = vi.fn();
+
+vi.mock("react-router-dom", async () => {
+  const actual = await vi.importActual<typeof import("react-router-dom")>("react-router-dom");
+  return {
+    ...actual,
+    useNavigate: () => mockNavigate,
+  };
+});
+
+vi.mock("../../../../../src/web/client/src/components/Terminal.tsx", () => ({
+  Terminal: ({ onExit }: { onExit: (code: number) => void }) => (
+    <button type="button" data-testid="mock-terminal" onClick={() => onExit(0)}>
+      Mock terminal
+    </button>
+  ),
+}));
 
 class WebSocketMock {
   public onopen: ((event: Event) => void) | null = null;
@@ -81,6 +99,7 @@ const renderPage = () =>
 
 describe("BranchDetailPage", () => {
   beforeEach(() => {
+    mockNavigate.mockReset();
     mockedUseBranch.mockReturnValue({
       data: baseBranch,
       isLoading: false,
@@ -180,5 +199,30 @@ describe("BranchDetailPage", () => {
 
     expect(screen.getAllByTestId("session-focus-button").length).toBe(1);
     expect(screen.getAllByTestId("session-stop-button").length).toBe(1);
+  });
+
+  it("navigates back to the branch list after the active session exits", () => {
+    mockedUseSessions.mockReturnValue({
+      data: [
+        {
+          sessionId: "running-session",
+          toolType: "claude-code",
+          mode: "normal",
+          status: "running",
+          worktreePath: baseBranch.worktreePath,
+          startedAt: "2025-11-10T00:00:00Z",
+          endedAt: null,
+          toolName: null,
+        },
+      ],
+      isLoading: false,
+      error: null,
+    });
+
+    renderPage();
+
+    fireEvent.click(screen.getByTestId("mock-terminal"));
+
+    expect(mockNavigate).toHaveBeenCalledWith("/", { replace: false });
   });
 });

@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { useBranch } from "../hooks/useBranches";
 import { useCreateWorktree } from "../hooks/useWorktrees";
 import { useSessions, useDeleteSession } from "../hooks/useSessions";
@@ -33,6 +33,7 @@ const MERGE_STATUS_TONE: Record<Branch["mergeStatus"], "success" | "warning" | "
 export function BranchDetailPage() {
   const { branchName } = useParams<{ branchName: string }>();
   const decodedBranchName = branchName ? decodeURIComponent(branchName) : "";
+  const navigate = useNavigate();
 
   const { data: branch, isLoading, error } = useBranch(decodedBranchName);
   const createWorktree = useCreateWorktree();
@@ -187,6 +188,7 @@ export function BranchDetailPage() {
       type: code === 0 ? "success" : "error",
       message: `Session exited with code ${code}.`,
     });
+    navigate("/", { replace: false });
   };
 
   const handleFocusSession = (sessionId: string) => {
