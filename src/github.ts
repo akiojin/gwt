@@ -119,7 +119,7 @@ export async function getPullRequestByBranch(
       "--state",
       "all",
       "--json",
-      "number,title,state,headRefName,mergedAt,author",
+      "number,title,state,headRefName,baseRefName,mergedAt,author",
       "--limit",
       "1",
     ]);
@@ -137,6 +137,7 @@ export async function getPullRequestByBranch(
       branch: pr.headRefName,
       mergedAt: pr.mergedAt,
       author: pr.author?.login || "unknown",
+      baseRefName: pr.baseRefName ?? null,
     };
   } catch {
     return null;

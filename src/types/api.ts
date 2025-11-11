@@ -17,6 +17,7 @@ export interface Branch {
   commitDate?: string | null; // ISO8601
   mergeStatus: "unmerged" | "merged" | "unknown";
   worktreePath?: string | null;
+  baseBranch?: string | null;
   divergence?: {
     ahead: number;
     behind: number;

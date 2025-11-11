@@ -26,6 +26,7 @@ Gitブランチを表すエンティティ。ローカルブランチとリモ�
 | commitDate | ISO8601 | 最新コミット日時 | ○ | ISO8601形式 |
 | mergeStatus | 'unmerged' \| 'merged' \| 'unknown' | マージ状態 | ✓ | - |
 | worktreePath | string \| null | 関連するWorktreeのパス（存在しない場合はnull） | ✓ | 絶対パス |
+| baseBranch | string \| null | このブランチのベースとなったブランチ名（例: `main`, `origin/develop`） | ○ | 1-255文字、Git参照形式 |
 | divergence | object \| null | ブランチの差分情報 | ○ | 下記参照 |
 
 #### divergence属性の構造
@@ -41,7 +42,7 @@ Gitブランチを表すエンティティ。ローカルブランチとリモ�
 #### 関係
 
 - **Branch → Worktree**: 1対0..1（1つのブランチは最大1つのWorktreeを持つ）
-- **Branch → Branch**: リモートブランチとローカルブランチの対応関係（例: `main` ↔ `origin/main`）
+- **Branch → Branch**: リモートブランチとローカルブランチの対応関係（例: `main` ↔ `origin/main`）、および`baseBranch`による派生元ノード
 
 #### バリデーションルール
 

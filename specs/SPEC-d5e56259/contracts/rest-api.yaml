@@ -446,6 +446,12 @@ components:
           type: string
           nullable: true
           example: '/claude-worktree/.worktrees/feature-webui'
+        baseBranch:
+          type: string
+          nullable: true
+          example: 'main'
+          description: >
+            推定ベースブランチ（PRのbaseRef、Git upstream、merge-baseヒューリスティクスから算出）
         divergence:
           type: object
           nullable: true

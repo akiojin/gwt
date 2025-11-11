@@ -590,3 +590,245 @@ button {
 .terminal-section__close:hover {
   background: rgba(15, 23, 42, 0.95);
 }
+
+/* =======================
+   Branch Graph
+   ======================= */
+
+.branch-graph-panel {
+  background: var(--color-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: 1.75rem 2rem;
+  box-shadow: var(--shadow-card);
+}
+
+.branch-graph-panel + .metrics-grid {
+  margin-top: 1.5rem;
+}
+
+.branch-graph-panel__header {
+  display: flex;
+  justify-content: space-between;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 1.5rem;
+}
+
+.branch-graph-panel__eyebrow {
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: var(--color-muted);
+  font-size: 0.8rem;
+  margin-bottom: 0.25rem;
+}
+
+.branch-graph-panel__legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.branch-graph-panel__empty {
+  text-align: center;
+  color: var(--color-muted);
+}
+
+.graph-chip {
+  font-size: 0.75rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 0.35rem 0.75rem;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--color-border);
+  background: rgba(15, 23, 42, 0.7);
+}
+
+.graph-chip--base {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+.graph-chip--local {
+  border-color: var(--color-local);
+  color: var(--color-local);
+}
+
+.graph-chip--remote {
+  border-color: var(--color-remote);
+  color: var(--color-remote);
+}
+
+.graph-chip--worktree {
+  border-color: var(--color-success);
+  color: var(--color-success);
+}
+
+.branch-graph {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.branch-graph__lane {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.branch-graph__lane:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.branch-graph__lane-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.branch-graph__lane-label {
+  font-weight: 600;
+}
+
+.branch-graph__lane-meta {
+  margin-left: 0.5rem;
+  font-size: 0.75rem;
+  letter-spacing: 0.1em;
+  color: var(--color-muted);
+}
+
+.lane-meta--muted {
+  color: rgba(148, 163, 184, 0.6);
+}
+
+.branch-graph__lane-count {
+  color: var(--color-muted);
+  font-size: 0.85rem;
+}
+
+.branch-graph__track {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  overflow-x: auto;
+  padding-bottom: 0.5rem;
+}
+
+.branch-graph__node-link {
+  position: relative;
+  text-decoration: none;
+  min-width: 180px;
+  flex-shrink: 0;
+}
+
+.branch-graph__node {
+  position: relative;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 0.85rem 1rem;
+  background: var(--color-surface-muted);
+  box-shadow: var(--shadow-soft);
+}
+
+.branch-graph__node::before {
+  content: "";
+  position: absolute;
+  width: 28px;
+  height: 2px;
+  background: var(--color-border-strong);
+  left: -22px;
+  top: 50%;
+  transform: translateY(-50%);
+  opacity: 0.6;
+}
+
+.branch-graph__node--base::before {
+  display: none;
+}
+
+.branch-graph__node--local {
+  border-color: rgba(192, 132, 252, 0.8);
+  box-shadow: 0 15px 35px rgba(148, 73, 255, 0.25);
+}
+
+.branch-graph__node--remote {
+  border-color: rgba(96, 165, 250, 0.8);
+  box-shadow: 0 15px 35px rgba(14, 165, 233, 0.25);
+}
+
+.branch-graph__node--merged {
+  background: rgba(37, 99, 235, 0.25);
+}
+
+.branch-graph__node--active {
+  background: rgba(8, 145, 178, 0.25);
+}
+
+.branch-graph__node-label {
+  font-weight: 600;
+  display: block;
+}
+
+.branch-graph__node-meta {
+  font-size: 0.75rem;
+  color: var(--color-muted);
+}
+
+.branch-graph__tooltip {
+  position: absolute;
+  bottom: calc(100% + 0.5rem);
+  left: 0;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  padding: 0.75rem;
+  width: min(260px, 60vw);
+  box-shadow: var(--shadow-card);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(0.4rem);
+  transition:
+    opacity 0.15s ease,
+    transform 0.15s ease;
+  z-index: 5;
+}
+
+.branch-graph__tooltip p {
+  font-size: 0.8rem;
+  color: var(--color-text);
+}
+
+.branch-graph__tooltip p + p {
+  margin-top: 0.25rem;
+  color: var(--color-muted);
+}
+
+.branch-graph__node:hover .branch-graph__tooltip,
+.branch-graph__node:focus-within .branch-graph__tooltip {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+@media (max-width: 768px) {
+  .branch-graph__track {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .branch-graph__node::before {
+    width: 2px;
+    height: 24px;
+    left: 50%;
+    top: -18px;
+  }
+
+  .branch-graph__node-link {
+    width: 100%;
+  }
+}
