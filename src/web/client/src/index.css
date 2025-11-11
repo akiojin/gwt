@@ -229,6 +229,33 @@ button {
   font-size: 0.9rem;
 }
 
+.view-toggle {
+  display: inline-flex;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+  margin-left: auto;
+}
+
+.view-toggle__button {
+  border: none;
+  background: transparent;
+  color: var(--color-muted);
+  padding: 0.35rem 0.85rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.view-toggle__button.is-active {
+  background: var(--color-accent);
+  color: #0f172a;
+}
+
+.view-toggle__button:not(.is-active):hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
 .page-state {
   background: var(--color-card);
   border: 1px solid var(--color-border);

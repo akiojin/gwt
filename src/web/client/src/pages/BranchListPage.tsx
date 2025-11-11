@@ -31,10 +31,13 @@ interface PageStateMessage {
 
 const SEARCH_PLACEHOLDER = "ブランチ名やタイプで検索...";
 
+type ViewMode = "graph" | "list";
+
 export function BranchListPage() {
   const { data, isLoading, error } = useBranches();
   const [query, setQuery] = useState("");
   const [selectedBranch, setSelectedBranch] = useState<Branch | null>(null);
+  const [viewMode, setViewMode] = useState<ViewMode>("graph");
 
   const handleBranchSelection = useCallback((branch: Branch) => {
     setSelectedBranch(branch);
@@ -130,7 +133,7 @@ export function BranchListPage() {
       </header>
 
       <main className="page-content">
-        {!pageState && filteredBranches.length > 0 && (
+        {!pageState && filteredBranches.length > 0 && viewMode === "graph" && (
           <BranchGraph
             branches={filteredBranches}
             onSelectBranch={handleBranchSelection}
@@ -185,6 +188,24 @@ export function BranchListPage() {
             {numberFormatter.format(filteredBranches.length)} / {" "}
             {numberFormatter.format(metrics.total)} branches
           </span>
+          <div className="view-toggle" role="group" aria-label="表示モード切替">
+            <button
+              type="button"
+              className={`view-toggle__button ${viewMode === "graph" ? "is-active" : ""}`}
+              onClick={() => setViewMode("graph")}
+              aria-pressed={viewMode === "graph"}
+            >
+              グラフビュー
+            </button>
+            <button
+              type="button"
+              className={`view-toggle__button ${viewMode === "list" ? "is-active" : ""}`}
+              onClick={() => setViewMode("list")}
+              aria-pressed={viewMode === "list"}
+            >
+              リストビュー
+            </button>
+          </div>
         </section>
 
         {pageState ? (
@@ -200,7 +221,7 @@ export function BranchListPage() {
               試してください。
             </p>
           </div>
-        ) : (
+        ) : viewMode === "list" ? (
           <div className="branch-grid">
             {filteredBranches.map((branch) => (
               <article
@@ -300,7 +321,7 @@ export function BranchListPage() {
               </article>
             ))}
           </div>
-        )}
+        ) : null}
       </main>
       {selectedBranch && (
         <AIToolLaunchModal branch={selectedBranch} onClose={() => setSelectedBranch(null)} />

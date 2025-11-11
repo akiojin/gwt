@@ -90,6 +90,10 @@ describe("BranchListPage", () => {
       </MemoryRouter>,
     );
 
+  const switchToListView = () => {
+    fireEvent.click(screen.getByRole("button", { name: "リストビュー" }));
+  };
+
   it("renders summary metrics and branch cards", () => {
     renderPage();
 
@@ -99,16 +103,21 @@ describe("BranchListPage", () => {
     expect(
       screen.getAllByText("feature/design-refresh").length,
     ).toBeGreaterThanOrEqual(1);
-    expect(screen.getByText("未マージ")).toBeInTheDocument();
     expect(screen.getByText("リモート追跡ブランチ")).toBeInTheDocument();
     expect(
       screen.getByText("ベースブランチ中心のラジアルビュー"),
     ).toBeInTheDocument();
+
+    // List view can still be accessed via toggle
+    switchToListView();
+    expect(screen.getByText("未マージ")).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "AIツールを起動" }).length).toBeGreaterThan(0);
   });
 
   it("filters branches by the search query and shows empty state when unmatched", () => {
     renderPage();
+
+    switchToListView();
 
     const input = screen.getByPlaceholderText("ブランチ名やタイプで検索...");
     fireEvent.change(input, { target: { value: "release" } });
@@ -125,6 +134,8 @@ describe("BranchListPage", () => {
   it("opens the launch modal when branch card is selected and closes on demand", () => {
     renderPage();
 
+    switchToListView();
+
     const interactiveCard = screen.getByRole("button", {
       name: "feature/design-refresh のAIツールを設定",
     });
@@ -140,6 +151,8 @@ describe("BranchListPage", () => {
 
   it("supports keyboard selection of branch cards", () => {
     renderPage();
+
+    switchToListView();
 
     const interactiveCard = screen.getByRole("button", {
       name: "release/v1.0.0 のAIツールを設定",
@@ -160,5 +173,19 @@ describe("BranchListPage", () => {
 
     fireEvent.click(radialNode);
     expect(screen.getByTestId("ai-tool-modal")).toHaveTextContent("hotfix/security");
+  });
+
+  it("defaults to graph view and toggles to list view when requested", () => {
+    renderPage();
+
+    const graphButton = screen.getByRole("button", { name: "グラフビュー" });
+    const listButton = screen.getByRole("button", { name: "リストビュー" });
+
+    expect(graphButton).toHaveAttribute("aria-pressed", "true");
+    expect(listButton).toHaveAttribute("aria-pressed", "false");
+
+    fireEvent.click(listButton);
+    expect(graphButton).toHaveAttribute("aria-pressed", "false");
+    expect(listButton).toHaveAttribute("aria-pressed", "true");
   });
 });
