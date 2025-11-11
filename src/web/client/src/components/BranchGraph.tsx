@@ -34,7 +34,7 @@ const PRIMARY_BASES = ["main", "origin/main", "develop", "origin/develop"] as co
 const DIVERGENCE_FILTERS: { id: DivergenceFilter; label: string }[] = [
   { id: "ahead", label: "Ahead" },
   { id: "behind", label: "Behind" },
-  { id: "upToDate", label: "最新" },
+  { id: "upToDate", label: "Up-to-date" },
 ];
 const NODE_WIDTH_PX = 170;
 const MIN_PRIMARY_RADIUS = 200;
@@ -80,12 +80,30 @@ export function BranchGraph({
   const [draggingNode, setDraggingNode] = useState<string | null>(null);
   const normalizedBranches = useMemo(() => {
     const map = new Map<string, Branch>();
+    const shouldReplace = (existing: Branch, candidate: Branch) => {
+      const existingHasWorktree = Boolean(existing.worktreePath);
+      const candidateHasWorktree = Boolean(candidate.worktreePath);
+      if (!existingHasWorktree && candidateHasWorktree) {
+        return true;
+      }
+      if (existingHasWorktree && !candidateHasWorktree) {
+        return false;
+      }
+      if (existing.type === "remote" && candidate.type !== "remote") {
+        return true;
+      }
+      if (existing.type !== "remote" && candidate.type === "remote") {
+        return false;
+      }
+      const existingDate = existing.commitDate ?? "";
+      const candidateDate = candidate.commitDate ?? "";
+      return candidateDate.localeCompare(existingDate) > 0;
+    };
+
     branches.forEach((branch) => {
       const key = canonicalName(branch.name) ?? branch.name;
       const existing = map.get(key);
-      if (!existing) {
-        map.set(key, branch);
-      } else if (existing.type === "remote" && branch.type !== "remote") {
+      if (!existing || shouldReplace(existing, branch)) {
         map.set(key, branch);
       }
     });
@@ -253,8 +271,8 @@ export function BranchGraph({
     return (
       <section className="branch-graph-panel">
         <div className="branch-graph-panel__empty">
-          <p>グラフ表示できるブランチがありません。</p>
-          <p>fetch済みのブランチやWorktreeを追加すると関係図が表示されます。</p>
+          <p>No branches to visualize yet.</p>
+          <p>Fetch branches or create worktrees to see relationships here.</p>
         </div>
       </section>
     );
@@ -344,15 +362,15 @@ export function BranchGraph({
           <span className="graph-chip graph-chip--worktree">Worktree</span>
         </div>
         {baseFilters.length > 0 && (
-          <div className="branch-graph__filters" role="group" aria-label="ベースブランチのフィルター">
+          <div className="branch-graph__filters" role="group" aria-label="Base branch filters">
             <button
               type="button"
               className={`branch-graph__filter ${!activeBase ? "is-active" : ""}`}
               onClick={() => handleBaseChipClick(null)}
               aria-pressed={!activeBase}
-              aria-label="すべてのベースを表示"
+              aria-label="Show all bases"
             >
-              すべて
+              All bases
             </button>
             {baseFilters.map((base) => (
               <button
@@ -361,14 +379,14 @@ export function BranchGraph({
                 className={`branch-graph__filter ${activeBase === base ? "is-active" : ""}`}
                 onClick={() => handleBaseChipClick(activeBase === base ? null : base)}
                 aria-pressed={activeBase === base}
-                aria-label={`${base} を中心に表示`}
+                aria-label={`Focus on ${base}`}
               >
                 {base}
               </button>
             ))}
           </div>
         )}
-        <div className="branch-graph__filters" role="group" aria-label="差分フィルター">
+        <div className="branch-graph__filters" role="group" aria-label="Divergence filters">
           <button
             type="button"
             className={`branch-graph__filter ${!activeDivergence ? "is-active" : ""}`}
@@ -447,8 +465,8 @@ export function BranchGraph({
           })}
           {!radialNodes.length && (
             <div className="radial-graph__empty-hint">
-              <p>派生ブランチがまだありません。</p>
-              <p>main / develop 以外のブランチが追加されると外周に表示されます。</p>
+              <p>No derived branches yet.</p>
+              <p>Branches other than main/develop will appear around this orbit.</p>
             </div>
           )}
         </div>
@@ -491,7 +509,7 @@ function CoreNode({
           to={`/${encodeURIComponent(descriptor.branch.name)}`}
           className="radial-core__link"
         >
-          セッションを表示
+          View sessions
         </Link>
       )}
     </div>
@@ -553,7 +571,7 @@ function RadialBranchNode({
       style={nodeStyle}
       role="button"
       tabIndex={0}
-      aria-label={`${node.branch.name} を選択`}
+      aria-label={`Select ${node.branch.name}`}
       onClick={handleSelect}
       onKeyDown={handleKeyDown}
       onPointerDown={(event) => onPointerDown?.(node.branch.name, event)}
@@ -562,18 +580,18 @@ function RadialBranchNode({
       <div className="radial-node__content">
         <span className="radial-node__label">{formatBranchLabel(node.branch)}</span>
         <span className="radial-node__meta">
-          {canonicalName(node.branch.baseBranch) ?? node.branch.baseBranch ?? "ベース不明"}
+          {canonicalName(node.branch.baseBranch) ?? node.branch.baseBranch ?? "Base unknown"}
         </span>
         <div className="radial-node__tooltip">
           <p>{node.branch.name}</p>
           <p>{getDivergenceLabel(node.branch)}</p>
-          <p>{node.branch.worktreePath ?? "Worktree未作成"}</p>
+          <p>{node.branch.worktreePath ?? "Worktree missing"}</p>
           <Link
             to={detailLink}
             className="radial-node__detail-link"
             onClick={(event) => event.stopPropagation()}
           >
-            詳細を開く
+            Open details
           </Link>
         </div>
       </div>

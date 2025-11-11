@@ -8,14 +8,14 @@ import type { Branch } from "../../../../types/api.js";
 const numberFormatter = new Intl.NumberFormat("ja-JP");
 
 const BRANCH_TYPE_LABEL: Record<Branch["type"], string> = {
-  local: "ローカル",
-  remote: "リモート",
+  local: "Local",
+  remote: "Remote",
 };
 
 const MERGE_STATUS_LABEL: Record<Branch["mergeStatus"], string> = {
-  merged: "マージ済み",
-  unmerged: "未マージ",
-  unknown: "状態不明",
+  merged: "Merged",
+  unmerged: "Not merged",
+  unknown: "Unknown",
 };
 
 const MERGE_STATUS_TONE: Record<Branch["mergeStatus"], "success" | "warning" | "muted"> = {
@@ -29,7 +29,7 @@ interface PageStateMessage {
   description: string;
 }
 
-const SEARCH_PLACEHOLDER = "ブランチ名やタイプで検索...";
+const SEARCH_PLACEHOLDER = "Search by branch name or type...";
 
 type ViewMode = "graph" | "list";
 type DivergenceFilter = "ahead" | "behind" | "upToDate";
@@ -132,23 +132,23 @@ export function BranchListPage() {
   const pageState: PageStateMessage | null = useMemo(() => {
     if (isLoading) {
       return {
-        title: "データを読み込み中",
-        description: "最新のブランチ一覧を取得しています...",
+        title: "Loading",
+        description: "Fetching latest branch data...",
       };
     }
 
     if (error) {
       return {
-        title: "ブランチの取得に失敗しました",
+        title: "Failed to load branches",
         description:
-          error instanceof Error ? error.message : "未知のエラーが発生しました。",
+          error instanceof Error ? error.message : "Unknown error occurred.",
       };
     }
 
     if (!branches.length) {
       return {
-        title: "ブランチが見つかりません",
-        description: "git fetch origin などで最新のブランチを取得してください。",
+        title: "No branches found",
+        description: "Run git fetch origin to pull the latest branches.",
       };
     }
 
@@ -161,13 +161,12 @@ export function BranchListPage() {
         <p className="page-hero__eyebrow">WORKTREE DASHBOARD</p>
         <h1>Claude Worktree Control Center</h1>
         <p>
-          ローカルのGitブランチとAIツールをブラウザ上で一元管理し、Worktree状態を瞬時に
-          可視化します。
+          Manage local git branches and AI tools from the browser while keeping worktree status visible at a glance.
         </p>
-        <div className="page-hero__meta">リアルタイムで更新されるステータスビュー</div>
+        <div className="page-hero__meta">Real-time status overview</div>
         <div className="page-hero__actions">
           <Link to="/config" className="button button--secondary">
-            カスタムツール設定
+            Custom Tool Settings
           </Link>
         </div>
       </header>
@@ -175,32 +174,32 @@ export function BranchListPage() {
       <main className="page-content">
         <section className="metrics-grid">
           <article className="metric-card">
-            <p className="metric-card__label">総ブランチ数</p>
+            <p className="metric-card__label">Total branches</p>
             <p className="metric-card__value" data-testid="metric-total">
               {numberFormatter.format(metrics.total)}
             </p>
-            <p className="metric-card__hint">ローカル + リモート</p>
+            <p className="metric-card__hint">Local + Remote</p>
           </article>
           <article className="metric-card">
-            <p className="metric-card__label">作成済みWorktree</p>
+            <p className="metric-card__label">Worktrees ready</p>
             <p className="metric-card__value" data-testid="metric-worktrees">
               {numberFormatter.format(metrics.worktrees)}
             </p>
-            <p className="metric-card__hint">即座にAIツールを起動可能</p>
+            <p className="metric-card__hint">Launch-ready worktrees</p>
           </article>
           <article className="metric-card">
-            <p className="metric-card__label">リモート追跡ブランチ</p>
+            <p className="metric-card__label">Remote tracking</p>
             <p className="metric-card__value">
               {numberFormatter.format(metrics.remote)}
             </p>
-            <p className="metric-card__hint">origin との同期ステータス</p>
+            <p className="metric-card__hint">Sync status vs origin</p>
           </article>
           <article className="metric-card">
-            <p className="metric-card__label">最新コミットが最新</p>
+            <p className="metric-card__label">Up-to-date commits</p>
             <p className="metric-card__value">
               {numberFormatter.format(metrics.healthy)}
             </p>
-            <p className="metric-card__hint">divergence 0 のブランチ</p>
+            <p className="metric-card__hint">Branches with divergence 0</p>
           </article>
         </section>
 
@@ -221,14 +220,14 @@ export function BranchListPage() {
             {numberFormatter.format(filteredBranches.length)} / {" "}
             {numberFormatter.format(metrics.total)} branches
           </span>
-          <div className="view-toggle" role="group" aria-label="表示モード切替">
+          <div className="view-toggle" role="group" aria-label="Toggle view mode">
             <button
               type="button"
               className={`view-toggle__button ${viewMode === "graph" ? "is-active" : ""}`}
               onClick={() => setViewMode("graph")}
               aria-pressed={viewMode === "graph"}
             >
-              グラフビュー
+              Graph view
             </button>
             <button
               type="button"
@@ -236,7 +235,7 @@ export function BranchListPage() {
               onClick={() => setViewMode("list")}
               aria-pressed={viewMode === "list"}
             >
-              リストビュー
+              List view
             </button>
           </div>
           <div className="filter-pill-group">
@@ -245,7 +244,7 @@ export function BranchListPage() {
                 type="button"
                 className="filter-pill"
                 onClick={() => setBaseFilter(null)}
-                aria-label={`${baseFilter} のフィルターを解除`}
+                aria-label={`Clear base filter ${baseFilter}`}
               >
                 base: {baseFilter}
                 <span aria-hidden="true">×</span>
@@ -256,7 +255,7 @@ export function BranchListPage() {
                 type="button"
                 className="filter-pill"
                 onClick={() => setDivergenceFilter(null)}
-                aria-label={`divergence ${divergenceFilter} のフィルターを解除`}
+                aria-label={`Clear divergence filter ${divergenceFilter}`}
               >
                 divergence: {divergenceFilter}
                 <span aria-hidden="true">×</span>
@@ -272,10 +271,9 @@ export function BranchListPage() {
           </div>
         ) : filteredBranches.length === 0 ? (
           <div className="empty-state">
-            <h3>一致するブランチがありません</h3>
+            <h3>No branches match your filters</h3>
             <p>
-              検索条件を見直すか、タグ・ブランチタイプ・コミットメッセージなど別のキーワードを
-              試してください。
+              Adjust the search query or filters (type, divergence, base) and try again.
             </p>
           </div>
         ) : viewMode === "list" ? (
@@ -286,14 +284,14 @@ export function BranchListPage() {
                 className="branch-card branch-card--interactive"
                 role="button"
                 tabIndex={0}
-                aria-label={`${branch.name} のAIツールを設定`}
+                aria-label={`Configure AI tool for ${branch.name}`}
                 onClick={() => handleBranchSelection(branch)}
                 onKeyDown={(event) => handleCardKeyDown(event, branch)}
               >
                 <div className="branch-card__header">
                   <div>
                     <p className="branch-card__eyebrow">
-                      {BRANCH_TYPE_LABEL[branch.type]}ブランチ
+                      {BRANCH_TYPE_LABEL[branch.type]} branch
                     </p>
                     <h2>{branch.name}</h2>
                   </div>
@@ -311,18 +309,18 @@ export function BranchListPage() {
                           : "status-badge--muted"
                       }`}
                     >
-                      {branch.worktreePath ? "Worktreeあり" : "Worktree未作成"}
+                      {branch.worktreePath ? "Worktree ready" : "No worktree"}
                     </span>
                   </div>
                 </div>
 
                 <p className="branch-card__commit">
-                  {branch.commitMessage ?? "コミットメッセージがありません"}
+                  {branch.commitMessage ?? "No commit message"}
                 </p>
 
                 <dl className="metadata-grid metadata-grid--compact">
                   <div>
-                    <dt>最新コミット</dt>
+                    <dt>Latest commit</dt>
                     <dd>{branch.commitHash.slice(0, 7)}</dd>
                   </div>
                   <div>
@@ -331,7 +329,7 @@ export function BranchListPage() {
                   </div>
                   <div>
                     <dt>Worktree</dt>
-                    <dd>{branch.worktreePath ?? "未作成"}</dd>
+                    <dd>{branch.worktreePath ?? "Not created"}</dd>
                   </div>
                 </dl>
 
@@ -344,7 +342,7 @@ export function BranchListPage() {
                         branch.divergence.upToDate ? "pill--success" : "pill--warning"
                       }`}
                     >
-                      {branch.divergence.upToDate ? "最新" : "更新あり"}
+                      {branch.divergence.upToDate ? "Up-to-date" : "Needs sync"}
                     </span>
                   </div>
                 )}
@@ -358,14 +356,14 @@ export function BranchListPage() {
                       handleBranchSelection(branch);
                     }}
                   >
-                    AIツールを起動
+                    Launch AI tool
                   </button>
                   <Link
                     className="button button--ghost"
                     to={`/${encodeURIComponent(branch.name)}`}
                     onClick={(event) => event.stopPropagation()}
                   >
-                    セッションを表示
+                    View session
                   </Link>
                   <span
                     className={`info-pill ${
@@ -380,7 +378,7 @@ export function BranchListPage() {
           </div>
         ) : (
           <div className="page-state page-state--card">
-            <p>グラフビューを表示しています。</p>
+            <p>Graph view is active.</p>
           </div>
         )}
 

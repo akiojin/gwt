@@ -91,23 +91,23 @@ describe("BranchListPage", () => {
     );
 
   const switchToListView = () => {
-    fireEvent.click(screen.getByRole("button", { name: "リストビュー" }));
+    fireEvent.click(screen.getByRole("button", { name: "List view" }));
   };
 
   it("renders summary metrics and branch cards", () => {
     renderPage();
 
-    expect(screen.getByText("総ブランチ数")).toBeInTheDocument();
+    expect(screen.getByText("Total branches")).toBeInTheDocument();
     expect(screen.getByTestId("metric-total")).toHaveTextContent("3");
     expect(screen.getByTestId("metric-worktrees")).toHaveTextContent("1");
     expect(
       screen.getAllByText("feature/design-refresh").length,
     ).toBeGreaterThanOrEqual(1);
-    expect(screen.getByText("リモート追跡ブランチ")).toBeInTheDocument();
+    expect(screen.getByText("Remote tracking")).toBeInTheDocument();
     // List view can still be accessed via toggle
     switchToListView();
-    expect(screen.getByText("未マージ")).toBeInTheDocument();
-    expect(screen.getAllByRole("button", { name: "AIツールを起動" }).length).toBeGreaterThan(0);
+    expect(screen.getByText("Not merged")).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Launch AI tool" }).length).toBeGreaterThan(0);
   });
 
   it("filters branches by the search query and shows empty state when unmatched", () => {
@@ -115,7 +115,7 @@ describe("BranchListPage", () => {
 
     switchToListView();
 
-    const input = screen.getByPlaceholderText("ブランチ名やタイプで検索...");
+    const input = screen.getByPlaceholderText("Search by branch name or type...");
     fireEvent.change(input, { target: { value: "release" } });
 
     expect(
@@ -124,7 +124,7 @@ describe("BranchListPage", () => {
     expect(screen.queryByText("feature/design-refresh")).not.toBeInTheDocument();
 
     fireEvent.change(input, { target: { value: "zzz" } });
-    expect(screen.getByText("一致するブランチがありません")).toBeInTheDocument();
+    expect(screen.getByText("No branches match your filters")).toBeInTheDocument();
   });
 
   it("opens the launch modal when branch card is selected and closes on demand", () => {
@@ -133,7 +133,7 @@ describe("BranchListPage", () => {
     switchToListView();
 
     const interactiveCard = screen.getByRole("button", {
-      name: "feature/design-refresh のAIツールを設定",
+      name: "Configure AI tool for feature/design-refresh",
     });
 
     fireEvent.click(interactiveCard);
@@ -151,7 +151,7 @@ describe("BranchListPage", () => {
     switchToListView();
 
     const interactiveCard = screen.getByRole("button", {
-      name: "release/v1.0.0 のAIツールを設定",
+      name: "Configure AI tool for release/v1.0.0",
     });
 
     fireEvent.keyDown(interactiveCard, { key: "Enter" });
@@ -164,7 +164,7 @@ describe("BranchListPage", () => {
     renderPage();
 
     const radialNode = screen.getByRole("button", {
-      name: "hotfix/security を選択",
+      name: "Select hotfix/security",
     });
 
     fireEvent.click(radialNode);
@@ -174,8 +174,8 @@ describe("BranchListPage", () => {
   it("defaults to graph view and toggles to list view when requested", () => {
     renderPage();
 
-    const graphButton = screen.getByRole("button", { name: "グラフビュー" });
-    const listButton = screen.getByRole("button", { name: "リストビュー" });
+    const graphButton = screen.getByRole("button", { name: "Graph view" });
+    const listButton = screen.getByRole("button", { name: "List view" });
 
     expect(graphButton).toHaveAttribute("aria-pressed", "true");
     expect(listButton).toHaveAttribute("aria-pressed", "false");
@@ -188,7 +188,7 @@ describe("BranchListPage", () => {
   it("applies base branch filter to both graph and list views", () => {
     renderPage();
 
-    const mainFilter = screen.getByRole("button", { name: "main を中心に表示" });
+    const mainFilter = screen.getByRole("button", { name: "Focus on main" });
     fireEvent.click(mainFilter);
 
     switchToListView();
@@ -196,7 +196,7 @@ describe("BranchListPage", () => {
     expect(screen.getByText("feature/design-refresh")).toBeInTheDocument();
     expect(screen.getByText("hotfix/security")).toBeInTheDocument();
 
-    const clearFilter = screen.getByRole("button", { name: "main のフィルターを解除" });
+    const clearFilter = screen.getByRole("button", { name: "Clear base filter main" });
     fireEvent.click(clearFilter);
 
     expect(screen.getByText("hotfix/security")).toBeInTheDocument();
@@ -215,7 +215,7 @@ describe("BranchListPage", () => {
     expect(screen.queryByText("release/v1.0.0")).toBeNull();
 
     const clearButton = screen.getByRole("button", {
-      name: "divergence ahead のフィルターを解除",
+      name: "Clear divergence filter ahead",
     });
     fireEvent.click(clearButton);
     expect(screen.getByText("hotfix/security")).toBeInTheDocument();
