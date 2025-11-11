@@ -29,8 +29,6 @@ interface PageStateMessage {
   description: string;
 }
 
-const SEARCH_PLACEHOLDER = "Search by branch name or type...";
-
 type ViewMode = "graph" | "list";
 type DivergenceFilter = "ahead" | "behind" | "upToDate";
 
@@ -48,6 +46,10 @@ export function BranchListPage() {
   const [viewMode, setViewMode] = useState<ViewMode>("graph");
   const [baseFilter, setBaseFilter] = useState<string | null>(null);
   const [divergenceFilter, setDivergenceFilter] = useState<DivergenceFilter | null>(null);
+  const [showStats, setShowStats] = useState(true);
+  const [statsPosition, setStatsPosition] = useState({ x: 20, y: 20 });
+  const [isDragging, setIsDragging] = useState(false);
+  const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
 
   const handleBranchSelection = useCallback((branch: Branch) => {
     setSelectedBranch(branch);
@@ -62,6 +64,42 @@ export function BranchListPage() {
     },
     [handleBranchSelection],
   );
+
+  const handleStatsMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    if ((e.target as HTMLElement).closest('.overlay-panel__close')) {
+      return;
+    }
+    setIsDragging(true);
+    const rect = e.currentTarget.getBoundingClientRect();
+    setDragOffset({
+      x: e.clientX - rect.left,
+      y: e.clientY - rect.top,
+    });
+  };
+
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isDragging) return;
+      setStatsPosition({
+        x: e.clientX - dragOffset.x,
+        y: e.clientY - dragOffset.y,
+      });
+    };
+
+    const handleMouseUp = () => {
+      setIsDragging(false);
+    };
+
+    if (isDragging) {
+      document.addEventListener('mousemove', handleMouseMove);
+      document.addEventListener('mouseup', handleMouseUp);
+    }
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isDragging, dragOffset]);
 
   const branches = data ?? [];
 
@@ -156,128 +194,149 @@ export function BranchListPage() {
   }, [branches.length, error, isLoading]);
 
   return (
-    <div className="app-shell">
-      <header className="page-hero">
-        <p className="page-hero__eyebrow">WORKTREE DASHBOARD</p>
-        <h1>Claude Worktree Control Center</h1>
-        <p>
-          Manage local git branches and AI tools from the browser while keeping worktree status visible at a glance.
-        </p>
-        <div className="page-hero__meta">Real-time status overview</div>
-        <div className="page-hero__actions">
-          <Link to="/config" className="button button--secondary">
-            Custom Tool Settings
-          </Link>
-        </div>
-      </header>
+    <div className="app-shell app-shell--fullscreen">
+      <main className="page-content page-content--fullscreen">
+        {/* Stats overlay */}
+        {showStats && (
+          <div
+            className="overlay-panel overlay-panel--stats"
+            style={{
+              left: `${statsPosition.x}px`,
+              top: `${statsPosition.y}px`,
+              right: 'auto',
+              userSelect: isDragging ? 'none' : 'auto',
+            }}
+            onMouseDown={handleStatsMouseDown}
+          >
+            <div className="overlay-panel__header">
+              <h2>Statistics</h2>
+              <button
+                type="button"
+                className="overlay-panel__close"
+                onClick={() => setShowStats(false)}
+                aria-label="Close statistics"
+              >
+                ×
+              </button>
+            </div>
+            <div className="overlay-panel__content">
+              <div className="stat-item">
+                <span className="stat-item__label">Total branches</span>
+                <span className="stat-item__value">{numberFormatter.format(metrics.total)}</span>
+              </div>
+              <div className="stat-item">
+                <span className="stat-item__label">Worktrees ready</span>
+                <span className="stat-item__value">{numberFormatter.format(metrics.worktrees)}</span>
+              </div>
+              <div className="stat-item">
+                <span className="stat-item__label">Remote tracking</span>
+                <span className="stat-item__value">{numberFormatter.format(metrics.remote)}</span>
+              </div>
+              <div className="stat-item">
+                <span className="stat-item__label">Up-to-date</span>
+                <span className="stat-item__value">{numberFormatter.format(metrics.healthy)}</span>
+              </div>
+            </div>
+          </div>
+        )}
 
-      <main className="page-content">
-        <section className="metrics-grid">
-          <article className="metric-card">
-            <p className="metric-card__label">Total branches</p>
-            <p className="metric-card__value" data-testid="metric-total">
-              {numberFormatter.format(metrics.total)}
-            </p>
-            <p className="metric-card__hint">Local + Remote</p>
-          </article>
-          <article className="metric-card">
-            <p className="metric-card__label">Worktrees ready</p>
-            <p className="metric-card__value" data-testid="metric-worktrees">
-              {numberFormatter.format(metrics.worktrees)}
-            </p>
-            <p className="metric-card__hint">Launch-ready worktrees</p>
-          </article>
-          <article className="metric-card">
-            <p className="metric-card__label">Remote tracking</p>
-            <p className="metric-card__value">
-              {numberFormatter.format(metrics.remote)}
-            </p>
-            <p className="metric-card__hint">Sync status vs origin</p>
-          </article>
-          <article className="metric-card">
-            <p className="metric-card__label">Up-to-date commits</p>
-            <p className="metric-card__value">
-              {numberFormatter.format(metrics.healthy)}
-            </p>
-            <p className="metric-card__hint">Branches with divergence 0</p>
-          </article>
-        </section>
-
-        <section className="toolbar">
-          <label className="toolbar__field">
-            <span className="toolbar__icon" aria-hidden="true">
-              🔍
+        {/* Control panel */}
+        <div className="overlay-panel overlay-panel--controls">
+          <div className="control-group">
+            <label className="search-field">
+              <span className="search-field__icon">🔍</span>
+              <input
+                type="search"
+                className="search-field__input"
+                placeholder="Search branches..."
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+              />
+            </label>
+            <span className="control-badge">
+              {numberFormatter.format(filteredBranches.length)} / {numberFormatter.format(metrics.total)}
             </span>
-            <input
-              type="search"
-              className="search-input"
-              placeholder={SEARCH_PLACEHOLDER}
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-            />
-          </label>
-          <span className="toolbar__count">
-            {numberFormatter.format(filteredBranches.length)} / {" "}
-            {numberFormatter.format(metrics.total)} branches
-          </span>
-          <div className="view-toggle" role="group" aria-label="Toggle view mode">
-            <button
-              type="button"
-              className={`view-toggle__button ${viewMode === "graph" ? "is-active" : ""}`}
-              onClick={() => setViewMode("graph")}
-              aria-pressed={viewMode === "graph"}
-            >
-              Graph view
-            </button>
-            <button
-              type="button"
-              className={`view-toggle__button ${viewMode === "list" ? "is-active" : ""}`}
-              onClick={() => setViewMode("list")}
-              aria-pressed={viewMode === "list"}
-            >
-              List view
-            </button>
           </div>
-          <div className="filter-pill-group">
-            {baseFilter && (
-              <button
-                type="button"
-                className="filter-pill"
-                onClick={() => setBaseFilter(null)}
-                aria-label={`Clear base filter ${baseFilter}`}
-              >
-                base: {baseFilter}
-                <span aria-hidden="true">×</span>
-              </button>
-            )}
-            {divergenceFilter && (
-              <button
-                type="button"
-                className="filter-pill"
-                onClick={() => setDivergenceFilter(null)}
-                aria-label={`Clear divergence filter ${divergenceFilter}`}
-              >
-                divergence: {divergenceFilter}
-                <span aria-hidden="true">×</span>
-              </button>
-            )}
-          </div>
-        </section>
 
-        {pageState ? (
-          <div className="page-state page-state--card">
-            <h2>{pageState.title}</h2>
-            <p>{pageState.description}</p>
+          <div className="control-group">
+            <div className="view-mode-toggle">
+              <button
+                type="button"
+                className={`view-mode-toggle__btn ${viewMode === "graph" ? "is-active" : ""}`}
+                onClick={() => setViewMode("graph")}
+              >
+                🌐 Graph
+              </button>
+              <button
+                type="button"
+                className={`view-mode-toggle__btn ${viewMode === "list" ? "is-active" : ""}`}
+                onClick={() => setViewMode("list")}
+              >
+                📋 List
+              </button>
+            </div>
           </div>
-        ) : filteredBranches.length === 0 ? (
-          <div className="empty-state">
-            <h3>No branches match your filters</h3>
-            <p>
-              Adjust the search query or filters (type, divergence, base) and try again.
-            </p>
+
+          {(baseFilter || divergenceFilter) && (
+            <div className="control-group">
+              <div className="filter-chips">
+                {baseFilter && (
+                  <button
+                    type="button"
+                    className="filter-chip"
+                    onClick={() => setBaseFilter(null)}
+                  >
+                    base: {baseFilter} <span>×</span>
+                  </button>
+                )}
+                {divergenceFilter && (
+                  <button
+                    type="button"
+                    className="filter-chip"
+                    onClick={() => setDivergenceFilter(null)}
+                  >
+                    {divergenceFilter} <span>×</span>
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
+          <div className="control-group">
+            <Link to="/config" className="control-link">
+              ⚙️ Settings
+            </Link>
+            {!showStats && (
+              <button
+                type="button"
+                className="control-link"
+                onClick={() => setShowStats(true)}
+              >
+                📊 Stats
+              </button>
+            )}
           </div>
-        ) : viewMode === "list" ? (
-          <div className="branch-grid">
+        </div>
+
+        {/* List view overlay */}
+        {viewMode === "list" && (
+          <div className="overlay-panel overlay-panel--list">
+            <div className="overlay-panel__header">
+              <h2>Branches</h2>
+            </div>
+            <div className="overlay-panel__content overlay-panel__content--scrollable">
+              {pageState ? (
+                <div className="empty-message">
+                  <h3>{pageState.title}</h3>
+                  <p>{pageState.description}</p>
+                </div>
+              ) : filteredBranches.length === 0 ? (
+                <div className="empty-message">
+                  <h3>No branches found</h3>
+                  <p>Adjust your search or filters</p>
+                </div>
+              ) : (
+                <div className="branch-list">
             {filteredBranches.map((branch) => (
               <article
                 key={branch.name}
@@ -375,14 +434,14 @@ export function BranchListPage() {
                 </div>
               </article>
             ))}
-          </div>
-        ) : (
-          <div className="page-state page-state--card">
-            <p>Graph view is active.</p>
+                </div>
+              )}
+            </div>
           </div>
         )}
 
-        {!pageState && branches.length > 0 && viewMode === "graph" && (
+        {/* Graph - always rendered as background */}
+        {!pageState && branches.length > 0 && (
           <div className="graph-container">
             <BranchGraph
               branches={filteredBranches.length ? filteredBranches : branches}

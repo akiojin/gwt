@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { useBranch } from "../hooks/useBranches";
 import { useCreateWorktree } from "../hooks/useWorktrees";
@@ -196,23 +196,20 @@ export function BranchDetailPage() {
 
 
 
-  const handleSessionExit = useCallback(
-    (code: number) => {
-      setActiveSessionId(null);
-      setIsTerminalFullscreen(false);
-      queryClient.invalidateQueries({ queryKey: ["sessions"] });
-      setBanner({
-        type: code === 0 ? "success" : "error",
-        message: `Session exited with code ${code}.`,
-      });
-      navigate("/", { replace: false });
-    },
-    [navigate, queryClient],
-  );
+  const handleSessionExit = (code: number) => {
+    setActiveSessionId(null);
+    setIsTerminalFullscreen(false);
+    queryClient.invalidateQueries({ queryKey: ["sessions"] });
+    setBanner({
+      type: code === 0 ? "success" : "error",
+      message: `Session exited with code ${code}.`,
+    });
+    navigate("/", { replace: false });
+  };
 
-  const handleSessionError = useCallback((message: string) => {
+  const handleSessionError = (message: string) => {
     setBanner({ type: "error", message: message ?? "Unknown error" });
-  }, []);
+  };
 
   const handleFocusSession = (sessionId: string) => {
     setActiveSessionId(sessionId);
