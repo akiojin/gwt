@@ -6,13 +6,27 @@
  */
 
 import { execa } from "execa";
-import { getAllBranches, getRepositoryRoot } from "../../../git.js";
+import {
+  getAllBranches,
+  getRepositoryRoot,
+  getBranchDivergenceStatuses,
+} from "../../../git.js";
 import { getPullRequestByBranch } from "../../../github.js";
 import { listAdditionalWorktrees } from "../../../worktree.js";
 import type { Branch } from "../../../types/api.js";
 import type { BranchInfo, PullRequest } from "../../../cli/ui/types.js";
 
 const DEFAULT_BASE_BRANCHES = ["main", "master", "develop", "dev"];
+
+function mapPullRequestState(state: string): "open" | "merged" | "closed" {
+  if (state === "OPEN") {
+    return "open";
+  }
+  if (state === "MERGED") {
+    return "merged";
+  }
+  return "closed";
+}
 
 /**
  * すべてのブランチ一覧を取得（マージステータスとWorktree情報付き）
@@ -23,6 +37,7 @@ export async function listBranches(): Promise<Branch[]> {
     listAdditionalWorktrees(),
     getRepositoryRoot(),
   ]);
+  const divergenceMap = await buildDivergenceMap(branches, repoRoot);
   const upstreamMap = await collectUpstreamMap(repoRoot);
   const baseCandidates = buildBaseBranchCandidates(branches);
   const mainBranch = "main"; // TODO: 動的に取得
@@ -54,6 +69,30 @@ export async function listBranches(): Promise<Branch[]> {
         ancestorCache,
       );
 
+      const prInfo = pr
+        ? {
+            number: pr.number,
+            title: pr.title,
+            state: mapPullRequestState(pr.state),
+            mergedAt: pr.mergedAt,
+          }
+        : null;
+
+      const divergenceStatus =
+        branchInfo.type === "local"
+          ? divergenceMap.get(branchInfo.name)
+          : undefined;
+
+      const divergence = divergenceStatus
+        ? {
+            ahead: divergenceStatus.localAhead,
+            behind: divergenceStatus.remoteAhead,
+            upToDate:
+              divergenceStatus.localAhead === 0 &&
+              divergenceStatus.remoteAhead === 0,
+          }
+        : null;
+
       return {
         name: branchInfo.name,
         type: branchInfo.type,
@@ -62,14 +101,40 @@ export async function listBranches(): Promise<Branch[]> {
         author: null,
         commitDate: null,
         mergeStatus,
+        hasUnpushedCommits: Boolean(branchInfo.hasUnpushedCommits),
         worktreePath: worktree?.path || null,
         baseBranch: baseBranch ?? null,
-        divergence: null, // TODO: divergence情報を取得
+        divergence,
+        prInfo,
       };
     }),
   );
 
   return branchList;
+}
+
+async function buildDivergenceMap(
+  branches: BranchInfo[],
+  repoRoot: string,
+): Promise<Map<string, { remoteAhead: number; localAhead: number }>> {
+  const localBranchNames = branches
+    .filter((branch) => branch.type === "local")
+    .map((branch) => branch.name);
+
+  if (localBranchNames.length === 0) {
+    return new Map();
+  }
+
+  try {
+    const statuses = await getBranchDivergenceStatuses({
+      cwd: repoRoot,
+      branches: localBranchNames,
+    });
+    return new Map(statuses.map((status) => [status.branch, status]));
+  } catch (error) {
+    console.warn("Failed to compute branch divergence for Web UI", error);
+    return new Map();
+  }
 }
 
 /**
