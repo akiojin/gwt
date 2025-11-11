@@ -364,14 +364,17 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
           </div>
 
           <label className="form-field">
-              <span>
-                <input
-                  type="checkbox"
-                  checked={skipPermissions}
-                  onChange={(event) => setSkipPermissions(event.target.checked)}
-                />
-                <span style={{ marginLeft: "0.5rem" }}>Skip permission checks (at your own risk)</span>
+            <span className="form-field__checkbox-row">
+              <input
+                type="checkbox"
+                className="form-field__checkbox-input"
+                checked={skipPermissions}
+                onChange={(event) => setSkipPermissions(event.target.checked)}
+              />
+              <span className="form-field__checkbox-label">
+                Skip permission checks (at your own risk)
               </span>
+            </span>
           </label>
 
           <div className="tool-card__actions">

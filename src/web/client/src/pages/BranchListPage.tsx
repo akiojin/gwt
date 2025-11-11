@@ -445,11 +445,6 @@ export function BranchListPage() {
           <div className="graph-container">
             <BranchGraph
               branches={filteredBranches.length ? filteredBranches : branches}
-              activeBase={baseFilter}
-              onBaseFilterChange={setBaseFilter}
-              activeDivergence={divergenceFilter}
-              onDivergenceFilterChange={setDivergenceFilter}
-              onSelectBranch={handleBranchSelection}
             />
           </div>
         )}
