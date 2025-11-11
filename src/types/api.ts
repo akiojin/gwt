@@ -69,8 +69,21 @@ export interface AIToolSession {
 /**
  * CustomAITool - カスタムAI Tool設定
  */
+export interface EnvironmentVariable {
+  key: string;
+  value: string;
+  lastUpdated?: string | null;
+}
+
+export interface EnvironmentHistoryEntry {
+  key: string;
+  action: "add" | "update" | "delete" | "import";
+  timestamp: string;
+  source: "ui" | "os" | "cli";
+}
+
 export interface CustomAITool {
-  id: string; // UUID v4
+  id: string; // UUID v4 or slug
   displayName: string;
   icon?: string | null;
   command: string;
@@ -82,10 +95,10 @@ export interface CustomAITool {
     resume?: string[];
   };
   permissionSkipArgs?: string[] | null;
-  env?: Record<string, string> | null;
+  env?: EnvironmentVariable[] | null;
   description?: string | null;
-  createdAt: string; // ISO8601
-  updatedAt: string; // ISO8601
+  createdAt?: string | null; // ISO8601
+  updatedAt?: string | null; // ISO8601
 }
 
 /**
@@ -120,7 +133,15 @@ export type WorktreeListResponse = SuccessResponse<Worktree[]>;
 export type WorktreeResponse = SuccessResponse<Worktree>;
 export type SessionListResponse = SuccessResponse<AIToolSession[]>;
 export type SessionResponse = SuccessResponse<AIToolSession>;
-export type ConfigResponse = SuccessResponse<{ tools: CustomAITool[] }>;
+export interface ConfigPayload {
+  version: string;
+  updatedAt?: string | null;
+  env?: EnvironmentVariable[] | null;
+  history?: EnvironmentHistoryEntry[] | null;
+  tools: CustomAITool[];
+}
+
+export type ConfigResponse = SuccessResponse<ConfigPayload>;
 
 /**
  * API Request bodies
@@ -145,9 +166,7 @@ export interface StartSessionRequest {
   customToolId?: string | null;
 }
 
-export interface UpdateConfigRequest {
-  tools: CustomAITool[];
-}
+export type UpdateConfigRequest = ConfigPayload;
 
 export interface CleanupResponse {
   success: true;
