@@ -9,6 +9,13 @@ import * as pty from "node-pty";
 import type { IPty } from "node-pty";
 import { randomUUID } from "node:crypto";
 import type { AIToolSession } from "../../../types/api.js";
+import {
+  resolveClaudeCommand,
+  resolveCodexCommand,
+  resolveCustomToolCommand,
+  AIToolResolutionError,
+  type ResolvedCommand,
+} from "../../../services/aiToolResolver.js";
 
 export interface PTYInstance {
   ptyProcess: IPty;
@@ -24,37 +31,78 @@ export class PTYManager {
   /**
    * 新しいPTYセッションを作成
    */
-  public spawn(
+  public async spawn(
     toolType: "claude-code" | "codex-cli" | "custom",
     worktreePath: string,
     mode: "normal" | "continue" | "resume",
-    toolName?: string | null,
-    cols = 80,
-    rows = 24,
-  ): { sessionId: string; session: AIToolSession } {
+    options: {
+      toolName?: string | null;
+      cols?: number;
+      rows?: number;
+      skipPermissions?: boolean;
+      bypassApprovals?: boolean;
+      extraArgs?: string[];
+      customToolId?: string | null;
+    } = {},
+  ): Promise<{ sessionId: string; session: AIToolSession }> {
+    const cols = options.cols ?? 80;
+    const rows = options.rows ?? 24;
+    const toolName = options.toolName ?? null;
     const sessionId = randomUUID();
 
-    // AI Toolコマンドを構築
-    const command = this.buildCommand(toolType, mode, toolName);
-    const args = this.buildArgs(toolType, mode);
+    const resolverOptions: {
+      toolName?: string | null;
+      skipPermissions?: boolean;
+      bypassApprovals?: boolean;
+      extraArgs?: string[];
+      customToolId?: string | null;
+    } = {};
+
+    if (toolName !== null) {
+      resolverOptions.toolName = toolName;
+    }
+    if (options.skipPermissions !== undefined) {
+      resolverOptions.skipPermissions = options.skipPermissions;
+    }
+    if (options.bypassApprovals !== undefined) {
+      resolverOptions.bypassApprovals = options.bypassApprovals;
+    }
+    if (options.extraArgs && options.extraArgs.length > 0) {
+      resolverOptions.extraArgs = options.extraArgs;
+    }
+    if (options.customToolId !== undefined) {
+      resolverOptions.customToolId = options.customToolId;
+    }
+
+    const resolved = await this.resolveCommand(toolType, mode, resolverOptions);
+
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      TERM: "xterm-256color",
+      COLORTERM: "truecolor",
+    };
+
+    if (resolved.env) {
+      Object.assign(env, resolved.env);
+    }
+
+    if (toolType === "claude-code" && options.skipPermissions && isRootUser()) {
+      env.IS_SANDBOX = "1";
+    }
 
     // PTYプロセスをスポーン
-    const ptyProcess = pty.spawn(command, args, {
+    const ptyProcess = pty.spawn(resolved.command, resolved.args, {
       name: "xterm-256color",
       cols,
       rows,
       cwd: worktreePath,
-      env: {
-        ...process.env,
-        TERM: "xterm-256color",
-        COLORTERM: "truecolor",
-      },
+      env,
     });
 
     const session: AIToolSession = {
       sessionId,
       toolType,
-      toolName: toolName || null,
+      toolName: options.customToolId ?? toolName ?? null,
       mode,
       worktreePath,
       ptyPid: ptyProcess.pid,
@@ -133,57 +181,74 @@ export class PTYManager {
     return Array.from(this.instances.values()).map((inst) => inst.session);
   }
 
-  /**
-   * AI Toolのコマンドを構築
-   */
-  private buildCommand(
+  private async resolveCommand(
     toolType: "claude-code" | "codex-cli" | "custom",
     mode: "normal" | "continue" | "resume",
-    toolName?: string | null,
-  ): string {
-    if (toolType === "custom" && toolName) {
-      // カスタムツールは別途config.jsonから取得する必要があるが、
-      // ここでは簡易実装としてtoolNameをそのままコマンドとして使用
-      return toolName;
-    }
-
-    if (toolType === "codex-cli") {
-      return "codex";
-    }
-
-    // claude-code
-    return "claude";
-  }
-
-  /**
-   * AI Toolの引数を構築
-   */
-  private buildArgs(
-    toolType: "claude-code" | "codex-cli" | "custom",
-    mode: "normal" | "continue" | "resume",
-  ): string[] {
+    options: {
+      toolName?: string | null;
+      skipPermissions?: boolean;
+      bypassApprovals?: boolean;
+      extraArgs?: string[];
+      customToolId?: string | null;
+    },
+  ): Promise<ResolvedCommand> {
     if (toolType === "custom") {
-      // カスタムツールの引数は別途config.jsonから取得
-      return [];
+      const toolId = options.customToolId ?? options.toolName;
+      if (!toolId) {
+        throw new AIToolResolutionError(
+          "COMMAND_NOT_FOUND",
+          "Custom tool identifier is required to start a session.",
+        );
+      }
+
+      return resolveCustomToolCommand({
+        toolId,
+        mode,
+        ...(options.skipPermissions !== undefined
+          ? { skipPermissions: options.skipPermissions }
+          : {}),
+        ...(options.extraArgs ? { extraArgs: options.extraArgs } : {}),
+      });
     }
 
     if (toolType === "codex-cli") {
-      if (mode === "continue") {
-        return ["--continue"];
+      const codexOptions: {
+        mode: "normal" | "continue" | "resume";
+        bypassApprovals?: boolean;
+        extraArgs?: string[];
+      } = { mode };
+
+      if (options.bypassApprovals !== undefined) {
+        codexOptions.bypassApprovals = options.bypassApprovals;
       }
-      if (mode === "resume") {
-        return ["--resume"];
+      if (options.extraArgs && options.extraArgs.length > 0) {
+        codexOptions.extraArgs = options.extraArgs;
       }
-      return [];
+
+      return resolveCodexCommand(codexOptions);
     }
 
-    // claude-code
-    if (mode === "continue") {
-      return ["--continue"];
+    const claudeOptions: {
+      mode: "normal" | "continue" | "resume";
+      skipPermissions?: boolean;
+      extraArgs?: string[];
+    } = { mode };
+
+    if (options.skipPermissions !== undefined) {
+      claudeOptions.skipPermissions = options.skipPermissions;
     }
-    if (mode === "resume") {
-      return ["--resume"];
+    if (options.extraArgs && options.extraArgs.length > 0) {
+      claudeOptions.extraArgs = options.extraArgs;
     }
-    return [];
+
+    return resolveClaudeCommand(claudeOptions);
+  }
+}
+
+function isRootUser(): boolean {
+  try {
+    return typeof process.getuid === "function" && process.getuid() === 0;
+  } catch {
+    return false;
   }
 }

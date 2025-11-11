@@ -7,7 +7,7 @@
 
 import { homedir } from "node:os";
 import path from "node:path";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile, mkdir } from "node:fs/promises";
 import type {
   ToolsConfig,
   CustomAITool,
@@ -36,7 +36,8 @@ const TOOLS_CONFIG_PATH = path.join(
 export async function loadToolsConfig(): Promise<ToolsConfig> {
   try {
     const content = await readFile(TOOLS_CONFIG_PATH, "utf-8");
-    const config = JSON.parse(content) as ToolsConfig;
+    const parsed = JSON.parse(content) as ToolsConfig;
+    const config = normalizeToolsConfig(parsed);
 
     // 検証
     validateToolsConfig(config);
@@ -156,6 +157,37 @@ function validateCustomAITool(tool: unknown): asserts tool is CustomAITool {
       `modeArgs must define at least one mode (normal, continue, or resume) for tool "${t.id}"`,
     );
   }
+}
+
+function normalizeToolsConfig(config: ToolsConfig): ToolsConfig {
+  const version = config.version ?? "1.0.0";
+  const customTools = (config.customTools ?? []).map((tool) => {
+    const createdAt = tool.createdAt ?? new Date().toISOString();
+    const updatedAt = tool.updatedAt ?? createdAt;
+    return {
+      ...tool,
+      createdAt,
+      updatedAt,
+    };
+  });
+
+  return {
+    version,
+    customTools,
+  };
+}
+
+export async function saveToolsConfig(config: ToolsConfig): Promise<void> {
+  const normalized = normalizeToolsConfig(config);
+  validateToolsConfig(normalized);
+
+  const dir = path.dirname(TOOLS_CONFIG_PATH);
+  await mkdir(dir, { recursive: true });
+  await writeFile(
+    TOOLS_CONFIG_PATH,
+    JSON.stringify(normalized, null, 2),
+    "utf-8",
+  );
 }
 
 /**

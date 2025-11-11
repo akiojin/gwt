@@ -28,11 +28,7 @@ export class WebSocketHandler {
    * WebSocket接続を処理
    */
   public handle(connection: WebSocket, request: FastifyRequest): void {
-    const url = new URL(
-      request.url,
-      `http://${request.hostname || "localhost"}`,
-    );
-    const sessionId = url.searchParams.get("sessionId");
+    const sessionId = resolveSessionId(request);
 
     if (!sessionId) {
       this.sendError(connection, "Missing sessionId parameter");
@@ -48,6 +44,7 @@ export class WebSocketHandler {
     }
 
     const { ptyProcess } = instance;
+    let hasExited = false;
 
     // セッションステータスを更新
     this.ptyManager.updateStatus(sessionId, "running");
@@ -59,6 +56,7 @@ export class WebSocketHandler {
 
     // PTYプロセス終了時の処理
     ptyProcess.onExit(({ exitCode, signal }) => {
+      hasExited = true;
       this.ptyManager.updateStatus(sessionId, "completed", exitCode);
       this.sendExit(connection, exitCode, signal);
       connection.close();
@@ -66,6 +64,10 @@ export class WebSocketHandler {
 
     // クライアントからのメッセージを処理
     connection.on("message", (rawMessage) => {
+      if (hasExited) {
+        this.sendError(connection, "Session already exited");
+        return;
+      }
       try {
         const message: ClientMessage = JSON.parse(rawMessage.toString());
         this.handleClientMessage(message, ptyProcess, connection);
@@ -104,12 +106,22 @@ export class WebSocketHandler {
     switch (message.type) {
       case "input": {
         const inputMsg = message as InputMessage;
-        ptyProcess.write(inputMsg.data);
+        try {
+          ptyProcess.write(inputMsg.data);
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          this.sendError(connection, `Failed to write to session: ${reason}`);
+        }
         break;
       }
       case "resize": {
         const resizeMsg = message as ResizeMessage;
-        ptyProcess.resize(resizeMsg.data.cols, resizeMsg.data.rows);
+        try {
+          ptyProcess.resize(resizeMsg.data.cols, resizeMsg.data.rows);
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          this.sendError(connection, `Failed to resize terminal: ${reason}`);
+        }
         break;
       }
       case "ping": {
@@ -177,4 +189,36 @@ export class WebSocketHandler {
     };
     connection.send(JSON.stringify(message));
   }
+}
+
+interface RequestLike {
+  params?: { sessionId?: string } | undefined;
+  url: string;
+  hostname?: string;
+  headers?: { host?: string | undefined };
+}
+
+export function resolveSessionId(
+  request: FastifyRequest | RequestLike,
+): string | null {
+  const paramsId = (request as RequestLike).params?.sessionId;
+  if (typeof paramsId === "string" && paramsId.length > 0) {
+    return paramsId;
+  }
+
+  try {
+    const host =
+      (request as FastifyRequest).headers?.host ??
+      (request as RequestLike).hostname ??
+      "localhost";
+    const parsed = new URL(request.url, `http://${host}`);
+    const queryId = parsed.searchParams.get("sessionId");
+    if (queryId && queryId.length > 0) {
+      return queryId;
+    }
+  } catch {
+    // ignore
+  }
+
+  return null;
 }

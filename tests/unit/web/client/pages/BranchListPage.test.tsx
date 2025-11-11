@@ -25,6 +25,8 @@ const sampleBranches: Branch[] = [
     author: "Akira",
     commitDate: "2025-11-10T09:00:00.000Z",
     divergence: { ahead: 2, behind: 0, upToDate: false },
+    hasUnpushedCommits: true,
+    prInfo: null,
   },
   {
     name: "release/v1.0.0",
@@ -37,6 +39,13 @@ const sampleBranches: Branch[] = [
     author: "Sana",
     commitDate: "2025-11-05T04:00:00.000Z",
     divergence: { ahead: 0, behind: 0, upToDate: true },
+    hasUnpushedCommits: false,
+    prInfo: {
+      number: 42,
+      title: "Release v1.0.0",
+      state: "merged",
+      mergedAt: "2025-11-04T10:00:00.000Z",
+    },
   },
   {
     name: "hotfix/security",
@@ -49,6 +58,8 @@ const sampleBranches: Branch[] = [
     author: "Noa",
     commitDate: "2025-11-03T01:00:00.000Z",
     divergence: { ahead: 0, behind: 3, upToDate: false },
+    hasUnpushedCommits: false,
+    prInfo: null,
   },
 ];
 
@@ -82,6 +93,7 @@ describe("BranchListPage", () => {
     expect(
       screen.getByText("ベースブランチの関係をグラフィカルに把握"),
     ).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "AIツールを起動" }).length).toBeGreaterThan(0);
   });
 
   it("filters branches by the search query and shows empty state when unmatched", () => {

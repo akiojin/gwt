@@ -55,6 +55,20 @@ export async function startWebServer(): Promise<void> {
     prefix: "/",
   });
 
+  // SPA Fallback: serve index.html for non-API routes (e.g., refresh on nested paths)
+  fastify.setNotFoundHandler((request, reply) => {
+    const url = request.url || "";
+    if (request.method === "GET" && !url.startsWith("/api")) {
+      return reply.sendFile("index.html");
+    }
+
+    return reply.status(404).send({
+      success: false,
+      error: `Route ${request.method}:${url} not found`,
+      details: null,
+    });
+  });
+
   // サーバー起動
   try {
     const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;

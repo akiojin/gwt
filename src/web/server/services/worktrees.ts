@@ -10,6 +10,7 @@ import {
   createWorktree as createWorktreeCore,
   removeWorktree as removeWorktreeCore,
   generateWorktreePath,
+  isProtectedBranchName,
   type WorktreeInfo,
 } from "../../../worktree.js";
 import type { Worktree } from "../../../types/api.js";
@@ -26,8 +27,11 @@ export async function listWorktrees(): Promise<Worktree[]> {
     head: wt.head,
     isLocked: false, // TODO: locked情報を取得
     isPrunable: false, // TODO: prunable情報を取得
+    isProtected: isProtectedBranchName(wt.branch),
     createdAt: null, // git worktreeからは取得不可
     lastAccessedAt: null, // git worktreeからは取得不可
+    divergence: null,
+    prInfo: null,
   }));
 }
 

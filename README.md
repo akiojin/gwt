@@ -75,6 +75,33 @@ The tool presents an interactive interface with the following options:
 3. **Manage Worktrees**: View, open, or remove existing worktrees
 4. **Cleanup Branches**: Remove merged PR branches or branches identical to their base directly from the CLI
 
+## Web UI & Custom AI Tools
+
+### Launching the Web UI
+
+```bash
+claude-worktree serve
+# or
+bunx @akiojin/claude-worktree serve
+```
+
+- Open <http://localhost:3000> to access the Worktree dashboard
+- The branch list mirrors the CLI view, including search and worktree creation
+- Detailed branch pages let you start AI tool sessions directly from the browser
+
+### Managing Custom AI Tools
+
+- Navigate to **Config** (top-right button on the dashboard or `/config`) to view and edit `~/.claude-worktree/tools.json`
+- Add/edit tools with execution type (`path` / `bunx` / `command`), default arguments, mode-specific arguments, permission skip arguments, and environment variables
+- Changes are written to the same `tools.json` file that the CLI uses, so both channels stay in sync
+- When launching from the branch detail page you can:
+  - Select any custom tool
+  - Choose `normal` / `continue` / `resume` mode
+  - Append extra arguments
+  - Opt into the same `--dangerously-skip-permissions` flow as the CLI (with confirmation)
+
+> Tip: use the Web UI to quickly iterate on custom tool definitions, then run them from either the CLI or browser without editing JSON manually.
+
 ## Advanced Workflows
 
 ### Branch Strategy

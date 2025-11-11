@@ -1,25 +1,40 @@
 import React from "react";
 import type { Mock } from "vitest";
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import type { Branch } from "../../../../../src/types/api.js";
 import { BranchDetailPage } from "../../../../../src/web/client/src/pages/BranchDetailPage.js";
-import {
-  useBranch,
-  useSyncBranch,
-} from "../../../../../src/web/client/src/hooks/useBranches.js";
+import { useBranch } from "../../../../../src/web/client/src/hooks/useBranches.js";
 import { useCreateWorktree } from "../../../../../src/web/client/src/hooks/useWorktrees.js";
-import {
-  useStartSession,
-  useSessions,
-  useDeleteSession,
-} from "../../../../../src/web/client/src/hooks/useSessions.js";
+import { useSessions, useDeleteSession } from "../../../../../src/web/client/src/hooks/useSessions.js";
 import { useConfig } from "../../../../../src/web/client/src/hooks/useConfig.js";
+
+class WebSocketMock {
+  public onopen: ((event: Event) => void) | null = null;
+  public onmessage: ((event: MessageEvent) => void) | null = null;
+  public onerror: ((event: Event) => void) | null = null;
+  public onclose: ((event: CloseEvent) => void) | null = null;
+  public readyState = 1;
+
+  constructor() {
+    setTimeout(() => {
+      this.onopen?.(new Event("open"));
+    }, 0);
+  }
+
+  send() {}
+
+  close() {
+    this.readyState = 3;
+    this.onclose?.(new Event("close"));
+  }
+}
+
+vi.stubGlobal("WebSocket", WebSocketMock as unknown as typeof WebSocket);
 
 vi.mock("../../../../../src/web/client/src/hooks/useBranches.js", () => ({
   useBranch: vi.fn(),
-  useSyncBranch: vi.fn(),
 }));
 
 vi.mock("../../../../../src/web/client/src/hooks/useWorktrees.js", () => ({
@@ -27,7 +42,6 @@ vi.mock("../../../../../src/web/client/src/hooks/useWorktrees.js", () => ({
 }));
 
 vi.mock("../../../../../src/web/client/src/hooks/useSessions.js", () => ({
-  useStartSession: vi.fn(),
   useSessions: vi.fn(),
   useDeleteSession: vi.fn(),
 }));
@@ -37,9 +51,7 @@ vi.mock("../../../../../src/web/client/src/hooks/useConfig.js", () => ({
 }));
 
 const mockedUseBranch = useBranch as unknown as Mock;
-const mockedUseSyncBranch = useSyncBranch as unknown as Mock;
 const mockedUseCreateWorktree = useCreateWorktree as unknown as Mock;
-const mockedUseStartSession = useStartSession as unknown as Mock;
 const mockedUseSessions = useSessions as unknown as Mock;
 const mockedUseDeleteSession = useDeleteSession as unknown as Mock;
 const mockedUseConfig = useConfig as unknown as Mock;
@@ -75,24 +87,7 @@ describe("BranchDetailPage", () => {
       error: null,
     });
 
-    const syncMutation = vi.fn().mockResolvedValue({
-      branch: baseBranch,
-      divergence: baseBranch.divergence,
-      fetchStatus: "success",
-      pullStatus: "success",
-    });
-
-    mockedUseSyncBranch.mockReturnValue({
-      mutateAsync: syncMutation,
-      isPending: false,
-    });
-
     mockedUseCreateWorktree.mockReturnValue({
-      mutateAsync: vi.fn(),
-      isPending: false,
-    });
-
-    mockedUseStartSession.mockReturnValue({
       mutateAsync: vi.fn(),
       isPending: false,
     });
@@ -115,14 +110,14 @@ describe("BranchDetailPage", () => {
     });
   });
 
-  it("renders branch metadata and session actions when a worktree exists", () => {
+  it("renders branch metadata and AI tool summary when a worktree exists", () => {
     renderPage();
 
     expect(screen.getByText("feature/design-refresh")).toBeInTheDocument();
     expect(screen.getByText("コミット情報")).toBeInTheDocument();
     expect(screen.getByText("差分状況")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "セッションを起動" })).toBeEnabled();
-    expect(screen.getByText("Worktree情報")).toBeInTheDocument();
+    expect(screen.getByText("AIツール設定")).toBeInTheDocument();
+    expect(screen.getByText("ブランチ一覧を開く")).toBeInTheDocument();
   });
 
   it("shows worktree creation CTA when no worktree is present", () => {
@@ -137,11 +132,11 @@ describe("BranchDetailPage", () => {
     expect(
       screen.getByRole("button", { name: "Worktreeを作成" }),
     ).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "セッションを起動" })).not.toBeInTheDocument();
+    expect(screen.getByText("AIツール設定")).toBeInTheDocument();
   });
 
   it("renders session history rows when data exists", () => {
-    mockedUseSessions.mockReturnValueOnce({
+    mockedUseSessions.mockReturnValue({
       data: [
         {
           sessionId: "abc",
@@ -160,57 +155,30 @@ describe("BranchDetailPage", () => {
 
     renderPage();
     expect(screen.getByText("セッション履歴")).toBeInTheDocument();
-    expect(screen.getByText("running")).toBeInTheDocument();
+    expect(screen.getAllByTestId("session-row").length).toBe(1);
   });
 
-  it("blocks session start when branch has conflicting divergence", () => {
-    mockedUseBranch.mockReturnValueOnce({
-      data: {
-        ...baseBranch,
-        divergence: { ahead: 2, behind: 4, upToDate: false },
-      },
+  it("shows session action buttons for running session", () => {
+    mockedUseSessions.mockReturnValue({
+      data: [
+        {
+          sessionId: "running-session",
+          toolType: "codex-cli",
+          mode: "normal",
+          status: "running",
+          worktreePath: baseBranch.worktreePath,
+          startedAt: "2025-11-10T00:00:00Z",
+          endedAt: null,
+          toolName: null,
+        },
+      ],
       isLoading: false,
       error: null,
     });
 
     renderPage();
 
-    expect(screen.getByTestId("divergence-warning")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "セッションを起動" })).toBeDisabled();
-  });
-
-  it("prompts git sync when branch is behind remote", () => {
-    mockedUseBranch.mockReturnValueOnce({
-      data: {
-        ...baseBranch,
-        divergence: { ahead: 0, behind: 3, upToDate: false },
-      },
-      isLoading: false,
-      error: null,
-    });
-
-    renderPage();
-
-    expect(screen.getByTestId("sync-required")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "セッションを起動" })).toBeDisabled();
-  });
-
-  it("calls sync mutation when clicking 最新の変更を同期", async () => {
-    const syncMutation = vi.fn().mockResolvedValue({
-      branch: baseBranch,
-      divergence: baseBranch.divergence,
-      fetchStatus: "success",
-      pullStatus: "success",
-    });
-
-    mockedUseSyncBranch.mockReturnValueOnce({
-      mutateAsync: syncMutation,
-      isPending: false,
-    });
-
-    renderPage();
-
-    fireEvent.click(screen.getByRole("button", { name: "最新の変更を同期" }));
-    await waitFor(() => expect(syncMutation).toHaveBeenCalled());
+    expect(screen.getAllByTestId("session-focus-button").length).toBe(1);
+    expect(screen.getAllByTestId("session-stop-button").length).toBe(1);
   });
 });

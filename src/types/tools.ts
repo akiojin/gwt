@@ -70,6 +70,11 @@ export interface CustomAITool {
   icon?: string;
 
   /**
+   * 説明文（オプション）
+   */
+  description?: string;
+
+  /**
    * 実行方式
    *
    * - "path": 絶対パスで直接実行
@@ -118,6 +123,16 @@ export interface CustomAITool {
    * APIキーや設定ファイルパスなどを指定。
    */
   env?: Record<string, string>;
+
+  /**
+   * 作成日時（ISO8601）。tools.jsonのメタデータとして使用。
+   */
+  createdAt?: string;
+
+  /**
+   * 更新日時（ISO8601）。tools.jsonのメタデータとして使用。
+   */
+  updatedAt?: string;
 }
 
 /**

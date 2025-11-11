@@ -2,6 +2,7 @@ import React, { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useBranches } from "../hooks/useBranches";
 import { BranchGraph } from "../components/BranchGraph";
+import { AIToolLaunchModal } from "../components/AIToolLaunchModal";
 import type { Branch } from "../../../../types/api.js";
 
 const numberFormatter = new Intl.NumberFormat("ja-JP");
@@ -33,6 +34,7 @@ const SEARCH_PLACEHOLDER = "ブランチ名やタイプで検索...";
 export function BranchListPage() {
   const { data, isLoading, error } = useBranches();
   const [query, setQuery] = useState("");
+  const [selectedBranch, setSelectedBranch] = useState<Branch | null>(null);
 
   const branches = data ?? [];
 
@@ -106,6 +108,11 @@ export function BranchListPage() {
           可視化します。
         </p>
         <div className="page-hero__meta">リアルタイムで更新されるステータスビュー</div>
+        <div className="page-hero__actions">
+          <Link to="/config" className="button button--secondary">
+            カスタムツール設定
+          </Link>
+        </div>
       </header>
 
       <main className="page-content">
@@ -240,11 +247,18 @@ export function BranchListPage() {
                 )}
 
                 <div className="branch-card__actions">
+                  <button
+                    type="button"
+                    className="button button--primary"
+                    onClick={() => setSelectedBranch(branch)}
+                  >
+                    AIツールを起動
+                  </button>
                   <Link
                     className="button button--ghost"
                     to={`/${encodeURIComponent(branch.name)}`}
                   >
-                    詳細を見る
+                    セッションを表示
                   </Link>
                   <span
                     className={`info-pill ${
@@ -259,6 +273,9 @@ export function BranchListPage() {
           </div>
         )}
       </main>
+      {selectedBranch && (
+        <AIToolLaunchModal branch={selectedBranch} onClose={() => setSelectedBranch(null)} />
+      )}
     </div>
   );
 }

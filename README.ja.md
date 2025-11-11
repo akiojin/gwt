@@ -73,6 +73,35 @@ claude-worktree -v
 3. **ワークツリー管理**: 既存ワークツリーの表示、オープン、削除
 4. **ブランチクリーンアップ**: マージ済みPRやベースブランチと差分がないブランチ／ワークツリーをローカルから自動削除
 
+## Web UI とカスタムAIツール
+
+### Web UI の起動
+
+```bash
+claude-worktree serve
+# または
+bunx @akiojin/claude-worktree serve
+```
+
+- ブラウザで <http://localhost:3000> を開き、Worktree ダッシュボードにアクセス
+- ブランチ一覧/検索/Worktree作成など、CLIと同じ体験をブラウザで提供
+- ブランチ一覧カードの「AIツールを起動」ボタンでモーダルが開き、ツール/モード/引数/同期を選んで起動
+- ブランチ詳細ページはセッションの状態確認専用（稼働中セッションのターミナルと履歴を表示）
+
+### カスタムAIツールの管理
+
+- ダッシュボード右上の **Config**（または `/config` URL）で `~/.claude-worktree/tools.json` をGUI編集
+- 実行タイプ（path/bunx/command）、defaultArgs、modeArgs、permissionSkipArgs、envをまとめて設定
+- 変更内容はCLIと共有の `tools.json` に保存されるため、CLI/Webのどちらからでも同じツールを利用可能
+- ブランチ一覧モーダルの起動フォームでは以下を指定できます:
+  - 起動するカスタムツール（ビルトインを含む）
+  - `normal / continue / resume` モード
+  - 追加引数（スペース区切り）
+  - CLIと同等の `--dangerously-skip-permissions`（確認ダイアログ付き）
+- モーダルから直接 `git fetch --all` + `git pull --ff-only` を実行でき、CLIと同じ安全ガードで divergence を検出します。
+
+> JSON編集なしでカスタムツールを試せるため、Web UIでパラメータを調整しながらCLIにも即反映できます。
+
 ## 高度なワークフロー
 
 ### ブランチ作成ワークフロー

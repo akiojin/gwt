@@ -3,27 +3,11 @@ import chalk from "chalk";
 import { platform } from "os";
 import { existsSync } from "fs";
 import { createChildStdio, getTerminalStreams } from "./utils/terminal.js";
-
-const CODEX_CLI_PACKAGE = "@openai/codex@latest";
-const DEFAULT_CODEX_ARGS = [
-  "--enable",
-  "web_search_request",
-  "--model=gpt-5-codex",
-  "--sandbox",
-  "workspace-write",
-  "-c",
-  "model_reasoning_effort=high",
-  "-c",
-  "model_reasoning_summaries=detailed",
-  "-c",
-  "sandbox_workspace_write.network_access=true",
-  "-c",
-  "shell_environment_policy.inherit=all",
-  "-c",
-  "shell_environment_policy.ignore_default_excludes=true",
-  "-c",
-  "shell_environment_policy.experimental_use_profile=true",
-];
+import {
+  resolveCodexCommand,
+  AIToolResolutionError,
+  type ResolvedCommand,
+} from "./services/aiToolResolver.js";
 
 export class CodexError extends Error {
   constructor(
@@ -44,6 +28,7 @@ export async function launchCodexCLI(
   } = {},
 ): Promise<void> {
   const terminal = getTerminalStreams();
+  let lastResolvedCommand: ResolvedCommand | null = null;
 
   try {
     if (!existsSync(worktreePath)) {
@@ -53,15 +38,11 @@ export async function launchCodexCLI(
     console.log(chalk.blue("🚀 Launching Codex CLI..."));
     console.log(chalk.gray(`   Working directory: ${worktreePath}`));
 
-    const args: string[] = [];
-
     switch (options.mode) {
       case "continue":
-        args.push("resume", "--last");
         console.log(chalk.cyan("   ⏭️  Resuming last Codex session"));
         break;
       case "resume":
-        args.push("resume");
         console.log(chalk.cyan("   🔄 Resume command"));
         break;
       case "normal":
@@ -71,65 +52,94 @@ export async function launchCodexCLI(
     }
 
     if (options.bypassApprovals) {
-      args.push("--yolo");
       console.log(chalk.yellow("   ⚠️  Bypassing approvals and sandbox"));
     }
-
-    if (options.extraArgs && options.extraArgs.length > 0) {
-      args.push(...options.extraArgs);
-    }
-
-    args.push(...DEFAULT_CODEX_ARGS);
 
     terminal.exitRawMode();
 
     const childStdio = createChildStdio();
 
     try {
-      await execa("bunx", [CODEX_CLI_PACKAGE, ...args], {
+      const resolverOptions: {
+        mode?: "normal" | "continue" | "resume";
+        bypassApprovals?: boolean;
+        extraArgs?: string[];
+      } = {};
+
+      if (options.mode) {
+        resolverOptions.mode = options.mode;
+      }
+      if (options.bypassApprovals !== undefined) {
+        resolverOptions.bypassApprovals = options.bypassApprovals;
+      }
+      if (options.extraArgs && options.extraArgs.length > 0) {
+        resolverOptions.extraArgs = options.extraArgs;
+      }
+
+      lastResolvedCommand = await resolveCodexCommand(resolverOptions);
+
+      if (!lastResolvedCommand.usesFallback) {
+        console.log(chalk.green("   ✨ Using locally installed codex command"));
+      }
+
+      const env = lastResolvedCommand.env
+        ? { ...lastResolvedCommand.env }
+        : { ...process.env };
+
+      await execa(lastResolvedCommand.command, lastResolvedCommand.args, {
         cwd: worktreePath,
         stdin: childStdio.stdin,
         stdout: childStdio.stdout,
         stderr: childStdio.stderr,
+        env,
       } as any);
     } finally {
       childStdio.cleanup();
     }
   } catch (error: any) {
+    if (error instanceof AIToolResolutionError) {
+      throw new CodexError(error.message, error);
+    }
+
     const errorMessage =
       error.code === "ENOENT"
-        ? "bunx command not found. Please ensure Bun is installed so Codex CLI can run via bunx."
+        ? lastResolvedCommand?.usesFallback === false
+          ? "codex command not found. Please ensure Codex CLI is installed."
+          : "bunx command not found. Please ensure Bun is installed so Codex CLI can run via bunx."
         : `Failed to launch Codex CLI: ${error.message || "Unknown error"}`;
 
     if (platform() === "win32") {
       console.error(chalk.red("\n💡 Windows troubleshooting tips:"));
-      console.error(
-        chalk.yellow(
-          "   1. Confirm that Bun is installed and bunx is available",
-        ),
-      );
-      console.error(
-        chalk.yellow(
-          '   2. Run "bunx @openai/codex@latest -- --help" to verify the setup',
-        ),
-      );
+      if (lastResolvedCommand && !lastResolvedCommand.usesFallback) {
+        console.error(
+          chalk.yellow(
+            "   1. Confirm that Codex CLI is installed and available on PATH",
+          ),
+        );
+        console.error(
+          chalk.yellow('   2. Run "codex --help" to verify the setup'),
+        );
+      } else {
+        console.error(
+          chalk.yellow(
+            "   1. Confirm that Bun is installed and bunx is available",
+          ),
+        );
+        console.error(
+          chalk.yellow(
+            '   2. Run "bunx @openai/codex@latest -- --help" to verify the setup',
+          ),
+        );
+      }
       console.error(
         chalk.yellow("   3. Restart your terminal or IDE to refresh PATH"),
       );
     }
 
     throw new CodexError(errorMessage, error);
+  } finally {
+    terminal.exitRawMode();
   }
 }
 
-export async function isCodexAvailable(): Promise<boolean> {
-  try {
-    await execa("bunx", [CODEX_CLI_PACKAGE, "--help"]);
-    return true;
-  } catch (error: any) {
-    if (error.code === "ENOENT") {
-      console.error(chalk.yellow("\n⚠️  bunx command not found"));
-    }
-    return false;
-  }
-}
+export { isCodexAvailable } from "./services/aiToolResolver.js";

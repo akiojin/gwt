@@ -6,6 +6,7 @@
 
 import type { FastifyInstance } from "fastify";
 import type { PTYManager } from "../pty/manager.js";
+import { AIToolResolutionError } from "../../../services/aiToolResolver.js";
 import type {
   ApiResponse,
   AIToolSession,
@@ -26,7 +27,7 @@ export async function registerSessionRoutes(
       try {
         const sessions = ptyManager.list();
         return { success: true, data: sessions };
-      } catch (error) {
+      } catch (error: unknown) {
         const errorMsg = error instanceof Error ? error.message : String(error);
         reply.code(500);
         return {
@@ -44,18 +45,69 @@ export async function registerSessionRoutes(
     Reply: ApiResponse<AIToolSession>;
   }>("/api/sessions", async (request, reply) => {
     try {
-      const { toolType, toolName, mode, worktreePath } = request.body;
+      const {
+        toolType,
+        toolName,
+        mode,
+        worktreePath,
+        skipPermissions,
+        bypassApprovals,
+        extraArgs,
+        customToolId,
+      } = request.body;
 
-      const { session } = ptyManager.spawn(
+      const spawnOptions: {
+        toolName?: string | null;
+        skipPermissions?: boolean;
+        bypassApprovals?: boolean;
+        extraArgs?: string[];
+        customToolId?: string | null;
+      } = {};
+
+      if (typeof toolName !== "undefined") {
+        spawnOptions.toolName = toolName;
+      }
+      if (typeof skipPermissions !== "undefined") {
+        spawnOptions.skipPermissions = skipPermissions;
+      }
+      if (typeof bypassApprovals !== "undefined") {
+        spawnOptions.bypassApprovals = bypassApprovals;
+      }
+      if (Array.isArray(extraArgs) && extraArgs.length > 0) {
+        spawnOptions.extraArgs = extraArgs;
+      }
+      if (typeof customToolId !== "undefined") {
+        spawnOptions.customToolId = customToolId;
+      }
+
+      if (toolType === "custom" && !toolName && !customToolId) {
+        reply.code(400);
+        return {
+          success: false,
+          error: "Custom tool requires toolName or customToolId",
+          details: null,
+        };
+      }
+
+      const { session } = await ptyManager.spawn(
         toolType,
         worktreePath,
         mode,
-        toolName,
+        spawnOptions,
       );
 
       reply.code(201);
       return { success: true, data: session };
-    } catch (error) {
+    } catch (error: unknown) {
+      if (error instanceof AIToolResolutionError) {
+        reply.code(400);
+        return {
+          success: false,
+          error: error.message,
+          details: error.hints?.join("\n") ?? null,
+        };
+      }
+
       const errorMsg = error instanceof Error ? error.message : String(error);
       reply.code(500);
       return {
@@ -85,7 +137,7 @@ export async function registerSessionRoutes(
       }
 
       return { success: true, data: instance.session };
-    } catch (error) {
+    } catch (error: unknown) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       reply.code(500);
       return {
@@ -117,7 +169,7 @@ export async function registerSessionRoutes(
       }
 
       return { success: true };
-    } catch (error) {
+    } catch (error: unknown) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       reply.code(500);
       return {

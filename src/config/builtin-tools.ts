@@ -5,6 +5,10 @@
  */
 
 import type { CustomAITool } from "../types/tools.js";
+import {
+  CLAUDE_PERMISSION_SKIP_ARGS,
+  CODEX_DEFAULT_ARGS,
+} from "../shared/aiToolConstants.js";
 
 /**
  * Claude Code のビルトイン定義
@@ -19,7 +23,7 @@ export const CLAUDE_CODE_TOOL: CustomAITool = {
     continue: ["-c"],
     resume: ["-r"],
   },
-  permissionSkipArgs: ["--yes"],
+  permissionSkipArgs: Array.from(CLAUDE_PERMISSION_SKIP_ARGS),
 };
 
 /**
@@ -30,7 +34,7 @@ export const CODEX_CLI_TOOL: CustomAITool = {
   displayName: "Codex CLI",
   type: "bunx",
   command: "@openai/codex@latest",
-  defaultArgs: ["--auto-approve", "--verbose"],
+  defaultArgs: Array.from(CODEX_DEFAULT_ARGS),
   modeArgs: {
     normal: [],
     continue: ["resume", "--last"],
