@@ -1,9 +1,10 @@
 import { defineConfig } from "vite";
+import type { PluginOption } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "node:path";
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react() as unknown as PluginOption],
   root: path.resolve(__dirname),
   build: {
     outDir: path.resolve(__dirname, "../../../dist/client"),

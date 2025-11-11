@@ -9,7 +9,7 @@ import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import type { BranchItem, Statistics } from '../../types.js';
 import stringWidth from 'string-width';
 import chalk from 'chalk';
-import { isProtectedBranchName } from '../../../worktree.js';
+import { isProtectedBranchName } from '../../../../worktree.js';
 
 const WIDTH_OVERRIDES: Record<string, number> = {
   '⬆': 1,
