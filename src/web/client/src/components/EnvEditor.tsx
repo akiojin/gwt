@@ -20,13 +20,20 @@ interface EnvEditorProps {
 const KEY_PATTERN = /^[A-Z0-9_]+$/;
 
 export function createEnvRow(variable?: Partial<EnvRow>): EnvRow {
-  return {
+  const row: EnvRow = {
     id: variable?.id ?? `env-${Date.now()}-${Math.random().toString(36).slice(2)}`,
     key: variable?.key ?? "",
     value: variable?.value ?? "",
-    importedFromOs: variable?.importedFromOs,
-    lastUpdated: variable?.lastUpdated,
   };
+
+  if (typeof variable?.importedFromOs === "boolean") {
+    row.importedFromOs = variable.importedFromOs;
+  }
+  if (variable?.lastUpdated) {
+    row.lastUpdated = variable.lastUpdated;
+  }
+
+  return row;
 }
 
 function isInvalidKey(row: EnvRow): boolean {

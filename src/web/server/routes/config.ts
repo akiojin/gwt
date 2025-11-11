@@ -32,12 +32,19 @@ function normalizeEnv(
     lastUpdated.set(entry.key, entry.timestamp ?? null);
   }
 
-  return Object.entries(env).map(([key, value]) => ({
-    key,
-    value,
-    lastUpdated: lastUpdated.get(key) ?? null,
-    importedFromOs: importedKeys.has(key) || undefined,
-  }));
+  return Object.entries(env).map(([key, value]) => {
+    const variable: EnvironmentVariable = {
+      key,
+      value,
+      lastUpdated: lastUpdated.get(key) ?? null,
+    };
+
+    if (importedKeys.has(key)) {
+      variable.importedFromOs = true;
+    }
+
+    return variable;
+  });
 }
 
 function envArrayToRecord(
@@ -78,17 +85,28 @@ function toApiTool(
 
 function toFileTool(tool: ApiCustomAITool): FileCustomAITool {
   const envRecord = envArrayToRecord(tool.env);
-  return {
+  const fileTool: FileCustomAITool = {
     id: tool.id,
     displayName: tool.displayName,
-    icon: tool.icon ?? undefined,
     type: tool.executionType,
     command: tool.command,
-    defaultArgs: tool.defaultArgs ?? undefined,
     modeArgs: tool.modeArgs,
-    permissionSkipArgs: tool.permissionSkipArgs ?? undefined,
-    env: Object.keys(envRecord).length ? envRecord : undefined,
   };
+
+  if (tool.icon) {
+    fileTool.icon = tool.icon;
+  }
+  if (tool.defaultArgs && tool.defaultArgs.length > 0) {
+    fileTool.defaultArgs = tool.defaultArgs;
+  }
+  if (tool.permissionSkipArgs && tool.permissionSkipArgs.length > 0) {
+    fileTool.permissionSkipArgs = tool.permissionSkipArgs;
+  }
+  if (Object.keys(envRecord).length > 0) {
+    fileTool.env = envRecord;
+  }
+
+  return fileTool;
 }
 
 function diffEnvHistory(

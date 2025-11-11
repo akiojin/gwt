@@ -10,14 +10,21 @@ function rowsFromVariables(variables?: EnvironmentVariable[] | null): EnvRow[] {
   if (!variables) {
     return [];
   }
-  return variables.map((variable) =>
-    createEnvRow({
+  return variables.map((variable) => {
+    const partial: Partial<EnvRow> = {
       key: variable.key,
       value: variable.value,
-      importedFromOs: variable.importedFromOs,
-      lastUpdated: variable.lastUpdated,
-    }),
-  );
+    };
+
+    if (typeof variable.importedFromOs === "boolean") {
+      partial.importedFromOs = variable.importedFromOs;
+    }
+    if (variable.lastUpdated) {
+      partial.lastUpdated = variable.lastUpdated;
+    }
+
+    return createEnvRow(partial);
+  });
 }
 
 function serializeRows(rows: EnvRow[]): EnvironmentVariable[] {
