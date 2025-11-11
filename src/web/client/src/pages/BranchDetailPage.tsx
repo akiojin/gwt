@@ -119,59 +119,7 @@ export function BranchDetailPage() {
     };
   }, [isTerminalFullscreen]);
 
-  if (isLoading) {
-    return (
-      <div className="app-shell">
-        <div className="page-state page-state--centered">
-          <h1>読み込み中</h1>
-          <p>ブランチ情報を取得しています...</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className="app-shell">
-        <div className="page-state page-state--centered">
-          <h1>ブランチの取得に失敗しました</h1>
-          <p>{error instanceof Error ? error.message : "未知のエラーです"}</p>
-          <Link to="/" className="button button--ghost">
-            ブランチ一覧に戻る
-          </Link>
-        </div>
-      </div>
-    );
-  }
-
-  if (!branch) {
-    return (
-      <div className="app-shell">
-        <div className="page-state page-state--centered">
-          <h1>Branch not found</h1>
-          <p>指定されたブランチは存在しません。</p>
-          <Link to="/" className="button button--ghost">
-            ブランチ一覧に戻る
-          </Link>
-        </div>
-      </div>
-    );
-  }
-
-  const canStartSession = Boolean(branch.worktreePath);
-  const divergenceInfo = branch.divergence ?? null;
-  const hasBlockingDivergence = Boolean(
-    divergenceInfo && divergenceInfo.ahead > 0 && divergenceInfo.behind > 0,
-  );
-  const needsRemoteSync = Boolean(
-    branch.worktreePath &&
-      divergenceInfo &&
-      divergenceInfo.behind > 0 &&
-      divergenceInfo.ahead === 0 &&
-      !hasBlockingDivergence,
-  );
-  const isSyncingBranch = syncBranch.isPending;
-
+  // Hook values that don't depend on branch existence must be declared before the early returns
   const customTools = config?.tools ?? [];
   const availableTools: SelectableTool[] = useMemo(
     () => [
@@ -239,6 +187,66 @@ export function BranchDetailPage() {
     return { command: selectedToolSummary.command, args };
   }, [selectedToolSummary, selectedMode, skipPermissions, extraArgsText]);
 
+  const branchSessions = useMemo(() => {
+    return (sessionsData ?? [])
+      .filter((session) => session.worktreePath === branch?.worktreePath)
+      .sort((a, b) => (b.startedAt ?? "").localeCompare(a.startedAt ?? ""));
+  }, [sessionsData, branch?.worktreePath]);
+
+  if (isLoading) {
+    return (
+      <div className="app-shell">
+        <div className="page-state page-state--centered">
+          <h1>読み込み中</h1>
+          <p>ブランチ情報を取得しています...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="app-shell">
+        <div className="page-state page-state--centered">
+          <h1>ブランチの取得に失敗しました</h1>
+          <p>{error instanceof Error ? error.message : "未知のエラーです"}</p>
+          <Link to="/" className="button button--ghost">
+            ブランチ一覧に戻る
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
+  if (!branch) {
+    return (
+      <div className="app-shell">
+        <div className="page-state page-state--centered">
+          <h1>Branch not found</h1>
+          <p>指定されたブランチは存在しません。</p>
+          <Link to="/" className="button button--ghost">
+            ブランチ一覧に戻る
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
+  const canStartSession = Boolean(branch.worktreePath);
+  const divergenceInfo = branch.divergence ?? null;
+  const hasBlockingDivergence = Boolean(
+    divergenceInfo && divergenceInfo.ahead > 0 && divergenceInfo.behind > 0,
+  );
+  const needsRemoteSync = Boolean(
+    branch.worktreePath &&
+      divergenceInfo &&
+      divergenceInfo.behind > 0 &&
+      divergenceInfo.ahead === 0 &&
+      !hasBlockingDivergence,
+  );
+  const isSyncingBranch = syncBranch.isPending;
+
+  
   const handleCreateWorktree = async () => {
     try {
       await createWorktree.mutateAsync({
@@ -370,11 +378,7 @@ export function BranchDetailPage() {
     }
   };
 
-  const branchSessions = useMemo(() => {
-    return (sessionsData ?? [])
-      .filter((session) => session.worktreePath === branch?.worktreePath)
-      .sort((a, b) => (b.startedAt ?? "").localeCompare(a.startedAt ?? ""));
-  }, [sessionsData, branch?.worktreePath]);
+  
 
   const handleSessionExit = (code: number) => {
     setActiveSessionId(null);
