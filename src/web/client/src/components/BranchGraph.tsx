@@ -36,6 +36,10 @@ const DIVERGENCE_FILTERS: { id: DivergenceFilter; label: string }[] = [
   { id: "behind", label: "Behind" },
   { id: "upToDate", label: "最新" },
 ];
+const NODE_WIDTH_PX = 170;
+const MIN_PRIMARY_RADIUS = 200;
+const MAX_PRIMARY_RADIUS = 360;
+const SECONDARY_RING_OFFSET = 100;
 
 function formatBranchLabel(branch: Branch): string {
   return branch.name.length > 32
@@ -76,7 +80,7 @@ export function BranchGraph({
     return baseSet;
   }, [branches]);
 
-  const { centerNodes, radialNodes } = useMemo(() => {
+  const { centerNodes, radialNodes, primaryRadius, secondaryRadius } = useMemo(() => {
     const centers: CenterNodeDescriptor[] = [];
 
     PRIMARY_BASES.forEach((base) => {
@@ -121,6 +125,15 @@ export function BranchGraph({
     );
 
     const totalOrbitalNodes = orbitalBranches.length || 1;
+    const angleStep = (2 * Math.PI) / totalOrbitalNodes;
+    const minRadiusForSpacing = angleStep === 0
+      ? MIN_PRIMARY_RADIUS
+      : NODE_WIDTH_PX / (2 * Math.sin(angleStep / 2));
+    const computedPrimaryRadius = Math.min(
+      MAX_PRIMARY_RADIUS,
+      Math.max(MIN_PRIMARY_RADIUS, minRadiusForSpacing),
+    );
+    const computedSecondaryRadius = computedPrimaryRadius + SECONDARY_RING_OFFSET;
     let cursor = 0;
 
     const radial: RadialNodeDescriptor[] = [];
@@ -130,7 +143,7 @@ export function BranchGraph({
         const angle = (360 / totalOrbitalNodes) * cursor;
         cursor += 1;
         const isPrimaryOrbit = centerNames.has(base);
-        const radius = isPrimaryOrbit ? 180 : 250;
+        const radius = isPrimaryOrbit ? computedPrimaryRadius : computedSecondaryRadius;
         radial.push({
           branch,
           angle,
@@ -141,8 +154,25 @@ export function BranchGraph({
       });
     });
 
-    return { centerNodes: centers, radialNodes: radial };
+    return {
+      centerNodes: centers,
+      radialNodes: radial,
+      primaryRadius: computedPrimaryRadius,
+      secondaryRadius: computedSecondaryRadius,
+    };
   }, [branches, branchMap, referencedBases]);
+
+  const orbitSize = useMemo(() => {
+    const radius = secondaryRadius ?? (MIN_PRIMARY_RADIUS + SECONDARY_RING_OFFSET);
+    const diameter = (radius + 140) * 2;
+    const clamped = Math.min(Math.max(diameter, 480), 960);
+    return clamped;
+  }, [secondaryRadius]);
+
+  const coreSize = useMemo(() => {
+    const base = primaryRadius ?? MIN_PRIMARY_RADIUS;
+    return Math.min(Math.max(base * 0.9, 200), 320);
+  }, [primaryRadius]);
 
   const baseFilters = useMemo(() => {
     const labels = new Set<string>();
@@ -256,7 +286,10 @@ export function BranchGraph({
       </header>
 
       <div className="radial-graph">
-        <div className="radial-graph__orbit">
+        <div
+          className="radial-graph__orbit"
+          style={{ width: `${orbitSize}px`, height: `${orbitSize}px` }}
+        >
           {radialNodes.map((node) => (
             <RadialBranchNode
               key={node.branch.name}
@@ -275,7 +308,10 @@ export function BranchGraph({
             </div>
           )}
         </div>
-        <div className="radial-graph__core">
+        <div
+          className="radial-graph__core"
+          style={{ width: `${coreSize}px`, height: `${coreSize}px` }}
+        >
           {centerNodes.map((center) => (
             <CoreNode
               key={center.id}
