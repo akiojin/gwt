@@ -12,7 +12,6 @@ import type {
   HealthResponse,
   CreateWorktreeRequest,
   StartSessionRequest,
-  UpdateConfigRequest,
   BranchSyncRequest,
   BranchSyncResult,
   ConfigPayload,
@@ -176,17 +175,10 @@ export const configApi = {
   /**
    * カスタムAI Tool設定を取得
    */
-  get: async (): Promise<ConfigPayload> => {
-    return apiFetch<ConfigPayload>(`${API_BASE}/config`);
-  },
-
-  /**
-   * カスタムAI Tool設定を更新
-   */
-  update: async (request: UpdateConfigRequest): Promise<ConfigPayload> => {
-    return apiFetch<ConfigPayload>(`${API_BASE}/config`, {
+  get: async (): Promise<ConfigPayload> => apiFetch(`${API_BASE}/config`),
+  update: async (request: ConfigPayload): Promise<ConfigPayload> =>
+    apiFetch(`${API_BASE}/config`, {
       method: "PUT",
       body: JSON.stringify(request),
-    });
-  },
+    }),
 };

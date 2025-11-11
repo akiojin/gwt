@@ -32,8 +32,15 @@ export async function launchCustomAITool(
       ? { ...process.env, ...execution.env }
       : undefined;
 
-  await execa(execution.command, execution.args, {
-    stdio: "inherit",
+  const env = {
+    ...process.env,
+    ...(options.sharedEnv ?? {}),
+    ...(tool.env ?? {}),
+  };
+
+  // execa共通オプション（cwdがundefinedの場合は含めない）
+  const execaOptions = {
+    stdio: "inherit" as const,
     ...(options.cwd ? { cwd: options.cwd } : {}),
     ...(childEnv ? { env: childEnv } : {}),
   });

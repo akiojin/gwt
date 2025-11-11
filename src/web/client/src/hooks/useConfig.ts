@@ -1,26 +1,31 @@
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+/**
+ * Config Hooks
+ */
+
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { configApi } from "../lib/api";
-import type {
-  ConfigPayload,
-  UpdateConfigRequest,
-} from "../../../../types/api.js";
+import type { ConfigPayload } from "../../../../types/api.js";
 
-const QUERY_KEY = ["config"] as const;
-
+/**
+ * カスタムAIツール設定を取得
+ */
 export function useConfig() {
   return useQuery<ConfigPayload>({
-    queryKey: QUERY_KEY,
+    queryKey: ["config"],
     queryFn: configApi.get,
   });
 }
 
+/**
+ * カスタムAIツール設定を更新
+ */
 export function useUpdateConfig() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: (payload: UpdateConfigRequest) => configApi.update(payload),
+    mutationFn: configApi.update,
     onSuccess: (data: ConfigPayload) => {
-      queryClient.setQueryData(QUERY_KEY, data);
+      queryClient.setQueryData(["config"], data);
     },
   });
 }

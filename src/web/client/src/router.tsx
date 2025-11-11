@@ -2,7 +2,7 @@ import React from "react";
 import { createBrowserRouter } from "react-router-dom";
 import { BranchListPage } from "./pages/BranchListPage";
 import { BranchDetailPage } from "./pages/BranchDetailPage";
-import { ConfigPage } from "./pages/ConfigPage";
+import { ConfigManagementPage } from "./pages/ConfigManagementPage";
 
 /**
  * React Router設定
@@ -22,6 +22,6 @@ export const router = createBrowserRouter([
   },
   {
     path: "/config",
-    element: <ConfigPage />,
+    element: <ConfigManagementPage />,
   },
 ]);

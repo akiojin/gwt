@@ -7,7 +7,7 @@
 
 import { homedir } from "node:os";
 import path from "node:path";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
 import type {
   ToolsConfig,
   CustomAITool,
@@ -24,11 +24,20 @@ import {
 /**
  * ツール設定ファイルのパス
  */
-const TOOLS_CONFIG_PATH = path.join(
-  homedir(),
-  ".claude-worktree",
-  "tools.json",
-);
+export const WORKTREE_HOME =
+  process.env.CLAUDE_WORKTREE_HOME &&
+  process.env.CLAUDE_WORKTREE_HOME.trim().length > 0
+    ? process.env.CLAUDE_WORKTREE_HOME
+    : homedir();
+export const CONFIG_DIR = path.join(WORKTREE_HOME, ".claude-worktree");
+export const TOOLS_CONFIG_PATH = path.join(CONFIG_DIR, "tools.json");
+const TEMP_CONFIG_PATH = `${TOOLS_CONFIG_PATH}.tmp`;
+
+const DEFAULT_CONFIG: ToolsConfig = {
+  version: "1.0.0",
+  env: {},
+  customTools: [],
+};
 
 let envBootstrapApplied = false;
 
@@ -50,17 +59,14 @@ export async function loadToolsConfig(): Promise<ToolsConfig> {
     // 検証
     validateToolsConfig(config);
 
-    config = await bootstrapSharedEnv(config);
-
-    return config;
+    return {
+      ...config,
+      env: config.env ?? {},
+    };
   } catch (error) {
     // ファイルが存在しない場合は空配列を返す
     if (error instanceof Error && "code" in error && error.code === "ENOENT") {
-      return {
-        version: "1.0.0",
-        customTools: [],
-        env: {},
-      };
+      return { ...DEFAULT_CONFIG };
     }
 
     // JSON構文エラーの場合
@@ -93,6 +99,21 @@ function validateToolsConfig(config: ToolsConfig): void {
     throw new Error("customTools field must be an array");
   }
 
+  if (config.env && typeof config.env !== "object") {
+    throw new Error("env field must be an object map of key/value pairs");
+  }
+
+  if (config.env) {
+    for (const [key, value] of Object.entries(config.env)) {
+      if (!key || typeof key !== "string") {
+        throw new Error("env keys must be non-empty strings");
+      }
+      if (typeof value !== "string") {
+        throw new Error(`env value for key "${key}" must be a string`);
+      }
+    }
+  }
+
   // 各ツールの検証
   const seenIds = new Set<string>();
   for (const tool of config.customTools) {
@@ -120,6 +141,27 @@ function validateToolsConfig(config: ToolsConfig): void {
   if (config.env) {
     validateEnvRecord(config.env as EnvironmentRecord);
   }
+}
+
+export async function saveToolsConfig(config: ToolsConfig): Promise<void> {
+  const normalized: ToolsConfig = {
+    version: config.version,
+    updatedAt: config.updatedAt ?? new Date().toISOString(),
+    env: config.env ?? {},
+    customTools: config.customTools,
+  };
+
+  validateToolsConfig(normalized);
+
+  await mkdir(CONFIG_DIR, { recursive: true });
+  const payload = JSON.stringify(normalized, null, 2);
+  await writeFile(TEMP_CONFIG_PATH, payload, { mode: 0o600 });
+  await rename(TEMP_CONFIG_PATH, TOOLS_CONFIG_PATH);
+}
+
+export async function getSharedEnvironment(): Promise<Record<string, string>> {
+  const config = await loadToolsConfig();
+  return { ...(config.env ?? {}) };
 }
 
 /**

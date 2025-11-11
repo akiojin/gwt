@@ -24,6 +24,7 @@ export async function launchClaudeCode(
     skipPermissions?: boolean;
     mode?: "normal" | "continue" | "resume";
     extraArgs?: string[];
+    envOverrides?: Record<string, string>;
   } = {},
 ): Promise<void> {
   const terminal = getTerminalStreams();
@@ -85,6 +86,12 @@ export async function launchClaudeCode(
     }
 
     terminal.exitRawMode();
+
+    const baseEnv = {
+      ...process.env,
+      ...(options.envOverrides ?? {}),
+    };
+
     const childStdio = createChildStdio();
 
     try {
@@ -94,6 +101,17 @@ export async function launchClaudeCode(
         console.log(
           chalk.green("   ✨ Using locally installed claude command"),
         );
+        await execa("claude", args, {
+          cwd: worktreePath,
+          shell: true,
+          stdin: childStdio.stdin,
+          stdout: childStdio.stdout,
+          stderr: childStdio.stderr,
+          env:
+            isRoot && options.skipPermissions
+              ? { ...baseEnv, IS_SANDBOX: "1" }
+              : baseEnv,
+        } as any);
       } else {
         console.log(
           chalk.cyan(
@@ -120,6 +138,17 @@ export async function launchClaudeCode(
         );
         console.log("");
         await new Promise((resolve) => setTimeout(resolve, 2000));
+        await execa("bunx", [CLAUDE_CLI_PACKAGE, ...args], {
+          cwd: worktreePath,
+          shell: true,
+          stdin: childStdio.stdin,
+          stdout: childStdio.stdout,
+          stderr: childStdio.stderr,
+          env:
+            isRoot && options.skipPermissions
+              ? { ...baseEnv, IS_SANDBOX: "1" }
+              : baseEnv,
+        } as any);
       }
 
       const env = lastResolvedCommand.env
