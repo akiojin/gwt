@@ -8,6 +8,10 @@
 import Fastify from "fastify";
 import fastifyStatic from "@fastify/static";
 import fastifyWebsocket from "@fastify/websocket";
+import pino from "pino";
+import type { FastifyLoggerOptions } from "fastify";
+import { mkdir } from "node:fs/promises";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { PTYManager } from "./pty/manager.js";
@@ -22,9 +26,7 @@ const __dirname = dirname(__filename);
  */
 export async function startWebServer(): Promise<void> {
   const fastify = Fastify({
-    logger: {
-      level: process.env.LOG_LEVEL || "info",
-    },
+    logger: await createLoggerOptions(),
   });
 
   // PTYマネージャーとWebSocketハンドラーを初期化
@@ -83,4 +85,35 @@ export async function startWebServer(): Promise<void> {
     fastify.log.error(err);
     process.exit(1);
   }
+}
+
+async function createLoggerOptions(): Promise<FastifyLoggerOptions> {
+  const level = process.env.LOG_LEVEL || "info";
+  const logDir =
+    process.env.CLAUDE_WORKTREE_LOG_DIR ??
+    join(homedir(), ".claude-worktree", "logs");
+  await mkdir(logDir, { recursive: true });
+  const logFilePath = join(
+    logDir,
+    process.env.CLAUDE_WORKTREE_LOG_FILE ?? "webui.log",
+  );
+
+  const fileStream = pino.destination({ dest: logFilePath, sync: false });
+
+  if (process.env.CLAUDE_WORKTREE_LOG_STDOUT === "false") {
+    return {
+      level,
+      stream: fileStream,
+    } satisfies FastifyLoggerOptions;
+  }
+
+  const combinedStream = pino.multistream([
+    { stream: process.stdout },
+    { stream: fileStream },
+  ]);
+
+  return {
+    level,
+    stream: combinedStream,
+  } satisfies FastifyLoggerOptions;
 }
