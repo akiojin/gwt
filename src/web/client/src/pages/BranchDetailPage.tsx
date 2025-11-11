@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { useBranch } from "../hooks/useBranches";
+import { useBranch, useSyncBranch } from "../hooks/useBranches";
 import { useCreateWorktree } from "../hooks/useWorktrees";
 import {
   useStartSession,
@@ -80,6 +80,7 @@ export function BranchDetailPage() {
   const decodedBranchName = branchName ? decodeURIComponent(branchName) : "";
 
   const { data: branch, isLoading, error } = useBranch(decodedBranchName);
+  const syncBranch = useSyncBranch(decodedBranchName);
   const createWorktree = useCreateWorktree();
   const startSession = useStartSession();
   const { data: sessionsData, isLoading: isSessionsLoading } = useSessions();
@@ -162,6 +163,14 @@ export function BranchDetailPage() {
   const hasBlockingDivergence = Boolean(
     divergenceInfo && divergenceInfo.ahead > 0 && divergenceInfo.behind > 0,
   );
+  const needsRemoteSync = Boolean(
+    branch.worktreePath &&
+      divergenceInfo &&
+      divergenceInfo.behind > 0 &&
+      divergenceInfo.ahead === 0 &&
+      !hasBlockingDivergence,
+  );
+  const isSyncingBranch = syncBranch.isPending;
 
   const customTools = config?.tools ?? [];
   const availableTools: SelectableTool[] = useMemo(
@@ -262,6 +271,14 @@ export function BranchDetailPage() {
       return;
     }
 
+    if (needsRemoteSync) {
+      setBanner({
+        type: "error",
+        message: "リモートの更新を取り込むまでAIツールは起動できません。『最新の変更を同期』を実行してください。",
+      });
+      return;
+    }
+
     if (hasBlockingDivergence) {
       setBanner({
         type: "error",
@@ -328,6 +345,28 @@ export function BranchDetailPage() {
       setBanner({ type: "error", message: formatError(err, "セッションの終了に失敗しました") });
     } finally {
       setTerminatingSessionId(null);
+    }
+  };
+
+  const handleSyncBranch = async () => {
+    if (!branch.worktreePath) {
+      setBanner({ type: "error", message: "Worktreeが存在しないため同期できません。" });
+      return;
+    }
+
+    try {
+      const result = await syncBranch.mutateAsync({ worktreePath: branch.worktreePath });
+      if (result.pullStatus === "success") {
+        setBanner({ type: "success", message: "リモートの最新変更を取り込みました。" });
+      } else {
+        const warning = result.warnings?.join("\n") ?? "fast-forward pull が完了しませんでした";
+        setBanner({
+          type: "error",
+          message: `git pull --ff-only が失敗しました。\n${warning}`,
+        });
+      }
+    } catch (err) {
+      setBanner({ type: "error", message: formatError(err, "Git同期に失敗しました") });
     }
   };
 
@@ -481,6 +520,16 @@ export function BranchDetailPage() {
                       </p>
                     </div>
                   )}
+                  {needsRemoteSync && (
+                    <div className="inline-banner inline-banner--info" data-testid="sync-required">
+                      <p>
+                        リモートに未取得の更新 ({branch.divergence?.behind ?? 0} commits) があるため、AIツールを起動する前に同期してください。
+                      </p>
+                      <p className="section-card__body">
+                        CLI の `git fetch --all` と `git pull --ff-only` と同じ処理を Web UI から実行できます。
+                      </p>
+                    </div>
+                  )}
                   {hasBlockingDivergence && (
                     <div className="inline-banner inline-banner--warning" data-testid="divergence-warning">
                       <p>
@@ -501,9 +550,23 @@ export function BranchDetailPage() {
                       type="button"
                       className="button button--primary"
                       onClick={handleStartSession}
-                      disabled={isStartingSession || !selectedTool || hasBlockingDivergence}
+                      disabled={
+                        isStartingSession ||
+                        !selectedTool ||
+                        hasBlockingDivergence ||
+                        needsRemoteSync ||
+                        isSyncingBranch
+                      }
                     >
                       {isStartingSession ? "起動中..." : "セッションを起動"}
+                    </button>
+                    <button
+                      type="button"
+                      className="button button--secondary"
+                      onClick={handleSyncBranch}
+                      disabled={!branch.worktreePath || isSyncingBranch}
+                    >
+                      {isSyncingBranch ? "同期中..." : "最新の変更を同期"}
                     </button>
                     <Link to="/config" className="button button--ghost">
                       設定を編集

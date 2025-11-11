@@ -16,12 +16,19 @@ export interface Branch {
   author?: string | null;
   commitDate?: string | null; // ISO8601
   mergeStatus: "unmerged" | "merged" | "unknown";
+  hasUnpushedCommits: boolean;
   worktreePath?: string | null;
   baseBranch?: string | null;
   divergence?: {
     ahead: number;
     behind: number;
     upToDate: boolean;
+  } | null;
+  prInfo?: {
+    number: number;
+    title: string;
+    state: "open" | "merged" | "closed";
+    mergedAt?: string | null;
   } | null;
 }
 
@@ -34,8 +41,11 @@ export interface Worktree {
   head: string;
   isLocked: boolean;
   isPrunable: boolean;
+  isProtected: boolean;
   createdAt?: string | null; // ISO8601
   lastAccessedAt?: string | null; // ISO8601
+  divergence?: Branch["divergence"];
+  prInfo?: Branch["prInfo"];
 }
 
 /**
@@ -61,10 +71,17 @@ export interface AIToolSession {
  */
 export interface CustomAITool {
   id: string; // UUID v4
-  name: string;
+  displayName: string;
+  icon?: string | null;
   command: string;
   executionType: "path" | "bunx" | "command";
   defaultArgs?: string[] | null;
+  modeArgs: {
+    normal?: string[];
+    continue?: string[];
+    resume?: string[];
+  };
+  permissionSkipArgs?: string[] | null;
   env?: Record<string, string> | null;
   description?: string | null;
   createdAt: string; // ISO8601
@@ -98,6 +115,7 @@ export interface HealthResponse {
 
 export type BranchListResponse = SuccessResponse<Branch[]>;
 export type BranchResponse = SuccessResponse<Branch>;
+export type BranchSyncResponse = SuccessResponse<BranchSyncResult>;
 export type WorktreeListResponse = SuccessResponse<Worktree[]>;
 export type WorktreeResponse = SuccessResponse<Worktree>;
 export type SessionListResponse = SuccessResponse<AIToolSession[]>;
@@ -112,6 +130,10 @@ export interface CreateWorktreeRequest {
   createBranch?: boolean;
 }
 
+export interface BranchSyncRequest {
+  worktreePath: string;
+}
+
 export interface StartSessionRequest {
   toolType: "claude-code" | "codex-cli" | "custom";
   toolName?: string | null;
@@ -119,6 +141,8 @@ export interface StartSessionRequest {
   worktreePath: string;
   skipPermissions?: boolean;
   bypassApprovals?: boolean;
+  extraArgs?: string[];
+  customToolId?: string | null;
 }
 
 export interface UpdateConfigRequest {
@@ -128,6 +152,14 @@ export interface UpdateConfigRequest {
 export interface CleanupResponse {
   success: true;
   deleted: string[];
+}
+
+export interface BranchSyncResult {
+  branch: Branch;
+  divergence?: Branch["divergence"];
+  fetchStatus: "success";
+  pullStatus: "success" | "failed";
+  warnings?: string[];
 }
 
 /**

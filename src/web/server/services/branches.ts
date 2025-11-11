@@ -10,10 +10,15 @@ import {
   getAllBranches,
   getRepositoryRoot,
   getBranchDivergenceStatuses,
+  fetchAllRemotes,
+  pullFastForward,
 } from "../../../git.js";
 import { getPullRequestByBranch } from "../../../github.js";
 import { listAdditionalWorktrees } from "../../../worktree.js";
-import type { Branch } from "../../../types/api.js";
+import type { Branch, BranchSyncResult } from "../../../types/api.js";
+
+type DivergenceStatus = { remoteAhead: number; localAhead: number };
+type DivergenceValue = NonNullable<NonNullable<Branch["divergence"]>>;
 import type { BranchInfo, PullRequest } from "../../../cli/ui/types.js";
 
 const DEFAULT_BASE_BRANCHES = ["main", "master", "develop", "dev"];
@@ -84,13 +89,7 @@ export async function listBranches(): Promise<Branch[]> {
           : undefined;
 
       const divergence = divergenceStatus
-        ? {
-            ahead: divergenceStatus.localAhead,
-            behind: divergenceStatus.remoteAhead,
-            upToDate:
-              divergenceStatus.localAhead === 0 &&
-              divergenceStatus.remoteAhead === 0,
-          }
+        ? mapDivergence(divergenceStatus)
         : null;
 
       return {
@@ -113,10 +112,64 @@ export async function listBranches(): Promise<Branch[]> {
   return branchList;
 }
 
+export async function syncBranchState(
+  branchName: string,
+  worktreePath: string,
+): Promise<BranchSyncResult> {
+  if (!worktreePath) {
+    throw new Error("Worktree path is required to sync branch");
+  }
+
+  const repoRoot = await getRepositoryRoot();
+  const warnings: string[] = [];
+
+  await fetchAllRemotes({ cwd: repoRoot });
+
+  let pullStatus: "success" | "failed" = "success";
+  try {
+    await pullFastForward(worktreePath);
+  } catch (error) {
+    pullStatus = "failed";
+    const reason = error instanceof Error ? error.message : String(error);
+    warnings.push(reason);
+  }
+
+  const sanitizedBranch = sanitizeBranchName(branchName);
+  const divergenceInput: { cwd: string; branches?: string[] } = {
+    cwd: repoRoot,
+  };
+  if (sanitizedBranch) {
+    divergenceInput.branches = [sanitizedBranch];
+  }
+  const divergenceStatuses = await getBranchDivergenceStatuses(divergenceInput);
+  const divergence =
+    divergenceStatuses.length > 0
+      ? mapDivergence(divergenceStatuses[0]!)
+      : null;
+
+  const branch = await getBranchByName(branchName);
+  if (!branch) {
+    throw new Error(`Branch not found: ${branchName}`);
+  }
+
+  const result: BranchSyncResult = {
+    branch,
+    divergence: divergence ?? branch.divergence ?? null,
+    fetchStatus: "success",
+    pullStatus,
+  };
+
+  if (warnings.length) {
+    result.warnings = warnings;
+  }
+
+  return result;
+}
+
 async function buildDivergenceMap(
   branches: BranchInfo[],
   repoRoot: string,
-): Promise<Map<string, { remoteAhead: number; localAhead: number }>> {
+): Promise<Map<string, DivergenceStatus>> {
   const localBranchNames = branches
     .filter((branch) => branch.type === "local")
     .map((branch) => branch.name);
@@ -135,6 +188,18 @@ async function buildDivergenceMap(
     console.warn("Failed to compute branch divergence for Web UI", error);
     return new Map();
   }
+}
+
+function mapDivergence(status: DivergenceStatus): DivergenceValue {
+  return {
+    ahead: status.localAhead,
+    behind: status.remoteAhead,
+    upToDate: status.localAhead === 0 && status.remoteAhead === 0,
+  };
+}
+
+function sanitizeBranchName(value: string): string {
+  return value.replace(/^origin\//, "");
 }
 
 /**

@@ -14,6 +14,8 @@ import type {
   CreateWorktreeRequest,
   StartSessionRequest,
   UpdateConfigRequest,
+  BranchSyncRequest,
+  BranchSyncResult,
 } from "../../../../types/api.js";
 
 const API_BASE = "/api";
@@ -83,6 +85,17 @@ export const branchApi = {
     const encoded = encodeURIComponent(branchName);
     return apiFetch<Branch>(`${API_BASE}/branches/${encoded}`);
   },
+
+  sync: async (
+    branchName: string,
+    payload: BranchSyncRequest,
+  ): Promise<BranchSyncResult> => {
+    const encoded = encodeURIComponent(branchName);
+    return apiFetch<BranchSyncResult>(`${API_BASE}/branches/${encoded}/sync`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  },
 };
 
 /**
@@ -110,7 +123,7 @@ export const worktreeApi = {
    * Worktreeを削除
    */
   delete: async (path: string): Promise<void> => {
-    const url = new URL(`${API_BASE}/worktrees`, window.location.origin);
+    const url = new URL(`${API_BASE}/worktrees/delete`, window.location.origin);
     url.searchParams.set("path", path);
     await apiFetch<void>(url.toString(), {
       method: "DELETE",

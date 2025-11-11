@@ -1,11 +1,14 @@
 import React from "react";
 import type { Mock } from "vitest";
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import type { Branch } from "../../../../../src/types/api.js";
 import { BranchDetailPage } from "../../../../../src/web/client/src/pages/BranchDetailPage.js";
-import { useBranch } from "../../../../../src/web/client/src/hooks/useBranches.js";
+import {
+  useBranch,
+  useSyncBranch,
+} from "../../../../../src/web/client/src/hooks/useBranches.js";
 import { useCreateWorktree } from "../../../../../src/web/client/src/hooks/useWorktrees.js";
 import {
   useStartSession,
@@ -16,6 +19,7 @@ import { useConfig } from "../../../../../src/web/client/src/hooks/useConfig.js"
 
 vi.mock("../../../../../src/web/client/src/hooks/useBranches.js", () => ({
   useBranch: vi.fn(),
+  useSyncBranch: vi.fn(),
 }));
 
 vi.mock("../../../../../src/web/client/src/hooks/useWorktrees.js", () => ({
@@ -33,6 +37,7 @@ vi.mock("../../../../../src/web/client/src/hooks/useConfig.js", () => ({
 }));
 
 const mockedUseBranch = useBranch as unknown as Mock;
+const mockedUseSyncBranch = useSyncBranch as unknown as Mock;
 const mockedUseCreateWorktree = useCreateWorktree as unknown as Mock;
 const mockedUseStartSession = useStartSession as unknown as Mock;
 const mockedUseSessions = useSessions as unknown as Mock;
@@ -68,6 +73,18 @@ describe("BranchDetailPage", () => {
       data: baseBranch,
       isLoading: false,
       error: null,
+    });
+
+    const syncMutation = vi.fn().mockResolvedValue({
+      branch: baseBranch,
+      divergence: baseBranch.divergence,
+      fetchStatus: "success",
+      pullStatus: "success",
+    });
+
+    mockedUseSyncBranch.mockReturnValue({
+      mutateAsync: syncMutation,
+      isPending: false,
     });
 
     mockedUseCreateWorktree.mockReturnValue({
@@ -160,5 +177,40 @@ describe("BranchDetailPage", () => {
 
     expect(screen.getByTestId("divergence-warning")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "セッションを起動" })).toBeDisabled();
+  });
+
+  it("prompts git sync when branch is behind remote", () => {
+    mockedUseBranch.mockReturnValueOnce({
+      data: {
+        ...baseBranch,
+        divergence: { ahead: 0, behind: 3, upToDate: false },
+      },
+      isLoading: false,
+      error: null,
+    });
+
+    renderPage();
+
+    expect(screen.getByTestId("sync-required")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "セッションを起動" })).toBeDisabled();
+  });
+
+  it("calls sync mutation when clicking 最新の変更を同期", async () => {
+    const syncMutation = vi.fn().mockResolvedValue({
+      branch: baseBranch,
+      divergence: baseBranch.divergence,
+      fetchStatus: "success",
+      pullStatus: "success",
+    });
+
+    mockedUseSyncBranch.mockReturnValueOnce({
+      mutateAsync: syncMutation,
+      isPending: false,
+    });
+
+    renderPage();
+
+    fireEvent.click(screen.getByRole("button", { name: "最新の変更を同期" }));
+    await waitFor(() => expect(syncMutation).toHaveBeenCalled());
   });
 });

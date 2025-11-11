@@ -157,6 +157,8 @@ CLI / Web UI で GitHub PR 状態を参照し、マージ済み PR の Worktree 
 
 - Webサーバーの `listBranches` は CLI と同じ `getBranchDivergenceStatuses()` を使用して ahead/behind 情報を収集し、REST API の `Branch.divergence` に反映する。これによりメトリクスやバッジ表示が CLI と完全一致する。
 - ブランチ詳細ページは divergence の両方向差分（ahead > 0 かつ behind > 0）を検出した場合、CLI と同様に AI ツール起動ボタンを無効化し、差分解消手順（git fetch/pull/push）を案内する。
+- Web API には `POST /api/branches/{branchName}/sync` を追加し、CLI の `fetchAllRemotes` + `pullFastForward` フローをサーバー経由で再利用する。Web UI からは「最新の変更を同期」ボタンで呼び出し、成功時に divergence 表示と Branch データを即時更新する。
+- `behind > 0` で `ahead = 0` の場合は CLI の「最新のリモートを取り込んでから再実行」の挙動に合わせ、AI ツール起動ボタンを無効化し Git 同期を促す。
 
 ### ユーザーストーリー 10 - セッション履歴とエラー復旧 (優先度: P2)
 
