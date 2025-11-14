@@ -48,7 +48,7 @@ const mockExeca = execa as ReturnType<typeof vi.fn>;
 const DEFAULT_CODEX_ARGS = [
   "--enable",
   "web_search_request",
-  "--model=gpt-5-codex",
+  "--model=gpt-5.1-codex",
   "--sandbox",
   "workspace-write",
   "-c",
