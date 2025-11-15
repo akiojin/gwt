@@ -11,11 +11,32 @@ interface PackageManagerCandidate {
   command: [string, ...string[]];
 }
 
-export interface DependencyInstallResult {
+interface DetectedPackageManager {
   manager: PackageManager;
   lockfile: string;
-  skipped?: boolean;
+  command: [string, ...string[]];
 }
+
+export type DependencySkipReason =
+  | "missing-lockfile"
+  | "missing-binary"
+  | "install-failed"
+  | "lockfile-access-error"
+  | "unknown-error";
+
+export type DependencyInstallResult =
+  | {
+      skipped: false;
+      manager: PackageManager;
+      lockfile: string;
+    }
+  | {
+      skipped: true;
+      manager: PackageManager | null;
+      lockfile: string | null;
+      reason: DependencySkipReason;
+      message?: string;
+    };
 
 export class DependencyInstallError extends Error {
   constructor(
@@ -68,9 +89,7 @@ async function fileExists(targetPath: string): Promise<boolean> {
 
 export async function detectPackageManager(
   worktreePath: string,
-): Promise<
-  (DependencyInstallResult & { command: [string, ...string[]] }) | null
-> {
+): Promise<DetectedPackageManager | null> {
   const normalized = path.resolve(worktreePath);
 
   for (const candidate of INSTALL_CANDIDATES) {
@@ -90,16 +109,37 @@ export async function detectPackageManager(
 export async function installDependenciesForWorktree(
   worktreePath: string,
 ): Promise<DependencyInstallResult> {
-  const detection = await detectPackageManager(worktreePath);
+  let detection: DetectedPackageManager | null = null;
+
+  try {
+    detection = await detectPackageManager(worktreePath);
+  } catch (error) {
+    if (error instanceof DependencyInstallError) {
+      return {
+        skipped: true,
+        manager: null,
+        lockfile: null,
+        reason: "lockfile-access-error",
+        message: error.message,
+      };
+    }
+
+    return {
+      skipped: true,
+      manager: null,
+      lockfile: null,
+      reason: "unknown-error",
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
 
   if (!detection) {
-    throw new DependencyInstallError(
-      [
-        "No dependency lockfiles (bun.lock / pnpm-lock.yaml / package-lock.json) or package.json were found.",
-        `Worktree directory: ${worktreePath}`,
-        "Please run the appropriate package-manager install command manually.",
-      ].join("\n"),
-    );
+    return {
+      skipped: true,
+      manager: null,
+      lockfile: null,
+      reason: "missing-lockfile",
+    };
   }
 
   const [binary, ...args] = detection.command;
@@ -122,9 +162,10 @@ export async function installDependenciesForWorktree(
         `Package manager '${binary}' was not found; skipping automatic install.`,
       );
       return {
+        skipped: true,
         manager: detection.manager,
         lockfile: detection.lockfile,
-        skipped: true,
+        reason: "missing-binary",
       };
     }
 
@@ -137,13 +178,21 @@ export async function installDependenciesForWorktree(
     if (stderr) {
       messageParts.push(stderr.trim());
     }
+    const failureMessage = messageParts.join("\n");
 
-    throw new DependencyInstallError(messageParts.join("\n"), error);
+    return {
+      skipped: true,
+      manager: detection.manager,
+      lockfile: detection.lockfile,
+      reason: "install-failed",
+      message: failureMessage,
+    };
   } finally {
     spinner();
   }
 
   return {
+    skipped: false,
     manager: detection.manager,
     lockfile: detection.lockfile,
   };
