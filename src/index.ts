@@ -380,12 +380,37 @@ export async function handleAIToolWorkflow(
     if (!dependencyResult.ok) {
       return;
     }
-    if (dependencyResult.value.skipped) {
-      printWarning(
-        `Package manager '${dependencyResult.value.manager}' is not available in this environment; skipping automatic install.`,
-      );
+    const dependencyStatus = dependencyResult.value;
+
+    if (dependencyStatus.skipped) {
+      let warningMessage: string;
+      switch (dependencyStatus.reason) {
+        case "missing-lockfile":
+          warningMessage =
+            "Skipping automatic install because no lockfiles (bun.lock / pnpm-lock.yaml / package-lock.json) or package.json were found. Run the appropriate package-manager install command manually if needed.";
+          break;
+        case "missing-binary":
+          warningMessage = `Package manager '${dependencyStatus.manager ?? "unknown"}' is not available in this environment; skipping automatic install.`;
+          break;
+        case "install-failed":
+          warningMessage = `Dependency installation failed via ${dependencyStatus.manager ?? "unknown"}. Continuing without reinstall.`;
+          break;
+        case "lockfile-access-error":
+          warningMessage =
+            "Unable to read dependency lockfiles due to a filesystem error. Continuing without reinstall.";
+          break;
+        default:
+          warningMessage =
+            "Skipping automatic dependency install due to an unexpected error. Continuing without reinstall.";
+      }
+
+      if (dependencyStatus.message) {
+        warningMessage = `${warningMessage}\nDetails: ${dependencyStatus.message}`;
+      }
+
+      printWarning(warningMessage);
     } else {
-      printInfo(`Dependencies synced via ${dependencyResult.value.manager}.`);
+      printInfo(`Dependencies synced via ${dependencyStatus.manager}.`);
     }
 
     // Update remotes and attempt fast-forward pull
