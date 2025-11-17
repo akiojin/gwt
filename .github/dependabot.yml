@@ -1,0 +1,18 @@
+version: 2
+
+# Dependabot はデフォルトでは Conventional Commits を満たさない
+# (例: "Bump foo from 1.0.0 to 1.0.1") ため commitlint に弾かれる。
+# commit-message 設定で `chore(deps): ...` 形式に統一し、CI の commitlint を通過させる。
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore"
+      prefix-development: "chore"
+      include: "scope" # → chore(deps): bump ... / chore(deps-dev): bump ...
+    labels:
+      - "dependencies"
+      - "automerge"
+    open-pull-requests-limit: 10
