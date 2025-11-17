@@ -291,7 +291,7 @@ describe("handleAIToolWorkflow - dependency installation", () => {
     expect(installDependenciesMock).toHaveBeenCalledWith("/repo");
   });
 
-  it("prompts the user and aborts when install fails", async () => {
+  it("prompts the user but continues when install fails", async () => {
     installDependenciesMock.mockRejectedValueOnce(
       new DependencyInstallErrorMock("install failed"),
     );
@@ -308,8 +308,8 @@ describe("handleAIToolWorkflow - dependency installation", () => {
     await handleAIToolWorkflow(selection);
 
     expect(waitForUserAcknowledgementMock).toHaveBeenCalled();
-    expect(launchClaudeCodeMock).not.toHaveBeenCalled();
-    expect(saveSessionMock).not.toHaveBeenCalled();
+    expect(launchClaudeCodeMock).toHaveBeenCalled();
+    expect(saveSessionMock).toHaveBeenCalled();
   });
 
   it("continues when dependency install is skipped due to missing binary", async () => {

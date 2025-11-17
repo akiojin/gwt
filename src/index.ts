@@ -35,6 +35,7 @@ import readline from "node:readline";
 import {
   installDependenciesForWorktree,
   DependencyInstallError,
+  type DependencyInstallResult,
 } from "./services/dependency-installer.js";
 
 const ERROR_PROMPT = chalk.yellow(
@@ -143,20 +144,31 @@ async function runGitStep<T>(
   }
 }
 
-async function runDependencyInstallStep<T>(
+async function runDependencyInstallStep<T extends DependencyInstallResult>(
   description: string,
   step: () => Promise<T>,
-): Promise<GitStepResult<T>> {
+): Promise<{ ok: true; value: T }> {
   try {
     const value = await step();
     return { ok: true, value };
   } catch (error) {
     if (error instanceof DependencyInstallError) {
       const details = error.message ?? "";
+      // 依存インストールが失敗してもワークフロー自体は継続させる
       printError(`Failed to complete ${description}. ${details}`);
       await waitForErrorAcknowledgement();
-      return { ok: false };
+
+      const fallbackResult = {
+        skipped: true,
+        manager: null,
+        lockfile: null,
+        reason: "unknown-error",
+        message: details,
+      } as T;
+
+      return { ok: true, value: fallbackResult };
     }
+
     throw error;
   }
 }
