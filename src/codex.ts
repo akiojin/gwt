@@ -8,7 +8,7 @@ const CODEX_CLI_PACKAGE = "@openai/codex@latest";
 const DEFAULT_CODEX_ARGS = [
   "--enable",
   "web_search_request",
-  "--model=gpt-5-codex",
+  "--model=gpt-5.1-codex",
   "--sandbox",
   "workspace-write",
   "-c",
@@ -41,6 +41,7 @@ export async function launchCodexCLI(
     mode?: "normal" | "continue" | "resume";
     extraArgs?: string[];
     bypassApprovals?: boolean;
+    envOverrides?: Record<string, string>;
   } = {},
 ): Promise<void> {
   const terminal = getTerminalStreams();
@@ -85,12 +86,15 @@ export async function launchCodexCLI(
 
     const childStdio = createChildStdio();
 
+    const env = { ...process.env, ...(options.envOverrides ?? {}) };
+
     try {
       await execa("bunx", [CODEX_CLI_PACKAGE, ...args], {
         cwd: worktreePath,
         stdin: childStdio.stdin,
         stdout: childStdio.stdout,
         stderr: childStdio.stderr,
+        env,
       } as any);
     } finally {
       childStdio.cleanup();
@@ -104,15 +108,17 @@ export async function launchCodexCLI(
     if (platform() === "win32") {
       console.error(chalk.red("\n💡 Windows troubleshooting tips:"));
       console.error(
-        chalk.yellow("   1. Bun がインストールされ bunx が利用可能か確認"),
-      );
-      console.error(
         chalk.yellow(
-          '   2. "bunx @openai/codex@latest -- --help" を実行してセットアップを確認',
+          "   1. Confirm that Bun is installed and bunx is available",
         ),
       );
       console.error(
-        chalk.yellow("   3. ターミナルやIDEを再起動して PATH を更新"),
+        chalk.yellow(
+          '   2. Run "bunx @openai/codex@latest -- --help" to verify the setup',
+        ),
+      );
+      console.error(
+        chalk.yellow("   3. Restart your terminal or IDE to refresh PATH"),
       );
     }
 
@@ -126,7 +132,7 @@ export async function isCodexAvailable(): Promise<boolean> {
     return true;
   } catch (error: any) {
     if (error.code === "ENOENT") {
-      console.error(chalk.yellow("\n⚠️  bunx コマンドが見つかりません"));
+      console.error(chalk.yellow("\n⚠️  bunx command not found"));
     }
     return false;
   }

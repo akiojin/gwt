@@ -16,7 +16,7 @@ import {
   type EnsureWorktreeOptions,
 } from "./services/WorktreeOrchestrator.js";
 import chalk from "chalk";
-import type { SelectionResult } from "./ui/components/App.js";
+import type { SelectionResult } from "./cli/ui/components/App.js";
 import {
   worktreeExists,
   isProtectedBranchName,
@@ -27,7 +27,7 @@ import {
   getTerminalStreams,
   waitForUserAcknowledgement,
 } from "./utils/terminal.js";
-import { getToolById } from "./config/tools.js";
+import { getToolById, getSharedEnvironment } from "./config/tools.js";
 import { launchCustomAITool } from "./launcher.js";
 import { saveSession } from "./config/index.js";
 import { getPackageVersion } from "./utils.js";
@@ -35,10 +35,11 @@ import readline from "node:readline";
 import {
   installDependenciesForWorktree,
   DependencyInstallError,
+  type DependencyInstallResult,
 } from "./services/dependency-installer.js";
 
 const ERROR_PROMPT = chalk.yellow(
-  "エラー内容を確認したら Enter キーを押してください。",
+  "Review the error details, then press Enter to continue.",
 );
 
 async function waitForErrorAcknowledgement(): Promise<void> {
@@ -135,9 +136,7 @@ async function runGitStep<T>(
   } catch (error) {
     if (isGitRelatedError(error)) {
       const details = error instanceof Error ? error.message : String(error);
-      printWarning(
-        `Git操作に失敗しました (${description}). エラー: ${details}`,
-      );
+      printWarning(`Git operation failed (${description}). Error: ${details}`);
       await waitForErrorAcknowledgement();
       return { ok: false };
     }
@@ -145,20 +144,31 @@ async function runGitStep<T>(
   }
 }
 
-async function runDependencyInstallStep<T>(
+async function runDependencyInstallStep<T extends DependencyInstallResult>(
   description: string,
   step: () => Promise<T>,
-): Promise<GitStepResult<T>> {
+): Promise<{ ok: true; value: T }> {
   try {
     const value = await step();
     return { ok: true, value };
   } catch (error) {
     if (error instanceof DependencyInstallError) {
       const details = error.message ?? "";
-      printError(`${description} に失敗しました。${details}`);
+      // 依存インストールが失敗してもワークフロー自体は継続させる
+      printError(`Failed to complete ${description}. ${details}`);
       await waitForErrorAcknowledgement();
-      return { ok: false };
+
+      const fallbackResult = {
+        skipped: true,
+        manager: null,
+        lockfile: null,
+        reason: "unknown-error",
+        message: details,
+      } as T;
+
+      return { ok: true, value: fallbackResult };
     }
+
     throw error;
   }
 }
@@ -220,7 +230,7 @@ async function showVersion(): Promise<void> {
 async function mainInkUI(): Promise<SelectionResult | undefined> {
   const { render } = await import("ink");
   const React = await import("react");
-  const { App } = await import("./ui/components/App.js");
+  const { App } = await import("./cli/ui/components/App.js");
   const terminal = getTerminalStreams();
 
   let selectionResult: SelectionResult | undefined;
@@ -283,7 +293,7 @@ export async function handleAIToolWorkflow(
 
   try {
     // Get repository root
-    const repoRootResult = await runGitStep("リポジトリルートの取得", () =>
+    const repoRootResult = await runGitStep("retrieve repository root", () =>
       getRepositoryRoot(),
     );
     if (!repoRootResult.ok) {
@@ -314,7 +324,7 @@ export async function handleAIToolWorkflow(
         remoteBranch ??
         (branchType === "remote" ? (displayName ?? branch) : null);
       const switchResult = await runGitStep(
-        `保護ブランチ '${branch}' のチェックアウト`,
+        `check out protected branch '${branch}'`,
         () =>
           switchToProtectedBranch({
             branchName: branch,
@@ -344,7 +354,7 @@ export async function handleAIToolWorkflow(
     }
 
     const worktreeResult = await runGitStep(
-      `ワークツリーの準備 (${branch})`,
+      `prepare worktree (${branch})`,
       () => orchestrator.ensureWorktree(branch, repoRoot, ensureOptions),
     );
     if (!worktreeResult.ok) {
@@ -376,24 +386,47 @@ export async function handleAIToolWorkflow(
     printInfo(`Worktree ready: ${worktreePath}`);
 
     const dependencyResult = await runDependencyInstallStep(
-      `依存関係インストール (${branch})`,
+      `dependency installation (${branch})`,
       () => installDependenciesForWorktree(worktreePath),
     );
     if (!dependencyResult.ok) {
       return;
     }
-    if (dependencyResult.value.skipped) {
-      printWarning(
-        `${dependencyResult.value.manager} が環境に存在しないため、依存インストールをスキップしました。`,
-      );
+    const dependencyStatus = dependencyResult.value;
+
+    if (dependencyStatus.skipped) {
+      let warningMessage: string;
+      switch (dependencyStatus.reason) {
+        case "missing-lockfile":
+          warningMessage =
+            "Skipping automatic install because no lockfiles (bun.lock / pnpm-lock.yaml / package-lock.json) or package.json were found. Run the appropriate package-manager install command manually if needed.";
+          break;
+        case "missing-binary":
+          warningMessage = `Package manager '${dependencyStatus.manager ?? "unknown"}' is not available in this environment; skipping automatic install.`;
+          break;
+        case "install-failed":
+          warningMessage = `Dependency installation failed via ${dependencyStatus.manager ?? "unknown"}. Continuing without reinstall.`;
+          break;
+        case "lockfile-access-error":
+          warningMessage =
+            "Unable to read dependency lockfiles due to a filesystem error. Continuing without reinstall.";
+          break;
+        default:
+          warningMessage =
+            "Skipping automatic dependency install due to an unexpected error. Continuing without reinstall.";
+      }
+
+      if (dependencyStatus.message) {
+        warningMessage = `${warningMessage}\nDetails: ${dependencyStatus.message}`;
+      }
+
+      printWarning(warningMessage);
     } else {
-      printInfo(
-        `Dependencies synced via ${dependencyResult.value.manager}.`,
-      );
+      printInfo(`Dependencies synced via ${dependencyStatus.manager}.`);
     }
 
     // Update remotes and attempt fast-forward pull
-    const fetchResult = await runGitStep("リモートの取得", () =>
+    const fetchResult = await runGitStep("fetch remotes", () =>
       fetchAllRemotes({ cwd: repoRoot }),
     );
     if (!fetchResult.ok) {
@@ -428,7 +461,7 @@ export async function handleAIToolWorkflow(
       divergenceBranches.add(sanitizedRemoteBranch);
     }
 
-    const divergenceResult = await runGitStep("ブランチの差分確認", () =>
+    const divergenceResult = await runGitStep("check branch divergence", () =>
       getBranchDivergenceStatuses({
         cwd: repoRoot,
         branches: Array.from(divergenceBranches),
@@ -473,8 +506,11 @@ export async function handleAIToolWorkflow(
       );
     }
 
-    // Get tool definition
-    const toolConfig = await getToolById(tool);
+    // Get tool definition and shared environment overrides
+    const [toolConfig, sharedEnv] = await Promise.all([
+      getToolById(tool),
+      getSharedEnvironment(),
+    ]);
 
     if (!toolConfig) {
       throw new Error(`Tool not found: ${tool}`);
@@ -492,6 +528,7 @@ export async function handleAIToolWorkflow(
               ? "continue"
               : "normal",
         skipPermissions,
+        envOverrides: sharedEnv,
       });
     } else if (tool === "codex-cli") {
       await launchCodexCLI(worktreePath, {
@@ -502,6 +539,7 @@ export async function handleAIToolWorkflow(
               ? "continue"
               : "normal",
         bypassApprovals: skipPermissions,
+        envOverrides: sharedEnv,
       });
     } else {
       // Custom tool
@@ -515,6 +553,7 @@ export async function handleAIToolWorkflow(
               : "normal",
         skipPermissions,
         cwd: worktreePath,
+        sharedEnv,
       });
     }
 
@@ -593,6 +632,7 @@ export async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const showVersionFlag = args.includes("-v") || args.includes("--version");
   const showHelpFlag = args.includes("-h") || args.includes("--help");
+  const serveCommand = args.includes("serve");
 
   // Version flag has higher priority than help
   if (showVersionFlag) {
@@ -602,6 +642,13 @@ export async function main(): Promise<void> {
 
   if (showHelpFlag) {
     showHelp();
+    return;
+  }
+
+  // Start Web UI server if 'serve' command is provided
+  if (serveCommand) {
+    const { startWebServer } = await import("./web/server/index.js");
+    await startWebServer();
     return;
   }
 

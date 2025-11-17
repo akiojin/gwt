@@ -2,7 +2,7 @@ import path from "node:path";
 import { WorktreeRepository } from "../repositories/worktree.repository.js";
 import { GitRepository } from "../repositories/git.repository.js";
 import { WorktreeInfo } from "../worktree.js";
-import { WorktreeConfig } from "../ui/types.js";
+import { WorktreeConfig } from "../cli/ui/types.js";
 
 /**
  * Worktree操作のビジネスロジックを管理するService

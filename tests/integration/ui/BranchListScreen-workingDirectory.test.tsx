@@ -1,8 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
 import { render } from "ink-testing-library";
 import React from "react";
-import { BranchListScreen } from "../../../src/ui/components/screens/BranchListScreen.js";
-import type { BranchItem, Statistics } from "../../../src/ui/types.js";
+import { BranchListScreen } from "../../../src/cli/ui/components/screens/BranchListScreen.js";
+import type { BranchItem, Statistics } from "../../../src/cli/ui/types.js";
 
 describe("BranchListScreen - Working Directory Integration", () => {
   const mockStats: Statistics = {

@@ -1,5 +1,5 @@
 import { GitRepository } from "../repositories/git.repository.js";
-import { BranchInfo } from "../ui/types.js";
+import { BranchInfo } from "../cli/ui/types.js";
 
 /**
  * Git操作のビジネスロジックを管理するService

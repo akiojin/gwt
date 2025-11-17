@@ -137,7 +137,7 @@ describe("BatchMergeService", () => {
       ]);
 
       await expect(service.determineSourceBranch()).rejects.toThrow(
-        "マージ元ブランチを特定できません",
+        "Unable to determine source branch",
       );
     });
   });

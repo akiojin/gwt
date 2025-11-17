@@ -27,7 +27,6 @@ import { execa } from "execa";
 import {
   detectPackageManager,
   installDependenciesForWorktree,
-  DependencyInstallError,
 } from "../../src/services/dependency-installer";
 
 const WORKTREE = "/repo/.worktrees/feature-x";
@@ -155,21 +154,50 @@ describe("dependency installer", () => {
       );
     });
 
-    it("throws DependencyInstallError when no lockfile exists", async () => {
+    it("skips installation when no lockfile exists", async () => {
       setupExistingFiles([]);
 
-      await expect(installDependenciesForWorktree(WORKTREE)).rejects.toBeInstanceOf(
-        DependencyInstallError,
-      );
+      await expect(
+        installDependenciesForWorktree(WORKTREE),
+      ).resolves.toMatchObject({
+        skipped: true,
+        reason: "missing-lockfile",
+        manager: null,
+        lockfile: null,
+      });
     });
 
-    it("throws DependencyInstallError when command fails", async () => {
-      setupExistingFiles([path.join(WORKTREE, "bun.lock")]);
+    it("skips when install command fails", async () => {
+      const lockfilePath = path.join(WORKTREE, "bun.lock");
+      setupExistingFiles([lockfilePath]);
       (execa as any).mockRejectedValue(new Error("boom"));
 
-      await expect(installDependenciesForWorktree(WORKTREE)).rejects.toBeInstanceOf(
-        DependencyInstallError,
-      );
+      await expect(
+        installDependenciesForWorktree(WORKTREE),
+      ).resolves.toMatchObject({
+        skipped: true,
+        manager: "bun",
+        lockfile: lockfilePath,
+        reason: "install-failed",
+      });
+    });
+
+    it("skips when lockfile access fails", async () => {
+      const accessError = Object.assign(new Error("permission denied"), {
+        code: "EACCES",
+      });
+      accessMock.mockImplementation(async () => {
+        throw accessError;
+      });
+
+      await expect(
+        installDependenciesForWorktree(WORKTREE),
+      ).resolves.toMatchObject({
+        skipped: true,
+        reason: "lockfile-access-error",
+        manager: null,
+        lockfile: null,
+      });
     });
     it("skips when package manager binary is missing (ENOENT)", async () => {
       setupExistingFiles([path.join(WORKTREE, "bun.lock")]);

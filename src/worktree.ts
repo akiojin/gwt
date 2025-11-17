@@ -8,7 +8,7 @@ import {
   CleanupTarget,
   MergedPullRequest,
   CleanupReason,
-} from "./ui/types.js";
+} from "./cli/ui/types.js";
 import { getPullRequestByBranch, getMergedPullRequests } from "./github.js";
 import {
   hasUncommittedChanges,
