@@ -298,12 +298,12 @@ export function BranchListScreen({
         line += ' '.repeat(paddingWidth);
       }
 
-      const output = isSelected
+      const output = isSelected && !filterMode
         ? `[46m[30m${line}[0m`
         : line;
       return <Text>{output}</Text>;
     },
-    [cleanupUI, formatLatestCommit, truncateToWidth]
+    [cleanupUI, formatLatestCommit, truncateToWidth, filterMode]
   );
 
   return (
@@ -381,7 +381,7 @@ export function BranchListScreen({
             items={filteredBranches}
             onSelect={onSelect}
             limit={limit}
-            disabled={Boolean(cleanupUI?.inputLocked) || filterMode}
+            disabled={Boolean(cleanupUI?.inputLocked)}
             renderIndicator={() => null}
             renderItem={renderBranchRow}
           />
