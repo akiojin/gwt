@@ -1,3 +1,19 @@
+# [2.1.0](https://github.com/akiojin/gwt/compare/v2.0.4...v2.1.0) (2025-11-18)
+
+
+### Bug Fixes
+
+* .markdownlintignoreを追加してCHANGELOG.mdを除外 ([d911ee8](https://github.com/akiojin/gwt/commit/d911ee85480a038ae9e2a60c0bc0298566a7c2d3))
+* execa互換性問題によるblock-git-branch-ops.test.tsのテスト失敗を修正 ([48f8528](https://github.com/akiojin/gwt/commit/48f8528014c6fc2213256ff221efc52b70e98ee3))
+* markdownlintエラーを修正 ([ebf6bc7](https://github.com/akiojin/gwt/commit/ebf6bc7befe9e6e707df31c3e91c82d80e0307c5))
+* markdownlintのignore_filesを複数行形式に修正 ([0eda2dd](https://github.com/akiojin/gwt/commit/0eda2ddebebf3aa285d737638378f4d95039fa73))
+* semantic-release実行に必要なNode.js setupを追加 ([8d4b8f9](https://github.com/akiojin/gwt/commit/8d4b8f9e3296026dd713e767008526563009f435))
+
+
+### Features
+
+* bugfixブランチタイプのサポートを追加 ([ca915a0](https://github.com/akiojin/gwt/commit/ca915a0a98206448e9ef1b4b94dbadf10ec58c76))
+
 ## [2.0.4](https://github.com/akiojin/gwt/compare/v2.0.3...v2.0.4) (2025-11-18)
 
 

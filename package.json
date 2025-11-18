@@ -1,12 +1,13 @@
 {
   "name": "@akiojin/gwt",
-  "version": "2.0.4",
+  "version": "2.1.0",
   "description": "Interactive Git worktree manager for Claude Code with graphical branch selection",
   "main": "dist/index.js",
   "bin": {
     "gwt": "bin/gwt.js"
   },
   "type": "module",
+  "packageManager": "bun@latest",
   "scripts": {
     "build": "bun run build:cli && bun run build:web",
     "build:cli": "tsc",
