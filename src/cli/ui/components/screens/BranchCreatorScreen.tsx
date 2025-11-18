@@ -7,7 +7,7 @@ import { Input } from '../common/Input.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import { BRANCH_PREFIXES } from '../../../../config/constants.js';
 
-type BranchType = 'feature' | 'hotfix' | 'release';
+type BranchType = 'feature' | 'bugfix' | 'hotfix' | 'release';
 type Step = 'type-selection' | 'name-input';
 
 const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'];
@@ -66,6 +66,11 @@ export function BranchCreatorScreen({
       label: 'feature',
       value: 'feature',
       description: 'New feature development',
+    },
+    {
+      label: 'bugfix',
+      value: 'bugfix',
+      description: 'Bug fix',
     },
     {
       label: 'hotfix',
