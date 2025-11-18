@@ -292,17 +292,14 @@ describe('BranchListScreen', () => {
   });
 
   describe('Filter Mode', () => {
-    it('should enter filter mode when f key is pressed', () => {
+    it('should always display filter input field', () => {
+      // Note: Filter input is now always visible (no need to press 'f' key)
       const onSelect = vi.fn();
       const { container } = render(
         <BranchListScreen branches={mockBranches} stats={mockStats} onSelect={onSelect} />
       );
 
-      // Simulate f key press
-      const event = new KeyboardEvent('keydown', { key: 'f' });
-      document.dispatchEvent(event);
-
-      // Filter input field should be displayed
+      // Filter input field should be displayed by default
       expect(container.textContent).toContain('Filter:');
     });
 
@@ -327,11 +324,7 @@ describe('BranchListScreen', () => {
         <BranchListScreen branches={branches} stats={mockStats} onSelect={onSelect} />
       );
 
-      // Enter filter mode
-      const fKeyEvent = new KeyboardEvent('keydown', { key: 'f' });
-      document.dispatchEvent(fKeyEvent);
-
-      // Type "feature"
+      // Filter input is always visible, just type
       const inputEvent = new Event('input', { bubbles: true });
       const input = container.querySelector('input');
       if (input) {
@@ -344,17 +337,14 @@ describe('BranchListScreen', () => {
       expect(container.textContent).not.toContain('bugfix/issue-123');
     });
 
-    it('should exit filter mode and clear query when Esc key is pressed', () => {
+    it('should clear filter query when Esc key is pressed', () => {
+      // Note: Filter input remains visible, only the query is cleared
       const onSelect = vi.fn();
       const { container } = render(
         <BranchListScreen branches={mockBranches} stats={mockStats} onSelect={onSelect} />
       );
 
-      // Enter filter mode
-      const fKeyEvent = new KeyboardEvent('keydown', { key: 'f' });
-      document.dispatchEvent(fKeyEvent);
-
-      // Type something
+      // Type something in filter
       const input = container.querySelector('input');
       if (input) {
         input.value = 'feature';
@@ -365,8 +355,9 @@ describe('BranchListScreen', () => {
       const escKeyEvent = new KeyboardEvent('keydown', { key: 'Escape' });
       document.dispatchEvent(escKeyEvent);
 
-      // Filter input should be gone, all branches visible
-      expect(container.textContent).not.toContain('Filter:');
+      // Filter input should still be visible, but query cleared
+      // All branches should be visible again
+      expect(container.textContent).toContain('Filter:');
       expect(container.textContent).toContain('main');
       expect(container.textContent).toContain('feature/test');
     });
@@ -376,10 +367,6 @@ describe('BranchListScreen', () => {
       const { container } = render(
         <BranchListScreen branches={mockBranches} stats={mockStats} onSelect={onSelect} />
       );
-
-      // Enter filter mode
-      const fKeyEvent = new KeyboardEvent('keydown', { key: 'f' });
-      document.dispatchEvent(fKeyEvent);
 
       // Type "FEATURE" in uppercase
       const input = container.querySelector('input');
@@ -392,7 +379,11 @@ describe('BranchListScreen', () => {
       expect(container.textContent).toContain('feature/test');
     });
 
-    it('should disable other key bindings (m, c, r) in filter mode', () => {
+    it('should disable other key bindings (m, c, r) while typing in filter', () => {
+      // Note: Input component uses blockKeys prop to prevent c/r/m from
+      // triggering shortcuts while typing in the filter field
+      // This test verifies the intended behavior (though KeyboardEvent
+      // may not work correctly in test environment)
       const onSelect = vi.fn();
       const onNavigate = vi.fn();
       const onCleanupCommand = vi.fn();
@@ -409,17 +400,16 @@ describe('BranchListScreen', () => {
         />
       );
 
-      // Enter filter mode
-      const fKeyEvent = new KeyboardEvent('keydown', { key: 'f' });
-      document.dispatchEvent(fKeyEvent);
-
-      // Press m, c, r keys
+      // Filter input is always visible (no need to press 'f' key)
+      // When user types in filter, Input component blocks c/r/m keys
+      // Press m, c, r keys (should be blocked by Input's blockKeys)
       ['m', 'c', 'r'].forEach((key) => {
         const keyEvent = new KeyboardEvent('keydown', { key });
         document.dispatchEvent(keyEvent);
       });
 
-      // None of the callbacks should be called
+      // None of the callbacks should be called (keys are blocked)
+      // Note: This may fail in test environment due to KeyboardEvent limitations
       expect(onNavigate).not.toHaveBeenCalled();
       expect(onCleanupCommand).not.toHaveBeenCalled();
       expect(onRefresh).not.toHaveBeenCalled();
@@ -446,10 +436,6 @@ describe('BranchListScreen', () => {
         <BranchListScreen branches={branches} stats={mockStats} onSelect={onSelect} />
       );
 
-      // Enter filter mode
-      const fKeyEvent = new KeyboardEvent('keydown', { key: 'f' });
-      document.dispatchEvent(fKeyEvent);
-
       // Type "feature"
       const input = container.querySelector('input');
       if (input) {
@@ -466,10 +452,6 @@ describe('BranchListScreen', () => {
       const { container } = render(
         <BranchListScreen branches={mockBranches} stats={mockStats} onSelect={onSelect} />
       );
-
-      // Enter filter mode
-      const fKeyEvent = new KeyboardEvent('keydown', { key: 'f' });
-      document.dispatchEvent(fKeyEvent);
 
       // Type non-matching query
       const input = container.querySelector('input');
@@ -496,17 +478,13 @@ describe('BranchListScreen', () => {
           label: '✨ 🔀 feature/add-filter',
           value: 'feature/add-filter',
           latestCommitTimestamp: 1_698_000_000,
-          prTitle: 'Add search filter to branch list',
+          openPR: { number: 123, title: 'Add search filter to branch list' },
         },
       ];
 
       const { container } = render(
         <BranchListScreen branches={branchesWithPR} stats={mockStats} onSelect={onSelect} />
       );
-
-      // Enter filter mode
-      const fKeyEvent = new KeyboardEvent('keydown', { key: 'f' });
-      document.dispatchEvent(fKeyEvent);
 
       // Type "search" (part of PR title)
       const input = container.querySelector('input');

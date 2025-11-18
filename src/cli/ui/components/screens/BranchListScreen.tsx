@@ -89,8 +89,8 @@ export function BranchListScreen({
   const [filterQuery, setFilterQuery] = useState('');
 
   // Handle keyboard input
-  // Note: Select component and Input component handle their own keys
-  // This useInput is for global shortcuts that should work when not typing in filter
+  // Note: Input component blocks specific keys (c/r/m) using blockKeys prop
+  // This prevents shortcuts from triggering while typing in the filter
   useInput((input, key) => {
     if (cleanupUI?.inputLocked) {
       return;
@@ -102,9 +102,7 @@ export function BranchListScreen({
       return;
     }
 
-    // Note: When Input component is rendered, it captures keyboard input
-    // So m/c/r shortcuts may not work while typing in filter
-    // This is expected behavior for a search input
+    // Global shortcuts (blocked by Input component when typing)
     if (input === 'm' && onNavigate) {
       onNavigate('worktree-manager');
     } else if (input === 'c') {
@@ -283,6 +281,7 @@ export function BranchListScreen({
           onChange={setFilterQuery}
           onSubmit={() => {}} // No-op: filter is applied in real-time
           placeholder="Type to search..."
+          blockKeys={['c', 'r', 'm']} // Block shortcuts while typing
         />
         {filterQuery && (
           <Text dimColor>
