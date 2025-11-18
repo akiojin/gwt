@@ -1,3 +1,10 @@
+## [2.0.1](https://github.com/akiojin/gwt/compare/v2.0.0...v2.0.1) (2025-11-18)
+
+
+### Bug Fixes
+
+* release.ymlでnpm publish前にビルドを実行 ([4a84359](https://github.com/akiojin/gwt/commit/4a843592cc1ea8e3db743de56ed8ca05cbd76211))
+
 # [2.0.0](https://github.com/akiojin/gwt/compare/v1.33.0...v2.0.0) (2025-11-18)
 
 
