@@ -1,3 +1,10 @@
+## [2.1.1](https://github.com/akiojin/gwt/compare/v2.1.0...v2.1.1) (2025-11-18)
+
+
+### Bug Fixes
+
+* publish.ymlでSetup Bunステップの順序を修正 ([81d7c57](https://github.com/akiojin/gwt/commit/81d7c57da150f1fba4cf9440263ba16a05cff3a0))
+
 # [2.1.0](https://github.com/akiojin/gwt/compare/v2.0.4...v2.1.0) (2025-11-18)
 
 
