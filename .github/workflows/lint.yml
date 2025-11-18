@@ -31,7 +31,9 @@ jobs:
         with:
           files: .
           config_file: .markdownlint.json
-          ignore_files: node_modules/ CHANGELOG.md
+          ignore_files: |
+            node_modules/
+            CHANGELOG.md
 
       - name: Run ESLint
         run: bun run lint
