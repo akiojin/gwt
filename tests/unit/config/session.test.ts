@@ -54,7 +54,7 @@ describe("config/index.ts - Session Management", () => {
       expect(writeFile).toHaveBeenCalled();
 
       const writeFileCall = (writeFile as any).mock.calls[0];
-      expect(writeFileCall[0]).toContain(".config/claude-worktree/sessions");
+      expect(writeFileCall[0]).toContain(".config/gwt/sessions");
       expect(writeFileCall[1]).toContain("feature/test");
     });
 
@@ -90,7 +90,7 @@ describe("config/index.ts - Session Management", () => {
       await config.saveSession(sessionData);
 
       expect(mkdir).toHaveBeenCalledWith(
-        expect.stringContaining(".config/claude-worktree/sessions"),
+        expect.stringContaining(".config/gwt/sessions"),
         { recursive: true },
       );
     });
