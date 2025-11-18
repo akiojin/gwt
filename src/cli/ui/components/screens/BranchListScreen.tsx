@@ -284,11 +284,6 @@ export function BranchListScreen({
         {...(workingDirectory !== undefined && { workingDirectory })}
       />
 
-      {/* Stats */}
-      <Box marginTop={1}>
-        <Stats stats={stats} lastUpdated={lastUpdated} />
-      </Box>
-
       {/* Filter Input */}
       {filterMode && (
         <Box marginTop={1}>
@@ -307,6 +302,11 @@ export function BranchListScreen({
           )}
         </Box>
       )}
+
+      {/* Stats */}
+      <Box marginTop={1}>
+        <Stats stats={stats} lastUpdated={lastUpdated} />
+      </Box>
 
       {/* Content */}
       <Box flexDirection="column" flexGrow={1}>
