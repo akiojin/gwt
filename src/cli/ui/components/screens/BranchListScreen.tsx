@@ -298,12 +298,12 @@ export function BranchListScreen({
         line += ' '.repeat(paddingWidth);
       }
 
-      const output = isSelected && !filterMode
+      const output = isSelected
         ? `\u001b[46m\u001b[30m${line}\u001b[0m`
         : line;
       return <Text>{output}</Text>;
     },
-    [cleanupUI, formatLatestCommit, truncateToWidth, filterMode]
+    [cleanupUI, formatLatestCommit, truncateToWidth]
   );
 
   return (

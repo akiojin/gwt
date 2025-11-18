@@ -340,7 +340,7 @@ describe('BranchListScreen', () => {
       expect(container.textContent).toContain('(press f to filter)');
     });
 
-    it('should hide branch list cursor highlight when in filter mode', () => {
+    it('should show branch list cursor highlight in filter mode', () => {
       process.env.FORCE_COLOR = '1';
       const onSelect = vi.fn();
       let renderResult: ReturnType<typeof inkRender>;
@@ -352,8 +352,8 @@ describe('BranchListScreen', () => {
       });
 
       const frame = renderResult!.lastFrame() ?? '';
-      // Should NOT contain cyan background (cursor highlight)
-      expect(frame).not.toContain('\u001b[46m');
+      // Should contain cyan background (cursor highlight) even in filter mode
+      expect(frame).toContain('\u001b[46m');
     });
 
     it('should allow cursor movement with arrow keys in filter mode', () => {
