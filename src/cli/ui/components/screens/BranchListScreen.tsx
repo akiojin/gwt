@@ -62,6 +62,11 @@ export interface BranchListScreenProps {
   cleanupUI?: CleanupUIState;
   version?: string | null;
   workingDirectory?: string;
+  // Test support: allow external control of filter mode and query
+  testFilterMode?: boolean;
+  testOnFilterModeChange?: (mode: boolean) => void;
+  testFilterQuery?: string;
+  testOnFilterQueryChange?: (query: string) => void;
 }
 
 /**
@@ -82,27 +87,65 @@ export function BranchListScreen({
   cleanupUI,
   version,
   workingDirectory,
+  testFilterMode,
+  testOnFilterModeChange,
+  testFilterQuery,
+  testOnFilterQueryChange,
 }: BranchListScreenProps) {
   const { rows } = useTerminalSize();
 
-  // Filter state
-  const [filterQuery, setFilterQuery] = useState('');
+  // Filter state - allow test control via props
+  const [internalFilterQuery, setInternalFilterQuery] = useState('');
+  const filterQuery = testFilterQuery !== undefined ? testFilterQuery : internalFilterQuery;
+  const setFilterQuery = useCallback(
+    (query: string) => {
+      setInternalFilterQuery(query);
+      testOnFilterQueryChange?.(query);
+    },
+    [testOnFilterQueryChange]
+  );
+
+  // Focus management: true = filter mode, false = branch selection mode
+  // Allow test control via props
+  const [internalFilterMode, setInternalFilterMode] = useState(false);
+  const filterMode = testFilterMode !== undefined ? testFilterMode : internalFilterMode;
+  const setFilterMode = useCallback(
+    (mode: boolean) => {
+      setInternalFilterMode(mode);
+      testOnFilterModeChange?.(mode);
+    },
+    [testOnFilterModeChange]
+  );
 
   // Handle keyboard input
-  // Note: Input component blocks specific keys (c/r/m) using blockKeys prop
+  // Note: Input component blocks specific keys (c/r/m/f) using blockKeys prop
   // This prevents shortcuts from triggering while typing in the filter
   useInput((input, key) => {
     if (cleanupUI?.inputLocked) {
       return;
     }
 
-    // Clear filter with Escape (when filter has content)
-    if (key.escape && filterQuery) {
-      setFilterQuery('');
+    // Escape key handling
+    if (key.escape) {
+      if (filterQuery) {
+        // Clear filter query first
+        setFilterQuery('');
+        return;
+      }
+      if (filterMode) {
+        // Exit filter mode if query is empty
+        setFilterMode(false);
+        return;
+      }
+    }
+
+    // Enter filter mode with 'f' key (only in branch selection mode)
+    if (input === 'f' && !filterMode) {
+      setFilterMode(true);
       return;
     }
 
-    // Global shortcuts (blocked by Input component when typing)
+    // Global shortcuts (blocked by Input component when typing in filter mode)
     if (input === 'm' && onNavigate) {
       onNavigate('worktree-manager');
     } else if (input === 'c') {
@@ -276,13 +319,17 @@ export function BranchListScreen({
       {/* Filter Input - Always visible */}
       <Box>
         <Text dimColor>Filter: </Text>
-        <Input
-          value={filterQuery}
-          onChange={setFilterQuery}
-          onSubmit={() => {}} // No-op: filter is applied in real-time
-          placeholder="Type to search..."
-          blockKeys={['c', 'r', 'm']} // Block shortcuts while typing
-        />
+        {filterMode ? (
+          <Input
+            value={filterQuery}
+            onChange={setFilterQuery}
+            onSubmit={() => {}} // No-op: filter is applied in real-time
+            placeholder="Type to search..."
+            blockKeys={['c', 'r', 'm', 'f']} // Block shortcuts while typing
+          />
+        ) : (
+          <Text dimColor>{filterQuery || '(press f to filter)'}</Text>
+        )}
         {filterQuery && (
           <Text dimColor>
             {' '}
@@ -334,7 +381,7 @@ export function BranchListScreen({
             items={filteredBranches}
             onSelect={onSelect}
             limit={limit}
-            disabled={Boolean(cleanupUI?.inputLocked)}
+            disabled={Boolean(cleanupUI?.inputLocked) || filterMode}
             renderIndicator={() => null}
             renderItem={renderBranchRow}
           />
