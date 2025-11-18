@@ -86,7 +86,7 @@ describe('Edge Cases Integration Tests', () => {
     );
 
     // Header should still be visible
-    expect(getByText(/gwt/i)).toBeDefined();
+    expect(getByText(/gwt - Branch Selection/i)).toBeDefined();
 
     process.stdout.rows = originalRows;
   });

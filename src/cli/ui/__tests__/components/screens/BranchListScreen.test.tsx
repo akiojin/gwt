@@ -73,7 +73,7 @@ describe('BranchListScreen', () => {
       <BranchListScreen branches={mockBranches} stats={mockStats} onSelect={onSelect} />
     );
 
-    expect(getByText(/gwt/i)).toBeDefined();
+    expect(getByText(/gwt - Branch Selection/i)).toBeDefined();
   });
 
   it('should render statistics', () => {

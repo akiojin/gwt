@@ -114,7 +114,7 @@ describe('Navigation Integration Tests', () => {
     const { getByText } = render(<App onExit={onExit} />);
 
     await waitFor(() => {
-      expect(getByText(/gwt/i)).toBeDefined();
+      expect(getByText(/gwt - Branch Selection/i)).toBeDefined();
       expect(getByText(/main/)).toBeDefined();
     });
   });
