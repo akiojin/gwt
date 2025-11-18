@@ -1,6 +1,6 @@
 {
   "name": "@akiojin/gwt",
-  "version": "1.33.0",
+  "version": "2.0.4",
   "description": "Interactive Git worktree manager for Claude Code with graphical branch selection",
   "main": "dist/index.js",
   "bin": {
@@ -48,6 +48,9 @@
   "license": "MIT",
   "engines": {
     "bun": ">=1.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "dependencies": {
     "@fastify/static": "^8.0.3",

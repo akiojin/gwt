@@ -1,3 +1,55 @@
+## [2.0.4](https://github.com/akiojin/gwt/compare/v2.0.3...v2.0.4) (2025-11-18)
+
+
+### Bug Fixes
+
+* bin/gwt.jsでmain関数を明示的に呼び出すように修正 ([cc8b4b4](https://github.com/akiojin/gwt/commit/cc8b4b4ef8e1c30c6a0e77acd64b96b145beaae9))
+
+## [2.0.3](https://github.com/akiojin/gwt/compare/v2.0.2...v2.0.3) (2025-11-18)
+
+
+### Bug Fixes
+
+* semantic-release npmプラグインをnpmPublish: falseで有効化 ([6218754](https://github.com/akiojin/gwt/commit/621875478edea7f80b17c866bb3f02504f7d67cd))
+
+## [2.0.2](https://github.com/akiojin/gwt/compare/v2.0.1...v2.0.2) (2025-11-18)
+
+
+### Bug Fixes
+
+* semantic-releaseからnpm publishを分離してpublish.ymlに移動 ([42e0233](https://github.com/akiojin/gwt/commit/42e0233ec068253ab3efed9d8bda82b8c4b1252c))
+
+## [2.0.1](https://github.com/akiojin/gwt/compare/v2.0.0...v2.0.1) (2025-11-18)
+
+
+### Bug Fixes
+
+* release.ymlでnpm publish前にビルドを実行 ([4a84359](https://github.com/akiojin/gwt/commit/4a843592cc1ea8e3db743de56ed8ca05cbd76211))
+
+# [2.0.0](https://github.com/akiojin/gwt/compare/v1.33.0...v2.0.0) (2025-11-18)
+
+
+* refactor!: パッケージ名を@akiojin/claude-worktreeから@akiojin/gwtに変更 ([91a207e](https://github.com/akiojin/gwt/commit/91a207e680ebc3045dcd057e9bde258bf597baff))
+
+
+### Bug Fixes
+
+* release.ymlでsemantic-releaseの出力をログに表示するように修正 ([9e932a6](https://github.com/akiojin/gwt/commit/9e932a6156942dc81815cf29d2c416689e3f50dd))
+* スコープ付きパッケージをpublicとして公開するよう設定 ([a538301](https://github.com/akiojin/gwt/commit/a53830106a9873e9eb77b683513084e97a96fe25))
+
+
+### BREAKING CHANGES
+
+* パッケージ名が@akiojin/claude-worktreeから@akiojin/gwtに変更されました。
+既存のインストールを更新する必要があります:
+- グローバルインストール: npm uninstall -g @akiojin/claude-worktree && npm install -g @akiojin/gwt
+- コマンド名: claude-worktree → gwt
+- 設定ディレクトリ: ~/.config/claude-worktree → ~/.config/gwt
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+
 # [1.33.0](https://github.com/akiojin/claude-worktree/compare/v1.32.2...v1.33.0) (2025-11-17)
 
 ## Bug Fixes

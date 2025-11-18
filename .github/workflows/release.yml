@@ -74,6 +74,14 @@ jobs:
       - name: Install dependencies
         run: npm ci --legacy-peer-deps
 
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Build project
+        run: bun run build
+
       - name: Run semantic-release
         id: semantic_release
         env:
@@ -86,10 +94,11 @@ jobs:
           GIT_COMMITTER_NAME: github-actions[bot]
           GIT_COMMITTER_EMAIL: github-actions[bot]@users.noreply.github.com
         run: |
-          # semantic-releaseを実行して出力を取得
-          npx semantic-release > release-output.txt 2>&1
-          RELEASE_EXIT_CODE=$?
-          cat release-output.txt
+          # semantic-releaseを実行して出力を取得（teeで画面とファイル両方に出力）
+          set +e
+          npx semantic-release 2>&1 | tee release-output.txt
+          RELEASE_EXIT_CODE=${PIPESTATUS[0]}
+          set -e
 
           # semantic-releaseの出力を解析して新しいリリースが作成されたか確認
           if [ $RELEASE_EXIT_CODE -eq 0 ] && grep -q "Published release" release-output.txt; then

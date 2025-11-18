@@ -47,17 +47,6 @@ else
     echo "ℹ️  INFO: Codex auth.json not found on host (optional)"
 fi
 
-# プロジェクトのセットアップ
-echo "📦 Setting up project dependencies..."
-
-# node_modulesが存在しない、またはpackage.jsonが更新されている場合は依存関係をインストール
-if [ ! -d "/gwt/node_modules" ] || [ /gwt/package.json -nt /gwt/node_modules ]; then
-    echo "   Installing dependencies with bun..."
-    cd /gwt && bun install
-else
-    echo "   ✅ Dependencies already installed"
-fi
-
 echo "🚀 Docker development environment is ready!"
 echo "   You can now build the project with: bun run build"
 echo "   Or start development with: bun run dev"
