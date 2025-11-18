@@ -43,8 +43,8 @@
 
 ### テスト
 
-- [x] **T106** [P] [US1] src/cli/ui/__tests__/utils/branchFormatter.test.ts にbugfixブランチフォーマットのテストを追加
-- [x] **T107** [P] [US1] src/cli/ui/__tests__/components/screens/BranchCreatorScreen.test.tsx にbugfix選択肢の表示テストを追加
+- [x] **T106** [P] [US1] src/cli/ui/\*\*tests\*\*/utils/branchFormatter.test.ts にbugfixブランチフォーマットのテストを追加
+- [x] **T107** [P] [US1] src/cli/ui/\*\*tests\*\*/components/screens/BranchCreatorScreen.test.tsx にbugfix選択肢の表示テストを追加
 - [x] **T108** [P] [US1] tests/fixtures/branches.ts にbugfix/null-pointer-exceptionサンプルを追加
 
 **✅ MVP1チェックポイント**: US1完了後、bugfixブランチタイプを作成・表示できる独立した機能を提供
