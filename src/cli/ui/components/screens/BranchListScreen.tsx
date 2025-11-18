@@ -304,7 +304,7 @@ export function BranchListScreen({
       )}
 
       {/* Stats */}
-      <Box marginTop={1}>
+      <Box marginTop={filterMode ? 0 : 1}>
         <Stats stats={stats} lastUpdated={lastUpdated} />
       </Box>
 
