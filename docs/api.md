@@ -1,6 +1,6 @@
 # API Documentation
 
-このドキュメントは、`@akiojin/claude-worktree`の主要な公開関数のAPIリファレンスです。
+このドキュメントは、`@akiojin/gwt`の主要な公開関数のAPIリファレンスです。
 
 ## Git Operations (`src/git.ts`)
 

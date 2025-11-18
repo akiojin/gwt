@@ -9,7 +9,7 @@
 環境変数 `DEBUG_CLEANUP=1` を設定してデバッグ情報を表示できます：
 
 ```bash
-DEBUG_CLEANUP=1 claude-worktree
+DEBUG_CLEANUP=1 gwt
 ```
 
 デバッグモードでは以下の情報が表示されます：

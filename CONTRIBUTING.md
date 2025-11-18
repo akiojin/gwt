@@ -1,6 +1,6 @@
-# Contributing to Claude Worktree
+# Contributing to gwt
 
-`@akiojin/claude-worktree`へのコントリビューションをご検討いただきありがとうございます！
+`@akiojin/gwt`へのコントリビューションをご検討いただきありがとうございます！
 
 ## Development Setup
 
@@ -18,8 +18,8 @@
 2. クローン
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/claude-worktree.git
-cd claude-worktree
+git clone https://github.com/YOUR_USERNAME/gwt.git
+cd gwt
 ```
 
 1. 依存関係をインストール
@@ -43,7 +43,7 @@ bunx .
 ## Project Structure
 
 ```
-claude-worktree/
+gwt/
 ├── src/                  # ソースコード
 │   ├── index.ts          # メインエントリーポイント
 │   ├── git.ts            # Git操作

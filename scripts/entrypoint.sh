@@ -3,7 +3,7 @@ set -e
 
 # Git設定（node:22-bookwormにはGitが含まれている）
 # グローバルGit設定（安全なディレクトリを追加）
-git config --global --add safe.directory /claude-worktree
+git config --global --add safe.directory /gwt
 
 # ユーザー名とメールの設定（環境変数から）
 if [ -n "$GITHUB_USERNAME" ]; then
@@ -51,9 +51,9 @@ fi
 echo "📦 Setting up project dependencies..."
 
 # node_modulesが存在しない、またはpackage.jsonが更新されている場合は依存関係をインストール
-if [ ! -d "/claude-worktree/node_modules" ] || [ /claude-worktree/package.json -nt /claude-worktree/node_modules ]; then
+if [ ! -d "/gwt/node_modules" ] || [ /gwt/package.json -nt /gwt/node_modules ]; then
     echo "   Installing dependencies with bun..."
-    cd /claude-worktree && bun install
+    cd /gwt && bun install
 else
     echo "   ✅ Dependencies already installed"
 fi
