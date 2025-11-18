@@ -299,7 +299,7 @@ export function BranchListScreen({
       }
 
       const output = isSelected && !filterMode
-        ? `[46m[30m${line}[0m`
+        ? `\u001b[46m\u001b[30m${line}\u001b[0m`
         : line;
       return <Text>{output}</Text>;
     },
