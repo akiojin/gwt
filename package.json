@@ -49,6 +49,9 @@
   "engines": {
     "bun": ">=1.0.0"
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "@fastify/static": "^8.0.3",
     "@fastify/websocket": "^11.2.0",
