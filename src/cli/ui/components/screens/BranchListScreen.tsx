@@ -277,7 +277,7 @@ export function BranchListScreen({
 
       {/* Filter Input - Always visible */}
       <Box>
-        <Text>Filter: </Text>
+        <Text dimColor>Filter: </Text>
         <Input
           value={filterQuery}
           onChange={setFilterQuery}
