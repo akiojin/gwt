@@ -12,7 +12,7 @@ Interactive Git worktree manager with AI tool selection (Claude Code / Codex CLI
 
 - 🎯 **Modern React-based UI**: Built with Ink.js for a smooth, responsive terminal interface with real-time updates
 - 🖼️ **Full-screen Layout**: Persistent header with statistics, scrollable branch list, and always-visible footer with keyboard shortcuts
-- 🌟 **Smart Branch Creation**: Create feature, hotfix, or release branches with guided prompts and automatic base branch selection
+- 🌟 **Smart Branch Creation**: Create feature, bugfix, hotfix, or release branches with guided prompts and automatic base branch selection
 - 🔄 **Advanced Worktree Management**: Complete lifecycle management including creation, cleanup, and path optimization
 - 🤖 **AI Tool Selection**: Choose between Claude Code / Codex CLI through the interactive launcher
 - 🚀 **AI Tool Integration**: Launch the selected tool in the worktree (Claude Code includes permission handling and post-change flow)
@@ -71,7 +71,7 @@ gwt -v
 The tool presents an interactive interface with the following options:
 
 1. **Select Existing Branch**: Choose from local or remote branches with worktree auto-creation
-2. **Create New Branch**: Guided branch creation with type selection (feature/hotfix/release)
+2. **Create New Branch**: Guided branch creation with type selection (feature/bugfix/hotfix/release)
 3. **Manage Worktrees**: View, open, or remove existing worktrees
 4. **Cleanup Branches**: Remove merged PR branches or branches identical to their base directly from the CLI
 
@@ -105,7 +105,7 @@ gwt
 > **Important**: This workflow is intended for human developers. Autonomous agents must never create or delete branches unless a human gives explicit, task-specific instructions.
 
 1. Select "Create new branch" from the main menu
-2. Choose branch type (feature, hotfix, release)
+2. Choose branch type (feature, bugfix, hotfix, release)
 3. Enter branch name with automatic prefix application
 4. Select base branch from available options (feature → develop, hotfix → main)
 5. Confirm worktree creation path
