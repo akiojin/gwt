@@ -290,4 +290,233 @@ describe('BranchListScreen', () => {
       process.stdout.columns = originalColumns;
     }
   });
+
+  describe('Filter Mode', () => {
+    it('should enter filter mode when f key is pressed', () => {
+      const onSelect = vi.fn();
+      const { container } = render(
+        <BranchListScreen branches={mockBranches} stats={mockStats} onSelect={onSelect} />
+      );
+
+      // Simulate f key press
+      const event = new KeyboardEvent('keydown', { key: 'f' });
+      document.dispatchEvent(event);
+
+      // Filter input field should be displayed
+      expect(container.textContent).toContain('Filter:');
+    });
+
+    it('should filter branches in real-time as user types', () => {
+      const onSelect = vi.fn();
+      const branches: BranchItem[] = [
+        ...mockBranches,
+        {
+          name: 'bugfix/issue-123',
+          type: 'local',
+          branchType: 'bugfix',
+          isCurrent: false,
+          icons: ['🐛'],
+          hasChanges: false,
+          label: '🐛 bugfix/issue-123',
+          value: 'bugfix/issue-123',
+          latestCommitTimestamp: 1_698_000_000,
+        },
+      ];
+
+      const { container } = render(
+        <BranchListScreen branches={branches} stats={mockStats} onSelect={onSelect} />
+      );
+
+      // Enter filter mode
+      const fKeyEvent = new KeyboardEvent('keydown', { key: 'f' });
+      document.dispatchEvent(fKeyEvent);
+
+      // Type "feature"
+      const inputEvent = new Event('input', { bubbles: true });
+      const input = container.querySelector('input');
+      if (input) {
+        input.value = 'feature';
+        input.dispatchEvent(inputEvent);
+      }
+
+      // Only feature/test should be visible
+      expect(container.textContent).toContain('feature/test');
+      expect(container.textContent).not.toContain('bugfix/issue-123');
+    });
+
+    it('should exit filter mode and clear query when Esc key is pressed', () => {
+      const onSelect = vi.fn();
+      const { container } = render(
+        <BranchListScreen branches={mockBranches} stats={mockStats} onSelect={onSelect} />
+      );
+
+      // Enter filter mode
+      const fKeyEvent = new KeyboardEvent('keydown', { key: 'f' });
+      document.dispatchEvent(fKeyEvent);
+
+      // Type something
+      const input = container.querySelector('input');
+      if (input) {
+        input.value = 'feature';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+
+      // Press Escape
+      const escKeyEvent = new KeyboardEvent('keydown', { key: 'Escape' });
+      document.dispatchEvent(escKeyEvent);
+
+      // Filter input should be gone, all branches visible
+      expect(container.textContent).not.toContain('Filter:');
+      expect(container.textContent).toContain('main');
+      expect(container.textContent).toContain('feature/test');
+    });
+
+    it('should perform case-insensitive search', () => {
+      const onSelect = vi.fn();
+      const { container } = render(
+        <BranchListScreen branches={mockBranches} stats={mockStats} onSelect={onSelect} />
+      );
+
+      // Enter filter mode
+      const fKeyEvent = new KeyboardEvent('keydown', { key: 'f' });
+      document.dispatchEvent(fKeyEvent);
+
+      // Type "FEATURE" in uppercase
+      const input = container.querySelector('input');
+      if (input) {
+        input.value = 'FEATURE';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+
+      // "feature/test" should still be visible
+      expect(container.textContent).toContain('feature/test');
+    });
+
+    it('should disable other key bindings (m, c, r) in filter mode', () => {
+      const onSelect = vi.fn();
+      const onNavigate = vi.fn();
+      const onCleanupCommand = vi.fn();
+      const onRefresh = vi.fn();
+
+      const { container } = render(
+        <BranchListScreen
+          branches={mockBranches}
+          stats={mockStats}
+          onSelect={onSelect}
+          onNavigate={onNavigate}
+          onCleanupCommand={onCleanupCommand}
+          onRefresh={onRefresh}
+        />
+      );
+
+      // Enter filter mode
+      const fKeyEvent = new KeyboardEvent('keydown', { key: 'f' });
+      document.dispatchEvent(fKeyEvent);
+
+      // Press m, c, r keys
+      ['m', 'c', 'r'].forEach((key) => {
+        const keyEvent = new KeyboardEvent('keydown', { key });
+        document.dispatchEvent(keyEvent);
+      });
+
+      // None of the callbacks should be called
+      expect(onNavigate).not.toHaveBeenCalled();
+      expect(onCleanupCommand).not.toHaveBeenCalled();
+      expect(onRefresh).not.toHaveBeenCalled();
+    });
+
+    it('should display match count when filtering', () => {
+      const onSelect = vi.fn();
+      const branches: BranchItem[] = [
+        ...mockBranches,
+        {
+          name: 'feature/another',
+          type: 'local',
+          branchType: 'feature',
+          isCurrent: false,
+          icons: ['✨'],
+          hasChanges: false,
+          label: '✨ feature/another',
+          value: 'feature/another',
+          latestCommitTimestamp: 1_698_000_000,
+        },
+      ];
+
+      const { container } = render(
+        <BranchListScreen branches={branches} stats={mockStats} onSelect={onSelect} />
+      );
+
+      // Enter filter mode
+      const fKeyEvent = new KeyboardEvent('keydown', { key: 'f' });
+      document.dispatchEvent(fKeyEvent);
+
+      // Type "feature"
+      const input = container.querySelector('input');
+      if (input) {
+        input.value = 'feature';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+
+      // Should show "Showing 2 of 3 branches"
+      expect(container.textContent).toMatch(/Showing\s+2\s+of\s+3/i);
+    });
+
+    it('should show empty list when no branches match', () => {
+      const onSelect = vi.fn();
+      const { container } = render(
+        <BranchListScreen branches={mockBranches} stats={mockStats} onSelect={onSelect} />
+      );
+
+      // Enter filter mode
+      const fKeyEvent = new KeyboardEvent('keydown', { key: 'f' });
+      document.dispatchEvent(fKeyEvent);
+
+      // Type non-matching query
+      const input = container.querySelector('input');
+      if (input) {
+        input.value = 'nonexistent';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+
+      // Should show "Showing 0 of 2 branches"
+      expect(container.textContent).toMatch(/Showing\s+0\s+of\s+2/i);
+    });
+
+    it('should search in PR titles when available', () => {
+      const onSelect = vi.fn();
+      const branchesWithPR: BranchItem[] = [
+        ...mockBranches,
+        {
+          name: 'feature/add-filter',
+          type: 'local',
+          branchType: 'feature',
+          isCurrent: false,
+          icons: ['✨', '🔀'],
+          hasChanges: false,
+          label: '✨ 🔀 feature/add-filter',
+          value: 'feature/add-filter',
+          latestCommitTimestamp: 1_698_000_000,
+          prTitle: 'Add search filter to branch list',
+        },
+      ];
+
+      const { container } = render(
+        <BranchListScreen branches={branchesWithPR} stats={mockStats} onSelect={onSelect} />
+      );
+
+      // Enter filter mode
+      const fKeyEvent = new KeyboardEvent('keydown', { key: 'f' });
+      document.dispatchEvent(fKeyEvent);
+
+      // Type "search" (part of PR title)
+      const input = container.querySelector('input');
+      if (input) {
+        input.value = 'search';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+
+      // Branch with matching PR title should be visible
+      expect(container.textContent).toContain('feature/add-filter');
+    });
+  });
 });
