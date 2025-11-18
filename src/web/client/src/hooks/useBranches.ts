@@ -2,7 +2,7 @@
  * ブランチ関連のReact Hook
  */
 
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { branchApi } from "../lib/api";
 import type { Branch } from "../../../../types/api.js";
 
@@ -24,5 +24,18 @@ export function useBranch(branchName: string) {
     queryKey: ["branches", branchName],
     queryFn: () => branchApi.get(branchName),
     enabled: !!branchName,
+  });
+}
+
+export function useSyncBranch(branchName: string) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (payload: { worktreePath: string }) =>
+      branchApi.sync(branchName, payload),
+    onSuccess: (result) => {
+      queryClient.setQueryData(["branches", branchName], result.branch);
+      queryClient.invalidateQueries({ queryKey: ["branches"] });
+    },
   });
 }

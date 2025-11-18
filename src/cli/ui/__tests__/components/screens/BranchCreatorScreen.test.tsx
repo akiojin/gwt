@@ -40,6 +40,7 @@ describe('BranchCreatorScreen', () => {
 
     expect(getByText(/Select branch type/i)).toBeDefined();
     expect(getByText(/feature/i)).toBeDefined();
+    expect(getByText(/bugfix/i)).toBeDefined();
     expect(getByText(/hotfix/i)).toBeDefined();
     expect(getByText(/release/i)).toBeDefined();
   });

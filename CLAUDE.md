@@ -48,12 +48,11 @@
 
 ### ローカル検証/実行ルール（bun）
 
-- このリポジトリのローカル検証・実行は bun を使用する
+- このリポジトリのローカル検証・実行・CI/CDは bun を使用する
 - 依存インストール: `bun install`
 - ビルド: `bun run build`
 - 実行: `bunx .`（一発実行）または `bun run start`
-- グローバル実行: `bun add -g @akiojin/claude-worktree` → `claude-worktree`
-- CI/CD・Docker環境ではpnpmを使用（ハードリンクによるnode_modules効率化のため）
+- グローバル実行: `bun add -g @akiojin/gwt` → `gwt`
 
 ## コミュニケーションガイドライン
 
@@ -86,33 +85,3 @@
   2. `release/vX.Y.Z` → `main` へ直接マージ
   3. `release/vX.Y.Z` ブランチを削除
 - main への push をトリガーに `.github/workflows/publish.yml` が npm publish（設定時）と `main` → `develop` のバックマージを実行する。
-
-## 最近の変更
-
-### 2025-01-06: Codex CLI対応機能の計画
-
-- worktree起動時にClaude CodeとCodex CLIを選択可能にする機能を計画中
-- 詳細: `/specs/001-codex-cli-worktree/`
-- 技術スタック: Bun 1.0+, TypeScript, inquirer（必要に応じてNode.js 18+を併用）
-
-### 2025-01-07: unity-mcp-server型リリースフロー完全導入
-
-- unity-mcp-serverの直接マージ方式を完全導入（PRを経由せず高速化）
-- release.yml内で semantic-release → main直接マージ → developバックマージ → ブランチ削除を一括実行
-- PRベース方式から直接マージ方式に変更し、シンプルで高速なリリースフローを実現
-- 詳細: `.github/workflows/create-release.yml`, `.github/workflows/release.yml`, `.github/workflows/publish.yml`
-
-### 2025-01-06: リリースフロー変更
-
-- develop ブランチを導入し、手動リリーストリガー方式へ移行（現在は unity-mcp-server 型 release ブランチ方式に統一済み）
-- feature → develop (Auto Merge) → /release（release ブランチ作成）→ release push → semantic-release
-- 詳細: `.github/workflows/create-release.yml`, `.claude/commands/release.md`, `scripts/create-release-branch.sh`
-
-## Active Technologies
-
-- TypeScript 5.8.x / React 19 / Ink 6 / Bun 1.0+ + Vitest 2.1.x, happy-dom 20.0.8, @testing-library/react 16.3.0, execa 9.6.0 (SPEC-a5a44f4c)
-- TypeScript 5.8.x / Bun 1.0+ / GitHub Actions YAML + semantic-release 22.x, gh CLI, GitHub Actions (`actions/checkout`, `actions/github-script`) (SPEC-57fde06f)
-
-## Recent Changes
-
-- SPEC-a5a44f4c: Added TypeScript 5.8.x / React 19 / Ink 6 / Bun 1.0+ + Vitest 2.1.x, happy-dom 20.0.8, @testing-library/react 16.3.0, execa 9.6.0

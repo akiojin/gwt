@@ -29,6 +29,12 @@ export const localBranches: BranchInfo[] = [
     isCurrent: false,
   },
   {
+    name: "bugfix/null-pointer-exception",
+    type: "local",
+    branchType: "bugfix",
+    isCurrent: false,
+  },
+  {
     name: "hotfix/security-patch",
     type: "local",
     branchType: "hotfix",

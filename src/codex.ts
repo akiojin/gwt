@@ -27,6 +27,7 @@ export async function launchCodexCLI(
     mode?: "normal" | "continue" | "resume";
     extraArgs?: string[];
     bypassApprovals?: boolean;
+    envOverrides?: Record<string, string>;
   } = {},
 ): Promise<void> {
   const terminal = getTerminalStreams();
@@ -59,6 +60,11 @@ export async function launchCodexCLI(
 
     terminal.exitRawMode();
 
+    const envConfig: NodeJS.ProcessEnv = {
+      ...process.env,
+      ...(options.envOverrides ?? {}),
+    };
+
     const childStdio = createChildStdio();
 
     try {
@@ -75,7 +81,11 @@ export async function launchCodexCLI(
 
       lastResolvedCommand = await resolveCodexCommand(resolverOptions);
 
-      if (!lastResolvedCommand.usesFallback) {
+      if (lastResolvedCommand.usesFallback) {
+        console.log(
+          chalk.cyan("   🔄 Falling back to bunx @openai/codex@latest"),
+        );
+      } else {
         console.log(chalk.green("   ✨ Using locally installed codex command"));
       }
 
@@ -84,6 +94,7 @@ export async function launchCodexCLI(
         stdin: childStdio.stdin as ExecaOptions["stdin"],
         stdout: childStdio.stdout as ExecaOptions["stdout"],
         stderr: childStdio.stderr as ExecaOptions["stderr"],
+        env: envConfig,
       };
 
       await execa(

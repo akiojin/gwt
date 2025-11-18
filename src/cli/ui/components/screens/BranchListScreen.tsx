@@ -273,7 +273,7 @@ export function BranchListScreen({
     <Box flexDirection="column" height={rows}>
       {/* Header */}
       <Header
-        title="Claude Worktree - Branch Selection"
+        title="gwt - Branch Selection"
         titleColor="cyan"
         version={version}
         {...(workingDirectory !== undefined && { workingDirectory })}

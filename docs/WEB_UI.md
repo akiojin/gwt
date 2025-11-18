@@ -1,6 +1,6 @@
 # Web UI 機能
 
-Claude Worktree のWeb UI機能により、ブラウザからGitブランチとWorktreeを管理し、AI Toolセッションを起動できます。
+gwt のWeb UI機能により、ブラウザからGitブランチとWorktreeを管理し、AI Toolセッションを起動できます。
 
 ## 起動方法
 
@@ -24,6 +24,8 @@ bunx . serve
 - すべてのローカル・リモートブランチを表示
 - マージステータス（merged/unmerged/unknown）
 - Worktreeの有無を表示
+- ベースブランチ推定（PR baseRef / Git upstream / merge-baseヒューリスティクス）に基づいたノードグラフ表示
+- グラフではBaseノード→派生ブランチがレーン上で接続され、ホバー時にbase/divergence/worktreeパスをツールチップ表示
 - ブランチ名クリックで詳細ページへ遷移
 
 ### 2. ブランチ詳細ページ (`/:branchName`)

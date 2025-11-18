@@ -8,7 +8,7 @@ export interface WorktreeInfo {
 export interface BranchInfo {
   name: string;
   type: "local" | "remote";
-  branchType: "feature" | "hotfix" | "release" | "main" | "develop" | "other";
+  branchType: "feature" | "bugfix" | "hotfix" | "release" | "main" | "develop" | "other";
   isCurrent: boolean;
   description?: string;
   worktree?: WorktreeInfo;
@@ -35,6 +35,7 @@ export interface EnhancedBranchChoice extends BranchChoice {
 
 export type BranchType =
   | "feature"
+  | "bugfix"
   | "hotfix"
   | "release"
   | "main"
@@ -97,6 +98,7 @@ export interface PullRequest {
   branch: string;
   mergedAt: string | null;
   author: string;
+  baseRefName?: string | null;
 }
 
 export interface MergedPullRequest {
@@ -142,6 +144,7 @@ export interface GitHubPRResponse {
   headRefName: string;
   mergedAt: string | null;
   author: GitHubPRAuthor | null;
+  baseRefName?: string | null;
 }
 
 // ========================================

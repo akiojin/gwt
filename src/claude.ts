@@ -10,6 +10,7 @@ import {
   type ResolvedCommand,
   type ClaudeCommandOptions,
 } from "./services/aiToolResolver.js";
+
 export class ClaudeError extends Error {
   constructor(
     message: string,
@@ -26,13 +27,13 @@ export async function launchClaudeCode(
     skipPermissions?: boolean;
     mode?: "normal" | "continue" | "resume";
     extraArgs?: string[];
+    envOverrides?: Record<string, string>;
   } = {},
 ): Promise<void> {
   const terminal = getTerminalStreams();
   let lastResolvedCommand: ResolvedCommand | null = null;
 
   try {
-    // Check if the worktree path exists
     if (!existsSync(worktreePath)) {
       throw new Error(`Worktree path does not exist: ${worktreePath}`);
     }
@@ -40,7 +41,6 @@ export async function launchClaudeCode(
     console.log(chalk.blue("🚀 Launching Claude Code..."));
     console.log(chalk.gray(`   Working directory: ${worktreePath}`));
 
-    // Handle execution mode (logging only; args are built in resolver)
     switch (options.mode) {
       case "continue":
         console.log(chalk.cyan("   📱 Continuing most recent conversation"));
@@ -61,7 +61,6 @@ export async function launchClaudeCode(
         break;
     }
 
-    // Detect root user for Docker/sandbox environments
     let isRoot = false;
     try {
       isRoot = process.getuid ? process.getuid() === 0 : false;
@@ -69,11 +68,9 @@ export async function launchClaudeCode(
       // process.getuid() not available (e.g., Windows) - default to false
     }
 
-    // Handle skip permissions
     if (options.skipPermissions) {
       console.log(chalk.yellow("   ⚠️  Skipping permissions check"));
 
-      // Show additional warning for root users in Docker/sandbox environments
       if (isRoot) {
         console.log(
           chalk.yellow(
@@ -84,6 +81,15 @@ export async function launchClaudeCode(
     }
 
     terminal.exitRawMode();
+
+    const envConfig: NodeJS.ProcessEnv = {
+      ...process.env,
+      ...(options.envOverrides ?? {}),
+    };
+
+    if (isRoot && options.skipPermissions) {
+      envConfig.IS_SANDBOX = "1";
+    }
 
     const childStdio = createChildStdio();
 
@@ -133,11 +139,6 @@ export async function launchClaudeCode(
         );
       }
 
-      const envConfig =
-        isRoot && options.skipPermissions
-          ? { ...process.env, IS_SANDBOX: "1" }
-          : process.env;
-
       const execaOptions: ExecaOptions = {
         cwd: worktreePath,
         shell: true,
@@ -161,7 +162,6 @@ export async function launchClaudeCode(
     }
 
     let errorMessage: string;
-
     const errorWithCode = error as NodeJS.ErrnoException;
 
     if (errorWithCode?.code === "ENOENT") {
@@ -207,4 +207,5 @@ export async function launchClaudeCode(
     terminal.exitRawMode();
   }
 }
+
 export { isClaudeCodeAvailable } from "./services/aiToolResolver.js";

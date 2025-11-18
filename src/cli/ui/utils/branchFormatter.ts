@@ -12,6 +12,7 @@ const branchIcons: Record<BranchType, string> = {
   main: "⚡",
   develop: "⚡",
   feature: "✨",
+  bugfix: "🐛",
   hotfix: "🔥",
   release: "🚀",
   other: "📌",

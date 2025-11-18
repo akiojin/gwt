@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useBranches } from "../hooks/useBranches";
+import { BranchGraph } from "../components/BranchGraph";
 import type { Branch } from "../../../../types/api.js";
 
 const numberFormatter = new Intl.NumberFormat("ja-JP");
@@ -99,7 +100,7 @@ export function BranchListPage() {
     <div className="app-shell">
       <header className="page-hero">
         <p className="page-hero__eyebrow">WORKTREE DASHBOARD</p>
-        <h1>Claude Worktree Control Center</h1>
+        <h1>gwt Control Center</h1>
         <p>
           ローカルのGitブランチとAIツールをブラウザ上で一元管理し、Worktree状態を瞬時に
           可視化します。
@@ -108,6 +109,10 @@ export function BranchListPage() {
       </header>
 
       <main className="page-content">
+        {!pageState && filteredBranches.length > 0 && (
+          <BranchGraph branches={filteredBranches} />
+        )}
+
         <section className="metrics-grid">
           <article className="metric-card">
             <p className="metric-card__label">総ブランチ数</p>

@@ -3,7 +3,7 @@ set -e
 
 # Git設定（node:22-bookwormにはGitが含まれている）
 # グローバルGit設定（安全なディレクトリを追加）
-git config --global --add safe.directory /claude-worktree
+git config --global --add safe.directory /gwt
 
 # ユーザー名とメールの設定（環境変数から）
 if [ -n "$GITHUB_USERNAME" ]; then
@@ -47,26 +47,9 @@ else
     echo "ℹ️  INFO: Codex auth.json not found on host (optional)"
 fi
 
-# プロジェクトのセットアップ
-echo "📦 Setting up project dependencies..."
-
-# node_modulesが存在しない、またはpackage.jsonが更新されている場合は依存関係をインストール
-if [ ! -d "/claude-worktree/node_modules" ] || [ /claude-worktree/package.json -nt /claude-worktree/node_modules ]; then
-    echo "   Installing dependencies with bun..."
-    cd /claude-worktree && bun install
-else
-    echo "   ✅ Dependencies already installed"
-fi
-
-# distディレクトリが存在しない、またはsrcが更新されている場合はビルド
-if [ ! -d "/claude-worktree/dist" ] || [ -n "$(find /claude-worktree/src -type f -newer /claude-worktree/dist 2>/dev/null)" ]; then
-    echo "   Building project..."
-    cd /claude-worktree && bun run build
-else
-    echo "   ✅ Build artifacts up to date"
-fi
-
-echo "🚀 Docker environment is ready!"
+echo "🚀 Docker development environment is ready!"
+echo "   You can now build the project with: bun run build"
+echo "   Or start development with: bun run dev"
 echo ""
 
 # コマンドの実行（デフォルトはbash）

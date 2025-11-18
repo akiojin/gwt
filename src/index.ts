@@ -27,7 +27,7 @@ import {
   getTerminalStreams,
   waitForUserAcknowledgement,
 } from "./utils/terminal.js";
-import { getToolById } from "./config/tools.js";
+import { getToolById, getSharedEnvironment } from "./config/tools.js";
 import { launchCustomAITool } from "./launcher.js";
 import { saveSession } from "./config/index.js";
 import { getPackageVersion } from "./utils.js";
@@ -35,6 +35,7 @@ import readline from "node:readline";
 import {
   installDependenciesForWorktree,
   DependencyInstallError,
+  type DependencyInstallResult,
 } from "./services/dependency-installer.js";
 
 const ERROR_PROMPT = chalk.yellow(
@@ -143,20 +144,31 @@ async function runGitStep<T>(
   }
 }
 
-async function runDependencyInstallStep<T>(
+async function runDependencyInstallStep<T extends DependencyInstallResult>(
   description: string,
   step: () => Promise<T>,
-): Promise<GitStepResult<T>> {
+): Promise<{ ok: true; value: T }> {
   try {
     const value = await step();
     return { ok: true, value };
   } catch (error) {
     if (error instanceof DependencyInstallError) {
       const details = error.message ?? "";
+      // 依存インストールが失敗してもワークフロー自体は継続させる
       printError(`Failed to complete ${description}. ${details}`);
       await waitForErrorAcknowledgement();
-      return { ok: false };
+
+      const fallbackResult = {
+        skipped: true,
+        manager: null,
+        lockfile: null,
+        reason: "unknown-error",
+        message: details,
+      } as T;
+
+      return { ok: true, value: fallbackResult };
     }
+
     throw error;
   }
 }
@@ -183,7 +195,7 @@ function showHelp(): void {
   console.log(`
 Worktree Manager
 
-Usage: claude-worktree [options]
+Usage: gwt [options]
 
 Options:
   -h, --help      Show this help message
@@ -380,12 +392,37 @@ export async function handleAIToolWorkflow(
     if (!dependencyResult.ok) {
       return;
     }
-    if (dependencyResult.value.skipped) {
-      printWarning(
-        `Package manager '${dependencyResult.value.manager}' is not available in this environment; skipping automatic install.`,
-      );
+    const dependencyStatus = dependencyResult.value;
+
+    if (dependencyStatus.skipped) {
+      let warningMessage: string;
+      switch (dependencyStatus.reason) {
+        case "missing-lockfile":
+          warningMessage =
+            "Skipping automatic install because no lockfiles (bun.lock / pnpm-lock.yaml / package-lock.json) or package.json were found. Run the appropriate package-manager install command manually if needed.";
+          break;
+        case "missing-binary":
+          warningMessage = `Package manager '${dependencyStatus.manager ?? "unknown"}' is not available in this environment; skipping automatic install.`;
+          break;
+        case "install-failed":
+          warningMessage = `Dependency installation failed via ${dependencyStatus.manager ?? "unknown"}. Continuing without reinstall.`;
+          break;
+        case "lockfile-access-error":
+          warningMessage =
+            "Unable to read dependency lockfiles due to a filesystem error. Continuing without reinstall.";
+          break;
+        default:
+          warningMessage =
+            "Skipping automatic dependency install due to an unexpected error. Continuing without reinstall.";
+      }
+
+      if (dependencyStatus.message) {
+        warningMessage = `${warningMessage}\nDetails: ${dependencyStatus.message}`;
+      }
+
+      printWarning(warningMessage);
     } else {
-      printInfo(`Dependencies synced via ${dependencyResult.value.manager}.`);
+      printInfo(`Dependencies synced via ${dependencyStatus.manager}.`);
     }
 
     // Update remotes and attempt fast-forward pull
@@ -469,8 +506,11 @@ export async function handleAIToolWorkflow(
       );
     }
 
-    // Get tool definition
-    const toolConfig = await getToolById(tool);
+    // Get tool definition and shared environment overrides
+    const [toolConfig, sharedEnv] = await Promise.all([
+      getToolById(tool),
+      getSharedEnvironment(),
+    ]);
 
     if (!toolConfig) {
       throw new Error(`Tool not found: ${tool}`);
@@ -488,6 +528,7 @@ export async function handleAIToolWorkflow(
               ? "continue"
               : "normal",
         skipPermissions,
+        envOverrides: sharedEnv,
       });
     } else if (tool === "codex-cli") {
       await launchCodexCLI(worktreePath, {
@@ -498,6 +539,7 @@ export async function handleAIToolWorkflow(
               ? "continue"
               : "normal",
         bypassApprovals: skipPermissions,
+        envOverrides: sharedEnv,
       });
     } else {
       // Custom tool
@@ -511,6 +553,7 @@ export async function handleAIToolWorkflow(
               : "normal",
         skipPermissions,
         cwd: worktreePath,
+        sharedEnv,
       });
     }
 

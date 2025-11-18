@@ -5,6 +5,7 @@
 // ブランチタイプ
 export const BRANCH_TYPES = {
   FEATURE: "feature",
+  BUGFIX: "bugfix",
   HOTFIX: "hotfix",
   RELEASE: "release",
   MAIN: "main",
@@ -15,6 +16,7 @@ export const BRANCH_TYPES = {
 // ブランチプレフィックス
 export const BRANCH_PREFIXES = {
   FEATURE: "feature/",
+  BUGFIX: "bugfix/",
   HOTFIX: "hotfix/",
   RELEASE: "release/",
 } as const;

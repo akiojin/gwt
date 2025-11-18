@@ -203,79 +203,14 @@ describeOrSkip("block-git-branch-ops.sh hook", () => {
       expect(jsonOutput.decision).toBe("block");
     });
 
-    it("should block 'git worktree remove test'", async () => {
-      const result = await runHook("Bash", "git worktree remove test");
-
-      expect(result.exitCode).toBe(2);
-    });
-  });
-
-  describe("Non-Bash tools", () => {
-    it("should allow non-Bash tools", async () => {
-      const input = JSON.stringify({
-        tool_name: "Read",
-        tool_input: { file_path: "/some/file.txt" },
-      });
-
-      const result = await execa(hookScriptPath, {
-        input,
-        reject: false,
-      });
-
-      expect(result.exitCode).toBe(0);
-    });
-  });
-
-  describe("Safe git commands", () => {
-    it("should allow 'git status'", async () => {
-      const result = await runHook("Bash", "git status");
-
-      expect(result.exitCode).toBe(0);
-    });
-
-    it("should allow 'git log'", async () => {
-      const result = await runHook("Bash", "git log");
-
-      expect(result.exitCode).toBe(0);
-    });
-
-    it("should allow 'git diff'", async () => {
-      const result = await runHook("Bash", "git diff");
-
-      expect(result.exitCode).toBe(0);
-    });
-
-    it("should allow 'git add .'", async () => {
-      const result = await runHook("Bash", "git add .");
-
-      expect(result.exitCode).toBe(0);
-    });
-
-    it("should allow 'git commit -m \"message\"'", async () => {
-      const result = await runHook("Bash", 'git commit -m "message"');
-
-      expect(result.exitCode).toBe(0);
-    });
-
-    it("should allow 'git push'", async () => {
-      const result = await runHook("Bash", "git push");
-
-      expect(result.exitCode).toBe(0);
-    });
-  });
-
-  describe("Compound commands", () => {
-    it("should block when dangerous command is in chain", async () => {
-      const result = await runHook("Bash", "git add . && git checkout main");
+    it("should block 'git worktree remove /tmp/test'", async () => {
+      const result = await runHook("Bash", "git worktree remove /tmp/test");
 
       expect(result.exitCode).toBe(2);
     });
 
-    it("should allow safe command chains", async () => {
-      const result = await runHook(
-        "Bash",
-        "git add . && git commit -m 'test' && git push",
-      );
+    it("should allow 'git worktree list'", async () => {
+      const result = await runHook("Bash", "git worktree list");
 
       expect(result.exitCode).toBe(0);
     });

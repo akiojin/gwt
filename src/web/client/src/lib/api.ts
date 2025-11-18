@@ -9,11 +9,12 @@ import type {
   Branch,
   Worktree,
   AIToolSession,
-  CustomAITool,
   HealthResponse,
   CreateWorktreeRequest,
   StartSessionRequest,
-  UpdateConfigRequest,
+  BranchSyncRequest,
+  BranchSyncResult,
+  ConfigPayload,
 } from "../../../../types/api.js";
 
 const API_BASE = "/api";
@@ -83,6 +84,17 @@ export const branchApi = {
     const encoded = encodeURIComponent(branchName);
     return apiFetch<Branch>(`${API_BASE}/branches/${encoded}`);
   },
+
+  sync: async (
+    branchName: string,
+    payload: BranchSyncRequest,
+  ): Promise<BranchSyncResult> => {
+    const encoded = encodeURIComponent(branchName);
+    return apiFetch<BranchSyncResult>(`${API_BASE}/branches/${encoded}/sync`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  },
 };
 
 /**
@@ -110,7 +122,7 @@ export const worktreeApi = {
    * Worktreeを削除
    */
   delete: async (path: string): Promise<void> => {
-    const url = new URL(`${API_BASE}/worktrees`, window.location.origin);
+    const url = new URL(`${API_BASE}/worktrees/delete`, window.location.origin);
     url.searchParams.set("path", path);
     await apiFetch<void>(url.toString(), {
       method: "DELETE",
@@ -163,19 +175,10 @@ export const configApi = {
   /**
    * カスタムAI Tool設定を取得
    */
-  get: async (): Promise<{ tools: CustomAITool[] }> => {
-    return apiFetch<{ tools: CustomAITool[] }>(`${API_BASE}/config`);
-  },
-
-  /**
-   * カスタムAI Tool設定を更新
-   */
-  update: async (
-    request: UpdateConfigRequest,
-  ): Promise<{ tools: CustomAITool[] }> => {
-    return apiFetch<{ tools: CustomAITool[] }>(`${API_BASE}/config`, {
+  get: async (): Promise<ConfigPayload> => apiFetch(`${API_BASE}/config`),
+  update: async (request: ConfigPayload): Promise<ConfigPayload> =>
+    apiFetch(`${API_BASE}/config`, {
       method: "PUT",
       body: JSON.stringify(request),
-    });
-  },
+    }),
 };

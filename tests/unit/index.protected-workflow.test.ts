@@ -30,6 +30,7 @@ const {
   getRepositoryRootMock: vi.fn(async () => "/repo"),
   getCurrentBranchMock: vi.fn(async () => "develop"),
   installDependenciesMock: vi.fn(async () => ({
+    skipped: false as const,
     manager: "bun" as const,
     lockfile: "/repo/bun.lock",
   })),
@@ -100,6 +101,12 @@ vi.mock("../../src/claude.js", () => ({
 
 vi.mock("../../src/codex.js", () => ({
   launchCodexCLI: vi.fn(async () => undefined),
+  CodexError: class CodexError extends Error {
+    constructor(message: string, public cause?: unknown) {
+      super(message);
+      this.name = "CodexError";
+    }
+  },
 }));
 
 vi.mock("../../src/launcher.js", () => ({
@@ -111,6 +118,7 @@ vi.mock("../../src/config/tools.js", () => ({
     id: "claude-code",
     displayName: "Claude Code",
   })),
+  getSharedEnvironment: vi.fn(async () => ({})),
 }));
 
 vi.mock("../../src/config/index.js", () => ({
@@ -136,6 +144,7 @@ beforeEach(() => {
   fetchAllRemotesMock.mockClear();
   pullFastForwardMock.mockClear();
   getBranchDivergenceStatusesMock.mockClear();
+  getBranchDivergenceStatusesMock.mockResolvedValue([]);
   launchClaudeCodeMock.mockClear();
   saveSessionMock.mockClear();
   worktreeExistsMock.mockClear();
@@ -145,6 +154,7 @@ beforeEach(() => {
   switchToProtectedBranchMock.mockClear();
   installDependenciesMock.mockClear();
   installDependenciesMock.mockResolvedValue({
+    skipped: false,
     manager: "bun",
     lockfile: "/repo/bun.lock",
   });
@@ -281,7 +291,7 @@ describe("handleAIToolWorkflow - dependency installation", () => {
     expect(installDependenciesMock).toHaveBeenCalledWith("/repo");
   });
 
-  it("prompts the user and aborts when install fails", async () => {
+  it("prompts the user but continues when install fails", async () => {
     installDependenciesMock.mockRejectedValueOnce(
       new DependencyInstallErrorMock("install failed"),
     );
@@ -298,8 +308,8 @@ describe("handleAIToolWorkflow - dependency installation", () => {
     await handleAIToolWorkflow(selection);
 
     expect(waitForUserAcknowledgementMock).toHaveBeenCalled();
-    expect(launchClaudeCodeMock).not.toHaveBeenCalled();
-    expect(saveSessionMock).not.toHaveBeenCalled();
+    expect(launchClaudeCodeMock).toHaveBeenCalled();
+    expect(saveSessionMock).toHaveBeenCalled();
   });
 
   it("continues when dependency install is skipped due to missing binary", async () => {
@@ -307,6 +317,7 @@ describe("handleAIToolWorkflow - dependency installation", () => {
       manager: "bun",
       lockfile: "/repo/bun.lock",
       skipped: true,
+      reason: "missing-binary",
     });
 
     const selection: SelectionResult = {
@@ -322,5 +333,71 @@ describe("handleAIToolWorkflow - dependency installation", () => {
 
     expect(installDependenciesMock).toHaveBeenCalled();
     expect(waitForUserAcknowledgementMock).not.toHaveBeenCalled();
+  });
+
+  it("warns and continues when dependency metadata is missing", async () => {
+    installDependenciesMock.mockResolvedValueOnce({
+      manager: null,
+      lockfile: null,
+      skipped: true,
+      reason: "missing-lockfile",
+    });
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const selection: SelectionResult = {
+      branch: "feature/test",
+      displayName: "feature/test",
+      branchType: "local",
+      tool: "claude-code",
+      mode: "normal" as ExecutionMode,
+      skipPermissions: false,
+    };
+
+    await handleAIToolWorkflow(selection);
+
+    expect(installDependenciesMock).toHaveBeenCalled();
+    expect(waitForUserAcknowledgementMock).not.toHaveBeenCalled();
+    expect(launchClaudeCodeMock).toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Skipping automatic install because no lockfiles"),
+    );
+
+    warnSpy.mockRestore();
+  });
+
+  it("warns with details when dependency installation fails", async () => {
+    installDependenciesMock.mockResolvedValueOnce({
+      manager: "bun",
+      lockfile: "/repo/bun.lock",
+      skipped: true,
+      reason: "install-failed",
+      message: "Dependency installation failed (bun). Command: bun install",
+    });
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const selection: SelectionResult = {
+      branch: "feature/test",
+      displayName: "feature/test",
+      branchType: "local",
+      tool: "claude-code",
+      mode: "normal" as ExecutionMode,
+      skipPermissions: false,
+    };
+
+    await handleAIToolWorkflow(selection);
+
+    expect(installDependenciesMock).toHaveBeenCalled();
+    expect(waitForUserAcknowledgementMock).not.toHaveBeenCalled();
+    expect(launchClaudeCodeMock).toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Dependency installation failed via bun"),
+    );
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Details: Dependency installation failed"),
+    );
+
+    warnSpy.mockRestore();
   });
 });

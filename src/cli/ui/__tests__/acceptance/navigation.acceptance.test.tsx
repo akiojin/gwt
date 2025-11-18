@@ -103,7 +103,7 @@ describe('Acceptance: Navigation (User Story 2)', () => {
     const { getByText, container } = render(<App onExit={onExit} />);
 
     await waitFor(() => {
-      expect(getByText(/Claude Worktree/i)).toBeDefined();
+      expect(getByText(/gwt - Branch Selection/i)).toBeDefined();
     });
 
     // Verify n key action is available in footer
@@ -159,7 +159,7 @@ describe('Acceptance: Navigation (User Story 2)', () => {
     const { getByText, container } = render(<App onExit={onExit} />);
 
     await waitFor(() => {
-      expect(getByText(/Claude Worktree/i)).toBeDefined();
+      expect(getByText(/gwt - Branch Selection/i)).toBeDefined();
     });
 
     // Verify m key action is available for worktree management
@@ -182,7 +182,7 @@ describe('Acceptance: Navigation (User Story 2)', () => {
     const { getByText, getAllByText } = render(<App onExit={onExit} />);
 
     await waitFor(() => {
-      expect(getByText(/Claude Worktree/i)).toBeDefined();
+      expect(getByText(/gwt - Branch Selection/i)).toBeDefined();
     });
 
     // Verify navigation keys are available (main screen doesn't have q key)

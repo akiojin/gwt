@@ -123,7 +123,7 @@ export interface CustomAITool {
 /**
  * ツール設定ファイル全体
  *
- * ~/.claude-worktree/tools.json のスキーマ。
+ * ~/.gwt/tools.json のスキーマ。
  */
 export interface ToolsConfig {
   /**
@@ -132,6 +132,16 @@ export interface ToolsConfig {
    * セマンティックバージョニング形式。
    */
   version: string;
+
+  /**
+   * 設定ファイルの最終更新日時（ISO8601）
+   */
+  updatedAt?: string;
+
+  /**
+   * すべてのツールで共有する環境変数
+   */
+  env?: Record<string, string>;
 
   /**
    * カスタムツール定義の配列
@@ -217,4 +227,9 @@ export interface LaunchOptions {
    * ツール起動時のcwdとして使用されます。
    */
   cwd?: string;
+
+  /**
+   * 共有環境変数（共通env + ローカル取り込み）
+   */
+  sharedEnv?: Record<string, string>;
 }
