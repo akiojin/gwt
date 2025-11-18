@@ -195,7 +195,7 @@ function showHelp(): void {
   console.log(`
 Worktree Manager
 
-Usage: claude-worktree [options]
+Usage: gwt [options]
 
 Options:
   -h, --help      Show this help message

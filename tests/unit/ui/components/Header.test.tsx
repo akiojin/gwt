@@ -97,7 +97,7 @@ describe("Header Component", () => {
     it("should render elements in correct order: title, divider, working directory", () => {
       const { lastFrame } = render(
         <Header
-          title="Claude Worktree"
+          title="gwt"
           version="1.0.0"
           workingDirectory="/test/path"
           showDivider={true}
@@ -108,7 +108,7 @@ describe("Header Component", () => {
       const lines = output.split("\n").filter((line) => line.trim() !== "");
 
       // First line: title with version
-      expect(lines[0]).toContain("Claude Worktree v1.0.0");
+      expect(lines[0]).toContain("gwt v1.0.0");
 
       // Second line: divider
       expect(lines[1]).toContain("─");

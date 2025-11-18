@@ -1,10 +1,10 @@
 # Architecture Documentation
 
-`@akiojin/claude-worktree`のアーキテクチャ設計ドキュメント。
+`@akiojin/gwt`のアーキテクチャ設計ドキュメント。
 
 ## Overview
 
-Claude WorktreeはGit worktreeを活用した対話型ブランチ管理CLIツールです。Claude CodeまたはCodex CLIと統合し、効率的な開発ワークフローを実現します。
+gwtはGit worktreeを活用した対話型ブランチ管理CLIツールです。Claude CodeまたはCodex CLIと統合し、効率的な開発ワークフローを実現します。
 
 ## Architecture Diagram
 
@@ -180,7 +180,7 @@ Claude WorktreeはGit worktreeを活用した対話型ブランチ管理CLIツ�
 
 **データ保存:**
 
-- `~/.config/claude-worktree/sessions.json`
+- `~/.config/gwt/sessions.json`
 
 **技術スタック:**
 
@@ -319,7 +319,7 @@ git.deleteBranch() → Delete Branch
 
 ### Session Storage
 
-**場所:** `~/.config/claude-worktree/sessions.json`
+**場所:** `~/.config/gwt/sessions.json`
 
 **形式:**
 
@@ -400,7 +400,7 @@ git.deleteBranch() → Delete Branch
 ### Distribution
 
 - npm registry経由で配布
-- `bunx @akiojin/claude-worktree`で実行可能
+- `bunx @akiojin/gwt`で実行可能
 
 ### Requirements
 

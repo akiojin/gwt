@@ -1,4 +1,4 @@
-# @akiojin/claude-worktree
+# @akiojin/gwt
 
 [English](README.md)
 
@@ -6,7 +6,7 @@ Claude Code / Codex CLI 対応の対話型Gitワークツリーマネージャ�
 
 ## 概要
 
-`@akiojin/claude-worktree`は、直感的なインターフェースを通じてGitワークツリー管理を革新する強力なCLIツールです。Claude Code / Codex CLI の開発ワークフローとシームレスに統合し、インテリジェントなブランチ選択、自動ワークツリー作成、包括的なプロジェクト管理機能を提供します。
+`@akiojin/gwt`は、直感的なインターフェースを通じてGitワークツリー管理を革新する強力なCLIツールです。Claude Code / Codex CLI の開発ワークフローとシームレスに統合し、インテリジェントなブランチ選択、自動ワークツリー作成、包括的なプロジェクト管理機能を提供します。
 
 ## ✨ 主要機能
 
@@ -29,7 +29,7 @@ Claude Code / Codex CLI 対応の対話型Gitワークツリーマネージャ�
 #### bun（グローバルインストール）
 
 ```bash
-bun add -g @akiojin/claude-worktree
+bun add -g @akiojin/gwt
 ```
 
 ### 一回限りの使用
@@ -39,7 +39,7 @@ bun add -g @akiojin/claude-worktree
 #### bunx (bun)
 
 ```bash
-bunx @akiojin/claude-worktree
+bunx @akiojin/gwt
 ```
 
 ## クイックスタート
@@ -48,22 +48,22 @@ bunx @akiojin/claude-worktree
 
 ```bash
 # グローバルインストール済みの場合
-claude-worktree
+gwt
 
 # または一回限りの実行に bunx を使用
-bunx @akiojin/claude-worktree
+bunx @akiojin/gwt
 ```
 
 CLIオプション:
 
 ```bash
 # ヘルプを表示
-claude-worktree --help
+gwt --help
 
 # バージョンを確認
-claude-worktree --version
+gwt --version
 # または
-claude-worktree -v
+gwt -v
 ```
 
 ツールは以下のオプションを持つ対話型インターフェースを提供します:
@@ -177,7 +177,7 @@ Claude Code で以下のコマンドを実行して、仕様駆動開発を活�
 ## プロジェクト構造
 
 ```
-@akiojin/claude-worktree/
+@akiojin/gwt/
 ├── src/
 │   ├── index.ts          # メインアプリケーションエントリーポイント
 │   ├── git.ts           # Git操作とブランチ管理
@@ -192,7 +192,7 @@ Claude Code で以下のコマンドを実行して、仕様駆動開発を活�
 │       ├── table.ts     # ブランチテーブル生成
 │       └── types.ts     # TypeScript型定義
 ├── bin/
-│   └── claude-worktree.js # 実行可能ラッパー
+│   └── gwt.js # 実行可能ラッパー
 ├── .claude/             # Claude Code 設定
 │   └── commands/        # Spec Kit スラッシュコマンド
 ├── .specify/            # Spec Kit スクリプトとテンプレート
@@ -209,8 +209,8 @@ Claude Code で以下のコマンドを実行して、仕様駆動開発を活�
 
 ```bash
 # リポジトリをクローン
-git clone https://github.com/akiojin/claude-worktree.git
-cd claude-worktree
+git clone https://github.com/akiojin/gwt.git
+cd gwt
 
 # 依存関係をインストール（bun）
 bun install
@@ -266,7 +266,7 @@ bun run start
 # Package.jsonスクリプト例
 {
   "scripts": {
-    "worktree": "claude-worktree"
+    "worktree": "gwt"
   }
 }
 ```
@@ -289,7 +289,7 @@ bun run start
 詳細出力には環境変数を設定:
 
 ```bash
-DEBUG=claude-worktree claude-worktree
+DEBUG=gwt gwt
 ```
 
 ## ライセンス

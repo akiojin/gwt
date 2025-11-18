@@ -16,9 +16,9 @@ describe('Header', () => {
   });
 
   it('should render title', () => {
-    const { getByText } = render(<Header title="Claude Worktree" />);
+    const { getByText } = render(<Header title="gwt" />);
 
-    expect(getByText('Claude Worktree')).toBeDefined();
+    expect(getByText('gwt')).toBeDefined();
   });
 
   it('should render divider', () => {

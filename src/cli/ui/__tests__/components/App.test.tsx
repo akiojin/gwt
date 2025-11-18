@@ -53,7 +53,7 @@ describe('App', () => {
     const { getByText } = render(<App onExit={onExit} />);
 
     // Check for BranchListScreen elements
-    expect(getByText(/Claude Worktree/i)).toBeDefined();
+    expect(getByText(/gwt - Branch Selection/i)).toBeDefined();
     expect(getByText(/main/)).toBeDefined();
     expect(getByText(/feature\/test/)).toBeDefined();
   });
