@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { execa } from "execa";
+import { spawn } from "child_process";
 import { join } from "path";
 
 const hookScriptPath = join(
@@ -7,7 +7,7 @@ const hookScriptPath = join(
   ".claude/hooks/block-git-branch-ops.sh",
 );
 
-// Skip in CI due to execa/bun compatibility issues
+// Skip in CI due to shell compatibility issues
 const describeOrSkip = process.env.CI ? describe.skip : describe;
 
 describeOrSkip("block-git-branch-ops.sh hook", () => {
@@ -27,23 +27,42 @@ describeOrSkip("block-git-branch-ops.sh hook", () => {
       tool_input: { command },
     });
 
-    try {
-      const result = await execa(hookScriptPath, {
-        input,
-        reject: false,
+    return new Promise((resolve) => {
+      const process = spawn("bash", [hookScriptPath], {
+        stdio: ["pipe", "pipe", "pipe"],
       });
-      return {
-        exitCode: result.exitCode,
-        stdout: result.stdout,
-        stderr: result.stderr,
-      };
-    } catch (error: any) {
-      return {
-        exitCode: error.exitCode || 1,
-        stdout: error.stdout || "",
-        stderr: error.stderr || error.message || "",
-      };
-    }
+
+      let stdout = "";
+      let stderr = "";
+
+      process.stdout.on("data", (data) => {
+        stdout += data.toString();
+      });
+
+      process.stderr.on("data", (data) => {
+        stderr += data.toString();
+      });
+
+      process.on("close", (code) => {
+        resolve({
+          exitCode: code ?? 0,
+          stdout,
+          stderr,
+        });
+      });
+
+      process.on("error", (error) => {
+        resolve({
+          exitCode: 1,
+          stdout: "",
+          stderr: error.message,
+        });
+      });
+
+      // Write input to stdin
+      process.stdin.write(input);
+      process.stdin.end();
+    });
   }
 
   describe("Interactive rebase blocking", () => {
@@ -200,9 +219,21 @@ describeOrSkip("block-git-branch-ops.sh hook", () => {
         tool_input: { file_path: "/some/file.txt" },
       });
 
-      const result = await execa(hookScriptPath, {
-        input,
-        reject: false,
+      const result = await new Promise<{ exitCode: number }>((resolve) => {
+        const childProcess = spawn("bash", [hookScriptPath], {
+          stdio: ["pipe", "pipe", "pipe"],
+        });
+
+        childProcess.on("close", (code) => {
+          resolve({ exitCode: code ?? 0 });
+        });
+
+        childProcess.on("error", () => {
+          resolve({ exitCode: 1 });
+        });
+
+        childProcess.stdin.write(input);
+        childProcess.stdin.end();
       });
 
       expect(result.exitCode).toBe(0);
