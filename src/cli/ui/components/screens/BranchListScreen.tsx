@@ -86,34 +86,25 @@ export function BranchListScreen({
   const { rows } = useTerminalSize();
 
   // Filter state
-  const [filterMode, setFilterMode] = useState(false);
   const [filterQuery, setFilterQuery] = useState('');
 
   // Handle keyboard input
-  // Note: Select component handles Enter and arrow keys
+  // Note: Select component and Input component handle their own keys
+  // This useInput is for global shortcuts that should work when not typing in filter
   useInput((input, key) => {
     if (cleanupUI?.inputLocked) {
       return;
     }
 
-    // Enter filter mode with 'f' key
-    if (input === 'f' && !filterMode) {
-      setFilterMode(true);
-      return;
-    }
-
-    // Exit filter mode with Escape
-    if (key.escape && filterMode) {
-      setFilterMode(false);
+    // Clear filter with Escape (when filter has content)
+    if (key.escape && filterQuery) {
       setFilterQuery('');
       return;
     }
 
-    // Disable other key bindings in filter mode
-    if (filterMode) {
-      return;
-    }
-
+    // Note: When Input component is rendered, it captures keyboard input
+    // So m/c/r shortcuts may not work while typing in filter
+    // This is expected behavior for a search input
     if (input === 'm' && onNavigate) {
       onNavigate('worktree-manager');
     } else if (input === 'c') {
@@ -147,17 +138,17 @@ export function BranchListScreen({
 
   // Calculate available space for branch list
   // Header: 2 lines (title + divider)
+  // Filter input: 1 line
   // Stats: 1 line
-  // Filter input (if active): 1 line
   // Empty line: 1 line
   // Footer: 1 line
-  // Total fixed: 5 lines (or 6 with filter)
+  // Total fixed: 6 lines
   const headerLines = 2;
+  const filterLines = 1;
   const statsLines = 1;
-  const filterLines = filterMode ? 1 : 0;
   const emptyLine = 1;
   const footerLines = 1;
-  const fixedLines = headerLines + statsLines + filterLines + emptyLine + footerLines;
+  const fixedLines = headerLines + filterLines + statsLines + emptyLine + footerLines;
   const contentHeight = rows - fixedLines;
   const limit = Math.max(5, contentHeight); // Minimum 5 items visible
 
@@ -284,27 +275,25 @@ export function BranchListScreen({
         {...(workingDirectory !== undefined && { workingDirectory })}
       />
 
-      {/* Filter Input */}
-      {filterMode && (
-        <Box marginTop={1}>
-          <Text>Filter: </Text>
-          <Input
-            value={filterQuery}
-            onChange={setFilterQuery}
-            onSubmit={() => {}} // No-op: filter is applied in real-time
-            placeholder="Type to search..."
-          />
-          {filterQuery && (
-            <Text dimColor>
-              {' '}
-              (Showing {filteredBranches.length} of {branches.length})
-            </Text>
-          )}
-        </Box>
-      )}
+      {/* Filter Input - Always visible */}
+      <Box>
+        <Text>Filter: </Text>
+        <Input
+          value={filterQuery}
+          onChange={setFilterQuery}
+          onSubmit={() => {}} // No-op: filter is applied in real-time
+          placeholder="Type to search..."
+        />
+        {filterQuery && (
+          <Text dimColor>
+            {' '}
+            (Showing {filteredBranches.length} of {branches.length})
+          </Text>
+        )}
+      </Box>
 
       {/* Stats */}
-      <Box marginTop={filterMode ? 0 : 1}>
+      <Box>
         <Stats stats={stats} lastUpdated={lastUpdated} />
       </Box>
 
@@ -335,7 +324,7 @@ export function BranchListScreen({
           </Box>
         )}
 
-        {!loading && !error && branches.length > 0 && filteredBranches.length === 0 && filterMode && (
+        {!loading && !error && branches.length > 0 && filteredBranches.length === 0 && filterQuery && (
           <Box>
             <Text dimColor>No branches match your filter</Text>
           </Box>
