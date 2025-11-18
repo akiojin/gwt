@@ -1,9 +1,10 @@
-import React, { useCallback } from 'react';
+import React, { useCallback, useState, useMemo } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { Header } from '../parts/Header.js';
 import { Stats } from '../parts/Stats.js';
 import { Footer } from '../parts/Footer.js';
 import { Select } from '../common/Select.js';
+import { Input } from '../common/Input.js';
 import { LoadingIndicator } from '../common/LoadingIndicator.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import type { BranchItem, Statistics } from '../../types.js';
@@ -61,6 +62,11 @@ export interface BranchListScreenProps {
   cleanupUI?: CleanupUIState;
   version?: string | null;
   workingDirectory?: string;
+  // Test support: allow external control of filter mode and query
+  testFilterMode?: boolean;
+  testOnFilterModeChange?: (mode: boolean) => void;
+  testFilterQuery?: string;
+  testOnFilterQueryChange?: (query: string) => void;
 }
 
 /**
@@ -81,16 +87,65 @@ export function BranchListScreen({
   cleanupUI,
   version,
   workingDirectory,
+  testFilterMode,
+  testOnFilterModeChange,
+  testFilterQuery,
+  testOnFilterQueryChange,
 }: BranchListScreenProps) {
   const { rows } = useTerminalSize();
 
+  // Filter state - allow test control via props
+  const [internalFilterQuery, setInternalFilterQuery] = useState('');
+  const filterQuery = testFilterQuery !== undefined ? testFilterQuery : internalFilterQuery;
+  const setFilterQuery = useCallback(
+    (query: string) => {
+      setInternalFilterQuery(query);
+      testOnFilterQueryChange?.(query);
+    },
+    [testOnFilterQueryChange]
+  );
+
+  // Focus management: true = filter mode, false = branch selection mode
+  // Allow test control via props
+  const [internalFilterMode, setInternalFilterMode] = useState(false);
+  const filterMode = testFilterMode !== undefined ? testFilterMode : internalFilterMode;
+  const setFilterMode = useCallback(
+    (mode: boolean) => {
+      setInternalFilterMode(mode);
+      testOnFilterModeChange?.(mode);
+    },
+    [testOnFilterModeChange]
+  );
+
   // Handle keyboard input
-  // Note: Select component handles Enter and arrow keys
-  useInput((input) => {
+  // Note: Input component blocks specific keys (c/r/m/f) using blockKeys prop
+  // This prevents shortcuts from triggering while typing in the filter
+  useInput((input, key) => {
     if (cleanupUI?.inputLocked) {
       return;
     }
 
+    // Escape key handling
+    if (key.escape) {
+      if (filterQuery) {
+        // Clear filter query first
+        setFilterQuery('');
+        return;
+      }
+      if (filterMode) {
+        // Exit filter mode if query is empty
+        setFilterMode(false);
+        return;
+      }
+    }
+
+    // Enter filter mode with 'f' key (only in branch selection mode)
+    if (input === 'f' && !filterMode) {
+      setFilterMode(true);
+      return;
+    }
+
+    // Global shortcuts (blocked by Input component when typing in filter mode)
     if (input === 'm' && onNavigate) {
       onNavigate('worktree-manager');
     } else if (input === 'c') {
@@ -100,23 +155,48 @@ export function BranchListScreen({
     }
   });
 
+  // Filter branches based on query
+  const filteredBranches = useMemo(() => {
+    if (!filterQuery.trim()) {
+      return branches;
+    }
+
+    const query = filterQuery.toLowerCase();
+    return branches.filter((branch) => {
+      // Search in branch name
+      if (branch.name.toLowerCase().includes(query)) {
+        return true;
+      }
+
+      // Search in PR title if available (only openPR has title)
+      if (branch.openPR?.title?.toLowerCase().includes(query)) {
+        return true;
+      }
+
+      return false;
+    });
+  }, [branches, filterQuery]);
+
   // Calculate available space for branch list
   // Header: 2 lines (title + divider)
+  // Filter input: 1 line
   // Stats: 1 line
   // Empty line: 1 line
   // Footer: 1 line
-  // Total fixed: 5 lines
+  // Total fixed: 6 lines
   const headerLines = 2;
+  const filterLines = 1;
   const statsLines = 1;
   const emptyLine = 1;
   const footerLines = 1;
-  const fixedLines = headerLines + statsLines + emptyLine + footerLines;
+  const fixedLines = headerLines + filterLines + statsLines + emptyLine + footerLines;
   const contentHeight = rows - fixedLines;
   const limit = Math.max(5, contentHeight); // Minimum 5 items visible
 
   // Footer actions
   const footerActions = [
     { key: 'enter', description: 'Select' },
+    { key: 'f', description: 'Filter' },
     { key: 'r', description: 'Refresh' },
     { key: 'm', description: 'Manage worktrees' },
     { key: 'c', description: 'Cleanup branches' },
@@ -219,7 +299,7 @@ export function BranchListScreen({
       }
 
       const output = isSelected
-        ? `[46m[30m${line}[0m`
+        ? `\u001b[46m\u001b[30m${line}\u001b[0m`
         : line;
       return <Text>{output}</Text>;
     },
@@ -236,8 +316,30 @@ export function BranchListScreen({
         {...(workingDirectory !== undefined && { workingDirectory })}
       />
 
+      {/* Filter Input - Always visible */}
+      <Box>
+        <Text dimColor>Filter: </Text>
+        {filterMode ? (
+          <Input
+            value={filterQuery}
+            onChange={setFilterQuery}
+            onSubmit={() => {}} // No-op: filter is applied in real-time
+            placeholder="Type to search..."
+            blockKeys={['c', 'r', 'm', 'f']} // Block shortcuts while typing
+          />
+        ) : (
+          <Text dimColor>{filterQuery || '(press f to filter)'}</Text>
+        )}
+        {filterQuery && (
+          <Text dimColor>
+            {' '}
+            (Showing {filteredBranches.length} of {branches.length})
+          </Text>
+        )}
+      </Box>
+
       {/* Stats */}
-      <Box marginTop={1}>
+      <Box>
         <Stats stats={stats} lastUpdated={lastUpdated} />
       </Box>
 
@@ -268,9 +370,15 @@ export function BranchListScreen({
           </Box>
         )}
 
-        {!loading && !error && branches.length > 0 && (
+        {!loading && !error && branches.length > 0 && filteredBranches.length === 0 && filterQuery && (
+          <Box>
+            <Text dimColor>No branches match your filter</Text>
+          </Box>
+        )}
+
+        {!loading && !error && branches.length > 0 && filteredBranches.length > 0 && (
           <Select
-            items={branches}
+            items={filteredBranches}
             onSelect={onSelect}
             limit={limit}
             disabled={Boolean(cleanupUI?.inputLocked)}
