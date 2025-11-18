@@ -44,6 +44,20 @@ describe("branchFormatter", () => {
       expect(result.value).toBe("feature/new-ui");
     });
 
+    it("should format a bugfix branch", () => {
+      const branchInfo: BranchInfo = {
+        name: "bugfix/security-issue",
+        type: "local",
+        branchType: "bugfix",
+        isCurrent: false,
+      };
+
+      const result = formatBranchItem(branchInfo);
+
+      expect(result.icons).toContain("🐛"); // bugfix icon
+      expect(result.label).toContain("bugfix/security-issue");
+    });
+
     it("should format a hotfix branch", () => {
       const branchInfo: BranchInfo = {
         name: "hotfix/critical-bug",
