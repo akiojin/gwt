@@ -4,7 +4,7 @@
 
 ## Overview
 
-Claude WorktreeはGit worktreeを活用した対話型ブランチ管理CLIツールです。Claude CodeまたはCodex CLIと統合し、効率的な開発ワークフローを実現します。
+gwtはGit worktreeを活用した対話型ブランチ管理CLIツールです。Claude CodeまたはCodex CLIと統合し、効率的な開発ワークフローを実現します。
 
 ## Architecture Diagram
 

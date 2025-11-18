@@ -280,7 +280,7 @@ describe("Module/Feature", () => {
 - OS:
 - Node.js バージョン（利用している場合）:
 - Bun バージョン:
-- Claude Worktree バージョン:
+- gwt バージョン:
 
 ## 再現手順
 

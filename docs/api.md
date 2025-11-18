@@ -364,8 +364,8 @@ try {
 
 ```bash
 # 対話型ランチャーを起動
-claude-worktree
+gwt
 
 # ヘルプを表示
-claude-worktree --help
+gwt --help
 ```

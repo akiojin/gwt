@@ -140,7 +140,7 @@ Windows環境でbunxを使用して実行する際に以下のエラーが発生
 **症状：**
 
 ```
-Error [ERR_MODULE_NOT_FOUND]: Cannot find module 'E:\claude-worktree\dist\index.js'
+Error [ERR_MODULE_NOT_FOUND]: Cannot find module 'E:\gwt\dist\index.js'
 ```
 
 **原因：**
@@ -154,10 +154,10 @@ Error [ERR_MODULE_NOT_FOUND]: Cannot find module 'E:\claude-worktree\dist\index.
 
    ```bash
    # パッケージを一度アンインストール
-   bun remove -g @akiojin/claude-worktree
+   bun remove -g @akiojin/gwt
 
    # 再インストール（prepareスクリプトが自動実行される）
-   bun add -g @akiojin/claude-worktree
+   bun add -g @akiojin/gwt
    ```
 
 2. **ローカル開発時**
