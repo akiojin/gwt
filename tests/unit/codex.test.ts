@@ -7,17 +7,14 @@ vi.mock("execa", () => ({
   default: { execa: vi.fn() },
 }));
 
-const hoistedMocks = vi.hoisted(() => ({
+const { mockResolveCodexCommand, MockResolutionError } = vi.hoisted(() => ({
   mockResolveCodexCommand: vi.fn().mockResolvedValue({
     command: "bunx",
     args: ["@openai/codex@latest"],
     usesFallback: true,
   }),
+  MockResolutionError: class MockResolutionError extends Error {},
 }));
-
-const mockResolveCodexCommand = hoistedMocks.mockResolveCodexCommand;
-
-class MockResolutionError extends Error {}
 
 vi.mock("../../src/services/aiToolResolver", () => ({
   resolveCodexCommand: mockResolveCodexCommand,
