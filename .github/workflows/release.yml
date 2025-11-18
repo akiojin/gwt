@@ -33,11 +33,6 @@ jobs:
         with:
           bun-version: latest
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: latest
-
       - name: Install dependencies
         run: bun install
 
@@ -65,19 +60,13 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.PERSONAL_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22.14.0
-          cache: 'npm'
-
-      - name: Install dependencies
-        run: npm ci --legacy-peer-deps
-
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
 
       - name: Build project
         run: bun run build
@@ -96,7 +85,7 @@ jobs:
         run: |
           # semantic-releaseを実行して出力を取得（teeで画面とファイル両方に出力）
           set +e
-          npx semantic-release 2>&1 | tee release-output.txt
+          bunx semantic-release 2>&1 | tee release-output.txt
           RELEASE_EXIT_CODE=${PIPESTATUS[0]}
           set -e
 
