@@ -98,7 +98,7 @@ describe("BranchListScreen - Working Directory Integration", () => {
 
       // Find key sections
       const titleLineIndex = lines.findIndex((line) =>
-        line.includes("Claude Worktree")
+        line.includes("gwt")
       );
       const dividerLineIndex = lines.findIndex((line) => line.includes("─"));
       const workingDirLineIndex = lines.findIndex((line) =>
@@ -126,7 +126,7 @@ describe("BranchListScreen - Working Directory Integration", () => {
       const output = lastFrame();
 
       // Should have all main sections
-      expect(output).toContain("Claude Worktree");
+      expect(output).toContain("gwt");
       expect(output).toContain("Working Directory:");
       expect(output).toContain("Local:");
       expect(output).toContain("Remote:");
@@ -221,7 +221,7 @@ describe("BranchListScreen - Working Directory Integration", () => {
       );
       const output = lastFrame();
 
-      expect(output).toContain("Claude Worktree");
+      expect(output).toContain("gwt");
       expect(output).toContain("v1.17.0");
       expect(output).toContain("Working Directory:");
       expect(output).toContain("/full/props/test");

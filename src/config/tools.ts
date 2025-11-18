@@ -1,13 +1,13 @@
 /**
  * カスタムツール設定管理
  *
- * ~/.claude-worktree/tools.jsonから設定を読み込み、
+ * ~/.gwt/tools.jsonから設定を読み込み、
  * ビルトインツールと統合して管理します。
  */
 
 import { homedir } from "node:os";
 import path from "node:path";
-import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
+import { readFile, writeFile, mkdir, rename, access, cp } from "node:fs/promises";
 import type {
   ToolsConfig,
   CustomAITool,
@@ -17,15 +17,52 @@ import { BUILTIN_TOOLS } from "./builtin-tools.js";
 
 /**
  * ツール設定ファイルのパス
+ * 環境変数の優先順位: GWT_HOME > CLAUDE_WORKTREE_HOME (後方互換性) > ホームディレクトリ
  */
 export const WORKTREE_HOME =
-  process.env.CLAUDE_WORKTREE_HOME &&
-  process.env.CLAUDE_WORKTREE_HOME.trim().length > 0
+  (process.env.GWT_HOME && process.env.GWT_HOME.trim().length > 0)
+    ? process.env.GWT_HOME
+    : (process.env.CLAUDE_WORKTREE_HOME && process.env.CLAUDE_WORKTREE_HOME.trim().length > 0)
     ? process.env.CLAUDE_WORKTREE_HOME
     : homedir();
-export const CONFIG_DIR = path.join(WORKTREE_HOME, ".claude-worktree");
+
+const LEGACY_CONFIG_DIR = path.join(homedir(), ".claude-worktree");
+export const CONFIG_DIR = path.join(WORKTREE_HOME, ".gwt");
 export const TOOLS_CONFIG_PATH = path.join(CONFIG_DIR, "tools.json");
 const TEMP_CONFIG_PATH = `${TOOLS_CONFIG_PATH}.tmp`;
+
+/**
+ * レガシー設定ディレクトリから新しいディレクトリへ移行
+ */
+async function migrateLegacyConfig(): Promise<void> {
+  try {
+    // 新しいディレクトリが既に存在する場合は移行不要
+    try {
+      await access(CONFIG_DIR);
+      return;
+    } catch {
+      // 新しいディレクトリが存在しない場合は続行
+    }
+
+    // レガシーディレクトリの存在を確認
+    try {
+      await access(LEGACY_CONFIG_DIR);
+    } catch {
+      // レガシーディレクトリも存在しない場合は移行不要
+      return;
+    }
+
+    // レガシーディレクトリを新しいディレクトリにコピー
+    await mkdir(path.dirname(CONFIG_DIR), { recursive: true });
+    await cp(LEGACY_CONFIG_DIR, CONFIG_DIR, { recursive: true });
+    console.log(`✅ Migrated configuration from ${LEGACY_CONFIG_DIR} to ${CONFIG_DIR}`);
+  } catch (error) {
+    // 移行に失敗しても継続(エラーログのみ)
+    if (process.env.DEBUG) {
+      console.error("Failed to migrate legacy config:", error);
+    }
+  }
+}
 
 const DEFAULT_CONFIG: ToolsConfig = {
   version: "1.0.0",
@@ -36,13 +73,16 @@ const DEFAULT_CONFIG: ToolsConfig = {
 /**
  * ツール設定を読み込む
  *
- * ~/.claude-worktree/tools.jsonから設定を読み込みます。
+ * ~/.gwt/tools.jsonから設定を読み込みます。
  * ファイルが存在しない場合は空配列を返します。
  *
  * @returns ToolsConfig
  * @throws JSON構文エラー時
  */
 export async function loadToolsConfig(): Promise<ToolsConfig> {
+  // 最初の呼び出し時にレガシー設定の移行を試行
+  await migrateLegacyConfig();
+
   try {
     const content = await readFile(TOOLS_CONFIG_PATH, "utf-8");
     const config = JSON.parse(content) as ToolsConfig;

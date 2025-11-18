@@ -1,6 +1,6 @@
 # Web UI 機能
 
-Claude Worktree のWeb UI機能により、ブラウザからGitブランチとWorktreeを管理し、AI Toolセッションを起動できます。
+gwt のWeb UI機能により、ブラウザからGitブランチとWorktreeを管理し、AI Toolセッションを起動できます。
 
 ## 起動方法
 

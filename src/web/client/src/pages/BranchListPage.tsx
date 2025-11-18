@@ -100,7 +100,7 @@ export function BranchListPage() {
     <div className="app-shell">
       <header className="page-hero">
         <p className="page-hero__eyebrow">WORKTREE DASHBOARD</p>
-        <h1>Claude Worktree Control Center</h1>
+        <h1>gwt Control Center</h1>
         <p>
           ローカルのGitブランチとAIツールをブラウザ上で一元管理し、Worktree状態を瞬時に
           可視化します。

@@ -31,9 +31,12 @@ const DEFAULT_CONFIG: AppConfig = {
  */
 export async function loadConfig(): Promise<AppConfig> {
   const configPaths = [
-    path.join(process.cwd(), ".claude-worktree.json"),
-    path.join(homedir(), ".config", "claude-worktree", "config.json"),
-    path.join(homedir(), ".claude-worktree.json"),
+    path.join(process.cwd(), ".gwt.json"),
+    path.join(process.cwd(), ".claude-worktree.json"), // 後方互換性
+    path.join(homedir(), ".config", "gwt", "config.json"),
+    path.join(homedir(), ".config", "claude-worktree", "config.json"), // 後方互換性
+    path.join(homedir(), ".gwt.json"),
+    path.join(homedir(), ".claude-worktree.json"), // 後方互換性
   ];
 
   for (const configPath of configPaths) {
@@ -88,7 +91,7 @@ function getSessionFilePath(repositoryRoot: string): string {
   const sessionDir = path.join(
     homedir(),
     ".config",
-    "claude-worktree",
+    "gwt",
     "sessions",
   );
   const repoName = path.basename(repositoryRoot);
@@ -152,7 +155,7 @@ export async function getAllSessions(): Promise<SessionData[]> {
     const sessionDir = path.join(
       homedir(),
       ".config",
-      "claude-worktree",
+      "gwt",
       "sessions",
     );
     const { readdir } = await import("node:fs/promises");

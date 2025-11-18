@@ -123,7 +123,7 @@ export interface CustomAITool {
 /**
  * ツール設定ファイル全体
  *
- * ~/.claude-worktree/tools.json のスキーマ。
+ * ~/.gwt/tools.json のスキーマ。
  */
 export interface ToolsConfig {
   /**
