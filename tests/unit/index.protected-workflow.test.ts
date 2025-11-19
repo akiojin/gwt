@@ -102,7 +102,10 @@ vi.mock("../../src/claude.js", () => ({
 vi.mock("../../src/codex.js", () => ({
   launchCodexCLI: vi.fn(async () => undefined),
   CodexError: class CodexError extends Error {
-    constructor(message: string, public cause?: unknown) {
+    constructor(
+      message: string,
+      public cause?: unknown,
+    ) {
       super(message);
       this.name = "CodexError";
     }
@@ -360,7 +363,9 @@ describe("handleAIToolWorkflow - dependency installation", () => {
     expect(waitForUserAcknowledgementMock).not.toHaveBeenCalled();
     expect(launchClaudeCodeMock).toHaveBeenCalled();
     expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining("Skipping automatic install because no lockfiles"),
+      expect.stringContaining(
+        "Skipping automatic install because no lockfiles",
+      ),
     );
 
     warnSpy.mockRestore();

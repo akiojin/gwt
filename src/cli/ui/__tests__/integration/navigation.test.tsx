@@ -1,34 +1,44 @@
 /**
  * @vitest-environment happy-dom
  */
-import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from 'vitest';
-import type { Mock } from 'vitest';
-import { render, waitFor } from '@testing-library/react';
-import { act } from 'react-dom/test-utils';
-import React from 'react';
-import { App } from '../../components/App.js';
-import { Window } from 'happy-dom';
-import type { BranchInfo, BranchItem } from '../../types.js';
-import * as BranchListScreenModule from '../../components/screens/BranchListScreen.js';
-import * as BranchActionSelectorScreenModule from '../../screens/BranchActionSelectorScreen.js';
+import {
+  describe,
+  it,
+  expect,
+  beforeEach,
+  afterEach,
+  afterAll,
+  vi,
+} from "vitest";
+import type { Mock } from "vitest";
+import { render, waitFor } from "@testing-library/react";
+import { act } from "react-dom/test-utils";
+import React from "react";
+import { App } from "../../components/App.js";
+import { Window } from "happy-dom";
+import type { BranchInfo, BranchItem } from "../../types.js";
+import * as BranchListScreenModule from "../../components/screens/BranchListScreen.js";
+import * as BranchActionSelectorScreenModule from "../../screens/BranchActionSelectorScreen.js";
 
-vi.mock('../../../../git.ts', () => ({
+vi.mock("../../../../git.ts", () => ({
   __esModule: true,
   getAllBranches: vi.fn(),
-  getRepositoryRoot: vi.fn(async () => '/repo'),
+  getRepositoryRoot: vi.fn(async () => "/repo"),
   deleteBranch: vi.fn(async () => undefined),
 }));
 
-const { mockIsProtectedBranchName, mockSwitchToProtectedBranch } = vi.hoisted(() => ({
-  mockIsProtectedBranchName: vi.fn(() => false),
-  mockSwitchToProtectedBranch: vi.fn(async () => 'none' as const),
-}));
+const { mockIsProtectedBranchName, mockSwitchToProtectedBranch } = vi.hoisted(
+  () => ({
+    mockIsProtectedBranchName: vi.fn(() => false),
+    mockSwitchToProtectedBranch: vi.fn(async () => "none" as const),
+  }),
+);
 
-vi.mock('../../../../worktree.ts', () => ({
+vi.mock("../../../../worktree.ts", () => ({
   __esModule: true,
   listAdditionalWorktrees: vi.fn(),
   createWorktree: vi.fn(async () => undefined),
-  generateWorktreePath: vi.fn(async () => '/repo/.git/worktree/test'),
+  generateWorktreePath: vi.fn(async () => "/repo/.git/worktree/test"),
   getMergedPRWorktrees: vi.fn(async () => []),
   removeWorktree: vi.fn(async () => undefined),
   isProtectedBranchName: mockIsProtectedBranchName,
@@ -37,23 +47,27 @@ vi.mock('../../../../worktree.ts', () => ({
 
 const aiToolScreenProps: unknown[] = [];
 
-vi.mock('../../components/screens/AIToolSelectorScreen.js', () => {
+vi.mock("../../components/screens/AIToolSelectorScreen.js", () => {
   return {
     AIToolSelectorScreen: (props: unknown) => {
       aiToolScreenProps.push(props);
-      return React.createElement('div');
+      return React.createElement("div");
     },
   };
 });
 
-import { getAllBranches, getRepositoryRoot, deleteBranch } from '../../../../git.ts';
+import {
+  getAllBranches,
+  getRepositoryRoot,
+  deleteBranch,
+} from "../../../../git.ts";
 import {
   listAdditionalWorktrees,
   createWorktree,
   generateWorktreePath,
   getMergedPRWorktrees,
   removeWorktree,
-} from '../../../../worktree.ts';
+} from "../../../../worktree.ts";
 
 const mockedGetAllBranches = getAllBranches as Mock;
 const mockedGetRepositoryRoot = getRepositoryRoot as Mock;
@@ -69,7 +83,7 @@ const originalBranchListScreen = BranchListScreenModule.BranchListScreen;
 const originalBranchActionSelectorScreen =
   BranchActionSelectorScreenModule.BranchActionSelectorScreen;
 
-describe('Navigation Integration Tests', () => {
+describe("Navigation Integration Tests", () => {
   beforeEach(() => {
     // Setup happy-dom
     const window = new Window();
@@ -87,27 +101,29 @@ describe('Navigation Integration Tests', () => {
     mockedRemoveWorktree.mockReset();
     mockedIsProtectedBranchName.mockReset();
     mockedSwitchToProtectedBranch.mockReset();
-    mockedGetRepositoryRoot.mockResolvedValue('/repo');
-    mockedSwitchToProtectedBranch.mockResolvedValue('local');
+    mockedGetRepositoryRoot.mockResolvedValue("/repo");
+    mockedSwitchToProtectedBranch.mockResolvedValue("local");
   });
 
   const mockBranches: BranchInfo[] = [
     {
-      name: 'main',
-      type: 'local',
-      branchType: 'main',
+      name: "main",
+      type: "local",
+      branchType: "main",
       isCurrent: true,
     },
     {
-      name: 'feature/test',
-      type: 'local',
-      branchType: 'feature',
+      name: "feature/test",
+      type: "local",
+      branchType: "feature",
       isCurrent: false,
     },
   ];
 
-  it('should start with branch-list screen', async () => {
-    (getAllBranches as ReturnType<typeof vi.fn>).mockResolvedValue(mockBranches);
+  it("should start with branch-list screen", async () => {
+    (getAllBranches as ReturnType<typeof vi.fn>).mockResolvedValue(
+      mockBranches,
+    );
     (listAdditionalWorktrees as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 
     const onExit = vi.fn();
@@ -119,8 +135,10 @@ describe('Navigation Integration Tests', () => {
     });
   });
 
-  it('should support navigation between screens', async () => {
-    (getAllBranches as ReturnType<typeof vi.fn>).mockResolvedValue(mockBranches);
+  it("should support navigation between screens", async () => {
+    (getAllBranches as ReturnType<typeof vi.fn>).mockResolvedValue(
+      mockBranches,
+    );
     (listAdditionalWorktrees as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 
     const onExit = vi.fn();
@@ -134,8 +152,10 @@ describe('Navigation Integration Tests', () => {
     expect(container).toBeDefined();
   });
 
-  it('should maintain state across screen transitions', async () => {
-    (getAllBranches as ReturnType<typeof vi.fn>).mockResolvedValue(mockBranches);
+  it("should maintain state across screen transitions", async () => {
+    (getAllBranches as ReturnType<typeof vi.fn>).mockResolvedValue(
+      mockBranches,
+    );
     (listAdditionalWorktrees as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 
     const onExit = vi.fn();
@@ -149,8 +169,10 @@ describe('Navigation Integration Tests', () => {
     expect(container).toBeDefined();
   });
 
-  it('should handle back navigation correctly', async () => {
-    (getAllBranches as ReturnType<typeof vi.fn>).mockResolvedValue(mockBranches);
+  it("should handle back navigation correctly", async () => {
+    (getAllBranches as ReturnType<typeof vi.fn>).mockResolvedValue(
+      mockBranches,
+    );
     (listAdditionalWorktrees as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 
     const onExit = vi.fn();
@@ -164,8 +186,10 @@ describe('Navigation Integration Tests', () => {
     expect(container).toBeDefined();
   });
 
-  it('should handle navigation history', async () => {
-    (getAllBranches as ReturnType<typeof vi.fn>).mockResolvedValue(mockBranches);
+  it("should handle navigation history", async () => {
+    (getAllBranches as ReturnType<typeof vi.fn>).mockResolvedValue(
+      mockBranches,
+    );
     (listAdditionalWorktrees as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 
     const onExit = vi.fn();
@@ -179,8 +203,10 @@ describe('Navigation Integration Tests', () => {
     expect(container).toBeDefined();
   });
 
-  it('should display correct screen on navigation', async () => {
-    (getAllBranches as ReturnType<typeof vi.fn>).mockResolvedValue(mockBranches);
+  it("should display correct screen on navigation", async () => {
+    (getAllBranches as ReturnType<typeof vi.fn>).mockResolvedValue(
+      mockBranches,
+    );
     (listAdditionalWorktrees as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 
     const onExit = vi.fn();
@@ -194,8 +220,10 @@ describe('Navigation Integration Tests', () => {
     expect(container).toBeDefined();
   });
 
-  it('should call onExit when branch is selected', async () => {
-    (getAllBranches as ReturnType<typeof vi.fn>).mockResolvedValue(mockBranches);
+  it("should call onExit when branch is selected", async () => {
+    (getAllBranches as ReturnType<typeof vi.fn>).mockResolvedValue(
+      mockBranches,
+    );
     (listAdditionalWorktrees as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 
     const onExit = vi.fn();
@@ -210,7 +238,7 @@ describe('Navigation Integration Tests', () => {
   });
 });
 
-describe('Protected Branch Navigation (T103)', () => {
+describe("Protected Branch Navigation (T103)", () => {
   const branchListProps: any[] = [];
   const branchActionProps: any[] = [];
   let branchListSpy: ReturnType<typeof vi.spyOn>;
@@ -218,15 +246,15 @@ describe('Protected Branch Navigation (T103)', () => {
 
   const baseBranches: BranchInfo[] = [
     {
-      name: 'main',
-      type: 'local',
-      branchType: 'main',
+      name: "main",
+      type: "local",
+      branchType: "main",
       isCurrent: true,
     },
     {
-      name: 'feature/test',
-      type: 'local',
-      branchType: 'feature',
+      name: "feature/test",
+      type: "local",
+      branchType: "feature",
       isCurrent: false,
     },
   ];
@@ -245,28 +273,28 @@ describe('Protected Branch Navigation (T103)', () => {
     mockedRemoveWorktree.mockReset();
     mockedIsProtectedBranchName.mockReset();
     mockedSwitchToProtectedBranch.mockReset();
-    mockedGetRepositoryRoot.mockResolvedValue('/repo');
+    mockedGetRepositoryRoot.mockResolvedValue("/repo");
     branchListProps.length = 0;
     branchActionProps.length = 0;
     aiToolScreenProps.length = 0;
     branchListSpy = vi
-      .spyOn(BranchListScreenModule, 'BranchListScreen')
+      .spyOn(BranchListScreenModule, "BranchListScreen")
       .mockImplementation((props: any) => {
         branchListProps.push(props);
         return React.createElement(originalBranchListScreen, props);
       });
     branchActionSpy = vi
-      .spyOn(BranchActionSelectorScreenModule, 'BranchActionSelectorScreen')
+      .spyOn(BranchActionSelectorScreenModule, "BranchActionSelectorScreen")
       .mockImplementation((props: any) => {
         branchActionProps.push(props);
         return React.createElement(originalBranchActionSelectorScreen, props);
       });
 
     mockedIsProtectedBranchName.mockImplementation((name: string) =>
-      ['main', 'develop', 'origin/main', 'origin/develop'].includes(name)
+      ["main", "develop", "origin/main", "origin/develop"].includes(name),
     );
-    mockedSwitchToProtectedBranch.mockResolvedValue('local');
-    mockedGetRepositoryRoot.mockResolvedValue('/repo');
+    mockedSwitchToProtectedBranch.mockResolvedValue("local");
+    mockedGetRepositoryRoot.mockResolvedValue("/repo");
   });
 
   afterEach(() => {
@@ -274,7 +302,7 @@ describe('Protected Branch Navigation (T103)', () => {
     branchActionSpy.mockRestore();
   });
 
-  it('switches local protected branches via root workflow and navigates to AI tool', async () => {
+  it("switches local protected branches via root workflow and navigates to AI tool", async () => {
     mockedGetAllBranches.mockResolvedValue(baseBranches);
     mockedListAdditionalWorktrees.mockResolvedValue([]);
 
@@ -288,15 +316,15 @@ describe('Protected Branch Navigation (T103)', () => {
     await waitFor(() => {
       const latest = branchListProps.at(-1);
       const names = (latest?.branches as BranchItem[] | undefined)?.map(
-        (item) => item.name
+        (item) => item.name,
       );
       expect(names).toBeDefined();
-      expect(names).toContain('main');
+      expect(names).toContain("main");
     });
 
     const latestProps = branchListProps.at(-1);
     const protectedBranch = (latestProps?.branches as BranchItem[]).find(
-      (item) => item.name === 'main'
+      (item) => item.name === "main",
     );
     expect(protectedBranch).toBeDefined();
 
@@ -310,8 +338,8 @@ describe('Protected Branch Navigation (T103)', () => {
     });
 
     const actionProps = branchActionProps.at(-1);
-    expect(actionProps?.mode).toBe('protected');
-    expect(actionProps?.infoMessage).toContain('is a root branch');
+    expect(actionProps?.mode).toBe("protected");
+    expect(actionProps?.infoMessage).toContain("is a root branch");
 
     await act(async () => {
       await actionProps?.onUseExisting();
@@ -319,8 +347,8 @@ describe('Protected Branch Navigation (T103)', () => {
     });
 
     expect(mockedSwitchToProtectedBranch).toHaveBeenCalledWith({
-      branchName: 'main',
-      repoRoot: '/repo',
+      branchName: "main",
+      repoRoot: "/repo",
       remoteRef: null,
     });
 
@@ -329,24 +357,24 @@ describe('Protected Branch Navigation (T103)', () => {
     });
   });
 
-  it('creates tracking branch for remote protected selections before navigating to AI tool', async () => {
+  it("creates tracking branch for remote protected selections before navigating to AI tool", async () => {
     const remoteBranches: BranchInfo[] = [
       {
-        name: 'origin/develop',
-        type: 'remote',
-        branchType: 'develop',
+        name: "origin/develop",
+        type: "remote",
+        branchType: "develop",
         isCurrent: false,
       },
       {
-        name: 'feature/test',
-        type: 'local',
-        branchType: 'feature',
+        name: "feature/test",
+        type: "local",
+        branchType: "feature",
         isCurrent: false,
       },
     ];
     mockedGetAllBranches.mockResolvedValue(remoteBranches);
     mockedListAdditionalWorktrees.mockResolvedValue([]);
-    mockedSwitchToProtectedBranch.mockResolvedValue('remote');
+    mockedSwitchToProtectedBranch.mockResolvedValue("remote");
 
     const onExit = vi.fn();
     render(<App onExit={onExit} />);
@@ -358,15 +386,15 @@ describe('Protected Branch Navigation (T103)', () => {
     await waitFor(() => {
       const latest = branchListProps.at(-1);
       const names = (latest?.branches as BranchItem[] | undefined)?.map(
-        (item) => item.name
+        (item) => item.name,
       );
       expect(names).toBeDefined();
-      expect(names).toContain('origin/develop');
+      expect(names).toContain("origin/develop");
     });
 
     const latestProps = branchListProps.at(-1);
     const protectedBranch = (latestProps?.branches as BranchItem[]).find(
-      (item) => item.name === 'origin/develop'
+      (item) => item.name === "origin/develop",
     );
     expect(protectedBranch).toBeDefined();
 
@@ -380,8 +408,8 @@ describe('Protected Branch Navigation (T103)', () => {
     });
 
     const actionProps = branchActionProps.at(-1);
-    expect(actionProps?.mode).toBe('protected');
-    expect(actionProps?.primaryLabel).toContain('root');
+    expect(actionProps?.mode).toBe("protected");
+    expect(actionProps?.primaryLabel).toContain("root");
 
     await act(async () => {
       await actionProps?.onUseExisting();
@@ -389,9 +417,9 @@ describe('Protected Branch Navigation (T103)', () => {
     });
 
     expect(mockedSwitchToProtectedBranch).toHaveBeenCalledWith({
-      branchName: 'develop',
-      repoRoot: '/repo',
-      remoteRef: 'origin/develop',
+      branchName: "develop",
+      repoRoot: "/repo",
+      remoteRef: "origin/develop",
     });
 
     await waitFor(() => {

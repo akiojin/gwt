@@ -1,19 +1,19 @@
-import React, { useCallback, useState, useMemo } from 'react';
-import { Box, Text, useInput } from 'ink';
-import { Header } from '../parts/Header.js';
-import { Stats } from '../parts/Stats.js';
-import { Footer } from '../parts/Footer.js';
-import { Select } from '../common/Select.js';
-import { Input } from '../common/Input.js';
-import { LoadingIndicator } from '../common/LoadingIndicator.js';
-import { useTerminalSize } from '../../hooks/useTerminalSize.js';
-import type { BranchItem, Statistics } from '../../types.js';
-import stringWidth from 'string-width';
-import chalk from 'chalk';
+import React, { useCallback, useState, useMemo } from "react";
+import { Box, Text, useInput } from "ink";
+import { Header } from "../parts/Header.js";
+import { Stats } from "../parts/Stats.js";
+import { Footer } from "../parts/Footer.js";
+import { Select } from "../common/Select.js";
+import { Input } from "../common/Input.js";
+import { LoadingIndicator } from "../common/LoadingIndicator.js";
+import { useTerminalSize } from "../../hooks/useTerminalSize.js";
+import type { BranchItem, Statistics } from "../../types.js";
+import stringWidth from "string-width";
+import chalk from "chalk";
 
 const WIDTH_OVERRIDES: Record<string, number> = {
-  '⬆': 1,
-  '☁': 1,
+  "⬆": 1,
+  "☁": 1,
 };
 
 const measureDisplayWidth = (value: string): number => {
@@ -29,7 +29,7 @@ const measureDisplayWidth = (value: string): number => {
   return width;
 };
 
-type IndicatorColor = 'cyan' | 'green' | 'yellow' | 'red';
+type IndicatorColor = "cyan" | "green" | "yellow" | "red";
 
 interface CleanupIndicator {
   icon: string;
@@ -95,26 +95,28 @@ export function BranchListScreen({
   const { rows } = useTerminalSize();
 
   // Filter state - allow test control via props
-  const [internalFilterQuery, setInternalFilterQuery] = useState('');
-  const filterQuery = testFilterQuery !== undefined ? testFilterQuery : internalFilterQuery;
+  const [internalFilterQuery, setInternalFilterQuery] = useState("");
+  const filterQuery =
+    testFilterQuery !== undefined ? testFilterQuery : internalFilterQuery;
   const setFilterQuery = useCallback(
     (query: string) => {
       setInternalFilterQuery(query);
       testOnFilterQueryChange?.(query);
     },
-    [testOnFilterQueryChange]
+    [testOnFilterQueryChange],
   );
 
   // Focus management: true = filter mode, false = branch selection mode
   // Allow test control via props
   const [internalFilterMode, setInternalFilterMode] = useState(false);
-  const filterMode = testFilterMode !== undefined ? testFilterMode : internalFilterMode;
+  const filterMode =
+    testFilterMode !== undefined ? testFilterMode : internalFilterMode;
   const setFilterMode = useCallback(
     (mode: boolean) => {
       setInternalFilterMode(mode);
       testOnFilterModeChange?.(mode);
     },
-    [testOnFilterModeChange]
+    [testOnFilterModeChange],
   );
 
   // Handle keyboard input
@@ -129,7 +131,7 @@ export function BranchListScreen({
     if (key.escape) {
       if (filterQuery) {
         // Clear filter query first
-        setFilterQuery('');
+        setFilterQuery("");
         return;
       }
       if (filterMode) {
@@ -140,17 +142,17 @@ export function BranchListScreen({
     }
 
     // Enter filter mode with 'f' key (only in branch selection mode)
-    if (input === 'f' && !filterMode) {
+    if (input === "f" && !filterMode) {
       setFilterMode(true);
       return;
     }
 
     // Global shortcuts (blocked by Input component when typing in filter mode)
-    if (input === 'm' && onNavigate) {
-      onNavigate('worktree-manager');
-    } else if (input === 'c') {
+    if (input === "m" && onNavigate) {
+      onNavigate("worktree-manager");
+    } else if (input === "c") {
       onCleanupCommand?.();
-    } else if (input === 'r' && onRefresh) {
+    } else if (input === "r" && onRefresh) {
       onRefresh();
     }
   });
@@ -189,51 +191,52 @@ export function BranchListScreen({
   const statsLines = 1;
   const emptyLine = 1;
   const footerLines = 1;
-  const fixedLines = headerLines + filterLines + statsLines + emptyLine + footerLines;
+  const fixedLines =
+    headerLines + filterLines + statsLines + emptyLine + footerLines;
   const contentHeight = rows - fixedLines;
   const limit = Math.max(5, contentHeight); // Minimum 5 items visible
 
   // Footer actions
   const footerActions = [
-    { key: 'enter', description: 'Select' },
-    { key: 'f', description: 'Filter' },
-    { key: 'r', description: 'Refresh' },
-    { key: 'm', description: 'Manage worktrees' },
-    { key: 'c', description: 'Cleanup branches' },
+    { key: "enter", description: "Select" },
+    { key: "f", description: "Filter" },
+    { key: "r", description: "Refresh" },
+    { key: "m", description: "Manage worktrees" },
+    { key: "c", description: "Cleanup branches" },
   ];
 
   const formatLatestCommit = useCallback((timestamp?: number) => {
     if (!timestamp || Number.isNaN(timestamp)) {
-      return '---';
+      return "---";
     }
 
     const date = new Date(timestamp * 1000);
     const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, '0');
-    const day = String(date.getDate()).padStart(2, '0');
-    const hours = String(date.getHours()).padStart(2, '0');
-    const minutes = String(date.getMinutes()).padStart(2, '0');
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+    const hours = String(date.getHours()).padStart(2, "0");
+    const minutes = String(date.getMinutes()).padStart(2, "0");
 
     return `${year}-${month}-${day} ${hours}:${minutes}`;
   }, []);
 
   const truncateToWidth = useCallback((value: string, maxWidth: number) => {
     if (maxWidth <= 0) {
-      return '';
+      return "";
     }
 
     if (stringWidth(value) <= maxWidth) {
       return value;
     }
 
-    const ellipsis = '…';
+    const ellipsis = "…";
     const ellipsisWidth = stringWidth(ellipsis);
     if (ellipsisWidth >= maxWidth) {
       return ellipsis;
     }
 
     let currentWidth = 0;
-    let result = '';
+    let result = "";
 
     for (const char of value) {
       const charWidth = stringWidth(char);
@@ -250,60 +253,67 @@ export function BranchListScreen({
   const renderBranchRow = useCallback(
     (item: BranchItem, isSelected: boolean, context: { columns: number }) => {
       const columns = Math.max(20, context.columns);
-      const arrow = isSelected ? '>' : ' ';
+      const arrow = isSelected ? ">" : " ";
       const timestampText = formatLatestCommit(item.latestCommitTimestamp);
       const timestampWidth = stringWidth(timestampText);
 
       const indicatorInfo = cleanupUI?.indicators?.[item.name];
-      let indicatorIcon = indicatorInfo?.icon ?? '';
+      let indicatorIcon = indicatorInfo?.icon ?? "";
       if (indicatorIcon && indicatorInfo?.color && !isSelected) {
         switch (indicatorInfo.color) {
-          case 'cyan':
+          case "cyan":
             indicatorIcon = chalk.cyan(indicatorIcon);
             break;
-          case 'green':
+          case "green":
             indicatorIcon = chalk.green(indicatorIcon);
             break;
-          case 'yellow':
+          case "yellow":
             indicatorIcon = chalk.yellow(indicatorIcon);
             break;
-          case 'red':
+          case "red":
             indicatorIcon = chalk.red(indicatorIcon);
             break;
           default:
             break;
         }
       }
-      const indicatorPrefix = indicatorIcon ? `${indicatorIcon} ` : '';
+      const indicatorPrefix = indicatorIcon ? `${indicatorIcon} ` : "";
       const staticPrefix = `${arrow} ${indicatorPrefix}`;
       const staticPrefixWidth = stringWidth(staticPrefix);
 
-      const availableLeftWidth = Math.max(staticPrefixWidth, columns - timestampWidth - 1);
+      const availableLeftWidth = Math.max(
+        staticPrefixWidth,
+        columns - timestampWidth - 1,
+      );
       const maxLabelWidth = Math.max(0, availableLeftWidth - staticPrefixWidth);
       const truncatedLabel = truncateToWidth(item.label, maxLabelWidth);
       const leftText = `${staticPrefix}${truncatedLabel}`;
 
       const leftMeasuredWidth = stringWidth(leftText);
       const leftDisplayWidth = measureDisplayWidth(leftText);
-      const baseGapWidth = Math.max(1, columns - leftMeasuredWidth - timestampWidth);
-      const displayGapWidth = Math.max(1, columns - leftDisplayWidth - timestampWidth);
+      const baseGapWidth = Math.max(
+        1,
+        columns - leftMeasuredWidth - timestampWidth,
+      );
+      const displayGapWidth = Math.max(
+        1,
+        columns - leftDisplayWidth - timestampWidth,
+      );
       const cursorShift = Math.max(0, displayGapWidth - baseGapWidth);
 
-      const gap = ' '.repeat(baseGapWidth);
-      const cursorAdjust = cursorShift > 0 ? `\u001b[${cursorShift}C` : '';
+      const gap = " ".repeat(baseGapWidth);
+      const cursorAdjust = cursorShift > 0 ? `\u001b[${cursorShift}C` : "";
 
       let line = `${leftText}${gap}${cursorAdjust}${timestampText}`;
       const paddingWidth = Math.max(0, columns - stringWidth(line));
       if (paddingWidth > 0) {
-        line += ' '.repeat(paddingWidth);
+        line += " ".repeat(paddingWidth);
       }
 
-      const output = isSelected
-        ? `\u001b[46m\u001b[30m${line}\u001b[0m`
-        : line;
+      const output = isSelected ? `\u001b[46m\u001b[30m${line}\u001b[0m` : line;
       return <Text>{output}</Text>;
     },
-    [cleanupUI, formatLatestCommit, truncateToWidth]
+    [cleanupUI, formatLatestCommit, truncateToWidth],
   );
 
   return (
@@ -325,14 +335,14 @@ export function BranchListScreen({
             onChange={setFilterQuery}
             onSubmit={() => {}} // No-op: filter is applied in real-time
             placeholder="Type to search..."
-            blockKeys={['c', 'r', 'm', 'f']} // Block shortcuts while typing
+            blockKeys={["c", "r", "m", "f"]} // Block shortcuts while typing
           />
         ) : (
-          <Text dimColor>{filterQuery || '(press f to filter)'}</Text>
+          <Text dimColor>{filterQuery || "(press f to filter)"}</Text>
         )}
         {filterQuery && (
           <Text dimColor>
-            {' '}
+            {" "}
             (Showing {filteredBranches.length} of {branches.length})
           </Text>
         )}
@@ -370,22 +380,29 @@ export function BranchListScreen({
           </Box>
         )}
 
-        {!loading && !error && branches.length > 0 && filteredBranches.length === 0 && filterQuery && (
-          <Box>
-            <Text dimColor>No branches match your filter</Text>
-          </Box>
-        )}
+        {!loading &&
+          !error &&
+          branches.length > 0 &&
+          filteredBranches.length === 0 &&
+          filterQuery && (
+            <Box>
+              <Text dimColor>No branches match your filter</Text>
+            </Box>
+          )}
 
-        {!loading && !error && branches.length > 0 && filteredBranches.length > 0 && (
-          <Select
-            items={filteredBranches}
-            onSelect={onSelect}
-            limit={limit}
-            disabled={Boolean(cleanupUI?.inputLocked)}
-            renderIndicator={() => null}
-            renderItem={renderBranchRow}
-          />
-        )}
+        {!loading &&
+          !error &&
+          branches.length > 0 &&
+          filteredBranches.length > 0 && (
+            <Select
+              items={filteredBranches}
+              onSelect={onSelect}
+              limit={limit}
+              disabled={Boolean(cleanupUI?.inputLocked)}
+              renderIndicator={() => null}
+              renderItem={renderBranchRow}
+            />
+          )}
       </Box>
 
       {cleanupUI?.footerMessage && (

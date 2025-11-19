@@ -1,16 +1,16 @@
-import React, { useState, useCallback, useEffect, useRef } from 'react';
-import { Box, Text, useInput } from 'ink';
-import { Header } from '../parts/Header.js';
-import { Footer } from '../parts/Footer.js';
-import { Select } from '../common/Select.js';
-import { Input } from '../common/Input.js';
-import { useTerminalSize } from '../../hooks/useTerminalSize.js';
-import { BRANCH_PREFIXES } from '../../../../config/constants.js';
+import React, { useState, useCallback, useEffect, useRef } from "react";
+import { Box, Text, useInput } from "ink";
+import { Header } from "../parts/Header.js";
+import { Footer } from "../parts/Footer.js";
+import { Select } from "../common/Select.js";
+import { Input } from "../common/Input.js";
+import { useTerminalSize } from "../../hooks/useTerminalSize.js";
+import { BRANCH_PREFIXES } from "../../../../config/constants.js";
 
-type BranchType = 'feature' | 'bugfix' | 'hotfix' | 'release';
-type Step = 'type-selection' | 'name-input';
+type BranchType = "feature" | "bugfix" | "hotfix" | "release";
+type Step = "type-selection" | "name-input";
 
-const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'];
+const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
 
 export interface BranchCreatorScreenProps {
   onBack: () => void;
@@ -39,11 +39,13 @@ export function BranchCreatorScreen({
   disableAnimation = false,
 }: BranchCreatorScreenProps) {
   const { rows } = useTerminalSize();
-  const [step, setStep] = useState<Step>('type-selection');
-  const [selectedType, setSelectedType] = useState<BranchType>('feature');
-  const [branchName, setBranchName] = useState('');
+  const [step, setStep] = useState<Step>("type-selection");
+  const [selectedType, setSelectedType] = useState<BranchType>("feature");
+  const [branchName, setBranchName] = useState("");
   const [isCreating, setIsCreating] = useState(false);
-  const [pendingBranchName, setPendingBranchName] = useState<string | null>(null);
+  const [pendingBranchName, setPendingBranchName] = useState<string | null>(
+    null,
+  );
   const spinnerIndexRef = useRef(0);
   const [spinnerIndex, setSpinnerIndex] = useState(0);
 
@@ -63,40 +65,43 @@ export function BranchCreatorScreen({
   // Branch type options
   const branchTypeItems: BranchTypeItem[] = [
     {
-      label: 'feature',
-      value: 'feature',
-      description: 'New feature development',
+      label: "feature",
+      value: "feature",
+      description: "New feature development",
     },
     {
-      label: 'bugfix',
-      value: 'bugfix',
-      description: 'Bug fix',
+      label: "bugfix",
+      value: "bugfix",
+      description: "Bug fix",
     },
     {
-      label: 'hotfix',
-      value: 'hotfix',
-      description: 'Critical bug fix',
+      label: "hotfix",
+      value: "hotfix",
+      description: "Critical bug fix",
     },
     {
-      label: 'release',
-      value: 'release',
-      description: 'Release preparation',
+      label: "release",
+      value: "release",
+      description: "Release preparation",
     },
   ];
 
   // Handle branch type selection
   const handleTypeSelect = useCallback((item: BranchTypeItem) => {
     setSelectedType(item.value);
-    setStep('name-input');
+    setStep("name-input");
   }, []);
 
   // Handle branch name input
-  const handleNameChange = useCallback((value: string) => {
-    if (isCreating) {
-      return;
-    }
-    setBranchName(value);
-  }, [isCreating]);
+  const handleNameChange = useCallback(
+    (value: string) => {
+      if (isCreating) {
+        return;
+      }
+      setBranchName(value);
+    },
+    [isCreating],
+  );
 
   // Handle branch creation
   const handleCreate = useCallback(async () => {
@@ -109,7 +114,10 @@ export function BranchCreatorScreen({
       return;
     }
 
-    const prefix = BRANCH_PREFIXES[selectedType.toUpperCase() as keyof typeof BRANCH_PREFIXES];
+    const prefix =
+      BRANCH_PREFIXES[
+        selectedType.toUpperCase() as keyof typeof BRANCH_PREFIXES
+      ];
     const fullBranchName = `${prefix}${trimmedName}`;
 
     setIsCreating(true);
@@ -125,18 +133,17 @@ export function BranchCreatorScreen({
   }, [branchName, selectedType, onCreate, isCreating]);
 
   // Footer actions
-  const footerActions =
-    isCreating
-      ? []
-      : step === 'type-selection'
-        ? [
-            { key: 'enter', description: 'Select' },
-            { key: 'esc', description: 'Back' },
-          ]
-        : [
-            { key: 'enter', description: 'Create' },
-            { key: 'esc', description: 'Back' },
-          ];
+  const footerActions = isCreating
+    ? []
+    : step === "type-selection"
+      ? [
+          { key: "enter", description: "Select" },
+          { key: "esc", description: "Back" },
+        ]
+      : [
+          { key: "enter", description: "Create" },
+          { key: "esc", description: "Back" },
+        ];
 
   useEffect(() => {
     if (!isCreating || disableAnimation) {
@@ -146,7 +153,8 @@ export function BranchCreatorScreen({
     }
 
     const interval = setInterval(() => {
-      spinnerIndexRef.current = (spinnerIndexRef.current + 1) % SPINNER_FRAMES.length;
+      spinnerIndexRef.current =
+        (spinnerIndexRef.current + 1) % SPINNER_FRAMES.length;
       setSpinnerIndex(spinnerIndexRef.current);
     }, 120);
 
@@ -167,7 +175,10 @@ export function BranchCreatorScreen({
         {baseBranch && (
           <Box marginBottom={1}>
             <Text>
-              Base branch: <Text bold color="cyan">{baseBranch}</Text>
+              Base branch:{" "}
+              <Text bold color="cyan">
+                {baseBranch}
+              </Text>
             </Text>
           </Box>
         )}
@@ -175,9 +186,9 @@ export function BranchCreatorScreen({
           <Box flexDirection="column">
             <Box marginBottom={1}>
               <Text>
-                {spinnerFrame}{' '}
+                {spinnerFrame}{" "}
                 <Text color="cyan">
-                  Creating branch{' '}
+                  Creating branch{" "}
                   <Text bold>
                     {pendingBranchName ??
                       `${BRANCH_PREFIXES[selectedType.toUpperCase() as keyof typeof BRANCH_PREFIXES]}${branchName.trim()}`}
@@ -185,9 +196,11 @@ export function BranchCreatorScreen({
                 </Text>
               </Text>
             </Box>
-            <Text color="gray">Please wait while the branch is being created...</Text>
+            <Text color="gray">
+              Please wait while the branch is being created...
+            </Text>
           </Box>
-        ) : step === 'type-selection' ? (
+        ) : step === "type-selection" ? (
           <Box flexDirection="column">
             <Box marginBottom={1}>
               <Text>Select branch type:</Text>
@@ -198,7 +211,14 @@ export function BranchCreatorScreen({
           <Box flexDirection="column">
             <Box marginBottom={1}>
               <Text>
-                Branch name prefix: <Text bold>{BRANCH_PREFIXES[selectedType.toUpperCase() as keyof typeof BRANCH_PREFIXES]}</Text>
+                Branch name prefix:{" "}
+                <Text bold>
+                  {
+                    BRANCH_PREFIXES[
+                      selectedType.toUpperCase() as keyof typeof BRANCH_PREFIXES
+                    ]
+                  }
+                </Text>
               </Text>
             </Box>
             <Input

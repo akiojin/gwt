@@ -1,19 +1,27 @@
 /**
  * @vitest-environment happy-dom
  */
-import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from 'vitest';
-import { act, render } from '@testing-library/react';
-import React from 'react';
-import { App } from '../../components/App.js';
-import { Window } from 'happy-dom';
-import type { BranchInfo } from '../../types.js';
-import * as useGitDataModule from '../../hooks/useGitData.js';
+import {
+  describe,
+  it,
+  expect,
+  beforeEach,
+  afterEach,
+  afterAll,
+  vi,
+} from "vitest";
+import { act, render } from "@testing-library/react";
+import React from "react";
+import { App } from "../../components/App.js";
+import { Window } from "happy-dom";
+import type { BranchInfo } from "../../types.js";
+import * as useGitDataModule from "../../hooks/useGitData.js";
 
 const mockRefresh = vi.fn();
 const originalUseGitData = useGitDataModule.useGitData;
-const useGitDataSpy = vi.spyOn(useGitDataModule, 'useGitData');
+const useGitDataSpy = vi.spyOn(useGitDataModule, "useGitData");
 
-describe('App', () => {
+describe("App", () => {
   beforeEach(() => {
     // Setup happy-dom
     const window = new Window();
@@ -27,20 +35,20 @@ describe('App', () => {
 
   const mockBranches: BranchInfo[] = [
     {
-      name: 'main',
-      type: 'local',
-      branchType: 'main',
+      name: "main",
+      type: "local",
+      branchType: "main",
       isCurrent: true,
     },
     {
-      name: 'feature/test',
-      type: 'local',
-      branchType: 'feature',
+      name: "feature/test",
+      type: "local",
+      branchType: "feature",
       isCurrent: false,
     },
   ];
 
-  it('should render BranchListScreen when data is loaded', () => {
+  it("should render BranchListScreen when data is loaded", () => {
     useGitDataSpy.mockReturnValue({
       branches: mockBranches,
       loading: false,
@@ -58,7 +66,7 @@ describe('App', () => {
     expect(getByText(/feature\/test/)).toBeDefined();
   });
 
-  it('should show loading state initially', async () => {
+  it("should show loading state initially", async () => {
     useGitDataSpy.mockReturnValue({
       branches: [],
       loading: true,
@@ -69,7 +77,7 @@ describe('App', () => {
 
     const onExit = vi.fn();
     const { queryByText, getByText } = render(
-      <App onExit={onExit} loadingIndicatorDelay={10} />
+      <App onExit={onExit} loadingIndicatorDelay={10} />,
     );
 
     expect(queryByText(/Loading Git information/i)).toBeNull();
@@ -81,8 +89,8 @@ describe('App', () => {
     expect(getByText(/Loading Git information/i)).toBeDefined();
   });
 
-  it('should show error state when Git data fails to load', () => {
-    const error = new Error('Failed to fetch branches');
+  it("should show error state when Git data fails to load", () => {
+    const error = new Error("Failed to fetch branches");
     useGitDataSpy.mockReturnValue({
       branches: [],
       loading: false,
@@ -98,29 +106,29 @@ describe('App', () => {
     expect(getByText(/Failed to fetch branches/i)).toBeDefined();
   });
 
-  it('should calculate statistics from branches', () => {
+  it("should calculate statistics from branches", () => {
     const branchesWithWorktree: BranchInfo[] = [
       {
-        name: 'main',
-        type: 'local',
-        branchType: 'main',
+        name: "main",
+        type: "local",
+        branchType: "main",
         isCurrent: true,
       },
       {
-        name: 'feature/a',
-        type: 'local',
-        branchType: 'feature',
+        name: "feature/a",
+        type: "local",
+        branchType: "feature",
         isCurrent: false,
         worktree: {
-          path: '/path/a',
+          path: "/path/a",
           locked: false,
           prunable: false,
         },
       },
       {
-        name: 'origin/main',
-        type: 'remote',
-        branchType: 'main',
+        name: "origin/main",
+        type: "remote",
+        branchType: "main",
         isCurrent: false,
       },
     ];
@@ -144,7 +152,7 @@ describe('App', () => {
     expect(getByText(/Worktrees:/)).toBeDefined();
   });
 
-  it('should call onExit when branch is selected', () => {
+  it("should call onExit when branch is selected", () => {
     useGitDataSpy.mockReturnValue({
       branches: mockBranches,
       loading: false,
@@ -161,7 +169,7 @@ describe('App', () => {
     // which is covered in integration tests
   });
 
-  it('should handle empty branch list', () => {
+  it("should handle empty branch list", () => {
     useGitDataSpy.mockReturnValue({
       branches: [],
       loading: false,
@@ -176,7 +184,7 @@ describe('App', () => {
     expect(getByText(/No branches found/i)).toBeDefined();
   });
 
-  it('should wrap with ErrorBoundary', () => {
+  it("should wrap with ErrorBoundary", () => {
     // This test verifies ErrorBoundary is present
     // Actual error catching is tested separately
     useGitDataSpy.mockReturnValue({
@@ -193,7 +201,7 @@ describe('App', () => {
     expect(container).toBeDefined();
   });
 
-  it('should format branch items with icons', () => {
+  it("should format branch items with icons", () => {
     useGitDataSpy.mockReturnValue({
       branches: mockBranches,
       loading: false,
@@ -209,8 +217,8 @@ describe('App', () => {
     expect(getByText(/⚡/)).toBeDefined();
   });
 
-  describe('BranchActionSelectorScreen integration', () => {
-    it('should show BranchActionSelectorScreen after branch selection', () => {
+  describe("BranchActionSelectorScreen integration", () => {
+    it("should show BranchActionSelectorScreen after branch selection", () => {
       useGitDataSpy.mockReturnValue({
         branches: mockBranches,
         loading: false,

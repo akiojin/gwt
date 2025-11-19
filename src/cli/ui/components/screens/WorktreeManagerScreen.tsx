@@ -1,9 +1,9 @@
-import React from 'react';
-import { Box, Text, useInput } from 'ink';
-import { Header } from '../parts/Header.js';
-import { Footer } from '../parts/Footer.js';
-import { Select } from '../common/Select.js';
-import { useTerminalSize } from '../../hooks/useTerminalSize.js';
+import React from "react";
+import { Box, Text, useInput } from "ink";
+import { Header } from "../parts/Header.js";
+import { Footer } from "../parts/Footer.js";
+import { Select } from "../common/Select.js";
+import { useTerminalSize } from "../../hooks/useTerminalSize.js";
 
 export interface WorktreeItem {
   branch: string;
@@ -64,8 +64,8 @@ export function WorktreeManagerScreen({
 
   // Footer actions
   const footerActions = [
-    { key: 'enter', description: 'Select' },
-    { key: 'esc', description: 'Back' },
+    { key: "enter", description: "Select" },
+    { key: "esc", description: "Back" },
   ];
 
   return (

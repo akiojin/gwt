@@ -7,7 +7,14 @@
 
 import { homedir } from "node:os";
 import path from "node:path";
-import { readFile, writeFile, mkdir, rename, access, cp } from "node:fs/promises";
+import {
+  readFile,
+  writeFile,
+  mkdir,
+  rename,
+  access,
+  cp,
+} from "node:fs/promises";
 import type {
   ToolsConfig,
   CustomAITool,
@@ -20,11 +27,12 @@ import { BUILTIN_TOOLS } from "./builtin-tools.js";
  * 環境変数の優先順位: GWT_HOME > CLAUDE_WORKTREE_HOME (後方互換性) > ホームディレクトリ
  */
 export const WORKTREE_HOME =
-  (process.env.GWT_HOME && process.env.GWT_HOME.trim().length > 0)
+  process.env.GWT_HOME && process.env.GWT_HOME.trim().length > 0
     ? process.env.GWT_HOME
-    : (process.env.CLAUDE_WORKTREE_HOME && process.env.CLAUDE_WORKTREE_HOME.trim().length > 0)
-    ? process.env.CLAUDE_WORKTREE_HOME
-    : homedir();
+    : process.env.CLAUDE_WORKTREE_HOME &&
+        process.env.CLAUDE_WORKTREE_HOME.trim().length > 0
+      ? process.env.CLAUDE_WORKTREE_HOME
+      : homedir();
 
 const LEGACY_CONFIG_DIR = path.join(homedir(), ".claude-worktree");
 export const CONFIG_DIR = path.join(WORKTREE_HOME, ".gwt");
@@ -55,7 +63,9 @@ async function migrateLegacyConfig(): Promise<void> {
     // レガシーディレクトリを新しいディレクトリにコピー
     await mkdir(path.dirname(CONFIG_DIR), { recursive: true });
     await cp(LEGACY_CONFIG_DIR, CONFIG_DIR, { recursive: true });
-    console.log(`✅ Migrated configuration from ${LEGACY_CONFIG_DIR} to ${CONFIG_DIR}`);
+    console.log(
+      `✅ Migrated configuration from ${LEGACY_CONFIG_DIR} to ${CONFIG_DIR}`,
+    );
   } catch (error) {
     // 移行に失敗しても継続(エラーログのみ)
     if (process.env.DEBUG) {

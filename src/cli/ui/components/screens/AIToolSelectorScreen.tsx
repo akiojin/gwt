@@ -1,11 +1,11 @@
-import React, { useState, useEffect } from 'react';
-import { Box, Text, useInput } from 'ink';
-import { Header } from '../parts/Header.js';
-import { Footer } from '../parts/Footer.js';
-import { Select } from '../common/Select.js';
-import { useTerminalSize } from '../../hooks/useTerminalSize.js';
-import { getAllTools } from '../../../../config/tools.js';
-import type { AIToolConfig } from '../../../../types/tools.js';
+import React, { useState, useEffect } from "react";
+import { Box, Text, useInput } from "ink";
+import { Header } from "../parts/Header.js";
+import { Footer } from "../parts/Footer.js";
+import { Select } from "../common/Select.js";
+import { useTerminalSize } from "../../hooks/useTerminalSize.js";
+import { getAllTools } from "../../../../config/tools.js";
+import type { AIToolConfig } from "../../../../types/tools.js";
 
 export type AITool = string;
 
@@ -27,7 +27,11 @@ export interface AIToolSelectorScreenProps {
  *
  * This screen dynamically loads available tools from the configuration (builtin + custom).
  */
-export function AIToolSelectorScreen({ onBack, onSelect, version }: AIToolSelectorScreenProps) {
+export function AIToolSelectorScreen({
+  onBack,
+  onSelect,
+  version,
+}: AIToolSelectorScreenProps) {
   const { rows } = useTerminalSize();
   const [toolItems, setToolItems] = useState<AIToolItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -60,7 +64,7 @@ export function AIToolSelectorScreen({ onBack, onSelect, version }: AIToolSelect
         setToolItems(items);
       } catch (error) {
         // If loading fails, show error in console but don't crash
-        console.error('Failed to load tools:', error);
+        console.error("Failed to load tools:", error);
         // Fall back to empty array
         setToolItems([]);
       } finally {
@@ -86,8 +90,8 @@ export function AIToolSelectorScreen({ onBack, onSelect, version }: AIToolSelect
 
   // Footer actions
   const footerActions = [
-    { key: 'enter', description: 'Select' },
-    { key: 'esc', description: 'Back' },
+    { key: "enter", description: "Select" },
+    { key: "esc", description: "Back" },
   ];
 
   return (
@@ -103,7 +107,9 @@ export function AIToolSelectorScreen({ onBack, onSelect, version }: AIToolSelect
         {isLoading ? (
           <Text>Loading tools...</Text>
         ) : toolItems.length === 0 ? (
-          <Text color="yellow">No tools available. Please check your configuration.</Text>
+          <Text color="yellow">
+            No tools available. Please check your configuration.
+          </Text>
         ) : (
           <Select items={toolItems} onSelect={handleSelect} />
         )}

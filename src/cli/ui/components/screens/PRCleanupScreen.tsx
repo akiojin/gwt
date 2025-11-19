@@ -1,10 +1,10 @@
-import React from 'react';
-import { Box, Text, useInput } from 'ink';
-import { Header } from '../parts/Header.js';
-import { Footer } from '../parts/Footer.js';
-import { Select } from '../common/Select.js';
-import { useTerminalSize } from '../../hooks/useTerminalSize.js';
-import type { CleanupTarget } from '../../types.js';
+import React from "react";
+import { Box, Text, useInput } from "ink";
+import { Header } from "../parts/Header.js";
+import { Footer } from "../parts/Footer.js";
+import { Select } from "../common/Select.js";
+import { useTerminalSize } from "../../hooks/useTerminalSize.js";
+import type { CleanupTarget } from "../../types.js";
 
 export interface PRItem {
   label: string;
@@ -44,7 +44,7 @@ export function PRCleanupScreen({
   useInput((input, key) => {
     if (key.escape) {
       onBack();
-    } else if (input === 'r') {
+    } else if (input === "r") {
       onRefresh();
     }
   });
@@ -53,28 +53,28 @@ export function PRCleanupScreen({
   const prItems: PRItem[] = targets.map((target) => {
     const pr = target.pullRequest;
     const flags: string[] = [];
-    if (target.cleanupType === 'worktree-and-branch') {
-      flags.push('worktree');
+    if (target.cleanupType === "worktree-and-branch") {
+      flags.push("worktree");
     } else {
-      flags.push('branch');
+      flags.push("branch");
     }
-    if (target.reasons?.includes('merged-pr')) {
-      flags.push('merged');
+    if (target.reasons?.includes("merged-pr")) {
+      flags.push("merged");
     }
-    if (target.reasons?.includes('no-diff-with-base')) {
-      flags.push('base');
+    if (target.reasons?.includes("no-diff-with-base")) {
+      flags.push("base");
     }
     if (target.hasUncommittedChanges) {
-      flags.push('changes');
+      flags.push("changes");
     }
     if (target.hasUnpushedCommits) {
-      flags.push('unpushed');
+      flags.push("unpushed");
     }
     if (target.isAccessible === false) {
-      flags.push('inaccessible');
+      flags.push("inaccessible");
     }
 
-    const flagText = flags.length > 0 ? ` [${flags.join(', ')}]` : '';
+    const flagText = flags.length > 0 ? ` [${flags.join(", ")}]` : "";
 
     const label = pr
       ? `${target.branch} - #${pr.number} ${pr.title}${flagText}`
@@ -98,9 +98,9 @@ export function PRCleanupScreen({
 
   // Footer actions
   const footerActions = [
-    { key: 'enter', description: 'Cleanup' },
-    { key: 'r', description: 'Refresh' },
-    { key: 'esc', description: 'Back' },
+    { key: "enter", description: "Cleanup" },
+    { key: "r", description: "Refresh" },
+    { key: "esc", description: "Back" },
   ];
 
   return (
