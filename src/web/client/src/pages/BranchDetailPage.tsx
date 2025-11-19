@@ -69,7 +69,10 @@ const MERGE_STATUS_LABEL: Record<Branch["mergeStatus"], string> = {
   unknown: "状態不明",
 };
 
-const MERGE_STATUS_TONE: Record<Branch["mergeStatus"], "success" | "warning" | "muted"> = {
+const MERGE_STATUS_TONE: Record<
+  Branch["mergeStatus"],
+  "success" | "warning" | "muted"
+> = {
   merged: "success",
   unmerged: "warning",
   unknown: "muted",
@@ -99,7 +102,9 @@ export function BranchDetailPage() {
   const [selectedMode, setSelectedMode] = useState<ToolMode>("normal");
   const [skipPermissions, setSkipPermissions] = useState(false);
   const [extraArgsText, setExtraArgsText] = useState("");
-  const [terminatingSessionId, setTerminatingSessionId] = useState<string | null>(null);
+  const [terminatingSessionId, setTerminatingSessionId] = useState<
+    string | null
+  >(null);
 
   const formattedCommitDate = useMemo(
     () => formatDate(branch?.commitDate),
@@ -177,12 +182,14 @@ export function BranchDetailPage() {
     () => [
       { id: "claude-code", label: "Claude Code", target: "claude" },
       { id: "codex-cli", label: "Codex CLI", target: "codex" },
-      ...customTools.map((tool): SelectableTool => ({
-        id: tool.id,
-        label: tool.displayName,
-        target: "custom" as const,
-        definition: tool,
-      })),
+      ...customTools.map(
+        (tool): SelectableTool => ({
+          id: tool.id,
+          label: tool.displayName,
+          target: "custom" as const,
+          definition: tool,
+        }),
+      ),
     ],
     [customTools],
   );
@@ -200,7 +207,9 @@ export function BranchDetailPage() {
     }
   }, [availableTools, selectedToolId]);
 
-  const selectedTool = availableTools.find((tool) => tool.id === selectedToolId);
+  const selectedTool = availableTools.find(
+    (tool) => tool.id === selectedToolId,
+  );
 
   const selectedToolSummary: ToolSummary | null = useMemo(() => {
     if (!selectedTool) {
@@ -267,14 +276,18 @@ export function BranchDetailPage() {
     }
 
     if (!selectedTool) {
-      setBanner({ type: "error", message: "起動するAIツールを選択してください" });
+      setBanner({
+        type: "error",
+        message: "起動するAIツールを選択してください",
+      });
       return;
     }
 
     if (needsRemoteSync) {
       setBanner({
         type: "error",
-        message: "リモートの更新を取り込むまでAIツールは起動できません。『最新の変更を同期』を実行してください。",
+        message:
+          "リモートの更新を取り込むまでAIツールは起動できません。『最新の変更を同期』を実行してください。",
       });
       return;
     }
@@ -288,7 +301,12 @@ export function BranchDetailPage() {
       return;
     }
 
-    if (skipPermissions && !window.confirm("権限チェックをスキップして起動します。自己責任で実行してください。続行しますか？")) {
+    if (
+      skipPermissions &&
+      !window.confirm(
+        "権限チェックをスキップして起動します。自己責任で実行してください。続行しますか？",
+      )
+    ) {
       return;
     }
 
@@ -342,7 +360,10 @@ export function BranchDetailPage() {
         setActiveSessionId(null);
       }
     } catch (err) {
-      setBanner({ type: "error", message: formatError(err, "セッションの終了に失敗しました") });
+      setBanner({
+        type: "error",
+        message: formatError(err, "セッションの終了に失敗しました"),
+      });
     } finally {
       setTerminatingSessionId(null);
     }
@@ -350,23 +371,36 @@ export function BranchDetailPage() {
 
   const handleSyncBranch = async () => {
     if (!branch.worktreePath) {
-      setBanner({ type: "error", message: "Worktreeが存在しないため同期できません。" });
+      setBanner({
+        type: "error",
+        message: "Worktreeが存在しないため同期できません。",
+      });
       return;
     }
 
     try {
-      const result = await syncBranch.mutateAsync({ worktreePath: branch.worktreePath });
+      const result = await syncBranch.mutateAsync({
+        worktreePath: branch.worktreePath,
+      });
       if (result.pullStatus === "success") {
-        setBanner({ type: "success", message: "リモートの最新変更を取り込みました。" });
+        setBanner({
+          type: "success",
+          message: "リモートの最新変更を取り込みました。",
+        });
       } else {
-        const warning = result.warnings?.join("\n") ?? "fast-forward pull が完了しませんでした";
+        const warning =
+          result.warnings?.join("\n") ??
+          "fast-forward pull が完了しませんでした";
         setBanner({
           type: "error",
           message: `git pull --ff-only が失敗しました。\n${warning}`,
         });
       }
     } catch (err) {
-      setBanner({ type: "error", message: formatError(err, "Git同期に失敗しました") });
+      setBanner({
+        type: "error",
+        message: formatError(err, "Git同期に失敗しました"),
+      });
     }
   };
 
@@ -400,12 +434,16 @@ export function BranchDetailPage() {
           <span className={`status-badge status-badge--${branch.type}`}>
             {BRANCH_TYPE_LABEL[branch.type]}
           </span>
-          <span className={`status-badge status-badge--${MERGE_STATUS_TONE[branch.mergeStatus]}`}>
+          <span
+            className={`status-badge status-badge--${MERGE_STATUS_TONE[branch.mergeStatus]}`}
+          >
             {MERGE_STATUS_LABEL[branch.mergeStatus]}
           </span>
           <span
             className={`status-badge ${
-              branch.worktreePath ? "status-badge--success" : "status-badge--muted"
+              branch.worktreePath
+                ? "status-badge--success"
+                : "status-badge--muted"
             }`}
           >
             {branch.worktreePath ? "Worktreeあり" : "Worktree未作成"}
@@ -450,11 +488,14 @@ export function BranchDetailPage() {
                 <div>
                   <h2>AIツール起動</h2>
                   <p className="section-card__body">
-                    Web UI から直接AIツールを起動できます。設定したカスタムツールも一覧に表示されます。
+                    Web UI
+                    から直接AIツールを起動できます。設定したカスタムツールも一覧に表示されます。
                   </p>
                 </div>
                 {configError && (
-                  <span className="pill pill--warning">設定の取得に失敗しました</span>
+                  <span className="pill pill--warning">
+                    設定の取得に失敗しました
+                  </span>
                 )}
               </header>
 
@@ -469,7 +510,9 @@ export function BranchDetailPage() {
                       <span>AIツール</span>
                       <select
                         value={selectedToolId}
-                        onChange={(event) => setSelectedToolId(event.target.value)}
+                        onChange={(event) =>
+                          setSelectedToolId(event.target.value)
+                        }
                         disabled={isConfigLoading}
                       >
                         {availableTools.map((tool) => (
@@ -484,7 +527,9 @@ export function BranchDetailPage() {
                       <span>起動モード</span>
                       <select
                         value={selectedMode}
-                        onChange={(event) => setSelectedMode(event.target.value as ToolMode)}
+                        onChange={(event) =>
+                          setSelectedMode(event.target.value as ToolMode)
+                        }
                       >
                         <option value="normal">normal</option>
                         <option value="continue">continue</option>
@@ -497,7 +542,9 @@ export function BranchDetailPage() {
                       <input
                         type="text"
                         value={extraArgsText}
-                        onChange={(event) => setExtraArgsText(event.target.value)}
+                        onChange={(event) =>
+                          setExtraArgsText(event.target.value)
+                        }
                         placeholder="--flag value"
                       />
                     </label>
@@ -508,39 +555,61 @@ export function BranchDetailPage() {
                       <input
                         type="checkbox"
                         checked={skipPermissions}
-                        onChange={(event) => setSkipPermissions(event.target.checked)}
+                        onChange={(event) =>
+                          setSkipPermissions(event.target.checked)
+                        }
                       />
-                      <span style={{ marginLeft: "0.5rem" }}>権限チェックをスキップ (自己責任)</span>
+                      <span style={{ marginLeft: "0.5rem" }}>
+                        権限チェックをスキップ (自己責任)
+                      </span>
                     </span>
                   </label>
                   {skipPermissions && (
                     <div className="inline-banner inline-banner--warning">
                       <p>
-                        権限チェックをスキップすることで、CLI での `--dangerously-skip-permissions` 指定と同様のリスクを負います。
+                        権限チェックをスキップすることで、CLI での
+                        `--dangerously-skip-permissions`
+                        指定と同様のリスクを負います。
                       </p>
                     </div>
                   )}
                   {needsRemoteSync && (
-                    <div className="inline-banner inline-banner--info" data-testid="sync-required">
+                    <div
+                      className="inline-banner inline-banner--info"
+                      data-testid="sync-required"
+                    >
                       <p>
-                        リモートに未取得の更新 ({branch.divergence?.behind ?? 0} commits) があるため、AIツールを起動する前に同期してください。
+                        リモートに未取得の更新 ({branch.divergence?.behind ?? 0}{" "}
+                        commits)
+                        があるため、AIツールを起動する前に同期してください。
                       </p>
                       <p className="section-card__body">
-                        CLI の `git fetch --all` と `git pull --ff-only` と同じ処理を Web UI から実行できます。
+                        CLI の `git fetch --all` と `git pull --ff-only`
+                        と同じ処理を Web UI から実行できます。
                       </p>
                     </div>
                   )}
                   {hasBlockingDivergence && (
-                    <div className="inline-banner inline-banner--warning" data-testid="divergence-warning">
+                    <div
+                      className="inline-banner inline-banner--warning"
+                      data-testid="divergence-warning"
+                    >
                       <p>
-                        リモートとローカルの両方に未解決の差分があるため、Web UI でも CLI と同様に起動をブロックしています。
+                        リモートとローカルの両方に未解決の差分があるため、Web UI
+                        でも CLI と同様に起動をブロックしています。
                       </p>
                       <ul className="list-muted">
-                        <li>git fetch && git pull --ff-only origin {branch.name}</li>
-                        <li>必要に応じて git push origin {branch.name} でローカル進捗を共有</li>
+                        <li>
+                          git fetch && git pull --ff-only origin {branch.name}
+                        </li>
+                        <li>
+                          必要に応じて git push origin {branch.name}{" "}
+                          でローカル進捗を共有
+                        </li>
                       </ul>
                       <p className="section-card__body">
-                        rebase / merge などで差分を解消した後にページを更新してください。
+                        rebase / merge
+                        などで差分を解消した後にページを更新してください。
                       </p>
                     </div>
                   )}
@@ -577,7 +646,9 @@ export function BranchDetailPage() {
                     <dl className="metadata-grid metadata-grid--compact">
                       <div>
                         <dt>コマンド</dt>
-                        <dd className="tool-card__command">{selectedToolSummary.command}</dd>
+                        <dd className="tool-card__command">
+                          {selectedToolSummary.command}
+                        </dd>
                       </div>
                       <div>
                         <dt>defaultArgs</dt>
@@ -585,7 +656,9 @@ export function BranchDetailPage() {
                       </div>
                       <div>
                         <dt>permissionSkipArgs</dt>
-                        <dd>{renderArgs(selectedToolSummary.permissionSkipArgs)}</dd>
+                        <dd>
+                          {renderArgs(selectedToolSummary.permissionSkipArgs)}
+                        </dd>
                       </div>
                       {argsPreview && (
                         <div className="metadata-grid__full">
@@ -605,13 +678,18 @@ export function BranchDetailPage() {
                 <div>
                   <h2>セッション履歴</h2>
                   <p className="section-card__body">
-                    この Worktree に紐づいた最新の AI セッションが表示されます。CLI からの起動分も共有されます。
+                    この Worktree に紐づいた最新の AI
+                    セッションが表示されます。CLI からの起動分も共有されます。
                   </p>
                 </div>
-                {isSessionsLoading && <span className="pill">読み込み中...</span>}
+                {isSessionsLoading && (
+                  <span className="pill">読み込み中...</span>
+                )}
               </header>
               {branchSessions.length === 0 ? (
-                <p className="section-card__body">セッション履歴はまだありません。</p>
+                <p className="section-card__body">
+                  セッション履歴はまだありません。
+                </p>
               ) : (
                 <div className="session-table-wrapper">
                   <table className="session-table">
@@ -629,23 +707,40 @@ export function BranchDetailPage() {
                       {branchSessions.slice(0, 5).map((session) => (
                         <tr key={session.sessionId}>
                           <td>
-                            <span className={`status-pill status-pill--${session.status}`}>
+                            <span
+                              className={`status-pill status-pill--${session.status}`}
+                            >
                               {SESSION_STATUS_LABEL[session.status]}
                             </span>
                           </td>
-                          <td>{session.toolType === "custom" ? session.toolName ?? "custom" : toolLabel(session.toolType)}</td>
+                          <td>
+                            {session.toolType === "custom"
+                              ? (session.toolName ?? "custom")
+                              : toolLabel(session.toolType)}
+                          </td>
                           <td>{session.mode}</td>
                           <td>{formatDate(session.startedAt)}</td>
-                          <td>{session.endedAt ? formatDate(session.endedAt) : "--"}</td>
+                          <td>
+                            {session.endedAt
+                              ? formatDate(session.endedAt)
+                              : "--"}
+                          </td>
                           <td>
                             {session.status === "running" ? (
                               <button
                                 type="button"
                                 className="button button--ghost"
-                                onClick={() => handleTerminateSession(session.sessionId)}
-                                disabled={terminatingSessionId === session.sessionId || deleteSession.isPending}
+                                onClick={() =>
+                                  handleTerminateSession(session.sessionId)
+                                }
+                                disabled={
+                                  terminatingSessionId === session.sessionId ||
+                                  deleteSession.isPending
+                                }
                               >
-                                {terminatingSessionId === session.sessionId ? "終了中..." : "終了"}
+                                {terminatingSessionId === session.sessionId
+                                  ? "終了中..."
+                                  : "終了"}
                               </button>
                             ) : (
                               <span className="session-table__muted">--</span>
@@ -698,10 +793,14 @@ export function BranchDetailPage() {
                 </header>
                 <div className="pill-group">
                   <span className="pill">Ahead {branch.divergence.ahead}</span>
-                  <span className="pill">Behind {branch.divergence.behind}</span>
+                  <span className="pill">
+                    Behind {branch.divergence.behind}
+                  </span>
                   <span
                     className={`pill ${
-                      branch.divergence.upToDate ? "pill--success" : "pill--warning"
+                      branch.divergence.upToDate
+                        ? "pill--success"
+                        : "pill--warning"
                     }`}
                   >
                     {branch.divergence.upToDate ? "最新" : "更新あり"}
@@ -718,8 +817,12 @@ export function BranchDetailPage() {
                 <li>
                   パス: <strong>{branch.worktreePath ?? "未作成"}</strong>
                 </li>
-                <li>AIツールの起動にはクリーンなワークツリーであることを推奨します。</li>
-                <li>Worktreeを再作成すると既存のローカル変更が失われる可能性があります。</li>
+                <li>
+                  AIツールの起動にはクリーンなワークツリーであることを推奨します。
+                </li>
+                <li>
+                  Worktreeを再作成すると既存のローカル変更が失われる可能性があります。
+                </li>
               </ul>
             </section>
           </div>
@@ -745,7 +848,9 @@ export function BranchDetailPage() {
                       className="button button--ghost"
                       onClick={() => setIsTerminalFullscreen((prev) => !prev)}
                     >
-                      {isTerminalFullscreen ? "通常表示に戻す" : "ターミナルを最大化"}
+                      {isTerminalFullscreen
+                        ? "通常表示に戻す"
+                        : "ターミナルを最大化"}
                     </button>
                   </div>
                 </div>
@@ -754,7 +859,10 @@ export function BranchDetailPage() {
                     sessionId={activeSessionId}
                     onExit={handleSessionExit}
                     onError={(message) =>
-                      setBanner({ type: "error", message: message ?? "不明なエラー" })
+                      setBanner({
+                        type: "error",
+                        message: message ?? "不明なエラー",
+                      })
                     }
                   />
                 </div>
@@ -832,7 +940,10 @@ function renderArgs(args?: string[] | null) {
   return args.join(" ");
 }
 
-const SESSION_STATUS_LABEL: Record<"pending" | "running" | "completed" | "failed", string> = {
+const SESSION_STATUS_LABEL: Record<
+  "pending" | "running" | "completed" | "failed",
+  string
+> = {
   pending: "pending",
   running: "running",
   completed: "completed",

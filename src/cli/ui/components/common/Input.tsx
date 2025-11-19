@@ -1,6 +1,6 @@
-import React from 'react';
-import { Box, Text, useInput } from 'ink';
-import TextInput from 'ink-text-input';
+import React from "react";
+import { Box, Text, useInput } from "ink";
+import TextInput from "ink-text-input";
 
 export interface InputProps {
   value: string;
@@ -19,7 +19,15 @@ export interface InputProps {
 /**
  * Input component - wrapper around ink-text-input with optional label
  */
-export function Input({ value, onChange, onSubmit, placeholder, label, mask, blockKeys }: InputProps) {
+export function Input({
+  value,
+  onChange,
+  onSubmit,
+  placeholder,
+  label,
+  mask,
+  blockKeys,
+}: InputProps) {
   // Block specific keys from being processed by parent useInput handlers
   // This prevents shortcuts (c/r/m) from triggering while typing in the input
   useInput((input) => {

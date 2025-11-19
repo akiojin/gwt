@@ -8,7 +8,14 @@ export interface WorktreeInfo {
 export interface BranchInfo {
   name: string;
   type: "local" | "remote";
-  branchType: "feature" | "bugfix" | "hotfix" | "release" | "main" | "develop" | "other";
+  branchType:
+    | "feature"
+    | "bugfix"
+    | "hotfix"
+    | "release"
+    | "main"
+    | "develop"
+    | "other";
   isCurrent: boolean;
   description?: string;
   worktree?: WorktreeInfo;

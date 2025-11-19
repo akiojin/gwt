@@ -1,11 +1,11 @@
-import React, { useState } from 'react';
-import { Box, Text, useInput } from 'ink';
-import { Header } from '../parts/Header.js';
-import { Footer } from '../parts/Footer.js';
-import { Select } from '../common/Select.js';
-import { useTerminalSize } from '../../hooks/useTerminalSize.js';
+import React, { useState } from "react";
+import { Box, Text, useInput } from "ink";
+import { Header } from "../parts/Header.js";
+import { Footer } from "../parts/Footer.js";
+import { Select } from "../common/Select.js";
+import { useTerminalSize } from "../../hooks/useTerminalSize.js";
 
-export type ExecutionMode = 'normal' | 'continue' | 'resume';
+export type ExecutionMode = "normal" | "continue" | "resume";
 
 export interface ExecutionModeItem {
   label: string;
@@ -62,33 +62,34 @@ export function ExecutionModeSelectorScreen({
   // Execution mode options (Step 1)
   const modeItems: ExecutionModeItem[] = [
     {
-      label: 'Normal',
-      value: 'normal',
-      description: 'Start fresh session',
+      label: "Normal",
+      value: "normal",
+      description: "Start fresh session",
     },
     {
-      label: 'Continue',
-      value: 'continue',
-      description: 'Continue from last session',
+      label: "Continue",
+      value: "continue",
+      description: "Continue from last session",
     },
     {
-      label: 'Resume',
-      value: 'resume',
-      description: 'Resume specific session',
+      label: "Resume",
+      value: "resume",
+      description: "Resume specific session",
     },
   ];
 
   // Skip permissions options (Step 2)
   const skipPermissionsItems: SkipPermissionsItem[] = [
     {
-      label: 'No',
-      value: 'no',
-      description: 'Normal permission checks',
+      label: "No",
+      value: "no",
+      description: "Normal permission checks",
     },
     {
-      label: 'Yes',
-      value: 'yes',
-      description: 'Skip permission checks (--dangerously-skip-permissions / --yolo)',
+      label: "Yes",
+      value: "yes",
+      description:
+        "Skip permission checks (--dangerously-skip-permissions / --yolo)",
     },
   ];
 
@@ -103,22 +104,22 @@ export function ExecutionModeSelectorScreen({
     if (selectedMode) {
       onSelect({
         mode: selectedMode,
-        skipPermissions: item.value === 'yes',
+        skipPermissions: item.value === "yes",
       });
     }
   };
 
   // Footer actions
   const footerActions = [
-    { key: 'enter', description: 'Select' },
-    { key: 'esc', description: step === 2 ? 'Back to mode selection' : 'Back' },
+    { key: "enter", description: "Select" },
+    { key: "esc", description: step === 2 ? "Back to mode selection" : "Back" },
   ];
 
   return (
     <Box flexDirection="column" height={rows}>
       {/* Header */}
       <Header
-        title={step === 1 ? 'Execution Mode' : 'Skip Permissions'}
+        title={step === 1 ? "Execution Mode" : "Skip Permissions"}
         titleColor="magenta"
         version={version}
       />
@@ -135,9 +136,15 @@ export function ExecutionModeSelectorScreen({
         ) : (
           <>
             <Box marginBottom={1}>
-              <Text>Skip permission checks? (--dangerously-skip-permissions / --yolo)</Text>
+              <Text>
+                Skip permission checks? (--dangerously-skip-permissions /
+                --yolo)
+              </Text>
             </Box>
-            <Select items={skipPermissionsItems} onSelect={handleSkipPermissionsSelect} />
+            <Select
+              items={skipPermissionsItems}
+              onSelect={handleSkipPermissionsSelect}
+            />
           </>
         )}
       </Box>

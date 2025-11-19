@@ -1,22 +1,22 @@
 /**
  * @vitest-environment happy-dom
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { render } from '@testing-library/react';
-import React from 'react';
-import { ErrorBoundary } from '../../../components/common/ErrorBoundary.js';
-import { Text, Box } from 'ink';
-import { Window } from 'happy-dom';
+import { describe, it, expect, beforeEach, vi } from "vitest";
+import { render } from "@testing-library/react";
+import React from "react";
+import { ErrorBoundary } from "../../../components/common/ErrorBoundary.js";
+import { Text, Box } from "ink";
+import { Window } from "happy-dom";
 
 // Component that throws an error
 const ThrowError = ({ shouldThrow }: { shouldThrow: boolean }) => {
   if (shouldThrow) {
-    throw new Error('Test error message');
+    throw new Error("Test error message");
   }
   return <Text>No error</Text>;
 };
 
-describe('ErrorBoundary', () => {
+describe("ErrorBoundary", () => {
   beforeEach(() => {
     // Setup happy-dom
     const window = new Window();
@@ -24,31 +24,31 @@ describe('ErrorBoundary', () => {
     globalThis.document = window.document as any;
 
     // Suppress console.error for expected errors in tests
-    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
   });
 
-  it('should render children when no error occurs', () => {
+  it("should render children when no error occurs", () => {
     const { getByText } = render(
       <ErrorBoundary>
         <ThrowError shouldThrow={false} />
-      </ErrorBoundary>
+      </ErrorBoundary>,
     );
 
-    expect(getByText('No error')).toBeDefined();
+    expect(getByText("No error")).toBeDefined();
   });
 
-  it('should catch errors and display error message', () => {
+  it("should catch errors and display error message", () => {
     const { getByText } = render(
       <ErrorBoundary>
         <ThrowError shouldThrow={true} />
-      </ErrorBoundary>
+      </ErrorBoundary>,
     );
 
     expect(getByText(/Error:/)).toBeDefined();
     expect(getByText(/Test error message/)).toBeDefined();
   });
 
-  it('should display custom fallback when provided', () => {
+  it("should display custom fallback when provided", () => {
     const CustomFallback = ({ error }: { error: Error }) => (
       <Box>
         <Text color="red">Custom Error: {error.message}</Text>
@@ -58,18 +58,18 @@ describe('ErrorBoundary', () => {
     const { getByText } = render(
       <ErrorBoundary fallback={CustomFallback}>
         <ThrowError shouldThrow={true} />
-      </ErrorBoundary>
+      </ErrorBoundary>,
     );
 
     expect(getByText(/Custom Error:/)).toBeDefined();
     expect(getByText(/Test error message/)).toBeDefined();
   });
 
-  it('should reset error state when children change', () => {
+  it("should reset error state when children change", () => {
     const { rerender, getByText } = render(
       <ErrorBoundary>
         <ThrowError shouldThrow={true} />
-      </ErrorBoundary>
+      </ErrorBoundary>,
     );
 
     // Error is shown
@@ -79,14 +79,14 @@ describe('ErrorBoundary', () => {
     rerender(
       <ErrorBoundary>
         <ThrowError shouldThrow={false} />
-      </ErrorBoundary>
+      </ErrorBoundary>,
     );
 
     // Original children should be rendered
-    expect(getByText('No error')).toBeDefined();
+    expect(getByText("No error")).toBeDefined();
   });
 
-  it('should handle errors with no message', () => {
+  it("should handle errors with no message", () => {
     const ThrowNoMessage = () => {
       throw new Error();
     };
@@ -94,7 +94,7 @@ describe('ErrorBoundary', () => {
     const { getByText } = render(
       <ErrorBoundary>
         <ThrowNoMessage />
-      </ErrorBoundary>
+      </ErrorBoundary>,
     );
 
     expect(getByText(/Error:/)).toBeDefined();

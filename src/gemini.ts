@@ -57,7 +57,9 @@ export async function launchGeminiCLI(
     // Handle skip permissions (YOLO mode)
     if (options.skipPermissions) {
       args.push("-y");
-      console.log(chalk.yellow("   ⚠️  Auto-approving all actions (YOLO mode)"));
+      console.log(
+        chalk.yellow("   ⚠️  Auto-approving all actions (YOLO mode)"),
+      );
     }
 
     // Append any pass-through arguments after our flags
@@ -101,9 +103,7 @@ export async function launchGeminiCLI(
             "   💡 Recommended: Install Gemini CLI globally for faster startup",
           ),
         );
-        console.log(
-          chalk.yellow("      npm install -g @google/gemini-cli"),
-        );
+        console.log(chalk.yellow("      npm install -g @google/gemini-cli"));
         console.log("");
         // Wait 2 seconds to let user read the message
         await new Promise((resolve) => setTimeout(resolve, 2000));
