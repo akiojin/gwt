@@ -1,14 +1,14 @@
 /**
  * @vitest-environment happy-dom
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { render } from '@testing-library/react';
-import React from 'react';
-import { PRCleanupScreen } from '../../../components/screens/PRCleanupScreen.js';
-import { Window } from 'happy-dom';
-import type { CleanupTarget } from '../../../types.js';
+import { describe, it, expect, beforeEach, vi } from "vitest";
+import { render } from "@testing-library/react";
+import React from "react";
+import { PRCleanupScreen } from "../../../components/screens/PRCleanupScreen.js";
+import { Window } from "happy-dom";
+import type { CleanupTarget } from "../../../types.js";
 
-describe('PRCleanupScreen', () => {
+describe("PRCleanupScreen", () => {
   beforeEach(() => {
     // Setup happy-dom
     const window = new Window();
@@ -18,30 +18,30 @@ describe('PRCleanupScreen', () => {
 
   const mockTargets: CleanupTarget[] = [
     {
-      branch: 'feature/add-new-feature',
-      cleanupType: 'worktree-and-branch',
+      branch: "feature/add-new-feature",
+      cleanupType: "worktree-and-branch",
       pullRequest: {
         number: 123,
-        title: 'Add new feature',
-        branch: 'feature/add-new-feature',
-        mergedAt: '2025-01-20T10:00:00Z',
-        author: 'user1',
+        title: "Add new feature",
+        branch: "feature/add-new-feature",
+        mergedAt: "2025-01-20T10:00:00Z",
+        author: "user1",
       },
-      worktreePath: '/workspace/feature-add-new-feature',
+      worktreePath: "/workspace/feature-add-new-feature",
       hasUncommittedChanges: false,
       hasUnpushedCommits: false,
       hasRemoteBranch: true,
       isAccessible: true,
     },
     {
-      branch: 'hotfix/fix-bug',
-      cleanupType: 'branch-only',
+      branch: "hotfix/fix-bug",
+      cleanupType: "branch-only",
       pullRequest: {
         number: 124,
-        title: 'Fix bug',
-        branch: 'hotfix/fix-bug',
-        mergedAt: '2025-01-21T15:30:00Z',
-        author: 'user2',
+        title: "Fix bug",
+        branch: "hotfix/fix-bug",
+        mergedAt: "2025-01-21T15:30:00Z",
+        author: "user2",
       },
       worktreePath: null,
       hasUncommittedChanges: false,
@@ -50,7 +50,7 @@ describe('PRCleanupScreen', () => {
     },
   ];
 
-  it('should render header with title', () => {
+  it("should render header with title", () => {
     const onBack = vi.fn();
     const onCleanup = vi.fn();
     const { getByText } = render(
@@ -61,13 +61,13 @@ describe('PRCleanupScreen', () => {
         onBack={onBack}
         onRefresh={vi.fn()}
         onCleanup={onCleanup}
-      />
+      />,
     );
 
     expect(getByText(/Branch Cleanup/i)).toBeDefined();
   });
 
-  it('should render PR list', () => {
+  it("should render PR list", () => {
     const onBack = vi.fn();
     const onCleanup = vi.fn();
     const { getByText } = render(
@@ -78,14 +78,14 @@ describe('PRCleanupScreen', () => {
         onBack={onBack}
         onRefresh={vi.fn()}
         onCleanup={onCleanup}
-      />
+      />,
     );
 
     expect(getByText(/feature\/add-new-feature/i)).toBeDefined();
     expect(getByText(/hotfix\/fix-bug/i)).toBeDefined();
   });
 
-  it('should render footer with actions', () => {
+  it("should render footer with actions", () => {
     const onBack = vi.fn();
     const onCleanup = vi.fn();
     const { getAllByText } = render(
@@ -96,14 +96,14 @@ describe('PRCleanupScreen', () => {
         onBack={onBack}
         onRefresh={vi.fn()}
         onCleanup={onCleanup}
-      />
+      />,
     );
 
     expect(getAllByText(/enter/i).length).toBeGreaterThan(0);
     expect(getAllByText(/esc/i).length).toBeGreaterThan(0);
   });
 
-  it('should handle empty PR list', () => {
+  it("should handle empty PR list", () => {
     const onBack = vi.fn();
     const onCleanup = vi.fn();
     const { getByText } = render(
@@ -114,13 +114,13 @@ describe('PRCleanupScreen', () => {
         onBack={onBack}
         onRefresh={vi.fn()}
         onCleanup={onCleanup}
-      />
+      />,
     );
 
     expect(getByText(/No cleanup targets found/i)).toBeDefined();
   });
 
-  it('should display PR count in stats', () => {
+  it("should display PR count in stats", () => {
     const onBack = vi.fn();
     const onCleanup = vi.fn();
     const { getByText, getAllByText } = render(
@@ -131,14 +131,14 @@ describe('PRCleanupScreen', () => {
         onBack={onBack}
         onRefresh={vi.fn()}
         onCleanup={onCleanup}
-      />
+      />,
     );
 
     expect(getByText(/Total:/i)).toBeDefined();
     expect(getAllByText(/^2$/).length).toBeGreaterThan(0);
   });
 
-  it('should use terminal height for layout calculation', () => {
+  it("should use terminal height for layout calculation", () => {
     const originalRows = process.stdout.rows;
     process.stdout.rows = 30;
 
@@ -152,7 +152,7 @@ describe('PRCleanupScreen', () => {
         onBack={onBack}
         onRefresh={vi.fn()}
         onCleanup={onCleanup}
-      />
+      />,
     );
 
     expect(container).toBeDefined();
@@ -160,7 +160,7 @@ describe('PRCleanupScreen', () => {
     process.stdout.rows = originalRows;
   });
 
-  it('should handle back navigation with ESC key', () => {
+  it("should handle back navigation with ESC key", () => {
     const onBack = vi.fn();
     const onCleanup = vi.fn();
     const { container } = render(
@@ -171,14 +171,14 @@ describe('PRCleanupScreen', () => {
         onBack={onBack}
         onRefresh={vi.fn()}
         onCleanup={onCleanup}
-      />
+      />,
     );
 
     // Test will verify onBack is called when ESC is pressed
     expect(container).toBeDefined();
   });
 
-  it('should render status message when provided', () => {
+  it("should render status message when provided", () => {
     const onBack = vi.fn();
     const onCleanup = vi.fn();
     const { getByText } = render(
@@ -190,13 +190,13 @@ describe('PRCleanupScreen', () => {
         onBack={onBack}
         onRefresh={vi.fn()}
         onCleanup={onCleanup}
-      />
+      />,
     );
 
     expect(getByText(/Cleanup completed/i)).toBeDefined();
   });
 
-  it('should render loading message when loading', () => {
+  it("should render loading message when loading", () => {
     const onBack = vi.fn();
     const onCleanup = vi.fn();
     const { getByText } = render(
@@ -207,7 +207,7 @@ describe('PRCleanupScreen', () => {
         onBack={onBack}
         onRefresh={vi.fn()}
         onCleanup={onCleanup}
-      />
+      />,
     );
 
     expect(getByText(/Loading cleanup targets/i)).toBeDefined();

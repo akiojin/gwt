@@ -1,22 +1,28 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useApp } from 'ink';
-import { ErrorBoundary } from './common/ErrorBoundary.js';
-import { BranchListScreen } from './screens/BranchListScreen.js';
-import { WorktreeManagerScreen } from './screens/WorktreeManagerScreen.js';
-import { BranchCreatorScreen } from './screens/BranchCreatorScreen.js';
-import { BranchActionSelectorScreen } from '../screens/BranchActionSelectorScreen.js';
-import { AIToolSelectorScreen } from './screens/AIToolSelectorScreen.js';
-import { SessionSelectorScreen } from './screens/SessionSelectorScreen.js';
-import { ExecutionModeSelectorScreen } from './screens/ExecutionModeSelectorScreen.js';
-import type { AITool } from './screens/AIToolSelectorScreen.js';
-import type { ExecutionMode } from './screens/ExecutionModeSelectorScreen.js';
-import type { WorktreeItem } from './screens/WorktreeManagerScreen.js';
-import { useGitData } from '../hooks/useGitData.js';
-import { useScreenState } from '../hooks/useScreenState.js';
-import { formatBranchItems } from '../utils/branchFormatter.js';
-import { calculateStatistics } from '../utils/statisticsCalculator.js';
-import type { BranchInfo, BranchItem, SelectedBranchState } from '../types.js';
-import { getRepositoryRoot, deleteBranch } from '../../../git.js';
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { useApp } from "ink";
+import { ErrorBoundary } from "./common/ErrorBoundary.js";
+import { BranchListScreen } from "./screens/BranchListScreen.js";
+import { WorktreeManagerScreen } from "./screens/WorktreeManagerScreen.js";
+import { BranchCreatorScreen } from "./screens/BranchCreatorScreen.js";
+import { BranchActionSelectorScreen } from "../screens/BranchActionSelectorScreen.js";
+import { AIToolSelectorScreen } from "./screens/AIToolSelectorScreen.js";
+import { SessionSelectorScreen } from "./screens/SessionSelectorScreen.js";
+import { ExecutionModeSelectorScreen } from "./screens/ExecutionModeSelectorScreen.js";
+import type { AITool } from "./screens/AIToolSelectorScreen.js";
+import type { ExecutionMode } from "./screens/ExecutionModeSelectorScreen.js";
+import type { WorktreeItem } from "./screens/WorktreeManagerScreen.js";
+import { useGitData } from "../hooks/useGitData.js";
+import { useScreenState } from "../hooks/useScreenState.js";
+import { formatBranchItems } from "../utils/branchFormatter.js";
+import { calculateStatistics } from "../utils/statisticsCalculator.js";
+import type { BranchInfo, BranchItem, SelectedBranchState } from "../types.js";
+import { getRepositoryRoot, deleteBranch } from "../../../git.js";
 import {
   createWorktree,
   generateWorktreePath,
@@ -24,30 +30,30 @@ import {
   isProtectedBranchName,
   removeWorktree,
   switchToProtectedBranch,
-} from '../../../worktree.js';
-import { getPackageVersion } from '../../../utils.js';
+} from "../../../worktree.js";
+import { getPackageVersion } from "../../../utils.js";
 import {
   resolveBaseBranchLabel,
   resolveBaseBranchRef,
-} from '../utils/baseBranch.js';
+} from "../utils/baseBranch.js";
 
-const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'];
+const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
 const COMPLETION_HOLD_DURATION_MS = 3000;
 const PROTECTED_BRANCH_WARNING =
-  'Root branches operate directly in the repository root. Create a new branch if you need a dedicated worktree.';
+  "Root branches operate directly in the repository root. Create a new branch if you need a dedicated worktree.";
 
 const getSpinnerFrame = (index: number): string => {
   const frame = SPINNER_FRAMES[index];
-  if (typeof frame === 'string') {
+  if (typeof frame === "string") {
     return frame;
   }
-  return SPINNER_FRAMES[0] ?? '⠋';
+  return SPINNER_FRAMES[0] ?? "⠋";
 };
 
 export interface SelectionResult {
   branch: string; // Local branch name (without remote prefix)
   displayName: string; // Name that was selected in the UI (may include remote prefix)
-  branchType: 'local' | 'remote';
+  branchType: "local" | "remote";
   remoteBranch?: string; // Full remote ref when branchType === 'remote'
   tool: AITool;
   mode: ExecutionMode;
@@ -69,24 +75,37 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
   // 起動ディレクトリの取得
   const workingDirectory = process.cwd();
 
-  const { branches, worktrees, loading, error, refresh, lastUpdated } = useGitData({
-    enableAutoRefresh: false, // Manual refresh with 'r' key
-  });
+  const { branches, worktrees, loading, error, refresh, lastUpdated } =
+    useGitData({
+      enableAutoRefresh: false, // Manual refresh with 'r' key
+    });
   const { currentScreen, navigateTo, goBack } = useScreenState();
 
   // Version state
   const [version, setVersion] = useState<string | null>(null);
 
   // Selection state (for branch → tool → mode flow)
-  const [selectedBranch, setSelectedBranch] = useState<SelectedBranchState | null>(null);
-  const [creationSourceBranch, setCreationSourceBranch] = useState<SelectedBranchState | null>(null);
+  const [selectedBranch, setSelectedBranch] =
+    useState<SelectedBranchState | null>(null);
+  const [creationSourceBranch, setCreationSourceBranch] =
+    useState<SelectedBranchState | null>(null);
   const [selectedTool, setSelectedTool] = useState<AITool | null>(null);
 
   // PR cleanup feedback
-  const [cleanupIndicators, setCleanupIndicators] = useState<Record<string, { icon: string; color?: 'cyan' | 'green' | 'yellow' | 'red' }>>({});
-  const [cleanupProcessingBranch, setCleanupProcessingBranch] = useState<string | null>(null);
+  const [cleanupIndicators, setCleanupIndicators] = useState<
+    Record<
+      string,
+      { icon: string; color?: "cyan" | "green" | "yellow" | "red" }
+    >
+  >({});
+  const [cleanupProcessingBranch, setCleanupProcessingBranch] = useState<
+    string | null
+  >(null);
   const [cleanupInputLocked, setCleanupInputLocked] = useState(false);
-  const [cleanupFooterMessage, setCleanupFooterMessage] = useState<{ text: string; color?: 'cyan' | 'green' | 'yellow' | 'red' } | null>(null);
+  const [cleanupFooterMessage, setCleanupFooterMessage] = useState<{
+    text: string;
+    color?: "cyan" | "green" | "yellow" | "red";
+  } | null>(null);
   const [hiddenBranches, setHiddenBranches] = useState<string[]>([]);
   const spinnerFrameIndexRef = useRef(0);
   const [spinnerFrameIndex, setSpinnerFrameIndex] = useState(0);
@@ -107,7 +126,8 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     }
 
     const interval = setInterval(() => {
-      spinnerFrameIndexRef.current = (spinnerFrameIndexRef.current + 1) % SPINNER_FRAMES.length;
+      spinnerFrameIndexRef.current =
+        (spinnerFrameIndexRef.current + 1) % SPINNER_FRAMES.length;
       setSpinnerFrameIndex(spinnerFrameIndexRef.current);
     }, 120);
 
@@ -128,20 +148,23 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     if (cleanupProcessingBranch) {
       setCleanupIndicators((prev) => {
         const current = prev[cleanupProcessingBranch];
-        if (current && current.icon === frame && current.color === 'cyan') {
+        if (current && current.icon === frame && current.color === "cyan") {
           return prev;
         }
 
-        const next: Record<string, { icon: string; color?: 'cyan' | 'green' | 'yellow' | 'red' }> = {
+        const next: Record<
+          string,
+          { icon: string; color?: "cyan" | "green" | "yellow" | "red" }
+        > = {
           ...prev,
-          [cleanupProcessingBranch]: { icon: frame, color: 'cyan' },
+          [cleanupProcessingBranch]: { icon: frame, color: "cyan" },
         };
 
         return next;
       });
     }
 
-    setCleanupFooterMessage({ text: `Processing... ${frame}`, color: 'cyan' });
+    setCleanupFooterMessage({ text: `Processing... ${frame}`, color: "cyan" });
   }, [cleanupInputLocked, cleanupProcessingBranch, spinnerFrameIndex]);
 
   useEffect(() => {
@@ -157,28 +180,34 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     }
   }, [branches, hiddenBranches]);
 
-  useEffect(() => () => {
-    if (completionTimerRef.current) {
-      clearTimeout(completionTimerRef.current);
-      completionTimerRef.current = null;
-    }
-  }, []);
+  useEffect(
+    () => () => {
+      if (completionTimerRef.current) {
+        clearTimeout(completionTimerRef.current);
+        completionTimerRef.current = null;
+      }
+    },
+    [],
+  );
 
   const visibleBranches = useMemo(
     () => branches.filter((branch) => !hiddenBranches.includes(branch.name)),
-    [branches, hiddenBranches]
+    [branches, hiddenBranches],
   );
 
   // Helper function to create content-based hash for branches
   const branchHash = useMemo(
-    () => visibleBranches.map((b) => `${b.name}-${b.type}-${b.isCurrent}`).join(','),
-    [visibleBranches]
+    () =>
+      visibleBranches
+        .map((b) => `${b.name}-${b.type}-${b.isCurrent}`)
+        .join(","),
+    [visibleBranches],
   );
 
   // Helper function to create content-based hash for worktrees
   const worktreeHash = useMemo(
-    () => worktrees.map((w) => `${w.branch}-${w.path}`).join(','),
-    [worktrees]
+    () => worktrees.map((w) => `${w.branch}-${w.path}`).join(","),
+    [worktrees],
   );
 
   // Format branches to BranchItems (memoized for performance with content-based dependencies)
@@ -197,76 +226,89 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
   }, [branchHash, worktreeHash, visibleBranches, worktrees]);
 
   // Calculate statistics (memoized for performance)
-  const stats = useMemo(() => calculateStatistics(visibleBranches), [visibleBranches]);
+  const stats = useMemo(
+    () => calculateStatistics(visibleBranches),
+    [visibleBranches],
+  );
 
   // Format worktrees to WorktreeItems
   const worktreeItems: WorktreeItem[] = useMemo(
     () =>
-      worktrees.map((wt): WorktreeItem => ({
-        branch: wt.branch,
-        path: wt.path,
-        isAccessible: wt.isAccessible ?? true,
-      })),
-    [worktrees]
+      worktrees.map(
+        (wt): WorktreeItem => ({
+          branch: wt.branch,
+          path: wt.path,
+          isAccessible: wt.isAccessible ?? true,
+        }),
+      ),
+    [worktrees],
   );
 
   const resolveBaseBranch = useCallback(() => {
     const localMain = branches.find(
       (branch) =>
-        branch.type === 'local' && (branch.name === 'main' || branch.name === 'master')
+        branch.type === "local" &&
+        (branch.name === "main" || branch.name === "master"),
     );
     if (localMain) {
       return localMain.name;
     }
 
     const develop = branches.find(
-      (branch) => branch.type === 'local' && (branch.name === 'develop' || branch.name === 'dev')
+      (branch) =>
+        branch.type === "local" &&
+        (branch.name === "develop" || branch.name === "dev"),
     );
     if (develop) {
       return develop.name;
     }
 
-    return 'main';
+    return "main";
   }, [branches]);
 
   const baseBranchLabel = useMemo(
-    () => resolveBaseBranchLabel(creationSourceBranch, selectedBranch, resolveBaseBranch),
-    [creationSourceBranch, resolveBaseBranch, selectedBranch]
+    () =>
+      resolveBaseBranchLabel(
+        creationSourceBranch,
+        selectedBranch,
+        resolveBaseBranch,
+      ),
+    [creationSourceBranch, resolveBaseBranch, selectedBranch],
   );
 
   // Handle branch selection
   const toLocalBranchName = useCallback((remoteName: string) => {
-    const segments = remoteName.split('/');
+    const segments = remoteName.split("/");
     if (segments.length <= 1) {
       return remoteName;
     }
-    return segments.slice(1).join('/');
+    return segments.slice(1).join("/");
   }, []);
 
   const inferBranchCategory = useCallback(
-    (branchName: string): BranchInfo['branchType'] => {
+    (branchName: string): BranchInfo["branchType"] => {
       const matched = branches.find((branch) => branch.name === branchName);
       if (matched) {
         return matched.branchType;
       }
-      if (branchName === 'main' || branchName === 'master') {
-        return 'main';
+      if (branchName === "main" || branchName === "master") {
+        return "main";
       }
-      if (branchName === 'develop' || branchName === 'dev') {
-        return 'develop';
+      if (branchName === "develop" || branchName === "dev") {
+        return "develop";
       }
-      if (branchName.startsWith('feature/')) {
-        return 'feature';
+      if (branchName.startsWith("feature/")) {
+        return "feature";
       }
-      if (branchName.startsWith('hotfix/')) {
-        return 'hotfix';
+      if (branchName.startsWith("hotfix/")) {
+        return "hotfix";
       }
-      if (branchName.startsWith('release/')) {
-        return 'release';
+      if (branchName.startsWith("release/")) {
+        return "release";
       }
-      return 'other';
+      return "other";
     },
-    [branches]
+    [branches],
   );
 
   const isProtectedSelection = useCallback(
@@ -277,12 +319,14 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       return (
         isProtectedBranchName(branch.name) ||
         isProtectedBranchName(branch.displayName) ||
-        (branch.remoteBranch ? isProtectedBranchName(branch.remoteBranch) : false) ||
-        branch.branchCategory === 'main' ||
-        branch.branchCategory === 'develop'
+        (branch.remoteBranch
+          ? isProtectedBranchName(branch.remoteBranch)
+          : false) ||
+        branch.branchCategory === "main" ||
+        branch.branchCategory === "develop"
       );
     },
-    [isProtectedBranchName]
+    [isProtectedBranchName],
   );
 
   const protectedBranchInfo = useMemo(() => {
@@ -302,18 +346,18 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
   const handleSelect = useCallback(
     (item: BranchItem) => {
       const selection: SelectedBranchState =
-        item.type === 'remote'
+        item.type === "remote"
           ? {
               name: toLocalBranchName(item.name),
               displayName: item.name,
-              branchType: 'remote',
+              branchType: "remote",
               branchCategory: item.branchType,
               remoteBranch: item.name,
             }
           : {
               name: item.name,
               displayName: item.name,
-              branchType: 'local',
+              branchType: "local",
               branchCategory: item.branchType,
             };
 
@@ -326,15 +370,22 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       if (protectedSelected) {
         setCleanupFooterMessage({
           text: PROTECTED_BRANCH_WARNING,
-          color: 'yellow',
+          color: "yellow",
         });
       } else {
         setCleanupFooterMessage(null);
       }
 
-      navigateTo('branch-action-selector');
+      navigateTo("branch-action-selector");
     },
-    [isProtectedSelection, navigateTo, setCleanupFooterMessage, setCreationSourceBranch, setSelectedTool, toLocalBranchName]
+    [
+      isProtectedSelection,
+      navigateTo,
+      setCleanupFooterMessage,
+      setCreationSourceBranch,
+      setSelectedTool,
+      toLocalBranchName,
+    ],
   );
 
   // Handle navigation
@@ -342,7 +393,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     (screen: string) => {
       navigateTo(screen as any);
     },
-    [navigateTo]
+    [navigateTo],
   );
 
   const handleWorktreeSelect = useCallback(
@@ -350,15 +401,20 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       setSelectedBranch({
         name: worktree.branch,
         displayName: worktree.branch,
-        branchType: 'local',
+        branchType: "local",
         branchCategory: inferBranchCategory(worktree.branch),
       });
       setSelectedTool(null);
       setCreationSourceBranch(null);
       setCleanupFooterMessage(null);
-      navigateTo('ai-tool-selector');
+      navigateTo("ai-tool-selector");
     },
-    [inferBranchCategory, navigateTo, setCleanupFooterMessage, setCreationSourceBranch]
+    [
+      inferBranchCategory,
+      navigateTo,
+      setCleanupFooterMessage,
+      setCreationSourceBranch,
+    ],
   );
 
   // Handle branch action selection
@@ -370,13 +426,13 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     try {
       setCleanupFooterMessage({
         text: `Preparing root branch '${selectedBranch.displayName ?? selectedBranch.name}'...`,
-        color: 'cyan',
+        color: "cyan",
       });
       const repoRoot = await getRepositoryRoot();
       const remoteRef =
         selectedBranch.remoteBranch ??
-        (selectedBranch.branchType === 'remote'
-          ? selectedBranch.displayName ?? selectedBranch.name
+        (selectedBranch.branchType === "remote"
+          ? (selectedBranch.displayName ?? selectedBranch.name)
           : null);
 
       const result = await switchToProtectedBranch({
@@ -386,45 +442,44 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       });
 
       let successMessage = `'${selectedBranch.displayName ?? selectedBranch.name}' will use the repository root.`;
-      if (result === 'remote') {
+      if (result === "remote") {
         successMessage = `Created a local tracking branch for '${selectedBranch.displayName ?? selectedBranch.name}' and switched to the protected branch.`;
-      } else if (result === 'local') {
+      } else if (result === "local") {
         successMessage = `Checked out '${selectedBranch.displayName ?? selectedBranch.name}' in the repository root.`;
       }
 
       setCleanupFooterMessage({
         text: successMessage,
-        color: 'green',
+        color: "green",
       });
       refresh();
-      navigateTo('ai-tool-selector');
+      navigateTo("ai-tool-selector");
     } catch (error) {
-      const message =
-        error instanceof Error ? error.message : String(error);
+      const message = error instanceof Error ? error.message : String(error);
       setCleanupFooterMessage({
         text: `Failed to switch root branch: ${message}`,
-        color: 'red',
+        color: "red",
       });
-      console.error('Failed to switch protected branch:', error);
+      console.error("Failed to switch protected branch:", error);
     }
-  }, [
-    navigateTo,
-    refresh,
-    selectedBranch,
-    setCleanupFooterMessage,
-  ]);
+  }, [navigateTo, refresh, selectedBranch, setCleanupFooterMessage]);
 
   const handleUseExistingBranch = useCallback(() => {
     if (selectedBranch && isProtectedSelection(selectedBranch)) {
       void handleProtectedBranchSwitch();
       return;
     }
-    navigateTo('ai-tool-selector');
-  }, [handleProtectedBranchSwitch, isProtectedSelection, navigateTo, selectedBranch]);
+    navigateTo("ai-tool-selector");
+  }, [
+    handleProtectedBranchSwitch,
+    isProtectedSelection,
+    navigateTo,
+    selectedBranch,
+  ]);
 
   const handleCreateNewBranch = useCallback(() => {
     setCreationSourceBranch(selectedBranch);
-    navigateTo('branch-creator');
+    navigateTo("branch-creator");
   }, [navigateTo, selectedBranch]);
 
   // Handle quit
@@ -459,16 +514,16 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         setSelectedBranch({
           name: branchName,
           displayName: branchName,
-          branchType: 'local',
+          branchType: "local",
           branchCategory: inferBranchCategory(branchName),
         });
         setSelectedTool(null);
         setCleanupFooterMessage(null);
 
-        navigateTo('ai-tool-selector');
+        navigateTo("ai-tool-selector");
       } catch (error) {
         // On error, go back to branch list
-        console.error('Failed to create branch:', error);
+        console.error("Failed to create branch:", error);
         goBack();
         refresh();
       }
@@ -482,7 +537,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       creationSourceBranch,
       inferBranchCategory,
       setCleanupFooterMessage,
-    ]
+    ],
   );
 
   const handleCleanupCommand = useCallback(async () => {
@@ -516,7 +571,10 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     setCleanupInputLocked(true);
     setCleanupIndicators({});
     const initialFrame = getSpinnerFrame(0);
-    setCleanupFooterMessage({ text: `Processing... ${initialFrame}`, color: 'cyan' });
+    setCleanupFooterMessage({
+      text: `Processing... ${initialFrame}`,
+      color: "cyan",
+    });
     setCleanupProcessingBranch(null);
     spinnerFrameIndexRef.current = 0;
     setSpinnerFrameIndex(0);
@@ -527,7 +585,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setCleanupIndicators({});
-      setCleanupFooterMessage({ text: `❌ ${message}`, color: 'red' });
+      setCleanupFooterMessage({ text: `❌ ${message}`, color: "red" });
       setCleanupInputLocked(false);
       completionTimerRef.current = setTimeout(() => {
         setCleanupFooterMessage(null);
@@ -538,7 +596,10 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
 
     if (targets.length === 0) {
       setCleanupIndicators({});
-      setCleanupFooterMessage({ text: '✅ Nothing to clean up.', color: 'green' });
+      setCleanupFooterMessage({
+        text: "✅ Nothing to clean up.",
+        color: "green",
+      });
       setCleanupInputLocked(false);
       completionTimerRef.current = setTimeout(() => {
         setCleanupFooterMessage(null);
@@ -548,11 +609,21 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     }
 
     // Reset hidden branches that may already be gone
-    setHiddenBranches((prev) => prev.filter((name) => targets.find((t) => t.branch === name) === undefined));
+    setHiddenBranches((prev) =>
+      prev.filter(
+        (name) => targets.find((t) => t.branch === name) === undefined,
+      ),
+    );
 
-    const initialIndicators = targets.reduce<Record<string, { icon: string; color?: 'cyan' | 'green' | 'yellow' | 'red' }>>((acc, target, index) => {
-      const icon = index === 0 ? getSpinnerFrame(0) : '⏳';
-      const color: 'cyan' | 'green' | 'yellow' | 'red' = index === 0 ? 'cyan' : 'yellow';
+    const initialIndicators = targets.reduce<
+      Record<
+        string,
+        { icon: string; color?: "cyan" | "green" | "yellow" | "red" }
+      >
+    >((acc, target, index) => {
+      const icon = index === 0 ? getSpinnerFrame(0) : "⏳";
+      const color: "cyan" | "green" | "yellow" | "red" =
+        index === 0 ? "cyan" : "yellow";
       acc[target.branch] = { icon, color };
       return acc;
     }, {});
@@ -562,7 +633,10 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     setCleanupProcessingBranch(firstTarget ? firstTarget.branch : null);
     spinnerFrameIndexRef.current = 0;
     setSpinnerFrameIndex(0);
-    setCleanupFooterMessage({ text: `Processing... ${getSpinnerFrame(0)}`, color: 'cyan' });
+    setCleanupFooterMessage({
+      text: `Processing... ${getSpinnerFrame(0)}`,
+      color: "cyan",
+    });
 
     for (let index = 0; index < targets.length; index += 1) {
       const currentTarget = targets[index];
@@ -577,11 +651,11 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
 
       setCleanupIndicators((prev) => {
         const updated = { ...prev };
-        updated[target.branch] = { icon: getSpinnerFrame(0), color: 'cyan' };
+        updated[target.branch] = { icon: getSpinnerFrame(0), color: "cyan" };
         for (const pending of targets.slice(index + 1)) {
           const current = updated[pending.branch];
-          if (!current || current.icon !== '⏳') {
-            updated[pending.branch] = { icon: '⏳', color: 'yellow' };
+          if (!current || current.icon !== "⏳") {
+            updated[pending.branch] = { icon: "⏳", color: "yellow" };
           }
         }
         return updated;
@@ -590,19 +664,23 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       const shouldSkip =
         target.hasUncommittedChanges ||
         target.hasUnpushedCommits ||
-        (target.cleanupType === 'worktree-and-branch' && (!target.worktreePath || target.isAccessible === false));
+        (target.cleanupType === "worktree-and-branch" &&
+          (!target.worktreePath || target.isAccessible === false));
 
       if (shouldSkip) {
         setCleanupIndicators((prev) => ({
           ...prev,
-          [target.branch]: { icon: '⏭️', color: 'yellow' },
+          [target.branch]: { icon: "⏭️", color: "yellow" },
         }));
         setCleanupProcessingBranch(null);
         continue;
       }
 
       try {
-        if (target.cleanupType === 'worktree-and-branch' && target.worktreePath) {
+        if (
+          target.cleanupType === "worktree-and-branch" &&
+          target.worktreePath
+        ) {
           await removeWorktree(target.worktreePath, true);
         }
 
@@ -610,13 +688,13 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         succeededBranches.push(target.branch);
         setCleanupIndicators((prev) => ({
           ...prev,
-          [target.branch]: { icon: '✅', color: 'green' },
+          [target.branch]: { icon: "✅", color: "green" },
         }));
       } catch {
-        const icon = '❌';
+        const icon = "❌";
         setCleanupIndicators((prev) => ({
           ...prev,
-          [target.branch]: { icon, color: 'red' },
+          [target.branch]: { icon, color: "red" },
         }));
       }
 
@@ -625,23 +703,32 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
 
     setCleanupProcessingBranch(null);
     setCleanupInputLocked(false);
-    setCleanupFooterMessage({ text: 'Cleanup completed. Finalizing...', color: 'green' });
+    setCleanupFooterMessage({
+      text: "Cleanup completed. Finalizing...",
+      color: "green",
+    });
 
     const holdDuration =
-      typeof process !== 'undefined' && process.env?.NODE_ENV === 'test'
+      typeof process !== "undefined" && process.env?.NODE_ENV === "test"
         ? 0
         : COMPLETION_HOLD_DURATION_MS;
 
     completionTimerRef.current = setTimeout(resetAfterWait, holdDuration);
-  }, [cleanupInputLocked, deleteBranch, getMergedPRWorktrees, refresh, removeWorktree]);
+  }, [
+    cleanupInputLocked,
+    deleteBranch,
+    getMergedPRWorktrees,
+    refresh,
+    removeWorktree,
+  ]);
 
   // Handle AI tool selection
   const handleToolSelect = useCallback(
     (tool: AITool) => {
       setSelectedTool(tool);
-      navigateTo('execution-mode-selector');
+      navigateTo("execution-mode-selector");
     },
-    [navigateTo]
+    [navigateTo],
   );
 
   // Handle session selection
@@ -651,7 +738,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       // For now, just go back to branch list
       goBack();
     },
-    [goBack]
+    [goBack],
   );
 
   // Handle execution mode and skipPermissions selection
@@ -675,13 +762,13 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         exit();
       }
     },
-    [selectedBranch, selectedTool, onExit, exit]
+    [selectedBranch, selectedTool, onExit, exit],
   );
 
   // Render screen based on currentScreen
   const renderScreen = () => {
     switch (currentScreen) {
-      case 'branch-list':
+      case "branch-list":
         return (
           <BranchListScreen
             branches={branchItems}
@@ -705,7 +792,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
           />
         );
 
-      case 'worktree-manager':
+      case "worktree-manager":
         return (
           <WorktreeManagerScreen
             worktrees={worktreeItems}
@@ -715,7 +802,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
           />
         );
 
-      case 'branch-creator':
+      case "branch-creator":
         return (
           <BranchCreatorScreen
             onBack={goBack}
@@ -725,10 +812,10 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
           />
         );
 
-      case 'branch-action-selector': {
+      case "branch-action-selector": {
         const isProtected = Boolean(protectedBranchInfo);
         const baseProps = {
-          selectedBranch: selectedBranch?.displayName ?? '',
+          selectedBranch: selectedBranch?.displayName ?? "",
           onUseExisting: handleUseExistingBranch,
           onCreateNew: handleCreateNewBranch,
           onBack: goBack,
@@ -750,10 +837,16 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         return <BranchActionSelectorScreen {...baseProps} />;
       }
 
-      case 'ai-tool-selector':
-        return <AIToolSelectorScreen onBack={goBack} onSelect={handleToolSelect} version={version} />;
+      case "ai-tool-selector":
+        return (
+          <AIToolSelectorScreen
+            onBack={goBack}
+            onSelect={handleToolSelect}
+            version={version}
+          />
+        );
 
-      case 'session-selector':
+      case "session-selector":
         // TODO: Implement session data fetching
         return (
           <SessionSelectorScreen
@@ -764,9 +857,13 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
           />
         );
 
-      case 'execution-mode-selector':
+      case "execution-mode-selector":
         return (
-          <ExecutionModeSelectorScreen onBack={goBack} onSelect={handleModeSelect} version={version} />
+          <ExecutionModeSelectorScreen
+            onBack={goBack}
+            onSelect={handleModeSelect}
+            version={version}
+          />
         );
 
       default:

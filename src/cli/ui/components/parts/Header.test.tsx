@@ -5,9 +5,7 @@ import { Header } from "./Header.js";
 
 describe("Header Component", () => {
   it("正常系: versionプロップありの場合、タイトルとバージョンを表示する", () => {
-    const { lastFrame } = render(
-      <Header title="gwt" version="1.12.3" />
-    );
+    const { lastFrame } = render(<Header title="gwt" version="1.12.3" />);
 
     const output = lastFrame();
 
@@ -27,9 +25,7 @@ describe("Header Component", () => {
   });
 
   it("正常系: version={null}の場合、タイトルのみ表示する", () => {
-    const { lastFrame } = render(
-      <Header title="gwt" version={null} />
-    );
+    const { lastFrame } = render(<Header title="gwt" version={null} />);
 
     const output = lastFrame();
 
@@ -46,7 +42,7 @@ describe("Header Component", () => {
         version="1.12.3"
         showDivider={true}
         dividerChar="─"
-      />
+      />,
     );
 
     const output = lastFrame();
@@ -57,11 +53,7 @@ describe("Header Component", () => {
 
   it("正常系: showDivider=falseの場合、区切り線が表示されない", () => {
     const { lastFrame } = render(
-      <Header
-        title="gwt"
-        version="1.12.3"
-        showDivider={false}
-      />
+      <Header title="gwt" version="1.12.3" showDivider={false} />,
     );
 
     const output = lastFrame();
@@ -73,9 +65,7 @@ describe("Header Component", () => {
   });
 
   it("正常系: プレリリースバージョンも正しく表示される", () => {
-    const { lastFrame } = render(
-      <Header title="gwt" version="2.0.0-beta.1" />
-    );
+    const { lastFrame } = render(<Header title="gwt" version="2.0.0-beta.1" />);
 
     const output = lastFrame();
 

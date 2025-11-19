@@ -88,12 +88,7 @@ export function resetConfigCache(): void {
  * セッションデータの保存・読み込み
  */
 function getSessionFilePath(repositoryRoot: string): string {
-  const sessionDir = path.join(
-    homedir(),
-    ".config",
-    "gwt",
-    "sessions",
-  );
+  const sessionDir = path.join(homedir(), ".config", "gwt", "sessions");
   const repoName = path.basename(repositoryRoot);
   const repoHash = Buffer.from(repositoryRoot)
     .toString("base64")
@@ -152,12 +147,7 @@ export async function loadSession(
 
 export async function getAllSessions(): Promise<SessionData[]> {
   try {
-    const sessionDir = path.join(
-      homedir(),
-      ".config",
-      "gwt",
-      "sessions",
-    );
+    const sessionDir = path.join(homedir(), ".config", "gwt", "sessions");
     const { readdir } = await import("node:fs/promises");
 
     const files = await readdir(sessionDir);

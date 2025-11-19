@@ -12,6 +12,7 @@ import {
 import { launchClaudeCode } from "./claude.js";
 import { launchCodexCLI, CodexError } from "./codex.js";
 import { launchGeminiCLI, GeminiError } from "./gemini.js";
+import { launchQwenCLI, QwenError } from "./qwen.js";
 import {
   WorktreeOrchestrator,
   type EnsureWorktreeOptions,
@@ -98,6 +99,7 @@ function isRecoverableError(error: unknown): boolean {
     error instanceof WorktreeError ||
     error instanceof CodexError ||
     error instanceof GeminiError ||
+    error instanceof QwenError ||
     error instanceof DependencyInstallError
   ) {
     return true;
@@ -109,6 +111,7 @@ function isRecoverableError(error: unknown): boolean {
       error.name === "WorktreeError" ||
       error.name === "CodexError" ||
       error.name === "GeminiError" ||
+      error.name === "QwenError" ||
       error.name === "DependencyInstallError"
     );
   }
@@ -123,6 +126,7 @@ function isRecoverableError(error: unknown): boolean {
       name === "WorktreeError" ||
       name === "CodexError" ||
       name === "GeminiError" ||
+      name === "QwenError" ||
       name === "DependencyInstallError"
     );
   }
@@ -547,6 +551,17 @@ export async function handleAIToolWorkflow(
       });
     } else if (tool === "gemini-cli") {
       await launchGeminiCLI(worktreePath, {
+        mode:
+          mode === "resume"
+            ? "resume"
+            : mode === "continue"
+              ? "continue"
+              : "normal",
+        skipPermissions,
+        envOverrides: sharedEnv,
+      });
+    } else if (tool === "qwen-cli") {
+      await launchQwenCLI(worktreePath, {
         mode:
           mode === "resume"
             ? "resume"

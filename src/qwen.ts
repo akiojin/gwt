@@ -4,19 +4,19 @@ import { platform } from "os";
 import { existsSync } from "fs";
 import { createChildStdio, getTerminalStreams } from "./utils/terminal.js";
 
-const GEMINI_CLI_PACKAGE = "@google/gemini-cli@latest";
+const QWEN_CLI_PACKAGE = "@qwen-code/qwen-code@latest";
 
-export class GeminiError extends Error {
+export class QwenError extends Error {
   constructor(
     message: string,
     public cause?: unknown,
   ) {
     super(message);
-    this.name = "GeminiError";
+    this.name = "QwenError";
   }
 }
 
-export async function launchGeminiCLI(
+export async function launchQwenCLI(
   worktreePath: string,
   options: {
     skipPermissions?: boolean;
@@ -33,20 +33,28 @@ export async function launchGeminiCLI(
       throw new Error(`Worktree path does not exist: ${worktreePath}`);
     }
 
-    console.log(chalk.blue("🚀 Launching Gemini CLI..."));
+    console.log(chalk.blue("🚀 Launching Qwen CLI..."));
     console.log(chalk.gray(`   Working directory: ${worktreePath}`));
 
-    const args: string[] = [];
+    const args: string[] = ["--checkpointing"];
 
     // Handle execution mode
+    // Note: Qwen CLI doesn't have explicit continue/resume CLI options at startup.
+    // Session management is done via /chat commands during interactive sessions.
     switch (options.mode) {
       case "continue":
-        args.push("-r", "latest");
-        console.log(chalk.cyan("   ⏭️  Continuing most recent session"));
+        console.log(
+          chalk.cyan(
+            "   ⏭️  Starting session (use /chat resume in the CLI to continue)",
+          ),
+        );
         break;
       case "resume":
-        args.push("-r", "latest");
-        console.log(chalk.cyan("   🔄 Resuming session"));
+        console.log(
+          chalk.cyan(
+            "   🔄 Starting session (use /chat resume in the CLI to continue)",
+          ),
+        );
         break;
       case "normal":
       default:
@@ -56,7 +64,7 @@ export async function launchGeminiCLI(
 
     // Handle skip permissions (YOLO mode)
     if (options.skipPermissions) {
-      args.push("-y");
+      args.push("--yolo");
       console.log(
         chalk.yellow("   ⚠️  Auto-approving all actions (YOLO mode)"),
       );
@@ -76,16 +84,14 @@ export async function launchGeminiCLI(
 
     const childStdio = createChildStdio();
 
-    // Auto-detect locally installed gemini command
-    const hasLocalGemini = await isGeminiCommandAvailable();
+    // Auto-detect locally installed qwen command
+    const hasLocalQwen = await isQwenCommandAvailable();
 
     try {
-      if (hasLocalGemini) {
-        // Use locally installed gemini command
-        console.log(
-          chalk.green("   ✨ Using locally installed gemini command"),
-        );
-        await execa("gemini", args, {
+      if (hasLocalQwen) {
+        // Use locally installed qwen command
+        console.log(chalk.green("   ✨ Using locally installed qwen command"));
+        await execa("qwen", args, {
           cwd: worktreePath,
           shell: true,
           stdin: childStdio.stdin,
@@ -96,18 +102,18 @@ export async function launchGeminiCLI(
       } else {
         // Fallback to bunx
         console.log(
-          chalk.cyan("   🔄 Falling back to bunx @google/gemini-cli@latest"),
+          chalk.cyan("   🔄 Falling back to bunx @qwen-code/qwen-code@latest"),
         );
         console.log(
           chalk.yellow(
-            "   💡 Recommended: Install Gemini CLI globally for faster startup",
+            "   💡 Recommended: Install Qwen CLI globally for faster startup",
           ),
         );
-        console.log(chalk.yellow("      npm install -g @google/gemini-cli"));
+        console.log(chalk.yellow("      npm install -g @qwen-code/qwen-code"));
         console.log("");
         // Wait 2 seconds to let user read the message
         await new Promise((resolve) => setTimeout(resolve, 2000));
-        await execa("bunx", [GEMINI_CLI_PACKAGE, ...args], {
+        await execa("bunx", [QWEN_CLI_PACKAGE, ...args], {
           cwd: worktreePath,
           shell: true,
           stdin: childStdio.stdin,
@@ -120,31 +126,31 @@ export async function launchGeminiCLI(
       childStdio.cleanup();
     }
   } catch (error: any) {
-    const hasLocalGemini = await isGeminiCommandAvailable();
+    const hasLocalQwen = await isQwenCommandAvailable();
     let errorMessage: string;
 
     if (error.code === "ENOENT") {
-      if (hasLocalGemini) {
+      if (hasLocalQwen) {
         errorMessage =
-          "gemini command not found. Please ensure Gemini CLI is properly installed.";
+          "qwen command not found. Please ensure Qwen CLI is properly installed.";
       } else {
         errorMessage =
-          "bunx command not found. Please ensure Bun is installed so Gemini CLI can run via bunx.";
+          "bunx command not found. Please ensure Bun is installed so Qwen CLI can run via bunx.";
       }
     } else {
-      errorMessage = `Failed to launch Gemini CLI: ${error.message || "Unknown error"}`;
+      errorMessage = `Failed to launch Qwen CLI: ${error.message || "Unknown error"}`;
     }
 
     if (platform() === "win32") {
       console.error(chalk.red("\n💡 Windows troubleshooting tips:"));
-      if (hasLocalGemini) {
+      if (hasLocalQwen) {
         console.error(
           chalk.yellow(
-            "   1. Confirm that Gemini CLI is installed and the 'gemini' command is on PATH",
+            "   1. Confirm that Qwen CLI is installed and the 'qwen' command is on PATH",
           ),
         );
         console.error(
-          chalk.yellow('   2. Run "gemini --version" to verify the setup'),
+          chalk.yellow('   2. Run "qwen --version" to verify the setup'),
         );
       } else {
         console.error(
@@ -154,7 +160,7 @@ export async function launchGeminiCLI(
         );
         console.error(
           chalk.yellow(
-            '   2. Run "bunx @google/gemini-cli@latest -- --version" to verify the setup',
+            '   2. Run "bunx @qwen-code/qwen-code@latest -- --version" to verify the setup',
           ),
         );
       }
@@ -163,30 +169,30 @@ export async function launchGeminiCLI(
       );
     }
 
-    throw new GeminiError(errorMessage, error);
+    throw new QwenError(errorMessage, error);
   } finally {
     terminal.exitRawMode();
   }
 }
 
 /**
- * Check if locally installed `gemini` command is available
- * @returns true if `gemini` command exists in PATH, false otherwise
+ * Check if locally installed `qwen` command is available
+ * @returns true if `qwen` command exists in PATH, false otherwise
  */
-async function isGeminiCommandAvailable(): Promise<boolean> {
+async function isQwenCommandAvailable(): Promise<boolean> {
   try {
     const command = platform() === "win32" ? "where" : "which";
-    await execa(command, ["gemini"], { shell: true });
+    await execa(command, ["qwen"], { shell: true });
     return true;
   } catch {
-    // gemini command not found in PATH
+    // qwen command not found in PATH
     return false;
   }
 }
 
-export async function isGeminiCLIAvailable(): Promise<boolean> {
+export async function isQwenCLIAvailable(): Promise<boolean> {
   try {
-    await execa("bunx", [GEMINI_CLI_PACKAGE, "--version"], { shell: true });
+    await execa("bunx", [QWEN_CLI_PACKAGE, "--version"], { shell: true });
     return true;
   } catch (error: any) {
     if (error.code === "ENOENT") {

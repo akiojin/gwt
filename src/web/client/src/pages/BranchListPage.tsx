@@ -17,7 +17,10 @@ const MERGE_STATUS_LABEL: Record<Branch["mergeStatus"], string> = {
   unknown: "状態不明",
 };
 
-const MERGE_STATUS_TONE: Record<Branch["mergeStatus"], "success" | "warning" | "muted"> = {
+const MERGE_STATUS_TONE: Record<
+  Branch["mergeStatus"],
+  "success" | "warning" | "muted"
+> = {
   merged: "success",
   unmerged: "warning",
   unknown: "muted",
@@ -37,9 +40,13 @@ export function BranchListPage() {
   const branches = data ?? [];
 
   const metrics = useMemo(() => {
-    const worktrees = branches.filter((branch) => Boolean(branch.worktreePath)).length;
+    const worktrees = branches.filter((branch) =>
+      Boolean(branch.worktreePath),
+    ).length;
     const remote = branches.filter((branch) => branch.type === "remote").length;
-    const healthy = branches.filter((branch) => branch.divergence?.upToDate).length;
+    const healthy = branches.filter(
+      (branch) => branch.divergence?.upToDate,
+    ).length;
 
     return {
       total: branches.length,
@@ -82,14 +89,17 @@ export function BranchListPage() {
       return {
         title: "ブランチの取得に失敗しました",
         description:
-          error instanceof Error ? error.message : "未知のエラーが発生しました。",
+          error instanceof Error
+            ? error.message
+            : "未知のエラーが発生しました。",
       };
     }
 
     if (!branches.length) {
       return {
         title: "ブランチが見つかりません",
-        description: "git fetch origin などで最新のブランチを取得してください。",
+        description:
+          "git fetch origin などで最新のブランチを取得してください。",
       };
     }
 
@@ -105,7 +115,9 @@ export function BranchListPage() {
           ローカルのGitブランチとAIツールをブラウザ上で一元管理し、Worktree状態を瞬時に
           可視化します。
         </p>
-        <div className="page-hero__meta">リアルタイムで更新されるステータスビュー</div>
+        <div className="page-hero__meta">
+          リアルタイムで更新されるステータスビュー
+        </div>
       </header>
 
       <main className="page-content">
@@ -158,7 +170,7 @@ export function BranchListPage() {
             />
           </label>
           <span className="toolbar__count">
-            {numberFormatter.format(filteredBranches.length)} / {" "}
+            {numberFormatter.format(filteredBranches.length)} /{" "}
             {numberFormatter.format(metrics.total)} branches
           </span>
         </section>
@@ -188,10 +200,14 @@ export function BranchListPage() {
                     <h2>{branch.name}</h2>
                   </div>
                   <div className="badge-group">
-                    <span className={`status-badge status-badge--${branch.type}`}>
+                    <span
+                      className={`status-badge status-badge--${branch.type}`}
+                    >
                       {BRANCH_TYPE_LABEL[branch.type]}
                     </span>
-                    <span className={`status-badge status-badge--${MERGE_STATUS_TONE[branch.mergeStatus]}`}>
+                    <span
+                      className={`status-badge status-badge--${MERGE_STATUS_TONE[branch.mergeStatus]}`}
+                    >
                       {MERGE_STATUS_LABEL[branch.mergeStatus]}
                     </span>
                     <span
@@ -227,11 +243,17 @@ export function BranchListPage() {
 
                 {branch.divergence && (
                   <div className="pill-group">
-                    <span className="pill">Ahead {branch.divergence.ahead}</span>
-                    <span className="pill">Behind {branch.divergence.behind}</span>
+                    <span className="pill">
+                      Ahead {branch.divergence.ahead}
+                    </span>
+                    <span className="pill">
+                      Behind {branch.divergence.behind}
+                    </span>
                     <span
                       className={`pill ${
-                        branch.divergence.upToDate ? "pill--success" : "pill--warning"
+                        branch.divergence.upToDate
+                          ? "pill--success"
+                          : "pill--warning"
                       }`}
                     >
                       {branch.divergence.upToDate ? "最新" : "更新あり"}
@@ -248,7 +270,9 @@ export function BranchListPage() {
                   </Link>
                   <span
                     className={`info-pill ${
-                      branch.worktreePath ? "info-pill--success" : "info-pill--warning"
+                      branch.worktreePath
+                        ? "info-pill--success"
+                        : "info-pill--warning"
                     }`}
                   >
                     {branch.worktreePath ?? "Worktree未作成"}

@@ -351,7 +351,8 @@ function getBranchType(branchName: string): BranchInfo["branchType"] {
   if (branchName === "main" || branchName === "master") return "main";
   if (branchName === "develop" || branchName === "dev") return "develop";
   if (branchName.startsWith("feature/")) return "feature";
-  if (branchName.startsWith("bugfix/") || branchName.startsWith("bug/")) return "bugfix";
+  if (branchName.startsWith("bugfix/") || branchName.startsWith("bug/"))
+    return "bugfix";
   if (branchName.startsWith("hotfix/")) return "hotfix";
   if (branchName.startsWith("release/")) return "release";
   return "other";
