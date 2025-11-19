@@ -11,6 +11,7 @@ import {
 } from "./git.js";
 import { launchClaudeCode } from "./claude.js";
 import { launchCodexCLI, CodexError } from "./codex.js";
+import { launchGeminiCLI, GeminiError } from "./gemini.js";
 import {
   WorktreeOrchestrator,
   type EnsureWorktreeOptions,
@@ -96,6 +97,7 @@ function isRecoverableError(error: unknown): boolean {
     error instanceof GitError ||
     error instanceof WorktreeError ||
     error instanceof CodexError ||
+    error instanceof GeminiError ||
     error instanceof DependencyInstallError
   ) {
     return true;
@@ -106,6 +108,7 @@ function isRecoverableError(error: unknown): boolean {
       error.name === "GitError" ||
       error.name === "WorktreeError" ||
       error.name === "CodexError" ||
+      error.name === "GeminiError" ||
       error.name === "DependencyInstallError"
     );
   }
@@ -119,6 +122,7 @@ function isRecoverableError(error: unknown): boolean {
       name === "GitError" ||
       name === "WorktreeError" ||
       name === "CodexError" ||
+      name === "GeminiError" ||
       name === "DependencyInstallError"
     );
   }
@@ -539,6 +543,17 @@ export async function handleAIToolWorkflow(
               ? "continue"
               : "normal",
         bypassApprovals: skipPermissions,
+        envOverrides: sharedEnv,
+      });
+    } else if (tool === "gemini-cli") {
+      await launchGeminiCLI(worktreePath, {
+        mode:
+          mode === "resume"
+            ? "resume"
+            : mode === "continue"
+              ? "continue"
+              : "normal",
+        skipPermissions,
         envOverrides: sharedEnv,
       });
     } else {
