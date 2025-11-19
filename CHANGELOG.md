@@ -1,3 +1,12 @@
+# [2.3.0](https://github.com/akiojin/gwt/compare/v2.2.0...v2.3.0) (2025-11-19)
+
+
+### Features
+
+* Codex/Geminiの表示名を簡潔化 ([cc8bdb2](https://github.com/akiojin/gwt/commit/cc8bdb25617de58c79dda5b53134fc2a3ac89aa2))
+* Gemini CLIをビルトインツールとして追加 ([0e80363](https://github.com/akiojin/gwt/commit/0e80363ae81fdf61c00ae55dbecf8b2cecd677e4))
+* Qwenをビルトインツールとして追加 ([b4f6c94](https://github.com/akiojin/gwt/commit/b4f6c9476f6675bdc4e27006b60868ee14f07dae))
+
 # [2.2.0](https://github.com/akiojin/gwt/compare/v2.1.1...v2.2.0) (2025-11-18)
 
 
