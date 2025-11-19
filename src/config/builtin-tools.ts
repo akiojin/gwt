@@ -39,6 +39,26 @@ export const CODEX_CLI_TOOL: CustomAITool = {
 };
 
 /**
+ * Gemini CLI のビルトイン定義
+ */
+export const GEMINI_CLI_TOOL: CustomAITool = {
+  id: "gemini-cli",
+  displayName: "Gemini CLI",
+  type: "bunx",
+  command: "@google/gemini-cli@latest",
+  modeArgs: {
+    normal: [],
+    continue: ["-r", "latest"],
+    resume: ["-r", "latest"],
+  },
+  permissionSkipArgs: ["-y"],
+};
+
+/**
  * すべてのビルトインツール
  */
-export const BUILTIN_TOOLS: CustomAITool[] = [CLAUDE_CODE_TOOL, CODEX_CLI_TOOL];
+export const BUILTIN_TOOLS: CustomAITool[] = [
+  CLAUDE_CODE_TOOL,
+  CODEX_CLI_TOOL,
+  GEMINI_CLI_TOOL,
+];
