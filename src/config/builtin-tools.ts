@@ -1,7 +1,7 @@
 /**
  * ビルトインAIツール定義
  *
- * Claude Code、Codex、Gemini の CustomAITool 形式定義
+ * Claude Code、Codex、Gemini、Qwen の CustomAITool 形式定義
  */
 
 import type { CustomAITool } from "../types/tools.js";
@@ -55,10 +55,28 @@ export const GEMINI_CLI_TOOL: CustomAITool = {
 };
 
 /**
+ * Qwen のビルトイン定義
+ */
+export const QWEN_CLI_TOOL: CustomAITool = {
+  id: "qwen-cli",
+  displayName: "Qwen",
+  type: "bunx",
+  command: "@qwen-code/qwen-code@latest",
+  defaultArgs: ["--checkpointing"],
+  modeArgs: {
+    normal: [],
+    continue: [],
+    resume: [],
+  },
+  permissionSkipArgs: ["--yolo"],
+};
+
+/**
  * すべてのビルトインツール
  */
 export const BUILTIN_TOOLS: CustomAITool[] = [
   CLAUDE_CODE_TOOL,
   CODEX_CLI_TOOL,
   GEMINI_CLI_TOOL,
+  QWEN_CLI_TOOL,
 ];
