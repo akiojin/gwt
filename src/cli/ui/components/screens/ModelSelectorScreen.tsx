@@ -30,6 +30,7 @@ export interface ModelSelectorScreenProps {
   onBack: () => void;
   onSelect: (selection: ModelSelectionResult) => void;
   version?: string | null;
+  initialSelection?: ModelSelectionResult | null;
 }
 
 const TOOL_LABELS: Record<string, string> = {
@@ -54,6 +55,7 @@ export function ModelSelectorScreen({
   onBack,
   onSelect,
   version,
+  initialSelection,
 }: ModelSelectorScreenProps) {
   const { rows } = useTerminalSize();
 
@@ -65,9 +67,18 @@ export function ModelSelectorScreen({
   useEffect(() => {
     const options = getModelOptions(tool);
     setModelOptions(options);
+    // 初期選択が有効なら保持
+    if (initialSelection?.model) {
+      const found = options.find((opt) => opt.id === initialSelection.model);
+      if (found) {
+        setSelectedModel(found);
+        setStep("model");
+        return;
+      }
+    }
     setSelectedModel(null);
     setStep("model");
-  }, [tool]);
+  }, [tool, initialSelection?.model]);
 
   const modelItems: ModelSelectItem[] = useMemo(
     () =>
@@ -80,11 +91,15 @@ export function ModelSelectorScreen({
   );
 
   const defaultModelIndex = useMemo(() => {
+    const initial = initialSelection?.model
+      ? modelOptions.findIndex((opt) => opt.id === initialSelection.model)
+      : -1;
+    if (initial !== -1) return initial;
     const defaultOption = getDefaultModelOption(tool);
     if (!defaultOption) return 0;
     const index = modelOptions.findIndex((opt) => opt.id === defaultOption.id);
     return index >= 0 ? index : 0;
-  }, [modelOptions, tool]);
+  }, [initialSelection?.model, modelOptions, tool]);
 
   const inferenceOptions = useMemo(
     () => getInferenceLevelsForModel(selectedModel ?? undefined),
@@ -136,11 +151,15 @@ export function ModelSelectorScreen({
   );
 
   const defaultInferenceIndex = useMemo(() => {
+    const initialLevel = initialSelection?.inferenceLevel;
+    if (initialLevel && inferenceOptions.includes(initialLevel)) {
+      return inferenceOptions.findIndex((lvl) => lvl === initialLevel);
+    }
     const defaultLevel = getDefaultInferenceForModel(selectedModel ?? undefined);
     if (!defaultLevel) return 0;
     const index = inferenceOptions.findIndex((lvl) => lvl === defaultLevel);
     return index >= 0 ? index : 0;
-  }, [inferenceOptions, selectedModel]);
+  }, [initialSelection?.inferenceLevel, inferenceOptions, selectedModel]);
 
   useInput((_input, key) => {
     if (key.escape) {

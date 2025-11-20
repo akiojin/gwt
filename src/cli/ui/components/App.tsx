@@ -107,6 +107,9 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
   const [selectedTool, setSelectedTool] = useState<AITool | null>(null);
   const [selectedModel, setSelectedModel] =
     useState<ModelSelectionResult | null>(null);
+  const [lastModelByTool, setLastModelByTool] = useState<
+    Record<AITool, ModelSelectionResult | undefined>
+  >({});
 
   // PR cleanup feedback
   const [cleanupIndicators, setCleanupIndicators] = useState<
@@ -746,18 +749,22 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
   const handleToolSelect = useCallback(
     (tool: AITool) => {
       setSelectedTool(tool);
-      setSelectedModel(null);
+      setSelectedModel(lastModelByTool[tool] ?? null);
       navigateTo("model-selector");
     },
-    [navigateTo],
+    [lastModelByTool, navigateTo],
   );
 
   const handleModelSelect = useCallback(
     (selection: ModelSelectionResult) => {
       setSelectedModel(selection);
+      setLastModelByTool((prev) => ({
+        ...prev,
+        ...(selectedTool ? { [selectedTool]: selection } : {}),
+      }));
       navigateTo("execution-mode-selector");
     },
-    [navigateTo],
+    [navigateTo, selectedTool],
   );
 
   // Handle session selection
@@ -905,6 +912,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
             onBack={goBack}
             onSelect={handleModelSelect}
             version={version}
+            initialSelection={selectedModel}
           />
         );
 
