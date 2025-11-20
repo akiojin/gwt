@@ -5,14 +5,23 @@ import { existsSync } from "fs";
 import { createChildStdio, getTerminalStreams } from "./utils/terminal.js";
 
 const CODEX_CLI_PACKAGE = "@openai/codex@latest";
-const DEFAULT_CODEX_ARGS = [
+
+export type CodexReasoningEffort = "low" | "medium" | "high" | "xhigh";
+
+export const DEFAULT_CODEX_MODEL = "gpt-5.1-codex";
+export const DEFAULT_CODEX_REASONING_EFFORT: CodexReasoningEffort = "high";
+
+export const buildDefaultCodexArgs = (
+  model: string = DEFAULT_CODEX_MODEL,
+  reasoningEffort: CodexReasoningEffort = DEFAULT_CODEX_REASONING_EFFORT,
+): string[] => [
   "--enable",
   "web_search_request",
-  "--model=gpt-5.1-codex",
+  `--model=${model}`,
   "--sandbox",
   "workspace-write",
   "-c",
-  "model_reasoning_effort=high",
+  `model_reasoning_effort=${reasoningEffort}`,
   "-c",
   "model_reasoning_summaries=detailed",
   "-c",
@@ -42,6 +51,8 @@ export async function launchCodexCLI(
     extraArgs?: string[];
     bypassApprovals?: boolean;
     envOverrides?: Record<string, string>;
+    model?: string;
+    reasoningEffort?: CodexReasoningEffort;
   } = {},
 ): Promise<void> {
   const terminal = getTerminalStreams();
@@ -55,6 +66,12 @@ export async function launchCodexCLI(
     console.log(chalk.gray(`   Working directory: ${worktreePath}`));
 
     const args: string[] = [];
+    const model = options.model ?? DEFAULT_CODEX_MODEL;
+    const reasoningEffort =
+      options.reasoningEffort ?? DEFAULT_CODEX_REASONING_EFFORT;
+
+    console.log(chalk.green(`   🎯 Model: ${model}`));
+    console.log(chalk.green(`   🧠 Reasoning: ${reasoningEffort}`));
 
     switch (options.mode) {
       case "continue":
@@ -80,7 +97,9 @@ export async function launchCodexCLI(
       args.push(...options.extraArgs);
     }
 
-    args.push(...DEFAULT_CODEX_ARGS);
+    const codexArgs = buildDefaultCodexArgs(model, reasoningEffort);
+
+    args.push(...codexArgs);
 
     terminal.exitRawMode();
 

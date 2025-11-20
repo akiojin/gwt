@@ -1,6 +1,5 @@
 import { execa } from "execa";
 import chalk from "chalk";
-import { platform } from "os";
 import { existsSync } from "fs";
 import { createChildStdio, getTerminalStreams } from "./utils/terminal.js";
 
@@ -23,6 +22,7 @@ export async function launchGeminiCLI(
     mode?: "normal" | "continue" | "resume";
     extraArgs?: string[];
     envOverrides?: Record<string, string>;
+    model?: string;
   } = {},
 ): Promise<void> {
   const terminal = getTerminalStreams();
@@ -37,6 +37,11 @@ export async function launchGeminiCLI(
     console.log(chalk.gray(`   Working directory: ${worktreePath}`));
 
     const args: string[] = [];
+
+    if (options.model) {
+      args.push("--model", options.model);
+      console.log(chalk.green(`   🎯 Model: ${options.model}`));
+    }
 
     // Handle execution mode
     switch (options.mode) {
@@ -135,7 +140,7 @@ export async function launchGeminiCLI(
       errorMessage = `Failed to launch Gemini CLI: ${error.message || "Unknown error"}`;
     }
 
-    if (platform() === "win32") {
+    if (process.platform === "win32") {
       console.error(chalk.red("\n💡 Windows troubleshooting tips:"));
       if (hasLocalGemini) {
         console.error(
@@ -175,7 +180,7 @@ export async function launchGeminiCLI(
  */
 async function isGeminiCommandAvailable(): Promise<boolean> {
   try {
-    const command = platform() === "win32" ? "where" : "which";
+    const command = process.platform === "win32" ? "where" : "which";
     await execa(command, ["gemini"], { shell: true });
     return true;
   } catch {

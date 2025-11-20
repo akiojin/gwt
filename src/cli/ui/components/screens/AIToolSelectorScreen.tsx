@@ -6,8 +6,7 @@ import { Select } from "../common/Select.js";
 import { useTerminalSize } from "../../hooks/useTerminalSize.js";
 import { getAllTools } from "../../../../config/tools.js";
 import type { AIToolConfig } from "../../../../types/tools.js";
-
-export type AITool = string;
+import type { AITool } from "../../types.js";
 
 export interface AIToolItem {
   label: string;

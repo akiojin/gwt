@@ -9,20 +9,32 @@ import { Window } from "happy-dom";
 
 const advanceTimersBy = async (ms: number) => {
   await act(async () => {
-    await vi.advanceTimersByTimeAsync(ms);
+    if (typeof vi.advanceTimersByTimeAsync === "function") {
+      await vi.advanceTimersByTimeAsync(ms);
+    } else if (typeof vi.advanceTimersByTime === "function") {
+      vi.advanceTimersByTime(ms);
+    } else {
+      await new Promise((resolve) => setTimeout(resolve, ms));
+    }
   });
 };
 
 beforeEach(() => {
-  vi.useFakeTimers();
+  if (typeof vi.useFakeTimers === "function") {
+    vi.useFakeTimers();
+  }
   const window = new Window();
   globalThis.window = window as any;
   globalThis.document = window.document as any;
 });
 
 afterEach(() => {
-  vi.clearAllTimers();
-  vi.useRealTimers();
+  if (typeof vi.clearAllTimers === "function") {
+    vi.clearAllTimers();
+  }
+  if (typeof vi.useRealTimers === "function") {
+    vi.useRealTimers();
+  }
 });
 
 describe("LoadingIndicator", () => {
@@ -66,16 +78,18 @@ describe("LoadingIndicator", () => {
 
     expect(getMessageText(container)).toContain("Loading data");
 
-    await act(async () => {
-      rerender(
-        <LoadingIndicator
-          isLoading={false}
-          message="Loading data"
-          delay={10}
-        />,
-      );
-      await vi.advanceTimersByTimeAsync(0);
-    });
+      await act(async () => {
+        rerender(
+          <LoadingIndicator
+            isLoading={false}
+            message="Loading data"
+            delay={10}
+          />,
+        );
+        if (typeof vi.advanceTimersByTimeAsync === "function") {
+          await vi.advanceTimersByTimeAsync(0);
+        }
+      });
 
     expect(container.textContent).toBe("");
   });
