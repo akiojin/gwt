@@ -40,30 +40,20 @@ vi.mock("../../src/utils/terminal", () => ({
 }));
 
 import { execa } from "execa";
-import { launchCodexCLI } from "../../src/codex";
+import {
+  DEFAULT_CODEX_MODEL,
+  DEFAULT_CODEX_REASONING_EFFORT,
+  buildDefaultCodexArgs,
+  launchCodexCLI,
+} from "../../src/codex";
 
 // Get typed mock
 const mockExeca = execa as ReturnType<typeof vi.fn>;
 
-const DEFAULT_CODEX_ARGS = [
-  "--enable",
-  "web_search_request",
-  "--model=gpt-5.1-codex",
-  "--sandbox",
-  "workspace-write",
-  "-c",
-  "model_reasoning_effort=high",
-  "-c",
-  "model_reasoning_summaries=detailed",
-  "-c",
-  "sandbox_workspace_write.network_access=true",
-  "-c",
-  "shell_environment_policy.inherit=all",
-  "-c",
-  "shell_environment_policy.ignore_default_excludes=true",
-  "-c",
-  "shell_environment_policy.experimental_use_profile=true",
-];
+const DEFAULT_CODEX_ARGS = buildDefaultCodexArgs(
+  DEFAULT_CODEX_MODEL,
+  DEFAULT_CODEX_REASONING_EFFORT,
+);
 
 describe("codex.ts", () => {
   const worktreePath = "/tmp/worktree";
@@ -119,6 +109,19 @@ describe("codex.ts", () => {
       "resume",
       "--last",
       ...DEFAULT_CODEX_ARGS,
+    ]);
+  });
+
+  it("applies provided model and reasoning effort overrides", async () => {
+    await launchCodexCLI(worktreePath, {
+      model: "gpt-5.1-codex-max",
+      reasoningEffort: "xhigh",
+    });
+
+    const [, args] = (execa as any).mock.calls[0];
+    expect(args).toEqual([
+      "@openai/codex@latest",
+      ...buildDefaultCodexArgs("gpt-5.1-codex-max", "xhigh"),
     ]);
   });
 

@@ -23,6 +23,7 @@ export async function launchQwenCLI(
     mode?: "normal" | "continue" | "resume";
     extraArgs?: string[];
     envOverrides?: Record<string, string>;
+    model?: string;
   } = {},
 ): Promise<void> {
   const terminal = getTerminalStreams();
@@ -37,6 +38,11 @@ export async function launchQwenCLI(
     console.log(chalk.gray(`   Working directory: ${worktreePath}`));
 
     const args: string[] = ["--checkpointing"];
+
+    if (options.model) {
+      args.push("--model", options.model);
+      console.log(chalk.green(`   🎯 Model: ${options.model}`));
+    }
 
     // Handle execution mode
     // Note: Qwen CLI doesn't have explicit continue/resume CLI options at startup.

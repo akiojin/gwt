@@ -10,7 +10,11 @@ import {
   GitError,
 } from "./git.js";
 import { launchClaudeCode } from "./claude.js";
-import { launchCodexCLI, CodexError } from "./codex.js";
+import {
+  launchCodexCLI,
+  CodexError,
+  type CodexReasoningEffort,
+} from "./codex.js";
 import { launchGeminiCLI, GeminiError } from "./gemini.js";
 import { launchQwenCLI, QwenError } from "./qwen.js";
 import {
@@ -292,11 +296,17 @@ export async function handleAIToolWorkflow(
     tool,
     mode,
     skipPermissions,
+    model,
+    inferenceLevel,
   } = selectionResult;
 
   const branchLabel = displayName ?? branch;
+  const modelInfo =
+    model || inferenceLevel
+      ? `, model=${model ?? "default"}${inferenceLevel ? `/${inferenceLevel}` : ""}`
+      : "";
   printInfo(
-    `Selected: ${branchLabel} with ${tool} (${mode} mode, skipPermissions: ${skipPermissions})`,
+    `Selected: ${branchLabel} with ${tool} (${mode} mode${modelInfo}, skipPermissions: ${skipPermissions})`,
   );
 
   try {
@@ -528,7 +538,12 @@ export async function handleAIToolWorkflow(
     // Builtin tools use their dedicated launch functions
     // Custom tools use the generic launchCustomAITool function
     if (tool === "claude-code") {
-      await launchClaudeCode(worktreePath, {
+      const launchOptions: {
+        mode?: "normal" | "continue" | "resume";
+        skipPermissions?: boolean;
+        envOverrides?: Record<string, string>;
+        model?: string;
+      } = {
         mode:
           mode === "resume"
             ? "resume"
@@ -537,9 +552,19 @@ export async function handleAIToolWorkflow(
               : "normal",
         skipPermissions,
         envOverrides: sharedEnv,
-      });
+      };
+      if (model) {
+        launchOptions.model = model;
+      }
+      await launchClaudeCode(worktreePath, launchOptions);
     } else if (tool === "codex-cli") {
-      await launchCodexCLI(worktreePath, {
+      const launchOptions: {
+        mode?: "normal" | "continue" | "resume";
+        bypassApprovals?: boolean;
+        envOverrides?: Record<string, string>;
+        model?: string;
+        reasoningEffort?: CodexReasoningEffort;
+      } = {
         mode:
           mode === "resume"
             ? "resume"
@@ -548,9 +573,21 @@ export async function handleAIToolWorkflow(
               : "normal",
         bypassApprovals: skipPermissions,
         envOverrides: sharedEnv,
-      });
+      };
+      if (model) {
+        launchOptions.model = model;
+      }
+      if (inferenceLevel) {
+        launchOptions.reasoningEffort = inferenceLevel as CodexReasoningEffort;
+      }
+      await launchCodexCLI(worktreePath, launchOptions);
     } else if (tool === "gemini-cli") {
-      await launchGeminiCLI(worktreePath, {
+      const launchOptions: {
+        mode?: "normal" | "continue" | "resume";
+        skipPermissions?: boolean;
+        envOverrides?: Record<string, string>;
+        model?: string;
+      } = {
         mode:
           mode === "resume"
             ? "resume"
@@ -559,9 +596,18 @@ export async function handleAIToolWorkflow(
               : "normal",
         skipPermissions,
         envOverrides: sharedEnv,
-      });
+      };
+      if (model) {
+        launchOptions.model = model;
+      }
+      await launchGeminiCLI(worktreePath, launchOptions);
     } else if (tool === "qwen-cli") {
-      await launchQwenCLI(worktreePath, {
+      const launchOptions: {
+        mode?: "normal" | "continue" | "resume";
+        skipPermissions?: boolean;
+        envOverrides?: Record<string, string>;
+        model?: string;
+      } = {
         mode:
           mode === "resume"
             ? "resume"
@@ -570,7 +616,11 @@ export async function handleAIToolWorkflow(
               : "normal",
         skipPermissions,
         envOverrides: sharedEnv,
-      });
+      };
+      if (model) {
+        launchOptions.model = model;
+      }
+      await launchQwenCLI(worktreePath, launchOptions);
     } else {
       // Custom tool
       printInfo(`Launching custom tool: ${toolConfig.displayName}`);
