@@ -1,6 +1,19 @@
-import '@testing-library/jest-dom';
-import { cleanup } from '@testing-library/react';
-import { afterEach, beforeAll, afterAll } from 'vitest';
+import "@testing-library/jest-dom";
+import { cleanup } from "@testing-library/react";
+import { afterEach, beforeAll, afterAll, vi } from "vitest";
+
+// Vitest compatibility shims (bun env)
+if (!("hoisted" in vi)) {
+  // Fallback implementation for environments lacking vi.hoisted (e.g., older Vitest shim in Bun)
+  // Executes the initializer immediately; suitable for our test usage where isolation is not critical.
+  // @ts-expect-error - injected for compatibility
+  vi.hoisted = (factory: () => unknown) => factory();
+}
+
+if (!(vi as Record<string, unknown>).resetModules) {
+  // @ts-expect-error - provide stub if missing
+  vi.resetModules = async () => {};
+}
 
 // Cleanup after each test
 afterEach(() => {

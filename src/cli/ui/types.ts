@@ -5,6 +5,18 @@ export interface WorktreeInfo {
   isAccessible?: boolean;
 }
 
+export type AITool = string;
+export type InferenceLevel = "low" | "medium" | "high" | "xhigh";
+
+export interface ModelOption {
+  id: string;
+  label: string;
+  description?: string;
+  inferenceLevels?: InferenceLevel[];
+  defaultInference?: InferenceLevel;
+  isDefault?: boolean;
+}
+
 export interface BranchInfo {
   name: string;
   type: "local" | "remote";
@@ -161,6 +173,7 @@ export type ScreenType =
   | "branch-creator"
   | "branch-action-selector"
   | "ai-tool-selector"
+  | "model-selector"
   | "session-selector"
   | "execution-mode-selector"
   | "batch-merge-progress"

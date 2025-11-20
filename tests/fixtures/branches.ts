@@ -1,4 +1,4 @@
-import type { BranchInfo } from "../../src/ui/types";
+import type { BranchInfo } from "../../src/cli/ui/types";
 
 /**
  * テスト用のローカルブランチデータ

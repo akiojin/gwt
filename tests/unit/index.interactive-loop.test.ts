@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { SelectionResult } from "../../src/ui/components/App.js";
+import type { SelectionResult } from "../../src/cli/ui/components/App.js";
 import { runInteractiveLoop } from "../../src/index.js";
 
 const waitForUserAcknowledgementMock = vi.hoisted(() =>
@@ -24,6 +24,7 @@ describe("runInteractiveLoop", () => {
     tool: "codex-cli" as any,
     mode: "normal" as any,
     skipPermissions: false,
+    model: "gpt-5.1-codex",
   };
 
   let consoleLogSpy: ReturnType<typeof vi.spyOn>;

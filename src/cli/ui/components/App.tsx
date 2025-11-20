@@ -14,14 +14,23 @@ import { BranchActionSelectorScreen } from "../screens/BranchActionSelectorScree
 import { AIToolSelectorScreen } from "./screens/AIToolSelectorScreen.js";
 import { SessionSelectorScreen } from "./screens/SessionSelectorScreen.js";
 import { ExecutionModeSelectorScreen } from "./screens/ExecutionModeSelectorScreen.js";
-import type { AITool } from "./screens/AIToolSelectorScreen.js";
 import type { ExecutionMode } from "./screens/ExecutionModeSelectorScreen.js";
+import {
+  ModelSelectorScreen,
+  type ModelSelectionResult,
+} from "./screens/ModelSelectorScreen.js";
 import type { WorktreeItem } from "./screens/WorktreeManagerScreen.js";
 import { useGitData } from "../hooks/useGitData.js";
 import { useScreenState } from "../hooks/useScreenState.js";
 import { formatBranchItems } from "../utils/branchFormatter.js";
 import { calculateStatistics } from "../utils/statisticsCalculator.js";
-import type { BranchInfo, BranchItem, SelectedBranchState } from "../types.js";
+import type {
+  AITool,
+  BranchInfo,
+  BranchItem,
+  InferenceLevel,
+  SelectedBranchState,
+} from "../types.js";
 import { getRepositoryRoot, deleteBranch } from "../../../git.js";
 import {
   createWorktree,
@@ -36,6 +45,10 @@ import {
   resolveBaseBranchLabel,
   resolveBaseBranchRef,
 } from "../utils/baseBranch.js";
+import {
+  getDefaultInferenceForModel,
+  getDefaultModelOption,
+} from "../utils/modelOptions.js";
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
 const COMPLETION_HOLD_DURATION_MS = 3000;
@@ -58,6 +71,8 @@ export interface SelectionResult {
   tool: AITool;
   mode: ExecutionMode;
   skipPermissions: boolean;
+  model?: string | null;
+  inferenceLevel?: InferenceLevel;
 }
 
 export interface AppProps {
@@ -90,6 +105,11 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
   const [creationSourceBranch, setCreationSourceBranch] =
     useState<SelectedBranchState | null>(null);
   const [selectedTool, setSelectedTool] = useState<AITool | null>(null);
+  const [selectedModel, setSelectedModel] =
+    useState<ModelSelectionResult | null>(null);
+  const [lastModelByTool, setLastModelByTool] = useState<
+    Record<AITool, ModelSelectionResult | undefined>
+  >({});
 
   // PR cleanup feedback
   const [cleanupIndicators, setCleanupIndicators] = useState<
@@ -365,6 +385,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
 
       setSelectedBranch(selection);
       setSelectedTool(null);
+      setSelectedModel(null);
       setCreationSourceBranch(null);
 
       if (protectedSelected) {
@@ -405,6 +426,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         branchCategory: inferBranchCategory(worktree.branch),
       });
       setSelectedTool(null);
+      setSelectedModel(null);
       setCreationSourceBranch(null);
       setCleanupFooterMessage(null);
       navigateTo("ai-tool-selector");
@@ -518,6 +540,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
           branchCategory: inferBranchCategory(branchName),
         });
         setSelectedTool(null);
+        setSelectedModel(null);
         setCleanupFooterMessage(null);
 
         navigateTo("ai-tool-selector");
@@ -726,9 +749,22 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
   const handleToolSelect = useCallback(
     (tool: AITool) => {
       setSelectedTool(tool);
+      setSelectedModel(lastModelByTool[tool] ?? null);
+      navigateTo("model-selector");
+    },
+    [lastModelByTool, navigateTo],
+  );
+
+  const handleModelSelect = useCallback(
+    (selection: ModelSelectionResult) => {
+      setSelectedModel(selection);
+      setLastModelByTool((prev) => ({
+        ...prev,
+        ...(selectedTool ? { [selectedTool]: selection } : {}),
+      }));
       navigateTo("execution-mode-selector");
     },
-    [navigateTo],
+    [navigateTo, selectedTool],
   );
 
   // Handle session selection
@@ -746,6 +782,13 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     (result: { mode: ExecutionMode; skipPermissions: boolean }) => {
       // All selections complete - exit with result
       if (selectedBranch && selectedTool) {
+        const defaultModel = getDefaultModelOption(selectedTool);
+        const resolvedModel =
+          selectedModel?.model ?? defaultModel?.id ?? null;
+        const resolvedInference =
+          selectedModel?.inferenceLevel ??
+          getDefaultInferenceForModel(defaultModel ?? undefined);
+
         const payload: SelectionResult = {
           branch: selectedBranch.name,
           displayName: selectedBranch.displayName,
@@ -753,6 +796,10 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
           tool: selectedTool,
           mode: result.mode,
           skipPermissions: result.skipPermissions,
+          ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+          ...(resolvedInference !== undefined
+            ? { inferenceLevel: resolvedInference }
+            : {}),
           ...(selectedBranch.remoteBranch
             ? { remoteBranch: selectedBranch.remoteBranch }
             : {}),
@@ -762,7 +809,15 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         exit();
       }
     },
-    [selectedBranch, selectedTool, onExit, exit],
+    [
+      selectedBranch,
+      selectedTool,
+      selectedModel,
+      onExit,
+      exit,
+      getDefaultModelOption,
+      getDefaultInferenceForModel,
+    ],
   );
 
   // Render screen based on currentScreen
@@ -843,6 +898,21 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
             onBack={goBack}
             onSelect={handleToolSelect}
             version={version}
+          />
+        );
+
+      case "model-selector":
+        if (!selectedTool) {
+          goBack();
+          return null;
+        }
+        return (
+          <ModelSelectorScreen
+            tool={selectedTool}
+            onBack={goBack}
+            onSelect={handleModelSelect}
+            version={version}
+            initialSelection={selectedModel}
           />
         );
 
