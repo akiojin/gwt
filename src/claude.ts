@@ -1,6 +1,5 @@
 import { execa } from "execa";
 import chalk from "chalk";
-import { platform } from "os";
 import { existsSync } from "fs";
 import { createChildStdio, getTerminalStreams } from "./utils/terminal.js";
 
@@ -231,7 +230,7 @@ export async function launchClaudeCode(
       errorMessage = `Failed to launch Claude Code: ${error.message || "Unknown error"}`;
     }
 
-    if (platform() === "win32") {
+    if (process.platform === "win32") {
       console.error(chalk.red("\n💡 Windows troubleshooting tips:"));
       if (hasLocalClaude) {
         console.error(
