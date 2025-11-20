@@ -15,6 +15,17 @@ if (!(vi as Record<string, unknown>).resetModules) {
   vi.resetModules = async () => {};
 }
 
+// Timer helpers used by some tests, provide no-op fallbacks when missing
+if (!(vi as Record<string, unknown>).advanceTimersByTimeAsync) {
+  // @ts-expect-error - missing in Bun's Vitest shim
+  vi.advanceTimersByTimeAsync = async (ms: number) =>
+    new Promise((resolve) => setTimeout(resolve, ms));
+}
+if (!(vi as Record<string, unknown>).clearAllTimers) {
+  // @ts-expect-error - missing in Bun's Vitest shim
+  vi.clearAllTimers = () => {};
+}
+
 // Cleanup after each test
 afterEach(() => {
   cleanup();
