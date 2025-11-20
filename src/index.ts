@@ -187,7 +187,18 @@ async function runDependencyInstallStep<T extends DependencyInstallResult>(
 
 async function waitForEnter(promptMessage: string): Promise<void> {
   if (!process.stdin.isTTY) {
+    // For non-interactive environments, resolve immediately.
     return;
+  }
+
+  // Ensure stdin is resumed and not in raw mode before using readline.
+  // This is crucial for environments where stdin might be paused or in raw mode
+  // by other libraries (like Ink.js).
+  if (typeof process.stdin.resume === "function") {
+    process.stdin.resume();
+  }
+  if (process.stdin.isRaw) {
+    process.stdin.setRawMode(false);
   }
 
   await new Promise<void>((resolve) => {
@@ -196,8 +207,23 @@ async function waitForEnter(promptMessage: string): Promise<void> {
       output: process.stdout,
     });
 
+    // Handle Ctrl+C to gracefully exit.
+    rl.on("SIGINT", () => {
+      rl.close();
+      // Restore stdin to a paused state before exiting.
+      if (typeof process.stdin.pause === "function") {
+        process.stdin.pause();
+      }
+      process.exit(0);
+    });
+
     rl.question(`${promptMessage}\n`, () => {
       rl.close();
+      // Pause stdin again to allow other parts of the application
+      // to take control if needed.
+      if (typeof process.stdin.pause === "function") {
+        process.stdin.pause();
+      }
       resolve();
     });
   });
@@ -513,9 +539,11 @@ export async function handleAIToolWorkflow(
       printWarning(
         "Resolve these divergences (e.g., rebase or merge) before launching to avoid conflicts.",
       );
-      await waitForEnter("Press Enter to continue.");
+      await waitForEnter(
+        "Press Enter to return to the main menu and resolve these issues manually.",
+      );
       printWarning(
-        "Skipping AI tool launch until divergences are resolved. Returning to main menu...",
+        "AI tool launch has been cancelled until divergences are resolved.",
       );
       return;
     } else if (fastForwardError) {
