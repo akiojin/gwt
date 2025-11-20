@@ -270,7 +270,7 @@ export async function launchClaudeCode(
  */
 async function isClaudeCommandAvailable(): Promise<boolean> {
   try {
-    const command = platform() === "win32" ? "where" : "which";
+    const command = process.platform === "win32" ? "where" : "which";
     await execa(command, ["claude"], { shell: true });
     return true;
   } catch {
