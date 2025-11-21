@@ -1,9 +1,24 @@
 import { describe, it, expect } from "vitest";
-import { getModelOptions, getDefaultInferenceForModel } from "./modelOptions.js";
+import {
+  getModelOptions,
+  getDefaultInferenceForModel,
+  getDefaultModelOption,
+} from "./modelOptions.js";
 
 const byId = (tool: string) => getModelOptions(tool).map((m) => m.id);
 
 describe("modelOptions", () => {
+  it("lists Claude official aliases and keeps default as recommended Sonnet 4.5", () => {
+    const ids = byId("claude-code");
+    expect(ids).toEqual([
+      "default",
+      "opus",
+      "haiku",
+    ]);
+    const defaultModel = getDefaultModelOption("claude-code");
+    expect(defaultModel?.id).toBe("default");
+  });
+
   it("has unique Codex models", () => {
     const ids = byId("codex-cli");
     const unique = new Set(ids);
