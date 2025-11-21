@@ -789,6 +789,16 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
           selectedModel?.inferenceLevel ??
           getDefaultInferenceForModel(defaultModel ?? undefined);
 
+        // Claude Code のデフォルトはモデル未指定が最も安定するため、default/sonnet/現行推奨IDの場合は --model を付けない
+        const isClaudeDefaultModel =
+          selectedTool === "claude-code" &&
+          (!resolvedModel ||
+            resolvedModel === "default" ||
+            resolvedModel === "sonnet" ||
+            resolvedModel === "claude-sonnet-4-5-20250929");
+
+        const modelForPayload = isClaudeDefaultModel ? undefined : resolvedModel;
+
         const payload: SelectionResult = {
           branch: selectedBranch.name,
           displayName: selectedBranch.displayName,
@@ -796,7 +806,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
           tool: selectedTool,
           mode: result.mode,
           skipPermissions: result.skipPermissions,
-          ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+          ...(modelForPayload !== undefined ? { model: modelForPayload } : {}),
           ...(resolvedInference !== undefined
             ? { inferenceLevel: resolvedInference }
             : {}),
