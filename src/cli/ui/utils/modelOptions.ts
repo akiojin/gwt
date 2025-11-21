@@ -6,20 +6,23 @@ const CODEX_MAX_LEVELS: InferenceLevel[] = ["xhigh", "high", "medium", "low"];
 const MODEL_OPTIONS: Record<string, ModelOption[]> = {
   "claude-code": [
     {
-      id: "claude-sonnet-4.5",
+      id: "default",
       label: "Default (recommended) — Sonnet 4.5",
-      description: "Smartest model for daily use (released Sep 29, 2025)",
+      description:
+        "Official default alias. Tracks the recommended Claude Code model (currently Sonnet 4.5) and shows as a standard model in /model.",
       isDefault: true,
     },
     {
-      id: "claude-opus-4.1",
+      id: "opus",
       label: "Opus 4.1",
-      description: "Legacy: Opus 4.1 · reaches usage limits faster",
+      description:
+        "Official Opus alias for Claude Code (non-custom, matches /model option).",
     },
     {
-      id: "claude-haiku-4.5",
+      id: "haiku",
       label: "Haiku 4.5",
-      description: "Fastest model for simple tasks (released Oct 15, 2025)",
+      description:
+        "Official Haiku alias for Claude Code (fastest model, non-custom).",
     },
   ],
   "codex-cli": [
