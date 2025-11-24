@@ -76,7 +76,7 @@
     "zustand": "^5.0.2"
   },
   "devDependencies": {
-    "@commitlint/cli": "^19.6.2",
+    "@commitlint/cli": "^20.1.0",
     "@commitlint/config-conventional": "^19.6.2",
     "@playwright/test": "^1.51.0",
     "@semantic-release/changelog": "^6.0.3",
