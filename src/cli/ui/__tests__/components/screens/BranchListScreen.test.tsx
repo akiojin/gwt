@@ -588,16 +588,12 @@ describe("BranchListScreen", () => {
     });
 
     it("should disable other key bindings (m, c, r) while typing in filter", () => {
-      // Note: Input component uses blockKeys prop to prevent c/r/m/f from
-      // triggering shortcuts while typing in the filter field
-      // This test verifies the intended behavior (though KeyboardEvent
-      // may not work correctly in test environment)
       const onSelect = vi.fn();
       const onNavigate = vi.fn();
       const onCleanupCommand = vi.fn();
       const onRefresh = vi.fn();
 
-      const { container } = render(
+      const inkApp = inkRender(
         <BranchListScreen
           branches={mockBranches}
           stats={mockStats}
@@ -608,28 +604,21 @@ describe("BranchListScreen", () => {
         />,
       );
 
-      // Enter filter mode
-      const fKeyEvent = new (globalThis.window as any).KeyboardEvent(
-        "keydown",
-        { key: "f" },
-      );
-      document.dispatchEvent(fKeyEvent);
-
-      // When user types in filter, Input component blocks c/r/m/f keys
-      // Press m, c, r keys (should be blocked by Input's blockKeys)
-      ["m", "c", "r"].forEach((key) => {
-        const keyEvent = new (globalThis.window as any).KeyboardEvent(
-          "keydown",
-          { key },
-        );
-        document.dispatchEvent(keyEvent);
+      act(() => {
+        inkApp.stdin.write("f"); // enter filter mode
       });
 
-      // None of the callbacks should be called (keys are blocked)
-      // Note: This may fail in test environment due to KeyboardEvent limitations
+      act(() => {
+        inkApp.stdin.write("c");
+        inkApp.stdin.write("r");
+        inkApp.stdin.write("m");
+      });
+
       expect(onNavigate).not.toHaveBeenCalled();
       expect(onCleanupCommand).not.toHaveBeenCalled();
       expect(onRefresh).not.toHaveBeenCalled();
+
+      inkApp.unmount();
     });
 
     it("should display match count when filtering", () => {

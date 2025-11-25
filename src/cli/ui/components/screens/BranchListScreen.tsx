@@ -147,6 +147,11 @@ export function BranchListScreen({
       return;
     }
 
+    // Disable global shortcuts while in filter mode
+    if (filterMode) {
+      return;
+    }
+
     // Global shortcuts (blocked by Input component when typing in filter mode)
     if (input === "m" && onNavigate) {
       onNavigate("worktree-manager");
