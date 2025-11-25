@@ -2,18 +2,18 @@
 
 [English](README.md)
 
-Claude Code / Codex CLI 対応の対話型Gitワークツリーマネージャー（グラフィカルなブランチ選択と高度なワークフロー管理機能付き）
+Claude Code / Codex CLI / Gemini CLI 対応の対話型Gitワークツリーマネージャー（グラフィカルなブランチ選択と高度なワークフロー管理機能付き）
 
 ## 概要
 
-`@akiojin/gwt`は、直感的なインターフェースを通じてGitワークツリー管理を革新する強力なCLIツールです。Claude Code / Codex CLI の開発ワークフローとシームレスに統合し、インテリジェントなブランチ選択、自動ワークツリー作成、包括的なプロジェクト管理機能を提供します。
+`@akiojin/gwt`は、直感的なインターフェースを通じてGitワークツリー管理を革新する強力なCLIツールです。Claude Code / Codex CLI / Gemini CLI / Qwen CLI の開発ワークフローとシームレスに統合し、インテリジェントなブランチ選択、自動ワークツリー作成、包括的なプロジェクト管理機能を提供します。
 
 ## ✨ 主要機能
 
 - 🎯 **対話型ブランチ選択**: ブランチ種別・ワークツリー・変更状態アイコンに加え配置インジケータ枠（左=L, 右=R, リモートのみ=☁）で所在を示し、リモート名の `origin/` を省いたシンプルなリストで判別しやすく、現在の選択は `>` プレフィックスで強調されるため誤操作を防止
 - 🌟 **スマートブランチ作成**: ガイド付きプロンプトと自動ベースブランチ選択でfeature、bugfix、hotfix、releaseブランチを作成
 - 🔄 **高度なワークツリー管理**: 作成、クリーンアップ、パス最適化を含む完全なライフサイクル管理
-- 🤖 **AIツール選択**: 起動時の対話型ランチャーで Claude Code / Codex CLI を選択
+- 🤖 **AIツール選択**: 起動時の対話型ランチャーで Claude Code / Codex CLI / Gemini CLI / Qwen CLI を選択
 - 🚀 **AIツール統合**: 選択したツールをワークツリーで起動（Claude Codeは権限設定・変更処理の統合あり）
 - 📊 **GitHub PR統合**: マージされたプルリクエストのブランチとワークツリーの自動クリーンアップ
 - 🛠️ **変更管理**: 開発セッション後のコミット、stash、破棄の内蔵サポート
@@ -114,7 +114,7 @@ gwt -v
 2. CIワークフロー（Test、Lint）が自動実行
 3. すべてのCIチェックが成功し、競合がない場合、PRが自動的に`develop`にマージされる
 4. 変更は`develop`に蓄積され、リリース準備ができるまで待機
-5. `/release`コマンドを使用して`develop`を`main`にマージし、semantic-releaseをトリガー
+5. `/release`コマンドを使用してRelease PRを作成し、release-pleaseをトリガー
 
 **自動マージの無効化:**
 
@@ -129,7 +129,7 @@ gwt -v
 - **Node.js**（任意）: Nodeベースの開発ツール利用時は >= 18.0.0 を推奨
 - **pnpm**: >= 8.0.0（CI/CD・Docker環境用 - ハードリンクによるnode_modules効率化）
 - **Git**: ワークツリーサポート付き最新版
-- **AIツール**: 少なくともいずれかが必要（Claude Code もしくは Codex CLI）
+- **AIツール**: 少なくともいずれかが必要（Claude Code、Codex CLI、Gemini CLI、または Qwen CLI）
 - **GitHub CLI**: PR クリーンアップ機能に必要（オプション）
 - **Python**: >= 3.11（Spec Kit CLIに必要）
 - **uv**: Pythonパッケージマネージャー（Spec Kit CLIに必要）
@@ -184,6 +184,8 @@ Claude Code で以下のコマンドを実行して、仕様駆動開発を活�
 │   ├── worktree.ts      # ワークツリー作成と管理
 │   ├── claude.ts        # Claude Code 統合
 │   ├── codex.ts         # Codex CLI 統合
+│   ├── gemini.ts        # Gemini CLI 統合
+│   ├── qwen.ts          # Qwen CLI 統合
 │   ├── github.ts        # GitHub CLI統合
 │   ├── utils.ts         # ユーティリティ関数とエラーハンドリング
 │   └── ui/              # ユーザーインターフェースコンポーネント

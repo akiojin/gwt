@@ -146,7 +146,7 @@ describe("launchClaudeCode - Root User Detection", () => {
 
       await launchClaudeCode("/test/path", { skipPermissions: true });
 
-      // Verify execa was called without IS_SANDBOX=1
+      // Verify sandbox env is injected even for non-root users
       // 2nd call should be bunx (1st call is which/where check)
       expect(mockResolveClaudeCommand).toHaveBeenCalledWith(
         expect.objectContaining({ skipPermissions: true }),
@@ -160,7 +160,9 @@ describe("launchClaudeCode - Root User Detection", () => {
           stdin: "inherit",
           stdout: "inherit",
           stderr: "inherit",
-          env: process.env,
+          env: expect.objectContaining({
+            IS_SANDBOX: "1",
+          }),
         }),
       );
     });
@@ -181,7 +183,7 @@ describe("launchClaudeCode - Root User Detection", () => {
 
       await launchClaudeCode("/test/path", { skipPermissions: true });
 
-      // Verify execa was called without IS_SANDBOX=1 (fallback to non-root)
+      // Verify sandbox env is injected even when getuid is unavailable
       // 2nd call should be bunx (1st call is which/where check)
       expect(mockResolveClaudeCommand).toHaveBeenCalledWith(
         expect.objectContaining({ skipPermissions: true }),
@@ -195,7 +197,9 @@ describe("launchClaudeCode - Root User Detection", () => {
           stdin: "inherit",
           stdout: "inherit",
           stderr: "inherit",
-          env: process.env,
+          env: expect.objectContaining({
+            IS_SANDBOX: "1",
+          }),
         }),
       );
     });
@@ -557,7 +561,12 @@ describe("launchClaudeCode - Root User Detection", () => {
           "--dangerously-skip-permissions",
           "--verbose", // extra args
         ]),
-        expect.anything(),
+        expect.objectContaining({
+          cwd: "/test/path",
+          env: expect.objectContaining({
+            IS_SANDBOX: "1",
+          }),
+        }),
       );
     });
 

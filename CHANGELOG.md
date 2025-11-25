@@ -1,3 +1,99 @@
+## [2.6.1](https://github.com/akiojin/gwt/compare/v2.6.0...v2.6.1) (2025-11-25)
+
+
+### Bug Fixes
+
+* ensure claude skipPermissions uses sandbox env ([b24b3ea](https://github.com/akiojin/gwt/commit/b24b3ea7e7845ad13cc73ddc81cdde6ad2e445c9))
+* アイコン幅計測を補正してブランチ行の日時折り返しを防止 ([7d52a01](https://github.com/akiojin/gwt/commit/7d52a01405a8b1c6845d1043bc06b84b257bb597))
+* タイムスタンプ右寄せに安全マージンを設けて改行を防止 ([c8c5b78](https://github.com/akiojin/gwt/commit/c8c5b7846815269dac13ce5c1175b18d4564df95))
+* 実幅を過小評価しないよう文字幅計測と整列テストを更新 ([765cdd4](https://github.com/akiojin/gwt/commit/765cdd48a5529c11eaed01b8db19473b60820f8a))
+* 実行モード表示をNewに変更 ([9850729](https://github.com/akiojin/gwt/commit/98507299f4c550968711be72ce6fe97f6b55a42a))
+* 幅オーバーライドとアイコン計測のずれで発生する改行を再修正 ([3bdbb64](https://github.com/akiojin/gwt/commit/3bdbb647d18864275d5dd06cb15e34b3b11b3193))
+* 幅計測ヘルパー欠落による型エラーを解消 ([788413b](https://github.com/akiojin/gwt/commit/788413b82b0fa2f18af3e0759cda03ed30157a6b))
+
+# [2.6.0](https://github.com/akiojin/gwt/compare/v2.5.0...v2.6.0) (2025-11-25)
+
+
+### Bug Fixes
+
+* prevent false positives in git hook detection ([e5c0f32](https://github.com/akiojin/gwt/commit/e5c0f324f02ba934ef447685eead6aea12b4bdd5))
+* renderBranchRowのcursorAdjustロジックを復元してテスト互換性を維持 ([9f4f10e](https://github.com/akiojin/gwt/commit/9f4f10eeaf25b2fe0e773098bc72337f5d10ac08))
+* string-width v8対応のためWIDTH_OVERRIDESにVariation Selector付きアイコンを追加 ([c8f5b9b](https://github.com/akiojin/gwt/commit/c8f5b9bac9be76a0351aee06c9e4ebea00fb7cf4))
+* 全アイコンの幅オーバーライドを追加してタイムスタンプ折り返しを修正 ([06a7e5d](https://github.com/akiojin/gwt/commit/06a7e5dbf1a62f831db05d9b2ee67a6552945256))
+* 全ての幅計算をmeasureDisplayWidthに統一してstring-width v8対応を完了 ([6f7d1ce](https://github.com/akiojin/gwt/commit/6f7d1ceaa97ad99f61e3f0967ccc80dbd9a90d72))
+
+
+### Features
+
+* set upstream tracking for newly created refs ([7a631a1](https://github.com/akiojin/gwt/commit/7a631a132f7fc99f207dfa1b7d1e10a841fda27f))
+
+# [2.5.0](https://github.com/akiojin/gwt/compare/v2.4.1...v2.5.0) (2025-11-25)
+
+
+### Bug Fixes
+
+* ensure selected model ID is passed to launcher for Claude Code ([1b2b884](https://github.com/akiojin/gwt/commit/1b2b884835743d9143b0b2a5e4c9234af4d1009a))
+* omit --model flag when default Opus 4.5 is selected ([08828e3](https://github.com/akiojin/gwt/commit/08828e38a592e31691ef985b5008dea807e8918c))
+
+
+### Features
+
+* add Sonnet 4.5 as an explicit model option ([2a52c91](https://github.com/akiojin/gwt/commit/2a52c91faacb8d8c6422c80051bb611757464ddf))
+* set Opus 4.5 as default and remove explicit Default option ([86f60fa](https://github.com/akiojin/gwt/commit/86f60fadd8232920bf01f457a370bd2243066f0e))
+* update default Claude Code model to Opus 4.5 ([1dd909e](https://github.com/akiojin/gwt/commit/1dd909ed87a55ce3bb796deb0431d0027571dae2))
+* update Opus model version to 4.5 ([307faeb](https://github.com/akiojin/gwt/commit/307faeb66ebac0ca89b01c07ee19d213797c4d5c))
+
+## [2.4.1](https://github.com/akiojin/gwt/compare/v2.4.0...v2.4.1) (2025-11-21)
+
+
+### Bug Fixes
+
+* Claude Codeのデフォルトモデル指定を標準扱いに修正 ([3acb5c7](https://github.com/akiojin/gwt/commit/3acb5c7b18dc40e3fe7c9723400389fe633a125a))
+* **cli:** ターミナル入力がフリーズする問題を修正 ([c6752f3](https://github.com/akiojin/gwt/commit/c6752f3fc0153f3f279b49a77636ebee8154a624))
+* フィルターモードでショートカットを無効化 ([96d6f2d](https://github.com/akiojin/gwt/commit/96d6f2d27894cd7f1a46c6861ea4343f34223570))
+
+# [2.4.0](https://github.com/akiojin/gwt/compare/v2.3.0...v2.4.0) (2025-11-20)
+
+
+### Bug Fixes
+
+* Improve git hook detection for commands with options ([8f4f9a5](https://github.com/akiojin/gwt/commit/8f4f9a5d5a784c171e30efb100a733a6dced9c40))
+* use process.platform in claude command availability ([338e779](https://github.com/akiojin/gwt/commit/338e7798825546503c31c77d6dbfb85805c50042))
+
+
+### Features
+
+* align model selection with provider defaults ([cc8c863](https://github.com/akiojin/gwt/commit/cc8c863e6ce14aa57601deccd6471ca6c0aaa540))
+* QwenサポートをREADMEに追加し、GEMINI.mdを作成 ([4fa1491](https://github.com/akiojin/gwt/commit/4fa14914941593b330efa7486eef3772e387f330))
+* remember last model and reasoning selection per tool ([01b5124](https://github.com/akiojin/gwt/commit/01b5124409b13763d8b792493ef72442714cf4f9))
+
+# [2.3.0](https://github.com/akiojin/gwt/compare/v2.2.0...v2.3.0) (2025-11-19)
+
+
+### Features
+
+* Codex/Geminiの表示名を簡潔化 ([cc8bdb2](https://github.com/akiojin/gwt/commit/cc8bdb25617de58c79dda5b53134fc2a3ac89aa2))
+* Gemini CLIをビルトインツールとして追加 ([0e80363](https://github.com/akiojin/gwt/commit/0e80363ae81fdf61c00ae55dbecf8b2cecd677e4))
+* Qwenをビルトインツールとして追加 ([b4f6c94](https://github.com/akiojin/gwt/commit/b4f6c9476f6675bdc4e27006b60868ee14f07dae))
+
+# [2.2.0](https://github.com/akiojin/gwt/compare/v2.1.1...v2.2.0) (2025-11-18)
+
+
+### Bug Fixes
+
+* フィルターモード中でもブランチ選択のカーソル移動を可能に ([c00564a](https://github.com/akiojin/gwt/commit/c00564a0ffa4d3fc5fe05a800e8454b821e79421))
+* フィルター入力とStatsの間の空行を削除 ([054f092](https://github.com/akiojin/gwt/commit/054f092a18f06a752326d1a38670d2f4323c6e21))
+* フィルター入力の表示位置をWorking DirectoryとStatsの間に修正 ([57dd905](https://github.com/akiojin/gwt/commit/57dd9052b7032f8a1173b0d228ec67a186857e0d))
+* ブランチ選択モードでのカーソル反転表示を修正 ([fda28a1](https://github.com/akiojin/gwt/commit/fda28a1d0008555c96d6859a031cc4486ad4f94e))
+
+
+### Features
+
+* fキーでフィルター・検索モードを追加 ([481ab67](https://github.com/akiojin/gwt/commit/481ab678576642dbb01e5bfe57b58a2cc5da011d))
+* フィルターモード/ブランチ選択モードの切り替え機能を追加 ([c1e87bc](https://github.com/akiojin/gwt/commit/c1e87bc4557b7e343f72e51635f33a79f10979de))
+* フィルターモード中もブランチ選択の反転表示を有効化 ([a3b8eca](https://github.com/akiojin/gwt/commit/a3b8eca8212e481dde5665e34b7e8894155399af))
+* フィルター入力中のキーバインド(c/r/m)を無効化＋要件・テスト更新 ([232f66c](https://github.com/akiojin/gwt/commit/232f66cb114ac2fb47b294c71a9aa66afad8c297))
+
 ## [2.1.1](https://github.com/akiojin/gwt/compare/v2.1.0...v2.1.1) (2025-11-18)
 
 

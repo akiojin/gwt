@@ -61,7 +61,7 @@ export function BranchGraph({ branches }: BranchGraphProps) {
 
       if (!laneMap.has(base)) {
         const baseNode =
-          base !== UNKNOWN_BASE ? branchMap.get(base) ?? null : null;
+          base !== UNKNOWN_BASE ? (branchMap.get(base) ?? null) : null;
         laneMap.set(base, {
           id: base,
           baseLabel: base === UNKNOWN_BASE ? "ベース不明" : base,
@@ -103,7 +103,8 @@ export function BranchGraph({ branches }: BranchGraphProps) {
           <p className="branch-graph-panel__eyebrow">BRANCH GRAPH</p>
           <h2>ベースブランチの関係をグラフィカルに把握</h2>
           <p>
-            baseRef、Git upstream、merge-baseヒューリスティクスを用いて推定したベースブランチ単位で
+            baseRef、Git
+            upstream、merge-baseヒューリスティクスを用いて推定したベースブランチ単位で
             派生ノードをレーン表示します。
           </p>
         </div>

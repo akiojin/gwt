@@ -1,5 +1,5 @@
 import type { MergedPullRequest } from "../../src/github";
-import type { CleanupTarget } from "../../src/ui/types";
+import type { CleanupTarget } from "../../src/cli/ui/types";
 
 /**
  * テスト用のマージ済みPRデータ

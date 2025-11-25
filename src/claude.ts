@@ -1,7 +1,6 @@
 import { execa } from "execa";
 import type { Options as ExecaOptions } from "execa";
 import chalk from "chalk";
-import { platform } from "os";
 import { existsSync } from "fs";
 import { createChildStdio, getTerminalStreams } from "./utils/terminal.js";
 import {
@@ -28,6 +27,7 @@ export async function launchClaudeCode(
     mode?: "normal" | "continue" | "resume";
     extraArgs?: string[];
     envOverrides?: Record<string, string>;
+    model?: string;
   } = {},
 ): Promise<void> {
   const terminal = getTerminalStreams();
@@ -41,6 +41,13 @@ export async function launchClaudeCode(
     console.log(chalk.blue("🚀 Launching Claude Code..."));
     console.log(chalk.gray(`   Working directory: ${worktreePath}`));
 
+    if (options.model && options.model !== "opus") {
+      console.log(chalk.green(`   🎯 Model: ${options.model}`));
+    } else if (options.model === "opus") {
+      console.log(chalk.green(`   🎯 Model: ${options.model} (Default)`));
+    }
+
+    // Handle execution mode
     switch (options.mode) {
       case "continue":
         console.log(chalk.cyan("   📱 Continuing most recent conversation"));
@@ -174,7 +181,7 @@ export async function launchClaudeCode(
       errorMessage = `Failed to launch Claude Code: ${fallbackMessage}`;
     }
 
-    if (platform() === "win32") {
+    if (process.platform === "win32") {
       console.error(chalk.red("\n💡 Windows troubleshooting tips:"));
       if (lastResolvedCommand && !lastResolvedCommand.usesFallback) {
         console.error(

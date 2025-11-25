@@ -56,10 +56,20 @@ vi.mock("../../src/utils/terminal", () => ({
 }));
 
 import { execa } from "execa";
-import { launchCodexCLI } from "../../src/codex";
+import {
+  DEFAULT_CODEX_MODEL,
+  DEFAULT_CODEX_REASONING_EFFORT,
+  buildDefaultCodexArgs,
+  launchCodexCLI,
+} from "../../src/codex";
 
 // Get typed mock
 const mockExeca = execa as ReturnType<typeof vi.fn>;
+
+const DEFAULT_CODEX_ARGS = buildDefaultCodexArgs(
+  DEFAULT_CODEX_MODEL,
+  DEFAULT_CODEX_REASONING_EFFORT,
+);
 
 describe("codex.ts", () => {
   const worktreePath = "/tmp/worktree";
@@ -133,6 +143,19 @@ describe("codex.ts", () => {
     expect(mockResolveCodexCommand).toHaveBeenCalledWith(
       expect.objectContaining({ bypassApprovals: true }),
     );
+  });
+
+  it("applies provided model and reasoning effort overrides", async () => {
+    await launchCodexCLI(worktreePath, {
+      model: "gpt-5.1-codex-max",
+      reasoningEffort: "xhigh",
+    });
+
+    const [, args] = (execa as any).mock.calls[0];
+    expect(args).toEqual([
+      "@openai/codex@latest",
+      ...buildDefaultCodexArgs("gpt-5.1-codex-max", "xhigh"),
+    ]);
   });
 
   it("should hand off fallback file descriptors when stdin is not a TTY", async () => {

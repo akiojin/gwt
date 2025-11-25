@@ -21,7 +21,9 @@ const KEY_PATTERN = /^[A-Z0-9_]+$/;
 
 export function createEnvRow(variable?: Partial<EnvRow>): EnvRow {
   const row: EnvRow = {
-    id: variable?.id ?? `env-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    id:
+      variable?.id ??
+      `env-${Date.now()}-${Math.random().toString(36).slice(2)}`,
     key: variable?.key ?? "",
     value: variable?.value ?? "",
   };
@@ -49,13 +51,20 @@ export function EnvEditor({
   allowAdd = true,
   emptyLabel = "環境変数はまだありません",
 }: EnvEditorProps) {
-  const handleFieldChange = (id: string, field: "key" | "value", value: string) => {
+  const handleFieldChange = (
+    id: string,
+    field: "key" | "value",
+    value: string,
+  ) => {
     onChange(
       rows.map((row) =>
         row.id === id
           ? {
               ...row,
-              [field]: field === "key" ? value.toUpperCase().replace(/[^A-Z0-9_]/g, "_") : value,
+              [field]:
+                field === "key"
+                  ? value.toUpperCase().replace(/[^A-Z0-9_]/g, "_")
+                  : value,
             }
           : row,
       ),
@@ -75,10 +84,16 @@ export function EnvEditor({
       <header className="env-editor__header">
         <div>
           <h3>{title}</h3>
-          {description && <p className="env-editor__description">{description}</p>}
+          {description && (
+            <p className="env-editor__description">{description}</p>
+          )}
         </div>
         {allowAdd && (
-          <button type="button" className="button button--secondary" onClick={handleAdd}>
+          <button
+            type="button"
+            className="button button--secondary"
+            onClick={handleAdd}
+          >
             変数を追加
           </button>
         )}
@@ -99,29 +114,47 @@ export function EnvEditor({
             {rows.map((row) => {
               const keyInvalid = isInvalidKey(row);
               return (
-                <tr key={row.id} className={keyInvalid ? "env-editor__row--invalid" : undefined}>
+                <tr
+                  key={row.id}
+                  className={
+                    keyInvalid ? "env-editor__row--invalid" : undefined
+                  }
+                >
                   <td>
                     <input
                       type="text"
                       value={row.key}
-                      onChange={(event) => handleFieldChange(row.id, "key", event.target.value)}
+                      onChange={(event) =>
+                        handleFieldChange(row.id, "key", event.target.value)
+                      }
                       placeholder="EXAMPLE_KEY"
                     />
                     {row.importedFromOs && (
-                      <span className="pill pill--info" style={{ marginLeft: "0.5rem" }}>
+                      <span
+                        className="pill pill--info"
+                        style={{ marginLeft: "0.5rem" }}
+                      >
                         OSから取り込み
                       </span>
                     )}
                     {row.lastUpdated && (
-                      <span className="env-editor__meta">更新: {new Date(row.lastUpdated).toLocaleString()}</span>
+                      <span className="env-editor__meta">
+                        更新: {new Date(row.lastUpdated).toLocaleString()}
+                      </span>
                     )}
-                    {keyInvalid && <p className="env-editor__error">A-Z,0-9,_ のみ使用できます</p>}
+                    {keyInvalid && (
+                      <p className="env-editor__error">
+                        A-Z,0-9,_ のみ使用できます
+                      </p>
+                    )}
                   </td>
                   <td>
                     <input
                       type="text"
                       value={row.value}
-                      onChange={(event) => handleFieldChange(row.id, "value", event.target.value)}
+                      onChange={(event) =>
+                        handleFieldChange(row.id, "value", event.target.value)
+                      }
                       placeholder="値"
                     />
                   </td>

@@ -10,7 +10,13 @@ import {
   GitError,
 } from "./git.js";
 import { launchClaudeCode } from "./claude.js";
-import { launchCodexCLI, CodexError } from "./codex.js";
+import {
+  launchCodexCLI,
+  CodexError,
+  type CodexReasoningEffort,
+} from "./codex.js";
+import { launchGeminiCLI, GeminiError } from "./gemini.js";
+import { launchQwenCLI, QwenError } from "./qwen.js";
 import {
   WorktreeOrchestrator,
   type EnsureWorktreeOptions,
@@ -96,6 +102,8 @@ function isRecoverableError(error: unknown): boolean {
     error instanceof GitError ||
     error instanceof WorktreeError ||
     error instanceof CodexError ||
+    error instanceof GeminiError ||
+    error instanceof QwenError ||
     error instanceof DependencyInstallError
   ) {
     return true;
@@ -106,6 +114,8 @@ function isRecoverableError(error: unknown): boolean {
       error.name === "GitError" ||
       error.name === "WorktreeError" ||
       error.name === "CodexError" ||
+      error.name === "GeminiError" ||
+      error.name === "QwenError" ||
       error.name === "DependencyInstallError"
     );
   }
@@ -119,6 +129,8 @@ function isRecoverableError(error: unknown): boolean {
       name === "GitError" ||
       name === "WorktreeError" ||
       name === "CodexError" ||
+      name === "GeminiError" ||
+      name === "QwenError" ||
       name === "DependencyInstallError"
     );
   }
@@ -175,7 +187,18 @@ async function runDependencyInstallStep<T extends DependencyInstallResult>(
 
 async function waitForEnter(promptMessage: string): Promise<void> {
   if (!process.stdin.isTTY) {
+    // For non-interactive environments, resolve immediately.
     return;
+  }
+
+  // Ensure stdin is resumed and not in raw mode before using readline.
+  // This is crucial for environments where stdin might be paused or in raw mode
+  // by other libraries (like Ink.js).
+  if (typeof process.stdin.resume === "function") {
+    process.stdin.resume();
+  }
+  if (process.stdin.isRaw) {
+    process.stdin.setRawMode(false);
   }
 
   await new Promise<void>((resolve) => {
@@ -184,8 +207,23 @@ async function waitForEnter(promptMessage: string): Promise<void> {
       output: process.stdout,
     });
 
+    // Handle Ctrl+C to gracefully exit.
+    rl.on("SIGINT", () => {
+      rl.close();
+      // Restore stdin to a paused state before exiting.
+      if (typeof process.stdin.pause === "function") {
+        process.stdin.pause();
+      }
+      process.exit(0);
+    });
+
     rl.question(`${promptMessage}\n`, () => {
       rl.close();
+      // Pause stdin again to allow other parts of the application
+      // to take control if needed.
+      if (typeof process.stdin.pause === "function") {
+        process.stdin.pause();
+      }
       resolve();
     });
   });
@@ -284,11 +322,17 @@ export async function handleAIToolWorkflow(
     tool,
     mode,
     skipPermissions,
+    model,
+    inferenceLevel,
   } = selectionResult;
 
   const branchLabel = displayName ?? branch;
+  const modelInfo =
+    model || inferenceLevel
+      ? `, model=${model ?? "default"}${inferenceLevel ? `/${inferenceLevel}` : ""}`
+      : "";
   printInfo(
-    `Selected: ${branchLabel} with ${tool} (${mode} mode, skipPermissions: ${skipPermissions})`,
+    `Selected: ${branchLabel} with ${tool} (${mode} mode${modelInfo}, skipPermissions: ${skipPermissions})`,
   );
 
   try {
@@ -495,9 +539,11 @@ export async function handleAIToolWorkflow(
       printWarning(
         "Resolve these divergences (e.g., rebase or merge) before launching to avoid conflicts.",
       );
-      await waitForEnter("Press Enter to continue.");
+      await waitForEnter(
+        "Press Enter to return to the main menu and resolve these issues manually.",
+      );
       printWarning(
-        "Skipping AI tool launch until divergences are resolved. Returning to main menu...",
+        "AI tool launch has been cancelled until divergences are resolved.",
       );
       return;
     } else if (fastForwardError) {
@@ -520,7 +566,12 @@ export async function handleAIToolWorkflow(
     // Builtin tools use their dedicated launch functions
     // Custom tools use the generic launchCustomAITool function
     if (tool === "claude-code") {
-      await launchClaudeCode(worktreePath, {
+      const launchOptions: {
+        mode?: "normal" | "continue" | "resume";
+        skipPermissions?: boolean;
+        envOverrides?: Record<string, string>;
+        model?: string;
+      } = {
         mode:
           mode === "resume"
             ? "resume"
@@ -529,9 +580,19 @@ export async function handleAIToolWorkflow(
               : "normal",
         skipPermissions,
         envOverrides: sharedEnv,
-      });
+      };
+      if (model) {
+        launchOptions.model = model;
+      }
+      await launchClaudeCode(worktreePath, launchOptions);
     } else if (tool === "codex-cli") {
-      await launchCodexCLI(worktreePath, {
+      const launchOptions: {
+        mode?: "normal" | "continue" | "resume";
+        bypassApprovals?: boolean;
+        envOverrides?: Record<string, string>;
+        model?: string;
+        reasoningEffort?: CodexReasoningEffort;
+      } = {
         mode:
           mode === "resume"
             ? "resume"
@@ -540,7 +601,54 @@ export async function handleAIToolWorkflow(
               : "normal",
         bypassApprovals: skipPermissions,
         envOverrides: sharedEnv,
-      });
+      };
+      if (model) {
+        launchOptions.model = model;
+      }
+      if (inferenceLevel) {
+        launchOptions.reasoningEffort = inferenceLevel as CodexReasoningEffort;
+      }
+      await launchCodexCLI(worktreePath, launchOptions);
+    } else if (tool === "gemini-cli") {
+      const launchOptions: {
+        mode?: "normal" | "continue" | "resume";
+        skipPermissions?: boolean;
+        envOverrides?: Record<string, string>;
+        model?: string;
+      } = {
+        mode:
+          mode === "resume"
+            ? "resume"
+            : mode === "continue"
+              ? "continue"
+              : "normal",
+        skipPermissions,
+        envOverrides: sharedEnv,
+      };
+      if (model) {
+        launchOptions.model = model;
+      }
+      await launchGeminiCLI(worktreePath, launchOptions);
+    } else if (tool === "qwen-cli") {
+      const launchOptions: {
+        mode?: "normal" | "continue" | "resume";
+        skipPermissions?: boolean;
+        envOverrides?: Record<string, string>;
+        model?: string;
+      } = {
+        mode:
+          mode === "resume"
+            ? "resume"
+            : mode === "continue"
+              ? "continue"
+              : "normal",
+        skipPermissions,
+        envOverrides: sharedEnv,
+      };
+      if (model) {
+        launchOptions.model = model;
+      }
+      await launchQwenCLI(worktreePath, launchOptions);
     } else {
       // Custom tool
       printInfo(`Launching custom tool: ${toolConfig.displayName}`);

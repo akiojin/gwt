@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import type { SelectionResult } from "../../src/ui/components/App.js";
+import type { SelectionResult } from "../../src/cli/ui/components/App.js";
 
 type ViWithDoMock = typeof vi & { doMock?: typeof vi.mock };
 const viWithDoMock = vi as unknown as ViWithDoMock;
@@ -26,6 +26,7 @@ describe("main error handling", () => {
         tool: "codex-cli",
         mode: "normal" as const,
         skipPermissions: false,
+        model: "gpt-5.1-codex",
       },
       undefined,
     ];
@@ -99,7 +100,7 @@ describe("main error handling", () => {
       };
     });
 
-    viWithDoMock.doMock?.("../../src/ui/components/App.js", () => ({
+    viWithDoMock.doMock?.("../../src/cli/ui/components/App.js", () => ({
       App: (props: unknown) => props,
     }));
 

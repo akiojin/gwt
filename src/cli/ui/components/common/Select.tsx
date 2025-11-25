@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
-import { Box, Text, useInput, useStdout } from 'ink';
+import React, { useEffect, useState } from "react";
+import { Box, Text, useInput, useStdout } from "ink";
 
 export interface SelectItem {
   label: string;
@@ -16,7 +16,7 @@ export interface SelectProps<T extends SelectItem = SelectItem> {
   renderItem?: (
     item: T,
     isSelected: boolean,
-    context: { columns: number }
+    context: { columns: number },
   ) => React.ReactNode;
   // Optional controlled component props for cursor position
   selectedIndex?: number;
@@ -31,7 +31,7 @@ export interface SelectProps<T extends SelectItem = SelectItem> {
  */
 function arePropsEqual<T extends SelectItem = SelectItem>(
   prevProps: SelectProps<T>,
-  nextProps: SelectProps<T>
+  nextProps: SelectProps<T>,
 ): boolean {
   // Check if non-array props are the same
   if (
@@ -63,7 +63,10 @@ function arePropsEqual<T extends SelectItem = SelectItem>(
       return false;
     }
 
-    if (prevItem.value !== nextItem.value || prevItem.label !== nextItem.label) {
+    if (
+      prevItem.value !== nextItem.value ||
+      prevItem.label !== nextItem.label
+    ) {
       return false;
     }
   }
@@ -77,7 +80,7 @@ function arePropsEqual<T extends SelectItem = SelectItem>(
  * Cursor stops at top and bottom instead of wrapping around
  * Wrapped with React.memo for performance optimization
  */
-const SelectComponent = <T extends SelectItem = SelectItem,>({
+const SelectComponent = <T extends SelectItem = SelectItem>({
   items,
   onSelect,
   limit,
@@ -91,15 +94,18 @@ const SelectComponent = <T extends SelectItem = SelectItem,>({
   onEscape,
 }: SelectProps<T>) => {
   // Support both controlled and uncontrolled modes
-  const [internalSelectedIndex, setInternalSelectedIndex] = useState(initialIndex);
+  const [internalSelectedIndex, setInternalSelectedIndex] =
+    useState(initialIndex);
   const [offset, setOffset] = useState(0);
 
   // Use external selectedIndex if provided (controlled mode), otherwise use internal state
   const isControlled = externalSelectedIndex !== undefined;
-  const selectedIndex = isControlled ? externalSelectedIndex : internalSelectedIndex;
+  const selectedIndex = isControlled
+    ? externalSelectedIndex
+    : internalSelectedIndex;
 
   const updateSelectedIndex = (value: number | ((prev: number) => number)) => {
-    const newIndex = typeof value === 'function' ? value(selectedIndex) : value;
+    const newIndex = typeof value === "function" ? value(selectedIndex) : value;
 
     if (!isControlled) {
       setInternalSelectedIndex(newIndex);
@@ -140,7 +146,7 @@ const SelectComponent = <T extends SelectItem = SelectItem,>({
 
     // Only handle navigation and selection keys
     // Let other keys (q, m, n, c, etc.) propagate to parent components
-    if (key.upArrow || input === 'k') {
+    if (key.upArrow || input === "k") {
       // Move up but don't loop - stop at 0
       updateSelectedIndex((current) => {
         const newIndex = Math.max(0, current - 1);
@@ -152,7 +158,7 @@ const SelectComponent = <T extends SelectItem = SelectItem,>({
 
         return newIndex;
       });
-    } else if (key.downArrow || input === 'j') {
+    } else if (key.downArrow || input === "j") {
       // Move down but don't loop - stop at last item
       updateSelectedIndex((current) => {
         const newIndex = Math.min(items.length - 1, current + 1);
@@ -202,11 +208,13 @@ const SelectComponent = <T extends SelectItem = SelectItem,>({
           );
         }
 
-        const indicatorElement = renderIndicator
-          ? renderIndicator(item, isSelected)
-          : isSelected
-            ? <Text color="cyan">›</Text>
-            : <Text> </Text>;
+        const indicatorElement = renderIndicator ? (
+          renderIndicator(item, isSelected)
+        ) : isSelected ? (
+          <Text color="cyan">›</Text>
+        ) : (
+          <Text> </Text>
+        );
 
         return (
           <Box key={item.value} flexDirection="row">
@@ -226,4 +234,7 @@ const SelectComponent = <T extends SelectItem = SelectItem,>({
 /**
  * Export memoized Select component
  */
-export const Select = React.memo(SelectComponent, arePropsEqual) as typeof SelectComponent;
+export const Select = React.memo(
+  SelectComponent,
+  arePropsEqual,
+) as typeof SelectComponent;
