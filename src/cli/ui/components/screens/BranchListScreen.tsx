@@ -252,12 +252,12 @@ export function BranchListScreen({
       return "";
     }
 
-    if (stringWidth(value) <= maxWidth) {
+    if (measureDisplayWidth(value) <= maxWidth) {
       return value;
     }
 
     const ellipsis = "…";
-    const ellipsisWidth = stringWidth(ellipsis);
+    const ellipsisWidth = measureDisplayWidth(ellipsis);
     if (ellipsisWidth >= maxWidth) {
       return ellipsis;
     }
@@ -265,8 +265,9 @@ export function BranchListScreen({
     let currentWidth = 0;
     let result = "";
 
-    for (const char of value) {
-      const charWidth = stringWidth(char);
+    for (const char of Array.from(value)) {
+      const override = WIDTH_OVERRIDES[char];
+      const charWidth = override !== undefined ? override : stringWidth(char);
       if (currentWidth + charWidth + ellipsisWidth > maxWidth) {
         break;
       }
@@ -306,7 +307,7 @@ export function BranchListScreen({
       }
       const indicatorPrefix = indicatorIcon ? `${indicatorIcon} ` : "";
       const staticPrefix = `${arrow} ${indicatorPrefix}`;
-      const staticPrefixWidth = stringWidth(staticPrefix);
+      const staticPrefixWidth = measureDisplayWidth(staticPrefix);
 
       const availableLeftWidth = Math.max(
         staticPrefixWidth,
@@ -316,23 +317,14 @@ export function BranchListScreen({
       const truncatedLabel = truncateToWidth(item.label, maxLabelWidth);
       const leftText = `${staticPrefix}${truncatedLabel}`;
 
-      const leftMeasuredWidth = stringWidth(leftText);
       const leftDisplayWidth = measureDisplayWidth(leftText);
-      const baseGapWidth = Math.max(
-        1,
-        columns - leftMeasuredWidth - timestampWidth,
-      );
-      const displayGapWidth = Math.max(
-        1,
-        columns - leftDisplayWidth - timestampWidth,
-      );
-      const cursorShift = Math.max(0, displayGapWidth - baseGapWidth);
+      const gapWidth = Math.max(1, columns - leftDisplayWidth - timestampWidth);
 
-      const gap = " ".repeat(baseGapWidth);
-      const cursorAdjust = cursorShift > 0 ? `\u001b[${cursorShift}C` : "";
+      const gap = " ".repeat(gapWidth);
 
-      let line = `${leftText}${gap}${cursorAdjust}${timestampText}`;
-      const paddingWidth = Math.max(0, columns - stringWidth(line));
+      let line = `${leftText}${gap}${timestampText}`;
+      const lineDisplayWidth = measureDisplayWidth(line);
+      const paddingWidth = Math.max(0, columns - lineDisplayWidth);
       if (paddingWidth > 0) {
         line += " ".repeat(paddingWidth);
       }
