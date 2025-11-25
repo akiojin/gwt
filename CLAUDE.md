@@ -36,13 +36,13 @@
 
 ### コミットメッセージポリシー
 
-> 🚨 **コミットログは semantic-release が参照する唯一の真実であり、ここに齟齬があるとリリースバージョン・CHANGELOG 生成が即座に破綻します。commitlint を素通りさせることは絶対に許されません。**
+> 🚨 **コミットログは release-please が参照する唯一の真実であり、ここに齟齬があるとリリースバージョン・CHANGELOG 生成が即座に破綻します。commitlint を素通りさせることは絶対に許されません。**
 
-- semantic-release によってバージョン判定とリリースノート生成を100%自動化しているため、コミットメッセージは例外なく Conventional Commits 形式（`feat:`/`fix:`/`docs:`/`chore:` ...）で記述する。
-- コミットを作成する前に、変更内容と Conventional Commits の種別（`feat`/`fix`/`docs` など）が 1 対 1 で一致しているかを厳格に突き合わせる。 semantic-release が付与するバージョン種別（major/minor/patch）がこの判定で決まるため、嘘の種類を付けた瞬間にバージョン管理が壊れる。
+- release-please によってバージョン判定とリリースノート生成を100%自動化しているため、コミットメッセージは例外なく Conventional Commits 形式（`feat:`/`fix:`/`docs:`/`chore:` ...）で記述する。
+- コミットを作成する前に、変更内容と Conventional Commits の種別（`feat`/`fix`/`docs` など）が 1 対 1 で一致しているかを厳格に突き合わせる。 release-please が付与するバージョン種別（major/minor/patch）がこの判定で決まるため、嘘の種類を付けた瞬間にバージョン管理が壊れる。
 - ローカルでは `bunx commitlint --from HEAD~1 --to HEAD` などで必ず自己検証し、CI の commitlint に丸投げしない。エラーが出た状態で push しない。
-- `feat:` はマイナーバージョン、`fix:` はパッチ、`type!:` もしくは本文の `BREAKING CHANGE:` はメジャー扱いになる。 breaking change を含む場合は例外なく `!` か `BREAKING CHANGE:` を記載し、semantic-release に破壊的変更を認識させる。
-- 1コミットで複数タスクを抱き合わせない。変更内容とコミットメッセージの対応関係を明確に保ち、semantic-release の解析精度を担保する。
+- `feat:` はマイナーバージョン、`fix:` はパッチ、`type!:` もしくは本文の `BREAKING CHANGE:` はメジャー扱いになる。 breaking change を含む場合は例外なく `!` か `BREAKING CHANGE:` を記載し、release-please に破壊的変更を認識させる。
+- 1コミットで複数タスクを抱き合わせない。変更内容とコミットメッセージの対応関係を明確に保ち、release-please の解析精度を担保する。
 - `chore:` や `docs:` などリリース対象外のタイプでも必ずプレフィックスを付け、曖昧な自然文だけのコミットメッセージを禁止する。
 - コミット前に commitlint ルール（subject 空欄禁止・100文字以内など）を自己確認し、CI での差し戻しを防止する。
 
@@ -79,9 +79,8 @@
 ## リリースワークフロー
 
 - feature/\* ブランチは develop へ Auto Merge し、develop で次回リリース候補を蓄積する。
-- `/release` コマンド（または `gh workflow run create-release.yml --ref develop`）で semantic-release のドライランを実行し、次のバージョンを決定して `release/vX.Y.Z` ブランチを自動作成する。
-- `release/vX.Y.Z` ブランチへの push をトリガーに `.github/workflows/release.yml` が以下を実行：
-  1. semantic-release で CHANGELOG/タグ/GitHub Release を作成
-  2. `release/vX.Y.Z` → `main` へ直接マージ
-  3. `release/vX.Y.Z` ブランチを削除
+- `/release` コマンド（または `gh workflow run create-release.yml --ref develop`）で release-please が Release PR を作成し、自動マージを有効化する。
+- Release PR が develop にマージされると `.github/workflows/release.yml` が以下を実行：
+  1. release-please でタグ・GitHub Release を作成
+  2. develop → main へマージ
 - main への push をトリガーに `.github/workflows/publish.yml` が npm publish（設定時）と `main` → `develop` のバックマージを実行する。
