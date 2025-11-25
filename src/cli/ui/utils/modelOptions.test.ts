@@ -13,6 +13,7 @@ describe("modelOptions", () => {
     const ids = options.map((m) => m.id);
     expect(ids).toEqual([
       "default",
+      "sonnet",
       "opus",
       "haiku",
     ]);

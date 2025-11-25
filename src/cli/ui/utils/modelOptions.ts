@@ -13,6 +13,12 @@ const MODEL_OPTIONS: Record<string, ModelOption[]> = {
       isDefault: true,
     },
     {
+      id: "sonnet",
+      label: "Sonnet 4.5",
+      description:
+        "Official Sonnet alias for Claude Code.",
+    },
+    {
       id: "opus",
       label: "Opus 4.5",
       description:
