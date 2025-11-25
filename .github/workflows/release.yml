@@ -11,32 +11,127 @@ permissions:
   pull-requests: write
 
 jobs:
-  release-please:
-    name: Release Please (tag & GitHub Release)
+  create-release:
+    name: Create Tag & GitHub Release
     runs-on: ubuntu-latest
+    # Only run for release commits (from Release PR merge)
+    if: startsWith(github.event.head_commit.message, 'chore(release):')
     outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
-      version: ${{ steps.release.outputs.version }}
+      release_created: ${{ steps.create_release.outputs.release_created }}
+      tag_name: ${{ steps.extract_version.outputs.tag_name }}
+      version: ${{ steps.extract_version.outputs.version }}
 
     steps:
-      - name: Run release-please
-        id: release
-        uses: googleapis/release-please-action@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           token: ${{ secrets.PERSONAL_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
-          release-type: node
-          manifest-file: .release-please-manifest.json
-          config-file: .release-please-config.json
-          target-branch: main
-          skip-github-pull-request: true
+
+      - name: Extract version from commit message
+        id: extract_version
+        run: |
+          COMMIT_MSG="${{ github.event.head_commit.message }}"
+          # Extract version from "chore(release): vX.Y.Z" or "chore(release): X.Y.Z"
+          VERSION=$(echo "$COMMIT_MSG" | grep -oP 'chore\(release\):\s*v?\K[0-9]+\.[0-9]+\.[0-9]+' || echo "")
+
+          if [ -z "$VERSION" ]; then
+            echo "Could not extract version from commit message: $COMMIT_MSG"
+            echo "has_version=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag_name=v$VERSION" >> $GITHUB_OUTPUT
+          echo "has_version=true" >> $GITHUB_OUTPUT
+          echo "Extracted version: $VERSION"
+
+      - name: Check if tag already exists
+        if: steps.extract_version.outputs.has_version == 'true'
+        id: check_tag
+        run: |
+          TAG="${{ steps.extract_version.outputs.tag_name }}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists"
+            echo "tag_exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "Tag $TAG does not exist"
+            echo "tag_exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate release notes
+        if: steps.extract_version.outputs.has_version == 'true' && steps.check_tag.outputs.tag_exists != 'true'
+        id: release_notes
+        run: |
+          # Get the previous tag
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+
+          if [ -z "$PREV_TAG" ]; then
+            COMMITS=$(git log --pretty=format:"- %s" HEAD)
+          else
+            COMMITS=$(git log --pretty=format:"- %s" "${PREV_TAG}..HEAD^")
+          fi
+
+          # Filter for conventional commits
+          FEATURES=$(echo "$COMMITS" | grep -E "^- feat(\(.+\))?:" || echo "")
+          FIXES=$(echo "$COMMITS" | grep -E "^- fix(\(.+\))?:" || echo "")
+          OTHERS=$(echo "$COMMITS" | grep -vE "^- (feat|fix|chore|docs|style|refactor|perf|test|build|ci)(\(.+\))?:" || echo "")
+
+          # Build release notes
+          NOTES="## What's Changed"$'\n\n'
+
+          if [ -n "$FEATURES" ]; then
+            NOTES+="### Features"$'\n'
+            NOTES+="$FEATURES"$'\n\n'
+          fi
+
+          if [ -n "$FIXES" ]; then
+            NOTES+="### Bug Fixes"$'\n'
+            NOTES+="$FIXES"$'\n\n'
+          fi
+
+          # Write to file for gh release
+          echo "$NOTES" > release_notes.md
+          echo "Generated release notes"
+
+      - name: Update manifest version
+        if: steps.extract_version.outputs.has_version == 'true' && steps.check_tag.outputs.tag_exists != 'true'
+        run: |
+          VERSION="${{ steps.extract_version.outputs.version }}"
+          echo "{\".\": \"$VERSION\"}" > .release-please-manifest.json
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .release-please-manifest.json
+          git commit -m "chore: update manifest to $VERSION [skip ci]" || echo "No changes to commit"
+          git push origin main
+
+      - name: Create tag and GitHub Release
+        if: steps.extract_version.outputs.has_version == 'true' && steps.check_tag.outputs.tag_exists != 'true'
+        id: create_release
+        env:
+          GH_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.extract_version.outputs.version }}
+          TAG_NAME: ${{ steps.extract_version.outputs.tag_name }}
+        run: |
+          # Create tag
+          git tag "$TAG_NAME"
+          git push origin "$TAG_NAME"
+
+          # Create GitHub Release
+          gh release create "$TAG_NAME" \
+            --title "$TAG_NAME" \
+            --notes-file release_notes.md \
+            --latest
+
+          echo "release_created=true" >> $GITHUB_OUTPUT
+          echo "Created release $TAG_NAME"
 
       - name: Summary
-        if: steps.release.outputs.release_created == 'true'
+        if: steps.create_release.outputs.release_created == 'true'
         run: |
           cat >> $GITHUB_STEP_SUMMARY <<EOF
           ## Release Created
 
-          - **Version**: ${{ steps.release.outputs.version }}
-          - **Tag**: ${{ steps.release.outputs.tag_name }}
+          - **Version**: ${{ steps.extract_version.outputs.version }}
+          - **Tag**: ${{ steps.extract_version.outputs.tag_name }}
           EOF
