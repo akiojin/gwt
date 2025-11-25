@@ -6,17 +6,17 @@ const CODEX_MAX_LEVELS: InferenceLevel[] = ["xhigh", "high", "medium", "low"];
 const MODEL_OPTIONS: Record<string, ModelOption[]> = {
   "claude-code": [
     {
-      id: "default",
-      label: "Default (recommended) — Sonnet 4.5",
+      id: "opus",
+      label: "Opus 4.5",
       description:
-        "Official default alias. Tracks the recommended Claude Code model (currently Sonnet 4.5) and shows as a standard model in /model.",
+        "Official Opus alias for Claude Code (non-custom, matches /model option).",
       isDefault: true,
     },
     {
-      id: "opus",
-      label: "Opus 4.1",
+      id: "sonnet",
+      label: "Sonnet 4.5",
       description:
-        "Official Opus alias for Claude Code (non-custom, matches /model option).",
+        "Official Sonnet alias for Claude Code.",
     },
     {
       id: "haiku",
