@@ -150,6 +150,10 @@ export async function launchClaudeCode(
       ...process.env,
       ...(options.envOverrides ?? {}),
     };
+    const launchEnv =
+      options.skipPermissions && !baseEnv.IS_SANDBOX
+        ? { ...baseEnv, IS_SANDBOX: "1" }
+        : baseEnv;
 
     const childStdio = createChildStdio();
 
@@ -168,10 +172,7 @@ export async function launchClaudeCode(
           stdin: childStdio.stdin,
           stdout: childStdio.stdout,
           stderr: childStdio.stderr,
-          env:
-            isRoot && options.skipPermissions
-              ? { ...baseEnv, IS_SANDBOX: "1" }
-              : baseEnv,
+          env: launchEnv,
         } as any);
       } else {
         // Fallback to bunx
@@ -207,10 +208,7 @@ export async function launchClaudeCode(
           stdin: childStdio.stdin,
           stdout: childStdio.stdout,
           stderr: childStdio.stderr,
-          env:
-            isRoot && options.skipPermissions
-              ? { ...baseEnv, IS_SANDBOX: "1" }
-              : baseEnv,
+          env: launchEnv,
         } as any);
       }
     } finally {
