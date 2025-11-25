@@ -7,22 +7,22 @@
 ```
 feature/* → PR → develop (自動マージ)
                             ↓
-            /release または scripts/create-release-branch.sh
-                            ↓ (create-release.yml)
-                   release/vX.Y.Z を origin へ push
+               /release (create-release.yml)
+                            ↓
+               Release PR 作成 → develop へ自動マージ
                             ↓ (release.yml)
-      semantic-release → release/vX.Y.Z を main へマージ → ブランチ削除
+        release-please → タグ・GitHub Release 作成 → develop → main マージ
                             ↓ (publish.yml)
-           npm publish(任意) → main → develop へ自動バックマージ
+            npm publish(任意) → main → develop へ自動バックマージ
 ```
 
 ## メンテナーチェックリスト（要点）
 
 1. **準備** – `develop` に必要なコミットを揃え、`bun run lint && bun run test && bun run build` を成功させる。
-2. **トリガー** – Claude で `/release` を実行するか、ローカルで `scripts/create-release-branch.sh` を実行（`gh auth login` 済みであること）。
-3. **監視** – `create-release.yml` が完了したら `release.yml`、`publish.yml` を Actions で監視する。
-4. **確認** – `main` の `chore(release):` コミット、`vX.Y.Z` タグ、（有効化していれば）npm 公開をチェックする。
-5. **リカバリ** – 失敗時は原因を修正しワークフローを再実行、必要に応じて release ブランチを再作成する。詳細手順は spec を参照。
+2. **トリガー** – Claude で `/release` を実行するか、ローカルで `gh workflow run create-release.yml --ref develop` を実行（`gh auth login` 済みであること）。
+3. **監視** – `create-release.yml` で Release PR が作成されたら `release.yml`、`publish.yml` を Actions で監視する。
+4. **確認** – `develop` の `chore(release):` コミット、`vX.Y.Z` タグ、（有効化していれば）npm 公開をチェックする。
+5. **リカバリ** – 失敗時は原因を修正しワークフローを再実行、必要に応じて Release PR を閉じて再作成する。詳細手順は spec を参照。
 
 ## 追加ドキュメント
 
@@ -33,5 +33,4 @@ feature/* → PR → develop (自動マージ)
 ## 参考ファイル
 
 - `.claude/commands/release.md`
-- `scripts/create-release-branch.sh`
 - GitHub Actions: `create-release.yml`, `release.yml`, `publish.yml`

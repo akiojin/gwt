@@ -7,11 +7,11 @@ This page gives a maintainer-friendly snapshot of the release automation. Full d
 ```
 feature/* → PR → develop (auto merge)
                            ↓
-             /release or scripts/create-release-branch.sh
-                           ↓ (create-release.yml)
-                 release/vX.Y.Z push to origin
+              /release (create-release.yml)
+                           ↓
+              Release PR created → auto-merge to develop
                            ↓ (release.yml)
-     semantic-release → merge release/vX.Y.Z → main → delete branch
+       release-please → tag & GitHub Release → develop → main merge
                            ↓ (publish.yml)
           npm publish (optional) → main → develop back-merge
 ```
@@ -19,10 +19,10 @@ feature/* → PR → develop (auto merge)
 ## Maintainer Checklist (TL;DR)
 
 1. **Prepare** – ensure `develop` has all desired commits and `bun run lint && bun run test && bun run build` succeed.
-2. **Trigger** – run `/release` in Claude Code or execute `scripts/create-release-branch.sh` locally (requires `gh auth login`).
-3. **Monitor** – watch `create-release.yml` until the branch push completes, then monitor `release.yml` and `publish.yml` from the Actions tab.
-4. **Verify** – confirm the `chore(release):` commit on `main`, the `vX.Y.Z` tag, and (if enabled) the npm package version.
-5. **Recover** – if any workflow fails, fix the cause, rerun the workflow, or recreate the release branch as described in the spec.
+2. **Trigger** – run `/release` in Claude Code or execute `gh workflow run create-release.yml --ref develop` locally (requires `gh auth login`).
+3. **Monitor** – watch `create-release.yml` until the Release PR is created, then monitor `release.yml` and `publish.yml` from the Actions tab.
+4. **Verify** – confirm the `chore(release):` commit on `develop`, the `vX.Y.Z` tag, and (if enabled) the npm package version.
+5. **Recover** – if any workflow fails, fix the cause, rerun the workflow, or close and recreate the Release PR as described in the spec.
 
 ## Where to Read More
 
@@ -33,5 +33,4 @@ feature/* → PR → develop (auto merge)
 ## References
 
 - `.claude/commands/release.md`
-- `scripts/create-release-branch.sh`
 - GitHub Actions workflows: `create-release.yml`, `release.yml`, `publish.yml`

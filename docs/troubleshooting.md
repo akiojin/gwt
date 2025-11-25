@@ -101,24 +101,23 @@ git branch -D branch-name
 3. Gitとgh CLIのバージョン
 4. 実行したコマンドと期待した結果
 
-## ReleaseブランチのAuto Mergeが進まない場合
+## Release PRのAuto Mergeが進まない場合
 
 ### Requiredチェックの確認
 
-1. `gh pr checks <PR番号>` で `lint` / `test` / `semantic-release` の3ジョブが成功しているか確認します。
-2. 失敗したジョブがある場合は GitHub Actions から `release` ワークフローを再実行します（`Re-run all jobs`）。
-3. semantic-release の CHANGELOG/公開処理で失敗した場合はコミットメッセージ（Conventional Commits準拠）とトークン権限を見直し、修正後に再度 `/release` を実行して release ブランチを更新します。
+1. `gh pr checks <PR番号>` で `lint` / `test` の2ジョブが成功しているか確認します。
+2. 失敗したジョブがある場合は GitHub Actions から再実行します（`Re-run all jobs`）。
+3. release-please の処理で失敗した場合はコミットメッセージ（Conventional Commits準拠）とトークン権限を見直し、修正後に再度 `/release` を実行して Release PR を更新します。
 
 ### Branch Protection チェックリスト
 
-- [ ] `main` ブランチに「Require status checks」を設定し、`lint` / `test` / `semantic-release` だけを Required にしている
-- [ ] `main` への直接 push を禁止しており、release→main PR 経由でのみ更新している（管理者 push を許可する場合も release フロー前提）
-- [ ] 「Allow auto-merge」が `main` で有効になっている
-- [ ] `release` ブランチでは GitHub Actions (semantic-release) が push できるようにしており、保護ルールでブロックしていない
-- [ ] `SEMANTIC_RELEASE_TOKEN` が `repo` スコープを持ち、Release ワークフローに `GH_TOKEN` / `GITHUB_TOKEN` として渡されている
-- [ ] release→main PR に `release` / `auto-merge` ラベルが付与され、`gh pr merge --auto --merge` 成功時のログが記録されている
+- [ ] `develop` ブランチに「Require status checks」を設定し、`lint` / `test` を Required にしている
+- [ ] 「Allow auto-merge」が `develop` で有効になっている
+- [ ] GitHub Actions (release-please) が push できるようにしており、保護ルールでブロックしていない
+- [ ] `PERSONAL_ACCESS_TOKEN` または `GITHUB_TOKEN` が適切なスコープを持ち、Release ワークフローに渡されている
+- [ ] Release PR に `autorelease: pending` ラベルが付与され、`gh pr merge --auto --merge` 成功時のログが記録されている
 
-1つでも未達の場合、Auto Merge は pending のままとなります。設定を整えた後に `/release` を再実行して release ブランチを最新化してください。
+1つでも未達の場合、Auto Merge は pending のままとなります。設定を整えた後に `/release` を再実行して Release PR を最新化してください。
 
 ## ブランチ一覧の表示順がおかしい場合
 
