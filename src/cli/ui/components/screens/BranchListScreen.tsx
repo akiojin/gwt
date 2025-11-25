@@ -276,7 +276,8 @@ export function BranchListScreen({
 
   const renderBranchRow = useCallback(
     (item: BranchItem, isSelected: boolean, context: { columns: number }) => {
-      const columns = Math.max(20, context.columns);
+      // Use a small safety margin to avoid terminal-dependent wrapping
+      const columns = Math.max(20, context.columns - 1);
       const arrow = isSelected ? ">" : " ";
       const timestampText = formatLatestCommit(item.latestCommitTimestamp);
       const timestampWidth = stringWidth(timestampText);
@@ -304,32 +305,17 @@ export function BranchListScreen({
       const indicatorPrefix = indicatorIcon ? `${indicatorIcon} ` : "";
       const staticPrefix = `${arrow} ${indicatorPrefix}`;
       const staticPrefixWidth = measureDisplayWidth(staticPrefix);
-
-      const availableLeftWidth = Math.max(
-        staticPrefixWidth,
-        columns - timestampWidth - 1,
-      );
-      const maxLabelWidth = Math.max(0, availableLeftWidth - staticPrefixWidth);
+      const maxLeftDisplayWidth = Math.max(0, columns - timestampWidth - 1);
+      const maxLabelWidth = Math.max(0, maxLeftDisplayWidth - staticPrefixWidth);
       const truncatedLabel = truncateToWidth(item.label, maxLabelWidth);
       const leftText = `${staticPrefix}${truncatedLabel}`;
 
-      const leftMeasuredWidth = stringWidth(leftText);
       const leftDisplayWidth = measureDisplayWidth(leftText);
-      const baseGapWidth = Math.max(
-        1,
-        columns - leftMeasuredWidth - timestampWidth,
-      );
-      const displayGapWidth = Math.max(
-        1,
-        columns - leftDisplayWidth - timestampWidth,
-      );
-      const cursorShift = Math.max(0, displayGapWidth - baseGapWidth);
+      const gapWidth = Math.max(1, columns - leftDisplayWidth - timestampWidth);
 
-      const gap = " ".repeat(baseGapWidth);
-      const cursorAdjust = cursorShift > 0 ? `\u001b[${cursorShift}C` : "";
-
-      let line = `${leftText}${gap}${cursorAdjust}${timestampText}`;
-      const paddingWidth = Math.max(0, columns - stringWidth(line));
+      let line = `${leftText}${" ".repeat(gapWidth)}${timestampText}`;
+      const totalDisplayWidth = leftDisplayWidth + gapWidth + timestampWidth;
+      const paddingWidth = Math.max(0, columns - totalDisplayWidth);
       if (paddingWidth > 0) {
         line += " ".repeat(paddingWidth);
       }
