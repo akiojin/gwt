@@ -1,6 +1,6 @@
 {
   "name": "@akiojin/gwt",
-  "version": "2.5.0",
+  "version": "2.6.0",
   "description": "Interactive Git worktree manager for Claude Code with graphical branch selection",
   "main": "dist/index.js",
   "bin": {

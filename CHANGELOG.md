@@ -1,3 +1,19 @@
+# [2.6.0](https://github.com/akiojin/gwt/compare/v2.5.0...v2.6.0) (2025-11-25)
+
+
+### Bug Fixes
+
+* prevent false positives in git hook detection ([e5c0f32](https://github.com/akiojin/gwt/commit/e5c0f324f02ba934ef447685eead6aea12b4bdd5))
+* renderBranchRowのcursorAdjustロジックを復元してテスト互換性を維持 ([9f4f10e](https://github.com/akiojin/gwt/commit/9f4f10eeaf25b2fe0e773098bc72337f5d10ac08))
+* string-width v8対応のためWIDTH_OVERRIDESにVariation Selector付きアイコンを追加 ([c8f5b9b](https://github.com/akiojin/gwt/commit/c8f5b9bac9be76a0351aee06c9e4ebea00fb7cf4))
+* 全アイコンの幅オーバーライドを追加してタイムスタンプ折り返しを修正 ([06a7e5d](https://github.com/akiojin/gwt/commit/06a7e5dbf1a62f831db05d9b2ee67a6552945256))
+* 全ての幅計算をmeasureDisplayWidthに統一してstring-width v8対応を完了 ([6f7d1ce](https://github.com/akiojin/gwt/commit/6f7d1ceaa97ad99f61e3f0967ccc80dbd9a90d72))
+
+
+### Features
+
+* set upstream tracking for newly created refs ([7a631a1](https://github.com/akiojin/gwt/commit/7a631a132f7fc99f207dfa1b7d1e10a841fda27f))
+
 # [2.5.0](https://github.com/akiojin/gwt/compare/v2.4.1...v2.5.0) (2025-11-25)
 
 
