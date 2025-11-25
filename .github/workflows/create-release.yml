@@ -30,7 +30,7 @@ jobs:
           GH_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
           # Get current version from manifest
-          CURRENT_VERSION=$(jq -r '."."]' .release-please-manifest.json)
+          CURRENT_VERSION=$(jq -r '.["."]' .release-please-manifest.json)
           echo "current_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
 
           # Check for conventional commits since last release tag
