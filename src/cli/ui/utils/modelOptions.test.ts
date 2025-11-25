@@ -8,15 +8,17 @@ import {
 const byId = (tool: string) => getModelOptions(tool).map((m) => m.id);
 
 describe("modelOptions", () => {
-  it("lists Claude official aliases and keeps default as recommended Sonnet 4.5", () => {
-    const ids = byId("claude-code");
+  it("lists Claude official aliases and sets Opus 4.5 as default", () => {
+    const options = getModelOptions("claude-code");
+    const ids = options.map((m) => m.id);
     expect(ids).toEqual([
-      "default",
       "opus",
+      "sonnet",
       "haiku",
     ]);
     const defaultModel = getDefaultModelOption("claude-code");
-    expect(defaultModel?.id).toBe("default");
+    expect(defaultModel?.id).toBe("opus");
+    expect(defaultModel?.label).toBe("Opus 4.5");
   });
 
   it("has unique Codex models", () => {
