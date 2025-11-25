@@ -88,10 +88,11 @@ EOF
             exit 2
         fi
 
-        # branchコマンドは参照系のみ許可
-        if echo "$trimmed_segment" | grep -qE '\bbranch\b'; then
+        # branchサブコマンドは参照系のみ許可
+        # ファイル名にbranchを含む場合は許可（例: git diff .claude/hooks/block-git-branch-ops.sh）
+        if echo "$trimmed_segment" | grep -qE '^git[[:space:]]+((-[a-zA-Z]|--[a-z-]+)[[:space:]]+)*branch\b'; then
             # git ... branch の後の引数を抽出（branchより前を全て除去）
-            branch_args=$(echo "$trimmed_segment" | sed -E 's/^.*\bbranch\b//')
+            branch_args=$(echo "$trimmed_segment" | sed -E 's/^git[[:space:]]+((-[a-zA-Z]|--[a-z-]+)[[:space:]]+)*branch//')
             if is_read_only_git_branch "$branch_args"; then
                 continue
             fi
@@ -108,8 +109,9 @@ EOF
             exit 2
         fi
 
-        # worktreeコマンドをブロック
-        if echo "$trimmed_segment" | grep -qE '\bworktree\b'; then
+        # worktreeサブコマンドをブロック（git worktree add/remove等）
+        # ファイル名にworktreeを含む場合は許可（例: git add src/worktree.ts）
+        if echo "$trimmed_segment" | grep -qE '^git[[:space:]]+((-[a-zA-Z]|--[a-z-]+)[[:space:]]+)*worktree\b'; then
             cat <<EOF
 {
   "decision": "block",
