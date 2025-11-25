@@ -317,14 +317,23 @@ export function BranchListScreen({
       const truncatedLabel = truncateToWidth(item.label, maxLabelWidth);
       const leftText = `${staticPrefix}${truncatedLabel}`;
 
+      const leftMeasuredWidth = stringWidth(leftText);
       const leftDisplayWidth = measureDisplayWidth(leftText);
-      const gapWidth = Math.max(1, columns - leftDisplayWidth - timestampWidth);
+      const baseGapWidth = Math.max(
+        1,
+        columns - leftMeasuredWidth - timestampWidth,
+      );
+      const displayGapWidth = Math.max(
+        1,
+        columns - leftDisplayWidth - timestampWidth,
+      );
+      const cursorShift = Math.max(0, displayGapWidth - baseGapWidth);
 
-      const gap = " ".repeat(gapWidth);
+      const gap = " ".repeat(baseGapWidth);
+      const cursorAdjust = cursorShift > 0 ? `\u001b[${cursorShift}C` : "";
 
-      let line = `${leftText}${gap}${timestampText}`;
-      const lineDisplayWidth = measureDisplayWidth(line);
-      const paddingWidth = Math.max(0, columns - lineDisplayWidth);
+      let line = `${leftText}${gap}${cursorAdjust}${timestampText}`;
+      const paddingWidth = Math.max(0, columns - stringWidth(line));
       if (paddingWidth > 0) {
         line += " ".repeat(paddingWidth);
       }
