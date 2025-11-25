@@ -107,7 +107,7 @@ git branch -D branch-name
 
 1. `gh pr checks <PR番号>` で `lint` / `test` の2ジョブが成功しているか確認します。
 2. 失敗したジョブがある場合は GitHub Actions から再実行します（`Re-run all jobs`）。
-3. release-please の処理で失敗した場合はコミットメッセージ（Conventional Commits準拠）とトークン権限を見直し、修正後に再度 `/release` を実行して Release PR を更新します。
+3. リリースワークフローの処理で失敗した場合はコミットメッセージ（Conventional Commits準拠）とトークン権限を見直し、修正後に再度 `/release` を実行して Release PR を更新します。
 
 ### Branch Protection チェックリスト
 
