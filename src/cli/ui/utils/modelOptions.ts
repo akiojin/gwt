@@ -14,7 +14,7 @@ const MODEL_OPTIONS: Record<string, ModelOption[]> = {
     },
     {
       id: "opus",
-      label: "Opus 4.1",
+      label: "Opus 4.5",
       description:
         "Official Opus alias for Claude Code (non-custom, matches /model option).",
     },

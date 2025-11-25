@@ -9,7 +9,8 @@ const byId = (tool: string) => getModelOptions(tool).map((m) => m.id);
 
 describe("modelOptions", () => {
   it("lists Claude official aliases and keeps default as recommended Sonnet 4.5", () => {
-    const ids = byId("claude-code");
+    const options = getModelOptions("claude-code");
+    const ids = options.map((m) => m.id);
     expect(ids).toEqual([
       "default",
       "opus",
@@ -17,6 +18,9 @@ describe("modelOptions", () => {
     ]);
     const defaultModel = getDefaultModelOption("claude-code");
     expect(defaultModel?.id).toBe("default");
+
+    const opusModel = options.find((m) => m.id === "opus");
+    expect(opusModel?.label).toBe("Opus 4.5");
   });
 
   it("has unique Codex models", () => {
