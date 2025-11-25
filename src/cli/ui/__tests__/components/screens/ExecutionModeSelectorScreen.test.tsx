@@ -32,7 +32,7 @@ describe("ExecutionModeSelectorScreen", () => {
       <ExecutionModeSelectorScreen onBack={onBack} onSelect={onSelect} />,
     );
 
-    expect(getByText(/Normal/i)).toBeDefined();
+    expect(getByText(/New/i)).toBeDefined();
     expect(getByText(/Continue/i)).toBeDefined();
     expect(getByText(/Resume/i)).toBeDefined();
   });
