@@ -714,6 +714,157 @@ branch refs/heads/feature/no-diff
       expect(branchHasUniqueSpy).toHaveBeenCalled();
       expect(remoteExistsSpy).toHaveBeenCalled();
     });
+
+    it("includes branches with remote copy but no merged PR as cleanup targets", async () => {
+      vi.spyOn(configModule, "getConfig").mockResolvedValue({
+        defaultBaseBranch: "main",
+        skipPermissions: false,
+        enableGitHubIntegration: true,
+        enableDebugMode: false,
+        worktreeNamingPattern: "{repo}-{branch}",
+      });
+
+      vi.spyOn(git, "getRepositoryRoot").mockResolvedValue("/repo");
+
+      vi.spyOn(github, "getMergedPullRequests").mockResolvedValue([]);
+
+      vi.spyOn(github, "getPullRequestByBranch").mockResolvedValue(null);
+
+      vi.spyOn(git, "getLocalBranches").mockResolvedValue([
+        {
+          name: "feature/has-remote",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+        },
+        {
+          name: "main",
+          type: "local",
+          branchType: "main",
+          isCurrent: true,
+        },
+      ]);
+
+      vi.spyOn(git, "hasUncommittedChanges").mockResolvedValue(false);
+
+      vi.spyOn(git, "hasUnpushedCommits").mockResolvedValue(false);
+
+      vi.spyOn(git, "hasUnpushedCommitsInRepo").mockResolvedValue(false);
+
+      // ブランチには固有のコミットがある（ベースと差分あり）
+      vi.spyOn(git, "branchHasUniqueCommitsComparedToBase").mockResolvedValue(
+        true,
+      );
+
+      // リモートブランチが存在する
+      vi.spyOn(git, "checkRemoteBranchExists").mockResolvedValue(true);
+
+      (execa as any).mockImplementation(
+        async (command: string, args?: readonly string[]) => {
+          if (
+            command === "git" &&
+            args?.[0] === "worktree" &&
+            args[1] === "list"
+          ) {
+            return {
+              stdout: `worktree /repo
+HEAD 0000000
+branch refs/heads/main
+`,
+              stderr: "",
+              exitCode: 0,
+            };
+          }
+          return { stdout: "", stderr: "", exitCode: 0 };
+        },
+      );
+
+      (fs.existsSync as any).mockReturnValue(true);
+
+      const targets = await worktree.getMergedPRWorktrees();
+
+      expect(targets).toHaveLength(1);
+
+      const target = targets[0];
+      expect(target.branch).toBe("feature/has-remote");
+      expect(target.cleanupType).toBe("branch-only");
+      expect(target.pullRequest).toBeNull();
+      expect(target.reasons).toContain("has-remote-copy");
+      expect(target.reasons).not.toContain("merged-pr");
+      expect(target.reasons).not.toContain("no-diff-with-base");
+    });
+
+    it("skips branches with remote copy when they have unpushed commits", async () => {
+      vi.spyOn(configModule, "getConfig").mockResolvedValue({
+        defaultBaseBranch: "main",
+        skipPermissions: false,
+        enableGitHubIntegration: true,
+        enableDebugMode: false,
+        worktreeNamingPattern: "{repo}-{branch}",
+      });
+
+      vi.spyOn(git, "getRepositoryRoot").mockResolvedValue("/repo");
+
+      vi.spyOn(github, "getMergedPullRequests").mockResolvedValue([]);
+
+      vi.spyOn(github, "getPullRequestByBranch").mockResolvedValue(null);
+
+      vi.spyOn(git, "getLocalBranches").mockResolvedValue([
+        {
+          name: "feature/has-remote-unpushed",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+        },
+        {
+          name: "main",
+          type: "local",
+          branchType: "main",
+          isCurrent: true,
+        },
+      ]);
+
+      vi.spyOn(git, "hasUncommittedChanges").mockResolvedValue(false);
+
+      vi.spyOn(git, "hasUnpushedCommits").mockResolvedValue(false);
+
+      // 未プッシュのコミットがある（hasUnpushedCommitsInRepoがorphanedブランチで使われる）
+      vi.spyOn(git, "hasUnpushedCommitsInRepo").mockResolvedValue(true);
+
+      vi.spyOn(git, "branchHasUniqueCommitsComparedToBase").mockResolvedValue(
+        true,
+      );
+
+      // リモートブランチが存在する
+      vi.spyOn(git, "checkRemoteBranchExists").mockResolvedValue(true);
+
+      (execa as any).mockImplementation(
+        async (command: string, args?: readonly string[]) => {
+          if (
+            command === "git" &&
+            args?.[0] === "worktree" &&
+            args[1] === "list"
+          ) {
+            return {
+              stdout: `worktree /repo
+HEAD 0000000
+branch refs/heads/main
+`,
+              stderr: "",
+              exitCode: 0,
+            };
+          }
+          return { stdout: "", stderr: "", exitCode: 0 };
+        },
+      );
+
+      (fs.existsSync as any).mockReturnValue(true);
+
+      const targets = await worktree.getMergedPRWorktrees();
+
+      // 未プッシュのコミットがあるためクリーンアップ対象外
+      expect(targets).toHaveLength(0);
+    });
   });
 
   describe("Backward Compatibility (US3)", () => {

@@ -480,6 +480,14 @@ async function getOrphanedLocalBranches({
           reasons.push("merged-pr");
         }
 
+        // リモートブランチの存在確認（先に行う）
+        let hasRemoteBranch = false;
+        try {
+          hasRemoteBranch = await checkRemoteBranchExists(localBranch.name);
+        } catch {
+          hasRemoteBranch = false;
+        }
+
         if (!hasUnpushed) {
           const hasUniqueCommits = await branchHasUniqueCommitsComparedToBase(
             localBranch.name,
@@ -492,21 +500,21 @@ async function getOrphanedLocalBranches({
           }
         }
 
+        // リモートにコピーがあり、PRがマージされていないブランチも対象
+        // （未プッシュのコミットがない場合のみ）
+        if (hasRemoteBranch && !mergedPR && !hasUnpushed) {
+          reasons.push("has-remote-copy");
+        }
+
         if (process.env.DEBUG_CLEANUP) {
           console.log(
             chalk.gray(
-              `Debug: Checking orphaned branch ${localBranch.name} -> PR: ${mergedPR ? "MATCH" : "NO MATCH"}, reasons: ${reasons.join(", ")}`,
+              `Debug: Checking orphaned branch ${localBranch.name} -> PR: ${mergedPR ? "MATCH" : "NO MATCH"}, hasRemote: ${hasRemoteBranch}, reasons: ${reasons.join(", ")}`,
             ),
           );
         }
 
         if (reasons.length > 0) {
-          let hasRemoteBranch = false;
-          try {
-            hasRemoteBranch = await checkRemoteBranchExists(localBranch.name);
-          } catch {
-            hasRemoteBranch = false;
-          }
 
           cleanupTargets.push({
             worktreePath: null, // worktreeは存在しない
@@ -651,6 +659,9 @@ export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
       }
     }
 
+    // リモートブランチの存在確認（先に行う）
+    const hasRemoteBranch = await checkRemoteBranchExists(worktree.branch);
+
     if (!hasUnpushed) {
       const hasUniqueCommits = await branchHasUniqueCommitsComparedToBase(
         worktree.branch,
@@ -661,6 +672,12 @@ export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
       if (!hasUniqueCommits) {
         cleanupReasons.push("no-diff-with-base");
       }
+    }
+
+    // リモートにコピーがあり、PRがマージされていないブランチも対象
+    // （未プッシュのコミットがない場合のみ）
+    if (hasRemoteBranch && !mergedPR && !hasUnpushed) {
+      cleanupReasons.push("has-remote-copy");
     }
 
     if (process.env.DEBUG_CLEANUP) {
@@ -674,8 +691,6 @@ export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
     if (cleanupReasons.length === 0) {
       continue;
     }
-
-    const hasRemoteBranch = await checkRemoteBranchExists(worktree.branch);
 
     const target: CleanupTarget = {
       worktreePath: worktree.worktreePath,

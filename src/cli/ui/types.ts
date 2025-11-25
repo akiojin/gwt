@@ -134,7 +134,7 @@ export interface WorktreeWithPR {
   pullRequest: PullRequest | null;
 }
 
-export type CleanupReason = "merged-pr" | "no-diff-with-base";
+export type CleanupReason = "merged-pr" | "no-diff-with-base" | "has-remote-copy";
 
 export interface CleanupTarget {
   worktreePath: string | null; // null for local branch only cleanup
