@@ -7,9 +7,9 @@ const MODEL_OPTIONS: Record<string, ModelOption[]> = {
   "claude-code": [
     {
       id: "default",
-      label: "Default (recommended) — Sonnet 4.5",
+      label: "Default (recommended) — Opus 4.5",
       description:
-        "Official default alias. Tracks the recommended Claude Code model (currently Sonnet 4.5) and shows as a standard model in /model.",
+        "Official default alias. Tracks the recommended Claude Code model (currently Opus 4.5) and shows as a standard model in /model.",
       isDefault: true,
     },
     {
