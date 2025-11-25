@@ -15,7 +15,8 @@ jobs:
     name: Create Tag & GitHub Release
     runs-on: ubuntu-latest
     # Only run for release commits (from Release PR merge)
-    if: startsWith(github.event.head_commit.message, 'chore(release):')
+    # GitHub merge commit format: "Merge pull request #XX from ...\n\nchore(release): vX.Y.Z"
+    if: contains(github.event.head_commit.message, 'chore(release):')
     outputs:
       release_created: ${{ steps.create_release.outputs.release_created }}
       tag_name: ${{ steps.extract_version.outputs.tag_name }}
