@@ -9,11 +9,11 @@ release-please が Release PR を自動作成し、マージ後に完全自動�
 
 ## 実行内容
 
-1. `gh workflow run create-release.yml --ref develop` を実行して release-please が Release PR を作成
+1. `gh workflow run create-release.yml --ref develop` を実行して release-please が main への Release PR を作成
 2. Release PR に自動マージが有効化される
-3. CI チェック通過後、Release PR が develop に自動マージ
+3. CI チェック通過後、Release PR が main に自動マージ
 4. GitHub Actions が以下を自動実行:
-   - **release.yml (develop)**: release-please でタグ・GitHub Release を作成、develop → main をマージ
+   - **release.yml (main)**: release-please でタグ・GitHub Release を作成
    - **publish.yml (main)**: npm publish（必要に応じて）、main → develop バックマージ
 
 ## 前提条件
