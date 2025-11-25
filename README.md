@@ -139,7 +139,7 @@ The repository includes an automated PR merge workflow that streamlines the deve
 2. CI workflows (Test, Lint) run automatically
 3. When all CI checks pass and no conflicts exist, the PR is automatically merged to `develop`
 4. Changes accumulate on `develop` until ready for release
-5. Use `/release` command to merge `develop` to `main` and trigger semantic-release
+5. Use `/release` command to create Release PR and trigger release-please
 
 **Disabling auto-merge:**
 
@@ -305,7 +305,7 @@ bun run start
 
 ## Release Process
 
-We ship releases through semantic-release. End users can simply install the latest published package (via npm or the GitHub Releases tab) and rely on versioned artifacts. Maintainers who need the full workflow should read [docs/release-guide.md](./docs/release-guide.md) (日本語版: [docs/release-guide.ja.md](./docs/release-guide.ja.md)) and the in-depth specs under `specs/SPEC-57fde06f/`.
+We ship releases through release-please. End users can simply install the latest published package (via npm or the GitHub Releases tab) and rely on versioned artifacts. Maintainers who need the full workflow should read [docs/release-guide.md](./docs/release-guide.md) (日本語版: [docs/release-guide.ja.md](./docs/release-guide.ja.md)) and the in-depth specs under `specs/SPEC-57fde06f/`.
 
 ## Troubleshooting
 

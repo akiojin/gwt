@@ -1,19 +1,20 @@
 ---
-description: developからrelease/vX.Y.Zブランチを作成し、完全自動リリースフローを開始します。
+description: developからmainへのRelease PRを作成し、完全自動リリースフローを開始します。
 tags: [project]
 ---
 
 # リリースコマンド
 
-developブランチから`release/vX.Y.Z`ブランチを自動作成し、unity-mcp-serverと共通のリリースパイプラインを起動します。
+develop から main への Release PR を作成し、マージ後に完全自動リリースフローを実行します。
 
 ## 実行内容
 
-1. `gh workflow run create-release.yml --ref develop` を実行して semantic-release の dry-run を行い、次バージョンを判定
-2. `create-release.yml` が `release/vX.Y.Z` ブランチを作成して `origin` へ push
-3. GitHub Actions が以下を自動実行:
-   - **create-release.yml**: releaseブランチ作成フェーズのログを記録
-   - **release.yml (release/**)**: semantic-releaseで CHANGELOG とタグを生成し、release → main を直接マージ
+1. `gh workflow run create-release.yml --ref develop` を実行
+2. ワークフローが Conventional Commits を解析し、次のバージョンを決定
+3. develop → main の Release PR を作成し、自動マージを有効化
+4. CI チェック通過後、Release PR が main に自動マージ
+5. GitHub Actions が以下を自動実行:
+   - **release.yml (main)**: release-please でタグ・GitHub Release を作成
    - **publish.yml (main)**: npm publish（必要に応じて）、main → develop バックマージ
 
 ## 前提条件
@@ -21,25 +22,27 @@ developブランチから`release/vX.Y.Z`ブランチを自動作成し、unity-
 - develop ブランチにリリース対象コミットが揃っていること
 - GitHub CLI (`gh`) が認証済み (`gh auth login`)
 - 最新コミットが Conventional Commits 形式であること
-- semantic-release がバージョンを決定できる差分が存在すること
+- `feat:` または `fix:` コミットが存在すること
 
-## スクリプト実行
-
-ローカルから同じ処理を実行するには `scripts/create-release-branch.sh` を使います。
+## コマンド実行
 
 ```bash
-scripts/create-release-branch.sh
+gh workflow run create-release.yml --ref develop
 ```
 
-スクリプトは GitHub Actions の `create-release.yml` を起動し、以下を自動で行います:
+## Release PR の確認と操作
 
-1. develop ブランチの semantic-release dry-run
-2. 次のバージョン番号を算出
-3. `release/vX.Y.Z` ブランチを作成して push
-4. 直近のワークフロー実行 ID を表示し、`gh run watch` で追跡できるようにします
+```bash
+# Release PR を確認
+gh pr list --base main --head develop
+
+# Release PR を手動マージ（自動マージが有効でない場合）
+gh pr merge <PR番号> --merge
+```
 
 ## トラブルシューティング
 
-- release ブランチ push 後に release.yml が失敗した場合は、Actions から再実行し、semantic-release ログを確認してください。
+- Release PR が作成されない場合は、`feat:` または `fix:` コミットが存在するか確認してください。
+- Release PR 作成後に release.yml が失敗した場合は、Actions から再実行し、ログを確認してください。
 - main で npm publish が有効な場合は `NPM_TOKEN` が正しく設定されていることを確認してください。
-- release ブランチが既に存在する場合は、既存の release/vX.Y.Z を削除または完了させてから再実行してください。
+- Release PR が既に存在する場合は、既存の PR を確認して対応してください。
