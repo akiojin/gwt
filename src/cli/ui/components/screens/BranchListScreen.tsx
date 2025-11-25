@@ -35,11 +35,9 @@ const WIDTH_OVERRIDES: Record<string, number> = {
 };
 
 const getCharWidth = (char: string): number => {
+  const baseWidth = stringWidth(char);
   const override = WIDTH_OVERRIDES[char];
-  if (override !== undefined) {
-    return override;
-  }
-  return stringWidth(char);
+  return override !== undefined ? Math.max(baseWidth, override) : baseWidth;
 };
 
 const measureDisplayWidth = (value: string): number => {
