@@ -38,15 +38,16 @@ const WIDTH_OVERRIDES: Record<string, number> = {
   "⚠️": 1,
 };
 
+const getCharWidth = (char: string): number => {
+  const baseWidth = stringWidth(char);
+  const override = WIDTH_OVERRIDES[char];
+  return override !== undefined ? Math.max(baseWidth, override) : baseWidth;
+};
+
 const measureDisplayWidth = (value: string): number => {
   let width = 0;
   for (const char of Array.from(value)) {
-    const override = WIDTH_OVERRIDES[char];
-    if (override !== undefined) {
-      width += override;
-      continue;
-    }
-    width += stringWidth(char);
+    width += getCharWidth(char);
   }
   return width;
 };
@@ -266,8 +267,7 @@ export function BranchListScreen({
     let result = "";
 
     for (const char of Array.from(value)) {
-      const override = WIDTH_OVERRIDES[char];
-      const charWidth = override !== undefined ? override : stringWidth(char);
+      const charWidth = getCharWidth(char);
       if (currentWidth + charWidth + ellipsisWidth > maxWidth) {
         break;
       }

@@ -34,9 +34,8 @@ const changeIcons = {
 
 const remoteIcon = "☁";
 
-// Some icons are treated as double-width by string-width even though they render
-// as a single column in many terminals (e.g. ☁). Provide explicit overrides to
-// keep the column layout consistent across environments.
+// Emoji width varies by terminal. Provide explicit minimum widths so we never
+// underestimate and accidentally push the row past the terminal columns.
 const iconWidthOverrides: Record<string, number> = {
   // Remote icon
   [remoteIcon]: 1,
@@ -64,6 +63,12 @@ const iconWidthOverrides: Record<string, number> = {
   "⚠️": 1,
 };
 
+const getIconWidth = (icon: string): number => {
+  const baseWidth = stringWidth(icon);
+  const override = iconWidthOverrides[icon];
+  return override !== undefined ? Math.max(baseWidth, override) : baseWidth;
+};
+
 export interface FormatOptions {
   hasChanges?: boolean;
 }
@@ -80,7 +85,7 @@ export function formatBranchItem(
 
   // Helper to pad icon to fixed width
   const padIcon = (icon: string): string => {
-    const width = iconWidthOverrides[icon] ?? stringWidth(icon);
+    const width = getIconWidth(icon);
     const padding = Math.max(0, COLUMN_WIDTH - width);
     return icon + " ".repeat(padding);
   };
