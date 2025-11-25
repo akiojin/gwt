@@ -9,9 +9,9 @@ feature/* → PR → develop (auto merge)
                            ↓
               /release (create-release.yml)
                            ↓
-              Release PR created → auto-merge to develop
+              Release PR created → auto-merge to main
                            ↓ (release.yml)
-       release-please → tag & GitHub Release → develop → main merge
+               tag & GitHub Release created
                            ↓ (publish.yml)
           npm publish (optional) → main → develop back-merge
 ```
