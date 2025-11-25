@@ -321,6 +321,20 @@ export async function createWorktree(config: WorktreeConfig): Promise<void> {
       stopActiveSpinner();
     }
 
+    // 新規ブランチの場合、ベースブランチを追跡ブランチとして設定
+    if (config.isNewBranch && config.baseBranch) {
+      try {
+        await execa(
+          "git",
+          ["branch", "--set-upstream-to", config.baseBranch, config.branchName],
+          { cwd: config.worktreePath },
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn(`Warning: Failed to set upstream branch: ${message}`);
+      }
+    }
+
     // .gitignoreに.worktrees/を追加(エラーは警告として扱う)
     try {
       let gitignoreRoot = config.repoRoot;

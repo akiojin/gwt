@@ -12,8 +12,30 @@ import stringWidth from "string-width";
 import chalk from "chalk";
 
 const WIDTH_OVERRIDES: Record<string, number> = {
-  "⬆": 1,
+  // Remote icon
   "☁": 1,
+  "☁️": 1,
+  "☁︎": 1,
+  // Unpushed icon
+  "⬆": 1,
+  "⬆️": 1,
+  "⬆︎": 1,
+  // Branch type icons
+  "⚡": 1,
+  "✨": 1,
+  "🐛": 1,
+  "🔥": 1,
+  "🚀": 1,
+  "📌": 1,
+  // Worktree status icons
+  "🟢": 1,
+  "🟠": 1,
+  // Change status icons
+  "⭐": 1,
+  "✏️": 1,
+  "🔀": 1,
+  "✅": 1,
+  "⚠️": 1,
 };
 
 const measureDisplayWidth = (value: string): number => {
@@ -230,12 +252,12 @@ export function BranchListScreen({
       return "";
     }
 
-    if (stringWidth(value) <= maxWidth) {
+    if (measureDisplayWidth(value) <= maxWidth) {
       return value;
     }
 
     const ellipsis = "…";
-    const ellipsisWidth = stringWidth(ellipsis);
+    const ellipsisWidth = measureDisplayWidth(ellipsis);
     if (ellipsisWidth >= maxWidth) {
       return ellipsis;
     }
@@ -243,8 +265,9 @@ export function BranchListScreen({
     let currentWidth = 0;
     let result = "";
 
-    for (const char of value) {
-      const charWidth = stringWidth(char);
+    for (const char of Array.from(value)) {
+      const override = WIDTH_OVERRIDES[char];
+      const charWidth = override !== undefined ? override : stringWidth(char);
       if (currentWidth + charWidth + ellipsisWidth > maxWidth) {
         break;
       }
@@ -284,7 +307,7 @@ export function BranchListScreen({
       }
       const indicatorPrefix = indicatorIcon ? `${indicatorIcon} ` : "";
       const staticPrefix = `${arrow} ${indicatorPrefix}`;
-      const staticPrefixWidth = stringWidth(staticPrefix);
+      const staticPrefixWidth = measureDisplayWidth(staticPrefix);
 
       const availableLeftWidth = Math.max(
         staticPrefixWidth,

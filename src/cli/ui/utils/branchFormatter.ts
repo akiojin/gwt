@@ -38,12 +38,30 @@ const remoteIcon = "☁";
 // as a single column in many terminals (e.g. ☁). Provide explicit overrides to
 // keep the column layout consistent across environments.
 const iconWidthOverrides: Record<string, number> = {
+  // Remote icon
   [remoteIcon]: 1,
   "☁️": 1,
   "☁︎": 1,
+  // Unpushed icon
   "⬆️": 1,
   "⬆︎": 1,
   "⬆": 1,
+  // Branch type icons
+  "⚡": 1,
+  "✨": 1,
+  "🐛": 1,
+  "🔥": 1,
+  "🚀": 1,
+  "📌": 1,
+  // Worktree status icons
+  "🟢": 1,
+  "🟠": 1,
+  // Change status icons
+  "⭐": 1,
+  "✏️": 1,
+  "🔀": 1,
+  "✅": 1,
+  "⚠️": 1,
 };
 
 export interface FormatOptions {
