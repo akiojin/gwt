@@ -438,7 +438,7 @@ git.deleteBranch() → Delete Branch
 
 - **GitHub Actions**: テスト自動化
 - **Codecov**: カバレッジレポート
-- **Semantic Release**: 自動リリース
+- **Release Please**: 自動リリース
 
 ## References
 

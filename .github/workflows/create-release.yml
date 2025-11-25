@@ -20,7 +20,7 @@ jobs:
           release-type: node
           manifest-file: .release-please-manifest.json
           config-file: .release-please-config.json
-          target-branch: develop
+          target-branch: main
 
       - name: Enable auto-merge for release PR
         if: steps.rp.outputs.pr != ''
@@ -41,7 +41,7 @@ jobs:
 
           Next steps:
           1. CI checks will run on the Release PR
-          2. Once checks pass, the PR will be auto-merged to develop
+          2. Once checks pass, the PR will be auto-merged to main
           3. release.yml will create tag and GitHub Release
           4. publish.yml will handle npm publish and backmerge to develop
           EOF

@@ -1,5 +1,6 @@
 {
   "bootstrap-sha": "HEAD",
+  "default-branch": "main",
   "packages": {
     ".": {
       "release-type": "node",

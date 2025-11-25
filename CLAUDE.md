@@ -79,8 +79,6 @@
 ## リリースワークフロー
 
 - feature/\* ブランチは develop へ Auto Merge し、develop で次回リリース候補を蓄積する。
-- `/release` コマンド（または `gh workflow run create-release.yml --ref develop`）で release-please が Release PR を作成し、自動マージを有効化する。
-- Release PR が develop にマージされると `.github/workflows/release.yml` が以下を実行：
-  1. release-please でタグ・GitHub Release を作成
-  2. develop → main へマージ
+- `/release` コマンド（または `gh workflow run create-release.yml --ref develop`）で release-please が main への Release PR を作成し、自動マージを有効化する。
+- Release PR が main にマージされると `.github/workflows/release.yml` が release-please でタグ・GitHub Release を作成する。
 - main への push をトリガーに `.github/workflows/publish.yml` が npm publish（設定時）と `main` → `develop` のバックマージを実行する。
