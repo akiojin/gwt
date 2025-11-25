@@ -32,7 +32,7 @@ export interface ExecutionModeSelectorScreenProps {
 
 /**
  * ExecutionModeSelectorScreen - Screen for selecting execution mode (2-step)
- * Step 1: Select mode (Normal/Continue/Resume)
+ * Step 1: Select mode (New/Continue/Resume)
  * Step 2: Select skip permissions (Yes/No)
  * Layout: Header + Selection + Footer
  */
@@ -62,7 +62,7 @@ export function ExecutionModeSelectorScreen({
   // Execution mode options (Step 1)
   const modeItems: ExecutionModeItem[] = [
     {
-      label: "Normal",
+      label: "New",
       value: "normal",
       description: "Start fresh session",
     },
