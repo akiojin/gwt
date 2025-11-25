@@ -13,7 +13,11 @@ import chalk from "chalk";
 
 const WIDTH_OVERRIDES: Record<string, number> = {
   "⬆": 1,
+  "⬆️": 1,
+  "⬆︎": 1,
   "☁": 1,
+  "☁️": 1,
+  "☁︎": 1,
 };
 
 const measureDisplayWidth = (value: string): number => {
