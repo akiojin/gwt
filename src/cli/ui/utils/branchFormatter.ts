@@ -39,11 +39,7 @@ const remoteIcon = "☁";
 const iconWidthOverrides: Record<string, number> = {
   // Remote icon
   [remoteIcon]: 1,
-  "☁️": 1,
-  "☁︎": 1,
   // Unpushed icon
-  "⬆️": 1,
-  "⬆︎": 1,
   "⬆": 1,
   // Branch type icons
   "⚡": 1,
