@@ -12,12 +12,30 @@ import stringWidth from "string-width";
 import chalk from "chalk";
 
 const WIDTH_OVERRIDES: Record<string, number> = {
-  "⬆": 1,
-  "⬆️": 1,
-  "⬆︎": 1,
+  // Remote icon
   "☁": 1,
   "☁️": 1,
   "☁︎": 1,
+  // Unpushed icon
+  "⬆": 1,
+  "⬆️": 1,
+  "⬆︎": 1,
+  // Branch type icons
+  "⚡": 1,
+  "✨": 1,
+  "🐛": 1,
+  "🔥": 1,
+  "🚀": 1,
+  "📌": 1,
+  // Worktree status icons
+  "🟢": 1,
+  "🟠": 1,
+  // Change status icons
+  "⭐": 1,
+  "✏️": 1,
+  "🔀": 1,
+  "✅": 1,
+  "⚠️": 1,
 };
 
 const measureDisplayWidth = (value: string): number => {

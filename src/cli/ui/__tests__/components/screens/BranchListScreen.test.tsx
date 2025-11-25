@@ -313,6 +313,16 @@ describe("BranchListScreen", () => {
       // Note: ink-testing-library may not render all branches due to viewport constraints
       expect(timestampLines.length).toBeGreaterThanOrEqual(2);
 
+      // Icons that should be treated as width 1
+      const iconOverrides = new Set([
+        "\u2B06", // ⬆
+        "\u2601", // ☁
+        "\u26A1", // ⚡
+        "\u2728", // ✨
+        "\u2B50", // ⭐
+        "\u2705", // ✅
+        "\u26A0", // ⚠
+      ]);
       const timestampWidths = timestampLines.map((line) => {
         const match = line.match(/\d{4}-\d{2}-\d{2} \d{2}:\d{2}/);
         const index = match?.index ?? 0;
@@ -320,7 +330,7 @@ describe("BranchListScreen", () => {
 
         let width = 0;
         for (const char of Array.from(beforeTimestamp)) {
-          if (char === "\u2B06" || char === "\u2601") {
+          if (iconOverrides.has(char)) {
             width += 1;
             continue;
           }
