@@ -4,6 +4,7 @@ import {
   formatBranchItems,
 } from "../../utils/branchFormatter.js";
 import type { BranchInfo } from "../../types.js";
+import stringWidth from "string-width";
 
 describe("branchFormatter", () => {
   describe("formatBranchItem", () => {
@@ -125,6 +126,30 @@ describe("branchFormatter", () => {
       expect(localNameIndex).toBeGreaterThan(0);
       expect(localNameIndex).toBe(remoteNameIndex);
       expect(remoteResult.label).toMatch(/☁(?:️|︎)?\s+origin/);
+    });
+
+    it("should keep icon columns fixed-width when using wide emoji icons", () => {
+      const branchInfo: BranchInfo = {
+        name: "feature/wide-icons",
+        type: "remote",
+        branchType: "feature",
+        isCurrent: false,
+        hasUnpushedCommits: true,
+        worktree: {
+          path: "/path/to/worktree",
+          locked: false,
+          prunable: false,
+          isAccessible: true,
+        },
+      };
+
+      const result = formatBranchItem(branchInfo, { hasChanges: true });
+
+      // Four icon columns should occupy exactly 8 columns (4 * COLUMN_WIDTH)
+      const iconBlockWidth =
+        stringWidth(result.label) - stringWidth(branchInfo.name);
+
+      expect(iconBlockWidth).toBe(8);
     });
 
     it("should include worktree status icon when provided", () => {
