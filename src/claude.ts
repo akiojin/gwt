@@ -37,9 +37,11 @@ export async function launchClaudeCode(
 
     const args: string[] = [];
 
-    if (options.model) {
+    if (options.model && options.model !== "opus") {
       args.push("--model", options.model);
       console.log(chalk.green(`   🎯 Model: ${options.model}`));
+    } else if (options.model === "opus") {
+      console.log(chalk.green(`   🎯 Model: ${options.model} (Default)`));
     }
 
     // Handle execution mode
