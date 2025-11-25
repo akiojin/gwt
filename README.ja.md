@@ -114,7 +114,7 @@ gwt -v
 2. CIワークフロー（Test、Lint）が自動実行
 3. すべてのCIチェックが成功し、競合がない場合、PRが自動的に`develop`にマージされる
 4. 変更は`develop`に蓄積され、リリース準備ができるまで待機
-5. `/release`コマンドを使用して`develop`を`main`にマージし、semantic-releaseをトリガー
+5. `/release`コマンドを使用してRelease PRを作成し、release-pleaseをトリガー
 
 **自動マージの無効化:**
 

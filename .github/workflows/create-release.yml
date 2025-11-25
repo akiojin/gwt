@@ -5,102 +5,43 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
-  create-release-branch:
-    name: Create Release Branch
+  release-pr:
+    name: Create release PR (release-please)
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout develop
-        uses: actions/checkout@v4
+      - name: Run release-please
+        id: rp
+        uses: googleapis/release-please-action@v4
         with:
-          ref: develop
-          fetch-depth: 0
           token: ${{ secrets.PERSONAL_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
+          release-type: node
+          manifest-file: .release-please-manifest.json
+          config-file: .release-please-config.json
+          target-branch: main
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22.14.0
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - name: Install dependencies
-        run: bun install
-
-      - name: Determine next version
-        id: next_version
+      - name: Enable auto-merge for release PR
+        if: steps.rp.outputs.pr != ''
         env:
-          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN || 'dummy-token-for-dry-run' }}
+          PR_NUMBER: ${{ steps.rp.outputs.pr }}
         run: |
-          echo "Running semantic-release in dry-run mode..."
-          OUTPUT=$(bunx semantic-release --dry-run --branches develop 2>&1 || true)
-          echo "$OUTPUT"
-
-          # Check for non-compliant commits
-          if echo "$OUTPUT" | grep -q "not following the Conventional Commits"; then
-            echo "❌ Error: Commits not following Conventional Commits format detected"
-            echo "$OUTPUT" | grep "not following"
-            exit 1
-          fi
-
-          # Extract version
-          VERSION=$(echo "$OUTPUT" | grep "The next release version is" | sed -n 's/.*The next release version is \([0-9.]*\).*/\1/p')
-
-          if [ -z "$VERSION" ]; then
-            echo "❌ Error: Could not determine next version"
-            echo "Semantic-release output:"
-            echo "$OUTPUT"
-            exit 1
-          fi
-
-          echo "next_version=$VERSION" >> $GITHUB_OUTPUT
-          echo "✓ Next version: $VERSION"
-
-      - name: Create release branch
-        env:
-          VERSION: ${{ steps.next_version.outputs.next_version }}
-          GH_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
-        run: |
-          RELEASE_BRANCH="release/v$VERSION"
-
-          # Check if branch already exists
-          if git ls-remote --exit-code origin "$RELEASE_BRANCH" >/dev/null 2>&1; then
-            echo "❌ Error: Release branch $RELEASE_BRANCH already exists"
-            exit 1
-          fi
-
-          # Create and push release branch
-          git checkout -b "$RELEASE_BRANCH"
-          git push origin "$RELEASE_BRANCH"
-
-          echo "✓ Created release branch: $RELEASE_BRANCH"
-          echo "✓ The release.yml workflow will now run automatically"
+          gh pr merge "$PR_NUMBER" --auto --merge
 
       - name: Summary
-        if: success()
-        env:
-          VERSION: ${{ steps.next_version.outputs.next_version }}
+        if: steps.rp.outputs.pr != ''
         run: |
           cat >> $GITHUB_STEP_SUMMARY <<EOF
-          ## Release Branch Created
+          ## Release PR Created/Updated
 
-          - **Version**: v$VERSION
-          - **Branch**: \`release/v$VERSION\`
-          - **Next Steps**:
-            1. The \`release.yml\` workflow will run automatically
-            2. semantic-release will create CHANGELOG, tags, and a GitHub Release
-            3. The release branch will be merged directly into \`main\` and deleted
-            4. \`publish.yml\` will run on \`main\` for:
-               - npm publish (if NPM_TOKEN is configured and commit is a release commit)
-               - Automatic back-merge to \`develop\` (always executed)
+          - **PR**: #${{ steps.rp.outputs.pr }}
+          - **Auto-merge**: Enabled
 
-          Monitor the workflow progress:
-          https://github.com/${{ github.repository }}/actions
+          Next steps:
+          1. CI checks will run on the Release PR
+          2. Once checks pass, the PR will be auto-merged to main
+          3. release.yml will create tag and GitHub Release
+          4. publish.yml will handle npm publish and backmerge to develop
           EOF
