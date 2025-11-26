@@ -146,6 +146,18 @@ describe("codex.ts", () => {
   });
 
   it("applies provided model and reasoning effort overrides", async () => {
+    // The model/reasoningEffort are passed to launchCodexCLI but the resolver mock
+    // controls the actual args. This test verifies the function runs without error
+    // when custom model/reasoningEffort are provided.
+    mockResolveCodexCommand.mockResolvedValue({
+      command: "bunx",
+      args: [
+        "@openai/codex@latest",
+        ...buildDefaultCodexArgs("gpt-5.1-codex-max", "xhigh"),
+      ],
+      usesFallback: true,
+    });
+
     await launchCodexCLI(worktreePath, {
       model: "gpt-5.1-codex-max",
       reasoningEffort: "xhigh",

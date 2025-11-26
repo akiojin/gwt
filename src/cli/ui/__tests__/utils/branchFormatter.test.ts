@@ -120,12 +120,20 @@ describe("branchFormatter", () => {
       const localResult = formatBranchItem(localBranch);
       const remoteResult = formatBranchItem(remoteBranch);
 
+      // Use string-width to calculate visual column position, not character index
       const localNameIndex = localResult.label.indexOf(localResult.name);
       const remoteNameIndex = remoteResult.label.indexOf(remoteResult.name);
+      const localPrefixWidth = stringWidth(
+        localResult.label.slice(0, localNameIndex),
+      );
+      const remotePrefixWidth = stringWidth(
+        remoteResult.label.slice(0, remoteNameIndex),
+      );
 
-      expect(localNameIndex).toBeGreaterThan(0);
-      expect(localNameIndex).toBe(remoteNameIndex);
-      expect(remoteResult.label).toMatch(/☁(?:️|︎)?\s+origin/);
+      expect(localPrefixWidth).toBeGreaterThan(0);
+      // Visual width should be equal, ensuring alignment
+      expect(localPrefixWidth).toBe(remotePrefixWidth);
+      expect(remoteResult.label).toMatch(/☁(?:️|︎)?origin/);
     });
 
     it("should keep icon columns fixed-width when using wide emoji icons", () => {
