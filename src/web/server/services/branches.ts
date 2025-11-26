@@ -37,10 +37,21 @@ function mapPullRequestState(state: string): "open" | "merged" | "closed" {
  * すべてのブランチ一覧を取得（マージステータスとWorktree情報付き）
  */
 export async function listBranches(): Promise<Branch[]> {
-  const [branches, worktrees, repoRoot] = await Promise.all([
+  const repoRoot = await getRepositoryRoot();
+
+  // リモートブランチの最新情報を取得（失敗してもローカル情報にはフォールバック）
+  try {
+    await fetchAllRemotes({ cwd: repoRoot });
+  } catch (error) {
+    console.warn(
+      "Failed to fetch remote branches for Web UI; falling back to local branches",
+      error,
+    );
+  }
+
+  const [branches, worktrees] = await Promise.all([
     getAllBranches(),
     listAdditionalWorktrees(),
-    getRepositoryRoot(),
   ]);
   const divergenceMap = await buildDivergenceMap(branches, repoRoot);
   const upstreamMap = await collectUpstreamMap(repoRoot);
