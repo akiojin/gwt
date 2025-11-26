@@ -61,6 +61,7 @@ import {
   getAllBranches,
   getRepositoryRoot,
   deleteBranch,
+  fetchAllRemotes,
 } from "../../../../git.ts";
 import {
   listAdditionalWorktrees,
@@ -73,6 +74,7 @@ import {
 const mockedGetAllBranches = getAllBranches as Mock;
 const mockedGetRepositoryRoot = getRepositoryRoot as Mock;
 const mockedDeleteBranch = deleteBranch as Mock;
+const mockedFetchAllRemotes = fetchAllRemotes as Mock;
 const mockedListAdditionalWorktrees = listAdditionalWorktrees as Mock;
 const mockedCreateWorktree = createWorktree as Mock;
 const mockedGenerateWorktreePath = generateWorktreePath as Mock;
@@ -96,6 +98,7 @@ describe("Navigation Integration Tests", () => {
     mockedListAdditionalWorktrees.mockReset();
     mockedGetRepositoryRoot.mockReset();
     mockedDeleteBranch.mockReset();
+    mockedFetchAllRemotes.mockReset();
     mockedCreateWorktree.mockReset();
     mockedGenerateWorktreePath.mockReset();
     mockedGetMergedPRWorktrees.mockReset();
@@ -268,6 +271,7 @@ describe("Protected Branch Navigation (T103)", () => {
     mockedListAdditionalWorktrees.mockReset();
     mockedGetRepositoryRoot.mockReset();
     mockedDeleteBranch.mockReset();
+    mockedFetchAllRemotes.mockReset();
     mockedCreateWorktree.mockReset();
     mockedGenerateWorktreePath.mockReset();
     mockedGetMergedPRWorktrees.mockReset();
