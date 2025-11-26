@@ -3,6 +3,7 @@ import {
   getAllBranches,
   hasUnpushedCommitsInRepo,
   getRepositoryRoot,
+  fetchAllRemotes,
 } from "../../../git.js";
 import { listAdditionalWorktrees } from "../../../worktree.js";
 import { getPullRequestByBranch } from "../../../github.js";
@@ -40,6 +41,10 @@ export function useGitData(options?: UseGitDataOptions): UseGitDataResult {
     setError(null);
 
     try {
+      // リモートブランチの最新情報を取得
+      const repoRoot = await getRepositoryRoot();
+      await fetchAllRemotes({ cwd: repoRoot });
+
       const [branchesData, worktreesData] = await Promise.all([
         getAllBranches(),
         listAdditionalWorktrees(),
@@ -60,9 +65,6 @@ export function useGitData(options?: UseGitDataOptions): UseGitDataResult {
         };
         worktreeMap.set(worktree.branch, uiWorktreeInfo);
       }
-
-      // Get repository root for unpushed commits check
-      const repoRoot = await getRepositoryRoot();
 
       // Attach worktree info and check unpushed/PR status for local branches
       const enrichedBranches = await Promise.all(
