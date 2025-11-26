@@ -43,6 +43,16 @@
 * update default Claude Code model to Opus 4.5 ([1dd909e](https://github.com/akiojin/gwt/commit/1dd909ed87a55ce3bb796deb0431d0027571dae2))
 * update Opus model version to 4.5 ([307faeb](https://github.com/akiojin/gwt/commit/307faeb66ebac0ca89b01c07ee19d213797c4d5c))
 
+## [2.7.4](https://github.com/akiojin/gwt/compare/v2.7.3...v2.7.4) (2025-11-26)
+
+
+### Bug Fixes
+
+* fetchAllRemotes 失敗時にローカルブランチを表示するフォールバックを追加 ([65f0a02](https://github.com/akiojin/gwt/commit/65f0a0239b3dc45e54ba979b67c4bc41934ed12c))
+* navigation.test.tsx に fetchAllRemotes のモックを追加 ([b76ea96](https://github.com/akiojin/gwt/commit/b76ea96fd86ae467bc9cb3053806ae7280ae0f57))
+* ブランチ一覧表示時にリモートブランチをfetchして最新情報を取得 ([54b610f](https://github.com/akiojin/gwt/commit/54b610feb7c1d5349cdc3f305ffe03a5f11e3bcf))
+* ブランチ一覧表示時にリモートブランチをfetchして最新情報を取得 ([14696f1](https://github.com/akiojin/gwt/commit/14696f16e6cb5e5606fbb45e6f57bdfa9a3b4759))
+
 ## [2.4.1](https://github.com/akiojin/gwt/compare/v2.4.0...v2.4.1) (2025-11-21)
 
 
