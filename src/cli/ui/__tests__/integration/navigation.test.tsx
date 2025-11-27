@@ -331,7 +331,8 @@ describe("Protected Branch Navigation (T103)", () => {
     render(<App onExit={onExit} />);
 
     await waitFor(() => {
-      expect(branchListProps.length).toBeGreaterThan(0);
+      const latestProps = branchListProps.find((p) => p.branches?.length);
+      expect(latestProps?.branches?.length ?? 0).toBeGreaterThan(0);
     });
 
     // Simulate selecting the branch from the list
