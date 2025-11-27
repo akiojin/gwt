@@ -665,7 +665,7 @@ export async function handleAIToolWorkflow(
       });
     }
 
-    // Save session with lastUsedTool
+    // Save session with lastUsedTool (tool selection is confirmed at this point)
     await saveSession({
       lastWorktreePath: worktreePath,
       lastBranch: branch,
