@@ -58,27 +58,103 @@ export async function isGitRepository(): Promise<boolean> {
  * @throws {GitError} リポジトリルートの取得に失敗した場合
  */
 export async function getRepositoryRoot(): Promise<string> {
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+
+  const toExistingDir = (p: string): string => {
+    let current = path.resolve(p);
+    while (!fs.existsSync(current) && path.dirname(current) !== current) {
+      current = path.dirname(current);
+    }
+    if (!fs.existsSync(current)) {
+      return current;
+    }
+    try {
+      const stat = fs.statSync(current);
+      return stat.isDirectory() ? current : path.dirname(current);
+    } catch {
+      return current;
+    }
+  };
+
+  // 1) show-toplevel を最優先
   try {
-    // git rev-parse --git-common-dirを使用してメインリポジトリの.gitディレクトリを取得
+    const { stdout } = await execa("git", ["rev-parse", "--show-toplevel"]);
+    const top = stdout.trim();
+    if (top) {
+      const marker = `${path.sep}.worktrees${path.sep}`;
+      const idx = top.indexOf(marker);
+      if (idx >= 0) {
+        // /repo/.worktrees/<name> → repo root = /repo
+        const parent = top.slice(0, idx);
+        const upTwo = path.resolve(top, "..", "..");
+        if (fs.existsSync(parent)) return toExistingDir(parent);
+        if (fs.existsSync(upTwo)) return toExistingDir(upTwo);
+      }
+      if (fs.existsSync(top)) {
+        return toExistingDir(top);
+      }
+      return toExistingDir(path.resolve(top, ".."));
+    }
+  } catch {
+    // fallback
+  }
+
+  // 2) git-common-dir 経由
+  try {
     const { stdout: gitCommonDir } = await execa("git", [
       "rev-parse",
       "--git-common-dir",
     ]);
-    const gitDir = gitCommonDir.trim();
-
-    // .gitディレクトリの親ディレクトリがリポジトリルート
-    const path = await import("node:path");
-    const repoRoot = path.dirname(gitDir);
-
-    // 相対パスが返された場合（.gitなど）は、現在のディレクトリからの相対パスとして解決
-    if (!path.isAbsolute(repoRoot)) {
-      return path.resolve(repoRoot);
+    const gitDir = path.resolve(gitCommonDir.trim());
+    const parts = gitDir.split(path.sep);
+    const idxWorktrees = parts.lastIndexOf("worktrees");
+    if (idxWorktrees > 0) {
+      const repo = parts.slice(0, idxWorktrees).join(path.sep);
+      if (fs.existsSync(repo)) return toExistingDir(repo);
     }
-
-    return repoRoot;
-  } catch (error) {
-    throw new GitError("Failed to get repository root", error);
+    const idxGit = parts.lastIndexOf(".git");
+    if (idxGit > 0) {
+      const repo = parts.slice(0, idxGit).join(path.sep);
+      if (fs.existsSync(repo)) return toExistingDir(repo);
+    }
+    return toExistingDir(path.dirname(gitDir));
+  } catch {
+    // fallback
   }
+
+  // 3) .git を上に辿って探す
+  let current = process.cwd();
+  const root = path.parse(current).root;
+  while (true) {
+    const candidate = path.join(current, ".git");
+    if (fs.existsSync(candidate)) {
+      if (fs.statSync(candidate).isDirectory()) {
+        return toExistingDir(current);
+      }
+      try {
+        const content = fs.readFileSync(candidate, "utf-8");
+        const match = content.match(/gitdir:\s*(.+)\s*/i);
+        const gitDirMatch = match?.[1];
+        if (gitDirMatch) {
+          const gitDirPath = path.resolve(current, gitDirMatch.trim());
+          const parts = gitDirPath.split(path.sep);
+          const idxWT = parts.lastIndexOf("worktrees");
+          if (idxWT > 0) {
+            const repo = parts.slice(0, idxWT).join(path.sep);
+            return toExistingDir(repo);
+          }
+          return toExistingDir(path.dirname(gitDirPath));
+        }
+      } catch {
+        // ignore and continue
+      }
+    }
+    if (current === root) break;
+    current = path.dirname(current);
+  }
+
+  throw new GitError("Failed to get repository root");
 }
 
 /**
@@ -97,22 +173,33 @@ export async function getWorktreeRoot(): Promise<string> {
 
 export async function getCurrentBranch(): Promise<string | null> {
   try {
-    const { stdout } = await execa("git", ["branch", "--show-current"]);
+    const repoRoot = await getRepositoryRoot();
+    const { stdout } = await execa(
+      "git",
+      ["branch", "--show-current"],
+      { cwd: repoRoot },
+    );
     return stdout.trim() || null;
   } catch {
-    return null;
+    try {
+      const { stdout } = await execa("git", ["branch", "--show-current"]);
+      return stdout.trim() || null;
+    } catch {
+      return null;
+    }
   }
 }
 
 async function getBranchCommitTimestamps(
   refs: string[],
+  cwd?: string,
 ): Promise<Map<string, number>> {
   try {
     const { stdout } = await execa("git", [
       "for-each-ref",
       "--format=%(refname:short)%00%(committerdate:unix)",
       ...refs,
-    ]);
+    ], cwd ? { cwd } : undefined);
 
     const map = new Map<string, number>();
 
@@ -128,17 +215,24 @@ async function getBranchCommitTimestamps(
 
     return map;
   } catch (error) {
-    throw new GitError("Failed to get branch commit timestamps", error);
+    if (process.env.DEBUG) {
+      console.error(
+        "Failed to get branch commit timestamps",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    return new Map<string, number>();
   }
 }
 
 export async function getLocalBranches(): Promise<BranchInfo[]> {
-  try {
-    const commitMap = await getBranchCommitTimestamps(["refs/heads"]);
-    const { stdout } = await execa("git", [
-      "branch",
-      "--format=%(refname:short)",
-    ]);
+  const attempt = async (cwd?: string) => {
+    const commitMap = await getBranchCommitTimestamps(["refs/heads"], cwd);
+    const { stdout } = await execa(
+      "git",
+      ["branch", "--format=%(refname:short)"],
+      cwd ? { cwd } : undefined,
+    );
     return stdout
       .split("\n")
       .filter((line) => line.trim())
@@ -156,19 +250,39 @@ export async function getLocalBranches(): Promise<BranchInfo[]> {
             : {}),
         } satisfies BranchInfo;
       });
-  } catch (error) {
-    throw new GitError("Failed to get local branches", error);
+  };
+
+  try {
+    const repoRoot = await getRepositoryRoot();
+    return await attempt(repoRoot);
+  } catch (primaryError) {
+    try {
+      // fallback: current working directory
+      return await attempt(process.cwd());
+    } catch (fallbackError) {
+      const messageParts = [];
+      if (primaryError instanceof Error) {
+        messageParts.push(primaryError.message);
+      }
+      if (fallbackError instanceof Error) {
+        messageParts.push(fallbackError.message);
+      }
+      throw new GitError(
+        `Failed to get local branches${messageParts.length ? `: ${messageParts.join(" | ")}` : ""}`,
+        fallbackError,
+      );
+    }
   }
 }
 
 export async function getRemoteBranches(): Promise<BranchInfo[]> {
-  try {
-    const commitMap = await getBranchCommitTimestamps(["refs/remotes"]);
-    const { stdout } = await execa("git", [
-      "branch",
-      "-r",
-      "--format=%(refname:short)",
-    ]);
+  const attempt = async (cwd?: string) => {
+    const commitMap = await getBranchCommitTimestamps(["refs/remotes"], cwd);
+    const { stdout } = await execa(
+      "git",
+      ["branch", "-r", "--format=%(refname:short)"],
+      cwd ? { cwd } : undefined,
+    );
     return stdout
       .split("\n")
       .filter((line) => line.trim() && !line.includes("HEAD"))
@@ -187,8 +301,27 @@ export async function getRemoteBranches(): Promise<BranchInfo[]> {
             : {}),
         } satisfies BranchInfo;
       });
-  } catch (error) {
-    throw new GitError("Failed to get remote branches", error);
+  };
+
+  try {
+    const repoRoot = await getRepositoryRoot();
+    return await attempt(repoRoot);
+  } catch (primaryError) {
+    try {
+      return await attempt(process.cwd());
+    } catch (fallbackError) {
+      const messageParts = [];
+      if (primaryError instanceof Error) {
+        messageParts.push(primaryError.message);
+      }
+      if (fallbackError instanceof Error) {
+        messageParts.push(fallbackError.message);
+      }
+      throw new GitError(
+        `Failed to get remote branches${messageParts.length ? `: ${messageParts.join(" | ")}` : ""}`,
+        fallbackError,
+      );
+    }
   }
 }
 

@@ -5,8 +5,11 @@ export interface WorktreeInfo {
   isAccessible?: boolean;
 }
 
+import type { LastToolUsage } from "../../types/api.js";
+
 export type AITool = string;
 export type InferenceLevel = "low" | "medium" | "high" | "xhigh";
+export type { LastToolUsage } from "../../types/api.js";
 
 export interface ModelOption {
   id: string;
@@ -35,6 +38,7 @@ export interface BranchInfo {
   openPR?: { number: number; title: string };
   mergedPR?: { number: number; mergedAt: string };
   latestCommitTimestamp?: number;
+  lastToolUsage?: LastToolUsage | null;
 }
 
 export interface BranchChoice {
@@ -204,6 +208,7 @@ export interface BranchItem extends BranchInfo {
   hasChanges: boolean;
   label: string;
   value: string;
+  lastToolUsageLabel?: string | null;
 }
 
 /**

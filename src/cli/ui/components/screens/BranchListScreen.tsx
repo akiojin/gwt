@@ -279,7 +279,12 @@ export function BranchListScreen({
       // Use a small safety margin to avoid terminal-dependent wrapping
       const columns = Math.max(20, context.columns - 1);
       const arrow = isSelected ? ">" : " ";
-      const timestampText = formatLatestCommit(item.latestCommitTimestamp);
+      const commitText = formatLatestCommit(item.latestCommitTimestamp);
+      const infoText =
+        item.lastToolUsage && item.lastToolUsageLabel
+          ? item.lastToolUsageLabel
+          : `${chalk.gray("Unknown")}${commitText !== "---" ? ` | ${commitText}` : ""}`;
+      const timestampText = infoText;
       const timestampWidth = stringWidth(timestampText);
 
       const indicatorInfo = cleanupUI?.indicators?.[item.name];

@@ -16,6 +16,20 @@ export interface SessionData {
   lastUsedTool?: string;
   timestamp: number;
   repositoryRoot: string;
+  mode?: "normal" | "continue" | "resume";
+  model?: string | null;
+  toolLabel?: string | null;
+  history?: ToolSessionEntry[];
+}
+
+export interface ToolSessionEntry {
+  branch: string;
+  worktreePath: string | null;
+  toolId: string;
+  toolLabel: string;
+  mode?: "normal" | "continue" | "resume" | null;
+  model?: string | null;
+  timestamp: number;
 }
 
 const DEFAULT_CONFIG: AppConfig = {
@@ -104,7 +118,38 @@ export async function saveSession(sessionData: SessionData): Promise<void> {
     // ディレクトリを作成
     await mkdir(sessionDir, { recursive: true });
 
-    await writeFile(sessionPath, JSON.stringify(sessionData, null, 2), "utf-8");
+    // 既存履歴を読み込み（後方互換のため失敗は無視）
+    let existingHistory: ToolSessionEntry[] = [];
+    try {
+      const currentContent = await readFile(sessionPath, "utf-8");
+      const parsed = JSON.parse(currentContent) as SessionData;
+      if (Array.isArray(parsed.history)) {
+        existingHistory = parsed.history;
+      }
+    } catch {
+      // ignore
+    }
+
+    // 新しい履歴エントリを追加（branch/worktree/toolが揃っている場合のみ）
+    if (sessionData.lastBranch && sessionData.lastWorktreePath) {
+      const entry: ToolSessionEntry = {
+        branch: sessionData.lastBranch,
+        worktreePath: sessionData.lastWorktreePath,
+        toolId: sessionData.lastUsedTool ?? "unknown",
+        toolLabel: sessionData.toolLabel ?? sessionData.lastUsedTool ?? "Custom",
+        mode: sessionData.mode ?? null,
+        model: sessionData.model ?? null,
+        timestamp: sessionData.timestamp,
+      };
+      existingHistory = [...existingHistory, entry].slice(-100); // keep latest 100
+    }
+
+    const payload: SessionData = {
+      ...sessionData,
+      history: existingHistory,
+    };
+
+    await writeFile(sessionPath, JSON.stringify(payload, null, 2), "utf-8");
   } catch (error) {
     // セッション保存の失敗は致命的ではないため、エラーをログに出力するのみ
     if (process.env.DEBUG_SESSION) {
@@ -191,4 +236,45 @@ export async function getAllSessions(): Promise<SessionData[]> {
     }
     return [];
   }
+}
+
+/**
+ * 各ブランチの最新ツール利用履歴を取得
+ */
+export async function getLastToolUsageMap(
+  repositoryRoot: string,
+): Promise<Map<string, ToolSessionEntry>> {
+  const map = new Map<string, ToolSessionEntry>();
+  try {
+    const sessionPath = getSessionFilePath(repositoryRoot);
+    const content = await readFile(sessionPath, "utf-8");
+    const parsed = JSON.parse(content) as SessionData;
+
+    const history: ToolSessionEntry[] = Array.isArray(parsed.history)
+      ? parsed.history
+      : [];
+
+    // 後方互換: historyが無い場合はlastUsedToolを1件扱い
+    if (!history.length && parsed.lastBranch && parsed.lastWorktreePath) {
+      history.push({
+        branch: parsed.lastBranch,
+        worktreePath: parsed.lastWorktreePath,
+        toolId: parsed.lastUsedTool ?? "unknown",
+        toolLabel: parsed.toolLabel ?? parsed.lastUsedTool ?? "Custom",
+        mode: parsed.mode ?? null,
+        model: parsed.model ?? null,
+        timestamp: parsed.timestamp ?? Date.now(),
+      });
+    }
+
+    for (const entry of history) {
+      const existing = map.get(entry.branch);
+      if (!existing || existing.timestamp < entry.timestamp) {
+        map.set(entry.branch, entry);
+      }
+    }
+  } catch {
+    // セッションファイルが無い/壊れている場合は空のMapを返す
+  }
+  return map;
 }
