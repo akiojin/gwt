@@ -307,6 +307,56 @@ describe("Protected Branch Navigation (T103)", () => {
     branchActionSpy.mockRestore();
   });
 
+  it("prefills AI tool selector with last used tool for the branch", async () => {
+    const branchesWithUsage: BranchInfo[] = [
+      {
+        name: "feature/with-usage",
+        type: "local",
+        branchType: "feature",
+        isCurrent: false,
+        lastToolUsage: {
+          branch: "feature/with-usage",
+          worktreePath: "/repo/.worktrees/feature-with-usage",
+          toolId: "codex-cli",
+          toolLabel: "Codex",
+          timestamp: Date.now(),
+        },
+      },
+    ];
+
+    mockedGetAllBranches.mockResolvedValue(branchesWithUsage);
+    mockedListAdditionalWorktrees.mockResolvedValue([]);
+
+    const onExit = vi.fn();
+    render(<App onExit={onExit} />);
+
+    await waitFor(() => {
+      expect(branchListProps.length).toBeGreaterThan(0);
+    });
+
+    // Simulate selecting the branch from the list
+    const listProps =
+      branchListProps.find((p) => p.branches?.length) ??
+      branchListProps.at(-1);
+    expect(listProps?.branches?.length).toBeGreaterThan(0);
+    listProps.onSelect(listProps.branches[0]);
+
+    await waitFor(() => {
+      expect(branchActionProps.length).toBeGreaterThan(0);
+    });
+
+    // Use existing branch (non-protected) to navigate to AI tool selector
+    const actionProps = branchActionProps.at(-1);
+    actionProps.onUseExisting();
+
+    await waitFor(() => {
+      expect(aiToolScreenProps.length).toBeGreaterThan(0);
+    });
+
+    const props = aiToolScreenProps.at(-1) as { initialToolId?: string };
+    expect(props.initialToolId).toBe("codex-cli");
+  });
+
   it("switches local protected branches via root workflow and navigates to AI tool", async () => {
     mockedGetAllBranches.mockResolvedValue(baseBranches);
     mockedListAdditionalWorktrees.mockResolvedValue([]);
