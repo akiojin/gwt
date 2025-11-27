@@ -476,21 +476,21 @@ export function BranchDetailPage() {
             {branch.worktreePath ? "Worktreeあり" : "Worktree未作成"}
           </span>
         </div>
-        {latestToolUsage ? (
-          <div className="badge-group" style={{ marginTop: "0.5rem" }}>
-            <span className="status-badge status-badge--muted">
-              {renderToolUsage(latestToolUsage)}
-            </span>
-            <span className="status-badge status-badge--muted">
-              {formatUsageTimestamp(latestToolUsage.timestamp)} ・ worktree:{" "}
-              {latestToolUsage.worktreePath ?? branch.worktreePath ?? "N/A"}
-            </span>
-          </div>
-        ) : (
-          <p className="page-hero__subtitle">
-            まだ起動履歴がありません。
-          </p>
-        )}
+        <div className="badge-group" style={{ marginTop: "0.5rem" }}>
+          {latestToolUsage ? (
+            <>
+              <span className="status-badge status-badge--muted">
+                {renderToolUsage(latestToolUsage)}
+              </span>
+              <span className="status-badge status-badge--muted">
+                {formatUsageTimestamp(latestToolUsage.timestamp)} ・ worktree:{" "}
+                {latestToolUsage.worktreePath ?? branch.worktreePath ?? "N/A"}
+              </span>
+            </>
+          ) : (
+            <span className="status-badge status-badge--muted">Unknown</span>
+          )}
+        </div>
         <div className="page-hero__actions">
           {!canStartSession ? (
             <button
