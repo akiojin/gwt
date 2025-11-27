@@ -98,7 +98,13 @@ export interface WorktreeInfo {
 
 async function listWorktrees(): Promise<WorktreeInfo[]> {
   try {
-    const { stdout } = await execa("git", ["worktree", "list", "--porcelain"]);
+    const { getRepositoryRoot } = await import("./git.js");
+    const repoRoot = await getRepositoryRoot();
+    const { stdout } = await execa(
+      "git",
+      ["worktree", "list", "--porcelain"],
+      { cwd: repoRoot },
+    );
     const worktrees: WorktreeInfo[] = [];
     const lines = stdout.split("\n");
 

@@ -216,6 +216,59 @@ describe("BranchListScreen", () => {
     expect(getByText(/✨/)).toBeDefined(); // feature icon
   });
 
+  it("should render last tool usage when available and Unknown when not", () => {
+    const onSelect = vi.fn();
+    const branches: BranchItem[] = [
+      {
+        name: "feature/with-usage",
+        type: "local",
+        branchType: "feature",
+        isCurrent: false,
+        hasUnpushedCommits: false,
+        label: "feature/with-usage",
+        value: "feature/with-usage",
+        icons: [],
+        hasChanges: false,
+        lastToolUsage: {
+          branch: "feature/with-usage",
+          worktreePath: "/wt/with",
+          toolId: "codex-cli",
+          toolLabel: "Codex",
+          mode: "normal",
+          model: null,
+          timestamp: Date.UTC(2025, 10, 26, 14, 3),
+        },
+        lastToolUsageLabel: "Codex | New | 2025-11-26 14:03",
+      },
+      {
+        name: "feature/without-usage",
+        type: "local",
+        branchType: "feature",
+        isCurrent: false,
+        hasUnpushedCommits: false,
+        label: "feature/without-usage",
+        value: "feature/without-usage",
+        icons: [],
+        hasChanges: false,
+        latestCommitTimestamp: 1_730_000_000,
+        lastToolUsage: null,
+        lastToolUsageLabel: null,
+      },
+    ];
+
+    const { lastFrame } = inkRender(
+      <BranchListScreen
+        branches={branches}
+        stats={mockStats}
+        onSelect={onSelect}
+      />,
+    );
+
+    const output = stripAnsi(stripControlSequences(lastFrame() ?? ""));
+    expect(output).toContain("Codex | New | 2025-11-26 14:03");
+    expect(output).toContain("Unknown |");
+  });
+
   it("should render latest commit timestamp for each branch", () => {
     const onSelect = vi.fn();
     const { container } = render(

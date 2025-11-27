@@ -119,7 +119,7 @@ describeOrSkip("block-git-branch-ops.sh hook", () => {
       const jsonOutput = JSON.parse(result.stdout);
       expect(jsonOutput.decision).toBe("block");
       expect(jsonOutput.reason).toContain(
-        "Branch switching, creation, and worktree commands are not allowed",
+        "Branch switching commands (checkout/switch) are not allowed",
       );
     });
 

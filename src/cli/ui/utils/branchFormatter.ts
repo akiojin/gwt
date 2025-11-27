@@ -6,6 +6,7 @@ import type {
   WorktreeInfo,
 } from "../types.js";
 import stringWidth from "string-width";
+import chalk from "chalk";
 
 // Icon mappings
 const branchIcons: Record<BranchType, string> = {
@@ -67,6 +68,51 @@ const getIconWidth = (icon: string): number => {
 
 export interface FormatOptions {
   hasChanges?: boolean;
+}
+
+function mapToolLabel(toolId: string, toolLabel?: string): string {
+  if (toolId === "claude-code") return "Claude";
+  if (toolId === "codex-cli") return "Codex";
+  if (toolId === "gemini-cli") return "Gemini";
+  if (toolId === "qwen-cli") return "Qwen";
+  if (toolLabel) return toolLabel;
+  return "Custom";
+}
+
+function mapModeLabel(
+  mode?: "normal" | "continue" | "resume" | null,
+): string | null {
+  if (mode === "normal") return "New";
+  if (mode === "continue") return "Continue";
+  if (mode === "resume") return "Resume";
+  return null;
+}
+
+function formatTimestamp(ts: number): string {
+  const date = new Date(ts);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  return `${year}-${month}-${day} ${hours}:${minutes}`;
+}
+
+function buildLastToolUsageLabel(
+  usage?: BranchInfo["lastToolUsage"] | null,
+): string | null {
+  if (!usage) return null;
+  const toolText = mapToolLabel(usage.toolId, usage.toolLabel);
+  const modeText = mapModeLabel(usage.mode);
+  const timestamp = usage.timestamp ? formatTimestamp(usage.timestamp) : null;
+  const parts = [toolText];
+  if (modeText) {
+    parts.push(modeText);
+  }
+  if (timestamp) {
+    parts.push(timestamp);
+  }
+  return parts.join(" | ");
 }
 
 /**
@@ -171,6 +217,7 @@ export function formatBranchItem(
     hasChanges,
     label,
     value: branch.name,
+    lastToolUsageLabel: buildLastToolUsageLabel(branch.lastToolUsage),
   };
 }
 
