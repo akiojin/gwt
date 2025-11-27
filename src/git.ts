@@ -195,11 +195,11 @@ async function getBranchCommitTimestamps(
   cwd?: string,
 ): Promise<Map<string, number>> {
   try {
-    const { stdout } = await execa("git", [
+    const { stdout = "" } = (await execa("git", [
       "for-each-ref",
       "--format=%(refname:short)%00%(committerdate:unix)",
       ...refs,
-    ], cwd ? { cwd } : undefined);
+    ], cwd ? { cwd } : undefined)) ?? { stdout: "" };
 
     const map = new Map<string, number>();
 
@@ -215,24 +215,16 @@ async function getBranchCommitTimestamps(
 
     return map;
   } catch (error) {
-    if (process.env.DEBUG) {
-      console.error(
-        "Failed to get branch commit timestamps",
-        error instanceof Error ? error.message : String(error),
-      );
-    }
-    return new Map<string, number>();
+    throw new GitError("Failed to get branch commit timestamps", error);
   }
 }
 
 export async function getLocalBranches(): Promise<BranchInfo[]> {
-  const attempt = async (cwd?: string) => {
-    const commitMap = await getBranchCommitTimestamps(["refs/heads"], cwd);
-    const { stdout } = await execa(
-      "git",
-      ["branch", "--format=%(refname:short)"],
-      cwd ? { cwd } : undefined,
-    );
+  try {
+    const commitMap = await getBranchCommitTimestamps(["refs/heads"]);
+    const { stdout = "" } =
+      (await execa("git", ["branch", "--format=%(refname:short)"])) ??
+      { stdout: "" };
     return stdout
       .split("\n")
       .filter((line) => line.trim())
@@ -250,39 +242,17 @@ export async function getLocalBranches(): Promise<BranchInfo[]> {
             : {}),
         } satisfies BranchInfo;
       });
-  };
-
-  try {
-    const repoRoot = await getRepositoryRoot();
-    return await attempt(repoRoot);
   } catch (primaryError) {
-    try {
-      // fallback: current working directory
-      return await attempt(process.cwd());
-    } catch (fallbackError) {
-      const messageParts = [];
-      if (primaryError instanceof Error) {
-        messageParts.push(primaryError.message);
-      }
-      if (fallbackError instanceof Error) {
-        messageParts.push(fallbackError.message);
-      }
-      throw new GitError(
-        `Failed to get local branches${messageParts.length ? `: ${messageParts.join(" | ")}` : ""}`,
-        fallbackError,
-      );
-    }
+    throw new GitError("Failed to get local branches", primaryError);
   }
 }
 
 export async function getRemoteBranches(): Promise<BranchInfo[]> {
-  const attempt = async (cwd?: string) => {
-    const commitMap = await getBranchCommitTimestamps(["refs/remotes"], cwd);
-    const { stdout } = await execa(
-      "git",
-      ["branch", "-r", "--format=%(refname:short)"],
-      cwd ? { cwd } : undefined,
-    );
+  try {
+    const commitMap = await getBranchCommitTimestamps(["refs/remotes"]);
+    const { stdout = "" } =
+      (await execa("git", ["branch", "-r", "--format=%(refname:short)"])) ??
+      { stdout: "" };
     return stdout
       .split("\n")
       .filter((line) => line.trim() && !line.includes("HEAD"))
@@ -301,27 +271,8 @@ export async function getRemoteBranches(): Promise<BranchInfo[]> {
             : {}),
         } satisfies BranchInfo;
       });
-  };
-
-  try {
-    const repoRoot = await getRepositoryRoot();
-    return await attempt(repoRoot);
   } catch (primaryError) {
-    try {
-      return await attempt(process.cwd());
-    } catch (fallbackError) {
-      const messageParts = [];
-      if (primaryError instanceof Error) {
-        messageParts.push(primaryError.message);
-      }
-      if (fallbackError instanceof Error) {
-        messageParts.push(fallbackError.message);
-      }
-      throw new GitError(
-        `Failed to get remote branches${messageParts.length ? `: ${messageParts.join(" | ")}` : ""}`,
-        fallbackError,
-      );
-    }
+    throw new GitError("Failed to get remote branches", primaryError);
   }
 }
 

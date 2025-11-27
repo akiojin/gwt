@@ -9,9 +9,13 @@ vi.mock("execa", () => ({
 // Mock node:fs
 vi.mock("node:fs", () => {
   const existsSync = vi.fn();
+  const statSync = vi.fn(() => ({ isDirectory: () => true }));
+  const readFileSync = vi.fn(() => "");
   return {
     existsSync,
-    default: { existsSync },
+    statSync,
+    readFileSync,
+    default: { existsSync, statSync, readFileSync },
   };
 });
 
@@ -51,11 +55,11 @@ branch refs/heads/feature/test
       const path = await worktree.worktreeExists("feature/test");
 
       expect(path).toBe("/path/to/worktree-feature-test");
-      expect(execa).toHaveBeenCalledWith("git", [
-        "worktree",
-        "list",
-        "--porcelain",
-      ]);
+      expect(execa).toHaveBeenCalledWith(
+        "git",
+        ["worktree", "list", "--porcelain"],
+        expect.anything(),
+      );
     });
 
     it("should return null if worktree does not exist for branch", async () => {
@@ -520,6 +524,10 @@ branch refs/heads/main
   });
 
   describe("listAdditionalWorktrees (T701)", () => {
+    beforeEach(() => {
+      vi.spyOn(git, "getRepositoryRoot").mockResolvedValue("/");
+    });
+
     it("should call listWorktrees via git command", async () => {
       const mockWorktreeOutput = `worktree /path/to/repo
 HEAD abc1234
@@ -539,11 +547,11 @@ branch refs/heads/feature/test
       const worktreeList = await worktree.listAdditionalWorktrees();
 
       // Should call git worktree list
-      expect(execa).toHaveBeenCalledWith("git", [
-        "worktree",
-        "list",
-        "--porcelain",
-      ]);
+      expect(execa).toHaveBeenCalledWith(
+        "git",
+        ["worktree", "list", "--porcelain"],
+        expect.anything(),
+      );
 
       // Result should be an array
       expect(Array.isArray(worktreeList)).toBe(true);
