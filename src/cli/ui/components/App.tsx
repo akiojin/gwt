@@ -110,6 +110,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
   const [lastModelByTool, setLastModelByTool] = useState<
     Record<AITool, ModelSelectionResult | undefined>
   >({});
+  const [preferredToolId, setPreferredToolId] = useState<AITool | null>(null);
 
   // PR cleanup feedback
   const [cleanupIndicators, setCleanupIndicators] = useState<
@@ -199,6 +200,19 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       setHiddenBranches(filtered);
     }
   }, [branches, hiddenBranches]);
+
+  // Update preferred tool when branch or data changes
+  useEffect(() => {
+    if (!selectedBranch) return;
+    const branchMatch =
+      branches.find((b) => b.name === selectedBranch.name) ||
+      branches.find(
+        (b) =>
+          selectedBranch.branchType === "remote" &&
+          b.name === selectedBranch.displayName,
+      );
+    setPreferredToolId(branchMatch?.lastToolUsage?.toolId ?? null);
+  }, [branches, selectedBranch]);
 
   useEffect(
     () => () => {
@@ -387,6 +401,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       setSelectedTool(null);
       setSelectedModel(null);
       setCreationSourceBranch(null);
+      setPreferredToolId(item.lastToolUsage?.toolId ?? null);
 
       if (protectedSelected) {
         setCleanupFooterMessage({
@@ -419,6 +434,8 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
 
   const handleWorktreeSelect = useCallback(
     (worktree: WorktreeItem) => {
+      const lastTool = branches.find((b) => b.name === worktree.branch)
+        ?.lastToolUsage?.toolId;
       setSelectedBranch({
         name: worktree.branch,
         displayName: worktree.branch,
@@ -428,6 +445,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       setSelectedTool(null);
       setSelectedModel(null);
       setCreationSourceBranch(null);
+      setPreferredToolId(lastTool ?? null);
       setCleanupFooterMessage(null);
       navigateTo("ai-tool-selector");
     },
@@ -436,6 +454,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       navigateTo,
       setCleanupFooterMessage,
       setCreationSourceBranch,
+      branches,
     ],
   );
 
@@ -541,6 +560,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         });
         setSelectedTool(null);
         setSelectedModel(null);
+        setPreferredToolId(null);
         setCleanupFooterMessage(null);
 
         navigateTo("ai-tool-selector");
@@ -900,6 +920,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
             onBack={goBack}
             onSelect={handleToolSelect}
             version={version}
+            initialToolId={selectedTool ?? preferredToolId ?? null}
           />
         );
 

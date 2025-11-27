@@ -103,6 +103,26 @@ describe("AIToolSelectorScreen", () => {
     expect(container).toBeDefined();
   });
 
+  it("should preselect the last used tool when provided", async () => {
+    const onBack = vi.fn();
+    const onSelect = vi.fn();
+    const { container } = render(
+      <AIToolSelectorScreen
+        onBack={onBack}
+        onSelect={onSelect}
+        initialToolId="codex-cli"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(container.textContent?.includes("Codex")).toBe(true);
+    });
+
+    const text = container.textContent ?? "";
+    expect(text).toContain("›Codex");
+    expect(text).not.toContain("›Claude Code");
+  });
+
   /**
    * T210: カスタムツール表示のテスト
    */
