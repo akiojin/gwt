@@ -43,6 +43,14 @@
 * update default Claude Code model to Opus 4.5 ([1dd909e](https://github.com/akiojin/gwt/commit/1dd909ed87a55ce3bb796deb0431d0027571dae2))
 * update Opus model version to 4.5 ([307faeb](https://github.com/akiojin/gwt/commit/307faeb66ebac0ca89b01c07ee19d213797c4d5c))
 
+## [2.9.1](https://github.com/akiojin/gwt/compare/v2.9.0...v2.9.1) (2025-11-27)
+
+
+### Bug Fixes
+
+* persist last AI tool before launch ([d545f13](https://github.com/akiojin/gwt/commit/d545f133ce93b78158ad1de49b0637fceea7003d))
+* persist last AI tool before launch ([5c160b6](https://github.com/akiojin/gwt/commit/5c160b6128ce5c9f399ee98ca23ffebcb317181d))
+
 ## [2.9.0](https://github.com/akiojin/gwt/compare/v2.8.0...v2.9.0) (2025-11-27)
 
 
