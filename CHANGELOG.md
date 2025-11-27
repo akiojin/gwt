@@ -43,6 +43,20 @@
 * update default Claude Code model to Opus 4.5 ([1dd909e](https://github.com/akiojin/gwt/commit/1dd909ed87a55ce3bb796deb0431d0027571dae2))
 * update Opus model version to 4.5 ([307faeb](https://github.com/akiojin/gwt/commit/307faeb66ebac0ca89b01c07ee19d213797c4d5c))
 
+## [2.9.0](https://github.com/akiojin/gwt/compare/v2.8.0...v2.9.0) (2025-11-27)
+
+
+### Features
+
+* preselect last AI tool on selector reopen ([95ec7ce](https://github.com/akiojin/gwt/commit/95ec7ce7aede1ce6ca40599929e0eed6da3d0bb0))
+* preselect last AI tool when reopening selector ([f0060a1](https://github.com/akiojin/gwt/commit/f0060a1177920704676524c6cfd7fde073289641))
+
+
+### Bug Fixes
+
+* save last AI tool immediately on launch ([bf084f2](https://github.com/akiojin/gwt/commit/bf084f2c1c2e5ab40221f0a19daf86b109880b8f))
+* save last AI tool immediately on launch ([880cf5c](https://github.com/akiojin/gwt/commit/880cf5c037e6b5ff27815a5400732d043820342f))
+
 ## [2.8.0](https://github.com/akiojin/gwt/compare/v2.7.4...v2.8.0) (2025-11-27)
 
 
