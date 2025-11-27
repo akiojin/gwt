@@ -670,6 +670,9 @@ export async function handleAIToolWorkflow(
       lastWorktreePath: worktreePath,
       lastBranch: branch,
       lastUsedTool: tool,
+      toolLabel: toolConfig.displayName ?? tool,
+      mode,
+      model: model ?? null,
       timestamp: Date.now(),
       repositoryRoot: repoRoot,
     });

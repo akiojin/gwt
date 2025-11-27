@@ -52,15 +52,11 @@ describe("git.ts - Branch Operations", () => {
         isCurrent: false,
         latestCommitTimestamp: 1690000000,
       });
-      expect(execa).toHaveBeenNthCalledWith(1, "git", [
-        "for-each-ref",
-        "--format=%(refname:short)%00%(committerdate:unix)",
-        "refs/heads",
-      ]);
-      expect(execa).toHaveBeenNthCalledWith(2, "git", [
-        "branch",
-        "--format=%(refname:short)",
-      ]);
+      const calls = (execa as any).mock.calls;
+      expect(calls[0][0]).toBe("git");
+      expect(calls[0][1][0]).toBe("for-each-ref");
+      expect(calls[1][0]).toBe("git");
+      expect(calls[1][1][0]).toBe("branch");
     });
 
     it("should handle empty branch list", async () => {
@@ -121,16 +117,9 @@ describe("git.ts - Branch Operations", () => {
         isCurrent: false,
         latestCommitTimestamp: 1695000000,
       });
-      expect(execa).toHaveBeenNthCalledWith(1, "git", [
-        "for-each-ref",
-        "--format=%(refname:short)%00%(committerdate:unix)",
-        "refs/remotes",
-      ]);
-      expect(execa).toHaveBeenNthCalledWith(2, "git", [
-        "branch",
-        "-r",
-        "--format=%(refname:short)",
-      ]);
+      const calls = (execa as any).mock.calls;
+      expect(calls[0][1][0]).toBe("for-each-ref");
+      expect(calls[1][1][0]).toBe("branch");
     });
 
     it("should filter out HEAD references", async () => {

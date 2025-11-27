@@ -45,6 +45,30 @@ describe("branchFormatter", () => {
       expect(result.value).toBe("feature/new-ui");
     });
 
+    it("should include last tool usage label when present", () => {
+      const branchInfo: BranchInfo = {
+        name: "feature/tool",
+        type: "local",
+        branchType: "feature",
+        isCurrent: false,
+        lastToolUsage: {
+          branch: "feature/tool",
+          worktreePath: "/tmp/wt",
+          toolId: "codex-cli",
+          toolLabel: "Codex",
+          mode: "normal",
+          timestamp: Date.UTC(2025, 10, 26, 14, 3), // 2025-11-26 14:03 UTC
+          model: "gpt-5.1-codex",
+        },
+      };
+
+      const result = formatBranchItem(branchInfo);
+
+      expect(result.lastToolUsageLabel).toContain("Codex");
+      expect(result.lastToolUsageLabel).toContain("New");
+      expect(result.lastToolUsageLabel).toContain("2025-11-26");
+    });
+
     it("should format a bugfix branch", () => {
       const branchInfo: BranchInfo = {
         name: "bugfix/security-issue",
@@ -57,6 +81,19 @@ describe("branchFormatter", () => {
 
       expect(result.icons).toContain("🐛"); // bugfix icon
       expect(result.label).toContain("bugfix/security-issue");
+    });
+
+    it("should set lastToolUsageLabel to null when no usage exists", () => {
+      const branchInfo: BranchInfo = {
+        name: "feature/no-usage",
+        type: "local",
+        branchType: "feature",
+        isCurrent: false,
+      };
+
+      const result = formatBranchItem(branchInfo);
+
+      expect(result.lastToolUsageLabel).toBeNull();
     });
 
     it("should format a hotfix branch", () => {

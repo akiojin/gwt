@@ -10,7 +10,11 @@ import {
 import { useConfig } from "../hooks/useConfig";
 import { ApiError } from "../lib/api";
 import { Terminal } from "../components/Terminal";
-import type { Branch, CustomAITool } from "../../../../types/api.js";
+import type {
+  Branch,
+  CustomAITool,
+  LastToolUsage,
+} from "../../../../types/api.js";
 
 type ToolType = "claude-code" | "codex-cli" | "custom";
 type ToolMode = "normal" | "continue" | "resume";
@@ -410,6 +414,29 @@ export function BranchDetailPage() {
       .sort((a, b) => (b.startedAt ?? "").localeCompare(a.startedAt ?? ""));
   }, [sessionsData, branch?.worktreePath]);
 
+  const latestToolUsage: LastToolUsage | null = useMemo(() => {
+    if (branch?.lastToolUsage) {
+      return branch.lastToolUsage;
+    }
+    const first = branchSessions[0];
+    if (!first) return null;
+    return {
+      branch: branch.name,
+      worktreePath: branch.worktreePath ?? null,
+      toolId:
+        first.toolType === "custom"
+          ? first.toolName ?? "custom"
+          : (first.toolType as LastToolUsage["toolId"]),
+      toolLabel:
+        first.toolType === "custom"
+          ? first.toolName ?? "Custom"
+          : toolLabel(first.toolType),
+      mode: first.mode ?? "normal",
+      model: null,
+      timestamp: first.startedAt ? Date.parse(first.startedAt) : Date.now(),
+    };
+  }, [branch?.lastToolUsage, branch?.name, branch?.worktreePath, branchSessions]);
+
   const handleSessionExit = (code: number) => {
     setActiveSessionId(null);
     setIsTerminalFullscreen(false);
@@ -448,6 +475,21 @@ export function BranchDetailPage() {
           >
             {branch.worktreePath ? "Worktreeあり" : "Worktree未作成"}
           </span>
+        </div>
+        <div className="badge-group" style={{ marginTop: "0.5rem" }}>
+          {latestToolUsage ? (
+            <>
+              <span className="status-badge status-badge--muted">
+                {renderToolUsage(latestToolUsage)}
+              </span>
+              <span className="status-badge status-badge--muted">
+                {formatUsageTimestamp(latestToolUsage.timestamp)} ・ worktree:{" "}
+                {latestToolUsage.worktreePath ?? branch.worktreePath ?? "N/A"}
+              </span>
+            </>
+          ) : (
+            <span className="status-badge status-badge--muted">Unknown</span>
+          )}
         </div>
         <div className="page-hero__actions">
           {!canStartSession ? (
@@ -949,6 +991,32 @@ const SESSION_STATUS_LABEL: Record<
   completed: "completed",
   failed: "failed",
 };
+
+function renderToolUsage(usage: LastToolUsage): string {
+  const modeLabel =
+    usage.mode === "normal"
+      ? "New"
+      : usage.mode === "continue"
+        ? "Continue"
+        : usage.mode === "resume"
+          ? "Resume"
+          : null;
+  const toolText = mapToolLabel(usage.toolId, usage.toolLabel);
+  return [toolText, modeLabel, usage.model].filter(Boolean).join(" | ");
+}
+
+function formatUsageTimestamp(value: number): string {
+  return formatDate(new Date(value).toISOString());
+}
+
+function mapToolLabel(toolId: string, toolLabel?: string | null): string {
+  if (toolId === "claude-code") return "Claude";
+  if (toolId === "codex-cli") return "Codex";
+  if (toolId === "gemini-cli") return "Gemini";
+  if (toolId === "qwen-cli") return "Qwen";
+  if (toolLabel) return toolLabel;
+  return "Custom";
+}
 
 function parseExtraArgs(value: string): string[] {
   return value

@@ -9,6 +9,7 @@ import { listAdditionalWorktrees } from "../../../worktree.js";
 import { getPullRequestByBranch } from "../../../github.js";
 import type { BranchInfo, WorktreeInfo } from "../types.js";
 import type { WorktreeInfo as GitWorktreeInfo } from "../../../worktree.js";
+import { getLastToolUsageMap } from "../../../config/index.js";
 
 export interface UseGitDataOptions {
   enableAutoRefresh?: boolean;
@@ -52,10 +53,17 @@ export function useGitData(options?: UseGitDataOptions): UseGitDataResult {
         }
       }
 
-      const [branchesData, worktreesData] = await Promise.all([
-        getAllBranches(),
-        listAdditionalWorktrees(),
-      ]);
+      const branchesData = await getAllBranches();
+      let worktreesData: GitWorktreeInfo[] = [];
+      try {
+        worktreesData = await listAdditionalWorktrees();
+      } catch (err) {
+        if (process.env.DEBUG) {
+          console.error("Failed to list additional worktrees:", err);
+        }
+        worktreesData = [];
+      }
+      const lastToolUsageMap = await getLastToolUsageMap(repoRoot);
 
       // Store worktrees separately
       setWorktrees(worktreesData);
@@ -116,6 +124,9 @@ export function useGitData(options?: UseGitDataOptions): UseGitDataResult {
                     mergedAt: prInfo.mergedAt,
                   },
                 }
+              : {}),
+            ...(lastToolUsageMap.get(branch.name)
+              ? { lastToolUsage: lastToolUsageMap.get(branch.name) ?? null }
               : {}),
           };
         }),
