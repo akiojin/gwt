@@ -562,6 +562,19 @@ export async function handleAIToolWorkflow(
       throw new Error(`Tool not found: ${tool}`);
     }
 
+    // Save selection immediately so "last tool" is reflected even if the tool
+    // is interrupted or killed mid-run.
+    await saveSession({
+      lastWorktreePath: worktreePath,
+      lastBranch: branch,
+      lastUsedTool: tool,
+      toolLabel: toolConfig.displayName ?? tool,
+      mode,
+      model: model ?? null,
+      timestamp: Date.now(),
+      repositoryRoot: repoRoot,
+    });
+
     // Launch selected AI tool
     // Builtin tools use their dedicated launch functions
     // Custom tools use the generic launchCustomAITool function
@@ -664,18 +677,6 @@ export async function handleAIToolWorkflow(
         sharedEnv,
       });
     }
-
-    // Save session with lastUsedTool (tool selection is confirmed at this point)
-    await saveSession({
-      lastWorktreePath: worktreePath,
-      lastBranch: branch,
-      lastUsedTool: tool,
-      toolLabel: toolConfig.displayName ?? tool,
-      mode,
-      model: model ?? null,
-      timestamp: Date.now(),
-      repositoryRoot: repoRoot,
-    });
 
     printInfo("Session completed successfully. Returning to main menu...");
     return;
