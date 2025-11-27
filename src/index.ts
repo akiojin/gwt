@@ -563,7 +563,7 @@ export async function handleAIToolWorkflow(
     }
 
     // Save selection immediately so "last tool" is reflected even if the tool
-    // is interrupted or killed mid-run.
+    // is interrupted or killed mid-run (e.g., Ctrl+C).
     await saveSession({
       lastWorktreePath: worktreePath,
       lastBranch: branch,
