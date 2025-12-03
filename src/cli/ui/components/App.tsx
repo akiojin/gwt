@@ -733,8 +733,8 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
 
         await deleteBranch(target.branch, true);
 
-        // リモートブランチも削除
-        if (target.hasRemoteBranch) {
+        // マージ済みの場合のみリモートブランチも削除
+        if (target.hasRemoteBranch && target.reasons?.includes("merged-pr")) {
           try {
             await deleteRemoteBranch(target.branch);
           } catch {
