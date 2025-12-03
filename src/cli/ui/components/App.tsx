@@ -31,7 +31,11 @@ import type {
   InferenceLevel,
   SelectedBranchState,
 } from "../types.js";
-import { getRepositoryRoot, deleteBranch } from "../../../git.js";
+import {
+  getRepositoryRoot,
+  deleteBranch,
+  deleteRemoteBranch,
+} from "../../../git.js";
 import {
   createWorktree,
   generateWorktreePath,
@@ -728,6 +732,16 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         }
 
         await deleteBranch(target.branch, true);
+
+        // リモートブランチも削除
+        if (target.hasRemoteBranch) {
+          try {
+            await deleteRemoteBranch(target.branch);
+          } catch {
+            // リモート削除失敗はログのみ、処理は続行
+          }
+        }
+
         succeededBranches.push(target.branch);
         setCleanupIndicators((prev) => ({
           ...prev,
