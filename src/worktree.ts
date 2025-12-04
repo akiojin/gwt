@@ -486,16 +486,14 @@ async function getOrphanedLocalBranches({
           reasons.push("merged-pr");
         }
 
-        if (!hasUnpushed) {
-          const hasUniqueCommits = await branchHasUniqueCommitsComparedToBase(
-            localBranch.name,
-            baseBranch,
-            repoRoot,
-          );
+        const hasUniqueCommits = await branchHasUniqueCommitsComparedToBase(
+          localBranch.name,
+          baseBranch,
+          repoRoot,
+        );
 
-          if (!hasUniqueCommits) {
-            reasons.push("no-diff-with-base");
-          }
+        if (!hasUniqueCommits) {
+          reasons.push("no-diff-with-base");
         }
 
         if (process.env.DEBUG_CLEANUP) {
@@ -506,14 +504,18 @@ async function getOrphanedLocalBranches({
           );
         }
 
-        if (reasons.length > 0) {
-          let hasRemoteBranch = false;
-          try {
-            hasRemoteBranch = await checkRemoteBranchExists(localBranch.name);
-          } catch {
-            hasRemoteBranch = false;
-          }
+        let hasRemoteBranch = false;
+        try {
+          hasRemoteBranch = await checkRemoteBranchExists(localBranch.name);
+        } catch {
+          hasRemoteBranch = false;
+        }
 
+        if (!hasUnpushed && hasRemoteBranch && hasUniqueCommits) {
+          reasons.push("remote-synced");
+        }
+
+        if (reasons.length > 0) {
           cleanupTargets.push({
             worktreePath: null, // worktreeは存在しない
             branch: localBranch.name,
@@ -705,8 +707,6 @@ export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
     if (cleanupReasons.length === 0) {
       continue;
     }
-
-    const hasRemoteBranch = await checkRemoteBranchExists(worktree.branch);
 
     const target: CleanupTarget = {
       worktreePath: worktree.worktreePath,
