@@ -722,6 +722,152 @@ branch refs/heads/feature/no-diff
       expect(branchHasUniqueSpy).toHaveBeenCalled();
       expect(remoteExistsSpy).toHaveBeenCalled();
     });
+
+    it("includes remote-synced orphaned branches when they are clean and pushed", async () => {
+      vi.spyOn(configModule, "getConfig").mockResolvedValue({
+        defaultBaseBranch: "develop",
+        skipPermissions: false,
+        enableGitHubIntegration: true,
+        enableDebugMode: false,
+        worktreeNamingPattern: "{repo}-{branch}",
+      });
+
+      vi.spyOn(git, "getRepositoryRoot").mockResolvedValue("/repo");
+      vi.spyOn(github, "getMergedPullRequests").mockResolvedValue([]);
+      vi.spyOn(github, "getPullRequestByBranch").mockResolvedValue(null);
+      vi.spyOn(git, "getLocalBranches").mockResolvedValue([
+        {
+          name: "feature/ready-but-unmerged",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+        },
+        {
+          name: "develop",
+          type: "local",
+          branchType: "develop",
+          isCurrent: true,
+        },
+      ]);
+
+      vi.spyOn(git, "hasUncommittedChanges").mockResolvedValue(false);
+      vi.spyOn(git, "hasUnpushedCommits").mockResolvedValue(false);
+      vi.spyOn(git, "hasUnpushedCommitsInRepo").mockResolvedValue(false);
+      vi.spyOn(git, "branchHasUniqueCommitsComparedToBase").mockResolvedValue(
+        true,
+      );
+      vi.spyOn(git, "checkRemoteBranchExists").mockResolvedValue(true);
+
+      (execa as any).mockImplementation(
+        async (command: string, args?: readonly string[]) => {
+          if (
+            command === "git" &&
+            args?.[0] === "worktree" &&
+            args[1] === "list"
+          ) {
+            return {
+              stdout: `worktree /repo
+HEAD 0000000
+branch refs/heads/develop
+`,
+              stderr: "",
+              exitCode: 0,
+            };
+          }
+          return { stdout: "", stderr: "", exitCode: 0 };
+        },
+      );
+
+      (fs.existsSync as any).mockReturnValue(true);
+
+      const targets = await worktree.getMergedPRWorktrees();
+
+      const target = targets.find(
+        (t) => t.branch === "feature/ready-but-unmerged",
+      );
+      expect(target).toBeDefined();
+      expect(target?.cleanupType).toBe("branch-only");
+      expect(target?.reasons).toContain("remote-synced");
+      expect(target?.reasons).not.toContain("merged-pr");
+      expect(target?.hasRemoteBranch).toBe(true);
+      expect(target?.hasUnpushedCommits).toBe(false);
+      expect(target?.hasUncommittedChanges).toBe(false);
+    });
+
+    it("includes pushed-but-unmerged branches as local cleanup candidates when they are clean", async () => {
+      vi.spyOn(configModule, "getConfig").mockResolvedValue({
+        defaultBaseBranch: "develop",
+        skipPermissions: false,
+        enableGitHubIntegration: true,
+        enableDebugMode: false,
+        worktreeNamingPattern: "{repo}-{branch}",
+      });
+
+      vi.spyOn(git, "getRepositoryRoot").mockResolvedValue("/repo");
+      vi.spyOn(github, "getMergedPullRequests").mockResolvedValue([]);
+      vi.spyOn(github, "getPullRequestByBranch").mockResolvedValue(null);
+      vi.spyOn(git, "getLocalBranches").mockResolvedValue([
+        {
+          name: "feature/ready-but-unmerged",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+        },
+        {
+          name: "develop",
+          type: "local",
+          branchType: "develop",
+          isCurrent: true,
+        },
+      ]);
+
+      vi.spyOn(git, "hasUncommittedChanges").mockResolvedValue(false);
+      vi.spyOn(git, "hasUnpushedCommits").mockResolvedValue(false);
+      vi.spyOn(git, "hasUnpushedCommitsInRepo").mockResolvedValue(false);
+      vi.spyOn(git, "branchHasUniqueCommitsComparedToBase").mockResolvedValue(
+        true,
+      );
+      vi.spyOn(git, "checkRemoteBranchExists").mockResolvedValue(true);
+
+      (execa as any).mockImplementation(
+        async (command: string, args?: readonly string[]) => {
+          if (
+            command === "git" &&
+            args?.[0] === "worktree" &&
+            args[1] === "list"
+          ) {
+            return {
+              stdout: `worktree /repo
+HEAD 0000000
+branch refs/heads/develop
+
+worktree /repo/.git/worktree/feature-ready-but-unmerged
+HEAD def9999
+branch refs/heads/feature/ready-but-unmerged
+`,
+              stderr: "",
+              exitCode: 0,
+            };
+          }
+          return { stdout: "", stderr: "", exitCode: 0 };
+        },
+      );
+
+      (fs.existsSync as any).mockReturnValue(true);
+
+      const targets = await worktree.getMergedPRWorktrees();
+
+      const target = targets.find(
+        (t) => t.branch === "feature/ready-but-unmerged",
+      );
+      expect(target).toBeDefined();
+      expect(target?.cleanupType).toBe("worktree-and-branch");
+      expect(target?.reasons).toContain("remote-synced");
+      expect(target?.reasons).not.toContain("merged-pr");
+      expect(target?.hasRemoteBranch).toBe(true);
+      expect(target?.hasUnpushedCommits).toBe(false);
+      expect(target?.hasUncommittedChanges).toBe(false);
+    });
   });
 
   describe("Backward Compatibility (US3)", () => {

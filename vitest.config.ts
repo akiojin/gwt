@@ -5,6 +5,8 @@ export default defineConfig({
   test: {
     globals: true,
     environment: "happy-dom",
+    restoreMocks: true,
+    clearMocks: true,
     setupFiles: ["./vitest.setup.ts"],
     include: [
       "tests/**/*.test.ts",

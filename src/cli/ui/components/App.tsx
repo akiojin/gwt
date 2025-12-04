@@ -31,7 +31,11 @@ import type {
   InferenceLevel,
   SelectedBranchState,
 } from "../types.js";
-import { getRepositoryRoot, deleteBranch } from "../../../git.js";
+import {
+  getRepositoryRoot,
+  deleteBranch,
+  deleteRemoteBranch,
+} from "../../../git.js";
 import {
   createWorktree,
   generateWorktreePath,
@@ -728,6 +732,16 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         }
 
         await deleteBranch(target.branch, true);
+
+        // マージ済みの場合のみリモートブランチも削除
+        if (target.hasRemoteBranch && target.reasons?.includes("merged-pr")) {
+          try {
+            await deleteRemoteBranch(target.branch);
+          } catch {
+            // リモート削除失敗はログのみ、処理は続行
+          }
+        }
+
         succeededBranches.push(target.branch);
         setCleanupIndicators((prev) => ({
           ...prev,
@@ -803,8 +817,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       // All selections complete - exit with result
       if (selectedBranch && selectedTool) {
         const defaultModel = getDefaultModelOption(selectedTool);
-        const resolvedModel =
-          selectedModel?.model ?? defaultModel?.id ?? null;
+        const resolvedModel = selectedModel?.model ?? defaultModel?.id ?? null;
         const resolvedInference =
           selectedModel?.inferenceLevel ??
           getDefaultInferenceForModel(defaultModel ?? undefined);

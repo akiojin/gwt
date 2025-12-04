@@ -1,6 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { PassThrough } from "node:stream";
 
+// Vitest shim for environments lacking vi.hoisted (e.g., bun)
+if (typeof (vi as Record<string, unknown>).hoisted !== "function") {
+  // @ts-expect-error injected shim
+  vi.hoisted = (factory: () => unknown) => factory();
+}
+
 const { execaMock } = vi.hoisted(() => ({
   execaMock: vi.fn(),
 }));

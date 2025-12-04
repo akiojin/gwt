@@ -13,47 +13,69 @@ import {
 import { act, render } from "@testing-library/react";
 import React from "react";
 import { Window } from "happy-dom";
-import { App } from "../../components/App.js";
 import type { BranchInfo, BranchItem } from "../../types.js";
-import * as useGitDataModule from "../../hooks/useGitData.js";
-import * as useScreenStateModule from "../../hooks/useScreenState.js";
-import * as BranchListScreenModule from "../../components/screens/BranchListScreen.js";
-import * as BranchActionSelectorScreenModule from "../../screens/BranchActionSelectorScreen.js";
-import * as worktreeModule from "../../../../worktree.ts";
-import * as gitModule from "../../../../git.ts";
 import type { ScreenType } from "../../types.js";
 
 const navigateToMock = vi.fn();
 const goBackMock = vi.fn();
 const resetMock = vi.fn();
 
-const originalUseGitData = useGitDataModule.useGitData;
-const originalUseScreenState = useScreenStateModule.useScreenState;
-const originalBranchListScreen = BranchListScreenModule.BranchListScreen;
-const originalBranchActionSelector =
-  BranchActionSelectorScreenModule.BranchActionSelectorScreen;
-const originalGetRepositoryRoot = gitModule.getRepositoryRoot;
-
-const useGitDataSpy = vi.spyOn(useGitDataModule, "useGitData");
-const useScreenStateSpy = vi.spyOn(useScreenStateModule, "useScreenState");
-const branchListScreenSpy = vi.spyOn(
-  BranchListScreenModule,
-  "BranchListScreen",
-);
-const branchActionSelectorSpy = vi.spyOn(
-  BranchActionSelectorScreenModule,
-  "BranchActionSelectorScreen",
-);
-const switchToProtectedBranchSpy = vi.spyOn(
-  worktreeModule,
-  "switchToProtectedBranch",
-);
-const getRepositoryRootSpy = vi.spyOn(gitModule, "getRepositoryRoot");
-
 const branchListProps: any[] = [];
 const branchActionProps: any[] = [];
 const aiToolProps: any[] = [];
 let currentScreenState: ScreenType;
+let App: typeof import("../../components/App.js").App;
+const useGitDataMock = vi.fn();
+const useScreenStateMock = vi.fn();
+const switchToProtectedBranchMock = vi.fn();
+const getRepositoryRootMock = vi.fn();
+
+vi.mock("../../hooks/useGitData.js", () => ({
+  useGitData: (...args: any[]) => useGitDataMock(...args),
+}));
+
+vi.mock("../../hooks/useScreenState.js", () => ({
+  useScreenState: (...args: any[]) => useScreenStateMock(...args),
+}));
+
+vi.mock("../../../../worktree.js", async () => {
+  const actual = await vi.importActual<
+    typeof import("../../../../worktree.js")
+  >("../../../../worktree.js");
+  return {
+    ...actual,
+    switchToProtectedBranch: switchToProtectedBranchMock,
+  };
+});
+
+vi.mock("../../../../git.js", async () => {
+  const actual =
+    await vi.importActual<typeof import("../../../../git.js")>(
+      "../../../../git.js",
+    );
+  return {
+    ...actual,
+    getRepositoryRoot: getRepositoryRootMock,
+  };
+});
+
+vi.mock("../../components/screens/BranchListScreen.js", () => {
+  return {
+    BranchListScreen: (props: any) => {
+      branchListProps.push(props);
+      return React.createElement("div", null, "BranchListScreenMock");
+    },
+  };
+});
+
+vi.mock("../../screens/BranchActionSelectorScreen.js", () => {
+  return {
+    BranchActionSelectorScreen: (props: any) => {
+      branchActionProps.push(props);
+      return React.createElement("div", null, "BranchActionSelectorMock");
+    },
+  };
+});
 
 vi.mock("../../components/screens/AIToolSelectorScreen.js", () => {
   return {
@@ -65,7 +87,7 @@ vi.mock("../../components/screens/AIToolSelectorScreen.js", () => {
 });
 
 describe("App protected branch handling", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     const window = new Window();
     globalThis.window = window as any;
     globalThis.document = window.document as any;
@@ -78,11 +100,12 @@ describe("App protected branch handling", () => {
     branchActionProps.length = 0;
     aiToolProps.length = 0;
 
-    useGitDataSpy.mockReset();
-    switchToProtectedBranchSpy.mockReset();
-    getRepositoryRootSpy.mockReset();
+    useGitDataMock.mockReset();
+    switchToProtectedBranchMock.mockReset();
+    getRepositoryRootMock.mockReset();
+    App = (await import("../../components/App.js")).App;
 
-    useScreenStateSpy.mockImplementation(() => ({
+    useScreenStateMock.mockImplementation(() => ({
       currentScreen: currentScreenState,
       navigateTo: (screen: ScreenType) => {
         navigateToMock(screen);
@@ -95,39 +118,16 @@ describe("App protected branch handling", () => {
       },
     }));
 
-    branchListScreenSpy.mockImplementation((props: any) => {
-      branchListProps.push(props);
-      return React.createElement(originalBranchListScreen, props);
-    });
-    branchActionSelectorSpy.mockImplementation((props: any) => {
-      branchActionProps.push(props);
-      return React.createElement(originalBranchActionSelector, props);
-    });
-    switchToProtectedBranchSpy.mockResolvedValue("local");
-    getRepositoryRootSpy.mockResolvedValue("/repo");
+    switchToProtectedBranchMock.mockResolvedValue("local");
+    getRepositoryRootMock.mockResolvedValue("/repo");
   });
 
   afterEach(() => {
-    useGitDataSpy.mockReset();
-    useGitDataSpy.mockImplementation(originalUseGitData);
-    useScreenStateSpy.mockReset();
-    useScreenStateSpy.mockImplementation(originalUseScreenState);
-    branchListScreenSpy.mockImplementation(originalBranchListScreen as any);
-    branchActionSelectorSpy.mockImplementation(
-      originalBranchActionSelector as any,
-    );
-    switchToProtectedBranchSpy.mockReset();
-    getRepositoryRootSpy.mockReset();
+    useGitDataMock.mockReset();
+    useScreenStateMock.mockReset();
+    switchToProtectedBranchMock.mockReset();
+    getRepositoryRootMock.mockReset();
     branchActionProps.length = 0;
-  });
-
-  afterAll(() => {
-    useGitDataSpy.mockRestore();
-    useScreenStateSpy.mockRestore();
-    branchListScreenSpy.mockRestore();
-    branchActionSelectorSpy.mockRestore();
-    switchToProtectedBranchSpy.mockRestore();
-    getRepositoryRootSpy.mockRestore();
   });
 
   it("shows protected branch warning and switches root without launching AI tool", async () => {
@@ -146,14 +146,14 @@ describe("App protected branch handling", () => {
       },
     ];
 
-    useGitDataSpy.mockImplementation(() => ({
+    useGitDataMock.mockReturnValue({
       branches,
       worktrees: [],
       loading: false,
       error: null,
       refresh: vi.fn(),
       lastUpdated: null,
-    }));
+    });
 
     render(<App onExit={vi.fn()} />);
 
@@ -193,7 +193,7 @@ describe("App protected branch handling", () => {
       await Promise.resolve();
     });
 
-    expect(switchToProtectedBranchSpy).toHaveBeenCalledWith({
+    expect(switchToProtectedBranchMock).toHaveBeenCalledWith({
       branchName: "main",
       repoRoot: expect.any(String),
       remoteRef: null,
