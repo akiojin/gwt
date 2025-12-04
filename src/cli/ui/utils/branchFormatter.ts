@@ -35,6 +35,23 @@ const changeIcons = {
 
 const remoteIcon = "☁";
 
+// Sync status icons
+const syncIcons = {
+  upToDate: "=",
+  ahead: "↑",
+  behind: "↓",
+  diverged: "↕",
+  none: "-",
+  remoteOnly: "☁",
+};
+
+// Remote column markers
+const remoteMarkers = {
+  tracked: "✓", // ローカル+同名リモートあり
+  localOnly: "L", // ローカルのみ（リモートなし）
+  remoteOnly: "R", // リモートのみ（ローカルなし）
+};
+
 // Emoji width varies by terminal. Provide explicit minimum widths so we never
 // underestimate and accidentally push the row past the terminal columns.
 const iconWidthOverrides: Record<string, number> = {
@@ -168,17 +185,81 @@ export function formatBranchItem(
     changesIcon = " ".repeat(COLUMN_WIDTH);
   }
 
-  // Column 4: Remote icon
-  let remoteIconStr: string;
+  // Column 4: Remote status (✓ for tracked, L for local-only, R for remote-only)
+  let remoteStatusStr: string;
   if (branch.type === "remote") {
-    remoteIconStr = padIcon(remoteIcon);
+    // リモートのみのブランチ
+    remoteStatusStr = padIcon(remoteMarkers.remoteOnly);
+  } else if (branch.hasRemoteCounterpart) {
+    // ローカルブランチで同名リモートあり
+    remoteStatusStr = padIcon(remoteMarkers.tracked);
   } else {
-    remoteIconStr = " ".repeat(COLUMN_WIDTH);
+    // ローカルブランチでリモートなし
+    remoteStatusStr = padIcon(remoteMarkers.localOnly);
+  }
+
+  // Column 5: Sync status (=, ↑N, ↓N, ↕, -)
+  // 5文字固定幅（アイコン1文字 + 数字最大4桁）、9999超は「9999+」表示
+  const SYNC_COLUMN_WIDTH = 6; // アイコン1 + 数字4 + スペース1
+
+  // 数字を4桁以内にフォーマット（9999超は9999+）
+  const formatSyncNumber = (n: number): string => {
+    if (n > 9999) return "9999+";
+    return String(n);
+  };
+
+  // Sync列を固定幅でパディング
+  const padSyncColumn = (content: string): string => {
+    const width = stringWidth(content);
+    const padding = Math.max(0, SYNC_COLUMN_WIDTH - width);
+    return content + " ".repeat(padding);
+  };
+
+  let syncStatusStr: string;
+  if (branch.type === "remote") {
+    // リモートのみ → 比較不可
+    syncStatusStr = padSyncColumn(syncIcons.none);
+  } else if (branch.divergence) {
+    const { ahead, behind, upToDate } = branch.divergence;
+    if (upToDate) {
+      syncStatusStr = padSyncColumn(syncIcons.upToDate);
+    } else if (ahead > 0 && behind > 0) {
+      // diverged: ↕ のみ表示（詳細は別途表示可能）
+      syncStatusStr = padSyncColumn(syncIcons.diverged);
+    } else if (ahead > 0) {
+      // ahead: ↑N の形式
+      syncStatusStr = padSyncColumn(
+        `${syncIcons.ahead}${formatSyncNumber(ahead)}`,
+      );
+    } else {
+      // behind: ↓N の形式
+      syncStatusStr = padSyncColumn(
+        `${syncIcons.behind}${formatSyncNumber(behind)}`,
+      );
+    }
+  } else {
+    // divergence情報なし
+    syncStatusStr = padSyncColumn(syncIcons.none);
+  }
+
+  // Build Local/Remote name for display
+  // ローカルブランチ: ブランチ名を表示
+  // リモートのみ: origin/xxxをフル表示
+  let displayName: string;
+  let remoteName: string | null = null;
+
+  if (branch.type === "remote") {
+    // リモートのみのブランチ: フルのリモートブランチ名を表示
+    displayName = branch.name; // origin/xxx
+    remoteName = branch.name;
+  } else {
+    // ローカルブランチ: ブランチ名を表示
+    displayName = branch.name;
   }
 
   // Build label with fixed-width columns
-  // Format: [Type][Worktree][Changes][Remote] BranchName
-  const label = `${branchTypeIcon}${worktreeIcon}${changesIcon}${remoteIconStr}${branch.name}`;
+  // Format: [Type][Worktree][Changes][Remote][Sync] DisplayName
+  const label = `${branchTypeIcon}${worktreeIcon}${changesIcon}${remoteStatusStr}${syncStatusStr}${displayName}`;
 
   // Collect icons for compatibility
   const icons: string[] = [];
@@ -208,6 +289,27 @@ export function formatBranchItem(
     icons.push(remoteIcon);
   }
 
+  // Determine sync status for BranchItem
+  let syncStatus: BranchItem["syncStatus"];
+  if (branch.type === "remote") {
+    syncStatus = "remote-only";
+  } else if (!branch.hasRemoteCounterpart) {
+    syncStatus = "no-upstream";
+  } else if (branch.divergence) {
+    const { ahead, behind, upToDate } = branch.divergence;
+    if (upToDate) {
+      syncStatus = "up-to-date";
+    } else if (ahead > 0 && behind > 0) {
+      syncStatus = "diverged";
+    } else if (ahead > 0) {
+      syncStatus = "ahead";
+    } else {
+      syncStatus = "behind";
+    }
+  } else {
+    syncStatus = "no-upstream";
+  }
+
   return {
     // Copy all properties from BranchInfo
     ...branch,
@@ -218,6 +320,9 @@ export function formatBranchItem(
     label,
     value: branch.name,
     lastToolUsageLabel: buildLastToolUsageLabel(branch.lastToolUsage),
+    syncStatus,
+    syncInfo: undefined,
+    remoteName: remoteName ?? undefined,
   };
 }
 
