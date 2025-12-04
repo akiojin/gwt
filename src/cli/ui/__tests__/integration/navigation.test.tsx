@@ -26,6 +26,8 @@ vi.mock("../../../../git.ts", () => ({
   getRepositoryRoot: vi.fn(async () => "/repo"),
   deleteBranch: vi.fn(async () => undefined),
   fetchAllRemotes: vi.fn(async () => undefined),
+  collectUpstreamMap: vi.fn(async () => new Map()),
+  getBranchDivergenceStatuses: vi.fn(async () => []),
 }));
 
 const { mockIsProtectedBranchName, mockSwitchToProtectedBranch } = vi.hoisted(
