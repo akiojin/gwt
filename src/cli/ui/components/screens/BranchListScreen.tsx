@@ -14,8 +14,6 @@ import chalk from "chalk";
 const WIDTH_OVERRIDES: Record<string, number> = {
   // Remote icon
   "☁": 1,
-  // Unpushed icon
-  "⬆": 1,
   // Branch type icons
   "⚡": 1,
   "✨": 1,
@@ -27,11 +25,16 @@ const WIDTH_OVERRIDES: Record<string, number> = {
   "🟢": 1,
   "🟠": 1,
   // Change status icons
-  "⭐": 1,
-  "✏️": 1,
-  "🔀": 1,
+  "👉": 1,
+  "💾": 1,
+  "📤": 1,
+  "🔃": 1,
   "✅": 1,
   "⚠️": 1,
+  // Remote markers
+  "🔗": 1,
+  "💻": 1,
+  "☁️": 1,
 };
 
 const getCharWidth = (char: string): number => {
