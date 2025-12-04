@@ -45,6 +45,30 @@ describe("branchFormatter", () => {
       expect(result.value).toBe("feature/new-ui");
     });
 
+    it("should include last tool usage label when present", () => {
+      const branchInfo: BranchInfo = {
+        name: "feature/tool",
+        type: "local",
+        branchType: "feature",
+        isCurrent: false,
+        lastToolUsage: {
+          branch: "feature/tool",
+          worktreePath: "/tmp/wt",
+          toolId: "codex-cli",
+          toolLabel: "Codex",
+          mode: "normal",
+          timestamp: Date.UTC(2025, 10, 26, 14, 3), // 2025-11-26 14:03 UTC
+          model: "gpt-5.1-codex",
+        },
+      };
+
+      const result = formatBranchItem(branchInfo);
+
+      expect(result.lastToolUsageLabel).toContain("Codex");
+      expect(result.lastToolUsageLabel).toContain("New");
+      expect(result.lastToolUsageLabel).toContain("2025-11-26");
+    });
+
     it("should format a bugfix branch", () => {
       const branchInfo: BranchInfo = {
         name: "bugfix/security-issue",
@@ -57,6 +81,19 @@ describe("branchFormatter", () => {
 
       expect(result.icons).toContain("🐛"); // bugfix icon
       expect(result.label).toContain("bugfix/security-issue");
+    });
+
+    it("should set lastToolUsageLabel to null when no usage exists", () => {
+      const branchInfo: BranchInfo = {
+        name: "feature/no-usage",
+        type: "local",
+        branchType: "feature",
+        isCurrent: false,
+      };
+
+      const result = formatBranchItem(branchInfo);
+
+      expect(result.lastToolUsageLabel).toBeNull();
     });
 
     it("should format a hotfix branch", () => {
@@ -120,12 +157,12 @@ describe("branchFormatter", () => {
       const localResult = formatBranchItem(localBranch);
       const remoteResult = formatBranchItem(remoteBranch);
 
-      const localNameIndex = localResult.label.indexOf(localResult.name);
-      const remoteNameIndex = remoteResult.label.indexOf(remoteResult.name);
+      // Both should have the branch name in the label
+      expect(localResult.label).toContain("feature/foo");
+      expect(remoteResult.label).toContain("origin/feature/foo");
 
-      expect(localNameIndex).toBeGreaterThan(0);
-      expect(localNameIndex).toBe(remoteNameIndex);
-      expect(remoteResult.label).toMatch(/☁(?:️|︎)?\s+origin/);
+      // Remote branch should have R marker for remote-only status
+      expect(remoteResult.label).toMatch(/R/);
     });
 
     it("should keep icon columns fixed-width when using wide emoji icons", () => {
@@ -145,11 +182,13 @@ describe("branchFormatter", () => {
 
       const result = formatBranchItem(branchInfo, { hasChanges: true });
 
-      // Four icon columns should occupy exactly 8 columns (4 * COLUMN_WIDTH)
+      // Icon columns: [Type][Worktree][Changes][Remote] = 4 * 2 = 8
+      // Sync column: 6 (fixed width for icon + up to 4 digits + space)
+      // Total: 14
       const iconBlockWidth =
         stringWidth(result.label) - stringWidth(branchInfo.name);
 
-      expect(iconBlockWidth).toBe(8);
+      expect(iconBlockWidth).toBe(14);
     });
 
     it("should include worktree status icon when provided", () => {

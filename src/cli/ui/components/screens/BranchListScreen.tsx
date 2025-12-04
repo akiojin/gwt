@@ -112,6 +112,9 @@ export function BranchListScreen({
   testOnFilterQueryChange,
 }: BranchListScreenProps) {
   const { rows } = useTerminalSize();
+  const COLUMN_WIDTH = 2;
+  const SYNC_COLUMN_WIDTH = 6;
+  const headerText = `  ${"Ty".padEnd(COLUMN_WIDTH)}${"Wt".padEnd(COLUMN_WIDTH)}${"St".padEnd(COLUMN_WIDTH)}${"Rm".padEnd(COLUMN_WIDTH)}${"Sync".padEnd(SYNC_COLUMN_WIDTH)}Branch`;
 
   // Filter state - allow test control via props
   const [internalFilterQuery, setInternalFilterQuery] = useState("");
@@ -279,7 +282,12 @@ export function BranchListScreen({
       // Use a small safety margin to avoid terminal-dependent wrapping
       const columns = Math.max(20, context.columns - 1);
       const arrow = isSelected ? ">" : " ";
-      const timestampText = formatLatestCommit(item.latestCommitTimestamp);
+      const commitText = formatLatestCommit(item.latestCommitTimestamp);
+      const infoText =
+        item.lastToolUsage && item.lastToolUsageLabel
+          ? item.lastToolUsageLabel
+          : `${chalk.gray("Unknown")}${commitText !== "---" ? ` | ${commitText}` : ""}`;
+      const timestampText = infoText;
       const timestampWidth = stringWidth(timestampText);
 
       const indicatorInfo = cleanupUI?.indicators?.[item.name];
@@ -404,14 +412,20 @@ export function BranchListScreen({
           !error &&
           branches.length > 0 &&
           filteredBranches.length > 0 && (
-            <Select
-              items={filteredBranches}
-              onSelect={onSelect}
-              limit={limit}
-              disabled={Boolean(cleanupUI?.inputLocked)}
-              renderIndicator={() => null}
-              renderItem={renderBranchRow}
-            />
+            <>
+              {/* Column labels */}
+              <Box>
+                <Text dimColor>{headerText}</Text>
+              </Box>
+              <Select
+                items={filteredBranches}
+                onSelect={onSelect}
+                limit={limit}
+                disabled={Boolean(cleanupUI?.inputLocked)}
+                renderIndicator={() => null}
+                renderItem={renderBranchRow}
+              />
+            </>
           )}
       </Box>
 

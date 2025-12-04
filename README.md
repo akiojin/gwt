@@ -347,3 +347,9 @@ We welcome contributions! Please read our contributing guidelines:
 - **Documentation**: This README and inline code documentation
 - **Issues**: GitHub Issues for bug reports and feature requests
 - **Discussions**: GitHub Discussions for questions and community support
+
+### Icon Legend
+
+- First 3 columns: ⚡(main/develop) / ✨(feature) / 🐛(bugfix) / 🔥(hotfix) / 📦(release) / 📌(other), 🟢=has worktree, 🟠=has worktree (inaccessible), ✏️=uncommitted changes, ⚠️=warning, ⭐=current branch
+- Location column: blank=local exists, `☁`=remote only
+- Selection column: In color environments, selection is shown with `>` prefix (with space) instead of background inversion

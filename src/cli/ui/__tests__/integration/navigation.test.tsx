@@ -25,6 +25,9 @@ vi.mock("../../../../git.ts", () => ({
   getAllBranches: vi.fn(),
   getRepositoryRoot: vi.fn(async () => "/repo"),
   deleteBranch: vi.fn(async () => undefined),
+  fetchAllRemotes: vi.fn(async () => undefined),
+  collectUpstreamMap: vi.fn(async () => new Map()),
+  getBranchDivergenceStatuses: vi.fn(async () => []),
 }));
 
 const { mockIsProtectedBranchName, mockSwitchToProtectedBranch } = vi.hoisted(
@@ -60,6 +63,7 @@ import {
   getAllBranches,
   getRepositoryRoot,
   deleteBranch,
+  fetchAllRemotes,
 } from "../../../../git.ts";
 import {
   listAdditionalWorktrees,
@@ -72,6 +76,7 @@ import {
 const mockedGetAllBranches = getAllBranches as Mock;
 const mockedGetRepositoryRoot = getRepositoryRoot as Mock;
 const mockedDeleteBranch = deleteBranch as Mock;
+const mockedFetchAllRemotes = fetchAllRemotes as Mock;
 const mockedListAdditionalWorktrees = listAdditionalWorktrees as Mock;
 const mockedCreateWorktree = createWorktree as Mock;
 const mockedGenerateWorktreePath = generateWorktreePath as Mock;
@@ -95,6 +100,7 @@ describe("Navigation Integration Tests", () => {
     mockedListAdditionalWorktrees.mockReset();
     mockedGetRepositoryRoot.mockReset();
     mockedDeleteBranch.mockReset();
+    mockedFetchAllRemotes.mockReset();
     mockedCreateWorktree.mockReset();
     mockedGenerateWorktreePath.mockReset();
     mockedGetMergedPRWorktrees.mockReset();
@@ -267,6 +273,7 @@ describe("Protected Branch Navigation (T103)", () => {
     mockedListAdditionalWorktrees.mockReset();
     mockedGetRepositoryRoot.mockReset();
     mockedDeleteBranch.mockReset();
+    mockedFetchAllRemotes.mockReset();
     mockedCreateWorktree.mockReset();
     mockedGenerateWorktreePath.mockReset();
     mockedGetMergedPRWorktrees.mockReset();
@@ -300,6 +307,57 @@ describe("Protected Branch Navigation (T103)", () => {
   afterEach(() => {
     branchListSpy.mockRestore();
     branchActionSpy.mockRestore();
+  });
+
+  it("prefills AI tool selector with last used tool for the branch", async () => {
+    const branchesWithUsage: BranchInfo[] = [
+      {
+        name: "feature/with-usage",
+        type: "local",
+        branchType: "feature",
+        isCurrent: false,
+        lastToolUsage: {
+          branch: "feature/with-usage",
+          worktreePath: "/repo/.worktrees/feature-with-usage",
+          toolId: "codex-cli",
+          toolLabel: "Codex",
+          timestamp: Date.now(),
+        },
+      },
+    ];
+
+    mockedGetAllBranches.mockResolvedValue(branchesWithUsage);
+    mockedListAdditionalWorktrees.mockResolvedValue([]);
+
+    const onExit = vi.fn();
+    render(<App onExit={onExit} />);
+
+    await waitFor(() => {
+      const latestProps = branchListProps.find((p) => p.branches?.length);
+      expect(latestProps?.branches?.length ?? 0).toBeGreaterThan(0);
+    });
+
+    // Simulate selecting the branch from the list
+    const listProps =
+      branchListProps.find((p) => p.branches?.length) ??
+      branchListProps.at(-1);
+    expect(listProps?.branches?.length).toBeGreaterThan(0);
+    listProps.onSelect(listProps.branches[0]);
+
+    await waitFor(() => {
+      expect(branchActionProps.length).toBeGreaterThan(0);
+    });
+
+    // Use existing branch (non-protected) to navigate to AI tool selector
+    const actionProps = branchActionProps.at(-1);
+    actionProps.onUseExisting();
+
+    await waitFor(() => {
+      expect(aiToolScreenProps.length).toBeGreaterThan(0);
+    });
+
+    const props = aiToolScreenProps.at(-1) as { initialToolId?: string };
+    expect(props.initialToolId).toBe("codex-cli");
   });
 
   it("switches local protected branches via root workflow and navigates to AI tool", async () => {
