@@ -641,9 +641,8 @@ describe("BranchListScreen", () => {
       expect(container.textContent).toContain("feature/test");
     });
 
-    it("should disable other key bindings (m, c, r) while typing in filter", () => {
+    it("should disable other key bindings (c, r) while typing in filter", () => {
       const onSelect = vi.fn();
-      const onNavigate = vi.fn();
       const onCleanupCommand = vi.fn();
       const onRefresh = vi.fn();
 
@@ -652,7 +651,6 @@ describe("BranchListScreen", () => {
           branches={mockBranches}
           stats={mockStats}
           onSelect={onSelect}
-          onNavigate={onNavigate}
           onCleanupCommand={onCleanupCommand}
           onRefresh={onRefresh}
         />,
@@ -665,10 +663,8 @@ describe("BranchListScreen", () => {
       act(() => {
         inkApp.stdin.write("c");
         inkApp.stdin.write("r");
-        inkApp.stdin.write("m");
       });
 
-      expect(onNavigate).not.toHaveBeenCalled();
       expect(onCleanupCommand).not.toHaveBeenCalled();
       expect(onRefresh).not.toHaveBeenCalled();
 

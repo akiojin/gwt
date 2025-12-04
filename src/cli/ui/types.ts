@@ -182,7 +182,6 @@ export interface GitHubPRResponse {
  */
 export type ScreenType =
   | "branch-list"
-  | "worktree-manager"
   | "branch-creator"
   | "branch-action-selector"
   | "ai-tool-selector"
