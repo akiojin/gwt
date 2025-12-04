@@ -43,6 +43,36 @@
 * update default Claude Code model to Opus 4.5 ([1dd909e](https://github.com/akiojin/gwt/commit/1dd909ed87a55ce3bb796deb0431d0027571dae2))
 * update Opus model version to 4.5 ([307faeb](https://github.com/akiojin/gwt/commit/307faeb66ebac0ca89b01c07ee19d213797c4d5c))
 
+## [2.11.0](https://github.com/akiojin/gwt/compare/v2.10.0...v2.11.0) (2025-12-04)
+
+
+### Features
+
+* ブランチ一覧にLocal/Remote/Sync列を追加 ([7173e59](https://github.com/akiojin/gwt/commit/7173e59a179828ec79942780d6f806bcbd44fa29))
+* ブランチ一覧にLocal/Remote/Sync列を追加 ([3459565](https://github.com/akiojin/gwt/commit/3459565ae12a06548ef3215724bed052c9fddc53))
+* ブランチ一覧にラベル行を追加 ([b9b23ba](https://github.com/akiojin/gwt/commit/b9b23ba3f68c335bea41de941c0a38f1529fb247))
+* ブランチ一覧の表示アイコンを直感的な絵文字に改善 ([cd18b4b](https://github.com/akiojin/gwt/commit/cd18b4b3c5416ecc0f738c84ff0b1c96a1b40631))
+* ブランチ一覧の表示アイコンを直感的な絵文字に改善 ([4105f06](https://github.com/akiojin/gwt/commit/4105f0674a2a20cfe1feb3e855799fa0d573c440))
+
+
+### Bug Fixes
+
+* align branch list headers ([a27b54b](https://github.com/akiojin/gwt/commit/a27b54bc4ee475dfc5e0606a44858b980bb4d622))
+* align branch list headers ([6556f46](https://github.com/akiojin/gwt/commit/6556f4695b69addff2533b0b7406b0f470ba6a34))
+* ESLint警告103件とPrettier違反12ファイルを修正 ([5b1d61d](https://github.com/akiojin/gwt/commit/5b1d61d2f5128a97556205e3dcfe24b6375f6d9c))
+* ESLint警告103件とPrettier違反12ファイルを修正 ([e794b88](https://github.com/akiojin/gwt/commit/e794b88ac5982718f94e6952fcad1ce36cc438f4))
+* include upstream base when selecting cleanup targets ([9153de8](https://github.com/akiojin/gwt/commit/9153de8e9ec726bbe88a5ddafc879dd06c19f89b))
+* navigation.test.tsxにcollectUpstreamMap/getBranchDivergenceStatusesのモックを追加 ([d4ff9b1](https://github.com/akiojin/gwt/commit/d4ff9b1cd5c785160385bf31a781bad8817db03a))
+* origin/developとのマージコンフリクトを解決 ([f0898ed](https://github.com/akiojin/gwt/commit/f0898ed56fc43fcf5080ea25397fd9fea97f617c))
+* origin/developとのマージコンフリクトを解決 ([a3e627a](https://github.com/akiojin/gwt/commit/a3e627a51765ca61848967b0f36d03d910720aa4))
+* origin/developとのマージコンフリクトを解決 ([e30e192](https://github.com/akiojin/gwt/commit/e30e192cc8fc80159033e4aee679f30d9bf3fac5))
+* Remote列の表示を改善（L=ローカルのみ、R=リモートのみ） ([dc8f375](https://github.com/akiojin/gwt/commit/dc8f375a180b0f1eebc273346f997f1f442713aa))
+* Sync列の数字をアイコン直後に表示 ([253a529](https://github.com/akiojin/gwt/commit/253a5298d446e24858861a14a074986430973bc1))
+* Sync列を固定幅化してブランチ名の位置を揃える ([20d0d67](https://github.com/akiojin/gwt/commit/20d0d6729133e802a9846e0c402acdd84c6de28b))
+* レビューコメントへの対応 ([5e79440](https://github.com/akiojin/gwt/commit/5e79440e35fb858a4ee26bb0dd922c166d83de26))
+* 自動クリーンアップでリモートブランチを削除しないように修正 ([42f6296](https://github.com/akiojin/gwt/commit/42f6296576b5d81558c5aa5c3823dc0e6c833605))
+* 自動クリーンアップでリモートブランチを削除しないように修正 ([674b4ce](https://github.com/akiojin/gwt/commit/674b4ce09b98cbf15359984539d4aa5dfe0e7d16))
+
 ## [2.10.0](https://github.com/akiojin/gwt/compare/v2.9.1...v2.10.0) (2025-12-04)
 
 
