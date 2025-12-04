@@ -47,8 +47,9 @@ const syncIcons = {
 
 // Remote column markers
 const remoteMarkers = {
-  tracked: "✓",
-  none: "-",
+  tracked: "✓",    // ローカル+同名リモートあり
+  localOnly: "L",  // ローカルのみ（リモートなし）
+  remoteOnly: "R", // リモートのみ（ローカルなし）
 };
 
 // Emoji width varies by terminal. Provide explicit minimum widths so we never
@@ -184,17 +185,17 @@ export function formatBranchItem(
     changesIcon = " ".repeat(COLUMN_WIDTH);
   }
 
-  // Column 4: Remote status (✓ for tracked, - for no remote, ☁ for remote-only)
+  // Column 4: Remote status (✓ for tracked, L for local-only, R for remote-only)
   let remoteStatusStr: string;
   if (branch.type === "remote") {
     // リモートのみのブランチ
-    remoteStatusStr = padIcon(syncIcons.remoteOnly);
+    remoteStatusStr = padIcon(remoteMarkers.remoteOnly);
   } else if (branch.hasRemoteCounterpart) {
     // ローカルブランチで同名リモートあり
     remoteStatusStr = padIcon(remoteMarkers.tracked);
   } else {
     // ローカルブランチでリモートなし
-    remoteStatusStr = padIcon(remoteMarkers.none);
+    remoteStatusStr = padIcon(remoteMarkers.localOnly);
   }
 
   // Column 5: Sync status (=, ↑N, ↓N, ↕, -)

@@ -161,8 +161,8 @@ describe("branchFormatter", () => {
       expect(localResult.label).toContain("feature/foo");
       expect(remoteResult.label).toContain("origin/feature/foo");
 
-      // Remote branch should have cloud icon for remote-only status
-      expect(remoteResult.label).toMatch(/☁/);
+      // Remote branch should have R marker for remote-only status
+      expect(remoteResult.label).toMatch(/R/);
     });
 
     it("should keep icon columns fixed-width when using wide emoji icons", () => {
