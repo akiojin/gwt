@@ -2,6 +2,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { SelectionResult } from "../../src/cli/ui/components/App.js";
 import { runInteractiveLoop } from "../../src/index.js";
 
+// Vitest shim for environments lacking vi.hoisted (e.g., bun)
+if (typeof (vi as Record<string, unknown>).hoisted !== "function") {
+  // @ts-expect-error injected shim
+  vi.hoisted = (factory: () => unknown) => factory();
+}
+
 const waitForUserAcknowledgementMock = vi.hoisted(() =>
   vi.fn<() => Promise<void>>(),
 );
