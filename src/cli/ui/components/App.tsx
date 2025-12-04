@@ -817,8 +817,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       // All selections complete - exit with result
       if (selectedBranch && selectedTool) {
         const defaultModel = getDefaultModelOption(selectedTool);
-        const resolvedModel =
-          selectedModel?.model ?? defaultModel?.id ?? null;
+        const resolvedModel = selectedModel?.model ?? defaultModel?.id ?? null;
         const resolvedInference =
           selectedModel?.inferenceLevel ??
           getDefaultInferenceForModel(defaultModel ?? undefined);

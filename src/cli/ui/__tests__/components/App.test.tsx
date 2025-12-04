@@ -43,7 +43,9 @@ vi.mock("../../components/screens/BranchListScreen.js", () => {
           )}
           <ul>
             {props.branches.map((branch) => (
-              <li key={branch.name}>{`${branch.icons?.join("") ?? ""} ${branch.name}`}</li>
+              <li
+                key={branch.name}
+              >{`${branch.icons?.join("") ?? ""} ${branch.name}`}</li>
             ))}
           </ul>
         </div>
@@ -183,7 +185,7 @@ describe("App", () => {
     expect(props?.stats.worktreeCount).toBe(1);
   });
 
-  it("should call onExit when branch is selected", () => {
+  it("should render branch selection without triggering exit", () => {
     useGitDataMock.mockImplementation(() => ({
       branches: mockBranches,
       loading: false,
@@ -196,6 +198,7 @@ describe("App", () => {
     const { container } = render(<App onExit={onExit} />);
 
     expect(container).toBeDefined();
+    expect(onExit).not.toHaveBeenCalled();
     // Note: Testing actual selection requires simulating user input,
     // which is covered in integration tests
   });
@@ -303,5 +306,4 @@ describe("App", () => {
       expect(container).toBeDefined();
     });
   });
-
 });

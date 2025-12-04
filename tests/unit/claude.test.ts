@@ -317,8 +317,6 @@ describe("launchClaudeCode - Root User Detection", () => {
           exitCode: 0,
         } as any);
 
-      consoleLogSpy.mockClear();
-
       await launchClaudeCode("/test/path", { skipPermissions: true });
 
       // Verify sandbox warning is NOT displayed
@@ -345,8 +343,6 @@ describe("launchClaudeCode - Root User Detection", () => {
           stderr: "",
           exitCode: 0,
         } as any);
-
-      consoleLogSpy.mockClear();
 
       await launchClaudeCode("/test/path", { skipPermissions: false });
 

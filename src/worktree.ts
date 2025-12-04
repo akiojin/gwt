@@ -100,11 +100,9 @@ async function listWorktrees(): Promise<WorktreeInfo[]> {
   try {
     const { getRepositoryRoot } = await import("./git.js");
     const repoRoot = await getRepositoryRoot();
-    const { stdout } = await execa(
-      "git",
-      ["worktree", "list", "--porcelain"],
-      { cwd: repoRoot },
-    );
+    const { stdout } = await execa("git", ["worktree", "list", "--porcelain"], {
+      cwd: repoRoot,
+    });
     const worktrees: WorktreeInfo[] = [];
     const lines = stdout.split("\n");
 
@@ -636,14 +634,12 @@ export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
       typeof fs.existsSync === "function"
         ? fs.existsSync
         : typeof (fs as { default?: { existsSync?: unknown } }).default
-            ?.existsSync === "function"
+              ?.existsSync === "function"
           ? (fs as { default: { existsSync: (p: string) => boolean } }).default
               .existsSync
           : null;
 
-    const isAccessible = existsSync
-      ? existsSync(worktree.worktreePath)
-      : false;
+    const isAccessible = existsSync ? existsSync(worktree.worktreePath) : false;
 
     let hasUncommitted = false;
     let hasUnpushed = false;
@@ -687,11 +683,7 @@ export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
     // 差分がない場合はベース同等としてクリーンアップ候補
     if (!hasUniqueCommits) {
       cleanupReasons.push("no-diff-with-base");
-    } else if (
-      !hasUncommitted &&
-      !hasUnpushed &&
-      hasRemoteBranch
-    ) {
+    } else if (!hasUncommitted && !hasUnpushed && hasRemoteBranch) {
       // 未マージでも、ローカルに未コミット/未プッシュがなくリモートが最新ならローカルのみクリーンアップ許可
       cleanupReasons.push("remote-synced");
     }

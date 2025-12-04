@@ -39,9 +39,9 @@ vi.mock("../../hooks/useScreenState.js", () => ({
 }));
 
 vi.mock("../../../../worktree.js", async () => {
-  const actual = await vi.importActual<typeof import("../../../../worktree.js")>(
-    "../../../../worktree.js",
-  );
+  const actual = await vi.importActual<
+    typeof import("../../../../worktree.js")
+  >("../../../../worktree.js");
   return {
     ...actual,
     switchToProtectedBranch: switchToProtectedBranchMock,
@@ -49,9 +49,10 @@ vi.mock("../../../../worktree.js", async () => {
 });
 
 vi.mock("../../../../git.js", async () => {
-  const actual = await vi.importActual<typeof import("../../../../git.js")>(
-    "../../../../git.js",
-  );
+  const actual =
+    await vi.importActual<typeof import("../../../../git.js")>(
+      "../../../../git.js",
+    );
   return {
     ...actual,
     getRepositoryRoot: getRepositoryRootMock,
