@@ -299,6 +299,41 @@ export async function getAllBranches(): Promise<BranchInfo[]> {
   return [...localBranches, ...remoteBranches];
 }
 
+/**
+ * ローカルブランチのupstream（追跡ブランチ）情報を取得
+ * @param cwd - 作業ディレクトリ（省略時はリポジトリルート）
+ * @returns Map<ローカルブランチ名, upstreamブランチ名>
+ */
+export async function collectUpstreamMap(
+  cwd?: string,
+): Promise<Map<string, string>> {
+  const workDir = cwd ?? (await getRepositoryRoot());
+  try {
+    const { stdout } = await execa(
+      "git",
+      [
+        "for-each-ref",
+        "--format=%(refname:short)|%(upstream:short)",
+        "refs/heads",
+      ],
+      { cwd: workDir },
+    );
+
+    return stdout
+      .split("\n")
+      .filter((line) => line.includes("|"))
+      .reduce((map, line) => {
+        const [branch, upstream] = line.split("|");
+        if (branch && upstream) {
+          map.set(branch.trim(), upstream.trim());
+        }
+        return map;
+      }, new Map<string, string>());
+  } catch {
+    return new Map();
+  }
+}
+
 export async function createBranch(
   branchName: string,
   baseBranch = "main",
