@@ -409,14 +409,22 @@ export function BranchListScreen({
           !error &&
           branches.length > 0 &&
           filteredBranches.length > 0 && (
-            <Select
-              items={filteredBranches}
-              onSelect={onSelect}
-              limit={limit}
-              disabled={Boolean(cleanupUI?.inputLocked)}
-              renderIndicator={() => null}
-              renderItem={renderBranchRow}
-            />
+            <>
+              {/* Column labels */}
+              <Box>
+                <Text dimColor>
+                  {"  Type Wt St Rm Sync  Branch"}
+                </Text>
+              </Box>
+              <Select
+                items={filteredBranches}
+                onSelect={onSelect}
+                limit={limit}
+                disabled={Boolean(cleanupUI?.inputLocked)}
+                renderIndicator={() => null}
+                renderItem={renderBranchRow}
+              />
+            </>
           )}
       </Box>
 
