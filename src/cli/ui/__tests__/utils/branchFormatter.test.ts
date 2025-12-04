@@ -23,7 +23,7 @@ describe("branchFormatter", () => {
       expect(result.branchType).toBe("main");
       expect(result.isCurrent).toBe(true);
       expect(result.icons).toContain("⚡"); // main icon
-      expect(result.icons).toContain("⭐"); // current icon
+      expect(result.icons).toContain("👉"); // current icon
       expect(result.label).toContain("main");
       expect(result.value).toBe("main");
       expect(result.hasChanges).toBe(false);
@@ -40,7 +40,7 @@ describe("branchFormatter", () => {
       const result = formatBranchItem(branchInfo);
 
       expect(result.icons).toContain("✨"); // feature icon
-      expect(result.icons).not.toContain("⭐"); // not current
+      expect(result.icons).not.toContain("👉"); // not current
       expect(result.label).toContain("feature/new-ui");
       expect(result.value).toBe("feature/new-ui");
     });
@@ -161,8 +161,8 @@ describe("branchFormatter", () => {
       expect(localResult.label).toContain("feature/foo");
       expect(remoteResult.label).toContain("origin/feature/foo");
 
-      // Remote branch should have R marker for remote-only status
-      expect(remoteResult.label).toMatch(/R/);
+      // Remote branch should have ☁️ marker for remote-only status
+      expect(remoteResult.label).toMatch(/☁️/);
     });
 
     it("should keep icon columns fixed-width when using wide emoji icons", () => {
@@ -220,7 +220,7 @@ describe("branchFormatter", () => {
 
       const result = formatBranchItem(branchInfo, { hasChanges: true });
 
-      expect(result.icons).toContain("✏️"); // changes icon
+      expect(result.icons).toContain("💾"); // changes icon
       expect(result.hasChanges).toBe(true);
     });
 
@@ -235,8 +235,8 @@ describe("branchFormatter", () => {
 
       const result = formatBranchItem(branchInfo);
 
-      expect(result.icons).toContain("⬆️"); // unpushed icon
-      expect(result.label).toContain("⬆️");
+      expect(result.icons).toContain("📤"); // unpushed icon
+      expect(result.label).toContain("📤");
     });
 
     it("should show open PR icon", () => {
@@ -250,8 +250,8 @@ describe("branchFormatter", () => {
 
       const result = formatBranchItem(branchInfo);
 
-      expect(result.icons).toContain("🔀"); // open PR icon
-      expect(result.label).toContain("🔀");
+      expect(result.icons).toContain("🔃"); // open PR icon
+      expect(result.label).toContain("🔃");
     });
 
     it("should show merged PR icon", () => {
@@ -302,12 +302,12 @@ describe("branchFormatter", () => {
       const resultWithChanges = formatBranchItem(branchInfo, {
         hasChanges: true,
       });
-      expect(resultWithChanges.icons).toContain("✏️");
-      expect(resultWithChanges.icons).not.toContain("⬆️");
+      expect(resultWithChanges.icons).toContain("💾");
+      expect(resultWithChanges.icons).not.toContain("📤");
 
       const resultWithoutChanges = formatBranchItem(branchInfo);
-      expect(resultWithoutChanges.icons).toContain("⬆️");
-      expect(resultWithoutChanges.icons).not.toContain("✏️");
+      expect(resultWithoutChanges.icons).toContain("📤");
+      expect(resultWithoutChanges.icons).not.toContain("💾");
     });
 
     it("should prioritize unpushed over open PR", () => {
@@ -322,8 +322,8 @@ describe("branchFormatter", () => {
 
       const result = formatBranchItem(branchInfo);
 
-      expect(result.icons).toContain("⬆️");
-      expect(result.icons).not.toContain("🔀");
+      expect(result.icons).toContain("📤");
+      expect(result.icons).not.toContain("🔃");
     });
 
     it("should prioritize open PR over merged PR", () => {
@@ -338,7 +338,7 @@ describe("branchFormatter", () => {
 
       const result = formatBranchItem(branchInfo);
 
-      expect(result.icons).toContain("🔀");
+      expect(result.icons).toContain("🔃");
       expect(result.icons).not.toContain("✅");
     });
 
@@ -380,7 +380,7 @@ describe("branchFormatter", () => {
       const result = formatBranchItem(branchInfo);
 
       expect(result.icons).toContain("⚠️");
-      expect(result.icons).not.toContain("⭐");
+      expect(result.icons).not.toContain("👉");
     });
 
     it("should handle develop branch", () => {
