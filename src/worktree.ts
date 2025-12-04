@@ -26,6 +26,23 @@ import { getConfig } from "./config/index.js";
 import { GIT_CONFIG } from "./config/constants.js";
 import { startSpinner } from "./utils/spinner.js";
 
+async function getUpstreamBranch(branch: string): Promise<string | null> {
+  try {
+    const result = await execa("git", [
+      "rev-parse",
+      "--abbrev-ref",
+      `${branch}@{upstream}`,
+    ]);
+    const stdout =
+      typeof (result as { stdout?: unknown })?.stdout === "string"
+        ? (result as { stdout: string }).stdout.trim()
+        : "";
+    return stdout.length ? stdout : null;
+  } catch {
+    return null;
+  }
+}
+
 // Re-export WorktreeConfig for external use
 export type { WorktreeConfig };
 
@@ -476,9 +493,12 @@ async function getOrphanedLocalBranches({
 
         const reasons: CleanupReason[] = [];
 
+        const upstreamBranch = await getUpstreamBranch(localBranch.name);
+        const comparisonBase = upstreamBranch ?? baseBranch;
+
         const hasUniqueCommits = await branchHasUniqueCommitsComparedToBase(
           localBranch.name,
-          baseBranch,
+          comparisonBase,
           repoRoot,
         );
 
@@ -625,9 +645,12 @@ export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
       hasRemoteBranch = false;
     }
 
+    const upstreamBranch = await getUpstreamBranch(worktree.branch);
+    const comparisonBase = upstreamBranch ?? baseBranch;
+
     const hasUniqueCommits = await branchHasUniqueCommitsComparedToBase(
       worktree.branch,
-      baseBranch,
+      comparisonBase,
       repoRoot,
     );
 
