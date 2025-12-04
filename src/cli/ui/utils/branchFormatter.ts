@@ -198,32 +198,43 @@ export function formatBranchItem(
   }
 
   // Column 5: Sync status (=, ↑N, ↓N, ↕, -)
-  // 数字はアイコンの直後に表示（例: ↓171）
+  // 5文字固定幅（アイコン1文字 + 数字最大4桁）、9999超は「9999+」表示
+  const SYNC_COLUMN_WIDTH = 6; // アイコン1 + 数字4 + スペース1
+
+  // 数字を4桁以内にフォーマット（9999超は9999+）
+  const formatSyncNumber = (n: number): string => {
+    if (n > 9999) return "9999+";
+    return String(n);
+  };
+
+  // Sync列を固定幅でパディング
+  const padSyncColumn = (content: string): string => {
+    const width = getIconWidth(content.charAt(0)) + content.length - 1;
+    const padding = Math.max(0, SYNC_COLUMN_WIDTH - width);
+    return content + " ".repeat(padding);
+  };
+
   let syncStatusStr: string;
-  let syncInfoStr = "";
   if (branch.type === "remote") {
     // リモートのみ → 比較不可
-    syncStatusStr = padIcon(syncIcons.none);
+    syncStatusStr = padSyncColumn(syncIcons.none);
   } else if (branch.divergence) {
     const { ahead, behind, upToDate } = branch.divergence;
     if (upToDate) {
-      syncStatusStr = padIcon(syncIcons.upToDate);
+      syncStatusStr = padSyncColumn(syncIcons.upToDate);
     } else if (ahead > 0 && behind > 0) {
-      // diverged: ↕+N/-M の形式
-      syncStatusStr = `${syncIcons.diverged}+${ahead}/-${behind} `;
-      syncInfoStr = "";
+      // diverged: ↕+N/-M の形式（幅超過の可能性あるが許容）
+      syncStatusStr = padSyncColumn(`${syncIcons.diverged}+${formatSyncNumber(ahead)}/-${formatSyncNumber(behind)}`);
     } else if (ahead > 0) {
       // ahead: ↑N の形式
-      syncStatusStr = `${syncIcons.ahead}${ahead} `;
-      syncInfoStr = "";
+      syncStatusStr = padSyncColumn(`${syncIcons.ahead}${formatSyncNumber(ahead)}`);
     } else {
       // behind: ↓N の形式
-      syncStatusStr = `${syncIcons.behind}${behind} `;
-      syncInfoStr = "";
+      syncStatusStr = padSyncColumn(`${syncIcons.behind}${formatSyncNumber(behind)}`);
     }
   } else {
     // divergence情報なし
-    syncStatusStr = padIcon(syncIcons.none);
+    syncStatusStr = padSyncColumn(syncIcons.none);
   }
 
   // Build Local/Remote name for display
@@ -305,7 +316,7 @@ export function formatBranchItem(
     value: branch.name,
     lastToolUsageLabel: buildLastToolUsageLabel(branch.lastToolUsage),
     syncStatus,
-    syncInfo: syncInfoStr.trim() || undefined,
+    syncInfo: undefined,
     remoteName: remoteName ?? undefined,
   };
 }

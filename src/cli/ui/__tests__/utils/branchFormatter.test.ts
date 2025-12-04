@@ -182,12 +182,13 @@ describe("branchFormatter", () => {
 
       const result = formatBranchItem(branchInfo, { hasChanges: true });
 
-      // Five icon columns should occupy exactly 10 columns (5 * COLUMN_WIDTH)
-      // Columns: [Type][Worktree][Changes][Remote][Sync]
+      // Icon columns: [Type][Worktree][Changes][Remote] = 4 * 2 = 8
+      // Sync column: 6 (fixed width for icon + up to 4 digits + space)
+      // Total: 14
       const iconBlockWidth =
         stringWidth(result.label) - stringWidth(branchInfo.name);
 
-      expect(iconBlockWidth).toBe(10);
+      expect(iconBlockWidth).toBe(14);
     });
 
     it("should include worktree status icon when provided", () => {
