@@ -1,3 +1,6 @@
+import type { LastToolUsage } from "../../types/api.js";
+export type { LastToolUsage } from "../../types/api.js";
+
 export interface WorktreeInfo {
   path: string;
   locked: boolean;
@@ -5,11 +8,8 @@ export interface WorktreeInfo {
   isAccessible?: boolean;
 }
 
-import type { LastToolUsage } from "../../types/api.js";
-
 export type AITool = string;
 export type InferenceLevel = "low" | "medium" | "high" | "xhigh";
-export type { LastToolUsage } from "../../types/api.js";
 
 export interface ModelOption {
   id: string;
@@ -18,6 +18,12 @@ export interface ModelOption {
   inferenceLevels?: InferenceLevel[];
   defaultInference?: InferenceLevel;
   isDefault?: boolean;
+}
+
+export interface BranchDivergence {
+  ahead: number;
+  behind: number;
+  upToDate: boolean;
 }
 
 export interface BranchInfo {
@@ -39,6 +45,9 @@ export interface BranchInfo {
   mergedPR?: { number: number; mergedAt: string };
   latestCommitTimestamp?: number;
   lastToolUsage?: LastToolUsage | null;
+  upstream?: string | null;
+  divergence?: BranchDivergence | null;
+  hasRemoteCounterpart?: boolean;
 }
 
 export interface BranchChoice {
@@ -132,7 +141,7 @@ export interface WorktreeWithPR {
   pullRequest: PullRequest | null;
 }
 
-export type CleanupReason = "merged-pr" | "no-diff-with-base" | "remote-synced";
+export type CleanupReason = "no-diff-with-base" | "remote-synced";
 
 export interface CleanupTarget {
   worktreePath: string | null; // null for local branch only cleanup
@@ -173,7 +182,6 @@ export interface GitHubPRResponse {
  */
 export type ScreenType =
   | "branch-list"
-  | "worktree-manager"
   | "branch-creator"
   | "branch-action-selector"
   | "ai-tool-selector"
@@ -201,6 +209,14 @@ export interface Screen {
  */
 export type WorktreeStatus = "active" | "inaccessible" | undefined;
 
+export type SyncStatus =
+  | "up-to-date"
+  | "ahead"
+  | "behind"
+  | "diverged"
+  | "no-upstream"
+  | "remote-only";
+
 export interface BranchItem extends BranchInfo {
   // Display properties
   icons: string[];
@@ -209,6 +225,9 @@ export interface BranchItem extends BranchInfo {
   label: string;
   value: string;
   lastToolUsageLabel?: string | null;
+  syncStatus?: SyncStatus;
+  syncInfo?: string | undefined;
+  remoteName?: string | undefined;
 }
 
 /**

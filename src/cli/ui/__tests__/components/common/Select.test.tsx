@@ -1,14 +1,11 @@
 /**
  * @vitest-environment happy-dom
  */
- 
+
 import { describe, it, expect, vi } from "vitest";
 import { render } from "ink-testing-library";
 import React from "react";
 import { Select } from "../../../components/common/Select.js";
-
-// Helper to wait for async updates
-const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 interface TestItem {
   label: string;

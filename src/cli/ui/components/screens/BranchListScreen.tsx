@@ -14,8 +14,6 @@ import chalk from "chalk";
 const WIDTH_OVERRIDES: Record<string, number> = {
   // Remote icon
   "☁": 1,
-  // Unpushed icon
-  "⬆": 1,
   // Branch type icons
   "⚡": 1,
   "✨": 1,
@@ -27,11 +25,16 @@ const WIDTH_OVERRIDES: Record<string, number> = {
   "🟢": 1,
   "🟠": 1,
   // Change status icons
-  "⭐": 1,
-  "✏️": 1,
-  "🔀": 1,
+  "👉": 1,
+  "💾": 1,
+  "📤": 1,
+  "🔃": 1,
   "✅": 1,
   "⚠️": 1,
+  // Remote markers
+  "🔗": 1,
+  "💻": 1,
+  "☁️": 1,
 };
 
 const getCharWidth = (char: string): number => {
@@ -70,7 +73,6 @@ export interface BranchListScreenProps {
   branches: BranchItem[];
   stats: Statistics;
   onSelect: (branch: BranchItem) => void;
-  onNavigate?: (screen: string) => void;
   onQuit?: () => void;
   onCleanupCommand?: () => void;
   onRefresh?: () => void;
@@ -96,7 +98,6 @@ export function BranchListScreen({
   branches,
   stats,
   onSelect,
-  onNavigate,
   onCleanupCommand,
   onRefresh,
   loading = false,
@@ -112,6 +113,9 @@ export function BranchListScreen({
   testOnFilterQueryChange,
 }: BranchListScreenProps) {
   const { rows } = useTerminalSize();
+  const COLUMN_WIDTH = 2;
+  const SYNC_COLUMN_WIDTH = 6;
+  const headerText = `  ${"Ty".padEnd(COLUMN_WIDTH)}${"Wt".padEnd(COLUMN_WIDTH)}${"St".padEnd(COLUMN_WIDTH)}${"Rm".padEnd(COLUMN_WIDTH)}${"Sync".padEnd(SYNC_COLUMN_WIDTH)}Branch`;
 
   // Filter state - allow test control via props
   const [internalFilterQuery, setInternalFilterQuery] = useState("");
@@ -139,7 +143,7 @@ export function BranchListScreen({
   );
 
   // Handle keyboard input
-  // Note: Input component blocks specific keys (c/r/m/f) using blockKeys prop
+  // Note: Input component blocks specific keys (c/r/f) using blockKeys prop
   // This prevents shortcuts from triggering while typing in the filter
   useInput((input, key) => {
     if (cleanupUI?.inputLocked) {
@@ -172,9 +176,7 @@ export function BranchListScreen({
     }
 
     // Global shortcuts (blocked by Input component when typing in filter mode)
-    if (input === "m" && onNavigate) {
-      onNavigate("worktree-manager");
-    } else if (input === "c") {
+    if (input === "c") {
       onCleanupCommand?.();
     } else if (input === "r" && onRefresh) {
       onRefresh();
@@ -225,7 +227,6 @@ export function BranchListScreen({
     { key: "enter", description: "Select" },
     { key: "f", description: "Filter" },
     { key: "r", description: "Refresh" },
-    { key: "m", description: "Manage worktrees" },
     { key: "c", description: "Cleanup branches" },
   ];
 
@@ -311,7 +312,10 @@ export function BranchListScreen({
       const staticPrefix = `${arrow} ${indicatorPrefix}`;
       const staticPrefixWidth = measureDisplayWidth(staticPrefix);
       const maxLeftDisplayWidth = Math.max(0, columns - timestampWidth - 1);
-      const maxLabelWidth = Math.max(0, maxLeftDisplayWidth - staticPrefixWidth);
+      const maxLabelWidth = Math.max(
+        0,
+        maxLeftDisplayWidth - staticPrefixWidth,
+      );
       const truncatedLabel = truncateToWidth(item.label, maxLabelWidth);
       const leftText = `${staticPrefix}${truncatedLabel}`;
 
@@ -350,7 +354,7 @@ export function BranchListScreen({
             onChange={setFilterQuery}
             onSubmit={() => {}} // No-op: filter is applied in real-time
             placeholder="Type to search..."
-            blockKeys={["c", "r", "m", "f"]} // Block shortcuts while typing
+            blockKeys={["c", "r", "f"]} // Block shortcuts while typing
           />
         ) : (
           <Text dimColor>{filterQuery || "(press f to filter)"}</Text>
@@ -409,14 +413,20 @@ export function BranchListScreen({
           !error &&
           branches.length > 0 &&
           filteredBranches.length > 0 && (
-            <Select
-              items={filteredBranches}
-              onSelect={onSelect}
-              limit={limit}
-              disabled={Boolean(cleanupUI?.inputLocked)}
-              renderIndicator={() => null}
-              renderItem={renderBranchRow}
-            />
+            <>
+              {/* Column labels */}
+              <Box>
+                <Text dimColor>{headerText}</Text>
+              </Box>
+              <Select
+                items={filteredBranches}
+                onSelect={onSelect}
+                limit={limit}
+                disabled={Boolean(cleanupUI?.inputLocked)}
+                renderIndicator={() => null}
+                renderItem={renderBranchRow}
+              />
+            </>
           )}
       </Box>
 

@@ -174,11 +174,9 @@ export async function getWorktreeRoot(): Promise<string> {
 export async function getCurrentBranch(): Promise<string | null> {
   try {
     const repoRoot = await getRepositoryRoot();
-    const { stdout } = await execa(
-      "git",
-      ["branch", "--show-current"],
-      { cwd: repoRoot },
-    );
+    const { stdout } = await execa("git", ["branch", "--show-current"], {
+      cwd: repoRoot,
+    });
     return stdout.trim() || null;
   } catch {
     try {
@@ -195,11 +193,15 @@ async function getBranchCommitTimestamps(
   cwd?: string,
 ): Promise<Map<string, number>> {
   try {
-    const { stdout = "" } = (await execa("git", [
-      "for-each-ref",
-      "--format=%(refname:short)%00%(committerdate:unix)",
-      ...refs,
-    ], cwd ? { cwd } : undefined)) ?? { stdout: "" };
+    const { stdout = "" } = (await execa(
+      "git",
+      [
+        "for-each-ref",
+        "--format=%(refname:short)%00%(committerdate:unix)",
+        ...refs,
+      ],
+      cwd ? { cwd } : undefined,
+    )) ?? { stdout: "" };
 
     const map = new Map<string, number>();
 
@@ -222,9 +224,10 @@ async function getBranchCommitTimestamps(
 export async function getLocalBranches(): Promise<BranchInfo[]> {
   try {
     const commitMap = await getBranchCommitTimestamps(["refs/heads"]);
-    const { stdout = "" } =
-      (await execa("git", ["branch", "--format=%(refname:short)"])) ??
-      { stdout: "" };
+    const { stdout = "" } = (await execa("git", [
+      "branch",
+      "--format=%(refname:short)",
+    ])) ?? { stdout: "" };
     return stdout
       .split("\n")
       .filter((line) => line.trim())
@@ -250,9 +253,11 @@ export async function getLocalBranches(): Promise<BranchInfo[]> {
 export async function getRemoteBranches(): Promise<BranchInfo[]> {
   try {
     const commitMap = await getBranchCommitTimestamps(["refs/remotes"]);
-    const { stdout = "" } =
-      (await execa("git", ["branch", "-r", "--format=%(refname:short)"])) ??
-      { stdout: "" };
+    const { stdout = "" } = (await execa("git", [
+      "branch",
+      "-r",
+      "--format=%(refname:short)",
+    ])) ?? { stdout: "" };
     return stdout
       .split("\n")
       .filter((line) => line.trim() && !line.includes("HEAD"))
@@ -297,6 +302,41 @@ export async function getAllBranches(): Promise<BranchInfo[]> {
   }
 
   return [...localBranches, ...remoteBranches];
+}
+
+/**
+ * ローカルブランチのupstream（追跡ブランチ）情報を取得
+ * @param cwd - 作業ディレクトリ（省略時はリポジトリルート）
+ * @returns Map<ローカルブランチ名, upstreamブランチ名>
+ */
+export async function collectUpstreamMap(
+  cwd?: string,
+): Promise<Map<string, string>> {
+  const workDir = cwd ?? (await getRepositoryRoot());
+  try {
+    const { stdout } = await execa(
+      "git",
+      [
+        "for-each-ref",
+        "--format=%(refname:short)|%(upstream:short)",
+        "refs/heads",
+      ],
+      { cwd: workDir },
+    );
+
+    return stdout
+      .split("\n")
+      .filter((line) => line.includes("|"))
+      .reduce((map, line) => {
+        const [branch, upstream] = line.split("|");
+        if (branch?.trim() && upstream?.trim()) {
+          map.set(branch.trim(), upstream.trim());
+        }
+        return map;
+      }, new Map<string, string>());
+  } catch {
+    return new Map();
+  }
 }
 
 export async function createBranch(

@@ -8,7 +8,6 @@ import React, {
 import { useApp } from "ink";
 import { ErrorBoundary } from "./common/ErrorBoundary.js";
 import { BranchListScreen } from "./screens/BranchListScreen.js";
-import { WorktreeManagerScreen } from "./screens/WorktreeManagerScreen.js";
 import { BranchCreatorScreen } from "./screens/BranchCreatorScreen.js";
 import { BranchActionSelectorScreen } from "../screens/BranchActionSelectorScreen.js";
 import { AIToolSelectorScreen } from "./screens/AIToolSelectorScreen.js";
@@ -19,7 +18,6 @@ import {
   ModelSelectorScreen,
   type ModelSelectionResult,
 } from "./screens/ModelSelectorScreen.js";
-import type { WorktreeItem } from "./screens/WorktreeManagerScreen.js";
 import { useGitData } from "../hooks/useGitData.js";
 import { useScreenState } from "../hooks/useScreenState.js";
 import { formatBranchItems } from "../utils/branchFormatter.js";
@@ -31,11 +29,7 @@ import type {
   InferenceLevel,
   SelectedBranchState,
 } from "../types.js";
-import {
-  getRepositoryRoot,
-  deleteBranch,
-  deleteRemoteBranch,
-} from "../../../git.js";
+import { getRepositoryRoot, deleteBranch } from "../../../git.js";
 import {
   createWorktree,
   generateWorktreePath,
@@ -269,19 +263,6 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     [visibleBranches],
   );
 
-  // Format worktrees to WorktreeItems
-  const worktreeItems: WorktreeItem[] = useMemo(
-    () =>
-      worktrees.map(
-        (wt): WorktreeItem => ({
-          branch: wt.branch,
-          path: wt.path,
-          isAccessible: wt.isAccessible ?? true,
-        }),
-      ),
-    [worktrees],
-  );
-
   const resolveBaseBranch = useCallback(() => {
     const localMain = branches.find(
       (branch) =>
@@ -425,40 +406,6 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       setCreationSourceBranch,
       setSelectedTool,
       toLocalBranchName,
-    ],
-  );
-
-  // Handle navigation
-  const handleNavigate = useCallback(
-    (screen: string) => {
-      navigateTo(screen as any);
-    },
-    [navigateTo],
-  );
-
-  const handleWorktreeSelect = useCallback(
-    (worktree: WorktreeItem) => {
-      const lastTool = branches.find((b) => b.name === worktree.branch)
-        ?.lastToolUsage?.toolId;
-      setSelectedBranch({
-        name: worktree.branch,
-        displayName: worktree.branch,
-        branchType: "local",
-        branchCategory: inferBranchCategory(worktree.branch),
-      });
-      setSelectedTool(null);
-      setSelectedModel(null);
-      setCreationSourceBranch(null);
-      setPreferredToolId(lastTool ?? null);
-      setCleanupFooterMessage(null);
-      navigateTo("ai-tool-selector");
-    },
-    [
-      inferBranchCategory,
-      navigateTo,
-      setCleanupFooterMessage,
-      setCreationSourceBranch,
-      branches,
     ],
   );
 
@@ -733,14 +680,8 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
 
         await deleteBranch(target.branch, true);
 
-        // マージ済みの場合のみリモートブランチも削除
-        if (target.hasRemoteBranch && target.reasons?.includes("merged-pr")) {
-          try {
-            await deleteRemoteBranch(target.branch);
-          } catch {
-            // リモート削除失敗はログのみ、処理は続行
-          }
-        }
+        // 自動クリーンアップではリモートブランチは削除しない
+        // リモートブランチはユーザーが明示的に削除する必要がある
 
         succeededBranches.push(target.branch);
         setCleanupIndicators((prev) => ({
@@ -864,7 +805,6 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
             branches={branchItems}
             stats={stats}
             onSelect={handleSelect}
-            onNavigate={handleNavigate}
             onQuit={handleQuit}
             onCleanupCommand={handleCleanupCommand}
             onRefresh={refresh}
@@ -879,16 +819,6 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
             }}
             version={version}
             workingDirectory={workingDirectory}
-          />
-        );
-
-      case "worktree-manager":
-        return (
-          <WorktreeManagerScreen
-            worktrees={worktreeItems}
-            onBack={goBack}
-            onSelect={handleWorktreeSelect}
-            version={version}
           />
         );
 
@@ -978,7 +908,6 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
             branches={branchItems}
             stats={stats}
             onSelect={handleSelect}
-            onNavigate={handleNavigate}
             onQuit={handleQuit}
             onRefresh={refresh}
             loading={loading}

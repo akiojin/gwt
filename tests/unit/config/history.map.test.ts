@@ -5,7 +5,13 @@ vi.mock("node:fs/promises", () => {
   const writeFile = vi.fn();
   const mkdir = vi.fn();
   const readdir = vi.fn();
-  return { readFile, writeFile, mkdir, readdir, default: { readFile, writeFile, mkdir, readdir } };
+  return {
+    readFile,
+    writeFile,
+    mkdir,
+    readdir,
+    default: { readFile, writeFile, mkdir, readdir },
+  };
 });
 
 import { readFile } from "node:fs/promises";
@@ -20,9 +26,33 @@ describe("getLastToolUsageMap", () => {
     (readFile as any).mockResolvedValue(
       JSON.stringify({
         history: [
-          { branch: "feature/a", worktreePath: "/wt/a", toolId: "codex-cli", toolLabel: "Codex", mode: "normal", model: null, timestamp: 10 },
-          { branch: "feature/a", worktreePath: "/wt/a", toolId: "claude-code", toolLabel: "Claude", mode: "continue", model: null, timestamp: 20 },
-          { branch: "feature/b", worktreePath: "/wt/b", toolId: "custom-tool", toolLabel: "MyTool", mode: null, model: null, timestamp: 5 },
+          {
+            branch: "feature/a",
+            worktreePath: "/wt/a",
+            toolId: "codex-cli",
+            toolLabel: "Codex",
+            mode: "normal",
+            model: null,
+            timestamp: 10,
+          },
+          {
+            branch: "feature/a",
+            worktreePath: "/wt/a",
+            toolId: "claude-code",
+            toolLabel: "Claude",
+            mode: "continue",
+            model: null,
+            timestamp: 20,
+          },
+          {
+            branch: "feature/b",
+            worktreePath: "/wt/b",
+            toolId: "custom-tool",
+            toolLabel: "MyTool",
+            mode: null,
+            model: null,
+            timestamp: 5,
+          },
         ],
       }),
     );

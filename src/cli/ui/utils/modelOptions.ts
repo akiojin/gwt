@@ -15,8 +15,7 @@ const MODEL_OPTIONS: Record<string, ModelOption[]> = {
     {
       id: "sonnet",
       label: "Sonnet 4.5",
-      description:
-        "Official Sonnet alias for Claude Code.",
+      description: "Official Sonnet alias for Claude Code.",
     },
     {
       id: "haiku",

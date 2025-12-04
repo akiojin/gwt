@@ -18,7 +18,9 @@ import { App } from "../../components/App.js";
 import { Window } from "happy-dom";
 import type { BranchInfo, BranchItem } from "../../types.js";
 import * as BranchListScreenModule from "../../components/screens/BranchListScreen.js";
+import type { BranchListScreenProps } from "../../components/screens/BranchListScreen.js";
 import * as BranchActionSelectorScreenModule from "../../screens/BranchActionSelectorScreen.js";
+import type { BranchActionSelectorScreenProps } from "../../screens/BranchActionSelectorScreen.js";
 
 vi.mock("../../../../git.ts", () => ({
   __esModule: true,
@@ -26,6 +28,8 @@ vi.mock("../../../../git.ts", () => ({
   getRepositoryRoot: vi.fn(async () => "/repo"),
   deleteBranch: vi.fn(async () => undefined),
   fetchAllRemotes: vi.fn(async () => undefined),
+  collectUpstreamMap: vi.fn(async () => new Map()),
+  getBranchDivergenceStatuses: vi.fn(async () => []),
 }));
 
 const { mockIsProtectedBranchName, mockSwitchToProtectedBranch } = vi.hoisted(
@@ -90,8 +94,9 @@ describe("Navigation Integration Tests", () => {
   beforeEach(() => {
     // Setup happy-dom
     const window = new Window();
-    globalThis.window = window as any;
-    globalThis.document = window.document as any;
+    globalThis.window = window as unknown as typeof globalThis.window;
+    globalThis.document =
+      window.document as unknown as typeof globalThis.document;
 
     // Reset mocks
     mockedGetAllBranches.mockReset();
@@ -243,8 +248,8 @@ describe("Navigation Integration Tests", () => {
 });
 
 describe("Protected Branch Navigation (T103)", () => {
-  const branchListProps: any[] = [];
-  const branchActionProps: any[] = [];
+  const branchListProps: BranchListScreenProps[] = [];
+  const branchActionProps: BranchActionSelectorScreenProps[] = [];
   let branchListSpy: ReturnType<typeof vi.spyOn>;
   let branchActionSpy: ReturnType<typeof vi.spyOn>;
 
@@ -265,8 +270,9 @@ describe("Protected Branch Navigation (T103)", () => {
 
   beforeEach(() => {
     const window = new Window();
-    globalThis.window = window as any;
-    globalThis.document = window.document as any;
+    globalThis.window = window as unknown as typeof globalThis.window;
+    globalThis.document =
+      window.document as unknown as typeof globalThis.document;
     mockedGetAllBranches.mockReset();
     mockedListAdditionalWorktrees.mockReset();
     mockedGetRepositoryRoot.mockReset();
@@ -284,13 +290,13 @@ describe("Protected Branch Navigation (T103)", () => {
     aiToolScreenProps.length = 0;
     branchListSpy = vi
       .spyOn(BranchListScreenModule, "BranchListScreen")
-      .mockImplementation((props: any) => {
+      .mockImplementation((props: BranchListScreenProps) => {
         branchListProps.push(props);
         return React.createElement(originalBranchListScreen, props);
       });
     branchActionSpy = vi
       .spyOn(BranchActionSelectorScreenModule, "BranchActionSelectorScreen")
-      .mockImplementation((props: any) => {
+      .mockImplementation((props: BranchActionSelectorScreenProps) => {
         branchActionProps.push(props);
         return React.createElement(originalBranchActionSelectorScreen, props);
       });
@@ -337,8 +343,7 @@ describe("Protected Branch Navigation (T103)", () => {
 
     // Simulate selecting the branch from the list
     const listProps =
-      branchListProps.find((p) => p.branches?.length) ??
-      branchListProps.at(-1);
+      branchListProps.find((p) => p.branches?.length) ?? branchListProps.at(-1);
     expect(listProps?.branches?.length).toBeGreaterThan(0);
     listProps.onSelect(listProps.branches[0]);
 

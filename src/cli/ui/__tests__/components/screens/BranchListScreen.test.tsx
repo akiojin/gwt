@@ -27,8 +27,9 @@ describe("BranchListScreen", () => {
     vi.useFakeTimers();
     // Setup happy-dom
     const window = new Window();
-    globalThis.window = window as any;
-    globalThis.document = window.document as any;
+    globalThis.window = window as unknown as typeof globalThis.window;
+    globalThis.document =
+      window.document as unknown as typeof globalThis.document;
   });
 
   afterEach(() => {
@@ -142,7 +143,7 @@ describe("BranchListScreen", () => {
 
   it("should display loading indicator after the configured delay", async () => {
     const onSelect = vi.fn();
-    const { queryByText, getByText } = render(
+    const { getByText } = render(
       <BranchListScreen
         branches={mockBranches}
         stats={mockStats}
@@ -153,8 +154,8 @@ describe("BranchListScreen", () => {
     );
 
     await act(async () => {
-      if (typeof (vi as any).advanceTimersByTime === "function") {
-        (vi as any).advanceTimersByTime(10);
+      if (typeof vi.advanceTimersByTime === "function") {
+        vi.advanceTimersByTime(10);
       } else {
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
@@ -299,7 +300,7 @@ describe("BranchListScreen", () => {
       );
     });
 
-    const frame = renderResult!.lastFrame() ?? "";
+    const frame = renderResult?.lastFrame() ?? "";
     expect(frame).toContain("\u001b[46m"); // cyan background ANSI code
   });
 
@@ -356,7 +357,7 @@ describe("BranchListScreen", () => {
         );
       });
 
-      const frame = renderResult!.lastFrame() ?? "";
+      const frame = renderResult?.lastFrame() ?? "";
       const timestampLines = frame
         .split("\n")
         .map((line) => stripControlSequences(stripAnsi(line)))
@@ -417,10 +418,9 @@ describe("BranchListScreen", () => {
       expect(container.textContent).toContain("(press f to filter)");
 
       // Press 'f' key
-      const fKeyEvent = new (globalThis.window as any).KeyboardEvent(
-        "keydown",
-        { key: "f" },
-      );
+      const fKeyEvent = new globalThis.window.KeyboardEvent("keydown", {
+        key: "f",
+      });
       document.dispatchEvent(fKeyEvent);
 
       // Filter input should be active (placeholder visible)
@@ -439,17 +439,15 @@ describe("BranchListScreen", () => {
       );
 
       // Enter filter mode first
-      const fKeyEvent = new (globalThis.window as any).KeyboardEvent(
-        "keydown",
-        { key: "f" },
-      );
+      const fKeyEvent = new globalThis.window.KeyboardEvent("keydown", {
+        key: "f",
+      });
       document.dispatchEvent(fKeyEvent);
 
       // Press Escape
-      const escKeyEvent = new (globalThis.window as any).KeyboardEvent(
-        "keydown",
-        { key: "Escape" },
-      );
+      const escKeyEvent = new globalThis.window.KeyboardEvent("keydown", {
+        key: "Escape",
+      });
       document.dispatchEvent(escKeyEvent);
 
       // Should return to branch selection mode
@@ -473,7 +471,7 @@ describe("BranchListScreen", () => {
         );
       });
 
-      const frame = renderResult!.lastFrame() ?? "";
+      const frame = renderResult?.lastFrame() ?? "";
       // Should contain cyan background (cursor highlight) even in filter mode
       expect(frame).toContain("\u001b[46m");
     });
@@ -570,10 +568,9 @@ describe("BranchListScreen", () => {
       );
 
       // Enter filter mode
-      const fKeyEvent = new (globalThis.window as any).KeyboardEvent(
-        "keydown",
-        { key: "f" },
-      );
+      const fKeyEvent = new globalThis.window.KeyboardEvent("keydown", {
+        key: "f",
+      });
       document.dispatchEvent(fKeyEvent);
 
       // Type something in filter
@@ -584,10 +581,9 @@ describe("BranchListScreen", () => {
       }
 
       // Press Escape (should clear query first)
-      const escKeyEvent = new (globalThis.window as any).KeyboardEvent(
-        "keydown",
-        { key: "Escape" },
-      );
+      const escKeyEvent = new globalThis.window.KeyboardEvent("keydown", {
+        key: "Escape",
+      });
       document.dispatchEvent(escKeyEvent);
 
       // Filter input should still be visible, but query cleared
@@ -608,17 +604,15 @@ describe("BranchListScreen", () => {
       );
 
       // Enter filter mode
-      const fKeyEvent = new (globalThis.window as any).KeyboardEvent(
-        "keydown",
-        { key: "f" },
-      );
+      const fKeyEvent = new globalThis.window.KeyboardEvent("keydown", {
+        key: "f",
+      });
       document.dispatchEvent(fKeyEvent);
 
       // Press Escape with empty query (should exit filter mode)
-      const escKeyEvent = new (globalThis.window as any).KeyboardEvent(
-        "keydown",
-        { key: "Escape" },
-      );
+      const escKeyEvent = new globalThis.window.KeyboardEvent("keydown", {
+        key: "Escape",
+      });
       document.dispatchEvent(escKeyEvent);
 
       // Should return to branch selection mode
@@ -641,9 +635,8 @@ describe("BranchListScreen", () => {
       expect(container.textContent).toContain("feature/test");
     });
 
-    it("should disable other key bindings (m, c, r) while typing in filter", () => {
+    it("should disable other key bindings (c, r) while typing in filter", () => {
       const onSelect = vi.fn();
-      const onNavigate = vi.fn();
       const onCleanupCommand = vi.fn();
       const onRefresh = vi.fn();
 
@@ -652,7 +645,6 @@ describe("BranchListScreen", () => {
           branches={mockBranches}
           stats={mockStats}
           onSelect={onSelect}
-          onNavigate={onNavigate}
           onCleanupCommand={onCleanupCommand}
           onRefresh={onRefresh}
         />,
@@ -665,10 +657,8 @@ describe("BranchListScreen", () => {
       act(() => {
         inkApp.stdin.write("c");
         inkApp.stdin.write("r");
-        inkApp.stdin.write("m");
       });
 
-      expect(onNavigate).not.toHaveBeenCalled();
       expect(onCleanupCommand).not.toHaveBeenCalled();
       expect(onRefresh).not.toHaveBeenCalled();
 

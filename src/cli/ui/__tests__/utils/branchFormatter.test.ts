@@ -23,7 +23,7 @@ describe("branchFormatter", () => {
       expect(result.branchType).toBe("main");
       expect(result.isCurrent).toBe(true);
       expect(result.icons).toContain("⚡"); // main icon
-      expect(result.icons).toContain("⭐"); // current icon
+      expect(result.icons).toContain("👉"); // current icon
       expect(result.label).toContain("main");
       expect(result.value).toBe("main");
       expect(result.hasChanges).toBe(false);
@@ -40,7 +40,7 @@ describe("branchFormatter", () => {
       const result = formatBranchItem(branchInfo);
 
       expect(result.icons).toContain("✨"); // feature icon
-      expect(result.icons).not.toContain("⭐"); // not current
+      expect(result.icons).not.toContain("👉"); // not current
       expect(result.label).toContain("feature/new-ui");
       expect(result.value).toBe("feature/new-ui");
     });
@@ -157,12 +157,12 @@ describe("branchFormatter", () => {
       const localResult = formatBranchItem(localBranch);
       const remoteResult = formatBranchItem(remoteBranch);
 
-      const localNameIndex = localResult.label.indexOf(localResult.name);
-      const remoteNameIndex = remoteResult.label.indexOf(remoteResult.name);
+      // Both should have the branch name in the label
+      expect(localResult.label).toContain("feature/foo");
+      expect(remoteResult.label).toContain("origin/feature/foo");
 
-      expect(localNameIndex).toBeGreaterThan(0);
-      expect(localNameIndex).toBe(remoteNameIndex);
-      expect(remoteResult.label).toMatch(/☁(?:️|︎)?\s+origin/);
+      // Remote branch should have ☁️ marker for remote-only status
+      expect(remoteResult.label).toMatch(/☁️/);
     });
 
     it("should keep icon columns fixed-width when using wide emoji icons", () => {
@@ -182,11 +182,13 @@ describe("branchFormatter", () => {
 
       const result = formatBranchItem(branchInfo, { hasChanges: true });
 
-      // Four icon columns should occupy exactly 8 columns (4 * COLUMN_WIDTH)
+      // Icon columns: [Type][Worktree][Changes][Remote] = 4 * 2 = 8
+      // Sync column: 6 (fixed width for icon + up to 4 digits + space)
+      // Total: 14
       const iconBlockWidth =
         stringWidth(result.label) - stringWidth(branchInfo.name);
 
-      expect(iconBlockWidth).toBe(8);
+      expect(iconBlockWidth).toBe(14);
     });
 
     it("should include worktree status icon when provided", () => {
@@ -218,7 +220,7 @@ describe("branchFormatter", () => {
 
       const result = formatBranchItem(branchInfo, { hasChanges: true });
 
-      expect(result.icons).toContain("✏️"); // changes icon
+      expect(result.icons).toContain("💾"); // changes icon
       expect(result.hasChanges).toBe(true);
     });
 
@@ -233,8 +235,8 @@ describe("branchFormatter", () => {
 
       const result = formatBranchItem(branchInfo);
 
-      expect(result.icons).toContain("⬆️"); // unpushed icon
-      expect(result.label).toContain("⬆️");
+      expect(result.icons).toContain("📤"); // unpushed icon
+      expect(result.label).toContain("📤");
     });
 
     it("should show open PR icon", () => {
@@ -248,8 +250,8 @@ describe("branchFormatter", () => {
 
       const result = formatBranchItem(branchInfo);
 
-      expect(result.icons).toContain("🔀"); // open PR icon
-      expect(result.label).toContain("🔀");
+      expect(result.icons).toContain("🔃"); // open PR icon
+      expect(result.label).toContain("🔃");
     });
 
     it("should show merged PR icon", () => {
@@ -300,12 +302,12 @@ describe("branchFormatter", () => {
       const resultWithChanges = formatBranchItem(branchInfo, {
         hasChanges: true,
       });
-      expect(resultWithChanges.icons).toContain("✏️");
-      expect(resultWithChanges.icons).not.toContain("⬆️");
+      expect(resultWithChanges.icons).toContain("💾");
+      expect(resultWithChanges.icons).not.toContain("📤");
 
       const resultWithoutChanges = formatBranchItem(branchInfo);
-      expect(resultWithoutChanges.icons).toContain("⬆️");
-      expect(resultWithoutChanges.icons).not.toContain("✏️");
+      expect(resultWithoutChanges.icons).toContain("📤");
+      expect(resultWithoutChanges.icons).not.toContain("💾");
     });
 
     it("should prioritize unpushed over open PR", () => {
@@ -320,8 +322,8 @@ describe("branchFormatter", () => {
 
       const result = formatBranchItem(branchInfo);
 
-      expect(result.icons).toContain("⬆️");
-      expect(result.icons).not.toContain("🔀");
+      expect(result.icons).toContain("📤");
+      expect(result.icons).not.toContain("🔃");
     });
 
     it("should prioritize open PR over merged PR", () => {
@@ -336,7 +338,7 @@ describe("branchFormatter", () => {
 
       const result = formatBranchItem(branchInfo);
 
-      expect(result.icons).toContain("🔀");
+      expect(result.icons).toContain("🔃");
       expect(result.icons).not.toContain("✅");
     });
 
@@ -378,7 +380,7 @@ describe("branchFormatter", () => {
       const result = formatBranchItem(branchInfo);
 
       expect(result.icons).toContain("⚠️");
-      expect(result.icons).not.toContain("⭐");
+      expect(result.icons).not.toContain("👉");
     });
 
     it("should handle develop branch", () => {

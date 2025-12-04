@@ -19,14 +19,14 @@ import { Select, type SelectItem } from "../../../components/common/Select.js";
 describe.skip("Select Component React.memo (T082-2)", () => {
   beforeEach(() => {
     const window = new Window();
-    globalThis.window = window as any;
-    globalThis.document = window.document as any;
+    globalThis.window = window as unknown as typeof globalThis.window;
+    globalThis.document =
+      window.document as unknown as typeof globalThis.document;
     vi.clearAllMocks();
   });
 
   it("should not re-render when items array reference changes but content is the same", () => {
     const onSelect = vi.fn();
-    const renderCount = 0;
 
     // Wrapper component to track renders
     function TestWrapper() {

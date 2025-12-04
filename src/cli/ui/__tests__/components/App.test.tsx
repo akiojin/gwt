@@ -1,19 +1,11 @@
 /**
  * @vitest-environment happy-dom
  */
-import {
-  describe,
-  it,
-  expect,
-  beforeEach,
-  afterEach,
-  afterAll,
-  vi,
-} from "vitest";
-import { act, render } from "@testing-library/react";
+import { describe, it, expect, beforeEach, vi } from "vitest";
+import { render } from "@testing-library/react";
 import React from "react";
 import { Window } from "happy-dom";
-import type { BranchInfo } from "../../types.js";
+import type { BranchInfo, BranchItem } from "../../types.js";
 import type { BranchListScreenProps } from "../../components/screens/BranchListScreen.js";
 
 const mockRefresh = vi.fn();
@@ -22,7 +14,7 @@ const branchListProps: BranchListScreenProps[] = [];
 const useGitDataMock = vi.fn();
 
 vi.mock("../../hooks/useGitData.js", () => ({
-  useGitData: (...args: any[]) => useGitDataMock(...args),
+  useGitData: (...args: unknown[]) => useGitDataMock(...args),
 }));
 
 vi.mock("../../components/screens/BranchListScreen.js", () => {
@@ -58,8 +50,9 @@ describe("App", () => {
   beforeEach(async () => {
     // Setup happy-dom
     const window = new Window();
-    globalThis.window = window as any;
-    globalThis.document = window.document as any;
+    globalThis.window = window as unknown as typeof globalThis.window;
+    globalThis.document =
+      window.document as unknown as typeof globalThis.document;
 
     vi.clearAllMocks();
     useGitDataMock.mockReset();
@@ -253,7 +246,7 @@ describe("App", () => {
 
     expect(branchListProps).not.toHaveLength(0);
     const props = branchListProps.at(-1);
-    const main = props?.branches.find((b: any) => b.name === "main");
+    const main = props?.branches.find((b: BranchItem) => b.name === "main");
     expect(main?.icons).toContain("⚡");
   });
 
