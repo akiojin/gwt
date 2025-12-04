@@ -714,6 +714,88 @@ branch refs/heads/feature/no-diff
       expect(branchHasUniqueSpy).toHaveBeenCalled();
       expect(remoteExistsSpy).toHaveBeenCalled();
     });
+
+    it("uses upstream branch as comparison base when determining cleanup candidates", async () => {
+      const configSpy = vi.spyOn(configModule, "getConfig").mockResolvedValue({
+        defaultBaseBranch: "main",
+        skipPermissions: false,
+        enableGitHubIntegration: true,
+        enableDebugMode: false,
+        worktreeNamingPattern: "{repo}-{branch}",
+      });
+
+      const repoRootSpy = vi
+        .spyOn(git, "getRepositoryRoot")
+        .mockResolvedValue("/repo");
+
+      vi.spyOn(github, "getMergedPullRequests").mockResolvedValue([]);
+      vi.spyOn(github, "getPullRequestByBranch").mockResolvedValue(null);
+      vi.spyOn(git, "getLocalBranches").mockResolvedValue([]);
+      vi.spyOn(git, "hasUncommittedChanges").mockResolvedValue(false);
+      vi.spyOn(git, "hasUnpushedCommits").mockResolvedValue(false);
+      vi.spyOn(git, "hasUnpushedCommitsInRepo").mockResolvedValue(false);
+
+      const branchHasUniqueSpy = vi
+        .spyOn(git, "branchHasUniqueCommitsComparedToBase")
+        .mockResolvedValue(false);
+
+      vi.spyOn(git, "checkRemoteBranchExists").mockResolvedValue(false);
+
+      (execa as any).mockImplementation(
+        async (command: string, args?: readonly string[]) => {
+          if (
+            command === "git" &&
+            args?.[0] === "worktree" &&
+            args[1] === "list"
+          ) {
+            return {
+              stdout: `worktree /repo
+HEAD 0000000
+branch refs/heads/main
+
+worktree /repo/.worktrees/feature-upstream
+HEAD abc1234
+branch refs/heads/feature/upstream
+`,
+              stderr: "",
+              exitCode: 0,
+            };
+          }
+
+          if (
+            command === "git" &&
+            args?.[0] === "rev-parse" &&
+            args[1] === "--abbrev-ref"
+          ) {
+            return {
+              stdout: "origin/develop",
+              stderr: "",
+              exitCode: 0,
+            };
+          }
+
+          return { stdout: "", stderr: "", exitCode: 0 };
+        },
+      );
+
+      (fs.existsSync as any).mockReturnValue(true);
+
+      const targets = await worktree.getMergedPRWorktrees();
+
+      expect(targets).toHaveLength(1);
+      expect(branchHasUniqueSpy).toHaveBeenCalledWith(
+        "feature/upstream",
+        "origin/develop",
+        "/repo",
+      );
+
+      const target = targets[0];
+      expect(target.reasons).toContain("no-diff-with-base");
+      expect(target.reasons).not.toContain("merged-pr");
+
+      expect(configSpy).toHaveBeenCalled();
+      expect(repoRootSpy).toHaveBeenCalled();
+    });
   });
 
   describe("Backward Compatibility (US3)", () => {
