@@ -84,7 +84,6 @@ describe("BranchListScreen Performance", () => {
         branches={branches}
         stats={stats}
         onSelect={() => {}}
-        onNavigate={() => {}}
         onQuit={() => {}}
       />,
     );
@@ -123,7 +122,6 @@ describe("BranchListScreen Performance", () => {
         branches={branches}
         stats={stats}
         onSelect={() => {}}
-        onNavigate={() => {}}
         onQuit={() => {}}
         lastUpdated={new Date()}
       />,
@@ -137,7 +135,6 @@ describe("BranchListScreen Performance", () => {
         branches={branches}
         stats={{ ...stats, total: stats.total + 1 }}
         onSelect={() => {}}
-        onNavigate={() => {}}
         onQuit={() => {}}
         lastUpdated={new Date()}
       />,
@@ -174,7 +171,6 @@ describe("BranchListScreen Performance", () => {
         branches={branches}
         stats={stats}
         onSelect={() => {}}
-        onNavigate={() => {}}
         onQuit={() => {}}
       />,
     );

@@ -141,7 +141,7 @@ export interface WorktreeWithPR {
   pullRequest: PullRequest | null;
 }
 
-export type CleanupReason = "merged-pr" | "no-diff-with-base" | "remote-synced";
+export type CleanupReason = "no-diff-with-base" | "remote-synced";
 
 export interface CleanupTarget {
   worktreePath: string | null; // null for local branch only cleanup
@@ -182,7 +182,6 @@ export interface GitHubPRResponse {
  */
 export type ScreenType =
   | "branch-list"
-  | "worktree-manager"
   | "branch-creator"
   | "branch-action-selector"
   | "ai-tool-selector"

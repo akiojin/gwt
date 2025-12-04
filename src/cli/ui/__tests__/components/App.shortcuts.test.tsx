@@ -6,7 +6,6 @@ import type { Mock } from "vitest";
 import { render, act } from "@testing-library/react";
 import React from "react";
 import type { BranchItem, CleanupTarget } from "../../types.js";
-import type { WorktreeManagerScreenProps } from "../../components/screens/WorktreeManagerScreen.js";
 import type { BranchCreatorScreenProps } from "../../components/screens/BranchCreatorScreen.js";
 import type { BranchListScreenProps } from "../../components/screens/BranchListScreen.js";
 import { Window } from "happy-dom";
@@ -16,7 +15,6 @@ const navigateToMock = vi.fn();
 const goBackMock = vi.fn();
 const resetMock = vi.fn();
 
-const worktreeScreenProps: WorktreeManagerScreenProps[] = [];
 const branchCreatorProps: BranchCreatorScreenProps[] = [];
 const branchListProps: BranchListScreenProps[] = [];
 
@@ -62,15 +60,6 @@ vi.mock("../../../../git.js", async () => {
   };
 });
 
-vi.mock("../../components/screens/WorktreeManagerScreen.js", () => {
-  return {
-    WorktreeManagerScreen: (props: WorktreeManagerScreenProps) => {
-      worktreeScreenProps.push(props);
-      return React.createElement("div", null, "WorktreeManagerScreenMock");
-    },
-  };
-});
-
 vi.mock("../../components/screens/BranchCreatorScreen.js", () => {
   return {
     BranchCreatorScreen: (props: BranchCreatorScreenProps) => {
@@ -97,7 +86,6 @@ describe("App shortcuts integration", () => {
       globalThis.document =
         window.document as unknown as typeof globalThis.document;
     }
-    worktreeScreenProps.length = 0;
     branchCreatorProps.length = 0;
     branchListProps.length = 0;
     navigateToMock.mockClear();
@@ -118,7 +106,7 @@ describe("App shortcuts integration", () => {
       lastUpdated: null,
     });
     useScreenStateMock.mockReturnValue({
-      currentScreen: "worktree-manager",
+      currentScreen: "branch-list",
       navigateTo: navigateToMock as Mock,
       goBack: goBackMock as Mock,
       reset: resetMock as Mock,
@@ -174,22 +162,8 @@ describe("App shortcuts integration", () => {
     removeWorktreeMock.mockReset();
     getRepositoryRootMock.mockReset();
     deleteBranchMock.mockReset();
-    worktreeScreenProps.length = 0;
     branchCreatorProps.length = 0;
     branchListProps.length = 0;
-  });
-
-  it("navigates to AI tool selector when worktree is selected", () => {
-    const onExit = vi.fn();
-    render(<App onExit={onExit} />);
-
-    expect(worktreeScreenProps).not.toHaveLength(0);
-    const { onSelect, worktrees } = worktreeScreenProps[0];
-    expect(worktrees).toHaveLength(1);
-
-    onSelect(worktrees[0]);
-
-    expect(navigateToMock).toHaveBeenCalledWith("ai-tool-selector");
   });
 
   it("creates new worktree when branch creator submits", async () => {
