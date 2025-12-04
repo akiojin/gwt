@@ -25,10 +25,10 @@ const worktreeIcons: Record<Exclude<WorktreeStatus, undefined>, string> = {
 };
 
 const changeIcons = {
-  current: "⭐",
-  hasChanges: "✏️",
-  unpushed: "⬆️",
-  openPR: "🔀",
+  current: "👉",
+  hasChanges: "💾",
+  unpushed: "📤",
+  openPR: "🔃",
   mergedPR: "✅",
   warning: "⚠️",
 };
@@ -37,7 +37,7 @@ const remoteIcon = "☁";
 
 // Sync status icons
 const syncIcons = {
-  upToDate: "=",
+  upToDate: "✓",
   ahead: "↑",
   behind: "↓",
   diverged: "↕",
@@ -47,9 +47,9 @@ const syncIcons = {
 
 // Remote column markers
 const remoteMarkers = {
-  tracked: "✓", // ローカル+同名リモートあり
-  localOnly: "L", // ローカルのみ（リモートなし）
-  remoteOnly: "R", // リモートのみ（ローカルなし）
+  tracked: "🔗", // ローカル+同名リモートあり
+  localOnly: "💻", // ローカルのみ（リモートなし）
+  remoteOnly: "☁️", // リモートのみ（ローカルなし）
 };
 
 // Emoji width varies by terminal. Provide explicit minimum widths so we never
@@ -57,8 +57,6 @@ const remoteMarkers = {
 const iconWidthOverrides: Record<string, number> = {
   // Remote icon
   [remoteIcon]: 1,
-  // Unpushed icon
-  "⬆": 1,
   // Branch type icons
   "⚡": 1,
   "✨": 1,
@@ -70,11 +68,16 @@ const iconWidthOverrides: Record<string, number> = {
   "🟢": 1,
   "🟠": 1,
   // Change status icons
-  "⭐": 1,
-  "✏️": 1,
-  "🔀": 1,
+  "👉": 1,
+  "💾": 1,
+  "📤": 1,
+  "🔃": 1,
   "✅": 1,
   "⚠️": 1,
+  // Remote markers
+  "🔗": 1,
+  "💻": 1,
+  "☁️": 1,
 };
 
 const getIconWidth = (icon: string): number => {
