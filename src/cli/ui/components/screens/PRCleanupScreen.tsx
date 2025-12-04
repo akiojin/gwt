@@ -58,9 +58,6 @@ export function PRCleanupScreen({
     } else {
       flags.push("branch");
     }
-    if (target.reasons?.includes("merged-pr")) {
-      flags.push("merged");
-    }
     if (target.reasons?.includes("no-diff-with-base")) {
       flags.push("base");
     }

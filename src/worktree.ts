@@ -6,10 +6,9 @@ import {
   WorktreeConfig,
   WorktreeWithPR,
   CleanupTarget,
-  MergedPullRequest,
   CleanupReason,
 } from "./cli/ui/types.js";
-import { getPullRequestByBranch, getMergedPullRequests } from "./github.js";
+import { getPullRequestByBranch } from "./github.js";
 import {
   hasUncommittedChanges,
   hasUnpushedCommits,
@@ -414,15 +413,13 @@ async function getWorktreesWithPRStatus(): Promise<WorktreeWithPR[]> {
 }
 
 /**
- * worktreeに存在しないローカルブランチの中でマージ済みPRに関連するクリーンアップ候補を取得
+ * worktreeに存在しないローカルブランチのクリーンアップ候補を取得
  * @returns {Promise<CleanupTarget[]>} クリーンアップ候補の配列
  */
 async function getOrphanedLocalBranches({
-  mergedPRs,
   baseBranch,
   repoRoot,
 }: {
-  mergedPRs: MergedPullRequest[];
   baseBranch: string;
   repoRoot: string;
 }): Promise<CleanupTarget[]> {
@@ -467,7 +464,6 @@ async function getOrphanedLocalBranches({
 
       // worktreeに存在しないローカルブランチのみ対象
       if (!worktreeBranches.has(localBranch.name)) {
-        const mergedPR = findMatchingPR(localBranch.name, mergedPRs);
         let hasUnpushed = false;
         try {
           hasUnpushed = await hasUnpushedCommitsInRepo(
@@ -479,10 +475,6 @@ async function getOrphanedLocalBranches({
         }
 
         const reasons: CleanupReason[] = [];
-
-        if (mergedPR) {
-          reasons.push("merged-pr");
-        }
 
         const hasUniqueCommits = await branchHasUniqueCommitsComparedToBase(
           localBranch.name,
@@ -497,7 +489,7 @@ async function getOrphanedLocalBranches({
         if (process.env.DEBUG_CLEANUP) {
           console.log(
             chalk.gray(
-              `Debug: Checking orphaned branch ${localBranch.name} -> PR: ${mergedPR ? "MATCH" : "NO MATCH"}, reasons: ${reasons.join(", ")}`,
+              `Debug: Checking orphaned branch ${localBranch.name} -> reasons: ${reasons.join(", ")}`,
             ),
           );
         }
@@ -517,7 +509,7 @@ async function getOrphanedLocalBranches({
           cleanupTargets.push({
             worktreePath: null, // worktreeは存在しない
             branch: localBranch.name,
-            pullRequest: mergedPR ?? null,
+            pullRequest: null,
             hasUncommittedChanges: false, // worktreeが存在しないため常にfalse
             hasUnpushedCommits: hasUnpushed,
             cleanupType: "branch-only",
@@ -546,49 +538,19 @@ async function getOrphanedLocalBranches({
   }
 }
 
-function normalizeBranchName(branchName: string): string {
-  return branchName
-    .replace(/^origin\//, "")
-    .replace(/^refs\/heads\//, "")
-    .replace(/^refs\/remotes\/origin\//, "")
-    .trim();
-}
-
-function findMatchingPR(
-  worktreeBranch: string,
-  mergedPRs: MergedPullRequest[],
-): MergedPullRequest | null {
-  const normalizedWorktreeBranch = normalizeBranchName(worktreeBranch);
-
-  for (const pr of mergedPRs) {
-    const normalizedPRBranch = normalizeBranchName(pr.branch);
-
-    if (normalizedWorktreeBranch === normalizedPRBranch) {
-      return pr;
-    }
-  }
-
-  return null;
-}
-
 /**
  * マージ済みPRに関連するworktreeおよびローカルブランチのクリーンアップ候補を取得
  * @returns {Promise<CleanupTarget[]>} クリーンアップ候補の配列
  */
 export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
-  const [config, repoRoot] = await Promise.all([
+  const [config, repoRoot, worktreesWithPR] = await Promise.all([
     getConfig(),
     getRepositoryRoot(),
+    getWorktreesWithPRStatus(),
   ]);
   const baseBranch = config.defaultBaseBranch || GIT_CONFIG.DEFAULT_BASE_BRANCH;
 
-  // 並列実行で高速化 - worktreeとマージ済みPRの両方を取得
-  const [mergedPRs, worktreesWithPR] = await Promise.all([
-    getMergedPullRequests(),
-    getWorktreesWithPRStatus(),
-  ]);
   const orphanedBranches = await getOrphanedLocalBranches({
-    mergedPRs,
     baseBranch,
     repoRoot,
   });
@@ -599,8 +561,6 @@ export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
     worktreesWithPR.forEach((w) =>
       console.log(`  ${w.branch} -> ${w.worktreePath}`),
     );
-    console.log(chalk.cyan("Debug: Merged PRs:"));
-    mergedPRs.forEach((pr) => console.log(`  ${pr.branch} (PR #${pr.number})`));
   }
 
   for (const worktree of worktreesWithPR) {
@@ -614,14 +574,9 @@ export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
       continue;
     }
 
-    const mergedPR = findMatchingPR(worktree.branch, mergedPRs);
-
     if (process.env.DEBUG_CLEANUP) {
-      const normalizedWorktree = normalizeBranchName(worktree.branch);
       console.log(
-        chalk.gray(
-          `Debug: Checking worktree ${worktree.branch} (normalized: ${normalizedWorktree}) -> ${mergedPR ? "MATCH" : "NO MATCH"}`,
-        ),
+        chalk.gray(`Debug: Checking worktree ${worktree.branch}`),
       );
     }
 
@@ -670,10 +625,6 @@ export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
       hasRemoteBranch = false;
     }
 
-    if (mergedPR) {
-      cleanupReasons.push("merged-pr");
-    }
-
     const hasUniqueCommits = await branchHasUniqueCommitsComparedToBase(
       worktree.branch,
       baseBranch,
@@ -703,7 +654,7 @@ export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
     const target: CleanupTarget = {
       worktreePath: worktree.worktreePath,
       branch: worktree.branch,
-      pullRequest: mergedPR ?? null,
+      pullRequest: null,
       hasUncommittedChanges: hasUncommitted,
       hasUnpushedCommits: hasUnpushed,
       cleanupType: "worktree-and-branch",
