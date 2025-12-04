@@ -11,11 +11,7 @@ describe("modelOptions", () => {
   it("lists Claude official aliases and sets Opus 4.5 as default", () => {
     const options = getModelOptions("claude-code");
     const ids = options.map((m) => m.id);
-    expect(ids).toEqual([
-      "opus",
-      "sonnet",
-      "haiku",
-    ]);
+    expect(ids).toEqual(["opus", "sonnet", "haiku"]);
     const defaultModel = getDefaultModelOption("claude-code");
     expect(defaultModel?.id).toBe("opus");
     expect(defaultModel?.label).toBe("Opus 4.5");
@@ -34,7 +30,9 @@ describe("modelOptions", () => {
   });
 
   it("uses medium as default reasoning for codex-max", () => {
-    const codexMax = getModelOptions("codex-cli").find((m) => m.id === "gpt-5.1-codex-max");
+    const codexMax = getModelOptions("codex-cli").find(
+      (m) => m.id === "gpt-5.1-codex-max",
+    );
     expect(getDefaultInferenceForModel(codexMax)).toBe("medium");
   });
 

@@ -2,15 +2,7 @@
  * @vitest-environment happy-dom
  * Edge case tests for UI components
  */
-import {
-  describe,
-  it,
-  expect,
-  beforeEach,
-  afterEach,
-  afterAll,
-  vi,
-} from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { render } from "@testing-library/react";
 import React from "react";
 import * as BranchListScreenModule from "../../components/screens/BranchListScreen.js";
@@ -24,7 +16,7 @@ const useGitDataMock = vi.fn();
 let App: typeof import("../../components/App.js").App;
 
 vi.mock("../../hooks/useGitData.js", () => ({
-  useGitData: (...args: any[]) => useGitDataMock(...args),
+  useGitData: (...args: unknown[]) => useGitDataMock(...args),
 }));
 
 vi.mock("../../components/screens/BranchListScreen.js", () => ({
@@ -53,8 +45,9 @@ describe("Edge Cases Integration Tests", () => {
   beforeEach(async () => {
     // Setup happy-dom
     const window = new Window();
-    globalThis.window = window as any;
-    globalThis.document = window.document as any;
+    globalThis.window = window as unknown as typeof globalThis.window;
+    globalThis.document =
+      window.document as unknown as typeof globalThis.document;
 
     // Reset mocks
     vi.clearAllMocks();

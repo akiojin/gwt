@@ -63,8 +63,9 @@ describe("Acceptance: Navigation (User Story 2)", () => {
   beforeEach(() => {
     // Setup happy-dom
     const window = new Window();
-    globalThis.window = window as any;
-    globalThis.document = window.document as any;
+    globalThis.window = window as unknown as typeof globalThis.window;
+    globalThis.document =
+      window.document as unknown as typeof globalThis.document;
 
     // Reset mocks
     mockedGetAllBranches.mockReset();

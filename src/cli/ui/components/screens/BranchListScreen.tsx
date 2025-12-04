@@ -312,7 +312,10 @@ export function BranchListScreen({
       const staticPrefix = `${arrow} ${indicatorPrefix}`;
       const staticPrefixWidth = measureDisplayWidth(staticPrefix);
       const maxLeftDisplayWidth = Math.max(0, columns - timestampWidth - 1);
-      const maxLabelWidth = Math.max(0, maxLeftDisplayWidth - staticPrefixWidth);
+      const maxLabelWidth = Math.max(
+        0,
+        maxLeftDisplayWidth - staticPrefixWidth,
+      );
       const truncatedLabel = truncateToWidth(item.label, maxLabelWidth);
       const leftText = `${staticPrefix}${truncatedLabel}`;
 

@@ -6,6 +6,8 @@ import type { Mock } from "vitest";
 import { render, act } from "@testing-library/react";
 import React from "react";
 import type { BranchItem, CleanupTarget } from "../../types.js";
+import type { BranchCreatorScreenProps } from "../../components/screens/BranchCreatorScreen.js";
+import type { BranchListScreenProps } from "../../components/screens/BranchListScreen.js";
 import { Window } from "happy-dom";
 let App: typeof import("../../components/App.js").App;
 
@@ -13,8 +15,8 @@ const navigateToMock = vi.fn();
 const goBackMock = vi.fn();
 const resetMock = vi.fn();
 
-const branchCreatorProps: any[] = [];
-const branchListProps: any[] = [];
+const branchCreatorProps: BranchCreatorScreenProps[] = [];
+const branchListProps: BranchListScreenProps[] = [];
 
 const useGitDataMock = vi.fn();
 const useScreenStateMock = vi.fn();
@@ -26,11 +28,11 @@ const getRepositoryRootMock = vi.fn();
 const deleteBranchMock = vi.fn();
 
 vi.mock("../../hooks/useGitData.js", () => ({
-  useGitData: (...args: any[]) => useGitDataMock(...args),
+  useGitData: (...args: unknown[]) => useGitDataMock(...args),
 }));
 
 vi.mock("../../hooks/useScreenState.js", () => ({
-  useScreenState: (...args: any[]) => useScreenStateMock(...args),
+  useScreenState: (...args: unknown[]) => useScreenStateMock(...args),
 }));
 
 vi.mock("../../../../worktree.js", async () => {
@@ -60,7 +62,7 @@ vi.mock("../../../../git.js", async () => {
 
 vi.mock("../../components/screens/BranchCreatorScreen.js", () => {
   return {
-    BranchCreatorScreen: (props: any) => {
+    BranchCreatorScreen: (props: BranchCreatorScreenProps) => {
       branchCreatorProps.push(props);
       return React.createElement("div", null, "BranchCreatorScreenMock");
     },
@@ -69,7 +71,7 @@ vi.mock("../../components/screens/BranchCreatorScreen.js", () => {
 
 vi.mock("../../components/screens/BranchListScreen.js", () => {
   return {
-    BranchListScreen: (props: any) => {
+    BranchListScreen: (props: BranchListScreenProps) => {
       branchListProps.push(props);
       return React.createElement("div", null, "BranchListScreenMock");
     },
@@ -80,8 +82,9 @@ describe("App shortcuts integration", () => {
   beforeEach(async () => {
     if (typeof globalThis.document === "undefined") {
       const window = new Window();
-      globalThis.window = window as any;
-      globalThis.document = window.document as any;
+      globalThis.window = window as unknown as typeof globalThis.window;
+      globalThis.document =
+        window.document as unknown as typeof globalThis.document;
     }
     branchCreatorProps.length = 0;
     branchListProps.length = 0;

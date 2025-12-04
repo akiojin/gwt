@@ -425,17 +425,22 @@ export function BranchDetailPage() {
       worktreePath: branch.worktreePath ?? null,
       toolId:
         first.toolType === "custom"
-          ? first.toolName ?? "custom"
+          ? (first.toolName ?? "custom")
           : (first.toolType as LastToolUsage["toolId"]),
       toolLabel:
         first.toolType === "custom"
-          ? first.toolName ?? "Custom"
+          ? (first.toolName ?? "Custom")
           : toolLabel(first.toolType),
       mode: first.mode ?? "normal",
       model: null,
       timestamp: first.startedAt ? Date.parse(first.startedAt) : Date.now(),
     };
-  }, [branch?.lastToolUsage, branch?.name, branch?.worktreePath, branchSessions]);
+  }, [
+    branch?.lastToolUsage,
+    branch?.name,
+    branch?.worktreePath,
+    branchSessions,
+  ]);
 
   const handleSessionExit = (code: number) => {
     setActiveSessionId(null);

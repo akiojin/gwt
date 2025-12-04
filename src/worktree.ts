@@ -595,9 +595,7 @@ export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
     }
 
     if (process.env.DEBUG_CLEANUP) {
-      console.log(
-        chalk.gray(`Debug: Checking worktree ${worktree.branch}`),
-      );
+      console.log(chalk.gray(`Debug: Checking worktree ${worktree.branch}`));
     }
 
     const cleanupReasons: CleanupReason[] = [];
