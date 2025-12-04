@@ -43,6 +43,21 @@
 * update default Claude Code model to Opus 4.5 ([1dd909e](https://github.com/akiojin/gwt/commit/1dd909ed87a55ce3bb796deb0431d0027571dae2))
 * update Opus model version to 4.5 ([307faeb](https://github.com/akiojin/gwt/commit/307faeb66ebac0ca89b01c07ee19d213797c4d5c))
 
+## [2.10.0](https://github.com/akiojin/gwt/compare/v2.9.1...v2.10.0) (2025-12-04)
+
+
+### Features
+
+* Cコマンドでリモートブランチも削除対象に追加 ([632cb9e](https://github.com/akiojin/gwt/commit/632cb9eb6ee325b2959dad5fec44969f09d75764))
+
+
+### Bug Fixes
+
+* align cleanup reasons with types and dedupe vars ([a3994ed](https://github.com/akiojin/gwt/commit/a3994eda8f122de1ac24da91648a642fdb024ab9))
+* expand cleanup candidates for remote-synced branches ([9204c5a](https://github.com/akiojin/gwt/commit/9204c5a9388d0b9cee403ce832ab75f916b2d469))
+* stabilize worktree cleanup and ui tests ([61d510b](https://github.com/akiojin/gwt/commit/61d510b97c579cf988342db7a3b1c6d9cf576db1))
+* リモートブランチ削除をマージ済みPRのみに限定 ([ba9a653](https://github.com/akiojin/gwt/commit/ba9a653135fa819d992e4d462fdd80766a9c8067))
+
 ## [2.9.1](https://github.com/akiojin/gwt/compare/v2.9.0...v2.9.1) (2025-11-27)
 
 
