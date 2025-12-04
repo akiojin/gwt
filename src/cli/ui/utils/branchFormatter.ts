@@ -198,6 +198,7 @@ export function formatBranchItem(
   }
 
   // Column 5: Sync status (=, ↑N, ↓N, ↕, -)
+  // 数字はアイコンの直後に表示（例: ↓171）
   let syncStatusStr: string;
   let syncInfoStr = "";
   if (branch.type === "remote") {
@@ -208,14 +209,17 @@ export function formatBranchItem(
     if (upToDate) {
       syncStatusStr = padIcon(syncIcons.upToDate);
     } else if (ahead > 0 && behind > 0) {
-      syncStatusStr = padIcon(syncIcons.diverged);
-      syncInfoStr = ` +${ahead}/-${behind}`;
+      // diverged: ↕+N/-M の形式
+      syncStatusStr = `${syncIcons.diverged}+${ahead}/-${behind} `;
+      syncInfoStr = "";
     } else if (ahead > 0) {
-      syncStatusStr = padIcon(syncIcons.ahead);
-      syncInfoStr = ` +${ahead}`;
+      // ahead: ↑N の形式
+      syncStatusStr = `${syncIcons.ahead}${ahead} `;
+      syncInfoStr = "";
     } else {
-      syncStatusStr = padIcon(syncIcons.behind);
-      syncInfoStr = ` -${behind}`;
+      // behind: ↓N の形式
+      syncStatusStr = `${syncIcons.behind}${behind} `;
+      syncInfoStr = "";
     }
   } else {
     // divergence情報なし
@@ -238,8 +242,8 @@ export function formatBranchItem(
   }
 
   // Build label with fixed-width columns
-  // Format: [Type][Worktree][Changes][Remote][Sync] DisplayName [SyncInfo]
-  const label = `${branchTypeIcon}${worktreeIcon}${changesIcon}${remoteStatusStr}${syncStatusStr}${displayName}${syncInfoStr}`;
+  // Format: [Type][Worktree][Changes][Remote][Sync] DisplayName
+  const label = `${branchTypeIcon}${worktreeIcon}${changesIcon}${remoteStatusStr}${syncStatusStr}${displayName}`;
 
   // Collect icons for compatibility
   const icons: string[] = [];
