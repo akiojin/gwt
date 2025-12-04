@@ -27,6 +27,23 @@ import { getConfig } from "./config/index.js";
 import { GIT_CONFIG } from "./config/constants.js";
 import { startSpinner } from "./utils/spinner.js";
 
+async function getUpstreamBranch(branch: string): Promise<string | null> {
+  try {
+    const result = await execa("git", [
+      "rev-parse",
+      "--abbrev-ref",
+      `${branch}@{upstream}`,
+    ]);
+    const stdout =
+      typeof (result as { stdout?: unknown })?.stdout === "string"
+        ? (result as { stdout: string }).stdout.trim()
+        : "";
+    return stdout.length ? stdout : null;
+  } catch {
+    return null;
+  }
+}
+
 // Re-export WorktreeConfig for external use
 export type { WorktreeConfig };
 
@@ -481,11 +498,14 @@ async function getOrphanedLocalBranches({
         }
 
         if (!hasUnpushed) {
-          const hasUniqueCommits = await branchHasUniqueCommitsComparedToBase(
-            localBranch.name,
-            baseBranch,
-            repoRoot,
-          );
+        const upstreamBranch = await getUpstreamBranch(localBranch.name);
+        const comparisonBase = upstreamBranch ?? baseBranch;
+
+        const hasUniqueCommits = await branchHasUniqueCommitsComparedToBase(
+          localBranch.name,
+          comparisonBase,
+          repoRoot,
+        );
 
           if (!hasUniqueCommits) {
             reasons.push("no-diff-with-base");
@@ -652,11 +672,14 @@ export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
     }
 
     if (!hasUnpushed) {
-      const hasUniqueCommits = await branchHasUniqueCommitsComparedToBase(
-        worktree.branch,
-        baseBranch,
-        repoRoot,
-      );
+    const upstreamBranch = await getUpstreamBranch(worktree.branch);
+    const comparisonBase = upstreamBranch ?? baseBranch;
+
+    const hasUniqueCommits = await branchHasUniqueCommitsComparedToBase(
+      worktree.branch,
+      comparisonBase,
+      repoRoot,
+    );
 
       if (!hasUniqueCommits) {
         cleanupReasons.push("no-diff-with-base");
