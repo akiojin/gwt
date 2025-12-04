@@ -153,9 +153,9 @@ describe("Acceptance: Navigation (User Story 2)", () => {
 
   /**
    * T076: Acceptance Scenario 3
-   * Worktree管理でアクション実行後に適切に遷移
+   * ブランチリスト画面でフッターアクションが表示される
    */
-  it("[AC3] should handle worktree management navigation", async () => {
+  it("[AC3] should display footer actions on branch list screen", async () => {
     (getAllBranches as ReturnType<typeof vi.fn>).mockResolvedValue(
       mockBranches,
     );
@@ -175,18 +175,9 @@ describe("Acceptance: Navigation (User Story 2)", () => {
       expect(getByText(/gwt - Branch Selection/i)).toBeDefined();
     });
 
-    // Verify m key action is available for worktree management
-    const mKeyElements = container.querySelectorAll("*");
-    let hasMKey = false;
-    mKeyElements.forEach((el) => {
-      if (el.textContent?.toLowerCase().includes("manage worktrees")) {
-        hasMKey = true;
-      }
-    });
-
-    expect(hasMKey || container.textContent?.toLowerCase().includes("m")).toBe(
-      true,
-    );
+    // Verify footer actions are available
+    const footerText = container.textContent || "";
+    expect(footerText.toLowerCase()).toContain("enter");
   });
 
   it("[Integration] should support all navigation keys", async () => {
@@ -224,7 +215,7 @@ describe("Acceptance: Navigation (User Story 2)", () => {
     // Verify footer has multiple action keys (main screen doesn't have q key)
     const footerText = container.textContent || "";
     expect(footerText.toLowerCase()).toContain("enter");
-    expect(footerText.toLowerCase()).toContain("m"); // Manage worktrees
+    expect(footerText.toLowerCase()).toContain("r"); // Refresh
   });
 });
 

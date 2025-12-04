@@ -73,7 +73,6 @@ export interface BranchListScreenProps {
   branches: BranchItem[];
   stats: Statistics;
   onSelect: (branch: BranchItem) => void;
-  onNavigate?: (screen: string) => void;
   onQuit?: () => void;
   onCleanupCommand?: () => void;
   onRefresh?: () => void;
@@ -99,7 +98,6 @@ export function BranchListScreen({
   branches,
   stats,
   onSelect,
-  onNavigate,
   onCleanupCommand,
   onRefresh,
   loading = false,
@@ -145,7 +143,7 @@ export function BranchListScreen({
   );
 
   // Handle keyboard input
-  // Note: Input component blocks specific keys (c/r/m/f) using blockKeys prop
+  // Note: Input component blocks specific keys (c/r/f) using blockKeys prop
   // This prevents shortcuts from triggering while typing in the filter
   useInput((input, key) => {
     if (cleanupUI?.inputLocked) {
@@ -178,9 +176,7 @@ export function BranchListScreen({
     }
 
     // Global shortcuts (blocked by Input component when typing in filter mode)
-    if (input === "m" && onNavigate) {
-      onNavigate("worktree-manager");
-    } else if (input === "c") {
+    if (input === "c") {
       onCleanupCommand?.();
     } else if (input === "r" && onRefresh) {
       onRefresh();
@@ -231,7 +227,6 @@ export function BranchListScreen({
     { key: "enter", description: "Select" },
     { key: "f", description: "Filter" },
     { key: "r", description: "Refresh" },
-    { key: "m", description: "Manage worktrees" },
     { key: "c", description: "Cleanup branches" },
   ];
 
@@ -356,7 +351,7 @@ export function BranchListScreen({
             onChange={setFilterQuery}
             onSubmit={() => {}} // No-op: filter is applied in real-time
             placeholder="Type to search..."
-            blockKeys={["c", "r", "m", "f"]} // Block shortcuts while typing
+            blockKeys={["c", "r", "f"]} // Block shortcuts while typing
           />
         ) : (
           <Text dimColor>{filterQuery || "(press f to filter)"}</Text>
