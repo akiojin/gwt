@@ -608,10 +608,6 @@ branch refs/heads/feature/test
         .spyOn(git, "getRepositoryRoot")
         .mockResolvedValue("/repo");
 
-      const mergedPRsSpy = vi
-        .spyOn(github, "getMergedPullRequests")
-        .mockResolvedValue([]);
-
       const pullRequestByBranchSpy = vi
         .spyOn(github, "getPullRequestByBranch")
         .mockResolvedValue(null);
@@ -701,7 +697,6 @@ branch refs/heads/feature/no-diff
       expect(worktreeTarget?.cleanupType).toBe("worktree-and-branch");
       expect(worktreeTarget?.pullRequest).toBeNull();
       expect(worktreeTarget?.reasons).toContain("no-diff-with-base");
-      expect(worktreeTarget?.reasons).not.toContain("merged-pr");
 
       const orphanTarget = targets.find(
         (target) => target.branch === "feature/orphan",
@@ -713,7 +708,6 @@ branch refs/heads/feature/no-diff
 
       expect(configSpy).toHaveBeenCalled();
       expect(repoRootSpy).toHaveBeenCalled();
-      expect(mergedPRsSpy).toHaveBeenCalled();
       expect(pullRequestByBranchSpy).toHaveBeenCalled();
       expect(getLocalBranchesSpy).toHaveBeenCalled();
       expect(hasUncommittedSpy).toHaveBeenCalled();
@@ -736,7 +730,6 @@ branch refs/heads/feature/no-diff
         .spyOn(git, "getRepositoryRoot")
         .mockResolvedValue("/repo");
 
-      vi.spyOn(github, "getMergedPullRequests").mockResolvedValue([]);
       vi.spyOn(github, "getPullRequestByBranch").mockResolvedValue(null);
       vi.spyOn(git, "getLocalBranches").mockResolvedValue([]);
       vi.spyOn(git, "hasUncommittedChanges").mockResolvedValue(false);
@@ -815,7 +808,6 @@ branch refs/heads/feature/upstream
       });
 
       vi.spyOn(git, "getRepositoryRoot").mockResolvedValue("/repo");
-      vi.spyOn(github, "getMergedPullRequests").mockResolvedValue([]);
       vi.spyOn(github, "getPullRequestByBranch").mockResolvedValue(null);
       vi.spyOn(git, "getLocalBranches").mockResolvedValue([
         {
@@ -870,7 +862,6 @@ branch refs/heads/develop
       expect(target).toBeDefined();
       expect(target?.cleanupType).toBe("branch-only");
       expect(target?.reasons).toContain("remote-synced");
-      expect(target?.reasons).not.toContain("merged-pr");
       expect(target?.hasRemoteBranch).toBe(true);
       expect(target?.hasUnpushedCommits).toBe(false);
       expect(target?.hasUncommittedChanges).toBe(false);
@@ -886,7 +877,6 @@ branch refs/heads/develop
       });
 
       vi.spyOn(git, "getRepositoryRoot").mockResolvedValue("/repo");
-      vi.spyOn(github, "getMergedPullRequests").mockResolvedValue([]);
       vi.spyOn(github, "getPullRequestByBranch").mockResolvedValue(null);
       vi.spyOn(git, "getLocalBranches").mockResolvedValue([
         {
@@ -945,7 +935,6 @@ branch refs/heads/feature/ready-but-unmerged
       expect(target).toBeDefined();
       expect(target?.cleanupType).toBe("worktree-and-branch");
       expect(target?.reasons).toContain("remote-synced");
-      expect(target?.reasons).not.toContain("merged-pr");
       expect(target?.hasRemoteBranch).toBe(true);
       expect(target?.hasUnpushedCommits).toBe(false);
       expect(target?.hasUncommittedChanges).toBe(false);
