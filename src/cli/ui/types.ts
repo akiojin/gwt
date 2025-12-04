@@ -1,11 +1,11 @@
+import type { LastToolUsage } from "../../types/api.js";
+
 export interface WorktreeInfo {
   path: string;
   locked: boolean;
   prunable: boolean;
   isAccessible?: boolean;
 }
-
-import type { LastToolUsage } from "../../types/api.js";
 
 export type AITool = string;
 export type InferenceLevel = "low" | "medium" | "high" | "xhigh";

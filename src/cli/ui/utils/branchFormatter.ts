@@ -47,8 +47,8 @@ const syncIcons = {
 
 // Remote column markers
 const remoteMarkers = {
-  tracked: "✓",    // ローカル+同名リモートあり
-  localOnly: "L",  // ローカルのみ（リモートなし）
+  tracked: "✓", // ローカル+同名リモートあり
+  localOnly: "L", // ローカルのみ（リモートなし）
   remoteOnly: "R", // リモートのみ（ローカルなし）
 };
 
@@ -210,7 +210,7 @@ export function formatBranchItem(
 
   // Sync列を固定幅でパディング
   const padSyncColumn = (content: string): string => {
-    const width = getIconWidth(content.charAt(0)) + content.length - 1;
+    const width = stringWidth(content);
     const padding = Math.max(0, SYNC_COLUMN_WIDTH - width);
     return content + " ".repeat(padding);
   };
@@ -224,14 +224,18 @@ export function formatBranchItem(
     if (upToDate) {
       syncStatusStr = padSyncColumn(syncIcons.upToDate);
     } else if (ahead > 0 && behind > 0) {
-      // diverged: ↕+N/-M の形式（幅超過の可能性あるが許容）
-      syncStatusStr = padSyncColumn(`${syncIcons.diverged}+${formatSyncNumber(ahead)}/-${formatSyncNumber(behind)}`);
+      // diverged: ↕ のみ表示（詳細は別途表示可能）
+      syncStatusStr = padSyncColumn(syncIcons.diverged);
     } else if (ahead > 0) {
       // ahead: ↑N の形式
-      syncStatusStr = padSyncColumn(`${syncIcons.ahead}${formatSyncNumber(ahead)}`);
+      syncStatusStr = padSyncColumn(
+        `${syncIcons.ahead}${formatSyncNumber(ahead)}`,
+      );
     } else {
       // behind: ↓N の形式
-      syncStatusStr = padSyncColumn(`${syncIcons.behind}${formatSyncNumber(behind)}`);
+      syncStatusStr = padSyncColumn(
+        `${syncIcons.behind}${formatSyncNumber(behind)}`,
+      );
     }
   } else {
     // divergence情報なし
