@@ -41,14 +41,14 @@ import { execa } from "execa";
 const mockExeca = execa as ReturnType<typeof vi.fn>;
 
 // Mock console.log to avoid test output clutter
-const consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+let consoleLogSpy: ReturnType<typeof vi.spyOn>;
 
 describe("launchClaudeCode - Root User Detection", () => {
   let originalGetuid: (() => number) | undefined;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    consoleLogSpy.mockClear();
+    consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     mockTerminalStreams.exitRawMode.mockClear();
     mockChildStdio.cleanup.mockClear();
     mockChildStdio.stdin = "inherit";

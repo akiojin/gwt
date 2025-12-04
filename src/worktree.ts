@@ -627,13 +627,21 @@ export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
 
     const cleanupReasons: CleanupReason[] = [];
 
-    if (mergedPR) {
-      cleanupReasons.push("merged-pr");
-    }
-
     // worktreeパスの存在を確認
     const fs = await import("node:fs");
-    const isAccessible = fs.existsSync(worktree.worktreePath);
+    // Some test environments mock node:fs without existsSync on the module root.
+    const existsSync =
+      typeof fs.existsSync === "function"
+        ? fs.existsSync
+        : typeof (fs as { default?: { existsSync?: unknown } }).default
+            ?.existsSync === "function"
+          ? (fs as { default: { existsSync: (p: string) => boolean } }).default
+              .existsSync
+          : null;
+
+    const isAccessible = existsSync
+      ? existsSync(worktree.worktreePath)
+      : false;
 
     let hasUncommitted = false;
     let hasUnpushed = false;
@@ -657,16 +665,33 @@ export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
       }
     }
 
-    if (!hasUnpushed) {
-      const hasUniqueCommits = await branchHasUniqueCommitsComparedToBase(
-        worktree.branch,
-        baseBranch,
-        repoRoot,
-      );
+    let hasRemoteBranch = false;
+    try {
+      hasRemoteBranch = await checkRemoteBranchExists(worktree.branch);
+    } catch {
+      hasRemoteBranch = false;
+    }
 
-      if (!hasUniqueCommits) {
-        cleanupReasons.push("no-diff-with-base");
-      }
+    if (mergedPR) {
+      cleanupReasons.push("merged-pr");
+    }
+
+    const hasUniqueCommits = await branchHasUniqueCommitsComparedToBase(
+      worktree.branch,
+      baseBranch,
+      repoRoot,
+    );
+
+    // 差分がない場合はベース同等としてクリーンアップ候補
+    if (!hasUniqueCommits) {
+      cleanupReasons.push("no-diff-with-base");
+    } else if (
+      !hasUncommitted &&
+      !hasUnpushed &&
+      hasRemoteBranch
+    ) {
+      // 未マージでも、ローカルに未コミット/未プッシュがなくリモートが最新ならローカルのみクリーンアップ許可
+      cleanupReasons.push("remote-synced");
     }
 
     if (process.env.DEBUG_CLEANUP) {
