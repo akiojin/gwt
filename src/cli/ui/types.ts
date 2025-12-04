@@ -1,4 +1,5 @@
 import type { LastToolUsage } from "../../types/api.js";
+export type { LastToolUsage } from "../../types/api.js";
 
 export interface WorktreeInfo {
   path: string;
@@ -9,7 +10,6 @@ export interface WorktreeInfo {
 
 export type AITool = string;
 export type InferenceLevel = "low" | "medium" | "high" | "xhigh";
-export type { LastToolUsage } from "../../types/api.js";
 
 export interface ModelOption {
   id: string;

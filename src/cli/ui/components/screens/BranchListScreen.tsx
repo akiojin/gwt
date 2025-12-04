@@ -112,6 +112,9 @@ export function BranchListScreen({
   testOnFilterQueryChange,
 }: BranchListScreenProps) {
   const { rows } = useTerminalSize();
+  const COLUMN_WIDTH = 2;
+  const SYNC_COLUMN_WIDTH = 6;
+  const headerText = `  ${"Ty".padEnd(COLUMN_WIDTH)}${"Wt".padEnd(COLUMN_WIDTH)}${"St".padEnd(COLUMN_WIDTH)}${"Rm".padEnd(COLUMN_WIDTH)}${"Sync".padEnd(SYNC_COLUMN_WIDTH)}Branch`;
 
   // Filter state - allow test control via props
   const [internalFilterQuery, setInternalFilterQuery] = useState("");
@@ -412,9 +415,7 @@ export function BranchListScreen({
             <>
               {/* Column labels */}
               <Box>
-                <Text dimColor>
-                  {"  Type Wt St Rm Sync  Branch"}
-                </Text>
+                <Text dimColor>{headerText}</Text>
               </Box>
               <Select
                 items={filteredBranches}
