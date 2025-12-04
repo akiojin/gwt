@@ -57,9 +57,13 @@ export async function registerSessionRoutes(
 
       // 履歴を永続化（best-effort）
       try {
-        const { stdout: repoRoot } = await execa("git", ["rev-parse", "--show-toplevel"], {
-          cwd: worktreePath,
-        });
+        const { stdout: repoRoot } = await execa(
+          "git",
+          ["rev-parse", "--show-toplevel"],
+          {
+            cwd: worktreePath,
+          },
+        );
         let branchName: string | null = null;
         try {
           const { stdout: branchStdout } = await execa(
@@ -75,9 +79,12 @@ export async function registerSessionRoutes(
         await saveSession({
           lastWorktreePath: worktreePath,
           lastBranch: branchName,
-          lastUsedTool: toolType === "custom" ? toolName ?? "custom" : toolType,
+          lastUsedTool:
+            toolType === "custom" ? (toolName ?? "custom") : toolType,
           toolLabel:
-            toolType === "custom" ? toolName ?? "Custom" : toolLabelFromType(toolType),
+            toolType === "custom"
+              ? (toolName ?? "Custom")
+              : toolLabelFromType(toolType),
           mode,
           timestamp: Date.now(),
           repositoryRoot: repoRoot.trim(),

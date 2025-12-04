@@ -136,7 +136,8 @@ export async function saveSession(sessionData: SessionData): Promise<void> {
         branch: sessionData.lastBranch,
         worktreePath: sessionData.lastWorktreePath,
         toolId: sessionData.lastUsedTool ?? "unknown",
-        toolLabel: sessionData.toolLabel ?? sessionData.lastUsedTool ?? "Custom",
+        toolLabel:
+          sessionData.toolLabel ?? sessionData.lastUsedTool ?? "Custom",
         mode: sessionData.mode ?? null,
         model: sessionData.model ?? null,
         timestamp: sessionData.timestamp,

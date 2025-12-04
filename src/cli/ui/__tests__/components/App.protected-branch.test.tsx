@@ -1,28 +1,21 @@
 /**
  * @vitest-environment happy-dom
  */
-import {
-  describe,
-  it,
-  expect,
-  beforeEach,
-  afterEach,
-  afterAll,
-  vi,
-} from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { act, render } from "@testing-library/react";
 import React from "react";
 import { Window } from "happy-dom";
-import type { BranchInfo, BranchItem } from "../../types.js";
-import type { ScreenType } from "../../types.js";
+import type { BranchInfo, BranchItem, ScreenType } from "../../types.js";
+import type { BranchListScreenProps } from "../../components/screens/BranchListScreen.js";
+import type { BranchActionSelectorScreenProps } from "../../screens/BranchActionSelectorScreen.js";
 
 const navigateToMock = vi.fn();
 const goBackMock = vi.fn();
 const resetMock = vi.fn();
 
-const branchListProps: any[] = [];
-const branchActionProps: any[] = [];
-const aiToolProps: any[] = [];
+const branchListProps: BranchListScreenProps[] = [];
+const branchActionProps: BranchActionSelectorScreenProps[] = [];
+const aiToolProps: unknown[] = [];
 let currentScreenState: ScreenType;
 let App: typeof import("../../components/App.js").App;
 const useGitDataMock = vi.fn();
@@ -31,11 +24,11 @@ const switchToProtectedBranchMock = vi.fn();
 const getRepositoryRootMock = vi.fn();
 
 vi.mock("../../hooks/useGitData.js", () => ({
-  useGitData: (...args: any[]) => useGitDataMock(...args),
+  useGitData: (...args: unknown[]) => useGitDataMock(...args),
 }));
 
 vi.mock("../../hooks/useScreenState.js", () => ({
-  useScreenState: (...args: any[]) => useScreenStateMock(...args),
+  useScreenState: (...args: unknown[]) => useScreenStateMock(...args),
 }));
 
 vi.mock("../../../../worktree.js", async () => {
@@ -61,7 +54,7 @@ vi.mock("../../../../git.js", async () => {
 
 vi.mock("../../components/screens/BranchListScreen.js", () => {
   return {
-    BranchListScreen: (props: any) => {
+    BranchListScreen: (props: BranchListScreenProps) => {
       branchListProps.push(props);
       return React.createElement("div", null, "BranchListScreenMock");
     },
@@ -70,7 +63,7 @@ vi.mock("../../components/screens/BranchListScreen.js", () => {
 
 vi.mock("../../screens/BranchActionSelectorScreen.js", () => {
   return {
-    BranchActionSelectorScreen: (props: any) => {
+    BranchActionSelectorScreen: (props: BranchActionSelectorScreenProps) => {
       branchActionProps.push(props);
       return React.createElement("div", null, "BranchActionSelectorMock");
     },
@@ -89,8 +82,9 @@ vi.mock("../../components/screens/AIToolSelectorScreen.js", () => {
 describe("App protected branch handling", () => {
   beforeEach(async () => {
     const window = new Window();
-    globalThis.window = window as any;
-    globalThis.document = window.document as any;
+    globalThis.window = window as unknown as typeof globalThis.window;
+    globalThis.document =
+      window.document as unknown as typeof globalThis.document;
 
     currentScreenState = "branch-list";
     navigateToMock.mockReset();

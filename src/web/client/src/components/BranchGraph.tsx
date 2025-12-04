@@ -71,7 +71,7 @@ export function BranchGraph({ branches }: BranchGraphProps) {
         });
       }
 
-      laneMap.get(base)!.nodes.push(branch);
+      laneMap.get(base)?.nodes.push(branch);
     });
 
     return Array.from(laneMap.values()).sort((a, b) => {

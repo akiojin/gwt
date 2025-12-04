@@ -29,6 +29,7 @@ import type {
   BranchInfo,
   BranchItem,
   InferenceLevel,
+  ScreenType,
   SelectedBranchState,
 } from "../types.js";
 import {
@@ -431,7 +432,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
   // Handle navigation
   const handleNavigate = useCallback(
     (screen: string) => {
-      navigateTo(screen as any);
+      navigateTo(screen as ScreenType);
     },
     [navigateTo],
   );

@@ -1,19 +1,14 @@
 /**
  * @vitest-environment happy-dom
  */
-import {
-  describe,
-  it,
-  expect,
-  beforeEach,
-  afterEach,
-  afterAll,
-  vi,
-} from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { Mock } from "vitest";
-import { render, act, waitFor } from "@testing-library/react";
+import { render, act } from "@testing-library/react";
 import React from "react";
 import type { BranchItem, CleanupTarget } from "../../types.js";
+import type { WorktreeManagerScreenProps } from "../../components/screens/WorktreeManagerScreen.js";
+import type { BranchCreatorScreenProps } from "../../components/screens/BranchCreatorScreen.js";
+import type { BranchListScreenProps } from "../../components/screens/BranchListScreen.js";
 import { Window } from "happy-dom";
 let App: typeof import("../../components/App.js").App;
 
@@ -21,9 +16,9 @@ const navigateToMock = vi.fn();
 const goBackMock = vi.fn();
 const resetMock = vi.fn();
 
-const worktreeScreenProps: any[] = [];
-const branchCreatorProps: any[] = [];
-const branchListProps: any[] = [];
+const worktreeScreenProps: WorktreeManagerScreenProps[] = [];
+const branchCreatorProps: BranchCreatorScreenProps[] = [];
+const branchListProps: BranchListScreenProps[] = [];
 
 const useGitDataMock = vi.fn();
 const useScreenStateMock = vi.fn();
@@ -35,11 +30,11 @@ const getRepositoryRootMock = vi.fn();
 const deleteBranchMock = vi.fn();
 
 vi.mock("../../hooks/useGitData.js", () => ({
-  useGitData: (...args: any[]) => useGitDataMock(...args),
+  useGitData: (...args: unknown[]) => useGitDataMock(...args),
 }));
 
 vi.mock("../../hooks/useScreenState.js", () => ({
-  useScreenState: (...args: any[]) => useScreenStateMock(...args),
+  useScreenState: (...args: unknown[]) => useScreenStateMock(...args),
 }));
 
 vi.mock("../../../../worktree.js", async () => {
@@ -69,7 +64,7 @@ vi.mock("../../../../git.js", async () => {
 
 vi.mock("../../components/screens/WorktreeManagerScreen.js", () => {
   return {
-    WorktreeManagerScreen: (props: any) => {
+    WorktreeManagerScreen: (props: WorktreeManagerScreenProps) => {
       worktreeScreenProps.push(props);
       return React.createElement("div", null, "WorktreeManagerScreenMock");
     },
@@ -78,7 +73,7 @@ vi.mock("../../components/screens/WorktreeManagerScreen.js", () => {
 
 vi.mock("../../components/screens/BranchCreatorScreen.js", () => {
   return {
-    BranchCreatorScreen: (props: any) => {
+    BranchCreatorScreen: (props: BranchCreatorScreenProps) => {
       branchCreatorProps.push(props);
       return React.createElement("div", null, "BranchCreatorScreenMock");
     },
@@ -87,7 +82,7 @@ vi.mock("../../components/screens/BranchCreatorScreen.js", () => {
 
 vi.mock("../../components/screens/BranchListScreen.js", () => {
   return {
-    BranchListScreen: (props: any) => {
+    BranchListScreen: (props: BranchListScreenProps) => {
       branchListProps.push(props);
       return React.createElement("div", null, "BranchListScreenMock");
     },
@@ -98,8 +93,9 @@ describe("App shortcuts integration", () => {
   beforeEach(async () => {
     if (typeof globalThis.document === "undefined") {
       const window = new Window();
-      globalThis.window = window as any;
-      globalThis.document = window.document as any;
+      globalThis.window = window as unknown as typeof globalThis.window;
+      globalThis.document =
+        window.document as unknown as typeof globalThis.document;
     }
     worktreeScreenProps.length = 0;
     branchCreatorProps.length = 0;

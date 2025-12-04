@@ -20,8 +20,9 @@ describe("ErrorBoundary", () => {
   beforeEach(() => {
     // Setup happy-dom
     const window = new Window();
-    globalThis.window = window as any;
-    globalThis.document = window.document as any;
+    globalThis.window = window as unknown as typeof globalThis.window;
+    globalThis.document =
+      window.document as unknown as typeof globalThis.document;
 
     // Suppress console.error for expected errors in tests
     vi.spyOn(console, "error").mockImplementation(() => {});

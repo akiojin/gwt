@@ -7,16 +7,22 @@ import { render, waitFor } from "@testing-library/react";
 import { ModelSelectorScreen } from "../../components/screens/ModelSelectorScreen.js";
 import type { ModelSelectionResult } from "../../components/screens/ModelSelectorScreen.js";
 import { Window } from "happy-dom";
+import type {
+  SelectProps,
+  SelectItem,
+} from "../../components/common/Select.js";
 
-const selectMocks: any[] = [];
+const selectMocks: SelectProps<SelectItem>[] = [];
 
 vi.mock("../../components/common/Select.js", () => {
   return {
-    Select: (props: any) => {
+    Select: (props: SelectProps<SelectItem>) => {
       selectMocks.push(props);
       return React.createElement("div", {
         "data-testid": "select-mock",
-        onClick: () => props.onSelect && props.onSelect(props.items[props.initialIndex ?? 0]),
+        onClick: () =>
+          props.onSelect &&
+          props.onSelect(props.items[props.initialIndex ?? 0]),
       });
     },
   };
@@ -26,8 +32,9 @@ describe("ModelSelectorScreen initial selection", () => {
   beforeEach(() => {
     selectMocks.length = 0;
     const window = new Window();
-    globalThis.window = window as any;
-    globalThis.document = window.document as any;
+    globalThis.window = window as unknown as typeof globalThis.window;
+    globalThis.document =
+      window.document as unknown as typeof globalThis.document;
   });
 
   it("sets model list initialIndex based on previous selection", async () => {
