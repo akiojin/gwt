@@ -43,12 +43,12 @@ const mockExeca = execa as ReturnType<typeof vi.fn>;
 const mockExistsSync = existsSync as ReturnType<typeof vi.fn>;
 
 // Mock console.log to avoid test output clutter
-const consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+let consoleLogSpy: ReturnType<typeof vi.spyOn>;
 
 describe("launchQwenCLI", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    consoleLogSpy.mockClear();
+    consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     mockTerminalStreams.exitRawMode.mockClear();
     mockChildStdio.cleanup.mockClear();
     mockChildStdio.stdin = "inherit";

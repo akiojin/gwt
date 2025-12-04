@@ -43,12 +43,12 @@ const mockExeca = execa as ReturnType<typeof vi.fn>;
 const mockExistsSync = existsSync as ReturnType<typeof vi.fn>;
 
 // Mock console.log to avoid test output clutter
-const consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+let consoleLogSpy: ReturnType<typeof vi.spyOn>;
 
 describe("launchGeminiCLI", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    consoleLogSpy.mockClear();
+    consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     mockTerminalStreams.exitRawMode.mockClear();
     mockChildStdio.cleanup.mockClear();
     mockChildStdio.stdin = "inherit";
@@ -315,14 +315,13 @@ describe("launchGeminiCLI", () => {
     it("T011: Windowsプラットフォームでトラブルシューティングメッセージを表示", async () => {
       // Mock platform to Windows
       const originalPlatform = process.platform;
+      const consoleErrorSpy = vi
+        .spyOn(console, "error")
+        .mockImplementation(() => {});
       Object.defineProperty(process, "platform", {
         value: "win32",
         configurable: true,
       });
-
-      const consoleErrorSpy = vi
-        .spyOn(console, "error")
-        .mockImplementation(() => {});
 
       mockExeca
         .mockRejectedValueOnce(new Error("Command not found")) // which/where
@@ -333,27 +332,22 @@ describe("launchGeminiCLI", () => {
         } as any);
 
       try {
-        await launchGeminiCLI("/test/path");
-        expect.fail("Should have thrown an error");
-      } catch (error: any) {
-        // Error should be thrown
+        await expect(launchGeminiCLI("/test/path")).rejects.toThrow();
+
+        // Verify Windows troubleshooting message
+        expect(consoleErrorSpy).toHaveBeenCalledWith(
+          expect.stringContaining("Windows troubleshooting tips"),
+        );
+        expect(consoleErrorSpy).toHaveBeenCalledWith(
+          expect.stringContaining("PATH"),
+        );
+      } finally {
+        Object.defineProperty(process, "platform", {
+          value: originalPlatform,
+          configurable: true,
+        });
+        consoleErrorSpy.mockRestore();
       }
-
-      // Verify Windows troubleshooting message
-      expect(consoleErrorSpy).toHaveBeenCalledWith(
-        expect.stringContaining("Windows troubleshooting tips"),
-      );
-      expect(consoleErrorSpy).toHaveBeenCalledWith(
-        expect.stringContaining("PATH"),
-      );
-
-      // Restore platform
-      Object.defineProperty(process, "platform", {
-        value: originalPlatform,
-        configurable: true,
-      });
-
-      consoleErrorSpy.mockRestore();
     });
   });
 
