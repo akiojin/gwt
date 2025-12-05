@@ -43,6 +43,15 @@
 * update default Claude Code model to Opus 4.5 ([1dd909e](https://github.com/akiojin/gwt/commit/1dd909ed87a55ce3bb796deb0431d0027571dae2))
 * update Opus model version to 4.5 ([307faeb](https://github.com/akiojin/gwt/commit/307faeb66ebac0ca89b01c07ee19d213797c4d5c))
 
+## [2.11.1](https://github.com/akiojin/gwt/compare/v2.11.0...v2.11.1) (2025-12-05)
+
+
+### Bug Fixes
+
+* prepare-release.yml を llm-router と同じフローに統一 ([8bace15](https://github.com/akiojin/gwt/commit/8bace15b9532c377e47c275a85fc3277f86f1ffc))
+* ブランチ一覧のAIツールラベルからNew/Continue/Resumeを削除 ([45eec22](https://github.com/akiojin/gwt/commit/45eec2208e4955a0b46467b4263e9435725f3633))
+* ブランチ一覧のAIツールラベルからNew/Continue/Resumeを削除 ([9d6bf3c](https://github.com/akiojin/gwt/commit/9d6bf3cfbcdef91e0c8301ba8ab52d1397ae7e0f))
+
 ## [2.11.0](https://github.com/akiojin/gwt/compare/v2.10.0...v2.11.0) (2025-12-04)
 
 
