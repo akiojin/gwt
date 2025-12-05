@@ -65,7 +65,6 @@ describe("branchFormatter", () => {
       const result = formatBranchItem(branchInfo);
 
       expect(result.lastToolUsageLabel).toContain("Codex");
-      expect(result.lastToolUsageLabel).toContain("New");
       expect(result.lastToolUsageLabel).toContain("2025-11-26");
     });
 

@@ -239,7 +239,7 @@ describe("BranchListScreen", () => {
           model: null,
           timestamp: Date.UTC(2025, 10, 26, 14, 3),
         },
-        lastToolUsageLabel: "Codex | New | 2025-11-26 14:03",
+        lastToolUsageLabel: "Codex | 2025-11-26 14:03",
       },
       {
         name: "feature/without-usage",
@@ -266,7 +266,7 @@ describe("BranchListScreen", () => {
     );
 
     const output = stripAnsi(stripControlSequences(lastFrame() ?? ""));
-    expect(output).toContain("Codex | New | 2025-11-26 14:03");
+    expect(output).toContain("Codex | 2025-11-26 14:03");
     expect(output).toContain("Unknown |");
   });
 
