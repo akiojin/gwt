@@ -99,15 +99,6 @@ function mapToolLabel(toolId: string, toolLabel?: string): string {
   return "Custom";
 }
 
-function mapModeLabel(
-  mode?: "normal" | "continue" | "resume" | null,
-): string | null {
-  if (mode === "normal") return "New";
-  if (mode === "continue") return "Continue";
-  if (mode === "resume") return "Resume";
-  return null;
-}
-
 function formatTimestamp(ts: number): string {
   const date = new Date(ts);
   const year = date.getFullYear();
@@ -123,12 +114,8 @@ function buildLastToolUsageLabel(
 ): string | null {
   if (!usage) return null;
   const toolText = mapToolLabel(usage.toolId, usage.toolLabel);
-  const modeText = mapModeLabel(usage.mode);
   const timestamp = usage.timestamp ? formatTimestamp(usage.timestamp) : null;
   const parts = [toolText];
-  if (modeText) {
-    parts.push(modeText);
-  }
   if (timestamp) {
     parts.push(timestamp);
   }
