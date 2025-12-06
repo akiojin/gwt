@@ -48,6 +48,7 @@ import {
   getDefaultInferenceForModel,
   getDefaultModelOption,
 } from "../utils/modelOptions.js";
+import { resolveContinueSessionId } from "../utils/continueSession.js";
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
 const COMPLETION_HOLD_DURATION_MS = 3000;
@@ -291,28 +292,13 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         const sessionData = root ? await loadSession(root) : null;
         const history = sessionData?.history ?? [];
 
-        let found: string | null = null;
-        for (let i = history.length - 1; i >= 0; i -= 1) {
-          const entry = history[i];
-          if (
-            entry &&
-            entry.branch === selectedBranch.name &&
-            entry.toolId === selectedTool &&
-            entry.sessionId
-          ) {
-            found = entry.sessionId;
-            break;
-          }
-        }
-
-        if (
-          !found &&
-          sessionData?.lastSessionId &&
-          sessionData.lastUsedTool === selectedTool &&
-          sessionData.lastBranch === selectedBranch.name
-        ) {
-          found = sessionData.lastSessionId;
-        }
+        const found = await resolveContinueSessionId({
+          history,
+          sessionData,
+          branch: selectedBranch.name,
+          toolId: selectedTool,
+          repoRoot: root,
+        });
 
         setContinueSessionId(found ?? null);
       } catch {
