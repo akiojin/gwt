@@ -105,6 +105,44 @@ describe("utils/session", () => {
     );
   });
 
+  it("uses CODEX_HOME and CLAUDE_CONFIG_DIR when provided", async () => {
+    const dirent = (name: string, type: "file" | "dir") => ({
+      name,
+      isFile: () => type === "file",
+      isDirectory: () => type === "dir",
+    });
+
+    process.env.CODEX_HOME = "/custom/codex";
+    process.env.CLAUDE_CONFIG_DIR = "/custom/claude";
+
+    (readdir as any).mockImplementation((dir: string, opts?: any) => {
+      if (opts?.withFileTypes) {
+        if (dir === "/custom/codex/sessions") {
+          return Promise.resolve([dirent("sid.json", "file")]);
+        }
+        if (dir === "/custom/claude/projects/-repo/sessions") {
+          return Promise.resolve([dirent("log.jsonl", "file")]);
+        }
+      }
+      return Promise.resolve([]);
+    });
+    (stat as any).mockResolvedValue({ mtimeMs: 123 });
+    (readFile as any).mockImplementation((filePath: string) => {
+      if (filePath.endsWith("sid.json")) {
+        return Promise.resolve(JSON.stringify({ id: "custom-codex" }));
+      }
+      return Promise.resolve('{"session_id":"custom-claude"}');
+    });
+
+    const codexId = await findLatestCodexSessionId();
+    const claudeId = await findLatestClaudeSessionId("/repo");
+    expect(codexId).toBe("custom-codex");
+    expect(claudeId).toBe("custom-claude");
+
+    delete process.env.CODEX_HOME;
+    delete process.env.CLAUDE_CONFIG_DIR;
+  });
+
   it("returns null when session files are missing", async () => {
     (readdir as any).mockRejectedValue(new Error("missing"));
     const codexId = await findLatestCodexSessionId();

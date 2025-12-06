@@ -131,7 +131,9 @@ async function readSessionIdFromFile(filePath: string): Promise<string | null> {
 }
 
 export async function findLatestCodexSessionId(): Promise<string | null> {
-  const baseDir = path.join(homedir(), ".codex", "sessions");
+  // Codex CLI respects CODEX_HOME. Default is ~/.codex.
+  const codexHome = process.env.CODEX_HOME ?? path.join(homedir(), ".codex");
+  const baseDir = path.join(codexHome, "sessions");
   const latest = await findLatestFileRecursive(
     baseDir,
     (name) => name.endsWith(".json") || name.endsWith(".jsonl"),
@@ -150,13 +152,9 @@ export async function findLatestClaudeSessionId(
   cwd: string,
 ): Promise<string | null> {
   const encoded = encodeClaudeProjectPath(cwd);
-  const baseDir = path.join(
-    homedir(),
-    ".claude",
-    "projects",
-    encoded,
-    "sessions",
-  );
+  const claudeRoot =
+    process.env.CLAUDE_CONFIG_DIR ?? path.join(homedir(), ".claude");
+  const baseDir = path.join(claudeRoot, "projects", encoded, "sessions");
   const latest = await findLatestFile(
     baseDir,
     (name) => name.endsWith(".jsonl") || name.endsWith(".json"),
