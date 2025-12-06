@@ -54,11 +54,13 @@ async function findLatestFile(
   filter: (name: string) => boolean,
 ): Promise<string | null> {
   try {
-    const files = (await readdir(dir)).filter(filter);
-    if (!files.length) return null;
+    const entries = await readdir(dir, { withFileTypes: true });
+    const files = entries.filter((e) => e.isFile()).map((e) => e.name);
+    const filtered = files.filter(filter);
+    if (!filtered.length) return null;
 
     const withStats = await Promise.all(
-      files.map(async (name) => {
+      filtered.map(async (name) => {
         const fullPath = path.join(dir, name);
         try {
           const info = await stat(fullPath);
@@ -81,10 +83,48 @@ async function findLatestFile(
   }
 }
 
+async function findLatestFileRecursive(
+  dir: string,
+  filter: (name: string) => boolean,
+): Promise<string | null> {
+  try {
+    const entries = await readdir(dir, { withFileTypes: true });
+    const candidates: { fullPath: string; mtime: number }[] = [];
+
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        const nested = await findLatestFileRecursive(fullPath, filter);
+        if (nested) {
+          const info = await stat(nested);
+          candidates.push({ fullPath: nested, mtime: info.mtimeMs });
+        }
+      } else if (entry.isFile() && filter(entry.name)) {
+        try {
+          const info = await stat(fullPath);
+          candidates.push({ fullPath, mtime: info.mtimeMs });
+        } catch {
+          // ignore
+        }
+      }
+    }
+
+    if (!candidates.length) return null;
+    candidates.sort((a, b) => b.mtime - a.mtime);
+    return candidates[0]?.fullPath ?? null;
+  } catch {
+    return null;
+  }
+}
+
 async function readSessionIdFromFile(filePath: string): Promise<string | null> {
   try {
     const content = await readFile(filePath, "utf-8");
-    return pickSessionIdFromText(content);
+    const fromContent = pickSessionIdFromText(content);
+    if (fromContent) return fromContent;
+    // Fallback: try to extract UUID from filename
+    const filenameMatch = path.basename(filePath).match(UUID_REGEX);
+    return filenameMatch ? filenameMatch[0] : null;
   } catch {
     return null;
   }
@@ -92,7 +132,7 @@ async function readSessionIdFromFile(filePath: string): Promise<string | null> {
 
 export async function findLatestCodexSessionId(): Promise<string | null> {
   const baseDir = path.join(homedir(), ".codex", "sessions");
-  const latest = await findLatestFile(
+  const latest = await findLatestFileRecursive(
     baseDir,
     (name) => name.endsWith(".json") || name.endsWith(".jsonl"),
   );

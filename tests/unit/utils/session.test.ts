@@ -47,25 +47,51 @@ describe("utils/session", () => {
   });
 
   it("findLatestCodexSessionId returns newest session id from JSON", async () => {
-    (readdir as any).mockResolvedValue(["old.json", "new.json"]);
-    (stat as any).mockImplementation((filePath: string) => {
-      return Promise.resolve({
-        mtimeMs: filePath.includes("new.json") ? 200 : 100,
-      });
-    });
-    (readFile as any).mockImplementation((filePath: string) => {
-      if (filePath.includes("new.json")) {
-        return Promise.resolve(JSON.stringify({ id: "new-session-id" }));
-      }
-      return Promise.resolve(JSON.stringify({ id: "old-session-id" }));
+    const dirent = (name: string, type: "file" | "dir") => ({
+      name,
+      isFile: () => type === "file",
+      isDirectory: () => type === "dir",
     });
 
+    (readdir as any).mockImplementation((dir: string, opts?: any) => {
+      if (opts?.withFileTypes) {
+        if (dir.endsWith("/.codex/sessions")) {
+          return Promise.resolve([dirent("2025", "dir")]);
+        }
+        if (dir.endsWith("/.codex/sessions/2025")) {
+          return Promise.resolve([dirent("12", "dir")]);
+        }
+        if (dir.endsWith("/.codex/sessions/2025/12")) {
+          return Promise.resolve([
+            dirent(
+              "rollout-2025-12-06T15-12-04-019af438-56b3-7b32-bf8e-a5faeba5c9db.jsonl",
+              "file",
+            ),
+          ]);
+        }
+      }
+      return Promise.resolve([]);
+    });
+    (stat as any).mockResolvedValue({ mtimeMs: 300 });
+    (readFile as any).mockResolvedValue("[]");
+
     const id = await findLatestCodexSessionId();
-    expect(id).toBe("new-session-id");
+    expect(id).toBe("019af438-56b3-7b32-bf8e-a5faeba5c9db");
   });
 
   it("findLatestClaudeSessionId reads JSONL lines and extracts session_id", async () => {
-    (readdir as any).mockResolvedValue(["log.jsonl"]);
+    const dirent = (name: string, type: "file" | "dir") => ({
+      name,
+      isFile: () => type === "file",
+      isDirectory: () => type === "dir",
+    });
+
+    (readdir as any).mockImplementation((dir: string, opts?: any) => {
+      if (opts?.withFileTypes) {
+        return Promise.resolve([dirent("log.jsonl", "file")]);
+      }
+      return Promise.resolve([]);
+    });
     (stat as any).mockResolvedValue({ mtimeMs: 123 });
     (readFile as any).mockResolvedValue(
       '{"session_id":"abc-123"}\n{"message":"hello"}',
@@ -75,6 +101,7 @@ describe("utils/session", () => {
     expect(id).toBe("abc-123");
     expect(readdir).toHaveBeenCalledWith(
       "/home/test/.claude/projects/-repos-sample/sessions",
+      { withFileTypes: true },
     );
   });
 
@@ -91,7 +118,24 @@ describe("utils/session", () => {
   });
 
   it("findLatestGeminiSessionId picks latest chats json", async () => {
-    (readdir as any).mockImplementation((dir: string) => {
+    const dirent = (name: string, type: "file" | "dir") => ({
+      name,
+      isFile: () => type === "file",
+      isDirectory: () => type === "dir",
+    });
+    (readdir as any).mockImplementation((dir: string, opts?: any) => {
+      if (opts?.withFileTypes) {
+        if (dir.endsWith("/.gemini/tmp")) {
+          return Promise.resolve([dirent("projA", "dir"), dirent("projB", "dir")]);
+        }
+        if (dir.endsWith("projA/chats")) {
+          return Promise.resolve([dirent("a.json", "file")]);
+        }
+        if (dir.endsWith("projB/chats")) {
+          return Promise.resolve([dirent("b.json", "file")]);
+        }
+        return Promise.resolve([]);
+      }
       if (dir.endsWith("/.gemini/tmp")) {
         return Promise.resolve(["projA", "projB"]);
       }
@@ -116,7 +160,18 @@ describe("utils/session", () => {
   });
 
   it("findLatestQwenSessionId falls back to filename when no id", async () => {
-    (readdir as any).mockImplementation((dir: string) => {
+    const dirent = (name: string, type: "file" | "dir") => ({
+      name,
+      isFile: () => type === "file",
+      isDirectory: () => type === "dir",
+    });
+    (readdir as any).mockImplementation((dir: string, opts?: any) => {
+      if (opts?.withFileTypes) {
+        if (dir.endsWith("/.qwen/tmp")) {
+          return Promise.resolve([dirent("p1", "dir")]);
+        }
+        return Promise.resolve([dirent("save-123.json", "file")]);
+      }
       if (dir.endsWith("/.qwen/tmp")) {
         return Promise.resolve(["p1"]);
       }
