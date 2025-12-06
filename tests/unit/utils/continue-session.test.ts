@@ -1,5 +1,8 @@
-import { describe, it, expect, vi } from "vitest";
-import { resolveContinueSessionId } from "../../../src/cli/ui/utils/continueSession.js";
+import { describe, it, expect } from "vitest";
+import {
+  resolveContinueSessionId,
+  findLatestBranchSession,
+} from "../../../src/cli/ui/utils/continueSession.js";
 import type {
   SessionData,
   ToolSessionEntry,
@@ -34,7 +37,6 @@ describe("resolveContinueSessionId", () => {
       branch,
       toolId,
       repoRoot,
-      lookupLatestSessionId: vi.fn(),
     });
 
     expect(result).toBe("hist-2");
@@ -81,7 +83,6 @@ describe("resolveContinueSessionId", () => {
   });
 
   it("returns null when branch/tool do not match", async () => {
-    const lookup = vi.fn();
     const sessionData = {
       lastBranch: "other",
       lastUsedTool: toolId,
@@ -94,10 +95,33 @@ describe("resolveContinueSessionId", () => {
       branch,
       toolId,
       repoRoot,
-      lookupLatestSessionId: lookup,
     });
 
-    expect(lookup).not.toHaveBeenCalled();
     expect(result).toBeNull();
+  });
+
+  it("findLatestBranchSession returns most recent entry for branch", () => {
+    const history: ToolSessionEntry[] = [
+      { branch: "feature/other", toolId, toolLabel: "Codex", worktreePath: "/a", timestamp: 1 },
+      {
+        branch,
+        toolId,
+        toolLabel: "Codex",
+        worktreePath: "/b",
+        timestamp: 2,
+        sessionId: "s-2",
+      },
+      {
+        branch,
+        toolId,
+        toolLabel: "Codex",
+        worktreePath: "/c",
+        timestamp: 3,
+        sessionId: "s-3",
+      },
+    ];
+
+    const entry = findLatestBranchSession(history, branch);
+    expect(entry?.sessionId).toBe("s-3");
   });
 });

@@ -49,3 +49,16 @@ export async function resolveContinueSessionId(
 
   return null;
 }
+
+export function findLatestBranchSession(
+  history: ToolSessionEntry[],
+  branch: string,
+): ToolSessionEntry | null {
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    const entry = history[i];
+    if (entry && entry.branch === branch) {
+      return entry;
+    }
+  }
+  return null;
+}
