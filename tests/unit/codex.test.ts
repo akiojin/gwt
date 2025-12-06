@@ -146,4 +146,20 @@ describe("codex.ts", () => {
     mockChildStdio.stdout = "inherit";
     mockChildStdio.stderr = "inherit";
   });
+
+  it("should include --enable skills in default arguments (FR-202)", async () => {
+    await launchCodexCLI(worktreePath);
+
+    const [, args] = (execa as any).mock.calls[0];
+
+    // Find the index of "--enable" followed by "skills"
+    const enableIndex = args.findIndex(
+      (arg: string, i: number) =>
+        arg === "--enable" && args[i + 1] === "skills",
+    );
+
+    expect(enableIndex).toBeGreaterThan(-1);
+    expect(args[enableIndex]).toBe("--enable");
+    expect(args[enableIndex + 1]).toBe("skills");
+  });
 });

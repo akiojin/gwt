@@ -17,6 +17,8 @@ export const buildDefaultCodexArgs = (
 ): string[] => [
   "--enable",
   "web_search_request",
+  "--enable",
+  "skills",
   `--model=${model}`,
   "--sandbox",
   "workspace-write",
