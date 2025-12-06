@@ -2,7 +2,7 @@
  * @vitest-environment happy-dom
  */
 import React from "react";
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import { render } from "@testing-library/react";
 import { Window } from "happy-dom";
 import { BranchQuickStartScreen } from "../../../components/screens/BranchQuickStartScreen.js";
