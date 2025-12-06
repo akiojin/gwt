@@ -162,4 +162,25 @@ describe("codex.ts", () => {
     expect(args[enableIndex]).toBe("--enable");
     expect(args[enableIndex + 1]).toBe("skills");
   });
+
+  it("should display launch arguments in console log (FR-008)", async () => {
+    const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    await launchCodexCLI(worktreePath);
+
+    // Verify that args are logged with 📋 prefix
+    expect(consoleSpy).toHaveBeenCalledWith(
+      expect.stringContaining("📋 Args:"),
+    );
+
+    // Verify that the actual arguments are included in the log
+    expect(consoleSpy).toHaveBeenCalledWith(
+      expect.stringContaining("--enable"),
+    );
+    expect(consoleSpy).toHaveBeenCalledWith(
+      expect.stringContaining("skills"),
+    );
+
+    consoleSpy.mockRestore();
+  });
 });
