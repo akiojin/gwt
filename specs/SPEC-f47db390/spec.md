@@ -47,6 +47,20 @@
 
 ---
 
+### ユーザーストーリー 4 - Gemini/Qwenでも同等の再開体験 (優先度: P2)
+
+開発者がGeminiまたはQwenを利用するときも、セッションID（または保存タグ）を保存・表示し、Continue/Resumeで最新セッションを再開できる。
+
+**この優先度の理由**: マルチツール利用時の体験差異をなくし、一貫した「続きから」操作を提供するため。  
+**独立したテスト**: Gemini/Qwenで1セッション実行→終了→Continue/Resume起動時にID/タグが表示・渡されることを確認。
+
+**受け入れシナリオ**:
+1. **前提条件** Geminiセッション実行済み、**操作** gwtでContinue、**期待結果** `gemini --resume <ID>` が渡され同じ会話が開く（IDがない場合は最新にフォールバック）。
+2. **前提条件** Qwenセッションを `/chat save foo` で保存済み、**操作** gwtでContinue、**期待結果** 保存タグが表示され、ログに `/chat resume foo` を実行する案内が出る（自動入力不可の場合は手動案内）。
+3. **前提条件** Gemini/Qwenで履歴無し、**操作** Continue、**期待結果** 従来の新規起動にフォールバックし警告を表示。
+
+---
+
 ### エッジケース
 - セッションディレクトリ（`~/.codex/sessions` や `~/.claude/projects/.../sessions`）が存在しない/権限不足。
 - 24時間ルールで保存済みセッションが期限切れの場合のフォールバック動作。
@@ -64,6 +78,8 @@
 - **FR-006**: セッション終了時に「Session ID」「Resumeコマンド例」「保存先パス」をユーザーに表示し、必要ならコピーできるようにしなければならない。
 - **FR-007**: セッション保存・読み出しが失敗してもワークフローをブロックしないこと。失敗時は警告を表示し、デフォルト起動に戻る。
 - **FR-008**: Gemini/Qwen/カスタムツールなどセッションIDを提供しないツールでは、既存の保存ロジックを変更せず、Continue/ResumeでIDを要求しない。
+- **FR-009**: Gemini CLIでは終了後に`~/.gemini/tmp/<project_hash>/chats/*.json`の最新ファイルからIDを抽出し、Continue/Resume時は`--resume <id>`を優先、ID不明時は`--resume`（latest）にフォールバックしなければならない。
+- **FR-010**: Qwen CLIでは終了後に`~/.qwen/tmp/<project_hash>/`配下の保存ファイル（/chat save or checkpoint）からタグ/IDを抽出し履歴に保存しなければならない。Continue/Resume時には保存タグを表示し、`/chat resume <tag>` の案内を必ず出すこと（自動再開できない場合のフォールバック）。
 
 ### 主要エンティティ
 - **SessionData**: `lastWorktreePath`, `lastBranch`, `lastUsedTool`, `mode`, `model`, 追加で `lastSessionId` を持つ。履歴`history[]`に`sessionId`/`toolId`/`branch`/`timestamp`を保持。

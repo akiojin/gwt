@@ -124,3 +124,71 @@ export async function findLatestClaudeSessionId(
   if (!latest) return null;
   return readSessionIdFromFile(latest);
 }
+
+async function findLatestNestedSessionFile(
+  baseDir: string,
+  subPath: string[],
+  predicate: (name: string) => boolean,
+): Promise<string | null> {
+  try {
+    const entries = await readdir(baseDir);
+    if (!entries.length) return null;
+
+    const candidates: { fullPath: string; mtime: number }[] = [];
+
+    for (const entry of entries) {
+      const dirPath = path.join(baseDir, entry, ...subPath);
+      const latest = await findLatestFile(dirPath, predicate);
+      if (latest) {
+        try {
+          const info = await stat(latest);
+          candidates.push({ fullPath: latest, mtime: info.mtimeMs });
+        } catch {
+          // ignore
+        }
+      }
+    }
+
+    if (!candidates.length) return null;
+    candidates.sort((a, b) => b.mtime - a.mtime);
+    return candidates[0]?.fullPath ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export async function findLatestGeminiSessionId(
+  _cwd: string,
+): Promise<string | null> {
+  // Gemini stores sessions under ~/.gemini/tmp/<project_hash>/chats/*.json
+  const baseDir = path.join(homedir(), ".gemini", "tmp");
+  const latest = await findLatestNestedSessionFile(baseDir, ["chats"], (name) =>
+    name.endsWith(".json"),
+  );
+  if (!latest) return null;
+  return readSessionIdFromFile(latest);
+}
+
+export async function findLatestQwenSessionId(
+  _cwd: string,
+): Promise<string | null> {
+  // Qwen stores checkpoints/saves under ~/.qwen/tmp/<project_hash>/
+  const baseDir = path.join(homedir(), ".qwen", "tmp");
+  const latest =
+    (await findLatestNestedSessionFile(
+      baseDir,
+      [],
+      (name) => name.endsWith(".json") || name.endsWith(".jsonl"),
+    )) ??
+    (await findLatestNestedSessionFile(
+      baseDir,
+      ["checkpoints"],
+      (name) => name.endsWith(".json") || name.endsWith(".ckpt"),
+    ));
+
+  if (!latest) return null;
+  const fromContent = await readSessionIdFromFile(latest);
+  if (fromContent) return fromContent;
+  // Fallback: use filename (without extension) as tag
+  return path.basename(latest).replace(/\.[^.]+$/, "");
+}

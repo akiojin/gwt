@@ -2,6 +2,7 @@ import { execa } from "execa";
 import chalk from "chalk";
 import { existsSync } from "fs";
 import { createChildStdio, getTerminalStreams } from "./utils/terminal.js";
+import { findLatestGeminiSessionId } from "./utils/session.js";
 
 const GEMINI_CLI_PACKAGE = "@google/gemini-cli@latest";
 
@@ -23,8 +24,9 @@ export async function launchGeminiCLI(
     extraArgs?: string[];
     envOverrides?: Record<string, string>;
     model?: string;
+    sessionId?: string | null;
   } = {},
-): Promise<void> {
+): Promise<{ sessionId?: string | null }> {
   const terminal = getTerminalStreams();
 
   try {
@@ -44,14 +46,33 @@ export async function launchGeminiCLI(
     }
 
     // Handle execution mode
+    const resumeSessionId =
+      options.sessionId && options.sessionId.trim().length > 0
+        ? options.sessionId.trim()
+        : null;
+
     switch (options.mode) {
       case "continue":
-        args.push("-r", "latest");
-        console.log(chalk.cyan("   ⏭️  Continuing most recent session"));
+        if (resumeSessionId) {
+          args.push("--resume", resumeSessionId);
+          console.log(
+            chalk.cyan(
+              `   ⏭️  Continuing specific session: ${resumeSessionId}`,
+            ),
+          );
+        } else {
+          args.push("--resume");
+          console.log(chalk.cyan("   ⏭️  Continuing most recent session"));
+        }
         break;
       case "resume":
-        args.push("-r", "latest");
-        console.log(chalk.cyan("   🔄 Resuming session"));
+        if (resumeSessionId) {
+          args.push("--resume", resumeSessionId);
+          console.log(chalk.cyan(`   🔄 Resuming session: ${resumeSessionId}`));
+        } else {
+          args.push("--resume");
+          console.log(chalk.cyan("   🔄 Resuming session (latest)"));
+        }
         break;
       case "normal":
       default:
@@ -124,6 +145,31 @@ export async function launchGeminiCLI(
     } finally {
       childStdio.cleanup();
     }
+
+    let capturedSessionId: string | null = null;
+    try {
+      capturedSessionId =
+        (await findLatestGeminiSessionId(worktreePath)) ??
+        resumeSessionId ??
+        null;
+    } catch {
+      capturedSessionId = resumeSessionId ?? null;
+    }
+
+    if (capturedSessionId) {
+      console.log(chalk.cyan(`\n   🆔 Session ID: ${capturedSessionId}`));
+      console.log(
+        chalk.gray(`   Resume command: gemini --resume ${capturedSessionId}`),
+      );
+    } else {
+      console.log(
+        chalk.yellow(
+          "\n   ℹ️  Could not determine Gemini session ID automatically.",
+        ),
+      );
+    }
+
+    return capturedSessionId ? { sessionId: capturedSessionId } : {};
   } catch (error: any) {
     const hasLocalGemini = await isGeminiCommandAvailable();
     let errorMessage: string;

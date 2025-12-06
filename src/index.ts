@@ -675,6 +675,7 @@ export async function handleAIToolWorkflow(
         skipPermissions?: boolean;
         envOverrides?: Record<string, string>;
         model?: string;
+        sessionId?: string | null;
       } = {
         mode:
           mode === "resume"
@@ -684,6 +685,7 @@ export async function handleAIToolWorkflow(
               : "normal",
         skipPermissions,
         envOverrides: sharedEnv,
+        sessionId: resumeSessionId,
       };
       if (model) {
         launchOptions.model = model;
@@ -695,6 +697,7 @@ export async function handleAIToolWorkflow(
         skipPermissions?: boolean;
         envOverrides?: Record<string, string>;
         model?: string;
+        sessionId?: string | null;
       } = {
         mode:
           mode === "resume"
@@ -704,6 +707,7 @@ export async function handleAIToolWorkflow(
               : "normal",
         skipPermissions,
         envOverrides: sharedEnv,
+        sessionId: resumeSessionId,
       };
       if (model) {
         launchOptions.model = model;

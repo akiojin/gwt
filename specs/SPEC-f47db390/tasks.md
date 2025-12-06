@@ -31,6 +31,13 @@ description: "Continue/Resumeで正しいセッションを再開するための
 - [ ] **T0303** [US3] UIテストでリスト表示・空表示・選択イベントを検証（`src/cli/ui/__tests__/components/screens/SessionSelectorScreen.test.tsx`）。
 - [ ] **T0304** [US3] Resume選択時に選択IDでCLIを起動する統合テストを追加（`tests/integration/session-resume.test.ts` など）。
 
-## フェーズ5: ポリッシュと検証
+## フェーズ5: US4 Gemini/Qwen対応 (P2)
+- [ ] **T0401** [US4] GeminiセッションID抽出ヘルパーを実装（`~/.gemini/tmp/**/chats/*.json` 最新ID）（`src/utils/session.ts`）。
+- [ ] **T0402** [US4] Gemini Continue/Resumeで`--resume <id>`を優先、ID不明時は`--resume`にフォールバック（`src/gemini.ts`）。
+- [ ] **T0403** [US4] Qwenセッションタグ抽出ヘルパーを実装（`~/.qwen/tmp/**` 保存/チェックポイントから取得）（`src/utils/session.ts`）。
+- [ ] **T0404** [US4] Qwen Continue/Resume時に保存タグを表示し、起動後ログで`/chat resume <tag>`案内を出す（`src/qwen.ts` など）。
+- [ ] **T0405** [US4] Gemini/Qwenのセッション保存・再開テストを追加（ユーティリティユニットテスト + CLI引数組み立てテスト）。
+
+## フェーズ6: ポリッシュと検証
 - [ ] **T9001** [共通] フォーマット/リンター/markdownlintをローカル実行し、エラーを解消する。
 - [ ] **T9002** [共通] `bun run test` と `bun run build` を完走させ、失敗がないことを確認する。
