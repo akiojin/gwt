@@ -232,21 +232,3 @@ export async function findLatestQwenSessionId(
   // Fallback: use filename (without extension) as tag
   return path.basename(latest).replace(/\.[^.]+$/, "");
 }
-
-export async function findLatestSessionIdForTool(
-  toolId: string,
-  cwd: string,
-): Promise<string | null> {
-  switch (toolId) {
-    case "codex-cli":
-      return findLatestCodexSessionId();
-    case "claude-code":
-      return findLatestClaudeSessionId(cwd);
-    case "gemini-cli":
-      return findLatestGeminiSessionId(cwd);
-    case "qwen-cli":
-      return findLatestQwenSessionId(cwd);
-    default:
-      return null;
-  }
-}

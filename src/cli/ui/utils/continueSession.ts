@@ -1,5 +1,4 @@
 import type { SessionData, ToolSessionEntry } from "../../../config/index.js";
-import { findLatestSessionIdForTool } from "../../../utils/session.js";
 
 export interface ContinueSessionContext {
   history: ToolSessionEntry[];
@@ -7,10 +6,6 @@ export interface ContinueSessionContext {
   branch: string;
   toolId: string;
   repoRoot: string | null;
-  lookupLatestSessionId?: (
-    toolId: string,
-    cwd: string,
-  ) => Promise<string | null>;
 }
 
 /**
@@ -28,7 +23,6 @@ export async function resolveContinueSessionId(
     branch,
     toolId,
     repoRoot,
-    lookupLatestSessionId = findLatestSessionIdForTool,
   } = context;
 
   // 1) 履歴から最新マッチを探す（末尾から遡る）
@@ -51,14 +45,6 @@ export async function resolveContinueSessionId(
     sessionData.lastUsedTool === toolId
   ) {
     return sessionData.lastSessionId;
-  }
-
-  // 3) それでも無ければ、同一ブランチ/ツールの直近セッションをツール固有の保存場所から検索
-  if (
-    sessionData?.lastBranch === branch &&
-    sessionData.lastUsedTool === toolId
-  ) {
-    return lookupLatestSessionId(toolId, repoRoot ?? process.cwd());
   }
 
   return null;

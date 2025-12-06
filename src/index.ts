@@ -39,7 +39,6 @@ import { saveSession, loadSession } from "./config/index.js";
 import { getPackageVersion } from "./utils.js";
 import readline from "node:readline";
 import { resolveContinueSessionId } from "./cli/ui/utils/continueSession.js";
-import { findLatestSessionIdForTool } from "./utils/session.js";
 import {
   installDependenciesForWorktree,
   DependencyInstallError,
@@ -598,7 +597,6 @@ export async function handleAIToolWorkflow(
           branch,
           toolId: tool,
           repoRoot,
-          lookupLatestSessionId: findLatestSessionIdForTool,
         }));
 
       if (!resumeSessionId) {

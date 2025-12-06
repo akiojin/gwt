@@ -62,8 +62,7 @@ describe("resolveContinueSessionId", () => {
     expect(result).toBe("last-1");
   });
 
-  it("uses tool-specific lookup when no history or lastSessionId", async () => {
-    const lookup = vi.fn().mockResolvedValue("from-lookup");
+  it("returns null when no history or matching lastSessionId", async () => {
     const sessionData = {
       lastBranch: branch,
       lastUsedTool: toolId,
@@ -76,11 +75,9 @@ describe("resolveContinueSessionId", () => {
       branch,
       toolId,
       repoRoot,
-      lookupLatestSessionId: lookup,
     });
 
-    expect(lookup).toHaveBeenCalledWith(toolId, repoRoot);
-    expect(result).toBe("from-lookup");
+    expect(result).toBeNull();
   });
 
   it("returns null when branch/tool do not match", async () => {
