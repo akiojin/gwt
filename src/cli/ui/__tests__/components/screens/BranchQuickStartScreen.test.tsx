@@ -23,6 +23,7 @@ describe("BranchQuickStartScreen", () => {
           toolLabel: "Codex",
           model: "gpt-5.1-codex",
           sessionId: "abc-123",
+          inferenceLevel: "high",
         }}
         onBack={() => {}}
         onSelect={() => {}}
@@ -31,7 +32,9 @@ describe("BranchQuickStartScreen", () => {
 
     const titleMatches = getAllByText(/Resume with previous settings/);
     expect(titleMatches.length).toBeGreaterThan(0);
-    expect(getByText(/Codex \/ gpt-5.1-codex \/ ID: abc-123/)).toBeDefined();
+    expect(
+      getByText(/Codex \/ gpt-5.1-codex \/ Reasoning: high \/ ID: abc-123/),
+    ).toBeDefined();
   });
 
   it("disables previous options when no history", () => {

@@ -127,6 +127,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     toolLabel: string;
     model?: string | null;
     sessionId?: string | null;
+    inferenceLevel?: InferenceLevel | null;
   } | null>(null);
   const [branchQuickStartLoading, setBranchQuickStartLoading] =
     useState(false);
@@ -315,6 +316,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
                   toolId: latest.toolId as AITool,
                   toolLabel: latest.toolLabel,
                   model: latest.model ?? null,
+                  inferenceLevel: latest.reasoningLevel as InferenceLevel | null,
                   sessionId: latest.sessionId ?? null,
                 }
               : null,
@@ -611,7 +613,11 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         color: "green",
       });
       refresh();
-      navigateTo("ai-tool-selector");
+      const nextScreen =
+        branchQuickStart || branchQuickStartLoading
+          ? "branch-quick-start"
+          : "ai-tool-selector";
+      navigateTo(nextScreen);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setCleanupFooterMessage({
@@ -620,7 +626,14 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       });
       console.error("Failed to switch protected branch:", error);
     }
-  }, [navigateTo, refresh, selectedBranch, setCleanupFooterMessage]);
+  }, [
+    branchQuickStart,
+    branchQuickStartLoading,
+    navigateTo,
+    refresh,
+    selectedBranch,
+    setCleanupFooterMessage,
+  ]);
 
   const handleUseExistingBranch = useCallback(() => {
     if (selectedBranch && isProtectedSelection(selectedBranch)) {
@@ -981,7 +994,10 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       setPreferredToolId(branchQuickStart.toolId);
       setSelectedModel(
         branchQuickStart.model
-          ? ({ model: branchQuickStart.model } as ModelSelectionResult)
+          ? ({
+              model: branchQuickStart.model,
+              inferenceLevel: branchQuickStart.inferenceLevel ?? undefined,
+            } as ModelSelectionResult)
           : null,
       );
 

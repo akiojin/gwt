@@ -15,6 +15,7 @@ export interface SessionData {
   lastBranch: string | null;
   lastUsedTool?: string;
   lastSessionId?: string | null;
+  reasoningLevel?: string | null;
   timestamp: number;
   repositoryRoot: string;
   mode?: "normal" | "continue" | "resume";
@@ -31,6 +32,7 @@ export interface ToolSessionEntry {
   sessionId?: string | null;
   mode?: "normal" | "continue" | "resume" | null;
   model?: string | null;
+  reasoningLevel?: string | null;
   timestamp: number;
 }
 
@@ -150,6 +152,7 @@ export async function saveSession(
         sessionId: sessionData.lastSessionId ?? null,
         mode: sessionData.mode ?? null,
         model: sessionData.model ?? null,
+        reasoningLevel: sessionData.reasoningLevel ?? null,
         timestamp: sessionData.timestamp,
       };
       existingHistory = [...existingHistory, entry].slice(-100); // keep latest 100
@@ -159,6 +162,7 @@ export async function saveSession(
       ...sessionData,
       history: existingHistory,
       lastSessionId: sessionData.lastSessionId ?? null,
+      reasoningLevel: sessionData.reasoningLevel ?? null,
     };
 
     await writeFile(sessionPath, JSON.stringify(payload, null, 2), "utf-8");
@@ -275,6 +279,7 @@ export async function getLastToolUsageMap(
         toolLabel: parsed.toolLabel ?? parsed.lastUsedTool ?? "Custom",
         mode: parsed.mode ?? null,
         model: parsed.model ?? null,
+        reasoningLevel: parsed.reasoningLevel ?? null,
         timestamp: parsed.timestamp ?? Date.now(),
       });
     }

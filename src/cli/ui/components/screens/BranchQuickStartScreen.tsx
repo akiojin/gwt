@@ -11,6 +11,7 @@ export interface BranchQuickStartOption {
   toolLabel: string;
   model?: string | null;
   sessionId?: string | null;
+  inferenceLevel?: string | null;
 }
 
 type QuickStartItem = SelectItem & {
@@ -42,7 +43,7 @@ export function BranchQuickStartScreen({
       label: "Resume with previous settings",
       value: "reuse-continue",
       description: previousOption
-        ? `${previousOption.toolLabel} / ${previousOption.model ?? "default"} / ${previousOption.sessionId ? `ID: ${previousOption.sessionId}` : "No ID"}`
+        ? `${previousOption.toolLabel} / ${previousOption.model ?? "default"} / Reasoning: ${previousOption.inferenceLevel ?? "default"} / ${previousOption.sessionId ? `ID: ${previousOption.sessionId}` : "No ID"}`
         : "No previous settings (disabled)",
       disabled: !previousOption,
     },
