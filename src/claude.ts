@@ -165,6 +165,8 @@ export async function launchClaudeCode(
       args.push(...options.extraArgs);
     }
 
+    console.log(chalk.gray(`   📋 Args: ${args.join(" ")}`));
+
     terminal.exitRawMode();
 
     const baseEnv = {

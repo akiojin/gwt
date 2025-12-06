@@ -18,6 +18,8 @@ export const buildDefaultCodexArgs = (
 ): string[] => [
   "--enable",
   "web_search_request",
+  "--enable",
+  "skills",
   `--model=${model}`,
   "--sandbox",
   "workspace-write",
@@ -123,6 +125,8 @@ export async function launchCodexCLI(
     const codexArgs = buildDefaultCodexArgs(model, reasoningEffort);
 
     args.push(...codexArgs);
+
+    console.log(chalk.gray(`   📋 Args: ${args.join(" ")}`));
 
     terminal.exitRawMode();
 

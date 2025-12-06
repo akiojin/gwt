@@ -467,4 +467,31 @@ describe("launchQwenCLI", () => {
       mockChildStdio.stderr = "inherit";
     });
   });
+
+  describe("FR-008: Launch arguments display", () => {
+    it("should display launch arguments in console log", async () => {
+      mockExeca
+        .mockRejectedValueOnce(new Error("Command not found")) // which/where
+        .mockResolvedValue({
+          stdout: "",
+          stderr: "",
+          exitCode: 0,
+        } as any);
+
+      await launchQwenCLI("/test/path", { skipPermissions: true });
+
+      // Verify that args are logged with 📋 prefix
+      expect(consoleLogSpy).toHaveBeenCalledWith(
+        expect.stringContaining("📋 Args:"),
+      );
+
+      // Verify that the actual arguments are included in the log
+      expect(consoleLogSpy).toHaveBeenCalledWith(
+        expect.stringContaining("--checkpointing"),
+      );
+      expect(consoleLogSpy).toHaveBeenCalledWith(
+        expect.stringContaining("--yolo"),
+      );
+    });
+  });
 });
