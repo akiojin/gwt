@@ -559,4 +559,30 @@ describe("launchClaudeCode - Root User Detection", () => {
       );
     });
   });
+
+  describe("FR-008: Launch arguments display", () => {
+    it("should display launch arguments in console log", async () => {
+      // Mock which/where to fail (claude not available) and bunx to succeed
+      mockExeca
+        .mockRejectedValueOnce(new Error("Command not found")) // which/where
+        .mockResolvedValue({
+          // bunx
+          stdout: "",
+          stderr: "",
+          exitCode: 0,
+        } as any);
+
+      await launchClaudeCode("/test/path", { skipPermissions: true });
+
+      // Verify that args are logged with 📋 prefix
+      expect(consoleLogSpy).toHaveBeenCalledWith(
+        expect.stringContaining("📋 Args:"),
+      );
+
+      // Verify that the actual arguments are included in the log
+      expect(consoleLogSpy).toHaveBeenCalledWith(
+        expect.stringContaining("--dangerously-skip-permissions"),
+      );
+    });
+  });
 });

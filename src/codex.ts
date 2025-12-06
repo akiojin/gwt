@@ -103,6 +103,8 @@ export async function launchCodexCLI(
 
     args.push(...codexArgs);
 
+    console.log(chalk.gray(`   📋 Args: ${args.join(" ")}`));
+
     terminal.exitRawMode();
 
     const childStdio = createChildStdio();
