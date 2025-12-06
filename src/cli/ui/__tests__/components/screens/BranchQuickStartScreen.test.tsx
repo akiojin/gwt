@@ -16,7 +16,7 @@ describe("BranchQuickStartScreen", () => {
   });
 
   it("renders previous option details when available", () => {
-    const { getByText } = render(
+    const { getByText, getAllByText } = render(
       <BranchQuickStartScreen
         branchName="feature/foo"
         previousOption={{
@@ -29,7 +29,8 @@ describe("BranchQuickStartScreen", () => {
       />,
     );
 
-    expect(getByText(/前回設定で続きから/)).toBeDefined();
+    const titleMatches = getAllByText(/Resume with previous settings/);
+    expect(titleMatches.length).toBeGreaterThan(0);
     expect(getByText(/Codex \/ gpt-5.1-codex \/ ID: abc-123/)).toBeDefined();
   });
 
@@ -43,7 +44,7 @@ describe("BranchQuickStartScreen", () => {
       />,
     );
 
-    expect(getAllByText(/前回設定なし/)).toHaveLength(2);
+    expect(getAllByText(/No previous settings/)).toHaveLength(2);
   });
 
   it("shows manual selection option", () => {
@@ -60,6 +61,6 @@ describe("BranchQuickStartScreen", () => {
       />,
     );
 
-    expect(getByText("設定を選び直す")).toBeDefined();
+    expect(getByText("Choose manually")).toBeDefined();
   });
 });

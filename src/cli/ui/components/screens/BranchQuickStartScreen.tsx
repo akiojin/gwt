@@ -39,25 +39,25 @@ export function BranchQuickStartScreen({
 
   const items: QuickStartItem[] = [
     {
-      label: "前回設定で続きから",
+      label: "Resume with previous settings",
       value: "reuse-continue",
       description: previousOption
-        ? `${previousOption.toolLabel} / ${previousOption.model ?? "default"} / ${previousOption.sessionId ? `ID: ${previousOption.sessionId}` : "IDなし"}`
-        : "前回設定なし（選択不可）",
+        ? `${previousOption.toolLabel} / ${previousOption.model ?? "default"} / ${previousOption.sessionId ? `ID: ${previousOption.sessionId}` : "No ID"}`
+        : "No previous settings (disabled)",
       disabled: !previousOption,
     },
     {
-      label: "前回設定で新規開始",
+      label: "Start new with previous settings",
       value: "reuse-new",
       description: previousOption
         ? `${previousOption.toolLabel} / ${previousOption.model ?? "default"}`
-        : "前回設定なし（選択不可）",
+        : "No previous settings (disabled)",
       disabled: !previousOption,
     },
     {
-      label: "設定を選び直す",
+      label: "Choose manually",
       value: "manual",
-      description: "ツール・モデルを選択し直す",
+      description: "Pick tool and model manually",
     },
   ];
 
@@ -79,8 +79,8 @@ export function BranchQuickStartScreen({
         <Box marginBottom={1}>
           <Text>
             {loading
-              ? "前回の設定を読み込み中..."
-              : "前回の設定を使うか、新規で始めるかを選んでください。"}
+              ? "Loading previous settings..."
+              : "Resume with previous settings, start new, or choose manually."}
           </Text>
           <Text color="gray">{`Branch: ${branchName}`}</Text>
         </Box>
@@ -94,7 +94,7 @@ export function BranchQuickStartScreen({
             <Box flexDirection="column">
               <Text color={isSelected ? "cyan" : "white"}>
                 {item.label}
-                {item.disabled ? " (利用不可)" : ""}
+                {item.disabled ? " (disabled)" : ""}
               </Text>
               <Text color="gray">{item.description}</Text>
             </Box>
