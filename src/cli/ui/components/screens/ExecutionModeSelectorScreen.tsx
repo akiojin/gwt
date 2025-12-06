@@ -28,6 +28,7 @@ export interface ExecutionModeSelectorScreenProps {
   onBack: () => void;
   onSelect: (result: ExecutionModeResult) => void;
   version?: string | null;
+  continueSessionId?: string | null;
 }
 
 /**
@@ -40,6 +41,7 @@ export function ExecutionModeSelectorScreen({
   onBack,
   onSelect,
   version,
+  continueSessionId = null,
 }: ExecutionModeSelectorScreenProps) {
   const { rows } = useTerminalSize();
   const [step, setStep] = useState<1 | 2>(1);
@@ -67,7 +69,9 @@ export function ExecutionModeSelectorScreen({
       description: "Start fresh session",
     },
     {
-      label: "Continue",
+      label: continueSessionId
+        ? `Continue (ID: ${continueSessionId})`
+        : "Continue",
       value: "continue",
       description: "Continue from last session",
     },

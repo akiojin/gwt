@@ -35,7 +35,7 @@ import {
 } from "./utils/terminal.js";
 import { getToolById, getSharedEnvironment } from "./config/tools.js";
 import { launchCustomAITool } from "./launcher.js";
-import { saveSession } from "./config/index.js";
+import { saveSession, loadSession } from "./config/index.js";
 import { getPackageVersion } from "./utils.js";
 import readline from "node:readline";
 import {
@@ -324,6 +324,7 @@ export async function handleAIToolWorkflow(
     skipPermissions,
     model,
     inferenceLevel,
+    sessionId: selectedSessionId,
   } = selectionResult;
 
   const branchLabel = displayName ?? branch;
@@ -564,26 +565,69 @@ export async function handleAIToolWorkflow(
 
     // Save selection immediately so "last tool" is reflected even if the tool
     // is interrupted or killed mid-run (e.g., Ctrl+C).
-    await saveSession({
-      lastWorktreePath: worktreePath,
-      lastBranch: branch,
-      lastUsedTool: tool,
-      toolLabel: toolConfig.displayName ?? tool,
-      mode,
-      model: model ?? null,
-      timestamp: Date.now(),
-      repositoryRoot: repoRoot,
-    });
+    await saveSession(
+      {
+        lastWorktreePath: worktreePath,
+        lastBranch: branch,
+        lastUsedTool: tool,
+        toolLabel: toolConfig.displayName ?? tool,
+        mode,
+        model: model ?? null,
+        timestamp: Date.now(),
+        repositoryRoot: repoRoot,
+      },
+      { skipHistory: true },
+    );
+
+    // Lookup saved session ID for continue/resume
+    let resumeSessionId: string | null =
+      selectedSessionId && selectedSessionId.length > 0
+        ? selectedSessionId
+        : null;
+    if (mode === "continue" || mode === "resume") {
+      const existingSession = await loadSession(repoRoot);
+      const history = existingSession?.history ?? [];
+
+      for (let i = history.length - 1; i >= 0; i -= 1) {
+        const entry = history[i];
+        if (
+          entry &&
+          entry.branch === branch &&
+          entry.toolId === tool &&
+          entry.sessionId
+        ) {
+          resumeSessionId = entry.sessionId;
+          break;
+        }
+      }
+
+      if (
+        !resumeSessionId &&
+        existingSession?.lastSessionId &&
+        existingSession.lastUsedTool === tool &&
+        existingSession.lastBranch === branch
+      ) {
+        resumeSessionId = existingSession.lastSessionId;
+      }
+
+      if (!resumeSessionId) {
+        printWarning(
+          "No saved session ID found for this branch/tool. Falling back to tool default.",
+        );
+      }
+    }
 
     // Launch selected AI tool
     // Builtin tools use their dedicated launch functions
     // Custom tools use the generic launchCustomAITool function
+    let launchResult: { sessionId?: string | null } | void;
     if (tool === "claude-code") {
       const launchOptions: {
         mode?: "normal" | "continue" | "resume";
         skipPermissions?: boolean;
         envOverrides?: Record<string, string>;
         model?: string;
+        sessionId?: string | null;
       } = {
         mode:
           mode === "resume"
@@ -593,11 +637,12 @@ export async function handleAIToolWorkflow(
               : "normal",
         skipPermissions,
         envOverrides: sharedEnv,
+        sessionId: resumeSessionId,
       };
       if (model) {
         launchOptions.model = model;
       }
-      await launchClaudeCode(worktreePath, launchOptions);
+      launchResult = await launchClaudeCode(worktreePath, launchOptions);
     } else if (tool === "codex-cli") {
       const launchOptions: {
         mode?: "normal" | "continue" | "resume";
@@ -605,6 +650,7 @@ export async function handleAIToolWorkflow(
         envOverrides?: Record<string, string>;
         model?: string;
         reasoningEffort?: CodexReasoningEffort;
+        sessionId?: string | null;
       } = {
         mode:
           mode === "resume"
@@ -614,6 +660,7 @@ export async function handleAIToolWorkflow(
               : "normal",
         bypassApprovals: skipPermissions,
         envOverrides: sharedEnv,
+        sessionId: resumeSessionId,
       };
       if (model) {
         launchOptions.model = model;
@@ -621,7 +668,7 @@ export async function handleAIToolWorkflow(
       if (inferenceLevel) {
         launchOptions.reasoningEffort = inferenceLevel as CodexReasoningEffort;
       }
-      await launchCodexCLI(worktreePath, launchOptions);
+      launchResult = await launchCodexCLI(worktreePath, launchOptions);
     } else if (tool === "gemini-cli") {
       const launchOptions: {
         mode?: "normal" | "continue" | "resume";
@@ -641,7 +688,7 @@ export async function handleAIToolWorkflow(
       if (model) {
         launchOptions.model = model;
       }
-      await launchGeminiCLI(worktreePath, launchOptions);
+      launchResult = await launchGeminiCLI(worktreePath, launchOptions);
     } else if (tool === "qwen-cli") {
       const launchOptions: {
         mode?: "normal" | "continue" | "resume";
@@ -661,11 +708,11 @@ export async function handleAIToolWorkflow(
       if (model) {
         launchOptions.model = model;
       }
-      await launchQwenCLI(worktreePath, launchOptions);
+      launchResult = await launchQwenCLI(worktreePath, launchOptions);
     } else {
       // Custom tool
       printInfo(`Launching custom tool: ${toolConfig.displayName}`);
-      await launchCustomAITool(toolConfig, {
+      launchResult = await launchCustomAITool(toolConfig, {
         mode:
           mode === "resume"
             ? "resume"
@@ -677,6 +724,24 @@ export async function handleAIToolWorkflow(
         sharedEnv,
       });
     }
+
+    // Persist session with captured session ID (if any)
+    const finalSessionId =
+      (launchResult as { sessionId?: string | null } | undefined)?.sessionId ??
+      resumeSessionId ??
+      null;
+
+    await saveSession({
+      lastWorktreePath: worktreePath,
+      lastBranch: branch,
+      lastUsedTool: tool,
+      toolLabel: toolConfig.displayName ?? tool,
+      mode,
+      model: model ?? null,
+      timestamp: Date.now(),
+      repositoryRoot: repoRoot,
+      lastSessionId: finalSessionId,
+    });
 
     printInfo("Session completed successfully. Returning to main menu...");
     return;

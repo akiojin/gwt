@@ -16,14 +16,33 @@ describe("SessionSelectorScreen", () => {
       window.document as unknown as typeof globalThis.document;
   });
 
-  const mockSessions = ["session-1", "session-2", "session-3"];
+  const sessionItems = [
+    {
+      sessionId: "session-1",
+      branch: "feature/foo",
+      toolLabel: "Codex",
+      timestamp: 1700000000000,
+    },
+    {
+      sessionId: "session-2",
+      branch: "feature/bar",
+      toolLabel: "Claude",
+      timestamp: 1700000100000,
+    },
+    {
+      sessionId: "session-3",
+      branch: "feature/baz",
+      toolLabel: "Codex",
+      timestamp: 1700000200000,
+    },
+  ];
 
   it("should render header with title", () => {
     const onBack = vi.fn();
     const onSelect = vi.fn();
     const { getByText } = render(
       <SessionSelectorScreen
-        sessions={mockSessions}
+        sessions={sessionItems}
         onBack={onBack}
         onSelect={onSelect}
       />,
@@ -37,15 +56,15 @@ describe("SessionSelectorScreen", () => {
     const onSelect = vi.fn();
     const { getByText } = render(
       <SessionSelectorScreen
-        sessions={mockSessions}
+        sessions={sessionItems}
         onBack={onBack}
         onSelect={onSelect}
       />,
     );
 
-    expect(getByText(/session-1/i)).toBeDefined();
-    expect(getByText(/session-2/i)).toBeDefined();
-    expect(getByText(/session-3/i)).toBeDefined();
+    expect(getByText(/feature\/foo/i)).toBeDefined();
+    expect(getByText(/feature\/bar/i)).toBeDefined();
+    expect(getByText(/feature\/baz/i)).toBeDefined();
   });
 
   it("should render footer with actions", () => {
@@ -53,7 +72,7 @@ describe("SessionSelectorScreen", () => {
     const onSelect = vi.fn();
     const { getAllByText } = render(
       <SessionSelectorScreen
-        sessions={mockSessions}
+        sessions={sessionItems}
         onBack={onBack}
         onSelect={onSelect}
       />,
@@ -82,7 +101,7 @@ describe("SessionSelectorScreen", () => {
     const onSelect = vi.fn();
     const { getByText, getAllByText } = render(
       <SessionSelectorScreen
-        sessions={mockSessions}
+        sessions={sessionItems}
         onBack={onBack}
         onSelect={onSelect}
       />,
@@ -100,7 +119,7 @@ describe("SessionSelectorScreen", () => {
     const onSelect = vi.fn();
     const { container } = render(
       <SessionSelectorScreen
-        sessions={mockSessions}
+        sessions={sessionItems}
         onBack={onBack}
         onSelect={onSelect}
       />,
@@ -116,7 +135,7 @@ describe("SessionSelectorScreen", () => {
     const onSelect = vi.fn();
     const { container } = render(
       <SessionSelectorScreen
-        sessions={mockSessions}
+        sessions={sessionItems}
         onBack={onBack}
         onSelect={onSelect}
       />,

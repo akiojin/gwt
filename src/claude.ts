@@ -2,6 +2,7 @@ import { execa } from "execa";
 import chalk from "chalk";
 import { existsSync } from "fs";
 import { createChildStdio, getTerminalStreams } from "./utils/terminal.js";
+import { findLatestClaudeSessionId } from "./utils/session.js";
 
 const CLAUDE_CLI_PACKAGE = "@anthropic-ai/claude-code@latest";
 export class ClaudeError extends Error {
@@ -22,8 +23,9 @@ export async function launchClaudeCode(
     extraArgs?: string[];
     envOverrides?: Record<string, string>;
     model?: string;
+    sessionId?: string | null;
   } = {},
-): Promise<void> {
+): Promise<{ sessionId?: string | null }> {
   const terminal = getTerminalStreams();
 
   try {
@@ -44,11 +46,23 @@ export async function launchClaudeCode(
       console.log(chalk.green(`   🎯 Model: ${options.model} (Default)`));
     }
 
+    const resumeSessionId =
+      options.sessionId && options.sessionId.trim().length > 0
+        ? options.sessionId.trim()
+        : null;
+
     // Handle execution mode
     switch (options.mode) {
       case "continue":
-        args.push("-c");
-        console.log(chalk.cyan("   📱 Continuing most recent conversation"));
+        if (resumeSessionId) {
+          args.push("--resume", resumeSessionId);
+          console.log(
+            chalk.cyan(`   📱 Continuing specific session: ${resumeSessionId}`),
+          );
+        } else {
+          args.push("-c");
+          console.log(chalk.cyan("   📱 Continuing most recent conversation"));
+        }
         break;
       case "resume":
         // TODO: Implement conversation selection with Ink UI
@@ -109,7 +123,14 @@ export async function launchClaudeCode(
         }
         */
         // Use standard Claude Code resume for now
-        args.push("-r");
+        if (resumeSessionId) {
+          args.push("--resume", resumeSessionId);
+          console.log(
+            chalk.cyan(`   🔄 Resuming Claude session: ${resumeSessionId}`),
+          );
+        } else {
+          args.push("-r");
+        }
         break;
       case "normal":
       default:
@@ -214,6 +235,31 @@ export async function launchClaudeCode(
     } finally {
       childStdio.cleanup();
     }
+
+    let capturedSessionId: string | null = null;
+    try {
+      capturedSessionId =
+        (await findLatestClaudeSessionId(worktreePath)) ??
+        resumeSessionId ??
+        null;
+    } catch {
+      capturedSessionId = resumeSessionId ?? null;
+    }
+
+    if (capturedSessionId) {
+      console.log(chalk.cyan(`\n   🆔 Session ID: ${capturedSessionId}`));
+      console.log(
+        chalk.gray(`   Resume command: claude --resume ${capturedSessionId}`),
+      );
+    } else {
+      console.log(
+        chalk.yellow(
+          "\n   ℹ️  Could not determine Claude session ID automatically.",
+        ),
+      );
+    }
+
+    return capturedSessionId ? { sessionId: capturedSessionId } : {};
   } catch (error: any) {
     const hasLocalClaude = await isClaudeCommandAvailable();
     let errorMessage: string;
