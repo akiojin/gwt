@@ -178,7 +178,7 @@ describe("launchGeminiCLI", () => {
       );
     });
 
-    it("T005: continueモードで起動（-r latest）", async () => {
+    it("T005: continueモードで起動（--resume latest）", async () => {
       mockExeca
         .mockRejectedValueOnce(new Error("Command not found")) // which/where
         .mockResolvedValue({
@@ -189,11 +189,11 @@ describe("launchGeminiCLI", () => {
 
       await launchGeminiCLI("/test/path", { mode: "continue" });
 
-      // Verify -r latest is passed
+      // Verify --resume is passed
       expect(mockExeca).toHaveBeenNthCalledWith(
         2,
         "bunx",
-        ["@google/gemini-cli@latest", "-r", "latest"],
+        ["@google/gemini-cli@latest", "--resume"],
         expect.anything(),
       );
 
@@ -203,7 +203,7 @@ describe("launchGeminiCLI", () => {
       );
     });
 
-    it("T006: resumeモードで起動（-r latest）", async () => {
+    it("T006: resumeモードで起動（--resume latest）", async () => {
       mockExeca
         .mockRejectedValueOnce(new Error("Command not found")) // which/where
         .mockResolvedValue({
@@ -214,11 +214,11 @@ describe("launchGeminiCLI", () => {
 
       await launchGeminiCLI("/test/path", { mode: "resume" });
 
-      // Verify -r latest is passed
+      // Verify --resume is passed
       expect(mockExeca).toHaveBeenNthCalledWith(
         2,
         "bunx",
-        ["@google/gemini-cli@latest", "-r", "latest"],
+        ["@google/gemini-cli@latest", "--resume"],
         expect.anything(),
       );
 

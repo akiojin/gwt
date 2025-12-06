@@ -8,10 +8,18 @@ import { useTerminalSize } from "../../hooks/useTerminalSize.js";
 export interface SessionItem {
   label: string;
   value: string;
+  secondary?: string;
 }
 
 export interface SessionSelectorScreenProps {
-  sessions: string[];
+  sessions: {
+    sessionId: string;
+    branch: string;
+    toolLabel?: string | null;
+    timestamp?: number;
+  }[];
+  loading?: boolean;
+  errorMessage?: string | null;
   onBack: () => void;
   onSelect: (session: string) => void;
   version?: string | null;
@@ -23,6 +31,8 @@ export interface SessionSelectorScreenProps {
  */
 export function SessionSelectorScreen({
   sessions,
+  loading = false,
+  errorMessage = null,
   onBack,
   onSelect,
   version,
@@ -38,10 +48,18 @@ export function SessionSelectorScreen({
   });
 
   // Format sessions for Select component
-  const sessionItems: SessionItem[] = sessions.map((session) => ({
-    label: session,
-    value: session,
-  }));
+  const sessionItems: SessionItem[] = sessions.map((session) => {
+    const startedAt =
+      typeof session.timestamp === "number"
+        ? new Date(session.timestamp).toLocaleString()
+        : "unknown time";
+    const toolLabel = session.toolLabel ?? "unknown";
+    const label = `${session.branch} • ${toolLabel} • ${session.sessionId} (${startedAt})`;
+    return {
+      label,
+      value: session.sessionId,
+    };
+  });
 
   // Handle session selection
   const handleSelect = (item: SessionItem) => {
@@ -84,13 +102,23 @@ export function SessionSelectorScreen({
 
       {/* Content */}
       <Box flexDirection="column" flexGrow={1}>
-        {sessions.length === 0 ? (
+        {loading ? (
+          <Box>
+            <Text dimColor>Loading sessions...</Text>
+          </Box>
+        ) : sessions.length === 0 ? (
           <Box>
             <Text dimColor>No sessions found</Text>
           </Box>
         ) : (
           <Select items={sessionItems} onSelect={handleSelect} limit={limit} />
         )}
+
+        {errorMessage ? (
+          <Box marginTop={1}>
+            <Text color="red">{errorMessage}</Text>
+          </Box>
+        ) : null}
       </Box>
 
       {/* Footer */}

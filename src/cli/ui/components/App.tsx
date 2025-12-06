@@ -30,6 +30,7 @@ import type {
   SelectedBranchState,
 } from "../types.js";
 import { getRepositoryRoot, deleteBranch } from "../../../git.js";
+import { loadSession } from "../../../config/index.js";
 import {
   createWorktree,
   generateWorktreePath,
@@ -71,11 +72,19 @@ export interface SelectionResult {
   skipPermissions: boolean;
   model?: string | null;
   inferenceLevel?: InferenceLevel;
+  sessionId?: string | null;
 }
 
 export interface AppProps {
   onExit: (result?: SelectionResult) => void;
   loadingIndicatorDelay?: number;
+}
+
+export interface SessionOption {
+  sessionId: string;
+  toolLabel: string;
+  branch: string;
+  timestamp: number;
 }
 
 /**
@@ -96,6 +105,17 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
 
   // Version state
   const [version, setVersion] = useState<string | null>(null);
+  const [repoRoot, setRepoRoot] = useState<string | null>(null);
+  const [sessionOptions, setSessionOptions] = useState<SessionOption[]>([]);
+  const [sessionLoading, setSessionLoading] = useState(false);
+  const [sessionError, setSessionError] = useState<string | null>(null);
+  const [pendingExecution, setPendingExecution] = useState<{
+    mode: ExecutionMode;
+    skipPermissions: boolean;
+  } | null>(null);
+  const [continueSessionId, setContinueSessionId] = useState<string | null>(
+    null,
+  );
 
   // Selection state (for branch → tool → mode flow)
   const [selectedBranch, setSelectedBranch] =
@@ -135,6 +155,13 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     getPackageVersion()
       .then(setVersion)
       .catch(() => setVersion(null));
+  }, []);
+
+  // Fetch repository root once for session lookups
+  useEffect(() => {
+    getRepositoryRoot()
+      .then(setRepoRoot)
+      .catch(() => setRepoRoot(null));
   }, []);
 
   useEffect(() => {
@@ -198,6 +225,101 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       setHiddenBranches(filtered);
     }
   }, [branches, hiddenBranches]);
+
+  // Load available sessions when entering session selector
+  useEffect(() => {
+    if (currentScreen !== "session-selector") {
+      return;
+    }
+    if (!selectedTool || !selectedBranch) {
+      setSessionOptions([]);
+      return;
+    }
+
+    setSessionLoading(true);
+    setSessionError(null);
+
+    (async () => {
+      try {
+        const root = repoRoot ?? (await getRepositoryRoot());
+        if (!repoRoot && root) {
+          setRepoRoot(root);
+        }
+        const sessionData = root ? await loadSession(root) : null;
+        const history = sessionData?.history ?? [];
+
+        const filtered = history
+          .filter(
+            (entry) =>
+              entry.sessionId &&
+              entry.toolId === selectedTool &&
+              entry.branch === selectedBranch.name,
+          )
+          .sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0))
+          .map((entry) => ({
+            sessionId: entry.sessionId as string,
+            toolLabel: entry.toolLabel,
+            branch: entry.branch,
+            timestamp: entry.timestamp,
+          }));
+
+        setSessionOptions(filtered);
+      } catch (_err) {
+        setSessionOptions([]);
+        setSessionError("セッション一覧の取得に失敗しました");
+      } finally {
+        setSessionLoading(false);
+      }
+    })();
+  }, [currentScreen, selectedTool, selectedBranch, repoRoot]);
+
+  // Load last session ID for "Continue" label when entering execution mode selector
+  useEffect(() => {
+    if (currentScreen !== "execution-mode-selector") {
+      return;
+    }
+    if (!selectedTool || !selectedBranch) {
+      setContinueSessionId(null);
+      return;
+    }
+    (async () => {
+      try {
+        const root = repoRoot ?? (await getRepositoryRoot());
+        if (!repoRoot && root) {
+          setRepoRoot(root);
+        }
+        const sessionData = root ? await loadSession(root) : null;
+        const history = sessionData?.history ?? [];
+
+        let found: string | null = null;
+        for (let i = history.length - 1; i >= 0; i -= 1) {
+          const entry = history[i];
+          if (
+            entry &&
+            entry.branch === selectedBranch.name &&
+            entry.toolId === selectedTool &&
+            entry.sessionId
+          ) {
+            found = entry.sessionId;
+            break;
+          }
+        }
+
+        if (
+          !found &&
+          sessionData?.lastSessionId &&
+          sessionData.lastUsedTool === selectedTool &&
+          sessionData.lastBranch === selectedBranch.name
+        ) {
+          found = sessionData.lastSessionId;
+        }
+
+        setContinueSessionId(found ?? null);
+      } catch {
+        setContinueSessionId(null);
+      }
+    })();
+  }, [currentScreen, selectedTool, selectedBranch, repoRoot]);
 
   // Update preferred tool when branch or data changes
   useEffect(() => {
@@ -742,20 +864,12 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     [navigateTo, selectedTool],
   );
 
-  // Handle session selection
-  const handleSessionSelect = useCallback(
-    (_session: string) => {
-      // TODO: Load selected session and navigate to next screen
-      // For now, just go back to branch list
-      goBack();
-    },
-    [goBack],
-  );
-
-  // Handle execution mode and skipPermissions selection
-  const handleModeSelect = useCallback(
-    (result: { mode: ExecutionMode; skipPermissions: boolean }) => {
-      // All selections complete - exit with result
+  const completeSelection = useCallback(
+    (
+      executionMode: ExecutionMode,
+      skip: boolean,
+      sessionId?: string | null,
+    ) => {
       if (selectedBranch && selectedTool) {
         const defaultModel = getDefaultModelOption(selectedTool);
         const resolvedModel = selectedModel?.model ?? defaultModel?.id ?? null;
@@ -763,22 +877,21 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
           selectedModel?.inferenceLevel ??
           getDefaultInferenceForModel(defaultModel ?? undefined);
 
-        const modelForPayload = resolvedModel;
-
         const payload: SelectionResult = {
           branch: selectedBranch.name,
           displayName: selectedBranch.displayName,
           branchType: selectedBranch.branchType,
           tool: selectedTool,
-          mode: result.mode,
-          skipPermissions: result.skipPermissions,
-          ...(modelForPayload !== undefined ? { model: modelForPayload } : {}),
+          mode: executionMode,
+          skipPermissions: skip,
+          ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
           ...(resolvedInference !== undefined
             ? { inferenceLevel: resolvedInference }
             : {}),
           ...(selectedBranch.remoteBranch
             ? { remoteBranch: selectedBranch.remoteBranch }
             : {}),
+          ...(sessionId ? { sessionId } : {}),
         };
 
         onExit(payload);
@@ -794,6 +907,31 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       getDefaultModelOption,
       getDefaultInferenceForModel,
     ],
+  );
+
+  // Handle session selection
+  const handleSessionSelect = useCallback(
+    (session: string) => {
+      const execution = pendingExecution ?? {
+        mode: "resume" as ExecutionMode,
+        skipPermissions: false,
+      };
+      completeSelection(execution.mode, execution.skipPermissions, session);
+    },
+    [pendingExecution, completeSelection],
+  );
+
+  // Handle execution mode and skipPermissions selection
+  const handleModeSelect = useCallback(
+    (result: { mode: ExecutionMode; skipPermissions: boolean }) => {
+      if (result.mode === "resume") {
+        setPendingExecution(result);
+        navigateTo("session-selector");
+        return;
+      }
+      completeSelection(result.mode, result.skipPermissions, null);
+    },
+    [completeSelection, navigateTo],
   );
 
   // Render screen based on currentScreen
@@ -886,7 +1024,9 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         // TODO: Implement session data fetching
         return (
           <SessionSelectorScreen
-            sessions={[]}
+            sessions={sessionOptions}
+            loading={sessionLoading}
+            errorMessage={sessionError}
             onBack={goBack}
             onSelect={handleSessionSelect}
             version={version}
@@ -899,6 +1039,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
             onBack={goBack}
             onSelect={handleModeSelect}
             version={version}
+            continueSessionId={continueSessionId}
           />
         );
 

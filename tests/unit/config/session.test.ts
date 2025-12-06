@@ -58,6 +58,26 @@ describe("config/index.ts - Session Management", () => {
       expect(writeFileCall[1]).toContain("feature/test");
     });
 
+    it("should store sessionId when provided", async () => {
+      (mkdir as any).mockResolvedValue(undefined);
+      (writeFile as any).mockResolvedValue(undefined);
+
+      const sessionData: config.SessionData = {
+        lastWorktreePath: "/path/to/worktree",
+        lastBranch: "feature/test",
+        lastSessionId: "session-123",
+        timestamp: Date.now(),
+        repositoryRoot: "/path/to/repo",
+      };
+
+      await config.saveSession(sessionData);
+
+      const savedContent = (writeFile as any).mock.calls[0][1];
+      const parsed = JSON.parse(savedContent);
+      expect(parsed.lastSessionId).toBe("session-123");
+      expect(parsed.history[0].sessionId).toBe("session-123");
+    });
+
     it("should handle save errors gracefully", async () => {
       (mkdir as any).mockResolvedValue(undefined);
       (writeFile as any).mockRejectedValue(new Error("Write failed"));
