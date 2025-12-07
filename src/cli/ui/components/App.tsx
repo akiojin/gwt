@@ -54,7 +54,10 @@ import {
   resolveContinueSessionId,
   findLatestBranchSessionsByTool,
 } from "../utils/continueSession.js";
-import { findLatestCodexSessionId } from "../../../utils/session.js";
+import {
+  findLatestCodexSessionId,
+  findLatestClaudeSessionId,
+} from "../../../utils/session.js";
 import type { ToolSessionEntry } from "../../../config/index.js";
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
@@ -350,6 +353,20 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
               const latestCodex = await findLatestCodexSessionId();
               if (latestCodex) {
                 sessionId = latestCodex;
+              }
+            }
+
+            // For Claude Code, prefer the newest session file in the worktree even if history is stale.
+            if (entry.toolId === "claude-code") {
+              try {
+                const claudeSession = await findLatestClaudeSessionId(
+                  selectedWorktreePath ?? selectedBranch?.displayName ?? workingDirectory,
+                );
+                if (claudeSession) {
+                  sessionId = claudeSession;
+                }
+              } catch {
+                // ignore lookup failure
               }
             }
 
