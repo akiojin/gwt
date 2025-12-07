@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { EventEmitter } from "node:events";
 
 // Mock modules before importing
 vi.mock("execa", () => ({
@@ -18,8 +19,8 @@ vi.mock("os", () => ({
 
 const mockTerminalStreams = {
   stdin: { id: "stdin" } as unknown as NodeJS.ReadStream,
-  stdout: { id: "stdout" } as unknown as NodeJS.WriteStream,
-  stderr: { id: "stderr" } as unknown as NodeJS.WriteStream,
+  stdout: { id: "stdout", write: vi.fn() } as unknown as NodeJS.WriteStream,
+  stderr: { id: "stderr", write: vi.fn() } as unknown as NodeJS.WriteStream,
   stdinFd: undefined as number | undefined,
   stdoutFd: undefined as number | undefined,
   stderrFd: undefined as number | undefined,
@@ -38,6 +39,10 @@ vi.mock("../../src/utils/terminal", () => ({
   getTerminalStreams: vi.fn(() => mockTerminalStreams),
   createChildStdio: vi.fn(() => mockChildStdio),
 }));
+vi.mock("../../src/utils/session", () => ({
+  waitForCodexSessionId: vi.fn(async () => null),
+  findLatestCodexSessionId: vi.fn(async () => null),
+}));
 
 import { execa } from "execa";
 import {
@@ -55,21 +60,33 @@ const DEFAULT_CODEX_ARGS = buildDefaultCodexArgs(
   DEFAULT_CODEX_REASONING_EFFORT,
 );
 
+const createChildProcess = (
+  onEmit?: (stdout: EventEmitter, stderr: EventEmitter) => void,
+) => {
+  const stdout = new EventEmitter();
+  const stderr = new EventEmitter();
+  const promise = new Promise((resolve) => {
+    setImmediate(() => {
+      onEmit?.(stdout, stderr);
+      resolve({ stdout, stderr, exitCode: 0 });
+    });
+  });
+  return Object.assign(promise, { stdout, stderr });
+};
+
 describe("codex.ts", () => {
   const worktreePath = "/tmp/worktree";
 
   beforeEach(() => {
     vi.clearAllMocks();
     mockTerminalStreams.exitRawMode.mockClear();
+    (mockTerminalStreams.stdout.write as any).mockClear?.();
+    (mockTerminalStreams.stderr.write as any).mockClear?.();
     mockChildStdio.cleanup.mockClear();
     mockChildStdio.stdin = "inherit";
     mockChildStdio.stdout = "inherit";
     mockChildStdio.stderr = "inherit";
-    (execa as any).mockResolvedValue({
-      stdout: "",
-      stderr: "",
-      exitCode: 0,
-    });
+    (execa as any).mockImplementation(() => createChildProcess() as any);
   });
 
   it("should append default Codex CLI arguments on launch", async () => {
@@ -82,11 +99,25 @@ describe("codex.ts", () => {
     expect(options).toMatchObject({
       cwd: worktreePath,
       stdin: "inherit",
-      stdout: "inherit",
-      stderr: "inherit",
+      stdout: "pipe",
+      stderr: "pipe",
     });
     expect(mockTerminalStreams.exitRawMode).toHaveBeenCalledTimes(1);
     expect(mockChildStdio.cleanup).toHaveBeenCalledTimes(1);
+  });
+
+  it("captures sessionId from stdout when provided by Codex CLI", async () => {
+    (mockExeca as any).mockReturnValueOnce(
+      createChildProcess((stdout) => {
+        stdout.emit(
+          "data",
+          "Session: 019af999-aaaa-bbbb-cccc-123456789abc ready\n",
+        );
+      }) as any,
+    );
+
+    const result = await launchCodexCLI(worktreePath);
+    expect(result.sessionId).toBe("019af999-aaaa-bbbb-cccc-123456789abc");
   });
 
   it("should place extra arguments before the default set", async () => {
@@ -136,8 +167,8 @@ describe("codex.ts", () => {
     const [, , options] = (execa as any).mock.calls[0];
     expect(options).toMatchObject({
       stdin: 11,
-      stdout: 12,
-      stderr: 13,
+      stdout: "pipe",
+      stderr: "pipe",
     });
     expect(mockChildStdio.cleanup).toHaveBeenCalledTimes(1);
 

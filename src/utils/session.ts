@@ -253,7 +253,10 @@ export async function findLatestCodexSession(
     options.until !== undefined
       ? sinceFiltered.filter((c) => c.mtime <= options.until!)
       : sinceFiltered;
-  const pool = bounded.length ? bounded : sinceFiltered.length ? sinceFiltered : candidates;
+  const hasWindow = options.since !== undefined || options.until !== undefined;
+  const pool = bounded.length ? bounded : hasWindow ? [] : sinceFiltered;
+
+  if (!pool.length) return null;
 
   let chosen: { fullPath: string; mtime: number } | null = null;
 
@@ -285,7 +288,7 @@ export async function findLatestCodexSession(
 }
 
 export async function findLatestCodexSessionId(
-  options: { since?: number; preferClosestTo?: number; windowMs?: number } = {},
+  options: { since?: number; until?: number; preferClosestTo?: number; windowMs?: number } = {},
 ): Promise<string | null> {
   const found = await findLatestCodexSession(options);
   return found?.id ?? null;
@@ -487,7 +490,14 @@ export async function findLatestGeminiSession(
   if (options.until !== undefined) {
     pool = pool.filter((f) => f.mtime <= options.until!);
   }
-  if (!pool.length) pool = files;
+  const hasWindow = options.since !== undefined || options.until !== undefined;
+  if (!pool.length) {
+    if (!hasWindow) {
+      pool = files;
+    } else {
+      return null;
+    }
+  }
 
   const ref = options.preferClosestTo;
   const window = options.windowMs ?? 30 * 60 * 1000;
