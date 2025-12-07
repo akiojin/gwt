@@ -345,9 +345,8 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
           latestPerTool.map(async (entry) => {
             let sessionId = entry.sessionId ?? null;
 
-            // For Codex, if we don't have a sessionId (or it may be stale),
-            // attempt to read the latest Codex session from disk.
-            if (entry.toolId === "codex-cli") {
+            // For Codex, only when history has no sessionId, try filesystem latest.
+            if (!sessionId && entry.toolId === "codex-cli") {
               const latestCodex = await findLatestCodexSessionId();
               if (latestCodex) {
                 sessionId = latestCodex;
