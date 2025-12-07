@@ -86,7 +86,7 @@ async function findLatestFile(
 async function findLatestFileRecursive(
   dir: string,
   filter: (name: string) => boolean,
-): Promise<string | null> {
+) : Promise<string | null> {
   try {
     const entries = await readdir(dir, { withFileTypes: true });
     const candidates: { fullPath: string; mtime: number }[] = [];
@@ -115,6 +115,49 @@ async function findLatestFileRecursive(
   } catch {
     return null;
   }
+}
+
+async function findNewestSessionIdFromDir(
+  dir: string,
+  recursive: boolean,
+): Promise<string | null> {
+  try {
+    const entries = await readdir(dir, { withFileTypes: true });
+    const files: { fullPath: string; mtime: number }[] = [];
+
+    const processDir = async (currentDir: string) => {
+      const currentEntries = await readdir(currentDir, { withFileTypes: true });
+      for (const entry of currentEntries) {
+        const fullPath = path.join(currentDir, entry.name);
+        if (entry.isDirectory()) {
+          if (recursive) {
+            await processDir(fullPath);
+          }
+          continue;
+        }
+        if (!entry.isFile()) continue;
+        if (!entry.name.endsWith(".json") && !entry.name.endsWith(".jsonl"))
+          continue;
+        try {
+          const info = await stat(fullPath);
+          files.push({ fullPath, mtime: info.mtimeMs });
+        } catch {
+          // ignore unreadable
+        }
+      }
+    };
+
+    await processDir(dir);
+    files.sort((a, b) => b.mtime - a.mtime);
+
+    for (const file of files) {
+      const id = await readSessionIdFromFile(file.fullPath);
+      if (id) return id;
+    }
+  } catch {
+    // ignore
+  }
+  return null;
 }
 
 async function readSessionIdFromFile(filePath: string): Promise<string | null> {
@@ -274,25 +317,13 @@ export async function findLatestClaudeSessionId(
       const projectDir = path.join(claudeRoot, "projects", encoded);
       const sessionsDir = path.join(projectDir, "sessions");
 
-      // 1) Look under sessions/ (official location)
-      const latestSession = await findLatestFile(
-        sessionsDir,
-        (name) => name.endsWith(".jsonl") || name.endsWith(".json"),
-      );
-      if (latestSession) {
-        const id = await readSessionIdFromFile(latestSession);
-        if (id) return id;
-      }
+      // 1) Look under sessions/ (official location) - prefer newest file with valid ID
+      const sessionId = await findNewestSessionIdFromDir(sessionsDir, false);
+      if (sessionId) return sessionId;
 
-      // 2) Look directly under project dir (some versions emit files at root)
-      const latestProjectFile = await findLatestFileRecursive(
-        projectDir,
-        (name) => name.endsWith(".jsonl") || name.endsWith(".json"),
-      );
-      if (latestProjectFile) {
-        const id = await readSessionIdFromFile(latestProjectFile);
-        if (id) return id;
-      }
+      // 2) Look directly under project dir and subdirs (some versions emit files at root)
+      const rootSessionId = await findNewestSessionIdFromDir(projectDir, true);
+      if (rootSessionId) return rootSessionId;
     }
   }
 
