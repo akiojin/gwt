@@ -309,6 +309,10 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         const sessionData = await loadSession(root);
         const history = sessionData?.history ?? [];
         const latest = findLatestBranchSession(history, selectedBranch.name);
+        const latestReasoning =
+          latest?.reasoningLevel ??
+          sessionData?.reasoningLevel ??
+          null;
         if (!cancelled) {
           setBranchQuickStart(
             latest
@@ -316,7 +320,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
                   toolId: latest.toolId as AITool,
                   toolLabel: latest.toolLabel,
                   model: latest.model ?? null,
-                  inferenceLevel: latest.reasoningLevel as InferenceLevel | null,
+                  inferenceLevel: latestReasoning as InferenceLevel | null,
                   sessionId: latest.sessionId ?? null,
                 }
               : null,
