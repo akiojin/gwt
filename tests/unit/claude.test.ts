@@ -485,8 +485,8 @@ describe("launchClaudeCode - Root User Detection", () => {
         expect.objectContaining({
           cwd: "/test/path",
           shell: true,
-          stdout: "pipe",
-          stderr: "pipe",
+          stdout: "inherit",
+          stderr: "inherit",
         }),
       );
 
@@ -572,8 +572,8 @@ describe("launchClaudeCode - Root User Detection", () => {
         expect.objectContaining({
           cwd: "/test/path",
           shell: true,
-          stdout: "pipe",
-          stderr: "pipe",
+          stdout: "inherit",
+          stderr: "inherit",
           env: expect.objectContaining({
             IS_SANDBOX: "1",
           }),

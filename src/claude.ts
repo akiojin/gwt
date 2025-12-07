@@ -215,18 +215,10 @@ export async function launchClaudeCode(
           cwd: worktreePath,
           shell: true,
           stdin: childStdio.stdin,
-          stdout: "pipe",
-          stderr: "pipe",
+          stdout: childStdio.stdout,
+          stderr: childStdio.stderr,
           env: launchEnv,
         } as any);
-        child.stdout?.on("data", (d) => {
-          captureSessionId(d);
-          terminal.stdout.write(d);
-        });
-        child.stderr?.on("data", (d) => {
-          captureSessionId(d);
-          terminal.stderr.write(d);
-        });
         await child;
       } else {
         console.log(
