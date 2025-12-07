@@ -271,16 +271,21 @@ export async function launchClaudeCode(
     let capturedSessionId: string | null = sessionCapture.value ?? null;
     const finishedAt = Date.now();
     try {
-      const polled = await sessionProbe;
-      capturedSessionId =
-        polled ??
-        sessionCapture.value ??
-        (await findLatestClaudeSessionId(worktreePath, {
+      const [polled, latest] = await Promise.all([
+        sessionProbe,
+        findLatestClaudeSession(worktreePath, {
           since: startedAt - 60_000,
           until: finishedAt + 60_000,
           preferClosestTo: finishedAt,
           windowMs: 60 * 60 * 1000,
-        })) ??
+        }),
+      ]);
+
+      // Priority: latest on disk > captured from stdout > polled while running > resumeSessionId
+      capturedSessionId =
+        latest?.id ??
+        sessionCapture.value ??
+        polled ??
         resumeSessionId ??
         null;
     } catch {
