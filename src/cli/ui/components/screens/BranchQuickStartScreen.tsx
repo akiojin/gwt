@@ -102,62 +102,42 @@ export function BranchQuickStartScreen({
 
   const items: QuickStartItem[] = previousOptions.length
     ? (() => {
-        const grouped = new Map<
-          string,
-          {
-            meta: CategoryMeta;
-            entries: QuickStartItem[];
-          }
-        >();
-
-        previousOptions.forEach((opt) => {
-          const categoryMeta = resolveCategory(opt.toolId);
-          const resume: QuickStartItem = {
-            label: "Resume",
-            value: `reuse-continue:${opt.toolId ?? "unknown"}`,
-            action: "reuse-continue",
-            toolId: opt.toolId ?? null,
-            description: describe(opt, true),
-            category: categoryMeta.label,
-            categoryColor: categoryMeta.color,
-          };
-          const startNew: QuickStartItem = {
-            label: "New",
-            value: `reuse-new:${opt.toolId ?? "unknown"}`,
-            action: "reuse-new",
-            toolId: opt.toolId ?? null,
-            description: describe(opt, false),
-            category: categoryMeta.label,
-            categoryColor: categoryMeta.color,
-          };
-          const bucket = grouped.get(categoryMeta.label);
-          if (bucket) {
-            bucket.entries.push(resume, startNew);
-          } else {
-            grouped.set(categoryMeta.label, {
-              meta: categoryMeta,
-              entries: [resume, startNew],
-            });
-          }
+        const order = ["Codex", "Claude", "Gemini", "Qwen", "Other"];
+        const sorted = [...previousOptions].sort((a, b) => {
+          const ca = resolveCategory(a.toolId).label;
+          const cb = resolveCategory(b.toolId).label;
+          return order.indexOf(ca) - order.indexOf(cb);
         });
 
         const flat: QuickStartItem[] = [];
-        Array.from(grouped.values()).forEach((group, idx) => {
-          flat.push({
-            label: group.meta.label,
-            value: `header:${group.meta.label}:${idx}`,
-            action: "manual",
-            description: "",
-            disabled: true,
-            groupStart: idx === 0 ? false : true,
-            category: group.meta.label,
-            categoryColor: group.meta.color,
-          });
+        sorted.forEach((opt, idx) => {
+          const cat = resolveCategory(opt.toolId);
+          const groupStart =
+            idx === 0
+              ? false
+              : resolveCategory(sorted[idx - 1]?.toolId).label !== cat.label;
+
           flat.push(
-            ...group.entries.map((entry, entryIdx) => ({
-              ...entry,
-              value: `${entry.value}:${idx}:${entryIdx}`,
-            })),
+            {
+              label: "Resume",
+              value: `reuse-continue:${opt.toolId ?? "unknown"}:${idx}`,
+              action: "reuse-continue",
+              toolId: opt.toolId ?? null,
+              description: describe(opt, true),
+              groupStart,
+              category: cat.label,
+              categoryColor: cat.color,
+            },
+            {
+              label: "New",
+              value: `reuse-new:${opt.toolId ?? "unknown"}:${idx}`,
+              action: "reuse-new",
+              toolId: opt.toolId ?? null,
+              description: describe(opt, false),
+              groupStart: false,
+              category: cat.label,
+              categoryColor: cat.color,
+            },
           );
         });
 
