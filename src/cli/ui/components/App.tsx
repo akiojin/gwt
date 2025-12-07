@@ -54,6 +54,7 @@ import {
   resolveContinueSessionId,
   findLatestBranchSessionsByTool,
 } from "../utils/continueSession.js";
+import type { ToolSessionEntry } from "../../../config/index.js";
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
 const COMPLETION_HOLD_DURATION_MS = 3000;
