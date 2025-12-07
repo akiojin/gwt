@@ -409,30 +409,35 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
             // For Claude Code, prefer the newest session file in the worktree even if history is stale.
             if (entry.toolId === "claude-code") {
               try {
-                const claudeSession = await findLatestClaudeSession(
+                const worktree =
                   selectedWorktreePath ??
-                    selectedBranch?.displayName ??
-                    workingDirectory,
-                  {
-                    ...(entry.timestamp !== null && entry.timestamp !== undefined
-                      ? { since: entry.timestamp - 60_000, preferClosestTo: entry.timestamp }
-                      : {}),
-                    windowMs: 60 * 60 * 1000,
-                  },
-                );
-                if (claudeSession?.id) sessionId = claudeSession.id;
+                  selectedBranch?.displayName ??
+                  workingDirectory;
 
+                // Always resolve freshest on-disk session for this worktree
+                const claudeSession = await findLatestClaudeSession(worktree, {
+                  ...(entry.timestamp !== null && entry.timestamp !== undefined
+                    ? {
+                        since: entry.timestamp - 60_000,
+                        preferClosestTo: entry.timestamp,
+                      }
+                    : {}),
+                  windowMs: 60 * 60 * 1000,
+                });
+                sessionId = claudeSession?.id ?? sessionId ?? null;
+
+                // If still none, fetch absolute latest (no window)
+                if (!sessionId) {
+                  const latestAny = await findLatestClaudeSession(worktree);
+                  sessionId = latestAny?.id ?? null;
+                }
+
+                // Guard: ensure file actually exists; otherwise null out
                 if (
                   sessionId &&
                   !(await claudeSessionExists(sessionId, selectedWorktreePath))
                 ) {
-                  // If stale, try latest without timestamp constraint
-                  const latestClaude = await findLatestClaudeSession(
-                    selectedWorktreePath ??
-                      selectedBranch?.displayName ??
-                      workingDirectory,
-                  );
-                  sessionId = latestClaude?.id ?? null;
+                  sessionId = null;
                 }
               } catch {
                 // ignore lookup failure
