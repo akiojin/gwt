@@ -30,6 +30,7 @@ import {
   findLatestCodexSessionId,
   findLatestGeminiSessionId,
   findLatestQwenSessionId,
+  waitForClaudeSessionId,
   waitForCodexSessionId,
 } from "../../../src/utils/session.js";
 
@@ -161,6 +162,38 @@ describe("utils/session", () => {
 
     const id = await idPromise;
     expect(id).toBe("wait-456");
+  });
+
+  it("waitForClaudeSessionId polls until a session appears", async () => {
+    const dirent = (name: string, type: "file" | "dir") => ({
+      name,
+      isFile: () => type === "file",
+      isDirectory: () => type === "dir",
+    });
+
+    (readdir as any).mockImplementation((dir: string, opts?: any) => {
+      if (opts?.withFileTypes) {
+        if (dir.endsWith("/projects/-repo/sessions")) {
+          // First call: no files, second call: file appears
+          const count = (readdir as any).mock.calls.filter((c: any[]) =>
+            (c[0] as string).endsWith("/projects/-repo/sessions"),
+          ).length;
+          if (count >= 1) {
+            return Promise.resolve([dirent("s1.jsonl", "file")]);
+          }
+          return Promise.resolve([]);
+        }
+      }
+      return Promise.resolve([]);
+    });
+    (stat as any).mockResolvedValue({ mtimeMs: 10 });
+    (readFile as any).mockResolvedValue('{"session_id":"claude-123"}');
+
+    const id = await waitForClaudeSessionId("/repo", {
+      timeoutMs: 5_000,
+      pollIntervalMs: 10,
+    });
+    expect(id).toBe("claude-123");
   });
 
   it("findLatestClaudeSessionId reads JSONL lines and extracts session_id", async () => {
