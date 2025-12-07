@@ -70,11 +70,12 @@ export function BranchQuickStartScreen({
   branchName,
 }: BranchQuickStartScreenProps) {
   const { rows } = useTerminalSize();
+  const containerHeight = rows && rows > 0 ? rows : undefined;
 
   const items: QuickStartItem[] = previousOptions.length
     ? previousOptions.flatMap((opt, idx) => [
         {
-          label: `Resume with previous settings (${opt.toolLabel})`,
+          label: `${opt.toolLabel} — Resume`,
           value: `reuse-continue:${opt.toolId ?? "unknown"}`,
           action: "reuse-continue",
           toolId: opt.toolId ?? null,
@@ -82,7 +83,7 @@ export function BranchQuickStartScreen({
           groupStart: idx === 0 ? false : true,
         },
         {
-          label: `Start new with previous settings (${opt.toolLabel})`,
+          label: `${opt.toolLabel} — Start new`,
           value: `reuse-new:${opt.toolId ?? "unknown"}`,
           action: "reuse-new",
           toolId: opt.toolId ?? null,
@@ -121,7 +122,7 @@ export function BranchQuickStartScreen({
   });
 
   return (
-    <Box flexDirection="column" height={rows}>
+    <Box flexDirection="column" height={containerHeight}>
       <Header
         title="Quick Start"
         titleColor="cyan"
@@ -149,10 +150,10 @@ export function BranchQuickStartScreen({
               marginTop={item.groupStart ? 1 : 0}
             >
               <Text color={isSelected ? "cyan" : "white"}>
-                {item.label}
+                {`• ${item.label}`}
                 {item.disabled ? " (disabled)" : ""}
               </Text>
-              <Text color="gray">{item.description}</Text>
+              <Text color="gray">  {item.description}</Text>
             </Box>
           )}
         />
