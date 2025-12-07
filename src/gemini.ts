@@ -28,6 +28,18 @@ export async function launchGeminiCLI(
   } = {},
 ): Promise<{ sessionId?: string | null }> {
   const terminal = getTerminalStreams();
+  const sessionCapture: { value: string | null } = { value: null };
+
+  const captureSessionId = (chunk: Buffer | string) => {
+    const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+    const match = text.match(
+      /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i,
+    );
+    const id = match?.[1];
+    if (id && !sessionCapture.value) {
+      sessionCapture.value = id;
+    }
+  };
 
   try {
     // Check if the worktree path exists
@@ -135,14 +147,23 @@ export async function launchGeminiCLI(
 
     const runGemini = async (runArgs: string[]) => {
       if (hasLocalGemini) {
-        await execa("gemini", runArgs, {
+        const child = execa("gemini", runArgs, {
           cwd: worktreePath,
           shell: true,
           stdin: childStdio.stdin,
-          stdout: childStdio.stdout,
-          stderr: childStdio.stderr,
+          stdout: "pipe",
+          stderr: "pipe",
           env: baseEnv,
         } as any);
+        child.stdout?.on("data", (d) => {
+          captureSessionId(d);
+          terminal.stdout.write(d);
+        });
+        child.stderr?.on("data", (d) => {
+          captureSessionId(d);
+          terminal.stderr.write(d);
+        });
+        await child;
         return;
       }
       console.log(
@@ -156,14 +177,23 @@ export async function launchGeminiCLI(
       console.log(chalk.yellow("      npm install -g @google/gemini-cli"));
       console.log("");
       await new Promise((resolve) => setTimeout(resolve, 2000));
-      await execa("bunx", [GEMINI_CLI_PACKAGE, ...runArgs], {
+      const child = execa("bunx", [GEMINI_CLI_PACKAGE, ...runArgs], {
         cwd: worktreePath,
         shell: true,
         stdin: childStdio.stdin,
-        stdout: childStdio.stdout,
-        stderr: childStdio.stderr,
+        stdout: "pipe",
+        stderr: "pipe",
         env: baseEnv,
       } as any);
+      child.stdout?.on("data", (d) => {
+        captureSessionId(d);
+        terminal.stdout.write(d);
+      });
+      child.stderr?.on("data", (d) => {
+        captureSessionId(d);
+        terminal.stderr.write(d);
+      });
+      await child;
     };
 
     try {
@@ -189,14 +219,16 @@ export async function launchGeminiCLI(
       childStdio.cleanup();
     }
 
-    let capturedSessionId: string | null = null;
+    let capturedSessionId: string | null = sessionCapture.value ?? null;
     try {
-      capturedSessionId =
-        (await findLatestGeminiSessionId(worktreePath)) ??
-        resumeSessionId ??
-        null;
+      if (!capturedSessionId) {
+        capturedSessionId =
+          (await findLatestGeminiSessionId(worktreePath)) ??
+          resumeSessionId ??
+          null;
+      }
     } catch {
-      capturedSessionId = resumeSessionId ?? null;
+      capturedSessionId = sessionCapture.value ?? resumeSessionId ?? null;
     }
 
     if (capturedSessionId) {
