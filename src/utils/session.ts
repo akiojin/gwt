@@ -18,6 +18,19 @@ function pickSessionIdFromObject(obj: unknown): string | null {
   return null;
 }
 
+function pickCwdFromObject(obj: unknown): string | null {
+  if (!obj || typeof obj !== "object") return null;
+  const candidate = obj as Record<string, unknown>;
+  const keys = ["cwd", "workingDirectory", "workdir", "directory", "projectPath"];
+  for (const key of keys) {
+    const value = candidate[key];
+    if (typeof value === "string" && value.trim().length > 0) {
+      return value;
+    }
+  }
+  return null;
+}
+
 function pickSessionIdFromText(content: string): string | null {
   // Try whole content as JSON
   try {
@@ -191,6 +204,43 @@ async function readSessionIdFromFile(filePath: string): Promise<string | null> {
   }
 }
 
+async function readSessionInfoFromFile(
+  filePath: string,
+): Promise<{ id: string | null; cwd: string | null }> {
+  try {
+    const content = await readFile(filePath, "utf-8");
+    try {
+      const parsed = JSON.parse(content);
+      const id = pickSessionIdFromObject(parsed);
+      const cwd = pickCwdFromObject(parsed);
+      if (id || cwd) return { id, cwd };
+    } catch {
+      // ignore
+    }
+
+    const lines = content.split(/\r?\n/);
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const parsedLine = JSON.parse(trimmed);
+        const id = pickSessionIdFromObject(parsedLine);
+        const cwd = pickCwdFromObject(parsedLine);
+        if (id || cwd) return { id, cwd };
+      } catch {
+        // ignore
+      }
+    }
+
+    // Fallback: filename UUID
+    const filenameMatch = path.basename(filePath).match(UUID_REGEX);
+    if (filenameMatch) return { id: filenameMatch[0], cwd: null };
+  } catch {
+    // ignore unreadable
+  }
+  return { id: null, cwd: null };
+}
+
 export interface CodexSessionInfo {
   id: string;
   mtime: number;
@@ -234,6 +284,7 @@ export async function findLatestCodexSession(
     until?: number;
     preferClosestTo?: number;
     windowMs?: number;
+    cwd?: string | null;
   } = {},
 ): Promise<CodexSessionInfo | null> {
   // Codex CLI respects CODEX_HOME. Default is ~/.codex.
@@ -257,37 +308,44 @@ export async function findLatestCodexSession(
 
   if (!pool.length) return null;
 
-  let chosen: { fullPath: string; mtime: number } | null = null;
+  const ref = options.preferClosestTo;
+  const window = options.windowMs ?? 30 * 60 * 1000; // 30 minutes default
+  const ordered = [...pool].sort((a, b) => {
+    if (typeof ref === "number") {
+      const da = Math.abs(a.mtime - ref);
+      const db = Math.abs(b.mtime - ref);
+      if (da === db) return b.mtime - a.mtime;
+      if (da <= window || db <= window) return da - db;
+    }
+    return b.mtime - a.mtime;
+  });
 
-  if (typeof options.preferClosestTo === "number") {
-    const ref = options.preferClosestTo;
-    const window = options.windowMs ?? 30 * 60 * 1000; // 30 minutes default
-    const withinWindow = pool.filter(
-      (c) => Math.abs(c.mtime - ref) <= window,
-    );
-    const scored = (withinWindow.length ? withinWindow : pool).sort((a, b) => {
-      const diffA = Math.abs(a.mtime - ref);
-      const diffB = Math.abs(b.mtime - ref);
-      if (diffA === diffB) {
-        return b.mtime - a.mtime;
+  for (const file of ordered) {
+    const info = await readSessionInfoFromFile(file.fullPath);
+    if (!info.id) continue;
+    if (options.cwd) {
+      if (
+        info.cwd &&
+        (info.cwd === options.cwd || info.cwd.startsWith(options.cwd))
+      ) {
+        return { id: info.id, mtime: file.mtime };
       }
-      return diffA - diffB;
-    });
-    chosen = scored[0] ?? null;
-  } else {
-    const sorted = [...pool].sort((a, b) => b.mtime - a.mtime);
-    chosen = sorted[0] ?? null;
+      continue;
+    }
+    return { id: info.id, mtime: file.mtime };
   }
 
-  if (!chosen) return null;
-
-  const id = await readSessionIdFromFile(chosen.fullPath);
-  if (!id) return null;
-  return { id, mtime: chosen.mtime };
+  return null;
 }
 
 export async function findLatestCodexSessionId(
-  options: { since?: number; until?: number; preferClosestTo?: number; windowMs?: number } = {},
+  options: {
+    since?: number;
+    until?: number;
+    preferClosestTo?: number;
+    windowMs?: number;
+    cwd?: string | null;
+  } = {},
 ): Promise<string | null> {
   const found = await findLatestCodexSession(options);
   return found?.id ?? null;
@@ -297,6 +355,7 @@ export async function waitForCodexSessionId(options: {
   startedAt: number;
   timeoutMs?: number;
   pollIntervalMs?: number;
+  cwd?: string | null;
 }): Promise<string | null> {
   const timeoutMs = options.timeoutMs ?? 120_000;
   const pollIntervalMs = options.pollIntervalMs ?? 2_000;
@@ -307,6 +366,7 @@ export async function waitForCodexSessionId(options: {
       since: options.startedAt - 30_000,
       preferClosestTo: options.startedAt,
       windowMs: 30 * 60 * 1000,
+      cwd: options.cwd ?? null,
     });
     if (found?.id) return found.id;
     await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
@@ -472,7 +532,7 @@ async function findLatestNestedSessionFile(
 
 export async function findLatestGeminiSession(
   _cwd: string,
-  options: { since?: number; until?: number; preferClosestTo?: number; windowMs?: number } = {},
+  options: { since?: number; until?: number; preferClosestTo?: number; windowMs?: number; cwd?: string | null } = {},
 ): Promise<GeminiSessionInfo | null> {
   // Gemini stores sessions/logs under ~/.gemini/tmp/<project_hash>/(chats|logs).json
   const baseDir = path.join(homedir(), ".gemini", "tmp");
@@ -513,8 +573,18 @@ export async function findLatestGeminiSession(
     });
 
   for (const file of pool) {
-    const id = await readSessionIdFromFile(file.fullPath);
-    if (id) return { id, mtime: file.mtime };
+    const info = await readSessionInfoFromFile(file.fullPath);
+    if (!info.id) continue;
+    if (options.cwd) {
+      if (
+        info.cwd &&
+        (info.cwd === options.cwd || info.cwd.startsWith(options.cwd))
+      ) {
+        return { id: info.id, mtime: file.mtime };
+      }
+      continue;
+    }
+    return { id: info.id, mtime: file.mtime };
   }
 
   return null;
@@ -522,7 +592,7 @@ export async function findLatestGeminiSession(
 
 export async function findLatestGeminiSessionId(
   cwd: string,
-  options: { since?: number; until?: number; preferClosestTo?: number; windowMs?: number } = {},
+  options: { since?: number; until?: number; preferClosestTo?: number; windowMs?: number; cwd?: string | null } = {},
 ): Promise<string | null> {
   const normalized: { since?: number; until?: number; preferClosestTo?: number; windowMs?: number } = {};
   if (options.since !== undefined) normalized.since = options.since as number;
@@ -531,7 +601,7 @@ export async function findLatestGeminiSessionId(
     normalized.preferClosestTo = options.preferClosestTo as number;
   if (options.windowMs !== undefined) normalized.windowMs = options.windowMs as number;
 
-  const found = await findLatestGeminiSession(cwd, normalized as any);
+  const found = await findLatestGeminiSession(cwd, { ...normalized, cwd: options.cwd ?? cwd });
   return found?.id ?? null;
 }
 

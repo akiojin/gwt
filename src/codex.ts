@@ -98,7 +98,7 @@ export async function launchCodexCLI(
         : null;
 
     // Start polling session files immediately to catch the session created right after launch.
-    const sessionProbe = waitForCodexSessionId({ startedAt }).catch(
+    const sessionProbe = waitForCodexSessionId({ startedAt, cwd: worktreePath }).catch(
       () => null,
     );
 
@@ -186,6 +186,7 @@ export async function launchCodexCLI(
           until: Date.now() + 60_000,
           preferClosestTo: Date.now(),
           windowMs: 60 * 60 * 1000, // 60 minutes around launch window
+          cwd: worktreePath,
         }));
       capturedSessionId = found ?? resumeSessionId ?? null;
     } catch {
