@@ -33,7 +33,9 @@ describe("BranchQuickStartScreen", () => {
     const titleMatches = getAllByText(/Resume with previous settings/);
     expect(titleMatches.length).toBeGreaterThan(0);
     expect(
-      getByText(/Codex \/ gpt-5.1-codex \/ Reasoning: high \/ ID: abc-123/),
+      getByText(
+        /Codex \/ gpt-5.1-codex \/ Reasoning: High \/ ID: abc-123/,
+      ),
     ).toBeDefined();
   });
 

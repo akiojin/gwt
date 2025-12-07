@@ -14,6 +14,16 @@ export interface BranchQuickStartOption {
   inferenceLevel?: string | null;
 }
 
+const REASONING_LABELS: Record<string, string> = {
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  xhigh: "Extra high",
+};
+
+const formatReasoning = (level?: string | null) =>
+  level ? REASONING_LABELS[level] ?? level : "Default";
+
 type QuickStartItem = SelectItem & {
   description: string;
   disabled?: boolean;
@@ -43,7 +53,7 @@ export function BranchQuickStartScreen({
       label: "Resume with previous settings",
       value: "reuse-continue",
       description: previousOption
-        ? `${previousOption.toolLabel} / ${previousOption.model ?? "default"} / Reasoning: ${previousOption.inferenceLevel ?? "default"} / ${previousOption.sessionId ? `ID: ${previousOption.sessionId}` : "No ID"}`
+        ? `${previousOption.toolLabel} / ${previousOption.model ?? "default"} / Reasoning: ${formatReasoning(previousOption.inferenceLevel)} / ${previousOption.sessionId ? `ID: ${previousOption.sessionId}` : "No ID"}`
         : "No previous settings (disabled)",
       disabled: !previousOption,
     },
@@ -51,7 +61,7 @@ export function BranchQuickStartScreen({
       label: "Start new with previous settings",
       value: "reuse-new",
       description: previousOption
-        ? `${previousOption.toolLabel} / ${previousOption.model ?? "default"}`
+        ? `${previousOption.toolLabel} / ${previousOption.model ?? "default"} / Reasoning: ${formatReasoning(previousOption.inferenceLevel)}`
         : "No previous settings (disabled)",
       disabled: !previousOption,
     },
