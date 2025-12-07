@@ -53,6 +53,7 @@ type QuickStartItem = SelectItem & {
   groupStart?: boolean;
   category: string;
   categoryColor: "cyan" | "yellow" | "magenta" | "green" | "white";
+  kind: "header" | "action";
 };
 
 export interface BranchQuickStartScreenProps {
@@ -102,47 +103,62 @@ export function BranchQuickStartScreen({
 
   const items: QuickStartItem[] = previousOptions.length
     ? (() => {
-        const order = ["Codex", "Claude", "Gemini", "Qwen", "Other"];
-        const sorted = [...previousOptions].sort((a, b) => {
-          const ca = resolveCategory(a.toolId).label;
-          const cb = resolveCategory(b.toolId).label;
-          return order.indexOf(ca) - order.indexOf(cb);
-        });
+      const order = ["Codex", "Claude", "Gemini", "Qwen", "Other"];
+      const sorted = [...previousOptions].sort((a, b) => {
+        const ca = resolveCategory(a.toolId).label;
+        const cb = resolveCategory(b.toolId).label;
+        return order.indexOf(ca) - order.indexOf(cb);
+      });
 
-        const flat: QuickStartItem[] = [];
-        sorted.forEach((opt, idx) => {
-          const cat = resolveCategory(opt.toolId);
-          const groupStart =
-            idx === 0
-              ? false
-              : resolveCategory(sorted[idx - 1]?.toolId).label !== cat.label;
+      const flat: QuickStartItem[] = [];
+      sorted.forEach((opt, idx) => {
+        const cat = resolveCategory(opt.toolId);
+        const prevCat =
+          idx > 0 ? resolveCategory(sorted[idx - 1]?.toolId).label : null;
+        const isNewCategory = prevCat !== cat.label;
 
-          flat.push(
-            {
-              label: "Resume",
-              value: `reuse-continue:${opt.toolId ?? "unknown"}:${idx}`,
-              action: "reuse-continue",
-              toolId: opt.toolId ?? null,
-              description: describe(opt, true),
-              groupStart,
-              category: cat.label,
-              categoryColor: cat.color,
-            },
-            {
-              label: "New",
-              value: `reuse-new:${opt.toolId ?? "unknown"}:${idx}`,
-              action: "reuse-new",
-              toolId: opt.toolId ?? null,
-              description: describe(opt, false),
-              groupStart: false,
-              category: cat.label,
-              categoryColor: cat.color,
-            },
-          );
-        });
+        if (isNewCategory) {
+          flat.push({
+            label: `[${cat.label}]`,
+            value: `header:${cat.label}:${idx}`,
+            action: "manual",
+            description: "",
+            disabled: true,
+            groupStart: flat.length > 0,
+            category: cat.label,
+            categoryColor: cat.color,
+            kind: "header",
+          });
+        }
 
-        return flat;
-      })()
+        flat.push(
+          {
+            label: "Resume",
+            value: `reuse-continue:${opt.toolId ?? "unknown"}:${idx}`,
+            action: "reuse-continue",
+            toolId: opt.toolId ?? null,
+            description: describe(opt, true),
+            groupStart: false,
+            category: cat.label,
+            categoryColor: cat.color,
+            kind: "action",
+          },
+          {
+            label: "New",
+            value: `reuse-new:${opt.toolId ?? "unknown"}:${idx}`,
+            action: "reuse-new",
+            toolId: opt.toolId ?? null,
+            description: describe(opt, false),
+            groupStart: false,
+            category: cat.label,
+            categoryColor: cat.color,
+            kind: "action",
+          },
+        );
+      });
+
+      return flat;
+    })()
     : [
         {
           label: "Resume with previous settings",
@@ -152,6 +168,7 @@ export function BranchQuickStartScreen({
           disabled: true,
           category: CATEGORY_META.other.label,
           categoryColor: CATEGORY_META.other.color,
+          kind: "header",
         },
         {
           label: "Start new with previous settings",
@@ -161,6 +178,7 @@ export function BranchQuickStartScreen({
           disabled: true,
           category: CATEGORY_META.other.label,
           categoryColor: CATEGORY_META.other.color,
+          kind: "action",
         },
       ];
 
@@ -171,6 +189,7 @@ export function BranchQuickStartScreen({
     description: "Pick tool and model manually",
     category: CATEGORY_META.other.label,
     categoryColor: CATEGORY_META.other.color,
+    kind: "action",
   });
 
   useInput((_, key) => {
@@ -200,7 +219,7 @@ export function BranchQuickStartScreen({
           items={items}
           onSelect={(item: QuickStartItem) => {
             if (item.disabled) return;
-            onSelect(item.action, item.toolId ?? null);
+          onSelect(item.action, item.toolId ?? null);
           }}
           renderItem={(item: QuickStartItem, isSelected) => (
             <Box
@@ -211,12 +230,12 @@ export function BranchQuickStartScreen({
                 color={isSelected ? "white" : item.categoryColor}
                 inverse={isSelected}
               >
-                {item.disabled
-                  ? `[${item.category}]`
-                  : `[${item.category}] ${item.label}`}
+                {item.kind === "header"
+                  ? item.label
+                  : `  ${item.label}`}
                 {item.disabled ? " (disabled)" : ""}
               </Text>
-              {item.description && (
+              {item.kind === "action" && item.description && (
                 <Text color="gray">  {item.description}</Text>
               )}
             </Box>
