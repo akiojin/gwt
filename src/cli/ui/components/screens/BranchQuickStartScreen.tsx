@@ -82,7 +82,9 @@ export function BranchQuickStartScreen({
     return "Other";
   };
 
-  const categoryColor = (cat: string): keyof typeof Text.prototype.props["color"] => {
+  const categoryColor = (
+    cat: string,
+  ): "cyan" | "yellow" | "magenta" | "green" | "white" => {
     switch (cat) {
       case "Codex":
         return "cyan";
