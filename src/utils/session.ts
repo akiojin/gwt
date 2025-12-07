@@ -155,21 +155,20 @@ async function findNewestSessionIdFromDir(
     if (options.until !== undefined) {
       files.splice(0, files.length, ...files.filter((f) => f.mtime <= options.until!));
     }
-    const sorted = files.sort((a, b) => b.mtime - a.mtime);
-
+    const window = options.windowMs ?? 30 * 60 * 1000;
     const ref = options.preferClosestTo;
+    let pool = files.sort((a, b) => b.mtime - a.mtime);
+
     if (typeof ref === "number") {
-      const window = options.windowMs ?? 30 * 60 * 1000;
-      sorted.sort((a, b) => {
-        const da = Math.abs(a.mtime - ref);
-        const db = Math.abs(b.mtime - ref);
-        if (da === db) return b.mtime - a.mtime;
-        if (da <= window || db <= window) return da - db;
-        return b.mtime - a.mtime;
-      });
+      const withinWindow = pool.filter(
+        (f) => Math.abs(f.mtime - ref) <= window,
+      );
+      if (withinWindow.length) {
+        pool = withinWindow.sort((a, b) => b.mtime - a.mtime);
+      }
     }
 
-    for (const file of sorted) {
+    for (const file of pool) {
       const id = await readSessionIdFromFile(file.fullPath);
       if (id) return { id, mtime: file.mtime };
     }
