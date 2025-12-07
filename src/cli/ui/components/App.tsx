@@ -315,6 +315,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         const latestPerTool = findLatestBranchSessionsByTool(
           history,
           selectedBranch.name,
+          selectedWorktreePath,
         );
 
         const mapped = latestPerTool.map((entry) => ({
@@ -405,6 +406,12 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     () => branches.filter((branch) => !hiddenBranches.includes(branch.name)),
     [branches, hiddenBranches],
   );
+
+  const selectedWorktreePath = useMemo(() => {
+    if (!selectedBranch) return null;
+    const wt = worktrees.find((w) => w.branch === selectedBranch.name);
+    return wt?.path ?? null;
+  }, [selectedBranch, worktrees]);
 
   // Helper function to create content-based hash for branches
   const branchHash = useMemo(
