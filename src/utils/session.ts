@@ -120,7 +120,7 @@ async function findLatestFileRecursive(
 async function findNewestSessionIdFromDir(
   dir: string,
   recursive: boolean,
-  options: { since?: number; preferClosestTo?: number; windowMs?: number } = {},
+  options: { since?: number; until?: number; preferClosestTo?: number; windowMs?: number } = {},
 ): Promise<{ id: string; mtime: number } | null> {
   try {
     const entries = await readdir(dir, { withFileTypes: true });
@@ -149,12 +149,11 @@ async function findNewestSessionIdFromDir(
     };
 
     await processDir(dir);
-    if (options.since) {
-      files.splice(
-        0,
-        files.length,
-        ...files.filter((f) => f.mtime >= options.since!),
-      );
+    if (options.since !== undefined) {
+      files.splice(0, files.length, ...files.filter((f) => f.mtime >= options.since!));
+    }
+    if (options.until !== undefined) {
+      files.splice(0, files.length, ...files.filter((f) => f.mtime <= options.until!));
     }
     const sorted = files.sort((a, b) => b.mtime - a.mtime);
 
@@ -226,7 +225,12 @@ async function collectFilesRecursive(
 }
 
 export async function findLatestCodexSession(
-  options: { since?: number; preferClosestTo?: number; windowMs?: number } = {},
+  options: {
+    since?: number;
+    until?: number;
+    preferClosestTo?: number;
+    windowMs?: number;
+  } = {},
 ): Promise<CodexSessionInfo | null> {
   // Codex CLI respects CODEX_HOME. Default is ~/.codex.
   const codexHome = process.env.CODEX_HOME ?? path.join(homedir(), ".codex");
@@ -240,7 +244,11 @@ export async function findLatestCodexSession(
   const sinceFiltered = options.since
     ? candidates.filter((c) => c.mtime >= options.since!)
     : candidates;
-  const pool = sinceFiltered.length ? sinceFiltered : candidates;
+  const bounded =
+    options.until !== undefined
+      ? sinceFiltered.filter((c) => c.mtime <= options.until!)
+      : sinceFiltered;
+  const pool = bounded.length ? bounded : sinceFiltered.length ? sinceFiltered : candidates;
 
   let chosen: { fullPath: string; mtime: number } | null = null;
 
