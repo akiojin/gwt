@@ -53,12 +53,25 @@ export async function resolveContinueSessionId(
 export function findLatestBranchSession(
   history: ToolSessionEntry[],
   branch: string,
+  toolId?: string | null,
 ): ToolSessionEntry | null {
-  for (let i = history.length - 1; i >= 0; i -= 1) {
-    const entry = history[i];
-    if (entry && entry.branch === branch) {
-      return entry;
+  const byBranch = history.filter((entry) => entry && entry.branch === branch);
+  if (!byBranch.length) return null;
+
+  const pickLatest = (entries: ToolSessionEntry[]) =>
+    entries.reduce<ToolSessionEntry | null>((latest, entry) => {
+      if (!latest) return entry;
+      const latestTs = latest.timestamp ?? 0;
+      const currentTs = entry.timestamp ?? 0;
+      return currentTs >= latestTs ? entry : latest;
+    }, null);
+
+  if (toolId) {
+    const byTool = byBranch.filter((entry) => entry.toolId === toolId);
+    if (byTool.length) {
+      return pickLatest(byTool);
     }
   }
-  return null;
+
+  return pickLatest(byBranch);
 }
