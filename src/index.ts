@@ -36,6 +36,7 @@ import {
 import { getToolById, getSharedEnvironment } from "./config/tools.js";
 import { launchCustomAITool } from "./launcher.js";
 import { saveSession, loadSession } from "./config/index.js";
+import { findLatestCodexSession } from "./utils/session.js";
 import { getPackageVersion } from "./utils.js";
 import { findLatestClaudeSessionId } from "./utils/session.js";
 import readline from "node:readline";
@@ -609,6 +610,8 @@ export async function handleAIToolWorkflow(
       }
     }
 
+    const launchStartedAt = Date.now();
+
     // Launch selected AI tool
     // Builtin tools use their dedicated launch functions
     // Custom tools use the generic launchCustomAITool function
@@ -732,6 +735,20 @@ export async function handleAIToolWorkflow(
         finalSessionId = (await findLatestClaudeSessionId(worktreePath)) ?? null;
       } catch {
         finalSessionId = null;
+      }
+    }
+    if (tool === "codex-cli") {
+      try {
+        const latest = await findLatestCodexSession({
+          since: launchStartedAt - 60_000,
+          preferClosestTo: launchStartedAt,
+          windowMs: 60 * 60 * 1000,
+        });
+        if (latest) {
+          finalSessionId = latest.id;
+        }
+      } catch {
+        // ignore fallback failure
       }
     }
 
