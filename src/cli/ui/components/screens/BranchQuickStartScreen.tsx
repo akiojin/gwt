@@ -74,34 +74,23 @@ export function BranchQuickStartScreen({
   const { rows } = useTerminalSize();
   const containerHeight = rows && rows > 0 ? rows : undefined;
 
-  const categorize = (toolId?: string | null): string => {
-    if (toolId === "codex-cli") return "Codex";
-    if (toolId === "claude-code") return "Claude";
-    if (toolId === "gemini-cli") return "Gemini";
-    if (toolId === "qwen-cli") return "Qwen";
-    return "Other";
+  const CATEGORY_META: Record<
+    string,
+    { label: string; color: "cyan" | "yellow" | "magenta" | "green" | "white" }
+  > = {
+    "codex-cli": { label: "Codex", color: "cyan" },
+    "claude-code": { label: "Claude", color: "yellow" },
+    "gemini-cli": { label: "Gemini", color: "magenta" },
+    "qwen-cli": { label: "Qwen", color: "green" },
+    other: { label: "Other", color: "white" },
   };
 
-  const categoryColor = (
-    cat: string,
-  ): "cyan" | "yellow" | "magenta" | "green" | "white" => {
-    switch (cat) {
-      case "Codex":
-        return "cyan";
-      case "Claude":
-        return "yellow";
-      case "Gemini":
-        return "magenta";
-      case "Qwen":
-        return "green";
-      default:
-        return "white";
-    }
-  };
+  const resolveCategory = (toolId?: string | null) =>
+    CATEGORY_META[toolId ?? ""] ?? CATEGORY_META.other;
 
   const items: QuickStartItem[] = previousOptions.length
     ? previousOptions.flatMap((opt, idx) => {
-        const category = categorize(opt.toolId);
+        const category = resolveCategory(opt.toolId);
         return [
           {
             label: `Resume • ${opt.toolLabel}`,
@@ -110,7 +99,7 @@ export function BranchQuickStartScreen({
             toolId: opt.toolId ?? null,
             description: describe(opt, true),
             groupStart: idx === 0 ? false : true,
-            category,
+            category: category.label,
           },
           {
             label: `New • ${opt.toolLabel}`,
@@ -119,7 +108,7 @@ export function BranchQuickStartScreen({
             toolId: opt.toolId ?? null,
             description: describe(opt, false),
             groupStart: false,
-            category,
+            category: category.label,
           },
         ];
       })
@@ -185,7 +174,19 @@ export function BranchQuickStartScreen({
               marginTop={item.groupStart ? 1 : item.category === "Other" ? 1 : 0}
             >
               <Text
-                color={isSelected ? "white" : categoryColor(item.category)}
+                color={
+                  isSelected
+                    ? "white"
+                    : CATEGORY_META[
+                        Object.values(CATEGORY_META).find(
+                          (m) => m.label === item.category,
+                        )
+                          ? Object.entries(CATEGORY_META).find(
+                              ([, m]) => m.label === item.category,
+                            )?.[0] ?? "other"
+                          : "other"
+                      ].color
+                }
                 inverse={isSelected}
               >
                 {`[${item.category}] ${item.label}`}
