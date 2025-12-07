@@ -1104,6 +1104,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
                 ? {
                     toolLabel: branchQuickStart.toolLabel,
                     model: branchQuickStart.model ?? null,
+                    inferenceLevel: branchQuickStart.inferenceLevel ?? null,
                     sessionId: branchQuickStart.sessionId ?? null,
                   }
                 : null
