@@ -153,13 +153,6 @@ export async function launchCodexCLI(
         env,
       } as any);
       await child;
-    } catch (execError: any) {
-      // Treat SIGINT/SIGTERM as normal exit (user pressed Ctrl+C)
-      if (execError.signal === "SIGINT" || execError.signal === "SIGTERM") {
-        // Normal user-initiated exit, continue to session detection
-      } else {
-        throw execError;
-      }
     } finally {
       childStdio.cleanup();
     }
