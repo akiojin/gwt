@@ -73,6 +73,7 @@
 1. **前提条件** 対象ブランチの履歴に`toolId/model/sessionId`がある、**操作** ブランチ選択→「前回設定で続きから」を選択、**期待結果** ツール・モデルが前回値でセットされ、Continue/Resumeモード選択へ進み、sessionIdが事前入力される。
 2. **前提条件** 対象ブランチの履歴に`toolId/model`はあるが`sessionId`が無い、**操作** ブランチ選択→「前回設定で新規」を選択、**期待結果** ツール・モデルが前回値でセットされ、新規開始モードで起動フローに進む。
 3. **前提条件** 対象ブランチに履歴が無い、**操作** ブランチ選択、**期待結果** クイック選択をスキップし従来のツール選択画面に遷移する。
+4. **表示ルール** Quick Startではツール固有の情報のみ表示する。CodexではReasoningレベルを表示するが、Claude/Gemini/QwenではReasoningを表示しない。また「Start new with previous settings」ではセッションIDを表示しない（IDは「Resume with previous settings」のみで提示する）。
 
 ---
 
@@ -96,6 +97,7 @@
 - **FR-009**: Gemini CLIでは終了後に`~/.gemini/tmp/<project_hash>/chats/*.json`の最新ファイルからIDを抽出し、Continue/Resume時は`--resume <id>`を優先、ID不明時は`--resume`（latest）にフォールバックしなければならない。
 - **FR-010**: Qwen CLIでは終了後に`~/.qwen/tmp/<project_hash>/`配下の保存ファイル（/chat save or checkpoint）からタグ/IDを抽出し履歴に保存しなければならない。Continue/Resume時には保存タグを表示し、`/chat resume <tag>` の案内を必ず出すこと（自動再開できない場合のフォールバック）。
 - **FR-011**: ブランチ選択直後、同ブランチの最新履歴が存在する場合は前回の`toolId/model/sessionId`を提示するクイック選択を表示し、「前回設定で続きから」「前回設定で新規」「設定を選び直す」の3択を提供しなければならない。履歴が無い場合は従来のツール選択にフォールバックする。
+- **FR-012**: Quick Startの表示内容はツール能力に応じて切り替えること。CodexのみReasoningレベルを表示し、他ツールでは非表示とする。また「Start new with previous settings」ではセッションIDを表示しない。
 
 ### 主要エンティティ
 - **SessionData**: `lastWorktreePath`, `lastBranch`, `lastUsedTool`, `mode`, `model`, 追加で `lastSessionId` を持つ。履歴`history[]`に`sessionId`/`toolId`/`branch`/`timestamp`を保持。
