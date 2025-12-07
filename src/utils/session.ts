@@ -242,10 +242,22 @@ export function encodeClaudeProjectPath(cwd: string): string {
   return normalized.replace(/_/g, "-").replace(/\//g, "-");
 }
 
+function generateClaudeProjectPathCandidates(cwd: string): string[] {
+  const base = encodeClaudeProjectPath(cwd);
+  const dotToDash = cwd
+    .replace(/\\/g, "/")
+    .replace(/:/g, "")
+    .replace(/\./g, "-")
+    .replace(/_/g, "-")
+    .replace(/\//g, "-");
+  const collapsed = dotToDash.replace(/-+/g, "-");
+  const candidates = [base, dotToDash, collapsed];
+  return Array.from(new Set(candidates));
+}
+
 export async function findLatestClaudeSessionId(
   cwd: string,
 ): Promise<string | null> {
-  const encoded = encodeClaudeProjectPath(cwd);
   const rootCandidates: string[] = [];
   if (process.env.CLAUDE_CONFIG_DIR) {
     rootCandidates.push(process.env.CLAUDE_CONFIG_DIR);
@@ -255,15 +267,19 @@ export async function findLatestClaudeSessionId(
     path.join(homedir(), ".config", "claude"),
   );
 
+  const encodedPaths = generateClaudeProjectPathCandidates(cwd);
+
   for (const claudeRoot of rootCandidates) {
-    const baseDir = path.join(claudeRoot, "projects", encoded, "sessions");
-    const latest = await findLatestFile(
-      baseDir,
-      (name) => name.endsWith(".jsonl") || name.endsWith(".json"),
-    );
-    if (latest) {
-      const id = await readSessionIdFromFile(latest);
-      if (id) return id;
+    for (const encoded of encodedPaths) {
+      const baseDir = path.join(claudeRoot, "projects", encoded, "sessions");
+      const latest = await findLatestFile(
+        baseDir,
+        (name) => name.endsWith(".jsonl") || name.endsWith(".json"),
+      );
+      if (latest) {
+        const id = await readSessionIdFromFile(latest);
+        if (id) return id;
+      }
     }
   }
 
