@@ -41,6 +41,12 @@ function pickCwdFromObject(obj: unknown): string | null {
       return value;
     }
   }
+  // Check nested payload object (for Codex session format)
+  const payload = candidate["payload"];
+  if (payload && typeof payload === "object") {
+    const nested = pickCwdFromObject(payload);
+    if (nested) return nested;
+  }
   return null;
 }
 

@@ -121,6 +121,80 @@ describe("utils/session", () => {
     expect(id).toBe("019af438-56b3-7b32-bf8e-a5faeba5c9db");
   });
 
+  it("findLatestCodexSessionId extracts cwd from nested payload object", async () => {
+    const dirent = (name: string, type: "file" | "dir") => ({
+      name,
+      isFile: () => type === "file",
+      isDirectory: () => type === "dir",
+    });
+
+    const sessionUuid = "019af9b0-1d45-7840-a20a-c579b2710459";
+
+    (readdir as any).mockImplementation((dir: string, opts?: any) => {
+      if (opts?.withFileTypes) {
+        if (dir.endsWith("/.codex/sessions")) {
+          return Promise.resolve([dirent("2025", "dir")]);
+        }
+        if (dir.endsWith("/.codex/sessions/2025")) {
+          return Promise.resolve([dirent("12", "dir")]);
+        }
+        if (dir.endsWith("/.codex/sessions/2025/12")) {
+          return Promise.resolve([
+            dirent(`rollout-2025-12-07T16-40-59-${sessionUuid}.jsonl`, "file"),
+          ]);
+        }
+      }
+      return Promise.resolve([]);
+    });
+    (stat as any).mockResolvedValue({ mtimeMs: 300 });
+    // Codex session format: cwd is inside payload object
+    (readFile as any).mockResolvedValue(
+      JSON.stringify({
+        timestamp: "2025-12-07T16:40:59.000Z",
+        type: "session_meta",
+        payload: { id: sessionUuid, cwd: "/gwt" },
+      }),
+    );
+
+    // cwd option matches worktree path, session cwd is repo root
+    const id = await findLatestCodexSessionId({ cwd: "/gwt/.worktrees/feature" });
+    expect(id).toBe(sessionUuid);
+  });
+
+  it("findLatestCodexSessionId matches when worktree path starts with session cwd", async () => {
+    const dirent = (name: string, type: "file" | "dir") => ({
+      name,
+      isFile: () => type === "file",
+      isDirectory: () => type === "dir",
+    });
+
+    const sessionUuid = "abcdabcd-abcd-abcd-abcd-abcdabcdabcd";
+
+    (readdir as any).mockImplementation((dir: string, opts?: any) => {
+      if (opts?.withFileTypes) {
+        if (dir.endsWith("/.codex/sessions")) {
+          return Promise.resolve([dirent("2025", "dir")]);
+        }
+        if (dir.endsWith("/.codex/sessions/2025")) {
+          return Promise.resolve([dirent("12", "dir")]);
+        }
+        if (dir.endsWith("/.codex/sessions/2025/12")) {
+          return Promise.resolve([dirent(`rollout-${sessionUuid}.jsonl`, "file")]);
+        }
+      }
+      return Promise.resolve([]);
+    });
+    (stat as any).mockResolvedValue({ mtimeMs: 500 });
+    // Session cwd is /repo, but we search with /repo/.worktrees/branch
+    (readFile as any).mockResolvedValue(
+      JSON.stringify({ payload: { id: sessionUuid, cwd: "/repo" } }),
+    );
+
+    // Should match: /repo/.worktrees/branch starts with /repo
+    const id = await findLatestCodexSessionId({ cwd: "/repo/.worktrees/branch" });
+    expect(id).toBe(sessionUuid);
+  });
+
   it("findLatestCodexSessionId can pick session closest to reference time", async () => {
     const dirent = (name: string, type: "file" | "dir") => ({
       name,
