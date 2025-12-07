@@ -182,7 +182,7 @@ export function BranchQuickStartScreen({
           renderItem={(item: QuickStartItem, isSelected) => (
             <Box
               flexDirection="column"
-              marginTop={item.groupStart ? 1 : 0}
+              marginTop={item.groupStart ? 1 : item.category === "Other" ? 1 : 0}
             >
               <Text
                 color={isSelected ? "white" : categoryColor(item.category)}
