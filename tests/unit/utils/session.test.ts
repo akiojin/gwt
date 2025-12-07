@@ -170,6 +170,27 @@ describe("utils/session", () => {
     expect(id).toBe("cfg-claude");
   });
 
+  it("reads Claude sessionId from ~/.claude/history.jsonl when per-project sessions are absent", async () => {
+    // No per-project sessions
+    (readdir as any).mockRejectedValue(new Error("missing sessions"));
+
+    // history.jsonl contains entries for other projects and the target one
+    const historyContent = [
+      '{"project":"/other","sessionId":"zzz"}',
+      '{"project":"/repo/sub","sessionId":"hist-123"}',
+    ].join("\n");
+
+    (readFile as any).mockImplementation((filePath: string) => {
+      if (filePath.endsWith("history.jsonl")) {
+        return Promise.resolve(historyContent);
+      }
+      return Promise.reject(new Error("no sessions"));
+    });
+
+    const id = await findLatestClaudeSessionId("/repo/subdir");
+    expect(id).toBe("hist-123");
+  });
+
   it("returns null when session files are missing", async () => {
     (readdir as any).mockRejectedValue(new Error("missing"));
     const codexId = await findLatestCodexSessionId();

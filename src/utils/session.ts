@@ -152,9 +152,14 @@ export async function findLatestClaudeSessionId(
   cwd: string,
 ): Promise<string | null> {
   const encoded = encodeClaudeProjectPath(cwd);
-  const rootCandidates = process.env.CLAUDE_CONFIG_DIR
-    ? [process.env.CLAUDE_CONFIG_DIR]
-    : [path.join(homedir(), ".claude"), path.join(homedir(), ".config", "claude")];
+  const rootCandidates: string[] = [];
+  if (process.env.CLAUDE_CONFIG_DIR) {
+    rootCandidates.push(process.env.CLAUDE_CONFIG_DIR);
+  }
+  rootCandidates.push(
+    path.join(homedir(), ".claude"),
+    path.join(homedir(), ".config", "claude"),
+  );
 
   for (const claudeRoot of rootCandidates) {
     const baseDir = path.join(claudeRoot, "projects", encoded, "sessions");
@@ -166,6 +171,28 @@ export async function findLatestClaudeSessionId(
       const id = await readSessionIdFromFile(latest);
       if (id) return id;
     }
+  }
+
+  // Fallback: parse ~/.claude/history.jsonl (Claude Code global history)
+  try {
+    const historyPath = path.join(homedir(), ".claude", "history.jsonl");
+    const content = await readFile(historyPath, "utf-8");
+    const lines = content.split(/\r?\n/).filter(Boolean);
+    for (let i = lines.length - 1; i >= 0; i -= 1) {
+      try {
+        const line = lines[i] ?? "";
+        const parsed = JSON.parse(line) as Record<string, unknown>;
+        const project = typeof parsed.project === "string" ? parsed.project : null;
+        const sessionId = typeof parsed.sessionId === "string" ? parsed.sessionId : null;
+        if (project && sessionId && project.startsWith(cwd)) {
+          return sessionId;
+        }
+      } catch {
+        // ignore malformed lines
+      }
+    }
+  } catch {
+    // ignore if history not present
   }
 
   return null;
