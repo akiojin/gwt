@@ -2,7 +2,10 @@ import { execa } from "execa";
 import chalk from "chalk";
 import { existsSync } from "fs";
 import { createChildStdio, getTerminalStreams } from "./utils/terminal.js";
-import { findLatestClaudeSessionId } from "./utils/session.js";
+import {
+  findLatestClaudeSessionId,
+  waitForClaudeSessionId,
+} from "./utils/session.js";
 
 const CLAUDE_CLI_PACKAGE = "@anthropic-ai/claude-code@latest";
 export class ClaudeError extends Error {
@@ -50,6 +53,11 @@ export async function launchClaudeCode(
       options.sessionId && options.sessionId.trim().length > 0
         ? options.sessionId.trim()
         : null;
+
+    const startedAt = Date.now();
+    const sessionProbe = waitForClaudeSessionId(worktreePath).catch(
+      () => null,
+    );
 
     // Handle execution mode
     switch (options.mode) {
@@ -243,7 +251,9 @@ export async function launchClaudeCode(
 
     let capturedSessionId: string | null = null;
     try {
+      const polled = await sessionProbe;
       capturedSessionId =
+        polled ??
         (await findLatestClaudeSessionId(worktreePath)) ??
         resumeSessionId ??
         null;

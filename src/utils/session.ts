@@ -292,6 +292,22 @@ export async function findLatestClaudeSessionId(
   return null;
 }
 
+export async function waitForClaudeSessionId(
+  cwd: string,
+  options: { timeoutMs?: number; pollIntervalMs?: number } = {},
+): Promise<string | null> {
+  const timeoutMs = options.timeoutMs ?? 120_000;
+  const pollIntervalMs = options.pollIntervalMs ?? 2_000;
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const found = await findLatestClaudeSessionId(cwd);
+    if (found) return found;
+    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+  }
+  return null;
+}
+
 async function findLatestNestedSessionFile(
   baseDir: string,
   subPath: string[],
