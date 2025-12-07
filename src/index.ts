@@ -796,6 +796,8 @@ export async function handleAIToolWorkflow(
       lastSessionId: finalSessionId,
     });
 
+    // Small buffer before returning to branch list to avoid abrupt screen swap
+    await new Promise((resolve) => setTimeout(resolve, 3000));
     printInfo("Session completed successfully. Returning to main menu...");
     return;
   } catch (error) {
