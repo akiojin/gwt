@@ -110,15 +110,15 @@ export function BranchQuickStartScreen({
       });
 
       const flat: QuickStartItem[] = [];
-      sorted.forEach((opt, idx) => {
-        const cat = resolveCategory(opt.toolId);
-        const prevCat =
-          idx > 0 ? resolveCategory(sorted[idx - 1]?.toolId).label : null;
-        const isNewCategory = prevCat !== cat.label;
+        sorted.forEach((opt, idx) => {
+          const cat = resolveCategory(opt.toolId);
+          const prevCat =
+            idx > 0 ? resolveCategory(sorted[idx - 1]?.toolId).label : null;
+          const isNewCategory = prevCat !== cat.label;
 
         flat.push(
           {
-            label: `[${cat.label}] Resume`,
+            label: "Resume",
             value: `reuse-continue:${opt.toolId ?? "unknown"}:${idx}`,
             action: "reuse-continue",
             toolId: opt.toolId ?? null,
@@ -128,7 +128,7 @@ export function BranchQuickStartScreen({
             categoryColor: cat.color,
           },
           {
-            label: `[${cat.label}] New`,
+            label: "New",
             value: `reuse-new:${opt.toolId ?? "unknown"}:${idx}`,
             action: "reuse-new",
             toolId: opt.toolId ?? null,
@@ -208,7 +208,7 @@ export function BranchQuickStartScreen({
             >
               <Text>
                 <Text
-                  color={item.category === "Codex" ? "cyan" : "white"}
+                  color={item.categoryColor}
                   inverse={isSelected}
                 >
                   {`[${item.category}] `}
