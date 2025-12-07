@@ -60,7 +60,11 @@ import {
   findLatestClaudeSession,
   findLatestClaudeSessionId,
   findLatestGeminiSession,
+  encodeClaudeProjectPath,
 } from "../../../utils/session.js";
+import { homedir } from "node:os";
+import path from "node:path";
+import { stat } from "node:fs/promises";
 import type { ToolSessionEntry } from "../../../config/index.js";
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
@@ -347,6 +351,36 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
           selectedWorktreePath,
         );
 
+        const claudeSessionExists = async (
+          sessionId: string | null,
+          worktreePath: string | null,
+        ): Promise<boolean> => {
+          if (!sessionId || !worktreePath) return false;
+          const slug = encodeClaudeProjectPath(worktreePath);
+          const roots = [
+            ...(process.env.CLAUDE_CONFIG_DIR
+              ? [process.env.CLAUDE_CONFIG_DIR]
+              : []),
+            path.join(homedir(), ".claude"),
+            path.join(homedir(), ".config", "claude"),
+          ];
+          for (const root of roots) {
+            const candidate = path.join(
+              root,
+              "projects",
+              slug,
+              `${sessionId}.jsonl`,
+            );
+            try {
+              await stat(candidate);
+              return true;
+            } catch {
+              // continue
+            }
+          }
+          return false;
+        };
+
         const mapped = await Promise.all(
           latestPerTool.map(async (entry) => {
             let sessionId = entry.sessionId ?? null;
@@ -387,6 +421,19 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
                   },
                 );
                 if (claudeSession?.id) sessionId = claudeSession.id;
+
+                if (
+                  sessionId &&
+                  !(await claudeSessionExists(sessionId, selectedWorktreePath))
+                ) {
+                  // If stale, try latest without timestamp constraint
+                  const latestClaude = await findLatestClaudeSession(
+                    selectedWorktreePath ??
+                      selectedBranch?.displayName ??
+                      workingDirectory,
+                  );
+                  sessionId = latestClaude?.id ?? null;
+                }
               } catch {
                 // ignore lookup failure
               }
