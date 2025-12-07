@@ -309,7 +309,11 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         }
         const sessionData = await loadSession(root);
         const history = sessionData?.history ?? [];
-        const latest = findLatestBranchSession(history, selectedBranch.name);
+        const latest = findLatestBranchSession(
+          history,
+          selectedBranch.name,
+          preferredToolId,
+        );
         const latestReasoning =
           latest?.reasoningLevel ??
           sessionData?.reasoningLevel ??
@@ -342,7 +346,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     return () => {
       cancelled = true;
     };
-  }, [selectedBranch, repoRoot]);
+  }, [selectedBranch, repoRoot, preferredToolId]);
 
   // Load last session ID for "Continue" label when entering execution mode selector
   useEffect(() => {

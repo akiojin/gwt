@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   resolveContinueSessionId,
   findLatestBranchSession,
@@ -123,5 +123,29 @@ describe("resolveContinueSessionId", () => {
 
     const entry = findLatestBranchSession(history, branch);
     expect(entry?.sessionId).toBe("s-3");
+  });
+
+  it("findLatestBranchSession prefers matching tool when provided", () => {
+    const history: ToolSessionEntry[] = [
+      {
+        branch,
+        toolId: "claude-code",
+        toolLabel: "Claude",
+        worktreePath: "/x",
+        timestamp: 5,
+        sessionId: "claude-5",
+      },
+      {
+        branch,
+        toolId: "codex-cli",
+        toolLabel: "Codex",
+        worktreePath: "/y",
+        timestamp: 4,
+        sessionId: "codex-4",
+      },
+    ];
+
+    const entry = findLatestBranchSession(history, branch, "codex-cli");
+    expect(entry?.sessionId).toBe("codex-4");
   });
 });
