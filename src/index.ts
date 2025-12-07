@@ -741,11 +741,14 @@ export async function handleAIToolWorkflow(
         finalSessionId = null;
       }
     }
+    const finishedAt = Date.now();
+
     if (tool === "codex-cli") {
       try {
         const latest = await findLatestCodexSession({
           since: launchStartedAt - 60_000,
-          preferClosestTo: launchStartedAt,
+          until: finishedAt + 60_000,
+          preferClosestTo: finishedAt,
           windowMs: 60 * 60 * 1000,
         });
         if (latest) {
@@ -758,7 +761,8 @@ export async function handleAIToolWorkflow(
       try {
         const latestClaude = await findLatestClaudeSession(worktreePath, {
           since: launchStartedAt - 60_000,
-          preferClosestTo: launchStartedAt,
+          until: finishedAt + 60_000,
+          preferClosestTo: finishedAt,
           windowMs: 60 * 60 * 1000,
         });
         if (latestClaude) {
@@ -771,7 +775,8 @@ export async function handleAIToolWorkflow(
       try {
         const latestGemini = await findLatestGeminiSession(worktreePath, {
           since: launchStartedAt - 60_000,
-          preferClosestTo: launchStartedAt,
+          until: finishedAt + 60_000,
+          preferClosestTo: finishedAt,
           windowMs: 60 * 60 * 1000,
         });
         if (latestGemini) {
