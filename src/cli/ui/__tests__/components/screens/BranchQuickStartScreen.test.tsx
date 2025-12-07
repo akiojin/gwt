@@ -85,7 +85,7 @@ describe("BranchQuickStartScreen", () => {
   });
 
   it("shows manual selection option", () => {
-    const { getByText } = render(
+    const { getByText, getAllByText } = render(
       <BranchQuickStartScreen
         branchName="feature/foo"
         previousOptions={[
@@ -105,7 +105,7 @@ describe("BranchQuickStartScreen", () => {
   });
 
   it("renders multiple tools separately", () => {
-    const { getByText } = render(
+    const { getByText, getAllByText } = render(
       <BranchQuickStartScreen
         branchName="feature/foo"
         previousOptions={[
@@ -130,13 +130,11 @@ describe("BranchQuickStartScreen", () => {
       />,
     );
 
-    expect(getByText(/\[Codex\] Resume/i)).toBeDefined();
+    expect(getAllByText(/\[Codex\]/i)).toHaveLength(2);
     expect(
       getByText(/Model: gpt-5.1-codex \/ Reasoning: High \/ Skip: Yes \/ ID: codex-123/),
     ).toBeDefined();
-    expect(
-      getByText(/\[Claude\] Resume/i),
-    ).toBeDefined();
+    expect(getAllByText(/\[Claude\]/i)).toHaveLength(2);
     expect(
       getByText(/Model: opus \/ Skip: No \/ ID: claude-999/),
     ).toBeDefined();
