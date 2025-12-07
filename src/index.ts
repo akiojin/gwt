@@ -39,6 +39,7 @@ import { saveSession, loadSession } from "./config/index.js";
 import {
   findLatestCodexSession,
   findLatestClaudeSession,
+  findLatestGeminiSession,
 } from "./utils/session.js";
 import { getPackageVersion } from "./utils.js";
 import { findLatestClaudeSessionId } from "./utils/session.js";
@@ -762,6 +763,19 @@ export async function handleAIToolWorkflow(
         });
         if (latestClaude) {
           finalSessionId = latestClaude.id;
+        }
+      } catch {
+        // ignore
+      }
+    } else if (tool === "gemini-cli") {
+      try {
+        const latestGemini = await findLatestGeminiSession(worktreePath, {
+          since: launchStartedAt - 60_000,
+          preferClosestTo: launchStartedAt,
+          windowMs: 60 * 60 * 1000,
+        });
+        if (latestGemini) {
+          finalSessionId = latestGemini.id;
         }
       } catch {
         // ignore

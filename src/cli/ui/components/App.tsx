@@ -59,6 +59,7 @@ import {
   findLatestCodexSessionId,
   findLatestClaudeSession,
   findLatestClaudeSessionId,
+  findLatestGeminiSession,
 } from "../../../utils/session.js";
 import type { ToolSessionEntry } from "../../../config/index.js";
 
@@ -388,6 +389,26 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
                 if (claudeSession?.id) sessionId = claudeSession.id;
               } catch {
                 // ignore lookup failure
+              }
+            }
+
+            // For Gemini, prefer newest session file (Gemini keeps per-project chats)
+            if (entry.toolId === "gemini-cli") {
+              try {
+                const gemSession = await findLatestGeminiSession(
+                  selectedWorktreePath ??
+                    selectedBranch?.displayName ??
+                    workingDirectory,
+                  {
+                    ...(entry.timestamp !== null && entry.timestamp !== undefined
+                      ? { since: entry.timestamp - 60_000, preferClosestTo: entry.timestamp }
+                      : {}),
+                    windowMs: 60 * 60 * 1000,
+                  },
+                );
+                if (gemSession?.id) sessionId = gemSession.id;
+              } catch {
+                // ignore
               }
             }
 
