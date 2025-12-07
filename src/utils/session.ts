@@ -215,6 +215,27 @@ export async function findLatestCodexSessionId(
   return found?.id ?? null;
 }
 
+export async function waitForCodexSessionId(options: {
+  startedAt: number;
+  timeoutMs?: number;
+  pollIntervalMs?: number;
+}): Promise<string | null> {
+  const timeoutMs = options.timeoutMs ?? 120_000;
+  const pollIntervalMs = options.pollIntervalMs ?? 2_000;
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const found = await findLatestCodexSession({
+      since: options.startedAt - 30_000,
+      preferClosestTo: options.startedAt,
+      windowMs: 30 * 60 * 1000,
+    });
+    if (found?.id) return found.id;
+    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+  }
+  return null;
+}
+
 export function encodeClaudeProjectPath(cwd: string): string {
   // Normalize to forward slashes, drop drive colon, replace / and _ with -
   const normalized = cwd.replace(/\\/g, "/").replace(/:/g, "");
