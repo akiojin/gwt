@@ -223,7 +223,9 @@ export async function launchGeminiCLI(
     try {
       if (!capturedSessionId) {
         capturedSessionId =
-          (await findLatestGeminiSessionId(worktreePath)) ??
+          (await findLatestGeminiSessionId(worktreePath, {
+            cwd: worktreePath,
+          })) ??
           resumeSessionId ??
           null;
       }

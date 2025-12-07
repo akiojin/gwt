@@ -750,6 +750,7 @@ export async function handleAIToolWorkflow(
           until: finishedAt + 60_000,
           preferClosestTo: finishedAt,
           windowMs: 60 * 60 * 1000,
+          cwd: worktreePath,
         });
         if (latest) {
           finalSessionId = latest.id;
@@ -778,6 +779,7 @@ export async function handleAIToolWorkflow(
           until: finishedAt + 60_000,
           preferClosestTo: finishedAt,
           windowMs: 60 * 60 * 1000,
+          cwd: worktreePath,
         });
         if (latestGemini) {
           finalSessionId = latestGemini.id;
