@@ -1,11 +1,15 @@
 import { execa } from "execa";
 import chalk from "chalk";
 import { existsSync } from "fs";
+import path from "node:path";
+import { homedir } from "node:os";
+import { stat } from "node:fs/promises";
 import { createChildStdio, getTerminalStreams } from "./utils/terminal.js";
 import {
   findLatestClaudeSession,
   findLatestClaudeSessionId,
   waitForClaudeSessionId,
+  encodeClaudeProjectPath,
 } from "./utils/session.js";
 
 const CLAUDE_CLI_PACKAGE = "@anthropic-ai/claude-code@latest";
@@ -40,6 +44,49 @@ export async function launchClaudeCode(
     );
     const id = match?.[1];
     if (id) sessionCapture.value = id;
+  };
+
+  const sessionFileExists = async (id: string): Promise<boolean> => {
+    try {
+      const generateClaudeProjectPathCandidates = (cwd: string): string[] => {
+        const base = encodeClaudeProjectPath(cwd);
+        const dotToDash = cwd
+          .replace(/\\/g, "/")
+          .replace(/:/g, "")
+          .replace(/\./g, "-")
+          .replace(/_/g, "-")
+          .replace(/\//g, "-");
+        const collapsed = dotToDash.replace(/-+/g, "-");
+        return Array.from(new Set([base, dotToDash, collapsed]));
+      };
+
+      const encodedPaths = generateClaudeProjectPathCandidates(worktreePath);
+      const roots: string[] = [];
+      if (process.env.CLAUDE_CONFIG_DIR) roots.push(process.env.CLAUDE_CONFIG_DIR);
+      roots.push(
+        path.join(homedir(), ".claude"),
+        path.join(homedir(), ".config", "claude"),
+      );
+      for (const root of roots) {
+        for (const enc of encodedPaths) {
+          const candidate = path.join(
+            root,
+            "projects",
+            enc,
+            `${id}.jsonl`,
+          );
+          try {
+            await stat(candidate);
+            return true;
+          } catch {
+            // continue
+          }
+        }
+      }
+    } catch {
+      // ignore
+    }
+    return false;
   };
 
   try {
@@ -281,15 +328,23 @@ export async function launchClaudeCode(
         }),
       ]);
 
-      // Priority: latest on disk > captured from stdout > polled while running > resumeSessionId
+      const fromFiles = latest?.id ?? null;
+      const fromCapture =
+        sessionCapture.value &&
+        (await sessionFileExists(sessionCapture.value))
+          ? sessionCapture.value
+          : null;
+
+      // Priority: latest on disk > captured & exists on disk > polled > resumeSessionId
       capturedSessionId =
-        latest?.id ??
-        sessionCapture.value ??
-        polled ??
-        resumeSessionId ??
-        null;
+        fromFiles ?? fromCapture ?? polled ?? resumeSessionId ?? null;
     } catch {
-      capturedSessionId = sessionCapture.value ?? resumeSessionId ?? null;
+      const validCapture =
+        sessionCapture.value &&
+        (await sessionFileExists(sessionCapture.value))
+          ? sessionCapture.value
+          : null;
+      capturedSessionId = validCapture ?? resumeSessionId ?? null;
     }
 
     if (capturedSessionId) {
