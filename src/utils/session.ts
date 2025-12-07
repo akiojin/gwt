@@ -175,17 +175,23 @@ async function findNewestSessionIdFromDir(
     };
 
     await processDir(dir);
-    if (options.since !== undefined) {
-      files.splice(0, files.length, ...files.filter((f) => f.mtime >= options.since!));
-    }
-    if (options.until !== undefined) {
-      files.splice(0, files.length, ...files.filter((f) => f.mtime <= options.until!));
-    }
-    const window = options.windowMs ?? 30 * 60 * 1000;
-    const ref = options.preferClosestTo;
-    let pool = files.sort((a, b) => b.mtime - a.mtime);
 
+    // Apply since/until filters clearly
+    const filtered = files.filter((f) => {
+      if (options.since !== undefined && f.mtime < options.since) return false;
+      if (options.until !== undefined && f.mtime > options.until) return false;
+      return true;
+    });
+
+    if (!filtered.length) return null;
+
+    // Sort by mtime descending (newest first)
+    let pool = filtered.sort((a, b) => b.mtime - a.mtime);
+
+    // Apply preferClosestTo window if specified
+    const ref = options.preferClosestTo;
     if (typeof ref === "number") {
+      const window = options.windowMs ?? 30 * 60 * 1000;
       const withinWindow = pool.filter(
         (f) => Math.abs(f.mtime - ref) <= window,
       );
@@ -396,9 +402,9 @@ export async function waitForCodexSessionId(options: {
 
   while (Date.now() < deadline) {
     const found = await findLatestCodexSession({
-      since: options.startedAt - 30_000,
+      since: options.startedAt,
       preferClosestTo: options.startedAt,
-      windowMs: 30 * 60 * 1000,
+      windowMs: 10 * 60 * 1000,
       cwd: options.cwd ?? null,
     });
     if (found?.id) return found.id;

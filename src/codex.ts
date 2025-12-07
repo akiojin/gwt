@@ -163,10 +163,10 @@ export async function launchCodexCLI(
       const [polled, latest] = await Promise.all([
         sessionProbe,
         findLatestCodexSession({
-          since: startedAt - 30_000,
+          since: startedAt,
           until: finishedAt + 30_000,
           preferClosestTo: finishedAt,
-          windowMs: 60 * 60 * 1000, // 60 minutes around launch window
+          windowMs: 10 * 60 * 1000,
           cwd: worktreePath,
         }),
       ]);
