@@ -1001,9 +1001,13 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         return;
       }
 
-      const selected = branchQuickStart.find(
-        (opt) => opt.toolId === toolId,
-      ) ?? branchQuickStart[0];
+      const selected =
+        branchQuickStart.find((opt) => opt.toolId === toolId) ??
+        branchQuickStart[0];
+      if (!selected) {
+        navigateTo("ai-tool-selector");
+        return;
+      }
 
       setSelectedTool(selected.toolId);
       setPreferredToolId(selected.toolId);
