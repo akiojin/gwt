@@ -5,6 +5,15 @@ import { readdir, readFile, stat } from "node:fs/promises";
 const UUID_REGEX =
   /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
 
+/**
+ * Validates that a string is a properly formatted UUID session ID.
+ * @param id - The string to validate
+ * @returns true if the string is a valid UUID format
+ */
+export function isValidUuidSessionId(id: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+}
+
 function pickSessionIdFromObject(obj: unknown): string | null {
   if (!obj || typeof obj !== "object") return null;
   const candidate = obj as Record<string, unknown>;
@@ -12,7 +21,11 @@ function pickSessionIdFromObject(obj: unknown): string | null {
   for (const key of keys) {
     const value = candidate[key];
     if (typeof value === "string" && value.trim().length > 0) {
-      return value;
+      const trimmed = value.trim();
+      // Only accept values that are valid UUIDs to avoid picking up arbitrary strings
+      if (isValidUuidSessionId(trimmed)) {
+        return trimmed;
+      }
     }
   }
   return null;
@@ -321,6 +334,26 @@ export async function findLatestCodexSession(
   });
 
   for (const file of ordered) {
+    // Priority 1: Extract session ID from filename (most reliable for Codex)
+    // Codex filenames follow pattern: rollout-YYYY-MM-DDTHH-MM-SS-{uuid}.jsonl
+    const filenameMatch = path.basename(file.fullPath).match(UUID_REGEX);
+    if (filenameMatch) {
+      const sessionId = filenameMatch[0];
+      // If cwd filtering is needed, read file content to check cwd
+      if (options.cwd) {
+        const info = await readSessionInfoFromFile(file.fullPath);
+        if (
+          info.cwd &&
+          (info.cwd === options.cwd || info.cwd.startsWith(options.cwd))
+        ) {
+          return { id: sessionId, mtime: file.mtime };
+        }
+        continue; // cwd doesn't match, try next file
+      }
+      return { id: sessionId, mtime: file.mtime };
+    }
+
+    // Priority 2: Fallback to reading file content if filename lacks UUID
     const info = await readSessionInfoFromFile(file.fullPath);
     if (!info.id) continue;
     if (options.cwd) {
@@ -627,4 +660,50 @@ export async function findLatestQwenSessionId(
   if (fromContent) return fromContent;
   // Fallback: use filename (without extension) as tag
   return path.basename(latest).replace(/\.[^.]+$/, "");
+}
+
+/**
+ * Returns the list of possible Claude root directories.
+ */
+function getClaudeRootCandidates(): string[] {
+  const roots: string[] = [];
+  if (process.env.CLAUDE_CONFIG_DIR) {
+    roots.push(process.env.CLAUDE_CONFIG_DIR);
+  }
+  roots.push(
+    path.join(homedir(), ".claude"),
+    path.join(homedir(), ".config", "claude"),
+  );
+  return roots;
+}
+
+/**
+ * Checks if a Claude session file exists for the given session ID and worktree path.
+ * @param sessionId - The session ID to check
+ * @param worktreePath - The worktree path (used to determine project encoding)
+ * @returns true if a session file exists for this ID
+ */
+export async function claudeSessionFileExists(
+  sessionId: string,
+  worktreePath: string,
+): Promise<boolean> {
+  if (!isValidUuidSessionId(sessionId)) {
+    return false;
+  }
+
+  const encodedPaths = generateClaudeProjectPathCandidates(worktreePath);
+  const roots = getClaudeRootCandidates();
+
+  for (const root of roots) {
+    for (const enc of encodedPaths) {
+      const candidate = path.join(root, "projects", enc, `${sessionId}.jsonl`);
+      try {
+        await stat(candidate);
+        return true;
+      } catch {
+        // continue to next candidate
+      }
+    }
+  }
+  return false;
 }

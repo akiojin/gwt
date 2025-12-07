@@ -41,7 +41,7 @@ vi.mock("../../src/utils/terminal", () => ({
 }));
 vi.mock("../../src/utils/session", () => ({
   waitForCodexSessionId: vi.fn(async () => null),
-  findLatestCodexSessionId: vi.fn(async () => null),
+  findLatestCodexSession: vi.fn(async () => null),
 }));
 
 import { execa } from "execa";
@@ -99,22 +99,22 @@ describe("codex.ts", () => {
     expect(options).toMatchObject({
       cwd: worktreePath,
       stdin: "inherit",
-      stdout: "pipe",
-      stderr: "pipe",
+      stdout: "inherit",
+      stderr: "inherit",
     });
     expect(mockTerminalStreams.exitRawMode).toHaveBeenCalledTimes(1);
     expect(mockChildStdio.cleanup).toHaveBeenCalledTimes(1);
   });
 
-  it("captures sessionId from stdout when provided by Codex CLI", async () => {
-    (mockExeca as any).mockReturnValueOnce(
-      createChildProcess((stdout) => {
-        stdout.emit(
-          "data",
-          "Session: 019af999-aaaa-bbbb-cccc-123456789abc ready\n",
-        );
-      }) as any,
+  it("captures sessionId from file-based session detection", async () => {
+    const { findLatestCodexSession } = await import(
+      "../../src/utils/session.js"
     );
+    (findLatestCodexSession as any).mockResolvedValueOnce({
+      id: "019af999-aaaa-bbbb-cccc-123456789abc",
+      fullPath: "/mock/path/session.jsonl",
+      mtime: new Date(),
+    });
 
     const result = await launchCodexCLI(worktreePath);
     expect(result.sessionId).toBe("019af999-aaaa-bbbb-cccc-123456789abc");
@@ -167,8 +167,8 @@ describe("codex.ts", () => {
     const [, , options] = (execa as any).mock.calls[0];
     expect(options).toMatchObject({
       stdin: 11,
-      stdout: "pipe",
-      stderr: "pipe",
+      stdout: 12,
+      stderr: 13,
     });
     expect(mockChildStdio.cleanup).toHaveBeenCalledTimes(1);
 

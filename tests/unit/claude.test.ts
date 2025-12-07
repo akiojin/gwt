@@ -137,8 +137,8 @@ describe("launchClaudeCode - Root User Detection", () => {
         expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
         expect.objectContaining({
           shell: true,
-          stdout: "pipe",
-          stderr: "pipe",
+          stdout: "inherit",
+          stderr: "inherit",
           env: expect.objectContaining({
             IS_SANDBOX: "1",
           }),
@@ -170,8 +170,8 @@ describe("launchClaudeCode - Root User Detection", () => {
         expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
         expect.objectContaining({
           shell: true,
-          stdout: "pipe",
-          stderr: "pipe",
+          stdout: "inherit",
+          stderr: "inherit",
           env: expect.objectContaining({
             IS_SANDBOX: "1",
           }),
@@ -203,8 +203,8 @@ describe("launchClaudeCode - Root User Detection", () => {
         expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
         expect.objectContaining({
           shell: true,
-          stdout: "pipe",
-          stderr: "pipe",
+          stdout: "inherit",
+          stderr: "inherit",
           env: expect.objectContaining({
             IS_SANDBOX: "1",
           }),
@@ -234,8 +234,8 @@ describe("launchClaudeCode - Root User Detection", () => {
         ]),
       );
       const options = bunxCall[2] as Record<string, any>;
-      expect(options.stdout).toBe("pipe");
-      expect(options.stderr).toBe("pipe");
+      expect(options.stdout).toBe("inherit");
+      expect(options.stderr).toBe("inherit");
       expect(options.env?.IS_SANDBOX).toBe("1");
     });
   });
@@ -263,6 +263,10 @@ describe("launchClaudeCode - Root User Detection", () => {
       // Mock root user
       process.getuid = () => 0;
 
+      // Temporarily remove IS_SANDBOX from process.env if present
+      const originalIsSandbox = process.env.IS_SANDBOX;
+      delete process.env.IS_SANDBOX;
+
       // Mock which/where to fail (claude not available) and bunx to succeed
       mockExeca
         .mockRejectedValueOnce(new Error("Command not found")) // which/where
@@ -277,19 +281,28 @@ describe("launchClaudeCode - Root User Detection", () => {
 
       const bunxCall = mockExeca.mock.calls[1];
       const options = bunxCall[2] as Record<string, unknown>;
-      expect(options.stdout).toBe("pipe");
-      expect(options.stderr).toBe("pipe");
+      expect(options.stdout).toBe("inherit");
+      expect(options.stderr).toBe("inherit");
       expect(options.env && (options.env as Record<string, string>).IS_SANDBOX).toBeUndefined();
 
       // Verify --dangerously-skip-permissions is NOT in args
       expect(bunxCall[1] as string[]).not.toContain(
         "--dangerously-skip-permissions",
       );
+
+      // Restore IS_SANDBOX
+      if (originalIsSandbox !== undefined) {
+        process.env.IS_SANDBOX = originalIsSandbox;
+      }
     });
 
     it("should not set IS_SANDBOX=1 when skipPermissions is undefined", async () => {
       // Mock root user
       process.getuid = () => 0;
+
+      // Temporarily remove IS_SANDBOX from process.env if present
+      const originalIsSandbox = process.env.IS_SANDBOX;
+      delete process.env.IS_SANDBOX;
 
       // Mock which/where to fail (claude not available) and bunx to succeed
       mockExeca
@@ -305,9 +318,14 @@ describe("launchClaudeCode - Root User Detection", () => {
 
       const bunxCall = mockExeca.mock.calls[1];
       const options = bunxCall[2] as Record<string, any>;
-      expect(options.stdout).toBe("pipe");
-      expect(options.stderr).toBe("pipe");
+      expect(options.stdout).toBe("inherit");
+      expect(options.stderr).toBe("inherit");
       expect(options.env?.IS_SANDBOX).toBeUndefined();
+
+      // Restore IS_SANDBOX
+      if (originalIsSandbox !== undefined) {
+        process.env.IS_SANDBOX = originalIsSandbox;
+      }
     });
   });
 
@@ -420,8 +438,8 @@ describe("launchClaudeCode - Root User Detection", () => {
       expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
       expect.objectContaining({
         stdin: 101,
-        stdout: "pipe",
-        stderr: "pipe",
+        stdout: 102,
+        stderr: 103,
       }),
     );
 
@@ -528,8 +546,8 @@ describe("launchClaudeCode - Root User Detection", () => {
         expect.objectContaining({
           cwd: "/test/path",
           shell: true,
-          stdout: "pipe",
-          stderr: "pipe",
+          stdout: "inherit",
+          stderr: "inherit",
         }),
       );
 
@@ -615,8 +633,8 @@ describe("launchClaudeCode - Root User Detection", () => {
         ]),
         expect.objectContaining({
           shell: true,
-          stdout: "pipe",
-          stderr: "pipe",
+          stdout: "inherit",
+          stderr: "inherit",
         }),
       );
     });

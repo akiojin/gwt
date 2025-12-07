@@ -1,15 +1,11 @@
 import { execa } from "execa";
 import chalk from "chalk";
 import { existsSync } from "fs";
-import path from "node:path";
-import { homedir } from "node:os";
-import { stat } from "node:fs/promises";
 import { createChildStdio, getTerminalStreams } from "./utils/terminal.js";
 import {
   findLatestClaudeSession,
-  findLatestClaudeSessionId,
   waitForClaudeSessionId,
-  encodeClaudeProjectPath,
+  claudeSessionFileExists,
 } from "./utils/session.js";
 
 const CLAUDE_CLI_PACKAGE = "@anthropic-ai/claude-code@latest";
@@ -36,58 +32,6 @@ export async function launchClaudeCode(
 ): Promise<{ sessionId?: string | null }> {
   const terminal = getTerminalStreams();
   const startedAt = Date.now();
-  const sessionCapture: { value: string | null } = { value: null };
-  const captureSessionId = (chunk: Buffer | string) => {
-    const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
-    const match = text.match(
-      /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i,
-    );
-    const id = match?.[1];
-    if (id) sessionCapture.value = id;
-  };
-
-  const sessionFileExists = async (id: string): Promise<boolean> => {
-    try {
-      const generateClaudeProjectPathCandidates = (cwd: string): string[] => {
-        const base = encodeClaudeProjectPath(cwd);
-        const dotToDash = cwd
-          .replace(/\\/g, "/")
-          .replace(/:/g, "")
-          .replace(/\./g, "-")
-          .replace(/_/g, "-")
-          .replace(/\//g, "-");
-        const collapsed = dotToDash.replace(/-+/g, "-");
-        return Array.from(new Set([base, dotToDash, collapsed]));
-      };
-
-      const encodedPaths = generateClaudeProjectPathCandidates(worktreePath);
-      const roots: string[] = [];
-      if (process.env.CLAUDE_CONFIG_DIR) roots.push(process.env.CLAUDE_CONFIG_DIR);
-      roots.push(
-        path.join(homedir(), ".claude"),
-        path.join(homedir(), ".config", "claude"),
-      );
-      for (const root of roots) {
-        for (const enc of encodedPaths) {
-          const candidate = path.join(
-            root,
-            "projects",
-            enc,
-            `${id}.jsonl`,
-          );
-          try {
-            await stat(candidate);
-            return true;
-          } catch {
-            // continue
-          }
-        }
-      }
-    } catch {
-      // ignore
-    }
-    return false;
-  };
 
   try {
     // Check if the worktree path exists
@@ -297,54 +241,34 @@ export async function launchClaudeCode(
           cwd: worktreePath,
           shell: true,
           stdin: childStdio.stdin,
-          stdout: "pipe",
-          stderr: "pipe",
+          stdout: childStdio.stdout,
+          stderr: childStdio.stderr,
           env: launchEnv,
         } as any);
-        child.stdout?.on("data", (d) => {
-          captureSessionId(d);
-          terminal.stdout.write(d);
-        });
-        child.stderr?.on("data", (d) => {
-          captureSessionId(d);
-          terminal.stderr.write(d);
-        });
         await child;
       }
     } finally {
       childStdio.cleanup();
     }
 
-    let capturedSessionId: string | null = sessionCapture.value ?? null;
+    // File-based session detection only - no stdout capture
+    let capturedSessionId: string | null = null;
     const finishedAt = Date.now();
     try {
       const [polled, latest] = await Promise.all([
         sessionProbe,
         findLatestClaudeSession(worktreePath, {
-          since: startedAt - 60_000,
-          until: finishedAt + 60_000,
+          since: startedAt - 30_000,
+          until: finishedAt + 30_000,
           preferClosestTo: finishedAt,
           windowMs: 60 * 60 * 1000,
         }),
       ]);
 
-      const fromFiles = latest?.id ?? null;
-      const fromCapture =
-        sessionCapture.value &&
-        (await sessionFileExists(sessionCapture.value))
-          ? sessionCapture.value
-          : null;
-
-      // Priority: latest on disk > captured & exists on disk > polled > resumeSessionId
-      capturedSessionId =
-        fromFiles ?? fromCapture ?? polled ?? resumeSessionId ?? null;
+      // Priority: latest on disk > polled > resumeSessionId
+      capturedSessionId = latest?.id ?? polled ?? resumeSessionId ?? null;
     } catch {
-      const validCapture =
-        sessionCapture.value &&
-        (await sessionFileExists(sessionCapture.value))
-          ? sessionCapture.value
-          : null;
-      capturedSessionId = validCapture ?? resumeSessionId ?? null;
+      capturedSessionId = resumeSessionId ?? null;
     }
 
     if (capturedSessionId) {
