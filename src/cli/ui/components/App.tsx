@@ -54,6 +54,7 @@ import {
   resolveContinueSessionId,
   findLatestBranchSessionsByTool,
 } from "../utils/continueSession.js";
+import { findLatestCodexSessionId } from "../../../utils/session.js";
 import type { ToolSessionEntry } from "../../../config/index.js";
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
@@ -340,18 +341,33 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
           selectedWorktreePath,
         );
 
-        const mapped = latestPerTool.map((entry) => ({
-          toolId: entry.toolId as AITool,
-          toolLabel: entry.toolLabel,
-          model: entry.model ?? null,
-          inferenceLevel: (entry.reasoningLevel ??
-            sessionData?.reasoningLevel ??
-            null) as InferenceLevel | null,
-          sessionId: entry.sessionId ?? null,
-          skipPermissions:
-            entry.skipPermissions ?? sessionData?.skipPermissions ?? null,
-          timestamp: entry.timestamp ?? null,
-        }));
+        const mapped = await Promise.all(
+          latestPerTool.map(async (entry) => {
+            let sessionId = entry.sessionId ?? null;
+
+            // For Codex, if we don't have a sessionId (or it may be stale),
+            // attempt to read the latest Codex session from disk.
+            if (entry.toolId === "codex-cli") {
+              const latestCodex = await findLatestCodexSessionId();
+              if (latestCodex) {
+                sessionId = latestCodex;
+              }
+            }
+
+            return {
+              toolId: entry.toolId as AITool,
+              toolLabel: entry.toolLabel,
+              model: entry.model ?? null,
+              inferenceLevel: (entry.reasoningLevel ??
+                sessionData?.reasoningLevel ??
+                null) as InferenceLevel | null,
+              sessionId,
+              skipPermissions:
+                entry.skipPermissions ?? sessionData?.skipPermissions ?? null,
+              timestamp: entry.timestamp ?? null,
+            };
+          }),
+        );
 
         if (!cancelled) {
           setBranchQuickStart(mapped);
