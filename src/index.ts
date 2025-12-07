@@ -36,7 +36,10 @@ import {
 import { getToolById, getSharedEnvironment } from "./config/tools.js";
 import { launchCustomAITool } from "./launcher.js";
 import { saveSession, loadSession } from "./config/index.js";
-import { findLatestCodexSession } from "./utils/session.js";
+import {
+  findLatestCodexSession,
+  findLatestClaudeSession,
+} from "./utils/session.js";
 import { getPackageVersion } from "./utils.js";
 import { findLatestClaudeSessionId } from "./utils/session.js";
 import readline from "node:readline";
@@ -749,6 +752,19 @@ export async function handleAIToolWorkflow(
         }
       } catch {
         // ignore fallback failure
+      }
+    } else if (tool === "claude-code") {
+      try {
+        const latestClaude = await findLatestClaudeSession(worktreePath, {
+          since: launchStartedAt - 60_000,
+          preferClosestTo: launchStartedAt,
+          windowMs: 60 * 60 * 1000,
+        });
+        if (latestClaude) {
+          finalSessionId = latestClaude.id;
+        }
+      } catch {
+        // ignore
       }
     }
 

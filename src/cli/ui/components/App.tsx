@@ -57,6 +57,7 @@ import {
 import {
   findLatestCodexSession,
   findLatestCodexSessionId,
+  findLatestClaudeSession,
   findLatestClaudeSessionId,
 } from "../../../utils/session.js";
 import type { ToolSessionEntry } from "../../../config/index.js";
@@ -373,12 +374,18 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
             // For Claude Code, prefer the newest session file in the worktree even if history is stale.
             if (entry.toolId === "claude-code") {
               try {
-                const claudeSession = await findLatestClaudeSessionId(
-                  selectedWorktreePath ?? selectedBranch?.displayName ?? workingDirectory,
+                const claudeSession = await findLatestClaudeSession(
+                  selectedWorktreePath ??
+                    selectedBranch?.displayName ??
+                    workingDirectory,
+                  {
+                    ...(entry.timestamp !== null && entry.timestamp !== undefined
+                      ? { since: entry.timestamp - 60_000, preferClosestTo: entry.timestamp }
+                      : {}),
+                    windowMs: 60 * 60 * 1000,
+                  },
                 );
-                if (claudeSession) {
-                  sessionId = claudeSession;
-                }
+                if (claudeSession?.id) sessionId = claudeSession.id;
               } catch {
                 // ignore lookup failure
               }
