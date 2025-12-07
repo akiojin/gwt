@@ -57,9 +57,9 @@ export async function launchClaudeCode(
         : null;
 
     const sessionProbe = waitForClaudeSessionId(worktreePath, {
-      since: startedAt - 60_000,
+      since: startedAt,
       preferClosestTo: startedAt,
-      windowMs: 60 * 60 * 1000,
+      windowMs: 10 * 60 * 1000,
     }).catch(() => null);
 
     // Handle execution mode
@@ -258,10 +258,10 @@ export async function launchClaudeCode(
       const [polled, latest] = await Promise.all([
         sessionProbe,
         findLatestClaudeSession(worktreePath, {
-          since: startedAt - 30_000,
+          since: startedAt,
           until: finishedAt + 30_000,
           preferClosestTo: finishedAt,
-          windowMs: 60 * 60 * 1000,
+          windowMs: 10 * 60 * 1000,
         }),
       ]);
 
