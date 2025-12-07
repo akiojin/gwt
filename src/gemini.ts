@@ -121,7 +121,6 @@ export async function launchGeminiCLI(
         chalk.yellow("   ⚠️  Auto-approving all actions (YOLO mode)"),
       );
     }
-
     terminal.exitRawMode();
 
     const baseEnv = {

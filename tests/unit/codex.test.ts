@@ -146,4 +146,41 @@ describe("codex.ts", () => {
     mockChildStdio.stdout = "inherit";
     mockChildStdio.stderr = "inherit";
   });
+
+  it("should include --enable skills in default arguments (FR-202)", async () => {
+    await launchCodexCLI(worktreePath);
+
+    const [, args] = (execa as any).mock.calls[0];
+
+    // Find the index of "--enable" followed by "skills"
+    const enableIndex = args.findIndex(
+      (arg: string, i: number) =>
+        arg === "--enable" && args[i + 1] === "skills",
+    );
+
+    expect(enableIndex).toBeGreaterThan(-1);
+    expect(args[enableIndex]).toBe("--enable");
+    expect(args[enableIndex + 1]).toBe("skills");
+  });
+
+  it("should display launch arguments in console log (FR-008)", async () => {
+    const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    await launchCodexCLI(worktreePath);
+
+    // Verify that args are logged with 📋 prefix
+    expect(consoleSpy).toHaveBeenCalledWith(
+      expect.stringContaining("📋 Args:"),
+    );
+
+    // Verify that the actual arguments are included in the log
+    expect(consoleSpy).toHaveBeenCalledWith(
+      expect.stringContaining("--enable"),
+    );
+    expect(consoleSpy).toHaveBeenCalledWith(
+      expect.stringContaining("skills"),
+    );
+
+    consoleSpy.mockRestore();
+  });
 });
