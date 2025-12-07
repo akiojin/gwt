@@ -144,6 +144,18 @@ export async function launchCodexCLI(
     const env = { ...process.env, ...(options.envOverrides ?? {}) };
 
     try {
+      const execChild = async (child: any) => {
+        try {
+          await child;
+        } catch (execError: any) {
+          // Treat SIGINT/SIGTERM as normal exit (user pressed Ctrl+C)
+          if (execError.signal === "SIGINT" || execError.signal === "SIGTERM") {
+            return;
+          }
+          throw execError;
+        }
+      };
+
       const child = execa("bunx", [CODEX_CLI_PACKAGE, ...args], {
         cwd: worktreePath,
         shell: true,
@@ -152,7 +164,7 @@ export async function launchCodexCLI(
         stderr: childStdio.stderr,
         env,
       } as any);
-      await child;
+      await execChild(child);
     } finally {
       childStdio.cleanup();
     }
