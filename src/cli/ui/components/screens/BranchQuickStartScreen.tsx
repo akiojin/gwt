@@ -10,6 +10,7 @@ export type QuickStartAction = "reuse-continue" | "reuse-new" | "manual";
 export interface BranchQuickStartOption {
   toolId?: string | null;
   toolLabel: string;
+  toolCategory?: "Codex" | "Claude" | "Gemini" | "Qwen" | "Other";
   model?: string | null;
   sessionId?: string | null;
   inferenceLevel?: string | null;
@@ -50,6 +51,7 @@ type QuickStartItem = SelectItem & {
   toolId?: string | null;
   action: QuickStartAction;
   groupStart?: boolean;
+  category: string;
 };
 
 export interface BranchQuickStartScreenProps {
@@ -72,25 +74,53 @@ export function BranchQuickStartScreen({
   const { rows } = useTerminalSize();
   const containerHeight = rows && rows > 0 ? rows : undefined;
 
+  const categorize = (toolId?: string | null): string => {
+    if (toolId === "codex-cli") return "Codex";
+    if (toolId === "claude-code") return "Claude";
+    if (toolId === "gemini-cli") return "Gemini";
+    if (toolId === "qwen-cli") return "Qwen";
+    return "Other";
+  };
+
+  const categoryColor = (cat: string): keyof typeof Text.prototype.props["color"] => {
+    switch (cat) {
+      case "Codex":
+        return "cyan";
+      case "Claude":
+        return "yellow";
+      case "Gemini":
+        return "magenta";
+      case "Qwen":
+        return "green";
+      default:
+        return "white";
+    }
+  };
+
   const items: QuickStartItem[] = previousOptions.length
-    ? previousOptions.flatMap((opt, idx) => [
-        {
-          label: `Resume • ${opt.toolLabel}`,
-          value: `reuse-continue:${opt.toolId ?? "unknown"}`,
-          action: "reuse-continue",
-          toolId: opt.toolId ?? null,
-          description: describe(opt, true),
-          groupStart: idx === 0 ? false : true,
-        },
-        {
-          label: `New • ${opt.toolLabel}`,
-          value: `reuse-new:${opt.toolId ?? "unknown"}`,
-          action: "reuse-new",
-          toolId: opt.toolId ?? null,
-          description: describe(opt, false),
-          groupStart: false,
-        },
-      ])
+    ? previousOptions.flatMap((opt, idx) => {
+        const category = categorize(opt.toolId);
+        return [
+          {
+            label: `Resume • ${opt.toolLabel}`,
+            value: `reuse-continue:${opt.toolId ?? "unknown"}`,
+            action: "reuse-continue",
+            toolId: opt.toolId ?? null,
+            description: describe(opt, true),
+            groupStart: idx === 0 ? false : true,
+            category,
+          },
+          {
+            label: `New • ${opt.toolLabel}`,
+            value: `reuse-new:${opt.toolId ?? "unknown"}`,
+            action: "reuse-new",
+            toolId: opt.toolId ?? null,
+            description: describe(opt, false),
+            groupStart: false,
+            category,
+          },
+        ];
+      })
     : [
         {
           label: "Resume with previous settings",
@@ -98,6 +128,7 @@ export function BranchQuickStartScreen({
           action: "reuse-continue",
           description: "No previous settings (disabled)",
           disabled: true,
+          category: "Other",
         },
         {
           label: "Start new with previous settings",
@@ -105,6 +136,7 @@ export function BranchQuickStartScreen({
           action: "reuse-new",
           description: "No previous settings (disabled)",
           disabled: true,
+          category: "Other",
         },
       ];
 
@@ -113,6 +145,7 @@ export function BranchQuickStartScreen({
     value: "manual",
     action: "manual",
     description: "Pick tool and model manually",
+    category: "Other",
   });
 
   useInput((_, key) => {
@@ -149,8 +182,11 @@ export function BranchQuickStartScreen({
               flexDirection="column"
               marginTop={item.groupStart ? 1 : 0}
             >
-              <Text color={isSelected ? "cyan" : "white"}>
-                {`• ${item.label}`}
+              <Text
+                color={isSelected ? "white" : categoryColor(item.category)}
+                inverse={isSelected}
+              >
+                {`[${item.category}] ${item.label}`}
                 {item.disabled ? " (disabled)" : ""}
               </Text>
               <Text color="gray">  {item.description}</Text>
