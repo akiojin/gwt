@@ -312,8 +312,29 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         }
         const sessionData = await loadSession(root);
         const history = sessionData?.history ?? [];
+
+        const combinedHistory = [...history];
+        if (
+          sessionData?.lastSessionId &&
+          sessionData.lastBranch === selectedBranch.name &&
+          sessionData.lastUsedTool
+        ) {
+          const synthetic: ToolSessionEntry = {
+            branch: sessionData.lastBranch,
+            worktreePath: sessionData.lastWorktreePath ?? null,
+            toolId: sessionData.lastUsedTool,
+            toolLabel: sessionData.toolLabel ?? sessionData.lastUsedTool,
+            sessionId: sessionData.lastSessionId,
+            mode: sessionData.mode ?? null,
+            model: sessionData.model ?? null,
+            reasoningLevel: sessionData.reasoningLevel ?? null,
+            skipPermissions: sessionData.skipPermissions ?? null,
+            timestamp: sessionData.timestamp ?? Date.now(),
+          };
+          combinedHistory.push(synthetic);
+        }
         const latestPerTool = findLatestBranchSessionsByTool(
-          history,
+          combinedHistory,
           selectedBranch.name,
           selectedWorktreePath,
         );
