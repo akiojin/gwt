@@ -37,6 +37,7 @@ import { getToolById, getSharedEnvironment } from "./config/tools.js";
 import { launchCustomAITool } from "./launcher.js";
 import { saveSession, loadSession } from "./config/index.js";
 import { getPackageVersion } from "./utils.js";
+import { findLatestClaudeSessionId } from "./utils/session.js";
 import readline from "node:readline";
 import { resolveContinueSessionId } from "./cli/ui/utils/continueSession.js";
 import {
@@ -721,10 +722,18 @@ export async function handleAIToolWorkflow(
     }
 
     // Persist session with captured session ID (if any)
-    const finalSessionId =
+    let finalSessionId =
       (launchResult as { sessionId?: string | null } | undefined)?.sessionId ??
       resumeSessionId ??
       null;
+
+    if (!finalSessionId && tool === "claude-code") {
+      try {
+        finalSessionId = (await findLatestClaudeSessionId(worktreePath)) ?? null;
+      } catch {
+        finalSessionId = null;
+      }
+    }
 
     await saveSession({
       lastWorktreePath: worktreePath,
