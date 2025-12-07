@@ -55,6 +55,7 @@ import {
   findLatestBranchSessionsByTool,
 } from "../utils/continueSession.js";
 import {
+  findLatestCodexSession,
   findLatestCodexSessionId,
   findLatestClaudeSessionId,
 } from "../../../utils/session.js";
@@ -348,11 +349,24 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
           latestPerTool.map(async (entry) => {
             let sessionId = entry.sessionId ?? null;
 
-            // For Codex, only when history has no sessionId, try filesystem latest.
-            if (!sessionId && entry.toolId === "codex-cli") {
-              const latestCodex = await findLatestCodexSessionId();
-              if (latestCodex) {
-                sessionId = latestCodex;
+            // For Codex, prefer a newer filesystem session over stale history
+            if (entry.toolId === "codex-cli") {
+              try {
+                const latestCodex = await findLatestCodexSession();
+                const historyTs = entry.timestamp ?? 0;
+                if (
+                  latestCodex &&
+                  (!sessionId || latestCodex.mtime > historyTs)
+                ) {
+                  sessionId = latestCodex.id;
+                }
+                // Fallback when filesystem unavailable and history missing
+                if (!sessionId) {
+                  const latestId = await findLatestCodexSessionId();
+                  if (latestId) sessionId = latestId;
+                }
+              } catch {
+                // ignore lookup failure
               }
             }
 
