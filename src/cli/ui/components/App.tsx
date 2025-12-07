@@ -128,6 +128,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     model?: string | null;
     sessionId?: string | null;
     inferenceLevel?: InferenceLevel | null;
+    skipPermissions?: boolean | null;
   } | null>(null);
   const [branchQuickStartLoading, setBranchQuickStartLoading] =
     useState(false);
@@ -313,6 +314,10 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
           latest?.reasoningLevel ??
           sessionData?.reasoningLevel ??
           null;
+        const latestSkipPermissions =
+          latest?.skipPermissions ??
+          sessionData?.skipPermissions ??
+          null;
         if (!cancelled) {
           setBranchQuickStart(
             latest
@@ -322,6 +327,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
                   model: latest.model ?? null,
                   inferenceLevel: latestReasoning as InferenceLevel | null,
                   sessionId: latest.sessionId ?? null,
+                  skipPermissions: latestSkipPermissions,
                 }
               : null,
           );
@@ -1005,15 +1011,17 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
           : null,
       );
 
+      const skip = branchQuickStart.skipPermissions ?? false;
+
       if (action === "reuse-continue") {
         const hasSession = Boolean(branchQuickStart.sessionId);
         const mode: ExecutionMode = hasSession ? "resume" : "continue";
-        completeSelection(mode, false, branchQuickStart.sessionId ?? null);
+        completeSelection(mode, skip, branchQuickStart.sessionId ?? null);
         return;
       }
 
       // "Start new with previous settings" skips the execution mode screen and launches immediately
-      completeSelection("normal", false, null);
+      completeSelection("normal", skip, null);
     },
     [
       branchQuickStart,
@@ -1109,6 +1117,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
                     toolLabel: branchQuickStart.toolLabel,
                     model: branchQuickStart.model ?? null,
                     inferenceLevel: branchQuickStart.inferenceLevel ?? null,
+                    skipPermissions: branchQuickStart.skipPermissions ?? null,
                     sessionId: branchQuickStart.sessionId ?? null,
                   }
                 : null

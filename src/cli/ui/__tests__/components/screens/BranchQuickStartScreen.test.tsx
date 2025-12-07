@@ -24,6 +24,7 @@ describe("BranchQuickStartScreen", () => {
           model: "gpt-5.1-codex",
           sessionId: "abc-123",
           inferenceLevel: "high",
+          skipPermissions: true,
         }}
         onBack={() => {}}
         onSelect={() => {}}
@@ -34,7 +35,7 @@ describe("BranchQuickStartScreen", () => {
     expect(titleMatches.length).toBeGreaterThan(0);
     expect(
       getByText(
-        /Codex \/ gpt-5.1-codex \/ Reasoning: High \/ ID: abc-123/,
+        /Codex \/ gpt-5.1-codex \/ Reasoning: High \/ Skip: Yes \/ ID: abc-123/,
       ),
     ).toBeDefined();
   });
