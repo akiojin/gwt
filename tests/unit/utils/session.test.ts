@@ -79,6 +79,48 @@ describe("utils/session", () => {
     expect(id).toBe("019af438-56b3-7b32-bf8e-a5faeba5c9db");
   });
 
+  it("findLatestCodexSessionId can pick session closest to reference time", async () => {
+    const dirent = (name: string, type: "file" | "dir") => ({
+      name,
+      isFile: () => type === "file",
+      isDirectory: () => type === "dir",
+    });
+
+    (readdir as any).mockImplementation((dir: string, opts?: any) => {
+      if (opts?.withFileTypes) {
+        if (dir.endsWith("/.codex/sessions")) {
+          return Promise.resolve([dirent("2025", "dir")]);
+        }
+        if (dir.endsWith("/.codex/sessions/2025")) {
+          return Promise.resolve([dirent("12", "dir")]);
+        }
+        if (dir.endsWith("/.codex/sessions/2025/12")) {
+          return Promise.resolve([
+            dirent("early-uuid.jsonl", "file"),
+            dirent("late-uuid.jsonl", "file"),
+          ]);
+        }
+      }
+      return Promise.resolve([]);
+    });
+    (stat as any).mockImplementation((filePath: string) => {
+      if (filePath.includes("early-uuid")) return Promise.resolve({ mtimeMs: 1_000 });
+      return Promise.resolve({ mtimeMs: 5_000 });
+    });
+    (readFile as any).mockImplementation((filePath: string) => {
+      if (filePath.includes("early-uuid")) {
+        return Promise.resolve('{"sessionId":"early-123"}');
+      }
+      return Promise.resolve('{"sessionId":"late-456"}');
+    });
+
+    const id = await findLatestCodexSessionId({
+      preferClosestTo: 1_200,
+      windowMs: 2_000,
+    });
+    expect(id).toBe("early-123");
+  });
+
   it("findLatestClaudeSessionId reads JSONL lines and extracts session_id", async () => {
     const dirent = (name: string, type: "file" | "dir") => ({
       name,
