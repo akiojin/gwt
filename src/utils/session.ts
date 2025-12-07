@@ -458,28 +458,43 @@ export async function findLatestGeminiSession(
   _cwd: string,
   options: { since?: number; until?: number; preferClosestTo?: number; windowMs?: number } = {},
 ): Promise<GeminiSessionInfo | null> {
-  // Gemini stores sessions under ~/.gemini/tmp/<project_hash>/chats/*.json
+  // Gemini stores sessions/logs under ~/.gemini/tmp/<project_hash>/(chats|logs).json
   const baseDir = path.join(homedir(), ".gemini", "tmp");
-  const latest = await findLatestNestedSessionFile(baseDir, ["chats"], (name) =>
-    name.endsWith(".json"),
+  const files = await collectFilesRecursive(
+    baseDir,
+    (name) => name.endsWith(".json") || name.endsWith(".jsonl"),
   );
-  if (!latest) return null;
-  try {
-    const info = await stat(latest);
-    const id = await readSessionIdFromFile(latest);
-    if (!id) return null;
+  if (!files.length) return null;
 
-    if (options.since !== undefined && info.mtimeMs < options.since) {
-      return null;
-    }
-    if (options.until !== undefined && info.mtimeMs > options.until) {
-      return null;
-    }
-
-    return { id, mtime: info.mtimeMs };
-  } catch {
-    return null;
+  let pool = files;
+  if (options.since !== undefined) {
+    pool = pool.filter((f) => f.mtime >= options.since!);
   }
+  if (options.until !== undefined) {
+    pool = pool.filter((f) => f.mtime <= options.until!);
+  }
+  if (!pool.length) pool = files;
+
+  const ref = options.preferClosestTo;
+  const window = options.windowMs ?? 30 * 60 * 1000;
+  pool = pool
+    .slice()
+    .sort((a, b) => {
+      if (typeof ref === "number") {
+        const da = Math.abs(a.mtime - ref);
+        const db = Math.abs(b.mtime - ref);
+        if (da === db) return b.mtime - a.mtime;
+        if (da <= window || db <= window) return da - db;
+      }
+      return b.mtime - a.mtime;
+    });
+
+  for (const file of pool) {
+    const id = await readSessionIdFromFile(file.fullPath);
+    if (id) return { id, mtime: file.mtime };
+  }
+
+  return null;
 }
 
 export async function findLatestGeminiSessionId(
