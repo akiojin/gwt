@@ -212,11 +212,21 @@ async function findNewestSessionIdFromDir(
 
 async function readSessionIdFromFile(filePath: string): Promise<string | null> {
   try {
+    // Priority 1: Use filename UUID (most reliable for Claude session files)
+    // Claude session files are named with their session ID: {uuid}.jsonl
+    const basename = path.basename(filePath);
+    const filenameWithoutExt = basename.replace(/\.(json|jsonl)$/i, "");
+    if (isValidUuidSessionId(filenameWithoutExt)) {
+      return filenameWithoutExt;
+    }
+
+    // Priority 2: Extract from file content (for other formats)
     const content = await readFile(filePath, "utf-8");
     const fromContent = pickSessionIdFromText(content);
     if (fromContent) return fromContent;
-    // Fallback: use filename only (avoid picking unrelated UUIDs inside file)
-    const filenameMatch = path.basename(filePath).match(UUID_REGEX);
+
+    // Priority 3: Fallback to any UUID in filename
+    const filenameMatch = basename.match(UUID_REGEX);
     return filenameMatch ? filenameMatch[0] : null;
   } catch {
     return null;
