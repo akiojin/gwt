@@ -105,10 +105,22 @@ export async function launchQwenCLI(
     const hasLocalQwen = await isQwenCommandAvailable();
 
     try {
+      const execChild = async (child: any) => {
+        try {
+          await child;
+        } catch (execError: any) {
+          // Treat SIGINT/SIGTERM as normal exit (user pressed Ctrl+C)
+          if (execError.signal === "SIGINT" || execError.signal === "SIGTERM") {
+            return;
+          }
+          throw execError;
+        }
+      };
+
       if (hasLocalQwen) {
         // Use locally installed qwen command
         console.log(chalk.green("   ✨ Using locally installed qwen command"));
-        await execa("qwen", args, {
+        const child = execa("qwen", args, {
           cwd: worktreePath,
           shell: true,
           stdin: childStdio.stdin,
@@ -116,6 +128,7 @@ export async function launchQwenCLI(
           stderr: childStdio.stderr,
           env: baseEnv,
         } as any);
+        await execChild(child);
       } else {
         // Fallback to bunx
         console.log(
@@ -130,7 +143,7 @@ export async function launchQwenCLI(
         console.log("");
         // Wait 2 seconds to let user read the message
         await new Promise((resolve) => setTimeout(resolve, 2000));
-        await execa("bunx", [QWEN_CLI_PACKAGE, ...args], {
+        const child = execa("bunx", [QWEN_CLI_PACKAGE, ...args], {
           cwd: worktreePath,
           shell: true,
           stdin: childStdio.stdin,
@@ -138,6 +151,7 @@ export async function launchQwenCLI(
           stderr: childStdio.stderr,
           env: baseEnv,
         } as any);
+        await execChild(child);
       }
     } finally {
       childStdio.cleanup();

@@ -2,7 +2,11 @@ import { execa } from "execa";
 import chalk from "chalk";
 import { existsSync } from "fs";
 import { createChildStdio, getTerminalStreams } from "./utils/terminal.js";
-import { findLatestClaudeSessionId } from "./utils/session.js";
+import {
+  findLatestClaudeSession,
+  waitForClaudeSessionId,
+  claudeSessionFileExists,
+} from "./utils/session.js";
 
 const CLAUDE_CLI_PACKAGE = "@anthropic-ai/claude-code@latest";
 export class ClaudeError extends Error {
@@ -27,6 +31,7 @@ export async function launchClaudeCode(
   } = {},
 ): Promise<{ sessionId?: string | null }> {
   const terminal = getTerminalStreams();
+  const startedAt = Date.now();
 
   try {
     // Check if the worktree path exists
@@ -51,6 +56,12 @@ export async function launchClaudeCode(
         ? options.sessionId.trim()
         : null;
 
+    const sessionProbe = waitForClaudeSessionId(worktreePath, {
+      since: startedAt,
+      preferClosestTo: startedAt,
+      windowMs: 10 * 60 * 1000,
+    }).catch(() => null);
+
     // Handle execution mode
     switch (options.mode) {
       case "continue":
@@ -60,8 +71,11 @@ export async function launchClaudeCode(
             chalk.cyan(`   📱 Continuing specific session: ${resumeSessionId}`),
           );
         } else {
-          args.push("-c");
-          console.log(chalk.cyan("   📱 Continuing most recent conversation"));
+          console.log(
+            chalk.yellow(
+              "   ℹ️  No saved session ID for this branch/tool. Starting new session.",
+            ),
+          );
         }
         break;
       case "resume":
@@ -185,11 +199,10 @@ export async function launchClaudeCode(
 
     try {
       if (hasLocalClaude) {
-        // Use locally installed claude command
         console.log(
           chalk.green("   ✨ Using locally installed claude command"),
         );
-        await execa("claude", args, {
+        const child = execa("claude", args, {
           cwd: worktreePath,
           shell: true,
           stdin: childStdio.stdin,
@@ -197,8 +210,8 @@ export async function launchClaudeCode(
           stderr: childStdio.stderr,
           env: launchEnv,
         } as any);
+        await child;
       } else {
-        // Fallback to bunx
         console.log(
           chalk.cyan(
             "   🔄 Falling back to bunx @anthropic-ai/claude-code@latest",
@@ -223,9 +236,8 @@ export async function launchClaudeCode(
           ),
         );
         console.log("");
-        // Wait 2 seconds to let user read the message
         await new Promise((resolve) => setTimeout(resolve, 2000));
-        await execa("bunx", [CLAUDE_CLI_PACKAGE, ...args], {
+        const child = execa("bunx", [CLAUDE_CLI_PACKAGE, ...args], {
           cwd: worktreePath,
           shell: true,
           stdin: childStdio.stdin,
@@ -233,17 +245,28 @@ export async function launchClaudeCode(
           stderr: childStdio.stderr,
           env: launchEnv,
         } as any);
+        await child;
       }
     } finally {
       childStdio.cleanup();
     }
 
+    // File-based session detection only - no stdout capture
     let capturedSessionId: string | null = null;
+    const finishedAt = Date.now();
     try {
-      capturedSessionId =
-        (await findLatestClaudeSessionId(worktreePath)) ??
-        resumeSessionId ??
-        null;
+      const [polled, latest] = await Promise.all([
+        sessionProbe,
+        findLatestClaudeSession(worktreePath, {
+          since: startedAt,
+          until: finishedAt + 30_000,
+          preferClosestTo: finishedAt,
+          windowMs: 10 * 60 * 1000,
+        }),
+      ]);
+
+      // Priority: latest on disk > polled > resumeSessionId
+      capturedSessionId = latest?.id ?? polled ?? resumeSessionId ?? null;
     } catch {
       capturedSessionId = resumeSessionId ?? null;
     }
