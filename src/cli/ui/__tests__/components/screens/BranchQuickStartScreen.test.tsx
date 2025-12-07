@@ -85,7 +85,7 @@ describe("BranchQuickStartScreen", () => {
   });
 
   it("shows manual selection option", () => {
-    const { getByText, getAllByText } = render(
+    const { getByText } = render(
       <BranchQuickStartScreen
         branchName="feature/foo"
         previousOptions={[
