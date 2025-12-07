@@ -360,7 +360,11 @@ export async function findLatestCodexSession(
         const info = await readSessionInfoFromFile(file.fullPath);
         if (
           info.cwd &&
-          (info.cwd === options.cwd || info.cwd.startsWith(options.cwd))
+          // Match if: exact match, session cwd starts with options.cwd,
+          // or options.cwd starts with session cwd (for worktree subdirectories)
+          (info.cwd === options.cwd ||
+            info.cwd.startsWith(options.cwd) ||
+            options.cwd.startsWith(info.cwd))
         ) {
           return { id: sessionId, mtime: file.mtime };
         }
@@ -375,7 +379,11 @@ export async function findLatestCodexSession(
     if (options.cwd) {
       if (
         info.cwd &&
-        (info.cwd === options.cwd || info.cwd.startsWith(options.cwd))
+        // Match if: exact match, session cwd starts with options.cwd,
+        // or options.cwd starts with session cwd (for worktree subdirectories)
+        (info.cwd === options.cwd ||
+          info.cwd.startsWith(options.cwd) ||
+          options.cwd.startsWith(info.cwd))
       ) {
         return { id: info.id, mtime: file.mtime };
       }
