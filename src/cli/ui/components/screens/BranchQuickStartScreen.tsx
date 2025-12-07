@@ -75,7 +75,7 @@ export function BranchQuickStartScreen({
   const items: QuickStartItem[] = previousOptions.length
     ? previousOptions.flatMap((opt, idx) => [
         {
-          label: `${opt.toolLabel} — Resume`,
+          label: `Resume • ${opt.toolLabel}`,
           value: `reuse-continue:${opt.toolId ?? "unknown"}`,
           action: "reuse-continue",
           toolId: opt.toolId ?? null,
@@ -83,7 +83,7 @@ export function BranchQuickStartScreen({
           groupStart: idx === 0 ? false : true,
         },
         {
-          label: `${opt.toolLabel} — Start new`,
+          label: `New • ${opt.toolLabel}`,
           value: `reuse-new:${opt.toolId ?? "unknown"}`,
           action: "reuse-new",
           toolId: opt.toolId ?? null,
@@ -109,7 +109,7 @@ export function BranchQuickStartScreen({
       ];
 
   items.push({
-    label: "Choose manually",
+    label: "Manual selection",
     value: "manual",
     action: "manual",
     description: "Pick tool and model manually",
