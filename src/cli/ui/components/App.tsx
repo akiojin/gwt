@@ -1005,11 +1005,15 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
           : null,
       );
 
-      if (action === "reuse-continue" && branchQuickStart.sessionId) {
-        setContinueSessionId(branchQuickStart.sessionId);
+      if (action === "reuse-continue") {
+        const hasSession = Boolean(branchQuickStart.sessionId);
+        const mode: ExecutionMode = hasSession ? "resume" : "continue";
+        completeSelection(mode, false, branchQuickStart.sessionId ?? null);
+        return;
       }
 
-      navigateTo("execution-mode-selector");
+      // "Start new with previous settings" skips the execution mode screen and launches immediately
+      completeSelection("normal", false, null);
     },
     [
       branchQuickStart,
@@ -1017,7 +1021,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       setPreferredToolId,
       setSelectedModel,
       setSelectedTool,
-      setContinueSessionId,
+      completeSelection,
     ],
   );
 
