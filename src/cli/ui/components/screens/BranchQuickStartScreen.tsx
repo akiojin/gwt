@@ -33,7 +33,7 @@ const supportsReasoning = (toolId?: string | null) =>
   toolId === "codex-cli";
 
 const describe = (opt: BranchQuickStartOption, includeSessionId = true) => {
-  const parts = [opt.toolLabel, opt.model ?? "default"];
+  const parts = [`Model: ${opt.model ?? "default"}`];
   if (supportsReasoning(opt.toolId)) {
     parts.push(`Reasoning: ${formatReasoning(opt.inferenceLevel)}`);
   }
@@ -49,6 +49,7 @@ type QuickStartItem = SelectItem & {
   disabled?: boolean;
   toolId?: string | null;
   action: QuickStartAction;
+  groupStart?: boolean;
 };
 
 export interface BranchQuickStartScreenProps {
@@ -71,13 +72,14 @@ export function BranchQuickStartScreen({
   const { rows } = useTerminalSize();
 
   const items: QuickStartItem[] = previousOptions.length
-    ? previousOptions.flatMap((opt) => [
+    ? previousOptions.flatMap((opt, idx) => [
         {
           label: `Resume with previous settings (${opt.toolLabel})`,
           value: `reuse-continue:${opt.toolId ?? "unknown"}`,
           action: "reuse-continue",
           toolId: opt.toolId ?? null,
           description: describe(opt, true),
+          groupStart: idx === 0 ? false : true,
         },
         {
           label: `Start new with previous settings (${opt.toolLabel})`,
@@ -85,6 +87,7 @@ export function BranchQuickStartScreen({
           action: "reuse-new",
           toolId: opt.toolId ?? null,
           description: describe(opt, false),
+          groupStart: false,
         },
       ])
     : [
@@ -126,7 +129,7 @@ export function BranchQuickStartScreen({
       />
 
       <Box flexDirection="column" flexGrow={1} marginTop={1}>
-        <Box marginBottom={1}>
+        <Box marginBottom={1} flexDirection="column">
           <Text>
             {loading
               ? "Loading previous settings..."
@@ -141,7 +144,10 @@ export function BranchQuickStartScreen({
             onSelect(item.action, item.toolId ?? null);
           }}
           renderItem={(item: QuickStartItem, isSelected) => (
-            <Box flexDirection="column">
+            <Box
+              flexDirection="column"
+              marginTop={item.groupStart ? 1 : 0}
+            >
               <Text color={isSelected ? "cyan" : "white"}>
                 {item.label}
                 {item.disabled ? " (disabled)" : ""}
