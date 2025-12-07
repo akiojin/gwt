@@ -30,6 +30,7 @@ export async function launchClaudeCode(
   } = {},
 ): Promise<{ sessionId?: string | null }> {
   const terminal = getTerminalStreams();
+  const startedAt = Date.now();
 
   try {
     // Check if the worktree path exists
@@ -55,9 +56,11 @@ export async function launchClaudeCode(
         : null;
 
     const startedAt = Date.now();
-    const sessionProbe = waitForClaudeSessionId(worktreePath).catch(
-      () => null,
-    );
+    const sessionProbe = waitForClaudeSessionId(worktreePath, {
+      since: startedAt - 60_000,
+      preferClosestTo: startedAt,
+      windowMs: 60 * 60 * 1000,
+    }).catch(() => null);
 
     // Handle execution mode
     switch (options.mode) {
@@ -250,11 +253,17 @@ export async function launchClaudeCode(
     }
 
     let capturedSessionId: string | null = null;
+    const finishedAt = Date.now();
     try {
       const polled = await sessionProbe;
       capturedSessionId =
         polled ??
-        (await findLatestClaudeSessionId(worktreePath)) ??
+        (await findLatestClaudeSessionId(worktreePath, {
+          since: startedAt - 60_000,
+          until: finishedAt + 60_000,
+          preferClosestTo: finishedAt,
+          windowMs: 60 * 60 * 1000,
+        })) ??
         resumeSessionId ??
         null;
     } catch {

@@ -333,8 +333,9 @@ function generateClaudeProjectPathCandidates(cwd: string): string[] {
 
 export async function findLatestClaudeSessionId(
   cwd: string,
+  options: { since?: number; until?: number; preferClosestTo?: number; windowMs?: number } = {},
 ): Promise<string | null> {
-  const found = await findLatestClaudeSession(cwd);
+  const found = await findLatestClaudeSession(cwd, options);
   return found?.id ?? null;
 }
 
@@ -345,7 +346,7 @@ export interface ClaudeSessionInfo {
 
 export async function findLatestClaudeSession(
   cwd: string,
-  options: { since?: number; preferClosestTo?: number; windowMs?: number } = {},
+  options: { since?: number; until?: number; preferClosestTo?: number; windowMs?: number } = {},
 ): Promise<ClaudeSessionInfo | null> {
   const rootCandidates: string[] = [];
   if (process.env.CLAUDE_CONFIG_DIR) {
@@ -408,14 +409,27 @@ export async function findLatestClaudeSession(
 
 export async function waitForClaudeSessionId(
   cwd: string,
-  options: { timeoutMs?: number; pollIntervalMs?: number } = {},
+  options: {
+    timeoutMs?: number;
+    pollIntervalMs?: number;
+    since?: number;
+    until?: number;
+    preferClosestTo?: number;
+    windowMs?: number;
+  } = {},
 ): Promise<string | null> {
   const timeoutMs = options.timeoutMs ?? 120_000;
   const pollIntervalMs = options.pollIntervalMs ?? 2_000;
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
-    const found = await findLatestClaudeSession(cwd);
+    const opt: { since?: number; until?: number; preferClosestTo?: number; windowMs?: number } = {};
+    if (options.since !== undefined) opt.since = options.since;
+    if (options.until !== undefined) opt.until = options.until;
+    if (options.preferClosestTo !== undefined) opt.preferClosestTo = options.preferClosestTo;
+    if (options.windowMs !== undefined) opt.windowMs = options.windowMs;
+
+    const found = await findLatestClaudeSession(cwd, opt);
     if (found?.id) return found.id;
     await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
   }
@@ -501,7 +515,14 @@ export async function findLatestGeminiSessionId(
   cwd: string,
   options: { since?: number; until?: number; preferClosestTo?: number; windowMs?: number } = {},
 ): Promise<string | null> {
-  const found = await findLatestGeminiSession(cwd, options);
+  const normalized: { since?: number; until?: number; preferClosestTo?: number; windowMs?: number } = {};
+  if (options.since !== undefined) normalized.since = options.since as number;
+  if (options.until !== undefined) normalized.until = options.until as number;
+  if (options.preferClosestTo !== undefined)
+    normalized.preferClosestTo = options.preferClosestTo as number;
+  if (options.windowMs !== undefined) normalized.windowMs = options.windowMs as number;
+
+  const found = await findLatestGeminiSession(cwd, normalized as any);
   return found?.id ?? null;
 }
 
