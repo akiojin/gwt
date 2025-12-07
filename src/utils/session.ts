@@ -197,6 +197,11 @@ export interface CodexSessionInfo {
   mtime: number;
 }
 
+export interface GeminiSessionInfo {
+  id: string;
+  mtime: number;
+}
+
 async function collectFilesRecursive(
   dir: string,
   filter: (name: string) => boolean,
@@ -449,16 +454,40 @@ async function findLatestNestedSessionFile(
   }
 }
 
-export async function findLatestGeminiSessionId(
+export async function findLatestGeminiSession(
   _cwd: string,
-): Promise<string | null> {
+  options: { since?: number; until?: number; preferClosestTo?: number; windowMs?: number } = {},
+): Promise<GeminiSessionInfo | null> {
   // Gemini stores sessions under ~/.gemini/tmp/<project_hash>/chats/*.json
   const baseDir = path.join(homedir(), ".gemini", "tmp");
   const latest = await findLatestNestedSessionFile(baseDir, ["chats"], (name) =>
     name.endsWith(".json"),
   );
   if (!latest) return null;
-  return readSessionIdFromFile(latest);
+  try {
+    const info = await stat(latest);
+    const id = await readSessionIdFromFile(latest);
+    if (!id) return null;
+
+    if (options.since !== undefined && info.mtimeMs < options.since) {
+      return null;
+    }
+    if (options.until !== undefined && info.mtimeMs > options.until) {
+      return null;
+    }
+
+    return { id, mtime: info.mtimeMs };
+  } catch {
+    return null;
+  }
+}
+
+export async function findLatestGeminiSessionId(
+  cwd: string,
+  options: { since?: number; until?: number; preferClosestTo?: number; windowMs?: number } = {},
+): Promise<string | null> {
+  const found = await findLatestGeminiSession(cwd, options);
+  return found?.id ?? null;
 }
 
 export async function findLatestQwenSessionId(
