@@ -12,6 +12,7 @@ export interface BranchQuickStartOption {
   model?: string | null;
   sessionId?: string | null;
   inferenceLevel?: string | null;
+  skipPermissions?: boolean | null;
 }
 
 const REASONING_LABELS: Record<string, string> = {
@@ -23,6 +24,9 @@ const REASONING_LABELS: Record<string, string> = {
 
 const formatReasoning = (level?: string | null) =>
   level ? REASONING_LABELS[level] ?? level : "Default";
+
+const formatSkip = (skip?: boolean | null) =>
+  skip === true ? "Yes" : skip === false ? "No" : "No";
 
 type QuickStartItem = SelectItem & {
   description: string;
@@ -53,7 +57,7 @@ export function BranchQuickStartScreen({
       label: "Resume with previous settings",
       value: "reuse-continue",
       description: previousOption
-        ? `${previousOption.toolLabel} / ${previousOption.model ?? "default"} / Reasoning: ${formatReasoning(previousOption.inferenceLevel)} / ${previousOption.sessionId ? `ID: ${previousOption.sessionId}` : "No ID"}`
+        ? `${previousOption.toolLabel} / ${previousOption.model ?? "default"} / Reasoning: ${formatReasoning(previousOption.inferenceLevel)} / Skip: ${formatSkip(previousOption.skipPermissions)} / ${previousOption.sessionId ? `ID: ${previousOption.sessionId}` : "No ID"}`
         : "No previous settings (disabled)",
       disabled: !previousOption,
     },
@@ -61,7 +65,7 @@ export function BranchQuickStartScreen({
       label: "Start new with previous settings",
       value: "reuse-new",
       description: previousOption
-        ? `${previousOption.toolLabel} / ${previousOption.model ?? "default"} / Reasoning: ${formatReasoning(previousOption.inferenceLevel)}`
+        ? `${previousOption.toolLabel} / ${previousOption.model ?? "default"} / Reasoning: ${formatReasoning(previousOption.inferenceLevel)} / Skip: ${formatSkip(previousOption.skipPermissions)}`
         : "No previous settings (disabled)",
       disabled: !previousOption,
     },

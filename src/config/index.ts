@@ -16,6 +16,7 @@ export interface SessionData {
   lastUsedTool?: string;
   lastSessionId?: string | null;
   reasoningLevel?: string | null;
+  skipPermissions?: boolean | null;
   timestamp: number;
   repositoryRoot: string;
   mode?: "normal" | "continue" | "resume";
@@ -33,6 +34,7 @@ export interface ToolSessionEntry {
   mode?: "normal" | "continue" | "resume" | null;
   model?: string | null;
   reasoningLevel?: string | null;
+  skipPermissions?: boolean | null;
   timestamp: number;
 }
 
@@ -153,6 +155,7 @@ export async function saveSession(
         mode: sessionData.mode ?? null,
         model: sessionData.model ?? null,
         reasoningLevel: sessionData.reasoningLevel ?? null,
+        skipPermissions: sessionData.skipPermissions ?? null,
         timestamp: sessionData.timestamp,
       };
       existingHistory = [...existingHistory, entry].slice(-100); // keep latest 100
@@ -163,6 +166,7 @@ export async function saveSession(
       history: existingHistory,
       lastSessionId: sessionData.lastSessionId ?? null,
       reasoningLevel: sessionData.reasoningLevel ?? null,
+      skipPermissions: sessionData.skipPermissions ?? null,
     };
 
     await writeFile(sessionPath, JSON.stringify(payload, null, 2), "utf-8");
