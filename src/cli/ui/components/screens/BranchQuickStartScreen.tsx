@@ -74,6 +74,7 @@ export function BranchQuickStartScreen({
 }: BranchQuickStartScreenProps) {
   const { rows } = useTerminalSize();
   const containerHeight = rows && rows > 0 ? rows : undefined;
+  const pendingEnterRef = React.useRef(false);
 
   const CATEGORY_META = {
     "codex-cli": { label: "Codex", color: "cyan" },
@@ -175,8 +176,29 @@ export function BranchQuickStartScreen({
   useInput((_, key) => {
     if (key.escape) {
       onBack();
+      return;
+    }
+    if (key.return) {
+      if (!loading && items.length > 0) {
+        onSelect(
+          (items[0] as QuickStartItem).action,
+          (items[0] as QuickStartItem).toolId ?? null,
+        );
+      } else {
+        pendingEnterRef.current = true;
+      }
     }
   });
+
+  React.useEffect(() => {
+    if (pendingEnterRef.current && !loading && items.length > 0) {
+      pendingEnterRef.current = false;
+      onSelect(
+        (items[0] as QuickStartItem).action,
+        (items[0] as QuickStartItem).toolId ?? null,
+      );
+    }
+  }, [loading, items, onSelect]);
 
   return (
     <Box flexDirection="column" height={containerHeight}>
