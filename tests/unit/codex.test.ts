@@ -102,7 +102,8 @@ describe("codex.ts", () => {
       stdout: "inherit",
       stderr: "inherit",
     });
-    expect(mockTerminalStreams.exitRawMode).toHaveBeenCalledTimes(1);
+    // exitRawMode is called once before child process and once in finally block
+    expect(mockTerminalStreams.exitRawMode).toHaveBeenCalledTimes(2);
     expect(mockChildStdio.cleanup).toHaveBeenCalledTimes(1);
   });
 
