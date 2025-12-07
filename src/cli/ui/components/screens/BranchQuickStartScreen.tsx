@@ -52,6 +52,7 @@ type QuickStartItem = SelectItem & {
   action: QuickStartAction;
   groupStart?: boolean;
   category: string;
+  categoryColor: "cyan" | "yellow" | "magenta" | "green" | "white";
 };
 
 export interface BranchQuickStartScreenProps {
@@ -74,23 +75,34 @@ export function BranchQuickStartScreen({
   const { rows } = useTerminalSize();
   const containerHeight = rows && rows > 0 ? rows : undefined;
 
-  const CATEGORY_META: Record<
-    string,
-    { label: string; color: "cyan" | "yellow" | "magenta" | "green" | "white" }
-  > = {
+  const CATEGORY_META = {
     "codex-cli": { label: "Codex", color: "cyan" },
     "claude-code": { label: "Claude", color: "yellow" },
     "gemini-cli": { label: "Gemini", color: "magenta" },
     "qwen-cli": { label: "Qwen", color: "green" },
     other: { label: "Other", color: "white" },
-  };
+  } as const;
 
-  const resolveCategory = (toolId?: string | null) =>
-    CATEGORY_META[toolId ?? ""] ?? CATEGORY_META.other;
+  type CategoryMeta = (typeof CATEGORY_META)[keyof typeof CATEGORY_META];
+
+  const resolveCategory = (toolId?: string | null): CategoryMeta => {
+    switch (toolId) {
+      case "codex-cli":
+        return CATEGORY_META["codex-cli"];
+      case "claude-code":
+        return CATEGORY_META["claude-code"];
+      case "gemini-cli":
+        return CATEGORY_META["gemini-cli"];
+      case "qwen-cli":
+        return CATEGORY_META["qwen-cli"];
+      default:
+        return CATEGORY_META.other;
+    }
+  };
 
   const items: QuickStartItem[] = previousOptions.length
     ? previousOptions.flatMap((opt, idx) => {
-        const category = resolveCategory(opt.toolId);
+        const categoryMeta = resolveCategory(opt.toolId);
         return [
           {
             label: `Resume • ${opt.toolLabel}`,
@@ -99,7 +111,8 @@ export function BranchQuickStartScreen({
             toolId: opt.toolId ?? null,
             description: describe(opt, true),
             groupStart: idx === 0 ? false : true,
-            category: category.label,
+            category: categoryMeta.label,
+            categoryColor: categoryMeta.color,
           },
           {
             label: `New • ${opt.toolLabel}`,
@@ -108,7 +121,8 @@ export function BranchQuickStartScreen({
             toolId: opt.toolId ?? null,
             description: describe(opt, false),
             groupStart: false,
-            category: category.label,
+            category: categoryMeta.label,
+            categoryColor: categoryMeta.color,
           },
         ];
       })
@@ -119,7 +133,8 @@ export function BranchQuickStartScreen({
           action: "reuse-continue",
           description: "No previous settings (disabled)",
           disabled: true,
-          category: "Other",
+          category: CATEGORY_META.other.label,
+          categoryColor: CATEGORY_META.other.color,
         },
         {
           label: "Start new with previous settings",
@@ -127,7 +142,8 @@ export function BranchQuickStartScreen({
           action: "reuse-new",
           description: "No previous settings (disabled)",
           disabled: true,
-          category: "Other",
+          category: CATEGORY_META.other.label,
+          categoryColor: CATEGORY_META.other.color,
         },
       ];
 
@@ -136,7 +152,8 @@ export function BranchQuickStartScreen({
     value: "manual",
     action: "manual",
     description: "Pick tool and model manually",
-    category: "Other",
+    category: CATEGORY_META.other.label,
+    categoryColor: CATEGORY_META.other.color,
   });
 
   useInput((_, key) => {
@@ -174,19 +191,7 @@ export function BranchQuickStartScreen({
               marginTop={item.groupStart ? 1 : item.category === "Other" ? 1 : 0}
             >
               <Text
-                color={
-                  isSelected
-                    ? "white"
-                    : CATEGORY_META[
-                        Object.values(CATEGORY_META).find(
-                          (m) => m.label === item.category,
-                        )
-                          ? Object.entries(CATEGORY_META).find(
-                              ([, m]) => m.label === item.category,
-                            )?.[0] ?? "other"
-                          : "other"
-                      ].color
-                }
+                color={isSelected ? "white" : item.categoryColor}
                 inverse={isSelected}
               >
                 {`[${item.category}] ${item.label}`}
