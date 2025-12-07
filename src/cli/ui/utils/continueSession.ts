@@ -75,3 +75,26 @@ export function findLatestBranchSession(
 
   return pickLatest(byBranch);
 }
+
+export function findLatestBranchSessionsByTool(
+  history: ToolSessionEntry[],
+  branch: string,
+): ToolSessionEntry[] {
+  const byBranch = history.filter((entry) => entry && entry.branch === branch);
+  if (!byBranch.length) return [];
+
+  const latestByTool = new Map<string, ToolSessionEntry>();
+  for (const entry of byBranch) {
+    if (!entry.toolId) continue;
+    const current = latestByTool.get(entry.toolId);
+    const currentTs = current?.timestamp ?? 0;
+    const entryTs = entry.timestamp ?? 0;
+    if (!current || entryTs >= currentTs) {
+      latestByTool.set(entry.toolId, entry);
+    }
+  }
+
+  return Array.from(latestByTool.values()).sort(
+    (a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0),
+  );
+}

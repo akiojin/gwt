@@ -47,3 +47,4 @@ description: "Continue/Resumeで正しいセッションを再開するための
 - [x] **T0502** `[US5]` 履歴が存在する場合はQuick Startへ遷移し、選択結果に応じてツール/モデル/セッションIDを事前セットするロジックを実装（履歴なしは従来フロー）。
 - [x] **T0503** `[US5]` Quick StartのUIテストと統合テスト（前回設定で続きから/新規、履歴なしフォールバック）を追加。
 - [x] **T0504** `[US5]` Quick Startの表示ルールをツール別に分岐し、CodexのみReasoningを表示、Start newではセッションIDを非表示にするUIテストを追加（`src/cli/ui/__tests__/components/screens/BranchQuickStartScreen.test.tsx`）。
+- [ ] **T0505** `[US5]` 同一ブランチでツールごとに直近設定を保持し、Quick Startでツール別行（Resume/Start new）を生成するロジックとテストを追加する。

@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import {
   resolveContinueSessionId,
   findLatestBranchSession,
+  findLatestBranchSessionsByTool,
 } from "../../../src/cli/ui/utils/continueSession.js";
 import type {
   SessionData,
@@ -147,5 +148,40 @@ describe("resolveContinueSessionId", () => {
 
     const entry = findLatestBranchSession(history, branch, "codex-cli");
     expect(entry?.sessionId).toBe("codex-4");
+  });
+
+  it("findLatestBranchSessionsByTool returns latest per tool for branch", () => {
+    const history: ToolSessionEntry[] = [
+      {
+        branch,
+        toolId: "codex-cli",
+        toolLabel: "Codex",
+        worktreePath: "/a",
+        timestamp: 1,
+        sessionId: "codex-1",
+      },
+      {
+        branch,
+        toolId: "codex-cli",
+        toolLabel: "Codex",
+        worktreePath: "/b",
+        timestamp: 5,
+        sessionId: "codex-5",
+      },
+      {
+        branch,
+        toolId: "claude-code",
+        toolLabel: "Claude",
+        worktreePath: "/c",
+        timestamp: 3,
+        sessionId: "claude-3",
+      },
+    ];
+
+    const results = findLatestBranchSessionsByTool(history, branch);
+    const ids = results.map((r) => r.sessionId);
+    expect(ids).toContain("codex-5");
+    expect(ids).toContain("claude-3");
+    expect(ids).not.toContain("codex-1");
   });
 });

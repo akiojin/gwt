@@ -47,19 +47,21 @@ const describe = (opt: BranchQuickStartOption, includeSessionId = true) => {
 type QuickStartItem = SelectItem & {
   description: string;
   disabled?: boolean;
+  toolId?: string | null;
+  action: QuickStartAction;
 };
 
 export interface BranchQuickStartScreenProps {
-  previousOption: BranchQuickStartOption | null;
+  previousOptions: BranchQuickStartOption[];
   loading?: boolean;
   onBack: () => void;
-  onSelect: (action: QuickStartAction) => void;
+  onSelect: (action: QuickStartAction, toolId?: string | null) => void;
   version?: string | null;
   branchName: string;
 }
 
 export function BranchQuickStartScreen({
-  previousOption,
+  previousOptions,
   loading = false,
   onBack,
   onSelect,
@@ -68,29 +70,46 @@ export function BranchQuickStartScreen({
 }: BranchQuickStartScreenProps) {
   const { rows } = useTerminalSize();
 
-  const items: QuickStartItem[] = [
-    {
-      label: "Resume with previous settings",
-      value: "reuse-continue",
-      description: previousOption
-        ? describe(previousOption, true)
-        : "No previous settings (disabled)",
-      disabled: !previousOption,
-    },
-    {
-      label: "Start new with previous settings",
-      value: "reuse-new",
-      description: previousOption
-        ? describe(previousOption, false)
-        : "No previous settings (disabled)",
-      disabled: !previousOption,
-    },
-    {
-      label: "Choose manually",
-      value: "manual",
-      description: "Pick tool and model manually",
-    },
-  ];
+  const items: QuickStartItem[] = previousOptions.length
+    ? previousOptions.flatMap((opt) => [
+        {
+          label: `Resume with previous settings (${opt.toolLabel})`,
+          value: `reuse-continue:${opt.toolId ?? "unknown"}`,
+          action: "reuse-continue",
+          toolId: opt.toolId ?? null,
+          description: describe(opt, true),
+        },
+        {
+          label: `Start new with previous settings (${opt.toolLabel})`,
+          value: `reuse-new:${opt.toolId ?? "unknown"}`,
+          action: "reuse-new",
+          toolId: opt.toolId ?? null,
+          description: describe(opt, false),
+        },
+      ])
+    : [
+        {
+          label: "Resume with previous settings",
+          value: "reuse-continue",
+          action: "reuse-continue",
+          description: "No previous settings (disabled)",
+          disabled: true,
+        },
+        {
+          label: "Start new with previous settings",
+          value: "reuse-new",
+          action: "reuse-new",
+          description: "No previous settings (disabled)",
+          disabled: true,
+        },
+      ];
+
+  items.push({
+    label: "Choose manually",
+    value: "manual",
+    action: "manual",
+    description: "Pick tool and model manually",
+  });
 
   useInput((_, key) => {
     if (key.escape) {
@@ -119,7 +138,7 @@ export function BranchQuickStartScreen({
           items={items}
           onSelect={(item: QuickStartItem) => {
             if (item.disabled) return;
-            onSelect(item.value as QuickStartAction);
+            onSelect(item.action, item.toolId ?? null);
           }}
           renderItem={(item: QuickStartItem, isSelected) => (
             <Box flexDirection="column">
