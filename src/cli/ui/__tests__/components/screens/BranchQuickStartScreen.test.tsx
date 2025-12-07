@@ -38,12 +38,12 @@ describe("BranchQuickStartScreen", () => {
     expect(titleMatches.length).toBeGreaterThan(0);
     expect(
       getByText(
-        /Codex \/ gpt-5.1-codex \/ Reasoning: High \/ Skip: Yes \/ ID: abc-123/,
+        /Model: gpt-5.1-codex \/ Reasoning: High \/ Skip: Yes \/ ID: abc-123/,
       ),
     ).toBeDefined();
     expect(queryAllByText(/ID: abc-123/)).toHaveLength(1);
     expect(
-      getByText(/Codex \/ gpt-5.1-codex \/ Reasoning: High \/ Skip: Yes$/),
+      getByText(/Model: gpt-5.1-codex \/ Reasoning: High \/ Skip: Yes$/),
     ).toBeDefined();
   });
 
@@ -67,7 +67,7 @@ describe("BranchQuickStartScreen", () => {
     );
 
     expect(
-      getByText(/Claude Code \/ opus \/ Skip: No \/ ID: abc-123/),
+      getByText(/Model: opus \/ Skip: No \/ ID: abc-123/),
     ).toBeDefined();
   });
 
@@ -132,15 +132,13 @@ describe("BranchQuickStartScreen", () => {
 
     expect(getByText(/Resume with previous settings \(Codex\)/i)).toBeDefined();
     expect(
-      getByText(
-        /Codex \/ gpt-5.1-codex \/ Reasoning: High \/ Skip: Yes \/ ID: codex-123/,
-      ),
+      getByText(/Model: gpt-5.1-codex \/ Reasoning: High \/ Skip: Yes \/ ID: codex-123/),
     ).toBeDefined();
     expect(
       getByText(/Resume with previous settings \(Claude Code\)/i),
     ).toBeDefined();
     expect(
-      getByText(/Claude Code \/ opus \/ Skip: No \/ ID: claude-999/),
+      getByText(/Model: opus \/ Skip: No \/ ID: claude-999/),
     ).toBeDefined();
   });
 });
