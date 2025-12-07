@@ -19,14 +19,16 @@ describe("BranchQuickStartScreen", () => {
     const { getByText, getAllByText, queryAllByText } = render(
       <BranchQuickStartScreen
         branchName="feature/foo"
-        previousOption={{
-          toolId: "codex-cli",
-          toolLabel: "Codex",
-          model: "gpt-5.1-codex",
-          sessionId: "abc-123",
-          inferenceLevel: "high",
-          skipPermissions: true,
-        }}
+        previousOptions={[
+          {
+            toolId: "codex-cli",
+            toolLabel: "Codex",
+            model: "gpt-5.1-codex",
+            sessionId: "abc-123",
+            inferenceLevel: "high",
+            skipPermissions: true,
+          },
+        ]}
         onBack={() => {}}
         onSelect={() => {}}
       />,
@@ -49,14 +51,16 @@ describe("BranchQuickStartScreen", () => {
     const { getByText } = render(
       <BranchQuickStartScreen
         branchName="feature/foo"
-        previousOption={{
-          toolId: "claude-code",
-          toolLabel: "Claude Code",
-          model: "opus",
-          sessionId: "abc-123",
-          inferenceLevel: "xhigh",
-          skipPermissions: false,
-        }}
+        previousOptions={[
+          {
+            toolId: "claude-code",
+            toolLabel: "Claude Code",
+            model: "opus",
+            sessionId: "abc-123",
+            inferenceLevel: "xhigh",
+            skipPermissions: false,
+          },
+        ]}
         onBack={() => {}}
         onSelect={() => {}}
       />,
@@ -71,7 +75,7 @@ describe("BranchQuickStartScreen", () => {
     const { getAllByText } = render(
       <BranchQuickStartScreen
         branchName="feature/foo"
-        previousOption={null}
+        previousOptions={[]}
         onBack={() => {}}
         onSelect={() => {}}
       />,
@@ -84,16 +88,59 @@ describe("BranchQuickStartScreen", () => {
     const { getByText } = render(
       <BranchQuickStartScreen
         branchName="feature/foo"
-        previousOption={{
-          toolLabel: "Codex",
-          model: "gpt-5.1-codex",
-          sessionId: "abc-123",
-        }}
+        previousOptions={[
+          {
+            toolId: "codex-cli",
+            toolLabel: "Codex",
+            model: "gpt-5.1-codex",
+            sessionId: "abc-123",
+          },
+        ]}
         onBack={() => {}}
         onSelect={() => {}}
       />,
     );
 
     expect(getByText("Choose manually")).toBeDefined();
+  });
+
+  it("renders multiple tools separately", () => {
+    const { getByText } = render(
+      <BranchQuickStartScreen
+        branchName="feature/foo"
+        previousOptions={[
+          {
+            toolId: "codex-cli",
+            toolLabel: "Codex",
+            model: "gpt-5.1-codex",
+            sessionId: "codex-123",
+            inferenceLevel: "high",
+            skipPermissions: true,
+          },
+          {
+            toolId: "claude-code",
+            toolLabel: "Claude Code",
+            model: "opus",
+            sessionId: "claude-999",
+            skipPermissions: false,
+          },
+        ]}
+        onBack={() => {}}
+        onSelect={() => {}}
+      />,
+    );
+
+    expect(getByText(/Resume with previous settings \(Codex\)/i)).toBeDefined();
+    expect(
+      getByText(
+        /Codex \/ gpt-5.1-codex \/ Reasoning: High \/ Skip: Yes \/ ID: codex-123/,
+      ),
+    ).toBeDefined();
+    expect(
+      getByText(/Resume with previous settings \(Claude Code\)/i),
+    ).toBeDefined();
+    expect(
+      getByText(/Claude Code \/ opus \/ Skip: No \/ ID: claude-999/),
+    ).toBeDefined();
   });
 });

@@ -52,7 +52,7 @@ import {
 } from "../utils/modelOptions.js";
 import {
   resolveContinueSessionId,
-  findLatestBranchSession,
+  findLatestBranchSessionsByTool,
 } from "../utils/continueSession.js";
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
@@ -122,14 +122,17 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
   const [continueSessionId, setContinueSessionId] = useState<string | null>(
     null,
   );
-  const [branchQuickStart, setBranchQuickStart] = useState<{
-    toolId: AITool;
-    toolLabel: string;
-    model?: string | null;
-    sessionId?: string | null;
-    inferenceLevel?: InferenceLevel | null;
-    skipPermissions?: boolean | null;
-  } | null>(null);
+  const [branchQuickStart, setBranchQuickStart] = useState<
+    {
+      toolId: AITool;
+      toolLabel: string;
+      model?: string | null;
+      sessionId?: string | null;
+      inferenceLevel?: InferenceLevel | null;
+      skipPermissions?: boolean | null;
+      timestamp?: number | null;
+    }[]
+  >([]);
   const [branchQuickStartLoading, setBranchQuickStartLoading] =
     useState(false);
 
@@ -289,10 +292,10 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     })();
   }, [currentScreen, selectedTool, selectedBranch, repoRoot]);
 
-  // Load quick start option for selected branch (latest history entry)
+  // Load quick start options for selected branch (latest per tool)
   useEffect(() => {
     if (!selectedBranch) {
-      setBranchQuickStart(null);
+      setBranchQuickStart([]);
       return;
     }
     let cancelled = false;
@@ -304,40 +307,34 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
           setRepoRoot(root);
         }
         if (!root) {
-          if (!cancelled) setBranchQuickStart(null);
+          if (!cancelled) setBranchQuickStart([]);
           return;
         }
         const sessionData = await loadSession(root);
         const history = sessionData?.history ?? [];
-        const latest = findLatestBranchSession(
+        const latestPerTool = findLatestBranchSessionsByTool(
           history,
           selectedBranch.name,
-          preferredToolId,
         );
-        const latestReasoning =
-          latest?.reasoningLevel ??
-          sessionData?.reasoningLevel ??
-          null;
-        const latestSkipPermissions =
-          latest?.skipPermissions ??
-          sessionData?.skipPermissions ??
-          null;
+
+        const mapped = latestPerTool.map((entry) => ({
+          toolId: entry.toolId as AITool,
+          toolLabel: entry.toolLabel,
+          model: entry.model ?? null,
+          inferenceLevel: (entry.reasoningLevel ??
+            sessionData?.reasoningLevel ??
+            null) as InferenceLevel | null,
+          sessionId: entry.sessionId ?? null,
+          skipPermissions:
+            entry.skipPermissions ?? sessionData?.skipPermissions ?? null,
+          timestamp: entry.timestamp ?? null,
+        }));
+
         if (!cancelled) {
-          setBranchQuickStart(
-            latest
-              ? {
-                  toolId: latest.toolId as AITool,
-                  toolLabel: latest.toolLabel,
-                  model: latest.model ?? null,
-                  inferenceLevel: latestReasoning as InferenceLevel | null,
-                  sessionId: latest.sessionId ?? null,
-                  skipPermissions: latestSkipPermissions,
-                }
-              : null,
-          );
+          setBranchQuickStart(mapped);
         }
       } catch {
-        if (!cancelled) setBranchQuickStart(null);
+        if (!cancelled) setBranchQuickStart([]);
       } finally {
         if (!cancelled) setBranchQuickStartLoading(false);
       }
@@ -346,7 +343,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     return () => {
       cancelled = true;
     };
-  }, [selectedBranch, repoRoot, preferredToolId]);
+  }, [selectedBranch, repoRoot]);
 
   // Load last session ID for "Continue" label when entering execution mode selector
   useEffect(() => {
@@ -628,7 +625,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       });
       refresh();
       const nextScreen =
-        branchQuickStart || branchQuickStartLoading
+        branchQuickStart.length || branchQuickStartLoading
           ? "branch-quick-start"
           : "ai-tool-selector";
       navigateTo(nextScreen);
@@ -654,7 +651,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       void handleProtectedBranchSwitch();
       return;
     }
-    if (branchQuickStart) {
+    if (branchQuickStart.length) {
       navigateTo("branch-quick-start");
     } else {
       navigateTo("ai-tool-selector");
@@ -663,7 +660,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     handleProtectedBranchSwitch,
     isProtectedSelection,
     navigateTo,
-    branchQuickStart,
+    branchQuickStart.length,
     selectedBranch,
   ]);
 
@@ -998,29 +995,33 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
   );
 
   const handleQuickStartSelect = useCallback(
-    (action: QuickStartAction) => {
-      if (action === "manual" || !branchQuickStart) {
+    (action: QuickStartAction, toolId?: AITool | null) => {
+      if (action === "manual" || !branchQuickStart.length) {
         navigateTo("ai-tool-selector");
         return;
       }
 
-      setSelectedTool(branchQuickStart.toolId);
-      setPreferredToolId(branchQuickStart.toolId);
+      const selected = branchQuickStart.find(
+        (opt) => opt.toolId === toolId,
+      ) ?? branchQuickStart[0];
+
+      setSelectedTool(selected.toolId);
+      setPreferredToolId(selected.toolId);
       setSelectedModel(
-        branchQuickStart.model
+        selected.model
           ? ({
-              model: branchQuickStart.model,
-              inferenceLevel: branchQuickStart.inferenceLevel ?? undefined,
+              model: selected.model,
+              inferenceLevel: selected.inferenceLevel ?? undefined,
             } as ModelSelectionResult)
           : null,
       );
 
-      const skip = branchQuickStart.skipPermissions ?? false;
+      const skip = selected.skipPermissions ?? false;
 
       if (action === "reuse-continue") {
-        const hasSession = Boolean(branchQuickStart.sessionId);
+        const hasSession = Boolean(selected.sessionId);
         const mode: ExecutionMode = hasSession ? "resume" : "continue";
-        completeSelection(mode, skip, branchQuickStart.sessionId ?? null);
+        completeSelection(mode, skip, selected.sessionId ?? null);
         return;
       }
 
@@ -1115,18 +1116,14 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         return (
           <BranchQuickStartScreen
             branchName={selectedBranch?.displayName ?? ""}
-            previousOption={
-              branchQuickStart
-                ? {
-                    toolId: branchQuickStart.toolId,
-                    toolLabel: branchQuickStart.toolLabel,
-                    model: branchQuickStart.model ?? null,
-                    inferenceLevel: branchQuickStart.inferenceLevel ?? null,
-                    skipPermissions: branchQuickStart.skipPermissions ?? null,
-                    sessionId: branchQuickStart.sessionId ?? null,
-                  }
-                : null
-            }
+            previousOptions={branchQuickStart.map((opt) => ({
+              toolId: opt.toolId,
+              toolLabel: opt.toolLabel,
+              model: opt.model ?? null,
+              inferenceLevel: opt.inferenceLevel ?? null,
+              skipPermissions: opt.skipPermissions ?? null,
+              sessionId: opt.sessionId ?? null,
+            }))}
             loading={branchQuickStartLoading}
             onBack={goBack}
             onSelect={handleQuickStartSelect}
