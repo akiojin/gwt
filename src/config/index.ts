@@ -155,7 +155,7 @@ export async function saveSession(
         mode: sessionData.mode ?? null,
         model: sessionData.model ?? null,
         reasoningLevel: sessionData.reasoningLevel ?? null,
-        skipPermissions: sessionData.skipPermissions ?? null,
+        skipPermissions: sessionData.skipPermissions ?? false,
         timestamp: sessionData.timestamp,
       };
       existingHistory = [...existingHistory, entry].slice(-100); // keep latest 100
@@ -166,7 +166,7 @@ export async function saveSession(
       history: existingHistory,
       lastSessionId: sessionData.lastSessionId ?? null,
       reasoningLevel: sessionData.reasoningLevel ?? null,
-      skipPermissions: sessionData.skipPermissions ?? null,
+      skipPermissions: sessionData.skipPermissions ?? false,
     };
 
     await writeFile(sessionPath, JSON.stringify(payload, null, 2), "utf-8");
