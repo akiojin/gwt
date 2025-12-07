@@ -135,28 +135,81 @@ export interface CodexSessionInfo {
   mtime: number;
 }
 
+async function collectFilesRecursive(
+  dir: string,
+  filter: (name: string) => boolean,
+): Promise<{ fullPath: string; mtime: number }[]> {
+  const results: { fullPath: string; mtime: number }[] = [];
+  try {
+    const entries = await readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        const nested = await collectFilesRecursive(fullPath, filter);
+        results.push(...nested);
+      } else if (entry.isFile() && filter(entry.name)) {
+        try {
+          const info = await stat(fullPath);
+          results.push({ fullPath, mtime: info.mtimeMs });
+        } catch {
+          // ignore unreadable file
+        }
+      }
+    }
+  } catch {
+    // ignore unreadable directory
+  }
+  return results;
+}
+
 export async function findLatestCodexSession(
-  options: { since?: number } = {},
+  options: { since?: number; preferClosestTo?: number; windowMs?: number } = {},
 ): Promise<CodexSessionInfo | null> {
   // Codex CLI respects CODEX_HOME. Default is ~/.codex.
   const codexHome = process.env.CODEX_HOME ?? path.join(homedir(), ".codex");
   const baseDir = path.join(codexHome, "sessions");
-  const latest = await findLatestFileRecursive(
+  const candidates = await collectFilesRecursive(
     baseDir,
     (name) => name.endsWith(".json") || name.endsWith(".jsonl"),
   );
-  if (!latest) return null;
-  const info = await stat(latest);
-  if (options.since && info.mtimeMs < options.since) {
-    return null;
+  if (!candidates.length) return null;
+
+  const sinceFiltered = options.since
+    ? candidates.filter((c) => c.mtime >= options.since!)
+    : candidates;
+  const pool = sinceFiltered.length ? sinceFiltered : candidates;
+
+  let chosen: { fullPath: string; mtime: number } | null = null;
+
+  if (typeof options.preferClosestTo === "number") {
+    const ref = options.preferClosestTo;
+    const window = options.windowMs ?? 30 * 60 * 1000; // 30 minutes default
+    const withinWindow = pool.filter(
+      (c) => Math.abs(c.mtime - ref) <= window,
+    );
+    const scored = (withinWindow.length ? withinWindow : pool).sort((a, b) => {
+      const diffA = Math.abs(a.mtime - ref);
+      const diffB = Math.abs(b.mtime - ref);
+      if (diffA === diffB) {
+        return b.mtime - a.mtime;
+      }
+      return diffA - diffB;
+    });
+    chosen = scored[0] ?? null;
+  } else {
+    const sorted = [...pool].sort((a, b) => b.mtime - a.mtime);
+    chosen = sorted[0] ?? null;
   }
-  const id = await readSessionIdFromFile(latest);
+
+  if (!chosen) return null;
+
+  const id = await readSessionIdFromFile(chosen.fullPath);
   if (!id) return null;
-  return { id, mtime: info.mtimeMs };
+  return { id, mtime: chosen.mtime };
 }
 
 export async function findLatestCodexSessionId(
-  options: { since?: number } = {},
+  options: { since?: number; preferClosestTo?: number; windowMs?: number } = {},
 ): Promise<string | null> {
   const found = await findLatestCodexSession(options);
   return found?.id ?? null;
@@ -204,7 +257,7 @@ export async function findLatestClaudeSessionId(
         const parsed = JSON.parse(line) as Record<string, unknown>;
         const project = typeof parsed.project === "string" ? parsed.project : null;
         const sessionId = typeof parsed.sessionId === "string" ? parsed.sessionId : null;
-        if (project && sessionId && project.startsWith(cwd)) {
+        if (project && sessionId && (project === cwd || cwd.startsWith(project))) {
           return sessionId;
         }
       } catch {

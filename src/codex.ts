@@ -146,7 +146,11 @@ export async function launchCodexCLI(
 
     let capturedSessionId: string | null = null;
     try {
-      const found = await findLatestCodexSessionId({ since: startedAt - 1000 });
+      const found = await findLatestCodexSessionId({
+        since: startedAt - 30_000,
+        preferClosestTo: startedAt,
+        windowMs: 30 * 60 * 1000, // 30 minutes around launch start
+      });
       capturedSessionId = found ?? resumeSessionId ?? null;
     } catch {
       capturedSessionId = resumeSessionId ?? null;
