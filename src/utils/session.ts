@@ -271,13 +271,26 @@ export async function findLatestClaudeSessionId(
 
   for (const claudeRoot of rootCandidates) {
     for (const encoded of encodedPaths) {
-      const baseDir = path.join(claudeRoot, "projects", encoded, "sessions");
-      const latest = await findLatestFile(
-        baseDir,
+      const projectDir = path.join(claudeRoot, "projects", encoded);
+      const sessionsDir = path.join(projectDir, "sessions");
+
+      // 1) Look under sessions/ (official location)
+      const latestSession = await findLatestFile(
+        sessionsDir,
         (name) => name.endsWith(".jsonl") || name.endsWith(".json"),
       );
-      if (latest) {
-        const id = await readSessionIdFromFile(latest);
+      if (latestSession) {
+        const id = await readSessionIdFromFile(latestSession);
+        if (id) return id;
+      }
+
+      // 2) Look directly under project dir (some versions emit files at root)
+      const latestProjectFile = await findLatestFileRecursive(
+        projectDir,
+        (name) => name.endsWith(".jsonl") || name.endsWith(".json"),
+      );
+      if (latestProjectFile) {
+        const id = await readSessionIdFromFile(latestProjectFile);
         if (id) return id;
       }
     }
