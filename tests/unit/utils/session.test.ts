@@ -143,6 +143,33 @@ describe("utils/session", () => {
     delete process.env.CLAUDE_CONFIG_DIR;
   });
 
+  it("falls back to ~/.config/claude when ~/.claude is missing", async () => {
+    const dirent = (name: string, type: "file" | "dir") => ({
+      name,
+      isFile: () => type === "file",
+      isDirectory: () => type === "dir",
+    });
+
+    // First call (.claude) will throw, second (.config/claude) returns file
+    (readdir as any).mockImplementation((dir: string, opts?: any) => {
+      if (opts?.withFileTypes) {
+        if (dir === "/home/test/.claude/projects/-repo/sessions") {
+          return Promise.reject(new Error("missing"));
+        }
+        if (dir === "/home/test/.config/claude/projects/-repo/sessions") {
+          return Promise.resolve([dirent("log.jsonl", "file")]);
+        }
+      }
+      return Promise.resolve([]);
+    });
+
+    (stat as any).mockResolvedValue({ mtimeMs: 10 });
+    (readFile as any).mockResolvedValue('{"session_id":"cfg-claude"}');
+
+    const id = await findLatestClaudeSessionId("/repo");
+    expect(id).toBe("cfg-claude");
+  });
+
   it("returns null when session files are missing", async () => {
     (readdir as any).mockRejectedValue(new Error("missing"));
     const codexId = await findLatestCodexSessionId();

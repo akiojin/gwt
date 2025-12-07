@@ -152,15 +152,23 @@ export async function findLatestClaudeSessionId(
   cwd: string,
 ): Promise<string | null> {
   const encoded = encodeClaudeProjectPath(cwd);
-  const claudeRoot =
-    process.env.CLAUDE_CONFIG_DIR ?? path.join(homedir(), ".claude");
-  const baseDir = path.join(claudeRoot, "projects", encoded, "sessions");
-  const latest = await findLatestFile(
-    baseDir,
-    (name) => name.endsWith(".jsonl") || name.endsWith(".json"),
-  );
-  if (!latest) return null;
-  return readSessionIdFromFile(latest);
+  const rootCandidates = process.env.CLAUDE_CONFIG_DIR
+    ? [process.env.CLAUDE_CONFIG_DIR]
+    : [path.join(homedir(), ".claude"), path.join(homedir(), ".config", "claude")];
+
+  for (const claudeRoot of rootCandidates) {
+    const baseDir = path.join(claudeRoot, "projects", encoded, "sessions");
+    const latest = await findLatestFile(
+      baseDir,
+      (name) => name.endsWith(".jsonl") || name.endsWith(".json"),
+    );
+    if (latest) {
+      const id = await readSessionIdFromFile(latest);
+      if (id) return id;
+    }
+  }
+
+  return null;
 }
 
 async function findLatestNestedSessionFile(
