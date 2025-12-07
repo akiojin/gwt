@@ -222,6 +222,8 @@ export async function launchCodexCLI(
     }
 
     throw new CodexError(errorMessage, error);
+  } finally {
+    terminal.exitRawMode();
   }
 }
 
