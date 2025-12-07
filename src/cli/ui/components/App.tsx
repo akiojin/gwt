@@ -58,13 +58,8 @@ import {
   findLatestCodexSession,
   findLatestCodexSessionId,
   findLatestClaudeSession,
-  findLatestClaudeSessionId,
   findLatestGeminiSession,
-  encodeClaudeProjectPath,
 } from "../../../utils/session.js";
-import { homedir } from "node:os";
-import path from "node:path";
-import { stat } from "node:fs/promises";
 import type { ToolSessionEntry } from "../../../config/index.js";
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
@@ -350,36 +345,6 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
           selectedBranch.name,
           selectedWorktreePath,
         );
-
-        const claudeSessionExists = async (
-          sessionId: string | null,
-          worktreePath: string | null,
-        ): Promise<boolean> => {
-          if (!sessionId || !worktreePath) return false;
-          const slug = encodeClaudeProjectPath(worktreePath);
-          const roots = [
-            ...(process.env.CLAUDE_CONFIG_DIR
-              ? [process.env.CLAUDE_CONFIG_DIR]
-              : []),
-            path.join(homedir(), ".claude"),
-            path.join(homedir(), ".config", "claude"),
-          ];
-          for (const root of roots) {
-            const candidate = path.join(
-              root,
-              "projects",
-              slug,
-              `${sessionId}.jsonl`,
-            );
-            try {
-              await stat(candidate);
-              return true;
-            } catch {
-              // continue
-            }
-          }
-          return false;
-        };
 
         const mapped = await Promise.all(
           latestPerTool.map(async (entry) => {

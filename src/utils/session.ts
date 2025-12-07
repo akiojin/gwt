@@ -115,47 +115,12 @@ async function findLatestFile(
   }
 }
 
-async function findLatestFileRecursive(
-  dir: string,
-  filter: (name: string) => boolean,
-) : Promise<string | null> {
-  try {
-    const entries = await readdir(dir, { withFileTypes: true });
-    const candidates: { fullPath: string; mtime: number }[] = [];
-
-    for (const entry of entries) {
-      const fullPath = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        const nested = await findLatestFileRecursive(fullPath, filter);
-        if (nested) {
-          const info = await stat(nested);
-          candidates.push({ fullPath: nested, mtime: info.mtimeMs });
-        }
-      } else if (entry.isFile() && filter(entry.name)) {
-        try {
-          const info = await stat(fullPath);
-          candidates.push({ fullPath, mtime: info.mtimeMs });
-        } catch {
-          // ignore
-        }
-      }
-    }
-
-    if (!candidates.length) return null;
-    candidates.sort((a, b) => b.mtime - a.mtime);
-    return candidates[0]?.fullPath ?? null;
-  } catch {
-    return null;
-  }
-}
-
 async function findNewestSessionIdFromDir(
   dir: string,
   recursive: boolean,
   options: { since?: number; until?: number; preferClosestTo?: number; windowMs?: number } = {},
 ): Promise<{ id: string; mtime: number } | null> {
   try {
-    const entries = await readdir(dir, { withFileTypes: true });
     const files: { fullPath: string; mtime: number }[] = [];
 
     const processDir = async (currentDir: string) => {
