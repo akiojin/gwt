@@ -30,6 +30,7 @@ import {
   findLatestCodexSessionId,
   findLatestGeminiSessionId,
   findLatestQwenSessionId,
+  waitForCodexSessionId,
 } from "../../../src/utils/session.js";
 
 describe("utils/session", () => {
@@ -119,6 +120,47 @@ describe("utils/session", () => {
       windowMs: 2_000,
     });
     expect(id).toBe("early-123");
+  });
+
+  it("waitForCodexSessionId polls until a nearby session appears", async () => {
+    const dirent = (name: string, type: "file" | "dir") => ({
+      name,
+      isFile: () => type === "file",
+      isDirectory: () => type === "dir",
+    });
+
+    // first poll returns nothing, second poll sees the file
+    const calls: string[] = [];
+    (readdir as any).mockImplementation((dir: string, opts?: any) => {
+      calls.push(dir);
+      if (opts?.withFileTypes) {
+        if (dir.endsWith("/.codex/sessions")) {
+          return Promise.resolve([dirent("2025", "dir")]);
+        }
+        if (dir.endsWith("/.codex/sessions/2025")) {
+          return Promise.resolve([dirent("12", "dir")]);
+        }
+        if (dir.endsWith("/.codex/sessions/2025/12")) {
+          // Only on second pass we expose the file
+          if (calls.filter((c) => c.endsWith("/2025/12")).length >= 2) {
+            return Promise.resolve([dirent("new-uuid.jsonl", "file")]);
+          }
+          return Promise.resolve([]);
+        }
+      }
+      return Promise.resolve([]);
+    });
+    (stat as any).mockResolvedValue({ mtimeMs: 5_000 });
+    (readFile as any).mockResolvedValue('{"sessionId":"wait-456"}');
+
+    const idPromise = waitForCodexSessionId({
+      startedAt: 4_000,
+      timeoutMs: 10_000,
+      pollIntervalMs: 10,
+    });
+
+    const id = await idPromise;
+    expect(id).toBe("wait-456");
   });
 
   it("findLatestClaudeSessionId reads JSONL lines and extracts session_id", async () => {

@@ -3,7 +3,10 @@ import chalk from "chalk";
 import { platform } from "os";
 import { existsSync } from "fs";
 import { createChildStdio, getTerminalStreams } from "./utils/terminal.js";
-import { findLatestCodexSessionId } from "./utils/session.js";
+import {
+  findLatestCodexSessionId,
+  waitForCodexSessionId,
+} from "./utils/session.js";
 
 const CODEX_CLI_PACKAGE = "@openai/codex@latest";
 
@@ -81,6 +84,10 @@ export async function launchCodexCLI(
         : null;
 
     const startedAt = Date.now();
+    // Start polling session files immediately to catch the session created right after launch.
+    const sessionProbe = waitForCodexSessionId({ startedAt }).catch(
+      () => null,
+    );
 
     switch (options.mode) {
       case "continue":
@@ -146,11 +153,14 @@ export async function launchCodexCLI(
 
     let capturedSessionId: string | null = null;
     try {
-      const found = await findLatestCodexSessionId({
-        since: startedAt - 30_000,
-        preferClosestTo: startedAt,
-        windowMs: 30 * 60 * 1000, // 30 minutes around launch start
-      });
+      const polled = await sessionProbe;
+      const found =
+        polled ??
+        (await findLatestCodexSessionId({
+          since: startedAt - 30_000,
+          preferClosestTo: startedAt,
+          windowMs: 30 * 60 * 1000, // 30 minutes around launch start
+        }));
       capturedSessionId = found ?? resumeSessionId ?? null;
     } catch {
       capturedSessionId = resumeSessionId ?? null;
