@@ -79,12 +79,18 @@ export function findLatestBranchSession(
 export function findLatestBranchSessionsByTool(
   history: ToolSessionEntry[],
   branch: string,
+  worktreePath?: string | null,
 ): ToolSessionEntry[] {
   const byBranch = history.filter((entry) => entry && entry.branch === branch);
   if (!byBranch.length) return [];
 
+  const scoped = worktreePath
+    ? byBranch.filter((entry) => entry.worktreePath === worktreePath)
+    : byBranch;
+  const source = scoped.length ? scoped : byBranch;
+
   const latestByTool = new Map<string, ToolSessionEntry>();
-  for (const entry of byBranch) {
+  for (const entry of source) {
     if (!entry.toolId) continue;
     const current = latestByTool.get(entry.toolId);
     const currentTs = current?.timestamp ?? 0;

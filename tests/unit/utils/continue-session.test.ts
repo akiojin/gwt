@@ -184,4 +184,33 @@ describe("resolveContinueSessionId", () => {
     expect(ids).toContain("claude-3");
     expect(ids).not.toContain("codex-1");
   });
+
+  it("findLatestBranchSessionsByTool prefers matching worktree when provided", () => {
+    const history: ToolSessionEntry[] = [
+      {
+        branch,
+        toolId: "codex-cli",
+        toolLabel: "Codex",
+        worktreePath: "/wt-other",
+        timestamp: 10,
+        sessionId: "codex-other",
+      },
+      {
+        branch,
+        toolId: "codex-cli",
+        toolLabel: "Codex",
+        worktreePath: "/wt-current",
+        timestamp: 5,
+        sessionId: "codex-current",
+      },
+    ];
+
+    const results = findLatestBranchSessionsByTool(
+      history,
+      branch,
+      "/wt-current",
+    );
+    expect(results.map((r) => r.sessionId)).toContain("codex-current");
+    expect(results.map((r) => r.sessionId)).not.toContain("codex-other");
+  });
 });
