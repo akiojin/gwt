@@ -130,7 +130,14 @@ async function readSessionIdFromFile(filePath: string): Promise<string | null> {
   }
 }
 
-export async function findLatestCodexSessionId(): Promise<string | null> {
+export interface CodexSessionInfo {
+  id: string;
+  mtime: number;
+}
+
+export async function findLatestCodexSession(
+  options: { since?: number } = {},
+): Promise<CodexSessionInfo | null> {
   // Codex CLI respects CODEX_HOME. Default is ~/.codex.
   const codexHome = process.env.CODEX_HOME ?? path.join(homedir(), ".codex");
   const baseDir = path.join(codexHome, "sessions");
@@ -139,7 +146,20 @@ export async function findLatestCodexSessionId(): Promise<string | null> {
     (name) => name.endsWith(".json") || name.endsWith(".jsonl"),
   );
   if (!latest) return null;
-  return readSessionIdFromFile(latest);
+  const info = await stat(latest);
+  if (options.since && info.mtimeMs < options.since) {
+    return null;
+  }
+  const id = await readSessionIdFromFile(latest);
+  if (!id) return null;
+  return { id, mtime: info.mtimeMs };
+}
+
+export async function findLatestCodexSessionId(
+  options: { since?: number } = {},
+): Promise<string | null> {
+  const found = await findLatestCodexSession(options);
+  return found?.id ?? null;
 }
 
 export function encodeClaudeProjectPath(cwd: string): string {

@@ -80,6 +80,8 @@ export async function launchCodexCLI(
         ? options.sessionId.trim()
         : null;
 
+    const startedAt = Date.now();
+
     switch (options.mode) {
       case "continue":
         if (resumeSessionId) {
@@ -144,8 +146,8 @@ export async function launchCodexCLI(
 
     let capturedSessionId: string | null = null;
     try {
-      capturedSessionId =
-        (await findLatestCodexSessionId()) ?? resumeSessionId ?? null;
+      const found = await findLatestCodexSessionId({ since: startedAt - 1000 });
+      capturedSessionId = found ?? resumeSessionId ?? null;
     } catch {
       capturedSessionId = resumeSessionId ?? null;
     }
