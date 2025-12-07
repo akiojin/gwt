@@ -81,7 +81,7 @@ describe("BranchQuickStartScreen", () => {
       />,
     );
 
-    expect(getAllByText(/No previous settings/)).toHaveLength(1);
+    expect(getAllByText(/No previous settings/)).toHaveLength(2);
   });
 
   it("shows manual selection option", () => {
@@ -130,12 +130,12 @@ describe("BranchQuickStartScreen", () => {
       />,
     );
 
-    expect(getByText(/\[Codex\]/i)).toBeDefined();
+    expect(getByText(/\[Codex\] Resume/i)).toBeDefined();
     expect(
       getByText(/Model: gpt-5.1-codex \/ Reasoning: High \/ Skip: Yes \/ ID: codex-123/),
     ).toBeDefined();
     expect(
-      getByText(/\[Claude\]/i),
+      getByText(/\[Claude\] Resume/i),
     ).toBeDefined();
     expect(
       getByText(/Model: opus \/ Skip: No \/ ID: claude-999/),

@@ -53,7 +53,6 @@ type QuickStartItem = SelectItem & {
   groupStart?: boolean;
   category: string;
   categoryColor: "cyan" | "yellow" | "magenta" | "green" | "white";
-  kind: "header" | "action";
 };
 
 export interface BranchQuickStartScreenProps {
@@ -117,34 +116,19 @@ export function BranchQuickStartScreen({
           idx > 0 ? resolveCategory(sorted[idx - 1]?.toolId).label : null;
         const isNewCategory = prevCat !== cat.label;
 
-        if (isNewCategory) {
-          flat.push({
-            label: `[${cat.label}]`,
-            value: `header:${cat.label}:${idx}`,
-            action: "manual",
-            description: "",
-            disabled: true,
-            groupStart: flat.length > 0,
-            category: cat.label,
-            categoryColor: cat.color,
-            kind: "header",
-          });
-        }
-
         flat.push(
           {
-            label: "Resume",
+            label: `[${cat.label}] Resume`,
             value: `reuse-continue:${opt.toolId ?? "unknown"}:${idx}`,
             action: "reuse-continue",
             toolId: opt.toolId ?? null,
             description: describe(opt, true),
-            groupStart: false,
+            groupStart: isNewCategory && flat.length > 0,
             category: cat.label,
             categoryColor: cat.color,
-            kind: "action",
           },
           {
-            label: "New",
+            label: `[${cat.label}] New`,
             value: `reuse-new:${opt.toolId ?? "unknown"}:${idx}`,
             action: "reuse-new",
             toolId: opt.toolId ?? null,
@@ -152,7 +136,6 @@ export function BranchQuickStartScreen({
             groupStart: false,
             category: cat.label,
             categoryColor: cat.color,
-            kind: "action",
           },
         );
       });
@@ -168,7 +151,6 @@ export function BranchQuickStartScreen({
           disabled: true,
           category: CATEGORY_META.other.label,
           categoryColor: CATEGORY_META.other.color,
-          kind: "header",
         },
         {
           label: "Start new with previous settings",
@@ -178,7 +160,6 @@ export function BranchQuickStartScreen({
           disabled: true,
           category: CATEGORY_META.other.label,
           categoryColor: CATEGORY_META.other.color,
-          kind: "action",
         },
       ];
 
@@ -189,7 +170,6 @@ export function BranchQuickStartScreen({
     description: "Pick tool and model manually",
     category: CATEGORY_META.other.label,
     categoryColor: CATEGORY_META.other.color,
-    kind: "action",
   });
 
   useInput((_, key) => {
@@ -230,12 +210,10 @@ export function BranchQuickStartScreen({
                 color={isSelected ? "white" : item.categoryColor}
                 inverse={isSelected}
               >
-                {item.kind === "header"
-                  ? item.label
-                  : `  ${item.label}`}
+                {item.label}
                 {item.disabled ? " (disabled)" : ""}
               </Text>
-              {item.kind === "action" && item.description && (
+              {item.description && (
                 <Text color="gray">  {item.description}</Text>
               )}
             </Box>
