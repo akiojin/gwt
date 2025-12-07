@@ -102,7 +102,7 @@ export function BranchQuickStartScreen({
 
   const items: QuickStartItem[] = previousOptions.length
     ? (() => {
-      const order = ["Codex", "Claude", "Gemini", "Qwen", "Other"];
+        const order = ["Claude", "Codex", "Gemini", "Qwen", "Other"];
       const sorted = [...previousOptions].sort((a, b) => {
         const ca = resolveCategory(a.toolId).label;
         const cb = resolveCategory(b.toolId).label;
@@ -206,12 +206,17 @@ export function BranchQuickStartScreen({
               flexDirection="column"
               marginTop={item.groupStart ? 1 : item.category === "Other" ? 1 : 0}
             >
-              <Text
-                color={isSelected ? "white" : item.categoryColor}
-                inverse={isSelected}
-              >
-                {item.label}
-                {item.disabled ? " (disabled)" : ""}
+              <Text>
+                <Text
+                  color={item.category === "Codex" ? "cyan" : "white"}
+                  inverse={isSelected}
+                >
+                  {`[${item.category}] `}
+                </Text>
+                <Text inverse={isSelected}>
+                  {item.label}
+                  {item.disabled ? " (disabled)" : ""}
+                </Text>
               </Text>
               {item.description && (
                 <Text color="gray">  {item.description}</Text>
