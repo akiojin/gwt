@@ -414,23 +414,9 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
                   selectedBranch?.displayName ??
                   workingDirectory;
 
-                // Always resolve freshest on-disk session for this worktree
-                const claudeSession = await findLatestClaudeSession(worktree, {
-                  ...(entry.timestamp !== null && entry.timestamp !== undefined
-                    ? {
-                        since: entry.timestamp - 60_000,
-                        preferClosestTo: entry.timestamp,
-                      }
-                    : {}),
-                  windowMs: 60 * 60 * 1000,
-                });
-                sessionId = claudeSession?.id ?? sessionId ?? null;
-
-                // If still none, fetch absolute latest (no window)
-                if (!sessionId) {
-                  const latestAny = await findLatestClaudeSession(worktree);
-                  sessionId = latestAny?.id ?? null;
-                }
+                // Always resolve freshest on-disk session for this worktree (no window restriction)
+                const latestAny = await findLatestClaudeSession(worktree);
+                sessionId = latestAny?.id ?? sessionId ?? null;
 
               } catch {
                 // ignore lookup failure
