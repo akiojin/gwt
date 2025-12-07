@@ -60,8 +60,11 @@ export async function launchClaudeCode(
             chalk.cyan(`   📱 Continuing specific session: ${resumeSessionId}`),
           );
         } else {
-          args.push("-c");
-          console.log(chalk.cyan("   📱 Continuing most recent conversation"));
+          console.log(
+            chalk.yellow(
+              "   ℹ️  No saved session ID for this branch/tool. Starting new session.",
+            ),
+          );
         }
         break;
       case "resume":

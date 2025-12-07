@@ -203,6 +203,24 @@ describe("launchClaudeCode - Root User Detection", () => {
     });
   });
 
+  describe("Continue mode without saved session", () => {
+    it("falls back to new session when no sessionId is provided", async () => {
+      // which/where fails so bunx path is used
+      mockExeca
+        .mockRejectedValueOnce(new Error("Command not found")) // which/where
+        .mockResolvedValue({ stdout: "", stderr: "", exitCode: 0 } as any); // bunx
+
+      await launchClaudeCode("/test/path", { mode: "continue" });
+
+      // Second call is the actual launch (bunx)
+      const bunxCall = mockExeca.mock.calls[1];
+      expect(bunxCall[0]).toBe("bunx");
+      const args = bunxCall[1] as string[];
+      expect(args).not.toContain("-c");
+      expect(args).not.toContain("--resume");
+    });
+  });
+
   describe("T106: IS_SANDBOX=1 not set when skipPermissions=false", () => {
     it("should not set IS_SANDBOX=1 when skipPermissions=false even if root", async () => {
       // Mock root user
@@ -514,7 +532,6 @@ describe("launchClaudeCode - Root User Detection", () => {
         2,
         "claude",
         expect.arrayContaining([
-          "-c", // continue mode
           "--dangerously-skip-permissions",
           "--verbose", // extra args
         ]),
@@ -525,6 +542,10 @@ describe("launchClaudeCode - Root User Detection", () => {
           }),
         }),
       );
+
+      const args = mockExeca.mock.calls[1][1] as string[];
+      expect(args).not.toContain("-c");
+      expect(args).not.toContain("--resume");
     });
 
     it("should pass arguments correctly when using bunx fallback", async () => {
