@@ -170,21 +170,19 @@ export async function launchCodexCLI(
     }
 
     // File-based session detection only - no stdout capture
+    // Use only findLatestCodexSession with short timeout, skip sessionProbe to avoid hanging
     let capturedSessionId: string | null = null;
     const finishedAt = Date.now();
     try {
-      const [polled, latest] = await Promise.all([
-        sessionProbe,
-        findLatestCodexSession({
-          since: startedAt,
-          until: finishedAt + 30_000,
-          preferClosestTo: finishedAt,
-          windowMs: 10 * 60 * 1000,
-          cwd: worktreePath,
-        }),
-      ]);
-      // Priority: latest on disk > polled > resumeSessionId
-      capturedSessionId = latest?.id ?? polled ?? resumeSessionId ?? null;
+      const latest = await findLatestCodexSession({
+        since: startedAt,
+        until: finishedAt + 30_000,
+        preferClosestTo: finishedAt,
+        windowMs: 10 * 60 * 1000,
+        cwd: worktreePath,
+      });
+      // Priority: latest on disk > resumeSessionId
+      capturedSessionId = latest?.id ?? resumeSessionId ?? null;
     } catch {
       capturedSessionId = resumeSessionId ?? null;
     }
