@@ -36,8 +36,15 @@ import {
 import { getToolById, getSharedEnvironment } from "./config/tools.js";
 import { launchCustomAITool } from "./launcher.js";
 import { saveSession, loadSession } from "./config/index.js";
+import {
+  findLatestCodexSession,
+  findLatestClaudeSession,
+  findLatestGeminiSession,
+} from "./utils/session.js";
 import { getPackageVersion } from "./utils.js";
+import { findLatestClaudeSessionId } from "./utils/session.js";
 import readline from "node:readline";
+import { resolveContinueSessionId } from "./cli/ui/utils/continueSession.js";
 import {
   installDependenciesForWorktree,
   DependencyInstallError,
@@ -273,6 +280,13 @@ async function mainInkUI(): Promise<SelectionResult | undefined> {
 
   let selectionResult: SelectionResult | undefined;
 
+  // Reset stdin state before Ink.js render to prevent hangs after AI tool exit
+  // This is necessary because child processes (especially Codex) may leave stdin
+  // in an inconsistent state after Ctrl+C termination
+  terminal.stdin.removeAllListeners?.();
+  if (process.stdin.isRaw) {
+    process.stdin.setRawMode(false);
+  }
   if (typeof terminal.stdin.resume === "function") {
     terminal.stdin.resume();
   }
@@ -573,6 +587,8 @@ export async function handleAIToolWorkflow(
         toolLabel: toolConfig.displayName ?? tool,
         mode,
         model: model ?? null,
+        reasoningLevel: inferenceLevel ?? null,
+        skipPermissions: skipPermissions ?? null,
         timestamp: Date.now(),
         repositoryRoot: repoRoot,
       },
@@ -588,27 +604,15 @@ export async function handleAIToolWorkflow(
       const existingSession = await loadSession(repoRoot);
       const history = existingSession?.history ?? [];
 
-      for (let i = history.length - 1; i >= 0; i -= 1) {
-        const entry = history[i];
-        if (
-          entry &&
-          entry.branch === branch &&
-          entry.toolId === tool &&
-          entry.sessionId
-        ) {
-          resumeSessionId = entry.sessionId;
-          break;
-        }
-      }
-
-      if (
-        !resumeSessionId &&
-        existingSession?.lastSessionId &&
-        existingSession.lastUsedTool === tool &&
-        existingSession.lastBranch === branch
-      ) {
-        resumeSessionId = existingSession.lastSessionId;
-      }
+      resumeSessionId =
+        resumeSessionId ??
+        (await resolveContinueSessionId({
+          history,
+          sessionData: existingSession,
+          branch,
+          toolId: tool,
+          repoRoot,
+        }));
 
       if (!resumeSessionId) {
         printWarning(
@@ -616,6 +620,8 @@ export async function handleAIToolWorkflow(
         );
       }
     }
+
+    const launchStartedAt = Date.now();
 
     // Launch selected AI tool
     // Builtin tools use their dedicated launch functions
@@ -730,10 +736,65 @@ export async function handleAIToolWorkflow(
     }
 
     // Persist session with captured session ID (if any)
-    const finalSessionId =
+    let finalSessionId =
       (launchResult as { sessionId?: string | null } | undefined)?.sessionId ??
       resumeSessionId ??
       null;
+
+    if (!finalSessionId && tool === "claude-code") {
+      try {
+        finalSessionId = (await findLatestClaudeSessionId(worktreePath)) ?? null;
+      } catch {
+        finalSessionId = null;
+      }
+    }
+    const finishedAt = Date.now();
+
+    if (tool === "codex-cli") {
+      try {
+        const latest = await findLatestCodexSession({
+          since: launchStartedAt - 60_000,
+          until: finishedAt + 60_000,
+          preferClosestTo: finishedAt,
+          windowMs: 60 * 60 * 1000,
+          cwd: worktreePath,
+        });
+        if (latest) {
+          finalSessionId = latest.id;
+        }
+      } catch {
+        // ignore fallback failure
+      }
+    } else if (tool === "claude-code") {
+      try {
+        const latestClaude = await findLatestClaudeSession(worktreePath, {
+          since: launchStartedAt - 60_000,
+          until: finishedAt + 60_000,
+          preferClosestTo: finishedAt,
+          windowMs: 60 * 60 * 1000,
+        });
+        if (latestClaude) {
+          finalSessionId = latestClaude.id;
+        }
+      } catch {
+        // ignore
+      }
+    } else if (tool === "gemini-cli") {
+      try {
+        const latestGemini = await findLatestGeminiSession(worktreePath, {
+          since: launchStartedAt - 60_000,
+          until: finishedAt + 60_000,
+          preferClosestTo: finishedAt,
+          windowMs: 60 * 60 * 1000,
+          cwd: worktreePath,
+        });
+        if (latestGemini) {
+          finalSessionId = latestGemini.id;
+        }
+      } catch {
+        // ignore
+      }
+    }
 
     await saveSession({
       lastWorktreePath: worktreePath,
@@ -742,11 +803,15 @@ export async function handleAIToolWorkflow(
       toolLabel: toolConfig.displayName ?? tool,
       mode,
       model: model ?? null,
+      reasoningLevel: inferenceLevel ?? null,
+      skipPermissions: skipPermissions ?? null,
       timestamp: Date.now(),
       repositoryRoot: repoRoot,
       lastSessionId: finalSessionId,
     });
 
+    // Small buffer before returning to branch list to avoid abrupt screen swap
+    await new Promise((resolve) => setTimeout(resolve, 3000));
     printInfo("Session completed successfully. Returning to main menu...");
     return;
   } catch (error) {

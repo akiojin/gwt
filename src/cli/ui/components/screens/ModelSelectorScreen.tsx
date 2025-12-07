@@ -230,7 +230,7 @@ export function ModelSelectorScreen({
   return (
     <Box flexDirection="column" height={rows}>
       <Header
-        title={step === "model" ? "Model Selection" : "Inference Level"}
+        title={step === "model" ? "Model Selection" : "Reasoning Level"}
         titleColor="blue"
         version={version}
       />

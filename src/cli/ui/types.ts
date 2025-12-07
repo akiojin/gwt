@@ -184,6 +184,7 @@ export type ScreenType =
   | "branch-list"
   | "branch-creator"
   | "branch-action-selector"
+  | "branch-quick-start"
   | "ai-tool-selector"
   | "model-selector"
   | "session-selector"

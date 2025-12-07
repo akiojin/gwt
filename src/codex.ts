@@ -3,7 +3,10 @@ import chalk from "chalk";
 import { platform } from "os";
 import { existsSync } from "fs";
 import { createChildStdio, getTerminalStreams } from "./utils/terminal.js";
-import { findLatestCodexSessionId } from "./utils/session.js";
+import {
+  findLatestCodexSession,
+  waitForCodexSessionId,
+} from "./utils/session.js";
 
 const CODEX_CLI_PACKAGE = "@openai/codex@latest";
 
@@ -60,6 +63,7 @@ export async function launchCodexCLI(
   } = {},
 ): Promise<{ sessionId?: string | null }> {
   const terminal = getTerminalStreams();
+  const startedAt = Date.now();
 
   try {
     if (!existsSync(worktreePath)) {
@@ -81,6 +85,11 @@ export async function launchCodexCLI(
       options.sessionId && options.sessionId.trim().length > 0
         ? options.sessionId.trim()
         : null;
+
+    // Start polling session files immediately to catch the session created right after launch.
+    const sessionProbe = waitForCodexSessionId({ startedAt, cwd: worktreePath }).catch(
+      () => null,
+    );
 
     switch (options.mode) {
       case "continue":
@@ -135,21 +144,45 @@ export async function launchCodexCLI(
     const env = { ...process.env, ...(options.envOverrides ?? {}) };
 
     try {
-      await execa("bunx", [CODEX_CLI_PACKAGE, ...args], {
+      const execChild = async (child: any) => {
+        try {
+          await child;
+        } catch (execError: any) {
+          // Treat SIGINT/SIGTERM as normal exit (user pressed Ctrl+C)
+          if (execError.signal === "SIGINT" || execError.signal === "SIGTERM") {
+            return;
+          }
+          throw execError;
+        }
+      };
+
+      const child = execa("bunx", [CODEX_CLI_PACKAGE, ...args], {
         cwd: worktreePath,
+        shell: true,
         stdin: childStdio.stdin,
         stdout: childStdio.stdout,
         stderr: childStdio.stderr,
         env,
       } as any);
+      await execChild(child);
     } finally {
       childStdio.cleanup();
     }
 
+    // File-based session detection only - no stdout capture
+    // Use only findLatestCodexSession with short timeout, skip sessionProbe to avoid hanging
     let capturedSessionId: string | null = null;
+    const finishedAt = Date.now();
     try {
-      capturedSessionId =
-        (await findLatestCodexSessionId()) ?? resumeSessionId ?? null;
+      const latest = await findLatestCodexSession({
+        since: startedAt,
+        until: finishedAt + 30_000,
+        preferClosestTo: finishedAt,
+        windowMs: 10 * 60 * 1000,
+        cwd: worktreePath,
+      });
+      // Priority: latest on disk > resumeSessionId
+      capturedSessionId = latest?.id ?? resumeSessionId ?? null;
     } catch {
       capturedSessionId = resumeSessionId ?? null;
     }
@@ -192,6 +225,8 @@ export async function launchCodexCLI(
     }
 
     throw new CodexError(errorMessage, error);
+  } finally {
+    terminal.exitRawMode();
   }
 }
 
