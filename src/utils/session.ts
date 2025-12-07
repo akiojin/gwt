@@ -120,7 +120,8 @@ async function findLatestFileRecursive(
 async function findNewestSessionIdFromDir(
   dir: string,
   recursive: boolean,
-): Promise<string | null> {
+  options: { since?: number; preferClosestTo?: number; windowMs?: number } = {},
+): Promise<{ id: string; mtime: number } | null> {
   try {
     const entries = await readdir(dir, { withFileTypes: true });
     const files: { fullPath: string; mtime: number }[] = [];
@@ -148,11 +149,30 @@ async function findNewestSessionIdFromDir(
     };
 
     await processDir(dir);
-    files.sort((a, b) => b.mtime - a.mtime);
+    if (options.since) {
+      files.splice(
+        0,
+        files.length,
+        ...files.filter((f) => f.mtime >= options.since!),
+      );
+    }
+    const sorted = files.sort((a, b) => b.mtime - a.mtime);
 
-    for (const file of files) {
+    const ref = options.preferClosestTo;
+    if (typeof ref === "number") {
+      const window = options.windowMs ?? 30 * 60 * 1000;
+      sorted.sort((a, b) => {
+        const da = Math.abs(a.mtime - ref);
+        const db = Math.abs(b.mtime - ref);
+        if (da === db) return b.mtime - a.mtime;
+        if (da <= window || db <= window) return da - db;
+        return b.mtime - a.mtime;
+      });
+    }
+
+    for (const file of sorted) {
       const id = await readSessionIdFromFile(file.fullPath);
-      if (id) return id;
+      if (id) return { id, mtime: file.mtime };
     }
   } catch {
     // ignore
@@ -301,6 +321,19 @@ function generateClaudeProjectPathCandidates(cwd: string): string[] {
 export async function findLatestClaudeSessionId(
   cwd: string,
 ): Promise<string | null> {
+  const found = await findLatestClaudeSession(cwd);
+  return found?.id ?? null;
+}
+
+export interface ClaudeSessionInfo {
+  id: string;
+  mtime: number;
+}
+
+export async function findLatestClaudeSession(
+  cwd: string,
+  options: { since?: number; preferClosestTo?: number; windowMs?: number } = {},
+): Promise<ClaudeSessionInfo | null> {
   const rootCandidates: string[] = [];
   if (process.env.CLAUDE_CONFIG_DIR) {
     rootCandidates.push(process.env.CLAUDE_CONFIG_DIR);
@@ -318,12 +351,20 @@ export async function findLatestClaudeSessionId(
       const sessionsDir = path.join(projectDir, "sessions");
 
       // 1) Look under sessions/ (official location) - prefer newest file with valid ID
-      const sessionId = await findNewestSessionIdFromDir(sessionsDir, false);
-      if (sessionId) return sessionId;
+      const session = await findNewestSessionIdFromDir(
+        sessionsDir,
+        false,
+        options,
+      );
+      if (session) return session;
 
       // 2) Look directly under project dir and subdirs (some versions emit files at root)
-      const rootSessionId = await findNewestSessionIdFromDir(projectDir, true);
-      if (rootSessionId) return rootSessionId;
+      const rootSession = await findNewestSessionIdFromDir(
+        projectDir,
+        true,
+        options,
+      );
+      if (rootSession) return rootSession;
     }
   }
 
@@ -339,7 +380,7 @@ export async function findLatestClaudeSessionId(
         const project = typeof parsed.project === "string" ? parsed.project : null;
         const sessionId = typeof parsed.sessionId === "string" ? parsed.sessionId : null;
         if (project && sessionId && (project === cwd || cwd.startsWith(project))) {
-          return sessionId;
+          return { id: sessionId, mtime: Date.now() };
         }
       } catch {
         // ignore malformed lines
@@ -361,8 +402,8 @@ export async function waitForClaudeSessionId(
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
-    const found = await findLatestClaudeSessionId(cwd);
-    if (found) return found;
+    const found = await findLatestClaudeSession(cwd);
+    if (found?.id) return found.id;
     await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
   }
   return null;
