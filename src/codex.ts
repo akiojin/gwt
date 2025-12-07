@@ -4,7 +4,7 @@ import { platform } from "os";
 import { existsSync } from "fs";
 import { createChildStdio, getTerminalStreams } from "./utils/terminal.js";
 import {
-  findLatestCodexSessionId,
+  findLatestCodexSession,
   waitForCodexSessionId,
 } from "./utils/session.js";
 
@@ -64,17 +64,6 @@ export async function launchCodexCLI(
 ): Promise<{ sessionId?: string | null }> {
   const terminal = getTerminalStreams();
   const startedAt = Date.now();
-  const sessionCapture: { value: string | null } = { value: null };
-  const captureSessionId = (chunk: Buffer | string) => {
-    const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
-    const match = text.match(
-      /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i,
-    );
-    const id = match?.[1];
-    if (id) {
-      sessionCapture.value = id;
-    }
-  };
 
   try {
     if (!existsSync(worktreePath)) {
@@ -158,39 +147,33 @@ export async function launchCodexCLI(
       const child = execa("bunx", [CODEX_CLI_PACKAGE, ...args], {
         cwd: worktreePath,
         stdin: childStdio.stdin,
-        stdout: "pipe",
-        stderr: "pipe",
+        stdout: childStdio.stdout,
+        stderr: childStdio.stderr,
         env,
       } as any);
-      child.stdout?.on("data", (d) => {
-        captureSessionId(d);
-        terminal.stdout.write(d);
-      });
-      child.stderr?.on("data", (d) => {
-        captureSessionId(d);
-        terminal.stderr.write(d);
-      });
       await child;
     } finally {
       childStdio.cleanup();
     }
 
+    // File-based session detection only - no stdout capture
     let capturedSessionId: string | null = null;
+    const finishedAt = Date.now();
     try {
-      const polled = await sessionProbe;
-      const found =
-        sessionCapture.value ??
-        polled ??
-        (await findLatestCodexSessionId({
-          since: startedAt - 60_000,
-          until: Date.now() + 60_000,
-          preferClosestTo: Date.now(),
+      const [polled, latest] = await Promise.all([
+        sessionProbe,
+        findLatestCodexSession({
+          since: startedAt - 30_000,
+          until: finishedAt + 30_000,
+          preferClosestTo: finishedAt,
           windowMs: 60 * 60 * 1000, // 60 minutes around launch window
           cwd: worktreePath,
-        }));
-      capturedSessionId = found ?? resumeSessionId ?? null;
+        }),
+      ]);
+      // Priority: latest on disk > polled > resumeSessionId
+      capturedSessionId = latest?.id ?? polled ?? resumeSessionId ?? null;
     } catch {
-      capturedSessionId = sessionCapture.value ?? resumeSessionId ?? null;
+      capturedSessionId = resumeSessionId ?? null;
     }
 
     if (capturedSessionId) {
