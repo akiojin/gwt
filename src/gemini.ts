@@ -146,6 +146,26 @@ export async function launchGeminiCLI(
     const hasLocalGemini = await isGeminiCommandAvailable();
 
     const runGemini = async (runArgs: string[]) => {
+      const execChild = async (child: any) => {
+        child.stdout?.on("data", (d: Buffer) => {
+          captureSessionId(d);
+          terminal.stdout.write(d);
+        });
+        child.stderr?.on("data", (d: Buffer) => {
+          captureSessionId(d);
+          terminal.stderr.write(d);
+        });
+        try {
+          await child;
+        } catch (execError: any) {
+          // Treat SIGINT/SIGTERM as normal exit (user pressed Ctrl+C)
+          if (execError.signal === "SIGINT" || execError.signal === "SIGTERM") {
+            return;
+          }
+          throw execError;
+        }
+      };
+
       if (hasLocalGemini) {
         const child = execa("gemini", runArgs, {
           cwd: worktreePath,
@@ -155,15 +175,7 @@ export async function launchGeminiCLI(
           stderr: "pipe",
           env: baseEnv,
         } as any);
-        child.stdout?.on("data", (d) => {
-          captureSessionId(d);
-          terminal.stdout.write(d);
-        });
-        child.stderr?.on("data", (d) => {
-          captureSessionId(d);
-          terminal.stderr.write(d);
-        });
-        await child;
+        await execChild(child);
         return;
       }
       console.log(
@@ -185,15 +197,7 @@ export async function launchGeminiCLI(
         stderr: "pipe",
         env: baseEnv,
       } as any);
-      child.stdout?.on("data", (d) => {
-        captureSessionId(d);
-        terminal.stdout.write(d);
-      });
-      child.stderr?.on("data", (d) => {
-        captureSessionId(d);
-        terminal.stderr.write(d);
-      });
-      await child;
+      await execChild(child);
     };
 
     try {
