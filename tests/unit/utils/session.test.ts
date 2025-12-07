@@ -196,6 +196,29 @@ describe("utils/session", () => {
     expect(id).toBe("claude-123");
   });
 
+  it("findLatestClaudeSessionId tries dot-to-dash encoding used by Claude", async () => {
+    const dirent = (name: string, type: "file" | "dir") => ({
+      name,
+      isFile: () => type === "file",
+      isDirectory: () => type === "dir",
+    });
+
+    (readdir as any).mockImplementation((dir: string, opts?: any) => {
+      if (opts?.withFileTypes) {
+        if (dir.endsWith("/projects/-repo--worktrees-branch/sessions")) {
+          return Promise.resolve([dirent("s1.jsonl", "file")]);
+        }
+        return Promise.resolve([]);
+      }
+      return Promise.resolve([]);
+    });
+    (stat as any).mockResolvedValue({ mtimeMs: 20 });
+    (readFile as any).mockResolvedValue('{"sessionId":"dotdash-1"}');
+
+    const id = await findLatestClaudeSessionId("/repo/.worktrees/branch");
+    expect(id).toBe("dotdash-1");
+  });
+
   it("findLatestClaudeSessionId reads JSONL lines and extracts session_id", async () => {
     const dirent = (name: string, type: "file" | "dir") => ({
       name,
