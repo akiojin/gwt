@@ -1114,6 +1114,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
             previousOption={
               branchQuickStart
                 ? {
+                    toolId: branchQuickStart.toolId,
                     toolLabel: branchQuickStart.toolLabel,
                     model: branchQuickStart.model ?? null,
                     inferenceLevel: branchQuickStart.inferenceLevel ?? null,

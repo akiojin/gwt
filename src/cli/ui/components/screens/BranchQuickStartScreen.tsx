@@ -8,6 +8,7 @@ import { useTerminalSize } from "../../hooks/useTerminalSize.js";
 export type QuickStartAction = "reuse-continue" | "reuse-new" | "manual";
 
 export interface BranchQuickStartOption {
+  toolId?: string | null;
   toolLabel: string;
   model?: string | null;
   sessionId?: string | null;
@@ -27,6 +28,21 @@ const formatReasoning = (level?: string | null) =>
 
 const formatSkip = (skip?: boolean | null) =>
   skip === true ? "Yes" : skip === false ? "No" : "No";
+
+const supportsReasoning = (toolId?: string | null) =>
+  toolId === "codex-cli";
+
+const describe = (opt: BranchQuickStartOption, includeSessionId = true) => {
+  const parts = [opt.toolLabel, opt.model ?? "default"];
+  if (supportsReasoning(opt.toolId)) {
+    parts.push(`Reasoning: ${formatReasoning(opt.inferenceLevel)}`);
+  }
+  parts.push(`Skip: ${formatSkip(opt.skipPermissions)}`);
+  if (includeSessionId) {
+    parts.push(opt.sessionId ? `ID: ${opt.sessionId}` : "No ID");
+  }
+  return parts.join(" / ");
+};
 
 type QuickStartItem = SelectItem & {
   description: string;
@@ -57,7 +73,7 @@ export function BranchQuickStartScreen({
       label: "Resume with previous settings",
       value: "reuse-continue",
       description: previousOption
-        ? `${previousOption.toolLabel} / ${previousOption.model ?? "default"} / Reasoning: ${formatReasoning(previousOption.inferenceLevel)} / Skip: ${formatSkip(previousOption.skipPermissions)} / ${previousOption.sessionId ? `ID: ${previousOption.sessionId}` : "No ID"}`
+        ? describe(previousOption, true)
         : "No previous settings (disabled)",
       disabled: !previousOption,
     },
@@ -65,7 +81,7 @@ export function BranchQuickStartScreen({
       label: "Start new with previous settings",
       value: "reuse-new",
       description: previousOption
-        ? `${previousOption.toolLabel} / ${previousOption.model ?? "default"} / Reasoning: ${formatReasoning(previousOption.inferenceLevel)} / Skip: ${formatSkip(previousOption.skipPermissions)}`
+        ? describe(previousOption, false)
         : "No previous settings (disabled)",
       disabled: !previousOption,
     },
