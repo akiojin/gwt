@@ -432,13 +432,6 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
                   sessionId = latestAny?.id ?? null;
                 }
 
-                // Guard: ensure file actually exists; otherwise null out
-                if (
-                  sessionId &&
-                  !(await claudeSessionExists(sessionId, selectedWorktreePath))
-                ) {
-                  sessionId = null;
-                }
               } catch {
                 // ignore lookup failure
               }
