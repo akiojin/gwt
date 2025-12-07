@@ -196,7 +196,7 @@ async function readSessionIdFromFile(filePath: string): Promise<string | null> {
     const content = await readFile(filePath, "utf-8");
     const fromContent = pickSessionIdFromText(content);
     if (fromContent) return fromContent;
-    // Fallback: try to extract UUID from filename
+    // Fallback: use filename only (avoid picking unrelated UUIDs inside file)
     const filenameMatch = path.basename(filePath).match(UUID_REGEX);
     return filenameMatch ? filenameMatch[0] : null;
   } catch {
