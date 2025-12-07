@@ -101,31 +101,68 @@ export function BranchQuickStartScreen({
   };
 
   const items: QuickStartItem[] = previousOptions.length
-    ? previousOptions.flatMap((opt, idx) => {
-        const categoryMeta = resolveCategory(opt.toolId);
-        return [
+    ? (() => {
+        const grouped = new Map<
+          string,
           {
-            label: `Resume • ${opt.toolLabel}`,
+            meta: CategoryMeta;
+            entries: QuickStartItem[];
+          }
+        >();
+
+        previousOptions.forEach((opt) => {
+          const categoryMeta = resolveCategory(opt.toolId);
+          const resume: QuickStartItem = {
+            label: "Resume",
             value: `reuse-continue:${opt.toolId ?? "unknown"}`,
             action: "reuse-continue",
             toolId: opt.toolId ?? null,
             description: describe(opt, true),
-            groupStart: idx === 0 ? false : true,
             category: categoryMeta.label,
             categoryColor: categoryMeta.color,
-          },
-          {
-            label: `New • ${opt.toolLabel}`,
+          };
+          const startNew: QuickStartItem = {
+            label: "New",
             value: `reuse-new:${opt.toolId ?? "unknown"}`,
             action: "reuse-new",
             toolId: opt.toolId ?? null,
             description: describe(opt, false),
-            groupStart: false,
             category: categoryMeta.label,
             categoryColor: categoryMeta.color,
-          },
-        ];
-      })
+          };
+          const bucket = grouped.get(categoryMeta.label);
+          if (bucket) {
+            bucket.entries.push(resume, startNew);
+          } else {
+            grouped.set(categoryMeta.label, {
+              meta: categoryMeta,
+              entries: [resume, startNew],
+            });
+          }
+        });
+
+        const flat: QuickStartItem[] = [];
+        Array.from(grouped.values()).forEach((group, idx) => {
+          flat.push({
+            label: group.meta.label,
+            value: `header:${group.meta.label}:${idx}`,
+            action: "manual",
+            description: "",
+            disabled: true,
+            groupStart: idx === 0 ? false : true,
+            category: group.meta.label,
+            categoryColor: group.meta.color,
+          });
+          flat.push(
+            ...group.entries.map((entry, entryIdx) => ({
+              ...entry,
+              value: `${entry.value}:${idx}:${entryIdx}`,
+            })),
+          );
+        });
+
+        return flat;
+      })()
     : [
         {
           label: "Resume with previous settings",
@@ -194,10 +231,14 @@ export function BranchQuickStartScreen({
                 color={isSelected ? "white" : item.categoryColor}
                 inverse={isSelected}
               >
-                {`[${item.category}] ${item.label}`}
+                {item.disabled
+                  ? `[${item.category}]`
+                  : `[${item.category}] ${item.label}`}
                 {item.disabled ? " (disabled)" : ""}
               </Text>
-              <Text color="gray">  {item.description}</Text>
+              {item.description && (
+                <Text color="gray">  {item.description}</Text>
+              )}
             </Box>
           )}
         />
