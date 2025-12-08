@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { EventEmitter } from "node:events";
+import * as sessionUtils from "../../src/utils/session.js";
 
 // Mock execa before importing
 vi.mock("execa", () => ({
@@ -13,8 +15,8 @@ vi.mock("fs", () => ({
 
 const mockTerminalStreams = {
   stdin: { id: "stdin" } as unknown as NodeJS.ReadStream,
-  stdout: { id: "stdout" } as unknown as NodeJS.WriteStream,
-  stderr: { id: "stderr" } as unknown as NodeJS.WriteStream,
+  stdout: { id: "stdout", write: vi.fn() } as unknown as NodeJS.WriteStream,
+  stderr: { id: "stderr", write: vi.fn() } as unknown as NodeJS.WriteStream,
   stdinFd: undefined as number | undefined,
   stdoutFd: undefined as number | undefined,
   stderrFd: undefined as number | undefined,
@@ -33,6 +35,11 @@ vi.mock("../../src/utils/terminal", () => ({
   getTerminalStreams: vi.fn(() => mockTerminalStreams),
   createChildStdio: vi.fn(() => mockChildStdio),
 }));
+vi.mock("../../src/utils/session", () => ({
+  waitForClaudeSessionId: vi.fn(async () => null),
+  findLatestClaudeSessionId: vi.fn(async () => null),
+  findLatestClaudeSession: vi.fn(async () => null),
+}));
 
 import { launchClaudeCode } from "../../src/claude.js";
 import { execa } from "execa";
@@ -42,6 +49,19 @@ const mockExeca = execa as ReturnType<typeof vi.fn>;
 
 // Mock console.log to avoid test output clutter
 let consoleLogSpy: ReturnType<typeof vi.spyOn>;
+const createChildProcess = (
+  onEmit?: (stdout: EventEmitter, stderr: EventEmitter) => void,
+) => {
+  const stdout = new EventEmitter();
+  const stderr = new EventEmitter();
+  const promise = new Promise((resolve) => {
+    setImmediate(() => {
+      onEmit?.(stdout, stderr);
+      resolve({ stdout, stderr, exitCode: 0 });
+    });
+  });
+  return Object.assign(promise, { stdout, stderr });
+};
 
 describe("launchClaudeCode - Root User Detection", () => {
   let originalGetuid: (() => number) | undefined;
@@ -50,10 +70,14 @@ describe("launchClaudeCode - Root User Detection", () => {
     vi.clearAllMocks();
     consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     mockTerminalStreams.exitRawMode.mockClear();
+    (mockTerminalStreams.stdout.write as any).mockClear?.();
+    (mockTerminalStreams.stderr.write as any).mockClear?.();
     mockChildStdio.cleanup.mockClear();
     mockChildStdio.stdin = "inherit";
     mockChildStdio.stdout = "inherit";
     mockChildStdio.stderr = "inherit";
+    // Default execa mock
+    (mockExeca as any).mockImplementation(() => createChildProcess() as any);
     // Store original getuid
     originalGetuid = process.getuid;
   });
@@ -65,6 +89,22 @@ describe("launchClaudeCode - Root User Detection", () => {
     } else {
       delete (process as any).getuid;
     }
+  });
+
+  it("captures sessionId from file-based detection and returns it", async () => {
+    process.getuid = () => 1000;
+
+    // Mock findLatestClaudeSession to return session info
+    (sessionUtils.findLatestClaudeSession as any).mockResolvedValueOnce({
+      id: "123e4567-e89b-12d3-a456-426614174000",
+      cwd: "/test/path",
+    });
+    (mockExeca as any)
+      .mockRejectedValueOnce(new Error("Command not found"))
+      .mockReturnValueOnce(createChildProcess() as any);
+
+    const result = await launchClaudeCode("/test/path", {});
+    expect(result.sessionId).toBe("123e4567-e89b-12d3-a456-426614174000");
   });
 
   describe("T104: Root user detection logic", () => {
@@ -91,6 +131,8 @@ describe("launchClaudeCode - Root User Detection", () => {
         "bunx",
         expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
         expect.objectContaining({
+          stdout: "inherit",
+          stderr: "inherit",
           env: expect.objectContaining({
             IS_SANDBOX: "1",
           }),
@@ -121,7 +163,6 @@ describe("launchClaudeCode - Root User Detection", () => {
         "bunx",
         expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
         expect.objectContaining({
-          stdin: "inherit",
           stdout: "inherit",
           stderr: "inherit",
           env: expect.objectContaining({
@@ -154,7 +195,6 @@ describe("launchClaudeCode - Root User Detection", () => {
         "bunx",
         expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
         expect.objectContaining({
-          stdin: "inherit",
           stdout: "inherit",
           stderr: "inherit",
           env: expect.objectContaining({
@@ -173,33 +213,40 @@ describe("launchClaudeCode - Root User Detection", () => {
       // Mock which/where to fail (claude not available) and bunx to succeed
       mockExeca
         .mockRejectedValueOnce(new Error("Command not found")) // which/where
-        .mockResolvedValue({
-          // bunx
-          stdout: "",
-          stderr: "",
-          exitCode: 0,
-        } as any);
+        .mockReturnValueOnce(createChildProcess() as any);
 
       await launchClaudeCode("/test/path", { skipPermissions: true });
 
-      // Verify IS_SANDBOX=1 is set
-      // 2nd call should be bunx (1st call is which/where check)
-      expect(mockExeca).toHaveBeenNthCalledWith(
-        2,
-        "bunx",
+      const bunxCall = mockExeca.mock.calls[1];
+      expect(bunxCall[0]).toBe("bunx");
+      expect(bunxCall[1] as string[]).toEqual(
         expect.arrayContaining([
           "@anthropic-ai/claude-code@latest",
           "--dangerously-skip-permissions",
         ]),
-        expect.objectContaining({
-          stdin: "inherit",
-          stdout: "inherit",
-          stderr: "inherit",
-          env: expect.objectContaining({
-            IS_SANDBOX: "1",
-          }),
-        }),
       );
+      const options = bunxCall[2] as Record<string, any>;
+      expect(options.stdout).toBe("inherit");
+      expect(options.stderr).toBe("inherit");
+      expect(options.env?.IS_SANDBOX).toBe("1");
+    });
+  });
+
+  describe("Continue mode without saved session", () => {
+    it("falls back to new session when no sessionId is provided", async () => {
+      // which/where fails so bunx path is used
+      mockExeca
+        .mockRejectedValueOnce(new Error("Command not found")) // which/where
+        .mockResolvedValue({ stdout: "", stderr: "", exitCode: 0 } as any); // bunx
+
+      await launchClaudeCode("/test/path", { mode: "continue" });
+
+      // Second call is the actual launch (bunx)
+      const bunxCall = mockExeca.mock.calls[1];
+      expect(bunxCall[0]).toBe("bunx");
+      const args = bunxCall[1] as string[];
+      expect(args).not.toContain("-c");
+      expect(args).not.toContain("--resume");
     });
   });
 
@@ -207,6 +254,10 @@ describe("launchClaudeCode - Root User Detection", () => {
     it("should not set IS_SANDBOX=1 when skipPermissions=false even if root", async () => {
       // Mock root user
       process.getuid = () => 0;
+
+      // Temporarily remove IS_SANDBOX from process.env if present
+      const originalIsSandbox = process.env.IS_SANDBOX;
+      delete process.env.IS_SANDBOX;
 
       // Mock which/where to fail (claude not available) and bunx to succeed
       mockExeca
@@ -220,32 +271,30 @@ describe("launchClaudeCode - Root User Detection", () => {
 
       await launchClaudeCode("/test/path", { skipPermissions: false });
 
-      // Verify IS_SANDBOX=1 is NOT set
-      // 2nd call should be bunx (1st call is which/where check)
-      expect(mockExeca).toHaveBeenNthCalledWith(
-        2,
-        "bunx",
-        expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
-        expect.objectContaining({
-          stdin: "inherit",
-          stdout: "inherit",
-          stderr: "inherit",
-          env: process.env,
-        }),
-      );
+      const bunxCall = mockExeca.mock.calls[1];
+      const options = bunxCall[2] as Record<string, unknown>;
+      expect(options.stdout).toBe("inherit");
+      expect(options.stderr).toBe("inherit");
+      expect(options.env && (options.env as Record<string, string>).IS_SANDBOX).toBeUndefined();
 
       // Verify --dangerously-skip-permissions is NOT in args
-      expect(mockExeca).toHaveBeenNthCalledWith(
-        2,
-        "bunx",
-        expect.not.arrayContaining(["--dangerously-skip-permissions"]),
-        expect.anything(),
+      expect(bunxCall[1] as string[]).not.toContain(
+        "--dangerously-skip-permissions",
       );
+
+      // Restore IS_SANDBOX
+      if (originalIsSandbox !== undefined) {
+        process.env.IS_SANDBOX = originalIsSandbox;
+      }
     });
 
     it("should not set IS_SANDBOX=1 when skipPermissions is undefined", async () => {
       // Mock root user
       process.getuid = () => 0;
+
+      // Temporarily remove IS_SANDBOX from process.env if present
+      const originalIsSandbox = process.env.IS_SANDBOX;
+      delete process.env.IS_SANDBOX;
 
       // Mock which/where to fail (claude not available) and bunx to succeed
       mockExeca
@@ -259,19 +308,16 @@ describe("launchClaudeCode - Root User Detection", () => {
 
       await launchClaudeCode("/test/path", {});
 
-      // Verify IS_SANDBOX=1 is NOT set
-      // 2nd call should be bunx (1st call is which/where check)
-      expect(mockExeca).toHaveBeenNthCalledWith(
-        2,
-        "bunx",
-        expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
-        expect.objectContaining({
-          stdin: "inherit",
-          stdout: "inherit",
-          stderr: "inherit",
-          env: process.env,
-        }),
-      );
+      const bunxCall = mockExeca.mock.calls[1];
+      const options = bunxCall[2] as Record<string, any>;
+      expect(options.stdout).toBe("inherit");
+      expect(options.stderr).toBe("inherit");
+      expect(options.env?.IS_SANDBOX).toBeUndefined();
+
+      // Restore IS_SANDBOX
+      if (originalIsSandbox !== undefined) {
+        process.env.IS_SANDBOX = originalIsSandbox;
+      }
     });
   });
 
@@ -375,19 +421,19 @@ describe("launchClaudeCode - Root User Detection", () => {
           exitCode: 0,
         } as any);
 
-      await launchClaudeCode("/test/path");
+    await launchClaudeCode("/test/path");
 
-      // 2nd call should be bunx (1st call is which/where check)
-      expect(mockExeca).toHaveBeenNthCalledWith(
-        2,
-        "bunx",
-        expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
-        expect.objectContaining({
-          stdin: 101,
-          stdout: 102,
-          stderr: 103,
-        }),
-      );
+    // 2nd call should be bunx (1st call is which/where check)
+    expect(mockExeca).toHaveBeenNthCalledWith(
+      2,
+      "bunx",
+      expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
+      expect.objectContaining({
+        stdin: 101,
+        stdout: 102,
+        stderr: 103,
+      }),
+    );
 
       expect(mockChildStdio.cleanup).toHaveBeenCalledTimes(1);
 
@@ -402,7 +448,17 @@ describe("launchClaudeCode - Root User Detection", () => {
     // Clear the default mock from parent beforeEach for these tests
     beforeEach(() => {
       vi.clearAllMocks();
-      consoleLogSpy.mockClear();
+      consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      mockTerminalStreams.exitRawMode.mockClear();
+      (mockTerminalStreams.stdout.write as any).mockClear?.();
+      (mockTerminalStreams.stderr.write as any).mockClear?.();
+      mockChildStdio.cleanup.mockClear();
+      mockChildStdio.stdin = "inherit";
+      mockChildStdio.stdout = "inherit";
+      mockChildStdio.stderr = "inherit";
+      (mockExeca as any).mockImplementation(
+        () => createChildProcess() as any,
+      );
     });
 
     it("should use locally installed claude command when available", async () => {
@@ -438,6 +494,8 @@ describe("launchClaudeCode - Root User Detection", () => {
         expect.any(Array),
         expect.objectContaining({
           cwd: "/test/path",
+          stdout: "inherit",
+          stderr: "inherit",
         }),
       );
 
@@ -478,6 +536,8 @@ describe("launchClaudeCode - Root User Detection", () => {
         expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
         expect.objectContaining({
           cwd: "/test/path",
+          stdout: "inherit",
+          stderr: "inherit",
         }),
       );
 
@@ -514,17 +574,22 @@ describe("launchClaudeCode - Root User Detection", () => {
         2,
         "claude",
         expect.arrayContaining([
-          "-c", // continue mode
           "--dangerously-skip-permissions",
           "--verbose", // extra args
         ]),
         expect.objectContaining({
           cwd: "/test/path",
+          stdout: "inherit",
+          stderr: "inherit",
           env: expect.objectContaining({
             IS_SANDBOX: "1",
           }),
         }),
       );
+
+      const args = mockExeca.mock.calls[1][1] as string[];
+      expect(args).not.toContain("-c");
+      expect(args).not.toContain("--resume");
     });
 
     it("should pass arguments correctly when using bunx fallback", async () => {
@@ -555,7 +620,36 @@ describe("launchClaudeCode - Root User Detection", () => {
           "-r", // resume mode
           "--debug", // extra args
         ]),
-        expect.anything(),
+        expect.objectContaining({
+          stdout: "inherit",
+          stderr: "inherit",
+        }),
+      );
+    });
+  });
+
+  describe("FR-008: Launch arguments display", () => {
+    it("should display launch arguments in console log", async () => {
+      // Mock which/where to fail (claude not available) and bunx to succeed
+      mockExeca
+        .mockRejectedValueOnce(new Error("Command not found")) // which/where
+        .mockResolvedValue({
+          // bunx
+          stdout: "",
+          stderr: "",
+          exitCode: 0,
+        } as any);
+
+      await launchClaudeCode("/test/path", { skipPermissions: true });
+
+      // Verify that args are logged with 📋 prefix
+      expect(consoleLogSpy).toHaveBeenCalledWith(
+        expect.stringContaining("📋 Args:"),
+      );
+
+      // Verify that the actual arguments are included in the log
+      expect(consoleLogSpy).toHaveBeenCalledWith(
+        expect.stringContaining("--dangerously-skip-permissions"),
       );
     });
   });

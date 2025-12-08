@@ -35,9 +35,16 @@ import {
 } from "./utils/terminal.js";
 import { getToolById, getSharedEnvironment } from "./config/tools.js";
 import { launchCustomAITool } from "./launcher.js";
-import { saveSession } from "./config/index.js";
+import { saveSession, loadSession } from "./config/index.js";
+import {
+  findLatestCodexSession,
+  findLatestClaudeSession,
+  findLatestGeminiSession,
+} from "./utils/session.js";
 import { getPackageVersion } from "./utils.js";
+import { findLatestClaudeSessionId } from "./utils/session.js";
 import readline from "node:readline";
+import { resolveContinueSessionId } from "./cli/ui/utils/continueSession.js";
 import {
   installDependenciesForWorktree,
   DependencyInstallError,
@@ -273,6 +280,7 @@ async function mainInkUI(): Promise<SelectionResult | undefined> {
 
   let selectionResult: SelectionResult | undefined;
 
+  // Resume stdin to ensure it's ready for Ink.js
   if (typeof terminal.stdin.resume === "function") {
     terminal.stdin.resume();
   }
@@ -324,6 +332,7 @@ export async function handleAIToolWorkflow(
     skipPermissions,
     model,
     inferenceLevel,
+    sessionId: selectedSessionId,
   } = selectionResult;
 
   const branchLabel = displayName ?? branch;
@@ -564,26 +573,61 @@ export async function handleAIToolWorkflow(
 
     // Save selection immediately so "last tool" is reflected even if the tool
     // is interrupted or killed mid-run (e.g., Ctrl+C).
-    await saveSession({
-      lastWorktreePath: worktreePath,
-      lastBranch: branch,
-      lastUsedTool: tool,
-      toolLabel: toolConfig.displayName ?? tool,
-      mode,
-      model: model ?? null,
-      timestamp: Date.now(),
-      repositoryRoot: repoRoot,
-    });
+    await saveSession(
+      {
+        lastWorktreePath: worktreePath,
+        lastBranch: branch,
+        lastUsedTool: tool,
+        toolLabel: toolConfig.displayName ?? tool,
+        mode,
+        model: model ?? null,
+        reasoningLevel: inferenceLevel ?? null,
+        skipPermissions: skipPermissions ?? null,
+        timestamp: Date.now(),
+        repositoryRoot: repoRoot,
+      },
+      { skipHistory: true },
+    );
+
+    // Lookup saved session ID for continue/resume
+    let resumeSessionId: string | null =
+      selectedSessionId && selectedSessionId.length > 0
+        ? selectedSessionId
+        : null;
+    if (mode === "continue" || mode === "resume") {
+      const existingSession = await loadSession(repoRoot);
+      const history = existingSession?.history ?? [];
+
+      resumeSessionId =
+        resumeSessionId ??
+        (await resolveContinueSessionId({
+          history,
+          sessionData: existingSession,
+          branch,
+          toolId: tool,
+          repoRoot,
+        }));
+
+      if (!resumeSessionId) {
+        printWarning(
+          "No saved session ID found for this branch/tool. Falling back to tool default.",
+        );
+      }
+    }
+
+    const launchStartedAt = Date.now();
 
     // Launch selected AI tool
     // Builtin tools use their dedicated launch functions
     // Custom tools use the generic launchCustomAITool function
+    let launchResult: { sessionId?: string | null } | void;
     if (tool === "claude-code") {
       const launchOptions: {
         mode?: "normal" | "continue" | "resume";
         skipPermissions?: boolean;
         envOverrides?: Record<string, string>;
         model?: string;
+        sessionId?: string | null;
       } = {
         mode:
           mode === "resume"
@@ -593,11 +637,12 @@ export async function handleAIToolWorkflow(
               : "normal",
         skipPermissions,
         envOverrides: sharedEnv,
+        sessionId: resumeSessionId,
       };
       if (model) {
         launchOptions.model = model;
       }
-      await launchClaudeCode(worktreePath, launchOptions);
+      launchResult = await launchClaudeCode(worktreePath, launchOptions);
     } else if (tool === "codex-cli") {
       const launchOptions: {
         mode?: "normal" | "continue" | "resume";
@@ -605,6 +650,7 @@ export async function handleAIToolWorkflow(
         envOverrides?: Record<string, string>;
         model?: string;
         reasoningEffort?: CodexReasoningEffort;
+        sessionId?: string | null;
       } = {
         mode:
           mode === "resume"
@@ -614,6 +660,7 @@ export async function handleAIToolWorkflow(
               : "normal",
         bypassApprovals: skipPermissions,
         envOverrides: sharedEnv,
+        sessionId: resumeSessionId,
       };
       if (model) {
         launchOptions.model = model;
@@ -621,13 +668,14 @@ export async function handleAIToolWorkflow(
       if (inferenceLevel) {
         launchOptions.reasoningEffort = inferenceLevel as CodexReasoningEffort;
       }
-      await launchCodexCLI(worktreePath, launchOptions);
+      launchResult = await launchCodexCLI(worktreePath, launchOptions);
     } else if (tool === "gemini-cli") {
       const launchOptions: {
         mode?: "normal" | "continue" | "resume";
         skipPermissions?: boolean;
         envOverrides?: Record<string, string>;
         model?: string;
+        sessionId?: string | null;
       } = {
         mode:
           mode === "resume"
@@ -637,17 +685,19 @@ export async function handleAIToolWorkflow(
               : "normal",
         skipPermissions,
         envOverrides: sharedEnv,
+        sessionId: resumeSessionId,
       };
       if (model) {
         launchOptions.model = model;
       }
-      await launchGeminiCLI(worktreePath, launchOptions);
+      launchResult = await launchGeminiCLI(worktreePath, launchOptions);
     } else if (tool === "qwen-cli") {
       const launchOptions: {
         mode?: "normal" | "continue" | "resume";
         skipPermissions?: boolean;
         envOverrides?: Record<string, string>;
         model?: string;
+        sessionId?: string | null;
       } = {
         mode:
           mode === "resume"
@@ -657,15 +707,16 @@ export async function handleAIToolWorkflow(
               : "normal",
         skipPermissions,
         envOverrides: sharedEnv,
+        sessionId: resumeSessionId,
       };
       if (model) {
         launchOptions.model = model;
       }
-      await launchQwenCLI(worktreePath, launchOptions);
+      launchResult = await launchQwenCLI(worktreePath, launchOptions);
     } else {
       // Custom tool
       printInfo(`Launching custom tool: ${toolConfig.displayName}`);
-      await launchCustomAITool(toolConfig, {
+      launchResult = await launchCustomAITool(toolConfig, {
         mode:
           mode === "resume"
             ? "resume"
@@ -678,6 +729,83 @@ export async function handleAIToolWorkflow(
       });
     }
 
+    // Persist session with captured session ID (if any)
+    let finalSessionId =
+      (launchResult as { sessionId?: string | null } | undefined)?.sessionId ??
+      resumeSessionId ??
+      null;
+
+    if (!finalSessionId && tool === "claude-code") {
+      try {
+        finalSessionId = (await findLatestClaudeSessionId(worktreePath)) ?? null;
+      } catch {
+        finalSessionId = null;
+      }
+    }
+    const finishedAt = Date.now();
+
+    if (tool === "codex-cli") {
+      try {
+        const latest = await findLatestCodexSession({
+          since: launchStartedAt - 60_000,
+          until: finishedAt + 60_000,
+          preferClosestTo: finishedAt,
+          windowMs: 60 * 60 * 1000,
+          cwd: worktreePath,
+        });
+        if (latest) {
+          finalSessionId = latest.id;
+        }
+      } catch {
+        // ignore fallback failure
+      }
+    } else if (tool === "claude-code") {
+      try {
+        const latestClaude = await findLatestClaudeSession(worktreePath, {
+          since: launchStartedAt - 60_000,
+          until: finishedAt + 60_000,
+          preferClosestTo: finishedAt,
+          windowMs: 60 * 60 * 1000,
+        });
+        if (latestClaude) {
+          finalSessionId = latestClaude.id;
+        }
+      } catch {
+        // ignore
+      }
+    } else if (tool === "gemini-cli") {
+      try {
+        const latestGemini = await findLatestGeminiSession(worktreePath, {
+          since: launchStartedAt - 60_000,
+          until: finishedAt + 60_000,
+          preferClosestTo: finishedAt,
+          windowMs: 60 * 60 * 1000,
+          cwd: worktreePath,
+        });
+        if (latestGemini) {
+          finalSessionId = latestGemini.id;
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    await saveSession({
+      lastWorktreePath: worktreePath,
+      lastBranch: branch,
+      lastUsedTool: tool,
+      toolLabel: toolConfig.displayName ?? tool,
+      mode,
+      model: model ?? null,
+      reasoningLevel: inferenceLevel ?? null,
+      skipPermissions: skipPermissions ?? null,
+      timestamp: Date.now(),
+      repositoryRoot: repoRoot,
+      lastSessionId: finalSessionId,
+    });
+
+    // Small buffer before returning to branch list to avoid abrupt screen swap
+    await new Promise((resolve) => setTimeout(resolve, 3000));
     printInfo("Session completed successfully. Returning to main menu...");
     return;
   } catch (error) {

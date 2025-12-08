@@ -16,6 +16,7 @@ const resetMock = vi.fn();
 const branchListProps: BranchListScreenProps[] = [];
 const branchActionProps: BranchActionSelectorScreenProps[] = [];
 const aiToolProps: unknown[] = [];
+const branchQuickStartProps: unknown[] = [];
 let currentScreenState: ScreenType;
 let App: typeof import("../../components/App.js").App;
 const useGitDataMock = vi.fn();
@@ -74,6 +75,15 @@ vi.mock("../../components/screens/AIToolSelectorScreen.js", () => {
   return {
     AIToolSelectorScreen: (props: unknown) => {
       aiToolProps.push(props);
+      return React.createElement("div");
+    },
+  };
+});
+
+vi.mock("../../components/screens/BranchQuickStartScreen.js", () => {
+  return {
+    BranchQuickStartScreen: (props: unknown) => {
+      branchQuickStartProps.push(props);
       return React.createElement("div");
     },
   };
@@ -193,7 +203,7 @@ describe("App protected branch handling", () => {
       remoteRef: null,
     });
 
-    expect(navigateToMock).toHaveBeenCalledWith("ai-tool-selector");
-    expect(aiToolProps).not.toHaveLength(0);
+    expect(navigateToMock).toHaveBeenCalledWith("branch-quick-start");
+    expect(branchQuickStartProps).not.toHaveLength(0);
   });
 });

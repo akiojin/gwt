@@ -2,6 +2,7 @@ import { execa } from "execa";
 import chalk from "chalk";
 import { existsSync } from "fs";
 import { createChildStdio, getTerminalStreams } from "./utils/terminal.js";
+import { findLatestQwenSessionId } from "./utils/session.js";
 
 const QWEN_CLI_PACKAGE = "@qwen-code/qwen-code@latest";
 
@@ -23,8 +24,9 @@ export async function launchQwenCLI(
     extraArgs?: string[];
     envOverrides?: Record<string, string>;
     model?: string;
+    sessionId?: string | null;
   } = {},
-): Promise<void> {
+): Promise<{ sessionId?: string | null }> {
   const terminal = getTerminalStreams();
 
   try {
@@ -46,18 +48,26 @@ export async function launchQwenCLI(
     // Handle execution mode
     // Note: Qwen CLI doesn't have explicit continue/resume CLI options at startup.
     // Session management is done via /chat commands during interactive sessions.
+    const resumeSessionId =
+      options.sessionId && options.sessionId.trim().length > 0
+        ? options.sessionId.trim()
+        : null;
     switch (options.mode) {
       case "continue":
         console.log(
           chalk.cyan(
-            "   ⏭️  Starting session (use /chat resume in the CLI to continue)",
+            resumeSessionId
+              ? `   ⏭️  Starting session (then /chat resume ${resumeSessionId})`
+              : "   ⏭️  Starting session (use /chat resume in the CLI to continue)",
           ),
         );
         break;
       case "resume":
         console.log(
           chalk.cyan(
-            "   🔄 Starting session (use /chat resume in the CLI to continue)",
+            resumeSessionId
+              ? `   🔄 Starting session (then /chat resume ${resumeSessionId})`
+              : "   🔄 Starting session (use /chat resume in the CLI to continue)",
           ),
         );
         break;
@@ -80,6 +90,8 @@ export async function launchQwenCLI(
       args.push(...options.extraArgs);
     }
 
+    console.log(chalk.gray(`   📋 Args: ${args.join(" ")}`));
+
     terminal.exitRawMode();
 
     const baseEnv = {
@@ -93,10 +105,22 @@ export async function launchQwenCLI(
     const hasLocalQwen = await isQwenCommandAvailable();
 
     try {
+      const execChild = async (child: any) => {
+        try {
+          await child;
+        } catch (execError: any) {
+          // Treat SIGINT/SIGTERM as normal exit (user pressed Ctrl+C)
+          if (execError.signal === "SIGINT" || execError.signal === "SIGTERM") {
+            return;
+          }
+          throw execError;
+        }
+      };
+
       if (hasLocalQwen) {
         // Use locally installed qwen command
         console.log(chalk.green("   ✨ Using locally installed qwen command"));
-        await execa("qwen", args, {
+        const child = execa("qwen", args, {
           cwd: worktreePath,
           shell: true,
           stdin: childStdio.stdin,
@@ -104,6 +128,7 @@ export async function launchQwenCLI(
           stderr: childStdio.stderr,
           env: baseEnv,
         } as any);
+        await execChild(child);
       } else {
         // Fallback to bunx
         console.log(
@@ -118,7 +143,7 @@ export async function launchQwenCLI(
         console.log("");
         // Wait 2 seconds to let user read the message
         await new Promise((resolve) => setTimeout(resolve, 2000));
-        await execa("bunx", [QWEN_CLI_PACKAGE, ...args], {
+        const child = execa("bunx", [QWEN_CLI_PACKAGE, ...args], {
           cwd: worktreePath,
           shell: true,
           stdin: childStdio.stdin,
@@ -126,10 +151,36 @@ export async function launchQwenCLI(
           stderr: childStdio.stderr,
           env: baseEnv,
         } as any);
+        await execChild(child);
       }
     } finally {
       childStdio.cleanup();
     }
+
+    let capturedSessionId: string | null = null;
+    try {
+      capturedSessionId =
+        (await findLatestQwenSessionId(worktreePath)) ??
+        resumeSessionId ??
+        null;
+    } catch {
+      capturedSessionId = resumeSessionId ?? null;
+    }
+
+    if (capturedSessionId) {
+      console.log(chalk.cyan(`\n   🆔 Session tag: ${capturedSessionId}`));
+      console.log(
+        chalk.gray(`   Resume in Qwen CLI: /chat resume ${capturedSessionId}`),
+      );
+    } else {
+      console.log(
+        chalk.yellow(
+          "\n   ℹ️  Could not determine Qwen session tag automatically.",
+        ),
+      );
+    }
+
+    return capturedSessionId ? { sessionId: capturedSessionId } : {};
   } catch (error: any) {
     const hasLocalQwen = await isQwenCommandAvailable();
     let errorMessage: string;

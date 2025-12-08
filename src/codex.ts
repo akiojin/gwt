@@ -3,6 +3,10 @@ import chalk from "chalk";
 import { platform } from "os";
 import { existsSync } from "fs";
 import { createChildStdio, getTerminalStreams } from "./utils/terminal.js";
+import {
+  findLatestCodexSession,
+  waitForCodexSessionId,
+} from "./utils/session.js";
 
 const CODEX_CLI_PACKAGE = "@openai/codex@latest";
 
@@ -17,6 +21,8 @@ export const buildDefaultCodexArgs = (
 ): string[] => [
   "--enable",
   "web_search_request",
+  "--enable",
+  "skills",
   `--model=${model}`,
   "--sandbox",
   "workspace-write",
@@ -53,9 +59,11 @@ export async function launchCodexCLI(
     envOverrides?: Record<string, string>;
     model?: string;
     reasoningEffort?: CodexReasoningEffort;
+    sessionId?: string | null;
   } = {},
-): Promise<void> {
+): Promise<{ sessionId?: string | null }> {
   const terminal = getTerminalStreams();
+  const startedAt = Date.now();
 
   try {
     if (!existsSync(worktreePath)) {
@@ -73,14 +81,40 @@ export async function launchCodexCLI(
     console.log(chalk.green(`   🎯 Model: ${model}`));
     console.log(chalk.green(`   🧠 Reasoning: ${reasoningEffort}`));
 
+    const resumeSessionId =
+      options.sessionId && options.sessionId.trim().length > 0
+        ? options.sessionId.trim()
+        : null;
+
+    // Start polling session files immediately to catch the session created right after launch.
+    const sessionProbe = waitForCodexSessionId({ startedAt, cwd: worktreePath }).catch(
+      () => null,
+    );
+
     switch (options.mode) {
       case "continue":
-        args.push("resume", "--last");
-        console.log(chalk.cyan("   ⏭️  Resuming last Codex session"));
+        if (resumeSessionId) {
+          args.push("resume", resumeSessionId);
+          console.log(
+            chalk.cyan(
+              `   ⏭️  Resuming specific Codex session: ${resumeSessionId}`,
+            ),
+          );
+        } else {
+          args.push("resume", "--last");
+          console.log(chalk.cyan("   ⏭️  Resuming last Codex session"));
+        }
         break;
       case "resume":
-        args.push("resume");
-        console.log(chalk.cyan("   🔄 Resume command"));
+        if (resumeSessionId) {
+          args.push("resume", resumeSessionId);
+          console.log(
+            chalk.cyan(`   🔄 Resuming Codex session: ${resumeSessionId}`),
+          );
+        } else {
+          args.push("resume");
+          console.log(chalk.cyan("   🔄 Resume command"));
+        }
         break;
       case "normal":
       default:
@@ -101,6 +135,8 @@ export async function launchCodexCLI(
 
     args.push(...codexArgs);
 
+    console.log(chalk.gray(`   📋 Args: ${args.join(" ")}`));
+
     terminal.exitRawMode();
 
     const childStdio = createChildStdio();
@@ -108,16 +144,63 @@ export async function launchCodexCLI(
     const env = { ...process.env, ...(options.envOverrides ?? {}) };
 
     try {
-      await execa("bunx", [CODEX_CLI_PACKAGE, ...args], {
+      const execChild = async (child: any) => {
+        try {
+          await child;
+        } catch (execError: any) {
+          // Treat SIGINT/SIGTERM as normal exit (user pressed Ctrl+C)
+          if (execError.signal === "SIGINT" || execError.signal === "SIGTERM") {
+            return;
+          }
+          throw execError;
+        }
+      };
+
+      const child = execa("bunx", [CODEX_CLI_PACKAGE, ...args], {
         cwd: worktreePath,
+        shell: true,
         stdin: childStdio.stdin,
         stdout: childStdio.stdout,
         stderr: childStdio.stderr,
         env,
       } as any);
+      await execChild(child);
     } finally {
       childStdio.cleanup();
     }
+
+    // File-based session detection only - no stdout capture
+    // Use only findLatestCodexSession with short timeout, skip sessionProbe to avoid hanging
+    let capturedSessionId: string | null = null;
+    const finishedAt = Date.now();
+    try {
+      const latest = await findLatestCodexSession({
+        since: startedAt,
+        until: finishedAt + 30_000,
+        preferClosestTo: finishedAt,
+        windowMs: 10 * 60 * 1000,
+        cwd: worktreePath,
+      });
+      // Priority: latest on disk > resumeSessionId
+      capturedSessionId = latest?.id ?? resumeSessionId ?? null;
+    } catch {
+      capturedSessionId = resumeSessionId ?? null;
+    }
+
+    if (capturedSessionId) {
+      console.log(chalk.cyan(`\n   🆔 Session ID: ${capturedSessionId}`));
+      console.log(
+        chalk.gray(`   Resume command: codex resume ${capturedSessionId}`),
+      );
+    } else {
+      console.log(
+        chalk.yellow(
+          "\n   ℹ️  Could not determine Codex session ID automatically.",
+        ),
+      );
+    }
+
+    return capturedSessionId ? { sessionId: capturedSessionId } : {};
   } catch (error: any) {
     const errorMessage =
       error.code === "ENOENT"
@@ -142,6 +225,8 @@ export async function launchCodexCLI(
     }
 
     throw new CodexError(errorMessage, error);
+  } finally {
+    terminal.exitRawMode();
   }
 }
 
