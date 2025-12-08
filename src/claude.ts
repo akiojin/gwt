@@ -197,6 +197,18 @@ export async function launchClaudeCode(
     // Auto-detect locally installed claude command
     const hasLocalClaude = await isClaudeCommandAvailable();
 
+    // Wrapper to handle SIGINT/SIGTERM as normal exit (same pattern as Codex)
+    const execChild = async (child: any) => {
+      try {
+        await child;
+      } catch (execError: any) {
+        if (execError.signal === "SIGINT" || execError.signal === "SIGTERM") {
+          return; // Treat Ctrl+C as normal exit
+        }
+        throw execError;
+      }
+    };
+
     try {
       if (hasLocalClaude) {
         console.log(
@@ -210,7 +222,7 @@ export async function launchClaudeCode(
           stderr: childStdio.stderr,
           env: launchEnv,
         } as any);
-        await child;
+        await execChild(child);
       } else {
         console.log(
           chalk.cyan(
@@ -245,7 +257,7 @@ export async function launchClaudeCode(
           stderr: childStdio.stderr,
           env: launchEnv,
         } as any);
-        await child;
+        await execChild(child);
       }
     } finally {
       childStdio.cleanup();
