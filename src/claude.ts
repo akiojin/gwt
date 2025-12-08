@@ -181,15 +181,7 @@ export async function launchClaudeCode(
 
     console.log(chalk.gray(`   📋 Args: ${args.join(" ")}`));
 
-    // Complete stdin reset before launching child process
-    // This removes any residual Ink.js listeners that could interfere
     terminal.exitRawMode();
-    if (process.stdin.removeAllListeners) {
-      process.stdin.removeAllListeners();
-    }
-    if (typeof process.stdin.pause === "function") {
-      process.stdin.pause();
-    }
 
     const baseEnv = {
       ...process.env,
@@ -269,11 +261,6 @@ export async function launchClaudeCode(
       }
     } finally {
       childStdio.cleanup();
-      // Complete stdin reset after child process exits
-      if (process.stdin.removeAllListeners) {
-        process.stdin.removeAllListeners();
-      }
-      terminal.exitRawMode();
     }
 
     // File-based session detection only - no stdout capture
@@ -367,7 +354,12 @@ export async function launchClaudeCode(
 async function isClaudeCommandAvailable(): Promise<boolean> {
   try {
     const command = process.platform === "win32" ? "where" : "which";
-    await execa(command, ["claude"], { shell: true });
+    await execa(command, ["claude"], {
+      shell: true,
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    });
     return true;
   } catch {
     // claude command not found in PATH
