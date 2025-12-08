@@ -14,6 +14,8 @@ import { AIToolSelectorScreen } from "./screens/AIToolSelectorScreen.js";
 import { SessionSelectorScreen } from "./screens/SessionSelectorScreen.js";
 import { ExecutionModeSelectorScreen } from "./screens/ExecutionModeSelectorScreen.js";
 import type { ExecutionMode } from "./screens/ExecutionModeSelectorScreen.js";
+import { BranchQuickStartScreen } from "./screens/BranchQuickStartScreen.js";
+import type { QuickStartAction } from "./screens/BranchQuickStartScreen.js";
 import {
   ModelSelectorScreen,
   type ModelSelectionResult,
@@ -30,6 +32,7 @@ import type {
   SelectedBranchState,
 } from "../types.js";
 import { getRepositoryRoot, deleteBranch } from "../../../git.js";
+import { loadSession } from "../../../config/index.js";
 import {
   createWorktree,
   generateWorktreePath,
@@ -47,6 +50,17 @@ import {
   getDefaultInferenceForModel,
   getDefaultModelOption,
 } from "../utils/modelOptions.js";
+import {
+  resolveContinueSessionId,
+  findLatestBranchSessionsByTool,
+} from "../utils/continueSession.js";
+import {
+  findLatestCodexSession,
+  findLatestCodexSessionId,
+  findLatestClaudeSession,
+  findLatestGeminiSession,
+} from "../../../utils/session.js";
+import type { ToolSessionEntry } from "../../../config/index.js";
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
 const COMPLETION_HOLD_DURATION_MS = 3000;
@@ -71,11 +85,19 @@ export interface SelectionResult {
   skipPermissions: boolean;
   model?: string | null;
   inferenceLevel?: InferenceLevel;
+  sessionId?: string | null;
 }
 
 export interface AppProps {
   onExit: (result?: SelectionResult) => void;
   loadingIndicatorDelay?: number;
+}
+
+export interface SessionOption {
+  sessionId: string;
+  toolLabel: string;
+  branch: string;
+  timestamp: number;
 }
 
 /**
@@ -96,6 +118,30 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
 
   // Version state
   const [version, setVersion] = useState<string | null>(null);
+  const [repoRoot, setRepoRoot] = useState<string | null>(null);
+  const [sessionOptions, setSessionOptions] = useState<SessionOption[]>([]);
+  const [sessionLoading, setSessionLoading] = useState(false);
+  const [sessionError, setSessionError] = useState<string | null>(null);
+  const [pendingExecution, setPendingExecution] = useState<{
+    mode: ExecutionMode;
+    skipPermissions: boolean;
+  } | null>(null);
+  const [continueSessionId, setContinueSessionId] = useState<string | null>(
+    null,
+  );
+  const [branchQuickStart, setBranchQuickStart] = useState<
+    {
+      toolId: AITool;
+      toolLabel: string;
+      model?: string | null;
+      sessionId?: string | null;
+      inferenceLevel?: InferenceLevel | null;
+      skipPermissions?: boolean | null;
+      timestamp?: number | null;
+    }[]
+  >([]);
+  const [branchQuickStartLoading, setBranchQuickStartLoading] =
+    useState(false);
 
   // Selection state (for branch → tool → mode flow)
   const [selectedBranch, setSelectedBranch] =
@@ -135,6 +181,13 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     getPackageVersion()
       .then(setVersion)
       .catch(() => setVersion(null));
+  }, []);
+
+  // Fetch repository root once for session lookups
+  useEffect(() => {
+    getRepositoryRoot()
+      .then(setRepoRoot)
+      .catch(() => setRepoRoot(null));
   }, []);
 
   useEffect(() => {
@@ -199,6 +252,225 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     }
   }, [branches, hiddenBranches]);
 
+  // Load available sessions when entering session selector
+  useEffect(() => {
+    if (currentScreen !== "session-selector") {
+      return;
+    }
+    if (!selectedTool || !selectedBranch) {
+      setSessionOptions([]);
+      return;
+    }
+
+    setSessionLoading(true);
+    setSessionError(null);
+
+    (async () => {
+      try {
+        const root = repoRoot ?? (await getRepositoryRoot());
+        if (!repoRoot && root) {
+          setRepoRoot(root);
+        }
+        const sessionData = root ? await loadSession(root) : null;
+        const history = sessionData?.history ?? [];
+
+        const filtered = history
+          .filter(
+            (entry) =>
+              entry.sessionId &&
+              entry.toolId === selectedTool &&
+              entry.branch === selectedBranch.name,
+          )
+          .sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0))
+          .map((entry) => ({
+            sessionId: entry.sessionId as string,
+            toolLabel: entry.toolLabel,
+            branch: entry.branch,
+            timestamp: entry.timestamp,
+          }));
+
+        setSessionOptions(filtered);
+      } catch (_err) {
+        setSessionOptions([]);
+        setSessionError("セッション一覧の取得に失敗しました");
+      } finally {
+        setSessionLoading(false);
+      }
+    })();
+  }, [currentScreen, selectedTool, selectedBranch, repoRoot]);
+
+  // Load quick start options for selected branch (latest per tool)
+  useEffect(() => {
+    if (!selectedBranch) {
+      setBranchQuickStart([]);
+      return;
+    }
+    let cancelled = false;
+    setBranchQuickStartLoading(true);
+    (async () => {
+      try {
+        const root = repoRoot ?? (await getRepositoryRoot());
+        if (!repoRoot && root) {
+          setRepoRoot(root);
+        }
+        if (!root) {
+          if (!cancelled) setBranchQuickStart([]);
+          return;
+        }
+        const sessionData = await loadSession(root);
+        const history = sessionData?.history ?? [];
+
+        const combinedHistory = [...history];
+        if (
+          sessionData?.lastSessionId &&
+          sessionData.lastBranch === selectedBranch.name &&
+          sessionData.lastUsedTool
+        ) {
+          const synthetic: ToolSessionEntry = {
+            branch: sessionData.lastBranch,
+            worktreePath: sessionData.lastWorktreePath ?? null,
+            toolId: sessionData.lastUsedTool,
+            toolLabel: sessionData.toolLabel ?? sessionData.lastUsedTool,
+            sessionId: sessionData.lastSessionId,
+            mode: sessionData.mode ?? null,
+            model: sessionData.model ?? null,
+            reasoningLevel: sessionData.reasoningLevel ?? null,
+            skipPermissions: sessionData.skipPermissions ?? null,
+            timestamp: sessionData.timestamp ?? Date.now(),
+          };
+          combinedHistory.push(synthetic);
+        }
+        const latestPerTool = findLatestBranchSessionsByTool(
+          combinedHistory,
+          selectedBranch.name,
+          selectedWorktreePath,
+        );
+
+        const mapped = await Promise.all(
+          latestPerTool.map(async (entry) => {
+            let sessionId = entry.sessionId ?? null;
+
+            // For Codex, prefer a newer filesystem session over stale history
+            if (entry.toolId === "codex-cli") {
+              try {
+                const latestCodex = await findLatestCodexSession();
+                const historyTs = entry.timestamp ?? 0;
+                if (
+                  latestCodex &&
+                  (!sessionId || latestCodex.mtime > historyTs)
+                ) {
+                  sessionId = latestCodex.id;
+                }
+                // Fallback when filesystem unavailable and history missing
+                if (!sessionId) {
+                  const latestId = await findLatestCodexSessionId();
+                  if (latestId) sessionId = latestId;
+                }
+              } catch {
+                // ignore lookup failure
+              }
+            }
+
+            // For Claude Code, prefer the newest session file in the worktree even if history is stale.
+            if (entry.toolId === "claude-code") {
+              try {
+                const worktree =
+                  selectedWorktreePath ??
+                  selectedBranch?.displayName ??
+                  workingDirectory;
+
+                // Always resolve freshest on-disk session for this worktree (no window restriction)
+                const latestAny = await findLatestClaudeSession(worktree);
+                sessionId = latestAny?.id ?? sessionId ?? null;
+
+              } catch {
+                // ignore lookup failure
+              }
+            }
+
+            // For Gemini, prefer newest session file (Gemini keeps per-project chats)
+            if (entry.toolId === "gemini-cli") {
+              try {
+                const gemSession = await findLatestGeminiSession(
+                  selectedWorktreePath ??
+                    selectedBranch?.displayName ??
+                    workingDirectory,
+                  {
+                    ...(entry.timestamp !== null && entry.timestamp !== undefined
+                      ? { since: entry.timestamp - 60_000, preferClosestTo: entry.timestamp }
+                      : {}),
+                    windowMs: 60 * 60 * 1000,
+                  },
+                );
+                if (gemSession?.id) sessionId = gemSession.id;
+              } catch {
+                // ignore
+              }
+            }
+
+            return {
+              toolId: entry.toolId as AITool,
+              toolLabel: entry.toolLabel,
+              model: entry.model ?? null,
+              inferenceLevel: (entry.reasoningLevel ??
+                sessionData?.reasoningLevel ??
+                null) as InferenceLevel | null,
+              sessionId,
+              skipPermissions:
+                entry.skipPermissions ?? sessionData?.skipPermissions ?? null,
+              timestamp: entry.timestamp ?? null,
+            };
+          }),
+        );
+
+        if (!cancelled) {
+          setBranchQuickStart(mapped);
+        }
+      } catch {
+        if (!cancelled) setBranchQuickStart([]);
+      } finally {
+        if (!cancelled) setBranchQuickStartLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedBranch, repoRoot]);
+
+  // Load last session ID for "Continue" label when entering execution mode selector
+  useEffect(() => {
+    if (currentScreen !== "execution-mode-selector") {
+      return;
+    }
+    if (!selectedTool || !selectedBranch) {
+      setContinueSessionId(null);
+      return;
+    }
+    (async () => {
+      try {
+        const root = repoRoot ?? (await getRepositoryRoot());
+        if (!repoRoot && root) {
+          setRepoRoot(root);
+        }
+        const sessionData = root ? await loadSession(root) : null;
+        const history = sessionData?.history ?? [];
+
+        const found = await resolveContinueSessionId({
+          history,
+          sessionData,
+          branch: selectedBranch.name,
+          toolId: selectedTool,
+          repoRoot: root,
+        });
+
+        setContinueSessionId(found ?? null);
+      } catch {
+        setContinueSessionId(null);
+      }
+    })();
+  }, [currentScreen, selectedTool, selectedBranch, repoRoot]);
+
   // Update preferred tool when branch or data changes
   useEffect(() => {
     if (!selectedBranch) return;
@@ -226,6 +498,12 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     () => branches.filter((branch) => !hiddenBranches.includes(branch.name)),
     [branches, hiddenBranches],
   );
+
+  const selectedWorktreePath = useMemo(() => {
+    if (!selectedBranch) return null;
+    const wt = worktrees.find((w) => w.branch === selectedBranch.name);
+    return wt?.path ?? null;
+  }, [selectedBranch, worktrees]);
 
   // Helper function to create content-based hash for branches
   const branchHash = useMemo(
@@ -445,7 +723,11 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         color: "green",
       });
       refresh();
-      navigateTo("ai-tool-selector");
+      const nextScreen =
+        branchQuickStart.length || branchQuickStartLoading
+          ? "branch-quick-start"
+          : "ai-tool-selector";
+      navigateTo(nextScreen);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setCleanupFooterMessage({
@@ -454,18 +736,30 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       });
       console.error("Failed to switch protected branch:", error);
     }
-  }, [navigateTo, refresh, selectedBranch, setCleanupFooterMessage]);
+  }, [
+    branchQuickStart,
+    branchQuickStartLoading,
+    navigateTo,
+    refresh,
+    selectedBranch,
+    setCleanupFooterMessage,
+  ]);
 
   const handleUseExistingBranch = useCallback(() => {
     if (selectedBranch && isProtectedSelection(selectedBranch)) {
       void handleProtectedBranchSwitch();
       return;
     }
-    navigateTo("ai-tool-selector");
+    if (branchQuickStart.length) {
+      navigateTo("branch-quick-start");
+    } else {
+      navigateTo("ai-tool-selector");
+    }
   }, [
     handleProtectedBranchSwitch,
     isProtectedSelection,
     navigateTo,
+    branchQuickStart.length,
     selectedBranch,
   ]);
 
@@ -742,20 +1036,12 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     [navigateTo, selectedTool],
   );
 
-  // Handle session selection
-  const handleSessionSelect = useCallback(
-    (_session: string) => {
-      // TODO: Load selected session and navigate to next screen
-      // For now, just go back to branch list
-      goBack();
-    },
-    [goBack],
-  );
-
-  // Handle execution mode and skipPermissions selection
-  const handleModeSelect = useCallback(
-    (result: { mode: ExecutionMode; skipPermissions: boolean }) => {
-      // All selections complete - exit with result
+  const completeSelection = useCallback(
+    (
+      executionMode: ExecutionMode,
+      skip: boolean,
+      sessionId?: string | null,
+    ) => {
       if (selectedBranch && selectedTool) {
         const defaultModel = getDefaultModelOption(selectedTool);
         const resolvedModel = selectedModel?.model ?? defaultModel?.id ?? null;
@@ -763,22 +1049,21 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
           selectedModel?.inferenceLevel ??
           getDefaultInferenceForModel(defaultModel ?? undefined);
 
-        const modelForPayload = resolvedModel;
-
         const payload: SelectionResult = {
           branch: selectedBranch.name,
           displayName: selectedBranch.displayName,
           branchType: selectedBranch.branchType,
           tool: selectedTool,
-          mode: result.mode,
-          skipPermissions: result.skipPermissions,
-          ...(modelForPayload !== undefined ? { model: modelForPayload } : {}),
+          mode: executionMode,
+          skipPermissions: skip,
+          ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
           ...(resolvedInference !== undefined
             ? { inferenceLevel: resolvedInference }
             : {}),
           ...(selectedBranch.remoteBranch
             ? { remoteBranch: selectedBranch.remoteBranch }
             : {}),
+          ...(sessionId ? { sessionId } : {}),
         };
 
         onExit(payload);
@@ -794,6 +1079,79 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       getDefaultModelOption,
       getDefaultInferenceForModel,
     ],
+  );
+
+  // Handle session selection
+  const handleSessionSelect = useCallback(
+    (session: string) => {
+      const execution = pendingExecution ?? {
+        mode: "resume" as ExecutionMode,
+        skipPermissions: false,
+      };
+      completeSelection(execution.mode, execution.skipPermissions, session);
+    },
+    [pendingExecution, completeSelection],
+  );
+
+  const handleQuickStartSelect = useCallback(
+    (action: QuickStartAction, toolId?: AITool | null) => {
+      if (action === "manual" || !branchQuickStart.length) {
+        navigateTo("ai-tool-selector");
+        return;
+      }
+
+      const selected =
+        branchQuickStart.find((opt) => opt.toolId === toolId) ??
+        branchQuickStart[0];
+      if (!selected) {
+        navigateTo("ai-tool-selector");
+        return;
+      }
+
+      setSelectedTool(selected.toolId);
+      setPreferredToolId(selected.toolId);
+      setSelectedModel(
+        selected.model
+          ? ({
+              model: selected.model,
+              inferenceLevel: selected.inferenceLevel ?? undefined,
+            } as ModelSelectionResult)
+          : null,
+      );
+
+      const skip = selected.skipPermissions ?? false;
+
+      if (action === "reuse-continue") {
+        const hasSession = Boolean(selected.sessionId);
+        const mode: ExecutionMode = hasSession ? "resume" : "continue";
+        completeSelection(mode, skip, selected.sessionId ?? null);
+        return;
+      }
+
+      // "Start new with previous settings" skips the execution mode screen and launches immediately
+      completeSelection("normal", skip, null);
+    },
+    [
+      branchQuickStart,
+      navigateTo,
+      setPreferredToolId,
+      setSelectedModel,
+      setSelectedTool,
+      completeSelection,
+    ],
+  );
+
+  // Handle execution mode and skipPermissions selection
+  const handleModeSelect = useCallback(
+    (result: { mode: ExecutionMode; skipPermissions: boolean }) => {
+      if (result.mode === "resume") {
+        setPendingExecution(result);
+        navigateTo("session-selector");
+        return;
+      }
+      completeSelection(result.mode, result.skipPermissions, null);
+    },
+    [completeSelection, navigateTo],
   );
 
   // Render screen based on currentScreen
@@ -857,6 +1215,25 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         return <BranchActionSelectorScreen {...baseProps} />;
       }
 
+      case "branch-quick-start":
+        return (
+          <BranchQuickStartScreen
+            branchName={selectedBranch?.displayName ?? ""}
+            previousOptions={branchQuickStart.map((opt) => ({
+              toolId: opt.toolId,
+              toolLabel: opt.toolLabel,
+              model: opt.model ?? null,
+              inferenceLevel: opt.inferenceLevel ?? null,
+              skipPermissions: opt.skipPermissions ?? null,
+              sessionId: opt.sessionId ?? null,
+            }))}
+            loading={branchQuickStartLoading}
+            onBack={goBack}
+            onSelect={handleQuickStartSelect}
+            version={version}
+          />
+        );
+
       case "ai-tool-selector":
         return (
           <AIToolSelectorScreen
@@ -886,7 +1263,9 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         // TODO: Implement session data fetching
         return (
           <SessionSelectorScreen
-            sessions={[]}
+            sessions={sessionOptions}
+            loading={sessionLoading}
+            errorMessage={sessionError}
             onBack={goBack}
             onSelect={handleSessionSelect}
             version={version}
@@ -899,6 +1278,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
             onBack={goBack}
             onSelect={handleModeSelect}
             version={version}
+            continueSessionId={continueSessionId}
           />
         );
 

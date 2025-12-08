@@ -14,6 +14,9 @@ export interface SessionData {
   lastWorktreePath: string | null;
   lastBranch: string | null;
   lastUsedTool?: string;
+  lastSessionId?: string | null;
+  reasoningLevel?: string | null;
+  skipPermissions?: boolean | null;
   timestamp: number;
   repositoryRoot: string;
   mode?: "normal" | "continue" | "resume";
@@ -27,8 +30,11 @@ export interface ToolSessionEntry {
   worktreePath: string | null;
   toolId: string;
   toolLabel: string;
+  sessionId?: string | null;
   mode?: "normal" | "continue" | "resume" | null;
   model?: string | null;
+  reasoningLevel?: string | null;
+  skipPermissions?: boolean | null;
   timestamp: number;
 }
 
@@ -110,7 +116,10 @@ function getSessionFilePath(repositoryRoot: string): string {
   return path.join(sessionDir, `${repoName}_${repoHash}.json`);
 }
 
-export async function saveSession(sessionData: SessionData): Promise<void> {
+export async function saveSession(
+  sessionData: SessionData,
+  options: { skipHistory?: boolean } = {},
+): Promise<void> {
   try {
     const sessionPath = getSessionFilePath(sessionData.repositoryRoot);
     const sessionDir = path.dirname(sessionPath);
@@ -131,15 +140,22 @@ export async function saveSession(sessionData: SessionData): Promise<void> {
     }
 
     // 新しい履歴エントリを追加（branch/worktree/toolが揃っている場合のみ）
-    if (sessionData.lastBranch && sessionData.lastWorktreePath) {
+    if (
+      !options.skipHistory &&
+      sessionData.lastBranch &&
+      sessionData.lastWorktreePath
+    ) {
       const entry: ToolSessionEntry = {
         branch: sessionData.lastBranch,
         worktreePath: sessionData.lastWorktreePath,
         toolId: sessionData.lastUsedTool ?? "unknown",
         toolLabel:
           sessionData.toolLabel ?? sessionData.lastUsedTool ?? "Custom",
+        sessionId: sessionData.lastSessionId ?? null,
         mode: sessionData.mode ?? null,
         model: sessionData.model ?? null,
+        reasoningLevel: sessionData.reasoningLevel ?? null,
+        skipPermissions: sessionData.skipPermissions ?? false,
         timestamp: sessionData.timestamp,
       };
       existingHistory = [...existingHistory, entry].slice(-100); // keep latest 100
@@ -148,6 +164,9 @@ export async function saveSession(sessionData: SessionData): Promise<void> {
     const payload: SessionData = {
       ...sessionData,
       history: existingHistory,
+      lastSessionId: sessionData.lastSessionId ?? null,
+      reasoningLevel: sessionData.reasoningLevel ?? null,
+      skipPermissions: sessionData.skipPermissions ?? false,
     };
 
     await writeFile(sessionPath, JSON.stringify(payload, null, 2), "utf-8");
@@ -264,6 +283,7 @@ export async function getLastToolUsageMap(
         toolLabel: parsed.toolLabel ?? parsed.lastUsedTool ?? "Custom",
         mode: parsed.mode ?? null,
         model: parsed.model ?? null,
+        reasoningLevel: parsed.reasoningLevel ?? null,
         timestamp: parsed.timestamp ?? Date.now(),
       });
     }
