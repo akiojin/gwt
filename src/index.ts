@@ -280,13 +280,7 @@ async function mainInkUI(): Promise<SelectionResult | undefined> {
 
   let selectionResult: SelectionResult | undefined;
 
-  // Reset stdin state before Ink.js render to prevent hangs after AI tool exit
-  // This is necessary because child processes (especially Codex) may leave stdin
-  // in an inconsistent state after Ctrl+C termination
-  terminal.stdin.removeAllListeners?.();
-  if (process.stdin.isRaw) {
-    process.stdin.setRawMode(false);
-  }
+  // Resume stdin to ensure it's ready for Ink.js
   if (typeof terminal.stdin.resume === "function") {
     terminal.stdin.resume();
   }
