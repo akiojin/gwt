@@ -81,7 +81,7 @@ describe("launchGeminiCLI", () => {
       );
 
       // Second call should be bunx with no default args
-      // Gemini uses stdout: "pipe" to capture session ID
+      // Gemini uses stdout: "pipe" to capture session ID, stderr: inherit for direct output
       expect(mockExeca).toHaveBeenNthCalledWith(
         2,
         "bunx",
@@ -90,7 +90,7 @@ describe("launchGeminiCLI", () => {
           cwd: "/test/path",
           stdin: "inherit",
           stdout: "pipe",
-          stderr: "pipe",
+          stderr: "inherit",
         }),
       );
 
@@ -127,7 +127,7 @@ describe("launchGeminiCLI", () => {
       );
 
       // Second call should use local gemini command (not bunx)
-      // Note: stdout/stderr are piped even for local command to capture session ID
+      // Note: stdout is piped to capture session ID, stderr is inherit
       expect(mockExeca).toHaveBeenNthCalledWith(
         2,
         "gemini",
@@ -135,7 +135,7 @@ describe("launchGeminiCLI", () => {
         expect.objectContaining({
           cwd: "/test/path",
           stdout: "pipe",
-          stderr: "pipe",
+          stderr: "inherit",
         }),
       );
 
@@ -439,7 +439,7 @@ describe("launchGeminiCLI", () => {
 
       await launchGeminiCLI("/test/path");
 
-      // Verify file descriptors are used for stdin, but stdout/stderr are piped for session ID capture
+      // Verify file descriptors are used for stdin, but stdout is piped for session ID capture
       expect(mockExeca).toHaveBeenNthCalledWith(
         2,
         "bunx",
@@ -447,7 +447,7 @@ describe("launchGeminiCLI", () => {
         expect.objectContaining({
           stdin: 101,
           stdout: "pipe",
-          stderr: "pipe",
+          stderr: 103,
         }),
       );
 
