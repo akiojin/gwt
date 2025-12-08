@@ -183,6 +183,12 @@ export async function launchClaudeCode(
 
     terminal.exitRawMode();
 
+    // Resume stdin before launching child process
+    // (Ink.js may have left it paused after unmount)
+    if (typeof process.stdin.resume === "function") {
+      process.stdin.resume();
+    }
+
     const baseEnv = {
       ...process.env,
       ...(options.envOverrides ?? {}),
@@ -216,7 +222,6 @@ export async function launchClaudeCode(
         );
         const child = execa("claude", args, {
           cwd: worktreePath,
-          shell: true,
           stdin: childStdio.stdin,
           stdout: childStdio.stdout,
           stderr: childStdio.stderr,
@@ -251,7 +256,6 @@ export async function launchClaudeCode(
         await new Promise((resolve) => setTimeout(resolve, 2000));
         const child = execa("bunx", [CLAUDE_CLI_PACKAGE, ...args], {
           cwd: worktreePath,
-          shell: true,
           stdin: childStdio.stdin,
           stdout: childStdio.stdout,
           stderr: childStdio.stderr,

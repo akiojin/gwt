@@ -136,7 +136,6 @@ describe("launchClaudeCode - Root User Detection", () => {
         "bunx",
         expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
         expect.objectContaining({
-          shell: true,
           stdout: "inherit",
           stderr: "inherit",
           env: expect.objectContaining({
@@ -169,7 +168,6 @@ describe("launchClaudeCode - Root User Detection", () => {
         "bunx",
         expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
         expect.objectContaining({
-          shell: true,
           stdout: "inherit",
           stderr: "inherit",
           env: expect.objectContaining({
@@ -202,7 +200,6 @@ describe("launchClaudeCode - Root User Detection", () => {
         "bunx",
         expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
         expect.objectContaining({
-          shell: true,
           stdout: "inherit",
           stderr: "inherit",
           env: expect.objectContaining({
@@ -502,7 +499,6 @@ describe("launchClaudeCode - Root User Detection", () => {
         expect.any(Array),
         expect.objectContaining({
           cwd: "/test/path",
-          shell: true,
           stdout: "inherit",
           stderr: "inherit",
         }),
@@ -545,7 +541,6 @@ describe("launchClaudeCode - Root User Detection", () => {
         expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
         expect.objectContaining({
           cwd: "/test/path",
-          shell: true,
           stdout: "inherit",
           stderr: "inherit",
         }),
@@ -589,7 +584,6 @@ describe("launchClaudeCode - Root User Detection", () => {
         ]),
         expect.objectContaining({
           cwd: "/test/path",
-          shell: true,
           stdout: "inherit",
           stderr: "inherit",
           env: expect.objectContaining({
@@ -632,7 +626,6 @@ describe("launchClaudeCode - Root User Detection", () => {
           "--debug", // extra args
         ]),
         expect.objectContaining({
-          shell: true,
           stdout: "inherit",
           stderr: "inherit",
         }),
