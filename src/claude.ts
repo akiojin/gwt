@@ -2,11 +2,7 @@ import { execa } from "execa";
 import chalk from "chalk";
 import { existsSync } from "fs";
 import { createChildStdio, getTerminalStreams } from "./utils/terminal.js";
-import {
-  findLatestClaudeSession,
-  waitForClaudeSessionId,
-  claudeSessionFileExists,
-} from "./utils/session.js";
+import { findLatestClaudeSession } from "./utils/session.js";
 
 const CLAUDE_CLI_PACKAGE = "@anthropic-ai/claude-code@latest";
 export class ClaudeError extends Error {
@@ -55,12 +51,6 @@ export async function launchClaudeCode(
       options.sessionId && options.sessionId.trim().length > 0
         ? options.sessionId.trim()
         : null;
-
-    const sessionProbe = waitForClaudeSessionId(worktreePath, {
-      since: startedAt,
-      preferClosestTo: startedAt,
-      windowMs: 10 * 60 * 1000,
-    }).catch(() => null);
 
     // Handle execution mode
     switch (options.mode) {
@@ -202,7 +192,7 @@ export async function launchClaudeCode(
         console.log(
           chalk.green("   ✨ Using locally installed claude command"),
         );
-        const child = execa("claude", args, {
+        await execa("claude", args, {
           cwd: worktreePath,
           shell: true,
           stdin: childStdio.stdin,
@@ -210,7 +200,6 @@ export async function launchClaudeCode(
           stderr: childStdio.stderr,
           env: launchEnv,
         } as any);
-        await child;
       } else {
         console.log(
           chalk.cyan(
@@ -237,7 +226,7 @@ export async function launchClaudeCode(
         );
         console.log("");
         await new Promise((resolve) => setTimeout(resolve, 2000));
-        const child = execa("bunx", [CLAUDE_CLI_PACKAGE, ...args], {
+        await execa("bunx", [CLAUDE_CLI_PACKAGE, ...args], {
           cwd: worktreePath,
           shell: true,
           stdin: childStdio.stdin,
@@ -245,28 +234,24 @@ export async function launchClaudeCode(
           stderr: childStdio.stderr,
           env: launchEnv,
         } as any);
-        await child;
       }
     } finally {
       childStdio.cleanup();
     }
 
     // File-based session detection only - no stdout capture
+    // Use only findLatestClaudeSession with short timeout, skip sessionProbe to avoid hanging
     let capturedSessionId: string | null = null;
     const finishedAt = Date.now();
     try {
-      const [polled, latest] = await Promise.all([
-        sessionProbe,
-        findLatestClaudeSession(worktreePath, {
-          since: startedAt,
-          until: finishedAt + 30_000,
-          preferClosestTo: finishedAt,
-          windowMs: 10 * 60 * 1000,
-        }),
-      ]);
-
-      // Priority: latest on disk > polled > resumeSessionId
-      capturedSessionId = latest?.id ?? polled ?? resumeSessionId ?? null;
+      const latest = await findLatestClaudeSession(worktreePath, {
+        since: startedAt,
+        until: finishedAt + 30_000,
+        preferClosestTo: finishedAt,
+        windowMs: 10 * 60 * 1000,
+      });
+      // Priority: latest on disk > resumeSessionId
+      capturedSessionId = latest?.id ?? resumeSessionId ?? null;
     } catch {
       capturedSessionId = resumeSessionId ?? null;
     }
@@ -342,7 +327,12 @@ export async function launchClaudeCode(
 async function isClaudeCommandAvailable(): Promise<boolean> {
   try {
     const command = process.platform === "win32" ? "where" : "which";
-    await execa(command, ["claude"], { shell: true });
+    await execa(command, ["claude"], {
+      shell: true,
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    });
     return true;
   } catch {
     // claude command not found in PATH

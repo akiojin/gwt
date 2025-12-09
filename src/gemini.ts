@@ -28,18 +28,6 @@ export async function launchGeminiCLI(
   } = {},
 ): Promise<{ sessionId?: string | null }> {
   const terminal = getTerminalStreams();
-  const sessionCapture: { value: string | null } = { value: null };
-
-  const captureSessionId = (chunk: Buffer | string) => {
-    const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
-    const match = text.match(
-      /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i,
-    );
-    const id = match?.[1];
-    if (id && !sessionCapture.value) {
-      sessionCapture.value = id;
-    }
-  };
 
   try {
     // Check if the worktree path exists
@@ -145,38 +133,60 @@ export async function launchGeminiCLI(
     // Auto-detect locally installed gemini command
     const hasLocalGemini = await isGeminiCommandAvailable();
 
-    const runGemini = async (runArgs: string[]) => {
-      const execChild = async (child: any) => {
-        child.stdout?.on("data", (d: Buffer) => {
-          captureSessionId(d);
-          terminal.stdout.write(d);
-        });
-        child.stderr?.on("data", (d: Buffer) => {
-          captureSessionId(d);
-          terminal.stderr.write(d);
-        });
-        try {
-          await child;
-        } catch (execError: any) {
-          // Treat SIGINT/SIGTERM as normal exit (user pressed Ctrl+C)
-          if (execError.signal === "SIGINT" || execError.signal === "SIGTERM") {
-            return;
-          }
-          throw execError;
-        }
-      };
+    // Capture session ID from Gemini's exit summary
+    let capturedSessionId: string | null = null;
+    const extractSessionId = (output: string | undefined) => {
+      if (!output) return;
+      // Gemini outputs "Session ID: <uuid>" in exit summary
+      // UUID may be split across lines due to terminal width
+      // First, find "Session ID:" and extract following hex characters
+      const sessionIdIndex = output.indexOf("Session ID:");
+      if (sessionIdIndex === -1) return;
 
-      if (hasLocalGemini) {
-        const child = execa("gemini", runArgs, {
+      // Extract text after "Session ID:" until we have enough hex chars for UUID
+      const afterLabel = output.slice(sessionIdIndex + "Session ID:".length);
+      // Remove all non-hex characters except dash, then extract UUID pattern
+      const hexOnly = afterLabel.replace(/[^0-9a-fA-F-]/g, "");
+      // UUID format: 8-4-4-4-12 = 32 hex chars + 4 dashes
+      const uuidMatch = hexOnly.match(
+        /^([0-9a-f]{8})-?([0-9a-f]{4})-?([0-9a-f]{4})-?([0-9a-f]{4})-?([0-9a-f]{12})/i,
+      );
+      if (uuidMatch) {
+        capturedSessionId = `${uuidMatch[1]}-${uuidMatch[2]}-${uuidMatch[3]}-${uuidMatch[4]}-${uuidMatch[5]}`;
+      }
+    };
+
+    const runGemini = async (runArgs: string[]): Promise<string | undefined> => {
+      // Capture stdout while passing through to terminal
+      // Store chunks to extract session ID after process exits
+      const outputChunks: string[] = [];
+
+      const runWithCapture = async (cmd: string, args: string[]) => {
+        const child = execa(cmd, args, {
           cwd: worktreePath,
           shell: true,
           stdin: childStdio.stdin,
           stdout: "pipe",
-          stderr: "pipe",
+          stderr: childStdio.stderr,
           env: baseEnv,
         } as any);
-        await execChild(child);
-        return;
+
+        // Pass stdout through to terminal while capturing
+        child.stdout?.on("data", (chunk: Buffer) => {
+          const text = chunk.toString("utf8");
+          outputChunks.push(text);
+          terminal.stdout.write(chunk);
+        });
+
+        await child;
+        return outputChunks.join("");
+      };
+
+      if (hasLocalGemini) {
+        console.log(
+          chalk.green("   ✨ Using locally installed gemini command"),
+        );
+        return await runWithCapture("gemini", runArgs);
       }
       console.log(
         chalk.cyan("   🔄 Falling back to bunx @google/gemini-cli@latest"),
@@ -189,21 +199,14 @@ export async function launchGeminiCLI(
       console.log(chalk.yellow("      npm install -g @google/gemini-cli"));
       console.log("");
       await new Promise((resolve) => setTimeout(resolve, 2000));
-      const child = execa("bunx", [GEMINI_CLI_PACKAGE, ...runArgs], {
-        cwd: worktreePath,
-        shell: true,
-        stdin: childStdio.stdin,
-        stdout: "pipe",
-        stderr: "pipe",
-        env: baseEnv,
-      } as any);
-      await execChild(child);
+      return await runWithCapture("bunx", [GEMINI_CLI_PACKAGE, ...runArgs]);
     };
 
+    let output: string | undefined;
     try {
       // Try with explicit session ID first (if any), then fallback to --resume (latest) once
       try {
-        await runGemini(argsPrimary);
+        output = await runGemini(argsPrimary);
       } catch (err) {
         const shouldRetry =
           (options.mode === "resume" || options.mode === "continue") &&
@@ -214,7 +217,7 @@ export async function launchGeminiCLI(
               `   ⚠️  Failed to resume session ${resumeSessionId}. Retrying with latest session...`,
             ),
           );
-          await runGemini(argsFallback);
+          output = await runGemini(argsFallback);
         } else {
           throw err;
         }
@@ -223,18 +226,21 @@ export async function launchGeminiCLI(
       childStdio.cleanup();
     }
 
-    let capturedSessionId: string | null = sessionCapture.value ?? null;
-    try {
-      if (!capturedSessionId) {
+    // Extract session ID from Gemini's exit summary output
+    extractSessionId(output);
+
+    // Fallback to file-based detection if stdout capture failed
+    if (!capturedSessionId) {
+      try {
         capturedSessionId =
           (await findLatestGeminiSessionId(worktreePath, {
             cwd: worktreePath,
           })) ??
           resumeSessionId ??
           null;
+      } catch {
+        capturedSessionId = resumeSessionId ?? null;
       }
-    } catch {
-      capturedSessionId = sessionCapture.value ?? resumeSessionId ?? null;
     }
 
     if (capturedSessionId) {
@@ -308,7 +314,12 @@ export async function launchGeminiCLI(
 async function isGeminiCommandAvailable(): Promise<boolean> {
   try {
     const command = process.platform === "win32" ? "where" : "which";
-    await execa(command, ["gemini"], { shell: true });
+    await execa(command, ["gemini"], {
+      shell: true,
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    });
     return true;
   } catch {
     // gemini command not found in PATH
