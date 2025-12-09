@@ -43,6 +43,14 @@
 * update default Claude Code model to Opus 4.5 ([1dd909e](https://github.com/akiojin/gwt/commit/1dd909ed87a55ce3bb796deb0431d0027571dae2))
 * update Opus model version to 4.5 ([307faeb](https://github.com/akiojin/gwt/commit/307faeb66ebac0ca89b01c07ee19d213797c4d5c))
 
+## [2.12.1](https://github.com/akiojin/gwt/compare/v2.12.0...v2.12.1) (2025-12-09)
+
+
+### Bug Fixes
+
+* ensure divergence prompt waits for input ([248e3eb](https://github.com/akiojin/gwt/commit/248e3ebd7483d18681e02771c411b170cbcd3e2e))
+* ensure divergence prompt waits for input ([efca1f5](https://github.com/akiojin/gwt/commit/efca1f5602a6f1264df8b28207c819d8aa4657fe))
+
 ## [2.12.0](https://github.com/akiojin/gwt/compare/v2.11.1...v2.12.0) (2025-12-08)
 
 
