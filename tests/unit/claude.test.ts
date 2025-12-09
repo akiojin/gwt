@@ -91,22 +91,17 @@ describe("launchClaudeCode - Root User Detection", () => {
     }
   });
 
-  it("captures sessionId from stdout and returns it", async () => {
+  it("captures sessionId from file-based detection and returns it", async () => {
     process.getuid = () => 1000;
 
-    (sessionUtils.waitForClaudeSessionId as any).mockResolvedValueOnce(
-      "123e4567-e89b-12d3-a456-426614174000",
-    );
+    // Mock findLatestClaudeSession to return session info
+    (sessionUtils.findLatestClaudeSession as any).mockResolvedValueOnce({
+      id: "123e4567-e89b-12d3-a456-426614174000",
+      cwd: "/test/path",
+    });
     (mockExeca as any)
       .mockRejectedValueOnce(new Error("Command not found"))
-      .mockReturnValueOnce(
-        createChildProcess((stdout) => {
-          stdout.emit(
-            "data",
-            "Session ID: 123e4567-e89b-12d3-a456-426614174000",
-          );
-        }) as any,
-      );
+      .mockReturnValueOnce(createChildProcess() as any);
 
     const result = await launchClaudeCode("/test/path", {});
     expect(result.sessionId).toBe("123e4567-e89b-12d3-a456-426614174000");
@@ -136,7 +131,6 @@ describe("launchClaudeCode - Root User Detection", () => {
         "bunx",
         expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
         expect.objectContaining({
-          shell: true,
           stdout: "inherit",
           stderr: "inherit",
           env: expect.objectContaining({
@@ -169,7 +163,6 @@ describe("launchClaudeCode - Root User Detection", () => {
         "bunx",
         expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
         expect.objectContaining({
-          shell: true,
           stdout: "inherit",
           stderr: "inherit",
           env: expect.objectContaining({
@@ -202,7 +195,6 @@ describe("launchClaudeCode - Root User Detection", () => {
         "bunx",
         expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
         expect.objectContaining({
-          shell: true,
           stdout: "inherit",
           stderr: "inherit",
           env: expect.objectContaining({
@@ -502,7 +494,6 @@ describe("launchClaudeCode - Root User Detection", () => {
         expect.any(Array),
         expect.objectContaining({
           cwd: "/test/path",
-          shell: true,
           stdout: "inherit",
           stderr: "inherit",
         }),
@@ -545,7 +536,6 @@ describe("launchClaudeCode - Root User Detection", () => {
         expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
         expect.objectContaining({
           cwd: "/test/path",
-          shell: true,
           stdout: "inherit",
           stderr: "inherit",
         }),
@@ -589,7 +579,6 @@ describe("launchClaudeCode - Root User Detection", () => {
         ]),
         expect.objectContaining({
           cwd: "/test/path",
-          shell: true,
           stdout: "inherit",
           stderr: "inherit",
           env: expect.objectContaining({
@@ -632,7 +621,6 @@ describe("launchClaudeCode - Root User Detection", () => {
           "--debug", // extra args
         ]),
         expect.objectContaining({
-          shell: true,
           stdout: "inherit",
           stderr: "inherit",
         }),
