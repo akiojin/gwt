@@ -13,19 +13,18 @@ bun install
 - 単体テスト（ロガー関連）: `bun test tests/logging/logger.test.ts tests/logging/rotation.test.ts`
 - 全テスト: `bun test`
 
-## 環境変数
-- `LOG_LEVEL` : ログレベル（既定 `info`）
-- `LOG_DIR`   : 出力ディレクトリ（既定 `./logs`）
-- `LOG_FILE`  : ファイル名（既定 `app.log`）
-
 ## カテゴリ運用
 - CLI: `category=cli`
 - Webサーバー: `category=server`
 - 追加コンポーネントは同一ファイル出力で `category` を付与
 
 ## ローテーション
-- 起動時に `LOG_DIR` 配下で7日より古いファイルを削除
+- 起動時に `~/.gwt/logs/<cwd名>/` 配下で7日より古いファイルを削除
 - 日次サイズ上限なし
+
+## 出力パス
+- 既定: `~/.gwt/logs/<カレントディレクトリ名>/<YYYY-MM-DD>.jsonl`
+- サブディレクトリは存在しなければ自動作成
 
 ## 画面出力との分離
 - ユーザー向けのメッセージは console 出力（「ログ」という語を使わない）
