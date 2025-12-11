@@ -81,7 +81,7 @@
 ### ドキュメント（この機能）
 
 ```text
-specs/SPEC-afd20ca6/ または specs/feature/support-qwen/
+specs/SPEC-afd20ca6/
 ├── spec.md              # 機能仕様（完了）
 ├── plan.md              # このファイル（/speckit.plan 出力）
 ├── research.md          # フェーズ0出力（次のステップ）
@@ -114,7 +114,7 @@ tests/unit/
 
 **目的**: 既存のコードベースパターンを理解し、Qwen CLI固有の実装詳細を確認する
 
-**出力**: `specs/feature/support-qwen/research.md`
+**出力**: `specs/SPEC-afd20ca6/research.md`
 
 ### 調査項目
 
@@ -187,7 +187,7 @@ tests/unit/
 **目的**: Qwen CLI統合の詳細設計を定義する
 
 **出力**:
-- `specs/feature/support-qwen/quickstart.md`（開発者ガイド）
+- `specs/SPEC-afd20ca6/quickstart.md`（開発者ガイド）
 - data-model.md: N/A（データモデルなし）
 - contracts/: N/A（外部API契約なし）
 
@@ -336,7 +336,7 @@ vi.mock("../../src/utils/terminal", () => ({
 
 **注**: このフェーズは `/speckit.tasks` コマンドで実行されます。`/speckit.plan` では `tasks.md` を作成しません。
 
-**Phase 2の出力**: `specs/feature/support-qwen/tasks.md`
+**Phase 2の出力**: `specs/SPEC-afd20ca6/tasks.md`
 
 ## 原則チェック（再評価）
 
