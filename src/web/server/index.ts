@@ -15,6 +15,7 @@ import { WebSocketHandler } from "./websocket/handler.js";
 import { registerRoutes } from "./routes/index.js";
 import { importOsEnvIntoSharedConfig } from "./env/importer.js";
 import { createLogger } from "../../logging/logger.js";
+import type { WebFastifyInstance } from "./types.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -25,8 +26,8 @@ const __dirname = dirname(__filename);
 export async function startWebServer(): Promise<void> {
   const serverLogger = createLogger({ category: "server" });
 
-  const fastify = Fastify({
-    logger: serverLogger,
+  const fastify: WebFastifyInstance = Fastify({
+    loggerInstance: serverLogger,
   });
 
   // PTYマネージャーとWebSocketハンドラーを初期化
