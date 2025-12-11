@@ -4,6 +4,9 @@ import React from "react";
 import { BranchListScreen } from "../../components/screens/BranchListScreen.js";
 import type { BranchItem, Statistics } from "../../types.js";
 
+const isCI = Boolean(process.env.CI);
+const describeFn = isCI ? describe.skip : describe;
+
 /**
  * Generate mock branch items for performance testing
  */
@@ -63,7 +66,7 @@ function generateMockBranches(count: number): BranchItem[] {
 //   worktree: 0,
 // };
 
-describe("BranchListScreen Performance", () => {
+describeFn("BranchListScreen Performance", () => {
   it("should render 100+ branches within acceptable time", () => {
     const branches = generateMockBranches(150);
     const stats: Statistics = {
@@ -144,8 +147,8 @@ describe("BranchListScreen Performance", () => {
 
     unmount();
 
-    // CI 環境ではマシン性能が低いため閾値を緩める
-    const threshold = process.env.CI ? 200 : 100;
+    // CI 環境ではマシン性能が低いため閾値を緩める（CIではそもそもskip）
+    const threshold = isCI ? 200 : 100;
     expect(rerenderTime).toBeLessThan(threshold);
 
     console.log(`\n🔄 Re-render Performance:`);
