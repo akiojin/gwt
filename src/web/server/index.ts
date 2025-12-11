@@ -14,6 +14,7 @@ import { PTYManager } from "./pty/manager.js";
 import { WebSocketHandler } from "./websocket/handler.js";
 import { registerRoutes } from "./routes/index.js";
 import { importOsEnvIntoSharedConfig } from "./env/importer.js";
+import { createLogger } from "../../logging/logger.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -22,10 +23,10 @@ const __dirname = dirname(__filename);
  * Webサーバーを起動
  */
 export async function startWebServer(): Promise<void> {
+  const serverLogger = createLogger({ category: "server" });
+
   const fastify = Fastify({
-    logger: {
-      level: process.env.LOG_LEVEL || "info",
-    },
+    logger: serverLogger,
   });
 
   // PTYマネージャーとWebSocketハンドラーを初期化
