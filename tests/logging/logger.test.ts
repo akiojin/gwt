@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
-import { createLogger } from "../../src/logging/logger.js";
+import { createLogger, formatDate } from "../../src/logging/logger.js";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -42,13 +42,6 @@ describe("createLogger", () => {
     logger.info("hello default");
     logger.flush?.();
 
-    const fileCheck = () => fs.existsSync(expectedFile);
-    let attempts = 0;
-    while (!fileCheck() && attempts < 20) {
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
-      attempts += 1;
-    }
-
     expect(fs.existsSync(expectedFile)).toBe(true);
 
     homeSpy.mockRestore();
@@ -70,17 +63,6 @@ describe("createLogger", () => {
     logger.flush?.(); // noop if not supported
 
     // pino transport is async; wait briefly
-    const fileCheck = () => {
-      if (!fs.existsSync(logfile)) return false;
-      const lines = fs.readFileSync(logfile, "utf-8").trim().split("\n").filter(Boolean);
-      return lines.length > 0;
-    };
-    let attempts = 0;
-    while (!fileCheck() && attempts < 20) {
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
-      attempts += 1;
-    }
-
     expect(fs.existsSync(logfile)).toBe(true);
     const record = readLastLine(logfile);
     expect(record).toHaveProperty("time");
@@ -102,27 +84,9 @@ describe("createLogger", () => {
     logger.info("should not appear");
     logger.error("should appear");
 
-    const fileCheck = () => {
-      if (!fs.existsSync(logfile)) return false;
-      const lines = fs.readFileSync(logfile, "utf-8").trim().split("\n").filter(Boolean);
-      return lines.length > 0;
-    };
-    let attempts = 0;
-    while (!fileCheck() && attempts < 20) {
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
-      attempts += 1;
-    }
-
     const lines = fs.readFileSync(logfile, "utf-8").trim().split("\n");
     const last = JSON.parse(lines[lines.length - 1]);
     expect(last.msg).toBe("should appear");
     process.env.LOG_LEVEL = "";
   });
 });
-
-function formatDate(date: Date): string {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
