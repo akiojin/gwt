@@ -1,8 +1,11 @@
-import { createLogger } from "../../src/logging/logger.js";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
+import { createLogger, formatDate } from "../../src/logging/logger.js";
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 
 const TMP_DIR = path.join(process.cwd(), ".tmp-log-test");
+const TMP_HOME = path.join(process.cwd(), ".tmp-log-home");
 
 function readLastLine(file: string): any {
   const content = fs.readFileSync(file, "utf-8").trim().split("\n");
@@ -21,6 +24,30 @@ describe("createLogger", () => {
     fs.rmSync(TMP_DIR, { recursive: true, force: true });
   });
 
+  it("writes to default path ~/.gwt/logs/<cwd>/<YYYY-MM-DD>.jsonl", () => {
+    fs.rmSync(TMP_HOME, { recursive: true, force: true });
+    fs.mkdirSync(TMP_HOME, { recursive: true });
+    const homeSpy = vi.spyOn(os, "homedir").mockReturnValue(TMP_HOME);
+
+    const today = formatDate(new Date());
+    const expectedDir = path.join(TMP_HOME, ".gwt", "logs", path.basename(process.cwd()));
+    const expectedFile = path.join(expectedDir, `${today}.jsonl`);
+
+    const logger = createLogger({
+      category: "cli",
+      level: "info",
+      sync: true,
+    });
+
+    logger.info("hello default");
+    logger.flush?.();
+
+    expect(fs.existsSync(expectedFile)).toBe(true);
+
+    homeSpy.mockRestore();
+    fs.rmSync(TMP_HOME, { recursive: true, force: true });
+  });
+
   it("writes JSON with required fields and category", () => {
     const logfile = path.join(TMP_DIR, "app.log");
     const logger = createLogger({
@@ -36,17 +63,6 @@ describe("createLogger", () => {
     logger.flush?.(); // noop if not supported
 
     // pino transport is async; wait briefly
-    const fileCheck = () => {
-      if (!fs.existsSync(logfile)) return false;
-      const lines = fs.readFileSync(logfile, "utf-8").trim().split("\n").filter(Boolean);
-      return lines.length > 0;
-    };
-    let attempts = 0;
-    while (!fileCheck() && attempts < 20) {
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
-      attempts += 1;
-    }
-
     expect(fs.existsSync(logfile)).toBe(true);
     const record = readLastLine(logfile);
     expect(record).toHaveProperty("time");
@@ -67,17 +83,6 @@ describe("createLogger", () => {
 
     logger.info("should not appear");
     logger.error("should appear");
-
-    const fileCheck = () => {
-      if (!fs.existsSync(logfile)) return false;
-      const lines = fs.readFileSync(logfile, "utf-8").trim().split("\n").filter(Boolean);
-      return lines.length > 0;
-    };
-    let attempts = 0;
-    while (!fileCheck() && attempts < 20) {
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
-      attempts += 1;
-    }
 
     const lines = fs.readFileSync(logfile, "utf-8").trim().split("\n");
     const last = JSON.parse(lines[lines.length - 1]);
