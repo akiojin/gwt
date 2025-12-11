@@ -125,8 +125,6 @@ export function BranchListScreen({
   onToggleSelect,
 }: BranchListScreenProps) {
   const { rows } = useTerminalSize();
-  const COLUMN_WIDTH = 2;
-  const SYNC_COLUMN_WIDTH = 6;
   const headerText =
     "  Legend: [ ]/[ * ] select  🟢/⚪ worktree  🛡/⚠ safe";
   const selectedSet = useMemo(() => new Set(selectedBranches), [selectedBranches]);

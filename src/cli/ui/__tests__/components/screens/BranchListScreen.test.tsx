@@ -8,7 +8,6 @@ import React from "react";
 import { BranchListScreen } from "../../../components/screens/BranchListScreen.js";
 import type { BranchInfo, BranchItem, Statistics } from "../../../types.js";
 import { formatBranchItem } from "../../../utils/branchFormatter.js";
-import stringWidth from "string-width";
 import { Window } from "happy-dom";
 
 const stripAnsi = (value: string): string =>
