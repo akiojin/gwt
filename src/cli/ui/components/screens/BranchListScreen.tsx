@@ -1,4 +1,4 @@
-import React, { useCallback, useState, useMemo } from "react";
+import React, { useCallback, useState, useMemo, useEffect } from "react";
 import { Box, Text, useInput } from "ink";
 import { Header } from "../parts/Header.js";
 import { Stats } from "../parts/Stats.js";
@@ -9,8 +9,11 @@ import { LoadingIndicator } from "../common/LoadingIndicator.js";
 import { useTerminalSize } from "../../hooks/useTerminalSize.js";
 import type { BranchItem, Statistics } from "../../types.js";
 import stringWidth from "string-width";
+import stripAnsi from "strip-ansi";
 import chalk from "chalk";
 
+// Emoji 幅は端末によって 1 または 2 になることがあるため、最小幅を上書きして
+// 実測より小さくならないようにする（過小評価＝折り返しの原因を防ぐ）
 const WIDTH_OVERRIDES: Record<string, number> = {
   // Remote icon
   "☁": 1,
@@ -22,19 +25,24 @@ const WIDTH_OVERRIDES: Record<string, number> = {
   "🚀": 1,
   "📌": 1,
   // Worktree status icons
-  "🟢": 1,
+  "🟢": 2,
+  "⚪": 2,
   "🟠": 1,
   // Change status icons
   "👉": 1,
   "💾": 1,
   "📤": 1,
   "🔃": 1,
-  "✅": 1,
-  "⚠️": 1,
+  "✅": 2,
+  "⚠": 2,
+  "⚠️": 2,
+  "🛡": 2,
   // Remote markers
-  "🔗": 1,
-  "💻": 1,
-  "☁️": 1,
+  "🔗": 2,
+  "💻": 2,
+  "☁️": 2,
+  "☑": 2,
+  "☐": 2,
 };
 
 const getCharWidth = (char: string): number => {
@@ -88,6 +96,8 @@ export interface BranchListScreenProps {
   testOnFilterModeChange?: (mode: boolean) => void;
   testFilterQuery?: string;
   testOnFilterQueryChange?: (query: string) => void;
+  selectedBranches?: string[];
+  onToggleSelect?: (branchName: string) => void;
 }
 
 /**
@@ -111,11 +121,15 @@ export function BranchListScreen({
   testOnFilterModeChange,
   testFilterQuery,
   testOnFilterQueryChange,
+  selectedBranches = [],
+  onToggleSelect,
 }: BranchListScreenProps) {
   const { rows } = useTerminalSize();
   const COLUMN_WIDTH = 2;
   const SYNC_COLUMN_WIDTH = 6;
-  const headerText = `  ${"Ty".padEnd(COLUMN_WIDTH)}${"Wt".padEnd(COLUMN_WIDTH)}${"St".padEnd(COLUMN_WIDTH)}${"Rm".padEnd(COLUMN_WIDTH)}${"Sync".padEnd(SYNC_COLUMN_WIDTH)}Branch`;
+  const headerText =
+    "  Legend: [ ]/[ * ] select  🟢/⚪ worktree  🛡/⚠ safe";
+  const selectedSet = useMemo(() => new Set(selectedBranches), [selectedBranches]);
 
   // Filter state - allow test control via props
   const [internalFilterQuery, setInternalFilterQuery] = useState("");
@@ -142,6 +156,9 @@ export function BranchListScreen({
     [testOnFilterModeChange],
   );
 
+  // Cursor position for Select (controlled to enable space toggle)
+  const [selectedIndex, setSelectedIndex] = useState(0);
+
   // Handle keyboard input
   // Note: Input component blocks specific keys (c/r/f) using blockKeys prop
   // This prevents shortcuts from triggering while typing in the filter
@@ -167,6 +184,15 @@ export function BranchListScreen({
     // Enter filter mode with 'f' key (only in branch selection mode)
     if (input === "f" && !filterMode) {
       setFilterMode(true);
+      return;
+    }
+
+    // Toggle selection with space (only in branch selection mode)
+    if (input === " " && !filterMode) {
+      const target = filteredBranches[selectedIndex];
+      if (target) {
+        onToggleSelect?.(target.name);
+      }
       return;
     }
 
@@ -204,6 +230,15 @@ export function BranchListScreen({
       return false;
     });
   }, [branches, filterQuery]);
+
+  useEffect(() => {
+    setSelectedIndex((prev) => {
+      if (filteredBranches.length === 0) {
+        return 0;
+      }
+      return Math.min(prev, filteredBranches.length - 1);
+    });
+  }, [filteredBranches.length]);
 
   // Calculate available space for branch list
   // Header: 2 lines (title + divider)
@@ -275,18 +310,67 @@ export function BranchListScreen({
     return result + ellipsis;
   }, []);
 
+  const colorToolLabel = useCallback((label: string, toolId?: string | null) => {
+    switch (toolId) {
+      case "claude-code":
+        return chalk.hex("#ffaf00")(label); // orange-ish
+      case "codex-cli":
+        return chalk.cyan(label);
+      case "gemini-cli":
+        return chalk.magenta(label);
+      case "qwen-cli":
+        return chalk.green(label);
+      default: {
+        const trimmed = label.trim().toLowerCase();
+        if (!toolId || trimmed === "unknown") {
+          return chalk.gray(label);
+        }
+        return chalk.white(label);
+      }
+    }
+  }, []);
+
   const renderBranchRow = useCallback(
     (item: BranchItem, isSelected: boolean, context: { columns: number }) => {
-      // Use a small safety margin to avoid terminal-dependent wrapping
+      // 端末幅ピッタリでの自動折返しを避けるため、1桁だけ余白を取る
       const columns = Math.max(20, context.columns - 1);
+      const visibleWidth = (value: string) =>
+        measureDisplayWidth(stripAnsi(value));
       const arrow = isSelected ? ">" : " ";
-      const commitText = formatLatestCommit(item.latestCommitTimestamp);
-      const infoText =
-        item.lastToolUsage && item.lastToolUsageLabel
-          ? item.lastToolUsageLabel
-          : `${chalk.gray("Unknown")}${commitText !== "---" ? ` | ${commitText}` : ""}`;
-      const timestampText = infoText;
-      const timestampWidth = stringWidth(timestampText);
+      let commitText = "---";
+      if (item.latestCommitTimestamp) {
+        commitText = formatLatestCommit(item.latestCommitTimestamp);
+      } else if (item.lastToolUsage?.timestamp) {
+        const seconds = Math.floor(item.lastToolUsage.timestamp / 1000);
+        commitText = formatLatestCommit(seconds);
+      }
+      const toolLabelRaw =
+        item.lastToolUsageLabel?.split("|")?.[0]?.trim() ??
+        item.lastToolUsage?.toolId ??
+        "Unknown";
+
+      const formatFixedWidth = (value: string, targetWidth: number) => {
+        let v = value;
+        if (measureDisplayWidth(v) > targetWidth) {
+          v = truncateToWidth(v, targetWidth);
+        }
+        const padding = Math.max(0, targetWidth - measureDisplayWidth(v));
+        return v + " ".repeat(padding);
+      };
+
+      const TOOL_WIDTH = 7;
+      const DATE_WIDTH = 16; // "YYYY-MM-DD HH:mm"
+      const paddedTool = formatFixedWidth(toolLabelRaw, TOOL_WIDTH);
+      const paddedDate =
+        commitText === "---"
+          ? " ".repeat(DATE_WIDTH)
+          : commitText.padStart(DATE_WIDTH, " ");
+      const timestampText = `${paddedTool} | ${paddedDate}`;
+      const displayTimestampText = `${colorToolLabel(
+        paddedTool,
+        item.lastToolUsage?.toolId,
+      )} | ${paddedDate}`;
+      const timestampWidth = measureDisplayWidth(timestampText);
 
       const indicatorInfo = cleanupUI?.indicators?.[item.name];
       let indicatorIcon = indicatorInfo?.icon ?? "";
@@ -309,30 +393,112 @@ export function BranchListScreen({
         }
       }
       const indicatorPrefix = indicatorIcon ? `${indicatorIcon} ` : "";
-      const staticPrefix = `${arrow} ${indicatorPrefix}`;
-      const staticPrefixWidth = measureDisplayWidth(staticPrefix);
+
+      const isChecked = selectedSet.has(item.name);
+      const selectionIcon = isChecked ? "[*]" : "[ ]";
+      const hasWorktree =
+        item.worktreeStatus === "active" ||
+        item.worktreeStatus === "inaccessible";
+      const worktreeIcon = hasWorktree ? chalk.green("🟢") : chalk.gray("⚪");
+      const safeIcon =
+        item.safeToCleanup === true ? chalk.green("🛡") : chalk.yellow("⚠");
+      const stateCluster = `${selectionIcon} ${worktreeIcon} ${safeIcon}`;
+
+      const staticPrefix = `${arrow} ${indicatorPrefix}${stateCluster} `;
+      const staticPrefixWidth = visibleWidth(staticPrefix);
       const maxLeftDisplayWidth = Math.max(0, columns - timestampWidth - 1);
       const maxLabelWidth = Math.max(
         0,
         maxLeftDisplayWidth - staticPrefixWidth,
       );
-      const truncatedLabel = truncateToWidth(item.label, maxLabelWidth);
-      const leftText = `${staticPrefix}${truncatedLabel}`;
+      const displayLabel =
+        item.type === "remote" && item.remoteName ? item.remoteName : item.name;
+      let truncatedLabel = truncateToWidth(displayLabel, maxLabelWidth);
+      let leftText = `${staticPrefix}${truncatedLabel}`;
 
-      const leftDisplayWidth = measureDisplayWidth(leftText);
-      const gapWidth = Math.max(1, columns - leftDisplayWidth - timestampWidth);
+      let leftDisplayWidth = visibleWidth(leftText);
+      // Gap between labelとツール/日時。右端に寄せるため必要分だけ確保。
+      let gapWidth = Math.max(1, columns - leftDisplayWidth - timestampWidth);
 
-      let line = `${leftText}${" ".repeat(gapWidth)}${timestampText}`;
-      const totalDisplayWidth = leftDisplayWidth + gapWidth + timestampWidth;
-      const paddingWidth = Math.max(0, columns - totalDisplayWidth);
-      if (paddingWidth > 0) {
-        line += " ".repeat(paddingWidth);
+      // もしまだオーバーする場合、隙間→ラベルの順で削って収める
+      let totalWidth = leftDisplayWidth + gapWidth + timestampWidth;
+      if (totalWidth > columns) {
+        const overflow = totalWidth - columns;
+        const reducedGap = Math.max(1, gapWidth - overflow);
+        gapWidth = reducedGap;
+        totalWidth = leftDisplayWidth + gapWidth + timestampWidth;
+      }
+      if (leftDisplayWidth + gapWidth + timestampWidth > columns) {
+        const extra = leftDisplayWidth + gapWidth + timestampWidth - columns;
+        const newLabelWidth = Math.max(
+          0,
+          measureDisplayWidth(truncatedLabel) - extra,
+        );
+        truncatedLabel = truncateToWidth(displayLabel, newLabelWidth);
+        leftText = `${staticPrefix}${truncatedLabel}`;
+        leftDisplayWidth = visibleWidth(leftText);
+        gapWidth = Math.max(1, columns - leftDisplayWidth - timestampWidth);
       }
 
-      const output = isSelected ? `\u001b[46m\u001b[30m${line}\u001b[0m` : line;
+      const buildLine = () =>
+        `${leftText}${" ".repeat(gapWidth)}${timestampText}`;
+
+      let line = buildLine();
+      // Replace timestamp with colorized tool name (keep alignment from width calc)
+      let lineWithColoredTimestamp = line.replace(
+        timestampText,
+        displayTimestampText,
+      );
+
+      // 端末幅を超えた場合は隙間→ラベルの順で詰めて収める
+      const clampToWidth = () => {
+        const finalWidth = measureDisplayWidth(stripAnsi(lineWithColoredTimestamp));
+        if (finalWidth <= columns) {
+          return;
+        }
+        const overflow = finalWidth - columns;
+        const reducedGap = Math.max(1, gapWidth - overflow);
+        gapWidth = reducedGap;
+        line = buildLine();
+        lineWithColoredTimestamp = line.replace(
+          timestampText,
+          displayTimestampText,
+        );
+        const widthAfterGap = measureDisplayWidth(
+          stripAnsi(lineWithColoredTimestamp),
+        );
+        if (widthAfterGap > columns) {
+          const extra = widthAfterGap - columns;
+          const newLabelWidth = Math.max(
+            0,
+            measureDisplayWidth(truncatedLabel) - extra,
+          );
+          truncatedLabel = truncateToWidth(displayLabel, newLabelWidth);
+          leftText = `${staticPrefix}${truncatedLabel}`;
+          leftDisplayWidth = visibleWidth(leftText);
+          gapWidth = Math.max(1, columns - leftDisplayWidth - timestampWidth);
+          line = buildLine();
+          lineWithColoredTimestamp = line.replace(
+            timestampText,
+            displayTimestampText,
+          );
+        }
+      };
+
+      clampToWidth();
+
+      const output = isSelected
+        ? `\u001b[46m\u001b[30m${lineWithColoredTimestamp}\u001b[0m`
+        : lineWithColoredTimestamp;
       return <Text>{output}</Text>;
     },
-    [cleanupUI, formatLatestCommit, truncateToWidth],
+    [
+      cleanupUI,
+      formatLatestCommit,
+      truncateToWidth,
+      selectedSet,
+      colorToolLabel,
+    ],
   );
 
   return (
@@ -425,6 +591,8 @@ export function BranchListScreen({
                 disabled={Boolean(cleanupUI?.inputLocked)}
                 renderIndicator={() => null}
                 renderItem={renderBranchRow}
+                selectedIndex={selectedIndex}
+                onSelectedIndexChange={setSelectedIndex}
               />
             </>
           )}

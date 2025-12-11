@@ -6,6 +6,7 @@ export interface WorktreeInfo {
   locked: boolean;
   prunable: boolean;
   isAccessible?: boolean;
+  hasUncommittedChanges?: boolean;
 }
 
 export type AITool = string;
@@ -229,6 +230,7 @@ export interface BranchItem extends BranchInfo {
   syncStatus?: SyncStatus;
   syncInfo?: string | undefined;
   remoteName?: string | undefined;
+  safeToCleanup?: boolean;
 }
 
 /**
