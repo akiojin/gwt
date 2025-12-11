@@ -22,7 +22,7 @@
     "start:web": "node ./dist/index.js serve",
     "prepare": "husky",
     "pretest": "bun run build:cli",
-    "test": "vitest run",
+    "test": "NODE_OPTIONS=--max-old-space-size=4096 vitest run --maxWorkers=4",
     "test:watch": "vitest",
     "test:ui": "vitest --ui",
     "test:coverage": "vitest run --coverage",
