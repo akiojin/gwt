@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import pino, { type LoggerOptions, type Logger } from "pino";
 import { pruneOldLogs } from "./rotation.js";
 
@@ -24,8 +25,10 @@ export interface LoggerConfig {
  */
 export function createLogger(config: LoggerConfig = {}): Logger {
   const level = config.level ?? process.env.LOG_LEVEL ?? "info";
-  const logDir = config.logDir ?? process.env.LOG_DIR ?? path.join(process.cwd(), "logs");
-  const filename = config.filename ?? process.env.LOG_FILE ?? "app.log";
+  const cwdBase = path.basename(process.cwd()) || "workspace";
+  const defaultLogDir = path.join(os.homedir(), ".gwt", "logs", cwdBase);
+  const logDir = config.logDir ?? defaultLogDir;
+  const filename = config.filename ?? `${formatDate(new Date())}.jsonl`;
   const category = config.category ?? "default";
   const keepDays = config.keepDays ?? 7;
 
@@ -67,3 +70,10 @@ export function createLogger(config: LoggerConfig = {}): Logger {
 
 /** Convenience logger for quick use (category defaults to "default"). */
 export const logger = createLogger();
+
+function formatDate(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}

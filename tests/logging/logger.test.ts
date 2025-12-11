@@ -1,8 +1,11 @@
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { createLogger } from "../../src/logging/logger.js";
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 
 const TMP_DIR = path.join(process.cwd(), ".tmp-log-test");
+const TMP_HOME = path.join(process.cwd(), ".tmp-log-home");
 
 function readLastLine(file: string): any {
   const content = fs.readFileSync(file, "utf-8").trim().split("\n");
@@ -19,6 +22,37 @@ describe("createLogger", () => {
 
   afterAll(() => {
     fs.rmSync(TMP_DIR, { recursive: true, force: true });
+  });
+
+  it("writes to default path ~/.gwt/logs/<cwd>/<YYYY-MM-DD>.jsonl", () => {
+    fs.rmSync(TMP_HOME, { recursive: true, force: true });
+    fs.mkdirSync(TMP_HOME, { recursive: true });
+    const homeSpy = vi.spyOn(os, "homedir").mockReturnValue(TMP_HOME);
+
+    const today = formatDate(new Date());
+    const expectedDir = path.join(TMP_HOME, ".gwt", "logs", path.basename(process.cwd()));
+    const expectedFile = path.join(expectedDir, `${today}.jsonl`);
+
+    const logger = createLogger({
+      category: "cli",
+      level: "info",
+      sync: true,
+    });
+
+    logger.info("hello default");
+    logger.flush?.();
+
+    const fileCheck = () => fs.existsSync(expectedFile);
+    let attempts = 0;
+    while (!fileCheck() && attempts < 20) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+      attempts += 1;
+    }
+
+    expect(fs.existsSync(expectedFile)).toBe(true);
+
+    homeSpy.mockRestore();
+    fs.rmSync(TMP_HOME, { recursive: true, force: true });
   });
 
   it("writes JSON with required fields and category", () => {
@@ -85,3 +119,10 @@ describe("createLogger", () => {
     process.env.LOG_LEVEL = "";
   });
 });
+
+function formatDate(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
