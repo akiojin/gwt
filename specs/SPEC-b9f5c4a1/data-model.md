@@ -1,9 +1,9 @@
 # データモデル（ログ運用統一）
 
 ## LogConfig
-- `level`: string — ログレベル。既定は `LOG_LEVEL` or `"info"`
-- `logDir`: string — ログ出力ディレクトリ。既定は `LOG_DIR` or `./logs`
-- `filename`: string — ログファイル名。既定は `LOG_FILE` or `app.log`
+- `level`: string — ログレベル。既定は `"info"`（必要に応じて config で上書き）
+- `logDir`: string — 出力先ディレクトリ。既定は `~/.gwt/logs/<cwd basename>`
+- `filename`: string — ログファイル名。既定は `<YYYY-MM-DD>.jsonl`
 - `category`: string — ログカテゴリ（例: `cli`, `server`, `worker`）。必須
 - `base`: object — 追加の共通フィールド
 - `keepDays`: number — 保持日数。既定 7
