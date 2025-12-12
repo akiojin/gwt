@@ -34,6 +34,13 @@ const MODEL_OPTIONS: Record<string, ModelOption[]> = {
       isDefault: true,
     },
     {
+      id: "gpt-5.2",
+      label: "gpt-5.2",
+      description: "Latest frontier model with extra high reasoning",
+      inferenceLevels: CODEX_MAX_LEVELS,
+      defaultInference: "medium",
+    },
+    {
       id: "gpt-5.1-codex-max",
       label: "gpt-5.1-codex-max",
       description: "Max performance (xhigh available)",

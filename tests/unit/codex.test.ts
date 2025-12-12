@@ -157,6 +157,19 @@ describe("codex.ts", () => {
     ]);
   });
 
+  it("passes gpt-5.2 and xhigh reasoning when requested", async () => {
+    await launchCodexCLI(worktreePath, {
+      model: "gpt-5.2",
+      reasoningEffort: "xhigh",
+    });
+
+    const [, args] = (execa as any).mock.calls[0];
+    expect(args).toEqual([
+      "@openai/codex@latest",
+      ...buildDefaultCodexArgs("gpt-5.2", "xhigh"),
+    ]);
+  });
+
   it("should hand off fallback file descriptors when stdin is not a TTY", async () => {
     mockTerminalStreams.usingFallback = true;
     mockChildStdio.stdin = 11 as unknown as any;
