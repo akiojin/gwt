@@ -3,12 +3,6 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
-type ViWithDoMock = typeof vi & { doMock?: typeof vi.mock };
-const viWithDoMock = vi as unknown as ViWithDoMock;
-if (!viWithDoMock.doMock) {
-  viWithDoMock.doMock = vi.mock.bind(vi);
-}
-
 describe("startSystemTray (SPEC-1f56fd80)", () => {
   let createMock: ReturnType<typeof vi.fn>;
   let originalEnv: NodeJS.ProcessEnv;
@@ -21,7 +15,7 @@ describe("startSystemTray (SPEC-1f56fd80)", () => {
     process.env.DISPLAY = process.env.DISPLAY || ":0";
 
     createMock = vi.fn(() => ({ dispose: vi.fn() }));
-    viWithDoMock.doMock?.("trayicon", () => ({
+    vi.doMock("trayicon", () => ({
       create: createMock,
     }));
   });
