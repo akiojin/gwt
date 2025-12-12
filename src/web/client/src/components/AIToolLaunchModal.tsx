@@ -1,5 +1,16 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { Card, CardHeader, CardContent } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import type { Branch, CustomAITool } from "../../../../types/api.js";
 import {
   CLAUDE_PERMISSION_SKIP_ARGS,
@@ -262,169 +273,190 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
   };
 
   return (
-    <div className="modal-backdrop" role="dialog" aria-modal="true">
-      <div className="modal" role="document">
-        <div className="modal__header">
-          <div>
-            <p className="tool-card__eyebrow">Launch AI Tool</p>
-            <h2>{branch.name}</h2>
-          </div>
-          <button type="button" className="button button--ghost" onClick={handleClose}>
-            ×
-          </button>
-        </div>
-
-        {banner && (
-          <div className={`inline-banner inline-banner--${banner.type}`}>
-            {banner.message}
-          </div>
-        )}
-
-        {configError && (
-          <div className="inline-banner inline-banner--warning">
-            Failed to load config: {configError instanceof Error ? configError.message : "unknown"}
-          </div>
-        )}
-
-        {!branch.worktreePath && (
-          <div
-            className={`inline-banner inline-banner--${isProtectedBranch ? "error" : "warning"}`}
-          >
-            {isProtectedBranch ? (
-              <p>
-                Cannot create worktree for protected branches (main, develop, master).
-                Protected branches must remain in the main repository.
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80" role="dialog" aria-modal="true">
+      <Card className="mx-4 w-full max-w-2xl" role="document">
+        <CardHeader className="pb-4">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                Launch AI Tool
               </p>
-            ) : (
-              <>
-                <p>Worktree is missing. Create it before launching AI tools.</p>
-                <button
-                  type="button"
-                  className="button button--secondary"
-                  onClick={handleCreateWorktree}
-                  disabled={isCreatingWorktree}
-                >
-                  {isCreatingWorktree ? "Creating..." : "Create worktree"}
-                </button>
-              </>
-            )}
+              <h2 className="mt-1 text-lg font-semibold">{branch.name}</h2>
+            </div>
+            <Button variant="ghost" size="sm" onClick={handleClose}>
+              ×
+            </Button>
           </div>
-        )}
+        </CardHeader>
 
-        {needsRemoteSync && (
-          <div className="inline-banner inline-banner--info">
-            Remote has {branch.divergence?.behind ?? 0} commits you need to pull before launching.
-          </div>
-        )}
+        <CardContent className="space-y-4">
+          {banner && (
+            <Alert variant={banner.type === "error" ? "destructive" : banner.type === "success" ? "success" : "info"}>
+              <AlertDescription>{banner.message}</AlertDescription>
+            </Alert>
+          )}
 
-        {hasBlockingDivergence && (
-          <div className="inline-banner inline-banner--warning">
-            Both remote and local have unresolved differences. Rebase/merge before launching.
-          </div>
-        )}
+          {configError && (
+            <Alert variant="warning">
+              <AlertDescription>
+                Failed to load config: {configError instanceof Error ? configError.message : "unknown"}
+              </AlertDescription>
+            </Alert>
+          )}
 
-        <div className="tool-form">
-          <div className="form-grid">
-            <label className="form-field">
-            <span>AI tool</span>
-              <select
+          {!branch.worktreePath && (
+            <Alert variant={isProtectedBranch ? "destructive" : "warning"}>
+              <AlertDescription className="space-y-2">
+                {isProtectedBranch ? (
+                  <p>
+                    Cannot create worktree for protected branches (main, develop, master).
+                    Protected branches must remain in the main repository.
+                  </p>
+                ) : (
+                  <>
+                    <p>Worktree is missing. Create it before launching AI tools.</p>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={handleCreateWorktree}
+                      disabled={isCreatingWorktree}
+                    >
+                      {isCreatingWorktree ? "Creating..." : "Create worktree"}
+                    </Button>
+                  </>
+                )}
+              </AlertDescription>
+            </Alert>
+          )}
+
+          {needsRemoteSync && (
+            <Alert variant="info">
+              <AlertDescription>
+                Remote has {branch.divergence?.behind ?? 0} commits you need to pull before launching.
+              </AlertDescription>
+            </Alert>
+          )}
+
+          {hasBlockingDivergence && (
+            <Alert variant="warning">
+              <AlertDescription>
+                Both remote and local have unresolved differences. Rebase/merge before launching.
+              </AlertDescription>
+            </Alert>
+          )}
+
+          <div className="grid gap-4 sm:grid-cols-3">
+            <div className="space-y-2">
+              <label className="text-sm font-medium">AI tool</label>
+              <Select
                 value={selectedToolId}
-                onChange={(event) => setSelectedToolId(event.target.value)}
-                disabled={isConfigLoading}
+                onValueChange={setSelectedToolId}
+                disabled={isConfigLoading ?? false}
               >
-                {availableTools.map((tool) => (
-                  <option key={tool.id} value={tool.id}>
-                    {tool.label}
-                  </option>
-                ))}
-              </select>
-            </label>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {availableTools.map((tool) => (
+                    <SelectItem key={tool.id} value={tool.id}>
+                      {tool.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
 
-            <label className="form-field">
-            <span>Launch mode</span>
-              <select
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Launch mode</label>
+              <Select
                 value={selectedMode}
-                onChange={(event) => setSelectedMode(event.target.value as ToolMode)}
+                onValueChange={(value) => setSelectedMode(value as ToolMode)}
               >
-                <option value="normal">normal</option>
-                <option value="continue">continue</option>
-                <option value="resume">resume</option>
-              </select>
-            </label>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="normal">normal</SelectItem>
+                  <SelectItem value="continue">continue</SelectItem>
+                  <SelectItem value="resume">resume</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
 
-            <label className="form-field">
-              <span>Extra args (space separated)</span>
-              <input
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Extra args</label>
+              <Input
                 type="text"
                 value={extraArgsText}
                 onChange={(event) => setExtraArgsText(event.target.value)}
                 placeholder="--flag value"
               />
-            </label>
+            </div>
           </div>
 
-          <label className="form-field">
-            <span className="form-field__checkbox-row">
-              <input
-                type="checkbox"
-                className="form-field__checkbox-input"
-                checked={skipPermissions}
-                onChange={(event) => setSkipPermissions(event.target.checked)}
-              />
-              <span className="form-field__checkbox-label">
-                Skip permission checks (at your own risk)
-              </span>
-            </span>
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={skipPermissions}
+              onChange={(event) => setSkipPermissions(event.target.checked)}
+              className="h-4 w-4 rounded border-border"
+            />
+            <span>Skip permission checks (at your own risk)</span>
           </label>
 
-          <div className="tool-card__actions">
-            <button
-              type="button"
-              className="button button--primary"
+          <div className="flex flex-wrap gap-2">
+            <Button
               onClick={handleStartSession}
               disabled={isStartingSession || !selectedTool || hasBlockingDivergence || needsRemoteSync}
             >
               {isStartingSession ? "Launching..." : "Launch AI tool"}
-            </button>
-            <button
-              type="button"
-              className="button button--secondary"
+            </Button>
+            <Button
+              variant="secondary"
               onClick={handleSyncBranch}
               disabled={!branch.worktreePath || syncBranch.isPending}
             >
               {syncBranch.isPending ? "Syncing..." : "Sync latest"}
-            </button>
-            <button type="button" className="button button--ghost" onClick={handleClose}>
+            </Button>
+            <Button variant="ghost" onClick={handleClose}>
               Cancel
-            </button>
+            </Button>
           </div>
 
           {selectedToolSummary && (
-            <dl className="metadata-grid metadata-grid--compact">
-              <div>
-                <dt>Command</dt>
-                <dd className="tool-card__command">{selectedToolSummary.command}</dd>
-              </div>
-              <div>
-                <dt>defaultArgs</dt>
-                <dd>{renderArgs(selectedToolSummary.defaultArgs)}</dd>
-              </div>
-              <div>
-                <dt>permissionSkipArgs</dt>
-                <dd>{renderArgs(selectedToolSummary.permissionSkipArgs)}</dd>
+            <div className="space-y-2 rounded-lg border bg-muted/30 p-4 text-sm">
+              <div className="grid gap-2 sm:grid-cols-3">
+                <div>
+                  <span className="text-muted-foreground">Command:</span>{" "}
+                  <code className="rounded bg-muted px-1.5 py-0.5 font-mono">
+                    {selectedToolSummary.command}
+                  </code>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">defaultArgs:</span>{" "}
+                  <span className={!selectedToolSummary.defaultArgs?.length ? "text-muted-foreground/50" : ""}>
+                    {renderArgs(selectedToolSummary.defaultArgs)}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">permissionSkipArgs:</span>{" "}
+                  <span className={!selectedToolSummary.permissionSkipArgs?.length ? "text-muted-foreground/50" : ""}>
+                    {renderArgs(selectedToolSummary.permissionSkipArgs)}
+                  </span>
+                </div>
               </div>
               {argsPreview && (
-                <div className="metadata-grid__full">
-                  <dt>Command to run</dt>
-                  <dd className="tool-card__command">
+                <div className="border-t pt-2">
+                  <span className="text-xs text-muted-foreground">Command to run:</span>
+                  <pre className="mt-1 overflow-x-auto rounded bg-background p-2 font-mono text-sm">
                     {argsPreview.command} {argsPreview.args.join(" ")}
-                  </dd>
+                  </pre>
                 </div>
               )}
-            </dl>
+            </div>
           )}
-        </div>
-      </div>
+        </CardContent>
+      </Card>
     </div>
   );
 }
@@ -438,7 +470,7 @@ function parseExtraArgs(value: string): string[] {
 
 function renderArgs(args?: string[] | null) {
   if (!args || args.length === 0) {
-    return <span className="tool-card__muted">未設定</span>;
+    return "未設定";
   }
   return args.join(" ");
 }
