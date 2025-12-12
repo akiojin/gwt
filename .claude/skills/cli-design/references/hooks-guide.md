@@ -157,6 +157,8 @@ function App() {
 
 ターミナルサイズの取得とリサイズ監視。
 
+> **注**: CI/テスト環境など非TTY環境では`process.stdout.rows`/`columns`が`undefined`になります。必ずフォールバック値を設定してください。また、`process.stdout.isTTY`でTTY判定を行い、非TTY環境ではリサイズイベントをスキップすることを推奨します。
+
 ```typescript
 import { useState, useEffect } from "react";
 
