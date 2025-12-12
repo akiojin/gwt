@@ -140,9 +140,15 @@ vi.mock("../../src/utils/terminal.js", async () => {
   };
 });
 
-vi.mock("../../src/utils/prompt.js", () => ({
-  waitForEnter: waitForEnterMock,
-}));
+vi.mock("../../src/utils/prompt.js", async () => {
+  const actual = await vi.importActual<
+    typeof import("../../src/utils/prompt.js")
+  >("../../src/utils/prompt.js");
+  return {
+    ...actual,
+    waitForEnter: waitForEnterMock,
+  };
+});
 
 // Import after mocks are set up
 import { handleAIToolWorkflow } from "../../src/index.js";
