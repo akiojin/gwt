@@ -227,7 +227,7 @@ export async function resolveCustomToolCommand(
       "CUSTOM_TOOL_NOT_FOUND",
       `Custom tool not found: ${options.toolId}`,
       [
-        "Update ~/.claude-worktree/tools.json to include this ID",
+        "Update ~/.gwt/tools.json to include this ID",
         "Reload the Web UI after editing the tools list",
       ],
     );

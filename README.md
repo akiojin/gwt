@@ -80,18 +80,22 @@ The tool presents an interactive interface with the following options:
 ### Launching the Web UI
 
 ```bash
-claude-worktree serve
-# or
-bunx @akiojin/claude-worktree serve
+# Running the CLI also starts the Web UI in the background.
+gwt
+
+# (Optional) start only the Web UI server:
+gwt serve
+# or without global install
+bunx @akiojin/gwt serve
 ```
 
-- Open <http://localhost:3000> to access the Worktree dashboard
+- The Web UI is available by default at <http://localhost:3000>
 - The branch list mirrors the CLI view, including search and worktree creation
 - Detailed branch pages let you start AI tool sessions directly from the browser
 
 ### Managing Custom AI Tools
 
-- Navigate to **Config** (top-right button on the dashboard or `/config`) to view and edit `~/.claude-worktree/tools.json`
+- Navigate to **Config** (top-right button on the dashboard or `/config`) to view and edit `~/.gwt/tools.json` (legacy `~/.claude-worktree/tools.json` is auto-migrated on first run)
 - Add/edit tools with execution type (`path` / `bunx` / `command`), default arguments, mode-specific arguments, permission skip arguments, and environment variables
 - Changes are written to the same `tools.json` file that the CLI uses, so both channels stay in sync
 - When launching from the branch detail page you can:
