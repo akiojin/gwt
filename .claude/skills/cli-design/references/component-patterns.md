@@ -198,6 +198,8 @@ export const Header = React.memo(function Header(props: HeaderProps) {
 
 ### カスタム比較関数
 
+> **重要**: カスタム比較関数を使用する場合、コールバックprops（`onSelect`など）の参照が安定していることが前提です。親コンポーネントで`useCallback`を使用してコールバックをメモ化してください。
+
 配列の参照ではなくコンテンツで比較する場合:
 
 ```typescript
@@ -314,6 +316,8 @@ useInput((input, key) => {
 ```
 
 ## ErrorBoundaryパターン
+
+> **注**: ErrorBoundaryはReactの制約上、クラスコンポーネントでのみ実装可能です。これは「関数コンポーネント + フック」の原則の唯一の例外です。
 
 クラスコンポーネントで実装（フックでは不可）:
 
