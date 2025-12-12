@@ -33,6 +33,7 @@ import {
   getTerminalStreams,
   waitForUserAcknowledgement,
 } from "./utils/terminal.js";
+import { createLogger } from "./logging/logger.js";
 import { getToolById, getSharedEnvironment } from "./config/tools.js";
 import { launchCustomAITool } from "./launcher.js";
 import { saveSession, loadSession } from "./config/index.js";
@@ -55,6 +56,9 @@ const ERROR_PROMPT = chalk.yellow(
   "Review the error details, then press Enter to continue.",
 );
 
+// Category: cli
+const appLogger = createLogger({ category: "cli" });
+
 async function waitForErrorAcknowledgement(): Promise<void> {
   await waitForUserAcknowledgement(ERROR_PROMPT);
 }
@@ -64,14 +68,17 @@ async function waitForErrorAcknowledgement(): Promise<void> {
  */
 function printError(message: string): void {
   console.error(chalk.red(`❌ ${message}`));
+  appLogger.error({ message });
 }
 
 function printInfo(message: string): void {
   console.log(chalk.blue(`ℹ️  ${message}`));
+  appLogger.info({ message });
 }
 
 function printWarning(message: string): void {
   console.warn(chalk.yellow(`⚠️  ${message}`));
+  appLogger.warn({ message });
 }
 
 type GitStepResult<T> = { ok: true; value: T } | { ok: false };
