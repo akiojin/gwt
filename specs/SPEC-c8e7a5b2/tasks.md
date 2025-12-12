@@ -26,8 +26,8 @@
 
 ## Phase 4: Commit
 
-- [ ] T030 Commit SPEC files and test file
-- [ ] T031 Push to remote
+- [x] T030 Commit SPEC files and test file
+- [x] T031 Push to remote
 
 ## Dependencies
 

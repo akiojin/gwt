@@ -40,7 +40,7 @@ describe("ConfigPage", () => {
 
   beforeEach(() => {
     mutateAsync.mockReset();
-    mockedUseConfig.mockReturnValue({ data: { tools: sampleTools, env: {} }, isLoading: false, error: null });
+    mockedUseConfig.mockReturnValue({ data: { tools: sampleTools, env: [], version: "1" }, isLoading: false, error: null });
     mockedUseUpdateConfig.mockReturnValue({ mutateAsync, isPending: false });
   });
 
@@ -73,7 +73,7 @@ describe("ConfigPage", () => {
       updatedAt: "2025-11-11T00:00:00Z",
     };
 
-    mutateAsync.mockResolvedValue({ tools: [...sampleTools, newTool], env: {} });
+    mutateAsync.mockResolvedValue({ tools: [...sampleTools, newTool], env: [], version: "2" });
 
     renderPage();
 
@@ -92,7 +92,7 @@ describe("ConfigPage", () => {
     });
 
     const payload = mutateAsync.mock.calls[0][0];
-    expect(payload.env).toEqual({});
+    expect(payload.env).toEqual([]);
     expect(payload.tools).toHaveLength(2);
     expect(payload.tools[1]).toMatchObject({
       id: "my-tool",
