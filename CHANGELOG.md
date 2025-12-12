@@ -43,6 +43,29 @@
 * update default Claude Code model to Opus 4.5 ([1dd909e](https://github.com/akiojin/gwt/commit/1dd909ed87a55ce3bb796deb0431d0027571dae2))
 * update Opus model version to 4.5 ([307faeb](https://github.com/akiojin/gwt/commit/307faeb66ebac0ca89b01c07ee19d213797c4d5c))
 
+## [2.13.0](https://github.com/akiojin/gwt/compare/v2.12.1...v2.13.0) (2025-12-12)
+
+
+### Features
+
+* Codexにgpt-5.2モデルを追加 ([9c97214](https://github.com/akiojin/gwt/commit/9c97214d365348ecc807e97684ee4233c25c9cfe))
+* Codexにgpt-5.2モデルを追加 ([a1ec770](https://github.com/akiojin/gwt/commit/a1ec7704b431a43e15c16e87648e9e831235fd3c))
+* Ink.js CLI UIデザインスキル（cli-design）を追加 ([4da6a1c](https://github.com/akiojin/gwt/commit/4da6a1cabe56d683274f0f63e209343b0bf8a1c1))
+* Ink.js CLI UIデザインスキル（cli-design）を追加 ([1066498](https://github.com/akiojin/gwt/commit/106649852109478aee692fda4f32d203993a4f16))
+* pino構造化ログと7日ローテーションを導入 ([946e42c](https://github.com/akiojin/gwt/commit/946e42c336784cee061af83592b22b08e9d3ace6))
+* route logs to ~/.gwt with daily jsonl files ([4a5a5f4](https://github.com/akiojin/gwt/commit/4a5a5f4d8d626c94bc66475c089696a487596229))
+
+
+### Bug Fixes
+
+* align branch list layout and icon widths ([eee5e00](https://github.com/akiojin/gwt/commit/eee5e00fcaed22b5dd48e12438cf3096fd4604f8))
+* divergenceテストにwaitForEnterモックを追加 ([6695f1c](https://github.com/akiojin/gwt/commit/6695f1c9c3d4c5ac860ed037f8c4d786a5f26b37))
+* divergenceテストのタイムアウト修正 ([4ba674a](https://github.com/akiojin/gwt/commit/4ba674a3ecf400957a212a5489551a19cbeafb7f))
+* Fastify logger型の不整合を修正 ([4396886](https://github.com/akiojin/gwt/commit/439688689e296497077ee3c21976c1ae167d5ef2))
+* prompt.jsモックでimportActualを使用 ([8b99f97](https://github.com/akiojin/gwt/commit/8b99f975c7add859a8d9df76668c1cab2a973ee9))
+* resolve lint errors on branch list ([30d9b3d](https://github.com/akiojin/gwt/commit/30d9b3ded9a767be5809d6d00e0f6143029352d2))
+* share logger date helper and simplify tests ([d73336f](https://github.com/akiojin/gwt/commit/d73336ffc3f57f06cc879955611fbee154648295))
+
 ## [2.12.1](https://github.com/akiojin/gwt/compare/v2.12.0...v2.12.1) (2025-12-09)
 
 
