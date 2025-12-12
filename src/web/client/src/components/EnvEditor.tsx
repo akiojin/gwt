@@ -1,4 +1,16 @@
 import React from "react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
+import {
+  Table,
+  TableHeader,
+  TableBody,
+  TableRow,
+  TableHead,
+  TableCell,
+} from "@/components/ui/table";
+import { cn } from "@/lib/utils";
 
 export interface EnvRow {
   id: string;
@@ -80,98 +92,94 @@ export function EnvEditor({
   };
 
   return (
-    <div className="env-editor">
-      <header className="env-editor__header">
+    <div className="space-y-4">
+      <div className="flex items-start justify-between gap-4">
         <div>
-          <h3>{title}</h3>
+          <h3 className="font-semibold">{title}</h3>
           {description && (
-            <p className="env-editor__description">{description}</p>
+            <p className="mt-1 text-sm text-muted-foreground">{description}</p>
           )}
         </div>
         {allowAdd && (
-          <button
-            type="button"
-            className="button button--secondary"
-            onClick={handleAdd}
-          >
+          <Button variant="secondary" size="sm" onClick={handleAdd}>
             変数を追加
-          </button>
+          </Button>
         )}
-      </header>
+      </div>
 
       {rows.length === 0 ? (
-        <p className="env-editor__empty">{emptyLabel}</p>
+        <p className="py-4 text-center text-sm text-muted-foreground">{emptyLabel}</p>
       ) : (
-        <table className="env-editor__table">
-          <thead>
-            <tr>
-              <th>キー</th>
-              <th>値</th>
-              <th style={{ width: "140px" }}>操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row) => {
-              const keyInvalid = isInvalidKey(row);
-              return (
-                <tr
-                  key={row.id}
-                  className={
-                    keyInvalid ? "env-editor__row--invalid" : undefined
-                  }
-                >
-                  <td>
-                    <input
-                      type="text"
-                      value={row.key}
-                      onChange={(event) =>
-                        handleFieldChange(row.id, "key", event.target.value)
-                      }
-                      placeholder="EXAMPLE_KEY"
-                    />
-                    {row.importedFromOs && (
-                      <span
-                        className="pill pill--info"
-                        style={{ marginLeft: "0.5rem" }}
+        <div className="rounded-md border">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>キー</TableHead>
+                <TableHead>値</TableHead>
+                <TableHead className="w-24 text-right">操作</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {rows.map((row) => {
+                const keyInvalid = isInvalidKey(row);
+                return (
+                  <TableRow
+                    key={row.id}
+                    className={cn(keyInvalid && "bg-destructive/10")}
+                  >
+                    <TableCell className="space-y-1">
+                      <Input
+                        type="text"
+                        value={row.key}
+                        onChange={(event) =>
+                          handleFieldChange(row.id, "key", event.target.value)
+                        }
+                        placeholder="EXAMPLE_KEY"
+                        className={cn(keyInvalid && "border-destructive")}
+                      />
+                      <div className="flex flex-wrap items-center gap-2">
+                        {row.importedFromOs && (
+                          <Badge variant="outline" className="text-xs">
+                            OSから取り込み
+                          </Badge>
+                        )}
+                        {row.lastUpdated && (
+                          <span className="text-xs text-muted-foreground">
+                            更新: {new Date(row.lastUpdated).toLocaleString()}
+                          </span>
+                        )}
+                      </div>
+                      {keyInvalid && (
+                        <p className="text-xs text-destructive">
+                          A-Z,0-9,_ のみ使用できます
+                        </p>
+                      )}
+                    </TableCell>
+                    <TableCell>
+                      <Input
+                        type="text"
+                        value={row.value}
+                        onChange={(event) =>
+                          handleFieldChange(row.id, "value", event.target.value)
+                        }
+                        placeholder="値"
+                      />
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => handleRemove(row.id)}
                       >
-                        OSから取り込み
-                      </span>
-                    )}
-                    {row.lastUpdated && (
-                      <span className="env-editor__meta">
-                        更新: {new Date(row.lastUpdated).toLocaleString()}
-                      </span>
-                    )}
-                    {keyInvalid && (
-                      <p className="env-editor__error">
-                        A-Z,0-9,_ のみ使用できます
-                      </p>
-                    )}
-                  </td>
-                  <td>
-                    <input
-                      type="text"
-                      value={row.value}
-                      onChange={(event) =>
-                        handleFieldChange(row.id, "value", event.target.value)
-                      }
-                      placeholder="値"
-                    />
-                  </td>
-                  <td>
-                    <button
-                      type="button"
-                      className="button button--ghost"
-                      onClick={() => handleRemove(row.id)}
-                    >
-                      削除
-                    </button>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+                        削除
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
+        </div>
       )}
     </div>
   );
