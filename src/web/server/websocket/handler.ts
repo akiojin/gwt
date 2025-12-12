@@ -5,7 +5,7 @@
  * 仕様: specs/SPEC-d5e56259/contracts/websocket.md
  */
 
-import type { FastifyRequest } from "fastify";
+import type { FastifyRequest, FastifyBaseLogger } from "fastify";
 import type { WebSocket } from "@fastify/websocket";
 import type { PTYManager } from "../pty/manager.js";
 import type {
@@ -22,17 +22,18 @@ import type {
  * WebSocketハンドラー
  */
 export class WebSocketHandler {
-  constructor(private ptyManager: PTYManager) {}
+  private cleanupTimers: Map<string, NodeJS.Timeout> = new Map();
+
+  constructor(
+    private ptyManager: PTYManager,
+    private logger: FastifyBaseLogger,
+  ) {}
 
   /**
    * WebSocket接続を処理
    */
   public handle(connection: WebSocket, request: FastifyRequest): void {
-    const url = new URL(
-      request.url,
-      `http://${request.hostname || "localhost"}`,
-    );
-    const sessionId = url.searchParams.get("sessionId");
+    const sessionId = resolveSessionId(request);
 
     if (!sessionId) {
       this.sendError(connection, "Missing sessionId parameter");
@@ -47,7 +48,14 @@ export class WebSocketHandler {
       return;
     }
 
+    this.logger.info(
+      `WebSocket connection established for session ${sessionId} (pid=${instance.ptyProcess.pid})`,
+    );
+
+    this.clearCleanupTimer(sessionId);
+
     const { ptyProcess } = instance;
+    let hasExited = false;
 
     // セッションステータスを更新
     this.ptyManager.updateStatus(sessionId, "running");
@@ -59,6 +67,8 @@ export class WebSocketHandler {
 
     // PTYプロセス終了時の処理
     ptyProcess.onExit(({ exitCode, signal }) => {
+      hasExited = true;
+      this.clearCleanupTimer(sessionId);
       this.ptyManager.updateStatus(sessionId, "completed", exitCode);
       this.sendExit(connection, exitCode, signal);
       connection.close();
@@ -66,6 +76,10 @@ export class WebSocketHandler {
 
     // クライアントからのメッセージを処理
     connection.on("message", (rawMessage) => {
+      if (hasExited) {
+        this.sendError(connection, "Session already exited");
+        return;
+      }
       try {
         const message: ClientMessage = JSON.parse(rawMessage.toString());
         this.handleClientMessage(message, ptyProcess, connection);
@@ -77,7 +91,10 @@ export class WebSocketHandler {
 
     // 接続エラー時の処理
     connection.on("error", (error) => {
-      console.error(`WebSocket error for session ${sessionId}:`, error);
+      this.logger.error(
+        { err: error, sessionId },
+        `WebSocket error for session ${sessionId}`,
+      );
       this.ptyManager.updateStatus(
         sessionId,
         "failed",
@@ -87,9 +104,17 @@ export class WebSocketHandler {
     });
 
     // 接続クローズ時の処理
-    connection.on("close", () => {
-      console.log(`WebSocket closed for session ${sessionId}`);
-      // PTYプロセスは残す（バックグラウンドで実行継続）
+    connection.on("close", (code, reason) => {
+      const reasonText = reason?.toString()?.trim();
+      this.logger.info(
+        `WebSocket closed for session ${sessionId} (code=${code}${reasonText ? `, reason=${reasonText}` : ""})`,
+      );
+
+      if (hasExited) {
+        return;
+      }
+
+      this.scheduleCleanup(sessionId);
     });
   }
 
@@ -104,12 +129,22 @@ export class WebSocketHandler {
     switch (message.type) {
       case "input": {
         const inputMsg = message as InputMessage;
-        ptyProcess.write(inputMsg.data);
+        try {
+          ptyProcess.write(inputMsg.data);
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          this.sendError(connection, `Failed to write to session: ${reason}`);
+        }
         break;
       }
       case "resize": {
         const resizeMsg = message as ResizeMessage;
-        ptyProcess.resize(resizeMsg.data.cols, resizeMsg.data.rows);
+        try {
+          ptyProcess.resize(resizeMsg.data.cols, resizeMsg.data.rows);
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          this.sendError(connection, `Failed to resize terminal: ${reason}`);
+        }
         break;
       }
       case "ping": {
@@ -177,4 +212,75 @@ export class WebSocketHandler {
     };
     connection.send(JSON.stringify(message));
   }
+
+  private scheduleCleanup(sessionId: string): void {
+    this.clearCleanupTimer(sessionId);
+    const timer = setTimeout(() => {
+      this.cleanupTimers.delete(sessionId);
+      const tracked = this.ptyManager.get(sessionId);
+      if (!tracked) {
+        return;
+      }
+
+      if (
+        tracked.session.status === "running" ||
+        tracked.session.status === "pending"
+      ) {
+        this.logger.warn(
+          `Auto-cleaning session ${sessionId} after unexpected client disconnect`,
+        );
+        this.ptyManager.updateStatus(
+          sessionId,
+          "failed",
+          undefined,
+          "Client disconnected",
+        );
+        this.ptyManager.delete(sessionId);
+      }
+    }, CLEANUP_GRACE_PERIOD_MS);
+    this.cleanupTimers.set(sessionId, timer);
+  }
+
+  private clearCleanupTimer(sessionId: string): void {
+    const timer = this.cleanupTimers.get(sessionId);
+    if (timer) {
+      clearTimeout(timer);
+      this.cleanupTimers.delete(sessionId);
+      this.logger.info(`Cleared cleanup timer for session ${sessionId}`);
+    }
+  }
+}
+
+const CLEANUP_GRACE_PERIOD_MS = Number(process.env.WS_CLEANUP_GRACE_MS ?? 3000);
+
+interface RequestLike {
+  params?: { sessionId?: string } | undefined;
+  url: string;
+  hostname?: string;
+  headers?: { host?: string | undefined };
+}
+
+export function resolveSessionId(
+  request: FastifyRequest | RequestLike,
+): string | null {
+  const paramsId = (request as RequestLike).params?.sessionId;
+  if (typeof paramsId === "string" && paramsId.length > 0) {
+    return paramsId;
+  }
+
+  try {
+    const host =
+      (request as FastifyRequest).headers?.host ??
+      (request as RequestLike).hostname ??
+      "localhost";
+    const parsed = new URL(request.url, `http://${host}`);
+    const queryId = parsed.searchParams.get("sessionId");
+    if (queryId && queryId.length > 0) {
+      return queryId;
+    }
+  } catch {
+    // ignore
+  }
+
+  return null;
 }

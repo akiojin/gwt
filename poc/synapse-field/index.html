@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <title>Synapse Field PoC</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main>
+      <section class="page-hero">
+        <p class="page-hero__eyebrow">Synapse Visual PoC</p>
+        <h1>Neural Link Playground</h1>
+        <p class="page-hero__subtitle">
+          TypeScript + Canvas で粒子ネットワークを描画し、シナプスをイメージしたパルスを表現します。
+          このページはプロダクションコードから独立した検証用スペースです。
+        </p>
+        <div class="cta-row">
+          <a class="button" href="../..">Back to repo</a>
+          <a class="button button--ghost" href="https://github.com/akiojin/claude-worktree" target="_blank" rel="noreferrer">
+            GitHub ↗
+          </a>
+        </div>
+      </section>
+
+      <section class="synapse-stage">
+        <div class="synapse-stage__canvas">
+          <canvas id="synapse-canvas" aria-label="Synapse network visualization"></canvas>
+        </div>
+        <aside class="synapse-stage__panel">
+          <h2>Design Notes</h2>
+          <ul>
+            <li>粒子はブラウン運動のようにランダムドリフトし、壁で反射します。</li>
+            <li>一定距離内のノードを結線し、電気信号をイメージしたパルスを流します。</li>
+            <li>TypeScript でノード／エッジのデータ構造を型安全に管理しています。</li>
+            <li>Canvas の低レベル API を直接制御し、軽量にアニメーションしています。</li>
+          </ul>
+        </aside>
+      </section>
+    </main>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>
