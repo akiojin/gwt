@@ -11,7 +11,9 @@ const UUID_REGEX =
  * @returns true if the string is a valid UUID format
  */
 export function isValidUuidSessionId(id: string): boolean {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+    id,
+  );
 }
 
 function pickSessionIdFromObject(obj: unknown): string | null {
@@ -34,7 +36,13 @@ function pickSessionIdFromObject(obj: unknown): string | null {
 function pickCwdFromObject(obj: unknown): string | null {
   if (!obj || typeof obj !== "object") return null;
   const candidate = obj as Record<string, unknown>;
-  const keys = ["cwd", "workingDirectory", "workdir", "directory", "projectPath"];
+  const keys = [
+    "cwd",
+    "workingDirectory",
+    "workdir",
+    "directory",
+    "projectPath",
+  ];
   for (const key of keys) {
     const value = candidate[key];
     if (typeof value === "string" && value.trim().length > 0) {
@@ -118,7 +126,12 @@ async function findLatestFile(
 async function findNewestSessionIdFromDir(
   dir: string,
   recursive: boolean,
-  options: { since?: number; until?: number; preferClosestTo?: number; windowMs?: number } = {},
+  options: {
+    since?: number;
+    until?: number;
+    preferClosestTo?: number;
+    windowMs?: number;
+  } = {},
 ): Promise<{ id: string; mtime: number } | null> {
   try {
     const files: { fullPath: string; mtime: number }[] = [];
@@ -423,7 +436,12 @@ function generateClaudeProjectPathCandidates(cwd: string): string[] {
 
 export async function findLatestClaudeSessionId(
   cwd: string,
-  options: { since?: number; until?: number; preferClosestTo?: number; windowMs?: number } = {},
+  options: {
+    since?: number;
+    until?: number;
+    preferClosestTo?: number;
+    windowMs?: number;
+  } = {},
 ): Promise<string | null> {
   const found = await findLatestClaudeSession(cwd, options);
   return found?.id ?? null;
@@ -436,7 +454,12 @@ export interface ClaudeSessionInfo {
 
 export async function findLatestClaudeSession(
   cwd: string,
-  options: { since?: number; until?: number; preferClosestTo?: number; windowMs?: number } = {},
+  options: {
+    since?: number;
+    until?: number;
+    preferClosestTo?: number;
+    windowMs?: number;
+  } = {},
 ): Promise<ClaudeSessionInfo | null> {
   const rootCandidates: string[] = [];
   if (process.env.CLAUDE_CONFIG_DIR) {
@@ -481,9 +504,15 @@ export async function findLatestClaudeSession(
       try {
         const line = lines[i] ?? "";
         const parsed = JSON.parse(line) as Record<string, unknown>;
-        const project = typeof parsed.project === "string" ? parsed.project : null;
-        const sessionId = typeof parsed.sessionId === "string" ? parsed.sessionId : null;
-        if (project && sessionId && (project === cwd || cwd.startsWith(project))) {
+        const project =
+          typeof parsed.project === "string" ? parsed.project : null;
+        const sessionId =
+          typeof parsed.sessionId === "string" ? parsed.sessionId : null;
+        if (
+          project &&
+          sessionId &&
+          (project === cwd || cwd.startsWith(project))
+        ) {
           return { id: sessionId, mtime: Date.now() };
         }
       } catch {
@@ -513,10 +542,16 @@ export async function waitForClaudeSessionId(
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
-    const opt: { since?: number; until?: number; preferClosestTo?: number; windowMs?: number } = {};
+    const opt: {
+      since?: number;
+      until?: number;
+      preferClosestTo?: number;
+      windowMs?: number;
+    } = {};
     if (options.since !== undefined) opt.since = options.since;
     if (options.until !== undefined) opt.until = options.until;
-    if (options.preferClosestTo !== undefined) opt.preferClosestTo = options.preferClosestTo;
+    if (options.preferClosestTo !== undefined)
+      opt.preferClosestTo = options.preferClosestTo;
     if (options.windowMs !== undefined) opt.windowMs = options.windowMs;
 
     const found = await findLatestClaudeSession(cwd, opt);
@@ -560,7 +595,13 @@ async function findLatestNestedSessionFile(
 
 export async function findLatestGeminiSession(
   _cwd: string,
-  options: { since?: number; until?: number; preferClosestTo?: number; windowMs?: number; cwd?: string | null } = {},
+  options: {
+    since?: number;
+    until?: number;
+    preferClosestTo?: number;
+    windowMs?: number;
+    cwd?: string | null;
+  } = {},
 ): Promise<GeminiSessionInfo | null> {
   // Gemini stores sessions/logs under ~/.gemini/tmp/<project_hash>/(chats|logs).json
   const baseDir = path.join(homedir(), ".gemini", "tmp");
@@ -588,17 +629,15 @@ export async function findLatestGeminiSession(
 
   const ref = options.preferClosestTo;
   const window = options.windowMs ?? 30 * 60 * 1000;
-  pool = pool
-    .slice()
-    .sort((a, b) => {
-      if (typeof ref === "number") {
-        const da = Math.abs(a.mtime - ref);
-        const db = Math.abs(b.mtime - ref);
-        if (da === db) return b.mtime - a.mtime;
-        if (da <= window || db <= window) return da - db;
-      }
-      return b.mtime - a.mtime;
-    });
+  pool = pool.slice().sort((a, b) => {
+    if (typeof ref === "number") {
+      const da = Math.abs(a.mtime - ref);
+      const db = Math.abs(b.mtime - ref);
+      if (da === db) return b.mtime - a.mtime;
+      if (da <= window || db <= window) return da - db;
+    }
+    return b.mtime - a.mtime;
+  });
 
   for (const file of pool) {
     const info = await readSessionInfoFromFile(file.fullPath);
@@ -620,16 +659,31 @@ export async function findLatestGeminiSession(
 
 export async function findLatestGeminiSessionId(
   cwd: string,
-  options: { since?: number; until?: number; preferClosestTo?: number; windowMs?: number; cwd?: string | null } = {},
+  options: {
+    since?: number;
+    until?: number;
+    preferClosestTo?: number;
+    windowMs?: number;
+    cwd?: string | null;
+  } = {},
 ): Promise<string | null> {
-  const normalized: { since?: number; until?: number; preferClosestTo?: number; windowMs?: number } = {};
+  const normalized: {
+    since?: number;
+    until?: number;
+    preferClosestTo?: number;
+    windowMs?: number;
+  } = {};
   if (options.since !== undefined) normalized.since = options.since as number;
   if (options.until !== undefined) normalized.until = options.until as number;
   if (options.preferClosestTo !== undefined)
     normalized.preferClosestTo = options.preferClosestTo as number;
-  if (options.windowMs !== undefined) normalized.windowMs = options.windowMs as number;
+  if (options.windowMs !== undefined)
+    normalized.windowMs = options.windowMs as number;
 
-  const found = await findLatestGeminiSession(cwd, { ...normalized, cwd: options.cwd ?? cwd });
+  const found = await findLatestGeminiSession(cwd, {
+    ...normalized,
+    cwd: options.cwd ?? cwd,
+  });
   return found?.id ?? null;
 }
 

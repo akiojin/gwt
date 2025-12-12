@@ -1,4 +1,13 @@
 import React, { useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import type {
   CustomAITool,
   EnvironmentVariable,
@@ -31,15 +40,28 @@ interface FormErrors {
   env?: string;
 }
 
-export function CustomToolForm({ initialValue, onSubmit, onCancel, isSaving }: CustomToolFormProps) {
-  const [formState, setFormState] = useState(() => createInitialState(initialValue));
+export function CustomToolForm({
+  initialValue,
+  onSubmit,
+  onCancel,
+  isSaving,
+}: CustomToolFormProps) {
+  const [formState, setFormState] = useState(() =>
+    createInitialState(initialValue),
+  );
   const [errors, setErrors] = useState<FormErrors>({});
 
   const title = initialValue ? "ツールを編集" : "新規カスタムツール";
 
-  const handleChange = (field: keyof typeof formState) =>
-    (event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
+  const handleChange =
+    (field: keyof typeof formState) =>
+    (event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
       setFormState((prev) => ({ ...prev, [field]: event.target.value }));
+    };
+
+  const handleSelectChange =
+    (field: keyof typeof formState) => (value: string) => {
+      setFormState((prev) => ({ ...prev, [field]: value }));
     };
 
   const handleSubmit = (event: React.FormEvent) => {
@@ -74,7 +96,9 @@ export function CustomToolForm({ initialValue, onSubmit, onCancel, isSaving }: C
       id: formState.id.trim(),
       displayName: formState.displayName.trim(),
       icon: formState.icon?.trim() ? formState.icon.trim() : null,
-      description: formState.description?.trim() ? formState.description.trim() : null,
+      description: formState.description?.trim()
+        ? formState.description.trim()
+        : null,
       executionType: formState.executionType,
       command: formState.command.trim(),
       defaultArgs: parseList(formState.defaultArgs),
@@ -89,102 +113,175 @@ export function CustomToolForm({ initialValue, onSubmit, onCancel, isSaving }: C
   };
 
   return (
-    <form className="tool-form" onSubmit={handleSubmit}>
-      <div className="tool-form__header">
+    <form onSubmit={handleSubmit} className="space-y-6">
+      <div className="flex items-start justify-between gap-4">
         <div>
-          <p className="tool-card__eyebrow">{title}</p>
-          <h3>{formState.displayName || "カスタムAIツール"}</h3>
+          <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+            {title}
+          </p>
+          <h3 className="mt-1 text-lg font-semibold">
+            {formState.displayName || "カスタムAIツール"}
+          </h3>
         </div>
-        <div className="tool-form__controls">
-          <button type="button" className="button button--ghost" onClick={onCancel} disabled={isSaving}>
+        <div className="flex gap-2">
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={onCancel}
+            disabled={isSaving}
+          >
             キャンセル
-          </button>
-          <button type="submit" className="button button--primary" disabled={isSaving}>
+          </Button>
+          <Button type="submit" disabled={isSaving}>
             {isSaving ? "保存中..." : "保存"}
-          </button>
+          </Button>
         </div>
       </div>
 
-      <div className="form-grid">
-        <label className="form-field">
-          <span>ツールID *</span>
-          <input
+      <div className="grid gap-4 sm:grid-cols-2">
+        <div className="space-y-2">
+          <label className="text-sm font-medium">ツールID *</label>
+          <Input
             type="text"
             value={formState.id}
             onChange={handleChange("id")}
             disabled={Boolean(initialValue)}
           />
-          {errors.id && <p className="form-field__error">{errors.id}</p>}
-        </label>
+          {errors.id && <p className="text-xs text-destructive">{errors.id}</p>}
+        </div>
 
-        <label className="form-field">
-          <span>表示名 *</span>
-          <input type="text" value={formState.displayName} onChange={handleChange("displayName")} />
-          {errors.displayName && <p className="form-field__error">{errors.displayName}</p>}
-        </label>
+        <div className="space-y-2">
+          <label className="text-sm font-medium">表示名 *</label>
+          <Input
+            type="text"
+            value={formState.displayName}
+            onChange={handleChange("displayName")}
+          />
+          {errors.displayName && (
+            <p className="text-xs text-destructive">{errors.displayName}</p>
+          )}
+        </div>
 
-        <label className="form-field">
-          <span>アイコン (任意)</span>
-          <input type="text" value={formState.icon} onChange={handleChange("icon")} maxLength={2} />
-        </label>
+        <div className="space-y-2">
+          <label className="text-sm font-medium">アイコン (任意)</label>
+          <Input
+            type="text"
+            value={formState.icon}
+            onChange={handleChange("icon")}
+            maxLength={2}
+          />
+        </div>
 
-        <label className="form-field">
-          <span>説明 (任意)</span>
-          <input type="text" value={formState.description} onChange={handleChange("description")} />
-        </label>
+        <div className="space-y-2">
+          <label className="text-sm font-medium">説明 (任意)</label>
+          <Input
+            type="text"
+            value={formState.description}
+            onChange={handleChange("description")}
+          />
+        </div>
 
-        <label className="form-field">
-          <span>実行タイプ *</span>
-          <select value={formState.executionType} onChange={handleChange("executionType")}
-            disabled={Boolean(initialValue)}>
-            <option value="path">path (絶対パス)</option>
-            <option value="bunx">bunx (パッケージ)</option>
-            <option value="command">command (PATH)</option>
-          </select>
-        </label>
+        <div className="space-y-2">
+          <label className="text-sm font-medium">実行タイプ *</label>
+          <Select
+            value={formState.executionType}
+            onValueChange={handleSelectChange("executionType")}
+            disabled={Boolean(initialValue)}
+          >
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="path">path (絶対パス)</SelectItem>
+              <SelectItem value="bunx">bunx (パッケージ)</SelectItem>
+              <SelectItem value="command">command (PATH)</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
 
-        <label className="form-field">
-          <span>{formState.executionType === "bunx" ? "パッケージ名" : "コマンド"} *</span>
-          <input type="text" value={formState.command} onChange={handleChange("command")} />
-          {errors.command && <p className="form-field__error">{errors.command}</p>}
-        </label>
+        <div className="space-y-2">
+          <label className="text-sm font-medium">
+            {formState.executionType === "bunx" ? "パッケージ名" : "コマンド"} *
+          </label>
+          <Input
+            type="text"
+            value={formState.command}
+            onChange={handleChange("command")}
+          />
+          {errors.command && (
+            <p className="text-xs text-destructive">{errors.command}</p>
+          )}
+        </div>
       </div>
 
-      <div className="form-grid">
-        <label className="form-field form-field--stacked">
-          <span>defaultArgs (改行区切り)</span>
-          <textarea value={formState.defaultArgs} onChange={handleChange("defaultArgs")} rows={2} />
-        </label>
+      <div className="grid gap-4 sm:grid-cols-2">
+        <div className="space-y-2">
+          <label className="text-sm font-medium">
+            defaultArgs (改行区切り)
+          </label>
+          <textarea
+            value={formState.defaultArgs}
+            onChange={handleChange("defaultArgs")}
+            rows={2}
+            className="flex w-full rounded-md border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+          />
+        </div>
 
-        <label className="form-field form-field--stacked">
-          <span>permissionSkipArgs (改行区切り)</span>
+        <div className="space-y-2">
+          <label className="text-sm font-medium">
+            permissionSkipArgs (改行区切り)
+          </label>
           <textarea
             value={formState.permissionSkipArgs}
-            onChange={handleChange("permissionSkipArgs")} rows={2}
+            onChange={handleChange("permissionSkipArgs")}
+            rows={2}
+            className="flex w-full rounded-md border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
           />
-        </label>
+        </div>
       </div>
 
-      <div className="form-grid form-grid--thirds">
-        <label className="form-field form-field--stacked">
-          <span>normalモード引数</span>
-          <textarea value={formState.modeNormal} onChange={handleChange("modeNormal")} rows={3} />
-        </label>
-        <label className="form-field form-field--stacked">
-          <span>continueモード引数</span>
-          <textarea value={formState.modeContinue} onChange={handleChange("modeContinue")} rows={3} />
-        </label>
-        <label className="form-field form-field--stacked">
-          <span>resumeモード引数</span>
-          <textarea value={formState.modeResume} onChange={handleChange("modeResume")} rows={3} />
-        </label>
+      <div className="grid gap-4 sm:grid-cols-3">
+        <div className="space-y-2">
+          <label className="text-sm font-medium">normalモード引数</label>
+          <textarea
+            value={formState.modeNormal}
+            onChange={handleChange("modeNormal")}
+            rows={3}
+            className="flex w-full rounded-md border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+          />
+        </div>
+        <div className="space-y-2">
+          <label className="text-sm font-medium">continueモード引数</label>
+          <textarea
+            value={formState.modeContinue}
+            onChange={handleChange("modeContinue")}
+            rows={3}
+            className="flex w-full rounded-md border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+          />
+        </div>
+        <div className="space-y-2">
+          <label className="text-sm font-medium">resumeモード引数</label>
+          <textarea
+            value={formState.modeResume}
+            onChange={handleChange("modeResume")}
+            rows={3}
+            className="flex w-full rounded-md border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+          />
+        </div>
       </div>
 
-      <label className="form-field form-field--stacked">
-        <span>環境変数 (key=value を改行で記述)</span>
-        <textarea value={formState.env} onChange={handleChange("env")} rows={3} />
-        {errors.env && <p className="form-field__error">{errors.env}</p>}
-      </label>
+      <div className="space-y-2">
+        <label className="text-sm font-medium">
+          環境変数 (key=value を改行で記述)
+        </label>
+        <textarea
+          value={formState.env}
+          onChange={handleChange("env")}
+          rows={3}
+          className="flex w-full rounded-md border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+        />
+        {errors.env && <p className="text-xs text-destructive">{errors.env}</p>}
+      </div>
     </form>
   );
 }

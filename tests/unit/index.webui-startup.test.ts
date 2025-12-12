@@ -15,7 +15,11 @@ describe("main() - Web UI server startup (SPEC-c8e7a5b2)", () => {
   let consoleInfoSpy: ReturnType<typeof vi.spyOn>;
   let originalEnv: NodeJS.ProcessEnv;
   let startWebServerMock: ReturnType<typeof vi.fn>;
-  let appLoggerMock: { info: ReturnType<typeof vi.fn>; warn: ReturnType<typeof vi.fn>; error: ReturnType<typeof vi.fn> };
+  let appLoggerMock: {
+    info: ReturnType<typeof vi.fn>;
+    warn: ReturnType<typeof vi.fn>;
+    error: ReturnType<typeof vi.fn>;
+  };
 
   beforeEach(() => {
     vi.resetModules();
@@ -91,7 +95,9 @@ describe("main() - Web UI server startup (SPEC-c8e7a5b2)", () => {
 
     // Mock ink to prevent infinite loops
     const renderSpy = vi.fn(
-      (element: { props?: { onExit?: (value?: unknown) => void } } | undefined) => {
+      (
+        element: { props?: { onExit?: (value?: unknown) => void } } | undefined,
+      ) => {
         // Immediately exit with undefined to stop the loop
         element?.props?.onExit?.(undefined);
         return {
@@ -139,9 +145,9 @@ describe("main() - Web UI server startup (SPEC-c8e7a5b2)", () => {
     await main();
 
     const logCalls = consoleLogSpy.mock.calls.map(([msg]) => String(msg ?? ""));
-    expect(
-      logCalls.some((msg) => msg.includes("http://localhost:3000")),
-    ).toBe(true);
+    expect(logCalls.some((msg) => msg.includes("http://localhost:3000"))).toBe(
+      true,
+    );
   });
 
   it("T013: PORT環境変数がメッセージに反映される", async () => {
@@ -152,9 +158,9 @@ describe("main() - Web UI server startup (SPEC-c8e7a5b2)", () => {
     await main();
 
     const logCalls = consoleLogSpy.mock.calls.map(([msg]) => String(msg ?? ""));
-    expect(
-      logCalls.some((msg) => msg.includes("http://localhost:8080")),
-    ).toBe(true);
+    expect(logCalls.some((msg) => msg.includes("http://localhost:8080"))).toBe(
+      true,
+    );
   });
 
   it("T014: エラー時にappLogger.warnが呼び出される", async () => {
@@ -188,11 +194,9 @@ describe("main() - Web UI server startup (SPEC-c8e7a5b2)", () => {
     setupMocks({ isGitRepository: false });
 
     // Mock process.exit to prevent test from exiting
-    const processExitSpy = vi
-      .spyOn(process, "exit")
-      .mockImplementation((() => {
-        throw new Error("process.exit called");
-      }) as unknown as (code?: number) => never);
+    const processExitSpy = vi.spyOn(process, "exit").mockImplementation((() => {
+      throw new Error("process.exit called");
+    }) as unknown as (code?: number) => never);
 
     const { main } = await import("../../src/index.js");
 

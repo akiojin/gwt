@@ -28,4 +28,3 @@ declare module "trayicon" {
 
   export default trayicon;
 }
-

@@ -16,7 +16,13 @@ describe("resolveContinueSessionId", () => {
 
   it("prefers latest matching history entry", async () => {
     const history: ToolSessionEntry[] = [
-      { branch, toolId, worktreePath: "/wt1", toolLabel: "Codex", timestamp: 1 },
+      {
+        branch,
+        toolId,
+        worktreePath: "/wt1",
+        toolLabel: "Codex",
+        timestamp: 1,
+      },
       {
         branch,
         toolId,
@@ -45,7 +51,13 @@ describe("resolveContinueSessionId", () => {
 
   it("falls back to lastSessionId when history lacks sessionId", async () => {
     const history: ToolSessionEntry[] = [
-      { branch, toolId, worktreePath: "/wt1", toolLabel: "Codex", timestamp: 1 },
+      {
+        branch,
+        toolId,
+        worktreePath: "/wt1",
+        toolLabel: "Codex",
+        timestamp: 1,
+      },
     ];
     const sessionData = {
       lastBranch: branch,
@@ -103,7 +115,13 @@ describe("resolveContinueSessionId", () => {
 
   it("findLatestBranchSession returns most recent entry for branch", () => {
     const history: ToolSessionEntry[] = [
-      { branch: "feature/other", toolId, toolLabel: "Codex", worktreePath: "/a", timestamp: 1 },
+      {
+        branch: "feature/other",
+        toolId,
+        toolLabel: "Codex",
+        worktreePath: "/a",
+        timestamp: 1,
+      },
       {
         branch,
         toolId,

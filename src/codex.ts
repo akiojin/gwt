@@ -86,11 +86,6 @@ export async function launchCodexCLI(
         ? options.sessionId.trim()
         : null;
 
-    // Start polling session files immediately to catch the session created right after launch.
-    const sessionProbe = waitForCodexSessionId({ startedAt, cwd: worktreePath }).catch(
-      () => null,
-    );
-
     switch (options.mode) {
       case "continue":
         if (resumeSessionId) {

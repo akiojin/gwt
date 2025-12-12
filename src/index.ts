@@ -701,7 +701,8 @@ export async function handleAIToolWorkflow(
 
     if (!finalSessionId && tool === "claude-code") {
       try {
-        finalSessionId = (await findLatestClaudeSessionId(worktreePath)) ?? null;
+        finalSessionId =
+          (await findLatestClaudeSessionId(worktreePath)) ?? null;
       } catch {
         finalSessionId = null;
       }

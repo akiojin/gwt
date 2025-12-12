@@ -445,7 +445,9 @@ describe("BranchListScreen", () => {
       stdin.write(" ");
     });
 
-    const frame = stripControlSequences(stripAnsi(renderResult.lastFrame() ?? ""));
+    const frame = stripControlSequences(
+      stripAnsi(renderResult.lastFrame() ?? ""),
+    );
     expect(frame).toContain("[*] 🟢 🛡");
     expect(frame).toContain("feature/login");
   });
