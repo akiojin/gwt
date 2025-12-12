@@ -16,4 +16,3 @@
 - CLI UI: `src/cli/ui/components/screens/BranchListScreen.tsx`
 - 依存: 新規 npm 依存（軽量トレイライブラリ）
 - テスト: `tests/unit` と `src/cli/ui/__tests__`
-

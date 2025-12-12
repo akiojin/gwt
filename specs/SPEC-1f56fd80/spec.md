@@ -92,4 +92,3 @@
 - 既存仕様: SPEC-c8e7a5b2 (CLI 起動時 Web UI 自動起動)
 - 既存実装: `src/web/server/index.ts`（Web UI サーバー）
 - 既存実装: `src/cli/ui/components/screens/BranchListScreen.tsx`
-
