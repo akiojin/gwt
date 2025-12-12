@@ -4,7 +4,6 @@
  * AI Toolセッション関連のREST APIエンドポイント。
  */
 
-import type { FastifyInstance } from "fastify";
 import type { PTYManager } from "../pty/manager.js";
 import { AIToolResolutionError } from "../../../services/aiToolResolver.js";
 import type {
@@ -12,12 +11,15 @@ import type {
   AIToolSession,
   StartSessionRequest,
 } from "../../../types/api.js";
+import { saveSession } from "../../../config/index.js";
+import { execa } from "execa";
+import type { WebFastifyInstance } from "../types.js";
 
 /**
  * セッション関連のルートを登録
  */
 export async function registerSessionRoutes(
-  fastify: FastifyInstance,
+  fastify: WebFastifyInstance,
   ptyManager: PTYManager,
 ): Promise<void> {
   // GET /api/sessions - すべてのセッション一覧を取得
@@ -95,6 +97,44 @@ export async function registerSessionRoutes(
         mode,
         spawnOptions,
       );
+
+      // 履歴を永続化（best-effort）
+      try {
+        const { stdout: repoRoot } = await execa(
+          "git",
+          ["rev-parse", "--show-toplevel"],
+          {
+            cwd: worktreePath,
+          },
+        );
+        let branchName: string | null = null;
+        try {
+          const { stdout: branchStdout } = await execa(
+            "git",
+            ["rev-parse", "--abbrev-ref", "HEAD"],
+            { cwd: worktreePath },
+          );
+          branchName = branchStdout.trim() || null;
+        } catch {
+          branchName = null;
+        }
+
+        await saveSession({
+          lastWorktreePath: worktreePath,
+          lastBranch: branchName,
+          lastUsedTool:
+            toolType === "custom" ? (toolName ?? "custom") : toolType,
+          toolLabel:
+            toolType === "custom"
+              ? (toolName ?? "Custom")
+              : toolLabelFromType(toolType),
+          mode,
+          timestamp: Date.now(),
+          repositoryRoot: repoRoot.trim(),
+        });
+      } catch {
+        // ignore persistence errors
+      }
 
       reply.code(201);
       return { success: true, data: session };
@@ -179,4 +219,10 @@ export async function registerSessionRoutes(
       };
     }
   });
+}
+
+function toolLabelFromType(toolType: "claude-code" | "codex-cli" | "custom") {
+  if (toolType === "claude-code") return "Claude";
+  if (toolType === "codex-cli") return "Codex";
+  return "Custom";
 }

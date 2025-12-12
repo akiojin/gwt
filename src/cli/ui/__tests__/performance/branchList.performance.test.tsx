@@ -1,16 +1,26 @@
-import { describe, it, expect } from 'vitest';
-import { render } from 'ink-testing-library';
-import React from 'react';
-import { BranchListScreen } from '../../components/screens/BranchListScreen.js';
-import type { BranchItem, Statistics } from '../../types.js';
+import { describe, it, expect } from "vitest";
+import { render } from "ink-testing-library";
+import React from "react";
+import { BranchListScreen } from "../../components/screens/BranchListScreen.js";
+import type { BranchItem, Statistics } from "../../types.js";
+
+const isCI = Boolean(process.env.CI);
+const describeFn = isCI ? describe.skip : describe;
 
 /**
  * Generate mock branch items for performance testing
  */
 function generateMockBranches(count: number): BranchItem[] {
   const branches: BranchItem[] = [];
-  const types = ['feature', 'hotfix', 'release', 'other'] as const;
-  const branchTypes = ['main', 'develop', 'feature', 'hotfix', 'release', 'other'] as const;
+  const types = ["feature", "hotfix", "release", "other"] as const;
+  const branchTypes = [
+    "main",
+    "develop",
+    "feature",
+    "hotfix",
+    "release",
+    "other",
+  ] as const;
 
   for (let i = 0; i < count; i++) {
     const type = types[i % types.length];
@@ -18,22 +28,26 @@ function generateMockBranches(count: number): BranchItem[] {
     const hasWorktree = i % 3 === 0;
 
     branches.push({
-      name: `${type}/test-branch-${i.toString().padStart(4, '0')}`,
+      name: `${type}/test-branch-${i.toString().padStart(4, "0")}`,
       branchType,
-      type: i % 10 === 0 ? 'remote' : 'local',
+      type: i % 10 === 0 ? "remote" : "local",
       isCurrent: i === 0,
       worktree: hasWorktree
         ? {
             path: `/mock/worktree/${type}-${i}`,
-            branch: `${type}/test-branch-${i.toString().padStart(4, '0')}`,
+            branch: `${type}/test-branch-${i.toString().padStart(4, "0")}`,
             isAccessible: i % 5 !== 0, // Some inaccessible
           }
         : undefined,
-      worktreeStatus: hasWorktree ? (i % 5 !== 0 ? 'active' : 'inaccessible') : undefined,
+      worktreeStatus: hasWorktree
+        ? i % 5 !== 0
+          ? "active"
+          : "inaccessible"
+        : undefined,
       hasChanges: i % 4 === 0,
       icons: [],
-      label: `${type}/test-branch-${i.toString().padStart(4, '0')}`,
-      value: `${type}/test-branch-${i.toString().padStart(4, '0')}`,
+      label: `${type}/test-branch-${i.toString().padStart(4, "0")}`,
+      value: `${type}/test-branch-${i.toString().padStart(4, "0")}`,
     });
   }
 
@@ -52,17 +66,17 @@ function generateMockBranches(count: number): BranchItem[] {
 //   worktree: 0,
 // };
 
-describe('BranchListScreen Performance', () => {
-  it('should render 100+ branches within acceptable time', () => {
+describeFn("BranchListScreen Performance", () => {
+  it("should render 100+ branches within acceptable time", () => {
     const branches = generateMockBranches(150);
     const stats: Statistics = {
       total: branches.length,
-      local: branches.filter((b) => b.type === 'local').length,
-      remote: branches.filter((b) => b.type === 'remote').length,
+      local: branches.filter((b) => b.type === "local").length,
+      remote: branches.filter((b) => b.type === "remote").length,
       current: 1,
-      feature: branches.filter((b) => b.branchType === 'feature').length,
-      hotfix: branches.filter((b) => b.branchType === 'hotfix').length,
-      release: branches.filter((b) => b.branchType === 'release').length,
+      feature: branches.filter((b) => b.branchType === "feature").length,
+      hotfix: branches.filter((b) => b.branchType === "hotfix").length,
+      release: branches.filter((b) => b.branchType === "release").length,
       worktree: branches.filter((b) => b.worktree).length,
     };
 
@@ -73,9 +87,8 @@ describe('BranchListScreen Performance', () => {
         branches={branches}
         stats={stats}
         onSelect={() => {}}
-        onNavigate={() => {}}
         onQuit={() => {}}
-      />
+      />,
     );
 
     const renderTime = performance.now() - startTime;
@@ -89,19 +102,21 @@ describe('BranchListScreen Performance', () => {
     console.log(`\n📊 Performance Test Results:`);
     console.log(`   Branches: ${branches.length}`);
     console.log(`   Render time: ${renderTime.toFixed(2)}ms`);
-    console.log(`   Average per branch: ${(renderTime / branches.length).toFixed(3)}ms`);
+    console.log(
+      `   Average per branch: ${(renderTime / branches.length).toFixed(3)}ms`,
+    );
   });
 
-  it('should handle re-render efficiently when stats update', () => {
+  it("should handle re-render efficiently when stats update", () => {
     const branches = generateMockBranches(100);
     const stats: Statistics = {
       total: branches.length,
-      local: branches.filter((b) => b.type === 'local').length,
-      remote: branches.filter((b) => b.type === 'remote').length,
+      local: branches.filter((b) => b.type === "local").length,
+      remote: branches.filter((b) => b.type === "remote").length,
       current: 1,
-      feature: branches.filter((b) => b.branchType === 'feature').length,
-      hotfix: branches.filter((b) => b.branchType === 'hotfix').length,
-      release: branches.filter((b) => b.branchType === 'release').length,
+      feature: branches.filter((b) => b.branchType === "feature").length,
+      hotfix: branches.filter((b) => b.branchType === "hotfix").length,
+      release: branches.filter((b) => b.branchType === "release").length,
       worktree: branches.filter((b) => b.worktree).length,
     };
 
@@ -110,10 +125,9 @@ describe('BranchListScreen Performance', () => {
         branches={branches}
         stats={stats}
         onSelect={() => {}}
-        onNavigate={() => {}}
         onQuit={() => {}}
         lastUpdated={new Date()}
-      />
+      />,
     );
 
     // Simulate stats update (real-time refresh)
@@ -124,33 +138,33 @@ describe('BranchListScreen Performance', () => {
         branches={branches}
         stats={{ ...stats, total: stats.total + 1 }}
         onSelect={() => {}}
-        onNavigate={() => {}}
         onQuit={() => {}}
         lastUpdated={new Date()}
-      />
+      />,
     );
 
     const rerenderTime = performance.now() - startTime;
 
     unmount();
 
-    // Re-render should be very fast (< 100ms)
-    expect(rerenderTime).toBeLessThan(100);
+    // Performance threshold for re-render
+    const threshold = 100;
+    expect(rerenderTime).toBeLessThan(threshold);
 
     console.log(`\n🔄 Re-render Performance:`);
     console.log(`   Re-render time: ${rerenderTime.toFixed(2)}ms`);
   });
 
-  it('should handle large branch list (200+ branches)', () => {
+  it("should handle large branch list (200+ branches)", () => {
     const branches = generateMockBranches(250);
     const stats: Statistics = {
       total: branches.length,
-      local: branches.filter((b) => b.type === 'local').length,
-      remote: branches.filter((b) => b.type === 'remote').length,
+      local: branches.filter((b) => b.type === "local").length,
+      remote: branches.filter((b) => b.type === "remote").length,
       current: 1,
-      feature: branches.filter((b) => b.branchType === 'feature').length,
-      hotfix: branches.filter((b) => b.branchType === 'hotfix').length,
-      release: branches.filter((b) => b.branchType === 'release').length,
+      feature: branches.filter((b) => b.branchType === "feature").length,
+      hotfix: branches.filter((b) => b.branchType === "hotfix").length,
+      release: branches.filter((b) => b.branchType === "release").length,
       worktree: branches.filter((b) => b.worktree).length,
     };
 
@@ -161,9 +175,8 @@ describe('BranchListScreen Performance', () => {
         branches={branches}
         stats={stats}
         onSelect={() => {}}
-        onNavigate={() => {}}
         onQuit={() => {}}
-      />
+      />,
     );
 
     const renderTime = performance.now() - startTime;

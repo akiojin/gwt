@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { SelectionResult } from "../../src/ui/components/App.js";
-import type { ExecutionMode } from "../../src/ui/components/screens/ExecutionModeSelectorScreen.js";
+import type { SelectionResult } from "../../src/cli/ui/components/App.js";
+import type { ExecutionMode } from "../../src/cli/ui/components/screens/ExecutionModeSelectorScreen.js";
 
 const {
   execaMock,
@@ -30,6 +30,7 @@ const {
   getRepositoryRootMock: vi.fn(async () => "/repo"),
   getCurrentBranchMock: vi.fn(async () => "develop"),
   installDependenciesMock: vi.fn(async () => ({
+    skipped: false as const,
     manager: "bun" as const,
     lockfile: "/repo/bun.lock",
   })),
@@ -48,6 +49,8 @@ const DependencyInstallErrorMock = vi.hoisted(
 const waitForUserAcknowledgementMock = vi.hoisted(() =>
   vi.fn<() => Promise<void>>(),
 );
+
+const waitForEnterMock = vi.hoisted(() => vi.fn<() => Promise<void>>());
 
 vi.mock("execa", () => ({
   execa: execaMock,
@@ -100,6 +103,15 @@ vi.mock("../../src/claude.js", () => ({
 
 vi.mock("../../src/codex.js", () => ({
   launchCodexCLI: vi.fn(async () => undefined),
+  CodexError: class CodexError extends Error {
+    constructor(
+      message: string,
+      public cause?: unknown,
+    ) {
+      super(message);
+      this.name = "CodexError";
+    }
+  },
 }));
 
 vi.mock("../../src/launcher.js", () => ({
@@ -111,6 +123,7 @@ vi.mock("../../src/config/tools.js", () => ({
     id: "claude-code",
     displayName: "Claude Code",
   })),
+  getSharedEnvironment: vi.fn(async () => ({})),
 }));
 
 vi.mock("../../src/config/index.js", () => ({
@@ -127,6 +140,16 @@ vi.mock("../../src/utils/terminal.js", async () => {
   };
 });
 
+vi.mock("../../src/utils/prompt.js", async () => {
+  const actual = await vi.importActual<
+    typeof import("../../src/utils/prompt.js")
+  >("../../src/utils/prompt.js");
+  return {
+    ...actual,
+    waitForEnter: waitForEnterMock,
+  };
+});
+
 // Import after mocks are set up
 import { handleAIToolWorkflow } from "../../src/index.js";
 
@@ -136,6 +159,7 @@ beforeEach(() => {
   fetchAllRemotesMock.mockClear();
   pullFastForwardMock.mockClear();
   getBranchDivergenceStatusesMock.mockClear();
+  getBranchDivergenceStatusesMock.mockResolvedValue([]);
   launchClaudeCodeMock.mockClear();
   saveSessionMock.mockClear();
   worktreeExistsMock.mockClear();
@@ -145,11 +169,14 @@ beforeEach(() => {
   switchToProtectedBranchMock.mockClear();
   installDependenciesMock.mockClear();
   installDependenciesMock.mockResolvedValue({
+    skipped: false,
     manager: "bun",
     lockfile: "/repo/bun.lock",
   });
   waitForUserAcknowledgementMock.mockClear();
   waitForUserAcknowledgementMock.mockResolvedValue(undefined);
+  waitForEnterMock.mockClear();
+  waitForEnterMock.mockResolvedValue(undefined);
   switchToProtectedBranchMock.mockResolvedValue("local");
   branchExistsMock.mockResolvedValue(true);
   getCurrentBranchMock.mockResolvedValue("develop");
@@ -164,6 +191,7 @@ describe("handleAIToolWorkflow - protected branches", () => {
       tool: "claude-code",
       mode: "normal" as ExecutionMode,
       skipPermissions: true,
+      model: "sonnet",
     };
     await handleAIToolWorkflow(selection);
 
@@ -198,6 +226,7 @@ describe("handleAIToolWorkflow - protected branches", () => {
       tool: "claude-code",
       mode: "normal" as ExecutionMode,
       skipPermissions: false,
+      model: "sonnet",
     };
     await handleAIToolWorkflow(selection);
 
@@ -230,6 +259,7 @@ describe("handleAIToolWorkflow - divergence handling", () => {
       tool: "claude-code",
       mode: "normal" as ExecutionMode,
       skipPermissions: false,
+      model: "sonnet",
     };
 
     await handleAIToolWorkflow(selection);
@@ -255,6 +285,7 @@ describe("handleAIToolWorkflow - git failure tolerance", () => {
       tool: "claude-code",
       mode: "normal" as ExecutionMode,
       skipPermissions: false,
+      model: "sonnet",
     };
 
     await handleAIToolWorkflow(selection);
@@ -275,13 +306,14 @@ describe("handleAIToolWorkflow - dependency installation", () => {
       tool: "claude-code",
       mode: "normal" as ExecutionMode,
       skipPermissions: true,
+      model: "sonnet",
     };
 
     await handleAIToolWorkflow(selection);
     expect(installDependenciesMock).toHaveBeenCalledWith("/repo");
   });
 
-  it("prompts the user and aborts when install fails", async () => {
+  it("prompts the user but continues when install fails", async () => {
     installDependenciesMock.mockRejectedValueOnce(
       new DependencyInstallErrorMock("install failed"),
     );
@@ -293,13 +325,14 @@ describe("handleAIToolWorkflow - dependency installation", () => {
       tool: "claude-code",
       mode: "normal" as ExecutionMode,
       skipPermissions: false,
+      model: "sonnet",
     };
 
     await handleAIToolWorkflow(selection);
 
     expect(waitForUserAcknowledgementMock).toHaveBeenCalled();
-    expect(launchClaudeCodeMock).not.toHaveBeenCalled();
-    expect(saveSessionMock).not.toHaveBeenCalled();
+    expect(launchClaudeCodeMock).toHaveBeenCalled();
+    expect(saveSessionMock).toHaveBeenCalled();
   });
 
   it("continues when dependency install is skipped due to missing binary", async () => {
@@ -307,6 +340,7 @@ describe("handleAIToolWorkflow - dependency installation", () => {
       manager: "bun",
       lockfile: "/repo/bun.lock",
       skipped: true,
+      reason: "missing-binary",
     });
 
     const selection: SelectionResult = {
@@ -316,11 +350,82 @@ describe("handleAIToolWorkflow - dependency installation", () => {
       tool: "claude-code",
       mode: "normal" as ExecutionMode,
       skipPermissions: false,
+      model: "sonnet",
     };
 
     await handleAIToolWorkflow(selection);
 
     expect(installDependenciesMock).toHaveBeenCalled();
     expect(waitForUserAcknowledgementMock).not.toHaveBeenCalled();
+  });
+
+  it("warns and continues when dependency metadata is missing", async () => {
+    installDependenciesMock.mockResolvedValueOnce({
+      manager: null,
+      lockfile: null,
+      skipped: true,
+      reason: "missing-lockfile",
+    });
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const selection: SelectionResult = {
+      branch: "feature/test",
+      displayName: "feature/test",
+      branchType: "local",
+      tool: "claude-code",
+      mode: "normal" as ExecutionMode,
+      skipPermissions: false,
+      model: "sonnet",
+    };
+
+    await handleAIToolWorkflow(selection);
+
+    expect(installDependenciesMock).toHaveBeenCalled();
+    expect(waitForUserAcknowledgementMock).not.toHaveBeenCalled();
+    expect(launchClaudeCodeMock).toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "Skipping automatic install because no lockfiles",
+      ),
+    );
+
+    warnSpy.mockRestore();
+  });
+
+  it("warns with details when dependency installation fails", async () => {
+    installDependenciesMock.mockResolvedValueOnce({
+      manager: "bun",
+      lockfile: "/repo/bun.lock",
+      skipped: true,
+      reason: "install-failed",
+      message: "Dependency installation failed (bun). Command: bun install",
+    });
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const selection: SelectionResult = {
+      branch: "feature/test",
+      displayName: "feature/test",
+      branchType: "local",
+      tool: "claude-code",
+      mode: "normal" as ExecutionMode,
+      skipPermissions: false,
+      model: "sonnet",
+    };
+
+    await handleAIToolWorkflow(selection);
+
+    expect(installDependenciesMock).toHaveBeenCalled();
+    expect(waitForUserAcknowledgementMock).not.toHaveBeenCalled();
+    expect(launchClaudeCodeMock).toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Dependency installation failed via bun"),
+    );
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Details: Dependency installation failed"),
+    );
+
+    warnSpy.mockRestore();
   });
 });

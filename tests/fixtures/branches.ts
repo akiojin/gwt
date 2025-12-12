@@ -1,4 +1,4 @@
-import type { BranchInfo } from "../../src/ui/types";
+import type { BranchInfo } from "../../src/cli/ui/types";
 
 /**
  * テスト用のローカルブランチデータ
@@ -26,6 +26,12 @@ export const localBranches: BranchInfo[] = [
     name: "feature/dashboard",
     type: "local",
     branchType: "feature",
+    isCurrent: false,
+  },
+  {
+    name: "bugfix/null-pointer-exception",
+    type: "local",
+    branchType: "bugfix",
     isCurrent: false,
   },
   {

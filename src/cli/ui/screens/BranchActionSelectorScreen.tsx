@@ -46,7 +46,9 @@ export function BranchActionSelectorScreen({
     (mode === "protected" ? "Switch to root branch" : "Use existing branch");
   const secondaryActionLabel =
     secondaryLabel ??
-    (mode === "protected" ? "Create new branch from this branch" : "Create new branch");
+    (mode === "protected"
+      ? "Create new branch from this branch"
+      : "Create new branch");
 
   const items: SelectItem[] = [
     {
@@ -74,15 +76,18 @@ export function BranchActionSelectorScreen({
 
   // Footer actions
   const footerActions = [
-    { key: 'enter', description: 'Select' },
-    { key: 'esc', description: 'Back' },
+    { key: "enter", description: "Select" },
+    { key: "esc", description: "Back" },
   ];
 
   return (
     <Box flexDirection="column">
       <Box marginBottom={1}>
         <Text>
-          Selected branch: <Text bold color="cyan">{selectedBranch}</Text>
+          Selected branch:{" "}
+          <Text bold color="cyan">
+            {selectedBranch}
+          </Text>
         </Text>
       </Box>
       {infoMessage ? (

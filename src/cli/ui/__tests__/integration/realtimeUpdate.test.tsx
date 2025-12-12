@@ -1,12 +1,12 @@
 /**
  * @vitest-environment happy-dom
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render } from '@testing-library/react';
-import React from 'react';
-import { App } from '../../components/App.js';
-import { Window } from 'happy-dom';
-import type { BranchInfo } from '../../types.js';
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { render } from "@testing-library/react";
+import React from "react";
+import { App } from "../../components/App.js";
+import { Window } from "happy-dom";
+import type { BranchInfo } from "../../types.js";
 
 /**
  * Real-time update integration tests
@@ -15,19 +15,20 @@ import type { BranchInfo } from '../../types.js';
 
 // Mock useGitData hook
 const mockRefresh = vi.fn();
-vi.mock('../../hooks/useGitData.js', () => ({
+vi.mock("../../hooks/useGitData.js", () => ({
   useGitData: vi.fn(),
 }));
 
-import { useGitData } from '../../hooks/useGitData.js';
+import { useGitData } from "../../hooks/useGitData.js";
 const mockUseGitData = useGitData as ReturnType<typeof vi.fn>;
 
-describe('Real-time Update Integration', () => {
+describe("Real-time Update Integration", () => {
   beforeEach(() => {
     // Setup happy-dom
     const window = new Window();
-    globalThis.window = window as any;
-    globalThis.document = window.document as any;
+    globalThis.window = window as unknown as typeof globalThis.window;
+    globalThis.document =
+      window.document as unknown as typeof globalThis.document;
 
     // Reset mocks
     vi.clearAllMocks();
@@ -37,18 +38,18 @@ describe('Real-time Update Integration', () => {
     vi.restoreAllMocks();
   });
 
-  it('T084: should disable auto-refresh (manual refresh with r key)', () => {
+  it("T084: should disable auto-refresh (manual refresh with r key)", () => {
     const mockBranches: BranchInfo[] = [
       {
-        name: 'main',
-        branchType: 'main',
-        type: 'local',
+        name: "main",
+        branchType: "main",
+        type: "local",
         isCurrent: true,
       },
       {
-        name: 'feature/test-1',
-        branchType: 'feature',
-        type: 'local',
+        name: "feature/test-1",
+        branchType: "feature",
+        type: "local",
         isCurrent: false,
       },
     ];
@@ -71,18 +72,18 @@ describe('Real-time Update Integration', () => {
     });
   });
 
-  it('T085: should display updated statistics', () => {
+  it("T085: should display updated statistics", () => {
     const mockBranches: BranchInfo[] = [
       {
-        name: 'main',
-        branchType: 'main',
-        type: 'local',
+        name: "main",
+        branchType: "main",
+        type: "local",
         isCurrent: true,
       },
       {
-        name: 'feature/test-1',
-        branchType: 'feature',
-        type: 'local',
+        name: "feature/test-1",
+        branchType: "feature",
+        type: "local",
         isCurrent: false,
       },
     ];
@@ -101,15 +102,15 @@ describe('Real-time Update Integration', () => {
 
     // Initial state should show "Local: 2"
     expect(getByText(/Local:/i)).toBeDefined();
-    expect(getByText('2')).toBeDefined();
+    expect(getByText("2")).toBeDefined();
 
     // Simulate Git operation: add a new branch
     const updatedBranches: BranchInfo[] = [
       ...mockBranches,
       {
-        name: 'feature/test-2',
-        branchType: 'feature',
-        type: 'local',
+        name: "feature/test-2",
+        branchType: "feature",
+        type: "local",
         isCurrent: false,
       },
     ];
@@ -127,21 +128,21 @@ describe('Real-time Update Integration', () => {
     rerender(<App onExit={onExit} />);
 
     // Should now show "Local: 3"
-    expect(getByText('3')).toBeDefined();
+    expect(getByText("3")).toBeDefined();
   });
 
-  it('T086: should update statistics after Worktree creation', () => {
+  it("T086: should update statistics after Worktree creation", () => {
     const mockBranches: BranchInfo[] = [
       {
-        name: 'main',
-        branchType: 'main',
-        type: 'local',
+        name: "main",
+        branchType: "main",
+        type: "local",
         isCurrent: true,
       },
       {
-        name: 'feature/test-1',
-        branchType: 'feature',
-        type: 'local',
+        name: "feature/test-1",
+        branchType: "feature",
+        type: "local",
         isCurrent: false,
       },
     ];
@@ -161,24 +162,24 @@ describe('Real-time Update Integration', () => {
     // Initial state should show "Worktrees: 0"
     expect(getByText(/Worktrees:/i)).toBeDefined();
     // Verify the content contains Worktrees: 0
-    expect(container.textContent).toContain('Worktrees');
+    expect(container.textContent).toContain("Worktrees");
 
     // Simulate Worktree creation
     const branchesWithWorktree: BranchInfo[] = [
       {
-        name: 'main',
-        branchType: 'main',
-        type: 'local',
+        name: "main",
+        branchType: "main",
+        type: "local",
         isCurrent: true,
       },
       {
-        name: 'feature/test-1',
-        branchType: 'feature',
-        type: 'local',
+        name: "feature/test-1",
+        branchType: "feature",
+        type: "local",
         isCurrent: false,
         worktree: {
-          path: '/mock/worktree/feature-test-1',
-          branch: 'feature/test-1',
+          path: "/mock/worktree/feature-test-1",
+          branch: "feature/test-1",
           isAccessible: true,
         },
       },
@@ -188,8 +189,8 @@ describe('Real-time Update Integration', () => {
       branches: branchesWithWorktree,
       worktrees: [
         {
-          path: '/mock/worktree/feature-test-1',
-          branch: 'feature/test-1',
+          path: "/mock/worktree/feature-test-1",
+          branch: "feature/test-1",
           isAccessible: true,
         },
       ],
@@ -205,15 +206,15 @@ describe('Real-time Update Integration', () => {
     // Should now show "Worktrees: 1"
     expect(getByText(/Worktrees:/i)).toBeDefined();
     // Verify worktree count increased by checking container content
-    expect(container.textContent).toContain('Worktrees');
+    expect(container.textContent).toContain("Worktrees");
   });
 
-  it('should display lastUpdated timestamp', () => {
+  it("should display lastUpdated timestamp", () => {
     const mockBranches: BranchInfo[] = [
       {
-        name: 'main',
-        branchType: 'main',
-        type: 'local',
+        name: "main",
+        branchType: "main",
+        type: "local",
         isCurrent: true,
       },
     ];
@@ -235,8 +236,8 @@ describe('Real-time Update Integration', () => {
     expect(getByText(/Updated:/i)).toBeDefined();
   });
 
-  it('should handle refresh errors gracefully', () => {
-    const error = new Error('Git command failed');
+  it("should handle refresh errors gracefully", () => {
+    const error = new Error("Git command failed");
     mockUseGitData.mockReturnValue({
       branches: [],
       worktrees: [],
@@ -258,25 +259,25 @@ describe('Real-time Update Integration', () => {
    * T082-3: Cursor position retention during auto-refresh
    * Tests that cursor position is maintained when data is auto-refreshed
    */
-  describe('Cursor Position Retention (T082-3)', () => {
-    it('should maintain cursor position when branches data is refreshed with same content', () => {
+  describe("Cursor Position Retention (T082-3)", () => {
+    it("should maintain cursor position when branches data is refreshed with same content", () => {
       const mockBranches: BranchInfo[] = [
         {
-          name: 'main',
-          branchType: 'main',
-          type: 'local',
+          name: "main",
+          branchType: "main",
+          type: "local",
           isCurrent: true,
         },
         {
-          name: 'feature/test-1',
-          branchType: 'feature',
-          type: 'local',
+          name: "feature/test-1",
+          branchType: "feature",
+          type: "local",
           isCurrent: false,
         },
         {
-          name: 'feature/test-2',
-          branchType: 'feature',
-          type: 'local',
+          name: "feature/test-2",
+          branchType: "feature",
+          type: "local",
           isCurrent: false,
         },
       ];
@@ -299,21 +300,21 @@ describe('Real-time Update Integration', () => {
       // Create new array with same content (simulating auto-refresh)
       const refreshedBranches: BranchInfo[] = [
         {
-          name: 'main',
-          branchType: 'main',
-          type: 'local',
+          name: "main",
+          branchType: "main",
+          type: "local",
           isCurrent: true,
         },
         {
-          name: 'feature/test-1',
-          branchType: 'feature',
-          type: 'local',
+          name: "feature/test-1",
+          branchType: "feature",
+          type: "local",
           isCurrent: false,
         },
         {
-          name: 'feature/test-2',
-          branchType: 'feature',
-          type: 'local',
+          name: "feature/test-2",
+          branchType: "feature",
+          type: "local",
           isCurrent: false,
         },
       ];
@@ -341,18 +342,18 @@ describe('Real-time Update Integration', () => {
       // - Cursor position might be reset
     });
 
-    it('should maintain cursor position when a branch is added at the end', () => {
+    it("should maintain cursor position when a branch is added at the end", () => {
       const initialBranches: BranchInfo[] = [
         {
-          name: 'main',
-          branchType: 'main',
-          type: 'local',
+          name: "main",
+          branchType: "main",
+          type: "local",
           isCurrent: true,
         },
         {
-          name: 'feature/test-1',
-          branchType: 'feature',
-          type: 'local',
+          name: "feature/test-1",
+          branchType: "feature",
+          type: "local",
           isCurrent: false,
         },
       ];
@@ -373,9 +374,9 @@ describe('Real-time Update Integration', () => {
       const updatedBranches: BranchInfo[] = [
         ...initialBranches,
         {
-          name: 'feature/test-2',
-          branchType: 'feature',
-          type: 'local',
+          name: "feature/test-2",
+          branchType: "feature",
+          type: "local",
           isCurrent: false,
         },
       ];
@@ -394,24 +395,24 @@ describe('Real-time Update Integration', () => {
       // Cursor should remain on the same item (e.g., index 1 should still point to 'feature/test-1')
     });
 
-    it('should adjust cursor position when current selected branch is deleted', () => {
+    it("should adjust cursor position when current selected branch is deleted", () => {
       const initialBranches: BranchInfo[] = [
         {
-          name: 'main',
-          branchType: 'main',
-          type: 'local',
+          name: "main",
+          branchType: "main",
+          type: "local",
           isCurrent: true,
         },
         {
-          name: 'feature/test-1',
-          branchType: 'feature',
-          type: 'local',
+          name: "feature/test-1",
+          branchType: "feature",
+          type: "local",
           isCurrent: false,
         },
         {
-          name: 'feature/test-2',
-          branchType: 'feature',
-          type: 'local',
+          name: "feature/test-2",
+          branchType: "feature",
+          type: "local",
           isCurrent: false,
         },
       ];
@@ -431,15 +432,15 @@ describe('Real-time Update Integration', () => {
       // Remove middle branch (cursor was on index 1, which is now deleted)
       const updatedBranches: BranchInfo[] = [
         {
-          name: 'main',
-          branchType: 'main',
-          type: 'local',
+          name: "main",
+          branchType: "main",
+          type: "local",
           isCurrent: true,
         },
         {
-          name: 'feature/test-2',
-          branchType: 'feature',
-          type: 'local',
+          name: "feature/test-2",
+          branchType: "feature",
+          type: "local",
           isCurrent: false,
         },
       ];
@@ -458,12 +459,12 @@ describe('Real-time Update Integration', () => {
       // Cursor should be clamped to valid index (e.g., moved to index 1, which is now 'feature/test-2')
     });
 
-    it('should maintain scroll offset during auto-refresh', () => {
+    it("should maintain scroll offset during auto-refresh", () => {
       // Create many branches to test scrolling
       const manyBranches: BranchInfo[] = Array.from({ length: 20 }, (_, i) => ({
         name: `feature/test-${i + 1}`,
-        branchType: 'feature' as const,
-        type: 'local' as const,
+        branchType: "feature" as const,
+        type: "local" as const,
         isCurrent: false,
       }));
 
@@ -480,12 +481,15 @@ describe('Real-time Update Integration', () => {
       const { rerender } = render(<App onExit={onExit} />);
 
       // Simulate auto-refresh with same content
-      const refreshedBranches: BranchInfo[] = Array.from({ length: 20 }, (_, i) => ({
-        name: `feature/test-${i + 1}`,
-        branchType: 'feature' as const,
-        type: 'local' as const,
-        isCurrent: false,
-      }));
+      const refreshedBranches: BranchInfo[] = Array.from(
+        { length: 20 },
+        (_, i) => ({
+          name: `feature/test-${i + 1}`,
+          branchType: "feature" as const,
+          type: "local" as const,
+          isCurrent: false,
+        }),
+      );
 
       mockUseGitData.mockReturnValue({
         branches: refreshedBranches,

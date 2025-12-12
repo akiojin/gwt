@@ -11,8 +11,9 @@ describe("useScreenState", () => {
   beforeEach(() => {
     // Setup happy-dom
     const window = new Window();
-    globalThis.window = window as any;
-    globalThis.document = window.document as any;
+    globalThis.window = window as unknown as typeof globalThis.window;
+    globalThis.document =
+      window.document as unknown as typeof globalThis.document;
   });
   it("should initialize with branch-list as active screen", () => {
     const { result } = renderHook(() => useScreenState());
@@ -24,20 +25,20 @@ describe("useScreenState", () => {
     const { result } = renderHook(() => useScreenState());
 
     act(() => {
-      result.current.navigateTo("worktree-manager");
+      result.current.navigateTo("branch-creator");
     });
 
-    expect(result.current.currentScreen).toBe("worktree-manager");
+    expect(result.current.currentScreen).toBe("branch-creator");
   });
 
   it("should navigate back to previous screen", () => {
     const { result } = renderHook(() => useScreenState());
 
     act(() => {
-      result.current.navigateTo("worktree-manager");
+      result.current.navigateTo("branch-creator");
     });
 
-    expect(result.current.currentScreen).toBe("worktree-manager");
+    expect(result.current.currentScreen).toBe("branch-creator");
 
     act(() => {
       result.current.goBack();
@@ -50,20 +51,20 @@ describe("useScreenState", () => {
     const { result } = renderHook(() => useScreenState());
 
     act(() => {
-      result.current.navigateTo("worktree-manager");
-    });
-
-    act(() => {
       result.current.navigateTo("branch-creator");
     });
 
-    expect(result.current.currentScreen).toBe("branch-creator");
+    act(() => {
+      result.current.navigateTo("ai-tool-selector");
+    });
+
+    expect(result.current.currentScreen).toBe("ai-tool-selector");
 
     act(() => {
       result.current.goBack();
     });
 
-    expect(result.current.currentScreen).toBe("worktree-manager");
+    expect(result.current.currentScreen).toBe("branch-creator");
 
     act(() => {
       result.current.goBack();
@@ -88,9 +89,9 @@ describe("useScreenState", () => {
     const { result } = renderHook(() => useScreenState());
 
     const screens: ScreenType[] = [
-      "worktree-manager",
       "branch-creator",
       "ai-tool-selector",
+      "model-selector",
       "execution-mode-selector",
     ];
 
@@ -106,17 +107,17 @@ describe("useScreenState", () => {
     act(() => {
       result.current.goBack();
     });
+    expect(result.current.currentScreen).toBe("model-selector");
+
+    act(() => {
+      result.current.goBack();
+    });
     expect(result.current.currentScreen).toBe("ai-tool-selector");
 
     act(() => {
       result.current.goBack();
     });
     expect(result.current.currentScreen).toBe("branch-creator");
-
-    act(() => {
-      result.current.goBack();
-    });
-    expect(result.current.currentScreen).toBe("worktree-manager");
 
     act(() => {
       result.current.goBack();
@@ -128,14 +129,14 @@ describe("useScreenState", () => {
     const { result } = renderHook(() => useScreenState());
 
     act(() => {
-      result.current.navigateTo("worktree-manager");
-    });
-
-    act(() => {
       result.current.navigateTo("branch-creator");
     });
 
-    expect(result.current.currentScreen).toBe("branch-creator");
+    act(() => {
+      result.current.navigateTo("ai-tool-selector");
+    });
+
+    expect(result.current.currentScreen).toBe("ai-tool-selector");
 
     act(() => {
       result.current.reset();

@@ -1,15 +1,14 @@
 services:
-  claude-worktree:
+  gwt:
     build: .
-    container_name: claude-worktree
+    container_name: gwt
     volumes:
-      - .:/claude-worktree
+      - .:/gwt
       - bash-history:/root/.bash_history_dir
       - ./.docker/bash_history:/root/.bash_history
       - claude-config:/root/.claude
       - codex-config:/root/.codex
       - ${HOME:-~}/.codex:/root/.codex-host:ro
-      - ~/.serena:/root/.serena
     ports:
       - "3000:3000"
     environment:
@@ -27,7 +26,7 @@ services:
       - FORCE_AUTO_BACKGROUND_TASKS=1
     stdin_open: true
     tty: true
-    working_dir: /claude-worktree
+    working_dir: /gwt
 
 volumes:
   bash-history: {}

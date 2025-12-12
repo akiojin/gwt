@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Box, Text } from 'ink';
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { Box, Text } from "ink";
 
 export interface LoadingIndicatorProps {
   /** true にするとローディング表示を開始する */
@@ -14,7 +14,7 @@ export interface LoadingIndicatorProps {
   frames?: string[];
 }
 
-const DEFAULT_FRAMES = ['|', '/', '-', '\\'];
+const DEFAULT_FRAMES = ["|", "/", "-", "\\"];
 
 /**
  * ローディング中に簡易スピナーとメッセージを表示するコンポーネント。
@@ -23,7 +23,7 @@ const DEFAULT_FRAMES = ['|', '/', '-', '\\'];
 export function LoadingIndicator({
   isLoading,
   delay = 300,
-  message = 'Loading... please wait',
+  message = "Loading... please wait",
   interval = 80,
   frames = DEFAULT_FRAMES,
 }: LoadingIndicatorProps) {
@@ -33,7 +33,10 @@ export function LoadingIndicator({
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // スピナーに使用するフレームをキャッシュ
-  const safeFrames = useMemo(() => (frames.length > 0 ? frames : DEFAULT_FRAMES), [frames]);
+  const safeFrames = useMemo(
+    () => (frames.length > 0 ? frames : DEFAULT_FRAMES),
+    [frames],
+  );
 
   useEffect(() => {
     // ローディングが開始したら、delay後に表示を有効化

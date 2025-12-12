@@ -13,7 +13,7 @@
 
 **この優先度の理由**: 現状は `~/.claude-worktree/tools.json` を直接開かない限り、どのツールにどの環境変数が設定済みか把握できないため、ブラウザ上での可視化が第一歩となる。
 
-**独立したテスト**: `claude-worktree serve` を起動 → `/config` を開く → 任意ツールを選択し、サーバー上の `tools.json` に登録済みの環境変数が一覧表示されることを確認することで完全に検証できる。
+**独立したテスト**: `gwt serve` を起動 → `/config` を開く → 任意ツールを選択し、サーバー上の `tools.json` に登録済みの環境変数が一覧表示されることを確認することで完全に検証できる。
 
 **受け入れシナリオ**:
 
@@ -55,7 +55,7 @@
 
 ### ユーザーストーリー 4 - CLI との一貫性検証 (優先度: P3)
 
-開発者はブラウザで保存した環境変数が CLI (`claude-worktree` や Codex/Claude 起動) からもそのまま利用されることを確認できる。
+開発者はブラウザで保存した環境変数が CLI (`gwt` や Codex/Claude 起動) からもそのまま利用されることを確認できる。
 
 **この優先度の理由**: Web UI で設定した値が別チャネルで無効なら意味がない。後方互換検証は重要だが、追加実装は比較的軽いため P3。
 
@@ -63,7 +63,7 @@
 
 **受け入れシナリオ**:
 
-1. **前提条件** Web UI で保存済みの env が存在、**操作** CLI から対象ツールを `claude-worktree` 経由で起動、**期待結果** ツールプロセス内で同じ env が利用可能
+1. **前提条件** Web UI で保存済みの env が存在、**操作** CLI から対象ツールを `gwt` 経由で起動、**期待結果** ツールプロセス内で同じ env が利用可能
 
 ---
 
@@ -106,7 +106,7 @@
 
 ### 制約
 
-- `claude-worktree serve` を実行している OS ユーザーが `~/.claude-worktree/tools.json` へ読み書きできる必要がある
+- `gwt serve` を実行している OS ユーザーが `~/.claude-worktree/tools.json` へ読み書きできる必要がある
 - Web UI と CLI は同一マシン上の同一ファイルを共有するため、ファイルロックや同時編集の検知を実装する必要がある
 - `env` 値は暗号化せずプレーンテキストで保存されるため、転送はローカルホスト HTTP のみに限定される（HTTPS やリモート公開は前提にしない）
 
@@ -134,7 +134,7 @@
 
 ## 依存関係 *(該当する場合)*
 
-- 既存の Web サーバー (`claude-worktree serve`) と React Router
+- 既存の Web サーバー (`gwt serve`) と React Router
 - `configApi` (`GET /api/config`, `PUT /api/config`) および `src/config/tools.ts`
 - `launchCustomAITool` が参照する `CustomAITool.env` ロジック（env 連携確認が必要）
 - Spec: `SPEC-d5e56259` (Web UI) / `SPEC-30f6d724` (Custom AI Tool 定義)

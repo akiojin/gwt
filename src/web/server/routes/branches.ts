@@ -4,7 +4,6 @@
  * ブランチ関連のREST APIエンドポイント。
  */
 
-import type { FastifyInstance } from "fastify";
 import {
   listBranches,
   getBranchByName,
@@ -16,12 +15,13 @@ import type {
   BranchSyncRequest,
   BranchSyncResult,
 } from "../../../types/api.js";
+import type { WebFastifyInstance } from "../types.js";
 
 /**
  * ブランチ関連のルートを登録
  */
 export async function registerBranchRoutes(
-  fastify: FastifyInstance,
+  fastify: WebFastifyInstance,
 ): Promise<void> {
   // GET /api/branches - すべてのブランチ一覧を取得
   fastify.get<{ Reply: ApiResponse<Branch[]> }>(

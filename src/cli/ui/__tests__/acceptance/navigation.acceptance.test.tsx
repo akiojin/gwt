@@ -2,46 +2,51 @@
  * @vitest-environment happy-dom
  * Acceptance tests for User Story 2: Sub-screen Navigation
  */
-import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest';
-import type { Mock } from 'vitest';
-import { render, waitFor } from '@testing-library/react';
-import React from 'react';
-import { App } from '../../components/App.js';
-import { Window } from 'happy-dom';
-import type { BranchInfo } from '../../types.js';
+import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
+import type { Mock } from "vitest";
+import { render, waitFor } from "@testing-library/react";
+import React from "react";
+import { App } from "../../components/App.js";
+import { Window } from "happy-dom";
+import type { BranchInfo } from "../../types.js";
 
 // Mock git.ts and worktree.ts
-vi.mock('../../../../git.ts', () => ({
+vi.mock("../../../../git.ts", () => ({
   __esModule: true,
   getAllBranches: vi.fn(),
-  getRepositoryRoot: vi.fn(async () => '/repo'),
+  getRepositoryRoot: vi.fn(async () => "/repo"),
   deleteBranch: vi.fn(async () => undefined),
 }));
 
-const { acceptanceIsProtectedBranchName, acceptanceSwitchToProtectedBranch } = vi.hoisted(() => ({
-  acceptanceIsProtectedBranchName: vi.fn(() => false),
-  acceptanceSwitchToProtectedBranch: vi.fn(async () => 'none' as const),
-}));
+const { acceptanceIsProtectedBranchName, acceptanceSwitchToProtectedBranch } =
+  vi.hoisted(() => ({
+    acceptanceIsProtectedBranchName: vi.fn(() => false),
+    acceptanceSwitchToProtectedBranch: vi.fn(async () => "none" as const),
+  }));
 
-vi.mock('../../../../worktree.ts', () => ({
+vi.mock("../../../../worktree.ts", () => ({
   __esModule: true,
   listAdditionalWorktrees: vi.fn(),
   createWorktree: vi.fn(async () => undefined),
-  generateWorktreePath: vi.fn(async () => '/repo/.git/worktree/test'),
+  generateWorktreePath: vi.fn(async () => "/repo/.git/worktree/test"),
   getMergedPRWorktrees: vi.fn(async () => []),
   removeWorktree: vi.fn(async () => undefined),
   isProtectedBranchName: acceptanceIsProtectedBranchName,
   switchToProtectedBranch: acceptanceSwitchToProtectedBranch,
 }));
 
-import { getAllBranches, getRepositoryRoot, deleteBranch } from '../../../../git.ts';
+import {
+  getAllBranches,
+  getRepositoryRoot,
+  deleteBranch,
+} from "../../../../git.ts";
 import {
   listAdditionalWorktrees,
   createWorktree,
   generateWorktreePath,
   getMergedPRWorktrees,
   removeWorktree,
-} from '../../../../worktree.ts';
+} from "../../../../worktree.ts";
 
 const mockedGetAllBranches = getAllBranches as Mock;
 const mockedGetRepositoryRoot = getRepositoryRoot as Mock;
@@ -54,12 +59,13 @@ const mockedRemoveWorktree = removeWorktree as Mock;
 const mockedIsProtectedBranchName = acceptanceIsProtectedBranchName as Mock;
 const mockedSwitchToProtectedBranch = acceptanceSwitchToProtectedBranch as Mock;
 
-describe('Acceptance: Navigation (User Story 2)', () => {
+describe("Acceptance: Navigation (User Story 2)", () => {
   beforeEach(() => {
     // Setup happy-dom
     const window = new Window();
-    globalThis.window = window as any;
-    globalThis.document = window.document as any;
+    globalThis.window = window as unknown as typeof globalThis.window;
+    globalThis.document =
+      window.document as unknown as typeof globalThis.document;
 
     // Reset mocks
     mockedGetAllBranches.mockReset();
@@ -72,21 +78,21 @@ describe('Acceptance: Navigation (User Story 2)', () => {
     mockedRemoveWorktree.mockReset();
     mockedIsProtectedBranchName.mockReset();
     mockedSwitchToProtectedBranch.mockReset();
-    mockedGetRepositoryRoot.mockResolvedValue('/repo');
-    mockedSwitchToProtectedBranch.mockResolvedValue('none');
+    mockedGetRepositoryRoot.mockResolvedValue("/repo");
+    mockedSwitchToProtectedBranch.mockResolvedValue("none");
   });
 
   const mockBranches: BranchInfo[] = [
     {
-      name: 'main',
-      type: 'local',
-      branchType: 'main',
+      name: "main",
+      type: "local",
+      branchType: "main",
       isCurrent: true,
     },
     {
-      name: 'feature/test',
-      type: 'local',
-      branchType: 'feature',
+      name: "feature/test",
+      type: "local",
+      branchType: "feature",
       isCurrent: false,
     },
   ];
@@ -95,35 +101,41 @@ describe('Acceptance: Navigation (User Story 2)', () => {
    * T074: Acceptance Scenario 1
    * nキーで新規ブランチ作成画面に遷移
    */
-  it('[AC1] should navigate to branch creator on n key', async () => {
-    (getAllBranches as ReturnType<typeof vi.fn>).mockResolvedValue(mockBranches);
+  it("[AC1] should navigate to branch creator on n key", async () => {
+    (getAllBranches as ReturnType<typeof vi.fn>).mockResolvedValue(
+      mockBranches,
+    );
     (listAdditionalWorktrees as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 
     const onExit = vi.fn();
     const { getByText, container } = render(<App onExit={onExit} />);
 
     await waitFor(() => {
-      expect(getByText(/Claude Worktree/i)).toBeDefined();
+      expect(getByText(/gwt - Branch Selection/i)).toBeDefined();
     });
 
     // Verify n key action is available in footer
-    const nKeyElements = container.querySelectorAll('*');
+    const nKeyElements = container.querySelectorAll("*");
     let hasNKey = false;
     nKeyElements.forEach((el) => {
-      if (el.textContent?.toLowerCase().includes('new branch')) {
+      if (el.textContent?.toLowerCase().includes("new branch")) {
         hasNKey = true;
       }
     });
 
-    expect(hasNKey || container.textContent?.toLowerCase().includes('n')).toBe(true);
+    expect(hasNKey || container.textContent?.toLowerCase().includes("n")).toBe(
+      true,
+    );
   });
 
   /**
    * T075: Acceptance Scenario 2
    * メイン画面にはqキーが存在しない（終了はCtrl+Cのみ）
    */
-  it('[AC2] should not have q key on main screen', async () => {
-    (getAllBranches as ReturnType<typeof vi.fn>).mockResolvedValue(mockBranches);
+  it("[AC2] should not have q key on main screen", async () => {
+    (getAllBranches as ReturnType<typeof vi.fn>).mockResolvedValue(
+      mockBranches,
+    );
     (listAdditionalWorktrees as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 
     const onExit = vi.fn();
@@ -134,23 +146,25 @@ describe('Acceptance: Navigation (User Story 2)', () => {
     });
 
     // Verify q key is NOT in the footer (main screen uses Ctrl+C for exit)
-    const footerText = container.textContent || '';
+    const footerText = container.textContent || "";
     // Main screen should not have 'q' for quit, but should have other keys
     expect(footerText.toLowerCase()).not.toMatch(/\[q\]/);
-    expect(footerText.toLowerCase()).toContain('enter');
+    expect(footerText.toLowerCase()).toContain("enter");
   });
 
   /**
    * T076: Acceptance Scenario 3
-   * Worktree管理でアクション実行後に適切に遷移
+   * ブランチリスト画面でフッターアクションが表示される
    */
-  it('[AC3] should handle worktree management navigation', async () => {
-    (getAllBranches as ReturnType<typeof vi.fn>).mockResolvedValue(mockBranches);
+  it("[AC3] should display footer actions on branch list screen", async () => {
+    (getAllBranches as ReturnType<typeof vi.fn>).mockResolvedValue(
+      mockBranches,
+    );
     (listAdditionalWorktrees as ReturnType<typeof vi.fn>).mockResolvedValue([
       {
-        branch: 'feature/test',
-        path: '/path/to/worktree',
-        head: 'abc123',
+        branch: "feature/test",
+        path: "/path/to/worktree",
+        head: "abc123",
         isAccessible: true,
       },
     ]);
@@ -159,30 +173,25 @@ describe('Acceptance: Navigation (User Story 2)', () => {
     const { getByText, container } = render(<App onExit={onExit} />);
 
     await waitFor(() => {
-      expect(getByText(/Claude Worktree/i)).toBeDefined();
+      expect(getByText(/gwt - Branch Selection/i)).toBeDefined();
     });
 
-    // Verify m key action is available for worktree management
-    const mKeyElements = container.querySelectorAll('*');
-    let hasMKey = false;
-    mKeyElements.forEach((el) => {
-      if (el.textContent?.toLowerCase().includes('manage worktrees')) {
-        hasMKey = true;
-      }
-    });
-
-    expect(hasMKey || container.textContent?.toLowerCase().includes('m')).toBe(true);
+    // Verify footer actions are available
+    const footerText = container.textContent || "";
+    expect(footerText.toLowerCase()).toContain("enter");
   });
 
-  it('[Integration] should support all navigation keys', async () => {
-    (getAllBranches as ReturnType<typeof vi.fn>).mockResolvedValue(mockBranches);
+  it("[Integration] should support all navigation keys", async () => {
+    (getAllBranches as ReturnType<typeof vi.fn>).mockResolvedValue(
+      mockBranches,
+    );
     (listAdditionalWorktrees as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 
     const onExit = vi.fn();
     const { getByText, getAllByText } = render(<App onExit={onExit} />);
 
     await waitFor(() => {
-      expect(getByText(/Claude Worktree/i)).toBeDefined();
+      expect(getByText(/gwt - Branch Selection/i)).toBeDefined();
     });
 
     // Verify navigation keys are available (main screen doesn't have q key)
@@ -191,8 +200,10 @@ describe('Acceptance: Navigation (User Story 2)', () => {
     expect(enterKeys.length).toBeGreaterThan(0);
   });
 
-  it('[Integration] should display correct footer actions', async () => {
-    (getAllBranches as ReturnType<typeof vi.fn>).mockResolvedValue(mockBranches);
+  it("[Integration] should display correct footer actions", async () => {
+    (getAllBranches as ReturnType<typeof vi.fn>).mockResolvedValue(
+      mockBranches,
+    );
     (listAdditionalWorktrees as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 
     const onExit = vi.fn();
@@ -203,9 +214,9 @@ describe('Acceptance: Navigation (User Story 2)', () => {
     });
 
     // Verify footer has multiple action keys (main screen doesn't have q key)
-    const footerText = container.textContent || '';
-    expect(footerText.toLowerCase()).toContain('enter');
-    expect(footerText.toLowerCase()).toContain('m'); // Manage worktrees
+    const footerText = container.textContent || "";
+    expect(footerText.toLowerCase()).toContain("enter");
+    expect(footerText.toLowerCase()).toContain("r"); // Refresh
   });
 });
 

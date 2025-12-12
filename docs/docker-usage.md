@@ -25,7 +25,7 @@
 
 3. **コンテナに接続**
    ```bash
-   docker-compose exec claude-worktree bash
+   docker-compose exec gwt bash
    ```
 
 ## トラブルシューティング

@@ -8,16 +8,14 @@
 import Fastify from "fastify";
 import fastifyStatic from "@fastify/static";
 import fastifyWebsocket from "@fastify/websocket";
-import pino from "pino";
-import type { FastifyLoggerOptions } from "fastify";
-import { mkdir } from "node:fs/promises";
-import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { PTYManager } from "./pty/manager.js";
 import { WebSocketHandler } from "./websocket/handler.js";
 import { registerRoutes } from "./routes/index.js";
 import { importOsEnvIntoSharedConfig } from "./env/importer.js";
+import { createLogger } from "../../logging/logger.js";
+import type { WebFastifyInstance } from "./types.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -26,8 +24,10 @@ const __dirname = dirname(__filename);
  * Webサーバーを起動
  */
 export async function startWebServer(): Promise<void> {
-  const fastify = Fastify({
-    logger: await createLoggerOptions(),
+  const serverLogger = createLogger({ category: "server" });
+
+  const fastify: WebFastifyInstance = Fastify({
+    loggerInstance: serverLogger,
   });
 
   // PTYマネージャーとWebSocketハンドラーを初期化
@@ -59,20 +59,6 @@ export async function startWebServer(): Promise<void> {
     prefix: "/",
   });
 
-  // SPA Fallback: serve index.html for non-API routes (e.g., refresh on nested paths)
-  fastify.setNotFoundHandler((request, reply) => {
-    const url = request.url || "";
-    if (request.method === "GET" && !url.startsWith("/api")) {
-      return reply.sendFile("index.html");
-    }
-
-    return reply.status(404).send({
-      success: false,
-      error: `Route ${request.method}:${url} not found`,
-      details: null,
-    });
-  });
-
   // サーバー起動
   try {
     const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
@@ -87,35 +73,4 @@ export async function startWebServer(): Promise<void> {
     fastify.log.error(err);
     process.exit(1);
   }
-}
-
-async function createLoggerOptions(): Promise<FastifyLoggerOptions> {
-  const level = process.env.LOG_LEVEL || "info";
-  const logDir =
-    process.env.CLAUDE_WORKTREE_LOG_DIR ??
-    join(homedir(), ".claude-worktree", "logs");
-  await mkdir(logDir, { recursive: true });
-  const logFilePath = join(
-    logDir,
-    process.env.CLAUDE_WORKTREE_LOG_FILE ?? "webui.log",
-  );
-
-  const fileStream = pino.destination({ dest: logFilePath, sync: false });
-
-  if (process.env.CLAUDE_WORKTREE_LOG_STDOUT === "false") {
-    return {
-      level,
-      stream: fileStream,
-    } satisfies FastifyLoggerOptions;
-  }
-
-  const combinedStream = pino.multistream([
-    { stream: process.stdout },
-    { stream: fileStream },
-  ]);
-
-  return {
-    level,
-    stream: combinedStream,
-  } satisfies FastifyLoggerOptions;
 }

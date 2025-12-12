@@ -1,34 +1,65 @@
-import React, { useCallback } from 'react';
-import { Box, Text, useInput } from 'ink';
-import { Header } from '../parts/Header.js';
-import { Stats } from '../parts/Stats.js';
-import { Footer } from '../parts/Footer.js';
-import { Select } from '../common/Select.js';
-import { LoadingIndicator } from '../common/LoadingIndicator.js';
-import { useTerminalSize } from '../../hooks/useTerminalSize.js';
-import type { BranchItem, Statistics } from '../../types.js';
-import stringWidth from 'string-width';
-import chalk from 'chalk';
+import React, { useCallback, useState, useMemo, useEffect } from "react";
+import { Box, Text, useInput } from "ink";
+import { Header } from "../parts/Header.js";
+import { Stats } from "../parts/Stats.js";
+import { Footer } from "../parts/Footer.js";
+import { Select } from "../common/Select.js";
+import { Input } from "../common/Input.js";
+import { LoadingIndicator } from "../common/LoadingIndicator.js";
+import { useTerminalSize } from "../../hooks/useTerminalSize.js";
+import type { BranchItem, Statistics } from "../../types.js";
+import stringWidth from "string-width";
+import stripAnsi from "strip-ansi";
+import chalk from "chalk";
 
+// Emoji 幅は端末によって 1 または 2 になることがあるため、最小幅を上書きして
+// 実測より小さくならないようにする（過小評価＝折り返しの原因を防ぐ）
 const WIDTH_OVERRIDES: Record<string, number> = {
-  '⬆': 1,
-  '☁': 1,
+  // Remote icon
+  "☁": 1,
+  // Branch type icons
+  "⚡": 1,
+  "✨": 1,
+  "🐛": 1,
+  "🔥": 1,
+  "🚀": 1,
+  "📌": 1,
+  // Worktree status icons
+  "🟢": 2,
+  "⚪": 2,
+  "🟠": 1,
+  // Change status icons
+  "👉": 1,
+  "💾": 1,
+  "📤": 1,
+  "🔃": 1,
+  "✅": 2,
+  "⚠": 2,
+  "⚠️": 2,
+  "🛡": 2,
+  // Remote markers
+  "🔗": 2,
+  "💻": 2,
+  "☁️": 2,
+  "☑": 2,
+  "☐": 2,
+};
+
+const getCharWidth = (char: string): number => {
+  const baseWidth = stringWidth(char);
+  const override = WIDTH_OVERRIDES[char];
+  return override !== undefined ? Math.max(baseWidth, override) : baseWidth;
 };
 
 const measureDisplayWidth = (value: string): number => {
   let width = 0;
   for (const char of Array.from(value)) {
-    const override = WIDTH_OVERRIDES[char];
-    if (override !== undefined) {
-      width += override;
-      continue;
-    }
-    width += stringWidth(char);
+    width += getCharWidth(char);
   }
   return width;
 };
 
-type IndicatorColor = 'cyan' | 'green' | 'yellow' | 'red';
+type IndicatorColor = "cyan" | "green" | "yellow" | "red";
 
 interface CleanupIndicator {
   icon: string;
@@ -50,7 +81,6 @@ export interface BranchListScreenProps {
   branches: BranchItem[];
   stats: Statistics;
   onSelect: (branch: BranchItem) => void;
-  onNavigate?: (screen: string) => void;
   onQuit?: () => void;
   onCleanupCommand?: () => void;
   onRefresh?: () => void;
@@ -61,6 +91,13 @@ export interface BranchListScreenProps {
   cleanupUI?: CleanupUIState;
   version?: string | null;
   workingDirectory?: string;
+  // Test support: allow external control of filter mode and query
+  testFilterMode?: boolean;
+  testOnFilterModeChange?: (mode: boolean) => void;
+  testFilterQuery?: string;
+  testOnFilterQueryChange?: (query: string) => void;
+  selectedBranches?: string[];
+  onToggleSelect?: (branchName: string) => void;
 }
 
 /**
@@ -71,7 +108,6 @@ export function BranchListScreen({
   branches,
   stats,
   onSelect,
-  onNavigate,
   onCleanupCommand,
   onRefresh,
   loading = false,
@@ -81,82 +117,187 @@ export function BranchListScreen({
   cleanupUI,
   version,
   workingDirectory,
+  testFilterMode,
+  testOnFilterModeChange,
+  testFilterQuery,
+  testOnFilterQueryChange,
+  selectedBranches = [],
+  onToggleSelect,
 }: BranchListScreenProps) {
   const { rows } = useTerminalSize();
+  const headerText =
+    "  Legend: [ ]/[ * ] select  🟢/⚪ worktree  🛡/⚠ safe";
+  const selectedSet = useMemo(() => new Set(selectedBranches), [selectedBranches]);
+
+  // Filter state - allow test control via props
+  const [internalFilterQuery, setInternalFilterQuery] = useState("");
+  const filterQuery =
+    testFilterQuery !== undefined ? testFilterQuery : internalFilterQuery;
+  const setFilterQuery = useCallback(
+    (query: string) => {
+      setInternalFilterQuery(query);
+      testOnFilterQueryChange?.(query);
+    },
+    [testOnFilterQueryChange],
+  );
+
+  // Focus management: true = filter mode, false = branch selection mode
+  // Allow test control via props
+  const [internalFilterMode, setInternalFilterMode] = useState(false);
+  const filterMode =
+    testFilterMode !== undefined ? testFilterMode : internalFilterMode;
+  const setFilterMode = useCallback(
+    (mode: boolean) => {
+      setInternalFilterMode(mode);
+      testOnFilterModeChange?.(mode);
+    },
+    [testOnFilterModeChange],
+  );
+
+  // Cursor position for Select (controlled to enable space toggle)
+  const [selectedIndex, setSelectedIndex] = useState(0);
 
   // Handle keyboard input
-  // Note: Select component handles Enter and arrow keys
-  useInput((input) => {
+  // Note: Input component blocks specific keys (c/r/f) using blockKeys prop
+  // This prevents shortcuts from triggering while typing in the filter
+  useInput((input, key) => {
     if (cleanupUI?.inputLocked) {
       return;
     }
 
-    if (input === 'm' && onNavigate) {
-      onNavigate('worktree-manager');
-    } else if (input === 'c') {
+    // Escape key handling
+    if (key.escape) {
+      if (filterQuery) {
+        // Clear filter query first
+        setFilterQuery("");
+        return;
+      }
+      if (filterMode) {
+        // Exit filter mode if query is empty
+        setFilterMode(false);
+        return;
+      }
+    }
+
+    // Enter filter mode with 'f' key (only in branch selection mode)
+    if (input === "f" && !filterMode) {
+      setFilterMode(true);
+      return;
+    }
+
+    // Toggle selection with space (only in branch selection mode)
+    if (input === " " && !filterMode) {
+      const target = filteredBranches[selectedIndex];
+      if (target) {
+        onToggleSelect?.(target.name);
+      }
+      return;
+    }
+
+    // Disable global shortcuts while in filter mode
+    if (filterMode) {
+      return;
+    }
+
+    // Global shortcuts (blocked by Input component when typing in filter mode)
+    if (input === "c") {
       onCleanupCommand?.();
-    } else if (input === 'r' && onRefresh) {
+    } else if (input === "r" && onRefresh) {
       onRefresh();
     }
   });
 
+  // Filter branches based on query
+  const filteredBranches = useMemo(() => {
+    if (!filterQuery.trim()) {
+      return branches;
+    }
+
+    const query = filterQuery.toLowerCase();
+    return branches.filter((branch) => {
+      // Search in branch name
+      if (branch.name.toLowerCase().includes(query)) {
+        return true;
+      }
+
+      // Search in PR title if available (only openPR has title)
+      if (branch.openPR?.title?.toLowerCase().includes(query)) {
+        return true;
+      }
+
+      return false;
+    });
+  }, [branches, filterQuery]);
+
+  useEffect(() => {
+    setSelectedIndex((prev) => {
+      if (filteredBranches.length === 0) {
+        return 0;
+      }
+      return Math.min(prev, filteredBranches.length - 1);
+    });
+  }, [filteredBranches.length]);
+
   // Calculate available space for branch list
   // Header: 2 lines (title + divider)
+  // Filter input: 1 line
   // Stats: 1 line
   // Empty line: 1 line
   // Footer: 1 line
-  // Total fixed: 5 lines
+  // Total fixed: 6 lines
   const headerLines = 2;
+  const filterLines = 1;
   const statsLines = 1;
   const emptyLine = 1;
   const footerLines = 1;
-  const fixedLines = headerLines + statsLines + emptyLine + footerLines;
+  const fixedLines =
+    headerLines + filterLines + statsLines + emptyLine + footerLines;
   const contentHeight = rows - fixedLines;
   const limit = Math.max(5, contentHeight); // Minimum 5 items visible
 
   // Footer actions
   const footerActions = [
-    { key: 'enter', description: 'Select' },
-    { key: 'r', description: 'Refresh' },
-    { key: 'm', description: 'Manage worktrees' },
-    { key: 'c', description: 'Cleanup branches' },
+    { key: "enter", description: "Select" },
+    { key: "f", description: "Filter" },
+    { key: "r", description: "Refresh" },
+    { key: "c", description: "Cleanup branches" },
   ];
 
   const formatLatestCommit = useCallback((timestamp?: number) => {
     if (!timestamp || Number.isNaN(timestamp)) {
-      return '---';
+      return "---";
     }
 
     const date = new Date(timestamp * 1000);
     const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, '0');
-    const day = String(date.getDate()).padStart(2, '0');
-    const hours = String(date.getHours()).padStart(2, '0');
-    const minutes = String(date.getMinutes()).padStart(2, '0');
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+    const hours = String(date.getHours()).padStart(2, "0");
+    const minutes = String(date.getMinutes()).padStart(2, "0");
 
     return `${year}-${month}-${day} ${hours}:${minutes}`;
   }, []);
 
   const truncateToWidth = useCallback((value: string, maxWidth: number) => {
     if (maxWidth <= 0) {
-      return '';
+      return "";
     }
 
-    if (stringWidth(value) <= maxWidth) {
+    if (measureDisplayWidth(value) <= maxWidth) {
       return value;
     }
 
-    const ellipsis = '…';
-    const ellipsisWidth = stringWidth(ellipsis);
+    const ellipsis = "…";
+    const ellipsisWidth = measureDisplayWidth(ellipsis);
     if (ellipsisWidth >= maxWidth) {
       return ellipsis;
     }
 
     let currentWidth = 0;
-    let result = '';
+    let result = "";
 
-    for (const char of value) {
-      const charWidth = stringWidth(char);
+    for (const char of Array.from(value)) {
+      const charWidth = getCharWidth(char);
       if (currentWidth + charWidth + ellipsisWidth > maxWidth) {
         break;
       }
@@ -167,77 +308,231 @@ export function BranchListScreen({
     return result + ellipsis;
   }, []);
 
+  const colorToolLabel = useCallback((label: string, toolId?: string | null) => {
+    switch (toolId) {
+      case "claude-code":
+        return chalk.hex("#ffaf00")(label); // orange-ish
+      case "codex-cli":
+        return chalk.cyan(label);
+      case "gemini-cli":
+        return chalk.magenta(label);
+      case "qwen-cli":
+        return chalk.green(label);
+      default: {
+        const trimmed = label.trim().toLowerCase();
+        if (!toolId || trimmed === "unknown") {
+          return chalk.gray(label);
+        }
+        return chalk.white(label);
+      }
+    }
+  }, []);
+
   const renderBranchRow = useCallback(
     (item: BranchItem, isSelected: boolean, context: { columns: number }) => {
-      const columns = Math.max(20, context.columns);
-      const arrow = isSelected ? '>' : ' ';
-      const timestampText = formatLatestCommit(item.latestCommitTimestamp);
-      const timestampWidth = stringWidth(timestampText);
+      // 端末幅ピッタリでの自動折返しを避けるため、1桁だけ余白を取る
+      const columns = Math.max(20, context.columns - 1);
+      const visibleWidth = (value: string) =>
+        measureDisplayWidth(stripAnsi(value));
+      const arrow = isSelected ? ">" : " ";
+      let commitText = "---";
+      if (item.latestCommitTimestamp) {
+        commitText = formatLatestCommit(item.latestCommitTimestamp);
+      } else if (item.lastToolUsage?.timestamp) {
+        const seconds = Math.floor(item.lastToolUsage.timestamp / 1000);
+        commitText = formatLatestCommit(seconds);
+      }
+      const toolLabelRaw =
+        item.lastToolUsageLabel?.split("|")?.[0]?.trim() ??
+        item.lastToolUsage?.toolId ??
+        "Unknown";
+
+      const formatFixedWidth = (value: string, targetWidth: number) => {
+        let v = value;
+        if (measureDisplayWidth(v) > targetWidth) {
+          v = truncateToWidth(v, targetWidth);
+        }
+        const padding = Math.max(0, targetWidth - measureDisplayWidth(v));
+        return v + " ".repeat(padding);
+      };
+
+      const TOOL_WIDTH = 7;
+      const DATE_WIDTH = 16; // "YYYY-MM-DD HH:mm"
+      const paddedTool = formatFixedWidth(toolLabelRaw, TOOL_WIDTH);
+      const paddedDate =
+        commitText === "---"
+          ? " ".repeat(DATE_WIDTH)
+          : commitText.padStart(DATE_WIDTH, " ");
+      const timestampText = `${paddedTool} | ${paddedDate}`;
+      const displayTimestampText = `${colorToolLabel(
+        paddedTool,
+        item.lastToolUsage?.toolId,
+      )} | ${paddedDate}`;
+      const timestampWidth = measureDisplayWidth(timestampText);
 
       const indicatorInfo = cleanupUI?.indicators?.[item.name];
-      let indicatorIcon = indicatorInfo?.icon ?? '';
+      let indicatorIcon = indicatorInfo?.icon ?? "";
       if (indicatorIcon && indicatorInfo?.color && !isSelected) {
         switch (indicatorInfo.color) {
-          case 'cyan':
+          case "cyan":
             indicatorIcon = chalk.cyan(indicatorIcon);
             break;
-          case 'green':
+          case "green":
             indicatorIcon = chalk.green(indicatorIcon);
             break;
-          case 'yellow':
+          case "yellow":
             indicatorIcon = chalk.yellow(indicatorIcon);
             break;
-          case 'red':
+          case "red":
             indicatorIcon = chalk.red(indicatorIcon);
             break;
           default:
             break;
         }
       }
-      const indicatorPrefix = indicatorIcon ? `${indicatorIcon} ` : '';
-      const staticPrefix = `${arrow} ${indicatorPrefix}`;
-      const staticPrefixWidth = stringWidth(staticPrefix);
+      const indicatorPrefix = indicatorIcon ? `${indicatorIcon} ` : "";
 
-      const availableLeftWidth = Math.max(staticPrefixWidth, columns - timestampWidth - 1);
-      const maxLabelWidth = Math.max(0, availableLeftWidth - staticPrefixWidth);
-      const truncatedLabel = truncateToWidth(item.label, maxLabelWidth);
-      const leftText = `${staticPrefix}${truncatedLabel}`;
+      const isChecked = selectedSet.has(item.name);
+      const selectionIcon = isChecked ? "[*]" : "[ ]";
+      const hasWorktree =
+        item.worktreeStatus === "active" ||
+        item.worktreeStatus === "inaccessible";
+      const worktreeIcon = hasWorktree ? chalk.green("🟢") : chalk.gray("⚪");
+      const safeIcon =
+        item.safeToCleanup === true ? chalk.green("🛡") : chalk.yellow("⚠");
+      const stateCluster = `${selectionIcon} ${worktreeIcon} ${safeIcon}`;
 
-      const leftMeasuredWidth = stringWidth(leftText);
-      const leftDisplayWidth = measureDisplayWidth(leftText);
-      const baseGapWidth = Math.max(1, columns - leftMeasuredWidth - timestampWidth);
-      const displayGapWidth = Math.max(1, columns - leftDisplayWidth - timestampWidth);
-      const cursorShift = Math.max(0, displayGapWidth - baseGapWidth);
+      const staticPrefix = `${arrow} ${indicatorPrefix}${stateCluster} `;
+      const staticPrefixWidth = visibleWidth(staticPrefix);
+      const maxLeftDisplayWidth = Math.max(0, columns - timestampWidth - 1);
+      const maxLabelWidth = Math.max(
+        0,
+        maxLeftDisplayWidth - staticPrefixWidth,
+      );
+      const displayLabel =
+        item.type === "remote" && item.remoteName ? item.remoteName : item.name;
+      let truncatedLabel = truncateToWidth(displayLabel, maxLabelWidth);
+      let leftText = `${staticPrefix}${truncatedLabel}`;
 
-      const gap = ' '.repeat(baseGapWidth);
-      const cursorAdjust = cursorShift > 0 ? `\u001b[${cursorShift}C` : '';
+      let leftDisplayWidth = visibleWidth(leftText);
+      // Gap between labelとツール/日時。右端に寄せるため必要分だけ確保。
+      let gapWidth = Math.max(1, columns - leftDisplayWidth - timestampWidth);
 
-      let line = `${leftText}${gap}${cursorAdjust}${timestampText}`;
-      const paddingWidth = Math.max(0, columns - stringWidth(line));
-      if (paddingWidth > 0) {
-        line += ' '.repeat(paddingWidth);
+      // もしまだオーバーする場合、隙間→ラベルの順で削って収める
+      let totalWidth = leftDisplayWidth + gapWidth + timestampWidth;
+      if (totalWidth > columns) {
+        const overflow = totalWidth - columns;
+        const reducedGap = Math.max(1, gapWidth - overflow);
+        gapWidth = reducedGap;
+        totalWidth = leftDisplayWidth + gapWidth + timestampWidth;
+      }
+      if (leftDisplayWidth + gapWidth + timestampWidth > columns) {
+        const extra = leftDisplayWidth + gapWidth + timestampWidth - columns;
+        const newLabelWidth = Math.max(
+          0,
+          measureDisplayWidth(truncatedLabel) - extra,
+        );
+        truncatedLabel = truncateToWidth(displayLabel, newLabelWidth);
+        leftText = `${staticPrefix}${truncatedLabel}`;
+        leftDisplayWidth = visibleWidth(leftText);
+        gapWidth = Math.max(1, columns - leftDisplayWidth - timestampWidth);
       }
 
+      const buildLine = () =>
+        `${leftText}${" ".repeat(gapWidth)}${timestampText}`;
+
+      let line = buildLine();
+      // Replace timestamp with colorized tool name (keep alignment from width calc)
+      let lineWithColoredTimestamp = line.replace(
+        timestampText,
+        displayTimestampText,
+      );
+
+      // 端末幅を超えた場合は隙間→ラベルの順で詰めて収める
+      const clampToWidth = () => {
+        const finalWidth = measureDisplayWidth(stripAnsi(lineWithColoredTimestamp));
+        if (finalWidth <= columns) {
+          return;
+        }
+        const overflow = finalWidth - columns;
+        const reducedGap = Math.max(1, gapWidth - overflow);
+        gapWidth = reducedGap;
+        line = buildLine();
+        lineWithColoredTimestamp = line.replace(
+          timestampText,
+          displayTimestampText,
+        );
+        const widthAfterGap = measureDisplayWidth(
+          stripAnsi(lineWithColoredTimestamp),
+        );
+        if (widthAfterGap > columns) {
+          const extra = widthAfterGap - columns;
+          const newLabelWidth = Math.max(
+            0,
+            measureDisplayWidth(truncatedLabel) - extra,
+          );
+          truncatedLabel = truncateToWidth(displayLabel, newLabelWidth);
+          leftText = `${staticPrefix}${truncatedLabel}`;
+          leftDisplayWidth = visibleWidth(leftText);
+          gapWidth = Math.max(1, columns - leftDisplayWidth - timestampWidth);
+          line = buildLine();
+          lineWithColoredTimestamp = line.replace(
+            timestampText,
+            displayTimestampText,
+          );
+        }
+      };
+
+      clampToWidth();
+
       const output = isSelected
-        ? `[46m[30m${line}[0m`
-        : line;
+        ? `\u001b[46m\u001b[30m${lineWithColoredTimestamp}\u001b[0m`
+        : lineWithColoredTimestamp;
       return <Text>{output}</Text>;
     },
-    [cleanupUI, formatLatestCommit, truncateToWidth]
+    [
+      cleanupUI,
+      formatLatestCommit,
+      truncateToWidth,
+      selectedSet,
+      colorToolLabel,
+    ],
   );
 
   return (
     <Box flexDirection="column" height={rows}>
       {/* Header */}
       <Header
-        title="Claude Worktree - Branch Selection"
+        title="gwt - Branch Selection"
         titleColor="cyan"
         version={version}
         {...(workingDirectory !== undefined && { workingDirectory })}
       />
 
+      {/* Filter Input - Always visible */}
+      <Box>
+        <Text dimColor>Filter: </Text>
+        {filterMode ? (
+          <Input
+            value={filterQuery}
+            onChange={setFilterQuery}
+            onSubmit={() => {}} // No-op: filter is applied in real-time
+            placeholder="Type to search..."
+            blockKeys={["c", "r", "f"]} // Block shortcuts while typing
+          />
+        ) : (
+          <Text dimColor>{filterQuery || "(press f to filter)"}</Text>
+        )}
+        {filterQuery && (
+          <Text dimColor>
+            {" "}
+            (Showing {filteredBranches.length} of {branches.length})
+          </Text>
+        )}
+      </Box>
+
       {/* Stats */}
-      <Box marginTop={1}>
+      <Box>
         <Stats stats={stats} lastUpdated={lastUpdated} />
       </Box>
 
@@ -268,16 +563,37 @@ export function BranchListScreen({
           </Box>
         )}
 
-        {!loading && !error && branches.length > 0 && (
-          <Select
-            items={branches}
-            onSelect={onSelect}
-            limit={limit}
-            disabled={Boolean(cleanupUI?.inputLocked)}
-            renderIndicator={() => null}
-            renderItem={renderBranchRow}
-          />
-        )}
+        {!loading &&
+          !error &&
+          branches.length > 0 &&
+          filteredBranches.length === 0 &&
+          filterQuery && (
+            <Box>
+              <Text dimColor>No branches match your filter</Text>
+            </Box>
+          )}
+
+        {!loading &&
+          !error &&
+          branches.length > 0 &&
+          filteredBranches.length > 0 && (
+            <>
+              {/* Column labels */}
+              <Box>
+                <Text dimColor>{headerText}</Text>
+              </Box>
+              <Select
+                items={filteredBranches}
+                onSelect={onSelect}
+                limit={limit}
+                disabled={Boolean(cleanupUI?.inputLocked)}
+                renderIndicator={() => null}
+                renderItem={renderBranchRow}
+                selectedIndex={selectedIndex}
+                onSelectedIndexChange={setSelectedIndex}
+              />
+            </>
+          )}
       </Box>
 
       {cleanupUI?.footerMessage && (

@@ -42,6 +42,5 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | g
 COPY scripts/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-WORKDIR /claude-worktree
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["bash"]

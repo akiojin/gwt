@@ -1,6 +1,6 @@
 import { vi } from "vitest";
 import type { ExecaReturnValue } from "execa";
-import type { CleanupTarget } from "../../src/ui/types";
+import type { CleanupTarget } from "../../src/cli/ui/types";
 
 /**
  * execaのモック - Gitコマンド、GitHub CLI、AIツールの実行をモック

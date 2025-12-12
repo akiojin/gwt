@@ -1,6 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { SelectionResult } from "../../src/ui/components/App.js";
+import type { SelectionResult } from "../../src/cli/ui/components/App.js";
 import { runInteractiveLoop } from "../../src/index.js";
+
+// Vitest shim for environments lacking vi.hoisted (e.g., bun)
+if (typeof (vi as Record<string, unknown>).hoisted !== "function") {
+  // @ts-expect-error injected shim
+  vi.hoisted = (factory: () => unknown) => factory();
+}
 
 const waitForUserAcknowledgementMock = vi.hoisted(() =>
   vi.fn<() => Promise<void>>(),
@@ -24,6 +30,7 @@ describe("runInteractiveLoop", () => {
     tool: "codex-cli" as any,
     mode: "normal" as any,
     skipPermissions: false,
+    model: "gpt-5.1-codex",
   };
 
   let consoleLogSpy: ReturnType<typeof vi.spyOn>;
