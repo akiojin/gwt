@@ -64,13 +64,13 @@ export async function registerWorktreeRoutes(
     }
   });
 
-  // DELETE /api/worktrees - Worktreeを削除
+  // DELETE /api/worktrees/delete - Worktreeを削除
   fastify.delete<{
-    Querystring: { path: string };
+    Querystring: { path: string; force?: boolean };
     Reply:
       | { success: true }
       | { success: false; error: string; details?: string | null };
-  }>("/api/worktrees", async (request, reply) => {
+  }>("/api/worktrees/delete", async (request, reply) => {
     try {
       const { path } = request.query;
 
