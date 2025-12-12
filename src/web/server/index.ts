@@ -16,6 +16,7 @@ import { registerRoutes } from "./routes/index.js";
 import { importOsEnvIntoSharedConfig } from "./env/importer.js";
 import { createLogger } from "../../logging/logger.js";
 import type { WebFastifyInstance } from "./types.js";
+import { startSystemTray } from "./tray.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -68,7 +69,9 @@ export async function startWebServer(): Promise<void> {
 
     await fastify.listen({ port, host });
     console.log(`Web UI server running at http://${host}:${port}`);
-    console.log(`Access from host: http://localhost:${port}`);
+    const accessUrl = `http://localhost:${port}`;
+    console.log(`Access from host: ${accessUrl}`);
+    await startSystemTray(accessUrl);
   } catch (err) {
     fastify.log.error(err);
     process.exit(1);
