@@ -164,8 +164,8 @@ const SelectComponent = <T extends SelectItem = SelectItem>({
 
         return newIndex;
       });
-    } else if (key.return) {
-      // Select current item
+    } else if (key.return || input === "\n") {
+      // Select current item (handle both CR in raw mode and LF in cooked mode)
       const selectedItem = items[selectedIndex];
       if (selectedItem && !disabled) {
         onSelect(selectedItem);
