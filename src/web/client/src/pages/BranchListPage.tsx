@@ -9,7 +9,6 @@ import { Card, CardHeader, CardContent, CardFooter } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { cn } from "@/lib/utils";
 import type { Branch } from "../../../../types/api.js";
 
 const numberFormatter = new Intl.NumberFormat("ja-JP");
