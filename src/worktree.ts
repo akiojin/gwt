@@ -110,6 +110,7 @@ export interface WorktreeInfo {
   head: string;
   isAccessible?: boolean;
   invalidReason?: string;
+  hasUncommittedChanges?: boolean;
 }
 
 async function listWorktrees(): Promise<WorktreeInfo[]> {

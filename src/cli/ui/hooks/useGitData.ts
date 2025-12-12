@@ -12,6 +12,7 @@ import { getPullRequestByBranch } from "../../../github.js";
 import type { BranchInfo, WorktreeInfo } from "../types.js";
 import type { WorktreeInfo as GitWorktreeInfo } from "../../../worktree.js";
 import { getLastToolUsageMap } from "../../../config/index.js";
+import { hasUncommittedChanges } from "../../../git.js";
 
 export interface UseGitDataOptions {
   enableAutoRefresh?: boolean;
@@ -65,6 +66,22 @@ export function useGitData(options?: UseGitDataOptions): UseGitDataResult {
         }
         worktreesData = [];
       }
+
+      // enrich worktrees with uncommitted status (only for accessible paths)
+      worktreesData = await Promise.all(
+        worktreesData.map(async (wt) => {
+          if (wt.isAccessible === false) {
+            return wt;
+          }
+          try {
+            const hasUncommitted = await hasUncommittedChanges(wt.path);
+            return { ...wt, hasUncommittedChanges: hasUncommitted };
+          } catch {
+            return wt;
+          }
+        }),
+      );
+
       const lastToolUsageMap = await getLastToolUsageMap(repoRoot);
 
       // upstream情報とdivergence情報を取得
@@ -109,6 +126,9 @@ export function useGitData(options?: UseGitDataOptions): UseGitDataResult {
           locked: false, // worktree.ts doesn't expose locked status
           prunable: worktree.isAccessible === false,
           isAccessible: worktree.isAccessible ?? true, // Default to true if undefined
+          ...(worktree.hasUncommittedChanges !== undefined
+            ? { hasUncommittedChanges: worktree.hasUncommittedChanges }
+            : {}),
         };
         worktreeMap.set(worktree.branch, uiWorktreeInfo);
       }
