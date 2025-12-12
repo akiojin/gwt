@@ -1,3 +1,4 @@
+import React from "react";
 import { cn } from "@/lib/utils";
 
 interface PageHeaderProps {
@@ -5,6 +6,7 @@ interface PageHeaderProps {
   title: string;
   subtitle?: string;
   actions?: React.ReactNode;
+  children?: React.ReactNode;
   className?: string;
 }
 
@@ -13,6 +15,7 @@ export function PageHeader({
   title,
   subtitle,
   actions,
+  children,
   className,
 }: PageHeaderProps) {
   return (
@@ -34,6 +37,7 @@ export function PageHeader({
             {subtitle && (
               <p className="mt-1 text-sm text-muted-foreground">{subtitle}</p>
             )}
+            {children}
           </div>
           {actions && <div className="flex gap-2">{actions}</div>}
         </div>

@@ -2,36 +2,17 @@ import React, { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useBranches } from "../hooks/useBranches";
 import { BranchGraph } from "../components/BranchGraph";
+import { PageHeader } from "@/components/common/PageHeader";
+import { MetricCard } from "@/components/common/MetricCard";
+import { SearchInput } from "@/components/common/SearchInput";
+import { Card, CardHeader, CardContent, CardFooter } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { cn } from "@/lib/utils";
 import type { Branch } from "../../../../types/api.js";
 
 const numberFormatter = new Intl.NumberFormat("ja-JP");
-
-const BRANCH_TYPE_LABEL: Record<Branch["type"], string> = {
-  local: "ローカル",
-  remote: "リモート",
-};
-
-const MERGE_STATUS_LABEL: Record<Branch["mergeStatus"], string> = {
-  merged: "マージ済み",
-  unmerged: "未マージ",
-  unknown: "状態不明",
-};
-
-const MERGE_STATUS_TONE: Record<
-  Branch["mergeStatus"],
-  "success" | "warning" | "muted"
-> = {
-  merged: "success",
-  unmerged: "warning",
-  unknown: "muted",
-};
-
-interface PageStateMessage {
-  title: string;
-  description: string;
-}
-
-const SEARCH_PLACEHOLDER = "ブランチ名やタイプで検索...";
 
 export function BranchListPage() {
   const { data, isLoading, error } = useBranches();
@@ -40,28 +21,17 @@ export function BranchListPage() {
   const branches = data ?? [];
 
   const metrics = useMemo(() => {
-    const worktrees = branches.filter((branch) =>
-      Boolean(branch.worktreePath),
-    ).length;
-    const remote = branches.filter((branch) => branch.type === "remote").length;
-    const healthy = branches.filter(
-      (branch) => branch.divergence?.upToDate,
-    ).length;
+    const worktrees = branches.filter((b) => Boolean(b.worktreePath)).length;
+    const remote = branches.filter((b) => b.type === "remote").length;
+    const healthy = branches.filter((b) => b.divergence?.upToDate).length;
 
-    return {
-      total: branches.length,
-      worktrees,
-      remote,
-      healthy,
-    };
+    return { total: branches.length, worktrees, remote, healthy };
   }, [branches]);
 
   const normalizedQuery = query.trim().toLowerCase();
 
   const filteredBranches = useMemo(() => {
-    if (!normalizedQuery) {
-      return branches;
-    }
+    if (!normalizedQuery) return branches;
 
     return branches.filter((branch) => {
       const haystack = [
@@ -77,212 +47,196 @@ export function BranchListPage() {
     });
   }, [branches, normalizedQuery]);
 
-  const pageState: PageStateMessage | null = useMemo(() => {
-    if (isLoading) {
-      return {
-        title: "データを読み込み中",
-        description: "最新のブランチ一覧を取得しています...",
-      };
-    }
+  // Loading state
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-background">
+        <PageHeader
+          eyebrow="WORKTREE DASHBOARD"
+          title="gwt Control Center"
+          subtitle="Loading branch data..."
+        />
+        <main className="mx-auto max-w-7xl px-6 py-8">
+          <div className="flex items-center justify-center py-20">
+            <div className="text-center">
+              <div className="mb-4 text-4xl">⏳</div>
+              <p className="text-muted-foreground">Loading branches...</p>
+            </div>
+          </div>
+        </main>
+      </div>
+    );
+  }
 
-    if (error) {
-      return {
-        title: "ブランチの取得に失敗しました",
-        description:
-          error instanceof Error
-            ? error.message
-            : "未知のエラーが発生しました。",
-      };
-    }
+  // Error state
+  if (error) {
+    return (
+      <div className="min-h-screen bg-background">
+        <PageHeader
+          eyebrow="WORKTREE DASHBOARD"
+          title="gwt Control Center"
+        />
+        <main className="mx-auto max-w-7xl px-6 py-8">
+          <Alert variant="destructive">
+            <AlertDescription>
+              {error instanceof Error ? error.message : "Failed to load branches"}
+            </AlertDescription>
+          </Alert>
+        </main>
+      </div>
+    );
+  }
 
-    if (!branches.length) {
-      return {
-        title: "ブランチが見つかりません",
-        description:
-          "git fetch origin などで最新のブランチを取得してください。",
-      };
-    }
-
-    return null;
-  }, [branches.length, error, isLoading]);
+  // Empty state
+  if (!branches.length) {
+    return (
+      <div className="min-h-screen bg-background">
+        <PageHeader
+          eyebrow="WORKTREE DASHBOARD"
+          title="gwt Control Center"
+        />
+        <main className="mx-auto max-w-7xl px-6 py-8">
+          <Card className="border-dashed">
+            <CardContent className="flex flex-col items-center justify-center py-12">
+              <div className="mb-4 text-4xl">📭</div>
+              <h3 className="mb-2 text-lg font-semibold">No branches found</h3>
+              <p className="text-sm text-muted-foreground">
+                Try running <code className="rounded bg-muted px-1">git fetch origin</code> to sync branches.
+              </p>
+            </CardContent>
+          </Card>
+        </main>
+      </div>
+    );
+  }
 
   return (
-    <div className="app-shell">
-      <header className="page-hero">
-        <p className="page-hero__eyebrow">WORKTREE DASHBOARD</p>
-        <h1>gwt Control Center</h1>
-        <p>
-          ローカルのGitブランチとAIツールをブラウザ上で一元管理し、Worktree状態を瞬時に
-          可視化します。
-        </p>
-        <div className="page-hero__meta">
-          リアルタイムで更新されるステータスビュー
-        </div>
-      </header>
+    <div className="min-h-screen bg-background">
+      <PageHeader
+        eyebrow="WORKTREE DASHBOARD"
+        title="gwt Control Center"
+        subtitle="Manage Git branches and AI tools from your browser"
+      />
 
-      <main className="page-content">
-        {!pageState && filteredBranches.length > 0 && (
+      <main className="mx-auto max-w-7xl space-y-6 px-6 py-8">
+        {/* Branch Graph */}
+        {filteredBranches.length > 0 && (
           <BranchGraph branches={filteredBranches} />
         )}
 
-        <section className="metrics-grid">
-          <article className="metric-card">
-            <p className="metric-card__label">総ブランチ数</p>
-            <p className="metric-card__value" data-testid="metric-total">
-              {numberFormatter.format(metrics.total)}
-            </p>
-            <p className="metric-card__hint">ローカル + リモート</p>
-          </article>
-          <article className="metric-card">
-            <p className="metric-card__label">作成済みWorktree</p>
-            <p className="metric-card__value" data-testid="metric-worktrees">
-              {numberFormatter.format(metrics.worktrees)}
-            </p>
-            <p className="metric-card__hint">即座にAIツールを起動可能</p>
-          </article>
-          <article className="metric-card">
-            <p className="metric-card__label">リモート追跡ブランチ</p>
-            <p className="metric-card__value">
-              {numberFormatter.format(metrics.remote)}
-            </p>
-            <p className="metric-card__hint">origin との同期ステータス</p>
-          </article>
-          <article className="metric-card">
-            <p className="metric-card__label">最新コミットが最新</p>
-            <p className="metric-card__value">
-              {numberFormatter.format(metrics.healthy)}
-            </p>
-            <p className="metric-card__hint">divergence 0 のブランチ</p>
-          </article>
+        {/* Metrics Grid */}
+        <section className="grid grid-cols-2 gap-4 md:grid-cols-4">
+          <MetricCard
+            label="Total Branches"
+            value={numberFormatter.format(metrics.total)}
+            hint="Local + Remote"
+          />
+          <MetricCard
+            label="Active Worktrees"
+            value={numberFormatter.format(metrics.worktrees)}
+            hint="Ready for AI tools"
+          />
+          <MetricCard
+            label="Remote Tracking"
+            value={numberFormatter.format(metrics.remote)}
+            hint="Synced with origin"
+          />
+          <MetricCard
+            label="Up to Date"
+            value={numberFormatter.format(metrics.healthy)}
+            hint="No divergence"
+          />
         </section>
 
-        <section className="toolbar">
-          <label className="toolbar__field">
-            <span className="toolbar__icon" aria-hidden="true">
-              🔍
-            </span>
-            <input
-              type="search"
-              className="search-input"
-              placeholder={SEARCH_PLACEHOLDER}
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-            />
-          </label>
-          <span className="toolbar__count">
-            {numberFormatter.format(filteredBranches.length)} /{" "}
-            {numberFormatter.format(metrics.total)} branches
-          </span>
-        </section>
+        {/* Search */}
+        <SearchInput
+          value={query}
+          onChange={setQuery}
+          placeholder="Search branches by name, type, or commit..."
+          count={{ filtered: filteredBranches.length, total: metrics.total }}
+        />
 
-        {pageState ? (
-          <div className="page-state page-state--card">
-            <h2>{pageState.title}</h2>
-            <p>{pageState.description}</p>
-          </div>
-        ) : filteredBranches.length === 0 ? (
-          <div className="empty-state">
-            <h3>一致するブランチがありません</h3>
-            <p>
-              検索条件を見直すか、タグ・ブランチタイプ・コミットメッセージなど別のキーワードを
-              試してください。
-            </p>
-          </div>
+        {/* Branch Grid */}
+        {filteredBranches.length === 0 ? (
+          <Card className="border-dashed">
+            <CardContent className="flex flex-col items-center justify-center py-12">
+              <h3 className="mb-2 text-lg font-semibold">No matching branches</h3>
+              <p className="text-sm text-muted-foreground">
+                Try a different search term or clear the filter.
+              </p>
+            </CardContent>
+          </Card>
         ) : (
-          <div className="branch-grid">
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {filteredBranches.map((branch) => (
-              <article key={branch.name} className="branch-card">
-                <div className="branch-card__header">
-                  <div>
-                    <p className="branch-card__eyebrow">
-                      {BRANCH_TYPE_LABEL[branch.type]}ブランチ
-                    </p>
-                    <h2>{branch.name}</h2>
-                  </div>
-                  <div className="badge-group">
-                    <span
-                      className={`status-badge status-badge--${branch.type}`}
-                    >
-                      {BRANCH_TYPE_LABEL[branch.type]}
-                    </span>
-                    <span
-                      className={`status-badge status-badge--${MERGE_STATUS_TONE[branch.mergeStatus]}`}
-                    >
-                      {MERGE_STATUS_LABEL[branch.mergeStatus]}
-                    </span>
-                    <span
-                      className={`status-badge ${
-                        branch.worktreePath
-                          ? "status-badge--success"
-                          : "status-badge--muted"
-                      }`}
-                    >
-                      {branch.worktreePath ? "Worktreeあり" : "Worktree未作成"}
-                    </span>
-                  </div>
-                </div>
-
-                <p className="branch-card__commit">
-                  {branch.commitMessage ?? "コミットメッセージがありません"}
-                </p>
-
-                <dl className="metadata-grid metadata-grid--compact">
-                  <div>
-                    <dt>最新コミット</dt>
-                    <dd>{branch.commitHash.slice(0, 7)}</dd>
-                  </div>
-                  <div>
-                    <dt>Author</dt>
-                    <dd>{branch.author ?? "N/A"}</dd>
-                  </div>
-                  <div>
-                    <dt>Worktree</dt>
-                    <dd>{branch.worktreePath ?? "未作成"}</dd>
-                  </div>
-                </dl>
-
-                {branch.divergence && (
-                  <div className="pill-group">
-                    <span className="pill">
-                      Ahead {branch.divergence.ahead}
-                    </span>
-                    <span className="pill">
-                      Behind {branch.divergence.behind}
-                    </span>
-                    <span
-                      className={`pill ${
-                        branch.divergence.upToDate
-                          ? "pill--success"
-                          : "pill--warning"
-                      }`}
-                    >
-                      {branch.divergence.upToDate ? "最新" : "更新あり"}
-                    </span>
-                  </div>
-                )}
-
-                <div className="branch-card__actions">
-                  <Link
-                    className="button button--ghost"
-                    to={`/${encodeURIComponent(branch.name)}`}
-                  >
-                    詳細を見る
-                  </Link>
-                  <span
-                    className={`info-pill ${
-                      branch.worktreePath
-                        ? "info-pill--success"
-                        : "info-pill--warning"
-                    }`}
-                  >
-                    {branch.worktreePath ?? "Worktree未作成"}
-                  </span>
-                </div>
-              </article>
+              <BranchCardItem key={branch.name} branch={branch} />
             ))}
           </div>
         )}
       </main>
     </div>
+  );
+}
+
+// Extracted Branch Card component
+function BranchCardItem({ branch }: { branch: Branch }) {
+  return (
+    <Card className="flex flex-col transition-colors hover:border-muted-foreground/50">
+      <CardHeader className="pb-3">
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+              {branch.type === "local" ? "Local" : "Remote"} Branch
+            </p>
+            <h3 className="mt-1 truncate font-semibold" title={branch.name}>
+              {branch.name}
+            </h3>
+          </div>
+          <div className="flex flex-wrap justify-end gap-1">
+            <Badge variant={branch.type === "local" ? "local" : "remote"}>
+              {branch.type === "local" ? "L" : "R"}
+            </Badge>
+            {branch.worktreePath && (
+              <Badge variant="success">WT</Badge>
+            )}
+          </div>
+        </div>
+      </CardHeader>
+
+      <CardContent className="flex-1 pb-3">
+        <p className="line-clamp-2 text-sm text-muted-foreground">
+          {branch.commitMessage ?? "No commit message"}
+        </p>
+
+        {branch.divergence && (
+          <div className="mt-3 flex flex-wrap gap-1.5">
+            {branch.divergence.ahead > 0 && (
+              <Badge variant="outline" className="text-xs">
+                ↑ {branch.divergence.ahead}
+              </Badge>
+            )}
+            {branch.divergence.behind > 0 && (
+              <Badge variant="outline" className="text-xs">
+                ↓ {branch.divergence.behind}
+              </Badge>
+            )}
+            <Badge
+              variant={branch.divergence.upToDate ? "success" : "warning"}
+              className="text-xs"
+            >
+              {branch.divergence.upToDate ? "Up to date" : "Needs sync"}
+            </Badge>
+          </div>
+        )}
+      </CardContent>
+
+      <CardFooter className="pt-0">
+        <Button variant="ghost" size="sm" asChild className="w-full">
+          <Link to={`/${encodeURIComponent(branch.name)}`}>
+            View Details →
+          </Link>
+        </Button>
+      </CardFooter>
+    </Card>
   );
 }
