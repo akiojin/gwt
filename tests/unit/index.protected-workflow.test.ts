@@ -50,6 +50,8 @@ const waitForUserAcknowledgementMock = vi.hoisted(() =>
   vi.fn<() => Promise<void>>(),
 );
 
+const waitForEnterMock = vi.hoisted(() => vi.fn<() => Promise<void>>());
+
 vi.mock("execa", () => ({
   execa: execaMock,
 }));
@@ -138,6 +140,10 @@ vi.mock("../../src/utils/terminal.js", async () => {
   };
 });
 
+vi.mock("../../src/utils/prompt.js", () => ({
+  waitForEnter: waitForEnterMock,
+}));
+
 // Import after mocks are set up
 import { handleAIToolWorkflow } from "../../src/index.js";
 
@@ -163,6 +169,8 @@ beforeEach(() => {
   });
   waitForUserAcknowledgementMock.mockClear();
   waitForUserAcknowledgementMock.mockResolvedValue(undefined);
+  waitForEnterMock.mockClear();
+  waitForEnterMock.mockResolvedValue(undefined);
   switchToProtectedBranchMock.mockResolvedValue("local");
   branchExistsMock.mockResolvedValue(true);
   getCurrentBranchMock.mockResolvedValue("develop");
