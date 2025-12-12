@@ -63,6 +63,7 @@
 
 - ドキュメントはREADME.md/README.ja.mdに集約する
 - 仕様ファイルは必ず `specs/SPEC-????????/` （UUID8桁）配下に配置する。`specs/feature/*` など別階層への配置は禁止。
+- ログに関する統一仕様は `specs/SPEC-b9f5c4a1/spec.md` を参照し、画面出力とログ（pino構造化ログ）を明確に分けること。
 
 ## コードクオリティガイドライン
 
