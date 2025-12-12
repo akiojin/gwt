@@ -5,19 +5,19 @@
  * 仕様: specs/SPEC-d5e56259/contracts/rest-api.yaml
  */
 
-import type { FastifyInstance } from "fastify";
 import type { PTYManager } from "../pty/manager.js";
 import { registerBranchRoutes } from "./branches.js";
 import { registerWorktreeRoutes } from "./worktrees.js";
 import { registerSessionRoutes } from "./sessions.js";
 import { registerConfigRoutes } from "./config.js";
 import type { HealthResponse } from "../../../types/api.js";
+import type { WebFastifyInstance } from "../types.js";
 
 /**
  * すべてのルートを登録
  */
 export async function registerRoutes(
-  fastify: FastifyInstance,
+  fastify: WebFastifyInstance,
   ptyManager: PTYManager,
 ): Promise<void> {
   // ヘルスチェック

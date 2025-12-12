@@ -4,7 +4,6 @@
  * AI Toolセッション関連のREST APIエンドポイント。
  */
 
-import type { FastifyInstance } from "fastify";
 import type { PTYManager } from "../pty/manager.js";
 import type {
   ApiResponse,
@@ -13,12 +12,13 @@ import type {
 } from "../../../types/api.js";
 import { saveSession } from "../../../config/index.js";
 import { execa } from "execa";
+import type { WebFastifyInstance } from "../types.js";
 
 /**
  * セッション関連のルートを登録
  */
 export async function registerSessionRoutes(
-  fastify: FastifyInstance,
+  fastify: WebFastifyInstance,
   ptyManager: PTYManager,
 ): Promise<void> {
   // GET /api/sessions - すべてのセッション一覧を取得
