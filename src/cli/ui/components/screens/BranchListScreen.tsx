@@ -243,15 +243,22 @@ export function BranchListScreen({
   // Filter input: 1 line
   // Stats: 1 line
   // Empty line: 1 line
+  // Web UI URL: 1 line
   // Footer: 1 line
-  // Total fixed: 6 lines
+  // Total fixed: 7 lines
   const headerLines = 2;
   const filterLines = 1;
   const statsLines = 1;
   const emptyLine = 1;
+  const webUiLines = 1;
   const footerLines = 1;
   const fixedLines =
-    headerLines + filterLines + statsLines + emptyLine + footerLines;
+    headerLines +
+    filterLines +
+    statsLines +
+    emptyLine +
+    webUiLines +
+    footerLines;
   const contentHeight = rows - fixedLines;
   const limit = Math.max(5, contentHeight); // Minimum 5 items visible
 
@@ -607,6 +614,16 @@ export function BranchListScreen({
           )}
         </Box>
       )}
+
+      {/* Web UI URL */}
+      <Box>
+        <Text dimColor>
+          Web UI: http://localhost:
+          {process.env.PORT && !Number.isNaN(Number(process.env.PORT))
+            ? Number(process.env.PORT)
+            : 3000}
+        </Text>
+      </Box>
 
       {/* Footer */}
       <Footer actions={footerActions} />
