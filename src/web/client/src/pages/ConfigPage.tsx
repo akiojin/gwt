@@ -228,7 +228,7 @@ export function ConfigPage() {
             <div>
               <h2>登録済みツール</h2>
               <p className="section-card__body">
-                CLI と Web UI は同じ設定を参照します。ここで更新すると ~/.claude-worktree/tools.json に保存されます。
+                CLI と Web UI は同じ設定を参照します。ここで更新すると ~/.gwt/tools.json に保存されます。
               </p>
             </div>
           </header>
