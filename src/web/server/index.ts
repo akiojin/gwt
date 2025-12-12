@@ -17,6 +17,7 @@ import { importOsEnvIntoSharedConfig } from "./env/importer.js";
 import { createLogger } from "../../logging/logger.js";
 import type { WebFastifyInstance } from "./types.js";
 import { startSystemTray } from "./tray.js";
+import { resolveWebUiPort } from "../../utils/webui.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -62,7 +63,7 @@ export async function startWebServer(): Promise<void> {
 
   // サーバー起動
   try {
-    const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+    const port = resolveWebUiPort();
     // Docker環境からホストOSでアクセスできるよう、0.0.0.0でリッスン
     // IPv4/IPv6両方対応のため、listenOnStart: false も検討可能
     const host = process.env.HOST || "0.0.0.0";

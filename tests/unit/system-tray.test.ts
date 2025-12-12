@@ -18,6 +18,7 @@ describe("startSystemTray (SPEC-1f56fd80)", () => {
     originalEnv = { ...process.env };
     delete process.env.CI;
     delete process.env.GWT_DISABLE_TRAY;
+    process.env.DISPLAY = process.env.DISPLAY || ":0";
 
     createMock = vi.fn(() => ({ dispose: vi.fn() }));
     viWithDoMock.doMock?.("trayicon", () => ({
@@ -58,4 +59,3 @@ describe("startSystemTray (SPEC-1f56fd80)", () => {
     expect(createMock).not.toHaveBeenCalled();
   });
 });
-

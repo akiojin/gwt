@@ -11,6 +11,7 @@ import type { BranchItem, Statistics } from "../../types.js";
 import stringWidth from "string-width";
 import stripAnsi from "strip-ansi";
 import chalk from "chalk";
+import { resolveWebUiPort } from "../../../../utils/webui.js";
 
 // Emoji 幅は端末によって 1 または 2 になることがあるため、最小幅を上書きして
 // 実測より小さくならないようにする（過小評価＝折り返しの原因を防ぐ）
@@ -618,10 +619,7 @@ export function BranchListScreen({
       {/* Web UI URL */}
       <Box>
         <Text dimColor>
-          Web UI: http://localhost:
-          {process.env.PORT && !Number.isNaN(Number(process.env.PORT))
-            ? Number(process.env.PORT)
-            : 3000}
+          Web UI: http://localhost:{resolveWebUiPort()}
         </Text>
       </Box>
 

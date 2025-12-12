@@ -6,7 +6,8 @@ export type OpenUrlFn = (url: string) => Promise<void> | void;
 const TRAY_ICON_BASE64 =
   "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQBAMAAADt3eJSAAAABGdBTUEAALGPC/xhBQAAACBjSFJNAAB6JgAAgIQAAPoAAACA6AAAdTAAAOpgAAA6mAAAF3CculE8AAAAJ1BMVEUAAAAAvNQAvNQAvNQAvNQAvNQAvNQAvNQAvNQAvNQAvNQAvNT////J1ubyAAAAC3RSTlMAJYTcgyQJnJ3U3WXfUogAAAABYktHRAyBs1FjAAAAB3RJTUUH6QwMCRccbOpRBQAAAFdJREFUCNdjYEAARuXNriCarXr37t1tQEYmkN69M4GBoRvE2F3AwAqmd29kYIEwNjEwQxibGbghjN0MXDARJpgaqK6tDAzVUHMQJoPtKgPZyuq8S5WBAQBeRj51tvdhawAAACV0RVh0ZGF0ZTpjcmVhdGUAMjAyNS0xMi0xMlQwOToyMzoyOCswMDowMBPEA5UAAAAldEVYdGRhdGU6bW9kaWZ5ADIwMjUtMTItMTJUMDk6MjM6MjgrMDA6MDBimbspAAAAAElFTkSuQmCC";
 
-let trayInitialized = false;
+let trayInitAttempted = false;
+let trayInstance: { dispose?: () => void } | null = null;
 
 function shouldEnableTray(): boolean {
   if (process.env.GWT_DISABLE_TRAY?.toLowerCase() === "true") return false;
@@ -42,24 +43,14 @@ export async function startSystemTray(
   url: string,
   opts?: { openUrl?: OpenUrlFn },
 ): Promise<void> {
-  if (trayInitialized || !shouldEnableTray()) return;
-  trayInitialized = true;
+  if (trayInitAttempted || !shouldEnableTray()) return;
+  trayInitAttempted = true;
 
   const logger = createLogger({ category: "tray" });
 
   try {
-    const mod = (await import("trayicon")) as unknown as {
-      create?: (options: {
-        icon: Buffer;
-        title?: string;
-        tooltip?: string;
-        action?: () => unknown;
-      }) => unknown;
-      default?: unknown;
-    };
-    const create =
-      (mod as any).create ??
-      ((mod as any).default && (mod as any).default.create);
+    const mod = await import("trayicon");
+    const create = (mod as any).create ?? (mod as any).default?.create;
     if (typeof create !== "function") {
       throw new Error("trayicon.create not available");
     }
@@ -67,7 +58,7 @@ export async function startSystemTray(
     const icon = Buffer.from(TRAY_ICON_BASE64, "base64");
     const open = opts?.openUrl ?? openUrl;
 
-    create({
+    trayInstance = create({
       icon,
       title: "gwt Web UI",
       tooltip: "Double-click to open Web UI",
@@ -80,3 +71,7 @@ export async function startSystemTray(
   }
 }
 
+export function disposeSystemTray(): void {
+  trayInstance?.dispose?.();
+  trayInstance = null;
+}

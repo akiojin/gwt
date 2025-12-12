@@ -33,6 +33,7 @@ import {
   getTerminalStreams,
   waitForUserAcknowledgement,
 } from "./utils/terminal.js";
+import { resolveWebUiPort } from "./utils/webui.js";
 import { createLogger } from "./logging/logger.js";
 import { getToolById, getSharedEnvironment } from "./config/tools.js";
 import { launchCustomAITool } from "./launcher.js";
@@ -876,7 +877,7 @@ export async function main(): Promise<void> {
 
   // Start Web UI server in background
   const { startWebServer } = await import("./web/server/index.js");
-  const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+  const port = resolveWebUiPort();
   startWebServer().catch((err) => {
     appLogger.warn({ err }, "Web UI server failed to start");
   });
