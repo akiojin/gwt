@@ -147,8 +147,8 @@ describeFn("BranchListScreen Performance", () => {
 
     unmount();
 
-    // CI 環境ではマシン性能が低いため閾値を緩める（CIではそもそもskip）
-    const threshold = isCI ? 200 : 100;
+    // Performance threshold for re-render
+    const threshold = 100;
     expect(rerenderTime).toBeLessThan(threshold);
 
     console.log(`\n🔄 Re-render Performance:`);
