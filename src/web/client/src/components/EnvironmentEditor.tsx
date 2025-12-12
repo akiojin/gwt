@@ -1,4 +1,6 @@
 import React from "react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 
 export interface EnvEntry {
   id: string;
@@ -26,21 +28,23 @@ export function EnvironmentEditor({
   const hasEntries = entries.length > 0;
 
   return (
-    <div className="env-editor">
-      <p className="env-editor__description">
+    <div className="space-y-4">
+      <p className="text-sm text-muted-foreground">
         Claude Code / Codex CLI などが参照する共有環境変数を管理します。例: ANTHROPIC_API_KEY, OPENAI_API_KEY, GITHUB_TOKEN
       </p>
 
-      <div className="env-editor__rows">
+      <div className="space-y-3">
         {!hasEntries && (
-          <p className="env-editor__empty">環境変数はまだ設定されていません。</p>
+          <p className="py-4 text-center text-sm text-muted-foreground">
+            環境変数はまだ設定されていません。
+          </p>
         )}
 
         {entries.map((entry) => (
-          <div className="env-editor__row" key={entry.id}>
-            <label className="form-field">
-              <span>キー</span>
-              <input
+          <div key={entry.id} className="flex items-end gap-3">
+            <div className="flex-1 space-y-1">
+              <label className="text-sm font-medium">キー</label>
+              <Input
                 type="text"
                 value={entry.key}
                 onChange={(event) => onEntryChange(entry.id, "key", event.target.value)}
@@ -48,11 +52,11 @@ export function EnvironmentEditor({
                 maxLength={100}
                 disabled={isSaving}
               />
-            </label>
+            </div>
 
-            <label className="form-field form-field--stacked">
-              <span>値</span>
-              <input
+            <div className="flex-1 space-y-1">
+              <label className="text-sm font-medium">値</label>
+              <Input
                 type="text"
                 value={entry.value}
                 onChange={(event) => onEntryChange(entry.id, "value", event.target.value)}
@@ -60,40 +64,36 @@ export function EnvironmentEditor({
                 maxLength={500}
                 disabled={isSaving}
               />
-            </label>
+            </div>
 
-            <button
-              type="button"
-              className="button button--ghost env-editor__remove"
+            <Button
+              variant="ghost"
+              size="sm"
               onClick={() => onRemoveEntry(entry.id)}
               disabled={isSaving}
             >
               削除
-            </button>
+            </Button>
           </div>
         ))}
       </div>
 
-      <div className="env-editor__actions">
-        <button
-          type="button"
-          className="button button--secondary"
+      <div className="flex gap-2 pt-2">
+        <Button
+          variant="secondary"
           onClick={onAddEntry}
           disabled={isSaving}
         >
           環境変数を追加
-        </button>
+        </Button>
 
-        <button
-          type="button"
-          className="button button--primary"
+        <Button
           onClick={onSave}
           disabled={isSaving}
         >
           {isSaving ? "保存中..." : "保存"}
-        </button>
+        </Button>
       </div>
     </div>
   );
 }
-
