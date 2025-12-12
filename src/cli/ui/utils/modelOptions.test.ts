@@ -23,6 +23,7 @@ describe("modelOptions", () => {
     expect(unique.size).toBe(ids.length);
     expect(ids).toEqual([
       "gpt-5.1-codex",
+      "gpt-5.2",
       "gpt-5.1-codex-max",
       "gpt-5.1-codex-mini",
       "gpt-5.1",
@@ -34,6 +35,19 @@ describe("modelOptions", () => {
       (m) => m.id === "gpt-5.1-codex-max",
     );
     expect(getDefaultInferenceForModel(codexMax)).toBe("medium");
+  });
+
+  it("exposes gpt-5.2 with xhigh reasoning and medium default", () => {
+    const codex52 = getModelOptions("codex-cli").find(
+      (m) => m.id === "gpt-5.2",
+    );
+    expect(codex52?.inferenceLevels).toEqual([
+      "xhigh",
+      "high",
+      "medium",
+      "low",
+    ]);
+    expect(getDefaultInferenceForModel(codex52)).toBe("medium");
   });
 
   it("lists expected Gemini models", () => {
