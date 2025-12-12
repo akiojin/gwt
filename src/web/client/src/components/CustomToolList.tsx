@@ -1,4 +1,7 @@
 import React from "react";
+import { Card, CardHeader, CardContent, CardFooter } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import type { CustomAITool } from "../../../../types/api.js";
 
 interface CustomToolListProps {
@@ -10,56 +13,70 @@ interface CustomToolListProps {
 export function CustomToolList({ tools, onEdit, onDelete }: CustomToolListProps) {
   if (!tools.length) {
     return (
-      <div className="page-state page-state--card">
-        <h2>カスタムツールが登録されていません</h2>
-        <p>「カスタムツールを追加」から最初のツールを登録してください。</p>
-      </div>
+      <Card className="border-dashed">
+        <CardContent className="flex flex-col items-center justify-center py-12 text-center">
+          <h3 className="text-lg font-semibold">カスタムツールが登録されていません</h3>
+          <p className="mt-2 text-sm text-muted-foreground">
+            「カスタムツールを追加」から最初のツールを登録してください。
+          </p>
+        </CardContent>
+      </Card>
     );
   }
 
   return (
-    <div className="tool-grid">
+    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
       {tools.map((tool) => (
-        <article key={tool.id} className="tool-card">
-          <header className="tool-card__header">
-            <div>
-              <p className="tool-card__eyebrow">ID: {tool.id}</p>
-              <h3>
-                {tool.icon && <span className="tool-card__icon">{tool.icon}</span>}
-                {tool.displayName}
-              </h3>
+        <Card key={tool.id} className="flex flex-col">
+          <CardHeader className="pb-3">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0 flex-1">
+                <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                  ID: {tool.id}
+                </p>
+                <h3 className="mt-1 flex items-center gap-2 font-semibold">
+                  {tool.icon && <span>{tool.icon}</span>}
+                  <span className="truncate">{tool.displayName}</span>
+                </h3>
+              </div>
+              <Badge variant="outline">{renderExecutionLabel(tool.executionType)}</Badge>
             </div>
-            <span className="pill">{renderExecutionLabel(tool.executionType)}</span>
-          </header>
+          </CardHeader>
 
-          <p className="tool-card__command">{tool.command}</p>
+          <CardContent className="flex-1 space-y-3 pb-3">
+            <p className="rounded bg-muted px-2 py-1 font-mono text-sm">
+              {tool.command}
+            </p>
 
-          {tool.description && <p className="tool-card__description">{tool.description}</p>}
+            {tool.description && (
+              <p className="text-sm text-muted-foreground">{tool.description}</p>
+            )}
 
-          <dl className="metadata-grid metadata-grid--compact tool-card__meta">
-            <div>
-              <dt>normal</dt>
-              <dd>{renderArgs(tool.modeArgs?.normal)}</dd>
-            </div>
-            <div>
-              <dt>continue</dt>
-              <dd>{renderArgs(tool.modeArgs?.continue)}</dd>
-            </div>
-            <div>
-              <dt>resume</dt>
-              <dd>{renderArgs(tool.modeArgs?.resume)}</dd>
-            </div>
-          </dl>
+            <dl className="grid grid-cols-3 gap-2 text-xs">
+              <div>
+                <dt className="text-muted-foreground">normal</dt>
+                <dd className="mt-0.5">{renderArgs(tool.modeArgs?.normal)}</dd>
+              </div>
+              <div>
+                <dt className="text-muted-foreground">continue</dt>
+                <dd className="mt-0.5">{renderArgs(tool.modeArgs?.continue)}</dd>
+              </div>
+              <div>
+                <dt className="text-muted-foreground">resume</dt>
+                <dd className="mt-0.5">{renderArgs(tool.modeArgs?.resume)}</dd>
+              </div>
+            </dl>
+          </CardContent>
 
-          <footer className="tool-card__actions">
-            <button type="button" className="button button--secondary" onClick={() => onEdit(tool)}>
+          <CardFooter className="flex gap-2 pt-0">
+            <Button variant="secondary" size="sm" onClick={() => onEdit(tool)}>
               編集
-            </button>
-            <button type="button" className="button button--ghost" onClick={() => onDelete(tool)}>
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => onDelete(tool)}>
               削除
-            </button>
-          </footer>
-        </article>
+            </Button>
+          </CardFooter>
+        </Card>
       ))}
     </div>
   );
@@ -79,7 +96,7 @@ function renderExecutionLabel(type: CustomAITool["executionType"]) {
 
 function renderArgs(args?: string[] | null) {
   if (!args || args.length === 0) {
-    return <span className="tool-card__muted">未設定</span>;
+    return <span className="text-muted-foreground/50">未設定</span>;
   }
   return args.join(" ");
 }
