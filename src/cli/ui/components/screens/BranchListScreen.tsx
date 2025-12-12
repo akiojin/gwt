@@ -126,9 +126,11 @@ export function BranchListScreen({
   onToggleSelect,
 }: BranchListScreenProps) {
   const { rows } = useTerminalSize();
-  const headerText =
-    "  Legend: [ ]/[ * ] select  🟢/⚪ worktree  🛡/⚠ safe";
-  const selectedSet = useMemo(() => new Set(selectedBranches), [selectedBranches]);
+  const headerText = "  Legend: [ ]/[ * ] select  🟢/⚪ worktree  🛡/⚠ safe";
+  const selectedSet = useMemo(
+    () => new Set(selectedBranches),
+    [selectedBranches],
+  );
 
   // Filter state - allow test control via props
   const [internalFilterQuery, setInternalFilterQuery] = useState("");
@@ -316,25 +318,28 @@ export function BranchListScreen({
     return result + ellipsis;
   }, []);
 
-  const colorToolLabel = useCallback((label: string, toolId?: string | null) => {
-    switch (toolId) {
-      case "claude-code":
-        return chalk.hex("#ffaf00")(label); // orange-ish
-      case "codex-cli":
-        return chalk.cyan(label);
-      case "gemini-cli":
-        return chalk.magenta(label);
-      case "qwen-cli":
-        return chalk.green(label);
-      default: {
-        const trimmed = label.trim().toLowerCase();
-        if (!toolId || trimmed === "unknown") {
-          return chalk.gray(label);
+  const colorToolLabel = useCallback(
+    (label: string, toolId?: string | null) => {
+      switch (toolId) {
+        case "claude-code":
+          return chalk.hex("#ffaf00")(label); // orange-ish
+        case "codex-cli":
+          return chalk.cyan(label);
+        case "gemini-cli":
+          return chalk.magenta(label);
+        case "qwen-cli":
+          return chalk.green(label);
+        default: {
+          const trimmed = label.trim().toLowerCase();
+          if (!toolId || trimmed === "unknown") {
+            return chalk.gray(label);
+          }
+          return chalk.white(label);
         }
-        return chalk.white(label);
       }
-    }
-  }, []);
+    },
+    [],
+  );
 
   const renderBranchRow = useCallback(
     (item: BranchItem, isSelected: boolean, context: { columns: number }) => {
@@ -458,7 +463,9 @@ export function BranchListScreen({
 
       // 端末幅を超えた場合は隙間→ラベルの順で詰めて収める
       const clampToWidth = () => {
-        const finalWidth = measureDisplayWidth(stripAnsi(lineWithColoredTimestamp));
+        const finalWidth = measureDisplayWidth(
+          stripAnsi(lineWithColoredTimestamp),
+        );
         if (finalWidth <= columns) {
           return;
         }
@@ -618,9 +625,7 @@ export function BranchListScreen({
 
       {/* Web UI URL */}
       <Box>
-        <Text dimColor>
-          Web UI: http://localhost:{resolveWebUiPort()}
-        </Text>
+        <Text dimColor>Web UI: http://localhost:{resolveWebUiPort()}</Text>
       </Box>
 
       {/* Footer */}

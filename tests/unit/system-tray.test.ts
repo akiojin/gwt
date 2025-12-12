@@ -37,7 +37,10 @@ describe("startSystemTray (SPEC-1f56fd80)", () => {
     await startSystemTray("http://localhost:3000");
 
     expect(createMock).toHaveBeenCalledTimes(1);
-    const options = createMock.mock.calls[0][0] as { title?: string; action?: unknown };
+    const options = createMock.mock.calls[0][0] as {
+      title?: string;
+      action?: unknown;
+    };
     expect(options.title).toMatch(/gwt/i);
     expect(typeof options.action).toBe("function");
   });
