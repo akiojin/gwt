@@ -25,6 +25,7 @@
 
 ### 基本ルール
 
+- **指示を受けた場合、まず既存要件（spec.md）に追記可能かを調べ、次に要件化（Spec Kit による仕様策定）とTDD化を優先的に実行する。実装は要件とテストが確定した後に着手する。**
 - 作業（タスク）を完了したら、変更点を日本語でコミットログに追加して、コミット＆プッシュを必ず行う
 - 作業（タスク）は、最大限の並列化をして進める
 - 作業（タスク）は、最大限の細分化をしてToDoに登録する
@@ -36,24 +37,23 @@
 
 ### コミットメッセージポリシー
 
-> 🚨 **コミットログは semantic-release が参照する唯一の真実であり、ここに齟齬があるとリリースバージョン・CHANGELOG 生成が即座に破綻します。commitlint を素通りさせることは絶対に許されません。**
+> 🚨 **コミットログは release-please が参照する唯一の真実であり、ここに齟齬があるとリリースバージョン・CHANGELOG 生成が即座に破綻します。commitlint を素通りさせることは絶対に許されません。**
 
-- semantic-release によってバージョン判定とリリースノート生成を100%自動化しているため、コミットメッセージは例外なく Conventional Commits 形式（`feat:`/`fix:`/`docs:`/`chore:` ...）で記述する。
-- コミットを作成する前に、変更内容と Conventional Commits の種別（`feat`/`fix`/`docs` など）が 1 対 1 で一致しているかを厳格に突き合わせる。 semantic-release が付与するバージョン種別（major/minor/patch）がこの判定で決まるため、嘘の種類を付けた瞬間にバージョン管理が壊れる。
+- release-please によってバージョン判定とリリースノート生成を100%自動化しているため、コミットメッセージは例外なく Conventional Commits 形式（`feat:`/`fix:`/`docs:`/`chore:` ...）で記述する。
+- コミットを作成する前に、変更内容と Conventional Commits の種別（`feat`/`fix`/`docs` など）が 1 対 1 で一致しているかを厳格に突き合わせる。 release-please が付与するバージョン種別（major/minor/patch）がこの判定で決まるため、嘘の種類を付けた瞬間にバージョン管理が壊れる。
 - ローカルでは `bunx commitlint --from HEAD~1 --to HEAD` などで必ず自己検証し、CI の commitlint に丸投げしない。エラーが出た状態で push しない。
-- `feat:` はマイナーバージョン、`fix:` はパッチ、`type!:` もしくは本文の `BREAKING CHANGE:` はメジャー扱いになる。 breaking change を含む場合は例外なく `!` か `BREAKING CHANGE:` を記載し、semantic-release に破壊的変更を認識させる。
-- 1コミットで複数タスクを抱き合わせない。変更内容とコミットメッセージの対応関係を明確に保ち、semantic-release の解析精度を担保する。
+- `feat:` はマイナーバージョン、`fix:` はパッチ、`type!:` もしくは本文の `BREAKING CHANGE:` はメジャー扱いになる。 breaking change を含む場合は例外なく `!` か `BREAKING CHANGE:` を記載し、release-please に破壊的変更を認識させる。
+- 1コミットで複数タスクを抱き合わせない。変更内容とコミットメッセージの対応関係を明確に保ち、release-please の解析精度を担保する。
 - `chore:` や `docs:` などリリース対象外のタイプでも必ずプレフィックスを付け、曖昧な自然文だけのコミットメッセージを禁止する。
 - コミット前に commitlint ルール（subject 空欄禁止・100文字以内など）を自己確認し、CI での差し戻しを防止する。
 
 ### ローカル検証/実行ルール（bun）
 
-- このリポジトリのローカル検証・実行は bun を使用する
+- このリポジトリのローカル検証・実行・CI/CDは bun を使用する
 - 依存インストール: `bun install`
 - ビルド: `bun run build`
 - 実行: `bunx .`（一発実行）または `bun run start`
-- グローバル実行: `bun add -g @akiojin/claude-worktree` → `claude-worktree`
-- CI/CD・Docker環境ではpnpmを使用（ハードリンクによるnode_modules効率化のため）
+- グローバル実行: `bun add -g @akiojin/gwt` → `gwt`
 
 ## コミュニケーションガイドライン
 
@@ -62,6 +62,8 @@
 ## ドキュメント管理
 
 - ドキュメントはREADME.md/README.ja.mdに集約する
+- 仕様ファイルは必ず `specs/SPEC-????????/` （UUID8桁）配下に配置する。`specs/feature/*` など別階層への配置は禁止。
+- ログに関する統一仕様は `specs/SPEC-b9f5c4a1/spec.md` を参照し、画面出力とログ（pino構造化ログ）を明確に分けること。
 
 ## コードクオリティガイドライン
 
@@ -80,39 +82,6 @@
 ## リリースワークフロー
 
 - feature/\* ブランチは develop へ Auto Merge し、develop で次回リリース候補を蓄積する。
-- `/release` コマンド（または `gh workflow run create-release.yml --ref develop`）で semantic-release のドライランを実行し、次のバージョンを決定して `release/vX.Y.Z` ブランチを自動作成する。
-- `release/vX.Y.Z` ブランチへの push をトリガーに `.github/workflows/release.yml` が以下を実行：
-  1. semantic-release で CHANGELOG/タグ/GitHub Release を作成
-  2. `release/vX.Y.Z` → `main` へ直接マージ
-  3. `release/vX.Y.Z` ブランチを削除
-- main への push をトリガーに `.github/workflows/publish.yml` が npm publish（設定時）と `main` → `develop` のバックマージを実行する。
-
-## 最近の変更
-
-### 2025-01-06: Codex CLI対応機能の計画
-
-- worktree起動時にClaude CodeとCodex CLIを選択可能にする機能を計画中
-- 詳細: `/specs/001-codex-cli-worktree/`
-- 技術スタック: Bun 1.0+, TypeScript, inquirer（必要に応じてNode.js 18+を併用）
-
-### 2025-01-07: unity-mcp-server型リリースフロー完全導入
-
-- unity-mcp-serverの直接マージ方式を完全導入（PRを経由せず高速化）
-- release.yml内で semantic-release → main直接マージ → developバックマージ → ブランチ削除を一括実行
-- PRベース方式から直接マージ方式に変更し、シンプルで高速なリリースフローを実現
-- 詳細: `.github/workflows/create-release.yml`, `.github/workflows/release.yml`, `.github/workflows/publish.yml`
-
-### 2025-01-06: リリースフロー変更
-
-- develop ブランチを導入し、手動リリーストリガー方式へ移行（現在は unity-mcp-server 型 release ブランチ方式に統一済み）
-- feature → develop (Auto Merge) → /release（release ブランチ作成）→ release push → semantic-release
-- 詳細: `.github/workflows/create-release.yml`, `.claude/commands/release.md`, `scripts/create-release-branch.sh`
-
-## Active Technologies
-
-- TypeScript 5.8.x / React 19 / Ink 6 / Bun 1.0+ + Vitest 2.1.x, happy-dom 20.0.8, @testing-library/react 16.3.0, execa 9.6.0 (SPEC-a5a44f4c)
-- TypeScript 5.8.x / Bun 1.0+ / GitHub Actions YAML + semantic-release 22.x, gh CLI, GitHub Actions (`actions/checkout`, `actions/github-script`) (SPEC-57fde06f)
-
-## Recent Changes
-
-- SPEC-a5a44f4c: Added TypeScript 5.8.x / React 19 / Ink 6 / Bun 1.0+ + Vitest 2.1.x, happy-dom 20.0.8, @testing-library/react 16.3.0, execa 9.6.0
+- `/release` コマンド（または `gh workflow run prepare-release.yml --ref develop`）で develop → main の Release PR を作成する。
+- Release PR が main にマージされると `.github/workflows/release.yml` が release-please でタグ・GitHub Release・Release PR を作成する。
+- `v*` タグの push をトリガーに `.github/workflows/publish.yml` が npm publish を実行する。

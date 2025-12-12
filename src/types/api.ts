@@ -30,6 +30,7 @@ export interface Branch {
     state: "open" | "merged" | "closed";
     mergedAt?: string | null;
   } | null;
+  lastToolUsage?: LastToolUsage | null;
 }
 
 /**
@@ -46,6 +47,7 @@ export interface Worktree {
   lastAccessedAt?: string | null; // ISO8601
   divergence?: Branch["divergence"];
   prInfo?: Branch["prInfo"];
+  lastToolUsage?: LastToolUsage | null;
 }
 
 /**
@@ -102,7 +104,15 @@ export interface CustomAITool {
   updatedAt?: string | null; // ISO8601
 }
 
-export type EnvironmentMap = Record<string, string>;
+export interface LastToolUsage {
+  branch: string;
+  worktreePath: string | null;
+  toolId: string;
+  toolLabel: string;
+  mode?: "normal" | "continue" | "resume" | null;
+  model?: string | null;
+  timestamp: number; // epoch millis
+}
 
 /**
  * REST API Response wrappers

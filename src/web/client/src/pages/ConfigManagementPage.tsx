@@ -1,6 +1,10 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import type { ConfigPayload, CustomAITool, EnvironmentVariable } from "../../../../types/api.js";
+import type {
+  ConfigPayload,
+  CustomAITool,
+  EnvironmentVariable,
+} from "../../../../types/api.js";
 import { useConfig, useUpdateConfig } from "../hooks/useConfig";
 import { EnvEditor, createEnvRow, type EnvRow } from "../components/EnvEditor";
 
@@ -58,9 +62,10 @@ export function ConfigManagementPage() {
   const updateConfig = useUpdateConfig();
   const [sharedEnv, setSharedEnv] = useState<EnvRow[]>([]);
   const [toolEnv, setToolEnv] = useState<ToolEnvState>({});
-  const [banner, setBanner] = useState<{ type: "success" | "error"; message: string } | null>(
-    null,
-  );
+  const [banner, setBanner] = useState<{
+    type: "success" | "error";
+    message: string;
+  } | null>(null);
 
   useEffect(() => {
     if (!data) return;
@@ -82,10 +87,19 @@ export function ConfigManagementPage() {
   );
 
   const hasInvalidRows = useMemo(() => {
-    const keyInvalid = sharedEnv.some((row) => !row.key || /[^A-Z0-9_]/.test(row.key));
-    const valueInvalid = sharedEnv.some((row) => row.key && row.value.trim().length === 0);
+    const keyInvalid = sharedEnv.some(
+      (row) => !row.key || /[^A-Z0-9_]/.test(row.key),
+    );
+    const valueInvalid = sharedEnv.some(
+      (row) => row.key && row.value.trim().length === 0,
+    );
     const toolInvalid = Object.values(toolEnv).some((rows) =>
-      rows.some((row) => !row.key || /[^A-Z0-9_]/.test(row.key) || row.value.trim().length === 0),
+      rows.some(
+        (row) =>
+          !row.key ||
+          /[^A-Z0-9_]/.test(row.key) ||
+          row.value.trim().length === 0,
+      ),
     );
     return keyInvalid || valueInvalid || toolInvalid;
   }, [sharedEnv, toolEnv]);
@@ -95,7 +109,8 @@ export function ConfigManagementPage() {
       return true;
     }
     if (!data) return false;
-    const currentTool = data.tools?.map((tool) => serializeRows(toolEnv[tool.id] ?? [])) ?? [];
+    const currentTool =
+      data.tools?.map((tool) => serializeRows(toolEnv[tool.id] ?? [])) ?? [];
     const originalTool = data.tools?.map((tool) => tool.env ?? []) ?? [];
     return JSON.stringify(currentTool) !== JSON.stringify(originalTool);
   }, [data, serializedOriginalShared, serializedCurrentShared, toolEnv]);
@@ -160,7 +175,11 @@ export function ConfigManagementPage() {
             {updateConfig.isPending ? "保存中..." : "保存"}
           </button>
         </div>
-        {banner && <div className={`inline-banner inline-banner--${banner.type}`}>{banner.message}</div>}
+        {banner && (
+          <div className={`inline-banner inline-banner--${banner.type}`}>
+            {banner.message}
+          </div>
+        )}
       </header>
 
       <main className="page-content page-content--wide">

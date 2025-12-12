@@ -1,19 +1,19 @@
-# @akiojin/claude-worktree
+# @akiojin/gwt
 
 [English](README.md)
 
-Claude Code / Codex CLI 対応の対話型Gitワークツリーマネージャー（グラフィカルなブランチ選択と高度なワークフロー管理機能付き）
+Claude Code / Codex CLI / Gemini CLI 対応の対話型Gitワークツリーマネージャー（グラフィカルなブランチ選択と高度なワークフロー管理機能付き）
 
 ## 概要
 
-`@akiojin/claude-worktree`は、直感的なインターフェースを通じてGitワークツリー管理を革新する強力なCLIツールです。Claude Code / Codex CLI の開発ワークフローとシームレスに統合し、インテリジェントなブランチ選択、自動ワークツリー作成、包括的なプロジェクト管理機能を提供します。
+`@akiojin/gwt`は、直感的なインターフェースを通じてGitワークツリー管理を革新する強力なCLIツールです。Claude Code / Codex CLI / Gemini CLI / Qwen CLI の開発ワークフローとシームレスに統合し、インテリジェントなブランチ選択、自動ワークツリー作成、包括的なプロジェクト管理機能を提供します。
 
 ## ✨ 主要機能
 
 - 🎯 **対話型ブランチ選択**: ブランチ種別・ワークツリー・変更状態アイコンに加え配置インジケータ枠（左=L, 右=R, リモートのみ=☁）で所在を示し、リモート名の `origin/` を省いたシンプルなリストで判別しやすく、現在の選択は `>` プレフィックスで強調されるため誤操作を防止
-- 🌟 **スマートブランチ作成**: ガイド付きプロンプトと自動ベースブランチ選択でfeature、hotfix、releaseブランチを作成
+- 🌟 **スマートブランチ作成**: ガイド付きプロンプトと自動ベースブランチ選択でfeature、bugfix、hotfix、releaseブランチを作成
 - 🔄 **高度なワークツリー管理**: 作成、クリーンアップ、パス最適化を含む完全なライフサイクル管理
-- 🤖 **AIツール選択**: 起動時の対話型ランチャーで Claude Code / Codex CLI を選択
+- 🤖 **AIツール選択**: 起動時の対話型ランチャーで Claude Code / Codex CLI / Gemini CLI / Qwen CLI を選択
 - 🚀 **AIツール統合**: 選択したツールをワークツリーで起動（Claude Codeは権限設定・変更処理の統合あり）
 - 📊 **GitHub PR統合**: マージされたプルリクエストのブランチとワークツリーの自動クリーンアップ
 - 🛠️ **変更管理**: 開発セッション後のコミット、stash、破棄の内蔵サポート
@@ -29,7 +29,7 @@ Claude Code / Codex CLI 対応の対話型Gitワークツリーマネージャ�
 #### bun（グローバルインストール）
 
 ```bash
-bun add -g @akiojin/claude-worktree
+bun add -g @akiojin/gwt
 ```
 
 ### 一回限りの使用
@@ -39,7 +39,7 @@ bun add -g @akiojin/claude-worktree
 #### bunx (bun)
 
 ```bash
-bunx @akiojin/claude-worktree
+bunx @akiojin/gwt
 ```
 
 ## クイックスタート
@@ -48,28 +48,28 @@ bunx @akiojin/claude-worktree
 
 ```bash
 # グローバルインストール済みの場合
-claude-worktree
+gwt
 
 # または一回限りの実行に bunx を使用
-bunx @akiojin/claude-worktree
+bunx @akiojin/gwt
 ```
 
 CLIオプション:
 
 ```bash
 # ヘルプを表示
-claude-worktree --help
+gwt --help
 
 # バージョンを確認
-claude-worktree --version
+gwt --version
 # または
-claude-worktree -v
+gwt -v
 ```
 
 ツールは以下のオプションを持つ対話型インターフェースを提供します:
 
 1. **既存ブランチを選択**: ワークツリー自動作成機能付きでローカル・リモートブランチから選択
-2. **新規ブランチ作成**: タイプ選択（feature/hotfix/release）によるガイド付きブランチ作成
+2. **新規ブランチ作成**: タイプ選択（feature/bugfix/hotfix/release）によるガイド付きブランチ作成
 3. **ワークツリー管理**: 既存ワークツリーの表示、オープン、削除
 4. **ブランチクリーンアップ**: マージ済みPRやベースブランチと差分がないブランチ／ワークツリーをローカルから自動削除
 
@@ -109,7 +109,7 @@ bunx @akiojin/claude-worktree serve
 > **重要**: このワークフローは人間の開発者向けです。エージェントは、ユーザーから明確かつタスク固有の指示がない限り、ブランチの作成や削除を絶対に行ってはいけません。
 
 1. メインメニューから「新規ブランチ作成」を選択
-2. ブランチタイプ（feature、hotfix、release）を選択
+2. ブランチタイプ（feature、bugfix、hotfix、release）を選択
 3. 自動プレフィックス適用でブランチ名を入力
 4. 利用可能なオプションからベースブランチを選択
 5. ワークツリー作成パスを確認
@@ -143,7 +143,7 @@ bunx @akiojin/claude-worktree serve
 2. CIワークフロー（Test、Lint）が自動実行
 3. すべてのCIチェックが成功し、競合がない場合、PRが自動的に`develop`にマージされる
 4. 変更は`develop`に蓄積され、リリース準備ができるまで待機
-5. `/release`コマンドを使用して`develop`を`main`にマージし、semantic-releaseをトリガー
+5. `/release`コマンドを使用してRelease PRを作成し、release-pleaseをトリガー
 
 **自動マージの無効化:**
 
@@ -158,7 +158,7 @@ bunx @akiojin/claude-worktree serve
 - **Node.js**（任意）: Nodeベースの開発ツール利用時は >= 18.0.0 を推奨
 - **pnpm**: >= 8.0.0（CI/CD・Docker環境用 - ハードリンクによるnode_modules効率化）
 - **Git**: ワークツリーサポート付き最新版
-- **AIツール**: 少なくともいずれかが必要（Claude Code もしくは Codex CLI）
+- **AIツール**: 少なくともいずれかが必要（Claude Code、Codex CLI、Gemini CLI、または Qwen CLI）
 - **GitHub CLI**: PR クリーンアップ機能に必要（オプション）
 - **Python**: >= 3.11（Spec Kit CLIに必要）
 - **uv**: Pythonパッケージマネージャー（Spec Kit CLIに必要）
@@ -206,13 +206,15 @@ Claude Code で以下のコマンドを実行して、仕様駆動開発を活�
 ## プロジェクト構造
 
 ```
-@akiojin/claude-worktree/
+@akiojin/gwt/
 ├── src/
 │   ├── index.ts          # メインアプリケーションエントリーポイント
 │   ├── git.ts           # Git操作とブランチ管理
 │   ├── worktree.ts      # ワークツリー作成と管理
 │   ├── claude.ts        # Claude Code 統合
 │   ├── codex.ts         # Codex CLI 統合
+│   ├── gemini.ts        # Gemini CLI 統合
+│   ├── qwen.ts          # Qwen CLI 統合
 │   ├── github.ts        # GitHub CLI統合
 │   ├── utils.ts         # ユーティリティ関数とエラーハンドリング
 │   └── ui/              # ユーザーインターフェースコンポーネント
@@ -221,7 +223,7 @@ Claude Code で以下のコマンドを実行して、仕様駆動開発を活�
 │       ├── table.ts     # ブランチテーブル生成
 │       └── types.ts     # TypeScript型定義
 ├── bin/
-│   └── claude-worktree.js # 実行可能ラッパー
+│   └── gwt.js # 実行可能ラッパー
 ├── .claude/             # Claude Code 設定
 │   └── commands/        # Spec Kit スラッシュコマンド
 ├── .specify/            # Spec Kit スクリプトとテンプレート
@@ -238,8 +240,8 @@ Claude Code で以下のコマンドを実行して、仕様駆動開発を活�
 
 ```bash
 # リポジトリをクローン
-git clone https://github.com/akiojin/claude-worktree.git
-cd claude-worktree
+git clone https://github.com/akiojin/gwt.git
+cd gwt
 
 # 依存関係をインストール（bun）
 bun install
@@ -295,7 +297,7 @@ bun run start
 # Package.jsonスクリプト例
 {
   "scripts": {
-    "worktree": "claude-worktree"
+    "worktree": "gwt"
   }
 }
 ```
@@ -318,7 +320,7 @@ bun run start
 詳細出力には環境変数を設定:
 
 ```bash
-DEBUG=claude-worktree claude-worktree
+DEBUG=gwt gwt
 ```
 
 ## ライセンス
@@ -347,6 +349,6 @@ MIT - 詳細はLICENSEファイルを参照
 
 ### アイコン凡例
 
-- 先頭3枠: ⚡(main/develop) / ✨(feature) / 🔥(hotfix) / 📦(release) / 📌(other)、🟢=ワークツリーあり、🟠=ワークツリーあり(アクセス不可)、✏️=未コミット、⚠️=警告、⭐=現在ブランチ
+- 先頭3枠: ⚡(main/develop) / ✨(feature) / 🐛(bugfix) / 🔥(hotfix) / 📦(release) / 📌(other)、🟢=ワークツリーあり、🟠=ワークツリーあり(アクセス不可)、✏️=未コミット、⚠️=警告、⭐=現在ブランチ
 - 配置枠: 空白=ローカルが存在、`☁`=リモートのみ存在
 - 選択枠: カラー環境では背景反転を用いず `>`プレフィックス（スペース付き）で選択中を表示

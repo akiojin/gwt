@@ -2,7 +2,6 @@
  * Config Routes
  */
 
-import type { FastifyInstance } from "fastify";
 import { loadToolsConfig, saveToolsConfig } from "../../../config/tools.js";
 import {
   loadEnvHistory,
@@ -17,6 +16,7 @@ import type {
 } from "../../../types/api.js";
 import type { CustomAITool as FileCustomAITool } from "../../../types/tools.js";
 import { getImportedEnvKeys } from "../env/importer.js";
+import type { WebFastifyInstance } from "../types.js";
 
 function normalizeEnv(
   env: Record<string, string> | undefined,
@@ -135,7 +135,7 @@ function diffEnvHistory(
 }
 
 export async function registerConfigRoutes(
-  fastify: FastifyInstance,
+  fastify: WebFastifyInstance,
 ): Promise<void> {
   fastify.get<{ Reply: ApiResponse<ConfigPayload> }>(
     "/api/config",

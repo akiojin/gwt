@@ -1,6 +1,6 @@
 # API Documentation
 
-このドキュメントは、`@akiojin/claude-worktree`の主要な公開関数のAPIリファレンスです。
+このドキュメントは、`@akiojin/gwt`の主要な公開関数のAPIリファレンスです。
 
 ## Git Operations (`src/git.ts`)
 
@@ -364,8 +364,8 @@ try {
 
 ```bash
 # 対話型ランチャーを起動
-claude-worktree
+gwt
 
 # ヘルプを表示
-claude-worktree --help
+gwt --help
 ```

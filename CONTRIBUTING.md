@@ -1,6 +1,6 @@
-# Contributing to Claude Worktree
+# Contributing to gwt
 
-`@akiojin/claude-worktree`へのコントリビューションをご検討いただきありがとうございます！
+`@akiojin/gwt`へのコントリビューションをご検討いただきありがとうございます！
 
 ## Development Setup
 
@@ -18,8 +18,8 @@
 2. クローン
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/claude-worktree.git
-cd claude-worktree
+git clone https://github.com/YOUR_USERNAME/gwt.git
+cd gwt
 ```
 
 1. 依存関係をインストール
@@ -43,7 +43,7 @@ bunx .
 ## Project Structure
 
 ```
-claude-worktree/
+gwt/
 ├── src/                  # ソースコード
 │   ├── index.ts          # メインエントリーポイント
 │   ├── git.ts            # Git操作
@@ -280,7 +280,7 @@ describe("Module/Feature", () => {
 - OS:
 - Node.js バージョン（利用している場合）:
 - Bun バージョン:
-- Claude Worktree バージョン:
+- gwt バージョン:
 
 ## 再現手順
 
@@ -325,11 +325,10 @@ describe("Module/Feature", () => {
 
 リリースは自動化されています:
 
-1. PRがmainブランチにマージ
-2. GitHub Actionsがテスト実行
-3. Semantic Releaseがバージョン決定
-4. npmに自動公開
-5. CHANGELOG.md自動更新
+1. `/release` コマンドで Release PR を作成
+2. Release PR が main にマージされると release-please がタグ・GitHub Release を作成
+3. npmに自動公開
+4. main → develop への自動バックマージ
 
 ## Questions?
 

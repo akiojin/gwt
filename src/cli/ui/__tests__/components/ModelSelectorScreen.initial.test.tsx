@@ -1,0 +1,88 @@
+/**
+ * @vitest-environment happy-dom
+ */
+import React from "react";
+import { describe, it, expect, beforeEach, vi } from "vitest";
+import { render, waitFor, fireEvent, screen } from "@testing-library/react";
+import { ModelSelectorScreen } from "../../components/screens/ModelSelectorScreen.js";
+import type { ModelSelectionResult } from "../../components/screens/ModelSelectorScreen.js";
+import { Window } from "happy-dom";
+import type {
+  SelectProps,
+  SelectItem,
+} from "../../components/common/Select.js";
+
+const selectMocks: SelectProps<SelectItem>[] = [];
+
+vi.mock("../../components/common/Select.js", () => {
+  return {
+    Select: (props: SelectProps<SelectItem>) => {
+      selectMocks.push(props);
+      return React.createElement("div", {
+        "data-testid": "select-mock",
+        onClick: () =>
+          props.onSelect &&
+          props.onSelect(props.items[props.initialIndex ?? 0]),
+      });
+    },
+  };
+});
+
+describe("ModelSelectorScreen initial selection", () => {
+  beforeEach(() => {
+    selectMocks.length = 0;
+    const window = new Window();
+    globalThis.window = window as unknown as typeof globalThis.window;
+    globalThis.document =
+      window.document as unknown as typeof globalThis.document;
+  });
+
+  it("sets model list initialIndex based on previous selection", async () => {
+    const initial: ModelSelectionResult = {
+      model: "gpt-5.1-codex-max",
+      inferenceLevel: "high",
+    };
+
+    render(
+      <ModelSelectorScreen
+        tool="codex-cli"
+        onBack={() => {}}
+        onSelect={() => {}}
+        initialSelection={initial}
+      />,
+    );
+
+    await waitFor(() => expect(selectMocks.length).toBeGreaterThan(0));
+    const modelSelect = selectMocks.at(-1);
+    const index = modelSelect.initialIndex as number;
+    // codex-cli models: [gpt-5.1-codex, gpt-5.2, gpt-5.1-codex-max, gpt-5.1-codex-mini, gpt-5.1]
+    expect(index).toBe(2);
+  });
+
+  it("includes gpt-5.2 in model options and preserves ordering", async () => {
+    const initial: ModelSelectionResult = {
+      model: "gpt-5.1-codex-max",
+      inferenceLevel: "high",
+    };
+
+    render(
+      <ModelSelectorScreen
+        tool="codex-cli"
+        onBack={() => {}}
+        onSelect={() => {}}
+        initialSelection={initial}
+      />,
+    );
+
+    await waitFor(() => expect(selectMocks.length).toBeGreaterThan(1));
+    const modelSelect = selectMocks.at(-1)!;
+    const ids = modelSelect.items.map((item) => item.value);
+    expect(ids).toEqual([
+      "gpt-5.1-codex",
+      "gpt-5.2",
+      "gpt-5.1-codex-max",
+      "gpt-5.1-codex-mini",
+      "gpt-5.1",
+    ]);
+  });
+});

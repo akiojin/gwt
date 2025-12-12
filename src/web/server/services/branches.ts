@@ -16,6 +16,7 @@ import {
 import { getPullRequestByBranch } from "../../../github.js";
 import { listAdditionalWorktrees } from "../../../worktree.js";
 import type { Branch, BranchSyncResult } from "../../../types/api.js";
+import { getLastToolUsageMap } from "../../../config/index.js";
 
 type DivergenceStatus = { remoteAhead: number; localAhead: number };
 type DivergenceValue = NonNullable<NonNullable<Branch["divergence"]>>;
@@ -37,10 +38,22 @@ function mapPullRequestState(state: string): "open" | "merged" | "closed" {
  * すべてのブランチ一覧を取得（マージステータスとWorktree情報付き）
  */
 export async function listBranches(): Promise<Branch[]> {
-  const [branches, worktrees, repoRoot] = await Promise.all([
+  const repoRoot = await getRepositoryRoot();
+  const lastToolUsageMap = await getLastToolUsageMap(repoRoot);
+
+  // リモートブランチの最新情報を取得（失敗してもローカル情報にはフォールバック）
+  try {
+    await fetchAllRemotes({ cwd: repoRoot });
+  } catch (error) {
+    console.warn(
+      "Failed to fetch remote branches for Web UI; falling back to local branches",
+      error,
+    );
+  }
+
+  const [branches, worktrees] = await Promise.all([
     getAllBranches(),
     listAdditionalWorktrees(),
-    getRepositoryRoot(),
   ]);
   const divergenceMap = await buildDivergenceMap(branches, repoRoot);
   const upstreamMap = await collectUpstreamMap(repoRoot);
@@ -92,6 +105,8 @@ export async function listBranches(): Promise<Branch[]> {
         ? mapDivergence(divergenceStatus)
         : null;
 
+      const lastToolUsage = lastToolUsageMap.get(branchInfo.name) ?? null;
+
       return {
         name: branchInfo.name,
         type: branchInfo.type,
@@ -105,6 +120,7 @@ export async function listBranches(): Promise<Branch[]> {
         baseBranch: baseBranch ?? null,
         divergence,
         prInfo,
+        ...(lastToolUsage ? { lastToolUsage } : {}),
       };
     }),
   );

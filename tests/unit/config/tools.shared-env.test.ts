@@ -31,7 +31,7 @@ describe("shared environment config", () => {
   });
 
   it("loadToolsConfig returns shared env and updatedAt when present", async () => {
-    const configDir = path.join(tempHome, ".claude-worktree");
+    const configDir = path.join(tempHome, ".gwt");
     await mkdir(configDir, { recursive: true });
     await writeFile(
       path.join(configDir, "tools.json"),
@@ -57,7 +57,7 @@ describe("shared environment config", () => {
   });
 
   it("saveToolsConfig persists shared env and sets updatedAt", async () => {
-    const configDir = path.join(tempHome, ".claude-worktree");
+    const configDir = path.join(tempHome, ".gwt");
     await mkdir(configDir, { recursive: true });
 
     await saveToolsConfig({

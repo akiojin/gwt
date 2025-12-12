@@ -1,13 +1,12 @@
-import React, { useState, useEffect } from 'react';
-import { Box, Text, useInput } from 'ink';
-import { Header } from '../parts/Header.js';
-import { Footer } from '../parts/Footer.js';
-import { Select } from '../common/Select.js';
-import { useTerminalSize } from '../../hooks/useTerminalSize.js';
-import { getAllTools } from '../../../../config/tools.js';
-import type { AIToolConfig } from '../../../../types/tools.js';
-
-export type AITool = string;
+import React, { useState, useEffect } from "react";
+import { Box, Text, useInput } from "ink";
+import { Header } from "../parts/Header.js";
+import { Footer } from "../parts/Footer.js";
+import { Select } from "../common/Select.js";
+import { useTerminalSize } from "../../hooks/useTerminalSize.js";
+import { getAllTools } from "../../../../config/tools.js";
+import type { AIToolConfig } from "../../../../types/tools.js";
+import type { AITool } from "../../types.js";
 
 export interface AIToolItem {
   label: string;
@@ -19,6 +18,7 @@ export interface AIToolSelectorScreenProps {
   onBack: () => void;
   onSelect: (tool: AITool) => void;
   version?: string | null;
+  initialToolId?: AITool | null;
 }
 
 /**
@@ -27,10 +27,16 @@ export interface AIToolSelectorScreenProps {
  *
  * This screen dynamically loads available tools from the configuration (builtin + custom).
  */
-export function AIToolSelectorScreen({ onBack, onSelect, version }: AIToolSelectorScreenProps) {
+export function AIToolSelectorScreen({
+  onBack,
+  onSelect,
+  version,
+  initialToolId,
+}: AIToolSelectorScreenProps) {
   const { rows } = useTerminalSize();
   const [toolItems, setToolItems] = useState<AIToolItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [selectedIndex, setSelectedIndex] = useState<number>(0);
 
   // Load tools from getAllTools()
   useEffect(() => {
@@ -58,9 +64,16 @@ export function AIToolSelectorScreen({ onBack, onSelect, version }: AIToolSelect
         });
 
         setToolItems(items);
+
+        // Decide initial cursor position based on last used tool
+        const idx =
+          initialToolId && items.length > 0
+            ? items.findIndex((item) => item.value === initialToolId)
+            : 0;
+        setSelectedIndex(idx >= 0 ? idx : 0);
       } catch (error) {
         // If loading fails, show error in console but don't crash
-        console.error('Failed to load tools:', error);
+        console.error("Failed to load tools:", error);
         // Fall back to empty array
         setToolItems([]);
       } finally {
@@ -69,7 +82,17 @@ export function AIToolSelectorScreen({ onBack, onSelect, version }: AIToolSelect
     };
 
     loadTools();
-  }, []);
+  }, [initialToolId]);
+
+  // Update selection when props or items change
+  useEffect(() => {
+    if (isLoading || toolItems.length === 0) return;
+    const idx =
+      initialToolId && toolItems.length > 0
+        ? toolItems.findIndex((item) => item.value === initialToolId)
+        : 0;
+    setSelectedIndex(idx >= 0 ? idx : 0);
+  }, [initialToolId, toolItems, isLoading]);
 
   // Handle keyboard input
   // Note: Select component handles Enter and arrow keys
@@ -86,8 +109,8 @@ export function AIToolSelectorScreen({ onBack, onSelect, version }: AIToolSelect
 
   // Footer actions
   const footerActions = [
-    { key: 'enter', description: 'Select' },
-    { key: 'esc', description: 'Back' },
+    { key: "enter", description: "Select" },
+    { key: "esc", description: "Back" },
   ];
 
   return (
@@ -103,9 +126,16 @@ export function AIToolSelectorScreen({ onBack, onSelect, version }: AIToolSelect
         {isLoading ? (
           <Text>Loading tools...</Text>
         ) : toolItems.length === 0 ? (
-          <Text color="yellow">No tools available. Please check your configuration.</Text>
+          <Text color="yellow">
+            No tools available. Please check your configuration.
+          </Text>
         ) : (
-          <Select items={toolItems} onSelect={handleSelect} />
+          <Select
+            items={toolItems}
+            onSelect={handleSelect}
+            selectedIndex={selectedIndex}
+            onSelectedIndexChange={setSelectedIndex}
+          />
         )}
       </Box>
 

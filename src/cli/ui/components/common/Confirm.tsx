@@ -1,6 +1,6 @@
-import React from 'react';
-import { Box, Text } from 'ink';
-import { Select, type SelectItem } from './Select.js';
+import React from "react";
+import { Box, Text } from "ink";
+import { Select, type SelectItem } from "./Select.js";
 
 export interface ConfirmProps {
   message: string;
@@ -16,17 +16,17 @@ export interface ConfirmProps {
 export function Confirm({
   message,
   onConfirm,
-  yesLabel = 'Yes',
-  noLabel = 'No',
+  yesLabel = "Yes",
+  noLabel = "No",
   defaultNo = false,
 }: ConfirmProps) {
   const items: SelectItem[] = [
-    { label: yesLabel, value: 'yes' },
-    { label: noLabel, value: 'no' },
+    { label: yesLabel, value: "yes" },
+    { label: noLabel, value: "no" },
   ];
 
   const handleSelect = (item: SelectItem) => {
-    onConfirm(item.value === 'yes');
+    onConfirm(item.value === "yes");
   };
 
   return (
@@ -34,7 +34,11 @@ export function Confirm({
       <Box marginBottom={1}>
         <Text>{message}</Text>
       </Box>
-      <Select items={items} onSelect={handleSelect} initialIndex={defaultNo ? 1 : 0} />
+      <Select
+        items={items}
+        onSelect={handleSelect}
+        initialIndex={defaultNo ? 1 : 0}
+      />
     </Box>
   );
 }

@@ -1,5 +1,2 @@
-CHANGELOG.md
 node_modules/
-dist/
-.git/
-bun.lock
+CHANGELOG.md

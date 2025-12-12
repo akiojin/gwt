@@ -3,11 +3,16 @@ import {
   getAllBranches,
   hasUnpushedCommitsInRepo,
   getRepositoryRoot,
+  fetchAllRemotes,
+  collectUpstreamMap,
+  getBranchDivergenceStatuses,
 } from "../../../git.js";
 import { listAdditionalWorktrees } from "../../../worktree.js";
 import { getPullRequestByBranch } from "../../../github.js";
 import type { BranchInfo, WorktreeInfo } from "../types.js";
 import type { WorktreeInfo as GitWorktreeInfo } from "../../../worktree.js";
+import { getLastToolUsageMap } from "../../../config/index.js";
+import { hasUncommittedChanges } from "../../../git.js";
 
 export interface UseGitDataOptions {
   enableAutoRefresh?: boolean;
@@ -40,10 +45,74 @@ export function useGitData(options?: UseGitDataOptions): UseGitDataResult {
     setError(null);
 
     try {
-      const [branchesData, worktreesData] = await Promise.all([
-        getAllBranches(),
-        listAdditionalWorktrees(),
+      const repoRoot = await getRepositoryRoot();
+
+      // リモートブランチの最新情報を取得（失敗してもローカル表示は継続）
+      try {
+        await fetchAllRemotes({ cwd: repoRoot });
+      } catch (fetchError) {
+        if (process.env.DEBUG) {
+          console.warn("Failed to fetch remote branches", fetchError);
+        }
+      }
+
+      const branchesData = await getAllBranches();
+      let worktreesData: GitWorktreeInfo[] = [];
+      try {
+        worktreesData = await listAdditionalWorktrees();
+      } catch (err) {
+        if (process.env.DEBUG) {
+          console.error("Failed to list additional worktrees:", err);
+        }
+        worktreesData = [];
+      }
+
+      // enrich worktrees with uncommitted status (only for accessible paths)
+      worktreesData = await Promise.all(
+        worktreesData.map(async (wt) => {
+          if (wt.isAccessible === false) {
+            return wt;
+          }
+          try {
+            const hasUncommitted = await hasUncommittedChanges(wt.path);
+            return { ...wt, hasUncommittedChanges: hasUncommitted };
+          } catch {
+            return wt;
+          }
+        }),
+      );
+
+      const lastToolUsageMap = await getLastToolUsageMap(repoRoot);
+
+      // upstream情報とdivergence情報を取得
+      const [upstreamMap, divergenceStatuses] = await Promise.all([
+        collectUpstreamMap(repoRoot),
+        getBranchDivergenceStatuses({ cwd: repoRoot }).catch(() => []),
       ]);
+
+      // divergenceをMapに変換
+      const divergenceMap = new Map(
+        divergenceStatuses.map((s) => [
+          s.branch,
+          {
+            ahead: s.localAhead,
+            behind: s.remoteAhead,
+            upToDate: s.localAhead === 0 && s.remoteAhead === 0,
+          },
+        ]),
+      );
+
+      // ローカルブランチ名のSet（重複除去用）
+      const localBranchNames = new Set(
+        branchesData.filter((b) => b.type === "local").map((b) => b.name),
+      );
+
+      // リモートブランチ名のSet（hasRemoteCounterpart判定用）
+      const remoteBranchNames = new Set(
+        branchesData
+          .filter((b) => b.type === "remote")
+          .map((b) => b.name.replace(/^origin\//, "")),
+      );
 
       // Store worktrees separately
       setWorktrees(worktreesData);
@@ -57,16 +126,25 @@ export function useGitData(options?: UseGitDataOptions): UseGitDataResult {
           locked: false, // worktree.ts doesn't expose locked status
           prunable: worktree.isAccessible === false,
           isAccessible: worktree.isAccessible ?? true, // Default to true if undefined
+          ...(worktree.hasUncommittedChanges !== undefined
+            ? { hasUncommittedChanges: worktree.hasUncommittedChanges }
+            : {}),
         };
         worktreeMap.set(worktree.branch, uiWorktreeInfo);
       }
 
-      // Get repository root for unpushed commits check
-      const repoRoot = await getRepositoryRoot();
+      // リモートブランチの重複除去（ローカルに同名がある場合は除外）
+      const filteredBranches = branchesData.filter((branch) => {
+        if (branch.type === "remote") {
+          const remoteBranchBaseName = branch.name.replace(/^origin\//, "");
+          return !localBranchNames.has(remoteBranchBaseName);
+        }
+        return true;
+      });
 
       // Attach worktree info and check unpushed/PR status for local branches
       const enrichedBranches = await Promise.all(
-        branchesData.map(async (branch) => {
+        filteredBranches.map(async (branch) => {
           const worktreeInfo = worktreeMap.get(branch.name);
           let hasUnpushed = false;
           let prInfo = null;
@@ -93,6 +171,20 @@ export function useGitData(options?: UseGitDataOptions): UseGitDataResult {
             }
           }
 
+          // upstream/divergence/hasRemoteCounterpart情報を付加
+          const upstream =
+            branch.type === "local"
+              ? (upstreamMap.get(branch.name) ?? null)
+              : null;
+          const divergence =
+            branch.type === "local"
+              ? (divergenceMap.get(branch.name) ?? null)
+              : null;
+          const hasRemoteCounterpart =
+            branch.type === "local"
+              ? remoteBranchNames.has(branch.name)
+              : false;
+
           return {
             ...branch,
             ...(worktreeInfo ? { worktree: worktreeInfo } : {}),
@@ -108,6 +200,12 @@ export function useGitData(options?: UseGitDataOptions): UseGitDataResult {
                   },
                 }
               : {}),
+            ...(lastToolUsageMap.get(branch.name)
+              ? { lastToolUsage: lastToolUsageMap.get(branch.name) ?? null }
+              : {}),
+            ...(upstream !== null ? { upstream } : {}),
+            ...(divergence !== null ? { divergence } : {}),
+            ...(hasRemoteCounterpart ? { hasRemoteCounterpart } : {}),
           };
         }),
       );

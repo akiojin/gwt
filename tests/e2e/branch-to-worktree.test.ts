@@ -38,13 +38,19 @@ import * as worktree from "../../src/worktree";
 const stripAnsi = (value: string) => value.replace(/\u001B\[[0-9;]*m/g, "");
 
 describe("E2E: Complete Branch to Worktree Flow", () => {
+  let repoRootSpy: ReturnType<typeof vi.spyOn>;
+
   beforeEach(() => {
     vi.clearAllMocks();
     mkdirMock.mockClear();
+    repoRootSpy = vi
+      .spyOn(git, "getRepositoryRoot")
+      .mockResolvedValue("/path/to/repo");
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
+    repoRootSpy?.mockRestore();
   });
 
   describe("Full User Workflow (T110)", () => {

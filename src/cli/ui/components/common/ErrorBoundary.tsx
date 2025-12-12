@@ -1,5 +1,5 @@
-import React, { Component, type ReactNode } from 'react';
-import { Box, Text } from 'ink';
+import React, { Component, type ReactNode } from "react";
+import { Box, Text } from "ink";
 
 interface ErrorBoundaryProps {
   children: ReactNode;
@@ -14,7 +14,10 @@ interface ErrorBoundaryState {
 /**
  * Error Boundary component to catch and display errors
  */
-export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
+export class ErrorBoundary extends Component<
+  ErrorBoundaryProps,
+  ErrorBoundaryState
+> {
   constructor(props: ErrorBoundaryProps) {
     super(props);
     this.state = { hasError: false, error: null };
@@ -25,7 +28,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
   }
 
   componentDidCatch(error: Error, errorInfo: React.ErrorInfo): void {
-    console.error('ErrorBoundary caught an error:', error, errorInfo);
+    console.error("ErrorBoundary caught an error:", error, errorInfo);
   }
 
   componentDidUpdate(prevProps: ErrorBoundaryProps): void {
@@ -46,7 +49,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
       return (
         <Box flexDirection="column" padding={1}>
           <Text color="red" bold>
-            Error: {this.state.error.message || 'Unknown error'}
+            Error: {this.state.error.message || "Unknown error"}
           </Text>
         </Box>
       );
