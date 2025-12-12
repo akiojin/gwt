@@ -65,7 +65,8 @@ const iconWidthOverrides: Record<string, number> = {
   "🚀": 1,
   "📌": 1,
   // Worktree status icons
-  "🟢": 1,
+  "🟢": 2,
+  "⚪": 2,
   "🟠": 1,
   // Change status icons
   "👉": 1,
@@ -73,7 +74,11 @@ const iconWidthOverrides: Record<string, number> = {
   "📤": 1,
   "🔃": 1,
   "✅": 1,
-  "⚠️": 1,
+  "⚠️": 2,
+  "⚠": 1,
+  "🛡": 2,
+  "☑": 2,
+  "☐": 2,
   // Remote markers
   "🔗": 1,
   "💻": 1,
