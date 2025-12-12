@@ -874,6 +874,14 @@ export async function main(): Promise<void> {
     process.exit(1);
   }
 
+  // Start Web UI server in background
+  const { startWebServer } = await import("./web/server/index.js");
+  const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+  startWebServer().catch((err) => {
+    appLogger.warn({ err }, "Web UI server failed to start");
+  });
+  printInfo(`Web UI available at http://localhost:${port}`);
+
   await runInteractiveLoop();
 }
 
