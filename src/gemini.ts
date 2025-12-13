@@ -62,12 +62,6 @@ export async function launchGeminiCLI(
 
       switch (options.mode) {
         case "continue":
-          if (useResumeId && resumeSessionId) {
-            a.push("--resume", resumeSessionId);
-          } else {
-            a.push("--resume");
-          }
-          break;
         case "resume":
           if (useResumeId && resumeSessionId) {
             a.push("--resume", resumeSessionId);
