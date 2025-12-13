@@ -1,4 +1,4 @@
-import { execa } from "execa";
+import { execa, type Options } from "execa";
 import chalk from "chalk";
 import { existsSync } from "fs";
 import { createChildStdio, getTerminalStreams } from "./utils/terminal.js";
@@ -51,6 +51,9 @@ export async function launchClaudeCode(
       options.sessionId && options.sessionId.trim().length > 0
         ? options.sessionId.trim()
         : null;
+    const usedExplicitSessionId =
+      Boolean(resumeSessionId) &&
+      (options.mode === "continue" || options.mode === "resume");
 
     // Handle execution mode
     switch (options.mode) {
@@ -173,14 +176,16 @@ export async function launchClaudeCode(
 
     terminal.exitRawMode();
 
-    const baseEnv = {
-      ...process.env,
-      ...(options.envOverrides ?? {}),
-    };
-    const launchEnv =
+    const baseEnv = { ...process.env, ...(options.envOverrides ?? {}) };
+    const launchEnvSource =
       options.skipPermissions && !baseEnv.IS_SANDBOX
         ? { ...baseEnv, IS_SANDBOX: "1" }
         : baseEnv;
+    const launchEnv = Object.fromEntries(
+      Object.entries(launchEnvSource).filter(
+        (entry): entry is [string, string] => typeof entry[1] === "string",
+      ),
+    );
 
     const childStdio = createChildStdio();
 
@@ -199,7 +204,7 @@ export async function launchClaudeCode(
           stdout: childStdio.stdout,
           stderr: childStdio.stderr,
           env: launchEnv,
-        } as any);
+        } as unknown as Options);
       } else {
         console.log(
           chalk.cyan(
@@ -233,7 +238,7 @@ export async function launchClaudeCode(
           stdout: childStdio.stdout,
           stderr: childStdio.stderr,
           env: launchEnv,
-        } as any);
+        } as unknown as Options);
       }
     } finally {
       childStdio.cleanup();
@@ -250,10 +255,13 @@ export async function launchClaudeCode(
         preferClosestTo: finishedAt,
         windowMs: 10 * 60 * 1000,
       });
-      // Priority: latest on disk > resumeSessionId
-      capturedSessionId = latest?.id ?? resumeSessionId ?? null;
+      const detectedSessionId = latest?.id ?? null;
+      // When we explicitly resumed a specific session, keep that ID as the source of truth.
+      capturedSessionId = usedExplicitSessionId
+        ? resumeSessionId
+        : detectedSessionId;
     } catch {
-      capturedSessionId = resumeSessionId ?? null;
+      capturedSessionId = usedExplicitSessionId ? resumeSessionId : null;
     }
 
     if (capturedSessionId) {
@@ -270,11 +278,12 @@ export async function launchClaudeCode(
     }
 
     return capturedSessionId ? { sessionId: capturedSessionId } : {};
-  } catch (error: any) {
+  } catch (error: unknown) {
     const hasLocalClaude = await isClaudeCommandAvailable();
     let errorMessage: string;
+    const err = error as NodeJS.ErrnoException;
 
-    if (error.code === "ENOENT") {
+    if (err.code === "ENOENT") {
       if (hasLocalClaude) {
         errorMessage =
           "claude command not found. Please ensure Claude Code is properly installed.";
@@ -283,7 +292,8 @@ export async function launchClaudeCode(
           "bunx command not found. Please ensure Bun is installed so Claude Code can run via bunx.";
       }
     } else {
-      errorMessage = `Failed to launch Claude Code: ${error.message || "Unknown error"}`;
+      const details = error instanceof Error ? error.message : String(error);
+      errorMessage = `Failed to launch Claude Code: ${details || "Unknown error"}`;
     }
 
     if (process.platform === "win32") {
@@ -344,8 +354,9 @@ export async function isClaudeCodeAvailable(): Promise<boolean> {
   try {
     await execa("bunx", [CLAUDE_CLI_PACKAGE, "--version"], { shell: true });
     return true;
-  } catch (error: any) {
-    if (error.code === "ENOENT") {
+  } catch (error: unknown) {
+    const err = error as NodeJS.ErrnoException;
+    if (err.code === "ENOENT") {
       console.error(chalk.yellow("\n⚠️  bunx command not found"));
       console.error(
         chalk.gray(
