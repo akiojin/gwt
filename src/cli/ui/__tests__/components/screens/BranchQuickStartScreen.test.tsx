@@ -66,9 +66,7 @@ describe("BranchQuickStartScreen", () => {
       />,
     );
 
-    expect(
-      getByText(/Model: opus \/ Skip: No \/ ID: abc-123/),
-    ).toBeDefined();
+    expect(getByText(/Model: opus \/ Skip: No \/ ID: abc-123/)).toBeDefined();
   });
 
   it("disables previous options when no history", () => {
@@ -132,7 +130,9 @@ describe("BranchQuickStartScreen", () => {
 
     expect(getAllByText(/\[Codex\]/i)).toHaveLength(2);
     expect(
-      getByText(/Model: gpt-5.1-codex \/ Reasoning: High \/ Skip: Yes \/ ID: codex-123/),
+      getByText(
+        /Model: gpt-5.1-codex \/ Reasoning: High \/ Skip: Yes \/ ID: codex-123/,
+      ),
     ).toBeDefined();
     expect(getAllByText(/\[Claude\]/i)).toHaveLength(2);
     expect(

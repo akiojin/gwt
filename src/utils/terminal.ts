@@ -30,9 +30,9 @@ const DEFAULT_ACK_MESSAGE =
 function isProcessTTY(): boolean {
   return Boolean(
     process.stdin.isTTY &&
-      process.stdout.isTTY &&
-      process.stderr.isTTY &&
-      typeof (process.stdin as NodeJS.ReadStream).setRawMode === "function",
+    process.stdout.isTTY &&
+    process.stderr.isTTY &&
+    typeof (process.stdin as NodeJS.ReadStream).setRawMode === "function",
   );
 }
 

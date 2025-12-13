@@ -140,8 +140,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       timestamp?: number | null;
     }[]
   >([]);
-  const [branchQuickStartLoading, setBranchQuickStartLoading] =
-    useState(false);
+  const [branchQuickStartLoading, setBranchQuickStartLoading] = useState(false);
 
   // Selection state (for branch → tool → mode flow)
   const [selectedBranch, setSelectedBranch] =
@@ -274,9 +273,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         if (cancelled) return;
         const safe = new Set(
           targets
-            .filter(
-              (t) => !t.hasUncommittedChanges && !t.hasUnpushedCommits,
-            )
+            .filter((t) => !t.hasUncommittedChanges && !t.hasUnpushedCommits)
             .map((t) => t.branch),
         );
         setSafeBranches(safe);
@@ -420,7 +417,6 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
                 // Always resolve freshest on-disk session for this worktree (no window restriction)
                 const latestAny = await findLatestClaudeSession(worktree);
                 sessionId = latestAny?.id ?? sessionId ?? null;
-
               } catch {
                 // ignore lookup failure
               }
@@ -434,8 +430,12 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
                     selectedBranch?.displayName ??
                     workingDirectory,
                   {
-                    ...(entry.timestamp !== null && entry.timestamp !== undefined
-                      ? { since: entry.timestamp - 60_000, preferClosestTo: entry.timestamp }
+                    ...(entry.timestamp !== null &&
+                    entry.timestamp !== undefined
+                      ? {
+                          since: entry.timestamp - 60_000,
+                          preferClosestTo: entry.timestamp,
+                        }
                       : {}),
                     windowMs: 60 * 60 * 1000,
                   },

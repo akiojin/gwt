@@ -133,6 +133,7 @@ describe("main error handling", () => {
     }));
 
     viWithDoMock.doMock?.("../../src/config/tools.js", () => ({
+      CONFIG_DIR: "/tmp/gwt-test",
       getToolById: vi.fn(async () => ({
         id: "codex-cli",
         displayName: "Codex CLI",
