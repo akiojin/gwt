@@ -43,6 +43,39 @@
 * update default Claude Code model to Opus 4.5 ([1dd909e](https://github.com/akiojin/gwt/commit/1dd909ed87a55ce3bb796deb0431d0027571dae2))
 * update Opus model version to 4.5 ([307faeb](https://github.com/akiojin/gwt/commit/307faeb66ebac0ca89b01c07ee19d213797c4d5c))
 
+## [2.14.0](https://github.com/akiojin/gwt/compare/v2.13.0...v2.14.0) (2025-12-13)
+
+
+### Features
+
+* Web UIトレイ常駐とURL表示 ([bf0d674](https://github.com/akiojin/gwt/commit/bf0d674b4eb49aa5585145fcf19a6dafd6eb2904))
+* Web UIトレイ常駐とURL表示 ([51103c3](https://github.com/akiojin/gwt/commit/51103c3250f53c3c4e6d33c64e968f300cb3d39e))
+* Web UIをTailwind CSS + shadcn/uiで刷新 ([07d1140](https://github.com/akiojin/gwt/commit/07d114026b74aa39d5748fb5725c9584d89849c7))
+* **webui:** CLI起動時にWeb UIサーバーを自動起動 ([519938b](https://github.com/akiojin/gwt/commit/519938baa0ee4f3fd94ff475a14a72b2bfdc2f29))
+* **webui:** Tailwind CSS + shadcn/ui基盤を導入 ([b49ede7](https://github.com/akiojin/gwt/commit/b49ede7694c5da0732dcd089af33315ebbb9b09b))
+* **webui:** Web UI機能強化とCLI連携 ([982763e](https://github.com/akiojin/gwt/commit/982763e31fdba320c4843a775795efaade35b05a))
+* **webui:** 全ページをTailwind + shadcn/uiでリファクタリング ([a5ca94c](https://github.com/akiojin/gwt/commit/a5ca94cf402fdc9e94239f275d153b43ab732a59))
+* ポート使用中時のWeb UIサーバー起動スキップ (FR-006) ([d38dc33](https://github.com/akiojin/gwt/commit/d38dc333de868a3dfd0ae111fb075232e72d975a))
+
+
+### Bug Fixes
+
+* Goodbye後にプロセスが終了しない問題を修正 ([99d6aa1](https://github.com/akiojin/gwt/commit/99d6aa1510e3bf24d38bbd7ae7ed70465868e063))
+* Goodbye後にプロセスが終了しない問題を修正 ([a3c4ee1](https://github.com/akiojin/gwt/commit/a3c4ee11df685a72b7536c4600115cdf5d60ade6))
+* handle LF enter in Select ([5f7c42f](https://github.com/akiojin/gwt/commit/5f7c42f030e64f74a2d5e9e764290be373309a2e))
+* PR [#344](https://github.com/akiojin/gwt/issues/344) CodeRabbitレビュー対応 ([c40cce9](https://github.com/akiojin/gwt/commit/c40cce9a40c763908e26a9d4b476553e12892237))
+* Quick Start Enter二度押し問題とテストOOM改善 ([137530a](https://github.com/akiojin/gwt/commit/137530ae796e3af123375847ba52b815304dc12b))
+* Quick Start画面の初回表示時にEnterが効かない問題を修正 ([26d8e61](https://github.com/akiojin/gwt/commit/26d8e612eed311c29aa0768c4b2f6824d1199c68))
+* Quick Start画面の初回表示時にEnterが効かない問題を修正 ([d5915f7](https://github.com/akiojin/gwt/commit/d5915f7d43d6adb3a23951983925c539061f6d80))
+* Resume/ContinueでsessionIdを上書きしない ([f26674e](https://github.com/akiojin/gwt/commit/f26674ef7ad83edde59e789b291a6bd28b075eb5))
+* Resume/ContinueでsessionIdを上書きしない ([ec0d682](https://github.com/akiojin/gwt/commit/ec0d682388b1c9bec84b2efd3b411807c033ac62))
+* Resumeは各ツールのresume機能に委譲 ([755aaff](https://github.com/akiojin/gwt/commit/755aaff357737bd170a68549be738b34466832f4))
+* Resumeは各ツールのresume機能に委譲 ([c8afa5d](https://github.com/akiojin/gwt/commit/c8afa5d4427891cf87b4b0031903e53e40dee4f0))
+* **test:** テストモックのAPI形状を修正 ([19c326e](https://github.com/akiojin/gwt/commit/19c326ee88e331f0e486562387b916f3ace806b5))
+* Web UIサーバー停止をタイムアウト付きで堅牢化 ([72d366f](https://github.com/akiojin/gwt/commit/72d366fe945d4279e9d5768d3f9892e90d9e43b0))
+* Web UIポート解決とトレイ初期化の堅牢化 ([533fbcf](https://github.com/akiojin/gwt/commit/533fbcf5a449d83f74b5582b80abd8ce8e3ddbd2))
+* 未使用インポートを削除しESLintエラーを解消 ([7463870](https://github.com/akiojin/gwt/commit/74638704cc7f4f1f0634851d0711db00a68dad64))
+
 ## [2.13.0](https://github.com/akiojin/gwt/compare/v2.12.1...v2.13.0) (2025-12-12)
 
 
