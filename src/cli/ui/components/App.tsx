@@ -11,7 +11,6 @@ import { BranchListScreen } from "./screens/BranchListScreen.js";
 import { BranchCreatorScreen } from "./screens/BranchCreatorScreen.js";
 import { BranchActionSelectorScreen } from "../screens/BranchActionSelectorScreen.js";
 import { AIToolSelectorScreen } from "./screens/AIToolSelectorScreen.js";
-import { SessionSelectorScreen } from "./screens/SessionSelectorScreen.js";
 import { ExecutionModeSelectorScreen } from "./screens/ExecutionModeSelectorScreen.js";
 import type { ExecutionMode } from "./screens/ExecutionModeSelectorScreen.js";
 import { BranchQuickStartScreen } from "./screens/BranchQuickStartScreen.js";
@@ -93,13 +92,6 @@ export interface AppProps {
   loadingIndicatorDelay?: number;
 }
 
-export interface SessionOption {
-  sessionId: string;
-  toolLabel: string;
-  branch: string;
-  timestamp: number;
-}
-
 /**
  * App - Top-level component for Ink.js UI
  * Integrates ErrorBoundary, data fetching, screen navigation, and all screens
@@ -119,13 +111,6 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
   // Version state
   const [version, setVersion] = useState<string | null>(null);
   const [repoRoot, setRepoRoot] = useState<string | null>(null);
-  const [sessionOptions, setSessionOptions] = useState<SessionOption[]>([]);
-  const [sessionLoading, setSessionLoading] = useState(false);
-  const [sessionError, setSessionError] = useState<string | null>(null);
-  const [pendingExecution, setPendingExecution] = useState<{
-    mode: ExecutionMode;
-    skipPermissions: boolean;
-  } | null>(null);
   const [continueSessionId, setContinueSessionId] = useState<string | null>(
     null,
   );
@@ -286,53 +271,6 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       cancelled = true;
     };
   }, [branches, worktrees]);
-
-  // Load available sessions when entering session selector
-  useEffect(() => {
-    if (currentScreen !== "session-selector") {
-      return;
-    }
-    if (!selectedTool || !selectedBranch) {
-      setSessionOptions([]);
-      return;
-    }
-
-    setSessionLoading(true);
-    setSessionError(null);
-
-    (async () => {
-      try {
-        const root = repoRoot ?? (await getRepositoryRoot());
-        if (!repoRoot && root) {
-          setRepoRoot(root);
-        }
-        const sessionData = root ? await loadSession(root) : null;
-        const history = sessionData?.history ?? [];
-
-        const filtered = history
-          .filter(
-            (entry) =>
-              entry.sessionId &&
-              entry.toolId === selectedTool &&
-              entry.branch === selectedBranch.name,
-          )
-          .sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0))
-          .map((entry) => ({
-            sessionId: entry.sessionId as string,
-            toolLabel: entry.toolLabel,
-            branch: entry.branch,
-            timestamp: entry.timestamp,
-          }));
-
-        setSessionOptions(filtered);
-      } catch (_err) {
-        setSessionOptions([]);
-        setSessionError("セッション一覧の取得に失敗しました");
-      } finally {
-        setSessionLoading(false);
-      }
-    })();
-  }, [currentScreen, selectedTool, selectedBranch, repoRoot]);
 
   // Load quick start options for selected branch (latest per tool)
   useEffect(() => {
@@ -1157,18 +1095,6 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     ],
   );
 
-  // Handle session selection
-  const handleSessionSelect = useCallback(
-    (session: string) => {
-      const execution = pendingExecution ?? {
-        mode: "resume" as ExecutionMode,
-        skipPermissions: false,
-      };
-      completeSelection(execution.mode, execution.skipPermissions, session);
-    },
-    [pendingExecution, completeSelection],
-  );
-
   const handleQuickStartSelect = useCallback(
     (action: QuickStartAction, toolId?: AITool | null) => {
       if (action === "manual" || !branchQuickStart.length) {
@@ -1220,14 +1146,9 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
   // Handle execution mode and skipPermissions selection
   const handleModeSelect = useCallback(
     (result: { mode: ExecutionMode; skipPermissions: boolean }) => {
-      if (result.mode === "resume") {
-        setPendingExecution(result);
-        navigateTo("session-selector");
-        return;
-      }
       completeSelection(result.mode, result.skipPermissions, null);
     },
-    [completeSelection, navigateTo],
+    [completeSelection],
   );
 
   // Render screen based on currentScreen
@@ -1334,19 +1255,6 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
             onSelect={handleModelSelect}
             version={version}
             initialSelection={selectedModel}
-          />
-        );
-
-      case "session-selector":
-        // TODO: Implement session data fetching
-        return (
-          <SessionSelectorScreen
-            sessions={sessionOptions}
-            loading={sessionLoading}
-            errorMessage={sessionError}
-            onBack={goBack}
-            onSelect={handleSessionSelect}
-            version={version}
           />
         );
 

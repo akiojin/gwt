@@ -34,16 +34,16 @@
 
 ---
 
-### ユーザーストーリー 3 - 手動選択用のセッション一覧が参照できる (優先度: P2)
+### ユーザーストーリー 3 - ResumeはツールのResume機能を呼び出す (優先度: P2)
 
-開発者が「Resume」モードを選ぶと、保存済みセッションの一覧（ID/ツール/ブランチ/開始時刻）が表示され、任意のセッションを指定して再開できる。
+開発者が「Resume」モードを選ぶと、gwtは独自のセッション一覧を表示せず、選択したAIツールが提供するResume機能で再開フローを開始する。
 
-**この優先度の理由**: 複数作業を並行するケースで「どのセッションか」を明示的に選べることが利便性につながる。  
-**独立したテスト**: セッション履歴を2件以上保存→ResumeモードでSessionSelectorに一覧が表示され、選択したIDでCLIが起動することを確認。
+**この優先度の理由**: セッションの真正なソースは各ツール側の履歴であり、gwt側の履歴不足でも確実に再開操作に到達できるため。  
+**独立したテスト**: Resumeモードを選択→gwtがセッションIDを自動補完しないことを確認しつつ、ツール起動引数がツール固有のResume形式（Codex: `resume`、Claude Code: `-r`、Gemini: `--resume`）になることを検証する。
 
 **受け入れシナリオ**:
-1. **前提条件** 複数のCodex/Claudeセッションが保存済み、**操作** Resumeモードで1件選択、**期待結果** 選択IDで`codex resume`または`claude --resume`が実行される。
-2. **前提条件** 一覧に有効IDがない、**操作** Resumeモード、**期待結果** 「保存されたセッションがありません」警告を出し通常起動に戻す。
+1. **前提条件** 任意のAIツール選択済み、**操作** Resumeモードを選択、**期待結果** gwtはSessionSelectorを表示せず、ツール固有のResume起動引数で起動する。
+2. **前提条件** gwt側の履歴が空/欠落、**操作** Resumeモードを選択、**期待結果** gwtは履歴に依存せずツールのResumeを起動し、ツール側の標準挙動でセッション選択/最新再開が行える。
 
 ---
 
@@ -91,7 +91,7 @@
 - **FR-002**: CodexのセッションID取得は終了後に`~/.codex/sessions/*.json`またはCLI出力を走査し、最新セッションIDを特定して保存しなければならない。
 - **FR-003**: Claude CodeのセッションID取得は終了後に`~/.claude/projects/<encoded cwd>/sessions/*.jsonl`の最新ファイルを読み取り、メタデータのIDを保存しなければならない。
 - **FR-004**: 「Continue」実行時、保存済みIDが存在すればCodexには`codex resume <id>`、Claude Codeには`claude --resume <id>`を渡し、存在しない場合は従来の`--last`/`-c`にフォールバックしなければならない。
-- **FR-005**: 「Resume」実行時、保存済み履歴（最大直近100件）を一覧表示し、選択されたエントリの`sessionId`とツール種別に応じた再開コマンドで起動しなければならない。
+- **FR-005**: 「Resume」実行時、gwtは保存済み履歴の一覧選択を行わず、ツールが提供するResume機能を起動しなければならない（sessionIdを自動補完しない）。ただし、Quick Start等でsessionIdが明示的に指定された場合は、そのIDをツールのResume引数として付与してもよい。
 - **FR-006**: セッション終了時に「Session ID」「Resumeコマンド例」「保存先パス」をユーザーに表示し、必要ならコピーできるようにしなければならない。
 - **FR-007**: セッション保存・読み出しが失敗してもワークフローをブロックしないこと。失敗時は警告を表示し、デフォルト起動に戻る。
 - **FR-008**: Gemini/Qwen/カスタムツールなどセッションIDを提供しないツールでは、既存の保存ロジックを変更せず、Continue/ResumeでIDを要求しない。
@@ -143,7 +143,7 @@
 
 - Codex CLIの再開コマンド（`codex resume <SESSION_ID>`）とセッションストレージ`~/.codex/sessions`。
 - Claude Code CLIの再開コマンド（`claude --resume <session-id>`）とプロジェクト別ストレージ`~/.claude/projects/<encoded>/sessions/`。
-- 既存のセッション保存ロジック（`src/config/index.ts`）とUIフロー（ExecutionModeSelector/SessionSelector）。
+- 既存のセッション保存ロジック（`src/config/index.ts`）とUIフロー（ExecutionModeSelector）。
 
 ## 参考資料 *(該当する場合)*
 
