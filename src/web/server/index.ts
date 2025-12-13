@@ -69,9 +69,8 @@ export async function startWebServer(): Promise<void> {
     const host = process.env.HOST || "0.0.0.0";
 
     await fastify.listen({ port, host });
-    console.log(`Web UI server running at http://${host}:${port}`);
     const accessUrl = `http://localhost:${port}`;
-    console.log(`Access from host: ${accessUrl}`);
+    serverLogger.info({ host, port, accessUrl }, "Web UI server started");
     await startSystemTray(accessUrl);
   } catch (err) {
     fastify.log.error(err);

@@ -121,7 +121,7 @@
   "lint-staged": {
     "*.md": "bunx --bun markdownlint-cli -c .markdownlint.json",
     "*.{ts,tsx}": [
-      "bunx eslint --max-warnings=0",
+      "bunx eslint --max-warnings=0 --no-warn-ignored",
       "bunx prettier --check"
     ]
   },

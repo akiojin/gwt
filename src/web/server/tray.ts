@@ -1,6 +1,10 @@
 import { execa } from "execa";
 import { createLogger } from "../../logging/logger.js";
 
+/**
+ * URL を開く関数の型定義
+ * @param url - 開くURL
+ */
 export type OpenUrlFn = (url: string) => Promise<void> | void;
 
 const TRAY_ICON_BASE64 =
@@ -19,14 +23,15 @@ function shouldEnableTray(): boolean {
   return true;
 }
 
+/**
+ * デフォルトブラウザでURLを開く
+ * @param url - 開くURL
+ */
 export async function openUrl(url: string): Promise<void> {
   const platform = process.platform;
   try {
     if (platform === "win32") {
-      await execa("cmd", ["/c", "start", "", url], {
-        windowsHide: true,
-        shell: true,
-      });
+      await execa("explorer.exe", [url], { windowsHide: true });
       return;
     }
     if (platform === "darwin") {
@@ -39,6 +44,12 @@ export async function openUrl(url: string): Promise<void> {
   }
 }
 
+/**
+ * システムトレイアイコンを初期化
+ * @param url - Web UI のURL（ダブルクリック時に開く）
+ * @param opts - オプション設定
+ * @param opts.openUrl - URL を開くカスタム関数（テスト用）
+ */
 export async function startSystemTray(
   url: string,
   opts?: { openUrl?: OpenUrlFn },
@@ -49,8 +60,10 @@ export async function startSystemTray(
   const logger = createLogger({ category: "tray" });
 
   try {
-    const mod = await import("trayicon");
-    const create = (mod as any).create ?? (mod as any).default?.create;
+    const mod = (await import("trayicon")) as Record<string, unknown> & {
+      default?: Record<string, unknown>;
+    };
+    const create = mod.create ?? mod.default?.create;
     if (typeof create !== "function") {
       throw new Error("trayicon.create not available");
     }
@@ -71,6 +84,9 @@ export async function startSystemTray(
   }
 }
 
+/**
+ * システムトレイアイコンを破棄
+ */
 export function disposeSystemTray(): void {
   trayInstance?.dispose?.();
   trayInstance = null;

@@ -1,7 +1,7 @@
 declare module "trayicon" {
   export interface TrayIconMenuItem {
     text: string;
-    action?: () => unknown;
+    action?: () => void | Promise<void>;
     disabled?: boolean;
     checked?: boolean;
   }
@@ -10,7 +10,7 @@ declare module "trayicon" {
     icon: Buffer;
     title?: string;
     tooltip?: string;
-    action?: () => unknown;
+    action?: () => void | Promise<void>;
     menu?: TrayIconMenuItem[];
   }
 
