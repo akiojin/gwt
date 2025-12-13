@@ -553,12 +553,12 @@ export async function handleAIToolWorkflow(
       { skipHistory: true },
     );
 
-    // Lookup saved session ID for continue/resume
+    // Lookup saved session ID for Continue (auto attach)
     let resumeSessionId: string | null =
       selectedSessionId && selectedSessionId.length > 0
         ? selectedSessionId
         : null;
-    if (mode === "continue" || mode === "resume") {
+    if (mode === "continue") {
       const existingSession = await loadSession(repoRoot);
       const history = existingSession?.history ?? [];
 
