@@ -1,5 +1,8 @@
 import React, { useMemo } from "react";
 import { Link } from "react-router-dom";
+import { Card, CardHeader, CardContent } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { cn } from "@/lib/utils";
 import type { Branch } from "../../../../types/api.js";
 
 const UNKNOWN_BASE = "__unknown__";
@@ -55,7 +58,6 @@ export function BranchGraph({ branches }: BranchGraphProps) {
       const base = branch.baseBranch ?? UNKNOWN_BASE;
 
       if (!branch.baseBranch && referencedBases.has(branch.name)) {
-        // ベースとして参照されている場合は、グラフ上で基点ノードとしてのみ表示
         return;
       }
 
@@ -75,71 +77,83 @@ export function BranchGraph({ branches }: BranchGraphProps) {
     });
 
     return Array.from(laneMap.values()).sort((a, b) => {
-      if (a.id === UNKNOWN_BASE) {
-        return 1;
-      }
-      if (b.id === UNKNOWN_BASE) {
-        return -1;
-      }
+      if (a.id === UNKNOWN_BASE) return 1;
+      if (b.id === UNKNOWN_BASE) return -1;
       return a.baseLabel.localeCompare(b.baseLabel, "ja");
     });
   }, [branches, branchMap, referencedBases]);
 
   if (!lanes.length) {
     return (
-      <section className="branch-graph-panel">
-        <div className="branch-graph-panel__empty">
-          <p>グラフ表示できるブランチがありません。</p>
-          <p>fetch済みのブランチやWorktreeを追加すると関係図が表示されます。</p>
-        </div>
-      </section>
+      <Card className="border-dashed">
+        <CardContent className="flex flex-col items-center justify-center py-12 text-center">
+          <p className="text-muted-foreground">
+            グラフ表示できるブランチがありません。
+          </p>
+          <p className="text-sm text-muted-foreground">
+            fetch済みのブランチやWorktreeを追加すると関係図が表示されます。
+          </p>
+        </CardContent>
+      </Card>
     );
   }
 
   return (
-    <section className="branch-graph-panel">
-      <header className="branch-graph-panel__header">
-        <div>
-          <p className="branch-graph-panel__eyebrow">BRANCH GRAPH</p>
-          <h2>ベースブランチの関係をグラフィカルに把握</h2>
-          <p>
-            baseRef、Git
-            upstream、merge-baseヒューリスティクスを用いて推定したベースブランチ単位で
-            派生ノードをレーン表示します。
-          </p>
+    <Card>
+      <CardHeader className="pb-4">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+              BRANCH GRAPH
+            </p>
+            <h2 className="mt-1 text-lg font-semibold">
+              ベースブランチの関係をグラフィカルに把握
+            </h2>
+            <p className="mt-1 text-sm text-muted-foreground">
+              baseRef、Git
+              upstream、merge-baseヒューリスティクスを用いて推定したベースブランチ単位で派生ノードをレーン表示します。
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Badge variant="outline">Base</Badge>
+            <Badge variant="local">Local</Badge>
+            <Badge variant="remote">Remote</Badge>
+            <Badge variant="success">Worktree</Badge>
+          </div>
         </div>
-        <div className="branch-graph-panel__legend">
-          <span className="graph-chip graph-chip--base">Base</span>
-          <span className="graph-chip graph-chip--local">Local</span>
-          <span className="graph-chip graph-chip--remote">Remote</span>
-          <span className="graph-chip graph-chip--worktree">Worktree</span>
-        </div>
-      </header>
+      </CardHeader>
 
-      <div className="branch-graph">
+      <CardContent className="space-y-4">
         {lanes.map((lane) => (
-          <article className="branch-graph__lane" key={lane.id}>
-            <div className="branch-graph__lane-heading">
-              <p className="branch-graph__lane-label">
-                {lane.baseLabel}
+          <article key={lane.id} className="rounded-lg border bg-muted/30 p-4">
+            <div className="mb-3 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="font-semibold">{lane.baseLabel}</span>
                 {lane.baseNode && (
-                  <span className="branch-graph__lane-meta">
+                  <Badge
+                    variant={
+                      lane.baseNode.type === "local" ? "local" : "remote"
+                    }
+                    className="text-xs"
+                  >
                     {lane.baseNode.type === "local" ? "LOCAL" : "REMOTE"}
-                  </span>
+                  </Badge>
                 )}
                 {lane.isSyntheticBase && (
-                  <span className="branch-graph__lane-meta lane-meta--muted">
+                  <Badge
+                    variant="outline"
+                    className="text-xs text-muted-foreground"
+                  >
                     推定のみ
-                  </span>
+                  </Badge>
                 )}
-              </p>
-              <span className="branch-graph__lane-count">
-                {lane.nodes.length} branch
-                {lane.nodes.length > 1 ? "es" : ""}
+              </div>
+              <span className="text-sm text-muted-foreground">
+                {lane.nodes.length} branch{lane.nodes.length > 1 ? "es" : ""}
               </span>
             </div>
 
-            <div className="branch-graph__track">
+            <div className="flex flex-wrap gap-2">
               {renderBaseNode(lane)}
               {lane.nodes.map((branch) => (
                 <BranchNode key={branch.name} branch={branch} />
@@ -147,25 +161,30 @@ export function BranchGraph({ branches }: BranchGraphProps) {
             </div>
           </article>
         ))}
-      </div>
-    </section>
+      </CardContent>
+    </Card>
   );
 }
 
 function renderBaseNode(lane: Lane) {
   const label =
     lane.baseLabel === "ベース不明" ? "Unknown base" : lane.baseLabel;
+
   const content = (
     <div
-      className={`branch-graph__node branch-graph__node--base ${
-        lane.baseNode ? `branch-graph__node--${lane.baseNode.type}` : ""
-      }`}
+      className={cn(
+        "group relative rounded-md border bg-card px-3 py-2 transition-colors hover:border-muted-foreground/50",
+        lane.baseNode?.type === "local" && "border-l-2 border-l-local",
+        lane.baseNode?.type === "remote" && "border-l-2 border-l-remote",
+      )}
     >
-      <span className="branch-graph__node-label">{label}</span>
-      <span className="branch-graph__node-meta">BASE</span>
-      <div className="branch-graph__tooltip">
-        <p>{label}</p>
-        <p>
+      <span className="block truncate text-sm font-medium">{label}</span>
+      <span className="text-xs text-muted-foreground">BASE</span>
+
+      {/* Tooltip */}
+      <div className="invisible absolute bottom-full left-0 z-10 mb-2 w-48 rounded-md border bg-popover p-2 text-xs shadow-md group-hover:visible">
+        <p className="font-medium">{label}</p>
+        <p className="text-muted-foreground">
           {lane.baseNode
             ? `type: ${lane.baseNode.type}`
             : "推定されたベースブランチ"}
@@ -179,7 +198,7 @@ function renderBaseNode(lane: Lane) {
       <Link
         key={`base-${lane.id}`}
         to={`/${encodeURIComponent(lane.baseNode.name)}`}
-        className="branch-graph__node-link"
+        className="block"
         aria-label={`ベースブランチ ${lane.baseNode.name} を開く`}
       >
         {content}
@@ -187,35 +206,36 @@ function renderBaseNode(lane: Lane) {
     );
   }
 
-  return (
-    <div key={`base-${lane.id}`} className="branch-graph__node-link">
-      {content}
-    </div>
-  );
+  return <div key={`base-${lane.id}`}>{content}</div>;
 }
 
 function BranchNode({ branch }: { branch: Branch }) {
   const node = (
     <div
-      className={`branch-graph__node branch-graph__node--${branch.type} ${
-        branch.mergeStatus === "merged"
-          ? "branch-graph__node--merged"
-          : branch.mergeStatus === "unmerged"
-            ? "branch-graph__node--active"
-            : ""
-      }`}
+      className={cn(
+        "group relative rounded-md border bg-card px-3 py-2 transition-colors hover:border-muted-foreground/50",
+        branch.type === "local" && "border-l-2 border-l-local",
+        branch.type === "remote" && "border-l-2 border-l-remote",
+        branch.mergeStatus === "merged" && "opacity-60",
+      )}
     >
-      <span className="branch-graph__node-label">
+      <span className="block truncate text-sm font-medium">
         {formatBranchLabel(branch)}
       </span>
-      <span className="branch-graph__node-meta">
+      <span className="text-xs text-muted-foreground">
         {branch.worktreePath ? "Worktree" : "No Worktree"}
       </span>
-      <div className="branch-graph__tooltip">
-        <p>{branch.name}</p>
-        <p>base: {branch.baseBranch ?? "unknown"}</p>
-        <p>{getDivergenceLabel(branch)}</p>
-        <p>{branch.worktreePath ?? "Worktree未作成"}</p>
+
+      {/* Tooltip */}
+      <div className="invisible absolute bottom-full left-0 z-10 mb-2 w-56 rounded-md border bg-popover p-2 text-xs shadow-md group-hover:visible">
+        <p className="font-medium">{branch.name}</p>
+        <p className="text-muted-foreground">
+          base: {branch.baseBranch ?? "unknown"}
+        </p>
+        <p className="text-muted-foreground">{getDivergenceLabel(branch)}</p>
+        <p className="text-muted-foreground">
+          {branch.worktreePath ?? "Worktree未作成"}
+        </p>
       </div>
     </div>
   );
@@ -223,7 +243,7 @@ function BranchNode({ branch }: { branch: Branch }) {
   return (
     <Link
       to={`/${encodeURIComponent(branch.name)}`}
-      className="branch-graph__node-link"
+      className="block"
       aria-label={`${branch.name} の詳細を開く`}
     >
       {node}
