@@ -1,5 +1,10 @@
 import React from "react";
-import { Card, CardHeader, CardContent, CardFooter } from "@/components/ui/card";
+import {
+  Card,
+  CardHeader,
+  CardContent,
+  CardFooter,
+} from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import type { CustomAITool } from "../../../../types/api.js";
@@ -10,12 +15,18 @@ interface CustomToolListProps {
   onDelete: (tool: CustomAITool) => void;
 }
 
-export function CustomToolList({ tools, onEdit, onDelete }: CustomToolListProps) {
+export function CustomToolList({
+  tools,
+  onEdit,
+  onDelete,
+}: CustomToolListProps) {
   if (!tools.length) {
     return (
       <Card className="border-dashed">
         <CardContent className="flex flex-col items-center justify-center py-12 text-center">
-          <h3 className="text-lg font-semibold">カスタムツールが登録されていません</h3>
+          <h3 className="text-lg font-semibold">
+            カスタムツールが登録されていません
+          </h3>
           <p className="mt-2 text-sm text-muted-foreground">
             「カスタムツールを追加」から最初のツールを登録してください。
           </p>
@@ -39,7 +50,9 @@ export function CustomToolList({ tools, onEdit, onDelete }: CustomToolListProps)
                   <span className="truncate">{tool.displayName}</span>
                 </h3>
               </div>
-              <Badge variant="outline">{renderExecutionLabel(tool.executionType)}</Badge>
+              <Badge variant="outline">
+                {renderExecutionLabel(tool.executionType)}
+              </Badge>
             </div>
           </CardHeader>
 
@@ -49,7 +62,9 @@ export function CustomToolList({ tools, onEdit, onDelete }: CustomToolListProps)
             </p>
 
             {tool.description && (
-              <p className="text-sm text-muted-foreground">{tool.description}</p>
+              <p className="text-sm text-muted-foreground">
+                {tool.description}
+              </p>
             )}
 
             <dl className="grid grid-cols-3 gap-2 text-xs">
@@ -59,7 +74,9 @@ export function CustomToolList({ tools, onEdit, onDelete }: CustomToolListProps)
               </div>
               <div>
                 <dt className="text-muted-foreground">continue</dt>
-                <dd className="mt-0.5">{renderArgs(tool.modeArgs?.continue)}</dd>
+                <dd className="mt-0.5">
+                  {renderArgs(tool.modeArgs?.continue)}
+                </dd>
               </div>
               <div>
                 <dt className="text-muted-foreground">resume</dt>

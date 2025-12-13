@@ -69,7 +69,9 @@ export function BranchDetailPage() {
   const [selectedMode, setSelectedMode] = useState<ToolMode>("normal");
   const [skipPermissions, setSkipPermissions] = useState(false);
   const [extraArgsText, setExtraArgsText] = useState("");
-  const [terminatingSessionId, setTerminatingSessionId] = useState<string | null>(null);
+  const [terminatingSessionId, setTerminatingSessionId] = useState<
+    string | null
+  >(null);
 
   const formattedCommitDate = useMemo(
     () => formatDate(branch?.commitDate),
@@ -153,10 +155,10 @@ export function BranchDetailPage() {
   );
   const needsRemoteSync = Boolean(
     branch.worktreePath &&
-      divergenceInfo &&
-      divergenceInfo.behind > 0 &&
-      divergenceInfo.ahead === 0 &&
-      !hasBlockingDivergence,
+    divergenceInfo &&
+    divergenceInfo.behind > 0 &&
+    divergenceInfo.ahead === 0 &&
+    !hasBlockingDivergence,
   );
   const isSyncingBranch = syncBranch.isPending;
 
@@ -190,7 +192,9 @@ export function BranchDetailPage() {
     }
   }, [availableTools, selectedToolId]);
 
-  const selectedTool = availableTools.find((tool) => tool.id === selectedToolId);
+  const selectedTool = availableTools.find(
+    (tool) => tool.id === selectedToolId,
+  );
 
   // Branch sessions
   const branchSessions = useMemo(() => {
@@ -219,7 +223,12 @@ export function BranchDetailPage() {
       model: null,
       timestamp: first.startedAt ? Date.parse(first.startedAt) : Date.now(),
     };
-  }, [branch?.lastToolUsage, branch?.name, branch?.worktreePath, branchSessions]);
+  }, [
+    branch?.lastToolUsage,
+    branch?.name,
+    branch?.worktreePath,
+    branchSessions,
+  ]);
 
   // Handlers
   const handleCreateWorktree = async () => {
@@ -250,7 +259,10 @@ export function BranchDetailPage() {
     }
 
     if (!selectedTool) {
-      setBanner({ type: "error", message: "起動するAIツールを選択してください" });
+      setBanner({
+        type: "error",
+        message: "起動するAIツールを選択してください",
+      });
       return;
     }
 
@@ -292,11 +304,15 @@ export function BranchDetailPage() {
       const sessionRequest = {
         toolType,
         toolName: selectedTool.target === "custom" ? selectedTool.id : null,
-        ...(selectedTool.target === "custom" ? { customToolId: selectedTool.id } : {}),
+        ...(selectedTool.target === "custom"
+          ? { customToolId: selectedTool.id }
+          : {}),
         mode: selectedMode,
         worktreePath: branch.worktreePath,
         skipPermissions,
-        ...(selectedTool.target === "codex" ? { bypassApprovals: skipPermissions } : {}),
+        ...(selectedTool.target === "codex"
+          ? { bypassApprovals: skipPermissions }
+          : {}),
         ...(extraArgs.length ? { extraArgs } : {}),
       } as const;
 
@@ -335,20 +351,36 @@ export function BranchDetailPage() {
 
   const handleSyncBranch = async () => {
     if (!branch.worktreePath) {
-      setBanner({ type: "error", message: "Worktreeが存在しないため同期できません。" });
+      setBanner({
+        type: "error",
+        message: "Worktreeが存在しないため同期できません。",
+      });
       return;
     }
 
     try {
-      const result = await syncBranch.mutateAsync({ worktreePath: branch.worktreePath });
+      const result = await syncBranch.mutateAsync({
+        worktreePath: branch.worktreePath,
+      });
       if (result.pullStatus === "success") {
-        setBanner({ type: "success", message: "リモートの最新変更を取り込みました。" });
+        setBanner({
+          type: "success",
+          message: "リモートの最新変更を取り込みました。",
+        });
       } else {
-        const warning = result.warnings?.join("\n") ?? "fast-forward pull が完了しませんでした";
-        setBanner({ type: "error", message: `git pull --ff-only が失敗しました。\n${warning}` });
+        const warning =
+          result.warnings?.join("\n") ??
+          "fast-forward pull が完了しませんでした";
+        setBanner({
+          type: "error",
+          message: `git pull --ff-only が失敗しました。\n${warning}`,
+        });
       }
     } catch (err) {
-      setBanner({ type: "error", message: formatError(err, "Git同期に失敗しました") });
+      setBanner({
+        type: "error",
+        message: formatError(err, "Git同期に失敗しました"),
+      });
     }
   };
 
@@ -402,7 +434,10 @@ export function BranchDetailPage() {
             <Link to="/">← ブランチ一覧</Link>
           </Button>
           {!canStartSession ? (
-            <Button onClick={handleCreateWorktree} disabled={createWorktree.isPending}>
+            <Button
+              onClick={handleCreateWorktree}
+              disabled={createWorktree.isPending}
+            >
               {createWorktree.isPending ? "作成中..." : "Worktreeを作成"}
             </Button>
           ) : (
@@ -477,7 +512,9 @@ export function BranchDetailPage() {
             <TerminalPanel
               sessionId={activeSessionId}
               isFullscreen={isTerminalFullscreen}
-              onToggleFullscreen={() => setIsTerminalFullscreen((prev) => !prev)}
+              onToggleFullscreen={() =>
+                setIsTerminalFullscreen((prev) => !prev)
+              }
               onExit={handleSessionExit}
               onError={(message) =>
                 setBanner({ type: "error", message: message ?? "不明なエラー" })
@@ -515,7 +552,8 @@ function formatError(error: unknown, fallback: string): string {
 }
 
 function toolLabel(tool: string, selectedTool?: SelectableTool): string {
-  if (tool === "custom" && selectedTool?.target === "custom") return selectedTool.label;
+  if (tool === "custom" && selectedTool?.target === "custom")
+    return selectedTool.label;
   if (tool === "codex-cli") return "Codex CLI";
   return "Claude Code";
 }

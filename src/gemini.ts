@@ -156,7 +156,9 @@ export async function launchGeminiCLI(
       }
     };
 
-    const runGemini = async (runArgs: string[]): Promise<string | undefined> => {
+    const runGemini = async (
+      runArgs: string[],
+    ): Promise<string | undefined> => {
       // Capture stdout while passing through to terminal
       // Store chunks to extract session ID after process exits
       const outputChunks: string[] = [];

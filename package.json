@@ -78,6 +78,7 @@
     "react-router-dom": "^7.2.0",
     "string-width": "^8.1.0",
     "tailwindcss": "^4.1.18",
+    "trayicon": "^1.2.2",
     "ws": "^8.18.0",
     "xterm": "^5.4.0-beta.37",
     "xterm-addon-fit": "^0.9.0-beta.37",
@@ -120,7 +121,7 @@
   "lint-staged": {
     "*.md": "bunx --bun markdownlint-cli -c .markdownlint.json",
     "*.{ts,tsx}": [
-      "bunx eslint --max-warnings=0",
+      "bunx eslint --max-warnings=0 --no-warn-ignored",
       "bunx prettier --check"
     ]
   },

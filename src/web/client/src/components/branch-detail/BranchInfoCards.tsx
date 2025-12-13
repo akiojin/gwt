@@ -75,7 +75,10 @@ export function BranchInfoCards({
             </div>
             <div className="flex justify-between">
               <dt className="text-muted-foreground">Worktree</dt>
-              <dd className="max-w-[200px] truncate text-right" title={branch.worktreePath ?? undefined}>
+              <dd
+                className="max-w-[200px] truncate text-right"
+                title={branch.worktreePath ?? undefined}
+              >
                 {branch.worktreePath ?? "未作成"}
               </dd>
             </div>
@@ -110,8 +113,12 @@ export function BranchInfoCards({
           <CardContent>
             <div className="flex flex-wrap gap-2">
               <Badge variant="outline">↑ Ahead {branch.divergence.ahead}</Badge>
-              <Badge variant="outline">↓ Behind {branch.divergence.behind}</Badge>
-              <Badge variant={branch.divergence.upToDate ? "success" : "warning"}>
+              <Badge variant="outline">
+                ↓ Behind {branch.divergence.behind}
+              </Badge>
+              <Badge
+                variant={branch.divergence.upToDate ? "success" : "warning"}
+              >
                 {branch.divergence.upToDate ? "最新" : "更新あり"}
               </Badge>
             </div>
@@ -129,7 +136,10 @@ export function BranchInfoCards({
         </CardHeader>
         <CardContent className="space-y-2 text-sm text-muted-foreground">
           <p>
-            パス: <strong className="text-foreground">{branch.worktreePath ?? "未作成"}</strong>
+            パス:{" "}
+            <strong className="text-foreground">
+              {branch.worktreePath ?? "未作成"}
+            </strong>
           </p>
           <ul className="list-inside list-disc space-y-1 text-xs">
             <li>AIツールの起動にはクリーンなワークツリーであることを推奨</li>
@@ -149,7 +159,9 @@ export function BranchInfoCards({
           </CardHeader>
           <CardContent>
             <div className="flex flex-wrap items-center gap-2 text-sm">
-              <Badge variant="outline">{renderToolUsage(latestToolUsage)}</Badge>
+              <Badge variant="outline">
+                {renderToolUsage(latestToolUsage)}
+              </Badge>
               <span className="text-muted-foreground">
                 {formatUsageTimestamp(latestToolUsage.timestamp)}
               </span>

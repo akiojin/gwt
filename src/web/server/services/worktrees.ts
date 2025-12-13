@@ -59,9 +59,8 @@ export async function createNewWorktree(
     );
   }
 
-  const { getRepositoryRoot, getCurrentBranch } = await import(
-    "../../../git.js"
-  );
+  const { getRepositoryRoot, getCurrentBranch } =
+    await import("../../../git.js");
 
   const [repoRoot, currentBranch] = await Promise.all([
     getRepositoryRoot(),

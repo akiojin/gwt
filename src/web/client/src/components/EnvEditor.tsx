@@ -108,7 +108,9 @@ export function EnvEditor({
       </div>
 
       {rows.length === 0 ? (
-        <p className="py-4 text-center text-sm text-muted-foreground">{emptyLabel}</p>
+        <p className="py-4 text-center text-sm text-muted-foreground">
+          {emptyLabel}
+        </p>
       ) : (
         <div className="rounded-md border">
           <Table>

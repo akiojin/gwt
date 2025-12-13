@@ -30,7 +30,8 @@ export function EnvironmentEditor({
   return (
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">
-        Claude Code / Codex CLI などが参照する共有環境変数を管理します。例: ANTHROPIC_API_KEY, OPENAI_API_KEY, GITHUB_TOKEN
+        Claude Code / Codex CLI などが参照する共有環境変数を管理します。例:
+        ANTHROPIC_API_KEY, OPENAI_API_KEY, GITHUB_TOKEN
       </p>
 
       <div className="space-y-3">
@@ -47,7 +48,9 @@ export function EnvironmentEditor({
               <Input
                 type="text"
                 value={entry.key}
-                onChange={(event) => onEntryChange(entry.id, "key", event.target.value)}
+                onChange={(event) =>
+                  onEntryChange(entry.id, "key", event.target.value)
+                }
                 placeholder="ANTHROPIC_API_KEY"
                 maxLength={100}
                 disabled={isSaving}
@@ -59,7 +62,9 @@ export function EnvironmentEditor({
               <Input
                 type="text"
                 value={entry.value}
-                onChange={(event) => onEntryChange(entry.id, "value", event.target.value)}
+                onChange={(event) =>
+                  onEntryChange(entry.id, "value", event.target.value)
+                }
                 placeholder="sk-..."
                 maxLength={500}
                 disabled={isSaving}
@@ -79,18 +84,11 @@ export function EnvironmentEditor({
       </div>
 
       <div className="flex gap-2 pt-2">
-        <Button
-          variant="secondary"
-          onClick={onAddEntry}
-          disabled={isSaving}
-        >
+        <Button variant="secondary" onClick={onAddEntry} disabled={isSaving}>
           環境変数を追加
         </Button>
 
-        <Button
-          onClick={onSave}
-          disabled={isSaving}
-        >
+        <Button onClick={onSave} disabled={isSaving}>
           {isSaving ? "保存中..." : "保存"}
         </Button>
       </div>

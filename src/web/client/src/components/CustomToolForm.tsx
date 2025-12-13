@@ -40,20 +40,29 @@ interface FormErrors {
   env?: string;
 }
 
-export function CustomToolForm({ initialValue, onSubmit, onCancel, isSaving }: CustomToolFormProps) {
-  const [formState, setFormState] = useState(() => createInitialState(initialValue));
+export function CustomToolForm({
+  initialValue,
+  onSubmit,
+  onCancel,
+  isSaving,
+}: CustomToolFormProps) {
+  const [formState, setFormState] = useState(() =>
+    createInitialState(initialValue),
+  );
   const [errors, setErrors] = useState<FormErrors>({});
 
   const title = initialValue ? "ツールを編集" : "新規カスタムツール";
 
-  const handleChange = (field: keyof typeof formState) =>
+  const handleChange =
+    (field: keyof typeof formState) =>
     (event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
       setFormState((prev) => ({ ...prev, [field]: event.target.value }));
     };
 
-  const handleSelectChange = (field: keyof typeof formState) => (value: string) => {
-    setFormState((prev) => ({ ...prev, [field]: value }));
-  };
+  const handleSelectChange =
+    (field: keyof typeof formState) => (value: string) => {
+      setFormState((prev) => ({ ...prev, [field]: value }));
+    };
 
   const handleSubmit = (event: React.FormEvent) => {
     event.preventDefault();
@@ -87,7 +96,9 @@ export function CustomToolForm({ initialValue, onSubmit, onCancel, isSaving }: C
       id: formState.id.trim(),
       displayName: formState.displayName.trim(),
       icon: formState.icon?.trim() ? formState.icon.trim() : null,
-      description: formState.description?.trim() ? formState.description.trim() : null,
+      description: formState.description?.trim()
+        ? formState.description.trim()
+        : null,
       executionType: formState.executionType,
       command: formState.command.trim(),
       defaultArgs: parseList(formState.defaultArgs),
@@ -113,7 +124,12 @@ export function CustomToolForm({ initialValue, onSubmit, onCancel, isSaving }: C
           </h3>
         </div>
         <div className="flex gap-2">
-          <Button type="button" variant="ghost" onClick={onCancel} disabled={isSaving}>
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={onCancel}
+            disabled={isSaving}
+          >
             キャンセル
           </Button>
           <Button type="submit" disabled={isSaving}>
@@ -136,18 +152,33 @@ export function CustomToolForm({ initialValue, onSubmit, onCancel, isSaving }: C
 
         <div className="space-y-2">
           <label className="text-sm font-medium">表示名 *</label>
-          <Input type="text" value={formState.displayName} onChange={handleChange("displayName")} />
-          {errors.displayName && <p className="text-xs text-destructive">{errors.displayName}</p>}
+          <Input
+            type="text"
+            value={formState.displayName}
+            onChange={handleChange("displayName")}
+          />
+          {errors.displayName && (
+            <p className="text-xs text-destructive">{errors.displayName}</p>
+          )}
         </div>
 
         <div className="space-y-2">
           <label className="text-sm font-medium">アイコン (任意)</label>
-          <Input type="text" value={formState.icon} onChange={handleChange("icon")} maxLength={2} />
+          <Input
+            type="text"
+            value={formState.icon}
+            onChange={handleChange("icon")}
+            maxLength={2}
+          />
         </div>
 
         <div className="space-y-2">
           <label className="text-sm font-medium">説明 (任意)</label>
-          <Input type="text" value={formState.description} onChange={handleChange("description")} />
+          <Input
+            type="text"
+            value={formState.description}
+            onChange={handleChange("description")}
+          />
         </div>
 
         <div className="space-y-2">
@@ -172,14 +203,22 @@ export function CustomToolForm({ initialValue, onSubmit, onCancel, isSaving }: C
           <label className="text-sm font-medium">
             {formState.executionType === "bunx" ? "パッケージ名" : "コマンド"} *
           </label>
-          <Input type="text" value={formState.command} onChange={handleChange("command")} />
-          {errors.command && <p className="text-xs text-destructive">{errors.command}</p>}
+          <Input
+            type="text"
+            value={formState.command}
+            onChange={handleChange("command")}
+          />
+          {errors.command && (
+            <p className="text-xs text-destructive">{errors.command}</p>
+          )}
         </div>
       </div>
 
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-2">
-          <label className="text-sm font-medium">defaultArgs (改行区切り)</label>
+          <label className="text-sm font-medium">
+            defaultArgs (改行区切り)
+          </label>
           <textarea
             value={formState.defaultArgs}
             onChange={handleChange("defaultArgs")}
@@ -189,7 +228,9 @@ export function CustomToolForm({ initialValue, onSubmit, onCancel, isSaving }: C
         </div>
 
         <div className="space-y-2">
-          <label className="text-sm font-medium">permissionSkipArgs (改行区切り)</label>
+          <label className="text-sm font-medium">
+            permissionSkipArgs (改行区切り)
+          </label>
           <textarea
             value={formState.permissionSkipArgs}
             onChange={handleChange("permissionSkipArgs")}
@@ -230,7 +271,9 @@ export function CustomToolForm({ initialValue, onSubmit, onCancel, isSaving }: C
       </div>
 
       <div className="space-y-2">
-        <label className="text-sm font-medium">環境変数 (key=value を改行で記述)</label>
+        <label className="text-sm font-medium">
+          環境変数 (key=value を改行で記述)
+        </label>
         <textarea
           value={formState.env}
           onChange={handleChange("env")}

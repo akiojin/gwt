@@ -43,15 +43,21 @@ describe("utils/session", () => {
 
   describe("isValidUuidSessionId", () => {
     it("returns true for valid UUIDs", () => {
-      expect(isValidUuidSessionId("550e8400-e29b-41d4-a716-446655440000")).toBe(true);
-      expect(isValidUuidSessionId("AABBCCDD-EEFF-1122-3344-556677889900")).toBe(true);
+      expect(isValidUuidSessionId("550e8400-e29b-41d4-a716-446655440000")).toBe(
+        true,
+      );
+      expect(isValidUuidSessionId("AABBCCDD-EEFF-1122-3344-556677889900")).toBe(
+        true,
+      );
     });
 
     it("returns false for invalid UUIDs", () => {
       expect(isValidUuidSessionId("not-a-uuid")).toBe(false);
       expect(isValidUuidSessionId("550e8400-e29b-41d4-a716")).toBe(false);
       expect(isValidUuidSessionId("")).toBe(false);
-      expect(isValidUuidSessionId("550e8400e29b41d4a716446655440000")).toBe(false); // no dashes
+      expect(isValidUuidSessionId("550e8400e29b41d4a716446655440000")).toBe(
+        false,
+      ); // no dashes
     });
   });
 
@@ -157,7 +163,9 @@ describe("utils/session", () => {
     );
 
     // cwd option matches worktree path, session cwd is repo root
-    const id = await findLatestCodexSessionId({ cwd: "/gwt/.worktrees/feature" });
+    const id = await findLatestCodexSessionId({
+      cwd: "/gwt/.worktrees/feature",
+    });
     expect(id).toBe(sessionUuid);
   });
 
@@ -179,7 +187,9 @@ describe("utils/session", () => {
           return Promise.resolve([dirent("12", "dir")]);
         }
         if (dir.endsWith("/.codex/sessions/2025/12")) {
-          return Promise.resolve([dirent(`rollout-${sessionUuid}.jsonl`, "file")]);
+          return Promise.resolve([
+            dirent(`rollout-${sessionUuid}.jsonl`, "file"),
+          ]);
         }
       }
       return Promise.resolve([]);
@@ -191,7 +201,9 @@ describe("utils/session", () => {
     );
 
     // Should match: /repo/.worktrees/branch starts with /repo
-    const id = await findLatestCodexSessionId({ cwd: "/repo/.worktrees/branch" });
+    const id = await findLatestCodexSessionId({
+      cwd: "/repo/.worktrees/branch",
+    });
     expect(id).toBe(sessionUuid);
   });
 
@@ -224,7 +236,8 @@ describe("utils/session", () => {
       return Promise.resolve([]);
     });
     (stat as any).mockImplementation((filePath: string) => {
-      if (filePath.includes(earlyUuid)) return Promise.resolve({ mtimeMs: 1_000 });
+      if (filePath.includes(earlyUuid))
+        return Promise.resolve({ mtimeMs: 1_000 });
       return Promise.resolve({ mtimeMs: 5_000 });
     });
     (readFile as any).mockImplementation((filePath: string) => {
@@ -264,7 +277,9 @@ describe("utils/session", () => {
         if (dir.endsWith("/.codex/sessions/2025/12")) {
           // Only on second pass we expose the file
           if (calls.filter((c) => c.endsWith("/2025/12")).length >= 2) {
-            return Promise.resolve([dirent(`rollout-${waitUuid}.jsonl`, "file")]);
+            return Promise.resolve([
+              dirent(`rollout-${waitUuid}.jsonl`, "file"),
+            ]);
           }
           return Promise.resolve([]);
         }
@@ -387,7 +402,9 @@ describe("utils/session", () => {
     (readdir as any).mockImplementation((dir: string, opts?: any) => {
       if (opts?.withFileTypes) {
         if (dir === "/custom/codex/sessions") {
-          return Promise.resolve([dirent(`rollout-${customCodexUuid}.jsonl`, "file")]);
+          return Promise.resolve([
+            dirent(`rollout-${customCodexUuid}.jsonl`, "file"),
+          ]);
         }
         if (dir === "/custom/claude/projects/-repo/sessions") {
           return Promise.resolve([dirent(`${customClaudeUuid}.jsonl`, "file")]);
@@ -491,7 +508,10 @@ describe("utils/session", () => {
     (readdir as any).mockImplementation((dir: string, opts?: any) => {
       if (opts?.withFileTypes) {
         if (dir.endsWith("/.gemini/tmp")) {
-          return Promise.resolve([dirent("projA", "dir"), dirent("projB", "dir")]);
+          return Promise.resolve([
+            dirent("projA", "dir"),
+            dirent("projB", "dir"),
+          ]);
         }
         if (dir.endsWith("/projA")) {
           return Promise.resolve([dirent("a.json", "file")]);
@@ -511,7 +531,9 @@ describe("utils/session", () => {
     // Include cwd field so that the cwd filter matches the requested path
     (readFile as any).mockImplementation((filePath: string) => {
       if (filePath.includes("b.json")) {
-        return Promise.resolve(JSON.stringify({ id: gemini2Uuid, cwd: "/repo" }));
+        return Promise.resolve(
+          JSON.stringify({ id: gemini2Uuid, cwd: "/repo" }),
+        );
       }
       return Promise.resolve(JSON.stringify({ id: gemini1Uuid, cwd: "/repo" }));
     });

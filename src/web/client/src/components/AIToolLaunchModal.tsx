@@ -68,7 +68,11 @@ type SelectableTool =
   | { id: string; label: string; target: "custom"; definition: CustomAITool };
 
 export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
-  const { data: config, isLoading: isConfigLoading, error: configError } = useConfig();
+  const {
+    data: config,
+    isLoading: isConfigLoading,
+    error: configError,
+  } = useConfig();
   const startSession = useStartSession();
   const createWorktree = useCreateWorktree();
   const syncBranch = useSyncBranch(branch.name);
@@ -78,7 +82,10 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
   const [selectedMode, setSelectedMode] = useState<ToolMode>("normal");
   const [skipPermissions, setSkipPermissions] = useState(false);
   const [extraArgsText, setExtraArgsText] = useState("");
-  const [banner, setBanner] = useState<{ type: "success" | "error" | "info"; message: string } | null>(null);
+  const [banner, setBanner] = useState<{
+    type: "success" | "error" | "info";
+    message: string;
+  } | null>(null);
   const [isStartingSession, setIsStartingSession] = useState(false);
   const [isCreatingWorktree, setIsCreatingWorktree] = useState(false);
 
@@ -110,7 +117,9 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
     }
   }, [availableTools, selectedToolId]);
 
-  const selectedTool = availableTools.find((tool) => tool.id === selectedToolId);
+  const selectedTool = availableTools.find(
+    (tool) => tool.id === selectedToolId,
+  );
 
   const selectedToolSummary: ToolSummary | null = useMemo(() => {
     if (!selectedTool) {
@@ -159,10 +168,10 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
   );
   const needsRemoteSync = Boolean(
     branch.worktreePath &&
-      divergenceInfo &&
-      divergenceInfo.behind > 0 &&
-      divergenceInfo.ahead === 0 &&
-      !hasBlockingDivergence,
+    divergenceInfo &&
+    divergenceInfo.behind > 0 &&
+    divergenceInfo.ahead === 0 &&
+    !hasBlockingDivergence,
   );
 
   useEffect(() => {
@@ -188,10 +197,19 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
     }
     setIsCreatingWorktree(true);
     try {
-      await createWorktree.mutateAsync({ branchName: branch.name, createBranch: false });
-      setBanner({ type: "success", message: `Worktree created for ${branch.name}. Please sync before launching.` });
+      await createWorktree.mutateAsync({
+        branchName: branch.name,
+        createBranch: false,
+      });
+      setBanner({
+        type: "success",
+        message: `Worktree created for ${branch.name}. Please sync before launching.`,
+      });
     } catch (error) {
-      setBanner({ type: "error", message: formatError(error, "Failed to create worktree") });
+      setBanner({
+        type: "error",
+        message: formatError(error, "Failed to create worktree"),
+      });
     } finally {
       setIsCreatingWorktree(false);
     }
@@ -199,25 +217,43 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
 
   const handleSyncBranch = async () => {
     if (!branch.worktreePath) {
-      setBanner({ type: "error", message: "Cannot sync because worktree is missing." });
+      setBanner({
+        type: "error",
+        message: "Cannot sync because worktree is missing.",
+      });
       return;
     }
     try {
-      const result = await syncBranch.mutateAsync({ worktreePath: branch.worktreePath });
+      const result = await syncBranch.mutateAsync({
+        worktreePath: branch.worktreePath,
+      });
       if (result.pullStatus === "success") {
-        setBanner({ type: "success", message: "Fetched latest changes from remote." });
+        setBanner({
+          type: "success",
+          message: "Fetched latest changes from remote.",
+        });
       } else {
-        const warning = result.warnings?.join("\n") ?? "fast-forward pull did not complete.";
-        setBanner({ type: "error", message: `git pull --ff-only failed.\n${warning}` });
+        const warning =
+          result.warnings?.join("\n") ?? "fast-forward pull did not complete.";
+        setBanner({
+          type: "error",
+          message: `git pull --ff-only failed.\n${warning}`,
+        });
       }
     } catch (error) {
-      setBanner({ type: "error", message: formatError(error, "Git sync failed") });
+      setBanner({
+        type: "error",
+        message: formatError(error, "Git sync failed"),
+      });
     }
   };
 
   const handleStartSession = async () => {
     if (!branch.worktreePath) {
-      setBanner({ type: "error", message: "Worktree missing. Create one first." });
+      setBanner({
+        type: "error",
+        message: "Worktree missing. Create one first.",
+      });
       return;
     }
     if (!selectedTool) {
@@ -225,18 +261,25 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
       return;
     }
     if (needsRemoteSync) {
-      setBanner({ type: "error", message: "Cannot launch until remote updates are synced." });
+      setBanner({
+        type: "error",
+        message: "Cannot launch until remote updates are synced.",
+      });
       return;
     }
     if (hasBlockingDivergence) {
       setBanner({
         type: "error",
-        message: "Both remote and local have diverged. Resolve differences before launching.",
+        message:
+          "Both remote and local have diverged. Resolve differences before launching.",
       });
       return;
     }
 
-    if (skipPermissions && !window.confirm("Skip permission checks? This is risky.")) {
+    if (
+      skipPermissions &&
+      !window.confirm("Skip permission checks? This is risky.")
+    ) {
       return;
     }
 
@@ -252,11 +295,15 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
       const sessionRequest = {
         toolType,
         toolName: selectedTool.target === "custom" ? selectedTool.id : null,
-        ...(selectedTool.target === "custom" ? { customToolId: selectedTool.id } : {}),
+        ...(selectedTool.target === "custom"
+          ? { customToolId: selectedTool.id }
+          : {}),
         mode: selectedMode,
         worktreePath: branch.worktreePath,
         skipPermissions,
-        ...(selectedTool.target === "codex" ? { bypassApprovals: skipPermissions } : {}),
+        ...(selectedTool.target === "codex"
+          ? { bypassApprovals: skipPermissions }
+          : {}),
         ...(extraArgs.length ? { extraArgs } : {}),
       } as const;
 
@@ -266,14 +313,21 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
         state: { focusSessionId: session.sessionId },
       });
     } catch (error) {
-      setBanner({ type: "error", message: formatError(error, "Failed to start session") });
+      setBanner({
+        type: "error",
+        message: formatError(error, "Failed to start session"),
+      });
     } finally {
       setIsStartingSession(false);
     }
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80" role="dialog" aria-modal="true">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/80"
+      role="dialog"
+      aria-modal="true"
+    >
       <Card className="mx-4 w-full max-w-2xl" role="document">
         <CardHeader className="pb-4">
           <div className="flex items-start justify-between gap-4">
@@ -291,7 +345,15 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
 
         <CardContent className="space-y-4">
           {banner && (
-            <Alert variant={banner.type === "error" ? "destructive" : banner.type === "success" ? "success" : "info"}>
+            <Alert
+              variant={
+                banner.type === "error"
+                  ? "destructive"
+                  : banner.type === "success"
+                    ? "success"
+                    : "info"
+              }
+            >
               <AlertDescription>{banner.message}</AlertDescription>
             </Alert>
           )}
@@ -299,7 +361,8 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
           {configError && (
             <Alert variant="warning">
               <AlertDescription>
-                Failed to load config: {configError instanceof Error ? configError.message : "unknown"}
+                Failed to load config:{" "}
+                {configError instanceof Error ? configError.message : "unknown"}
               </AlertDescription>
             </Alert>
           )}
@@ -309,12 +372,15 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
               <AlertDescription className="space-y-2">
                 {isProtectedBranch ? (
                   <p>
-                    Cannot create worktree for protected branches (main, develop, master).
-                    Protected branches must remain in the main repository.
+                    Cannot create worktree for protected branches (main,
+                    develop, master). Protected branches must remain in the main
+                    repository.
                   </p>
                 ) : (
                   <>
-                    <p>Worktree is missing. Create it before launching AI tools.</p>
+                    <p>
+                      Worktree is missing. Create it before launching AI tools.
+                    </p>
                     <Button
                       variant="secondary"
                       size="sm"
@@ -332,7 +398,8 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
           {needsRemoteSync && (
             <Alert variant="info">
               <AlertDescription>
-                Remote has {branch.divergence?.behind ?? 0} commits you need to pull before launching.
+                Remote has {branch.divergence?.behind ?? 0} commits you need to
+                pull before launching.
               </AlertDescription>
             </Alert>
           )}
@@ -340,7 +407,8 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
           {hasBlockingDivergence && (
             <Alert variant="warning">
               <AlertDescription>
-                Both remote and local have unresolved differences. Rebase/merge before launching.
+                Both remote and local have unresolved differences. Rebase/merge
+                before launching.
               </AlertDescription>
             </Alert>
           )}
@@ -407,7 +475,12 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
           <div className="flex flex-wrap gap-2">
             <Button
               onClick={handleStartSession}
-              disabled={isStartingSession || !selectedTool || hasBlockingDivergence || needsRemoteSync}
+              disabled={
+                isStartingSession ||
+                !selectedTool ||
+                hasBlockingDivergence ||
+                needsRemoteSync
+              }
             >
               {isStartingSession ? "Launching..." : "Launch AI tool"}
             </Button>
@@ -434,20 +507,36 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
                 </div>
                 <div>
                   <span className="text-muted-foreground">defaultArgs:</span>{" "}
-                  <span className={!selectedToolSummary.defaultArgs?.length ? "text-muted-foreground/50" : ""}>
+                  <span
+                    className={
+                      !selectedToolSummary.defaultArgs?.length
+                        ? "text-muted-foreground/50"
+                        : ""
+                    }
+                  >
                     {renderArgs(selectedToolSummary.defaultArgs)}
                   </span>
                 </div>
                 <div>
-                  <span className="text-muted-foreground">permissionSkipArgs:</span>{" "}
-                  <span className={!selectedToolSummary.permissionSkipArgs?.length ? "text-muted-foreground/50" : ""}>
+                  <span className="text-muted-foreground">
+                    permissionSkipArgs:
+                  </span>{" "}
+                  <span
+                    className={
+                      !selectedToolSummary.permissionSkipArgs?.length
+                        ? "text-muted-foreground/50"
+                        : ""
+                    }
+                  >
                     {renderArgs(selectedToolSummary.permissionSkipArgs)}
                   </span>
                 </div>
               </div>
               {argsPreview && (
                 <div className="border-t pt-2">
-                  <span className="text-xs text-muted-foreground">Command to run:</span>
+                  <span className="text-xs text-muted-foreground">
+                    Command to run:
+                  </span>
                   <pre className="mt-1 overflow-x-auto rounded bg-background p-2 font-mono text-sm">
                     {argsPreview.command} {argsPreview.args.join(" ")}
                   </pre>

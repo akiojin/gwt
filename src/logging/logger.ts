@@ -17,7 +17,7 @@ export interface LoggerConfig {
   sync?: boolean;
 }
 
-/** 
+/**
  * Create a pino logger with unified structure and category field.
  * - Writes to a single file stream (no per-component files)
  * - Adds `category` to each log record
@@ -51,7 +51,10 @@ export function createLogger(config: LoggerConfig = {}): Logger {
   };
 
   if (config.sync) {
-    const destinationStream = pino.destination({ dest: destination, sync: true });
+    const destinationStream = pino.destination({
+      dest: destination,
+      sync: true,
+    });
     return pino(options, destinationStream);
   }
 

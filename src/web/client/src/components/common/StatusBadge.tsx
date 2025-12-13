@@ -2,7 +2,13 @@ import React from "react";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 
-type StatusType = "local" | "remote" | "success" | "warning" | "muted" | "default";
+type StatusType =
+  | "local"
+  | "remote"
+  | "success"
+  | "warning"
+  | "muted"
+  | "default";
 
 interface StatusBadgeProps {
   status: StatusType;
@@ -11,7 +17,10 @@ interface StatusBadgeProps {
 }
 
 export function StatusBadge({ status, children, className }: StatusBadgeProps) {
-  const variantMap: Record<StatusType, "local" | "remote" | "success" | "warning" | "secondary" | "default"> = {
+  const variantMap: Record<
+    StatusType,
+    "local" | "remote" | "success" | "warning" | "secondary" | "default"
+  > = {
     local: "local",
     remote: "remote",
     success: "success",

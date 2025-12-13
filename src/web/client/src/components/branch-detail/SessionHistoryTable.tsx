@@ -93,7 +93,8 @@ export function SessionHistoryTable({
           )}
         </div>
         <p className="mt-2 text-sm text-muted-foreground">
-          この Worktree に紐づいた AI セッション履歴です。CLI からの起動分も共有されます。
+          この Worktree に紐づいた AI セッション履歴です。CLI
+          からの起動分も共有されます。
         </p>
       </CardHeader>
       <CardContent>
@@ -134,7 +135,9 @@ export function SessionHistoryTable({
                       {toolLabel(session.toolType, session.toolName)}
                     </TableCell>
                     <TableCell>
-                      <span className="text-muted-foreground">{session.mode}</span>
+                      <span className="text-muted-foreground">
+                        {session.mode}
+                      </span>
                     </TableCell>
                     <TableCell className="text-muted-foreground">
                       {formatDate(session.startedAt)}
@@ -152,7 +155,8 @@ export function SessionHistoryTable({
                             onTerminate(session.sessionId);
                           }}
                           disabled={
-                            terminatingSessionId === session.sessionId || isDeleting
+                            terminatingSessionId === session.sessionId ||
+                            isDeleting
                           }
                         >
                           {terminatingSessionId === session.sessionId
@@ -160,7 +164,9 @@ export function SessionHistoryTable({
                             : "終了"}
                         </Button>
                       ) : (
-                        <span className="text-sm text-muted-foreground">--</span>
+                        <span className="text-sm text-muted-foreground">
+                          --
+                        </span>
                       )}
                     </TableCell>
                   </TableRow>

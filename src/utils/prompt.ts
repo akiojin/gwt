@@ -22,7 +22,9 @@ export async function waitForEnter(promptMessage: string): Promise<void> {
 
   if ((stdin as NodeJS.ReadStream & { isRaw?: boolean }).isRaw) {
     try {
-      (stdin as NodeJS.ReadStream & { setRawMode?: (flag: boolean) => void }).setRawMode?.(false);
+      (
+        stdin as NodeJS.ReadStream & { setRawMode?: (flag: boolean) => void }
+      ).setRawMode?.(false);
     } catch {
       // Ignore raw mode errors
     }
@@ -35,17 +37,21 @@ export async function waitForEnter(promptMessage: string): Promise<void> {
       rl.removeAllListeners();
       rl.close();
       const remover = (method: "off" | "removeListener") =>
-        (stdin as unknown as Record<string, (event: string, fn: () => void) => void>)[method]?.(
-          "end",
-          onEnd,
-        );
+        (
+          stdin as unknown as Record<
+            string,
+            (event: string, fn: () => void) => void
+          >
+        )[method]?.("end", onEnd);
       remover("off");
       remover("removeListener");
       const removerErr = (method: "off" | "removeListener") =>
-        (stdin as unknown as Record<string, (event: string, fn: () => void) => void>)[method]?.(
-          "error",
-          onEnd,
-        );
+        (
+          stdin as unknown as Record<
+            string,
+            (event: string, fn: () => void) => void
+          >
+        )[method]?.("error", onEnd);
       removerErr("off");
       removerErr("removeListener");
       if (typeof stdin.pause === "function") {

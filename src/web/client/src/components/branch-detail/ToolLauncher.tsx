@@ -141,12 +141,11 @@ export function ToolLauncher({
             </p>
             <h3 className="mt-1 text-lg font-semibold">AIツール起動</h3>
           </div>
-          {configError && (
-            <Badge variant="warning">設定の取得に失敗</Badge>
-          )}
+          {configError && <Badge variant="warning">設定の取得に失敗</Badge>}
         </div>
         <p className="mt-2 text-sm text-muted-foreground">
-          Web UI から直接AIツールを起動できます。設定したカスタムツールも一覧に表示されます。
+          Web UI
+          から直接AIツールを起動できます。設定したカスタムツールも一覧に表示されます。
         </p>
       </CardHeader>
 
@@ -222,7 +221,8 @@ export function ToolLauncher({
               <Alert variant="warning">
                 <AlertDescription>
                   権限チェックをスキップすることで、CLI での
-                  `--dangerously-skip-permissions` 指定と同様のリスクを負います。
+                  `--dangerously-skip-permissions`
+                  指定と同様のリスクを負います。
                 </AlertDescription>
               </Alert>
             )}
@@ -231,7 +231,8 @@ export function ToolLauncher({
               <Alert variant="info" data-testid="sync-required">
                 <AlertDescription>
                   <p>
-                    リモートに未取得の更新 ({branch.divergence?.behind ?? 0} commits)
+                    リモートに未取得の更新 ({branch.divergence?.behind ?? 0}{" "}
+                    commits)
                     があるため、AIツールを起動する前に同期してください。
                   </p>
                   <p className="mt-1 text-xs text-muted-foreground">
@@ -249,7 +250,9 @@ export function ToolLauncher({
                     リモートとローカルの両方に未解決の差分があるため、起動をブロックしています。
                   </p>
                   <ul className="mt-2 list-inside list-disc text-xs text-muted-foreground">
-                    <li>git fetch && git pull --ff-only origin {branch.name}</li>
+                    <li>
+                      git fetch && git pull --ff-only origin {branch.name}
+                    </li>
                     <li>git push origin {branch.name} でローカル進捗を共有</li>
                   </ul>
                 </AlertDescription>
@@ -294,14 +297,21 @@ export function ToolLauncher({
                   </div>
                   <div>
                     <span className="text-muted-foreground">defaultArgs:</span>{" "}
-                    <span className={cn(!selectedToolSummary.defaultArgs?.length && "text-muted-foreground/50")}>
+                    <span
+                      className={cn(
+                        !selectedToolSummary.defaultArgs?.length &&
+                          "text-muted-foreground/50",
+                      )}
+                    >
                       {selectedToolSummary.defaultArgs?.join(" ") || "未設定"}
                     </span>
                   </div>
                 </div>
                 {argsPreview && (
                   <div className="border-t pt-2">
-                    <span className="text-xs text-muted-foreground">最終コマンド:</span>
+                    <span className="text-xs text-muted-foreground">
+                      最終コマンド:
+                    </span>
                     <pre className="mt-1 overflow-x-auto rounded bg-background p-2 font-mono text-sm">
                       {argsPreview.command} {argsPreview.args.join(" ")}
                     </pre>
