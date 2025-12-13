@@ -183,6 +183,17 @@ describe("Select", () => {
       expect(onSelect).toHaveBeenCalled();
     });
 
+    it("should call onSelect when linefeed is pressed (cooked mode Enter)", () => {
+      const onSelect = vi.fn();
+      const { stdin } = render(
+        <Select items={mockItems} onSelect={onSelect} />,
+      );
+
+      stdin.write("\n"); // Linefeed key
+
+      expect(onSelect).toHaveBeenCalled();
+    });
+
     it("should pass selected item to onSelect callback", () => {
       const onSelect = vi.fn();
       render(<Select items={mockItems} onSelect={onSelect} initialIndex={2} />);
