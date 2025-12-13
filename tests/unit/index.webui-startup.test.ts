@@ -15,6 +15,7 @@ describe("main() - Web UI server startup (SPEC-c8e7a5b2)", () => {
   let consoleInfoSpy: ReturnType<typeof vi.spyOn>;
   let originalEnv: NodeJS.ProcessEnv;
   let startWebServerMock: ReturnType<typeof vi.fn>;
+  let closeWebServerMock: ReturnType<typeof vi.fn>;
   let appLoggerMock: {
     info: ReturnType<typeof vi.fn>;
     warn: ReturnType<typeof vi.fn>;
@@ -29,7 +30,10 @@ describe("main() - Web UI server startup (SPEC-c8e7a5b2)", () => {
     consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     consoleInfoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
 
-    startWebServerMock = vi.fn().mockResolvedValue(undefined);
+    closeWebServerMock = vi.fn().mockResolvedValue(undefined);
+    startWebServerMock = vi.fn().mockResolvedValue({
+      close: closeWebServerMock,
+    });
     appLoggerMock = {
       info: vi.fn(),
       warn: vi.fn(),
@@ -250,5 +254,33 @@ describe("main() - Web UI server startup (SPEC-c8e7a5b2)", () => {
     const { main } = await import("../../src/index.js");
 
     await expect(main()).resolves.toBeUndefined();
+  });
+
+  it("T020: UI終了後にWeb UIサーバーがクリーンアップされる", async () => {
+    setupMocks();
+
+    const { main } = await import("../../src/index.js");
+    await main();
+
+    expect(closeWebServerMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("T021: ポート使用中の場合はcloseが呼ばれない", async () => {
+    setupMocks({ isPortInUse: true });
+
+    const { main } = await import("../../src/index.js");
+    await main();
+
+    expect(closeWebServerMock).not.toHaveBeenCalled();
+  });
+
+  it("T022: startWebServer失敗時はcloseが呼ばれない", async () => {
+    const serverError = new Error("startWebServer failed");
+    setupMocks({ startWebServerError: serverError });
+
+    const { main } = await import("../../src/index.js");
+    await main();
+
+    expect(closeWebServerMock).not.toHaveBeenCalled();
   });
 });
