@@ -1,6 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { SelectionResult } from "../../src/cli/ui/components/App.js";
-import type { ExecutionMode } from "../../src/cli/ui/components/screens/ExecutionModeSelectorScreen.js";
 
 const {
   ensureWorktreeMock,
@@ -144,7 +143,7 @@ describe("handleAIToolWorkflow - session ID persistence", () => {
       displayName: "feature/test",
       branchType: "local",
       tool: "codex-cli",
-      mode: "resume" as ExecutionMode,
+      mode: "resume",
       skipPermissions: false,
       sessionId: explicit,
     };

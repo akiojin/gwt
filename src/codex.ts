@@ -1,4 +1,4 @@
-import { execa, type Options } from "execa";
+import { execa } from "execa";
 import chalk from "chalk";
 import { platform } from "os";
 import { existsSync } from "fs";
@@ -166,7 +166,7 @@ export async function launchCodexCLI(
         stdout: childStdio.stdout,
         stderr: childStdio.stderr,
         env,
-      } as unknown as Options);
+      });
       await execChild(child);
     } finally {
       childStdio.cleanup();

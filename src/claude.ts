@@ -1,4 +1,4 @@
-import { execa, type Options } from "execa";
+import { execa } from "execa";
 import chalk from "chalk";
 import { existsSync } from "fs";
 import { createChildStdio, getTerminalStreams } from "./utils/terminal.js";
@@ -204,7 +204,7 @@ export async function launchClaudeCode(
           stdout: childStdio.stdout,
           stderr: childStdio.stderr,
           env: launchEnv,
-        } as unknown as Options);
+        });
       } else {
         console.log(
           chalk.cyan(
@@ -238,7 +238,7 @@ export async function launchClaudeCode(
           stdout: childStdio.stdout,
           stderr: childStdio.stderr,
           env: launchEnv,
-        } as unknown as Options);
+        });
       }
     } finally {
       childStdio.cleanup();
