@@ -14,14 +14,13 @@ const alertVariants = cva(
           "border-green-500/50 bg-green-500/10 text-green-400 [&>svg]:text-green-400",
         warning:
           "border-yellow-500/50 bg-yellow-500/10 text-yellow-400 [&>svg]:text-yellow-400",
-        info:
-          "border-blue-500/50 bg-blue-500/10 text-blue-400 [&>svg]:text-blue-400",
+        info: "border-blue-500/50 bg-blue-500/10 text-blue-400 [&>svg]:text-blue-400",
       },
     },
     defaultVariants: {
       variant: "default",
     },
-  }
+  },
 );
 
 const Alert = React.forwardRef<

@@ -25,13 +25,12 @@ const REASONING_LABELS: Record<string, string> = {
 };
 
 const formatReasoning = (level?: string | null) =>
-  level ? REASONING_LABELS[level] ?? level : "Default";
+  level ? (REASONING_LABELS[level] ?? level) : "Default";
 
 const formatSkip = (skip?: boolean | null) =>
   skip === true ? "Yes" : skip === false ? "No" : "No";
 
-const supportsReasoning = (toolId?: string | null) =>
-  toolId === "codex-cli";
+const supportsReasoning = (toolId?: string | null) => toolId === "codex-cli";
 
 const describe = (opt: BranchQuickStartOption, includeSessionId = true) => {
   const parts = [`Model: ${opt.model ?? "default"}`];
@@ -103,45 +102,45 @@ export function BranchQuickStartScreen({
   const items: QuickStartItem[] = previousOptions.length
     ? (() => {
         const order = ["Claude", "Codex", "Gemini", "Qwen", "Other"];
-      const sorted = [...previousOptions].sort((a, b) => {
-        const ca = resolveCategory(a.toolId).label;
-        const cb = resolveCategory(b.toolId).label;
-        return order.indexOf(ca) - order.indexOf(cb);
-      });
+        const sorted = [...previousOptions].sort((a, b) => {
+          const ca = resolveCategory(a.toolId).label;
+          const cb = resolveCategory(b.toolId).label;
+          return order.indexOf(ca) - order.indexOf(cb);
+        });
 
-      const flat: QuickStartItem[] = [];
+        const flat: QuickStartItem[] = [];
         sorted.forEach((opt, idx) => {
           const cat = resolveCategory(opt.toolId);
           const prevCat =
             idx > 0 ? resolveCategory(sorted[idx - 1]?.toolId).label : null;
           const isNewCategory = prevCat !== cat.label;
 
-        flat.push(
-          {
-            label: "Resume",
-            value: `reuse-continue:${opt.toolId ?? "unknown"}:${idx}`,
-            action: "reuse-continue",
-            toolId: opt.toolId ?? null,
-            description: describe(opt, true),
-            groupStart: isNewCategory && flat.length > 0,
-            category: cat.label,
-            categoryColor: cat.color,
-          },
-          {
-            label: "New",
-            value: `reuse-new:${opt.toolId ?? "unknown"}:${idx}`,
-            action: "reuse-new",
-            toolId: opt.toolId ?? null,
-            description: describe(opt, false),
-            groupStart: false,
-            category: cat.label,
-            categoryColor: cat.color,
-          },
-        );
-      });
+          flat.push(
+            {
+              label: "Resume",
+              value: `reuse-continue:${opt.toolId ?? "unknown"}:${idx}`,
+              action: "reuse-continue",
+              toolId: opt.toolId ?? null,
+              description: describe(opt, true),
+              groupStart: isNewCategory && flat.length > 0,
+              category: cat.label,
+              categoryColor: cat.color,
+            },
+            {
+              label: "New",
+              value: `reuse-new:${opt.toolId ?? "unknown"}:${idx}`,
+              action: "reuse-new",
+              toolId: opt.toolId ?? null,
+              description: describe(opt, false),
+              groupStart: false,
+              category: cat.label,
+              categoryColor: cat.color,
+            },
+          );
+        });
 
-      return flat;
-    })()
+        return flat;
+      })()
     : [
         {
           label: "Resume with previous settings",
@@ -180,11 +179,7 @@ export function BranchQuickStartScreen({
 
   return (
     <Box flexDirection="column" height={containerHeight}>
-      <Header
-        title="Quick Start"
-        titleColor="cyan"
-        version={version}
-      />
+      <Header title="Quick Start" titleColor="cyan" version={version} />
 
       <Box flexDirection="column" flexGrow={1} marginTop={1}>
         <Box marginBottom={1} flexDirection="column">
@@ -204,13 +199,12 @@ export function BranchQuickStartScreen({
           renderItem={(item: QuickStartItem, isSelected) => (
             <Box
               flexDirection="column"
-              marginTop={item.groupStart ? 1 : item.category === "Other" ? 1 : 0}
+              marginTop={
+                item.groupStart ? 1 : item.category === "Other" ? 1 : 0
+              }
             >
               <Text>
-                <Text
-                  color={item.categoryColor}
-                  inverse={isSelected}
-                >
+                <Text color={item.categoryColor} inverse={isSelected}>
                   {`[${item.category}] `}
                 </Text>
                 <Text inverse={isSelected}>
@@ -219,7 +213,7 @@ export function BranchQuickStartScreen({
                 </Text>
               </Text>
               {item.description && (
-                <Text color="gray">  {item.description}</Text>
+                <Text color="gray"> {item.description}</Text>
               )}
             </Box>
           )}

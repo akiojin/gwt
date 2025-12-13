@@ -21,7 +21,8 @@ function rowsFromVariables(variables?: EnvironmentVariable[] | null): EnvRow[] {
       key: variable.key,
       value: variable.value,
     };
-    if (typeof variable.importedFromOs === "boolean") partial.importedFromOs = variable.importedFromOs;
+    if (typeof variable.importedFromOs === "boolean")
+      partial.importedFromOs = variable.importedFromOs;
     if (variable.lastUpdated) partial.lastUpdated = variable.lastUpdated;
     return createEnvRow(partial);
   });
@@ -55,7 +56,10 @@ export function ConfigManagementPage() {
   const updateConfig = useUpdateConfig();
   const [sharedEnv, setSharedEnv] = useState<EnvRow[]>([]);
   const [toolEnv, setToolEnv] = useState<ToolEnvState>({});
-  const [banner, setBanner] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const [banner, setBanner] = useState<{
+    type: "success" | "error";
+    message: string;
+  } | null>(null);
 
   useEffect(() => {
     if (!data) return;
@@ -67,14 +71,29 @@ export function ConfigManagementPage() {
     setToolEnv(toolState);
   }, [data]);
 
-  const serializedOriginalShared = useMemo(() => JSON.stringify(data?.env ?? []), [data?.env]);
-  const serializedCurrentShared = useMemo(() => JSON.stringify(serializeRows(sharedEnv)), [sharedEnv]);
+  const serializedOriginalShared = useMemo(
+    () => JSON.stringify(data?.env ?? []),
+    [data?.env],
+  );
+  const serializedCurrentShared = useMemo(
+    () => JSON.stringify(serializeRows(sharedEnv)),
+    [sharedEnv],
+  );
 
   const hasInvalidRows = useMemo(() => {
-    const keyInvalid = sharedEnv.some((row) => !row.key || /[^A-Z0-9_]/.test(row.key));
-    const valueInvalid = sharedEnv.some((row) => row.key && row.value.trim().length === 0);
+    const keyInvalid = sharedEnv.some(
+      (row) => !row.key || /[^A-Z0-9_]/.test(row.key),
+    );
+    const valueInvalid = sharedEnv.some(
+      (row) => row.key && row.value.trim().length === 0,
+    );
     const toolInvalid = Object.values(toolEnv).some((rows) =>
-      rows.some((row) => !row.key || /[^A-Z0-9_]/.test(row.key) || row.value.trim().length === 0),
+      rows.some(
+        (row) =>
+          !row.key ||
+          /[^A-Z0-9_]/.test(row.key) ||
+          row.value.trim().length === 0,
+      ),
     );
     return keyInvalid || valueInvalid || toolInvalid;
   }, [sharedEnv, toolEnv]);
@@ -82,7 +101,8 @@ export function ConfigManagementPage() {
   const hasChanges = useMemo(() => {
     if (serializedOriginalShared !== serializedCurrentShared) return true;
     if (!data) return false;
-    const currentTool = data.tools?.map((tool) => serializeRows(toolEnv[tool.id] ?? [])) ?? [];
+    const currentTool =
+      data.tools?.map((tool) => serializeRows(toolEnv[tool.id] ?? [])) ?? [];
     const originalTool = data.tools?.map((tool) => tool.env ?? []) ?? [];
     return JSON.stringify(currentTool) !== JSON.stringify(originalTool);
   }, [data, serializedOriginalShared, serializedCurrentShared, toolEnv]);

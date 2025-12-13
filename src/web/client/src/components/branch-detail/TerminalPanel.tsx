@@ -30,7 +30,8 @@ export function TerminalPanel({
         </CardHeader>
         <CardContent className="flex min-h-[200px] items-center justify-center">
           <p className="text-center text-sm text-muted-foreground">
-            上部のアクションからAIツールを起動すると、<br />
+            上部のアクションからAIツールを起動すると、
+            <br />
             このエリアにターミナルが表示されます。
           </p>
         </CardContent>
@@ -42,7 +43,7 @@ export function TerminalPanel({
     <Card
       className={cn(
         "flex flex-col transition-all",
-        isFullscreen && "fixed inset-4 z-50 h-auto"
+        isFullscreen && "fixed inset-4 z-50 h-auto",
       )}
       data-testid="active-terminal"
     >
@@ -74,18 +75,16 @@ export function TerminalPanel({
           出力はリアルタイムにストリームされます。終了するとこのパネルは自動で閉じます。
         </p>
       </CardHeader>
-      <CardContent className={cn("flex-1 overflow-hidden", isFullscreen && "h-full")}>
+      <CardContent
+        className={cn("flex-1 overflow-hidden", isFullscreen && "h-full")}
+      >
         <div
           className={cn(
             "h-full min-h-[300px] overflow-auto rounded-lg border bg-black p-4",
-            isFullscreen && "min-h-0"
+            isFullscreen && "min-h-0",
           )}
         >
-          <Terminal
-            sessionId={sessionId}
-            onExit={onExit}
-            onError={onError}
-          />
+          <Terminal sessionId={sessionId} onExit={onExit} onError={onError} />
         </div>
       </CardContent>
     </Card>

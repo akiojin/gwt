@@ -108,9 +108,8 @@ describe("codex.ts", () => {
   });
 
   it("captures sessionId from file-based session detection", async () => {
-    const { findLatestCodexSession } = await import(
-      "../../src/utils/session.js"
-    );
+    const { findLatestCodexSession } =
+      await import("../../src/utils/session.js");
     (findLatestCodexSession as any).mockResolvedValueOnce({
       id: "019af999-aaaa-bbbb-cccc-123456789abc",
       fullPath: "/mock/path/session.jsonl",
@@ -222,9 +221,7 @@ describe("codex.ts", () => {
     expect(consoleSpy).toHaveBeenCalledWith(
       expect.stringContaining("--enable"),
     );
-    expect(consoleSpy).toHaveBeenCalledWith(
-      expect.stringContaining("skills"),
-    );
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining("skills"));
 
     consoleSpy.mockRestore();
   });

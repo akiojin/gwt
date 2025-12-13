@@ -1,6 +1,11 @@
 import React from "react";
 import { Link } from "react-router-dom";
-import { Card, CardHeader, CardContent, CardFooter } from "@/components/ui/card";
+import {
+  Card,
+  CardHeader,
+  CardContent,
+  CardFooter,
+} from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 
@@ -35,7 +40,7 @@ export function BranchCard({
     <Card
       className={cn(
         "transition-colors hover:border-muted-foreground/30",
-        className
+        className,
       )}
     >
       <CardHeader className="pb-2">
@@ -81,12 +86,12 @@ export function BranchCard({
             Merged
           </Badge>
         )}
-        {(ahead !== undefined && ahead > 0) && (
+        {ahead !== undefined && ahead > 0 && (
           <Badge variant="outline" className="text-xs">
             ↑{ahead}
           </Badge>
         )}
-        {(behind !== undefined && behind > 0) && (
+        {behind !== undefined && behind > 0 && (
           <Badge variant="outline" className="text-xs">
             ↓{behind}
           </Badge>

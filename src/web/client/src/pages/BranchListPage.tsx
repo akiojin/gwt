@@ -5,7 +5,12 @@ import { BranchGraph } from "../components/BranchGraph";
 import { PageHeader } from "@/components/common/PageHeader";
 import { MetricCard } from "@/components/common/MetricCard";
 import { SearchInput } from "@/components/common/SearchInput";
-import { Card, CardHeader, CardContent, CardFooter } from "@/components/ui/card";
+import {
+  Card,
+  CardHeader,
+  CardContent,
+  CardFooter,
+} from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -71,14 +76,13 @@ export function BranchListPage() {
   if (error) {
     return (
       <div className="min-h-screen bg-background">
-        <PageHeader
-          eyebrow="WORKTREE DASHBOARD"
-          title="gwt Control Center"
-        />
+        <PageHeader eyebrow="WORKTREE DASHBOARD" title="gwt Control Center" />
         <main className="mx-auto max-w-7xl px-6 py-8">
           <Alert variant="destructive">
             <AlertDescription>
-              {error instanceof Error ? error.message : "Failed to load branches"}
+              {error instanceof Error
+                ? error.message
+                : "Failed to load branches"}
             </AlertDescription>
           </Alert>
         </main>
@@ -90,17 +94,16 @@ export function BranchListPage() {
   if (!branches.length) {
     return (
       <div className="min-h-screen bg-background">
-        <PageHeader
-          eyebrow="WORKTREE DASHBOARD"
-          title="gwt Control Center"
-        />
+        <PageHeader eyebrow="WORKTREE DASHBOARD" title="gwt Control Center" />
         <main className="mx-auto max-w-7xl px-6 py-8">
           <Card className="border-dashed">
             <CardContent className="flex flex-col items-center justify-center py-12">
               <div className="mb-4 text-4xl">📭</div>
               <h3 className="mb-2 text-lg font-semibold">No branches found</h3>
               <p className="text-sm text-muted-foreground">
-                Try running <code className="rounded bg-muted px-1">git fetch origin</code> to sync branches.
+                Try running{" "}
+                <code className="rounded bg-muted px-1">git fetch origin</code>{" "}
+                to sync branches.
               </p>
             </CardContent>
           </Card>
@@ -159,7 +162,9 @@ export function BranchListPage() {
         {filteredBranches.length === 0 ? (
           <Card className="border-dashed">
             <CardContent className="flex flex-col items-center justify-center py-12">
-              <h3 className="mb-2 text-lg font-semibold">No matching branches</h3>
+              <h3 className="mb-2 text-lg font-semibold">
+                No matching branches
+              </h3>
               <p className="text-sm text-muted-foreground">
                 Try a different search term or clear the filter.
               </p>
@@ -195,9 +200,7 @@ function BranchCardItem({ branch }: { branch: Branch }) {
             <Badge variant={branch.type === "local" ? "local" : "remote"}>
               {branch.type === "local" ? "L" : "R"}
             </Badge>
-            {branch.worktreePath && (
-              <Badge variant="success">WT</Badge>
-            )}
+            {branch.worktreePath && <Badge variant="success">WT</Badge>}
           </div>
         </div>
       </CardHeader>
@@ -231,9 +234,7 @@ function BranchCardItem({ branch }: { branch: Branch }) {
 
       <CardFooter className="pt-0">
         <Button variant="ghost" size="sm" asChild className="w-full">
-          <Link to={`/${encodeURIComponent(branch.name)}`}>
-            View Details →
-          </Link>
+          <Link to={`/${encodeURIComponent(branch.name)}`}>View Details →</Link>
         </Button>
       </CardFooter>
     </Card>

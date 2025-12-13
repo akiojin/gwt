@@ -87,7 +87,9 @@ export function BranchGraph({ branches }: BranchGraphProps) {
     return (
       <Card className="border-dashed">
         <CardContent className="flex flex-col items-center justify-center py-12 text-center">
-          <p className="text-muted-foreground">グラフ表示できるブランチがありません。</p>
+          <p className="text-muted-foreground">
+            グラフ表示できるブランチがありません。
+          </p>
           <p className="text-sm text-muted-foreground">
             fetch済みのブランチやWorktreeを追加すると関係図が表示されます。
           </p>
@@ -108,7 +110,8 @@ export function BranchGraph({ branches }: BranchGraphProps) {
               ベースブランチの関係をグラフィカルに把握
             </h2>
             <p className="mt-1 text-sm text-muted-foreground">
-              baseRef、Git upstream、merge-baseヒューリスティクスを用いて推定したベースブランチ単位で派生ノードをレーン表示します。
+              baseRef、Git
+              upstream、merge-baseヒューリスティクスを用いて推定したベースブランチ単位で派生ノードをレーン表示します。
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -127,12 +130,20 @@ export function BranchGraph({ branches }: BranchGraphProps) {
               <div className="flex items-center gap-2">
                 <span className="font-semibold">{lane.baseLabel}</span>
                 {lane.baseNode && (
-                  <Badge variant={lane.baseNode.type === "local" ? "local" : "remote"} className="text-xs">
+                  <Badge
+                    variant={
+                      lane.baseNode.type === "local" ? "local" : "remote"
+                    }
+                    className="text-xs"
+                  >
                     {lane.baseNode.type === "local" ? "LOCAL" : "REMOTE"}
                   </Badge>
                 )}
                 {lane.isSyntheticBase && (
-                  <Badge variant="outline" className="text-xs text-muted-foreground">
+                  <Badge
+                    variant="outline"
+                    className="text-xs text-muted-foreground"
+                  >
                     推定のみ
                   </Badge>
                 )}
@@ -156,14 +167,15 @@ export function BranchGraph({ branches }: BranchGraphProps) {
 }
 
 function renderBaseNode(lane: Lane) {
-  const label = lane.baseLabel === "ベース不明" ? "Unknown base" : lane.baseLabel;
+  const label =
+    lane.baseLabel === "ベース不明" ? "Unknown base" : lane.baseLabel;
 
   const content = (
     <div
       className={cn(
         "group relative rounded-md border bg-card px-3 py-2 transition-colors hover:border-muted-foreground/50",
         lane.baseNode?.type === "local" && "border-l-2 border-l-local",
-        lane.baseNode?.type === "remote" && "border-l-2 border-l-remote"
+        lane.baseNode?.type === "remote" && "border-l-2 border-l-remote",
       )}
     >
       <span className="block truncate text-sm font-medium">{label}</span>
@@ -173,7 +185,9 @@ function renderBaseNode(lane: Lane) {
       <div className="invisible absolute bottom-full left-0 z-10 mb-2 w-48 rounded-md border bg-popover p-2 text-xs shadow-md group-hover:visible">
         <p className="font-medium">{label}</p>
         <p className="text-muted-foreground">
-          {lane.baseNode ? `type: ${lane.baseNode.type}` : "推定されたベースブランチ"}
+          {lane.baseNode
+            ? `type: ${lane.baseNode.type}`
+            : "推定されたベースブランチ"}
         </p>
       </div>
     </div>
@@ -202,7 +216,7 @@ function BranchNode({ branch }: { branch: Branch }) {
         "group relative rounded-md border bg-card px-3 py-2 transition-colors hover:border-muted-foreground/50",
         branch.type === "local" && "border-l-2 border-l-local",
         branch.type === "remote" && "border-l-2 border-l-remote",
-        branch.mergeStatus === "merged" && "opacity-60"
+        branch.mergeStatus === "merged" && "opacity-60",
       )}
     >
       <span className="block truncate text-sm font-medium">
@@ -215,9 +229,13 @@ function BranchNode({ branch }: { branch: Branch }) {
       {/* Tooltip */}
       <div className="invisible absolute bottom-full left-0 z-10 mb-2 w-56 rounded-md border bg-popover p-2 text-xs shadow-md group-hover:visible">
         <p className="font-medium">{branch.name}</p>
-        <p className="text-muted-foreground">base: {branch.baseBranch ?? "unknown"}</p>
+        <p className="text-muted-foreground">
+          base: {branch.baseBranch ?? "unknown"}
+        </p>
         <p className="text-muted-foreground">{getDivergenceLabel(branch)}</p>
-        <p className="text-muted-foreground">{branch.worktreePath ?? "Worktree未作成"}</p>
+        <p className="text-muted-foreground">
+          {branch.worktreePath ?? "Worktree未作成"}
+        </p>
       </div>
     </div>
   );

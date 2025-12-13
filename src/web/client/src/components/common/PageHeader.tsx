@@ -20,10 +20,7 @@ export function PageHeader({
 }: PageHeaderProps) {
   return (
     <header
-      className={cn(
-        "border-b border-border bg-card/50 px-6 py-8",
-        className
-      )}
+      className={cn("border-b border-border bg-card/50 px-6 py-8", className)}
     >
       <div className="mx-auto max-w-7xl">
         {eyebrow && (
