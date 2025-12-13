@@ -48,8 +48,18 @@ describe("main() - Web UI server startup (SPEC-c8e7a5b2)", () => {
   const setupMocks = (overrides?: {
     isGitRepository?: boolean;
     startWebServerError?: Error;
+    isPortInUse?: boolean;
+    port?: number;
   }) => {
     const isGitRepo = overrides?.isGitRepository ?? true;
+    const portInUse = overrides?.isPortInUse ?? false;
+    const port = overrides?.port ?? 3000;
+
+    // Mock webui utils including isPortInUse
+    viWithDoMock.doMock?.("../../src/utils/webui.js", () => ({
+      resolveWebUiPort: vi.fn(() => port),
+      isPortInUse: vi.fn(async () => portInUse),
+    }));
 
     viWithDoMock.doMock?.("../../src/git.js", () => ({
       isGitRepository: vi.fn(async () => isGitRepo),
@@ -152,7 +162,7 @@ describe("main() - Web UI server startup (SPEC-c8e7a5b2)", () => {
 
   it("T013: PORT環境変数がメッセージに反映される", async () => {
     process.env.PORT = "8080";
-    setupMocks();
+    setupMocks({ port: 8080 });
 
     const { main } = await import("../../src/index.js");
     await main();
@@ -204,5 +214,41 @@ describe("main() - Web UI server startup (SPEC-c8e7a5b2)", () => {
     expect(startWebServerMock).not.toHaveBeenCalled();
 
     processExitSpy.mockRestore();
+  });
+
+  it("T017: ポート使用中の場合startWebServerが呼び出されない (FR-006)", async () => {
+    setupMocks({ isPortInUse: true });
+
+    const { main } = await import("../../src/index.js");
+    await main();
+
+    expect(startWebServerMock).not.toHaveBeenCalled();
+  });
+
+  it("T018: ポート使用中の場合printWarningが呼び出される (FR-006)", async () => {
+    const consoleWarnSpy = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => {});
+    setupMocks({ isPortInUse: true });
+
+    const { main } = await import("../../src/index.js");
+    await main();
+
+    const warnCalls = consoleWarnSpy.mock.calls.map(([msg]) =>
+      String(msg ?? ""),
+    );
+    expect(
+      warnCalls.some((msg) => msg.includes("Port 3000 is already in use")),
+    ).toBe(true);
+
+    consoleWarnSpy.mockRestore();
+  });
+
+  it("T019: ポート使用中でもmain()が正常完了する (FR-006)", async () => {
+    setupMocks({ isPortInUse: true });
+
+    const { main } = await import("../../src/index.js");
+
+    await expect(main()).resolves.toBeUndefined();
   });
 });
