@@ -275,7 +275,9 @@ describe("launchClaudeCode - Root User Detection", () => {
       const options = bunxCall[2] as Record<string, unknown>;
       expect(options.stdout).toBe("inherit");
       expect(options.stderr).toBe("inherit");
-      expect(options.env && (options.env as Record<string, string>).IS_SANDBOX).toBeUndefined();
+      expect(
+        options.env && (options.env as Record<string, string>).IS_SANDBOX,
+      ).toBeUndefined();
 
       // Verify --dangerously-skip-permissions is NOT in args
       expect(bunxCall[1] as string[]).not.toContain(
@@ -421,19 +423,19 @@ describe("launchClaudeCode - Root User Detection", () => {
           exitCode: 0,
         } as any);
 
-    await launchClaudeCode("/test/path");
+      await launchClaudeCode("/test/path");
 
-    // 2nd call should be bunx (1st call is which/where check)
-    expect(mockExeca).toHaveBeenNthCalledWith(
-      2,
-      "bunx",
-      expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
-      expect.objectContaining({
-        stdin: 101,
-        stdout: 102,
-        stderr: 103,
-      }),
-    );
+      // 2nd call should be bunx (1st call is which/where check)
+      expect(mockExeca).toHaveBeenNthCalledWith(
+        2,
+        "bunx",
+        expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
+        expect.objectContaining({
+          stdin: 101,
+          stdout: 102,
+          stderr: 103,
+        }),
+      );
 
       expect(mockChildStdio.cleanup).toHaveBeenCalledTimes(1);
 
@@ -456,9 +458,7 @@ describe("launchClaudeCode - Root User Detection", () => {
       mockChildStdio.stdin = "inherit";
       mockChildStdio.stdout = "inherit";
       mockChildStdio.stderr = "inherit";
-      (mockExeca as any).mockImplementation(
-        () => createChildProcess() as any,
-      );
+      (mockExeca as any).mockImplementation(() => createChildProcess() as any);
     });
 
     it("should use locally installed claude command when available", async () => {

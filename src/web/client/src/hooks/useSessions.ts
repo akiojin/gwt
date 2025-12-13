@@ -38,7 +38,16 @@ export function useStartSession() {
 
   return useMutation({
     mutationFn: (request: StartSessionRequest) => sessionApi.start(request),
-    onSuccess: () => {
+    onSuccess: (session: AIToolSession) => {
+      queryClient.setQueryData<AIToolSession[] | undefined>(
+        ["sessions"],
+        (existing) => {
+          const next =
+            existing?.filter((item) => item.sessionId !== session.sessionId) ??
+            [];
+          return [session, ...next];
+        },
+      );
       queryClient.invalidateQueries({ queryKey: ["sessions"] });
     },
   });

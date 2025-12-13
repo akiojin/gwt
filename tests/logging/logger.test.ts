@@ -30,7 +30,12 @@ describe("createLogger", () => {
     const homeSpy = vi.spyOn(os, "homedir").mockReturnValue(TMP_HOME);
 
     const today = formatDate(new Date());
-    const expectedDir = path.join(TMP_HOME, ".gwt", "logs", path.basename(process.cwd()));
+    const expectedDir = path.join(
+      TMP_HOME,
+      ".gwt",
+      "logs",
+      path.basename(process.cwd()),
+    );
     const expectedFile = path.join(expectedDir, `${today}.jsonl`);
 
     const logger = createLogger({

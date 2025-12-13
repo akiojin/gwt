@@ -17,13 +17,7 @@ export interface ContinueSessionContext {
 export async function resolveContinueSessionId(
   context: ContinueSessionContext,
 ): Promise<string | null> {
-  const {
-    history,
-    sessionData,
-    branch,
-    toolId,
-    repoRoot,
-  } = context;
+  const { history, sessionData, branch, toolId, repoRoot: _repoRoot } = context;
 
   // 1) 履歴から最新マッチを探す（末尾から遡る）
   for (let i = history.length - 1; i >= 0; i -= 1) {

@@ -52,6 +52,9 @@ export async function launchQwenCLI(
       options.sessionId && options.sessionId.trim().length > 0
         ? options.sessionId.trim()
         : null;
+    const usedExplicitSessionId =
+      Boolean(resumeSessionId) &&
+      (options.mode === "continue" || options.mode === "resume");
     switch (options.mode) {
       case "continue":
         console.log(
@@ -94,10 +97,14 @@ export async function launchQwenCLI(
 
     terminal.exitRawMode();
 
-    const baseEnv = {
-      ...process.env,
-      ...(options.envOverrides ?? {}),
-    };
+    const baseEnv = Object.fromEntries(
+      Object.entries({
+        ...process.env,
+        ...(options.envOverrides ?? {}),
+      }).filter(
+        (entry): entry is [string, string] => typeof entry[1] === "string",
+      ),
+    );
 
     const childStdio = createChildStdio();
 
@@ -105,12 +112,13 @@ export async function launchQwenCLI(
     const hasLocalQwen = await isQwenCommandAvailable();
 
     try {
-      const execChild = async (child: any) => {
+      const execChild = async (child: Promise<unknown>) => {
         try {
           await child;
-        } catch (execError: any) {
+        } catch (execError: unknown) {
           // Treat SIGINT/SIGTERM as normal exit (user pressed Ctrl+C)
-          if (execError.signal === "SIGINT" || execError.signal === "SIGTERM") {
+          const signal = (execError as { signal?: unknown })?.signal;
+          if (signal === "SIGINT" || signal === "SIGTERM") {
             return;
           }
           throw execError;
@@ -127,7 +135,7 @@ export async function launchQwenCLI(
           stdout: childStdio.stdout,
           stderr: childStdio.stderr,
           env: baseEnv,
-        } as any);
+        });
         await execChild(child);
       } else {
         // Fallback to bunx
@@ -150,7 +158,7 @@ export async function launchQwenCLI(
           stdout: childStdio.stdout,
           stderr: childStdio.stderr,
           env: baseEnv,
-        } as any);
+        });
         await execChild(child);
       }
     } finally {
@@ -159,12 +167,10 @@ export async function launchQwenCLI(
 
     let capturedSessionId: string | null = null;
     try {
-      capturedSessionId =
-        (await findLatestQwenSessionId(worktreePath)) ??
-        resumeSessionId ??
-        null;
+      const detected = (await findLatestQwenSessionId(worktreePath)) ?? null;
+      capturedSessionId = usedExplicitSessionId ? resumeSessionId : detected;
     } catch {
-      capturedSessionId = resumeSessionId ?? null;
+      capturedSessionId = usedExplicitSessionId ? resumeSessionId : null;
     }
 
     if (capturedSessionId) {
@@ -181,11 +187,12 @@ export async function launchQwenCLI(
     }
 
     return capturedSessionId ? { sessionId: capturedSessionId } : {};
-  } catch (error: any) {
+  } catch (error: unknown) {
     const hasLocalQwen = await isQwenCommandAvailable();
     let errorMessage: string;
+    const err = error as NodeJS.ErrnoException;
 
-    if (error.code === "ENOENT") {
+    if (err.code === "ENOENT") {
       if (hasLocalQwen) {
         errorMessage =
           "qwen command not found. Please ensure Qwen CLI is properly installed.";
@@ -194,7 +201,8 @@ export async function launchQwenCLI(
           "bunx command not found. Please ensure Bun is installed so Qwen CLI can run via bunx.";
       }
     } else {
-      errorMessage = `Failed to launch Qwen CLI: ${error.message || "Unknown error"}`;
+      const details = error instanceof Error ? error.message : String(error);
+      errorMessage = `Failed to launch Qwen CLI: ${details || "Unknown error"}`;
     }
 
     if (process.platform === "win32") {
@@ -250,8 +258,9 @@ export async function isQwenCLIAvailable(): Promise<boolean> {
   try {
     await execa("bunx", [QWEN_CLI_PACKAGE, "--version"], { shell: true });
     return true;
-  } catch (error: any) {
-    if (error.code === "ENOENT") {
+  } catch (error: unknown) {
+    const err = error as NodeJS.ErrnoException;
+    if (err.code === "ENOENT") {
       console.error(chalk.yellow("\n⚠️  bunx command not found"));
       console.error(
         chalk.gray(

@@ -33,6 +33,7 @@ import {
   getTerminalStreams,
   waitForUserAcknowledgement,
 } from "./utils/terminal.js";
+import { resolveWebUiPort, isPortInUse } from "./utils/webui.js";
 import { createLogger } from "./logging/logger.js";
 import { getToolById, getSharedEnvironment } from "./config/tools.js";
 import { launchCustomAITool } from "./launcher.js";
@@ -552,12 +553,12 @@ export async function handleAIToolWorkflow(
       { skipHistory: true },
     );
 
-    // Lookup saved session ID for continue/resume
+    // Lookup saved session ID for Continue (auto attach)
     let resumeSessionId: string | null =
       selectedSessionId && selectedSessionId.length > 0
         ? selectedSessionId
         : null;
-    if (mode === "continue" || mode === "resume") {
+    if (mode === "continue") {
       const existingSession = await loadSession(repoRoot);
       const history = existingSession?.history ?? [];
 
@@ -700,14 +701,15 @@ export async function handleAIToolWorkflow(
 
     if (!finalSessionId && tool === "claude-code") {
       try {
-        finalSessionId = (await findLatestClaudeSessionId(worktreePath)) ?? null;
+        finalSessionId =
+          (await findLatestClaudeSessionId(worktreePath)) ?? null;
       } catch {
         finalSessionId = null;
       }
     }
     const finishedAt = Date.now();
 
-    if (tool === "codex-cli") {
+    if (!finalSessionId && tool === "codex-cli") {
       try {
         const latest = await findLatestCodexSession({
           since: launchStartedAt - 60_000,
@@ -722,7 +724,7 @@ export async function handleAIToolWorkflow(
       } catch {
         // ignore fallback failure
       }
-    } else if (tool === "claude-code") {
+    } else if (!finalSessionId && tool === "claude-code") {
       try {
         const latestClaude = await findLatestClaudeSession(worktreePath, {
           since: launchStartedAt - 60_000,
@@ -736,7 +738,7 @@ export async function handleAIToolWorkflow(
       } catch {
         // ignore
       }
-    } else if (tool === "gemini-cli") {
+    } else if (!finalSessionId && tool === "gemini-cli") {
       try {
         const latestGemini = await findLatestGeminiSession(worktreePath, {
           since: launchStartedAt - 60_000,
@@ -874,7 +876,52 @@ export async function main(): Promise<void> {
     process.exit(1);
   }
 
-  await runInteractiveLoop();
+  // Start Web UI server in background (skip if port is in use)
+  const port = resolveWebUiPort();
+  const portInUse = await isPortInUse(port);
+  let webServerHandlePromise: Promise<{
+    close: () => Promise<void>;
+  } | null> | null = null;
+  if (portInUse) {
+    printWarning(`Port ${port} is already in use. Skipping Web UI server.`);
+  } else {
+    const { startWebServer } = await import("./web/server/index.js");
+    webServerHandlePromise = startWebServer({ background: true }).catch(
+      (err) => {
+        appLogger.warn({ err }, "Web UI server failed to start");
+        return null;
+      },
+    );
+    printInfo(`Web UI available at http://localhost:${port}`);
+  }
+
+  try {
+    await runInteractiveLoop();
+  } finally {
+    if (webServerHandlePromise) {
+      const shutdownTimeoutMs = 2000;
+      const handleOrTimeout = await Promise.race([
+        webServerHandlePromise,
+        new Promise<"timeout">((resolve) => {
+          const timer = setTimeout(() => resolve("timeout"), shutdownTimeoutMs);
+          timer.unref?.();
+        }),
+      ]);
+
+      if (handleOrTimeout === "timeout") {
+        appLogger.warn(
+          { timeoutMs: shutdownTimeoutMs },
+          "Web UI server startup did not finish before shutdown timeout; skipping stop",
+        );
+      } else if (handleOrTimeout) {
+        try {
+          await handleOrTimeout.close();
+        } catch (err) {
+          appLogger.warn({ err }, "Web UI server failed to stop");
+        }
+      }
+    }
+  }
 }
 
 // Run the application if this module is executed directly
