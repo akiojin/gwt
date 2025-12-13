@@ -197,6 +197,7 @@ export function BranchQuickStartScreen({
         </Box>
         <Select
           items={items}
+          disabled={loading}
           onSelect={(item: QuickStartItem) => {
             if (item.disabled) return;
             onSelect(item.action, item.toolId ?? null);
