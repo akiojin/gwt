@@ -1,0 +1,128 @@
+:root {
+  --bg-primary: #030712;
+  --bg-panel: rgba(10, 17, 35, 0.9);
+  --text-base: #e2e8f0;
+  --text-muted: #94a3b8;
+  --accent: #5eead4;
+  --accent-strong: #ec4899;
+  font-family: "Inter", "JetBrains Mono", system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: radial-gradient(circle at top, rgba(94, 234, 212, 0.2), transparent 45%),
+    radial-gradient(circle at bottom, rgba(236, 72, 153, 0.15), transparent 50%),
+    var(--bg-primary);
+  color: var(--text-base);
+}
+
+main {
+  width: min(1200px, 100%);
+  margin: 0 auto;
+  padding: 3rem 1.25rem 4rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.page-hero {
+  background: rgba(8, 15, 35, 0.9);
+  border: 1px solid rgba(94, 234, 212, 0.35);
+  border-radius: 24px;
+  padding: 2rem;
+  box-shadow: 0 25px 55px rgba(2, 6, 23, 0.6);
+}
+
+.page-hero__eyebrow {
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.page-hero h1 {
+  margin: 0.5rem 0 0.75rem;
+  font-size: clamp(2rem, 3vw, 3rem);
+}
+
+.page-hero__subtitle {
+  color: var(--text-muted);
+  line-height: 1.6;
+}
+
+.synapse-stage {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr);
+  gap: 1.5rem;
+  align-items: stretch;
+}
+
+.synapse-stage__canvas {
+  border-radius: 24px;
+  border: 1px solid rgba(236, 72, 153, 0.35);
+  background: radial-gradient(circle at center, rgba(8, 145, 178, 0.25), rgba(2, 6, 23, 0.95));
+  min-height: 420px;
+  overflow: hidden;
+  position: relative;
+  box-shadow: 0 35px 75px rgba(2, 6, 23, 0.7);
+}
+
+#synapse-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.synapse-stage__panel {
+  background: var(--bg-panel);
+  border-radius: 24px;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  padding: 1.5rem;
+  box-shadow: 0 25px 55px rgba(2, 6, 23, 0.6);
+}
+
+.synapse-stage__panel h2 {
+  margin-top: 0;
+}
+
+.synapse-stage__panel ul {
+  padding-left: 1.25rem;
+  color: var(--text-muted);
+  line-height: 1.6;
+}
+
+.synapse-stage__panel li::marker {
+  color: var(--accent);
+}
+
+.cta-row {
+  display: flex;
+  gap: 0.75rem;
+  margin-top: 1.25rem;
+}
+
+.button {
+  border-radius: 999px;
+  padding: 0.65rem 1.5rem;
+  border: 1px solid transparent;
+  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  color: #04121a;
+  font-weight: 600;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.button--ghost {
+  background: transparent;
+  border-color: rgba(148, 163, 184, 0.4);
+  color: var(--text-base);
+}
+
+@media (max-width: 900px) {
+  .synapse-stage {
+    grid-template-columns: 1fr;
+  }
+}
