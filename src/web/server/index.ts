@@ -16,7 +16,7 @@ import { registerRoutes } from "./routes/index.js";
 import { importOsEnvIntoSharedConfig } from "./env/importer.js";
 import { createLogger } from "../../logging/logger.js";
 import type { WebFastifyInstance } from "./types.js";
-import { startSystemTray } from "./tray.js";
+import { disposeSystemTray, startSystemTray } from "./tray.js";
 import { resolveWebUiPort } from "../../utils/webui.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -25,7 +25,20 @@ const __dirname = dirname(__filename);
 /**
  * Webサーバーを起動
  */
-export async function startWebServer(): Promise<void> {
+export interface WebServerHandle {
+  close: () => Promise<void>;
+}
+
+export interface StartWebServerOptions {
+  /**
+   * true の場合、CLI 本体の終了をブロックしないようにサーバーを起動します。
+   */
+  background?: boolean;
+}
+
+export async function startWebServer(
+  options: StartWebServerOptions = {},
+): Promise<WebServerHandle> {
   const serverLogger = createLogger({ category: "server" });
 
   const fastify: WebFastifyInstance = Fastify({
@@ -62,18 +75,33 @@ export async function startWebServer(): Promise<void> {
   });
 
   // サーバー起動
-  try {
-    const port = resolveWebUiPort();
-    // Docker環境からホストOSでアクセスできるよう、0.0.0.0でリッスン
-    // IPv4/IPv6両方対応のため、listenOnStart: false も検討可能
-    const host = process.env.HOST || "0.0.0.0";
+  const port = resolveWebUiPort();
+  // Docker環境からホストOSでアクセスできるよう、0.0.0.0でリッスン
+  // IPv4/IPv6両方対応のため、listenOnStart: false も検討可能
+  const host = process.env.HOST || "0.0.0.0";
 
-    await fastify.listen({ port, host });
-    const accessUrl = `http://localhost:${port}`;
-    serverLogger.info({ host, port, accessUrl }, "Web UI server started");
-    await startSystemTray(accessUrl);
-  } catch (err) {
-    fastify.log.error(err);
-    process.exit(1);
+  await fastify.listen({ port, host });
+  const accessUrl = `http://localhost:${port}`;
+  serverLogger.info({ host, port, accessUrl }, "Web UI server started");
+  await startSystemTray(accessUrl);
+
+  if (options.background) {
+    fastify.server?.unref?.();
   }
+
+  let closed = false;
+  return {
+    close: async () => {
+      if (closed) return;
+      closed = true;
+
+      disposeSystemTray();
+
+      for (const session of ptyManager.list()) {
+        ptyManager.delete(session.sessionId);
+      }
+
+      await fastify.close();
+    },
+  };
 }
