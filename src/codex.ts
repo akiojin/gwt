@@ -1,12 +1,9 @@
-import { execa } from "execa";
+import { execa, type Options } from "execa";
 import chalk from "chalk";
 import { platform } from "os";
 import { existsSync } from "fs";
 import { createChildStdio, getTerminalStreams } from "./utils/terminal.js";
-import {
-  findLatestCodexSession,
-  waitForCodexSessionId,
-} from "./utils/session.js";
+import { findLatestCodexSession } from "./utils/session.js";
 
 const CODEX_CLI_PACKAGE = "@openai/codex@latest";
 
@@ -85,6 +82,9 @@ export async function launchCodexCLI(
       options.sessionId && options.sessionId.trim().length > 0
         ? options.sessionId.trim()
         : null;
+    const usedExplicitSessionId =
+      Boolean(resumeSessionId) &&
+      (options.mode === "continue" || options.mode === "resume");
 
     switch (options.mode) {
       case "continue":
@@ -136,15 +136,23 @@ export async function launchCodexCLI(
 
     const childStdio = createChildStdio();
 
-    const env = { ...process.env, ...(options.envOverrides ?? {}) };
+    const env = Object.fromEntries(
+      Object.entries({
+        ...process.env,
+        ...(options.envOverrides ?? {}),
+      }).filter(
+        (entry): entry is [string, string] => typeof entry[1] === "string",
+      ),
+    );
 
     try {
-      const execChild = async (child: any) => {
+      const execChild = async (child: Promise<unknown>) => {
         try {
           await child;
-        } catch (execError: any) {
+        } catch (execError: unknown) {
           // Treat SIGINT/SIGTERM as normal exit (user pressed Ctrl+C)
-          if (execError.signal === "SIGINT" || execError.signal === "SIGTERM") {
+          const signal = (execError as { signal?: unknown })?.signal;
+          if (signal === "SIGINT" || signal === "SIGTERM") {
             return;
           }
           throw execError;
@@ -158,7 +166,7 @@ export async function launchCodexCLI(
         stdout: childStdio.stdout,
         stderr: childStdio.stderr,
         env,
-      } as any);
+      } as unknown as Options);
       await execChild(child);
     } finally {
       childStdio.cleanup();
@@ -176,10 +184,13 @@ export async function launchCodexCLI(
         windowMs: 10 * 60 * 1000,
         cwd: worktreePath,
       });
-      // Priority: latest on disk > resumeSessionId
-      capturedSessionId = latest?.id ?? resumeSessionId ?? null;
+      const detectedSessionId = latest?.id ?? null;
+      // When we explicitly resumed a specific session, keep that ID as the source of truth.
+      capturedSessionId = usedExplicitSessionId
+        ? resumeSessionId
+        : detectedSessionId;
     } catch {
-      capturedSessionId = resumeSessionId ?? null;
+      capturedSessionId = usedExplicitSessionId ? resumeSessionId : null;
     }
 
     if (capturedSessionId) {
@@ -196,11 +207,13 @@ export async function launchCodexCLI(
     }
 
     return capturedSessionId ? { sessionId: capturedSessionId } : {};
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const err = error as NodeJS.ErrnoException;
+    const details = error instanceof Error ? error.message : String(error);
     const errorMessage =
-      error.code === "ENOENT"
+      err.code === "ENOENT"
         ? "bunx command not found. Please ensure Bun is installed so Codex CLI can run via bunx."
-        : `Failed to launch Codex CLI: ${error.message || "Unknown error"}`;
+        : `Failed to launch Codex CLI: ${details || "Unknown error"}`;
 
     if (platform() === "win32") {
       console.error(chalk.red("\n💡 Windows troubleshooting tips:"));
@@ -229,8 +242,9 @@ export async function isCodexAvailable(): Promise<boolean> {
   try {
     await execa("bunx", [CODEX_CLI_PACKAGE, "--help"]);
     return true;
-  } catch (error: any) {
-    if (error.code === "ENOENT") {
+  } catch (error: unknown) {
+    const err = error as NodeJS.ErrnoException;
+    if (err.code === "ENOENT") {
       console.error(chalk.yellow("\n⚠️  bunx command not found"));
     }
     return false;

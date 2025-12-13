@@ -1,4 +1,4 @@
-import { execa } from "execa";
+import { execa, type Options } from "execa";
 import chalk from "chalk";
 import { existsSync } from "fs";
 import { createChildStdio, getTerminalStreams } from "./utils/terminal.js";
@@ -50,6 +50,9 @@ export async function launchGeminiCLI(
       options.sessionId && options.sessionId.trim().length > 0
         ? options.sessionId.trim()
         : null;
+    const explicitResumeRequested =
+      Boolean(resumeSessionId) &&
+      (options.mode === "continue" || options.mode === "resume");
 
     const buildArgs = (useResumeId: boolean) => {
       const a: string[] = [];
@@ -123,10 +126,14 @@ export async function launchGeminiCLI(
     }
     terminal.exitRawMode();
 
-    const baseEnv = {
-      ...process.env,
-      ...(options.envOverrides ?? {}),
-    };
+    const baseEnv = Object.fromEntries(
+      Object.entries({
+        ...process.env,
+        ...(options.envOverrides ?? {}),
+      }).filter(
+        (entry): entry is [string, string] => typeof entry[1] === "string",
+      ),
+    );
 
     const childStdio = createChildStdio();
 
@@ -171,7 +178,7 @@ export async function launchGeminiCLI(
           stdout: "pipe",
           stderr: childStdio.stderr,
           env: baseEnv,
-        } as any);
+        } as unknown as Options);
 
         // Pass stdout through to terminal while capturing
         child.stdout?.on("data", (chunk: Buffer) => {
@@ -205,6 +212,7 @@ export async function launchGeminiCLI(
     };
 
     let output: string | undefined;
+    let fellBackToLatest = false;
     try {
       // Try with explicit session ID first (if any), then fallback to --resume (latest) once
       try {
@@ -214,6 +222,7 @@ export async function launchGeminiCLI(
           (options.mode === "resume" || options.mode === "continue") &&
           resumeSessionId;
         if (shouldRetry) {
+          fellBackToLatest = true;
           console.log(
             chalk.yellow(
               `   ⚠️  Failed to resume session ${resumeSessionId}. Retrying with latest session...`,
@@ -231,17 +240,23 @@ export async function launchGeminiCLI(
     // Extract session ID from Gemini's exit summary output
     extractSessionId(output);
 
-    // Fallback to file-based detection if stdout capture failed
+    const explicitResumeSucceeded =
+      explicitResumeRequested && !fellBackToLatest;
+
+    // If we explicitly resumed a specific session (and did not fall back), keep that ID.
+    if (explicitResumeSucceeded) {
+      capturedSessionId = resumeSessionId;
+    }
+
+    // Fallback to file-based detection if stdout capture failed (and we don't have an explicit-resume ID)
     if (!capturedSessionId) {
       try {
         capturedSessionId =
           (await findLatestGeminiSessionId(worktreePath, {
             cwd: worktreePath,
-          })) ??
-          resumeSessionId ??
-          null;
+          })) ?? null;
       } catch {
-        capturedSessionId = resumeSessionId ?? null;
+        capturedSessionId = null;
       }
     }
 
@@ -259,11 +274,12 @@ export async function launchGeminiCLI(
     }
 
     return capturedSessionId ? { sessionId: capturedSessionId } : {};
-  } catch (error: any) {
+  } catch (error: unknown) {
     const hasLocalGemini = await isGeminiCommandAvailable();
     let errorMessage: string;
+    const err = error as NodeJS.ErrnoException;
 
-    if (error.code === "ENOENT") {
+    if (err.code === "ENOENT") {
       if (hasLocalGemini) {
         errorMessage =
           "gemini command not found. Please ensure Gemini CLI is properly installed.";
@@ -272,7 +288,8 @@ export async function launchGeminiCLI(
           "bunx command not found. Please ensure Bun is installed so Gemini CLI can run via bunx.";
       }
     } else {
-      errorMessage = `Failed to launch Gemini CLI: ${error.message || "Unknown error"}`;
+      const details = error instanceof Error ? error.message : String(error);
+      errorMessage = `Failed to launch Gemini CLI: ${details || "Unknown error"}`;
     }
 
     if (process.platform === "win32") {
@@ -333,8 +350,9 @@ export async function isGeminiCLIAvailable(): Promise<boolean> {
   try {
     await execa("bunx", [GEMINI_CLI_PACKAGE, "--version"], { shell: true });
     return true;
-  } catch (error: any) {
-    if (error.code === "ENOENT") {
+  } catch (error: unknown) {
+    const err = error as NodeJS.ErrnoException;
+    if (err.code === "ENOENT") {
       console.error(chalk.yellow("\n⚠️  bunx command not found"));
       console.error(
         chalk.gray(

@@ -384,62 +384,54 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         const mapped = await Promise.all(
           latestPerTool.map(async (entry) => {
             let sessionId = entry.sessionId ?? null;
+            const worktree = selectedWorktreePath ?? workingDirectory;
 
             // For Codex, prefer a newer filesystem session over stale history
-            if (entry.toolId === "codex-cli") {
+            if (!sessionId && entry.toolId === "codex-cli") {
               try {
-                const latestCodex = await findLatestCodexSession();
-                const historyTs = entry.timestamp ?? 0;
-                if (
-                  latestCodex &&
-                  (!sessionId || latestCodex.mtime > historyTs)
-                ) {
-                  sessionId = latestCodex.id;
-                }
-                // Fallback when filesystem unavailable and history missing
-                if (!sessionId) {
-                  const latestId = await findLatestCodexSessionId();
-                  if (latestId) sessionId = latestId;
-                }
+                const historyTs = entry.timestamp ?? null;
+                const latestCodex = await findLatestCodexSession({
+                  ...(historyTs
+                    ? {
+                        since: historyTs - 60_000,
+                        preferClosestTo: historyTs,
+                        windowMs: 60 * 60 * 1000,
+                      }
+                    : {}),
+                  cwd: worktree,
+                });
+                sessionId =
+                  latestCodex?.id ??
+                  (await findLatestCodexSessionId({ cwd: worktree })) ??
+                  null;
               } catch {
                 // ignore lookup failure
               }
             }
 
             // For Claude Code, prefer the newest session file in the worktree even if history is stale.
-            if (entry.toolId === "claude-code") {
+            if (!sessionId && entry.toolId === "claude-code") {
               try {
-                const worktree =
-                  selectedWorktreePath ??
-                  selectedBranch?.displayName ??
-                  workingDirectory;
-
                 // Always resolve freshest on-disk session for this worktree (no window restriction)
                 const latestAny = await findLatestClaudeSession(worktree);
-                sessionId = latestAny?.id ?? sessionId ?? null;
+                sessionId = latestAny?.id ?? null;
               } catch {
                 // ignore lookup failure
               }
             }
 
             // For Gemini, prefer newest session file (Gemini keeps per-project chats)
-            if (entry.toolId === "gemini-cli") {
+            if (!sessionId && entry.toolId === "gemini-cli") {
               try {
-                const gemSession = await findLatestGeminiSession(
-                  selectedWorktreePath ??
-                    selectedBranch?.displayName ??
-                    workingDirectory,
-                  {
-                    ...(entry.timestamp !== null &&
-                    entry.timestamp !== undefined
-                      ? {
-                          since: entry.timestamp - 60_000,
-                          preferClosestTo: entry.timestamp,
-                        }
-                      : {}),
-                    windowMs: 60 * 60 * 1000,
-                  },
-                );
+                const gemSession = await findLatestGeminiSession(worktree, {
+                  ...(entry.timestamp !== null && entry.timestamp !== undefined
+                    ? {
+                        since: entry.timestamp - 60_000,
+                        preferClosestTo: entry.timestamp,
+                      }
+                    : {}),
+                  windowMs: 60 * 60 * 1000,
+                });
                 if (gemSession?.id) sessionId = gemSession.id;
               } catch {
                 // ignore
