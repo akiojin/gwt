@@ -879,17 +879,49 @@ export async function main(): Promise<void> {
   // Start Web UI server in background (skip if port is in use)
   const port = resolveWebUiPort();
   const portInUse = await isPortInUse(port);
+  let webServerHandlePromise: Promise<{
+    close: () => Promise<void>;
+  } | null> | null = null;
   if (portInUse) {
     printWarning(`Port ${port} is already in use. Skipping Web UI server.`);
   } else {
     const { startWebServer } = await import("./web/server/index.js");
-    startWebServer().catch((err) => {
-      appLogger.warn({ err }, "Web UI server failed to start");
-    });
+    webServerHandlePromise = startWebServer({ background: true }).catch(
+      (err) => {
+        appLogger.warn({ err }, "Web UI server failed to start");
+        return null;
+      },
+    );
     printInfo(`Web UI available at http://localhost:${port}`);
   }
 
-  await runInteractiveLoop();
+  try {
+    await runInteractiveLoop();
+  } finally {
+    if (webServerHandlePromise) {
+      const shutdownTimeoutMs = 2000;
+      const handleOrTimeout = await Promise.race([
+        webServerHandlePromise,
+        new Promise<"timeout">((resolve) => {
+          const timer = setTimeout(() => resolve("timeout"), shutdownTimeoutMs);
+          timer.unref?.();
+        }),
+      ]);
+
+      if (handleOrTimeout === "timeout") {
+        appLogger.warn(
+          { timeoutMs: shutdownTimeoutMs },
+          "Web UI server startup did not finish before shutdown timeout; skipping stop",
+        );
+      } else if (handleOrTimeout) {
+        try {
+          await handleOrTimeout.close();
+        } catch (err) {
+          appLogger.warn({ err }, "Web UI server failed to stop");
+        }
+      }
+    }
+  }
 }
 
 // Run the application if this module is executed directly
