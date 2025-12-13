@@ -264,4 +264,23 @@ describe("main() - Web UI server startup (SPEC-c8e7a5b2)", () => {
 
     expect(closeWebServerMock).toHaveBeenCalledTimes(1);
   });
+
+  it("T021: ポート使用中の場合はcloseが呼ばれない", async () => {
+    setupMocks({ isPortInUse: true });
+
+    const { main } = await import("../../src/index.js");
+    await main();
+
+    expect(closeWebServerMock).not.toHaveBeenCalled();
+  });
+
+  it("T022: startWebServer失敗時はcloseが呼ばれない", async () => {
+    const serverError = new Error("startWebServer failed");
+    setupMocks({ startWebServerError: serverError });
+
+    const { main } = await import("../../src/index.js");
+    await main();
+
+    expect(closeWebServerMock).not.toHaveBeenCalled();
+  });
 });

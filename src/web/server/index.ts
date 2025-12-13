@@ -23,19 +23,32 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 /**
- * Webサーバーを起動
+ * Web UI サーバーのライフサイクル操作ハンドル。
+ *
+ * `close()` は Web UI サーバーを停止し、関連リソース（PTY/トレイ等）を解放します。
  */
 export interface WebServerHandle {
   close: () => Promise<void>;
 }
 
+/**
+ * `startWebServer` の起動オプション。
+ */
 export interface StartWebServerOptions {
   /**
-   * true の場合、CLI 本体の終了をブロックしないようにサーバーを起動します。
+   * true の場合、Web UI サーバーが CLI 本体の終了をブロックしないようにします。
+   * （内部で `server.unref()` を呼び、サーバーの存在がプロセス生存を維持しないようにします）
    */
   background?: boolean;
 }
 
+/**
+ * Web UI サーバーを起動します。
+ *
+ * @param options - 起動オプション
+ * @returns Web UI サーバー停止用のハンドル
+ * @throws サーバー起動（listen/初期化）に失敗した場合
+ */
 export async function startWebServer(
   options: StartWebServerOptions = {},
 ): Promise<WebServerHandle> {
@@ -95,13 +108,26 @@ export async function startWebServer(
       if (closed) return;
       closed = true;
 
-      disposeSystemTray();
+      try {
+        try {
+          disposeSystemTray();
+        } catch (err) {
+          serverLogger.warn({ err }, "System tray cleanup failed");
+        }
 
-      for (const session of ptyManager.list()) {
-        ptyManager.delete(session.sessionId);
+        for (const session of ptyManager.list()) {
+          try {
+            ptyManager.delete(session.sessionId);
+          } catch (err) {
+            serverLogger.warn(
+              { err, sessionId: session.sessionId },
+              "Failed to delete PTY session",
+            );
+          }
+        }
+      } finally {
+        await fastify.close();
       }
-
-      await fastify.close();
     },
   };
 }

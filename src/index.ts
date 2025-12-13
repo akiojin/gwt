@@ -898,12 +898,27 @@ export async function main(): Promise<void> {
   try {
     await runInteractiveLoop();
   } finally {
-    const handle = await webServerHandlePromise;
-    if (handle) {
-      try {
-        await handle.close();
-      } catch (err) {
-        appLogger.warn({ err }, "Web UI server failed to stop");
+    if (webServerHandlePromise) {
+      const shutdownTimeoutMs = 2000;
+      const handleOrTimeout = await Promise.race([
+        webServerHandlePromise,
+        new Promise<"timeout">((resolve) => {
+          const timer = setTimeout(() => resolve("timeout"), shutdownTimeoutMs);
+          timer.unref?.();
+        }),
+      ]);
+
+      if (handleOrTimeout === "timeout") {
+        appLogger.warn(
+          { timeoutMs: shutdownTimeoutMs },
+          "Web UI server startup did not finish before shutdown timeout; skipping stop",
+        );
+      } else if (handleOrTimeout) {
+        try {
+          await handleOrTimeout.close();
+        } catch (err) {
+          appLogger.warn({ err }, "Web UI server failed to stop");
+        }
       }
     }
   }
