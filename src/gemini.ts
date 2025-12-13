@@ -1,4 +1,4 @@
-import { execa, type Options } from "execa";
+import { execa } from "execa";
 import chalk from "chalk";
 import { existsSync } from "fs";
 import { createChildStdio, getTerminalStreams } from "./utils/terminal.js";
@@ -50,7 +50,7 @@ export async function launchGeminiCLI(
       options.sessionId && options.sessionId.trim().length > 0
         ? options.sessionId.trim()
         : null;
-    const explicitResumeRequested =
+    const usedExplicitSessionId =
       Boolean(resumeSessionId) &&
       (options.mode === "continue" || options.mode === "resume");
 
@@ -178,7 +178,7 @@ export async function launchGeminiCLI(
           stdout: "pipe",
           stderr: childStdio.stderr,
           env: baseEnv,
-        } as unknown as Options);
+        });
 
         // Pass stdout through to terminal while capturing
         child.stdout?.on("data", (chunk: Buffer) => {
@@ -240,8 +240,7 @@ export async function launchGeminiCLI(
     // Extract session ID from Gemini's exit summary output
     extractSessionId(output);
 
-    const explicitResumeSucceeded =
-      explicitResumeRequested && !fellBackToLatest;
+    const explicitResumeSucceeded = usedExplicitSessionId && !fellBackToLatest;
 
     // If we explicitly resumed a specific session (and did not fall back), keep that ID.
     if (explicitResumeSucceeded) {

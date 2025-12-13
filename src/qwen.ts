@@ -1,4 +1,4 @@
-import { execa, type Options } from "execa";
+import { execa } from "execa";
 import chalk from "chalk";
 import { existsSync } from "fs";
 import { createChildStdio, getTerminalStreams } from "./utils/terminal.js";
@@ -135,7 +135,7 @@ export async function launchQwenCLI(
           stdout: childStdio.stdout,
           stderr: childStdio.stderr,
           env: baseEnv,
-        } as unknown as Options);
+        });
         await execChild(child);
       } else {
         // Fallback to bunx
@@ -158,7 +158,7 @@ export async function launchQwenCLI(
           stdout: childStdio.stdout,
           stderr: childStdio.stderr,
           env: baseEnv,
-        } as unknown as Options);
+        });
         await execChild(child);
       }
     } finally {

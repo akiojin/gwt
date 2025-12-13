@@ -432,7 +432,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
                     : {}),
                   windowMs: 60 * 60 * 1000,
                 });
-                if (gemSession?.id) sessionId = gemSession.id;
+                sessionId = gemSession?.id ?? null;
               } catch {
                 // ignore
               }

@@ -82,4 +82,31 @@ describe("launchClaudeCode - session id", () => {
     expect(command).toBe("claude");
     expect(args).toEqual(expect.arrayContaining(["--resume", explicit]));
   });
+
+  it("keeps explicit sessionId on resume even when another session is detected", async () => {
+    const explicit = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+    const detected = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+    const { findLatestClaudeSession } =
+      await import("../../src/utils/session.js");
+    const findLatestClaudeSessionMock =
+      findLatestClaudeSession as unknown as ReturnType<typeof vi.fn>;
+    findLatestClaudeSessionMock.mockResolvedValueOnce({
+      id: detected,
+      mtime: Date.now(),
+    });
+
+    const result = await launchClaudeCode(worktreePath, {
+      mode: "resume",
+      sessionId: explicit,
+    });
+
+    expect(result.sessionId).toBe(explicit);
+
+    const [command, args] = (mockExeca.mock.calls.at(-1) ?? []) as unknown as [
+      string,
+      string[],
+    ];
+    expect(command).toBe("claude");
+    expect(args).toEqual(expect.arrayContaining(["--resume", explicit]));
+  });
 });
