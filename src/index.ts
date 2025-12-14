@@ -552,12 +552,12 @@ export async function handleAIToolWorkflow(
       { skipHistory: true },
     );
 
-    // Lookup saved session ID for continue/resume
+    // Lookup saved session ID for Continue (auto attach)
     let resumeSessionId: string | null =
       selectedSessionId && selectedSessionId.length > 0
         ? selectedSessionId
         : null;
-    if (mode === "continue" || mode === "resume") {
+    if (mode === "continue") {
       const existingSession = await loadSession(repoRoot);
       const history = existingSession?.history ?? [];
 
@@ -708,7 +708,7 @@ export async function handleAIToolWorkflow(
     }
     const finishedAt = Date.now();
 
-    if (tool === "codex-cli") {
+    if (!finalSessionId && tool === "codex-cli") {
       try {
         const latest = await findLatestCodexSession({
           since: launchStartedAt - 60_000,
@@ -723,7 +723,7 @@ export async function handleAIToolWorkflow(
       } catch {
         // ignore fallback failure
       }
-    } else if (tool === "claude-code") {
+    } else if (!finalSessionId && tool === "claude-code") {
       try {
         const latestClaude = await findLatestClaudeSession(worktreePath, {
           since: launchStartedAt - 60_000,
@@ -737,7 +737,7 @@ export async function handleAIToolWorkflow(
       } catch {
         // ignore
       }
-    } else if (tool === "gemini-cli") {
+    } else if (!finalSessionId && tool === "gemini-cli") {
       try {
         const latestGemini = await findLatestGeminiSession(worktreePath, {
           since: launchStartedAt - 60_000,
