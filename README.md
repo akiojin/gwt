@@ -44,6 +44,11 @@ Run without installation using bunx:
 bunx @akiojin/gwt
 ```
 
+> Note (Linux): If installation fails with a `node-gyp` error like `Error: not found: make`, you're missing build tools needed to compile native dependencies (e.g., `node-pty`). This is common on `linux/arm64` and minimal images like `node:* -slim`.
+>
+> - Debian/Ubuntu: `apt-get update && apt-get install -y build-essential`
+> - Alpine: `apk add --no-cache build-base python3`
+
 ## Quick Start
 
 Run in any Git repository:
@@ -189,6 +194,7 @@ For technical details, see [specs/SPEC-cff08403/](specs/SPEC-cff08403/).
 - **GitHub CLI**: Required for PR cleanup features (optional)
 - **Python**: >= 3.11 (for Spec Kit CLI)
 - **uv**: Python package manager (for Spec Kit CLI)
+- **Build tools** (Linux): `make` + a C/C++ toolchain may be required when native dependencies are built from source (common on `linux/arm64` and minimal Docker images)
 
 ## Spec-Driven Development with Spec Kit
 
