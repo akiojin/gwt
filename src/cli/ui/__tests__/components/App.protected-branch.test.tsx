@@ -203,7 +203,7 @@ describe("App protected branch handling", () => {
       remoteRef: null,
     });
 
-    expect(navigateToMock).toHaveBeenCalledWith("branch-quick-start");
+    expect(navigateToMock).toHaveBeenCalledWith("branch-action-selector");
     expect(branchQuickStartProps).not.toHaveLength(0);
   });
 });
