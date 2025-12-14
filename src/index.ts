@@ -33,7 +33,6 @@ import {
   getTerminalStreams,
   waitForUserAcknowledgement,
 } from "./utils/terminal.js";
-import { resolveWebUiPort, isPortInUse } from "./utils/webui.js";
 import { createLogger } from "./logging/logger.js";
 import { getToolById, getSharedEnvironment } from "./config/tools.js";
 import { launchCustomAITool } from "./launcher.js";
@@ -874,19 +873,6 @@ export async function main(): Promise<void> {
 
     await waitForErrorAcknowledgement();
     process.exit(1);
-  }
-
-  // Start Web UI server in background (skip if port is in use)
-  const port = resolveWebUiPort();
-  const portInUse = await isPortInUse(port);
-  if (portInUse) {
-    printWarning(`Port ${port} is already in use. Skipping Web UI server.`);
-  } else {
-    const { startWebServer } = await import("./web/server/index.js");
-    startWebServer().catch((err) => {
-      appLogger.warn({ err }, "Web UI server failed to start");
-    });
-    printInfo(`Web UI available at http://localhost:${port}`);
   }
 
   await runInteractiveLoop();

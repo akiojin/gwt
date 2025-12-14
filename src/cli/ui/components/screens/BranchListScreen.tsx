@@ -11,7 +11,6 @@ import type { BranchItem, Statistics } from "../../types.js";
 import stringWidth from "string-width";
 import stripAnsi from "strip-ansi";
 import chalk from "chalk";
-import { resolveWebUiPort } from "../../../../utils/webui.js";
 
 // Emoji 幅は端末によって 1 または 2 になることがあるため、最小幅を上書きして
 // 実測より小さくならないようにする（過小評価＝折り返しの原因を防ぐ）
@@ -246,22 +245,15 @@ export function BranchListScreen({
   // Filter input: 1 line
   // Stats: 1 line
   // Empty line: 1 line
-  // Web UI URL: 1 line
   // Footer: 1 line
-  // Total fixed: 7 lines
+  // Total fixed: 6 lines
   const headerLines = 2;
   const filterLines = 1;
   const statsLines = 1;
   const emptyLine = 1;
-  const webUiLines = 1;
   const footerLines = 1;
   const fixedLines =
-    headerLines +
-    filterLines +
-    statsLines +
-    emptyLine +
-    webUiLines +
-    footerLines;
+    headerLines + filterLines + statsLines + emptyLine + footerLines;
   const contentHeight = rows - fixedLines;
   const limit = Math.max(5, contentHeight); // Minimum 5 items visible
 
@@ -622,11 +614,6 @@ export function BranchListScreen({
           )}
         </Box>
       )}
-
-      {/* Web UI URL */}
-      <Box>
-        <Text dimColor>Web UI: http://localhost:{resolveWebUiPort()}</Text>
-      </Box>
 
       {/* Footer */}
       <Footer actions={footerActions} />
