@@ -42,6 +42,11 @@ bun add -g @akiojin/gwt
 bunx @akiojin/gwt
 ```
 
+> 注意（Linux）: `node-gyp` のエラー（例: `Error: not found: make`）でインストールに失敗する場合、`node-pty` などのネイティブ依存をビルドするためのツールが不足しています。`linux/arm64` や `node:* -slim` のような最小イメージで起きやすいです。
+>
+> - Debian/Ubuntu: `apt-get update && apt-get install -y build-essential`
+> - Alpine: `apk add --no-cache build-base python3`
+
 ## クイックスタート
 
 任意のGitリポジトリで実行:
@@ -166,6 +171,7 @@ bunx @akiojin/gwt serve
 - **GitHub CLI**: PR クリーンアップ機能に必要（オプション）
 - **Python**: >= 3.11（Spec Kit CLIに必要）
 - **uv**: Pythonパッケージマネージャー（Spec Kit CLIに必要）
+- **ビルドツール**（Linux）: ネイティブ依存がソースビルドに回る場合、`make` と C/C++ ツールチェーンが必要です（`linux/arm64` や最小Dockerイメージで起きやすい）
 
 ## Spec Kit による仕様駆動開発
 
@@ -317,6 +323,7 @@ bun run start
 **権限エラー**: Claude Codeが適切なディレクトリ権限を持っていることを確認  
 **Git ワークツリー競合**: クリーンアップ機能を使用して古いワークツリーを削除  
 **GitHub認証**: PRクリーンアップ機能使用前に`gh auth login`を実行  
+**node-gyp / node-pty ビルドエラー**: `Error: not found: make` の場合は `build-essential`（Debian/Ubuntu）や `build-base`（Alpine）をインストール  
 **Bunバージョン**: `bun --version`でBun >= 1.0.0を確認
 
 ### デバッグモード
