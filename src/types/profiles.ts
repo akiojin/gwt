@@ -38,12 +38,13 @@ export interface ProfilesConfig {
  * デフォルトのプロファイル設定
  *
  * profiles.yamlが存在しない場合に使用されます。
+ * 不変オブジェクトとして扱われるため、変更は禁止されています。
  */
-export const DEFAULT_PROFILES_CONFIG: ProfilesConfig = {
+export const DEFAULT_PROFILES_CONFIG: Readonly<ProfilesConfig> = Object.freeze({
   version: "1.0",
   activeProfile: null,
-  profiles: {},
-};
+  profiles: Object.freeze({}),
+});
 
 /**
  * プロファイル名のバリデーションパターン

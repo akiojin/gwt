@@ -14,6 +14,7 @@ import { Input } from "../common/Input.js";
 import { Confirm } from "../common/Confirm.js";
 import { useTerminalSize } from "../../hooks/useTerminalSize.js";
 import { useProfiles } from "../../hooks/useProfiles.js";
+import { isValidProfileName } from "../../../../types/profiles.js";
 
 export interface EnvironmentProfileScreenProps {
   onBack: () => void;
@@ -95,6 +96,9 @@ export function EnvironmentProfileScreen({
   // 選択中の環境変数キー（編集/削除用）
   const [selectedEnvKey, setSelectedEnvKey] = useState<string | null>(null);
 
+  // バリデーションエラー
+  const [validationError, setValidationError] = useState<string | null>(null);
+
   // プロファイル一覧アイテム
   const profileItems: ProfileItem[] = useMemo(() => {
     if (!profiles) return [];
@@ -156,11 +160,19 @@ export function EnvironmentProfileScreen({
   const handleStartCreateProfile = useCallback(() => {
     setNewProfileName("");
     setNewProfileDisplayName("");
+    setValidationError(null);
     setMode("create-name");
   }, []);
 
   // 新規プロファイル名入力完了
   const handleCreateNameSubmit = useCallback((name: string) => {
+    if (!isValidProfileName(name)) {
+      setValidationError(
+        "Invalid profile name. Use only lowercase letters, numbers, and hyphens.",
+      );
+      return;
+    }
+    setValidationError(null);
     setNewProfileName(name);
     setNewProfileDisplayName(name);
     setMode("create-display");
@@ -447,6 +459,11 @@ export function EnvironmentProfileScreen({
               placeholder="development"
             />
           </Box>
+          {validationError && (
+            <Box marginTop={1}>
+              <Text color="red">{validationError}</Text>
+            </Box>
+          )}
         </Box>
         <Footer actions={getFooterActions()} />
       </Box>
@@ -701,6 +718,8 @@ export function EnvironmentProfileScreen({
           {osEnvItems
             .slice(osEnvIndex, osEnvIndex + maxOsEnvVisible)
             .map((item, idx) => {
+              // スライス後の先頭（idx === 0）が現在のスクロール位置での選択項目
+              // osEnvIndex は j/k キーでスクロールされ、表示先頭が選択状態を示す
               const isOsEnvSelected = focus === "osenv" && idx === 0;
               return (
                 <Box key={item.key}>
