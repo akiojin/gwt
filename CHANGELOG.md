@@ -43,6 +43,26 @@
 * update default Claude Code model to Opus 4.5 ([1dd909e](https://github.com/akiojin/gwt/commit/1dd909ed87a55ce3bb796deb0431d0027571dae2))
 * update Opus model version to 4.5 ([307faeb](https://github.com/akiojin/gwt/commit/307faeb66ebac0ca89b01c07ee19d213797c4d5c))
 
+## [3.0.0](https://github.com/akiojin/gwt/compare/v2.14.0...v3.0.0) (2025-12-15)
+
+
+### ⚠ BREAKING CHANGES
+
+* gwtコマンド起動時にWeb UIサーバーが自動起動しなくなります。 Web UIを使用する場合は `gwt serve` または `npm run start:web` で明示的に起動してください。
+
+### Bug Fixes
+
+* macOS/Linuxでトレイ初期化を無効化してクラッシュを防止 ([d30c320](https://github.com/akiojin/gwt/commit/d30c32098e48858113afdd24a5cbbeb38481ceaf))
+* macOS/Linuxでトレイ初期化を無効化してクラッシュを防止 ([e53a0f5](https://github.com/akiojin/gwt/commit/e53a0f568abbb4bd15bd4d8fd97308fc5da9eed4))
+* Web UI URL表示削除に伴うテスト修正 ([dbabfcf](https://github.com/akiojin/gwt/commit/dbabfcf92d0c1a7d6be12319f417ac53ba77b3e1))
+* トレイ再初期化とテストのplatform注入 ([1b39cf5](https://github.com/akiojin/gwt/commit/1b39cf5491f68ae65d45cb0fba28d0a3566d3243))
+* トレイ破棄の二重実行を防止 ([0b7fcd5](https://github.com/akiojin/gwt/commit/0b7fcd5620a76e74c1eef104105a5ca96186bf13))
+
+
+### Code Refactoring
+
+* CLI起動時のWeb UIサーバー自動起動を廃止 ([32a2a97](https://github.com/akiojin/gwt/commit/32a2a97ab4168fe2d569101076dbb197870620f2))
+
 ## [2.14.0](https://github.com/akiojin/gwt/compare/v2.13.0...v2.14.0) (2025-12-13)
 
 
