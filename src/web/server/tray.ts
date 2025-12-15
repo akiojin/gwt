@@ -11,15 +11,16 @@ const TRAY_ICON_BASE64 =
   "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQBAMAAADt3eJSAAAABGdBTUEAALGPC/xhBQAAACBjSFJNAAB6JgAAgIQAAPoAAACA6AAAdTAAAOpgAAA6mAAAF3CculE8AAAAJ1BMVEUAAAAAvNQAvNQAvNQAvNQAvNQAvNQAvNQAvNQAvNQAvNQAvNT////J1ubyAAAAC3RSTlMAJYTcgyQJnJ3U3WXfUogAAAABYktHRAyBs1FjAAAAB3RJTUUH6QwMCRccbOpRBQAAAFdJREFUCNdjYEAARuXNriCarXr37t1tQEYmkN69M4GBoRvE2F3AwAqmd29kYIEwNjEwQxibGbghjN0MXDARJpgaqK6tDAzVUHMQJoPtKgPZyuq8S5WBAQBeRj51tvdhawAAACV0RVh0ZGF0ZTpjcmVhdGUAMjAyNS0xMi0xMlQwOToyMzoyOCswMDowMBPEA5UAAAAldEVYdGRhdGU6bW9kaWZ5ADIwMjUtMTItMTJUMDk6MjM6MjgrMDA6MDBimbspAAAAAElFTkSuQmCC";
 
 let trayInitAttempted = false;
-let trayInstance: { dispose?: () => void } | null = null;
+type TrayHandle = { dispose?: () => void; kill?: () => void };
+let trayInstance: TrayHandle | null = null;
+let trayInitPromise: Promise<TrayHandle> | null = null;
 
 function shouldEnableTray(): boolean {
+  // NOTE: `trayicon` is a win32-only dependency.
+  if (process.platform !== "win32") return false;
   if (process.env.GWT_DISABLE_TRAY?.toLowerCase() === "true") return false;
   if (process.env.GWT_DISABLE_TRAY === "1") return false;
   if (process.env.CI) return false;
-  if (process.platform === "linux") {
-    if (!process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) return false;
-  }
   return true;
 }
 
@@ -71,14 +72,31 @@ export async function startSystemTray(
     const icon = Buffer.from(TRAY_ICON_BASE64, "base64");
     const open = opts?.openUrl ?? openUrl;
 
-    trayInstance = create({
-      icon,
-      title: "gwt Web UI",
-      tooltip: "Double-click to open Web UI",
-      action: async () => {
-        await open(url);
-      },
-    });
+    const initPromise = Promise.resolve(
+      create({
+        icon,
+        title: "gwt Web UI",
+        tooltip: "Double-click to open Web UI",
+        action: async () => {
+          await open(url);
+        },
+      }) as TrayHandle,
+    );
+    trayInitPromise = initPromise;
+
+    void initPromise
+      .then((tray) => {
+        if (trayInitPromise !== initPromise) {
+          tray.dispose?.();
+          tray.kill?.();
+          return;
+        }
+        trayInstance = tray;
+      })
+      .catch((err) => {
+        if (trayInitPromise !== initPromise) return;
+        logger.warn({ err }, "System tray failed to initialize");
+      });
   } catch (err) {
     logger.warn({ err }, "System tray failed to initialize");
   }
@@ -88,6 +106,25 @@ export async function startSystemTray(
  * システムトレイアイコンを破棄
  */
 export function disposeSystemTray(): void {
-  trayInstance?.dispose?.();
+  const pending = trayInitPromise;
+  trayInitPromise = null;
+
+  const instance = trayInstance;
   trayInstance = null;
+
+  try {
+    instance?.dispose?.();
+    instance?.kill?.();
+  } finally {
+    if (pending) {
+      void pending
+        .then((tray) => {
+          tray.dispose?.();
+          tray.kill?.();
+        })
+        .catch(() => {
+          // Ignore errors during cleanup
+        });
+    }
+  }
 }

@@ -6,10 +6,16 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 describe("startSystemTray (SPEC-1f56fd80)", () => {
   let createMock: ReturnType<typeof vi.fn>;
   let originalEnv: NodeJS.ProcessEnv;
+  let originalPlatform: string;
 
   beforeEach(() => {
     vi.resetModules();
     originalEnv = { ...process.env };
+    originalPlatform = process.platform;
+    Object.defineProperty(process, "platform", {
+      value: "win32",
+      configurable: true,
+    });
     delete process.env.CI;
     delete process.env.GWT_DISABLE_TRAY;
     process.env.DISPLAY = process.env.DISPLAY || ":0";
@@ -22,6 +28,10 @@ describe("startSystemTray (SPEC-1f56fd80)", () => {
 
   afterEach(() => {
     process.env = originalEnv;
+    Object.defineProperty(process, "platform", {
+      value: originalPlatform,
+      configurable: true,
+    });
     vi.clearAllMocks();
     vi.restoreAllMocks();
   });
@@ -53,6 +63,18 @@ describe("startSystemTray (SPEC-1f56fd80)", () => {
     process.env.CI = "1";
     const { startSystemTray } = await import("../../src/web/server/tray.js");
     await startSystemTray("http://localhost:3000");
+    expect(createMock).not.toHaveBeenCalled();
+  });
+
+  it("T013: 非Windows環境ではトレイを初期化しない", async () => {
+    Object.defineProperty(process, "platform", {
+      value: "darwin",
+      configurable: true,
+    });
+
+    const { startSystemTray } = await import("../../src/web/server/tray.js");
+    await startSystemTray("http://localhost:3000");
+
     expect(createMock).not.toHaveBeenCalled();
   });
 });
