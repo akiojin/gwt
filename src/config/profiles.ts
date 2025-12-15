@@ -43,6 +43,10 @@ function getProfilesConfigPath(): string {
 
 /**
  * プロファイル設定ファイルのパス（後方互換性のためエクスポート）
+ *
+ * @deprecated 内部では getProfilesConfigPath() を使用してください。
+ * この定数はモジュールロード時に評価されるため、
+ * 環境変数の空文字チェック（trim().length > 0）が行われません。
  */
 export const PROFILES_CONFIG_PATH = path.join(
   process.env.GWT_HOME || process.env.CLAUDE_WORKTREE_HOME || homedir(),
@@ -191,7 +195,7 @@ export async function createProfile(
  * プロファイルを更新
  *
  * @param name - プロファイル名
- * @param updates - 更新するフィールド
+ * @param updates - 更新するフィールド（envが指定された場合は完全に置き換えられます）
  * @throws プロファイルが存在しない場合
  */
 export async function updateProfile(
