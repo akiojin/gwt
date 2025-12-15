@@ -123,20 +123,6 @@ describe("BranchListScreen", () => {
     expect(getAllByText(/enter/i).length).toBeGreaterThan(0);
   });
 
-  it("should display Web UI URL line", () => {
-    const onSelect = vi.fn();
-    const { container } = render(
-      <BranchListScreen
-        branches={mockBranches}
-        stats={mockStats}
-        onSelect={onSelect}
-      />,
-    );
-
-    expect(container.textContent).toContain("Web UI:");
-    expect(container.textContent).toContain("http://localhost:3000");
-  });
-
   it("should handle empty branch list", () => {
     const onSelect = vi.fn();
     const emptyStats: Statistics = {

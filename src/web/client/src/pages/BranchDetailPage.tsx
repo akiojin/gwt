@@ -88,6 +88,66 @@ export function BranchDetailPage() {
     };
   }, [isTerminalFullscreen]);
 
+  // Available tools - must be before conditional returns
+  const customTools: CustomAITool[] = config?.tools ?? [];
+  const availableTools: SelectableTool[] = useMemo(
+    () => [
+      { id: "claude-code", label: "Claude Code", target: "claude" },
+      { id: "codex-cli", label: "Codex CLI", target: "codex" },
+      ...customTools.map(
+        (tool): SelectableTool => ({
+          id: tool.id,
+          label: tool.displayName,
+          target: "custom" as const,
+          definition: tool,
+        }),
+      ),
+    ],
+    [customTools],
+  );
+
+  // Ensure selected tool is valid - must be before conditional returns
+  useEffect(() => {
+    if (!availableTools.length) {
+      setSelectedToolId("claude-code");
+      return;
+    }
+    if (!availableTools.find((tool) => tool.id === selectedToolId)) {
+      const first = availableTools[0];
+      if (first) setSelectedToolId(first.id);
+    }
+  }, [availableTools, selectedToolId]);
+
+  // Branch sessions - must be before conditional returns
+  const branchSessions = useMemo(() => {
+    return (sessionsData ?? [])
+      .filter((session) => session.worktreePath === branch?.worktreePath)
+      .sort((a, b) => (b.startedAt ?? "").localeCompare(a.startedAt ?? ""));
+  }, [sessionsData, branch?.worktreePath]);
+
+  // Latest tool usage - must be before conditional returns
+  const latestToolUsage: LastToolUsage | null = useMemo(() => {
+    if (!branch) return null;
+    if (branch.lastToolUsage) return branch.lastToolUsage;
+    const first = branchSessions[0];
+    if (!first) return null;
+    return {
+      branch: branch.name,
+      worktreePath: branch.worktreePath ?? null,
+      toolId:
+        first.toolType === "custom"
+          ? (first.toolName ?? "custom")
+          : (first.toolType as LastToolUsage["toolId"]),
+      toolLabel:
+        first.toolType === "custom"
+          ? (first.toolName ?? "Custom")
+          : toolLabel(first.toolType),
+      mode: first.mode ?? "normal",
+      model: null,
+      timestamp: first.startedAt ? Date.parse(first.startedAt) : Date.now(),
+    };
+  }, [branch, branchSessions]);
+
   // Loading state
   if (isLoading) {
     return (
@@ -162,73 +222,9 @@ export function BranchDetailPage() {
   );
   const isSyncingBranch = syncBranch.isPending;
 
-  // Available tools
-  const customTools: CustomAITool[] = config?.tools ?? [];
-  const availableTools: SelectableTool[] = useMemo(
-    () => [
-      { id: "claude-code", label: "Claude Code", target: "claude" },
-      { id: "codex-cli", label: "Codex CLI", target: "codex" },
-      ...customTools.map(
-        (tool): SelectableTool => ({
-          id: tool.id,
-          label: tool.displayName,
-          target: "custom" as const,
-          definition: tool,
-        }),
-      ),
-    ],
-    [customTools],
-  );
-
-  // Ensure selected tool is valid
-  useEffect(() => {
-    if (!availableTools.length) {
-      setSelectedToolId("claude-code");
-      return;
-    }
-    if (!availableTools.find((tool) => tool.id === selectedToolId)) {
-      const first = availableTools[0];
-      if (first) setSelectedToolId(first.id);
-    }
-  }, [availableTools, selectedToolId]);
-
   const selectedTool = availableTools.find(
     (tool) => tool.id === selectedToolId,
   );
-
-  // Branch sessions
-  const branchSessions = useMemo(() => {
-    return (sessionsData ?? [])
-      .filter((session) => session.worktreePath === branch?.worktreePath)
-      .sort((a, b) => (b.startedAt ?? "").localeCompare(a.startedAt ?? ""));
-  }, [sessionsData, branch?.worktreePath]);
-
-  // Latest tool usage
-  const latestToolUsage: LastToolUsage | null = useMemo(() => {
-    if (branch?.lastToolUsage) return branch.lastToolUsage;
-    const first = branchSessions[0];
-    if (!first) return null;
-    return {
-      branch: branch.name,
-      worktreePath: branch.worktreePath ?? null,
-      toolId:
-        first.toolType === "custom"
-          ? (first.toolName ?? "custom")
-          : (first.toolType as LastToolUsage["toolId"]),
-      toolLabel:
-        first.toolType === "custom"
-          ? (first.toolName ?? "Custom")
-          : toolLabel(first.toolType),
-      mode: first.mode ?? "normal",
-      model: null,
-      timestamp: first.startedAt ? Date.parse(first.startedAt) : Date.now(),
-    };
-  }, [
-    branch?.lastToolUsage,
-    branch?.name,
-    branch?.worktreePath,
-    branchSessions,
-  ]);
 
   // Handlers
   const handleCreateWorktree = async () => {
