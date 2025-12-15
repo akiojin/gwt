@@ -143,6 +143,7 @@ export function EnvironmentProfileScreen({
       try {
         await setActiveProfile(item.value);
         setSelectedProfileName(item.value);
+        setFocus("env"); // viewモードでは環境変数にフォーカス
         setMode("view");
       } catch {
         // Error is already set in hook
@@ -174,6 +175,7 @@ export function EnvironmentProfileScreen({
           env: {},
         });
         setSelectedProfileName(newProfileName);
+        setFocus("env"); // viewモードでは環境変数にフォーカス
         setMode("view");
       } catch {
         setMode("list");
@@ -318,13 +320,9 @@ export function EnvironmentProfileScreen({
 
       // プロファイル詳細モード
       if (mode === "view") {
-        // Tab でフォーカス切り替え
+        // Tab でフォーカス切り替え (env ↔ osenv)
         if (key.tab) {
-          setFocus((prev) => {
-            if (prev === "profiles") return "env";
-            if (prev === "env") return "osenv";
-            return "profiles";
-          });
+          setFocus((prev) => (prev === "env" ? "osenv" : "env"));
           return;
         }
 
