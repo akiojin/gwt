@@ -77,4 +77,23 @@ describe("startSystemTray (SPEC-1f56fd80)", () => {
 
     expect(createMock).not.toHaveBeenCalled();
   });
+
+  it("T014: disposeSystemTrayは初期化レースでも二重にdisposeしない", async () => {
+    const disposeMock = vi.fn();
+    const killMock = vi.fn();
+    createMock.mockImplementation(() => ({
+      dispose: disposeMock,
+      kill: killMock,
+    }));
+
+    const { startSystemTray, disposeSystemTray } =
+      await import("../../src/web/server/tray.js");
+    await startSystemTray("http://localhost:3000");
+    disposeSystemTray();
+
+    await Promise.resolve();
+
+    expect(disposeMock).toHaveBeenCalledTimes(1);
+    expect(killMock).toHaveBeenCalledTimes(1);
+  });
 });

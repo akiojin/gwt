@@ -106,25 +106,11 @@ export async function startSystemTray(
  * システムトレイアイコンを破棄
  */
 export function disposeSystemTray(): void {
-  const pending = trayInitPromise;
   trayInitPromise = null;
 
   const instance = trayInstance;
   trayInstance = null;
 
-  try {
-    instance?.dispose?.();
-    instance?.kill?.();
-  } finally {
-    if (pending) {
-      void pending
-        .then((tray) => {
-          tray.dispose?.();
-          tray.kill?.();
-        })
-        .catch(() => {
-          // Ignore errors during cleanup
-        });
-    }
-  }
+  instance?.dispose?.();
+  instance?.kill?.();
 }
