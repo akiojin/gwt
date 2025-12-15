@@ -85,16 +85,17 @@ The tool presents an interactive interface with the following options:
 ### Launching the Web UI
 
 ```bash
-# Running the CLI also starts the Web UI in the background.
+# Start the interactive CLI:
 gwt
 
-# (Optional) start only the Web UI server:
+# Start the Web UI server:
 gwt serve
 # or without global install
 bunx @akiojin/gwt serve
 ```
 
 - The Web UI is available by default at <http://localhost:3000>
+- System tray integration is currently supported on **Windows only** (it is automatically disabled on macOS/Linux)
 - The branch list mirrors the CLI view, including search and worktree creation
 - Detailed branch pages let you start AI tool sessions directly from the browser
 
