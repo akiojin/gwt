@@ -105,15 +105,32 @@ if [[ -n "$SPEC_ID" ]]; then
 fi
 
 # 機能パスを取得（失敗したら終了）
-feature_paths=$(get_feature_paths) || exit 1
-eval "$feature_paths"
+load_feature_paths || exit 1
 
 # パスのみモードの場合、パスを出力して終了（JSON + paths-only を組み合わせ可能）
 if $PATHS_ONLY; then
     if $JSON_MODE; then
         # 最小限のJSONパスペイロード（検証は実行されない）
-        printf '{"REPO_ROOT":"%s","GIT_BRANCH":"%s","SPEC_ID":"%s","FEATURE_DIR":"%s","FEATURE_SPEC":"%s","IMPL_PLAN":"%s","TASKS":"%s"}\n' \
-            "$REPO_ROOT" "$GIT_BRANCH" "$SPEC_ID" "$FEATURE_DIR" "$FEATURE_SPEC" "$IMPL_PLAN" "$TASKS"
+        if command -v jq >/dev/null 2>&1; then
+            jq -cn \
+                --arg repo_root "$REPO_ROOT" \
+                --arg git_branch "$GIT_BRANCH" \
+                --arg spec_id "$SPEC_ID" \
+                --arg feature_dir "$FEATURE_DIR" \
+                --arg feature_spec "$FEATURE_SPEC" \
+                --arg impl_plan "$IMPL_PLAN" \
+                --arg tasks "$TASKS" \
+                '{REPO_ROOT: $repo_root, GIT_BRANCH: $git_branch, SPEC_ID: $spec_id, FEATURE_DIR: $feature_dir, FEATURE_SPEC: $feature_spec, IMPL_PLAN: $impl_plan, TASKS: $tasks}'
+        else
+            printf '{"REPO_ROOT":"%s","GIT_BRANCH":"%s","SPEC_ID":"%s","FEATURE_DIR":"%s","FEATURE_SPEC":"%s","IMPL_PLAN":"%s","TASKS":"%s"}\n' \
+                "$(json_escape_string "$REPO_ROOT")" \
+                "$(json_escape_string "$GIT_BRANCH")" \
+                "$(json_escape_string "$SPEC_ID")" \
+                "$(json_escape_string "$FEATURE_DIR")" \
+                "$(json_escape_string "$FEATURE_SPEC")" \
+                "$(json_escape_string "$IMPL_PLAN")" \
+                "$(json_escape_string "$TASKS")"
+        fi
     else
         echo "リポジトリルート: $REPO_ROOT"
         echo "Gitブランチ: $GIT_BRANCH"
@@ -175,7 +192,18 @@ if $JSON_MODE; then
         json_docs="[${json_docs%,}]"
     fi
 
-    printf '{"FEATURE_DIR":"%s","AVAILABLE_DOCS":%s,"SPEC_ID":"%s"}\n' "$FEATURE_DIR" "$json_docs" "$SPEC_ID"
+    if command -v jq >/dev/null 2>&1; then
+        jq -cn \
+            --arg feature_dir "$FEATURE_DIR" \
+            --arg spec_id "$SPEC_ID" \
+            --argjson available_docs "$json_docs" \
+            '{FEATURE_DIR: $feature_dir, AVAILABLE_DOCS: $available_docs, SPEC_ID: $spec_id}'
+    else
+        printf '{"FEATURE_DIR":"%s","AVAILABLE_DOCS":%s,"SPEC_ID":"%s"}\n' \
+            "$(json_escape_string "$FEATURE_DIR")" \
+            "$json_docs" \
+            "$(json_escape_string "$SPEC_ID")"
+    fi
 else
     # テキスト出力
     echo "機能ディレクトリ: $FEATURE_DIR"
