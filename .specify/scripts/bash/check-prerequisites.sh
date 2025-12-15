@@ -26,8 +26,11 @@ JSON_MODE=false
 REQUIRE_TASKS=false
 INCLUDE_TASKS=false
 PATHS_ONLY=false
+SPEC_ID=""
 
-for arg in "$@"; do
+i=1
+while [ $i -le $# ]; do
+    arg="${!i}"
     case "$arg" in
         --json)
             JSON_MODE=true
@@ -41,6 +44,19 @@ for arg in "$@"; do
         --paths-only)
             PATHS_ONLY=true
             ;;
+        --spec-id)
+            if [ $((i + 1)) -gt $# ]; then
+                echo 'エラー: --spec-id には値が必要です' >&2
+                exit 1
+            fi
+            i=$((i + 1))
+            next_arg="${!i}"
+            if [[ "$next_arg" == --* ]]; then
+                echo 'エラー: --spec-id には値が必要です' >&2
+                exit 1
+            fi
+            SPEC_ID="$next_arg"
+            ;;
         --help|-h)
             cat << 'EOF'
 使い方: check-prerequisites.sh [オプション]
@@ -52,6 +68,7 @@ for arg in "$@"; do
   --require-tasks     tasks.mdの存在を要求（実装フェーズ用）
   --include-tasks     AVAILABLE_DOCSリストにtasks.mdを含める
   --paths-only        パス変数のみ出力（前提条件検証なし）
+  --spec-id <id>      SPEC IDを明示的に指定（例: SPEC-1defd8fd）
   --help, -h          このヘルプメッセージを表示
 
 例:
@@ -64,6 +81,9 @@ for arg in "$@"; do
   # 機能パスのみ取得（検証なし）
   ./check-prerequisites.sh --paths-only
 
+  # SPEC IDを指定してチェック（ブランチを作成しない運用向け）
+  ./check-prerequisites.sh --json --spec-id SPEC-1defd8fd
+
 EOF
             exit 0
             ;;
@@ -72,25 +92,32 @@ EOF
             exit 1
             ;;
     esac
+    i=$((i + 1))
 done
 
 # 共通関数を読み込む
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/common.sh"
 
-# 機能パスを取得してブランチを検証
-eval $(get_feature_paths)
-check_feature_branch "$CURRENT_BRANCH" "$HAS_GIT" || exit 1
+# SPEC_ID が指定された場合は SPECIFY_FEATURE 環境変数に設定（スクリプト内でのみ有効）
+if [[ -n "$SPEC_ID" ]]; then
+    export SPECIFY_FEATURE="$SPEC_ID"
+fi
+
+# 機能パスを取得（失敗したら終了）
+feature_paths=$(get_feature_paths) || exit 1
+eval "$feature_paths"
 
 # パスのみモードの場合、パスを出力して終了（JSON + paths-only を組み合わせ可能）
 if $PATHS_ONLY; then
     if $JSON_MODE; then
         # 最小限のJSONパスペイロード（検証は実行されない）
-        printf '{"REPO_ROOT":"%s","BRANCH":"%s","FEATURE_DIR":"%s","FEATURE_SPEC":"%s","IMPL_PLAN":"%s","TASKS":"%s"}\n' \
-            "$REPO_ROOT" "$CURRENT_BRANCH" "$FEATURE_DIR" "$FEATURE_SPEC" "$IMPL_PLAN" "$TASKS"
+        printf '{"REPO_ROOT":"%s","GIT_BRANCH":"%s","SPEC_ID":"%s","FEATURE_DIR":"%s","FEATURE_SPEC":"%s","IMPL_PLAN":"%s","TASKS":"%s"}\n' \
+            "$REPO_ROOT" "$GIT_BRANCH" "$SPEC_ID" "$FEATURE_DIR" "$FEATURE_SPEC" "$IMPL_PLAN" "$TASKS"
     else
         echo "リポジトリルート: $REPO_ROOT"
-        echo "ブランチ: $CURRENT_BRANCH"
+        echo "Gitブランチ: $GIT_BRANCH"
+        echo "SPEC ID: $SPEC_ID"
         echo "機能ディレクトリ: $FEATURE_DIR"
         echo "機能仕様: $FEATURE_SPEC"
         echo "実装計画: $IMPL_PLAN"
@@ -148,10 +175,11 @@ if $JSON_MODE; then
         json_docs="[${json_docs%,}]"
     fi
 
-    printf '{"FEATURE_DIR":"%s","AVAILABLE_DOCS":%s}\n' "$FEATURE_DIR" "$json_docs"
+    printf '{"FEATURE_DIR":"%s","AVAILABLE_DOCS":%s,"SPEC_ID":"%s"}\n' "$FEATURE_DIR" "$json_docs" "$SPEC_ID"
 else
     # テキスト出力
     echo "機能ディレクトリ: $FEATURE_DIR"
+    echo "SPEC ID: $SPEC_ID"
     echo "利用可能なドキュメント:"
 
     # 各潜在的ドキュメントのステータスを表示
