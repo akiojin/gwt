@@ -5,7 +5,6 @@ set -e
 # コマンドライン引数を解析
 JSON_MODE=false
 SPEC_ID=""
-ARGS=()
 i=1
 
 while [ $i -le $# ]; do
@@ -35,7 +34,8 @@ while [ $i -le $# ]; do
             exit 0
             ;;
         *)
-            ARGS+=("$arg")
+            echo "エラー: 未知のオプション '$arg'。使用方法については --help を参照してください。" >&2
+            exit 1
             ;;
     esac
     i=$((i + 1))
@@ -50,11 +50,9 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/common.sh"
 
-# 共通関数からすべてのパスと変数を取得
-eval $(get_feature_paths)
-
-# 適切な機能ブランチ上にいるかチェック（gitリポジトリのみ）
-check_feature_branch "$CURRENT_BRANCH" "$HAS_GIT" || exit 1
+# 共通関数からすべてのパスと変数を取得（失敗したら終了）
+feature_paths=$(get_feature_paths) || exit 1
+eval "$feature_paths"
 
 # 機能ディレクトリが存在することを確認
 mkdir -p "$FEATURE_DIR"
@@ -63,21 +61,30 @@ mkdir -p "$FEATURE_DIR"
 TEMPLATE="$REPO_ROOT/.specify/templates/plan-template.md"
 if [[ -f "$TEMPLATE" ]]; then
     cp "$TEMPLATE" "$IMPL_PLAN"
-    echo "planテンプレートを $IMPL_PLAN にコピーしました"
+    if ! $JSON_MODE; then
+        echo "planテンプレートを $IMPL_PLAN にコピーしました"
+    else
+        >&2 echo "[specify] planテンプレートを $IMPL_PLAN にコピーしました"
+    fi
 else
-    echo "警告: $TEMPLATE にplanテンプレートが見つかりません"
+    if ! $JSON_MODE; then
+        echo "警告: $TEMPLATE にplanテンプレートが見つかりません"
+    else
+        >&2 echo "[specify] 警告: $TEMPLATE にplanテンプレートが見つかりません"
+    fi
     # テンプレートが存在しない場合は基本的なplanファイルを作成
     touch "$IMPL_PLAN"
 fi
 
 # 結果を出力
 if $JSON_MODE; then
-    printf '{"FEATURE_SPEC":"%s","IMPL_PLAN":"%s","SPECS_DIR":"%s","BRANCH":"%s","HAS_GIT":"%s"}\n' \
-        "$FEATURE_SPEC" "$IMPL_PLAN" "$FEATURE_DIR" "$CURRENT_BRANCH" "$HAS_GIT"
+    printf '{"FEATURE_SPEC":"%s","IMPL_PLAN":"%s","FEATURE_DIR":"%s","SPEC_ID":"%s","GIT_BRANCH":"%s","HAS_GIT":"%s"}\n' \
+        "$FEATURE_SPEC" "$IMPL_PLAN" "$FEATURE_DIR" "$SPEC_ID" "$GIT_BRANCH" "$HAS_GIT"
 else
     echo "機能仕様: $FEATURE_SPEC"
     echo "実装計画: $IMPL_PLAN"
     echo "仕様ディレクトリ: $FEATURE_DIR"
-    echo "ブランチ: $CURRENT_BRANCH"
+    echo "SPEC ID: $SPEC_ID"
+    echo "Gitブランチ: $GIT_BRANCH"
     echo "Git使用: $HAS_GIT"
 fi
