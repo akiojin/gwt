@@ -106,8 +106,7 @@ if [[ -n "$SPEC_ID_ARG" ]]; then
 fi
 
 # 共通関数からすべてのパスと変数を取得（失敗したら終了）
-feature_paths=$(get_feature_paths) || exit 1
-eval "$feature_paths"
+load_feature_paths || exit 1
 
 NEW_PLAN="$IMPL_PLAN"  # 互換用エイリアス
 
@@ -155,6 +154,23 @@ log_warning() {
     echo "[specify] 警告: $1" >&2
 }
 
+is_placeholder_value() {
+    local value="${1:-}"
+    value=$(echo "$value" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || true)
+
+    if [[ -z "$value" ]]; then
+        return 0
+    fi
+
+    case "$value" in
+        "NEEDS CLARIFICATION" | "要確認" | "N/A" | "該当なし")
+            return 0
+            ;;
+    esac
+
+    return 1
+}
+
 # Cleanup function for temporary files
 cleanup() {
     local exit_code=$?
@@ -199,15 +215,15 @@ validate_environment() {
 extract_plan_field() {
     local field_pattern="$1"
     local plan_file="$2"
-    
-    grep "^\*\*${field_pattern}\*\*: " "$plan_file" 2>/dev/null | \
-        head -1 | \
-        sed "s|^\*\*${field_pattern}\*\*: ||" | \
-        sed 's/^[ \t]*//;s/[ \t]*$//' | \
-        grep -v "NEEDS CLARIFICATION" | \
-        grep -v "要確認" | \
-        grep -v "^N/A$" | \
-        grep -v "^該当なし$" || echo ""
+
+    local value=""
+    value=$(grep "^\*\*${field_pattern}\*\*: " "$plan_file" 2>/dev/null | head -1 | sed "s|^\*\*${field_pattern}\*\*: ||" | sed 's/^[ \t]*//;s/[ \t]*$//' || true)
+
+    if is_placeholder_value "$value"; then
+        echo ""
+    else
+        echo "$value"
+    fi
 }
 
 extract_plan_field_any() {
@@ -258,7 +274,7 @@ parse_plan_data() {
         log_info "主要な依存関係: $NEW_FRAMEWORK"
     fi
     
-    if [[ -n "$NEW_DB" ]] && [[ "$NEW_DB" != "N/A" ]]; then
+    if ! is_placeholder_value "$NEW_DB"; then
         log_info "ストレージ: $NEW_DB"
     fi
     
@@ -273,8 +289,8 @@ format_technology_stack() {
     local parts=()
     
     # Add non-empty parts
-    [[ -n "$lang" && "$lang" != "NEEDS CLARIFICATION" && "$lang" != "要確認" ]] && parts+=("$lang")
-    [[ -n "$framework" && "$framework" != "NEEDS CLARIFICATION" && "$framework" != "要確認" && "$framework" != "N/A" && "$framework" != "該当なし" ]] && parts+=("$framework")
+    ! is_placeholder_value "$lang" && parts+=("$lang")
+    ! is_placeholder_value "$framework" && parts+=("$framework")
     
     # Join with proper formatting
     if [[ ${#parts[@]} -eq 0 ]]; then
@@ -366,9 +382,12 @@ create_new_agent_file() {
     
     # Perform substitutions with error checking using safer approach
     # Escape special characters for sed by using a different delimiter or escaping
-    local escaped_lang=$(printf '%s\n' "$NEW_LANG" | sed 's/[\[\.*^$()+{}|]/\\&/g')
-    local escaped_framework=$(printf '%s\n' "$NEW_FRAMEWORK" | sed 's/[\[\.*^$()+{}|]/\\&/g')
-    local escaped_branch=$(printf '%s\n' "$SPEC_ID" | sed 's/[\[\.*^$()+{}|]/\\&/g')
+    local escaped_lang
+    escaped_lang=$(printf '%s\n' "$NEW_LANG" | sed 's/[\[\.*^$()+{}|]/\\&/g')
+    local escaped_framework
+    escaped_framework=$(printf '%s\n' "$NEW_FRAMEWORK" | sed 's/[\[\.*^$()+{}|]/\\&/g')
+    local escaped_branch
+    escaped_branch=$(printf '%s\n' "$SPEC_ID" | sed 's/[\[\.*^$()+{}|]/\\&/g')
     
     # Build technology stack and recent change strings conditionally
     local tech_stack
@@ -438,23 +457,24 @@ update_existing_agent_file() {
     }
     
     # Process the file in one pass
-    local tech_stack=$(format_technology_stack "$NEW_LANG" "$NEW_FRAMEWORK")
+    local tech_stack
+    tech_stack=$(format_technology_stack "$NEW_LANG" "$NEW_FRAMEWORK")
     local new_tech_entries=()
     local new_change_entry=""
     
     # Prepare new technology entries
-    if [[ -n "$tech_stack" ]] && ! grep -q "$tech_stack" "$target_file"; then
+    if [[ -n "$tech_stack" ]] && ! grep -Fq "$tech_stack" "$target_file"; then
         new_tech_entries+=("- $tech_stack ($SPEC_ID)")
     fi
     
-    if [[ -n "$NEW_DB" ]] && [[ "$NEW_DB" != "N/A" ]] && [[ "$NEW_DB" != "NEEDS CLARIFICATION" ]] && [[ "$NEW_DB" != "要確認" ]] && ! grep -q "$NEW_DB" "$target_file"; then
+    if ! is_placeholder_value "$NEW_DB" && ! grep -Fq "$NEW_DB" "$target_file"; then
         new_tech_entries+=("- $NEW_DB ($SPEC_ID)")
     fi
     
     # Prepare new change entry
     if [[ -n "$tech_stack" ]]; then
         new_change_entry="- $SPEC_ID: 追加: $tech_stack"
-    elif [[ -n "$NEW_DB" ]] && [[ "$NEW_DB" != "N/A" ]] && [[ "$NEW_DB" != "NEEDS CLARIFICATION" ]] && [[ "$NEW_DB" != "要確認" ]]; then
+    elif ! is_placeholder_value "$NEW_DB"; then
         new_change_entry="- $SPEC_ID: 追加: $NEW_DB"
     fi
     
@@ -474,9 +494,7 @@ update_existing_agent_file() {
     local in_tech_section=false
     local in_changes_section=false
     local tech_entries_added=false
-    local changes_entries_added=false
     local existing_changes_count=0
-    local file_ended=false
     
     while IFS= read -r line || [[ -n "$line" ]]; do
         # 使用中の技術セクション
@@ -511,7 +529,6 @@ update_existing_agent_file() {
                 echo "$new_change_entry" >> "$temp_file"
             fi
             in_changes_section=true
-            changes_entries_added=true
             continue
         elif [[ $in_changes_section == true ]] && [[ "$line" =~ ^##[[:space:]] ]]; then
             echo "$line" >> "$temp_file"
@@ -552,7 +569,6 @@ update_existing_agent_file() {
         echo "" >> "$temp_file"
         echo "## 最近の変更" >> "$temp_file"
         echo "$new_change_entry" >> "$temp_file"
-        changes_entries_added=true
     fi
     
     # Move temp file to target atomically
@@ -778,7 +794,7 @@ print_summary() {
         echo "  - 主要な依存関係: $NEW_FRAMEWORK"
     fi
     
-    if [[ -n "$NEW_DB" ]] && [[ "$NEW_DB" != "N/A" ]]; then
+    if ! is_placeholder_value "$NEW_DB"; then
         echo "  - ストレージ: $NEW_DB"
     fi
     

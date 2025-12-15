@@ -70,11 +70,17 @@ list_spec_dirs() {
         return 0
     fi
 
-    local old_nullglob
-    old_nullglob=$(shopt -p nullglob || true)
+    local nullglob_was_enabled=false
+    if shopt -q nullglob; then
+        nullglob_was_enabled=true
+    fi
     shopt -s nullglob
     local dirs=("$specs_dir"/SPEC-*)
-    eval "$old_nullglob" >/dev/null 2>&1 || true
+    if $nullglob_was_enabled; then
+        shopt -s nullglob
+    else
+        shopt -u nullglob
+    fi
 
     for dir in "${dirs[@]}"; do
         if [[ -d "$dir" ]]; then
@@ -150,7 +156,7 @@ check_feature_branch() {
 
 get_feature_dir() { echo "$1/specs/$2"; }
 
-get_feature_paths() {
+load_feature_paths() {
     local repo_root
     repo_root=$(get_repo_root)
     local git_branch
@@ -168,21 +174,33 @@ get_feature_paths() {
     local feature_dir
     feature_dir=$(get_feature_dir "$repo_root" "$spec_id")
 
-    cat <<EOF
-REPO_ROOT='$repo_root'
-GIT_BRANCH='$git_branch'
-HAS_GIT='$has_git_repo'
-SPEC_ID='$spec_id'
-FEATURE_DIR='$feature_dir'
-FEATURE_SPEC='$feature_dir/spec.md'
-IMPL_PLAN='$feature_dir/plan.md'
-TASKS='$feature_dir/tasks.md'
-RESEARCH='$feature_dir/research.md'
-DATA_MODEL='$feature_dir/data-model.md'
-QUICKSTART='$feature_dir/quickstart.md'
-CONTRACTS_DIR='$feature_dir/contracts'
-EOF
+    REPO_ROOT="$repo_root"
+    GIT_BRANCH="$git_branch"
+    HAS_GIT="$has_git_repo"
+    SPEC_ID="$spec_id"
+    FEATURE_DIR="$feature_dir"
+    FEATURE_SPEC="$feature_dir/spec.md"
+    IMPL_PLAN="$feature_dir/plan.md"
+    TASKS="$feature_dir/tasks.md"
+    RESEARCH="$feature_dir/research.md"
+    DATA_MODEL="$feature_dir/data-model.md"
+    QUICKSTART="$feature_dir/quickstart.md"
+    CONTRACTS_DIR="$feature_dir/contracts"
 }
 
 check_file() { [[ -f "$1" ]] && echo "  ✓ $2" || echo "  ✗ $2"; }
 check_dir() { [[ -d "$1" && -n $(ls -A "$1" 2>/dev/null) ]] && echo "  ✓ $2" || echo "  ✗ $2"; }
+
+# jq がない環境向けの最小限のJSON文字列エスケープ
+# - 文字列をJSONに埋め込めるように \, ", 改行などをエスケープして返す（囲みの " は付けない）
+json_escape_string() {
+    local value="$1"
+    value=${value//\\/\\\\}
+    value=${value//\"/\\\"}
+    value=${value//$'\n'/\\n}
+    value=${value//$'\r'/\\r}
+    value=${value//$'\t'/\\t}
+    value=${value//$'\f'/\\f}
+    value=${value//$'\b'/\\b}
+    printf '%s' "$value"
+}

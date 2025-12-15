@@ -51,8 +51,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/common.sh"
 
 # 共通関数からすべてのパスと変数を取得（失敗したら終了）
-feature_paths=$(get_feature_paths) || exit 1
-eval "$feature_paths"
+load_feature_paths || exit 1
 
 # 機能ディレクトリが存在することを確認
 mkdir -p "$FEATURE_DIR"
@@ -78,8 +77,24 @@ fi
 
 # 結果を出力
 if $JSON_MODE; then
-    printf '{"FEATURE_SPEC":"%s","IMPL_PLAN":"%s","FEATURE_DIR":"%s","SPEC_ID":"%s","GIT_BRANCH":"%s","HAS_GIT":"%s"}\n' \
-        "$FEATURE_SPEC" "$IMPL_PLAN" "$FEATURE_DIR" "$SPEC_ID" "$GIT_BRANCH" "$HAS_GIT"
+    if command -v jq >/dev/null 2>&1; then
+        jq -cn \
+            --arg feature_spec "$FEATURE_SPEC" \
+            --arg impl_plan "$IMPL_PLAN" \
+            --arg feature_dir "$FEATURE_DIR" \
+            --arg spec_id "$SPEC_ID" \
+            --arg git_branch "$GIT_BRANCH" \
+            --arg has_git "$HAS_GIT" \
+            '{FEATURE_SPEC: $feature_spec, IMPL_PLAN: $impl_plan, FEATURE_DIR: $feature_dir, SPEC_ID: $spec_id, GIT_BRANCH: $git_branch, HAS_GIT: $has_git}'
+    else
+        printf '{"FEATURE_SPEC":"%s","IMPL_PLAN":"%s","FEATURE_DIR":"%s","SPEC_ID":"%s","GIT_BRANCH":"%s","HAS_GIT":"%s"}\n' \
+            "$(json_escape_string "$FEATURE_SPEC")" \
+            "$(json_escape_string "$IMPL_PLAN")" \
+            "$(json_escape_string "$FEATURE_DIR")" \
+            "$(json_escape_string "$SPEC_ID")" \
+            "$(json_escape_string "$GIT_BRANCH")" \
+            "$(json_escape_string "$HAS_GIT")"
+    fi
 else
     echo "機能仕様: $FEATURE_SPEC"
     echo "実装計画: $IMPL_PLAN"

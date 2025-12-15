@@ -72,16 +72,23 @@ today="$(date +%Y-%m-%d)"
     echo ""
     echo "**最終更新**: $today"
     echo ""
-    echo 'このファイルは `.specify/scripts/bash/update-specs-index.sh` により自動生成されます。'
+    echo 'このファイルは `.specify/scripts/bash/update-specs-index.sh` により自動生成されました。'
     echo ""
     echo "| SPEC ID | タイトル | 作成日 |"
     echo "| --- | --- | --- |"
 } >"$tmp_file"
 
-old_nullglob=$(shopt -p nullglob || true)
+nullglob_was_enabled=false
+if shopt -q nullglob; then
+    nullglob_was_enabled=true
+fi
 shopt -s nullglob
 spec_dirs=("$SPECS_DIR"/SPEC-*)
-eval "$old_nullglob" >/dev/null 2>&1 || true
+if $nullglob_was_enabled; then
+    shopt -s nullglob
+else
+    shopt -u nullglob
+fi
 
 if [[ ${#spec_dirs[@]} -eq 0 ]]; then
     echo "| - | （仕様がまだありません） | - |" >>"$tmp_file"
