@@ -33,7 +33,6 @@ import {
   getTerminalStreams,
   waitForUserAcknowledgement,
 } from "./utils/terminal.js";
-import { resolveWebUiPort, isPortInUse } from "./utils/webui.js";
 import { createLogger } from "./logging/logger.js";
 import { getToolById, getSharedEnvironment } from "./config/tools.js";
 import { launchCustomAITool } from "./launcher.js";
@@ -204,7 +203,10 @@ function showHelp(): void {
   console.log(`
 Worktree Manager
 
-Usage: gwt [options]
+Usage: gwt [command] [options]
+
+Commands:
+  serve           Start Web UI server (http://localhost:3000)
 
 Options:
   -h, --help      Show this help message
@@ -212,7 +214,8 @@ Options:
 
 Description:
   Interactive Git worktree manager with AI tool selection (Claude Code / Codex CLI) and graphical branch selection.
-  Launch without additional options to open the interactive menu.
+  Launch without additional options to open the interactive CLI menu.
+  Use 'gwt serve' to start the Web UI server for browser-based management.
 `);
 }
 
@@ -876,52 +879,7 @@ export async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // Start Web UI server in background (skip if port is in use)
-  const port = resolveWebUiPort();
-  const portInUse = await isPortInUse(port);
-  let webServerHandlePromise: Promise<{
-    close: () => Promise<void>;
-  } | null> | null = null;
-  if (portInUse) {
-    printWarning(`Port ${port} is already in use. Skipping Web UI server.`);
-  } else {
-    const { startWebServer } = await import("./web/server/index.js");
-    webServerHandlePromise = startWebServer({ background: true }).catch(
-      (err) => {
-        appLogger.warn({ err }, "Web UI server failed to start");
-        return null;
-      },
-    );
-    printInfo(`Web UI available at http://localhost:${port}`);
-  }
-
-  try {
-    await runInteractiveLoop();
-  } finally {
-    if (webServerHandlePromise) {
-      const shutdownTimeoutMs = 2000;
-      const handleOrTimeout = await Promise.race([
-        webServerHandlePromise,
-        new Promise<"timeout">((resolve) => {
-          const timer = setTimeout(() => resolve("timeout"), shutdownTimeoutMs);
-          timer.unref?.();
-        }),
-      ]);
-
-      if (handleOrTimeout === "timeout") {
-        appLogger.warn(
-          { timeoutMs: shutdownTimeoutMs },
-          "Web UI server startup did not finish before shutdown timeout; skipping stop",
-        );
-      } else if (handleOrTimeout) {
-        try {
-          await handleOrTimeout.close();
-        } catch (err) {
-          appLogger.warn({ err }, "Web UI server failed to stop");
-        }
-      }
-    }
-  }
+  await runInteractiveLoop();
 }
 
 // Run the application if this module is executed directly
