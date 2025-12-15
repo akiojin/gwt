@@ -203,7 +203,10 @@ function showHelp(): void {
   console.log(`
 Worktree Manager
 
-Usage: gwt [options]
+Usage: gwt [command] [options]
+
+Commands:
+  serve           Start Web UI server (http://localhost:3000)
 
 Options:
   -h, --help      Show this help message
@@ -211,7 +214,8 @@ Options:
 
 Description:
   Interactive Git worktree manager with AI tool selection (Claude Code / Codex CLI) and graphical branch selection.
-  Launch without additional options to open the interactive menu.
+  Launch without additional options to open the interactive CLI menu.
+  Use 'gwt serve' to start the Web UI server for browser-based management.
 `);
 }
 
