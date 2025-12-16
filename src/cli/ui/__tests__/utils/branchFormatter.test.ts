@@ -284,7 +284,7 @@ describe("branchFormatter", () => {
 
       const result = formatBranchItem(branchInfo);
 
-      expect(result.icons).toContain("🟠"); // inaccessible worktree icon
+      expect(result.icons).toContain("🔴"); // inaccessible worktree icon
       expect(result.icons).toContain("⚠️"); // warning icon
       expect(result.worktreeStatus).toBe("inaccessible");
     });
