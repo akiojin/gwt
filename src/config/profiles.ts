@@ -86,7 +86,13 @@ export async function loadProfiles(): Promise<ProfilesConfig> {
   } catch (error) {
     // ファイルが存在しない場合はデフォルト設定を返す
     if (error instanceof Error && "code" in error && error.code === "ENOENT") {
-      return { ...DEFAULT_PROFILES_CONFIG };
+      // DEFAULT_PROFILES_CONFIG は不変オブジェクトのため、
+      // 呼び出し側が編集できるように新しい参照を返す
+      return {
+        version: DEFAULT_PROFILES_CONFIG.version,
+        activeProfile: null,
+        profiles: {},
+      };
     }
 
     // YAML構文エラーの場合
