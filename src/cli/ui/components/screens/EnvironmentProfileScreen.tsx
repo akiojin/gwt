@@ -227,7 +227,11 @@ export function EnvironmentProfileScreen({
   // 環境変数キー入力完了
   const handleEnvKeySubmit = useCallback((key: string) => {
     const trimmedKey = key.trim();
-    if (!ENV_VAR_KEY_PATTERN.test(trimmedKey)) {
+    if (
+      !trimmedKey ||
+      /[\\s=]/.test(trimmedKey) ||
+      !ENV_VAR_KEY_PATTERN.test(trimmedKey)
+    ) {
       setValidationError(
         "Invalid variable name. Use letters, numbers, and underscores (must start with a letter or underscore).",
       );
