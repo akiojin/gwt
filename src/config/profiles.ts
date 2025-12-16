@@ -46,13 +46,9 @@ function getProfilesConfigPath(): string {
  *
  * @deprecated 内部では getProfilesConfigPath() を使用してください。
  * この定数はモジュールロード時に評価されるため、
- * 環境変数の空文字チェック（trim().length > 0）が行われません。
+ * 実行中に環境変数（GWT_HOME/CLAUDE_WORKTREE_HOME）を変更しても反映されません。
  */
-export const PROFILES_CONFIG_PATH = path.join(
-  process.env.GWT_HOME || process.env.CLAUDE_WORKTREE_HOME || homedir(),
-  ".gwt",
-  "profiles.yaml",
-);
+export const PROFILES_CONFIG_PATH = getProfilesConfigPath();
 
 /**
  * プロファイル設定を読み込む
@@ -76,6 +72,14 @@ export async function loadProfiles(): Promise<ProfilesConfig> {
 
     if (config.profiles && typeof config.profiles !== "object") {
       throw new Error("profiles field must be an object");
+    }
+
+    if (
+      config.activeProfile !== null &&
+      config.activeProfile !== undefined &&
+      typeof config.activeProfile !== "string"
+    ) {
+      throw new Error("activeProfile field must be a string or null");
     }
 
     return {
@@ -183,7 +187,7 @@ export async function createProfile(
 ): Promise<void> {
   if (!isValidProfileName(name)) {
     throw new Error(
-      `Invalid profile name: "${name}". Use only lowercase letters, numbers, and hyphens.`,
+      `Invalid profile name: "${name}". Use lowercase letters, numbers, and hyphens (must start and end with a letter or number).`,
     );
   }
 

@@ -45,6 +45,8 @@ interface EnvVarItem {
   envValue: string;
 }
 
+const UI_CHROME_HEIGHT = 20; // ヘッダー/フッター/余白などの固定行数
+
 /**
  * 環境変数プロファイルエディター画面
  */
@@ -150,7 +152,7 @@ export function EnvironmentProfileScreen({
         setFocus("env"); // viewモードでは環境変数にフォーカス
         setMode("view");
       } catch {
-        // Error is already set in hook
+        // エラー状態は useProfiles フック側で管理するため、ここでは握りつぶす
       }
     },
     [setActiveProfile],
@@ -168,7 +170,7 @@ export function EnvironmentProfileScreen({
   const handleCreateNameSubmit = useCallback((name: string) => {
     if (!isValidProfileName(name)) {
       setValidationError(
-        "Invalid profile name. Use only lowercase letters, numbers, and hyphens.",
+        "Invalid profile name. Use lowercase letters, numbers, and hyphens (must start and end with a letter or number).",
       );
       return;
     }
@@ -190,6 +192,7 @@ export function EnvironmentProfileScreen({
         setFocus("env"); // viewモードでは環境変数にフォーカス
         setMode("view");
       } catch {
+        // エラー状態は useProfiles フック側で管理するため、ここでは一覧に戻す
         setMode("list");
       }
     },
@@ -204,7 +207,7 @@ export function EnvironmentProfileScreen({
           await deleteProfile(selectedProfileName);
           setSelectedProfileName(null);
         } catch {
-          // Error handled by hook
+          // エラー状態は useProfiles フック側で管理するため、ここでは握りつぶす
         }
       }
       setMode("list");
@@ -232,7 +235,7 @@ export function EnvironmentProfileScreen({
         try {
           await updateEnvVar(selectedProfileName, newEnvKey, value);
         } catch {
-          // Error handled by hook
+          // エラー状態は useProfiles フック側で管理するため、ここでは握りつぶす
         }
       }
       setMode("view");
@@ -257,7 +260,7 @@ export function EnvironmentProfileScreen({
         try {
           await updateEnvVar(selectedProfileName, selectedEnvKey, value);
         } catch {
-          // Error handled by hook
+          // エラー状態は useProfiles フック側で管理するため、ここでは握りつぶす
         }
       }
       setMode("view");
@@ -272,7 +275,7 @@ export function EnvironmentProfileScreen({
         try {
           await deleteEnvVar(selectedProfileName, selectedEnvKey);
         } catch {
-          // Error handled by hook
+          // エラー状態は useProfiles フック側で管理するため、ここでは握りつぶす
         }
       }
       setMode("view");
@@ -649,7 +652,10 @@ export function EnvironmentProfileScreen({
   }
 
   // プロファイル詳細
-  const maxOsEnvVisible = Math.max(5, Math.floor((rows - 20) / 2));
+  const maxOsEnvVisible = Math.max(
+    5,
+    Math.floor((rows - UI_CHROME_HEIGHT) / 2),
+  );
 
   return (
     <Box flexDirection="column" height={rows}>

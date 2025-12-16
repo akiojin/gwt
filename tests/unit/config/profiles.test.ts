@@ -54,6 +54,14 @@ describe("isValidProfileName", () => {
     expect(isValidProfileName("dev env")).toBe(false);
     expect(isValidProfileName("dev/env")).toBe(false);
   });
+
+  it("先頭/末尾がハイフン、またはハイフンのみの名前は無効", () => {
+    expect(isValidProfileName("-")).toBe(false);
+    expect(isValidProfileName("---")).toBe(false);
+    expect(isValidProfileName("-dev")).toBe(false);
+    expect(isValidProfileName("dev-")).toBe(false);
+    expect(isValidProfileName("-dev-")).toBe(false);
+  });
 });
 
 describe("loadProfiles", () => {
@@ -121,7 +129,7 @@ profiles: {invalid
       "utf-8",
     );
 
-    await expect(loadProfiles()).rejects.toThrow();
+    await expect(loadProfiles()).rejects.toThrow(/line|column/i);
   });
 });
 
@@ -402,7 +410,9 @@ profiles:
       "utf-8",
     );
 
-    await expect(setActiveProfile("nonexistent")).rejects.toThrow();
+    await expect(setActiveProfile("nonexistent")).rejects.toThrow(
+      'Profile "nonexistent" does not exist',
+    );
   });
 });
 
@@ -462,7 +472,9 @@ profiles:
       env: {},
     };
 
-    await expect(createProfile("development", newProfile)).rejects.toThrow();
+    await expect(createProfile("development", newProfile)).rejects.toThrow(
+      'Profile "development" already exists',
+    );
   });
 
   it("無効なプロファイル名で作成しようとするとエラー", async () => {
@@ -471,7 +483,9 @@ profiles:
       env: {},
     };
 
-    await expect(createProfile("Invalid Name", newProfile)).rejects.toThrow();
+    await expect(createProfile("Invalid Name", newProfile)).rejects.toThrow(
+      'Invalid profile name: "Invalid Name". Use lowercase letters, numbers, and hyphens (must start and end with a letter or number).',
+    );
   });
 });
 
@@ -527,7 +541,7 @@ profiles:
   it("存在しないプロファイルを更新しようとするとエラー", async () => {
     await expect(
       updateProfile("nonexistent", { displayName: "Test" }),
-    ).rejects.toThrow();
+    ).rejects.toThrow('Profile "nonexistent" does not exist');
   });
 });
 
@@ -593,11 +607,15 @@ profiles:
       "utf-8",
     );
 
-    await expect(deleteProfile("development")).rejects.toThrow();
+    await expect(deleteProfile("development")).rejects.toThrow(
+      'Cannot delete active profile "development". Please switch to another profile first.',
+    );
   });
 
   it("存在しないプロファイルを削除しようとするとエラー", async () => {
-    await expect(deleteProfile("nonexistent")).rejects.toThrow();
+    await expect(deleteProfile("nonexistent")).rejects.toThrow(
+      'Profile "nonexistent" does not exist',
+    );
   });
 });
 

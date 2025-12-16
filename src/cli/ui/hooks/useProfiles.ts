@@ -150,8 +150,16 @@ export function useProfiles(): UseProfilesResult {
   // 環境変数を更新
   const updateEnvVar = useCallback(
     async (profileName: string, key: string, value: string) => {
-      if (!profiles?.profiles[profileName]) {
-        throw new Error(`Profile "${profileName}" does not exist`);
+      if (!profiles) {
+        const err = new Error("Profiles not loaded");
+        setError(err);
+        throw err;
+      }
+
+      if (!profiles.profiles[profileName]) {
+        const err = new Error(`Profile "${profileName}" does not exist`);
+        setError(err);
+        throw err;
       }
 
       const existingProfile = profiles.profiles[profileName];
@@ -165,8 +173,16 @@ export function useProfiles(): UseProfilesResult {
   // 環境変数を削除
   const deleteEnvVar = useCallback(
     async (profileName: string, key: string) => {
-      if (!profiles?.profiles[profileName]) {
-        throw new Error(`Profile "${profileName}" does not exist`);
+      if (!profiles) {
+        const err = new Error("Profiles not loaded");
+        setError(err);
+        throw err;
+      }
+
+      if (!profiles.profiles[profileName]) {
+        const err = new Error(`Profile "${profileName}" does not exist`);
+        setError(err);
+        throw err;
       }
 
       const existingProfile = profiles.profiles[profileName];
