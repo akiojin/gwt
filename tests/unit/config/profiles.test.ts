@@ -28,7 +28,6 @@ let updateProfile: (
 ) => Promise<void>;
 let deleteProfile: (name: string) => Promise<void>;
 let resolveProfileEnv: () => Promise<Record<string, string>>;
-let _PROFILES_CONFIG_PATH: string;
 
 const originalGwtHome = process.env.GWT_HOME;
 
@@ -74,7 +73,6 @@ describe("loadProfiles", () => {
     const module = await import("../../../src/config/profiles.js");
     loadProfiles = module.loadProfiles;
     saveProfiles = module.saveProfiles;
-    _PROFILES_CONFIG_PATH = module.PROFILES_CONFIG_PATH;
   });
 
   afterEach(async () => {

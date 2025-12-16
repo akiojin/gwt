@@ -356,9 +356,13 @@ export function EnvironmentProfileScreen({
         // j/k でスクロール
         if (input === "j" || key.downArrow) {
           if (focus === "env") {
-            setEnvIndex((prev) => Math.min(prev + 1, envItems.length - 1));
+            setEnvIndex((prev) =>
+              Math.min(prev + 1, Math.max(0, envItems.length - 1)),
+            );
           } else if (focus === "osenv") {
-            setOsEnvIndex((prev) => Math.min(prev + 1, osEnvItems.length - 1));
+            setOsEnvIndex((prev) =>
+              Math.min(prev + 1, Math.max(0, osEnvItems.length - 1)),
+            );
           }
           return;
         }
