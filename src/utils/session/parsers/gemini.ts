@@ -10,7 +10,7 @@ import { homedir } from "node:os";
 
 import type { GeminiSessionInfo, SessionSearchOptions } from "../types.js";
 import {
-  collectFilesRecursive,
+  collectFilesIterative,
   matchesCwd,
   readSessionInfoFromFile,
 } from "../common.js";
@@ -26,7 +26,7 @@ export async function findLatestGeminiSession(
 ): Promise<GeminiSessionInfo | null> {
   // Gemini stores sessions/logs under ~/.gemini/tmp/<project_hash>/
   const baseDir = path.join(homedir(), ".gemini", "tmp");
-  const files = await collectFilesRecursive(
+  const files = await collectFilesIterative(
     baseDir,
     (name) => name.endsWith(".json") || name.endsWith(".jsonl"),
   );

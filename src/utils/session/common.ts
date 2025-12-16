@@ -146,13 +146,13 @@ export async function findLatestFile(
 }
 
 /**
- * Collects files recursively from a directory matching a filter.
+ * Collects files iteratively from a directory matching a filter.
  * Uses queue-based iteration to avoid stack overflow on deep directory structures.
  * @param dir - The root directory to search
  * @param filter - Function to filter files by name
  * @returns Array of matching files with their paths and modification times
  */
-export async function collectFilesRecursive(
+export async function collectFilesIterative(
   dir: string,
   filter: (name: string) => boolean,
 ): Promise<{ fullPath: string; mtime: number }[]> {
@@ -254,6 +254,11 @@ export async function readSessionInfoFromFile(
 
 /**
  * Finds newest session ID from a directory with optional time filtering.
+ * Uses queue-based iteration to avoid stack overflow on deep directory structures.
+ * @param dir - The root directory to search
+ * @param recursive - Whether to search subdirectories
+ * @param options - Search options (since, until, preferClosestTo, windowMs)
+ * @returns Session info with ID and modification time, or null if not found
  */
 export async function findNewestSessionIdFromDir(
   dir: string,
@@ -262,30 +267,37 @@ export async function findNewestSessionIdFromDir(
 ): Promise<{ id: string; mtime: number } | null> {
   try {
     const files: { fullPath: string; mtime: number }[] = [];
+    const queue: string[] = [dir];
 
-    const processDir = async (currentDir: string) => {
-      const currentEntries = await readdir(currentDir, { withFileTypes: true });
-      for (const entry of currentEntries) {
-        const fullPath = path.join(currentDir, entry.name);
-        if (entry.isDirectory()) {
-          if (recursive) {
-            await processDir(fullPath);
+    // Queue-based directory traversal
+    while (queue.length > 0) {
+      const currentDir = queue.shift();
+      if (!currentDir) break;
+
+      try {
+        const entries = await readdir(currentDir, { withFileTypes: true });
+        for (const entry of entries) {
+          const fullPath = path.join(currentDir, entry.name);
+          if (entry.isDirectory()) {
+            if (recursive) {
+              queue.push(fullPath);
+            }
+            continue;
           }
-          continue;
+          if (!entry.isFile()) continue;
+          if (!entry.name.endsWith(".json") && !entry.name.endsWith(".jsonl"))
+            continue;
+          try {
+            const info = await stat(fullPath);
+            files.push({ fullPath, mtime: info.mtimeMs });
+          } catch {
+            // ignore unreadable file
+          }
         }
-        if (!entry.isFile()) continue;
-        if (!entry.name.endsWith(".json") && !entry.name.endsWith(".jsonl"))
-          continue;
-        try {
-          const info = await stat(fullPath);
-          files.push({ fullPath, mtime: info.mtimeMs });
-        } catch {
-          // ignore unreadable
-        }
+      } catch {
+        // ignore unreadable directory
       }
-    };
-
-    await processDir(dir);
+    }
 
     // Apply since/until filters
     const filtered = files.filter((f) => {

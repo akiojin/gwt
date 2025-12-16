@@ -12,7 +12,7 @@ import { homedir } from "node:os";
 import type { CodexSessionInfo, SessionSearchOptions } from "../types.js";
 import {
   UUID_REGEX,
-  collectFilesRecursive,
+  collectFilesIterative,
   matchesCwd,
   readSessionInfoFromFile,
 } from "../common.js";
@@ -33,28 +33,22 @@ export async function findLatestCodexSession(
   // Codex CLI respects CODEX_HOME. Default is ~/.codex.
   const codexHome = process.env.CODEX_HOME ?? path.join(homedir(), ".codex");
   const baseDir = path.join(codexHome, "sessions");
-  const candidates = await collectFilesRecursive(
+  const candidates = await collectFilesIterative(
     baseDir,
     (name) => name.endsWith(".json") || name.endsWith(".jsonl"),
   );
   if (!candidates.length) return null;
 
+  // Apply time filters
+  let pool = candidates;
   const sinceVal = options.since;
-  const sinceFiltered =
-    sinceVal !== undefined
-      ? candidates.filter((c) => c.mtime >= sinceVal)
-      : candidates;
   const untilVal = options.until;
-  const bounded =
-    untilVal !== undefined
-      ? sinceFiltered.filter((c) => c.mtime <= untilVal)
-      : sinceFiltered;
-  const hasTimeFilter =
-    options.since !== undefined || options.until !== undefined;
-  // If time filters produced no results, return empty if filters were specified
-  const pool =
-    bounded.length > 0 ? bounded : hasTimeFilter ? [] : sinceFiltered;
-
+  if (sinceVal !== undefined) {
+    pool = pool.filter((c) => c.mtime >= sinceVal);
+  }
+  if (untilVal !== undefined) {
+    pool = pool.filter((c) => c.mtime <= untilVal);
+  }
   if (!pool.length) return null;
 
   const ref = options.preferClosestTo;
