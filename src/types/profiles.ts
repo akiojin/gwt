@@ -49,9 +49,9 @@ export const DEFAULT_PROFILES_CONFIG: Readonly<ProfilesConfig> = Object.freeze({
 /**
  * プロファイル名のバリデーションパターン
  *
- * 英数字とハイフンのみを許可します。
+ * 小文字英数字とハイフンのみを許可し、先頭と末尾は英数字でなければなりません。
  */
-export const PROFILE_NAME_PATTERN = /^[a-z0-9-]+$/;
+export const PROFILE_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 
 /**
  * プロファイル名をバリデート
