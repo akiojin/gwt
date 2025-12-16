@@ -20,6 +20,8 @@ import {
 /**
  * Encodes a project path for Claude's directory structure.
  * Normalizes separators and replaces special characters with dashes.
+ * @param cwd - The working directory path to encode
+ * @returns The encoded path string suitable for Claude's directory naming
  */
 export function encodeClaudeProjectPath(cwd: string): string {
   // Normalize to forward slashes, drop drive colon, replace / and _ with -
