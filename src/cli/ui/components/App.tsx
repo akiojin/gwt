@@ -369,15 +369,17 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
             // For Gemini, prefer newest session file (Gemini keeps per-project chats)
             if (!sessionId && entry.toolId === "gemini-cli") {
               try {
-                const gemSession = await findLatestGeminiSession(worktree, {
-                  ...(entry.timestamp !== null && entry.timestamp !== undefined
-                    ? {
-                        since: entry.timestamp - 60_000,
-                        preferClosestTo: entry.timestamp,
-                      }
-                    : {}),
+                const gemOptions: Parameters<
+                  typeof findLatestGeminiSession
+                >[0] = {
                   windowMs: 60 * 60 * 1000,
-                });
+                  cwd: worktree,
+                };
+                if (entry.timestamp !== null && entry.timestamp !== undefined) {
+                  gemOptions.since = entry.timestamp - 60_000;
+                  gemOptions.preferClosestTo = entry.timestamp;
+                }
+                const gemSession = await findLatestGeminiSession(gemOptions);
                 sessionId = gemSession?.id ?? null;
               } catch {
                 // ignore

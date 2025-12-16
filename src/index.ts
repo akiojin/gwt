@@ -743,7 +743,7 @@ export async function handleAIToolWorkflow(
       }
     } else if (!finalSessionId && tool === "gemini-cli") {
       try {
-        const latestGemini = await findLatestGeminiSession(worktreePath, {
+        const latestGemini = await findLatestGeminiSession({
           since: launchStartedAt - 60_000,
           until: finishedAt + 60_000,
           preferClosestTo: finishedAt,
