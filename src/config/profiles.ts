@@ -7,7 +7,7 @@
  * @see specs/SPEC-dafff079/spec.md
  */
 
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { homedir } from "node:os";
@@ -121,7 +121,14 @@ export async function saveProfiles(config: ProfilesConfig): Promise<void> {
 
   const yaml = stringifyYaml(config);
   await writeFile(tempPath, yaml, { mode: 0o600 });
-  await rename(tempPath, configPath);
+  try {
+    await rename(tempPath, configPath);
+  } catch (error) {
+    await unlink(tempPath).catch(() => {
+      // 一時ファイルが存在しない/削除できない場合は無視する
+    });
+    throw error;
+  }
 }
 
 /**
