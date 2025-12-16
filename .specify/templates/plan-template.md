@@ -3,7 +3,7 @@
 **仕様ID**: `[SPEC-xxxxxxxx]` | **日付**: [日付] | **仕様書**: [リンク]
 **入力**: `/specs/[SPEC-xxxxxxxx]/spec.md` からの機能仕様
 
-**注**: このテンプレートは `/speckit.plan` コマンドによって記入されます。実行ワークフローについては `.specify/templates/commands/plan.md` を参照してください。
+**注**: このテンプレートは `/speckit.plan` コマンドによって記入されます。実行ワークフローについては `.claude/commands/speckit.plan.md` を参照してください。
 
 ## 概要
 
