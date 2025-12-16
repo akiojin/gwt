@@ -388,6 +388,6 @@ We welcome contributions! Please read our contributing guidelines:
 
 ### Icon Legend
 
-- First 3 columns: ⚡(main/develop) / ✨(feature) / 🐛(bugfix) / 🔥(hotfix) / 📦(release) / 📌(other), 🟢=has worktree, 🟠=has worktree (inaccessible), ✏️=uncommitted changes, ⚠️=warning, ⭐=current branch
+- First 3 columns: ⚡(main/develop) / ✨(feature) / 🐛(bugfix) / 🔥(hotfix) / 📦(release) / 📌(other), 🟢=has worktree, 🔴=has worktree (inaccessible), ✏️=uncommitted changes, ⚠️=warning, ⭐=current branch
 - Location column: blank=local exists, `☁`=remote only
 - Selection column: In color environments, selection is shown with `>` prefix (with space) instead of background inversion
