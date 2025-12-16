@@ -84,6 +84,7 @@ export interface BranchListScreenProps {
   onQuit?: () => void;
   onCleanupCommand?: () => void;
   onRefresh?: () => void;
+  onOpenProfiles?: () => void;
   loading?: boolean;
   error?: Error | null;
   lastUpdated?: Date | null;
@@ -91,6 +92,7 @@ export interface BranchListScreenProps {
   cleanupUI?: CleanupUIState;
   version?: string | null;
   workingDirectory?: string;
+  activeProfile?: string | null;
   // Test support: allow external control of filter mode and query
   testFilterMode?: boolean;
   testOnFilterModeChange?: (mode: boolean) => void;
@@ -110,6 +112,7 @@ export function BranchListScreen({
   onSelect,
   onCleanupCommand,
   onRefresh,
+  onOpenProfiles,
   loading = false,
   error = null,
   lastUpdated = null,
@@ -117,6 +120,7 @@ export function BranchListScreen({
   cleanupUI,
   version,
   workingDirectory,
+  activeProfile,
   testFilterMode,
   testOnFilterModeChange,
   testFilterQuery,
@@ -206,6 +210,8 @@ export function BranchListScreen({
       onCleanupCommand?.();
     } else if (input === "r" && onRefresh) {
       onRefresh();
+    } else if (input === "p" && onOpenProfiles) {
+      onOpenProfiles();
     }
   });
 
@@ -262,7 +268,8 @@ export function BranchListScreen({
     { key: "enter", description: "Select" },
     { key: "f", description: "Filter" },
     { key: "r", description: "Refresh" },
-    { key: "c", description: "Cleanup branches" },
+    { key: "c", description: "Cleanup" },
+    { key: "p", description: "Profiles" },
   ];
 
   const formatLatestCommit = useCallback((timestamp?: number) => {
@@ -514,6 +521,7 @@ export function BranchListScreen({
         titleColor="cyan"
         version={version}
         {...(workingDirectory !== undefined && { workingDirectory })}
+        activeProfile={activeProfile}
       />
 
       {/* Filter Input - Always visible */}

@@ -7,7 +7,10 @@ import React, {
 } from "react";
 import { useApp } from "ink";
 import { ErrorBoundary } from "./common/ErrorBoundary.js";
-import { BranchListScreen } from "./screens/BranchListScreen.js";
+import {
+  BranchListScreen,
+  type BranchListScreenProps,
+} from "./screens/BranchListScreen.js";
 import { BranchCreatorScreen } from "./screens/BranchCreatorScreen.js";
 import { BranchActionSelectorScreen } from "../screens/BranchActionSelectorScreen.js";
 import { AIToolSelectorScreen } from "./screens/AIToolSelectorScreen.js";
@@ -19,7 +22,9 @@ import {
   ModelSelectorScreen,
   type ModelSelectionResult,
 } from "./screens/ModelSelectorScreen.js";
+import { EnvironmentProfileScreen } from "./screens/EnvironmentProfileScreen.js";
 import { useGitData } from "../hooks/useGitData.js";
+import { useProfiles } from "../hooks/useProfiles.js";
 import { useScreenState } from "../hooks/useScreenState.js";
 import { formatBranchItems } from "../utils/branchFormatter.js";
 import { calculateStatistics } from "../utils/statisticsCalculator.js";
@@ -107,6 +112,9 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       enableAutoRefresh: false, // Manual refresh with 'r' key
     });
   const { currentScreen, navigateTo, goBack } = useScreenState();
+
+  // Profile state
+  const { activeProfileName, refresh: refreshProfiles } = useProfiles();
 
   // Version state
   const [version, setVersion] = useState<string | null>(null);
@@ -1153,31 +1161,39 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
 
   // Render screen based on currentScreen
   const renderScreen = () => {
+    const renderBranchListScreen = (
+      additionalProps?: Partial<BranchListScreenProps>,
+    ) => (
+      <BranchListScreen
+        branches={branchItems}
+        stats={stats}
+        onSelect={handleSelect}
+        onQuit={handleQuit}
+        onRefresh={refresh}
+        loading={loading}
+        error={error}
+        lastUpdated={lastUpdated}
+        loadingIndicatorDelay={loadingIndicatorDelay}
+        version={version}
+        workingDirectory={workingDirectory}
+        activeProfile={activeProfileName}
+        onOpenProfiles={() => navigateTo("environment-profile")}
+        {...additionalProps}
+      />
+    );
+
     switch (currentScreen) {
       case "branch-list":
-        return (
-          <BranchListScreen
-            branches={branchItems}
-            stats={stats}
-            onSelect={handleSelect}
-            onQuit={handleQuit}
-            onCleanupCommand={handleCleanupCommand}
-            onRefresh={refresh}
-            loading={loading}
-            error={error}
-            lastUpdated={lastUpdated}
-            loadingIndicatorDelay={loadingIndicatorDelay}
-            cleanupUI={{
-              indicators: cleanupIndicators,
-              footerMessage: cleanupFooterMessage,
-              inputLocked: cleanupInputLocked,
-            }}
-            version={version}
-            workingDirectory={workingDirectory}
-            selectedBranches={selectedBranches}
-            onToggleSelect={toggleBranchSelection}
-          />
-        );
+        return renderBranchListScreen({
+          onCleanupCommand: handleCleanupCommand,
+          cleanupUI: {
+            indicators: cleanupIndicators,
+            footerMessage: cleanupFooterMessage,
+            inputLocked: cleanupInputLocked,
+          },
+          selectedBranches,
+          onToggleSelect: toggleBranchSelection,
+        });
 
       case "branch-creator":
         return (
@@ -1268,22 +1284,19 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
           />
         );
 
-      default:
+      case "environment-profile":
         return (
-          <BranchListScreen
-            branches={branchItems}
-            stats={stats}
-            onSelect={handleSelect}
-            onQuit={handleQuit}
-            onRefresh={refresh}
-            loading={loading}
-            error={error}
-            lastUpdated={lastUpdated}
-            loadingIndicatorDelay={loadingIndicatorDelay}
+          <EnvironmentProfileScreen
+            onBack={() => {
+              void refreshProfiles();
+              goBack();
+            }}
             version={version}
-            workingDirectory={workingDirectory}
           />
         );
+
+      default:
+        return renderBranchListScreen();
     }
   };
 
