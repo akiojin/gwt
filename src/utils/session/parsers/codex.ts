@@ -49,8 +49,11 @@ export async function findLatestCodexSession(
     untilVal !== undefined
       ? sinceFiltered.filter((c) => c.mtime <= untilVal)
       : sinceFiltered;
-  const hasWindow = options.since !== undefined || options.until !== undefined;
-  const pool = bounded.length ? bounded : hasWindow ? [] : sinceFiltered;
+  const hasTimeFilter =
+    options.since !== undefined || options.until !== undefined;
+  // If time filters produced no results, return empty if filters were specified
+  const pool =
+    bounded.length > 0 ? bounded : hasTimeFilter ? [] : sinceFiltered;
 
   if (!pool.length) return null;
 
