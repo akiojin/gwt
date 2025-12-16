@@ -403,6 +403,21 @@ function normalizePath(p: string): string {
 }
 
 /**
+ * Checks if one path is a proper prefix of another (with path separator boundary).
+ * Ensures that the prefix ends at a directory boundary to avoid false matches
+ * like "/home/user/proj" matching "/home/user/project".
+ * @param prefix - The potential prefix path
+ * @param full - The full path to check against
+ * @returns true if prefix is a valid path prefix of full
+ */
+function isPathPrefix(prefix: string, full: string): boolean {
+  if (!full.startsWith(prefix)) return false;
+  if (full.length === prefix.length) return true;
+  // Ensure the next character is a path separator
+  return full[prefix.length] === "/";
+}
+
+/**
  * Checks if a session's cwd matches the target cwd.
  * Matching rules:
  * - Exact match
@@ -410,6 +425,7 @@ function normalizePath(p: string): string {
  * - Target cwd starts with session cwd (for worktree subdirectories)
  *
  * Paths are normalized before comparison to handle cross-platform differences.
+ * Path prefix matching ensures boundaries at directory separators.
  *
  * @param sessionCwd - The cwd from the session file
  * @param targetCwd - The target cwd to match against
@@ -424,7 +440,7 @@ export function matchesCwd(
   const normalizedTarget = normalizePath(targetCwd);
   return (
     normalizedSession === normalizedTarget ||
-    normalizedSession.startsWith(normalizedTarget) ||
-    normalizedTarget.startsWith(normalizedSession)
+    isPathPrefix(normalizedTarget, normalizedSession) ||
+    isPathPrefix(normalizedSession, normalizedTarget)
   );
 }
