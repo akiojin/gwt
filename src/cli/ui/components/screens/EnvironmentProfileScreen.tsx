@@ -5,7 +5,7 @@
  * @see specs/SPEC-dafff079/spec.md
  */
 
-import React, { useState, useCallback, useMemo } from "react";
+import React, { useState, useCallback, useMemo, useEffect } from "react";
 import { Box, Text, useInput } from "ink";
 import { Header } from "../parts/Header.js";
 import { Footer } from "../parts/Footer.js";
@@ -223,6 +223,43 @@ export function EnvironmentProfileScreen({
       .sort((a, b) => a.key.localeCompare(b.key));
   }, [currentProfile]);
 
+  // 配列サイズ変更に追従してインデックスをクランプ（削除後の範囲外アクセス防止）
+  useEffect(() => {
+    if (profileItems.length === 0) {
+      if (profileIndex !== 0) {
+        setProfileIndex(0);
+      }
+      return;
+    }
+    if (profileIndex >= profileItems.length) {
+      setProfileIndex(profileItems.length - 1);
+    }
+  }, [profileItems.length, profileIndex, setProfileIndex]);
+
+  useEffect(() => {
+    if (envItems.length === 0) {
+      if (envIndex !== 0) {
+        setEnvIndex(0);
+      }
+      return;
+    }
+    if (envIndex >= envItems.length) {
+      setEnvIndex(envItems.length - 1);
+    }
+  }, [envItems.length, envIndex, setEnvIndex]);
+
+  useEffect(() => {
+    if (osEnvItems.length === 0) {
+      if (osEnvIndex !== 0) {
+        setOsEnvIndex(0);
+      }
+      return;
+    }
+    if (osEnvIndex >= osEnvItems.length) {
+      setOsEnvIndex(osEnvItems.length - 1);
+    }
+  }, [osEnvItems.length, osEnvIndex, setOsEnvIndex]);
+
   // プロファイルを選択してアクティブ化
   const handleActivateProfile = useCallback(
     async (item: ProfileItem) => {
@@ -306,11 +343,7 @@ export function EnvironmentProfileScreen({
   // 環境変数キー入力完了
   const handleEnvKeySubmit = useCallback((key: string) => {
     const trimmedKey = key.trim();
-    if (
-      !trimmedKey ||
-      /[\\s=]/.test(trimmedKey) ||
-      !ENV_VAR_KEY_PATTERN.test(trimmedKey)
-    ) {
+    if (!trimmedKey || !ENV_VAR_KEY_PATTERN.test(trimmedKey)) {
       setValidationError(
         "Invalid variable name. Use letters, numbers, and underscores (must start with a letter or underscore).",
       );
