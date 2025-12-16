@@ -191,7 +191,8 @@ export type ScreenType =
   | "session-selector"
   | "execution-mode-selector"
   | "batch-merge-progress"
-  | "batch-merge-result";
+  | "batch-merge-result"
+  | "environment-profile";
 
 /**
  * Branch action types for action selector screen
