@@ -43,6 +43,31 @@
 * update default Claude Code model to Opus 4.5 ([1dd909e](https://github.com/akiojin/gwt/commit/1dd909ed87a55ce3bb796deb0431d0027571dae2))
 * update Opus model version to 4.5 ([307faeb](https://github.com/akiojin/gwt/commit/307faeb66ebac0ca89b01c07ee19d213797c4d5c))
 
+## [3.1.0](https://github.com/akiojin/gwt/compare/v3.0.0...v3.1.0) (2025-12-16)
+
+
+### Features
+
+* プロファイル未選択（none）を選択可能にする ([adaaf9c](https://github.com/akiojin/gwt/commit/adaaf9cf2f2d9e5ff3e897a3c39be86693199033))
+* プロファイル未選択を選択できるようにする ([d93c3e7](https://github.com/akiojin/gwt/commit/d93c3e7567cbdb3c24d21ee5ff52e3a39b14510e))
+* 環境変数プロファイル機能を追加 ([80f3f13](https://github.com/akiojin/gwt/commit/80f3f130815f8bed7128fc99d3831403f51bebaa))
+* 環境変数プロファイル機能を追加 ([df01519](https://github.com/akiojin/gwt/commit/df015191a837f413df6235eb00bd23a9fcd0caf0))
+
+
+### Bug Fixes
+
+* CodeRabbitのレビュー指摘事項を修正 ([45ff1e7](https://github.com/akiojin/gwt/commit/45ff1e75be18b33b9f80fb0f0aafa37261cb3709))
+* EnvironmentProfileScreenのキーボード入力を修正 ([fefea29](https://github.com/akiojin/gwt/commit/fefea2958ed44166b7f7840bbd8d2a12b7146cac))
+* envキー入力のバリデーションを追加 ([739a951](https://github.com/akiojin/gwt/commit/739a951bd32271e14808da52947bf118280a6913))
+* envキー入力バリデーションを調整 ([cdb5bf6](https://github.com/akiojin/gwt/commit/cdb5bf6e44028560ca142ef57e9eff1c8380af92))
+* profiles.yaml更新の競合を防止 ([8062807](https://github.com/akiojin/gwt/commit/8062807b812364bb226e3afdd8f78594b1dbb66f))
+* profiles.yaml未作成時の作成失敗を修正 ([070853b](https://github.com/akiojin/gwt/commit/070853b917de8e1303abd374c04693f6e61de182))
+* Spec Kitスクリプトの安全性改善（eval撤廃/JSON出力） ([434531e](https://github.com/akiojin/gwt/commit/434531ede534c5163e5fcd992cd898d9c8363aba))
+* プロファイル保存の一時ファイルとスクロール境界を修正 ([dc53ad2](https://github.com/akiojin/gwt/commit/dc53ad2fa439e7ec34082f8416c49f11359654f4))
+* プロファイル名検証と設定パス不整合を修正 ([5c8a422](https://github.com/akiojin/gwt/commit/5c8a422882ed8b17657550618ee1d913ad565578))
+* プロファイル変更後にヘッダー表示を更新 ([60883b3](https://github.com/akiojin/gwt/commit/60883b35698ceabc57f70feb2df171b64ba296e1))
+* プロファイル画面の入力検証とインデックス境界を修正 ([4354512](https://github.com/akiojin/gwt/commit/43545121cc9c6b2da7bd63304e21b553c087cf6b))
+
 ## [3.0.0](https://github.com/akiojin/gwt/compare/v2.14.0...v3.0.0) (2025-12-15)
 
 
