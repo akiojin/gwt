@@ -22,6 +22,9 @@ import {
  * 2. ~/.qwen/tmp/<hash>/checkpoints/*.json or *.ckpt
  *
  * Falls back to filename (without extension) if no session ID is found in content.
+ *
+ * @param _cwd - Working directory (currently unused, reserved for future per-project filtering)
+ * @returns Session ID string or null if not found
  */
 export async function findLatestQwenSessionId(
   _cwd: string,

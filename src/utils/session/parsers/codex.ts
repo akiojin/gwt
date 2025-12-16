@@ -13,6 +13,7 @@ import type { CodexSessionInfo, SessionSearchOptions } from "../types.js";
 import {
   UUID_REGEX,
   collectFilesRecursive,
+  matchesCwd,
   readSessionInfoFromFile,
 } from "../common.js";
 
@@ -22,6 +23,9 @@ import {
  * Session ID is extracted from:
  * 1. Filename (rollout-...-{uuid}.jsonl) - most reliable
  * 2. File content (payload.id or sessionId fields)
+ *
+ * @param options - Search options including time filters and cwd matching
+ * @returns Session info with ID and modification time, or null if not found
  */
 export async function findLatestCodexSession(
   options: SessionSearchOptions = {},
@@ -70,14 +74,7 @@ export async function findLatestCodexSession(
       // If cwd filtering is needed, read file content to check cwd
       if (options.cwd) {
         const info = await readSessionInfoFromFile(file.fullPath);
-        if (
-          info.cwd &&
-          // Match if: exact match, session cwd starts with options.cwd,
-          // or options.cwd starts with session cwd (for worktree subdirectories)
-          (info.cwd === options.cwd ||
-            info.cwd.startsWith(options.cwd) ||
-            options.cwd.startsWith(info.cwd))
-        ) {
+        if (matchesCwd(info.cwd, options.cwd)) {
           return { id: sessionId, mtime: file.mtime };
         }
         continue; // cwd doesn't match, try next file
@@ -89,12 +86,7 @@ export async function findLatestCodexSession(
     const info = await readSessionInfoFromFile(file.fullPath);
     if (!info.id) continue;
     if (options.cwd) {
-      if (
-        info.cwd &&
-        (info.cwd === options.cwd ||
-          info.cwd.startsWith(options.cwd) ||
-          options.cwd.startsWith(info.cwd))
-      ) {
+      if (matchesCwd(info.cwd, options.cwd)) {
         return { id: info.id, mtime: file.mtime };
       }
       continue;
@@ -107,6 +99,8 @@ export async function findLatestCodexSession(
 
 /**
  * Finds the latest Codex session ID.
+ * @param options - Search options including time filters and cwd matching
+ * @returns Session ID string or null if not found
  */
 export async function findLatestCodexSessionId(
   options: SessionSearchOptions = {},
@@ -117,6 +111,8 @@ export async function findLatestCodexSessionId(
 
 /**
  * Polls for a Codex session ID until found or timeout.
+ * @param options - Polling options including startedAt time, timeout, and cwd filter
+ * @returns Session ID string or null if timeout reached
  */
 export async function waitForCodexSessionId(options: {
   startedAt: number;

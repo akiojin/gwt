@@ -29,6 +29,8 @@ export function encodeClaudeProjectPath(cwd: string): string {
 /**
  * Generates candidate paths for Claude project directory.
  * Handles various encoding patterns used by different Claude versions.
+ * @param cwd - The working directory path to encode
+ * @returns Array of possible encoded directory names
  */
 function generateClaudeProjectPathCandidates(cwd: string): string[] {
   const base = encodeClaudeProjectPath(cwd);
@@ -45,6 +47,9 @@ function generateClaudeProjectPathCandidates(cwd: string): string[] {
 
 /**
  * Returns the list of possible Claude root directories.
+ * Checks CLAUDE_CONFIG_DIR environment variable first, then falls back to
+ * standard locations (~/.claude and ~/.config/claude).
+ * @returns Array of possible Claude root directory paths
  */
 function getClaudeRootCandidates(): string[] {
   const roots: string[] = [];
@@ -65,6 +70,10 @@ function getClaudeRootCandidates(): string[] {
  * 1. ~/.claude/projects/<encoded>/sessions/ (official location)
  * 2. ~/.claude/projects/<encoded>/ (root and subdirs)
  * 3. ~/.claude/history.jsonl (global history fallback)
+ *
+ * @param cwd - The working directory to find sessions for
+ * @param options - Search options (since, until, preferClosestTo, windowMs)
+ * @returns Session info with ID and modification time, or null if not found
  */
 export async function findLatestClaudeSession(
   cwd: string,
@@ -99,6 +108,9 @@ export async function findLatestClaudeSession(
   // Fallback: parse ~/.claude/history.jsonl
   try {
     const historyPath = path.join(homedir(), ".claude", "history.jsonl");
+    const historyStat = await checkFileStat(historyPath);
+    if (!historyStat) return null;
+
     const content = await readFileContent(historyPath);
     const lines = content.split(/\r?\n/).filter(Boolean);
     for (let i = lines.length - 1; i >= 0; i -= 1) {
@@ -114,7 +126,7 @@ export async function findLatestClaudeSession(
           sessionId &&
           (project === cwd || cwd.startsWith(project))
         ) {
-          return { id: sessionId, mtime: Date.now() };
+          return { id: sessionId, mtime: historyStat.mtimeMs };
         }
       } catch {
         // ignore malformed lines
@@ -129,6 +141,9 @@ export async function findLatestClaudeSession(
 
 /**
  * Finds the latest Claude session ID for a given working directory.
+ * @param cwd - The working directory to find sessions for
+ * @param options - Search options (since, until, preferClosestTo, windowMs)
+ * @returns Session ID string or null if not found
  */
 export async function findLatestClaudeSessionId(
   cwd: string,
@@ -140,6 +155,9 @@ export async function findLatestClaudeSessionId(
 
 /**
  * Polls for a Claude session ID until found or timeout.
+ * @param cwd - The working directory to find sessions for
+ * @param options - Polling options including timeout, interval, and search filters
+ * @returns Session ID string or null if timeout reached
  */
 export async function waitForClaudeSessionId(
   cwd: string,
@@ -156,15 +174,16 @@ export async function waitForClaudeSessionId(
   const pollIntervalMs = options.pollIntervalMs ?? 2_000;
   const deadline = Date.now() + timeoutMs;
 
-  while (Date.now() < deadline) {
-    const opt: Omit<SessionSearchOptions, "cwd"> = {};
-    if (options.since !== undefined) opt.since = options.since;
-    if (options.until !== undefined) opt.until = options.until;
-    if (options.preferClosestTo !== undefined)
-      opt.preferClosestTo = options.preferClosestTo;
-    if (options.windowMs !== undefined) opt.windowMs = options.windowMs;
+  // Build search options once outside the loop
+  const searchOptions: Omit<SessionSearchOptions, "cwd"> = {};
+  if (options.since !== undefined) searchOptions.since = options.since;
+  if (options.until !== undefined) searchOptions.until = options.until;
+  if (options.preferClosestTo !== undefined)
+    searchOptions.preferClosestTo = options.preferClosestTo;
+  if (options.windowMs !== undefined) searchOptions.windowMs = options.windowMs;
 
-    const found = await findLatestClaudeSession(cwd, opt);
+  while (Date.now() < deadline) {
+    const found = await findLatestClaudeSession(cwd, searchOptions);
     if (found?.id) return found.id;
     await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
   }
