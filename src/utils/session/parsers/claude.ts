@@ -12,6 +12,7 @@ import type { ClaudeSessionInfo, SessionSearchOptions } from "../types.js";
 import {
   isValidUuidSessionId,
   findNewestSessionIdFromDir,
+  matchesCwd,
   readFileContent,
   checkFileStat,
 } from "../common.js";
@@ -121,11 +122,7 @@ export async function findLatestClaudeSession(
           typeof parsed.project === "string" ? parsed.project : null;
         const sessionId =
           typeof parsed.sessionId === "string" ? parsed.sessionId : null;
-        if (
-          project &&
-          sessionId &&
-          (project === cwd || cwd.startsWith(project))
-        ) {
+        if (project && sessionId && matchesCwd(project, cwd)) {
           return { id: sessionId, mtime: historyStat.mtimeMs };
         }
       } catch {
@@ -209,6 +206,20 @@ export async function claudeSessionFileExists(
 
   for (const root of roots) {
     for (const enc of encodedPaths) {
+      // Check official sessions/ location first
+      const sessionsCandidate = path.join(
+        root,
+        "projects",
+        enc,
+        "sessions",
+        `${sessionId}.jsonl`,
+      );
+      const sessionsInfo = await checkFileStat(sessionsCandidate);
+      if (sessionsInfo) {
+        return true;
+      }
+
+      // Then check project root
       const candidate = path.join(root, "projects", enc, `${sessionId}.jsonl`);
       const info = await checkFileStat(candidate);
       if (info) {
