@@ -211,7 +211,46 @@ describe("BranchListScreen", () => {
     );
 
     const text = container.textContent ?? "";
-    expect(text).toMatch(/\[ \]\s(🟢|⚪)\s(🛡|⚠)/); // state cluster with spacing
+    expect(text).toMatch(/\[ \]\s(🟢|🔴|⚪)\s(🛡|⚠)/); // state cluster with spacing
+  });
+
+  it("should display 🔴 for inaccessible worktree", async () => {
+    const onSelect = vi.fn();
+    const branches: BranchItem[] = [
+      {
+        ...formatBranchItem({
+          name: "feature/missing-worktree",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+          hasUnpushedCommits: false,
+          worktree: {
+            path: "/tmp/wt-missing",
+            locked: false,
+            prunable: false,
+            isAccessible: false,
+          },
+        }),
+        safeToCleanup: false,
+      },
+    ];
+
+    let renderResult: ReturnType<typeof inkRender>;
+    await act(async () => {
+      renderResult = inkRender(
+        <BranchListScreen
+          branches={branches}
+          stats={mockStats}
+          onSelect={onSelect}
+        />,
+        { stripAnsi: false },
+      );
+    });
+
+    const frame = stripControlSequences(
+      stripAnsi(renderResult.lastFrame() ?? ""),
+    );
+    expect(frame).toContain("[ ] 🔴 ⚠");
   });
 
   it("should render last tool usage when available and Unknown when not", () => {
