@@ -392,11 +392,24 @@ export async function checkFileStat(
 }
 
 /**
+ * Normalizes a path for cross-platform comparison.
+ * Converts backslashes to forward slashes and resolves the path.
+ * @param p - The path to normalize
+ * @returns The normalized path string
+ */
+function normalizePath(p: string): string {
+  // Normalize separators to forward slashes for consistent comparison
+  return path.normalize(p).replace(/\\/g, "/");
+}
+
+/**
  * Checks if a session's cwd matches the target cwd.
  * Matching rules:
  * - Exact match
  * - Session cwd starts with target cwd (session is in subdirectory)
  * - Target cwd starts with session cwd (for worktree subdirectories)
+ *
+ * Paths are normalized before comparison to handle cross-platform differences.
  *
  * @param sessionCwd - The cwd from the session file
  * @param targetCwd - The target cwd to match against
@@ -407,9 +420,11 @@ export function matchesCwd(
   targetCwd: string,
 ): boolean {
   if (!sessionCwd) return false;
+  const normalizedSession = normalizePath(sessionCwd);
+  const normalizedTarget = normalizePath(targetCwd);
   return (
-    sessionCwd === targetCwd ||
-    sessionCwd.startsWith(targetCwd) ||
-    targetCwd.startsWith(sessionCwd)
+    normalizedSession === normalizedTarget ||
+    normalizedSession.startsWith(normalizedTarget) ||
+    normalizedTarget.startsWith(normalizedSession)
   );
 }
