@@ -27,7 +27,7 @@ const WIDTH_OVERRIDES: Record<string, number> = {
   // Worktree status icons
   "🟢": 2,
   "⚪": 2,
-  "🟠": 1,
+  "🔴": 2,
   // Change status icons
   "👉": 1,
   "💾": 1,
@@ -129,7 +129,7 @@ export function BranchListScreen({
   onToggleSelect,
 }: BranchListScreenProps) {
   const { rows } = useTerminalSize();
-  const headerText = "  Legend: [ ]/[ * ] select  🟢/⚪ worktree  🛡/⚠ safe";
+  const headerText = "  Legend: [ ]/[ * ] select  🟢/🔴/⚪ worktree  🛡/⚠ safe";
   const selectedSet = useMemo(
     () => new Set(selectedBranches),
     [selectedBranches],
@@ -406,10 +406,12 @@ export function BranchListScreen({
 
       const isChecked = selectedSet.has(item.name);
       const selectionIcon = isChecked ? "[*]" : "[ ]";
-      const hasWorktree =
-        item.worktreeStatus === "active" ||
-        item.worktreeStatus === "inaccessible";
-      const worktreeIcon = hasWorktree ? chalk.green("🟢") : chalk.gray("⚪");
+      let worktreeIcon = chalk.gray("⚪");
+      if (item.worktreeStatus === "active") {
+        worktreeIcon = chalk.green("🟢");
+      } else if (item.worktreeStatus === "inaccessible") {
+        worktreeIcon = chalk.red("🔴");
+      }
       const safeIcon =
         item.safeToCleanup === true ? chalk.green("🛡") : chalk.yellow("⚠");
       const stateCluster = `${selectionIcon} ${worktreeIcon} ${safeIcon}`;
