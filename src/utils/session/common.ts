@@ -147,30 +147,39 @@ export async function findLatestFile(
 
 /**
  * Collects files recursively from a directory matching a filter.
+ * Uses queue-based iteration to avoid stack overflow on deep directory structures.
+ * @param dir - The root directory to search
+ * @param filter - Function to filter files by name
+ * @returns Array of matching files with their paths and modification times
  */
 export async function collectFilesRecursive(
   dir: string,
   filter: (name: string) => boolean,
 ): Promise<{ fullPath: string; mtime: number }[]> {
   const results: { fullPath: string; mtime: number }[] = [];
-  try {
-    const entries = await readdir(dir, { withFileTypes: true });
-    for (const entry of entries) {
-      const fullPath = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        const nested = await collectFilesRecursive(fullPath, filter);
-        results.push(...nested);
-      } else if (entry.isFile() && filter(entry.name)) {
-        try {
-          const info = await stat(fullPath);
-          results.push({ fullPath, mtime: info.mtimeMs });
-        } catch {
-          // ignore unreadable file
+  const queue: string[] = [dir];
+
+  while (queue.length > 0) {
+    const currentDir = queue.shift();
+    if (!currentDir) break;
+    try {
+      const entries = await readdir(currentDir, { withFileTypes: true });
+      for (const entry of entries) {
+        const fullPath = path.join(currentDir, entry.name);
+        if (entry.isDirectory()) {
+          queue.push(fullPath);
+        } else if (entry.isFile() && filter(entry.name)) {
+          try {
+            const info = await stat(fullPath);
+            results.push({ fullPath, mtime: info.mtimeMs });
+          } catch {
+            // ignore unreadable file
+          }
         }
       }
+    } catch {
+      // ignore unreadable directory
     }
-  } catch {
-    // ignore unreadable directory
   }
   return results;
 }
@@ -368,4 +377,27 @@ export async function checkFileStat(
   } catch {
     return null;
   }
+}
+
+/**
+ * Checks if a session's cwd matches the target cwd.
+ * Matching rules:
+ * - Exact match
+ * - Session cwd starts with target cwd (session is in subdirectory)
+ * - Target cwd starts with session cwd (for worktree subdirectories)
+ *
+ * @param sessionCwd - The cwd from the session file
+ * @param targetCwd - The target cwd to match against
+ * @returns true if the cwd matches
+ */
+export function matchesCwd(
+  sessionCwd: string | null,
+  targetCwd: string,
+): boolean {
+  if (!sessionCwd) return false;
+  return (
+    sessionCwd === targetCwd ||
+    sessionCwd.startsWith(targetCwd) ||
+    targetCwd.startsWith(sessionCwd)
+  );
 }
