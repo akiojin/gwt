@@ -46,6 +46,7 @@ interface EnvVarItem {
 }
 
 const UI_CHROME_HEIGHT = 20; // ヘッダー/フッター/余白などの固定行数
+const ENV_VAR_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /**
  * 環境変数プロファイルエディター画面
@@ -219,12 +220,23 @@ export function EnvironmentProfileScreen({
   const handleStartAddEnv = useCallback(() => {
     setNewEnvKey("");
     setNewEnvValue("");
+    setValidationError(null);
     setMode("add-env-key");
   }, []);
 
   // 環境変数キー入力完了
   const handleEnvKeySubmit = useCallback((key: string) => {
-    setNewEnvKey(key);
+    const trimmedKey = key.trim();
+    if (!ENV_VAR_KEY_PATTERN.test(trimmedKey)) {
+      setValidationError(
+        "Invalid variable name. Use letters, numbers, and underscores (must start with a letter or underscore).",
+      );
+      setNewEnvKey(trimmedKey);
+      return;
+    }
+
+    setValidationError(null);
+    setNewEnvKey(trimmedKey);
     setMode("add-env-value");
   }, []);
 
@@ -519,6 +531,11 @@ export function EnvironmentProfileScreen({
               placeholder="API_KEY"
             />
           </Box>
+          {validationError && (
+            <Box marginTop={1}>
+              <Text color="red">{validationError}</Text>
+            </Box>
+          )}
         </Box>
         <Footer actions={getFooterActions()} />
       </Box>
@@ -724,9 +741,11 @@ export function EnvironmentProfileScreen({
           {osEnvItems
             .slice(osEnvIndex, osEnvIndex + maxOsEnvVisible)
             .map((item, idx) => {
-              // スライス後の先頭（idx === 0）が現在のスクロール位置での選択項目
-              // osEnvIndex は j/k キーでスクロールされ、表示先頭が選択状態を示す
-              const isOsEnvSelected = focus === "osenv" && idx === 0;
+              // osEnvIndex は「選択中のOS環境変数のインデックス」であり、同時にスクロールの先頭位置でもある
+              // そのため、表示上は slice した先頭要素が選択状態になる
+              const actualIndex = osEnvIndex + idx;
+              const isOsEnvSelected =
+                focus === "osenv" && actualIndex === osEnvIndex;
               return (
                 <Box key={item.key}>
                   <Text
