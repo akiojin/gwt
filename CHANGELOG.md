@@ -43,6 +43,14 @@
 * update default Claude Code model to Opus 4.5 ([1dd909e](https://github.com/akiojin/gwt/commit/1dd909ed87a55ce3bb796deb0431d0027571dae2))
 * update Opus model version to 4.5 ([307faeb](https://github.com/akiojin/gwt/commit/307faeb66ebac0ca89b01c07ee19d213797c4d5c))
 
+## [3.1.1](https://github.com/akiojin/gwt/compare/v3.1.0...v3.1.1) (2025-12-16)
+
+
+### Bug Fixes
+
+* アクセス不可Worktreeを🔴表示に変更 ([9a4ef35](https://github.com/akiojin/gwt/commit/9a4ef3566a38063a20cb2cf32e4d495d85edb177))
+* アクセス不可Worktreeを🔴表示に変更 ([9bbc419](https://github.com/akiojin/gwt/commit/9bbc419e50583ff945e92c4717c75278484ffced))
+
 ## [3.1.0](https://github.com/akiojin/gwt/compare/v3.0.0...v3.1.0) (2025-12-16)
 
 
