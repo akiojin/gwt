@@ -35,6 +35,7 @@ type ScreenMode =
 interface ProfileItem {
   label: string;
   value: string;
+  profileName: string | null;
   isActive: boolean;
 }
 
@@ -47,6 +48,7 @@ interface EnvVarItem {
 
 const UI_CHROME_HEIGHT = 20; // ヘッダー/フッター/余白などの固定行数
 const ENV_VAR_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const NO_PROFILE_VALUE = "__gwt_no_profile__";
 
 type FocusTarget = "profiles" | "env" | "osenv";
 
@@ -184,11 +186,21 @@ export function EnvironmentProfileScreen({
   // プロファイル一覧アイテム
   const profileItems: ProfileItem[] = useMemo(() => {
     if (!profiles) return [];
-    return Object.entries(profiles.profiles).map(([name, profile]) => ({
+    const items = Object.entries(profiles.profiles).map(([name, profile]) => ({
       label: `${profile.displayName}${name === activeProfileName ? " (active)" : ""}`,
       value: name,
+      profileName: name,
       isActive: name === activeProfileName,
     }));
+    return [
+      {
+        label: `(none)${activeProfileName === null ? " (active)" : ""}`,
+        value: NO_PROFILE_VALUE,
+        profileName: null,
+        isActive: activeProfileName === null,
+      },
+      ...items,
+    ];
   }, [profiles, activeProfileName]);
 
   // 現在選択中のプロファイル
@@ -264,15 +276,23 @@ export function EnvironmentProfileScreen({
   const handleActivateProfile = useCallback(
     async (item: ProfileItem) => {
       try {
-        await setActiveProfile(item.value);
-        setSelectedProfileName(item.value);
+        await setActiveProfile(item.profileName);
+        if (item.profileName === null) {
+          setSelectedProfileName(null);
+          setFocus("profiles");
+          setProfileIndex(0);
+          setMode("list");
+          return;
+        }
+
+        setSelectedProfileName(item.profileName);
         setFocus("env"); // viewモードでは環境変数にフォーカス
         setMode("view");
       } catch {
         // エラー状態は useProfiles フック側で管理するため、ここでは握りつぶす
       }
     },
-    [setActiveProfile],
+    [setActiveProfile, setSelectedProfileName, setFocus, setProfileIndex],
   );
 
   // 新規プロファイル作成開始
@@ -452,8 +472,8 @@ export function EnvironmentProfileScreen({
         }
         if (input === "d" && profileItems.length > 0) {
           const item = profileItems[profileIndex];
-          if (item && item.value !== activeProfileName) {
-            setSelectedProfileName(item.value);
+          if (item?.profileName && item.profileName !== activeProfileName) {
+            setSelectedProfileName(item.profileName);
             setMode("confirm-delete-profile");
           }
           return;
@@ -757,6 +777,9 @@ export function EnvironmentProfileScreen({
 
   // プロファイル一覧
   if (mode === "list") {
+    const hasProfiles = Boolean(
+      profiles && Object.keys(profiles.profiles).length > 0,
+    );
     return (
       <Box flexDirection="column" height={rows}>
         <Header
@@ -768,18 +791,19 @@ export function EnvironmentProfileScreen({
 
         <Box flexDirection="column" flexGrow={1} marginTop={1}>
           <Box marginBottom={1}>
-            <Text>Select a profile to activate:</Text>
+            <Text>Select a profile to activate (or choose "(none)"):</Text>
           </Box>
 
-          {profileItems.length === 0 ? (
-            <Text dimColor>No profiles. Press [n] to create one.</Text>
-          ) : (
-            <Select
-              items={profileItems}
-              onSelect={handleActivateProfile}
-              selectedIndex={profileIndex}
-              onSelectedIndexChange={setProfileIndex}
-            />
+          <Select
+            items={profileItems}
+            onSelect={handleActivateProfile}
+            selectedIndex={profileIndex}
+            onSelectedIndexChange={setProfileIndex}
+          />
+          {!hasProfiles && (
+            <Box marginTop={1}>
+              <Text dimColor>No profiles. Press [n] to create one.</Text>
+            </Box>
           )}
         </Box>
 

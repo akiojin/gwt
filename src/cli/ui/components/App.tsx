@@ -114,7 +114,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
   const { currentScreen, navigateTo, goBack } = useScreenState();
 
   // Profile state
-  const { activeProfileName } = useProfiles();
+  const { activeProfileName, refresh: refreshProfiles } = useProfiles();
 
   // Version state
   const [version, setVersion] = useState<string | null>(null);
@@ -1285,7 +1285,15 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         );
 
       case "environment-profile":
-        return <EnvironmentProfileScreen onBack={goBack} version={version} />;
+        return (
+          <EnvironmentProfileScreen
+            onBack={() => {
+              void refreshProfiles();
+              goBack();
+            }}
+            version={version}
+          />
+        );
 
       default:
         return renderBranchListScreen();
