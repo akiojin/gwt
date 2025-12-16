@@ -48,6 +48,30 @@ interface EnvVarItem {
 const UI_CHROME_HEIGHT = 20; // ヘッダー/フッター/余白などの固定行数
 const ENV_VAR_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
+type FocusTarget = "profiles" | "env" | "osenv";
+
+interface SelectionState {
+  profileIndex: number;
+  envIndex: number;
+  osEnvIndex: number;
+  focus: FocusTarget;
+  selectedProfileName: string | null;
+}
+
+interface ProfileCreationState {
+  name: string;
+  displayName: string;
+}
+
+interface EnvEditState {
+  key: string;
+  value: string;
+  selectedKey: string | null;
+}
+
+type NumberUpdater = number | ((prev: number) => number);
+type FocusUpdater = FocusTarget | ((prev: FocusTarget) => FocusTarget);
+
 /**
  * 環境変数プロファイルエディター画面
  */
@@ -71,36 +95,91 @@ export function EnvironmentProfileScreen({
   // 画面モード
   const [mode, setMode] = useState<ScreenMode>("list");
 
-  // プロファイル一覧での選択インデックス
-  const [profileIndex, setProfileIndex] = useState(0);
+  const [selection, setSelection] = useState<SelectionState>({
+    profileIndex: 0,
+    envIndex: 0,
+    osEnvIndex: 0,
+    focus: "profiles",
+    selectedProfileName: null,
+  });
 
-  // 環境変数一覧での選択インデックス
-  const [envIndex, setEnvIndex] = useState(0);
+  const [profileCreation, setProfileCreation] = useState<ProfileCreationState>({
+    name: "",
+    displayName: "",
+  });
 
-  // OS環境変数一覧での選択インデックス
-  const [osEnvIndex, setOsEnvIndex] = useState(0);
-
-  // フォーカス: "profiles" | "env" | "osenv"
-  const [focus, setFocus] = useState<"profiles" | "env" | "osenv">("profiles");
-
-  // 新規プロファイル作成用の一時データ
-  const [newProfileName, setNewProfileName] = useState("");
-  const [newProfileDisplayName, setNewProfileDisplayName] = useState("");
-
-  // 環境変数追加/編集用の一時データ
-  const [newEnvKey, setNewEnvKey] = useState("");
-  const [newEnvValue, setNewEnvValue] = useState("");
-
-  // 選択中のプロファイル名
-  const [selectedProfileName, setSelectedProfileName] = useState<string | null>(
-    null,
-  );
-
-  // 選択中の環境変数キー（編集/削除用）
-  const [selectedEnvKey, setSelectedEnvKey] = useState<string | null>(null);
+  const [envEdit, setEnvEdit] = useState<EnvEditState>({
+    key: "",
+    value: "",
+    selectedKey: null,
+  });
 
   // バリデーションエラー
   const [validationError, setValidationError] = useState<string | null>(null);
+
+  const profileIndex = selection.profileIndex;
+  const envIndex = selection.envIndex;
+  const osEnvIndex = selection.osEnvIndex;
+  const focus = selection.focus;
+  const selectedProfileName = selection.selectedProfileName;
+
+  const newProfileName = profileCreation.name;
+  const newProfileDisplayName = profileCreation.displayName;
+
+  const newEnvKey = envEdit.key;
+  const newEnvValue = envEdit.value;
+  const selectedEnvKey = envEdit.selectedKey;
+
+  const setProfileIndex = useCallback((index: number) => {
+    setSelection((prev) => ({ ...prev, profileIndex: index }));
+  }, []);
+
+  const setEnvIndex = useCallback((updater: NumberUpdater) => {
+    setSelection((prev) => ({
+      ...prev,
+      envIndex:
+        typeof updater === "function" ? updater(prev.envIndex) : updater,
+    }));
+  }, []);
+
+  const setOsEnvIndex = useCallback((updater: NumberUpdater) => {
+    setSelection((prev) => ({
+      ...prev,
+      osEnvIndex:
+        typeof updater === "function" ? updater(prev.osEnvIndex) : updater,
+    }));
+  }, []);
+
+  const setFocus = useCallback((updater: FocusUpdater) => {
+    setSelection((prev) => ({
+      ...prev,
+      focus: typeof updater === "function" ? updater(prev.focus) : updater,
+    }));
+  }, []);
+
+  const setSelectedProfileName = useCallback((name: string | null) => {
+    setSelection((prev) => ({ ...prev, selectedProfileName: name }));
+  }, []);
+
+  const setNewProfileName = useCallback((value: string) => {
+    setProfileCreation((prev) => ({ ...prev, name: value }));
+  }, []);
+
+  const setNewProfileDisplayName = useCallback((value: string) => {
+    setProfileCreation((prev) => ({ ...prev, displayName: value }));
+  }, []);
+
+  const setNewEnvKey = useCallback((value: string) => {
+    setEnvEdit((prev) => ({ ...prev, key: value }));
+  }, []);
+
+  const setNewEnvValue = useCallback((value: string) => {
+    setEnvEdit((prev) => ({ ...prev, value }));
+  }, []);
+
+  const setSelectedEnvKey = useCallback((key: string | null) => {
+    setEnvEdit((prev) => ({ ...prev, selectedKey: key }));
+  }, []);
 
   // プロファイル一覧アイテム
   const profileItems: ProfileItem[] = useMemo(() => {
