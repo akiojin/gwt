@@ -43,6 +43,17 @@
 * update default Claude Code model to Opus 4.5 ([1dd909e](https://github.com/akiojin/gwt/commit/1dd909ed87a55ce3bb796deb0431d0027571dae2))
 * update Opus model version to 4.5 ([307faeb](https://github.com/akiojin/gwt/commit/307faeb66ebac0ca89b01c07ee19d213797c4d5c))
 
+## [3.1.2](https://github.com/akiojin/gwt/compare/v3.1.1...v3.1.2) (2025-12-16)
+
+
+### Bug Fixes
+
+* CodeRabbitレビュー最終修正 ([f39d0a6](https://github.com/akiojin/gwt/commit/f39d0a62b455015296027be2100c55635bd90cea))
+* CodeRabbit指摘事項を修正 ([1eebd46](https://github.com/akiojin/gwt/commit/1eebd46a5b8ccafd7b4f7c4849f100a87904f577))
+* CodeRabbit追加指摘事項を修正 ([02a137c](https://github.com/akiojin/gwt/commit/02a137c32ce38084563607e1583efc844138dc84))
+* matchesCwdにクロスプラットフォームパス正規化を追加 ([93afdcc](https://github.com/akiojin/gwt/commit/93afdcc801e7e6f2401aa6722dab93e56459b507))
+* パスプレフィックスマッチングに境界チェックを追加 ([623bc3d](https://github.com/akiojin/gwt/commit/623bc3df12f4923a889b9572395067956b6e5b4c))
+
 ## [3.1.1](https://github.com/akiojin/gwt/compare/v3.1.0...v3.1.1) (2025-12-16)
 
 
