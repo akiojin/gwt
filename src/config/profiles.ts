@@ -7,7 +7,15 @@
  * @see specs/SPEC-dafff079/spec.md
  */
 
-import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  open,
+  readFile,
+  rename,
+  stat,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import path from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { homedir } from "node:os";
@@ -39,6 +47,89 @@ function getConfigDir(): string {
  */
 function getProfilesConfigPath(): string {
   return path.join(getConfigDir(), "profiles.yaml");
+}
+
+const LOCK_RETRY_INTERVAL_MS = 50;
+const LOCK_TIMEOUT_MS = 3000;
+const LOCK_STALE_MS = 30_000;
+
+function getProfilesLockPath(): string {
+  return `${getProfilesConfigPath()}.lock`;
+}
+
+async function withProfilesLock<T>(fn: () => Promise<T>): Promise<T> {
+  const lockPath = getProfilesLockPath();
+  await mkdir(path.dirname(lockPath), { recursive: true });
+
+  const startedAt = Date.now();
+
+  while (true) {
+    try {
+      const handle = await open(lockPath, "wx");
+      try {
+        await handle.writeFile(
+          JSON.stringify(
+            { pid: process.pid, createdAt: new Date().toISOString() },
+            null,
+            2,
+          ),
+          "utf-8",
+        );
+      } finally {
+        await handle.close();
+      }
+      break;
+    } catch (error) {
+      if (!(error instanceof Error) || !("code" in error)) {
+        throw error;
+      }
+
+      if (error.code !== "EEXIST") {
+        throw error;
+      }
+
+      try {
+        const lockStat = await stat(lockPath);
+        const isStale = Date.now() - lockStat.mtimeMs > LOCK_STALE_MS;
+        if (isStale) {
+          await unlink(lockPath).catch(() => {
+            // 他プロセスが先に削除した可能性があるため無視する
+          });
+          continue;
+        }
+      } catch {
+        // lock の stat/unlink が失敗してもリトライする
+      }
+
+      if (Date.now() - startedAt > LOCK_TIMEOUT_MS) {
+        throw new Error(
+          `Timeout acquiring profiles lock: ${lockPath}. Another gwt instance may be running.`,
+        );
+      }
+
+      await new Promise((resolve) =>
+        setTimeout(resolve, LOCK_RETRY_INTERVAL_MS),
+      );
+    }
+  }
+
+  try {
+    return await fn();
+  } finally {
+    await unlink(lockPath).catch(() => {
+      // lock が既に削除されている/削除できない場合は無視する
+    });
+  }
+}
+
+async function mutateProfiles(
+  mutator: (config: ProfilesConfig) => void | Promise<void>,
+): Promise<void> {
+  await withProfilesLock(async () => {
+    const config = await loadProfiles();
+    await mutator(config);
+    await saveProfiles(config);
+  });
 }
 
 /**
@@ -170,14 +261,13 @@ export async function getActiveProfileName(): Promise<string | null> {
 export async function setActiveProfile(
   profileName: string | null,
 ): Promise<void> {
-  const config = await loadProfiles();
+  await mutateProfiles(async (config) => {
+    if (profileName !== null && !config.profiles[profileName]) {
+      throw new Error(`Profile "${profileName}" does not exist`);
+    }
 
-  if (profileName !== null && !config.profiles[profileName]) {
-    throw new Error(`Profile "${profileName}" does not exist`);
-  }
-
-  config.activeProfile = profileName;
-  await saveProfiles(config);
+    config.activeProfile = profileName;
+  });
 }
 
 /**
@@ -198,14 +288,13 @@ export async function createProfile(
     );
   }
 
-  const config = await loadProfiles();
+  await mutateProfiles(async (config) => {
+    if (config.profiles[name]) {
+      throw new Error(`Profile "${name}" already exists`);
+    }
 
-  if (config.profiles[name]) {
-    throw new Error(`Profile "${name}" already exists`);
-  }
-
-  config.profiles[name] = profile;
-  await saveProfiles(config);
+    config.profiles[name] = profile;
+  });
 }
 
 /**
@@ -219,17 +308,16 @@ export async function updateProfile(
   name: string,
   updates: Partial<EnvironmentProfile>,
 ): Promise<void> {
-  const config = await loadProfiles();
+  await mutateProfiles(async (config) => {
+    if (!config.profiles[name]) {
+      throw new Error(`Profile "${name}" does not exist`);
+    }
 
-  if (!config.profiles[name]) {
-    throw new Error(`Profile "${name}" does not exist`);
-  }
-
-  config.profiles[name] = {
-    ...config.profiles[name],
-    ...updates,
-  };
-  await saveProfiles(config);
+    config.profiles[name] = {
+      ...config.profiles[name],
+      ...updates,
+    };
+  });
 }
 
 /**
@@ -240,20 +328,19 @@ export async function updateProfile(
  * @throws プロファイルが存在しない場合
  */
 export async function deleteProfile(name: string): Promise<void> {
-  const config = await loadProfiles();
+  await mutateProfiles(async (config) => {
+    if (!config.profiles[name]) {
+      throw new Error(`Profile "${name}" does not exist`);
+    }
 
-  if (!config.profiles[name]) {
-    throw new Error(`Profile "${name}" does not exist`);
-  }
+    if (config.activeProfile === name) {
+      throw new Error(
+        `Cannot delete active profile "${name}". Please switch to another profile first.`,
+      );
+    }
 
-  if (config.activeProfile === name) {
-    throw new Error(
-      `Cannot delete active profile "${name}". Please switch to another profile first.`,
-    );
-  }
-
-  delete config.profiles[name];
-  await saveProfiles(config);
+    delete config.profiles[name];
+  });
 }
 
 /**
