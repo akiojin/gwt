@@ -212,6 +212,7 @@ export async function launchClaudeCode(
 
       try {
         await execa(file, fileArgs, { ...execOptions, shell: false });
+        return;
       } catch (error: unknown) {
         const err = error as NodeJS.ErrnoException;
         if (err?.code === "ENOENT" || err?.code === "EINVAL") {
@@ -381,10 +382,10 @@ export async function launchClaudeCode(
  * Check if locally installed `claude` command is available
  * @returns true if `claude` command exists in PATH, false otherwise
  */
-async function isClaudeCommandAvailable(): Promise<boolean> {
+async function isCommandAvailable(commandName: string): Promise<boolean> {
   try {
     const command = process.platform === "win32" ? "where" : "which";
-    await execa(command, ["claude"], {
+    await execa(command, [commandName], {
       shell: true,
       stdin: "ignore",
       stdout: "ignore",
@@ -392,24 +393,16 @@ async function isClaudeCommandAvailable(): Promise<boolean> {
     });
     return true;
   } catch {
-    // claude command not found in PATH
     return false;
   }
 }
 
+async function isClaudeCommandAvailable(): Promise<boolean> {
+  return isCommandAvailable("claude");
+}
+
 async function isNpxCommandAvailable(): Promise<boolean> {
-  try {
-    const command = process.platform === "win32" ? "where" : "which";
-    await execa(command, ["npx"], {
-      shell: true,
-      stdin: "ignore",
-      stdout: "ignore",
-      stderr: "ignore",
-    });
-    return true;
-  } catch {
-    return false;
-  }
+  return isCommandAvailable("npx");
 }
 
 export async function isClaudeCodeAvailable(): Promise<boolean> {

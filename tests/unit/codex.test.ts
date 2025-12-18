@@ -64,6 +64,16 @@ import {
 // Get typed mock
 const mockExeca = execa as ReturnType<typeof vi.fn>;
 
+type ExecaCall = [unknown, string[], Record<string, unknown>];
+
+const getExecaCall = (index = 0): ExecaCall =>
+  mockExeca.mock.calls[index] as unknown as ExecaCall;
+
+const getExecaArgs = (index = 0): string[] => getExecaCall(index)[1];
+
+const getExecaOptions = (index = 0): Record<string, unknown> =>
+  getExecaCall(index)[2];
+
 const DEFAULT_CODEX_ARGS = buildDefaultCodexArgs(
   DEFAULT_CODEX_MODEL,
   DEFAULT_CODEX_REASONING_EFFORT,
@@ -102,11 +112,7 @@ describe("codex.ts", () => {
     await launchCodexCLI(worktreePath);
 
     expect(execa).toHaveBeenCalledTimes(1);
-    const [, args, options] = mockExeca.mock.calls[0] as unknown as [
-      unknown,
-      string[],
-      Record<string, unknown>,
-    ];
+    const [, args, options] = getExecaCall();
 
     expect(args).toEqual(["@openai/codex@latest", ...DEFAULT_CODEX_ARGS]);
     expect(options).toMatchObject({
@@ -138,7 +144,7 @@ describe("codex.ts", () => {
   it("should place extra arguments before the default set", async () => {
     await launchCodexCLI(worktreePath, { extraArgs: ["--custom-flag"] });
 
-    const [, args] = mockExeca.mock.calls[0] as unknown as [unknown, string[]];
+    const args = getExecaArgs();
     expect(args).toEqual([
       "@openai/codex@latest",
       "--custom-flag",
@@ -149,7 +155,7 @@ describe("codex.ts", () => {
   it("should include resume command arguments before defaults when continuing", async () => {
     await launchCodexCLI(worktreePath, { mode: "continue" });
 
-    const [, args] = mockExeca.mock.calls[0] as unknown as [unknown, string[]];
+    const args = getExecaArgs();
     expect(args).toEqual([
       "@openai/codex@latest",
       "resume",
@@ -164,7 +170,7 @@ describe("codex.ts", () => {
       reasoningEffort: "xhigh",
     });
 
-    const [, args] = mockExeca.mock.calls[0] as unknown as [unknown, string[]];
+    const args = getExecaArgs();
     expect(args).toEqual([
       "@openai/codex@latest",
       ...buildDefaultCodexArgs("gpt-5.1-codex-max", "xhigh"),
@@ -177,7 +183,7 @@ describe("codex.ts", () => {
       reasoningEffort: "xhigh",
     });
 
-    const [, args] = mockExeca.mock.calls[0] as unknown as [unknown, string[]];
+    const args = getExecaArgs();
     expect(args).toEqual([
       "@openai/codex@latest",
       ...buildDefaultCodexArgs("gpt-5.2", "xhigh"),
@@ -192,11 +198,7 @@ describe("codex.ts", () => {
 
     await launchCodexCLI(worktreePath);
 
-    const [, , options] = mockExeca.mock.calls[0] as unknown as [
-      unknown,
-      unknown,
-      Record<string, unknown>,
-    ];
+    const options = getExecaOptions();
     expect(options).toMatchObject({
       stdin: 11,
       stdout: 12,
@@ -213,7 +215,7 @@ describe("codex.ts", () => {
   it("should include --enable skills in default arguments (FR-202)", async () => {
     await launchCodexCLI(worktreePath);
 
-    const [, args] = mockExeca.mock.calls[0] as unknown as [unknown, string[]];
+    const args = getExecaArgs();
 
     // Find the index of "--enable" followed by "skills"
     const enableIndex = args.findIndex(
