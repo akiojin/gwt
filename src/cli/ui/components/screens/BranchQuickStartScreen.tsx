@@ -32,6 +32,10 @@ const formatSkip = (skip?: boolean | null) =>
 
 const supportsReasoning = (toolId?: string | null) => toolId === "codex-cli";
 
+const UNSUPPORTED_TOOL_ID = "qwen-cli";
+const UNSUPPORTED_TOOL_MESSAGE = "Unsupported tool (Qwen CLI). ";
+const UNSUPPORTED_TOOL_CATEGORY_LABEL = "Qwen (unsupported)";
+
 const describe = (opt: BranchQuickStartOption, includeSessionId = true) => {
   const parts = [`Model: ${opt.model ?? "default"}`];
   if (supportsReasoning(opt.toolId)) {
@@ -111,7 +115,7 @@ export function BranchQuickStartScreen({
         const flat: QuickStartItem[] = [];
         sorted.forEach((opt, idx) => {
           const cat = resolveCategory(opt.toolId);
-          const isUnsupportedTool = opt.toolId === "qwen-cli";
+          const isUnsupportedTool = opt.toolId === UNSUPPORTED_TOOL_ID;
           const prevCat =
             idx > 0 ? resolveCategory(sorted[idx - 1]?.toolId).label : null;
           const isNewCategory = prevCat !== cat.label;
@@ -123,7 +127,7 @@ export function BranchQuickStartScreen({
               action: "reuse-continue",
               toolId: opt.toolId ?? null,
               description: isUnsupportedTool
-                ? `Unsupported tool (Qwen CLI). ${describe(opt, true)}`
+                ? `${UNSUPPORTED_TOOL_MESSAGE}${describe(opt, true)}`
                 : describe(opt, true),
               ...(isUnsupportedTool ? { disabled: true } : {}),
               groupStart: isNewCategory && flat.length > 0,
@@ -136,7 +140,7 @@ export function BranchQuickStartScreen({
               action: "reuse-new",
               toolId: opt.toolId ?? null,
               description: isUnsupportedTool
-                ? `Unsupported tool (Qwen CLI). ${describe(opt, false)}`
+                ? `${UNSUPPORTED_TOOL_MESSAGE}${describe(opt, false)}`
                 : describe(opt, false),
               ...(isUnsupportedTool ? { disabled: true } : {}),
               groupStart: false,
@@ -206,7 +210,9 @@ export function BranchQuickStartScreen({
           }}
           renderItem={(item: QuickStartItem, isSelected) => {
             const categoryLabel =
-              item.toolId === "qwen-cli" ? "Qwen (unsupported)" : item.category;
+              item.toolId === UNSUPPORTED_TOOL_ID
+                ? UNSUPPORTED_TOOL_CATEGORY_LABEL
+                : item.category;
 
             return (
               <Box
