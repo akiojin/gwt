@@ -23,6 +23,3 @@ export {
   findLatestGeminiSession,
   findLatestGeminiSessionId,
 } from "./gemini.js";
-
-// Qwen CLI
-export { findLatestQwenSessionId } from "./qwen.js";
