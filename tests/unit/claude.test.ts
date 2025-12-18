@@ -668,7 +668,7 @@ describe("launchClaudeCode - Root User Detection", () => {
       // where claude fails, where npx succeeds, then npx runs
       mockExeca
         .mockRejectedValueOnce(new Error("Command not found")) // where claude
-        .mockResolvedValueOnce({ stdout: "C:\\\\bin\\\\npx.cmd" }) // where npx
+        .mockResolvedValueOnce({ stdout: String.raw`C:\bin\npx.cmd` }) // where npx
         .mockResolvedValueOnce(createChildProcess()); // npx execution
 
       await launchClaudeCode("/test/path");
