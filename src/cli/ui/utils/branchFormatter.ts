@@ -98,7 +98,6 @@ function mapToolLabel(toolId: string, toolLabel?: string): string {
   if (toolId === "claude-code") return "Claude";
   if (toolId === "codex-cli") return "Codex";
   if (toolId === "gemini-cli") return "Gemini";
-  if (toolId === "qwen-cli") return "Qwen";
   if (toolLabel) return toolLabel;
   return "Custom";
 }

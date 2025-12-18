@@ -1,29 +1,45 @@
 import React, { useState } from "react";
-import { Box, Text, useInput } from "ink";
+import { Box, Text } from "ink";
 import { Header } from "../parts/Header.js";
 import { Footer } from "../parts/Footer.js";
 import { Select } from "../common/Select.js";
+import { useAppInput } from "../../hooks/useAppInput.js";
 import { useTerminalSize } from "../../hooks/useTerminalSize.js";
 
+/**
+ * Supported execution modes for interactive tools.
+ */
 export type ExecutionMode = "normal" | "continue" | "resume";
 
+/**
+ * Selectable execution mode item (step 1).
+ */
 export interface ExecutionModeItem {
   label: string;
   value: ExecutionMode;
   description: string;
 }
 
+/**
+ * Selectable skip-permissions item (step 2).
+ */
 export interface SkipPermissionsItem {
   label: string;
   value: string; // "yes" or "no"
   description: string;
 }
 
+/**
+ * Result returned by `ExecutionModeSelectorScreen`.
+ */
 export interface ExecutionModeResult {
   mode: ExecutionMode;
   skipPermissions: boolean;
 }
 
+/**
+ * Props for `ExecutionModeSelectorScreen`.
+ */
 export interface ExecutionModeSelectorScreenProps {
   onBack: () => void;
   onSelect: (result: ExecutionModeResult) => void;
@@ -48,7 +64,7 @@ export function ExecutionModeSelectorScreen({
   const [selectedMode, setSelectedMode] = useState<ExecutionMode | null>(null);
 
   // Handle keyboard input
-  useInput((input, key) => {
+  useAppInput((input, key) => {
     if (key.escape) {
       if (step === 2) {
         // Go back to step 1

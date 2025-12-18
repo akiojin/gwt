@@ -34,6 +34,7 @@ const mockChildStdio = {
 vi.mock("../../src/utils/terminal", () => ({
   getTerminalStreams: vi.fn(() => mockTerminalStreams),
   createChildStdio: vi.fn(() => mockChildStdio),
+  resetTerminalModes: vi.fn(),
 }));
 
 import { launchGeminiCLI } from "../../src/gemini.js";
@@ -462,6 +463,67 @@ describe("launchGeminiCLI", () => {
       mockChildStdio.stdin = "inherit";
       mockChildStdio.stdout = "inherit";
       mockChildStdio.stderr = "inherit";
+    });
+
+    it("T016: resetTerminalModesが正常時に呼び出される", async () => {
+      mockExeca
+        .mockResolvedValueOnce({
+          // which/where gemini (success)
+          stdout: "/usr/local/bin/gemini",
+          stderr: "",
+          exitCode: 0,
+        })
+        .mockResolvedValueOnce({
+          // gemini execution
+          stdout: "",
+          stderr: "",
+          exitCode: 0,
+        });
+
+      await launchGeminiCLI("/test/path");
+
+      const { resetTerminalModes } =
+        await import("../../src/utils/terminal.js");
+      const mockResetTerminalModes =
+        resetTerminalModes as unknown as ReturnType<typeof vi.fn>;
+
+      expect(mockResetTerminalModes).toHaveBeenCalledTimes(2);
+      expect(mockResetTerminalModes).toHaveBeenNthCalledWith(
+        1,
+        mockTerminalStreams.stdout,
+      );
+      expect(mockResetTerminalModes).toHaveBeenNthCalledWith(
+        2,
+        mockTerminalStreams.stdout,
+      );
+    });
+
+    it("T017: resetTerminalModesがエラー時でも呼び出される", async () => {
+      mockExeca
+        .mockResolvedValueOnce({
+          // which/where gemini (success)
+          stdout: "/usr/local/bin/gemini",
+          stderr: "",
+          exitCode: 0,
+        })
+        .mockRejectedValueOnce(new Error("Boom")) // gemini execution
+        .mockResolvedValueOnce({
+          // which/where gemini (catch block)
+          stdout: "/usr/local/bin/gemini",
+          stderr: "",
+          exitCode: 0,
+        });
+
+      await expect(launchGeminiCLI("/test/path")).rejects.toThrow(
+        /Failed to launch Gemini CLI/,
+      );
+
+      const { resetTerminalModes } =
+        await import("../../src/utils/terminal.js");
+      const mockResetTerminalModes =
+        resetTerminalModes as unknown as ReturnType<typeof vi.fn>;
+
+      expect(mockResetTerminalModes).toHaveBeenCalledTimes(2);
     });
   });
 

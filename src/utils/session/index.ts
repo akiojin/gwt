@@ -5,7 +5,6 @@
  * - Claude Code
  * - Codex CLI
  * - Gemini CLI
- * - Qwen CLI
  */
 
 // Type exports
@@ -41,6 +40,3 @@ export {
   findLatestGeminiSession,
   findLatestGeminiSessionId,
 } from "./parsers/gemini.js";
-
-// Qwen CLI parser
-export { findLatestQwenSessionId } from "./parsers/qwen.js";

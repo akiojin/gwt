@@ -204,6 +204,8 @@ describe("App protected branch handling", () => {
     });
 
     expect(navigateToMock).toHaveBeenCalledWith("branch-action-selector");
-    expect(branchQuickStartProps).not.toHaveLength(0);
+    // When branchQuickStart is empty, navigates to ai-tool-selector instead of branch-quick-start
+    // So AIToolSelectorScreen should be rendered, not BranchQuickStartScreen
+    expect(aiToolProps).not.toHaveLength(0);
   });
 });
