@@ -63,6 +63,6 @@ describe("modelOptions", () => {
   });
 
   it("returns no models for unsupported tools", () => {
-    expect(byId("qwen-cli")).toEqual([]);
+    expect(byId("unknown-tool")).toEqual([]);
   });
 });

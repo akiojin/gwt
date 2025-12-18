@@ -47,17 +47,16 @@
 
 ---
 
-### ユーザーストーリー 4 - Gemini/Qwenでも同等の再開体験 (優先度: P2)
+### ユーザーストーリー 4 - Geminiでも同等の再開体験 (優先度: P2)
 
-開発者がGeminiまたはQwenを利用するときも、セッションID（または保存タグ）を保存・表示し、Continue/Resumeで最新セッションを再開できる。
+開発者がGeminiを利用するときも、セッションIDを保存・表示し、Continue/Resumeで最新セッションを再開できる。
 
 **この優先度の理由**: マルチツール利用時の体験差異をなくし、一貫した「続きから」操作を提供するため。  
-**独立したテスト**: Gemini/Qwenで1セッション実行→終了→Continue/Resume起動時にID/タグが表示・渡されることを確認。
+**独立したテスト**: Geminiで1セッション実行→終了→Continue/Resume起動時にIDが表示・渡されることを確認。
 
 **受け入れシナリオ**:
 1. **前提条件** Geminiセッション実行済み、**操作** gwtでContinue、**期待結果** `gemini --resume <ID>` が渡され同じ会話が開く（IDがない場合は最新にフォールバック）。
-2. **前提条件** Qwenセッションを `/chat save foo` で保存済み、**操作** gwtでContinue、**期待結果** 保存タグが表示され、ログに `/chat resume foo` を実行する案内が出る（自動入力不可の場合は手動案内）。
-3. **前提条件** Gemini/Qwenで履歴無し、**操作** Continue、**期待結果** 従来の新規起動にフォールバックし警告を表示。
+2. **前提条件** Geminiで履歴無し、**操作** Continue、**期待結果** 従来の新規起動にフォールバックし警告を表示。
 
 ---
 
@@ -73,7 +72,7 @@
 1. **前提条件** 対象ブランチの履歴に`toolId/model/sessionId`がある、**操作** ブランチ選択→「前回設定で続きから」を選択、**期待結果** ツール・モデルが前回値でセットされ、Continue/Resumeモード選択へ進み、sessionIdが事前入力される。
 2. **前提条件** 対象ブランチの履歴に`toolId/model`はあるが`sessionId`が無い、**操作** ブランチ選択→「前回設定で新規」を選択、**期待結果** ツール・モデルが前回値でセットされ、新規開始モードで起動フローに進む。
 3. **前提条件** 対象ブランチに履歴が無い、**操作** ブランチ選択、**期待結果** クイック選択をスキップし従来のツール選択画面に遷移する。
-4. **表示ルール** Quick Startではツール固有の情報のみ表示する。CodexではReasoningレベルを表示するが、Claude/Gemini/QwenではReasoningを表示しない。また「Start new with previous settings」ではセッションIDを表示しない（IDは「Resume with previous settings」のみで提示する）。
+4. **表示ルール** Quick Startではツール固有の情報のみ表示する。CodexではReasoningレベルを表示するが、Claude/GeminiではReasoningを表示しない。また「Start new with previous settings」ではセッションIDを表示しない（IDは「Resume with previous settings」のみで提示する）。
 5. **ツール別保持** 同一ブランチ内で複数ツールを切り替えた場合でも、各ツールの直近設定を並列に保持・提示し、Quick Startでツールごとの「Resume/Start new」を選べること（例: Codex行とClaude行が並ぶ）。
 
 ---
@@ -82,7 +81,7 @@
 - セッションディレクトリ（`~/.codex/sessions` や `~/.claude/projects/.../sessions`）が存在しない/権限不足。
 - 24時間ルールで保存済みセッションが期限切れの場合のフォールバック動作。
 - Windows/WSLパス差異でセッションファイル探索に失敗する場合。
-- 非対応ツール（Gemini/Qwen/カスタム）の場合は従来挙動を維持する。
+- 非対応ツール（カスタムなど）の場合は従来挙動を維持する。
 
 ## 要件 *(必須)*
 
@@ -94,12 +93,11 @@
 - **FR-005**: 「Resume」実行時、gwtは保存済み履歴の一覧選択を行わず、ツールが提供するResume機能を起動しなければならない（sessionIdを自動補完しない）。ただし、Quick Start等でsessionIdが明示的に指定された場合は、そのIDをツールのResume引数として付与してもよい。
 - **FR-006**: セッション終了時に「Session ID」「Resumeコマンド例」「保存先パス」をユーザーに表示し、必要ならコピーできるようにしなければならない。
 - **FR-007**: セッション保存・読み出しが失敗してもワークフローをブロックしないこと。失敗時は警告を表示し、デフォルト起動に戻る。
-- **FR-008**: Gemini/Qwen/カスタムツールなどセッションIDを提供しないツールでは、既存の保存ロジックを変更せず、Continue/ResumeでIDを要求しない。
+- **FR-008**: セッションIDを提供しないツールでは、既存の保存ロジックを変更せず、Continue/ResumeでIDを要求しない。
 - **FR-009**: Gemini CLIでは終了後に`~/.gemini/tmp/<project_hash>/chats/*.json`の最新ファイルからIDを抽出し、Continue/Resume時は`--resume <id>`を優先、ID不明時は`--resume`（latest）にフォールバックしなければならない。
-- **FR-010**: Qwen CLIでは終了後に`~/.qwen/tmp/<project_hash>/`配下の保存ファイル（/chat save or checkpoint）からタグ/IDを抽出し履歴に保存しなければならない。Continue/Resume時には保存タグを表示し、`/chat resume <tag>` の案内を必ず出すこと（自動再開できない場合のフォールバック）。
-- **FR-011**: ブランチ選択直後、同ブランチの最新履歴が存在する場合は前回の`toolId/model/sessionId`を提示するクイック選択を表示し、「前回設定で続きから」「前回設定で新規」「設定を選び直す」の3択を提供しなければならない。履歴が無い場合は従来のツール選択にフォールバックする。
-- **FR-012**: Quick Startの表示内容はツール能力に応じて切り替えること。CodexのみReasoningレベルを表示し、他ツールでは非表示とする。また「Start new with previous settings」ではセッションIDを表示しない。
-- **FR-013**: 同一ブランチで複数ツールを利用した場合、各ツールごとに直近設定（toolId/model/reasoningLevel/skipPermissions/sessionId）を保持し、Quick Startでツール別の「Resume with previous settings / Start new with previous settings」を提示する。履歴が無いツールは表示しない。
+- **FR-010**: ブランチ選択直後、同ブランチの最新履歴が存在する場合は前回の`toolId/model/sessionId`を提示するクイック選択を表示し、「前回設定で続きから」「前回設定で新規」「設定を選び直す」の3択を提供しなければならない。履歴が無い場合は従来のツール選択にフォールバックする。
+- **FR-011**: Quick Startの表示内容はツール能力に応じて切り替えること。CodexのみReasoningレベルを表示し、他ツールでは非表示とする。また「Start new with previous settings」ではセッションIDを表示しない。
+- **FR-012**: 同一ブランチで複数ツールを利用した場合、各ツールごとに直近設定（toolId/model/reasoningLevel/skipPermissions/sessionId）を保持し、Quick Startでツール別の「Resume with previous settings / Start new with previous settings」を提示する。履歴が無いツールは表示しない。
 
 ### 主要エンティティ
 - **SessionData**: `lastWorktreePath`, `lastBranch`, `lastUsedTool`, `mode`, `model`, 追加で `lastSessionId` を持つ。履歴`history[]`に`sessionId`/`toolId`/`branch`/`timestamp`を保持。
@@ -131,7 +129,7 @@
 
 - Web UIでのセッション一覧表示やコピー操作
 - セッションIDのクラウド同期・共有機能
-- 他ツール(Gemini/Qwen/カスタム)のセッション管理実装
+- カスタムツールのセッション管理実装
 - Claude/Codex本体の挙動変更やセッション保持期間の延長
 
 ## セキュリティとプライバシーの考慮事項 *(該当する場合)*
