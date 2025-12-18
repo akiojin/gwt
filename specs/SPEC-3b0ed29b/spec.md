@@ -136,6 +136,7 @@ gwtから各AIツール（Claude Code、Codex、Gemini、Qwen）を起動する�
 - **FR-009**: Quick Startは、選択中のブランチ／ワークツリーごとにツール別最新セッションを表示し、他ブランチのセッションIDを混在させてはならない
 - **FR-010**: Quick Startは、履歴が古い場合でもワークツリー内のセッションファイルを走査し、有効な`session_id`を持つ最新ファイルを優先して表示しなければならない
 - **FR-011**: Quick Startは、Reasoning設定を持たないツール（Claude Code / Gemini / Qwen）ではReasoning表示を出してはならない
+- **FR-012**: 各AIツールは、起動プロセスのstdin/stdout/stderrを親ターミナル（TTY）へ接続し、色表示・ターミナル幅・インタラクティブ描画が失われないように**しなければならない**
 
 #### Claude Code固有要件
 
