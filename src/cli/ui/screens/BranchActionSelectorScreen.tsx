@@ -5,6 +5,9 @@ import { Footer } from "../components/parts/Footer.js";
 import { useAppInput } from "../hooks/useAppInput.js";
 import type { BranchAction } from "../types.js";
 
+/**
+ * Props for `BranchActionSelectorScreen`.
+ */
 export interface BranchActionSelectorScreenProps {
   selectedBranch: string;
   onUseExisting: () => void;

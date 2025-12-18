@@ -10,6 +10,10 @@ import { findLatestGeminiSessionId } from "./utils/session.js";
 
 const GEMINI_CLI_PACKAGE = "@google/gemini-cli@latest";
 
+/**
+ * Error wrapper used by `launchGeminiCLI` to preserve the original failure
+ * while providing a user-friendly message.
+ */
 export class GeminiError extends Error {
   constructor(
     message: string,
@@ -20,6 +24,16 @@ export class GeminiError extends Error {
   }
 }
 
+/**
+ * Launches Gemini CLI in the given worktree path.
+ *
+ * This function resets terminal modes before and after the child process and
+ * supports continue/resume modes when a session id is available.
+ *
+ * @param worktreePath - Worktree directory to run Gemini CLI in
+ * @param options - Launch options (mode/session/model/permissions/env)
+ * @returns Captured session id when available
+ */
 export async function launchGeminiCLI(
   worktreePath: string,
   options: {
@@ -320,6 +334,9 @@ async function isGeminiCommandAvailable(): Promise<boolean> {
   }
 }
 
+/**
+ * Checks whether Gemini CLI is available via `bunx` in the current environment.
+ */
 export async function isGeminiCLIAvailable(): Promise<boolean> {
   try {
     await execa("bunx", [GEMINI_CLI_PACKAGE, "--version"], { shell: true });

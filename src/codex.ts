@@ -11,11 +11,27 @@ import { findLatestCodexSession } from "./utils/session.js";
 
 const CODEX_CLI_PACKAGE = "@openai/codex@latest";
 
+/**
+ * Reasoning effort levels supported by Codex CLI.
+ */
 export type CodexReasoningEffort = "low" | "medium" | "high" | "xhigh";
 
+/**
+ * Default Codex model used when no override is provided.
+ */
 export const DEFAULT_CODEX_MODEL = "gpt-5.1-codex";
+
+/**
+ * Default reasoning effort used when no override is provided.
+ */
 export const DEFAULT_CODEX_REASONING_EFFORT: CodexReasoningEffort = "high";
 
+/**
+ * Builds the default argument list for Codex CLI launch.
+ *
+ * @param model - Model name to pass via `--model`
+ * @param reasoningEffort - Reasoning effort to pass via config
+ */
 export const buildDefaultCodexArgs = (
   model: string = DEFAULT_CODEX_MODEL,
   reasoningEffort: CodexReasoningEffort = DEFAULT_CODEX_REASONING_EFFORT,
@@ -41,6 +57,10 @@ export const buildDefaultCodexArgs = (
   "shell_environment_policy.experimental_use_profile=true",
 ];
 
+/**
+ * Error wrapper used by `launchCodexCLI` to preserve the original failure
+ * while providing a user-friendly message.
+ */
 export class CodexError extends Error {
   constructor(
     message: string,
@@ -51,6 +71,16 @@ export class CodexError extends Error {
   }
 }
 
+/**
+ * Launches Codex CLI in the given worktree path.
+ *
+ * This function resets terminal modes before and after the child process and
+ * tries to detect a session id after launch (when supported).
+ *
+ * @param worktreePath - Worktree directory to run Codex CLI in
+ * @param options - Launch options (mode/session/model/reasoning/env)
+ * @returns Captured session id when available
+ */
 export async function launchCodexCLI(
   worktreePath: string,
   options: {
@@ -244,6 +274,9 @@ export async function launchCodexCLI(
   }
 }
 
+/**
+ * Checks whether Codex CLI is available via `bunx` in the current environment.
+ */
 export async function isCodexAvailable(): Promise<boolean> {
   try {
     await execa("bunx", [CODEX_CLI_PACKAGE, "--help"]);

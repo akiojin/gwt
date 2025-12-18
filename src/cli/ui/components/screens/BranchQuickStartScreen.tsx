@@ -6,8 +6,14 @@ import { Select, type SelectItem } from "../common/Select.js";
 import { useAppInput } from "../../hooks/useAppInput.js";
 import { useTerminalSize } from "../../hooks/useTerminalSize.js";
 
+/**
+ * Action returned by `BranchQuickStartScreen`.
+ */
 export type QuickStartAction = "reuse-continue" | "reuse-new" | "manual";
 
+/**
+ * Previous tool/session configuration shown in the quick start list.
+ */
 export interface BranchQuickStartOption {
   toolId?: string | null;
   toolLabel: string;
@@ -55,6 +61,9 @@ type QuickStartItem = SelectItem & {
   categoryColor: "cyan" | "yellow" | "magenta" | "green" | "white";
 };
 
+/**
+ * Props for `BranchQuickStartScreen`.
+ */
 export interface BranchQuickStartScreenProps {
   previousOptions: BranchQuickStartOption[];
   loading?: boolean;

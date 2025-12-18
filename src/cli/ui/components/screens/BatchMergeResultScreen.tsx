@@ -7,6 +7,9 @@ import { useAppInput } from "../../hooks/useAppInput.js";
 import { useTerminalSize } from "../../hooks/useTerminalSize.js";
 import type { BatchMergeResult } from "../../types.js";
 
+/**
+ * Props for `BatchMergeResultScreen`.
+ */
 export interface BatchMergeResultScreenProps {
   result: BatchMergeResult;
   onBack?: () => void;

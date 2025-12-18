@@ -13,6 +13,9 @@ import {
   getModelOptions,
 } from "../../utils/modelOptions.js";
 
+/**
+ * Result returned by `ModelSelectorScreen`.
+ */
 export interface ModelSelectionResult {
   model: string | null;
   inferenceLevel?: InferenceLevel;
@@ -26,6 +29,9 @@ interface InferenceSelectItem extends SelectItem {
   hint?: string;
 }
 
+/**
+ * Props for `ModelSelectorScreen`.
+ */
 export interface ModelSelectorScreenProps {
   tool: AITool;
   onBack: () => void;

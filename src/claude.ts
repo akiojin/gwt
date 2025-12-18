@@ -10,6 +10,10 @@ import { findLatestClaudeSession } from "./utils/session.js";
 
 const CLAUDE_CLI_PACKAGE = "@anthropic-ai/claude-code@latest";
 
+/**
+ * Error wrapper used by `launchClaudeCode` to preserve the original failure
+ * while providing a user-friendly message.
+ */
 export class ClaudeError extends Error {
   constructor(
     message: string,
@@ -20,6 +24,20 @@ export class ClaudeError extends Error {
   }
 }
 
+/**
+ * Launches Claude Code in the given worktree path.
+ *
+ * This function:
+ * - validates the worktree path
+ * - normalizes launch arguments (mode/model/session/extra args)
+ * - resets terminal modes before and after the child process
+ * - auto-detects a local `claude` command and falls back to `npx` (Windows) or
+ *   `bunx` when needed
+ *
+ * @param worktreePath - Worktree directory to run Claude Code in
+ * @param options - Launch options (mode/session/model/permissions/env)
+ * @returns Captured session id when available
+ */
 export async function launchClaudeCode(
   worktreePath: string,
   options: {
@@ -379,8 +397,10 @@ export async function launchClaudeCode(
 }
 
 /**
- * Check if locally installed `claude` command is available
- * @returns true if `claude` command exists in PATH, false otherwise
+ * Checks whether a command is available in the current PATH.
+ *
+ * @param commandName - Command name to look up (`where` on Windows, `which` elsewhere)
+ * @returns true if the command exists in PATH
  */
 async function isCommandAvailable(commandName: string): Promise<boolean> {
   try {
@@ -405,6 +425,9 @@ async function isNpxCommandAvailable(): Promise<boolean> {
   return isCommandAvailable("npx");
 }
 
+/**
+ * Checks whether Claude Code is available via `bunx` in the current environment.
+ */
 export async function isClaudeCodeAvailable(): Promise<boolean> {
   try {
     await execa("bunx", [CLAUDE_CLI_PACKAGE, "--version"], { shell: true });

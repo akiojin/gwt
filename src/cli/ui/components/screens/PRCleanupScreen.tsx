@@ -7,12 +7,18 @@ import { useAppInput } from "../../hooks/useAppInput.js";
 import { useTerminalSize } from "../../hooks/useTerminalSize.js";
 import type { CleanupTarget } from "../../types.js";
 
+/**
+ * Renderable item for the cleanup target list.
+ */
 export interface PRItem {
   label: string;
   value: string;
   target: CleanupTarget;
 }
 
+/**
+ * Props for `PRCleanupScreen`.
+ */
 export interface PRCleanupScreenProps {
   targets: CleanupTarget[];
   loading: boolean;
