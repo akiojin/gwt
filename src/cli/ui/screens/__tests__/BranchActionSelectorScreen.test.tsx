@@ -184,32 +184,36 @@ describe("BranchActionSelectorScreen", () => {
 
   it("should still handle Escape key as back navigation", () => {
     vi.useFakeTimers();
-    const onUseExisting = vi.fn();
-    const onCreateNew = vi.fn();
-    const onBack = vi.fn();
+    let inkApp: ReturnType<typeof inkRender> | undefined;
 
-    const inkApp = inkRender(
-      <BranchActionSelectorScreen
-        selectedBranch="feature-test"
-        onUseExisting={onUseExisting}
-        onCreateNew={onCreateNew}
-        onBack={onBack}
-      />,
-    );
+    try {
+      const onUseExisting = vi.fn();
+      const onCreateNew = vi.fn();
+      const onBack = vi.fn();
 
-    act(() => {
-      inkApp.stdin.write("\u001b");
-    });
+      inkApp = inkRender(
+        <BranchActionSelectorScreen
+          selectedBranch="feature-test"
+          onUseExisting={onUseExisting}
+          onCreateNew={onCreateNew}
+          onBack={onBack}
+        />,
+      );
 
-    act(() => {
-      vi.advanceTimersByTime(25);
-    });
+      act(() => {
+        inkApp.stdin.write("\u001b");
+      });
 
-    expect(onBack).toHaveBeenCalledTimes(1);
-    expect(onCreateNew).not.toHaveBeenCalled();
-    expect(onUseExisting).not.toHaveBeenCalled();
+      act(() => {
+        vi.advanceTimersByTime(25);
+      });
 
-    inkApp.unmount();
-    vi.useRealTimers();
+      expect(onBack).toHaveBeenCalledTimes(1);
+      expect(onCreateNew).not.toHaveBeenCalled();
+      expect(onUseExisting).not.toHaveBeenCalled();
+    } finally {
+      inkApp?.unmount();
+      vi.useRealTimers();
+    }
   });
 });
