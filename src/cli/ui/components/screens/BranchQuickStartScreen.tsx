@@ -1,8 +1,9 @@
 import React from "react";
-import { Box, Text, useInput } from "ink";
+import { Box, Text } from "ink";
 import { Header } from "../parts/Header.js";
 import { Footer } from "../parts/Footer.js";
 import { Select, type SelectItem } from "../common/Select.js";
+import { useAppInput } from "../../hooks/useAppInput.js";
 import { useTerminalSize } from "../../hooks/useTerminalSize.js";
 
 export type QuickStartAction = "reuse-continue" | "reuse-new" | "manual";
@@ -182,7 +183,7 @@ export function BranchQuickStartScreen({
     categoryColor: CATEGORY_META.other.color,
   });
 
-  useInput((_, key) => {
+  useAppInput((_, key) => {
     if (key.escape) {
       onBack();
     }

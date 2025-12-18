@@ -36,6 +36,12 @@ import {
   claudeSessionFileExists,
 } from "../../../src/utils/session.js";
 
+const mockReaddir = readdir as unknown as ReturnType<typeof vi.fn>;
+const mockReadFile = readFile as unknown as ReturnType<typeof vi.fn>;
+const mockStat = stat as unknown as ReturnType<typeof vi.fn>;
+
+type ReaddirOptions = { withFileTypes?: boolean };
+
 describe("utils/session", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -64,7 +70,7 @@ describe("utils/session", () => {
   describe("claudeSessionFileExists", () => {
     it("returns true when session file exists", async () => {
       const validUuid = "12345678-1234-1234-1234-123456789012";
-      (stat as any).mockResolvedValue({ mtimeMs: 123 });
+      mockStat.mockResolvedValue({ mtimeMs: 123 });
 
       const exists = await claudeSessionFileExists(validUuid, "/repo");
       expect(exists).toBe(true);
@@ -78,7 +84,7 @@ describe("utils/session", () => {
 
     it("returns false when file does not exist", async () => {
       const validUuid = "12345678-1234-1234-1234-123456789012";
-      (stat as any).mockRejectedValue(new Error("ENOENT"));
+      mockStat.mockRejectedValue(new Error("ENOENT"));
 
       const exists = await claudeSessionFileExists(validUuid, "/repo");
       expect(exists).toBe(false);
@@ -101,7 +107,7 @@ describe("utils/session", () => {
       isDirectory: () => type === "dir",
     });
 
-    (readdir as any).mockImplementation((dir: string, opts?: any) => {
+    mockReaddir.mockImplementation((dir: string, opts?: ReaddirOptions) => {
       if (opts?.withFileTypes) {
         if (dir.endsWith("/.codex/sessions")) {
           return Promise.resolve([dirent("2025", "dir")]);
@@ -120,8 +126,8 @@ describe("utils/session", () => {
       }
       return Promise.resolve([]);
     });
-    (stat as any).mockResolvedValue({ mtimeMs: 300 });
-    (readFile as any).mockResolvedValue("[]");
+    mockStat.mockResolvedValue({ mtimeMs: 300 });
+    mockReadFile.mockResolvedValue("[]");
 
     const id = await findLatestCodexSessionId();
     expect(id).toBe("019af438-56b3-7b32-bf8e-a5faeba5c9db");
@@ -136,7 +142,7 @@ describe("utils/session", () => {
 
     const sessionUuid = "019af9b0-1d45-7840-a20a-c579b2710459";
 
-    (readdir as any).mockImplementation((dir: string, opts?: any) => {
+    mockReaddir.mockImplementation((dir: string, opts?: ReaddirOptions) => {
       if (opts?.withFileTypes) {
         if (dir.endsWith("/.codex/sessions")) {
           return Promise.resolve([dirent("2025", "dir")]);
@@ -152,9 +158,9 @@ describe("utils/session", () => {
       }
       return Promise.resolve([]);
     });
-    (stat as any).mockResolvedValue({ mtimeMs: 300 });
+    mockStat.mockResolvedValue({ mtimeMs: 300 });
     // Codex session format: cwd is inside payload object
-    (readFile as any).mockResolvedValue(
+    mockReadFile.mockResolvedValue(
       JSON.stringify({
         timestamp: "2025-12-07T16:40:59.000Z",
         type: "session_meta",
@@ -178,7 +184,7 @@ describe("utils/session", () => {
 
     const sessionUuid = "abcdabcd-abcd-abcd-abcd-abcdabcdabcd";
 
-    (readdir as any).mockImplementation((dir: string, opts?: any) => {
+    mockReaddir.mockImplementation((dir: string, opts?: ReaddirOptions) => {
       if (opts?.withFileTypes) {
         if (dir.endsWith("/.codex/sessions")) {
           return Promise.resolve([dirent("2025", "dir")]);
@@ -194,9 +200,9 @@ describe("utils/session", () => {
       }
       return Promise.resolve([]);
     });
-    (stat as any).mockResolvedValue({ mtimeMs: 500 });
+    mockStat.mockResolvedValue({ mtimeMs: 500 });
     // Session cwd is /repo, but we search with /repo/.worktrees/branch
-    (readFile as any).mockResolvedValue(
+    mockReadFile.mockResolvedValue(
       JSON.stringify({ payload: { id: sessionUuid, cwd: "/repo" } }),
     );
 
@@ -218,7 +224,7 @@ describe("utils/session", () => {
     const earlyUuid = "11111111-1111-1111-1111-111111111111";
     const lateUuid = "22222222-2222-2222-2222-222222222222";
 
-    (readdir as any).mockImplementation((dir: string, opts?: any) => {
+    mockReaddir.mockImplementation((dir: string, opts?: ReaddirOptions) => {
       if (opts?.withFileTypes) {
         if (dir.endsWith("/.codex/sessions")) {
           return Promise.resolve([dirent("2025", "dir")]);
@@ -235,12 +241,12 @@ describe("utils/session", () => {
       }
       return Promise.resolve([]);
     });
-    (stat as any).mockImplementation((filePath: string) => {
+    mockStat.mockImplementation((filePath: string) => {
       if (filePath.includes(earlyUuid))
         return Promise.resolve({ mtimeMs: 1_000 });
       return Promise.resolve({ mtimeMs: 5_000 });
     });
-    (readFile as any).mockImplementation((filePath: string) => {
+    mockReadFile.mockImplementation((filePath: string) => {
       if (filePath.includes(earlyUuid)) {
         return Promise.resolve(`{"sessionId":"${earlyUuid}"}`);
       }
@@ -265,7 +271,7 @@ describe("utils/session", () => {
 
     // first poll returns nothing, second poll sees the file
     const calls: string[] = [];
-    (readdir as any).mockImplementation((dir: string, opts?: any) => {
+    mockReaddir.mockImplementation((dir: string, opts?: ReaddirOptions) => {
       calls.push(dir);
       if (opts?.withFileTypes) {
         if (dir.endsWith("/.codex/sessions")) {
@@ -286,8 +292,8 @@ describe("utils/session", () => {
       }
       return Promise.resolve([]);
     });
-    (stat as any).mockResolvedValue({ mtimeMs: 5_000 });
-    (readFile as any).mockResolvedValue(`{"sessionId":"${waitUuid}"}`);
+    mockStat.mockResolvedValue({ mtimeMs: 5_000 });
+    mockReadFile.mockResolvedValue(`{"sessionId":"${waitUuid}"}`);
 
     const idPromise = waitForCodexSessionId({
       startedAt: 4_000,
@@ -308,14 +314,13 @@ describe("utils/session", () => {
 
     const claudeUuid = "44444444-4444-4444-4444-444444444444";
 
-    (readdir as any).mockImplementation((dir: string, opts?: any) => {
+    let sessionsCallCount = 0;
+    mockReaddir.mockImplementation((dir: string, opts?: ReaddirOptions) => {
       if (opts?.withFileTypes) {
         if (dir.endsWith("/projects/-repo/sessions")) {
           // First call: no files, second call: file appears
-          const count = (readdir as any).mock.calls.filter((c: any[]) =>
-            (c[0] as string).endsWith("/projects/-repo/sessions"),
-          ).length;
-          if (count >= 1) {
+          sessionsCallCount += 1;
+          if (sessionsCallCount >= 2) {
             return Promise.resolve([dirent(`${claudeUuid}.jsonl`, "file")]);
           }
           return Promise.resolve([]);
@@ -323,8 +328,8 @@ describe("utils/session", () => {
       }
       return Promise.resolve([]);
     });
-    (stat as any).mockResolvedValue({ mtimeMs: 10 });
-    (readFile as any).mockResolvedValue(`{"session_id":"${claudeUuid}"}`);
+    mockStat.mockResolvedValue({ mtimeMs: 10 });
+    mockReadFile.mockResolvedValue(`{"session_id":"${claudeUuid}"}`);
 
     const id = await waitForClaudeSessionId("/repo", {
       timeoutMs: 5_000,
@@ -342,7 +347,7 @@ describe("utils/session", () => {
 
     const dotdashUuid = "55555555-5555-5555-5555-555555555555";
 
-    (readdir as any).mockImplementation((dir: string, opts?: any) => {
+    mockReaddir.mockImplementation((dir: string, opts?: ReaddirOptions) => {
       if (opts?.withFileTypes) {
         if (dir.endsWith("/projects/-repo--worktrees-branch/sessions")) {
           return Promise.resolve([dirent(`${dotdashUuid}.jsonl`, "file")]);
@@ -351,8 +356,8 @@ describe("utils/session", () => {
       }
       return Promise.resolve([]);
     });
-    (stat as any).mockResolvedValue({ mtimeMs: 20 });
-    (readFile as any).mockResolvedValue(`{"sessionId":"${dotdashUuid}"}`);
+    mockStat.mockResolvedValue({ mtimeMs: 20 });
+    mockReadFile.mockResolvedValue(`{"sessionId":"${dotdashUuid}"}`);
 
     const id = await findLatestClaudeSessionId("/repo/.worktrees/branch");
     expect(id).toBe(dotdashUuid);
@@ -367,14 +372,14 @@ describe("utils/session", () => {
 
     const jsonlUuid = "66666666-6666-6666-6666-666666666666";
 
-    (readdir as any).mockImplementation((dir: string, opts?: any) => {
+    mockReaddir.mockImplementation((dir: string, opts?: ReaddirOptions) => {
       if (opts?.withFileTypes) {
         return Promise.resolve([dirent("log.jsonl", "file")]);
       }
       return Promise.resolve([]);
     });
-    (stat as any).mockResolvedValue({ mtimeMs: 123 });
-    (readFile as any).mockResolvedValue(
+    mockStat.mockResolvedValue({ mtimeMs: 123 });
+    mockReadFile.mockResolvedValue(
       `{"session_id":"${jsonlUuid}"}\n{"message":"hello"}`,
     );
 
@@ -399,7 +404,7 @@ describe("utils/session", () => {
     process.env.CODEX_HOME = "/custom/codex";
     process.env.CLAUDE_CONFIG_DIR = "/custom/claude";
 
-    (readdir as any).mockImplementation((dir: string, opts?: any) => {
+    mockReaddir.mockImplementation((dir: string, opts?: ReaddirOptions) => {
       if (opts?.withFileTypes) {
         if (dir === "/custom/codex/sessions") {
           return Promise.resolve([
@@ -412,8 +417,8 @@ describe("utils/session", () => {
       }
       return Promise.resolve([]);
     });
-    (stat as any).mockResolvedValue({ mtimeMs: 123 });
-    (readFile as any).mockImplementation((filePath: string) => {
+    mockStat.mockResolvedValue({ mtimeMs: 123 });
+    mockReadFile.mockImplementation((filePath: string) => {
       if (filePath.includes(customCodexUuid)) {
         return Promise.resolve(JSON.stringify({ id: customCodexUuid }));
       }
@@ -439,7 +444,7 @@ describe("utils/session", () => {
     const cfgClaudeUuid = "99999999-9999-9999-9999-999999999999";
 
     // First call (.claude) will throw, second (.config/claude) returns file
-    (readdir as any).mockImplementation((dir: string, opts?: any) => {
+    mockReaddir.mockImplementation((dir: string, opts?: ReaddirOptions) => {
       if (opts?.withFileTypes) {
         if (dir === "/home/test/.claude/projects/-repo/sessions") {
           return Promise.reject(new Error("missing"));
@@ -451,8 +456,8 @@ describe("utils/session", () => {
       return Promise.resolve([]);
     });
 
-    (stat as any).mockResolvedValue({ mtimeMs: 10 });
-    (readFile as any).mockResolvedValue(`{"session_id":"${cfgClaudeUuid}"}`);
+    mockStat.mockResolvedValue({ mtimeMs: 10 });
+    mockReadFile.mockResolvedValue(`{"session_id":"${cfgClaudeUuid}"}`);
 
     const id = await findLatestClaudeSessionId("/repo");
     expect(id).toBe(cfgClaudeUuid);
@@ -460,7 +465,7 @@ describe("utils/session", () => {
 
   it("reads Claude sessionId from ~/.claude/history.jsonl when per-project sessions are absent", async () => {
     // No per-project sessions
-    (readdir as any).mockRejectedValue(new Error("missing sessions"));
+    mockReaddir.mockRejectedValue(new Error("missing sessions"));
 
     const histUuid = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
     const otherUuid = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
@@ -471,19 +476,19 @@ describe("utils/session", () => {
       `{"project":"/repo/sub","sessionId":"${histUuid}"}`,
     ].join("\n");
 
-    (readFile as any).mockImplementation((filePath: string) => {
+    mockReadFile.mockImplementation((filePath: string) => {
       if (filePath.endsWith("history.jsonl")) {
         return Promise.resolve(historyContent);
       }
       return Promise.reject(new Error("no sessions"));
     });
 
-    const id = await findLatestClaudeSessionId("/repo/subdir");
+    const id = await findLatestClaudeSessionId("/repo/sub/dir");
     expect(id).toBe(histUuid);
   });
 
   it("returns null when session files are missing", async () => {
-    (readdir as any).mockRejectedValue(new Error("missing"));
+    mockReaddir.mockRejectedValue(new Error("missing"));
     const codexId = await findLatestCodexSessionId();
     const claudeId = await findLatestClaudeSessionId("/repos/none");
     const geminiId = await findLatestGeminiSessionId("/repos/none");
@@ -505,7 +510,7 @@ describe("utils/session", () => {
     const gemini2Uuid = "dddddddd-dddd-dddd-dddd-dddddddddddd";
 
     // collectFilesRecursive walks through directories recursively
-    (readdir as any).mockImplementation((dir: string, opts?: any) => {
+    mockReaddir.mockImplementation((dir: string, opts?: ReaddirOptions) => {
       if (opts?.withFileTypes) {
         if (dir.endsWith("/.gemini/tmp")) {
           return Promise.resolve([
@@ -523,13 +528,13 @@ describe("utils/session", () => {
       }
       return Promise.resolve([]);
     });
-    (stat as any).mockImplementation((filePath: string) => {
+    mockStat.mockImplementation((filePath: string) => {
       return Promise.resolve({
         mtimeMs: filePath.includes("b.json") ? 300 : 200,
       });
     });
     // Include cwd field so that the cwd filter matches the requested path
-    (readFile as any).mockImplementation((filePath: string) => {
+    mockReadFile.mockImplementation((filePath: string) => {
       if (filePath.includes("b.json")) {
         return Promise.resolve(
           JSON.stringify({ id: gemini2Uuid, cwd: "/repo" }),
@@ -548,7 +553,7 @@ describe("utils/session", () => {
       isFile: () => type === "file",
       isDirectory: () => type === "dir",
     });
-    (readdir as any).mockImplementation((dir: string, opts?: any) => {
+    mockReaddir.mockImplementation((dir: string, opts?: ReaddirOptions) => {
       if (opts?.withFileTypes) {
         if (dir.endsWith("/.qwen/tmp")) {
           return Promise.resolve([dirent("p1", "dir")]);
@@ -560,8 +565,8 @@ describe("utils/session", () => {
       }
       return Promise.resolve(["save-123.json"]);
     });
-    (stat as any).mockResolvedValue({ mtimeMs: 123 });
-    (readFile as any).mockResolvedValue("{}");
+    mockStat.mockResolvedValue({ mtimeMs: 123 });
+    mockReadFile.mockResolvedValue("{}");
 
     const id = await findLatestQwenSessionId("/repo");
     expect(id).toBe("save-123");

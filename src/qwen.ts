@@ -1,7 +1,11 @@
 import { execa } from "execa";
 import chalk from "chalk";
 import { existsSync } from "fs";
-import { createChildStdio, getTerminalStreams } from "./utils/terminal.js";
+import {
+  createChildStdio,
+  getTerminalStreams,
+  resetTerminalModes,
+} from "./utils/terminal.js";
 import { findLatestQwenSessionId } from "./utils/session.js";
 
 const QWEN_CLI_PACKAGE = "@qwen-code/qwen-code@latest";
@@ -96,6 +100,7 @@ export async function launchQwenCLI(
     console.log(chalk.gray(`   📋 Args: ${args.join(" ")}`));
 
     terminal.exitRawMode();
+    resetTerminalModes(terminal.stdout);
 
     const baseEnv = Object.fromEntries(
       Object.entries({
@@ -236,6 +241,7 @@ export async function launchQwenCLI(
     throw new QwenError(errorMessage, error);
   } finally {
     terminal.exitRawMode();
+    resetTerminalModes(terminal.stdout);
   }
 }
 

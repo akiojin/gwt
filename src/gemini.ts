@@ -1,7 +1,11 @@
 import { execa } from "execa";
 import chalk from "chalk";
 import { existsSync } from "fs";
-import { createChildStdio, getTerminalStreams } from "./utils/terminal.js";
+import {
+  createChildStdio,
+  getTerminalStreams,
+  resetTerminalModes,
+} from "./utils/terminal.js";
 import { findLatestGeminiSessionId } from "./utils/session.js";
 
 const GEMINI_CLI_PACKAGE = "@google/gemini-cli@latest";
@@ -119,6 +123,7 @@ export async function launchGeminiCLI(
       );
     }
     terminal.exitRawMode();
+    resetTerminalModes(terminal.stdout);
 
     const baseEnv = Object.fromEntries(
       Object.entries({
@@ -291,6 +296,7 @@ export async function launchGeminiCLI(
     throw new GeminiError(errorMessage, error);
   } finally {
     terminal.exitRawMode();
+    resetTerminalModes(terminal.stdout);
   }
 }
 
