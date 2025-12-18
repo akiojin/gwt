@@ -10,7 +10,7 @@ export type QuickStartAction = "reuse-continue" | "reuse-new" | "manual";
 export interface BranchQuickStartOption {
   toolId?: string | null;
   toolLabel: string;
-  toolCategory?: "Codex" | "Claude" | "Gemini" | "Qwen" | "Other";
+  toolCategory?: "Codex" | "Claude" | "Gemini" | "Other";
   model?: string | null;
   sessionId?: string | null;
   inferenceLevel?: string | null;
@@ -31,10 +31,6 @@ const formatSkip = (skip?: boolean | null) =>
   skip === true ? "Yes" : skip === false ? "No" : "No";
 
 const supportsReasoning = (toolId?: string | null) => toolId === "codex-cli";
-
-const UNSUPPORTED_TOOL_ID = "qwen-cli";
-const UNSUPPORTED_TOOL_MESSAGE = "Unsupported tool (Qwen CLI). ";
-const UNSUPPORTED_TOOL_CATEGORY_LABEL = "Qwen (unsupported)";
 
 const describe = (opt: BranchQuickStartOption, includeSessionId = true) => {
   const parts = [`Model: ${opt.model ?? "default"}`];
@@ -82,7 +78,6 @@ export function BranchQuickStartScreen({
     "codex-cli": { label: "Codex", color: "cyan" },
     "claude-code": { label: "Claude", color: "yellow" },
     "gemini-cli": { label: "Gemini", color: "magenta" },
-    "qwen-cli": { label: "Qwen", color: "green" },
     other: { label: "Other", color: "white" },
   } as const;
 
@@ -96,8 +91,6 @@ export function BranchQuickStartScreen({
         return CATEGORY_META["claude-code"];
       case "gemini-cli":
         return CATEGORY_META["gemini-cli"];
-      case "qwen-cli":
-        return CATEGORY_META["qwen-cli"];
       default:
         return CATEGORY_META.other;
     }
@@ -105,7 +98,7 @@ export function BranchQuickStartScreen({
 
   const items: QuickStartItem[] = previousOptions.length
     ? (() => {
-        const order = ["Claude", "Codex", "Gemini", "Qwen", "Other"];
+        const order = ["Claude", "Codex", "Gemini", "Other"];
         const sorted = [...previousOptions].sort((a, b) => {
           const ca = resolveCategory(a.toolId).label;
           const cb = resolveCategory(b.toolId).label;
@@ -115,7 +108,6 @@ export function BranchQuickStartScreen({
         const flat: QuickStartItem[] = [];
         sorted.forEach((opt, idx) => {
           const cat = resolveCategory(opt.toolId);
-          const isUnsupportedTool = opt.toolId === UNSUPPORTED_TOOL_ID;
           const prevCat =
             idx > 0 ? resolveCategory(sorted[idx - 1]?.toolId).label : null;
           const isNewCategory = prevCat !== cat.label;
@@ -126,10 +118,7 @@ export function BranchQuickStartScreen({
               value: `reuse-continue:${opt.toolId ?? "unknown"}:${idx}`,
               action: "reuse-continue",
               toolId: opt.toolId ?? null,
-              description: isUnsupportedTool
-                ? `${UNSUPPORTED_TOOL_MESSAGE}${describe(opt, true)}`
-                : describe(opt, true),
-              ...(isUnsupportedTool ? { disabled: true } : {}),
+              description: describe(opt, true),
               groupStart: isNewCategory && flat.length > 0,
               category: cat.label,
               categoryColor: cat.color,
@@ -139,10 +128,7 @@ export function BranchQuickStartScreen({
               value: `reuse-new:${opt.toolId ?? "unknown"}:${idx}`,
               action: "reuse-new",
               toolId: opt.toolId ?? null,
-              description: isUnsupportedTool
-                ? `${UNSUPPORTED_TOOL_MESSAGE}${describe(opt, false)}`
-                : describe(opt, false),
-              ...(isUnsupportedTool ? { disabled: true } : {}),
+              description: describe(opt, false),
               groupStart: false,
               category: cat.label,
               categoryColor: cat.color,
@@ -209,11 +195,6 @@ export function BranchQuickStartScreen({
             onSelect(item.action, item.toolId ?? null);
           }}
           renderItem={(item: QuickStartItem, isSelected) => {
-            const categoryLabel =
-              item.toolId === UNSUPPORTED_TOOL_ID
-                ? UNSUPPORTED_TOOL_CATEGORY_LABEL
-                : item.category;
-
             return (
               <Box
                 flexDirection="column"
@@ -223,7 +204,7 @@ export function BranchQuickStartScreen({
               >
                 <Text>
                   <Text color={item.categoryColor} inverse={isSelected}>
-                    {`[${categoryLabel}] `}
+                    {`[${item.category}] `}
                   </Text>
                   <Text inverse={isSelected}>
                     {item.label}

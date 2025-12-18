@@ -299,17 +299,13 @@ export async function getToolById(
 export async function getAllTools(): Promise<AIToolConfig[]> {
   const config = await loadToolsConfig();
 
-  // Builtin tools that are reserved but not exposed in selectors.
-  // These IDs remain blocked from customTools to avoid ambiguity.
-  const UNSUPPORTED_BUILTIN_TOOL_IDS = new Set<string>(["qwen-cli"]);
-
   // ビルトインツールをAIToolConfig形式に変換
   const builtinConfigs: AIToolConfig[] = BUILTIN_TOOLS.map((tool) => ({
     id: tool.id,
     displayName: tool.displayName,
     ...(tool.icon ? { icon: tool.icon } : {}),
     isBuiltin: true,
-  })).filter((tool) => !UNSUPPORTED_BUILTIN_TOOL_IDS.has(tool.id));
+  }));
 
   // カスタムツールをAIToolConfig形式に変換
   const customConfigs: AIToolConfig[] = config.customTools.map((tool) => ({
