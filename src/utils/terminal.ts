@@ -2,6 +2,13 @@ import fs from "node:fs";
 import { platform } from "node:os";
 import { ReadStream, WriteStream } from "node:tty";
 
+/**
+ * Terminal streams used by the CLI (stdin/stdout/stderr) and their raw-mode
+ * teardown helper.
+ *
+ * When the current process is not a TTY, this may fall back to `/dev/tty` so
+ * interactive child processes can still read/write correctly.
+ */
 export interface TerminalStreams {
   stdin: NodeJS.ReadStream;
   stdout: NodeJS.WriteStream;
@@ -14,9 +21,18 @@ export interface TerminalStreams {
 }
 
 const DEV_TTY_PATH = "/dev/tty";
+// 端末モードのリセット:
+// - ESC[?1l: application cursor keys (DECCKM) を無効化
+// - ESC>: keypad mode を normal/numeric に戻す
+// WSL2/Windowsの矢印キー入力が壊れるケースを抑止する。
+const TERMINAL_RESET_SEQUENCE = "\u001b[?1l\u001b>";
 
 let cachedStreams: TerminalStreams | null = null;
 
+/**
+ * Stdio configuration for launching an interactive child process (via `execa`),
+ * plus a cleanup hook to be called after the child exits.
+ */
 export interface ChildStdio {
   stdin: "inherit" | { file: string; append?: boolean };
   stdout: "inherit" | { file: string; append?: boolean };
@@ -165,6 +181,9 @@ function createTerminalStreams(): TerminalStreams {
   }
 }
 
+/**
+ * Returns cached terminal streams and falls back to `/dev/tty` when needed.
+ */
 export function getTerminalStreams(): TerminalStreams {
   if (!cachedStreams) {
     cachedStreams = createTerminalStreams();
@@ -172,6 +191,35 @@ export function getTerminalStreams(): TerminalStreams {
   return cachedStreams;
 }
 
+/**
+ * Best-effort terminal mode reset for interactive sessions.
+ *
+ * This writes a small ANSI sequence to restore cursor-key/keypad modes, which
+ * helps prevent broken arrow-key behavior on some Windows/WSL2 terminals after
+ * interactive CLIs exit.
+ */
+export function resetTerminalModes(
+  stdout: NodeJS.WriteStream | undefined,
+): void {
+  if (!stdout || typeof stdout.write !== "function") {
+    return;
+  }
+  if (!("isTTY" in stdout) || !stdout.isTTY) {
+    return;
+  }
+  try {
+    stdout.write(TERMINAL_RESET_SEQUENCE);
+  } catch {
+    // Ignore terminal reset errors.
+  }
+}
+
+/**
+ * Creates stdio settings for launching a child process.
+ *
+ * When terminal streams are backed by `/dev/tty`, forwards those file
+ * descriptors to the child so it remains interactive.
+ */
 export function createChildStdio(): ChildStdio {
   const terminal = getTerminalStreams();
 
@@ -196,6 +244,12 @@ function isInteractive(stream: NodeJS.ReadStream): boolean {
   return Boolean(stream.isTTY);
 }
 
+/**
+ * Prints a message and waits for the user to press Enter when running in an
+ * interactive terminal.
+ *
+ * Useful for pausing on errors while ensuring raw mode is disabled.
+ */
 export async function waitForUserAcknowledgement(
   message: string = DEFAULT_ACK_MESSAGE,
 ): Promise<void> {

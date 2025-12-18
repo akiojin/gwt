@@ -1,12 +1,16 @@
 import React from "react";
-import { Box, Text, useInput } from "ink";
+import { Box, Text } from "ink";
 import { Header } from "../parts/Header.js";
 import { Footer } from "../parts/Footer.js";
 import { ProgressBar } from "../parts/ProgressBar.js";
 import { MergeStatusList } from "../parts/MergeStatusList.js";
+import { useAppInput } from "../../hooks/useAppInput.js";
 import { useTerminalSize } from "../../hooks/useTerminalSize.js";
 import type { BatchMergeProgress, BranchMergeStatus } from "../../types.js";
 
+/**
+ * Props for `BatchMergeProgressScreen`.
+ */
 export interface BatchMergeProgressScreenProps {
   progress: BatchMergeProgress;
   statuses: BranchMergeStatus[];
@@ -26,7 +30,7 @@ export function BatchMergeProgressScreen({
   const { rows } = useTerminalSize();
 
   // Handle keyboard input
-  useInput((input, key) => {
+  useAppInput((input, key) => {
     if ((input === "q" || key.escape) && onCancel) {
       onCancel();
     }

@@ -13,10 +13,13 @@ vi.mock("fs", () => ({
   default: { existsSync: vi.fn(() => true) },
 }));
 
+const stdoutWrite = vi.fn();
+const stderrWrite = vi.fn();
+
 const mockTerminalStreams = {
   stdin: { id: "stdin" } as unknown as NodeJS.ReadStream,
-  stdout: { id: "stdout", write: vi.fn() } as unknown as NodeJS.WriteStream,
-  stderr: { id: "stderr", write: vi.fn() } as unknown as NodeJS.WriteStream,
+  stdout: { id: "stdout", write: stdoutWrite } as unknown as NodeJS.WriteStream,
+  stderr: { id: "stderr", write: stderrWrite } as unknown as NodeJS.WriteStream,
   stdinFd: undefined as number | undefined,
   stdoutFd: undefined as number | undefined,
   stderrFd: undefined as number | undefined,
@@ -24,16 +27,22 @@ const mockTerminalStreams = {
   exitRawMode: vi.fn(),
 };
 
-const mockChildStdio = {
-  stdin: "inherit" as const,
-  stdout: "inherit" as const,
-  stderr: "inherit" as const,
+const mockChildStdio: {
+  stdin: unknown;
+  stdout: unknown;
+  stderr: unknown;
+  cleanup: ReturnType<typeof vi.fn>;
+} = {
+  stdin: "inherit",
+  stdout: "inherit",
+  stderr: "inherit",
   cleanup: vi.fn(),
 };
 
 vi.mock("../../src/utils/terminal", () => ({
   getTerminalStreams: vi.fn(() => mockTerminalStreams),
   createChildStdio: vi.fn(() => mockChildStdio),
+  resetTerminalModes: vi.fn(),
 }));
 vi.mock("../../src/utils/session", () => ({
   waitForClaudeSessionId: vi.fn(async () => null),
@@ -65,21 +74,26 @@ const createChildProcess = (
 
 describe("launchClaudeCode - Root User Detection", () => {
   let originalGetuid: (() => number) | undefined;
+  let originalPlatformDescriptor: PropertyDescriptor | undefined;
 
   beforeEach(() => {
     vi.clearAllMocks();
     consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     mockTerminalStreams.exitRawMode.mockClear();
-    (mockTerminalStreams.stdout.write as any).mockClear?.();
-    (mockTerminalStreams.stderr.write as any).mockClear?.();
+    stdoutWrite.mockClear();
+    stderrWrite.mockClear();
     mockChildStdio.cleanup.mockClear();
     mockChildStdio.stdin = "inherit";
     mockChildStdio.stdout = "inherit";
     mockChildStdio.stderr = "inherit";
     // Default execa mock
-    (mockExeca as any).mockImplementation(() => createChildProcess() as any);
+    mockExeca.mockImplementation(() => createChildProcess());
     // Store original getuid
     originalGetuid = process.getuid;
+    originalPlatformDescriptor = Object.getOwnPropertyDescriptor(
+      process,
+      "platform",
+    );
   });
 
   afterEach(() => {
@@ -87,7 +101,11 @@ describe("launchClaudeCode - Root User Detection", () => {
     if (originalGetuid !== undefined) {
       process.getuid = originalGetuid;
     } else {
-      delete (process as any).getuid;
+      delete (process as unknown as { getuid?: () => number }).getuid;
+    }
+
+    if (originalPlatformDescriptor) {
+      Object.defineProperty(process, "platform", originalPlatformDescriptor);
     }
   });
 
@@ -95,13 +113,17 @@ describe("launchClaudeCode - Root User Detection", () => {
     process.getuid = () => 1000;
 
     // Mock findLatestClaudeSession to return session info
-    (sessionUtils.findLatestClaudeSession as any).mockResolvedValueOnce({
+    const mockFindLatestClaudeSession =
+      sessionUtils.findLatestClaudeSession as unknown as ReturnType<
+        typeof vi.fn
+      >;
+    mockFindLatestClaudeSession.mockResolvedValueOnce({
       id: "123e4567-e89b-12d3-a456-426614174000",
       cwd: "/test/path",
     });
-    (mockExeca as any)
+    mockExeca
       .mockRejectedValueOnce(new Error("Command not found"))
-      .mockReturnValueOnce(createChildProcess() as any);
+      .mockReturnValueOnce(createChildProcess());
 
     const result = await launchClaudeCode("/test/path", {});
     expect(result.sessionId).toBe("123e4567-e89b-12d3-a456-426614174000");
@@ -120,7 +142,7 @@ describe("launchClaudeCode - Root User Detection", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchClaudeCode("/test/path", { skipPermissions: true });
 
@@ -152,7 +174,7 @@ describe("launchClaudeCode - Root User Detection", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchClaudeCode("/test/path", { skipPermissions: true });
 
@@ -174,7 +196,7 @@ describe("launchClaudeCode - Root User Detection", () => {
 
     it("should handle environments where process.getuid() is not available", async () => {
       // Mock process without getuid (e.g., Windows)
-      delete (process as any).getuid;
+      delete (process as unknown as { getuid?: () => number }).getuid;
 
       // Mock which/where to fail (claude not available) and bunx to succeed
       mockExeca
@@ -184,7 +206,7 @@ describe("launchClaudeCode - Root User Detection", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchClaudeCode("/test/path", { skipPermissions: true });
 
@@ -213,7 +235,7 @@ describe("launchClaudeCode - Root User Detection", () => {
       // Mock which/where to fail (claude not available) and bunx to succeed
       mockExeca
         .mockRejectedValueOnce(new Error("Command not found")) // which/where
-        .mockReturnValueOnce(createChildProcess() as any);
+        .mockReturnValueOnce(createChildProcess());
 
       await launchClaudeCode("/test/path", { skipPermissions: true });
 
@@ -225,10 +247,12 @@ describe("launchClaudeCode - Root User Detection", () => {
           "--dangerously-skip-permissions",
         ]),
       );
-      const options = bunxCall[2] as Record<string, any>;
+      const options = bunxCall[2] as Record<string, unknown>;
       expect(options.stdout).toBe("inherit");
       expect(options.stderr).toBe("inherit");
-      expect(options.env?.IS_SANDBOX).toBe("1");
+      expect(
+        (options.env as Record<string, string> | undefined)?.IS_SANDBOX,
+      ).toBe("1");
     });
   });
 
@@ -237,7 +261,7 @@ describe("launchClaudeCode - Root User Detection", () => {
       // which/where fails so bunx path is used
       mockExeca
         .mockRejectedValueOnce(new Error("Command not found")) // which/where
-        .mockResolvedValue({ stdout: "", stderr: "", exitCode: 0 } as any); // bunx
+        .mockResolvedValue({ stdout: "", stderr: "", exitCode: 0 }); // bunx
 
       await launchClaudeCode("/test/path", { mode: "continue" });
 
@@ -267,7 +291,7 @@ describe("launchClaudeCode - Root User Detection", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchClaudeCode("/test/path", { skipPermissions: false });
 
@@ -306,15 +330,17 @@ describe("launchClaudeCode - Root User Detection", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchClaudeCode("/test/path", {});
 
       const bunxCall = mockExeca.mock.calls[1];
-      const options = bunxCall[2] as Record<string, any>;
+      const options = bunxCall[2] as Record<string, unknown>;
       expect(options.stdout).toBe("inherit");
       expect(options.stderr).toBe("inherit");
-      expect(options.env?.IS_SANDBOX).toBeUndefined();
+      expect(
+        (options.env as Record<string, string> | undefined)?.IS_SANDBOX,
+      ).toBeUndefined();
 
       // Restore IS_SANDBOX
       if (originalIsSandbox !== undefined) {
@@ -336,7 +362,7 @@ describe("launchClaudeCode - Root User Detection", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchClaudeCode("/test/path", { skipPermissions: true });
 
@@ -363,7 +389,7 @@ describe("launchClaudeCode - Root User Detection", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchClaudeCode("/test/path", { skipPermissions: true });
 
@@ -390,7 +416,7 @@ describe("launchClaudeCode - Root User Detection", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchClaudeCode("/test/path", { skipPermissions: false });
 
@@ -409,9 +435,9 @@ describe("launchClaudeCode - Root User Detection", () => {
   describe("TTY handoff", () => {
     it("should pass fallback file descriptors when usingFallback is true", async () => {
       mockTerminalStreams.usingFallback = true;
-      mockChildStdio.stdin = 101 as unknown as any;
-      mockChildStdio.stdout = 102 as unknown as any;
-      mockChildStdio.stderr = 103 as unknown as any;
+      mockChildStdio.stdin = 101;
+      mockChildStdio.stdout = 102;
+      mockChildStdio.stderr = 103;
 
       // Mock which/where to fail (claude not available) and bunx to succeed
       mockExeca
@@ -421,7 +447,7 @@ describe("launchClaudeCode - Root User Detection", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchClaudeCode("/test/path");
 
@@ -452,13 +478,13 @@ describe("launchClaudeCode - Root User Detection", () => {
       vi.clearAllMocks();
       consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
       mockTerminalStreams.exitRawMode.mockClear();
-      (mockTerminalStreams.stdout.write as any).mockClear?.();
-      (mockTerminalStreams.stderr.write as any).mockClear?.();
+      stdoutWrite.mockClear();
+      stderrWrite.mockClear();
       mockChildStdio.cleanup.mockClear();
       mockChildStdio.stdin = "inherit";
       mockChildStdio.stdout = "inherit";
       mockChildStdio.stderr = "inherit";
-      (mockExeca as any).mockImplementation(() => createChildProcess() as any);
+      mockExeca.mockImplementation(() => createChildProcess());
     });
 
     it("should use locally installed claude command when available", async () => {
@@ -469,13 +495,13 @@ describe("launchClaudeCode - Root User Detection", () => {
           stdout: "/usr/local/bin/claude",
           stderr: "",
           exitCode: 0,
-        } as any)
+        })
         .mockResolvedValueOnce({
           // Second call: claude execution
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchClaudeCode("/test/path");
 
@@ -517,7 +543,7 @@ describe("launchClaudeCode - Root User Detection", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchClaudeCode("/test/path");
 
@@ -555,13 +581,13 @@ describe("launchClaudeCode - Root User Detection", () => {
           stdout: "/usr/local/bin/claude",
           stderr: "",
           exitCode: 0,
-        } as any)
+        })
         .mockResolvedValueOnce({
           // Second call: claude execution
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchClaudeCode("/test/path", {
         mode: "continue",
@@ -604,7 +630,7 @@ describe("launchClaudeCode - Root User Detection", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchClaudeCode("/test/path", {
         mode: "resume",
@@ -628,6 +654,53 @@ describe("launchClaudeCode - Root User Detection", () => {
     });
   });
 
+  describe("Windows fallback", () => {
+    it("uses npx when claude is missing and npx is available", async () => {
+      Object.defineProperty(process, "platform", {
+        ...(originalPlatformDescriptor ?? {
+          configurable: true,
+          enumerable: true,
+          writable: false,
+        }),
+        value: "win32",
+      });
+
+      // where claude fails, where npx succeeds, then npx runs
+      mockExeca
+        .mockRejectedValueOnce(new Error("Command not found")) // where claude
+        .mockResolvedValueOnce({ stdout: String.raw`C:\bin\npx.cmd` }) // where npx
+        .mockResolvedValueOnce(createChildProcess()); // npx execution
+
+      await launchClaudeCode("/test/path");
+
+      expect(mockExeca).toHaveBeenNthCalledWith(
+        1,
+        "where",
+        ["claude"],
+        expect.objectContaining({ shell: true }),
+      );
+      expect(mockExeca).toHaveBeenNthCalledWith(
+        2,
+        "where",
+        ["npx"],
+        expect.objectContaining({ shell: true }),
+      );
+      expect(mockExeca).toHaveBeenNthCalledWith(
+        3,
+        "npx",
+        expect.arrayContaining(["-y", "@anthropic-ai/claude-code@latest"]),
+        expect.objectContaining({
+          cwd: "/test/path",
+          stdout: "inherit",
+          stderr: "inherit",
+        }),
+      );
+
+      const calledCommands = mockExeca.mock.calls.map((call) => call[0]);
+      expect(calledCommands).not.toContain("bunx");
+    });
+  });
+
   describe("FR-008: Launch arguments display", () => {
     it("should display launch arguments in console log", async () => {
       // Mock which/where to fail (claude not available) and bunx to succeed
@@ -638,7 +711,7 @@ describe("launchClaudeCode - Root User Detection", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchClaudeCode("/test/path", { skipPermissions: true });
 

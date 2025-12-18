@@ -1,10 +1,19 @@
-import { execa } from "execa";
+import { execa, type Options as ExecaOptions } from "execa";
 import chalk from "chalk";
 import { existsSync } from "fs";
-import { createChildStdio, getTerminalStreams } from "./utils/terminal.js";
+import {
+  createChildStdio,
+  getTerminalStreams,
+  resetTerminalModes,
+} from "./utils/terminal.js";
 import { findLatestClaudeSession } from "./utils/session.js";
 
 const CLAUDE_CLI_PACKAGE = "@anthropic-ai/claude-code@latest";
+
+/**
+ * Error wrapper used by `launchClaudeCode` to preserve the original failure
+ * while providing a user-friendly message.
+ */
 export class ClaudeError extends Error {
   constructor(
     message: string,
@@ -15,6 +24,20 @@ export class ClaudeError extends Error {
   }
 }
 
+/**
+ * Launches Claude Code in the given worktree path.
+ *
+ * This function:
+ * - validates the worktree path
+ * - normalizes launch arguments (mode/model/session/extra args)
+ * - resets terminal modes before and after the child process
+ * - auto-detects a local `claude` command and falls back to `npx` (Windows) or
+ *   `bunx` when needed
+ *
+ * @param worktreePath - Worktree directory to run Claude Code in
+ * @param options - Launch options (mode/session/model/permissions/env)
+ * @returns Captured session id when available
+ */
 export async function launchClaudeCode(
   worktreePath: string,
   options: {
@@ -175,6 +198,7 @@ export async function launchClaudeCode(
     console.log(chalk.gray(`   📋 Args: ${args.join(" ")}`));
 
     terminal.exitRawMode();
+    resetTerminalModes(terminal.stdout);
 
     const baseEnv = { ...process.env, ...(options.envOverrides ?? {}) };
     const launchEnvSource =
@@ -191,26 +215,58 @@ export async function launchClaudeCode(
 
     // Auto-detect locally installed claude command
     const hasLocalClaude = await isClaudeCommandAvailable();
+    const hasNpx =
+      process.platform === "win32" ? await isNpxCommandAvailable() : false;
+
+    const execInteractive = async (
+      file: string,
+      fileArgs: string[],
+      execOptions: Omit<ExecaOptions, "shell">,
+    ) => {
+      if (process.platform !== "win32") {
+        await execa(file, fileArgs, { ...execOptions, shell: true });
+        return;
+      }
+
+      try {
+        await execa(file, fileArgs, { ...execOptions, shell: false });
+        return;
+      } catch (error: unknown) {
+        const err = error as NodeJS.ErrnoException;
+        if (err?.code === "ENOENT" || err?.code === "EINVAL") {
+          await execa(file, fileArgs, { ...execOptions, shell: true });
+          return;
+        }
+        throw error;
+      }
+    };
 
     try {
       if (hasLocalClaude) {
         console.log(
           chalk.green("   ✨ Using locally installed claude command"),
         );
-        await execa("claude", args, {
+        await execInteractive("claude", args, {
           cwd: worktreePath,
-          shell: true,
           stdin: childStdio.stdin,
           stdout: childStdio.stdout,
           stderr: childStdio.stderr,
           env: launchEnv,
         });
       } else {
-        console.log(
-          chalk.cyan(
-            "   🔄 Falling back to bunx @anthropic-ai/claude-code@latest",
-          ),
-        );
+        if (hasNpx) {
+          console.log(
+            chalk.cyan(
+              "   🔄 Falling back to npx @anthropic-ai/claude-code@latest",
+            ),
+          );
+        } else {
+          console.log(
+            chalk.cyan(
+              "   🔄 Falling back to bunx @anthropic-ai/claude-code@latest",
+            ),
+          );
+        }
         console.log(
           chalk.yellow(
             "   💡 Recommended: Install Claude Code via official method for faster startup",
@@ -231,14 +287,23 @@ export async function launchClaudeCode(
         );
         console.log("");
         await new Promise((resolve) => setTimeout(resolve, 2000));
-        await execa("bunx", [CLAUDE_CLI_PACKAGE, ...args], {
-          cwd: worktreePath,
-          shell: true,
-          stdin: childStdio.stdin,
-          stdout: childStdio.stdout,
-          stderr: childStdio.stderr,
-          env: launchEnv,
-        });
+        if (hasNpx) {
+          await execInteractive("npx", ["-y", CLAUDE_CLI_PACKAGE, ...args], {
+            cwd: worktreePath,
+            stdin: childStdio.stdin,
+            stdout: childStdio.stdout,
+            stderr: childStdio.stderr,
+            env: launchEnv,
+          });
+        } else {
+          await execInteractive("bunx", [CLAUDE_CLI_PACKAGE, ...args], {
+            cwd: worktreePath,
+            stdin: childStdio.stdin,
+            stdout: childStdio.stdout,
+            stderr: childStdio.stderr,
+            env: launchEnv,
+          });
+        }
       }
     } finally {
       childStdio.cleanup();
@@ -327,17 +392,20 @@ export async function launchClaudeCode(
     throw new ClaudeError(errorMessage, error);
   } finally {
     terminal.exitRawMode();
+    resetTerminalModes(terminal.stdout);
   }
 }
 
 /**
- * Check if locally installed `claude` command is available
- * @returns true if `claude` command exists in PATH, false otherwise
+ * Checks whether a command is available in the current PATH.
+ *
+ * @param commandName - Command name to look up (`where` on Windows, `which` elsewhere)
+ * @returns true if the command exists in PATH
  */
-async function isClaudeCommandAvailable(): Promise<boolean> {
+async function isCommandAvailable(commandName: string): Promise<boolean> {
   try {
     const command = process.platform === "win32" ? "where" : "which";
-    await execa(command, ["claude"], {
+    await execa(command, [commandName], {
       shell: true,
       stdin: "ignore",
       stdout: "ignore",
@@ -345,11 +413,21 @@ async function isClaudeCommandAvailable(): Promise<boolean> {
     });
     return true;
   } catch {
-    // claude command not found in PATH
     return false;
   }
 }
 
+async function isClaudeCommandAvailable(): Promise<boolean> {
+  return isCommandAvailable("claude");
+}
+
+async function isNpxCommandAvailable(): Promise<boolean> {
+  return isCommandAvailable("npx");
+}
+
+/**
+ * Checks whether Claude Code is available via `bunx` in the current environment.
+ */
 export async function isClaudeCodeAvailable(): Promise<boolean> {
   try {
     await execa("bunx", [CLAUDE_CLI_PACKAGE, "--version"], { shell: true });

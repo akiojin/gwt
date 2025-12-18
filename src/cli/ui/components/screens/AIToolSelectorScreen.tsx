@@ -1,19 +1,26 @@
 import React, { useState, useEffect } from "react";
-import { Box, Text, useInput } from "ink";
+import { Box, Text } from "ink";
 import { Header } from "../parts/Header.js";
 import { Footer } from "../parts/Footer.js";
 import { Select } from "../common/Select.js";
+import { useAppInput } from "../../hooks/useAppInput.js";
 import { useTerminalSize } from "../../hooks/useTerminalSize.js";
 import { getAllTools } from "../../../../config/tools.js";
 import type { AIToolConfig } from "../../../../types/tools.js";
 import type { AITool } from "../../types.js";
 
+/**
+ * Renderable item for the AI tool selector list.
+ */
 export interface AIToolItem {
   label: string;
   value: AITool;
   description: string;
 }
 
+/**
+ * Props for `AIToolSelectorScreen`.
+ */
 export interface AIToolSelectorScreenProps {
   onBack: () => void;
   onSelect: (tool: AITool) => void;
@@ -96,7 +103,7 @@ export function AIToolSelectorScreen({
 
   // Handle keyboard input
   // Note: Select component handles Enter and arrow keys
-  useInput((input, key) => {
+  useAppInput((input, key) => {
     if (key.escape) {
       onBack();
     }
