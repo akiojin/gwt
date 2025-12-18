@@ -1,9 +1,13 @@
 import React from "react";
-import { Box, Text, useInput } from "ink";
+import { Box, Text } from "ink";
 import { Select, type SelectItem } from "../components/common/Select.js";
 import { Footer } from "../components/parts/Footer.js";
+import { useAppInput } from "../hooks/useAppInput.js";
 import type { BranchAction } from "../types.js";
 
+/**
+ * Props for `BranchActionSelectorScreen`.
+ */
 export interface BranchActionSelectorScreenProps {
   selectedBranch: string;
   onUseExisting: () => void;
@@ -35,7 +39,7 @@ export function BranchActionSelectorScreen({
   secondaryLabel,
 }: BranchActionSelectorScreenProps) {
   // Handle keyboard input for back navigation
-  useInput((input, key) => {
+  useAppInput((input, key) => {
     if (key.escape) {
       onBack();
     }
