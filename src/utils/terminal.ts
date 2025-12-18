@@ -276,7 +276,6 @@ export async function waitForUserAcknowledgement(
       }
       finished = true;
       stdin.removeListener("data", onData);
-      process.removeListener("exit", cleanup);
       if (typeof stdin.pause === "function") {
         stdin.pause();
       }
