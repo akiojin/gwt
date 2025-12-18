@@ -327,7 +327,7 @@ export function BranchListScreen({
         case "gemini-cli":
           return chalk.magenta(label);
         case "qwen-cli":
-          return chalk.green(label);
+          return chalk.gray(label);
         default: {
           const trimmed = label.trim().toLowerCase();
           if (!toolId || trimmed === "unknown") {

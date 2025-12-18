@@ -37,7 +37,6 @@ const TOOL_LABELS: Record<string, string> = {
   "claude-code": "Claude Code",
   "codex-cli": "Codex",
   "gemini-cli": "Gemini",
-  "qwen-cli": "Qwen",
 };
 
 const INFERENCE_LABELS: Record<InferenceLevel, string> = {
@@ -255,13 +254,6 @@ export function ModelSelectorScreen({
                 {modelOptions.length === 0 ? " (no options)" : ""}
               </Text>
             </Box>
-            {tool === "qwen-cli" ? (
-              <Box marginBottom={1} flexDirection="column">
-                <Text>Latest Qwen models from Alibaba Cloud ModelStudio:</Text>
-                <Text>• coder-model (qwen3-coder-plus-2025-09-23)</Text>
-                <Text>• vision-model (qwen3-vl-plus-2025-09-23)</Text>
-              </Box>
-            ) : null}
 
             {modelItems.length === 0 ? (
               <Select
