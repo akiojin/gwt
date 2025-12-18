@@ -466,10 +466,19 @@ describe("utils/session", () => {
     const otherUuid = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
 
     // history.jsonl contains entries for other projects and the target one
+    // Using /repo/subdir to match the cwd exactly, and /repo to test prefix matching
     const historyContent = [
       `{"project":"/other","sessionId":"${otherUuid}"}`,
-      `{"project":"/repo/sub","sessionId":"${histUuid}"}`,
+      `{"project":"/repo","sessionId":"${histUuid}"}`,
     ].join("\n");
+
+    // Mock stat to return file info for history.jsonl
+    (stat as any).mockImplementation((filePath: string) => {
+      if (filePath.endsWith("history.jsonl")) {
+        return Promise.resolve({ mtimeMs: 100 });
+      }
+      return Promise.reject(new Error("not found"));
+    });
 
     (readFile as any).mockImplementation((filePath: string) => {
       if (filePath.endsWith("history.jsonl")) {
