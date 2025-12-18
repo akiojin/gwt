@@ -71,8 +71,8 @@ const MODEL_OPTIONS: Record<string, ModelOption[]> = {
       isDefault: true,
     },
     {
-      id: "gemini-3-flash",
-      label: "Flash (gemini-3-flash)",
+      id: "gemini-3-flash-preview",
+      label: "Flash (gemini-3-flash-preview)",
       description: "Next-generation high-speed model",
     },
     {
