@@ -6,16 +6,20 @@
  */
 
 import React, { useState, useCallback, useMemo, useEffect } from "react";
-import { Box, Text, useInput } from "ink";
+import { Box, Text } from "ink";
 import { Header } from "../parts/Header.js";
 import { Footer } from "../parts/Footer.js";
 import { Select } from "../common/Select.js";
 import { Input } from "../common/Input.js";
 import { Confirm } from "../common/Confirm.js";
+import { useAppInput } from "../../hooks/useAppInput.js";
 import { useTerminalSize } from "../../hooks/useTerminalSize.js";
 import { useProfiles } from "../../hooks/useProfiles.js";
 import { isValidProfileName } from "../../../../types/profiles.js";
 
+/**
+ * Props for `EnvironmentProfileScreen`.
+ */
 export interface EnvironmentProfileScreenProps {
   onBack: () => void;
   version?: string | null;
@@ -432,7 +436,7 @@ export function EnvironmentProfileScreen({
   );
 
   // キーボード入力ハンドリング
-  useInput(
+  useAppInput(
     (input, key) => {
       // 入力モード時は他のキーハンドリングをスキップ
       if (

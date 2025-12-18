@@ -1,11 +1,12 @@
 import React, { useCallback, useState, useMemo, useEffect } from "react";
-import { Box, Text, useInput } from "ink";
+import { Box, Text } from "ink";
 import { Header } from "../parts/Header.js";
 import { Stats } from "../parts/Stats.js";
 import { Footer } from "../parts/Footer.js";
 import { Select } from "../common/Select.js";
 import { Input } from "../common/Input.js";
 import { LoadingIndicator } from "../common/LoadingIndicator.js";
+import { useAppInput } from "../../hooks/useAppInput.js";
 import { useTerminalSize } from "../../hooks/useTerminalSize.js";
 import type { BranchItem, Statistics } from "../../types.js";
 import stringWidth from "string-width";
@@ -77,6 +78,9 @@ interface CleanupUIState {
   inputLocked: boolean;
 }
 
+/**
+ * Props for `BranchListScreen`.
+ */
 export interface BranchListScreenProps {
   branches: BranchItem[];
   stats: Statistics;
@@ -166,7 +170,7 @@ export function BranchListScreen({
   // Handle keyboard input
   // Note: Input component blocks specific keys (c/r/f) using blockKeys prop
   // This prevents shortcuts from triggering while typing in the filter
-  useInput((input, key) => {
+  useAppInput((input, key) => {
     if (cleanupUI?.inputLocked) {
       return;
     }

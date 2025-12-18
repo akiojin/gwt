@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Box, Text, useInput } from "ink";
+import { Box, Text } from "ink";
 import { Header } from "../parts/Header.js";
 import { Footer } from "../parts/Footer.js";
 import { Select, type SelectItem } from "../common/Select.js";
+import { useAppInput } from "../../hooks/useAppInput.js";
 import { useTerminalSize } from "../../hooks/useTerminalSize.js";
 import type { AITool, InferenceLevel, ModelOption } from "../../types.js";
 import {
@@ -12,6 +13,9 @@ import {
   getModelOptions,
 } from "../../utils/modelOptions.js";
 
+/**
+ * Result returned by `ModelSelectorScreen`.
+ */
 export interface ModelSelectionResult {
   model: string | null;
   inferenceLevel?: InferenceLevel;
@@ -25,6 +29,9 @@ interface InferenceSelectItem extends SelectItem {
   hint?: string;
 }
 
+/**
+ * Props for `ModelSelectorScreen`.
+ */
 export interface ModelSelectorScreenProps {
   tool: AITool;
   onBack: () => void;
@@ -158,7 +165,7 @@ export function ModelSelectorScreen({
     return index >= 0 ? index : 0;
   }, [initialSelection?.inferenceLevel, inferenceOptions, selectedModel]);
 
-  useInput((_input, key) => {
+  useAppInput((_input, key) => {
     if (key.escape) {
       if (step === "inference") {
         setStep("model");
