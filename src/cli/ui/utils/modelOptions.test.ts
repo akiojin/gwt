@@ -53,8 +53,7 @@ describe("modelOptions", () => {
 
   it("lists expected Gemini models", () => {
     expect(byId("gemini-cli")).toEqual([
-      "gemini-3",
-      "gemini-2.5",
+      "",
       "gemini-3-pro-preview",
       "gemini-3-flash-preview",
       "gemini-2.5-pro",

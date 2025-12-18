@@ -76,42 +76,35 @@ const MODEL_OPTIONS: Record<string, ModelOption[]> = {
   ],
   "gemini-cli": [
     {
-      id: "gemini-3",
-      label: "Auto (Gemini 3)",
-      description:
-        "Let Gemini CLI decide the best model for the task: gemini-3-pro, gemini-3-flash",
+      id: "",
+      label: "Default (Auto)",
+      description: "Use Gemini CLI default model",
       isDefault: true,
     },
     {
-      id: "gemini-2.5",
-      label: "Auto (Gemini 2.5)",
-      description:
-        "Let Gemini CLI decide the best model for the task: gemini-2.5-pro, gemini-2.5-flash",
-    },
-    {
       id: "gemini-3-pro-preview",
-      label: "Manual (gemini-3-pro-preview)",
+      label: "Pro (gemini-3-pro-preview)",
       description:
         "Default Pro. Falls back to gemini-2.5-pro when preview is unavailable.",
     },
     {
       id: "gemini-3-flash-preview",
-      label: "Manual (gemini-3-flash-preview)",
-      description: "Manually select a model",
+      label: "Flash (gemini-3-flash-preview)",
+      description: "Next-generation high-speed model",
     },
     {
       id: "gemini-2.5-pro",
-      label: "Manual (gemini-2.5-pro)",
+      label: "Pro (gemini-2.5-pro)",
       description: "Stable Pro model for deep reasoning and creativity",
     },
     {
       id: "gemini-2.5-flash",
-      label: "Manual (gemini-2.5-flash)",
+      label: "Flash (gemini-2.5-flash)",
       description: "Balance of speed and reasoning",
     },
     {
       id: "gemini-2.5-flash-lite",
-      label: "Manual (gemini-2.5-flash-lite)",
+      label: "Flash-Lite (gemini-2.5-flash-lite)",
       description: "Fastest for simple tasks",
     },
   ],
