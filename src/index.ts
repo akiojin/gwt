@@ -16,7 +16,6 @@ import {
   type CodexReasoningEffort,
 } from "./codex.js";
 import { launchGeminiCLI, GeminiError } from "./gemini.js";
-import { launchQwenCLI, QwenError } from "./qwen.js";
 import {
   WorktreeOrchestrator,
   type EnsureWorktreeOptions,
@@ -117,7 +116,6 @@ function isRecoverableError(error: unknown): boolean {
     error instanceof WorktreeError ||
     error instanceof CodexError ||
     error instanceof GeminiError ||
-    error instanceof QwenError ||
     error instanceof DependencyInstallError
   ) {
     return true;
@@ -129,7 +127,6 @@ function isRecoverableError(error: unknown): boolean {
       error.name === "WorktreeError" ||
       error.name === "CodexError" ||
       error.name === "GeminiError" ||
-      error.name === "QwenError" ||
       error.name === "DependencyInstallError"
     );
   }
@@ -144,7 +141,6 @@ function isRecoverableError(error: unknown): boolean {
       name === "WorktreeError" ||
       name === "CodexError" ||
       name === "GeminiError" ||
-      name === "QwenError" ||
       name === "DependencyInstallError"
     );
   }
@@ -310,6 +306,12 @@ export async function handleAIToolWorkflow(
   printInfo(
     `Selected: ${branchLabel} with ${tool} (${mode} mode${modelInfo}, skipPermissions: ${skipPermissions})`,
   );
+
+  if (tool === "qwen-cli") {
+    printError("Qwen CLI is currently unsupported.");
+    await waitForErrorAcknowledgement();
+    return;
+  }
 
   try {
     // Get repository root
@@ -658,28 +660,6 @@ export async function handleAIToolWorkflow(
         launchOptions.model = model;
       }
       launchResult = await launchGeminiCLI(worktreePath, launchOptions);
-    } else if (tool === "qwen-cli") {
-      const launchOptions: {
-        mode?: "normal" | "continue" | "resume";
-        skipPermissions?: boolean;
-        envOverrides?: Record<string, string>;
-        model?: string;
-        sessionId?: string | null;
-      } = {
-        mode:
-          mode === "resume"
-            ? "resume"
-            : mode === "continue"
-              ? "continue"
-              : "normal",
-        skipPermissions,
-        envOverrides: sharedEnv,
-        sessionId: resumeSessionId,
-      };
-      if (model) {
-        launchOptions.model = model;
-      }
-      launchResult = await launchQwenCLI(worktreePath, launchOptions);
     } else {
       // Custom tool
       printInfo(`Launching custom tool: ${toolConfig.displayName}`);

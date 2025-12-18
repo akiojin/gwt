@@ -60,7 +60,7 @@ describe("modelOptions", () => {
     ]);
   });
 
-  it("lists expected Qwen models", () => {
-    expect(byId("qwen-cli")).toEqual(["coder-model", "vision-model"]);
+  it("returns no models for unsupported tools", () => {
+    expect(byId("qwen-cli")).toEqual([]);
   });
 });
