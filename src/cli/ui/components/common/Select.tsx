@@ -2,11 +2,17 @@ import React, { useEffect, useState } from "react";
 import { Box, Text, useStdout } from "ink";
 import { useAppInput } from "../../hooks/useAppInput.js";
 
+/**
+ * Item descriptor for the `Select` component.
+ */
 export interface SelectItem {
   label: string;
   value: string;
 }
 
+/**
+ * Props for the `Select` component.
+ */
 export interface SelectProps<T extends SelectItem = SelectItem> {
   items: T[];
   onSelect: (item: T) => void;

@@ -13,6 +13,9 @@ type Step = "type-selection" | "name-input";
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
 
+/**
+ * Props for `BranchCreatorScreen`.
+ */
 export interface BranchCreatorScreenProps {
   onBack: () => void;
   onCreate: (branchName: string) => Promise<void>;

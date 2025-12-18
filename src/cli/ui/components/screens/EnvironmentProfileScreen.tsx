@@ -17,6 +17,9 @@ import { useTerminalSize } from "../../hooks/useTerminalSize.js";
 import { useProfiles } from "../../hooks/useProfiles.js";
 import { isValidProfileName } from "../../../../types/profiles.js";
 
+/**
+ * Props for `EnvironmentProfileScreen`.
+ */
 export interface EnvironmentProfileScreenProps {
   onBack: () => void;
   version?: string | null;

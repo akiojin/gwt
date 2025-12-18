@@ -8,6 +8,9 @@ import { useAppInput } from "../../hooks/useAppInput.js";
 import { useTerminalSize } from "../../hooks/useTerminalSize.js";
 import type { BatchMergeProgress, BranchMergeStatus } from "../../types.js";
 
+/**
+ * Props for `BatchMergeProgressScreen`.
+ */
 export interface BatchMergeProgressScreenProps {
   progress: BatchMergeProgress;
   statuses: BranchMergeStatus[];

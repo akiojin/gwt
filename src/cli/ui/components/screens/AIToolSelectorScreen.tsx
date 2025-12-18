@@ -9,12 +9,18 @@ import { getAllTools } from "../../../../config/tools.js";
 import type { AIToolConfig } from "../../../../types/tools.js";
 import type { AITool } from "../../types.js";
 
+/**
+ * Renderable item for the AI tool selector list.
+ */
 export interface AIToolItem {
   label: string;
   value: AITool;
   description: string;
 }
 
+/**
+ * Props for `AIToolSelectorScreen`.
+ */
 export interface AIToolSelectorScreenProps {
   onBack: () => void;
   onSelect: (tool: AITool) => void;

@@ -78,6 +78,9 @@ interface CleanupUIState {
   inputLocked: boolean;
 }
 
+/**
+ * Props for `BranchListScreen`.
+ */
 export interface BranchListScreenProps {
   branches: BranchItem[];
   stats: Statistics;

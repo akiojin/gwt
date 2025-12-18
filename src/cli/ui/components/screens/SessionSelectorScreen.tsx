@@ -6,12 +6,18 @@ import { Select } from "../common/Select.js";
 import { useAppInput } from "../../hooks/useAppInput.js";
 import { useTerminalSize } from "../../hooks/useTerminalSize.js";
 
+/**
+ * Renderable item for the session selector list.
+ */
 export interface SessionItem {
   label: string;
   value: string;
   secondary?: string;
 }
 
+/**
+ * Props for `SessionSelectorScreen`.
+ */
 export interface SessionSelectorScreenProps {
   sessions: {
     sessionId: string;
