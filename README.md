@@ -248,7 +248,6 @@ For more details, see the [Spec Kit documentation](https://github.com/akiojin/sp
 │   ├── claude.ts        # Claude Code integration
 │   ├── codex.ts         # Codex CLI integration
 │   ├── gemini.ts        # Gemini CLI integration
-│   ├── qwen.ts          # (deprecated) Qwen CLI integration (unsupported)
 │   ├── github.ts        # GitHub CLI integration
 │   ├── utils.ts         # Utility functions and error handling
 │   └── ui/              # User interface components
