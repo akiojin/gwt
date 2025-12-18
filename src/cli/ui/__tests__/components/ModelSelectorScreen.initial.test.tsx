@@ -55,12 +55,12 @@ describe("ModelSelectorScreen initial selection", () => {
     await waitFor(() => expect(selectMocks.length).toBeGreaterThan(0));
     const modelSelect = selectMocks.at(-1);
     const index = modelSelect.initialIndex as number;
-    // codex-cli models: ["", gpt-5.1-codex, gpt-5.2, gpt-5.1-codex-max, gpt-5.1-codex-mini, gpt-5.1]
-    // (index 0 = Default/Auto, index 3 = gpt-5.1-codex-max)
-    expect(index).toBe(3);
+    // codex-cli models: ["", gpt-5.2-codex, gpt-5.1-codex-max, gpt-5.1-codex-mini, gpt-5.1-codex, gpt-5.2, gpt-5.1]
+    // (index 0 = Default/Auto, index 2 = gpt-5.1-codex-max)
+    expect(index).toBe(2);
   });
 
-  it("includes gpt-5.2 in model options and preserves ordering", async () => {
+  it("includes gpt-5.2-codex in model options and preserves ordering", async () => {
     const initial: ModelSelectionResult = {
       model: "gpt-5.1-codex-max",
       inferenceLevel: "high",
@@ -81,10 +81,11 @@ describe("ModelSelectorScreen initial selection", () => {
     const ids = modelSelect?.items.map((item) => item.value);
     expect(ids).toEqual([
       "", // Default (Auto)
-      "gpt-5.1-codex",
-      "gpt-5.2",
+      "gpt-5.2-codex",
       "gpt-5.1-codex-max",
       "gpt-5.1-codex-mini",
+      "gpt-5.1-codex",
+      "gpt-5.2",
       "gpt-5.1",
     ]);
   });

@@ -27,10 +27,10 @@ describe("runInteractiveLoop", () => {
     branch: "feature/example",
     displayName: "feature/example",
     branchType: "local",
-    tool: "codex-cli" as any,
-    mode: "normal" as any,
+    tool: "codex-cli",
+    mode: "normal",
     skipPermissions: false,
-    model: "gpt-5.1-codex",
+    model: "gpt-5.2-codex",
   };
 
   let consoleLogSpy: ReturnType<typeof vi.spyOn>;

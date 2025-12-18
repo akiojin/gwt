@@ -39,18 +39,11 @@ const MODEL_OPTIONS: Record<string, ModelOption[]> = {
       defaultInference: "high",
     },
     {
-      id: "gpt-5.1-codex",
-      label: "gpt-5.1-codex",
-      description: "Standard Codex model",
-      inferenceLevels: CODEX_BASE_LEVELS,
-      defaultInference: "high",
-    },
-    {
-      id: "gpt-5.2",
-      label: "gpt-5.2",
-      description: "Latest frontier model with extra high reasoning",
+      id: "gpt-5.2-codex",
+      label: "gpt-5.2-codex",
+      description: "Latest frontier agentic coding model",
       inferenceLevels: CODEX_MAX_LEVELS,
-      defaultInference: "medium",
+      defaultInference: "high",
     },
     {
       id: "gpt-5.1-codex-max",
@@ -64,6 +57,20 @@ const MODEL_OPTIONS: Record<string, ModelOption[]> = {
       label: "gpt-5.1-codex-mini",
       description: "Lightweight / cost-saving",
       inferenceLevels: CODEX_BASE_LEVELS,
+      defaultInference: "medium",
+    },
+    {
+      id: "gpt-5.1-codex",
+      label: "gpt-5.1-codex",
+      description: "Standard Codex model",
+      inferenceLevels: CODEX_BASE_LEVELS,
+      defaultInference: "high",
+    },
+    {
+      id: "gpt-5.2",
+      label: "gpt-5.2",
+      description: "Latest frontier model with extra high reasoning",
+      inferenceLevels: CODEX_MAX_LEVELS,
       defaultInference: "medium",
     },
     {

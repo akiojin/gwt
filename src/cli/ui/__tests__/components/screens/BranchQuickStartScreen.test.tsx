@@ -23,7 +23,7 @@ describe("BranchQuickStartScreen", () => {
           {
             toolId: "codex-cli",
             toolLabel: "Codex",
-            model: "gpt-5.1-codex",
+            model: "gpt-5.2-codex",
             sessionId: "abc-123",
             inferenceLevel: "high",
             skipPermissions: true,
@@ -38,12 +38,12 @@ describe("BranchQuickStartScreen", () => {
     expect(titleMatches.length).toBeGreaterThan(0);
     expect(
       getByText(
-        /Model: gpt-5.1-codex \/ Reasoning: High \/ Skip: Yes \/ ID: abc-123/,
+        /Model: gpt-5.2-codex \/ Reasoning: High \/ Skip: Yes \/ ID: abc-123/,
       ),
     ).toBeDefined();
     expect(queryAllByText(/ID: abc-123/)).toHaveLength(1);
     expect(
-      getByText(/Model: gpt-5.1-codex \/ Reasoning: High \/ Skip: Yes$/),
+      getByText(/Model: gpt-5.2-codex \/ Reasoning: High \/ Skip: Yes$/),
     ).toBeDefined();
   });
 
@@ -90,7 +90,7 @@ describe("BranchQuickStartScreen", () => {
           {
             toolId: "codex-cli",
             toolLabel: "Codex",
-            model: "gpt-5.1-codex",
+            model: "gpt-5.2-codex",
             sessionId: "abc-123",
           },
         ]}
@@ -110,7 +110,7 @@ describe("BranchQuickStartScreen", () => {
           {
             toolId: "codex-cli",
             toolLabel: "Codex",
-            model: "gpt-5.1-codex",
+            model: "gpt-5.2-codex",
             sessionId: "codex-123",
             inferenceLevel: "high",
             skipPermissions: true,
@@ -131,7 +131,7 @@ describe("BranchQuickStartScreen", () => {
     expect(getAllByText(/\[Codex\]/i)).toHaveLength(2);
     expect(
       getByText(
-        /Model: gpt-5.1-codex \/ Reasoning: High \/ Skip: Yes \/ ID: codex-123/,
+        /Model: gpt-5.2-codex \/ Reasoning: High \/ Skip: Yes \/ ID: codex-123/,
       ),
     ).toBeDefined();
     expect(getAllByText(/\[Claude\]/i)).toHaveLength(2);
