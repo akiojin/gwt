@@ -268,20 +268,26 @@ export async function waitForUserAcknowledgement(
   terminal.exitRawMode();
 
   await new Promise<void>((resolve) => {
-    const cleanup = () => {
+    let finished = false;
+
+    function cleanup(): void {
+      if (finished) {
+        return;
+      }
+      finished = true;
       stdin.removeListener("data", onData);
       if (typeof stdin.pause === "function") {
         stdin.pause();
       }
-    };
+    }
 
-    const onData = (chunk: Buffer | string) => {
+    function onData(chunk: Buffer | string): void {
       const data = typeof chunk === "string" ? chunk : chunk.toString("utf8");
       if (data.includes("\n") || data.includes("\r")) {
         cleanup();
         resolve();
       }
-    };
+    }
 
     if (typeof stdout?.write === "function") {
       stdout.write(`\n${message}\n`);
@@ -292,5 +298,6 @@ export async function waitForUserAcknowledgement(
     }
 
     stdin.on("data", onData);
+    process.once("exit", cleanup);
   });
 }

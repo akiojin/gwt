@@ -6,6 +6,7 @@ import {
   getTerminalStreams,
   resetTerminalModes,
 } from "./utils/terminal.js";
+import { isCommandAvailable } from "./utils/command.js";
 import { findLatestGeminiSessionId } from "./utils/session.js";
 
 const GEMINI_CLI_PACKAGE = "@google/gemini-cli@latest";
@@ -151,7 +152,7 @@ export async function launchGeminiCLI(
     const childStdio = createChildStdio();
 
     // Auto-detect locally installed gemini command
-    const hasLocalGemini = await isGeminiCommandAvailable();
+    const hasLocalGemini = await isCommandAvailable("gemini");
 
     // Preserve TTY for interactive UI (colors/width) by inheriting stdout/stderr.
     // Session ID is determined via file-based detection after exit.
@@ -262,7 +263,7 @@ export async function launchGeminiCLI(
 
     return capturedSessionId ? { sessionId: capturedSessionId } : {};
   } catch (error: unknown) {
-    const hasLocalGemini = await isGeminiCommandAvailable();
+    const hasLocalGemini = await isCommandAvailable("gemini");
     let errorMessage: string;
     const err = error as NodeJS.ErrnoException;
 
@@ -311,26 +312,6 @@ export async function launchGeminiCLI(
   } finally {
     terminal.exitRawMode();
     resetTerminalModes(terminal.stdout);
-  }
-}
-
-/**
- * Check if locally installed `gemini` command is available
- * @returns true if `gemini` command exists in PATH, false otherwise
- */
-async function isGeminiCommandAvailable(): Promise<boolean> {
-  try {
-    const command = process.platform === "win32" ? "where" : "which";
-    await execa(command, ["gemini"], {
-      shell: true,
-      stdin: "ignore",
-      stdout: "ignore",
-      stderr: "ignore",
-    });
-    return true;
-  } catch {
-    // gemini command not found in PATH
-    return false;
   }
 }
 

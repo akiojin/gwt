@@ -6,6 +6,7 @@ import {
   getTerminalStreams,
   resetTerminalModes,
 } from "./utils/terminal.js";
+import { isCommandAvailable } from "./utils/command.js";
 import { findLatestClaudeSession } from "./utils/session.js";
 
 const CLAUDE_CLI_PACKAGE = "@anthropic-ai/claude-code@latest";
@@ -393,27 +394,6 @@ export async function launchClaudeCode(
   } finally {
     terminal.exitRawMode();
     resetTerminalModes(terminal.stdout);
-  }
-}
-
-/**
- * Checks whether a command is available in the current PATH.
- *
- * @param commandName - Command name to look up (`where` on Windows, `which` elsewhere)
- * @returns true if the command exists in PATH
- */
-async function isCommandAvailable(commandName: string): Promise<boolean> {
-  try {
-    const command = process.platform === "win32" ? "where" : "which";
-    await execa(command, [commandName], {
-      shell: true,
-      stdin: "ignore",
-      stdout: "ignore",
-      stderr: "ignore",
-    });
-    return true;
-  } catch {
-    return false;
   }
 }
 
