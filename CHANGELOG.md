@@ -121,9 +121,9 @@
 * Quick Startをツールカテゴリ別に色分け表示 ([f7464e2](https://github.com/akiojin/gwt/commit/f7464e2ad177ec52b25ecf5a27f29d6a478a2478))
 * reuse skip permissions in quick start ([5c75eea](https://github.com/akiojin/gwt/commit/5c75eea4f41ad52826a5a4c1e05a12f54b97eb15))
 * skip execution mode when quick-start reusing settings ([ed6bfc3](https://github.com/akiojin/gwt/commit/ed6bfc375a898fc3c16f250b9bd257d9bb927761))
-* support gemini and qwen session resume ([9cc993d](https://github.com/akiojin/gwt/commit/9cc993df4eb5ba9a1ea1c3be89e64dbca3071929))
+* support gemini session resume ([9cc993d](https://github.com/akiojin/gwt/commit/9cc993df4eb5ba9a1ea1c3be89e64dbca3071929))
 * クイックスタートでツール別の直近設定を提示 ([9904992](https://github.com/akiojin/gwt/commit/99049928061105e48fadb103bab423fdb4e7ecf4))
-* セッションID再開対応（Codex/Claude/Gemini/Qwen） ([a2d50ef](https://github.com/akiojin/gwt/commit/a2d50ef9f48e18045b6c5764b38c6f567f6d0d83))
+* セッションID再開対応（Codex/Claude/Gemini） ([a2d50ef](https://github.com/akiojin/gwt/commit/a2d50ef9f48e18045b6c5764b38c6f567f6d0d83))
 * 全AIツール起動時のパラメーターを表示 ([72d41b4](https://github.com/akiojin/gwt/commit/72d41b4bbf9af82c7ff9a2f90d3d852aa7db8861))
 * 全AIツール起動時のパラメーターを表示 ([d3a6827](https://github.com/akiojin/gwt/commit/d3a682790addca7c541a01a37c72efbad75a4b57))
 
@@ -329,7 +329,7 @@
 ### Features
 
 * align model selection with provider defaults ([cc8c863](https://github.com/akiojin/gwt/commit/cc8c863e6ce14aa57601deccd6471ca6c0aaa540))
-* QwenサポートをREADMEに追加し、GEMINI.mdを作成 ([4fa1491](https://github.com/akiojin/gwt/commit/4fa14914941593b330efa7486eef3772e387f330))
+* READMEを更新し、GEMINI.mdを作成 ([4fa1491](https://github.com/akiojin/gwt/commit/4fa14914941593b330efa7486eef3772e387f330))
 * remember last model and reasoning selection per tool ([01b5124](https://github.com/akiojin/gwt/commit/01b5124409b13763d8b792493ef72442714cf4f9))
 
 # [2.3.0](https://github.com/akiojin/gwt/compare/v2.2.0...v2.3.0) (2025-11-19)
@@ -339,7 +339,7 @@
 
 * Codex/Geminiの表示名を簡潔化 ([cc8bdb2](https://github.com/akiojin/gwt/commit/cc8bdb25617de58c79dda5b53134fc2a3ac89aa2))
 * Gemini CLIをビルトインツールとして追加 ([0e80363](https://github.com/akiojin/gwt/commit/0e80363ae81fdf61c00ae55dbecf8b2cecd677e4))
-* Qwenをビルトインツールとして追加 ([b4f6c94](https://github.com/akiojin/gwt/commit/b4f6c9476f6675bdc4e27006b60868ee14f07dae))
+* ビルトインツールを追加 ([b4f6c94](https://github.com/akiojin/gwt/commit/b4f6c9476f6675bdc4e27006b60868ee14f07dae))
 
 # [2.2.0](https://github.com/akiojin/gwt/compare/v2.1.1...v2.2.0) (2025-11-18)
 

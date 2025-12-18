@@ -30,12 +30,12 @@
 #
 # 5. Multi-Agent Support
 #    - Handles agent-specific file paths and naming conventions
-#    - Supports: Claude, Gemini, Copilot, Cursor, Qwen, opencode, Codex, Windsurf, Kilo Code, Auggie CLI, Roo Code, CodeBuddy CLI, Amp, or Amazon Q Developer CLI
+#    - Supports: Claude, Gemini, Copilot, Cursor, opencode, Codex, Windsurf, Kilo Code, Auggie CLI, Roo Code, CodeBuddy CLI, Amp, or Amazon Q Developer CLI
 #    - Can update single agents or all existing agent files
 #    - Creates default Claude file if no agent files exist
 #
 # Usage: ./update-agent-context.sh [agent_type]
-# Agent types: claude|gemini|copilot|cursor-agent|qwen|opencode|codex|windsurf|kilocode|auggie|q
+# Agent types: claude|gemini|copilot|cursor-agent|opencode|codex|windsurf|kilocode|auggie|q
 # Leave empty to update all existing agent files
 
 set -e
@@ -54,7 +54,7 @@ source "$SCRIPT_DIR/common.sh"
 
 # 引数解析
 # Usage: ./update-agent-context.sh [--spec-id SPEC-xxxxxxxx] [agent_type]
-# agent_type: claude|gemini|copilot|cursor-agent|qwen|opencode|codex|windsurf|kilocode|auggie|codebuddy|q
+# agent_type: claude|gemini|copilot|cursor-agent|opencode|codex|windsurf|kilocode|auggie|codebuddy|q
 AGENT_TYPE=""
 SPEC_ID_ARG=""
 
@@ -79,7 +79,7 @@ plan.md の内容から、各AIエージェント向けのコンテキストフ�
   --help, -h               このヘルプを表示
 
 agent_type:
-  claude|gemini|copilot|cursor-agent|qwen|opencode|codex|windsurf|kilocode|auggie|codebuddy|q
+  claude|gemini|copilot|cursor-agent|opencode|codex|windsurf|kilocode|auggie|codebuddy|q
 
 例:
   ./update-agent-context.sh --spec-id SPEC-1defd8fd claude
@@ -115,7 +115,6 @@ CLAUDE_FILE="$REPO_ROOT/CLAUDE.md"
 GEMINI_FILE="$REPO_ROOT/GEMINI.md"
 COPILOT_FILE="$REPO_ROOT/.github/copilot-instructions.md"
 CURSOR_FILE="$REPO_ROOT/.cursor/rules/specify-rules.mdc"
-QWEN_FILE="$REPO_ROOT/QWEN.md"
 AGENTS_FILE="$REPO_ROOT/AGENTS.md"
 WINDSURF_FILE="$REPO_ROOT/.windsurf/rules/specify-rules.md"
 KILOCODE_FILE="$REPO_ROOT/.kilocode/rules/specify-rules.md"
@@ -674,9 +673,6 @@ update_specific_agent() {
         cursor-agent)
             update_agent_file "$CURSOR_FILE" "Cursor IDE"
             ;;
-        qwen)
-            update_agent_file "$QWEN_FILE" "Qwen Code"
-            ;;
         opencode)
             update_agent_file "$AGENTS_FILE" "opencode"
             ;;
@@ -706,7 +702,7 @@ update_specific_agent() {
             ;;
         *)
             log_error "未知のagent_typeです: '$agent_type'"
-            log_error "指定可能: claude|gemini|copilot|cursor-agent|qwen|opencode|codex|windsurf|kilocode|auggie|roo|amp|q"
+            log_error "指定可能: claude|gemini|copilot|cursor-agent|opencode|codex|windsurf|kilocode|auggie|roo|amp|q"
             exit 1
             ;;
     esac
@@ -733,11 +729,6 @@ update_all_existing_agents() {
     
     if [[ -f "$CURSOR_FILE" ]]; then
         update_agent_file "$CURSOR_FILE" "Cursor IDE"
-        found_agent=true
-    fi
-    
-    if [[ -f "$QWEN_FILE" ]]; then
-        update_agent_file "$QWEN_FILE" "Qwen Code"
         found_agent=true
     fi
     
@@ -800,7 +791,7 @@ print_summary() {
     
     echo
 
-    log_info "使い方: $0 [--spec-id SPEC-xxxxxxxx] [claude|gemini|copilot|cursor-agent|qwen|opencode|codex|windsurf|kilocode|auggie|codebuddy|q]"
+    log_info "使い方: $0 [--spec-id SPEC-xxxxxxxx] [claude|gemini|copilot|cursor-agent|opencode|codex|windsurf|kilocode|auggie|codebuddy|q]"
 }
 
 #==============================================================================

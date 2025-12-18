@@ -225,7 +225,6 @@ Claude Code で以下のコマンドを実行して、仕様駆動開発を活�
 │   ├── claude.ts        # Claude Code 統合
 │   ├── codex.ts         # Codex CLI 統合
 │   ├── gemini.ts        # Gemini CLI 統合
-│   ├── qwen.ts          # (deprecated) Qwen CLI 統合（未サポート）
 │   ├── github.ts        # GitHub CLI統合
 │   ├── utils.ts         # ユーティリティ関数とエラーハンドリング
 │   └── ui/              # ユーザーインターフェースコンポーネント
