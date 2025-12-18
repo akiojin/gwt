@@ -43,6 +43,15 @@
 * update default Claude Code model to Opus 4.5 ([1dd909e](https://github.com/akiojin/gwt/commit/1dd909ed87a55ce3bb796deb0431d0027571dae2))
 * update Opus model version to 4.5 ([307faeb](https://github.com/akiojin/gwt/commit/307faeb66ebac0ca89b01c07ee19d213797c4d5c))
 
+## [4.0.1](https://github.com/akiojin/gwt/compare/v4.0.0...v4.0.1) (2025-12-18)
+
+
+### Bug Fixes
+
+* WSL2とWindowsで矢印キー入力を安定化 ([94539f1](https://github.com/akiojin/gwt/commit/94539f17b1449b49fc93af0e775667e4d1d399c6))
+* WSL2とWindowsで矢印キー入力を安定化 ([d96ba58](https://github.com/akiojin/gwt/commit/d96ba58b26f7afc283fd91c952876ff7130175bb))
+* デフォルトモデルオプション追加に伴うテスト期待値を修正 ([31a1728](https://github.com/akiojin/gwt/commit/31a17284ba82c27f1dd8aebf6d8bc8b43eca7d5f))
+
 ## [4.0.0](https://github.com/akiojin/gwt/compare/v3.1.2...v4.0.0) (2025-12-18)
 
 
