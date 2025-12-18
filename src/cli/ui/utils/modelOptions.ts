@@ -6,11 +6,16 @@ const CODEX_MAX_LEVELS: InferenceLevel[] = ["xhigh", "high", "medium", "low"];
 const MODEL_OPTIONS: Record<string, ModelOption[]> = {
   "claude-code": [
     {
+      id: "",
+      label: "Default (Auto)",
+      description: "Use Claude Code default behavior",
+      isDefault: true,
+    },
+    {
       id: "opus",
       label: "Opus 4.5",
       description:
         "Official Opus alias for Claude Code (non-custom, matches /model option).",
-      isDefault: true,
     },
     {
       id: "sonnet",
@@ -26,12 +31,19 @@ const MODEL_OPTIONS: Record<string, ModelOption[]> = {
   ],
   "codex-cli": [
     {
+      id: "",
+      label: "Default (Auto)",
+      description: "Use Codex default model",
+      isDefault: true,
+      inferenceLevels: CODEX_BASE_LEVELS,
+      defaultInference: "high",
+    },
+    {
       id: "gpt-5.1-codex",
       label: "gpt-5.1-codex",
       description: "Standard Codex model",
       inferenceLevels: CODEX_BASE_LEVELS,
       defaultInference: "high",
-      isDefault: true,
     },
     {
       id: "gpt-5.2",
@@ -64,11 +76,21 @@ const MODEL_OPTIONS: Record<string, ModelOption[]> = {
   ],
   "gemini-cli": [
     {
+      id: "",
+      label: "Default (Auto)",
+      description: "Use Gemini CLI default model",
+      isDefault: true,
+    },
+    {
       id: "gemini-3-pro-preview",
       label: "Pro (gemini-3-pro-preview)",
       description:
         "Default Pro. Falls back to gemini-2.5-pro when preview is unavailable.",
-      isDefault: true,
+    },
+    {
+      id: "gemini-3-flash-preview",
+      label: "Flash (gemini-3-flash-preview)",
+      description: "Next-generation high-speed model",
     },
     {
       id: "gemini-2.5-pro",
@@ -84,21 +106,6 @@ const MODEL_OPTIONS: Record<string, ModelOption[]> = {
       id: "gemini-2.5-flash-lite",
       label: "Flash-Lite (gemini-2.5-flash-lite)",
       description: "Fastest for simple tasks",
-    },
-  ],
-  "qwen-cli": [
-    {
-      id: "coder-model",
-      label: "Coder Model",
-      description:
-        "Latest Qwen Coder model (qwen3-coder-plus-2025-09-23) from Alibaba Cloud ModelStudio",
-      isDefault: true,
-    },
-    {
-      id: "vision-model",
-      label: "Vision Model",
-      description:
-        "Latest Qwen Vision model (qwen3-vl-plus-2025-09-23) from Alibaba Cloud ModelStudio",
     },
   ],
 };

@@ -60,6 +60,8 @@ export const GEMINI_CLI_TOOL: CustomAITool = {
 
 /**
  * Qwen のビルトイン定義
+ *
+ * NOTE: 現在は未サポート（選択画面には表示しない）。ID予約のため定義のみ残す。
  */
 export const QWEN_CLI_TOOL: CustomAITool = {
   id: "qwen-cli",
