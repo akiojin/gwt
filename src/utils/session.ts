@@ -11,7 +11,6 @@
  * - ./session/parsers/claude.js - Claude-specific functions
  * - ./session/parsers/codex.js - Codex-specific functions
  * - ./session/parsers/gemini.js - Gemini-specific functions
- * - ./session/parsers/qwen.js - Qwen-specific functions
  */
 
 export * from "./session/index.js";
