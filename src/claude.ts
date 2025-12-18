@@ -1,10 +1,15 @@
-import { execa } from "execa";
+import { execa, type Options as ExecaOptions } from "execa";
 import chalk from "chalk";
 import { existsSync } from "fs";
-import { createChildStdio, getTerminalStreams } from "./utils/terminal.js";
+import {
+  createChildStdio,
+  getTerminalStreams,
+  resetTerminalModes,
+} from "./utils/terminal.js";
 import { findLatestClaudeSession } from "./utils/session.js";
 
 const CLAUDE_CLI_PACKAGE = "@anthropic-ai/claude-code@latest";
+
 export class ClaudeError extends Error {
   constructor(
     message: string,
@@ -175,6 +180,7 @@ export async function launchClaudeCode(
     console.log(chalk.gray(`   📋 Args: ${args.join(" ")}`));
 
     terminal.exitRawMode();
+    resetTerminalModes(terminal.stdout);
 
     const baseEnv = { ...process.env, ...(options.envOverrides ?? {}) };
     const launchEnvSource =
@@ -191,26 +197,57 @@ export async function launchClaudeCode(
 
     // Auto-detect locally installed claude command
     const hasLocalClaude = await isClaudeCommandAvailable();
+    const hasNpx =
+      process.platform === "win32" ? await isNpxCommandAvailable() : false;
+
+    const execInteractive = async (
+      file: string,
+      fileArgs: string[],
+      execOptions: Omit<ExecaOptions, "shell">,
+    ) => {
+      if (process.platform !== "win32") {
+        await execa(file, fileArgs, { ...execOptions, shell: true });
+        return;
+      }
+
+      try {
+        await execa(file, fileArgs, { ...execOptions, shell: false });
+      } catch (error: unknown) {
+        const err = error as NodeJS.ErrnoException;
+        if (err?.code === "ENOENT" || err?.code === "EINVAL") {
+          await execa(file, fileArgs, { ...execOptions, shell: true });
+          return;
+        }
+        throw error;
+      }
+    };
 
     try {
       if (hasLocalClaude) {
         console.log(
           chalk.green("   ✨ Using locally installed claude command"),
         );
-        await execa("claude", args, {
+        await execInteractive("claude", args, {
           cwd: worktreePath,
-          shell: true,
           stdin: childStdio.stdin,
           stdout: childStdio.stdout,
           stderr: childStdio.stderr,
           env: launchEnv,
         });
       } else {
-        console.log(
-          chalk.cyan(
-            "   🔄 Falling back to bunx @anthropic-ai/claude-code@latest",
-          ),
-        );
+        if (hasNpx) {
+          console.log(
+            chalk.cyan(
+              "   🔄 Falling back to npx @anthropic-ai/claude-code@latest",
+            ),
+          );
+        } else {
+          console.log(
+            chalk.cyan(
+              "   🔄 Falling back to bunx @anthropic-ai/claude-code@latest",
+            ),
+          );
+        }
         console.log(
           chalk.yellow(
             "   💡 Recommended: Install Claude Code via official method for faster startup",
@@ -231,14 +268,23 @@ export async function launchClaudeCode(
         );
         console.log("");
         await new Promise((resolve) => setTimeout(resolve, 2000));
-        await execa("bunx", [CLAUDE_CLI_PACKAGE, ...args], {
-          cwd: worktreePath,
-          shell: true,
-          stdin: childStdio.stdin,
-          stdout: childStdio.stdout,
-          stderr: childStdio.stderr,
-          env: launchEnv,
-        });
+        if (hasNpx) {
+          await execInteractive("npx", ["-y", CLAUDE_CLI_PACKAGE, ...args], {
+            cwd: worktreePath,
+            stdin: childStdio.stdin,
+            stdout: childStdio.stdout,
+            stderr: childStdio.stderr,
+            env: launchEnv,
+          });
+        } else {
+          await execInteractive("bunx", [CLAUDE_CLI_PACKAGE, ...args], {
+            cwd: worktreePath,
+            stdin: childStdio.stdin,
+            stdout: childStdio.stdout,
+            stderr: childStdio.stderr,
+            env: launchEnv,
+          });
+        }
       }
     } finally {
       childStdio.cleanup();
@@ -327,6 +373,7 @@ export async function launchClaudeCode(
     throw new ClaudeError(errorMessage, error);
   } finally {
     terminal.exitRawMode();
+    resetTerminalModes(terminal.stdout);
   }
 }
 
@@ -346,6 +393,21 @@ async function isClaudeCommandAvailable(): Promise<boolean> {
     return true;
   } catch {
     // claude command not found in PATH
+    return false;
+  }
+}
+
+async function isNpxCommandAvailable(): Promise<boolean> {
+  try {
+    const command = process.platform === "win32" ? "where" : "which";
+    await execa(command, ["npx"], {
+      shell: true,
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    return true;
+  } catch {
     return false;
   }
 }

@@ -17,10 +17,13 @@ vi.mock("os", () => ({
   default: { platform: vi.fn(() => "darwin") },
 }));
 
+const stdoutWrite = vi.fn();
+const stderrWrite = vi.fn();
+
 const mockTerminalStreams = {
   stdin: { id: "stdin" } as unknown as NodeJS.ReadStream,
-  stdout: { id: "stdout", write: vi.fn() } as unknown as NodeJS.WriteStream,
-  stderr: { id: "stderr", write: vi.fn() } as unknown as NodeJS.WriteStream,
+  stdout: { id: "stdout", write: stdoutWrite } as unknown as NodeJS.WriteStream,
+  stderr: { id: "stderr", write: stderrWrite } as unknown as NodeJS.WriteStream,
   stdinFd: undefined as number | undefined,
   stdoutFd: undefined as number | undefined,
   stderrFd: undefined as number | undefined,
@@ -28,16 +31,22 @@ const mockTerminalStreams = {
   exitRawMode: vi.fn(),
 };
 
-const mockChildStdio = {
-  stdin: "inherit" as const,
-  stdout: "inherit" as const,
-  stderr: "inherit" as const,
+const mockChildStdio: {
+  stdin: unknown;
+  stdout: unknown;
+  stderr: unknown;
+  cleanup: ReturnType<typeof vi.fn>;
+} = {
+  stdin: "inherit",
+  stdout: "inherit",
+  stderr: "inherit",
   cleanup: vi.fn(),
 };
 
 vi.mock("../../src/utils/terminal", () => ({
   getTerminalStreams: vi.fn(() => mockTerminalStreams),
   createChildStdio: vi.fn(() => mockChildStdio),
+  resetTerminalModes: vi.fn(),
 }));
 vi.mock("../../src/utils/session", () => ({
   waitForCodexSessionId: vi.fn(async () => null),
@@ -80,20 +89,24 @@ describe("codex.ts", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockTerminalStreams.exitRawMode.mockClear();
-    (mockTerminalStreams.stdout.write as any).mockClear?.();
-    (mockTerminalStreams.stderr.write as any).mockClear?.();
+    stdoutWrite.mockClear();
+    stderrWrite.mockClear();
     mockChildStdio.cleanup.mockClear();
     mockChildStdio.stdin = "inherit";
     mockChildStdio.stdout = "inherit";
     mockChildStdio.stderr = "inherit";
-    (execa as any).mockImplementation(() => createChildProcess() as any);
+    mockExeca.mockImplementation(() => createChildProcess());
   });
 
   it("should append default Codex CLI arguments on launch", async () => {
     await launchCodexCLI(worktreePath);
 
     expect(execa).toHaveBeenCalledTimes(1);
-    const [, args, options] = (execa as any).mock.calls[0];
+    const [, args, options] = mockExeca.mock.calls[0] as unknown as [
+      unknown,
+      string[],
+      Record<string, unknown>,
+    ];
 
     expect(args).toEqual(["@openai/codex@latest", ...DEFAULT_CODEX_ARGS]);
     expect(options).toMatchObject({
@@ -110,7 +123,9 @@ describe("codex.ts", () => {
   it("captures sessionId from file-based session detection", async () => {
     const { findLatestCodexSession } =
       await import("../../src/utils/session.js");
-    (findLatestCodexSession as any).mockResolvedValueOnce({
+    const mockFindLatestCodexSession =
+      findLatestCodexSession as unknown as ReturnType<typeof vi.fn>;
+    mockFindLatestCodexSession.mockResolvedValueOnce({
       id: "019af999-aaaa-bbbb-cccc-123456789abc",
       fullPath: "/mock/path/session.jsonl",
       mtime: new Date(),
@@ -123,7 +138,7 @@ describe("codex.ts", () => {
   it("should place extra arguments before the default set", async () => {
     await launchCodexCLI(worktreePath, { extraArgs: ["--custom-flag"] });
 
-    const [, args] = (execa as any).mock.calls[0];
+    const [, args] = mockExeca.mock.calls[0] as unknown as [unknown, string[]];
     expect(args).toEqual([
       "@openai/codex@latest",
       "--custom-flag",
@@ -134,7 +149,7 @@ describe("codex.ts", () => {
   it("should include resume command arguments before defaults when continuing", async () => {
     await launchCodexCLI(worktreePath, { mode: "continue" });
 
-    const [, args] = (execa as any).mock.calls[0];
+    const [, args] = mockExeca.mock.calls[0] as unknown as [unknown, string[]];
     expect(args).toEqual([
       "@openai/codex@latest",
       "resume",
@@ -149,7 +164,7 @@ describe("codex.ts", () => {
       reasoningEffort: "xhigh",
     });
 
-    const [, args] = (execa as any).mock.calls[0];
+    const [, args] = mockExeca.mock.calls[0] as unknown as [unknown, string[]];
     expect(args).toEqual([
       "@openai/codex@latest",
       ...buildDefaultCodexArgs("gpt-5.1-codex-max", "xhigh"),
@@ -162,7 +177,7 @@ describe("codex.ts", () => {
       reasoningEffort: "xhigh",
     });
 
-    const [, args] = (execa as any).mock.calls[0];
+    const [, args] = mockExeca.mock.calls[0] as unknown as [unknown, string[]];
     expect(args).toEqual([
       "@openai/codex@latest",
       ...buildDefaultCodexArgs("gpt-5.2", "xhigh"),
@@ -171,13 +186,17 @@ describe("codex.ts", () => {
 
   it("should hand off fallback file descriptors when stdin is not a TTY", async () => {
     mockTerminalStreams.usingFallback = true;
-    mockChildStdio.stdin = 11 as unknown as any;
-    mockChildStdio.stdout = 12 as unknown as any;
-    mockChildStdio.stderr = 13 as unknown as any;
+    mockChildStdio.stdin = 11;
+    mockChildStdio.stdout = 12;
+    mockChildStdio.stderr = 13;
 
     await launchCodexCLI(worktreePath);
 
-    const [, , options] = (execa as any).mock.calls[0];
+    const [, , options] = mockExeca.mock.calls[0] as unknown as [
+      unknown,
+      unknown,
+      Record<string, unknown>,
+    ];
     expect(options).toMatchObject({
       stdin: 11,
       stdout: 12,
@@ -194,7 +213,7 @@ describe("codex.ts", () => {
   it("should include --enable skills in default arguments (FR-202)", async () => {
     await launchCodexCLI(worktreePath);
 
-    const [, args] = (execa as any).mock.calls[0];
+    const [, args] = mockExeca.mock.calls[0] as unknown as [unknown, string[]];
 
     // Find the index of "--enable" followed by "skills"
     const enableIndex = args.findIndex(

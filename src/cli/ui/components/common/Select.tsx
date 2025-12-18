@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
-import { Box, Text, useInput, useStdout } from "ink";
+import { Box, Text, useStdout } from "ink";
+import { useAppInput } from "../../hooks/useAppInput.js";
 
 export interface SelectItem {
   label: string;
@@ -133,7 +134,7 @@ const SelectComponent = <T extends SelectItem = SelectItem>({
     }
   }, [items, limit]);
 
-  useInput((input, key) => {
+  useAppInput((input, key) => {
     if (disabled) {
       return;
     }

@@ -14,6 +14,7 @@ export interface TerminalStreams {
 }
 
 const DEV_TTY_PATH = "/dev/tty";
+const TERMINAL_RESET_SEQUENCE = "\u001b[?1l\u001b>";
 
 let cachedStreams: TerminalStreams | null = null;
 
@@ -170,6 +171,22 @@ export function getTerminalStreams(): TerminalStreams {
     cachedStreams = createTerminalStreams();
   }
   return cachedStreams;
+}
+
+export function resetTerminalModes(
+  stdout: NodeJS.WriteStream | undefined,
+): void {
+  if (!stdout || typeof stdout.write !== "function") {
+    return;
+  }
+  if (!("isTTY" in stdout) || !stdout.isTTY) {
+    return;
+  }
+  try {
+    stdout.write(TERMINAL_RESET_SEQUENCE);
+  } catch {
+    // Ignore terminal reset errors.
+  }
 }
 
 export function createChildStdio(): ChildStdio {

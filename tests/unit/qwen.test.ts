@@ -23,15 +23,21 @@ const mockTerminalStreams = {
 };
 
 const mockChildStdio = {
-  stdin: "inherit" as const,
-  stdout: "inherit" as const,
-  stderr: "inherit" as const,
+  stdin: "inherit",
+  stdout: "inherit",
+  stderr: "inherit",
   cleanup: vi.fn(),
+} as {
+  stdin: unknown;
+  stdout: unknown;
+  stderr: unknown;
+  cleanup: ReturnType<typeof vi.fn>;
 };
 
 vi.mock("../../src/utils/terminal", () => ({
   getTerminalStreams: vi.fn(() => mockTerminalStreams),
   createChildStdio: vi.fn(() => mockChildStdio),
+  resetTerminalModes: vi.fn(),
 }));
 
 import { launchQwenCLI } from "../../src/qwen.js";
@@ -68,7 +74,7 @@ describe("launchQwenCLI", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchQwenCLI("/test/path");
 
@@ -107,13 +113,13 @@ describe("launchQwenCLI", () => {
           stdout: "/usr/local/bin/qwen",
           stderr: "",
           exitCode: 0,
-        } as any)
+        })
         .mockResolvedValueOnce({
           // qwen execution
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchQwenCLI("/test/path");
 
@@ -165,7 +171,7 @@ describe("launchQwenCLI", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchQwenCLI("/test/path", { mode: "normal" });
 
@@ -185,7 +191,7 @@ describe("launchQwenCLI", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchQwenCLI("/test/path", { mode: "continue" });
 
@@ -205,7 +211,7 @@ describe("launchQwenCLI", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchQwenCLI("/test/path", { mode: "resume" });
 
@@ -227,7 +233,7 @@ describe("launchQwenCLI", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchQwenCLI("/test/path", { skipPermissions: true });
 
@@ -252,7 +258,7 @@ describe("launchQwenCLI", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchQwenCLI("/test/path", { skipPermissions: false });
 
@@ -279,7 +285,7 @@ describe("launchQwenCLI", () => {
           // bunx execution failure
           code: "ENOENT",
           message: "bunx command not found",
-        } as any)
+        })
         .mockRejectedValueOnce(new Error("Command not found")); // which/where in catch block
 
       await expect(launchQwenCLI("/test/path")).rejects.toThrow(
@@ -296,9 +302,10 @@ describe("launchQwenCLI", () => {
       try {
         await launchQwenCLI("/test/path");
         expect.fail("Should have thrown an error");
-      } catch (error: any) {
-        expect(error.name).toBe("QwenError");
-        expect(error.cause).toBe(originalError);
+      } catch (error: unknown) {
+        const err = error as { name?: string; cause?: unknown };
+        expect(err.name).toBe("QwenError");
+        expect(err.cause).toBe(originalError);
       }
     });
 
@@ -320,14 +327,14 @@ describe("launchQwenCLI", () => {
           // bunx execution failure
           code: "ENOENT",
           message: "bunx command not found",
-        } as any)
+        })
         .mockRejectedValueOnce(new Error("Command not found")); // which/where in catch block
 
       try {
         await launchQwenCLI("/test/path");
         expect.fail("Should have thrown an error");
-      } catch (error: any) {
-        // Error should be thrown
+      } catch (_error: unknown) {
+        // no-op
       }
 
       // Verify Windows troubleshooting message (uses console.error, not console.log)
@@ -362,7 +369,7 @@ describe("launchQwenCLI", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchQwenCLI("/test/path", {
         envOverrides: {
@@ -392,7 +399,7 @@ describe("launchQwenCLI", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchQwenCLI("/test/path", {
         extraArgs: ["--verbose", "--debug"],
@@ -421,7 +428,7 @@ describe("launchQwenCLI", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchQwenCLI("/test/path");
 
@@ -431,9 +438,9 @@ describe("launchQwenCLI", () => {
 
     it("T015: childStdio.cleanupがusingFallback=true時に呼び出される", async () => {
       mockTerminalStreams.usingFallback = true;
-      mockChildStdio.stdin = 101 as unknown as any;
-      mockChildStdio.stdout = 102 as unknown as any;
-      mockChildStdio.stderr = 103 as unknown as any;
+      mockChildStdio.stdin = 101;
+      mockChildStdio.stdout = 102;
+      mockChildStdio.stderr = 103;
 
       mockExeca
         .mockRejectedValueOnce(new Error("Command not found")) // which/where
@@ -441,7 +448,7 @@ describe("launchQwenCLI", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchQwenCLI("/test/path");
 
@@ -476,7 +483,7 @@ describe("launchQwenCLI", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchQwenCLI("/test/path", { skipPermissions: true });
 

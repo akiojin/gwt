@@ -1,8 +1,9 @@
 import React, { useState } from "react";
-import { Box, Text, useInput } from "ink";
+import { Box, Text } from "ink";
 import { Header } from "../parts/Header.js";
 import { Footer } from "../parts/Footer.js";
 import { Select } from "../common/Select.js";
+import { useAppInput } from "../../hooks/useAppInput.js";
 import { useTerminalSize } from "../../hooks/useTerminalSize.js";
 
 export type ExecutionMode = "normal" | "continue" | "resume";
@@ -48,7 +49,7 @@ export function ExecutionModeSelectorScreen({
   const [selectedMode, setSelectedMode] = useState<ExecutionMode | null>(null);
 
   // Handle keyboard input
-  useInput((input, key) => {
+  useAppInput((input, key) => {
     if (key.escape) {
       if (step === 2) {
         // Go back to step 1

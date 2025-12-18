@@ -2,7 +2,11 @@ import { execa } from "execa";
 import chalk from "chalk";
 import { platform } from "os";
 import { existsSync } from "fs";
-import { createChildStdio, getTerminalStreams } from "./utils/terminal.js";
+import {
+  createChildStdio,
+  getTerminalStreams,
+  resetTerminalModes,
+} from "./utils/terminal.js";
 import { findLatestCodexSession } from "./utils/session.js";
 
 const CODEX_CLI_PACKAGE = "@openai/codex@latest";
@@ -133,6 +137,7 @@ export async function launchCodexCLI(
     console.log(chalk.gray(`   📋 Args: ${args.join(" ")}`));
 
     terminal.exitRawMode();
+    resetTerminalModes(terminal.stdout);
 
     const childStdio = createChildStdio();
 
@@ -235,6 +240,7 @@ export async function launchCodexCLI(
     throw new CodexError(errorMessage, error);
   } finally {
     terminal.exitRawMode();
+    resetTerminalModes(terminal.stdout);
   }
 }
 

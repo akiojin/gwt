@@ -34,6 +34,7 @@ const mockChildStdio = {
 vi.mock("../../src/utils/terminal", () => ({
   getTerminalStreams: vi.fn(() => mockTerminalStreams),
   createChildStdio: vi.fn(() => mockChildStdio),
+  resetTerminalModes: vi.fn(),
 }));
 
 import { launchGeminiCLI } from "../../src/gemini.js";

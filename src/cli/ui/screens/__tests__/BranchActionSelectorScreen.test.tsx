@@ -2,7 +2,8 @@
  * @vitest-environment happy-dom
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { render } from "@testing-library/react";
+import { act, render } from "@testing-library/react";
+import { render as inkRender } from "ink-testing-library";
 import React from "react";
 import { BranchActionSelectorScreen } from "../BranchActionSelectorScreen.js";
 import { Window } from "happy-dom";
@@ -148,5 +149,67 @@ describe("BranchActionSelectorScreen", () => {
     // Note: Simulating selection requires ink-testing-library
     // For now, we verify the component structure and callbacks are set up
     expect(onCreateNew).not.toHaveBeenCalled();
+  });
+
+  it("should treat split down-arrow sequence as navigation (WSL2) and not as Escape", () => {
+    const onUseExisting = vi.fn();
+    const onCreateNew = vi.fn();
+    const onBack = vi.fn();
+
+    const inkApp = inkRender(
+      <BranchActionSelectorScreen
+        selectedBranch="feature-test"
+        onUseExisting={onUseExisting}
+        onCreateNew={onCreateNew}
+        onBack={onBack}
+      />,
+    );
+
+    act(() => {
+      inkApp.stdin.write("\u001b");
+      inkApp.stdin.write("[");
+      inkApp.stdin.write("B");
+    });
+
+    act(() => {
+      inkApp.stdin.write("\r");
+    });
+
+    expect(onBack).not.toHaveBeenCalled();
+    expect(onCreateNew).toHaveBeenCalledTimes(1);
+    expect(onUseExisting).not.toHaveBeenCalled();
+
+    inkApp.unmount();
+  });
+
+  it("should still handle Escape key as back navigation", () => {
+    vi.useFakeTimers();
+    const onUseExisting = vi.fn();
+    const onCreateNew = vi.fn();
+    const onBack = vi.fn();
+
+    const inkApp = inkRender(
+      <BranchActionSelectorScreen
+        selectedBranch="feature-test"
+        onUseExisting={onUseExisting}
+        onCreateNew={onCreateNew}
+        onBack={onBack}
+      />,
+    );
+
+    act(() => {
+      inkApp.stdin.write("\u001b");
+    });
+
+    act(() => {
+      vi.advanceTimersByTime(50);
+    });
+
+    expect(onBack).toHaveBeenCalledTimes(1);
+    expect(onCreateNew).not.toHaveBeenCalled();
+    expect(onUseExisting).not.toHaveBeenCalled();
+
+    inkApp.unmount();
+    vi.useRealTimers();
   });
 });
