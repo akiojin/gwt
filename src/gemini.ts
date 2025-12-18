@@ -134,62 +134,41 @@ export async function launchGeminiCLI(
     // Auto-detect locally installed gemini command
     const hasLocalGemini = await isGeminiCommandAvailable();
 
-    // Capture session ID from Gemini's exit summary
+    // Preserve TTY for interactive UI (colors/width) by inheriting stdout/stderr.
+    // Session ID is determined via file-based detection after exit.
     let capturedSessionId: string | null = null;
-    const extractSessionId = (output: string | undefined) => {
-      if (!output) return;
-      // Gemini outputs "Session ID: <uuid>" in exit summary
-      // UUID may be split across lines due to terminal width
-      // First, find "Session ID:" and extract following hex characters
-      const sessionIdIndex = output.indexOf("Session ID:");
-      if (sessionIdIndex === -1) return;
 
-      // Extract text after "Session ID:" until we have enough hex chars for UUID
-      const afterLabel = output.slice(sessionIdIndex + "Session ID:".length);
-      // Remove all non-hex characters except dash, then extract UUID pattern
-      const hexOnly = afterLabel.replace(/[^0-9a-fA-F-]/g, "");
-      // UUID format: 8-4-4-4-12 = 32 hex chars + 4 dashes
-      const uuidMatch = hexOnly.match(
-        /^([0-9a-f]{8})-?([0-9a-f]{4})-?([0-9a-f]{4})-?([0-9a-f]{4})-?([0-9a-f]{12})/i,
-      );
-      if (uuidMatch) {
-        capturedSessionId = `${uuidMatch[1]}-${uuidMatch[2]}-${uuidMatch[3]}-${uuidMatch[4]}-${uuidMatch[5]}`;
-      }
-    };
+    const runGemini = async (runArgs: string[]): Promise<void> => {
+      const execChild = async (child: Promise<unknown>) => {
+        try {
+          await child;
+        } catch (execError: unknown) {
+          // Treat SIGINT/SIGTERM as normal exit (user pressed Ctrl+C)
+          const signal = (execError as { signal?: unknown })?.signal;
+          if (signal === "SIGINT" || signal === "SIGTERM") {
+            return;
+          }
+          throw execError;
+        }
+      };
 
-    const runGemini = async (
-      runArgs: string[],
-    ): Promise<string | undefined> => {
-      // Capture stdout while passing through to terminal
-      // Store chunks to extract session ID after process exits
-      const outputChunks: string[] = [];
-
-      const runWithCapture = async (cmd: string, args: string[]) => {
+      const run = async (cmd: string, args: string[]) => {
         const child = execa(cmd, args, {
           cwd: worktreePath,
           shell: true,
           stdin: childStdio.stdin,
-          stdout: "pipe",
+          stdout: childStdio.stdout,
           stderr: childStdio.stderr,
           env: baseEnv,
         });
-
-        // Pass stdout through to terminal while capturing
-        child.stdout?.on("data", (chunk: Buffer) => {
-          const text = chunk.toString("utf8");
-          outputChunks.push(text);
-          terminal.stdout.write(chunk);
-        });
-
-        await child;
-        return outputChunks.join("");
+        await execChild(child);
       };
 
       if (hasLocalGemini) {
         console.log(
           chalk.green("   ✨ Using locally installed gemini command"),
         );
-        return await runWithCapture("gemini", runArgs);
+        return await run("gemini", runArgs);
       }
       console.log(
         chalk.cyan("   🔄 Falling back to bunx @google/gemini-cli@latest"),
@@ -202,15 +181,14 @@ export async function launchGeminiCLI(
       console.log(chalk.yellow("      npm install -g @google/gemini-cli"));
       console.log("");
       await new Promise((resolve) => setTimeout(resolve, 2000));
-      return await runWithCapture("bunx", [GEMINI_CLI_PACKAGE, ...runArgs]);
+      return await run("bunx", [GEMINI_CLI_PACKAGE, ...runArgs]);
     };
 
-    let output: string | undefined;
     let fellBackToLatest = false;
     try {
       // Try with explicit session ID first (if any), then fallback to --resume (latest) once
       try {
-        output = await runGemini(argsPrimary);
+        await runGemini(argsPrimary);
       } catch (err) {
         const shouldRetry =
           (options.mode === "resume" || options.mode === "continue") &&
@@ -222,7 +200,7 @@ export async function launchGeminiCLI(
               `   ⚠️  Failed to resume session ${resumeSessionId}. Retrying with latest session...`,
             ),
           );
-          output = await runGemini(argsFallback);
+          await runGemini(argsFallback);
         } else {
           throw err;
         }
@@ -230,9 +208,6 @@ export async function launchGeminiCLI(
     } finally {
       childStdio.cleanup();
     }
-
-    // Extract session ID from Gemini's exit summary output
-    extractSessionId(output);
 
     const explicitResumeSucceeded = usedExplicitSessionId && !fellBackToLatest;
 
