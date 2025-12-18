@@ -111,6 +111,7 @@ export function BranchQuickStartScreen({
         const flat: QuickStartItem[] = [];
         sorted.forEach((opt, idx) => {
           const cat = resolveCategory(opt.toolId);
+          const isUnsupportedTool = opt.toolId === "qwen-cli";
           const prevCat =
             idx > 0 ? resolveCategory(sorted[idx - 1]?.toolId).label : null;
           const isNewCategory = prevCat !== cat.label;
@@ -121,7 +122,10 @@ export function BranchQuickStartScreen({
               value: `reuse-continue:${opt.toolId ?? "unknown"}:${idx}`,
               action: "reuse-continue",
               toolId: opt.toolId ?? null,
-              description: describe(opt, true),
+              description: isUnsupportedTool
+                ? `Unsupported tool (Qwen CLI). ${describe(opt, true)}`
+                : describe(opt, true),
+              ...(isUnsupportedTool ? { disabled: true } : {}),
               groupStart: isNewCategory && flat.length > 0,
               category: cat.label,
               categoryColor: cat.color,
@@ -131,7 +135,10 @@ export function BranchQuickStartScreen({
               value: `reuse-new:${opt.toolId ?? "unknown"}:${idx}`,
               action: "reuse-new",
               toolId: opt.toolId ?? null,
-              description: describe(opt, false),
+              description: isUnsupportedTool
+                ? `Unsupported tool (Qwen CLI). ${describe(opt, false)}`
+                : describe(opt, false),
+              ...(isUnsupportedTool ? { disabled: true } : {}),
               groupStart: false,
               category: cat.label,
               categoryColor: cat.color,
@@ -197,27 +204,32 @@ export function BranchQuickStartScreen({
             if (item.disabled) return;
             onSelect(item.action, item.toolId ?? null);
           }}
-          renderItem={(item: QuickStartItem, isSelected) => (
-            <Box
-              flexDirection="column"
-              marginTop={
-                item.groupStart ? 1 : item.category === "Other" ? 1 : 0
-              }
-            >
-              <Text>
-                <Text color={item.categoryColor} inverse={isSelected}>
-                  {`[${item.category}] `}
+          renderItem={(item: QuickStartItem, isSelected) => {
+            const categoryLabel =
+              item.toolId === "qwen-cli" ? "Qwen (unsupported)" : item.category;
+
+            return (
+              <Box
+                flexDirection="column"
+                marginTop={
+                  item.groupStart ? 1 : item.category === "Other" ? 1 : 0
+                }
+              >
+                <Text>
+                  <Text color={item.categoryColor} inverse={isSelected}>
+                    {`[${categoryLabel}] `}
+                  </Text>
+                  <Text inverse={isSelected}>
+                    {item.label}
+                    {item.disabled ? " (disabled)" : ""}
+                  </Text>
                 </Text>
-                <Text inverse={isSelected}>
-                  {item.label}
-                  {item.disabled ? " (disabled)" : ""}
-                </Text>
-              </Text>
-              {item.description && (
-                <Text color="gray"> {item.description}</Text>
-              )}
-            </Box>
-          )}
+                {item.description && (
+                  <Text color="gray"> {item.description}</Text>
+                )}
+              </Box>
+            );
+          }}
         />
       </Box>
 
