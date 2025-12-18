@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { useInput, type Key } from "ink";
 
 const ESCAPE_SEQUENCE_TIMEOUT_MS = 25;
@@ -62,6 +62,18 @@ function parseArrowDirection(
   }
 }
 
+/**
+ * Ink `useInput` wrapper that buffers an initial Escape press to disambiguate
+ * between a real Escape key and a split ANSI escape sequence (e.g., arrow keys
+ * in WSL2/Windows terminals).
+ *
+ * When an Escape is received, waits briefly for subsequent characters. If they
+ * form an arrow sequence (e.g., `[A`, `[B`, `OA`), emits a synthetic arrow
+ * `Key`. Otherwise, forwards the original Escape keypress.
+ *
+ * @param inputHandler - Callback invoked for each normalized input event
+ * @param options - Optional Ink input options (e.g., `{ isActive: false }`)
+ */
 export function useAppInput(
   inputHandler: InputHandler,
   options?: Options,
@@ -73,15 +85,15 @@ export function useAppInput(
     handlerRef.current = inputHandler;
   }, [inputHandler]);
 
-  const clearPending = () => {
+  const clearPending = useCallback(() => {
     const pending = pendingRef.current;
     if (pending?.timeoutId) {
       clearTimeout(pending.timeoutId);
     }
     pendingRef.current = null;
-  };
+  }, []);
 
-  const flushPending = () => {
+  const flushPending = useCallback(() => {
     const pending = pendingRef.current;
     if (!pending) {
       return;
@@ -92,15 +104,15 @@ export function useAppInput(
     for (const event of pending.bufferedEvents) {
       handlerRef.current(event.input, event.key);
     }
-  };
+  }, [clearPending]);
 
   useEffect(() => {
     if (options?.isActive === false) {
       clearPending();
     }
-  }, [options?.isActive]);
+  }, [options?.isActive, clearPending]);
 
-  useEffect(() => clearPending, []);
+  useEffect(() => clearPending, [clearPending]);
 
   useInput((input, key) => {
     const pending = pendingRef.current;

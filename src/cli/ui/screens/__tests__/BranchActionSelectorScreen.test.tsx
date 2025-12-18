@@ -202,7 +202,7 @@ describe("BranchActionSelectorScreen", () => {
     });
 
     act(() => {
-      vi.advanceTimersByTime(50);
+      vi.advanceTimersByTime(25);
     });
 
     expect(onBack).toHaveBeenCalledTimes(1);

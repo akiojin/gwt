@@ -14,6 +14,10 @@ export interface TerminalStreams {
 }
 
 const DEV_TTY_PATH = "/dev/tty";
+// 端末モードのリセット:
+// - ESC[?1l: application cursor keys (DECCKM) を無効化
+// - ESC>: keypad mode を normal/numeric に戻す
+// WSL2/Windowsの矢印キー入力が壊れるケースを抑止する。
 const TERMINAL_RESET_SEQUENCE = "\u001b[?1l\u001b>";
 
 let cachedStreams: TerminalStreams | null = null;
