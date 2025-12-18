@@ -43,6 +43,30 @@
 * update default Claude Code model to Opus 4.5 ([1dd909e](https://github.com/akiojin/gwt/commit/1dd909ed87a55ce3bb796deb0431d0027571dae2))
 * update Opus model version to 4.5 ([307faeb](https://github.com/akiojin/gwt/commit/307faeb66ebac0ca89b01c07ee19d213797c4d5c))
 
+## [4.0.0](https://github.com/akiojin/gwt/compare/v3.1.2...v4.0.0) (2025-12-18)
+
+
+### ⚠ BREAKING CHANGES
+
+* Qwen CLI (qwen-cli) は起動/選択できません。
+
+### Features
+
+* gemini-3-flash モデルのサポートを追加 ([1561e7f](https://github.com/akiojin/gwt/commit/1561e7fb5b141d350ace7409bad2bfc952c662db))
+* gemini-3-flash モデルのサポートを追加 ([161ef2f](https://github.com/akiojin/gwt/commit/161ef2f3444b98e56289f8067e0b1938e84a0864))
+* Qwen CLIを未サポート化 ([c007c00](https://github.com/akiojin/gwt/commit/c007c004b854a2552cac7a2f0e2a84266ee59f1d))
+* 全てのツールにデフォルト（自動選択）オプションを追加し、Geminiのモデル選択肢を改善 ([5fb143d](https://github.com/akiojin/gwt/commit/5fb143d9b4b18872ea4b83f9e55f366736412951))
+* 全てのツールにデフォルトオプションを追加し、Geminiのモデル選択肢を改善 ([ff9554d](https://github.com/akiojin/gwt/commit/ff9554deb34b647a525649e341629872dcae20f5))
+
+
+### Bug Fixes
+
+* Gemini CLI起動時のTTY描画を維持する ([a27b4ce](https://github.com/akiojin/gwt/commit/a27b4ce679edf5b24f0092ad81d9a8aef5dfde2e))
+* Gemini CLI起動時のTTY描画を維持する ([81403da](https://github.com/akiojin/gwt/commit/81403dacda28f87c34eeb8517cf8946299daf76c))
+* gemini-3-flash のモデル ID を gemini-3-flash-preview に修正 ([bf17b3a](https://github.com/akiojin/gwt/commit/bf17b3a130d05cdc50484f2de1eb73560c1733e0))
+* gemini-3-flash のモデル ID を gemini-3-flash-preview に修正 ([4a5d934](https://github.com/akiojin/gwt/commit/4a5d934b0daef02f2dee9bb34fb7b26a5f783c92))
+* Geminiのモデル選択肢を修正（Default追加＋マニュアルリスト復元） ([ebb2c65](https://github.com/akiojin/gwt/commit/ebb2c65645d14e30b67250fd6446994678ef96bd))
+
 ## [3.1.2](https://github.com/akiojin/gwt/compare/v3.1.1...v3.1.2) (2025-12-16)
 
 
