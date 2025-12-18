@@ -311,6 +311,12 @@ export async function handleAIToolWorkflow(
     `Selected: ${branchLabel} with ${tool} (${mode} mode${modelInfo}, skipPermissions: ${skipPermissions})`,
   );
 
+  if (tool === "qwen-cli") {
+    printError("Qwen CLI is currently unsupported.");
+    await waitForErrorAcknowledgement();
+    return;
+  }
+
   try {
     // Get repository root
     const repoRootResult = await runGitStep("retrieve repository root", () =>
