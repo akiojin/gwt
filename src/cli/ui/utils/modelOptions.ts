@@ -108,26 +108,6 @@ const MODEL_OPTIONS: Record<string, ModelOption[]> = {
       description: "Fastest for simple tasks",
     },
   ],
-  "qwen-cli": [
-    {
-      id: "",
-      label: "Default (Auto)",
-      description: "Use Qwen CLI default model",
-      isDefault: true,
-    },
-    {
-      id: "coder-model",
-      label: "Coder Model",
-      description:
-        "Latest Qwen Coder model (qwen3-coder-plus-2025-09-23) from Alibaba Cloud ModelStudio",
-    },
-    {
-      id: "vision-model",
-      label: "Vision Model",
-      description:
-        "Latest Qwen Vision model (qwen3-vl-plus-2025-09-23) from Alibaba Cloud ModelStudio",
-    },
-  ],
 };
 
 export function getModelOptions(tool: AITool): ModelOption[] {
