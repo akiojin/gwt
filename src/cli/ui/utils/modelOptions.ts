@@ -71,6 +71,11 @@ const MODEL_OPTIONS: Record<string, ModelOption[]> = {
       isDefault: true,
     },
     {
+      id: "gemini-3-flash",
+      label: "Flash (gemini-3-flash)",
+      description: "Next-generation high-speed model",
+    },
+    {
       id: "gemini-2.5-pro",
       label: "Pro (gemini-2.5-pro)",
       description: "Stable Pro model for deep reasoning and creativity",
