@@ -23,12 +23,26 @@ describe("modelOptions", () => {
     expect(unique.size).toBe(ids.length);
     expect(ids).toEqual([
       "",
-      "gpt-5.1-codex",
-      "gpt-5.2",
+      "gpt-5.2-codex",
       "gpt-5.1-codex-max",
       "gpt-5.1-codex-mini",
+      "gpt-5.1-codex",
+      "gpt-5.2",
       "gpt-5.1",
     ]);
+  });
+
+  it("exposes gpt-5.2-codex with xhigh reasoning and high default", () => {
+    const codex52 = getModelOptions("codex-cli").find(
+      (m) => m.id === "gpt-5.2-codex",
+    );
+    expect(codex52?.inferenceLevels).toEqual([
+      "xhigh",
+      "high",
+      "medium",
+      "low",
+    ]);
+    expect(getDefaultInferenceForModel(codex52)).toBe("high");
   });
 
   it("uses medium as default reasoning for codex-max", () => {
