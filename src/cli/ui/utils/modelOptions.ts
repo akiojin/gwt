@@ -48,37 +48,24 @@ const MODEL_OPTIONS: Record<string, ModelOption[]> = {
     {
       id: "gpt-5.1-codex-max",
       label: "gpt-5.1-codex-max",
-      description: "Max performance (xhigh available)",
+      description: "Codex-optimized flagship for deep and fast reasoning.",
       inferenceLevels: CODEX_MAX_LEVELS,
       defaultInference: "medium",
     },
     {
       id: "gpt-5.1-codex-mini",
       label: "gpt-5.1-codex-mini",
-      description: "Lightweight / cost-saving",
+      description: "Optimized for codex. Cheaper, faster, but less capable.",
       inferenceLevels: CODEX_BASE_LEVELS,
       defaultInference: "medium",
-    },
-    {
-      id: "gpt-5.1-codex",
-      label: "gpt-5.1-codex",
-      description: "Standard Codex model",
-      inferenceLevels: CODEX_BASE_LEVELS,
-      defaultInference: "high",
     },
     {
       id: "gpt-5.2",
       label: "gpt-5.2",
-      description: "Latest frontier model with extra high reasoning",
+      description:
+        "Latest frontier model with improvements across knowledge, reasoning and coding",
       inferenceLevels: CODEX_MAX_LEVELS,
       defaultInference: "medium",
-    },
-    {
-      id: "gpt-5.1",
-      label: "gpt-5.1",
-      description: "General-purpose GPT-5.1",
-      inferenceLevels: CODEX_BASE_LEVELS,
-      defaultInference: "high",
     },
   ],
   "gemini-cli": [
