@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import * as git from "../../src/git";
 import * as worktree from "../../src/worktree";
@@ -171,6 +172,7 @@ branch refs/heads/feature/test
           };
         },
       );
+      vi.spyOn(git, "getCurrentBranchName").mockResolvedValue("feature/test");
 
       // Check if worktree exists
       const existingWorktree = await worktree.worktreeExists("feature/test");
