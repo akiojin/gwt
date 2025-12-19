@@ -19,7 +19,7 @@ export type CodexReasoningEffort = "low" | "medium" | "high" | "xhigh";
 /**
  * Default Codex model used when no override is provided.
  */
-export const DEFAULT_CODEX_MODEL = "gpt-5.1-codex";
+export const DEFAULT_CODEX_MODEL = "gpt-5.2-codex";
 
 /**
  * Default reasoning effort used when no override is provided.
