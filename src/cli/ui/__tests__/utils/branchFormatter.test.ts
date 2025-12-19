@@ -58,7 +58,7 @@ describe("branchFormatter", () => {
           toolLabel: "Codex",
           mode: "normal",
           timestamp: Date.UTC(2025, 10, 26, 14, 3), // 2025-11-26 14:03 UTC
-          model: "gpt-5.1-codex",
+          model: "gpt-5.2-codex",
         },
       };
 
