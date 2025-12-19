@@ -58,6 +58,9 @@ vi.mock("../../src/worktree.js", async () => {
   return {
     ...actual,
     worktreeExists: worktreeExistsMock,
+    resolveWorktreePathForBranch: vi.fn(async (branch: string) => ({
+      path: await worktreeExistsMock(branch),
+    })),
     isProtectedBranchName: vi.fn(() => false),
     switchToProtectedBranch: vi.fn(),
   };
