@@ -141,7 +141,7 @@ export function normalizeModelId(
 ): string | null {
   if (model === null || model === undefined) return model ?? null;
   const trimmed = model.trim();
-  if (!trimmed) return trimmed;
+  if (!trimmed) return null;
   if (tool === "claude-code") {
     const lower = trimmed.toLowerCase();
     if (lower === "opuss") return "opus";

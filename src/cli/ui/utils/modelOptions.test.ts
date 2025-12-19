@@ -79,6 +79,11 @@ describe("modelOptions", () => {
     expect(normalizeModelId("claude-code", "opuss")).toBe("opus");
     expect(normalizeModelId("claude-code", "Opus")).toBe("opus");
     expect(normalizeModelId("claude-code", "sonnet")).toBe("sonnet");
+    expect(normalizeModelId("claude-code", null)).toBeNull();
+    expect(normalizeModelId("claude-code", undefined)).toBeNull();
+    expect(normalizeModelId("claude-code", "")).toBeNull();
+    expect(normalizeModelId("claude-code", "  ")).toBeNull();
+    expect(normalizeModelId("claude-code", "  opus  ")).toBe("opus");
   });
 
   it("returns no models for unsupported tools", () => {
