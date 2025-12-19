@@ -200,6 +200,9 @@ export async function worktreeExists(
   return resolution.path;
 }
 
+/**
+ * Resolution result for a branch-associated worktree path.
+ */
 export interface WorktreePathResolution {
   path: string | null;
   mismatch?: {
@@ -208,6 +211,9 @@ export interface WorktreePathResolution {
   };
 }
 
+/**
+ * Resolve a worktree path for the selected branch and verify the actual checkout.
+ */
 export async function resolveWorktreePathForBranch(
   branchName: string,
 ): Promise<WorktreePathResolution> {
