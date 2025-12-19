@@ -188,7 +188,7 @@ describe("handleAIToolWorkflow - Resume delegation", () => {
     branchType: "local",
     tool: "codex-cli",
     skipPermissions: false,
-    model: "gpt-5.1-codex",
+    model: "gpt-5.2-codex",
   };
 
   it("does not auto-resolve sessionId when mode=resume (delegates to tool resume)", async () => {

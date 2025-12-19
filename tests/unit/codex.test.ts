@@ -108,6 +108,10 @@ describe("codex.ts", () => {
     mockExeca.mockImplementation(() => createChildProcess());
   });
 
+  it("uses gpt-5.2-codex as the default model", () => {
+    expect(DEFAULT_CODEX_MODEL).toBe("gpt-5.2-codex");
+  });
+
   it("should append default Codex CLI arguments on launch", async () => {
     await launchCodexCLI(worktreePath);
 
