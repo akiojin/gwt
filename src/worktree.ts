@@ -21,6 +21,7 @@ import {
   ensureGitignoreEntry,
   branchExists,
   getCurrentBranch,
+  getCurrentBranchName,
 } from "./git.js";
 import { getConfig } from "./config/index.js";
 import { GIT_CONFIG } from "./config/constants.js";
@@ -195,9 +196,49 @@ export async function listAdditionalWorktrees(): Promise<WorktreeInfo[]> {
 export async function worktreeExists(
   branchName: string,
 ): Promise<string | null> {
+  const resolution = await resolveWorktreePathForBranch(branchName);
+  return resolution.path;
+}
+
+export interface WorktreePathResolution {
+  path: string | null;
+  mismatch?: {
+    path: string;
+    actualBranch: string | null;
+  };
+}
+
+export async function resolveWorktreePathForBranch(
+  branchName: string,
+): Promise<WorktreePathResolution> {
   const worktrees = await listWorktrees();
   const worktree = worktrees.find((w) => w.branch === branchName);
-  return worktree ? worktree.path : null;
+  if (!worktree) {
+    return { path: null };
+  }
+
+  try {
+    const actualBranch = (await getCurrentBranchName(worktree.path)).trim();
+    if (!actualBranch || actualBranch !== branchName) {
+      return {
+        path: null,
+        mismatch: {
+          path: worktree.path,
+          actualBranch: actualBranch || null,
+        },
+      };
+    }
+  } catch {
+    return {
+      path: null,
+      mismatch: {
+        path: worktree.path,
+        actualBranch: null,
+      },
+    };
+  }
+
+  return { path: worktree.path };
 }
 
 export async function generateWorktreePath(
