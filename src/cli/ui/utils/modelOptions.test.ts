@@ -3,6 +3,7 @@ import {
   getModelOptions,
   getDefaultInferenceForModel,
   getDefaultModelOption,
+  normalizeModelId,
 } from "./modelOptions.js";
 
 const byId = (tool: string) => getModelOptions(tool).map((m) => m.id);
@@ -72,6 +73,17 @@ describe("modelOptions", () => {
       "gemini-2.5-flash",
       "gemini-2.5-flash-lite",
     ]);
+  });
+
+  it("normalizes known Claude model typos and casing", () => {
+    expect(normalizeModelId("claude-code", "opuss")).toBe("opus");
+    expect(normalizeModelId("claude-code", "Opus")).toBe("opus");
+    expect(normalizeModelId("claude-code", "sonnet")).toBe("sonnet");
+    expect(normalizeModelId("claude-code", null)).toBeNull();
+    expect(normalizeModelId("claude-code", undefined)).toBeNull();
+    expect(normalizeModelId("claude-code", "")).toBeNull();
+    expect(normalizeModelId("claude-code", "  ")).toBeNull();
+    expect(normalizeModelId("claude-code", "  opus  ")).toBe("opus");
   });
 
   it("returns no models for unsupported tools", () => {

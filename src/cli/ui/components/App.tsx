@@ -53,6 +53,7 @@ import {
 import {
   getDefaultInferenceForModel,
   getDefaultModelOption,
+  normalizeModelId,
 } from "../utils/modelOptions.js";
 import {
   resolveContinueSessionId,
@@ -386,10 +387,15 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
               }
             }
 
+            const normalizedModel = normalizeModelId(
+              entry.toolId as AITool,
+              entry.model ?? null,
+            );
+
             return {
               toolId: entry.toolId as AITool,
               toolLabel: entry.toolLabel,
-              model: entry.model ?? null,
+              model: normalizedModel ?? null,
               inferenceLevel: (entry.reasoningLevel ??
                 sessionData?.reasoningLevel ??
                 null) as InferenceLevel | null,
@@ -1069,6 +1075,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       if (selectedBranch && selectedTool) {
         const defaultModel = getDefaultModelOption(selectedTool);
         const resolvedModel = selectedModel?.model ?? defaultModel?.id ?? null;
+        const normalizedModel = normalizeModelId(selectedTool, resolvedModel);
         const resolvedInference =
           selectedModel?.inferenceLevel ??
           getDefaultInferenceForModel(defaultModel ?? undefined);
@@ -1080,7 +1087,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
           tool: selectedTool,
           mode: executionMode,
           skipPermissions: skip,
-          ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+          ...(normalizedModel !== undefined ? { model: normalizedModel } : {}),
           ...(resolvedInference !== undefined
             ? { inferenceLevel: resolvedInference }
             : {}),
@@ -1122,10 +1129,14 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
 
       setSelectedTool(selected.toolId);
       setPreferredToolId(selected.toolId);
+      const normalizedQuickStartModel = normalizeModelId(
+        selected.toolId as AITool,
+        selected.model ?? null,
+      );
       setSelectedModel(
-        selected.model
+        normalizedQuickStartModel
           ? ({
-              model: selected.model,
+              model: normalizedQuickStartModel,
               inferenceLevel: selected.inferenceLevel ?? undefined,
             } as ModelSelectionResult)
           : null,
