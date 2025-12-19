@@ -43,6 +43,15 @@
 * update default Claude Code model to Opus 4.5 ([1dd909e](https://github.com/akiojin/gwt/commit/1dd909ed87a55ce3bb796deb0431d0027571dae2))
 * update Opus model version to 4.5 ([307faeb](https://github.com/akiojin/gwt/commit/307faeb66ebac0ca89b01c07ee19d213797c4d5c))
 
+## [4.1.0](https://github.com/akiojin/gwt/compare/v4.0.1...v4.1.0) (2025-12-19)
+
+
+### Features
+
+* Codexモデル一覧を4件に整理 ([7a0bac9](https://github.com/akiojin/gwt/commit/7a0bac9459ed22826c95d778924731e8eab207f7))
+* gpt-5.2-codex対応 ([14c2cb4](https://github.com/akiojin/gwt/commit/14c2cb4df6275628787e173c7275362bb11c6101))
+* gpt-5.2-codex対応 ([865f7c8](https://github.com/akiojin/gwt/commit/865f7c87bcce729ddfa383a1048bc632c8d45486))
+
 ## [4.0.1](https://github.com/akiojin/gwt/compare/v4.0.0...v4.0.1) (2025-12-18)
 
 
