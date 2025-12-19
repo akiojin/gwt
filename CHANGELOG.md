@@ -43,6 +43,15 @@
 * update default Claude Code model to Opus 4.5 ([1dd909e](https://github.com/akiojin/gwt/commit/1dd909ed87a55ce3bb796deb0431d0027571dae2))
 * update Opus model version to 4.5 ([307faeb](https://github.com/akiojin/gwt/commit/307faeb66ebac0ca89b01c07ee19d213797c4d5c))
 
+## [4.1.1](https://github.com/akiojin/gwt/compare/v4.1.0...v4.1.1) (2025-12-19)
+
+
+### Bug Fixes
+
+* normalizeModelIdの空文字処理とテスト補強 ([b82230b](https://github.com/akiojin/gwt/commit/b82230b6589e689955cd872fc648655436e7f218))
+* Worktree再利用の整合性検証とモデル名正規化 ([69f5fb6](https://github.com/akiojin/gwt/commit/69f5fb6f7419dee017f8ed2946bc0154856ca743))
+* Worktree再利用の整合性検証とモデル名正規化 ([255e551](https://github.com/akiojin/gwt/commit/255e551d915ca3af705ce1f64e8d16983001056a))
+
 ## [4.1.0](https://github.com/akiojin/gwt/compare/v4.0.1...v4.1.0) (2025-12-19)
 
 
