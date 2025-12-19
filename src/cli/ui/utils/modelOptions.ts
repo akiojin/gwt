@@ -132,6 +132,9 @@ export function getDefaultInferenceForModel(
   return levels[0];
 }
 
+/**
+ * Normalize a model identifier for consistent display and persistence.
+ */
 export function normalizeModelId(
   tool: AITool,
   model?: string | null,
