@@ -608,6 +608,7 @@ export async function handleAIToolWorkflow(
         envOverrides?: Record<string, string>;
         model?: string;
         sessionId?: string | null;
+        chrome?: boolean;
       } = {
         mode:
           mode === "resume"
@@ -618,6 +619,7 @@ export async function handleAIToolWorkflow(
         skipPermissions,
         envOverrides: sharedEnv,
         sessionId: resumeSessionId,
+        chrome: true,
       };
       if (normalizedModel) {
         launchOptions.model = normalizedModel;
