@@ -108,6 +108,18 @@ describe("App shortcuts integration", () => {
       ],
       worktrees: [
         {
+          branch: "feature/add-new-feature",
+          path: "/worktrees/feature-add-new-feature",
+          isAccessible: true,
+          hasUncommittedChanges: false,
+        },
+        {
+          branch: "hotfix/urgent-fix",
+          path: "/worktrees/hotfix-urgent-fix",
+          isAccessible: true,
+          hasUncommittedChanges: true,
+        },
+        {
           branch: "feature/existing",
           path: "/worktrees/feature-existing",
           isAccessible: true,
@@ -206,6 +218,98 @@ describe("App shortcuts integration", () => {
       }),
     );
     expect(navigateToMock).toHaveBeenCalledWith("ai-tool-selector");
+  });
+
+  it("shows warning when cleanup runs without selection", async () => {
+    const onExit = vi.fn();
+
+    render(<App onExit={onExit} />);
+
+    const initialProps = branchListProps.at(-1);
+    expect(initialProps).toBeDefined();
+
+    act(() => {
+      initialProps?.onCleanupCommand?.();
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const latestProps = branchListProps.at(-1);
+    expect(latestProps?.cleanupUI?.footerMessage?.text).toBe(
+      "クリーンアップ対象が選択されていません",
+    );
+    expect(removeWorktreeMock).not.toHaveBeenCalled();
+    expect(deleteBranchMock).not.toHaveBeenCalled();
+  });
+
+  it("marks branches safe only when merged and clean", () => {
+    const onExit = vi.fn();
+    const refresh = vi.fn();
+    useGitDataMock.mockReturnValue({
+      branches: [
+        {
+          name: "feature/merged-clean",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+          mergedPR: { number: 101, mergedAt: "2025-01-02T10:00:00Z" },
+        },
+        {
+          name: "feature/merged-unpushed",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+          hasUnpushedCommits: true,
+          mergedPR: { number: 102, mergedAt: "2025-01-03T10:00:00Z" },
+        },
+        {
+          name: "feature/unmerged",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+        },
+      ],
+      worktrees: [
+        {
+          branch: "feature/merged-clean",
+          path: "/worktrees/merged-clean",
+          isAccessible: true,
+          hasUncommittedChanges: false,
+        },
+        {
+          branch: "feature/merged-unpushed",
+          path: "/worktrees/merged-unpushed",
+          isAccessible: true,
+          hasUncommittedChanges: false,
+        },
+        {
+          branch: "feature/unmerged",
+          path: "/worktrees/unmerged",
+          isAccessible: true,
+          hasUncommittedChanges: false,
+        },
+      ],
+      loading: false,
+      error: null,
+      refresh,
+      lastUpdated: null,
+    });
+
+    render(<App onExit={onExit} />);
+
+    const latestProps = branchListProps.at(-1);
+    const safeMap = new Map(
+      latestProps?.branches?.map((branch: BranchItem) => [
+        branch.name,
+        branch.safeToCleanup,
+      ]),
+    );
+
+    expect(safeMap.get("feature/merged-clean")).toBe(true);
+    expect(safeMap.get("feature/merged-unpushed")).toBe(false);
+    expect(safeMap.get("feature/unmerged")).toBe(false);
   });
 
   it("displays per-branch cleanup indicators and waits before clearing results", async () => {
