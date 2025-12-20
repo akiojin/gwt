@@ -7,6 +7,11 @@ import {
   fetchAllRemotes,
   pullFastForward,
   getBranchDivergenceStatuses,
+  hasUncommittedChanges,
+  hasUnpushedCommits,
+  getUncommittedChangesCount,
+  getUnpushedCommitsCount,
+  pushBranchToRemote,
   GitError,
 } from "./git.js";
 import { launchClaudeCode } from "./claude.js";
@@ -49,7 +54,7 @@ import {
   DependencyInstallError,
   type DependencyInstallResult,
 } from "./services/dependency-installer.js";
-import { waitForEnter } from "./utils/prompt.js";
+import { confirmYesNo, waitForEnter } from "./utils/prompt.js";
 
 const ERROR_PROMPT = chalk.yellow(
   "Review the error details, then press Enter to continue.",
@@ -745,6 +750,47 @@ export async function handleAIToolWorkflow(
       repositoryRoot: repoRoot,
       lastSessionId: finalSessionId,
     });
+
+    try {
+      const [hasUncommitted, hasUnpushed] = await Promise.all([
+        hasUncommittedChanges(worktreePath),
+        hasUnpushedCommits(worktreePath, branch),
+      ]);
+
+      if (hasUncommitted) {
+        const uncommittedCount =
+          await getUncommittedChangesCount(worktreePath);
+        const countLabel =
+          uncommittedCount > 0 ? ` (${uncommittedCount}件)` : "";
+        printWarning(`未コミットの変更があります${countLabel}。`);
+      }
+
+      if (hasUnpushed) {
+        const unpushedCount = await getUnpushedCommitsCount(
+          worktreePath,
+          branch,
+        );
+        const countLabel = unpushedCount > 0 ? ` (${unpushedCount}件)` : "";
+        const shouldPush = await confirmYesNo(
+          `未プッシュのコミットがあります${countLabel}。プッシュしますか？`,
+          { defaultValue: false },
+        );
+        if (shouldPush) {
+          printInfo(`Pushing origin/${branch}...`);
+          try {
+            await pushBranchToRemote(worktreePath, branch);
+            printInfo(`Push completed for ${branch}.`);
+          } catch (error) {
+            const details =
+              error instanceof Error ? error.message : String(error);
+            printWarning(`Push failed for ${branch}: ${details}`);
+          }
+        }
+      }
+    } catch (error) {
+      const details = error instanceof Error ? error.message : String(error);
+      printWarning(`Failed to check git status after session: ${details}`);
+    }
 
     // Small buffer before returning to branch list to avoid abrupt screen swap
     await new Promise((resolve) => setTimeout(resolve, 3000));

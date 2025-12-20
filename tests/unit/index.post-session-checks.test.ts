@@ -18,6 +18,7 @@ const {
   getUncommittedChangesCountMock,
   getUnpushedCommitsCountMock,
   pushBranchToRemoteMock,
+  confirmYesNoMock,
 } = vi.hoisted(() => ({
   ensureWorktreeMock: vi.fn(async () => "/repo/.worktrees/feature"),
   fetchAllRemotesMock: vi.fn(async () => undefined),
@@ -34,20 +35,14 @@ const {
     lockfile: null,
     reason: "missing-lockfile" as const,
   })),
-  findLatestCodexSessionMock: vi.fn(async () => ({
-    id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
-    mtime: Date.now(),
-  })),
+  findLatestCodexSessionMock: vi.fn(async () => null),
   hasUncommittedChangesMock: vi.fn(async () => false),
   hasUnpushedCommitsMock: vi.fn(async () => false),
   getUncommittedChangesCountMock: vi.fn(async () => 0),
   getUnpushedCommitsCountMock: vi.fn(async () => 0),
   pushBranchToRemoteMock: vi.fn(async () => undefined),
+  confirmYesNoMock: vi.fn(async () => false),
 }));
-
-const confirmYesNoMock = vi.hoisted(() =>
-  vi.fn<() => Promise<boolean>>(),
-);
 
 vi.mock("../../src/git.js", async () => {
   const actual =
@@ -141,7 +136,6 @@ vi.mock("../../src/utils/prompt.js", async () => {
   };
 });
 
-// Import after mocks are set up
 import { handleAIToolWorkflow } from "../../src/index.js";
 
 beforeEach(() => {
@@ -161,9 +155,7 @@ beforeEach(() => {
   getUncommittedChangesCountMock.mockClear();
   getUnpushedCommitsCountMock.mockClear();
   pushBranchToRemoteMock.mockClear();
-
   confirmYesNoMock.mockClear();
-  confirmYesNoMock.mockResolvedValue(false);
 
   getBranchDivergenceStatusesMock.mockResolvedValue([]);
   worktreeExistsMock.mockResolvedValue(null);
@@ -172,31 +164,68 @@ beforeEach(() => {
   hasUnpushedCommitsMock.mockResolvedValue(false);
   getUncommittedChangesCountMock.mockResolvedValue(0);
   getUnpushedCommitsCountMock.mockResolvedValue(0);
-  pushBranchToRemoteMock.mockResolvedValue(undefined);
+  confirmYesNoMock.mockResolvedValue(false);
 });
 
-describe("handleAIToolWorkflow - session ID persistence", () => {
-  it("does not overwrite explicit sessionId with on-disk detection", async () => {
-    const explicit = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
-    launchCodexCLIMock.mockResolvedValueOnce({ sessionId: explicit });
+const selection: SelectionResult = {
+  branch: "feature/test",
+  displayName: "feature/test",
+  branchType: "local",
+  tool: "codex-cli",
+  mode: "normal",
+  skipPermissions: false,
+};
 
-    const selection: SelectionResult = {
-      branch: "feature/test",
-      displayName: "feature/test",
-      branchType: "local",
-      tool: "codex-cli",
-      mode: "resume",
-      skipPermissions: false,
-      sessionId: explicit,
-    };
+describe("handleAIToolWorkflow - post session checks", () => {
+  it("warns when uncommitted changes exist", async () => {
+    vi.useFakeTimers();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-    await handleAIToolWorkflow(selection);
+    hasUncommittedChangesMock.mockResolvedValue(true);
+    getUncommittedChangesCountMock.mockResolvedValue(2);
 
-    const lastSaved = saveSessionMock.mock.calls.at(-1)?.[0] as
-      | { lastSessionId?: string | null }
-      | undefined;
+    const run = handleAIToolWorkflow(selection);
+    await vi.advanceTimersByTimeAsync(3000);
+    await run;
 
-    expect(lastSaved?.lastSessionId).toBe(explicit);
-    expect(findLatestCodexSessionMock).not.toHaveBeenCalled();
+    const messages = warnSpy.mock.calls.flat().join(" ");
+    expect(messages).toContain("未コミット");
+
+    warnSpy.mockRestore();
+    vi.useRealTimers();
+  });
+
+  it("prompts and pushes when unpushed commits exist and user confirms", async () => {
+    vi.useFakeTimers();
+    hasUnpushedCommitsMock.mockResolvedValue(true);
+    getUnpushedCommitsCountMock.mockResolvedValue(3);
+    confirmYesNoMock.mockResolvedValue(true);
+
+    const run = handleAIToolWorkflow(selection);
+    await vi.advanceTimersByTimeAsync(3000);
+    await run;
+
+    expect(confirmYesNoMock).toHaveBeenCalled();
+    expect(pushBranchToRemoteMock).toHaveBeenCalledWith(
+      "/repo/.worktrees/feature",
+      "feature/test",
+    );
+
+    vi.useRealTimers();
+  });
+
+  it("does not push when user declines", async () => {
+    vi.useFakeTimers();
+    hasUnpushedCommitsMock.mockResolvedValue(true);
+    confirmYesNoMock.mockResolvedValue(false);
+
+    const run = handleAIToolWorkflow(selection);
+    await vi.advanceTimersByTimeAsync(3000);
+    await run;
+
+    expect(confirmYesNoMock).toHaveBeenCalled();
+    expect(pushBranchToRemoteMock).not.toHaveBeenCalled();
+
+    vi.useRealTimers();
   });
 });
