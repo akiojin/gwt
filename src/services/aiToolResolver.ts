@@ -1,6 +1,7 @@
 import { execa } from "execa";
 import { platform } from "os";
 import { getToolById } from "../config/tools.js";
+import { CLAUDE_CODE_TOOL } from "../config/builtin-tools.js";
 import {
   CODEX_DEFAULT_ARGS,
   CLAUDE_PERMISSION_SKIP_ARGS,
@@ -144,12 +145,16 @@ export async function resolveClaudeCommand(
   options: ClaudeCommandOptions = {},
 ): Promise<ResolvedCommand> {
   const args = buildClaudeArgs(options);
+  const envOverrides = CLAUDE_CODE_TOOL.env
+    ? { env: { ...CLAUDE_CODE_TOOL.env } as NodeJS.ProcessEnv }
+    : {};
 
   if (await commandExists("claude")) {
     return {
       command: "claude",
       args,
       usesFallback: false,
+      ...envOverrides,
     };
   }
 
@@ -158,6 +163,7 @@ export async function resolveClaudeCommand(
     command: "bunx",
     args: [CLAUDE_CLI_PACKAGE, ...args],
     usesFallback: true,
+    ...envOverrides,
   };
 }
 
