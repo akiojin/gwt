@@ -35,10 +35,10 @@ vi.mock("../../hooks/useScreenState.js", () => ({
   useScreenState: (...args: unknown[]) => useScreenStateMock(...args),
 }));
 
-vi.mock("../../../../worktree.js", async () => {
+vi.mock("../../../../worktree.ts", async () => {
   const actual = await vi.importActual<
-    typeof import("../../../../worktree.js")
-  >("../../../../worktree.js");
+    typeof import("../../../../worktree.ts")
+  >("../../../../worktree.ts");
   return {
     ...actual,
     getMergedPRWorktrees: getMergedPRWorktreesMock,
@@ -48,10 +48,10 @@ vi.mock("../../../../worktree.js", async () => {
   };
 });
 
-vi.mock("../../../../git.js", async () => {
+vi.mock("../../../../git.ts", async () => {
   const actual =
-    await vi.importActual<typeof import("../../../../git.js")>(
-      "../../../../git.js",
+    await vi.importActual<typeof import("../../../../git.ts")>(
+      "../../../../git.ts",
     );
   return {
     ...actual,

@@ -54,6 +54,7 @@ describe("ModelSelectorScreen initial selection", () => {
 
     await waitFor(() => expect(selectMocks.length).toBeGreaterThan(0));
     const modelSelect = selectMocks.at(-1);
+    expect(modelSelect).toBeDefined();
     const index = modelSelect.initialIndex as number;
     // codex-cli models: ["", gpt-5.2-codex, gpt-5.1-codex-max, gpt-5.1-codex-mini, gpt-5.2]
     // (index 0 = Default/Auto, index 2 = gpt-5.1-codex-max)
