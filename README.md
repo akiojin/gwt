@@ -390,6 +390,7 @@ We welcome contributions! Please read our contributing guidelines:
 This repo includes `.mcp.json` for local MCP server definitions.
 
 - **External endpoints**: `context7` uses an external SSE endpoint. Review trust, security, and privacy requirements before enabling it in your environment.
+- **Data handling**: MCP clients may send prompts/queries (and possibly repository context depending on your tooling). Confirm compliance/DPA needs and disable the endpoint if external sharing is not permitted.
 - **Overrides**: If your MCP client supports environment expansion, you can override or disable external endpoints via env vars:
   - `MCP_CONTEXT7_URL` (default: `https://mcp.context7.com/sse`)
   - `MCP_CONTEXT7_ENABLED` (default: `true`)
