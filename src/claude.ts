@@ -48,6 +48,7 @@ export async function launchClaudeCode(
     envOverrides?: Record<string, string>;
     model?: string;
     sessionId?: string | null;
+    chrome?: boolean;
   } = {},
 ): Promise<{ sessionId?: string | null }> {
   const terminal = getTerminalStreams();
@@ -167,6 +168,12 @@ export async function launchClaudeCode(
       default:
         console.log(chalk.green("   ✨ Starting new session"));
         break;
+    }
+
+    // Handle Chrome extension integration
+    if (options.chrome) {
+      args.push("--chrome");
+      console.log(chalk.green("   🌐 Chrome integration enabled"));
     }
 
     // Detect root user for Docker/sandbox environments
