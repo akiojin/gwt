@@ -76,9 +76,7 @@ list_spec_dirs() {
     fi
     shopt -s nullglob
     local dirs=("$specs_dir"/SPEC-*)
-    if $nullglob_was_enabled; then
-        shopt -s nullglob
-    else
+    if ! $nullglob_was_enabled; then
         shopt -u nullglob
     fi
 
