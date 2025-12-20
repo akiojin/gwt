@@ -103,6 +103,7 @@ describe("App protected branch handling", () => {
     branchListProps.length = 0;
     branchActionProps.length = 0;
     aiToolProps.length = 0;
+    branchQuickStartProps.length = 0;
 
     useGitDataMock.mockReset();
     switchToProtectedBranchMock.mockReset();
@@ -193,7 +194,6 @@ describe("App protected branch handling", () => {
 
     await act(async () => {
       actionProps?.onUseExisting();
-      await Promise.resolve();
       await Promise.resolve();
     });
 

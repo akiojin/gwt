@@ -60,6 +60,7 @@ import { confirmYesNo, waitForEnter } from "./utils/prompt.js";
 const ERROR_PROMPT = chalk.yellow(
   "Review the error details, then press Enter to continue.",
 );
+const POST_SESSION_DELAY_MS = 3000;
 
 // Category: cli
 const appLogger = createLogger({ category: "cli" });
@@ -802,7 +803,7 @@ export async function handleAIToolWorkflow(
       printWarning(`Failed to check git status after session: ${details}`);
     }
     // Small buffer before returning to branch list to avoid abrupt screen swap
-    await new Promise((resolve) => setTimeout(resolve, 3000));
+    await new Promise((resolve) => setTimeout(resolve, POST_SESSION_DELAY_MS));
     printInfo("Session completed successfully. Returning to main menu...");
     return;
   } catch (error) {
