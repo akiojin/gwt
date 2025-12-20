@@ -13,6 +13,11 @@ const {
   getRepositoryRootMock,
   installDependenciesMock,
   findLatestCodexSessionMock,
+  hasUncommittedChangesMock,
+  hasUnpushedCommitsMock,
+  getUncommittedChangesCountMock,
+  getUnpushedCommitsCountMock,
+  pushBranchToRemoteMock,
 } = vi.hoisted(() => ({
   ensureWorktreeMock: vi.fn(async () => "/repo/.worktrees/feature"),
   fetchAllRemotesMock: vi.fn(async () => undefined),
@@ -33,8 +38,14 @@ const {
     id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
     mtime: Date.now(),
   })),
+  hasUncommittedChangesMock: vi.fn(async () => false),
+  hasUnpushedCommitsMock: vi.fn(async () => false),
+  getUncommittedChangesCountMock: vi.fn(async () => 0),
+  getUnpushedCommitsCountMock: vi.fn(async () => 0),
+  pushBranchToRemoteMock: vi.fn(async () => undefined),
 }));
 
+const confirmYesNoMock = vi.hoisted(() => vi.fn<() => Promise<boolean>>());
 vi.mock("../../src/git.js", async () => {
   const actual =
     await vi.importActual<typeof import("../../src/git.js")>(
@@ -48,6 +59,11 @@ vi.mock("../../src/git.js", async () => {
     getBranchDivergenceStatuses: getBranchDivergenceStatusesMock,
     branchExists: vi.fn(async () => true),
     getCurrentBranch: vi.fn(async () => "develop"),
+    hasUncommittedChanges: hasUncommittedChangesMock,
+    hasUnpushedCommits: hasUnpushedCommitsMock,
+    getUncommittedChangesCount: getUncommittedChangesCountMock,
+    getUnpushedCommitsCount: getUnpushedCommitsCountMock,
+    pushBranchToRemote: pushBranchToRemoteMock,
   };
 });
 
@@ -58,6 +74,9 @@ vi.mock("../../src/worktree.js", async () => {
   return {
     ...actual,
     worktreeExists: worktreeExistsMock,
+    resolveWorktreePathForBranch: vi.fn(async (branch: string) => ({
+      path: await worktreeExistsMock(branch),
+    })),
     isProtectedBranchName: vi.fn(() => false),
     switchToProtectedBranch: vi.fn(),
   };
@@ -112,6 +131,15 @@ vi.mock("../../src/utils/session.js", () => ({
   findLatestClaudeSessionId: vi.fn(async () => null),
 }));
 
+vi.mock("../../src/utils/prompt.js", async () => {
+  const actual = await vi.importActual<
+    typeof import("../../src/utils/prompt.js")
+  >("../../src/utils/prompt.js");
+  return {
+    ...actual,
+    confirmYesNo: confirmYesNoMock,
+  };
+});
 // Import after mocks are set up
 import { handleAIToolWorkflow } from "../../src/index.js";
 
@@ -127,10 +155,23 @@ beforeEach(() => {
   getRepositoryRootMock.mockClear();
   installDependenciesMock.mockClear();
   findLatestCodexSessionMock.mockClear();
+  hasUncommittedChangesMock.mockClear();
+  hasUnpushedCommitsMock.mockClear();
+  getUncommittedChangesCountMock.mockClear();
+  getUnpushedCommitsCountMock.mockClear();
+  pushBranchToRemoteMock.mockClear();
+
+  confirmYesNoMock.mockClear();
+  confirmYesNoMock.mockResolvedValue(false);
 
   getBranchDivergenceStatusesMock.mockResolvedValue([]);
   worktreeExistsMock.mockResolvedValue(null);
   getRepositoryRootMock.mockResolvedValue("/repo");
+  hasUncommittedChangesMock.mockResolvedValue(false);
+  hasUnpushedCommitsMock.mockResolvedValue(false);
+  getUncommittedChangesCountMock.mockResolvedValue(0);
+  getUnpushedCommitsCountMock.mockResolvedValue(0);
+  pushBranchToRemoteMock.mockResolvedValue(undefined);
 });
 
 describe("handleAIToolWorkflow - session ID persistence", () => {

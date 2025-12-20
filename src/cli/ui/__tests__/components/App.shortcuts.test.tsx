@@ -35,10 +35,10 @@ vi.mock("../../hooks/useScreenState.js", () => ({
   useScreenState: (...args: unknown[]) => useScreenStateMock(...args),
 }));
 
-vi.mock("../../../../worktree.js", async () => {
+vi.mock("../../../../worktree.ts", async () => {
   const actual = await vi.importActual<
-    typeof import("../../../../worktree.js")
-  >("../../../../worktree.js");
+    typeof import("../../../../worktree.ts")
+  >("../../../../worktree.ts");
   return {
     ...actual,
     getMergedPRWorktrees: getMergedPRWorktreesMock,
@@ -48,10 +48,10 @@ vi.mock("../../../../worktree.js", async () => {
   };
 });
 
-vi.mock("../../../../git.js", async () => {
+vi.mock("../../../../git.ts", async () => {
   const actual =
-    await vi.importActual<typeof import("../../../../git.js")>(
-      "../../../../git.js",
+    await vi.importActual<typeof import("../../../../git.ts")>(
+      "../../../../git.ts",
     );
   return {
     ...actual,
@@ -92,8 +92,33 @@ describe("App shortcuts integration", () => {
     goBackMock.mockClear();
     resetMock.mockClear();
     useGitDataMock.mockReturnValue({
-      branches: [],
+      branches: [
+        {
+          name: "feature/add-new-feature",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+        },
+        {
+          name: "hotfix/urgent-fix",
+          type: "local",
+          branchType: "hotfix",
+          isCurrent: false,
+        },
+      ],
       worktrees: [
+        {
+          branch: "feature/add-new-feature",
+          path: "/worktrees/feature-add-new-feature",
+          isAccessible: true,
+          hasUncommittedChanges: false,
+        },
+        {
+          branch: "hotfix/urgent-fix",
+          path: "/worktrees/hotfix-urgent-fix",
+          isAccessible: true,
+          hasUncommittedChanges: true,
+        },
         {
           branch: "feature/existing",
           path: "/worktrees/feature-existing",
@@ -195,8 +220,102 @@ describe("App shortcuts integration", () => {
     expect(navigateToMock).toHaveBeenCalledWith("ai-tool-selector");
   });
 
+  it("shows warning when cleanup runs without selection", async () => {
+    const onExit = vi.fn();
+
+    render(<App onExit={onExit} />);
+
+    const initialProps = branchListProps.at(-1);
+    expect(initialProps).toBeDefined();
+
+    act(() => {
+      initialProps?.onCleanupCommand?.();
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const latestProps = branchListProps.at(-1);
+    expect(latestProps?.cleanupUI?.footerMessage?.text).toBe(
+      "クリーンアップ対象が選択されていません",
+    );
+    expect(removeWorktreeMock).not.toHaveBeenCalled();
+    expect(deleteBranchMock).not.toHaveBeenCalled();
+  });
+
+  it("marks branches safe only when merged and clean", () => {
+    const onExit = vi.fn();
+    const refresh = vi.fn();
+    useGitDataMock.mockReturnValue({
+      branches: [
+        {
+          name: "feature/merged-clean",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+          mergedPR: { number: 101, mergedAt: "2025-01-02T10:00:00Z" },
+        },
+        {
+          name: "feature/merged-unpushed",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+          hasUnpushedCommits: true,
+          mergedPR: { number: 102, mergedAt: "2025-01-03T10:00:00Z" },
+        },
+        {
+          name: "feature/unmerged",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+        },
+      ],
+      worktrees: [
+        {
+          branch: "feature/merged-clean",
+          path: "/worktrees/merged-clean",
+          isAccessible: true,
+          hasUncommittedChanges: false,
+        },
+        {
+          branch: "feature/merged-unpushed",
+          path: "/worktrees/merged-unpushed",
+          isAccessible: true,
+          hasUncommittedChanges: false,
+        },
+        {
+          branch: "feature/unmerged",
+          path: "/worktrees/unmerged",
+          isAccessible: true,
+          hasUncommittedChanges: false,
+        },
+      ],
+      loading: false,
+      error: null,
+      refresh,
+      lastUpdated: null,
+    });
+
+    render(<App onExit={onExit} />);
+
+    const latestProps = branchListProps.at(-1);
+    const safeMap = new Map(
+      latestProps?.branches?.map((branch: BranchItem) => [
+        branch.name,
+        branch.safeToCleanup,
+      ]),
+    );
+
+    expect(safeMap.get("feature/merged-clean")).toBe(true);
+    expect(safeMap.get("feature/merged-unpushed")).toBe(false);
+    expect(safeMap.get("feature/unmerged")).toBe(false);
+  });
+
   it("displays per-branch cleanup indicators and waits before clearing results", async () => {
     vi.useFakeTimers();
+    const originalNodeEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = "production";
 
     try {
       const onExit = vi.fn();
@@ -234,8 +353,22 @@ describe("App shortcuts integration", () => {
         throw new Error("BranchListScreen props missing");
       }
 
+      await act(async () => {
+        initialProps.onToggleSelect?.("feature/add-new-feature");
+        initialProps.onToggleSelect?.("hotfix/urgent-fix");
+      });
+
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      const selectedProps = branchListProps.at(-1);
+      expect(selectedProps?.selectedBranches).toEqual([
+        "feature/add-new-feature",
+        "hotfix/urgent-fix",
+      ]);
       act(() => {
-        initialProps.onCleanupCommand?.();
+        selectedProps?.onCleanupCommand?.();
       });
 
       await act(async () => {
@@ -296,6 +429,7 @@ describe("App shortcuts integration", () => {
         ),
       ).toBe(false);
     } finally {
+      process.env.NODE_ENV = originalNodeEnv;
       vi.useRealTimers();
     }
   });

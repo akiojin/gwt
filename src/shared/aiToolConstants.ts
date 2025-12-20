@@ -12,7 +12,7 @@ export const CLAUDE_PERMISSION_SKIP_ARGS = [
 export const CODEX_DEFAULT_ARGS = [
   "--enable",
   "web_search_request",
-  "--model=gpt-5-codex",
+  "--model=gpt-5.2-codex",
   "--sandbox",
   "workspace-write",
   "-c",

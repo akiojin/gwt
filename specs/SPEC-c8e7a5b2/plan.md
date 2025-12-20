@@ -36,15 +36,7 @@
 
 ### 実装箇所
 
-```typescript
-// src/index.ts:877-883
-const { startWebServer } = await import("./web/server/index.js");
-const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
-startWebServer().catch((err) => {
-  appLogger.warn({ err }, "Web UI server failed to start");
-});
-printInfo(`Web UI available at http://localhost:${port}`);
-```
+実装箇所: `src/index.ts:877-883`
 
 ## テスト戦略
 

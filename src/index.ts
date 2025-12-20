@@ -7,6 +7,11 @@ import {
   fetchAllRemotes,
   pullFastForward,
   getBranchDivergenceStatuses,
+  hasUncommittedChanges,
+  hasUnpushedCommits,
+  getUncommittedChangesCount,
+  getUnpushedCommitsCount,
+  pushBranchToRemote,
   GitError,
 } from "./git.js";
 import { launchClaudeCode } from "./claude.js";
@@ -16,7 +21,6 @@ import {
   type CodexReasoningEffort,
 } from "./codex.js";
 import { launchGeminiCLI, GeminiError } from "./gemini.js";
-import { launchQwenCLI, QwenError } from "./qwen.js";
 import {
   WorktreeOrchestrator,
   type EnsureWorktreeOptions,
@@ -24,10 +28,10 @@ import {
 import chalk from "chalk";
 import type { SelectionResult } from "./cli/ui/components/App.js";
 import {
-  worktreeExists,
   isProtectedBranchName,
   switchToProtectedBranch,
   WorktreeError,
+  resolveWorktreePathForBranch,
 } from "./worktree.js";
 import {
   getTerminalStreams,
@@ -45,16 +49,18 @@ import {
 import { getPackageVersion } from "./utils.js";
 import { findLatestClaudeSessionId } from "./utils/session.js";
 import { resolveContinueSessionId } from "./cli/ui/utils/continueSession.js";
+import { normalizeModelId } from "./cli/ui/utils/modelOptions.js";
 import {
   installDependenciesForWorktree,
   DependencyInstallError,
   type DependencyInstallResult,
 } from "./services/dependency-installer.js";
-import { waitForEnter } from "./utils/prompt.js";
+import { confirmYesNo, waitForEnter } from "./utils/prompt.js";
 
 const ERROR_PROMPT = chalk.yellow(
   "Review the error details, then press Enter to continue.",
 );
+const POST_SESSION_DELAY_MS = 3000;
 
 // Category: cli
 const appLogger = createLogger({ category: "cli" });
@@ -117,7 +123,6 @@ function isRecoverableError(error: unknown): boolean {
     error instanceof WorktreeError ||
     error instanceof CodexError ||
     error instanceof GeminiError ||
-    error instanceof QwenError ||
     error instanceof DependencyInstallError
   ) {
     return true;
@@ -129,7 +134,6 @@ function isRecoverableError(error: unknown): boolean {
       error.name === "WorktreeError" ||
       error.name === "CodexError" ||
       error.name === "GeminiError" ||
-      error.name === "QwenError" ||
       error.name === "DependencyInstallError"
     );
   }
@@ -144,7 +148,6 @@ function isRecoverableError(error: unknown): boolean {
       name === "WorktreeError" ||
       name === "CodexError" ||
       name === "GeminiError" ||
-      name === "QwenError" ||
       name === "DependencyInstallError"
     );
   }
@@ -303,9 +306,10 @@ export async function handleAIToolWorkflow(
   } = selectionResult;
 
   const branchLabel = displayName ?? branch;
+  const normalizedModel = normalizeModelId(tool, model ?? null);
   const modelInfo =
-    model || inferenceLevel
-      ? `, model=${model ?? "default"}${inferenceLevel ? `/${inferenceLevel}` : ""}`
+    normalizedModel || inferenceLevel
+      ? `, model=${normalizedModel ?? "default"}${inferenceLevel ? `/${inferenceLevel}` : ""}`
       : "";
   printInfo(
     `Selected: ${branchLabel} with ${tool} (${mode} mode${modelInfo}, skipPermissions: ${skipPermissions})`,
@@ -332,7 +336,16 @@ export async function handleAIToolWorkflow(
       ensureOptions.isNewBranch = !localExists;
     }
 
-    const existingWorktree = await worktreeExists(branch);
+    const existingWorktreeResolution =
+      await resolveWorktreePathForBranch(branch);
+    const existingWorktree = existingWorktreeResolution.path;
+    if (!existingWorktree && existingWorktreeResolution.mismatch) {
+      const actualBranch =
+        existingWorktreeResolution.mismatch.actualBranch ?? "unknown";
+      printWarning(
+        `Worktree mismatch detected: ${existingWorktreeResolution.mismatch.path} is checked out to '${actualBranch}'. Creating or reusing the correct worktree for '${branch}'.`,
+      );
+    }
 
     const isProtectedBranch =
       isProtectedBranchName(branch) ||
@@ -547,7 +560,7 @@ export async function handleAIToolWorkflow(
         lastUsedTool: tool,
         toolLabel: toolConfig.displayName ?? tool,
         mode,
-        model: model ?? null,
+        model: normalizedModel ?? null,
         reasoningLevel: inferenceLevel ?? null,
         skipPermissions: skipPermissions ?? null,
         timestamp: Date.now(),
@@ -595,6 +608,7 @@ export async function handleAIToolWorkflow(
         envOverrides?: Record<string, string>;
         model?: string;
         sessionId?: string | null;
+        chrome?: boolean;
       } = {
         mode:
           mode === "resume"
@@ -605,9 +619,10 @@ export async function handleAIToolWorkflow(
         skipPermissions,
         envOverrides: sharedEnv,
         sessionId: resumeSessionId,
+        chrome: true,
       };
-      if (model) {
-        launchOptions.model = model;
+      if (normalizedModel) {
+        launchOptions.model = normalizedModel;
       }
       launchResult = await launchClaudeCode(worktreePath, launchOptions);
     } else if (tool === "codex-cli") {
@@ -629,8 +644,8 @@ export async function handleAIToolWorkflow(
         envOverrides: sharedEnv,
         sessionId: resumeSessionId,
       };
-      if (model) {
-        launchOptions.model = model;
+      if (normalizedModel) {
+        launchOptions.model = normalizedModel;
       }
       if (inferenceLevel) {
         launchOptions.reasoningEffort = inferenceLevel as CodexReasoningEffort;
@@ -654,32 +669,10 @@ export async function handleAIToolWorkflow(
         envOverrides: sharedEnv,
         sessionId: resumeSessionId,
       };
-      if (model) {
-        launchOptions.model = model;
+      if (normalizedModel) {
+        launchOptions.model = normalizedModel;
       }
       launchResult = await launchGeminiCLI(worktreePath, launchOptions);
-    } else if (tool === "qwen-cli") {
-      const launchOptions: {
-        mode?: "normal" | "continue" | "resume";
-        skipPermissions?: boolean;
-        envOverrides?: Record<string, string>;
-        model?: string;
-        sessionId?: string | null;
-      } = {
-        mode:
-          mode === "resume"
-            ? "resume"
-            : mode === "continue"
-              ? "continue"
-              : "normal",
-        skipPermissions,
-        envOverrides: sharedEnv,
-        sessionId: resumeSessionId,
-      };
-      if (model) {
-        launchOptions.model = model;
-      }
-      launchResult = await launchQwenCLI(worktreePath, launchOptions);
     } else {
       // Custom tool
       printInfo(`Launching custom tool: ${toolConfig.displayName}`);
@@ -743,7 +736,7 @@ export async function handleAIToolWorkflow(
       }
     } else if (!finalSessionId && tool === "gemini-cli") {
       try {
-        const latestGemini = await findLatestGeminiSession(worktreePath, {
+        const latestGemini = await findLatestGeminiSession({
           since: launchStartedAt - 60_000,
           until: finishedAt + 60_000,
           preferClosestTo: finishedAt,
@@ -764,7 +757,7 @@ export async function handleAIToolWorkflow(
       lastUsedTool: tool,
       toolLabel: toolConfig.displayName ?? tool,
       mode,
-      model: model ?? null,
+      model: normalizedModel ?? null,
       reasoningLevel: inferenceLevel ?? null,
       skipPermissions: skipPermissions ?? null,
       timestamp: Date.now(),
@@ -772,8 +765,47 @@ export async function handleAIToolWorkflow(
       lastSessionId: finalSessionId,
     });
 
+    try {
+      const [hasUncommitted, hasUnpushed] = await Promise.all([
+        hasUncommittedChanges(worktreePath),
+        hasUnpushedCommits(worktreePath, branch),
+      ]);
+
+      if (hasUncommitted) {
+        const uncommittedCount = await getUncommittedChangesCount(worktreePath);
+        const countLabel =
+          uncommittedCount > 0 ? ` (${uncommittedCount}件)` : "";
+        printWarning(`未コミットの変更があります${countLabel}。`);
+      }
+
+      if (hasUnpushed) {
+        const unpushedCount = await getUnpushedCommitsCount(
+          worktreePath,
+          branch,
+        );
+        const countLabel = unpushedCount > 0 ? ` (${unpushedCount}件)` : "";
+        const shouldPush = await confirmYesNo(
+          `未プッシュのコミットがあります${countLabel}。プッシュしますか？`,
+          { defaultValue: false },
+        );
+        if (shouldPush) {
+          printInfo(`Pushing origin/${branch}...`);
+          try {
+            await pushBranchToRemote(worktreePath, branch);
+            printInfo(`Push completed for ${branch}.`);
+          } catch (error) {
+            const details =
+              error instanceof Error ? error.message : String(error);
+            printWarning(`Push failed for ${branch}: ${details}`);
+          }
+        }
+      }
+    } catch (error) {
+      const details = error instanceof Error ? error.message : String(error);
+      printWarning(`Failed to check git status after session: ${details}`);
+    }
     // Small buffer before returning to branch list to avoid abrupt screen swap
-    await new Promise((resolve) => setTimeout(resolve, 3000));
+    await new Promise((resolve) => setTimeout(resolve, POST_SESSION_DELAY_MS));
     printInfo("Session completed successfully. Returning to main menu...");
     return;
   } catch (error) {

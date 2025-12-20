@@ -26,7 +26,7 @@ describe("main error handling", () => {
         tool: "codex-cli",
         mode: "normal" as const,
         skipPermissions: false,
-        model: "gpt-5.1-codex",
+        model: "gpt-5.2-codex",
       },
       undefined,
     ];
@@ -118,6 +118,7 @@ describe("main error handling", () => {
       return {
         ...actual,
         worktreeExists: vi.fn(async () => null),
+        resolveWorktreePathForBranch: vi.fn(async () => ({ path: null })),
         generateWorktreePath: vi.fn(
           async (_repo: string, branch: string) => `/worktrees/${branch}`,
         ),

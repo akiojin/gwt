@@ -7,7 +7,10 @@ import React, {
 } from "react";
 import { useApp } from "ink";
 import { ErrorBoundary } from "./common/ErrorBoundary.js";
-import { BranchListScreen } from "./screens/BranchListScreen.js";
+import {
+  BranchListScreen,
+  type BranchListScreenProps,
+} from "./screens/BranchListScreen.js";
 import { BranchCreatorScreen } from "./screens/BranchCreatorScreen.js";
 import { BranchActionSelectorScreen } from "../screens/BranchActionSelectorScreen.js";
 import { AIToolSelectorScreen } from "./screens/AIToolSelectorScreen.js";
@@ -19,7 +22,9 @@ import {
   ModelSelectorScreen,
   type ModelSelectionResult,
 } from "./screens/ModelSelectorScreen.js";
+import { EnvironmentProfileScreen } from "./screens/EnvironmentProfileScreen.js";
 import { useGitData } from "../hooks/useGitData.js";
+import { useProfiles } from "../hooks/useProfiles.js";
 import { useScreenState } from "../hooks/useScreenState.js";
 import { formatBranchItems } from "../utils/branchFormatter.js";
 import { calculateStatistics } from "../utils/statisticsCalculator.js";
@@ -27,6 +32,7 @@ import type {
   AITool,
   BranchInfo,
   BranchItem,
+  CleanupTarget,
   InferenceLevel,
   SelectedBranchState,
 } from "../types.js";
@@ -35,7 +41,6 @@ import { loadSession } from "../../../config/index.js";
 import {
   createWorktree,
   generateWorktreePath,
-  getMergedPRWorktrees,
   isProtectedBranchName,
   removeWorktree,
   switchToProtectedBranch,
@@ -48,6 +53,7 @@ import {
 import {
   getDefaultInferenceForModel,
   getDefaultModelOption,
+  normalizeModelId,
 } from "../utils/modelOptions.js";
 import {
   resolveContinueSessionId,
@@ -108,6 +114,9 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     });
   const { currentScreen, navigateTo, goBack } = useScreenState();
 
+  // Profile state
+  const { activeProfileName, refresh: refreshProfiles } = useProfiles();
+
   // Version state
   const [version, setVersion] = useState<string | null>(null);
   const [repoRoot, setRepoRoot] = useState<string | null>(null);
@@ -157,7 +166,6 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
   } | null>(null);
   const [hiddenBranches, setHiddenBranches] = useState<string[]>([]);
   const [selectedBranches, setSelectedBranches] = useState<string[]>([]);
-  const [safeBranches, setSafeBranches] = useState<Set<string>>(new Set());
   const spinnerFrameIndexRef = useRef(0);
   const [spinnerFrameIndex, setSpinnerFrameIndex] = useState(0);
   const completionTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -249,29 +257,6 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     );
   }, [branches, hiddenBranches]);
 
-  // Precompute safe-to-clean branches using cleanup candidate logic
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const targets = await getMergedPRWorktrees();
-        if (cancelled) return;
-        const safe = new Set(
-          targets
-            .filter((t) => !t.hasUncommittedChanges && !t.hasUnpushedCommits)
-            .map((t) => t.branch),
-        );
-        setSafeBranches(safe);
-      } catch {
-        if (cancelled) return;
-        setSafeBranches(new Set());
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [branches, worktrees]);
-
   // Load quick start options for selected branch (latest per tool)
   useEffect(() => {
     if (!selectedBranch) {
@@ -361,25 +346,32 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
             // For Gemini, prefer newest session file (Gemini keeps per-project chats)
             if (!sessionId && entry.toolId === "gemini-cli") {
               try {
-                const gemSession = await findLatestGeminiSession(worktree, {
-                  ...(entry.timestamp !== null && entry.timestamp !== undefined
-                    ? {
-                        since: entry.timestamp - 60_000,
-                        preferClosestTo: entry.timestamp,
-                      }
-                    : {}),
+                const gemOptions: Parameters<
+                  typeof findLatestGeminiSession
+                >[0] = {
                   windowMs: 60 * 60 * 1000,
-                });
+                  cwd: worktree,
+                };
+                if (entry.timestamp !== null && entry.timestamp !== undefined) {
+                  gemOptions.since = entry.timestamp - 60_000;
+                  gemOptions.preferClosestTo = entry.timestamp;
+                }
+                const gemSession = await findLatestGeminiSession(gemOptions);
                 sessionId = gemSession?.id ?? null;
               } catch {
                 // ignore
               }
             }
 
+            const normalizedModel = normalizeModelId(
+              entry.toolId as AITool,
+              entry.model ?? null,
+            );
+
             return {
               toolId: entry.toolId as AITool,
               toolLabel: entry.toolLabel,
-              model: entry.model ?? null,
+              model: normalizedModel ?? null,
               inferenceLevel: (entry.reasoningLevel ??
                 sessionData?.reasoningLevel ??
                 null) as InferenceLevel | null,
@@ -504,16 +496,15 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       });
     }
     const baseItems = formatBranchItems(visibleBranches, worktreeMap);
-    return baseItems.map((item) => ({
-      ...item,
-      safeToCleanup: safeBranches.has(item.name),
-    }));
-  }, [branchHash, worktreeHash, visibleBranches, worktrees, safeBranches]);
-
-  const selectedBranchSet = useMemo(
-    () => new Set(selectedBranches),
-    [selectedBranches],
-  );
+    return baseItems.map((item) => {
+      const hasUncommitted = item.worktree?.hasUncommittedChanges ?? false;
+      const hasUnpushed = Boolean(item.hasUnpushedCommits);
+      const isMerged = Boolean(item.mergedPR);
+      const safeToCleanup =
+        item.type === "local" && isMerged && !hasUncommitted && !hasUnpushed;
+      return { ...item, safeToCleanup };
+    });
+  }, [branchHash, worktreeHash, visibleBranches, worktrees]);
 
   // Calculate statistics (memoized for performance)
   const stats = useMemo(
@@ -606,17 +597,31 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     [isProtectedBranchName],
   );
 
-  const toggleBranchSelection = useCallback((branchName: string) => {
-    setSelectedBranches((prev) => {
-      const set = new Set(prev);
-      if (set.has(branchName)) {
-        set.delete(branchName);
-      } else {
-        set.add(branchName);
+  const toggleBranchSelection = useCallback(
+    (branchName: string) => {
+      const branch = branches.find((b) => b.name === branchName);
+      if (!branch || branch.type === "remote") {
+        return;
       }
-      return Array.from(set);
-    });
-  }, []);
+      if (
+        isProtectedBranchName(branch.name) ||
+        branch.branchType === "main" ||
+        branch.branchType === "develop"
+      ) {
+        return;
+      }
+      setSelectedBranches((prev) => {
+        const set = new Set(prev);
+        if (set.has(branchName)) {
+          set.delete(branchName);
+        } else {
+          set.add(branchName);
+        }
+        return Array.from(set);
+      });
+    },
+    [branches, isProtectedBranchName],
+  );
 
   const protectedBranchInfo = useMemo(() => {
     if (!selectedBranch) {
@@ -830,6 +835,20 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       completionTimerRef.current = null;
     }
 
+    if (selectedBranches.length === 0) {
+      setCleanupIndicators({});
+      setCleanupFooterMessage({
+        text: "クリーンアップ対象が選択されていません",
+        color: "yellow",
+      });
+      setCleanupInputLocked(false);
+      completionTimerRef.current = setTimeout(() => {
+        setCleanupFooterMessage(null);
+        completionTimerRef.current = null;
+      }, COMPLETION_HOLD_DURATION_MS);
+      return;
+    }
+
     const succeededBranches: string[] = [];
 
     const resetAfterWait = () => {
@@ -862,26 +881,50 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     spinnerFrameIndexRef.current = 0;
     setSpinnerFrameIndex(0);
 
-    let targets;
-    try {
-      targets = await getMergedPRWorktrees();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setCleanupIndicators({});
-      setCleanupFooterMessage({ text: `❌ ${message}`, color: "red" });
-      setCleanupInputLocked(false);
-      completionTimerRef.current = setTimeout(() => {
-        setCleanupFooterMessage(null);
-        completionTimerRef.current = null;
-      }, COMPLETION_HOLD_DURATION_MS);
-      return;
-    }
+    const branchMap = new Map(branches.map((branch) => [branch.name, branch]));
+    const worktreeMap = new Map(
+      worktrees.map((worktree) => [worktree.branch, worktree]),
+    );
+    const targets = selectedBranches.reduce<CleanupTarget[]>((acc, name) => {
+      const branch = branchMap.get(name);
+      if (!branch || branch.type === "remote") {
+        return acc;
+      }
+      if (
+        isProtectedBranchName(branch.name) ||
+        branch.branchType === "main" ||
+        branch.branchType === "develop"
+      ) {
+        return acc;
+      }
+
+      const worktree = worktreeMap.get(branch.name);
+      const hasRemoteBranch =
+        typeof branch.hasRemoteCounterpart === "boolean"
+          ? branch.hasRemoteCounterpart
+          : undefined;
+      const isAccessible =
+        typeof worktree?.isAccessible === "boolean"
+          ? worktree.isAccessible
+          : undefined;
+      acc.push({
+        branch: branch.name,
+        pullRequest: null,
+        worktreePath: worktree?.path ?? null,
+        cleanupType: worktree ? "worktree-and-branch" : "branch-only",
+        hasUncommittedChanges: worktree?.hasUncommittedChanges ?? false,
+        hasUnpushedCommits: Boolean(branch.hasUnpushedCommits),
+        ...(hasRemoteBranch !== undefined ? { hasRemoteBranch } : {}),
+        ...(isAccessible !== undefined ? { isAccessible } : {}),
+      });
+      return acc;
+    }, []);
 
     if (targets.length === 0) {
       setCleanupIndicators({});
       setCleanupFooterMessage({
-        text: "✅ Nothing to clean up.",
-        color: "green",
+        text: "⚠️ No cleanup candidates among selected branches.",
+        color: "yellow",
       });
       setCleanupInputLocked(false);
       completionTimerRef.current = setTimeout(() => {
@@ -889,24 +932,6 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         completionTimerRef.current = null;
       }, COMPLETION_HOLD_DURATION_MS);
       return;
-    }
-
-    // Manual selection: restrict targets when選択がある
-    if (selectedBranchSet.size > 0) {
-      targets = targets.filter((t) => selectedBranchSet.has(t.branch));
-      if (targets.length === 0) {
-        setCleanupIndicators({});
-        setCleanupFooterMessage({
-          text: "⚠️ No cleanup candidates among selected branches.",
-          color: "yellow",
-        });
-        setCleanupInputLocked(false);
-        completionTimerRef.current = setTimeout(() => {
-          setCleanupFooterMessage(null);
-          completionTimerRef.current = null;
-        }, COMPLETION_HOLD_DURATION_MS);
-        return;
-      }
     }
 
     // Reset hidden branches that may already be gone
@@ -1021,11 +1046,12 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     completionTimerRef.current = setTimeout(resetAfterWait, holdDuration);
   }, [
     cleanupInputLocked,
+    branches,
     deleteBranch,
-    getMergedPRWorktrees,
     refresh,
     removeWorktree,
-    selectedBranchSet,
+    selectedBranches,
+    worktrees,
   ]);
 
   // Handle AI tool selection
@@ -1059,6 +1085,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       if (selectedBranch && selectedTool) {
         const defaultModel = getDefaultModelOption(selectedTool);
         const resolvedModel = selectedModel?.model ?? defaultModel?.id ?? null;
+        const normalizedModel = normalizeModelId(selectedTool, resolvedModel);
         const resolvedInference =
           selectedModel?.inferenceLevel ??
           getDefaultInferenceForModel(defaultModel ?? undefined);
@@ -1070,7 +1097,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
           tool: selectedTool,
           mode: executionMode,
           skipPermissions: skip,
-          ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+          ...(normalizedModel !== undefined ? { model: normalizedModel } : {}),
           ...(resolvedInference !== undefined
             ? { inferenceLevel: resolvedInference }
             : {}),
@@ -1112,10 +1139,14 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
 
       setSelectedTool(selected.toolId);
       setPreferredToolId(selected.toolId);
+      const normalizedQuickStartModel = normalizeModelId(
+        selected.toolId as AITool,
+        selected.model ?? null,
+      );
       setSelectedModel(
-        selected.model
+        normalizedQuickStartModel
           ? ({
-              model: selected.model,
+              model: normalizedQuickStartModel,
               inferenceLevel: selected.inferenceLevel ?? undefined,
             } as ModelSelectionResult)
           : null,
@@ -1153,31 +1184,39 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
 
   // Render screen based on currentScreen
   const renderScreen = () => {
+    const renderBranchListScreen = (
+      additionalProps?: Partial<BranchListScreenProps>,
+    ) => (
+      <BranchListScreen
+        branches={branchItems}
+        stats={stats}
+        onSelect={handleSelect}
+        onQuit={handleQuit}
+        onRefresh={refresh}
+        loading={loading}
+        error={error}
+        lastUpdated={lastUpdated}
+        loadingIndicatorDelay={loadingIndicatorDelay}
+        version={version}
+        workingDirectory={workingDirectory}
+        activeProfile={activeProfileName}
+        onOpenProfiles={() => navigateTo("environment-profile")}
+        {...additionalProps}
+      />
+    );
+
     switch (currentScreen) {
       case "branch-list":
-        return (
-          <BranchListScreen
-            branches={branchItems}
-            stats={stats}
-            onSelect={handleSelect}
-            onQuit={handleQuit}
-            onCleanupCommand={handleCleanupCommand}
-            onRefresh={refresh}
-            loading={loading}
-            error={error}
-            lastUpdated={lastUpdated}
-            loadingIndicatorDelay={loadingIndicatorDelay}
-            cleanupUI={{
-              indicators: cleanupIndicators,
-              footerMessage: cleanupFooterMessage,
-              inputLocked: cleanupInputLocked,
-            }}
-            version={version}
-            workingDirectory={workingDirectory}
-            selectedBranches={selectedBranches}
-            onToggleSelect={toggleBranchSelection}
-          />
-        );
+        return renderBranchListScreen({
+          onCleanupCommand: handleCleanupCommand,
+          cleanupUI: {
+            indicators: cleanupIndicators,
+            footerMessage: cleanupFooterMessage,
+            inputLocked: cleanupInputLocked,
+          },
+          selectedBranches,
+          onToggleSelect: toggleBranchSelection,
+        });
 
       case "branch-creator":
         return (
@@ -1268,22 +1307,19 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
           />
         );
 
-      default:
+      case "environment-profile":
         return (
-          <BranchListScreen
-            branches={branchItems}
-            stats={stats}
-            onSelect={handleSelect}
-            onQuit={handleQuit}
-            onRefresh={refresh}
-            loading={loading}
-            error={error}
-            lastUpdated={lastUpdated}
-            loadingIndicatorDelay={loadingIndicatorDelay}
+          <EnvironmentProfileScreen
+            onBack={() => {
+              void refreshProfiles();
+              goBack();
+            }}
             version={version}
-            workingDirectory={workingDirectory}
           />
         );
+
+      default:
+        return renderBranchListScreen();
     }
   };
 

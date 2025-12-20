@@ -6,7 +6,7 @@ Interactive Git worktree manager with AI tool selection (Claude Code / Codex CLI
 
 ## Overview
 
-`@akiojin/gwt` is a powerful CLI tool that revolutionizes Git worktree management through an intuitive interface. It seamlessly integrates with Claude Code / Codex CLI / Gemini CLI / Qwen CLI workflows, providing intelligent branch selection, automated worktree creation, and comprehensive project management capabilities.
+`@akiojin/gwt` is a powerful CLI tool that revolutionizes Git worktree management through an intuitive interface. It seamlessly integrates with Claude Code / Codex CLI / Gemini CLI workflows, providing intelligent branch selection, automated worktree creation, and comprehensive project management capabilities.
 
 ## ✨ Key Features
 
@@ -14,7 +14,7 @@ Interactive Git worktree manager with AI tool selection (Claude Code / Codex CLI
 - 🖼️ **Full-screen Layout**: Persistent header with statistics, scrollable branch list, and always-visible footer with keyboard shortcuts
 - 🌟 **Smart Branch Creation**: Create feature, bugfix, hotfix, or release branches with guided prompts and automatic base branch selection
 - 🔄 **Advanced Worktree Management**: Complete lifecycle management including creation, cleanup, and path optimization
-- 🤖 **AI Tool Selection**: Choose between Claude Code / Codex CLI / Gemini CLI / Qwen CLI through the interactive launcher
+- 🤖 **AI Tool Selection**: Choose between Claude Code / Codex CLI / Gemini CLI through the interactive launcher
 - 🚀 **AI Tool Integration**: Launch the selected tool in the worktree (Claude Code includes permission handling and post-change flow)
 - 🔒 **Worktree Command Restriction**: PreToolUse hooks enforce worktree boundaries, blocking directory navigation, branch switching, and file operations outside the worktree
 - 📊 **GitHub PR Integration**: Automatic cleanup of merged pull request branches and worktrees
@@ -43,6 +43,11 @@ Run without installation using bunx:
 ```bash
 bunx @akiojin/gwt
 ```
+
+> Note (Linux): If installation fails with a `node-gyp` error like `Error: not found: make`, you're missing build tools needed to compile native dependencies (e.g., `node-pty`). This is common on `linux/arm64` and minimal images like `node:* -slim`.
+>
+> - Debian/Ubuntu: `apt-get update && apt-get install -y build-essential`
+> - Alpine: `apk add --no-cache build-base python3`
 
 ## Quick Start
 
@@ -80,16 +85,17 @@ The tool presents an interactive interface with the following options:
 ### Launching the Web UI
 
 ```bash
-# Running the CLI also starts the Web UI in the background.
+# Start the interactive CLI:
 gwt
 
-# (Optional) start only the Web UI server:
+# Start the Web UI server:
 gwt serve
 # or without global install
 bunx @akiojin/gwt serve
 ```
 
 - The Web UI is available by default at <http://localhost:3000>
+- System tray integration is currently supported on **Windows only** (it is automatically disabled on macOS/Linux)
 - The branch list mirrors the CLI view, including search and worktree creation
 - Detailed branch pages let you start AI tool sessions directly from the browser
 
@@ -185,10 +191,11 @@ For technical details, see [specs/SPEC-cff08403/](specs/SPEC-cff08403/).
 - **Node.js** (optional): Recommended >= 18.0.0 when working with Node-based tooling
 - **pnpm**: >= 8.0.0 (for CI/CD and Docker environments - uses hardlinked node_modules)
 - **Git**: Latest version with worktree support
-- **AI Tool**: At least one of Claude Code, Codex CLI, Gemini CLI, or Qwen CLI should be available
+- **AI Tool**: At least one of Claude Code, Codex CLI, or Gemini CLI should be available
 - **GitHub CLI**: Required for PR cleanup features (optional)
 - **Python**: >= 3.11 (for Spec Kit CLI)
 - **uv**: Python package manager (for Spec Kit CLI)
+- **Build tools** (Linux): `make` + a C/C++ toolchain may be required when native dependencies are built from source (common on `linux/arm64` and minimal Docker images)
 
 ## Spec-Driven Development with Spec Kit
 
@@ -241,7 +248,6 @@ For more details, see the [Spec Kit documentation](https://github.com/akiojin/sp
 │   ├── claude.ts        # Claude Code integration
 │   ├── codex.ts         # Codex CLI integration
 │   ├── gemini.ts        # Gemini CLI integration
-│   ├── qwen.ts          # Qwen CLI integration
 │   ├── github.ts        # GitHub CLI integration
 │   ├── utils.ts         # Utility functions and error handling
 │   └── ui/              # User interface components
@@ -379,8 +385,33 @@ We welcome contributions! Please read our contributing guidelines:
 - **Issues**: GitHub Issues for bug reports and feature requests
 - **Discussions**: GitHub Discussions for questions and community support
 
+## MCP Configuration
+
+This repo includes `.mcp.json` for local MCP server definitions.
+
+- **External endpoints**: `context7` uses an external SSE endpoint. Review trust, security, and privacy requirements before enabling it in your environment.
+- **Data handling**: MCP clients may send prompts/queries (and possibly repository context depending on your tooling). Confirm compliance/DPA needs and disable the endpoint if external sharing is not permitted.
+- **Overrides**: If your MCP client supports environment expansion, you can override or disable external endpoints via env vars:
+  - `MCP_CONTEXT7_URL` (default: `https://mcp.context7.com/sse`)
+  - `MCP_CONTEXT7_ENABLED` (default: `true`)
+  - `SERENA_MCP_REF` (default: pinned commit in `.mcp.json`)
+- **Local config**: If your client does not expand env vars, generate a local config with `envsubst` and point your client to it.
+
 ### Icon Legend
 
-- First 3 columns: ⚡(main/develop) / ✨(feature) / 🐛(bugfix) / 🔥(hotfix) / 📦(release) / 📌(other), 🟢=has worktree, 🟠=has worktree (inaccessible), ✏️=uncommitted changes, ⚠️=warning, ⭐=current branch
-- Location column: blank=local exists, `☁`=remote only
-- Selection column: In color environments, selection is shown with `>` prefix (with space) instead of background inversion
+- **Branch Type (first 3 columns)**:
+  - ⚡ main/develop
+  - ✨ feature
+  - 🐛 bugfix
+  - 🔥 hotfix
+  - 📦 release
+  - 📌 other
+- **Worktree Status**:
+  - 🟢 has worktree
+  - 🔴 has worktree (inaccessible)
+- **Branch Status**:
+  - ✏️ uncommitted changes
+  - ⚠️ warning
+  - ⭐ current branch
+- **Location column**: blank = local exists, `☁` = remote only
+- **Selection column**: in color environments, selection is shown with `>` prefix (with space) instead of background inversion

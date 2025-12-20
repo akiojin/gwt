@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import * as worktree from "../../src/worktree";
 
@@ -51,10 +52,16 @@ branch refs/heads/feature/test
         stderr: "",
         exitCode: 0,
       });
+      const getCurrentBranchNameSpy = vi
+        .spyOn(git, "getCurrentBranchName")
+        .mockResolvedValue("feature/test");
 
       const path = await worktree.worktreeExists("feature/test");
 
       expect(path).toBe("/path/to/worktree-feature-test");
+      expect(getCurrentBranchNameSpy).toHaveBeenCalledWith(
+        "/path/to/worktree-feature-test",
+      );
       expect(execa).toHaveBeenCalledWith(
         "git",
         ["worktree", "list", "--porcelain"],
@@ -75,6 +82,28 @@ branch refs/heads/main
       });
 
       const path = await worktree.worktreeExists("feature/non-existent");
+
+      expect(path).toBeNull();
+    });
+
+    it("should return null when worktree branch does not match selected branch", async () => {
+      const mockOutput = `worktree /path/to/repo
+HEAD abc1234
+branch refs/heads/main
+
+worktree /path/to/worktree-feature-test
+HEAD def5678
+branch refs/heads/feature/test
+`;
+
+      (execa as any).mockResolvedValue({
+        stdout: mockOutput,
+        stderr: "",
+        exitCode: 0,
+      });
+      vi.spyOn(git, "getCurrentBranchName").mockResolvedValue("feature/other");
+
+      const path = await worktree.worktreeExists("feature/test");
 
       expect(path).toBeNull();
     });
@@ -1031,6 +1060,7 @@ branch refs/heads/feature/old
           stderr: "",
           exitCode: 0,
         });
+        vi.spyOn(git, "getCurrentBranchName").mockResolvedValue("feature/old");
 
         const path = await worktree.worktreeExists("feature/old");
 
@@ -1056,6 +1086,13 @@ branch refs/heads/feature/new
           stderr: "",
           exitCode: 0,
         });
+        vi.spyOn(git, "getCurrentBranchName").mockImplementation(
+          async (worktreePath) => {
+            if (worktreePath.endsWith("feature-old")) return "feature/old";
+            if (worktreePath.endsWith("feature-new")) return "feature/new";
+            return "";
+          },
+        );
 
         const oldPath = await worktree.worktreeExists("feature/old");
         expect(oldPath).toBe("/path/to/repo/.git/worktree/feature-old");

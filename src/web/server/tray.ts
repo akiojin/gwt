@@ -22,13 +22,14 @@ let trayInitAttempted = false;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let trayInstance: any = null;
 
-function shouldEnableTray(): boolean {
+function shouldEnableTray(
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  // NOTE: `trayicon` is a win32-only dependency.
+  if (platform !== "win32") return false;
   if (process.env.GWT_DISABLE_TRAY?.toLowerCase() === "true") return false;
   if (process.env.GWT_DISABLE_TRAY === "1") return false;
   if (process.env.CI) return false;
-  if (process.platform === "linux") {
-    if (!process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) return false;
-  }
   return true;
 }
 
@@ -61,9 +62,9 @@ export async function openUrl(url: string): Promise<void> {
  */
 export async function startSystemTray(
   url: string,
-  opts?: { openUrl?: OpenUrlFn },
+  opts?: { openUrl?: OpenUrlFn; platform?: NodeJS.Platform },
 ): Promise<void> {
-  if (trayInitAttempted || !shouldEnableTray()) return;
+  if (trayInitAttempted || !shouldEnableTray(opts?.platform)) return;
   trayInitAttempted = true;
 
   const logger = createLogger({ category: "tray" });
@@ -131,4 +132,5 @@ export function disposeSystemTray(): void {
     // Ignore errors during cleanup
   }
   trayInstance = null;
+  trayInitAttempted = false;
 }

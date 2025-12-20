@@ -1,16 +1,23 @@
 import React from "react";
-import { Box, Text, useInput } from "ink";
+import { Box, Text } from "ink";
 import { Header } from "../parts/Header.js";
 import { Footer } from "../parts/Footer.js";
 import { Select, type SelectItem } from "../common/Select.js";
+import { useAppInput } from "../../hooks/useAppInput.js";
 import { useTerminalSize } from "../../hooks/useTerminalSize.js";
 
+/**
+ * Action returned by `BranchQuickStartScreen`.
+ */
 export type QuickStartAction = "reuse-continue" | "reuse-new" | "manual";
 
+/**
+ * Previous tool/session configuration shown in the quick start list.
+ */
 export interface BranchQuickStartOption {
   toolId?: string | null;
   toolLabel: string;
-  toolCategory?: "Codex" | "Claude" | "Gemini" | "Qwen" | "Other";
+  toolCategory?: "Codex" | "Claude" | "Gemini" | "Other";
   model?: string | null;
   sessionId?: string | null;
   inferenceLevel?: string | null;
@@ -54,6 +61,9 @@ type QuickStartItem = SelectItem & {
   categoryColor: "cyan" | "yellow" | "magenta" | "green" | "white";
 };
 
+/**
+ * Props for `BranchQuickStartScreen`.
+ */
 export interface BranchQuickStartScreenProps {
   previousOptions: BranchQuickStartOption[];
   loading?: boolean;
@@ -78,7 +88,6 @@ export function BranchQuickStartScreen({
     "codex-cli": { label: "Codex", color: "cyan" },
     "claude-code": { label: "Claude", color: "yellow" },
     "gemini-cli": { label: "Gemini", color: "magenta" },
-    "qwen-cli": { label: "Qwen", color: "green" },
     other: { label: "Other", color: "white" },
   } as const;
 
@@ -92,8 +101,6 @@ export function BranchQuickStartScreen({
         return CATEGORY_META["claude-code"];
       case "gemini-cli":
         return CATEGORY_META["gemini-cli"];
-      case "qwen-cli":
-        return CATEGORY_META["qwen-cli"];
       default:
         return CATEGORY_META.other;
     }
@@ -101,7 +108,7 @@ export function BranchQuickStartScreen({
 
   const items: QuickStartItem[] = previousOptions.length
     ? (() => {
-        const order = ["Claude", "Codex", "Gemini", "Qwen", "Other"];
+        const order = ["Claude", "Codex", "Gemini", "Other"];
         const sorted = [...previousOptions].sort((a, b) => {
           const ca = resolveCategory(a.toolId).label;
           const cb = resolveCategory(b.toolId).label;
@@ -171,7 +178,7 @@ export function BranchQuickStartScreen({
     categoryColor: CATEGORY_META.other.color,
   });
 
-  useInput((_, key) => {
+  useAppInput((_, key) => {
     if (key.escape) {
       onBack();
     }
@@ -197,27 +204,29 @@ export function BranchQuickStartScreen({
             if (item.disabled) return;
             onSelect(item.action, item.toolId ?? null);
           }}
-          renderItem={(item: QuickStartItem, isSelected) => (
-            <Box
-              flexDirection="column"
-              marginTop={
-                item.groupStart ? 1 : item.category === "Other" ? 1 : 0
-              }
-            >
-              <Text>
-                <Text color={item.categoryColor} inverse={isSelected}>
-                  {`[${item.category}] `}
+          renderItem={(item: QuickStartItem, isSelected) => {
+            return (
+              <Box
+                flexDirection="column"
+                marginTop={
+                  item.groupStart ? 1 : item.category === "Other" ? 1 : 0
+                }
+              >
+                <Text>
+                  <Text color={item.categoryColor} inverse={isSelected}>
+                    {`[${item.category}] `}
+                  </Text>
+                  <Text inverse={isSelected}>
+                    {item.label}
+                    {item.disabled ? " (disabled)" : ""}
+                  </Text>
                 </Text>
-                <Text inverse={isSelected}>
-                  {item.label}
-                  {item.disabled ? " (disabled)" : ""}
-                </Text>
-              </Text>
-              {item.description && (
-                <Text color="gray"> {item.description}</Text>
-              )}
-            </Box>
-          )}
+                {item.description && (
+                  <Text color="gray"> {item.description}</Text>
+                )}
+              </Box>
+            );
+          }}
         />
       </Box>
 

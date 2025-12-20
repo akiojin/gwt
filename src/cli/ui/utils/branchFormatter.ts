@@ -6,7 +6,6 @@ import type {
   WorktreeInfo,
 } from "../types.js";
 import stringWidth from "string-width";
-import chalk from "chalk";
 
 // Icon mappings
 const branchIcons: Record<BranchType, string> = {
@@ -21,7 +20,7 @@ const branchIcons: Record<BranchType, string> = {
 
 const worktreeIcons: Record<Exclude<WorktreeStatus, undefined>, string> = {
   active: "🟢",
-  inaccessible: "🟠",
+  inaccessible: "🔴",
 };
 
 const changeIcons = {
@@ -67,7 +66,7 @@ const iconWidthOverrides: Record<string, number> = {
   // Worktree status icons
   "🟢": 2,
   "⚪": 2,
-  "🟠": 1,
+  "🔴": 2,
   // Change status icons
   "👉": 1,
   "💾": 1,
@@ -99,7 +98,6 @@ function mapToolLabel(toolId: string, toolLabel?: string): string {
   if (toolId === "claude-code") return "Claude";
   if (toolId === "codex-cli") return "Codex";
   if (toolId === "gemini-cli") return "Gemini";
-  if (toolId === "qwen-cli") return "Qwen";
   if (toolLabel) return toolLabel;
   return "Custom";
 }
