@@ -14,6 +14,9 @@ import type {
 import { saveSession } from "../../../config/index.js";
 import { execa } from "execa";
 import type { WebFastifyInstance } from "../types.js";
+import { createLogger } from "../../../logging/logger.js";
+
+const logger = createLogger({ category: "sessions" });
 
 /**
  * セッション関連のルートを登録
@@ -28,6 +31,7 @@ export async function registerSessionRoutes(
     async (request, reply) => {
       try {
         const sessions = ptyManager.list();
+        logger.debug({ count: sessions.length }, "Sessions listed");
         return { success: true, data: sessions };
       } catch (error: unknown) {
         const errorMsg = error instanceof Error ? error.message : String(error);
@@ -57,6 +61,8 @@ export async function registerSessionRoutes(
         extraArgs,
         customToolId,
       } = request.body;
+
+      logger.debug({ toolType, mode, worktreePath }, "Session start requested");
 
       const spawnOptions: {
         toolName?: string | null;
@@ -136,6 +142,10 @@ export async function registerSessionRoutes(
         // ignore persistence errors
       }
 
+      logger.info(
+        { sessionId: session.sessionId, toolType },
+        "Session created",
+      );
       reply.code(201);
       return { success: true, data: session };
     } catch (error: unknown) {
@@ -200,6 +210,10 @@ export async function registerSessionRoutes(
 
       const deleted = ptyManager.delete(sessionId);
       if (!deleted) {
+        logger.warn(
+          { sessionId, reason: "not found" },
+          "Session delete failed",
+        );
         reply.code(404);
         return {
           success: false,
@@ -208,6 +222,7 @@ export async function registerSessionRoutes(
         };
       }
 
+      logger.info({ sessionId }, "Session deleted via API");
       return { success: true };
     } catch (error: unknown) {
       const errorMsg = error instanceof Error ? error.message : String(error);

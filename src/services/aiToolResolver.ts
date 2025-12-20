@@ -8,6 +8,9 @@ import {
 } from "../shared/aiToolConstants.js";
 import { prepareCustomToolExecution } from "./customToolResolver.js";
 import type { LaunchOptions } from "../types/tools.js";
+import { createLogger } from "../logging/logger.js";
+
+const logger = createLogger({ category: "resolver" });
 
 const DETECTION_COMMAND = platform() === "win32" ? "where" : "which";
 const MIN_BUN_MAJOR = 1;
@@ -42,8 +45,10 @@ export class AIToolResolutionError extends Error {
 async function commandExists(command: string): Promise<boolean> {
   try {
     await execa(DETECTION_COMMAND, [command], { shell: true });
+    logger.debug({ command, exists: true }, "Command check");
     return true;
   } catch {
+    logger.debug({ command, exists: false }, "Command check");
     return false;
   }
 }
@@ -68,6 +73,7 @@ async function ensureBunxAvailable(): Promise<void> {
       try {
         const { stdout } = await execa("bun", ["--version"]);
         const version = stdout.trim();
+        logger.debug({ bunVersion: version }, "Bun version detected");
         const major = parseInt(version.split(".")[0] ?? "0", 10);
         if (!Number.isFinite(major) || major < MIN_BUN_MAJOR) {
           throw new AIToolResolutionError(
@@ -150,6 +156,10 @@ export async function resolveClaudeCommand(
     : {};
 
   if (await commandExists("claude")) {
+    logger.info(
+      { command: "claude", usesFallback: false },
+      "Claude command resolved",
+    );
     return {
       command: "claude",
       args,
@@ -159,6 +169,10 @@ export async function resolveClaudeCommand(
   }
 
   await ensureBunxAvailable();
+  logger.info(
+    { command: "bunx", usesFallback: true },
+    "Claude command resolved (fallback)",
+  );
   return {
     command: "bunx",
     args: [CLAUDE_CLI_PACKAGE, ...args],
@@ -205,6 +219,10 @@ export async function resolveCodexCommand(
   const args = buildCodexArgs(options);
 
   if (await commandExists("codex")) {
+    logger.info(
+      { command: "codex", usesFallback: false },
+      "Codex command resolved",
+    );
     return {
       command: "codex",
       args,
@@ -213,6 +231,10 @@ export async function resolveCodexCommand(
   }
 
   await ensureBunxAvailable();
+  logger.info(
+    { command: "bunx", usesFallback: true },
+    "Codex command resolved (fallback)",
+  );
   return {
     command: "bunx",
     args: [CODEX_CLI_PACKAGE, ...args],
@@ -229,6 +251,7 @@ export async function resolveCustomToolCommand(
 ): Promise<ResolvedCommand> {
   const tool = await getToolById(options.toolId);
   if (!tool) {
+    logger.error({ toolId: options.toolId }, "Custom tool not found");
     throw new AIToolResolutionError(
       "CUSTOM_TOOL_NOT_FOUND",
       `Custom tool not found: ${options.toolId}`,
@@ -240,6 +263,11 @@ export async function resolveCustomToolCommand(
   }
 
   const execution = await prepareCustomToolExecution(tool, options);
+
+  logger.info(
+    { toolId: options.toolId, command: execution.command },
+    "Custom tool command resolved",
+  );
 
   return {
     command: execution.command,

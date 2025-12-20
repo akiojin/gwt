@@ -7,6 +7,9 @@
 
 import { execa } from "execa";
 import type { CustomAITool, LaunchOptions } from "./types/tools.js";
+import { createLogger } from "./logging/logger.js";
+
+const logger = createLogger({ category: "launcher" });
 
 /**
  * コマンド名をPATH環境変数から解決
@@ -28,16 +31,22 @@ export async function resolveCommand(commandName: string): Promise<string> {
     const resolvedPath = (result.stdout.split("\n")[0] ?? "").trim();
 
     if (!resolvedPath) {
+      logger.error({ commandName }, "Command not found in PATH");
       throw new Error(
         `Command "${commandName}" not found in PATH.\n` +
           `Please ensure the command is installed and available in your PATH environment variable.`,
       );
     }
 
+    logger.debug({ commandName, resolvedPath }, "Command resolved");
     return resolvedPath;
   } catch (error) {
     // which/whereコマンド自体が失敗した場合
     if (error instanceof Error) {
+      logger.error(
+        { commandName, error: error.message },
+        "Command resolution failed",
+      );
       throw new Error(
         `Failed to resolve command "${commandName}".\n` +
           `Error: ${error.message}\n` +
@@ -78,6 +87,10 @@ function buildArgs(tool: CustomAITool, options: LaunchOptions): string[] {
     args.push(...options.extraArgs);
   }
 
+  logger.debug(
+    { toolId: tool.id, mode: options.mode ?? "normal", argsCount: args.length },
+    "Args built",
+  );
   return args;
 }
 
@@ -110,10 +123,21 @@ export async function launchCustomAITool(
     env,
   };
 
+  logger.info(
+    {
+      toolId: tool.id,
+      toolType: tool.type,
+      command: tool.command,
+      mode: options.mode ?? "normal",
+    },
+    "Launching custom AI tool",
+  );
+
   switch (tool.type) {
     case "path": {
       // 絶対パスで直接実行
       await execa(tool.command, args, execaOptions);
+      logger.info({ toolId: tool.id }, "Custom AI tool completed (path)");
       break;
     }
 
@@ -121,6 +145,7 @@ export async function launchCustomAITool(
       // bunx経由でパッケージ実行
       // bunx [package] [args...]
       await execa("bunx", [tool.command, ...args], execaOptions);
+      logger.info({ toolId: tool.id }, "Custom AI tool completed (bunx)");
       break;
     }
 
@@ -128,6 +153,7 @@ export async function launchCustomAITool(
       // PATH解決 → 実行
       const resolvedPath = await resolveCommand(tool.command);
       await execa(resolvedPath, args, execaOptions);
+      logger.info({ toolId: tool.id }, "Custom AI tool completed (command)");
       break;
     }
 
