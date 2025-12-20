@@ -60,6 +60,7 @@ export default [
       ".serena/**",
       ".claude/**",
       "poc/**",
+      "playwright.config.ts",
     ],
   },
 ];
