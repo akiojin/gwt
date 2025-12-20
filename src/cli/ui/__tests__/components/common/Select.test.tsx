@@ -12,6 +12,9 @@ interface TestItem {
   value: string;
 }
 
+const delay = (ms = 0): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
 describe("Select", () => {
   const mockItems: TestItem[] = [
     { label: "Option 1", value: "opt1" },
@@ -291,7 +294,7 @@ describe("Select", () => {
       );
 
       stdin.write(' ');
-      await delay(0);
+      await delay(10);
 
       expect(onSpace).toHaveBeenCalledTimes(1);
       expect(onSpace).toHaveBeenCalledWith(mockItems[0]);
@@ -305,7 +308,7 @@ describe("Select", () => {
       );
 
       stdin.write(' ');
-      await delay(0);
+      await delay(10);
 
       expect(onSpace).not.toHaveBeenCalled();
     });
@@ -318,7 +321,7 @@ describe("Select", () => {
       );
 
       stdin.write('\u001B');
-      await delay(0);
+      await delay(30);
 
       expect(onEscape).toHaveBeenCalledTimes(1);
     });
