@@ -32,6 +32,7 @@ import type {
   AITool,
   BranchInfo,
   BranchItem,
+  CleanupTarget,
   InferenceLevel,
   SelectedBranchState,
 } from "../types.js";
@@ -40,7 +41,6 @@ import { loadSession } from "../../../config/index.js";
 import {
   createWorktree,
   generateWorktreePath,
-  getMergedPRWorktrees,
   isProtectedBranchName,
   removeWorktree,
   switchToProtectedBranch,
@@ -166,7 +166,6 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
   } | null>(null);
   const [hiddenBranches, setHiddenBranches] = useState<string[]>([]);
   const [selectedBranches, setSelectedBranches] = useState<string[]>([]);
-  const [safeBranches, setSafeBranches] = useState<Set<string>>(new Set());
   const spinnerFrameIndexRef = useRef(0);
   const [spinnerFrameIndex, setSpinnerFrameIndex] = useState(0);
   const completionTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -257,29 +256,6 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       ),
     );
   }, [branches, hiddenBranches]);
-
-  // Precompute safe-to-clean branches using cleanup candidate logic
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const targets = await getMergedPRWorktrees();
-        if (cancelled) return;
-        const safe = new Set(
-          targets
-            .filter((t) => !t.hasUncommittedChanges && !t.hasUnpushedCommits)
-            .map((t) => t.branch),
-        );
-        setSafeBranches(safe);
-      } catch {
-        if (cancelled) return;
-        setSafeBranches(new Set());
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [branches, worktrees]);
 
   // Load quick start options for selected branch (latest per tool)
   useEffect(() => {
@@ -520,16 +496,15 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       });
     }
     const baseItems = formatBranchItems(visibleBranches, worktreeMap);
-    return baseItems.map((item) => ({
-      ...item,
-      safeToCleanup: safeBranches.has(item.name),
-    }));
-  }, [branchHash, worktreeHash, visibleBranches, worktrees, safeBranches]);
-
-  const selectedBranchSet = useMemo(
-    () => new Set(selectedBranches),
-    [selectedBranches],
-  );
+    return baseItems.map((item) => {
+      const hasUncommitted = item.worktree?.hasUncommittedChanges ?? false;
+      const hasUnpushed = Boolean(item.hasUnpushedCommits);
+      const isMerged = Boolean(item.mergedPR);
+      const safeToCleanup =
+        item.type === "local" && isMerged && !hasUncommitted && !hasUnpushed;
+      return { ...item, safeToCleanup };
+    });
+  }, [branchHash, worktreeHash, visibleBranches, worktrees]);
 
   // Calculate statistics (memoized for performance)
   const stats = useMemo(
@@ -622,17 +597,31 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     [isProtectedBranchName],
   );
 
-  const toggleBranchSelection = useCallback((branchName: string) => {
-    setSelectedBranches((prev) => {
-      const set = new Set(prev);
-      if (set.has(branchName)) {
-        set.delete(branchName);
-      } else {
-        set.add(branchName);
+  const toggleBranchSelection = useCallback(
+    (branchName: string) => {
+      const branch = branches.find((b) => b.name === branchName);
+      if (!branch || branch.type === "remote") {
+        return;
       }
-      return Array.from(set);
-    });
-  }, []);
+      if (
+        isProtectedBranchName(branch.name) ||
+        branch.branchType === "main" ||
+        branch.branchType === "develop"
+      ) {
+        return;
+      }
+      setSelectedBranches((prev) => {
+        const set = new Set(prev);
+        if (set.has(branchName)) {
+          set.delete(branchName);
+        } else {
+          set.add(branchName);
+        }
+        return Array.from(set);
+      });
+    },
+    [branches, isProtectedBranchName],
+  );
 
   const protectedBranchInfo = useMemo(() => {
     if (!selectedBranch) {
@@ -846,6 +835,20 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       completionTimerRef.current = null;
     }
 
+    if (selectedBranches.length === 0) {
+      setCleanupIndicators({});
+      setCleanupFooterMessage({
+        text: "クリーンアップ対象が選択されていません",
+        color: "yellow",
+      });
+      setCleanupInputLocked(false);
+      completionTimerRef.current = setTimeout(() => {
+        setCleanupFooterMessage(null);
+        completionTimerRef.current = null;
+      }, COMPLETION_HOLD_DURATION_MS);
+      return;
+    }
+
     const succeededBranches: string[] = [];
 
     const resetAfterWait = () => {
@@ -878,26 +881,50 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     spinnerFrameIndexRef.current = 0;
     setSpinnerFrameIndex(0);
 
-    let targets;
-    try {
-      targets = await getMergedPRWorktrees();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setCleanupIndicators({});
-      setCleanupFooterMessage({ text: `❌ ${message}`, color: "red" });
-      setCleanupInputLocked(false);
-      completionTimerRef.current = setTimeout(() => {
-        setCleanupFooterMessage(null);
-        completionTimerRef.current = null;
-      }, COMPLETION_HOLD_DURATION_MS);
-      return;
-    }
+    const branchMap = new Map(branches.map((branch) => [branch.name, branch]));
+    const worktreeMap = new Map(
+      worktrees.map((worktree) => [worktree.branch, worktree]),
+    );
+    const targets = selectedBranches.reduce<CleanupTarget[]>((acc, name) => {
+      const branch = branchMap.get(name);
+      if (!branch || branch.type === "remote") {
+        return acc;
+      }
+      if (
+        isProtectedBranchName(branch.name) ||
+        branch.branchType === "main" ||
+        branch.branchType === "develop"
+      ) {
+        return acc;
+      }
+
+      const worktree = worktreeMap.get(branch.name);
+      const hasRemoteBranch =
+        typeof branch.hasRemoteCounterpart === "boolean"
+          ? branch.hasRemoteCounterpart
+          : undefined;
+      const isAccessible =
+        typeof worktree?.isAccessible === "boolean"
+          ? worktree.isAccessible
+          : undefined;
+      acc.push({
+        branch: branch.name,
+        pullRequest: null,
+        worktreePath: worktree?.path ?? null,
+        cleanupType: worktree ? "worktree-and-branch" : "branch-only",
+        hasUncommittedChanges: worktree?.hasUncommittedChanges ?? false,
+        hasUnpushedCommits: Boolean(branch.hasUnpushedCommits),
+        ...(hasRemoteBranch !== undefined ? { hasRemoteBranch } : {}),
+        ...(isAccessible !== undefined ? { isAccessible } : {}),
+      });
+      return acc;
+    }, []);
 
     if (targets.length === 0) {
       setCleanupIndicators({});
       setCleanupFooterMessage({
-        text: "✅ Nothing to clean up.",
-        color: "green",
+        text: "⚠️ No cleanup candidates among selected branches.",
+        color: "yellow",
       });
       setCleanupInputLocked(false);
       completionTimerRef.current = setTimeout(() => {
@@ -905,24 +932,6 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         completionTimerRef.current = null;
       }, COMPLETION_HOLD_DURATION_MS);
       return;
-    }
-
-    // Manual selection: restrict targets when選択がある
-    if (selectedBranchSet.size > 0) {
-      targets = targets.filter((t) => selectedBranchSet.has(t.branch));
-      if (targets.length === 0) {
-        setCleanupIndicators({});
-        setCleanupFooterMessage({
-          text: "⚠️ No cleanup candidates among selected branches.",
-          color: "yellow",
-        });
-        setCleanupInputLocked(false);
-        completionTimerRef.current = setTimeout(() => {
-          setCleanupFooterMessage(null);
-          completionTimerRef.current = null;
-        }, COMPLETION_HOLD_DURATION_MS);
-        return;
-      }
     }
 
     // Reset hidden branches that may already be gone
@@ -1037,11 +1046,12 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     completionTimerRef.current = setTimeout(resetAfterWait, holdDuration);
   }, [
     cleanupInputLocked,
+    branches,
     deleteBranch,
-    getMergedPRWorktrees,
     refresh,
     removeWorktree,
-    selectedBranchSet,
+    selectedBranches,
+    worktrees,
   ]);
 
   // Handle AI tool selection

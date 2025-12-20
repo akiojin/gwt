@@ -231,7 +231,7 @@ export interface BranchItem extends BranchInfo {
   syncStatus?: SyncStatus;
   syncInfo?: string | undefined;
   remoteName?: string | undefined;
-  // クリーンアップ判定で「未コミット/未プッシュなし」と評価された場合に true
+  // クリーンアップ判定で「未コミット/未プッシュなし かつマージ済み」と評価された場合に true
   safeToCleanup?: boolean;
 }
 
