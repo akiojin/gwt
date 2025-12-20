@@ -1,5 +1,8 @@
 import { execa } from "execa";
 import type { CustomAITool, LaunchOptions } from "../types/tools.js";
+import { createLogger } from "../logging/logger.js";
+
+const logger = createLogger({ category: "custom-resolver" });
 
 export interface CustomToolExecutionPlan {
   command: string;
@@ -21,6 +24,7 @@ export async function resolveCommandPath(commandName: string): Promise<string> {
       );
     }
 
+    logger.debug({ commandName, resolvedPath }, "Command path resolved");
     return resolvedPath;
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
@@ -55,6 +59,10 @@ export function buildCustomToolArgs(
     args.push(...options.extraArgs);
   }
 
+  logger.debug(
+    { toolId: tool.id, argsCount: args.length },
+    "Custom tool args built",
+  );
   return args;
 }
 
@@ -62,37 +70,44 @@ export async function prepareCustomToolExecution(
   tool: CustomAITool,
   options: LaunchOptions = {},
 ): Promise<CustomToolExecutionPlan> {
-  const args = buildCustomToolArgs(tool, options);
+  const baseArgs = buildCustomToolArgs(tool, options);
   const envOverrides: NodeJS.ProcessEnv | undefined = tool.env
     ? ({ ...tool.env } as NodeJS.ProcessEnv)
     : undefined;
 
+  let command: string;
+  let args: string[];
+
   switch (tool.type) {
     case "path": {
-      return {
-        command: tool.command,
-        args,
-        ...(envOverrides ? { env: envOverrides } : {}),
-      };
+      command = tool.command;
+      args = baseArgs;
+      break;
     }
     case "bunx": {
-      return {
-        command: "bunx",
-        args: [tool.command, ...args],
-        ...(envOverrides ? { env: envOverrides } : {}),
-      };
+      command = "bunx";
+      args = [tool.command, ...baseArgs];
+      break;
     }
     case "command": {
-      const resolved = await resolveCommandPath(tool.command);
-      return {
-        command: resolved,
-        args,
-        ...(envOverrides ? { env: envOverrides } : {}),
-      };
+      command = await resolveCommandPath(tool.command);
+      args = baseArgs;
+      break;
     }
     default: {
       const exhaustive: never = tool.type;
       throw new Error(`Unknown custom tool type: ${exhaustive as string}`);
     }
   }
+
+  logger.debug(
+    { toolId: tool.id, toolType: tool.type, command, hasEnv: !!envOverrides },
+    "Custom tool execution prepared",
+  );
+
+  return {
+    command,
+    args,
+    ...(envOverrides ? { env: envOverrides } : {}),
+  };
 }

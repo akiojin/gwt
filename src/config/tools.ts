@@ -21,6 +21,9 @@ import type {
   AIToolConfig,
 } from "../types/tools.js";
 import { BUILTIN_TOOLS } from "./builtin-tools.js";
+import { createLogger } from "../logging/logger.js";
+
+const logger = createLogger({ category: "config" });
 
 /**
  * ツール設定ファイルのパス
@@ -63,6 +66,10 @@ async function migrateLegacyConfig(): Promise<void> {
     // レガシーディレクトリを新しいディレクトリにコピー
     await mkdir(path.dirname(CONFIG_DIR), { recursive: true });
     await cp(LEGACY_CONFIG_DIR, CONFIG_DIR, { recursive: true });
+    logger.info(
+      { from: LEGACY_CONFIG_DIR, to: CONFIG_DIR },
+      "Legacy config migrated",
+    );
     console.log(
       `✅ Migrated configuration from ${LEGACY_CONFIG_DIR} to ${CONFIG_DIR}`,
     );
@@ -100,6 +107,11 @@ export async function loadToolsConfig(): Promise<ToolsConfig> {
     // 検証
     validateToolsConfig(config);
 
+    logger.debug(
+      { path: TOOLS_CONFIG_PATH, toolCount: config.customTools.length },
+      "Tools config loaded",
+    );
+
     return {
       ...config,
       env: config.env ?? {},
@@ -107,11 +119,19 @@ export async function loadToolsConfig(): Promise<ToolsConfig> {
   } catch (error) {
     // ファイルが存在しない場合は空配列を返す
     if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      logger.debug(
+        { path: TOOLS_CONFIG_PATH },
+        "Tools config not found, using defaults",
+      );
       return { ...DEFAULT_CONFIG };
     }
 
     // JSON構文エラーの場合
     if (error instanceof SyntaxError) {
+      logger.error(
+        { path: TOOLS_CONFIG_PATH, error: error.message },
+        "Tools config parse error",
+      );
       throw new Error(
         `Failed to parse tools.json: ${error.message}\n` +
           `Please check the JSON syntax in ${TOOLS_CONFIG_PATH}`,
@@ -265,12 +285,15 @@ export async function getToolById(
   // ビルトインツールから検索
   const builtinTool = BUILTIN_TOOLS.find((t) => t.id === id);
   if (builtinTool) {
+    logger.debug({ id, found: true, isBuiltin: true }, "Tool lookup");
     return builtinTool;
   }
 
   // カスタムツールから検索
   const config = await loadToolsConfig();
-  return config.customTools.find((t) => t.id === id);
+  const customTool = config.customTools.find((t) => t.id === id);
+  logger.debug({ id, found: !!customTool, isBuiltin: false }, "Tool lookup");
+  return customTool;
 }
 
 /**
