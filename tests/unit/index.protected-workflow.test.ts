@@ -62,10 +62,7 @@ const waitForUserAcknowledgementMock = vi.hoisted(() =>
 
 const waitForEnterMock = vi.hoisted(() => vi.fn<() => Promise<void>>());
 
-const confirmYesNoMock = vi.hoisted(() =>
-  vi.fn<() => Promise<boolean>>(),
-);
-
+const confirmYesNoMock = vi.hoisted(() => vi.fn<() => Promise<boolean>>());
 vi.mock("execa", () => ({
   execa: execaMock,
 }));
@@ -98,6 +95,9 @@ vi.mock("../../src/worktree.js", async () => {
   );
   return {
     worktreeExists: worktreeExistsMock,
+    resolveWorktreePathForBranch: vi.fn(async (branch: string) => ({
+      path: await worktreeExistsMock(branch),
+    })),
     isProtectedBranchName: (name: string) =>
       name === "main" || name === "origin/main",
     switchToProtectedBranch: switchToProtectedBranchMock,

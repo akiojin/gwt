@@ -78,7 +78,6 @@ export async function waitForEnter(promptMessage: string): Promise<void> {
     stdin.once("error", onEnd);
   });
 }
-
 export async function confirmYesNo(
   promptMessage: string,
   options: { defaultValue?: boolean } = {},

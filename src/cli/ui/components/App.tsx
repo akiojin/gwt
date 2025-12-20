@@ -53,6 +53,7 @@ import {
 import {
   getDefaultInferenceForModel,
   getDefaultModelOption,
+  normalizeModelId,
 } from "../utils/modelOptions.js";
 import {
   resolveContinueSessionId,
@@ -141,7 +142,6 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
   const [creationSourceBranch, setCreationSourceBranch] =
     useState<SelectedBranchState | null>(null);
   const [selectedTool, setSelectedTool] = useState<AITool | null>(null);
-  const [selectedBranches, setSelectedBranches] = useState<string[]>([]);
   const [selectedModel, setSelectedModel] =
     useState<ModelSelectionResult | null>(null);
   const [lastModelByTool, setLastModelByTool] = useState<
@@ -165,6 +165,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     color?: "cyan" | "green" | "yellow" | "red";
   } | null>(null);
   const [hiddenBranches, setHiddenBranches] = useState<string[]>([]);
+  const [selectedBranches, setSelectedBranches] = useState<string[]>([]);
   const [safeBranches, setSafeBranches] = useState<Set<string>>(new Set());
   const spinnerFrameIndexRef = useRef(0);
   const [spinnerFrameIndex, setSpinnerFrameIndex] = useState(0);
@@ -386,10 +387,15 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
               }
             }
 
+            const normalizedModel = normalizeModelId(
+              entry.toolId as AITool,
+              entry.model ?? null,
+            );
+
             return {
               toolId: entry.toolId as AITool,
               toolLabel: entry.toolLabel,
-              model: entry.model ?? null,
+              model: normalizedModel ?? null,
               inferenceLevel: (entry.reasoningLevel ??
                 sessionData?.reasoningLevel ??
                 null) as InferenceLevel | null,
@@ -483,17 +489,6 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     return wt?.path ?? null;
   }, [selectedBranch, worktrees]);
 
-  useEffect(() => {
-    setSelectedBranches((prev) => {
-      if (prev.length === 0) {
-        return prev;
-      }
-      const visibleSet = new Set(visibleBranches.map((branch) => branch.name));
-      const next = prev.filter((name) => visibleSet.has(name));
-      return next.length === prev.length ? prev : next;
-    });
-  }, [visibleBranches]);
-
   // Helper function to create content-based hash for branches
   const branchHash = useMemo(
     () =>
@@ -574,36 +569,6 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     [creationSourceBranch, resolveBaseBranch, selectedBranch],
   );
 
-  const toggleBranchSelection = useCallback(
-    (branchName: string) => {
-      const branch = visibleBranches.find((item) => item.name === branchName);
-      if (!branch) {
-        return;
-      }
-      if (branch.type !== "local") {
-        return;
-      }
-      if (isProtectedBranchName(branch.name)) {
-        return;
-      }
-
-      setSelectedBranches((prev) => {
-        const set = new Set(prev);
-        if (set.has(branchName)) {
-          set.delete(branchName);
-        } else {
-          set.add(branchName);
-        }
-        return Array.from(set);
-      });
-    },
-    [visibleBranches]
-  );
-
-  const clearBranchSelection = useCallback(() => {
-    setSelectedBranches((prev) => (prev.length === 0 ? prev : []));
-  }, []);
-
   // Handle branch selection
   const toLocalBranchName = useCallback((remoteName: string) => {
     const segments = remoteName.split("/");
@@ -656,6 +621,18 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     },
     [isProtectedBranchName],
   );
+
+  const toggleBranchSelection = useCallback((branchName: string) => {
+    setSelectedBranches((prev) => {
+      const set = new Set(prev);
+      if (set.has(branchName)) {
+        set.delete(branchName);
+      } else {
+        set.add(branchName);
+      }
+      return Array.from(set);
+    });
+  }, []);
 
   const protectedBranchInfo = useMemo(() => {
     if (!selectedBranch) {
@@ -869,18 +846,6 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       completionTimerRef.current = null;
     }
 
-    if (selectedBranches.length === 0) {
-      setCleanupFooterMessage({
-        text: "クリーンアップ対象が選択されていません",
-        color: "yellow",
-      });
-      completionTimerRef.current = setTimeout(() => {
-        setCleanupFooterMessage(null);
-        completionTimerRef.current = null;
-      }, COMPLETION_HOLD_DURATION_MS);
-      return;
-    }
-
     const succeededBranches: string[] = [];
 
     const resetAfterWait = () => {
@@ -942,15 +907,13 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       return;
     }
 
-    let filteredTargets = targets;
+    // Manual selection: restrict targets when選択がある
     if (selectedBranchSet.size > 0) {
-      filteredTargets = targets.filter((target) =>
-        selectedBranchSet.has(target.branch),
-      );
-      if (filteredTargets.length === 0) {
+      targets = targets.filter((t) => selectedBranchSet.has(t.branch));
+      if (targets.length === 0) {
         setCleanupIndicators({});
         setCleanupFooterMessage({
-          text: "選択したブランチはクリーンアップ対象ではありません。",
+          text: "⚠️ No cleanup candidates among selected branches.",
           color: "yellow",
         });
         setCleanupInputLocked(false);
@@ -965,12 +928,15 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     // Reset hidden branches that may already be gone
     setHiddenBranches((prev) =>
       prev.filter(
-        (name) => filteredTargets.find((t) => t.branch === name) === undefined,
+        (name) => targets.find((t) => t.branch === name) === undefined,
       ),
     );
 
-    const initialIndicators = filteredTargets.reduce<
-      Record<string, { icon: string; color?: "cyan" | "green" | "yellow" | "red" }>
+    const initialIndicators = targets.reduce<
+      Record<
+        string,
+        { icon: string; color?: "cyan" | "green" | "yellow" | "red" }
+      >
     >((acc, target, index) => {
       const icon = index === 0 ? getSpinnerFrame(0) : "⏳";
       const color: "cyan" | "green" | "yellow" | "red" =
@@ -980,7 +946,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     }, {});
 
     setCleanupIndicators(initialIndicators);
-    const firstTarget = filteredTargets[0];
+    const firstTarget = targets.length > 0 ? targets[0] : undefined;
     setCleanupProcessingBranch(firstTarget ? firstTarget.branch : null);
     spinnerFrameIndexRef.current = 0;
     setSpinnerFrameIndex(0);
@@ -989,11 +955,12 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       color: "cyan",
     });
 
-    for (let index = 0; index < filteredTargets.length; index += 1) {
-      const target = filteredTargets[index];
-      if (!target) {
+    for (let index = 0; index < targets.length; index += 1) {
+      const currentTarget = targets[index];
+      if (!currentTarget) {
         continue;
       }
+      const target = currentTarget;
 
       setCleanupProcessingBranch(target.branch);
       spinnerFrameIndexRef.current = 0;
@@ -1001,8 +968,8 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
 
       setCleanupIndicators((prev) => {
         const updated = { ...prev };
-        updated[target.branch] = { icon: getSpinnerFrame(0), color: 'cyan' };
-        for (const pending of filteredTargets.slice(index + 1)) {
+        updated[target.branch] = { icon: getSpinnerFrame(0), color: "cyan" };
+        for (const pending of targets.slice(index + 1)) {
           const current = updated[pending.branch];
           if (!current || current.icon !== "⏳") {
             updated[pending.branch] = { icon: "⏳", color: "yellow" };
@@ -1074,7 +1041,6 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     getMergedPRWorktrees,
     refresh,
     removeWorktree,
-    selectedBranches,
     selectedBranchSet,
   ]);
 
@@ -1109,6 +1075,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       if (selectedBranch && selectedTool) {
         const defaultModel = getDefaultModelOption(selectedTool);
         const resolvedModel = selectedModel?.model ?? defaultModel?.id ?? null;
+        const normalizedModel = normalizeModelId(selectedTool, resolvedModel);
         const resolvedInference =
           selectedModel?.inferenceLevel ??
           getDefaultInferenceForModel(defaultModel ?? undefined);
@@ -1120,7 +1087,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
           tool: selectedTool,
           mode: executionMode,
           skipPermissions: skip,
-          ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+          ...(normalizedModel !== undefined ? { model: normalizedModel } : {}),
           ...(resolvedInference !== undefined
             ? { inferenceLevel: resolvedInference }
             : {}),
@@ -1162,10 +1129,14 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
 
       setSelectedTool(selected.toolId);
       setPreferredToolId(selected.toolId);
+      const normalizedQuickStartModel = normalizeModelId(
+        selected.toolId as AITool,
+        selected.model ?? null,
+      );
       setSelectedModel(
-        selected.model
+        normalizedQuickStartModel
           ? ({
-              model: selected.model,
+              model: normalizedQuickStartModel,
               inferenceLevel: selected.inferenceLevel ?? undefined,
             } as ModelSelectionResult)
           : null,
@@ -1235,7 +1206,6 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
           },
           selectedBranches,
           onToggleSelect: toggleBranchSelection,
-          onClearSelection: clearBranchSelection,
         });
 
       case "branch-creator":

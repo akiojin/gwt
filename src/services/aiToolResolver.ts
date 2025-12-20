@@ -113,14 +113,9 @@ export interface ClaudeCommandOptions {
   mode?: "normal" | "continue" | "resume";
   skipPermissions?: boolean;
   extraArgs?: string[];
-  args?: string[];
 }
 
 export function buildClaudeArgs(options: ClaudeCommandOptions = {}): string[] {
-  if (options.args) {
-    return [...options.args];
-  }
-
   const args: string[] = [];
 
   switch (options.mode) {
@@ -170,14 +165,9 @@ export interface CodexCommandOptions {
   mode?: "normal" | "continue" | "resume";
   bypassApprovals?: boolean;
   extraArgs?: string[];
-  args?: string[];
 }
 
 export function buildCodexArgs(options: CodexCommandOptions = {}): string[] {
-  if (options.args) {
-    return [...options.args];
-  }
-
   const args: string[] = [];
 
   switch (options.mode) {

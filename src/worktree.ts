@@ -21,6 +21,7 @@ import {
   ensureGitignoreEntry,
   branchExists,
   getCurrentBranch,
+  getCurrentBranchName,
 } from "./git.js";
 import { getConfig } from "./config/index.js";
 import { GIT_CONFIG } from "./config/constants.js";
@@ -195,9 +196,55 @@ export async function listAdditionalWorktrees(): Promise<WorktreeInfo[]> {
 export async function worktreeExists(
   branchName: string,
 ): Promise<string | null> {
+  const resolution = await resolveWorktreePathForBranch(branchName);
+  return resolution.path;
+}
+
+/**
+ * Resolution result for a branch-associated worktree path.
+ */
+export interface WorktreePathResolution {
+  path: string | null;
+  mismatch?: {
+    path: string;
+    actualBranch: string | null;
+  };
+}
+
+/**
+ * Resolve a worktree path for the selected branch and verify the actual checkout.
+ */
+export async function resolveWorktreePathForBranch(
+  branchName: string,
+): Promise<WorktreePathResolution> {
   const worktrees = await listWorktrees();
   const worktree = worktrees.find((w) => w.branch === branchName);
-  return worktree ? worktree.path : null;
+  if (!worktree) {
+    return { path: null };
+  }
+
+  try {
+    const actualBranch = (await getCurrentBranchName(worktree.path)).trim();
+    if (!actualBranch || actualBranch !== branchName) {
+      return {
+        path: null,
+        mismatch: {
+          path: worktree.path,
+          actualBranch: actualBranch || null,
+        },
+      };
+    }
+  } catch {
+    return {
+      path: null,
+      mismatch: {
+        path: worktree.path,
+        actualBranch: null,
+      },
+    };
+  }
+
+  return { path: worktree.path };
 }
 
 export async function generateWorktreePath(
@@ -507,8 +554,14 @@ async function getOrphanedLocalBranches({
           reasons.push("no-diff-with-base");
         }
 
-        // リモートにコピーがあり、PRがマージされていないブランチも対象
-        // （未プッシュのコミットがない場合のみ）
+        if (process.env.DEBUG_CLEANUP) {
+          console.log(
+            chalk.gray(
+              `Debug: Checking orphaned branch ${localBranch.name} -> reasons: ${reasons.join(", ")}`,
+            ),
+          );
+        }
+
         let hasRemoteBranch = false;
         try {
           hasRemoteBranch = await checkRemoteBranchExists(localBranch.name);
@@ -516,22 +569,8 @@ async function getOrphanedLocalBranches({
           hasRemoteBranch = false;
         }
 
-        const mergedPR = false;
-
-        if (hasRemoteBranch && !mergedPR && !hasUnpushed) {
-          reasons.push("has-remote-copy");
-        }
-
         if (!hasUnpushed && hasRemoteBranch && hasUniqueCommits) {
           reasons.push("remote-synced");
-        }
-
-        if (process.env.DEBUG_CLEANUP) {
-          console.log(
-            chalk.gray(
-              `Debug: Checking orphaned branch ${localBranch.name} -> reasons: ${reasons.join(", ")}`,
-            ),
-          );
         }
 
         if (reasons.length > 0) {
@@ -651,6 +690,7 @@ export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
     } catch {
       hasRemoteBranch = false;
     }
+
     const upstreamBranch = await getUpstreamBranch(worktree.branch);
     const comparisonBase = upstreamBranch ?? baseBranch;
 
@@ -666,14 +706,6 @@ export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
     } else if (!hasUncommitted && !hasUnpushed && hasRemoteBranch) {
       // 未マージでも、ローカルに未コミット/未プッシュがなくリモートが最新ならローカルのみクリーンアップ許可
       cleanupReasons.push("remote-synced");
-    }
-
-    // リモートにコピーがあり、PRがマージされていないブランチも対象
-    // （未プッシュのコミットがない場合のみ）
-    const mergedPR = worktree.pullRequest?.state === "MERGED";
-
-    if (hasRemoteBranch && !mergedPR && !hasUnpushed) {
-      cleanupReasons.push("has-remote-copy");
     }
 
     if (process.env.DEBUG_CLEANUP) {

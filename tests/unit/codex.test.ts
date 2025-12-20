@@ -1,27 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import * as sessionUtils from "../../src/utils/session.js";
+import { EventEmitter } from "node:events";
 
 // Mock modules before importing
 vi.mock("execa", () => ({
   execa: vi.fn(),
   default: { execa: vi.fn() },
-}));
-
-const { mockResolveCodexCommand, MockResolutionError } = vi.hoisted(() => ({
-  mockResolveCodexCommand: vi
-    .fn()
-    .mockImplementation(async (options?: { args?: string[] }) => ({
-      command: "bunx",
-      args: ["@openai/codex@latest", ...(options?.args ?? [])],
-      usesFallback: true,
-    })),
-  MockResolutionError: class MockResolutionError extends Error {},
-}));
-
-vi.mock("../../src/services/aiToolResolver", () => ({
-  resolveCodexCommand: mockResolveCodexCommand,
-  AIToolResolutionError: MockResolutionError,
-  isCodexAvailable: vi.fn(),
 }));
 
 vi.mock("fs", () => ({
@@ -66,6 +49,7 @@ vi.mock("../../src/utils/terminal", () => ({
   resetTerminalModes: vi.fn(),
 }));
 vi.mock("../../src/utils/session", () => ({
+  waitForCodexSessionId: vi.fn(async () => null),
   findLatestCodexSession: vi.fn(async () => null),
 }));
 
@@ -77,7 +61,37 @@ import {
   launchCodexCLI,
 } from "../../src/codex";
 
+// Get typed mock
 const mockExeca = execa as ReturnType<typeof vi.fn>;
+
+type ExecaCall = [unknown, string[], Record<string, unknown>];
+
+const getExecaCall = (index = 0): ExecaCall =>
+  mockExeca.mock.calls[index] as unknown as ExecaCall;
+
+const getExecaArgs = (index = 0): string[] => getExecaCall(index)[1];
+
+const getExecaOptions = (index = 0): Record<string, unknown> =>
+  getExecaCall(index)[2];
+
+const DEFAULT_CODEX_ARGS = buildDefaultCodexArgs(
+  DEFAULT_CODEX_MODEL,
+  DEFAULT_CODEX_REASONING_EFFORT,
+);
+
+const createChildProcess = (
+  onEmit?: (stdout: EventEmitter, stderr: EventEmitter) => void,
+) => {
+  const stdout = new EventEmitter();
+  const stderr = new EventEmitter();
+  const promise = new Promise((resolve) => {
+    setImmediate(() => {
+      onEmit?.(stdout, stderr);
+      resolve({ stdout, stderr, exitCode: 0 });
+    });
+  });
+  return Object.assign(promise, { stdout, stderr });
+};
 
 describe("codex.ts", () => {
   const worktreePath = "/tmp/worktree";
@@ -91,33 +105,36 @@ describe("codex.ts", () => {
     mockChildStdio.stdin = "inherit";
     mockChildStdio.stdout = "inherit";
     mockChildStdio.stderr = "inherit";
-    mockExeca.mockResolvedValue({ stdout: "", stderr: "", exitCode: 0 });
+    mockExeca.mockImplementation(() => createChildProcess());
   });
 
   it("uses gpt-5.2-codex as the default model", () => {
     expect(DEFAULT_CODEX_MODEL).toBe("gpt-5.2-codex");
   });
 
-  it("invokes resolver and executes returned command", async () => {
+  it("should append default Codex CLI arguments on launch", async () => {
     await launchCodexCLI(worktreePath);
 
-    expect(mockResolveCodexCommand).toHaveBeenCalled();
-    const [command, args, options] = mockExeca.mock.calls[0];
-    expect(command).toBe("bunx");
-    expect(args).toContain("@openai/codex@latest");
+    expect(execa).toHaveBeenCalledTimes(1);
+    const [, args, options] = getExecaCall();
+
+    expect(args).toEqual(["@openai/codex@latest", ...DEFAULT_CODEX_ARGS]);
     expect(options).toMatchObject({
       cwd: worktreePath,
       stdin: "inherit",
       stdout: "inherit",
       stderr: "inherit",
     });
+    // exitRawMode is called once before child process and once in finally block
+    expect(mockTerminalStreams.exitRawMode).toHaveBeenCalledTimes(2);
+    expect(mockChildStdio.cleanup).toHaveBeenCalledTimes(1);
   });
 
   it("captures sessionId from file-based session detection", async () => {
+    const { findLatestCodexSession } =
+      await import("../../src/utils/session.js");
     const mockFindLatestCodexSession =
-      sessionUtils.findLatestCodexSession as unknown as ReturnType<
-        typeof vi.fn
-      >;
+      findLatestCodexSession as unknown as ReturnType<typeof vi.fn>;
     mockFindLatestCodexSession.mockResolvedValueOnce({
       id: "019af999-aaaa-bbbb-cccc-123456789abc",
       fullPath: "/mock/path/session.jsonl",
@@ -128,37 +145,109 @@ describe("codex.ts", () => {
     expect(result.sessionId).toBe("019af999-aaaa-bbbb-cccc-123456789abc");
   });
 
-  it("places extra arguments before the default set", async () => {
+  it("should place extra arguments before the default set", async () => {
     await launchCodexCLI(worktreePath, { extraArgs: ["--custom-flag"] });
 
-    const args = mockResolveCodexCommand.mock.calls[0]?.[0]?.args as string[];
+    const args = getExecaArgs();
     expect(args).toEqual([
+      "@openai/codex@latest",
       "--custom-flag",
-      ...buildDefaultCodexArgs(
-        DEFAULT_CODEX_MODEL,
-        DEFAULT_CODEX_REASONING_EFFORT,
-      ),
+      ...DEFAULT_CODEX_ARGS,
     ]);
   });
 
-  it("adds resume args when mode is continue", async () => {
+  it("should include resume command arguments before defaults when continuing", async () => {
     await launchCodexCLI(worktreePath, { mode: "continue" });
 
-    const args = mockResolveCodexCommand.mock.calls[0]?.[0]?.args as string[];
+    const args = getExecaArgs();
     expect(args).toEqual([
+      "@openai/codex@latest",
       "resume",
       "--last",
-      ...buildDefaultCodexArgs(
-        DEFAULT_CODEX_MODEL,
-        DEFAULT_CODEX_REASONING_EFFORT,
-      ),
+      ...DEFAULT_CODEX_ARGS,
     ]);
   });
 
-  it("adds --yolo when bypassApprovals is true", async () => {
-    await launchCodexCLI(worktreePath, { bypassApprovals: true });
+  it("applies provided model and reasoning effort overrides", async () => {
+    await launchCodexCLI(worktreePath, {
+      model: "gpt-5.1-codex-max",
+      reasoningEffort: "xhigh",
+    });
 
-    const args = mockResolveCodexCommand.mock.calls[0]?.[0]?.args as string[];
-    expect(args).toContain("--yolo");
+    const args = getExecaArgs();
+    expect(args).toEqual([
+      "@openai/codex@latest",
+      ...buildDefaultCodexArgs("gpt-5.1-codex-max", "xhigh"),
+    ]);
+  });
+
+  it("passes gpt-5.2 and xhigh reasoning when requested", async () => {
+    await launchCodexCLI(worktreePath, {
+      model: "gpt-5.2",
+      reasoningEffort: "xhigh",
+    });
+
+    const args = getExecaArgs();
+    expect(args).toEqual([
+      "@openai/codex@latest",
+      ...buildDefaultCodexArgs("gpt-5.2", "xhigh"),
+    ]);
+  });
+
+  it("should hand off fallback file descriptors when stdin is not a TTY", async () => {
+    mockTerminalStreams.usingFallback = true;
+    mockChildStdio.stdin = 11;
+    mockChildStdio.stdout = 12;
+    mockChildStdio.stderr = 13;
+
+    await launchCodexCLI(worktreePath);
+
+    const options = getExecaOptions();
+    expect(options).toMatchObject({
+      stdin: 11,
+      stdout: 12,
+      stderr: 13,
+    });
+    expect(mockChildStdio.cleanup).toHaveBeenCalledTimes(1);
+
+    mockTerminalStreams.usingFallback = false;
+    mockChildStdio.stdin = "inherit";
+    mockChildStdio.stdout = "inherit";
+    mockChildStdio.stderr = "inherit";
+  });
+
+  it("should include --enable skills in default arguments (FR-202)", async () => {
+    await launchCodexCLI(worktreePath);
+
+    const args = getExecaArgs();
+
+    // Find the index of "--enable" followed by "skills"
+    const enableIndex = args.findIndex(
+      (arg: string, i: number) =>
+        arg === "--enable" && args[i + 1] === "skills",
+    );
+
+    expect(enableIndex).toBeGreaterThan(-1);
+    expect(args[enableIndex]).toBe("--enable");
+    expect(args[enableIndex + 1]).toBe("skills");
+  });
+
+  it("should display launch arguments in console log (FR-008)", async () => {
+    const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    await launchCodexCLI(worktreePath);
+
+    // Verify that args are logged with 📋 prefix
+    expect(consoleSpy).toHaveBeenCalledWith(
+      expect.stringContaining("📋 Args:"),
+    );
+
+    // Verify that the actual arguments are included in the log
+    expect(consoleSpy).toHaveBeenCalledWith(
+      expect.stringContaining("--enable"),
+    );
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining("skills"));
+
+    consoleSpy.mockRestore();
   });
 });

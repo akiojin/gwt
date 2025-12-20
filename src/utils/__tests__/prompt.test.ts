@@ -87,7 +87,6 @@ describe("waitForEnter", () => {
     expect(Date.now() - start).toBeLessThan(50);
   });
 });
-
 describe("confirmYesNo", () => {
   it("resolves true when user inputs y on TTY", async () => {
     vi.resetModules();

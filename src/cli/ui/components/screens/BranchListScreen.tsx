@@ -104,7 +104,6 @@ export interface BranchListScreenProps {
   testOnFilterQueryChange?: (query: string) => void;
   selectedBranches?: string[];
   onToggleSelect?: (branchName: string) => void;
-  onClearSelection?: () => void;
 }
 
 /**
@@ -132,7 +131,6 @@ export function BranchListScreen({
   testOnFilterQueryChange,
   selectedBranches = [],
   onToggleSelect,
-  onClearSelection,
 }: BranchListScreenProps) {
   const { rows } = useTerminalSize();
   const headerText = "  Legend: [ ]/[ * ] select  🟢/🔴/⚪ worktree  🛡/⚠ safe";
@@ -189,8 +187,6 @@ export function BranchListScreen({
         setFilterMode(false);
         return;
       }
-      onClearSelection?.();
-      return;
     }
 
     // Enter filter mode with 'f' key (only in branch selection mode)
@@ -521,12 +517,6 @@ export function BranchListScreen({
     ],
   );
 
-  const effectiveFooterMessage =
-    cleanupUI?.footerMessage ??
-    (selectedSet.size > 0
-      ? { text: `選択中: ${selectedSet.size}個のブランチ` }
-      : null);
-
   return (
     <Box flexDirection="column" height={rows}>
       {/* Header */}
@@ -625,14 +615,14 @@ export function BranchListScreen({
           )}
       </Box>
 
-      {effectiveFooterMessage && (
+      {cleanupUI?.footerMessage && (
         <Box marginBottom={1}>
-          {effectiveFooterMessage.color ? (
-            <Text color={effectiveFooterMessage.color}>
-              {effectiveFooterMessage.text}
+          {cleanupUI.footerMessage.color ? (
+            <Text color={cleanupUI.footerMessage.color}>
+              {cleanupUI.footerMessage.text}
             </Text>
           ) : (
-            <Text>{effectiveFooterMessage.text}</Text>
+            <Text>{cleanupUI.footerMessage.text}</Text>
           )}
         </Box>
       )}

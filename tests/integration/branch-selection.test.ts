@@ -1,4 +1,12 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeEach,
+  afterEach,
+  type MockedFunction,
+} from "vitest";
 import * as git from "../../src/git";
 import * as worktree from "../../src/worktree";
 
@@ -34,6 +42,7 @@ vi.mock("node:fs/promises", async () => {
 });
 
 import { execa } from "execa";
+const execaMock = execa as MockedFunction<typeof execa>;
 
 describe("Integration: Branch Selection to Worktree Creation", () => {
   beforeEach(() => {
@@ -48,7 +57,7 @@ describe("Integration: Branch Selection to Worktree Creation", () => {
   describe("Branch Selection Flow (T108)", () => {
     it("should complete full flow: get branches -> check worktree -> create worktree", async () => {
       // Setup: Mock git branch list
-      (execa as any).mockImplementation(
+      execaMock.mockImplementation(
         async (command: string, args?: readonly string[]) => {
           // getLocalBranches
           if (
@@ -147,7 +156,7 @@ branch refs/heads/main
 
     it("should handle existing worktree gracefully", async () => {
       // Mock worktree that already exists
-      (execa as any).mockImplementation(
+      execaMock.mockImplementation(
         async (command: string, args?: readonly string[]) => {
           if (args?.[0] === "worktree" && args[1] === "list") {
             return {
@@ -171,6 +180,7 @@ branch refs/heads/feature/test
           };
         },
       );
+      vi.spyOn(git, "getCurrentBranchName").mockResolvedValue("feature/test");
 
       // Check if worktree exists
       const existingWorktree = await worktree.worktreeExists("feature/test");
@@ -181,7 +191,7 @@ branch refs/heads/feature/test
     });
 
     it("should create worktree for local branch without existing worktree", async () => {
-      (execa as any).mockImplementation(
+      execaMock.mockImplementation(
         async (command: string, args?: readonly string[]) => {
           // No existing worktrees
           if (args?.[0] === "worktree" && args[1] === "list") {
@@ -238,7 +248,7 @@ branch refs/heads/main
 
     it("should handle branch selection errors gracefully", async () => {
       // Mock git command failure
-      (execa as any).mockRejectedValue(new Error("Git command failed"));
+      execaMock.mockRejectedValue(new Error("Git command failed"));
 
       // Should throw appropriate error
       await expect(git.getAllBranches()).rejects.toThrow(
@@ -262,7 +272,7 @@ branch refs/heads/main
 
   describe("Error Handling", () => {
     it("should handle worktree creation failure", async () => {
-      (execa as any).mockImplementation(
+      execaMock.mockImplementation(
         async (command: string, args?: readonly string[]) => {
           if (args?.[0] === "worktree" && args[1] === "add") {
             throw new Error("Worktree creation failed");
@@ -285,7 +295,7 @@ branch refs/heads/main
     });
 
     it("should handle branch listing errors", async () => {
-      (execa as any).mockRejectedValue(new Error("Permission denied"));
+      execaMock.mockRejectedValue(new Error("Permission denied"));
 
       await expect(git.getLocalBranches()).rejects.toThrow(
         "Failed to get local branches",

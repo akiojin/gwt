@@ -1,5 +1,4 @@
-import { execa } from "execa";
-import type { Options as ExecaOptions } from "execa";
+import { execa, type Options as ExecaOptions } from "execa";
 import chalk from "chalk";
 import { existsSync } from "fs";
 import {
@@ -7,14 +6,15 @@ import {
   getTerminalStreams,
   resetTerminalModes,
 } from "./utils/terminal.js";
+import { isCommandAvailable } from "./utils/command.js";
 import { findLatestClaudeSession } from "./utils/session.js";
-import { CLAUDE_PERMISSION_SKIP_ARGS } from "./shared/aiToolConstants.js";
-import {
-  resolveClaudeCommand,
-  AIToolResolutionError,
-  type ResolvedCommand,
-} from "./services/aiToolResolver.js";
 
+const CLAUDE_CLI_PACKAGE = "@anthropic-ai/claude-code@latest";
+
+/**
+ * Error wrapper used by `launchClaudeCode` to preserve the original failure
+ * while providing a user-friendly message.
+ */
 export class ClaudeError extends Error {
   constructor(
     message: string,
@@ -25,6 +25,20 @@ export class ClaudeError extends Error {
   }
 }
 
+/**
+ * Launches Claude Code in the given worktree path.
+ *
+ * This function:
+ * - validates the worktree path
+ * - normalizes launch arguments (mode/model/session/extra args)
+ * - resets terminal modes before and after the child process
+ * - auto-detects a local `claude` command and falls back to `npx` (Windows) or
+ *   `bunx` when needed
+ *
+ * @param worktreePath - Worktree directory to run Claude Code in
+ * @param options - Launch options (mode/session/model/permissions/env)
+ * @returns Captured session id when available
+ */
 export async function launchClaudeCode(
   worktreePath: string,
   options: {
@@ -38,9 +52,9 @@ export async function launchClaudeCode(
 ): Promise<{ sessionId?: string | null }> {
   const terminal = getTerminalStreams();
   const startedAt = Date.now();
-  let lastResolvedCommand: ResolvedCommand | null = null;
 
   try {
+    // Check if the worktree path exists
     if (!existsSync(worktreePath)) {
       throw new Error(`Worktree path does not exist: ${worktreePath}`);
     }
@@ -65,6 +79,7 @@ export async function launchClaudeCode(
       Boolean(resumeSessionId) &&
       (options.mode === "continue" || options.mode === "resume");
 
+    // Handle execution mode
     switch (options.mode) {
       case "continue":
         if (resumeSessionId) {
@@ -81,6 +96,8 @@ export async function launchClaudeCode(
         }
         break;
       case "resume":
+        // TODO: Implement conversation selection with Ink UI
+        // Legacy UI removed - this feature needs to be reimplemented
         console.log(
           chalk.yellow(
             "   ⚠️  Resume conversation feature temporarily disabled (Ink UI migration)",
@@ -90,6 +107,53 @@ export async function launchClaudeCode(
           chalk.cyan("   ℹ️  Using default Claude Code resume behavior"),
         );
 
+        // Fallback to default Claude Code resume
+        /*
+        try {
+          const { selectClaudeConversation } = await import("./ui/legacy/prompts.js");
+          const selectedConversation =
+            await selectClaudeConversation(worktreePath);
+
+          if (selectedConversation) {
+            console.log(
+              chalk.green(`   ✨ Resuming: ${selectedConversation.title}`),
+            );
+
+            // Use specific session ID if available
+            if (selectedConversation.sessionId) {
+              args.push("--resume", selectedConversation.sessionId);
+              console.log(
+                chalk.cyan(
+                  `   🆔 Using session ID: ${selectedConversation.sessionId}`,
+                ),
+              );
+            } else {
+              // Fallback: try to use filename as session identifier
+              const fileName = selectedConversation.id;
+              console.log(
+                chalk.yellow(
+                  `   ⚠️  No session ID found, trying filename: ${fileName}`,
+                ),
+              );
+              args.push("--resume", fileName);
+            }
+          } else {
+            // User cancelled - return without launching Claude
+            console.log(
+              chalk.gray("   ↩️  Selection cancelled, returning to menu"),
+            );
+            return;
+          }
+        } catch (error) {
+          console.warn(
+            chalk.yellow(
+              "   ⚠️  Failed to load conversation history, using standard resume",
+            ),
+          );
+          args.push("-r");
+        }
+        */
+        // Use standard Claude Code resume for now
         if (resumeSessionId) {
           args.push("--resume", resumeSessionId);
           console.log(
@@ -105,6 +169,7 @@ export async function launchClaudeCode(
         break;
     }
 
+    // Detect root user for Docker/sandbox environments
     let isRoot = false;
     try {
       isRoot = process.getuid ? process.getuid() === 0 : false;
@@ -112,10 +177,12 @@ export async function launchClaudeCode(
       // process.getuid() not available (e.g., Windows) - default to false
     }
 
+    // Handle skip permissions
     if (options.skipPermissions) {
-      args.push(...CLAUDE_PERMISSION_SKIP_ARGS);
+      args.push("--dangerously-skip-permissions");
       console.log(chalk.yellow("   ⚠️  Skipping permissions check"));
 
+      // Show additional warning for root users in Docker/sandbox environments
       if (isRoot) {
         console.log(
           chalk.yellow(
@@ -124,7 +191,7 @@ export async function launchClaudeCode(
         );
       }
     }
-
+    // Append any pass-through arguments after our flags
     if (options.extraArgs && options.extraArgs.length > 0) {
       args.push(...options.extraArgs);
     }
@@ -147,15 +214,60 @@ export async function launchClaudeCode(
 
     const childStdio = createChildStdio();
 
-    try {
-      lastResolvedCommand = await resolveClaudeCommand({ args });
+    // Auto-detect locally installed claude command
+    const hasLocalClaude = await isClaudeCommandAvailable();
+    const hasNpx =
+      process.platform === "win32" ? await isNpxCommandAvailable() : false;
 
-      if (lastResolvedCommand.usesFallback) {
+    const execInteractive = async (
+      file: string,
+      fileArgs: string[],
+      execOptions: Omit<ExecaOptions, "shell">,
+    ) => {
+      if (process.platform !== "win32") {
+        await execa(file, fileArgs, { ...execOptions, shell: true });
+        return;
+      }
+
+      try {
+        await execa(file, fileArgs, { ...execOptions, shell: false });
+        return;
+      } catch (error: unknown) {
+        const err = error as NodeJS.ErrnoException;
+        if (err?.code === "ENOENT" || err?.code === "EINVAL") {
+          await execa(file, fileArgs, { ...execOptions, shell: true });
+          return;
+        }
+        throw error;
+      }
+    };
+
+    try {
+      if (hasLocalClaude) {
         console.log(
-          chalk.cyan(
-            "   🔄 Falling back to bunx @anthropic-ai/claude-code@latest",
-          ),
+          chalk.green("   ✨ Using locally installed claude command"),
         );
+        await execInteractive("claude", args, {
+          cwd: worktreePath,
+          stdin: childStdio.stdin,
+          stdout: childStdio.stdout,
+          stderr: childStdio.stderr,
+          env: launchEnv,
+        });
+      } else {
+        if (hasNpx) {
+          console.log(
+            chalk.cyan(
+              "   🔄 Falling back to npx @anthropic-ai/claude-code@latest",
+            ),
+          );
+        } else {
+          console.log(
+            chalk.cyan(
+              "   🔄 Falling back to bunx @anthropic-ai/claude-code@latest",
+            ),
+          );
+        }
         console.log(
           chalk.yellow(
             "   💡 Recommended: Install Claude Code via official method for faster startup",
@@ -170,32 +282,36 @@ export async function launchClaudeCode(
           ),
         );
         console.log(
-          chalk.yellow("      Windows: irm https://claude.ai/install.ps1 | iex"),
+          chalk.yellow(
+            "      Windows: irm https://claude.ai/install.ps1 | iex",
+          ),
         );
         console.log("");
         await new Promise((resolve) => setTimeout(resolve, 2000));
-      } else {
-        console.log(chalk.green("   ✨ Using locally installed claude command"));
+        if (hasNpx) {
+          await execInteractive("npx", ["-y", CLAUDE_CLI_PACKAGE, ...args], {
+            cwd: worktreePath,
+            stdin: childStdio.stdin,
+            stdout: childStdio.stdout,
+            stderr: childStdio.stderr,
+            env: launchEnv,
+          });
+        } else {
+          await execInteractive("bunx", [CLAUDE_CLI_PACKAGE, ...args], {
+            cwd: worktreePath,
+            stdin: childStdio.stdin,
+            stdout: childStdio.stdout,
+            stderr: childStdio.stderr,
+            env: launchEnv,
+          });
+        }
       }
-
-      const execaOptions: ExecaOptions = {
-        cwd: worktreePath,
-        shell: true,
-        stdin: childStdio.stdin as ExecaOptions["stdin"],
-        stdout: childStdio.stdout as ExecaOptions["stdout"],
-        stderr: childStdio.stderr as ExecaOptions["stderr"],
-        env: launchEnv,
-      };
-
-      await execa(
-        lastResolvedCommand.command,
-        lastResolvedCommand.args,
-        execaOptions,
-      );
     } finally {
       childStdio.cleanup();
     }
 
+    // File-based session detection only - no stdout capture
+    // Use only findLatestClaudeSession with short timeout, skip sessionProbe to avoid hanging
     let capturedSessionId: string | null = null;
     const finishedAt = Date.now();
     try {
@@ -206,6 +322,7 @@ export async function launchClaudeCode(
         windowMs: 10 * 60 * 1000,
       });
       const detectedSessionId = latest?.id ?? null;
+      // When we explicitly resumed a specific session, keep that ID as the source of truth.
       capturedSessionId = usedExplicitSessionId
         ? resumeSessionId
         : detectedSessionId;
@@ -220,32 +337,34 @@ export async function launchClaudeCode(
       );
     } else {
       console.log(
-        chalk.yellow("\n   ℹ️  Could not determine Claude session ID automatically."),
+        chalk.yellow(
+          "\n   ℹ️  Could not determine Claude session ID automatically.",
+        ),
       );
     }
 
     return capturedSessionId ? { sessionId: capturedSessionId } : {};
   } catch (error: unknown) {
-    if (error instanceof AIToolResolutionError) {
-      throw new ClaudeError(error.message, error);
-    }
-
+    const hasLocalClaude = await isClaudeCommandAvailable();
     let errorMessage: string;
-    const errorWithCode = error as NodeJS.ErrnoException;
+    const err = error as NodeJS.ErrnoException;
 
-    if (errorWithCode?.code === "ENOENT") {
-      errorMessage = lastResolvedCommand?.usesFallback
-        ? "bunx command not found. Please ensure Bun is installed so Claude Code can run via bunx."
-        : "claude command not found. Please ensure Claude Code is properly installed.";
+    if (err.code === "ENOENT") {
+      if (hasLocalClaude) {
+        errorMessage =
+          "claude command not found. Please ensure Claude Code is properly installed.";
+      } else {
+        errorMessage =
+          "bunx command not found. Please ensure Bun is installed so Claude Code can run via bunx.";
+      }
     } else {
-      const fallbackMessage =
-        error instanceof Error ? error.message : "Unknown error";
-      errorMessage = `Failed to launch Claude Code: ${fallbackMessage}`;
+      const details = error instanceof Error ? error.message : String(error);
+      errorMessage = `Failed to launch Claude Code: ${details || "Unknown error"}`;
     }
 
     if (process.platform === "win32") {
       console.error(chalk.red("\n💡 Windows troubleshooting tips:"));
-      if (lastResolvedCommand && !lastResolvedCommand.usesFallback) {
+      if (hasLocalClaude) {
         console.error(
           chalk.yellow(
             "   1. Confirm that Claude Code is installed and the 'claude' command is on PATH",
@@ -256,7 +375,9 @@ export async function launchClaudeCode(
         );
       } else {
         console.error(
-          chalk.yellow("   1. Confirm that Bun is installed and bunx is available"),
+          chalk.yellow(
+            "   1. Confirm that Bun is installed and bunx is available",
+          ),
         );
         console.error(
           chalk.yellow(
@@ -276,4 +397,31 @@ export async function launchClaudeCode(
   }
 }
 
-export { isClaudeCodeAvailable } from "./services/aiToolResolver.js";
+async function isClaudeCommandAvailable(): Promise<boolean> {
+  return isCommandAvailable("claude");
+}
+
+async function isNpxCommandAvailable(): Promise<boolean> {
+  return isCommandAvailable("npx");
+}
+
+/**
+ * Checks whether Claude Code is available via `bunx` in the current environment.
+ */
+export async function isClaudeCodeAvailable(): Promise<boolean> {
+  try {
+    await execa("bunx", [CLAUDE_CLI_PACKAGE, "--version"], { shell: true });
+    return true;
+  } catch (error: unknown) {
+    const err = error as NodeJS.ErrnoException;
+    if (err.code === "ENOENT") {
+      console.error(chalk.yellow("\n⚠️  bunx command not found"));
+      console.error(
+        chalk.gray(
+          "   Install Bun and confirm that bunx is available before continuing",
+        ),
+      );
+    }
+    return false;
+  }
+}

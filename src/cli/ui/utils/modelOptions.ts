@@ -2,6 +2,7 @@ import type { AITool, InferenceLevel, ModelOption } from "../types.js";
 
 const CODEX_BASE_LEVELS: InferenceLevel[] = ["high", "medium", "low"];
 const CODEX_MAX_LEVELS: InferenceLevel[] = ["xhigh", "high", "medium", "low"];
+const CLAUDE_MODEL_ALIASES = new Set(["opus", "sonnet", "haiku"]);
 
 const MODEL_OPTIONS: Record<string, ModelOption[]> = {
   "claude-code": [
@@ -129,4 +130,22 @@ export function getDefaultInferenceForModel(
   if (model.defaultInference) return model.defaultInference;
   const levels = getInferenceLevelsForModel(model);
   return levels[0];
+}
+
+/**
+ * Normalize a model identifier for consistent display and persistence.
+ */
+export function normalizeModelId(
+  tool: AITool,
+  model?: string | null,
+): string | null {
+  if (model === null || model === undefined) return model ?? null;
+  const trimmed = model.trim();
+  if (!trimmed) return null;
+  if (tool === "claude-code") {
+    const lower = trimmed.toLowerCase();
+    if (lower === "opuss") return "opus";
+    if (CLAUDE_MODEL_ALIASES.has(lower)) return lower;
+  }
+  return trimmed;
 }
