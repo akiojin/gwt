@@ -43,6 +43,14 @@
 * update default Claude Code model to Opus 4.5 ([1dd909e](https://github.com/akiojin/gwt/commit/1dd909ed87a55ce3bb796deb0431d0027571dae2))
 * update Opus model version to 4.5 ([307faeb](https://github.com/akiojin/gwt/commit/307faeb66ebac0ca89b01c07ee19d213797c4d5c))
 
+## [4.2.0](https://github.com/akiojin/gwt/compare/v4.1.1...v4.2.0) (2025-12-20)
+
+
+### Features
+
+* add post-session git prompts ([bc24450](https://github.com/akiojin/gwt/commit/bc244506559fc0676f6740fa3edf7912c0f02af7))
+* add post-session push prompt ([89b2839](https://github.com/akiojin/gwt/commit/89b2839fe22177390c98f97bc10063f0602877c0))
+
 ## [4.1.1](https://github.com/akiojin/gwt/compare/v4.1.0...v4.1.1) (2025-12-19)
 
 
