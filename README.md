@@ -385,8 +385,33 @@ We welcome contributions! Please read our contributing guidelines:
 - **Issues**: GitHub Issues for bug reports and feature requests
 - **Discussions**: GitHub Discussions for questions and community support
 
+## MCP Configuration
+
+This repo includes `.mcp.json` for local MCP server definitions.
+
+- **External endpoints**: `context7` uses an external SSE endpoint. Review trust, security, and privacy requirements before enabling it in your environment.
+- **Data handling**: MCP clients may send prompts/queries (and possibly repository context depending on your tooling). Confirm compliance/DPA needs and disable the endpoint if external sharing is not permitted.
+- **Overrides**: If your MCP client supports environment expansion, you can override or disable external endpoints via env vars:
+  - `MCP_CONTEXT7_URL` (default: `https://mcp.context7.com/sse`)
+  - `MCP_CONTEXT7_ENABLED` (default: `true`)
+  - `SERENA_MCP_REF` (default: pinned commit in `.mcp.json`)
+- **Local config**: If your client does not expand env vars, generate a local config with `envsubst` and point your client to it.
+
 ### Icon Legend
 
-- First 3 columns: ⚡(main/develop) / ✨(feature) / 🐛(bugfix) / 🔥(hotfix) / 📦(release) / 📌(other), 🟢=has worktree, 🔴=has worktree (inaccessible), ✏️=uncommitted changes, ⚠️=warning, ⭐=current branch
-- Location column: blank=local exists, `☁`=remote only
-- Selection column: In color environments, selection is shown with `>` prefix (with space) instead of background inversion
+- **Branch Type (first 3 columns)**:
+  - ⚡ main/develop
+  - ✨ feature
+  - 🐛 bugfix
+  - 🔥 hotfix
+  - 📦 release
+  - 📌 other
+- **Worktree Status**:
+  - 🟢 has worktree
+  - 🔴 has worktree (inaccessible)
+- **Branch Status**:
+  - ✏️ uncommitted changes
+  - ⚠️ warning
+  - ⭐ current branch
+- **Location column**: blank = local exists, `☁` = remote only
+- **Selection column**: in color environments, selection is shown with `>` prefix (with space) instead of background inversion

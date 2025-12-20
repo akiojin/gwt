@@ -12,6 +12,9 @@ interface TestItem {
   value: string;
 }
 
+const delay = (ms = 0): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
 describe("Select", () => {
   const mockItems: TestItem[] = [
     { label: "Option 1", value: "opt1" },
@@ -279,6 +282,48 @@ describe("Select", () => {
 
       // None of these should trigger selection
       expect(onSelect).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Space/Escape handlers', () => {
+    it('should call onSpace with the currently highlighted item', async () => {
+      const onSelect = vi.fn();
+      const onSpace = vi.fn();
+      const { stdin } = render(
+        <Select items={mockItems} onSelect={onSelect} onSpace={onSpace} />
+      );
+
+      stdin.write(' ');
+      await delay(10);
+
+      expect(onSpace).toHaveBeenCalledTimes(1);
+      expect(onSpace).toHaveBeenCalledWith(mockItems[0]);
+    });
+
+    it('should not trigger onSpace when disabled', async () => {
+      const onSelect = vi.fn();
+      const onSpace = vi.fn();
+      const { stdin } = render(
+        <Select items={mockItems} onSelect={onSelect} onSpace={onSpace} disabled />
+      );
+
+      stdin.write(' ');
+      await delay(10);
+
+      expect(onSpace).not.toHaveBeenCalled();
+    });
+
+    it('should call onEscape when escape key is pressed', async () => {
+      const onSelect = vi.fn();
+      const onEscape = vi.fn();
+      const { stdin } = render(
+        <Select items={mockItems} onSelect={onSelect} onEscape={onEscape} />
+      );
+
+      stdin.write('\u001B');
+      await delay(30);
+
+      expect(onEscape).toHaveBeenCalledTimes(1);
     });
   });
 });

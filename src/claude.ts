@@ -407,6 +407,8 @@ async function isNpxCommandAvailable(): Promise<boolean> {
 
 /**
  * Checks whether Claude Code is available via `bunx` in the current environment.
+ *
+ * @returns true if Claude Code can be resolved via bunx, false otherwise.
  */
 export async function isClaudeCodeAvailable(): Promise<boolean> {
   try {

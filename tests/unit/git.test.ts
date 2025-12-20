@@ -1,3 +1,6 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import * as git from "../../src/git";
 import { localBranches, remoteBranches } from "../fixtures/branches";
@@ -876,9 +879,6 @@ describe("git.ts - Branch Operations", () => {
 
 describe("git.ts - Gitignore Operations", () => {
   describe("ensureGitignoreEntry", () => {
-    const fs = require("node:fs/promises");
-    const path = require("node:path");
-    const os = require("node:os");
     let tempDir: string;
 
     beforeEach(async () => {
