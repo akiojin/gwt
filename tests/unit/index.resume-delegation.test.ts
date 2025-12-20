@@ -22,6 +22,11 @@ const {
   saveSessionMock,
   loadSessionMock,
   findLatestCodexSessionMock,
+  hasUncommittedChangesMock,
+  hasUnpushedCommitsMock,
+  getUncommittedChangesCountMock,
+  getUnpushedCommitsCountMock,
+  pushBranchToRemoteMock,
 } = vi.hoisted(() => ({
   ensureWorktreeMock: vi.fn(async () => "/repo/worktrees/feature/resume"),
   fetchAllRemotesMock: vi.fn(async () => undefined),
@@ -66,12 +71,18 @@ const {
     ],
   })),
   findLatestCodexSessionMock: vi.fn(async () => null),
+  hasUncommittedChangesMock: vi.fn(async () => false),
+  hasUnpushedCommitsMock: vi.fn(async () => false),
+  getUncommittedChangesCountMock: vi.fn(async () => 0),
+  getUnpushedCommitsCountMock: vi.fn(async () => 0),
+  pushBranchToRemoteMock: vi.fn(async () => undefined),
 }));
 
 const waitForUserAcknowledgementMock = vi.hoisted(() =>
   vi.fn<() => Promise<void>>(),
 );
 
+const confirmYesNoMock = vi.hoisted(() => vi.fn<() => Promise<boolean>>());
 vi.mock("../../src/git.js", async () => {
   const actual =
     await vi.importActual<typeof import("../../src/git.js")>(
@@ -84,6 +95,11 @@ vi.mock("../../src/git.js", async () => {
     pullFastForward: pullFastForwardMock,
     getBranchDivergenceStatuses: getBranchDivergenceStatusesMock,
     branchExists: vi.fn(async () => true),
+    hasUncommittedChanges: hasUncommittedChangesMock,
+    hasUnpushedCommits: hasUnpushedCommitsMock,
+    getUncommittedChangesCount: getUncommittedChangesCountMock,
+    getUnpushedCommitsCount: getUnpushedCommitsCountMock,
+    pushBranchToRemote: pushBranchToRemoteMock,
   };
 });
 
@@ -163,6 +179,15 @@ vi.mock("../../src/utils/terminal.js", async () => {
   };
 });
 
+vi.mock("../../src/utils/prompt.js", async () => {
+  const actual = await vi.importActual<
+    typeof import("../../src/utils/prompt.js")
+  >("../../src/utils/prompt.js");
+  return {
+    ...actual,
+    confirmYesNo: confirmYesNoMock,
+  };
+});
 // Import after mocks are set up
 import { handleAIToolWorkflow } from "../../src/index.js";
 
@@ -180,8 +205,20 @@ beforeEach(() => {
   saveSessionMock.mockClear();
   loadSessionMock.mockClear();
   findLatestCodexSessionMock.mockClear();
+  hasUncommittedChangesMock.mockClear();
+  hasUnpushedCommitsMock.mockClear();
+  getUncommittedChangesCountMock.mockClear();
+  getUnpushedCommitsCountMock.mockClear();
+  pushBranchToRemoteMock.mockClear();
   waitForUserAcknowledgementMock.mockClear();
   waitForUserAcknowledgementMock.mockResolvedValue(undefined);
+  confirmYesNoMock.mockClear();
+  confirmYesNoMock.mockResolvedValue(false);
+  hasUncommittedChangesMock.mockResolvedValue(false);
+  hasUnpushedCommitsMock.mockResolvedValue(false);
+  getUncommittedChangesCountMock.mockResolvedValue(0);
+  getUnpushedCommitsCountMock.mockResolvedValue(0);
+  pushBranchToRemoteMock.mockResolvedValue(undefined);
 });
 
 describe("handleAIToolWorkflow - Resume delegation", () => {

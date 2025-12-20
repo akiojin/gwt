@@ -120,7 +120,7 @@
     "vitest": "^4.0.8"
   },
   "lint-staged": {
-    "*.md": "bunx --bun markdownlint-cli -c .markdownlint.json",
+    "**/*.md": "bunx --bun markdownlint-cli -c .markdownlint.json --ignore CHANGELOG.md --ignore node_modules",
     "*.{ts,tsx}": [
       "bunx eslint --max-warnings=0 --no-warn-ignored",
       "bunx prettier --check"
