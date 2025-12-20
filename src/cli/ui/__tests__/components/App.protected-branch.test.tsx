@@ -103,6 +103,7 @@ describe("App protected branch handling", () => {
     branchListProps.length = 0;
     branchActionProps.length = 0;
     aiToolProps.length = 0;
+    branchQuickStartProps.length = 0;
 
     useGitDataMock.mockReset();
     switchToProtectedBranchMock.mockReset();
@@ -194,7 +195,6 @@ describe("App protected branch handling", () => {
     await act(async () => {
       actionProps?.onUseExisting();
       await Promise.resolve();
-      await Promise.resolve();
     });
 
     expect(switchToProtectedBranchMock).toHaveBeenCalledWith({
@@ -206,6 +206,7 @@ describe("App protected branch handling", () => {
     expect(navigateToMock).toHaveBeenCalledWith("branch-action-selector");
     // When branchQuickStart is empty, navigates to ai-tool-selector instead of branch-quick-start
     // So AIToolSelectorScreen should be rendered, not BranchQuickStartScreen
+    expect(branchQuickStartProps).toHaveLength(0);
     expect(aiToolProps).not.toHaveLength(0);
   });
 });

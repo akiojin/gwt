@@ -251,6 +251,7 @@ describe("App", () => {
   });
 
   describe("BranchActionSelectorScreen integration", () => {
+    // TODO: replace placeholder assertions with real integration checks.
     it("should show BranchActionSelectorScreen after branch selection", () => {
       useGitDataMock.mockImplementation(() => ({
         branches: mockBranches,
@@ -263,7 +264,7 @@ describe("App", () => {
       const onExit = vi.fn();
       const { container } = render(<App onExit={onExit} />);
 
-      // After implementation, should verify BranchActionSelectorScreen appears
+      // TODO: verify BranchActionSelectorScreen appears
       expect(container).toBeDefined();
     });
 
@@ -279,7 +280,7 @@ describe("App", () => {
       const onExit = vi.fn();
       const { container } = render(<App onExit={onExit} />);
 
-      // After implementation, should verify navigation to AIToolSelectorScreen
+      // TODO: verify navigation to AIToolSelectorScreen
       expect(container).toBeDefined();
     });
 
@@ -295,7 +296,7 @@ describe("App", () => {
       const onExit = vi.fn();
       const { container } = render(<App onExit={onExit} />);
 
-      // After implementation, should verify navigation to BranchCreatorScreen
+      // TODO: verify navigation to BranchCreatorScreen
       expect(container).toBeDefined();
     });
   });

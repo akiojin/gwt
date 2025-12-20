@@ -51,7 +51,7 @@ jobs:
 
           if [ -n "$existing_pr" ]; then
             echo "PR #$existing_pr already exists"
-            echo "PR_NUMBER=$existing_pr" >> $GITHUB_ENV
+            echo "PR_NUMBER=$existing_pr" >> "$GITHUB_ENV"
           else
             # 新しいPRを作成
             pr_url=$(gh pr create \
@@ -61,5 +61,5 @@ jobs:
               --body "Automated release PR from develop to main")
             pr_number=$(echo "$pr_url" | grep -oE '[0-9]+$')
             echo "Created PR #$pr_number"
-            echo "PR_NUMBER=$pr_number" >> $GITHUB_ENV
+            echo "PR_NUMBER=$pr_number" >> "$GITHUB_ENV"
           fi
