@@ -1,23 +1,31 @@
 import React, { useState, useEffect } from "react";
-import { Box, Text, useInput } from "ink";
+import { Box, Text } from "ink";
 import { Header } from "../parts/Header.js";
 import { Footer } from "../parts/Footer.js";
 import { Select } from "../common/Select.js";
+import { useAppInput } from "../../hooks/useAppInput.js";
 import { useTerminalSize } from "../../hooks/useTerminalSize.js";
 import { getAllTools } from "../../../../config/tools.js";
 import type { AIToolConfig } from "../../../../types/tools.js";
 import type { AITool } from "../../types.js";
 
+/**
+ * Renderable item for the AI tool selector list.
+ */
 export interface AIToolItem {
   label: string;
   value: AITool;
   description: string;
 }
 
+/**
+ * Props for `AIToolSelectorScreen`.
+ */
 export interface AIToolSelectorScreenProps {
   onBack: () => void;
   onSelect: (tool: AITool) => void;
   version?: string | null;
+  initialToolId?: AITool | null;
 }
 
 /**
@@ -30,10 +38,12 @@ export function AIToolSelectorScreen({
   onBack,
   onSelect,
   version,
+  initialToolId,
 }: AIToolSelectorScreenProps) {
   const { rows } = useTerminalSize();
   const [toolItems, setToolItems] = useState<AIToolItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [selectedIndex, setSelectedIndex] = useState<number>(0);
 
   // Load tools from getAllTools()
   useEffect(() => {
@@ -61,6 +71,13 @@ export function AIToolSelectorScreen({
         });
 
         setToolItems(items);
+
+        // Decide initial cursor position based on last used tool
+        const idx =
+          initialToolId && items.length > 0
+            ? items.findIndex((item) => item.value === initialToolId)
+            : 0;
+        setSelectedIndex(idx >= 0 ? idx : 0);
       } catch (error) {
         // If loading fails, show error in console but don't crash
         console.error("Failed to load tools:", error);
@@ -72,11 +89,21 @@ export function AIToolSelectorScreen({
     };
 
     loadTools();
-  }, []);
+  }, [initialToolId]);
+
+  // Update selection when props or items change
+  useEffect(() => {
+    if (isLoading || toolItems.length === 0) return;
+    const idx =
+      initialToolId && toolItems.length > 0
+        ? toolItems.findIndex((item) => item.value === initialToolId)
+        : 0;
+    setSelectedIndex(idx >= 0 ? idx : 0);
+  }, [initialToolId, toolItems, isLoading]);
 
   // Handle keyboard input
   // Note: Select component handles Enter and arrow keys
-  useInput((input, key) => {
+  useAppInput((input, key) => {
     if (key.escape) {
       onBack();
     }
@@ -110,7 +137,12 @@ export function AIToolSelectorScreen({
             No tools available. Please check your configuration.
           </Text>
         ) : (
-          <Select items={toolItems} onSelect={handleSelect} />
+          <Select
+            items={toolItems}
+            onSelect={handleSelect}
+            selectedIndex={selectedIndex}
+            onSelectedIndexChange={setSelectedIndex}
+          />
         )}
       </Box>
 

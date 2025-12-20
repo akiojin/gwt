@@ -20,27 +20,42 @@ const branchIcons: Record<BranchType, string> = {
 
 const worktreeIcons: Record<Exclude<WorktreeStatus, undefined>, string> = {
   active: "🟢",
-  inaccessible: "🟠",
+  inaccessible: "🔴",
 };
 
 const changeIcons = {
-  current: "⭐",
-  hasChanges: "✏️",
-  unpushed: "⬆️",
-  openPR: "🔀",
+  current: "👉",
+  hasChanges: "💾",
+  unpushed: "📤",
+  openPR: "🔃",
   mergedPR: "✅",
   warning: "⚠️",
 };
 
 const remoteIcon = "☁";
 
+// Sync status icons
+const syncIcons = {
+  upToDate: "✓",
+  ahead: "↑",
+  behind: "↓",
+  diverged: "↕",
+  none: "-",
+  remoteOnly: "☁",
+};
+
+// Remote column markers
+const remoteMarkers = {
+  tracked: "🔗", // ローカル+同名リモートあり
+  localOnly: "💻", // ローカルのみ（リモートなし）
+  remoteOnly: "☁️", // リモートのみ（ローカルなし）
+};
+
 // Emoji width varies by terminal. Provide explicit minimum widths so we never
 // underestimate and accidentally push the row past the terminal columns.
 const iconWidthOverrides: Record<string, number> = {
   // Remote icon
   [remoteIcon]: 1,
-  // Unpushed icon
-  "⬆": 1,
   // Branch type icons
   "⚡": 1,
   "✨": 1,
@@ -49,14 +64,24 @@ const iconWidthOverrides: Record<string, number> = {
   "🚀": 1,
   "📌": 1,
   // Worktree status icons
-  "🟢": 1,
-  "🟠": 1,
+  "🟢": 2,
+  "⚪": 2,
+  "🔴": 2,
   // Change status icons
-  "⭐": 1,
-  "✏️": 1,
-  "🔀": 1,
+  "👉": 1,
+  "💾": 1,
+  "📤": 1,
+  "🔃": 1,
   "✅": 1,
-  "⚠️": 1,
+  "⚠️": 2,
+  "⚠": 1,
+  "🛡": 2,
+  "☑": 2,
+  "☐": 2,
+  // Remote markers
+  "🔗": 1,
+  "💻": 1,
+  "☁️": 1,
 };
 
 const getIconWidth = (icon: string): number => {
@@ -67,6 +92,37 @@ const getIconWidth = (icon: string): number => {
 
 export interface FormatOptions {
   hasChanges?: boolean;
+}
+
+function mapToolLabel(toolId: string, toolLabel?: string): string {
+  if (toolId === "claude-code") return "Claude";
+  if (toolId === "codex-cli") return "Codex";
+  if (toolId === "gemini-cli") return "Gemini";
+  if (toolLabel) return toolLabel;
+  return "Custom";
+}
+
+function formatTimestamp(ts: number): string {
+  const date = new Date(ts);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  return `${year}-${month}-${day} ${hours}:${minutes}`;
+}
+
+function buildLastToolUsageLabel(
+  usage?: BranchInfo["lastToolUsage"] | null,
+): string | null {
+  if (!usage) return null;
+  const toolText = mapToolLabel(usage.toolId, usage.toolLabel);
+  const timestamp = usage.timestamp ? formatTimestamp(usage.timestamp) : null;
+  const parts = [toolText];
+  if (timestamp) {
+    parts.push(timestamp);
+  }
+  return parts.join(" | ");
 }
 
 /**
@@ -122,17 +178,81 @@ export function formatBranchItem(
     changesIcon = " ".repeat(COLUMN_WIDTH);
   }
 
-  // Column 4: Remote icon
-  let remoteIconStr: string;
+  // Column 4: Remote status (✓ for tracked, L for local-only, R for remote-only)
+  let remoteStatusStr: string;
   if (branch.type === "remote") {
-    remoteIconStr = padIcon(remoteIcon);
+    // リモートのみのブランチ
+    remoteStatusStr = padIcon(remoteMarkers.remoteOnly);
+  } else if (branch.hasRemoteCounterpart) {
+    // ローカルブランチで同名リモートあり
+    remoteStatusStr = padIcon(remoteMarkers.tracked);
   } else {
-    remoteIconStr = " ".repeat(COLUMN_WIDTH);
+    // ローカルブランチでリモートなし
+    remoteStatusStr = padIcon(remoteMarkers.localOnly);
+  }
+
+  // Column 5: Sync status (=, ↑N, ↓N, ↕, -)
+  // 5文字固定幅（アイコン1文字 + 数字最大4桁）、9999超は「9999+」表示
+  const SYNC_COLUMN_WIDTH = 6; // アイコン1 + 数字4 + スペース1
+
+  // 数字を4桁以内にフォーマット（9999超は9999+）
+  const formatSyncNumber = (n: number): string => {
+    if (n > 9999) return "9999+";
+    return String(n);
+  };
+
+  // Sync列を固定幅でパディング
+  const padSyncColumn = (content: string): string => {
+    const width = stringWidth(content);
+    const padding = Math.max(0, SYNC_COLUMN_WIDTH - width);
+    return content + " ".repeat(padding);
+  };
+
+  let syncStatusStr: string;
+  if (branch.type === "remote") {
+    // リモートのみ → 比較不可
+    syncStatusStr = padSyncColumn(syncIcons.none);
+  } else if (branch.divergence) {
+    const { ahead, behind, upToDate } = branch.divergence;
+    if (upToDate) {
+      syncStatusStr = padSyncColumn(syncIcons.upToDate);
+    } else if (ahead > 0 && behind > 0) {
+      // diverged: ↕ のみ表示（詳細は別途表示可能）
+      syncStatusStr = padSyncColumn(syncIcons.diverged);
+    } else if (ahead > 0) {
+      // ahead: ↑N の形式
+      syncStatusStr = padSyncColumn(
+        `${syncIcons.ahead}${formatSyncNumber(ahead)}`,
+      );
+    } else {
+      // behind: ↓N の形式
+      syncStatusStr = padSyncColumn(
+        `${syncIcons.behind}${formatSyncNumber(behind)}`,
+      );
+    }
+  } else {
+    // divergence情報なし
+    syncStatusStr = padSyncColumn(syncIcons.none);
+  }
+
+  // Build Local/Remote name for display
+  // ローカルブランチ: ブランチ名を表示
+  // リモートのみ: origin/xxxをフル表示
+  let displayName: string;
+  let remoteName: string | null = null;
+
+  if (branch.type === "remote") {
+    // リモートのみのブランチ: フルのリモートブランチ名を表示
+    displayName = branch.name; // origin/xxx
+    remoteName = branch.name;
+  } else {
+    // ローカルブランチ: ブランチ名を表示
+    displayName = branch.name;
   }
 
   // Build label with fixed-width columns
-  // Format: [Type][Worktree][Changes][Remote] BranchName
-  const label = `${branchTypeIcon}${worktreeIcon}${changesIcon}${remoteIconStr}${branch.name}`;
+  // Format: [Type][Worktree][Changes][Remote][Sync] DisplayName
+  const label = `${branchTypeIcon}${worktreeIcon}${changesIcon}${remoteStatusStr}${syncStatusStr}${displayName}`;
 
   // Collect icons for compatibility
   const icons: string[] = [];
@@ -162,6 +282,27 @@ export function formatBranchItem(
     icons.push(remoteIcon);
   }
 
+  // Determine sync status for BranchItem
+  let syncStatus: BranchItem["syncStatus"];
+  if (branch.type === "remote") {
+    syncStatus = "remote-only";
+  } else if (!branch.hasRemoteCounterpart) {
+    syncStatus = "no-upstream";
+  } else if (branch.divergence) {
+    const { ahead, behind, upToDate } = branch.divergence;
+    if (upToDate) {
+      syncStatus = "up-to-date";
+    } else if (ahead > 0 && behind > 0) {
+      syncStatus = "diverged";
+    } else if (ahead > 0) {
+      syncStatus = "ahead";
+    } else {
+      syncStatus = "behind";
+    }
+  } else {
+    syncStatus = "no-upstream";
+  }
+
   return {
     // Copy all properties from BranchInfo
     ...branch,
@@ -171,6 +312,10 @@ export function formatBranchItem(
     hasChanges,
     label,
     value: branch.name,
+    lastToolUsageLabel: buildLastToolUsageLabel(branch.lastToolUsage),
+    syncStatus,
+    syncInfo: undefined,
+    remoteName: remoteName ?? undefined,
   };
 }
 

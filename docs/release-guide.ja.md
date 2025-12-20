@@ -9,9 +9,9 @@ feature/* → PR → develop (自動マージ)
                             ↓
                /release (create-release.yml)
                             ↓
-               Release PR 作成 → develop へ自動マージ
+               Release PR 作成 → main へ自動マージ
                             ↓ (release.yml)
-        release-please → タグ・GitHub Release 作成 → develop → main マージ
+               タグ・GitHub Release 作成
                             ↓ (publish.yml)
             npm publish(任意) → main → develop へ自動バックマージ
 ```

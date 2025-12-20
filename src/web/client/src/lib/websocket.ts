@@ -31,6 +31,11 @@ export class PTYWebSocket {
   private ws: WebSocket | null = null;
   private handlers: WebSocketEventHandler;
   private sessionId: string;
+  private reconnectTimer: number | null = null;
+  private retryCount = 0;
+  private exitReceived = false;
+  private manualClose = false;
+  private reconnectScheduled = false;
 
   constructor(sessionId: string, handlers: WebSocketEventHandler) {
     this.sessionId = sessionId;
@@ -41,13 +46,17 @@ export class PTYWebSocket {
    * WebSocket接続を確立
    */
   public connect(): void {
+    this.clearReconnectTimer();
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const host = window.location.host;
     const url = `${protocol}//${host}/api/sessions/${this.sessionId}/terminal?sessionId=${this.sessionId}`;
-
     this.ws = new WebSocket(url);
+    this.manualClose = false;
+    this.exitReceived = false;
+    this.reconnectScheduled = false;
 
     this.ws.onopen = () => {
+      this.retryCount = 0;
       this.handlers.onOpen?.();
     };
 
@@ -63,10 +72,12 @@ export class PTYWebSocket {
     this.ws.onerror = (event) => {
       console.error("WebSocket error:", event);
       this.handlers.onError?.("WebSocket connection error");
+      this.scheduleReconnect();
     };
 
     this.ws.onclose = () => {
       this.handlers.onClose?.();
+      this.scheduleReconnect();
     };
   }
 
@@ -82,6 +93,7 @@ export class PTYWebSocket {
       }
       case "exit": {
         const exitMsg = message as ExitMessage;
+        this.exitReceived = true;
         this.handlers.onExit?.(exitMsg.data.code, exitMsg.data.signal);
         break;
       }
@@ -159,6 +171,9 @@ export class PTYWebSocket {
    * WebSocket接続を切断
    */
   public disconnect(): void {
+    this.manualClose = true;
+    this.exitReceived = true;
+    this.clearReconnectTimer();
     if (this.ws) {
       this.ws.close();
       this.ws = null;
@@ -171,4 +186,36 @@ export class PTYWebSocket {
   public isConnected(): boolean {
     return this.ws !== null && this.ws.readyState === WebSocket.OPEN;
   }
+
+  private scheduleReconnect(): void {
+    if (this.reconnectScheduled) {
+      return;
+    }
+    if (this.manualClose || this.exitReceived) {
+      return;
+    }
+    if (this.retryCount >= MAX_WEBSOCKET_RETRIES) {
+      this.handlers.onError?.("Unable to reconnect to session.");
+      return;
+    }
+
+    this.retryCount += 1;
+    const delay = Math.min(2000, this.retryCount * 500);
+    this.clearReconnectTimer();
+    this.reconnectScheduled = true;
+    this.reconnectTimer = window.setTimeout(() => {
+      this.reconnectScheduled = false;
+      this.connect();
+    }, delay);
+  }
+
+  private clearReconnectTimer(): void {
+    if (this.reconnectTimer !== null) {
+      window.clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+      this.reconnectScheduled = false;
+    }
+  }
 }
+
+const MAX_WEBSOCKET_RETRIES = 5;

@@ -38,7 +38,7 @@ describe("showVersion via CLI args", () => {
     process.argv = ["node", "index.js", "--version"];
 
     // getPackageVersion()をモック
-    const mockVersion = "1.12.3";
+    const mockVersion = "2.6.1";
     vi.spyOn(utils, "getPackageVersion").mockResolvedValue(mockVersion);
 
     // Act: main()を呼び出す

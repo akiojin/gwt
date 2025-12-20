@@ -1,6 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import path from "node:path";
 
+// Vitest shim for environments lacking vi.hoisted (e.g., bun)
+if (typeof (vi as Record<string, unknown>).hoisted !== "function") {
+  // @ts-expect-error injected shim
+  vi.hoisted = (factory: () => unknown) => factory();
+}
+
 const accessMock = vi.hoisted(() => vi.fn());
 
 vi.mock("node:fs/promises", async () => {

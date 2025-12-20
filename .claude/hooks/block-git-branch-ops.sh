@@ -17,8 +17,8 @@ is_read_only_git_branch() {
     fi
 
     # 参照系フラグのみの場合は許可
-    # 許可リスト: --list, --show-current, --all, -a, --remotes, -r, --contains, --merged, --no-merged, --points-at, --format, --sort, --abbrev
-    if echo "$branch_args" | grep -qE '^(--list|--show-current|--all|-a|--remotes|-r|--contains|--merged|--no-merged|--points-at|--format|--sort|--abbrev)'; then
+    # 許可リスト: --list, --show-current, --all, -a, --remotes, -r, --contains, --merged, --no-merged, --points-at, --format, --sort, --abbrev, -v, -vv, --verbose
+    if echo "$branch_args" | grep -qE '^(--list|--show-current|--all|-a|--remotes|-r|--contains|--merged|--no-merged|--points-at|--format|--sort|--abbrev|-v|-vv|--verbose)'; then
         return 0
     fi
 

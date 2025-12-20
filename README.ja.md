@@ -6,14 +6,14 @@ Claude Code / Codex CLI / Gemini CLI 対応の対話型Gitワークツリーマ�
 
 ## 概要
 
-`@akiojin/gwt`は、直感的なインターフェースを通じてGitワークツリー管理を革新する強力なCLIツールです。Claude Code / Codex CLI / Gemini CLI / Qwen CLI の開発ワークフローとシームレスに統合し、インテリジェントなブランチ選択、自動ワークツリー作成、包括的なプロジェクト管理機能を提供します。
+`@akiojin/gwt`は、直感的なインターフェースを通じてGitワークツリー管理を革新する強力なCLIツールです。Claude Code / Codex CLI / Gemini CLI の開発ワークフローとシームレスに統合し、インテリジェントなブランチ選択、自動ワークツリー作成、包括的なプロジェクト管理機能を提供します。
 
 ## ✨ 主要機能
 
 - 🎯 **対話型ブランチ選択**: ブランチ種別・ワークツリー・変更状態アイコンに加え配置インジケータ枠（左=L, 右=R, リモートのみ=☁）で所在を示し、リモート名の `origin/` を省いたシンプルなリストで判別しやすく、現在の選択は `>` プレフィックスで強調されるため誤操作を防止
 - 🌟 **スマートブランチ作成**: ガイド付きプロンプトと自動ベースブランチ選択でfeature、bugfix、hotfix、releaseブランチを作成
 - 🔄 **高度なワークツリー管理**: 作成、クリーンアップ、パス最適化を含む完全なライフサイクル管理
-- 🤖 **AIツール選択**: 起動時の対話型ランチャーで Claude Code / Codex CLI / Gemini CLI / Qwen CLI を選択
+- 🤖 **AIツール選択**: 起動時の対話型ランチャーで Claude Code / Codex CLI / Gemini CLI を選択
 - 🚀 **AIツール統合**: 選択したツールをワークツリーで起動（Claude Codeは権限設定・変更処理の統合あり）
 - 📊 **GitHub PR統合**: マージされたプルリクエストのブランチとワークツリーの自動クリーンアップ
 - 🛠️ **変更管理**: 開発セッション後のコミット、stash、破棄の内蔵サポート
@@ -41,6 +41,11 @@ bun add -g @akiojin/gwt
 ```bash
 bunx @akiojin/gwt
 ```
+
+> 注意（Linux）: `node-gyp` のエラー（例: `Error: not found: make`）でインストールに失敗する場合、`node-pty` などのネイティブ依存をビルドするためのツールが不足しています。`linux/arm64` や `node:* -slim` のような最小イメージで起きやすいです。
+>
+> - Debian/Ubuntu: `apt-get update && apt-get install -y build-essential`
+> - Alpine: `apk add --no-cache build-base python3`
 
 ## クイックスタート
 
@@ -72,6 +77,40 @@ gwt -v
 2. **新規ブランチ作成**: タイプ選択（feature/bugfix/hotfix/release）によるガイド付きブランチ作成
 3. **ワークツリー管理**: 既存ワークツリーの表示、オープン、削除
 4. **ブランチクリーンアップ**: マージ済みPRやベースブランチと差分がないブランチ／ワークツリーをローカルから自動削除
+
+## Web UI とカスタムAIツール
+
+### Web UI の起動
+
+```bash
+# CLI を起動します
+gwt
+
+# Web UI サーバーを起動します
+gwt serve
+# または
+bunx @akiojin/gwt serve
+```
+
+- Web UI はデフォルトで <http://localhost:3000> で利用できます
+- システムトレイ常駐は現時点では **Windows のみ対応** です（macOS/Linux では自動で無効化されます）
+- ブランチ一覧/検索/Worktree作成など、CLIと同じ体験をブラウザで提供
+- ブランチ一覧カードの「AIツールを起動」ボタンでモーダルが開き、ツール/モード/引数/同期を選んで起動
+- ブランチ詳細ページはセッションの状態確認専用（稼働中セッションのターミナルと履歴を表示）
+
+### カスタムAIツールの管理
+
+- ダッシュボード右上の **Config**（または `/config` URL）で `~/.gwt/tools.json` をGUI編集（旧 `~/.claude-worktree/tools.json` は初回起動時に自動移行）
+- 実行タイプ（path/bunx/command）、defaultArgs、modeArgs、permissionSkipArgs、envをまとめて設定
+- 変更内容はCLIと共有の `tools.json` に保存されるため、CLI/Webのどちらからでも同じツールを利用可能
+- ブランチ一覧モーダルの起動フォームでは以下を指定できます:
+  - 起動するカスタムツール（ビルトインを含む）
+  - `normal / continue / resume` モード
+  - 追加引数（スペース区切り）
+  - CLIと同等の `--dangerously-skip-permissions`（確認ダイアログ付き）
+- モーダルから直接 `git fetch --all` + `git pull --ff-only` を実行でき、CLIと同じ安全ガードで divergence を検出します。
+
+> JSON編集なしでカスタムツールを試せるため、Web UIでパラメータを調整しながらCLIにも即反映できます。
 
 ## 高度なワークフロー
 
@@ -129,10 +168,11 @@ gwt -v
 - **Node.js**（任意）: Nodeベースの開発ツール利用時は >= 18.0.0 を推奨
 - **pnpm**: >= 8.0.0（CI/CD・Docker環境用 - ハードリンクによるnode_modules効率化）
 - **Git**: ワークツリーサポート付き最新版
-- **AIツール**: 少なくともいずれかが必要（Claude Code、Codex CLI、Gemini CLI、または Qwen CLI）
+- **AIツール**: 少なくともいずれかが必要（Claude Code、Codex CLI、または Gemini CLI）
 - **GitHub CLI**: PR クリーンアップ機能に必要（オプション）
 - **Python**: >= 3.11（Spec Kit CLIに必要）
 - **uv**: Pythonパッケージマネージャー（Spec Kit CLIに必要）
+- **ビルドツール**（Linux）: ネイティブ依存がソースビルドに回る場合、`make` と C/C++ ツールチェーンが必要です（`linux/arm64` や最小Dockerイメージで起きやすい）
 
 ## Spec Kit による仕様駆動開発
 
@@ -185,7 +225,6 @@ Claude Code で以下のコマンドを実行して、仕様駆動開発を活�
 │   ├── claude.ts        # Claude Code 統合
 │   ├── codex.ts         # Codex CLI 統合
 │   ├── gemini.ts        # Gemini CLI 統合
-│   ├── qwen.ts          # Qwen CLI 統合
 │   ├── github.ts        # GitHub CLI統合
 │   ├── utils.ts         # ユーティリティ関数とエラーハンドリング
 │   └── ui/              # ユーザーインターフェースコンポーネント
@@ -284,6 +323,7 @@ bun run start
 **権限エラー**: Claude Codeが適切なディレクトリ権限を持っていることを確認  
 **Git ワークツリー競合**: クリーンアップ機能を使用して古いワークツリーを削除  
 **GitHub認証**: PRクリーンアップ機能使用前に`gh auth login`を実行  
+**node-gyp / node-pty ビルドエラー**: `Error: not found: make` の場合は `build-essential`（Debian/Ubuntu）や `build-base`（Alpine）をインストール  
 **Bunバージョン**: `bun --version`でBun >= 1.0.0を確認
 
 ### デバッグモード
@@ -320,6 +360,6 @@ MIT - 詳細はLICENSEファイルを参照
 
 ### アイコン凡例
 
-- 先頭3枠: ⚡(main/develop) / ✨(feature) / 🐛(bugfix) / 🔥(hotfix) / 📦(release) / 📌(other)、🟢=ワークツリーあり、🟠=ワークツリーあり(アクセス不可)、✏️=未コミット、⚠️=警告、⭐=現在ブランチ
+- 先頭3枠: ⚡(main/develop) / ✨(feature) / 🐛(bugfix) / 🔥(hotfix) / 📦(release) / 📌(other)、🟢=ワークツリーあり、🔴=ワークツリーあり(アクセス不可)、✏️=未コミット、⚠️=警告、⭐=現在ブランチ
 - 配置枠: 空白=ローカルが存在、`☁`=リモートのみ存在
 - 選択枠: カラー環境では背景反転を用いず `>`プレフィックス（スペース付き）で選択中を表示

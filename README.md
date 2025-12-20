@@ -6,7 +6,7 @@ Interactive Git worktree manager with AI tool selection (Claude Code / Codex CLI
 
 ## Overview
 
-`@akiojin/gwt` is a powerful CLI tool that revolutionizes Git worktree management through an intuitive interface. It seamlessly integrates with Claude Code / Codex CLI / Gemini CLI / Qwen CLI workflows, providing intelligent branch selection, automated worktree creation, and comprehensive project management capabilities.
+`@akiojin/gwt` is a powerful CLI tool that revolutionizes Git worktree management through an intuitive interface. It seamlessly integrates with Claude Code / Codex CLI / Gemini CLI workflows, providing intelligent branch selection, automated worktree creation, and comprehensive project management capabilities.
 
 ## ✨ Key Features
 
@@ -14,7 +14,7 @@ Interactive Git worktree manager with AI tool selection (Claude Code / Codex CLI
 - 🖼️ **Full-screen Layout**: Persistent header with statistics, scrollable branch list, and always-visible footer with keyboard shortcuts
 - 🌟 **Smart Branch Creation**: Create feature, bugfix, hotfix, or release branches with guided prompts and automatic base branch selection
 - 🔄 **Advanced Worktree Management**: Complete lifecycle management including creation, cleanup, and path optimization
-- 🤖 **AI Tool Selection**: Choose between Claude Code / Codex CLI / Gemini CLI / Qwen CLI through the interactive launcher
+- 🤖 **AI Tool Selection**: Choose between Claude Code / Codex CLI / Gemini CLI through the interactive launcher
 - 🚀 **AI Tool Integration**: Launch the selected tool in the worktree (Claude Code includes permission handling and post-change flow)
 - 🔒 **Worktree Command Restriction**: PreToolUse hooks enforce worktree boundaries, blocking directory navigation, branch switching, and file operations outside the worktree
 - 📊 **GitHub PR Integration**: Automatic cleanup of merged pull request branches and worktrees
@@ -43,6 +43,11 @@ Run without installation using bunx:
 ```bash
 bunx @akiojin/gwt
 ```
+
+> Note (Linux): If installation fails with a `node-gyp` error like `Error: not found: make`, you're missing build tools needed to compile native dependencies (e.g., `node-pty`). This is common on `linux/arm64` and minimal images like `node:* -slim`.
+>
+> - Debian/Ubuntu: `apt-get update && apt-get install -y build-essential`
+> - Alpine: `apk add --no-cache build-base python3`
 
 ## Quick Start
 
@@ -74,6 +79,38 @@ The tool presents an interactive interface with the following options:
 2. **Create New Branch**: Guided branch creation with type selection (feature/bugfix/hotfix/release)
 3. **Manage Worktrees**: View, open, or remove existing worktrees
 4. **Cleanup Branches**: Remove merged PR branches or branches identical to their base directly from the CLI
+
+## Web UI & Custom AI Tools
+
+### Launching the Web UI
+
+```bash
+# Start the interactive CLI:
+gwt
+
+# Start the Web UI server:
+gwt serve
+# or without global install
+bunx @akiojin/gwt serve
+```
+
+- The Web UI is available by default at <http://localhost:3000>
+- System tray integration is currently supported on **Windows only** (it is automatically disabled on macOS/Linux)
+- The branch list mirrors the CLI view, including search and worktree creation
+- Detailed branch pages let you start AI tool sessions directly from the browser
+
+### Managing Custom AI Tools
+
+- Navigate to **Config** (top-right button on the dashboard or `/config`) to view and edit `~/.gwt/tools.json` (legacy `~/.claude-worktree/tools.json` is auto-migrated on first run)
+- Add/edit tools with execution type (`path` / `bunx` / `command`), default arguments, mode-specific arguments, permission skip arguments, and environment variables
+- Changes are written to the same `tools.json` file that the CLI uses, so both channels stay in sync
+- When launching from the branch detail page you can:
+  - Select any custom tool
+  - Choose `normal` / `continue` / `resume` mode
+  - Append extra arguments
+  - Opt into the same `--dangerously-skip-permissions` flow as the CLI (with confirmation)
+
+> Tip: use the Web UI to quickly iterate on custom tool definitions, then run them from either the CLI or browser without editing JSON manually.
 
 ## Advanced Workflows
 
@@ -154,10 +191,11 @@ For technical details, see [specs/SPEC-cff08403/](specs/SPEC-cff08403/).
 - **Node.js** (optional): Recommended >= 18.0.0 when working with Node-based tooling
 - **pnpm**: >= 8.0.0 (for CI/CD and Docker environments - uses hardlinked node_modules)
 - **Git**: Latest version with worktree support
-- **AI Tool**: At least one of Claude Code, Codex CLI, Gemini CLI, or Qwen CLI should be available
+- **AI Tool**: At least one of Claude Code, Codex CLI, or Gemini CLI should be available
 - **GitHub CLI**: Required for PR cleanup features (optional)
 - **Python**: >= 3.11 (for Spec Kit CLI)
 - **uv**: Python package manager (for Spec Kit CLI)
+- **Build tools** (Linux): `make` + a C/C++ toolchain may be required when native dependencies are built from source (common on `linux/arm64` and minimal Docker images)
 
 ## Spec-Driven Development with Spec Kit
 
@@ -210,7 +248,6 @@ For more details, see the [Spec Kit documentation](https://github.com/akiojin/sp
 │   ├── claude.ts        # Claude Code integration
 │   ├── codex.ts         # Codex CLI integration
 │   ├── gemini.ts        # Gemini CLI integration
-│   ├── qwen.ts          # Qwen CLI integration
 │   ├── github.ts        # GitHub CLI integration
 │   ├── utils.ts         # Utility functions and error handling
 │   └── ui/              # User interface components
@@ -347,3 +384,9 @@ We welcome contributions! Please read our contributing guidelines:
 - **Documentation**: This README and inline code documentation
 - **Issues**: GitHub Issues for bug reports and feature requests
 - **Discussions**: GitHub Discussions for questions and community support
+
+### Icon Legend
+
+- First 3 columns: ⚡(main/develop) / ✨(feature) / 🐛(bugfix) / 🔥(hotfix) / 📦(release) / 📌(other), 🟢=has worktree, 🔴=has worktree (inaccessible), ✏️=uncommitted changes, ⚠️=warning, ⭐=current branch
+- Location column: blank=local exists, `☁`=remote only
+- Selection column: In color environments, selection is shown with `>` prefix (with space) instead of background inversion

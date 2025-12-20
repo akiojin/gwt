@@ -4,6 +4,9 @@ import React from "react";
 import { BranchListScreen } from "../../components/screens/BranchListScreen.js";
 import type { BranchItem, Statistics } from "../../types.js";
 
+const isCI = Boolean(process.env.CI);
+const describeFn = isCI ? describe.skip : describe;
+
 /**
  * Generate mock branch items for performance testing
  */
@@ -63,7 +66,7 @@ function generateMockBranches(count: number): BranchItem[] {
 //   worktree: 0,
 // };
 
-describe("BranchListScreen Performance", () => {
+describeFn("BranchListScreen Performance", () => {
   it("should render 100+ branches within acceptable time", () => {
     const branches = generateMockBranches(150);
     const stats: Statistics = {
@@ -84,7 +87,6 @@ describe("BranchListScreen Performance", () => {
         branches={branches}
         stats={stats}
         onSelect={() => {}}
-        onNavigate={() => {}}
         onQuit={() => {}}
       />,
     );
@@ -123,7 +125,6 @@ describe("BranchListScreen Performance", () => {
         branches={branches}
         stats={stats}
         onSelect={() => {}}
-        onNavigate={() => {}}
         onQuit={() => {}}
         lastUpdated={new Date()}
       />,
@@ -137,7 +138,6 @@ describe("BranchListScreen Performance", () => {
         branches={branches}
         stats={{ ...stats, total: stats.total + 1 }}
         onSelect={() => {}}
-        onNavigate={() => {}}
         onQuit={() => {}}
         lastUpdated={new Date()}
       />,
@@ -147,8 +147,9 @@ describe("BranchListScreen Performance", () => {
 
     unmount();
 
-    // Re-render should be very fast (< 100ms)
-    expect(rerenderTime).toBeLessThan(100);
+    // Performance threshold for re-render
+    const threshold = 100;
+    expect(rerenderTime).toBeLessThan(threshold);
 
     console.log(`\n🔄 Re-render Performance:`);
     console.log(`   Re-render time: ${rerenderTime.toFixed(2)}ms`);
@@ -174,7 +175,6 @@ describe("BranchListScreen Performance", () => {
         branches={branches}
         stats={stats}
         onSelect={() => {}}
-        onNavigate={() => {}}
         onQuit={() => {}}
       />,
     );

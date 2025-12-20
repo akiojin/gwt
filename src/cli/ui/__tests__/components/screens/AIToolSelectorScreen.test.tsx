@@ -27,8 +27,9 @@ describe("AIToolSelectorScreen", () => {
   beforeEach(() => {
     // Setup happy-dom
     const window = new Window();
-    globalThis.window = window as any;
-    globalThis.document = window.document as any;
+    globalThis.window = window as unknown as typeof globalThis.window;
+    globalThis.document =
+      window.document as unknown as typeof globalThis.document;
   });
 
   it("should render header with title", () => {
@@ -101,6 +102,26 @@ describe("AIToolSelectorScreen", () => {
 
     // Test will verify onSelect is called with correct tool
     expect(container).toBeDefined();
+  });
+
+  it("should preselect the last used tool when provided", async () => {
+    const onBack = vi.fn();
+    const onSelect = vi.fn();
+    const { container } = render(
+      <AIToolSelectorScreen
+        onBack={onBack}
+        onSelect={onSelect}
+        initialToolId="codex-cli"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(container.textContent?.includes("Codex")).toBe(true);
+    });
+
+    const text = container.textContent ?? "";
+    expect(text).toContain("›Codex");
+    expect(text).not.toContain("›Claude Code");
   });
 
   /**

@@ -25,6 +25,7 @@
 
 ### 基本ルール
 
+- **指示を受けた場合、まず既存要件（spec.md）に追記可能かを調べ、次に要件化（Spec Kit による仕様策定）とTDD化を優先的に実行する。実装は要件とテストが確定した後に着手する。**
 - 作業（タスク）を完了したら、変更点を日本語でコミットログに追加して、コミット＆プッシュを必ず行う
 - 作業（タスク）は、最大限の並列化をして進める
 - 作業（タスク）は、最大限の細分化をしてToDoに登録する
@@ -61,6 +62,8 @@
 ## ドキュメント管理
 
 - ドキュメントはREADME.md/README.ja.mdに集約する
+- 仕様ファイルは必ず `specs/SPEC-????????/` （UUID8桁）配下に配置する。`specs/feature/*` など別階層への配置は禁止。
+- ログに関する統一仕様は `specs/SPEC-b9f5c4a1/spec.md` を参照し、画面出力とログ（pino構造化ログ）を明確に分けること。
 
 ## コードクオリティガイドライン
 
@@ -79,6 +82,6 @@
 ## リリースワークフロー
 
 - feature/\* ブランチは develop へ Auto Merge し、develop で次回リリース候補を蓄積する。
-- `/release` コマンド（または `gh workflow run create-release.yml --ref develop`）で release-please が main への Release PR を作成し、自動マージを有効化する。
-- Release PR が main にマージされると `.github/workflows/release.yml` が release-please でタグ・GitHub Release を作成する。
-- main への push をトリガーに `.github/workflows/publish.yml` が npm publish（設定時）と `main` → `develop` のバックマージを実行する。
+- `/release` コマンド（または `gh workflow run prepare-release.yml --ref develop`）で develop → main の Release PR を作成する。
+- Release PR が main にマージされると `.github/workflows/release.yml` が release-please でタグ・GitHub Release・Release PR を作成する。
+- `v*` タグの push をトリガーに `.github/workflows/publish.yml` が npm publish を実行する。

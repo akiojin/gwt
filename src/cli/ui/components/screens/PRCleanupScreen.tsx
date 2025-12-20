@@ -1,17 +1,24 @@
 import React from "react";
-import { Box, Text, useInput } from "ink";
+import { Box, Text } from "ink";
 import { Header } from "../parts/Header.js";
 import { Footer } from "../parts/Footer.js";
 import { Select } from "../common/Select.js";
+import { useAppInput } from "../../hooks/useAppInput.js";
 import { useTerminalSize } from "../../hooks/useTerminalSize.js";
 import type { CleanupTarget } from "../../types.js";
 
+/**
+ * Renderable item for the cleanup target list.
+ */
 export interface PRItem {
   label: string;
   value: string;
   target: CleanupTarget;
 }
 
+/**
+ * Props for `PRCleanupScreen`.
+ */
 export interface PRCleanupScreenProps {
   targets: CleanupTarget[];
   loading: boolean;
@@ -41,7 +48,7 @@ export function PRCleanupScreen({
 
   // Handle keyboard input
   // Note: Select component handles Enter and arrow keys
-  useInput((input, key) => {
+  useAppInput((input, key) => {
     if (key.escape) {
       onBack();
     } else if (input === "r") {
@@ -57,9 +64,6 @@ export function PRCleanupScreen({
       flags.push("worktree");
     } else {
       flags.push("branch");
-    }
-    if (target.reasons?.includes("merged-pr")) {
-      flags.push("merged");
     }
     if (target.reasons?.includes("no-diff-with-base")) {
       flags.push("base");

@@ -1,8 +1,12 @@
+import type { LastToolUsage } from "../../types/api.js";
+export type { LastToolUsage } from "../../types/api.js";
+
 export interface WorktreeInfo {
   path: string;
   locked: boolean;
   prunable: boolean;
   isAccessible?: boolean;
+  hasUncommittedChanges?: boolean;
 }
 
 export type AITool = string;
@@ -15,6 +19,12 @@ export interface ModelOption {
   inferenceLevels?: InferenceLevel[];
   defaultInference?: InferenceLevel;
   isDefault?: boolean;
+}
+
+export interface BranchDivergence {
+  ahead: number;
+  behind: number;
+  upToDate: boolean;
 }
 
 export interface BranchInfo {
@@ -35,6 +45,10 @@ export interface BranchInfo {
   openPR?: { number: number; title: string };
   mergedPR?: { number: number; mergedAt: string };
   latestCommitTimestamp?: number;
+  lastToolUsage?: LastToolUsage | null;
+  upstream?: string | null;
+  divergence?: BranchDivergence | null;
+  hasRemoteCounterpart?: boolean;
 }
 
 export interface BranchChoice {
@@ -134,7 +148,11 @@ export interface WorktreeWithPR {
   pullRequest: PullRequest | null;
 }
 
-export type CleanupReason = "merged-pr" | "no-diff-with-base" | "has-remote-copy";
+export type CleanupReason =
+  | "merged-pr"
+  | "no-diff-with-base"
+  | "has-remote-copy"
+  | "remote-synced";
 
 export interface CleanupTarget {
   worktreePath: string | null; // null for local branch only cleanup
@@ -175,15 +193,16 @@ export interface GitHubPRResponse {
  */
 export type ScreenType =
   | "branch-list"
-  | "worktree-manager"
   | "branch-creator"
   | "branch-action-selector"
+  | "branch-quick-start"
   | "ai-tool-selector"
   | "model-selector"
   | "session-selector"
   | "execution-mode-selector"
   | "batch-merge-progress"
-  | "batch-merge-result";
+  | "batch-merge-result"
+  | "environment-profile";
 
 /**
  * Branch action types for action selector screen
@@ -203,6 +222,14 @@ export interface Screen {
  */
 export type WorktreeStatus = "active" | "inaccessible" | undefined;
 
+export type SyncStatus =
+  | "up-to-date"
+  | "ahead"
+  | "behind"
+  | "diverged"
+  | "no-upstream"
+  | "remote-only";
+
 export interface BranchItem extends BranchInfo {
   // Display properties
   icons: string[];
@@ -210,6 +237,12 @@ export interface BranchItem extends BranchInfo {
   hasChanges: boolean;
   label: string;
   value: string;
+  lastToolUsageLabel?: string | null;
+  syncStatus?: SyncStatus;
+  syncInfo?: string | undefined;
+  remoteName?: string | undefined;
+  // クリーンアップ判定で「未コミット/未プッシュなし」と評価された場合に true
+  safeToCleanup?: boolean;
 }
 
 /**

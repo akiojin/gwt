@@ -11,7 +11,7 @@ export interface InputProps {
   mask?: string;
   /**
    * Block specific key bindings to prevent parent handlers from processing them
-   * Useful for blocking shortcuts like 'c', 'r', 'm' while typing
+   * Useful for blocking shortcuts like 'c', 'r' while typing
    */
   blockKeys?: string[];
 }

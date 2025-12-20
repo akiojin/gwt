@@ -1,11 +1,18 @@
 import React, { useEffect, useState } from "react";
-import { Box, Text, useInput, useStdout } from "ink";
+import { Box, Text, useStdout } from "ink";
+import { useAppInput } from "../../hooks/useAppInput.js";
 
+/**
+ * Item descriptor for the `Select` component.
+ */
 export interface SelectItem {
   label: string;
   value: string;
 }
 
+/**
+ * Props for the `Select` component.
+ */
 export interface SelectProps<T extends SelectItem = SelectItem> {
   items: T[];
   onSelect: (item: T) => void;
@@ -139,7 +146,7 @@ const SelectComponent = <T extends SelectItem = SelectItem>({
     }
   }, [items, limit]);
 
-  useInput((input, key) => {
+  useAppInput((input, key) => {
     if (disabled) {
       return;
     }
@@ -170,8 +177,8 @@ const SelectComponent = <T extends SelectItem = SelectItem>({
 
         return newIndex;
       });
-    } else if (key.return) {
-      // Select current item
+    } else if (key.return || input === "\n") {
+      // Select current item (handle both CR in raw mode and LF in cooked mode)
       const selectedItem = items[selectedIndex];
       if (selectedItem && !disabled) {
         onSelect(selectedItem);

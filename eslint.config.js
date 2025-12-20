@@ -59,6 +59,7 @@ export default [
       ".specify/**",
       ".serena/**",
       ".claude/**",
+      "poc/**",
     ],
   },
 ];
