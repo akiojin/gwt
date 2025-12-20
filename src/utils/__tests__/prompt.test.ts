@@ -87,3 +87,89 @@ describe("waitForEnter", () => {
     expect(Date.now() - start).toBeLessThan(50);
   });
 });
+
+describe("confirmYesNo", () => {
+  it("resolves true when user inputs y on TTY", async () => {
+    vi.resetModules();
+    for (const key of Object.keys(terminalStreams)) {
+      delete terminalStreams[key];
+    }
+
+    const stdin = new PassThrough() as unknown as NodeJS.ReadStream;
+    const stdout = new PassThrough() as unknown as NodeJS.WriteStream;
+    Object.defineProperty(stdin, "isTTY", { value: true });
+
+    const exitRawMode = vi.fn();
+
+    Object.assign(terminalStreams, {
+      stdin,
+      stdout,
+      stderr: stdout,
+      usingFallback: false,
+      exitRawMode,
+    });
+
+    const { confirmYesNo } = await import("../prompt.js");
+
+    const waiting = withTimeout(confirmYesNo("push?"), 200);
+    stdin.write("y\n");
+
+    await expect(waiting).resolves.toBe(true);
+    expect(exitRawMode).toHaveBeenCalled();
+  });
+
+  it("uses default value when input is empty on TTY", async () => {
+    vi.resetModules();
+    for (const key of Object.keys(terminalStreams)) {
+      delete terminalStreams[key];
+    }
+
+    const stdin = new PassThrough() as unknown as NodeJS.ReadStream;
+    const stdout = new PassThrough() as unknown as NodeJS.WriteStream;
+    Object.defineProperty(stdin, "isTTY", { value: true });
+
+    Object.assign(terminalStreams, {
+      stdin,
+      stdout,
+      stderr: stdout,
+      usingFallback: false,
+      exitRawMode: vi.fn(),
+    });
+
+    const { confirmYesNo } = await import("../prompt.js");
+
+    const waiting = withTimeout(
+      confirmYesNo("push?", { defaultValue: true }),
+      200,
+    );
+    stdin.write("\n");
+
+    await expect(waiting).resolves.toBe(true);
+  });
+
+  it("returns default immediately on non-TTY stdin", async () => {
+    vi.resetModules();
+    for (const key of Object.keys(terminalStreams)) {
+      delete terminalStreams[key];
+    }
+
+    const stdin = new PassThrough() as unknown as NodeJS.ReadStream;
+    const stdout = new PassThrough() as unknown as NodeJS.WriteStream;
+    Object.defineProperty(stdin, "isTTY", { value: false });
+
+    Object.assign(terminalStreams, {
+      stdin,
+      stdout,
+      stderr: stdout,
+      usingFallback: false,
+      exitRawMode: vi.fn(),
+    });
+
+    const { confirmYesNo } = await import("../prompt.js");
+
+    const start = Date.now();
+    const result = await confirmYesNo("push?", { defaultValue: false });
+    expect(result).toBe(false);
+    expect(Date.now() - start).toBeLessThan(50);
+  });
+});
