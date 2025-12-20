@@ -13,6 +13,7 @@ RUN npm add -g \
     pnpm@latest \
     bun@latest \
     typescript@latest \
+    typescript-language-server@latest \
     eslint@latest \
     prettier@latest \
     @commitlint/cli@latest \
