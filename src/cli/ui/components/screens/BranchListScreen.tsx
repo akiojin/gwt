@@ -407,7 +407,12 @@ export function BranchListScreen({
       const indicatorPrefix = indicatorIcon ? `${indicatorIcon} ` : "";
 
       const isChecked = selectedSet.has(item.name);
-      const selectionIcon = isChecked ? "[*]" : "[ ]";
+      const isWarning = Boolean(item.hasUnpushedCommits) || !item.mergedPR;
+      const selectionIcon = isChecked
+        ? isWarning
+          ? chalk.red("[*]")
+          : "[*]"
+        : "[ ]";
       let worktreeIcon = chalk.gray("⚪");
       if (item.worktreeStatus === "active") {
         worktreeIcon = chalk.green("🟢");
