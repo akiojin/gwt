@@ -1,5 +1,8 @@
 import { execa } from "execa";
+import { createRequire } from "node:module";
 import { createLogger } from "../../logging/logger.js";
+
+const require = createRequire(import.meta.url);
 
 /**
  * URL を開く関数の型定義
@@ -7,11 +10,17 @@ import { createLogger } from "../../logging/logger.js";
  */
 export type OpenUrlFn = (url: string) => Promise<void> | void;
 
-const TRAY_ICON_BASE64 =
+// PNG icon (16x16) for macOS/Linux - Base64 encoded
+const TRAY_ICON_PNG_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAABHNCSVQICAgIfAhkiAAAAAlwSFlzAAAAdgAAAHYBTnsmCAAAABl0RVh0U29mdHdhcmUAd3d3Lmlua3NjYXBlLm9yZ5vuPBoAAADLSURBVDiNpZMxDoJAEEXfLhYewMrOxsLKG3gDj+ANPIKFtScwHoHOxmN4AysLL0BlQ0Ji4W6yLLAgfslkZnbm/0wmA/9G6CogIr4F7IAbcAYOqpoEJBYD+3UADVYAiMgZOAKvboAFwFLENoAtsAdGwAw4qepZRN7A2LIIWCngCjy7t1bVF/D05QBT4K6qOxH5dOwjuwrYApdMvC3wBHzWBTwAr6p6c+wFSBJvEeDsehLVNwZ0sQDqv+kl3xjQxcKNSaZ/s+irNK1fXfwA7LE/RA3w5ggAAAAASUVORK5CYII=";
+
+// ICO icon for Windows - Base64 encoded
+const TRAY_ICON_ICO_BASE64 =
   "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQBAMAAADt3eJSAAAABGdBTUEAALGPC/xhBQAAACBjSFJNAAB6JgAAgIQAAPoAAACA6AAAdTAAAOpgAAA6mAAAF3CculE8AAAAJ1BMVEUAAAAAvNQAvNQAvNQAvNQAvNQAvNQAvNQAvNQAvNQAvNQAvNT////J1ubyAAAAC3RSTlMAJYTcgyQJnJ3U3WXfUogAAAABYktHRAyBs1FjAAAAB3RJTUUH6QwMCRccbOpRBQAAAFdJREFUCNdjYEAARuXNriCarXr37t1tQEYmkN69M4GBoRvE2F3AwAqmd29kYIEwNjEwQxibGbghjN0MXDARJpgaqK6tDAzVUHMQJoPtKgPZyuq8S5WBAQBeRj51tvdhawAAACV0RVh0ZGF0ZTpjcmVhdGUAMjAyNS0xMi0xMlQwOToyMzoyOCswMDowMBPEA5UAAAAldEVYdGRhdGU6bW9kaWZ5ADIwMjUtMTItMTJUMDk6MjM6MjgrMDA6MDBimbspAAAAAElFTkSuQmCC";
 
 let trayInitAttempted = false;
-let trayInstance: { dispose?: () => void } | null = null;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let trayInstance: any = null;
 
 function shouldEnableTray(): boolean {
   if (process.env.GWT_DISABLE_TRAY?.toLowerCase() === "true") return false;
@@ -46,7 +55,7 @@ export async function openUrl(url: string): Promise<void> {
 
 /**
  * システムトレイアイコンを初期化
- * @param url - Web UI のURL（ダブルクリック時に開く）
+ * @param url - Web UI のURL（メニューから開く）
  * @param opts - オプション設定
  * @param opts.openUrl - URL を開くカスタム関数（テスト用）
  */
@@ -58,27 +67,55 @@ export async function startSystemTray(
   trayInitAttempted = true;
 
   const logger = createLogger({ category: "tray" });
+  const open = opts?.openUrl ?? openUrl;
 
   try {
-    const mod = (await import("trayicon")) as Record<string, unknown> & {
-      default?: Record<string, unknown>;
+    // systray2 をCommonJS requireでインポート（ESM互換性のため）
+    const SysTray = require("systray2").default;
+
+    const isWindows = process.platform === "win32";
+    const isMacOS = process.platform === "darwin";
+
+    // プラットフォームに応じたアイコンを選択
+    const iconBase64 = isWindows ? TRAY_ICON_ICO_BASE64 : TRAY_ICON_PNG_BASE64;
+
+    const openDashboardItem = {
+      title: "Open Web UI",
+      tooltip: "Open gwt Web UI in browser",
+      checked: false,
+      enabled: true,
     };
-    const create = mod.create ?? mod.default?.create;
-    if (typeof create !== "function") {
-      throw new Error("trayicon.create not available");
-    }
 
-    const icon = Buffer.from(TRAY_ICON_BASE64, "base64");
-    const open = opts?.openUrl ?? openUrl;
+    const exitItem = {
+      title: "Exit",
+      tooltip: "Close the tray icon",
+      checked: false,
+      enabled: true,
+    };
 
-    trayInstance = create({
-      icon,
-      title: "gwt Web UI",
-      tooltip: "Double-click to open Web UI",
-      action: async () => {
-        await open(url);
+    trayInstance = new SysTray({
+      menu: {
+        icon: iconBase64,
+        isTemplateIcon: isMacOS,
+        title: "gwt",
+        tooltip: `gwt Web UI - ${url}`,
+        items: [openDashboardItem, SysTray.separator, exitItem],
       },
+      debug: false,
+      copyDir: false,
     });
+
+    trayInstance.onClick((action: { item: { title: string } }) => {
+      if (action.item.title === "Open Web UI") {
+        open(url);
+      } else if (action.item.title === "Exit") {
+        trayInstance?.kill(false);
+        trayInstance = null;
+      }
+    });
+
+    await trayInstance.ready();
+    logger.info("System tray initialized");
   } catch (err) {
     logger.warn({ err }, "System tray failed to initialize");
   }
@@ -88,6 +125,10 @@ export async function startSystemTray(
  * システムトレイアイコンを破棄
  */
 export function disposeSystemTray(): void {
-  trayInstance?.dispose?.();
+  try {
+    trayInstance?.kill?.(false);
+  } catch {
+    // Ignore errors during cleanup
+  }
   trayInstance = null;
 }
