@@ -480,12 +480,16 @@ update_existing_agent_file() {
     # Check if sections exist in the file
     local has_active_technologies=0
     local has_recent_changes=0
-    
-    if grep -q "^## 使用中の技術" "$target_file" 2>/dev/null; then
+    local tech_header_ja="## 使用中の技術"
+    local tech_header_en="## Active Technologies"
+    local changes_header_ja="## 最近の変更"
+    local changes_header_en="## Recent Changes"
+
+    if grep -Eq "^## (使用中の技術|Active Technologies)" "$target_file" 2>/dev/null; then
         has_active_technologies=1
     fi
 
-    if grep -q "^## 最近の変更" "$target_file" 2>/dev/null; then
+    if grep -Eq "^## (最近の変更|Recent Changes)" "$target_file" 2>/dev/null; then
         has_recent_changes=1
     fi
     
@@ -497,7 +501,7 @@ update_existing_agent_file() {
     
     while IFS= read -r line || [[ -n "$line" ]]; do
         # 使用中の技術セクション
-        if [[ "$line" == "## 使用中の技術" ]]; then
+        if [[ "$line" == "$tech_header_ja" || "$line" == "$tech_header_en" ]]; then
             echo "$line" >> "$temp_file"
             in_tech_section=true
             continue
@@ -521,7 +525,7 @@ update_existing_agent_file() {
         fi
         
         # 最近の変更セクション
-        if [[ "$line" == "## 最近の変更" ]]; then
+        if [[ "$line" == "$changes_header_ja" || "$line" == "$changes_header_en" ]]; then
             echo "$line" >> "$temp_file"
             # Add new change entry right after the heading
             if [[ -n "$new_change_entry" ]]; then

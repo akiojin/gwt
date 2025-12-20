@@ -43,7 +43,8 @@ get_mtime_epoch() {
 
 escape_md_table_cell() {
     # Escape `|` which breaks markdown tables
-    echo "$1" | sed 's/|/\\|/g'
+    local input="$1"
+    echo "${input//|/\\|}"
 }
 
 REPO_ROOT="$(get_repo_root)"
@@ -68,6 +69,7 @@ trap cleanup EXIT
 today="$(date +%Y-%m-%d)"
 
 {
+    echo "<!-- markdownlint-disable MD013 -->"
     echo "# 仕様一覧"
     echo ""
     echo "**最終更新**: $today"
@@ -84,9 +86,7 @@ if shopt -q nullglob; then
 fi
 shopt -s nullglob
 spec_dirs=("$SPECS_DIR"/SPEC-*)
-if $nullglob_was_enabled; then
-    shopt -s nullglob
-else
+if ! $nullglob_was_enabled; then
     shopt -u nullglob
 fi
 

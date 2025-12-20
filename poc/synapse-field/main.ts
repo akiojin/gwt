@@ -16,7 +16,7 @@ interface SynapseEdge {
 const NODE_COUNT = 32;
 const LINKS_PER_NODE = 3;
 
-const rand = (limit: number) => Math.random() * limit;
+const randomInRange = (limit: number) => Math.random() * limit;
 
 function createNodes(
   width: number,
@@ -24,8 +24,8 @@ function createNodes(
   count: number,
 ): SynapseNode[] {
   return Array.from({ length: count }, () => ({
-    x: rand(width),
-    y: rand(height),
+    x: randomInRange(width),
+    y: randomInRange(height),
     vx: (Math.random() - 0.5) * 0.5,
     vy: (Math.random() - 0.5) * 0.5,
     radius: 2 + Math.random() * 3,
@@ -136,7 +136,18 @@ function drawNetwork(
 function initSynapseField(canvas: HTMLCanvasElement) {
   const ctx = canvas.getContext("2d");
   if (!ctx) {
-    throw new Error("Canvas context is not available");
+    const details = {
+      id: canvas.id || "unknown",
+      className: canvas.className || "none",
+      width: canvas.width,
+      height: canvas.height,
+      clientWidth: canvas.clientWidth,
+      clientHeight: canvas.clientHeight,
+      userAgent: navigator.userAgent,
+    };
+    throw new Error(
+      `Canvas 2D context is not available for "2d" (${JSON.stringify(details)})`,
+    );
   }
 
   let nodes = createNodes(canvas.clientWidth, canvas.clientHeight, NODE_COUNT);

@@ -180,9 +180,13 @@ if [ -f "$TEMPLATE" ]; then cp "$TEMPLATE" "$SPEC_FILE"; else touch "$SPEC_FILE"
 # 仕様一覧を更新（失敗しても仕様作成は継続）
 INDEX_SCRIPT="$REPO_ROOT/.specify/scripts/bash/update-specs-index.sh"
 if [[ -f "$INDEX_SCRIPT" ]]; then
-    "$INDEX_SCRIPT" >/dev/null 2>&1 || >&2 echo "[specify] 警告: specs/specs.md の更新に失敗しました"
+    if ! "$INDEX_SCRIPT" >/dev/null 2>&1; then
+        >&2 echo "[specify] 警告: specs/specs.md の更新に失敗しました"
+        >&2 echo "[specify]        手動で更新する場合: $INDEX_SCRIPT を実行してください"
+    fi
 else
-    >&2 echo "[specify] 警告: $INDEX_SCRIPT が見つかりません（specs/specs.md を更新できません）"
+    >&2 echo "[specify] 警告: $INDEX_SCRIPT が見つかりません"
+    >&2 echo "[specify]        specs/specs.md の自動更新は利用できません"
 fi
 
 if $JSON_MODE; then
