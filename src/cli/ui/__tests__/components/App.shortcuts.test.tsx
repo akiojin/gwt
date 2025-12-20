@@ -259,6 +259,10 @@ describe("App shortcuts integration", () => {
       });
 
       const selectedProps = branchListProps.at(-1);
+      expect(selectedProps?.selectedBranches).toEqual([
+        "feature/add-new-feature",
+        "hotfix/urgent-fix",
+      ]);
       act(() => {
         selectedProps?.onCleanupCommand?.();
       });
