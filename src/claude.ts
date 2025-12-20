@@ -176,7 +176,11 @@ export async function launchClaudeCode(
 
     terminal.exitRawMode();
 
-    const baseEnv = { ...process.env, ...(options.envOverrides ?? {}) };
+    const baseEnv: Record<string, string | undefined> = {
+      ...process.env,
+      ...(options.envOverrides ?? {}),
+      ENABLE_LSP_TOOL: "1", // Enable TypeScript LSP support in Claude Code
+    };
     const launchEnvSource =
       options.skipPermissions && !baseEnv.IS_SANDBOX
         ? { ...baseEnv, IS_SANDBOX: "1" }
