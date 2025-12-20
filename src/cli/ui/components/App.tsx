@@ -899,6 +899,14 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       }
 
       const worktree = worktreeMap.get(branch.name);
+      const hasRemoteBranch =
+        typeof branch.hasRemoteCounterpart === "boolean"
+          ? branch.hasRemoteCounterpart
+          : undefined;
+      const isAccessible =
+        typeof worktree?.isAccessible === "boolean"
+          ? worktree.isAccessible
+          : undefined;
       acc.push({
         branch: branch.name,
         pullRequest: null,
@@ -906,8 +914,8 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         cleanupType: worktree ? "worktree-and-branch" : "branch-only",
         hasUncommittedChanges: worktree?.hasUncommittedChanges ?? false,
         hasUnpushedCommits: Boolean(branch.hasUnpushedCommits),
-        hasRemoteBranch: branch.hasRemoteCounterpart,
-        isAccessible: worktree?.isAccessible,
+        ...(hasRemoteBranch !== undefined ? { hasRemoteBranch } : {}),
+        ...(isAccessible !== undefined ? { isAccessible } : {}),
       });
       return acc;
     }, []);
