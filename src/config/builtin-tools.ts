@@ -25,7 +25,7 @@ export const CLAUDE_CODE_TOOL: CustomAITool = {
   },
   permissionSkipArgs: Array.from(CLAUDE_PERMISSION_SKIP_ARGS),
   env: {
-    ENABLE_LSP_TOOL: "1",
+    ENABLE_LSP_TOOL: "true",
   },
 };
 
