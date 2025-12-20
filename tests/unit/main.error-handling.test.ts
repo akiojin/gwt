@@ -118,6 +118,7 @@ describe("main error handling", () => {
       return {
         ...actual,
         worktreeExists: vi.fn(async () => null),
+        resolveWorktreePathForBranch: vi.fn(async () => ({ path: null })),
         generateWorktreePath: vi.fn(
           async (_repo: string, branch: string) => `/worktrees/${branch}`,
         ),

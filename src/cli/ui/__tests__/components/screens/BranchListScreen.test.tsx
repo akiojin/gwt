@@ -21,12 +21,6 @@ const stripControlSequences = (value: string): string =>
     return "";
   });
 
-const flushInkUpdates = async () => {
-  await act(async () => {
-    await Promise.resolve();
-  });
-};
-
 describe("BranchListScreen", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -73,14 +67,6 @@ describe("BranchListScreen", () => {
     changesCount: 0,
     lastUpdated: new Date(),
   };
-
-  const selectableBranch: BranchItem = formatBranchItem({
-    name: "feature/cleanup-target",
-    type: "local",
-    branchType: "feature",
-    isCurrent: false,
-    latestCommitTimestamp: 1_700_100_000,
-  });
 
   it("should render header with title", () => {
     const onSelect = vi.fn();
@@ -489,47 +475,6 @@ describe("BranchListScreen", () => {
     );
     expect(frame).toContain("[*] 🟢 🛡");
     expect(frame).toContain("feature/login");
-  });
-
-  it("invokes onClearSelection when escape key is pressed", async () => {
-    const onClearSelection = vi.fn();
-    let renderResult: ReturnType<typeof inkRender>;
-    await act(async () => {
-      renderResult = inkRender(
-        <BranchListScreen
-          branches={[selectableBranch]}
-          stats={mockStats}
-          onSelect={vi.fn()}
-          onClearSelection={onClearSelection}
-          selectedBranches={["feature/cleanup-target"]}
-        />,
-      );
-    });
-
-    renderResult.stdin.write("\u001B");
-    await act(async () => {
-      vi.advanceTimersByTime(30);
-      await Promise.resolve();
-    });
-    await flushInkUpdates();
-
-    expect(onClearSelection).toHaveBeenCalled();
-  });
-
-  it("displays selection summary message when selections exist", () => {
-    const onSelect = vi.fn();
-    const selected = ["feature/test", "feature/cleanup-target"];
-
-    const { getByText } = render(
-      <BranchListScreen
-        branches={[...mockBranches, selectableBranch]}
-        stats={mockStats}
-        onSelect={onSelect}
-        selectedBranches={selected}
-      />,
-    );
-
-    expect(getByText(/選択中: 2個のブランチ/)).toBeDefined();
   });
 
   describe("Filter Mode", () => {

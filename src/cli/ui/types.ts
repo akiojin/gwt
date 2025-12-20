@@ -110,12 +110,6 @@ export interface SelectedBranchState {
   remoteBranch?: string;
 }
 
-export type SelectedBranchSet = Set<string>;
-
-export interface BranchSelectionState {
-  branches: SelectedBranchSet;
-}
-
 export interface UIFilter {
   showWithWorktree: boolean;
   showWithoutWorktree: boolean;
@@ -148,11 +142,7 @@ export interface WorktreeWithPR {
   pullRequest: PullRequest | null;
 }
 
-export type CleanupReason =
-  | "merged-pr"
-  | "no-diff-with-base"
-  | "has-remote-copy"
-  | "remote-synced";
+export type CleanupReason = "no-diff-with-base" | "remote-synced";
 
 export interface CleanupTarget {
   worktreePath: string | null; // null for local branch only cleanup

@@ -1,5 +1,4 @@
 import { execa } from "execa";
-import type { Options as ExecaOptions } from "execa";
 import chalk from "chalk";
 import { platform } from "os";
 import { existsSync } from "fs";
@@ -9,11 +8,8 @@ import {
   resetTerminalModes,
 } from "./utils/terminal.js";
 import { findLatestCodexSession } from "./utils/session.js";
-import {
-  resolveCodexCommand,
-  AIToolResolutionError,
-  type ResolvedCommand,
-} from "./services/aiToolResolver.js";
+
+const CODEX_CLI_PACKAGE = "@openai/codex@latest";
 
 /**
  * Reasoning effort levels supported by Codex CLI.
@@ -99,7 +95,6 @@ export async function launchCodexCLI(
 ): Promise<{ sessionId?: string | null }> {
   const terminal = getTerminalStreams();
   const startedAt = Date.now();
-  let lastResolvedCommand: ResolvedCommand | null = null;
 
   try {
     if (!existsSync(worktreePath)) {
@@ -165,12 +160,16 @@ export async function launchCodexCLI(
       args.push(...options.extraArgs);
     }
 
-    args.push(...buildDefaultCodexArgs(model, reasoningEffort));
+    const codexArgs = buildDefaultCodexArgs(model, reasoningEffort);
+
+    args.push(...codexArgs);
 
     console.log(chalk.gray(`   📋 Args: ${args.join(" ")}`));
 
     terminal.exitRawMode();
     resetTerminalModes(terminal.stdout);
+
+    const childStdio = createChildStdio();
 
     const env = Object.fromEntries(
       Object.entries({
@@ -181,42 +180,35 @@ export async function launchCodexCLI(
       ),
     );
 
-    const childStdio = createChildStdio();
-
     try {
-      lastResolvedCommand = await resolveCodexCommand({ args });
-
-      if (lastResolvedCommand.usesFallback) {
-        console.log(chalk.cyan("   🔄 Falling back to bunx @openai/codex@latest"));
-      } else {
-        console.log(chalk.green("   ✨ Using locally installed codex command"));
-      }
-
-      const execaOptions: ExecaOptions = {
-        cwd: worktreePath,
-        stdin: childStdio.stdin as ExecaOptions["stdin"],
-        stdout: childStdio.stdout as ExecaOptions["stdout"],
-        stderr: childStdio.stderr as ExecaOptions["stderr"],
-        env,
+      const execChild = async (child: Promise<unknown>) => {
+        try {
+          await child;
+        } catch (execError: unknown) {
+          // Treat SIGINT/SIGTERM as normal exit (user pressed Ctrl+C)
+          const signal = (execError as { signal?: unknown })?.signal;
+          if (signal === "SIGINT" || signal === "SIGTERM") {
+            return;
+          }
+          throw execError;
+        }
       };
 
-      try {
-        await execa(
-          lastResolvedCommand.command,
-          lastResolvedCommand.args,
-          execaOptions,
-        );
-      } catch (execError: unknown) {
-        const signal = (execError as { signal?: unknown })?.signal;
-        if (signal === "SIGINT" || signal === "SIGTERM") {
-          return {};
-        }
-        throw execError;
-      }
+      const child = execa("bunx", [CODEX_CLI_PACKAGE, ...args], {
+        cwd: worktreePath,
+        shell: true,
+        stdin: childStdio.stdin,
+        stdout: childStdio.stdout,
+        stderr: childStdio.stderr,
+        env,
+      });
+      await execChild(child);
     } finally {
       childStdio.cleanup();
     }
 
+    // File-based session detection only - no stdout capture
+    // Use only findLatestCodexSession with short timeout, skip sessionProbe to avoid hanging
     let capturedSessionId: string | null = null;
     const finishedAt = Date.now();
     try {
@@ -228,6 +220,7 @@ export async function launchCodexCLI(
         cwd: worktreePath,
       });
       const detectedSessionId = latest?.id ?? null;
+      // When we explicitly resumed a specific session, keep that ID as the source of truth.
       capturedSessionId = usedExplicitSessionId
         ? resumeSessionId
         : detectedSessionId;
@@ -242,46 +235,33 @@ export async function launchCodexCLI(
       );
     } else {
       console.log(
-        chalk.yellow("\n   ℹ️  Could not determine Codex session ID automatically."),
+        chalk.yellow(
+          "\n   ℹ️  Could not determine Codex session ID automatically.",
+        ),
       );
     }
 
     return capturedSessionId ? { sessionId: capturedSessionId } : {};
   } catch (error: unknown) {
-    if (error instanceof AIToolResolutionError) {
-      throw new CodexError(error.message, error);
-    }
-
+    const err = error as NodeJS.ErrnoException;
+    const details = error instanceof Error ? error.message : String(error);
     const errorMessage =
-      (error as NodeJS.ErrnoException)?.code === "ENOENT"
-        ? lastResolvedCommand?.usesFallback === false
-          ? "codex command not found. Please ensure Codex CLI is installed."
-          : "bunx command not found. Please ensure Bun is installed so Codex CLI can run via bunx."
-        : `Failed to launch Codex CLI: ${
-            error instanceof Error ? error.message : "Unknown error"
-          }`;
+      err.code === "ENOENT"
+        ? "bunx command not found. Please ensure Bun is installed so Codex CLI can run via bunx."
+        : `Failed to launch Codex CLI: ${details || "Unknown error"}`;
 
     if (platform() === "win32") {
       console.error(chalk.red("\n💡 Windows troubleshooting tips:"));
-      if (lastResolvedCommand && !lastResolvedCommand.usesFallback) {
-        console.error(
-          chalk.yellow(
-            "   1. Confirm that Codex CLI is installed and the 'codex' command is on PATH",
-          ),
-        );
-        console.error(
-          chalk.yellow('   2. Run "codex --help" to verify the setup'),
-        );
-      } else {
-        console.error(
-          chalk.yellow("   1. Confirm that Bun is installed and bunx is available"),
-        );
-        console.error(
-          chalk.yellow(
-            '   2. Run "bunx @openai/codex@latest -- --help" to verify the setup',
-          ),
-        );
-      }
+      console.error(
+        chalk.yellow(
+          "   1. Confirm that Bun is installed and bunx is available",
+        ),
+      );
+      console.error(
+        chalk.yellow(
+          '   2. Run "bunx @openai/codex@latest -- --help" to verify the setup',
+        ),
+      );
       console.error(
         chalk.yellow("   3. Restart your terminal or IDE to refresh PATH"),
       );
@@ -294,4 +274,18 @@ export async function launchCodexCLI(
   }
 }
 
-export { isCodexAvailable } from "./services/aiToolResolver.js";
+/**
+ * Checks whether Codex CLI is available via `bunx` in the current environment.
+ */
+export async function isCodexAvailable(): Promise<boolean> {
+  try {
+    await execa("bunx", [CODEX_CLI_PACKAGE, "--help"]);
+    return true;
+  } catch (error: unknown) {
+    const err = error as NodeJS.ErrnoException;
+    if (err.code === "ENOENT") {
+      console.error(chalk.yellow("\n⚠️  bunx command not found"));
+    }
+    return false;
+  }
+}

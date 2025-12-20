@@ -45,10 +45,7 @@ const {
   pushBranchToRemoteMock: vi.fn(async () => undefined),
 }));
 
-const confirmYesNoMock = vi.hoisted(() =>
-  vi.fn<() => Promise<boolean>>(),
-);
-
+const confirmYesNoMock = vi.hoisted(() => vi.fn<() => Promise<boolean>>());
 vi.mock("../../src/git.js", async () => {
   const actual =
     await vi.importActual<typeof import("../../src/git.js")>(
@@ -77,6 +74,9 @@ vi.mock("../../src/worktree.js", async () => {
   return {
     ...actual,
     worktreeExists: worktreeExistsMock,
+    resolveWorktreePathForBranch: vi.fn(async (branch: string) => ({
+      path: await worktreeExistsMock(branch),
+    })),
     isProtectedBranchName: vi.fn(() => false),
     switchToProtectedBranch: vi.fn(),
   };
@@ -140,7 +140,6 @@ vi.mock("../../src/utils/prompt.js", async () => {
     confirmYesNo: confirmYesNoMock,
   };
 });
-
 // Import after mocks are set up
 import { handleAIToolWorkflow } from "../../src/index.js";
 
