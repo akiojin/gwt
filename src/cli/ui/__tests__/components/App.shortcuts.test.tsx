@@ -92,7 +92,20 @@ describe("App shortcuts integration", () => {
     goBackMock.mockClear();
     resetMock.mockClear();
     useGitDataMock.mockReturnValue({
-      branches: [],
+      branches: [
+        {
+          name: "feature/add-new-feature",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+        },
+        {
+          name: "hotfix/urgent-fix",
+          type: "local",
+          branchType: "hotfix",
+          isCurrent: false,
+        },
+      ],
       worktrees: [
         {
           branch: "feature/existing",
@@ -197,6 +210,8 @@ describe("App shortcuts integration", () => {
 
   it("displays per-branch cleanup indicators and waits before clearing results", async () => {
     vi.useFakeTimers();
+    const originalNodeEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = "production";
 
     try {
       const onExit = vi.fn();
@@ -234,8 +249,18 @@ describe("App shortcuts integration", () => {
         throw new Error("BranchListScreen props missing");
       }
 
+      await act(async () => {
+        initialProps.onToggleSelect?.("feature/add-new-feature");
+        initialProps.onToggleSelect?.("hotfix/urgent-fix");
+      });
+
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      const selectedProps = branchListProps.at(-1);
       act(() => {
-        initialProps.onCleanupCommand?.();
+        selectedProps?.onCleanupCommand?.();
       });
 
       await act(async () => {
@@ -296,6 +321,7 @@ describe("App shortcuts integration", () => {
         ),
       ).toBe(false);
     } finally {
+      process.env.NODE_ENV = originalNodeEnv;
       vi.useRealTimers();
     }
   });

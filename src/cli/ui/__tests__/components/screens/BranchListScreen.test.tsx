@@ -507,6 +507,10 @@ describe("BranchListScreen", () => {
     });
 
     renderResult.stdin.write("\u001B");
+    await act(async () => {
+      vi.advanceTimersByTime(30);
+      await Promise.resolve();
+    });
     await flushInkUpdates();
 
     expect(onClearSelection).toHaveBeenCalled();
