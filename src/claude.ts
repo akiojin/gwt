@@ -37,6 +37,7 @@ export class ClaudeError extends Error {
  *
  * @param worktreePath - Worktree directory to run Claude Code in
  * @param options - Launch options (mode/session/model/permissions/env)
+ * @param options.chrome - Enable Chrome extension integration (adds --chrome flag)
  * @returns Captured session id when available
  */
 export async function launchClaudeCode(
