@@ -76,134 +76,41 @@ bun run test Select
 
 ### 1. 新規ステートの追加
 
-**App.tsx**:
-```typescript
-const [selectedBranches, setSelectedBranches] = useState<Set<string>>(new Set());
-```
+選択ブランチの状態は `src/cli/ui/components/App.tsx` で管理する。
 
 ### 2. コールバック関数の作成
 
-**App.tsx**:
-```typescript
-const toggleBranchSelection = useCallback((branchName: string) => {
-  setSelectedBranches(prev => {
-    const next = new Set(prev);
-    if (next.has(branchName)) {
-      next.delete(branchName);
-    } else {
-      next.add(branchName);
-    }
-    return next;
-  });
-}, []);
-
-const clearBranchSelection = useCallback(() => {
-  setSelectedBranches(new Set());
-}, []);
-```
+同ファイルで、選択の切り替え・全解除のコールバックを用意する。
 
 ### 3. Props の渡し方
 
-**App.tsx → BranchListScreen**:
-```typescript
-<BranchListScreen
-  branches={visibleBranches}
-  stats={stats}
-  onSelect={handleBranchSelect}
-  onCleanupCommand={handleCleanupCommand}
-  selectedBranches={selectedBranches}           // 追加
-  onToggleSelection={toggleBranchSelection}     // 追加
-  onClearSelection={clearBranchSelection}       // 追加
-  // ... 他のProps ...
-/>
-```
-
-**BranchListScreen.tsx → Select**:
-```typescript
-<Select
-  items={branches}
-  onSelect={onSelect}
-  onSpace={onToggleSelection ? (item) => onToggleSelection(item.name) : undefined}  // 追加
-  onEscape={onClearSelection}                   // 追加
-  limit={limit}
-  disabled={Boolean(cleanupUI?.inputLocked)}
-  renderItem={renderBranchRow}
-/>
-```
+- App.tsx → BranchListScreen: `selectedBranches` と選択用コールバックを渡す。
+- BranchListScreen.tsx → Select: スペース/ESC入力に応じて選択切り替えや解除を委譲する。
 
 ### 4. キーハンドリングの追加
 
-**Select.tsx**:
-```typescript
-useInput((input, key) => {
-  if (disabled) {
-    return;
-  }
-
-  // 既存のキー処理...
-
-  if (input === ' ' && onSpace) {
-    const selectedItem = items[selectedIndex];
-    if (selectedItem) {
-      onSpace(selectedItem);
-    }
-  } else if (key.escape && onEscape) {
-    onEscape();
-  }
-});
-```
+入力処理は `src/cli/ui/components/screens/BranchListScreen.tsx` または
+`src/cli/ui/components/common/Select.tsx` に集約し、スペースで選択切り替え、
+ESCで選択解除を行う。
 
 ### 5. マーカー表示の実装
 
-**BranchListScreen.tsx の renderBranchRow**:
-```typescript
-const isSelected = selectedBranches?.has(item.name) ?? false;
-const isWarning = item.hasUnpushedCommits || !item.mergedPR;
-const selectionMarker = isSelected
-  ? (isWarning ? chalk.red('*') : '*')
-  : ' ';
-const arrow = isCursor ? '>' : ' ';
-const staticPrefix = `${arrow}${selectionMarker} ${indicatorPrefix}`;
-```
+表示ロジックは `src/cli/ui/components/screens/BranchListScreen.tsx` の
+`renderBranchRow` で統合する。
 
 ## デバッグ方法
 
 ### 1. コンソールログ
 
-```typescript
-console.log('selectedBranches:', Array.from(selectedBranches));
-console.log('isSelected:', selectedBranches.has(branchName));
-```
+一時的なログ出力で選択状態の変化を追跡する。
 
 ### 2. Ink Devtools
 
-Inkの公式devtoolsは現在利用不可のため、代わりに以下の方法を使用：
-
-```typescript
-// デバッグ用のステート監視
-useEffect(() => {
-  console.log('Selection changed:', Array.from(selectedBranches));
-}, [selectedBranches]);
-```
+Inkの公式devtoolsは現在利用不可のため、状態変化のログ出力やテスト実行で代替する。
 
 ### 3. テストでのデバッグ
 
-```typescript
-import { render } from 'ink-testing-library';
-
-it('should toggle selection', () => {
-  const { lastFrame, stdin } = render(<MyComponent />);
-
-  // キー入力をシミュレート
-  stdin.write(' ');
-
-  // 出力を確認
-  console.log(lastFrame());
-
-  // アサーション
-  expect(lastFrame()).toContain('*');
-});
-```
+`ink-testing-library` の `lastFrame` で表示内容を確認する。
 
 ## トラブルシューティング
 
@@ -214,9 +121,7 @@ it('should toggle selection', () => {
 **原因**: `selectedBranches` がundefinedの可能性
 
 **解決策**:
-```typescript
-const isSelected = selectedBranches?.has(item.name) ?? false;
-```
+`selectedBranches` が未定義でも処理できるよう、防御的に判定する。
 
 ---
 
@@ -268,45 +173,15 @@ bun run build
 
 ### 1. 型安全性の確保
 
-```typescript
-// Optional Propsは常に `?:` を使用
-interface BranchListScreenProps {
-  selectedBranches?: Set<string>;
-  onToggleSelection?: (branchName: string) => void;
-}
-
-// 使用時は `?.` または `??` でnullチェック
-const isSelected = selectedBranches?.has(item.name) ?? false;
-```
+OptionalなPropsは常に `?:` を使用し、使用時は `?.` / `??` でnullチェックする。
 
 ### 2. パフォーマンスの最適化
 
-```typescript
-// useCallback でメモ化
-const toggleBranchSelection = useCallback((branchName: string) => {
-  // ...
-}, []); // 依存配列を最小限に
-
-// useMemo でメモ化
-const visibleBranches = useMemo(() => {
-  return branches.filter(b => !hiddenBranches.includes(b.name));
-}, [branches, hiddenBranches]);
-```
+`useCallback` と `useMemo` を使い、依存配列を最小限にして再計算を抑える。
 
 ### 3. コミットメッセージ
 
-Conventional Commitsに従ってください：
-
-```bash
-# 機能追加
-git commit -m "feat: ブランチ選択機能のスペースキー対応"
-
-# バグ修正
-git commit -m "fix: 選択マーカーの表示位置を修正"
-
-# テスト追加
-git commit -m "test: Select コンポーネントのスペースキーテストを追加"
-```
+Conventional Commitsに従う（`feat` / `fix` / `test` など）。
 
 ### 4. コードレビュー前のチェックリスト
 

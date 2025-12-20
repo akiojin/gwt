@@ -12,7 +12,8 @@ $ARGUMENTS
 
 ## 概要
 
-`.specify/memory/constitution.md` はテンプレートです。角括弧 `[PLACEHOLDER]` を具体値に置き換え、必要に応じて関連テンプレートとの整合も取ります。
+`.specify/memory/constitution.md` はテンプレートです。
+角括弧 `[PLACEHOLDER]` を具体値に置き換え、必要に応じて関連テンプレートとの整合も取ります。
 
 ## 実行フロー
 
