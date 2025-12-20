@@ -31,12 +31,10 @@ description: "Continue/Resumeで正しいセッションを再開するための
 - [x] **T0303** `[US3]` UIテストでリスト表示・空表示・選択イベントを検証（`src/cli/ui/__tests__/components/screens/SessionSelectorScreen.test.tsx`）。
 - [x] **T0304** `[US3]` Resume選択時に選択IDでCLIを起動する統合テストを追加（`tests/integration/session-resume.test.ts` など）。
 
-## フェーズ5: US4 Gemini/Qwen対応 (P2)
+## フェーズ5: US4 Gemini対応 (P2)
 - [x] **T0401** `[US4]` GeminiセッションID抽出ヘルパーを実装（`~/.gemini/tmp/**/chats/*.json` 最新ID）（`src/utils/session.ts`）。
 - [x] **T0402** `[US4]` Gemini Continue/Resumeで`--resume <id>`を優先、ID不明時は`--resume`にフォールバック（`src/gemini.ts`）。
-- [x] **T0403** `[US4]` Qwenセッションタグ抽出ヘルパーを実装（`~/.qwen/tmp/**` 保存/チェックポイントから取得）（`src/utils/session.ts`）。
-- [x] **T0404** `[US4]` Qwen Continue/Resume時に保存タグを表示し、起動後ログで`/chat resume <tag>`案内を出す（`src/qwen.ts` など）。
-- [x] **T0405** `[US4]` Gemini/Qwenのセッション保存・再開テストを追加（ユーティリティユニットテスト + CLI引数組み立てテスト）。
+- [x] **T0403** `[US4]` Geminiのセッション保存・再開テストを追加（ユーティリティユニットテスト + CLI引数組み立てテスト）。
 
 ## フェーズ6: ポリッシュと検証
 - [x] **T9001** `[共通]` フォーマット/リンター/markdownlintをローカル実行し、エラーを解消する。

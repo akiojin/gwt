@@ -3,7 +3,7 @@
  */
 import React from "react";
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { render, waitFor, fireEvent, screen } from "@testing-library/react";
+import { render, waitFor } from "@testing-library/react";
 import { ModelSelectorScreen } from "../../components/screens/ModelSelectorScreen.js";
 import type { ModelSelectionResult } from "../../components/screens/ModelSelectorScreen.js";
 import { Window } from "happy-dom";
@@ -54,12 +54,14 @@ describe("ModelSelectorScreen initial selection", () => {
 
     await waitFor(() => expect(selectMocks.length).toBeGreaterThan(0));
     const modelSelect = selectMocks.at(-1);
+    expect(modelSelect).toBeDefined();
     const index = modelSelect.initialIndex as number;
-    // codex-cli models: [gpt-5.1-codex, gpt-5.2, gpt-5.1-codex-max, gpt-5.1-codex-mini, gpt-5.1]
+    // codex-cli models: ["", gpt-5.2-codex, gpt-5.1-codex-max, gpt-5.1-codex-mini, gpt-5.2]
+    // (index 0 = Default/Auto, index 2 = gpt-5.1-codex-max)
     expect(index).toBe(2);
   });
 
-  it("includes gpt-5.2 in model options and preserves ordering", async () => {
+  it("includes gpt-5.2-codex in model options and preserves ordering", async () => {
     const initial: ModelSelectionResult = {
       model: "gpt-5.1-codex-max",
       inferenceLevel: "high",
@@ -75,14 +77,15 @@ describe("ModelSelectorScreen initial selection", () => {
     );
 
     await waitFor(() => expect(selectMocks.length).toBeGreaterThan(1));
-    const modelSelect = selectMocks.at(-1)!;
-    const ids = modelSelect.items.map((item) => item.value);
+    const modelSelect = selectMocks.at(-1);
+    expect(modelSelect).toBeDefined();
+    const ids = modelSelect?.items.map((item) => item.value);
     expect(ids).toEqual([
-      "gpt-5.1-codex",
-      "gpt-5.2",
+      "", // Default (Auto)
+      "gpt-5.2-codex",
       "gpt-5.1-codex-max",
       "gpt-5.1-codex-mini",
-      "gpt-5.1",
+      "gpt-5.2",
     ]);
   });
 });

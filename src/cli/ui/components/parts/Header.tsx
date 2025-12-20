@@ -22,6 +22,14 @@ export interface HeaderProps {
    * @default undefined
    */
   workingDirectory?: string;
+  /**
+   * 現在アクティブなプロファイル名
+   * - string: プロファイル名が利用可能（例: "development"）
+   * - null: プロファイルが選択されていない
+   * - undefined: プロファイル情報未提供
+   * @default undefined
+   */
+  activeProfile?: string | null | undefined;
 }
 
 /**
@@ -36,9 +44,16 @@ export const Header = React.memo(function Header({
   width = 80,
   version,
   workingDirectory,
+  activeProfile,
 }: HeaderProps) {
   const divider = dividerChar.repeat(width);
-  const displayTitle = version ? `${title} v${version}` : title;
+
+  // タイトル構築: "gwt v2.14 | Profile: development" または "gwt v2.14 | Profile: (none)"
+  let displayTitle = version ? `${title} v${version}` : title;
+  if (activeProfile !== undefined) {
+    const profileLabel = activeProfile ?? "(none)";
+    displayTitle = `${displayTitle} | Profile: ${profileLabel}`;
+  }
 
   return (
     <Box flexDirection="column">

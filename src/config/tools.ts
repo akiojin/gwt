@@ -22,6 +22,7 @@ import type {
 } from "../types/tools.js";
 import { BUILTIN_TOOLS } from "./builtin-tools.js";
 import { createLogger } from "../logging/logger.js";
+import { resolveProfileEnv } from "./profiles.js";
 
 const logger = createLogger({ category: "config" });
 
@@ -216,9 +217,26 @@ export async function saveToolsConfig(config: ToolsConfig): Promise<void> {
   await rename(TEMP_CONFIG_PATH, TOOLS_CONFIG_PATH);
 }
 
+/**
+ * 共有環境変数を取得
+ *
+ * AIツール起動時に適用される環境変数を返します。
+ * マージ優先順位（後勝ち）:
+ * 1. tools.json の env フィールド
+ * 2. profiles.yaml のアクティブプロファイル
+ *
+ * @returns 環境変数のRecord
+ */
 export async function getSharedEnvironment(): Promise<Record<string, string>> {
-  const config = await loadToolsConfig();
-  return { ...(config.env ?? {}) };
+  const [config, profileEnv] = await Promise.all([
+    loadToolsConfig(),
+    resolveProfileEnv(),
+  ]);
+
+  return {
+    ...(config.env ?? {}),
+    ...profileEnv, // プロファイルが後勝ち
+  };
 }
 
 /**

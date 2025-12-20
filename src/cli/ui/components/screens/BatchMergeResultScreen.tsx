@@ -1,11 +1,15 @@
 import React from "react";
-import { Box, Text, useInput } from "ink";
+import { Box, Text } from "ink";
 import { Header } from "../parts/Header.js";
 import { Footer } from "../parts/Footer.js";
 import { MergeStatusList } from "../parts/MergeStatusList.js";
+import { useAppInput } from "../../hooks/useAppInput.js";
 import { useTerminalSize } from "../../hooks/useTerminalSize.js";
 import type { BatchMergeResult } from "../../types.js";
 
+/**
+ * Props for `BatchMergeResultScreen`.
+ */
 export interface BatchMergeResultScreenProps {
   result: BatchMergeResult;
   onBack?: () => void;
@@ -25,7 +29,7 @@ export function BatchMergeResultScreen({
   const { rows } = useTerminalSize();
 
   // Handle keyboard input
-  useInput((input, key) => {
+  useAppInput((input, key) => {
     if (input === "q" && onQuit) {
       onQuit();
     } else if (key.escape && onBack) {

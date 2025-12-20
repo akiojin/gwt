@@ -3,11 +3,11 @@
 **仕様ID**: `SPEC-3b0ed29b`
 **作成日**: 2025-12-06
 **ステータス**: ドラフト
-**入力**: ユーザー説明: "AIツール起動機能: gwtから各AIツール（Claude Code、Codex、Gemini、Qwen）を起動する機能。各ツールは独自のデフォルト引数を持ち、モード（新規/継続/再開）に応じた引数、権限スキップオプション、およびCodex CLIのスキル機能（--enable skills）などの機能拡張オプションを提供する。"
+**入力**: ユーザー説明: "AIツール起動機能: gwtから各AIツール（Claude Code、Codex、Gemini）を起動する機能。各ツールは独自のデフォルト引数を持ち、モード（新規/継続/再開）に応じた引数、権限スキップオプション、およびCodex CLIのスキル機能（--enable skills）などの機能拡張オプションを提供する。"
 
 ## 概要
 
-gwtから各AIツール（Claude Code、Codex、Gemini、Qwen）を起動する機能。各ツールは独自のデフォルト引数を持ち、モード（新規/継続/再開）に応じた引数、権限スキップオプション、およびツール固有の機能拡張オプションを提供する。
+gwtから各AIツール（Claude Code、Codex、Gemini）を起動する機能。各ツールは独自のデフォルト引数を持ち、モード（新規/継続/再開）に応じた引数、権限スキップオプション、およびツール固有の機能拡張オプションを提供する。
 
 ## ユーザーシナリオとテスト *(必須)*
 
@@ -17,14 +17,13 @@ gwtから各AIツール（Claude Code、Codex、Gemini、Qwen）を起動する�
 
 **この優先度の理由**: 開発者が最小限の操作でAIツールを起動できることがgwtの基本価値であり、デフォルト設定の自動適用はユーザー体験の根幹となる。
 
-**独立したテスト**: 各AIツール（Claude Code、Codex、Gemini、Qwen）を新規セッションで起動し、期待されるデフォルト引数がプロセスに渡されることを確認すれば検証できる。
+**独立したテスト**: 各AIツール（Claude Code、Codex、Gemini）を新規セッションで起動し、期待されるデフォルト引数がプロセスに渡されることを確認すれば検証できる。
 
 **受け入れシナリオ**:
 
 1. **前提条件** gwtが起動しブランチが選択されている、**操作** AIツール選択画面でCodexを選択して起動、**期待結果** Codexが`--enable web_search_request`、`--enable skills`、`--sandbox workspace-write`などのデフォルト引数付きで起動する
 2. **前提条件** gwtが起動しブランチが選択されている、**操作** AIツール選択画面でClaude Codeを選択して起動、**期待結果** Claude Codeがデフォルト設定で起動し、モデル選択が可能
 3. **前提条件** gwtが起動しブランチが選択されている、**操作** AIツール選択画面でGeminiを選択して起動、**期待結果** Gemini CLIがデフォルト設定で起動する
-4. **前提条件** gwtが起動しブランチが選択されている、**操作** AIツール選択画面でQwenを選択して起動、**期待結果** Qwen CLIが`--checkpointing`オプション付きで起動する
 
 ---
 
@@ -41,7 +40,6 @@ gwtから各AIツール（Claude Code、Codex、Gemini、Qwen）を起動する�
 1. **前提条件** 過去のCodexセッションが存在、**操作** 「Continue」モードでCodexを起動、**期待結果** `resume --last`引数が渡され、最後のセッションが再開される
 2. **前提条件** 過去のClaude Codeセッションが存在、**操作** 「Continue」モードでClaude Codeを起動、**期待結果** `-c`引数が渡され、最新の会話が継続される
 3. **前提条件** 過去のGeminiセッションが存在、**操作** 「Continue」モードでGeminiを起動、**期待結果** `-r latest`引数が渡され、最新セッションが再開される
-4. **前提条件** 過去のQwenセッションが存在、**操作** 「Continue」モードでQwenを起動、**期待結果** Qwenが起動し、ユーザーは`/chat resume`コマンドでセッションを再開できる
 
 ---
 
@@ -58,7 +56,6 @@ gwtから各AIツール（Claude Code、Codex、Gemini、Qwen）を起動する�
 1. **前提条件** 権限スキップモードが有効、**操作** Codexを起動、**期待結果** `--yolo`フラグが渡され、自動承認モードで起動する
 2. **前提条件** 権限スキップモードが有効、**操作** Claude Codeを起動、**期待結果** `--dangerously-skip-permissions`フラグと`IS_SANDBOX=1`環境変数が設定される
 3. **前提条件** 権限スキップモードが有効、**操作** Geminiを起動、**期待結果** `-y`フラグが渡され、自動承認モードで起動する
-4. **前提条件** 権限スキップモードが有効、**操作** Qwenを起動、**期待結果** `--yolo`フラグが渡され、自動承認モードで起動する
 
 ---
 
@@ -107,7 +104,33 @@ gwtから各AIツール（Claude Code、Codex、Gemini、Qwen）を起動する�
 1. **前提条件** feature/update-claude-md のワークツリーでClaude Codeを起動しセッションを終了、**操作** Quick Startを開く、**期待結果** ClaudeのResume行に直近で保存されたセッションIDが表示され、別ブランチのIDは出ない
 2. **前提条件** Codexで新規セッション開始後すぐ終了、**操作** Quick Startを開く、**期待結果** CodexのResume行に開始直後のセッションIDが表示される
 3. **前提条件** agentファイルなどsession_idを持たないファイルが最新更新となっている、**操作** Quick Startを開く、**期待結果** 有効なsession_idを持つ最新ファイルが優先され、無効なファイルで上書きされない
-4. **前提条件** Reasoningを持たないツール(Gemini/Qwen/Claude)、**操作** Quick Startを見る、**期待結果** Reasoning表示が出ず、モデル・スキップ可否・セッションIDのみが表示される
+4. **前提条件** Reasoningを持たないツール(Gemini/Claude)、**操作** Quick Startを見る、**期待結果** Reasoning表示が出ず、モデル・スキップ可否・セッションIDのみが表示される
+
+---
+
+### ユーザーストーリー 7 - Worktree再利用時のブランチ整合性保証 (優先度: P1)
+
+開発者がブランチを選択してAIツールを起動する際、gwtは再利用するWorktreeが選択ブランチと一致していることを確認し、異なるブランチのWorktreeを誤って使わない。
+
+**この優先度の理由**: 異なるブランチのWorktreeを誤って使うと、作業対象のコードや履歴が混在し重大な作業ミスを招くため。  
+**独立したテスト**: `git worktree list` に登録されたパスの現在ブランチが一致しないケースを擬似的に作り、選択ブランチに一致しないWorktreeが再利用されず、警告が表示されることを確認する。
+
+**受け入れシナリオ**:
+1. **前提条件** 選択ブランチに一致するWorktreeが存在、**操作** ツール起動フローを進める、**期待結果** 一致するWorktreeが再利用される
+2. **前提条件** Worktreeのパスが存在するが選択ブランチと異なるブランチがチェックアウトされている、**操作** ツール起動フローを進める、**期待結果** そのWorktreeは再利用されず警告が表示され、選択ブランチに対する正しいWorktreeが用意される
+
+---
+
+### ユーザーストーリー 8 - モデル名表示の正規化 (優先度: P2)
+
+開発者が選択サマリやQuick Startでモデル名を確認する際、モデル名は公式の識別子に正規化され、タイプミスや表記揺れが混入しない。
+
+**この優先度の理由**: モデル名の誤表示は誤設定の疑念を生み、作業の信頼性を損なうため。  
+**独立したテスト**: 既存履歴や選択結果に誤ったモデル名が含まれるケースを作成し、表示および保存時に正規化されることを確認する。
+
+**受け入れシナリオ**:
+1. **前提条件** Claudeモデル名に誤表記（例: 末尾の余分な文字）が含まれる履歴が存在、**操作** Quick Startを表示、**期待結果** 正規化されたモデル名が表示される
+2. **前提条件** モデル選択後に選択サマリが表示される、**操作** サマリを確認、**期待結果** 正規化されたモデル名が表示される
 
 ---
 
@@ -115,6 +138,8 @@ gwtから各AIツール（Claude Code、Codex、Gemini、Qwen）を起動する�
 
 - AIツールのコマンドがPATHに存在しない場合、bunx経由でのフォールバック起動を試み、それも失敗した場合は適切なエラーメッセージとトラブルシューティング情報を表示する
 - worktreeパスが存在しない場合、起動前にエラーを返し、ツールは起動しない
+- `git worktree list` の情報と実際のWorktreeのチェックアウトブランチが一致しない場合は再利用せず警告する
+- 既存履歴に誤ったモデル名が保存されている場合は正規化された表記で表示する
 - Windows環境でのエラー発生時は、プラットフォーム固有のトラブルシューティングメッセージを表示する
 - 環境変数に同じキーが共有envとツール固有envの両方に存在する場合、ツール固有の環境変数が優先される
 - rootユーザーでClaude Codeを起動する場合、Docker/サンドボックス環境として検出され、追加の警告が表示される
@@ -135,7 +160,12 @@ gwtから各AIツール（Claude Code、Codex、Gemini、Qwen）を起動する�
 - **FR-008**: 各AIツールは、起動時に実際に渡されるコマンドライン引数をログに表示**しなければならない**
 - **FR-009**: Quick Startは、選択中のブランチ／ワークツリーごとにツール別最新セッションを表示し、他ブランチのセッションIDを混在させてはならない
 - **FR-010**: Quick Startは、履歴が古い場合でもワークツリー内のセッションファイルを走査し、有効な`session_id`を持つ最新ファイルを優先して表示しなければならない
-- **FR-011**: Quick Startは、Reasoning設定を持たないツール（Claude Code / Gemini / Qwen）ではReasoning表示を出してはならない
+- **FR-011**: Quick Startは、Reasoning設定を持たないツール（Claude Code / Gemini）ではReasoning表示を出してはならない
+- **FR-012**: 各AIツールは、起動プロセスのstdin/stdout/stderrを親ターミナル（TTY）へ接続し、色表示・ターミナル幅・インタラクティブ描画が失われないように**しなければならない**
+- **FR-013**: AIツール選択画面は、未サポートのビルトインツールを選択肢として表示してはならない
+- **FR-014**: Quick Start の履歴に未サポートのツールが含まれる場合、ユーザーに未サポートである旨を明示し、選択されても起動処理を中断しなければならない
+- **FR-015**: 既存Worktreeを再利用する際は、選択ブランチとWorktreeのチェックアウトブランチが一致していることを検証し、一致しない場合は再利用せず警告を表示しなければならない
+- **FR-016**: 選択サマリやQuick Startで表示されるモデル名は公式の識別子に正規化し、タイプミスや表記揺れを含むべきではない
 
 #### Claude Code固有要件
 
@@ -160,15 +190,10 @@ gwtから各AIツール（Claude Code、Codex、Gemini、Qwen）を起動する�
 - **FR-301**: Geminiは、継続/再開モード時に`-r latest`フラグを渡さ**なければならない**
 - **FR-302**: Geminiは、権限スキップモード時に`-y`フラグを渡さ**なければならない**
 
-#### Qwen固有要件
-
-- **FR-401**: Qwenは、デフォルト引数として`--checkpointing`を含め、セッション管理機能を有効化**しなければならない**
-- **FR-402**: Qwenは、権限スキップモード時に`--yolo`フラグを渡さ**なければならない**
-
 ### 主要エンティティ
 
 - **AIToolLaunchOptions**: AIツール起動時のオプション。skipPermissions（真偽値）、mode（"normal" | "continue" | "resume"）、extraArgs（文字列配列）、envOverrides（キー・値のマップ）、model（文字列）を含む
-- **AIToolError**: 各AIツール起動時のエラークラス。ClaudeError、CodexError、GeminiError、QwenErrorとして実装され、message（文字列）、cause（unknown）を含む
+- **AIToolError**: 各AIツール起動時のエラークラス。ClaudeError、CodexError、GeminiErrorとして実装され、message（文字列）、cause（unknown）を含む
 
 ## 成功基準 *(必須)*
 
@@ -179,6 +204,8 @@ gwtから各AIツール（Claude Code、Codex、Gemini、Qwen）を起動する�
 - **SC-003**: AIツール起動エラーの90%以上で、ユーザーが問題を自己解決できるトラブルシューティング情報が提供される
 - **SC-004**: セッション継続/再開機能を使用した場合、95%以上の確率で過去のセッションにアクセスできる
 - **SC-005**: 開発者の95%以上が、既存のAIツールと同じ操作性で全てのツールを利用できる
+- **SC-006**: 選択ブランチと異なるWorktreeが再利用されないことを回帰テストで確認できる
+- **SC-007**: Claudeモデル名の誤表記が選択サマリおよびQuick Startに表示されないことを確認できる
 
 ## 制約と仮定 *(該当する場合)*
 
@@ -214,7 +241,6 @@ gwtから各AIツール（Claude Code、Codex、Gemini、Qwen）を起動する�
 - @anthropic-ai/claude-code: Claude Code CLI
 - @openai/codex: OpenAI Codex CLI
 - @google/gemini-cli: Google Gemini CLI
-- @qwen-code/qwen-code: Qwen CLI
 - bun/bunx: パッケージ実行環境
 - execa: プロセス実行ライブラリ
 
@@ -223,8 +249,6 @@ gwtから各AIツール（Claude Code、Codex、Gemini、Qwen）を起動する�
 - [OpenAI Codex CLI ドキュメント](https://developers.openai.com/codex/cli/)
 - [Claude Code ドキュメント](https://claude.ai/docs)
 - [Gemini CLI ドキュメント](https://ai.google.dev/gemini-api/docs/cli)
-- [Qwen Code ドキュメント](https://qwenlm.github.io/qwen-code-docs/)
 - [既存実装: src/codex.ts](../../src/codex.ts)
 - [既存実装: src/claude.ts](../../src/claude.ts)
 - [既存実装: src/gemini.ts](../../src/gemini.ts)
-- [既存実装: src/qwen.ts](../../src/qwen.ts)

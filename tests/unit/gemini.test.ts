@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
+type MockStdio = "inherit" | number;
+
 // Mock execa before importing
 vi.mock("execa", () => ({
   execa: vi.fn(),
@@ -23,15 +25,16 @@ const mockTerminalStreams = {
 };
 
 const mockChildStdio = {
-  stdin: "inherit" as const,
-  stdout: "inherit" as const,
-  stderr: "inherit" as const,
+  stdin: "inherit" as MockStdio,
+  stdout: "inherit" as MockStdio,
+  stderr: "inherit" as MockStdio,
   cleanup: vi.fn(),
 };
 
 vi.mock("../../src/utils/terminal", () => ({
   getTerminalStreams: vi.fn(() => mockTerminalStreams),
   createChildStdio: vi.fn(() => mockChildStdio),
+  resetTerminalModes: vi.fn(),
 }));
 
 import { launchGeminiCLI } from "../../src/gemini.js";
@@ -68,7 +71,7 @@ describe("launchGeminiCLI", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchGeminiCLI("/test/path");
 
@@ -81,7 +84,7 @@ describe("launchGeminiCLI", () => {
       );
 
       // Second call should be bunx with no default args
-      // Gemini uses stdout: "pipe" to capture session ID, stderr: inherit for direct output
+      // Gemini uses stdout/stderr inherit to preserve TTY (colors/width/interactive UI)
       expect(mockExeca).toHaveBeenNthCalledWith(
         2,
         "bunx",
@@ -89,7 +92,7 @@ describe("launchGeminiCLI", () => {
         expect.objectContaining({
           cwd: "/test/path",
           stdin: "inherit",
-          stdout: "pipe",
+          stdout: "inherit",
           stderr: "inherit",
         }),
       );
@@ -108,13 +111,13 @@ describe("launchGeminiCLI", () => {
           stdout: "/usr/local/bin/gemini",
           stderr: "",
           exitCode: 0,
-        } as any)
+        })
         .mockResolvedValueOnce({
           // gemini execution
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchGeminiCLI("/test/path");
 
@@ -127,14 +130,14 @@ describe("launchGeminiCLI", () => {
       );
 
       // Second call should use local gemini command (not bunx)
-      // Note: stdout is piped to capture session ID, stderr is inherit
+      // Note: stdout/stderr are inherited to preserve TTY
       expect(mockExeca).toHaveBeenNthCalledWith(
         2,
         "gemini",
         [],
         expect.objectContaining({
           cwd: "/test/path",
-          stdout: "pipe",
+          stdout: "inherit",
           stderr: "inherit",
         }),
       );
@@ -167,7 +170,7 @@ describe("launchGeminiCLI", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchGeminiCLI("/test/path", { mode: "normal" });
 
@@ -187,7 +190,7 @@ describe("launchGeminiCLI", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchGeminiCLI("/test/path", { mode: "continue" });
 
@@ -212,7 +215,7 @@ describe("launchGeminiCLI", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchGeminiCLI("/test/path", { mode: "resume" });
 
@@ -239,7 +242,7 @@ describe("launchGeminiCLI", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchGeminiCLI("/test/path", { skipPermissions: true });
 
@@ -264,7 +267,7 @@ describe("launchGeminiCLI", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchGeminiCLI("/test/path", { skipPermissions: false });
 
@@ -291,7 +294,7 @@ describe("launchGeminiCLI", () => {
           // bunx execution failure
           code: "ENOENT",
           message: "bunx command not found",
-        } as any)
+        })
         .mockRejectedValueOnce(new Error("Command not found")); // which/where in catch block
 
       await expect(launchGeminiCLI("/test/path")).rejects.toThrow(
@@ -308,9 +311,10 @@ describe("launchGeminiCLI", () => {
       try {
         await launchGeminiCLI("/test/path");
         expect.fail("Should have thrown an error");
-      } catch (error: any) {
-        expect(error.name).toBe("GeminiError");
-        expect(error.cause).toBe(originalError);
+      } catch (error: unknown) {
+        const err = error as Error & { cause?: unknown };
+        expect(err.name).toBe("GeminiError");
+        expect(err.cause).toBe(originalError);
       }
     });
 
@@ -331,7 +335,7 @@ describe("launchGeminiCLI", () => {
           // bunx execution failure
           code: "ENOENT",
           message: "bunx command not found",
-        } as any);
+        });
 
       try {
         await expect(launchGeminiCLI("/test/path")).rejects.toThrow();
@@ -361,7 +365,7 @@ describe("launchGeminiCLI", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchGeminiCLI("/test/path", {
         envOverrides: {
@@ -391,7 +395,7 @@ describe("launchGeminiCLI", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchGeminiCLI("/test/path", {
         extraArgs: ["--verbose", "--debug"],
@@ -415,7 +419,7 @@ describe("launchGeminiCLI", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchGeminiCLI("/test/path");
 
@@ -425,9 +429,9 @@ describe("launchGeminiCLI", () => {
 
     it("T015: childStdio.cleanupがusingFallback=true時に呼び出される", async () => {
       mockTerminalStreams.usingFallback = true;
-      mockChildStdio.stdin = 101 as unknown as any;
-      mockChildStdio.stdout = 102 as unknown as any;
-      mockChildStdio.stderr = 103 as unknown as any;
+      mockChildStdio.stdin = 101;
+      mockChildStdio.stdout = 102;
+      mockChildStdio.stderr = 103;
 
       mockExeca
         .mockRejectedValueOnce(new Error("Command not found")) // which/where
@@ -435,18 +439,18 @@ describe("launchGeminiCLI", () => {
           stdout: "",
           stderr: "",
           exitCode: 0,
-        } as any);
+        });
 
       await launchGeminiCLI("/test/path");
 
-      // Verify file descriptors are used for stdin, but stdout is piped for session ID capture
+      // Verify child stdio values are passed through (TTY should be preserved)
       expect(mockExeca).toHaveBeenNthCalledWith(
         2,
         "bunx",
         expect.any(Array),
         expect.objectContaining({
           stdin: 101,
-          stdout: "pipe",
+          stdout: 102,
           stderr: 103,
         }),
       );
@@ -459,6 +463,67 @@ describe("launchGeminiCLI", () => {
       mockChildStdio.stdin = "inherit";
       mockChildStdio.stdout = "inherit";
       mockChildStdio.stderr = "inherit";
+    });
+
+    it("T016: resetTerminalModesが正常時に呼び出される", async () => {
+      mockExeca
+        .mockResolvedValueOnce({
+          // which/where gemini (success)
+          stdout: "/usr/local/bin/gemini",
+          stderr: "",
+          exitCode: 0,
+        })
+        .mockResolvedValueOnce({
+          // gemini execution
+          stdout: "",
+          stderr: "",
+          exitCode: 0,
+        });
+
+      await launchGeminiCLI("/test/path");
+
+      const { resetTerminalModes } =
+        await import("../../src/utils/terminal.js");
+      const mockResetTerminalModes =
+        resetTerminalModes as unknown as ReturnType<typeof vi.fn>;
+
+      expect(mockResetTerminalModes).toHaveBeenCalledTimes(2);
+      expect(mockResetTerminalModes).toHaveBeenNthCalledWith(
+        1,
+        mockTerminalStreams.stdout,
+      );
+      expect(mockResetTerminalModes).toHaveBeenNthCalledWith(
+        2,
+        mockTerminalStreams.stdout,
+      );
+    });
+
+    it("T017: resetTerminalModesがエラー時でも呼び出される", async () => {
+      mockExeca
+        .mockResolvedValueOnce({
+          // which/where gemini (success)
+          stdout: "/usr/local/bin/gemini",
+          stderr: "",
+          exitCode: 0,
+        })
+        .mockRejectedValueOnce(new Error("Boom")) // gemini execution
+        .mockResolvedValueOnce({
+          // which/where gemini (catch block)
+          stdout: "/usr/local/bin/gemini",
+          stderr: "",
+          exitCode: 0,
+        });
+
+      await expect(launchGeminiCLI("/test/path")).rejects.toThrow(
+        /Failed to launch Gemini CLI/,
+      );
+
+      const { resetTerminalModes } =
+        await import("../../src/utils/terminal.js");
+      const mockResetTerminalModes =
+        resetTerminalModes as unknown as ReturnType<typeof vi.fn>;
+
+      expect(mockResetTerminalModes).toHaveBeenCalledTimes(2);
     });
   });
 

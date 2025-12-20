@@ -1,11 +1,18 @@
 import React, { useEffect, useState } from "react";
-import { Box, Text, useInput, useStdout } from "ink";
+import { Box, Text, useStdout } from "ink";
+import { useAppInput } from "../../hooks/useAppInput.js";
 
+/**
+ * Item descriptor for the `Select` component.
+ */
 export interface SelectItem {
   label: string;
   value: string;
 }
 
+/**
+ * Props for the `Select` component.
+ */
 export interface SelectProps<T extends SelectItem = SelectItem> {
   items: T[];
   onSelect: (item: T) => void;
@@ -21,6 +28,8 @@ export interface SelectProps<T extends SelectItem = SelectItem> {
   // Optional controlled component props for cursor position
   selectedIndex?: number;
   onSelectedIndexChange?: (index: number) => void;
+  onSpace?: (item: T) => void;
+  onEscape?: () => void;
 }
 
 /**
@@ -40,7 +49,9 @@ function arePropsEqual<T extends SelectItem = SelectItem>(
     prevProps.onSelect !== nextProps.onSelect ||
     prevProps.onSelectedIndexChange !== nextProps.onSelectedIndexChange ||
     prevProps.renderIndicator !== nextProps.renderIndicator ||
-    prevProps.renderItem !== nextProps.renderItem
+    prevProps.renderItem !== nextProps.renderItem ||
+    prevProps.onSpace !== nextProps.onSpace ||
+    prevProps.onEscape !== nextProps.onEscape
   ) {
     return false;
   }
@@ -86,6 +97,8 @@ const SelectComponent = <T extends SelectItem = SelectItem>({
   renderItem,
   selectedIndex: externalSelectedIndex,
   onSelectedIndexChange,
+  onSpace,
+  onEscape,
 }: SelectProps<T>) => {
   // Support both controlled and uncontrolled modes
   const [internalSelectedIndex, setInternalSelectedIndex] =
@@ -133,7 +146,7 @@ const SelectComponent = <T extends SelectItem = SelectItem>({
     }
   }, [items, limit]);
 
-  useInput((input, key) => {
+  useAppInput((input, key) => {
     if (disabled) {
       return;
     }
@@ -170,6 +183,13 @@ const SelectComponent = <T extends SelectItem = SelectItem>({
       if (selectedItem && !disabled) {
         onSelect(selectedItem);
       }
+    } else if (input === ' ' && onSpace) {
+      const selectedItem = items[selectedIndex];
+      if (selectedItem && !disabled) {
+        onSpace(selectedItem);
+      }
+    } else if (key.escape && onEscape) {
+      onEscape();
     }
     // All other keys are ignored and will propagate to parent components
   });

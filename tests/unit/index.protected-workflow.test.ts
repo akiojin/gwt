@@ -16,6 +16,11 @@ const {
   getRepositoryRootMock,
   getCurrentBranchMock,
   installDependenciesMock,
+  hasUncommittedChangesMock,
+  hasUnpushedCommitsMock,
+  getUncommittedChangesCountMock,
+  getUnpushedCommitsCountMock,
+  pushBranchToRemoteMock,
 } = vi.hoisted(() => ({
   execaMock: vi.fn(async () => ({ stdout: "" })),
   ensureWorktreeMock: vi.fn(async () => "/repo"),
@@ -34,6 +39,11 @@ const {
     manager: "bun" as const,
     lockfile: "/repo/bun.lock",
   })),
+  hasUncommittedChangesMock: vi.fn(async () => false),
+  hasUnpushedCommitsMock: vi.fn(async () => false),
+  getUncommittedChangesCountMock: vi.fn(async () => 0),
+  getUnpushedCommitsCountMock: vi.fn(async () => 0),
+  pushBranchToRemoteMock: vi.fn(async () => undefined),
 }));
 
 const DependencyInstallErrorMock = vi.hoisted(
@@ -52,6 +62,7 @@ const waitForUserAcknowledgementMock = vi.hoisted(() =>
 
 const waitForEnterMock = vi.hoisted(() => vi.fn<() => Promise<void>>());
 
+const confirmYesNoMock = vi.hoisted(() => vi.fn<() => Promise<boolean>>());
 vi.mock("execa", () => ({
   execa: execaMock,
 }));
@@ -69,6 +80,11 @@ vi.mock("../../src/git.js", async () => {
     pullFastForward: pullFastForwardMock,
     getBranchDivergenceStatuses: getBranchDivergenceStatusesMock,
     getCurrentBranch: getCurrentBranchMock,
+    hasUncommittedChanges: hasUncommittedChangesMock,
+    hasUnpushedCommits: hasUnpushedCommitsMock,
+    getUncommittedChangesCount: getUncommittedChangesCountMock,
+    getUnpushedCommitsCount: getUnpushedCommitsCountMock,
+    pushBranchToRemote: pushBranchToRemoteMock,
     GitError: actual.GitError,
   };
 });
@@ -79,6 +95,9 @@ vi.mock("../../src/worktree.js", async () => {
   );
   return {
     worktreeExists: worktreeExistsMock,
+    resolveWorktreePathForBranch: vi.fn(async (branch: string) => ({
+      path: await worktreeExistsMock(branch),
+    })),
     isProtectedBranchName: (name: string) =>
       name === "main" || name === "origin/main",
     switchToProtectedBranch: switchToProtectedBranchMock,
@@ -147,6 +166,7 @@ vi.mock("../../src/utils/prompt.js", async () => {
   return {
     ...actual,
     waitForEnter: waitForEnterMock,
+    confirmYesNo: confirmYesNoMock,
   };
 });
 
@@ -168,15 +188,27 @@ beforeEach(() => {
   getCurrentBranchMock.mockClear();
   switchToProtectedBranchMock.mockClear();
   installDependenciesMock.mockClear();
+  hasUncommittedChangesMock.mockClear();
+  hasUnpushedCommitsMock.mockClear();
+  getUncommittedChangesCountMock.mockClear();
+  getUnpushedCommitsCountMock.mockClear();
+  pushBranchToRemoteMock.mockClear();
   installDependenciesMock.mockResolvedValue({
     skipped: false,
     manager: "bun",
     lockfile: "/repo/bun.lock",
   });
+  hasUncommittedChangesMock.mockResolvedValue(false);
+  hasUnpushedCommitsMock.mockResolvedValue(false);
+  getUncommittedChangesCountMock.mockResolvedValue(0);
+  getUnpushedCommitsCountMock.mockResolvedValue(0);
+  pushBranchToRemoteMock.mockResolvedValue(undefined);
   waitForUserAcknowledgementMock.mockClear();
   waitForUserAcknowledgementMock.mockResolvedValue(undefined);
   waitForEnterMock.mockClear();
   waitForEnterMock.mockResolvedValue(undefined);
+  confirmYesNoMock.mockClear();
+  confirmYesNoMock.mockResolvedValue(false);
   switchToProtectedBranchMock.mockResolvedValue("local");
   branchExistsMock.mockResolvedValue(true);
   getCurrentBranchMock.mockResolvedValue("develop");

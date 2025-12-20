@@ -1,11 +1,12 @@
 import React, { useCallback, useState, useMemo, useEffect } from "react";
-import { Box, Text, useInput } from "ink";
+import { Box, Text } from "ink";
 import { Header } from "../parts/Header.js";
 import { Stats } from "../parts/Stats.js";
 import { Footer } from "../parts/Footer.js";
 import { Select } from "../common/Select.js";
 import { Input } from "../common/Input.js";
 import { LoadingIndicator } from "../common/LoadingIndicator.js";
+import { useAppInput } from "../../hooks/useAppInput.js";
 import { useTerminalSize } from "../../hooks/useTerminalSize.js";
 import type { BranchItem, Statistics } from "../../types.js";
 import stringWidth from "string-width";
@@ -27,7 +28,7 @@ const WIDTH_OVERRIDES: Record<string, number> = {
   // Worktree status icons
   "🟢": 2,
   "⚪": 2,
-  "🟠": 1,
+  "🔴": 2,
   // Change status icons
   "👉": 1,
   "💾": 1,
@@ -77,6 +78,9 @@ interface CleanupUIState {
   inputLocked: boolean;
 }
 
+/**
+ * Props for `BranchListScreen`.
+ */
 export interface BranchListScreenProps {
   branches: BranchItem[];
   stats: Statistics;
@@ -84,6 +88,7 @@ export interface BranchListScreenProps {
   onQuit?: () => void;
   onCleanupCommand?: () => void;
   onRefresh?: () => void;
+  onOpenProfiles?: () => void;
   loading?: boolean;
   error?: Error | null;
   lastUpdated?: Date | null;
@@ -91,6 +96,7 @@ export interface BranchListScreenProps {
   cleanupUI?: CleanupUIState;
   version?: string | null;
   workingDirectory?: string;
+  activeProfile?: string | null;
   // Test support: allow external control of filter mode and query
   testFilterMode?: boolean;
   testOnFilterModeChange?: (mode: boolean) => void;
@@ -110,6 +116,7 @@ export function BranchListScreen({
   onSelect,
   onCleanupCommand,
   onRefresh,
+  onOpenProfiles,
   loading = false,
   error = null,
   lastUpdated = null,
@@ -117,6 +124,7 @@ export function BranchListScreen({
   cleanupUI,
   version,
   workingDirectory,
+  activeProfile,
   testFilterMode,
   testOnFilterModeChange,
   testFilterQuery,
@@ -125,7 +133,7 @@ export function BranchListScreen({
   onToggleSelect,
 }: BranchListScreenProps) {
   const { rows } = useTerminalSize();
-  const headerText = "  Legend: [ ]/[ * ] select  🟢/⚪ worktree  🛡/⚠ safe";
+  const headerText = "  Legend: [ ]/[ * ] select  🟢/🔴/⚪ worktree  🛡/⚠ safe";
   const selectedSet = useMemo(
     () => new Set(selectedBranches),
     [selectedBranches],
@@ -162,7 +170,7 @@ export function BranchListScreen({
   // Handle keyboard input
   // Note: Input component blocks specific keys (c/r/f) using blockKeys prop
   // This prevents shortcuts from triggering while typing in the filter
-  useInput((input, key) => {
+  useAppInput((input, key) => {
     if (cleanupUI?.inputLocked) {
       return;
     }
@@ -206,6 +214,8 @@ export function BranchListScreen({
       onCleanupCommand?.();
     } else if (input === "r" && onRefresh) {
       onRefresh();
+    } else if (input === "p" && onOpenProfiles) {
+      onOpenProfiles();
     }
   });
 
@@ -262,7 +272,8 @@ export function BranchListScreen({
     { key: "enter", description: "Select" },
     { key: "f", description: "Filter" },
     { key: "r", description: "Refresh" },
-    { key: "c", description: "Cleanup branches" },
+    { key: "c", description: "Cleanup" },
+    { key: "p", description: "Profiles" },
   ];
 
   const formatLatestCommit = useCallback((timestamp?: number) => {
@@ -319,8 +330,6 @@ export function BranchListScreen({
           return chalk.cyan(label);
         case "gemini-cli":
           return chalk.magenta(label);
-        case "qwen-cli":
-          return chalk.green(label);
         default: {
           const trimmed = label.trim().toLowerCase();
           if (!toolId || trimmed === "unknown") {
@@ -398,11 +407,18 @@ export function BranchListScreen({
       const indicatorPrefix = indicatorIcon ? `${indicatorIcon} ` : "";
 
       const isChecked = selectedSet.has(item.name);
-      const selectionIcon = isChecked ? "[*]" : "[ ]";
-      const hasWorktree =
-        item.worktreeStatus === "active" ||
-        item.worktreeStatus === "inaccessible";
-      const worktreeIcon = hasWorktree ? chalk.green("🟢") : chalk.gray("⚪");
+      const isWarning = Boolean(item.hasUnpushedCommits) || !item.mergedPR;
+      const selectionIcon = isChecked
+        ? isWarning
+          ? chalk.red("[*]")
+          : "[*]"
+        : "[ ]";
+      let worktreeIcon = chalk.gray("⚪");
+      if (item.worktreeStatus === "active") {
+        worktreeIcon = chalk.green("🟢");
+      } else if (item.worktreeStatus === "inaccessible") {
+        worktreeIcon = chalk.red("🔴");
+      }
       const safeIcon =
         item.safeToCleanup === true ? chalk.green("🛡") : chalk.yellow("⚠");
       const stateCluster = `${selectionIcon} ${worktreeIcon} ${safeIcon}`;
@@ -514,6 +530,7 @@ export function BranchListScreen({
         titleColor="cyan"
         version={version}
         {...(workingDirectory !== undefined && { workingDirectory })}
+        activeProfile={activeProfile}
       />
 
       {/* Filter Input - Always visible */}

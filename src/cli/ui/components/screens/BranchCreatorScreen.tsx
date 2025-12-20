@@ -1,9 +1,10 @@
 import React, { useState, useCallback, useEffect, useRef } from "react";
-import { Box, Text, useInput } from "ink";
+import { Box, Text } from "ink";
 import { Header } from "../parts/Header.js";
 import { Footer } from "../parts/Footer.js";
 import { Select } from "../common/Select.js";
 import { Input } from "../common/Input.js";
+import { useAppInput } from "../../hooks/useAppInput.js";
 import { useTerminalSize } from "../../hooks/useTerminalSize.js";
 import { BRANCH_PREFIXES } from "../../../../config/constants.js";
 
@@ -12,6 +13,9 @@ type Step = "type-selection" | "name-input";
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
 
+/**
+ * Props for `BranchCreatorScreen`.
+ */
 export interface BranchCreatorScreenProps {
   onBack: () => void;
   onCreate: (branchName: string) => Promise<void>;
@@ -52,7 +56,7 @@ export function BranchCreatorScreen({
   const spinnerFrame = SPINNER_FRAMES[spinnerIndex] ?? SPINNER_FRAMES[0];
 
   // Handle keyboard input for back navigation
-  useInput((input, key) => {
+  useAppInput((input, key) => {
     if (isCreating) {
       return;
     }
