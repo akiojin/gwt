@@ -24,8 +24,9 @@ beforeEach(() => {
     vi.useFakeTimers();
   }
   const window = new Window();
-  globalThis.window = window as any;
-  globalThis.document = window.document as any;
+  globalThis.window = window as unknown as typeof globalThis.window;
+  globalThis.document =
+    window.document as unknown as typeof globalThis.document;
 });
 
 afterEach(() => {
@@ -78,18 +79,18 @@ describe("LoadingIndicator", () => {
 
     expect(getMessageText(container)).toContain("Loading data");
 
-      await act(async () => {
-        rerender(
-          <LoadingIndicator
-            isLoading={false}
-            message="Loading data"
-            delay={10}
-          />,
-        );
-        if (typeof vi.advanceTimersByTimeAsync === "function") {
-          await vi.advanceTimersByTimeAsync(0);
-        }
-      });
+    await act(async () => {
+      rerender(
+        <LoadingIndicator
+          isLoading={false}
+          message="Loading data"
+          delay={10}
+        />,
+      );
+      if (typeof vi.advanceTimersByTimeAsync === "function") {
+        await vi.advanceTimersByTimeAsync(0);
+      }
+    });
 
     expect(container.textContent).toBe("");
   });

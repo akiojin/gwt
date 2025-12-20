@@ -7,16 +7,22 @@ import { render, waitFor } from "@testing-library/react";
 import { ModelSelectorScreen } from "../../components/screens/ModelSelectorScreen.js";
 import type { ModelSelectionResult } from "../../components/screens/ModelSelectorScreen.js";
 import { Window } from "happy-dom";
+import type {
+  SelectProps,
+  SelectItem,
+} from "../../components/common/Select.js";
 
-const selectMocks: any[] = [];
+const selectMocks: SelectProps<SelectItem>[] = [];
 
 vi.mock("../../components/common/Select.js", () => {
   return {
-    Select: (props: any) => {
+    Select: (props: SelectProps<SelectItem>) => {
       selectMocks.push(props);
       return React.createElement("div", {
         "data-testid": "select-mock",
-        onClick: () => props.onSelect && props.onSelect(props.items[props.initialIndex ?? 0]),
+        onClick: () =>
+          props.onSelect &&
+          props.onSelect(props.items[props.initialIndex ?? 0]),
       });
     },
   };
@@ -26,8 +32,9 @@ describe("ModelSelectorScreen initial selection", () => {
   beforeEach(() => {
     selectMocks.length = 0;
     const window = new Window();
-    globalThis.window = window as any;
-    globalThis.document = window.document as any;
+    globalThis.window = window as unknown as typeof globalThis.window;
+    globalThis.document =
+      window.document as unknown as typeof globalThis.document;
   });
 
   it("sets model list initialIndex based on previous selection", async () => {
@@ -48,11 +55,12 @@ describe("ModelSelectorScreen initial selection", () => {
     await waitFor(() => expect(selectMocks.length).toBeGreaterThan(0));
     const modelSelect = selectMocks.at(-1);
     const index = modelSelect.initialIndex as number;
-    // codex-cli models: [gpt-5.1-codex, gpt-5.1-codex-max, gpt-5.1-codex-mini, gpt-5.1]
-    expect(index).toBe(1);
+    // codex-cli models: ["", gpt-5.2-codex, gpt-5.1-codex-max, gpt-5.1-codex-mini, gpt-5.2]
+    // (index 0 = Default/Auto, index 2 = gpt-5.1-codex-max)
+    expect(index).toBe(2);
   });
 
-  it("sets inference list initialIndex based on previous reasoning level", async () => {
+  it("includes gpt-5.2-codex in model options and preserves ordering", async () => {
     const initial: ModelSelectionResult = {
       model: "gpt-5.1-codex-max",
       inferenceLevel: "high",
@@ -67,15 +75,16 @@ describe("ModelSelectorScreen initial selection", () => {
       />,
     );
 
-    // trigger onSelect for model to render inference step
-    await waitFor(() => expect(selectMocks.length).toBeGreaterThan(0));
-    const modelSelect = selectMocks[0];
-    modelSelect.onSelect(modelSelect.items[modelSelect.initialIndex]);
-
     await waitFor(() => expect(selectMocks.length).toBeGreaterThan(1));
-    const inferenceSelect = selectMocks[1];
-    const index = inferenceSelect.initialIndex as number;
-    // inference order for codex-max: [xhigh, high, medium, low]; "high" should be index 1
-    expect(index).toBe(1);
+    const modelSelect = selectMocks.at(-1);
+    expect(modelSelect).toBeDefined();
+    const ids = modelSelect?.items.map((item) => item.value);
+    expect(ids).toEqual([
+      "", // Default (Auto)
+      "gpt-5.2-codex",
+      "gpt-5.1-codex-max",
+      "gpt-5.1-codex-mini",
+      "gpt-5.2",
+    ]);
   });
 });

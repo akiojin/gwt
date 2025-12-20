@@ -1,40 +1,30 @@
 import { execa } from "execa";
 import { platform } from "os";
+import { getToolById } from "../config/tools.js";
+import {
+  CODEX_DEFAULT_ARGS,
+  CLAUDE_PERMISSION_SKIP_ARGS,
+} from "../shared/aiToolConstants.js";
+import { prepareCustomToolExecution } from "./customToolResolver.js";
+import type { LaunchOptions } from "../types/tools.js";
 
 const DETECTION_COMMAND = platform() === "win32" ? "where" : "which";
 const MIN_BUN_MAJOR = 1;
 
 export const CLAUDE_CLI_PACKAGE = "@anthropic-ai/claude-code@latest";
 export const CODEX_CLI_PACKAGE = "@openai/codex@latest";
-export const CODEX_DEFAULT_ARGS = [
-  "--enable",
-  "web_search_request",
-  "--model=gpt-5-codex",
-  "--sandbox",
-  "workspace-write",
-  "-c",
-  "model_reasoning_effort=high",
-  "-c",
-  "model_reasoning_summaries=detailed",
-  "-c",
-  "sandbox_workspace_write.network_access=true",
-  "-c",
-  "shell_environment_policy.inherit=all",
-  "-c",
-  "shell_environment_policy.ignore_default_excludes=true",
-  "-c",
-  "shell_environment_policy.experimental_use_profile=true",
-];
 
 export type ResolverErrorCode =
   | "COMMAND_NOT_FOUND"
   | "BUNX_NOT_FOUND"
-  | "BUN_TOO_OLD";
+  | "BUN_TOO_OLD"
+  | "CUSTOM_TOOL_NOT_FOUND";
 
 export interface ResolvedCommand {
   command: string;
   args: string[];
   usesFallback: boolean;
+  env?: NodeJS.ProcessEnv;
 }
 
 export class AIToolResolutionError extends Error {
@@ -92,10 +82,8 @@ async function ensureBunxAvailable(): Promise<void> {
         if (error instanceof AIToolResolutionError) {
           throw error;
         }
-        const isNodeError =
-          typeof error === "object" && error !== null && "code" in error;
-
-        if (isNodeError && (error as NodeJS.ErrnoException).code === "ENOENT") {
+        const err = error as NodeJS.ErrnoException;
+        if (err?.code === "ENOENT") {
           throw new AIToolResolutionError(
             "BUNX_NOT_FOUND",
             "bun command not found while verifying bunx. Install Bun 1.0+ and ensure it is on PATH.",
@@ -105,15 +93,9 @@ async function ensureBunxAvailable(): Promise<void> {
             ],
           );
         }
-        const errorMessage =
-          typeof error === "object" && error !== null && "message" in error
-            ? String(
-                (error as { message?: unknown }).message ?? "unknown error",
-              )
-            : "unknown error";
         throw new AIToolResolutionError(
           "BUN_TOO_OLD",
-          `Failed to verify Bun version: ${errorMessage}`,
+          `Failed to verify Bun version: ${err?.message ?? "unknown error"}`,
         );
       }
     })();
@@ -131,9 +113,14 @@ export interface ClaudeCommandOptions {
   mode?: "normal" | "continue" | "resume";
   skipPermissions?: boolean;
   extraArgs?: string[];
+  args?: string[];
 }
 
 export function buildClaudeArgs(options: ClaudeCommandOptions = {}): string[] {
+  if (options.args) {
+    return [...options.args];
+  }
+
   const args: string[] = [];
 
   switch (options.mode) {
@@ -148,7 +135,7 @@ export function buildClaudeArgs(options: ClaudeCommandOptions = {}): string[] {
   }
 
   if (options.skipPermissions) {
-    args.push("--dangerously-skip-permissions");
+    args.push(...CLAUDE_PERMISSION_SKIP_ARGS);
   }
 
   if (options.extraArgs?.length) {
@@ -183,9 +170,14 @@ export interface CodexCommandOptions {
   mode?: "normal" | "continue" | "resume";
   bypassApprovals?: boolean;
   extraArgs?: string[];
+  args?: string[];
 }
 
 export function buildCodexArgs(options: CodexCommandOptions = {}): string[] {
+  if (options.args) {
+    return [...options.args];
+  }
+
   const args: string[] = [];
 
   switch (options.mode) {
@@ -229,6 +221,35 @@ export async function resolveCodexCommand(
     command: "bunx",
     args: [CODEX_CLI_PACKAGE, ...args],
     usesFallback: true,
+  };
+}
+
+export interface CustomToolCommandOptions extends LaunchOptions {
+  toolId: string;
+}
+
+export async function resolveCustomToolCommand(
+  options: CustomToolCommandOptions,
+): Promise<ResolvedCommand> {
+  const tool = await getToolById(options.toolId);
+  if (!tool) {
+    throw new AIToolResolutionError(
+      "CUSTOM_TOOL_NOT_FOUND",
+      `Custom tool not found: ${options.toolId}`,
+      [
+        "Update ~/.gwt/tools.json to include this ID",
+        "Reload the Web UI after editing the tools list",
+      ],
+    );
+  }
+
+  const execution = await prepareCustomToolExecution(tool, options);
+
+  return {
+    command: execution.command,
+    args: execution.args,
+    usesFallback: tool.type === "bunx",
+    ...(execution.env ? { env: execution.env } : {}),
   };
 }
 

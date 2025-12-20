@@ -1,14 +1,11 @@
 /**
  * @vitest-environment happy-dom
  */
- 
+
 import { describe, it, expect, vi } from "vitest";
 import { render } from "ink-testing-library";
 import React from "react";
 import { Select } from "../../../components/common/Select.js";
-
-// Helper to wait for async updates
-const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 interface TestItem {
   label: string;
@@ -183,6 +180,17 @@ describe("Select", () => {
       stdin.write("\r"); // Enter key
 
       // Should be called at least once
+      expect(onSelect).toHaveBeenCalled();
+    });
+
+    it("should call onSelect when linefeed is pressed (cooked mode Enter)", () => {
+      const onSelect = vi.fn();
+      const { stdin } = render(
+        <Select items={mockItems} onSelect={onSelect} />,
+      );
+
+      stdin.write("\n"); // Linefeed key
+
       expect(onSelect).toHaveBeenCalled();
     });
 

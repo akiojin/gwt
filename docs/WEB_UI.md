@@ -15,6 +15,8 @@ bun run start:web
 bunx . serve
 ```
 
+通常の `gwt` 起動でも Web UI はバックグラウンドで自動起動します。CLI なしで Web UI だけを起動したい場合に上記コマンドを使ってください。
+
 デフォルトでは `http://localhost:3000` でアクセス可能です。
 
 ## 機能概要

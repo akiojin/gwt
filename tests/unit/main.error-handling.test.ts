@@ -26,7 +26,7 @@ describe("main error handling", () => {
         tool: "codex-cli",
         mode: "normal" as const,
         skipPermissions: false,
-        model: "gpt-5.1-codex",
+        model: "gpt-5.2-codex",
       },
       undefined,
     ];
@@ -133,6 +133,7 @@ describe("main error handling", () => {
     }));
 
     viWithDoMock.doMock?.("../../src/config/tools.js", () => ({
+      CONFIG_DIR: "/tmp/gwt-test",
       getToolById: vi.fn(async () => ({
         id: "codex-cli",
         displayName: "Codex CLI",

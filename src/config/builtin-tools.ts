@@ -1,10 +1,14 @@
 /**
  * ビルトインAIツール定義
  *
- * Claude Code、Codex、Gemini、Qwen の CustomAITool 形式定義
+ * Claude Code、Codex、Gemini の CustomAITool 形式定義
  */
 
 import type { CustomAITool } from "../types/tools.js";
+import {
+  CLAUDE_PERMISSION_SKIP_ARGS,
+  CODEX_DEFAULT_ARGS,
+} from "../shared/aiToolConstants.js";
 
 /**
  * Claude Code のビルトイン定義
@@ -19,7 +23,7 @@ export const CLAUDE_CODE_TOOL: CustomAITool = {
     continue: ["-c"],
     resume: ["-r"],
   },
-  permissionSkipArgs: ["--yes"],
+  permissionSkipArgs: Array.from(CLAUDE_PERMISSION_SKIP_ARGS),
 };
 
 /**
@@ -30,7 +34,7 @@ export const CODEX_CLI_TOOL: CustomAITool = {
   displayName: "Codex",
   type: "bunx",
   command: "@openai/codex@latest",
-  defaultArgs: ["--auto-approve", "--verbose"],
+  defaultArgs: Array.from(CODEX_DEFAULT_ARGS),
   modeArgs: {
     normal: [],
     continue: ["resume", "--last"],
@@ -55,28 +59,10 @@ export const GEMINI_CLI_TOOL: CustomAITool = {
 };
 
 /**
- * Qwen のビルトイン定義
- */
-export const QWEN_CLI_TOOL: CustomAITool = {
-  id: "qwen-cli",
-  displayName: "Qwen",
-  type: "bunx",
-  command: "@qwen-code/qwen-code@latest",
-  defaultArgs: ["--checkpointing"],
-  modeArgs: {
-    normal: [],
-    continue: [],
-    resume: [],
-  },
-  permissionSkipArgs: ["--yolo"],
-};
-
-/**
  * すべてのビルトインツール
  */
 export const BUILTIN_TOOLS: CustomAITool[] = [
   CLAUDE_CODE_TOOL,
   CODEX_CLI_TOOL,
   GEMINI_CLI_TOOL,
-  QWEN_CLI_TOOL,
 ];

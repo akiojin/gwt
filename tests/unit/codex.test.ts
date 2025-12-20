@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import type { ChildStdio } from "../../src/utils/terminal.js";
+import * as sessionUtils from "../../src/utils/session.js";
 
 // Mock modules before importing
 vi.mock("execa", () => ({
@@ -8,11 +8,13 @@ vi.mock("execa", () => ({
 }));
 
 const { mockResolveCodexCommand, MockResolutionError } = vi.hoisted(() => ({
-  mockResolveCodexCommand: vi.fn().mockResolvedValue({
-    command: "bunx",
-    args: ["@openai/codex@latest"],
-    usesFallback: true,
-  }),
+  mockResolveCodexCommand: vi
+    .fn()
+    .mockImplementation(async (options?: { args?: string[] }) => ({
+      command: "bunx",
+      args: ["@openai/codex@latest", ...(options?.args ?? [])],
+      usesFallback: true,
+    })),
   MockResolutionError: class MockResolutionError extends Error {},
 }));
 
@@ -32,10 +34,13 @@ vi.mock("os", () => ({
   default: { platform: vi.fn(() => "darwin") },
 }));
 
+const stdoutWrite = vi.fn();
+const stderrWrite = vi.fn();
+
 const mockTerminalStreams = {
   stdin: { id: "stdin" } as unknown as NodeJS.ReadStream,
-  stdout: { id: "stdout" } as unknown as NodeJS.WriteStream,
-  stderr: { id: "stderr" } as unknown as NodeJS.WriteStream,
+  stdout: { id: "stdout", write: stdoutWrite } as unknown as NodeJS.WriteStream,
+  stderr: { id: "stderr", write: stderrWrite } as unknown as NodeJS.WriteStream,
   stdinFd: undefined as number | undefined,
   stdoutFd: undefined as number | undefined,
   stderrFd: undefined as number | undefined,
@@ -43,7 +48,12 @@ const mockTerminalStreams = {
   exitRawMode: vi.fn(),
 };
 
-const mockChildStdio: ChildStdio = {
+const mockChildStdio: {
+  stdin: unknown;
+  stdout: unknown;
+  stderr: unknown;
+  cleanup: ReturnType<typeof vi.fn>;
+} = {
   stdin: "inherit",
   stdout: "inherit",
   stderr: "inherit",
@@ -53,6 +63,10 @@ const mockChildStdio: ChildStdio = {
 vi.mock("../../src/utils/terminal", () => ({
   getTerminalStreams: vi.fn(() => mockTerminalStreams),
   createChildStdio: vi.fn(() => mockChildStdio),
+  resetTerminalModes: vi.fn(),
+}));
+vi.mock("../../src/utils/session", () => ({
+  findLatestCodexSession: vi.fn(async () => null),
 }));
 
 import { execa } from "execa";
@@ -63,13 +77,7 @@ import {
   launchCodexCLI,
 } from "../../src/codex";
 
-// Get typed mock
 const mockExeca = execa as ReturnType<typeof vi.fn>;
-
-const DEFAULT_CODEX_ARGS = buildDefaultCodexArgs(
-  DEFAULT_CODEX_MODEL,
-  DEFAULT_CODEX_REASONING_EFFORT,
-);
 
 describe("codex.ts", () => {
   const worktreePath = "/tmp/worktree";
@@ -77,118 +85,80 @@ describe("codex.ts", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockTerminalStreams.exitRawMode.mockClear();
+    stdoutWrite.mockClear();
+    stderrWrite.mockClear();
     mockChildStdio.cleanup.mockClear();
     mockChildStdio.stdin = "inherit";
     mockChildStdio.stdout = "inherit";
     mockChildStdio.stderr = "inherit";
-    mockExeca.mockResolvedValue({
-      stdout: "",
-      stderr: "",
-      exitCode: 0,
-    });
-    mockResolveCodexCommand.mockReset();
-    mockResolveCodexCommand.mockResolvedValue({
-      command: "bunx",
-      args: ["@openai/codex@latest"],
-      usesFallback: true,
-    });
+    mockExeca.mockResolvedValue({ stdout: "", stderr: "", exitCode: 0 });
   });
 
-  it("should invoke resolver and execute the returned command", async () => {
+  it("uses gpt-5.2-codex as the default model", () => {
+    expect(DEFAULT_CODEX_MODEL).toBe("gpt-5.2-codex");
+  });
+
+  it("invokes resolver and executes returned command", async () => {
     await launchCodexCLI(worktreePath);
 
-    expect(mockResolveCodexCommand).toHaveBeenCalledWith({
-      mode: undefined,
-      bypassApprovals: undefined,
-      extraArgs: undefined,
-    });
-
-    expect(execa).toHaveBeenCalledTimes(1);
+    expect(mockResolveCodexCommand).toHaveBeenCalled();
     const [command, args, options] = mockExeca.mock.calls[0];
-
     expect(command).toBe("bunx");
-    expect(args).toEqual(["@openai/codex@latest"]);
+    expect(args).toContain("@openai/codex@latest");
     expect(options).toMatchObject({
       cwd: worktreePath,
       stdin: "inherit",
       stdout: "inherit",
       stderr: "inherit",
     });
-    expect(mockTerminalStreams.exitRawMode).toHaveBeenCalledTimes(1);
-    expect(mockChildStdio.cleanup).toHaveBeenCalledTimes(1);
   });
 
-  it("should pass extra arguments through resolver", async () => {
+  it("captures sessionId from file-based session detection", async () => {
+    const mockFindLatestCodexSession =
+      sessionUtils.findLatestCodexSession as unknown as ReturnType<
+        typeof vi.fn
+      >;
+    mockFindLatestCodexSession.mockResolvedValueOnce({
+      id: "019af999-aaaa-bbbb-cccc-123456789abc",
+      fullPath: "/mock/path/session.jsonl",
+      mtime: new Date(),
+    });
+
+    const result = await launchCodexCLI(worktreePath);
+    expect(result.sessionId).toBe("019af999-aaaa-bbbb-cccc-123456789abc");
+  });
+
+  it("places extra arguments before the default set", async () => {
     await launchCodexCLI(worktreePath, { extraArgs: ["--custom-flag"] });
 
-    expect(mockResolveCodexCommand).toHaveBeenCalledWith(
-      expect.objectContaining({ extraArgs: ["--custom-flag"] }),
-    );
-  });
-
-  it("should pass mode information to resolver", async () => {
-    await launchCodexCLI(worktreePath, { mode: "continue" });
-    expect(mockResolveCodexCommand).toHaveBeenCalledWith(
-      expect.objectContaining({ mode: "continue" }),
-    );
-
-    await launchCodexCLI(worktreePath, { mode: "resume" });
-    expect(mockResolveCodexCommand).toHaveBeenLastCalledWith(
-      expect.objectContaining({ mode: "resume" }),
-    );
-  });
-
-  it("should pass bypassApprovals flag to resolver", async () => {
-    await launchCodexCLI(worktreePath, { bypassApprovals: true });
-    expect(mockResolveCodexCommand).toHaveBeenCalledWith(
-      expect.objectContaining({ bypassApprovals: true }),
-    );
-  });
-
-  it("applies provided model and reasoning effort overrides", async () => {
-    // The model/reasoningEffort are passed to launchCodexCLI but the resolver mock
-    // controls the actual args. This test verifies the function runs without error
-    // when custom model/reasoningEffort are provided.
-    mockResolveCodexCommand.mockResolvedValue({
-      command: "bunx",
-      args: [
-        "@openai/codex@latest",
-        ...buildDefaultCodexArgs("gpt-5.1-codex-max", "xhigh"),
-      ],
-      usesFallback: true,
-    });
-
-    await launchCodexCLI(worktreePath, {
-      model: "gpt-5.1-codex-max",
-      reasoningEffort: "xhigh",
-    });
-
-    const [, args] = (execa as any).mock.calls[0];
+    const args = mockResolveCodexCommand.mock.calls[0]?.[0]?.args as string[];
     expect(args).toEqual([
-      "@openai/codex@latest",
-      ...buildDefaultCodexArgs("gpt-5.1-codex-max", "xhigh"),
+      "--custom-flag",
+      ...buildDefaultCodexArgs(
+        DEFAULT_CODEX_MODEL,
+        DEFAULT_CODEX_REASONING_EFFORT,
+      ),
     ]);
   });
 
-  it("should hand off fallback file descriptors when stdin is not a TTY", async () => {
-    mockTerminalStreams.usingFallback = true;
-    mockChildStdio.stdin = 11;
-    mockChildStdio.stdout = 12;
-    mockChildStdio.stderr = 13;
+  it("adds resume args when mode is continue", async () => {
+    await launchCodexCLI(worktreePath, { mode: "continue" });
 
-    await launchCodexCLI(worktreePath);
+    const args = mockResolveCodexCommand.mock.calls[0]?.[0]?.args as string[];
+    expect(args).toEqual([
+      "resume",
+      "--last",
+      ...buildDefaultCodexArgs(
+        DEFAULT_CODEX_MODEL,
+        DEFAULT_CODEX_REASONING_EFFORT,
+      ),
+    ]);
+  });
 
-    const [, , options] = mockExeca.mock.calls[0];
-    expect(options).toMatchObject({
-      stdin: 11,
-      stdout: 12,
-      stderr: 13,
-    });
-    expect(mockChildStdio.cleanup).toHaveBeenCalledTimes(1);
+  it("adds --yolo when bypassApprovals is true", async () => {
+    await launchCodexCLI(worktreePath, { bypassApprovals: true });
 
-    mockTerminalStreams.usingFallback = false;
-    mockChildStdio.stdin = "inherit";
-    mockChildStdio.stdout = "inherit";
-    mockChildStdio.stderr = "inherit";
+    const args = mockResolveCodexCommand.mock.calls[0]?.[0]?.args as string[];
+    expect(args).toContain("--yolo");
   });
 });

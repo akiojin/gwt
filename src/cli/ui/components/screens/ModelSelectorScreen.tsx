@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Box, Text, useInput } from "ink";
+import { Box, Text } from "ink";
 import { Header } from "../parts/Header.js";
 import { Footer } from "../parts/Footer.js";
 import { Select, type SelectItem } from "../common/Select.js";
+import { useAppInput } from "../../hooks/useAppInput.js";
 import { useTerminalSize } from "../../hooks/useTerminalSize.js";
 import type { AITool, InferenceLevel, ModelOption } from "../../types.js";
 import {
@@ -12,6 +13,9 @@ import {
   getModelOptions,
 } from "../../utils/modelOptions.js";
 
+/**
+ * Result returned by `ModelSelectorScreen`.
+ */
 export interface ModelSelectionResult {
   model: string | null;
   inferenceLevel?: InferenceLevel;
@@ -25,6 +29,9 @@ interface InferenceSelectItem extends SelectItem {
   hint?: string;
 }
 
+/**
+ * Props for `ModelSelectorScreen`.
+ */
 export interface ModelSelectorScreenProps {
   tool: AITool;
   onBack: () => void;
@@ -37,7 +44,6 @@ const TOOL_LABELS: Record<string, string> = {
   "claude-code": "Claude Code",
   "codex-cli": "Codex",
   "gemini-cli": "Gemini",
-  "qwen-cli": "Qwen",
 };
 
 const INFERENCE_LABELS: Record<InferenceLevel, string> = {
@@ -106,62 +112,60 @@ export function ModelSelectorScreen({
     [selectedModel],
   );
 
-  const inferenceItems: InferenceSelectItem[] = useMemo(
-    () => {
-      return inferenceOptions.map((level) => {
-        if (selectedModel?.id === "gpt-5.1-codex-max") {
-          if (level === "low") {
-            return {
-              label: "Low",
-              value: level,
-              hint: "Fast responses with lighter reasoning",
-            };
-          }
-          if (level === "medium") {
-            return {
-              label: "Medium (default)",
-              value: level,
-              hint: "Balances speed and reasoning depth for everyday tasks",
-            };
-          }
-          if (level === "high") {
-            return {
-              label: "High",
-              value: level,
-              hint: "Maximizes reasoning depth for complex problems",
-            };
-          }
-          if (level === "xhigh") {
-            return {
-              label: "Extra high",
-              value: level,
-              hint:
-                "Extra high reasoning depth; may quickly consume Plus plan rate limits.",
-            };
-          }
+  const inferenceItems: InferenceSelectItem[] = useMemo(() => {
+    return inferenceOptions.map((level) => {
+      if (selectedModel?.id === "gpt-5.1-codex-max") {
+        if (level === "low") {
+          return {
+            label: "Low",
+            value: level,
+            hint: "Fast responses with lighter reasoning",
+          };
         }
+        if (level === "medium") {
+          return {
+            label: "Medium (default)",
+            value: level,
+            hint: "Balances speed and reasoning depth for everyday tasks",
+          };
+        }
+        if (level === "high") {
+          return {
+            label: "High",
+            value: level,
+            hint: "Maximizes reasoning depth for complex problems",
+          };
+        }
+        if (level === "xhigh") {
+          return {
+            label: "Extra high",
+            value: level,
+            hint: "Extra high reasoning depth; may quickly consume Plus plan rate limits.",
+          };
+        }
+      }
 
-        return {
-          label: INFERENCE_LABELS[level],
-          value: level,
-        };
-      });
-    },
-    [inferenceOptions, selectedModel?.id],
-  );
+      return {
+        label: INFERENCE_LABELS[level],
+        value: level,
+      };
+    });
+  }, [inferenceOptions, selectedModel?.id]);
 
   const defaultInferenceIndex = useMemo(() => {
     const initialLevel = initialSelection?.inferenceLevel;
     if (initialLevel && inferenceOptions.includes(initialLevel)) {
       return inferenceOptions.findIndex((lvl) => lvl === initialLevel);
     }
-    const defaultLevel = getDefaultInferenceForModel(selectedModel ?? undefined);
+    const defaultLevel = getDefaultInferenceForModel(
+      selectedModel ?? undefined,
+    );
     if (!defaultLevel) return 0;
     const index = inferenceOptions.findIndex((lvl) => lvl === defaultLevel);
     return index >= 0 ? index : 0;
   }, [initialSelection?.inferenceLevel, inferenceOptions, selectedModel]);
 
-  useInput((_input, key) => {
+  useAppInput((_input, key) => {
     if (key.escape) {
       if (step === "inference") {
         setStep("model");
@@ -223,18 +227,16 @@ export function ModelSelectorScreen({
       {isSelected ? (
         <Text color="cyan">➤ {item.label}</Text>
       ) : (
-        <Text>  {item.label}</Text>
+        <Text> {item.label}</Text>
       )}
-      {item.description ? (
-        <Text color="gray">    {item.description}</Text>
-      ) : null}
+      {item.description ? <Text color="gray"> {item.description}</Text> : null}
     </Box>
   );
 
   return (
     <Box flexDirection="column" height={rows}>
       <Header
-        title={step === "model" ? "Model Selection" : "Inference Level"}
+        title={step === "model" ? "Model Selection" : "Reasoning Level"}
         titleColor="blue"
         version={version}
       />
@@ -259,19 +261,13 @@ export function ModelSelectorScreen({
                 {modelOptions.length === 0 ? " (no options)" : ""}
               </Text>
             </Box>
-            {tool === "qwen-cli" ? (
-              <Box marginBottom={1} flexDirection="column">
-                <Text>Latest Qwen models from Alibaba Cloud ModelStudio:</Text>
-                <Text>• coder-model (qwen3-coder-plus-2025-09-23)</Text>
-                <Text>• vision-model (qwen3-vl-plus-2025-09-23)</Text>
-              </Box>
-            ) : null}
 
             {modelItems.length === 0 ? (
               <Select
                 items={[
                   {
-                    label: "No model selection required. Press Enter to continue.",
+                    label:
+                      "No model selection required. Press Enter to continue.",
                     value: "__continue__",
                   },
                 ]}
@@ -302,10 +298,10 @@ export function ModelSelectorScreen({
                   {isSelected ? (
                     <Text color="cyan">➤ {item.label}</Text>
                   ) : (
-                    <Text>  {item.label}</Text>
+                    <Text> {item.label}</Text>
                   )}
                   {"hint" in item && item.hint ? (
-                    <Text color="gray">    {item.hint}</Text>
+                    <Text color="gray"> {item.hint}</Text>
                   ) : null}
                 </Box>
               )}

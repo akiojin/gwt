@@ -2,12 +2,17 @@ import { execa } from "execa";
 import type { Options as ExecaOptions } from "execa";
 import chalk from "chalk";
 import { existsSync } from "fs";
-import { createChildStdio, getTerminalStreams } from "./utils/terminal.js";
+import {
+  createChildStdio,
+  getTerminalStreams,
+  resetTerminalModes,
+} from "./utils/terminal.js";
+import { findLatestClaudeSession } from "./utils/session.js";
+import { CLAUDE_PERMISSION_SKIP_ARGS } from "./shared/aiToolConstants.js";
 import {
   resolveClaudeCommand,
   AIToolResolutionError,
   type ResolvedCommand,
-  type ClaudeCommandOptions,
 } from "./services/aiToolResolver.js";
 
 export class ClaudeError extends Error {
@@ -28,9 +33,11 @@ export async function launchClaudeCode(
     extraArgs?: string[];
     envOverrides?: Record<string, string>;
     model?: string;
+    sessionId?: string | null;
   } = {},
-): Promise<void> {
+): Promise<{ sessionId?: string | null }> {
   const terminal = getTerminalStreams();
+  const startedAt = Date.now();
   let lastResolvedCommand: ResolvedCommand | null = null;
 
   try {
@@ -41,16 +48,37 @@ export async function launchClaudeCode(
     console.log(chalk.blue("🚀 Launching Claude Code..."));
     console.log(chalk.gray(`   Working directory: ${worktreePath}`));
 
+    const args: string[] = [];
+
     if (options.model && options.model !== "opus") {
+      args.push("--model", options.model);
       console.log(chalk.green(`   🎯 Model: ${options.model}`));
     } else if (options.model === "opus") {
       console.log(chalk.green(`   🎯 Model: ${options.model} (Default)`));
     }
 
-    // Handle execution mode
+    const resumeSessionId =
+      options.sessionId && options.sessionId.trim().length > 0
+        ? options.sessionId.trim()
+        : null;
+    const usedExplicitSessionId =
+      Boolean(resumeSessionId) &&
+      (options.mode === "continue" || options.mode === "resume");
+
     switch (options.mode) {
       case "continue":
-        console.log(chalk.cyan("   📱 Continuing most recent conversation"));
+        if (resumeSessionId) {
+          args.push("--resume", resumeSessionId);
+          console.log(
+            chalk.cyan(`   📱 Continuing specific session: ${resumeSessionId}`),
+          );
+        } else {
+          console.log(
+            chalk.yellow(
+              "   ℹ️  No saved session ID for this branch/tool. Starting new session.",
+            ),
+          );
+        }
         break;
       case "resume":
         console.log(
@@ -61,6 +89,15 @@ export async function launchClaudeCode(
         console.log(
           chalk.cyan("   ℹ️  Using default Claude Code resume behavior"),
         );
+
+        if (resumeSessionId) {
+          args.push("--resume", resumeSessionId);
+          console.log(
+            chalk.cyan(`   🔄 Resuming Claude session: ${resumeSessionId}`),
+          );
+        } else {
+          args.push("-r");
+        }
         break;
       case "normal":
       default:
@@ -76,6 +113,7 @@ export async function launchClaudeCode(
     }
 
     if (options.skipPermissions) {
+      args.push(...CLAUDE_PERMISSION_SKIP_ARGS);
       console.log(chalk.yellow("   ⚠️  Skipping permissions check"));
 
       if (isRoot) {
@@ -87,32 +125,30 @@ export async function launchClaudeCode(
       }
     }
 
-    terminal.exitRawMode();
-
-    const envConfig: NodeJS.ProcessEnv = {
-      ...process.env,
-      ...(options.envOverrides ?? {}),
-    };
-
-    if (isRoot && options.skipPermissions) {
-      envConfig.IS_SANDBOX = "1";
+    if (options.extraArgs && options.extraArgs.length > 0) {
+      args.push(...options.extraArgs);
     }
+
+    console.log(chalk.gray(`   📋 Args: ${args.join(" ")}`));
+
+    terminal.exitRawMode();
+    resetTerminalModes(terminal.stdout);
+
+    const baseEnv = { ...process.env, ...(options.envOverrides ?? {}) };
+    const launchEnvSource =
+      options.skipPermissions && !baseEnv.IS_SANDBOX
+        ? { ...baseEnv, IS_SANDBOX: "1" }
+        : baseEnv;
+    const launchEnv = Object.fromEntries(
+      Object.entries(launchEnvSource).filter(
+        (entry): entry is [string, string] => typeof entry[1] === "string",
+      ),
+    );
 
     const childStdio = createChildStdio();
 
     try {
-      const resolverOptions: ClaudeCommandOptions = {};
-      if (options.mode) {
-        resolverOptions.mode = options.mode;
-      }
-      if (typeof options.skipPermissions !== "undefined") {
-        resolverOptions.skipPermissions = options.skipPermissions;
-      }
-      if (options.extraArgs && options.extraArgs.length > 0) {
-        resolverOptions.extraArgs = options.extraArgs;
-      }
-
-      lastResolvedCommand = await resolveClaudeCommand(resolverOptions);
+      lastResolvedCommand = await resolveClaudeCommand({ args });
 
       if (lastResolvedCommand.usesFallback) {
         console.log(
@@ -134,16 +170,12 @@ export async function launchClaudeCode(
           ),
         );
         console.log(
-          chalk.yellow(
-            "      Windows: irm https://claude.ai/install.ps1 | iex",
-          ),
+          chalk.yellow("      Windows: irm https://claude.ai/install.ps1 | iex"),
         );
         console.log("");
         await new Promise((resolve) => setTimeout(resolve, 2000));
       } else {
-        console.log(
-          chalk.green("   ✨ Using locally installed claude command"),
-        );
+        console.log(chalk.green("   ✨ Using locally installed claude command"));
       }
 
       const execaOptions: ExecaOptions = {
@@ -152,7 +184,7 @@ export async function launchClaudeCode(
         stdin: childStdio.stdin as ExecaOptions["stdin"],
         stdout: childStdio.stdout as ExecaOptions["stdout"],
         stderr: childStdio.stderr as ExecaOptions["stderr"],
-        env: envConfig,
+        env: launchEnv,
       };
 
       await execa(
@@ -163,6 +195,36 @@ export async function launchClaudeCode(
     } finally {
       childStdio.cleanup();
     }
+
+    let capturedSessionId: string | null = null;
+    const finishedAt = Date.now();
+    try {
+      const latest = await findLatestClaudeSession(worktreePath, {
+        since: startedAt,
+        until: finishedAt + 30_000,
+        preferClosestTo: finishedAt,
+        windowMs: 10 * 60 * 1000,
+      });
+      const detectedSessionId = latest?.id ?? null;
+      capturedSessionId = usedExplicitSessionId
+        ? resumeSessionId
+        : detectedSessionId;
+    } catch {
+      capturedSessionId = usedExplicitSessionId ? resumeSessionId : null;
+    }
+
+    if (capturedSessionId) {
+      console.log(chalk.cyan(`\n   🆔 Session ID: ${capturedSessionId}`));
+      console.log(
+        chalk.gray(`   Resume command: claude --resume ${capturedSessionId}`),
+      );
+    } else {
+      console.log(
+        chalk.yellow("\n   ℹ️  Could not determine Claude session ID automatically."),
+      );
+    }
+
+    return capturedSessionId ? { sessionId: capturedSessionId } : {};
   } catch (error: unknown) {
     if (error instanceof AIToolResolutionError) {
       throw new ClaudeError(error.message, error);
@@ -194,9 +256,7 @@ export async function launchClaudeCode(
         );
       } else {
         console.error(
-          chalk.yellow(
-            "   1. Confirm that Bun is installed and bunx is available",
-          ),
+          chalk.yellow("   1. Confirm that Bun is installed and bunx is available"),
         );
         console.error(
           chalk.yellow(
@@ -212,6 +272,7 @@ export async function launchClaudeCode(
     throw new ClaudeError(errorMessage, error);
   } finally {
     terminal.exitRawMode();
+    resetTerminalModes(terminal.stdout);
   }
 }
 

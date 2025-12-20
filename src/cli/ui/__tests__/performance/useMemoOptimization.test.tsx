@@ -18,9 +18,6 @@ vi.mock("../../hooks/useGitData.js", () => ({
   useGitData: vi.fn(),
 }));
 
-import { useGitData } from "../../hooks/useGitData.js";
-// const mockUseGitData = useGitData as ReturnType<typeof vi.fn>;
-
 // Helper function to create a stable hash of branch data
 function createBranchHash(branches: BranchInfo[]): string {
   return branches.map((b) => `${b.name}-${b.type}-${b.isCurrent}`).join(",");
@@ -63,8 +60,9 @@ function TestComponent({
 describe("useMemo Optimization (T082-1)", () => {
   beforeEach(() => {
     const window = new Window();
-    globalThis.window = window as any;
-    globalThis.document = window.document as any;
+    globalThis.window = window as unknown as typeof globalThis.window;
+    globalThis.document =
+      window.document as unknown as typeof globalThis.document;
     vi.clearAllMocks();
   });
 

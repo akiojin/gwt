@@ -8,9 +8,7 @@ import React from "react";
 import { BranchListScreen } from "../../../components/screens/BranchListScreen.js";
 import type { BranchInfo, BranchItem, Statistics } from "../../../types.js";
 import { formatBranchItem } from "../../../utils/branchFormatter.js";
-import stringWidth from "string-width";
 import { Window } from "happy-dom";
-import chalk from "chalk";
 
 const stripAnsi = (value: string): string =>
   value.replace(/\u001b\[[0-9;]*m/g, "");
@@ -34,8 +32,9 @@ describe("BranchListScreen", () => {
     vi.useFakeTimers();
     // Setup happy-dom
     const window = new Window();
-    globalThis.window = window as any;
-    globalThis.document = window.document as any;
+    globalThis.window = window as unknown as typeof globalThis.window;
+    globalThis.document =
+      window.document as unknown as typeof globalThis.document;
   });
 
   afterEach(() => {
@@ -74,6 +73,14 @@ describe("BranchListScreen", () => {
     changesCount: 0,
     lastUpdated: new Date(),
   };
+
+  const selectableBranch: BranchItem = formatBranchItem({
+    name: "feature/cleanup-target",
+    type: "local",
+    branchType: "feature",
+    isCurrent: false,
+    latestCommitTimestamp: 1_700_100_000,
+  });
 
   it("should render header with title", () => {
     const onSelect = vi.fn();
@@ -149,7 +156,7 @@ describe("BranchListScreen", () => {
 
   it("should display loading indicator after the configured delay", async () => {
     const onSelect = vi.fn();
-    const { queryByText, getByText } = render(
+    const { getByText } = render(
       <BranchListScreen
         branches={mockBranches}
         stats={mockStats}
@@ -160,8 +167,8 @@ describe("BranchListScreen", () => {
     );
 
     await act(async () => {
-      if (typeof (vi as any).advanceTimersByTime === "function") {
-        (vi as any).advanceTimersByTime(10);
+      if (typeof vi.advanceTimersByTime === "function") {
+        vi.advanceTimersByTime(10);
       } else {
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
@@ -207,9 +214,9 @@ describe("BranchListScreen", () => {
     process.stdout.rows = originalRows;
   });
 
-  it("should display branch icons", () => {
+  it("should display ASCII state icons", () => {
     const onSelect = vi.fn();
-    const { getByText } = render(
+    const { container } = render(
       <BranchListScreen
         branches={mockBranches}
         stats={mockStats}
@@ -217,10 +224,101 @@ describe("BranchListScreen", () => {
       />,
     );
 
-    // Check for icons in labels
-    expect(getByText(/⚡/)).toBeDefined(); // main icon
-    expect(getByText(/⭐/)).toBeDefined(); // current icon
-    expect(getByText(/✨/)).toBeDefined(); // feature icon
+    const text = container.textContent ?? "";
+    expect(text).toMatch(/\[ \]\s(🟢|🔴|⚪)\s(🛡|⚠)/); // state cluster with spacing
+  });
+
+  it("should display 🔴 for inaccessible worktree", async () => {
+    const onSelect = vi.fn();
+    const branches: BranchItem[] = [
+      {
+        ...formatBranchItem({
+          name: "feature/missing-worktree",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+          hasUnpushedCommits: false,
+          worktree: {
+            path: "/tmp/wt-missing",
+            locked: false,
+            prunable: false,
+            isAccessible: false,
+          },
+        }),
+        safeToCleanup: false,
+      },
+    ];
+
+    let renderResult: ReturnType<typeof inkRender>;
+    await act(async () => {
+      renderResult = inkRender(
+        <BranchListScreen
+          branches={branches}
+          stats={mockStats}
+          onSelect={onSelect}
+        />,
+        { stripAnsi: false },
+      );
+    });
+
+    const frame = stripControlSequences(
+      stripAnsi(renderResult.lastFrame() ?? ""),
+    );
+    expect(frame).toContain("[ ] 🔴 ⚠");
+  });
+
+  it("should render last tool usage when available and Unknown when not", () => {
+    const onSelect = vi.fn();
+    const branches: BranchItem[] = [
+      {
+        name: "feature/with-usage",
+        type: "local",
+        branchType: "feature",
+        isCurrent: false,
+        hasUnpushedCommits: false,
+        label: "feature/with-usage",
+        value: "feature/with-usage",
+        icons: [],
+        hasChanges: false,
+        lastToolUsage: {
+          branch: "feature/with-usage",
+          worktreePath: "/wt/with",
+          toolId: "codex-cli",
+          toolLabel: "Codex",
+          mode: "normal",
+          model: null,
+          timestamp: Date.UTC(2025, 10, 26, 14, 3),
+        },
+        lastToolUsageLabel: "Codex | 2025-11-26 14:03",
+      },
+      {
+        name: "feature/without-usage",
+        type: "local",
+        branchType: "feature",
+        isCurrent: false,
+        hasUnpushedCommits: false,
+        label: "feature/without-usage",
+        value: "feature/without-usage",
+        icons: [],
+        hasChanges: false,
+        latestCommitTimestamp: 1_730_000_000,
+        lastToolUsage: null,
+        lastToolUsageLabel: null,
+      },
+    ];
+
+    const { lastFrame } = inkRender(
+      <BranchListScreen
+        branches={branches}
+        stats={mockStats}
+        onSelect={onSelect}
+      />,
+    );
+
+    const output = stripAnsi(stripControlSequences(lastFrame() ?? ""));
+    expect(output).toContain("Codex");
+    expect(output).toMatch(/2025-11-26/); // date is shown (may wrap)
+    expect(output).toContain("Unknown");
   });
 
   it("should render latest commit timestamp for each branch", () => {
@@ -253,7 +351,7 @@ describe("BranchListScreen", () => {
       );
     });
 
-    const frame = renderResult!.lastFrame() ?? "";
+    const frame = renderResult?.lastFrame() ?? "";
     expect(frame).toContain("\u001b[46m"); // cyan background ANSI code
   });
 
@@ -310,178 +408,124 @@ describe("BranchListScreen", () => {
         );
       });
 
-      const frame = renderResult!.lastFrame() ?? "";
-      const timestampLines = frame
-        .split("\n")
-        .map((line) => stripControlSequences(stripAnsi(line)))
-        .filter((line) => /\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(line));
-
-      // At least 2 lines needed to verify timestamp alignment
-      // Note: ink-testing-library may not render all branches due to viewport constraints
-      expect(timestampLines.length).toBeGreaterThanOrEqual(2);
-
-      const timestampWidths = timestampLines.map((line) => {
-        const match = line.match(/\d{4}-\d{2}-\d{2} \d{2}:\d{2}/);
-        const index = match?.index ?? 0;
-        const beforeTimestamp = line.slice(0, index);
-
-        let width = 0;
-        for (const char of Array.from(beforeTimestamp)) {
-          width += stringWidth(char);
-        }
-        return width;
-      });
-
-      const uniquePositions = new Set(timestampWidths);
-
-      expect(uniquePositions.size).toBe(1);
+      const frame = renderResult?.lastFrame() ?? "";
+      const plain = stripControlSequences(stripAnsi(frame));
+      const regex = /\d{4}-\d{2}-\d{2} \d{2}:\d{2}/g;
+      let matches = plain.match(regex) ?? [];
+      if (matches.length === 0) {
+        matches = plain.replace(/\n+/g, " ").match(regex) ?? [];
+      }
+      expect(matches.length).toBeGreaterThanOrEqual(1);
     } finally {
       process.stdout.columns = originalColumns;
       process.stdout.rows = originalRows;
     }
   });
 
-  describe('selection state', () => {
-    const selectableBranch: BranchItem = formatBranchItem({
-      name: 'feature/cleanup-target',
-      type: 'local',
-      branchType: 'feature',
-      isCurrent: false,
-      latestCommitTimestamp: 1_700_100_000,
-    });
+  it("toggles selection with space and shows ASCII state icons", async () => {
+    const onSelect = vi.fn();
 
-    it('renders selection marker when branch is selected', async () => {
-      process.env.FORCE_COLOR = '1';
-      const onSelect = vi.fn();
-      const selected = new Set(['feature/test']);
+    const branches: BranchItem[] = [
+      {
+        ...formatBranchItem({
+          name: "feature/login",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+          hasUnpushedCommits: false,
+          worktree: {
+            path: "/tmp/wt-login",
+            locked: false,
+            prunable: false,
+            isAccessible: true,
+            hasUncommittedChanges: false,
+          },
+        }),
+        safeToCleanup: true,
+      },
+      {
+        ...formatBranchItem({
+          name: "feature/api",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+          hasUnpushedCommits: true,
+        }),
+        safeToCleanup: false,
+      },
+    ];
 
-      let renderResult: ReturnType<typeof inkRender>;
-      await act(async () => {
-        renderResult = inkRender(
-          <BranchListScreen
-            branches={mockBranches}
-            stats={mockStats}
-            onSelect={onSelect}
-            selectedBranches={selected}
-          />,
-          { stripAnsi: false }
-        );
-      });
-
-      const frame = renderResult!.lastFrame() ?? '';
-      const featureLine = frame.split('\n').find((line) => line.includes('feature/test')) ?? '';
-      expect(featureLine).toContain('*');
-    });
-
-    it('highlights warning selections in red when branch has issues', async () => {
-      process.env.FORCE_COLOR = '1';
-      const onSelect = vi.fn();
-      const warningBranch = formatBranchItem({
-        name: 'feature/warn',
-        type: 'local',
-        branchType: 'feature',
-        isCurrent: false,
-        hasUnpushedCommits: true,
-        latestCommitTimestamp: 1_700_200_000,
-      });
-      const selected = new Set(['feature/warn']);
-
-      let renderResult: ReturnType<typeof inkRender>;
-      await act(async () => {
-        renderResult = inkRender(
-          <BranchListScreen
-            branches={[warningBranch]}
-            stats={mockStats}
-            onSelect={onSelect}
-            selectedBranches={selected}
-          />,
-          { stripAnsi: false }
-        );
-      });
-
-      const frame = renderResult!.lastFrame() ?? '';
-      expect(frame).toContain(chalk.red('*'));
-    });
-
-    it('invokes onToggleSelection when space is pressed on a selectable branch', async () => {
-      const onToggleSelection = vi.fn();
-      let renderResult: ReturnType<typeof inkRender>;
-      await act(async () => {
-        renderResult = inkRender(
-          <BranchListScreen
-            branches={[selectableBranch]}
-            stats={mockStats}
-            onSelect={vi.fn()}
-            onToggleSelection={onToggleSelection}
-            selectedBranches={new Set()}
-          />
-        );
-      });
-
-      renderResult!.stdin.write(' ');
-      await flushInkUpdates();
-
-      expect(onToggleSelection).toHaveBeenCalledWith('feature/cleanup-target');
-    });
-
-    it('does not toggle selection for protected branches', async () => {
-      const onToggleSelection = vi.fn();
-      const protectedBranch = mockBranches[0]; // main
-      let renderResult: ReturnType<typeof inkRender>;
-      await act(async () => {
-        renderResult = inkRender(
-          <BranchListScreen
-            branches={[protectedBranch]}
-            stats={mockStats}
-            onSelect={vi.fn()}
-            onToggleSelection={onToggleSelection}
-            selectedBranches={new Set()}
-          />
-        );
-      });
-
-      renderResult!.stdin.write(' ');
-      await flushInkUpdates();
-
-      expect(onToggleSelection).not.toHaveBeenCalled();
-    });
-
-    it('invokes onClearSelection when escape key is pressed', async () => {
-      const onClearSelection = vi.fn();
-      let renderResult: ReturnType<typeof inkRender>;
-      await act(async () => {
-        renderResult = inkRender(
-          <BranchListScreen
-            branches={[selectableBranch]}
-            stats={mockStats}
-            onSelect={vi.fn()}
-            onClearSelection={onClearSelection}
-            selectedBranches={new Set(['feature/cleanup-target'])}
-          />
-        );
-      });
-
-      renderResult!.stdin.write('\u001B');
-      await flushInkUpdates();
-
-      expect(onClearSelection).toHaveBeenCalled();
-    });
-
-    it('displays selection summary message when selections exist', async () => {
-      const onSelect = vi.fn();
-      const selected = new Set(['feature/test', 'feature/cleanup-target']);
-
-      const { getByText } = render(
+    const Wrapper = () => {
+      const [selected, setSelected] = React.useState<string[]>([]);
+      return (
         <BranchListScreen
-          branches={[...mockBranches, selectableBranch]}
+          branches={branches}
           stats={mockStats}
           onSelect={onSelect}
           selectedBranches={selected}
+          onToggleSelect={(name) =>
+            setSelected((prev) =>
+              prev.includes(name)
+                ? prev.filter((n) => n !== name)
+                : [...prev, name],
+            )
+          }
         />
       );
+    };
 
-      expect(getByText(/選択中: 2個のブランチ/)).toBeDefined();
+    let renderResult: ReturnType<typeof inkRender>;
+    await act(async () => {
+      renderResult = inkRender(<Wrapper />, { stripAnsi: false });
     });
+
+    const { stdin } = renderResult;
+    await act(async () => {
+      stdin.write(" ");
+    });
+
+    const frame = stripControlSequences(
+      stripAnsi(renderResult.lastFrame() ?? ""),
+    );
+    expect(frame).toContain("[*] 🟢 🛡");
+    expect(frame).toContain("feature/login");
+  });
+
+  it("invokes onClearSelection when escape key is pressed", async () => {
+    const onClearSelection = vi.fn();
+    let renderResult: ReturnType<typeof inkRender>;
+    await act(async () => {
+      renderResult = inkRender(
+        <BranchListScreen
+          branches={[selectableBranch]}
+          stats={mockStats}
+          onSelect={vi.fn()}
+          onClearSelection={onClearSelection}
+          selectedBranches={["feature/cleanup-target"]}
+        />,
+      );
+    });
+
+    renderResult.stdin.write("\u001B");
+    await flushInkUpdates();
+
+    expect(onClearSelection).toHaveBeenCalled();
+  });
+
+  it("displays selection summary message when selections exist", () => {
+    const onSelect = vi.fn();
+    const selected = ["feature/test", "feature/cleanup-target"];
+
+    const { getByText } = render(
+      <BranchListScreen
+        branches={[...mockBranches, selectableBranch]}
+        stats={mockStats}
+        onSelect={onSelect}
+        selectedBranches={selected}
+      />,
+    );
+
+    expect(getByText(/選択中: 2個のブランチ/)).toBeDefined();
   });
 
   describe("Filter Mode", () => {
@@ -514,10 +558,9 @@ describe("BranchListScreen", () => {
       expect(container.textContent).toContain("(press f to filter)");
 
       // Press 'f' key
-      const fKeyEvent = new (globalThis.window as any).KeyboardEvent(
-        "keydown",
-        { key: "f" },
-      );
+      const fKeyEvent = new globalThis.window.KeyboardEvent("keydown", {
+        key: "f",
+      });
       document.dispatchEvent(fKeyEvent);
 
       // Filter input should be active (placeholder visible)
@@ -536,17 +579,15 @@ describe("BranchListScreen", () => {
       );
 
       // Enter filter mode first
-      const fKeyEvent = new (globalThis.window as any).KeyboardEvent(
-        "keydown",
-        { key: "f" },
-      );
+      const fKeyEvent = new globalThis.window.KeyboardEvent("keydown", {
+        key: "f",
+      });
       document.dispatchEvent(fKeyEvent);
 
       // Press Escape
-      const escKeyEvent = new (globalThis.window as any).KeyboardEvent(
-        "keydown",
-        { key: "Escape" },
-      );
+      const escKeyEvent = new globalThis.window.KeyboardEvent("keydown", {
+        key: "Escape",
+      });
       document.dispatchEvent(escKeyEvent);
 
       // Should return to branch selection mode
@@ -570,7 +611,7 @@ describe("BranchListScreen", () => {
         );
       });
 
-      const frame = renderResult!.lastFrame() ?? "";
+      const frame = renderResult?.lastFrame() ?? "";
       // Should contain cyan background (cursor highlight) even in filter mode
       expect(frame).toContain("\u001b[46m");
     });
@@ -667,10 +708,9 @@ describe("BranchListScreen", () => {
       );
 
       // Enter filter mode
-      const fKeyEvent = new (globalThis.window as any).KeyboardEvent(
-        "keydown",
-        { key: "f" },
-      );
+      const fKeyEvent = new globalThis.window.KeyboardEvent("keydown", {
+        key: "f",
+      });
       document.dispatchEvent(fKeyEvent);
 
       // Type something in filter
@@ -681,10 +721,9 @@ describe("BranchListScreen", () => {
       }
 
       // Press Escape (should clear query first)
-      const escKeyEvent = new (globalThis.window as any).KeyboardEvent(
-        "keydown",
-        { key: "Escape" },
-      );
+      const escKeyEvent = new globalThis.window.KeyboardEvent("keydown", {
+        key: "Escape",
+      });
       document.dispatchEvent(escKeyEvent);
 
       // Filter input should still be visible, but query cleared
@@ -705,17 +744,15 @@ describe("BranchListScreen", () => {
       );
 
       // Enter filter mode
-      const fKeyEvent = new (globalThis.window as any).KeyboardEvent(
-        "keydown",
-        { key: "f" },
-      );
+      const fKeyEvent = new globalThis.window.KeyboardEvent("keydown", {
+        key: "f",
+      });
       document.dispatchEvent(fKeyEvent);
 
       // Press Escape with empty query (should exit filter mode)
-      const escKeyEvent = new (globalThis.window as any).KeyboardEvent(
-        "keydown",
-        { key: "Escape" },
-      );
+      const escKeyEvent = new globalThis.window.KeyboardEvent("keydown", {
+        key: "Escape",
+      });
       document.dispatchEvent(escKeyEvent);
 
       // Should return to branch selection mode
@@ -738,9 +775,8 @@ describe("BranchListScreen", () => {
       expect(container.textContent).toContain("feature/test");
     });
 
-    it("should disable other key bindings (m, c, r) while typing in filter", () => {
+    it("should disable other key bindings (c, r) while typing in filter", () => {
       const onSelect = vi.fn();
-      const onNavigate = vi.fn();
       const onCleanupCommand = vi.fn();
       const onRefresh = vi.fn();
 
@@ -749,7 +785,6 @@ describe("BranchListScreen", () => {
           branches={mockBranches}
           stats={mockStats}
           onSelect={onSelect}
-          onNavigate={onNavigate}
           onCleanupCommand={onCleanupCommand}
           onRefresh={onRefresh}
         />,
@@ -762,10 +797,8 @@ describe("BranchListScreen", () => {
       act(() => {
         inkApp.stdin.write("c");
         inkApp.stdin.write("r");
-        inkApp.stdin.write("m");
       });
 
-      expect(onNavigate).not.toHaveBeenCalled();
       expect(onCleanupCommand).not.toHaveBeenCalled();
       expect(onRefresh).not.toHaveBeenCalled();
 

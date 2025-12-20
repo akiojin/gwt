@@ -3,8 +3,8 @@ import { cleanup } from "@testing-library/react";
 import { afterEach, beforeAll, afterAll, vi } from "vitest";
 
 // Vitest compatibility shims (bun env)
-if (!("hoisted" in vi)) {
-  // Fallback implementation for environments lacking vi.hoisted (e.g., older Vitest shim in Bun)
+if (typeof (vi as Record<string, unknown>).hoisted !== "function") {
+  // Fallback implementation for environments lacking vi.hoisted (e.g., Bun's Vitest shim)
   // Executes the initializer immediately; suitable for our test usage where isolation is not critical.
   // @ts-expect-error - injected for compatibility
   vi.hoisted = (factory: () => unknown) => factory();
@@ -26,7 +26,7 @@ if (!(vi as Record<string, unknown>).clearAllTimers) {
   vi.clearAllTimers = () => {};
 }
 
-// Cleanup after each test
+// Cleanup + mock isolation after each test
 afterEach(() => {
   cleanup();
 });

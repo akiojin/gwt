@@ -30,6 +30,8 @@ export async function listWorktrees(): Promise<Worktree[]> {
     isProtected: isProtectedBranchName(wt.branch),
     createdAt: null, // git worktreeからは取得不可
     lastAccessedAt: null, // git worktreeからは取得不可
+    divergence: null,
+    prInfo: null,
   }));
 }
 
@@ -50,16 +52,22 @@ export async function createNewWorktree(
   branchName: string,
   createBranch: boolean,
 ): Promise<Worktree> {
-  const { getRepositoryRoot, getCurrentBranch } = await import(
-    "../../../git.js"
-  );
+  // 保護ブランチのチェック
+  if (isProtectedBranchName(branchName)) {
+    throw new Error(
+      `Cannot create worktree for protected branch: ${branchName}. Protected branches (main, develop, master) must remain in the main repository.`,
+    );
+  }
+
+  const { getRepositoryRoot, getCurrentBranch } =
+    await import("../../../git.js");
 
   const [repoRoot, currentBranch] = await Promise.all([
     getRepositoryRoot(),
     getCurrentBranch(),
   ]);
 
-  const worktreePath = await generateWorktreePath(branchName, repoRoot);
+  const worktreePath = await generateWorktreePath(repoRoot, branchName);
 
   await createWorktreeCore({
     branchName,

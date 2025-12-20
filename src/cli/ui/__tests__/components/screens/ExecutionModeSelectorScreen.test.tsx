@@ -11,8 +11,9 @@ describe("ExecutionModeSelectorScreen", () => {
   beforeEach(() => {
     // Setup happy-dom
     const window = new Window();
-    globalThis.window = window as any;
-    globalThis.document = window.document as any;
+    globalThis.window = window as unknown as typeof globalThis.window;
+    globalThis.document =
+      window.document as unknown as typeof globalThis.document;
   });
 
   it("should render header with title", () => {
@@ -35,6 +36,20 @@ describe("ExecutionModeSelectorScreen", () => {
     expect(getByText(/New/i)).toBeDefined();
     expect(getByText(/Continue/i)).toBeDefined();
     expect(getByText(/Resume/i)).toBeDefined();
+  });
+
+  it("should include session ID in Continue label when provided", () => {
+    const onBack = vi.fn();
+    const onSelect = vi.fn();
+    const { getByText } = render(
+      <ExecutionModeSelectorScreen
+        onBack={onBack}
+        onSelect={onSelect}
+        continueSessionId="abc-123"
+      />,
+    );
+
+    expect(getByText(/Continue \(ID: abc-123\)/i)).toBeDefined();
   });
 
   it("should render footer with actions", () => {

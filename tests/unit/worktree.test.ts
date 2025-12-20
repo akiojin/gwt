@@ -9,9 +9,13 @@ vi.mock("execa", () => ({
 // Mock node:fs
 vi.mock("node:fs", () => {
   const existsSync = vi.fn();
+  const statSync = vi.fn(() => ({ isDirectory: () => true }));
+  const readFileSync = vi.fn(() => "");
   return {
     existsSync,
-    default: { existsSync },
+    statSync,
+    readFileSync,
+    default: { existsSync, statSync, readFileSync },
   };
 });
 
@@ -51,11 +55,11 @@ branch refs/heads/feature/test
       const path = await worktree.worktreeExists("feature/test");
 
       expect(path).toBe("/path/to/worktree-feature-test");
-      expect(execa).toHaveBeenCalledWith("git", [
-        "worktree",
-        "list",
-        "--porcelain",
-      ]);
+      expect(execa).toHaveBeenCalledWith(
+        "git",
+        ["worktree", "list", "--porcelain"],
+        expect.anything(),
+      );
     });
 
     it("should return null if worktree does not exist for branch", async () => {
@@ -520,6 +524,10 @@ branch refs/heads/main
   });
 
   describe("listAdditionalWorktrees (T701)", () => {
+    beforeEach(() => {
+      vi.spyOn(git, "getRepositoryRoot").mockResolvedValue("/");
+    });
+
     it("should call listWorktrees via git command", async () => {
       const mockWorktreeOutput = `worktree /path/to/repo
 HEAD abc1234
@@ -539,11 +547,11 @@ branch refs/heads/feature/test
       const worktreeList = await worktree.listAdditionalWorktrees();
 
       // Should call git worktree list
-      expect(execa).toHaveBeenCalledWith("git", [
-        "worktree",
-        "list",
-        "--porcelain",
-      ]);
+      expect(execa).toHaveBeenCalledWith(
+        "git",
+        ["worktree", "list", "--porcelain"],
+        expect.anything(),
+      );
 
       // Result should be an array
       expect(Array.isArray(worktreeList)).toBe(true);
@@ -599,10 +607,6 @@ branch refs/heads/feature/test
       const repoRootSpy = vi
         .spyOn(git, "getRepositoryRoot")
         .mockResolvedValue("/repo");
-
-      const mergedPRsSpy = vi
-        .spyOn(github, "getMergedPullRequests")
-        .mockResolvedValue([]);
 
       const pullRequestByBranchSpy = vi
         .spyOn(github, "getPullRequestByBranch")
@@ -693,7 +697,6 @@ branch refs/heads/feature/no-diff
       expect(worktreeTarget?.cleanupType).toBe("worktree-and-branch");
       expect(worktreeTarget?.pullRequest).toBeNull();
       expect(worktreeTarget?.reasons).toContain("no-diff-with-base");
-      expect(worktreeTarget?.reasons).not.toContain("merged-pr");
 
       const orphanTarget = targets.find(
         (target) => target.branch === "feature/orphan",
@@ -705,7 +708,6 @@ branch refs/heads/feature/no-diff
 
       expect(configSpy).toHaveBeenCalled();
       expect(repoRootSpy).toHaveBeenCalled();
-      expect(mergedPRsSpy).toHaveBeenCalled();
       expect(pullRequestByBranchSpy).toHaveBeenCalled();
       expect(getLocalBranchesSpy).toHaveBeenCalled();
       expect(hasUncommittedSpy).toHaveBeenCalled();
@@ -713,6 +715,87 @@ branch refs/heads/feature/no-diff
       expect(hasUnpushedRepoSpy).toHaveBeenCalled();
       expect(branchHasUniqueSpy).toHaveBeenCalled();
       expect(remoteExistsSpy).toHaveBeenCalled();
+    });
+
+    it("uses upstream branch as comparison base when determining cleanup candidates", async () => {
+      const configSpy = vi.spyOn(configModule, "getConfig").mockResolvedValue({
+        defaultBaseBranch: "main",
+        skipPermissions: false,
+        enableGitHubIntegration: true,
+        enableDebugMode: false,
+        worktreeNamingPattern: "{repo}-{branch}",
+      });
+
+      const repoRootSpy = vi
+        .spyOn(git, "getRepositoryRoot")
+        .mockResolvedValue("/repo");
+
+      vi.spyOn(github, "getPullRequestByBranch").mockResolvedValue(null);
+      vi.spyOn(git, "getLocalBranches").mockResolvedValue([]);
+      vi.spyOn(git, "hasUncommittedChanges").mockResolvedValue(false);
+      vi.spyOn(git, "hasUnpushedCommits").mockResolvedValue(false);
+      vi.spyOn(git, "hasUnpushedCommitsInRepo").mockResolvedValue(false);
+
+      const branchHasUniqueSpy = vi
+        .spyOn(git, "branchHasUniqueCommitsComparedToBase")
+        .mockResolvedValue(false);
+
+      vi.spyOn(git, "checkRemoteBranchExists").mockResolvedValue(false);
+
+      (execa as any).mockImplementation(
+        async (command: string, args?: readonly string[]) => {
+          if (
+            command === "git" &&
+            args?.[0] === "worktree" &&
+            args[1] === "list"
+          ) {
+            return {
+              stdout: `worktree /repo
+HEAD 0000000
+branch refs/heads/main
+
+worktree /repo/.worktrees/feature-upstream
+HEAD abc1234
+branch refs/heads/feature/upstream
+`,
+              stderr: "",
+              exitCode: 0,
+            };
+          }
+
+          if (
+            command === "git" &&
+            args?.[0] === "rev-parse" &&
+            args[1] === "--abbrev-ref"
+          ) {
+            return {
+              stdout: "origin/develop",
+              stderr: "",
+              exitCode: 0,
+            };
+          }
+
+          return { stdout: "", stderr: "", exitCode: 0 };
+        },
+      );
+
+      (fs.existsSync as any).mockReturnValue(true);
+
+      const targets = await worktree.getMergedPRWorktrees();
+
+      expect(targets).toHaveLength(1);
+      expect(branchHasUniqueSpy).toHaveBeenCalledWith(
+        "feature/upstream",
+        "origin/develop",
+        "/repo",
+      );
+
+      const target = targets[0];
+      expect(target.reasons).toContain("no-diff-with-base");
+      expect(target.reasons).not.toContain("merged-pr");
+
+      expect(configSpy).toHaveBeenCalled();
+      expect(repoRootSpy).toHaveBeenCalled();
     });
 
     it("includes branches with remote copy but no merged PR as cleanup targets", async () => {
@@ -725,11 +808,8 @@ branch refs/heads/feature/no-diff
       });
 
       vi.spyOn(git, "getRepositoryRoot").mockResolvedValue("/repo");
-
       vi.spyOn(github, "getMergedPullRequests").mockResolvedValue([]);
-
       vi.spyOn(github, "getPullRequestByBranch").mockResolvedValue(null);
-
       vi.spyOn(git, "getLocalBranches").mockResolvedValue([
         {
           name: "feature/has-remote",
@@ -746,17 +826,11 @@ branch refs/heads/feature/no-diff
       ]);
 
       vi.spyOn(git, "hasUncommittedChanges").mockResolvedValue(false);
-
       vi.spyOn(git, "hasUnpushedCommits").mockResolvedValue(false);
-
       vi.spyOn(git, "hasUnpushedCommitsInRepo").mockResolvedValue(false);
-
-      // ブランチには固有のコミットがある（ベースと差分あり）
       vi.spyOn(git, "branchHasUniqueCommitsComparedToBase").mockResolvedValue(
         true,
       );
-
-      // リモートブランチが存在する
       vi.spyOn(git, "checkRemoteBranchExists").mockResolvedValue(true);
 
       (execa as any).mockImplementation(
@@ -790,6 +864,7 @@ branch refs/heads/main
       expect(target.cleanupType).toBe("branch-only");
       expect(target.pullRequest).toBeNull();
       expect(target.reasons).toContain("has-remote-copy");
+      expect(target.reasons).toContain("remote-synced");
       expect(target.reasons).not.toContain("merged-pr");
       expect(target.reasons).not.toContain("no-diff-with-base");
     });
@@ -804,11 +879,8 @@ branch refs/heads/main
       });
 
       vi.spyOn(git, "getRepositoryRoot").mockResolvedValue("/repo");
-
       vi.spyOn(github, "getMergedPullRequests").mockResolvedValue([]);
-
       vi.spyOn(github, "getPullRequestByBranch").mockResolvedValue(null);
-
       vi.spyOn(git, "getLocalBranches").mockResolvedValue([
         {
           name: "feature/has-remote-unpushed",
@@ -825,17 +897,11 @@ branch refs/heads/main
       ]);
 
       vi.spyOn(git, "hasUncommittedChanges").mockResolvedValue(false);
-
       vi.spyOn(git, "hasUnpushedCommits").mockResolvedValue(false);
-
-      // 未プッシュのコミットがある（hasUnpushedCommitsInRepoがorphanedブランチで使われる）
       vi.spyOn(git, "hasUnpushedCommitsInRepo").mockResolvedValue(true);
-
       vi.spyOn(git, "branchHasUniqueCommitsComparedToBase").mockResolvedValue(
         true,
       );
-
-      // リモートブランチが存在する
       vi.spyOn(git, "checkRemoteBranchExists").mockResolvedValue(true);
 
       (execa as any).mockImplementation(
@@ -862,8 +928,149 @@ branch refs/heads/main
 
       const targets = await worktree.getMergedPRWorktrees();
 
-      // 未プッシュのコミットがあるためクリーンアップ対象外
       expect(targets).toHaveLength(0);
+    });
+
+    it("includes remote-synced orphaned branches when they are clean and pushed", async () => {
+      vi.spyOn(configModule, "getConfig").mockResolvedValue({
+        defaultBaseBranch: "develop",
+        skipPermissions: false,
+        enableGitHubIntegration: true,
+        enableDebugMode: false,
+        worktreeNamingPattern: "{repo}-{branch}",
+      });
+
+      vi.spyOn(git, "getRepositoryRoot").mockResolvedValue("/repo");
+      vi.spyOn(github, "getPullRequestByBranch").mockResolvedValue(null);
+      vi.spyOn(git, "getLocalBranches").mockResolvedValue([
+        {
+          name: "feature/ready-but-unmerged",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+        },
+        {
+          name: "develop",
+          type: "local",
+          branchType: "develop",
+          isCurrent: true,
+        },
+      ]);
+
+      vi.spyOn(git, "hasUncommittedChanges").mockResolvedValue(false);
+      vi.spyOn(git, "hasUnpushedCommits").mockResolvedValue(false);
+      vi.spyOn(git, "hasUnpushedCommitsInRepo").mockResolvedValue(false);
+      vi.spyOn(git, "branchHasUniqueCommitsComparedToBase").mockResolvedValue(
+        true,
+      );
+      vi.spyOn(git, "checkRemoteBranchExists").mockResolvedValue(true);
+
+      (execa as any).mockImplementation(
+        async (command: string, args?: readonly string[]) => {
+          if (
+            command === "git" &&
+            args?.[0] === "worktree" &&
+            args[1] === "list"
+          ) {
+            return {
+              stdout: `worktree /repo
+HEAD 0000000
+branch refs/heads/develop
+`,
+              stderr: "",
+              exitCode: 0,
+            };
+          }
+          return { stdout: "", stderr: "", exitCode: 0 };
+        },
+      );
+
+      (fs.existsSync as any).mockReturnValue(true);
+
+      const targets = await worktree.getMergedPRWorktrees();
+
+      const target = targets.find(
+        (t) => t.branch === "feature/ready-but-unmerged",
+      );
+      expect(target).toBeDefined();
+      expect(target?.cleanupType).toBe("branch-only");
+      expect(target?.reasons).toContain("remote-synced");
+      expect(target?.hasRemoteBranch).toBe(true);
+      expect(target?.hasUnpushedCommits).toBe(false);
+      expect(target?.hasUncommittedChanges).toBe(false);
+    });
+
+    it("includes pushed-but-unmerged branches as local cleanup candidates when they are clean", async () => {
+      vi.spyOn(configModule, "getConfig").mockResolvedValue({
+        defaultBaseBranch: "develop",
+        skipPermissions: false,
+        enableGitHubIntegration: true,
+        enableDebugMode: false,
+        worktreeNamingPattern: "{repo}-{branch}",
+      });
+
+      vi.spyOn(git, "getRepositoryRoot").mockResolvedValue("/repo");
+      vi.spyOn(github, "getPullRequestByBranch").mockResolvedValue(null);
+      vi.spyOn(git, "getLocalBranches").mockResolvedValue([
+        {
+          name: "feature/ready-but-unmerged",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+        },
+        {
+          name: "develop",
+          type: "local",
+          branchType: "develop",
+          isCurrent: true,
+        },
+      ]);
+
+      vi.spyOn(git, "hasUncommittedChanges").mockResolvedValue(false);
+      vi.spyOn(git, "hasUnpushedCommits").mockResolvedValue(false);
+      vi.spyOn(git, "hasUnpushedCommitsInRepo").mockResolvedValue(false);
+      vi.spyOn(git, "branchHasUniqueCommitsComparedToBase").mockResolvedValue(
+        true,
+      );
+      vi.spyOn(git, "checkRemoteBranchExists").mockResolvedValue(true);
+
+      (execa as any).mockImplementation(
+        async (command: string, args?: readonly string[]) => {
+          if (
+            command === "git" &&
+            args?.[0] === "worktree" &&
+            args[1] === "list"
+          ) {
+            return {
+              stdout: `worktree /repo
+HEAD 0000000
+branch refs/heads/develop
+
+worktree /repo/.git/worktree/feature-ready-but-unmerged
+HEAD def9999
+branch refs/heads/feature/ready-but-unmerged
+`,
+              stderr: "",
+              exitCode: 0,
+            };
+          }
+          return { stdout: "", stderr: "", exitCode: 0 };
+        },
+      );
+
+      (fs.existsSync as any).mockReturnValue(true);
+
+      const targets = await worktree.getMergedPRWorktrees();
+
+      const target = targets.find(
+        (t) => t.branch === "feature/ready-but-unmerged",
+      );
+      expect(target).toBeDefined();
+      expect(target?.cleanupType).toBe("worktree-and-branch");
+      expect(target?.reasons).toContain("remote-synced");
+      expect(target?.hasRemoteBranch).toBe(true);
+      expect(target?.hasUnpushedCommits).toBe(false);
+      expect(target?.hasUncommittedChanges).toBe(false);
     });
   });
 

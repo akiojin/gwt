@@ -4,7 +4,6 @@
  * Worktree関連のREST APIエンドポイント。
  */
 
-import type { FastifyInstance } from "fastify";
 import {
   listWorktrees,
   getWorktreeByPath,
@@ -16,12 +15,13 @@ import type {
   Worktree,
   CreateWorktreeRequest,
 } from "../../../types/api.js";
+import type { WebFastifyInstance } from "../types.js";
 
 /**
  * Worktree関連のルートを登録
  */
 export async function registerWorktreeRoutes(
-  fastify: FastifyInstance,
+  fastify: WebFastifyInstance,
 ): Promise<void> {
   // GET /api/worktrees - すべてのWorktree一覧を取得
   fastify.get<{ Reply: ApiResponse<Worktree[]> }>(
@@ -64,13 +64,13 @@ export async function registerWorktreeRoutes(
     }
   });
 
-  // DELETE /api/worktrees - Worktreeを削除
+  // DELETE /api/worktrees/delete - Worktreeを削除
   fastify.delete<{
-    Querystring: { path: string };
+    Querystring: { path: string; force?: boolean };
     Reply:
       | { success: true }
       | { success: false; error: string; details?: string | null };
-  }>("/api/worktrees", async (request, reply) => {
+  }>("/api/worktrees/delete", async (request, reply) => {
     try {
       const { path } = request.query;
 
