@@ -13,10 +13,11 @@ RUN npm add -g \
     pnpm@latest \
     bun@latest \
     typescript@latest \
+    typescript-language-server@latest \
     eslint@latest \
     prettier@latest \
     @commitlint/cli@latest \
-    @commitlint/config-conventional@latest 
+    @commitlint/config-conventional@latest
 
 # Setup pnpm global bin directory manually
 ENV PNPM_HOME="/root/.local/share/pnpm"
