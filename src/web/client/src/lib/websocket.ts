@@ -71,7 +71,8 @@ export class PTYWebSocket {
 
     this.ws.onerror = (event) => {
       console.error("WebSocket error:", event);
-      this.handlers.onError?.("WebSocket connection error");
+      // エラーは再接続が全て失敗した後にのみ表示する
+      // scheduleReconnect内でMAX_WEBSOCKET_RETRIESを超えた場合にonErrorが呼ばれる
       this.scheduleReconnect();
     };
 
