@@ -17,7 +17,7 @@ RUN npm add -g \
     eslint@latest \
     prettier@latest \
     @commitlint/cli@latest \
-    @commitlint/config-conventional@latest 
+    @commitlint/config-conventional@latest
 
 # Setup pnpm global bin directory manually
 ENV PNPM_HOME="/root/.local/share/pnpm"

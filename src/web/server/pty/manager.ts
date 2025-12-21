@@ -17,6 +17,9 @@ import {
   type ResolvedCommand,
 } from "../../../services/aiToolResolver.js";
 import { loadToolsConfig } from "../../../config/tools.js";
+import { createLogger } from "../../../logging/logger.js";
+
+const logger = createLogger({ category: "pty" });
 
 export interface PTYInstance {
   ptyProcess: IPty;
@@ -51,6 +54,11 @@ export class PTYManager {
     const toolName = options.toolName ?? null;
     const sessionId = randomUUID();
 
+    logger.debug(
+      { sessionId, toolType, mode, worktreePath, cols, rows },
+      "Spawning PTY session",
+    );
+
     const resolverOptions: {
       toolName?: string | null;
       skipPermissions?: boolean;
@@ -76,6 +84,18 @@ export class PTYManager {
     }
 
     const resolved = await this.resolveCommand(toolType, mode, resolverOptions);
+
+    logger.debug(
+      {
+        toolType,
+        command: resolved.command,
+        argsCount: resolved.args.length,
+        usesFallback: resolved.usesFallback,
+        hasEnv: !!resolved.env,
+      },
+      "Command resolved",
+    );
+
     const sharedEnv = await this.loadSharedEnv();
 
     const env: NodeJS.ProcessEnv = {
@@ -101,6 +121,20 @@ export class PTYManager {
       cwd: worktreePath,
       env,
     });
+
+    logger.info(
+      {
+        sessionId,
+        command: resolved.command,
+        argsCount: resolved.args.length,
+        pid: ptyProcess.pid,
+        cwd: worktreePath,
+        envKeys: Object.keys(env).filter(
+          (k) => !k.startsWith("npm_") && !k.startsWith("BUN_"),
+        ),
+      },
+      "PTY process spawned",
+    );
 
     const session: AIToolSession = {
       sessionId,
@@ -135,6 +169,7 @@ export class PTYManager {
   public delete(sessionId: string): boolean {
     const instance = this.instances.get(sessionId);
     if (!instance) {
+      logger.warn({ sessionId, reason: "not found" }, "Session delete failed");
       return false;
     }
 
@@ -146,6 +181,7 @@ export class PTYManager {
     }
 
     this.instances.delete(sessionId);
+    logger.info({ sessionId }, "Session deleted");
     return true;
   }
 
@@ -174,6 +210,7 @@ export class PTYManager {
       instance.session.endedAt = new Date().toISOString();
     }
 
+    logger.debug({ sessionId, status, exitCode }, "Session status updated");
     return true;
   }
 
@@ -249,7 +286,12 @@ export class PTYManager {
 
   private async loadSharedEnv(): Promise<Record<string, string>> {
     const config = await loadToolsConfig();
-    return { ...(config.env ?? {}) };
+    const sharedEnv = { ...(config.env ?? {}) };
+    logger.debug(
+      { keyCount: Object.keys(sharedEnv).length },
+      "Shared env loaded",
+    );
+    return sharedEnv;
   }
 }
 

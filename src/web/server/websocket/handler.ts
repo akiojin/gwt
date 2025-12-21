@@ -36,6 +36,10 @@ export class WebSocketHandler {
     const sessionId = resolveSessionId(request);
 
     if (!sessionId) {
+      this.logger.warn(
+        { error: "Missing sessionId" },
+        "WebSocket session resolution failed",
+      );
       this.sendError(connection, "Missing sessionId parameter");
       connection.close();
       return;
@@ -43,6 +47,10 @@ export class WebSocketHandler {
 
     const instance = this.ptyManager.get(sessionId);
     if (!instance) {
+      this.logger.warn(
+        { sessionId, error: "not found" },
+        "WebSocket session not found",
+      );
       this.sendError(connection, `Session not found: ${sessionId}`);
       connection.close();
       return;
@@ -68,6 +76,7 @@ export class WebSocketHandler {
     // PTYプロセス終了時の処理
     ptyProcess.onExit(({ exitCode, signal }) => {
       hasExited = true;
+      this.logger.info({ sessionId, exitCode, signal }, "PTY process exited");
       this.clearCleanupTimer(sessionId);
       this.ptyManager.updateStatus(sessionId, "completed", exitCode);
       this.sendExit(connection, exitCode, signal);
@@ -85,6 +94,10 @@ export class WebSocketHandler {
         this.handleClientMessage(message, ptyProcess, connection);
       } catch (error) {
         const errorMsg = error instanceof Error ? error.message : String(error);
+        this.logger.warn(
+          { sessionId, error: errorMsg },
+          "WebSocket message parse error",
+        );
         this.sendError(connection, `Invalid message format: ${errorMsg}`);
       }
     });
