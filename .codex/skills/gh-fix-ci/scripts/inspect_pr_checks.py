@@ -45,6 +45,7 @@ PENDING_LOG_MARKERS = (
     "still in progress",
     "log will be available when it is complete",
 )
+MAX_REVIEW_BODY_CHARS = 240
 
 
 class GhResult:
@@ -77,8 +78,8 @@ def run_gh_command_raw(args: Sequence[str], cwd: Path) -> tuple[int, bytes, str]
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Inspect failing GitHub PR checks, fetch GitHub Actions logs, and extract a "
-            "failure snippet."
+            "Inspect review change requests and failing GitHub PR checks, fetch GitHub "
+            "Actions logs, and extract a failure snippet."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
@@ -106,13 +107,18 @@ def main() -> int:
     if pr_value is None:
         return 1
 
+    review_summary = fetch_review_summary(pr_value, repo_root)
+    review_error = bool(review_summary and review_summary.get("error"))
+    change_requests = review_summary.get("changeRequests") if review_summary else []
+    has_change_requests = bool(change_requests)
+
     checks = fetch_checks(pr_value, repo_root)
     if checks is None:
         return 1
 
     failing = [c for c in checks if is_failing(c)]
-    if not failing:
-        print(f"PR #{pr_value}: no failing checks detected.")
+    if not failing and not has_change_requests and not review_error:
+        print(f"PR #{pr_value}: no failing checks or change requests detected.")
         return 0
 
     results = []
@@ -127,9 +133,18 @@ def main() -> int:
         )
 
     if args.json:
-        print(json.dumps({"pr": pr_value, "results": results}, indent=2))
+        print(
+            json.dumps(
+                {"pr": pr_value, "review": review_summary, "results": results},
+                indent=2,
+            )
+        )
     else:
-        render_results(pr_value, results)
+        render_review_summary(pr_value, review_summary)
+        if results:
+            render_results(pr_value, results)
+        else:
+            print("No failing checks detected.")
 
     return 1
 
@@ -218,6 +233,133 @@ def fetch_checks(pr_value: str, repo_root: Path) -> list[dict[str, Any]] | None:
         print("Error: unexpected checks JSON shape.", file=sys.stderr)
         return None
     return data
+
+
+def fetch_review_summary(pr_value: str, repo_root: Path) -> dict[str, Any]:
+    fields = ["reviewDecision", "reviews"]
+    result = run_gh_command(["pr", "view", pr_value, "--json", ",".join(fields)], cwd=repo_root)
+    if result.returncode != 0:
+        message = "\n".join(filter(None, [result.stderr, result.stdout])).strip()
+        available_fields = parse_available_fields(message)
+        if available_fields:
+            selected_fields = [field for field in fields if field in available_fields]
+            if selected_fields:
+                result = run_gh_command(
+                    ["pr", "view", pr_value, "--json", ",".join(selected_fields)],
+                    cwd=repo_root,
+                )
+                if result.returncode != 0:
+                    return fetch_review_summary_via_api(pr_value, repo_root, message)
+            else:
+                return fetch_review_summary_via_api(pr_value, repo_root, message)
+        else:
+            return fetch_review_summary_via_api(pr_value, repo_root, message)
+
+    try:
+        data = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError:
+        return fetch_review_summary_via_api(pr_value, repo_root, "Error: unable to parse review JSON.")
+    if not isinstance(data, dict):
+        return fetch_review_summary_via_api(pr_value, repo_root, "Error: unexpected review JSON shape.")
+
+    summary = build_review_summary(data.get("reviewDecision"), data.get("reviews"), "pr_view")
+    return summary
+
+
+def fetch_review_summary_via_api(
+    pr_value: str,
+    repo_root: Path,
+    error_message: str | None = None,
+) -> dict[str, Any]:
+    repo_slug = fetch_repo_slug(repo_root)
+    if not repo_slug:
+        return {
+            "decision": None,
+            "changeRequests": [],
+            "source": "api",
+            "error": error_message or "Error: unable to resolve repository name for reviews.",
+        }
+    endpoint = f"/repos/{repo_slug}/pulls/{pr_value}/reviews"
+    result = run_gh_command(["api", endpoint], cwd=repo_root)
+    if result.returncode != 0:
+        message = (result.stderr or result.stdout or "").strip()
+        return {
+            "decision": None,
+            "changeRequests": [],
+            "source": "api",
+            "error": message or error_message or "Error: gh api reviews failed.",
+        }
+    try:
+        reviews = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError:
+        return {
+            "decision": None,
+            "changeRequests": [],
+            "source": "api",
+            "error": error_message or "Error: unable to parse review JSON.",
+        }
+    if not isinstance(reviews, list):
+        return {
+            "decision": None,
+            "changeRequests": [],
+            "source": "api",
+            "error": error_message or "Error: unexpected review JSON shape.",
+        }
+    return build_review_summary(None, reviews, "api")
+
+
+def build_review_summary(
+    decision_value: Any,
+    reviews_value: Any,
+    source: str,
+) -> dict[str, Any]:
+    decision = str(decision_value) if decision_value else None
+    reviews = reviews_value if isinstance(reviews_value, list) else []
+    change_requests = extract_change_requests(reviews)
+    note = None
+    if not decision and change_requests:
+        decision = "CHANGES_REQUESTED"
+    if decision == "CHANGES_REQUESTED" and not change_requests:
+        note = "Review decision indicates changes requested, but no review bodies were available."
+    summary: dict[str, Any] = {
+        "decision": decision,
+        "changeRequests": change_requests,
+        "source": source,
+    }
+    if note:
+        summary["note"] = note
+    return summary
+
+
+def extract_change_requests(reviews: Iterable[dict[str, Any]]) -> list[dict[str, str]]:
+    change_requests: list[dict[str, str]] = []
+    for review in reviews:
+        if not isinstance(review, dict):
+            continue
+        state = normalize_field(review.get("state"))
+        if state != "changes_requested":
+            continue
+        author = extract_review_author(review)
+        submitted_at = review.get("submittedAt") or review.get("submitted_at") or ""
+        body = review.get("body") or ""
+        change_requests.append(
+            {
+                "author": author,
+                "submittedAt": str(submitted_at) if submitted_at else "",
+                "body": str(body),
+            }
+        )
+    return change_requests
+
+
+def extract_review_author(review: dict[str, Any]) -> str:
+    author = review.get("author") or review.get("user")
+    if isinstance(author, dict):
+        login = author.get("login") or author.get("name")
+        return str(login) if login else ""
+    if isinstance(author, str):
+        return author
+    return ""
 
 
 def is_failing(check: dict[str, Any]) -> bool:
@@ -497,8 +639,45 @@ def render_results(pr_number: str, results: Iterable[dict[str, Any]]) -> None:
     print("-" * 60)
 
 
+def render_review_summary(pr_number: str, review_summary: dict[str, Any] | None) -> None:
+    if not review_summary:
+        return
+    decision = review_summary.get("decision") or "unknown"
+    print(f"PR #{pr_number} review status:")
+    print(f"Review decision: {decision}")
+    if review_summary.get("note"):
+        print(f"Note: {review_summary['note']}")
+    if review_summary.get("error"):
+        print(f"Review error: {review_summary['error']}")
+        return
+    change_requests = review_summary.get("changeRequests") or []
+    if not change_requests:
+        print("Change requests: none")
+        return
+    print(f"Change requests: {len(change_requests)}")
+    for request in change_requests:
+        author = request.get("author") or "unknown"
+        submitted_at = request.get("submittedAt") or ""
+        header = f"- {author}"
+        if submitted_at:
+            header = f"{header} @ {submitted_at}"
+        print(header)
+        summary = summarize_review_body(request.get("body") or "")
+        if summary:
+            print(indent_block(summary, prefix="  "))
+
+
 def indent_block(text: str, prefix: str = "  ") -> str:
     return "\n".join(f"{prefix}{line}" for line in text.splitlines())
+
+
+def summarize_review_body(body: str) -> str:
+    if not body:
+        return ""
+    collapsed = " ".join(line.strip() for line in body.splitlines() if line.strip())
+    if len(collapsed) <= MAX_REVIEW_BODY_CHARS:
+        return collapsed
+    return f"{collapsed[: MAX_REVIEW_BODY_CHARS - 3].rstrip()}..."
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ metadata:
 
 ## Overview
 
-Use gh to locate failing PR checks, fetch GitHub Actions logs for actionable failures, summarize the failure snippet, then propose a fix plan and implement after explicit approval.
+Use gh to locate reviewer change requests and failing PR checks, fetch GitHub Actions logs for actionable failures, summarize the failure snippet, then propose a fix plan and implement after explicit approval.
 - Depends on the `plan` skill for drafting and approving the fix plan.
 
 Prereq: ensure `gh` is authenticated (for example, run `gh auth login` once), then run `gh auth status` with escalated permissions (include workflow/repo scopes) so `gh` commands succeed. If sandboxing blocks `gh auth status`, rerun it with `sandbox_permissions=require_escalated`.
@@ -34,7 +34,15 @@ Prereq: ensure `gh` is authenticated (for example, run `gh auth login` once), th
 2. Resolve the PR.
    - Prefer the current branch PR: `gh pr view --json number,url`.
    - If the user provides a PR number or URL, use that directly.
-3. Inspect failing checks (GitHub Actions only).
+3. Check review status (Change Requests).
+   - `gh pr view <pr> --json reviewDecision,reviews`
+   - If `reviewDecision` is `CHANGES_REQUESTED`, capture the reviewers and their review bodies for the summary.
+   - Useful filter for reviewers who requested changes:
+     - `gh pr view <pr> --json reviews --jq '.reviews[] | select(.state=="CHANGES_REQUESTED") | {author: .author.login, submittedAt: .submittedAt, body: .body}'`
+   - If JSON fields are rejected or incomplete, fall back to the API:
+     - `gh api "/repos/<owner>/<repo>/pulls/<pr>/reviews"`
+     - `gh api "/repos/<owner>/<repo>/pulls/<pr>/comments"` (inline review comments)
+4. Inspect failing checks (GitHub Actions only).
    - Preferred: run the bundled script (handles gh field drift and job-log fallbacks):
      - `python "<path-to-skill>/scripts/inspect_pr_checks.py" --repo "." --pr "<number-or-url>"`
      - Add `--json` for machine-friendly output.
@@ -46,18 +54,19 @@ Prereq: ensure `gh` is authenticated (for example, run `gh auth login` once), th
        - `gh run view <run_id> --log`
      - If the run log says it is still in progress, fetch job logs directly:
        - `gh api "/repos/<owner>/<repo>/actions/jobs/<job_id>/logs" > "<path>"`
-4. Scope non-GitHub Actions checks.
+5. Scope non-GitHub Actions checks.
    - If `detailsUrl` is not a GitHub Actions run, label it as external and only report the URL.
    - Do not attempt Buildkite or other providers; keep the workflow lean.
-5. Summarize failures for the user.
+6. Summarize failures for the user.
+   - Provide change request status (if any), reviewers requesting changes, and key review snippets.
    - Provide the failing check name, run URL (if any), and a concise log snippet.
    - Call out missing logs explicitly.
-6. Create a plan.
+7. Create a plan.
    - Use the `plan` skill to draft a concise plan and request approval.
-7. Implement after approval.
+8. Implement after approval.
    - Apply the approved plan, summarize diffs/tests, and ask about opening a PR.
-8. Recheck status.
-   - After changes, suggest re-running the relevant tests and `gh pr checks` to confirm.
+9. Recheck status.
+   - After changes, suggest re-running the relevant tests, `gh pr checks`, and re-checking review status to confirm.
 
 ## Bundled Resources
 
