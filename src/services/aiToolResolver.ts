@@ -1,12 +1,16 @@
 import { execa } from "execa";
 import { platform } from "os";
 import { getToolById } from "../config/tools.js";
+import { CLAUDE_CODE_TOOL } from "../config/builtin-tools.js";
 import {
   CODEX_DEFAULT_ARGS,
   CLAUDE_PERMISSION_SKIP_ARGS,
 } from "../shared/aiToolConstants.js";
 import { prepareCustomToolExecution } from "./customToolResolver.js";
 import type { LaunchOptions } from "../types/tools.js";
+import { createLogger } from "../logging/logger.js";
+
+const logger = createLogger({ category: "resolver" });
 
 const DETECTION_COMMAND = platform() === "win32" ? "where" : "which";
 const MIN_BUN_MAJOR = 1;
@@ -41,9 +45,29 @@ export class AIToolResolutionError extends Error {
 async function commandExists(command: string): Promise<boolean> {
   try {
     await execa(DETECTION_COMMAND, [command], { shell: true });
+    logger.debug({ command, exists: true }, "Command check");
     return true;
   } catch {
+    logger.debug({ command, exists: false }, "Command check");
     return false;
+  }
+}
+
+/**
+ * コマンドのフルパスを取得
+ * node-ptyはシェルを経由しないため、フルパスが必要
+ */
+async function resolveCommandPath(command: string): Promise<string | null> {
+  try {
+    const { stdout } = await execa(DETECTION_COMMAND, [command], {
+      shell: true,
+    });
+    const fullPath = stdout.trim().split("\n")[0];
+    logger.debug({ command, fullPath }, "Command path resolved");
+    return fullPath || null;
+  } catch {
+    logger.debug({ command, fullPath: null }, "Command path resolution failed");
+    return null;
   }
 }
 
@@ -67,6 +91,7 @@ async function ensureBunxAvailable(): Promise<void> {
       try {
         const { stdout } = await execa("bun", ["--version"]);
         const version = stdout.trim();
+        logger.debug({ bunVersion: version }, "Bun version detected");
         const major = parseInt(version.split(".")[0] ?? "0", 10);
         if (!Number.isFinite(major) || major < MIN_BUN_MAJOR) {
           throw new AIToolResolutionError(
@@ -144,20 +169,40 @@ export async function resolveClaudeCommand(
   options: ClaudeCommandOptions = {},
 ): Promise<ResolvedCommand> {
   const args = buildClaudeArgs(options);
+  const envOverrides = CLAUDE_CODE_TOOL.env
+    ? { env: { ...CLAUDE_CODE_TOOL.env } as NodeJS.ProcessEnv }
+    : {};
 
-  if (await commandExists("claude")) {
+  // フルパスを取得（node-ptyはシェルを経由しないため必要）
+  const claudePath = await resolveCommandPath("claude");
+  if (claudePath) {
+    logger.info(
+      { command: claudePath, usesFallback: false },
+      "Claude command resolved",
+    );
     return {
-      command: "claude",
+      command: claudePath,
       args,
       usesFallback: false,
+      ...envOverrides,
     };
   }
 
-  await ensureBunxAvailable();
+  // bunxへフォールバック
+  const bunxPath = await resolveCommandPath("bunx");
+  if (!bunxPath) {
+    await ensureBunxAvailable(); // エラーをスローする
+  }
+
+  logger.info(
+    { command: bunxPath ?? "bunx", usesFallback: true },
+    "Claude command resolved (fallback)",
+  );
   return {
-    command: "bunx",
+    command: bunxPath ?? "bunx",
     args: [CLAUDE_CLI_PACKAGE, ...args],
     usesFallback: true,
+    ...envOverrides,
   };
 }
 
@@ -198,17 +243,32 @@ export async function resolveCodexCommand(
 ): Promise<ResolvedCommand> {
   const args = buildCodexArgs(options);
 
-  if (await commandExists("codex")) {
+  // フルパスを取得（node-ptyはシェルを経由しないため必要）
+  const codexPath = await resolveCommandPath("codex");
+  if (codexPath) {
+    logger.info(
+      { command: codexPath, usesFallback: false },
+      "Codex command resolved",
+    );
     return {
-      command: "codex",
+      command: codexPath,
       args,
       usesFallback: false,
     };
   }
 
-  await ensureBunxAvailable();
+  // bunxへフォールバック
+  const bunxPath = await resolveCommandPath("bunx");
+  if (!bunxPath) {
+    await ensureBunxAvailable(); // エラーをスローする
+  }
+
+  logger.info(
+    { command: bunxPath ?? "bunx", usesFallback: true },
+    "Codex command resolved (fallback)",
+  );
   return {
-    command: "bunx",
+    command: bunxPath ?? "bunx",
     args: [CODEX_CLI_PACKAGE, ...args],
     usesFallback: true,
   };
@@ -223,6 +283,7 @@ export async function resolveCustomToolCommand(
 ): Promise<ResolvedCommand> {
   const tool = await getToolById(options.toolId);
   if (!tool) {
+    logger.error({ toolId: options.toolId }, "Custom tool not found");
     throw new AIToolResolutionError(
       "CUSTOM_TOOL_NOT_FOUND",
       `Custom tool not found: ${options.toolId}`,
@@ -234,6 +295,11 @@ export async function resolveCustomToolCommand(
   }
 
   const execution = await prepareCustomToolExecution(tool, options);
+
+  logger.info(
+    { toolId: options.toolId, command: execution.command },
+    "Custom tool command resolved",
+  );
 
   return {
     command: execution.command,

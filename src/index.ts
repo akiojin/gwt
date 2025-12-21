@@ -209,7 +209,7 @@ Worktree Manager
 Usage: gwt [command] [options]
 
 Commands:
-  serve           Start Web UI server (http://localhost:3000)
+  serve           Start Web UI server (http://localhost:3001)
 
 Options:
   -h, --help      Show this help message
