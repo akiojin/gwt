@@ -56,6 +56,9 @@ async function commandExists(command: string): Promise<boolean> {
 /**
  * コマンドのフルパスを取得
  * node-ptyはシェルを経由しないため、フルパスが必要
+ *
+ * @param command - 解決するコマンド名
+ * @returns コマンドのフルパス。見つからない場合はnull
  */
 async function resolveCommandPath(command: string): Promise<string | null> {
   try {

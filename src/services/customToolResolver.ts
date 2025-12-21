@@ -35,6 +35,13 @@ export async function resolveCommandPath(commandName: string): Promise<string> {
   }
 }
 
+/**
+ * カスタムツールの引数を構築する
+ *
+ * @param tool - カスタムAIツール設定
+ * @param options - 起動オプション
+ * @returns 構築された引数配列
+ */
 export function buildCustomToolArgs(
   tool: CustomAITool,
   options: LaunchOptions = {},

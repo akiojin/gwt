@@ -53,6 +53,10 @@ export async function resolveCommand(commandName: string): Promise<string> {
           `Please ensure the command is installed and available in your PATH environment variable.`,
       );
     }
+    logger.error(
+      { commandName, error: String(error) },
+      "Command resolution failed (unknown error type)",
+    );
     throw error;
   }
 }

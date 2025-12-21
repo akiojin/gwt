@@ -10,6 +10,7 @@ import { isCommandAvailable } from "./utils/command.js";
 import { findLatestClaudeSession } from "./utils/session.js";
 
 const CLAUDE_CLI_PACKAGE = "@anthropic-ai/claude-code@latest";
+const DEFAULT_ENABLE_LSP_TOOL = "true";
 
 /**
  * Error wrapper used by `launchClaudeCode` to preserve the original failure
@@ -212,7 +213,7 @@ export async function launchClaudeCode(
     const baseEnv: Record<string, string | undefined> = {
       ...process.env,
       ...(options.envOverrides ?? {}),
-      ENABLE_LSP_TOOL: "true", // Enable TypeScript LSP support in Claude Code
+      ENABLE_LSP_TOOL: DEFAULT_ENABLE_LSP_TOOL, // Enable TypeScript LSP support in Claude Code
     };
     const launchEnvSource =
       options.skipPermissions && !baseEnv.IS_SANDBOX

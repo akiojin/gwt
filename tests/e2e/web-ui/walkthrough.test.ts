@@ -189,12 +189,11 @@ test.describe("Web UI Walkthrough", () => {
     test("存在しないページはSPAフォールバックでindex.htmlを返す", async ({
       page,
     }) => {
-      await page.goto("/nonexistent-page");
+      const response = await page.goto("/nonexistent-page");
       // SPAフォールバックにより、index.htmlが返される
       // React Routerがハンドルし、何らかのUIが表示される
       // （このテストはSPAフォールバックが機能していることを確認）
-      const response = await page.request.get("/nonexistent-page");
-      expect(response.status()).toBe(200);
+      expect(response?.status()).toBe(200);
     });
   });
 });

@@ -25,8 +25,9 @@ let trayInstance: any = null;
 function shouldEnableTray(
   platform: NodeJS.Platform = process.platform,
 ): boolean {
-  // NOTE: `trayicon` is a win32-only dependency.
-  if (platform !== "win32") return false;
+  // NOTE: systray2 supports win32/darwin/linux. Skip unsupported platforms.
+  const supportedPlatforms: NodeJS.Platform[] = ["win32", "darwin", "linux"];
+  if (!supportedPlatforms.includes(platform)) return false;
   if (process.env.GWT_DISABLE_TRAY?.toLowerCase() === "true") return false;
   if (process.env.GWT_DISABLE_TRAY === "1") return false;
   if (process.env.CI) return false;
@@ -69,13 +70,14 @@ export async function startSystemTray(
 
   const logger = createLogger({ category: "tray" });
   const open = opts?.openUrl ?? openUrl;
+  const platform = opts?.platform ?? process.platform;
 
   try {
     // systray2 をCommonJS requireでインポート（ESM互換性のため）
     const SysTray = require("systray2").default;
 
-    const isWindows = process.platform === "win32";
-    const isMacOS = process.platform === "darwin";
+    const isWindows = platform === "win32";
+    const isMacOS = platform === "darwin";
 
     // プラットフォームに応じたアイコンを選択
     const iconBase64 = isWindows ? TRAY_ICON_ICO_BASE64 : TRAY_ICON_PNG_BASE64;
