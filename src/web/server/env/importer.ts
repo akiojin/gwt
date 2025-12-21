@@ -1,6 +1,9 @@
 import { loadToolsConfig, saveToolsConfig } from "../../../config/tools.js";
 import { recordEnvHistory } from "../../../config/env-history.js";
 import type { EnvironmentHistoryEntry } from "../../../types/api.js";
+import { createLogger } from "../../../logging/logger.js";
+
+const logger = createLogger({ category: "env" });
 
 const IMPORTABLE_KEYS = [
   "OPENAI_API_KEY",
@@ -29,6 +32,7 @@ export async function importOsEnvIntoSharedConfig(): Promise<string[]> {
   }
 
   if (!importedKeys.length) {
+    logger.debug({ reason: "no new keys" }, "Env import skipped");
     return [];
   }
 
@@ -46,6 +50,7 @@ export async function importOsEnvIntoSharedConfig(): Promise<string[]> {
   }));
   await recordEnvHistory(historyEntries);
 
+  logger.info({ importedKeys }, "Environment variables imported");
   return importedKeys;
 }
 

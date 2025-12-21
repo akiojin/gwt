@@ -87,6 +87,16 @@ export async function startWebServer(
     prefix: "/",
   });
 
+  // SPAフォールバック: 未知のルートにindex.htmlを返す
+  fastify.setNotFoundHandler(async (request, reply) => {
+    // APIリクエストは404を返す
+    if (request.url.startsWith("/api/")) {
+      return reply.status(404).send({ error: "Not Found", statusCode: 404 });
+    }
+    // それ以外はindex.htmlを返してReact Routerに処理を委譲
+    return reply.sendFile("index.html");
+  });
+
   // サーバー起動
   const port = resolveWebUiPort();
   // Docker環境からホストOSでアクセスできるよう、0.0.0.0でリッスン
