@@ -53,6 +53,24 @@ async function commandExists(command: string): Promise<boolean> {
   }
 }
 
+/**
+ * コマンドのフルパスを取得
+ * node-ptyはシェルを経由しないため、フルパスが必要
+ */
+async function resolveCommandPath(command: string): Promise<string | null> {
+  try {
+    const { stdout } = await execa(DETECTION_COMMAND, [command], {
+      shell: true,
+    });
+    const fullPath = stdout.trim().split("\n")[0];
+    logger.debug({ command, fullPath }, "Command path resolved");
+    return fullPath || null;
+  } catch {
+    logger.debug({ command, fullPath: null }, "Command path resolution failed");
+    return null;
+  }
+}
+
 let bunxCheckPromise: Promise<void> | null = null;
 
 async function ensureBunxAvailable(): Promise<void> {
@@ -155,26 +173,33 @@ export async function resolveClaudeCommand(
     ? { env: { ...CLAUDE_CODE_TOOL.env } as NodeJS.ProcessEnv }
     : {};
 
-  if (await commandExists("claude")) {
+  // フルパスを取得（node-ptyはシェルを経由しないため必要）
+  const claudePath = await resolveCommandPath("claude");
+  if (claudePath) {
     logger.info(
-      { command: "claude", usesFallback: false },
+      { command: claudePath, usesFallback: false },
       "Claude command resolved",
     );
     return {
-      command: "claude",
+      command: claudePath,
       args,
       usesFallback: false,
       ...envOverrides,
     };
   }
 
-  await ensureBunxAvailable();
+  // bunxへフォールバック
+  const bunxPath = await resolveCommandPath("bunx");
+  if (!bunxPath) {
+    await ensureBunxAvailable(); // エラーをスローする
+  }
+
   logger.info(
-    { command: "bunx", usesFallback: true },
+    { command: bunxPath ?? "bunx", usesFallback: true },
     "Claude command resolved (fallback)",
   );
   return {
-    command: "bunx",
+    command: bunxPath ?? "bunx",
     args: [CLAUDE_CLI_PACKAGE, ...args],
     usesFallback: true,
     ...envOverrides,
@@ -218,25 +243,32 @@ export async function resolveCodexCommand(
 ): Promise<ResolvedCommand> {
   const args = buildCodexArgs(options);
 
-  if (await commandExists("codex")) {
+  // フルパスを取得（node-ptyはシェルを経由しないため必要）
+  const codexPath = await resolveCommandPath("codex");
+  if (codexPath) {
     logger.info(
-      { command: "codex", usesFallback: false },
+      { command: codexPath, usesFallback: false },
       "Codex command resolved",
     );
     return {
-      command: "codex",
+      command: codexPath,
       args,
       usesFallback: false,
     };
   }
 
-  await ensureBunxAvailable();
+  // bunxへフォールバック
+  const bunxPath = await resolveCommandPath("bunx");
+  if (!bunxPath) {
+    await ensureBunxAvailable(); // エラーをスローする
+  }
+
   logger.info(
-    { command: "bunx", usesFallback: true },
+    { command: bunxPath ?? "bunx", usesFallback: true },
     "Codex command resolved (fallback)",
   );
   return {
-    command: "bunx",
+    command: bunxPath ?? "bunx",
     args: [CODEX_CLI_PACKAGE, ...args],
     usesFallback: true,
   };
