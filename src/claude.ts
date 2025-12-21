@@ -37,6 +37,7 @@ export class ClaudeError extends Error {
  *
  * @param worktreePath - Worktree directory to run Claude Code in
  * @param options - Launch options (mode/session/model/permissions/env)
+ * @param options.chrome - Enable Chrome extension integration (adds --chrome flag)
  * @returns Captured session id when available
  */
 export async function launchClaudeCode(
@@ -48,6 +49,7 @@ export async function launchClaudeCode(
     envOverrides?: Record<string, string>;
     model?: string;
     sessionId?: string | null;
+    chrome?: boolean;
   } = {},
 ): Promise<{ sessionId?: string | null }> {
   const terminal = getTerminalStreams();
@@ -169,6 +171,12 @@ export async function launchClaudeCode(
         break;
     }
 
+    // Handle Chrome extension integration
+    if (options.chrome) {
+      args.push("--chrome");
+      console.log(chalk.green("   🌐 Chrome integration enabled"));
+    }
+
     // Detect root user for Docker/sandbox environments
     let isRoot = false;
     try {
@@ -201,7 +209,11 @@ export async function launchClaudeCode(
     terminal.exitRawMode();
     resetTerminalModes(terminal.stdout);
 
-    const baseEnv = { ...process.env, ...(options.envOverrides ?? {}) };
+    const baseEnv: Record<string, string | undefined> = {
+      ...process.env,
+      ...(options.envOverrides ?? {}),
+      ENABLE_LSP_TOOL: "true", // Enable TypeScript LSP support in Claude Code
+    };
     const launchEnvSource =
       options.skipPermissions && !baseEnv.IS_SANDBOX
         ? { ...baseEnv, IS_SANDBOX: "1" }

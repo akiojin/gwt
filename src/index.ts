@@ -209,7 +209,7 @@ Worktree Manager
 Usage: gwt [command] [options]
 
 Commands:
-  serve           Start Web UI server (http://localhost:3000)
+  serve           Start Web UI server (http://localhost:3001)
 
 Options:
   -h, --help      Show this help message
@@ -608,6 +608,7 @@ export async function handleAIToolWorkflow(
         envOverrides?: Record<string, string>;
         model?: string;
         sessionId?: string | null;
+        chrome?: boolean;
       } = {
         mode:
           mode === "resume"
@@ -618,6 +619,7 @@ export async function handleAIToolWorkflow(
         skipPermissions,
         envOverrides: sharedEnv,
         sessionId: resumeSessionId,
+        chrome: true,
       };
       if (normalizedModel) {
         launchOptions.model = normalizedModel;
