@@ -43,6 +43,33 @@
 * update default Claude Code model to Opus 4.5 ([1dd909e](https://github.com/akiojin/gwt/commit/1dd909ed87a55ce3bb796deb0431d0027571dae2))
 * update Opus model version to 4.5 ([307faeb](https://github.com/akiojin/gwt/commit/307faeb66ebac0ca89b01c07ee19d213797c4d5c))
 
+## [4.3.0](https://github.com/akiojin/gwt/compare/v4.2.0...v4.3.0) (2025-12-21)
+
+
+### Features
+
+* Claude CodeのTypeScript LSP対応を追加 ([cf2983b](https://github.com/akiojin/gwt/commit/cf2983b1f58cb670dba2e47b645cc8af79d760a0))
+* Claude Code起動時にChrome拡張機能統合を有効化 ([b3a5d6d](https://github.com/akiojin/gwt/commit/b3a5d6d7adb85d82577f888c147b3af593bf9160))
+* Claude Code起動時にChrome拡張機能統合を有効化 ([f449845](https://github.com/akiojin/gwt/commit/f4498451d1deacbe811126cc34d35e2b73334eb2))
+* macOS対応のシステムトレイを実装 ([b2cdfbe](https://github.com/akiojin/gwt/commit/b2cdfbe6dffe391becdbb3799019616e1e45ed74))
+* Web UIサーバー全体にログ出力を追加 ([09909f2](https://github.com/akiojin/gwt/commit/09909f2c4b4f7c3a0130ade2536ed5bef55d7512))
+* Web UI機能の強化とブランチグラフのリファクタリング ([146f596](https://github.com/akiojin/gwt/commit/146f59609d207b072bfbf10e5150a37f75a4cd77))
+* ブランチグラフをReact Flowベースにリファクタリング ([f0deb4a](https://github.com/akiojin/gwt/commit/f0deb4a37c8dc0d31ede97491d34719dd7297999))
+
+
+### Bug Fixes
+
+* ENABLE_LSP_TOOL環境変数の値を"1"から"true"に修正 ([9bef1eb](https://github.com/akiojin/gwt/commit/9bef1eb809afe3d42cdd190a8ba7b21a71d1a778))
+* node-ptyで使用するコマンドのフルパスを解決 ([7d5ab76](https://github.com/akiojin/gwt/commit/7d5ab76d885b0d6363d7dca821312fedf2e746fa))
+* SPAルーティング用のフォールバック処理を追加 ([a4a0404](https://github.com/akiojin/gwt/commit/a4a0404a439dc07e70ff646f1ca16d8f05d35fef))
+* type-checkでcleanup対象の型エラーを解消 ([a617a2d](https://github.com/akiojin/gwt/commit/a617a2d53575f55985d9d7aa3d3e2fc8717e91fc))
+* Web UIからClaude Code起動時にENABLE_LSP_TOOL環境変数を渡す ([49fea84](https://github.com/akiojin/gwt/commit/49fea847f95e3d997313459389ee4a33aa42dade))
+* Web UIからClaude Code起動時にENABLE_LSP_TOOL環境変数を渡す ([84fedf3](https://github.com/akiojin/gwt/commit/84fedf3918c30b85cae6bb6cdac8f0488ea079ff))
+* Web UIのデフォルトポートを3001に変更 ([597fff3](https://github.com/akiojin/gwt/commit/597fff3310b294d67ec140542d72504ee17a966b))
+* WebSocket接続エラーの即時表示を抑制 ([c0ac929](https://github.com/akiojin/gwt/commit/c0ac929a052ceb3700feee1a9964cb85dfd9c052))
+* クリーンアップ選択の安全判定を要件どおりに更新 ([6c0a595](https://github.com/akiojin/gwt/commit/6c0a5957a866c4f9475f9dd30cb965331a99bfa8))
+* クリーンアップ選択の安全判定を要件どおりに更新 ([23c89c7](https://github.com/akiojin/gwt/commit/23c89c7ee2a5ef843c6d796e013e80c85607e857))
+
 ## [4.2.0](https://github.com/akiojin/gwt/compare/v4.1.1...v4.2.0) (2025-12-20)
 
 
