@@ -2,7 +2,7 @@ import * as net from "node:net";
 
 export function resolveWebUiPort(
   portEnv: string | undefined = process.env.PORT,
-  defaultPort = 3000,
+  defaultPort = 3001,
 ): number {
   if (!portEnv) {
     return defaultPort;
