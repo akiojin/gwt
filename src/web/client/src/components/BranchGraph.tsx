@@ -76,7 +76,7 @@ export function BranchGraph({ branches }: BranchGraphProps) {
 
       <CardContent className="relative p-0">
         {/* キャンバスコンテナ */}
-        <div className="relative h-[500px] w-full">
+        <div className="relative h-[60vh] min-h-[360px] max-h-[640px] w-full">
           <SynapticCanvas
             branches={branches}
             onNodeClick={handleNodeClick}
