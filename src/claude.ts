@@ -446,6 +446,14 @@ export async function isClaudeCodeAvailable(): Promise<boolean> {
   }
 }
 
+/**
+ * Checks whether Chrome integration is supported on the current platform.
+ *
+ * Supported platforms:
+ * - Windows (win32)
+ * - macOS (darwin)
+ * - Linux (non-WSL)
+ */
 function isChromeIntegrationSupported(): boolean {
   switch (process.platform) {
     case "win32":

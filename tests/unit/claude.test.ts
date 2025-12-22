@@ -318,6 +318,63 @@ describe("launchClaudeCode - Root User Detection", () => {
       );
     });
 
+    it("adds --chrome on Windows platform", async () => {
+      Object.defineProperty(process, "platform", {
+        ...(originalPlatformDescriptor ?? {
+          configurable: true,
+          enumerable: true,
+          writable: false,
+        }),
+        value: "win32",
+      });
+
+      delete process.env.WSL_DISTRO_NAME;
+      delete process.env.WSL_INTEROP;
+
+      mockExeca
+        .mockRejectedValueOnce(new Error("Command not found")) // where
+        .mockResolvedValue({
+          stdout: "",
+          stderr: "",
+          exitCode: 0,
+        });
+
+      await launchClaudeCode("/test/path", { chrome: true });
+
+      const npxCall = mockExeca.mock.calls.find((call) => call[0] === "npx");
+      expect(npxCall).toBeTruthy();
+      const args = (npxCall?.[1] ?? []) as string[];
+      expect(args).toContain("--chrome");
+    });
+
+    it("adds --chrome on macOS platform", async () => {
+      Object.defineProperty(process, "platform", {
+        ...(originalPlatformDescriptor ?? {
+          configurable: true,
+          enumerable: true,
+          writable: false,
+        }),
+        value: "darwin",
+      });
+
+      delete process.env.WSL_DISTRO_NAME;
+      delete process.env.WSL_INTEROP;
+
+      mockExeca
+        .mockRejectedValueOnce(new Error("Command not found")) // which
+        .mockResolvedValue({
+          stdout: "",
+          stderr: "",
+          exitCode: 0,
+        });
+
+      await launchClaudeCode("/test/path", { chrome: true });
+
+      const bunxCall = mockExeca.mock.calls[1];
+      const args = bunxCall[1] as string[];
+      expect(args).toContain("--chrome");
+    });
+
     it("skips --chrome on WSL environments", async () => {
       process.env.WSL_DISTRO_NAME = "Ubuntu";
       delete process.env.WSL_INTEROP;
@@ -340,7 +397,6 @@ describe("launchClaudeCode - Root User Detection", () => {
         expect.stringContaining("Chrome integration is not supported"),
       );
     });
-
   });
 
   describe("T106: IS_SANDBOX=1 not set when skipPermissions=false", () => {
