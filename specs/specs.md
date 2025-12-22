@@ -25,7 +25,6 @@
 
 | SPEC ID | タイトル | 作成日 |
 | --- | --- | --- |
-| [SPEC-c8e7a5b2](SPEC-c8e7a5b2/spec.md) | 機能仕様: CLI起動時Web UIサーバー自動起動 | 2025-12-12 |
 | [SPEC-8adfd99e](SPEC-8adfd99e/spec.md) | 機能仕様: Web UI 環境変数編集機能 | 2025-11-11 |
 | [SPEC-1f56fd80](SPEC-1f56fd80/spec.md) | 機能仕様: Web UI システムトレイ統合 | 2025-12-12 |
 | [SPEC-40c7b4f1](SPEC-40c7b4f1/spec.md) | 機能仕様: divergence検知後にUIへ確実に戻す | 2025-12-09 |
@@ -50,3 +49,9 @@
 | SPEC ID | タイトル | 作成日 |
 | --- | --- | --- |
 | [SPEC-b9f5c4a1](SPEC-b9f5c4a1/spec.md) | ログ運用統一仕様 | 2025-12-11 |
+
+## 廃止
+
+| SPEC ID | タイトル | 作成日 |
+| --- | --- | --- |
+| [SPEC-c8e7a5b2](SPEC-c8e7a5b2/spec.md) | 機能仕様: CLI起動時Web UIサーバー自動起動 | 2025-12-12 |
