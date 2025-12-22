@@ -1,6 +1,6 @@
 import { execa, type Options as ExecaOptions } from "execa";
 import chalk from "chalk";
-import { existsSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import {
   createChildStdio,
   getTerminalStreams,
@@ -172,9 +172,15 @@ export async function launchClaudeCode(
     }
 
     // Handle Chrome extension integration
-    if (options.chrome) {
+    if (options.chrome && isChromeIntegrationSupported()) {
       args.push("--chrome");
       console.log(chalk.green("   🌐 Chrome integration enabled"));
+    } else if (options.chrome) {
+      console.log(
+        chalk.yellow(
+          "   ⚠️  Chrome integration is not supported on this platform. Skipping --chrome.",
+        ),
+      );
     }
 
     // Detect root user for Docker/sandbox environments
@@ -436,6 +442,43 @@ export async function isClaudeCodeAvailable(): Promise<boolean> {
         ),
       );
     }
+    return false;
+  }
+}
+
+/**
+ * Checks whether Chrome integration is supported on the current platform.
+ *
+ * Supported platforms:
+ * - Windows (win32)
+ * - macOS (darwin)
+ * - Linux (non-WSL)
+ */
+function isChromeIntegrationSupported(): boolean {
+  switch (process.platform) {
+    case "win32":
+    case "darwin":
+      return true;
+    case "linux":
+      return !isWslEnvironment();
+    default:
+      return false;
+  }
+}
+
+function isWslEnvironment(): boolean {
+  if (process.platform !== "linux") {
+    return false;
+  }
+
+  if (process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP) {
+    return true;
+  }
+
+  try {
+    const procVersion = readFileSync("/proc/version", "utf8");
+    return /microsoft|wsl/i.test(procVersion);
+  } catch {
     return false;
   }
 }
