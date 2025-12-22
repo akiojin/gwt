@@ -113,7 +113,7 @@
     "ink-testing-library": "^4.0.0",
     "jsdom": "^27.0.1",
     "lint-staged": "^16.2.7",
-    "lucide-react": "^0.561.0",
+    "lucide-react": "^0.562.0",
     "prettier": "^3.6.2",
     "rimraf": "^6.0.1",
     "tailwind-merge": "^3.4.0",
