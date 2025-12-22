@@ -43,6 +43,15 @@
 * update default Claude Code model to Opus 4.5 ([1dd909e](https://github.com/akiojin/gwt/commit/1dd909ed87a55ce3bb796deb0431d0027571dae2))
 * update Opus model version to 4.5 ([307faeb](https://github.com/akiojin/gwt/commit/307faeb66ebac0ca89b01c07ee19d213797c4d5c))
 
+## [4.3.1](https://github.com/akiojin/gwt/compare/v4.3.0...v4.3.1) (2025-12-22)
+
+
+### Bug Fixes
+
+* WSL1検出でChrome統合を無効化する ([085688c](https://github.com/akiojin/gwt/commit/085688cbd1572f0ae79bf2408ca281f74e003f75))
+* 未対応環境ではClaude CodeのChrome統合をスキップする ([f76cc0c](https://github.com/akiojin/gwt/commit/f76cc0c8f8ea36c8b270a3132ab63bcdfdfd77ab))
+* 未対応環境ではClaude CodeのChrome統合をスキップする ([f744901](https://github.com/akiojin/gwt/commit/f744901062e5c02e35c27947a4beace2359ecaaf))
+
 ## [4.3.0](https://github.com/akiojin/gwt/compare/v4.2.0...v4.3.0) (2025-12-21)
 
 
