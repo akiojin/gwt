@@ -1,6 +1,6 @@
 import { execa, type Options as ExecaOptions } from "execa";
 import chalk from "chalk";
-import { existsSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import {
   createChildStdio,
   getTerminalStreams,
@@ -459,8 +459,18 @@ function isChromeIntegrationSupported(): boolean {
 }
 
 function isWslEnvironment(): boolean {
-  return Boolean(
-    process.platform === "linux" &&
-    (process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP),
-  );
+  if (process.platform !== "linux") {
+    return false;
+  }
+
+  if (process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP) {
+    return true;
+  }
+
+  try {
+    const procVersion = readFileSync("/proc/version", "utf8");
+    return /microsoft|wsl/i.test(procVersion);
+  } catch {
+    return false;
+  }
 }
