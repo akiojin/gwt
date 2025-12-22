@@ -461,6 +461,6 @@ function isChromeIntegrationSupported(): boolean {
 function isWslEnvironment(): boolean {
   return Boolean(
     process.platform === "linux" &&
-      (process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP),
+    (process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP),
   );
 }
