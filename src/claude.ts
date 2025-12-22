@@ -172,9 +172,15 @@ export async function launchClaudeCode(
     }
 
     // Handle Chrome extension integration
-    if (options.chrome) {
+    if (options.chrome && isChromeIntegrationSupported()) {
       args.push("--chrome");
       console.log(chalk.green("   🌐 Chrome integration enabled"));
+    } else if (options.chrome) {
+      console.log(
+        chalk.yellow(
+          "   ⚠️  Chrome integration is not supported on this platform. Skipping --chrome.",
+        ),
+      );
     }
 
     // Detect root user for Docker/sandbox environments
@@ -438,4 +444,23 @@ export async function isClaudeCodeAvailable(): Promise<boolean> {
     }
     return false;
   }
+}
+
+function isChromeIntegrationSupported(): boolean {
+  switch (process.platform) {
+    case "win32":
+    case "darwin":
+      return true;
+    case "linux":
+      return !isWslEnvironment();
+    default:
+      return false;
+  }
+}
+
+function isWslEnvironment(): boolean {
+  return Boolean(
+    process.platform === "linux" &&
+      (process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP),
+  );
 }

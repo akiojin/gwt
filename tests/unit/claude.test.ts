@@ -274,6 +274,70 @@ describe("launchClaudeCode - Root User Detection", () => {
     });
   });
 
+  describe("Chrome integration flag", () => {
+    const originalWslDistro = process.env.WSL_DISTRO_NAME;
+    const originalWslInterop = process.env.WSL_INTEROP;
+
+    afterEach(() => {
+      if (originalWslDistro === undefined) {
+        delete process.env.WSL_DISTRO_NAME;
+      } else {
+        process.env.WSL_DISTRO_NAME = originalWslDistro;
+      }
+      if (originalWslInterop === undefined) {
+        delete process.env.WSL_INTEROP;
+      } else {
+        process.env.WSL_INTEROP = originalWslInterop;
+      }
+    });
+
+    it("adds --chrome on supported platforms", async () => {
+      delete process.env.WSL_DISTRO_NAME;
+      delete process.env.WSL_INTEROP;
+
+      mockExeca
+        .mockRejectedValueOnce(new Error("Command not found")) // which/where
+        .mockResolvedValue({
+          // bunx
+          stdout: "",
+          stderr: "",
+          exitCode: 0,
+        });
+
+      await launchClaudeCode("/test/path", { chrome: true });
+
+      const bunxCall = mockExeca.mock.calls[1];
+      const args = bunxCall[1] as string[];
+      expect(args).toContain("--chrome");
+      expect(consoleLogSpy).toHaveBeenCalledWith(
+        expect.stringContaining("Chrome integration enabled"),
+      );
+    });
+
+    it("skips --chrome on WSL environments", async () => {
+      process.env.WSL_DISTRO_NAME = "Ubuntu";
+      delete process.env.WSL_INTEROP;
+
+      mockExeca
+        .mockRejectedValueOnce(new Error("Command not found")) // which/where
+        .mockResolvedValue({
+          // bunx
+          stdout: "",
+          stderr: "",
+          exitCode: 0,
+        });
+
+      await launchClaudeCode("/test/path", { chrome: true });
+
+      const bunxCall = mockExeca.mock.calls[1];
+      const args = bunxCall[1] as string[];
+      expect(args).not.toContain("--chrome");
+      expect(consoleLogSpy).toHaveBeenCalledWith(
+        expect.stringContaining("Chrome integration is not supported"),
+      );
+    });
+  });
+
   describe("T106: IS_SANDBOX=1 not set when skipPermissions=false", () => {
     it("should not set IS_SANDBOX=1 when skipPermissions=false even if root", async () => {
       // Mock root user
