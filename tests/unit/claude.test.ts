@@ -10,7 +10,11 @@ vi.mock("execa", () => ({
 
 vi.mock("fs", () => ({
   existsSync: vi.fn(() => true),
-  default: { existsSync: vi.fn(() => true) },
+  readFileSync: vi.fn(() => "Linux version 6.1.0"),
+  default: {
+    existsSync: vi.fn(() => true),
+    readFileSync: vi.fn(() => "Linux version 6.1.0"),
+  },
 }));
 
 const stdoutWrite = vi.fn();
@@ -336,6 +340,7 @@ describe("launchClaudeCode - Root User Detection", () => {
         expect.stringContaining("Chrome integration is not supported"),
       );
     });
+
   });
 
   describe("T106: IS_SANDBOX=1 not set when skipPermissions=false", () => {
