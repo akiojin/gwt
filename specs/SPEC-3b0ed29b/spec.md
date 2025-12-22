@@ -24,6 +24,7 @@ gwtから各AIツール（Claude Code、Codex、Gemini）を起動する機能�
 1. **前提条件** gwtが起動しブランチが選択されている、**操作** AIツール選択画面でCodexを選択して起動、**期待結果** Codexが`--enable web_search_request`、`--enable skills`、`--sandbox workspace-write`などのデフォルト引数付きで起動する
 2. **前提条件** gwtが起動しブランチが選択されている、**操作** AIツール選択画面でClaude Codeを選択して起動、**期待結果** Claude Codeがデフォルト設定で起動し、モデル選択が可能
 3. **前提条件** gwtが起動しブランチが選択されている、**操作** AIツール選択画面でGeminiを選択して起動、**期待結果** Gemini CLIがデフォルト設定で起動する
+4. **前提条件** Claude CodeのChrome拡張機能統合が未対応の環境（例: WSL）、**操作** Claude Codeを起動、**期待結果** Chrome統合フラグは付与されず、警告が表示された上でClaude Codeが起動する
 
 ---
 
@@ -141,6 +142,7 @@ gwtから各AIツール（Claude Code、Codex、Gemini）を起動する機能�
 - `git worktree list` の情報と実際のWorktreeのチェックアウトブランチが一致しない場合は再利用せず警告する
 - 既存履歴に誤ったモデル名が保存されている場合は正規化された表記で表示する
 - Windows環境でのエラー発生時は、プラットフォーム固有のトラブルシューティングメッセージを表示する
+- Claude CodeのChrome拡張機能統合が未対応の環境（例: WSL）では`--chrome`を付与せずに起動し、警告を表示する
 - 環境変数に同じキーが共有envとツール固有envの両方に存在する場合、ツール固有の環境変数が優先される
 - rootユーザーでClaude Codeを起動する場合、Docker/サンドボックス環境として検出され、追加の警告が表示される
 
@@ -172,6 +174,7 @@ gwtから各AIツール（Claude Code、Codex、Gemini）を起動する機能�
 - **FR-101**: Claude Codeは、権限スキップモード時に`--dangerously-skip-permissions`フラグと`IS_SANDBOX=1`環境変数を設定**しなければならない**
 - **FR-102**: Claude Codeは、継続モード時に`-c`フラグを、再開モード時に`-r`フラグを渡さ**なければならない**
 - **FR-103**: Claude Codeは、起動後に生成されるセッションファイル群から最終更新順に`session_id`を抽出し、agent等の`session_id`を持たないファイルで上書きしてはならない
+- **FR-104**: Claude Codeは、Chrome拡張機能統合が未対応の環境（例: WSL）では`--chrome`を付与せず、警告を表示して起動を継続**しなければならない**
 
 #### Codex固有要件
 
