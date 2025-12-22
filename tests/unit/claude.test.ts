@@ -10,7 +10,11 @@ vi.mock("execa", () => ({
 
 vi.mock("fs", () => ({
   existsSync: vi.fn(() => true),
-  default: { existsSync: vi.fn(() => true) },
+  readFileSync: vi.fn(() => "Linux version 6.1.0"),
+  default: {
+    existsSync: vi.fn(() => true),
+    readFileSync: vi.fn(() => "Linux version 6.1.0"),
+  },
 }));
 
 const stdoutWrite = vi.fn();
@@ -271,6 +275,127 @@ describe("launchClaudeCode - Root User Detection", () => {
       const args = bunxCall[1] as string[];
       expect(args).not.toContain("-c");
       expect(args).not.toContain("--resume");
+    });
+  });
+
+  describe("Chrome integration flag", () => {
+    const originalWslDistro = process.env.WSL_DISTRO_NAME;
+    const originalWslInterop = process.env.WSL_INTEROP;
+
+    afterEach(() => {
+      if (originalWslDistro === undefined) {
+        delete process.env.WSL_DISTRO_NAME;
+      } else {
+        process.env.WSL_DISTRO_NAME = originalWslDistro;
+      }
+      if (originalWslInterop === undefined) {
+        delete process.env.WSL_INTEROP;
+      } else {
+        process.env.WSL_INTEROP = originalWslInterop;
+      }
+    });
+
+    it("adds --chrome on supported platforms", async () => {
+      delete process.env.WSL_DISTRO_NAME;
+      delete process.env.WSL_INTEROP;
+
+      mockExeca
+        .mockRejectedValueOnce(new Error("Command not found")) // which/where
+        .mockResolvedValue({
+          // bunx
+          stdout: "",
+          stderr: "",
+          exitCode: 0,
+        });
+
+      await launchClaudeCode("/test/path", { chrome: true });
+
+      const bunxCall = mockExeca.mock.calls[1];
+      const args = bunxCall[1] as string[];
+      expect(args).toContain("--chrome");
+      expect(consoleLogSpy).toHaveBeenCalledWith(
+        expect.stringContaining("Chrome integration enabled"),
+      );
+    });
+
+    it("adds --chrome on Windows platform", async () => {
+      Object.defineProperty(process, "platform", {
+        ...(originalPlatformDescriptor ?? {
+          configurable: true,
+          enumerable: true,
+          writable: false,
+        }),
+        value: "win32",
+      });
+
+      delete process.env.WSL_DISTRO_NAME;
+      delete process.env.WSL_INTEROP;
+
+      mockExeca
+        .mockRejectedValueOnce(new Error("Command not found")) // where
+        .mockResolvedValue({
+          stdout: "",
+          stderr: "",
+          exitCode: 0,
+        });
+
+      await launchClaudeCode("/test/path", { chrome: true });
+
+      const npxCall = mockExeca.mock.calls.find((call) => call[0] === "npx");
+      expect(npxCall).toBeTruthy();
+      const args = (npxCall?.[1] ?? []) as string[];
+      expect(args).toContain("--chrome");
+    });
+
+    it("adds --chrome on macOS platform", async () => {
+      Object.defineProperty(process, "platform", {
+        ...(originalPlatformDescriptor ?? {
+          configurable: true,
+          enumerable: true,
+          writable: false,
+        }),
+        value: "darwin",
+      });
+
+      delete process.env.WSL_DISTRO_NAME;
+      delete process.env.WSL_INTEROP;
+
+      mockExeca
+        .mockRejectedValueOnce(new Error("Command not found")) // which
+        .mockResolvedValue({
+          stdout: "",
+          stderr: "",
+          exitCode: 0,
+        });
+
+      await launchClaudeCode("/test/path", { chrome: true });
+
+      const bunxCall = mockExeca.mock.calls[1];
+      const args = bunxCall[1] as string[];
+      expect(args).toContain("--chrome");
+    });
+
+    it("skips --chrome on WSL environments", async () => {
+      process.env.WSL_DISTRO_NAME = "Ubuntu";
+      delete process.env.WSL_INTEROP;
+
+      mockExeca
+        .mockRejectedValueOnce(new Error("Command not found")) // which/where
+        .mockResolvedValue({
+          // bunx
+          stdout: "",
+          stderr: "",
+          exitCode: 0,
+        });
+
+      await launchClaudeCode("/test/path", { chrome: true });
+
+      const bunxCall = mockExeca.mock.calls[1];
+      const args = bunxCall[1] as string[];
+      expect(args).not.toContain("--chrome");
+      expect(consoleLogSpy).toHaveBeenCalledWith(
+        expect.stringContaining("Chrome integration is not supported"),
+      );
     });
   });
 
