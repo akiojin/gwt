@@ -7,6 +7,7 @@ import {
   collectUpstreamMap,
   getBranchDivergenceStatuses,
 } from "../../../git.js";
+import { GIT_CONFIG } from "../../../config/constants.js";
 import { listAdditionalWorktrees } from "../../../worktree.js";
 import { getPullRequestByBranch } from "../../../github.js";
 import type { BranchInfo, WorktreeInfo } from "../types.js";
@@ -28,6 +29,45 @@ export interface UseGitDataResult {
   lastUpdated: Date | null;
 }
 
+export const GIT_DATA_TIMEOUT_MS = 3000;
+const PER_BRANCH_TIMEOUT_MS = 1000;
+
+async function withTimeout<T>(
+  label: string,
+  promise: Promise<T>,
+  timeoutMs: number,
+  fallback: T,
+): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  let timedOut = false;
+
+  const timeoutPromise = new Promise<T>((resolve) => {
+    timeoutId = setTimeout(() => {
+      timedOut = true;
+      resolve(fallback);
+    }, timeoutMs);
+  });
+
+  const guarded = promise.catch((error) => {
+    if (process.env.DEBUG) {
+      console.warn(`Failed to resolve ${label}`, error);
+    }
+    return fallback;
+  });
+
+  const result = await Promise.race([guarded, timeoutPromise]);
+
+  if (timedOut && process.env.DEBUG) {
+    console.warn(`Timed out waiting for ${label}`);
+  }
+
+  if (timeoutId) {
+    clearTimeout(timeoutId);
+  }
+
+  return result;
+}
+
 /**
  * Hook to fetch and manage Git data (branches and worktrees)
  * @param options - Configuration options for auto-refresh and polling interval
@@ -45,21 +85,37 @@ export function useGitData(options?: UseGitDataOptions): UseGitDataResult {
     setError(null);
 
     try {
-      const repoRoot = await getRepositoryRoot();
+      const repoRoot = await withTimeout(
+        "repository root",
+        getRepositoryRoot(),
+        GIT_DATA_TIMEOUT_MS,
+        process.cwd(),
+      );
 
       // リモートブランチの最新情報を取得（失敗してもローカル表示は継続）
-      try {
-        await fetchAllRemotes({ cwd: repoRoot });
-      } catch (fetchError) {
+      void fetchAllRemotes({
+        cwd: repoRoot,
+        timeoutMs: GIT_CONFIG.FETCH_TIMEOUT,
+      }).catch((fetchError) => {
         if (process.env.DEBUG) {
           console.warn("Failed to fetch remote branches", fetchError);
         }
-      }
+      });
 
-      const branchesData = await getAllBranches();
+      const branchesData = await withTimeout(
+        "branches",
+        getAllBranches(),
+        GIT_DATA_TIMEOUT_MS,
+        [],
+      );
       let worktreesData: GitWorktreeInfo[] = [];
       try {
-        worktreesData = await listAdditionalWorktrees();
+        worktreesData = await withTimeout(
+          "worktrees",
+          listAdditionalWorktrees(),
+          GIT_DATA_TIMEOUT_MS,
+          [],
+        );
       } catch (err) {
         if (process.env.DEBUG) {
           console.error("Failed to list additional worktrees:", err);
@@ -74,7 +130,12 @@ export function useGitData(options?: UseGitDataOptions): UseGitDataResult {
             return wt;
           }
           try {
-            const hasUncommitted = await hasUncommittedChanges(wt.path);
+            const hasUncommitted = await withTimeout(
+              "worktree status",
+              hasUncommittedChanges(wt.path),
+              PER_BRANCH_TIMEOUT_MS,
+              false,
+            );
             return { ...wt, hasUncommittedChanges: hasUncommitted };
           } catch {
             return wt;
@@ -82,12 +143,27 @@ export function useGitData(options?: UseGitDataOptions): UseGitDataResult {
         }),
       );
 
-      const lastToolUsageMap = await getLastToolUsageMap(repoRoot);
+      const lastToolUsageMap = await withTimeout(
+        "last tool usage",
+        getLastToolUsageMap(repoRoot),
+        GIT_DATA_TIMEOUT_MS,
+        new Map(),
+      );
 
       // upstream情報とdivergence情報を取得
       const [upstreamMap, divergenceStatuses] = await Promise.all([
-        collectUpstreamMap(repoRoot),
-        getBranchDivergenceStatuses({ cwd: repoRoot }).catch(() => []),
+        withTimeout(
+          "upstream map",
+          collectUpstreamMap(repoRoot),
+          GIT_DATA_TIMEOUT_MS,
+          new Map<string, string>(),
+        ),
+        withTimeout(
+          "divergence",
+          getBranchDivergenceStatuses({ cwd: repoRoot }).catch(() => []),
+          GIT_DATA_TIMEOUT_MS,
+          [],
+        ),
       ]);
 
       // divergenceをMapに変換
@@ -153,13 +229,20 @@ export function useGitData(options?: UseGitDataOptions): UseGitDataResult {
           if (branch.type === "local") {
             try {
               // Check for unpushed commits
-              hasUnpushed = await hasUnpushedCommitsInRepo(
-                branch.name,
-                repoRoot,
-              );
-
-              // Check for PR status
-              prInfo = await getPullRequestByBranch(branch.name);
+              [hasUnpushed, prInfo] = await Promise.all([
+                withTimeout(
+                  "unpushed commits",
+                  hasUnpushedCommitsInRepo(branch.name, repoRoot),
+                  PER_BRANCH_TIMEOUT_MS,
+                  false,
+                ),
+                withTimeout(
+                  "pull request",
+                  getPullRequestByBranch(branch.name),
+                  PER_BRANCH_TIMEOUT_MS,
+                  null,
+                ),
+              ]);
             } catch (error) {
               // Silently ignore errors to avoid breaking the UI
               if (process.env.DEBUG) {

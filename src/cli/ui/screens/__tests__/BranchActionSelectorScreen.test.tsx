@@ -6,6 +6,7 @@ import { act, render } from "@testing-library/react";
 import { render as inkRender } from "ink-testing-library";
 import React from "react";
 import { BranchActionSelectorScreen } from "../BranchActionSelectorScreen.js";
+import { ESCAPE_SEQUENCE_TIMEOUT_MS } from "../../hooks/useAppInput.js";
 import { Window } from "happy-dom";
 
 describe("BranchActionSelectorScreen", () => {
@@ -182,6 +183,50 @@ describe("BranchActionSelectorScreen", () => {
     inkApp.unmount();
   });
 
+  it("should treat delayed split down-arrow sequence as navigation (WSL2) and not as Escape", () => {
+    vi.useFakeTimers();
+    let inkApp: ReturnType<typeof inkRender> | undefined;
+
+    try {
+      const onUseExisting = vi.fn();
+      const onCreateNew = vi.fn();
+      const onBack = vi.fn();
+
+      inkApp = inkRender(
+        <BranchActionSelectorScreen
+          selectedBranch="feature-test"
+          onUseExisting={onUseExisting}
+          onCreateNew={onCreateNew}
+          onBack={onBack}
+        />,
+      );
+
+      act(() => {
+        inkApp.stdin.write("\u001b");
+      });
+
+      act(() => {
+        vi.advanceTimersByTime(ESCAPE_SEQUENCE_TIMEOUT_MS - 10);
+      });
+
+      act(() => {
+        inkApp.stdin.write("[");
+        inkApp.stdin.write("B");
+      });
+
+      act(() => {
+        inkApp.stdin.write("\r");
+      });
+
+      expect(onBack).not.toHaveBeenCalled();
+      expect(onCreateNew).toHaveBeenCalledTimes(1);
+      expect(onUseExisting).not.toHaveBeenCalled();
+    } finally {
+      inkApp?.unmount();
+      vi.useRealTimers();
+    }
+  });
+
   it("should still handle Escape key as back navigation", () => {
     vi.useFakeTimers();
     let inkApp: ReturnType<typeof inkRender> | undefined;
@@ -205,7 +250,7 @@ describe("BranchActionSelectorScreen", () => {
       });
 
       act(() => {
-        vi.advanceTimersByTime(25);
+        vi.advanceTimersByTime(ESCAPE_SEQUENCE_TIMEOUT_MS);
       });
 
       expect(onBack).toHaveBeenCalledTimes(1);

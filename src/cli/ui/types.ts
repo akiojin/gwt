@@ -12,6 +12,11 @@ export interface WorktreeInfo {
 export type AITool = string;
 export type InferenceLevel = "low" | "medium" | "high" | "xhigh";
 
+/**
+ * Branch view mode for filtering branch list by type
+ */
+export type BranchViewMode = "all" | "local" | "remote";
+
 export interface ModelOption {
   id: string;
   label: string;
