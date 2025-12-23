@@ -1,9 +1,14 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
+/* eslint-disable @typescript-eslint/no-unused-vars */
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import * as git from "../../src/git";
-import { localBranches, remoteBranches } from "../fixtures/branches";
+import {
+  localBranches as _localBranches,
+  remoteBranches as _remoteBranches,
+} from "../fixtures/branches";
 
 // Mock execa
 vi.mock("execa", () => ({
@@ -1334,5 +1339,214 @@ describe("pullFastForward", () => {
     await expect(git.pullFastForward("/repo/worktree")).rejects.toThrow(
       "Failed to fast-forward pull",
     );
+  });
+});
+
+// ========================================
+// cwd パラメータのテスト（回帰テスト）
+// ========================================
+
+describe("git.ts - cwd parameter support", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  describe("getLocalBranches with cwd", () => {
+    it("should pass cwd to execa when provided", async () => {
+      const testCwd = "/custom/repo/path";
+      const responses = [
+        {
+          stdout: "main\0${1700000000}",
+          stderr: "",
+          exitCode: 0,
+        },
+        {
+          stdout: "main\nfeature/test",
+          stderr: "",
+          exitCode: 0,
+        },
+      ];
+
+      (execa as any).mockImplementation(() => responses.shift());
+
+      await git.getLocalBranches(testCwd);
+
+      const calls = (execa as any).mock.calls;
+      // for-each-ref の呼び出し
+      expect(calls[0][2]).toEqual({ cwd: testCwd });
+      // branch の呼び出し
+      expect(calls[1][2]).toEqual({ cwd: testCwd });
+    });
+
+    it("should not pass cwd when not provided", async () => {
+      const responses = [
+        {
+          stdout: "main\0${1700000000}",
+          stderr: "",
+          exitCode: 0,
+        },
+        {
+          stdout: "main",
+          stderr: "",
+          exitCode: 0,
+        },
+      ];
+
+      (execa as any).mockImplementation(() => responses.shift());
+
+      await git.getLocalBranches();
+
+      const calls = (execa as any).mock.calls;
+      // for-each-ref の呼び出し - cwd なし
+      expect(calls[0][2]).toBeUndefined();
+      // branch の呼び出し - cwd なし
+      expect(calls[1][2]).toBeUndefined();
+    });
+  });
+
+  describe("getRemoteBranches with cwd", () => {
+    it("should pass cwd to execa when provided", async () => {
+      const testCwd = "/custom/repo/path";
+      const responses = [
+        {
+          stdout: "origin/main\0${1700000000}",
+          stderr: "",
+          exitCode: 0,
+        },
+        {
+          stdout: "origin/main\norigin/develop",
+          stderr: "",
+          exitCode: 0,
+        },
+      ];
+
+      (execa as any).mockImplementation(() => responses.shift());
+
+      await git.getRemoteBranches(testCwd);
+
+      const calls = (execa as any).mock.calls;
+      // for-each-ref の呼び出し
+      expect(calls[0][2]).toEqual({ cwd: testCwd });
+      // branch -r の呼び出し
+      expect(calls[1][2]).toEqual({ cwd: testCwd });
+    });
+
+    it("should not pass cwd when not provided", async () => {
+      const responses = [
+        {
+          stdout: "origin/main\0${1700000000}",
+          stderr: "",
+          exitCode: 0,
+        },
+        {
+          stdout: "origin/main",
+          stderr: "",
+          exitCode: 0,
+        },
+      ];
+
+      (execa as any).mockImplementation(() => responses.shift());
+
+      await git.getRemoteBranches();
+
+      const calls = (execa as any).mock.calls;
+      // for-each-ref の呼び出し - cwd なし
+      expect(calls[0][2]).toBeUndefined();
+      // branch -r の呼び出し - cwd なし
+      expect(calls[1][2]).toBeUndefined();
+    });
+  });
+
+  describe("getAllBranches with cwd", () => {
+    it("should pass cwd to all internal functions", async () => {
+      const testCwd = "/custom/repo/path";
+
+      (execa as any).mockImplementation(
+        async (command: string, args?: readonly string[], options?: any) => {
+          if (args?.[0] === "for-each-ref") {
+            if (args.includes("refs/heads")) {
+              return {
+                stdout: "main\0${1700000000}",
+                stderr: "",
+                exitCode: 0,
+              } as any;
+            }
+            if (args.includes("refs/remotes")) {
+              return {
+                stdout: "origin/main\0${1705000000}",
+                stderr: "",
+                exitCode: 0,
+              } as any;
+            }
+          }
+
+          if (args?.[0] === "branch" && args.includes("--show-current")) {
+            return {
+              stdout: "main",
+              stderr: "",
+              exitCode: 0,
+            } as any;
+          }
+
+          if (args?.[0] === "branch" && args.includes("-r")) {
+            return {
+              stdout: "origin/main",
+              stderr: "",
+              exitCode: 0,
+            } as any;
+          }
+
+          if (
+            args?.[0] === "branch" &&
+            args.includes("--format=%(refname:short)")
+          ) {
+            return {
+              stdout: "main",
+              stderr: "",
+              exitCode: 0,
+            } as any;
+          }
+
+          return {
+            stdout: "",
+            stderr: "",
+            exitCode: 0,
+          } as any;
+        },
+      );
+
+      await git.getAllBranches(testCwd);
+
+      const calls = (execa as any).mock.calls;
+      // すべての呼び出しでcwdが渡されていることを確認
+      const callsWithCwd = calls.filter(
+        (call: any[]) => call[2]?.cwd === testCwd,
+      );
+      // for-each-ref (2回: refs/heads, refs/remotes) + branch (3回: local, remote, --show-current)
+      expect(callsWithCwd.length).toBeGreaterThanOrEqual(5);
+    });
+  });
+
+  describe("getCurrentBranch with cwd", () => {
+    it("should use provided cwd instead of calling getRepositoryRoot", async () => {
+      const testCwd = "/custom/repo/path";
+
+      (execa as any).mockResolvedValue({
+        stdout: "main",
+        stderr: "",
+        exitCode: 0,
+      });
+
+      const result = await git.getCurrentBranch(testCwd);
+
+      expect(result).toBe("main");
+      expect(execa).toHaveBeenCalledWith("git", ["branch", "--show-current"], {
+        cwd: testCwd,
+      });
+    });
   });
 });
