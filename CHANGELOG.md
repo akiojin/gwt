@@ -43,6 +43,23 @@
 * update default Claude Code model to Opus 4.5 ([1dd909e](https://github.com/akiojin/gwt/commit/1dd909ed87a55ce3bb796deb0431d0027571dae2))
 * update Opus model version to 4.5 ([307faeb](https://github.com/akiojin/gwt/commit/307faeb66ebac0ca89b01c07ee19d213797c4d5c))
 
+## [4.4.0](https://github.com/akiojin/gwt/compare/v4.3.1...v4.4.0) (2025-12-23)
+
+
+### Features
+
+* ブランチ一覧画面の改善（表示モード切替・スピナー局所化） ([46e42ae](https://github.com/akiojin/gwt/commit/46e42aecb544964fa156c84043b19243a16ee91f))
+* ブランチ表示モード切替機能（TABキー）を追加 ([50a1d39](https://github.com/akiojin/gwt/commit/50a1d393024a8e8e7ec3c4bcd98502c15408cabe))
+
+
+### Bug Fixes
+
+* Git情報取得のタイムアウトを追加 ([bcccdbf](https://github.com/akiojin/gwt/commit/bcccdbf701165d773f8f64032002d02050515507))
+* Mode表示を Stats 行の先頭に移動 ([d18ad5c](https://github.com/akiojin/gwt/commit/d18ad5cf2549128cf5faaf6f48f48e2a58ac2f7e))
+* WSLの矢印キー誤認を防止 ([cbad8f6](https://github.com/akiojin/gwt/commit/cbad8f600d0bba5c751f1062f54136aaf7235aef))
+* リモート取得遅延でもブランチ一覧を表示 ([5cea85a](https://github.com/akiojin/gwt/commit/5cea85a358399aa44633b58d54ef282ef4718b25))
+* 相対パス起動のエントリ判定を安定化 ([618093e](https://github.com/akiojin/gwt/commit/618093e61738dbf2799c16b103c015fb27d69913))
+
 ## [4.3.1](https://github.com/akiojin/gwt/compare/v4.3.0...v4.3.1) (2025-12-22)
 
 
