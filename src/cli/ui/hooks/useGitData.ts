@@ -104,7 +104,7 @@ export function useGitData(options?: UseGitDataOptions): UseGitDataResult {
 
       const branchesData = await withTimeout(
         "branches",
-        getAllBranches(),
+        getAllBranches(repoRoot),
         GIT_DATA_TIMEOUT_MS,
         [],
       );

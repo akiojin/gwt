@@ -177,11 +177,11 @@ export async function getWorktreeRoot(): Promise<string> {
   }
 }
 
-export async function getCurrentBranch(): Promise<string | null> {
+export async function getCurrentBranch(cwd?: string): Promise<string | null> {
   try {
-    const repoRoot = await getRepositoryRoot();
+    const workDir = cwd ?? (await getRepositoryRoot());
     const { stdout } = await execa("git", ["branch", "--show-current"], {
-      cwd: repoRoot,
+      cwd: workDir,
     });
     return stdout.trim() || null;
   } catch {
@@ -227,13 +227,15 @@ async function getBranchCommitTimestamps(
   }
 }
 
-export async function getLocalBranches(): Promise<BranchInfo[]> {
+export async function getLocalBranches(cwd?: string): Promise<BranchInfo[]> {
   try {
-    const commitMap = await getBranchCommitTimestamps(["refs/heads"]);
-    const { stdout = "" } = (await execa("git", [
-      "branch",
-      "--format=%(refname:short)",
-    ])) ?? { stdout: "" };
+    const execOptions = cwd ? { cwd } : undefined;
+    const commitMap = await getBranchCommitTimestamps(["refs/heads"], cwd);
+    const { stdout = "" } = (await execa(
+      "git",
+      ["branch", "--format=%(refname:short)"],
+      execOptions,
+    )) ?? { stdout: "" };
     return stdout
       .split("\n")
       .filter((line) => line.trim())
@@ -256,14 +258,15 @@ export async function getLocalBranches(): Promise<BranchInfo[]> {
   }
 }
 
-export async function getRemoteBranches(): Promise<BranchInfo[]> {
+export async function getRemoteBranches(cwd?: string): Promise<BranchInfo[]> {
   try {
-    const commitMap = await getBranchCommitTimestamps(["refs/remotes"]);
-    const { stdout = "" } = (await execa("git", [
-      "branch",
-      "-r",
-      "--format=%(refname:short)",
-    ])) ?? { stdout: "" };
+    const execOptions = cwd ? { cwd } : undefined;
+    const commitMap = await getBranchCommitTimestamps(["refs/remotes"], cwd);
+    const { stdout = "" } = (await execa(
+      "git",
+      ["branch", "-r", "--format=%(refname:short)"],
+      execOptions,
+    )) ?? { stdout: "" };
     return stdout
       .split("\n")
       .filter((line) => line.trim() && !line.includes("HEAD"))
@@ -289,13 +292,14 @@ export async function getRemoteBranches(): Promise<BranchInfo[]> {
 
 /**
  * ローカルとリモートのすべてのブランチ情報を取得
+ * @param cwd - 作業ディレクトリ（省略時はリポジトリルート）
  * @returns {Promise<BranchInfo[]>} ブランチ情報の配列
  */
-export async function getAllBranches(): Promise<BranchInfo[]> {
+export async function getAllBranches(cwd?: string): Promise<BranchInfo[]> {
   const [localBranches, remoteBranches, currentBranch] = await Promise.all([
-    getLocalBranches(),
-    getRemoteBranches(),
-    getCurrentBranch(),
+    getLocalBranches(cwd),
+    getRemoteBranches(cwd),
+    getCurrentBranch(cwd),
   ]);
 
   // 現在のブランチ情報を設定
