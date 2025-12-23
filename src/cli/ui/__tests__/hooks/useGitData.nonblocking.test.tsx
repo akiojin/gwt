@@ -155,4 +155,52 @@ describe("useGitData non-blocking fetch", () => {
       { timeout: 1000 },
     );
   });
+
+  it("passes repoRoot to getAllBranches", async () => {
+    const mockRepoRoot = "/custom/repo/root";
+
+    (getRepositoryRoot as ReturnType<typeof vi.fn>).mockResolvedValue(
+      mockRepoRoot,
+    );
+    (fetchAllRemotes as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+    (getAllBranches as ReturnType<typeof vi.fn>).mockResolvedValue([
+      {
+        name: "main",
+        type: "local",
+        branchType: "main",
+        isCurrent: true,
+      },
+    ]);
+    (listAdditionalWorktrees as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    (getLastToolUsageMap as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Map(),
+    );
+    (collectUpstreamMap as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Map(),
+    );
+    (getBranchDivergenceStatuses as ReturnType<typeof vi.fn>).mockResolvedValue(
+      [],
+    );
+    (hasUnpushedCommitsInRepo as ReturnType<typeof vi.fn>).mockResolvedValue(
+      false,
+    );
+    (hasUncommittedChanges as ReturnType<typeof vi.fn>).mockResolvedValue(
+      false,
+    );
+    (getPullRequestByBranch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      null,
+    );
+
+    const { result } = renderHook(() => useGitData());
+
+    await waitFor(
+      () => {
+        expect(result.current.loading).toBe(false);
+      },
+      { timeout: 1000 },
+    );
+
+    // getAllBranches が repoRoot を引数として受け取っていることを検証
+    expect(getAllBranches).toHaveBeenCalledWith(mockRepoRoot);
+  });
 });
