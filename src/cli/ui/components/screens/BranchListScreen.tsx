@@ -6,6 +6,7 @@ import { Footer } from "../parts/Footer.js";
 import { Select } from "../common/Select.js";
 import { Input } from "../common/Input.js";
 import { LoadingIndicator } from "../common/LoadingIndicator.js";
+import { useSpinnerFrame } from "../common/SpinnerIcon.js";
 import { useAppInput } from "../../hooks/useAppInput.js";
 import { useTerminalSize } from "../../hooks/useTerminalSize.js";
 import type { BranchItem, Statistics } from "../../types.js";
@@ -64,11 +65,13 @@ type IndicatorColor = "cyan" | "green" | "yellow" | "red";
 
 interface CleanupIndicator {
   icon: string;
+  isSpinning?: boolean;
   color?: IndicatorColor;
 }
 
 interface CleanupFooterMessage {
   text: string;
+  isSpinning?: boolean;
   color?: IndicatorColor;
 }
 
@@ -136,6 +139,20 @@ export function BranchListScreen({
   const selectedSet = useMemo(
     () => new Set(selectedBranches),
     [selectedBranches],
+  );
+
+  // Check if any indicator needs spinner animation
+  const hasSpinningIndicator = useMemo(() => {
+    if (!cleanupUI?.indicators) return false;
+    return Object.values(cleanupUI.indicators).some((ind) => ind.isSpinning);
+  }, [cleanupUI?.indicators]);
+
+  // Also check footer message for spinner
+  const hasSpinningFooter = cleanupUI?.footerMessage?.isSpinning ?? false;
+
+  // Get spinner frame for all spinning elements
+  const spinnerFrame = useSpinnerFrame(
+    hasSpinningIndicator || hasSpinningFooter,
   );
 
   // Filter state - allow test control via props
@@ -347,7 +364,6 @@ export function BranchListScreen({
       const columns = Math.max(20, context.columns - 1);
       const visibleWidth = (value: string) =>
         measureDisplayWidth(stripAnsi(value));
-      const arrow = isSelected ? ">" : " ";
       let commitText = "---";
       if (item.latestCommitTimestamp) {
         commitText = formatLatestCommit(item.latestCommitTimestamp);
@@ -383,27 +399,38 @@ export function BranchListScreen({
       )} | ${paddedDate}`;
       const timestampWidth = measureDisplayWidth(timestampText);
 
+      // Determine the leading indicator (cursor or cleanup status)
       const indicatorInfo = cleanupUI?.indicators?.[item.name];
-      let indicatorIcon = indicatorInfo?.icon ?? "";
-      if (indicatorIcon && indicatorInfo?.color && !isSelected) {
-        switch (indicatorInfo.color) {
-          case "cyan":
-            indicatorIcon = chalk.cyan(indicatorIcon);
-            break;
-          case "green":
-            indicatorIcon = chalk.green(indicatorIcon);
-            break;
-          case "yellow":
-            indicatorIcon = chalk.yellow(indicatorIcon);
-            break;
-          case "red":
-            indicatorIcon = chalk.red(indicatorIcon);
-            break;
-          default:
-            break;
+      let leadingIndicator: string;
+      if (indicatorInfo) {
+        // Use spinner frame if isSpinning, otherwise use static icon
+        let indicatorIcon =
+          indicatorInfo.isSpinning && spinnerFrame
+            ? spinnerFrame
+            : indicatorInfo.icon;
+        if (indicatorIcon && indicatorInfo.color && !isSelected) {
+          switch (indicatorInfo.color) {
+            case "cyan":
+              indicatorIcon = chalk.cyan(indicatorIcon);
+              break;
+            case "green":
+              indicatorIcon = chalk.green(indicatorIcon);
+              break;
+            case "yellow":
+              indicatorIcon = chalk.yellow(indicatorIcon);
+              break;
+            case "red":
+              indicatorIcon = chalk.red(indicatorIcon);
+              break;
+            default:
+              break;
+          }
         }
+        leadingIndicator = indicatorIcon;
+      } else {
+        // Normal cursor
+        leadingIndicator = isSelected ? ">" : " ";
       }
-      const indicatorPrefix = indicatorIcon ? `${indicatorIcon} ` : "";
 
       const isChecked = selectedSet.has(item.name);
       const isWarning = Boolean(item.hasUnpushedCommits) || !item.mergedPR;
@@ -422,7 +449,7 @@ export function BranchListScreen({
         item.safeToCleanup === true ? chalk.green("🛡") : chalk.yellow("⚠");
       const stateCluster = `${selectionIcon} ${worktreeIcon} ${safeIcon}`;
 
-      const staticPrefix = `${arrow} ${indicatorPrefix}${stateCluster} `;
+      const staticPrefix = `${leadingIndicator} ${stateCluster} `;
       const staticPrefixWidth = visibleWidth(staticPrefix);
       const maxLeftDisplayWidth = Math.max(0, columns - timestampWidth - 1);
       const maxLabelWidth = Math.max(
@@ -518,6 +545,7 @@ export function BranchListScreen({
       truncateToWidth,
       selectedSet,
       colorToolLabel,
+      spinnerFrame,
     ],
   );
 
@@ -619,10 +647,16 @@ export function BranchListScreen({
         <Box marginBottom={1}>
           {cleanupUI.footerMessage.color ? (
             <Text color={cleanupUI.footerMessage.color}>
-              {cleanupUI.footerMessage.text}
+              {cleanupUI.footerMessage.isSpinning && spinnerFrame
+                ? `${spinnerFrame} ${cleanupUI.footerMessage.text}`
+                : cleanupUI.footerMessage.text}
             </Text>
           ) : (
-            <Text>{cleanupUI.footerMessage.text}</Text>
+            <Text>
+              {cleanupUI.footerMessage.isSpinning && spinnerFrame
+                ? `${spinnerFrame} ${cleanupUI.footerMessage.text}`
+                : cleanupUI.footerMessage.text}
+            </Text>
           )}
         </Box>
       )}
