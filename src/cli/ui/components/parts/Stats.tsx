@@ -59,15 +59,6 @@ export const Stats = React.memo(function Stats({
 
   return (
     <Box>
-      {items.map((item) => (
-        <Box key={item.label}>
-          <Text dimColor>{item.label}: </Text>
-          <Text bold color={item.color}>
-            {item.value}
-          </Text>
-          <Text dimColor>{separator}</Text>
-        </Box>
-      ))}
       {viewMode && (
         <Box>
           <Text dimColor>Mode: </Text>
@@ -77,6 +68,15 @@ export const Stats = React.memo(function Stats({
           <Text dimColor>{separator}</Text>
         </Box>
       )}
+      {items.map((item) => (
+        <Box key={item.label}>
+          <Text dimColor>{item.label}: </Text>
+          <Text bold color={item.color}>
+            {item.value}
+          </Text>
+          <Text dimColor>{separator}</Text>
+        </Box>
+      ))}
       {lastUpdated && (
         <Box>
           <Text dimColor>Updated: </Text>
