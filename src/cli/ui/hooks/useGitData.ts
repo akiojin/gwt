@@ -7,6 +7,7 @@ import {
   collectUpstreamMap,
   getBranchDivergenceStatuses,
 } from "../../../git.js";
+import { GIT_CONFIG } from "../../../config/constants.js";
 import { listAdditionalWorktrees } from "../../../worktree.js";
 import { getPullRequestByBranch } from "../../../github.js";
 import type { BranchInfo, WorktreeInfo } from "../types.js";
@@ -48,13 +49,14 @@ export function useGitData(options?: UseGitDataOptions): UseGitDataResult {
       const repoRoot = await getRepositoryRoot();
 
       // リモートブランチの最新情報を取得（失敗してもローカル表示は継続）
-      try {
-        await fetchAllRemotes({ cwd: repoRoot });
-      } catch (fetchError) {
+      void fetchAllRemotes({
+        cwd: repoRoot,
+        timeoutMs: GIT_CONFIG.FETCH_TIMEOUT,
+      }).catch((fetchError) => {
         if (process.env.DEBUG) {
           console.warn("Failed to fetch remote branches", fetchError);
         }
-      }
+      });
 
       const branchesData = await getAllBranches();
       let worktreesData: GitWorktreeInfo[] = [];

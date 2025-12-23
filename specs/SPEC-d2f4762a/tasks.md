@@ -28,6 +28,11 @@
 - [x] **T103** [US0] `src/cli/ui/screens/__tests__/BranchActionSelectorScreen.test.tsx` の`Esc`タイムアウト期待値を新しい待機時間に合わせる
 - [x] **T104** [US0] `tests/unit/index.entrypoint.test.ts` に相対パス実行でもエントリ判定が通ることを確認するテストを追加
 - [x] **T105** [US0] `src/index.ts` のエントリポイント判定を `fileURLToPath` + `path.resolve` で正規化する
+- [x] **T106** [P] [共通] `specs/SPEC-d2f4762a/spec.md` にリモート取得の停止時もUIが継続する要件とシナリオを追記
+- [x] **T107** [P] [共通] `specs/SPEC-d2f4762a/plan.md` に非ブロッキングフェッチの実装方針を追記
+- [x] **T108** [US0] `src/cli/ui/__tests__/hooks/useGitData.nonblocking.test.tsx` にフェッチが解決しなくてもローディングが解除されるテストを追加
+- [x] **T109** [US0] `tests/unit/git.fetchAllRemotes.test.ts` に`fetchAllRemotes`がタイムアウト/非対話設定を渡すテストを追加
+- [x] **T110** [US0] `src/git.ts` と `src/cli/ui/hooks/useGitData.ts` を更新し、フェッチのタイムアウトと非ブロッキングを実装
 
 ## フェーズ3: 統合とポリッシュ
 
