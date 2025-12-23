@@ -133,7 +133,6 @@ export function BranchListScreen({
   onToggleSelect,
 }: BranchListScreenProps) {
   const { rows } = useTerminalSize();
-  const headerText = "  Legend: [ ]/[ * ] select  🟢/🔴/⚪ worktree  🛡/⚠ safe";
   const selectedSet = useMemo(
     () => new Set(selectedBranches),
     [selectedBranches],
@@ -602,10 +601,6 @@ export function BranchListScreen({
           branches.length > 0 &&
           filteredBranches.length > 0 && (
             <>
-              {/* Column labels */}
-              <Box>
-                <Text dimColor>{headerText}</Text>
-              </Box>
               <Select
                 items={filteredBranches}
                 onSelect={onSelect}
