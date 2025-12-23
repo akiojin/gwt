@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   isGitRepository,
   getRepositoryRoot,
@@ -914,8 +916,19 @@ export async function main(): Promise<void> {
   await runInteractiveLoop();
 }
 
+export function isEntryPoint(metaUrl: string, argv1?: string): boolean {
+  if (!argv1) {
+    return false;
+  }
+  try {
+    return fileURLToPath(metaUrl) === path.resolve(argv1);
+  } catch {
+    return false;
+  }
+}
+
 // Run the application if this module is executed directly
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isEntryPoint(import.meta.url, process.argv[1])) {
   main().catch(async (error) => {
     console.error("Fatal error:", error);
     await waitForErrorAcknowledgement();

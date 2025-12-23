@@ -26,6 +26,8 @@
 
 - [x] **T102** [US0] `src/cli/ui/hooks/useAppInput.ts` のエスケープシーケンス待機時間を調整し、WSL/Windowsの遅延を許容する
 - [x] **T103** [US0] `src/cli/ui/screens/__tests__/BranchActionSelectorScreen.test.tsx` の`Esc`タイムアウト期待値を新しい待機時間に合わせる
+- [x] **T104** [US0] `tests/unit/index.entrypoint.test.ts` に相対パス実行でもエントリ判定が通ることを確認するテストを追加
+- [x] **T105** [US0] `src/index.ts` のエントリポイント判定を `fileURLToPath` + `path.resolve` で正規化する
 
 ## フェーズ3: 統合とポリッシュ
 
