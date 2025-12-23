@@ -67,18 +67,9 @@ import {
 } from "../../../utils/session.js";
 import type { ToolSessionEntry } from "../../../config/index.js";
 
-const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
 const COMPLETION_HOLD_DURATION_MS = 3000;
 const PROTECTED_BRANCH_WARNING =
   "Root branches operate directly in the repository root. Create a new branch if you need a dedicated worktree.";
-
-const getSpinnerFrame = (index: number): string => {
-  const frame = SPINNER_FRAMES[index];
-  if (typeof frame === "string") {
-    return frame;
-  }
-  return SPINNER_FRAMES[0] ?? "⠋";
-};
 
 export interface SelectionResult {
   branch: string; // Local branch name (without remote prefix)
@@ -153,21 +144,24 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
   const [cleanupIndicators, setCleanupIndicators] = useState<
     Record<
       string,
-      { icon: string; color?: "cyan" | "green" | "yellow" | "red" }
+      {
+        icon: string;
+        isSpinning?: boolean;
+        color?: "cyan" | "green" | "yellow" | "red";
+      }
     >
   >({});
-  const [cleanupProcessingBranch, setCleanupProcessingBranch] = useState<
+  const [_cleanupProcessingBranch, setCleanupProcessingBranch] = useState<
     string | null
   >(null);
   const [cleanupInputLocked, setCleanupInputLocked] = useState(false);
   const [cleanupFooterMessage, setCleanupFooterMessage] = useState<{
     text: string;
+    isSpinning?: boolean;
     color?: "cyan" | "green" | "yellow" | "red";
   } | null>(null);
   const [hiddenBranches, setHiddenBranches] = useState<string[]>([]);
   const [selectedBranches, setSelectedBranches] = useState<string[]>([]);
-  const spinnerFrameIndexRef = useRef(0);
-  const [spinnerFrameIndex, setSpinnerFrameIndex] = useState(0);
   const completionTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   // Fetch version on mount
@@ -183,55 +177,6 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       .then(setRepoRoot)
       .catch(() => setRepoRoot(null));
   }, []);
-
-  useEffect(() => {
-    if (!cleanupInputLocked) {
-      spinnerFrameIndexRef.current = 0;
-      setSpinnerFrameIndex(0);
-      return undefined;
-    }
-
-    const interval = setInterval(() => {
-      spinnerFrameIndexRef.current =
-        (spinnerFrameIndexRef.current + 1) % SPINNER_FRAMES.length;
-      setSpinnerFrameIndex(spinnerFrameIndexRef.current);
-    }, 120);
-
-    return () => {
-      clearInterval(interval);
-      spinnerFrameIndexRef.current = 0;
-      setSpinnerFrameIndex(0);
-    };
-  }, [cleanupInputLocked]);
-
-  useEffect(() => {
-    if (!cleanupInputLocked) {
-      return;
-    }
-
-    const frame = getSpinnerFrame(spinnerFrameIndex);
-
-    if (cleanupProcessingBranch) {
-      setCleanupIndicators((prev) => {
-        const current = prev[cleanupProcessingBranch];
-        if (current && current.icon === frame && current.color === "cyan") {
-          return prev;
-        }
-
-        const next: Record<
-          string,
-          { icon: string; color?: "cyan" | "green" | "yellow" | "red" }
-        > = {
-          ...prev,
-          [cleanupProcessingBranch]: { icon: frame, color: "cyan" },
-        };
-
-        return next;
-      });
-    }
-
-    setCleanupFooterMessage({ text: `Processing... ${frame}`, color: "cyan" });
-  }, [cleanupInputLocked, cleanupProcessingBranch, spinnerFrameIndex]);
 
   useEffect(() => {
     if (!hiddenBranches.length) {
@@ -872,14 +817,12 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     // Provide immediate feedback before fetching targets
     setCleanupInputLocked(true);
     setCleanupIndicators({});
-    const initialFrame = getSpinnerFrame(0);
     setCleanupFooterMessage({
-      text: `Processing... ${initialFrame}`,
+      text: "Processing...",
+      isSpinning: true,
       color: "cyan",
     });
     setCleanupProcessingBranch(null);
-    spinnerFrameIndexRef.current = 0;
-    setSpinnerFrameIndex(0);
 
     const branchMap = new Map(branches.map((branch) => [branch.name, branch]));
     const worktreeMap = new Map(
@@ -944,23 +887,27 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     const initialIndicators = targets.reduce<
       Record<
         string,
-        { icon: string; color?: "cyan" | "green" | "yellow" | "red" }
+        {
+          icon: string;
+          isSpinning?: boolean;
+          color?: "cyan" | "green" | "yellow" | "red";
+        }
       >
     >((acc, target, index) => {
-      const icon = index === 0 ? getSpinnerFrame(0) : "⏳";
-      const color: "cyan" | "green" | "yellow" | "red" =
-        index === 0 ? "cyan" : "yellow";
-      acc[target.branch] = { icon, color };
+      if (index === 0) {
+        acc[target.branch] = { icon: "", isSpinning: true, color: "cyan" };
+      } else {
+        acc[target.branch] = { icon: "⏳", color: "yellow" };
+      }
       return acc;
     }, {});
 
     setCleanupIndicators(initialIndicators);
     const firstTarget = targets.length > 0 ? targets[0] : undefined;
     setCleanupProcessingBranch(firstTarget ? firstTarget.branch : null);
-    spinnerFrameIndexRef.current = 0;
-    setSpinnerFrameIndex(0);
     setCleanupFooterMessage({
-      text: `Processing... ${getSpinnerFrame(0)}`,
+      text: "Processing...",
+      isSpinning: true,
       color: "cyan",
     });
 
@@ -972,12 +919,10 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       const target = currentTarget;
 
       setCleanupProcessingBranch(target.branch);
-      spinnerFrameIndexRef.current = 0;
-      setSpinnerFrameIndex(0);
 
       setCleanupIndicators((prev) => {
         const updated = { ...prev };
-        updated[target.branch] = { icon: getSpinnerFrame(0), color: "cyan" };
+        updated[target.branch] = { icon: "", isSpinning: true, color: "cyan" };
         for (const pending of targets.slice(index + 1)) {
           const current = updated[pending.branch];
           if (!current || current.icon !== "⏳") {

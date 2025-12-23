@@ -833,4 +833,212 @@ describe("BranchListScreen", () => {
       expect(container.textContent).toContain("feature/add-filter");
     });
   });
+
+  describe("Branch View Mode Toggle (TAB key)", () => {
+    const mixedBranches: BranchItem[] = [
+      {
+        name: "main",
+        type: "local",
+        branchType: "main",
+        isCurrent: true,
+        icons: ["⚡"],
+        hasChanges: false,
+        label: "⚡ main",
+        value: "main",
+        latestCommitTimestamp: 1_700_000_000,
+      },
+      {
+        name: "feature/test",
+        type: "local",
+        branchType: "feature",
+        isCurrent: false,
+        icons: ["✨"],
+        hasChanges: false,
+        label: "✨ feature/test",
+        value: "feature/test",
+        latestCommitTimestamp: 1_699_000_000,
+      },
+      {
+        name: "origin/main",
+        type: "remote",
+        branchType: "main",
+        isCurrent: false,
+        icons: ["🌐"],
+        hasChanges: false,
+        label: "🌐 origin/main",
+        value: "origin/main",
+        remoteName: "origin/main",
+        latestCommitTimestamp: 1_698_000_000,
+      },
+      {
+        name: "origin/feature/remote-test",
+        type: "remote",
+        branchType: "feature",
+        isCurrent: false,
+        icons: ["🌐"],
+        hasChanges: false,
+        label: "🌐 origin/feature/remote-test",
+        value: "origin/feature/remote-test",
+        remoteName: "origin/feature/remote-test",
+        latestCommitTimestamp: 1_697_000_000,
+      },
+    ];
+
+    it("should default to 'all' view mode and display Mode: All in stats", () => {
+      const onSelect = vi.fn();
+      const { container } = render(
+        <BranchListScreen
+          branches={mixedBranches}
+          stats={mockStats}
+          onSelect={onSelect}
+        />,
+      );
+
+      expect(container.textContent).toContain("Mode: All");
+    });
+
+    it("should filter to local branches only when view mode is 'local'", () => {
+      const onSelect = vi.fn();
+      const { container } = render(
+        <BranchListScreen
+          branches={mixedBranches}
+          stats={mockStats}
+          onSelect={onSelect}
+          testViewMode="local"
+        />,
+      );
+
+      expect(container.textContent).toContain("Mode: Local");
+      expect(container.textContent).toContain("main");
+      expect(container.textContent).toContain("feature/test");
+      expect(container.textContent).not.toContain("origin/main");
+      expect(container.textContent).not.toContain("origin/feature/remote-test");
+    });
+
+    it("should filter to remote branches only when view mode is 'remote'", () => {
+      const onSelect = vi.fn();
+      const { container } = render(
+        <BranchListScreen
+          branches={mixedBranches}
+          stats={mockStats}
+          onSelect={onSelect}
+          testViewMode="remote"
+        />,
+      );
+
+      expect(container.textContent).toContain("Mode: Remote");
+      expect(container.textContent).not.toContain("feature/test");
+      expect(container.textContent).toContain("origin/main");
+      expect(container.textContent).toContain("origin/feature/remote-test");
+    });
+
+    it("should toggle view mode from all to local when TAB is pressed", () => {
+      const onSelect = vi.fn();
+      const onViewModeChange = vi.fn();
+
+      const inkApp = inkRender(
+        <BranchListScreen
+          branches={mixedBranches}
+          stats={mockStats}
+          onSelect={onSelect}
+          testOnViewModeChange={onViewModeChange}
+        />,
+      );
+
+      act(() => {
+        inkApp.stdin.write("\t"); // TAB key
+      });
+
+      expect(onViewModeChange).toHaveBeenCalledWith("local");
+
+      inkApp.unmount();
+    });
+
+    it("should toggle view mode from local to remote when TAB is pressed", () => {
+      const onSelect = vi.fn();
+      const onViewModeChange = vi.fn();
+
+      const inkApp = inkRender(
+        <BranchListScreen
+          branches={mixedBranches}
+          stats={mockStats}
+          onSelect={onSelect}
+          testViewMode="local"
+          testOnViewModeChange={onViewModeChange}
+        />,
+      );
+
+      act(() => {
+        inkApp.stdin.write("\t"); // TAB key
+      });
+
+      expect(onViewModeChange).toHaveBeenCalledWith("remote");
+
+      inkApp.unmount();
+    });
+
+    it("should toggle view mode from remote to all when TAB is pressed", () => {
+      const onSelect = vi.fn();
+      const onViewModeChange = vi.fn();
+
+      const inkApp = inkRender(
+        <BranchListScreen
+          branches={mixedBranches}
+          stats={mockStats}
+          onSelect={onSelect}
+          testViewMode="remote"
+          testOnViewModeChange={onViewModeChange}
+        />,
+      );
+
+      act(() => {
+        inkApp.stdin.write("\t"); // TAB key
+      });
+
+      expect(onViewModeChange).toHaveBeenCalledWith("all");
+
+      inkApp.unmount();
+    });
+
+    it("should not toggle view mode when in filter mode", () => {
+      const onSelect = vi.fn();
+      const onViewModeChange = vi.fn();
+
+      const inkApp = inkRender(
+        <BranchListScreen
+          branches={mixedBranches}
+          stats={mockStats}
+          onSelect={onSelect}
+          testFilterMode={true}
+          testOnViewModeChange={onViewModeChange}
+        />,
+      );
+
+      act(() => {
+        inkApp.stdin.write("\t"); // TAB key
+      });
+
+      expect(onViewModeChange).not.toHaveBeenCalled();
+
+      inkApp.unmount();
+    });
+
+    it("should combine view mode filter with search filter (AND condition)", () => {
+      const onSelect = vi.fn();
+      const { container } = render(
+        <BranchListScreen
+          branches={mixedBranches}
+          stats={mockStats}
+          onSelect={onSelect}
+          testViewMode="local"
+          testFilterQuery="feature"
+        />,
+      );
+
+      // Only local branches matching "feature"
+      expect(container.textContent).toContain("feature/test");
+      expect(container.textContent).not.toContain("main");
+      expect(container.textContent).not.toContain("origin/feature/remote-test");
+    });
+  });
 });
