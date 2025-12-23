@@ -9,7 +9,7 @@ import { LoadingIndicator } from "../common/LoadingIndicator.js";
 import { useSpinnerFrame } from "../common/SpinnerIcon.js";
 import { useAppInput } from "../../hooks/useAppInput.js";
 import { useTerminalSize } from "../../hooks/useTerminalSize.js";
-import type { BranchItem, Statistics } from "../../types.js";
+import type { BranchItem, Statistics, BranchViewMode } from "../../types.js";
 import stringWidth from "string-width";
 import stripAnsi from "strip-ansi";
 import chalk from "chalk";
@@ -105,6 +105,8 @@ export interface BranchListScreenProps {
   testOnFilterModeChange?: (mode: boolean) => void;
   testFilterQuery?: string;
   testOnFilterQueryChange?: (query: string) => void;
+  testViewMode?: BranchViewMode;
+  testOnViewModeChange?: (mode: BranchViewMode) => void;
   selectedBranches?: string[];
   onToggleSelect?: (branchName: string) => void;
 }
@@ -132,6 +134,8 @@ export function BranchListScreen({
   testOnFilterModeChange,
   testFilterQuery,
   testOnFilterQueryChange,
+  testViewMode,
+  testOnViewModeChange,
   selectedBranches = [],
   onToggleSelect,
 }: BranchListScreenProps) {
@@ -180,6 +184,29 @@ export function BranchListScreen({
     [testOnFilterModeChange],
   );
 
+  // View mode state for filtering by local/remote
+  const [internalViewMode, setInternalViewMode] =
+    useState<BranchViewMode>("all");
+  const viewMode = testViewMode !== undefined ? testViewMode : internalViewMode;
+  const setViewMode = useCallback(
+    (mode: BranchViewMode) => {
+      setInternalViewMode(mode);
+      testOnViewModeChange?.(mode);
+    },
+    [testOnViewModeChange],
+  );
+
+  // Cycle view mode: all → local → remote → all
+  const cycleViewMode = useCallback(() => {
+    const modes: BranchViewMode[] = ["all", "local", "remote"];
+    const currentIndex = modes.indexOf(viewMode);
+    const nextIndex = (currentIndex + 1) % modes.length;
+    const nextMode = modes[nextIndex];
+    if (nextMode !== undefined) {
+      setViewMode(nextMode);
+    }
+  }, [viewMode, setViewMode]);
+
   // Cursor position for Select (controlled to enable space toggle)
   const [selectedIndex, setSelectedIndex] = useState(0);
 
@@ -220,6 +247,13 @@ export function BranchListScreen({
       return;
     }
 
+    // Tab key to cycle view mode (only in branch selection mode)
+    if (key.tab && !filterMode) {
+      cycleViewMode();
+      setSelectedIndex(0); // Reset cursor position on mode change
+      return;
+    }
+
     // Disable global shortcuts while in filter mode
     if (filterMode) {
       return;
@@ -235,27 +269,35 @@ export function BranchListScreen({
     }
   });
 
-  // Filter branches based on query
+  // Filter branches based on view mode and query
   const filteredBranches = useMemo(() => {
-    if (!filterQuery.trim()) {
-      return branches;
+    let result = branches;
+
+    // Apply view mode filter
+    if (viewMode !== "all") {
+      result = result.filter((branch) => branch.type === viewMode);
     }
 
-    const query = filterQuery.toLowerCase();
-    return branches.filter((branch) => {
-      // Search in branch name
-      if (branch.name.toLowerCase().includes(query)) {
-        return true;
-      }
+    // Apply search filter
+    if (filterQuery.trim()) {
+      const query = filterQuery.toLowerCase();
+      result = result.filter((branch) => {
+        // Search in branch name
+        if (branch.name.toLowerCase().includes(query)) {
+          return true;
+        }
 
-      // Search in PR title if available (only openPR has title)
-      if (branch.openPR?.title?.toLowerCase().includes(query)) {
-        return true;
-      }
+        // Search in PR title if available (only openPR has title)
+        if (branch.openPR?.title?.toLowerCase().includes(query)) {
+          return true;
+        }
 
-      return false;
-    });
-  }, [branches, filterQuery]);
+        return false;
+      });
+    }
+
+    return result;
+  }, [branches, viewMode, filterQuery]);
 
   useEffect(() => {
     setSelectedIndex((prev) => {
@@ -287,6 +329,7 @@ export function BranchListScreen({
   const footerActions = [
     { key: "enter", description: "Select" },
     { key: "f", description: "Filter" },
+    { key: "tab", description: "Mode" },
     { key: "r", description: "Refresh" },
     { key: "c", description: "Cleanup" },
     { key: "p", description: "Profiles" },
@@ -584,7 +627,7 @@ export function BranchListScreen({
 
       {/* Stats */}
       <Box>
-        <Stats stats={stats} lastUpdated={lastUpdated} />
+        <Stats stats={stats} lastUpdated={lastUpdated} viewMode={viewMode} />
       </Box>
 
       {/* Content */}
