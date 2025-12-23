@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef } from "react";
 import { useInput, type Key } from "ink";
 
-const ESCAPE_SEQUENCE_TIMEOUT_MS = 25;
+// WSL/Windows can emit split escape sequences with higher latency.
+export const ESCAPE_SEQUENCE_TIMEOUT_MS = 80;
 
 type InputHandler = (input: string, key: Key) => void;
 type Options = { isActive?: boolean };
