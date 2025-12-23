@@ -1,6 +1,7 @@
 import { execa } from "execa";
 import path from "node:path";
 import { BranchInfo } from "./cli/ui/types.js";
+import { GIT_CONFIG } from "./config/constants.js";
 
 export class GitError extends Error {
   constructor(
@@ -40,12 +41,17 @@ export async function isGitRepository(): Promise<boolean> {
       console.error(`[DEBUG] git rev-parse --git-dir: ${result.stdout}`);
     }
     return true;
-  } catch (error: any) {
+  } catch (error: unknown) {
     // Debug: log the error for troubleshooting
     if (process.env.DEBUG) {
-      console.error(`[DEBUG] git rev-parse --git-dir failed:`, error.message);
-      if (error.stderr) {
-        console.error(`[DEBUG] stderr:`, error.stderr);
+      const message = error instanceof Error ? error.message : String(error);
+      const stderr =
+        typeof error === "object" && error !== null && "stderr" in error
+          ? (error as { stderr?: string }).stderr
+          : undefined;
+      console.error(`[DEBUG] git rev-parse --git-dir failed:`, message);
+      if (stderr) {
+        console.error(`[DEBUG] stderr:`, stderr);
       }
     }
     return false;
@@ -752,15 +758,27 @@ export async function getEnhancedSessionInfo(
 
 export async function fetchAllRemotes(options?: {
   cwd?: string;
+  timeoutMs?: number;
+  allowPrompt?: boolean;
 }): Promise<void> {
   try {
-    const execOptions = options?.cwd ? { cwd: options.cwd } : undefined;
+    const execOptions = options?.cwd ? { cwd: options.cwd } : {};
+    const timeoutMs = options?.timeoutMs ?? GIT_CONFIG.FETCH_TIMEOUT;
+    const allowPrompt = options?.allowPrompt === true;
+    const env = allowPrompt
+      ? process.env
+      : {
+          ...process.env,
+          GIT_TERMINAL_PROMPT: "0",
+          GCM_INTERACTIVE: "Never",
+        };
     const args = ["fetch", "--all", "--prune"];
-    if (execOptions) {
-      await execa("git", args, execOptions);
-    } else {
-      await execa("git", args);
-    }
+    await execa("git", args, {
+      ...execOptions,
+      timeout: timeoutMs,
+      env,
+      stdin: allowPrompt ? "inherit" : "ignore",
+    });
   } catch (error) {
     throw new GitError("Failed to fetch remote branches", error);
   }
@@ -854,11 +872,19 @@ export async function executeNpmVersionInWorktree(
         { cwd: worktreePath },
       );
     }
-  } catch (error: any) {
+  } catch (error: unknown) {
     // エラーの詳細情報を含める
     const errorMessage = error instanceof Error ? error.message : String(error);
-    const errorDetails = error?.stderr ? ` (stderr: ${error.stderr})` : "";
-    const errorStdout = error?.stdout ? ` (stdout: ${error.stdout})` : "";
+    const stderr =
+      typeof error === "object" && error !== null && "stderr" in error
+        ? (error as { stderr?: string }).stderr
+        : undefined;
+    const stdout =
+      typeof error === "object" && error !== null && "stdout" in error
+        ? (error as { stdout?: string }).stdout
+        : undefined;
+    const errorDetails = stderr ? ` (stderr: ${stderr})` : "";
+    const errorStdout = stdout ? ` (stdout: ${stdout})` : "";
     throw new GitError(
       `Failed to update version to ${newVersion} in worktree: ${errorMessage}${errorDetails}${errorStdout}`,
       error,
@@ -1201,9 +1227,13 @@ export async function ensureGitignoreEntry(
       if (content.includes("\r\n")) {
         eol = "\r\n";
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       // ENOENTエラー（ファイルが存在しない）は無視
-      if (error.code !== "ENOENT") {
+      const code =
+        typeof error === "object" && error !== null && "code" in error
+          ? (error as { code?: string }).code
+          : undefined;
+      if (code !== "ENOENT") {
         throw error;
       }
     }
@@ -1222,7 +1252,8 @@ export async function ensureGitignoreEntry(
 
     const newContent = `${content}${separator}${entry}${eol}`;
     await fs.writeFile(gitignorePath, newContent, "utf-8");
-  } catch (error: any) {
-    throw new GitError(`Failed to update .gitignore: ${error.message}`, error);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new GitError(`Failed to update .gitignore: ${message}`, error);
   }
 }
