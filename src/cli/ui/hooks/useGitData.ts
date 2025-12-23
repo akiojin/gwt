@@ -29,8 +29,8 @@ export interface UseGitDataResult {
   lastUpdated: Date | null;
 }
 
-export const GIT_DATA_TIMEOUT_MS = 3000;
-const PER_BRANCH_TIMEOUT_MS = 1000;
+export const GIT_DATA_TIMEOUT_MS = 30000; // 30 seconds for large repositories
+const PER_BRANCH_TIMEOUT_MS = 5000; // 5 seconds per branch operation
 
 async function withTimeout<T>(
   label: string,
