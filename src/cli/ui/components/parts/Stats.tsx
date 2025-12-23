@@ -1,11 +1,12 @@
 import React from "react";
 import { Box, Text } from "ink";
-import type { Statistics } from "../../types.js";
+import type { Statistics, BranchViewMode } from "../../types.js";
 
 export interface StatsProps {
   stats: Statistics;
   separator?: string;
   lastUpdated?: Date | null;
+  viewMode?: BranchViewMode;
 }
 
 /**
@@ -30,13 +31,24 @@ function formatRelativeTime(date: Date): string {
 }
 
 /**
- * Stats component - displays statistics in one line
- * Optimized with React.memo to prevent unnecessary re-renders
+ * Format view mode label for display
  */
+function formatViewModeLabel(mode: BranchViewMode): string {
+  switch (mode) {
+    case "all":
+      return "All";
+    case "local":
+      return "Local";
+    case "remote":
+      return "Remote";
+  }
+}
+
 export const Stats = React.memo(function Stats({
   stats,
   separator = "  ",
   lastUpdated = null,
+  viewMode,
 }: StatsProps) {
   const items = [
     { label: "Local", value: stats.localCount, color: "cyan" },
@@ -56,6 +68,15 @@ export const Stats = React.memo(function Stats({
           <Text dimColor>{separator}</Text>
         </Box>
       ))}
+      {viewMode && (
+        <Box>
+          <Text dimColor>Mode: </Text>
+          <Text bold color="white">
+            {formatViewModeLabel(viewMode)}
+          </Text>
+          <Text dimColor>{separator}</Text>
+        </Box>
+      )}
       {lastUpdated && (
         <Box>
           <Text dimColor>Updated: </Text>
