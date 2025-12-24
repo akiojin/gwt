@@ -341,9 +341,9 @@ describe("launchClaudeCode - Root User Detection", () => {
 
       await launchClaudeCode("/test/path", { chrome: true });
 
-      const npxCall = mockExeca.mock.calls.find((call) => call[0] === "npx");
-      expect(npxCall).toBeTruthy();
-      const args = (npxCall?.[1] ?? []) as string[];
+      const bunxCall = mockExeca.mock.calls.find((call) => call[0] === "bunx");
+      expect(bunxCall).toBeTruthy();
+      const args = (bunxCall?.[1] ?? []) as string[];
       expect(args).toContain("--chrome");
     });
 
@@ -780,7 +780,7 @@ describe("launchClaudeCode - Root User Detection", () => {
   });
 
   describe("Windows fallback", () => {
-    it("uses npx when claude is missing and npx is available", async () => {
+    it("uses bunx when claude is missing", async () => {
       Object.defineProperty(process, "platform", {
         ...(originalPlatformDescriptor ?? {
           configurable: true,
@@ -790,11 +790,11 @@ describe("launchClaudeCode - Root User Detection", () => {
         value: "win32",
       });
 
-      // where claude fails, where npx succeeds, then npx runs
+      // where claude fails, where bunx succeeds, then bunx runs
       mockExeca
         .mockRejectedValueOnce(new Error("Command not found")) // where claude
-        .mockResolvedValueOnce({ stdout: String.raw`C:\bin\npx.cmd` }) // where npx
-        .mockResolvedValueOnce(createChildProcess()); // npx execution
+        .mockResolvedValueOnce({ stdout: String.raw`C:\bin\bunx.cmd` }) // where bunx
+        .mockResolvedValueOnce(createChildProcess()); // bunx execution
 
       await launchClaudeCode("/test/path");
 
@@ -807,13 +807,13 @@ describe("launchClaudeCode - Root User Detection", () => {
       expect(mockExeca).toHaveBeenNthCalledWith(
         2,
         "where",
-        ["npx"],
+        ["bunx"],
         expect.objectContaining({ shell: true }),
       );
       expect(mockExeca).toHaveBeenNthCalledWith(
         3,
-        "npx",
-        expect.arrayContaining(["-y", "@anthropic-ai/claude-code@latest"]),
+        "bunx",
+        expect.arrayContaining(["@anthropic-ai/claude-code@latest"]),
         expect.objectContaining({
           cwd: "/test/path",
           stdout: "inherit",
@@ -822,7 +822,7 @@ describe("launchClaudeCode - Root User Detection", () => {
       );
 
       const calledCommands = mockExeca.mock.calls.map((call) => call[0]);
-      expect(calledCommands).not.toContain("bunx");
+      expect(calledCommands).not.toContain("npx");
     });
   });
 
