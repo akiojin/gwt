@@ -43,6 +43,19 @@
 * update default Claude Code model to Opus 4.5 ([1dd909e](https://github.com/akiojin/gwt/commit/1dd909ed87a55ce3bb796deb0431d0027571dae2))
 * update Opus model version to 4.5 ([307faeb](https://github.com/akiojin/gwt/commit/307faeb66ebac0ca89b01c07ee19d213797c4d5c))
 
+## [4.5.0](https://github.com/akiojin/gwt/compare/v4.4.1...v4.5.0) (2025-12-24)
+
+
+### Features
+
+* requirements-spec-kit スキルを追加 ([01a6644](https://github.com/akiojin/gwt/commit/01a6644ad3ba5e73bdf17f79c278ec6cf311b637))
+
+
+### Bug Fixes
+
+* gitデータ取得のタイムアウトを延長 ([27b88a0](https://github.com/akiojin/gwt/commit/27b88a07b2785d26e561066147140f5d2da7541d))
+* gitデータ取得のタイムアウトを延長 ([5e5bdfe](https://github.com/akiojin/gwt/commit/5e5bdfe980c4636611005dc2858c94e84007c246))
+
 ## [4.4.1](https://github.com/akiojin/gwt/compare/v4.4.0...v4.4.1) (2025-12-23)
 
 
