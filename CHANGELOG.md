@@ -43,6 +43,14 @@
 * update default Claude Code model to Opus 4.5 ([1dd909e](https://github.com/akiojin/gwt/commit/1dd909ed87a55ce3bb796deb0431d0027571dae2))
 * update Opus model version to 4.5 ([307faeb](https://github.com/akiojin/gwt/commit/307faeb66ebac0ca89b01c07ee19d213797c4d5c))
 
+## [4.5.1](https://github.com/akiojin/gwt/compare/v4.5.0...v4.5.1) (2025-12-24)
+
+
+### Bug Fixes
+
+* **ci:** マージ方法をsquashに変更してCHANGELOG重複を防止 ([#425](https://github.com/akiojin/gwt/issues/425)) ([ee6338c](https://github.com/akiojin/gwt/commit/ee6338c726002326707baa8b15b5f70703395502))
+* Claude Codeのフォールバックをbunxに統一 ([ac740d9](https://github.com/akiojin/gwt/commit/ac740d9c7bc3ef97a5d3b0903908ecc672c637ce))
+
 ## [4.5.0](https://github.com/akiojin/gwt/compare/v4.4.1...v4.5.0) (2025-12-24)
 
 
