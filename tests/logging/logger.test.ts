@@ -7,7 +7,7 @@ import os from "node:os";
 const TMP_DIR = path.join(process.cwd(), ".tmp-log-test");
 const TMP_HOME = path.join(process.cwd(), ".tmp-log-home");
 
-function readLastLine(file: string): any {
+function readLastLine(file: string): Record<string, unknown> {
   const content = fs.readFileSync(file, "utf-8").trim().split("\n");
   const lines = content.filter(Boolean);
   const last = lines[lines.length - 1];
@@ -92,6 +92,61 @@ describe("createLogger", () => {
     const lines = fs.readFileSync(logfile, "utf-8").trim().split("\n");
     const last = JSON.parse(lines[lines.length - 1]);
     expect(last.msg).toBe("should appear");
-    process.env.LOG_LEVEL = "";
+    delete process.env.LOG_LEVEL;
+  });
+
+  it("multiple logger instances can write to same log file without corruption", () => {
+    const logfile = path.join(TMP_DIR, "multilogger.log");
+    fs.writeFileSync(logfile, ""); // Clear file
+
+    const LOGGER_COUNT = 3;
+    const LOGS_PER_LOGGER = 10;
+
+    // Create multiple logger instances pointing to same file
+    const loggers = Array.from({ length: LOGGER_COUNT }, (_, i) =>
+      createLogger({
+        logDir: TMP_DIR,
+        filename: "multilogger.log",
+        category: `logger-${i}`,
+        sync: true,
+      }),
+    );
+
+    // Write logs from all loggers (simulating concurrent writes)
+    for (let i = 0; i < LOGS_PER_LOGGER; i++) {
+      for (let j = 0; j < LOGGER_COUNT; j++) {
+        loggers[j].info(
+          { loggerId: j, index: i },
+          `Message ${i} from logger ${j}`,
+        );
+      }
+    }
+
+    // Verify log file integrity
+    const content = fs.readFileSync(logfile, "utf-8").trim();
+    const lines = content.split("\n").filter(Boolean);
+
+    // Should have expected number of log entries
+    expect(lines.length).toBe(LOGGER_COUNT * LOGS_PER_LOGGER);
+
+    // Each line should be valid JSON with correct structure
+    let validJsonCount = 0;
+    for (const line of lines) {
+      try {
+        const parsed = JSON.parse(line);
+        expect(parsed).toHaveProperty("msg");
+        expect(parsed).toHaveProperty("category");
+        expect(parsed).toHaveProperty("loggerId");
+        expect(parsed).toHaveProperty("index");
+        expect(parsed).toHaveProperty("time");
+        expect(parsed).toHaveProperty("level");
+        validJsonCount++;
+      } catch {
+        // Log corruption detected - fail the test
+        throw new Error(`Invalid JSON line: ${line}`);
+      }
+    }
+
+    expect(validJsonCount).toBe(LOGGER_COUNT * LOGS_PER_LOGGER);
   });
 });

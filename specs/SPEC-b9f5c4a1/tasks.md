@@ -25,9 +25,33 @@
 - [ ] T050 Update developer quickstart for logging setup & パス規則 (`specs/SPEC-b9f5c4a1/quickstart.md`)
 - [ ] T051 Add design notes/data model if needed for logging config (`specs/SPEC-b9f5c4a1/data-model.md`)
 
+## Phase 7: console.log移行（既存コードの構造化ログ対応）
+
+### Phase 7.1: 高優先度ファイル（111件）
+- [ ] T060 [Migration] Migrate `src/index.ts` (11件) - printError/printInfo/printWarning を構造化ログと並行出力に
+- [ ] T061 [Migration] Migrate `src/github.ts` (8件) - DEBUG_CLEANUP条件をlogger.debug()に統一
+- [ ] T062 [Migration] Migrate `src/worktree.ts` (16件) - DEBUG_CLEANUP条件をlogger.debug()に統一
+- [ ] T063 [Migration] Migrate `src/claude.ts` (30件) - ユーザー向け表示と構造化ログを分離
+- [ ] T064 [Migration] Migrate `src/codex.ts` (20件) - ユーザー向け表示と構造化ログを分離
+- [ ] T065 [Migration] Migrate `src/gemini.ts` (20件) - ユーザー向け表示と構造化ログを分離
+
+### Phase 7.2: 中優先度ファイル（6件）
+- [ ] T070 [Migration] Migrate `src/utils.ts` (3件) - ユーザー向けメッセージの分離
+- [ ] T071 [Migration] Migrate `src/services/dependency-installer.ts` (1件) - 警告メッセージ
+- [ ] T072 [Migration] Migrate `src/web/server/services/branches.ts` (2件) - Web UI情報
+
+### Phase 7.3: 低優先度ファイル（28件）
+- [ ] T080 [Migration] Migrate `src/config/index.ts` (5件) - DEBUG_* 環境変数をlogger.debug()に
+- [ ] T081 [Migration] Migrate `src/claude-history.ts` (15件) - デバッグ出力
+- [ ] T082 [Migration] Migrate `src/git.ts` (3件) - DEBUG条件をlogger.debug()に
+- [ ] T083 [Migration] Migrate `src/cli/ui/hooks/useGitData.ts` (5件) - DEBUG条件をlogger.debug()に
+
 ## Dependencies
-- Phase 1 → Phase 2 → US1 → US2 → US3 → Polish
+- Phase 1 → Phase 2 → US1 → US2 → US3 → Polish → Migration
 
 ## Parallel execution opportunities
 - [P] T001 and T002 can run in parallel (deps independent)
 - [P] T020 and T030 tests can be authored in parallel after foundational scaffolding
+- [P] T060-T065 can run in parallel (independent files)
+- [P] T070-T072 can run in parallel (independent files)
+- [P] T080-T083 can run in parallel (independent files)
