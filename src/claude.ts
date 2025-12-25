@@ -6,7 +6,7 @@ import {
   getTerminalStreams,
   resetTerminalModes,
 } from "./utils/terminal.js";
-import { isCommandAvailable } from "./utils/command.js";
+import { findCommand } from "./utils/command.js";
 import { findLatestClaudeSession } from "./utils/session.js";
 
 const CLAUDE_CLI_PACKAGE = "@anthropic-ai/claude-code@latest";
@@ -232,7 +232,9 @@ export async function launchClaudeCode(
     const childStdio = createChildStdio();
 
     // Auto-detect locally installed claude command
-    const hasLocalClaude = await isClaudeCommandAvailable();
+    const claudeLookup = await findCommand("claude");
+    const npxLookup =
+      process.platform === "win32" ? await findCommand("npx") : null;
 
     const execInteractive = async (
       file: string,
@@ -258,11 +260,12 @@ export async function launchClaudeCode(
     };
 
     try {
-      if (hasLocalClaude) {
+      if (claudeLookup.source === "installed" && claudeLookup.path) {
+        // Use the full path to avoid PATH issues in non-interactive shells
         console.log(
           chalk.green("   ✨ Using locally installed claude command"),
         );
-        await execInteractive("claude", args, {
+        await execInteractive(claudeLookup.path, args, {
           cwd: worktreePath,
           stdin: childStdio.stdin,
           stdout: childStdio.stdout,
@@ -270,11 +273,20 @@ export async function launchClaudeCode(
           env: launchEnv,
         });
       } else {
-        console.log(
-          chalk.cyan(
-            "   🔄 Falling back to bunx @anthropic-ai/claude-code@latest",
-          ),
-        );
+        const useNpx = npxLookup?.source === "installed" && npxLookup?.path;
+        if (useNpx) {
+          console.log(
+            chalk.cyan(
+              "   🔄 Falling back to npx @anthropic-ai/claude-code@latest",
+            ),
+          );
+        } else {
+          console.log(
+            chalk.cyan(
+              "   🔄 Falling back to bunx @anthropic-ai/claude-code@latest",
+            ),
+          );
+        }
         console.log(
           chalk.yellow(
             "   💡 Recommended: Install Claude Code via official method for faster startup",
@@ -295,13 +307,27 @@ export async function launchClaudeCode(
         );
         console.log("");
         await new Promise((resolve) => setTimeout(resolve, 2000));
-        await execInteractive("bunx", [CLAUDE_CLI_PACKAGE, ...args], {
-          cwd: worktreePath,
-          stdin: childStdio.stdin,
-          stdout: childStdio.stdout,
-          stderr: childStdio.stderr,
-          env: launchEnv,
-        });
+        if (useNpx && npxLookup?.path) {
+          await execInteractive(
+            npxLookup.path,
+            ["-y", CLAUDE_CLI_PACKAGE, ...args],
+            {
+              cwd: worktreePath,
+              stdin: childStdio.stdin,
+              stdout: childStdio.stdout,
+              stderr: childStdio.stderr,
+              env: launchEnv,
+            },
+          );
+        } else {
+          await execInteractive("bunx", [CLAUDE_CLI_PACKAGE, ...args], {
+            cwd: worktreePath,
+            stdin: childStdio.stdin,
+            stdout: childStdio.stdout,
+            stderr: childStdio.stderr,
+            env: launchEnv,
+          });
+        }
       }
     } finally {
       childStdio.cleanup();
@@ -342,7 +368,9 @@ export async function launchClaudeCode(
 
     return capturedSessionId ? { sessionId: capturedSessionId } : {};
   } catch (error: unknown) {
-    const hasLocalClaude = await isClaudeCommandAvailable();
+    const claudeCheck = await findCommand("claude");
+    const hasLocalClaude =
+      claudeCheck.source === "installed" && claudeCheck.path !== null;
     let errorMessage: string;
     const err = error as NodeJS.ErrnoException;
 
@@ -392,10 +420,6 @@ export async function launchClaudeCode(
     terminal.exitRawMode();
     resetTerminalModes(terminal.stdout);
   }
-}
-
-async function isClaudeCommandAvailable(): Promise<boolean> {
-  return isCommandAvailable("claude");
 }
 
 /**

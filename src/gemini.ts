@@ -6,7 +6,7 @@ import {
   getTerminalStreams,
   resetTerminalModes,
 } from "./utils/terminal.js";
-import { isCommandAvailable } from "./utils/command.js";
+import { findCommand } from "./utils/command.js";
 import { findLatestGeminiSessionId } from "./utils/session.js";
 
 const GEMINI_CLI_PACKAGE = "@google/gemini-cli@latest";
@@ -152,7 +152,7 @@ export async function launchGeminiCLI(
     const childStdio = createChildStdio();
 
     // Auto-detect locally installed gemini command
-    const hasLocalGemini = await isCommandAvailable("gemini");
+    const geminiLookup = await findCommand("gemini");
 
     // Preserve TTY for interactive UI (colors/width) by inheriting stdout/stderr.
     // Session ID is determined via file-based detection after exit.
@@ -184,11 +184,12 @@ export async function launchGeminiCLI(
         await execChild(child);
       };
 
-      if (hasLocalGemini) {
+      if (geminiLookup.source === "installed" && geminiLookup.path) {
+        // Use the full path to avoid PATH issues in non-interactive shells
         console.log(
           chalk.green("   ✨ Using locally installed gemini command"),
         );
-        return await run("gemini", runArgs);
+        return await run(geminiLookup.path, runArgs);
       }
       console.log(
         chalk.cyan("   🔄 Falling back to bunx @google/gemini-cli@latest"),
@@ -263,7 +264,9 @@ export async function launchGeminiCLI(
 
     return capturedSessionId ? { sessionId: capturedSessionId } : {};
   } catch (error: unknown) {
-    const hasLocalGemini = await isCommandAvailable("gemini");
+    const geminiCheck = await findCommand("gemini");
+    const hasLocalGemini =
+      geminiCheck.source === "installed" && geminiCheck.path !== null;
     let errorMessage: string;
     const err = error as NodeJS.ErrnoException;
 
