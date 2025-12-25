@@ -768,11 +768,13 @@ export async function handleAIToolWorkflow(
       lastSessionId: finalSessionId,
     });
 
+    let uncommittedExists = false;
     try {
       const [hasUncommitted, hasUnpushed] = await Promise.all([
         hasUncommittedChanges(worktreePath),
         hasUnpushedCommits(worktreePath, branch),
       ]);
+      uncommittedExists = hasUncommitted;
 
       if (hasUncommitted) {
         const uncommittedCount = await getUncommittedChangesCount(worktreePath);
@@ -807,8 +809,15 @@ export async function handleAIToolWorkflow(
       const details = error instanceof Error ? error.message : String(error);
       printWarning(`Failed to check git status after session: ${details}`);
     }
-    // Small buffer before returning to branch list to avoid abrupt screen swap
-    await new Promise((resolve) => setTimeout(resolve, POST_SESSION_DELAY_MS));
+
+    if (uncommittedExists) {
+      await waitForEnter("Press Enter to return to the main menu...");
+    } else {
+      // Small buffer before returning to branch list to avoid abrupt screen swap
+      await new Promise((resolve) =>
+        setTimeout(resolve, POST_SESSION_DELAY_MS),
+      );
+    }
     printInfo("Session completed successfully. Returning to main menu...");
     return;
   } catch (error) {
