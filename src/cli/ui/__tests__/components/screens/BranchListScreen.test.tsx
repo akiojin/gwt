@@ -210,7 +210,7 @@ describe("BranchListScreen", () => {
       />,
     );
 
-    const text = container.textContent ?? "";
+    const text = stripAnsi(container.textContent ?? "");
     expect(text).toMatch(/\[ \]\s(🟢|🔴|⚪)\s(🛡|⚠)/); // state cluster with spacing
   });
 
@@ -724,10 +724,11 @@ describe("BranchListScreen", () => {
       expect(container.textContent).toContain("feature/test");
     });
 
-    it("should disable other key bindings (c, r) while typing in filter", () => {
+    it("should disable other key bindings (c, r, l) while typing in filter", () => {
       const onSelect = vi.fn();
       const onCleanupCommand = vi.fn();
       const onRefresh = vi.fn();
+      const onOpenLogs = vi.fn();
 
       const inkApp = inkRender(
         <BranchListScreen
@@ -736,6 +737,7 @@ describe("BranchListScreen", () => {
           onSelect={onSelect}
           onCleanupCommand={onCleanupCommand}
           onRefresh={onRefresh}
+          onOpenLogs={onOpenLogs}
         />,
       );
 
@@ -746,10 +748,34 @@ describe("BranchListScreen", () => {
       act(() => {
         inkApp.stdin.write("c");
         inkApp.stdin.write("r");
+        inkApp.stdin.write("l");
       });
 
       expect(onCleanupCommand).not.toHaveBeenCalled();
       expect(onRefresh).not.toHaveBeenCalled();
+      expect(onOpenLogs).not.toHaveBeenCalled();
+
+      inkApp.unmount();
+    });
+
+    it("should open logs on l key", () => {
+      const onSelect = vi.fn();
+      const onOpenLogs = vi.fn();
+
+      const inkApp = inkRender(
+        <BranchListScreen
+          branches={mockBranches}
+          stats={mockStats}
+          onSelect={onSelect}
+          onOpenLogs={onOpenLogs}
+        />,
+      );
+
+      act(() => {
+        inkApp.stdin.write("l");
+      });
+
+      expect(onOpenLogs).toHaveBeenCalled();
 
       inkApp.unmount();
     });

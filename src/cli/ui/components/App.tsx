@@ -11,6 +11,9 @@ import {
   BranchListScreen,
   type BranchListScreenProps,
 } from "./screens/BranchListScreen.js";
+import { LogListScreen } from "./screens/LogListScreen.js";
+import { LogDetailScreen } from "./screens/LogDetailScreen.js";
+import { LogDatePickerScreen } from "./screens/LogDatePickerScreen.js";
 import { BranchCreatorScreen } from "./screens/BranchCreatorScreen.js";
 import { BranchActionSelectorScreen } from "../screens/BranchActionSelectorScreen.js";
 import { AIToolSelectorScreen } from "./screens/AIToolSelectorScreen.js";
@@ -28,6 +31,19 @@ import { useProfiles } from "../hooks/useProfiles.js";
 import { useScreenState } from "../hooks/useScreenState.js";
 import { formatBranchItems } from "../utils/branchFormatter.js";
 import { calculateStatistics } from "../utils/statisticsCalculator.js";
+import { copyToClipboard } from "../utils/clipboard.js";
+import {
+  parseLogLines,
+  type FormattedLogEntry,
+} from "../../../logging/formatter.js";
+import {
+  buildLogFilePath,
+  getTodayLogDate,
+  listRecentLogFiles,
+  readLogFileLines,
+  resolveLogDir,
+  type LogFileInfo,
+} from "../../../logging/reader.js";
 import type {
   AITool,
   BranchInfo,
@@ -127,6 +143,23 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
   >([]);
   const [branchQuickStartLoading, setBranchQuickStartLoading] = useState(false);
 
+  // Log viewer state
+  const logDir = useMemo(
+    () => resolveLogDir(workingDirectory),
+    [workingDirectory],
+  );
+  const [logEntries, setLogEntries] = useState<FormattedLogEntry[]>([]);
+  const [logLoading, setLogLoading] = useState(false);
+  const [logError, setLogError] = useState<string | null>(null);
+  const [logSelectedDate, setLogSelectedDate] = useState<string | null>(
+    getTodayLogDate(),
+  );
+  const [logDates, setLogDates] = useState<LogFileInfo[]>([]);
+  const [logSelectedEntry, setLogSelectedEntry] =
+    useState<FormattedLogEntry | null>(null);
+  const [logNotification, setLogNotification] = useState<string | null>(null);
+  const logNotificationTimerRef = useRef<NodeJS.Timeout | null>(null);
+
   // Selection state (for branch → tool → mode flow)
   const [selectedBranch, setSelectedBranch] =
     useState<SelectedBranchState | null>(null);
@@ -177,6 +210,67 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       .then(setRepoRoot)
       .catch(() => setRepoRoot(null));
   }, []);
+
+  const showLogNotification = useCallback((message: string) => {
+    setLogNotification(message);
+    if (logNotificationTimerRef.current) {
+      clearTimeout(logNotificationTimerRef.current);
+    }
+    logNotificationTimerRef.current = setTimeout(() => {
+      setLogNotification(null);
+    }, 2000);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (logNotificationTimerRef.current) {
+        clearTimeout(logNotificationTimerRef.current);
+      }
+    };
+  }, []);
+
+  const loadLogEntries = useCallback(
+    async (date: string | null) => {
+      const targetDate = date ?? getTodayLogDate();
+      setLogLoading(true);
+      setLogError(null);
+      try {
+        const filePath = buildLogFilePath(logDir, targetDate);
+        const lines = await readLogFileLines(filePath);
+        const parsed = parseLogLines(lines, { limit: 100 });
+        setLogEntries(parsed);
+      } catch (error) {
+        setLogEntries([]);
+        setLogError(
+          error instanceof Error ? error.message : "Failed to load logs",
+        );
+      } finally {
+        setLogLoading(false);
+      }
+    },
+    [logDir],
+  );
+
+  const loadLogDates = useCallback(async () => {
+    try {
+      const files = await listRecentLogFiles(logDir, 7);
+      setLogDates(files);
+    } catch {
+      setLogDates([]);
+    }
+  }, [logDir]);
+
+  useEffect(() => {
+    if (currentScreen === "log-list") {
+      void loadLogEntries(logSelectedDate);
+    }
+  }, [currentScreen, loadLogEntries, logSelectedDate]);
+
+  useEffect(() => {
+    if (currentScreen === "log-date-picker") {
+      void loadLogDates();
+    }
+  }, [currentScreen, loadLogDates]);
 
   useEffect(() => {
     if (!hiddenBranches.length) {
@@ -716,6 +810,45 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     exit();
   }, [onExit, exit]);
 
+  const handleOpenLogs = useCallback(() => {
+    setLogSelectedDate(getTodayLogDate());
+    setLogSelectedEntry(null);
+    navigateTo("log-list");
+  }, [navigateTo]);
+
+  const handleSelectLogEntry = useCallback(
+    (entry: FormattedLogEntry) => {
+      setLogSelectedEntry(entry);
+      navigateTo("log-detail");
+    },
+    [navigateTo],
+  );
+
+  const handleCopyLogEntry = useCallback(
+    async (entry: FormattedLogEntry) => {
+      try {
+        await copyToClipboard(entry.json);
+        showLogNotification("クリップボードにコピーしました");
+      } catch {
+        showLogNotification("クリップボードへのコピーに失敗しました");
+      }
+    },
+    [showLogNotification],
+  );
+
+  const handleOpenLogDates = useCallback(() => {
+    navigateTo("log-date-picker");
+  }, [navigateTo]);
+
+  const handleSelectLogDate = useCallback(
+    (date: string) => {
+      setLogSelectedDate(date);
+      setLogSelectedEntry(null);
+      navigateTo("log-list");
+    },
+    [navigateTo],
+  );
+
   // Handle branch creation
   const handleCreate = useCallback(
     async (branchName: string) => {
@@ -1146,6 +1279,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         workingDirectory={workingDirectory}
         activeProfile={activeProfileName}
         onOpenProfiles={() => navigateTo("environment-profile")}
+        onOpenLogs={handleOpenLogs}
         {...additionalProps}
       />
     );
@@ -1162,6 +1296,43 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
           selectedBranches,
           onToggleSelect: toggleBranchSelection,
         });
+
+      case "log-list":
+        return (
+          <LogListScreen
+            entries={logEntries}
+            loading={logLoading}
+            error={logError}
+            onBack={goBack}
+            onSelect={handleSelectLogEntry}
+            onCopy={handleCopyLogEntry}
+            onPickDate={handleOpenLogDates}
+            notification={logNotification}
+            version={version}
+            selectedDate={logSelectedDate}
+          />
+        );
+
+      case "log-detail":
+        return (
+          <LogDetailScreen
+            entry={logSelectedEntry}
+            onBack={goBack}
+            onCopy={handleCopyLogEntry}
+            notification={logNotification}
+            version={version}
+          />
+        );
+
+      case "log-date-picker":
+        return (
+          <LogDatePickerScreen
+            dates={logDates}
+            onBack={goBack}
+            onSelect={handleSelectLogDate}
+            version={version}
+          />
+        );
 
       case "branch-creator":
         return (
