@@ -32,8 +32,7 @@ export class ClaudeError extends Error {
  * - validates the worktree path
  * - normalizes launch arguments (mode/model/session/extra args)
  * - resets terminal modes before and after the child process
- * - auto-detects a local `claude` command and falls back to `npx` (Windows) or
- *   `bunx` when needed
+ * - auto-detects a local `claude` command and falls back to `bunx` when needed
  *
  * @param worktreePath - Worktree directory to run Claude Code in
  * @param options - Launch options (mode/session/model/permissions/env)
@@ -234,8 +233,6 @@ export async function launchClaudeCode(
 
     // Auto-detect locally installed claude command
     const hasLocalClaude = await isClaudeCommandAvailable();
-    const hasNpx =
-      process.platform === "win32" ? await isNpxCommandAvailable() : false;
 
     const execInteractive = async (
       file: string,
@@ -273,19 +270,11 @@ export async function launchClaudeCode(
           env: launchEnv,
         });
       } else {
-        if (hasNpx) {
-          console.log(
-            chalk.cyan(
-              "   🔄 Falling back to npx @anthropic-ai/claude-code@latest",
-            ),
-          );
-        } else {
-          console.log(
-            chalk.cyan(
-              "   🔄 Falling back to bunx @anthropic-ai/claude-code@latest",
-            ),
-          );
-        }
+        console.log(
+          chalk.cyan(
+            "   🔄 Falling back to bunx @anthropic-ai/claude-code@latest",
+          ),
+        );
         console.log(
           chalk.yellow(
             "   💡 Recommended: Install Claude Code via official method for faster startup",
@@ -306,23 +295,13 @@ export async function launchClaudeCode(
         );
         console.log("");
         await new Promise((resolve) => setTimeout(resolve, 2000));
-        if (hasNpx) {
-          await execInteractive("npx", ["-y", CLAUDE_CLI_PACKAGE, ...args], {
-            cwd: worktreePath,
-            stdin: childStdio.stdin,
-            stdout: childStdio.stdout,
-            stderr: childStdio.stderr,
-            env: launchEnv,
-          });
-        } else {
-          await execInteractive("bunx", [CLAUDE_CLI_PACKAGE, ...args], {
-            cwd: worktreePath,
-            stdin: childStdio.stdin,
-            stdout: childStdio.stdout,
-            stderr: childStdio.stderr,
-            env: launchEnv,
-          });
-        }
+        await execInteractive("bunx", [CLAUDE_CLI_PACKAGE, ...args], {
+          cwd: worktreePath,
+          stdin: childStdio.stdin,
+          stdout: childStdio.stdout,
+          stderr: childStdio.stderr,
+          env: launchEnv,
+        });
       }
     } finally {
       childStdio.cleanup();
@@ -417,10 +396,6 @@ export async function launchClaudeCode(
 
 async function isClaudeCommandAvailable(): Promise<boolean> {
   return isCommandAvailable("claude");
-}
-
-async function isNpxCommandAvailable(): Promise<boolean> {
-  return isCommandAvailable("npx");
 }
 
 /**

@@ -366,9 +366,9 @@ describe("launchClaudeCode - Root User Detection", () => {
 
       await launchClaudeCode("/test/path", { chrome: true });
 
-      // On Windows, should use npx if bunx fallback was triggered
-      const call = mockExeca.mock.calls[0];
-      const args = call[1] as string[];
+      const bunxCall = mockExeca.mock.calls.find((call) => call[0] === "bunx");
+      expect(bunxCall).toBeTruthy();
+      const args = (bunxCall?.[1] ?? []) as string[];
       expect(args).toContain("--chrome");
     });
 
@@ -683,7 +683,7 @@ describe("launchClaudeCode - Root User Detection", () => {
   describe("Windows fallback", () => {
     // This test requires mocking findCommand which is not supported in Bun
     // The Windows fallback logic is tested implicitly through command.test.ts
-    it.skip("uses npx when claude is missing and npx is available", async () => {
+    it.skip("uses bunx when claude is missing", async () => {
       // Skipped: Cannot mock findCommand in Bun environment
       // Functionality is covered by command.test.ts
     });
