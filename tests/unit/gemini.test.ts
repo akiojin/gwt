@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterAll } from "vitest";
 
 type MockStdio = "inherit" | number;
 
@@ -37,6 +37,12 @@ vi.mock("../../src/utils/terminal", () => ({
   resetTerminalModes: vi.fn(),
 }));
 
+// Mock findCommand to control command discovery behavior
+const mockFindCommand = vi.fn();
+vi.mock("../../src/utils/command", () => ({
+  findCommand: (...args: unknown[]) => mockFindCommand(...args),
+}));
+
 import { launchGeminiCLI } from "../../src/gemini.js";
 import { execa } from "execa";
 import { existsSync } from "fs";
@@ -59,34 +65,38 @@ describe("launchGeminiCLI", () => {
     mockChildStdio.stderr = "inherit";
     mockTerminalStreams.usingFallback = false;
     mockExistsSync.mockReturnValue(true);
+    // Reset findCommand mock
+    mockFindCommand.mockReset();
+  });
+
+  afterAll(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
   });
 
   describe("基本起動テスト", () => {
     it("T001: bunx経由で正常に起動できる", async () => {
-      // Mock which/where to fail (gemini not available) and bunx to succeed
-      mockExeca
-        .mockRejectedValueOnce(new Error("Command not found")) // which/where
-        .mockResolvedValue({
-          // bunx
-          stdout: "",
-          stderr: "",
-          exitCode: 0,
-        });
+      // Mock findCommand to return bunx fallback (gemini not installed)
+      mockFindCommand.mockResolvedValue({
+        available: true,
+        path: null,
+        source: "bunx",
+      });
+
+      // Mock bunx execution
+      mockExeca.mockResolvedValue({
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+      });
 
       await launchGeminiCLI("/test/path");
 
-      // First call should be which/where to check gemini availability
-      expect(mockExeca).toHaveBeenNthCalledWith(
-        1,
-        expect.stringMatching(/which|where/),
-        ["gemini"],
-        expect.objectContaining({ shell: true }),
-      );
+      // findCommand should be called for gemini
+      expect(mockFindCommand).toHaveBeenCalledWith("gemini");
 
-      // Second call should be bunx with no default args
-      // Gemini uses stdout/stderr inherit to preserve TTY (colors/width/interactive UI)
-      expect(mockExeca).toHaveBeenNthCalledWith(
-        2,
+      // execa should be called with bunx
+      expect(mockExeca).toHaveBeenCalledWith(
         "bunx",
         ["@google/gemini-cli@latest"],
         expect.objectContaining({
@@ -104,36 +114,28 @@ describe("launchGeminiCLI", () => {
     });
 
     it("T002: ローカルgeminiコマンドを優先的に使用する", async () => {
-      // Mock which/where to succeed (gemini available)
-      mockExeca
-        .mockResolvedValueOnce({
-          // which/where gemini (success)
-          stdout: "/usr/local/bin/gemini",
-          stderr: "",
-          exitCode: 0,
-        })
-        .mockResolvedValueOnce({
-          // gemini execution
-          stdout: "",
-          stderr: "",
-          exitCode: 0,
-        });
+      // Mock findCommand to return local gemini
+      mockFindCommand.mockResolvedValue({
+        available: true,
+        path: "/usr/local/bin/gemini",
+        source: "installed",
+      });
+
+      // Mock gemini execution
+      mockExeca.mockResolvedValue({
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+      });
 
       await launchGeminiCLI("/test/path");
 
-      // First call should be which/where
-      expect(mockExeca).toHaveBeenNthCalledWith(
-        1,
-        expect.stringMatching(/which|where/),
-        ["gemini"],
-        expect.objectContaining({ shell: true }),
-      );
+      // findCommand should be called for gemini
+      expect(mockFindCommand).toHaveBeenCalledWith("gemini");
 
-      // Second call should use local gemini command (not bunx)
-      // Note: stdout/stderr are inherited to preserve TTY
-      expect(mockExeca).toHaveBeenNthCalledWith(
-        2,
-        "gemini",
+      // execa should use local gemini command with full path (not bunx)
+      expect(mockExeca).toHaveBeenCalledWith(
+        "/usr/local/bin/gemini",
         [],
         expect.objectContaining({
           cwd: "/test/path",
@@ -142,8 +144,10 @@ describe("launchGeminiCLI", () => {
         }),
       );
 
-      // Note: The "Using locally installed" message is NOT logged in gemini.ts,
-      // unlike claude.ts which has explicit console output for local command detection.
+      // Verify installed message
+      expect(consoleLogSpy).toHaveBeenCalledWith(
+        expect.stringContaining("Using locally installed gemini"),
+      );
     });
 
     it.skip("T003: worktreeパスが存在しない場合はエラーを返す", async () => {
@@ -164,19 +168,21 @@ describe("launchGeminiCLI", () => {
 
   describe("モード別起動テスト", () => {
     it("T004: normalモードで起動（引数なし）", async () => {
-      mockExeca
-        .mockRejectedValueOnce(new Error("Command not found")) // which/where
-        .mockResolvedValue({
-          stdout: "",
-          stderr: "",
-          exitCode: 0,
-        });
+      mockFindCommand.mockResolvedValue({
+        available: true,
+        path: null,
+        source: "bunx",
+      });
+      mockExeca.mockResolvedValue({
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+      });
 
       await launchGeminiCLI("/test/path", { mode: "normal" });
 
       // Verify no mode-specific args are passed
-      expect(mockExeca).toHaveBeenNthCalledWith(
-        2,
+      expect(mockExeca).toHaveBeenCalledWith(
         "bunx",
         ["@google/gemini-cli@latest"],
         expect.anything(),
@@ -184,19 +190,21 @@ describe("launchGeminiCLI", () => {
     });
 
     it("T005: continueモードで起動（--resume latest）", async () => {
-      mockExeca
-        .mockRejectedValueOnce(new Error("Command not found")) // which/where
-        .mockResolvedValue({
-          stdout: "",
-          stderr: "",
-          exitCode: 0,
-        });
+      mockFindCommand.mockResolvedValue({
+        available: true,
+        path: null,
+        source: "bunx",
+      });
+      mockExeca.mockResolvedValue({
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+      });
 
       await launchGeminiCLI("/test/path", { mode: "continue" });
 
       // Verify --resume is passed
-      expect(mockExeca).toHaveBeenNthCalledWith(
-        2,
+      expect(mockExeca).toHaveBeenCalledWith(
         "bunx",
         ["@google/gemini-cli@latest", "--resume"],
         expect.anything(),
@@ -209,19 +217,21 @@ describe("launchGeminiCLI", () => {
     });
 
     it("T006: resumeモードで起動（--resume latest）", async () => {
-      mockExeca
-        .mockRejectedValueOnce(new Error("Command not found")) // which/where
-        .mockResolvedValue({
-          stdout: "",
-          stderr: "",
-          exitCode: 0,
-        });
+      mockFindCommand.mockResolvedValue({
+        available: true,
+        path: null,
+        source: "bunx",
+      });
+      mockExeca.mockResolvedValue({
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+      });
 
       await launchGeminiCLI("/test/path", { mode: "resume" });
 
       // Verify --resume is passed
-      expect(mockExeca).toHaveBeenNthCalledWith(
-        2,
+      expect(mockExeca).toHaveBeenCalledWith(
         "bunx",
         ["@google/gemini-cli@latest", "--resume"],
         expect.anything(),
@@ -236,19 +246,21 @@ describe("launchGeminiCLI", () => {
 
   describe("権限スキップテスト", () => {
     it("T007: skipPermissions=trueで-yフラグを付与", async () => {
-      mockExeca
-        .mockRejectedValueOnce(new Error("Command not found")) // which/where
-        .mockResolvedValue({
-          stdout: "",
-          stderr: "",
-          exitCode: 0,
-        });
+      mockFindCommand.mockResolvedValue({
+        available: true,
+        path: null,
+        source: "bunx",
+      });
+      mockExeca.mockResolvedValue({
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+      });
 
       await launchGeminiCLI("/test/path", { skipPermissions: true });
 
       // Verify -y flag is added
-      expect(mockExeca).toHaveBeenNthCalledWith(
-        2,
+      expect(mockExeca).toHaveBeenCalledWith(
         "bunx",
         ["@google/gemini-cli@latest", "-y"],
         expect.anything(),
@@ -261,19 +273,21 @@ describe("launchGeminiCLI", () => {
     });
 
     it("T008: skipPermissions=falseで-yフラグなし", async () => {
-      mockExeca
-        .mockRejectedValueOnce(new Error("Command not found")) // which/where
-        .mockResolvedValue({
-          stdout: "",
-          stderr: "",
-          exitCode: 0,
-        });
+      mockFindCommand.mockResolvedValue({
+        available: true,
+        path: null,
+        source: "bunx",
+      });
+      mockExeca.mockResolvedValue({
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+      });
 
       await launchGeminiCLI("/test/path", { skipPermissions: false });
 
       // Verify -y flag is NOT added
-      expect(mockExeca).toHaveBeenNthCalledWith(
-        2,
+      expect(mockExeca).toHaveBeenCalledWith(
         "bunx",
         expect.not.arrayContaining(["-y"]),
         expect.anything(),
@@ -288,14 +302,15 @@ describe("launchGeminiCLI", () => {
 
   describe("エラーハンドリングテスト", () => {
     it("T009: bunx不在でENOENTエラーをGeminiErrorでラップ", async () => {
-      mockExeca
-        .mockRejectedValueOnce(new Error("Command not found")) // which/where (gemini check)
-        .mockRejectedValueOnce({
-          // bunx execution failure
-          code: "ENOENT",
-          message: "bunx command not found",
-        })
-        .mockRejectedValueOnce(new Error("Command not found")); // which/where in catch block
+      mockFindCommand.mockResolvedValue({
+        available: true,
+        path: null,
+        source: "bunx",
+      });
+      const enoentError = Object.assign(new Error("bunx command not found"), {
+        code: "ENOENT",
+      });
+      mockExeca.mockRejectedValue(enoentError);
 
       await expect(launchGeminiCLI("/test/path")).rejects.toThrow(
         /bunx command not found/,
@@ -303,10 +318,13 @@ describe("launchGeminiCLI", () => {
     });
 
     it("T010: GeminiError発生時にcauseを保持", async () => {
+      mockFindCommand.mockResolvedValue({
+        available: true,
+        path: null,
+        source: "bunx",
+      });
       const originalError = new Error("Original error");
-      mockExeca
-        .mockRejectedValueOnce(new Error("Command not found")) // which/where
-        .mockRejectedValueOnce(originalError); // bunx execution failure
+      mockExeca.mockRejectedValue(originalError);
 
       try {
         await launchGeminiCLI("/test/path");
@@ -329,13 +347,15 @@ describe("launchGeminiCLI", () => {
         configurable: true,
       });
 
-      mockExeca
-        .mockRejectedValueOnce(new Error("Command not found")) // which/where
-        .mockRejectedValueOnce({
-          // bunx execution failure
-          code: "ENOENT",
-          message: "bunx command not found",
-        });
+      mockFindCommand.mockResolvedValue({
+        available: true,
+        path: null,
+        source: "bunx",
+      });
+      const enoentError = Object.assign(new Error("bunx command not found"), {
+        code: "ENOENT",
+      });
+      mockExeca.mockRejectedValue(enoentError);
 
       try {
         await expect(launchGeminiCLI("/test/path")).rejects.toThrow();
@@ -359,13 +379,16 @@ describe("launchGeminiCLI", () => {
 
   describe("環境変数テスト", () => {
     it("T012: envOverridesが正しくマージされる", async () => {
-      mockExeca
-        .mockRejectedValueOnce(new Error("Command not found")) // which/where
-        .mockResolvedValue({
-          stdout: "",
-          stderr: "",
-          exitCode: 0,
-        });
+      mockFindCommand.mockResolvedValue({
+        available: true,
+        path: null,
+        source: "bunx",
+      });
+      mockExeca.mockResolvedValue({
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+      });
 
       await launchGeminiCLI("/test/path", {
         envOverrides: {
@@ -375,8 +398,7 @@ describe("launchGeminiCLI", () => {
       });
 
       // Verify environment variables are merged
-      expect(mockExeca).toHaveBeenNthCalledWith(
-        2,
+      expect(mockExeca).toHaveBeenCalledWith(
         "bunx",
         expect.any(Array),
         expect.objectContaining({
@@ -389,21 +411,23 @@ describe("launchGeminiCLI", () => {
     });
 
     it("T013: extraArgsが正しく追加される", async () => {
-      mockExeca
-        .mockRejectedValueOnce(new Error("Command not found")) // which/where
-        .mockResolvedValue({
-          stdout: "",
-          stderr: "",
-          exitCode: 0,
-        });
+      mockFindCommand.mockResolvedValue({
+        available: true,
+        path: null,
+        source: "bunx",
+      });
+      mockExeca.mockResolvedValue({
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+      });
 
       await launchGeminiCLI("/test/path", {
         extraArgs: ["--verbose", "--debug"],
       });
 
       // Verify extra args are appended
-      expect(mockExeca).toHaveBeenNthCalledWith(
-        2,
+      expect(mockExeca).toHaveBeenCalledWith(
         "bunx",
         ["@google/gemini-cli@latest", "--verbose", "--debug"],
         expect.anything(),
@@ -413,13 +437,16 @@ describe("launchGeminiCLI", () => {
 
   describe("ターミナル管理テスト", () => {
     it("T014: exitRawModeが正常時に呼び出される", async () => {
-      mockExeca
-        .mockRejectedValueOnce(new Error("Command not found")) // which/where
-        .mockResolvedValue({
-          stdout: "",
-          stderr: "",
-          exitCode: 0,
-        });
+      mockFindCommand.mockResolvedValue({
+        available: true,
+        path: null,
+        source: "bunx",
+      });
+      mockExeca.mockResolvedValue({
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+      });
 
       await launchGeminiCLI("/test/path");
 
@@ -433,19 +460,21 @@ describe("launchGeminiCLI", () => {
       mockChildStdio.stdout = 102;
       mockChildStdio.stderr = 103;
 
-      mockExeca
-        .mockRejectedValueOnce(new Error("Command not found")) // which/where
-        .mockResolvedValue({
-          stdout: "",
-          stderr: "",
-          exitCode: 0,
-        });
+      mockFindCommand.mockResolvedValue({
+        available: true,
+        path: null,
+        source: "bunx",
+      });
+      mockExeca.mockResolvedValue({
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+      });
 
       await launchGeminiCLI("/test/path");
 
       // Verify child stdio values are passed through (TTY should be preserved)
-      expect(mockExeca).toHaveBeenNthCalledWith(
-        2,
+      expect(mockExeca).toHaveBeenCalledWith(
         "bunx",
         expect.any(Array),
         expect.objectContaining({
@@ -466,19 +495,16 @@ describe("launchGeminiCLI", () => {
     });
 
     it("T016: resetTerminalModesが正常時に呼び出される", async () => {
-      mockExeca
-        .mockResolvedValueOnce({
-          // which/where gemini (success)
-          stdout: "/usr/local/bin/gemini",
-          stderr: "",
-          exitCode: 0,
-        })
-        .mockResolvedValueOnce({
-          // gemini execution
-          stdout: "",
-          stderr: "",
-          exitCode: 0,
-        });
+      mockFindCommand.mockResolvedValue({
+        available: true,
+        path: "/usr/local/bin/gemini",
+        source: "installed",
+      });
+      mockExeca.mockResolvedValue({
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+      });
 
       await launchGeminiCLI("/test/path");
 
@@ -499,20 +525,18 @@ describe("launchGeminiCLI", () => {
     });
 
     it("T017: resetTerminalModesがエラー時でも呼び出される", async () => {
-      mockExeca
+      mockFindCommand
         .mockResolvedValueOnce({
-          // which/where gemini (success)
-          stdout: "/usr/local/bin/gemini",
-          stderr: "",
-          exitCode: 0,
+          available: true,
+          path: "/usr/local/bin/gemini",
+          source: "installed",
         })
-        .mockRejectedValueOnce(new Error("Boom")) // gemini execution
         .mockResolvedValueOnce({
-          // which/where gemini (catch block)
-          stdout: "/usr/local/bin/gemini",
-          stderr: "",
-          exitCode: 0,
+          available: true,
+          path: "/usr/local/bin/gemini",
+          source: "installed",
         });
+      mockExeca.mockRejectedValue(new Error("Boom"));
 
       await expect(launchGeminiCLI("/test/path")).rejects.toThrow(
         /Failed to launch Gemini CLI/,

@@ -6,7 +6,7 @@ import {
   getTerminalStreams,
   resetTerminalModes,
 } from "./utils/terminal.js";
-import { isCommandAvailable } from "./utils/command.js";
+import { findCommand } from "./utils/command.js";
 import { findLatestClaudeSession } from "./utils/session.js";
 
 const CLAUDE_CLI_PACKAGE = "@anthropic-ai/claude-code@latest";
@@ -32,8 +32,7 @@ export class ClaudeError extends Error {
  * - validates the worktree path
  * - normalizes launch arguments (mode/model/session/extra args)
  * - resets terminal modes before and after the child process
- * - auto-detects a local `claude` command and falls back to `npx` (Windows) or
- *   `bunx` when needed
+ * - auto-detects a local `claude` command and falls back to `bunx` when needed
  *
  * @param worktreePath - Worktree directory to run Claude Code in
  * @param options - Launch options (mode/session/model/permissions/env)
@@ -233,9 +232,9 @@ export async function launchClaudeCode(
     const childStdio = createChildStdio();
 
     // Auto-detect locally installed claude command
-    const hasLocalClaude = await isClaudeCommandAvailable();
-    const hasNpx =
-      process.platform === "win32" ? await isNpxCommandAvailable() : false;
+    const claudeLookup = await findCommand("claude");
+    const npxLookup =
+      process.platform === "win32" ? await findCommand("npx") : null;
 
     const execInteractive = async (
       file: string,
@@ -261,11 +260,12 @@ export async function launchClaudeCode(
     };
 
     try {
-      if (hasLocalClaude) {
+      if (claudeLookup.source === "installed" && claudeLookup.path) {
+        // Use the full path to avoid PATH issues in non-interactive shells
         console.log(
           chalk.green("   ✨ Using locally installed claude command"),
         );
-        await execInteractive("claude", args, {
+        await execInteractive(claudeLookup.path, args, {
           cwd: worktreePath,
           stdin: childStdio.stdin,
           stdout: childStdio.stdout,
@@ -273,7 +273,8 @@ export async function launchClaudeCode(
           env: launchEnv,
         });
       } else {
-        if (hasNpx) {
+        const useNpx = npxLookup?.source === "installed" && npxLookup?.path;
+        if (useNpx) {
           console.log(
             chalk.cyan(
               "   🔄 Falling back to npx @anthropic-ai/claude-code@latest",
@@ -306,14 +307,18 @@ export async function launchClaudeCode(
         );
         console.log("");
         await new Promise((resolve) => setTimeout(resolve, 2000));
-        if (hasNpx) {
-          await execInteractive("npx", ["-y", CLAUDE_CLI_PACKAGE, ...args], {
-            cwd: worktreePath,
-            stdin: childStdio.stdin,
-            stdout: childStdio.stdout,
-            stderr: childStdio.stderr,
-            env: launchEnv,
-          });
+        if (useNpx && npxLookup?.path) {
+          await execInteractive(
+            npxLookup.path,
+            ["-y", CLAUDE_CLI_PACKAGE, ...args],
+            {
+              cwd: worktreePath,
+              stdin: childStdio.stdin,
+              stdout: childStdio.stdout,
+              stderr: childStdio.stderr,
+              env: launchEnv,
+            },
+          );
         } else {
           await execInteractive("bunx", [CLAUDE_CLI_PACKAGE, ...args], {
             cwd: worktreePath,
@@ -363,7 +368,9 @@ export async function launchClaudeCode(
 
     return capturedSessionId ? { sessionId: capturedSessionId } : {};
   } catch (error: unknown) {
-    const hasLocalClaude = await isClaudeCommandAvailable();
+    const claudeCheck = await findCommand("claude");
+    const hasLocalClaude =
+      claudeCheck.source === "installed" && claudeCheck.path !== null;
     let errorMessage: string;
     const err = error as NodeJS.ErrnoException;
 
@@ -413,14 +420,6 @@ export async function launchClaudeCode(
     terminal.exitRawMode();
     resetTerminalModes(terminal.stdout);
   }
-}
-
-async function isClaudeCommandAvailable(): Promise<boolean> {
-  return isCommandAvailable("claude");
-}
-
-async function isNpxCommandAvailable(): Promise<boolean> {
-  return isCommandAvailable("npx");
 }
 
 /**
