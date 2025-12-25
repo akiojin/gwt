@@ -6,7 +6,7 @@ import { Footer } from "../parts/Footer.js";
 import { Select } from "../common/Select.js";
 import { useAppInput } from "../../hooks/useAppInput.js";
 import { useTerminalSize } from "../../hooks/useTerminalSize.js";
-import type { FormattedLogEntry } from "../../../logging/formatter.js";
+import type { FormattedLogEntry } from "../../../../logging/formatter.js";
 
 interface LogListItem {
   label: string;
@@ -103,7 +103,11 @@ export function LogListScreen({
     (item: LogListItem, isSelected: boolean, context: { columns: number }) => {
       const maxWidth = Math.max(10, context.columns - 2);
       const label = truncateToWidth(item.label, maxWidth);
-      return <Text color={isSelected ? "cyan" : undefined}>{label}</Text>;
+      return isSelected ? (
+        <Text color="cyan">{label}</Text>
+      ) : (
+        <Text>{label}</Text>
+      );
     },
     [],
   );

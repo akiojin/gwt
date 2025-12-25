@@ -4,7 +4,7 @@ import { Header } from "../parts/Header.js";
 import { Footer } from "../parts/Footer.js";
 import { useAppInput } from "../../hooks/useAppInput.js";
 import { useTerminalSize } from "../../hooks/useTerminalSize.js";
-import type { FormattedLogEntry } from "../../../logging/formatter.js";
+import type { FormattedLogEntry } from "../../../../logging/formatter.js";
 
 export interface LogDetailScreenProps {
   entry: FormattedLogEntry | null;
@@ -34,7 +34,7 @@ export function LogDetailScreen({
     }
   });
 
-  const jsonLines = useMemo(() => {
+  const jsonLines = useMemo<string[]>(() => {
     if (!entry) return ["ログがありません"]; // fallback
     return entry.json.split("\n");
   }, [entry]);

@@ -5,7 +5,7 @@ import { Footer } from "../parts/Footer.js";
 import { Select } from "../common/Select.js";
 import { useAppInput } from "../../hooks/useAppInput.js";
 import { useTerminalSize } from "../../hooks/useTerminalSize.js";
-import type { LogFileInfo } from "../../../logging/reader.js";
+import type { LogFileInfo } from "../../../../logging/reader.js";
 
 interface DateItem {
   label: string;

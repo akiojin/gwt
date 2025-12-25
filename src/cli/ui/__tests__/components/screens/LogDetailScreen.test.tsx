@@ -6,7 +6,7 @@ import { act } from "@testing-library/react";
 import { render as inkRender } from "ink-testing-library";
 import React from "react";
 import { LogDetailScreen } from "../../../components/screens/LogDetailScreen.js";
-import type { FormattedLogEntry } from "../../../../logging/formatter.js";
+import type { FormattedLogEntry } from "../../../../../logging/formatter.js";
 
 const entry: FormattedLogEntry = {
   id: "entry-1",
