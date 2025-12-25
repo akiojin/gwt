@@ -274,8 +274,14 @@ export function BranchListScreen({
     let result = branches;
 
     // Apply view mode filter
-    if (viewMode !== "all") {
-      result = result.filter((branch) => branch.type === viewMode);
+    if (viewMode === "local") {
+      result = result.filter((branch) => branch.type === "local");
+    } else if (viewMode === "remote") {
+      // リモート専用ブランチ OR ローカルだがリモートにも存在するブランチ
+      result = result.filter(
+        (branch) =>
+          branch.type === "remote" || branch.hasRemoteCounterpart === true,
+      );
     }
 
     // Apply search filter
