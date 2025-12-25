@@ -267,6 +267,7 @@ async function mainInkUI(): Promise<SelectionResult | undefined> {
       stdin: terminal.stdin,
       stdout: terminal.stdout,
       stderr: terminal.stderr,
+      patchConsole: false,
     },
   );
 
