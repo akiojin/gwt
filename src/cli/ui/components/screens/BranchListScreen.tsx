@@ -10,6 +10,7 @@ import { useSpinnerFrame } from "../common/SpinnerIcon.js";
 import { useAppInput } from "../../hooks/useAppInput.js";
 import { useTerminalSize } from "../../hooks/useTerminalSize.js";
 import type { BranchItem, Statistics, BranchViewMode } from "../../types.js";
+import type { ToolStatus } from "../../hooks/useToolStatus.js";
 import stringWidth from "string-width";
 import stripAnsi from "strip-ansi";
 import chalk from "chalk";
@@ -109,6 +110,11 @@ export interface BranchListScreenProps {
   testOnViewModeChange?: (mode: BranchViewMode) => void;
   selectedBranches?: string[];
   onToggleSelect?: (branchName: string) => void;
+  /**
+   * AIツールのインストール状態配列
+   * @see specs/SPEC-3b0ed29b/spec.md FR-019, FR-021
+   */
+  toolStatuses?: ToolStatus[] | undefined;
 }
 
 /**
@@ -138,6 +144,7 @@ export function BranchListScreen({
   testOnViewModeChange,
   selectedBranches = [],
   onToggleSelect,
+  toolStatuses,
 }: BranchListScreenProps) {
   const { rows } = useTerminalSize();
   const selectedSet = useMemo(
@@ -274,8 +281,14 @@ export function BranchListScreen({
     let result = branches;
 
     // Apply view mode filter
-    if (viewMode !== "all") {
-      result = result.filter((branch) => branch.type === viewMode);
+    if (viewMode === "local") {
+      result = result.filter((branch) => branch.type === "local");
+    } else if (viewMode === "remote") {
+      // リモート専用ブランチ OR ローカルだがリモートにも存在するブランチ
+      result = result.filter(
+        (branch) =>
+          branch.type === "remote" || branch.hasRemoteCounterpart === true,
+      );
     }
 
     // Apply search filter
@@ -624,6 +637,22 @@ export function BranchListScreen({
           </Text>
         )}
       </Box>
+
+      {/* Tool Status - FR-019, FR-021 */}
+      {toolStatuses && toolStatuses.length > 0 && (
+        <Box>
+          <Text dimColor>Tools: </Text>
+          {toolStatuses.map((tool, index) => (
+            <React.Fragment key={tool.id}>
+              <Text>{tool.name}: </Text>
+              <Text color={tool.status === "installed" ? "green" : "yellow"}>
+                {tool.status}
+              </Text>
+              {index < toolStatuses.length - 1 && <Text dimColor> | </Text>}
+            </React.Fragment>
+          ))}
+        </Box>
+      )}
 
       {/* Stats */}
       <Box>
