@@ -25,8 +25,8 @@ import {
 } from "../../src/services/aiToolResolver.js";
 import { CODEX_DEFAULT_ARGS } from "../../src/shared/aiToolConstants.js";
 
-function notFoundError(): Error {
-  const error: any = new Error("not found");
+function notFoundError(): Error & { code: string } {
+  const error = new Error("not found") as Error & { code: string };
   error.code = "ENOENT";
   return error;
 }
@@ -41,14 +41,14 @@ describe("aiToolResolver", () => {
   it("resolves claude to local binary when available", async () => {
     mockExeca.mockImplementation(async (cmd, args) => {
       if (cmd === detectionCommand && args[0] === "claude") {
-        return { stdout: "/usr/bin/claude" } as any;
+        return { stdout: "/usr/bin/claude" } as { stdout: string };
       }
       throw new Error(`Unexpected command ${cmd}`);
     });
 
     const result = await resolveClaudeCommand({ mode: "continue" });
-    expect(result).toEqual({
-      command: "claude",
+    expect(result).toMatchObject({
+      command: "/usr/bin/claude",
       args: ["-c"],
       usesFallback: false,
     });
@@ -60,16 +60,16 @@ describe("aiToolResolver", () => {
         throw notFoundError();
       }
       if (cmd === detectionCommand && args[0] === "bunx") {
-        return { stdout: "/usr/bin/bunx" } as any;
+        return { stdout: "/usr/bin/bunx" } as { stdout: string };
       }
       if (cmd === "bun" && args[0] === "--version") {
-        return { stdout: "1.0.0" } as any;
+        return { stdout: "1.0.0" } as { stdout: string };
       }
       throw new Error(`Unexpected command ${cmd}`);
     });
 
     const result = await resolveClaudeCommand({ skipPermissions: true });
-    expect(result.command).toBe("bunx");
+    expect(result.command).toBe("/usr/bin/bunx");
     expect(result.args).toEqual([
       "@anthropic-ai/claude-code@latest",
       "--dangerously-skip-permissions",
@@ -115,16 +115,16 @@ describe("aiToolResolver", () => {
         throw notFoundError();
       }
       if (cmd === detectionCommand && args[0] === "bunx") {
-        return { stdout: "/usr/bin/bunx" } as any;
+        return { stdout: "/usr/bin/bunx" } as { stdout: string };
       }
       if (cmd === "bun" && args[0] === "--version") {
-        return { stdout: "1.2.3" } as any;
+        return { stdout: "1.2.3" } as { stdout: string };
       }
       throw new Error(`Unexpected command ${cmd}`);
     });
 
     const result = await resolveCodexCommand({ mode: "resume" });
-    expect(result.command).toBe("bunx");
+    expect(result.command).toBe("/usr/bin/bunx");
     expect(result.args[0]).toBe("@openai/codex@latest");
     expect(result.args.slice(1)).toEqual(["resume", ...CODEX_DEFAULT_ARGS]);
   });
@@ -184,9 +184,9 @@ describe("aiToolResolver", () => {
 
     mockExeca.mockImplementation(async (cmd: string, args: unknown[]) => {
       if (cmd === detectionCommand && (args as string[])[0] === "my-tool") {
-        return { stdout: "/usr/local/bin/my-tool" } as any;
+        return { stdout: "/usr/local/bin/my-tool" } as { stdout: string };
       }
-      return { stdout: "" } as any;
+      return { stdout: "" } as { stdout: string };
     });
 
     const result = await resolveCustomToolCommand({
