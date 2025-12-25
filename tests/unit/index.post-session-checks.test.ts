@@ -19,6 +19,7 @@ const {
   getUnpushedCommitsCountMock,
   pushBranchToRemoteMock,
   confirmYesNoMock,
+  waitForEnterMock,
 } = vi.hoisted(() => ({
   ensureWorktreeMock: vi.fn(async () => "/repo/.worktrees/feature"),
   fetchAllRemotesMock: vi.fn(async () => undefined),
@@ -42,6 +43,7 @@ const {
   getUnpushedCommitsCountMock: vi.fn(async () => 0),
   pushBranchToRemoteMock: vi.fn(async () => undefined),
   confirmYesNoMock: vi.fn(async () => false),
+  waitForEnterMock: vi.fn(async () => undefined),
 }));
 
 vi.mock("../../src/git.js", async () => {
@@ -133,6 +135,7 @@ vi.mock("../../src/utils/prompt.js", async () => {
   return {
     ...actual,
     confirmYesNo: confirmYesNoMock,
+    waitForEnter: waitForEnterMock,
   };
 });
 
@@ -156,6 +159,7 @@ beforeEach(() => {
   getUnpushedCommitsCountMock.mockClear();
   pushBranchToRemoteMock.mockClear();
   confirmYesNoMock.mockClear();
+  waitForEnterMock.mockClear();
 
   getBranchDivergenceStatusesMock.mockResolvedValue([]);
   worktreeExistsMock.mockResolvedValue(null);
@@ -177,21 +181,35 @@ const selection: SelectionResult = {
 };
 
 describe("handleAIToolWorkflow - post session checks", () => {
-  it("warns when uncommitted changes exist", async () => {
-    vi.useFakeTimers();
+  it("warns when uncommitted changes exist and waits for Enter", async () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
     hasUncommittedChangesMock.mockResolvedValue(true);
     getUncommittedChangesCountMock.mockResolvedValue(2);
 
+    await handleAIToolWorkflow(selection);
+
+    const messages = warnSpy.mock.calls.flat().join(" ");
+    expect(messages).toContain("未コミット");
+    expect(waitForEnterMock).toHaveBeenCalledWith(
+      "Press Enter to return to the main menu...",
+    );
+
+    warnSpy.mockRestore();
+  });
+
+  it("uses 3-second delay when no uncommitted changes exist", async () => {
+    vi.useFakeTimers();
+
+    hasUncommittedChangesMock.mockResolvedValue(false);
+    hasUnpushedCommitsMock.mockResolvedValue(false);
+
     const run = handleAIToolWorkflow(selection);
     await vi.advanceTimersByTimeAsync(3000);
     await run;
 
-    const messages = warnSpy.mock.calls.flat().join(" ");
-    expect(messages).toContain("未コミット");
+    expect(waitForEnterMock).not.toHaveBeenCalled();
 
-    warnSpy.mockRestore();
     vi.useRealTimers();
   });
 
