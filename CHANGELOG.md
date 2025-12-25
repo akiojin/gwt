@@ -43,6 +43,27 @@
 * update default Claude Code model to Opus 4.5 ([1dd909e](https://github.com/akiojin/gwt/commit/1dd909ed87a55ce3bb796deb0431d0027571dae2))
 * update Opus model version to 4.5 ([307faeb](https://github.com/akiojin/gwt/commit/307faeb66ebac0ca89b01c07ee19d213797c4d5c))
 
+## [4.6.1](https://github.com/akiojin/gwt/compare/v4.6.0...v4.6.1) (2025-12-25)
+
+
+### Bug Fixes
+
+* **cli:** AIツール実行時にフルパスを使用して非インタラクティブシェルのPATH問題を修正 ([#436](https://github.com/akiojin/gwt/issues/436)) ([ba78cd5](https://github.com/akiojin/gwt/commit/ba78cd52cc95193f894e0aa8635767395567d56b))
+
+## [4.6.0](https://github.com/akiojin/gwt/compare/v4.5.1...v4.6.0) (2025-12-25)
+
+
+### Features
+
+* Claude Codeプラグイン設定を追加 ([#429](https://github.com/akiojin/gwt/issues/429)) ([06d04db](https://github.com/akiojin/gwt/commit/06d04dbf28e7fa6a65a7349388c4dc48efbb6ae7))
+* **cli:** AIツールのインストール状態検出とステータス表示を追加 ([#431](https://github.com/akiojin/gwt/issues/431)) ([79a6995](https://github.com/akiojin/gwt/commit/79a6995349b1dfb966e496c3e50644fcb58c99f6))
+
+
+### Bug Fixes
+
+* ブランチリスト画面のフリッカーを解消 ([#433](https://github.com/akiojin/gwt/issues/433)) ([3331c5d](https://github.com/akiojin/gwt/commit/3331c5d5f28847a95399a20b23fee97685db858d))
+* リモートモードでローカル・リモート両存在ブランチが表示されない問題を修正 ([#430](https://github.com/akiojin/gwt/issues/430)) ([70a5876](https://github.com/akiojin/gwt/commit/70a5876796273c39dafae5223994eccfe826cda7))
+
 ## [4.5.1](https://github.com/akiojin/gwt/compare/v4.5.0...v4.5.1) (2025-12-24)
 
 
