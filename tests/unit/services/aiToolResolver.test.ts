@@ -44,8 +44,8 @@ describe("aiToolResolver", () => {
     });
 
     const result = await resolveClaudeCommand({ mode: "continue" });
-    expect(result).toEqual({
-      command: "claude",
+    expect(result).toMatchObject({
+      command: "/usr/bin/claude",
       args: ["-c"],
       usesFallback: false,
     });
@@ -66,7 +66,7 @@ describe("aiToolResolver", () => {
     });
 
     const result = await resolveClaudeCommand({ skipPermissions: true });
-    expect(result.command).toBe("bunx");
+    expect(result.command).toBe("/usr/bin/bunx");
     expect(result.args).toEqual([
       "@anthropic-ai/claude-code@latest",
       "--dangerously-skip-permissions",
@@ -121,7 +121,7 @@ describe("aiToolResolver", () => {
     });
 
     const result = await resolveCodexCommand({ mode: "resume" });
-    expect(result.command).toBe("bunx");
+    expect(result.command).toBe("/usr/bin/bunx");
     expect(result.args[0]).toBe("@openai/codex@latest");
     expect(result.args.slice(1)).toEqual(["resume", ...CODEX_DEFAULT_ARGS]);
   });
