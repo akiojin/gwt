@@ -6,6 +6,7 @@ import { describe, it, expect, vi } from "vitest";
 import { render } from "ink-testing-library";
 import React from "react";
 import { Select } from "../../../components/common/Select.js";
+import { ESCAPE_SEQUENCE_TIMEOUT_MS } from "../../../hooks/useAppInput.js";
 
 interface TestItem {
   label: string;
@@ -285,43 +286,48 @@ describe("Select", () => {
     });
   });
 
-  describe('Space/Escape handlers', () => {
-    it('should call onSpace with the currently highlighted item', async () => {
+  describe("Space/Escape handlers", () => {
+    it("should call onSpace with the currently highlighted item", async () => {
       const onSelect = vi.fn();
       const onSpace = vi.fn();
       const { stdin } = render(
-        <Select items={mockItems} onSelect={onSelect} onSpace={onSpace} />
+        <Select items={mockItems} onSelect={onSelect} onSpace={onSpace} />,
       );
 
-      stdin.write(' ');
+      stdin.write(" ");
       await delay(10);
 
       expect(onSpace).toHaveBeenCalledTimes(1);
       expect(onSpace).toHaveBeenCalledWith(mockItems[0]);
     });
 
-    it('should not trigger onSpace when disabled', async () => {
+    it("should not trigger onSpace when disabled", async () => {
       const onSelect = vi.fn();
       const onSpace = vi.fn();
       const { stdin } = render(
-        <Select items={mockItems} onSelect={onSelect} onSpace={onSpace} disabled />
+        <Select
+          items={mockItems}
+          onSelect={onSelect}
+          onSpace={onSpace}
+          disabled
+        />,
       );
 
-      stdin.write(' ');
+      stdin.write(" ");
       await delay(10);
 
       expect(onSpace).not.toHaveBeenCalled();
     });
 
-    it('should call onEscape when escape key is pressed', async () => {
+    it("should call onEscape when escape key is pressed", async () => {
       const onSelect = vi.fn();
       const onEscape = vi.fn();
       const { stdin } = render(
-        <Select items={mockItems} onSelect={onSelect} onEscape={onEscape} />
+        <Select items={mockItems} onSelect={onSelect} onEscape={onEscape} />,
       );
 
-      stdin.write('\u001B');
-      await delay(30);
+      stdin.write("\u001B");
+      await delay(ESCAPE_SEQUENCE_TIMEOUT_MS + 20);
 
       expect(onEscape).toHaveBeenCalledTimes(1);
     });

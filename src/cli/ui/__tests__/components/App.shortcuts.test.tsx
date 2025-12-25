@@ -176,7 +176,7 @@ describe("App shortcuts integration", () => {
     getRepositoryRootMock.mockResolvedValue("/repo");
     deleteBranchMock.mockResolvedValue(undefined);
     App = (await import("../../components/App.js")).App;
-  });
+  }, 30000);
 
   afterEach(() => {
     useGitDataMock.mockReset();
@@ -380,9 +380,13 @@ describe("App shortcuts integration", () => {
       expect(latestProps?.cleanupUI?.footerMessage?.text).toBeTruthy();
       expect(latestProps?.cleanupUI?.indicators).toMatchObject({
         "feature/add-new-feature": expect.objectContaining({
-          icon: expect.stringMatching(/⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧/),
+          isSpinning: true,
+          color: "cyan",
         }),
-        "hotfix/urgent-fix": expect.objectContaining({ icon: "⏳" }),
+        "hotfix/urgent-fix": expect.objectContaining({
+          icon: "⏳",
+          color: "yellow",
+        }),
       });
 
       resolveRemoveWorktree?.();
