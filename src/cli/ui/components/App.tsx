@@ -26,6 +26,7 @@ import { EnvironmentProfileScreen } from "./screens/EnvironmentProfileScreen.js"
 import { useGitData } from "../hooks/useGitData.js";
 import { useProfiles } from "../hooks/useProfiles.js";
 import { useScreenState } from "../hooks/useScreenState.js";
+import { useToolStatus } from "../hooks/useToolStatus.js";
 import { formatBranchItems } from "../utils/branchFormatter.js";
 import { calculateStatistics } from "../utils/statisticsCalculator.js";
 import type {
@@ -107,6 +108,9 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
 
   // Profile state
   const { activeProfileName, refresh: refreshProfiles } = useProfiles();
+
+  // Tool status state (FR-017: 起動時に検出してキャッシュ)
+  const { tools: toolStatuses } = useToolStatus();
 
   // Version state
   const [version, setVersion] = useState<string | null>(null);
@@ -1146,6 +1150,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         workingDirectory={workingDirectory}
         activeProfile={activeProfileName}
         onOpenProfiles={() => navigateTo("environment-profile")}
+        toolStatuses={toolStatuses}
         {...additionalProps}
       />
     );
