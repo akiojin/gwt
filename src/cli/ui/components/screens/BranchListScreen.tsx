@@ -121,7 +121,7 @@ export interface BranchListScreenProps {
  * BranchListScreen - Main screen for branch selection
  * Layout: Header + Stats + Branch List + Footer
  */
-export function BranchListScreen({
+export const BranchListScreen = React.memo(function BranchListScreen({
   branches,
   stats,
   onSelect,
@@ -459,11 +459,9 @@ export function BranchListScreen({
       const indicatorInfo = cleanupUI?.indicators?.[item.name];
       let leadingIndicator: string;
       if (indicatorInfo) {
-        // Use spinner frame if isSpinning, otherwise use static icon
-        let indicatorIcon =
-          indicatorInfo.isSpinning && spinnerFrame
-            ? spinnerFrame
-            : indicatorInfo.icon;
+        // Use static spinner icon if isSpinning to avoid re-render dependency
+        // The static "⠋" provides visual feedback without causing flicker
+        let indicatorIcon = indicatorInfo.isSpinning ? "⠋" : indicatorInfo.icon;
         if (indicatorIcon && indicatorInfo.color && !isSelected) {
           switch (indicatorInfo.color) {
             case "cyan":
@@ -601,7 +599,6 @@ export function BranchListScreen({
       truncateToWidth,
       selectedSet,
       colorToolLabel,
-      spinnerFrame,
     ],
   );
 
@@ -737,4 +734,4 @@ export function BranchListScreen({
       <Footer actions={footerActions} />
     </Box>
   );
-}
+});
