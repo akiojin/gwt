@@ -43,6 +43,13 @@
 * update default Claude Code model to Opus 4.5 ([1dd909e](https://github.com/akiojin/gwt/commit/1dd909ed87a55ce3bb796deb0431d0027571dae2))
 * update Opus model version to 4.5 ([307faeb](https://github.com/akiojin/gwt/commit/307faeb66ebac0ca89b01c07ee19d213797c4d5c))
 
+## [4.6.1](https://github.com/akiojin/gwt/compare/v4.6.0...v4.6.1) (2025-12-25)
+
+
+### Bug Fixes
+
+* **cli:** AIツール実行時にフルパスを使用して非インタラクティブシェルのPATH問題を修正 ([#436](https://github.com/akiojin/gwt/issues/436)) ([ba78cd5](https://github.com/akiojin/gwt/commit/ba78cd52cc95193f894e0aa8635767395567d56b))
+
 ## [4.6.0](https://github.com/akiojin/gwt/compare/v4.5.1...v4.6.0) (2025-12-25)
 
 
