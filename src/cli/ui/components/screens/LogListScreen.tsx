@@ -22,7 +22,7 @@ export interface LogListScreenProps {
   onSelect: (entry: FormattedLogEntry) => void;
   onCopy: (entry: FormattedLogEntry) => void;
   onPickDate?: () => void;
-  notification?: string | null;
+  notification?: { message: string; tone: "success" | "error" } | null;
   version?: string | null;
   selectedDate?: string | null;
 }
@@ -44,6 +44,12 @@ const truncateToWidth = (value: string, maxWidth: number): string => {
   return result + ellipsis;
 };
 
+const padToWidth = (value: string, width: number): string => {
+  if (width <= 0) return "";
+  if (stringWidth(value) >= width) return value;
+  return value + " ".repeat(width - stringWidth(value));
+};
+
 export function LogListScreen({
   entries,
   loading = false,
@@ -56,17 +62,19 @@ export function LogListScreen({
   version,
   selectedDate,
 }: LogListScreenProps) {
-  const { rows } = useTerminalSize();
+  const { rows, columns } = useTerminalSize();
   const [selectedIndex, setSelectedIndex] = useState(0);
+
+  const maxLabelWidth = Math.max(10, columns - 2);
 
   const items = useMemo<LogListItem[]>(
     () =>
       entries.map((entry) => ({
-        label: entry.summary,
+        label: truncateToWidth(entry.summary, maxLabelWidth),
         value: entry.id,
         entry,
       })),
-    [entries],
+    [entries, maxLabelWidth],
   );
 
   const handleSelect = useCallback(
@@ -100,16 +108,15 @@ export function LogListScreen({
   });
 
   const renderItem = useCallback(
-    (item: LogListItem, isSelected: boolean, context: { columns: number }) => {
-      const maxWidth = Math.max(10, context.columns - 2);
-      const label = truncateToWidth(item.label, maxWidth);
-      return isSelected ? (
-        <Text color="cyan">{label}</Text>
-      ) : (
-        <Text>{label}</Text>
-      );
+    (item: LogListItem, isSelected: boolean) => {
+      if (!isSelected) {
+        return <Text>{item.label}</Text>;
+      }
+      const padded = padToWidth(item.label, maxLabelWidth);
+      const output = `\u001b[46m\u001b[30m${padded}\u001b[0m`;
+      return <Text>{output}</Text>;
     },
-    [],
+    [maxLabelWidth],
   );
 
   const headerLines = 2;
@@ -130,6 +137,14 @@ export function LogListScreen({
   return (
     <Box flexDirection="column" height={rows}>
       <Header title="gwt - Log Viewer" titleColor="cyan" version={version} />
+
+      {notification ? (
+        <Box marginTop={1}>
+          <Text color={notification.tone === "error" ? "red" : "green"}>
+            {notification.message}
+          </Text>
+        </Box>
+      ) : null}
 
       <Box marginTop={1}>
         <Box marginRight={2}>
@@ -167,12 +182,6 @@ export function LogListScreen({
         {error ? (
           <Box marginTop={1}>
             <Text color="red">{error}</Text>
-          </Box>
-        ) : null}
-
-        {notification ? (
-          <Box marginTop={1}>
-            <Text color="green">{notification}</Text>
           </Box>
         ) : null}
       </Box>
