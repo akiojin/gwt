@@ -306,7 +306,12 @@ export async function launchClaudeCode(
           ),
         );
         console.log("");
-        await new Promise((resolve) => setTimeout(resolve, 2000));
+        const shouldSkipDelay =
+          typeof process !== "undefined" &&
+          (process.env?.NODE_ENV === "test" || Boolean(process.env?.VITEST));
+        if (!shouldSkipDelay) {
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+        }
         if (useNpx && npxLookup?.path) {
           await execInteractive(
             npxLookup.path,
