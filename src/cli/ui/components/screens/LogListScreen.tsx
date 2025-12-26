@@ -22,7 +22,7 @@ export interface LogListScreenProps {
   onSelect: (entry: FormattedLogEntry) => void;
   onCopy: (entry: FormattedLogEntry) => void;
   onPickDate?: () => void;
-  notification?: string | null;
+  notification?: { message: string; tone: "success" | "error" } | null;
   version?: string | null;
   selectedDate?: string | null;
 }
@@ -128,6 +128,14 @@ export function LogListScreen({
     <Box flexDirection="column" height={rows}>
       <Header title="gwt - Log Viewer" titleColor="cyan" version={version} />
 
+      {notification ? (
+        <Box marginTop={1}>
+          <Text color={notification.tone === "error" ? "red" : "green"}>
+            {notification.message}
+          </Text>
+        </Box>
+      ) : null}
+
       <Box marginTop={1}>
         <Box marginRight={2}>
           <Text>
@@ -164,12 +172,6 @@ export function LogListScreen({
         {error ? (
           <Box marginTop={1}>
             <Text color="red">{error}</Text>
-          </Box>
-        ) : null}
-
-        {notification ? (
-          <Box marginTop={1}>
-            <Text color="green">{notification}</Text>
           </Box>
         ) : null}
       </Box>

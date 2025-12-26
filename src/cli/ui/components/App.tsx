@@ -161,7 +161,10 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
   const [logDates, setLogDates] = useState<LogFileInfo[]>([]);
   const [logSelectedEntry, setLogSelectedEntry] =
     useState<FormattedLogEntry | null>(null);
-  const [logNotification, setLogNotification] = useState<string | null>(null);
+  const [logNotification, setLogNotification] = useState<{
+    message: string;
+    tone: "success" | "error";
+  } | null>(null);
   const logNotificationTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   // Selection state (for branch → tool → mode flow)
@@ -215,15 +218,18 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       .catch(() => setRepoRoot(null));
   }, []);
 
-  const showLogNotification = useCallback((message: string) => {
-    setLogNotification(message);
-    if (logNotificationTimerRef.current) {
-      clearTimeout(logNotificationTimerRef.current);
-    }
-    logNotificationTimerRef.current = setTimeout(() => {
-      setLogNotification(null);
-    }, 2000);
-  }, []);
+  const showLogNotification = useCallback(
+    (message: string, tone: "success" | "error" = "success") => {
+      setLogNotification({ message, tone });
+      if (logNotificationTimerRef.current) {
+        clearTimeout(logNotificationTimerRef.current);
+      }
+      logNotificationTimerRef.current = setTimeout(() => {
+        setLogNotification(null);
+      }, 2000);
+    },
+    [],
+  );
 
   useEffect(() => {
     return () => {
@@ -832,9 +838,9 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     async (entry: FormattedLogEntry) => {
       try {
         await copyToClipboard(entry.json);
-        showLogNotification("クリップボードにコピーしました");
+        showLogNotification("Copied to clipboard.", "success");
       } catch {
-        showLogNotification("クリップボードへのコピーに失敗しました");
+        showLogNotification("Failed to copy to clipboard.", "error");
       }
     },
     [showLogNotification],
