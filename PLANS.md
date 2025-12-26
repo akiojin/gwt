@@ -1,5 +1,9 @@
 # PLANS
 
+## Warning文言タイポ修正
+
+- [x] T401: `src/index.ts` の自動インストール警告文を修正
+
 ## Issue #444: Worktree作成時のstaleディレクトリ自動回復
 
 - [x] 仕様追記: `specs/SPEC-d2f4762a/spec.md` にUS6/FR/エッジケースを追加
