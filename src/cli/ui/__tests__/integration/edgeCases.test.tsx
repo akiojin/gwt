@@ -2,9 +2,10 @@
  * @vitest-environment happy-dom
  * Edge case tests for UI components
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render } from "@testing-library/react";
 import React from "react";
+import { App as AppComponent } from "../../components/App.js";
 import * as BranchListScreenModule from "../../components/screens/BranchListScreen.js";
 import type { BranchListScreenProps } from "../../components/screens/BranchListScreen.js";
 import { Window } from "happy-dom";
@@ -13,14 +14,6 @@ import type { BranchInfo, BranchItem, Statistics } from "../../types.js";
 const mockRefresh = vi.fn();
 const branchListProps: BranchListScreenProps[] = [];
 const useGitDataMock = vi.fn();
-let App: typeof import("../../components/App.js").App | null = null;
-
-const loadApp = async () => {
-  if (!App) {
-    App = (await import("../../components/App.js")).App;
-  }
-  return App;
-};
 
 vi.mock("../../hooks/useGitData.js", () => ({
   useGitData: (...args: unknown[]) => useGitDataMock(...args),
@@ -60,6 +53,14 @@ describe("Edge Cases Integration Tests", () => {
     vi.clearAllMocks();
     useGitDataMock.mockReset();
     branchListProps.length = 0;
+    useGitDataMock.mockReturnValue({
+      branches: [],
+      worktrees: [],
+      loading: false,
+      error: null,
+      refresh: mockRefresh,
+      lastUpdated: null,
+    });
   });
 
   /**
@@ -224,7 +225,7 @@ describe("Edge Cases Integration Tests", () => {
    * testing unreliable in testing-library. The error is thrown but not caught
    * by the test framework correctly.
    */
-  it.skip("[T093] should catch errors in App component", async () => {
+  it.skip("[T093] should catch errors in App component", () => {
     // Mock useGitData to throw an error after initial render
     let callCount = 0;
     useGitDataMock.mockImplementation(() => {
@@ -243,14 +244,13 @@ describe("Edge Cases Integration Tests", () => {
     });
 
     const onExit = vi.fn();
-    const AppComponent = await loadApp();
     const { container } = render(<AppComponent onExit={onExit} />);
 
     // Initial render should work
     expect(container).toBeDefined();
   });
 
-  it("[T093] should display error message when data loading fails", async () => {
+  it("[T093] should display error message when data loading fails", () => {
     const testError = new Error("Test error: Failed to load Git data");
     useGitDataMock.mockReturnValue({
       branches: [],
@@ -262,7 +262,6 @@ describe("Edge Cases Integration Tests", () => {
     });
 
     const onExit = vi.fn();
-    const AppComponent = await loadApp();
     const { getByText } = render(<AppComponent onExit={onExit} />);
 
     expect(branchListProps).not.toHaveLength(0);
@@ -272,7 +271,7 @@ describe("Edge Cases Integration Tests", () => {
     expect(getByText(/Failed to load Git data/i)).toBeDefined();
   });
 
-  it("[T093] should handle empty branches list gracefully", async () => {
+  it("[T093] should handle empty branches list gracefully", () => {
     useGitDataMock.mockReturnValue({
       branches: [],
       worktrees: [],
@@ -283,7 +282,6 @@ describe("Edge Cases Integration Tests", () => {
     });
 
     const onExit = vi.fn();
-    const AppComponent = await loadApp();
     const { container } = render(<AppComponent onExit={onExit} />);
 
     // Should render without error even with no branches
@@ -293,7 +291,7 @@ describe("Edge Cases Integration Tests", () => {
   /**
    * Additional edge cases
    */
-  it("should handle large number of worktrees", async () => {
+  it("should handle large number of worktrees", () => {
     const mockBranches: BranchInfo[] = Array.from({ length: 50 }, (_, i) => ({
       name: `feature/branch-${i}`,
       type: "local" as const,
@@ -316,7 +314,6 @@ describe("Edge Cases Integration Tests", () => {
     });
 
     const onExit = vi.fn();
-    const AppComponent = await loadApp();
     const { container } = render(<AppComponent onExit={onExit} />);
 
     expect(container).toBeDefined();
@@ -366,10 +363,5 @@ describe("Edge Cases Integration Tests", () => {
     expect(container).toBeDefined();
 
     process.stdout.rows = originalRows;
-  });
-
-  afterEach(() => {
-    useGitDataMock.mockReset();
-    branchListProps.length = 0;
   });
 });
