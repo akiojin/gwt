@@ -10,7 +10,7 @@ export interface LogDetailScreenProps {
   entry: FormattedLogEntry | null;
   onBack: () => void;
   onCopy: (entry: FormattedLogEntry) => void;
-  notification?: string | null;
+  notification?: { message: string; tone: "success" | "error" } | null;
   version?: string | null;
 }
 
@@ -48,16 +48,17 @@ export function LogDetailScreen({
     <Box flexDirection="column" height={rows}>
       <Header title="gwt - Log Detail" titleColor="cyan" version={version} />
 
+      {notification ? (
+        <Box marginTop={1}>
+          <Text color={notification.tone === "error" ? "red" : "green"}>
+            {notification.message}
+          </Text>
+        </Box>
+      ) : null}
       <Box flexDirection="column" flexGrow={1} marginTop={1}>
         {jsonLines.map((line, index) => (
           <Text key={`${line}-${index}`}>{line}</Text>
         ))}
-
-        {notification ? (
-          <Box marginTop={1}>
-            <Text color="green">{notification}</Text>
-          </Box>
-        ) : null}
       </Box>
 
       <Footer actions={footerActions} />
