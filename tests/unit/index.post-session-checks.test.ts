@@ -20,6 +20,7 @@ const {
   pushBranchToRemoteMock,
   confirmYesNoMock,
   waitForEnterMock,
+  resolveWorktreePathForBranchMock,
 } = vi.hoisted(() => ({
   ensureWorktreeMock: vi.fn(async () => "/repo/.worktrees/feature"),
   fetchAllRemotesMock: vi.fn(async () => undefined),
@@ -44,6 +45,7 @@ const {
   pushBranchToRemoteMock: vi.fn(async () => undefined),
   confirmYesNoMock: vi.fn(async () => false),
   waitForEnterMock: vi.fn(async () => undefined),
+  resolveWorktreePathForBranchMock: vi.fn(async () => ({ path: null })),
 }));
 
 vi.mock("../../src/git.js", async () => {
@@ -74,6 +76,7 @@ vi.mock("../../src/worktree.js", async () => {
   return {
     ...actual,
     worktreeExists: worktreeExistsMock,
+    resolveWorktreePathForBranch: resolveWorktreePathForBranchMock,
     isProtectedBranchName: vi.fn(() => false),
     switchToProtectedBranch: vi.fn(),
   };
@@ -160,6 +163,7 @@ beforeEach(() => {
   pushBranchToRemoteMock.mockClear();
   confirmYesNoMock.mockClear();
   waitForEnterMock.mockClear();
+  resolveWorktreePathForBranchMock.mockClear();
 
   getBranchDivergenceStatusesMock.mockResolvedValue([]);
   worktreeExistsMock.mockResolvedValue(null);
@@ -168,6 +172,8 @@ beforeEach(() => {
   hasUnpushedCommitsMock.mockResolvedValue(false);
   getUncommittedChangesCountMock.mockResolvedValue(0);
   getUnpushedCommitsCountMock.mockResolvedValue(0);
+  confirmYesNoMock.mockResolvedValue(false);
+  resolveWorktreePathForBranchMock.mockResolvedValue({ path: null });
 });
 
 const selection: SelectionResult = {
