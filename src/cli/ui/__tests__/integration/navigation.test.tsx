@@ -1,15 +1,7 @@
 /**
  * @vitest-environment happy-dom
  */
-import {
-  describe,
-  it,
-  expect,
-  beforeEach,
-  afterEach,
-  afterAll,
-  vi,
-} from "vitest";
+import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
 import type { Mock } from "vitest";
 import { render, waitFor } from "@testing-library/react";
 import { act } from "react-dom/test-utils";
@@ -17,10 +9,11 @@ import React from "react";
 import { App } from "../../components/App.js";
 import { Window } from "happy-dom";
 import type { BranchInfo, BranchItem } from "../../types.js";
-import * as BranchListScreenModule from "../../components/screens/BranchListScreen.js";
 import type { BranchListScreenProps } from "../../components/screens/BranchListScreen.js";
-import * as BranchActionSelectorScreenModule from "../../screens/BranchActionSelectorScreen.js";
 import type { BranchActionSelectorScreenProps } from "../../screens/BranchActionSelectorScreen.js";
+
+const branchListProps: BranchListScreenProps[] = [];
+const branchActionProps: BranchActionSelectorScreenProps[] = [];
 
 vi.mock("../../../../git.ts", () => ({
   __esModule: true,
@@ -31,6 +24,45 @@ vi.mock("../../../../git.ts", () => ({
   collectUpstreamMap: vi.fn(async () => new Map()),
   getBranchDivergenceStatuses: vi.fn(async () => []),
 }));
+
+vi.mock("../../../../config/index.js", () => ({
+  loadSession: vi.fn(),
+  getLastToolUsageMap: vi.fn(),
+}));
+
+vi.mock(
+  "../../components/screens/BranchListScreen.js",
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import("../../components/screens/BranchListScreen.js")
+      >();
+    return {
+      ...actual,
+      BranchListScreen: (props: BranchListScreenProps) => {
+        branchListProps.push(props);
+        return React.createElement(actual.BranchListScreen, props);
+      },
+    };
+  },
+);
+
+vi.mock(
+  "../../screens/BranchActionSelectorScreen.js",
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import("../../screens/BranchActionSelectorScreen.js")
+      >();
+    return {
+      ...actual,
+      BranchActionSelectorScreen: (props: BranchActionSelectorScreenProps) => {
+        branchActionProps.push(props);
+        return React.createElement(actual.BranchActionSelectorScreen, props);
+      },
+    };
+  },
+);
 
 const { mockIsProtectedBranchName, mockSwitchToProtectedBranch } = vi.hoisted(
   () => ({
@@ -74,6 +106,7 @@ import {
   getMergedPRWorktrees,
   removeWorktree,
 } from "../../../../worktree.ts";
+import { loadSession, getLastToolUsageMap } from "../../../../config/index.js";
 
 const mockedGetAllBranches = getAllBranches as Mock;
 const mockedGetRepositoryRoot = getRepositoryRoot as Mock;
@@ -86,9 +119,8 @@ const mockedGetMergedPRWorktrees = getMergedPRWorktrees as Mock;
 const mockedRemoveWorktree = removeWorktree as Mock;
 const mockedIsProtectedBranchName = mockIsProtectedBranchName as Mock;
 const mockedSwitchToProtectedBranch = mockSwitchToProtectedBranch as Mock;
-const originalBranchListScreen = BranchListScreenModule.BranchListScreen;
-const originalBranchActionSelectorScreen =
-  BranchActionSelectorScreenModule.BranchActionSelectorScreen;
+const mockedLoadSession = loadSession as Mock;
+const mockedGetLastToolUsageMap = getLastToolUsageMap as Mock;
 
 describe("Navigation Integration Tests", () => {
   beforeEach(() => {
@@ -110,8 +142,15 @@ describe("Navigation Integration Tests", () => {
     mockedRemoveWorktree.mockReset();
     mockedIsProtectedBranchName.mockReset();
     mockedSwitchToProtectedBranch.mockReset();
+    mockedLoadSession.mockReset();
+    mockedGetLastToolUsageMap.mockReset();
+    branchListProps.length = 0;
+    branchActionProps.length = 0;
+    aiToolScreenProps.length = 0;
     mockedGetRepositoryRoot.mockResolvedValue("/repo");
     mockedSwitchToProtectedBranch.mockResolvedValue("local");
+    mockedLoadSession.mockResolvedValue({ history: [] });
+    mockedGetLastToolUsageMap.mockResolvedValue(new Map());
   });
 
   const mockBranches: BranchInfo[] = [
@@ -248,11 +287,6 @@ describe("Navigation Integration Tests", () => {
 });
 
 describe("Protected Branch Navigation (T103)", () => {
-  const branchListProps: BranchListScreenProps[] = [];
-  const branchActionProps: BranchActionSelectorScreenProps[] = [];
-  let branchListSpy: ReturnType<typeof vi.spyOn>;
-  let branchActionSpy: ReturnType<typeof vi.spyOn>;
-
   const baseBranches: BranchInfo[] = [
     {
       name: "main",
@@ -284,33 +318,19 @@ describe("Protected Branch Navigation (T103)", () => {
     mockedRemoveWorktree.mockReset();
     mockedIsProtectedBranchName.mockReset();
     mockedSwitchToProtectedBranch.mockReset();
+    mockedLoadSession.mockReset();
+    mockedGetLastToolUsageMap.mockReset();
     mockedGetRepositoryRoot.mockResolvedValue("/repo");
     branchListProps.length = 0;
     branchActionProps.length = 0;
     aiToolScreenProps.length = 0;
-    branchListSpy = vi
-      .spyOn(BranchListScreenModule, "BranchListScreen")
-      .mockImplementation((props: BranchListScreenProps) => {
-        branchListProps.push(props);
-        return React.createElement(originalBranchListScreen, props);
-      });
-    branchActionSpy = vi
-      .spyOn(BranchActionSelectorScreenModule, "BranchActionSelectorScreen")
-      .mockImplementation((props: BranchActionSelectorScreenProps) => {
-        branchActionProps.push(props);
-        return React.createElement(originalBranchActionSelectorScreen, props);
-      });
-
     mockedIsProtectedBranchName.mockImplementation((name: string) =>
       ["main", "develop", "origin/main", "origin/develop"].includes(name),
     );
     mockedSwitchToProtectedBranch.mockResolvedValue("local");
     mockedGetRepositoryRoot.mockResolvedValue("/repo");
-  });
-
-  afterEach(() => {
-    branchListSpy.mockRestore();
-    branchActionSpy.mockRestore();
+    mockedLoadSession.mockResolvedValue({ history: [] });
+    mockedGetLastToolUsageMap.mockResolvedValue(new Map());
   });
 
   it("prefills AI tool selector with last used tool for the branch", async () => {
