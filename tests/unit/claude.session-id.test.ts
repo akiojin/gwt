@@ -1,7 +1,7 @@
 /**
  * @vitest-environment node
  */
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("execa", () => ({
   execa: vi.fn(),
@@ -42,6 +42,16 @@ vi.mock("../../src/utils/session", () => ({
   findLatestClaudeSession: vi.fn(),
 }));
 
+vi.mock("../../src/utils/command", () => ({
+  findCommand: vi.fn().mockResolvedValue({
+    available: true,
+    path: "/usr/local/bin/claude",
+    source: "installed",
+  }),
+}));
+
+const MOCK_CLAUDE_PATH = "/usr/local/bin/claude";
+
 import { execa } from "execa";
 import { launchClaudeCode } from "../../src/claude";
 
@@ -55,6 +65,11 @@ describe("launchClaudeCode - session id", () => {
     exitRawModeMock.mockClear();
     mockChildStdio.cleanup.mockClear();
     mockExeca.mockResolvedValue({ stdout: "", stderr: "", exitCode: 0 });
+  });
+
+  afterAll(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
   });
 
   it("keeps explicit sessionId on continue even when another session is detected", async () => {
@@ -80,7 +95,7 @@ describe("launchClaudeCode - session id", () => {
       string,
       string[],
     ];
-    expect(command).toBe("claude");
+    expect(command).toBe(MOCK_CLAUDE_PATH);
     expect(args).toEqual(expect.arrayContaining(["--resume", explicit]));
   });
 
@@ -107,7 +122,7 @@ describe("launchClaudeCode - session id", () => {
       string,
       string[],
     ];
-    expect(command).toBe("claude");
+    expect(command).toBe(MOCK_CLAUDE_PATH);
     expect(args).toEqual(expect.arrayContaining(["--resume", explicit]));
   });
 });

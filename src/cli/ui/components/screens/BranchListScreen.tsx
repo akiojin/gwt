@@ -93,6 +93,7 @@ export interface BranchListScreenProps {
   onCleanupCommand?: () => void;
   onRefresh?: () => void;
   onOpenProfiles?: () => void;
+  onOpenLogs?: () => void;
   loading?: boolean;
   error?: Error | null;
   lastUpdated?: Date | null;
@@ -128,6 +129,7 @@ export const BranchListScreen = React.memo(function BranchListScreen({
   onCleanupCommand,
   onRefresh,
   onOpenProfiles,
+  onOpenLogs,
   loading = false,
   error = null,
   lastUpdated = null,
@@ -273,6 +275,8 @@ export const BranchListScreen = React.memo(function BranchListScreen({
       onRefresh();
     } else if (input === "p" && onOpenProfiles) {
       onOpenProfiles();
+    } else if (input === "l" && onOpenLogs) {
+      onOpenLogs();
     }
   });
 
@@ -346,6 +350,7 @@ export const BranchListScreen = React.memo(function BranchListScreen({
     { key: "r", description: "Refresh" },
     { key: "c", description: "Cleanup" },
     { key: "p", description: "Profiles" },
+    { key: "l", description: "Logs" },
   ];
 
   const formatLatestCommit = useCallback((timestamp?: number) => {
@@ -622,7 +627,7 @@ export const BranchListScreen = React.memo(function BranchListScreen({
             onChange={setFilterQuery}
             onSubmit={() => {}} // No-op: filter is applied in real-time
             placeholder="Type to search..."
-            blockKeys={["c", "r", "f"]} // Block shortcuts while typing
+            blockKeys={["c", "r", "f", "l"]} // Block shortcuts while typing
           />
         ) : (
           <Text dimColor>{filterQuery || "(press f to filter)"}</Text>
