@@ -201,7 +201,12 @@ export async function launchGeminiCLI(
       );
       console.log(chalk.yellow("      npm install -g @google/gemini-cli"));
       console.log("");
-      await new Promise((resolve) => setTimeout(resolve, 2000));
+      const shouldSkipDelay =
+        typeof process !== "undefined" &&
+        (process.env?.NODE_ENV === "test" || Boolean(process.env?.VITEST));
+      if (!shouldSkipDelay) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+      }
       return await run("bunx", [GEMINI_CLI_PACKAGE, ...runArgs]);
     };
 

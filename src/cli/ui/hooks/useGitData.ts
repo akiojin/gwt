@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   getAllBranches,
   hasUnpushedCommitsInRepo,
@@ -80,7 +80,15 @@ export function useGitData(options?: UseGitDataOptions): UseGitDataResult {
   const [error, setError] = useState<Error | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
-  const loadData = useCallback(async () => {
+  // キャッシュ機構: 初回ロード完了を追跡（useRef で再レンダリングを防ぐ）
+  const hasLoadedOnceRef = useRef(false);
+
+  const loadData = useCallback(async (forceRefresh = false) => {
+    // キャッシュがあり、強制リフレッシュでなければスキップ
+    if (hasLoadedOnceRef.current && !forceRefresh) {
+      return;
+    }
+
     setLoading(true);
     setError(null);
 
@@ -295,6 +303,7 @@ export function useGitData(options?: UseGitDataOptions): UseGitDataResult {
 
       setBranches(enrichedBranches);
       setLastUpdated(new Date());
+      hasLoadedOnceRef.current = true; // 初回ロード完了をマーク
     } catch (err) {
       setError(err instanceof Error ? err : new Error(String(err)));
       setBranches([]);
@@ -305,7 +314,7 @@ export function useGitData(options?: UseGitDataOptions): UseGitDataResult {
   }, []);
 
   const refresh = useCallback(() => {
-    loadData();
+    loadData(true); // forceRefresh = true で強制的にデータを再取得
   }, [loadData]);
 
   useEffect(() => {
