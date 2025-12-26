@@ -238,7 +238,7 @@ describe("App shortcuts integration", () => {
 
     const latestProps = branchListProps.at(-1);
     expect(latestProps?.cleanupUI?.footerMessage?.text).toBe(
-      "クリーンアップ対象が選択されていません",
+      "No cleanup targets selected.",
     );
     expect(removeWorktreeMock).not.toHaveBeenCalled();
     expect(deleteBranchMock).not.toHaveBeenCalled();

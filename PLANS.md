@@ -14,3 +14,9 @@
 - [ ] T303: `src/worktree.ts` にstale判定/削除の前処理を追加
 - [ ] T304: `src/worktree.ts` に判定不能時のエラーメッセージを追加
 - [ ] T201: 既存の統合チェック（format/markdownlint/lint）を実行
+
+## AIツール終了時の警告待機仕様変更
+
+- [x] T901: SPEC/plan/tasks 追記（`specs/SPEC-b0b1b0b1/`）
+- [x] T902: 終了時チェックの警告/待機仕様を実装更新（`src/index.ts`）
+- [x] T903: 関連テストを更新（`tests/unit/index.post-session-checks.test.ts`）

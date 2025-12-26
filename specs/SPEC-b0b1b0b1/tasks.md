@@ -7,3 +7,7 @@
 - [x] T005 調整: 既存の `handleAIToolWorkflow` テストで新プロンプトをモック（`tests/unit/index.*.test.ts`）
 - [x] T006 検証: `bun run test` を実行（必要に応じて対象テストに絞る）
 - [x] T007 ドキュメント: SPEC/plan/tasks の整合性を確認
+- [x] T101 テスト更新: 未コミット/未プッシュ警告と3秒待機の期待値へ更新（`tests/unit/index.post-session-checks.test.ts`）
+- [x] T102 実装更新: 未プッシュ確認・push処理を削除し、3秒待機で統一（`src/index.ts`）
+- [x] T103 調整: 関連モック/期待値の整理（`tests/unit/index.post-session-checks.test.ts`）
+- [ ] T104 検証: `bun run test` を実行（必要に応じて対象テストに絞る）
