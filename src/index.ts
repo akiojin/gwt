@@ -435,7 +435,7 @@ export async function handleAIToolWorkflow(
       switch (dependencyStatus.reason) {
         case "missing-lockfile":
           warningMessage =
-            "Skipping automatic install because no lockfiles (bun.lock / pnpm-lock.yaml / package-lock.json) or package.json were found. Run the appropriate package-manager install command manually if needed.";
+            "Skipping automatic install because no lockfiles (bun.lock / pnpm-lock.yaml / package-lock.json) or package.json could be found. Run the appropriate package-manager install command manually if needed.";
           break;
         case "missing-binary":
           warningMessage = `Package manager '${dependencyStatus.manager ?? "unknown"}' is not available in this environment; skipping automatic install.`;
