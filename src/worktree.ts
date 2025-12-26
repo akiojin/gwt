@@ -289,6 +289,73 @@ export async function generateAlternativeWorktreePath(
   return alternativePath;
 }
 
+type StaleWorktreeAssessment = {
+  status: "absent" | "registered" | "stale" | "unknown";
+  reason?: string;
+};
+
+async function assessStaleWorktreeDirectory(
+  targetPath: string,
+): Promise<StaleWorktreeAssessment> {
+  const fsSync = await import("node:fs");
+
+  if (!fsSync.existsSync(targetPath)) {
+    return { status: "absent" };
+  }
+
+  const registered = await checkWorktreePathConflict(targetPath);
+  if (registered) {
+    return { status: "registered" };
+  }
+
+  const gitMetaPath = path.join(targetPath, ".git");
+  if (!fsSync.existsSync(gitMetaPath)) {
+    return { status: "stale", reason: "missing .git" };
+  }
+
+  let gitMetaStat: Awaited<ReturnType<typeof fs.lstat>>;
+  try {
+    gitMetaStat = await fs.lstat(gitMetaPath);
+  } catch {
+    return { status: "unknown", reason: "unable to stat .git" };
+  }
+
+  if (gitMetaStat.isDirectory()) {
+    return { status: "unknown", reason: ".git is a directory" };
+  }
+
+  if (!gitMetaStat.isFile()) {
+    return { status: "unknown", reason: ".git is not a file" };
+  }
+
+  let gitMetaContents = "";
+  try {
+    gitMetaContents = await fs.readFile(gitMetaPath, "utf8");
+  } catch {
+    return { status: "unknown", reason: "unable to read .git" };
+  }
+
+  const gitdirMatch = gitMetaContents.match(/^\s*gitdir:\s*(.+)\s*$/m);
+  if (!gitdirMatch) {
+    return { status: "unknown", reason: "missing gitdir entry" };
+  }
+
+  const rawGitdir = gitdirMatch[1]?.trim();
+  if (!rawGitdir) {
+    return { status: "unknown", reason: "empty gitdir entry" };
+  }
+
+  const gitdirPath = path.isAbsolute(rawGitdir)
+    ? rawGitdir
+    : path.resolve(targetPath, rawGitdir);
+
+  if (!fsSync.existsSync(gitdirPath)) {
+    return { status: "stale", reason: "missing gitdir path" };
+  }
+
+  return { status: "unknown", reason: "gitdir exists" };
+}
+
 /**
  * 新しいworktreeを作成
  * @param {WorktreeConfig} config - worktreeの設定
@@ -302,6 +369,16 @@ export async function createWorktree(config: WorktreeConfig): Promise<void> {
   }
 
   try {
+    const staleness = await assessStaleWorktreeDirectory(config.worktreePath);
+    if (staleness.status === "stale") {
+      await fs.rm(config.worktreePath, { recursive: true, force: true });
+    } else if (staleness.status === "unknown") {
+      const reason = staleness.reason ? ` (${staleness.reason})` : "";
+      throw new WorktreeError(
+        `Worktree path already exists but is not registered as a git worktree, and stale status could not be confirmed${reason}. Remove the directory manually and retry: ${config.worktreePath}`,
+      );
+    }
+
     const worktreeParentDir = path.dirname(config.worktreePath);
 
     try {
