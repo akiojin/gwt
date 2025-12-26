@@ -55,7 +55,6 @@ export function LogDetailScreen({
           </Text>
         </Box>
       ) : null}
-
       <Box flexDirection="column" flexGrow={1} marginTop={1}>
         {jsonLines.map((line, index) => (
           <Text key={`${line}-${index}`}>{line}</Text>
