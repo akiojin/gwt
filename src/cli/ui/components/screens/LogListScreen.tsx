@@ -44,6 +44,12 @@ const truncateToWidth = (value: string, maxWidth: number): string => {
   return result + ellipsis;
 };
 
+const padToWidth = (value: string, width: number): string => {
+  if (width <= 0) return "";
+  if (stringWidth(value) >= width) return value;
+  return value + " ".repeat(width - stringWidth(value));
+};
+
 export function LogListScreen({
   entries,
   loading = false,
@@ -101,13 +107,17 @@ export function LogListScreen({
     }
   });
 
-  const renderItem = useCallback((item: LogListItem, isSelected: boolean) => {
-    return isSelected ? (
-      <Text color="cyan">{item.label}</Text>
-    ) : (
-      <Text>{item.label}</Text>
-    );
-  }, []);
+  const renderItem = useCallback(
+    (item: LogListItem, isSelected: boolean) => {
+      if (!isSelected) {
+        return <Text>{item.label}</Text>;
+      }
+      const padded = padToWidth(item.label, maxLabelWidth);
+      const output = `\u001b[46m\u001b[30m${padded}\u001b[0m`;
+      return <Text>{output}</Text>;
+    },
+    [maxLabelWidth],
+  );
 
   const headerLines = 2;
   const statsLines = 1;
