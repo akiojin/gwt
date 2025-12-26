@@ -2,7 +2,7 @@
  * @vitest-environment happy-dom
  * Edge case tests for UI components
  */
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { render } from "@testing-library/react";
 import React from "react";
 import { App as AppComponent } from "../../components/App.js";
@@ -14,9 +14,49 @@ import type { BranchInfo, BranchItem, Statistics } from "../../types.js";
 const mockRefresh = vi.fn();
 const branchListProps: BranchListScreenProps[] = [];
 const useGitDataMock = vi.fn();
+const useProfilesMock = vi.fn();
+const useToolStatusMock = vi.fn();
+const originalStdoutRows = process.stdout.rows;
+const originalStdoutColumns = process.stdout.columns;
+
+vi.mock("ink", async () => {
+  const ReactImport = await import("react");
+  const Box = ({ children }: { children?: ReactImport.ReactNode }) =>
+    ReactImport.createElement("div", null, children);
+  const Text = ({ children }: { children?: ReactImport.ReactNode }) =>
+    ReactImport.createElement("span", null, children);
+  return {
+    Box,
+    Text,
+    useApp: () => ({ exit: vi.fn() }),
+    useInput: () => {},
+    useStdout: () => ({ stdout: process.stdout, write: vi.fn() }),
+  };
+});
 
 vi.mock("../../hooks/useGitData.js", () => ({
   useGitData: (...args: unknown[]) => useGitDataMock(...args),
+}));
+
+vi.mock("../../hooks/useProfiles.js", () => ({
+  useProfiles: (...args: unknown[]) => useProfilesMock(...args),
+}));
+
+vi.mock("../../hooks/useToolStatus.js", () => ({
+  useToolStatus: (...args: unknown[]) => useToolStatusMock(...args),
+}));
+
+vi.mock("../../../utils.js", () => ({
+  getPackageVersion: vi.fn(async () => "0.0.0-test"),
+}));
+
+vi.mock("../../../git.js", () => ({
+  getRepositoryRoot: vi.fn(async () => "/repo"),
+  deleteBranch: vi.fn(async () => undefined),
+}));
+
+vi.mock("../../../config/index.js", () => ({
+  loadSession: vi.fn(async () => null),
 }));
 
 vi.mock("../../components/screens/BranchListScreen.js", () => ({
@@ -42,7 +82,7 @@ vi.mock("../../components/screens/BranchListScreen.js", () => ({
 }));
 
 describe("Edge Cases Integration Tests", () => {
-  beforeEach(async () => {
+  beforeEach(() => {
     // Setup happy-dom
     const window = new Window();
     globalThis.window = window as unknown as typeof globalThis.window;
@@ -52,6 +92,8 @@ describe("Edge Cases Integration Tests", () => {
     // Reset mocks
     vi.clearAllMocks();
     useGitDataMock.mockReset();
+    useProfilesMock.mockReset();
+    useToolStatusMock.mockReset();
     branchListProps.length = 0;
     useGitDataMock.mockReturnValue({
       branches: [],
@@ -61,6 +103,33 @@ describe("Edge Cases Integration Tests", () => {
       refresh: mockRefresh,
       lastUpdated: null,
     });
+
+    useProfilesMock.mockReturnValue({
+      profiles: null,
+      loading: false,
+      error: null,
+      activeProfileName: null,
+      activeProfile: null,
+      refresh: vi.fn(),
+      setActiveProfile: vi.fn(),
+      createProfile: vi.fn(),
+      updateProfile: vi.fn(),
+      deleteProfile: vi.fn(),
+      updateEnvVar: vi.fn(),
+      deleteEnvVar: vi.fn(),
+    });
+
+    useToolStatusMock.mockReturnValue({
+      tools: [],
+      loading: false,
+      error: null,
+      refresh: vi.fn(),
+    });
+  });
+
+  afterEach(() => {
+    process.stdout.rows = originalStdoutRows;
+    process.stdout.columns = originalStdoutColumns;
   });
 
   /**
