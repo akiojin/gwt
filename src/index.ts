@@ -13,7 +13,6 @@ import {
   hasUnpushedCommits,
   getUncommittedChangesCount,
   getUnpushedCommitsCount,
-  pushBranchToRemote,
   GitError,
 } from "./git.js";
 import { launchClaudeCode } from "./claude.js";
@@ -57,7 +56,7 @@ import {
   DependencyInstallError,
   type DependencyInstallResult,
 } from "./services/dependency-installer.js";
-import { confirmYesNo, waitForEnter } from "./utils/prompt.js";
+import { waitForEnter } from "./utils/prompt.js";
 
 const ERROR_PROMPT = chalk.yellow(
   "Review the error details, then press Enter to continue.",
@@ -768,19 +767,21 @@ export async function handleAIToolWorkflow(
       lastSessionId: finalSessionId,
     });
 
-    let uncommittedExists = false;
     try {
       const [hasUncommitted, hasUnpushed] = await Promise.all([
         hasUncommittedChanges(worktreePath),
         hasUnpushedCommits(worktreePath, branch),
       ]);
-      uncommittedExists = hasUncommitted;
 
       if (hasUncommitted) {
         const uncommittedCount = await getUncommittedChangesCount(worktreePath);
         const countLabel =
-          uncommittedCount > 0 ? ` (${uncommittedCount}件)` : "";
-        printWarning(`未コミットの変更があります${countLabel}。`);
+          uncommittedCount > 0
+            ? ` (${uncommittedCount} ${
+                uncommittedCount === 1 ? "change" : "changes"
+              })`
+            : "";
+        printWarning(`Uncommitted changes detected${countLabel}.`);
       }
 
       if (hasUnpushed) {
@@ -788,36 +789,21 @@ export async function handleAIToolWorkflow(
           worktreePath,
           branch,
         );
-        const countLabel = unpushedCount > 0 ? ` (${unpushedCount}件)` : "";
-        const shouldPush = await confirmYesNo(
-          `未プッシュのコミットがあります${countLabel}。プッシュしますか？`,
-          { defaultValue: false },
-        );
-        if (shouldPush) {
-          printInfo(`Pushing origin/${branch}...`);
-          try {
-            await pushBranchToRemote(worktreePath, branch);
-            printInfo(`Push completed for ${branch}.`);
-          } catch (error) {
-            const details =
-              error instanceof Error ? error.message : String(error);
-            printWarning(`Push failed for ${branch}: ${details}`);
-          }
-        }
+        const countLabel =
+          unpushedCount > 0
+            ? ` (${unpushedCount} ${
+                unpushedCount === 1 ? "commit" : "commits"
+              })`
+            : "";
+        printWarning(`Unpushed commits detected${countLabel}.`);
       }
     } catch (error) {
       const details = error instanceof Error ? error.message : String(error);
       printWarning(`Failed to check git status after session: ${details}`);
     }
 
-    if (uncommittedExists) {
-      await waitForEnter("Press Enter to return to the main menu...");
-    } else {
-      // Small buffer before returning to branch list to avoid abrupt screen swap
-      await new Promise((resolve) =>
-        setTimeout(resolve, POST_SESSION_DELAY_MS),
-      );
-    }
+    // Small buffer before returning to branch list to avoid abrupt screen swap
+    await new Promise((resolve) => setTimeout(resolve, POST_SESSION_DELAY_MS));
     printInfo("Session completed successfully. Returning to main menu...");
     return;
   } catch (error) {
