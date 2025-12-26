@@ -56,17 +56,19 @@ export function LogListScreen({
   version,
   selectedDate,
 }: LogListScreenProps) {
-  const { rows } = useTerminalSize();
+  const { rows, columns } = useTerminalSize();
   const [selectedIndex, setSelectedIndex] = useState(0);
+
+  const maxLabelWidth = Math.max(10, columns - 2);
 
   const items = useMemo<LogListItem[]>(
     () =>
       entries.map((entry) => ({
-        label: entry.summary,
+        label: truncateToWidth(entry.summary, maxLabelWidth),
         value: entry.id,
         entry,
       })),
-    [entries],
+    [entries, maxLabelWidth],
   );
 
   const handleSelect = useCallback(
@@ -99,18 +101,13 @@ export function LogListScreen({
     }
   });
 
-  const renderItem = useCallback(
-    (item: LogListItem, isSelected: boolean, context: { columns: number }) => {
-      const maxWidth = Math.max(10, context.columns - 2);
-      const label = truncateToWidth(item.label, maxWidth);
-      return isSelected ? (
-        <Text color="cyan">{label}</Text>
-      ) : (
-        <Text>{label}</Text>
-      );
-    },
-    [],
-  );
+  const renderItem = useCallback((item: LogListItem, isSelected: boolean) => {
+    return isSelected ? (
+      <Text color="cyan">{item.label}</Text>
+    ) : (
+      <Text>{item.label}</Text>
+    );
+  }, []);
 
   const headerLines = 2;
   const statsLines = 1;
