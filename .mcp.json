@@ -6,24 +6,6 @@
       "args": [
         "markitdown-mcp"
       ]
-    },
-    "playwright": {
-      "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "@executeautomation/playwright-mcp-server"]
-    },
-    "serena": {
-      "type": "stdio",
-      "command": "uvx",
-      "args": [
-        "--from",
-        "git+https://github.com/oraios/serena@${SERENA_MCP_REF:-7908319e40bdb2e2b5c23d28bee557a6099d095b}",
-        "serena-mcp-server",
-        "--context",
-        "ide-assistant",
-        "--project",
-        "$(pwd)"
-      ]
     }
   }
 }
