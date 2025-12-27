@@ -1,10 +1,5 @@
 {
   "mcpServers": {
-    "context7": {
-      "type": "sse",
-      "url": "${MCP_CONTEXT7_URL:-https://mcp.context7.com/sse}",
-      "enabled": "${MCP_CONTEXT7_ENABLED:-true}"
-    },
     "markitdown": {
       "type": "stdio",
       "command": "uvx",
