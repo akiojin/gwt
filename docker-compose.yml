@@ -26,6 +26,7 @@ services:
       - MAX_MCP_OUTPUT_TOKENS
       - ENABLE_BACKGROUND_TASKS=1
       - FORCE_AUTO_BACKGROUND_TASKS=1
+      - PORT=3000
     stdin_open: true
     tty: true
     working_dir: /gwt
