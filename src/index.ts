@@ -553,23 +553,21 @@ export async function handleAIToolWorkflow(
       throw new Error(`Tool not found: ${tool}`);
     }
 
-    // Save selection immediately so "last tool" is reflected even if the tool
-    // is interrupted or killed mid-run (e.g., Ctrl+C).
-    await saveSession(
-      {
-        lastWorktreePath: worktreePath,
-        lastBranch: branch,
-        lastUsedTool: tool,
-        toolLabel: toolConfig.displayName ?? tool,
-        mode,
-        model: normalizedModel ?? null,
-        reasoningLevel: inferenceLevel ?? null,
-        skipPermissions: skipPermissions ?? null,
-        timestamp: Date.now(),
-        repositoryRoot: repoRoot,
-      },
-      { skipHistory: true },
-    );
+    // Save selection immediately (including history) so "last tool" is reflected
+    // even if the tool is interrupted or killed mid-run (e.g., Ctrl+C).
+    // FR-042: Record timestamp to session history immediately on tool start.
+    await saveSession({
+      lastWorktreePath: worktreePath,
+      lastBranch: branch,
+      lastUsedTool: tool,
+      toolLabel: toolConfig.displayName ?? tool,
+      mode,
+      model: normalizedModel ?? null,
+      reasoningLevel: inferenceLevel ?? null,
+      skipPermissions: skipPermissions ?? null,
+      timestamp: Date.now(),
+      repositoryRoot: repoRoot,
+    });
 
     // Lookup saved session ID for Continue (auto attach)
     let resumeSessionId: string | null =
@@ -599,96 +597,127 @@ export async function handleAIToolWorkflow(
 
     const launchStartedAt = Date.now();
 
+    // FR-043: Start periodic timestamp update timer (30 seconds interval)
+    // This ensures the latest activity time is updated even if the tool is force-killed
+    const SESSION_UPDATE_INTERVAL_MS = 30_000;
+    const updateTimer = setInterval(async () => {
+      try {
+        await saveSession(
+          {
+            lastWorktreePath: worktreePath,
+            lastBranch: branch,
+            lastUsedTool: tool,
+            toolLabel: toolConfig.displayName ?? tool,
+            mode,
+            model: normalizedModel ?? null,
+            reasoningLevel: inferenceLevel ?? null,
+            skipPermissions: skipPermissions ?? null,
+            timestamp: Date.now(),
+            repositoryRoot: repoRoot,
+          },
+          { skipHistory: true }, // Don't add to history, just update timestamp
+        );
+      } catch {
+        // Ignore errors during periodic update
+      }
+    }, SESSION_UPDATE_INTERVAL_MS);
+
     // Launch selected AI tool
     // Builtin tools use their dedicated launch functions
     // Custom tools use the generic launchCustomAITool function
     let launchResult: { sessionId?: string | null } | void;
-    if (tool === "claude-code") {
-      const launchOptions: {
-        mode?: "normal" | "continue" | "resume";
-        skipPermissions?: boolean;
-        envOverrides?: Record<string, string>;
-        model?: string;
-        sessionId?: string | null;
-        chrome?: boolean;
-      } = {
-        mode:
-          mode === "resume"
-            ? "resume"
-            : mode === "continue"
-              ? "continue"
-              : "normal",
-        skipPermissions,
-        envOverrides: sharedEnv,
-        sessionId: resumeSessionId,
-        chrome: true,
-      };
-      if (normalizedModel) {
-        launchOptions.model = normalizedModel;
+    try {
+      if (tool === "claude-code") {
+        const launchOptions: {
+          mode?: "normal" | "continue" | "resume";
+          skipPermissions?: boolean;
+          envOverrides?: Record<string, string>;
+          model?: string;
+          sessionId?: string | null;
+          chrome?: boolean;
+        } = {
+          mode:
+            mode === "resume"
+              ? "resume"
+              : mode === "continue"
+                ? "continue"
+                : "normal",
+          skipPermissions,
+          envOverrides: sharedEnv,
+          sessionId: resumeSessionId,
+          chrome: true,
+        };
+        if (normalizedModel) {
+          launchOptions.model = normalizedModel;
+        }
+        launchResult = await launchClaudeCode(worktreePath, launchOptions);
+      } else if (tool === "codex-cli") {
+        const launchOptions: {
+          mode?: "normal" | "continue" | "resume";
+          bypassApprovals?: boolean;
+          envOverrides?: Record<string, string>;
+          model?: string;
+          reasoningEffort?: CodexReasoningEffort;
+          sessionId?: string | null;
+        } = {
+          mode:
+            mode === "resume"
+              ? "resume"
+              : mode === "continue"
+                ? "continue"
+                : "normal",
+          bypassApprovals: skipPermissions,
+          envOverrides: sharedEnv,
+          sessionId: resumeSessionId,
+        };
+        if (normalizedModel) {
+          launchOptions.model = normalizedModel;
+        }
+        if (inferenceLevel) {
+          launchOptions.reasoningEffort =
+            inferenceLevel as CodexReasoningEffort;
+        }
+        launchResult = await launchCodexCLI(worktreePath, launchOptions);
+      } else if (tool === "gemini-cli") {
+        const launchOptions: {
+          mode?: "normal" | "continue" | "resume";
+          skipPermissions?: boolean;
+          envOverrides?: Record<string, string>;
+          model?: string;
+          sessionId?: string | null;
+        } = {
+          mode:
+            mode === "resume"
+              ? "resume"
+              : mode === "continue"
+                ? "continue"
+                : "normal",
+          skipPermissions,
+          envOverrides: sharedEnv,
+          sessionId: resumeSessionId,
+        };
+        if (normalizedModel) {
+          launchOptions.model = normalizedModel;
+        }
+        launchResult = await launchGeminiCLI(worktreePath, launchOptions);
+      } else {
+        // Custom tool
+        printInfo(`Launching custom tool: ${toolConfig.displayName}`);
+        launchResult = await launchCustomAITool(toolConfig, {
+          mode:
+            mode === "resume"
+              ? "resume"
+              : mode === "continue"
+                ? "continue"
+                : "normal",
+          skipPermissions,
+          cwd: worktreePath,
+          sharedEnv,
+        });
       }
-      launchResult = await launchClaudeCode(worktreePath, launchOptions);
-    } else if (tool === "codex-cli") {
-      const launchOptions: {
-        mode?: "normal" | "continue" | "resume";
-        bypassApprovals?: boolean;
-        envOverrides?: Record<string, string>;
-        model?: string;
-        reasoningEffort?: CodexReasoningEffort;
-        sessionId?: string | null;
-      } = {
-        mode:
-          mode === "resume"
-            ? "resume"
-            : mode === "continue"
-              ? "continue"
-              : "normal",
-        bypassApprovals: skipPermissions,
-        envOverrides: sharedEnv,
-        sessionId: resumeSessionId,
-      };
-      if (normalizedModel) {
-        launchOptions.model = normalizedModel;
-      }
-      if (inferenceLevel) {
-        launchOptions.reasoningEffort = inferenceLevel as CodexReasoningEffort;
-      }
-      launchResult = await launchCodexCLI(worktreePath, launchOptions);
-    } else if (tool === "gemini-cli") {
-      const launchOptions: {
-        mode?: "normal" | "continue" | "resume";
-        skipPermissions?: boolean;
-        envOverrides?: Record<string, string>;
-        model?: string;
-        sessionId?: string | null;
-      } = {
-        mode:
-          mode === "resume"
-            ? "resume"
-            : mode === "continue"
-              ? "continue"
-              : "normal",
-        skipPermissions,
-        envOverrides: sharedEnv,
-        sessionId: resumeSessionId,
-      };
-      if (normalizedModel) {
-        launchOptions.model = normalizedModel;
-      }
-      launchResult = await launchGeminiCLI(worktreePath, launchOptions);
-    } else {
-      // Custom tool
-      printInfo(`Launching custom tool: ${toolConfig.displayName}`);
-      launchResult = await launchCustomAITool(toolConfig, {
-        mode:
-          mode === "resume"
-            ? "resume"
-            : mode === "continue"
-              ? "continue"
-              : "normal",
-        skipPermissions,
-        cwd: worktreePath,
-        sharedEnv,
-      });
+    } finally {
+      // FR-043: Clear the periodic timestamp update timer
+      clearInterval(updateTimer);
     }
 
     // Persist session with captured session ID (if any)
