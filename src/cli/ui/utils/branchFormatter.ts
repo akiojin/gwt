@@ -126,6 +126,19 @@ function buildLastToolUsageLabel(
 }
 
 /**
+ * Calculate the latest activity timestamp for a branch.
+ * Returns the maximum of git commit timestamp and tool usage timestamp (in seconds).
+ */
+export function getLatestActivityTimestamp(branch: BranchInfo): number {
+  const gitTimestampSec = branch.latestCommitTimestamp ?? 0;
+  // lastToolUsage.timestamp is in milliseconds, convert to seconds
+  const toolTimestampSec = branch.lastToolUsage?.timestamp
+    ? Math.floor(branch.lastToolUsage.timestamp / 1000)
+    : 0;
+  return Math.max(gitTimestampSec, toolTimestampSec);
+}
+
+/**
  * Converts BranchInfo to BranchItem with display properties
  */
 export function formatBranchItem(
@@ -357,11 +370,12 @@ function sortBranches(
     if (aHasWorktree && !bHasWorktree) return -1;
     if (!aHasWorktree && bHasWorktree) return 1;
 
-    // 5. Prioritize most recent commit within same worktree status
-    const aCommit = a.latestCommitTimestamp ?? 0;
-    const bCommit = b.latestCommitTimestamp ?? 0;
-    if (aCommit !== bCommit) {
-      return bCommit - aCommit;
+    // 5. Prioritize most recent activity within same worktree status
+    // (max of git commit timestamp and tool usage timestamp)
+    const aLatest = getLatestActivityTimestamp(a);
+    const bLatest = getLatestActivityTimestamp(b);
+    if (aLatest !== bLatest) {
+      return bLatest - aLatest;
     }
 
     // 6. Local branches are prioritized over remote-only
