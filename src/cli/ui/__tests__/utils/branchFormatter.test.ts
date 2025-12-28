@@ -848,5 +848,110 @@ describe("branchFormatter", () => {
       expect(results[1].name).toBe("hotfix/urgent");
       expect(results[2].name).toBe("release/v1.0");
     });
+
+    it("should sort by latest activity time (max of git commit and tool usage)", () => {
+      const branches: BranchInfo[] = [
+        {
+          name: "feature/git-newer",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+          latestCommitTimestamp: 1_800_000_000, // git commit is newer
+          lastToolUsage: {
+            branch: "feature/git-newer",
+            worktreePath: "/tmp/wt1",
+            toolId: "claude-code",
+            toolLabel: "Claude",
+            timestamp: 1_700_000_000_000, // 1_700_000_000 seconds (older)
+          },
+        },
+        {
+          name: "feature/tool-newer",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+          latestCommitTimestamp: 1_700_000_000, // git commit is older
+          lastToolUsage: {
+            branch: "feature/tool-newer",
+            worktreePath: "/tmp/wt2",
+            toolId: "claude-code",
+            toolLabel: "Claude",
+            timestamp: 1_800_000_000_000, // 1_800_000_000 seconds (newer)
+          },
+        },
+      ];
+
+      const results = formatBranchItems(branches);
+
+      // Both have same latest activity time (1_800_000_000), so alphabetical
+      // feature/git-newer: max(1_800_000_000, 1_700_000_000) = 1_800_000_000
+      // feature/tool-newer: max(1_700_000_000, 1_800_000_000) = 1_800_000_000
+      expect(results[0].name).toBe("feature/git-newer");
+      expect(results[1].name).toBe("feature/tool-newer");
+    });
+
+    it("should prioritize branch with tool usage over branch with only git commit when tool is newer", () => {
+      const branches: BranchInfo[] = [
+        {
+          name: "feature/git-only",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+          latestCommitTimestamp: 1_700_000_000,
+        },
+        {
+          name: "feature/with-tool",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+          latestCommitTimestamp: 1_600_000_000,
+          lastToolUsage: {
+            branch: "feature/with-tool",
+            worktreePath: "/tmp/wt",
+            toolId: "claude-code",
+            toolLabel: "Claude",
+            timestamp: 1_800_000_000_000, // 1_800_000_000 seconds (newest)
+          },
+        },
+      ];
+
+      const results = formatBranchItems(branches);
+
+      // feature/with-tool has newer activity (tool usage at 1_800_000_000)
+      expect(results[0].name).toBe("feature/with-tool");
+      expect(results[1].name).toBe("feature/git-only");
+    });
+
+    it("should prioritize branch with newer git commit over branch with older tool usage", () => {
+      const branches: BranchInfo[] = [
+        {
+          name: "feature/old-tool",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+          latestCommitTimestamp: 1_600_000_000,
+          lastToolUsage: {
+            branch: "feature/old-tool",
+            worktreePath: "/tmp/wt",
+            toolId: "claude-code",
+            toolLabel: "Claude",
+            timestamp: 1_650_000_000_000, // 1_650_000_000 seconds
+          },
+        },
+        {
+          name: "feature/new-git",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+          latestCommitTimestamp: 1_800_000_000, // newest
+        },
+      ];
+
+      const results = formatBranchItems(branches);
+
+      // feature/new-git has newer activity (git commit at 1_800_000_000)
+      expect(results[0].name).toBe("feature/new-git");
+      expect(results[1].name).toBe("feature/old-tool");
+    });
   });
 });
