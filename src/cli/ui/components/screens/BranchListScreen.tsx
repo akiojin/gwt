@@ -640,7 +640,7 @@ export const BranchListScreen = React.memo(function BranchListScreen({
         )}
       </Box>
 
-      {/* Tool Status - FR-019, FR-021 */}
+      {/* Tool Status - FR-019, FR-021, FR-022 */}
       {toolStatuses && toolStatuses.length > 0 && (
         <Box>
           <Text dimColor>Tools: </Text>
@@ -648,7 +648,9 @@ export const BranchListScreen = React.memo(function BranchListScreen({
             <React.Fragment key={tool.id}>
               <Text>{tool.name}: </Text>
               <Text color={tool.status === "installed" ? "green" : "yellow"}>
-                {tool.status}
+                {tool.status === "installed" && tool.version
+                  ? tool.version
+                  : tool.status}
               </Text>
               {index < toolStatuses.length - 1 && <Text dimColor> | </Text>}
             </React.Fragment>
