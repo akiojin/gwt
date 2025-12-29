@@ -20,6 +20,7 @@ const {
   pushBranchToRemoteMock,
   confirmYesNoMock,
   waitForEnterMock,
+  resolveWorktreePathForBranchMock,
 } = vi.hoisted(() => ({
   ensureWorktreeMock: vi.fn(async () => "/repo/.worktrees/feature"),
   fetchAllRemotesMock: vi.fn(async () => undefined),
@@ -44,6 +45,7 @@ const {
   pushBranchToRemoteMock: vi.fn(async () => undefined),
   confirmYesNoMock: vi.fn(async () => false),
   waitForEnterMock: vi.fn(async () => undefined),
+  resolveWorktreePathForBranchMock: vi.fn(async () => ({ path: null })),
 }));
 
 vi.mock("../../src/git.js", async () => {
@@ -74,6 +76,7 @@ vi.mock("../../src/worktree.js", async () => {
   return {
     ...actual,
     worktreeExists: worktreeExistsMock,
+    resolveWorktreePathForBranch: resolveWorktreePathForBranchMock,
     isProtectedBranchName: vi.fn(() => false),
     switchToProtectedBranch: vi.fn(),
   };
@@ -160,6 +163,7 @@ beforeEach(() => {
   pushBranchToRemoteMock.mockClear();
   confirmYesNoMock.mockClear();
   waitForEnterMock.mockClear();
+  resolveWorktreePathForBranchMock.mockClear();
 
   getBranchDivergenceStatusesMock.mockResolvedValue([]);
   worktreeExistsMock.mockResolvedValue(null);
@@ -169,6 +173,7 @@ beforeEach(() => {
   getUncommittedChangesCountMock.mockResolvedValue(0);
   getUnpushedCommitsCountMock.mockResolvedValue(0);
   confirmYesNoMock.mockResolvedValue(false);
+  resolveWorktreePathForBranchMock.mockResolvedValue({ path: null });
 });
 
 const selection: SelectionResult = {
@@ -181,24 +186,73 @@ const selection: SelectionResult = {
 };
 
 describe("handleAIToolWorkflow - post session checks", () => {
-  it("warns when uncommitted changes exist and waits for Enter", async () => {
+  it("warns when uncommitted changes exist and waits 3 seconds", async () => {
+    vi.useFakeTimers();
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
     hasUncommittedChangesMock.mockResolvedValue(true);
     getUncommittedChangesCountMock.mockResolvedValue(2);
 
-    await handleAIToolWorkflow(selection);
+    const run = handleAIToolWorkflow(selection);
+    await vi.advanceTimersByTimeAsync(3000);
+    await run;
 
     const messages = warnSpy.mock.calls.flat().join(" ");
-    expect(messages).toContain("未コミット");
-    expect(waitForEnterMock).toHaveBeenCalledWith(
-      "Press Enter to return to the main menu...",
-    );
+    expect(messages).toContain("Uncommitted changes detected");
+    expect(waitForEnterMock).not.toHaveBeenCalled();
+    expect(confirmYesNoMock).not.toHaveBeenCalled();
+    expect(pushBranchToRemoteMock).not.toHaveBeenCalled();
 
     warnSpy.mockRestore();
+    vi.useRealTimers();
   });
 
-  it("uses 3-second delay when no uncommitted changes exist", async () => {
+  it("warns when unpushed commits exist and waits 3 seconds", async () => {
+    vi.useFakeTimers();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    hasUnpushedCommitsMock.mockResolvedValue(true);
+    getUnpushedCommitsCountMock.mockResolvedValue(3);
+
+    const run = handleAIToolWorkflow(selection);
+    await vi.advanceTimersByTimeAsync(3000);
+    await run;
+
+    const messages = warnSpy.mock.calls.flat().join(" ");
+    expect(messages).toContain("Unpushed commits detected");
+    expect(waitForEnterMock).not.toHaveBeenCalled();
+    expect(confirmYesNoMock).not.toHaveBeenCalled();
+    expect(pushBranchToRemoteMock).not.toHaveBeenCalled();
+
+    warnSpy.mockRestore();
+    vi.useRealTimers();
+  });
+
+  it("warns for both uncommitted and unpushed changes before waiting", async () => {
+    vi.useFakeTimers();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    hasUncommittedChangesMock.mockResolvedValue(true);
+    hasUnpushedCommitsMock.mockResolvedValue(true);
+    getUncommittedChangesCountMock.mockResolvedValue(1);
+    getUnpushedCommitsCountMock.mockResolvedValue(1);
+
+    const run = handleAIToolWorkflow(selection);
+    await vi.advanceTimersByTimeAsync(3000);
+    await run;
+
+    const messages = warnSpy.mock.calls.flat().join(" ");
+    expect(messages).toContain("Uncommitted changes detected");
+    expect(messages).toContain("Unpushed commits detected");
+    expect(waitForEnterMock).not.toHaveBeenCalled();
+    expect(confirmYesNoMock).not.toHaveBeenCalled();
+    expect(pushBranchToRemoteMock).not.toHaveBeenCalled();
+
+    warnSpy.mockRestore();
+    vi.useRealTimers();
+  });
+
+  it("uses 3-second delay when no uncommitted or unpushed changes exist", async () => {
     vi.useFakeTimers();
 
     hasUncommittedChangesMock.mockResolvedValue(false);
@@ -209,39 +263,7 @@ describe("handleAIToolWorkflow - post session checks", () => {
     await run;
 
     expect(waitForEnterMock).not.toHaveBeenCalled();
-
-    vi.useRealTimers();
-  });
-
-  it("prompts and pushes when unpushed commits exist and user confirms", async () => {
-    vi.useFakeTimers();
-    hasUnpushedCommitsMock.mockResolvedValue(true);
-    getUnpushedCommitsCountMock.mockResolvedValue(3);
-    confirmYesNoMock.mockResolvedValue(true);
-
-    const run = handleAIToolWorkflow(selection);
-    await vi.advanceTimersByTimeAsync(3000);
-    await run;
-
-    expect(confirmYesNoMock).toHaveBeenCalled();
-    expect(pushBranchToRemoteMock).toHaveBeenCalledWith(
-      "/repo/.worktrees/feature",
-      "feature/test",
-    );
-
-    vi.useRealTimers();
-  });
-
-  it("does not push when user declines", async () => {
-    vi.useFakeTimers();
-    hasUnpushedCommitsMock.mockResolvedValue(true);
-    confirmYesNoMock.mockResolvedValue(false);
-
-    const run = handleAIToolWorkflow(selection);
-    await vi.advanceTimersByTimeAsync(3000);
-    await run;
-
-    expect(confirmYesNoMock).toHaveBeenCalled();
+    expect(confirmYesNoMock).not.toHaveBeenCalled();
     expect(pushBranchToRemoteMock).not.toHaveBeenCalled();
 
     vi.useRealTimers();

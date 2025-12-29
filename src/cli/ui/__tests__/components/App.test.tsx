@@ -7,14 +7,53 @@ import React from "react";
 import { Window } from "happy-dom";
 import type { BranchInfo, BranchItem } from "../../types.js";
 import type { BranchListScreenProps } from "../../components/screens/BranchListScreen.js";
+import { App } from "../../components/App.js";
 
 const mockRefresh = vi.fn();
-let App: typeof import("../../components/App.js").App;
+const exitMock = vi.fn();
 const branchListProps: BranchListScreenProps[] = [];
 const useGitDataMock = vi.fn();
+const useProfilesMock = vi.fn();
+const useToolStatusMock = vi.fn();
+
+vi.mock("ink", async () => {
+  const ReactImport = await import("react");
+  const Box = ({ children }: { children?: ReactImport.ReactNode }) =>
+    ReactImport.createElement("div", null, children);
+  const Text = ({ children }: { children?: ReactImport.ReactNode }) =>
+    ReactImport.createElement("span", null, children);
+  return {
+    Box,
+    Text,
+    useApp: () => ({ exit: exitMock }),
+    useInput: () => {},
+    useStdout: () => ({ stdout: process.stdout, write: vi.fn() }),
+  };
+});
 
 vi.mock("../../hooks/useGitData.js", () => ({
   useGitData: (...args: unknown[]) => useGitDataMock(...args),
+}));
+
+vi.mock("../../hooks/useProfiles.js", () => ({
+  useProfiles: (...args: unknown[]) => useProfilesMock(...args),
+}));
+
+vi.mock("../../hooks/useToolStatus.js", () => ({
+  useToolStatus: (...args: unknown[]) => useToolStatusMock(...args),
+}));
+
+vi.mock("../../../utils.js", () => ({
+  getPackageVersion: vi.fn(async () => "0.0.0-test"),
+}));
+
+vi.mock("../../../git.js", () => ({
+  getRepositoryRoot: vi.fn(async () => "/repo"),
+  deleteBranch: vi.fn(async () => undefined),
+}));
+
+vi.mock("../../../config/index.js", () => ({
+  loadSession: vi.fn(async () => null),
 }));
 
 vi.mock("../../components/screens/BranchListScreen.js", () => {
@@ -47,7 +86,7 @@ vi.mock("../../components/screens/BranchListScreen.js", () => {
 });
 
 describe("App", () => {
-  beforeEach(async () => {
+  beforeEach(() => {
     // Setup happy-dom
     const window = new Window();
     globalThis.window = window as unknown as typeof globalThis.window;
@@ -56,8 +95,31 @@ describe("App", () => {
 
     vi.clearAllMocks();
     useGitDataMock.mockReset();
+    useProfilesMock.mockReset();
+    useToolStatusMock.mockReset();
     branchListProps.length = 0;
-    App = (await import("../../components/App.js")).App;
+
+    useProfilesMock.mockReturnValue({
+      profiles: null,
+      loading: false,
+      error: null,
+      activeProfileName: null,
+      activeProfile: null,
+      refresh: vi.fn(),
+      setActiveProfile: vi.fn(),
+      createProfile: vi.fn(),
+      updateProfile: vi.fn(),
+      deleteProfile: vi.fn(),
+      updateEnvVar: vi.fn(),
+      deleteEnvVar: vi.fn(),
+    });
+
+    useToolStatusMock.mockReturnValue({
+      tools: [],
+      loading: false,
+      error: null,
+      refresh: vi.fn(),
+    });
   });
 
   const mockBranches: BranchInfo[] = [

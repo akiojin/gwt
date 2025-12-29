@@ -13,7 +13,6 @@ import {
   hasUnpushedCommits,
   getUncommittedChangesCount,
   getUnpushedCommitsCount,
-  pushBranchToRemote,
   GitError,
 } from "./git.js";
 import { launchClaudeCode } from "./claude.js";
@@ -57,7 +56,7 @@ import {
   DependencyInstallError,
   type DependencyInstallResult,
 } from "./services/dependency-installer.js";
-import { confirmYesNo, waitForEnter } from "./utils/prompt.js";
+import { waitForEnter } from "./utils/prompt.js";
 
 const ERROR_PROMPT = chalk.yellow(
   "Review the error details, then press Enter to continue.",
@@ -435,7 +434,7 @@ export async function handleAIToolWorkflow(
       switch (dependencyStatus.reason) {
         case "missing-lockfile":
           warningMessage =
-            "Skipping automatic install because no lockfiles (bun.lock / pnpm-lock.yaml / package-lock.json) or package.json were found. Run the appropriate package-manager install command manually if needed.";
+            "Skipping automatic install because no lockfiles (bun.lock / pnpm-lock.yaml / package-lock.json) or package.json could be found. Run the appropriate package-manager install command manually if needed.";
           break;
         case "missing-binary":
           warningMessage = `Package manager '${dependencyStatus.manager ?? "unknown"}' is not available in this environment; skipping automatic install.`;
@@ -554,23 +553,21 @@ export async function handleAIToolWorkflow(
       throw new Error(`Tool not found: ${tool}`);
     }
 
-    // Save selection immediately so "last tool" is reflected even if the tool
-    // is interrupted or killed mid-run (e.g., Ctrl+C).
-    await saveSession(
-      {
-        lastWorktreePath: worktreePath,
-        lastBranch: branch,
-        lastUsedTool: tool,
-        toolLabel: toolConfig.displayName ?? tool,
-        mode,
-        model: normalizedModel ?? null,
-        reasoningLevel: inferenceLevel ?? null,
-        skipPermissions: skipPermissions ?? null,
-        timestamp: Date.now(),
-        repositoryRoot: repoRoot,
-      },
-      { skipHistory: true },
-    );
+    // Save selection immediately (including history) so "last tool" is reflected
+    // even if the tool is interrupted or killed mid-run (e.g., Ctrl+C).
+    // FR-042: Record timestamp to session history immediately on tool start.
+    await saveSession({
+      lastWorktreePath: worktreePath,
+      lastBranch: branch,
+      lastUsedTool: tool,
+      toolLabel: toolConfig.displayName ?? tool,
+      mode,
+      model: normalizedModel ?? null,
+      reasoningLevel: inferenceLevel ?? null,
+      skipPermissions: skipPermissions ?? null,
+      timestamp: Date.now(),
+      repositoryRoot: repoRoot,
+    });
 
     // Lookup saved session ID for Continue (auto attach)
     let resumeSessionId: string | null =
@@ -600,96 +597,127 @@ export async function handleAIToolWorkflow(
 
     const launchStartedAt = Date.now();
 
+    // FR-043: Start periodic timestamp update timer (30 seconds interval)
+    // This ensures the latest activity time is updated even if the tool is force-killed
+    const SESSION_UPDATE_INTERVAL_MS = 30_000;
+    const updateTimer = setInterval(async () => {
+      try {
+        await saveSession(
+          {
+            lastWorktreePath: worktreePath,
+            lastBranch: branch,
+            lastUsedTool: tool,
+            toolLabel: toolConfig.displayName ?? tool,
+            mode,
+            model: normalizedModel ?? null,
+            reasoningLevel: inferenceLevel ?? null,
+            skipPermissions: skipPermissions ?? null,
+            timestamp: Date.now(),
+            repositoryRoot: repoRoot,
+          },
+          { skipHistory: true }, // Don't add to history, just update timestamp
+        );
+      } catch {
+        // Ignore errors during periodic update
+      }
+    }, SESSION_UPDATE_INTERVAL_MS);
+
     // Launch selected AI tool
     // Builtin tools use their dedicated launch functions
     // Custom tools use the generic launchCustomAITool function
     let launchResult: { sessionId?: string | null } | void;
-    if (tool === "claude-code") {
-      const launchOptions: {
-        mode?: "normal" | "continue" | "resume";
-        skipPermissions?: boolean;
-        envOverrides?: Record<string, string>;
-        model?: string;
-        sessionId?: string | null;
-        chrome?: boolean;
-      } = {
-        mode:
-          mode === "resume"
-            ? "resume"
-            : mode === "continue"
-              ? "continue"
-              : "normal",
-        skipPermissions,
-        envOverrides: sharedEnv,
-        sessionId: resumeSessionId,
-        chrome: true,
-      };
-      if (normalizedModel) {
-        launchOptions.model = normalizedModel;
+    try {
+      if (tool === "claude-code") {
+        const launchOptions: {
+          mode?: "normal" | "continue" | "resume";
+          skipPermissions?: boolean;
+          envOverrides?: Record<string, string>;
+          model?: string;
+          sessionId?: string | null;
+          chrome?: boolean;
+        } = {
+          mode:
+            mode === "resume"
+              ? "resume"
+              : mode === "continue"
+                ? "continue"
+                : "normal",
+          skipPermissions,
+          envOverrides: sharedEnv,
+          sessionId: resumeSessionId,
+          chrome: true,
+        };
+        if (normalizedModel) {
+          launchOptions.model = normalizedModel;
+        }
+        launchResult = await launchClaudeCode(worktreePath, launchOptions);
+      } else if (tool === "codex-cli") {
+        const launchOptions: {
+          mode?: "normal" | "continue" | "resume";
+          bypassApprovals?: boolean;
+          envOverrides?: Record<string, string>;
+          model?: string;
+          reasoningEffort?: CodexReasoningEffort;
+          sessionId?: string | null;
+        } = {
+          mode:
+            mode === "resume"
+              ? "resume"
+              : mode === "continue"
+                ? "continue"
+                : "normal",
+          bypassApprovals: skipPermissions,
+          envOverrides: sharedEnv,
+          sessionId: resumeSessionId,
+        };
+        if (normalizedModel) {
+          launchOptions.model = normalizedModel;
+        }
+        if (inferenceLevel) {
+          launchOptions.reasoningEffort =
+            inferenceLevel as CodexReasoningEffort;
+        }
+        launchResult = await launchCodexCLI(worktreePath, launchOptions);
+      } else if (tool === "gemini-cli") {
+        const launchOptions: {
+          mode?: "normal" | "continue" | "resume";
+          skipPermissions?: boolean;
+          envOverrides?: Record<string, string>;
+          model?: string;
+          sessionId?: string | null;
+        } = {
+          mode:
+            mode === "resume"
+              ? "resume"
+              : mode === "continue"
+                ? "continue"
+                : "normal",
+          skipPermissions,
+          envOverrides: sharedEnv,
+          sessionId: resumeSessionId,
+        };
+        if (normalizedModel) {
+          launchOptions.model = normalizedModel;
+        }
+        launchResult = await launchGeminiCLI(worktreePath, launchOptions);
+      } else {
+        // Custom tool
+        printInfo(`Launching custom tool: ${toolConfig.displayName}`);
+        launchResult = await launchCustomAITool(toolConfig, {
+          mode:
+            mode === "resume"
+              ? "resume"
+              : mode === "continue"
+                ? "continue"
+                : "normal",
+          skipPermissions,
+          cwd: worktreePath,
+          sharedEnv,
+        });
       }
-      launchResult = await launchClaudeCode(worktreePath, launchOptions);
-    } else if (tool === "codex-cli") {
-      const launchOptions: {
-        mode?: "normal" | "continue" | "resume";
-        bypassApprovals?: boolean;
-        envOverrides?: Record<string, string>;
-        model?: string;
-        reasoningEffort?: CodexReasoningEffort;
-        sessionId?: string | null;
-      } = {
-        mode:
-          mode === "resume"
-            ? "resume"
-            : mode === "continue"
-              ? "continue"
-              : "normal",
-        bypassApprovals: skipPermissions,
-        envOverrides: sharedEnv,
-        sessionId: resumeSessionId,
-      };
-      if (normalizedModel) {
-        launchOptions.model = normalizedModel;
-      }
-      if (inferenceLevel) {
-        launchOptions.reasoningEffort = inferenceLevel as CodexReasoningEffort;
-      }
-      launchResult = await launchCodexCLI(worktreePath, launchOptions);
-    } else if (tool === "gemini-cli") {
-      const launchOptions: {
-        mode?: "normal" | "continue" | "resume";
-        skipPermissions?: boolean;
-        envOverrides?: Record<string, string>;
-        model?: string;
-        sessionId?: string | null;
-      } = {
-        mode:
-          mode === "resume"
-            ? "resume"
-            : mode === "continue"
-              ? "continue"
-              : "normal",
-        skipPermissions,
-        envOverrides: sharedEnv,
-        sessionId: resumeSessionId,
-      };
-      if (normalizedModel) {
-        launchOptions.model = normalizedModel;
-      }
-      launchResult = await launchGeminiCLI(worktreePath, launchOptions);
-    } else {
-      // Custom tool
-      printInfo(`Launching custom tool: ${toolConfig.displayName}`);
-      launchResult = await launchCustomAITool(toolConfig, {
-        mode:
-          mode === "resume"
-            ? "resume"
-            : mode === "continue"
-              ? "continue"
-              : "normal",
-        skipPermissions,
-        cwd: worktreePath,
-        sharedEnv,
-      });
+    } finally {
+      // FR-043: Clear the periodic timestamp update timer
+      clearInterval(updateTimer);
     }
 
     // Persist session with captured session ID (if any)
@@ -768,19 +796,21 @@ export async function handleAIToolWorkflow(
       lastSessionId: finalSessionId,
     });
 
-    let uncommittedExists = false;
     try {
       const [hasUncommitted, hasUnpushed] = await Promise.all([
         hasUncommittedChanges(worktreePath),
         hasUnpushedCommits(worktreePath, branch),
       ]);
-      uncommittedExists = hasUncommitted;
 
       if (hasUncommitted) {
         const uncommittedCount = await getUncommittedChangesCount(worktreePath);
         const countLabel =
-          uncommittedCount > 0 ? ` (${uncommittedCount}件)` : "";
-        printWarning(`未コミットの変更があります${countLabel}。`);
+          uncommittedCount > 0
+            ? ` (${uncommittedCount} ${
+                uncommittedCount === 1 ? "change" : "changes"
+              })`
+            : "";
+        printWarning(`Uncommitted changes detected${countLabel}.`);
       }
 
       if (hasUnpushed) {
@@ -788,36 +818,21 @@ export async function handleAIToolWorkflow(
           worktreePath,
           branch,
         );
-        const countLabel = unpushedCount > 0 ? ` (${unpushedCount}件)` : "";
-        const shouldPush = await confirmYesNo(
-          `未プッシュのコミットがあります${countLabel}。プッシュしますか？`,
-          { defaultValue: false },
-        );
-        if (shouldPush) {
-          printInfo(`Pushing origin/${branch}...`);
-          try {
-            await pushBranchToRemote(worktreePath, branch);
-            printInfo(`Push completed for ${branch}.`);
-          } catch (error) {
-            const details =
-              error instanceof Error ? error.message : String(error);
-            printWarning(`Push failed for ${branch}: ${details}`);
-          }
-        }
+        const countLabel =
+          unpushedCount > 0
+            ? ` (${unpushedCount} ${
+                unpushedCount === 1 ? "commit" : "commits"
+              })`
+            : "";
+        printWarning(`Unpushed commits detected${countLabel}.`);
       }
     } catch (error) {
       const details = error instanceof Error ? error.message : String(error);
       printWarning(`Failed to check git status after session: ${details}`);
     }
 
-    if (uncommittedExists) {
-      await waitForEnter("Press Enter to return to the main menu...");
-    } else {
-      // Small buffer before returning to branch list to avoid abrupt screen swap
-      await new Promise((resolve) =>
-        setTimeout(resolve, POST_SESSION_DELAY_MS),
-      );
-    }
+    // Small buffer before returning to branch list to avoid abrupt screen swap
+    await new Promise((resolve) => setTimeout(resolve, POST_SESSION_DELAY_MS));
     printInfo("Session completed successfully. Returning to main menu...");
     return;
   } catch (error) {

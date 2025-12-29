@@ -52,6 +52,6 @@ describe("LogDetailScreen", () => {
       <LogDetailScreen entry={null} onBack={vi.fn()} onCopy={vi.fn()} />,
     );
 
-    expect(lastFrame()).toContain("ログがありません");
+    expect(lastFrame()).toContain("No logs available.");
   });
 });

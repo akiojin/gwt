@@ -166,7 +166,7 @@ export function LogListScreen({
           </Box>
         ) : entries.length === 0 ? (
           <Box>
-            <Text dimColor>ログがありません</Text>
+            <Text dimColor>No logs available.</Text>
           </Box>
         ) : (
           <Select

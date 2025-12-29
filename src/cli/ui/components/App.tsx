@@ -926,7 +926,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     if (selectedBranches.length === 0) {
       setCleanupIndicators({});
       setCleanupFooterMessage({
-        text: "クリーンアップ対象が選択されていません",
+        text: "No cleanup targets selected.",
         color: "yellow",
       });
       setCleanupInputLocked(false);
