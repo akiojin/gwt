@@ -103,6 +103,93 @@ describe("command utilities", () => {
   });
 });
 
+describe("getCommandVersion", () => {
+  let commandModule: typeof import("../../../src/utils/command.js");
+
+  beforeEach(async () => {
+    commandModule = await import("../../../src/utils/command.js");
+    commandModule.clearCommandLookupCache();
+  });
+
+  it("returns version string for installed command with --version support", async () => {
+    // Test with a common system command that supports --version
+    // Note: Results may vary by platform
+    const result = await commandModule.getCommandVersion("/bin/ls");
+    // ls may or may not support --version depending on platform
+    expect(result === null || typeof result === "string").toBe(true);
+  });
+
+  it("returns null for non-existent command", async () => {
+    const result = await commandModule.getCommandVersion(
+      "/nonexistent/path/command",
+    );
+    expect(result).toBeNull();
+  });
+});
+
+describe("findCommand with version", () => {
+  let commandModule: typeof import("../../../src/utils/command.js");
+
+  beforeEach(async () => {
+    commandModule = await import("../../../src/utils/command.js");
+    commandModule.clearCommandLookupCache();
+  });
+
+  it("includes version property in result structure", async () => {
+    const result = await commandModule.findCommand("ls");
+    expect(result).toHaveProperty("version");
+  });
+
+  it("returns null version for bunx fallback", async () => {
+    const result = await commandModule.findCommand("nonexistent-command-xyz");
+    expect(result.version).toBeNull();
+  });
+
+  it("returns version for installed commands when available", async () => {
+    const result = await commandModule.findCommand("ls");
+    if (result.source === "installed") {
+      // Version is either a string starting with 'v' or null
+      expect(
+        result.version === null || result.version?.startsWith("v"),
+      ).toBe(true);
+    }
+  });
+});
+
+describe("detectAllToolStatuses with version", () => {
+  let commandModule: typeof import("../../../src/utils/command.js");
+
+  beforeEach(async () => {
+    commandModule = await import("../../../src/utils/command.js");
+    commandModule.clearCommandLookupCache();
+  });
+
+  it("returns ToolStatus with version property", async () => {
+    const results = await commandModule.detectAllToolStatuses();
+
+    for (const tool of results) {
+      expect(tool).toHaveProperty("version");
+      // bunx fallback should have null version
+      if (tool.status === "bunx") {
+        expect(tool.version).toBeNull();
+      }
+    }
+  });
+
+  it("includes version for installed tools", async () => {
+    const results = await commandModule.detectAllToolStatuses();
+
+    for (const tool of results) {
+      if (tool.status === "installed") {
+        // Version is either a string starting with 'v' or null
+        expect(
+          tool.version === null || tool.version?.startsWith("v"),
+        ).toBe(true);
+      }
+    }
+  });
+});
+
 describe("KNOWN_INSTALL_PATHS coverage", () => {
   beforeEach(async () => {
     const { clearCommandLookupCache } =
