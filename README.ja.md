@@ -100,7 +100,7 @@ bunx @akiojin/gwt serve
 
 ### カスタムAIツールの管理
 
-- ダッシュボード右上の **Config**（または `/config` URL）で `~/.gwt/tools.json` をGUI編集（旧 `~/.claude-worktree/tools.json` は初回起動時に自動移行）
+- ダッシュボード右上の **Config**（または `/config` URL）で `~/.gwt/tools.json` をGUI編集
 - 実行タイプ（path/bunx/command）、defaultArgs、modeArgs、permissionSkipArgs、envをまとめて設定
 - 変更内容はCLIと共有の `tools.json` に保存されるため、CLI/Webのどちらからでも同じツールを利用可能
 - ブランチ一覧モーダルの起動フォームでは以下を指定できます:
