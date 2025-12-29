@@ -434,7 +434,7 @@ export async function launchClaudeCode(
  */
 export async function isClaudeCodeAvailable(): Promise<boolean> {
   try {
-    await execa("bunx", [CLAUDE_CLI_PACKAGE, "--version"], { shell: true });
+    await execa("bunx", [CLAUDE_CLI_PACKAGE, "--version"]);
     return true;
   } catch (error: unknown) {
     const err = error as NodeJS.ErrnoException;

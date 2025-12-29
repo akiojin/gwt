@@ -175,7 +175,6 @@ export async function launchGeminiCLI(
       const run = async (cmd: string, args: string[]) => {
         const child = execa(cmd, args, {
           cwd: worktreePath,
-          shell: true,
           stdin: childStdio.stdin,
           stdout: childStdio.stdout,
           stderr: childStdio.stderr,
@@ -328,7 +327,7 @@ export async function launchGeminiCLI(
  */
 export async function isGeminiCLIAvailable(): Promise<boolean> {
   try {
-    await execa("bunx", [GEMINI_CLI_PACKAGE, "--version"], { shell: true });
+    await execa("bunx", [GEMINI_CLI_PACKAGE, "--version"]);
     return true;
   } catch (error: unknown) {
     const err = error as NodeJS.ErrnoException;
