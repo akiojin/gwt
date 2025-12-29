@@ -59,6 +59,7 @@ export interface CommandLookupResult {
   available: boolean;
   path: string | null;
   source: "installed" | "bunx";
+  version?: string | null;
 }
 
 /**
@@ -69,6 +70,7 @@ export interface ToolStatus {
   name: string;
   status: "installed" | "bunx";
   path: string | null;
+  version?: string | null;
 }
 
 /**
@@ -83,6 +85,33 @@ const commandLookupCache = new Map<string, CommandLookupResult>();
  */
 export function clearCommandLookupCache(): void {
   commandLookupCache.clear();
+}
+
+/**
+ * Gets the version of a command by running it with --version.
+ * FR-022: Returns version in "v{version}" format, null on failure.
+ * FR-023: Times out after 3 seconds to minimize startup delay.
+ *
+ * @param commandPath - Full path to the command
+ * @returns Version string (e.g., "v1.0.3") or null on failure
+ */
+export async function getCommandVersion(
+  commandPath: string,
+): Promise<string | null> {
+  try {
+    const result = await execa(commandPath, ["--version"], {
+      timeout: 3000,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    // Extract version number from output
+    // Examples: "claude 1.0.3", "codex 0.77.0", "gemini 0.1.0"
+    const match = result.stdout.match(/(\d+\.\d+(?:\.\d+)?(?:-[\w.]+)?)/);
+    return match ? `v${match[1]}` : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -141,6 +170,13 @@ export async function findCommand(
     lookupResult = { available: true, path: null, source: "bunx" };
   }
 
+  // Step 4: Get version for installed commands (FR-022)
+  if (lookupResult.source === "installed" && lookupResult.path) {
+    lookupResult.version = await getCommandVersion(lookupResult.path);
+  } else {
+    lookupResult.version = null;
+  }
+
   // Cache the result (FR-020)
   commandLookupCache.set(commandName, lookupResult);
 
@@ -181,6 +217,7 @@ export async function detectAllToolStatuses(): Promise<ToolStatus[]> {
         name: tool.displayName,
         status: result.source,
         path: result.path,
+        version: result.version ?? null,
       };
     }),
   );
