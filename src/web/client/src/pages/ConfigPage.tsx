@@ -275,8 +275,8 @@ export function ConfigPage() {
             </p>
             <h3 className="mt-1 text-lg font-semibold">登録済みツール</h3>
             <p className="mt-2 text-sm text-muted-foreground">
-              CLI と Web UI は同じ設定を参照します。更新すると
-              ~/.claude-worktree/tools.json に保存されます。
+              CLI と Web UI は同じ設定を参照します。更新すると ~/.gwt/tools.json
+              に保存されます。
             </p>
           </CardHeader>
           <CardContent>

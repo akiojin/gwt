@@ -101,7 +101,7 @@ bunx @akiojin/gwt serve
 
 ### Managing Custom AI Tools
 
-- Navigate to **Config** (top-right button on the dashboard or `/config`) to view and edit `~/.gwt/tools.json` (legacy `~/.claude-worktree/tools.json` is auto-migrated on first run)
+- Navigate to **Config** (top-right button on the dashboard or `/config`) to view and edit `~/.gwt/tools.json`
 - Add/edit tools with execution type (`path` / `bunx` / `command`), default arguments, mode-specific arguments, permission skip arguments, and environment variables
 - Changes are written to the same `tools.json` file that the CLI uses, so both channels stay in sync
 - When launching from the branch detail page you can:
