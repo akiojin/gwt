@@ -29,16 +29,13 @@ import {
 /**
  * 設定ディレクトリのパスを取得
  *
- * 環境変数の優先順位: GWT_HOME > CLAUDE_WORKTREE_HOME (後方互換性) > ホームディレクトリ
+ * 環境変数 GWT_HOME が設定されている場合はそれを使用、それ以外はホームディレクトリ
  */
 function getConfigDir(): string {
   const worktreeHome =
     process.env.GWT_HOME && process.env.GWT_HOME.trim().length > 0
       ? process.env.GWT_HOME
-      : process.env.CLAUDE_WORKTREE_HOME &&
-          process.env.CLAUDE_WORKTREE_HOME.trim().length > 0
-        ? process.env.CLAUDE_WORKTREE_HOME
-        : homedir();
+      : homedir();
   return path.join(worktreeHome, ".gwt");
 }
 
@@ -133,11 +130,11 @@ async function mutateProfiles(
 }
 
 /**
- * プロファイル設定ファイルのパス（後方互換性のためエクスポート）
+ * プロファイル設定ファイルのパス
  *
  * @deprecated 内部では getProfilesConfigPath() を使用してください。
  * この定数はモジュールロード時に評価されるため、
- * 実行中に環境変数（GWT_HOME/CLAUDE_WORKTREE_HOME）を変更しても反映されません。
+ * 実行中に環境変数（GWT_HOME）を変更しても反映されません。
  */
 export const PROFILES_CONFIG_PATH = getProfilesConfigPath();
 

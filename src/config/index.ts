@@ -52,11 +52,8 @@ const DEFAULT_CONFIG: AppConfig = {
 export async function loadConfig(): Promise<AppConfig> {
   const configPaths = [
     path.join(process.cwd(), ".gwt.json"),
-    path.join(process.cwd(), ".claude-worktree.json"), // 後方互換性
     path.join(homedir(), ".config", "gwt", "config.json"),
-    path.join(homedir(), ".config", "claude-worktree", "config.json"), // 後方互換性
     path.join(homedir(), ".gwt.json"),
-    path.join(homedir(), ".claude-worktree.json"), // 後方互換性
   ];
 
   for (const configPath of configPaths) {
@@ -79,10 +76,9 @@ export async function loadConfig(): Promise<AppConfig> {
   return {
     ...DEFAULT_CONFIG,
     defaultBaseBranch:
-      process.env.CLAUDE_WORKTREE_BASE_BRANCH ||
-      DEFAULT_CONFIG.defaultBaseBranch,
-    skipPermissions: process.env.CLAUDE_WORKTREE_SKIP_PERMISSIONS === "true",
-    enableGitHubIntegration: process.env.CLAUDE_WORKTREE_GITHUB !== "false",
+      process.env.GWT_BASE_BRANCH || DEFAULT_CONFIG.defaultBaseBranch,
+    skipPermissions: process.env.GWT_SKIP_PERMISSIONS === "true",
+    enableGitHubIntegration: process.env.GWT_GITHUB !== "false",
     enableDebugMode:
       process.env.DEBUG_CLEANUP === "true" || process.env.DEBUG === "true",
   };
