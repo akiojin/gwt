@@ -196,7 +196,6 @@ export async function launchCodexCLI(
 
       const child = execa("bunx", [CODEX_CLI_PACKAGE, ...args], {
         cwd: worktreePath,
-        shell: true,
         stdin: childStdio.stdin,
         stdout: childStdio.stdout,
         stderr: childStdio.stderr,
