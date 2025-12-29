@@ -37,7 +37,7 @@
 
 ### 2.5 履歴/エクスポート
 
-- `~/.claude-worktree/env-history.json` に `{key, action, timestamp, source}` を追記するヘルパーを server 側に実装。
+- `~/.gwt/env-history.json` に `{key, action, timestamp, source}` を追記するヘルパーを server 側に実装。
 - Web UI では履歴をモーダルで閲覧、`.env` ダウンロードは Fastify にエンドポイント `/api/config/env/export` を追加（1分で失効する署名トークン）。
 
 ## 3. 実装ステップ（ハイレベル）
