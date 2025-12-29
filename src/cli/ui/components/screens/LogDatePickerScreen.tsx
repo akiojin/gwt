@@ -70,7 +70,7 @@ export function LogDatePickerScreen({
       <Box flexDirection="column" flexGrow={1}>
         {dates.length === 0 ? (
           <Box>
-            <Text dimColor>ログがありません</Text>
+            <Text dimColor>No logs available.</Text>
           </Box>
         ) : (
           <Select items={items} onSelect={handleSelect} limit={limit} />

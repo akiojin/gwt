@@ -5,6 +5,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 describe("startSystemTray (SPEC-1f56fd80)", () => {
   let createMock: ReturnType<typeof vi.fn>;
+  let killMock: ReturnType<typeof vi.fn>;
+  let readyMock: ReturnType<typeof vi.fn>;
+  let onClickHandler: ((action: { item: { title: string } }) => void) | null;
   let originalEnv: NodeJS.ProcessEnv;
 
   beforeEach(() => {
@@ -14,10 +17,30 @@ describe("startSystemTray (SPEC-1f56fd80)", () => {
     delete process.env.GWT_DISABLE_TRAY;
     process.env.DISPLAY = process.env.DISPLAY || ":0";
 
-    createMock = vi.fn(() => ({ dispose: vi.fn() }));
-    vi.doMock("trayicon", () => ({
-      create: createMock,
-    }));
+    onClickHandler = null;
+    killMock = vi.fn();
+    readyMock = vi.fn(async () => undefined);
+    createMock = vi.fn(function (this: unknown) {
+      Object.assign(this as Record<string, unknown>, {
+        onClick: (handler: (action: { item: { title: string } }) => void) => {
+          onClickHandler = handler;
+        },
+        ready: readyMock,
+        kill: killMock,
+      });
+    });
+    (createMock as typeof createMock & { separator?: unknown }).separator = {
+      title: "separator",
+    };
+    vi.doMock("node:module", async () => {
+      const actual =
+        await vi.importActual<typeof import("node:module")>("node:module");
+      const mocked = {
+        ...actual,
+        createRequire: () => () => ({ default: createMock }),
+      };
+      return { ...mocked, default: mocked };
+    });
   });
 
   afterEach(() => {
@@ -32,11 +55,10 @@ describe("startSystemTray (SPEC-1f56fd80)", () => {
 
     expect(createMock).toHaveBeenCalledTimes(1);
     const options = createMock.mock.calls[0][0] as {
-      title?: string;
-      action?: unknown;
+      menu?: { title?: string; items?: Array<{ title?: string }> };
     };
-    expect(options.title).toMatch(/gwt/i);
-    expect(typeof options.action).toBe("function");
+    expect(options.menu?.title).toMatch(/gwt/i);
+    expect(options.menu?.items?.[0]?.title).toBe("Open Web UI");
   });
 
   it("T011: トレイのダブルクリックでブラウザが開く", async () => {
@@ -47,8 +69,7 @@ describe("startSystemTray (SPEC-1f56fd80)", () => {
       platform: "win32",
     });
 
-    const options = createMock.mock.calls[0][0] as { action: () => unknown };
-    await options.action();
+    onClickHandler?.({ item: { title: "Open Web UI" } });
     expect(openUrlMock).toHaveBeenCalledWith("http://localhost:3000");
   });
 
@@ -67,32 +88,16 @@ describe("startSystemTray (SPEC-1f56fd80)", () => {
   });
 
   it("T014: disposeSystemTrayは初期化レースでも二重にdisposeしない", async () => {
-    const disposeMock = vi.fn();
-    const killMock = vi.fn();
-    createMock.mockImplementation(() => ({
-      dispose: disposeMock,
-      kill: killMock,
-    }));
-
     const { startSystemTray, disposeSystemTray } =
       await import("../../src/web/server/tray.js");
     await startSystemTray("http://localhost:3000", { platform: "win32" });
     disposeSystemTray();
 
     await Promise.resolve();
-
-    expect(disposeMock).toHaveBeenCalledTimes(1);
     expect(killMock).toHaveBeenCalledTimes(1);
   });
 
   it("T015: dispose後はトレイを再初期化できる", async () => {
-    const disposeMock = vi.fn();
-    const killMock = vi.fn();
-    createMock.mockImplementation(() => ({
-      dispose: disposeMock,
-      kill: killMock,
-    }));
-
     const { startSystemTray, disposeSystemTray } =
       await import("../../src/web/server/tray.js");
 

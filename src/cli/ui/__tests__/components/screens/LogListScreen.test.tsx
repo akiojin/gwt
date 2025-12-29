@@ -97,6 +97,6 @@ describe("LogListScreen", () => {
       />,
     );
 
-    expect(lastFrame()).toContain("ログがありません");
+    expect(lastFrame()).toContain("No logs available.");
   });
 });

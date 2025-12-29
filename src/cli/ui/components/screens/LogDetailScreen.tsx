@@ -35,7 +35,7 @@ export function LogDetailScreen({
   });
 
   const jsonLines = useMemo<string[]>(() => {
-    if (!entry) return ["ログがありません"]; // fallback
+    if (!entry) return ["No logs available."]; // fallback
     return entry.json.split("\n");
   }, [entry]);
 
