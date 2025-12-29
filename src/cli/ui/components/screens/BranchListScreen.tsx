@@ -11,6 +11,7 @@ import { useAppInput } from "../../hooks/useAppInput.js";
 import { useTerminalSize } from "../../hooks/useTerminalSize.js";
 import type { BranchItem, Statistics, BranchViewMode } from "../../types.js";
 import type { ToolStatus } from "../../hooks/useToolStatus.js";
+import { getLatestActivityTimestamp } from "../../utils/branchFormatter.js";
 import stringWidth from "string-width";
 import stripAnsi from "strip-ansi";
 import chalk from "chalk";
@@ -425,12 +426,11 @@ export const BranchListScreen = React.memo(function BranchListScreen({
       const columns = Math.max(20, context.columns - 1);
       const visibleWidth = (value: string) =>
         measureDisplayWidth(stripAnsi(value));
+      // FR-041: Display latest activity time (max of git commit and tool usage)
       let commitText = "---";
-      if (item.latestCommitTimestamp) {
-        commitText = formatLatestCommit(item.latestCommitTimestamp);
-      } else if (item.lastToolUsage?.timestamp) {
-        const seconds = Math.floor(item.lastToolUsage.timestamp / 1000);
-        commitText = formatLatestCommit(seconds);
+      const latestActivitySec = getLatestActivityTimestamp(item);
+      if (latestActivitySec > 0) {
+        commitText = formatLatestCommit(latestActivitySec);
       }
       const toolLabelRaw =
         item.lastToolUsageLabel?.split("|")?.[0]?.trim() ??
