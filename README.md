@@ -242,19 +242,15 @@ For more details, see the [Spec Kit documentation](https://github.com/akiojin/sp
 ```
 @akiojin/gwt/
 ├── src/
-│   ├── index.ts          # Main application entry point
-│   ├── git.ts           # Git operations and branch management
-│   ├── worktree.ts      # Worktree creation and management
-│   ├── claude.ts        # Claude Code integration
-│   ├── codex.ts         # Codex CLI integration
-│   ├── gemini.ts        # Gemini CLI integration
-│   ├── github.ts        # GitHub CLI integration
-│   ├── utils.ts         # Utility functions and error handling
-│   └── ui/              # User interface components
-│       ├── display.ts   # Console output formatting
-│       ├── prompts.ts   # Interactive prompts
-│       ├── table.ts     # Branch table generation
-│       └── types.ts     # TypeScript type definitions
+│   ├── cli/
+│   │   └── ui/          # Ink.js React components for terminal UI
+│   ├── web/             # Web UI server (Express + React)
+│   ├── services/        # Core business logic
+│   ├── repositories/    # Data access layer
+│   ├── config/          # Configuration management
+│   ├── logging/         # Structured logging (pino)
+│   ├── shared/          # Shared utilities and types
+│   └── types/           # TypeScript type definitions
 ├── bin/
 │   └── gwt.js # Executable wrapper
 ├── .claude/             # Claude Code configuration
@@ -384,18 +380,6 @@ We welcome contributions! Please read our contributing guidelines:
 - **Documentation**: This README and inline code documentation
 - **Issues**: GitHub Issues for bug reports and feature requests
 - **Discussions**: GitHub Discussions for questions and community support
-
-## MCP Configuration
-
-This repo includes `.mcp.json` for local MCP server definitions.
-
-- **External endpoints**: `context7` uses an external SSE endpoint. Review trust, security, and privacy requirements before enabling it in your environment.
-- **Data handling**: MCP clients may send prompts/queries (and possibly repository context depending on your tooling). Confirm compliance/DPA needs and disable the endpoint if external sharing is not permitted.
-- **Overrides**: If your MCP client supports environment expansion, you can override or disable external endpoints via env vars:
-  - `MCP_CONTEXT7_URL` (default: `https://mcp.context7.com/sse`)
-  - `MCP_CONTEXT7_ENABLED` (default: `true`)
-  - `SERENA_MCP_REF` (default: pinned commit in `.mcp.json`)
-- **Local config**: If your client does not expand env vars, generate a local config with `envsubst` and point your client to it.
 
 ### Icon Legend
 
