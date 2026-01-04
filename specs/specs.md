@@ -1,7 +1,7 @@
 <!-- markdownlint-disable MD013 -->
 # 仕様一覧
 
-**最終更新**: 2025-12-22
+**最終更新**: 2026-01-04
 
 このファイルは `.specify/scripts/bash/update-specs-index.sh` の出力を元に、カテゴリで手動整理しています。
 
@@ -49,6 +49,12 @@
 | SPEC ID | タイトル | 作成日 |
 | --- | --- | --- |
 | [SPEC-b9f5c4a1](SPEC-b9f5c4a1/spec.md) | ログ運用統一仕様 | 2025-12-11 |
+
+## 将来計画
+
+| SPEC ID | タイトル | 作成日 |
+| --- | --- | --- |
+| [SPEC-d27be71b](SPEC-d27be71b/spec.md) | 機能仕様: Ink.js から OpenTUI への移行 | 2026-01-04 |
 
 ## 廃止
 
