@@ -1,10 +1,10 @@
 import { execa } from "execa";
-import type { CustomAITool, LaunchOptions } from "../types/tools.js";
+import type { CodingAgent, CodingAgentLaunchOptions } from "../types/tools.js";
 import { createLogger } from "../logging/logger.js";
 
-const logger = createLogger({ category: "custom-resolver" });
+const logger = createLogger({ category: "agent-resolver" });
 
-export interface CustomToolExecutionPlan {
+export interface CodingAgentExecutionPlan {
   command: string;
   args: string[];
   env?: NodeJS.ProcessEnv;
@@ -35,24 +35,24 @@ export async function resolveCommandPath(commandName: string): Promise<string> {
   }
 }
 
-export function buildCustomToolArgs(
-  tool: CustomAITool,
-  options: LaunchOptions = {},
+export function buildCodingAgentArgs(
+  agent: CodingAgent,
+  options: CodingAgentLaunchOptions = {},
 ): string[] {
   const args: string[] = [];
 
-  if (tool.defaultArgs?.length) {
-    args.push(...tool.defaultArgs);
+  if (agent.defaultArgs?.length) {
+    args.push(...agent.defaultArgs);
   }
 
   const mode = options.mode ?? "normal";
-  const modeArgs = tool.modeArgs?.[mode];
+  const modeArgs = agent.modeArgs?.[mode];
   if (modeArgs?.length) {
     args.push(...modeArgs);
   }
 
-  if (options.skipPermissions && tool.permissionSkipArgs?.length) {
-    args.push(...tool.permissionSkipArgs);
+  if (options.skipPermissions && agent.permissionSkipArgs?.length) {
+    args.push(...agent.permissionSkipArgs);
   }
 
   if (options.extraArgs?.length) {
@@ -60,49 +60,54 @@ export function buildCustomToolArgs(
   }
 
   logger.debug(
-    { toolId: tool.id, argsCount: args.length },
-    "Custom tool args built",
+    { agentId: agent.id, argsCount: args.length },
+    "Coding agent args built",
   );
   return args;
 }
 
-export async function prepareCustomToolExecution(
-  tool: CustomAITool,
-  options: LaunchOptions = {},
-): Promise<CustomToolExecutionPlan> {
-  const baseArgs = buildCustomToolArgs(tool, options);
-  const envOverrides: NodeJS.ProcessEnv | undefined = tool.env
-    ? ({ ...tool.env } as NodeJS.ProcessEnv)
+export async function prepareCodingAgentExecution(
+  agent: CodingAgent,
+  options: CodingAgentLaunchOptions = {},
+): Promise<CodingAgentExecutionPlan> {
+  const baseArgs = buildCodingAgentArgs(agent, options);
+  const envOverrides: NodeJS.ProcessEnv | undefined = agent.env
+    ? ({ ...agent.env } as NodeJS.ProcessEnv)
     : undefined;
 
   let command: string;
   let args: string[];
 
-  switch (tool.type) {
+  switch (agent.type) {
     case "path": {
-      command = tool.command;
+      command = agent.command;
       args = baseArgs;
       break;
     }
     case "bunx": {
       command = "bunx";
-      args = [tool.command, ...baseArgs];
+      args = [agent.command, ...baseArgs];
       break;
     }
     case "command": {
-      command = await resolveCommandPath(tool.command);
+      command = await resolveCommandPath(agent.command);
       args = baseArgs;
       break;
     }
     default: {
-      const exhaustive: never = tool.type;
-      throw new Error(`Unknown custom tool type: ${exhaustive as string}`);
+      const exhaustive: never = agent.type;
+      throw new Error(`Unknown coding agent type: ${exhaustive as string}`);
     }
   }
 
   logger.debug(
-    { toolId: tool.id, toolType: tool.type, command, hasEnv: !!envOverrides },
-    "Custom tool execution prepared",
+    {
+      agentId: agent.id,
+      agentType: agent.type,
+      command,
+      hasEnv: !!envOverrides,
+    },
+    "Coding agent execution prepared",
   );
 
   return {

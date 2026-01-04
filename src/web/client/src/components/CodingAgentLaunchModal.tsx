@@ -11,18 +11,18 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import type { Branch, CustomAITool } from "../../../../types/api.js";
+import type { Branch, ApiCodingAgent } from "../../../../types/api.js";
 import {
   CLAUDE_PERMISSION_SKIP_ARGS,
   CODEX_DEFAULT_ARGS,
-} from "../../../../shared/aiToolConstants.js";
+} from "../../../../shared/codingAgentConstants.js";
 import { useConfig } from "../hooks/useConfig";
 import { useStartSession } from "../hooks/useSessions";
 import { useCreateWorktree } from "../hooks/useWorktrees";
 import { useSyncBranch } from "../hooks/useBranches";
 import { ApiError } from "../lib/api";
 
-const BUILTIN_TOOL_SUMMARIES: Record<string, ToolSummary> = {
+const BUILTIN_AGENT_SUMMARIES: Record<string, AgentSummary> = {
   "claude-code": {
     command: "claude",
     defaultArgs: [],
@@ -44,7 +44,7 @@ const BUILTIN_TOOL_SUMMARIES: Record<string, ToolSummary> = {
   },
 };
 
-interface ToolSummary {
+interface AgentSummary {
   command: string;
   defaultArgs?: string[] | null;
   modeArgs?: {
@@ -55,19 +55,22 @@ interface ToolSummary {
   permissionSkipArgs?: string[] | null;
 }
 
-interface AIToolLaunchModalProps {
+interface CodingAgentLaunchModalProps {
   branch: Branch;
   onClose: () => void;
 }
 
-type ToolMode = "normal" | "continue" | "resume";
+type AgentMode = "normal" | "continue" | "resume";
 
-type SelectableTool =
+type SelectableAgent =
   | { id: "claude-code"; label: string; target: "claude" }
   | { id: "codex-cli"; label: string; target: "codex" }
-  | { id: string; label: string; target: "custom"; definition: CustomAITool };
+  | { id: string; label: string; target: "custom"; definition: ApiCodingAgent };
 
-export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
+export function CodingAgentLaunchModal({
+  branch,
+  onClose,
+}: CodingAgentLaunchModalProps) {
   const {
     data: config,
     isLoading: isConfigLoading,
@@ -78,8 +81,8 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
   const syncBranch = useSyncBranch(branch.name);
   const navigate = useNavigate();
 
-  const [selectedToolId, setSelectedToolId] = useState<string>("claude-code");
-  const [selectedMode, setSelectedMode] = useState<ToolMode>("normal");
+  const [selectedAgentId, setSelectedAgentId] = useState<string>("claude-code");
+  const [selectedMode, setSelectedMode] = useState<AgentMode>("normal");
   const [skipPermissions, setSkipPermissions] = useState(false);
   const [extraArgsText, setExtraArgsText] = useState("");
   const [banner, setBanner] = useState<{
@@ -89,74 +92,74 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
   const [isStartingSession, setIsStartingSession] = useState(false);
   const [isCreatingWorktree, setIsCreatingWorktree] = useState(false);
 
-  const customTools = config?.tools ?? [];
-  const availableTools: SelectableTool[] = useMemo(
+  const customAgents = config?.codingAgents ?? [];
+  const availableAgents: SelectableAgent[] = useMemo(
     () => [
       { id: "claude-code", label: "Claude Code", target: "claude" },
       { id: "codex-cli", label: "Codex CLI", target: "codex" },
-      ...customTools.map((tool) => ({
-        id: tool.id,
-        label: tool.displayName,
+      ...customAgents.map((agent) => ({
+        id: agent.id,
+        label: agent.displayName,
         target: "custom" as const,
-        definition: tool,
+        definition: agent,
       })),
     ],
-    [customTools],
+    [customAgents],
   );
 
   useEffect(() => {
-    if (!availableTools.length) {
-      setSelectedToolId("claude-code");
+    if (!availableAgents.length) {
+      setSelectedAgentId("claude-code");
       return;
     }
-    if (!availableTools.find((tool) => tool.id === selectedToolId)) {
-      const first = availableTools[0];
+    if (!availableAgents.find((agent) => agent.id === selectedAgentId)) {
+      const first = availableAgents[0];
       if (first) {
-        setSelectedToolId(first.id);
+        setSelectedAgentId(first.id);
       }
     }
-  }, [availableTools, selectedToolId]);
+  }, [availableAgents, selectedAgentId]);
 
-  const selectedTool = availableTools.find(
-    (tool) => tool.id === selectedToolId,
+  const selectedAgent = availableAgents.find(
+    (agent) => agent.id === selectedAgentId,
   );
 
-  const selectedToolSummary: ToolSummary | null = useMemo(() => {
-    if (!selectedTool) {
+  const selectedAgentSummary: AgentSummary | null = useMemo(() => {
+    if (!selectedAgent) {
       return null;
     }
-    if (selectedTool.target === "custom") {
+    if (selectedAgent.target === "custom") {
       return {
-        command: selectedTool.definition.command,
-        defaultArgs: selectedTool.definition.defaultArgs ?? null,
-        modeArgs: selectedTool.definition.modeArgs,
-        permissionSkipArgs: selectedTool.definition.permissionSkipArgs ?? null,
+        command: selectedAgent.definition.command,
+        defaultArgs: selectedAgent.definition.defaultArgs ?? null,
+        modeArgs: selectedAgent.definition.modeArgs,
+        permissionSkipArgs: selectedAgent.definition.permissionSkipArgs ?? null,
       };
     }
-    return BUILTIN_TOOL_SUMMARIES[selectedTool.id] ?? null;
-  }, [selectedTool]);
+    return BUILTIN_AGENT_SUMMARIES[selectedAgent.id] ?? null;
+  }, [selectedAgent]);
 
   const argsPreview = useMemo(() => {
-    if (!selectedToolSummary) {
+    if (!selectedAgentSummary) {
       return null;
     }
     const args: string[] = [];
-    if (selectedToolSummary.defaultArgs?.length) {
-      args.push(...selectedToolSummary.defaultArgs);
+    if (selectedAgentSummary.defaultArgs?.length) {
+      args.push(...selectedAgentSummary.defaultArgs);
     }
-    const mode = selectedToolSummary.modeArgs?.[selectedMode];
+    const mode = selectedAgentSummary.modeArgs?.[selectedMode];
     if (mode?.length) {
       args.push(...mode);
     }
-    if (skipPermissions && selectedToolSummary.permissionSkipArgs?.length) {
-      args.push(...selectedToolSummary.permissionSkipArgs);
+    if (skipPermissions && selectedAgentSummary.permissionSkipArgs?.length) {
+      args.push(...selectedAgentSummary.permissionSkipArgs);
     }
     const extraArgs = parseExtraArgs(extraArgsText);
     if (extraArgs.length) {
       args.push(...extraArgs);
     }
-    return { command: selectedToolSummary.command, args };
-  }, [selectedToolSummary, selectedMode, skipPermissions, extraArgsText]);
+    return { command: selectedAgentSummary.command, args };
+  }, [selectedAgentSummary, selectedMode, skipPermissions, extraArgsText]);
 
   const PROTECTED_BRANCHES = ["main", "master", "develop"];
   const isProtectedBranch = PROTECTED_BRANCHES.includes(
@@ -256,8 +259,8 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
       });
       return;
     }
-    if (!selectedTool) {
-      setBanner({ type: "error", message: "Select an AI tool to launch." });
+    if (!selectedAgent) {
+      setBanner({ type: "error", message: "Select a coding agent to launch." });
       return;
     }
     if (needsRemoteSync) {
@@ -285,23 +288,23 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
 
     setIsStartingSession(true);
     try {
-      const toolType =
-        selectedTool.target === "codex"
+      const agentType =
+        selectedAgent.target === "codex"
           ? "codex-cli"
-          : selectedTool.target === "custom"
+          : selectedAgent.target === "custom"
             ? "custom"
             : "claude-code";
       const extraArgs = parseExtraArgs(extraArgsText);
       const sessionRequest = {
-        toolType,
-        toolName: selectedTool.target === "custom" ? selectedTool.id : null,
-        ...(selectedTool.target === "custom"
-          ? { customToolId: selectedTool.id }
+        agentType,
+        agentName: selectedAgent.target === "custom" ? selectedAgent.id : null,
+        ...(selectedAgent.target === "custom"
+          ? { customAgentId: selectedAgent.id }
           : {}),
         mode: selectedMode,
         worktreePath: branch.worktreePath,
         skipPermissions,
-        ...(selectedTool.target === "codex"
+        ...(selectedAgent.target === "codex"
           ? { bypassApprovals: skipPermissions }
           : {}),
         ...(extraArgs.length ? { extraArgs } : {}),
@@ -333,7 +336,7 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
           <div className="flex items-start justify-between gap-4">
             <div>
               <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                Launch AI Tool
+                Launch Coding Agent
               </p>
               <h2 className="mt-1 text-lg font-semibold">{branch.name}</h2>
             </div>
@@ -379,7 +382,8 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
                 ) : (
                   <>
                     <p>
-                      Worktree is missing. Create it before launching AI tools.
+                      Worktree is missing. Create it before launching coding
+                      agents.
                     </p>
                     <Button
                       variant="secondary"
@@ -415,19 +419,19 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
 
           <div className="grid gap-4 sm:grid-cols-3">
             <div className="space-y-2">
-              <label className="text-sm font-medium">AI tool</label>
+              <label className="text-sm font-medium">Coding agent</label>
               <Select
-                value={selectedToolId}
-                onValueChange={setSelectedToolId}
+                value={selectedAgentId}
+                onValueChange={setSelectedAgentId}
                 disabled={isConfigLoading ?? false}
               >
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {availableTools.map((tool) => (
-                    <SelectItem key={tool.id} value={tool.id}>
-                      {tool.label}
+                  {availableAgents.map((agent) => (
+                    <SelectItem key={agent.id} value={agent.id}>
+                      {agent.label}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -438,7 +442,7 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
               <label className="text-sm font-medium">Launch mode</label>
               <Select
                 value={selectedMode}
-                onValueChange={(value) => setSelectedMode(value as ToolMode)}
+                onValueChange={(value) => setSelectedMode(value as AgentMode)}
               >
                 <SelectTrigger>
                   <SelectValue />
@@ -477,12 +481,12 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
               onClick={handleStartSession}
               disabled={
                 isStartingSession ||
-                !selectedTool ||
+                !selectedAgent ||
                 hasBlockingDivergence ||
                 needsRemoteSync
               }
             >
-              {isStartingSession ? "Launching..." : "Launch AI tool"}
+              {isStartingSession ? "Launching..." : "Launch coding agent"}
             </Button>
             <Button
               variant="secondary"
@@ -496,25 +500,25 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
             </Button>
           </div>
 
-          {selectedToolSummary && (
+          {selectedAgentSummary && (
             <div className="space-y-2 rounded-lg border bg-muted/30 p-4 text-sm">
               <div className="grid gap-2 sm:grid-cols-3">
                 <div>
                   <span className="text-muted-foreground">Command:</span>{" "}
                   <code className="rounded bg-muted px-1.5 py-0.5 font-mono">
-                    {selectedToolSummary.command}
+                    {selectedAgentSummary.command}
                   </code>
                 </div>
                 <div>
                   <span className="text-muted-foreground">defaultArgs:</span>{" "}
                   <span
                     className={
-                      !selectedToolSummary.defaultArgs?.length
+                      !selectedAgentSummary.defaultArgs?.length
                         ? "text-muted-foreground/50"
                         : ""
                     }
                   >
-                    {renderArgs(selectedToolSummary.defaultArgs)}
+                    {renderArgs(selectedAgentSummary.defaultArgs)}
                   </span>
                 </div>
                 <div>
@@ -523,12 +527,12 @@ export function AIToolLaunchModal({ branch, onClose }: AIToolLaunchModalProps) {
                   </span>{" "}
                   <span
                     className={
-                      !selectedToolSummary.permissionSkipArgs?.length
+                      !selectedAgentSummary.permissionSkipArgs?.length
                         ? "text-muted-foreground/50"
                         : ""
                     }
                   >
-                    {renderArgs(selectedToolSummary.permissionSkipArgs)}
+                    {renderArgs(selectedAgentSummary.permissionSkipArgs)}
                   </span>
                 </div>
               </div>

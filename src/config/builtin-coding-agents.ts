@@ -1,19 +1,19 @@
 /**
- * ビルトインAIツール定義
+ * ビルトインコーディングエージェント定義
  *
- * Claude Code、Codex、Gemini の CustomAITool 形式定義
+ * Claude Code、Codex、Gemini の CodingAgent 形式定義
  */
 
-import type { CustomAITool } from "../types/tools.js";
+import type { CodingAgent } from "../types/tools.js";
 import {
   CLAUDE_PERMISSION_SKIP_ARGS,
   CODEX_DEFAULT_ARGS,
-} from "../shared/aiToolConstants.js";
+} from "../shared/codingAgentConstants.js";
 
 /**
  * Claude Code のビルトイン定義
  */
-export const CLAUDE_CODE_TOOL: CustomAITool = {
+export const CLAUDE_CODE_TOOL: CodingAgent = {
   id: "claude-code",
   displayName: "Claude Code",
   type: "bunx",
@@ -32,7 +32,7 @@ export const CLAUDE_CODE_TOOL: CustomAITool = {
 /**
  * Codex のビルトイン定義
  */
-export const CODEX_CLI_TOOL: CustomAITool = {
+export const CODEX_CLI_TOOL: CodingAgent = {
   id: "codex-cli",
   displayName: "Codex",
   type: "bunx",
@@ -48,7 +48,7 @@ export const CODEX_CLI_TOOL: CustomAITool = {
 /**
  * Gemini のビルトイン定義
  */
-export const GEMINI_CLI_TOOL: CustomAITool = {
+export const GEMINI_CLI_TOOL: CodingAgent = {
   id: "gemini-cli",
   displayName: "Gemini",
   type: "bunx",
@@ -62,9 +62,9 @@ export const GEMINI_CLI_TOOL: CustomAITool = {
 };
 
 /**
- * すべてのビルトインツール
+ * すべてのビルトインコーディングエージェント
  */
-export const BUILTIN_TOOLS: CustomAITool[] = [
+export const BUILTIN_CODING_AGENTS: CodingAgent[] = [
   CLAUDE_CODE_TOOL,
   CODEX_CLI_TOOL,
   GEMINI_CLI_TOOL,

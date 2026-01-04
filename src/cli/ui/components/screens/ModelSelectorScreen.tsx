@@ -5,7 +5,11 @@ import { Footer } from "../parts/Footer.js";
 import { Select, type SelectItem } from "../common/Select.js";
 import { useAppInput } from "../../hooks/useAppInput.js";
 import { useTerminalSize } from "../../hooks/useTerminalSize.js";
-import type { AITool, InferenceLevel, ModelOption } from "../../types.js";
+import type {
+  CodingAgentId,
+  InferenceLevel,
+  ModelOption,
+} from "../../types.js";
 import {
   getDefaultInferenceForModel,
   getDefaultModelOption,
@@ -33,7 +37,7 @@ interface InferenceSelectItem extends SelectItem {
  * Props for `ModelSelectorScreen`.
  */
 export interface ModelSelectorScreenProps {
-  tool: AITool;
+  tool: CodingAgentId;
   onBack: () => void;
   onSelect: (selection: ModelSelectionResult) => void;
   version?: string | null;
