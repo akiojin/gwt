@@ -1,12 +1,22 @@
 # Node.js 22 (LTS) ベースイメージ
 FROM node:22-bookworm
 
+ARG ZIG_VERSION=0.15.2
+ARG ZIG_SHA256=02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239
+
 RUN apt-get update && apt-get install -y \
     jq \
     vim \
     ripgrep \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+
+# Install Zig
+RUN curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz && \
+    echo "${ZIG_SHA256}  /tmp/zig.tar.xz" | sha256sum -c - && \
+    tar -C /opt -xf /tmp/zig.tar.xz && \
+    ln -s "/opt/zig-x86_64-linux-${ZIG_VERSION}/zig" /usr/local/bin/zig && \
+    rm /tmp/zig.tar.xz
 
 # Global tools with pnpm
 RUN npm add -g \
