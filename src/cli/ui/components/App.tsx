@@ -16,7 +16,7 @@ import { LogDetailScreen } from "./screens/LogDetailScreen.js";
 import { LogDatePickerScreen } from "./screens/LogDatePickerScreen.js";
 import { BranchCreatorScreen } from "./screens/BranchCreatorScreen.js";
 import { BranchActionSelectorScreen } from "../screens/BranchActionSelectorScreen.js";
-import { AIToolSelectorScreen } from "./screens/AIToolSelectorScreen.js";
+import { CodingAgentSelectorScreen } from "./screens/CodingAgentSelectorScreen.js";
 import { ExecutionModeSelectorScreen } from "./screens/ExecutionModeSelectorScreen.js";
 import type { ExecutionMode } from "./screens/ExecutionModeSelectorScreen.js";
 import { BranchQuickStartScreen } from "./screens/BranchQuickStartScreen.js";
@@ -46,7 +46,7 @@ import {
   type LogFileInfo,
 } from "../../../logging/reader.js";
 import type {
-  AITool,
+  CodingAgentId,
   BranchInfo,
   BranchItem,
   CleanupTarget,
@@ -93,7 +93,7 @@ export interface SelectionResult {
   displayName: string; // Name that was selected in the UI (may include remote prefix)
   branchType: "local" | "remote";
   remoteBranch?: string; // Full remote ref when branchType === 'remote'
-  tool: AITool;
+  tool: CodingAgentId;
   mode: ExecutionMode;
   skipPermissions: boolean;
   model?: string | null;
@@ -136,7 +136,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
   );
   const [branchQuickStart, setBranchQuickStart] = useState<
     {
-      toolId: AITool;
+      toolId: CodingAgentId;
       toolLabel: string;
       model?: string | null;
       sessionId?: string | null;
@@ -172,13 +172,15 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     useState<SelectedBranchState | null>(null);
   const [creationSourceBranch, setCreationSourceBranch] =
     useState<SelectedBranchState | null>(null);
-  const [selectedTool, setSelectedTool] = useState<AITool | null>(null);
+  const [selectedTool, setSelectedTool] = useState<CodingAgentId | null>(null);
   const [selectedModel, setSelectedModel] =
     useState<ModelSelectionResult | null>(null);
   const [lastModelByTool, setLastModelByTool] = useState<
-    Record<AITool, ModelSelectionResult | undefined>
+    Record<CodingAgentId, ModelSelectionResult | undefined>
   >({});
-  const [preferredToolId, setPreferredToolId] = useState<AITool | null>(null);
+  const [preferredToolId, setPreferredToolId] = useState<CodingAgentId | null>(
+    null,
+  );
 
   // PR cleanup feedback
   const [cleanupIndicators, setCleanupIndicators] = useState<
@@ -413,12 +415,12 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
             }
 
             const normalizedModel = normalizeModelId(
-              entry.toolId as AITool,
+              entry.toolId as CodingAgentId,
               entry.model ?? null,
             );
 
             return {
-              toolId: entry.toolId as AITool,
+              toolId: entry.toolId as CodingAgentId,
               toolLabel: entry.toolLabel,
               model: normalizedModel ?? null,
               inferenceLevel: (entry.reasoningLevel ??
@@ -772,7 +774,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       const nextScreen =
         branchQuickStart.length || branchQuickStartLoading
           ? "branch-quick-start"
-          : "ai-tool-selector";
+          : "coding-agent-selector";
       navigateTo(nextScreen);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -799,7 +801,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     if (branchQuickStart.length) {
       navigateTo("branch-quick-start");
     } else {
-      navigateTo("ai-tool-selector");
+      navigateTo("coding-agent-selector");
     }
   }, [
     handleProtectedBranchSwitch,
@@ -893,7 +895,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         setPreferredToolId(null);
         setCleanupFooterMessage(null);
 
-        navigateTo("ai-tool-selector");
+        navigateTo("coding-agent-selector");
       } catch (error) {
         // On error, go back to branch list
         console.error("Failed to create branch:", error);
@@ -1144,7 +1146,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
 
   // Handle AI tool selection
   const handleToolSelect = useCallback(
-    (tool: AITool) => {
+    (tool: CodingAgentId) => {
       setSelectedTool(tool);
       setSelectedModel(lastModelByTool[tool] ?? null);
       navigateTo("model-selector");
@@ -1211,9 +1213,9 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
   );
 
   const handleQuickStartSelect = useCallback(
-    (action: QuickStartAction, toolId?: AITool | null) => {
+    (action: QuickStartAction, toolId?: CodingAgentId | null) => {
       if (action === "manual" || !branchQuickStart.length) {
-        navigateTo("ai-tool-selector");
+        navigateTo("coding-agent-selector");
         return;
       }
 
@@ -1221,14 +1223,14 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         branchQuickStart.find((opt) => opt.toolId === toolId) ??
         branchQuickStart[0];
       if (!selected) {
-        navigateTo("ai-tool-selector");
+        navigateTo("coding-agent-selector");
         return;
       }
 
       setSelectedTool(selected.toolId);
       setPreferredToolId(selected.toolId);
       const normalizedQuickStartModel = normalizeModelId(
-        selected.toolId as AITool,
+        selected.toolId as CodingAgentId,
         selected.model ?? null,
       );
       setSelectedModel(
@@ -1399,13 +1401,13 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
           />
         );
 
-      case "ai-tool-selector":
+      case "coding-agent-selector":
         return (
-          <AIToolSelectorScreen
+          <CodingAgentSelectorScreen
             onBack={goBack}
             onSelect={handleToolSelect}
             version={version}
-            initialToolId={selectedTool ?? preferredToolId ?? null}
+            initialAgentId={selectedTool ?? preferredToolId ?? null}
           />
         );
 

@@ -8,7 +8,7 @@
 import type {
   Branch,
   Worktree,
-  AIToolSession,
+  CodingAgentSession,
   HealthResponse,
   CreateWorktreeRequest,
   StartSessionRequest,
@@ -137,15 +137,15 @@ export const sessionApi = {
   /**
    * すべてのセッション一覧を取得
    */
-  list: async (): Promise<AIToolSession[]> => {
-    return apiFetch<AIToolSession[]>(`${API_BASE}/sessions`);
+  list: async (): Promise<CodingAgentSession[]> => {
+    return apiFetch<CodingAgentSession[]>(`${API_BASE}/sessions`);
   },
 
   /**
    * 新しいセッションを開始
    */
-  start: async (request: StartSessionRequest): Promise<AIToolSession> => {
-    return apiFetch<AIToolSession>(`${API_BASE}/sessions`, {
+  start: async (request: StartSessionRequest): Promise<CodingAgentSession> => {
+    return apiFetch<CodingAgentSession>(`${API_BASE}/sessions`, {
       method: "POST",
       body: JSON.stringify(request),
     });
@@ -154,8 +154,8 @@ export const sessionApi = {
   /**
    * 特定のセッション情報を取得
    */
-  get: async (sessionId: string): Promise<AIToolSession> => {
-    return apiFetch<AIToolSession>(`${API_BASE}/sessions/${sessionId}`);
+  get: async (sessionId: string): Promise<CodingAgentSession> => {
+    return apiFetch<CodingAgentSession>(`${API_BASE}/sessions/${sessionId}`);
   },
 
   /**
@@ -173,7 +173,7 @@ export const sessionApi = {
  */
 export const configApi = {
   /**
-   * カスタムAI Tool設定を取得
+   * カスタム Coding Agent 設定を取得
    */
   get: async (): Promise<ConfigPayload> => apiFetch(`${API_BASE}/config`),
   update: async (request: ConfigPayload): Promise<ConfigPayload> =>

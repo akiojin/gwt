@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import type {
   ConfigPayload,
-  CustomAITool,
+  ApiCodingAgent,
   EnvironmentVariable,
 } from "../../../../types/api.js";
 import { useConfig, useUpdateConfig } from "../hooks/useConfig";
@@ -39,15 +39,17 @@ function buildPayload(
   sharedEnv: EnvRow[],
   toolState: ToolEnvState,
 ): ConfigPayload {
-  const tools: CustomAITool[] = (base?.tools ?? []).map((tool) => ({
-    ...tool,
-    env: serializeRows(toolState[tool.id] ?? []),
-  }));
+  const codingAgents: ApiCodingAgent[] = (base?.codingAgents ?? []).map(
+    (agent) => ({
+      ...agent,
+      env: serializeRows(toolState[agent.id] ?? []),
+    }),
+  );
 
   return {
     version: base?.version ?? "1.0.0",
     env: serializeRows(sharedEnv),
-    tools,
+    codingAgents,
   };
 }
 
@@ -65,8 +67,8 @@ export function ConfigManagementPage() {
     if (!data) return;
     setSharedEnv(rowsFromVariables(data.env));
     const toolState: ToolEnvState = {};
-    data.tools?.forEach((tool) => {
-      toolState[tool.id] = rowsFromVariables(tool.env);
+    data.codingAgents?.forEach((agent) => {
+      toolState[agent.id] = rowsFromVariables(agent.env);
     });
     setToolEnv(toolState);
   }, [data]);
@@ -102,8 +104,11 @@ export function ConfigManagementPage() {
     if (serializedOriginalShared !== serializedCurrentShared) return true;
     if (!data) return false;
     const currentTool =
-      data.tools?.map((tool) => serializeRows(toolEnv[tool.id] ?? [])) ?? [];
-    const originalTool = data.tools?.map((tool) => tool.env ?? []) ?? [];
+      data.codingAgents?.map((agent) =>
+        serializeRows(toolEnv[agent.id] ?? []),
+      ) ?? [];
+    const originalTool =
+      data.codingAgents?.map((agent) => agent.env ?? []) ?? [];
     return JSON.stringify(currentTool) !== JSON.stringify(originalTool);
   }, [data, serializedOriginalShared, serializedCurrentShared, toolEnv]);
 
@@ -195,41 +200,44 @@ export function ConfigManagementPage() {
           <CardContent className="pt-6">
             <EnvEditor
               title="共通環境変数"
-              description="全てのAIツールで共有される値。PAT やプロキシ設定などはこちらに入力してください。"
+              description="全ての Coding Agent で共有される値。PAT やプロキシ設定などはこちらに入力してください。"
               rows={sharedEnv}
               onChange={setSharedEnv}
             />
           </CardContent>
         </Card>
 
-        {/* Tool-specific Environment Variables */}
+        {/* Agent-specific Environment Variables */}
         <Card>
           <CardHeader className="pb-3">
             <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-              Tool-specific
+              Agent-specific
             </p>
-            <h3 className="mt-1 text-lg font-semibold">ツール固有の環境変数</h3>
+            <h3 className="mt-1 text-lg font-semibold">
+              Coding Agent 固有の環境変数
+            </h3>
             <p className="mt-2 text-sm text-muted-foreground">
-              各ツール固有に上書きしたい値がある場合はこちらから設定します。
-              共通設定との競合がある場合はツール設定が優先されます。
+              各 Coding Agent
+              固有に上書きしたい値がある場合はこちらから設定します。
+              共通設定との競合がある場合はエージェント設定が優先されます。
             </p>
           </CardHeader>
           <CardContent className="space-y-6">
-            {data?.tools?.map((tool) => (
-              <div key={tool.id} className="rounded-lg border p-4">
+            {data?.codingAgents?.map((agent) => (
+              <div key={agent.id} className="rounded-lg border p-4">
                 <EnvEditor
-                  title={tool.displayName}
-                  description={`${tool.executionType} / ${tool.command}`}
-                  rows={toolEnv[tool.id] ?? []}
+                  title={agent.displayName}
+                  description={`${agent.executionType} / ${agent.command}`}
+                  rows={toolEnv[agent.id] ?? []}
                   onChange={(rows) =>
-                    setToolEnv((prev) => ({ ...prev, [tool.id]: rows }))
+                    setToolEnv((prev) => ({ ...prev, [agent.id]: rows }))
                   }
                 />
               </div>
             ))}
-            {!data?.tools?.length && (
+            {!data?.codingAgents?.length && (
               <p className="py-4 text-center text-sm text-muted-foreground">
-                登録されているツールがありません。
+                登録されている Coding Agent がありません。
               </p>
             )}
           </CardContent>

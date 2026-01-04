@@ -14,10 +14,10 @@ import {
   resolveCodexCommand,
   buildClaudeArgs,
   buildCodexArgs,
-  CODEX_DEFAULT_ARGS,
-  AIToolResolutionError,
+  CodingAgentResolutionError,
   __resetBunxCacheForTests,
-} from "../../../src/services/aiToolResolver.js";
+} from "../../../src/services/codingAgentResolver.js";
+import { CODEX_DEFAULT_ARGS } from "../../../src/shared/codingAgentConstants.js";
 
 interface ErrorWithCode extends Error {
   code?: string;
@@ -34,7 +34,7 @@ beforeEach(() => {
   __resetBunxCacheForTests();
 });
 
-describe("aiToolResolver", () => {
+describe("codingAgentResolver", () => {
   it("resolves claude to local binary when available", async () => {
     mockExeca.mockImplementation(async (cmd, args) => {
       if (cmd === detectionCommand && args[0] === "claude") {
@@ -86,7 +86,7 @@ describe("aiToolResolver", () => {
     });
 
     await expect(resolveClaudeCommand()).rejects.toBeInstanceOf(
-      AIToolResolutionError,
+      CodingAgentResolutionError,
     );
   });
 
