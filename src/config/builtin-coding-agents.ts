@@ -62,10 +62,26 @@ export const GEMINI_CLI_TOOL: CodingAgent = {
 };
 
 /**
+ * OpenCode のビルトイン定義
+ */
+export const OPENCODE_TOOL: CodingAgent = {
+  id: "opencode",
+  displayName: "OpenCode",
+  type: "bunx",
+  command: "opencode-ai@latest",
+  modeArgs: {
+    normal: [],
+    continue: ["-c"],
+    resume: ["-s"],
+  },
+};
+
+/**
  * すべてのビルトインコーディングエージェント
  */
 export const BUILTIN_CODING_AGENTS: CodingAgent[] = [
   CLAUDE_CODE_TOOL,
   CODEX_CLI_TOOL,
   GEMINI_CLI_TOOL,
+  OPENCODE_TOOL,
 ];

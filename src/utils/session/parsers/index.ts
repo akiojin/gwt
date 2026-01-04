@@ -23,3 +23,9 @@ export {
   findLatestGeminiSession,
   findLatestGeminiSessionId,
 } from "./gemini.js";
+
+// OpenCode
+export {
+  findLatestOpenCodeSession,
+  findLatestOpenCodeSessionId,
+} from "./opencode.js";
