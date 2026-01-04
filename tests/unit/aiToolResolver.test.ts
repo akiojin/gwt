@@ -23,7 +23,7 @@ import {
   AIToolResolutionError,
   __resetBunxCacheForTests,
 } from "../../src/services/aiToolResolver.js";
-import { CODEX_DEFAULT_ARGS } from "../../src/shared/aiToolConstants.js";
+import { CODEX_DEFAULT_ARGS } from "../../src/shared/codingAgentConstants.js";
 
 function notFoundError(): Error & { code: string } {
   const error = new Error("not found") as Error & { code: string };

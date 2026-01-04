@@ -13,7 +13,7 @@ import type {
   CustomAITool,
   AIToolConfig,
 } from "../types/tools.js";
-import { BUILTIN_TOOLS } from "./builtin-tools.js";
+import { BUILTIN_CODING_AGENTS } from "./builtin-coding-agents.js";
 import { createLogger } from "../logging/logger.js";
 import { resolveProfileEnv } from "./profiles.js";
 
@@ -137,8 +137,8 @@ function validateToolsConfig(config: ToolsConfig): void {
     }
     seenIds.add(tool.id);
 
-    // ビルトインツールとのID重複チェック
-    const builtinIds = BUILTIN_TOOLS.map((t) => t.id);
+    // ビルトインエージェントとのID重複チェック
+    const builtinIds = BUILTIN_CODING_AGENTS.map((t) => t.id);
     if (builtinIds.includes(tool.id)) {
       throw new Error(
         `Tool ID "${tool.id}" conflicts with builtin tool\n` +
@@ -247,8 +247,8 @@ function validateCustomAITool(tool: unknown): asserts tool is CustomAITool {
 export async function getToolById(
   id: string,
 ): Promise<CustomAITool | undefined> {
-  // ビルトインツールから検索
-  const builtinTool = BUILTIN_TOOLS.find((t) => t.id === id);
+  // ビルトインエージェントから検索
+  const builtinTool = BUILTIN_CODING_AGENTS.find((t) => t.id === id);
   if (builtinTool) {
     logger.debug({ id, found: true, isBuiltin: true }, "Tool lookup");
     return builtinTool;
@@ -269,8 +269,8 @@ export async function getToolById(
 export async function getAllTools(): Promise<AIToolConfig[]> {
   const config = await loadToolsConfig();
 
-  // ビルトインツールをAIToolConfig形式に変換
-  const builtinConfigs: AIToolConfig[] = BUILTIN_TOOLS.map((tool) => ({
+  // ビルトインエージェントをCodingAgentConfig形式に変換
+  const builtinConfigs: AIToolConfig[] = BUILTIN_CODING_AGENTS.map((tool) => ({
     id: tool.id,
     displayName: tool.displayName,
     ...(tool.icon ? { icon: tool.icon } : {}),

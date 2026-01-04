@@ -15,7 +15,7 @@ import type { Branch, CustomAITool } from "../../../../types/api.js";
 import {
   CLAUDE_PERMISSION_SKIP_ARGS,
   CODEX_DEFAULT_ARGS,
-} from "../../../../shared/aiToolConstants.js";
+} from "../../../../shared/codingAgentConstants.js";
 import { useConfig } from "../hooks/useConfig";
 import { useStartSession } from "../hooks/useSessions";
 import { useCreateWorktree } from "../hooks/useWorktrees";

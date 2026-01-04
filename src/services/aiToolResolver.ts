@@ -1,11 +1,11 @@
 import { execa } from "execa";
 import { platform } from "os";
 import { getToolById } from "../config/tools.js";
-import { CLAUDE_CODE_TOOL } from "../config/builtin-tools.js";
+import { CLAUDE_CODE_TOOL } from "../config/builtin-coding-agents.js";
 import {
   CODEX_DEFAULT_ARGS,
   CLAUDE_PERMISSION_SKIP_ARGS,
-} from "../shared/aiToolConstants.js";
+} from "../shared/codingAgentConstants.js";
 import { prepareCustomToolExecution } from "./customToolResolver.js";
 import type { LaunchOptions } from "../types/tools.js";
 import { createLogger } from "../logging/logger.js";
