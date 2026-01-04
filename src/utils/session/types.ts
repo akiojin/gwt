@@ -40,3 +40,8 @@ export type CodexSessionInfo = SessionInfo;
  * Gemini CLI session info
  */
 export type GeminiSessionInfo = SessionInfo;
+
+/**
+ * OpenCode session info
+ */
+export type OpenCodeSessionInfo = SessionInfo;

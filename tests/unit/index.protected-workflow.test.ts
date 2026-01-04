@@ -142,6 +142,13 @@ vi.mock("../../src/config/tools.js", () => ({
     id: "claude-code",
     displayName: "Claude Code",
   })),
+  getCodingAgentById: vi.fn(async () => ({
+    id: "claude-code",
+    displayName: "Claude Code",
+    type: "bunx",
+    command: "@anthropic-ai/claude-code@latest",
+    modeArgs: { normal: [], continue: ["-c"], resume: ["-r"] },
+  })),
   getSharedEnvironment: vi.fn(async () => ({})),
 }));
 

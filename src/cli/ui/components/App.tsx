@@ -81,6 +81,7 @@ import {
   findLatestCodexSessionId,
   findLatestClaudeSession,
   findLatestGeminiSession,
+  findLatestOpenCodeSession,
 } from "../../../utils/session.js";
 import type { ToolSessionEntry } from "../../../config/index.js";
 
@@ -409,6 +410,27 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
                 }
                 const gemSession = await findLatestGeminiSession(gemOptions);
                 sessionId = gemSession?.id ?? null;
+              } catch {
+                // ignore
+              }
+            }
+
+            // For OpenCode, prefer newest session file
+            if (!sessionId && entry.toolId === "opencode") {
+              try {
+                const openCodeOptions: Parameters<
+                  typeof findLatestOpenCodeSession
+                >[0] = {
+                  windowMs: 60 * 60 * 1000,
+                  cwd: worktree,
+                };
+                if (entry.timestamp !== null && entry.timestamp !== undefined) {
+                  openCodeOptions.since = entry.timestamp - 60_000;
+                  openCodeOptions.preferClosestTo = entry.timestamp;
+                }
+                const openCodeSession =
+                  await findLatestOpenCodeSession(openCodeOptions);
+                sessionId = openCodeSession?.id ?? null;
               } catch {
                 // ignore
               }

@@ -1,10 +1,11 @@
 /**
- * Session module - unified session management for AI tools
+ * Session module - unified session management for coding agents
  *
- * This module provides session detection and management for various AI CLI tools:
+ * This module provides session detection and management for various coding agents:
  * - Claude Code
  * - Codex CLI
  * - Gemini CLI
+ * - OpenCode
  */
 
 // Type exports
@@ -14,6 +15,7 @@ export type {
   ClaudeSessionInfo,
   CodexSessionInfo,
   GeminiSessionInfo,
+  OpenCodeSessionInfo,
 } from "./types.js";
 
 // Common utilities
@@ -40,3 +42,9 @@ export {
   findLatestGeminiSession,
   findLatestGeminiSessionId,
 } from "./parsers/gemini.js";
+
+// OpenCode parser
+export {
+  findLatestOpenCodeSession,
+  findLatestOpenCodeSessionId,
+} from "./parsers/opencode.js";
