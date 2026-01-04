@@ -9,7 +9,7 @@ export interface WorktreeInfo {
   hasUncommittedChanges?: boolean;
 }
 
-export type AITool = string;
+export type CodingAgentId = string;
 export type InferenceLevel = "low" | "medium" | "high" | "xhigh";
 
 /**
@@ -194,7 +194,7 @@ export type ScreenType =
   | "branch-creator"
   | "branch-action-selector"
   | "branch-quick-start"
-  | "ai-tool-selector"
+  | "coding-agent-selector"
   | "model-selector"
   | "session-selector"
   | "execution-mode-selector"

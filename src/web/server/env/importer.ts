@@ -1,4 +1,7 @@
-import { loadToolsConfig, saveToolsConfig } from "../../../config/tools.js";
+import {
+  loadCodingAgentsConfig,
+  saveCodingAgentsConfig,
+} from "../../../config/tools.js";
 import { recordEnvHistory } from "../../../config/env-history.js";
 import type { EnvironmentHistoryEntry } from "../../../types/api.js";
 import { createLogger } from "../../../logging/logger.js";
@@ -18,7 +21,7 @@ const IMPORTABLE_KEYS = [
 const importedKeySet = new Set<string>();
 
 export async function importOsEnvIntoSharedConfig(): Promise<string[]> {
-  const config = await loadToolsConfig();
+  const config = await loadCodingAgentsConfig();
   const sharedEnv = { ...(config.env ?? {}) };
   const importedKeys: string[] = [];
 
@@ -36,7 +39,7 @@ export async function importOsEnvIntoSharedConfig(): Promise<string[]> {
     return [];
   }
 
-  await saveToolsConfig({
+  await saveCodingAgentsConfig({
     ...config,
     env: sharedEnv,
   });

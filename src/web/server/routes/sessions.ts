@@ -1,14 +1,14 @@
 /**
  * Session Routes
  *
- * AI Toolセッション関連のREST APIエンドポイント。
+ * コーディングエージェントセッション関連のREST APIエンドポイント。
  */
 
 import type { PTYManager } from "../pty/manager.js";
-import { AIToolResolutionError } from "../../../services/aiToolResolver.js";
+import { CodingAgentResolutionError } from "../../../services/codingAgentResolver.js";
 import type {
   ApiResponse,
-  AIToolSession,
+  CodingAgentSession,
   StartSessionRequest,
 } from "../../../types/api.js";
 import { saveSession } from "../../../config/index.js";
@@ -26,7 +26,7 @@ export async function registerSessionRoutes(
   ptyManager: PTYManager,
 ): Promise<void> {
   // GET /api/sessions - すべてのセッション一覧を取得
-  fastify.get<{ Reply: ApiResponse<AIToolSession[]> }>(
+  fastify.get<{ Reply: ApiResponse<CodingAgentSession[]> }>(
     "/api/sessions",
     async (request, reply) => {
       try {
@@ -48,21 +48,24 @@ export async function registerSessionRoutes(
   // POST /api/sessions - 新しいセッションを開始
   fastify.post<{
     Body: StartSessionRequest;
-    Reply: ApiResponse<AIToolSession>;
+    Reply: ApiResponse<CodingAgentSession>;
   }>("/api/sessions", async (request, reply) => {
     try {
       const {
-        toolType,
-        toolName,
+        agentType,
+        agentName,
         mode,
         worktreePath,
         skipPermissions,
         bypassApprovals,
         extraArgs,
-        customToolId,
+        customAgentId,
       } = request.body;
 
-      logger.debug({ toolType, mode, worktreePath }, "Session start requested");
+      logger.debug(
+        { agentType, mode, worktreePath },
+        "Session start requested",
+      );
 
       const spawnOptions: {
         toolName?: string | null;
@@ -72,8 +75,8 @@ export async function registerSessionRoutes(
         customToolId?: string | null;
       } = {};
 
-      if (typeof toolName !== "undefined") {
-        spawnOptions.toolName = toolName;
+      if (typeof agentName !== "undefined") {
+        spawnOptions.toolName = agentName;
       }
       if (typeof skipPermissions !== "undefined") {
         spawnOptions.skipPermissions = skipPermissions;
@@ -84,21 +87,21 @@ export async function registerSessionRoutes(
       if (Array.isArray(extraArgs) && extraArgs.length > 0) {
         spawnOptions.extraArgs = extraArgs;
       }
-      if (typeof customToolId !== "undefined") {
-        spawnOptions.customToolId = customToolId;
+      if (typeof customAgentId !== "undefined") {
+        spawnOptions.customToolId = customAgentId;
       }
 
-      if (toolType === "custom" && !toolName && !customToolId) {
+      if (agentType === "custom" && !agentName && !customAgentId) {
         reply.code(400);
         return {
           success: false,
-          error: "Custom tool requires toolName or customToolId",
+          error: "Custom coding agent requires agentName or customAgentId",
           details: null,
         };
       }
 
       const { session } = await ptyManager.spawn(
-        toolType,
+        agentType,
         worktreePath,
         mode,
         spawnOptions,
@@ -129,11 +132,11 @@ export async function registerSessionRoutes(
           lastWorktreePath: worktreePath,
           lastBranch: branchName,
           lastUsedTool:
-            toolType === "custom" ? (toolName ?? "custom") : toolType,
+            agentType === "custom" ? (agentName ?? "custom") : agentType,
           toolLabel:
-            toolType === "custom"
-              ? (toolName ?? "Custom")
-              : toolLabelFromType(toolType),
+            agentType === "custom"
+              ? (agentName ?? "Custom")
+              : agentLabelFromType(agentType),
           mode,
           timestamp: Date.now(),
           repositoryRoot: repoRoot.trim(),
@@ -143,13 +146,13 @@ export async function registerSessionRoutes(
       }
 
       logger.info(
-        { sessionId: session.sessionId, toolType },
+        { sessionId: session.sessionId, agentType },
         "Session created",
       );
       reply.code(201);
       return { success: true, data: session };
     } catch (error: unknown) {
-      if (error instanceof AIToolResolutionError) {
+      if (error instanceof CodingAgentResolutionError) {
         reply.code(400);
         return {
           success: false,
@@ -171,7 +174,7 @@ export async function registerSessionRoutes(
   // GET /api/sessions/:sessionId - 特定のセッション情報を取得
   fastify.get<{
     Params: { sessionId: string };
-    Reply: ApiResponse<AIToolSession>;
+    Reply: ApiResponse<CodingAgentSession>;
   }>("/api/sessions/:sessionId", async (request, reply) => {
     try {
       const { sessionId } = request.params;
@@ -236,8 +239,8 @@ export async function registerSessionRoutes(
   });
 }
 
-function toolLabelFromType(toolType: "claude-code" | "codex-cli" | "custom") {
-  if (toolType === "claude-code") return "Claude";
-  if (toolType === "codex-cli") return "Codex";
+function agentLabelFromType(agentType: "claude-code" | "codex-cli" | "custom") {
+  if (agentType === "claude-code") return "Claude";
+  if (agentType === "codex-cli") return "Codex";
   return "Custom";
 }

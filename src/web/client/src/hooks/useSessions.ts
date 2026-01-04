@@ -5,7 +5,7 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { sessionApi } from "../lib/api";
 import type {
-  AIToolSession,
+  CodingAgentSession,
   StartSessionRequest,
 } from "../../../../types/api.js";
 
@@ -13,7 +13,7 @@ import type {
  * セッション一覧を取得
  */
 export function useSessions() {
-  return useQuery<AIToolSession[]>({
+  return useQuery<CodingAgentSession[]>({
     queryKey: ["sessions"],
     queryFn: sessionApi.list,
   });
@@ -23,7 +23,7 @@ export function useSessions() {
  * 特定のセッション情報を取得
  */
 export function useSession(sessionId: string) {
-  return useQuery<AIToolSession>({
+  return useQuery<CodingAgentSession>({
     queryKey: ["sessions", sessionId],
     queryFn: () => sessionApi.get(sessionId),
     enabled: !!sessionId,
@@ -38,8 +38,8 @@ export function useStartSession() {
 
   return useMutation({
     mutationFn: (request: StartSessionRequest) => sessionApi.start(request),
-    onSuccess: (session: AIToolSession) => {
-      queryClient.setQueryData<AIToolSession[] | undefined>(
+    onSuccess: (session: CodingAgentSession) => {
+      queryClient.setQueryData<CodingAgentSession[] | undefined>(
         ["sessions"],
         (existing) => {
           const next =

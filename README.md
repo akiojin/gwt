@@ -2,7 +2,7 @@
 
 [日本語](README.ja.md)
 
-Interactive Git worktree manager with AI tool selection (Claude Code / Codex CLI / Gemini CLI), graphical branch selection, and advanced workflow management.
+Interactive Git worktree manager with Coding Agent selection (Claude Code / Codex CLI / Gemini CLI), graphical branch selection, and advanced workflow management.
 
 ## Overview
 
@@ -14,8 +14,8 @@ Interactive Git worktree manager with AI tool selection (Claude Code / Codex CLI
 - 🖼️ **Full-screen Layout**: Persistent header with statistics, scrollable branch list, and always-visible footer with keyboard shortcuts
 - 🌟 **Smart Branch Creation**: Create feature, bugfix, hotfix, or release branches with guided prompts and automatic base branch selection
 - 🔄 **Advanced Worktree Management**: Complete lifecycle management including creation, cleanup, and path optimization
-- 🤖 **AI Tool Selection**: Choose between Claude Code / Codex CLI / Gemini CLI through the interactive launcher
-- 🚀 **AI Tool Integration**: Launch the selected tool in the worktree (Claude Code includes permission handling and post-change flow)
+- 🤖 **Coding Agent Selection**: Choose between Claude Code / Codex CLI / Gemini CLI through the interactive launcher
+- 🚀 **Coding Agent Integration**: Launch the selected agent in the worktree (Claude Code includes permission handling and post-change flow)
 - 🔒 **Worktree Command Restriction**: PreToolUse hooks enforce worktree boundaries, blocking directory navigation, branch switching, and file operations outside the worktree
 - 📊 **GitHub PR Integration**: Automatic cleanup of merged pull request branches and worktrees
 - 🛠️ **Change Management**: Built-in support for committing, stashing, or discarding changes after development sessions
@@ -97,20 +97,20 @@ bunx @akiojin/gwt serve
 - The Web UI is available by default at <http://localhost:3000>
 - System tray integration is currently supported on **Windows only** (it is automatically disabled on macOS/Linux)
 - The branch list mirrors the CLI view, including search and worktree creation
-- Detailed branch pages let you start AI tool sessions directly from the browser
+- Detailed branch pages let you start Coding Agent sessions directly from the browser
 
-### Managing Custom AI Tools
+### Managing Custom Coding Agents
 
 - Navigate to **Config** (top-right button on the dashboard or `/config`) to view and edit `~/.gwt/tools.json`
-- Add/edit tools with execution type (`path` / `bunx` / `command`), default arguments, mode-specific arguments, permission skip arguments, and environment variables
+- Add/edit Coding Agents with execution type (`path` / `bunx` / `command`), default arguments, mode-specific arguments, permission skip arguments, and environment variables
 - Changes are written to the same `tools.json` file that the CLI uses, so both channels stay in sync
 - When launching from the branch detail page you can:
-  - Select any custom tool
+  - Select any custom Coding Agent
   - Choose `normal` / `continue` / `resume` mode
   - Append extra arguments
   - Opt into the same `--dangerously-skip-permissions` flow as the CLI (with confirmation)
 
-> Tip: use the Web UI to quickly iterate on custom tool definitions, then run them from either the CLI or browser without editing JSON manually.
+> Tip: use the Web UI to quickly iterate on custom Coding Agent definitions, then run them from either the CLI or browser without editing JSON manually.
 
 ## Advanced Workflows
 
@@ -191,7 +191,7 @@ For technical details, see [specs/SPEC-cff08403/](specs/SPEC-cff08403/).
 - **Node.js** (optional): Recommended >= 18.0.0 when working with Node-based tooling
 - **pnpm**: >= 8.0.0 (for CI/CD and Docker environments - uses hardlinked node_modules)
 - **Git**: Latest version with worktree support
-- **AI Tool**: At least one of Claude Code, Codex CLI, or Gemini CLI should be available
+- **Coding Agent**: At least one of Claude Code, Codex CLI, or Gemini CLI should be available
 - **GitHub CLI**: Required for PR cleanup features (optional)
 - **Python**: >= 3.11 (for Spec Kit CLI)
 - **uv**: Python package manager (for Spec Kit CLI)

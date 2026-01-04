@@ -13,8 +13,8 @@ Claude Code / Codex CLI / Gemini CLI 対応の対話型Gitワークツリーマ�
 - 🎯 **対話型ブランチ選択**: ブランチ種別・ワークツリー・変更状態アイコンに加え配置インジケータ枠（左=L, 右=R, リモートのみ=☁）で所在を示し、リモート名の `origin/` を省いたシンプルなリストで判別しやすく、現在の選択は `>` プレフィックスで強調されるため誤操作を防止
 - 🌟 **スマートブランチ作成**: ガイド付きプロンプトと自動ベースブランチ選択でfeature、bugfix、hotfix、releaseブランチを作成
 - 🔄 **高度なワークツリー管理**: 作成、クリーンアップ、パス最適化を含む完全なライフサイクル管理
-- 🤖 **AIツール選択**: 起動時の対話型ランチャーで Claude Code / Codex CLI / Gemini CLI を選択
-- 🚀 **AIツール統合**: 選択したツールをワークツリーで起動（Claude Codeは権限設定・変更処理の統合あり）
+- 🤖 **Coding Agent 選択**: 起動時の対話型ランチャーで Claude Code / Codex CLI / Gemini CLI を選択
+- 🚀 **Coding Agent 統合**: 選択したコーディングエージェントをワークツリーで起動（Claude Codeは権限設定・変更処理の統合あり）
 - 📊 **GitHub PR統合**: マージされたプルリクエストのブランチとワークツリーの自動クリーンアップ
 - 🛠️ **変更管理**: 開発セッション後のコミット、stash、破棄の内蔵サポート
 - 📦 **ユニバーサルパッケージ**: 一度インストールすれば全プロジェクトで一貫した動作
@@ -78,7 +78,7 @@ gwt -v
 3. **ワークツリー管理**: 既存ワークツリーの表示、オープン、削除
 4. **ブランチクリーンアップ**: マージ済みPRやベースブランチと差分がないブランチ／ワークツリーをローカルから自動削除
 
-## Web UI とカスタムAIツール
+## Web UI とカスタム Coding Agent
 
 ### Web UI の起動
 
@@ -95,22 +95,22 @@ bunx @akiojin/gwt serve
 - Web UI はデフォルトで <http://localhost:3000> で利用できます
 - システムトレイ常駐は現時点では **Windows のみ対応** です（macOS/Linux では自動で無効化されます）
 - ブランチ一覧/検索/Worktree作成など、CLIと同じ体験をブラウザで提供
-- ブランチ一覧カードの「AIツールを起動」ボタンでモーダルが開き、ツール/モード/引数/同期を選んで起動
+- ブランチ一覧カードの「Coding Agentを起動」ボタンでモーダルが開き、エージェント/モード/引数/同期を選んで起動
 - ブランチ詳細ページはセッションの状態確認専用（稼働中セッションのターミナルと履歴を表示）
 
-### カスタムAIツールの管理
+### カスタム Coding Agent の管理
 
 - ダッシュボード右上の **Config**（または `/config` URL）で `~/.gwt/tools.json` をGUI編集
 - 実行タイプ（path/bunx/command）、defaultArgs、modeArgs、permissionSkipArgs、envをまとめて設定
-- 変更内容はCLIと共有の `tools.json` に保存されるため、CLI/Webのどちらからでも同じツールを利用可能
+- 変更内容はCLIと共有の `tools.json` に保存されるため、CLI/Webのどちらからでも同じコーディングエージェントを利用可能
 - ブランチ一覧モーダルの起動フォームでは以下を指定できます:
-  - 起動するカスタムツール（ビルトインを含む）
+  - 起動するコーディングエージェント（ビルトインを含む）
   - `normal / continue / resume` モード
   - 追加引数（スペース区切り）
   - CLIと同等の `--dangerously-skip-permissions`（確認ダイアログ付き）
 - モーダルから直接 `git fetch --all` + `git pull --ff-only` を実行でき、CLIと同じ安全ガードで divergence を検出します。
 
-> JSON編集なしでカスタムツールを試せるため、Web UIでパラメータを調整しながらCLIにも即反映できます。
+> JSON編集なしでカスタムコーディングエージェントを試せるため、Web UIでパラメータを調整しながらCLIにも即反映できます。
 
 ## 高度なワークフロー
 
@@ -168,7 +168,7 @@ bunx @akiojin/gwt serve
 - **Node.js**（任意）: Nodeベースの開発ツール利用時は >= 18.0.0 を推奨
 - **pnpm**: >= 8.0.0（CI/CD・Docker環境用 - ハードリンクによるnode_modules効率化）
 - **Git**: ワークツリーサポート付き最新版
-- **AIツール**: 少なくともいずれかが必要（Claude Code、Codex CLI、または Gemini CLI）
+- **Coding Agent**: 少なくともいずれかが必要（Claude Code、Codex CLI、または Gemini CLI）
 - **GitHub CLI**: PR クリーンアップ機能に必要（オプション）
 - **Python**: >= 3.11（Spec Kit CLIに必要）
 - **uv**: Pythonパッケージマネージャー（Spec Kit CLIに必要）
