@@ -52,6 +52,22 @@ export async function loadCodingAgentsConfig(): Promise<CodingAgentsConfig> {
     const content = await readFile(TOOLS_CONFIG_PATH, "utf-8");
     const config = JSON.parse(content) as CodingAgentsConfig;
 
+    // マイグレーション: customTools → customCodingAgents (後方互換性)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const legacyConfig = config as any;
+    if (!config.customCodingAgents && legacyConfig.customTools) {
+      config.customCodingAgents = legacyConfig.customTools;
+      logger.warn(
+        { path: TOOLS_CONFIG_PATH },
+        "Migrating deprecated 'customTools' to 'customCodingAgents'",
+      );
+    }
+
+    // フォールバック: undefined/null → 空配列
+    if (!config.customCodingAgents) {
+      config.customCodingAgents = [];
+    }
+
     // 検証
     validateCodingAgentsConfig(config);
 
