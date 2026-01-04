@@ -43,6 +43,13 @@
 * update default Claude Code model to Opus 4.5 ([1dd909e](https://github.com/akiojin/gwt/commit/1dd909ed87a55ce3bb796deb0431d0027571dae2))
 * update Opus model version to 4.5 ([307faeb](https://github.com/akiojin/gwt/commit/307faeb66ebac0ca89b01c07ee19d213797c4d5c))
 
+## [4.9.1](https://github.com/akiojin/gwt/compare/v4.9.0...v4.9.1) (2026-01-04)
+
+
+### Bug Fixes
+
+* package.json の description を Coding Agent 対応に修正 ([#471](https://github.com/akiojin/gwt/issues/471)) ([f7de165](https://github.com/akiojin/gwt/commit/f7de165c41ed609b5eb6e2b7e1f01f1df415346f))
+
 ## [4.9.0](https://github.com/akiojin/gwt/compare/v4.8.0...v4.9.0) (2025-12-29)
 
 
