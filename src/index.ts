@@ -39,8 +39,8 @@ import {
   waitForUserAcknowledgement,
 } from "./utils/terminal.js";
 import { createLogger } from "./logging/logger.js";
-import { getToolById, getSharedEnvironment } from "./config/tools.js";
-import { launchCustomAITool } from "./launcher.js";
+import { getCodingAgentById, getSharedEnvironment } from "./config/tools.js";
+import { launchCodingAgent } from "./launcher.js";
 import { saveSession, loadSession } from "./config/index.js";
 import {
   findLatestCodexSession,
@@ -543,24 +543,24 @@ export async function handleAIToolWorkflow(
       );
     }
 
-    // Get tool definition and shared environment overrides
-    const [toolConfig, sharedEnv] = await Promise.all([
-      getToolById(tool),
+    // Get coding agent definition and shared environment overrides
+    const [agentConfig, sharedEnv] = await Promise.all([
+      getCodingAgentById(tool),
       getSharedEnvironment(),
     ]);
 
-    if (!toolConfig) {
-      throw new Error(`Tool not found: ${tool}`);
+    if (!agentConfig) {
+      throw new Error(`Coding agent not found: ${tool}`);
     }
 
-    // Save selection immediately (including history) so "last tool" is reflected
-    // even if the tool is interrupted or killed mid-run (e.g., Ctrl+C).
-    // FR-042: Record timestamp to session history immediately on tool start.
+    // Save selection immediately (including history) so "last agent" is reflected
+    // even if the agent is interrupted or killed mid-run (e.g., Ctrl+C).
+    // FR-042: Record timestamp to session history immediately on agent start.
     await saveSession({
       lastWorktreePath: worktreePath,
       lastBranch: branch,
       lastUsedTool: tool,
-      toolLabel: toolConfig.displayName ?? tool,
+      toolLabel: agentConfig.displayName ?? tool,
       mode,
       model: normalizedModel ?? null,
       reasoningLevel: inferenceLevel ?? null,
@@ -607,7 +607,7 @@ export async function handleAIToolWorkflow(
             lastWorktreePath: worktreePath,
             lastBranch: branch,
             lastUsedTool: tool,
-            toolLabel: toolConfig.displayName ?? tool,
+            toolLabel: agentConfig.displayName ?? tool,
             mode,
             model: normalizedModel ?? null,
             reasoningLevel: inferenceLevel ?? null,
@@ -622,9 +622,9 @@ export async function handleAIToolWorkflow(
       }
     }, SESSION_UPDATE_INTERVAL_MS);
 
-    // Launch selected AI tool
-    // Builtin tools use their dedicated launch functions
-    // Custom tools use the generic launchCustomAITool function
+    // Launch selected coding agent
+    // Builtin agents use their dedicated launch functions
+    // Custom agents use the generic launchCodingAgent function
     let launchResult: { sessionId?: string | null } | void;
     try {
       if (tool === "claude-code") {
@@ -701,9 +701,9 @@ export async function handleAIToolWorkflow(
         }
         launchResult = await launchGeminiCLI(worktreePath, launchOptions);
       } else {
-        // Custom tool
-        printInfo(`Launching custom tool: ${toolConfig.displayName}`);
-        launchResult = await launchCustomAITool(toolConfig, {
+        // Custom coding agent
+        printInfo(`Launching custom agent: ${agentConfig.displayName}`);
+        launchResult = await launchCodingAgent(agentConfig, {
           mode:
             mode === "resume"
               ? "resume"
@@ -786,7 +786,7 @@ export async function handleAIToolWorkflow(
       lastWorktreePath: worktreePath,
       lastBranch: branch,
       lastUsedTool: tool,
-      toolLabel: toolConfig.displayName ?? tool,
+      toolLabel: agentConfig.displayName ?? tool,
       mode,
       model: normalizedModel ?? null,
       reasoningLevel: inferenceLevel ?? null,

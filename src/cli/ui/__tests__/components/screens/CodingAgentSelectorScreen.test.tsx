@@ -4,12 +4,12 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, waitFor } from "@testing-library/react";
 import React from "react";
-import { AIToolSelectorScreen } from "../../../components/screens/AIToolSelectorScreen.js";
+import { CodingAgentSelectorScreen } from "../../../components/screens/CodingAgentSelectorScreen.js";
 import { Window } from "happy-dom";
 
-// Mock getAllTools
+// Mock getAllCodingAgents
 vi.mock("../../../config/tools.js", () => ({
-  getAllTools: vi.fn().mockResolvedValue([
+  getAllCodingAgents: vi.fn().mockResolvedValue([
     {
       id: "claude-code",
       displayName: "Claude Code",
@@ -23,7 +23,7 @@ vi.mock("../../../config/tools.js", () => ({
   ]),
 }));
 
-describe("AIToolSelectorScreen", () => {
+describe("CodingAgentSelectorScreen", () => {
   beforeEach(() => {
     // Setup happy-dom
     const window = new Window();
@@ -36,20 +36,20 @@ describe("AIToolSelectorScreen", () => {
     const onBack = vi.fn();
     const onSelect = vi.fn();
     const { getByText } = render(
-      <AIToolSelectorScreen onBack={onBack} onSelect={onSelect} />,
+      <CodingAgentSelectorScreen onBack={onBack} onSelect={onSelect} />,
     );
 
-    expect(getByText(/AI Tool Selection/i)).toBeDefined();
+    expect(getByText(/Coding Agent Selection/i)).toBeDefined();
   });
 
-  it("should render AI tool options", async () => {
+  it("should render Coding Agent options", async () => {
     const onBack = vi.fn();
     const onSelect = vi.fn();
     const { getByText } = render(
-      <AIToolSelectorScreen onBack={onBack} onSelect={onSelect} />,
+      <CodingAgentSelectorScreen onBack={onBack} onSelect={onSelect} />,
     );
 
-    // Wait for tools to load
+    // Wait for agents to load
     await waitFor(() => {
       expect(getByText(/Claude Code/i)).toBeDefined();
       expect(getByText(/Codex/i)).toBeDefined();
@@ -60,7 +60,7 @@ describe("AIToolSelectorScreen", () => {
     const onBack = vi.fn();
     const onSelect = vi.fn();
     const { getAllByText } = render(
-      <AIToolSelectorScreen onBack={onBack} onSelect={onSelect} />,
+      <CodingAgentSelectorScreen onBack={onBack} onSelect={onSelect} />,
     );
 
     expect(getAllByText(/enter/i).length).toBeGreaterThan(0);
@@ -74,7 +74,7 @@ describe("AIToolSelectorScreen", () => {
     const onBack = vi.fn();
     const onSelect = vi.fn();
     const { container } = render(
-      <AIToolSelectorScreen onBack={onBack} onSelect={onSelect} />,
+      <CodingAgentSelectorScreen onBack={onBack} onSelect={onSelect} />,
     );
 
     expect(container).toBeDefined();
@@ -86,32 +86,32 @@ describe("AIToolSelectorScreen", () => {
     const onBack = vi.fn();
     const onSelect = vi.fn();
     const { container } = render(
-      <AIToolSelectorScreen onBack={onBack} onSelect={onSelect} />,
+      <CodingAgentSelectorScreen onBack={onBack} onSelect={onSelect} />,
     );
 
     // Test will verify onBack is called when ESC is pressed
     expect(container).toBeDefined();
   });
 
-  it("should handle tool selection", () => {
+  it("should handle coding agent selection", () => {
     const onBack = vi.fn();
     const onSelect = vi.fn();
     const { container } = render(
-      <AIToolSelectorScreen onBack={onBack} onSelect={onSelect} />,
+      <CodingAgentSelectorScreen onBack={onBack} onSelect={onSelect} />,
     );
 
-    // Test will verify onSelect is called with correct tool
+    // Test will verify onSelect is called with correct agent
     expect(container).toBeDefined();
   });
 
-  it("should preselect the last used tool when provided", async () => {
+  it("should preselect the last used coding agent when provided", async () => {
     const onBack = vi.fn();
     const onSelect = vi.fn();
     const { container } = render(
-      <AIToolSelectorScreen
+      <CodingAgentSelectorScreen
         onBack={onBack}
         onSelect={onSelect}
-        initialToolId="codex-cli"
+        initialAgentId="codex-cli"
       />,
     );
 
@@ -125,49 +125,49 @@ describe("AIToolSelectorScreen", () => {
   });
 
   /**
-   * T210: カスタムツール表示のテスト
+   * T210: カスタムコーディングエージェント表示のテスト
    */
-  describe("Custom tool display", () => {
-    it("should load tools from getAllTools() dynamically", async () => {
+  describe("Custom coding agent display", () => {
+    it("should load coding agents from getAllCodingAgents() dynamically", async () => {
       // TODO: 実装後にテストを記述
-      // getAllTools()がモックされ、呼び出されることを確認
-      // モックの戻り値がツールアイテムとして表示されることを確認
+      // getAllCodingAgents()がモックされ、呼び出されることを確認
+      // モックの戻り値がエージェントアイテムとして表示されることを確認
       expect(true).toBe(true);
     });
 
-    it("should display both builtin and custom tools", async () => {
+    it("should display both builtin and custom coding agents", async () => {
       // TODO: 実装後にテストを記述
-      // getAllTools()がビルトインツール（claude-code, codex-cli）と
-      // カスタムツール（例: aider）を返す場合、
-      // すべてのツールが表示されることを確認
+      // getAllCodingAgents()がビルトインエージェント（claude-code, codex-cli）と
+      // カスタムエージェント（例: aider）を返す場合、
+      // すべてのエージェントが表示されることを確認
       expect(true).toBe(true);
     });
 
-    it("should display custom tool with icon if defined", async () => {
+    it("should display custom coding agent with icon if defined", async () => {
       // TODO: 実装後にテストを記述
-      // カスタムツールにiconフィールドがある場合、
+      // カスタムエージェントにiconフィールドがある場合、
       // それが表示されることを確認
       expect(true).toBe(true);
     });
 
-    it("should display custom tool without icon if not defined", async () => {
+    it("should display custom coding agent without icon if not defined", async () => {
       // TODO: 実装後にテストを記述
-      // カスタムツールにiconフィールドがない場合、
-      // ツール名のみが表示されることを確認
+      // カスタムエージェントにiconフィールドがない場合、
+      // エージェント名のみが表示されることを確認
       expect(true).toBe(true);
     });
 
-    it("should handle custom tool selection", async () => {
+    it("should handle custom coding agent selection", async () => {
       // TODO: 実装後にテストを記述
-      // カスタムツールを選択した場合、
-      // onSelect()がカスタムツールのIDで呼び出されることを確認
+      // カスタムエージェントを選択した場合、
+      // onSelect()がカスタムエージェントのIDで呼び出されることを確認
       expect(true).toBe(true);
     });
 
-    it("should display only builtin tools if no custom tools exist", async () => {
+    it("should display only builtin coding agents if no custom agents exist", async () => {
       // TODO: 実装後にテストを記述
-      // getAllTools()がビルトインツールのみを返す場合、
-      // ビルトインツールのみが表示されることを確認
+      // getAllCodingAgents()がビルトインエージェントのみを返す場合、
+      // ビルトインエージェントのみが表示されることを確認
       expect(true).toBe(true);
     });
   });

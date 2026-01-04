@@ -1,13 +1,13 @@
 import { execa } from "execa";
 import { platform } from "os";
-import { getToolById } from "../config/tools.js";
+import { getCodingAgentById } from "../config/tools.js";
 import { CLAUDE_CODE_TOOL } from "../config/builtin-coding-agents.js";
 import {
   CODEX_DEFAULT_ARGS,
   CLAUDE_PERMISSION_SKIP_ARGS,
 } from "../shared/codingAgentConstants.js";
-import { prepareCustomToolExecution } from "./customToolResolver.js";
-import type { LaunchOptions } from "../types/tools.js";
+import { prepareCodingAgentExecution } from "./codingAgentCommandResolver.js";
+import type { CodingAgentLaunchOptions } from "../types/tools.js";
 import { createLogger } from "../logging/logger.js";
 
 const logger = createLogger({ category: "resolver" });
@@ -31,14 +31,14 @@ export interface ResolvedCommand {
   env?: NodeJS.ProcessEnv;
 }
 
-export class AIToolResolutionError extends Error {
+export class CodingAgentResolutionError extends Error {
   constructor(
     public code: ResolverErrorCode,
     message: string,
     public hints?: string[],
   ) {
     super(message);
-    this.name = "AIToolResolutionError";
+    this.name = "CodingAgentResolutionError";
   }
 }
 
@@ -78,7 +78,7 @@ async function ensureBunxAvailable(): Promise<void> {
     bunxCheckPromise = (async () => {
       const bunxExists = await commandExists("bunx");
       if (!bunxExists) {
-        throw new AIToolResolutionError(
+        throw new CodingAgentResolutionError(
           "BUNX_NOT_FOUND",
           "bunx command not found. Install Bun 1.0+ so bunx is available on PATH.",
           [
@@ -94,7 +94,7 @@ async function ensureBunxAvailable(): Promise<void> {
         logger.debug({ bunVersion: version }, "Bun version detected");
         const major = parseInt(version.split(".")[0] ?? "0", 10);
         if (!Number.isFinite(major) || major < MIN_BUN_MAJOR) {
-          throw new AIToolResolutionError(
+          throw new CodingAgentResolutionError(
             "BUN_TOO_OLD",
             `Detected Bun ${version}. Bun ${MIN_BUN_MAJOR}.0+ is required for bunx fallback execution.`,
             [
@@ -104,12 +104,12 @@ async function ensureBunxAvailable(): Promise<void> {
           );
         }
       } catch (error: unknown) {
-        if (error instanceof AIToolResolutionError) {
+        if (error instanceof CodingAgentResolutionError) {
           throw error;
         }
         const err = error as NodeJS.ErrnoException;
         if (err?.code === "ENOENT") {
-          throw new AIToolResolutionError(
+          throw new CodingAgentResolutionError(
             "BUNX_NOT_FOUND",
             "bun command not found while verifying bunx. Install Bun 1.0+ and ensure it is on PATH.",
             [
@@ -118,7 +118,7 @@ async function ensureBunxAvailable(): Promise<void> {
             ],
           );
         }
-        throw new AIToolResolutionError(
+        throw new CodingAgentResolutionError(
           "BUN_TOO_OLD",
           `Failed to verify Bun version: ${err?.message ?? "unknown error"}`,
         );
@@ -274,37 +274,37 @@ export async function resolveCodexCommand(
   };
 }
 
-export interface CustomToolCommandOptions extends LaunchOptions {
-  toolId: string;
+export interface CodingAgentCommandOptions extends CodingAgentLaunchOptions {
+  agentId: string;
 }
 
-export async function resolveCustomToolCommand(
-  options: CustomToolCommandOptions,
+export async function resolveCodingAgentCommand(
+  options: CodingAgentCommandOptions,
 ): Promise<ResolvedCommand> {
-  const tool = await getToolById(options.toolId);
-  if (!tool) {
-    logger.error({ toolId: options.toolId }, "Custom tool not found");
-    throw new AIToolResolutionError(
+  const agent = await getCodingAgentById(options.agentId);
+  if (!agent) {
+    logger.error({ agentId: options.agentId }, "Coding agent not found");
+    throw new CodingAgentResolutionError(
       "CUSTOM_TOOL_NOT_FOUND",
-      `Custom tool not found: ${options.toolId}`,
+      `Coding agent not found: ${options.agentId}`,
       [
         "Update ~/.gwt/tools.json to include this ID",
-        "Reload the Web UI after editing the tools list",
+        "Reload the Web UI after editing the agents list",
       ],
     );
   }
 
-  const execution = await prepareCustomToolExecution(tool, options);
+  const execution = await prepareCodingAgentExecution(agent, options);
 
   logger.info(
-    { toolId: options.toolId, command: execution.command },
-    "Custom tool command resolved",
+    { agentId: options.agentId, command: execution.command },
+    "Coding agent command resolved",
   );
 
   return {
     command: execution.command,
     args: execution.args,
-    usesFallback: tool.type === "bunx",
+    usesFallback: agent.type === "bunx",
     ...(execution.env ? { env: execution.env } : {}),
   };
 }
@@ -314,7 +314,7 @@ export async function isClaudeCodeAvailable(): Promise<boolean> {
     await resolveClaudeCommand();
     return true;
   } catch (error) {
-    if (error instanceof AIToolResolutionError) {
+    if (error instanceof CodingAgentResolutionError) {
       return false;
     }
     return false;
@@ -326,7 +326,7 @@ export async function isCodexAvailable(): Promise<boolean> {
     await resolveCodexCommand();
     return true;
   } catch (error) {
-    if (error instanceof AIToolResolutionError) {
+    if (error instanceof CodingAgentResolutionError) {
       return false;
     }
     return false;
