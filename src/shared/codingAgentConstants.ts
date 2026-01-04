@@ -1,5 +1,5 @@
 /**
- * Shared constants for AI tool integrations.
+ * Shared constants for Coding Agent integrations.
  *
  * These values are consumed by both the CLI (Node) runtime and the Web UI so
  * that command previews, permission flags, and default arguments stay in sync.
