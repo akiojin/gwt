@@ -85,3 +85,10 @@
 - `/release` コマンド（または `gh workflow run prepare-release.yml --ref develop`）で develop → main の Release PR を作成する。
 - Release PR が main にマージされると `.github/workflows/release.yml` が release-please でタグ・GitHub Release・Release PR を作成する。
 - `v*` タグの push をトリガーに `.github/workflows/publish.yml` が npm publish を実行する。
+
+## 使用中の技術
+- TypeScript 5.8 + Bun >= 1.0 + Ink.js (現行), React 19, @opentui/core, @opentui/solid, solid-js (SPEC-d27be71b)
+- ファイル/ローカル Git メタデータ（DB なし） (SPEC-d27be71b)
+
+## 最近の変更
+- SPEC-d27be71b: 追加: TypeScript 5.8 + Bun >= 1.0 + Ink.js (現行), React 19, @opentui/core, @opentui/solid, solid-js
