@@ -655,7 +655,7 @@ export function BranchListScreen(props: BranchListScreenProps) {
     const columns = listWidth();
 
     const indicatorInfo = props.cleanupUI?.indicators?.[branch.name];
-    let leadingIndicator = isSelected ? ">" : " ";
+    let leadingIndicator = "";
     if (indicatorInfo) {
       leadingIndicator = indicatorInfo.isSpinning
         ? (CLEANUP_SPINNER_FRAMES[0] ?? "⠋")
@@ -748,7 +748,9 @@ export function BranchListScreen(props: BranchListScreenProps) {
     }
 
     const segments: TextSegment[] = [];
-    appendSegment(segments, { text: leadingIndicator, fg: indicatorColor });
+    if (leadingIndicator) {
+      appendSegment(segments, { text: leadingIndicator, fg: indicatorColor });
+    }
     appendSegment(segments, { text: selectionIcon, fg: selectionColor });
     appendSegment(segments, { text: worktreeIcon, fg: worktreeColor });
     appendSegment(segments, { text: safeIcon, fg: safeColor });

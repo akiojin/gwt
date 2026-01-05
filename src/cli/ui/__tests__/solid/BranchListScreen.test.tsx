@@ -172,12 +172,12 @@ describe("Solid BranchListScreen", () => {
       await renderScreen(branches, { height: 12 });
 
     try {
-      expect(captureCharFrame()).toContain(">☑️⚪❌ main");
+      expect(captureCharFrame()).toContain("☑️⚪❌ main");
 
       mockInput.pressArrow("down");
       await renderOnce();
 
-      expect(captureCharFrame()).toContain(">☑️⚪❌ feature/login");
+      expect(captureCharFrame()).toContain("☑️⚪❌ feature/login");
 
       mockInput.pressEnter();
       await renderOnce();

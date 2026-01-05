@@ -491,8 +491,8 @@ export const BranchListScreen = React.memo(function BranchListScreen({
         }
         leadingIndicator = indicatorIcon;
       } else {
-        // Normal cursor
-        leadingIndicator = isSelected ? ">" : " ";
+        // Cursor indicator disabled
+        leadingIndicator = "";
       }
 
       const isChecked = selectedSet.has(item.name);
