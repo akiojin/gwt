@@ -300,9 +300,23 @@ async function mainSolidUI(): Promise<SelectionResult | undefined> {
   let selectionResult: SelectionResult | undefined;
   const mousePreference = process.env.GWT_UI_MOUSE?.trim().toLowerCase();
   const useMouse = mousePreference === "true" || mousePreference === "1";
+  const altScreenPreference =
+    process.env.GWT_UI_ALT_SCREEN?.trim().toLowerCase();
+  const useAlternateScreen =
+    altScreenPreference === undefined ||
+    altScreenPreference === "" ||
+    altScreenPreference === "true" ||
+    altScreenPreference === "1";
 
   if (typeof terminal.stdin.resume === "function") {
     terminal.stdin.resume();
+  }
+  if (typeof terminal.stdin.setRawMode === "function") {
+    try {
+      terminal.stdin.setRawMode(true);
+    } catch {
+      // Ignore raw mode errors and let OpenTUI handle setup.
+    }
   }
 
   try {
@@ -316,6 +330,7 @@ async function mainSolidUI(): Promise<SelectionResult | undefined> {
         stdin: terminal.stdin,
         stdout: terminal.stdout,
         exitOnCtrlC: true,
+        useAlternateScreen,
         useMouse,
         enableMouseMovement: useMouse,
       },
