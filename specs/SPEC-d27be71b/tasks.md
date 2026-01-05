@@ -70,7 +70,7 @@ Phase 8 (統合・仕上げ)
 
 ### 実装
 
-- [ ] **T203** [US1] T202の後に `src/cli/ui/screens/solid/BranchListScreen.tsx` を作成
+- [x] **T203** [US1] T202の後に `src/cli/ui/screens/solid/BranchListScreen.tsx` を作成
 - [ ] **T204** [US1] T203の後に 5000ブランチでの性能テストを実施（60fps / 16ms 目標）
 - [ ] **T205** [US1] T204の後に 既存 `src/cli/ui/screens/BranchListScreen.tsx` との機能パリティ確認
 - [ ] **T206** [US1] T205の後に Go/No-Go 判定（性能目標達成確認）
