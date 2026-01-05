@@ -36,6 +36,7 @@ import {
 } from "./worktree.js";
 import {
   getTerminalStreams,
+  resetTerminalModes,
   waitForUserAcknowledgement,
 } from "./utils/terminal.js";
 import { createLogger } from "./logging/logger.js";
@@ -283,6 +284,47 @@ async function mainInkUI(): Promise<SelectionResult | undefined> {
     terminal.stdin.removeAllListeners?.("keypress");
     terminal.stdin.removeAllListeners?.("readable");
     unmount();
+  }
+
+  return selectionResult;
+}
+
+/**
+ * Main function for OpenTUI UI
+ * Returns SelectionResult if user made selections, undefined if user quit
+ */
+async function mainSolidUI(): Promise<SelectionResult | undefined> {
+  const { renderSolidApp } = await import("./cli/ui/index.solid.js");
+  const terminal = getTerminalStreams();
+
+  let selectionResult: SelectionResult | undefined;
+
+  if (typeof terminal.stdin.resume === "function") {
+    terminal.stdin.resume();
+  }
+
+  try {
+    await renderSolidApp(
+      {
+        onExit: (result?: SelectionResult) => {
+          selectionResult = result;
+        },
+      },
+      {
+        stdin: terminal.stdin,
+        stdout: terminal.stdout,
+        exitOnCtrlC: true,
+      },
+    );
+  } finally {
+    terminal.exitRawMode();
+    resetTerminalModes(terminal.stdout);
+    if (typeof terminal.stdin.pause === "function") {
+      terminal.stdin.pause();
+    }
+    terminal.stdin.removeAllListeners?.("data");
+    terminal.stdin.removeAllListeners?.("keypress");
+    terminal.stdin.removeAllListeners?.("readable");
   }
 
   return selectionResult;
@@ -851,6 +893,17 @@ export async function handleAIToolWorkflow(
 type UIHandler = () => Promise<SelectionResult | undefined>;
 type WorkflowHandler = (selection: SelectionResult) => Promise<void>;
 
+function resolveUIHandler(): UIHandler {
+  const preference = process.env.GWT_UI?.trim().toLowerCase();
+  if (preference === "ink") {
+    return mainInkUI;
+  }
+  if (preference === "solid" || preference === "opentui") {
+    return mainSolidUI;
+  }
+  return mainSolidUI;
+}
+
 function logLoopError(error: unknown, context: "ui" | "workflow"): void {
   const label = context === "ui" ? "UI" : "workflow";
   if (error instanceof Error) {
@@ -861,7 +914,7 @@ function logLoopError(error: unknown, context: "ui" | "workflow"): void {
 }
 
 export async function runInteractiveLoop(
-  uiHandler: UIHandler = mainInkUI,
+  uiHandler: UIHandler = resolveUIHandler(),
   workflowHandler: WorkflowHandler = handleAIToolWorkflow,
 ): Promise<void> {
   // Main loop: UI → AI Tool → back to UI

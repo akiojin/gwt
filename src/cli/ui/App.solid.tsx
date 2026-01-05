@@ -1,52 +1,79 @@
 /** @jsxImportSource @opentui/solid */
-import { createEffect, createMemo, createSignal } from "solid-js";
-import type { BranchItem, Statistics } from "./types.js";
+import { useRenderer } from "@opentui/solid";
+import {
+  createEffect,
+  createMemo,
+  createSignal,
+  onCleanup,
+  onMount,
+} from "solid-js";
+import type {
+  BranchItem,
+  CodingAgentId,
+  InferenceLevel,
+  SelectedBranchState,
+  Statistics,
+  WorktreeInfo,
+} from "./types.js";
 import type { ToolStatus } from "./hooks/useToolStatus.js";
 import type { FormattedLogEntry } from "../../logging/formatter.js";
-import { calculateStatistics } from "./utils/statisticsCalculator.js";
 import { BranchListScreen } from "./screens/solid/BranchListScreen.js";
-import { LogScreen } from "./screens/solid/LogScreen.js";
-import { LogDetailScreen } from "./screens/solid/LogDetailScreen.js";
 import {
   SelectorScreen,
   type SelectorItem,
 } from "./screens/solid/SelectorScreen.js";
-import {
-  EnvironmentScreen,
-  type EnvironmentVariable,
-} from "./screens/solid/EnvironmentScreen.js";
-import {
-  ProfileScreen,
-  type ProfileItem,
-} from "./screens/solid/ProfileScreen.js";
-import {
-  SettingsScreen,
-  type SettingsItem,
-} from "./screens/solid/SettingsScreen.js";
-import { WorktreeCreateScreen } from "./screens/solid/WorktreeCreateScreen.js";
-import { WorktreeDeleteScreen } from "./screens/solid/WorktreeDeleteScreen.js";
-import { LoadingIndicatorScreen } from "./screens/solid/LoadingIndicator.js";
-import { ConfirmScreen } from "./screens/solid/ConfirmScreen.js";
-import { InputScreen } from "./screens/solid/InputScreen.js";
+import { LogScreen } from "./screens/solid/LogScreen.js";
+import { LogDetailScreen } from "./screens/solid/LogDetailScreen.js";
 import { ErrorScreen } from "./screens/solid/ErrorScreen.js";
+import { LoadingIndicatorScreen } from "./screens/solid/LoadingIndicator.js";
+import { calculateStatistics } from "./utils/statisticsCalculator.js";
+import { formatBranchItems } from "./utils/branchFormatter.js";
+import {
+  getDefaultInferenceForModel,
+  getDefaultModelOption,
+  normalizeModelId,
+} from "./utils/modelOptions.js";
+import { getAllBranches, getRepositoryRoot } from "../../git.js";
+import { listAdditionalWorktrees } from "../../worktree.js";
+import { detectAllToolStatuses } from "../../utils/command.js";
+import { getAllCodingAgents } from "../../config/tools.js";
+import {
+  buildLogFilePath,
+  getTodayLogDate,
+  readLogFileLines,
+  resolveLogDir,
+} from "../../logging/reader.js";
+import { parseLogLines } from "../../logging/formatter.js";
+import { copyToClipboard } from "./utils/clipboard.js";
+import { getPackageVersion } from "../../utils.js";
+
+export type ExecutionMode = "normal" | "continue" | "resume";
+
+export interface SelectionResult {
+  branch: string;
+  displayName: string;
+  branchType: "local" | "remote";
+  remoteBranch?: string;
+  tool: CodingAgentId;
+  mode: ExecutionMode;
+  skipPermissions: boolean;
+  model?: string | null;
+  inferenceLevel?: InferenceLevel;
+  sessionId?: string | null;
+}
 
 export type AppScreen =
   | "branch-list"
+  | "tool-select"
+  | "mode-select"
+  | "skip-permissions"
   | "log-list"
   | "log-detail"
-  | "environment"
-  | "profiles"
-  | "settings"
-  | "selector"
-  | "worktree-create"
-  | "worktree-delete"
   | "loading"
-  | "confirm"
-  | "input"
   | "error";
 
 export interface AppSolidProps {
-  onExit?: () => void;
+  onExit?: (result?: SelectionResult) => void;
   loadingIndicatorDelay?: number;
   initialScreen?: AppScreen;
   version?: string | null;
@@ -54,72 +81,94 @@ export interface AppSolidProps {
   branches?: BranchItem[];
   stats?: Statistics;
   toolStatuses?: ToolStatus[];
-  logEntries?: FormattedLogEntry[];
-  logSelectedDate?: string | null;
-  environmentVariables?: EnvironmentVariable[];
-  profiles?: ProfileItem[];
-  settings?: SettingsItem[];
-  selectorTitle?: string;
-  selectorDescription?: string;
-  selectorItems?: SelectorItem[];
-  worktreeBranchName?: string;
-  worktreeBaseBranch?: string;
-  worktreePath?: string | null;
-  confirmMessage?: string;
-  inputMessage?: string;
-  inputValue?: string;
-  errorMessage?: string;
 }
 
 const DEFAULT_SCREEN: AppScreen = "branch-list";
 
-const buildStats = (branches: BranchItem[]): Statistics => {
-  const changedBranches = new Set(
-    branches.filter((branch) => branch.hasChanges).map((branch) => branch.name),
-  );
-  return calculateStatistics(branches, changedBranches);
+const buildStats = (branches: BranchItem[]): Statistics =>
+  calculateStatistics(branches);
+
+const toLocalBranchName = (name: string): string => {
+  const segments = name.split("/");
+  if (segments.length <= 1) {
+    return name;
+  }
+  return segments.slice(1).join("/");
+};
+
+const toSelectedBranchState = (branch: BranchItem): SelectedBranchState => {
+  const isRemote = branch.type === "remote";
+  const baseName = isRemote ? toLocalBranchName(branch.name) : branch.name;
+  return {
+    name: baseName,
+    displayName: branch.name,
+    branchType: branch.type,
+    branchCategory: branch.branchType,
+    ...(isRemote ? { remoteBranch: branch.name } : {}),
+  };
 };
 
 export function AppSolid(props: AppSolidProps) {
+  const renderer = useRenderer();
+  let hasExited = false;
+
+  const exitApp = (result?: SelectionResult) => {
+    if (hasExited) return;
+    hasExited = true;
+    props.onExit?.(result);
+    renderer.destroy();
+  };
+
   const [currentScreen, setCurrentScreen] = createSignal<AppScreen>(
     props.initialScreen ?? DEFAULT_SCREEN,
   );
   const [screenStack, setScreenStack] = createSignal<AppScreen[]>([]);
-  const [selectedLogEntry, setSelectedLogEntry] =
+
+  const [branchItems, setBranchItems] = createSignal<BranchItem[]>(
+    props.branches ?? [],
+  );
+  const [stats, setStats] = createSignal<Statistics>(
+    props.stats ?? buildStats(props.branches ?? []),
+  );
+  const [loading, setLoading] = createSignal(!props.branches);
+  const [error, setError] = createSignal<Error | null>(null);
+
+  const [toolItems, setToolItems] = createSignal<SelectorItem[]>([]);
+  const [toolError, setToolError] = createSignal<Error | null>(null);
+  const [toolStatuses, setToolStatuses] = createSignal<ToolStatus[]>(
+    props.toolStatuses ?? [],
+  );
+
+  const [version, setVersion] = createSignal<string | null>(
+    props.version ?? null,
+  );
+
+  const workingDirectory = createMemo(
+    () => props.workingDirectory ?? process.cwd(),
+  );
+
+  const [selectedBranch, setSelectedBranch] =
+    createSignal<SelectedBranchState | null>(null);
+  const [selectedTool, setSelectedTool] = createSignal<CodingAgentId | null>(
+    null,
+  );
+  const [selectedMode, setSelectedMode] = createSignal<ExecutionMode>("normal");
+
+  const [logEntries, setLogEntries] = createSignal<FormattedLogEntry[]>([]);
+  const [logLoading, setLogLoading] = createSignal(false);
+  const [logError, setLogError] = createSignal<string | null>(null);
+  const [logSelectedEntry, setLogSelectedEntry] =
     createSignal<FormattedLogEntry | null>(null);
-  const [worktreeBranchName, setWorktreeBranchName] = createSignal(
-    props.worktreeBranchName ?? "",
+  const [logSelectedDate, _setLogSelectedDate] = createSignal<string | null>(
+    getTodayLogDate(),
   );
-  const [inputValue, setInputValue] = createSignal(props.inputValue ?? "");
+  const [logNotification, setLogNotification] = createSignal<{
+    message: string;
+    tone: "success" | "error";
+  } | null>(null);
 
-  createEffect(() => {
-    if (props.initialScreen) {
-      setScreenStack([]);
-      setCurrentScreen(props.initialScreen);
-    }
-  });
-
-  createEffect(() => {
-    if (props.worktreeBranchName !== undefined) {
-      setWorktreeBranchName(props.worktreeBranchName);
-    }
-  });
-
-  createEffect(() => {
-    if (props.inputValue !== undefined) {
-      setInputValue(props.inputValue);
-    }
-  });
-
-  const branches = createMemo(() => props.branches ?? []);
-  const stats = createMemo(() => props.stats ?? buildStats(branches()));
-  const logEntries = createMemo(() => props.logEntries ?? []);
-  const selectorItems = createMemo(() => props.selectorItems ?? []);
-  const environmentVariables = createMemo(
-    () => props.environmentVariables ?? [],
-  );
-  const profiles = createMemo(() => props.profiles ?? []);
-  const settings = createMemo(() => props.settings ?? []);
+  const logDir = createMemo(() => resolveLogDir(workingDirectory()));
+  let logNotificationTimer: ReturnType<typeof setTimeout> | null = null;
 
   const navigateTo = (screen: AppScreen) => {
     setScreenStack((prev) => [...prev, currentScreen()]);
@@ -136,29 +185,253 @@ export function AppSolid(props: AppSolidProps) {
     setCurrentScreen(previous);
   };
 
+  const showLogNotification = (message: string, tone: "success" | "error") => {
+    setLogNotification({ message, tone });
+    if (logNotificationTimer) {
+      clearTimeout(logNotificationTimer);
+    }
+    logNotificationTimer = setTimeout(() => {
+      setLogNotification(null);
+    }, 2000);
+  };
+
+  const loadLogEntries = async (date: string | null) => {
+    const targetDate = date ?? getTodayLogDate();
+    setLogLoading(true);
+    setLogError(null);
+    try {
+      const filePath = buildLogFilePath(logDir(), targetDate);
+      const lines = await readLogFileLines(filePath);
+      const parsed = parseLogLines(lines, { limit: 100 });
+      setLogEntries(parsed);
+    } catch (err) {
+      setLogEntries([]);
+      setLogError(err instanceof Error ? err.message : "Failed to load logs");
+    } finally {
+      setLogLoading(false);
+    }
+  };
+
+  const refreshBranches = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const repoRoot = await getRepositoryRoot();
+      const [branches, worktrees] = await Promise.all([
+        getAllBranches(repoRoot),
+        listAdditionalWorktrees(),
+      ]);
+
+      const localBranchNames = new Set(
+        branches.filter((branch) => branch.type === "local").map((b) => b.name),
+      );
+
+      const filtered = branches.filter((branch) => {
+        if (branch.type === "remote") {
+          const remoteName = branch.name.replace(/^origin\//, "");
+          return !localBranchNames.has(remoteName);
+        }
+        return true;
+      });
+
+      const worktreeMap = new Map<string, WorktreeInfo>();
+      for (const worktree of worktrees) {
+        worktreeMap.set(worktree.branch, {
+          path: worktree.path,
+          locked: false,
+          prunable: worktree.isAccessible === false,
+          isAccessible: worktree.isAccessible ?? true,
+          ...(worktree.hasUncommittedChanges !== undefined
+            ? { hasUncommittedChanges: worktree.hasUncommittedChanges }
+            : {}),
+        });
+      }
+
+      const enriched = filtered.map((branch) => ({
+        ...branch,
+        ...(branch.type === "local" && worktreeMap.has(branch.name)
+          ? { worktree: worktreeMap.get(branch.name) }
+          : {}),
+      }));
+
+      const items = formatBranchItems(enriched, worktreeMap);
+      setBranchItems(items);
+      setStats(buildStats(items));
+    } catch (err) {
+      setError(err instanceof Error ? err : new Error(String(err)));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  createEffect(() => {
+    if (props.branches) {
+      setBranchItems(props.branches);
+      setStats(props.stats ?? buildStats(props.branches));
+      setLoading(false);
+    }
+  });
+
+  onMount(() => {
+    if (!props.branches) {
+      void refreshBranches();
+    }
+  });
+
+  onMount(() => {
+    if (props.version === undefined) {
+      void getPackageVersion()
+        .then((value) => setVersion(value ?? null))
+        .catch(() => setVersion(null));
+    }
+  });
+
+  onMount(() => {
+    if (!props.toolStatuses) {
+      void detectAllToolStatuses()
+        .then((statuses) => setToolStatuses(statuses))
+        .catch(() => setToolStatuses([]));
+    }
+  });
+
+  onMount(() => {
+    void getAllCodingAgents()
+      .then((agents) => {
+        setToolItems(
+          agents.map((agent) => ({
+            label: agent.displayName,
+            value: agent.id,
+          })),
+        );
+      })
+      .catch((err) => {
+        setToolItems([]);
+        setToolError(err instanceof Error ? err : new Error(String(err)));
+      });
+  });
+
+  createEffect(() => {
+    if (currentScreen() === "log-list") {
+      void loadLogEntries(logSelectedDate());
+    }
+  });
+
+  onCleanup(() => {
+    if (logNotificationTimer) {
+      clearTimeout(logNotificationTimer);
+    }
+  });
+
+  const handleBranchSelect = (branch: BranchItem) => {
+    setSelectedBranch(toSelectedBranchState(branch));
+    setSelectedTool(null);
+    setSelectedMode("normal");
+    navigateTo("tool-select");
+  };
+
+  const handleToolSelect = (item: SelectorItem) => {
+    setSelectedTool(item.value as CodingAgentId);
+    navigateTo("mode-select");
+  };
+
+  const handleModeSelect = (item: SelectorItem) => {
+    setSelectedMode(item.value as ExecutionMode);
+    navigateTo("skip-permissions");
+  };
+
+  const finalizeSelection = (skipPermissions: boolean) => {
+    const branch = selectedBranch();
+    const tool = selectedTool();
+    if (!branch || !tool) {
+      return;
+    }
+
+    const defaultModel = getDefaultModelOption(tool);
+    const resolvedModel = defaultModel?.id ?? null;
+    const normalizedModel = normalizeModelId(tool, resolvedModel);
+    const resolvedInference = getDefaultInferenceForModel(defaultModel);
+    exitApp({
+      branch: branch.name,
+      displayName: branch.displayName,
+      branchType: branch.branchType,
+      ...(branch.remoteBranch ? { remoteBranch: branch.remoteBranch } : {}),
+      tool,
+      mode: selectedMode(),
+      skipPermissions,
+      ...(normalizedModel !== undefined ? { model: normalizedModel } : {}),
+      ...(resolvedInference !== undefined
+        ? { inferenceLevel: resolvedInference }
+        : {}),
+    });
+  };
+
   const renderCurrentScreen = () => {
     const screen = currentScreen();
+
     if (screen === "branch-list") {
       return (
         <BranchListScreen
-          branches={branches()}
+          branches={branchItems()}
           stats={stats()}
-          onSelect={() => {
-            props.onExit?.();
-          }}
-          onQuit={props.onExit}
-          onOpenLogs={() => navigateTo("log-list")}
-          onOpenProfiles={() => navigateTo("profiles")}
-          onRefresh={() => {
-            // no-op placeholder
-          }}
-          loading={false}
-          error={null}
+          onSelect={handleBranchSelect}
+          onQuit={() => exitApp(undefined)}
+          onRefresh={refreshBranches}
+          loading={loading()}
+          error={error()}
           loadingIndicatorDelay={props.loadingIndicatorDelay}
-          version={props.version}
-          workingDirectory={props.workingDirectory}
-          activeProfile={profiles().find((profile) => profile.isActive)?.name}
-          toolStatuses={props.toolStatuses}
+          version={version()}
+          workingDirectory={workingDirectory()}
+          toolStatuses={toolStatuses()}
+          onOpenLogs={() => navigateTo("log-list")}
+        />
+      );
+    }
+
+    if (screen === "tool-select") {
+      if (toolError()) {
+        return (
+          <ErrorScreen
+            error={toolError() as Error}
+            onBack={goBack}
+            hint="Unable to load available tools."
+          />
+        );
+      }
+      return (
+        <SelectorScreen
+          title="Select tool"
+          items={toolItems()}
+          onSelect={handleToolSelect}
+          onBack={goBack}
+        />
+      );
+    }
+
+    if (screen === "mode-select") {
+      return (
+        <SelectorScreen
+          title="Execution mode"
+          items={[
+            { label: "Normal", value: "normal" },
+            { label: "Continue", value: "continue" },
+            { label: "Resume", value: "resume" },
+          ]}
+          onSelect={handleModeSelect}
+          onBack={goBack}
+        />
+      );
+    }
+
+    if (screen === "skip-permissions") {
+      return (
+        <SelectorScreen
+          title="Skip permission prompts?"
+          items={[
+            { label: "Yes", value: "true" },
+            { label: "No", value: "false" },
+          ]}
+          onSelect={(item) => finalizeSelection(item.value === "true")}
+          onBack={goBack}
         />
       );
     }
@@ -167,16 +440,24 @@ export function AppSolid(props: AppSolidProps) {
       return (
         <LogScreen
           entries={logEntries()}
+          loading={logLoading()}
+          error={logError()}
           onBack={goBack}
           onSelect={(entry) => {
-            setSelectedLogEntry(entry);
+            setLogSelectedEntry(entry);
             navigateTo("log-detail");
           }}
-          onCopy={() => {
-            // no-op placeholder
+          onCopy={async (entry) => {
+            try {
+              await copyToClipboard(entry.json);
+              showLogNotification("Copied to clipboard.", "success");
+            } catch {
+              showLogNotification("Failed to copy to clipboard.", "error");
+            }
           }}
-          selectedDate={props.logSelectedDate ?? null}
-          version={props.version}
+          notification={logNotification()}
+          version={version()}
+          selectedDate={logSelectedDate()}
         />
       );
     }
@@ -184,79 +465,18 @@ export function AppSolid(props: AppSolidProps) {
     if (screen === "log-detail") {
       return (
         <LogDetailScreen
-          entry={selectedLogEntry()}
+          entry={logSelectedEntry()}
           onBack={goBack}
-          onCopy={() => {
-            // no-op placeholder
+          onCopy={async (entry) => {
+            try {
+              await copyToClipboard(entry.json);
+              showLogNotification("Copied to clipboard.", "success");
+            } catch {
+              showLogNotification("Failed to copy to clipboard.", "error");
+            }
           }}
-          version={props.version}
-        />
-      );
-    }
-
-    if (screen === "environment") {
-      return (
-        <EnvironmentScreen
-          variables={environmentVariables()}
-          onBack={goBack}
-          version={props.version}
-        />
-      );
-    }
-
-    if (screen === "profiles") {
-      return (
-        <ProfileScreen
-          profiles={profiles()}
-          onBack={goBack}
-          version={props.version}
-        />
-      );
-    }
-
-    if (screen === "settings") {
-      return (
-        <SettingsScreen
-          settings={settings()}
-          onBack={goBack}
-          version={props.version}
-        />
-      );
-    }
-
-    if (screen === "selector") {
-      return (
-        <SelectorScreen
-          title={props.selectorTitle ?? "Select item"}
-          description={props.selectorDescription}
-          items={selectorItems()}
-          onSelect={() => goBack()}
-          onBack={goBack}
-          version={props.version}
-        />
-      );
-    }
-
-    if (screen === "worktree-create") {
-      return (
-        <WorktreeCreateScreen
-          branchName={worktreeBranchName()}
-          baseBranch={props.worktreeBaseBranch}
-          onChange={setWorktreeBranchName}
-          onSubmit={() => goBack()}
-          onCancel={goBack}
-          version={props.version}
-        />
-      );
-    }
-
-    if (screen === "worktree-delete") {
-      return (
-        <WorktreeDeleteScreen
-          branchName={worktreeBranchName()}
-          worktreePath={props.worktreePath}
-          onConfirm={() => goBack()}
-          version={props.version}
+          notification={logNotification()}
+          version={version()}
         />
       );
     }
@@ -264,38 +484,17 @@ export function AppSolid(props: AppSolidProps) {
     if (screen === "loading") {
       return (
         <LoadingIndicatorScreen
-          message={props.inputMessage ?? "Loading..."}
+          message="Loading..."
           delay={props.loadingIndicatorDelay ?? 0}
         />
       );
     }
 
-    if (screen === "confirm") {
-      return (
-        <ConfirmScreen
-          message={props.confirmMessage ?? "Proceed?"}
-          onConfirm={() => goBack()}
-        />
-      );
-    }
-
-    if (screen === "input") {
-      return (
-        <InputScreen
-          message={props.inputMessage ?? "Enter value"}
-          value={inputValue()}
-          onChange={setInputValue}
-          onSubmit={() => goBack()}
-          label="Value"
-        />
-      );
-    }
-
     if (screen === "error") {
-      return <ErrorScreen error={props.errorMessage ?? "Unknown error"} />;
+      return <ErrorScreen error={error() ?? "Unknown error"} />;
     }
 
-    return <ErrorScreen error={`Unknown screen: ${screen}`} />;
+    return <ErrorScreen error={`Unknown screen: ${screen}`} onBack={goBack} />;
   };
 
   return <>{renderCurrentScreen()}</>;
