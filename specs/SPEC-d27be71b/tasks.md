@@ -134,10 +134,10 @@ Phase 8 (統合・仕上げ)
 
 ### 実装
 
-- [ ] **T405** [US3] T401の後に `src/cli/ui/screens/solid/LoadingIndicator.tsx` を作成
-- [ ] **T406** [US3] T402の後に `src/cli/ui/screens/solid/ConfirmScreen.tsx` を作成
-- [ ] **T407** [US3] T403の後に `src/cli/ui/screens/solid/InputScreen.tsx` を作成
-- [ ] **T408** [US3] T404の後に `src/cli/ui/screens/solid/ErrorScreen.tsx` を作成
+- [x] **T405** [US3] T401の後に `src/cli/ui/screens/solid/LoadingIndicator.tsx` を作成
+- [x] **T406** [US3] T402の後に `src/cli/ui/screens/solid/ConfirmScreen.tsx` を作成
+- [x] **T407** [US3] T403の後に `src/cli/ui/screens/solid/InputScreen.tsx` を作成
+- [x] **T408** [US3] T404の後に `src/cli/ui/screens/solid/ErrorScreen.tsx` を作成
 
 ### 統合
 
