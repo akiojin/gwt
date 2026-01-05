@@ -598,6 +598,7 @@ export function BranchListScreen(props: BranchListScreenProps) {
     }
 
     if (key.name === "n" || key.sequence === "n") {
+      key.preventDefault();
       const selected = filteredBranches()[selectedIndex()] ?? null;
       props.onCreateBranch?.(selected);
       return;
