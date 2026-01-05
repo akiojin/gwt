@@ -154,14 +154,14 @@ Phase 8 (統合・仕上げ)
 
 ### テスト（TDD 必須）
 
-- [ ] **T501** [P] [US4] `src/cli/ui/__tests__/solid/screens/LogScreen.test.tsx` にテスト作成
-- [ ] **T502** [P] [US4] `src/cli/ui/__tests__/solid/screens/LogDetailScreen.test.tsx` にテスト作成
-- [ ] **T503** [P] [US4] `src/cli/ui/__tests__/solid/screens/SelectorScreen.test.tsx` にテスト作成
-- [ ] **T504** [P] [US4] `src/cli/ui/__tests__/solid/screens/EnvironmentScreen.test.tsx` にテスト作成
-- [ ] **T505** [P] [US4] `src/cli/ui/__tests__/solid/screens/ProfileScreen.test.tsx` にテスト作成
-- [ ] **T506** [P] [US4] `src/cli/ui/__tests__/solid/screens/SettingsScreen.test.tsx` にテスト作成
-- [ ] **T507** [P] [US4] `src/cli/ui/__tests__/solid/screens/WorktreeCreateScreen.test.tsx` にテスト作成
-- [ ] **T508** [P] [US4] `src/cli/ui/__tests__/solid/screens/WorktreeDeleteScreen.test.tsx` にテスト作成
+- [x] **T501** [P] [US4] `src/cli/ui/__tests__/solid/screens/LogScreen.test.tsx` にテスト作成
+- [x] **T502** [P] [US4] `src/cli/ui/__tests__/solid/screens/LogDetailScreen.test.tsx` にテスト作成
+- [x] **T503** [P] [US4] `src/cli/ui/__tests__/solid/screens/SelectorScreen.test.tsx` にテスト作成
+- [x] **T504** [P] [US4] `src/cli/ui/__tests__/solid/screens/EnvironmentScreen.test.tsx` にテスト作成
+- [x] **T505** [P] [US4] `src/cli/ui/__tests__/solid/screens/ProfileScreen.test.tsx` にテスト作成
+- [x] **T506** [P] [US4] `src/cli/ui/__tests__/solid/screens/SettingsScreen.test.tsx` にテスト作成
+- [x] **T507** [P] [US4] `src/cli/ui/__tests__/solid/screens/WorktreeCreateScreen.test.tsx` にテスト作成
+- [x] **T508** [P] [US4] `src/cli/ui/__tests__/solid/screens/WorktreeDeleteScreen.test.tsx` にテスト作成
 
 ### 実装
 
