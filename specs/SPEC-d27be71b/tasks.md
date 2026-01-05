@@ -107,7 +107,7 @@ Phase 8 (統合・仕上げ)
 
 - [x] **T315** [P] [US2] `src/cli/ui/hooks/solid/useKeyHandler.ts` を作成
 - [x] **T316** [P] [US2] `src/cli/ui/hooks/solid/useScrollableList.ts` を作成
-- [ ] **T317** [P] [US2] `src/cli/ui/hooks/solid/useFilter.ts` を作成
+- [x] **T317** [P] [US2] `src/cli/ui/hooks/solid/useFilter.ts` を作成
 - [ ] **T318** [P] [US2] `src/cli/ui/hooks/solid/useSelection.ts` を作成
 - [ ] **T319** [P] [US2] `src/cli/ui/hooks/solid/useTerminalSize.ts` を作成
 - [ ] **T320** [P] [US2] `src/cli/ui/hooks/solid/useAsyncOperation.ts` を作成
