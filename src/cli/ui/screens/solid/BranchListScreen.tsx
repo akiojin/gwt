@@ -129,6 +129,105 @@ const padLine = (value: string, width: number): string => {
   return line + " ".repeat(padding);
 };
 
+interface TextSegment {
+  text: string;
+  fg?: string;
+  bg?: string;
+  attributes?: number;
+}
+
+const segmentStyleKey = (segment: TextSegment): string =>
+  `${segment.fg ?? ""}|${segment.bg ?? ""}|${segment.attributes ?? ""}`;
+
+const appendSegment = (segments: TextSegment[], segment: TextSegment) => {
+  if (!segment.text) {
+    return;
+  }
+  const last = segments[segments.length - 1];
+  if (last && segmentStyleKey(last) === segmentStyleKey(segment)) {
+    last.text += segment.text;
+    return;
+  }
+  segments.push({ ...segment });
+};
+
+const measureSegmentsWidth = (segments: TextSegment[]): number =>
+  segments.reduce(
+    (total, segment) => total + measureDisplayWidth(segment.text),
+    0,
+  );
+
+const truncateSegmentsToWidth = (
+  segments: TextSegment[],
+  maxWidth: number,
+): TextSegment[] => {
+  if (maxWidth <= 0) {
+    return [];
+  }
+  const ellipsis = "…";
+  const ellipsisWidth = measureDisplayWidth(ellipsis);
+  if (ellipsisWidth >= maxWidth) {
+    return [{ text: ellipsis }];
+  }
+
+  const targetWidth = maxWidth - ellipsisWidth;
+  const result: TextSegment[] = [];
+  let currentWidth = 0;
+  let truncated = false;
+
+  for (const segment of segments) {
+    for (const char of Array.from(segment.text)) {
+      const charWidth = getCharWidth(char);
+      if (currentWidth + charWidth > targetWidth) {
+        truncated = true;
+        break;
+      }
+      appendSegment(result, {
+        text: char,
+        fg: segment.fg,
+        bg: segment.bg,
+        attributes: segment.attributes,
+      });
+      currentWidth += charWidth;
+    }
+    if (truncated) {
+      break;
+    }
+  }
+
+  appendSegment(result, { text: ellipsis });
+  return result;
+};
+
+const fitSegmentsToWidth = (
+  segments: TextSegment[],
+  width: number,
+): TextSegment[] => {
+  const totalWidth = measureSegmentsWidth(segments);
+  if (totalWidth === width) {
+    return segments;
+  }
+  if (totalWidth > width) {
+    return truncateSegmentsToWidth(segments, width);
+  }
+  const padding = " ".repeat(Math.max(0, width - totalWidth));
+  if (padding) {
+    return [...segments, { text: padding }];
+  }
+  return segments;
+};
+
+const applySelectionStyle = (segments: TextSegment[]): TextSegment[] =>
+  segments.map((segment) => ({
+    text: segment.text,
+    fg: "black",
+    bg: "cyan",
+  }));
+
+const CLEANUP_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
+
+const CURSOR_FRAMES = ["▌", " "];
+
 const formatRelativeTime = (date: Date): string => {
   const now = new Date();
   const diffMs = now.getTime() - date.getTime();
@@ -155,6 +254,24 @@ const formatViewModeLabel = (mode: BranchViewMode): string => {
       return "Local";
     case "remote":
       return "Remote";
+  }
+};
+
+const getToolColor = (label: string, toolId?: string | null): string => {
+  switch (toolId) {
+    case "claude-code":
+      return "yellow";
+    case "codex-cli":
+      return "cyan";
+    case "gemini-cli":
+      return "magenta";
+    default: {
+      const trimmed = label.trim().toLowerCase();
+      if (!toolId || trimmed === "unknown") {
+        return "gray";
+      }
+      return "white";
+    }
   }
 };
 
@@ -226,6 +343,8 @@ export function BranchListScreen(props: BranchListScreenProps) {
   const [viewMode, setViewMode] = createSignal<BranchViewMode>("all");
   const [selectedIndex, setSelectedIndex] = createSignal(0);
   const [scrollOffset, setScrollOffset] = createSignal(0);
+  const [cleanupSpinnerIndex, setCleanupSpinnerIndex] = createSignal(0);
+  const [cursorIndex, setCursorIndex] = createSignal(0);
 
   const layoutWidth = createMemo(() => Math.max(20, terminal().width || 80));
   const listWidth = createMemo(() => Math.max(20, layoutWidth() - 1));
@@ -267,6 +386,48 @@ export function BranchListScreen(props: BranchListScreenProps) {
   });
 
   const selectedSet = createMemo(() => new Set(props.selectedBranches ?? []));
+
+  const hasSpinningIndicator = createMemo(() => {
+    if (!props.cleanupUI?.indicators) {
+      return false;
+    }
+    return Object.values(props.cleanupUI.indicators).some(
+      (indicator) => indicator.isSpinning,
+    );
+  });
+
+  const hasSpinningFooter = createMemo(
+    () => props.cleanupUI?.footerMessage?.isSpinning ?? false,
+  );
+
+  const cleanupSpinnerActive = createMemo(
+    () => hasSpinningIndicator() || hasSpinningFooter(),
+  );
+
+  createEffect(() => {
+    let intervalTimer: ReturnType<typeof setInterval> | undefined;
+    if (cleanupSpinnerActive()) {
+      intervalTimer = setInterval(() => {
+        setCleanupSpinnerIndex(
+          (current) => (current + 1) % CLEANUP_SPINNER_FRAMES.length,
+        );
+      }, 120);
+    } else {
+      setCleanupSpinnerIndex(0);
+    }
+    return () => {
+      if (intervalTimer) {
+        clearInterval(intervalTimer);
+      }
+    };
+  });
+
+  const cleanupSpinnerFrame = createMemo(() =>
+    cleanupSpinnerActive()
+      ? (CLEANUP_SPINNER_FRAMES[cleanupSpinnerIndex()] ??
+        CLEANUP_SPINNER_FRAMES[0])
+      : null,
+  );
 
   const filteredBranches = createMemo(() => {
     let result = props.branches;
@@ -335,6 +496,26 @@ export function BranchListScreen(props: BranchListScreenProps) {
       return Math.min(Math.max(0, next), maxOffset);
     });
   });
+
+  createEffect(() => {
+    let intervalTimer: ReturnType<typeof setInterval> | undefined;
+    if (filterMode()) {
+      intervalTimer = setInterval(() => {
+        setCursorIndex((current) => (current + 1) % CURSOR_FRAMES.length);
+      }, 500);
+    } else {
+      setCursorIndex(0);
+    }
+    return () => {
+      if (intervalTimer) {
+        clearInterval(intervalTimer);
+      }
+    };
+  });
+
+  const cursorFrame = createMemo(() =>
+    filterMode() ? (CURSOR_FRAMES[cursorIndex()] ?? CURSOR_FRAMES[0]) : "",
+  );
 
   const formatLatestCommit = (timestamp?: number) => {
     if (!timestamp || Number.isNaN(timestamp)) {
@@ -469,20 +650,29 @@ export function BranchListScreen(props: BranchListScreenProps) {
     const indicatorInfo = props.cleanupUI?.indicators?.[branch.name];
     let leadingIndicator = isSelected ? ">" : " ";
     if (indicatorInfo) {
-      leadingIndicator = indicatorInfo.isSpinning ? "⠋" : indicatorInfo.icon;
+      leadingIndicator = indicatorInfo.isSpinning
+        ? (CLEANUP_SPINNER_FRAMES[0] ?? "⠋")
+        : indicatorInfo.icon;
     }
+    const indicatorColor =
+      !isSelected && indicatorInfo?.color ? indicatorInfo.color : undefined;
 
     const isChecked = selectedSet().has(branch.name);
+    const isWarning = Boolean(branch.hasUnpushedCommits) || !branch.mergedPR;
     const selectionIcon = isChecked ? "[*]" : "[ ]";
+    const selectionColor = isChecked && isWarning ? "red" : undefined;
     let worktreeIcon = "⚪";
+    let worktreeColor: IndicatorColor | "gray" = "gray";
     if (branch.worktreeStatus === "active") {
       worktreeIcon = "🟢";
+      worktreeColor = "green";
     } else if (branch.worktreeStatus === "inaccessible") {
       worktreeIcon = "🔴";
+      worktreeColor = "red";
     }
     const safeIcon = branch.safeToCleanup === true ? "🛡" : "⚠";
-
-    const stateCluster = `${selectionIcon} ${worktreeIcon} ${safeIcon}`;
+    const safeColor: IndicatorColor =
+      branch.safeToCleanup === true ? "green" : "yellow";
 
     let commitText = "---";
     const latestActivitySec = getLatestActivityTimestamp(branch);
@@ -513,13 +703,14 @@ export function BranchListScreen(props: BranchListScreenProps) {
         : commitText.padStart(DATE_WIDTH, " ");
     const timestampText = `${paddedTool} | ${paddedDate}`;
     const timestampWidth = measureDisplayWidth(timestampText);
+    const toolColor = getToolColor(paddedTool, branch.lastToolUsage?.toolId);
 
     const displayLabel =
       branch.type === "remote" && branch.remoteName
         ? branch.remoteName
         : branch.name;
 
-    const staticPrefix = `${leadingIndicator} ${stateCluster} `;
+    const staticPrefix = `${leadingIndicator} ${selectionIcon} ${worktreeIcon} ${safeIcon} `;
     const staticPrefixWidth = measureDisplayWidth(staticPrefix);
     const maxLeftDisplayWidth = Math.max(0, columns - timestampWidth - 1);
     const maxLabelWidth = Math.max(0, maxLeftDisplayWidth - staticPrefixWidth);
@@ -546,14 +737,26 @@ export function BranchListScreen(props: BranchListScreenProps) {
         leftText = `${staticPrefix}${truncatedLabel}`;
         leftDisplayWidth = measureDisplayWidth(leftText);
         gapWidth = Math.max(1, columns - leftDisplayWidth - timestampWidth);
-        line = buildLine();
       }
     }
 
-    return {
-      line: padLine(line, columns),
-      isSelected,
-    };
+    const segments: TextSegment[] = [];
+    appendSegment(segments, { text: leadingIndicator, fg: indicatorColor });
+    appendSegment(segments, { text: " " });
+    appendSegment(segments, { text: selectionIcon, fg: selectionColor });
+    appendSegment(segments, { text: " " });
+    appendSegment(segments, { text: worktreeIcon, fg: worktreeColor });
+    appendSegment(segments, { text: " " });
+    appendSegment(segments, { text: safeIcon, fg: safeColor });
+    appendSegment(segments, { text: " " });
+    appendSegment(segments, { text: truncatedLabel });
+    appendSegment(segments, { text: " ".repeat(gapWidth) });
+    appendSegment(segments, { text: paddedTool, fg: toolColor });
+    appendSegment(segments, { text: " | " });
+    appendSegment(segments, { text: paddedDate });
+
+    const lineSegments = fitSegmentsToWidth(segments, columns);
+    return isSelected ? applySelectionStyle(lineSegments) : lineSegments;
   };
 
   const footerActions = [
@@ -566,52 +769,159 @@ export function BranchListScreen(props: BranchListScreenProps) {
     { key: "l", description: "Logs" },
   ];
 
-  const filterLine = createMemo(() => {
+  const filterLineSegments = createMemo(() => {
+    const segments: TextSegment[] = [];
     const query = filterQuery();
-    const display = filterMode()
-      ? query || "Type to search..."
-      : query || "(press f to filter)";
-    let line = `Filter: ${display}`;
-    if (query) {
-      line += ` (Showing ${filteredBranches().length} of ${props.branches.length})`;
+
+    appendSegment(segments, {
+      text: "Filter: ",
+      attributes: TextAttributes.DIM,
+    });
+    if (filterMode()) {
+      if (query) {
+        appendSegment(segments, { text: query });
+      } else {
+        appendSegment(segments, {
+          text: "Type to search...",
+          attributes: TextAttributes.DIM,
+        });
+      }
+      appendSegment(segments, { text: cursorFrame() });
+    } else {
+      appendSegment(segments, {
+        text: query || "(press f to filter)",
+        attributes: TextAttributes.DIM,
+      });
     }
-    return line;
+
+    if (query) {
+      appendSegment(segments, {
+        text: ` (Showing ${filteredBranches().length} of ${props.branches.length})`,
+        attributes: TextAttributes.DIM,
+      });
+    }
+
+    return fitSegmentsToWidth(segments, layoutWidth());
   });
 
-  const toolStatusLine = createMemo(() => {
-    if (!props.toolStatuses || props.toolStatuses.length === 0) {
+  const toolStatusSegments = createMemo(() => {
+    const toolStatuses = props.toolStatuses ?? [];
+    if (toolStatuses.length === 0) {
       return null;
     }
-    const parts = props.toolStatuses.map((tool) => {
+
+    const segments: TextSegment[] = [];
+    appendSegment(segments, {
+      text: "Tools: ",
+      attributes: TextAttributes.DIM,
+    });
+    toolStatuses.forEach((tool, index) => {
       const statusLabel =
         tool.status === "installed" && tool.version
           ? tool.version
           : tool.status;
-      return `${tool.name}: ${statusLabel}`;
+      appendSegment(segments, { text: `${tool.name}: ` });
+      appendSegment(segments, {
+        text: statusLabel,
+        fg: tool.status === "installed" ? "green" : "yellow",
+      });
+      if (index < toolStatuses.length - 1) {
+        appendSegment(segments, {
+          text: " | ",
+          attributes: TextAttributes.DIM,
+        });
+      }
     });
-    return `Tools: ${parts.join(" | ")}`;
+
+    return fitSegmentsToWidth(segments, layoutWidth());
   });
 
-  const statsLine = createMemo(() => {
-    const parts = [
-      `Mode: ${formatViewModeLabel(viewMode())}`,
-      `Local: ${props.stats.localCount}`,
-      `Remote: ${props.stats.remoteCount}`,
-      `Worktrees: ${props.stats.worktreeCount}`,
-      `Changes: ${props.stats.changesCount}`,
+  const statsSegments = createMemo(() => {
+    const segments: TextSegment[] = [];
+    const separator = "  ";
+
+    appendSegment(segments, { text: "Mode: ", attributes: TextAttributes.DIM });
+    appendSegment(segments, {
+      text: formatViewModeLabel(viewMode()),
+      fg: "white",
+      attributes: TextAttributes.BOLD,
+    });
+    appendSegment(segments, {
+      text: separator,
+      attributes: TextAttributes.DIM,
+    });
+
+    const statsItems = [
+      { label: "Local", value: props.stats.localCount, color: "cyan" },
+      { label: "Remote", value: props.stats.remoteCount, color: "green" },
+      { label: "Worktrees", value: props.stats.worktreeCount, color: "yellow" },
+      { label: "Changes", value: props.stats.changesCount, color: "magenta" },
     ];
+
+    statsItems.forEach((item, index) => {
+      appendSegment(segments, {
+        text: `${item.label}: `,
+        attributes: TextAttributes.DIM,
+      });
+      appendSegment(segments, {
+        text: String(item.value),
+        fg: item.color,
+        attributes: TextAttributes.BOLD,
+      });
+      if (index < statsItems.length - 1 || props.lastUpdated) {
+        appendSegment(segments, {
+          text: separator,
+          attributes: TextAttributes.DIM,
+        });
+      }
+    });
+
     if (props.lastUpdated) {
-      parts.push(`Updated: ${formatRelativeTime(props.lastUpdated)}`);
+      appendSegment(segments, {
+        text: "Updated: ",
+        attributes: TextAttributes.DIM,
+      });
+      appendSegment(segments, {
+        text: formatRelativeTime(props.lastUpdated),
+        fg: "gray",
+      });
     }
-    return parts.join("  ");
+
+    return fitSegmentsToWidth(segments, layoutWidth());
   });
 
-  const footerLine = createMemo(() => {
-    const parts = footerActions.map(
-      (action) => `[${action.key}] ${action.description}`,
-    );
-    return parts.join("  ");
+  const footerSegments = createMemo(() => {
+    const segments: TextSegment[] = [];
+    const separator = "  ";
+    footerActions.forEach((action, index) => {
+      appendSegment(segments, { text: "[", attributes: TextAttributes.DIM });
+      appendSegment(segments, {
+        text: action.key,
+        fg: "cyan",
+        attributes: TextAttributes.BOLD,
+      });
+      appendSegment(segments, { text: "]", attributes: TextAttributes.DIM });
+      appendSegment(segments, { text: ` ${action.description}` });
+      if (index < footerActions.length - 1) {
+        appendSegment(segments, {
+          text: separator,
+          attributes: TextAttributes.DIM,
+        });
+      }
+    });
+
+    return fitSegmentsToWidth(segments, layoutWidth());
   });
+
+  const renderSegmentLine = (segments: TextSegment[]) => (
+    <text>
+      {segments.map((segment) => (
+        <span fg={segment.fg} bg={segment.bg} attributes={segment.attributes}>
+          {segment.text}
+        </span>
+      ))}
+    </text>
+  );
 
   return (
     <box flexDirection="column" height={terminal().height || 24}>
@@ -632,19 +942,11 @@ export function BranchListScreen(props: BranchListScreenProps) {
         )}
       </box>
 
-      <text attributes={TextAttributes.DIM}>
-        {padLine(filterLine(), layoutWidth())}
-      </text>
+      {renderSegmentLine(filterLineSegments())}
 
-      {toolStatusLine() && (
-        <text attributes={TextAttributes.DIM}>
-          {padLine(toolStatusLine() ?? "", layoutWidth())}
-        </text>
-      )}
+      {toolStatusSegments() && renderSegmentLine(toolStatusSegments() ?? [])}
 
-      <text attributes={TextAttributes.DIM}>
-        {padLine(statsLine(), layoutWidth())}
-      </text>
+      {renderSegmentLine(statsSegments())}
 
       <box flexDirection="column" flexGrow={1}>
         <LoadingIndicator
@@ -655,9 +957,23 @@ export function BranchListScreen(props: BranchListScreenProps) {
         />
 
         {props.error && (
-          <text fg="red" attributes={TextAttributes.BOLD}>
-            {padLine(`Error: ${props.error.message}`, layoutWidth())}
-          </text>
+          <>
+            <text fg="red" attributes={TextAttributes.BOLD}>
+              {padLine(`Error: ${props.error.message}`, layoutWidth())}
+            </text>
+            {process.env.DEBUG && props.error.stack && (
+              <>
+                <text attributes={TextAttributes.DIM}>
+                  {padLine("", layoutWidth())}
+                </text>
+                {props.error.stack.split("\n").map((line) => (
+                  <text fg="gray" attributes={TextAttributes.DIM}>
+                    {padLine(line, layoutWidth())}
+                  </text>
+                ))}
+              </>
+            )}
+          </>
         )}
 
         {!props.loading && !props.error && props.branches.length === 0 && (
@@ -679,15 +995,8 @@ export function BranchListScreen(props: BranchListScreenProps) {
         {!props.loading && !props.error && filteredBranches().length > 0 && (
           <>
             {visibleBranches().map((branch, index) => {
-              const row = renderBranchLine(branch, index);
-              return (
-                <text
-                  fg={row.isSelected ? "black" : undefined}
-                  bg={row.isSelected ? "cyan" : undefined}
-                >
-                  {row.line}
-                </text>
-              );
+              const rowSegments = renderBranchLine(branch, index);
+              return renderSegmentLine(rowSegments);
             })}
             {Array.from({
               length: Math.max(0, contentHeight() - visibleBranches().length),
@@ -701,15 +1010,15 @@ export function BranchListScreen(props: BranchListScreenProps) {
       {props.cleanupUI?.footerMessage && (
         <text fg={props.cleanupUI.footerMessage.color}>
           {padLine(
-            props.cleanupUI.footerMessage.isSpinning
-              ? `⠋ ${props.cleanupUI.footerMessage.text}`
+            props.cleanupUI.footerMessage.isSpinning && cleanupSpinnerFrame()
+              ? `${cleanupSpinnerFrame()} ${props.cleanupUI.footerMessage.text}`
               : props.cleanupUI.footerMessage.text,
             layoutWidth(),
           )}
         </text>
       )}
 
-      <text>{padLine(footerLine(), layoutWidth())}</text>
+      {renderSegmentLine(footerSegments())}
     </box>
   );
 }
