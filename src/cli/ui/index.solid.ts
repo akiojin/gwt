@@ -9,5 +9,20 @@ export async function renderSolidApp(
   props: AppSolidProps,
   config?: CliRendererConfig,
 ): Promise<void> {
-  await render(() => AppSolid(props), config);
+  let resolveDone: (() => void) | null = null;
+  const done = new Promise<void>((resolve) => {
+    resolveDone = resolve;
+  });
+  const onDestroy = config?.onDestroy;
+
+  await render(() => AppSolid(props), {
+    ...config,
+    onDestroy: () => {
+      onDestroy?.();
+      resolveDone?.();
+      resolveDone = null;
+    },
+  });
+
+  await done;
 }
