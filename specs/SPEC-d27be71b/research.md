@@ -54,6 +54,27 @@
 
 ※ OpenTUI のテスト実行には `@opentui/solid` の Bun プラグインが必要なため、`--preload` を指定している。
 
+## BranchListScreen 機能パリティ確認（Ink.js vs OpenTUI）
+
+確認日: 2026-01-05  
+対象: `src/cli/ui/components/screens/BranchListScreen.tsx`（Ink.js）と `src/cli/ui/screens/solid/BranchListScreen.tsx`（OpenTUI）
+
+### 結果
+
+OpenTUI 版は **機能パリティ未達**。以下の機能が未実装または不足。
+
+- Header/Stats/Footer レイアウト（タイトル色、version/workingDirectory/activeProfile 表示、フッターのアクション表示）
+- フィルター入力 UI（Input コンポーネント、placeholder、フィルター件数表示、blockKeys）
+- ツール状態の表示（FR-019/FR-021/FR-022）
+- LoadingIndicator（遅延表示含む）
+- Error 表示（DEBUG 時の stack 表示含む）
+- 空状態のメッセージ（branches 0 / filter 0 の分岐）
+- Select 方式のリスト表示（レンダラ、選択ハイライト、行内の色/アイコン/情報表示）
+- 行フォーマット（最新アクティビティ、ツールラベル、幅計測・省略処理）
+- 複数選択（space でのトグル、selectedBranches の反映）
+- Cleanup UI（インジケータ、フッターメッセージ、inputLocked の取り扱い）
+- キーボードショートカット（c/r/p/l、tab モード切替の表記）
+
 ## 技術的決定
 
 1. OpenTUI + SolidJS を採用し、Ink.js 依存を最終リリースで撤去する。
