@@ -10,7 +10,8 @@
   "packageManager": "bun@latest",
   "scripts": {
     "build": "bun run build:cli && bun run build:web",
-    "build:cli": "tsc",
+    "build:cli": "tsc && bun run build:opentui",
+    "build:opentui": "bun scripts/build-opentui.ts",
     "build:server": "tsc",
     "build:client": "vite build src/web/client",
     "build:web": "bun run build:client",

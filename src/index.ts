@@ -294,7 +294,7 @@ async function mainInkUI(): Promise<SelectionResult | undefined> {
  * Returns SelectionResult if user made selections, undefined if user quit
  */
 async function mainSolidUI(): Promise<SelectionResult | undefined> {
-  const { renderSolidApp } = await import("./cli/ui/index.solid.js");
+  const { renderSolidApp } = await import("./opentui/index.solid.js");
   const terminal = getTerminalStreams();
 
   let selectionResult: SelectionResult | undefined;
