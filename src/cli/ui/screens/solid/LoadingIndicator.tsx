@@ -17,7 +17,7 @@ export function LoadingIndicatorScreen({
   interval = 80,
   frames = DEFAULT_FRAMES,
 }: LoadingIndicatorScreenProps) {
-  const [visible, setVisible] = createSignal(false);
+  const [visible, setVisible] = createSignal(isLoading && delay <= 0);
   const [frameIndex, setFrameIndex] = createSignal(0);
 
   const safeFrames = createMemo(() =>
@@ -28,6 +28,11 @@ export function LoadingIndicatorScreen({
     if (!isLoading) {
       setVisible(false);
       setFrameIndex(0);
+      return;
+    }
+
+    if (delay <= 0) {
+      setVisible(true);
       return;
     }
 

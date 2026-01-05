@@ -20,6 +20,8 @@ export function InputScreen({
   placeholder,
   label,
 }: InputScreenProps) {
+  const inputHeight = label ? 2 : 1;
+
   useKeyboard((key) => {
     if (key.name === "escape") {
       onCancel?.();
@@ -29,14 +31,16 @@ export function InputScreen({
   return (
     <box flexDirection="column">
       <text>{message}</text>
-      <TextInput
-        value={value}
-        onChange={onChange}
-        onSubmit={onSubmit}
-        placeholder={placeholder}
-        label={label}
-        focused
-      />
+      <box height={inputHeight}>
+        <TextInput
+          value={value}
+          onChange={onChange}
+          onSubmit={onSubmit}
+          placeholder={placeholder}
+          label={label}
+          focused
+        />
+      </box>
     </box>
   );
 }
