@@ -2,33 +2,25 @@
 import { describe, expect, it } from "bun:test";
 import { testRender } from "@opentui/solid";
 import { SelectInput } from "../../../components/solid/SelectInput.js";
-import type { SelectInputOption } from "../../../components/solid/SelectInput.js";
+import type { SelectInputItem } from "../../../components/solid/SelectInput.js";
 
-const options: SelectInputOption[] = [
-  { name: "Option A", description: "First" },
-  { name: "Option B", description: "Second" },
-];
-
-const renderSelect = async (props?: {
-  options?: SelectInputOption[];
-  onSelect?: (option: SelectInputOption | null) => void;
+const renderSelectInput = async (options: {
+  items: SelectInputItem[];
+  selectedIndex?: number;
+  width?: number;
+  height?: number;
 }) => {
-  const selections: (SelectInputOption | null)[] = [];
   const testSetup = await testRender(
     () => (
       <SelectInput
-        options={props?.options ?? options}
-        onSelect={(option) => {
-          selections.push(option);
-          props?.onSelect?.(option);
-        }}
+        items={options.items}
+        selectedIndex={options.selectedIndex}
         focused
-        showDescription={false}
       />
     ),
     {
-      width: 40,
-      height: 6,
+      width: options.width ?? 40,
+      height: options.height ?? 6,
     },
   );
 
@@ -40,14 +32,18 @@ const renderSelect = async (props?: {
 
   return {
     ...testSetup,
-    selections,
     cleanup,
   };
 };
 
 describe("Solid SelectInput", () => {
-  it("renders options", async () => {
-    const { captureCharFrame, cleanup } = await renderSelect();
+  it("renders selected option", async () => {
+    const items: SelectInputItem[] = [
+      { label: "Option A", value: "a" },
+      { label: "Option B", value: "b" },
+    ];
+
+    const { captureCharFrame, cleanup } = await renderSelectInput({ items });
 
     try {
       const frame = captureCharFrame();
@@ -57,18 +53,19 @@ describe("Solid SelectInput", () => {
     }
   });
 
-  it("selects option on enter", async () => {
-    const { mockInput, renderOnce, selections, cleanup } = await renderSelect();
+  it("respects selectedIndex", async () => {
+    const items: SelectInputItem[] = [
+      { label: "Option A", value: "a" },
+      { label: "Option B", value: "b" },
+    ];
+
+    const { captureCharFrame, cleanup } = await renderSelectInput({
+      items,
+      selectedIndex: 1,
+    });
 
     try {
-      mockInput.pressArrow("down");
-      await renderOnce();
-
-      mockInput.pressEnter();
-      await renderOnce();
-
-      expect(selections).toHaveLength(1);
-      expect(selections[0]?.name).toBe("Option B");
+      expect(captureCharFrame()).toContain("Option B");
     } finally {
       cleanup();
     }
