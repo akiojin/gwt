@@ -57,7 +57,6 @@ import {
   DependencyInstallError,
   type DependencyInstallResult,
 } from "./services/dependency-installer.js";
-import { waitForEnter } from "./utils/prompt.js";
 
 const ERROR_PROMPT = chalk.yellow(
   "Review the error details, then press Enter to continue.",
@@ -565,16 +564,21 @@ export async function handleAIToolWorkflow(
       divergenceBranches.add(sanitizedRemoteBranch);
     }
 
-    const divergenceResult = await runGitStep("check branch divergence", () =>
-      getBranchDivergenceStatuses({
+    let divergenceStatuses: Awaited<
+      ReturnType<typeof getBranchDivergenceStatuses>
+    > = [];
+    try {
+      divergenceStatuses = await getBranchDivergenceStatuses({
         cwd: repoRoot,
         branches: Array.from(divergenceBranches),
-      }),
-    );
-    if (!divergenceResult.ok) {
-      return;
+      });
+    } catch (error) {
+      const details = error instanceof Error ? error.message : String(error);
+      printWarning(
+        `Failed to check branch divergence. Error: ${details}. Continuing without blocking.`,
+      );
+      divergenceStatuses = [];
     }
-    const divergenceStatuses = divergenceResult.value;
     const divergedBranches = divergenceStatuses.filter(
       (status) => status.remoteAhead > 0 && status.localAhead > 0,
     );
@@ -597,15 +601,8 @@ export async function handleAIToolWorkflow(
       );
 
       printWarning(
-        "Resolve these divergences (e.g., rebase or merge) before launching to avoid conflicts.",
+        "Resolve these divergences (e.g., rebase or merge) to avoid conflicts. Continuing without blocking.",
       );
-      await waitForEnter(
-        "Press Enter to return to the main menu and resolve these issues manually.",
-      );
-      printWarning(
-        "AI tool launch has been cancelled until divergences are resolved.",
-      );
-      return;
     } else if (fastForwardError) {
       printWarning(
         `Fast-forward pull could not complete (${fastForwardError.message}). Continuing without blocking.`,

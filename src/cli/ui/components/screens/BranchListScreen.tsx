@@ -92,6 +92,7 @@ export interface BranchListScreenProps {
   onSelect: (branch: BranchItem) => void;
   onQuit?: () => void;
   onCleanupCommand?: () => void;
+  onRepairCommand?: () => void;
   onRefresh?: () => void;
   onOpenProfiles?: () => void;
   onOpenLogs?: () => void;
@@ -128,6 +129,7 @@ export const BranchListScreen = React.memo(function BranchListScreen({
   stats,
   onSelect,
   onCleanupCommand,
+  onRepairCommand,
   onRefresh,
   onOpenProfiles,
   onOpenLogs,
@@ -272,6 +274,8 @@ export const BranchListScreen = React.memo(function BranchListScreen({
     // Global shortcuts (blocked by Input component when typing in filter mode)
     if (input === "c") {
       onCleanupCommand?.();
+    } else if (input === "x") {
+      onRepairCommand?.();
     } else if (input === "r" && onRefresh) {
       onRefresh();
     } else if (input === "p" && onOpenProfiles) {
@@ -350,6 +354,7 @@ export const BranchListScreen = React.memo(function BranchListScreen({
     { key: "tab", description: "Mode" },
     { key: "r", description: "Refresh" },
     { key: "c", description: "Cleanup" },
+    { key: "x", description: "Repair" },
     { key: "p", description: "Profiles" },
     { key: "l", description: "Logs" },
   ];
