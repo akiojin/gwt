@@ -2,7 +2,6 @@
 import { describe, expect, it } from "bun:test";
 import { testRender } from "@opentui/solid";
 import { TextInput } from "../../../components/solid/TextInput.js";
-import { createSignal } from "solid-js";
 
 const renderTextInput = async (options: {
   value?: string;
@@ -12,19 +11,16 @@ const renderTextInput = async (options: {
   height?: number;
 }) => {
   const testSetup = await testRender(
-    () => {
-      const [value, setValue] = createSignal(options.value ?? "");
-      return (
-        <TextInput
-          value={value()}
-          onChange={setValue}
-          onSubmit={() => {}}
-          placeholder={options.placeholder}
-          label={options.label}
-          focused
-        />
-      );
-    },
+    () => (
+      <TextInput
+        value={options.value ?? ""}
+        onChange={() => {}}
+        placeholder={options.placeholder}
+        label={options.label}
+        focused
+        width={options.width}
+      />
+    ),
     {
       width: options.width ?? 40,
       height: options.height ?? 4,
@@ -46,14 +42,14 @@ const renderTextInput = async (options: {
 describe("Solid TextInput", () => {
   it("renders label and value", async () => {
     const { captureCharFrame, cleanup } = await renderTextInput({
-      value: "hello",
       label: "Name:",
+      value: "Alice",
     });
 
     try {
       const frame = captureCharFrame();
       expect(frame).toContain("Name:");
-      expect(frame).toContain("hello");
+      expect(frame).toContain("Alice");
     } finally {
       cleanup();
     }
@@ -61,12 +57,12 @@ describe("Solid TextInput", () => {
 
   it("renders placeholder when empty", async () => {
     const { captureCharFrame, cleanup } = await renderTextInput({
+      placeholder: "Enter name",
       value: "",
-      placeholder: "Enter value",
     });
 
     try {
-      expect(captureCharFrame()).toContain("Enter val");
+      expect(captureCharFrame()).toContain("Enter name");
     } finally {
       cleanup();
     }
