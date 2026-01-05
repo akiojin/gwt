@@ -134,14 +134,10 @@ vi.mock("../../src/codex.js", () => ({
 }));
 
 vi.mock("../../src/launcher.js", () => ({
-  launchCustomAITool: vi.fn(async () => undefined),
+  launchCodingAgent: vi.fn(async () => undefined),
 }));
 
 vi.mock("../../src/config/tools.js", () => ({
-  getToolById: vi.fn(() => ({
-    id: "claude-code",
-    displayName: "Claude Code",
-  })),
   getCodingAgentById: vi.fn(async () => ({
     id: "claude-code",
     displayName: "Claude Code",

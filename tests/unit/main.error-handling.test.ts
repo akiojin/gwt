@@ -111,13 +111,14 @@ describe("main error handling", () => {
 
     viWithDoMock.doMock?.("../../src/config/tools.js", () => ({
       CONFIG_DIR: "/tmp/gwt-test",
-      getToolById: vi.fn(async () => ({
+      getCodingAgentById: vi.fn(async () => ({
         id: "codex-cli",
         displayName: "Codex CLI",
         type: "command",
         command: "codex",
         modeArgs: { normal: [] },
       })),
+      getSharedEnvironment: vi.fn(async () => ({})),
     }));
 
     viWithDoMock.doMock?.("../../src/config/index.js", () => ({
@@ -136,7 +137,7 @@ describe("main error handling", () => {
     }));
 
     viWithDoMock.doMock?.("../../src/launcher.js", () => ({
-      launchCustomAITool: vi.fn(async () => {}),
+      launchCodingAgent: vi.fn(async () => {}),
     }));
 
     const processExitSpy = vi

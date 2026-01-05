@@ -17,7 +17,13 @@ export default defineConfig({
       "src/**/*.test.ts",
       "src/**/*.test.tsx",
     ],
-    exclude: ["node_modules", "dist", "build", "src/cli/ui/__tests__/solid/**"],
+    exclude: [
+      "node_modules",
+      "dist",
+      "build",
+      "src/cli/ui/__tests__/solid/**",
+      "tests/e2e/web-ui/**",
+    ],
     coverage: {
       provider: "v8",
       reporter: ["text", "json", "html", "lcov"],
@@ -55,7 +61,7 @@ export default defineConfig({
   },
   resolve: {
     alias: {
-      "@": path.resolve(__dirname, "./src"),
+      "@": path.resolve(__dirname, "./src/web/client/src"),
       "@tests": path.resolve(__dirname, "./tests"),
     },
     extensions: [".ts", ".tsx", ".js", ".jsx", ".json"],

@@ -109,7 +109,7 @@ describe("BranchDetailPage", () => {
     });
 
     mockedUseConfig.mockReturnValue({
-      data: { tools: [] },
+      data: { codingAgents: [] },
       isLoading: false,
       error: null,
     });
@@ -149,7 +149,7 @@ describe("BranchDetailPage", () => {
       data: [
         {
           sessionId: "abc",
-          toolType: "claude-code",
+          agentType: "claude-code",
           mode: "normal",
           status: "running",
           worktreePath: baseBranch.worktreePath,
@@ -164,7 +164,7 @@ describe("BranchDetailPage", () => {
 
     renderPage();
     expect(screen.getByText("セッション履歴")).toBeInTheDocument();
-    expect(screen.getByText("running")).toBeInTheDocument();
+    expect(screen.getByText("Running")).toBeInTheDocument();
   });
 
   it("allows session start when branch has conflicting divergence", () => {

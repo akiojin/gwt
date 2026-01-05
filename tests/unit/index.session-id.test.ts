@@ -99,9 +99,12 @@ vi.mock("../../src/services/dependency-installer.js", async () => {
 });
 
 vi.mock("../../src/config/tools.js", () => ({
-  getToolById: vi.fn(() => ({
+  getCodingAgentById: vi.fn(async () => ({
     id: "codex-cli",
     displayName: "Codex",
+    type: "command",
+    command: "codex",
+    modeArgs: { normal: [] },
   })),
   getSharedEnvironment: vi.fn(async () => ({})),
 }));

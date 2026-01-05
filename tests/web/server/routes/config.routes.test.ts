@@ -1,18 +1,23 @@
 import Fastify from "fastify";
 import type { FastifyInstance } from "fastify";
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
-import type { ToolsConfig } from "../../../../src/types/tools.js";
+import type { EnvironmentHistoryEntry } from "../../../../src/types/api.js";
+import type { CodingAgentsConfig } from "../../../../src/types/tools.js";
 import { registerConfigRoutes } from "../../../../src/web/server/routes/config.js";
 
-const mockLoadToolsConfig = vi.fn<[], Promise<ToolsConfig>>();
-const mockSaveToolsConfig = vi.fn<[], Promise<void>>();
-const mockLoadEnvHistory = vi.fn<[], Promise<any[]>>();
-const mockRecordEnvHistory = vi.fn<[], Promise<void>>();
+const mockLoadCodingAgentsConfig = vi.fn<[], Promise<CodingAgentsConfig>>();
+const mockSaveCodingAgentsConfig = vi.fn<[], Promise<void>>();
+const mockLoadEnvHistory = vi.fn<[], Promise<EnvironmentHistoryEntry[]>>();
+const mockRecordEnvHistory = vi.fn<
+  [EnvironmentHistoryEntry[]],
+  Promise<void>
+>();
 const mockGetImportedEnvKeys = vi.fn<[], string[]>(() => []);
 
 vi.mock("../../../../src/config/tools.ts", () => ({
-  loadToolsConfig: () => mockLoadToolsConfig(),
-  saveToolsConfig: (...args: unknown[]) => mockSaveToolsConfig(...args),
+  loadCodingAgentsConfig: () => mockLoadCodingAgentsConfig(),
+  saveCodingAgentsConfig: (...args: unknown[]) =>
+    mockSaveCodingAgentsConfig(...args),
 }));
 
 vi.mock("../../../../src/config/env-history.ts", () => ({
@@ -28,8 +33,8 @@ describe("config routes", () => {
   let fastify: FastifyInstance;
 
   beforeEach(() => {
-    mockLoadToolsConfig.mockReset();
-    mockSaveToolsConfig.mockReset();
+    mockLoadCodingAgentsConfig.mockReset();
+    mockSaveCodingAgentsConfig.mockReset();
     mockLoadEnvHistory.mockReset();
     mockRecordEnvHistory.mockReset();
     mockGetImportedEnvKeys.mockReset();
@@ -42,14 +47,14 @@ describe("config routes", () => {
   });
 
   it("GET /api/config returns shared env metadata", async () => {
-    const config: ToolsConfig = {
+    const config: CodingAgentsConfig = {
       version: "1.0.0",
       updatedAt: "2025-11-11T00:00:00Z",
       env: {
         OPENAI_API_KEY: "sk-test",
         HTTP_PROXY: "http://proxy:8080",
       },
-      customTools: [
+      customCodingAgents: [
         {
           id: "custom-tool-a",
           displayName: "Custom Tool A",
@@ -60,7 +65,7 @@ describe("config routes", () => {
       ],
     };
 
-    mockLoadToolsConfig.mockResolvedValue(config);
+    mockLoadCodingAgentsConfig.mockResolvedValue(config);
     mockLoadEnvHistory.mockResolvedValue([
       {
         key: "OPENAI_API_KEY",
@@ -96,10 +101,10 @@ describe("config routes", () => {
   });
 
   it("PUT /api/config saves shared env and records history", async () => {
-    mockLoadToolsConfig.mockResolvedValue({
+    mockLoadCodingAgentsConfig.mockResolvedValue({
       version: "1.0.0",
       env: { LEGACY: "old" },
-      customTools: [],
+      customCodingAgents: [],
     });
     mockLoadEnvHistory.mockResolvedValue([]);
 
@@ -111,7 +116,7 @@ describe("config routes", () => {
       payload: {
         version: "1.1.0",
         env: [{ key: "NEW_KEY", value: "new-value" }],
-        tools: [
+        codingAgents: [
           {
             id: "custom-tool",
             displayName: "Custom",
@@ -131,10 +136,10 @@ describe("config routes", () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(mockSaveToolsConfig).toHaveBeenCalledTimes(1);
-    expect(mockSaveToolsConfig.mock.calls[0][0]).toMatchObject({
+    expect(mockSaveCodingAgentsConfig).toHaveBeenCalledTimes(1);
+    expect(mockSaveCodingAgentsConfig.mock.calls[0][0]).toMatchObject({
       env: { NEW_KEY: "new-value" },
-      customTools: [
+      customCodingAgents: [
         expect.objectContaining({
           type: "command",
           env: { SCOPE: "test" },
