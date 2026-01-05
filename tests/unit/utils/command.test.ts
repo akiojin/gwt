@@ -149,9 +149,9 @@ describe("findCommand with version", () => {
     const result = await commandModule.findCommand("ls");
     if (result.source === "installed") {
       // Version is either a string starting with 'v' or null
-      expect(
-        result.version === null || result.version?.startsWith("v"),
-      ).toBe(true);
+      expect(result.version === null || result.version?.startsWith("v")).toBe(
+        true,
+      );
     }
   });
 });
@@ -182,9 +182,9 @@ describe("detectAllToolStatuses with version", () => {
     for (const tool of results) {
       if (tool.status === "installed") {
         // Version is either a string starting with 'v' or null
-        expect(
-          tool.version === null || tool.version?.startsWith("v"),
-        ).toBe(true);
+        expect(tool.version === null || tool.version?.startsWith("v")).toBe(
+          true,
+        );
       }
     }
   });

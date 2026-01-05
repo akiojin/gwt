@@ -234,11 +234,11 @@ Phase 8 (統合・仕上げ)
 
 ### Lint/品質チェック
 
-- [ ] **T713** [統合] `bun run format:check` 成功を確認
-- [ ] **T714** [統合] `bunx --bun markdownlint-cli "**/*.md" --config .markdownlint.json --ignore-path .markdownlintignore` 成功を確認
-- [ ] **T715** [統合] `bun run lint` 成功を確認
-- [ ] **T716** [統合] `bun run type-check` 成功を確認
-- [ ] **T717** [統合] `bun run build` 成功を確認
+- [x] **T713** [統合] `bun run format:check` 成功を確認
+- [x] **T714** [統合] `bunx --bun markdownlint-cli "**/*.md" --config .markdownlint.json --ignore-path .markdownlintignore` 成功を確認
+- [x] **T715** [統合] `bun run lint` 成功を確認
+- [x] **T716** [統合] `bun run type-check` 成功を確認
+- [x] **T717** [統合] `bun run build` 成功を確認
 
 ### ドキュメント
 
