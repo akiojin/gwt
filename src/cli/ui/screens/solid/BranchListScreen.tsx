@@ -1,7 +1,7 @@
 /** @jsxImportSource @opentui/solid */
 import { createEffect, createMemo, createSignal } from "solid-js";
 import { useKeyboard, useTerminalDimensions } from "@opentui/solid";
-import { StyledText, TextAttributes, parseColor } from "@opentui/core";
+import { TextAttributes } from "@opentui/core";
 import type { BranchItem, BranchViewMode, Statistics } from "../../types.js";
 import type { ToolStatus } from "../../hooks/useToolStatus.js";
 import { getLatestActivityTimestamp } from "../../utils/branchFormatter.js";
@@ -348,7 +348,7 @@ export function BranchListScreen(props: BranchListScreenProps) {
   const [cursorIndex, setCursorIndex] = createSignal(0);
 
   const layoutWidth = createMemo(() => Math.max(20, terminal().width || 80));
-  const listWidth = createMemo(() => Math.max(20, layoutWidth() - 1));
+  const listWidth = createMemo(() => Math.max(20, layoutWidth()));
 
   const headerTitle = createMemo(() => {
     let title = "gwt - Branch Selection";
@@ -916,21 +916,19 @@ export function BranchListScreen(props: BranchListScreenProps) {
     return fitSegmentsToWidth(segments, layoutWidth());
   });
 
-  const renderSegmentLine = (segments: TextSegment[]) => {
-    const content = new StyledText(
-      segments.map((segment) => ({
-        __isChunk: true as const,
-        text: segment.text,
-        ...(segment.fg !== undefined ? { fg: parseColor(segment.fg) } : {}),
-        ...(segment.bg !== undefined ? { bg: parseColor(segment.bg) } : {}),
-        ...(segment.attributes !== undefined
-          ? { attributes: segment.attributes }
-          : {}),
-      })),
-    );
-
-    return <text content={content} />;
-  };
+  const renderSegmentLine = (segments: TextSegment[]) => (
+    <box flexDirection="row">
+      {segments.map((segment) => (
+        <text
+          {...(segment.fg ? { fg: segment.fg } : {})}
+          {...(segment.bg ? { bg: segment.bg } : {})}
+          {...(segment.attributes ? { attributes: segment.attributes } : {})}
+        >
+          {segment.text}
+        </text>
+      ))}
+    </box>
+  );
 
   return (
     <box flexDirection="column" height={terminal().height || 24}>
