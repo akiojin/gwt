@@ -70,6 +70,7 @@ const WIDTH_OVERRIDES: Record<string, number> = {
   "⚠": 2,
   "⚠️": 2,
   "🛡": 2,
+  "☑️": 2,
   "⭕": 2,
   "⭕️": 2,
   "❌": 2,
@@ -665,7 +666,7 @@ export function BranchListScreen(props: BranchListScreenProps) {
 
     const isChecked = selectedSet().has(branch.name);
     const isWarning = Boolean(branch.hasUnpushedCommits) || !branch.mergedPR;
-    const selectionIcon = isChecked ? "[*]" : "[ ]";
+    const selectionIcon = isChecked ? "✅" : "☑️";
     const selectionColor = isChecked && isWarning ? "red" : undefined;
     let worktreeIcon = "⚪";
     let worktreeColor: IndicatorColor | "gray" = "gray";
@@ -716,7 +717,7 @@ export function BranchListScreen(props: BranchListScreenProps) {
         ? branch.remoteName
         : branch.name;
 
-    const staticPrefix = `${leadingIndicator} ${selectionIcon} ${worktreeIcon} ${safeIcon} `;
+    const staticPrefix = `${leadingIndicator}${selectionIcon}${worktreeIcon}${safeIcon} `;
     const staticPrefixWidth = measureDisplayWidth(staticPrefix);
     const maxLeftDisplayWidth = Math.max(0, columns - timestampWidth - 1);
     const maxLabelWidth = Math.max(0, maxLeftDisplayWidth - staticPrefixWidth);
@@ -748,11 +749,8 @@ export function BranchListScreen(props: BranchListScreenProps) {
 
     const segments: TextSegment[] = [];
     appendSegment(segments, { text: leadingIndicator, fg: indicatorColor });
-    appendSegment(segments, { text: " " });
     appendSegment(segments, { text: selectionIcon, fg: selectionColor });
-    appendSegment(segments, { text: " " });
     appendSegment(segments, { text: worktreeIcon, fg: worktreeColor });
-    appendSegment(segments, { text: " " });
     appendSegment(segments, { text: safeIcon, fg: safeColor });
     appendSegment(segments, { text: " " });
     appendSegment(segments, { text: truncatedLabel });
