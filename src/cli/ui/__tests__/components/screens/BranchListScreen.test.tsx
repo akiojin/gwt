@@ -70,7 +70,7 @@ describe("BranchListScreen", () => {
 
   it("should render header with title", () => {
     const onSelect = vi.fn();
-    const { getByText } = render(
+    const { getByText, getAllByText } = render(
       <BranchListScreen
         branches={mockBranches}
         stats={mockStats}
@@ -97,7 +97,7 @@ describe("BranchListScreen", () => {
 
   it("should render branch list", () => {
     const onSelect = vi.fn();
-    const { getByText } = render(
+    const { getByText, getAllByText } = render(
       <BranchListScreen
         branches={mockBranches}
         stats={mockStats}
@@ -105,7 +105,7 @@ describe("BranchListScreen", () => {
       />,
     );
 
-    expect(getByText(/main/)).toBeDefined();
+    expect(getAllByText(/main/).length).toBeGreaterThan(0);
     expect(getByText(/feature\/test/)).toBeDefined();
   });
 
