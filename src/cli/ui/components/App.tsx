@@ -60,6 +60,7 @@ import {
   generateWorktreePath,
   isProtectedBranchName,
   removeWorktree,
+  repairWorktrees,
   switchToProtectedBranch,
 } from "../../../worktree.js";
 import { getPackageVersion } from "../../../utils.js";
@@ -711,7 +712,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
   }, [selectedBranch, isProtectedSelection]);
 
   const handleSelect = useCallback(
-    (item: BranchItem) => {
+    async (item: BranchItem) => {
       const selection: SelectedBranchState =
         item.type === "remote"
           ? {
@@ -730,6 +731,43 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
 
       const protectedSelected = isProtectedSelection(selection);
 
+      // Auto-repair inaccessible worktree on Enter selection
+      if (item.worktreeStatus === "inaccessible") {
+        setCleanupInputLocked(true);
+        setCleanupFooterMessage({
+          text: `Repairing worktree for ${item.name}...`,
+          isSpinning: true,
+          color: "cyan",
+        });
+
+        try {
+          const result = await repairWorktrees([item.name]);
+          if (result.repairedCount > 0) {
+            setCleanupFooterMessage({
+              text: `Repaired worktree for ${item.name}`,
+              color: "green",
+            });
+            refresh();
+          } else {
+            setCleanupFooterMessage({
+              text: `Failed to repair worktree for ${item.name}`,
+              color: "red",
+            });
+          }
+        } catch {
+          setCleanupFooterMessage({
+            text: `Repair failed for ${item.name}`,
+            color: "red",
+          });
+        } finally {
+          setCleanupInputLocked(false);
+          // Clear message after delay
+          setTimeout(() => {
+            setCleanupFooterMessage(null);
+          }, COMPLETION_HOLD_DURATION_MS);
+        }
+      }
+
       setSelectedBranch(selection);
       setSelectedTool(null);
       setSelectedModel(null);
@@ -741,7 +779,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
           text: PROTECTED_BRANCH_WARNING,
           color: "yellow",
         });
-      } else {
+      } else if (item.worktreeStatus !== "inaccessible") {
         setCleanupFooterMessage(null);
       }
 
@@ -750,6 +788,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     [
       isProtectedSelection,
       navigateTo,
+      refresh,
       setCleanupFooterMessage,
       setCreationSourceBranch,
       setSelectedTool,
@@ -1166,6 +1205,100 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     worktrees,
   ]);
 
+  // Handle worktree repair command (FR-001: x key triggers repair)
+  const handleRepairCommand = useCallback(async () => {
+    if (cleanupInputLocked) {
+      return;
+    }
+
+    if (completionTimerRef.current) {
+      clearTimeout(completionTimerRef.current);
+      completionTimerRef.current = null;
+    }
+
+    // FR-007: No branches selected warning
+    if (selectedBranches.length === 0) {
+      setCleanupFooterMessage({
+        text: "No branches selected for repair.",
+        color: "yellow",
+      });
+      completionTimerRef.current = setTimeout(() => {
+        setCleanupFooterMessage(null);
+        completionTimerRef.current = null;
+      }, COMPLETION_HOLD_DURATION_MS);
+      return;
+    }
+
+    // FR-002: Filter to only inaccessible worktrees (pass branch names, not paths)
+    const worktreeMap = new Map(
+      worktrees.map((worktree) => [worktree.branch, worktree]),
+    );
+
+    const repairTargets: string[] = [];
+    for (const branchName of selectedBranches) {
+      const worktree = worktreeMap.get(branchName);
+      if (worktree && worktree.isAccessible === false) {
+        repairTargets.push(branchName);
+      }
+    }
+
+    // FR-007: No repair targets warning
+    if (repairTargets.length === 0) {
+      setCleanupFooterMessage({
+        text: "No inaccessible worktrees to repair among selected branches.",
+        color: "yellow",
+      });
+      completionTimerRef.current = setTimeout(() => {
+        setCleanupFooterMessage(null);
+        completionTimerRef.current = null;
+      }, COMPLETION_HOLD_DURATION_MS);
+      return;
+    }
+
+    // FR-005: Lock input during repair
+    setCleanupInputLocked(true);
+
+    // FR-006: Show progress message
+    setCleanupFooterMessage({
+      text: `Repairing ${repairTargets.length} worktree(s)...`,
+      isSpinning: true,
+      color: "cyan",
+    });
+
+    try {
+      // FR-003: Execute git worktree repair
+      const result = await repairWorktrees(repairTargets);
+
+      // FR-004: Show repair result
+      if (result.failedCount === 0) {
+        setCleanupFooterMessage({
+          text: `Repaired ${result.repairedCount} worktree(s) successfully.`,
+          color: "green",
+        });
+      } else {
+        setCleanupFooterMessage({
+          text: `Repaired ${result.repairedCount}, failed ${result.failedCount} worktree(s).`,
+          color: "yellow",
+        });
+      }
+
+      // Refresh to update worktree accessibility status
+      refresh();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setCleanupFooterMessage({
+        text: `Repair failed: ${message}`,
+        color: "red",
+      });
+    } finally {
+      setCleanupInputLocked(false);
+      completionTimerRef.current = setTimeout(() => {
+        setCleanupFooterMessage(null);
+        completionTimerRef.current = null;
+      }, COMPLETION_HOLD_DURATION_MS);
+    }
+  }, [cleanupInputLocked, refresh, selectedBranches, worktrees]);
+
   // Handle AI tool selection
   const handleToolSelect = useCallback(
     (tool: CodingAgentId) => {
@@ -1323,6 +1456,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       case "branch-list":
         return renderBranchListScreen({
           onCleanupCommand: handleCleanupCommand,
+          onRepairCommand: handleRepairCommand,
           cleanupUI: {
             indicators: cleanupIndicators,
             footerMessage: cleanupFooterMessage,
