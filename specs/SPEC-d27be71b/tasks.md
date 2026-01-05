@@ -48,10 +48,10 @@ Phase 8 (統合・仕上げ)
 
 ### 抽象化レイヤー
 
-- [ ] **T101** [P] [基盤] `src/cli/ui/core/types.ts` に UI 状態の型定義を整理（フレームワーク非依存）
-- [ ] **T102** [P] [基盤] `src/cli/ui/core/theme.ts` にテーマシステムを集約（色・アイコン定義）
-- [ ] **T103** [P] [基盤] `src/cli/ui/core/keybindings.ts` にキーバインド定義を集約
-- [ ] **T104** [基盤] T101の後に `src/cli/ui/stores/` に SolidJS ストア構造を設計
+- [x] **T101** [P] [基盤] `src/cli/ui/core/types.ts` に UI 状態の型定義を整理（フレームワーク非依存）
+- [x] **T102** [P] [基盤] `src/cli/ui/core/theme.ts` にテーマシステムを集約（色・アイコン定義）
+- [x] **T103** [P] [基盤] `src/cli/ui/core/keybindings.ts` にキーバインド定義を集約
+- [x] **T104** [基盤] T101の後に `src/cli/ui/stores/` に SolidJS ストア構造を設計
 - [ ] **T105** [P] [基盤] 現行 Ink.js の性能ベースラインを計測（5000ブランチスクロール fps / 入力レイテンシ）※ 150/250ブランチは測定済み、5000は未測定
 - [ ] **T106** [基盤] T105の後に `specs/SPEC-d27be71b/research.md` にベースライン結果を記録 ※ 部分結果は記録済み、5000測定後に更新
 
