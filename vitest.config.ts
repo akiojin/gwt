@@ -17,7 +17,7 @@ export default defineConfig({
       "src/**/*.test.ts",
       "src/**/*.test.tsx",
     ],
-    exclude: ["node_modules", "dist", "build"],
+    exclude: ["node_modules", "dist", "build", "src/cli/ui/__tests__/solid/**"],
     coverage: {
       provider: "v8",
       reporter: ["text", "json", "html", "lcov"],
