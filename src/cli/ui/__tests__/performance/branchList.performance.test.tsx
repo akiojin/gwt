@@ -67,6 +67,23 @@ function generateMockBranches(count: number): BranchItem[] {
 // };
 
 describeFn("BranchListScreen Performance", () => {
+  const waitForFrameChange = async (
+    getFrame: () => string,
+    previous: string,
+    timeoutMs: number,
+  ): Promise<number> => {
+    const start = performance.now();
+    let current = previous;
+    while (current === previous) {
+      if (performance.now() - start > timeoutMs) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      current = getFrame();
+    }
+    return performance.now() - start;
+  };
+
   it("should render 100+ branches within acceptable time", () => {
     const branches = generateMockBranches(150);
     const stats: Statistics = {
@@ -189,5 +206,62 @@ describeFn("BranchListScreen Performance", () => {
     console.log(`\n🚀 Large Branch List Performance:`);
     console.log(`   Branches: ${branches.length}`);
     console.log(`   Render time: ${renderTime.toFixed(2)}ms`);
+  });
+
+  it("should handle very large branch list (5000 branches)", async () => {
+    const branches = generateMockBranches(5000);
+    const stats: Statistics = {
+      total: branches.length,
+      local: branches.filter((b) => b.type === "local").length,
+      remote: branches.filter((b) => b.type === "remote").length,
+      current: 1,
+      feature: branches.filter((b) => b.branchType === "feature").length,
+      hotfix: branches.filter((b) => b.branchType === "hotfix").length,
+      release: branches.filter((b) => b.branchType === "release").length,
+      worktree: branches.filter((b) => b.worktree).length,
+    };
+
+    const startTime = performance.now();
+
+    const { unmount, stdin, lastFrame } = render(
+      <BranchListScreen
+        branches={branches}
+        stats={stats}
+        onSelect={() => {}}
+        onQuit={() => {}}
+      />,
+    );
+
+    const renderTime = performance.now() - startTime;
+
+    const steps = 5;
+    const timeoutMs = 200;
+    let totalLatency = 0;
+
+    for (let i = 0; i < steps; i++) {
+      const before = lastFrame() ?? "";
+      stdin.write("\u001B[B"); // Down arrow
+      totalLatency += await waitForFrameChange(
+        () => lastFrame() ?? "",
+        before,
+        timeoutMs,
+      );
+    }
+
+    const avgLatency = totalLatency / steps;
+    const approxFps = avgLatency > 0 ? 1000 / avgLatency : 0;
+
+    unmount();
+
+    // Generous threshold: keep test stable while capturing baseline
+    expect(renderTime).toBeLessThan(5000);
+
+    console.log(`\n🧭 Very Large Branch List Performance:`);
+    console.log(`   Branches: ${branches.length}`);
+    console.log(`   Render time: ${renderTime.toFixed(2)}ms`);
+    console.log(
+      `   Avg input latency (down x${steps}): ${avgLatency.toFixed(2)}ms`,
+    );
+    console.log(`   Approx input FPS: ${approxFps.toFixed(1)}`);
   });
 });
