@@ -41,10 +41,6 @@ const WIDTH_OVERRIDES: Record<string, number> = {
   "⚠": 2,
   "⚠️": 2,
   "🛡": 2,
-  "☑️": 2,
-  "⭕": 2,
-  "⭕️": 2,
-  "❌": 2,
   // Remote markers
   "🔗": 2,
   "💻": 2,
@@ -499,17 +495,17 @@ export const BranchListScreen = React.memo(function BranchListScreen({
       const isWarning = Boolean(item.hasUnpushedCommits) || !item.mergedPR;
       const selectionIcon = isChecked
         ? isWarning
-          ? chalk.red("✅")
-          : "✅"
-        : "☑️";
-      let worktreeIcon = chalk.gray("⚪");
+          ? chalk.red("[x]")
+          : "[x]"
+        : "[ ]";
+      let worktreeIcon = chalk.gray(".");
       if (item.worktreeStatus === "active") {
-        worktreeIcon = chalk.green("🟢");
+        worktreeIcon = chalk.green("W");
       } else if (item.worktreeStatus === "inaccessible") {
-        worktreeIcon = chalk.red("🔴");
+        worktreeIcon = chalk.red("X");
       }
       const safeIcon =
-        item.safeToCleanup === true ? chalk.green("⭕️") : chalk.red("❌");
+        item.safeToCleanup === true ? chalk.green("OK") : chalk.red("!!");
       const stateCluster = `${selectionIcon}${worktreeIcon}${safeIcon}`;
 
       const staticPrefix = `${leadingIndicator}${stateCluster} `;

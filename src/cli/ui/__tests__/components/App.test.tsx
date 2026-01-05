@@ -294,7 +294,7 @@ describe("App", () => {
     expect(container).toBeDefined();
   });
 
-  it("should format branch items with icons", () => {
+  it("should format branch items without icons", () => {
     useGitDataMock.mockImplementation(() => ({
       branches: mockBranches,
       loading: false,
@@ -309,7 +309,7 @@ describe("App", () => {
     expect(branchListProps).not.toHaveLength(0);
     const props = branchListProps.at(-1);
     const main = props?.branches.find((b: BranchItem) => b.name === "main");
-    expect(main?.icons).toContain("⚡");
+    expect(main?.icons).toEqual([]);
   });
 
   describe("BranchActionSelectorScreen integration", () => {

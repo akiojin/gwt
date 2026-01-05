@@ -70,10 +70,6 @@ const WIDTH_OVERRIDES: Record<string, number> = {
   "⚠": 2,
   "⚠️": 2,
   "🛡": 2,
-  "☑️": 2,
-  "⭕": 2,
-  "⭕️": 2,
-  "❌": 2,
   "🔗": 2,
   "💻": 2,
   "☁️": 2,
@@ -666,18 +662,18 @@ export function BranchListScreen(props: BranchListScreenProps) {
 
     const isChecked = selectedSet().has(branch.name);
     const isWarning = Boolean(branch.hasUnpushedCommits) || !branch.mergedPR;
-    const selectionIcon = isChecked ? "✅" : "☑️";
+    const selectionIcon = isChecked ? "[x]" : "[ ]";
     const selectionColor = isChecked && isWarning ? "red" : undefined;
-    let worktreeIcon = "⚪";
+    let worktreeIcon = ".";
     let worktreeColor: IndicatorColor | "gray" = "gray";
     if (branch.worktreeStatus === "active") {
-      worktreeIcon = "🟢";
+      worktreeIcon = "W";
       worktreeColor = "green";
     } else if (branch.worktreeStatus === "inaccessible") {
-      worktreeIcon = "🔴";
+      worktreeIcon = "X";
       worktreeColor = "red";
     }
-    const safeIcon = branch.safeToCleanup === true ? "⭕️" : "❌";
+    const safeIcon = branch.safeToCleanup === true ? "OK" : "!!";
     const safeColor: IndicatorColor =
       branch.safeToCleanup === true ? "green" : "red";
 

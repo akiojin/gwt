@@ -211,10 +211,10 @@ describe("BranchListScreen", () => {
     );
 
     const text = stripAnsi(container.textContent ?? "");
-    expect(text).toMatch(/☑️(🟢|🔴|⚪)(⭕️|❌)/);
+    expect(text).toMatch(/\[(x| )\](W|X|\.)(OK|!!)/);
   });
 
-  it("should display 🔴 for inaccessible worktree", async () => {
+  it("should display X for inaccessible worktree", async () => {
     const onSelect = vi.fn();
     const branches: BranchItem[] = [
       {
@@ -250,7 +250,7 @@ describe("BranchListScreen", () => {
     const frame = stripControlSequences(
       stripAnsi(renderResult.lastFrame() ?? ""),
     );
-    expect(frame).toContain("☑️🔴❌");
+    expect(frame).toContain("[ ]X!!");
   });
 
   it("should render last tool usage when available and Unknown when not", () => {
@@ -473,7 +473,7 @@ describe("BranchListScreen", () => {
     const frame = stripControlSequences(
       stripAnsi(renderResult.lastFrame() ?? ""),
     );
-    expect(frame).toContain("✅🟢⭕️");
+    expect(frame).toContain("[x]WOK");
     expect(frame).toContain("feature/login");
   });
 
