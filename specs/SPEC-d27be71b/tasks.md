@@ -96,7 +96,7 @@ Phase 8 (統合・仕上げ)
 ### 実装
 
 - [x] **T308** [US2] T301の後に `src/cli/ui/components/solid/Header.tsx` を作成
-- [ ] **T309** [US2] T302の後に `src/cli/ui/components/solid/Footer.tsx` を作成
+- [x] **T309** [US2] T302の後に `src/cli/ui/components/solid/Footer.tsx` を作成
 - [ ] **T310** [US2] T303の後に `src/cli/ui/components/solid/ScrollableList.tsx` を作成
 - [ ] **T311** [US2] T304の後に `src/cli/ui/components/solid/Stats.tsx` を作成
 - [ ] **T312** [US2] T305の後に `src/cli/ui/components/solid/SearchInput.tsx` を作成
