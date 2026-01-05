@@ -35,7 +35,7 @@ export interface HeaderProps {
 export function Header({
   title,
   titleColor = "cyan",
-  dividerChar = "─",
+  dividerChar = "-",
   showDivider = true,
   width = 80,
   version,

@@ -70,49 +70,49 @@ export type ColorValue = (typeof colors)[ColorName];
 // ========================================
 
 /**
- * Unicode icons used throughout the UI
+ * ASCII icons used throughout the UI
  */
 export const icons = {
   // Navigation
-  pointer: "›",
-  pointerBold: "➤",
-  arrowUp: "↑",
-  arrowDown: "↓",
-  arrowLeft: "←",
-  arrowRight: "→",
+  pointer: ">",
+  pointerBold: ">",
+  arrowUp: "^",
+  arrowDown: "v",
+  arrowLeft: "<",
+  arrowRight: ">",
 
   // Status
-  success: "✓",
-  error: "✗",
-  warning: "⚠",
-  info: "ℹ",
-  skipped: "⊘",
+  success: "OK",
+  error: "X",
+  warning: "!",
+  info: "i",
+  skipped: "-",
 
   // Branch indicators
-  worktree: "⚙",
-  worktreeActive: "●",
-  worktreeInaccessible: "○",
-  changes: "✎",
-  unpushed: "↑",
-  current: "★",
-  pr: "⎇",
-  merged: "⊕",
+  worktree: "W",
+  worktreeActive: "A",
+  worktreeInaccessible: "X",
+  changes: "C",
+  unpushed: "U",
+  current: "*",
+  pr: "PR",
+  merged: "M",
 
   // Sync status
-  syncUpToDate: "✓",
-  syncAhead: "↑",
-  syncBehind: "↓",
-  syncDiverged: "⇅",
+  syncUpToDate: "=",
+  syncAhead: ">",
+  syncBehind: "<",
+  syncDiverged: "!",
 
   // Loading
-  spinnerFrames: ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
+  spinnerFrames: ["|", "/", "-", "\\"],
 
   // Misc
-  bullet: "•",
-  divider: "─",
-  verticalLine: "│",
-  corner: "└",
-  branch: "├",
+  bullet: "*",
+  divider: "-",
+  verticalLine: "|",
+  corner: "+",
+  branch: "+",
 } as const;
 
 export type IconName = keyof typeof icons;
@@ -228,8 +228,8 @@ export interface StatsItemConfig {
  * Default stats items configuration
  */
 export const statsItemsConfig: Record<string, StatsItemConfig> = {
-  local: { label: "Local", icon: "⌂", color: colors.primary },
-  remote: { label: "Remote", icon: "☁", color: colors.info },
+  local: { label: "Local", icon: "L", color: colors.primary },
+  remote: { label: "Remote", icon: "R", color: colors.info },
   worktree: { label: "Worktrees", icon: icons.worktree, color: colors.success },
   changes: { label: "Changes", icon: icons.changes, color: colors.warning },
 };

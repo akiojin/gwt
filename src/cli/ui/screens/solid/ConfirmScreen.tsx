@@ -58,7 +58,7 @@ export function ConfirmScreen({
     <text
       {...(isSelected ? { fg: "cyan", attributes: TextAttributes.BOLD } : {})}
     >
-      {`${isSelected ? ">" : " "} ${label}`}
+      {label}
     </text>
   );
 

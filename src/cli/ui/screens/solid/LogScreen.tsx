@@ -153,14 +153,13 @@ export function LogScreen({
             {list.visibleItems().map((entry, index) => {
               const absoluteIndex = list.scrollOffset() + index;
               const isSelected = absoluteIndex === list.selectedIndex();
-              const indicator = isSelected ? ">" : " ";
               return (
                 <text
                   {...(isSelected
                     ? { fg: "cyan", attributes: TextAttributes.BOLD }
                     : {})}
                 >
-                  {`${indicator} ${entry.summary}`}
+                  {entry.summary}
                 </text>
               );
             })}

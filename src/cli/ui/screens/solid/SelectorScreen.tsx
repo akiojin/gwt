@@ -140,7 +140,6 @@ export function SelectorScreen({
             {list.visibleItems().map((item, index) => {
               const absoluteIndex = list.scrollOffset() + index;
               const isSelected = absoluteIndex === selectedIndex();
-              const indicator = isSelected ? ">" : " ";
               return (
                 <box flexDirection="row">
                   <text
@@ -148,7 +147,7 @@ export function SelectorScreen({
                       ? { fg: "cyan", attributes: TextAttributes.BOLD }
                       : {})}
                   >
-                    {`${indicator} ${item.label}`}
+                    {item.label}
                   </text>
                   {showDescription && item.description ? (
                     <text

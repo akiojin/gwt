@@ -52,45 +52,9 @@ export interface BranchListScreenProps {
 
 const VIEW_MODES: BranchViewMode[] = ["all", "local", "remote"];
 
-const WIDTH_OVERRIDES: Record<string, number> = {
-  "☁": 1,
-  "⚡": 1,
-  "✨": 1,
-  "🐛": 1,
-  "🔥": 1,
-  "🚀": 1,
-  "📌": 1,
-  "🟢": 2,
-  "⚪": 2,
-  "🔴": 2,
-  "👉": 1,
-  "💾": 1,
-  "📤": 1,
-  "🔃": 1,
-  "✅": 2,
-  "⚠": 2,
-  "⚠️": 2,
-  "🛡": 2,
-  "🔗": 2,
-  "💻": 2,
-  "☁️": 2,
-  "☑": 2,
-  "☐": 2,
-};
+const getCharWidth = (char: string): number => stringWidth(char);
 
-const getCharWidth = (char: string): number => {
-  const baseWidth = stringWidth(char);
-  const override = WIDTH_OVERRIDES[char];
-  return override !== undefined ? Math.max(baseWidth, override) : baseWidth;
-};
-
-const measureDisplayWidth = (value: string): number => {
-  let width = 0;
-  for (const char of Array.from(value)) {
-    width += getCharWidth(char);
-  }
-  return width;
-};
+const measureDisplayWidth = (value: string): number => stringWidth(value);
 
 const truncateToWidth = (value: string, maxWidth: number): string => {
   if (maxWidth <= 0) {
@@ -101,7 +65,7 @@ const truncateToWidth = (value: string, maxWidth: number): string => {
     return value;
   }
 
-  const ellipsis = "…";
+  const ellipsis = "...";
   const ellipsisWidth = measureDisplayWidth(ellipsis);
   if (ellipsisWidth >= maxWidth) {
     return ellipsis;
@@ -166,7 +130,7 @@ const truncateSegmentsToWidth = (
   if (maxWidth <= 0) {
     return [];
   }
-  const ellipsis = "…";
+  const ellipsis = "...";
   const ellipsisWidth = measureDisplayWidth(ellipsis);
   if (ellipsisWidth >= maxWidth) {
     return [{ text: ellipsis }];
@@ -226,9 +190,9 @@ const applySelectionStyle = (segments: TextSegment[]): TextSegment[] =>
     bg: "cyan",
   }));
 
-const CLEANUP_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
+const CLEANUP_SPINNER_FRAMES = ["-", "\\", "|", "/"];
 
-const CURSOR_FRAMES = ["▌", " "];
+const CURSOR_FRAMES = ["|", " "];
 
 const formatRelativeTime = (date: Date): string => {
   const now = new Date();
@@ -362,7 +326,7 @@ export function BranchListScreen(props: BranchListScreenProps) {
     return title;
   });
 
-  const dividerLine = createMemo(() => "─".repeat(layoutWidth()));
+  const dividerLine = createMemo(() => "-".repeat(layoutWidth()));
 
   const fixedLines = createMemo(() => {
     const headerLines = 2 + (props.workingDirectory ? 1 : 0);
@@ -658,7 +622,7 @@ export function BranchListScreen(props: BranchListScreenProps) {
     let leadingIndicator = "";
     if (indicatorInfo) {
       leadingIndicator = indicatorInfo.isSpinning
-        ? (CLEANUP_SPINNER_FRAMES[0] ?? "⠋")
+        ? (CLEANUP_SPINNER_FRAMES[0] ?? "-")
         : indicatorInfo.icon;
     }
     const indicatorColor =

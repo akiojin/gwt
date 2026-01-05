@@ -333,10 +333,10 @@ export function formatKeyCombination(combo: KeyCombination): string {
  */
 function formatKeyName(key: string): string {
   const displayMap: Record<string, string> = {
-    [Keys.UP]: "↑",
-    [Keys.DOWN]: "↓",
-    [Keys.LEFT]: "←",
-    [Keys.RIGHT]: "→",
+    [Keys.UP]: "Up",
+    [Keys.DOWN]: "Down",
+    [Keys.LEFT]: "Left",
+    [Keys.RIGHT]: "Right",
     [Keys.ENTER]: "Enter",
     [Keys.ESCAPE]: "Esc",
     [Keys.TAB]: "Tab",

@@ -64,12 +64,7 @@ const fitText = (value: string, width: number): string => {
 };
 
 const normalizeKeyLabel = (combo: KeybindingDef["key"]): string => {
-  const label = formatKeyCombination(combo);
-  return label
-    .replaceAll("↑", "Up")
-    .replaceAll("↓", "Down")
-    .replaceAll("←", "Left")
-    .replaceAll("→", "Right");
+  return formatKeyCombination(combo);
 };
 
 const buildHelpItems = (context?: string): HelpItem[] => {
