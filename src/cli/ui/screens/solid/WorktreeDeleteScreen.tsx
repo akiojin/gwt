@@ -1,3 +1,4 @@
+/** @jsxImportSource @opentui/solid */
 import { Header } from "../../components/solid/Header.js";
 import { ConfirmScreen } from "./ConfirmScreen.js";
 import { useTerminalSize } from "../../hooks/solid/useTerminalSize.js";

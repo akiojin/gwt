@@ -1,3 +1,4 @@
+/** @jsxImportSource @opentui/solid */
 import { useKeyboard } from "@opentui/solid";
 import { Header } from "../../components/solid/Header.js";
 import { Footer } from "../../components/solid/Footer.js";

@@ -1,3 +1,4 @@
+/** @jsxImportSource @opentui/solid */
 import { TextAttributes } from "@opentui/core";
 
 export interface FooterAction {
@@ -16,20 +17,20 @@ export function Footer({ actions, separator = "  " }: FooterProps) {
   }
 
   return (
-    <text>
+    <box flexDirection="row">
       {actions.map((action, index) => (
-        <span>
-          <span attributes={TextAttributes.DIM}>[</span>
-          <span fg="cyan" attributes={TextAttributes.BOLD}>
+        <>
+          <text attributes={TextAttributes.DIM}>[</text>
+          <text fg="cyan" attributes={TextAttributes.BOLD}>
             {action.key}
-          </span>
-          <span attributes={TextAttributes.DIM}>]</span>
-          <span>{` ${action.description}`}</span>
-          {index < actions.length - 1 && (
-            <span attributes={TextAttributes.DIM}>{separator}</span>
-          )}
-        </span>
+          </text>
+          <text attributes={TextAttributes.DIM}>]</text>
+          <text>{` ${action.description}`}</text>
+          {index < actions.length - 1 ? (
+            <text attributes={TextAttributes.DIM}>{separator}</text>
+          ) : null}
+        </>
       ))}
-    </text>
+    </box>
   );
 }

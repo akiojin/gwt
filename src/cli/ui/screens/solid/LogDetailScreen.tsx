@@ -1,9 +1,10 @@
+/** @jsxImportSource @opentui/solid */
 import { useKeyboard } from "@opentui/solid";
 import { createMemo } from "solid-js";
 import { Header } from "../../components/solid/Header.js";
 import { Footer } from "../../components/solid/Footer.js";
 import { useTerminalSize } from "../../hooks/solid/useTerminalSize.js";
-import type { FormattedLogEntry } from "../../../logging/formatter.js";
+import type { FormattedLogEntry } from "../../../../logging/formatter.js";
 
 export interface LogDetailScreenProps {
   entry: FormattedLogEntry | null;

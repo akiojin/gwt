@@ -1,3 +1,4 @@
+/** @jsxImportSource @opentui/solid */
 import type { SelectOption } from "@opentui/core";
 
 export interface SelectInputItem {

@@ -1,3 +1,4 @@
+/** @jsxImportSource @opentui/solid */
 import { useKeyboard } from "@opentui/solid";
 import { TextInput } from "../../components/solid/TextInput.js";
 

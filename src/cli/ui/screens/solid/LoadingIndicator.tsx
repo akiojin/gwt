@@ -1,3 +1,4 @@
+/** @jsxImportSource @opentui/solid */
 import { createEffect, createMemo, createSignal } from "solid-js";
 
 export interface LoadingIndicatorScreenProps {

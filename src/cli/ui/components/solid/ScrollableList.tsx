@@ -1,3 +1,4 @@
+/** @jsxImportSource @opentui/solid */
 import type { JSX } from "solid-js";
 
 export interface ScrollableListProps {

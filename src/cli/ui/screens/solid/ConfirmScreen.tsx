@@ -1,3 +1,4 @@
+/** @jsxImportSource @opentui/solid */
 import { TextAttributes } from "@opentui/core";
 import { useKeyboard } from "@opentui/solid";
 import { createSignal } from "solid-js";
@@ -50,8 +51,7 @@ export function ConfirmScreen({
 
   const renderOption = (label: string, isSelected: boolean) => (
     <text
-      fg={isSelected ? "cyan" : undefined}
-      attributes={isSelected ? TextAttributes.BOLD : undefined}
+      {...(isSelected ? { fg: "cyan", attributes: TextAttributes.BOLD } : {})}
     >
       {`${isSelected ? ">" : " "} ${label}`}
     </text>

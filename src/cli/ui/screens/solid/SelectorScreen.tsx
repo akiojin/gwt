@@ -1,3 +1,4 @@
+/** @jsxImportSource @opentui/solid */
 import { useKeyboard } from "@opentui/solid";
 import { createEffect, createMemo } from "solid-js";
 import { TextAttributes } from "@opentui/core";
@@ -136,17 +137,23 @@ export function SelectorScreen({
               const isSelected = absoluteIndex === selectedIndex();
               const indicator = isSelected ? ">" : " ";
               return (
-                <text
-                  fg={isSelected ? "cyan" : undefined}
-                  attributes={isSelected ? TextAttributes.BOLD : undefined}
-                >
-                  <span>{`${indicator} ${item.label}`}</span>
+                <box flexDirection="row">
+                  <text
+                    {...(isSelected
+                      ? { fg: "cyan", attributes: TextAttributes.BOLD }
+                      : {})}
+                  >
+                    {`${indicator} ${item.label}`}
+                  </text>
                   {showDescription && item.description ? (
-                    <span attributes={TextAttributes.DIM}>
+                    <text
+                      attributes={TextAttributes.DIM}
+                      {...(isSelected ? { fg: "cyan" } : {})}
+                    >
                       {` - ${item.description}`}
-                    </span>
+                    </text>
                   ) : null}
-                </text>
+                </box>
               );
             })}
           </box>

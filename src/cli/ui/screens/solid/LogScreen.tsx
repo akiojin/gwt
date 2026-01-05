@@ -1,10 +1,11 @@
+/** @jsxImportSource @opentui/solid */
 import { useKeyboard } from "@opentui/solid";
 import { createMemo } from "solid-js";
 import { TextAttributes } from "@opentui/core";
 import { Header } from "../../components/solid/Header.js";
 import { Footer } from "../../components/solid/Footer.js";
 import { useTerminalSize } from "../../hooks/solid/useTerminalSize.js";
-import type { FormattedLogEntry } from "../../../logging/formatter.js";
+import type { FormattedLogEntry } from "../../../../logging/formatter.js";
 import { useScrollableList } from "../../hooks/solid/useScrollableList.js";
 
 export interface LogScreenProps {
@@ -130,15 +131,11 @@ export function LogScreen({
         </text>
       ) : null}
 
-      <box>
-        <text>
-          <span attributes={TextAttributes.DIM}>Date: </span>
-          <span attributes={TextAttributes.BOLD}>{selectedDate ?? "---"}</span>
-        </text>
-        <text>
-          <span attributes={TextAttributes.DIM}> Total: </span>
-          <span attributes={TextAttributes.BOLD}>{entries.length}</span>
-        </text>
+      <box flexDirection="row">
+        <text attributes={TextAttributes.DIM}>Date: </text>
+        <text attributes={TextAttributes.BOLD}>{selectedDate ?? "---"}</text>
+        <text attributes={TextAttributes.DIM}> Total: </text>
+        <text attributes={TextAttributes.BOLD}>{entries.length}</text>
       </box>
 
       <box flexDirection="column" flexGrow={1}>
@@ -154,8 +151,9 @@ export function LogScreen({
               const indicator = isSelected ? ">" : " ";
               return (
                 <text
-                  fg={isSelected ? "cyan" : undefined}
-                  attributes={isSelected ? TextAttributes.BOLD : undefined}
+                  {...(isSelected
+                    ? { fg: "cyan", attributes: TextAttributes.BOLD }
+                    : {})}
                 >
                   {`${indicator} ${entry.summary}`}
                 </text>

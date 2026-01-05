@@ -1,3 +1,4 @@
+/** @jsxImportSource @opentui/solid */
 import { TextAttributes } from "@opentui/core";
 import type { JSX } from "solid-js";
 import type { BranchViewMode, Statistics } from "../../types.js";
@@ -46,15 +47,15 @@ export function Stats({
 }: StatsProps) {
   const segments: JSX.Element[] = [];
   const appendSeparator = () => {
-    segments.push(<span attributes={TextAttributes.DIM}>{separator}</span>);
+    segments.push(<text attributes={TextAttributes.DIM}>{separator}</text>);
   };
 
   if (viewMode) {
-    segments.push(<span attributes={TextAttributes.DIM}>Mode: </span>);
+    segments.push(<text attributes={TextAttributes.DIM}>Mode: </text>);
     segments.push(
-      <span fg="white" attributes={TextAttributes.BOLD}>
+      <text fg="white" attributes={TextAttributes.BOLD}>
         {formatViewModeLabel(viewMode)}
-      </span>,
+      </text>,
     );
     if (stats || lastUpdated) {
       appendSeparator();
@@ -70,12 +71,12 @@ export function Stats({
 
   items.forEach((item, index) => {
     segments.push(
-      <span attributes={TextAttributes.DIM}>{`${item.label}: `}</span>,
+      <text attributes={TextAttributes.DIM}>{`${item.label}: `}</text>,
     );
     segments.push(
-      <span fg={item.color} attributes={TextAttributes.BOLD}>
+      <text fg={item.color} attributes={TextAttributes.BOLD}>
         {item.value}
-      </span>,
+      </text>,
     );
     if (index < items.length - 1 || lastUpdated) {
       appendSeparator();
@@ -83,9 +84,9 @@ export function Stats({
   });
 
   if (lastUpdated) {
-    segments.push(<span attributes={TextAttributes.DIM}>Updated: </span>);
-    segments.push(<span fg="gray">{formatRelativeTime(lastUpdated)}</span>);
+    segments.push(<text attributes={TextAttributes.DIM}>Updated: </text>);
+    segments.push(<text fg="gray">{formatRelativeTime(lastUpdated)}</text>);
   }
 
-  return <text>{segments}</text>;
+  return <box flexDirection="row">{segments}</box>;
 }

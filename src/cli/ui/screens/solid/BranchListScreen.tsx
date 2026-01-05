@@ -1,3 +1,4 @@
+/** @jsxImportSource @opentui/solid */
 import { createEffect, createMemo, createSignal } from "solid-js";
 import { useKeyboard, useTerminalDimensions } from "@opentui/solid";
 import { TextAttributes } from "@opentui/core";
@@ -131,9 +132,9 @@ const padLine = (value: string, width: number): string => {
 
 interface TextSegment {
   text: string;
-  fg?: string;
-  bg?: string;
-  attributes?: number;
+  fg?: string | undefined;
+  bg?: string | undefined;
+  attributes?: number | undefined;
 }
 
 const segmentStyleKey = (segment: TextSegment): string =>
@@ -514,7 +515,9 @@ export function BranchListScreen(props: BranchListScreenProps) {
   });
 
   const cursorFrame = createMemo(() =>
-    filterMode() ? (CURSOR_FRAMES[cursorIndex()] ?? CURSOR_FRAMES[0]) : "",
+    filterMode()
+      ? (CURSOR_FRAMES[cursorIndex()] ?? CURSOR_FRAMES[0] ?? "")
+      : "",
   );
 
   const formatLatestCommit = (timestamp?: number) => {
@@ -914,13 +917,19 @@ export function BranchListScreen(props: BranchListScreenProps) {
   });
 
   const renderSegmentLine = (segments: TextSegment[]) => (
-    <text>
+    <box flexDirection="row">
       {segments.map((segment) => (
-        <span fg={segment.fg} bg={segment.bg} attributes={segment.attributes}>
+        <text
+          {...(segment.fg !== undefined ? { fg: segment.fg } : {})}
+          {...(segment.bg !== undefined ? { bg: segment.bg } : {})}
+          {...(segment.attributes !== undefined
+            ? { attributes: segment.attributes }
+            : {})}
+        >
           {segment.text}
-        </span>
+        </text>
       ))}
-    </text>
+    </box>
   );
 
   return (
@@ -951,9 +960,11 @@ export function BranchListScreen(props: BranchListScreenProps) {
       <box flexDirection="column" flexGrow={1}>
         <LoadingIndicator
           isLoading={Boolean(props.loading)}
-          delay={props.loadingIndicatorDelay}
           message="Loading Git information..."
           width={layoutWidth()}
+          {...(props.loadingIndicatorDelay !== undefined
+            ? { delay: props.loadingIndicatorDelay }
+            : {})}
         />
 
         {props.error && (
@@ -1008,7 +1019,11 @@ export function BranchListScreen(props: BranchListScreenProps) {
       </box>
 
       {props.cleanupUI?.footerMessage && (
-        <text fg={props.cleanupUI.footerMessage.color}>
+        <text
+          {...(props.cleanupUI.footerMessage.color
+            ? { fg: props.cleanupUI.footerMessage.color }
+            : {})}
+        >
           {padLine(
             props.cleanupUI.footerMessage.isSpinning && cleanupSpinnerFrame()
               ? `${cleanupSpinnerFrame()} ${props.cleanupUI.footerMessage.text}`

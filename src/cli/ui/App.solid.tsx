@@ -247,12 +247,15 @@ export function AppSolid(props: AppSolidProps) {
         });
       }
 
-      const enriched = filtered.map((branch) => ({
-        ...branch,
-        ...(branch.type === "local" && worktreeMap.has(branch.name)
-          ? { worktree: worktreeMap.get(branch.name) }
-          : {}),
-      }));
+      const enriched = filtered.map((branch) => {
+        if (branch.type === "local") {
+          const worktree = worktreeMap.get(branch.name);
+          if (worktree) {
+            return { ...branch, worktree };
+          }
+        }
+        return branch;
+      });
 
       const items = formatBranchItems(enriched, worktreeMap);
       setBranchItems(items);
@@ -378,7 +381,9 @@ export function AppSolid(props: AppSolidProps) {
           onRefresh={refreshBranches}
           loading={loading()}
           error={error()}
-          loadingIndicatorDelay={props.loadingIndicatorDelay}
+          {...(props.loadingIndicatorDelay !== undefined
+            ? { loadingIndicatorDelay: props.loadingIndicatorDelay }
+            : {})}
           version={version()}
           workingDirectory={workingDirectory()}
           toolStatuses={toolStatuses()}

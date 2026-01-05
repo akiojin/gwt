@@ -1,3 +1,4 @@
+/** @jsxImportSource @opentui/solid */
 import { TextAttributes } from "@opentui/core";
 
 export interface HeaderProps {
@@ -56,10 +57,10 @@ export function Header({
       </text>
       {showDivider && <text attributes={TextAttributes.DIM}>{divider}</text>}
       {workingDirectory && (
-        <text>
-          <span attributes={TextAttributes.DIM}>Working Directory: </span>
-          <span>{workingDirectory}</span>
-        </text>
+        <box flexDirection="row">
+          <text attributes={TextAttributes.DIM}>Working Directory: </text>
+          <text>{workingDirectory}</text>
+        </box>
       )}
     </box>
   );

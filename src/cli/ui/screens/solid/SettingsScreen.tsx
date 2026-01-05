@@ -1,3 +1,4 @@
+/** @jsxImportSource @opentui/solid */
 import { SelectorScreen } from "./SelectorScreen.js";
 
 export interface SettingsItem {
