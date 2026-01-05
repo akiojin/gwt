@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 
 let tempHome = "";
-const originalHomeEnv = process.env.CLAUDE_WORKTREE_HOME;
+const originalHomeEnv = process.env.GWT_HOME;
 
 describe("shared environment config", () => {
   let loadToolsConfig: typeof import("../../../src/config/tools.js").loadToolsConfig;
@@ -12,8 +12,8 @@ describe("shared environment config", () => {
   beforeEach(async () => {
     const base = path.join(process.cwd(), ".tmp-tests");
     await mkdir(base, { recursive: true });
-    tempHome = await mkdtemp(path.join(base, "cw-tools-"));
-    process.env.CLAUDE_WORKTREE_HOME = tempHome;
+    tempHome = await mkdtemp(path.join(base, "gwt-tools-"));
+    process.env.GWT_HOME = tempHome;
     await vi.resetModules();
     const module = await import("../../../src/config/tools.js");
     loadToolsConfig = module.loadToolsConfig;
@@ -23,9 +23,9 @@ describe("shared environment config", () => {
   afterEach(async () => {
     await rm(tempHome, { recursive: true, force: true });
     if (originalHomeEnv === undefined) {
-      delete process.env.CLAUDE_WORKTREE_HOME;
+      delete process.env.GWT_HOME;
     } else {
-      process.env.CLAUDE_WORKTREE_HOME = originalHomeEnv;
+      process.env.GWT_HOME = originalHomeEnv;
     }
     await vi.resetModules();
   });

@@ -9,7 +9,7 @@ vi.mock("execa", () => ({
 }));
 
 vi.mock("../../src/config/tools.js", () => ({
-  getToolById: (...args: unknown[]) => mockGetToolById(...args),
+  getCodingAgentById: (...args: unknown[]) => mockGetToolById(...args),
 }));
 
 const detectionCommand = process.platform === "win32" ? "where" : "which";
@@ -17,13 +17,13 @@ const detectionCommand = process.platform === "win32" ? "where" : "which";
 import {
   resolveClaudeCommand,
   resolveCodexCommand,
-  resolveCustomToolCommand,
+  resolveCodingAgentCommand,
   buildClaudeArgs,
   buildCodexArgs,
-  AIToolResolutionError,
+  CodingAgentResolutionError,
   __resetBunxCacheForTests,
-} from "../../src/services/aiToolResolver.js";
-import { CODEX_DEFAULT_ARGS } from "../../src/shared/aiToolConstants.js";
+} from "../../src/services/codingAgentResolver.js";
+import { CODEX_DEFAULT_ARGS } from "../../src/shared/codingAgentConstants.js";
 
 function notFoundError(): Error & { code: string } {
   const error = new Error("not found") as Error & { code: string };
@@ -37,7 +37,7 @@ beforeEach(() => {
   __resetBunxCacheForTests();
 });
 
-describe("aiToolResolver", () => {
+describe("codingAgentResolver", () => {
   it("resolves claude to local binary when available", async () => {
     mockExeca.mockImplementation(async (cmd, args) => {
       if (cmd === detectionCommand && args[0] === "claude") {
@@ -89,7 +89,7 @@ describe("aiToolResolver", () => {
     });
 
     await expect(resolveClaudeCommand()).rejects.toBeInstanceOf(
-      AIToolResolutionError,
+      CodingAgentResolutionError,
     );
   });
 
@@ -139,7 +139,7 @@ describe("aiToolResolver", () => {
     ).toEqual(["-r", "--dangerously-skip-permissions", "--foo"]);
   });
 
-  it("resolves custom tools defined in tools.json", async () => {
+  it("resolves custom coding agents defined in tools.json", async () => {
     mockGetToolById.mockResolvedValue({
       id: "aider",
       displayName: "Aider",
@@ -153,8 +153,8 @@ describe("aiToolResolver", () => {
       env: { AIDER_DEBUG: "1" },
     });
 
-    const result = await resolveCustomToolCommand({
-      toolId: "aider",
+    const result = await resolveCodingAgentCommand({
+      agentId: "aider",
       mode: "continue",
       skipPermissions: true,
       extraArgs: ["--branch", "feature/x"],
@@ -171,7 +171,7 @@ describe("aiToolResolver", () => {
     expect(result.env?.AIDER_DEBUG).toBe("1");
   });
 
-  it("resolved PATH command for custom tools", async () => {
+  it("resolves PATH command for custom coding agents", async () => {
     mockGetToolById.mockResolvedValue({
       id: "local-tool",
       displayName: "Local Tool",
@@ -189,19 +189,19 @@ describe("aiToolResolver", () => {
       return { stdout: "" } as { stdout: string };
     });
 
-    const result = await resolveCustomToolCommand({
-      toolId: "local-tool",
+    const result = await resolveCodingAgentCommand({
+      agentId: "local-tool",
     });
 
     expect(result.command).toBe("/usr/local/bin/my-tool");
     expect(result.usesFallback).toBe(false);
   });
 
-  it("throws when custom tool id is unknown", async () => {
+  it("throws when custom coding agent id is unknown", async () => {
     mockGetToolById.mockResolvedValue(undefined);
 
     await expect(
-      resolveCustomToolCommand({ toolId: "missing" }),
-    ).rejects.toBeInstanceOf(AIToolResolutionError);
+      resolveCodingAgentCommand({ agentId: "missing" }),
+    ).rejects.toBeInstanceOf(CodingAgentResolutionError);
   });
 });

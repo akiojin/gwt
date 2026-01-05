@@ -43,6 +43,54 @@
 * update default Claude Code model to Opus 4.5 ([1dd909e](https://github.com/akiojin/gwt/commit/1dd909ed87a55ce3bb796deb0431d0027571dae2))
 * update Opus model version to 4.5 ([307faeb](https://github.com/akiojin/gwt/commit/307faeb66ebac0ca89b01c07ee19d213797c4d5c))
 
+## [4.9.0](https://github.com/akiojin/gwt/compare/v4.8.0...v4.9.0) (2025-12-29)
+
+
+### Features
+
+* AIツールのインストール済み表示をバージョン番号に変更 ([#461](https://github.com/akiojin/gwt/issues/461)) ([2610ef2](https://github.com/akiojin/gwt/commit/2610ef2a8a1b64b8e98b4cde6df1b5afdabcef55))
+
+
+### Bug Fixes
+
+* claude-worktree後方互換コードを削除 ([#462](https://github.com/akiojin/gwt/issues/462)) ([c8e5fbf](https://github.com/akiojin/gwt/commit/c8e5fbf06f5c18480f2af3f8e78469214282ef28))
+
+## [4.8.0](https://github.com/akiojin/gwt/compare/v4.7.0...v4.8.0) (2025-12-29)
+
+
+### Features
+
+* Docker構成を最適化しPlaywright noVNCサービスを追加 ([#454](https://github.com/akiojin/gwt/issues/454)) ([6dd0843](https://github.com/akiojin/gwt/commit/6dd08435f9f49061f156d01f5e7ce0a25e15307f))
+* Docker構成を最適化しPlaywright noVNCサービスを追加 ([#455](https://github.com/akiojin/gwt/issues/455)) ([e62fef5](https://github.com/akiojin/gwt/commit/e62fef5bc199a26ea0d6f8f36527612ff461b00f))
+* ブランチ一覧に最終アクティビティ時間を表示 ([#456](https://github.com/akiojin/gwt/issues/456)) ([7cfab79](https://github.com/akiojin/gwt/commit/7cfab79ebc64393fb1e6666191c57d8baf2c5686))
+
+
+### Bug Fixes
+
+* execaのshell: trueオプションを削除してbunx起動エラーを修正 ([#458](https://github.com/akiojin/gwt/issues/458)) ([6de849f](https://github.com/akiojin/gwt/commit/6de849f70086dedcb8b79771590985cb6989833a))
+* warn then return after dirty worktree ([#453](https://github.com/akiojin/gwt/issues/453)) ([c9cead9](https://github.com/akiojin/gwt/commit/c9cead9841f6522fbe8cf43258eceb1183289c79))
+* 自動インストール警告文のタイポ修正 ([#451](https://github.com/akiojin/gwt/issues/451)) ([15917e3](https://github.com/akiojin/gwt/commit/15917e3d28a7ef950278a73dfaa5c298dfd4633f))
+
+## [4.7.0](https://github.com/akiojin/gwt/compare/v4.6.1...v4.7.0) (2025-12-26)
+
+
+### Features
+
+* ログビューアを追加 ([#442](https://github.com/akiojin/gwt/issues/442)) ([92128c3](https://github.com/akiojin/gwt/commit/92128c37f7453d302025b5d023984543d023adf4))
+* ログ表示の通知と選択UIを改善 ([#443](https://github.com/akiojin/gwt/issues/443)) ([cf3d7b3](https://github.com/akiojin/gwt/commit/cf3d7b31e84cdbc762fc6c629b5c670744678cb5))
+* 未コミット警告時にEnterキー待機を追加 ([#441](https://github.com/akiojin/gwt/issues/441)) ([d03dac5](https://github.com/akiojin/gwt/commit/d03dac52c12a5cb6ef99b973d7348f4f3ccdeeb6))
+
+
+### Bug Fixes
+
+* **cli:** AIツール実行時にフルパスを使用 ([#439](https://github.com/akiojin/gwt/issues/439)) ([2fe73e2](https://github.com/akiojin/gwt/commit/2fe73e27ea7f9148415fb67b3bfbe0dce9ac48bb))
+* worktree作成時のstale残骸を自動回復 ([#445](https://github.com/akiojin/gwt/issues/445)) ([ce971a6](https://github.com/akiojin/gwt/commit/ce971a6e4cd85db5c8c5295d9a1a6502898e9012))
+
+
+### Performance Improvements
+
+* ブランチ一覧のgit状態取得をキャッシュ化 ([#446](https://github.com/akiojin/gwt/issues/446)) ([76f30d6](https://github.com/akiojin/gwt/commit/76f30d64f7a5674eea07843c0aafb385f37e8282))
+
 ## [4.6.1](https://github.com/akiojin/gwt/compare/v4.6.0...v4.6.1) (2025-12-25)
 
 

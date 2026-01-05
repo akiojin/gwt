@@ -17,7 +17,7 @@ gwtはGit worktreeを活用した対話型ブランチ管理CLIツールです�
         ┌──────────┴──────────┬──────────────┬────────────┐
         │                     │              │            │
 ┌───────▼────────┐  ┌────────▼────────┐  ┌─▼──────┐  ┌──▼───────┐
-│  Git Module    │  │ Worktree Module │  │ GitHub │  │  AI Tool │
+│  Git Module    │  │ Worktree Module │  │ GitHub │  │  Coding  │
 │  (src/git.ts)  │  │(src/worktree.ts)│  │ Module │  │Integration│
 └───────┬────────┘  └────────┬────────┘  └─┬──────┘  └──┬───────┘
         │                    │              │            │
@@ -67,7 +67,7 @@ gwtはGit worktreeを活用した対話型ブランチ管理CLIツールです�
 - `git.ts` - Git操作
 - `worktree.ts` - ワークツリー管理
 - `github.ts` - GitHub統合
-- `claude.ts` / `codex.ts` - AIツール統合
+- `claude.ts` / `codex.ts` - Coding Agent 統合
 - `config/index.ts` - セッション管理
 
 ### 2. Git Module (`src/git.ts`)
@@ -133,7 +133,7 @@ gwtはGit worktreeを活用した対話型ブランチ管理CLIツールです�
 
 - `execa` - `gh`コマンド実行
 
-### 5. AI Tool Integration
+### 5. Coding Agent Integration
 
 #### Claude Code (`src/claude.ts`)
 
@@ -161,7 +161,7 @@ gwtはGit worktreeを活用した対話型ブランチ管理CLIツールです�
 
 **技術スタック:**
 
-- `execa` - AIツールプロセス起動
+- `execa` - Coding Agent プロセス起動
 - `node:child_process` - プロセス管理
 
 ### 6. Session Management (`src/config/index.ts`)
@@ -224,7 +224,7 @@ inquirer.select() → User Selection
     ↓
 worktree.createWorktree() → New Worktree
     ↓
-AI Tool Launch (claude.ts / codex.ts)
+Coding Agent Launch (claude.ts / codex.ts)
     ↓
 config.saveSession() → Session Persistence
 ```
@@ -248,7 +248,7 @@ worktree.createWorktree() → Worktree Creation
     ↓
 (For Release) git.executeNpmVersionInWorktree() → Update package.json
     ↓
-AI Tool Launch
+Coding Agent Launch
     ↓
 Session Save
 ```
@@ -296,7 +296,7 @@ git.deleteBranch() → Delete Branch
    - 認証エラー
    - PR取得失敗
 
-4. **AI Tool Error**: AIツール起動失敗
+4. **Coding Agent Error**: Coding Agent 起動失敗
    - ツールが見つからない
    - プロセス起動失敗
 
@@ -353,7 +353,7 @@ git.deleteBranch() → Delete Branch
 ### E2E Tests (`tests/e2e/`)
 
 - 完全なユーザーワークフローをテスト
-- ブランチ選択→ワークツリー作成→AIツール起動
+- ブランチ選択→ワークツリー作成→Coding Agent 起動
 - エラーリカバリーシナリオ
 
 **Testing Framework:** Vitest

@@ -14,8 +14,8 @@ import {
 interface SessionInfo {
   sessionId: string;
   worktreePath: string;
-  toolType: string;
-  toolName?: string | null;
+  agentType: string;
+  agentName?: string | null;
   mode?: string;
   status: "pending" | "running" | "completed" | "failed";
   startedAt?: string;
@@ -62,9 +62,9 @@ function formatDate(value?: string | null): string {
   }
 }
 
-function toolLabel(toolType: string, toolName?: string | null): string {
-  if (toolType === "custom") return toolName ?? "Custom";
-  if (toolType === "codex-cli") return "Codex CLI";
+function agentLabel(agentType: string, agentName?: string | null): string {
+  if (agentType === "custom") return agentName ?? "Custom";
+  if (agentType === "codex-cli") return "Codex CLI";
   return "Claude Code";
 }
 
@@ -93,7 +93,7 @@ export function SessionHistoryTable({
           )}
         </div>
         <p className="mt-2 text-sm text-muted-foreground">
-          この Worktree に紐づいた AI セッション履歴です。CLI
+          この Worktree に紐づいた Coding Agent セッション履歴です。CLI
           からの起動分も共有されます。
         </p>
       </CardHeader>
@@ -132,7 +132,7 @@ export function SessionHistoryTable({
                       </Badge>
                     </TableCell>
                     <TableCell className="font-medium">
-                      {toolLabel(session.toolType, session.toolName)}
+                      {agentLabel(session.agentType, session.agentName)}
                     </TableCell>
                     <TableCell>
                       <span className="text-muted-foreground">

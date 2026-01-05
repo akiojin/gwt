@@ -9,26 +9,26 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import type {
-  CustomAITool,
+  ApiCodingAgent,
   EnvironmentVariable,
 } from "../../../../types/api.js";
 
-export interface CustomToolFormValue {
+export interface CustomCodingAgentFormValue {
   id: string;
   displayName: string;
   icon?: string | null;
   description?: string | null;
-  executionType: CustomAITool["executionType"];
+  executionType: ApiCodingAgent["executionType"];
   command: string;
   defaultArgs?: string[] | null;
-  modeArgs: CustomAITool["modeArgs"];
+  modeArgs: ApiCodingAgent["modeArgs"];
   permissionSkipArgs?: string[] | null;
   env?: EnvironmentVariable[] | null;
 }
 
-interface CustomToolFormProps {
-  initialValue?: CustomAITool;
-  onSubmit: (value: CustomToolFormValue) => void;
+interface CustomCodingAgentFormProps {
+  initialValue?: ApiCodingAgent;
+  onSubmit: (value: CustomCodingAgentFormValue) => void;
   onCancel: () => void;
   isSaving?: boolean;
 }
@@ -40,18 +40,18 @@ interface FormErrors {
   env?: string;
 }
 
-export function CustomToolForm({
+export function CustomCodingAgentForm({
   initialValue,
   onSubmit,
   onCancel,
   isSaving,
-}: CustomToolFormProps) {
+}: CustomCodingAgentFormProps) {
   const [formState, setFormState] = useState(() =>
     createInitialState(initialValue),
   );
   const [errors, setErrors] = useState<FormErrors>({});
 
-  const title = initialValue ? "ツールを編集" : "新規カスタムツール";
+  const title = initialValue ? "Coding Agent を編集" : "新規 Coding Agent";
 
   const handleChange =
     (field: keyof typeof formState) =>
@@ -120,7 +120,7 @@ export function CustomToolForm({
             {title}
           </p>
           <h3 className="mt-1 text-lg font-semibold">
-            {formState.displayName || "カスタムAIツール"}
+            {formState.displayName || "Custom Coding Agent"}
           </h3>
         </div>
         <div className="flex gap-2">
@@ -140,7 +140,7 @@ export function CustomToolForm({
 
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-2">
-          <label className="text-sm font-medium">ツールID *</label>
+          <label className="text-sm font-medium">Agent ID *</label>
           <Input
             type="text"
             value={formState.id}
@@ -286,14 +286,14 @@ export function CustomToolForm({
   );
 }
 
-function createInitialState(initialValue?: CustomAITool) {
+function createInitialState(initialValue?: ApiCodingAgent) {
   if (!initialValue) {
     return {
       id: "",
       displayName: "",
       icon: "",
       description: "",
-      executionType: "bunx" as CustomAITool["executionType"],
+      executionType: "bunx" as ApiCodingAgent["executionType"],
       command: "",
       defaultArgs: "",
       modeNormal: "",
