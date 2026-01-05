@@ -186,7 +186,9 @@ export function AppSolid(props: AppSolidProps) {
   );
   const [creationSource, setCreationSource] =
     createSignal<SelectedBranchState | null>(null);
-  const [createBranchName, setCreateBranchName] = createSignal("");
+  const [createBranchName, setCreateBranchName] = createSignal("", {
+    equals: false,
+  });
   const [suppressCreateKey, setSuppressCreateKey] = createSignal<string | null>(
     null,
   );
