@@ -166,7 +166,7 @@ export function CodingAgentLaunchModal({
     branch.name.replace(/^origin\//, ""),
   );
   const divergenceInfo = branch.divergence ?? null;
-  const hasBlockingDivergence = Boolean(
+  const hasConflictingDivergence = Boolean(
     divergenceInfo && divergenceInfo.ahead > 0 && divergenceInfo.behind > 0,
   );
   const needsRemoteSync = Boolean(
@@ -174,7 +174,7 @@ export function CodingAgentLaunchModal({
     divergenceInfo &&
     divergenceInfo.behind > 0 &&
     divergenceInfo.ahead === 0 &&
-    !hasBlockingDivergence,
+    !hasConflictingDivergence,
   );
 
   useEffect(() => {
@@ -270,15 +270,6 @@ export function CodingAgentLaunchModal({
       });
       return;
     }
-    if (hasBlockingDivergence) {
-      setBanner({
-        type: "error",
-        message:
-          "Both remote and local have diverged. Resolve differences before launching.",
-      });
-      return;
-    }
-
     if (
       skipPermissions &&
       !window.confirm("Skip permission checks? This is risky.")
@@ -408,11 +399,11 @@ export function CodingAgentLaunchModal({
             </Alert>
           )}
 
-          {hasBlockingDivergence && (
+          {hasConflictingDivergence && (
             <Alert variant="warning">
               <AlertDescription>
-                Both remote and local have unresolved differences. Rebase/merge
-                before launching.
+                Both remote and local have unresolved differences. You can
+                launch, but resolving differences is recommended.
               </AlertDescription>
             </Alert>
           )}
@@ -479,12 +470,7 @@ export function CodingAgentLaunchModal({
           <div className="flex flex-wrap gap-2">
             <Button
               onClick={handleStartSession}
-              disabled={
-                isStartingSession ||
-                !selectedAgent ||
-                hasBlockingDivergence ||
-                needsRemoteSync
-              }
+              disabled={isStartingSession || !selectedAgent || needsRemoteSync}
             >
               {isStartingSession ? "Launching..." : "Launch coding agent"}
             </Button>
