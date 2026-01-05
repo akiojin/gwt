@@ -8,6 +8,7 @@ import { useTerminalSize } from "../../hooks/solid/useTerminalSize.js";
 export interface WorktreeCreateScreenProps {
   branchName: string;
   onChange: (value: string) => void;
+  onInput?: (value: string) => void;
   onSubmit: (value: string) => void;
   onCancel?: () => void;
   baseBranch?: string;
@@ -18,6 +19,7 @@ export interface WorktreeCreateScreenProps {
 export function WorktreeCreateScreen({
   branchName,
   onChange,
+  onInput,
   onSubmit,
   onCancel,
   baseBranch,
@@ -55,6 +57,7 @@ export function WorktreeCreateScreen({
           label="Branch name"
           value={branchName}
           onChange={onChange}
+          onInput={onInput ?? onChange}
           onSubmit={onSubmit}
           focused
         />

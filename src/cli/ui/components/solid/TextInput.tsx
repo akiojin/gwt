@@ -4,6 +4,7 @@ import { TextAttributes } from "@opentui/core";
 export interface TextInputProps {
   value: string;
   onChange: (value: string) => void;
+  onInput?: (value: string) => void;
   onSubmit?: (value: string) => void;
   placeholder?: string;
   label?: string;
@@ -14,6 +15,7 @@ export interface TextInputProps {
 export function TextInput({
   value,
   onChange,
+  onInput,
   onSubmit,
   placeholder = "",
   label,
@@ -30,6 +32,7 @@ export function TextInput({
       <input
         value={value}
         onChange={onChange}
+        onInput={onInput}
         placeholder={placeholder}
         focused={isFocused}
         width={inputWidth}
