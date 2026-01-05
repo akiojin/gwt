@@ -41,6 +41,14 @@ const KNOWN_INSTALL_PATHS: Record<string, { unix: string[]; win32: string[] }> =
       ],
       win32: [join(homedir(), ".bun", "bin", "gemini.exe")],
     },
+    opencode: {
+      unix: [
+        join(homedir(), ".bun", "bin", "opencode"),
+        join(homedir(), ".local", "bin", "opencode"),
+        "/usr/local/bin/opencode",
+      ],
+      win32: [join(homedir(), ".bun", "bin", "opencode.exe")],
+    },
   };
 
 /**
@@ -50,6 +58,7 @@ const BUILTIN_TOOLS = [
   { id: "claude-code", commandName: "claude", displayName: "Claude" },
   { id: "codex-cli", commandName: "codex", displayName: "Codex" },
   { id: "gemini-cli", commandName: "gemini", displayName: "Gemini" },
+  { id: "opencode", commandName: "opencode", displayName: "OpenCode" },
 ] as const;
 
 /**

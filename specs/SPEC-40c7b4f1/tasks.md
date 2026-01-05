@@ -1,20 +1,25 @@
-# Tasks: divergence検知後のEnter待ち修正
+# タスク: ブランチ選択時のdivergence/FF失敗ハンドリング（起動継続）
 
 **仕様ID**: `SPEC-40c7b4f1`
+**入力**: `/specs/SPEC-40c7b4f1/` の仕様・計画
 
 ## Phase 1: TDD - Test First
 
-- [x] T001 テスト追加: TTY/非TTY の waitForEnter 振る舞いを検証するユニットテストを作成
+- [ ] **T001** CLI: divergence時でも起動が継続されることをテストで確認する（`tests/unit/index.protected-workflow.test.ts`）
+- [ ] **T002** CLI: divergence検知失敗時でも起動が継続されることをテストで確認する（`tests/unit/index.protected-workflow.test.ts`）
+- [ ] **T003** Web UI: divergence警告があっても起動ボタンが無効化されないことをテストで確認する（`tests/unit/web/client/pages/BranchDetailPage.test.tsx`）
 
 ## Phase 2: Implementation
 
-- [x] T002 実装: waitForEnter を共通モジュール化し、getTerminalStreams を使用するようリファクタ
-- [x] T003 実装: EOF/SIGINT 時のクリーンアップと raw モード解除を追加
+- [ ] **T004** CLI: divergence検知時のブロック/Enter待ちを廃止し、警告のみで続行する（`src/index.ts`）
+- [ ] **T005** CLI: divergence検知失敗時は警告のみで続行する（`src/index.ts`）
+- [ ] **T006** Web UI: divergence警告文を注意喚起に調整し、起動ボタンの無効化条件から除外する（`src/web/client/src/pages/BranchDetailPage.tsx`, `src/web/client/src/components/branch-detail/ToolLauncher.tsx`）
 
 ## Phase 3: Verification
 
-- [x] T004 検証: bun run test を実行し回帰を確認
+- [ ] **T007** `bun run test`（必要に応じて対象テストのみ）を実行し回帰がないことを確認する
+- [ ] **T008** `.github/workflows/lint.yml` 相当のチェック（`bun run format:check` / `bun run lint` / `bunx --bun markdownlint-cli ...`）を実行し必要なら修正する
 
 ## Phase 4: Documentation
 
-- [x] T005 ドキュメント: SPEC/plan/tasks への反映確認
+- [ ] **T009** `specs/specs.md` を最新化し、仕様一覧を更新する

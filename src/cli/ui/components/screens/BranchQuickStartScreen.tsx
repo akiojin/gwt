@@ -17,7 +17,7 @@ export type QuickStartAction = "reuse-continue" | "reuse-new" | "manual";
 export interface BranchQuickStartOption {
   toolId?: string | null;
   toolLabel: string;
-  toolCategory?: "Codex" | "Claude" | "Gemini" | "Other";
+  toolCategory?: "Codex" | "Claude" | "Gemini" | "OpenCode" | "Other";
   model?: string | null;
   sessionId?: string | null;
   inferenceLevel?: string | null;
@@ -58,7 +58,7 @@ type QuickStartItem = SelectItem & {
   action: QuickStartAction;
   groupStart?: boolean;
   category: string;
-  categoryColor: "cyan" | "yellow" | "magenta" | "green" | "white";
+  categoryColor: "cyan" | "yellow" | "magenta" | "green" | "white"; // Includes green for OpenCode
 };
 
 /**
@@ -88,6 +88,7 @@ export function BranchQuickStartScreen({
     "codex-cli": { label: "Codex", color: "cyan" },
     "claude-code": { label: "Claude", color: "yellow" },
     "gemini-cli": { label: "Gemini", color: "magenta" },
+    opencode: { label: "OpenCode", color: "green" },
     other: { label: "Other", color: "white" },
   } as const;
 
@@ -101,6 +102,8 @@ export function BranchQuickStartScreen({
         return CATEGORY_META["claude-code"];
       case "gemini-cli":
         return CATEGORY_META["gemini-cli"];
+      case "opencode":
+        return CATEGORY_META["opencode"];
       default:
         return CATEGORY_META.other;
     }
@@ -108,7 +111,7 @@ export function BranchQuickStartScreen({
 
   const items: QuickStartItem[] = previousOptions.length
     ? (() => {
-        const order = ["Claude", "Codex", "Gemini", "Other"];
+        const order = ["Claude", "Codex", "Gemini", "OpenCode", "Other"];
         const sorted = [...previousOptions].sort((a, b) => {
           const ca = resolveCategory(a.toolId).label;
           const cb = resolveCategory(b.toolId).label;
