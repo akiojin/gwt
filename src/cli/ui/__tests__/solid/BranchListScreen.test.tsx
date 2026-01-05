@@ -3,6 +3,8 @@ import { describe, expect, it } from "bun:test";
 import { testRender } from "@opentui/solid";
 import { BranchListScreen } from "../../screens/solid/BranchListScreen.js";
 import type { BranchItem, Statistics } from "../../types.js";
+import type { BranchListScreenProps } from "../../screens/solid/BranchListScreen.js";
+import type { ToolStatus } from "../../hooks/useToolStatus.js";
 
 const createBranch = (
   name: string,
@@ -30,7 +32,11 @@ const buildStats = (branches: BranchItem[]): Statistics => ({
 
 const renderScreen = async (
   branches: BranchItem[],
-  options: { width?: number; height?: number } = {},
+  options: {
+    width?: number;
+    height?: number;
+    props?: Partial<BranchListScreenProps>;
+  } = {},
 ) => {
   const selections: BranchItem[] = [];
   const stats = buildStats(branches);
@@ -41,6 +47,7 @@ const renderScreen = async (
         branches={branches}
         stats={stats}
         onSelect={(branch) => selections.push(branch)}
+        {...options.props}
       />
     ),
     {
@@ -63,6 +70,97 @@ const renderScreen = async (
 };
 
 describe("Solid BranchListScreen", () => {
+  it("renders header details", async () => {
+    const branches = [createBranch("main")];
+    const { captureCharFrame, cleanup } = await renderScreen(branches, {
+      props: {
+        version: "1.2.3",
+        activeProfile: "dev",
+        workingDirectory: "/tmp/repo",
+      },
+    });
+
+    try {
+      const frame = captureCharFrame();
+      expect(frame).toContain("gwt - Branch Selection v1.2.3 | Profile: dev");
+      expect(frame).toContain("Working Directory: /tmp/repo");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("renders stats and tool status", async () => {
+    const branches = [createBranch("main"), createBranch("feature/test")];
+    const toolStatuses: ToolStatus[] = [
+      {
+        id: "claude-code",
+        name: "Claude",
+        status: "installed",
+        path: "/usr/bin/claude",
+        version: "v1.0.0",
+      },
+    ];
+
+    const { captureCharFrame, cleanup } = await renderScreen(branches, {
+      props: { toolStatuses },
+    });
+
+    try {
+      const frame = captureCharFrame();
+      expect(frame).toContain("Mode: All");
+      expect(frame).toContain("Local: 2");
+      expect(frame).toContain("Remote: 0");
+      expect(frame).toContain("Worktrees: 0");
+      expect(frame).toContain("Changes: 0");
+      expect(frame).toContain("Tools: Claude: v1.0.0");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("shows loading indicator", async () => {
+    const branches = [createBranch("main")];
+    const { renderOnce, captureCharFrame, cleanup } = await renderScreen(
+      branches,
+      {
+        props: { loading: true, loadingIndicatorDelay: 0 },
+      },
+    );
+
+    try {
+      await renderOnce();
+      await renderOnce();
+      expect(captureCharFrame()).toContain("Loading Git information...");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("shows error message", async () => {
+    const branches: BranchItem[] = [];
+    const error = new Error("Failed to load branches");
+    const { captureCharFrame, cleanup } = await renderScreen(branches, {
+      props: { error },
+    });
+
+    try {
+      expect(captureCharFrame()).toContain("Error: Failed to load branches");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("shows empty state", async () => {
+    const branches: BranchItem[] = [];
+    const { captureCharFrame, cleanup } = await renderScreen(branches);
+
+    try {
+      expect(captureCharFrame()).toContain("No branches found");
+    } finally {
+      cleanup();
+    }
+  });
+
   it("moves selection and selects branch on enter", async () => {
     const branches = [
       createBranch("main"),
@@ -71,15 +169,15 @@ describe("Solid BranchListScreen", () => {
     ];
 
     const { mockInput, renderOnce, captureCharFrame, selections, cleanup } =
-      await renderScreen(branches);
+      await renderScreen(branches, { height: 12 });
 
     try {
-      expect(captureCharFrame()).toContain("> main");
+      expect(captureCharFrame()).toContain("> [ ] ⚪ ⚠ main");
 
       mockInput.pressArrow("down");
       await renderOnce();
 
-      expect(captureCharFrame()).toContain("> feature/login");
+      expect(captureCharFrame()).toContain("> [ ] ⚪ ⚠ feature/login");
 
       mockInput.pressEnter();
       await renderOnce();
@@ -99,7 +197,7 @@ describe("Solid BranchListScreen", () => {
     ];
 
     const { mockInput, renderOnce, captureCharFrame, cleanup } =
-      await renderScreen(branches);
+      await renderScreen(branches, { height: 12 });
 
     try {
       mockInput.pressKey("f");
@@ -111,6 +209,24 @@ describe("Solid BranchListScreen", () => {
       const frame = captureCharFrame();
       expect(frame).toContain("feature/search");
       expect(frame).not.toContain("hotfix/urgent");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("shows filtered empty state", async () => {
+    const branches = [createBranch("feature/search")];
+    const { mockInput, renderOnce, captureCharFrame, cleanup } =
+      await renderScreen(branches, { height: 12 });
+
+    try {
+      mockInput.pressKey("f");
+      await renderOnce();
+
+      await mockInput.typeText("zzz");
+      await renderOnce();
+
+      expect(captureCharFrame()).toContain("No branches match your filter");
     } finally {
       cleanup();
     }

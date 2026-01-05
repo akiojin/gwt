@@ -61,19 +61,12 @@
 
 ### 結果
 
-OpenTUI 版は **機能パリティ未達**。以下の機能が未実装または不足。
+OpenTUI 版は **主要機能のパリティを達成**。ただし以下の細部は差分として残る。
 
-- Header/Stats/Footer レイアウト（タイトル色、version/workingDirectory/activeProfile 表示、フッターのアクション表示）
-- フィルター入力 UI（Input コンポーネント、placeholder、フィルター件数表示、blockKeys）
-- ツール状態の表示（FR-019/FR-021/FR-022）
-- LoadingIndicator（遅延表示含む）
-- Error 表示（DEBUG 時の stack 表示含む）
-- 空状態のメッセージ（branches 0 / filter 0 の分岐）
-- Select 方式のリスト表示（レンダラ、選択ハイライト、行内の色/アイコン/情報表示）
-- 行フォーマット（最新アクティビティ、ツールラベル、幅計測・省略処理）
-- 複数選択（space でのトグル、selectedBranches の反映）
-- Cleanup UI（インジケータ、フッターメッセージ、inputLocked の取り扱い）
-- キーボードショートカット（c/r/p/l、tab モード切替の表記）
+- 色付け/強調表示の細部（ツールラベルの色、cleanup インジケータの色、警告色など）
+- cleanup フッターメッセージのスピナーアニメーション（現在は静的表示）
+- フィルター入力のカーソル表示（Input コンポーネントは未採用、テキスト表示ベース）
+- DEBUG 時のエラースタック詳細表示
 
 ## 技術的決定
 
