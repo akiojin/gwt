@@ -205,7 +205,7 @@ gwtから各コーディングエージェント（Claude Code、Codex、Gemini�
 - **FR-102**: Claude Codeは、継続モード時に`-c`フラグを、再開モード時に`-r`フラグを渡さ**なければならない**
 - **FR-103**: Claude Codeは、起動後に生成されるセッションファイル群から最終更新順に`session_id`を抽出し、agent等の`session_id`を持たないファイルで上書きしてはならない
 - **FR-104**: Claude Codeは、Chrome拡張機能統合が未対応の環境（例: WSL）では`--chrome`を付与せず、警告を表示して起動を継続**しなければならない**
-- **FR-105**: Claude Codeのローカルコマンドが存在しない場合、OSに関わらず`bunx`で起動し、`npx`へフォールバックしてはならない
+- **FR-105**: Claude Codeのローカルコマンドが存在しない場合、OSに関わらず`bunx`で起動する
 
 #### Codex固有要件
 

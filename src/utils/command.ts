@@ -199,7 +199,7 @@ export async function findCommand(
  * If the standard lookup fails, checks known installation paths
  * as a fallback for common tools.
  *
- * @param commandName - Command name to look up (e.g. `claude`, `npx`, `gemini`)
+ * @param commandName - Command name to look up (e.g. `claude`, `gemini`)
  * @returns true if the command exists in PATH or known paths
  */
 export async function isCommandAvailable(
