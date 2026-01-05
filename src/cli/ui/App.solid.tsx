@@ -187,6 +187,9 @@ export function AppSolid(props: AppSolidProps) {
   const [creationSource, setCreationSource] =
     createSignal<SelectedBranchState | null>(null);
   const [createBranchName, setCreateBranchName] = createSignal("");
+  const [suppressCreateKey, setSuppressCreateKey] = createSignal<string | null>(
+    null,
+  );
   const [defaultBaseBranch, setDefaultBaseBranch] = createSignal("main");
 
   const [logEntries, setLogEntries] = createSignal<FormattedLogEntry[]>([]);
@@ -411,6 +414,7 @@ export function AppSolid(props: AppSolidProps) {
   const handleQuickCreate = (branch: BranchItem | null) => {
     setCreationSource(branch ? toSelectedBranchState(branch) : null);
     setCreateBranchName("");
+    setSuppressCreateKey("n");
     navigateTo("worktree-create");
   };
 
@@ -613,7 +617,20 @@ export function AppSolid(props: AppSolidProps) {
           baseBranch={baseBranchLabel}
           version={version()}
           helpVisible={helpVisible()}
-          onChange={setCreateBranchName}
+          onChange={(value) => {
+            const suppressKey = suppressCreateKey();
+            if (
+              suppressKey &&
+              createBranchName() === "" &&
+              value === suppressKey
+            ) {
+              setSuppressCreateKey(null);
+              setCreateBranchName("");
+              return;
+            }
+            setSuppressCreateKey(null);
+            setCreateBranchName(value);
+          }}
           onSubmit={(value) => {
             const trimmed = value.trim();
             if (!trimmed) {
@@ -629,9 +646,13 @@ export function AppSolid(props: AppSolidProps) {
             setNewBranchBaseRef(baseBranchRef);
             setSelectedTool(null);
             setSelectedMode("normal");
+            setSuppressCreateKey(null);
             navigateTo("tool-select");
           }}
-          onCancel={goBack}
+          onCancel={() => {
+            setSuppressCreateKey(null);
+            goBack();
+          }}
         />
       );
     }
