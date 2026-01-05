@@ -165,14 +165,14 @@ Phase 8 (統合・仕上げ)
 
 ### 実装
 
-- [ ] **T509** [US4] T501の後に `src/cli/ui/screens/solid/LogScreen.tsx` を作成
-- [ ] **T510** [US4] T502の後に `src/cli/ui/screens/solid/LogDetailScreen.tsx` を作成
-- [ ] **T511** [US4] T503の後に `src/cli/ui/screens/solid/SelectorScreen.tsx` を作成
-- [ ] **T512** [US4] T504の後に `src/cli/ui/screens/solid/EnvironmentScreen.tsx` を作成
-- [ ] **T513** [US4] T505の後に `src/cli/ui/screens/solid/ProfileScreen.tsx` を作成
-- [ ] **T514** [US4] T506の後に `src/cli/ui/screens/solid/SettingsScreen.tsx` を作成
-- [ ] **T515** [US4] T507の後に `src/cli/ui/screens/solid/WorktreeCreateScreen.tsx` を作成
-- [ ] **T516** [US4] T508の後に `src/cli/ui/screens/solid/WorktreeDeleteScreen.tsx` を作成
+- [x] **T509** [US4] T501の後に `src/cli/ui/screens/solid/LogScreen.tsx` を作成
+- [x] **T510** [US4] T502の後に `src/cli/ui/screens/solid/LogDetailScreen.tsx` を作成
+- [x] **T511** [US4] T503の後に `src/cli/ui/screens/solid/SelectorScreen.tsx` を作成
+- [x] **T512** [US4] T504の後に `src/cli/ui/screens/solid/EnvironmentScreen.tsx` を作成
+- [x] **T513** [US4] T505の後に `src/cli/ui/screens/solid/ProfileScreen.tsx` を作成
+- [x] **T514** [US4] T506の後に `src/cli/ui/screens/solid/SettingsScreen.tsx` を作成
+- [x] **T515** [US4] T507の後に `src/cli/ui/screens/solid/WorktreeCreateScreen.tsx` を作成
+- [x] **T516** [US4] T508の後に `src/cli/ui/screens/solid/WorktreeDeleteScreen.tsx` を作成
 
 ### App.tsx 移行
 

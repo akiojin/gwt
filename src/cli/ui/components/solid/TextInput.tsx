@@ -20,7 +20,7 @@ export function TextInput({
   width,
 }: TextInputProps) {
   const inputWidth =
-    width ?? Math.max(10, value.length, placeholder.length + 1);
+    width ?? Math.max(10, value.length + 1, placeholder.length + 1);
   const isFocused = focused ?? true;
 
   return (
