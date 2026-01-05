@@ -73,7 +73,7 @@ Phase 8 (統合・仕上げ)
 - [x] **T203** [US1] T202の後に `src/cli/ui/screens/solid/BranchListScreen.tsx` を作成
 - [x] **T204** [US1] T203の後に 5000ブランチでの性能テストを実施（60fps / 16ms 目標）
 - [x] **T205** [US1] T204の後に 既存 `src/cli/ui/screens/BranchListScreen.tsx` との機能パリティ確認（結果: 色/cleanupスピナー/フィルターカーソル/DEBUGスタックまで対応済み）
-- [ ] **T206** [US1] T205の後に Go/No-Go 判定（性能目標達成確認）
+- [x] **T206** [US1] T205の後に Go/No-Go 判定（性能目標達成確認: Go）
 
 **✅ MVP1チェックポイント**: BranchListScreen が OpenTUI で動作し性能目標達成
 
