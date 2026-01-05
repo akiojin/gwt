@@ -39,7 +39,7 @@ Phase 8 (統合・仕上げ)
 - [x] **T004** [共通] T003の後に `bun install` で依存インストールを検証
 - [x] **T005** [P] [共通] `tsconfig.solid.json` を作成（SolidJS 用の TypeScript 設定）
 - [ ] **T006** [P] [共通] `vite.config.solid.ts` を作成（SolidJS 用の Vite 設定）※ 既存 `src/web/client/vite.config.ts` を Solid 化する方針のため保留
-- [ ] **T007** [共通] T005,T006の後に OpenTUI の最小サンプルでビルド検証 ※ ローカルに Zig 未導入のため検証保留
+- [x] **T007** [共通] T005,T006の後に OpenTUI の最小サンプルでビルド検証（`@opentui/solid/bun-plugin` で Bun.build 実行済み）
 - [x] **T008** [P] [共通] Windows Terminal / PowerShell 7+ での動作確認手順を文書化
 
 ## フェーズ2: 基盤（全ストーリー共通）
