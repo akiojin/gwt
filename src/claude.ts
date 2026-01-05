@@ -8,6 +8,7 @@ import {
 } from "./utils/terminal.js";
 import { findCommand } from "./utils/command.js";
 import { findLatestClaudeSession } from "./utils/session.js";
+import { buildBunxInvocation } from "./utils/bunx.js";
 
 const CLAUDE_CLI_PACKAGE = "@anthropic-ai/claude-code@latest";
 
@@ -301,7 +302,11 @@ export async function launchClaudeCode(
         if (!shouldSkipDelay) {
           await new Promise((resolve) => setTimeout(resolve, 2000));
         }
-        await execInteractive("bunx", [CLAUDE_CLI_PACKAGE, ...args], {
+        const bunxInvocation = buildBunxInvocation([
+          CLAUDE_CLI_PACKAGE,
+          ...args,
+        ]);
+        await execInteractive(bunxInvocation.command, bunxInvocation.args, {
           cwd: worktreePath,
           stdin: childStdio.stdin,
           stdout: childStdio.stdout,
@@ -409,7 +414,11 @@ export async function launchClaudeCode(
  */
 export async function isClaudeCodeAvailable(): Promise<boolean> {
   try {
-    await execa("bunx", [CLAUDE_CLI_PACKAGE, "--version"]);
+    const bunxInvocation = buildBunxInvocation([
+      CLAUDE_CLI_PACKAGE,
+      "--version",
+    ]);
+    await execa(bunxInvocation.command, bunxInvocation.args);
     return true;
   } catch (error: unknown) {
     const err = error as NodeJS.ErrnoException;

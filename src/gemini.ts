@@ -8,6 +8,7 @@ import {
 } from "./utils/terminal.js";
 import { findCommand } from "./utils/command.js";
 import { findLatestGeminiSessionId } from "./utils/session.js";
+import { buildBunxInvocation } from "./utils/bunx.js";
 
 const GEMINI_CLI_PACKAGE = "@google/gemini-cli@latest";
 
@@ -206,7 +207,11 @@ export async function launchGeminiCLI(
       if (!shouldSkipDelay) {
         await new Promise((resolve) => setTimeout(resolve, 2000));
       }
-      return await run("bunx", [GEMINI_CLI_PACKAGE, ...runArgs]);
+      const bunxInvocation = buildBunxInvocation([
+        GEMINI_CLI_PACKAGE,
+        ...runArgs,
+      ]);
+      return await run(bunxInvocation.command, bunxInvocation.args);
     };
 
     let fellBackToLatest = false;
@@ -327,7 +332,11 @@ export async function launchGeminiCLI(
  */
 export async function isGeminiCLIAvailable(): Promise<boolean> {
   try {
-    await execa("bunx", [GEMINI_CLI_PACKAGE, "--version"]);
+    const bunxInvocation = buildBunxInvocation([
+      GEMINI_CLI_PACKAGE,
+      "--version",
+    ]);
+    await execa(bunxInvocation.command, bunxInvocation.args);
     return true;
   } catch (error: unknown) {
     const err = error as NodeJS.ErrnoException;

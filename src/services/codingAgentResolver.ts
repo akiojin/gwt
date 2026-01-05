@@ -9,6 +9,11 @@ import {
 import { prepareCodingAgentExecution } from "./codingAgentCommandResolver.js";
 import type { CodingAgentLaunchOptions } from "../types/tools.js";
 import { createLogger } from "../logging/logger.js";
+import {
+  buildBunInvocation,
+  buildBunxInvocation,
+  isBunxAvailable,
+} from "../utils/bunx.js";
 
 const logger = createLogger({ category: "resolver" });
 
@@ -76,7 +81,10 @@ let bunxCheckPromise: Promise<void> | null = null;
 async function ensureBunxAvailable(): Promise<void> {
   if (!bunxCheckPromise) {
     bunxCheckPromise = (async () => {
-      const bunxExists = await commandExists("bunx");
+      const bunxExists =
+        process.platform === "win32"
+          ? isBunxAvailable()
+          : await commandExists("bunx");
       if (!bunxExists) {
         throw new CodingAgentResolutionError(
           "BUNX_NOT_FOUND",
@@ -89,7 +97,14 @@ async function ensureBunxAvailable(): Promise<void> {
       }
 
       try {
-        const { stdout } = await execa("bun", ["--version"]);
+        const bunInvocation =
+          process.platform === "win32"
+            ? buildBunInvocation(["--version"])
+            : { command: "bun", args: ["--version"] };
+        const { stdout } = await execa(
+          bunInvocation.command,
+          bunInvocation.args,
+        );
         const version = stdout.trim();
         logger.debug({ bunVersion: version }, "Bun version detected");
         const major = parseInt(version.split(".")[0] ?? "0", 10);
@@ -194,13 +209,18 @@ export async function resolveClaudeCommand(
     await ensureBunxAvailable(); // エラーをスローする
   }
 
+  const bunxFallback =
+    process.platform === "win32"
+      ? buildBunxInvocation([CLAUDE_CLI_PACKAGE, ...args])
+      : { command: bunxPath ?? "bunx", args: [CLAUDE_CLI_PACKAGE, ...args] };
+
   logger.info(
-    { command: bunxPath ?? "bunx", usesFallback: true },
+    { command: bunxFallback.command, usesFallback: true },
     "Claude command resolved (fallback)",
   );
   return {
-    command: bunxPath ?? "bunx",
-    args: [CLAUDE_CLI_PACKAGE, ...args],
+    command: bunxFallback.command,
+    args: bunxFallback.args,
     usesFallback: true,
     ...envOverrides,
   };
@@ -263,13 +283,18 @@ export async function resolveCodexCommand(
     await ensureBunxAvailable(); // エラーをスローする
   }
 
+  const bunxFallback =
+    process.platform === "win32"
+      ? buildBunxInvocation([CODEX_CLI_PACKAGE, ...args])
+      : { command: bunxPath ?? "bunx", args: [CODEX_CLI_PACKAGE, ...args] };
+
   logger.info(
-    { command: bunxPath ?? "bunx", usesFallback: true },
+    { command: bunxFallback.command, usesFallback: true },
     "Codex command resolved (fallback)",
   );
   return {
-    command: bunxPath ?? "bunx",
-    args: [CODEX_CLI_PACKAGE, ...args],
+    command: bunxFallback.command,
+    args: bunxFallback.args,
     usesFallback: true,
   };
 }

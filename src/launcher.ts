@@ -8,6 +8,7 @@
 import { execa } from "execa";
 import type { CodingAgent, CodingAgentLaunchOptions } from "./types/tools.js";
 import { createLogger } from "./logging/logger.js";
+import { buildBunxInvocation } from "./utils/bunx.js";
 
 const logger = createLogger({ category: "launcher" });
 
@@ -151,7 +152,8 @@ export async function launchCodingAgent(
     case "bunx": {
       // bunx経由でパッケージ実行
       // bunx [package] [args...]
-      await execa("bunx", [agent.command, ...args], execaOptions);
+      const bunxInvocation = buildBunxInvocation([agent.command, ...args]);
+      await execa(bunxInvocation.command, bunxInvocation.args, execaOptions);
       logger.info({ agentId: agent.id }, "Coding agent completed (bunx)");
       break;
     }

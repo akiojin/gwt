@@ -1,6 +1,7 @@
 import { execa } from "execa";
 import type { CodingAgent, CodingAgentLaunchOptions } from "../types/tools.js";
 import { createLogger } from "../logging/logger.js";
+import { buildBunxInvocation } from "../utils/bunx.js";
 
 const logger = createLogger({ category: "agent-resolver" });
 
@@ -85,8 +86,17 @@ export async function prepareCodingAgentExecution(
       break;
     }
     case "bunx": {
-      command = "bunx";
-      args = [agent.command, ...baseArgs];
+      if (process.platform === "win32") {
+        const bunxInvocation = buildBunxInvocation([
+          agent.command,
+          ...baseArgs,
+        ]);
+        command = bunxInvocation.command;
+        args = bunxInvocation.args;
+      } else {
+        command = "bunx";
+        args = [agent.command, ...baseArgs];
+      }
       break;
     }
     case "command": {

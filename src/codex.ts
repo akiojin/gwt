@@ -8,6 +8,7 @@ import {
   resetTerminalModes,
 } from "./utils/terminal.js";
 import { findLatestCodexSession } from "./utils/session.js";
+import { buildBunxInvocation } from "./utils/bunx.js";
 
 const CODEX_CLI_PACKAGE = "@openai/codex@latest";
 
@@ -194,7 +195,8 @@ export async function launchCodexCLI(
         }
       };
 
-      const child = execa("bunx", [CODEX_CLI_PACKAGE, ...args], {
+      const bunxInvocation = buildBunxInvocation([CODEX_CLI_PACKAGE, ...args]);
+      const child = execa(bunxInvocation.command, bunxInvocation.args, {
         cwd: worktreePath,
         stdin: childStdio.stdin,
         stdout: childStdio.stdout,
@@ -278,7 +280,8 @@ export async function launchCodexCLI(
  */
 export async function isCodexAvailable(): Promise<boolean> {
   try {
-    await execa("bunx", [CODEX_CLI_PACKAGE, "--help"]);
+    const bunxInvocation = buildBunxInvocation([CODEX_CLI_PACKAGE, "--help"]);
+    await execa(bunxInvocation.command, bunxInvocation.args);
     return true;
   } catch (error: unknown) {
     const err = error as NodeJS.ErrnoException;
