@@ -113,7 +113,8 @@ export function HelpOverlay({
   const layout = createMemo(() => {
     const width = terminal().width ?? 80;
     const height = terminal().height ?? 24;
-    const overlayWidth = Math.min(Math.max(20, width - 2), maxWidth);
+    const safeWidth = Math.max(10, width - 2);
+    const overlayWidth = Math.min(maxWidth, safeWidth, width);
     const contentWidth = Math.max(MIN_CONTENT_WIDTH, overlayWidth - 4);
     const maxRows = Math.max(4, height - 6);
 
