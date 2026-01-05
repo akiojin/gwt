@@ -233,8 +233,6 @@ export async function launchClaudeCode(
 
     // Auto-detect locally installed claude command
     const claudeLookup = await findCommand("claude");
-    const npxLookup =
-      process.platform === "win32" ? await findCommand("npx") : null;
 
     const execInteractive = async (
       file: string,
@@ -273,20 +271,11 @@ export async function launchClaudeCode(
           env: launchEnv,
         });
       } else {
-        const useNpx = npxLookup?.source === "installed" && npxLookup?.path;
-        if (useNpx) {
-          console.log(
-            chalk.cyan(
-              "   🔄 Falling back to npx @anthropic-ai/claude-code@latest",
-            ),
-          );
-        } else {
-          console.log(
-            chalk.cyan(
-              "   🔄 Falling back to bunx @anthropic-ai/claude-code@latest",
-            ),
-          );
-        }
+        console.log(
+          chalk.cyan(
+            "   🔄 Falling back to bunx @anthropic-ai/claude-code@latest",
+          ),
+        );
         console.log(
           chalk.yellow(
             "   💡 Recommended: Install Claude Code via official method for faster startup",
@@ -312,27 +301,13 @@ export async function launchClaudeCode(
         if (!shouldSkipDelay) {
           await new Promise((resolve) => setTimeout(resolve, 2000));
         }
-        if (useNpx && npxLookup?.path) {
-          await execInteractive(
-            npxLookup.path,
-            ["-y", CLAUDE_CLI_PACKAGE, ...args],
-            {
-              cwd: worktreePath,
-              stdin: childStdio.stdin,
-              stdout: childStdio.stdout,
-              stderr: childStdio.stderr,
-              env: launchEnv,
-            },
-          );
-        } else {
-          await execInteractive("bunx", [CLAUDE_CLI_PACKAGE, ...args], {
-            cwd: worktreePath,
-            stdin: childStdio.stdin,
-            stdout: childStdio.stdout,
-            stderr: childStdio.stderr,
-            env: launchEnv,
-          });
-        }
+        await execInteractive("bunx", [CLAUDE_CLI_PACKAGE, ...args], {
+          cwd: worktreePath,
+          stdin: childStdio.stdin,
+          stdout: childStdio.stdout,
+          stderr: childStdio.stderr,
+          env: launchEnv,
+        });
       }
     } finally {
       childStdio.cleanup();
