@@ -210,7 +210,7 @@ export function BranchDetailPage() {
   // Computed values
   const canStartSession = Boolean(branch.worktreePath);
   const divergenceInfo = branch.divergence ?? null;
-  const hasBlockingDivergence = Boolean(
+  const hasConflictingDivergence = Boolean(
     divergenceInfo && divergenceInfo.ahead > 0 && divergenceInfo.behind > 0,
   );
   const needsRemoteSync = Boolean(
@@ -218,7 +218,7 @@ export function BranchDetailPage() {
     divergenceInfo &&
     divergenceInfo.behind > 0 &&
     divergenceInfo.ahead === 0 &&
-    !hasBlockingDivergence,
+    !hasConflictingDivergence,
   );
   const isSyncingBranch = syncBranch.isPending;
 
@@ -266,14 +266,6 @@ export function BranchDetailPage() {
       setBanner({
         type: "error",
         message: "リモートの更新を取り込むまで Coding Agent は起動できません。",
-      });
-      return;
-    }
-
-    if (hasBlockingDivergence) {
-      setBanner({
-        type: "error",
-        message: "差分を解消してから起動してください。",
       });
       return;
     }
@@ -478,7 +470,7 @@ export function BranchDetailPage() {
               isStartingSession={isStartingSession}
               isSyncingBranch={isSyncingBranch}
               needsRemoteSync={needsRemoteSync}
-              hasBlockingDivergence={hasBlockingDivergence}
+              hasConflictingDivergence={hasConflictingDivergence}
               onToolChange={setSelectedToolId}
               onModeChange={setSelectedMode}
               onSkipPermissionsChange={setSkipPermissions}
