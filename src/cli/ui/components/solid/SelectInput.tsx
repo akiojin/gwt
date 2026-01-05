@@ -1,46 +1,64 @@
 import type { SelectOption } from "@opentui/core";
 
-export interface SelectInputOption extends SelectOption {
-  name: string;
-  description: string;
-  value?: string;
+export interface SelectInputItem {
+  label: string;
+  value: string;
+  description?: string;
 }
 
 export interface SelectInputProps {
-  options: SelectInputOption[];
+  items: SelectInputItem[];
   selectedIndex?: number;
+  onSelect?: (item: SelectInputItem) => void;
+  onChange?: (item: SelectInputItem | null) => void;
+  focused?: boolean;
   showDescription?: boolean;
   wrapSelection?: boolean;
-  showScrollIndicator?: boolean;
-  focused?: boolean;
-  onChange?: (index: number, option: SelectInputOption | null) => void;
-  onSelect?: (option: SelectInputOption | null) => void;
 }
 
 export function SelectInput({
-  options,
+  items,
   selectedIndex,
-  showDescription,
-  wrapSelection,
-  showScrollIndicator,
-  focused,
-  onChange,
   onSelect,
+  onChange,
+  focused,
+  showDescription = false,
+  wrapSelection = false,
 }: SelectInputProps) {
+  const options: SelectOption[] = items.map((item) => ({
+    name: item.label,
+    description: item.description ?? "",
+    value: item.value,
+  }));
+
+  const handleSelect = (index: number, option: SelectOption | null) => {
+    if (index < 0) {
+      return;
+    }
+    const item = items[index];
+    if (!item || !option) {
+      return;
+    }
+    onSelect?.(item);
+  };
+
+  const handleChange = (index: number, option: SelectOption | null) => {
+    if (index < 0 || !option) {
+      onChange?.(null);
+      return;
+    }
+    onChange?.(items[index] ?? null);
+  };
+
   return (
     <select
       options={options}
-      selectedIndex={selectedIndex}
+      {...(selectedIndex !== undefined && { selectedIndex })}
+      focused={focused}
       showDescription={showDescription}
       wrapSelection={wrapSelection}
-      showScrollIndicator={showScrollIndicator}
-      focused={focused}
-      onChange={(index, option) => {
-        onChange?.(index, option as SelectInputOption | null);
-      }}
-      onSelect={(index, option) => {
-        onSelect?.(option as SelectInputOption | null);
-      }}
+      onSelect={handleSelect}
+      onChange={handleChange}
     />
   );
 }
