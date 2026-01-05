@@ -200,7 +200,7 @@ describe("BranchListScreen", () => {
     process.stdout.rows = originalRows;
   });
 
-  it("should display ASCII state icons", () => {
+  it("should display state icons", () => {
     const onSelect = vi.fn();
     const { container } = render(
       <BranchListScreen
@@ -211,7 +211,7 @@ describe("BranchListScreen", () => {
     );
 
     const text = stripAnsi(container.textContent ?? "");
-    expect(text).toMatch(/\[ \]\s(🟢|🔴|⚪)\s(🛡|⚠)/); // state cluster with spacing
+    expect(text).toMatch(/☑️(🟢|🔴|⚪)(⭕️|❌)/);
   });
 
   it("should display 🔴 for inaccessible worktree", async () => {
@@ -250,7 +250,7 @@ describe("BranchListScreen", () => {
     const frame = stripControlSequences(
       stripAnsi(renderResult.lastFrame() ?? ""),
     );
-    expect(frame).toContain("[ ] 🔴 ⚠");
+    expect(frame).toContain("☑️🔴❌");
   });
 
   it("should render last tool usage when available and Unknown when not", () => {
@@ -473,7 +473,7 @@ describe("BranchListScreen", () => {
     const frame = stripControlSequences(
       stripAnsi(renderResult.lastFrame() ?? ""),
     );
-    expect(frame).toContain("[*] 🟢 🛡");
+    expect(frame).toContain("✅🟢⭕️");
     expect(frame).toContain("feature/login");
   });
 
