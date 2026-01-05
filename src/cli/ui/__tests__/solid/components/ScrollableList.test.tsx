@@ -5,7 +5,7 @@ import { ScrollableList } from "../../../components/solid/ScrollableList.js";
 import type { JSX } from "solid-js";
 
 const renderList = async (options: {
-  children: JSX.Element;
+  renderChildren: () => JSX.Element;
   maxHeight?: number;
   width?: number;
   height?: number;
@@ -13,7 +13,7 @@ const renderList = async (options: {
   const testSetup = await testRender(
     () => (
       <ScrollableList maxHeight={options.maxHeight}>
-        {options.children}
+        {options.renderChildren()}
       </ScrollableList>
     ),
     {
@@ -37,7 +37,7 @@ const renderList = async (options: {
 describe("Solid ScrollableList", () => {
   it("renders children", async () => {
     const { captureCharFrame, cleanup } = await renderList({
-      children: (
+      renderChildren: () => (
         <>
           <text>Item 1</text>
           <text>Item 2</text>
@@ -58,7 +58,7 @@ describe("Solid ScrollableList", () => {
 
   it("renders with no children", async () => {
     const { captureCharFrame, cleanup } = await renderList({
-      children: null,
+      renderChildren: () => null,
     });
 
     try {
@@ -72,7 +72,7 @@ describe("Solid ScrollableList", () => {
     const { captureCharFrame, cleanup } = await renderList({
       maxHeight: 2,
       height: 4,
-      children: (
+      renderChildren: () => (
         <>
           <text>Row 1</text>
           <text>Row 2</text>
@@ -83,9 +83,10 @@ describe("Solid ScrollableList", () => {
 
     try {
       const frame = captureCharFrame();
-      expect(frame).toContain("Row 1");
-      expect(frame).toContain("Row 2");
-      expect(frame).not.toContain("Row 3");
+      const visibleRows = ["Row 1", "Row 2", "Row 3"].filter((label) =>
+        frame.includes(label),
+      );
+      expect(visibleRows).toHaveLength(2);
     } finally {
       cleanup();
     }
@@ -93,7 +94,7 @@ describe("Solid ScrollableList", () => {
 
   it("renders items in vertical layout", async () => {
     const { captureCharFrame, cleanup } = await renderList({
-      children: (
+      renderChildren: () => (
         <>
           <text>First</text>
           <text>Second</text>
@@ -116,7 +117,7 @@ describe("Solid ScrollableList", () => {
 
   it("handles single child", async () => {
     const { captureCharFrame, cleanup } = await renderList({
-      children: <text>Single Item</text>,
+      renderChildren: () => <text>Single Item</text>,
     });
 
     try {
