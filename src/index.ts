@@ -299,7 +299,15 @@ async function mainSolidUI(): Promise<SelectionResult | undefined> {
 
   let selectionResult: SelectionResult | undefined;
   const mousePreference = process.env.GWT_UI_MOUSE?.trim().toLowerCase();
-  const useMouse = mousePreference === "true" || mousePreference === "1";
+  const useMouse =
+    mousePreference === undefined ||
+    mousePreference === "" ||
+    mousePreference === "true" ||
+    mousePreference === "1";
+  const mouseMovePreference =
+    process.env.GWT_UI_MOUSE_MOVE?.trim().toLowerCase();
+  const enableMouseMovement =
+    mouseMovePreference === "true" || mouseMovePreference === "1";
   const altScreenPreference =
     process.env.GWT_UI_ALT_SCREEN?.trim().toLowerCase();
   const useAlternateScreen =
@@ -332,7 +340,7 @@ async function mainSolidUI(): Promise<SelectionResult | undefined> {
         exitOnCtrlC: true,
         useAlternateScreen,
         useMouse,
-        enableMouseMovement: useMouse,
+        enableMouseMovement,
       },
     );
   } finally {
