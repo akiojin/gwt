@@ -536,6 +536,41 @@ export async function removeWorktree(
   }
 }
 
+export interface RepairResult {
+  repairedCount: number;
+  failedCount: number;
+  failures: Array<{ path: string; error: string }>;
+}
+
+/**
+ * 指定されたWorktreeのパス不整合を修復
+ * @param worktreePaths 修復対象のWorktreeパス配列
+ * @returns 修復結果（成功数、失敗数、失敗詳細）
+ */
+export async function repairWorktrees(
+  worktreePaths: string[],
+): Promise<RepairResult> {
+  const result: RepairResult = {
+    repairedCount: 0,
+    failedCount: 0,
+    failures: [],
+  };
+
+  for (const worktreePath of worktreePaths) {
+    try {
+      await execa("git", ["worktree", "repair", worktreePath]);
+      result.repairedCount++;
+    } catch (error) {
+      result.failedCount++;
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+      result.failures.push({ path: worktreePath, error: errorMessage });
+    }
+  }
+
+  return result;
+}
+
 async function getWorktreesWithPRStatus(): Promise<WorktreeWithPR[]> {
   const worktrees = await listAdditionalWorktrees();
   const worktreesWithPR: WorktreeWithPR[] = [];

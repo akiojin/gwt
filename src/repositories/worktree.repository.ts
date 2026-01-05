@@ -66,4 +66,12 @@ export class WorktreeRepository {
   async prune(): Promise<void> {
     await this.execute(["prune"]);
   }
+
+  async repair(worktreePaths?: string[]): Promise<void> {
+    const args = ["repair"];
+    if (worktreePaths && worktreePaths.length > 0) {
+      args.push(...worktreePaths);
+    }
+    await this.execute(args);
+  }
 }
