@@ -712,7 +712,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
   }, [selectedBranch, isProtectedSelection]);
 
   const handleSelect = useCallback(
-    (item: BranchItem) => {
+    async (item: BranchItem) => {
       const selection: SelectedBranchState =
         item.type === "remote"
           ? {
@@ -731,6 +731,43 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
 
       const protectedSelected = isProtectedSelection(selection);
 
+      // Auto-repair inaccessible worktree on Enter selection
+      if (item.worktreeStatus === "inaccessible" && item.worktree?.path) {
+        setCleanupInputLocked(true);
+        setCleanupFooterMessage({
+          text: `Repairing worktree for ${item.name}...`,
+          isSpinning: true,
+          color: "cyan",
+        });
+
+        try {
+          const result = await repairWorktrees([item.worktree.path]);
+          if (result.repairedCount > 0) {
+            setCleanupFooterMessage({
+              text: `Repaired worktree for ${item.name}`,
+              color: "green",
+            });
+            refresh();
+          } else {
+            setCleanupFooterMessage({
+              text: `Failed to repair worktree for ${item.name}`,
+              color: "red",
+            });
+          }
+        } catch {
+          setCleanupFooterMessage({
+            text: `Repair failed for ${item.name}`,
+            color: "red",
+          });
+        } finally {
+          setCleanupInputLocked(false);
+          // Clear message after delay
+          setTimeout(() => {
+            setCleanupFooterMessage(null);
+          }, COMPLETION_HOLD_DURATION_MS);
+        }
+      }
+
       setSelectedBranch(selection);
       setSelectedTool(null);
       setSelectedModel(null);
@@ -742,7 +779,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
           text: PROTECTED_BRANCH_WARNING,
           color: "yellow",
         });
-      } else {
+      } else if (item.worktreeStatus !== "inaccessible") {
         setCleanupFooterMessage(null);
       }
 
@@ -751,6 +788,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     [
       isProtectedSelection,
       navigateTo,
+      refresh,
       setCleanupFooterMessage,
       setCreationSourceBranch,
       setSelectedTool,
