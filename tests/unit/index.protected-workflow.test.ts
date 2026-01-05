@@ -286,7 +286,7 @@ describe("handleAIToolWorkflow - protected branches", () => {
 });
 
 describe("handleAIToolWorkflow - divergence handling", () => {
-  it("skips AI tool launch when divergence is detected", async () => {
+  it("continues AI tool launch when divergence is detected", async () => {
     getBranchDivergenceStatusesMock.mockResolvedValue([
       { branch: "feature/diverged", remoteAhead: 7, localAhead: 2 },
     ]);
@@ -305,8 +305,32 @@ describe("handleAIToolWorkflow - divergence handling", () => {
 
     expect(fetchAllRemotesMock).toHaveBeenCalled();
     expect(pullFastForwardMock).toHaveBeenCalledWith("/repo");
-    expect(launchClaudeCodeMock).not.toHaveBeenCalled();
-    expect(saveSessionMock).not.toHaveBeenCalled();
+    expect(launchClaudeCodeMock).toHaveBeenCalled();
+    expect(saveSessionMock).toHaveBeenCalled();
+  });
+
+  it("continues AI tool launch when divergence check fails", async () => {
+    getBranchDivergenceStatusesMock.mockRejectedValueOnce(
+      new Error("divergence check failed"),
+    );
+
+    const selection: SelectionResult = {
+      branch: "feature/divergence-error",
+      displayName: "feature/divergence-error",
+      branchType: "local",
+      tool: "claude-code",
+      mode: "normal" as ExecutionMode,
+      skipPermissions: false,
+      model: "sonnet",
+    };
+
+    await handleAIToolWorkflow(selection);
+
+    expect(fetchAllRemotesMock).toHaveBeenCalled();
+    expect(pullFastForwardMock).toHaveBeenCalledWith("/repo");
+    expect(launchClaudeCodeMock).toHaveBeenCalled();
+    expect(saveSessionMock).toHaveBeenCalled();
+    expect(waitForUserAcknowledgementMock).not.toHaveBeenCalled();
   });
 });
 
