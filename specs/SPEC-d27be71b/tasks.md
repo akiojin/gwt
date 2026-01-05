@@ -101,7 +101,7 @@ Phase 8 (統合・仕上げ)
 - [x] **T311** [US2] T304の後に `src/cli/ui/components/solid/Stats.tsx` を作成
 - [x] **T312** [US2] T305の後に `src/cli/ui/components/solid/SearchInput.tsx` を作成
 - [x] **T313** [US2] T306の後に `src/cli/ui/components/solid/SelectInput.tsx` を作成
-- [ ] **T314** [US2] T307の後に `src/cli/ui/components/solid/TextInput.tsx` を作成
+- [x] **T314** [US2] T307の後に `src/cli/ui/components/solid/TextInput.tsx` を作成
 
 ### カスタムフック移行
 
