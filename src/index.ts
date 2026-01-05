@@ -298,6 +298,8 @@ async function mainSolidUI(): Promise<SelectionResult | undefined> {
   const terminal = getTerminalStreams();
 
   let selectionResult: SelectionResult | undefined;
+  const mousePreference = process.env.GWT_UI_MOUSE?.trim().toLowerCase();
+  const useMouse = mousePreference === "true" || mousePreference === "1";
 
   if (typeof terminal.stdin.resume === "function") {
     terminal.stdin.resume();
@@ -314,6 +316,8 @@ async function mainSolidUI(): Promise<SelectionResult | undefined> {
         stdin: terminal.stdin,
         stdout: terminal.stdout,
         exitOnCtrlC: true,
+        useMouse,
+        enableMouseMovement: useMouse,
       },
     );
   } finally {
