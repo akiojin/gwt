@@ -8,6 +8,7 @@ export interface WorktreeDeleteScreenProps {
   worktreePath?: string | null;
   onConfirm: (confirmed: boolean) => void;
   version?: string | null;
+  helpVisible?: boolean;
 }
 
 export function WorktreeDeleteScreen({
@@ -15,6 +16,7 @@ export function WorktreeDeleteScreen({
   worktreePath,
   onConfirm,
   version,
+  helpVisible = false,
 }: WorktreeDeleteScreenProps) {
   const terminal = useTerminalSize();
   const message = `Delete worktree for ${branchName}?`;
@@ -27,7 +29,12 @@ export function WorktreeDeleteScreen({
         version={version}
       />
       {worktreePath && <text fg="gray">{worktreePath}</text>}
-      <ConfirmScreen message={message} onConfirm={onConfirm} defaultNo />
+      <ConfirmScreen
+        message={message}
+        onConfirm={onConfirm}
+        defaultNo
+        helpVisible={helpVisible}
+      />
     </box>
   );
 }

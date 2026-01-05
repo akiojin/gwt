@@ -47,6 +47,7 @@ export interface BranchListScreenProps {
   selectedBranches?: string[];
   onToggleSelect?: (branchName: string) => void;
   toolStatuses?: ToolStatus[] | undefined;
+  helpVisible?: boolean;
 }
 
 const VIEW_MODES: BranchViewMode[] = ["all", "local", "remote"];
@@ -536,6 +537,9 @@ export function BranchListScreen(props: BranchListScreenProps) {
   };
 
   useKeyboard((key) => {
+    if (props.helpVisible) {
+      return;
+    }
     if (props.cleanupUI?.inputLocked) {
       return;
     }

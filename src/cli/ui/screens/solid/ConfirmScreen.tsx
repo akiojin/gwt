@@ -9,6 +9,7 @@ export interface ConfirmScreenProps {
   yesLabel?: string;
   noLabel?: string;
   defaultNo?: boolean;
+  helpVisible?: boolean;
 }
 
 export function ConfirmScreen({
@@ -17,6 +18,7 @@ export function ConfirmScreen({
   yesLabel = "Yes",
   noLabel = "No",
   defaultNo = false,
+  helpVisible = false,
 }: ConfirmScreenProps) {
   const [selectedIndex, setSelectedIndex] = createSignal(defaultNo ? 1 : 0);
 
@@ -29,6 +31,9 @@ export function ConfirmScreen({
   };
 
   useKeyboard((key) => {
+    if (helpVisible) {
+      return;
+    }
     if (key.name === "up" || key.name === "down" || key.name === "tab") {
       toggleSelection();
       return;

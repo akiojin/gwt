@@ -12,6 +12,7 @@ export interface LogDetailScreenProps {
   onCopy: (entry: FormattedLogEntry) => void;
   notification?: { message: string; tone: "success" | "error" } | null;
   version?: string | null;
+  helpVisible?: boolean;
 }
 
 export function LogDetailScreen({
@@ -20,10 +21,14 @@ export function LogDetailScreen({
   onCopy,
   notification,
   version,
+  helpVisible = false,
 }: LogDetailScreenProps) {
   const terminal = useTerminalSize();
 
   useKeyboard((key) => {
+    if (helpVisible) {
+      return;
+    }
     if (key.name === "escape" || key.name === "q") {
       onBack();
       return;

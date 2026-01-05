@@ -1,5 +1,5 @@
 /** @jsxImportSource @opentui/solid */
-import { useRenderer } from "@opentui/solid";
+import { useKeyboard, useRenderer } from "@opentui/solid";
 import {
   createEffect,
   createMemo,
@@ -18,6 +18,7 @@ import type {
 import type { ToolStatus } from "./hooks/useToolStatus.js";
 import type { FormattedLogEntry } from "../../logging/formatter.js";
 import { BranchListScreen } from "./screens/solid/BranchListScreen.js";
+import { HelpOverlay } from "./components/solid/HelpOverlay.js";
 import {
   SelectorScreen,
   type SelectorItem,
@@ -123,6 +124,7 @@ export function AppSolid(props: AppSolidProps) {
     props.initialScreen ?? DEFAULT_SCREEN,
   );
   const [screenStack, setScreenStack] = createSignal<AppScreen[]>([]);
+  const [helpVisible, setHelpVisible] = createSignal(false);
 
   const [branchItems, setBranchItems] = createSignal<BranchItem[]>(
     props.branches ?? [],
@@ -170,6 +172,38 @@ export function AppSolid(props: AppSolidProps) {
 
   const logDir = createMemo(() => resolveLogDir(workingDirectory()));
   let logNotificationTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const isHelpKey = (key: {
+    name: string;
+    sequence: string;
+    ctrl: boolean;
+    meta: boolean;
+    super?: boolean;
+    hyper?: boolean;
+    option?: boolean;
+  }) => {
+    if (key.ctrl || key.meta || key.super || key.hyper || key.option) {
+      return false;
+    }
+    return key.name === "h" || key.sequence === "h" || key.sequence === "?";
+  };
+
+  useKeyboard((key) => {
+    if (key.repeated) {
+      return;
+    }
+
+    if (helpVisible()) {
+      if (key.name === "escape" || isHelpKey(key)) {
+        setHelpVisible(false);
+      }
+      return;
+    }
+
+    if (isHelpKey(key)) {
+      setHelpVisible(true);
+    }
+  });
 
   const navigateTo = (screen: AppScreen) => {
     setScreenStack((prev) => [...prev, currentScreen()]);
@@ -403,6 +437,7 @@ export function AppSolid(props: AppSolidProps) {
           onOpenLogs={() => navigateTo("log-list")}
           selectedBranches={selectedBranches()}
           onToggleSelect={toggleSelectedBranch}
+          helpVisible={helpVisible()}
         />
       );
     }
@@ -423,6 +458,7 @@ export function AppSolid(props: AppSolidProps) {
           items={toolItems()}
           onSelect={handleToolSelect}
           onBack={goBack}
+          helpVisible={helpVisible()}
         />
       );
     }
@@ -438,6 +474,7 @@ export function AppSolid(props: AppSolidProps) {
           ]}
           onSelect={handleModeSelect}
           onBack={goBack}
+          helpVisible={helpVisible()}
         />
       );
     }
@@ -452,6 +489,7 @@ export function AppSolid(props: AppSolidProps) {
           ]}
           onSelect={(item) => finalizeSelection(item.value === "true")}
           onBack={goBack}
+          helpVisible={helpVisible()}
         />
       );
     }
@@ -478,6 +516,7 @@ export function AppSolid(props: AppSolidProps) {
           notification={logNotification()}
           version={version()}
           selectedDate={logSelectedDate()}
+          helpVisible={helpVisible()}
         />
       );
     }
@@ -497,6 +536,7 @@ export function AppSolid(props: AppSolidProps) {
           }}
           notification={logNotification()}
           version={version()}
+          helpVisible={helpVisible()}
         />
       );
     }
@@ -511,11 +551,27 @@ export function AppSolid(props: AppSolidProps) {
     }
 
     if (screen === "error") {
-      return <ErrorScreen error={error() ?? "Unknown error"} />;
+      return (
+        <ErrorScreen
+          error={error() ?? "Unknown error"}
+          helpVisible={helpVisible()}
+        />
+      );
     }
 
-    return <ErrorScreen error={`Unknown screen: ${screen}`} onBack={goBack} />;
+    return (
+      <ErrorScreen
+        error={`Unknown screen: ${screen}`}
+        onBack={goBack}
+        helpVisible={helpVisible()}
+      />
+    );
   };
 
-  return <>{renderCurrentScreen()}</>;
+  return (
+    <>
+      {renderCurrentScreen()}
+      <HelpOverlay visible={helpVisible()} context={currentScreen()} />
+    </>
+  );
 }

@@ -11,6 +11,7 @@ export interface EnvironmentScreenProps {
   onSelect?: (variable: EnvironmentVariable) => void;
   onBack?: () => void;
   version?: string | null;
+  helpVisible?: boolean;
 }
 
 export function EnvironmentScreen({
@@ -18,6 +19,7 @@ export function EnvironmentScreen({
   onSelect,
   onBack,
   version,
+  helpVisible = false,
 }: EnvironmentScreenProps) {
   const items = variables.map((variable) => ({
     label: `${variable.key}=${variable.value}`,
@@ -39,6 +41,7 @@ export function EnvironmentScreen({
       onBack={onBack}
       version={version}
       emptyMessage="No environment variables."
+      helpVisible={helpVisible}
     />
   );
 }

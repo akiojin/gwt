@@ -12,6 +12,7 @@ export interface SettingsScreenProps {
   onSelect?: (setting: SettingsItem) => void;
   onBack?: () => void;
   version?: string | null;
+  helpVisible?: boolean;
 }
 
 export function SettingsScreen({
@@ -19,6 +20,7 @@ export function SettingsScreen({
   onSelect,
   onBack,
   version,
+  helpVisible = false,
 }: SettingsScreenProps) {
   const items = settings.map((setting) => ({
     label: setting.label,
@@ -42,6 +44,7 @@ export function SettingsScreen({
       version={version}
       emptyMessage="No settings available."
       showDescription
+      helpVisible={helpVisible}
     />
   );
 }

@@ -19,6 +19,7 @@ export interface LogScreenProps {
   notification?: { message: string; tone: "success" | "error" } | null;
   version?: string | null;
   selectedDate?: string | null;
+  helpVisible?: boolean;
 }
 
 export function LogScreen({
@@ -32,6 +33,7 @@ export function LogScreen({
   notification,
   version,
   selectedDate,
+  helpVisible = false,
 }: LogScreenProps) {
   const terminal = useTerminalSize();
   const listHeight = createMemo(() => {
@@ -55,6 +57,9 @@ export function LogScreen({
   };
 
   useKeyboard((key) => {
+    if (helpVisible) {
+      return;
+    }
     if (key.name === "escape" || key.name === "q") {
       onBack();
       return;

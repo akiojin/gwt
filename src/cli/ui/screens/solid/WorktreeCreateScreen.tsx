@@ -12,6 +12,7 @@ export interface WorktreeCreateScreenProps {
   onCancel?: () => void;
   baseBranch?: string;
   version?: string | null;
+  helpVisible?: boolean;
 }
 
 export function WorktreeCreateScreen({
@@ -21,11 +22,15 @@ export function WorktreeCreateScreen({
   onCancel,
   baseBranch,
   version,
+  helpVisible = false,
 }: WorktreeCreateScreenProps) {
   const terminal = useTerminalSize();
   const inputHeight = 2;
 
   useKeyboard((key) => {
+    if (helpVisible) {
+      return;
+    }
     if (key.name === "escape") {
       onCancel?.();
     }

@@ -12,6 +12,7 @@ export interface ProfileScreenProps {
   onSelect?: (profile: ProfileItem) => void;
   onBack?: () => void;
   version?: string | null;
+  helpVisible?: boolean;
 }
 
 export function ProfileScreen({
@@ -19,6 +20,7 @@ export function ProfileScreen({
   onSelect,
   onBack,
   version,
+  helpVisible = false,
 }: ProfileScreenProps) {
   const items = profiles.map((profile) => ({
     label: `${profile.displayName ?? profile.name}${profile.isActive ? " (active)" : ""}`,
@@ -40,6 +42,7 @@ export function ProfileScreen({
       onBack={onBack}
       version={version}
       emptyMessage="No profiles available."
+      helpVisible={helpVisible}
     />
   );
 }

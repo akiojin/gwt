@@ -142,7 +142,7 @@ Phase 8 (統合・仕上げ)
 ### 統合
 
 - [x] **T409** [US3] T405-T408の後に 単純スクリーンの統合テスト実施
-- [ ] **T410** [US3] T409の後に Go/No-Go 中間判定（7-8 スクリーン完了時点）
+- [x] **T410** [US3] T409の後に Go/No-Go 中間判定（7-8 スクリーン完了時点）
 
 **✅ MVP3チェックポイント**: 基本 UI フローが OpenTUI で動作
 
@@ -194,13 +194,13 @@ Phase 8 (統合・仕上げ)
 
 ### テスト（TDD 必須）
 
-- [ ] **T601** [US5] `src/cli/ui/__tests__/solid/components/HelpOverlay.test.tsx` にテスト作成
+- [x] **T601** [US5] `src/cli/ui/__tests__/solid/components/HelpOverlay.test.tsx` にテスト作成
 
 ### 実装
 
-- [ ] **T602** [US5] T601の後に `src/cli/ui/components/solid/HelpOverlay.tsx` を作成
-- [ ] **T603** [US5] T602の後に BranchListScreen にヘルプオーバーレイを統合
-- [ ] **T604** [US5] T603の後に 他スクリーンにもヘルプオーバーレイを展開
+- [x] **T602** [US5] T601の後に `src/cli/ui/components/solid/HelpOverlay.tsx` を作成
+- [x] **T603** [US5] T602の後に BranchListScreen にヘルプオーバーレイを統合
+- [x] **T604** [US5] T603の後に 他スクリーンにもヘルプオーバーレイを展開
 
 **✅ 新機能チェックポイント**: ヘルプオーバーレイが動作
 

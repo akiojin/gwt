@@ -10,6 +10,7 @@ export interface InputScreenProps {
   onCancel?: () => void;
   placeholder?: string;
   label?: string;
+  helpVisible?: boolean;
 }
 
 export function InputScreen({
@@ -20,10 +21,14 @@ export function InputScreen({
   onCancel,
   placeholder,
   label,
+  helpVisible = false,
 }: InputScreenProps) {
   const inputHeight = label ? 2 : 1;
 
   useKeyboard((key) => {
+    if (helpVisible) {
+      return;
+    }
     if (key.name === "escape") {
       onCancel?.();
     }

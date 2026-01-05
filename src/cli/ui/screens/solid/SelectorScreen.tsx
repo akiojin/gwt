@@ -24,6 +24,7 @@ export interface SelectorScreenProps {
   selectedIndex?: number;
   onSelectedIndexChange?: (index: number) => void;
   showDescription?: boolean;
+  helpVisible?: boolean;
 }
 
 const clamp = (value: number, min: number, max: number) =>
@@ -40,6 +41,7 @@ export function SelectorScreen({
   selectedIndex: controlledIndex,
   onSelectedIndexChange,
   showDescription = false,
+  helpVisible = false,
 }: SelectorScreenProps) {
   const terminal = useTerminalSize();
   const listHeight = createMemo(() => {
@@ -71,6 +73,9 @@ export function SelectorScreen({
   };
 
   useKeyboard((key) => {
+    if (helpVisible) {
+      return;
+    }
     if (key.name === "escape" || key.name === "q") {
       onBack?.();
       return;
