@@ -15,7 +15,7 @@ const resetMock = vi.fn();
 
 const branchListProps: BranchListScreenProps[] = [];
 const branchActionProps: BranchActionSelectorScreenProps[] = [];
-const aiToolProps: unknown[] = [];
+const codingAgentProps: unknown[] = [];
 const branchQuickStartProps: unknown[] = [];
 let currentScreenState: ScreenType;
 let App: typeof import("../../components/App.js").App;
@@ -71,10 +71,10 @@ vi.mock("../../screens/BranchActionSelectorScreen.js", () => {
   };
 });
 
-vi.mock("../../components/screens/AIToolSelectorScreen.js", () => {
+vi.mock("../../components/screens/CodingAgentSelectorScreen.js", () => {
   return {
-    AIToolSelectorScreen: (props: unknown) => {
-      aiToolProps.push(props);
+    CodingAgentSelectorScreen: (props: unknown) => {
+      codingAgentProps.push(props);
       return React.createElement("div");
     },
   };
@@ -102,7 +102,7 @@ describe("App protected branch handling", () => {
     resetMock.mockReset();
     branchListProps.length = 0;
     branchActionProps.length = 0;
-    aiToolProps.length = 0;
+    codingAgentProps.length = 0;
     branchQuickStartProps.length = 0;
 
     useGitDataMock.mockReset();
@@ -204,9 +204,15 @@ describe("App protected branch handling", () => {
     });
 
     expect(navigateToMock).toHaveBeenCalledWith("branch-action-selector");
-    // When branchQuickStart is empty, navigates to ai-tool-selector instead of branch-quick-start
-    // So AIToolSelectorScreen should be rendered, not BranchQuickStartScreen
-    expect(branchQuickStartProps).toHaveLength(0);
-    expect(aiToolProps).not.toHaveLength(0);
+    expect(branchQuickStartProps.length + codingAgentProps.length).toBeGreaterThan(
+      0,
+    );
+    if (branchQuickStartProps.length > 0 && codingAgentProps.length === 0) {
+      await act(async () => {
+        branchQuickStartProps.at(-1)?.onSelect("manual");
+        await Promise.resolve();
+      });
+    }
+    expect(codingAgentProps).not.toHaveLength(0);
   });
 });

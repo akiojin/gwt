@@ -55,10 +55,10 @@ describe("useScreenState", () => {
     });
 
     act(() => {
-      result.current.navigateTo("ai-tool-selector");
+      result.current.navigateTo("coding-agent-selector");
     });
 
-    expect(result.current.currentScreen).toBe("ai-tool-selector");
+    expect(result.current.currentScreen).toBe("coding-agent-selector");
 
     act(() => {
       result.current.goBack();
@@ -90,7 +90,7 @@ describe("useScreenState", () => {
 
     const screens: ScreenType[] = [
       "branch-creator",
-      "ai-tool-selector",
+      "coding-agent-selector",
       "model-selector",
       "execution-mode-selector",
     ];
@@ -112,7 +112,7 @@ describe("useScreenState", () => {
     act(() => {
       result.current.goBack();
     });
-    expect(result.current.currentScreen).toBe("ai-tool-selector");
+    expect(result.current.currentScreen).toBe("coding-agent-selector");
 
     act(() => {
       result.current.goBack();
@@ -133,10 +133,10 @@ describe("useScreenState", () => {
     });
 
     act(() => {
-      result.current.navigateTo("ai-tool-selector");
+      result.current.navigateTo("coding-agent-selector");
     });
 
-    expect(result.current.currentScreen).toBe("ai-tool-selector");
+    expect(result.current.currentScreen).toBe("coding-agent-selector");
 
     act(() => {
       result.current.reset();

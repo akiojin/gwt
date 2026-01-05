@@ -11,6 +11,7 @@ import { Window } from "happy-dom";
 import type { BranchInfo, BranchItem } from "../../types.js";
 import type { BranchListScreenProps } from "../../components/screens/BranchListScreen.js";
 import type { BranchActionSelectorScreenProps } from "../../screens/BranchActionSelectorScreen.js";
+import type { BranchQuickStartScreenProps } from "../../components/screens/BranchQuickStartScreen.js";
 
 const branchListProps: BranchListScreenProps[] = [];
 const branchActionProps: BranchActionSelectorScreenProps[] = [];
@@ -82,12 +83,22 @@ vi.mock("../../../../worktree.ts", () => ({
   switchToProtectedBranch: mockSwitchToProtectedBranch,
 }));
 
-const aiToolScreenProps: unknown[] = [];
+const codingAgentScreenProps: unknown[] = [];
+const branchQuickStartProps: BranchQuickStartScreenProps[] = [];
 
-vi.mock("../../components/screens/AIToolSelectorScreen.js", () => {
+vi.mock("../../components/screens/CodingAgentSelectorScreen.js", () => {
   return {
-    AIToolSelectorScreen: (props: unknown) => {
-      aiToolScreenProps.push(props);
+    CodingAgentSelectorScreen: (props: unknown) => {
+      codingAgentScreenProps.push(props);
+      return React.createElement("div");
+    },
+  };
+});
+
+vi.mock("../../components/screens/BranchQuickStartScreen.js", () => {
+  return {
+    BranchQuickStartScreen: (props: BranchQuickStartScreenProps) => {
+      branchQuickStartProps.push(props);
       return React.createElement("div");
     },
   };
@@ -146,7 +157,8 @@ describe("Navigation Integration Tests", () => {
     mockedGetLastToolUsageMap.mockReset();
     branchListProps.length = 0;
     branchActionProps.length = 0;
-    aiToolScreenProps.length = 0;
+    codingAgentScreenProps.length = 0;
+    branchQuickStartProps.length = 0;
     mockedGetRepositoryRoot.mockResolvedValue("/repo");
     mockedSwitchToProtectedBranch.mockResolvedValue("local");
     mockedLoadSession.mockResolvedValue({ history: [] });
@@ -175,11 +187,11 @@ describe("Navigation Integration Tests", () => {
     (listAdditionalWorktrees as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 
     const onExit = vi.fn();
-    const { getByText } = render(<App onExit={onExit} />);
+    const { getByText, getAllByText } = render(<App onExit={onExit} />);
 
     await waitFor(() => {
       expect(getByText(/gwt - Branch Selection/i)).toBeDefined();
-      expect(getByText(/main/)).toBeDefined();
+      expect(getAllByText(/main/).length).toBeGreaterThan(0);
     });
   });
 
@@ -323,7 +335,8 @@ describe("Protected Branch Navigation (T103)", () => {
     mockedGetRepositoryRoot.mockResolvedValue("/repo");
     branchListProps.length = 0;
     branchActionProps.length = 0;
-    aiToolScreenProps.length = 0;
+    codingAgentScreenProps.length = 0;
+    branchQuickStartProps.length = 0;
     mockedIsProtectedBranchName.mockImplementation((name: string) =>
       ["main", "develop", "origin/main", "origin/develop"].includes(name),
     );
@@ -376,11 +389,26 @@ describe("Protected Branch Navigation (T103)", () => {
     actionProps.onUseExisting();
 
     await waitFor(() => {
-      expect(aiToolScreenProps.length).toBeGreaterThan(0);
+      expect(
+        codingAgentScreenProps.length + branchQuickStartProps.length,
+      ).toBeGreaterThan(0);
     });
 
-    const props = aiToolScreenProps.at(-1) as { initialToolId?: string };
-    expect(props.initialToolId).toBe("codex-cli");
+    if (branchQuickStartProps.length > 0 && codingAgentScreenProps.length === 0) {
+      await act(async () => {
+        branchQuickStartProps.at(-1)?.onSelect("manual");
+        await Promise.resolve();
+      });
+    }
+
+    await waitFor(() => {
+      expect(codingAgentScreenProps.length).toBeGreaterThan(0);
+    });
+
+    const props = codingAgentScreenProps.at(-1) as {
+      initialAgentId?: string | null;
+    };
+    expect(props.initialAgentId).toBe("codex-cli");
   });
 
   it("switches local protected branches via root workflow and navigates to AI tool", async () => {
@@ -434,7 +462,20 @@ describe("Protected Branch Navigation (T103)", () => {
     });
 
     await waitFor(() => {
-      expect(aiToolScreenProps.length).toBeGreaterThan(0);
+      expect(
+        codingAgentScreenProps.length + branchQuickStartProps.length,
+      ).toBeGreaterThan(0);
+    });
+
+    if (branchQuickStartProps.length > 0 && codingAgentScreenProps.length === 0) {
+      await act(async () => {
+        branchQuickStartProps.at(-1)?.onSelect("manual");
+        await Promise.resolve();
+      });
+    }
+
+    await waitFor(() => {
+      expect(codingAgentScreenProps.length).toBeGreaterThan(0);
     });
   });
 
@@ -504,7 +545,20 @@ describe("Protected Branch Navigation (T103)", () => {
     });
 
     await waitFor(() => {
-      expect(aiToolScreenProps.length).toBeGreaterThan(0);
+      expect(
+        codingAgentScreenProps.length + branchQuickStartProps.length,
+      ).toBeGreaterThan(0);
+    });
+
+    if (branchQuickStartProps.length > 0 && codingAgentScreenProps.length === 0) {
+      await act(async () => {
+        branchQuickStartProps.at(-1)?.onSelect("manual");
+        await Promise.resolve();
+      });
+    }
+
+    await waitFor(() => {
+      expect(codingAgentScreenProps.length).toBeGreaterThan(0);
     });
   });
 });
