@@ -60,6 +60,7 @@ export function WorktreeCreateScreen({
           onInput={onInput ?? onChange}
           onSubmit={onSubmit}
           focused
+          width={32}
         />
       </box>
 
