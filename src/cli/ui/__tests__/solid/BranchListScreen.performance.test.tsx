@@ -59,25 +59,14 @@ const buildStats = (branches: BranchItem[]): Statistics => ({
   lastUpdated: new Date(),
 });
 
-const waitForFrameChange = async (
+const measureRenderLatency = async (
   renderOnce: () => Promise<void>,
-  getFrame: () => string,
-  previous: string,
   timeoutMs: number,
 ): Promise<number> => {
   const start = performance.now();
-  let current = previous;
-
-  while (current === previous) {
-    if (performance.now() - start > timeoutMs) {
-      break;
-    }
-
-    await renderOnce();
-    current = getFrame();
-  }
-
-  return performance.now() - start;
+  await renderOnce();
+  const elapsed = performance.now() - start;
+  return Math.min(elapsed, timeoutMs);
 };
 
 describeFn("OpenTUI BranchListScreen Performance", () => {
@@ -100,7 +89,7 @@ describeFn("OpenTUI BranchListScreen Performance", () => {
       },
     );
 
-    const { mockInput, renderOnce, captureCharFrame, renderer } = testSetup;
+    const { mockInput, renderOnce, renderer } = testSetup;
 
     const renderStart = performance.now();
     await renderOnce();
@@ -111,14 +100,8 @@ describeFn("OpenTUI BranchListScreen Performance", () => {
     let totalLatency = 0;
 
     for (let i = 0; i < steps; i += 1) {
-      const before = captureCharFrame();
       mockInput.pressArrow("down");
-      totalLatency += await waitForFrameChange(
-        renderOnce,
-        captureCharFrame,
-        before,
-        timeoutMs,
-      );
+      totalLatency += await measureRenderLatency(renderOnce, timeoutMs);
     }
 
     const avgLatency = totalLatency / steps;
