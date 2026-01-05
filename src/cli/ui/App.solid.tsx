@@ -153,6 +153,7 @@ export function AppSolid(props: AppSolidProps) {
     null,
   );
   const [selectedMode, setSelectedMode] = createSignal<ExecutionMode>("normal");
+  const [selectedBranches, setSelectedBranches] = createSignal<string[]>([]);
 
   const [logEntries, setLogEntries] = createSignal<FormattedLogEntry[]>([]);
   const [logLoading, setLogLoading] = createSignal(false);
@@ -332,6 +333,18 @@ export function AppSolid(props: AppSolidProps) {
     navigateTo("tool-select");
   };
 
+  const toggleSelectedBranch = (branchName: string) => {
+    setSelectedBranches((prev) => {
+      const next = new Set(prev);
+      if (next.has(branchName)) {
+        next.delete(branchName);
+      } else {
+        next.add(branchName);
+      }
+      return Array.from(next);
+    });
+  };
+
   const handleToolSelect = (item: SelectorItem) => {
     setSelectedTool(item.value as CodingAgentId);
     navigateTo("mode-select");
@@ -388,6 +401,8 @@ export function AppSolid(props: AppSolidProps) {
           workingDirectory={workingDirectory()}
           toolStatuses={toolStatuses()}
           onOpenLogs={() => navigateTo("log-list")}
+          selectedBranches={selectedBranches()}
+          onToggleSelect={toggleSelectedBranch}
         />
       );
     }
