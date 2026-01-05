@@ -127,10 +127,10 @@ Phase 8 (統合・仕上げ)
 
 ### テスト（TDD 必須）
 
-- [ ] **T401** [P] [US3] `src/cli/ui/__tests__/solid/screens/LoadingIndicator.test.tsx` にテスト作成
-- [ ] **T402** [P] [US3] `src/cli/ui/__tests__/solid/screens/ConfirmScreen.test.tsx` にテスト作成
-- [ ] **T403** [P] [US3] `src/cli/ui/__tests__/solid/screens/InputScreen.test.tsx` にテスト作成
-- [ ] **T404** [P] [US3] `src/cli/ui/__tests__/solid/screens/ErrorScreen.test.tsx` にテスト作成
+- [x] **T401** [P] [US3] `src/cli/ui/__tests__/solid/screens/LoadingIndicator.test.tsx` にテスト作成
+- [x] **T402** [P] [US3] `src/cli/ui/__tests__/solid/screens/ConfirmScreen.test.tsx` にテスト作成
+- [x] **T403** [P] [US3] `src/cli/ui/__tests__/solid/screens/InputScreen.test.tsx` にテスト作成
+- [x] **T404** [P] [US3] `src/cli/ui/__tests__/solid/screens/ErrorScreen.test.tsx` にテスト作成
 
 ### 実装
 
