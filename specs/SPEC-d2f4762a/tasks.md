@@ -33,8 +33,8 @@
 - [x] **T108** [US0] `src/cli/ui/__tests__/hooks/useGitData.nonblocking.test.tsx` にフェッチが解決しなくてもローディングが解除されるテストを追加
 - [x] **T109** [US0] `tests/unit/git.fetchAllRemotes.test.ts` に`fetchAllRemotes`がタイムアウト/非対話設定を渡すテストを追加
 - [x] **T110** [US0] `src/git.ts` と `src/cli/ui/hooks/useGitData.ts` を更新し、フェッチのタイムアウトと非ブロッキングを実装
-- [ ] **T111** [US0] `src/cli/ui/__tests__/components/screens/BranchListScreen.test.tsx` に選択中ブランチのフルパス表示（`Branch: ...`）と空表示時の`Branch: (none)`のテストを追加
-- [ ] **T112** [US0] `src/cli/ui/components/screens/BranchListScreen.tsx` にフッターヘルプ直上のフルパス表示と固定行数調整を実装
+- [x] **T111** [US0] `src/cli/ui/__tests__/components/screens/BranchListScreen.test.tsx` に選択中ブランチのフルパス表示（`Branch: ...`）と空表示時の`Branch: (none)`のテストを追加
+- [x] **T112** [US0] `src/cli/ui/components/screens/BranchListScreen.tsx` にフッターヘルプ直上のフルパス表示と固定行数調整を実装
 
 ## フェーズ3: 統合とポリッシュ
 

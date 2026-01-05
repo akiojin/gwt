@@ -335,15 +335,22 @@ export const BranchListScreen = React.memo(function BranchListScreen({
   // Filter input: 1 line
   // Stats: 1 line
   // Empty line: 1 line
+  // Selected branch path: 1 line
   // Footer: 1 line
-  // Total fixed: 6 lines
+  // Total fixed: 7 lines
   const headerLines = 2;
   const filterLines = 1;
   const statsLines = 1;
   const emptyLine = 1;
+  const branchPathLines = 1;
   const footerLines = 1;
   const fixedLines =
-    headerLines + filterLines + statsLines + emptyLine + footerLines;
+    headerLines +
+    filterLines +
+    statsLines +
+    emptyLine +
+    branchPathLines +
+    footerLines;
   const contentHeight = rows - fixedLines;
   const limit = Math.max(5, contentHeight); // Minimum 5 items visible
 
@@ -358,6 +365,10 @@ export const BranchListScreen = React.memo(function BranchListScreen({
     { key: "p", description: "Profiles" },
     { key: "l", description: "Logs" },
   ];
+
+  const selectedBranchName =
+    filteredBranches[selectedIndex]?.name ?? "(none)";
+  const selectedBranchLabel = `Branch: ${selectedBranchName}`;
 
   const formatLatestCommit = useCallback((timestamp?: number) => {
     if (!timestamp || Number.isNaN(timestamp)) {
@@ -741,6 +752,10 @@ export const BranchListScreen = React.memo(function BranchListScreen({
           )}
         </Box>
       )}
+
+      <Box>
+        <Text dimColor>{selectedBranchLabel}</Text>
+      </Box>
 
       {/* Footer */}
       <Footer actions={footerActions} />
