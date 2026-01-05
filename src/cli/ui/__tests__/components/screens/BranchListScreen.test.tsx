@@ -70,7 +70,7 @@ describe("BranchListScreen", () => {
 
   it("should render header with title", () => {
     const onSelect = vi.fn();
-    const { getByText } = render(
+    const { getByText, getAllByText } = render(
       <BranchListScreen
         branches={mockBranches}
         stats={mockStats}
@@ -97,7 +97,7 @@ describe("BranchListScreen", () => {
 
   it("should render branch list", () => {
     const onSelect = vi.fn();
-    const { getByText } = render(
+    const { getByText, getAllByText } = render(
       <BranchListScreen
         branches={mockBranches}
         stats={mockStats}
@@ -105,7 +105,7 @@ describe("BranchListScreen", () => {
       />,
     );
 
-    expect(getByText(/main/)).toBeDefined();
+    expect(getAllByText(/main/).length).toBeGreaterThan(0);
     expect(getByText(/feature\/test/)).toBeDefined();
   });
 
@@ -123,6 +123,21 @@ describe("BranchListScreen", () => {
     expect(getAllByText(/enter/i).length).toBeGreaterThan(0);
   });
 
+  it("should display selected branch full path above footer help", () => {
+    const onSelect = vi.fn();
+    const { lastFrame } = inkRender(
+      <BranchListScreen
+        branches={mockBranches}
+        stats={mockStats}
+        onSelect={onSelect}
+      />,
+      { stripAnsi: false },
+    );
+
+    const output = stripAnsi(stripControlSequences(lastFrame() ?? ""));
+    expect(output).toContain("Branch: main");
+  });
+
   it("should handle empty branch list", () => {
     const onSelect = vi.fn();
     const emptyStats: Statistics = {
@@ -138,6 +153,25 @@ describe("BranchListScreen", () => {
     );
 
     expect(container).toBeDefined();
+  });
+
+  it("should display Branch: (none) when branch list is empty", () => {
+    const onSelect = vi.fn();
+    const emptyStats: Statistics = {
+      localCount: 0,
+      remoteCount: 0,
+      worktreeCount: 0,
+      changesCount: 0,
+      lastUpdated: new Date(),
+    };
+
+    const { lastFrame } = inkRender(
+      <BranchListScreen branches={[]} stats={emptyStats} onSelect={onSelect} />,
+      { stripAnsi: false },
+    );
+
+    const output = stripAnsi(stripControlSequences(lastFrame() ?? ""));
+    expect(output).toContain("Branch: (none)");
   });
 
   it("should display loading indicator after the configured delay", async () => {

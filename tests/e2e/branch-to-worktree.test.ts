@@ -18,9 +18,10 @@ const existsSyncMock = vi.hoisted(() =>
     if (typeof targetPath !== "string") {
       return false;
     }
+    const normalized = targetPath.replace(/\\/g, "/");
     if (
-      targetPath.includes("/path/to/repo/.worktrees") ||
-      targetPath === "/path/to/worktree"
+      normalized.includes("/path/to/repo/.worktrees") ||
+      normalized === "/path/to/worktree"
     ) {
       return false;
     }
