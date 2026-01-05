@@ -176,8 +176,8 @@ Phase 8 (統合・仕上げ)
 
 ### App.tsx 移行
 
-- [ ] **T517** [US4] T509-T516の後に `src/cli/ui/App.solid.tsx` を作成（ルーティング/状態管理）
-- [ ] **T518** [US4] T517の後に `src/cli/ui/index.solid.ts` を作成（エントリーポイント）
+- [x] **T517** [US4] T509-T516の後に `src/cli/ui/App.solid.tsx` を作成（ルーティング/状態管理）
+- [x] **T518** [US4] T517の後に `src/cli/ui/index.solid.ts` を作成（エントリーポイント）
 
 ### 統合
 
