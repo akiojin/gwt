@@ -30,10 +30,10 @@ export function TextInput({
       <input
         value={value}
         onChange={onChange}
-        onSubmit={onSubmit}
         placeholder={placeholder}
         focused={isFocused}
         width={inputWidth}
+        {...(onSubmit ? { onSubmit } : {})}
       />
     </box>
   );

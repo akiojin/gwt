@@ -26,6 +26,7 @@ import { LogScreen } from "./screens/solid/LogScreen.js";
 import { LogDetailScreen } from "./screens/solid/LogDetailScreen.js";
 import { ErrorScreen } from "./screens/solid/ErrorScreen.js";
 import { LoadingIndicatorScreen } from "./screens/solid/LoadingIndicator.js";
+import { WorktreeCreateScreen } from "./screens/solid/WorktreeCreateScreen.js";
 import { calculateStatistics } from "./utils/statisticsCalculator.js";
 import { formatBranchItems } from "./utils/branchFormatter.js";
 import {
@@ -33,9 +34,14 @@ import {
   getDefaultModelOption,
   normalizeModelId,
 } from "./utils/modelOptions.js";
+import {
+  resolveBaseBranchLabel,
+  resolveBaseBranchRef,
+} from "./utils/baseBranch.js";
 import { getAllBranches, getRepositoryRoot } from "../../git.js";
 import { listAdditionalWorktrees } from "../../worktree.js";
 import { detectAllToolStatuses, type ToolStatus } from "../../utils/command.js";
+import { getConfig } from "../../config/index.js";
 import { getAllCodingAgents } from "../../config/tools.js";
 import {
   buildLogFilePath,
@@ -54,6 +60,8 @@ export interface SelectionResult {
   displayName: string;
   branchType: "local" | "remote";
   remoteBranch?: string;
+  baseBranch?: string;
+  isNewBranch?: boolean;
   tool: CodingAgentId;
   mode: ExecutionMode;
   skipPermissions: boolean;
@@ -69,6 +77,7 @@ export type AppScreen =
   | "skip-permissions"
   | "log-list"
   | "log-detail"
+  | "worktree-create"
   | "loading"
   | "error";
 
@@ -106,6 +115,22 @@ const toSelectedBranchState = (branch: BranchItem): SelectedBranchState => {
     branchCategory: branch.branchType,
     ...(isRemote ? { remoteBranch: branch.name } : {}),
   };
+};
+
+const inferBranchCategory = (branchName: string): BranchItem["branchType"] => {
+  const normalized = branchName.replace(/^origin\//, "");
+  if (normalized === "main") return "main";
+  if (normalized === "develop") return "develop";
+  const prefix = normalized.split("/")[0] ?? "";
+  switch (prefix) {
+    case "feature":
+    case "bugfix":
+    case "hotfix":
+    case "release":
+      return prefix;
+    default:
+      return "other";
+  }
 };
 
 export function AppSolid(props: AppSolidProps) {
@@ -155,6 +180,14 @@ export function AppSolid(props: AppSolidProps) {
   );
   const [selectedMode, setSelectedMode] = createSignal<ExecutionMode>("normal");
   const [selectedBranches, setSelectedBranches] = createSignal<string[]>([]);
+  const [isNewBranch, setIsNewBranch] = createSignal(false);
+  const [newBranchBaseRef, setNewBranchBaseRef] = createSignal<string | null>(
+    null,
+  );
+  const [creationSource, setCreationSource] =
+    createSignal<SelectedBranchState | null>(null);
+  const [createBranchName, setCreateBranchName] = createSignal("");
+  const [defaultBaseBranch, setDefaultBaseBranch] = createSignal("main");
 
   const [logEntries, setLogEntries] = createSignal<FormattedLogEntry[]>([]);
   const [logLoading, setLogLoading] = createSignal(false);
@@ -332,6 +365,12 @@ export function AppSolid(props: AppSolidProps) {
   });
 
   onMount(() => {
+    void getConfig()
+      .then((config) => setDefaultBaseBranch(config.defaultBaseBranch))
+      .catch(() => setDefaultBaseBranch("main"));
+  });
+
+  onMount(() => {
     void getAllCodingAgents()
       .then((agents) => {
         setToolItems(
@@ -361,9 +400,18 @@ export function AppSolid(props: AppSolidProps) {
 
   const handleBranchSelect = (branch: BranchItem) => {
     setSelectedBranch(toSelectedBranchState(branch));
+    setIsNewBranch(false);
+    setNewBranchBaseRef(null);
+    setCreationSource(null);
     setSelectedTool(null);
     setSelectedMode("normal");
     navigateTo("tool-select");
+  };
+
+  const handleQuickCreate = (branch: BranchItem | null) => {
+    setCreationSource(branch ? toSelectedBranchState(branch) : null);
+    setCreateBranchName("");
+    navigateTo("worktree-create");
   };
 
   const toggleSelectedBranch = (branchName: string) => {
@@ -399,11 +447,19 @@ export function AppSolid(props: AppSolidProps) {
     const resolvedModel = defaultModel?.id ?? null;
     const normalizedModel = normalizeModelId(tool, resolvedModel);
     const resolvedInference = getDefaultInferenceForModel(defaultModel);
+    const baseRef = newBranchBaseRef();
+
     exitApp({
       branch: branch.name,
       displayName: branch.displayName,
       branchType: branch.branchType,
       ...(branch.remoteBranch ? { remoteBranch: branch.remoteBranch } : {}),
+      ...(isNewBranch()
+        ? {
+            isNewBranch: true,
+            ...(baseRef ? { baseBranch: baseRef } : {}),
+          }
+        : {}),
       tool,
       mode: selectedMode(),
       skipPermissions,
@@ -436,6 +492,7 @@ export function AppSolid(props: AppSolidProps) {
           onOpenLogs={() => navigateTo("log-list")}
           selectedBranches={selectedBranches()}
           onToggleSelect={toggleSelectedBranch}
+          onCreateBranch={handleQuickCreate}
           helpVisible={helpVisible()}
         />
       );
@@ -536,6 +593,45 @@ export function AppSolid(props: AppSolidProps) {
           notification={logNotification()}
           version={version()}
           helpVisible={helpVisible()}
+        />
+      );
+    }
+
+    if (screen === "worktree-create") {
+      const baseBranchRef = resolveBaseBranchRef(creationSource(), null, () =>
+        defaultBaseBranch(),
+      );
+      const baseBranchLabel = resolveBaseBranchLabel(
+        creationSource(),
+        null,
+        () => defaultBaseBranch(),
+      );
+
+      return (
+        <WorktreeCreateScreen
+          branchName={createBranchName()}
+          baseBranch={baseBranchLabel}
+          version={version()}
+          helpVisible={helpVisible()}
+          onChange={setCreateBranchName}
+          onSubmit={(value) => {
+            const trimmed = value.trim();
+            if (!trimmed) {
+              return;
+            }
+            setSelectedBranch({
+              name: trimmed,
+              displayName: trimmed,
+              branchType: "local",
+              branchCategory: inferBranchCategory(trimmed),
+            });
+            setIsNewBranch(true);
+            setNewBranchBaseRef(baseBranchRef);
+            setSelectedTool(null);
+            setSelectedMode("normal");
+            navigateTo("tool-select");
+          }}
+          onCancel={goBack}
         />
       );
     }

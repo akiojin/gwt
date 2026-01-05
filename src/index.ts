@@ -318,6 +318,8 @@ export async function handleAIToolWorkflow(
     displayName,
     branchType,
     remoteBranch,
+    baseBranch,
+    isNewBranch,
     tool,
     mode,
     skipPermissions,
@@ -349,7 +351,14 @@ export async function handleAIToolWorkflow(
     // Determine ensure options (local vs remote branch)
     const ensureOptions: EnsureWorktreeOptions = {};
 
-    if (branchType === "remote") {
+    if (isNewBranch) {
+      ensureOptions.isNewBranch = true;
+      if (baseBranch) {
+        ensureOptions.baseBranch = baseBranch;
+      }
+    }
+
+    if (branchType === "remote" && !isNewBranch) {
       const remoteRef = remoteBranch ?? branch;
       const localExists = await branchExists(branch);
 

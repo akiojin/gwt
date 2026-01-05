@@ -33,6 +33,7 @@ export interface BranchListScreenProps {
   onSelect: (branch: BranchItem) => void;
   onQuit?: () => void;
   onCleanupCommand?: () => void;
+  onCreateBranch?: (branch: BranchItem | null) => void;
   onRefresh?: () => void;
   onOpenProfiles?: () => void;
   onOpenLogs?: () => void;
@@ -596,6 +597,12 @@ export function BranchListScreen(props: BranchListScreenProps) {
       return;
     }
 
+    if (key.name === "n" || key.sequence === "n") {
+      const selected = filteredBranches()[selectedIndex()] ?? null;
+      props.onCreateBranch?.(selected);
+      return;
+    }
+
     if (key.name === "c" || key.sequence === "c") {
       props.onCleanupCommand?.();
     } else if (key.name === "r" || key.sequence === "r") {
@@ -733,6 +740,7 @@ export function BranchListScreen(props: BranchListScreenProps) {
     { key: "enter", description: "Select" },
     { key: "f", description: "Filter" },
     { key: "tab", description: "Mode" },
+    { key: "n", description: "New" },
     { key: "r", description: "Refresh" },
     { key: "c", description: "Cleanup" },
     { key: "p", description: "Profiles" },
