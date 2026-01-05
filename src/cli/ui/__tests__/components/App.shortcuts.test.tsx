@@ -217,7 +217,7 @@ describe("App shortcuts integration", () => {
         isNewBranch: true,
       }),
     );
-    expect(navigateToMock).toHaveBeenCalledWith("ai-tool-selector");
+    expect(navigateToMock).toHaveBeenCalledWith("coding-agent-selector");
   });
 
   it("shows warning when cleanup runs without selection", async () => {

@@ -18,12 +18,13 @@ vi.mock("execa", () => ({
 const existsSyncMock = vi.hoisted(() =>
   vi.fn((input: string | URL) => {
     const value = String(input);
-    if (value.includes("/path/to/repo/.worktrees")) {
+    const normalized = value.replace(/\\/g, "/");
+    if (normalized.includes("/path/to/repo/.worktrees")) {
       return false;
     }
     if (
-      value.includes("/path/to/worktree") ||
-      value.includes("/path/to/new-worktree")
+      normalized.includes("/path/to/worktree") ||
+      normalized.includes("/path/to/new-worktree")
     ) {
       return false;
     }
