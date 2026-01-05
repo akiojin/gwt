@@ -42,6 +42,18 @@
 
 ※ 入力レイテンシは ink-testing-library のフレーム更新待ちで測定した簡易値。実端末のスクロール FPS とは一致しない可能性がある。
 
+## OpenTUI BranchListScreen 性能測定（測定結果）
+
+測定日: 2026-01-05  
+測定コマンド: `bun test --preload @opentui/solid/preload src/cli/ui/__tests__/solid/BranchListScreen.performance.test.tsx`  
+測定環境: ローカル開発環境（CI ではない）
+
+- 5000 branches render: 8.61ms
+- 入力レイテンシ（Downキー x5 の平均）: 1.06ms
+- 参考: 入力更新の概算 FPS: 945.3
+
+※ OpenTUI のテスト実行には `@opentui/solid` の Bun プラグインが必要なため、`--preload` を指定している。
+
 ## 技術的決定
 
 1. OpenTUI + SolidJS を採用し、Ink.js 依存を最終リリースで撤去する。
