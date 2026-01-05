@@ -536,6 +536,74 @@ export async function removeWorktree(
   }
 }
 
+export interface RepairResult {
+  repairedCount: number;
+  failedCount: number;
+  failures: Array<{ path: string; error: string }>;
+}
+
+/**
+ * Worktreeのパス不整合を修復
+ * git worktree repairを引数なしで実行し、全Worktreeを修復
+ * @param targetBranches 修復対象のブランチ名配列（修復前後の比較用）
+ * @returns 修復結果（成功数、失敗数、失敗詳細）
+ */
+export async function repairWorktrees(
+  targetBranches: string[],
+): Promise<RepairResult> {
+  const result: RepairResult = {
+    repairedCount: 0,
+    failedCount: 0,
+    failures: [],
+  };
+
+  if (targetBranches.length === 0) {
+    return result;
+  }
+
+  // 修復前のアクセス可能性を記録
+  const beforeWorktrees = await listAdditionalWorktrees();
+  const beforeAccessible = new Map(
+    beforeWorktrees.map((w) => [w.branch, w.isAccessible]),
+  );
+
+  try {
+    // git worktree repairを引数なしで実行（全Worktreeを修復）
+    await execa("git", ["worktree", "repair"]);
+
+    // 修復後のアクセス可能性を確認
+    const afterWorktrees = await listAdditionalWorktrees();
+    const afterAccessible = new Map(
+      afterWorktrees.map((w) => [w.branch, w.isAccessible]),
+    );
+
+    // 対象ブランチの修復結果を集計
+    for (const branch of targetBranches) {
+      const wasBefore = beforeAccessible.get(branch);
+      const isAfter = afterAccessible.get(branch);
+
+      if (wasBefore === false && isAfter === true) {
+        result.repairedCount++;
+      } else if (wasBefore === false && isAfter === false) {
+        result.failedCount++;
+        result.failures.push({
+          path: branch,
+          error: "Worktree still inaccessible after repair",
+        });
+      }
+    }
+  } catch (error) {
+    // repair自体が失敗した場合
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    for (const branch of targetBranches) {
+      result.failedCount++;
+      result.failures.push({ path: branch, error: errorMessage });
+    }
+  }
+
+  return result;
+}
+
 async function getWorktreesWithPRStatus(): Promise<WorktreeWithPR[]> {
   const worktrees = await listAdditionalWorktrees();
   const worktreesWithPR: WorktreeWithPR[] = [];
