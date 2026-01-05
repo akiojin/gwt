@@ -27,6 +27,21 @@
 
 ※ 測定値はローカル環境依存のため、OpenTUI 移行後も同一条件で再測定し比較する。
 
+### 追加測定（5000ブランチ）
+
+測定日: 2026-01-05  
+測定コマンド: `bun run test -- src/cli/ui/__tests__/performance/branchList.performance.test.tsx`  
+測定環境: ローカル開発環境（CI ではない）
+
+- 150 branches render: 41.35ms（平均 0.276ms/branch）
+- Re-render（stats 更新）: 27.42ms
+- 250 branches render: 11.46ms
+- 5000 branches render: 11.48ms
+- 入力レイテンシ（Downキー x5 の平均）: 88.97ms（簡易測定）
+- 参考: 入力更新の概算 FPS: 11.2
+
+※ 入力レイテンシは ink-testing-library のフレーム更新待ちで測定した簡易値。実端末のスクロール FPS とは一致しない可能性がある。
+
 ## 技術的決定
 
 1. OpenTUI + SolidJS を採用し、Ink.js 依存を最終リリースで撤去する。
