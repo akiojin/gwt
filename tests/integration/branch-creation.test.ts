@@ -45,6 +45,7 @@ const lstatMock = lstat as unknown as ReturnType<typeof vi.fn>;
 const readFileMock = readFile as unknown as ReturnType<typeof vi.fn>;
 const rmMock = rm as unknown as ReturnType<typeof vi.fn>;
 const writeFileMock = writeFile as unknown as ReturnType<typeof vi.fn>;
+const normalizePath = (value: string) => value.replace(/\\/g, "/");
 
 describe("Integration: Branch Creation Workflow (T207)", () => {
   beforeEach(() => {
@@ -277,8 +278,10 @@ branch refs/heads/main
       );
 
       existsSyncMock.mockImplementation((targetPath: string) => {
-        if (targetPath === worktreePath) return true;
-        if (targetPath === `${worktreePath}/.git`) return false;
+        const normalizedTarget = normalizePath(targetPath);
+        const normalizedWorktree = normalizePath(worktreePath);
+        if (normalizedTarget === normalizedWorktree) return true;
+        if (normalizedTarget === `${normalizedWorktree}/.git`) return false;
         return false;
       });
 
@@ -330,8 +333,10 @@ branch refs/heads/main
       );
 
       existsSyncMock.mockImplementation((targetPath: string) => {
-        if (targetPath === worktreePath) return true;
-        if (targetPath === `${worktreePath}/.git`) return true;
+        const normalizedTarget = normalizePath(targetPath);
+        const normalizedWorktree = normalizePath(worktreePath);
+        if (normalizedTarget === normalizedWorktree) return true;
+        if (normalizedTarget === `${normalizedWorktree}/.git`) return true;
         return false;
       });
 
