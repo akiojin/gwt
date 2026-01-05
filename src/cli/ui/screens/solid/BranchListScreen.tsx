@@ -3,7 +3,7 @@ import { createEffect, createMemo, createSignal } from "solid-js";
 import { useKeyboard, useTerminalDimensions } from "@opentui/solid";
 import { TextAttributes } from "@opentui/core";
 import type { BranchItem, BranchViewMode, Statistics } from "../../types.js";
-import type { ToolStatus } from "../../../utils/command.js";
+import type { ToolStatus } from "../../../../utils/command.js";
 import { getLatestActivityTimestamp } from "../../utils/branchFormatter.js";
 import stringWidth from "string-width";
 
