@@ -4,7 +4,7 @@ import { testRender } from "@opentui/solid";
 import { BranchListScreen } from "../../screens/solid/BranchListScreen.js";
 import type { BranchItem, Statistics } from "../../types.js";
 import type { BranchListScreenProps } from "../../screens/solid/BranchListScreen.js";
-import type { ToolStatus } from "../../hooks/useToolStatus.js";
+import type { ToolStatus } from "../../../../utils/command.js";
 
 const createBranch = (
   name: string,

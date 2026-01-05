@@ -3,7 +3,7 @@ import { constants } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-const bundlePath = resolve(process.cwd(), "dist/cli/ui/components/App.js");
+const bundlePath = resolve(process.cwd(), "dist/cli/ui/App.solid.js");
 
 describe("Dist bundle integrity", () => {
   it("reflects BranchList cleanup UI implementation", async () => {

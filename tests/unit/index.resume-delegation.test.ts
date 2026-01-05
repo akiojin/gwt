@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { SelectionResult } from "../../src/cli/ui/components/App.js";
-import type { ExecutionMode } from "../../src/cli/ui/components/screens/ExecutionModeSelectorScreen.js";
+import type { SelectionResult } from "../../src/cli/ui/App.solid.js";
+import type { ExecutionMode } from "../../src/cli/ui/App.solid.js";
 
 // Vitest shim for environments lacking vi.hoisted (e.g., bun)
 if (typeof (vi as Record<string, unknown>).hoisted !== "function") {

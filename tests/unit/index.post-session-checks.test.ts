@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { SelectionResult } from "../../src/cli/ui/components/App.js";
+import type { SelectionResult } from "../../src/cli/ui/App.solid.js";
 
 const {
   ensureWorktreeMock,

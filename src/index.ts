@@ -27,7 +27,7 @@ import {
   type EnsureWorktreeOptions,
 } from "./services/WorktreeOrchestrator.js";
 import chalk from "chalk";
-import type { SelectionResult } from "./cli/ui/components/App.js";
+import type { SelectionResult } from "./cli/ui/App.solid.js";
 import {
   isProtectedBranchName,
   switchToProtectedBranch,
@@ -237,55 +237,6 @@ async function showVersion(): Promise<void> {
     await waitForErrorAcknowledgement();
     process.exit(1);
   }
-}
-
-/**
- * Main function for Ink.js UI
- * Returns SelectionResult if user made selections, undefined if user quit
- */
-async function mainInkUI(): Promise<SelectionResult | undefined> {
-  const { render } = await import("ink");
-  const React = await import("react");
-  const { App } = await import("./cli/ui/components/App.js");
-  const terminal = getTerminalStreams();
-
-  let selectionResult: SelectionResult | undefined;
-
-  // Resume stdin to ensure it's ready for Ink.js
-  if (typeof terminal.stdin.resume === "function") {
-    terminal.stdin.resume();
-  }
-
-  const { unmount, waitUntilExit } = render(
-    React.createElement(App, {
-      onExit: (result?: SelectionResult) => {
-        selectionResult = result;
-      },
-    }),
-    {
-      stdin: terminal.stdin,
-      stdout: terminal.stdout,
-      stderr: terminal.stderr,
-      patchConsole: false,
-    },
-  );
-
-  // Wait for user to exit
-  try {
-    await waitUntilExit();
-  } finally {
-    terminal.exitRawMode();
-    if (typeof terminal.stdin.pause === "function") {
-      terminal.stdin.pause();
-    }
-    // Inkが残した data リスナーが子プロセス入力を奪わないようクリーンアップ
-    terminal.stdin.removeAllListeners?.("data");
-    terminal.stdin.removeAllListeners?.("keypress");
-    terminal.stdin.removeAllListeners?.("readable");
-    unmount();
-  }
-
-  return selectionResult;
 }
 
 /**
@@ -918,13 +869,6 @@ type UIHandler = () => Promise<SelectionResult | undefined>;
 type WorkflowHandler = (selection: SelectionResult) => Promise<void>;
 
 function resolveUIHandler(): UIHandler {
-  const preference = process.env.GWT_UI?.trim().toLowerCase();
-  if (preference === "ink") {
-    return mainInkUI;
-  }
-  if (preference === "solid" || preference === "opentui") {
-    return mainSolidUI;
-  }
   return mainSolidUI;
 }
 

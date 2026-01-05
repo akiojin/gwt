@@ -15,7 +15,6 @@ import type {
   Statistics,
   WorktreeInfo,
 } from "./types.js";
-import type { ToolStatus } from "./hooks/useToolStatus.js";
 import type { FormattedLogEntry } from "../../logging/formatter.js";
 import { BranchListScreen } from "./screens/solid/BranchListScreen.js";
 import { HelpOverlay } from "./components/solid/HelpOverlay.js";
@@ -36,7 +35,7 @@ import {
 } from "./utils/modelOptions.js";
 import { getAllBranches, getRepositoryRoot } from "../../git.js";
 import { listAdditionalWorktrees } from "../../worktree.js";
-import { detectAllToolStatuses } from "../../utils/command.js";
+import { detectAllToolStatuses, type ToolStatus } from "../../utils/command.js";
 import { getAllCodingAgents } from "../../config/tools.js";
 import {
   buildLogFilePath,

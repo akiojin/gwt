@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import type { SelectionResult } from "../../src/cli/ui/components/App.js";
+import type { SelectionResult } from "../../src/cli/ui/App.solid.js";
 
 type ViWithDoMock = typeof vi & { doMock?: typeof vi.mock };
 const viWithDoMock = vi as unknown as ViWithDoMock;
@@ -56,6 +56,7 @@ describe("main error handling", () => {
           usingFallback: false,
           exitRawMode: vi.fn(),
         })),
+        resetTerminalModes: vi.fn(),
         waitForUserAcknowledgement,
         createChildStdio: vi.fn(() => ({
           stdin: "inherit" as const,
@@ -67,41 +68,16 @@ describe("main error handling", () => {
     });
 
     const renderSpy = vi.fn(
-      (
-        element:
-          | {
-              props?: {
-                onExit?: (value?: SelectionResult | undefined) => void;
-              };
-            }
-          | undefined,
-      ) => {
+      async (props: {
+        onExit?: (value?: SelectionResult | undefined) => void;
+      }) => {
         const next = selectionQueue.shift();
-        element?.props?.onExit?.(next);
-        return {
-          unmount: vi.fn(),
-          waitUntilExit: () => Promise.resolve(),
-        };
+        props.onExit?.(next);
       },
     );
 
-    viWithDoMock.doMock?.("ink", () => ({
-      render: renderSpy,
-    }));
-
-    viWithDoMock.doMock?.("react", () => {
-      const createElement = <P>(type: unknown, props: P) => ({ type, props });
-      const memo = <P>(component: P) => component;
-      return {
-        default: { createElement, memo },
-        createElement,
-        memo,
-        Component: class Component {},
-      };
-    });
-
-    viWithDoMock.doMock?.("../../src/cli/ui/components/App.js", () => ({
-      App: (props: unknown) => props,
+    viWithDoMock.doMock?.("../../src/opentui/index.solid.js", () => ({
+      renderSolidApp: renderSpy,
     }));
 
     viWithDoMock.doMock?.("../../src/git.js", () => ({
