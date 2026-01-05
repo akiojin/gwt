@@ -66,7 +66,7 @@ Phase 8 (統合・仕上げ)
 ### テスト（TDD 必須）
 
 - [x] **T201** [US1] `src/cli/ui/__tests__/solid/BranchListScreen.test.tsx` にテスト骨格を作成
-- [ ] **T202** [US1] T201の後に BranchListScreen のユニットテストを実装（選択、スクロール、フィルター）
+- [x] **T202** [US1] T201の後に BranchListScreen のユニットテストを実装（選択、スクロール、フィルター）
 
 ### 実装
 
