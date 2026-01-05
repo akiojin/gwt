@@ -7,8 +7,8 @@
       "dependencies": {
         "@fastify/static": "^9.0.0",
         "@fastify/websocket": "^11.2.0",
-        "@opentui/core": "^0.1.63",
-        "@opentui/solid": "^0.1.62",
+        "@opentui/core": "^0.1.68",
+        "@opentui/solid": "^0.1.68",
         "@radix-ui/react-dialog": "^1.1.15",
         "@radix-ui/react-label": "^2.1.8",
         "@radix-ui/react-select": "^2.2.6",
