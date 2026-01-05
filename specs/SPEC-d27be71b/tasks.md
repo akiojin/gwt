@@ -88,7 +88,7 @@ Phase 8 (統合・仕上げ)
 - [x] **T301** [P] [US2] `src/cli/ui/__tests__/solid/components/Header.test.tsx` にテスト作成
 - [x] **T302** [P] [US2] `src/cli/ui/__tests__/solid/components/Footer.test.tsx` にテスト作成
 - [x] **T303** [P] [US2] `src/cli/ui/__tests__/solid/components/ScrollableList.test.tsx` にテスト作成
-- [ ] **T304** [P] [US2] `src/cli/ui/__tests__/solid/components/Stats.test.tsx` にテスト作成
+- [x] **T304** [P] [US2] `src/cli/ui/__tests__/solid/components/Stats.test.tsx` にテスト作成
 - [ ] **T305** [P] [US2] `src/cli/ui/__tests__/solid/components/SearchInput.test.tsx` にテスト作成
 - [ ] **T306** [P] [US2] `src/cli/ui/__tests__/solid/components/SelectInput.test.tsx` にテスト作成
 - [ ] **T307** [P] [US2] `src/cli/ui/__tests__/solid/components/TextInput.test.tsx` にテスト作成
