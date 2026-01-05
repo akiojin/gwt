@@ -70,6 +70,9 @@ const WIDTH_OVERRIDES: Record<string, number> = {
   "⚠": 2,
   "⚠️": 2,
   "🛡": 2,
+  "⭕": 2,
+  "⭕️": 2,
+  "❌": 2,
   "🔗": 2,
   "💻": 2,
   "☁️": 2,
@@ -673,9 +676,9 @@ export function BranchListScreen(props: BranchListScreenProps) {
       worktreeIcon = "🔴";
       worktreeColor = "red";
     }
-    const safeIcon = branch.safeToCleanup === true ? "🛡" : "⚠";
+    const safeIcon = branch.safeToCleanup === true ? "⭕️" : "❌";
     const safeColor: IndicatorColor =
-      branch.safeToCleanup === true ? "green" : "yellow";
+      branch.safeToCleanup === true ? "green" : "red";
 
     let commitText = "---";
     const latestActivitySec = getLatestActivityTimestamp(branch);
