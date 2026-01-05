@@ -8,25 +8,8 @@ RUN apt-get update && apt-get install -y \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Global tools with pnpm
-RUN npm add -g \
-    pnpm@latest \
-    bun@latest \
-    typescript@latest \
-    typescript-language-server@latest \
-    eslint@latest \
-    prettier@latest \
-    @commitlint/cli@latest \
-    @commitlint/config-conventional@latest
-
-# Setup pnpm global bin directory manually
-ENV PNPM_HOME="/root/.local/share/pnpm"
-ENV PATH="$PNPM_HOME:$PATH"
-
-RUN mkdir -p "$PNPM_HOME" && \
-    pnpm config set global-bin-dir "$PNPM_HOME" && \
-    echo 'export PNPM_HOME="/root/.local/share/pnpm"' >> /root/.bashrc && \
-    echo 'export PATH="$PNPM_HOME:$PATH"' >> /root/.bashrc
+# Global tools (minimal - other tools are in devDependencies)
+RUN npm add -g bun@latest
 
 # Install uv/uvx
 RUN curl -fsSL https://astral.sh/uv/install.sh | bash
