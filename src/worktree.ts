@@ -543,12 +543,13 @@ export interface RepairResult {
 }
 
 /**
- * 指定されたWorktreeのパス不整合を修復
- * @param worktreePaths 修復対象のWorktreeパス配列
+ * Worktreeのパス不整合を修復
+ * git worktree repairを引数なしで実行し、全Worktreeを修復
+ * @param targetBranches 修復対象のブランチ名配列（修復前後の比較用）
  * @returns 修復結果（成功数、失敗数、失敗詳細）
  */
 export async function repairWorktrees(
-  worktreePaths: string[],
+  targetBranches: string[],
 ): Promise<RepairResult> {
   const result: RepairResult = {
     repairedCount: 0,
@@ -556,15 +557,47 @@ export async function repairWorktrees(
     failures: [],
   };
 
-  for (const worktreePath of worktreePaths) {
-    try {
-      await execa("git", ["worktree", "repair", worktreePath]);
-      result.repairedCount++;
-    } catch (error) {
+  if (targetBranches.length === 0) {
+    return result;
+  }
+
+  // 修復前のアクセス可能性を記録
+  const beforeWorktrees = await listAdditionalWorktrees();
+  const beforeAccessible = new Map(
+    beforeWorktrees.map((w) => [w.branch, w.isAccessible]),
+  );
+
+  try {
+    // git worktree repairを引数なしで実行（全Worktreeを修復）
+    await execa("git", ["worktree", "repair"]);
+
+    // 修復後のアクセス可能性を確認
+    const afterWorktrees = await listAdditionalWorktrees();
+    const afterAccessible = new Map(
+      afterWorktrees.map((w) => [w.branch, w.isAccessible]),
+    );
+
+    // 対象ブランチの修復結果を集計
+    for (const branch of targetBranches) {
+      const wasBefore = beforeAccessible.get(branch);
+      const isAfter = afterAccessible.get(branch);
+
+      if (wasBefore === false && isAfter === true) {
+        result.repairedCount++;
+      } else if (wasBefore === false && isAfter === false) {
+        result.failedCount++;
+        result.failures.push({
+          path: branch,
+          error: "Worktree still inaccessible after repair",
+        });
+      }
+    }
+  } catch (error) {
+    // repair自体が失敗した場合
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    for (const branch of targetBranches) {
       result.failedCount++;
-      const errorMessage =
-        error instanceof Error ? error.message : String(error);
-      result.failures.push({ path: worktreePath, error: errorMessage });
+      result.failures.push({ path: branch, error: errorMessage });
     }
   }
 

@@ -732,7 +732,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       const protectedSelected = isProtectedSelection(selection);
 
       // Auto-repair inaccessible worktree on Enter selection
-      if (item.worktreeStatus === "inaccessible" && item.worktree?.path) {
+      if (item.worktreeStatus === "inaccessible") {
         setCleanupInputLocked(true);
         setCleanupFooterMessage({
           text: `Repairing worktree for ${item.name}...`,
@@ -741,7 +741,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
         });
 
         try {
-          const result = await repairWorktrees([item.worktree.path]);
+          const result = await repairWorktrees([item.name]);
           if (result.repairedCount > 0) {
             setCleanupFooterMessage({
               text: `Repaired worktree for ${item.name}`,
@@ -1229,7 +1229,7 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
       return;
     }
 
-    // FR-002: Filter to only inaccessible worktrees
+    // FR-002: Filter to only inaccessible worktrees (pass branch names, not paths)
     const worktreeMap = new Map(
       worktrees.map((worktree) => [worktree.branch, worktree]),
     );
@@ -1237,8 +1237,8 @@ export function App({ onExit, loadingIndicatorDelay = 300 }: AppProps) {
     const repairTargets: string[] = [];
     for (const branchName of selectedBranches) {
       const worktree = worktreeMap.get(branchName);
-      if (worktree && worktree.isAccessible === false && worktree.path) {
-        repairTargets.push(worktree.path);
+      if (worktree && worktree.isAccessible === false) {
+        repairTargets.push(branchName);
       }
     }
 
