@@ -211,9 +211,9 @@ Phase 8 (統合・仕上げ)
 ### Ink.js 依存削除
 
 - [x] **T701** [統合] 全 OpenTUI スクリーンの動作確認完了後、Ink.js 版コードを削除
-- [ ] **T702** [統合] T701の後に `package.json` から ink, ink-select-input, ink-text-input, ink-testing-library を削除
-- [ ] **T703** [統合] T702の後に `package.json` から react, react-dom を削除（Web UI 移行まで保持する場合は除く）
-- [ ] **T704** [統合] T703の後に 不要になった React 関連の型定義を削除
+- [x] **T702** [統合] T701の後に `package.json` から ink, ink-select-input, ink-text-input, ink-testing-library を削除
+- [ ] **T703** [統合] T702の後に `package.json` から react, react-dom を削除（Web UI 移行まで保持する場合は除く）※ Web UI が React のため保留
+- [ ] **T704** [統合] T703の後に 不要になった React 関連の型定義を削除 ※ Web UI が React のため保留
 
 ### テスト移行完了
 
