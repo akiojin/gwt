@@ -60,7 +60,11 @@ import {
   type WorktreeInfo as WorktreeEntry,
 } from "../../worktree.js";
 import { detectAllToolStatuses, type ToolStatus } from "../../utils/command.js";
-import { getConfig, type ToolSessionEntry } from "../../config/index.js";
+import {
+  getConfig,
+  loadSession,
+  type ToolSessionEntry,
+} from "../../config/index.js";
 import { getAllCodingAgents } from "../../config/tools.js";
 import {
   buildLogFilePath,
@@ -239,6 +243,22 @@ export function AppSolid(props: AppSolidProps) {
     null,
   );
   const [defaultBaseBranch, setDefaultBaseBranch] = createSignal("main");
+
+  // セッション履歴（最終使用エージェントなど）
+  const [sessionHistory, setSessionHistory] = createSignal<ToolSessionEntry[]>(
+    [],
+  );
+
+  // 選択中ブランチの履歴をフィルタリング
+  const historyForBranch = createMemo(() => {
+    const history = sessionHistory();
+    const branch = selectedBranch();
+    if (!branch) return [];
+    // 選択中ブランチにマッチする履歴エントリを新しい順で返す
+    return history
+      .filter((entry) => entry.branch === branch.name)
+      .sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0));
+  });
 
   const [logEntries, setLogEntries] = createSignal<FormattedLogEntry[]>([]);
   const [logLoading, setLogLoading] = createSignal(false);
@@ -510,6 +530,18 @@ export function AppSolid(props: AppSolidProps) {
     void getConfig()
       .then((config) => setDefaultBaseBranch(config.defaultBaseBranch))
       .catch(() => setDefaultBaseBranch("main"));
+  });
+
+  // セッション履歴をロード（最終使用エージェントなど）
+  onMount(() => {
+    void getRepositoryRoot()
+      .then((repoRoot) => loadSession(repoRoot))
+      .then((session) => {
+        if (session?.history) {
+          setSessionHistory(session.history);
+        }
+      })
+      .catch(() => setSessionHistory([]));
   });
 
   onMount(() => {
@@ -1322,7 +1354,7 @@ export function AppSolid(props: AppSolidProps) {
       <WizardController
         visible={wizardVisible()}
         selectedBranchName={selectedBranch()?.name ?? ""}
-        history={[] as ToolSessionEntry[]}
+        history={historyForBranch()}
         onClose={handleWizardClose}
         onComplete={handleWizardComplete}
         onResume={handleWizardResume}
