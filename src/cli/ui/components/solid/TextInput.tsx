@@ -28,16 +28,22 @@ export function TextInput({
 
   return (
     <box flexDirection="column">
-      {label && <text attributes={TextAttributes.DIM}>{label}</text>}
-      <input
-        value={value}
-        onChange={onChange}
-        placeholder={placeholder}
-        focused={isFocused}
-        width={inputWidth}
-        {...(onInput ? { onInput } : {})}
-        {...(onSubmit ? { onSubmit } : {})}
-      />
+      {label && (
+        <box height={1}>
+          <text attributes={TextAttributes.DIM}>{label}</text>
+        </box>
+      )}
+      <box height={1}>
+        <input
+          value={value}
+          onChange={onChange}
+          placeholder={placeholder}
+          focused={isFocused}
+          width={inputWidth}
+          {...(onInput ? { onInput } : {})}
+          {...(onSubmit ? { onSubmit } : {})}
+        />
+      </box>
     </box>
   );
 }

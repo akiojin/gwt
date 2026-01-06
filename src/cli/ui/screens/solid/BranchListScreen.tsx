@@ -6,6 +6,7 @@ import type { BranchItem, BranchViewMode, Statistics } from "../../types.js";
 import type { ToolStatus } from "../../../../utils/command.js";
 import { getLatestActivityTimestamp } from "../../utils/branchFormatter.js";
 import stringWidth from "string-width";
+import { Header } from "../../components/solid/Header.js";
 
 type IndicatorColor = "cyan" | "green" | "yellow" | "red";
 
@@ -33,6 +34,7 @@ export interface BranchListScreenProps {
   onSelect: (branch: BranchItem) => void;
   onQuit?: () => void;
   onCleanupCommand?: () => void;
+  onRepairWorktrees?: () => void;
   onCreateBranch?: (branch: BranchItem | null) => void;
   onRefresh?: () => void;
   onOpenProfiles?: () => void;
@@ -316,33 +318,24 @@ export function BranchListScreen(props: BranchListScreenProps) {
   const layoutWidth = createMemo(() => Math.max(20, terminal().width || 80));
   const listWidth = createMemo(() => Math.max(20, layoutWidth()));
 
-  const headerTitle = createMemo(() => {
-    let title = "gwt - Branch Selection";
-    if (props.version) {
-      title = `${title} v${props.version}`;
-    }
-    if (props.activeProfile !== undefined) {
-      title = `${title} | Profile: ${props.activeProfile ?? "(none)"}`;
-    }
-    return title;
-  });
-
-  const dividerLine = createMemo(() => "-".repeat(layoutWidth()));
-
   const fixedLines = createMemo(() => {
     const headerLines = 2 + (props.workingDirectory ? 1 : 0);
     const filterLines = 1;
     const toolLines =
       props.toolStatuses && props.toolStatuses.length > 0 ? 1 : 0;
     const statsLines = 1;
+    const loadingLines = 1;
     const footerMessageLines = props.cleanupUI?.footerMessage ? 1 : 0;
+    const branchLines = 1;
     const footerLines = 1;
     return (
       headerLines +
       filterLines +
       toolLines +
       statsLines +
+      loadingLines +
       footerMessageLines +
+      branchLines +
       footerLines
     );
   });
@@ -510,6 +503,22 @@ export function BranchListScreen(props: BranchListScreenProps) {
     }
 
     if (filterMode()) {
+      if (key.name === "down") {
+        const total = filteredBranches().length;
+        if (total > 0) {
+          setSelectedIndex((prev) => Math.min(prev + 1, total - 1));
+        }
+        return;
+      }
+
+      if (key.name === "up") {
+        const total = filteredBranches().length;
+        if (total > 0) {
+          setSelectedIndex((prev) => Math.max(prev - 1, 0));
+        }
+        return;
+      }
+
       if (key.name === "escape") {
         if (filterQuery()) {
           setFilterQuery("");
@@ -606,6 +615,8 @@ export function BranchListScreen(props: BranchListScreenProps) {
 
     if (key.name === "c" || key.sequence === "c") {
       props.onCleanupCommand?.();
+    } else if (key.name === "x" || key.sequence === "x") {
+      props.onRepairWorktrees?.();
     } else if (key.name === "r" || key.sequence === "r") {
       props.onRefresh?.();
     } else if (key.name === "p" || key.sequence === "p") {
@@ -744,6 +755,7 @@ export function BranchListScreen(props: BranchListScreenProps) {
     { key: "n", description: "New" },
     { key: "r", description: "Refresh" },
     { key: "c", description: "Cleanup" },
+    { key: "x", description: "Repair" },
     { key: "p", description: "Profiles" },
     { key: "l", description: "Logs" },
   ];
@@ -906,24 +918,35 @@ export function BranchListScreen(props: BranchListScreenProps) {
     </box>
   );
 
+  const selectedBranchLabel = createMemo(() => {
+    const branches = filteredBranches();
+    if (branches.length === 0) {
+      return "(none)";
+    }
+    const selected = branches[selectedIndex()];
+    if (!selected?.name) {
+      return "(none)";
+    }
+    if (selected.type === "remote") {
+      return selected.name;
+    }
+    return `refs/heads/${selected.name}`;
+  });
+
   return (
     <box flexDirection="column" height={terminal().height || 24}>
-      <box flexDirection="column">
-        <text fg="cyan" attributes={TextAttributes.BOLD}>
-          {padLine(headerTitle(), layoutWidth())}
-        </text>
-        <text attributes={TextAttributes.DIM}>
-          {padLine(dividerLine(), layoutWidth())}
-        </text>
-        {props.workingDirectory && (
-          <text attributes={TextAttributes.DIM}>
-            {padLine(
-              `Working Directory: ${props.workingDirectory}`,
-              layoutWidth(),
-            )}
-          </text>
-        )}
-      </box>
+      <Header
+        title="gwt - Branch Selection"
+        titleColor="cyan"
+        width={layoutWidth()}
+        {...(props.version !== undefined ? { version: props.version } : {})}
+        {...(props.workingDirectory
+          ? { workingDirectory: props.workingDirectory }
+          : {})}
+        {...(props.activeProfile !== undefined
+          ? { activeProfile: props.activeProfile }
+          : {})}
+      />
 
       {renderSegmentLine(filterLineSegments())}
 
@@ -932,14 +955,18 @@ export function BranchListScreen(props: BranchListScreenProps) {
       {renderSegmentLine(statsSegments())}
 
       <box flexDirection="column" flexGrow={1}>
-        <LoadingIndicator
-          isLoading={Boolean(props.loading)}
-          message="Loading Git information..."
-          width={layoutWidth()}
-          {...(props.loadingIndicatorDelay !== undefined
-            ? { delay: props.loadingIndicatorDelay }
-            : {})}
-        />
+        {Boolean(props.loading) && props.branches.length === 0 ? (
+          <LoadingIndicator
+            isLoading
+            message="Loading Git information..."
+            width={layoutWidth()}
+            {...(props.loadingIndicatorDelay !== undefined
+              ? { delay: props.loadingIndicatorDelay }
+              : {})}
+          />
+        ) : (
+          <text>{padLine("", layoutWidth())}</text>
+        )}
 
         {props.error && (
           <>
@@ -1006,6 +1033,10 @@ export function BranchListScreen(props: BranchListScreenProps) {
           )}
         </text>
       )}
+
+      <text attributes={TextAttributes.DIM}>
+        {padLine(`Branch: ${selectedBranchLabel()}`, layoutWidth())}
+      </text>
 
       {renderSegmentLine(footerSegments())}
     </box>

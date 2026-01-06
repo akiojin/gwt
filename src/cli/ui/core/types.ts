@@ -1,8 +1,8 @@
 /**
  * Core UI Types - Framework-agnostic type definitions
  *
- * These types are designed to be shared between Ink.js (React) and OpenTUI (SolidJS)
- * implementations. They contain no framework-specific imports.
+ * These types are designed to be shared across CLI UI implementations and contain
+ * no framework-specific imports.
  *
  * @see specs/SPEC-d27be71b/spec.md - OpenTUI migration spec
  */

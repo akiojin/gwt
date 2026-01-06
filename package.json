@@ -24,6 +24,7 @@
     "prepare": "husky",
     "pretest": "bun run build:cli",
     "test": "NODE_OPTIONS=--max-old-space-size=6144 vitest run --maxWorkers=1",
+    "test:solid": "bun scripts/test-solid.ts",
     "test:watch": "vitest",
     "test:ui": "vitest --ui",
     "test:coverage": "vitest run --coverage",
