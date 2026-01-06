@@ -55,3 +55,53 @@
 
 - [ ] **T303** [US6] `src/worktree.ts` にstale判定・削除処理を追加し、`createWorktree`の前処理として実行
 - [ ] **T304** [US6] `src/worktree.ts` に判定不能な既存ディレクトリ向けの明確なエラーメッセージを追加
+
+## フェーズ5: ユーザーストーリー8 - ブランチ選択後のウィザードポップアップ (優先度: P0)
+
+**依存関係**: なし
+
+**ストーリー**: ブランチ選択後、ブランチ一覧画面の上にウィザードポップアップが表示され、7ステップの設定選択フローを経てAIツールを起動する。
+
+**価値**: 画面遷移ではなくレイヤー表示により、コンテキストを維持しながら設定を進められる。
+
+### テスト（TDD）
+
+- [ ] **T401** [US8] `src/cli/ui/__tests__/solid/components/WizardPopup.test.tsx` にウィザードポップアップの表示/非表示テストを追加
+- [ ] **T402** [US8] `src/cli/ui/__tests__/solid/components/WizardPopup.test.tsx` に背景オーバーレイ（半透過）の表示テストを追加
+- [ ] **T403** [US8] `src/cli/ui/__tests__/solid/components/WizardPopup.test.tsx` にEscapeキーでウィザード終了するテストを追加
+- [ ] **T404** [US8] `src/cli/ui/__tests__/solid/components/WizardPopup.test.tsx` にステップ間の遷移（前へ/次へ）テストを追加
+- [ ] **T405** [US8] `src/cli/ui/__tests__/solid/components/WizardSteps.test.tsx` にブランチタイプ選択ステップのテストを追加
+- [ ] **T406** [US8] `src/cli/ui/__tests__/solid/components/WizardSteps.test.tsx` にブランチ名入力ステップのテストを追加
+- [ ] **T407** [US8] `src/cli/ui/__tests__/solid/components/WizardSteps.test.tsx` にコーディングエージェント選択ステップのテストを追加
+- [ ] **T408** [US8] `src/cli/ui/__tests__/solid/components/WizardSteps.test.tsx` にモデル選択ステップのテストを追加
+- [ ] **T409** [US8] `src/cli/ui/__tests__/solid/components/WizardSteps.test.tsx` に推論レベル選択ステップ（Codexのみ）のテストを追加
+- [ ] **T410** [US8] `src/cli/ui/__tests__/solid/components/WizardSteps.test.tsx` に実行モード選択ステップのテストを追加
+- [ ] **T411** [US8] `src/cli/ui/__tests__/solid/components/WizardSteps.test.tsx` に権限スキップ確認ステップのテストを追加
+
+### 実装
+
+- [ ] **T412** [US8] `src/cli/ui/components/solid/WizardPopup.tsx` にウィザードポップアップコンポーネントを作成（z-index、オーバーレイ）
+- [ ] **T413** [US8] `src/cli/ui/components/solid/WizardSteps.tsx` に各ステップコンポーネントを作成
+- [ ] **T414** [US8] `src/cli/ui/components/solid/App.solid.tsx` にウィザードポップアップの統合（BranchListScreenからの起動）
+
+## フェーズ6: ユーザーストーリー9 - 前回履歴からのクイック選択ポップアップ (優先度: P1)
+
+**依存関係**: US8（ウィザードポップアップUI）
+
+**ストーリー**: ブランチ選択時に履歴がある場合、クイック選択画面を表示し、エージェントごとの「Resume/Start new」を選べる。
+
+**価値**: 毎回ツールとモデルを選択する手間を削減し、高速に再開できる。
+
+### テスト（TDD）
+
+- [ ] **T501** [US9] `src/cli/ui/__tests__/solid/components/QuickStartStep.test.tsx` にクイック選択画面の表示テストを追加
+- [ ] **T502** [US9] `src/cli/ui/__tests__/solid/components/QuickStartStep.test.tsx` にエージェントごとの履歴一覧表示テストを追加
+- [ ] **T503** [US9] `src/cli/ui/__tests__/solid/components/QuickStartStep.test.tsx` に「Resume with previous settings」選択時の動作テストを追加
+- [ ] **T504** [US9] `src/cli/ui/__tests__/solid/components/QuickStartStep.test.tsx` に「Start new with previous settings」選択時の動作テストを追加
+- [ ] **T505** [US9] `src/cli/ui/__tests__/solid/components/QuickStartStep.test.tsx` に「Choose different settings...」選択時の動作テストを追加
+- [ ] **T506** [US9] `src/cli/ui/__tests__/solid/components/QuickStartStep.test.tsx` に履歴がない場合のスキップテストを追加
+
+### 実装
+
+- [ ] **T507** [US9] `src/cli/ui/components/solid/QuickStartStep.tsx` にクイック選択ステップコンポーネントを作成
+- [ ] **T508** [US9] `src/cli/ui/components/solid/WizardPopup.tsx` にクイック選択ステップの統合（履歴有無による分岐）
