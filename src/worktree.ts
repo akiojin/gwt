@@ -114,6 +114,8 @@ export interface WorktreeInfo {
   isAccessible?: boolean;
   invalidReason?: string;
   hasUncommittedChanges?: boolean;
+  isLocked?: boolean;
+  isPrunable?: boolean;
 }
 
 async function listWorktrees(): Promise<WorktreeInfo[]> {
@@ -133,15 +135,35 @@ async function listWorktrees(): Promise<WorktreeInfo[]> {
         if (currentWorktree.path) {
           worktrees.push(currentWorktree as WorktreeInfo);
         }
-        currentWorktree = { path: line.substring(9) };
+        currentWorktree = {
+          path: line.substring(9),
+          locked: false,
+          prunable: false,
+          isLocked: false,
+          isPrunable: false,
+        };
       } else if (line.startsWith("HEAD ")) {
         currentWorktree.head = line.substring(5);
       } else if (line.startsWith("branch ")) {
         currentWorktree.branch = line.substring(7).replace("refs/heads/", "");
-      } else if (line === "locked") {
+      } else if (line === "locked" || line.startsWith("locked ")) {
         currentWorktree.locked = true;
-      } else if (line === "prunable") {
+        currentWorktree.isLocked = true;
+        if (line.startsWith("locked ")) {
+          const reason = line.substring(7).trim();
+          if (reason) {
+            currentWorktree.invalidReason ??= reason;
+          }
+        }
+      } else if (line === "prunable" || line.startsWith("prunable ")) {
         currentWorktree.prunable = true;
+        currentWorktree.isPrunable = true;
+        if (line.startsWith("prunable ")) {
+          const reason = line.substring(9).trim();
+          if (reason) {
+            currentWorktree.invalidReason ??= reason;
+          }
+        }
       } else if (line.startsWith("reason ")) {
         currentWorktree.invalidReason = line.substring(7);
       } else if (line === "") {

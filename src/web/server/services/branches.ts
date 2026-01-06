@@ -58,7 +58,9 @@ export async function listBranches(): Promise<Branch[]> {
   const divergenceMap = await buildDivergenceMap(branches, repoRoot);
   const upstreamMap = await collectUpstreamMap(repoRoot);
   const baseCandidates = buildBaseBranchCandidates(branches);
-  const mainBranch = "main"; // TODO: 動的に取得
+  const branchNames = branches.map((b: BranchInfo) => b.name);
+  const mainBranch =
+    DEFAULT_BASE_BRANCHES.find((name) => branchNames.includes(name)) ?? "main";
   const refCache = new Map<string, boolean>();
   const ancestorCache = new Map<string, boolean>();
 
@@ -158,10 +160,9 @@ export async function syncBranchState(
     divergenceInput.branches = [sanitizedBranch];
   }
   const divergenceStatuses = await getBranchDivergenceStatuses(divergenceInput);
+  const firstDivergence = divergenceStatuses[0];
   const divergence =
-    divergenceStatuses.length > 0
-      ? mapDivergence(divergenceStatuses[0]!)
-      : null;
+    firstDivergence !== undefined ? mapDivergence(firstDivergence) : null;
 
   const branch = await getBranchByName(branchName);
   if (!branch) {
@@ -346,8 +347,9 @@ async function refExists(
   repoRoot: string,
   cache: Map<string, boolean>,
 ): Promise<boolean> {
-  if (cache.has(refName)) {
-    return cache.get(refName)!;
+  const cached = cache.get(refName);
+  if (cached !== undefined) {
+    return cached;
   }
 
   try {
@@ -367,8 +369,9 @@ async function isAncestorRef(
   cache: Map<string, boolean>,
 ): Promise<boolean> {
   const cacheKey = `${ancestor}->${branch}`;
-  if (cache.has(cacheKey)) {
-    return cache.get(cacheKey)!;
+  const cached = cache.get(cacheKey);
+  if (cached !== undefined) {
+    return cached;
   }
 
   try {

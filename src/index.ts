@@ -14,15 +14,10 @@ import {
   hasUnpushedCommits,
   getUncommittedChangesCount,
   getUnpushedCommitsCount,
-  GitError,
 } from "./git.js";
 import { launchClaudeCode } from "./claude.js";
-import {
-  launchCodexCLI,
-  CodexError,
-  type CodexReasoningEffort,
-} from "./codex.js";
-import { launchGeminiCLI, GeminiError } from "./gemini.js";
+import { launchCodexCLI, type CodexReasoningEffort } from "./codex.js";
+import { launchGeminiCLI } from "./gemini.js";
 import {
   WorktreeOrchestrator,
   type EnsureWorktreeOptions,
@@ -32,7 +27,6 @@ import type { SelectionResult } from "./cli/ui/App.solid.js";
 import {
   isProtectedBranchName,
   switchToProtectedBranch,
-  WorktreeError,
   resolveWorktreePathForBranch,
 } from "./worktree.js";
 import {
@@ -49,7 +43,12 @@ import {
   findLatestClaudeSession,
   findLatestGeminiSession,
 } from "./utils/session.js";
-import { getPackageVersion } from "./utils.js";
+import {
+  getPackageVersion,
+  setupExitHandlers,
+  registerExitCleanup,
+  clearExitCleanup,
+} from "./utils.js";
 import { findLatestClaudeSessionId } from "./utils/session.js";
 import { resolveContinueSessionId } from "./cli/ui/utils/continueSession.js";
 import { normalizeModelId } from "./cli/ui/utils/modelOptions.js";
@@ -58,6 +57,7 @@ import {
   DependencyInstallError,
   type DependencyInstallResult,
 } from "./services/dependency-installer.js";
+import { isGitRelatedError, isRecoverableError } from "./utils/error-utils.js";
 
 const ERROR_PROMPT = chalk.yellow(
   "Review the error details, then press Enter to continue.",
@@ -91,71 +91,7 @@ function printWarning(message: string): void {
 
 type GitStepResult<T> = { ok: true; value: T } | { ok: false };
 
-function isGitRelatedError(error: unknown): boolean {
-  if (!error) {
-    return false;
-  }
-
-  if (error instanceof GitError || error instanceof WorktreeError) {
-    return true;
-  }
-
-  if (error instanceof Error) {
-    return error.name === "GitError" || error.name === "WorktreeError";
-  }
-
-  if (
-    typeof error === "object" &&
-    "name" in (error as Record<string, unknown>)
-  ) {
-    const name = (error as { name?: string }).name;
-    return name === "GitError" || name === "WorktreeError";
-  }
-
-  return false;
-}
-
-function isRecoverableError(error: unknown): boolean {
-  if (!error) {
-    return false;
-  }
-
-  if (
-    error instanceof GitError ||
-    error instanceof WorktreeError ||
-    error instanceof CodexError ||
-    error instanceof GeminiError ||
-    error instanceof DependencyInstallError
-  ) {
-    return true;
-  }
-
-  if (error instanceof Error) {
-    return (
-      error.name === "GitError" ||
-      error.name === "WorktreeError" ||
-      error.name === "CodexError" ||
-      error.name === "GeminiError" ||
-      error.name === "DependencyInstallError"
-    );
-  }
-
-  if (
-    typeof error === "object" &&
-    "name" in (error as Record<string, unknown>)
-  ) {
-    const name = (error as { name?: string }).name;
-    return (
-      name === "GitError" ||
-      name === "WorktreeError" ||
-      name === "CodexError" ||
-      name === "GeminiError" ||
-      name === "DependencyInstallError"
-    );
-  }
-
-  return false;
-}
+// Note: isGitRelatedError and isRecoverableError are now imported from ./utils/error-utils.js
 
 async function runGitStep<T>(
   description: string,
@@ -241,6 +177,15 @@ async function showVersion(): Promise<void> {
 }
 
 /**
+ * Performs terminal cleanup when exiting.
+ */
+function performTerminalCleanup(): void {
+  const terminal = getTerminalStreams();
+  terminal.exitRawMode();
+  resetTerminalModes(terminal.stdout);
+}
+
+/**
  * Main function for OpenTUI UI
  * Returns SelectionResult if user made selections, undefined if user quit
  */
@@ -248,6 +193,8 @@ async function mainSolidUI(): Promise<SelectionResult | undefined> {
   const { renderSolidApp } = await import("./opentui/index.solid.js");
   const terminal = getTerminalStreams();
 
+  // Register cleanup for signal handlers
+  registerExitCleanup(performTerminalCleanup);
   let selectionResult: SelectionResult | undefined;
   const mousePreference = process.env.GWT_UI_MOUSE?.trim().toLowerCase();
   const useMouse =
@@ -278,21 +225,6 @@ async function mainSolidUI(): Promise<SelectionResult | undefined> {
     }
   }
 
-  const handleSignal = (code: number) => {
-    terminal.exitRawMode();
-    resetTerminalModes(terminal.stdout);
-    if (typeof terminal.stdin.pause === "function") {
-      terminal.stdin.pause();
-    }
-    process.exit(code);
-  };
-
-  const handleSigint = () => handleSignal(130);
-  const handleSigterm = () => handleSignal(143);
-
-  process.once("SIGINT", handleSigint);
-  process.once("SIGTERM", handleSigterm);
-
   try {
     await renderSolidApp(
       {
@@ -303,23 +235,21 @@ async function mainSolidUI(): Promise<SelectionResult | undefined> {
       {
         stdin: terminal.stdin,
         stdout: terminal.stdout,
-        exitOnCtrlC: false,
+        exitOnCtrlC: true,
         useAlternateScreen,
         useMouse,
         enableMouseMovement,
       },
     );
   } finally {
-    process.removeListener("SIGINT", handleSigint);
-    process.removeListener("SIGTERM", handleSigterm);
-    terminal.exitRawMode();
-    resetTerminalModes(terminal.stdout);
+    performTerminalCleanup();
     if (typeof terminal.stdin.pause === "function") {
       terminal.stdin.pause();
     }
     terminal.stdin.removeAllListeners?.("data");
     terminal.stdin.removeAllListeners?.("keypress");
     terminal.stdin.removeAllListeners?.("readable");
+    clearExitCleanup();
   }
 
   return selectionResult;
@@ -912,7 +842,7 @@ export async function runInteractiveLoop(
   uiHandler: UIHandler = resolveUIHandler(),
   workflowHandler: WorkflowHandler = handleAIToolWorkflow,
 ): Promise<void> {
-  // Main loop: UI → AI Tool → back to UI
+  // Main loop: UI → Coding Agent → back to UI
   while (true) {
     let selectionResult: SelectionResult | undefined;
 
@@ -943,6 +873,9 @@ export async function runInteractiveLoop(
  * Main entry point
  */
 export async function main(): Promise<void> {
+  // Setup global signal handlers for clean exit
+  setupExitHandlers();
+
   // Parse command line arguments
   const args = process.argv.slice(2);
   const showVersionFlag = args.includes("-v") || args.includes("--version");
@@ -987,6 +920,9 @@ export async function main(): Promise<void> {
   }
 
   await runInteractiveLoop();
+
+  // Ensure clean exit with code 0
+  process.exit(0);
 }
 
 export function isEntryPoint(metaUrl: string, argv1?: string): boolean {

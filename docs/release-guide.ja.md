@@ -1,6 +1,6 @@
 # リリースガイド（概要）
 
-本ページはメンテナ向けの概要です。詳細な要件や設計は `specs/SPEC-57fde06f/` を参照してください。
+本ページはメンテナ向けの概要です。
 
 ## フロー概要
 
@@ -26,8 +26,6 @@ feature/* → PR → develop (自動マージ)
 
 ## 追加ドキュメント
 
-- 詳細な要件・エッジケース: `specs/SPEC-57fde06f/spec.md`
-- Quickstart / contracts / data model: `specs/SPEC-57fde06f/` 配下の各ファイル
 - 利用者向けサマリ: README.ja.md
 
 ## 参考ファイル
