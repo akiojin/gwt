@@ -1,27 +1,30 @@
 /**
  * カスタムツール起動機能のテスト
  *
- * T201-T204: launchCustomAITool()とresolveCommand()のテスト
+ * T201-T204: _launchCodingAgent()と_resolveCommand()のテスト
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import type { CustomAITool, LaunchOptions } from "../../src/types/tools.js";
+import type {
+  CodingAgent,
+  CodingAgentLaunchOptions,
+} from "../../src/types/tools.js";
 
 // テスト対象の関数（実装前なので一時的にany型）
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-let launchCustomAITool: any;
+let _launchCodingAgent: any;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-let resolveCommand: any;
+let _resolveCommand: any;
 
 // 実装後にインポートを有効化
-// import { launchCustomAITool, resolveCommand } from "../../src/launcher.js";
+// import { _launchCodingAgent, _resolveCommand } from "../../src/launcher.js";
 
 /**
  * T201: type='path'の実行テスト
  */
-describe("launchCustomAITool - type='path'", () => {
+describe("_launchCodingAgent - type='path'", () => {
   beforeEach(() => {
-    launchCustomAITool = vi.fn();
+    _launchCodingAgent = vi.fn();
   });
 
   afterEach(() => {
@@ -29,7 +32,7 @@ describe("launchCustomAITool - type='path'", () => {
   });
 
   it("絶対パスでツールを直接実行できる", async () => {
-    const tool: CustomAITool = {
+    const _tool: CodingAgent = {
       id: "test-tool-path",
       displayName: "Test Path Tool",
       type: "path",
@@ -37,7 +40,7 @@ describe("launchCustomAITool - type='path'", () => {
       modeArgs: { normal: [] },
     };
 
-    const options: LaunchOptions = {
+    const _options: CodingAgentLaunchOptions = {
       mode: "normal",
     };
 
@@ -47,7 +50,7 @@ describe("launchCustomAITool - type='path'", () => {
   });
 
   it("defaultArgsが正しく結合される（type='path'）", async () => {
-    const tool: CustomAITool = {
+    const _tool: CodingAgent = {
       id: "test-tool-path",
       displayName: "Test Path Tool",
       type: "path",
@@ -56,7 +59,7 @@ describe("launchCustomAITool - type='path'", () => {
       modeArgs: { normal: [] },
     };
 
-    const options: LaunchOptions = {
+    const _options: CodingAgentLaunchOptions = {
       mode: "normal",
     };
 
@@ -66,7 +69,7 @@ describe("launchCustomAITool - type='path'", () => {
   });
 
   it("modeArgs.normalが正しく結合される（type='path'）", async () => {
-    const tool: CustomAITool = {
+    const _tool: CodingAgent = {
       id: "test-tool-path",
       displayName: "Test Path Tool",
       type: "path",
@@ -74,7 +77,7 @@ describe("launchCustomAITool - type='path'", () => {
       modeArgs: { normal: ["--mode=normal"] },
     };
 
-    const options: LaunchOptions = {
+    const _options: CodingAgentLaunchOptions = {
       mode: "normal",
     };
 
@@ -84,7 +87,7 @@ describe("launchCustomAITool - type='path'", () => {
   });
 
   it("extraArgsが正しく結合される（type='path'）", async () => {
-    const tool: CustomAITool = {
+    const _tool: CodingAgent = {
       id: "test-tool-path",
       displayName: "Test Path Tool",
       type: "path",
@@ -92,7 +95,7 @@ describe("launchCustomAITool - type='path'", () => {
       modeArgs: { normal: [] },
     };
 
-    const options: LaunchOptions = {
+    const _options: CodingAgentLaunchOptions = {
       mode: "normal",
       extraArgs: ["--extra1", "--extra2"],
     };
@@ -103,7 +106,7 @@ describe("launchCustomAITool - type='path'", () => {
   });
 
   it("defaultArgs + modeArgs.normal + extraArgsが正しく結合される（type='path'）", async () => {
-    const tool: CustomAITool = {
+    const _tool: CodingAgent = {
       id: "test-tool-path",
       displayName: "Test Path Tool",
       type: "path",
@@ -112,7 +115,7 @@ describe("launchCustomAITool - type='path'", () => {
       modeArgs: { normal: ["--mode=normal"] },
     };
 
-    const options: LaunchOptions = {
+    const _options: CodingAgentLaunchOptions = {
       mode: "normal",
       extraArgs: ["--extra"],
     };
@@ -123,7 +126,7 @@ describe("launchCustomAITool - type='path'", () => {
   });
 
   it("stdio: 'inherit'でプロセスが起動される（type='path'）", async () => {
-    const tool: CustomAITool = {
+    const _tool: CodingAgent = {
       id: "test-tool-path",
       displayName: "Test Path Tool",
       type: "path",
@@ -131,7 +134,7 @@ describe("launchCustomAITool - type='path'", () => {
       modeArgs: { normal: [] },
     };
 
-    const options: LaunchOptions = {
+    const _options: CodingAgentLaunchOptions = {
       mode: "normal",
     };
 
@@ -144,9 +147,9 @@ describe("launchCustomAITool - type='path'", () => {
 /**
  * T202: type='bunx'の実行テスト
  */
-describe("launchCustomAITool - type='bunx'", () => {
+describe("_launchCodingAgent - type='bunx'", () => {
   beforeEach(() => {
-    launchCustomAITool = vi.fn();
+    _launchCodingAgent = vi.fn();
   });
 
   afterEach(() => {
@@ -154,7 +157,7 @@ describe("launchCustomAITool - type='bunx'", () => {
   });
 
   it("bunx経由でパッケージを実行できる", async () => {
-    const tool: CustomAITool = {
+    const _tool: CodingAgent = {
       id: "test-tool-bunx",
       displayName: "Test Bunx Tool",
       type: "bunx",
@@ -162,7 +165,7 @@ describe("launchCustomAITool - type='bunx'", () => {
       modeArgs: { normal: [] },
     };
 
-    const options: LaunchOptions = {
+    const _options: CodingAgentLaunchOptions = {
       mode: "normal",
     };
 
@@ -173,7 +176,7 @@ describe("launchCustomAITool - type='bunx'", () => {
   });
 
   it("defaultArgsが正しく結合される（type='bunx'）", async () => {
-    const tool: CustomAITool = {
+    const _tool: CodingAgent = {
       id: "test-tool-bunx",
       displayName: "Test Bunx Tool",
       type: "bunx",
@@ -182,7 +185,7 @@ describe("launchCustomAITool - type='bunx'", () => {
       modeArgs: { normal: [] },
     };
 
-    const options: LaunchOptions = {
+    const _options: CodingAgentLaunchOptions = {
       mode: "normal",
     };
 
@@ -192,7 +195,7 @@ describe("launchCustomAITool - type='bunx'", () => {
   });
 
   it("modeArgs.normalが正しく結合される（type='bunx'）", async () => {
-    const tool: CustomAITool = {
+    const _tool: CodingAgent = {
       id: "test-tool-bunx",
       displayName: "Test Bunx Tool",
       type: "bunx",
@@ -200,7 +203,7 @@ describe("launchCustomAITool - type='bunx'", () => {
       modeArgs: { normal: ["--mode=normal"] },
     };
 
-    const options: LaunchOptions = {
+    const _options: CodingAgentLaunchOptions = {
       mode: "normal",
     };
 
@@ -210,7 +213,7 @@ describe("launchCustomAITool - type='bunx'", () => {
   });
 
   it("extraArgsが正しく結合される（type='bunx'）", async () => {
-    const tool: CustomAITool = {
+    const _tool: CodingAgent = {
       id: "test-tool-bunx",
       displayName: "Test Bunx Tool",
       type: "bunx",
@@ -218,7 +221,7 @@ describe("launchCustomAITool - type='bunx'", () => {
       modeArgs: { normal: [] },
     };
 
-    const options: LaunchOptions = {
+    const _options: CodingAgentLaunchOptions = {
       mode: "normal",
       extraArgs: ["--extra"],
     };
@@ -229,7 +232,7 @@ describe("launchCustomAITool - type='bunx'", () => {
   });
 
   it("defaultArgs + modeArgs.normal + extraArgsが正しく結合される（type='bunx'）", async () => {
-    const tool: CustomAITool = {
+    const _tool: CodingAgent = {
       id: "test-tool-bunx",
       displayName: "Test Bunx Tool",
       type: "bunx",
@@ -238,7 +241,7 @@ describe("launchCustomAITool - type='bunx'", () => {
       modeArgs: { normal: ["--mode=normal"] },
     };
 
-    const options: LaunchOptions = {
+    const _options: CodingAgentLaunchOptions = {
       mode: "normal",
       extraArgs: ["--extra"],
     };
@@ -252,9 +255,9 @@ describe("launchCustomAITool - type='bunx'", () => {
 /**
  * T203: type='command'の実行テスト
  */
-describe("launchCustomAITool - type='command'", () => {
+describe("_launchCodingAgent - type='command'", () => {
   beforeEach(() => {
-    launchCustomAITool = vi.fn();
+    _launchCodingAgent = vi.fn();
   });
 
   afterEach(() => {
@@ -262,7 +265,7 @@ describe("launchCustomAITool - type='command'", () => {
   });
 
   it("PATH環境変数からコマンドを解決して実行できる", async () => {
-    const tool: CustomAITool = {
+    const _tool: CodingAgent = {
       id: "test-tool-command",
       displayName: "Test Command Tool",
       type: "command",
@@ -270,18 +273,18 @@ describe("launchCustomAITool - type='command'", () => {
       modeArgs: { normal: [] },
     };
 
-    const options: LaunchOptions = {
+    const _options: CodingAgentLaunchOptions = {
       mode: "normal",
     };
 
     // TODO: 実装後にテストを記述
-    // resolveCommand("aider")が呼び出され、
+    // _resolveCommand("aider")が呼び出され、
     // 解決されたパスでexeca()が呼び出されることを確認
     expect(true).toBe(true);
   });
 
   it("defaultArgsが正しく結合される（type='command'）", async () => {
-    const tool: CustomAITool = {
+    const _tool: CodingAgent = {
       id: "test-tool-command",
       displayName: "Test Command Tool",
       type: "command",
@@ -290,7 +293,7 @@ describe("launchCustomAITool - type='command'", () => {
       modeArgs: { normal: [] },
     };
 
-    const options: LaunchOptions = {
+    const _options: CodingAgentLaunchOptions = {
       mode: "normal",
     };
 
@@ -300,7 +303,7 @@ describe("launchCustomAITool - type='command'", () => {
   });
 
   it("modeArgs.normalが正しく結合される（type='command'）", async () => {
-    const tool: CustomAITool = {
+    const _tool: CodingAgent = {
       id: "test-tool-command",
       displayName: "Test Command Tool",
       type: "command",
@@ -308,7 +311,7 @@ describe("launchCustomAITool - type='command'", () => {
       modeArgs: { normal: ["--mode=normal"] },
     };
 
-    const options: LaunchOptions = {
+    const _options: CodingAgentLaunchOptions = {
       mode: "normal",
     };
 
@@ -318,7 +321,7 @@ describe("launchCustomAITool - type='command'", () => {
   });
 
   it("extraArgsが正しく結合される（type='command'）", async () => {
-    const tool: CustomAITool = {
+    const _tool: CodingAgent = {
       id: "test-tool-command",
       displayName: "Test Command Tool",
       type: "command",
@@ -326,7 +329,7 @@ describe("launchCustomAITool - type='command'", () => {
       modeArgs: { normal: [] },
     };
 
-    const options: LaunchOptions = {
+    const _options: CodingAgentLaunchOptions = {
       mode: "normal",
       extraArgs: ["--extra"],
     };
@@ -337,7 +340,7 @@ describe("launchCustomAITool - type='command'", () => {
   });
 
   it("defaultArgs + modeArgs.normal + extraArgsが正しく結合される（type='command'）", async () => {
-    const tool: CustomAITool = {
+    const _tool: CodingAgent = {
       id: "test-tool-command",
       displayName: "Test Command Tool",
       type: "command",
@@ -346,7 +349,7 @@ describe("launchCustomAITool - type='command'", () => {
       modeArgs: { normal: ["--mode=normal"] },
     };
 
-    const options: LaunchOptions = {
+    const _options: CodingAgentLaunchOptions = {
       mode: "normal",
       extraArgs: ["--extra"],
     };
@@ -357,7 +360,7 @@ describe("launchCustomAITool - type='command'", () => {
   });
 
   it("コマンドがPATHに存在しない場合、エラーをスローする", async () => {
-    const tool: CustomAITool = {
+    const _tool: CodingAgent = {
       id: "test-tool-command",
       displayName: "Test Command Tool",
       type: "command",
@@ -365,23 +368,23 @@ describe("launchCustomAITool - type='command'", () => {
       modeArgs: { normal: [] },
     };
 
-    const options: LaunchOptions = {
+    const _options: CodingAgentLaunchOptions = {
       mode: "normal",
     };
 
     // TODO: 実装後にテストを記述
-    // resolveCommand("non-existent-command")がエラーをスローすることを確認
+    // _resolveCommand("non-existent-command")がエラーをスローすることを確認
     // エラーメッセージに"Command not found"が含まれることを確認
     expect(true).toBe(true);
   });
 });
 
 /**
- * T204: resolveCommand()のテスト
+ * T204: _resolveCommand()のテスト
  */
-describe("resolveCommand", () => {
+describe("_resolveCommand", () => {
   beforeEach(() => {
-    resolveCommand = vi.fn();
+    _resolveCommand = vi.fn();
   });
 
   afterEach(() => {
@@ -403,19 +406,19 @@ describe("resolveCommand", () => {
   });
 
   it("コマンドが見つかった場合、絶対パスを返す", async () => {
-    const commandName = "node";
+    const _commandName = "node";
 
     // TODO: 実装後にテストを記述
-    // resolveCommand("node")が絶対パスの文字列を返すことを確認
+    // _resolveCommand("node")が絶対パスの文字列を返すことを確認
     // 返されたパスがpath.isAbsolute()でtrueとなることを確認
     expect(true).toBe(true);
   });
 
   it("コマンドが見つからない場合、明確なエラーメッセージをスローする", async () => {
-    const commandName = "non-existent-command";
+    const _commandName = "non-existent-command";
 
     // TODO: 実装後にテストを記述
-    // resolveCommand("non-existent-command")がエラーをスローすることを確認
+    // _resolveCommand("non-existent-command")がエラーをスローすることを確認
     // エラーメッセージに以下の内容が含まれることを確認:
     //   - コマンド名
     //   - "not found" または "が見つかりません"
@@ -424,11 +427,11 @@ describe("resolveCommand", () => {
   });
 
   it("which/whereコマンド自体が失敗した場合、エラーメッセージをスローする", async () => {
-    const commandName = "test-command";
+    const _commandName = "test-command";
 
     // TODO: 実装後にテストを記述
     // execa()がエラーをスローした場合、
-    // resolveCommand()がそのエラーをラップして再スローすることを確認
+    // _resolveCommand()がそのエラーをラップして再スローすることを確認
     expect(true).toBe(true);
   });
 

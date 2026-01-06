@@ -1,4 +1,4 @@
-import type { AITool, InferenceLevel, ModelOption } from "../types.js";
+import type { CodingAgentId, InferenceLevel, ModelOption } from "../types.js";
 
 const CODEX_BASE_LEVELS: InferenceLevel[] = ["high", "medium", "low"];
 const CODEX_MAX_LEVELS: InferenceLevel[] = ["xhigh", "high", "medium", "low"];
@@ -105,11 +105,13 @@ const MODEL_OPTIONS: Record<string, ModelOption[]> = {
   ],
 };
 
-export function getModelOptions(tool: AITool): ModelOption[] {
+export function getModelOptions(tool: CodingAgentId): ModelOption[] {
   return MODEL_OPTIONS[tool] ?? [];
 }
 
-export function getDefaultModelOption(tool: AITool): ModelOption | undefined {
+export function getDefaultModelOption(
+  tool: CodingAgentId,
+): ModelOption | undefined {
   const options = getModelOptions(tool);
   return options.find((opt) => opt.isDefault) ?? options[0];
 }
@@ -136,7 +138,7 @@ export function getDefaultInferenceForModel(
  * Normalize a model identifier for consistent display and persistence.
  */
 export function normalizeModelId(
-  tool: AITool,
+  tool: CodingAgentId,
   model?: string | null,
 ): string | null {
   if (model === null || model === undefined) return model ?? null;

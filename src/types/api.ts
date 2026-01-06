@@ -51,12 +51,12 @@ export interface Worktree {
 }
 
 /**
- * AIToolSession - AI Tool実行セッション
+ * CodingAgentSession - Coding Agent実行セッション
  */
-export interface AIToolSession {
+export interface CodingAgentSession {
   sessionId: string; // UUID v4
-  toolType: "claude-code" | "codex-cli" | "custom";
-  toolName?: string | null;
+  agentType: "claude-code" | "codex-cli" | "custom";
+  agentName?: string | null;
   mode: "normal" | "continue" | "resume";
   worktreePath: string;
   ptyPid?: number | null;
@@ -69,7 +69,7 @@ export interface AIToolSession {
 }
 
 /**
- * CustomAITool - カスタムAI Tool設定
+ * CodingAgent - カスタム Coding Agent 設定
  */
 export interface EnvironmentVariable {
   key: string;
@@ -85,7 +85,7 @@ export interface EnvironmentHistoryEntry {
   source: "ui" | "os" | "cli";
 }
 
-export interface CustomAITool {
+export interface ApiCodingAgent {
   id: string; // UUID v4 or slug
   displayName: string;
   icon?: string | null;
@@ -144,14 +144,14 @@ export type BranchResponse = SuccessResponse<Branch>;
 export type BranchSyncResponse = SuccessResponse<BranchSyncResult>;
 export type WorktreeListResponse = SuccessResponse<Worktree[]>;
 export type WorktreeResponse = SuccessResponse<Worktree>;
-export type SessionListResponse = SuccessResponse<AIToolSession[]>;
-export type SessionResponse = SuccessResponse<AIToolSession>;
+export type SessionListResponse = SuccessResponse<CodingAgentSession[]>;
+export type SessionResponse = SuccessResponse<CodingAgentSession>;
 export interface ConfigPayload {
   version: string;
   updatedAt?: string | null;
   env?: EnvironmentVariable[] | null;
   history?: EnvironmentHistoryEntry[] | null;
-  tools: CustomAITool[];
+  codingAgents: ApiCodingAgent[];
 }
 
 export type ConfigResponse = SuccessResponse<ConfigPayload>;
@@ -169,14 +169,14 @@ export interface BranchSyncRequest {
 }
 
 export interface StartSessionRequest {
-  toolType: "claude-code" | "codex-cli" | "custom";
-  toolName?: string | null;
+  agentType: "claude-code" | "codex-cli" | "custom";
+  agentName?: string | null;
   mode: "normal" | "continue" | "resume";
   worktreePath: string;
   skipPermissions?: boolean;
   bypassApprovals?: boolean;
   extraArgs?: string[];
-  customToolId?: string | null;
+  customAgentId?: string | null;
 }
 
 export type UpdateConfigRequest = ConfigPayload;

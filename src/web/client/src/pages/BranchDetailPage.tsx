@@ -22,7 +22,7 @@ import {
 } from "@/components/branch-detail";
 import type {
   Branch,
-  CustomAITool,
+  ApiCodingAgent,
   LastToolUsage,
 } from "../../../../types/api.js";
 
@@ -88,22 +88,22 @@ export function BranchDetailPage() {
     };
   }, [isTerminalFullscreen]);
 
-  // Available tools - must be before conditional returns
-  const customTools: CustomAITool[] = config?.tools ?? [];
+  // Available coding agents - must be before conditional returns
+  const customAgents: ApiCodingAgent[] = config?.codingAgents ?? [];
   const availableTools: SelectableTool[] = useMemo(
     () => [
       { id: "claude-code", label: "Claude Code", target: "claude" },
       { id: "codex-cli", label: "Codex CLI", target: "codex" },
-      ...customTools.map(
-        (tool): SelectableTool => ({
-          id: tool.id,
-          label: tool.displayName,
+      ...customAgents.map(
+        (agent): SelectableTool => ({
+          id: agent.id,
+          label: agent.displayName,
           target: "custom" as const,
-          definition: tool,
+          definition: agent,
         }),
       ),
     ],
-    [customTools],
+    [customAgents],
   );
 
   // Ensure selected tool is valid - must be before conditional returns
@@ -135,13 +135,13 @@ export function BranchDetailPage() {
       branch: branch.name,
       worktreePath: branch.worktreePath ?? null,
       toolId:
-        first.toolType === "custom"
-          ? (first.toolName ?? "custom")
-          : (first.toolType as LastToolUsage["toolId"]),
+        first.agentType === "custom"
+          ? (first.agentName ?? "custom")
+          : (first.agentType as LastToolUsage["toolId"]),
       toolLabel:
-        first.toolType === "custom"
-          ? (first.toolName ?? "Custom")
-          : toolLabel(first.toolType),
+        first.agentType === "custom"
+          ? (first.agentName ?? "Custom")
+          : agentLabel(first.agentType),
       mode: first.mode ?? "normal",
       model: null,
       timestamp: first.startedAt ? Date.parse(first.startedAt) : Date.now(),
@@ -210,7 +210,7 @@ export function BranchDetailPage() {
   // Computed values
   const canStartSession = Boolean(branch.worktreePath);
   const divergenceInfo = branch.divergence ?? null;
-  const hasBlockingDivergence = Boolean(
+  const hasConflictingDivergence = Boolean(
     divergenceInfo && divergenceInfo.ahead > 0 && divergenceInfo.behind > 0,
   );
   const needsRemoteSync = Boolean(
@@ -218,7 +218,7 @@ export function BranchDetailPage() {
     divergenceInfo &&
     divergenceInfo.behind > 0 &&
     divergenceInfo.ahead === 0 &&
-    !hasBlockingDivergence,
+    !hasConflictingDivergence,
   );
   const isSyncingBranch = syncBranch.isPending;
 
@@ -257,7 +257,7 @@ export function BranchDetailPage() {
     if (!selectedTool) {
       setBanner({
         type: "error",
-        message: "起動するAIツールを選択してください",
+        message: "起動する Coding Agent を選択してください",
       });
       return;
     }
@@ -265,15 +265,7 @@ export function BranchDetailPage() {
     if (needsRemoteSync) {
       setBanner({
         type: "error",
-        message: "リモートの更新を取り込むまでAIツールは起動できません。",
-      });
-      return;
-    }
-
-    if (hasBlockingDivergence) {
-      setBanner({
-        type: "error",
-        message: "差分を解消してから起動してください。",
+        message: "リモートの更新を取り込むまで Coding Agent は起動できません。",
       });
       return;
     }
@@ -287,7 +279,7 @@ export function BranchDetailPage() {
 
     setIsStartingSession(true);
     try {
-      const toolType: ToolType =
+      const agentType: ToolType =
         selectedTool.target === "codex"
           ? "codex-cli"
           : selectedTool.target === "custom"
@@ -298,10 +290,10 @@ export function BranchDetailPage() {
         .map((c) => c.trim())
         .filter(Boolean);
       const sessionRequest = {
-        toolType,
-        toolName: selectedTool.target === "custom" ? selectedTool.id : null,
+        agentType,
+        agentName: selectedTool.target === "custom" ? selectedTool.id : null,
         ...(selectedTool.target === "custom"
-          ? { customToolId: selectedTool.id }
+          ? { customAgentId: selectedTool.id }
           : {}),
         mode: selectedMode,
         worktreePath: branch.worktreePath,
@@ -317,7 +309,7 @@ export function BranchDetailPage() {
       setIsTerminalFullscreen(false);
       setBanner({
         type: "info",
-        message: `${toolLabel(toolType, selectedTool)} を起動しました。`,
+        message: `${agentLabel(agentType, selectedTool)} を起動しました。`,
       });
     } catch (err) {
       setBanner({
@@ -438,7 +430,7 @@ export function BranchDetailPage() {
             </Button>
           ) : (
             <Button variant="secondary" asChild>
-              <Link to="/config">カスタムツール設定</Link>
+              <Link to="/config">Custom Coding Agent</Link>
             </Button>
           )}
         </div>
@@ -478,7 +470,7 @@ export function BranchDetailPage() {
               isStartingSession={isStartingSession}
               isSyncingBranch={isSyncingBranch}
               needsRemoteSync={needsRemoteSync}
-              hasBlockingDivergence={hasBlockingDivergence}
+              hasConflictingDivergence={hasConflictingDivergence}
               onToolChange={setSelectedToolId}
               onModeChange={setSelectedMode}
               onSkipPermissionsChange={setSkipPermissions}
@@ -547,9 +539,9 @@ function formatError(error: unknown, fallback: string): string {
   return fallback;
 }
 
-function toolLabel(tool: string, selectedTool?: SelectableTool): string {
-  if (tool === "custom" && selectedTool?.target === "custom")
+function agentLabel(agentType: string, selectedTool?: SelectableTool): string {
+  if (agentType === "custom" && selectedTool?.target === "custom")
     return selectedTool.label;
-  if (tool === "codex-cli") return "Codex CLI";
+  if (agentType === "codex-cli") return "Codex CLI";
   return "Claude Code";
 }

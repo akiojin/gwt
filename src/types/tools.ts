@@ -1,5 +1,5 @@
 /**
- * カスタムコーディングエージェント対応機能の型定義
+ * コーディングエージェント対応機能の型定義
  *
  * この型定義ファイルは、設定ファイル（tools.json）のスキーマと
  * 内部で使用するデータ構造を定義します。
@@ -42,30 +42,30 @@ export interface ModeArgs {
 }
 
 /**
- * カスタムコーディングエージェント定義
+ * コーディングエージェント定義
  *
- * tools.jsonファイルで定義される個別のツール設定。
+ * tools.jsonファイルで定義される個別のエージェント設定。
  */
-export interface CustomAITool {
+export interface CodingAgent {
   /**
-   * ツールの一意識別子
+   * エージェントの一意識別子
    *
    * 小文字英数字とハイフンのみ使用可能（パターン: ^[a-z0-9-]+$）
-   * ビルトインツール（claude-code, codex-cli）との重複は不可。
+   * ビルトインエージェント（claude-code, codex-cli）との重複は不可。
    */
   id: string;
 
   /**
    * UI表示名
    *
-   * ツール選択画面で表示される名前。日本語も使用可能。
+   * エージェント選択画面で表示される名前。日本語も使用可能。
    */
   displayName: string;
 
   /**
    * アイコン文字（オプション）
    *
-   * ツール選択画面で表示されるUnicode文字。
+   * エージェント選択画面で表示されるUnicode文字。
    */
   icon?: string;
 
@@ -96,7 +96,7 @@ export interface CustomAITool {
   /**
    * デフォルト引数（オプション）
    *
-   * ツール実行時に常に付与される引数。
+   * エージェント実行時に常に付与される引数。
    * 最終的な引数は: defaultArgs + modeArgs[mode] + permissionSkipArgs + extraArgs
    */
   defaultArgs?: string[];
@@ -119,7 +119,7 @@ export interface CustomAITool {
   /**
    * 環境変数（オプション）
    *
-   * ツール起動時に設定される環境変数。
+   * エージェント起動時に設定される環境変数。
    * APIキーや設定ファイルパスなどを指定。
    */
   env?: Record<string, string>;
@@ -136,11 +136,11 @@ export interface CustomAITool {
 }
 
 /**
- * ツール設定ファイル全体
+ * コーディングエージェント設定ファイル全体
  *
  * ~/.gwt/tools.json のスキーマ。
  */
-export interface ToolsConfig {
+export interface CodingAgentsConfig {
   /**
    * 設定フォーマットのバージョン
    *
@@ -154,16 +154,16 @@ export interface ToolsConfig {
   updatedAt?: string;
 
   /**
-   * すべてのツールで共有する環境変数
+   * すべてのエージェントで共有する環境変数
    */
   env?: Record<string, string>;
 
   /**
-   * カスタムツール定義の配列
+   * カスタムコーディングエージェント定義の配列
    *
-   * 空配列も許可（ビルトインツールのみ使用）。
+   * 空配列も許可（ビルトインエージェントのみ使用）。
    */
-  customTools: CustomAITool[];
+  customCodingAgents: CodingAgent[];
 }
 
 // ============================================================================
@@ -171,17 +171,17 @@ export interface ToolsConfig {
 // ============================================================================
 
 /**
- * 統合ツール設定
+ * 統合コーディングエージェント設定
  *
- * ビルトインツールとカスタムツールを統合して扱うための内部型。
- * getAllTools() 関数がこの型の配列を返します。
+ * ビルトインエージェントとカスタムエージェントを統合して扱うための内部型。
+ * getAllCodingAgents() 関数がこの型の配列を返します。
  */
-export interface AIToolConfig {
+export interface CodingAgentConfig {
   /**
-   * ツールID
+   * エージェントID
    *
    * ビルトイン: "claude-code" | "codex-cli"
-   * カスタム: CustomAITool.id
+   * カスタム: CodingAgent.id
    */
   id: string;
 
@@ -196,27 +196,27 @@ export interface AIToolConfig {
   icon?: string;
 
   /**
-   * ビルトインツールかどうか
+   * ビルトインエージェントかどうか
    *
    * true: Claude Code または Codex CLI
-   * false: カスタムツール
+   * false: カスタムエージェント
    */
   isBuiltin: boolean;
 
   /**
-   * カスタムツールの場合、元の設定
+   * カスタムエージェントの場合、元の設定
    *
    * isBuiltin=false の場合のみ存在。
    */
-  customConfig?: CustomAITool;
+  customConfig?: CodingAgent;
 }
 
 /**
- * ツール起動オプション
+ * コーディングエージェント起動オプション
  *
- * launchCustomAITool() 関数の引数として使用。
+ * launchCodingAgent() 関数の引数として使用。
  */
-export interface LaunchOptions {
+export interface CodingAgentLaunchOptions {
   /**
    * 実行モード
    */
@@ -239,7 +239,7 @@ export interface LaunchOptions {
   /**
    * 作業ディレクトリ（ワークツリーパス）
    *
-   * ツール起動時のcwdとして使用されます。
+   * エージェント起動時のcwdとして使用されます。
    */
   cwd?: string;
 

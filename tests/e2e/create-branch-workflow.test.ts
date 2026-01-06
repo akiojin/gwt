@@ -1,15 +1,38 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeEach,
+  afterEach,
+  type MockedFunction,
+} from "vitest";
 
 // Mock all dependencies
 vi.mock("execa", () => ({
   execa: vi.fn(),
 }));
 
+const existsSyncMock = vi.hoisted(() =>
+  vi.fn((targetPath?: string) => {
+    if (typeof targetPath !== "string") {
+      return false;
+    }
+    const normalized = targetPath.replace(/\\/g, "/");
+    if (normalized.includes("/path/to/repo/.worktrees")) {
+      return false;
+    }
+    return true;
+  }),
+);
+
 vi.mock("node:fs", () => ({
-  existsSync: vi.fn(() => true),
+  existsSync: existsSyncMock,
 }));
 
 const mkdirMock = vi.hoisted(() => vi.fn(async () => undefined));
+const readFileMock = vi.hoisted(() => vi.fn(async () => ""));
+const writeFileMock = vi.hoisted(() => vi.fn(async () => undefined));
 
 vi.mock("node:fs/promises", async () => {
   const actual =
@@ -20,13 +43,17 @@ vi.mock("node:fs/promises", async () => {
   const mocked = {
     ...actual,
     mkdir: mkdirMock,
+    readFile: readFileMock,
+    writeFile: writeFileMock,
   };
 
   return {
     ...mocked,
     default: {
-      ...actual.default,
+      ...actual,
       mkdir: mkdirMock,
+      readFile: readFileMock,
+      writeFile: writeFileMock,
     },
   };
 });
@@ -34,11 +61,15 @@ vi.mock("node:fs/promises", async () => {
 import { execa } from "execa";
 import * as git from "../../src/git";
 import * as worktree from "../../src/worktree";
+const execaMock = execa as MockedFunction<typeof execa>;
 
 describe("E2E: Create Branch Workflow (T209)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mkdirMock.mockClear();
+    readFileMock.mockClear();
+    writeFileMock.mockClear();
+    existsSyncMock.mockClear();
   });
 
   afterEach(() => {
@@ -47,7 +78,7 @@ describe("E2E: Create Branch Workflow (T209)", () => {
 
   describe("Complete Branch Creation Workflows", () => {
     it("should handle feature branch creation end-to-end", async () => {
-      (execa as any).mockImplementation(
+      execaMock.mockImplementation(
         async (command: string, args?: readonly string[]) => {
           // getLocalBranches
           if (
@@ -113,7 +144,6 @@ branch refs/heads/develop
       // === USER WORKFLOW ===
 
       // Step 1: User decides to create new feature branch
-      const branchType = "feature";
       const branchName = "feature/new-dashboard";
       const baseBranch = "develop";
 
@@ -154,7 +184,7 @@ branch refs/heads/develop
     });
 
     it("should handle hotfix branch creation end-to-end", async () => {
-      (execa as any).mockImplementation(
+      execaMock.mockImplementation(
         async (command: string, args?: readonly string[]) => {
           if (
             args?.[0] === "branch" &&
@@ -229,7 +259,7 @@ branch refs/heads/main
     });
 
     it("should handle release branch creation with version bump", async () => {
-      (execa as any).mockImplementation(
+      execaMock.mockImplementation(
         async (command: string, args?: readonly string[]) => {
           if (args?.[0] === "checkout" && args?.[1] === "-b") {
             return { stdout: "", stderr: "", exitCode: 0 };
@@ -289,7 +319,7 @@ branch refs/heads/develop
 
   describe("Branch Type Workflows", () => {
     it("should create all branch types successfully", async () => {
-      (execa as any).mockResolvedValue({ stdout: "", stderr: "", exitCode: 0 });
+      execaMock.mockResolvedValue({ stdout: "", stderr: "", exitCode: 0 });
 
       const branchTypes = [
         { name: "feature/api-integration", base: "develop" },
@@ -312,7 +342,7 @@ branch refs/heads/develop
 
   describe("Error Recovery", () => {
     it("should handle branch already exists error", async () => {
-      (execa as any).mockRejectedValue(new Error("Branch already exists"));
+      execaMock.mockRejectedValue(new Error("Branch already exists"));
 
       await expect(git.createBranch("feature/existing")).rejects.toThrow(
         "Failed to create branch",
@@ -321,7 +351,7 @@ branch refs/heads/develop
 
     it("should handle worktree creation failure gracefully", async () => {
       let callCount = 0;
-      (execa as any).mockImplementation(
+      execaMock.mockImplementation(
         async (command: string, args?: readonly string[]) => {
           callCount++;
           if (callCount === 1) {

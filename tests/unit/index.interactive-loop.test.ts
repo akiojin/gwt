@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { SelectionResult } from "../../src/cli/ui/components/App.js";
+import type { SelectionResult } from "../../src/cli/ui/App.solid.js";
 import { runInteractiveLoop } from "../../src/index.js";
 
 // Vitest shim for environments lacking vi.hoisted (e.g., bun)

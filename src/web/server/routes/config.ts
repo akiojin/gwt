@@ -2,7 +2,10 @@
  * Config Routes
  */
 
-import { loadToolsConfig, saveToolsConfig } from "../../../config/tools.js";
+import {
+  loadCodingAgentsConfig,
+  saveCodingAgentsConfig,
+} from "../../../config/tools.js";
 import {
   loadEnvHistory,
   recordEnvHistory,
@@ -10,11 +13,11 @@ import {
 import type {
   ApiResponse,
   ConfigPayload,
-  CustomAITool as ApiCustomAITool,
+  ApiCodingAgent,
   EnvironmentHistoryEntry,
   EnvironmentVariable,
 } from "../../../types/api.js";
-import type { CustomAITool as FileCustomAITool } from "../../../types/tools.js";
+import type { CodingAgent } from "../../../types/tools.js";
 import { getImportedEnvKeys } from "../env/importer.js";
 import type { WebFastifyInstance } from "../types.js";
 
@@ -62,51 +65,51 @@ function envArrayToRecord(
   return record;
 }
 
-function toApiTool(
-  tool: FileCustomAITool,
+function toApiCodingAgent(
+  agent: CodingAgent,
   history: EnvironmentHistoryEntry[],
   importedKeys: Set<string>,
-): ApiCustomAITool {
+): ApiCodingAgent {
   return {
-    id: tool.id,
-    displayName: tool.displayName,
-    icon: tool.icon ?? null,
-    command: tool.command,
-    executionType: tool.type,
-    defaultArgs: tool.defaultArgs ?? null,
-    modeArgs: tool.modeArgs,
-    permissionSkipArgs: tool.permissionSkipArgs ?? null,
-    env: normalizeEnv(tool.env, importedKeys, history),
+    id: agent.id,
+    displayName: agent.displayName,
+    icon: agent.icon ?? null,
+    command: agent.command,
+    executionType: agent.type,
+    defaultArgs: agent.defaultArgs ?? null,
+    modeArgs: agent.modeArgs,
+    permissionSkipArgs: agent.permissionSkipArgs ?? null,
+    env: normalizeEnv(agent.env, importedKeys, history),
     description: null,
     createdAt: null,
     updatedAt: null,
   };
 }
 
-function toFileTool(tool: ApiCustomAITool): FileCustomAITool {
-  const envRecord = envArrayToRecord(tool.env);
-  const fileTool: FileCustomAITool = {
-    id: tool.id,
-    displayName: tool.displayName,
-    type: tool.executionType,
-    command: tool.command,
-    modeArgs: tool.modeArgs,
+function toFileCodingAgent(agent: ApiCodingAgent): CodingAgent {
+  const envRecord = envArrayToRecord(agent.env);
+  const fileAgent: CodingAgent = {
+    id: agent.id,
+    displayName: agent.displayName,
+    type: agent.executionType,
+    command: agent.command,
+    modeArgs: agent.modeArgs,
   };
 
-  if (tool.icon) {
-    fileTool.icon = tool.icon;
+  if (agent.icon) {
+    fileAgent.icon = agent.icon;
   }
-  if (tool.defaultArgs && tool.defaultArgs.length > 0) {
-    fileTool.defaultArgs = tool.defaultArgs;
+  if (agent.defaultArgs && agent.defaultArgs.length > 0) {
+    fileAgent.defaultArgs = agent.defaultArgs;
   }
-  if (tool.permissionSkipArgs && tool.permissionSkipArgs.length > 0) {
-    fileTool.permissionSkipArgs = tool.permissionSkipArgs;
+  if (agent.permissionSkipArgs && agent.permissionSkipArgs.length > 0) {
+    fileAgent.permissionSkipArgs = agent.permissionSkipArgs;
   }
   if (Object.keys(envRecord).length > 0) {
-    fileTool.env = envRecord;
+    fileAgent.env = envRecord;
   }
 
-  return fileTool;
+  return fileAgent;
 }
 
 function diffEnvHistory(
@@ -141,7 +144,7 @@ export async function registerConfigRoutes(
     "/api/config",
     async (request, reply) => {
       try {
-        const config = await loadToolsConfig();
+        const config = await loadCodingAgentsConfig();
         const history = await loadEnvHistory();
         const importedSet = new Set(getImportedEnvKeys());
 
@@ -152,13 +155,16 @@ export async function registerConfigRoutes(
             updatedAt: config.updatedAt ?? null,
             env: normalizeEnv(config.env, importedSet, history),
             history,
-            tools: config.customTools.map((tool) =>
-              toApiTool(tool, history, importedSet),
+            codingAgents: config.customCodingAgents.map((agent) =>
+              toApiCodingAgent(agent, history, importedSet),
             ),
           },
         } satisfies ApiResponse<ConfigPayload>;
       } catch (error) {
-        request.log.error({ err: error }, "Failed to load custom tool config");
+        request.log.error(
+          { err: error },
+          "Failed to load coding agents config",
+        );
         reply.code(500);
         return {
           success: false,
@@ -175,7 +181,7 @@ export async function registerConfigRoutes(
   }>("/api/config", async (request, reply) => {
     try {
       const payload = request.body;
-      const existing = await loadToolsConfig();
+      const existing = await loadCodingAgentsConfig();
       const nextEnvRecord = envArrayToRecord(payload.env);
       const envHistory = diffEnvHistory(
         existing.env ?? {},
@@ -183,10 +189,10 @@ export async function registerConfigRoutes(
         "ui",
       );
 
-      await saveToolsConfig({
+      await saveCodingAgentsConfig({
         version: payload.version || existing.version,
         env: nextEnvRecord,
-        customTools: payload.tools.map(toFileTool),
+        customCodingAgents: payload.codingAgents.map(toFileCodingAgent),
       });
 
       if (envHistory.length) {
@@ -203,7 +209,7 @@ export async function registerConfigRoutes(
           updatedAt: new Date().toISOString(),
           env: normalizeEnv(nextEnvRecord, importedSet, history),
           history,
-          tools: payload.tools,
+          codingAgents: payload.codingAgents,
         },
       } satisfies ApiResponse<ConfigPayload>;
     } catch (error) {

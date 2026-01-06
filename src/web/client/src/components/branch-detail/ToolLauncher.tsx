@@ -13,14 +13,14 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
-import type { CustomAITool, Branch } from "../../../../../types/api.js";
+import type { ApiCodingAgent, Branch } from "../../../../../types/api.js";
 
 type ToolMode = "normal" | "continue" | "resume";
 
 export type SelectableTool =
   | { id: "claude-code"; label: string; target: "claude" }
   | { id: "codex-cli"; label: string; target: "codex" }
-  | { id: string; label: string; target: "custom"; definition: CustomAITool };
+  | { id: string; label: string; target: "custom"; definition: ApiCodingAgent };
 
 interface ToolSummary {
   command: string;
@@ -45,7 +45,7 @@ interface ToolLauncherProps {
   isStartingSession: boolean;
   isSyncingBranch: boolean;
   needsRemoteSync: boolean;
-  hasBlockingDivergence: boolean;
+  hasConflictingDivergence: boolean;
   onToolChange: (toolId: string) => void;
   onModeChange: (mode: ToolMode) => void;
   onSkipPermissionsChange: (skip: boolean) => void;
@@ -88,7 +88,7 @@ export function ToolLauncher({
   isStartingSession,
   isSyncingBranch,
   needsRemoteSync,
-  hasBlockingDivergence,
+  hasConflictingDivergence,
   onToolChange,
   onModeChange,
   onSkipPermissionsChange,
@@ -139,13 +139,13 @@ export function ToolLauncher({
             <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
               Tool Launcher
             </p>
-            <h3 className="mt-1 text-lg font-semibold">AIツール起動</h3>
+            <h3 className="mt-1 text-lg font-semibold">Coding Agent</h3>
           </div>
           {configError && <Badge variant="warning">設定の取得に失敗</Badge>}
         </div>
         <p className="mt-2 text-sm text-muted-foreground">
-          Web UI
-          から直接AIツールを起動できます。設定したカスタムツールも一覧に表示されます。
+          Web UI から直接 Coding Agent
+          を起動できます。設定したカスタムエージェントも一覧に表示されます。
         </p>
       </CardHeader>
 
@@ -159,14 +159,14 @@ export function ToolLauncher({
             {/* Form Grid */}
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
               <div className="space-y-2">
-                <label className="text-sm font-medium">AIツール</label>
+                <label className="text-sm font-medium">Coding Agent</label>
                 <Select
                   value={selectedToolId}
                   onValueChange={onToolChange}
                   disabled={isConfigLoading ?? false}
                 >
                   <SelectTrigger>
-                    <SelectValue placeholder="ツールを選択" />
+                    <SelectValue placeholder="Select Coding Agent" />
                   </SelectTrigger>
                   <SelectContent>
                     {availableTools.map((tool) => (
@@ -232,8 +232,8 @@ export function ToolLauncher({
                 <AlertDescription>
                   <p>
                     リモートに未取得の更新 ({branch.divergence?.behind ?? 0}{" "}
-                    commits)
-                    があるため、AIツールを起動する前に同期してください。
+                    commits) があるため、Coding Agent
+                    を起動する前に同期してください。
                   </p>
                   <p className="mt-1 text-xs text-muted-foreground">
                     CLI の `git fetch --all` と `git pull --ff-only`
@@ -243,11 +243,12 @@ export function ToolLauncher({
               </Alert>
             )}
 
-            {hasBlockingDivergence && (
+            {hasConflictingDivergence && (
               <Alert variant="warning" data-testid="divergence-warning">
                 <AlertDescription>
                   <p>
-                    リモートとローカルの両方に未解決の差分があるため、起動をブロックしています。
+                    リモートとローカルの両方に未解決の差分があります。起動は可能ですが、
+                    衝突を避けるために差分の解消を推奨します。
                   </p>
                   <ul className="mt-2 list-inside list-disc text-xs text-muted-foreground">
                     <li>
@@ -266,7 +267,6 @@ export function ToolLauncher({
                 disabled={
                   isStartingSession ||
                   !selectedTool ||
-                  hasBlockingDivergence ||
                   needsRemoteSync ||
                   isSyncingBranch
                 }

@@ -109,7 +109,7 @@ describe("BranchDetailPage", () => {
     });
 
     mockedUseConfig.mockReturnValue({
-      data: { tools: [] },
+      data: { codingAgents: [] },
       isLoading: false,
       error: null,
     });
@@ -121,7 +121,9 @@ describe("BranchDetailPage", () => {
     expect(screen.getByText("feature/design-refresh")).toBeInTheDocument();
     expect(screen.getByText("コミット情報")).toBeInTheDocument();
     expect(screen.getByText("差分状況")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "セッションを起動" })).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: "セッションを起動" }),
+    ).toBeEnabled();
     expect(screen.getByText("Worktree情報")).toBeInTheDocument();
   });
 
@@ -137,7 +139,9 @@ describe("BranchDetailPage", () => {
     expect(
       screen.getByRole("button", { name: "Worktreeを作成" }),
     ).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "セッションを起動" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "セッションを起動" }),
+    ).not.toBeInTheDocument();
   });
 
   it("renders session history rows when data exists", () => {
@@ -145,7 +149,7 @@ describe("BranchDetailPage", () => {
       data: [
         {
           sessionId: "abc",
-          toolType: "claude-code",
+          agentType: "claude-code",
           mode: "normal",
           status: "running",
           worktreePath: baseBranch.worktreePath,
@@ -160,10 +164,10 @@ describe("BranchDetailPage", () => {
 
     renderPage();
     expect(screen.getByText("セッション履歴")).toBeInTheDocument();
-    expect(screen.getByText("running")).toBeInTheDocument();
+    expect(screen.getByText("Running")).toBeInTheDocument();
   });
 
-  it("blocks session start when branch has conflicting divergence", () => {
+  it("allows session start when branch has conflicting divergence", () => {
     mockedUseBranch.mockReturnValueOnce({
       data: {
         ...baseBranch,
@@ -176,7 +180,9 @@ describe("BranchDetailPage", () => {
     renderPage();
 
     expect(screen.getByTestId("divergence-warning")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "セッションを起動" })).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "セッションを起動" }),
+    ).not.toBeDisabled();
   });
 
   it("prompts git sync when branch is behind remote", () => {
@@ -192,7 +198,9 @@ describe("BranchDetailPage", () => {
     renderPage();
 
     expect(screen.getByTestId("sync-required")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "セッションを起動" })).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "セッションを起動" }),
+    ).toBeDisabled();
   });
 
   it("calls sync mutation when clicking 最新の変更を同期", async () => {

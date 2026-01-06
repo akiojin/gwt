@@ -1,12 +1,12 @@
 /**
- * カスタムツール起動機能
+ * コーディングエージェント起動機能
  *
- * カスタムコーディングエージェントの起動処理を管理します。
+ * コーディングエージェントの起動処理を管理します。
  * 3つの実行タイプ（path, bunx, command）をサポートします。
  */
 
 import { execa } from "execa";
-import type { CustomAITool, LaunchOptions } from "./types/tools.js";
+import type { CodingAgent, CodingAgentLaunchOptions } from "./types/tools.js";
 import { createLogger } from "./logging/logger.js";
 
 const logger = createLogger({ category: "launcher" });
@@ -63,21 +63,24 @@ export async function resolveCommand(commandName: string): Promise<string> {
  * defaultArgs + modeArgs[mode] + extraArgs の順で引数を結合します。
  * 未定義のフィールドは空配列として扱います。
  *
- * @param tool - カスタムツール定義
+ * @param agent - コーディングエージェント定義
  * @param options - 起動オプション
  * @returns 結合された引数配列
  */
-function buildArgs(tool: CustomAITool, options: LaunchOptions): string[] {
+function buildArgs(
+  agent: CodingAgent,
+  options: CodingAgentLaunchOptions,
+): string[] {
   const args: string[] = [];
 
   // 1. defaultArgs
-  if (tool.defaultArgs) {
-    args.push(...tool.defaultArgs);
+  if (agent.defaultArgs) {
+    args.push(...agent.defaultArgs);
   }
 
   // 2. modeArgs[mode]
   const mode = options.mode || "normal";
-  const modeArgs = tool.modeArgs[mode];
+  const modeArgs = agent.modeArgs[mode];
   if (modeArgs) {
     args.push(...modeArgs);
   }
@@ -88,32 +91,36 @@ function buildArgs(tool: CustomAITool, options: LaunchOptions): string[] {
   }
 
   logger.debug(
-    { toolId: tool.id, mode: options.mode ?? "normal", argsCount: args.length },
+    {
+      agentId: agent.id,
+      mode: options.mode ?? "normal",
+      argsCount: args.length,
+    },
     "Args built",
   );
   return args;
 }
 
 /**
- * カスタムコーディングエージェントを起動
+ * コーディングエージェントを起動
  *
- * ツールの実行タイプ（path/bunx/command）に応じて適切な方法で起動します。
- * stdio: "inherit" で起動するため、ツールの入出力は親プロセスに継承されます。
+ * エージェントの実行タイプ（path/bunx/command）に応じて適切な方法で起動します。
+ * stdio: "inherit" で起動するため、エージェントの入出力は親プロセスに継承されます。
  *
- * @param tool - カスタムツール定義
+ * @param agent - コーディングエージェント定義
  * @param options - 起動オプション
  * @throws 起動に失敗した場合
  */
-export async function launchCustomAITool(
-  tool: CustomAITool,
-  options: LaunchOptions = {},
+export async function launchCodingAgent(
+  agent: CodingAgent,
+  options: CodingAgentLaunchOptions = {},
 ): Promise<void> {
-  const args = buildArgs(tool, options);
+  const args = buildArgs(agent, options);
 
   const env = {
     ...process.env,
     ...(options.sharedEnv ?? {}),
-    ...(tool.env ?? {}),
+    ...(agent.env ?? {}),
   };
 
   // execa共通オプション（cwdがundefinedの場合は含めない）
@@ -125,43 +132,43 @@ export async function launchCustomAITool(
 
   logger.info(
     {
-      toolId: tool.id,
-      toolType: tool.type,
-      command: tool.command,
+      agentId: agent.id,
+      agentType: agent.type,
+      command: agent.command,
       mode: options.mode ?? "normal",
     },
-    "Launching custom AI tool",
+    "Launching coding agent",
   );
 
-  switch (tool.type) {
+  switch (agent.type) {
     case "path": {
       // 絶対パスで直接実行
-      await execa(tool.command, args, execaOptions);
-      logger.info({ toolId: tool.id }, "Custom AI tool completed (path)");
+      await execa(agent.command, args, execaOptions);
+      logger.info({ agentId: agent.id }, "Coding agent completed (path)");
       break;
     }
 
     case "bunx": {
       // bunx経由でパッケージ実行
       // bunx [package] [args...]
-      await execa("bunx", [tool.command, ...args], execaOptions);
-      logger.info({ toolId: tool.id }, "Custom AI tool completed (bunx)");
+      await execa("bunx", [agent.command, ...args], execaOptions);
+      logger.info({ agentId: agent.id }, "Coding agent completed (bunx)");
       break;
     }
 
     case "command": {
       // PATH解決 → 実行
-      const resolvedPath = await resolveCommand(tool.command);
+      const resolvedPath = await resolveCommand(agent.command);
       await execa(resolvedPath, args, execaOptions);
-      logger.info({ toolId: tool.id }, "Custom AI tool completed (command)");
+      logger.info({ agentId: agent.id }, "Coding agent completed (command)");
       break;
     }
 
     default: {
       // TypeScriptの型チェックで到達不可能だが、実行時の安全性のため
-      const exhaustiveCheck: never = tool.type;
+      const exhaustiveCheck: never = agent.type;
       throw new Error(
-        `Unknown tool execution type: ${exhaustiveCheck as string}`,
+        `Unknown agent execution type: ${exhaustiveCheck as string}`,
       );
     }
   }

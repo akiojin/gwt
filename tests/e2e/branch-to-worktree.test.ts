@@ -1,15 +1,41 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeEach,
+  afterEach,
+  type MockedFunction,
+} from "vitest";
 
 // Mock all dependencies
 vi.mock("execa", () => ({
   execa: vi.fn(),
 }));
 
+const existsSyncMock = vi.hoisted(() =>
+  vi.fn((targetPath?: string) => {
+    if (typeof targetPath !== "string") {
+      return false;
+    }
+    const normalized = targetPath.replace(/\\/g, "/");
+    if (
+      normalized.includes("/path/to/repo/.worktrees") ||
+      normalized === "/path/to/worktree"
+    ) {
+      return false;
+    }
+    return true;
+  }),
+);
+
 vi.mock("node:fs", () => ({
-  existsSync: vi.fn(() => true),
+  existsSync: existsSyncMock,
 }));
 
 const mkdirMock = vi.hoisted(() => vi.fn(async () => undefined));
+const readFileMock = vi.hoisted(() => vi.fn(async () => ""));
+const writeFileMock = vi.hoisted(() => vi.fn(async () => undefined));
 
 vi.mock("node:fs/promises", async () => {
   const actual =
@@ -20,13 +46,17 @@ vi.mock("node:fs/promises", async () => {
   const mocked = {
     ...actual,
     mkdir: mkdirMock,
+    readFile: readFileMock,
+    writeFile: writeFileMock,
   };
 
   return {
     ...mocked,
     default: {
-      ...actual.default,
+      ...actual,
       mkdir: mkdirMock,
+      readFile: readFileMock,
+      writeFile: writeFileMock,
     },
   };
 });
@@ -34,8 +64,7 @@ vi.mock("node:fs/promises", async () => {
 import { execa } from "execa";
 import * as git from "../../src/git";
 import * as worktree from "../../src/worktree";
-
-const stripAnsi = (value: string) => value.replace(/\u001B\[[0-9;]*m/g, "");
+const execaMock = execa as MockedFunction<typeof execa>;
 
 describe("E2E: Complete Branch to Worktree Flow", () => {
   let repoRootSpy: ReturnType<typeof vi.spyOn>;
@@ -43,6 +72,9 @@ describe("E2E: Complete Branch to Worktree Flow", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mkdirMock.mockClear();
+    readFileMock.mockClear();
+    writeFileMock.mockClear();
+    existsSyncMock.mockClear();
     repoRootSpy = vi
       .spyOn(git, "getRepositoryRoot")
       .mockResolvedValue("/path/to/repo");
@@ -56,7 +88,7 @@ describe("E2E: Complete Branch to Worktree Flow", () => {
   describe("Full User Workflow (T110)", () => {
     it("should complete end-to-end workflow: list → select → create → verify", async () => {
       // Mock complete Git repository state
-      (execa as any).mockImplementation(
+      execaMock.mockImplementation(
         async (command: string, args?: readonly string[]) => {
           // Step 1: Get local branches
           if (
@@ -196,7 +228,7 @@ branch refs/heads/feature/user-auth
     });
 
     it("should handle complete new branch creation workflow", async () => {
-      (execa as any).mockImplementation(
+      execaMock.mockImplementation(
         async (command: string, args?: readonly string[]) => {
           // Get branches
           if (
@@ -302,7 +334,7 @@ branch refs/heads/main
     });
 
     it("should handle workflow with remote branch selection", async () => {
-      (execa as any).mockImplementation(
+      execaMock.mockImplementation(
         async (command: string, args?: readonly string[]) => {
           if (args?.[0] === "branch" && args.includes("-r")) {
             return {
@@ -384,7 +416,7 @@ branch refs/heads/main
   describe("Error Recovery Scenarios", () => {
     it("should handle and recover from worktree creation failure", async () => {
       let callCount = 0;
-      (execa as any).mockImplementation(
+      execaMock.mockImplementation(
         async (command: string, args?: readonly string[]) => {
           if (args?.[0] === "worktree" && args[1] === "add") {
             callCount++;

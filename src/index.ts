@@ -13,7 +13,6 @@ import {
   hasUnpushedCommits,
   getUncommittedChangesCount,
   getUnpushedCommitsCount,
-  pushBranchToRemote,
 } from "./git.js";
 import { launchClaudeCode } from "./claude.js";
 import { launchCodexCLI, type CodexReasoningEffort } from "./codex.js";
@@ -23,7 +22,7 @@ import {
   type EnsureWorktreeOptions,
 } from "./services/WorktreeOrchestrator.js";
 import chalk from "chalk";
-import type { SelectionResult } from "./cli/ui/components/App.js";
+import type { SelectionResult } from "./cli/ui/App.solid.js";
 import {
   isProtectedBranchName,
   switchToProtectedBranch,
@@ -31,11 +30,12 @@ import {
 } from "./worktree.js";
 import {
   getTerminalStreams,
+  resetTerminalModes,
   waitForUserAcknowledgement,
 } from "./utils/terminal.js";
 import { createLogger } from "./logging/logger.js";
-import { getToolById, getSharedEnvironment } from "./config/tools.js";
-import { launchCustomAITool } from "./launcher.js";
+import { getCodingAgentById, getSharedEnvironment } from "./config/tools.js";
+import { launchCodingAgent } from "./launcher.js";
 import { saveSession, loadSession } from "./config/index.js";
 import {
   findLatestCodexSession,
@@ -51,7 +51,6 @@ import {
   DependencyInstallError,
   type DependencyInstallResult,
 } from "./services/dependency-installer.js";
-import { confirmYesNo, waitForEnter } from "./utils/prompt.js";
 import { isGitRelatedError, isRecoverableError } from "./utils/error-utils.js";
 
 const ERROR_PROMPT = chalk.yellow(
@@ -172,49 +171,68 @@ async function showVersion(): Promise<void> {
 }
 
 /**
- * Main function for Ink.js UI
+ * Main function for OpenTUI UI
  * Returns SelectionResult if user made selections, undefined if user quit
  */
-async function mainInkUI(): Promise<SelectionResult | undefined> {
-  const { render } = await import("ink");
-  const React = await import("react");
-  const { App } = await import("./cli/ui/components/App.js");
+async function mainSolidUI(): Promise<SelectionResult | undefined> {
+  const { renderSolidApp } = await import("./opentui/index.solid.js");
   const terminal = getTerminalStreams();
 
   let selectionResult: SelectionResult | undefined;
+  const mousePreference = process.env.GWT_UI_MOUSE?.trim().toLowerCase();
+  const useMouse =
+    mousePreference === undefined ||
+    mousePreference === "" ||
+    mousePreference === "true" ||
+    mousePreference === "1";
+  const mouseMovePreference =
+    process.env.GWT_UI_MOUSE_MOVE?.trim().toLowerCase();
+  const enableMouseMovement =
+    mouseMovePreference === "true" || mouseMovePreference === "1";
+  const altScreenPreference =
+    process.env.GWT_UI_ALT_SCREEN?.trim().toLowerCase();
+  const useAlternateScreen =
+    altScreenPreference === undefined ||
+    altScreenPreference === "" ||
+    altScreenPreference === "true" ||
+    altScreenPreference === "1";
 
-  // Resume stdin to ensure it's ready for Ink.js
   if (typeof terminal.stdin.resume === "function") {
     terminal.stdin.resume();
   }
+  if (typeof terminal.stdin.setRawMode === "function") {
+    try {
+      terminal.stdin.setRawMode(true);
+    } catch {
+      // Ignore raw mode errors and let OpenTUI handle setup.
+    }
+  }
 
-  const { unmount, waitUntilExit } = render(
-    React.createElement(App, {
-      onExit: (result?: SelectionResult) => {
-        selectionResult = result;
-      },
-    }),
-    {
-      stdin: terminal.stdin,
-      stdout: terminal.stdout,
-      stderr: terminal.stderr,
-      patchConsole: false,
-    },
-  );
-
-  // Wait for user to exit
   try {
-    await waitUntilExit();
+    await renderSolidApp(
+      {
+        onExit: (result?: SelectionResult) => {
+          selectionResult = result;
+        },
+      },
+      {
+        stdin: terminal.stdin,
+        stdout: terminal.stdout,
+        exitOnCtrlC: true,
+        useAlternateScreen,
+        useMouse,
+        enableMouseMovement,
+      },
+    );
   } finally {
     terminal.exitRawMode();
+    resetTerminalModes(terminal.stdout);
     if (typeof terminal.stdin.pause === "function") {
       terminal.stdin.pause();
     }
-    // Inkが残した data リスナーが子プロセス入力を奪わないようクリーンアップ
     terminal.stdin.removeAllListeners?.("data");
     terminal.stdin.removeAllListeners?.("keypress");
     terminal.stdin.removeAllListeners?.("readable");
-    unmount();
   }
 
   return selectionResult;
@@ -231,6 +249,8 @@ export async function handleAIToolWorkflow(
     displayName,
     branchType,
     remoteBranch,
+    baseBranch,
+    isNewBranch,
     tool,
     mode,
     skipPermissions,
@@ -262,7 +282,14 @@ export async function handleAIToolWorkflow(
     // Determine ensure options (local vs remote branch)
     const ensureOptions: EnsureWorktreeOptions = {};
 
-    if (branchType === "remote") {
+    if (isNewBranch) {
+      ensureOptions.isNewBranch = true;
+      if (baseBranch) {
+        ensureOptions.baseBranch = baseBranch;
+      }
+    }
+
+    if (branchType === "remote" && !isNewBranch) {
       const remoteRef = remoteBranch ?? branch;
       const localExists = await branchExists(branch);
 
@@ -366,7 +393,7 @@ export async function handleAIToolWorkflow(
       switch (dependencyStatus.reason) {
         case "missing-lockfile":
           warningMessage =
-            "Skipping automatic install because no lockfiles (bun.lock / pnpm-lock.yaml / package-lock.json) or package.json were found. Run the appropriate package-manager install command manually if needed.";
+            "Skipping automatic install because no lockfiles (bun.lock / pnpm-lock.yaml / package-lock.json) or package.json could be found. Run the appropriate package-manager install command manually if needed.";
           break;
         case "missing-binary":
           warningMessage = `Package manager '${dependencyStatus.manager ?? "unknown"}' is not available in this environment; skipping automatic install.`;
@@ -428,16 +455,21 @@ export async function handleAIToolWorkflow(
       divergenceBranches.add(sanitizedRemoteBranch);
     }
 
-    const divergenceResult = await runGitStep("check branch divergence", () =>
-      getBranchDivergenceStatuses({
+    let divergenceStatuses: Awaited<
+      ReturnType<typeof getBranchDivergenceStatuses>
+    > = [];
+    try {
+      divergenceStatuses = await getBranchDivergenceStatuses({
         cwd: repoRoot,
         branches: Array.from(divergenceBranches),
-      }),
-    );
-    if (!divergenceResult.ok) {
-      return;
+      });
+    } catch (error) {
+      const details = error instanceof Error ? error.message : String(error);
+      printWarning(
+        `Failed to check branch divergence. Error: ${details}. Continuing without blocking.`,
+      );
+      divergenceStatuses = [];
     }
-    const divergenceStatuses = divergenceResult.value;
     const divergedBranches = divergenceStatuses.filter(
       (status) => status.remoteAhead > 0 && status.localAhead > 0,
     );
@@ -460,48 +492,39 @@ export async function handleAIToolWorkflow(
       );
 
       printWarning(
-        "Resolve these divergences (e.g., rebase or merge) before launching to avoid conflicts.",
+        "Resolve these divergences (e.g., rebase or merge) to avoid conflicts. Continuing without blocking.",
       );
-      await waitForEnter(
-        "Press Enter to return to the main menu and resolve these issues manually.",
-      );
-      printWarning(
-        "AI tool launch has been cancelled until divergences are resolved.",
-      );
-      return;
     } else if (fastForwardError) {
       printWarning(
         `Fast-forward pull could not complete (${fastForwardError.message}). Continuing without blocking.`,
       );
     }
 
-    // Get tool definition and shared environment overrides
-    const [toolConfig, sharedEnv] = await Promise.all([
-      getToolById(tool),
+    // Get coding agent definition and shared environment overrides
+    const [agentConfig, sharedEnv] = await Promise.all([
+      getCodingAgentById(tool),
       getSharedEnvironment(),
     ]);
 
-    if (!toolConfig) {
-      throw new Error(`Tool not found: ${tool}`);
+    if (!agentConfig) {
+      throw new Error(`Coding agent not found: ${tool}`);
     }
 
-    // Save selection immediately so "last tool" is reflected even if the tool
-    // is interrupted or killed mid-run (e.g., Ctrl+C).
-    await saveSession(
-      {
-        lastWorktreePath: worktreePath,
-        lastBranch: branch,
-        lastUsedTool: tool,
-        toolLabel: toolConfig.displayName ?? tool,
-        mode,
-        model: normalizedModel ?? null,
-        reasoningLevel: inferenceLevel ?? null,
-        skipPermissions: skipPermissions ?? null,
-        timestamp: Date.now(),
-        repositoryRoot: repoRoot,
-      },
-      { skipHistory: true },
-    );
+    // Save selection immediately (including history) so "last agent" is reflected
+    // even if the agent is interrupted or killed mid-run (e.g., Ctrl+C).
+    // FR-042: Record timestamp to session history immediately on agent start.
+    await saveSession({
+      lastWorktreePath: worktreePath,
+      lastBranch: branch,
+      lastUsedTool: tool,
+      toolLabel: agentConfig.displayName ?? tool,
+      mode,
+      model: normalizedModel ?? null,
+      reasoningLevel: inferenceLevel ?? null,
+      skipPermissions: skipPermissions ?? null,
+      timestamp: Date.now(),
+      repositoryRoot: repoRoot,
+    });
 
     // Lookup saved session ID for Continue (auto attach)
     let resumeSessionId: string | null =
@@ -531,96 +554,127 @@ export async function handleAIToolWorkflow(
 
     const launchStartedAt = Date.now();
 
-    // Launch selected AI tool
-    // Builtin tools use their dedicated launch functions
-    // Custom tools use the generic launchCustomAITool function
+    // FR-043: Start periodic timestamp update timer (30 seconds interval)
+    // This ensures the latest activity time is updated even if the tool is force-killed
+    const SESSION_UPDATE_INTERVAL_MS = 30_000;
+    const updateTimer = setInterval(async () => {
+      try {
+        await saveSession(
+          {
+            lastWorktreePath: worktreePath,
+            lastBranch: branch,
+            lastUsedTool: tool,
+            toolLabel: agentConfig.displayName ?? tool,
+            mode,
+            model: normalizedModel ?? null,
+            reasoningLevel: inferenceLevel ?? null,
+            skipPermissions: skipPermissions ?? null,
+            timestamp: Date.now(),
+            repositoryRoot: repoRoot,
+          },
+          { skipHistory: true }, // Don't add to history, just update timestamp
+        );
+      } catch {
+        // Ignore errors during periodic update
+      }
+    }, SESSION_UPDATE_INTERVAL_MS);
+
+    // Launch selected coding agent
+    // Builtin agents use their dedicated launch functions
+    // Custom agents use the generic launchCodingAgent function
     let launchResult: { sessionId?: string | null } | void;
-    if (tool === "claude-code") {
-      const launchOptions: {
-        mode?: "normal" | "continue" | "resume";
-        skipPermissions?: boolean;
-        envOverrides?: Record<string, string>;
-        model?: string;
-        sessionId?: string | null;
-        chrome?: boolean;
-      } = {
-        mode:
-          mode === "resume"
-            ? "resume"
-            : mode === "continue"
-              ? "continue"
-              : "normal",
-        skipPermissions,
-        envOverrides: sharedEnv,
-        sessionId: resumeSessionId,
-        chrome: true,
-      };
-      if (normalizedModel) {
-        launchOptions.model = normalizedModel;
+    try {
+      if (tool === "claude-code") {
+        const launchOptions: {
+          mode?: "normal" | "continue" | "resume";
+          skipPermissions?: boolean;
+          envOverrides?: Record<string, string>;
+          model?: string;
+          sessionId?: string | null;
+          chrome?: boolean;
+        } = {
+          mode:
+            mode === "resume"
+              ? "resume"
+              : mode === "continue"
+                ? "continue"
+                : "normal",
+          skipPermissions,
+          envOverrides: sharedEnv,
+          sessionId: resumeSessionId,
+          chrome: true,
+        };
+        if (normalizedModel) {
+          launchOptions.model = normalizedModel;
+        }
+        launchResult = await launchClaudeCode(worktreePath, launchOptions);
+      } else if (tool === "codex-cli") {
+        const launchOptions: {
+          mode?: "normal" | "continue" | "resume";
+          bypassApprovals?: boolean;
+          envOverrides?: Record<string, string>;
+          model?: string;
+          reasoningEffort?: CodexReasoningEffort;
+          sessionId?: string | null;
+        } = {
+          mode:
+            mode === "resume"
+              ? "resume"
+              : mode === "continue"
+                ? "continue"
+                : "normal",
+          bypassApprovals: skipPermissions,
+          envOverrides: sharedEnv,
+          sessionId: resumeSessionId,
+        };
+        if (normalizedModel) {
+          launchOptions.model = normalizedModel;
+        }
+        if (inferenceLevel) {
+          launchOptions.reasoningEffort =
+            inferenceLevel as CodexReasoningEffort;
+        }
+        launchResult = await launchCodexCLI(worktreePath, launchOptions);
+      } else if (tool === "gemini-cli") {
+        const launchOptions: {
+          mode?: "normal" | "continue" | "resume";
+          skipPermissions?: boolean;
+          envOverrides?: Record<string, string>;
+          model?: string;
+          sessionId?: string | null;
+        } = {
+          mode:
+            mode === "resume"
+              ? "resume"
+              : mode === "continue"
+                ? "continue"
+                : "normal",
+          skipPermissions,
+          envOverrides: sharedEnv,
+          sessionId: resumeSessionId,
+        };
+        if (normalizedModel) {
+          launchOptions.model = normalizedModel;
+        }
+        launchResult = await launchGeminiCLI(worktreePath, launchOptions);
+      } else {
+        // Custom coding agent
+        printInfo(`Launching custom agent: ${agentConfig.displayName}`);
+        launchResult = await launchCodingAgent(agentConfig, {
+          mode:
+            mode === "resume"
+              ? "resume"
+              : mode === "continue"
+                ? "continue"
+                : "normal",
+          skipPermissions,
+          cwd: worktreePath,
+          sharedEnv,
+        });
       }
-      launchResult = await launchClaudeCode(worktreePath, launchOptions);
-    } else if (tool === "codex-cli") {
-      const launchOptions: {
-        mode?: "normal" | "continue" | "resume";
-        bypassApprovals?: boolean;
-        envOverrides?: Record<string, string>;
-        model?: string;
-        reasoningEffort?: CodexReasoningEffort;
-        sessionId?: string | null;
-      } = {
-        mode:
-          mode === "resume"
-            ? "resume"
-            : mode === "continue"
-              ? "continue"
-              : "normal",
-        bypassApprovals: skipPermissions,
-        envOverrides: sharedEnv,
-        sessionId: resumeSessionId,
-      };
-      if (normalizedModel) {
-        launchOptions.model = normalizedModel;
-      }
-      if (inferenceLevel) {
-        launchOptions.reasoningEffort = inferenceLevel as CodexReasoningEffort;
-      }
-      launchResult = await launchCodexCLI(worktreePath, launchOptions);
-    } else if (tool === "gemini-cli") {
-      const launchOptions: {
-        mode?: "normal" | "continue" | "resume";
-        skipPermissions?: boolean;
-        envOverrides?: Record<string, string>;
-        model?: string;
-        sessionId?: string | null;
-      } = {
-        mode:
-          mode === "resume"
-            ? "resume"
-            : mode === "continue"
-              ? "continue"
-              : "normal",
-        skipPermissions,
-        envOverrides: sharedEnv,
-        sessionId: resumeSessionId,
-      };
-      if (normalizedModel) {
-        launchOptions.model = normalizedModel;
-      }
-      launchResult = await launchGeminiCLI(worktreePath, launchOptions);
-    } else {
-      // Custom tool
-      printInfo(`Launching custom tool: ${toolConfig.displayName}`);
-      launchResult = await launchCustomAITool(toolConfig, {
-        mode:
-          mode === "resume"
-            ? "resume"
-            : mode === "continue"
-              ? "continue"
-              : "normal",
-        skipPermissions,
-        cwd: worktreePath,
-        sharedEnv,
-      });
+    } finally {
+      // FR-043: Clear the periodic timestamp update timer
+      clearInterval(updateTimer);
     }
 
     // Persist session with captured session ID (if any)
@@ -689,7 +743,7 @@ export async function handleAIToolWorkflow(
       lastWorktreePath: worktreePath,
       lastBranch: branch,
       lastUsedTool: tool,
-      toolLabel: toolConfig.displayName ?? tool,
+      toolLabel: agentConfig.displayName ?? tool,
       mode,
       model: normalizedModel ?? null,
       reasoningLevel: inferenceLevel ?? null,
@@ -708,8 +762,12 @@ export async function handleAIToolWorkflow(
       if (hasUncommitted) {
         const uncommittedCount = await getUncommittedChangesCount(worktreePath);
         const countLabel =
-          uncommittedCount > 0 ? ` (${uncommittedCount}件)` : "";
-        printWarning(`未コミットの変更があります${countLabel}。`);
+          uncommittedCount > 0
+            ? ` (${uncommittedCount} ${
+                uncommittedCount === 1 ? "change" : "changes"
+              })`
+            : "";
+        printWarning(`Uncommitted changes detected${countLabel}.`);
       }
 
       if (hasUnpushed) {
@@ -717,27 +775,19 @@ export async function handleAIToolWorkflow(
           worktreePath,
           branch,
         );
-        const countLabel = unpushedCount > 0 ? ` (${unpushedCount}件)` : "";
-        const shouldPush = await confirmYesNo(
-          `未プッシュのコミットがあります${countLabel}。プッシュしますか？`,
-          { defaultValue: false },
-        );
-        if (shouldPush) {
-          printInfo(`Pushing origin/${branch}...`);
-          try {
-            await pushBranchToRemote(worktreePath, branch);
-            printInfo(`Push completed for ${branch}.`);
-          } catch (error) {
-            const details =
-              error instanceof Error ? error.message : String(error);
-            printWarning(`Push failed for ${branch}: ${details}`);
-          }
-        }
+        const countLabel =
+          unpushedCount > 0
+            ? ` (${unpushedCount} ${
+                unpushedCount === 1 ? "commit" : "commits"
+              })`
+            : "";
+        printWarning(`Unpushed commits detected${countLabel}.`);
       }
     } catch (error) {
       const details = error instanceof Error ? error.message : String(error);
       printWarning(`Failed to check git status after session: ${details}`);
     }
+
     // Small buffer before returning to branch list to avoid abrupt screen swap
     await new Promise((resolve) => setTimeout(resolve, POST_SESSION_DELAY_MS));
     printInfo("Session completed successfully. Returning to main menu...");
@@ -758,6 +808,10 @@ export async function handleAIToolWorkflow(
 type UIHandler = () => Promise<SelectionResult | undefined>;
 type WorkflowHandler = (selection: SelectionResult) => Promise<void>;
 
+function resolveUIHandler(): UIHandler {
+  return mainSolidUI;
+}
+
 function logLoopError(error: unknown, context: "ui" | "workflow"): void {
   const label = context === "ui" ? "UI" : "workflow";
   if (error instanceof Error) {
@@ -768,7 +822,7 @@ function logLoopError(error: unknown, context: "ui" | "workflow"): void {
 }
 
 export async function runInteractiveLoop(
-  uiHandler: UIHandler = mainInkUI,
+  uiHandler: UIHandler = resolveUIHandler(),
   workflowHandler: WorkflowHandler = handleAIToolWorkflow,
 ): Promise<void> {
   // Main loop: UI → Coding Agent → back to UI

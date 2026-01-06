@@ -299,6 +299,73 @@ export async function generateAlternativeWorktreePath(
   return alternativePath;
 }
 
+type StaleWorktreeAssessment = {
+  status: "absent" | "registered" | "stale" | "unknown";
+  reason?: string;
+};
+
+async function assessStaleWorktreeDirectory(
+  targetPath: string,
+): Promise<StaleWorktreeAssessment> {
+  const fsSync = await import("node:fs");
+
+  if (!fsSync.existsSync(targetPath)) {
+    return { status: "absent" };
+  }
+
+  const registered = await checkWorktreePathConflict(targetPath);
+  if (registered) {
+    return { status: "registered" };
+  }
+
+  const gitMetaPath = path.join(targetPath, ".git");
+  if (!fsSync.existsSync(gitMetaPath)) {
+    return { status: "stale", reason: "missing .git" };
+  }
+
+  let gitMetaStat: Awaited<ReturnType<typeof fs.lstat>>;
+  try {
+    gitMetaStat = await fs.lstat(gitMetaPath);
+  } catch {
+    return { status: "unknown", reason: "unable to stat .git" };
+  }
+
+  if (gitMetaStat.isDirectory()) {
+    return { status: "unknown", reason: ".git is a directory" };
+  }
+
+  if (!gitMetaStat.isFile()) {
+    return { status: "unknown", reason: ".git is not a file" };
+  }
+
+  let gitMetaContents = "";
+  try {
+    gitMetaContents = await fs.readFile(gitMetaPath, "utf8");
+  } catch {
+    return { status: "unknown", reason: "unable to read .git" };
+  }
+
+  const gitdirMatch = gitMetaContents.match(/^\s*gitdir:\s*(.+)\s*$/m);
+  if (!gitdirMatch) {
+    return { status: "unknown", reason: "missing gitdir entry" };
+  }
+
+  const rawGitdir = gitdirMatch[1]?.trim();
+  if (!rawGitdir) {
+    return { status: "unknown", reason: "empty gitdir entry" };
+  }
+
+  const gitdirPath = path.isAbsolute(rawGitdir)
+    ? rawGitdir
+    : path.resolve(targetPath, rawGitdir);
+
+  if (!fsSync.existsSync(gitdirPath)) {
+    return { status: "stale", reason: "missing gitdir path" };
+  }
+
+  return { status: "unknown", reason: "gitdir exists" };
+}
+
 /**
  * 新しいworktreeを作成
  * @param {WorktreeConfig} config - worktreeの設定
@@ -312,6 +379,16 @@ export async function createWorktree(config: WorktreeConfig): Promise<void> {
   }
 
   try {
+    const staleness = await assessStaleWorktreeDirectory(config.worktreePath);
+    if (staleness.status === "stale") {
+      await fs.rm(config.worktreePath, { recursive: true, force: true });
+    } else if (staleness.status === "unknown") {
+      const reason = staleness.reason ? ` (${staleness.reason})` : "";
+      throw new WorktreeError(
+        `Worktree path already exists but is not registered as a git worktree, and stale status could not be confirmed${reason}. Remove the directory manually and retry: ${config.worktreePath}`,
+      );
+    }
+
     const worktreeParentDir = path.dirname(config.worktreePath);
 
     try {
@@ -467,6 +544,74 @@ export async function removeWorktree(
       error,
     );
   }
+}
+
+export interface RepairResult {
+  repairedCount: number;
+  failedCount: number;
+  failures: Array<{ path: string; error: string }>;
+}
+
+/**
+ * Worktreeのパス不整合を修復
+ * git worktree repairを引数なしで実行し、全Worktreeを修復
+ * @param targetBranches 修復対象のブランチ名配列（修復前後の比較用）
+ * @returns 修復結果（成功数、失敗数、失敗詳細）
+ */
+export async function repairWorktrees(
+  targetBranches: string[],
+): Promise<RepairResult> {
+  const result: RepairResult = {
+    repairedCount: 0,
+    failedCount: 0,
+    failures: [],
+  };
+
+  if (targetBranches.length === 0) {
+    return result;
+  }
+
+  // 修復前のアクセス可能性を記録
+  const beforeWorktrees = await listAdditionalWorktrees();
+  const beforeAccessible = new Map(
+    beforeWorktrees.map((w) => [w.branch, w.isAccessible]),
+  );
+
+  try {
+    // git worktree repairを引数なしで実行（全Worktreeを修復）
+    await execa("git", ["worktree", "repair"]);
+
+    // 修復後のアクセス可能性を確認
+    const afterWorktrees = await listAdditionalWorktrees();
+    const afterAccessible = new Map(
+      afterWorktrees.map((w) => [w.branch, w.isAccessible]),
+    );
+
+    // 対象ブランチの修復結果を集計
+    for (const branch of targetBranches) {
+      const wasBefore = beforeAccessible.get(branch);
+      const isAfter = afterAccessible.get(branch);
+
+      if (wasBefore === false && isAfter === true) {
+        result.repairedCount++;
+      } else if (wasBefore === false && isAfter === false) {
+        result.failedCount++;
+        result.failures.push({
+          path: branch,
+          error: "Worktree still inaccessible after repair",
+        });
+      }
+    }
+  } catch (error) {
+    // repair自体が失敗した場合
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    for (const branch of targetBranches) {
+      result.failedCount++;
+      result.failures.push({ path: branch, error: errorMessage });
+    }
+  }
+
+  return result;
 }
 
 async function getWorktreesWithPRStatus(): Promise<WorktreeWithPR[]> {

@@ -1,116 +1,82 @@
 /**
- * カスタムツール設定管理
+ * コーディングエージェント設定管理
  *
  * ~/.gwt/tools.jsonから設定を読み込み、
- * ビルトインツールと統合して管理します。
+ * ビルトインエージェントと統合して管理します。
  */
 
 import { homedir } from "node:os";
 import path from "node:path";
-import {
-  readFile,
-  writeFile,
-  mkdir,
-  rename,
-  access,
-  cp,
-} from "node:fs/promises";
+import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
 import type {
-  ToolsConfig,
-  CustomAITool,
-  AIToolConfig,
+  CodingAgentsConfig,
+  CodingAgent,
+  CodingAgentConfig,
 } from "../types/tools.js";
-import { BUILTIN_TOOLS } from "./builtin-tools.js";
+import { BUILTIN_CODING_AGENTS } from "./builtin-coding-agents.js";
 import { createLogger } from "../logging/logger.js";
 import { resolveProfileEnv } from "./profiles.js";
 
 const logger = createLogger({ category: "config" });
 
 /**
- * ツール設定ファイルのパス
- * 環境変数の優先順位: GWT_HOME > CLAUDE_WORKTREE_HOME (後方互換性) > ホームディレクトリ
+ * コーディングエージェント設定ファイルのパス
+ * 環境変数 GWT_HOME が設定されている場合はそれを使用、それ以外はホームディレクトリ
  */
 export const WORKTREE_HOME =
   process.env.GWT_HOME && process.env.GWT_HOME.trim().length > 0
     ? process.env.GWT_HOME
-    : process.env.CLAUDE_WORKTREE_HOME &&
-        process.env.CLAUDE_WORKTREE_HOME.trim().length > 0
-      ? process.env.CLAUDE_WORKTREE_HOME
-      : homedir();
+    : homedir();
 
-const LEGACY_CONFIG_DIR = path.join(homedir(), ".claude-worktree");
 export const CONFIG_DIR = path.join(WORKTREE_HOME, ".gwt");
 export const TOOLS_CONFIG_PATH = path.join(CONFIG_DIR, "tools.json");
 const TEMP_CONFIG_PATH = `${TOOLS_CONFIG_PATH}.tmp`;
 
-/**
- * レガシー設定ディレクトリから新しいディレクトリへ移行
- */
-async function migrateLegacyConfig(): Promise<void> {
-  try {
-    // 新しいディレクトリが既に存在する場合は移行不要
-    try {
-      await access(CONFIG_DIR);
-      return;
-    } catch {
-      // 新しいディレクトリが存在しない場合は続行
-    }
-
-    // レガシーディレクトリの存在を確認
-    try {
-      await access(LEGACY_CONFIG_DIR);
-    } catch {
-      // レガシーディレクトリも存在しない場合は移行不要
-      return;
-    }
-
-    // レガシーディレクトリを新しいディレクトリにコピー
-    await mkdir(path.dirname(CONFIG_DIR), { recursive: true });
-    await cp(LEGACY_CONFIG_DIR, CONFIG_DIR, { recursive: true });
-    logger.info(
-      { from: LEGACY_CONFIG_DIR, to: CONFIG_DIR },
-      "Legacy config migrated",
-    );
-    console.log(
-      `✅ Migrated configuration from ${LEGACY_CONFIG_DIR} to ${CONFIG_DIR}`,
-    );
-  } catch (error) {
-    // 移行に失敗しても継続(エラーログのみ)
-    if (process.env.DEBUG) {
-      console.error("Failed to migrate legacy config:", error);
-    }
-  }
-}
-
-const DEFAULT_CONFIG: ToolsConfig = {
+const DEFAULT_CONFIG: CodingAgentsConfig = {
   version: "1.0.0",
   env: {},
-  customTools: [],
+  customCodingAgents: [],
 };
 
 /**
- * ツール設定を読み込む
+ * コーディングエージェント設定を読み込む
  *
  * ~/.gwt/tools.jsonから設定を読み込みます。
  * ファイルが存在しない場合は空配列を返します。
  *
- * @returns ToolsConfig
+ * @returns CodingAgentsConfig
  * @throws JSON構文エラー時
  */
-export async function loadToolsConfig(): Promise<ToolsConfig> {
-  // 最初の呼び出し時にレガシー設定の移行を試行
-  await migrateLegacyConfig();
-
+export async function loadCodingAgentsConfig(): Promise<CodingAgentsConfig> {
   try {
     const content = await readFile(TOOLS_CONFIG_PATH, "utf-8");
-    const config = JSON.parse(content) as ToolsConfig;
+    const config = JSON.parse(content) as CodingAgentsConfig;
+
+    // マイグレーション: customTools → customCodingAgents (後方互換性)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const legacyConfig = config as any;
+    if (!config.customCodingAgents && legacyConfig.customTools) {
+      config.customCodingAgents = legacyConfig.customTools;
+      logger.warn(
+        { path: TOOLS_CONFIG_PATH },
+        "Migrating deprecated 'customTools' to 'customCodingAgents'",
+      );
+    }
+
+    // フォールバック: undefined/null → 空配列
+    if (!config.customCodingAgents) {
+      config.customCodingAgents = [];
+    }
 
     // 検証
-    validateToolsConfig(config);
+    validateCodingAgentsConfig(config);
 
     logger.debug(
-      { path: TOOLS_CONFIG_PATH, toolCount: config.customTools.length },
-      "Tools config loaded",
+      {
+        path: TOOLS_CONFIG_PATH,
+        agentCount: config.customCodingAgents.length,
+      },
+      "Coding agents config loaded",
     );
 
     return {
@@ -122,7 +88,7 @@ export async function loadToolsConfig(): Promise<ToolsConfig> {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") {
       logger.debug(
         { path: TOOLS_CONFIG_PATH },
-        "Tools config not found, using defaults",
+        "Coding agents config not found, using defaults",
       );
       return { ...DEFAULT_CONFIG };
     }
@@ -131,7 +97,7 @@ export async function loadToolsConfig(): Promise<ToolsConfig> {
     if (error instanceof SyntaxError) {
       logger.error(
         { path: TOOLS_CONFIG_PATH, error: error.message },
-        "Tools config parse error",
+        "Coding agents config parse error",
       );
       throw new Error(
         `Failed to parse tools.json: ${error.message}\n` +
@@ -145,20 +111,20 @@ export async function loadToolsConfig(): Promise<ToolsConfig> {
 }
 
 /**
- * ToolsConfig全体を検証
+ * CodingAgentsConfig全体を検証
  *
  * @param config - 検証対象の設定
  * @throws 検証エラー時
  */
-function validateToolsConfig(config: ToolsConfig): void {
+function validateCodingAgentsConfig(config: CodingAgentsConfig): void {
   // versionフィールドの検証
   if (!config.version || typeof config.version !== "string") {
     throw new Error("version field is required and must be a string");
   }
 
-  // customToolsフィールドの検証
-  if (!Array.isArray(config.customTools)) {
-    throw new Error("customTools field must be an array");
+  // customCodingAgentsフィールドの検証
+  if (!Array.isArray(config.customCodingAgents)) {
+    throw new Error("customCodingAgents field must be an array");
   }
 
   if (config.env && typeof config.env !== "object") {
@@ -176,40 +142,42 @@ function validateToolsConfig(config: ToolsConfig): void {
     }
   }
 
-  // 各ツールの検証
+  // 各エージェントの検証
   const seenIds = new Set<string>();
-  for (const tool of config.customTools) {
-    validateCustomAITool(tool);
+  for (const agent of config.customCodingAgents) {
+    validateCodingAgent(agent);
 
     // ID重複チェック
-    if (seenIds.has(tool.id)) {
+    if (seenIds.has(agent.id)) {
       throw new Error(
-        `Duplicate tool ID found: "${tool.id}"\n` +
-          `Each tool must have a unique ID in ${TOOLS_CONFIG_PATH}`,
+        `Duplicate agent ID found: "${agent.id}"\n` +
+          `Each agent must have a unique ID in ${TOOLS_CONFIG_PATH}`,
       );
     }
-    seenIds.add(tool.id);
+    seenIds.add(agent.id);
 
-    // ビルトインツールとのID重複チェック
-    const builtinIds = BUILTIN_TOOLS.map((t) => t.id);
-    if (builtinIds.includes(tool.id)) {
+    // ビルトインエージェントとのID重複チェック
+    const builtinIds = BUILTIN_CODING_AGENTS.map((t) => t.id);
+    if (builtinIds.includes(agent.id)) {
       throw new Error(
-        `Tool ID "${tool.id}" conflicts with builtin tool\n` +
-          `Builtin tool IDs: ${builtinIds.join(", ")}`,
+        `Agent ID "${agent.id}" conflicts with builtin agent\n` +
+          `Builtin agent IDs: ${builtinIds.join(", ")}`,
       );
     }
   }
 }
 
-export async function saveToolsConfig(config: ToolsConfig): Promise<void> {
-  const normalized: ToolsConfig = {
+export async function saveCodingAgentsConfig(
+  config: CodingAgentsConfig,
+): Promise<void> {
+  const normalized: CodingAgentsConfig = {
     version: config.version,
     updatedAt: config.updatedAt ?? new Date().toISOString(),
     env: config.env ?? {},
-    customTools: config.customTools,
+    customCodingAgents: config.customCodingAgents,
   };
 
-  validateToolsConfig(normalized);
+  validateCodingAgentsConfig(normalized);
 
   await mkdir(CONFIG_DIR, { recursive: true });
   const payload = JSON.stringify(normalized, null, 2);
@@ -229,7 +197,7 @@ export async function saveToolsConfig(config: ToolsConfig): Promise<void> {
  */
 export async function getSharedEnvironment(): Promise<Record<string, string>> {
   const [config, profileEnv] = await Promise.all([
-    loadToolsConfig(),
+    loadCodingAgentsConfig(),
     resolveProfileEnv(),
   ]);
 
@@ -240,104 +208,111 @@ export async function getSharedEnvironment(): Promise<Record<string, string>> {
 }
 
 /**
- * CustomAITool単体を検証
+ * CodingAgent単体を検証
  *
- * @param tool - 検証対象のツール
+ * @param agent - 検証対象のエージェント
  * @throws 検証エラー時
  */
-function validateCustomAITool(tool: unknown): asserts tool is CustomAITool {
+function validateCodingAgent(agent: unknown): asserts agent is CodingAgent {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const t = tool as any;
+  const a = agent as any;
 
   // 必須フィールドの存在チェック
   const requiredFields = ["id", "displayName", "type", "command", "modeArgs"];
   for (const field of requiredFields) {
-    if (!t[field]) {
+    if (!a[field]) {
       throw new Error(
-        `Required field "${field}" is missing in tool configuration`,
+        `Required field "${field}" is missing in agent configuration`,
       );
     }
   }
 
   // id形式の検証（小文字英数字とハイフンのみ）
-  if (!/^[a-z0-9-]+$/.test(t.id)) {
+  if (!/^[a-z0-9-]+$/.test(a.id)) {
     throw new Error(
-      `Invalid tool ID format: "${t.id}"\n` +
-        `Tool ID must contain only lowercase letters, numbers, and hyphens (pattern: ^[a-z0-9-]+$)`,
+      `Invalid agent ID format: "${a.id}"\n` +
+        `Agent ID must contain only lowercase letters, numbers, and hyphens (pattern: ^[a-z0-9-]+$)`,
     );
   }
 
   // typeフィールドの値検証
   const validTypes = ["path", "bunx", "command"];
-  if (!validTypes.includes(t.type)) {
+  if (!validTypes.includes(a.type)) {
     throw new Error(
-      `Invalid type: "${t.type}"\n` +
+      `Invalid type: "${a.type}"\n` +
         `Type must be one of: ${validTypes.join(", ")}`,
     );
   }
 
   // type='path'の場合、commandが絶対パスであることを確認
-  if (t.type === "path" && !path.isAbsolute(t.command)) {
+  if (a.type === "path" && !path.isAbsolute(a.command)) {
     throw new Error(
-      `For type="path", command must be an absolute path: "${t.command}"`,
+      `For type="path", command must be an absolute path: "${a.command}"`,
     );
   }
 
   // modeArgsの検証（少なくとも1つのモードが定義されている）
-  if (!t.modeArgs.normal && !t.modeArgs.continue && !t.modeArgs.resume) {
+  if (!a.modeArgs.normal && !a.modeArgs.continue && !a.modeArgs.resume) {
     throw new Error(
-      `modeArgs must define at least one mode (normal, continue, or resume) for tool "${t.id}"`,
+      `modeArgs must define at least one mode (normal, continue, or resume) for agent "${a.id}"`,
     );
   }
 }
 
 /**
- * IDでツールを検索
+ * IDでコーディングエージェントを検索
  *
- * @param id - ツールID
- * @returns ツール設定（見つからない場合はundefined）
+ * @param id - エージェントID
+ * @returns エージェント設定（見つからない場合はundefined）
  */
-export async function getToolById(
+export async function getCodingAgentById(
   id: string,
-): Promise<CustomAITool | undefined> {
-  // ビルトインツールから検索
-  const builtinTool = BUILTIN_TOOLS.find((t) => t.id === id);
-  if (builtinTool) {
-    logger.debug({ id, found: true, isBuiltin: true }, "Tool lookup");
-    return builtinTool;
+): Promise<CodingAgent | undefined> {
+  // ビルトインエージェントから検索
+  const builtinAgent = BUILTIN_CODING_AGENTS.find((a) => a.id === id);
+  if (builtinAgent) {
+    logger.debug({ id, found: true, isBuiltin: true }, "Coding agent lookup");
+    return builtinAgent;
   }
 
-  // カスタムツールから検索
-  const config = await loadToolsConfig();
-  const customTool = config.customTools.find((t) => t.id === id);
-  logger.debug({ id, found: !!customTool, isBuiltin: false }, "Tool lookup");
-  return customTool;
+  // カスタムエージェントから検索
+  const config = await loadCodingAgentsConfig();
+  const customAgent = config.customCodingAgents.find((a) => a.id === id);
+  logger.debug(
+    { id, found: !!customAgent, isBuiltin: false },
+    "Coding agent lookup",
+  );
+  return customAgent;
 }
 
 /**
- * すべてのツール（ビルトイン+カスタム）を取得
+ * すべてのコーディングエージェント（ビルトイン+カスタム）を取得
  *
- * @returns AIToolConfigの配列
+ * @returns CodingAgentConfigの配列
  */
-export async function getAllTools(): Promise<AIToolConfig[]> {
-  const config = await loadToolsConfig();
+export async function getAllCodingAgents(): Promise<CodingAgentConfig[]> {
+  const config = await loadCodingAgentsConfig();
 
-  // ビルトインツールをAIToolConfig形式に変換
-  const builtinConfigs: AIToolConfig[] = BUILTIN_TOOLS.map((tool) => ({
-    id: tool.id,
-    displayName: tool.displayName,
-    ...(tool.icon ? { icon: tool.icon } : {}),
-    isBuiltin: true,
-  }));
+  // ビルトインエージェントをCodingAgentConfig形式に変換
+  const builtinConfigs: CodingAgentConfig[] = BUILTIN_CODING_AGENTS.map(
+    (agent) => ({
+      id: agent.id,
+      displayName: agent.displayName,
+      ...(agent.icon ? { icon: agent.icon } : {}),
+      isBuiltin: true,
+    }),
+  );
 
-  // カスタムツールをAIToolConfig形式に変換
-  const customConfigs: AIToolConfig[] = config.customTools.map((tool) => ({
-    id: tool.id,
-    displayName: tool.displayName,
-    ...(tool.icon ? { icon: tool.icon } : {}),
-    isBuiltin: false,
-    customConfig: tool,
-  }));
+  // カスタムエージェントをCodingAgentConfig形式に変換
+  const customConfigs: CodingAgentConfig[] = config.customCodingAgents.map(
+    (agent) => ({
+      id: agent.id,
+      displayName: agent.displayName,
+      ...(agent.icon ? { icon: agent.icon } : {}),
+      isBuiltin: false,
+      customConfig: agent,
+    }),
+  );
 
   // ビルトイン + カスタム の順で統合
   return [...builtinConfigs, ...customConfigs];

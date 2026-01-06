@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { SelectionResult } from "../../src/cli/ui/components/App.js";
-import type { ExecutionMode } from "../../src/cli/ui/components/screens/ExecutionModeSelectorScreen.js";
+import type { SelectionResult } from "../../src/cli/ui/App.solid.js";
+import type { ExecutionMode } from "../../src/cli/ui/App.solid.js";
 
 // Vitest shim for environments lacking vi.hoisted (e.g., bun)
 if (typeof (vi as Record<string, unknown>).hoisted !== "function") {
@@ -15,7 +15,7 @@ const {
   getBranchDivergenceStatusesMock,
   worktreeExistsMock,
   getRepositoryRootMock,
-  getToolByIdMock,
+  getCodingAgentByIdMock,
   getSharedEnvironmentMock,
   installDependenciesMock,
   launchCodexCLIMock,
@@ -34,7 +34,13 @@ const {
   getBranchDivergenceStatusesMock: vi.fn(async () => []),
   worktreeExistsMock: vi.fn(async () => null),
   getRepositoryRootMock: vi.fn(async () => "/repo"),
-  getToolByIdMock: vi.fn(() => ({ id: "codex-cli", displayName: "Codex" })),
+  getCodingAgentByIdMock: vi.fn(async () => ({
+    id: "codex-cli",
+    displayName: "Codex",
+    type: "command",
+    command: "codex",
+    modeArgs: { normal: [] },
+  })),
   getSharedEnvironmentMock: vi.fn(async () => ({})),
   installDependenciesMock: vi.fn(async () => ({
     skipped: false as const,
@@ -140,7 +146,7 @@ vi.mock("../../src/services/dependency-installer.js", () => ({
 }));
 
 vi.mock("../../src/config/tools.js", () => ({
-  getToolById: getToolByIdMock,
+  getCodingAgentById: getCodingAgentByIdMock,
   getSharedEnvironment: getSharedEnvironmentMock,
 }));
 
@@ -198,7 +204,7 @@ beforeEach(() => {
   getBranchDivergenceStatusesMock.mockClear();
   worktreeExistsMock.mockClear();
   getRepositoryRootMock.mockClear();
-  getToolByIdMock.mockClear();
+  getCodingAgentByIdMock.mockClear();
   getSharedEnvironmentMock.mockClear();
   installDependenciesMock.mockClear();
   launchCodexCLIMock.mockClear();

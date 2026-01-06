@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { SelectionResult } from "../../src/cli/ui/components/App.js";
-import type { ExecutionMode } from "../../src/cli/ui/components/screens/ExecutionModeSelectorScreen.js";
+import type { SelectionResult } from "../../src/cli/ui/App.solid.js";
+import type { ExecutionMode } from "../../src/cli/ui/App.solid.js";
 
 const {
   execaMock,
@@ -134,13 +134,16 @@ vi.mock("../../src/codex.js", () => ({
 }));
 
 vi.mock("../../src/launcher.js", () => ({
-  launchCustomAITool: vi.fn(async () => undefined),
+  launchCodingAgent: vi.fn(async () => undefined),
 }));
 
 vi.mock("../../src/config/tools.js", () => ({
-  getToolById: vi.fn(() => ({
+  getCodingAgentById: vi.fn(async () => ({
     id: "claude-code",
     displayName: "Claude Code",
+    type: "bunx",
+    command: "@anthropic-ai/claude-code@latest",
+    modeArgs: { normal: [], continue: ["-c"], resume: ["-r"] },
   })),
   getSharedEnvironment: vi.fn(async () => ({})),
 }));
@@ -279,7 +282,7 @@ describe("handleAIToolWorkflow - protected branches", () => {
 });
 
 describe("handleAIToolWorkflow - divergence handling", () => {
-  it("skips AI tool launch when divergence is detected", async () => {
+  it("continues AI tool launch when divergence is detected", async () => {
     getBranchDivergenceStatusesMock.mockResolvedValue([
       { branch: "feature/diverged", remoteAhead: 7, localAhead: 2 },
     ]);
@@ -298,8 +301,32 @@ describe("handleAIToolWorkflow - divergence handling", () => {
 
     expect(fetchAllRemotesMock).toHaveBeenCalled();
     expect(pullFastForwardMock).toHaveBeenCalledWith("/repo");
-    expect(launchClaudeCodeMock).not.toHaveBeenCalled();
-    expect(saveSessionMock).not.toHaveBeenCalled();
+    expect(launchClaudeCodeMock).toHaveBeenCalled();
+    expect(saveSessionMock).toHaveBeenCalled();
+  });
+
+  it("continues AI tool launch when divergence check fails", async () => {
+    getBranchDivergenceStatusesMock.mockRejectedValueOnce(
+      new Error("divergence check failed"),
+    );
+
+    const selection: SelectionResult = {
+      branch: "feature/divergence-error",
+      displayName: "feature/divergence-error",
+      branchType: "local",
+      tool: "claude-code",
+      mode: "normal" as ExecutionMode,
+      skipPermissions: false,
+      model: "sonnet",
+    };
+
+    await handleAIToolWorkflow(selection);
+
+    expect(fetchAllRemotesMock).toHaveBeenCalled();
+    expect(pullFastForwardMock).toHaveBeenCalledWith("/repo");
+    expect(launchClaudeCodeMock).toHaveBeenCalled();
+    expect(saveSessionMock).toHaveBeenCalled();
+    expect(waitForUserAcknowledgementMock).not.toHaveBeenCalled();
   });
 });
 

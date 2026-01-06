@@ -4,11 +4,10 @@ import {
   formatBranchItems,
 } from "../../utils/branchFormatter.js";
 import type { BranchInfo } from "../../types.js";
-import stringWidth from "string-width";
 
 describe("branchFormatter", () => {
   describe("formatBranchItem", () => {
-    it("should format a main branch", () => {
+    it("should format a branch without icons", () => {
       const branchInfo: BranchInfo = {
         name: "main",
         type: "local",
@@ -22,27 +21,10 @@ describe("branchFormatter", () => {
       expect(result.type).toBe("local");
       expect(result.branchType).toBe("main");
       expect(result.isCurrent).toBe(true);
-      expect(result.icons).toContain("⚡"); // main icon
-      expect(result.icons).toContain("👉"); // current icon
-      expect(result.label).toContain("main");
+      expect(result.icons).toHaveLength(0);
+      expect(result.label).toBe("main");
       expect(result.value).toBe("main");
       expect(result.hasChanges).toBe(false);
-    });
-
-    it("should format a feature branch", () => {
-      const branchInfo: BranchInfo = {
-        name: "feature/new-ui",
-        type: "local",
-        branchType: "feature",
-        isCurrent: false,
-      };
-
-      const result = formatBranchItem(branchInfo);
-
-      expect(result.icons).toContain("✨"); // feature icon
-      expect(result.icons).not.toContain("👉"); // not current
-      expect(result.label).toContain("feature/new-ui");
-      expect(result.value).toBe("feature/new-ui");
     });
 
     it("should include last tool usage label when present", () => {
@@ -68,20 +50,6 @@ describe("branchFormatter", () => {
       expect(result.lastToolUsageLabel).toContain("2025-11-26");
     });
 
-    it("should format a bugfix branch", () => {
-      const branchInfo: BranchInfo = {
-        name: "bugfix/security-issue",
-        type: "local",
-        branchType: "bugfix",
-        isCurrent: false,
-      };
-
-      const result = formatBranchItem(branchInfo);
-
-      expect(result.icons).toContain("🐛"); // bugfix icon
-      expect(result.label).toContain("bugfix/security-issue");
-    });
-
     it("should set lastToolUsageLabel to null when no usage exists", () => {
       const branchInfo: BranchInfo = {
         name: "feature/no-usage",
@@ -95,34 +63,6 @@ describe("branchFormatter", () => {
       expect(result.lastToolUsageLabel).toBeNull();
     });
 
-    it("should format a hotfix branch", () => {
-      const branchInfo: BranchInfo = {
-        name: "hotfix/critical-bug",
-        type: "local",
-        branchType: "hotfix",
-        isCurrent: false,
-      };
-
-      const result = formatBranchItem(branchInfo);
-
-      expect(result.icons).toContain("🔥"); // hotfix icon
-      expect(result.label).toContain("hotfix/critical-bug");
-    });
-
-    it("should format a release branch", () => {
-      const branchInfo: BranchInfo = {
-        name: "release/v1.0.0",
-        type: "local",
-        branchType: "release",
-        isCurrent: false,
-      };
-
-      const result = formatBranchItem(branchInfo);
-
-      expect(result.icons).toContain("🚀"); // release icon
-      expect(result.label).toContain("release/v1.0.0");
-    });
-
     it("should format a remote branch", () => {
       const branchInfo: BranchInfo = {
         name: "origin/main",
@@ -133,64 +73,12 @@ describe("branchFormatter", () => {
 
       const result = formatBranchItem(branchInfo);
 
-      expect(result.icons).toContain("⚡"); // main icon
-      expect(result.icons).toContain("☁"); // remote icon
       expect(result.type).toBe("remote");
-      expect(result.label).toContain("origin/main");
+      expect(result.label).toBe("origin/main");
+      expect(result.remoteName).toBe("origin/main");
     });
 
-    it("should align branch names regardless of remote icon presence", () => {
-      const localBranch: BranchInfo = {
-        name: "feature/foo",
-        type: "local",
-        branchType: "feature",
-        isCurrent: false,
-      };
-      const remoteBranch: BranchInfo = {
-        name: "origin/feature/foo",
-        type: "remote",
-        branchType: "feature",
-        isCurrent: false,
-      };
-
-      const localResult = formatBranchItem(localBranch);
-      const remoteResult = formatBranchItem(remoteBranch);
-
-      // Both should have the branch name in the label
-      expect(localResult.label).toContain("feature/foo");
-      expect(remoteResult.label).toContain("origin/feature/foo");
-
-      // Remote branch should have ☁️ marker for remote-only status
-      expect(remoteResult.label).toMatch(/☁️/);
-    });
-
-    it("should keep icon columns fixed-width when using wide emoji icons", () => {
-      const branchInfo: BranchInfo = {
-        name: "feature/wide-icons",
-        type: "remote",
-        branchType: "feature",
-        isCurrent: false,
-        hasUnpushedCommits: true,
-        worktree: {
-          path: "/path/to/worktree",
-          locked: false,
-          prunable: false,
-          isAccessible: true,
-        },
-      };
-
-      const result = formatBranchItem(branchInfo, { hasChanges: true });
-
-      // Icon columns: [Type][Worktree][Changes][Remote] = 4 * 2 = 8
-      // Sync column: 6 (fixed width for icon + up to 4 digits + space)
-      // Total: 14
-      const iconBlockWidth =
-        stringWidth(result.label) - stringWidth(branchInfo.name);
-
-      expect(iconBlockWidth).toBe(14);
-    });
-
-    it("should include worktree status icon when provided", () => {
+    it("should set worktree status when provided", () => {
       const branchInfo: BranchInfo = {
         name: "feature/test",
         type: "local",
@@ -205,7 +93,6 @@ describe("branchFormatter", () => {
 
       const result = formatBranchItem(branchInfo);
 
-      expect(result.icons).toContain("🟢"); // active worktree icon
       expect(result.worktreeStatus).toBe("active");
     });
 
@@ -219,53 +106,7 @@ describe("branchFormatter", () => {
 
       const result = formatBranchItem(branchInfo, { hasChanges: true });
 
-      expect(result.icons).toContain("💾"); // changes icon
       expect(result.hasChanges).toBe(true);
-    });
-
-    it("should show unpushed commits icon", () => {
-      const branchInfo: BranchInfo = {
-        name: "feature/unpushed",
-        type: "local",
-        branchType: "feature",
-        isCurrent: false,
-        hasUnpushedCommits: true,
-      };
-
-      const result = formatBranchItem(branchInfo);
-
-      expect(result.icons).toContain("📤"); // unpushed icon
-      expect(result.label).toContain("📤");
-    });
-
-    it("should show open PR icon", () => {
-      const branchInfo: BranchInfo = {
-        name: "feature/pr-open",
-        type: "local",
-        branchType: "feature",
-        isCurrent: false,
-        openPR: { number: 123, title: "Test PR" },
-      };
-
-      const result = formatBranchItem(branchInfo);
-
-      expect(result.icons).toContain("🔃"); // open PR icon
-      expect(result.label).toContain("🔃");
-    });
-
-    it("should show merged PR icon", () => {
-      const branchInfo: BranchInfo = {
-        name: "feature/pr-merged",
-        type: "local",
-        branchType: "feature",
-        isCurrent: false,
-        mergedPR: { number: 456, mergedAt: "2025-10-31T00:00:00Z" },
-      };
-
-      const result = formatBranchItem(branchInfo);
-
-      expect(result.icons).toContain("✅"); // merged PR icon
-      expect(result.label).toContain("✅");
     });
 
     it("should show warning icon for inaccessible worktree", () => {
@@ -284,130 +125,7 @@ describe("branchFormatter", () => {
 
       const result = formatBranchItem(branchInfo);
 
-      expect(result.icons).toContain("🔴"); // inaccessible worktree icon
-      expect(result.icons).toContain("⚠️"); // warning icon
       expect(result.worktreeStatus).toBe("inaccessible");
-    });
-
-    it("should prioritize hasChanges over unpushed commits", () => {
-      const branchInfo: BranchInfo = {
-        name: "feature/both",
-        type: "local",
-        branchType: "feature",
-        isCurrent: false,
-        hasUnpushedCommits: true,
-      };
-
-      const resultWithChanges = formatBranchItem(branchInfo, {
-        hasChanges: true,
-      });
-      expect(resultWithChanges.icons).toContain("💾");
-      expect(resultWithChanges.icons).not.toContain("📤");
-
-      const resultWithoutChanges = formatBranchItem(branchInfo);
-      expect(resultWithoutChanges.icons).toContain("📤");
-      expect(resultWithoutChanges.icons).not.toContain("💾");
-    });
-
-    it("should prioritize unpushed over open PR", () => {
-      const branchInfo: BranchInfo = {
-        name: "feature/unpushed-pr",
-        type: "local",
-        branchType: "feature",
-        isCurrent: false,
-        hasUnpushedCommits: true,
-        openPR: { number: 123, title: "Test PR" },
-      };
-
-      const result = formatBranchItem(branchInfo);
-
-      expect(result.icons).toContain("📤");
-      expect(result.icons).not.toContain("🔃");
-    });
-
-    it("should prioritize open PR over merged PR", () => {
-      const branchInfo: BranchInfo = {
-        name: "feature/both-pr",
-        type: "local",
-        branchType: "feature",
-        isCurrent: false,
-        openPR: { number: 123, title: "Test PR" },
-        mergedPR: { number: 456, mergedAt: "2025-10-31T00:00:00Z" },
-      };
-
-      const result = formatBranchItem(branchInfo);
-
-      expect(result.icons).toContain("🔃");
-      expect(result.icons).not.toContain("✅");
-    });
-
-    it("should prioritize merged PR over warning", () => {
-      const branchInfo: BranchInfo = {
-        name: "feature/merged-broken",
-        type: "local",
-        branchType: "feature",
-        isCurrent: false,
-        mergedPR: { number: 456, mergedAt: "2025-10-31T00:00:00Z" },
-        worktree: {
-          path: "/path/to/worktree",
-          locked: false,
-          prunable: false,
-          isAccessible: false,
-        },
-      };
-
-      const result = formatBranchItem(branchInfo);
-
-      expect(result.icons).toContain("✅");
-      expect(result.icons).not.toContain("⚠️");
-    });
-
-    it("should prioritize warning over current branch icon", () => {
-      const branchInfo: BranchInfo = {
-        name: "feature/current-broken",
-        type: "local",
-        branchType: "feature",
-        isCurrent: true,
-        worktree: {
-          path: "/path/to/worktree",
-          locked: false,
-          prunable: false,
-          isAccessible: false,
-        },
-      };
-
-      const result = formatBranchItem(branchInfo);
-
-      expect(result.icons).toContain("⚠️");
-      expect(result.icons).not.toContain("👉");
-    });
-
-    it("should handle develop branch", () => {
-      const branchInfo: BranchInfo = {
-        name: "develop",
-        type: "local",
-        branchType: "develop",
-        isCurrent: false,
-      };
-
-      const result = formatBranchItem(branchInfo);
-
-      expect(result.icons).toContain("⚡"); // develop icon (same as main)
-      expect(result.label).toContain("develop");
-    });
-
-    it("should handle other branch type", () => {
-      const branchInfo: BranchInfo = {
-        name: "custom-branch",
-        type: "local",
-        branchType: "other",
-        isCurrent: false,
-      };
-
-      const result = formatBranchItem(branchInfo);
-
-      expect(result.icons).toContain("📌"); // other icon
-      expect(result.label).toContain("custom-branch");
     });
   });
 
@@ -847,6 +565,111 @@ describe("branchFormatter", () => {
       expect(results[0].name).toBe("feature/test");
       expect(results[1].name).toBe("hotfix/urgent");
       expect(results[2].name).toBe("release/v1.0");
+    });
+
+    it("should sort by latest activity time (max of git commit and tool usage)", () => {
+      const branches: BranchInfo[] = [
+        {
+          name: "feature/git-newer",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+          latestCommitTimestamp: 1_800_000_000, // git commit is newer
+          lastToolUsage: {
+            branch: "feature/git-newer",
+            worktreePath: "/tmp/wt1",
+            toolId: "claude-code",
+            toolLabel: "Claude",
+            timestamp: 1_700_000_000_000, // 1_700_000_000 seconds (older)
+          },
+        },
+        {
+          name: "feature/tool-newer",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+          latestCommitTimestamp: 1_700_000_000, // git commit is older
+          lastToolUsage: {
+            branch: "feature/tool-newer",
+            worktreePath: "/tmp/wt2",
+            toolId: "claude-code",
+            toolLabel: "Claude",
+            timestamp: 1_800_000_000_000, // 1_800_000_000 seconds (newer)
+          },
+        },
+      ];
+
+      const results = formatBranchItems(branches);
+
+      // Both have same latest activity time (1_800_000_000), so alphabetical
+      // feature/git-newer: max(1_800_000_000, 1_700_000_000) = 1_800_000_000
+      // feature/tool-newer: max(1_700_000_000, 1_800_000_000) = 1_800_000_000
+      expect(results[0].name).toBe("feature/git-newer");
+      expect(results[1].name).toBe("feature/tool-newer");
+    });
+
+    it("should prioritize branch with tool usage over branch with only git commit when tool is newer", () => {
+      const branches: BranchInfo[] = [
+        {
+          name: "feature/git-only",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+          latestCommitTimestamp: 1_700_000_000,
+        },
+        {
+          name: "feature/with-tool",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+          latestCommitTimestamp: 1_600_000_000,
+          lastToolUsage: {
+            branch: "feature/with-tool",
+            worktreePath: "/tmp/wt",
+            toolId: "claude-code",
+            toolLabel: "Claude",
+            timestamp: 1_800_000_000_000, // 1_800_000_000 seconds (newest)
+          },
+        },
+      ];
+
+      const results = formatBranchItems(branches);
+
+      // feature/with-tool has newer activity (tool usage at 1_800_000_000)
+      expect(results[0].name).toBe("feature/with-tool");
+      expect(results[1].name).toBe("feature/git-only");
+    });
+
+    it("should prioritize branch with newer git commit over branch with older tool usage", () => {
+      const branches: BranchInfo[] = [
+        {
+          name: "feature/old-tool",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+          latestCommitTimestamp: 1_600_000_000,
+          lastToolUsage: {
+            branch: "feature/old-tool",
+            worktreePath: "/tmp/wt",
+            toolId: "claude-code",
+            toolLabel: "Claude",
+            timestamp: 1_650_000_000_000, // 1_650_000_000 seconds
+          },
+        },
+        {
+          name: "feature/new-git",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+          latestCommitTimestamp: 1_800_000_000, // newest
+        },
+      ];
+
+      const results = formatBranchItems(branches);
+
+      // feature/new-git has newer activity (git commit at 1_800_000_000)
+      expect(results[0].name).toBe("feature/new-git");
+      expect(results[1].name).toBe("feature/old-tool");
     });
   });
 });

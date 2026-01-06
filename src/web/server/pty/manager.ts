@@ -1,29 +1,29 @@
 /**
  * PTY Manager
  *
- * AI Toolセッションの疑似端末(PTY)を管理します。
+ * コーディングエージェントセッションの疑似端末(PTY)を管理します。
  * node-ptyを使用してプロセスをスポーンし、WebSocketを通じて入出力を中継します。
  */
 
 import * as pty from "node-pty";
 import type { IPty } from "node-pty";
 import { randomUUID } from "node:crypto";
-import type { AIToolSession } from "../../../types/api.js";
+import type { CodingAgentSession } from "../../../types/api.js";
 import {
   resolveClaudeCommand,
   resolveCodexCommand,
-  resolveCustomToolCommand,
-  AIToolResolutionError,
+  resolveCodingAgentCommand,
+  CodingAgentResolutionError,
   type ResolvedCommand,
-} from "../../../services/aiToolResolver.js";
-import { loadToolsConfig } from "../../../config/tools.js";
+} from "../../../services/codingAgentResolver.js";
+import { loadCodingAgentsConfig } from "../../../config/tools.js";
 import { createLogger } from "../../../logging/logger.js";
 
 const logger = createLogger({ category: "pty" });
 
 export interface PTYInstance {
   ptyProcess: IPty;
-  session: AIToolSession;
+  session: CodingAgentSession;
 }
 
 /**
@@ -48,7 +48,7 @@ export class PTYManager {
       extraArgs?: string[];
       customToolId?: string | null;
     } = {},
-  ): Promise<{ sessionId: string; session: AIToolSession }> {
+  ): Promise<{ sessionId: string; session: CodingAgentSession }> {
     const cols = options.cols ?? 80;
     const rows = options.rows ?? 24;
     const toolName = options.toolName ?? null;
@@ -136,10 +136,10 @@ export class PTYManager {
       "PTY process spawned",
     );
 
-    const session: AIToolSession = {
+    const session: CodingAgentSession = {
       sessionId,
-      toolType,
-      toolName: options.customToolId ?? toolName ?? null,
+      agentType: toolType,
+      agentName: options.customToolId ?? toolName ?? null,
       mode,
       worktreePath,
       ptyPid: ptyProcess.pid,
@@ -190,7 +190,7 @@ export class PTYManager {
    */
   public updateStatus(
     sessionId: string,
-    status: AIToolSession["status"],
+    status: CodingAgentSession["status"],
     exitCode?: number,
     errorMessage?: string,
   ): boolean {
@@ -217,7 +217,7 @@ export class PTYManager {
   /**
    * すべてのセッション一覧を取得
    */
-  public list(): AIToolSession[] {
+  public list(): CodingAgentSession[] {
     return Array.from(this.instances.values()).map((inst) => inst.session);
   }
 
@@ -233,16 +233,16 @@ export class PTYManager {
     },
   ): Promise<ResolvedCommand> {
     if (toolType === "custom") {
-      const toolId = options.customToolId ?? options.toolName;
-      if (!toolId) {
-        throw new AIToolResolutionError(
+      const agentId = options.customToolId ?? options.toolName;
+      if (!agentId) {
+        throw new CodingAgentResolutionError(
           "COMMAND_NOT_FOUND",
-          "Custom tool identifier is required to start a session.",
+          "Coding agent identifier is required to start a session.",
         );
       }
 
-      return resolveCustomToolCommand({
-        toolId,
+      return resolveCodingAgentCommand({
+        agentId,
         mode,
         ...(options.skipPermissions !== undefined
           ? { skipPermissions: options.skipPermissions }
@@ -285,7 +285,7 @@ export class PTYManager {
   }
 
   private async loadSharedEnv(): Promise<Record<string, string>> {
-    const config = await loadToolsConfig();
+    const config = await loadCodingAgentsConfig();
     const sharedEnv = { ...(config.env ?? {}) };
     logger.debug(
       { keyCount: Object.keys(sharedEnv).length },

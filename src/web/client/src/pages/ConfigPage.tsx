@@ -1,15 +1,15 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import type {
-  CustomAITool,
+  ApiCodingAgent,
   EnvironmentVariable,
 } from "../../../../types/api.js";
 import { useConfig, useUpdateConfig } from "../hooks/useConfig";
-import { CustomToolList } from "../components/CustomToolList";
+import { CustomCodingAgentList } from "../components/CustomCodingAgentList";
 import {
-  CustomToolForm,
-  type CustomToolFormValue,
-} from "../components/CustomToolForm";
+  CustomCodingAgentForm,
+  type CustomCodingAgentFormValue,
+} from "../components/CustomCodingAgentForm";
 import {
   EnvironmentEditor,
   type EnvEntry,
@@ -31,8 +31,8 @@ const ENV_VALUE_MAX = 500;
 export function ConfigPage() {
   const { data, isLoading, error } = useConfig();
   const updateConfig = useUpdateConfig();
-  const [tools, setTools] = useState<CustomAITool[]>([]);
-  const [editingTool, setEditingTool] = useState<CustomAITool | undefined>(
+  const [agents, setAgents] = useState<ApiCodingAgent[]>([]);
+  const [editingAgent, setEditingAgent] = useState<ApiCodingAgent | undefined>(
     undefined,
   );
   const [banner, setBanner] = useState<BannerState | null>(null);
@@ -40,36 +40,36 @@ export function ConfigPage() {
   const [envEntries, setEnvEntries] = useState<EnvEntry[]>([]);
 
   useEffect(() => {
-    if (data?.tools) setTools(data.tools);
+    if (data?.codingAgents) setAgents(data.codingAgents);
     if (data) setEnvEntries(entriesFromVariables(data.env));
   }, [data]);
 
-  const sortedTools = useMemo(() => {
-    return [...tools].sort((a, b) =>
+  const sortedAgents = useMemo(() => {
+    return [...agents].sort((a, b) =>
       a.displayName.localeCompare(b.displayName, "ja"),
     );
-  }, [tools]);
+  }, [agents]);
 
-  const handleEdit = (tool: CustomAITool) => {
-    setEditingTool(tool);
+  const handleEdit = (agent: ApiCodingAgent) => {
+    setEditingAgent(agent);
     setIsCreating(false);
   };
 
-  const handleDelete = (tool: CustomAITool) => {
-    if (!window.confirm(`${tool.displayName} を削除しますか？`)) return;
-    const next = tools.filter((t) => t.id !== tool.id);
-    persistConfig(next, envEntries, `${tool.displayName} を削除しました。`);
+  const handleDelete = (agent: ApiCodingAgent) => {
+    if (!window.confirm(`${agent.displayName} を削除しますか？`)) return;
+    const next = agents.filter((a) => a.id !== agent.id);
+    persistConfig(next, envEntries, `${agent.displayName} を削除しました。`);
   };
 
   const handleCreate = () => {
-    setEditingTool(undefined);
+    setEditingAgent(undefined);
     setIsCreating(true);
   };
 
-  const handleFormSubmit = (value: CustomToolFormValue) => {
+  const handleFormSubmit = (value: CustomCodingAgentFormValue) => {
     const now = new Date().toISOString();
-    const existing = tools.find((tool) => tool.id === value.id);
-    const nextTool: CustomAITool = {
+    const existing = agents.find((agent) => agent.id === value.id);
+    const nextAgent: ApiCodingAgent = {
       id: value.id,
       displayName: value.displayName,
       icon: value.icon ?? null,
@@ -89,21 +89,21 @@ export function ConfigPage() {
     };
 
     const nextList = existing
-      ? tools.map((tool) => (tool.id === nextTool.id ? nextTool : tool))
-      : [...tools, nextTool];
+      ? agents.map((agent) => (agent.id === nextAgent.id ? nextAgent : agent))
+      : [...agents, nextAgent];
 
     persistConfig(
       nextList,
       envEntries,
-      `${nextTool.displayName} を保存しました。`,
+      `${nextAgent.displayName} を保存しました。`,
     );
   };
 
   const persistConfig = (
-    nextTools: CustomAITool[],
+    nextAgents: ApiCodingAgent[],
     nextEnvEntries: EnvEntry[],
     successMessage: string,
-    options?: { resetToolForm?: boolean },
+    options?: { resetForm?: boolean },
   ) => {
     let envPayload: EnvironmentVariable[];
     try {
@@ -116,13 +116,17 @@ export function ConfigPage() {
 
     const nextVersion = data?.version ?? "1.0.0";
     updateConfig
-      .mutateAsync({ version: nextVersion, tools: nextTools, env: envPayload })
+      .mutateAsync({
+        version: nextVersion,
+        codingAgents: nextAgents,
+        env: envPayload,
+      })
       .then((response) => {
-        setTools(response.tools);
+        setAgents(response.codingAgents);
         setEnvEntries(entriesFromVariables(response.env));
         setBanner({ type: "success", message: successMessage });
-        if (options?.resetToolForm ?? true) {
-          setEditingTool(undefined);
+        if (options?.resetForm ?? true) {
+          setEditingAgent(undefined);
           setIsCreating(false);
         }
       })
@@ -154,15 +158,15 @@ export function ConfigPage() {
   const handleEnvRemove = (id: string) =>
     setEnvEntries((prev) => prev.filter((e) => e.id !== id));
   const handleEnvSave = () =>
-    persistConfig(tools, envEntries, "環境変数を保存しました。", {
-      resetToolForm: false,
+    persistConfig(agents, envEntries, "環境変数を保存しました。", {
+      resetForm: false,
     });
   const handleCancel = () => {
-    setEditingTool(undefined);
+    setEditingAgent(undefined);
     setIsCreating(false);
   };
 
-  const activeFormTool = isCreating ? undefined : editingTool;
+  const activeFormAgent = isCreating ? undefined : editingAgent;
 
   // Loading state
   if (isLoading) {
@@ -170,7 +174,7 @@ export function ConfigPage() {
       <div className="min-h-screen bg-background">
         <PageHeader
           eyebrow="CONFIGURATION"
-          title="カスタムAIツール設定"
+          title="Custom Coding Agent"
           subtitle="読み込み中..."
         />
         <main className="mx-auto max-w-7xl px-6 py-8">
@@ -207,15 +211,15 @@ export function ConfigPage() {
     <div className="min-h-screen bg-background">
       <PageHeader
         eyebrow="CONFIGURATION"
-        title="カスタムAIツール設定"
-        subtitle="tools.json を編集して、独自のAIツールをCLI / Web UI 両方から利用できます。"
+        title="Custom Coding Agent"
+        subtitle="tools.json を編集して、独自の Coding Agent を CLI / Web UI 両方から利用できます。"
       >
         <div className="mt-4 flex flex-wrap gap-2">
           <Button variant="ghost" size="sm" asChild>
             <Link to="/">← ブランチ一覧</Link>
           </Button>
           <Button variant="secondary" onClick={handleCreate}>
-            カスタムツールを追加
+            Coding Agent を追加
           </Button>
         </div>
       </PageHeader>
@@ -251,8 +255,8 @@ export function ConfigPage() {
             </p>
             <h3 className="mt-1 text-lg font-semibold">共有環境変数</h3>
             <p className="mt-2 text-sm text-muted-foreground">
-              Web UI で起動する AI
-              ツールはここに定義された環境変数を自動的に引き継ぎます。
+              Web UI で起動する Coding Agent
+              はここに定義された環境変数を自動的に引き継ぎます。
             </p>
           </CardHeader>
           <CardContent>
@@ -267,33 +271,35 @@ export function ConfigPage() {
           </CardContent>
         </Card>
 
-        {/* Tool List */}
+        {/* Coding Agent List */}
         <Card>
           <CardHeader className="pb-3">
             <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-              Registered Tools
+              Registered Coding Agents
             </p>
-            <h3 className="mt-1 text-lg font-semibold">登録済みツール</h3>
+            <h3 className="mt-1 text-lg font-semibold">
+              登録済み Coding Agent
+            </h3>
             <p className="mt-2 text-sm text-muted-foreground">
-              CLI と Web UI は同じ設定を参照します。更新すると
-              ~/.claude-worktree/tools.json に保存されます。
+              CLI と Web UI は同じ設定を参照します。更新すると ~/.gwt/tools.json
+              に保存されます。
             </p>
           </CardHeader>
           <CardContent>
-            <CustomToolList
-              tools={sortedTools}
+            <CustomCodingAgentList
+              agents={sortedAgents}
               onEdit={handleEdit}
               onDelete={handleDelete}
             />
           </CardContent>
         </Card>
 
-        {/* Tool Form */}
-        {(isCreating || editingTool) && (
+        {/* Coding Agent Form */}
+        {(isCreating || editingAgent) && (
           <Card>
             <CardContent className="pt-6">
-              <CustomToolForm
-                {...(activeFormTool ? { initialValue: activeFormTool } : {})}
+              <CustomCodingAgentForm
+                {...(activeFormAgent ? { initialValue: activeFormAgent } : {})}
                 onSubmit={handleFormSubmit}
                 onCancel={handleCancel}
                 isSaving={updateConfig.isPending}

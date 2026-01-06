@@ -1,7 +1,7 @@
 # 実装計画: Web UI 環境変数編集機能
 
 **仕様ID**: `SPEC-8adfd99e` | **日付**: 2025-11-11 | **仕様書**: [spec.md](./spec.md)
-**概要**: Web UI から `~/.claude-worktree/tools.json` 内のカスタムAIツール環境変数を安全に閲覧・編集できるようにし、CLI との挙動を完全に一致させる。
+**概要**: Web UI から `~/.gwt/tools.json` 内のカスタムAIツール環境変数を安全に閲覧・編集できるようにし、CLI との挙動を完全に一致させる。
 
 ## 1. 前提・対象範囲
 
@@ -25,7 +25,7 @@
 
 1. `src/web/server/routes/config.ts`
    - `GET /api/config`: 既存の空配列レスポンスを置き換え、`src/config/tools.ts` の `loadToolsConfig()` を呼び `customTools` を返す。
-   - `PUT /api/config`: 受信した `UpdateConfigRequest` を `validateToolsConfig()` で検証後、`~/.claude-worktree/tools.json` へ保存。保存前後で `updatedAt` を比較し、競合（If-Match 代替）として 409 を返す仕組みを追加。
+   - `PUT /api/config`: 受信した `UpdateConfigRequest` を `validateToolsConfig()` で検証後、`~/.gwt/tools.json` へ保存。保存前後で `updatedAt` を比較し、競合（If-Match 代替）として 409 を返す仕組みを追加。
    - 新規ヘルパー `saveToolsConfig(config: ToolsConfig)` を `src/config/tools.ts` に追加して reuse。
    - 例外ハンドリング時はログへ `***masked***` を出力し、HTTP レスポンスには一般化したエラー文言を返す。
 

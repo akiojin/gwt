@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import path from "node:path";
 import * as worktree from "../../src/worktree";
 
 // Mock execa
@@ -134,19 +135,31 @@ branch refs/heads/feature/test
       const repoRoot = "/path/to/repo";
       const branchName = "feature/user-auth";
 
-      const path = await worktree.generateWorktreePath(repoRoot, branchName);
+      const worktreePath = await worktree.generateWorktreePath(
+        repoRoot,
+        branchName,
+      );
 
-      expect(path).toBe("/path/to/repo/.worktrees/feature-user-auth");
+      expect(worktreePath).toBe(
+        path.join(repoRoot, ".worktrees", "feature-user-auth"),
+      );
     });
 
     it("should sanitize special characters in branch name", async () => {
       const repoRoot = "/path/to/repo";
       const branchName = "feature/user:auth*with?special<chars>";
 
-      const path = await worktree.generateWorktreePath(repoRoot, branchName);
+      const worktreePath = await worktree.generateWorktreePath(
+        repoRoot,
+        branchName,
+      );
 
-      expect(path).toBe(
-        "/path/to/repo/.worktrees/feature-user-auth-with-special-chars-",
+      expect(worktreePath).toBe(
+        path.join(
+          repoRoot,
+          ".worktrees",
+          "feature-user-auth-with-special-chars-",
+        ),
       );
     });
 

@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import * as git from "../../src/git";
 import * as worktree from "../../src/worktree";
+import { existsSync } from "node:fs";
+import { mkdir, lstat, readFile, rm, writeFile } from "node:fs/promises";
 
 // Mock execa
 vi.mock("execa", () => ({
@@ -8,37 +10,54 @@ vi.mock("execa", () => ({
 }));
 
 vi.mock("node:fs", () => ({
-  existsSync: vi.fn(() => true),
+  existsSync: vi.fn(() => false),
 }));
 
-const mkdirMock = vi.hoisted(() => vi.fn(async () => undefined));
-
-vi.mock("node:fs/promises", async () => {
-  const actual =
-    await vi.importActual<typeof import("node:fs/promises")>(
-      "node:fs/promises",
-    );
-
-  const mocked = {
-    ...actual,
-    mkdir: mkdirMock,
-  };
+vi.mock("node:fs/promises", () => {
+  const mkdir = vi.fn(async () => undefined);
+  const lstat = vi.fn();
+  const readFile = vi.fn();
+  const rm = vi.fn(async () => undefined);
+  const writeFile = vi.fn(async () => undefined);
 
   return {
-    ...mocked,
+    mkdir,
+    lstat,
+    readFile,
+    rm,
+    writeFile,
     default: {
-      ...actual.default,
-      mkdir: mkdirMock,
+      mkdir,
+      lstat,
+      readFile,
+      rm,
+      writeFile,
     },
   };
 });
 
 import { execa } from "execa";
 
+const execaMock = execa as unknown as ReturnType<typeof vi.fn>;
+const existsSyncMock = existsSync as unknown as ReturnType<typeof vi.fn>;
+const mkdirMock = mkdir as unknown as ReturnType<typeof vi.fn>;
+const lstatMock = lstat as unknown as ReturnType<typeof vi.fn>;
+const readFileMock = readFile as unknown as ReturnType<typeof vi.fn>;
+const rmMock = rm as unknown as ReturnType<typeof vi.fn>;
+const writeFileMock = writeFile as unknown as ReturnType<typeof vi.fn>;
+const normalizePath = (value: string) => value.replace(/\\/g, "/");
+
 describe("Integration: Branch Creation Workflow (T207)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mkdirMock.mockClear();
+    rmMock.mockClear();
+    writeFileMock.mockClear();
+    existsSyncMock.mockReset();
+    existsSyncMock.mockReturnValue(false);
+    lstatMock.mockReset();
+    readFileMock.mockReset();
+    readFileMock.mockResolvedValue("");
   });
 
   afterEach(() => {
@@ -47,8 +66,8 @@ describe("Integration: Branch Creation Workflow (T207)", () => {
 
   describe("Feature Branch Creation Flow", () => {
     it("should create feature branch and worktree", async () => {
-      (execa as any).mockImplementation(
-        async (command: string, args?: readonly string[]) => {
+      execaMock.mockImplementation(
+        async (_command: string, args?: readonly string[]) => {
           // createBranch
           if (args?.[0] === "checkout" && args?.[1] === "-b") {
             return { stdout: "", stderr: "", exitCode: 0 };
@@ -109,8 +128,8 @@ branch refs/heads/main
 
   describe("Hotfix Branch Creation Flow", () => {
     it("should create hotfix branch from main", async () => {
-      (execa as any).mockImplementation(
-        async (command: string, args?: readonly string[]) => {
+      execaMock.mockImplementation(
+        async (_command: string, args?: readonly string[]) => {
           if (args?.[0] === "checkout" && args?.[1] === "-b") {
             return { stdout: "", stderr: "", exitCode: 0 };
           }
@@ -172,7 +191,7 @@ branch refs/heads/main
         { name: "bugfix/login-error", baseBranch: "develop" },
       ];
 
-      (execa as any).mockResolvedValue({ stdout: "", stderr: "", exitCode: 0 });
+      execaMock.mockResolvedValue({ stdout: "", stderr: "", exitCode: 0 });
 
       for (const { name, baseBranch } of testCases) {
         await git.createBranch(name, baseBranch);
@@ -188,7 +207,7 @@ branch refs/heads/main
 
   describe("Error Handling", () => {
     it("should handle branch creation failure", async () => {
-      (execa as any).mockRejectedValue(new Error("Branch already exists"));
+      execaMock.mockRejectedValue(new Error("Branch already exists"));
 
       await expect(git.createBranch("feature/duplicate")).rejects.toThrow(
         "Failed to create branch",
@@ -197,8 +216,8 @@ branch refs/heads/main
 
     it("should handle worktree creation failure after branch creation", async () => {
       let callCount = 0;
-      (execa as any).mockImplementation(
-        async (command: string, args?: readonly string[]) => {
+      execaMock.mockImplementation(
+        async (_command: string, _args?: readonly string[]) => {
           callCount++;
           if (callCount === 1) {
             // First call: branch creation succeeds
@@ -224,6 +243,122 @@ branch refs/heads/main
 
       await expect(worktree.createWorktree(config)).rejects.toThrow(
         "Failed to create worktree",
+      );
+    });
+  });
+
+  describe("Stale Worktree Directory Recovery", () => {
+    it("should remove stale directory and retry worktree creation", async () => {
+      const repoRoot = "/path/to/repo";
+      const branchName = "feature/stale";
+      const worktreePath = await worktree.generateWorktreePath(
+        repoRoot,
+        branchName,
+      );
+
+      execaMock.mockImplementation(
+        async (_command: string, args?: readonly string[]) => {
+          if (args?.[0] === "worktree" && args[1] === "list") {
+            return {
+              stdout: `worktree ${repoRoot}
+HEAD abc1234
+branch refs/heads/main
+`,
+              stderr: "",
+              exitCode: 0,
+            };
+          }
+
+          if (args?.[0] === "worktree" && args[1] === "add") {
+            return { stdout: "", stderr: "", exitCode: 0 };
+          }
+
+          return { stdout: "", stderr: "", exitCode: 0 };
+        },
+      );
+
+      existsSyncMock.mockImplementation((targetPath: string) => {
+        const normalizedTarget = normalizePath(targetPath);
+        const normalizedWorktree = normalizePath(worktreePath);
+        if (normalizedTarget === normalizedWorktree) return true;
+        if (normalizedTarget === `${normalizedWorktree}/.git`) return false;
+        return false;
+      });
+
+      await worktree.createWorktree({
+        branchName,
+        worktreePath,
+        repoRoot,
+        isNewBranch: false,
+        baseBranch: "develop",
+      });
+
+      expect(rmMock).toHaveBeenCalledWith(worktreePath, {
+        recursive: true,
+        force: true,
+      });
+      expect(execa).toHaveBeenCalledWith(
+        "git",
+        expect.arrayContaining(["worktree", "add"]),
+      );
+    });
+
+    it("should abort when existing directory is not stale", async () => {
+      const repoRoot = "/path/to/repo";
+      const branchName = "feature/non-stale";
+      const worktreePath = await worktree.generateWorktreePath(
+        repoRoot,
+        branchName,
+      );
+
+      execaMock.mockImplementation(
+        async (_command: string, args?: readonly string[]) => {
+          if (args?.[0] === "worktree" && args[1] === "list") {
+            return {
+              stdout: `worktree ${repoRoot}
+HEAD abc1234
+branch refs/heads/main
+`,
+              stderr: "",
+              exitCode: 0,
+            };
+          }
+
+          if (args?.[0] === "worktree" && args[1] === "add") {
+            return { stdout: "", stderr: "", exitCode: 0 };
+          }
+
+          return { stdout: "", stderr: "", exitCode: 0 };
+        },
+      );
+
+      existsSyncMock.mockImplementation((targetPath: string) => {
+        const normalizedTarget = normalizePath(targetPath);
+        const normalizedWorktree = normalizePath(worktreePath);
+        if (normalizedTarget === normalizedWorktree) return true;
+        if (normalizedTarget === `${normalizedWorktree}/.git`) return true;
+        return false;
+      });
+
+      lstatMock.mockResolvedValue({
+        isFile: () => false,
+        isDirectory: () => true,
+      });
+
+      await expect(
+        worktree.createWorktree({
+          branchName,
+          worktreePath,
+          repoRoot,
+          isNewBranch: false,
+          baseBranch: "develop",
+        }),
+      ).rejects.toThrow("stale");
+
+      expect(rmMock).not.toHaveBeenCalled();
+      expect(execa).not.toHaveBeenCalledWith(
+        "git",
+        expect.arrayContaining(["worktree", "add"]),
       );
     });
   });

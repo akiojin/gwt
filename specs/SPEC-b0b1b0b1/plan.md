@@ -3,17 +3,15 @@
 **仕様ID**: `SPEC-b0b1b0b1` | **日付**: 2025-12-20 | **仕様書**: [spec.md](./spec.md)
 
 ## 方針
-- `handleAIToolWorkflow` の終了直前にGit状態チェックと確認プロンプトを挿入する。
-- プロンプトは `getTerminalStreams` を使用し、非TTYは即時デフォルト（No）で返す。
-- TDDでプロンプトと終了時分岐の挙動を先に固める。
+- `handleAIToolWorkflow` の終了直前にGit状態チェックと警告表示を行う（確認プロンプトは出さない）。
+- 未コミット/未プッシュがあっても入力待ちはせず、3秒待機後にブランチ一覧へ戻る。
+- TDDで警告表示と待機挙動（3秒）を先に固める。
 
 ## ステップ
-1. **TDD**: `confirmYesNo` のTTY/非TTY挙動テストを追加（`src/utils/__tests__/prompt.test.ts`）。
-2. **実装**: `confirmYesNo` を `src/utils/prompt.ts` に追加。
-3. **TDD**: 終了時の未コミット警告・未プッシュ確認・push分岐のテストを追加（`tests/unit/index.post-session-checks.test.ts`）。
-4. **実装**: `src/index.ts` に終了時チェックを追加し、3秒待機の順序を調整。
-5. **補正**: 既存の `handleAIToolWorkflow` テストで新プロンプトをモック。
-6. **検証**: `bun run test`（必要に応じて該当テストのみに絞る）。
+1. **TDD**: 終了時の未コミット/未プッシュ警告と3秒待機のテストを更新（`tests/unit/index.post-session-checks.test.ts`）。
+2. **実装**: `src/index.ts` の終了時チェックを修正し、未プッシュ確認/ push処理を削除して3秒待機へ統一。
+3. **補正**: 既存テストのモック/期待値を警告のみへ更新。
+4. **検証**: `bun run test`（必要に応じて該当テストのみに絞る）。
 
 ## リスクと緩和
 - **リスク**: TTY入力待ちがテストをブロックする  

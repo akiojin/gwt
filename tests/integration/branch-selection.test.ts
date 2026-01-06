@@ -15,11 +15,30 @@ vi.mock("execa", () => ({
   execa: vi.fn(),
 }));
 
+const existsSyncMock = vi.hoisted(() =>
+  vi.fn((input: string | URL) => {
+    const value = String(input);
+    const normalized = value.replace(/\\/g, "/");
+    if (normalized.includes("/path/to/repo/.worktrees")) {
+      return false;
+    }
+    if (
+      normalized.includes("/path/to/worktree") ||
+      normalized.includes("/path/to/new-worktree")
+    ) {
+      return false;
+    }
+    return true;
+  }),
+);
+
 vi.mock("node:fs", () => ({
-  existsSync: vi.fn(() => true),
+  existsSync: existsSyncMock,
 }));
 
 const mkdirMock = vi.hoisted(() => vi.fn(async () => undefined));
+const readFileMock = vi.hoisted(() => vi.fn(async () => ""));
+const writeFileMock = vi.hoisted(() => vi.fn(async () => undefined));
 
 vi.mock("node:fs/promises", async () => {
   const actual =
@@ -30,13 +49,17 @@ vi.mock("node:fs/promises", async () => {
   const mocked = {
     ...actual,
     mkdir: mkdirMock,
+    readFile: readFileMock,
+    writeFile: writeFileMock,
   };
 
   return {
     ...mocked,
     default: {
-      ...actual.default,
+      ...actual,
       mkdir: mkdirMock,
+      readFile: readFileMock,
+      writeFile: writeFileMock,
     },
   };
 });
@@ -48,6 +71,9 @@ describe("Integration: Branch Selection to Worktree Creation", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mkdirMock.mockClear();
+    readFileMock.mockClear();
+    writeFileMock.mockClear();
+    existsSyncMock.mockClear();
   });
 
   afterEach(() => {
