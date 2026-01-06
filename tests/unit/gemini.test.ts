@@ -1,4 +1,12 @@
-import { describe, it, expect, mock, beforeEach, afterAll, spyOn } from "bun:test";
+import {
+  describe,
+  it,
+  expect,
+  mock,
+  beforeEach,
+  afterAll,
+  spyOn,
+} from "bun:test";
 
 type MockStdio = "inherit" | number;
 
@@ -339,9 +347,9 @@ describe("launchGeminiCLI", () => {
     it("T011: Windowsプラットフォームでトラブルシューティングメッセージを表示", async () => {
       // Mock platform to Windows
       const originalPlatform = process.platform;
-      const consoleErrorSpy = vi
-        .spyOn(console, "error")
-        .mockImplementation(() => {});
+      const consoleErrorSpy = spyOn(console, "error").mockImplementation(
+        () => {},
+      );
       Object.defineProperty(process, "platform", {
         value: "win32",
         configurable: true,
@@ -510,8 +518,7 @@ describe("launchGeminiCLI", () => {
 
       const { resetTerminalModes } =
         await import("../../src/utils/terminal.js");
-      const mockResetTerminalModes =
-        resetTerminalModes as unknown as Mock;
+      const mockResetTerminalModes = resetTerminalModes as unknown as Mock;
 
       expect(mockResetTerminalModes).toHaveBeenCalledTimes(2);
       expect(mockResetTerminalModes).toHaveBeenNthCalledWith(
@@ -544,8 +551,7 @@ describe("launchGeminiCLI", () => {
 
       const { resetTerminalModes } =
         await import("../../src/utils/terminal.js");
-      const mockResetTerminalModes =
-        resetTerminalModes as unknown as Mock;
+      const mockResetTerminalModes = resetTerminalModes as unknown as Mock;
 
       expect(mockResetTerminalModes).toHaveBeenCalledTimes(2);
     });
@@ -554,4 +560,94 @@ describe("launchGeminiCLI", () => {
   // Note: FR-008 (Launch arguments display) is not implemented in gemini.ts
   // Unlike Claude and Codex, Gemini CLI does not log the args before launch.
   // This is intentional as Gemini's argument handling is simpler.
+
+  describe("Launch/Exit Logs", () => {
+    it("should display launch message with rocket emoji at startup", async () => {
+      mockFindCommand.mockResolvedValue({
+        available: true,
+        path: null,
+        source: "bunx",
+      });
+      mockExeca.mockResolvedValue({
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+      });
+
+      await launchGeminiCLI("/test/path");
+
+      // Verify that launch message is logged with 🚀 emoji
+      expect(consoleLogSpy).toHaveBeenCalledWith(
+        expect.stringContaining("🚀 Launching Gemini CLI..."),
+      );
+    });
+
+    it("should display working directory in launch logs", async () => {
+      mockFindCommand.mockResolvedValue({
+        available: true,
+        path: null,
+        source: "bunx",
+      });
+      mockExeca.mockResolvedValue({
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+      });
+
+      await launchGeminiCLI("/test/path");
+
+      // Verify working directory is shown
+      expect(consoleLogSpy).toHaveBeenCalledWith(
+        expect.stringContaining("Working directory: /test/path"),
+      );
+    });
+
+    it("should display model info when custom model is specified", async () => {
+      mockFindCommand.mockResolvedValue({
+        available: true,
+        path: null,
+        source: "bunx",
+      });
+      mockExeca.mockResolvedValue({
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+      });
+
+      await launchGeminiCLI("/test/path", { model: "gemini-2.5-flash" });
+
+      // Verify model info is logged with 🎯 emoji
+      expect(consoleLogSpy).toHaveBeenCalledWith(
+        expect.stringContaining("🎯 Model: gemini-2.5-flash"),
+      );
+    });
+
+    it("should display session ID after agent exits when captured", async () => {
+      // Mock findCommand
+      mockFindCommand.mockResolvedValue({
+        available: true,
+        path: null,
+        source: "bunx",
+      });
+      mockExeca.mockResolvedValue({
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+      });
+
+      // Mock session detection
+      mock.module("../../src/utils/session", () => ({
+        waitForCodexSessionId: mock(async () => null),
+        findLatestCodexSession: mock(async () => null),
+        findLatestGeminiSessionId: mock(async () => "gemini-session-789"),
+      }));
+
+      await launchGeminiCLI("/test/path");
+
+      // Verify session ID is displayed after exit
+      expect(consoleLogSpy).toHaveBeenCalledWith(
+        expect.stringContaining("🆔 Session ID: gemini-session-789"),
+      );
+    });
+  });
 });
