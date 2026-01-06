@@ -36,7 +36,7 @@
 
 - **言語**: TypeScript 5.8+
 - **ランタイム**: Bun >= 1.0
-- **CLI UI**: Ink.js 6.x（React 19ベース）
+- **CLI UI**: OpenTUI + SolidJS
 - **Web UI**: React 19 + Vite + Fastify + Tailwind CSS
 - **テスト**: Vitest + Playwright
 - **ログ**: Pino（構造化ログ）
