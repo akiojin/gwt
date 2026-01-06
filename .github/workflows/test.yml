@@ -39,6 +39,7 @@ jobs:
 
       - name: Generate coverage report
         run: bun run test:coverage
+        timeout-minutes: 5
         continue-on-error: true
 
       - name: Upload coverage to Codecov
