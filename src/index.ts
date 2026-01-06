@@ -13,15 +13,10 @@ import {
   hasUnpushedCommits,
   getUncommittedChangesCount,
   getUnpushedCommitsCount,
-  GitError,
 } from "./git.js";
 import { launchClaudeCode } from "./claude.js";
-import {
-  launchCodexCLI,
-  CodexError,
-  type CodexReasoningEffort,
-} from "./codex.js";
-import { launchGeminiCLI, GeminiError } from "./gemini.js";
+import { launchCodexCLI, type CodexReasoningEffort } from "./codex.js";
+import { launchGeminiCLI } from "./gemini.js";
 import {
   WorktreeOrchestrator,
   type EnsureWorktreeOptions,
@@ -31,7 +26,6 @@ import type { SelectionResult } from "./cli/ui/App.solid.js";
 import {
   isProtectedBranchName,
   switchToProtectedBranch,
-  WorktreeError,
   resolveWorktreePathForBranch,
 } from "./worktree.js";
 import {
@@ -57,6 +51,7 @@ import {
   DependencyInstallError,
   type DependencyInstallResult,
 } from "./services/dependency-installer.js";
+import { isGitRelatedError, isRecoverableError } from "./utils/error-utils.js";
 
 const ERROR_PROMPT = chalk.yellow(
   "Review the error details, then press Enter to continue.",
@@ -90,71 +85,7 @@ function printWarning(message: string): void {
 
 type GitStepResult<T> = { ok: true; value: T } | { ok: false };
 
-function isGitRelatedError(error: unknown): boolean {
-  if (!error) {
-    return false;
-  }
-
-  if (error instanceof GitError || error instanceof WorktreeError) {
-    return true;
-  }
-
-  if (error instanceof Error) {
-    return error.name === "GitError" || error.name === "WorktreeError";
-  }
-
-  if (
-    typeof error === "object" &&
-    "name" in (error as Record<string, unknown>)
-  ) {
-    const name = (error as { name?: string }).name;
-    return name === "GitError" || name === "WorktreeError";
-  }
-
-  return false;
-}
-
-function isRecoverableError(error: unknown): boolean {
-  if (!error) {
-    return false;
-  }
-
-  if (
-    error instanceof GitError ||
-    error instanceof WorktreeError ||
-    error instanceof CodexError ||
-    error instanceof GeminiError ||
-    error instanceof DependencyInstallError
-  ) {
-    return true;
-  }
-
-  if (error instanceof Error) {
-    return (
-      error.name === "GitError" ||
-      error.name === "WorktreeError" ||
-      error.name === "CodexError" ||
-      error.name === "GeminiError" ||
-      error.name === "DependencyInstallError"
-    );
-  }
-
-  if (
-    typeof error === "object" &&
-    "name" in (error as Record<string, unknown>)
-  ) {
-    const name = (error as { name?: string }).name;
-    return (
-      name === "GitError" ||
-      name === "WorktreeError" ||
-      name === "CodexError" ||
-      name === "GeminiError" ||
-      name === "DependencyInstallError"
-    );
-  }
-
-  return false;
-}
+// Note: isGitRelatedError and isRecoverableError are now imported from ./utils/error-utils.js
 
 async function runGitStep<T>(
   description: string,
@@ -894,7 +825,7 @@ export async function runInteractiveLoop(
   uiHandler: UIHandler = resolveUIHandler(),
   workflowHandler: WorkflowHandler = handleAIToolWorkflow,
 ): Promise<void> {
-  // Main loop: UI → AI Tool → back to UI
+  // Main loop: UI → Coding Agent → back to UI
   while (true) {
     let selectionResult: SelectionResult | undefined;
 

@@ -112,6 +112,8 @@ export interface WorktreeInfo {
   isAccessible?: boolean;
   invalidReason?: string;
   hasUncommittedChanges?: boolean;
+  isLocked?: boolean;
+  isPrunable?: boolean;
 }
 
 async function listWorktrees(): Promise<WorktreeInfo[]> {
@@ -131,11 +133,19 @@ async function listWorktrees(): Promise<WorktreeInfo[]> {
         if (currentWorktree.path) {
           worktrees.push(currentWorktree as WorktreeInfo);
         }
-        currentWorktree = { path: line.substring(9) };
+        currentWorktree = {
+          path: line.substring(9),
+          isLocked: false,
+          isPrunable: false,
+        };
       } else if (line.startsWith("HEAD ")) {
         currentWorktree.head = line.substring(5);
       } else if (line.startsWith("branch ")) {
         currentWorktree.branch = line.substring(7).replace("refs/heads/", "");
+      } else if (line === "locked" || line.startsWith("locked ")) {
+        currentWorktree.isLocked = true;
+      } else if (line === "prunable" || line.startsWith("prunable ")) {
+        currentWorktree.isPrunable = true;
       } else if (line === "") {
         if (currentWorktree.path) {
           worktrees.push(currentWorktree as WorktreeInfo);
