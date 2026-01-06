@@ -34,6 +34,7 @@ export interface BranchListScreenProps {
   onSelect: (branch: BranchItem) => void;
   onQuit?: () => void;
   onCleanupCommand?: () => void;
+  onRepairWorktrees?: () => void;
   onCreateBranch?: (branch: BranchItem | null) => void;
   onRefresh?: () => void;
   onOpenProfiles?: () => void;
@@ -598,6 +599,8 @@ export function BranchListScreen(props: BranchListScreenProps) {
 
     if (key.name === "c" || key.sequence === "c") {
       props.onCleanupCommand?.();
+    } else if (key.name === "x" || key.sequence === "x") {
+      props.onRepairWorktrees?.();
     } else if (key.name === "r" || key.sequence === "r") {
       props.onRefresh?.();
     } else if (key.name === "p" || key.sequence === "p") {
@@ -736,6 +739,7 @@ export function BranchListScreen(props: BranchListScreenProps) {
     { key: "n", description: "New" },
     { key: "r", description: "Refresh" },
     { key: "c", description: "Cleanup" },
+    { key: "x", description: "Repair" },
     { key: "p", description: "Profiles" },
     { key: "l", description: "Logs" },
   ];

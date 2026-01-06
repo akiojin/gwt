@@ -52,6 +52,7 @@ import {
 } from "../../git.js";
 import {
   listAdditionalWorktrees,
+  repairWorktrees,
   type WorktreeInfo as WorktreeEntry,
 } from "../../worktree.js";
 import { detectAllToolStatuses, type ToolStatus } from "../../utils/command.js";
@@ -214,6 +215,12 @@ export function AppSolid(props: AppSolidProps) {
   );
   const [selectedMode, setSelectedMode] = createSignal<ExecutionMode>("normal");
   const [selectedBranches, setSelectedBranches] = createSignal<string[]>([]);
+  const [branchFooterMessage, setBranchFooterMessage] = createSignal<{
+    text: string;
+    isSpinning?: boolean;
+    color?: "cyan" | "green" | "yellow" | "red";
+  } | null>(null);
+  const [branchInputLocked, setBranchInputLocked] = createSignal(false);
   const [isNewBranch, setIsNewBranch] = createSignal(false);
   const [newBranchBaseRef, setNewBranchBaseRef] = createSignal<string | null>(
     null,
@@ -295,6 +302,7 @@ export function AppSolid(props: AppSolidProps) {
       .sort((a, b) => a.key.localeCompare(b.key)),
   );
   let logNotificationTimer: ReturnType<typeof setTimeout> | null = null;
+  let branchFooterTimer: ReturnType<typeof setTimeout> | null = null;
   const BRANCH_LOAD_TIMEOUT_MS = 3000;
   const BRANCH_FULL_LOAD_TIMEOUT_MS = 8000;
 
@@ -525,7 +533,32 @@ export function AppSolid(props: AppSolidProps) {
     if (logNotificationTimer) {
       clearTimeout(logNotificationTimer);
     }
+    if (branchFooterTimer) {
+      clearTimeout(branchFooterTimer);
+    }
   });
+
+  const showBranchFooterMessage = (
+    text: string,
+    color: "cyan" | "green" | "yellow" | "red",
+    options?: { spinning?: boolean; timeoutMs?: number },
+  ) => {
+    if (branchFooterTimer) {
+      clearTimeout(branchFooterTimer);
+      branchFooterTimer = null;
+    }
+    setBranchFooterMessage({
+      text,
+      color,
+      ...(options?.spinning ? { isSpinning: true } : {}),
+    });
+    const timeout = options?.timeoutMs ?? 2000;
+    if (timeout > 0) {
+      branchFooterTimer = setTimeout(() => {
+        setBranchFooterMessage(null);
+      }, timeout);
+    }
+  };
 
   const handleBranchSelect = (branch: BranchItem) => {
     setSelectedBranch(toSelectedBranchState(branch));
@@ -542,6 +575,45 @@ export function AppSolid(props: AppSolidProps) {
     setCreateBranchName("");
     setSuppressCreateKey("n");
     navigateTo("worktree-create");
+  };
+
+  const handleRepairWorktrees = async () => {
+    if (branchInputLocked()) {
+      return;
+    }
+    const targets = branchItems()
+      .filter((branch) => branch.worktreeStatus === "inaccessible")
+      .map((branch) => branch.name);
+
+    if (targets.length === 0) {
+      showBranchFooterMessage("No worktrees to repair.", "yellow");
+      return;
+    }
+
+    setBranchInputLocked(true);
+    showBranchFooterMessage("Repairing worktrees...", "yellow", {
+      spinning: true,
+      timeoutMs: 0,
+    });
+    try {
+      const result = await repairWorktrees(targets);
+      await refreshBranches();
+      const message =
+        result.failedCount > 0
+          ? `Repair finished: ${result.repairedCount} repaired, ${result.failedCount} failed.`
+          : result.repairedCount > 0
+            ? `Repaired ${result.repairedCount} worktree(s).`
+            : "No worktrees repaired.";
+      showBranchFooterMessage(
+        message,
+        result.failedCount > 0 ? "red" : "green",
+      );
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      showBranchFooterMessage(`Repair failed: ${errorMessage}`, "red");
+    } finally {
+      setBranchInputLocked(false);
+    }
   };
 
   const openProfileCreate = () => {
@@ -810,6 +882,11 @@ export function AppSolid(props: AppSolidProps) {
     const screen = currentScreen();
 
     if (screen === "branch-list") {
+      const cleanupUI = {
+        indicators: {},
+        footerMessage: branchFooterMessage(),
+        inputLocked: branchInputLocked(),
+      };
       return (
         <BranchListScreen
           branches={branchItems()}
@@ -817,6 +894,7 @@ export function AppSolid(props: AppSolidProps) {
           onSelect={handleBranchSelect}
           onQuit={() => exitApp(undefined)}
           onRefresh={refreshBranches}
+          onRepairWorktrees={handleRepairWorktrees}
           loading={loading()}
           error={error()}
           loadingIndicatorDelay={props.loadingIndicatorDelay ?? 0}
@@ -830,6 +908,7 @@ export function AppSolid(props: AppSolidProps) {
           selectedBranches={selectedBranches()}
           onToggleSelect={toggleSelectedBranch}
           onCreateBranch={handleQuickCreate}
+          cleanupUI={cleanupUI}
           helpVisible={helpVisible()}
         />
       );
