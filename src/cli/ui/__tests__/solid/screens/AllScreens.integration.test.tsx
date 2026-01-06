@@ -1,7 +1,7 @@
 /** @jsxImportSource @opentui/solid */
 import { describe, expect, it } from "bun:test";
 import { testRender } from "@opentui/solid";
-import { Match, Switch, createMemo, createSignal } from "solid-js";
+import type { JSX } from "solid-js";
 import { BranchListScreen } from "../../../screens/solid/BranchListScreen.js";
 import { LogScreen } from "../../../screens/solid/LogScreen.js";
 import { LogDetailScreen } from "../../../screens/solid/LogDetailScreen.js";
@@ -64,136 +64,11 @@ type ScreenId =
   | "input"
   | "error";
 
-const renderScreens = async () => {
-  let setIndex: (value: number) => void = () => {};
-
-  const branches = [createBranch("feature/one")];
-  const stats = buildStats(branches);
-  const logEntry = createLogEntry("1", "log entry");
-
-  const testSetup = await testRender(
-    () => {
-      const [index, setIndexSignal] = createSignal(0);
-      setIndex = setIndexSignal;
-
-      const screenId = createMemo(
-        () =>
-          ([
-            "branch-list",
-            "log-list",
-            "log-detail",
-            "selector",
-            "environment",
-            "profiles",
-            "settings",
-            "worktree-create",
-            "worktree-delete",
-            "loading",
-            "confirm",
-            "input",
-            "error",
-          ][index()] ?? "branch-list") as ScreenId,
-      );
-
-      return (
-        <Switch fallback={<ErrorScreen error="Unknown screen" />}>
-          <Match when={screenId() === "branch-list"}>
-            <BranchListScreen
-              branches={branches}
-              stats={stats}
-              onSelect={() => {}}
-              version="1.2.3"
-              workingDirectory="/tmp/repo"
-            />
-          </Match>
-          <Match when={screenId() === "log-list"}>
-            <LogScreen
-              entries={[logEntry]}
-              onBack={() => {}}
-              onSelect={() => {}}
-              onCopy={() => {}}
-              selectedDate="2026-01-05"
-            />
-          </Match>
-          <Match when={screenId() === "log-detail"}>
-            <LogDetailScreen
-              entry={logEntry}
-              onBack={() => {}}
-              onCopy={() => {}}
-            />
-          </Match>
-          <Match when={screenId() === "selector"}>
-            <SelectorScreen
-              title="Select item"
-              items={[
-                { label: "Option A", value: "a" },
-                { label: "Option B", value: "b" },
-              ]}
-              onSelect={() => {}}
-            />
-          </Match>
-          <Match when={screenId() === "environment"}>
-            <EnvironmentScreen
-              variables={[
-                { key: "API_KEY", value: "secret" },
-                { key: "REGION", value: "us-east-1" },
-              ]}
-            />
-          </Match>
-          <Match when={screenId() === "profiles"}>
-            <ProfileScreen
-              profiles={[
-                { name: "default", displayName: "Default", isActive: true },
-                { name: "dev", displayName: "Dev" },
-              ]}
-            />
-          </Match>
-          <Match when={screenId() === "settings"}>
-            <SettingsScreen
-              settings={[
-                { label: "Theme", value: "theme" },
-                { label: "Telemetry", value: "telemetry" },
-              ]}
-            />
-          </Match>
-          <Match when={screenId() === "worktree-create"}>
-            <WorktreeCreateScreen
-              branchName="feature/one"
-              baseBranch="main"
-              onChange={() => {}}
-              onSubmit={() => {}}
-            />
-          </Match>
-          <Match when={screenId() === "worktree-delete"}>
-            <WorktreeDeleteScreen
-              branchName="feature/one"
-              worktreePath="/tmp/worktree"
-              onConfirm={() => {}}
-            />
-          </Match>
-          <Match when={screenId() === "loading"}>
-            <LoadingIndicatorScreen message="Loading data" delay={0} />
-          </Match>
-          <Match when={screenId() === "confirm"}>
-            <ConfirmScreen message="Proceed?" onConfirm={() => {}} />
-          </Match>
-          <Match when={screenId() === "input"}>
-            <InputScreen
-              message="Enter value"
-              value="hello"
-              onChange={() => {}}
-              onSubmit={() => {}}
-              label="Value"
-            />
-          </Match>
-          <Match when={screenId() === "error"}>
-            <ErrorScreen error="Something went wrong" />
-          </Match>
-        </Switch>
-      );
-    },
-    { width: 80, height: 20 },
-  );
+const renderScreen = async (render: () => JSX.Element) => {
+  const testSetup = await testRender(() => render(), {
+    width: 80,
+    height: 20,
+  });
 
   await testSetup.renderOnce();
 
@@ -203,41 +78,178 @@ const renderScreens = async () => {
 
   return {
     ...testSetup,
-    setIndex,
     cleanup,
   };
 };
 
 describe("Solid all screens integration", () => {
   it("renders every screen", async () => {
-    const { setIndex, renderOnce, captureCharFrame, cleanup } =
-      await renderScreens();
+    const branches = [createBranch("feature/one")];
+    const stats = buildStats(branches);
+    const logEntry = createLogEntry("1", "log entry");
 
-    const expectations: Array<{ index: number; value: string }> = [
-      { index: 0, value: "gwt - Branch Selection" },
-      { index: 1, value: "gwt - Log Viewer" },
-      { index: 2, value: "gwt - Log Detail" },
-      { index: 3, value: "Option A" },
-      { index: 4, value: "API_KEY=secret" },
-      { index: 5, value: "Default (active)" },
-      { index: 6, value: "Telemetry" },
-      { index: 7, value: "gwt - Worktree Create" },
-      { index: 8, value: "/tmp/worktree" },
-      { index: 9, value: "Loading data" },
-      { index: 10, value: "Proceed?" },
-      { index: 11, value: "Enter value" },
-      { index: 12, value: "Error: Something went wrong" },
+    const cases: Array<{
+      id: ScreenId;
+      render: () => JSX.Element;
+      value: string;
+    }> = [
+      {
+        id: "branch-list",
+        render: () => (
+          <BranchListScreen
+            branches={branches}
+            stats={stats}
+            onSelect={() => {}}
+            version="1.2.3"
+            workingDirectory="/tmp/repo"
+          />
+        ),
+        value: "gwt - Branch Selection",
+      },
+      {
+        id: "log-list",
+        render: () => (
+          <LogScreen
+            entries={[logEntry]}
+            onBack={() => {}}
+            onSelect={() => {}}
+            onCopy={() => {}}
+            selectedDate="2026-01-05"
+          />
+        ),
+        value: "gwt - Log Viewer",
+      },
+      {
+        id: "log-detail",
+        render: () => (
+          <LogDetailScreen
+            entry={logEntry}
+            onBack={() => {}}
+            onCopy={() => {}}
+          />
+        ),
+        value: "gwt - Log Detail",
+      },
+      {
+        id: "selector",
+        render: () => (
+          <SelectorScreen
+            title="Select item"
+            items={[
+              { label: "Option A", value: "a" },
+              { label: "Option B", value: "b" },
+            ]}
+            onSelect={() => {}}
+          />
+        ),
+        value: "Option A",
+      },
+      {
+        id: "environment",
+        render: () => (
+          <EnvironmentScreen
+            variables={[
+              { key: "API_KEY", value: "secret" },
+              { key: "REGION", value: "us-east-1" },
+            ]}
+          />
+        ),
+        value: "API_KEY=secret",
+      },
+      {
+        id: "profiles",
+        render: () => (
+          <ProfileScreen
+            profiles={[
+              { name: "default", displayName: "Default", isActive: true },
+              { name: "dev", displayName: "Dev" },
+            ]}
+          />
+        ),
+        value: "Default (active)",
+      },
+      {
+        id: "settings",
+        render: () => (
+          <SettingsScreen
+            settings={[
+              { label: "Theme", value: "theme" },
+              { label: "Telemetry", value: "telemetry" },
+            ]}
+          />
+        ),
+        value: "Telemetry",
+      },
+      {
+        id: "worktree-create",
+        render: () => (
+          <WorktreeCreateScreen
+            branchName="feature/one"
+            baseBranch="main"
+            onChange={() => {}}
+            onSubmit={() => {}}
+          />
+        ),
+        value: "gwt - Worktree Create",
+      },
+      {
+        id: "worktree-delete",
+        render: () => (
+          <WorktreeDeleteScreen
+            branchName="feature/one"
+            worktreePath="/tmp/worktree"
+            onConfirm={() => {}}
+          />
+        ),
+        value: "/tmp/worktree",
+      },
+      {
+        id: "loading",
+        render: () => (
+          <LoadingIndicatorScreen message="Loading data" delay={0} />
+        ),
+        value: "Loading data",
+      },
+      {
+        id: "confirm",
+        render: () => <ConfirmScreen message="Proceed?" onConfirm={() => {}} />,
+        value: "Proceed?",
+      },
+      {
+        id: "input",
+        render: () => (
+          <InputScreen
+            message="Enter value"
+            value="hello"
+            onChange={() => {}}
+            onSubmit={() => {}}
+            label="Value"
+          />
+        ),
+        value: "Enter value",
+      },
+      {
+        id: "error",
+        render: () => <ErrorScreen error="Something went wrong" />,
+        value: "Error: Something went wrong",
+      },
     ];
 
     try {
-      for (const expectation of expectations) {
-        setIndex(expectation.index);
-        await renderOnce();
-        const frame = captureCharFrame();
-        expect(frame).toContain(expectation.value);
+      for (const testCase of cases) {
+        const { renderOnce, captureCharFrame, cleanup } = await renderScreen(
+          testCase.render,
+        );
+        try {
+          await renderOnce();
+          const frame = captureCharFrame();
+          expect(frame).toContain(testCase.value);
+        } finally {
+          cleanup();
+        }
       }
     } finally {
-      cleanup();
+      // no-op; per-case cleanup above
     }
   });
 });
