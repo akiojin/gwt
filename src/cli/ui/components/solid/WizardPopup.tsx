@@ -1,4 +1,5 @@
 /** @jsxImportSource @opentui/solid */
+import { TextAttributes } from "@opentui/core";
 import { Show, createSignal, createEffect } from "solid-js";
 import { useKeyboard } from "@opentui/solid";
 
@@ -71,7 +72,7 @@ export function WizardPopup(props: WizardPopupProps) {
         flexDirection="column"
         padding={1}
       >
-        <text bold color="cyan">
+        <text fg="cyan" attributes={TextAttributes.BOLD}>
           Select
         </text>
         <text> </text>

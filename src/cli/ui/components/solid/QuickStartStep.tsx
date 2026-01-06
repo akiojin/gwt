@@ -1,4 +1,5 @@
 /** @jsxImportSource @opentui/solid */
+import { TextAttributes } from "@opentui/core";
 import { createEffect, createMemo } from "solid-js";
 import type { ToolSessionEntry } from "../../../../config/index.js";
 import { SelectInput, type SelectInputItem } from "./SelectInput.js";
@@ -90,7 +91,7 @@ export function QuickStartStep(props: QuickStartStepProps) {
 
   return (
     <box flexDirection="column" padding={1}>
-      <text bold color="cyan">
+      <text fg="cyan" attributes={TextAttributes.BOLD}>
         Quick Start
       </text>
       <text> </text>
@@ -101,7 +102,9 @@ export function QuickStartStep(props: QuickStartStepProps) {
         showDescription={true}
       />
       <text> </text>
-      <text dimColor>[Esc] Cancel [Enter] Select [Up/Down] Navigate</text>
+      <text attributes={TextAttributes.DIM}>
+        [Esc] Cancel [Enter] Select [Up/Down] Navigate
+      </text>
     </box>
   );
 }

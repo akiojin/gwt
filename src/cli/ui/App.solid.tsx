@@ -20,6 +20,10 @@ import type { FormattedLogEntry } from "../../logging/formatter.js";
 import { BranchListScreen } from "./screens/solid/BranchListScreen.js";
 import { HelpOverlay } from "./components/solid/HelpOverlay.js";
 import {
+  WizardController,
+  type WizardResult,
+} from "./components/solid/WizardController.js";
+import {
   SelectorScreen,
   type SelectorItem,
 } from "./screens/solid/SelectorScreen.js";
@@ -56,7 +60,7 @@ import {
   type WorktreeInfo as WorktreeEntry,
 } from "../../worktree.js";
 import { detectAllToolStatuses, type ToolStatus } from "../../utils/command.js";
-import { getConfig } from "../../config/index.js";
+import { getConfig, type ToolSessionEntry } from "../../config/index.js";
 import { getAllCodingAgents } from "../../config/tools.js";
 import {
   buildLogFilePath,
@@ -184,6 +188,8 @@ export function AppSolid(props: AppSolidProps) {
   );
   const [screenStack, setScreenStack] = createSignal<AppScreen[]>([]);
   const [helpVisible, setHelpVisible] = createSignal(false);
+  const [wizardVisible, setWizardVisible] = createSignal(false);
+  const [wizardIsNewBranch, setWizardIsNewBranch] = createSignal(false);
 
   const [branchItems, setBranchItems] = createSignal<BranchItem[]>(
     props.branches ?? [],
@@ -567,14 +573,75 @@ export function AppSolid(props: AppSolidProps) {
     setCreationSource(null);
     setSelectedTool(null);
     setSelectedMode("normal");
-    navigateTo("tool-select");
+    // FR-044: ウィザードポップアップをレイヤー表示
+    setWizardIsNewBranch(false);
+    setWizardVisible(true);
   };
 
   const handleQuickCreate = (branch: BranchItem | null) => {
     setCreationSource(branch ? toSelectedBranchState(branch) : null);
     setCreateBranchName("");
     setSuppressCreateKey("n");
-    navigateTo("worktree-create");
+    // FR-052: 新規ブランチ作成時はウィザードでブランチタイプ選択から開始
+    setWizardIsNewBranch(true);
+    setWizardVisible(true);
+  };
+
+  // FR-049: Escapeキーでウィザードをキャンセル
+  const handleWizardClose = () => {
+    setWizardVisible(false);
+    setWizardIsNewBranch(false);
+  };
+
+  // ウィザード完了時の処理
+  const handleWizardComplete = (result: WizardResult) => {
+    setWizardVisible(false);
+    setWizardIsNewBranch(false);
+
+    const branch = selectedBranch();
+    if (!branch) {
+      return;
+    }
+
+    // 新規ブランチ作成の場合、ブランチ名を設定
+    const finalBranchName = result.branchName
+      ? `${result.branchType ?? ""}${result.branchName}`
+      : branch.name;
+
+    const baseBranchRef = wizardIsNewBranch() ? newBranchBaseRef() : null;
+    const normalizedModel = normalizeModelId(result.tool, result.model);
+
+    exitApp({
+      branch: finalBranchName,
+      displayName: branch.displayName,
+      branchType: branch.branchType,
+      ...(branch.remoteBranch ? { remoteBranch: branch.remoteBranch } : {}),
+      ...(wizardIsNewBranch()
+        ? {
+            isNewBranch: true,
+            ...(baseBranchRef ? { baseBranch: baseBranchRef } : {}),
+          }
+        : {}),
+      tool: result.tool,
+      mode: result.mode,
+      skipPermissions: result.skipPermissions,
+      ...(normalizedModel !== undefined ? { model: normalizedModel } : {}),
+      ...(result.reasoningLevel !== undefined
+        ? { inferenceLevel: result.reasoningLevel }
+        : {}),
+    });
+  };
+
+  // T508: クイックスタートからのResume（履歴対応は別タスク）
+  const handleWizardResume = () => {
+    // TODO: T508で履歴からのResume実装
+    setWizardVisible(false);
+  };
+
+  // T508: クイックスタートからのStartNew（履歴対応は別タスク）
+  const handleWizardStartNew = () => {
+    // TODO: T508で履歴からのStartNew実装
+    setWizardVisible(false);
   };
 
   const handleRepairWorktrees = async () => {
@@ -1249,6 +1316,16 @@ export function AppSolid(props: AppSolidProps) {
     <>
       {renderCurrentScreen()}
       <HelpOverlay visible={helpVisible()} context={currentScreen()} />
+      {/* FR-044: ウィザードポップアップをレイヤー表示 */}
+      <WizardController
+        visible={wizardVisible()}
+        isNewBranch={wizardIsNewBranch()}
+        history={[] as ToolSessionEntry[]}
+        onClose={handleWizardClose}
+        onComplete={handleWizardComplete}
+        onResume={handleWizardResume}
+        onStartNew={handleWizardStartNew}
+      />
     </>
   );
 }

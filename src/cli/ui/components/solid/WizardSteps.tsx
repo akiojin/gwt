@@ -1,4 +1,5 @@
 /** @jsxImportSource @opentui/solid */
+import { TextAttributes } from "@opentui/core";
 import { createSignal } from "solid-js";
 import { SelectInput, type SelectInputItem } from "./SelectInput.js";
 import { TextInput } from "./TextInput.js";
@@ -28,7 +29,7 @@ const BRANCH_TYPES: SelectInputItem[] = [
 export function BranchTypeStep(props: BranchTypeStepProps) {
   return (
     <box flexDirection="column">
-      <text bold color="cyan">
+      <text fg="cyan" attributes={TextAttributes.BOLD}>
         Select branch type:
       </text>
       <text> </text>
@@ -38,7 +39,7 @@ export function BranchTypeStep(props: BranchTypeStepProps) {
         focused={true}
       />
       <text> </text>
-      <text dimColor>[Enter] Select [Esc] Back</text>
+      <text attributes={TextAttributes.DIM}>[Enter] Select [Esc] Back</text>
     </box>
   );
 }
@@ -54,7 +55,7 @@ export function BranchNameStep(props: BranchNameStepProps) {
 
   return (
     <box flexDirection="column">
-      <text bold color="cyan">
+      <text fg="cyan" attributes={TextAttributes.BOLD}>
         Branch name: {props.branchType}
       </text>
       <text> </text>
@@ -66,7 +67,7 @@ export function BranchNameStep(props: BranchNameStepProps) {
         focused={true}
       />
       <text> </text>
-      <text dimColor>[Enter] Confirm [Esc] Back</text>
+      <text attributes={TextAttributes.DIM}>[Enter] Confirm [Esc] Back</text>
     </box>
   );
 }
@@ -93,7 +94,7 @@ const AGENTS: SelectInputItem[] = [
 export function AgentSelectStep(props: AgentSelectStepProps) {
   return (
     <box flexDirection="column">
-      <text bold color="cyan">
+      <text fg="cyan" attributes={TextAttributes.BOLD}>
         Select coding agent:
       </text>
       <text> </text>
@@ -103,7 +104,7 @@ export function AgentSelectStep(props: AgentSelectStepProps) {
         focused={true}
       />
       <text> </text>
-      <text dimColor>[Enter] Select [Esc] Back</text>
+      <text attributes={TextAttributes.DIM}>[Enter] Select [Esc] Back</text>
     </box>
   );
 }
@@ -135,7 +136,7 @@ export function ModelSelectStep(props: ModelSelectStepProps) {
 
   return (
     <box flexDirection="column">
-      <text bold color="cyan">
+      <text fg="cyan" attributes={TextAttributes.BOLD}>
         Select Model:
       </text>
       <text> </text>
@@ -145,7 +146,7 @@ export function ModelSelectStep(props: ModelSelectStepProps) {
         focused={true}
       />
       <text> </text>
-      <text dimColor>[Enter] Select [Esc] Back</text>
+      <text attributes={TextAttributes.DIM}>[Enter] Select [Esc] Back</text>
     </box>
   );
 }
@@ -164,7 +165,7 @@ const REASONING_LEVELS: SelectInputItem[] = [
 export function ReasoningLevelStep(props: ReasoningLevelStepProps) {
   return (
     <box flexDirection="column">
-      <text bold color="cyan">
+      <text fg="cyan" attributes={TextAttributes.BOLD}>
         Select reasoning level:
       </text>
       <text> </text>
@@ -174,7 +175,7 @@ export function ReasoningLevelStep(props: ReasoningLevelStepProps) {
         focused={true}
       />
       <text> </text>
-      <text dimColor>[Enter] Select [Esc] Back</text>
+      <text attributes={TextAttributes.DIM}>[Enter] Select [Esc] Back</text>
     </box>
   );
 }
@@ -201,7 +202,7 @@ const EXECUTION_MODES: SelectInputItem[] = [
 export function ExecutionModeStep(props: ExecutionModeStepProps) {
   return (
     <box flexDirection="column">
-      <text bold color="cyan">
+      <text fg="cyan" attributes={TextAttributes.BOLD}>
         Select execution mode:
       </text>
       <text> </text>
@@ -211,7 +212,7 @@ export function ExecutionModeStep(props: ExecutionModeStepProps) {
         focused={true}
       />
       <text> </text>
-      <text dimColor>[Enter] Select [Esc] Back</text>
+      <text attributes={TextAttributes.DIM}>[Enter] Select [Esc] Back</text>
     </box>
   );
 }
@@ -229,7 +230,7 @@ const SKIP_OPTIONS: SelectInputItem[] = [
 export function SkipPermissionsStep(props: SkipPermissionsStepProps) {
   return (
     <box flexDirection="column">
-      <text bold color="cyan">
+      <text fg="cyan" attributes={TextAttributes.BOLD}>
         Skip permission prompts?
       </text>
       <text> </text>
@@ -239,7 +240,7 @@ export function SkipPermissionsStep(props: SkipPermissionsStepProps) {
         focused={true}
       />
       <text> </text>
-      <text dimColor>[Enter] Select [Esc] Back</text>
+      <text attributes={TextAttributes.DIM}>[Enter] Select [Esc] Back</text>
     </box>
   );
 }

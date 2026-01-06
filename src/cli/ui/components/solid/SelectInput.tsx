@@ -52,7 +52,7 @@ export function SelectInput(props: SelectInputProps) {
         {...(props.selectedIndex !== undefined && {
           selectedIndex: props.selectedIndex,
         })}
-        focused={props.focused}
+        focused={props.focused ?? false}
         showDescription={props.showDescription ?? false}
         wrapSelection={props.wrapSelection ?? false}
         onSelect={handleSelect}
