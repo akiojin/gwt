@@ -56,7 +56,7 @@ export function SelectInput({
       <select
         options={options}
         {...(selectedIndex !== undefined && { selectedIndex })}
-        focused={focused}
+        {...(focused !== undefined && { focused })}
         showDescription={showDescription}
         wrapSelection={wrapSelection}
         onSelect={handleSelect}
