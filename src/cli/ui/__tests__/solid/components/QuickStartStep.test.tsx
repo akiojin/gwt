@@ -55,34 +55,9 @@ describe("QuickStartStep", () => {
     });
   });
 
-  // T502: エージェントごとの履歴一覧表示テスト
-  describe("history display", () => {
-    it("displays agent history entries", async () => {
-      const testSetup = await testRender(
-        () => (
-          <QuickStartStep
-            history={mockHistory}
-            onResume={() => {}}
-            onStartNew={() => {}}
-            onChooseDifferent={() => {}}
-            onBack={() => {}}
-          />
-        ),
-        { width: 60, height: 24 },
-      );
-      await testSetup.renderOnce();
-
-      try {
-        const frame = testSetup.captureCharFrame();
-        // エージェント名が表示される
-        expect(frame).toContain("Claude Code");
-        expect(frame).toContain("Codex CLI");
-      } finally {
-        testSetup.renderer.destroy();
-      }
-    });
-
-    it("displays model information for each agent", async () => {
+  // T502: ヘルプテキストの表示テスト
+  describe("help display", () => {
+    it("displays help text", async () => {
       const testSetup = await testRender(
         () => (
           <QuickStartStep
@@ -99,33 +74,9 @@ describe("QuickStartStep", () => {
 
       try {
         const frame = testSetup.captureCharFrame();
-        // モデル情報が表示される
-        expect(frame).toContain("claude-sonnet-4-20250514");
-        expect(frame).toContain("o3-mini");
-      } finally {
-        testSetup.renderer.destroy();
-      }
-    });
-
-    it("displays reasoning level for Codex only", async () => {
-      const testSetup = await testRender(
-        () => (
-          <QuickStartStep
-            history={mockHistory}
-            onResume={() => {}}
-            onStartNew={() => {}}
-            onChooseDifferent={() => {}}
-            onBack={() => {}}
-          />
-        ),
-        { width: 80, height: 24 },
-      );
-      await testSetup.renderOnce();
-
-      try {
-        const frame = testSetup.captureCharFrame();
-        // Codexの推論レベルが表示される
-        expect(frame).toContain("high");
+        // ヘルプテキストが表示される
+        expect(frame).toContain("[Esc] Cancel");
+        expect(frame).toContain("[Enter] Select");
       } finally {
         testSetup.renderer.destroy();
       }

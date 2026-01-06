@@ -17,48 +17,44 @@ export interface SelectInputProps {
   wrapSelection?: boolean;
 }
 
-export function SelectInput({
-  items,
-  selectedIndex,
-  onSelect,
-  onChange,
-  focused,
-  showDescription = false,
-  wrapSelection = false,
-}: SelectInputProps) {
-  const options: SelectOption[] = items.map((item) => ({
-    name: item.label,
-    description: item.description ?? "",
-    value: item.value,
-  }));
+export function SelectInput(props: SelectInputProps) {
+  // Solid.js ではpropsを分割代入するとreactivityが失われるため、propsを直接参照
+  const options = () =>
+    props.items.map((item) => ({
+      name: item.label,
+      description: item.description ?? "",
+      value: item.value,
+    })) as SelectOption[];
 
   const handleSelect = (index: number, option: SelectOption | null) => {
     if (index < 0) {
       return;
     }
-    const item = items[index];
+    const item = props.items[index];
     if (!item || !option) {
       return;
     }
-    onSelect?.(item);
+    props.onSelect?.(item);
   };
 
   const handleChange = (index: number, option: SelectOption | null) => {
     if (index < 0 || !option) {
-      onChange?.(null);
+      props.onChange?.(null);
       return;
     }
-    onChange?.(items[index] ?? null);
+    props.onChange?.(props.items[index] ?? null);
   };
 
   return (
     <box flexDirection="column" height={1}>
       <select
-        options={options}
-        {...(selectedIndex !== undefined && { selectedIndex })}
-        focused={focused}
-        showDescription={showDescription}
-        wrapSelection={wrapSelection}
+        options={options()}
+        {...(props.selectedIndex !== undefined && {
+          selectedIndex: props.selectedIndex,
+        })}
+        focused={props.focused}
+        showDescription={props.showDescription ?? false}
+        wrapSelection={props.wrapSelection ?? false}
         onSelect={handleSelect}
         onChange={handleChange}
       />
