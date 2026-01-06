@@ -14,6 +14,7 @@ import type { CodingAgentId } from "../../types.js";
 
 export interface StepProps {
   onBack: () => void;
+  focused?: boolean;
 }
 
 // アクション選択ステップ（既存を開く / 新規作成）
@@ -49,7 +50,7 @@ export function ActionSelectStep(props: ActionSelectStepProps) {
       <SelectInput
         items={ACTION_OPTIONS}
         onSelect={(item) => props.onSelect(item.value as BranchAction)}
-        focused={true}
+        focused={props.focused ?? true}
       />
       <text> </text>
       <text attributes={TextAttributes.DIM}>[Enter] Select [Esc] Cancel</text>
@@ -79,7 +80,7 @@ export function BranchTypeStep(props: BranchTypeStepProps) {
       <SelectInput
         items={BRANCH_TYPES}
         onSelect={(item) => props.onSelect(item.value)}
-        focused={true}
+        focused={props.focused ?? true}
       />
       <text> </text>
       <text attributes={TextAttributes.DIM}>[Enter] Select [Esc] Back</text>
@@ -107,7 +108,7 @@ export function BranchNameStep(props: BranchNameStepProps) {
         onChange={setName}
         onSubmit={(value) => props.onSubmit(value)}
         placeholder="Enter branch name..."
-        focused={true}
+        focused={props.focused ?? true}
       />
       <text> </text>
       <text attributes={TextAttributes.DIM}>[Enter] Confirm [Esc] Back</text>
@@ -132,6 +133,11 @@ const AGENTS: SelectInputItem[] = [
     value: "gemini-cli",
     description: "Google Gemini CLI",
   },
+  {
+    label: "OpenCode",
+    value: "opencode",
+    description: "OpenCode AI",
+  },
 ];
 
 export function AgentSelectStep(props: AgentSelectStepProps) {
@@ -144,7 +150,7 @@ export function AgentSelectStep(props: AgentSelectStepProps) {
       <SelectInput
         items={AGENTS}
         onSelect={(item) => props.onSelect(item.value)}
-        focused={true}
+        focused={props.focused ?? true}
       />
       <text> </text>
       <text attributes={TextAttributes.DIM}>[Enter] Select [Esc] Back</text>
@@ -184,7 +190,7 @@ export function ModelSelectStep(props: ModelSelectStepProps) {
       <SelectInput
         items={models()}
         onSelect={(item) => props.onSelect(item.value)}
-        focused={true}
+        focused={props.focused ?? true}
       />
       <text> </text>
       <text attributes={TextAttributes.DIM}>[Enter] Select [Esc] Back</text>
@@ -201,6 +207,7 @@ const REASONING_LEVELS: SelectInputItem[] = [
   { label: "low", value: "low", description: "Faster, less thorough" },
   { label: "medium", value: "medium", description: "Balanced" },
   { label: "high", value: "high", description: "Slower, more thorough" },
+  { label: "xhigh", value: "xhigh", description: "Extended high reasoning" },
 ];
 
 export function ReasoningLevelStep(props: ReasoningLevelStepProps) {
@@ -213,7 +220,7 @@ export function ReasoningLevelStep(props: ReasoningLevelStepProps) {
       <SelectInput
         items={REASONING_LEVELS}
         onSelect={(item) => props.onSelect(item.value)}
-        focused={true}
+        focused={props.focused ?? true}
       />
       <text> </text>
       <text attributes={TextAttributes.DIM}>[Enter] Select [Esc] Back</text>
@@ -250,7 +257,7 @@ export function ExecutionModeStep(props: ExecutionModeStepProps) {
       <SelectInput
         items={EXECUTION_MODES}
         onSelect={(item) => props.onSelect(item.value)}
-        focused={true}
+        focused={props.focused ?? true}
       />
       <text> </text>
       <text attributes={TextAttributes.DIM}>[Enter] Select [Esc] Back</text>
@@ -278,7 +285,7 @@ export function SkipPermissionsStep(props: SkipPermissionsStepProps) {
       <SelectInput
         items={SKIP_OPTIONS}
         onSelect={(item) => props.onSelect(item.value === "true")}
-        focused={true}
+        focused={props.focused ?? true}
       />
       <text> </text>
       <text attributes={TextAttributes.DIM}>[Enter] Select [Esc] Back</text>

@@ -29,9 +29,8 @@ export function WizardPopup(props: WizardPopupProps) {
         width="100%"
         height="100%"
         zIndex={50}
-      >
-        {/* Fill with empty content to create overlay */}
-      </box>
+        backgroundColor="black"
+      />
       {/* Popup content */}
       <box
         position="absolute"
@@ -43,6 +42,7 @@ export function WizardPopup(props: WizardPopupProps) {
         border
         borderStyle="single"
         borderColor="cyan"
+        backgroundColor="black"
         flexDirection="column"
         padding={1}
       >

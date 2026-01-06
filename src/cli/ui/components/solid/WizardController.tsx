@@ -81,6 +81,9 @@ export function WizardController(props: WizardControllerProps) {
   const [executionMode, setExecutionMode] =
     createSignal<ExecutionMode>("normal");
 
+  // キー伝播防止: 最初のフレームでは focused を無効にする
+  const [isInitialFrame, setIsInitialFrame] = createSignal(true);
+
   // Reset state when wizard becomes visible
   function getInitialStep(): WizardStep {
     // 履歴がある場合はクイック選択を表示
@@ -110,13 +113,23 @@ export function WizardController(props: WizardControllerProps) {
     const visible = props.visible;
     if (visible && !prevVisible) {
       resetWizard();
+      // キー伝播防止: 最初の数フレームでは focused を無効にする
+      // Enter キーが複数フレームにわたって伝播する可能性があるため、長めに設定
+      setIsInitialFrame(true);
+      // 十分な時間を置いて focused を有効化 (150ms)
+      setTimeout(() => setIsInitialFrame(false), 150);
     }
     prevVisible = visible;
   });
 
   // Handle keyboard events for step navigation
+  // T412: 最初のフレームでは Enter キーをブロックして伝播を防ぐ
   useKeyboard((key) => {
     if (!props.visible) return;
+    // 最初のフレームでは Enter キーを無視（ブランチ選択からの伝播防止）
+    if (isInitialFrame() && key.name === "return") {
+      return;
+    }
     if (key.name === "escape") {
       goBack();
     }
@@ -229,6 +242,7 @@ export function WizardController(props: WizardControllerProps) {
 
   const renderStep = () => {
     const currentStep = step();
+    const focused = !isInitialFrame();
 
     if (currentStep === "action-select") {
       return (
@@ -236,6 +250,7 @@ export function WizardController(props: WizardControllerProps) {
           branchName={props.selectedBranchName}
           onSelect={handleActionSelect}
           onBack={goBack}
+          focused={focused}
         />
       );
     }
@@ -248,13 +263,18 @@ export function WizardController(props: WizardControllerProps) {
           onStartNew={handleQuickStartNew}
           onChooseDifferent={handleChooseDifferent}
           onBack={goBack}
+          focused={focused}
         />
       );
     }
 
     if (currentStep === "branch-type") {
       return (
-        <BranchTypeStep onSelect={handleBranchTypeSelect} onBack={goBack} />
+        <BranchTypeStep
+          onSelect={handleBranchTypeSelect}
+          onBack={goBack}
+          focused={focused}
+        />
       );
     }
 
@@ -264,12 +284,19 @@ export function WizardController(props: WizardControllerProps) {
           branchType={branchType()}
           onSubmit={handleBranchNameSubmit}
           onBack={goBack}
+          focused={focused}
         />
       );
     }
 
     if (currentStep === "agent-select") {
-      return <AgentSelectStep onSelect={handleAgentSelect} onBack={goBack} />;
+      return (
+        <AgentSelectStep
+          onSelect={handleAgentSelect}
+          onBack={goBack}
+          focused={focused}
+        />
+      );
     }
 
     if (currentStep === "model-select") {
@@ -278,6 +305,7 @@ export function WizardController(props: WizardControllerProps) {
           agentId={selectedAgent() ?? "claude-code"}
           onSelect={handleModelSelect}
           onBack={goBack}
+          focused={focused}
         />
       );
     }
@@ -287,6 +315,7 @@ export function WizardController(props: WizardControllerProps) {
         <ReasoningLevelStep
           onSelect={handleReasoningLevelSelect}
           onBack={goBack}
+          focused={focused}
         />
       );
     }
@@ -296,6 +325,7 @@ export function WizardController(props: WizardControllerProps) {
         <ExecutionModeStep
           onSelect={handleExecutionModeSelect}
           onBack={goBack}
+          focused={focused}
         />
       );
     }
@@ -305,6 +335,7 @@ export function WizardController(props: WizardControllerProps) {
         <SkipPermissionsStep
           onSelect={handleSkipPermissionsSelect}
           onBack={goBack}
+          focused={focused}
         />
       );
     }

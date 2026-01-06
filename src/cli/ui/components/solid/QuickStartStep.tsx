@@ -17,6 +17,7 @@ export interface QuickStartStepProps {
   onStartNew: (entry: ToolSessionEntry) => void;
   onChooseDifferent: () => void;
   onBack: () => void;
+  focused?: boolean;
 }
 
 interface QuickStartItem extends SelectInputItem {
@@ -98,7 +99,7 @@ export function QuickStartStep(props: QuickStartStepProps) {
       <SelectInput
         items={items()}
         onSelect={handleSelect}
-        focused={true}
+        focused={props.focused ?? true}
         showDescription={true}
       />
       <text> </text>
