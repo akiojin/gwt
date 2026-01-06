@@ -23,7 +23,7 @@
     "start:web": "node ./dist/index.js serve",
     "prepare": "husky",
     "pretest": "bun run build:cli",
-    "test": "bun test",
+    "test": "bun test tests/unit tests/logging tests/quality tests/web src",
     "test:watch": "bun test --watch",
     "test:coverage": "bun test --coverage",
     "test:e2e": "playwright test",
