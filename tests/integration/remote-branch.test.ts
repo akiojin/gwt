@@ -7,11 +7,15 @@ vi.mock("execa", () => ({
   execa: vi.fn(),
 }));
 
+const existsSyncMock = vi.hoisted(() => vi.fn(() => false));
+
 vi.mock("node:fs", () => ({
-  existsSync: vi.fn(() => true),
+  existsSync: (...args: unknown[]) => existsSyncMock(...args),
 }));
 
 const mkdirMock = vi.hoisted(() => vi.fn(async () => undefined));
+const readFileMock = vi.hoisted(() => vi.fn(async () => ""));
+const writeFileMock = vi.hoisted(() => vi.fn(async () => undefined));
 
 vi.mock("node:fs/promises", async () => {
   const actual =
@@ -22,6 +26,8 @@ vi.mock("node:fs/promises", async () => {
   const mocked = {
     ...actual,
     mkdir: mkdirMock,
+    readFile: readFileMock,
+    writeFile: writeFileMock,
   };
 
   return {
@@ -29,16 +35,24 @@ vi.mock("node:fs/promises", async () => {
     default: {
       ...actual.default,
       mkdir: mkdirMock,
+      readFile: readFileMock,
+      writeFile: writeFileMock,
     },
   };
 });
 
 import { execa } from "execa";
 
+const execaMock = vi.mocked(execa);
+
 describe("Integration: Remote Branch to Local Worktree", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mkdirMock.mockClear();
+    existsSyncMock.mockClear();
+    existsSyncMock.mockReturnValue(false);
+    readFileMock.mockClear();
+    writeFileMock.mockClear();
   });
 
   afterEach(() => {
@@ -47,7 +61,7 @@ describe("Integration: Remote Branch to Local Worktree", () => {
 
   describe("Remote Branch Flow (T109)", () => {
     it("should create local branch from remote and create worktree", async () => {
-      (execa as any).mockImplementation(
+      execaMock.mockImplementation(
         async (command: string, args?: readonly string[]) => {
           // getRemoteBranches
           if (args?.[0] === "branch" && args.includes("-r")) {
@@ -129,7 +143,7 @@ branch refs/heads/main
     });
 
     it("should handle remote branch that already has local counterpart", async () => {
-      (execa as any).mockImplementation(
+      execaMock.mockImplementation(
         async (command: string, args?: readonly string[]) => {
           // branchExists - local branch already exists
           if (args?.[0] === "show-ref" && args.includes("--verify")) {
@@ -199,7 +213,7 @@ branch refs/heads/main
     });
 
     it("should handle worktree creation with custom base branch", async () => {
-      (execa as any).mockImplementation(
+      execaMock.mockImplementation(
         async (command: string, args?: readonly string[]) => {
           if (args?.[0] === "worktree" && args[1] === "add") {
             return {
@@ -236,7 +250,7 @@ branch refs/heads/main
 
   describe("Error Handling", () => {
     it("should handle remote branch fetch errors", async () => {
-      (execa as any).mockRejectedValue(new Error("Network error"));
+      execaMock.mockRejectedValue(new Error("Network error"));
 
       await expect(git.getRemoteBranches()).rejects.toThrow(
         "Failed to get remote branches",
@@ -244,7 +258,7 @@ branch refs/heads/main
     });
 
     it("should handle branch creation conflicts", async () => {
-      (execa as any).mockImplementation(
+      execaMock.mockImplementation(
         async (command: string, args?: readonly string[]) => {
           if (
             args?.[0] === "worktree" &&

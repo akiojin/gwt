@@ -395,7 +395,13 @@ describe("utils/session", () => {
     const id = await findLatestClaudeSessionId("/repos/sample");
     expect(id).toBe(jsonlUuid);
     expect(readdir).toHaveBeenCalledWith(
-      path.join("/home/test", ".claude", "projects", "-repos-sample", "sessions"),
+      path.join(
+        "/home/test",
+        ".claude",
+        "projects",
+        "-repos-sample",
+        "sessions",
+      ),
       { withFileTypes: true },
     );
   });

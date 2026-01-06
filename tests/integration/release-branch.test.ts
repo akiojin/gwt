@@ -7,11 +7,15 @@ vi.mock("execa", () => ({
   execa: vi.fn(),
 }));
 
+const existsSyncMock = vi.hoisted(() => vi.fn(() => false));
+
 vi.mock("node:fs", () => ({
-  existsSync: vi.fn(() => true),
+  existsSync: (...args: unknown[]) => existsSyncMock(...args),
 }));
 
 const mkdirMock = vi.hoisted(() => vi.fn(async () => undefined));
+const readFileMock = vi.hoisted(() => vi.fn(async () => ""));
+const writeFileMock = vi.hoisted(() => vi.fn(async () => undefined));
 
 vi.mock("node:fs/promises", async () => {
   const actual =
@@ -22,6 +26,8 @@ vi.mock("node:fs/promises", async () => {
   const mocked = {
     ...actual,
     mkdir: mkdirMock,
+    readFile: readFileMock,
+    writeFile: writeFileMock,
   };
 
   return {
@@ -29,16 +35,24 @@ vi.mock("node:fs/promises", async () => {
     default: {
       ...actual.default,
       mkdir: mkdirMock,
+      readFile: readFileMock,
+      writeFile: writeFileMock,
     },
   };
 });
 
 import { execa } from "execa";
 
+const execaMock = vi.mocked(execa);
+
 describe("Integration: Release Branch and Version Management (T208)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mkdirMock.mockClear();
+    existsSyncMock.mockClear();
+    existsSyncMock.mockReturnValue(false);
+    readFileMock.mockClear();
+    writeFileMock.mockClear();
   });
 
   afterEach(() => {
@@ -47,7 +61,7 @@ describe("Integration: Release Branch and Version Management (T208)", () => {
 
   describe("Release Branch Creation Flow", () => {
     it("should create release branch with version bump", async () => {
-      (execa as any).mockResolvedValue({
+      execaMock.mockResolvedValue({
         stdout: "",
         stderr: "",
         exitCode: 0,
@@ -73,7 +87,7 @@ describe("Integration: Release Branch and Version Management (T208)", () => {
     });
 
     it("should handle patch release", async () => {
-      (execa as any).mockResolvedValue({ stdout: "", stderr: "", exitCode: 0 });
+      execaMock.mockResolvedValue({ stdout: "", stderr: "", exitCode: 0 });
 
       const currentVersion = "2.0.0";
       const newVersion = git.calculateNewVersion(currentVersion, "patch");
@@ -83,7 +97,7 @@ describe("Integration: Release Branch and Version Management (T208)", () => {
     });
 
     it("should handle major release", async () => {
-      (execa as any).mockResolvedValue({ stdout: "", stderr: "", exitCode: 0 });
+      execaMock.mockResolvedValue({ stdout: "", stderr: "", exitCode: 0 });
 
       const currentVersion = "1.9.9";
       const newVersion = git.calculateNewVersion(currentVersion, "major");
@@ -95,7 +109,7 @@ describe("Integration: Release Branch and Version Management (T208)", () => {
 
   describe("Version Update in Worktree", () => {
     it("should update version in release worktree", async () => {
-      (execa as any).mockImplementation(
+      execaMock.mockImplementation(
         async (command: string, args?: readonly string[]) => {
           if (args?.[0] === "checkout") {
             return { stdout: "", stderr: "", exitCode: 0 };
@@ -165,7 +179,7 @@ branch refs/heads/develop
 
   describe("Release Workflow Integration", () => {
     it("should complete full release workflow", async () => {
-      (execa as any).mockImplementation(
+      execaMock.mockImplementation(
         async (command: string, args?: readonly string[]) => {
           if (args?.[0] === "checkout") {
             return { stdout: "", stderr: "", exitCode: 0 };
@@ -235,7 +249,7 @@ branch refs/heads/develop
     });
 
     it("should handle release branch creation failure", async () => {
-      (execa as any).mockRejectedValue(new Error("Branch already exists"));
+      execaMock.mockRejectedValue(new Error("Branch already exists"));
 
       await expect(
         git.createBranch("release/1.0.0", "develop"),

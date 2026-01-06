@@ -1,9 +1,15 @@
 import React from "react";
 import type { Mock } from "vitest";
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
-import type { CustomAITool } from "../../../../../src/types/api.js";
+import type { ApiCodingAgent } from "../../../../../src/types/api.js";
 import { ConfigPage } from "../../../../../src/web/client/src/pages/ConfigPage.js";
 import {
   useConfig,
@@ -18,7 +24,7 @@ vi.mock("../../../../../src/web/client/src/hooks/useConfig.js", () => ({
 const mockedUseConfig = useConfig as unknown as Mock;
 const mockedUseUpdateConfig = useUpdateConfig as unknown as Mock;
 
-const sampleTools: CustomAITool[] = [
+const sampleAgents: ApiCodingAgent[] = [
   {
     id: "claude-code",
     displayName: "Claude Code",
@@ -40,7 +46,11 @@ describe("ConfigPage", () => {
 
   beforeEach(() => {
     mutateAsync.mockReset();
-    mockedUseConfig.mockReturnValue({ data: { tools: sampleTools, env: [], version: "1" }, isLoading: false, error: null });
+    mockedUseConfig.mockReturnValue({
+      data: { codingAgents: sampleAgents, env: [], version: "1" },
+      isLoading: false,
+      error: null,
+    });
     mockedUseUpdateConfig.mockReturnValue({ mutateAsync, isPending: false });
   });
 
@@ -54,14 +64,14 @@ describe("ConfigPage", () => {
   it("renders existing tools", () => {
     renderPage();
     expect(screen.getByText("Claude Code")).toBeInTheDocument();
-    expect(screen.getByText("カスタムツールを追加")).toBeInTheDocument();
+    expect(screen.getByText("Coding Agent を追加")).toBeInTheDocument();
   });
 
   it("adds a new custom tool", async () => {
     const newTool = {
       id: "my-tool",
       displayName: "My Tool",
-      executionType: "command" as const,
+      executionType: "bunx" as const,
       command: "aider",
       modeArgs: { normal: [], continue: [], resume: [] },
       defaultArgs: null,
@@ -73,19 +83,44 @@ describe("ConfigPage", () => {
       updatedAt: "2025-11-11T00:00:00Z",
     };
 
-    mutateAsync.mockResolvedValue({ tools: [...sampleTools, newTool], env: [], version: "2" });
+    mutateAsync.mockResolvedValue({
+      codingAgents: [...sampleAgents, newTool],
+      env: [],
+      version: "2",
+    });
 
     renderPage();
 
-    fireEvent.click(screen.getByText("カスタムツールを追加"));
+    fireEvent.click(screen.getByText("Coding Agent を追加"));
 
-    fireEvent.change(screen.getByLabelText("ツールID *"), { target: { value: "my-tool" } });
-    fireEvent.change(screen.getByLabelText("表示名 *"), { target: { value: "My Tool" } });
-    fireEvent.change(screen.getByLabelText("実行タイプ *"), { target: { value: "command" } });
-    fireEvent.change(screen.getByLabelText(/コマンド/i), { target: { value: "aider" } });
+    const idInput = screen
+      .getByText("Agent ID *")
+      .parentElement?.querySelector("input");
+    const nameInput = screen
+      .getByText("表示名 *")
+      .parentElement?.querySelector("input");
 
-    const saveButtons = screen.getAllByRole("button", { name: "保存" });
-    fireEvent.click(saveButtons[1]);
+    if (!idInput || !nameInput) {
+      throw new Error("フォーム入力欄が見つかりません");
+    }
+
+    fireEvent.change(idInput, { target: { value: "my-tool" } });
+    fireEvent.change(nameInput, { target: { value: "My Tool" } });
+
+    const commandInput = screen
+      .getByText("パッケージ名 *")
+      .parentElement?.querySelector("input");
+    if (!commandInput) {
+      throw new Error("パッケージ名入力欄が見つかりません");
+    }
+    fireEvent.change(commandInput, { target: { value: "aider" } });
+
+    const formTitle = screen.getByText("新規 Coding Agent");
+    const form = formTitle.closest("form");
+    if (!form) {
+      throw new Error("フォームが見つかりません");
+    }
+    fireEvent.click(within(form).getByRole("button", { name: "保存" }));
 
     await waitFor(() => {
       expect(mutateAsync).toHaveBeenCalled();
@@ -93,11 +128,11 @@ describe("ConfigPage", () => {
 
     const payload = mutateAsync.mock.calls[0][0];
     expect(payload.env).toEqual([]);
-    expect(payload.tools).toHaveLength(2);
-    expect(payload.tools[1]).toMatchObject({
+    expect(payload.codingAgents).toHaveLength(2);
+    expect(payload.codingAgents[1]).toMatchObject({
       id: "my-tool",
       command: "aider",
-      executionType: "command",
+      executionType: "bunx",
     });
   });
 });
