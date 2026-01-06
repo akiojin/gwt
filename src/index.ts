@@ -42,7 +42,12 @@ import {
   findLatestClaudeSession,
   findLatestGeminiSession,
 } from "./utils/session.js";
-import { getPackageVersion } from "./utils.js";
+import {
+  getPackageVersion,
+  setupExitHandlers,
+  registerExitCleanup,
+  clearExitCleanup,
+} from "./utils.js";
 import { findLatestClaudeSessionId } from "./utils/session.js";
 import { resolveContinueSessionId } from "./cli/ui/utils/continueSession.js";
 import { normalizeModelId } from "./cli/ui/utils/modelOptions.js";
@@ -171,12 +176,24 @@ async function showVersion(): Promise<void> {
 }
 
 /**
+ * Performs terminal cleanup when exiting.
+ */
+function performTerminalCleanup(): void {
+  const terminal = getTerminalStreams();
+  terminal.exitRawMode();
+  resetTerminalModes(terminal.stdout);
+}
+
+/**
  * Main function for OpenTUI UI
  * Returns SelectionResult if user made selections, undefined if user quit
  */
 async function mainSolidUI(): Promise<SelectionResult | undefined> {
   const { renderSolidApp } = await import("./opentui/index.solid.js");
   const terminal = getTerminalStreams();
+
+  // Register cleanup for signal handlers
+  registerExitCleanup(performTerminalCleanup);
 
   let selectionResult: SelectionResult | undefined;
   const mousePreference = process.env.GWT_UI_MOUSE?.trim().toLowerCase();
@@ -225,14 +242,14 @@ async function mainSolidUI(): Promise<SelectionResult | undefined> {
       },
     );
   } finally {
-    terminal.exitRawMode();
-    resetTerminalModes(terminal.stdout);
+    performTerminalCleanup();
     if (typeof terminal.stdin.pause === "function") {
       terminal.stdin.pause();
     }
     terminal.stdin.removeAllListeners?.("data");
     terminal.stdin.removeAllListeners?.("keypress");
     terminal.stdin.removeAllListeners?.("readable");
+    clearExitCleanup();
   }
 
   return selectionResult;
@@ -856,6 +873,9 @@ export async function runInteractiveLoop(
  * Main entry point
  */
 export async function main(): Promise<void> {
+  // Setup global signal handlers for clean exit
+  setupExitHandlers();
+
   // Parse command line arguments
   const args = process.argv.slice(2);
   const showVersionFlag = args.includes("-v") || args.includes("--version");
@@ -900,6 +920,9 @@ export async function main(): Promise<void> {
   }
 
   await runInteractiveLoop();
+
+  // Ensure clean exit with code 0
+  process.exit(0);
 }
 
 export function isEntryPoint(metaUrl: string, argv1?: string): boolean {

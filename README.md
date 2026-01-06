@@ -183,7 +183,7 @@ The repository includes an automated PR merge workflow that streamlines the deve
 - Create PRs as drafts to prevent auto-merge: `gh pr create --draft`
 - The auto-merge workflow respects this setting and will skip draft PRs
 
-For technical details, see [specs/SPEC-cff08403/](specs/SPEC-cff08403/).
+For technical details, see the `.github/workflows/auto-merge.yml` workflow file.
 
 ## System Requirements
 
@@ -338,7 +338,7 @@ bun run start
 
 ## Release Process
 
-We ship releases through release-please. End users can simply install the latest published package (via npm or the GitHub Releases tab) and rely on versioned artifacts. Maintainers who need the full workflow should read [docs/release-guide.md](./docs/release-guide.md) (日本語版: [docs/release-guide.ja.md](./docs/release-guide.ja.md)) and the in-depth specs under `specs/SPEC-57fde06f/`.
+We ship releases through release-please. End users can simply install the latest published package (via npm or the GitHub Releases tab) and rely on versioned artifacts. Maintainers who need the full workflow should read [docs/release-guide.md](./docs/release-guide.md) (日本語版: [docs/release-guide.ja.md](./docs/release-guide.ja.md)).
 
 ## Troubleshooting
 

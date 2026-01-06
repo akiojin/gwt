@@ -183,7 +183,7 @@ gwt
 - ドラフトPRとして作成すると自動マージを防げます: `gh pr create --draft`
 - 自動マージワークフローはこの設定を尊重し、ドラフトPRはスキップします
 
-技術的な詳細については、[specs/SPEC-cff08403/](specs/SPEC-cff08403/)を参照してください。
+技術的な詳細については、`.github/workflows/auto-merge.yml` ワークフローファイルを参照してください。
 
 ## システム要件
 
@@ -338,7 +338,7 @@ bun run start
 
 ## リリースプロセス
 
-利用者の方は GitHub Releases もしくは npm で公開される最新版をご利用ください。リリース自動化の概要は [docs/release-guide.md](./docs/release-guide.md)（日本語版: [docs/release-guide.ja.md](./docs/release-guide.ja.md)）にまとめており、詳細設計は `specs/SPEC-57fde06f/` を参照してください。
+利用者の方は GitHub Releases もしくは npm で公開される最新版をご利用ください。リリース自動化の概要は [docs/release-guide.md](./docs/release-guide.md)（日本語版: [docs/release-guide.ja.md](./docs/release-guide.ja.md)）にまとめています。
 
 ## トラブルシューティング
 
