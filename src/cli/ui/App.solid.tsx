@@ -9,6 +9,7 @@ import {
 } from "solid-js";
 import type {
   BranchItem,
+  BranchInfo,
   CodingAgentId,
   InferenceLevel,
   SelectedBranchState,
@@ -39,7 +40,12 @@ import {
   resolveBaseBranchLabel,
   resolveBaseBranchRef,
 } from "./utils/baseBranch.js";
-import { getAllBranches, getRepositoryRoot } from "../../git.js";
+import {
+  getAllBranches,
+  getCurrentBranch,
+  getLocalBranches,
+  getRepositoryRoot,
+} from "../../git.js";
 import { listAdditionalWorktrees } from "../../worktree.js";
 import { detectAllToolStatuses, type ToolStatus } from "../../utils/command.js";
 import { getConfig } from "../../config/index.js";
@@ -220,6 +226,8 @@ export function AppSolid(props: AppSolidProps) {
 
   const logDir = createMemo(() => resolveLogDir(workingDirectory()));
   let logNotificationTimer: ReturnType<typeof setTimeout> | null = null;
+  const BRANCH_LOAD_TIMEOUT_MS = 3000;
+  const BRANCH_FULL_LOAD_TIMEOUT_MS = 8000;
 
   const isHelpKey = (key: {
     name: string;
@@ -300,49 +308,52 @@ export function AppSolid(props: AppSolidProps) {
     setError(null);
     try {
       const repoRoot = await getRepositoryRoot();
-      const [branches, worktrees] = await Promise.all([
-        getAllBranches(repoRoot),
-        listAdditionalWorktrees(),
-      ]);
+      const worktreesPromise = listAdditionalWorktrees();
+      const localBranchesPromise = getLocalBranches(repoRoot);
+      const currentBranchPromise = getCurrentBranch(repoRoot);
 
-      const localBranchNames = new Set(
-        branches.filter((branch) => branch.type === "local").map((b) => b.name),
-      );
+      const localBranches = await withTimeout(
+        localBranchesPromise,
+        BRANCH_LOAD_TIMEOUT_MS,
+      ).catch(() => []);
+      const currentBranch = await withTimeout(
+        currentBranchPromise,
+        BRANCH_LOAD_TIMEOUT_MS,
+      ).catch(() => null);
 
-      const filtered = branches.filter((branch) => {
-        if (branch.type === "remote") {
-          const remoteName = branch.name.replace(/^origin\//, "");
-          return !localBranchNames.has(remoteName);
-        }
-        return true;
-      });
-
-      const worktreeMap = new Map<string, WorktreeInfo>();
-      for (const worktree of worktrees) {
-        worktreeMap.set(worktree.branch, {
-          path: worktree.path,
-          locked: false,
-          prunable: worktree.isAccessible === false,
-          isAccessible: worktree.isAccessible ?? true,
-          ...(worktree.hasUncommittedChanges !== undefined
-            ? { hasUncommittedChanges: worktree.hasUncommittedChanges }
-            : {}),
+      if (currentBranch) {
+        localBranches.forEach((branch) => {
+          if (branch.name === currentBranch) {
+            branch.isCurrent = true;
+          }
         });
       }
 
-      const enriched = filtered.map((branch) => {
-        if (branch.type === "local") {
-          const worktree = worktreeMap.get(branch.name);
-          if (worktree) {
-            return { ...branch, worktree };
-          }
-        }
-        return branch;
-      });
+      const worktrees = await withTimeout(
+        worktreesPromise,
+        BRANCH_LOAD_TIMEOUT_MS,
+      ).catch(() => []);
 
-      const items = formatBranchItems(enriched, worktreeMap);
-      setBranchItems(items);
-      setStats(buildStats(items));
+      const initial = buildBranchList(localBranches, worktrees);
+      setBranchItems(initial.items);
+      setStats(buildStats(initial.items));
+
+      void (async () => {
+        const [branches, latestWorktrees] = await Promise.all([
+          withTimeout(
+            getAllBranches(repoRoot),
+            BRANCH_FULL_LOAD_TIMEOUT_MS,
+          ).catch(() => localBranches),
+          withTimeout(
+            listAdditionalWorktrees(),
+            BRANCH_FULL_LOAD_TIMEOUT_MS,
+          ).catch(() => worktrees),
+        ]);
+
+        const full = buildBranchList(branches, latestWorktrees);
+        setBranchItems(full.items);
+        setStats(buildStats(full.items));
+      })();
     } catch (err) {
       setError(err instanceof Error ? err : new Error(String(err)));
     } finally {
@@ -763,3 +774,62 @@ export function AppSolid(props: AppSolidProps) {
     </>
   );
 }
+const withTimeout = async <T,>(
+  promise: Promise<T>,
+  timeoutMs: number,
+): Promise<T> =>
+  new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error("timeout"));
+    }, timeoutMs);
+
+    promise
+      .then((value) => {
+        clearTimeout(timer);
+        resolve(value);
+      })
+      .catch((err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+  });
+
+const buildBranchList = (branches: BranchInfo[], worktrees: WorktreeInfo[]) => {
+  const localBranchNames = new Set(
+    branches.filter((branch) => branch.type === "local").map((b) => b.name),
+  );
+
+  const filtered = branches.filter((branch) => {
+    if (branch.type === "remote") {
+      const remoteName = branch.name.replace(/^origin\//, "");
+      return !localBranchNames.has(remoteName);
+    }
+    return true;
+  });
+
+  const worktreeMap = new Map<string, WorktreeInfo>();
+  for (const worktree of worktrees) {
+    worktreeMap.set(worktree.branch, {
+      path: worktree.path,
+      locked: false,
+      prunable: worktree.isAccessible === false,
+      isAccessible: worktree.isAccessible ?? true,
+      ...(worktree.hasUncommittedChanges !== undefined
+        ? { hasUncommittedChanges: worktree.hasUncommittedChanges }
+        : {}),
+    });
+  }
+
+  const enriched = filtered.map((branch) => {
+    if (branch.type === "local") {
+      const worktree = worktreeMap.get(branch.name);
+      if (worktree) {
+        return { ...branch, worktree };
+      }
+    }
+    return branch;
+  });
+
+  const items = formatBranchItems(enriched, worktreeMap);
+  return { items, worktreeMap };
+};
