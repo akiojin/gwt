@@ -150,19 +150,9 @@ export const defaultKeybindings: KeybindingDef[] = [
     description: "Move up",
   },
   {
-    action: "navigate-up",
-    key: { key: Keys.K },
-    description: "Move up (vim)",
-  },
-  {
     action: "navigate-down",
     key: { key: Keys.DOWN },
     description: "Move down",
-  },
-  {
-    action: "navigate-down",
-    key: { key: Keys.J },
-    description: "Move down (vim)",
   },
   {
     action: "page-up",
