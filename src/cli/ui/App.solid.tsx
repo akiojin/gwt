@@ -490,6 +490,7 @@ export function AppSolid(props: AppSolidProps) {
           loading={loading()}
           error={error()}
           loadingIndicatorDelay={props.loadingIndicatorDelay ?? 0}
+          lastUpdated={stats().lastUpdated}
           version={version()}
           workingDirectory={workingDirectory()}
           toolStatuses={toolStatuses()}

@@ -136,6 +136,17 @@ describe("Solid BranchListScreen", () => {
     }
   });
 
+  it("shows selected branch full path", async () => {
+    const branches = [createBranch("feature/long-branch-name")];
+    const { captureCharFrame, cleanup } = await renderScreen(branches);
+
+    try {
+      expect(captureCharFrame()).toContain("Branch: feature/long-branch-name");
+    } finally {
+      cleanup();
+    }
+  });
+
   it("shows error message", async () => {
     const branches: BranchItem[] = [];
     const error = new Error("Failed to load branches");

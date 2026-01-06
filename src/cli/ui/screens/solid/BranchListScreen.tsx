@@ -906,6 +906,15 @@ export function BranchListScreen(props: BranchListScreenProps) {
     </box>
   );
 
+  const selectedBranchLabel = createMemo(() => {
+    const branches = filteredBranches();
+    if (branches.length === 0) {
+      return "(none)";
+    }
+    const selected = branches[selectedIndex()];
+    return selected?.label ?? selected?.name ?? "(none)";
+  });
+
   return (
     <box flexDirection="column" height={terminal().height || 24}>
       <box flexDirection="column">
@@ -1006,6 +1015,10 @@ export function BranchListScreen(props: BranchListScreenProps) {
           )}
         </text>
       )}
+
+      <text attributes={TextAttributes.DIM}>
+        {padLine(`Branch: ${selectedBranchLabel()}`, layoutWidth())}
+      </text>
 
       {renderSegmentLine(footerSegments())}
     </box>
