@@ -16,6 +16,47 @@ export interface StepProps {
   onBack: () => void;
 }
 
+// アクション選択ステップ（既存を開く / 新規作成）
+export type BranchAction = "open-existing" | "create-new";
+
+export interface ActionSelectStepProps extends StepProps {
+  branchName: string;
+  onSelect: (action: BranchAction) => void;
+}
+
+const ACTION_OPTIONS: SelectInputItem[] = [
+  {
+    label: "Open existing worktree",
+    value: "open-existing",
+    description: "Open the worktree for this branch",
+  },
+  {
+    label: "Create new branch",
+    value: "create-new",
+    description: "Create a new branch based on this one",
+  },
+];
+
+export function ActionSelectStep(props: ActionSelectStepProps) {
+  return (
+    <box flexDirection="column">
+      <text fg="cyan" attributes={TextAttributes.BOLD}>
+        Branch: {props.branchName}
+      </text>
+      <text> </text>
+      <text>What would you like to do?</text>
+      <text> </text>
+      <SelectInput
+        items={ACTION_OPTIONS}
+        onSelect={(item) => props.onSelect(item.value as BranchAction)}
+        focused={true}
+      />
+      <text> </text>
+      <text attributes={TextAttributes.DIM}>[Enter] Select [Esc] Cancel</text>
+    </box>
+  );
+}
+
 // T405: ブランチタイプ選択ステップ
 export interface BranchTypeStepProps extends StepProps {
   onSelect: (type: string) => void;

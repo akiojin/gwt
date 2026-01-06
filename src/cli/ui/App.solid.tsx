@@ -189,7 +189,6 @@ export function AppSolid(props: AppSolidProps) {
   const [screenStack, setScreenStack] = createSignal<AppScreen[]>([]);
   const [helpVisible, setHelpVisible] = createSignal(false);
   const [wizardVisible, setWizardVisible] = createSignal(false);
-  const [wizardIsNewBranch, setWizardIsNewBranch] = createSignal(false);
 
   const [branchItems, setBranchItems] = createSignal<BranchItem[]>(
     props.branches ?? [],
@@ -574,29 +573,29 @@ export function AppSolid(props: AppSolidProps) {
     setSelectedTool(null);
     setSelectedMode("normal");
     // FR-044: ウィザードポップアップをレイヤー表示
-    setWizardIsNewBranch(false);
     setWizardVisible(true);
   };
 
   const handleQuickCreate = (branch: BranchItem | null) => {
+    // 選択中のブランチをベースにウィザードを開始
+    if (branch) {
+      setSelectedBranch(toSelectedBranchState(branch));
+    }
     setCreationSource(branch ? toSelectedBranchState(branch) : null);
     setCreateBranchName("");
     setSuppressCreateKey("n");
-    // FR-052: 新規ブランチ作成時はウィザードでブランチタイプ選択から開始
-    setWizardIsNewBranch(true);
+    // FR-044: ウィザードポップアップをレイヤー表示（アクション選択から開始）
     setWizardVisible(true);
   };
 
   // FR-049: Escapeキーでウィザードをキャンセル
   const handleWizardClose = () => {
     setWizardVisible(false);
-    setWizardIsNewBranch(false);
   };
 
   // ウィザード完了時の処理
   const handleWizardComplete = (result: WizardResult) => {
     setWizardVisible(false);
-    setWizardIsNewBranch(false);
 
     const branch = selectedBranch();
     if (!branch) {
@@ -604,11 +603,13 @@ export function AppSolid(props: AppSolidProps) {
     }
 
     // 新規ブランチ作成の場合、ブランチ名を設定
+    const isCreatingNew = result.isNewBranch ?? false;
     const finalBranchName = result.branchName
       ? `${result.branchType ?? ""}${result.branchName}`
       : branch.name;
 
-    const baseBranchRef = wizardIsNewBranch() ? newBranchBaseRef() : null;
+    // 新規作成時は選択中のブランチがベースとなる
+    const baseBranchRef = isCreatingNew ? branch.name : null;
     const normalizedModel = normalizeModelId(result.tool, result.model);
 
     exitApp({
@@ -616,7 +617,7 @@ export function AppSolid(props: AppSolidProps) {
       displayName: branch.displayName,
       branchType: branch.branchType,
       ...(branch.remoteBranch ? { remoteBranch: branch.remoteBranch } : {}),
-      ...(wizardIsNewBranch()
+      ...(isCreatingNew
         ? {
             isNewBranch: true,
             ...(baseBranchRef ? { baseBranch: baseBranchRef } : {}),
@@ -1320,7 +1321,7 @@ export function AppSolid(props: AppSolidProps) {
       {/* FR-044: ウィザードポップアップをレイヤー表示 */}
       <WizardController
         visible={wizardVisible()}
-        isNewBranch={wizardIsNewBranch()}
+        selectedBranchName={selectedBranch()?.name ?? ""}
         history={[] as ToolSessionEntry[]}
         onClose={handleWizardClose}
         onComplete={handleWizardComplete}

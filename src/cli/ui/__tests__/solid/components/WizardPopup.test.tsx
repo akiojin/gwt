@@ -17,7 +17,9 @@ const renderWizard = async (
         visible={props.visible}
         onClose={props.onClose ?? (() => {})}
         onComplete={props.onComplete ?? (() => {})}
-      />
+      >
+        <text>Test Content</text>
+      </WizardPopup>
     ),
     size,
   );
@@ -41,8 +43,8 @@ describe("WizardPopup", () => {
 
       try {
         const frame = captureCharFrame();
-        // ウィザードポップアップのタイトルまたは枠線が表示されることを確認
-        expect(frame).toContain("Select");
+        // ウィザードポップアップの枠線が表示されることを確認
+        expect(frame).toMatch(/[┌┐└┘│─]/);
       } finally {
         cleanup();
       }
@@ -55,15 +57,15 @@ describe("WizardPopup", () => {
 
       try {
         const frame = captureCharFrame();
-        // ウィザードポップアップが表示されないことを確認
-        expect(frame).not.toContain("Select");
+        // ウィザードポップアップが表示されないことを確認（枠線がない）
+        expect(frame).not.toMatch(/[┌┐└┘│─]/);
       } finally {
         cleanup();
       }
     });
   });
 
-  // T402: 背景オーバーレイ（半透過）の表示テスト
+  // T402: 背景オーバーレイの表示テスト
   describe("overlay", () => {
     it("renders background overlay when visible", async () => {
       const { captureCharFrame, cleanup } = await renderWizard({
@@ -80,25 +82,26 @@ describe("WizardPopup", () => {
     });
   });
 
-  // T403: ウィザードはステップ表示を持つ
-  describe("step display", () => {
-    it("shows step indicator when visible", async () => {
+  // T403: ウィザードは子コンテンツを表示する
+  describe("content display", () => {
+    it("shows children content when visible", async () => {
+      // デフォルトのTest Contentが表示されることを確認
       const { captureCharFrame, cleanup } = await renderWizard({
         visible: true,
       });
 
       try {
         const frame = captureCharFrame();
-        // ステップインジケーターが表示されることを確認
-        expect(frame).toContain("Step");
+        // 子コンテンツが表示されることを確認
+        expect(frame).toContain("Test Content");
       } finally {
         cleanup();
       }
     });
   });
 
-  // T404: ステップ表示の確認テスト
-  describe("step content", () => {
+  // T404: 枠線表示の確認テスト
+  describe("border display", () => {
     it("displays wizard content when visible", async () => {
       const { captureCharFrame, cleanup } = await renderWizard({
         visible: true,
@@ -106,9 +109,8 @@ describe("WizardPopup", () => {
 
       try {
         const frame = captureCharFrame();
-        // ウィザードコンテンツが表示されることを確認
-        expect(frame).toContain("Select");
-        expect(frame).toContain("Step 1");
+        // デフォルトコンテンツが表示されることを確認
+        expect(frame).toContain("Test Content");
       } finally {
         cleanup();
       }

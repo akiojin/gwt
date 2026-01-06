@@ -1,55 +1,27 @@
 /** @jsxImportSource @opentui/solid */
-import { TextAttributes } from "@opentui/core";
-import { Show, createSignal, createEffect } from "solid-js";
-import { useKeyboard } from "@opentui/solid";
+import { Show } from "solid-js";
+import type { JSX } from "solid-js";
 
 export interface WizardPopupProps {
   visible: boolean;
   onClose: () => void;
   onComplete: (result: unknown) => void;
-  children?: unknown;
+  children?: JSX.Element;
 }
 
 /**
- * WizardPopup - ブランチ選択後のウィザードポップアップ
+ * WizardPopup - ブランチ選択後のウィザードポップアップコンテナ
  *
  * FR-044: ブランチ選択時にレイヤー表示
- * FR-045: 背景を半透過オーバーレイで覆う
+ * FR-045: 背景を不透明オーバーレイで覆う
  * FR-046: z-indexで前面表示
- * FR-047: ステップを同一ポップアップ内で切り替え
- * FR-048: キーバインドヘルプ表示
- * FR-049: Escapeでウィザード終了
+ *
+ * ステップ管理とキーボード処理はWizardControllerで行う
  */
 export function WizardPopup(props: WizardPopupProps) {
-  const [step, setStep] = createSignal(0);
-
-  // Reset step when popup becomes visible
-  createEffect(() => {
-    if (props.visible) {
-      setStep(0);
-    }
-  });
-
-  // Handle keyboard events
-  useKeyboard((key) => {
-    if (!props.visible) {
-      return;
-    }
-
-    if (key.name === "escape") {
-      if (step() > 0) {
-        // Go back to previous step
-        setStep((s) => s - 1);
-      } else {
-        // Close wizard on first step
-        props.onClose();
-      }
-    }
-  });
-
   return (
     <Show when={props.visible}>
-      {/* Background overlay */}
+      {/* Background overlay - fills entire screen to hide background */}
       <box
         position="absolute"
         top={0}
@@ -57,7 +29,9 @@ export function WizardPopup(props: WizardPopupProps) {
         width="100%"
         height="100%"
         zIndex={50}
-      />
+      >
+        {/* Fill with empty content to create overlay */}
+      </box>
       {/* Popup content */}
       <box
         position="absolute"
@@ -72,11 +46,6 @@ export function WizardPopup(props: WizardPopupProps) {
         flexDirection="column"
         padding={1}
       >
-        <text fg="cyan" attributes={TextAttributes.BOLD}>
-          Select
-        </text>
-        <text> </text>
-        <text>Step {step() + 1}</text>
         {props.children}
       </box>
     </Show>

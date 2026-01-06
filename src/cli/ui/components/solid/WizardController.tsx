@@ -6,6 +6,8 @@ import type { CodingAgentId, InferenceLevel } from "../../types.js";
 import { WizardPopup } from "./WizardPopup.js";
 import { QuickStartStep } from "./QuickStartStep.js";
 import {
+  ActionSelectStep,
+  type BranchAction,
   BranchTypeStep,
   BranchNameStep,
   AgentSelectStep,
@@ -26,11 +28,13 @@ export interface WizardResult {
   // For new branch creation
   branchType?: string;
   branchName?: string;
+  // For action selection
+  isNewBranch?: boolean;
 }
 
 export interface WizardControllerProps {
   visible: boolean;
-  isNewBranch: boolean;
+  selectedBranchName: string;
   history: ToolSessionEntry[];
   onClose: () => void;
   onComplete: (result: WizardResult) => void;
@@ -39,6 +43,7 @@ export interface WizardControllerProps {
 }
 
 type WizardStep =
+  | "action-select"
   | "quick-start"
   | "branch-type"
   | "branch-name"
@@ -62,6 +67,8 @@ export function WizardController(props: WizardControllerProps) {
   const [stepHistory, setStepHistory] = createSignal<WizardStep[]>([]);
 
   // Wizard state
+  const [isCreatingNewBranch, setIsCreatingNewBranch] =
+    createSignal<boolean>(false);
   const [branchType, setBranchType] = createSignal<string>("");
   const [branchName, setBranchName] = createSignal<string>("");
   const [selectedAgent, setSelectedAgent] = createSignal<CodingAgentId | null>(
@@ -76,19 +83,19 @@ export function WizardController(props: WizardControllerProps) {
 
   // Reset state when wizard becomes visible
   function getInitialStep(): WizardStep {
-    if (props.isNewBranch) {
-      return "branch-type";
-    }
+    // 履歴がある場合はクイック選択を表示
     if (props.history.length > 0) {
       return "quick-start";
     }
-    return "agent-select";
+    // 履歴がない場合はアクション選択から開始
+    return "action-select";
   }
 
   // Watch for visibility changes to reset state
   const resetWizard = () => {
     setStep(getInitialStep());
     setStepHistory([]);
+    setIsCreatingNewBranch(false);
     setBranchType("");
     setBranchName("");
     setSelectedAgent(null);
@@ -137,6 +144,16 @@ export function WizardController(props: WizardControllerProps) {
   });
 
   // Step handlers
+  const handleActionSelect = (action: BranchAction) => {
+    if (action === "create-new") {
+      setIsCreatingNewBranch(true);
+      goToStep("branch-type");
+    } else {
+      setIsCreatingNewBranch(false);
+      goToStep("agent-select");
+    }
+  };
+
   const handleQuickStartResume = (entry: ToolSessionEntry) => {
     props.onResume(entry);
   };
@@ -146,11 +163,8 @@ export function WizardController(props: WizardControllerProps) {
   };
 
   const handleChooseDifferent = () => {
-    if (props.isNewBranch) {
-      goToStep("branch-type");
-    } else {
-      goToStep("agent-select");
-    }
+    // クイック選択から「別の設定を選択」の場合はアクション選択へ戻る
+    goToStep("action-select");
   };
 
   const handleBranchTypeSelect = (type: string) => {
@@ -194,16 +208,18 @@ export function WizardController(props: WizardControllerProps) {
     const currentReasoningLevel = reasoningLevel();
     const currentBranchType = branchType();
     const currentBranchName = branchName();
+    const creatingNew = isCreatingNewBranch();
 
     const result: WizardResult = {
       tool: agent,
       model: selectedModel(),
       mode: executionMode(),
       skipPermissions: skip,
+      isNewBranch: creatingNew,
       ...(needsReasoningLevel() && currentReasoningLevel !== undefined
         ? { reasoningLevel: currentReasoningLevel }
         : {}),
-      ...(props.isNewBranch
+      ...(creatingNew
         ? { branchType: currentBranchType, branchName: currentBranchName }
         : {}),
     };
@@ -213,6 +229,16 @@ export function WizardController(props: WizardControllerProps) {
 
   const renderStep = () => {
     const currentStep = step();
+
+    if (currentStep === "action-select") {
+      return (
+        <ActionSelectStep
+          branchName={props.selectedBranchName}
+          onSelect={handleActionSelect}
+          onBack={goBack}
+        />
+      );
+    }
 
     if (currentStep === "quick-start") {
       return (

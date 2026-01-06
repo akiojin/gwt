@@ -46,7 +46,7 @@ export function SelectInput(props: SelectInputProps) {
   };
 
   return (
-    <box flexDirection="column" height={1}>
+    <box flexDirection="column">
       <select
         options={options()}
         {...(props.selectedIndex !== undefined && {
