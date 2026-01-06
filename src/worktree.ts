@@ -109,6 +109,8 @@ export interface WorktreeInfo {
   path: string;
   branch: string;
   head: string;
+  locked?: boolean;
+  prunable?: boolean;
   isAccessible?: boolean;
   invalidReason?: string;
   hasUncommittedChanges?: boolean;
@@ -136,6 +138,12 @@ async function listWorktrees(): Promise<WorktreeInfo[]> {
         currentWorktree.head = line.substring(5);
       } else if (line.startsWith("branch ")) {
         currentWorktree.branch = line.substring(7).replace("refs/heads/", "");
+      } else if (line === "locked") {
+        currentWorktree.locked = true;
+      } else if (line === "prunable") {
+        currentWorktree.prunable = true;
+      } else if (line.startsWith("reason ")) {
+        currentWorktree.invalidReason = line.substring(7);
       } else if (line === "") {
         if (currentWorktree.path) {
           worktrees.push(currentWorktree as WorktreeInfo);
@@ -173,7 +181,8 @@ export async function listAdditionalWorktrees(): Promise<WorktreeInfo[]> {
       .filter((worktree) => worktree.path !== repoRoot)
       .map((worktree) => {
         // パスの存在を確認
-        const isAccessible = fs.existsSync(worktree.path);
+        const exists = fs.existsSync(worktree.path);
+        const isAccessible = exists && !worktree.prunable;
 
         const result: WorktreeInfo = {
           ...worktree,
@@ -181,7 +190,11 @@ export async function listAdditionalWorktrees(): Promise<WorktreeInfo[]> {
         };
 
         if (!isAccessible) {
-          result.invalidReason = "Path not accessible in current environment";
+          if (!exists) {
+            result.invalidReason = "Path not accessible in current environment";
+          } else if (worktree.prunable && !result.invalidReason) {
+            result.invalidReason = "Worktree is marked prunable";
+          }
         }
 
         return result;

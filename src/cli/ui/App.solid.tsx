@@ -1292,8 +1292,8 @@ const buildBranchList = (
   for (const worktree of worktrees) {
     worktreeMap.set(worktree.branch, {
       path: worktree.path,
-      locked: false,
-      prunable: worktree.isAccessible === false,
+      locked: worktree.locked ?? false,
+      prunable: worktree.prunable ?? false,
       isAccessible: worktree.isAccessible ?? true,
       ...(worktree.hasUncommittedChanges !== undefined
         ? { hasUncommittedChanges: worktree.hasUncommittedChanges }
