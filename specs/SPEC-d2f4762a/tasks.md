@@ -104,4 +104,4 @@
 ### 実装
 
 - [x] **T507** [US9] `src/cli/ui/components/solid/QuickStartStep.tsx` にクイック選択ステップコンポーネントを作成
-- [ ] **T508** [US9] `src/cli/ui/components/solid/WizardPopup.tsx` にクイック選択ステップの統合（履歴有無による分岐）
+- [x] **T508** [US9] `src/cli/ui/components/solid/WizardController.tsx` にクイック選択ステップの統合（履歴有無による分岐）
