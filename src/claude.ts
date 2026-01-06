@@ -97,11 +97,11 @@ export async function launchClaudeCode(
         }
         break;
       case "resume":
-        // TODO: Implement conversation selection with Ink UI
+        // TODO: Implement conversation selection in the OpenTUI UI
         // Legacy UI removed - this feature needs to be reimplemented
         console.log(
           chalk.yellow(
-            "   ⚠️  Resume conversation feature temporarily disabled (Ink UI migration)",
+            "   ⚠️  Resume conversation feature temporarily disabled (UI migration)",
           ),
         );
         console.log(
