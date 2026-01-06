@@ -1,6 +1,8 @@
 # SPEC-d27be71b: Ink.js から OpenTUI への移行
 
-## Status: Active / In Progress
+**仕様ID**: `SPEC-d27be71b`
+**作成日**: 2026-01-04
+**ステータス**: 実装中
 
 ## Overview
 
