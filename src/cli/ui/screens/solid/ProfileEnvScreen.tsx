@@ -7,31 +7,37 @@ import { Footer } from "../../components/solid/Footer.js";
 import { useTerminalSize } from "../../hooks/solid/useTerminalSize.js";
 import { useScrollableList } from "../../hooks/solid/useScrollableList.js";
 
-export interface EnvironmentVariable {
+export interface ProfileEnvVariable {
   key: string;
   value: string;
 }
 
-export interface EnvironmentScreenProps {
-  variables: EnvironmentVariable[];
-  onSelect?: (variable: EnvironmentVariable) => void;
+export interface ProfileEnvScreenProps {
+  profileName: string;
+  variables: ProfileEnvVariable[];
+  onAdd?: () => void;
+  onEdit?: (variable: ProfileEnvVariable) => void;
+  onDelete?: (variable: ProfileEnvVariable) => void;
+  onViewOsEnv?: () => void;
   onBack?: () => void;
   version?: string | null;
-  highlightKeys?: string[];
   helpVisible?: boolean;
 }
 
 const clamp = (value: number, min: number, max: number) =>
   Math.min(Math.max(value, min), max);
 
-export function EnvironmentScreen({
+export function ProfileEnvScreen({
+  profileName,
   variables,
-  onSelect,
+  onAdd,
+  onEdit,
+  onDelete,
+  onViewOsEnv,
   onBack,
   version,
-  highlightKeys,
   helpVisible = false,
-}: EnvironmentScreenProps) {
+}: ProfileEnvScreenProps) {
   const terminal = useTerminalSize();
   const listHeight = createMemo(() => {
     const headerRows = 2;
@@ -39,8 +45,6 @@ export function EnvironmentScreen({
     const reserved = headerRows + footerRows;
     return Math.max(1, terminal().rows - reserved);
   });
-
-  const highlightSet = createMemo(() => new Set(highlightKeys ?? []));
 
   const list = useScrollableList({
     items: () => variables,
@@ -50,6 +54,11 @@ export function EnvironmentScreen({
 
   const updateSelectedIndex = (value: number | ((prev: number) => number)) => {
     list.setSelectedIndex(value);
+  };
+
+  const getSelectedVariable = () => {
+    const index = clamp(list.selectedIndex(), 0, variables.length - 1);
+    return variables[index];
   };
 
   useKeyboard((key) => {
@@ -92,19 +101,45 @@ export function EnvironmentScreen({
       return;
     }
 
-    if (key.name === "return" || key.name === "linefeed") {
-      const item =
-        variables[clamp(list.selectedIndex(), 0, variables.length - 1)];
-      if (item) {
-        onSelect?.(item);
+    if (key.name === "a") {
+      onAdd?.();
+      return;
+    }
+
+    if (key.name === "e" || key.name === "return" || key.name === "linefeed") {
+      const variable = getSelectedVariable();
+      if (variable) {
+        onEdit?.(variable);
       }
+      return;
+    }
+
+    if (key.name === "d") {
+      const variable = getSelectedVariable();
+      if (variable) {
+        onDelete?.(variable);
+      }
+      return;
+    }
+
+    if (key.name === "o") {
+      onViewOsEnv?.();
     }
   });
 
   const footerActions = createMemo(() => {
     const actions = [] as { key: string; description: string }[];
-    if (onSelect) {
-      actions.push({ key: "enter", description: "Select" });
+    if (onAdd) {
+      actions.push({ key: "a", description: "Add" });
+    }
+    if (onEdit) {
+      actions.push({ key: "enter", description: "Edit" });
+    }
+    if (onDelete) {
+      actions.push({ key: "d", description: "Delete" });
+    }
+    if (onViewOsEnv) {
+      actions.push({ key: "o", description: "OS Env" });
     }
     if (onBack) {
       actions.push({ key: "esc", description: "Back" });
@@ -114,34 +149,32 @@ export function EnvironmentScreen({
 
   return (
     <box flexDirection="column" height={terminal().rows}>
-      <Header title="gwt - Environment" titleColor="cyan" version={version} />
+      <Header
+        title={`gwt - Profile: ${profileName}`}
+        titleColor="cyan"
+        version={version}
+      />
 
       <box flexDirection="column" flexGrow={1}>
         {variables.length === 0 ? (
-          <text fg="gray">No environment variables.</text>
+          <text fg="gray">No variables in profile.</text>
         ) : (
           <box flexDirection="column">
             {list.visibleItems().map((variable, index) => {
               const absoluteIndex = list.scrollOffset() + index;
               const isSelected = absoluteIndex === list.selectedIndex();
-              const isHighlighted = highlightSet().has(variable.key);
               const attributes = isSelected ? TextAttributes.BOLD : undefined;
-              const keyColor = isSelected
-                ? "cyan"
-                : isHighlighted
-                  ? "yellow"
-                  : undefined;
-              const valueColor = isSelected ? "cyan" : undefined;
+              const color = isSelected ? "cyan" : undefined;
               return (
                 <box flexDirection="row">
                   <text
-                    {...(keyColor ? { fg: keyColor } : {})}
+                    {...(color ? { fg: color } : {})}
                     {...(attributes !== undefined ? { attributes } : {})}
                   >
                     {variable.key}
                   </text>
                   <text
-                    {...(valueColor ? { fg: valueColor } : {})}
+                    {...(color ? { fg: color } : {})}
                     {...(attributes !== undefined ? { attributes } : {})}
                   >
                     ={variable.value}

@@ -28,7 +28,11 @@ import { LogDetailScreen } from "./screens/solid/LogDetailScreen.js";
 import { ErrorScreen } from "./screens/solid/ErrorScreen.js";
 import { LoadingIndicatorScreen } from "./screens/solid/LoadingIndicator.js";
 import { WorktreeCreateScreen } from "./screens/solid/WorktreeCreateScreen.js";
+import { InputScreen } from "./screens/solid/InputScreen.js";
+import { ConfirmScreen } from "./screens/solid/ConfirmScreen.js";
+import { EnvironmentScreen } from "./screens/solid/EnvironmentScreen.js";
 import { ProfileScreen } from "./screens/solid/ProfileScreen.js";
+import { ProfileEnvScreen } from "./screens/solid/ProfileEnvScreen.js";
 import { calculateStatistics } from "./utils/statisticsCalculator.js";
 import { formatBranchItems } from "./utils/branchFormatter.js";
 import {
@@ -62,7 +66,17 @@ import {
 import { parseLogLines } from "../../logging/formatter.js";
 import { copyToClipboard } from "./utils/clipboard.js";
 import { getPackageVersion } from "../../utils.js";
-import { loadProfiles, setActiveProfile } from "../../config/profiles.js";
+import {
+  createProfile,
+  deleteProfile,
+  loadProfiles,
+  setActiveProfile,
+  updateProfile,
+} from "../../config/profiles.js";
+import {
+  isValidProfileName,
+  type ProfilesConfig,
+} from "../../types/profiles.js";
 
 export type ExecutionMode = "normal" | "continue" | "resume";
 
@@ -89,9 +103,17 @@ export type AppScreen =
   | "log-list"
   | "log-detail"
   | "profile"
+  | "profile-env"
+  | "profile-input"
+  | "profile-confirm"
+  | "profile-os-env"
+  | "profile-error"
   | "worktree-create"
   | "loading"
   | "error";
+
+type ProfileInputMode = "create-profile" | "add-env" | "edit-env";
+type ProfileConfirmMode = "delete-profile" | "delete-env";
 
 export interface AppSolidProps {
   onExit?: (result?: SelectionResult) => void;
@@ -226,8 +248,52 @@ export function AppSolid(props: AppSolidProps) {
     null,
   );
   const [profileError, setProfileError] = createSignal<Error | null>(null);
+  const [profilesConfig, setProfilesConfig] =
+    createSignal<ProfilesConfig | null>(null);
+  const [profileActionError, setProfileActionError] =
+    createSignal<Error | null>(null);
+  const [profileActionHint, setProfileActionHint] = createSignal<string | null>(
+    null,
+  );
+  const [selectedProfileName, setSelectedProfileName] = createSignal<
+    string | null
+  >(null);
+  const [profileInputValue, setProfileInputValue] = createSignal("", {
+    equals: false,
+  });
+  const [profileInputMode, setProfileInputMode] =
+    createSignal<ProfileInputMode>("create-profile");
+  const [profileInputSuppressKey, setProfileInputSuppressKey] = createSignal<
+    string | null
+  >(null);
+  const [profileEnvKey, setProfileEnvKey] = createSignal<string | null>(null);
+  const [profileConfirmMode, setProfileConfirmMode] =
+    createSignal<ProfileConfirmMode>("delete-profile");
 
   const logDir = createMemo(() => resolveLogDir(workingDirectory()));
+  const selectedProfileConfig = createMemo(() => {
+    const name = selectedProfileName();
+    const config = profilesConfig();
+    if (!name || !config?.profiles?.[name]) {
+      return null;
+    }
+    return { name, profile: config.profiles[name] };
+  });
+  const profileEnvVariables = createMemo(() => {
+    const entry = selectedProfileConfig();
+    if (!entry) {
+      return [];
+    }
+    return Object.entries(entry.profile.env ?? {})
+      .map(([key, value]) => ({ key, value }))
+      .sort((a, b) => a.key.localeCompare(b.key));
+  });
+  const osEnvVariables = createMemo(() =>
+    Object.entries(process.env)
+      .filter(([, value]) => typeof value === "string")
+      .map(([key, value]) => ({ key, value: String(value) }))
+      .sort((a, b) => a.key.localeCompare(b.key)),
+  );
   let logNotificationTimer: ReturnType<typeof setTimeout> | null = null;
   const BRANCH_LOAD_TIMEOUT_MS = 3000;
   const BRANCH_FULL_LOAD_TIMEOUT_MS = 8000;
@@ -277,6 +343,12 @@ export function AppSolid(props: AppSolidProps) {
     const previous = stack[stack.length - 1] ?? DEFAULT_SCREEN;
     setScreenStack(stack.slice(0, -1));
     setCurrentScreen(previous);
+  };
+
+  const openProfileError = (err: unknown, hint: string) => {
+    setProfileActionError(err instanceof Error ? err : new Error(String(err)));
+    setProfileActionHint(hint);
+    navigateTo("profile-error");
   };
 
   const showLogNotification = (message: string, tone: "success" | "error") => {
@@ -364,6 +436,29 @@ export function AppSolid(props: AppSolidProps) {
     }
   };
 
+  const refreshProfiles = async () => {
+    try {
+      const config = await loadProfiles();
+      setProfilesConfig(config);
+      const items = Object.entries(config.profiles ?? {}).map(
+        ([name, profile]) => ({
+          name,
+          displayName: profile.displayName,
+          isActive: config.activeProfile === name,
+        }),
+      );
+      items.sort((a, b) => a.name.localeCompare(b.name));
+      setProfileItems(items);
+      setActiveProfileName(config.activeProfile ?? null);
+      setProfileError(null);
+    } catch (err) {
+      setProfilesConfig(null);
+      setProfileItems([]);
+      setActiveProfileName(null);
+      setProfileError(err instanceof Error ? err : new Error(String(err)));
+    }
+  };
+
   createEffect(() => {
     if (props.branches) {
       setBranchItems(props.branches);
@@ -395,24 +490,7 @@ export function AppSolid(props: AppSolidProps) {
   });
 
   onMount(() => {
-    void loadProfiles()
-      .then((config) => {
-        const items = Object.entries(config.profiles ?? {}).map(
-          ([name, profile]) => ({
-            name,
-            displayName: profile.displayName,
-            isActive: config.activeProfile === name,
-          }),
-        );
-        items.sort((a, b) => a.name.localeCompare(b.name));
-        setProfileItems(items);
-        setActiveProfileName(config.activeProfile ?? null);
-      })
-      .catch((err) => {
-        setProfileItems([]);
-        setActiveProfileName(null);
-        setProfileError(err instanceof Error ? err : new Error(String(err)));
-      });
+    void refreshProfiles();
   });
 
   onMount(() => {
@@ -464,6 +542,212 @@ export function AppSolid(props: AppSolidProps) {
     setCreateBranchName("");
     setSuppressCreateKey("n");
     navigateTo("worktree-create");
+  };
+
+  const openProfileCreate = () => {
+    setProfileInputMode("create-profile");
+    setProfileInputValue("");
+    setProfileEnvKey(null);
+    setProfileInputSuppressKey("n");
+    navigateTo("profile-input");
+  };
+
+  const openProfileDelete = (profile: { name: string }) => {
+    setSelectedProfileName(profile.name);
+    setProfileConfirmMode("delete-profile");
+    navigateTo("profile-confirm");
+  };
+
+  const openProfileEnv = (profile: { name: string }) => {
+    setSelectedProfileName(profile.name);
+    navigateTo("profile-env");
+  };
+
+  const openProfileEnvAdd = () => {
+    setProfileInputMode("add-env");
+    setProfileInputValue("");
+    setProfileEnvKey(null);
+    setProfileInputSuppressKey("a");
+    navigateTo("profile-input");
+  };
+
+  const openProfileEnvEdit = (variable: { key: string; value: string }) => {
+    setProfileInputMode("edit-env");
+    setProfileEnvKey(variable.key);
+    setProfileInputValue(variable.value);
+    setProfileInputSuppressKey("e");
+    navigateTo("profile-input");
+  };
+
+  const openProfileEnvDelete = (variable: { key: string }) => {
+    setProfileConfirmMode("delete-env");
+    setProfileEnvKey(variable.key);
+    navigateTo("profile-confirm");
+  };
+
+  const handleProfileInputChange = (value: string) => {
+    const suppressKey = profileInputSuppressKey();
+    if (suppressKey && profileInputValue() === "" && value === suppressKey) {
+      setProfileInputSuppressKey(null);
+      setProfileInputValue("");
+      return;
+    }
+    setProfileInputSuppressKey(null);
+    setProfileInputValue(value);
+  };
+
+  const submitProfileInput = async (value: string) => {
+    const mode = profileInputMode();
+    const trimmed = value.trim();
+
+    if (mode === "create-profile") {
+      if (!trimmed) {
+        openProfileError(
+          new Error("Profile name is required."),
+          "Invalid name.",
+        );
+        return;
+      }
+      if (!isValidProfileName(trimmed)) {
+        openProfileError(
+          new Error(`Invalid profile name: "${trimmed}".`),
+          "Profile names must use lowercase letters, numbers, and hyphens.",
+        );
+        return;
+      }
+      try {
+        await createProfile(trimmed, { displayName: trimmed, env: {} });
+        await refreshProfiles();
+        setSelectedProfileName(trimmed);
+        setProfileInputValue("");
+        setProfileInputSuppressKey(null);
+        goBack();
+      } catch (err) {
+        openProfileError(err, "Unable to create profile.");
+      }
+      return;
+    }
+
+    const entry = selectedProfileConfig();
+    if (!entry) {
+      openProfileError(
+        new Error("Profile not selected."),
+        "Profile not found.",
+      );
+      return;
+    }
+
+    if (mode === "add-env") {
+      const separatorIndex = trimmed.indexOf("=");
+      if (separatorIndex <= 0) {
+        openProfileError(
+          new Error("Environment variable must be in KEY=VALUE format."),
+          "Invalid environment variable.",
+        );
+        return;
+      }
+      const key = trimmed.slice(0, separatorIndex).trim();
+      const valuePart = trimmed.slice(separatorIndex + 1);
+      if (!key) {
+        openProfileError(
+          new Error("Environment variable key is required."),
+          "Invalid environment variable.",
+        );
+        return;
+      }
+      const nextEnv = { ...(entry.profile.env ?? {}) };
+      nextEnv[key] = valuePart;
+      try {
+        await updateProfile(entry.name, { env: nextEnv });
+        await refreshProfiles();
+        setProfileInputValue("");
+        setProfileInputSuppressKey(null);
+        goBack();
+      } catch (err) {
+        openProfileError(err, "Unable to update profile.");
+      }
+      return;
+    }
+
+    if (mode === "edit-env") {
+      const envKey = profileEnvKey();
+      if (!envKey) {
+        openProfileError(
+          new Error("Environment variable not selected."),
+          "Select a variable to edit.",
+        );
+        return;
+      }
+      const nextEnv = { ...(entry.profile.env ?? {}) };
+      nextEnv[envKey] = value;
+      try {
+        await updateProfile(entry.name, { env: nextEnv });
+        await refreshProfiles();
+        setProfileInputValue("");
+        setProfileInputSuppressKey(null);
+        goBack();
+      } catch (err) {
+        openProfileError(err, "Unable to update profile.");
+      }
+    }
+  };
+
+  const confirmProfileAction = async (confirmed: boolean) => {
+    if (!confirmed) {
+      goBack();
+      return;
+    }
+
+    const mode = profileConfirmMode();
+    const entry = selectedProfileConfig();
+
+    if (mode === "delete-profile") {
+      const name = selectedProfileName();
+      if (!name) {
+        openProfileError(
+          new Error("Profile not selected."),
+          "Profile not found.",
+        );
+        return;
+      }
+      try {
+        await deleteProfile(name);
+        await refreshProfiles();
+        setProfileEnvKey(null);
+        goBack();
+      } catch (err) {
+        openProfileError(err, "Unable to delete profile.");
+      }
+      return;
+    }
+
+    if (mode === "delete-env") {
+      if (!entry) {
+        openProfileError(
+          new Error("Profile not selected."),
+          "Profile not found.",
+        );
+        return;
+      }
+      const envKey = profileEnvKey();
+      if (!envKey) {
+        openProfileError(
+          new Error("Environment variable not selected."),
+          "Select a variable to delete.",
+        );
+        return;
+      }
+      const nextEnv = { ...(entry.profile.env ?? {}) };
+      delete nextEnv[envKey];
+      try {
+        await updateProfile(entry.name, { env: nextEnv });
+        await refreshProfiles();
+        setProfileEnvKey(null);
+        goBack();
+      } catch (err) {
+        openProfileError(err, "Unable to update profile.");
+      }
+    }
   };
 
   const toggleSelectedBranch = (branchName: string) => {
@@ -665,24 +949,136 @@ export function AppSolid(props: AppSolidProps) {
           profiles={profileItems()}
           version={version()}
           helpVisible={helpVisible()}
+          onCreate={openProfileCreate}
+          onDelete={openProfileDelete}
+          onEdit={openProfileEnv}
           onSelect={(profile) => {
             void setActiveProfile(profile.name)
               .then(() => {
-                setActiveProfileName(profile.name);
-                setProfileItems((prev) =>
-                  prev.map((item) => ({
-                    ...item,
-                    isActive: item.name === profile.name,
-                  })),
-                );
+                void refreshProfiles();
               })
               .catch((err) => {
-                setProfileError(
-                  err instanceof Error ? err : new Error(String(err)),
-                );
+                openProfileError(err, "Unable to set active profile.");
               });
           }}
           onBack={goBack}
+        />
+      );
+    }
+
+    if (screen === "profile-env") {
+      const entry = selectedProfileConfig();
+      if (!entry) {
+        return (
+          <ErrorScreen
+            error="Profile not found."
+            onBack={goBack}
+            hint="Select a profile before editing."
+          />
+        );
+      }
+      return (
+        <ProfileEnvScreen
+          profileName={entry.name}
+          variables={profileEnvVariables()}
+          onAdd={openProfileEnvAdd}
+          onEdit={openProfileEnvEdit}
+          onDelete={openProfileEnvDelete}
+          onViewOsEnv={() => navigateTo("profile-os-env")}
+          onBack={goBack}
+          version={version()}
+          helpVisible={helpVisible()}
+        />
+      );
+    }
+
+    if (screen === "profile-input") {
+      const mode = profileInputMode();
+      const envKey = profileEnvKey();
+      const message =
+        mode === "create-profile"
+          ? "New profile name"
+          : mode === "add-env"
+            ? "Add environment variable"
+            : `Edit value for ${envKey ?? "(unknown)"}`;
+      const label =
+        mode === "create-profile"
+          ? "Profile name"
+          : mode === "add-env"
+            ? "KEY=VALUE"
+            : "Value";
+      const placeholder =
+        mode === "create-profile"
+          ? "development"
+          : mode === "add-env"
+            ? "MY_VAR=value"
+            : undefined;
+
+      return (
+        <InputScreen
+          message={message}
+          value={profileInputValue()}
+          onChange={handleProfileInputChange}
+          onSubmit={(value) => void submitProfileInput(value)}
+          onCancel={() => {
+            setProfileInputSuppressKey(null);
+            goBack();
+          }}
+          label={label}
+          {...(placeholder !== undefined ? { placeholder } : {})}
+          width={32}
+          helpVisible={helpVisible()}
+        />
+      );
+    }
+
+    if (screen === "profile-confirm") {
+      const mode = profileConfirmMode();
+      const profileName = selectedProfileName();
+      const envKey = profileEnvKey();
+      const message =
+        mode === "delete-profile"
+          ? `Delete profile ${profileName ?? "(unknown)"}?`
+          : `Delete ${envKey ?? "(unknown)"}?`;
+
+      return (
+        <ConfirmScreen
+          message={message}
+          onConfirm={(confirmed) => void confirmProfileAction(confirmed)}
+          defaultNo
+          helpVisible={helpVisible()}
+        />
+      );
+    }
+
+    if (screen === "profile-os-env") {
+      const highlightKeys = profileEnvVariables().map(
+        (variable) => variable.key,
+      );
+      return (
+        <EnvironmentScreen
+          variables={osEnvVariables()}
+          highlightKeys={highlightKeys}
+          onBack={goBack}
+          version={version()}
+          helpVisible={helpVisible()}
+        />
+      );
+    }
+
+    if (screen === "profile-error") {
+      return (
+        <ErrorScreen
+          error={profileActionError() ?? "Profile error"}
+          onBack={() => {
+            setProfileActionError(null);
+            setProfileActionHint(null);
+            goBack();
+          }}
+          {...(profileActionHint()
+            ? { hint: profileActionHint() as string }
+            : {})}
+          helpVisible={helpVisible()}
         />
       );
     }
