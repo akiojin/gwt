@@ -665,16 +665,63 @@ export function AppSolid(props: AppSolidProps) {
     });
   };
 
-  // T508: クイックスタートからのResume（履歴対応は別タスク）
-  const handleWizardResume = () => {
-    // TODO: T508で履歴からのResume実装
+  // FR-010: クイックスタートからのResume（前回設定で続きから）
+  const handleWizardResume = (entry: ToolSessionEntry) => {
     setWizardVisible(false);
+
+    const branch = selectedBranch();
+    if (!branch) {
+      return;
+    }
+
+    const normalizedModel = normalizeModelId(
+      entry.toolId as CodingAgentId,
+      entry.model ?? undefined,
+    );
+
+    exitApp({
+      branch: branch.name,
+      displayName: branch.displayName,
+      branchType: branch.branchType,
+      ...(branch.remoteBranch ? { remoteBranch: branch.remoteBranch } : {}),
+      tool: entry.toolId as CodingAgentId,
+      mode: "continue",
+      skipPermissions: entry.skipPermissions ?? false,
+      ...(normalizedModel !== undefined ? { model: normalizedModel } : {}),
+      ...(entry.reasoningLevel
+        ? { inferenceLevel: entry.reasoningLevel as InferenceLevel }
+        : {}),
+      ...(entry.sessionId ? { sessionId: entry.sessionId } : {}),
+    });
   };
 
-  // T508: クイックスタートからのStartNew（履歴対応は別タスク）
-  const handleWizardStartNew = () => {
-    // TODO: T508で履歴からのStartNew実装
+  // FR-010: クイックスタートからのStartNew（前回設定で新規）
+  const handleWizardStartNew = (entry: ToolSessionEntry) => {
     setWizardVisible(false);
+
+    const branch = selectedBranch();
+    if (!branch) {
+      return;
+    }
+
+    const normalizedModel = normalizeModelId(
+      entry.toolId as CodingAgentId,
+      entry.model ?? undefined,
+    );
+
+    exitApp({
+      branch: branch.name,
+      displayName: branch.displayName,
+      branchType: branch.branchType,
+      ...(branch.remoteBranch ? { remoteBranch: branch.remoteBranch } : {}),
+      tool: entry.toolId as CodingAgentId,
+      mode: "normal",
+      skipPermissions: entry.skipPermissions ?? false,
+      ...(normalizedModel !== undefined ? { model: normalizedModel } : {}),
+      ...(entry.reasoningLevel
+        ? { inferenceLevel: entry.reasoningLevel as InferenceLevel }
+        : {}),
+    });
   };
 
   const handleRepairWorktrees = async () => {
