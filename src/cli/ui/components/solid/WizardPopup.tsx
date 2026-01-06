@@ -21,17 +21,7 @@ export interface WizardPopupProps {
 export function WizardPopup(props: WizardPopupProps) {
   return (
     <Show when={props.visible}>
-      {/* Background overlay - fills entire screen to hide background */}
-      <box
-        position="absolute"
-        top={0}
-        left={0}
-        width="100%"
-        height="100%"
-        zIndex={50}
-        backgroundColor="black"
-      />
-      {/* Popup content */}
+      {/* Popup content - centered overlay without full-screen background */}
       <box
         position="absolute"
         top="20%"

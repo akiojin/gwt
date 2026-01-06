@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
 import path from "node:path";
-import { platform } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
   isGitRepository,
@@ -208,11 +207,10 @@ async function mainSolidUI(): Promise<SelectionResult | undefined> {
     mouseMovePreference === "true" || mouseMovePreference === "1";
   const altScreenPreference =
     process.env.GWT_UI_ALT_SCREEN?.trim().toLowerCase();
-  const defaultAltScreen = platform() === "win32" ? false : true;
+  // Ink.js版ではalternate screenを使用していなかったため、デフォルトをfalseに
+  // alternate screenを使用するとコーディングエージェント起動/終了ログが見えなくなる
   const useAlternateScreen =
-    altScreenPreference === undefined || altScreenPreference === ""
-      ? defaultAltScreen
-      : altScreenPreference === "true" || altScreenPreference === "1";
+    altScreenPreference === "true" || altScreenPreference === "1";
 
   if (typeof terminal.stdin.resume === "function") {
     terminal.stdin.resume();
