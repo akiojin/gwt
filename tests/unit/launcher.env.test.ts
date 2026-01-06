@@ -1,9 +1,9 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, mock, beforeEach } from "bun:test";
 import type { CodingAgent } from "../../src/types/tools.js";
 
-const execaMock = vi.fn();
+const execaMock = mock();
 
-vi.mock("execa", () => ({
+mock.module("execa", () => ({
   execa: (...args: unknown[]) => execaMock(...args),
 }));
 

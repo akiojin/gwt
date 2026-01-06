@@ -1,14 +1,14 @@
 import React from "react";
-import type { Mock } from "vitest";
-import { describe, it, expect, beforeEach, vi } from "vitest";
+// import type { Mock } - use bun:test mock types
+import { describe, it, expect, beforeEach,  mock } from "bun:test";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import type { Branch } from "../../../../../src/types/api.js";
 import { BranchListPage } from "../../../../../src/web/client/src/pages/BranchListPage.js";
 import { useBranches } from "../../../../../src/web/client/src/hooks/useBranches.js";
 
-vi.mock("../../../../../src/web/client/src/hooks/useBranches.js", () => ({
-  useBranches: vi.fn(),
+mock.module("../../../../../src/web/client/src/hooks/useBranches.js", () => ({
+  useBranches: mock(),
 }));
 
 const mockedUseBranches = useBranches as unknown as Mock;

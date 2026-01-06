@@ -1,13 +1,13 @@
 /**
  * @vitest-environment node
  */
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach,  mock } from "bun:test";
 import path from "node:path";
 
-vi.mock("node:fs/promises", () => {
-  const readdir = vi.fn();
-  const readFile = vi.fn();
-  const stat = vi.fn();
+mock.module("node:fs/promises", () => {
+  const readdir = mock();
+  const readFile = mock();
+  const stat = mock();
   return {
     readdir,
     readFile,
@@ -16,8 +16,8 @@ vi.mock("node:fs/promises", () => {
   };
 });
 
-vi.mock("node:os", () => {
-  const homedir = vi.fn(() => "/home/test");
+mock.module("node:os", () => {
+  const homedir = mock(() => "/home/test");
   return {
     homedir,
     default: { homedir },
@@ -37,7 +37,7 @@ import {
 } from "../../../src/utils/session.js";
 
 type ReaddirOptions = { withFileTypes?: boolean };
-type MockFn = ReturnType<typeof vi.fn>;
+type MockFn = Mock;
 
 const readdirMock = readdir as unknown as MockFn;
 const readFileMock = readFile as unknown as MockFn;
@@ -50,7 +50,7 @@ const equalsPath = (value: string, expected: string) =>
 
 describe("utils/session", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    mock.restore();
   });
 
   describe("isValidUuidSessionId", () => {

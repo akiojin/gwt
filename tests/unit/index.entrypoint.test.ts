@@ -1,6 +1,6 @@
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "bun:test";
 import { isEntryPoint } from "../../src/index.js";
 
 describe("isEntryPoint", () => {

@@ -1,4 +1,4 @@
-import { vi } from "vitest";
+import { mock } from "bun:test";
 import type { ExecaReturnValue } from "execa";
 import type { CleanupTarget } from "../../src/cli/ui/types";
 
@@ -9,12 +9,12 @@ export function mockExeca(
   defaultStdout: string = "",
   defaultStderr: string = "",
 ) {
-  return vi.fn(
+  return mock(
     async (
       command: string,
       args?: readonly string[],
     ): Promise<Partial<ExecaReturnValue>> => {
-      const fullCommand = args ? `${command} ${args.join(" ")}` : command;
+      const _fullCommand = args ? `${command} ${args.join(" ")}` : command;
 
       // Gitコマンドのモック
       if (command === "git") {
@@ -102,7 +102,7 @@ export function mockExeca(
  */
 export function mockFileSystem() {
   return {
-    readFile: vi.fn(async (path: string) => {
+    readFile: mock(async (path: string) => {
       if (path.includes("package.json")) {
         return JSON.stringify({ version: "1.0.0" });
       }
@@ -116,10 +116,10 @@ export function mockFileSystem() {
       }
       return "";
     }),
-    writeFile: vi.fn(async () => undefined),
-    mkdir: vi.fn(async () => undefined),
-    rm: vi.fn(async () => undefined),
-    access: vi.fn(async () => undefined),
+    writeFile: mock(async () => undefined),
+    mkdir: mock(async () => undefined),
+    rm: mock(async () => undefined),
+    access: mock(async () => undefined),
   };
 }
 
@@ -211,10 +211,10 @@ export function createMockCleanupTarget(
  */
 export function mockConsole() {
   return {
-    log: vi.fn(),
-    error: vi.fn(),
-    warn: vi.fn(),
-    info: vi.fn(),
+    log: mock(),
+    error: mock(),
+    warn: mock(),
+    info: mock(),
   };
 }
 
@@ -223,7 +223,7 @@ export function mockConsole() {
  */
 export function mockProcess() {
   return {
-    exit: vi.fn(),
-    cwd: vi.fn(() => "/path/to/repo"),
+    exit: mock(),
+    cwd: mock(() => "/path/to/repo"),
   };
 }

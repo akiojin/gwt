@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect,  mock } from "bun:test";
 import {
   resolveContinueSessionId,
   findLatestBranchSession,
@@ -71,7 +71,7 @@ describe("resolveContinueSessionId", () => {
       branch,
       toolId,
       repoRoot,
-      lookupLatestSessionId: vi.fn(),
+      lookupLatestSessionId: mock(),
     });
 
     expect(result).toBe("last-1");

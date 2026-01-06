@@ -1,29 +1,29 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach,  mock } from "bun:test";
 
-const mocks = vi.hoisted(() => ({
-  mockGenerateWorktreePath: vi.fn<[string, string], Promise<string>>(),
-  mockCreateWorktree: vi.fn(),
-  mockListAdditionalWorktrees: vi.fn(),
+const mocks = (({
+  mockGenerateWorktreePath: mock(),
+  mockCreateWorktree: mock(),
+  mockListAdditionalWorktrees: mock(),
 }));
 
-vi.mock("../../../../../src/worktree.js", () => ({
+mock.module("../../../../../src/worktree.js", () => ({
   listAdditionalWorktrees: mocks.mockListAdditionalWorktrees,
   createWorktree: mocks.mockCreateWorktree,
-  removeWorktree: vi.fn(),
+  removeWorktree: mock(),
   generateWorktreePath: mocks.mockGenerateWorktreePath,
   isProtectedBranchName: () => false,
 }));
 
-vi.mock("../../../../../src/git.js", () => ({
-  getRepositoryRoot: vi.fn().mockResolvedValue("/repo"),
-  getCurrentBranch: vi.fn().mockResolvedValue("develop"),
+mock.module("../../../../../src/git.js", () => ({
+  getRepositoryRoot: mock().mockResolvedValue("/repo"),
+  getCurrentBranch: mock().mockResolvedValue("develop"),
 }));
 
 import { createNewWorktree } from "../../../../../src/web/server/services/worktrees.js";
 
 describe("createNewWorktree", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    mock.restore();
     mocks.mockGenerateWorktreePath.mockResolvedValue(
       "/repo/.worktrees/feature-test",
     );

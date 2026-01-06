@@ -1,19 +1,18 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import type { SelectionResult } from "../../src/cli/ui/App.solid.js";
 import { runInteractiveLoop } from "../../src/index.js";
 
 // Vitest shim for environments lacking vi.hoisted (e.g., bun)
 if (typeof (vi as Record<string, unknown>).hoisted !== "function") {
   // @ts-expect-error injected shim
-  vi.hoisted = (factory: () => unknown) => factory();
 }
 
-const waitForUserAcknowledgementMock = vi.hoisted(() =>
-  vi.fn<() => Promise<void>>(),
+const waitForUserAcknowledgementMock = (
+  (mock<() => Promise<void>>()),
 );
 
-vi.mock("../../src/utils/terminal.js", async () => {
-  const actual = await vi.importActual<
+mock.module("../../src/utils/terminal.js", async () => {
+  const actual = await import(
     typeof import("../../src/utils/terminal.js")
   >("../../src/utils/terminal.js");
   return {
@@ -33,16 +32,16 @@ describe("runInteractiveLoop", () => {
     model: "gpt-5.2-codex",
   };
 
-  let consoleLogSpy: ReturnType<typeof vi.spyOn>;
-  let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
-  let consoleWarnSpy: ReturnType<typeof vi.spyOn>;
+  let consoleLogSpy: Mock;
+  let consoleErrorSpy: Mock;
+  let consoleWarnSpy: Mock;
 
   beforeEach(() => {
     waitForUserAcknowledgementMock.mockReset();
     waitForUserAcknowledgementMock.mockResolvedValue(undefined);
-    consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-    consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    consoleLogSpy = spyOn(console, "log").mockImplementation(() => {});
+    consoleErrorSpy = spyOn(console, "error").mockImplementation(() => {});
+    consoleWarnSpy = spyOn(console, "warn").mockImplementation(() => {});
   });
 
   it("re-renders the UI after workflow errors instead of exiting", async () => {
@@ -68,7 +67,7 @@ describe("runInteractiveLoop", () => {
       .mockRejectedValueOnce(new Error("ui crash"))
       .mockResolvedValueOnce(undefined);
 
-    const workflowHandler = vi.fn<
+    const workflowHandler = mock<
       (selection: SelectionResult) => Promise<void>
     >(async () => {});
 

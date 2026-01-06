@@ -26,7 +26,7 @@
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true
   },
-  "include": ["src/**/*"],
+  "include": ["src/**/*", "bun.setup.ts"],
   "exclude": [
     "node_modules",
     "dist",

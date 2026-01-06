@@ -4,7 +4,7 @@
  * T201-T204: _launchCodingAgent()と_resolveCommand()のテスト
  */
 
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach,  mock } from "bun:test";
 import type {
   CodingAgent,
   CodingAgentLaunchOptions,
@@ -24,11 +24,11 @@ let _resolveCommand: any;
  */
 describe("_launchCodingAgent - type='path'", () => {
   beforeEach(() => {
-    _launchCodingAgent = vi.fn();
+    _launchCodingAgent = mock();
   });
 
   afterEach(() => {
-    vi.restoreAllMocks();
+    mock.restore();
   });
 
   it("絶対パスでツールを直接実行できる", async () => {
@@ -149,11 +149,11 @@ describe("_launchCodingAgent - type='path'", () => {
  */
 describe("_launchCodingAgent - type='bunx'", () => {
   beforeEach(() => {
-    _launchCodingAgent = vi.fn();
+    _launchCodingAgent = mock();
   });
 
   afterEach(() => {
-    vi.restoreAllMocks();
+    mock.restore();
   });
 
   it("bunx経由でパッケージを実行できる", async () => {
@@ -257,11 +257,11 @@ describe("_launchCodingAgent - type='bunx'", () => {
  */
 describe("_launchCodingAgent - type='command'", () => {
   beforeEach(() => {
-    _launchCodingAgent = vi.fn();
+    _launchCodingAgent = mock();
   });
 
   afterEach(() => {
-    vi.restoreAllMocks();
+    mock.restore();
   });
 
   it("PATH環境変数からコマンドを解決して実行できる", async () => {
@@ -384,11 +384,11 @@ describe("_launchCodingAgent - type='command'", () => {
  */
 describe("_resolveCommand", () => {
   beforeEach(() => {
-    _resolveCommand = vi.fn();
+    _resolveCommand = mock();
   });
 
   afterEach(() => {
-    vi.restoreAllMocks();
+    mock.restore();
   });
 
   it("Unix/Linuxでwhichコマンドを使用してコマンドパスを解決できる", async () => {

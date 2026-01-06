@@ -1,1 +1,12 @@
 preload = ["@opentui/solid/preload"]
+
+[test]
+preload = ["./bun.setup.ts"]
+timeout = 10000
+root = "."
+
+[[test.ignore]]
+path = "src/cli/ui/__tests__/solid/**"
+
+[[test.ignore]]
+path = "tests/e2e/web-ui/**"

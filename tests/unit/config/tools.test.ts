@@ -2,20 +2,20 @@
  * カスタムツール設定管理機能のテスト
  */
 
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { readFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import path from "node:path";
+import { describe, it, expect, beforeEach, afterEach,  mock } from "bun:test";
+import { readFile as _readFile } from "node:fs/promises";
+import { homedir as _homedir } from "node:os";
+import _path from "node:path";
 
 // テスト対象の関数（実装前なので一時的にany型）
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-let loadToolsConfig: any;
+let _loadToolsConfig: any;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-let validateToolConfig: any;
+let _validateToolConfig: any;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-let getToolById: any;
+let _getToolById: any;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-let getAllTools: any;
+let _getAllTools: any;
 
 // 実装後にインポートを有効化
 // import {
@@ -28,11 +28,11 @@ let getAllTools: any;
 describe("loadToolsConfig", () => {
   beforeEach(() => {
     // 実装前は空の関数をモック
-    loadToolsConfig = vi.fn();
+    loadToolsConfig = mock();
   });
 
   afterEach(() => {
-    vi.restoreAllMocks();
+    mock.restore();
   });
 
   it("設定ファイルが存在する場合、正常に読み込める", async () => {
@@ -58,11 +58,11 @@ describe("loadToolsConfig", () => {
 
 describe("validateToolConfig", () => {
   beforeEach(() => {
-    validateToolConfig = vi.fn();
+    validateToolConfig = mock();
   });
 
   it("必須フィールドが全て存在する場合、検証が成功", () => {
-    const validTool = {
+    const _validTool = {
       id: "test-tool",
       displayName: "Test Tool",
       type: "bunx",
@@ -74,7 +74,7 @@ describe("validateToolConfig", () => {
   });
 
   it("idフィールドが存在しない場合、エラーをスロー", () => {
-    const invalidTool = {
+    const _invalidTool = {
       displayName: "Test Tool",
       type: "bunx",
       command: "test-package@latest",
@@ -105,7 +105,7 @@ describe("validateToolConfig", () => {
   });
 
   it("typeフィールドが'path','bunx','command'以外の場合、エラーをスロー", () => {
-    const invalidTool = {
+    const _invalidTool = {
       id: "test-tool",
       displayName: "Test Tool",
       type: "invalid",
@@ -138,7 +138,7 @@ describe("validateToolConfig", () => {
   });
 
   it("id形式が不正な場合、エラーをスロー", () => {
-    const invalidTool = {
+    const _invalidTool = {
       id: "Invalid_ID!",
       displayName: "Test Tool",
       type: "bunx",
@@ -150,7 +150,7 @@ describe("validateToolConfig", () => {
   });
 
   it("type='path'でcommandが絶対パスでない場合、エラーをスロー", () => {
-    const invalidTool = {
+    const _invalidTool = {
       id: "test-tool",
       displayName: "Test Tool",
       type: "path",
@@ -164,7 +164,7 @@ describe("validateToolConfig", () => {
 
 describe("getToolById", () => {
   beforeEach(() => {
-    getToolById = vi.fn();
+    getToolById = mock();
   });
 
   it("存在するIDの場合、ツールを返す", () => {
@@ -180,7 +180,7 @@ describe("getToolById", () => {
 
 describe("getAllTools", () => {
   beforeEach(() => {
-    getAllTools = vi.fn();
+    getAllTools = mock();
   });
 
   it("ビルトインツール（Claude Code, Codex CLI）が含まれる", () => {

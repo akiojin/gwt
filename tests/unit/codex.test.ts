@@ -1,24 +1,24 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, mock, beforeEach, spyOn } from "bun:test";
 import { EventEmitter } from "node:events";
 
 // Mock modules before importing
-vi.mock("execa", () => ({
-  execa: vi.fn(),
-  default: { execa: vi.fn() },
+mock.module("execa", () => ({
+  execa: mock(),
+  default: { execa: mock() },
 }));
 
-vi.mock("fs", () => ({
-  existsSync: vi.fn(() => true),
-  default: { existsSync: vi.fn(() => true) },
+mock.module("fs", () => ({
+  existsSync: mock(() => true),
+  default: { existsSync: mock(() => true) },
 }));
 
-vi.mock("os", () => ({
-  platform: vi.fn(() => "darwin"),
-  default: { platform: vi.fn(() => "darwin") },
+mock.module("os", () => ({
+  platform: mock(() => "darwin"),
+  default: { platform: mock(() => "darwin") },
 }));
 
-const stdoutWrite = vi.fn();
-const stderrWrite = vi.fn();
+const stdoutWrite = mock();
+const stderrWrite = mock();
 
 const mockTerminalStreams = {
   stdin: { id: "stdin" } as unknown as NodeJS.ReadStream,
@@ -28,29 +28,29 @@ const mockTerminalStreams = {
   stdoutFd: undefined as number | undefined,
   stderrFd: undefined as number | undefined,
   usingFallback: false,
-  exitRawMode: vi.fn(),
+  exitRawMode: mock(),
 };
 
 const mockChildStdio: {
   stdin: unknown;
   stdout: unknown;
   stderr: unknown;
-  cleanup: ReturnType<typeof vi.fn>;
+  cleanup: Mock;
 } = {
   stdin: "inherit",
   stdout: "inherit",
   stderr: "inherit",
-  cleanup: vi.fn(),
+  cleanup: mock(),
 };
 
-vi.mock("../../src/utils/terminal", () => ({
-  getTerminalStreams: vi.fn(() => mockTerminalStreams),
-  createChildStdio: vi.fn(() => mockChildStdio),
-  resetTerminalModes: vi.fn(),
+mock.module("../../src/utils/terminal", () => ({
+  getTerminalStreams: mock(() => mockTerminalStreams),
+  createChildStdio: mock(() => mockChildStdio),
+  resetTerminalModes: mock(),
 }));
-vi.mock("../../src/utils/session", () => ({
-  waitForCodexSessionId: vi.fn(async () => null),
-  findLatestCodexSession: vi.fn(async () => null),
+mock.module("../../src/utils/session", () => ({
+  waitForCodexSessionId: mock(async () => null),
+  findLatestCodexSession: mock(async () => null),
 }));
 
 import { execa } from "execa";
@@ -62,7 +62,7 @@ import {
 } from "../../src/codex";
 
 // Get typed mock
-const mockExeca = execa as ReturnType<typeof vi.fn>;
+const mockExeca = execa as Mock;
 
 type ExecaCall = [unknown, string[], Record<string, unknown>];
 
@@ -97,7 +97,7 @@ describe("codex.ts", () => {
   const worktreePath = "/tmp/worktree";
 
   beforeEach(() => {
-    vi.clearAllMocks();
+    mock.restore();
     mockTerminalStreams.exitRawMode.mockClear();
     stdoutWrite.mockClear();
     stderrWrite.mockClear();
@@ -134,7 +134,7 @@ describe("codex.ts", () => {
     const { findLatestCodexSession } =
       await import("../../src/utils/session.js");
     const mockFindLatestCodexSession =
-      findLatestCodexSession as unknown as ReturnType<typeof vi.fn>;
+      findLatestCodexSession as unknown as Mock;
     mockFindLatestCodexSession.mockResolvedValueOnce({
       id: "019af999-aaaa-bbbb-cccc-123456789abc",
       fullPath: "/mock/path/session.jsonl",
@@ -233,7 +233,7 @@ describe("codex.ts", () => {
   });
 
   it("should display launch arguments in console log (FR-008)", async () => {
-    const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const consoleSpy = spyOn(console, "log").mockImplementation(() => {});
 
     await launchCodexCLI(worktreePath);
 
