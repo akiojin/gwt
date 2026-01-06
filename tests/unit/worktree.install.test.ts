@@ -1,17 +1,16 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
 import path from "node:path";
 
 // Vitest shim for environments lacking vi.hoisted (e.g., bun)
 if (typeof (vi as Record<string, unknown>).hoisted !== "function") {
   // @ts-expect-error injected shim
-  vi.hoisted = (factory: () => unknown) => factory();
 }
 
-const accessMock = vi.hoisted(() => vi.fn());
+const accessMock = (mock());
 
-vi.mock("node:fs/promises", async () => {
+mock.module("node:fs/promises", async () => {
   const actual =
-    await vi.importActual<typeof import("node:fs/promises")>(
+    await import(
       "node:fs/promises",
     );
 
@@ -26,8 +25,8 @@ vi.mock("node:fs/promises", async () => {
   };
 });
 
-vi.mock("execa", () => ({
-  execa: vi.fn(),
+mock.module("execa", () => ({
+  execa: mock(),
 }));
 
 import { execa } from "execa";
@@ -51,12 +50,12 @@ function setupExistingFiles(files: string[]): void {
 
 describe("dependency installer", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    mock.restore();
     accessMock.mockReset();
   });
 
   afterEach(() => {
-    vi.restoreAllMocks();
+    mock.restore();
   });
 
   describe("detectPackageManager", () => {

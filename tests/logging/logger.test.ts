@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, spyOn } from "bun:test";
 import { createLogger, formatDate } from "../../src/logging/logger.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -27,7 +27,7 @@ describe("createLogger", () => {
   it("writes to default path ~/.gwt/logs/<cwd>/<YYYY-MM-DD>.jsonl", () => {
     fs.rmSync(TMP_HOME, { recursive: true, force: true });
     fs.mkdirSync(TMP_HOME, { recursive: true });
-    const homeSpy = vi.spyOn(os, "homedir").mockReturnValue(TMP_HOME);
+    const homeSpy = spyOn(os, "homedir").mockReturnValue(TMP_HOME);
 
     const today = formatDate(new Date());
     const expectedDir = path.join(

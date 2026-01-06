@@ -1,18 +1,18 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, mock, beforeEach, afterEach, spyOn } from "bun:test";
 import path from "node:path";
 import * as worktree from "../../src/worktree";
 
 // Mock execa
-vi.mock("execa", () => ({
-  execa: vi.fn(),
+mock.module("execa", () => ({
+  execa: mock(),
 }));
 
 // Mock node:fs
-vi.mock("node:fs", () => {
-  const existsSync = vi.fn();
-  const statSync = vi.fn(() => ({ isDirectory: () => true }));
-  const readFileSync = vi.fn(() => "");
+mock.module("node:fs", () => {
+  const existsSync = mock();
+  const statSync = mock(() => ({ isDirectory: () => true }));
+  const readFileSync = mock(() => "");
   return {
     existsSync,
     statSync,
@@ -30,11 +30,11 @@ import * as configModule from "../../src/config/index";
 
 describe("worktree.ts - Worktree Operations", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    mock.restore();
   });
 
   afterEach(() => {
-    vi.restoreAllMocks();
+    mock.restore();
   });
 
   describe("worktreeExists (T104)", () => {
@@ -102,7 +102,7 @@ branch refs/heads/feature/test
         stderr: "",
         exitCode: 0,
       });
-      vi.spyOn(git, "getCurrentBranchName").mockResolvedValue("feature/other");
+      spyOn(git, "getCurrentBranchName").mockResolvedValue("feature/other");
 
       const path = await worktree.worktreeExists("feature/test");
 
@@ -176,12 +176,12 @@ branch refs/heads/feature/test
   });
 
   describe("createWorktree (T106)", () => {
-    let mkdirSpy: ReturnType<typeof vi.spyOn>;
-    let getWorktreeRootSpy: ReturnType<typeof vi.spyOn>;
-    let ensureGitignoreEntrySpy: ReturnType<typeof vi.spyOn>;
+    let mkdirSpy: Mock;
+    let getWorktreeRootSpy: Mock;
+    let ensureGitignoreEntrySpy: Mock;
 
     beforeEach(() => {
-      mkdirSpy = vi.spyOn(fsPromises, "mkdir").mockResolvedValue(undefined);
+      mkdirSpy = spyOn(fsPromises, "mkdir").mockResolvedValue(undefined);
       getWorktreeRootSpy = vi
         .spyOn(git, "getWorktreeRoot")
         .mockResolvedValue("/path/to/worktree-current");
@@ -450,11 +450,11 @@ branch refs/heads/feature/test
   });
 
   describe("switchToProtectedBranch", () => {
-    let branchExistsSpy: ReturnType<typeof vi.spyOn>;
-    let getCurrentBranchSpy: ReturnType<typeof vi.spyOn>;
+    let branchExistsSpy: Mock;
+    let getCurrentBranchSpy: Mock;
 
     beforeEach(() => {
-      branchExistsSpy = vi.spyOn(git, "branchExists").mockResolvedValue(false);
+      branchExistsSpy = spyOn(git, "branchExists").mockResolvedValue(false);
       getCurrentBranchSpy = vi
         .spyOn(git, "getCurrentBranch")
         .mockResolvedValue("develop");
@@ -567,7 +567,7 @@ branch refs/heads/feature/test
 
   describe("listAdditionalWorktrees (T701)", () => {
     beforeEach(() => {
-      vi.spyOn(git, "getRepositoryRoot").mockResolvedValue("/");
+      spyOn(git, "getRepositoryRoot").mockResolvedValue("/");
     });
 
     it("should call listWorktrees via git command", async () => {
@@ -638,7 +638,7 @@ branch refs/heads/feature/test
 
   describe("getMergedPRWorktrees", () => {
     it("includes branches identical to the base branch when there are no local-only commits", async () => {
-      const configSpy = vi.spyOn(configModule, "getConfig").mockResolvedValue({
+      const configSpy = spyOn(configModule, "getConfig").mockResolvedValue({
         defaultBaseBranch: "main",
         skipPermissions: false,
         enableGitHubIntegration: true,
@@ -760,7 +760,7 @@ branch refs/heads/feature/no-diff
     });
 
     it("uses upstream branch as comparison base when determining cleanup candidates", async () => {
-      const configSpy = vi.spyOn(configModule, "getConfig").mockResolvedValue({
+      const configSpy = spyOn(configModule, "getConfig").mockResolvedValue({
         defaultBaseBranch: "main",
         skipPermissions: false,
         enableGitHubIntegration: true,
@@ -772,17 +772,17 @@ branch refs/heads/feature/no-diff
         .spyOn(git, "getRepositoryRoot")
         .mockResolvedValue("/repo");
 
-      vi.spyOn(github, "getPullRequestByBranch").mockResolvedValue(null);
-      vi.spyOn(git, "getLocalBranches").mockResolvedValue([]);
-      vi.spyOn(git, "hasUncommittedChanges").mockResolvedValue(false);
-      vi.spyOn(git, "hasUnpushedCommits").mockResolvedValue(false);
-      vi.spyOn(git, "hasUnpushedCommitsInRepo").mockResolvedValue(false);
+      spyOn(github, "getPullRequestByBranch").mockResolvedValue(null);
+      spyOn(git, "getLocalBranches").mockResolvedValue([]);
+      spyOn(git, "hasUncommittedChanges").mockResolvedValue(false);
+      spyOn(git, "hasUnpushedCommits").mockResolvedValue(false);
+      spyOn(git, "hasUnpushedCommitsInRepo").mockResolvedValue(false);
 
       const branchHasUniqueSpy = vi
         .spyOn(git, "branchHasUniqueCommitsComparedToBase")
         .mockResolvedValue(false);
 
-      vi.spyOn(git, "checkRemoteBranchExists").mockResolvedValue(false);
+      spyOn(git, "checkRemoteBranchExists").mockResolvedValue(false);
 
       (execa as any).mockImplementation(
         async (command: string, args?: readonly string[]) => {
@@ -841,7 +841,7 @@ branch refs/heads/feature/upstream
     });
 
     it("includes remote-synced orphaned branches when they are clean and pushed", async () => {
-      vi.spyOn(configModule, "getConfig").mockResolvedValue({
+      spyOn(configModule, "getConfig").mockResolvedValue({
         defaultBaseBranch: "develop",
         skipPermissions: false,
         enableGitHubIntegration: true,
@@ -849,9 +849,9 @@ branch refs/heads/feature/upstream
         worktreeNamingPattern: "{repo}-{branch}",
       });
 
-      vi.spyOn(git, "getRepositoryRoot").mockResolvedValue("/repo");
-      vi.spyOn(github, "getPullRequestByBranch").mockResolvedValue(null);
-      vi.spyOn(git, "getLocalBranches").mockResolvedValue([
+      spyOn(git, "getRepositoryRoot").mockResolvedValue("/repo");
+      spyOn(github, "getPullRequestByBranch").mockResolvedValue(null);
+      spyOn(git, "getLocalBranches").mockResolvedValue([
         {
           name: "feature/ready-but-unmerged",
           type: "local",
@@ -866,13 +866,13 @@ branch refs/heads/feature/upstream
         },
       ]);
 
-      vi.spyOn(git, "hasUncommittedChanges").mockResolvedValue(false);
-      vi.spyOn(git, "hasUnpushedCommits").mockResolvedValue(false);
-      vi.spyOn(git, "hasUnpushedCommitsInRepo").mockResolvedValue(false);
-      vi.spyOn(git, "branchHasUniqueCommitsComparedToBase").mockResolvedValue(
+      spyOn(git, "hasUncommittedChanges").mockResolvedValue(false);
+      spyOn(git, "hasUnpushedCommits").mockResolvedValue(false);
+      spyOn(git, "hasUnpushedCommitsInRepo").mockResolvedValue(false);
+      spyOn(git, "branchHasUniqueCommitsComparedToBase").mockResolvedValue(
         true,
       );
-      vi.spyOn(git, "checkRemoteBranchExists").mockResolvedValue(true);
+      spyOn(git, "checkRemoteBranchExists").mockResolvedValue(true);
 
       (execa as any).mockImplementation(
         async (command: string, args?: readonly string[]) => {
@@ -910,7 +910,7 @@ branch refs/heads/develop
     });
 
     it("includes pushed-but-unmerged branches as local cleanup candidates when they are clean", async () => {
-      vi.spyOn(configModule, "getConfig").mockResolvedValue({
+      spyOn(configModule, "getConfig").mockResolvedValue({
         defaultBaseBranch: "develop",
         skipPermissions: false,
         enableGitHubIntegration: true,
@@ -918,9 +918,9 @@ branch refs/heads/develop
         worktreeNamingPattern: "{repo}-{branch}",
       });
 
-      vi.spyOn(git, "getRepositoryRoot").mockResolvedValue("/repo");
-      vi.spyOn(github, "getPullRequestByBranch").mockResolvedValue(null);
-      vi.spyOn(git, "getLocalBranches").mockResolvedValue([
+      spyOn(git, "getRepositoryRoot").mockResolvedValue("/repo");
+      spyOn(github, "getPullRequestByBranch").mockResolvedValue(null);
+      spyOn(git, "getLocalBranches").mockResolvedValue([
         {
           name: "feature/ready-but-unmerged",
           type: "local",
@@ -935,13 +935,13 @@ branch refs/heads/develop
         },
       ]);
 
-      vi.spyOn(git, "hasUncommittedChanges").mockResolvedValue(false);
-      vi.spyOn(git, "hasUnpushedCommits").mockResolvedValue(false);
-      vi.spyOn(git, "hasUnpushedCommitsInRepo").mockResolvedValue(false);
-      vi.spyOn(git, "branchHasUniqueCommitsComparedToBase").mockResolvedValue(
+      spyOn(git, "hasUncommittedChanges").mockResolvedValue(false);
+      spyOn(git, "hasUnpushedCommits").mockResolvedValue(false);
+      spyOn(git, "hasUnpushedCommitsInRepo").mockResolvedValue(false);
+      spyOn(git, "branchHasUniqueCommitsComparedToBase").mockResolvedValue(
         true,
       );
-      vi.spyOn(git, "checkRemoteBranchExists").mockResolvedValue(true);
+      spyOn(git, "checkRemoteBranchExists").mockResolvedValue(true);
 
       (execa as any).mockImplementation(
         async (command: string, args?: readonly string[]) => {
@@ -1001,7 +1001,7 @@ branch refs/heads/feature/old
           exitCode: 0,
         });
 
-        vi.spyOn(git, "getRepositoryRoot").mockResolvedValue("/path/to/repo");
+        spyOn(git, "getRepositoryRoot").mockResolvedValue("/path/to/repo");
         (fs.existsSync as any).mockReturnValue(true);
 
         const worktreeList = await worktree.listAdditionalWorktrees();
@@ -1034,7 +1034,7 @@ branch refs/heads/feature/new
           exitCode: 0,
         });
 
-        vi.spyOn(git, "getRepositoryRoot").mockResolvedValue("/path/to/repo");
+        spyOn(git, "getRepositoryRoot").mockResolvedValue("/path/to/repo");
         (fs.existsSync as any).mockReturnValue(true);
 
         const worktreeList = await worktree.listAdditionalWorktrees();
@@ -1073,7 +1073,7 @@ branch refs/heads/feature/old
           stderr: "",
           exitCode: 0,
         });
-        vi.spyOn(git, "getCurrentBranchName").mockResolvedValue("feature/old");
+        spyOn(git, "getCurrentBranchName").mockResolvedValue("feature/old");
 
         const path = await worktree.worktreeExists("feature/old");
 
@@ -1099,7 +1099,7 @@ branch refs/heads/feature/new
           stderr: "",
           exitCode: 0,
         });
-        vi.spyOn(git, "getCurrentBranchName").mockImplementation(
+        spyOn(git, "getCurrentBranchName").mockImplementation(
           async (worktreePath) => {
             if (worktreePath.endsWith("feature-old")) return "feature/old";
             if (worktreePath.endsWith("feature-new")) return "feature/new";

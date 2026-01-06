@@ -1,12 +1,12 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
 import * as config from "../../../src/config/index";
 
 // Mock node:fs/promises
-vi.mock("node:fs/promises", () => {
-  const readFile = vi.fn();
-  const writeFile = vi.fn();
-  const mkdir = vi.fn();
-  const readdir = vi.fn();
+mock.module("node:fs/promises", () => {
+  const readFile = mock();
+  const writeFile = mock();
+  const mkdir = mock();
+  const readdir = mock();
   return {
     readFile,
     writeFile,
@@ -17,8 +17,8 @@ vi.mock("node:fs/promises", () => {
 });
 
 // Mock node:os
-vi.mock("node:os", () => {
-  const homedir = vi.fn(() => "/home/testuser");
+mock.module("node:os", () => {
+  const homedir = mock(() => "/home/testuser");
   return {
     homedir,
     default: { homedir },
@@ -29,11 +29,11 @@ import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
 
 describe("config/index.ts - Session Management", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    mock.restore();
   });
 
   afterEach(() => {
-    vi.restoreAllMocks();
+    mock.restore();
   });
 
   describe("saveSession (T301)", () => {

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach,  mock } from "bun:test";
 import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 
@@ -14,7 +14,7 @@ describe("shared environment config", () => {
     await mkdir(base, { recursive: true });
     tempHome = await mkdtemp(path.join(base, "gwt-tools-"));
     process.env.GWT_HOME = tempHome;
-    await vi.resetModules();
+    await // resetModules not needed in bun;
     const module = await import("../../../src/config/tools.js");
     loadCodingAgentsConfig = module.loadCodingAgentsConfig;
     saveCodingAgentsConfig = module.saveCodingAgentsConfig;
@@ -27,7 +27,7 @@ describe("shared environment config", () => {
     } else {
       process.env.GWT_HOME = originalHomeEnv;
     }
-    await vi.resetModules();
+    await // resetModules not needed in bun;
   });
 
   it("loadCodingAgentsConfig returns shared env and updatedAt when present", async () => {

@@ -1,5 +1,5 @@
 import React from "react";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "bun:test";
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import type { Branch } from "../../../../../src/types/api.js";

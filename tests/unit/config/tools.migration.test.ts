@@ -3,10 +3,10 @@
  * SPEC-29e16bd0: customTools → customCodingAgents マイグレーション
  *
  * マイグレーションロジックのユニットテスト
- * ファイルI/O統合テストは vitest で実行（bun test では vi.resetModules 未対応）
+ * ファイルI/O統合テストは bun test で実行
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "bun:test";
 import type { CodingAgentsConfig } from "../../../src/types/tools.js";
 
 /**

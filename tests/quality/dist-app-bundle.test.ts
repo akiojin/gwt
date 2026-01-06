@@ -1,7 +1,7 @@
 import { access, readFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { resolve } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "bun:test";
 
 const bundlePath = resolve(
   process.cwd(),

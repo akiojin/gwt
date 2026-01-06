@@ -2,7 +2,7 @@
  * Tests for Web UI utility functions
  * Spec: SPEC-1f56fd80 (FR-006)
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach } from "bun:test";
 import * as net from "node:net";
 import { resolveWebUiPort, isPortInUse } from "../../../src/utils/webui.js";
 

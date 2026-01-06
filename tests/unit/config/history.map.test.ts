@@ -1,10 +1,10 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, mock, beforeEach } from "bun:test";
 
-vi.mock("node:fs/promises", () => {
-  const readFile = vi.fn();
-  const writeFile = vi.fn();
-  const mkdir = vi.fn();
-  const readdir = vi.fn();
+mock.module("node:fs/promises", () => {
+  const readFile = mock();
+  const writeFile = mock();
+  const mkdir = mock();
+  const readdir = mock();
   return {
     readFile,
     writeFile,
@@ -19,7 +19,7 @@ import { getLastToolUsageMap } from "../../../src/config/index";
 
 describe("getLastToolUsageMap", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    mock.restore();
   });
 
   it("returns latest entry per branch", async () => {

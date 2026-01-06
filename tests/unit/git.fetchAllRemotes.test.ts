@@ -2,28 +2,28 @@ import {
   describe,
   it,
   expect,
-  vi,
+  mock,
   beforeEach,
   afterEach,
-  type MockedFunction,
-} from "vitest";
+  
+} from "bun:test";
 import { fetchAllRemotes } from "../../src/git.js";
 
-vi.mock("execa", () => ({
-  execa: vi.fn(),
+mock.module("execa", () => ({
+  execa: mock(),
 }));
 
 import { execa } from "execa";
 
-const execaMock = execa as MockedFunction<typeof execa>;
+const execaMock = execa as Mock<typeof execa>;
 
 describe("fetchAllRemotes", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    mock.restore();
   });
 
   afterEach(() => {
-    vi.restoreAllMocks();
+    mock.restore();
   });
 
   it("passes timeout and disables interactive prompts", async () => {

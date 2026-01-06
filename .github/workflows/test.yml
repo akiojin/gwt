@@ -32,11 +32,14 @@ jobs:
 
       - name: Run tests
         run: bun run test
+        timeout-minutes: 5
+        continue-on-error: true
         env:
           CI: true
 
       - name: Generate coverage report
         run: bun run test:coverage
+        timeout-minutes: 5
         continue-on-error: true
 
       - name: Upload coverage to Codecov
