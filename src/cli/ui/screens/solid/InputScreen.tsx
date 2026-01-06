@@ -10,6 +10,7 @@ export interface InputScreenProps {
   onCancel?: () => void;
   placeholder?: string;
   label?: string;
+  width?: number;
   helpVisible?: boolean;
 }
 
@@ -21,6 +22,7 @@ export function InputScreen({
   onCancel,
   placeholder,
   label,
+  width,
   helpVisible = false,
 }: InputScreenProps) {
   const inputHeight = label ? 2 : 1;
@@ -42,8 +44,9 @@ export function InputScreen({
           value={value}
           onChange={onChange}
           onSubmit={onSubmit}
-          placeholder={placeholder}
-          label={label}
+          {...(placeholder !== undefined ? { placeholder } : {})}
+          {...(label !== undefined ? { label } : {})}
+          {...(width !== undefined ? { width } : {})}
           focused
         />
       </box>

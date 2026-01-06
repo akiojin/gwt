@@ -9,11 +9,12 @@ import {
 } from "solid-js";
 import type {
   BranchItem,
+  BranchInfo,
   CodingAgentId,
   InferenceLevel,
   SelectedBranchState,
   Statistics,
-  WorktreeInfo,
+  WorktreeInfo as UIWorktreeInfo,
 } from "./types.js";
 import type { FormattedLogEntry } from "../../logging/formatter.js";
 import { BranchListScreen } from "./screens/solid/BranchListScreen.js";
@@ -27,6 +28,11 @@ import { LogDetailScreen } from "./screens/solid/LogDetailScreen.js";
 import { ErrorScreen } from "./screens/solid/ErrorScreen.js";
 import { LoadingIndicatorScreen } from "./screens/solid/LoadingIndicator.js";
 import { WorktreeCreateScreen } from "./screens/solid/WorktreeCreateScreen.js";
+import { InputScreen } from "./screens/solid/InputScreen.js";
+import { ConfirmScreen } from "./screens/solid/ConfirmScreen.js";
+import { EnvironmentScreen } from "./screens/solid/EnvironmentScreen.js";
+import { ProfileScreen } from "./screens/solid/ProfileScreen.js";
+import { ProfileEnvScreen } from "./screens/solid/ProfileEnvScreen.js";
 import { calculateStatistics } from "./utils/statisticsCalculator.js";
 import { formatBranchItems } from "./utils/branchFormatter.js";
 import {
@@ -38,8 +44,17 @@ import {
   resolveBaseBranchLabel,
   resolveBaseBranchRef,
 } from "./utils/baseBranch.js";
-import { getAllBranches, getRepositoryRoot } from "../../git.js";
-import { listAdditionalWorktrees } from "../../worktree.js";
+import {
+  getAllBranches,
+  getCurrentBranch,
+  getLocalBranches,
+  getRepositoryRoot,
+} from "../../git.js";
+import {
+  listAdditionalWorktrees,
+  repairWorktrees,
+  type WorktreeInfo as WorktreeEntry,
+} from "../../worktree.js";
 import { detectAllToolStatuses, type ToolStatus } from "../../utils/command.js";
 import { getConfig } from "../../config/index.js";
 import { getAllCodingAgents } from "../../config/tools.js";
@@ -52,6 +67,17 @@ import {
 import { parseLogLines } from "../../logging/formatter.js";
 import { copyToClipboard } from "./utils/clipboard.js";
 import { getPackageVersion } from "../../utils.js";
+import {
+  createProfile,
+  deleteProfile,
+  loadProfiles,
+  setActiveProfile,
+  updateProfile,
+} from "../../config/profiles.js";
+import {
+  isValidProfileName,
+  type ProfilesConfig,
+} from "../../types/profiles.js";
 
 export type ExecutionMode = "normal" | "continue" | "resume";
 
@@ -77,9 +103,18 @@ export type AppScreen =
   | "skip-permissions"
   | "log-list"
   | "log-detail"
+  | "profile"
+  | "profile-env"
+  | "profile-input"
+  | "profile-confirm"
+  | "profile-os-env"
+  | "profile-error"
   | "worktree-create"
   | "loading"
   | "error";
+
+type ProfileInputMode = "create-profile" | "add-env" | "edit-env";
+type ProfileConfirmMode = "delete-profile" | "delete-env";
 
 export interface AppSolidProps {
   onExit?: (result?: SelectionResult) => void;
@@ -180,6 +215,12 @@ export function AppSolid(props: AppSolidProps) {
   );
   const [selectedMode, setSelectedMode] = createSignal<ExecutionMode>("normal");
   const [selectedBranches, setSelectedBranches] = createSignal<string[]>([]);
+  const [branchFooterMessage, setBranchFooterMessage] = createSignal<{
+    text: string;
+    isSpinning?: boolean;
+    color?: "cyan" | "green" | "yellow" | "red";
+  } | null>(null);
+  const [branchInputLocked, setBranchInputLocked] = createSignal(false);
   const [isNewBranch, setIsNewBranch] = createSignal(false);
   const [newBranchBaseRef, setNewBranchBaseRef] = createSignal<string | null>(
     null,
@@ -207,8 +248,63 @@ export function AppSolid(props: AppSolidProps) {
     tone: "success" | "error";
   } | null>(null);
 
+  const [profileItems, setProfileItems] = createSignal<
+    { name: string; displayName?: string; isActive?: boolean }[]
+  >([]);
+  const [activeProfile, setActiveProfileName] = createSignal<string | null>(
+    null,
+  );
+  const [profileError, setProfileError] = createSignal<Error | null>(null);
+  const [profilesConfig, setProfilesConfig] =
+    createSignal<ProfilesConfig | null>(null);
+  const [profileActionError, setProfileActionError] =
+    createSignal<Error | null>(null);
+  const [profileActionHint, setProfileActionHint] = createSignal<string | null>(
+    null,
+  );
+  const [selectedProfileName, setSelectedProfileName] = createSignal<
+    string | null
+  >(null);
+  const [profileInputValue, setProfileInputValue] = createSignal("", {
+    equals: false,
+  });
+  const [profileInputMode, setProfileInputMode] =
+    createSignal<ProfileInputMode>("create-profile");
+  const [profileInputSuppressKey, setProfileInputSuppressKey] = createSignal<
+    string | null
+  >(null);
+  const [profileEnvKey, setProfileEnvKey] = createSignal<string | null>(null);
+  const [profileConfirmMode, setProfileConfirmMode] =
+    createSignal<ProfileConfirmMode>("delete-profile");
+
   const logDir = createMemo(() => resolveLogDir(workingDirectory()));
+  const selectedProfileConfig = createMemo(() => {
+    const name = selectedProfileName();
+    const config = profilesConfig();
+    if (!name || !config?.profiles?.[name]) {
+      return null;
+    }
+    return { name, profile: config.profiles[name] };
+  });
+  const profileEnvVariables = createMemo(() => {
+    const entry = selectedProfileConfig();
+    if (!entry) {
+      return [];
+    }
+    return Object.entries(entry.profile.env ?? {})
+      .map(([key, value]) => ({ key, value }))
+      .sort((a, b) => a.key.localeCompare(b.key));
+  });
+  const osEnvVariables = createMemo(() =>
+    Object.entries(process.env)
+      .filter(([, value]) => typeof value === "string")
+      .map(([key, value]) => ({ key, value: String(value) }))
+      .sort((a, b) => a.key.localeCompare(b.key)),
+  );
   let logNotificationTimer: ReturnType<typeof setTimeout> | null = null;
+  let branchFooterTimer: ReturnType<typeof setTimeout> | null = null;
+  const BRANCH_LOAD_TIMEOUT_MS = 3000;
+  const BRANCH_FULL_LOAD_TIMEOUT_MS = 8000;
 
   const isHelpKey = (key: {
     name: string;
@@ -257,6 +353,12 @@ export function AppSolid(props: AppSolidProps) {
     setCurrentScreen(previous);
   };
 
+  const openProfileError = (err: unknown, hint: string) => {
+    setProfileActionError(err instanceof Error ? err : new Error(String(err)));
+    setProfileActionHint(hint);
+    navigateTo("profile-error");
+  };
+
   const showLogNotification = (message: string, tone: "success" | "error") => {
     setLogNotification({ message, tone });
     if (logNotificationTimer) {
@@ -289,53 +391,79 @@ export function AppSolid(props: AppSolidProps) {
     setError(null);
     try {
       const repoRoot = await getRepositoryRoot();
-      const [branches, worktrees] = await Promise.all([
-        getAllBranches(repoRoot),
-        listAdditionalWorktrees(),
-      ]);
+      const worktreesPromise = listAdditionalWorktrees();
+      const localBranchesPromise = getLocalBranches(repoRoot);
+      const currentBranchPromise = getCurrentBranch(repoRoot);
 
-      const localBranchNames = new Set(
-        branches.filter((branch) => branch.type === "local").map((b) => b.name),
-      );
+      const localBranches = await withTimeout(
+        localBranchesPromise,
+        BRANCH_LOAD_TIMEOUT_MS,
+      ).catch(() => []);
+      const currentBranch = await withTimeout(
+        currentBranchPromise,
+        BRANCH_LOAD_TIMEOUT_MS,
+      ).catch(() => null);
 
-      const filtered = branches.filter((branch) => {
-        if (branch.type === "remote") {
-          const remoteName = branch.name.replace(/^origin\//, "");
-          return !localBranchNames.has(remoteName);
-        }
-        return true;
-      });
-
-      const worktreeMap = new Map<string, WorktreeInfo>();
-      for (const worktree of worktrees) {
-        worktreeMap.set(worktree.branch, {
-          path: worktree.path,
-          locked: false,
-          prunable: worktree.isAccessible === false,
-          isAccessible: worktree.isAccessible ?? true,
-          ...(worktree.hasUncommittedChanges !== undefined
-            ? { hasUncommittedChanges: worktree.hasUncommittedChanges }
-            : {}),
+      if (currentBranch) {
+        localBranches.forEach((branch) => {
+          if (branch.name === currentBranch) {
+            branch.isCurrent = true;
+          }
         });
       }
 
-      const enriched = filtered.map((branch) => {
-        if (branch.type === "local") {
-          const worktree = worktreeMap.get(branch.name);
-          if (worktree) {
-            return { ...branch, worktree };
-          }
-        }
-        return branch;
-      });
+      const worktrees = await withTimeout(
+        worktreesPromise,
+        BRANCH_LOAD_TIMEOUT_MS,
+      ).catch(() => []);
 
-      const items = formatBranchItems(enriched, worktreeMap);
-      setBranchItems(items);
-      setStats(buildStats(items));
+      const initial = buildBranchList(localBranches, worktrees);
+      setBranchItems(initial.items);
+      setStats(buildStats(initial.items));
+
+      void (async () => {
+        const [branches, latestWorktrees] = await Promise.all([
+          withTimeout(
+            getAllBranches(repoRoot),
+            BRANCH_FULL_LOAD_TIMEOUT_MS,
+          ).catch(() => localBranches),
+          withTimeout(
+            listAdditionalWorktrees(),
+            BRANCH_FULL_LOAD_TIMEOUT_MS,
+          ).catch(() => worktrees),
+        ]);
+
+        const full = buildBranchList(branches, latestWorktrees);
+        setBranchItems(full.items);
+        setStats(buildStats(full.items));
+      })();
     } catch (err) {
       setError(err instanceof Error ? err : new Error(String(err)));
     } finally {
       setLoading(false);
+    }
+  };
+
+  const refreshProfiles = async () => {
+    try {
+      const config = await loadProfiles();
+      setProfilesConfig(config);
+      const items = Object.entries(config.profiles ?? {}).map(
+        ([name, profile]) => ({
+          name,
+          displayName: profile.displayName,
+          isActive: config.activeProfile === name,
+        }),
+      );
+      items.sort((a, b) => a.name.localeCompare(b.name));
+      setProfileItems(items);
+      setActiveProfileName(config.activeProfile ?? null);
+      setProfileError(null);
+    } catch (err) {
+      setProfilesConfig(null);
+      setProfileItems([]);
+      setActiveProfileName(null);
+      setProfileError(err instanceof Error ? err : new Error(String(err)));
     }
   };
 
@@ -370,6 +498,10 @@ export function AppSolid(props: AppSolidProps) {
   });
 
   onMount(() => {
+    void refreshProfiles();
+  });
+
+  onMount(() => {
     void getConfig()
       .then((config) => setDefaultBaseBranch(config.defaultBaseBranch))
       .catch(() => setDefaultBaseBranch("main"));
@@ -401,7 +533,32 @@ export function AppSolid(props: AppSolidProps) {
     if (logNotificationTimer) {
       clearTimeout(logNotificationTimer);
     }
+    if (branchFooterTimer) {
+      clearTimeout(branchFooterTimer);
+    }
   });
+
+  const showBranchFooterMessage = (
+    text: string,
+    color: "cyan" | "green" | "yellow" | "red",
+    options?: { spinning?: boolean; timeoutMs?: number },
+  ) => {
+    if (branchFooterTimer) {
+      clearTimeout(branchFooterTimer);
+      branchFooterTimer = null;
+    }
+    setBranchFooterMessage({
+      text,
+      color,
+      ...(options?.spinning ? { isSpinning: true } : {}),
+    });
+    const timeout = options?.timeoutMs ?? 2000;
+    if (timeout > 0) {
+      branchFooterTimer = setTimeout(() => {
+        setBranchFooterMessage(null);
+      }, timeout);
+    }
+  };
 
   const handleBranchSelect = (branch: BranchItem) => {
     setSelectedBranch(toSelectedBranchState(branch));
@@ -418,6 +575,251 @@ export function AppSolid(props: AppSolidProps) {
     setCreateBranchName("");
     setSuppressCreateKey("n");
     navigateTo("worktree-create");
+  };
+
+  const handleRepairWorktrees = async () => {
+    if (branchInputLocked()) {
+      return;
+    }
+    const targets = branchItems()
+      .filter((branch) => branch.worktreeStatus === "inaccessible")
+      .map((branch) => branch.name);
+
+    if (targets.length === 0) {
+      showBranchFooterMessage("No worktrees to repair.", "yellow");
+      return;
+    }
+
+    setBranchInputLocked(true);
+    showBranchFooterMessage("Repairing worktrees...", "yellow", {
+      spinning: true,
+      timeoutMs: 0,
+    });
+    try {
+      const result = await repairWorktrees(targets);
+      await refreshBranches();
+      const message =
+        result.failedCount > 0
+          ? `Repair finished: ${result.repairedCount} repaired, ${result.failedCount} failed.`
+          : result.repairedCount > 0
+            ? `Repaired ${result.repairedCount} worktree(s).`
+            : "No worktrees repaired.";
+      showBranchFooterMessage(
+        message,
+        result.failedCount > 0 ? "red" : "green",
+      );
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      showBranchFooterMessage(`Repair failed: ${errorMessage}`, "red");
+    } finally {
+      setBranchInputLocked(false);
+    }
+  };
+
+  const openProfileCreate = () => {
+    setProfileInputMode("create-profile");
+    setProfileInputValue("");
+    setProfileEnvKey(null);
+    setProfileInputSuppressKey("n");
+    navigateTo("profile-input");
+  };
+
+  const openProfileDelete = (profile: { name: string }) => {
+    setSelectedProfileName(profile.name);
+    setProfileConfirmMode("delete-profile");
+    navigateTo("profile-confirm");
+  };
+
+  const openProfileEnv = (profile: { name: string }) => {
+    setSelectedProfileName(profile.name);
+    navigateTo("profile-env");
+  };
+
+  const openProfileEnvAdd = () => {
+    setProfileInputMode("add-env");
+    setProfileInputValue("");
+    setProfileEnvKey(null);
+    setProfileInputSuppressKey("a");
+    navigateTo("profile-input");
+  };
+
+  const openProfileEnvEdit = (variable: { key: string; value: string }) => {
+    setProfileInputMode("edit-env");
+    setProfileEnvKey(variable.key);
+    setProfileInputValue(variable.value);
+    setProfileInputSuppressKey("e");
+    navigateTo("profile-input");
+  };
+
+  const openProfileEnvDelete = (variable: { key: string }) => {
+    setProfileConfirmMode("delete-env");
+    setProfileEnvKey(variable.key);
+    navigateTo("profile-confirm");
+  };
+
+  const handleProfileInputChange = (value: string) => {
+    const suppressKey = profileInputSuppressKey();
+    if (suppressKey && profileInputValue() === "" && value === suppressKey) {
+      setProfileInputSuppressKey(null);
+      setProfileInputValue("");
+      return;
+    }
+    setProfileInputSuppressKey(null);
+    setProfileInputValue(value);
+  };
+
+  const submitProfileInput = async (value: string) => {
+    const mode = profileInputMode();
+    const trimmed = value.trim();
+
+    if (mode === "create-profile") {
+      if (!trimmed) {
+        openProfileError(
+          new Error("Profile name is required."),
+          "Invalid name.",
+        );
+        return;
+      }
+      if (!isValidProfileName(trimmed)) {
+        openProfileError(
+          new Error(`Invalid profile name: "${trimmed}".`),
+          "Profile names must use lowercase letters, numbers, and hyphens.",
+        );
+        return;
+      }
+      try {
+        await createProfile(trimmed, { displayName: trimmed, env: {} });
+        await refreshProfiles();
+        setSelectedProfileName(trimmed);
+        setProfileInputValue("");
+        setProfileInputSuppressKey(null);
+        goBack();
+      } catch (err) {
+        openProfileError(err, "Unable to create profile.");
+      }
+      return;
+    }
+
+    const entry = selectedProfileConfig();
+    if (!entry) {
+      openProfileError(
+        new Error("Profile not selected."),
+        "Profile not found.",
+      );
+      return;
+    }
+
+    if (mode === "add-env") {
+      const separatorIndex = trimmed.indexOf("=");
+      if (separatorIndex <= 0) {
+        openProfileError(
+          new Error("Environment variable must be in KEY=VALUE format."),
+          "Invalid environment variable.",
+        );
+        return;
+      }
+      const key = trimmed.slice(0, separatorIndex).trim();
+      const valuePart = trimmed.slice(separatorIndex + 1);
+      if (!key) {
+        openProfileError(
+          new Error("Environment variable key is required."),
+          "Invalid environment variable.",
+        );
+        return;
+      }
+      const nextEnv = { ...(entry.profile.env ?? {}) };
+      nextEnv[key] = valuePart;
+      try {
+        await updateProfile(entry.name, { env: nextEnv });
+        await refreshProfiles();
+        setProfileInputValue("");
+        setProfileInputSuppressKey(null);
+        goBack();
+      } catch (err) {
+        openProfileError(err, "Unable to update profile.");
+      }
+      return;
+    }
+
+    if (mode === "edit-env") {
+      const envKey = profileEnvKey();
+      if (!envKey) {
+        openProfileError(
+          new Error("Environment variable not selected."),
+          "Select a variable to edit.",
+        );
+        return;
+      }
+      const nextEnv = { ...(entry.profile.env ?? {}) };
+      nextEnv[envKey] = value;
+      try {
+        await updateProfile(entry.name, { env: nextEnv });
+        await refreshProfiles();
+        setProfileInputValue("");
+        setProfileInputSuppressKey(null);
+        goBack();
+      } catch (err) {
+        openProfileError(err, "Unable to update profile.");
+      }
+    }
+  };
+
+  const confirmProfileAction = async (confirmed: boolean) => {
+    if (!confirmed) {
+      goBack();
+      return;
+    }
+
+    const mode = profileConfirmMode();
+    const entry = selectedProfileConfig();
+
+    if (mode === "delete-profile") {
+      const name = selectedProfileName();
+      if (!name) {
+        openProfileError(
+          new Error("Profile not selected."),
+          "Profile not found.",
+        );
+        return;
+      }
+      try {
+        await deleteProfile(name);
+        await refreshProfiles();
+        setProfileEnvKey(null);
+        goBack();
+      } catch (err) {
+        openProfileError(err, "Unable to delete profile.");
+      }
+      return;
+    }
+
+    if (mode === "delete-env") {
+      if (!entry) {
+        openProfileError(
+          new Error("Profile not selected."),
+          "Profile not found.",
+        );
+        return;
+      }
+      const envKey = profileEnvKey();
+      if (!envKey) {
+        openProfileError(
+          new Error("Environment variable not selected."),
+          "Select a variable to delete.",
+        );
+        return;
+      }
+      const nextEnv = { ...(entry.profile.env ?? {}) };
+      delete nextEnv[envKey];
+      try {
+        await updateProfile(entry.name, { env: nextEnv });
+        await refreshProfiles();
+        setProfileEnvKey(null);
+        goBack();
+      } catch (err) {
+        openProfileError(err, "Unable to update profile.");
+      }
+    }
   };
 
   const toggleSelectedBranch = (branchName: string) => {
@@ -480,6 +882,11 @@ export function AppSolid(props: AppSolidProps) {
     const screen = currentScreen();
 
     if (screen === "branch-list") {
+      const cleanupUI = {
+        indicators: {},
+        footerMessage: branchFooterMessage(),
+        inputLocked: branchInputLocked(),
+      };
       return (
         <BranchListScreen
           branches={branchItems()}
@@ -487,18 +894,21 @@ export function AppSolid(props: AppSolidProps) {
           onSelect={handleBranchSelect}
           onQuit={() => exitApp(undefined)}
           onRefresh={refreshBranches}
+          onRepairWorktrees={handleRepairWorktrees}
           loading={loading()}
           error={error()}
-          {...(props.loadingIndicatorDelay !== undefined
-            ? { loadingIndicatorDelay: props.loadingIndicatorDelay }
-            : {})}
+          loadingIndicatorDelay={props.loadingIndicatorDelay ?? 0}
+          lastUpdated={stats().lastUpdated}
           version={version()}
           workingDirectory={workingDirectory()}
           toolStatuses={toolStatuses()}
+          activeProfile={activeProfile()}
           onOpenLogs={() => navigateTo("log-list")}
+          onOpenProfiles={() => navigateTo("profile")}
           selectedBranches={selectedBranches()}
           onToggleSelect={toggleSelectedBranch}
           onCreateBranch={handleQuickCreate}
+          cleanupUI={cleanupUI}
           helpVisible={helpVisible()}
         />
       );
@@ -603,6 +1013,155 @@ export function AppSolid(props: AppSolidProps) {
       );
     }
 
+    if (screen === "profile") {
+      if (profileError()) {
+        return (
+          <ErrorScreen
+            error={profileError() as Error}
+            onBack={goBack}
+            hint="Unable to load profiles."
+          />
+        );
+      }
+      return (
+        <ProfileScreen
+          profiles={profileItems()}
+          version={version()}
+          helpVisible={helpVisible()}
+          onCreate={openProfileCreate}
+          onDelete={openProfileDelete}
+          onEdit={openProfileEnv}
+          onSelect={(profile) => {
+            void setActiveProfile(profile.name)
+              .then(() => {
+                void refreshProfiles();
+              })
+              .catch((err) => {
+                openProfileError(err, "Unable to set active profile.");
+              });
+          }}
+          onBack={goBack}
+        />
+      );
+    }
+
+    if (screen === "profile-env") {
+      const entry = selectedProfileConfig();
+      if (!entry) {
+        return (
+          <ErrorScreen
+            error="Profile not found."
+            onBack={goBack}
+            hint="Select a profile before editing."
+          />
+        );
+      }
+      return (
+        <ProfileEnvScreen
+          profileName={entry.name}
+          variables={profileEnvVariables()}
+          onAdd={openProfileEnvAdd}
+          onEdit={openProfileEnvEdit}
+          onDelete={openProfileEnvDelete}
+          onViewOsEnv={() => navigateTo("profile-os-env")}
+          onBack={goBack}
+          version={version()}
+          helpVisible={helpVisible()}
+        />
+      );
+    }
+
+    if (screen === "profile-input") {
+      const mode = profileInputMode();
+      const envKey = profileEnvKey();
+      const message =
+        mode === "create-profile"
+          ? "New profile name"
+          : mode === "add-env"
+            ? "Add environment variable"
+            : `Edit value for ${envKey ?? "(unknown)"}`;
+      const label =
+        mode === "create-profile"
+          ? "Profile name"
+          : mode === "add-env"
+            ? "KEY=VALUE"
+            : "Value";
+      const placeholder =
+        mode === "create-profile"
+          ? "development"
+          : mode === "add-env"
+            ? "MY_VAR=value"
+            : undefined;
+
+      return (
+        <InputScreen
+          message={message}
+          value={profileInputValue()}
+          onChange={handleProfileInputChange}
+          onSubmit={(value) => void submitProfileInput(value)}
+          onCancel={() => {
+            setProfileInputSuppressKey(null);
+            goBack();
+          }}
+          label={label}
+          {...(placeholder !== undefined ? { placeholder } : {})}
+          width={32}
+          helpVisible={helpVisible()}
+        />
+      );
+    }
+
+    if (screen === "profile-confirm") {
+      const mode = profileConfirmMode();
+      const profileName = selectedProfileName();
+      const envKey = profileEnvKey();
+      const message =
+        mode === "delete-profile"
+          ? `Delete profile ${profileName ?? "(unknown)"}?`
+          : `Delete ${envKey ?? "(unknown)"}?`;
+
+      return (
+        <ConfirmScreen
+          message={message}
+          onConfirm={(confirmed) => void confirmProfileAction(confirmed)}
+          defaultNo
+          helpVisible={helpVisible()}
+        />
+      );
+    }
+
+    if (screen === "profile-os-env") {
+      const highlightKeys = profileEnvVariables().map(
+        (variable) => variable.key,
+      );
+      return (
+        <EnvironmentScreen
+          variables={osEnvVariables()}
+          highlightKeys={highlightKeys}
+          onBack={goBack}
+          version={version()}
+          helpVisible={helpVisible()}
+        />
+      );
+    }
+
+    if (screen === "profile-error") {
+      return (
+        <ErrorScreen
+          error={profileActionError() ?? "Profile error"}
+          onBack={() => {
+            setProfileActionError(null);
+            setProfileActionHint(null);
+            goBack();
+          }}
+          {...(profileActionHint()
+            ? { hint: profileActionHint() as string }
+            : {})}
+          helpVisible={helpVisible()}
+        />
+      );
+    }
+
     if (screen === "worktree-create") {
       const baseBranchRef = resolveBaseBranchRef(creationSource(), null, () =>
         defaultBaseBranch(),
@@ -693,3 +1252,65 @@ export function AppSolid(props: AppSolidProps) {
     </>
   );
 }
+const withTimeout = async <T,>(
+  promise: Promise<T>,
+  timeoutMs: number,
+): Promise<T> =>
+  new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error("timeout"));
+    }, timeoutMs);
+
+    promise
+      .then((value) => {
+        clearTimeout(timer);
+        resolve(value);
+      })
+      .catch((err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+  });
+
+const buildBranchList = (
+  branches: BranchInfo[],
+  worktrees: WorktreeEntry[],
+) => {
+  const localBranchNames = new Set(
+    branches.filter((branch) => branch.type === "local").map((b) => b.name),
+  );
+
+  const filtered = branches.filter((branch) => {
+    if (branch.type === "remote") {
+      const remoteName = branch.name.replace(/^origin\//, "");
+      return !localBranchNames.has(remoteName);
+    }
+    return true;
+  });
+
+  const worktreeMap = new Map<string, UIWorktreeInfo>();
+  for (const worktree of worktrees) {
+    worktreeMap.set(worktree.branch, {
+      path: worktree.path,
+      locked: worktree.locked ?? false,
+      prunable: worktree.prunable ?? false,
+      isAccessible: worktree.isAccessible ?? true,
+      ...(worktree.hasUncommittedChanges !== undefined
+        ? { hasUncommittedChanges: worktree.hasUncommittedChanges }
+        : {}),
+    });
+  }
+
+  const enriched = filtered.map((branch) => {
+    if (branch.type === "local") {
+      const worktree = worktreeMap.get(branch.name);
+      if (worktree) {
+        return { ...branch, worktree };
+      }
+    }
+    return branch;
+  });
+
+  const items = formatBranchItems(enriched, worktreeMap);
+  return { items, worktreeMap };
+};

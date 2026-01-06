@@ -73,6 +73,7 @@ describe("Solid BranchListScreen", () => {
   it("renders header details", async () => {
     const branches = [createBranch("main")];
     const { captureCharFrame, cleanup } = await renderScreen(branches, {
+      height: 12,
       props: {
         version: "1.2.3",
         activeProfile: "dev",
@@ -119,7 +120,7 @@ describe("Solid BranchListScreen", () => {
   });
 
   it("shows loading indicator", async () => {
-    const branches = [createBranch("main")];
+    const branches: BranchItem[] = [];
     const { renderOnce, captureCharFrame, cleanup } = await renderScreen(
       branches,
       {
@@ -131,6 +132,19 @@ describe("Solid BranchListScreen", () => {
       await renderOnce();
       await renderOnce();
       expect(captureCharFrame()).toContain("Loading Git information...");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("shows selected branch full path", async () => {
+    const branches = [createBranch("feature/long-branch-name")];
+    const { captureCharFrame, cleanup } = await renderScreen(branches);
+
+    try {
+      expect(captureCharFrame()).toContain(
+        "Branch: refs/heads/feature/long-branch-name",
+      );
     } finally {
       cleanup();
     }
@@ -209,6 +223,34 @@ describe("Solid BranchListScreen", () => {
       const frame = captureCharFrame();
       expect(frame).toContain("feature/search");
       expect(frame).not.toContain("hotfix/urgent");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("moves selection while filter mode is active", async () => {
+    const branches = [
+      createBranch("feature/one"),
+      createBranch("feature/two"),
+      createBranch("bugfix/skip"),
+    ];
+
+    const { mockInput, renderOnce, captureCharFrame, cleanup } =
+      await renderScreen(branches, { height: 12 });
+
+    try {
+      mockInput.pressKey("f");
+      await renderOnce();
+
+      await mockInput.typeText("feature");
+      await renderOnce();
+
+      expect(captureCharFrame()).toContain("Branch: refs/heads/feature/one");
+
+      mockInput.pressArrow("down");
+      await renderOnce();
+
+      expect(captureCharFrame()).toContain("Branch: refs/heads/feature/two");
     } finally {
       cleanup();
     }
