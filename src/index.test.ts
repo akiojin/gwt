@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, spyOn, beforeEach, afterEach } from "bun:test";
 import * as utils from "./utils";
 
 // showVersion関数のテスト（TDD Green phase）
@@ -6,18 +6,18 @@ import * as utils from "./utils";
 // そのため、main()関数経由でテストするか、関数をexportする必要がある
 
 describe("showVersion via CLI args", () => {
-  let consoleLogSpy: ReturnType<typeof vi.spyOn>;
-  let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
-  let processExitSpy: ReturnType<typeof vi.spyOn>;
+  let consoleLogSpy: ReturnType<typeof spyOn>;
+  let consoleErrorSpy: ReturnType<typeof spyOn>;
+  let processExitSpy: ReturnType<typeof spyOn>;
   let originalArgv: string[];
 
   beforeEach(() => {
     // console.log, console.error, process.exitをモック
-    consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-    consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    processExitSpy = vi
-      .spyOn(process, "exit")
-      .mockImplementation((() => {}) as any);
+    consoleLogSpy = spyOn(console, "log").mockImplementation(() => {});
+    consoleErrorSpy = spyOn(console, "error").mockImplementation(() => {});
+    processExitSpy = spyOn(process, "exit").mockImplementation(
+      (() => {}) as () => never,
+    );
 
     // 元のprocess.argvを保存
     originalArgv = [...process.argv];
@@ -39,7 +39,7 @@ describe("showVersion via CLI args", () => {
 
     // getPackageVersion()をモック
     const mockVersion = "2.6.1";
-    vi.spyOn(utils, "getPackageVersion").mockResolvedValue(mockVersion);
+    spyOn(utils, "getPackageVersion").mockResolvedValue(mockVersion);
 
     // Act: main()を呼び出す
     const { main } = await import("./index");
@@ -55,7 +55,7 @@ describe("showVersion via CLI args", () => {
 
     // getPackageVersion()をモック
     const mockVersion = "1.12.3";
-    vi.spyOn(utils, "getPackageVersion").mockResolvedValue(mockVersion);
+    spyOn(utils, "getPackageVersion").mockResolvedValue(mockVersion);
 
     // Act: main()を呼び出す
     const { main } = await import("./index");
@@ -72,7 +72,7 @@ describe("showVersion via CLI args", () => {
     process.argv = ["node", "index.js", "--version"];
 
     // getPackageVersion()をモックしてnullを返す
-    vi.spyOn(utils, "getPackageVersion").mockResolvedValue(null);
+    spyOn(utils, "getPackageVersion").mockResolvedValue(null);
 
     // Act: main()を呼び出す
     const { main } = await import("./index");
