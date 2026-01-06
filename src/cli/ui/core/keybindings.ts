@@ -1,8 +1,7 @@
 /**
  * Keybindings - Centralized keyboard shortcut definitions
  *
- * This module provides a unified keybinding system that can be used by both
- * Ink.js (React) and OpenTUI (SolidJS) implementations.
+ * This module provides a unified keybinding system for the CLI UI.
  *
  * @see specs/SPEC-d27be71b/spec.md - OpenTUI migration spec
  */
