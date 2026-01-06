@@ -27,7 +27,7 @@ import {
   type EnsureWorktreeOptions,
 } from "./services/WorktreeOrchestrator.js";
 import chalk from "chalk";
-import type { SelectionResult } from "./cli/ui/components/App.js";
+import type { SelectionResult } from "./cli/ui/App.solid.js";
 import {
   isProtectedBranchName,
   switchToProtectedBranch,
@@ -36,6 +36,7 @@ import {
 } from "./worktree.js";
 import {
   getTerminalStreams,
+  resetTerminalModes,
   waitForUserAcknowledgement,
 } from "./utils/terminal.js";
 import { createLogger } from "./logging/logger.js";
@@ -239,49 +240,68 @@ async function showVersion(): Promise<void> {
 }
 
 /**
- * Main function for Ink.js UI
+ * Main function for OpenTUI UI
  * Returns SelectionResult if user made selections, undefined if user quit
  */
-async function mainInkUI(): Promise<SelectionResult | undefined> {
-  const { render } = await import("ink");
-  const React = await import("react");
-  const { App } = await import("./cli/ui/components/App.js");
+async function mainSolidUI(): Promise<SelectionResult | undefined> {
+  const { renderSolidApp } = await import("./opentui/index.solid.js");
   const terminal = getTerminalStreams();
 
   let selectionResult: SelectionResult | undefined;
+  const mousePreference = process.env.GWT_UI_MOUSE?.trim().toLowerCase();
+  const useMouse =
+    mousePreference === undefined ||
+    mousePreference === "" ||
+    mousePreference === "true" ||
+    mousePreference === "1";
+  const mouseMovePreference =
+    process.env.GWT_UI_MOUSE_MOVE?.trim().toLowerCase();
+  const enableMouseMovement =
+    mouseMovePreference === "true" || mouseMovePreference === "1";
+  const altScreenPreference =
+    process.env.GWT_UI_ALT_SCREEN?.trim().toLowerCase();
+  const useAlternateScreen =
+    altScreenPreference === undefined ||
+    altScreenPreference === "" ||
+    altScreenPreference === "true" ||
+    altScreenPreference === "1";
 
-  // Resume stdin to ensure it's ready for Ink.js
   if (typeof terminal.stdin.resume === "function") {
     terminal.stdin.resume();
   }
+  if (typeof terminal.stdin.setRawMode === "function") {
+    try {
+      terminal.stdin.setRawMode(true);
+    } catch {
+      // Ignore raw mode errors and let OpenTUI handle setup.
+    }
+  }
 
-  const { unmount, waitUntilExit } = render(
-    React.createElement(App, {
-      onExit: (result?: SelectionResult) => {
-        selectionResult = result;
-      },
-    }),
-    {
-      stdin: terminal.stdin,
-      stdout: terminal.stdout,
-      stderr: terminal.stderr,
-      patchConsole: false,
-    },
-  );
-
-  // Wait for user to exit
   try {
-    await waitUntilExit();
+    await renderSolidApp(
+      {
+        onExit: (result?: SelectionResult) => {
+          selectionResult = result;
+        },
+      },
+      {
+        stdin: terminal.stdin,
+        stdout: terminal.stdout,
+        exitOnCtrlC: true,
+        useAlternateScreen,
+        useMouse,
+        enableMouseMovement,
+      },
+    );
   } finally {
     terminal.exitRawMode();
+    resetTerminalModes(terminal.stdout);
     if (typeof terminal.stdin.pause === "function") {
       terminal.stdin.pause();
     }
-    // Inkが残した data リスナーが子プロセス入力を奪わないようクリーンアップ
     terminal.stdin.removeAllListeners?.("data");
     terminal.stdin.removeAllListeners?.("keypress");
     terminal.stdin.removeAllListeners?.("readable");
-    unmount();
   }
 
   return selectionResult;
@@ -298,6 +318,8 @@ export async function handleAIToolWorkflow(
     displayName,
     branchType,
     remoteBranch,
+    baseBranch,
+    isNewBranch,
     tool,
     mode,
     skipPermissions,
@@ -329,7 +351,14 @@ export async function handleAIToolWorkflow(
     // Determine ensure options (local vs remote branch)
     const ensureOptions: EnsureWorktreeOptions = {};
 
-    if (branchType === "remote") {
+    if (isNewBranch) {
+      ensureOptions.isNewBranch = true;
+      if (baseBranch) {
+        ensureOptions.baseBranch = baseBranch;
+      }
+    }
+
+    if (branchType === "remote" && !isNewBranch) {
       const remoteRef = remoteBranch ?? branch;
       const localExists = await branchExists(branch);
 
@@ -848,6 +877,10 @@ export async function handleAIToolWorkflow(
 type UIHandler = () => Promise<SelectionResult | undefined>;
 type WorkflowHandler = (selection: SelectionResult) => Promise<void>;
 
+function resolveUIHandler(): UIHandler {
+  return mainSolidUI;
+}
+
 function logLoopError(error: unknown, context: "ui" | "workflow"): void {
   const label = context === "ui" ? "UI" : "workflow";
   if (error instanceof Error) {
@@ -858,7 +891,7 @@ function logLoopError(error: unknown, context: "ui" | "workflow"): void {
 }
 
 export async function runInteractiveLoop(
-  uiHandler: UIHandler = mainInkUI,
+  uiHandler: UIHandler = resolveUIHandler(),
   workflowHandler: WorkflowHandler = handleAIToolWorkflow,
 ): Promise<void> {
   // Main loop: UI → AI Tool → back to UI

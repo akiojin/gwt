@@ -11,6 +11,11 @@
 - 実装はシンプルに、開発者体験は最高品質に
 - CLI操作の直感性と効率性を技術的複雑さより優先
 
+### 🧩 OpenTUI/SolidJS ガイドライン
+
+- CLI UI は `@opentui/solid` を利用し、Ink.js/React 依存の追加は行わない
+- 端末描画で使用するアイコンは ASCII に統一し、全角/絵文字は避ける
+
 ### 📝 設計ガイドライン
 
 - 設計に関するドキュメントには、ソースコードを書かないこと
@@ -85,3 +90,10 @@
 - `/release` コマンド（または `gh workflow run prepare-release.yml --ref develop`）で develop → main の Release PR を作成する。
 - Release PR が main にマージされると `.github/workflows/release.yml` が release-please でタグ・GitHub Release・Release PR を作成する。
 - `v*` タグの push をトリガーに `.github/workflows/publish.yml` が npm publish を実行する。
+
+## 使用中の技術
+- TypeScript 5.8 + Bun >= 1.0 + OpenTUI (SolidJS), React 19, @opentui/core, @opentui/solid, solid-js (SPEC-d27be71b)
+- ファイル/ローカル Git メタデータ（DB なし） (SPEC-d27be71b)
+
+## 最近の変更
+- SPEC-d27be71b: 追加: TypeScript 5.8 + Bun >= 1.0 + OpenTUI (SolidJS), React 19, @opentui/core, @opentui/solid, solid-js

@@ -10,7 +10,7 @@ Interactive Git worktree manager with Coding Agent selection (Claude Code / Code
 
 ## ✨ Key Features
 
-- 🎯 **Modern React-based UI**: Built with Ink.js for a smooth, responsive terminal interface with real-time updates
+- 🎯 **Modern OpenTUI-based UI**: Built with OpenTUI + SolidJS for a smooth, responsive terminal interface with real-time updates
 - 🖼️ **Full-screen Layout**: Persistent header with statistics, scrollable branch list, and always-visible footer with keyboard shortcuts
 - 🌟 **Smart Branch Creation**: Create feature, bugfix, hotfix, or release branches with guided prompts and automatic base branch selection
 - 🔄 **Advanced Worktree Management**: Complete lifecycle management including creation, cleanup, and path optimization
@@ -243,7 +243,7 @@ For more details, see the [Spec Kit documentation](https://github.com/akiojin/sp
 @akiojin/gwt/
 ├── src/
 │   ├── cli/
-│   │   └── ui/          # Ink.js React components for terminal UI
+│   │   └── ui/          # OpenTUI + SolidJS components for terminal UI
 │   ├── web/             # Web UI server (Express + React)
 │   ├── services/        # Core business logic
 │   ├── repositories/    # Data access layer
