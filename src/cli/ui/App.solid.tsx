@@ -27,6 +27,7 @@ import { LogDetailScreen } from "./screens/solid/LogDetailScreen.js";
 import { ErrorScreen } from "./screens/solid/ErrorScreen.js";
 import { LoadingIndicatorScreen } from "./screens/solid/LoadingIndicator.js";
 import { WorktreeCreateScreen } from "./screens/solid/WorktreeCreateScreen.js";
+import { ProfileScreen } from "./screens/solid/ProfileScreen.js";
 import { calculateStatistics } from "./utils/statisticsCalculator.js";
 import { formatBranchItems } from "./utils/branchFormatter.js";
 import {
@@ -52,6 +53,7 @@ import {
 import { parseLogLines } from "../../logging/formatter.js";
 import { copyToClipboard } from "./utils/clipboard.js";
 import { getPackageVersion } from "../../utils.js";
+import { loadProfiles, setActiveProfile } from "../../config/profiles.js";
 
 export type ExecutionMode = "normal" | "continue" | "resume";
 
@@ -77,6 +79,7 @@ export type AppScreen =
   | "skip-permissions"
   | "log-list"
   | "log-detail"
+  | "profile"
   | "worktree-create"
   | "loading"
   | "error";
@@ -206,6 +209,14 @@ export function AppSolid(props: AppSolidProps) {
     message: string;
     tone: "success" | "error";
   } | null>(null);
+
+  const [profileItems, setProfileItems] = createSignal<
+    { name: string; displayName?: string; isActive?: boolean }[]
+  >([]);
+  const [activeProfile, setActiveProfileName] = createSignal<string | null>(
+    null,
+  );
+  const [profileError, setProfileError] = createSignal<Error | null>(null);
 
   const logDir = createMemo(() => resolveLogDir(workingDirectory()));
   let logNotificationTimer: ReturnType<typeof setTimeout> | null = null;
@@ -370,6 +381,27 @@ export function AppSolid(props: AppSolidProps) {
   });
 
   onMount(() => {
+    void loadProfiles()
+      .then((config) => {
+        const items = Object.entries(config.profiles ?? {}).map(
+          ([name, profile]) => ({
+            name,
+            displayName: profile.displayName,
+            isActive: config.activeProfile === name,
+          }),
+        );
+        items.sort((a, b) => a.name.localeCompare(b.name));
+        setProfileItems(items);
+        setActiveProfileName(config.activeProfile ?? null);
+      })
+      .catch((err) => {
+        setProfileItems([]);
+        setActiveProfileName(null);
+        setProfileError(err instanceof Error ? err : new Error(String(err)));
+      });
+  });
+
+  onMount(() => {
     void getConfig()
       .then((config) => setDefaultBaseBranch(config.defaultBaseBranch))
       .catch(() => setDefaultBaseBranch("main"));
@@ -494,7 +526,9 @@ export function AppSolid(props: AppSolidProps) {
           version={version()}
           workingDirectory={workingDirectory()}
           toolStatuses={toolStatuses()}
+          activeProfile={activeProfile()}
           onOpenLogs={() => navigateTo("log-list")}
+          onOpenProfiles={() => navigateTo("profile")}
           selectedBranches={selectedBranches()}
           onToggleSelect={toggleSelectedBranch}
           onCreateBranch={handleQuickCreate}
@@ -598,6 +632,43 @@ export function AppSolid(props: AppSolidProps) {
           notification={logNotification()}
           version={version()}
           helpVisible={helpVisible()}
+        />
+      );
+    }
+
+    if (screen === "profile") {
+      if (profileError()) {
+        return (
+          <ErrorScreen
+            error={profileError() as Error}
+            onBack={goBack}
+            hint="Unable to load profiles."
+          />
+        );
+      }
+      return (
+        <ProfileScreen
+          profiles={profileItems()}
+          version={version()}
+          helpVisible={helpVisible()}
+          onSelect={(profile) => {
+            void setActiveProfile(profile.name)
+              .then(() => {
+                setActiveProfileName(profile.name);
+                setProfileItems((prev) =>
+                  prev.map((item) => ({
+                    ...item,
+                    isActive: item.name === profile.name,
+                  })),
+                );
+              })
+              .catch((err) => {
+                setProfileError(
+                  err instanceof Error ? err : new Error(String(err)),
+                );
+              });
+          }}
+          onBack={goBack}
         />
       );
     }
