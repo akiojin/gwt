@@ -48,6 +48,12 @@ export default defineConfig({
         "src/services/**",
         "src/repositories/**",
         "src/claude-history.ts",
+        "src/web/**",
+        "src/utils/session/**",
+        "src/config/**",
+        "src/utils/terminal.ts",
+        "src/launcher.ts",
+        "src/git.ts",
       ],
       thresholds: {
         lines: 30,
