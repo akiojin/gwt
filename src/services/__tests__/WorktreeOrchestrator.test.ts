@@ -1,4 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+/* eslint-disable @typescript-eslint/no-explicit-any */
+import { describe, it, expect, mock, beforeEach } from "bun:test";
 import {
   WorktreeOrchestrator,
   type WorktreeService,
@@ -6,8 +7,8 @@ import {
 import * as git from "../../git.js";
 
 // Mock git.getCurrentBranch
-vi.mock("../../git.js", () => ({
-  getCurrentBranch: vi.fn(),
+mock.module("../../git.js", () => ({
+  getCurrentBranch: mock(),
 }));
 
 describe("WorktreeOrchestrator", () => {
@@ -18,11 +19,11 @@ describe("WorktreeOrchestrator", () => {
   const mockWorktreePath = "/mock/repo/.git/worktree/feature-test";
 
   beforeEach(() => {
-    // Create mock service without vi.mock()
+    // Create mock service without mock.module()
     mockWorktreeService = {
-      worktreeExists: vi.fn(),
-      generateWorktreePath: vi.fn(),
-      createWorktree: vi.fn(),
+      worktreeExists: mock(),
+      generateWorktreePath: mock(),
+      createWorktree: mock(),
     };
     orchestrator = new WorktreeOrchestrator(mockWorktreeService);
   });

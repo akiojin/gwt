@@ -1,10 +1,10 @@
 import { PassThrough } from "node:stream";
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { describe, expect, it, mock, beforeEach } from "bun:test";
 
 // Shared mock target to avoid hoisting issues
 const terminalStreams: Record<string, unknown> = {};
 
-vi.mock("../terminal.js", () => ({
+mock.module("../terminal.js", () => ({
   getTerminalStreams: () => terminalStreams,
 }));
 
@@ -17,7 +17,6 @@ const withTimeout = <T>(promise: Promise<T>, ms = 500): Promise<T> =>
   ]);
 
 const resetTerminalStreams = () => {
-  vi.resetModules();
   for (const key of Object.keys(terminalStreams)) {
     delete terminalStreams[key];
   }
@@ -27,7 +26,7 @@ const setupTerminalStreams = (isTTY: boolean) => {
   const stdin = new PassThrough() as unknown as NodeJS.ReadStream;
   const stdout = new PassThrough() as unknown as NodeJS.WriteStream;
   Object.defineProperty(stdin, "isTTY", { value: isTTY, configurable: true });
-  const exitRawMode = vi.fn();
+  const exitRawMode = mock();
   Object.assign(terminalStreams, {
     stdin,
     stdout,
@@ -82,7 +81,7 @@ describe("waitForEnter", () => {
 
 describe("confirmYesNo", () => {
   let stdin: NodeJS.ReadStream;
-  let exitRawMode: ReturnType<typeof vi.fn>;
+  let exitRawMode: ReturnType<typeof mock>;
 
   beforeEach(() => {
     resetTerminalStreams();
