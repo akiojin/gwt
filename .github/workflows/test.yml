@@ -32,6 +32,7 @@ jobs:
 
       - name: Run tests
         run: bun run test
+        timeout-minutes: 5
         env:
           CI: true
 
