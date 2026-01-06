@@ -1,14 +1,14 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, mock, beforeEach } from "bun:test";
 
-const mockExeca = vi.fn();
-const mockGetToolById = vi.fn();
+const mockExeca = mock();
+const mockGetToolById = mock();
 
-vi.mock("execa", () => ({
+mock.module("execa", () => ({
   execa: (...args: unknown[]) => mockExeca(...args),
   default: { execa: (...args: unknown[]) => mockExeca(...args) },
 }));
 
-vi.mock("../../src/config/tools.js", () => ({
+mock.module("../../src/config/tools.js", () => ({
   getCodingAgentById: (...args: unknown[]) => mockGetToolById(...args),
 }));
 

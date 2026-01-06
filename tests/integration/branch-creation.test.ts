@@ -1,24 +1,24 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
 import * as git from "../../src/git";
 import * as worktree from "../../src/worktree";
 import { existsSync } from "node:fs";
 import { mkdir, lstat, readFile, rm, writeFile } from "node:fs/promises";
 
 // Mock execa
-vi.mock("execa", () => ({
-  execa: vi.fn(),
+mock.module("execa", () => ({
+  execa: mock(),
 }));
 
-vi.mock("node:fs", () => ({
-  existsSync: vi.fn(() => false),
+mock.module("node:fs", () => ({
+  existsSync: mock(() => false),
 }));
 
-vi.mock("node:fs/promises", () => {
-  const mkdir = vi.fn(async () => undefined);
-  const lstat = vi.fn();
-  const readFile = vi.fn();
-  const rm = vi.fn(async () => undefined);
-  const writeFile = vi.fn(async () => undefined);
+mock.module("node:fs/promises", () => {
+  const mkdir = mock(async () => undefined);
+  const lstat = mock();
+  const readFile = mock();
+  const rm = mock(async () => undefined);
+  const writeFile = mock(async () => undefined);
 
   return {
     mkdir,
@@ -38,18 +38,18 @@ vi.mock("node:fs/promises", () => {
 
 import { execa } from "execa";
 
-const execaMock = execa as unknown as ReturnType<typeof vi.fn>;
-const existsSyncMock = existsSync as unknown as ReturnType<typeof vi.fn>;
-const mkdirMock = mkdir as unknown as ReturnType<typeof vi.fn>;
-const lstatMock = lstat as unknown as ReturnType<typeof vi.fn>;
-const readFileMock = readFile as unknown as ReturnType<typeof vi.fn>;
-const rmMock = rm as unknown as ReturnType<typeof vi.fn>;
-const writeFileMock = writeFile as unknown as ReturnType<typeof vi.fn>;
+const execaMock = execa as unknown as Mock;
+const existsSyncMock = existsSync as unknown as Mock;
+const mkdirMock = mkdir as unknown as Mock;
+const lstatMock = lstat as unknown as Mock;
+const readFileMock = readFile as unknown as Mock;
+const rmMock = rm as unknown as Mock;
+const writeFileMock = writeFile as unknown as Mock;
 const normalizePath = (value: string) => value.replace(/\\/g, "/");
 
 describe("Integration: Branch Creation Workflow (T207)", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    mock.restore();
     mkdirMock.mockClear();
     rmMock.mockClear();
     writeFileMock.mockClear();
@@ -61,7 +61,7 @@ describe("Integration: Branch Creation Workflow (T207)", () => {
   });
 
   afterEach(() => {
-    vi.restoreAllMocks();
+    mock.restore();
   });
 
   describe("Feature Branch Creation Flow", () => {

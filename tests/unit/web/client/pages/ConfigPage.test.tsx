@@ -1,6 +1,6 @@
 import React from "react";
-import type { Mock } from "vitest";
-import { describe, it, expect, beforeEach, vi } from "vitest";
+// import type { Mock } - use bun:test mock types
+import { describe, it, expect, beforeEach,  mock } from "bun:test";
 import {
   fireEvent,
   render,
@@ -16,9 +16,9 @@ import {
   useUpdateConfig,
 } from "../../../../../src/web/client/src/hooks/useConfig.js";
 
-vi.mock("../../../../../src/web/client/src/hooks/useConfig.js", () => ({
-  useConfig: vi.fn(),
-  useUpdateConfig: vi.fn(),
+mock.module("../../../../../src/web/client/src/hooks/useConfig.js", () => ({
+  useConfig: mock(),
+  useUpdateConfig: mock(),
 }));
 
 const mockedUseConfig = useConfig as unknown as Mock;
@@ -42,7 +42,7 @@ const sampleAgents: ApiCodingAgent[] = [
 ];
 
 describe("ConfigPage", () => {
-  const mutateAsync = vi.fn();
+  const mutateAsync = mock();
 
   beforeEach(() => {
     mutateAsync.mockReset();

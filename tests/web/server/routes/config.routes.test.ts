@@ -1,31 +1,31 @@
 import Fastify from "fastify";
 import type { FastifyInstance } from "fastify";
-import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
+import { describe, expect, it, beforeEach, afterEach,  mock } from "bun:test";
 import type { EnvironmentHistoryEntry } from "../../../../src/types/api.js";
 import type { CodingAgentsConfig } from "../../../../src/types/tools.js";
 import { registerConfigRoutes } from "../../../../src/web/server/routes/config.js";
 
-const mockLoadCodingAgentsConfig = vi.fn<[], Promise<CodingAgentsConfig>>();
-const mockSaveCodingAgentsConfig = vi.fn<[], Promise<void>>();
-const mockLoadEnvHistory = vi.fn<[], Promise<EnvironmentHistoryEntry[]>>();
-const mockRecordEnvHistory = vi.fn<
+const mockLoadCodingAgentsConfig = mock();
+const mockSaveCodingAgentsConfig = mock();
+const mockLoadEnvHistory = mock();
+const mockRecordEnvHistory = mock<
   [EnvironmentHistoryEntry[]],
   Promise<void>
 >();
-const mockGetImportedEnvKeys = vi.fn<[], string[]>(() => []);
+const mockGetImportedEnvKeys = mock(() => []);
 
-vi.mock("../../../../src/config/tools.ts", () => ({
+mock.module("../../../../src/config/tools.ts", () => ({
   loadCodingAgentsConfig: () => mockLoadCodingAgentsConfig(),
   saveCodingAgentsConfig: (...args: unknown[]) =>
     mockSaveCodingAgentsConfig(...args),
 }));
 
-vi.mock("../../../../src/config/env-history.ts", () => ({
+mock.module("../../../../src/config/env-history.ts", () => ({
   loadEnvHistory: () => mockLoadEnvHistory(),
   recordEnvHistory: (...args: unknown[]) => mockRecordEnvHistory(...args),
 }));
 
-vi.mock("../../../../src/web/server/env/importer.ts", () => ({
+mock.module("../../../../src/web/server/env/importer.ts", () => ({
   getImportedEnvKeys: () => mockGetImportedEnvKeys(),
 }));
 
@@ -42,7 +42,7 @@ describe("config routes", () => {
   });
 
   afterEach(() => {
-    vi.resetModules();
+    // resetModules not needed in bun;
     return fastify.close();
   });
 

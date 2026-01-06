@@ -1,16 +1,16 @@
-import { describe, it, expect, vi, beforeEach, afterAll } from "vitest";
+import { describe, it, expect, mock, beforeEach, afterAll, spyOn } from "bun:test";
 
 type MockStdio = "inherit" | number;
 
 // Mock execa before importing
-vi.mock("execa", () => ({
-  execa: vi.fn(),
-  default: { execa: vi.fn() },
+mock.module("execa", () => ({
+  execa: mock(),
+  default: { execa: mock() },
 }));
 
-vi.mock("fs", () => ({
-  existsSync: vi.fn(() => true),
-  default: { existsSync: vi.fn(() => true) },
+mock.module("fs", () => ({
+  existsSync: mock(() => true),
+  default: { existsSync: mock(() => true) },
 }));
 
 const mockTerminalStreams = {
@@ -21,25 +21,25 @@ const mockTerminalStreams = {
   stdoutFd: undefined as number | undefined,
   stderrFd: undefined as number | undefined,
   usingFallback: false,
-  exitRawMode: vi.fn(),
+  exitRawMode: mock(),
 };
 
 const mockChildStdio = {
   stdin: "inherit" as MockStdio,
   stdout: "inherit" as MockStdio,
   stderr: "inherit" as MockStdio,
-  cleanup: vi.fn(),
+  cleanup: mock(),
 };
 
-vi.mock("../../src/utils/terminal", () => ({
-  getTerminalStreams: vi.fn(() => mockTerminalStreams),
-  createChildStdio: vi.fn(() => mockChildStdio),
-  resetTerminalModes: vi.fn(),
+mock.module("../../src/utils/terminal", () => ({
+  getTerminalStreams: mock(() => mockTerminalStreams),
+  createChildStdio: mock(() => mockChildStdio),
+  resetTerminalModes: mock(),
 }));
 
 // Mock findCommand to control command discovery behavior
-const mockFindCommand = vi.fn();
-vi.mock("../../src/utils/command", () => ({
+const mockFindCommand = mock();
+mock.module("../../src/utils/command", () => ({
   findCommand: (...args: unknown[]) => mockFindCommand(...args),
 }));
 
@@ -48,16 +48,16 @@ import { execa } from "execa";
 import { existsSync } from "fs";
 
 // Get typed mocks
-const mockExeca = execa as ReturnType<typeof vi.fn>;
-const mockExistsSync = existsSync as ReturnType<typeof vi.fn>;
+const mockExeca = execa as Mock;
+const mockExistsSync = existsSync as Mock;
 
 // Mock console.log to avoid test output clutter
-let consoleLogSpy: ReturnType<typeof vi.spyOn>;
+let consoleLogSpy: Mock;
 
 describe("launchGeminiCLI", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
-    consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    mock.restore();
+    consoleLogSpy = spyOn(console, "log").mockImplementation(() => {});
     mockTerminalStreams.exitRawMode.mockClear();
     mockChildStdio.cleanup.mockClear();
     mockChildStdio.stdin = "inherit";
@@ -70,8 +70,8 @@ describe("launchGeminiCLI", () => {
   });
 
   afterAll(() => {
-    vi.restoreAllMocks();
-    vi.resetModules();
+    mock.restore();
+    // resetModules not needed in bun;
   });
 
   describe("基本起動テスト", () => {
@@ -511,7 +511,7 @@ describe("launchGeminiCLI", () => {
       const { resetTerminalModes } =
         await import("../../src/utils/terminal.js");
       const mockResetTerminalModes =
-        resetTerminalModes as unknown as ReturnType<typeof vi.fn>;
+        resetTerminalModes as unknown as Mock;
 
       expect(mockResetTerminalModes).toHaveBeenCalledTimes(2);
       expect(mockResetTerminalModes).toHaveBeenNthCalledWith(
@@ -545,7 +545,7 @@ describe("launchGeminiCLI", () => {
       const { resetTerminalModes } =
         await import("../../src/utils/terminal.js");
       const mockResetTerminalModes =
-        resetTerminalModes as unknown as ReturnType<typeof vi.fn>;
+        resetTerminalModes as unknown as Mock;
 
       expect(mockResetTerminalModes).toHaveBeenCalledTimes(2);
     });

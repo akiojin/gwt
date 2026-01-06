@@ -2,19 +2,19 @@ import {
   describe,
   it,
   expect,
-  vi,
+  mock,
   beforeEach,
   afterEach,
-  type MockedFunction,
-} from "vitest";
+  spyOn,
+} from "bun:test";
 
 // Mock all dependencies
-vi.mock("execa", () => ({
-  execa: vi.fn(),
+mock.module("execa", () => ({
+  execa: mock(),
 }));
 
-const existsSyncMock = vi.hoisted(() =>
-  vi.fn((targetPath?: string) => {
+const existsSyncMock = (
+  mock((targetPath?: string) => {
     if (typeof targetPath !== "string") {
       return false;
     }
@@ -29,17 +29,17 @@ const existsSyncMock = vi.hoisted(() =>
   }),
 );
 
-vi.mock("node:fs", () => ({
+mock.module("node:fs", () => ({
   existsSync: existsSyncMock,
 }));
 
-const mkdirMock = vi.hoisted(() => vi.fn(async () => undefined));
-const readFileMock = vi.hoisted(() => vi.fn(async () => ""));
-const writeFileMock = vi.hoisted(() => vi.fn(async () => undefined));
+const mkdirMock = (mock(async () => undefined));
+const readFileMock = (mock(async () => ""));
+const writeFileMock = (mock(async () => undefined));
 
-vi.mock("node:fs/promises", async () => {
+mock.module("node:fs/promises", async () => {
   const actual =
-    await vi.importActual<typeof import("node:fs/promises")>(
+    await import(
       "node:fs/promises",
     );
 
@@ -67,10 +67,10 @@ import * as worktree from "../../src/worktree";
 const execaMock = execa as MockedFunction<typeof execa>;
 
 describe("E2E: Complete Branch to Worktree Flow", () => {
-  let repoRootSpy: ReturnType<typeof vi.spyOn>;
+  let repoRootSpy: Mock;
 
   beforeEach(() => {
-    vi.clearAllMocks();
+    mock.restore();
     mkdirMock.mockClear();
     readFileMock.mockClear();
     writeFileMock.mockClear();
@@ -81,7 +81,7 @@ describe("E2E: Complete Branch to Worktree Flow", () => {
   });
 
   afterEach(() => {
-    vi.restoreAllMocks();
+    mock.restore();
     repoRootSpy?.mockRestore();
   });
 

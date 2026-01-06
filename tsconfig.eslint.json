@@ -4,8 +4,7 @@
     "src/**/*",
     "tests/**/*",
     "scripts/**/*.ts",
-    "vitest.config.ts",
-    "vitest.setup.ts"
+    "bun.setup.ts"
   ],
   "exclude": ["node_modules", "dist"]
 }

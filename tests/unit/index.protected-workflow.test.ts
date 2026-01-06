@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import type { SelectionResult } from "../../src/cli/ui/App.solid.js";
 import type { ExecutionMode } from "../../src/cli/ui/App.solid.js";
 
@@ -21,32 +21,32 @@ const {
   getUncommittedChangesCountMock,
   getUnpushedCommitsCountMock,
   pushBranchToRemoteMock,
-} = vi.hoisted(() => ({
-  execaMock: vi.fn(async () => ({ stdout: "" })),
-  ensureWorktreeMock: vi.fn(async () => "/repo"),
-  fetchAllRemotesMock: vi.fn(async () => undefined),
-  pullFastForwardMock: vi.fn(async () => undefined),
-  getBranchDivergenceStatusesMock: vi.fn(async () => []),
-  launchClaudeCodeMock: vi.fn(async () => undefined),
-  saveSessionMock: vi.fn(async () => undefined),
-  worktreeExistsMock: vi.fn(async () => null),
-  switchToProtectedBranchMock: vi.fn(async () => "local" as const),
-  branchExistsMock: vi.fn(async () => true),
-  getRepositoryRootMock: vi.fn(async () => "/repo"),
-  getCurrentBranchMock: vi.fn(async () => "develop"),
-  installDependenciesMock: vi.fn(async () => ({
+} = (({
+  execaMock: mock(async () => ({ stdout: "" })),
+  ensureWorktreeMock: mock(async () => "/repo"),
+  fetchAllRemotesMock: mock(async () => undefined),
+  pullFastForwardMock: mock(async () => undefined),
+  getBranchDivergenceStatusesMock: mock(async () => []),
+  launchClaudeCodeMock: mock(async () => undefined),
+  saveSessionMock: mock(async () => undefined),
+  worktreeExistsMock: mock(async () => null),
+  switchToProtectedBranchMock: mock(async () => "local" as const),
+  branchExistsMock: mock(async () => true),
+  getRepositoryRootMock: mock(async () => "/repo"),
+  getCurrentBranchMock: mock(async () => "develop"),
+  installDependenciesMock: mock(async () => ({
     skipped: false as const,
     manager: "bun" as const,
     lockfile: "/repo/bun.lock",
   })),
-  hasUncommittedChangesMock: vi.fn(async () => false),
-  hasUnpushedCommitsMock: vi.fn(async () => false),
-  getUncommittedChangesCountMock: vi.fn(async () => 0),
-  getUnpushedCommitsCountMock: vi.fn(async () => 0),
-  pushBranchToRemoteMock: vi.fn(async () => undefined),
+  hasUncommittedChangesMock: mock(async () => false),
+  hasUnpushedCommitsMock: mock(async () => false),
+  getUncommittedChangesCountMock: mock(async () => 0),
+  getUnpushedCommitsCountMock: mock(async () => 0),
+  pushBranchToRemoteMock: mock(async () => undefined),
 }));
 
-const DependencyInstallErrorMock = vi.hoisted(
+const DependencyInstallErrorMock = (
   () =>
     class extends Error {
       constructor(message?: string) {
@@ -56,24 +56,24 @@ const DependencyInstallErrorMock = vi.hoisted(
     },
 );
 
-const waitForUserAcknowledgementMock = vi.hoisted(() =>
-  vi.fn<() => Promise<void>>(),
+const waitForUserAcknowledgementMock = (
+  (mock<() => Promise<void>>()),
 );
 
-const waitForEnterMock = vi.hoisted(() => vi.fn<() => Promise<void>>());
+const waitForEnterMock = ((mock<() => Promise<void>>()));
 
-const confirmYesNoMock = vi.hoisted(() => vi.fn<() => Promise<boolean>>());
-vi.mock("execa", () => ({
+const confirmYesNoMock = ((mock<() => Promise<boolean>>()));
+mock.module("execa", () => ({
   execa: execaMock,
 }));
 
-vi.mock("../../src/git.js", async () => {
+mock.module("../../src/git.js", async () => {
   const actual =
-    await vi.importActual<typeof import("../../src/git.js")>(
+    await import("../../src/git.js
       "../../src/git.js",
     );
   return {
-    isGitRepository: vi.fn(),
+    isGitRepository: mock(),
     getRepositoryRoot: getRepositoryRootMock,
     branchExists: branchExistsMock,
     fetchAllRemotes: fetchAllRemotesMock,
@@ -89,13 +89,13 @@ vi.mock("../../src/git.js", async () => {
   };
 });
 
-vi.mock("../../src/worktree.js", async () => {
-  const actual = await vi.importActual<typeof import("../../src/worktree.js")>(
+mock.module("../../src/worktree.js", async () => {
+  const actual = await import("../../src/worktree.js
     "../../src/worktree.js",
   );
   return {
     worktreeExists: worktreeExistsMock,
-    resolveWorktreePathForBranch: vi.fn(async (branch: string) => ({
+    resolveWorktreePathForBranch: mock(async (branch: string) => ({
       path: await worktreeExistsMock(branch),
     })),
     isProtectedBranchName: (name: string) =>
@@ -105,23 +105,23 @@ vi.mock("../../src/worktree.js", async () => {
   };
 });
 
-vi.mock("../../src/services/WorktreeOrchestrator.js", () => ({
+mock.module("../../src/services/WorktreeOrchestrator.js", () => ({
   WorktreeOrchestrator: class {
     ensureWorktree = ensureWorktreeMock;
   },
 }));
 
-vi.mock("../../src/services/dependency-installer.js", () => ({
+mock.module("../../src/services/dependency-installer.js", () => ({
   installDependenciesForWorktree: installDependenciesMock,
   DependencyInstallError: DependencyInstallErrorMock,
 }));
 
-vi.mock("../../src/claude.js", () => ({
+mock.module("../../src/claude.js", () => ({
   launchClaudeCode: launchClaudeCodeMock,
 }));
 
-vi.mock("../../src/codex.js", () => ({
-  launchCodexCLI: vi.fn(async () => undefined),
+mock.module("../../src/codex.js", () => ({
+  launchCodexCLI: mock(async () => undefined),
   CodexError: class CodexError extends Error {
     constructor(
       message: string,
@@ -133,27 +133,27 @@ vi.mock("../../src/codex.js", () => ({
   },
 }));
 
-vi.mock("../../src/launcher.js", () => ({
-  launchCodingAgent: vi.fn(async () => undefined),
+mock.module("../../src/launcher.js", () => ({
+  launchCodingAgent: mock(async () => undefined),
 }));
 
-vi.mock("../../src/config/tools.js", () => ({
-  getCodingAgentById: vi.fn(async () => ({
+mock.module("../../src/config/tools.js", () => ({
+  getCodingAgentById: mock(async () => ({
     id: "claude-code",
     displayName: "Claude Code",
     type: "bunx",
     command: "@anthropic-ai/claude-code@latest",
     modeArgs: { normal: [], continue: ["-c"], resume: ["-r"] },
   })),
-  getSharedEnvironment: vi.fn(async () => ({})),
+  getSharedEnvironment: mock(async () => ({})),
 }));
 
-vi.mock("../../src/config/index.js", () => ({
+mock.module("../../src/config/index.js", () => ({
   saveSession: saveSessionMock,
 }));
 
-vi.mock("../../src/utils/terminal.js", async () => {
-  const actual = await vi.importActual<
+mock.module("../../src/utils/terminal.js", async () => {
+  const actual = await import(
     typeof import("../../src/utils/terminal.js")
   >("../../src/utils/terminal.js");
   return {
@@ -162,8 +162,8 @@ vi.mock("../../src/utils/terminal.js", async () => {
   };
 });
 
-vi.mock("../../src/utils/prompt.js", async () => {
-  const actual = await vi.importActual<
+mock.module("../../src/utils/prompt.js", async () => {
+  const actual = await import(
     typeof import("../../src/utils/prompt.js")
   >("../../src/utils/prompt.js");
   return {
@@ -426,7 +426,7 @@ describe("handleAIToolWorkflow - dependency installation", () => {
       reason: "missing-lockfile",
     });
 
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
 
     const selection: SelectionResult = {
       branch: "feature/test",
@@ -461,7 +461,7 @@ describe("handleAIToolWorkflow - dependency installation", () => {
       message: "Dependency installation failed (bun). Command: bun install",
     });
 
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
 
     const selection: SelectionResult = {
       branch: "feature/test",

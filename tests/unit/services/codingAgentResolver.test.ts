@@ -1,8 +1,8 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, mock, beforeEach } from "bun:test";
 
-const mockExeca = vi.fn();
+const mockExeca = mock();
 
-vi.mock("execa", () => ({
+mock.module("execa", () => ({
   execa: (...args: unknown[]) => mockExeca(...args),
   default: { execa: (...args: unknown[]) => mockExeca(...args) },
 }));

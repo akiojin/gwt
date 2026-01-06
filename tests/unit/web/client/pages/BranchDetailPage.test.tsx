@@ -1,6 +1,6 @@
 import React from "react";
-import type { Mock } from "vitest";
-import { describe, it, expect, beforeEach, vi } from "vitest";
+// import type { Mock } - use bun:test mock types
+import { describe, it, expect, beforeEach,  mock } from "bun:test";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import type { Branch } from "../../../../../src/types/api.js";
@@ -17,23 +17,23 @@ import {
 } from "../../../../../src/web/client/src/hooks/useSessions.js";
 import { useConfig } from "../../../../../src/web/client/src/hooks/useConfig.js";
 
-vi.mock("../../../../../src/web/client/src/hooks/useBranches.js", () => ({
-  useBranch: vi.fn(),
-  useSyncBranch: vi.fn(),
+mock.module("../../../../../src/web/client/src/hooks/useBranches.js", () => ({
+  useBranch: mock(),
+  useSyncBranch: mock(),
 }));
 
-vi.mock("../../../../../src/web/client/src/hooks/useWorktrees.js", () => ({
-  useCreateWorktree: vi.fn(),
+mock.module("../../../../../src/web/client/src/hooks/useWorktrees.js", () => ({
+  useCreateWorktree: mock(),
 }));
 
-vi.mock("../../../../../src/web/client/src/hooks/useSessions.js", () => ({
-  useStartSession: vi.fn(),
-  useSessions: vi.fn(),
-  useDeleteSession: vi.fn(),
+mock.module("../../../../../src/web/client/src/hooks/useSessions.js", () => ({
+  useStartSession: mock(),
+  useSessions: mock(),
+  useDeleteSession: mock(),
 }));
 
-vi.mock("../../../../../src/web/client/src/hooks/useConfig.js", () => ({
-  useConfig: vi.fn(),
+mock.module("../../../../../src/web/client/src/hooks/useConfig.js", () => ({
+  useConfig: mock(),
 }));
 
 const mockedUseBranch = useBranch as unknown as Mock;
@@ -75,7 +75,7 @@ describe("BranchDetailPage", () => {
       error: null,
     });
 
-    const syncMutation = vi.fn().mockResolvedValue({
+    const syncMutation = mock().mockResolvedValue({
       branch: baseBranch,
       divergence: baseBranch.divergence,
       fetchStatus: "success",
@@ -88,12 +88,12 @@ describe("BranchDetailPage", () => {
     });
 
     mockedUseCreateWorktree.mockReturnValue({
-      mutateAsync: vi.fn(),
+      mutateAsync: mock(),
       isPending: false,
     });
 
     mockedUseStartSession.mockReturnValue({
-      mutateAsync: vi.fn(),
+      mutateAsync: mock(),
       isPending: false,
     });
 
@@ -104,7 +104,7 @@ describe("BranchDetailPage", () => {
     });
 
     mockedUseDeleteSession.mockReturnValue({
-      mutateAsync: vi.fn(),
+      mutateAsync: mock(),
       isPending: false,
     });
 
@@ -204,7 +204,7 @@ describe("BranchDetailPage", () => {
   });
 
   it("calls sync mutation when clicking 最新の変更を同期", async () => {
-    const syncMutation = vi.fn().mockResolvedValue({
+    const syncMutation = mock().mockResolvedValue({
       branch: baseBranch,
       divergence: baseBranch.divergence,
       fetchStatus: "success",

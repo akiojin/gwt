@@ -1,25 +1,25 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
 import * as git from "../../src/git";
 import * as worktree from "../../src/worktree";
 
 // Mock execa
-vi.mock("execa", () => ({
-  execa: vi.fn(),
+mock.module("execa", () => ({
+  execa: mock(),
 }));
 
-const existsSyncMock = vi.hoisted(() => vi.fn(() => false));
+const existsSyncMock = (mock(() => false));
 
-vi.mock("node:fs", () => ({
+mock.module("node:fs", () => ({
   existsSync: (...args: unknown[]) => existsSyncMock(...args),
 }));
 
-const mkdirMock = vi.hoisted(() => vi.fn(async () => undefined));
-const readFileMock = vi.hoisted(() => vi.fn(async () => ""));
-const writeFileMock = vi.hoisted(() => vi.fn(async () => undefined));
+const mkdirMock = (mock(async () => undefined));
+const readFileMock = (mock(async () => ""));
+const writeFileMock = (mock(async () => undefined));
 
-vi.mock("node:fs/promises", async () => {
+mock.module("node:fs/promises", async () => {
   const actual =
-    await vi.importActual<typeof import("node:fs/promises")>(
+    await import(
       "node:fs/promises",
     );
 
@@ -43,11 +43,11 @@ vi.mock("node:fs/promises", async () => {
 
 import { execa } from "execa";
 
-const execaMock = vi.mocked(execa);
+const execaMock = ((execa) as Mock);
 
 describe("Integration: Release Branch and Version Management (T208)", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    mock.restore();
     mkdirMock.mockClear();
     existsSyncMock.mockClear();
     existsSyncMock.mockReturnValue(false);
@@ -56,7 +56,7 @@ describe("Integration: Release Branch and Version Management (T208)", () => {
   });
 
   afterEach(() => {
-    vi.restoreAllMocks();
+    mock.restore();
   });
 
   describe("Release Branch Creation Flow", () => {

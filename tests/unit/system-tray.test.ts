@@ -1,26 +1,26 @@
 /**
  * Tests for system tray integration (SPEC-1f56fd80)
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
 
 describe("startSystemTray (SPEC-1f56fd80)", () => {
-  let createMock: ReturnType<typeof vi.fn>;
-  let killMock: ReturnType<typeof vi.fn>;
-  let readyMock: ReturnType<typeof vi.fn>;
+  let createMock: Mock;
+  let killMock: Mock;
+  let readyMock: Mock;
   let onClickHandler: ((action: { item: { title: string } }) => void) | null;
   let originalEnv: NodeJS.ProcessEnv;
 
   beforeEach(() => {
-    vi.resetModules();
+    // resetModules not needed in bun;
     originalEnv = { ...process.env };
     delete process.env.CI;
     delete process.env.GWT_DISABLE_TRAY;
     process.env.DISPLAY = process.env.DISPLAY || ":0";
 
     onClickHandler = null;
-    killMock = vi.fn();
-    readyMock = vi.fn(async () => undefined);
-    createMock = vi.fn(function (this: unknown) {
+    killMock = mock();
+    readyMock = mock(async () => undefined);
+    createMock = mock(function (this: unknown) {
       Object.assign(this as Record<string, unknown>, {
         onClick: (handler: (action: { item: { title: string } }) => void) => {
           onClickHandler = handler;
@@ -32,9 +32,9 @@ describe("startSystemTray (SPEC-1f56fd80)", () => {
     (createMock as typeof createMock & { separator?: unknown }).separator = {
       title: "separator",
     };
-    vi.doMock("node:module", async () => {
+    mock.module("node:module", async () => {
       const actual =
-        await vi.importActual<typeof import("node:module")>("node:module");
+        await import(typeof import("node:module")>("node:module");
       const mocked = {
         ...actual,
         createRequire: () => () => ({ default: createMock }),
@@ -45,8 +45,8 @@ describe("startSystemTray (SPEC-1f56fd80)", () => {
 
   afterEach(() => {
     process.env = originalEnv;
-    vi.clearAllMocks();
-    vi.restoreAllMocks();
+    mock.restore();
+    mock.restore();
   });
 
   it("T010: Web UI 起動後にトレイが初期化される", async () => {
@@ -62,7 +62,7 @@ describe("startSystemTray (SPEC-1f56fd80)", () => {
   });
 
   it("T011: トレイのダブルクリックでブラウザが開く", async () => {
-    const openUrlMock = vi.fn();
+    const openUrlMock = mock();
     const { startSystemTray } = await import("../../src/web/server/tray.js");
     await startSystemTray("http://localhost:3000", {
       openUrl: openUrlMock,

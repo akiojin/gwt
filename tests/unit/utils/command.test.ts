@@ -1,13 +1,13 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach,  mock } from "bun:test";
 
-const execaMock = vi.fn();
-const existsSyncMock = vi.fn(() => false);
+const execaMock = mock();
+const existsSyncMock = mock(() => false);
 
-vi.mock("execa", () => ({
+mock.module("execa", () => ({
   execa: (...args: unknown[]) => execaMock(...args),
 }));
 
-vi.mock("fs", () => ({
+mock.module("fs", () => ({
   existsSync: (...args: unknown[]) => existsSyncMock(...args),
   default: {
     existsSync: (...args: unknown[]) => existsSyncMock(...args),

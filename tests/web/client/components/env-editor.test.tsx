@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect,  mock } from "bun:test";
 import { fireEvent, render, screen } from "@testing-library/react";
 import React from "react";
 import { EnvEditor, createEnvRow } from "../../../../src/web/client/src/components/EnvEditor";
@@ -6,7 +6,7 @@ import { EnvEditor, createEnvRow } from "../../../../src/web/client/src/componen
 describe("EnvEditor", () => {
   it("converts keys to uppercase and underscores", () => {
     const rows = [createEnvRow({ id: "row-1" })];
-    const handleChange = vi.fn();
+    const handleChange = mock();
 
     render(
       <EnvEditor
@@ -26,7 +26,7 @@ describe("EnvEditor", () => {
   });
 
   it("adds a new row when clicking the add button", () => {
-    const handleChange = vi.fn();
+    const handleChange = mock();
     render(
       <EnvEditor
         title="Test"

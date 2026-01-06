@@ -3,7 +3,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
 import * as git from "../../src/git";
 import {
   localBranches as _localBranches,
@@ -11,19 +11,19 @@ import {
 } from "../fixtures/branches";
 
 // Mock execa
-vi.mock("execa", () => ({
-  execa: vi.fn(),
+mock.module("execa", () => ({
+  execa: mock(),
 }));
 
 import { execa } from "execa";
 
 describe("git.ts - Branch Operations", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    mock.restore();
   });
 
   afterEach(() => {
-    vi.restoreAllMocks();
+    mock.restore();
   });
 
   describe("getLocalBranches (T102)", () => {
@@ -995,11 +995,11 @@ describe("git.ts - Gitignore Operations", () => {
 
 describe("git.ts - Batch Merge Operations", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    mock.restore();
   });
 
   afterEach(() => {
-    vi.restoreAllMocks();
+    mock.restore();
   });
 
   describe("mergeFromBranch (T108-T109)", () => {
@@ -1190,7 +1190,7 @@ describe("git.ts - Batch Merge Operations", () => {
 
 describe("getBranchDivergenceStatuses", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    mock.restore();
   });
 
   it("should return divergence counts for branches with remotes", async () => {
@@ -1314,7 +1314,7 @@ describe("getBranchDivergenceStatuses", () => {
 
 describe("pullFastForward", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    mock.restore();
   });
 
   it("should call git pull with --ff-only", async () => {
@@ -1348,11 +1348,11 @@ describe("pullFastForward", () => {
 
 describe("git.ts - cwd parameter support", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    mock.restore();
   });
 
   afterEach(() => {
-    vi.restoreAllMocks();
+    mock.restore();
   });
 
   describe("getLocalBranches with cwd", () => {
