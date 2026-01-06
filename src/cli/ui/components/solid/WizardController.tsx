@@ -1,5 +1,5 @@
 /** @jsxImportSource @opentui/solid */
-import { createSignal, createMemo, Show } from "solid-js";
+import { createSignal, createEffect, createMemo, Show } from "solid-js";
 import { useKeyboard } from "@opentui/solid";
 import type { ToolSessionEntry } from "../../../../config/index.js";
 import type { CodingAgentId, InferenceLevel } from "../../types.js";
@@ -99,7 +99,7 @@ export function WizardController(props: WizardControllerProps) {
 
   // Reset wizard when it becomes visible
   let prevVisible = false;
-  createMemo(() => {
+  createEffect(() => {
     const visible = props.visible;
     if (visible && !prevVisible) {
       resetWizard();

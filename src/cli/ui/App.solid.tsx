@@ -977,6 +977,7 @@ export function AppSolid(props: AppSolidProps) {
           onCreateBranch={handleQuickCreate}
           cleanupUI={cleanupUI}
           helpVisible={helpVisible()}
+          wizardVisible={wizardVisible()}
         />
       );
     }

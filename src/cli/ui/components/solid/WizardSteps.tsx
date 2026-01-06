@@ -3,6 +3,8 @@ import { TextAttributes } from "@opentui/core";
 import { createSignal } from "solid-js";
 import { SelectInput, type SelectInputItem } from "./SelectInput.js";
 import { TextInput } from "./TextInput.js";
+import { getModelOptions } from "../../utils/modelOptions.js";
+import type { CodingAgentId } from "../../types.js";
 
 /**
  * WizardSteps - ウィザードの各ステップコンポーネント
@@ -111,28 +113,26 @@ export function AgentSelectStep(props: AgentSelectStepProps) {
 
 // T408: モデル選択ステップ
 export interface ModelSelectStepProps extends StepProps {
-  agentId: string;
+  agentId: CodingAgentId;
   onSelect: (model: string) => void;
 }
 
-const MODELS_BY_AGENT: Record<string, SelectInputItem[]> = {
-  "claude-code": [
-    { label: "claude-sonnet-4-20250514", value: "claude-sonnet-4-20250514" },
-    { label: "claude-opus-4-20250514", value: "claude-opus-4-20250514" },
-  ],
-  "codex-cli": [
-    { label: "o3-mini", value: "o3-mini" },
-    { label: "o1", value: "o1" },
-    { label: "gpt-4.1", value: "gpt-4.1" },
-  ],
-  "gemini-cli": [
-    { label: "gemini-2.5-pro", value: "gemini-2.5-pro" },
-    { label: "gemini-2.5-flash", value: "gemini-2.5-flash" },
-  ],
-};
+function getModelItems(agentId: CodingAgentId): SelectInputItem[] {
+  const options = getModelOptions(agentId);
+  return options.map((opt) => {
+    const item: SelectInputItem = {
+      label: opt.label,
+      value: opt.id,
+    };
+    if (opt.description !== undefined) {
+      item.description = opt.description;
+    }
+    return item;
+  });
+}
 
 export function ModelSelectStep(props: ModelSelectStepProps) {
-  const models = () => MODELS_BY_AGENT[props.agentId] ?? [];
+  const models = () => getModelItems(props.agentId);
 
   return (
     <box flexDirection="column">
