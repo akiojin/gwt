@@ -503,6 +503,22 @@ export function BranchListScreen(props: BranchListScreenProps) {
     }
 
     if (filterMode()) {
+      if (key.name === "down") {
+        const total = filteredBranches().length;
+        if (total > 0) {
+          setSelectedIndex((prev) => Math.min(prev + 1, total - 1));
+        }
+        return;
+      }
+
+      if (key.name === "up") {
+        const total = filteredBranches().length;
+        if (total > 0) {
+          setSelectedIndex((prev) => Math.max(prev - 1, 0));
+        }
+        return;
+      }
+
       if (key.name === "escape") {
         if (filterQuery()) {
           setFilterQuery("");
@@ -912,7 +928,7 @@ export function BranchListScreen(props: BranchListScreenProps) {
       return "(none)";
     }
     if (selected.type === "remote") {
-      return `refs/remotes/${selected.name}`;
+      return selected.name;
     }
     return `refs/heads/${selected.name}`;
   });

@@ -227,6 +227,34 @@ describe("Solid BranchListScreen", () => {
     }
   });
 
+  it("moves selection while filter mode is active", async () => {
+    const branches = [
+      createBranch("feature/one"),
+      createBranch("feature/two"),
+      createBranch("bugfix/skip"),
+    ];
+
+    const { mockInput, renderOnce, captureCharFrame, cleanup } =
+      await renderScreen(branches, { height: 12 });
+
+    try {
+      mockInput.pressKey("f");
+      await renderOnce();
+
+      await mockInput.typeText("feature");
+      await renderOnce();
+
+      expect(captureCharFrame()).toContain("Branch: refs/heads/feature/one");
+
+      mockInput.pressArrow("down");
+      await renderOnce();
+
+      expect(captureCharFrame()).toContain("Branch: refs/heads/feature/two");
+    } finally {
+      cleanup();
+    }
+  });
+
   it("shows filtered empty state", async () => {
     const branches = [createBranch("feature/search")];
     const { mockInput, renderOnce, captureCharFrame, cleanup } =
