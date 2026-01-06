@@ -141,7 +141,9 @@ describe("Solid BranchListScreen", () => {
     const { captureCharFrame, cleanup } = await renderScreen(branches);
 
     try {
-      expect(captureCharFrame()).toContain("Branch: feature/long-branch-name");
+      expect(captureCharFrame()).toContain(
+        "Branch: refs/heads/feature/long-branch-name",
+      );
     } finally {
       cleanup();
     }

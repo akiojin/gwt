@@ -908,7 +908,13 @@ export function BranchListScreen(props: BranchListScreenProps) {
       return "(none)";
     }
     const selected = branches[selectedIndex()];
-    return selected?.name ?? "(none)";
+    if (!selected?.name) {
+      return "(none)";
+    }
+    if (selected.type === "remote") {
+      return `refs/remotes/${selected.name}`;
+    }
+    return `refs/heads/${selected.name}`;
   });
 
   return (
