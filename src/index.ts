@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import path from "node:path";
+import { platform } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
   isGitRepository,
@@ -260,11 +261,11 @@ async function mainSolidUI(): Promise<SelectionResult | undefined> {
     mouseMovePreference === "true" || mouseMovePreference === "1";
   const altScreenPreference =
     process.env.GWT_UI_ALT_SCREEN?.trim().toLowerCase();
+  const defaultAltScreen = platform() === "win32" ? false : true;
   const useAlternateScreen =
-    altScreenPreference === undefined ||
-    altScreenPreference === "" ||
-    altScreenPreference === "true" ||
-    altScreenPreference === "1";
+    altScreenPreference === undefined || altScreenPreference === ""
+      ? defaultAltScreen
+      : altScreenPreference === "true" || altScreenPreference === "1";
 
   if (typeof terminal.stdin.resume === "function") {
     terminal.stdin.resume();
@@ -277,6 +278,21 @@ async function mainSolidUI(): Promise<SelectionResult | undefined> {
     }
   }
 
+  const handleSignal = (code: number) => {
+    terminal.exitRawMode();
+    resetTerminalModes(terminal.stdout);
+    if (typeof terminal.stdin.pause === "function") {
+      terminal.stdin.pause();
+    }
+    process.exit(code);
+  };
+
+  const handleSigint = () => handleSignal(130);
+  const handleSigterm = () => handleSignal(143);
+
+  process.once("SIGINT", handleSigint);
+  process.once("SIGTERM", handleSigterm);
+
   try {
     await renderSolidApp(
       {
@@ -287,13 +303,15 @@ async function mainSolidUI(): Promise<SelectionResult | undefined> {
       {
         stdin: terminal.stdin,
         stdout: terminal.stdout,
-        exitOnCtrlC: true,
+        exitOnCtrlC: false,
         useAlternateScreen,
         useMouse,
         enableMouseMovement,
       },
     );
   } finally {
+    process.removeListener("SIGINT", handleSigint);
+    process.removeListener("SIGTERM", handleSigterm);
     terminal.exitRawMode();
     resetTerminalModes(terminal.stdout);
     if (typeof terminal.stdin.pause === "function") {
