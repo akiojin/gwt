@@ -755,10 +755,8 @@ export function BranchListScreen(props: BranchListScreenProps) {
   };
 
   const footerActions = [
-    { key: "enter", description: "Select" },
     { key: "f", description: "Filter" },
     { key: "tab", description: "Mode" },
-    { key: "n", description: "New" },
     { key: "r", description: "Refresh" },
     { key: "c", description: "Cleanup" },
     { key: "x", description: "Repair" },
