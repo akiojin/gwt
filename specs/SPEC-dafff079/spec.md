@@ -150,7 +150,7 @@
 ### 制約
 
 - 既存の`tools.json`の`env`フィールドとの互換性を維持する必要がある
-- 既存のgwt UIフレームワーク（Ink.js/React）を使用する必要がある
+- CLI UI は OpenTUI（@opentui/solid）を使用する必要がある
 - 既存のショートカットキー（f、c、r、スペース）と競合してはならない
 
 ### 仮定
@@ -178,7 +178,7 @@
 
 - 既存のgwt設定管理システム（`~/.gwt/`ディレクトリ）
 - 既存のAIツール起動フロー（`getSharedEnvironment()`関数）
-- 既存のInk.js UIコンポーネント
+- OpenTUI UIコンポーネント
 
 ## 参考資料
 
