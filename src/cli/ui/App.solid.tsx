@@ -489,9 +489,7 @@ export function AppSolid(props: AppSolidProps) {
           onRefresh={refreshBranches}
           loading={loading()}
           error={error()}
-          {...(props.loadingIndicatorDelay !== undefined
-            ? { loadingIndicatorDelay: props.loadingIndicatorDelay }
-            : {})}
+          loadingIndicatorDelay={props.loadingIndicatorDelay ?? 0}
           version={version()}
           workingDirectory={workingDirectory()}
           toolStatuses={toolStatuses()}
