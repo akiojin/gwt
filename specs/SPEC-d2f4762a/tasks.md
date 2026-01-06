@@ -38,7 +38,7 @@
 
 ## フェーズ3: 統合とポリッシュ
 
-- [ ] **T201** [統合] `package.json` に従い `bun run format:check` / `bunx --bun markdownlint-cli "**/*.md" --config .markdownlint.json --ignore-path .markdownlintignore` / `bun run lint` を実行し、失敗があれば修正
+- [x] **T201** [統合] `package.json` に従い `bun run format:check` / `bunx --bun markdownlint-cli "**/*.md" --config .markdownlint.json --ignore-path .markdownlintignore` / `bun run lint` を実行し、失敗があれば修正
 
 ## フェーズ4: ユーザーストーリー6 - Worktree作成時のstaleディレクトリ自動回復
 
@@ -48,13 +48,13 @@
 
 ### テスト（TDD）
 
-- [ ] **T301** [US6] `tests/integration/branch-creation.test.ts` にstaleディレクトリを検出して削除→再作成できるテストを追加
-- [ ] **T302** [US6] `tests/integration/branch-creation.test.ts` にstale判定できない既存ディレクトリは削除せずエラーになるテストを追加
+- [x] **T301** [US6] `tests/integration/branch-creation.test.ts` にstaleディレクトリを検出して削除→再作成できるテストを追加
+- [x] **T302** [US6] `tests/integration/branch-creation.test.ts` にstale判定できない既存ディレクトリは削除せずエラーになるテストを追加
 
 ### 実装
 
-- [ ] **T303** [US6] `src/worktree.ts` にstale判定・削除処理を追加し、`createWorktree`の前処理として実行
-- [ ] **T304** [US6] `src/worktree.ts` に判定不能な既存ディレクトリ向けの明確なエラーメッセージを追加
+- [x] **T303** [US6] `src/worktree.ts` にstale判定・削除処理を追加し、`createWorktree`の前処理として実行
+- [x] **T304** [US6] `src/worktree.ts` に判定不能な既存ディレクトリ向けの明確なエラーメッセージを追加
 
 ## フェーズ5: ユーザーストーリー8 - ブランチ選択後のウィザードポップアップ (優先度: P0)
 
