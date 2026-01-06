@@ -220,7 +220,7 @@ export async function saveToolsConfig(config: ToolsConfig): Promise<void> {
 /**
  * 共有環境変数を取得
  *
- * AIツール起動時に適用される環境変数を返します。
+ * コーディングエージェント起動時に適用される環境変数を返します。
  * マージ優先順位（後勝ち）:
  * 1. tools.json の env フィールド
  * 2. profiles.yaml のアクティブプロファイル

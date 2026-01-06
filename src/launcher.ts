@@ -1,7 +1,7 @@
 /**
  * カスタムツール起動機能
  *
- * カスタムAIツールの起動処理を管理します。
+ * カスタムコーディングエージェントの起動処理を管理します。
  * 3つの実行タイプ（path, bunx, command）をサポートします。
  */
 
@@ -95,7 +95,7 @@ function buildArgs(tool: CustomAITool, options: LaunchOptions): string[] {
 }
 
 /**
- * カスタムAIツールを起動
+ * カスタムコーディングエージェントを起動
  *
  * ツールの実行タイプ（path/bunx/command）に応じて適切な方法で起動します。
  * stdio: "inherit" で起動するため、ツールの入出力は親プロセスに継承されます。
