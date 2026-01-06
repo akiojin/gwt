@@ -52,14 +52,16 @@ export function SelectInput({
   };
 
   return (
-    <select
-      options={options}
-      {...(selectedIndex !== undefined && { selectedIndex })}
-      focused={focused}
-      showDescription={showDescription}
-      wrapSelection={wrapSelection}
-      onSelect={handleSelect}
-      onChange={handleChange}
-    />
+    <box flexDirection="column" height={1}>
+      <select
+        options={options}
+        {...(selectedIndex !== undefined && { selectedIndex })}
+        focused={focused}
+        showDescription={showDescription}
+        wrapSelection={wrapSelection}
+        onSelect={handleSelect}
+        onChange={handleChange}
+      />
+    </box>
   );
 }

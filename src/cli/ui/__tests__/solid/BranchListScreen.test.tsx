@@ -73,6 +73,7 @@ describe("Solid BranchListScreen", () => {
   it("renders header details", async () => {
     const branches = [createBranch("main")];
     const { captureCharFrame, cleanup } = await renderScreen(branches, {
+      height: 12,
       props: {
         version: "1.2.3",
         activeProfile: "dev",
@@ -119,7 +120,7 @@ describe("Solid BranchListScreen", () => {
   });
 
   it("shows loading indicator", async () => {
-    const branches = [createBranch("main")];
+    const branches: BranchItem[] = [];
     const { renderOnce, captureCharFrame, cleanup } = await renderScreen(
       branches,
       {
