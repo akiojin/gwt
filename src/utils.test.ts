@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect } from "bun:test";
 import { getPackageVersion } from "./utils";
 import { readFile } from "fs/promises";
 import path from "node:path";

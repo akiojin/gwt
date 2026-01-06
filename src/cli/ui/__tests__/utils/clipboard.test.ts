@@ -1,9 +1,9 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, mock } from "bun:test";
 import { copyToClipboard } from "../../utils/clipboard.js";
 
-const execaMock = vi.fn();
+const execaMock = mock();
 
-vi.mock("execa", () => ({
+mock.module("execa", () => ({
   execa: (...args: unknown[]) => execaMock(...args),
 }));
 
