@@ -14,7 +14,7 @@ import type {
   InferenceLevel,
   SelectedBranchState,
   Statistics,
-  WorktreeInfo,
+  WorktreeInfo as UIWorktreeInfo,
 } from "./types.js";
 import type { FormattedLogEntry } from "../../logging/formatter.js";
 import { BranchListScreen } from "./screens/solid/BranchListScreen.js";
@@ -46,7 +46,10 @@ import {
   getLocalBranches,
   getRepositoryRoot,
 } from "../../git.js";
-import { listAdditionalWorktrees } from "../../worktree.js";
+import {
+  listAdditionalWorktrees,
+  type WorktreeInfo as WorktreeEntry,
+} from "../../worktree.js";
 import { detectAllToolStatuses, type ToolStatus } from "../../utils/command.js";
 import { getConfig } from "../../config/index.js";
 import { getAllCodingAgents } from "../../config/tools.js";
@@ -794,7 +797,10 @@ const withTimeout = async <T,>(
       });
   });
 
-const buildBranchList = (branches: BranchInfo[], worktrees: WorktreeInfo[]) => {
+const buildBranchList = (
+  branches: BranchInfo[],
+  worktrees: WorktreeEntry[],
+) => {
   const localBranchNames = new Set(
     branches.filter((branch) => branch.type === "local").map((b) => b.name),
   );
@@ -807,7 +813,7 @@ const buildBranchList = (branches: BranchInfo[], worktrees: WorktreeInfo[]) => {
     return true;
   });
 
-  const worktreeMap = new Map<string, WorktreeInfo>();
+  const worktreeMap = new Map<string, UIWorktreeInfo>();
   for (const worktree of worktrees) {
     worktreeMap.set(worktree.branch, {
       path: worktree.path,

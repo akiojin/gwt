@@ -39,8 +39,8 @@ export function ProfileScreen({
       title="gwt - Profiles"
       items={items}
       onSelect={handleSelect}
-      onBack={onBack}
-      version={version}
+      {...(onBack ? { onBack } : {})}
+      {...(version !== undefined ? { version } : {})}
       emptyMessage="No profiles available."
       helpVisible={helpVisible}
     />
