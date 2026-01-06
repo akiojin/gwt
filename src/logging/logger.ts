@@ -31,6 +31,11 @@ export function createLogger(config: LoggerConfig = {}): Logger {
   const filename = config.filename ?? `${formatDate(new Date())}.jsonl`;
   const category = config.category ?? "default";
   const keepDays = config.keepDays ?? 7;
+  const platform = os.platform();
+  const isWSL =
+    platform === "linux" && os.release().toLowerCase().includes("microsoft");
+  const preferDirectDestination =
+    platform === "win32" || isWSL || process.env.GWT_LOGGER_TRANSPORT === "0";
 
   if (!fs.existsSync(logDir)) {
     fs.mkdirSync(logDir, { recursive: true });
@@ -58,31 +63,34 @@ export function createLogger(config: LoggerConfig = {}): Logger {
     return pino(options, destinationStream);
   }
 
-  try {
-    const transport = pino.transport({
-      targets: [
-        {
-          target: "pino/file",
-          options: { destination, mkdir: true, append: true },
-          level,
-        },
-      ],
-    });
+  if (!preferDirectDestination) {
+    try {
+      const transport = pino.transport({
+        targets: [
+          {
+            target: "pino/file",
+            options: { destination, mkdir: true, append: true },
+            level,
+          },
+        ],
+      });
 
-    return pino(options, transport);
-  } catch (error) {
-    if (process.env.DEBUG_LOGGER) {
-      console.error(
-        "Logger transport disabled; falling back to direct file destination.",
-        error instanceof Error ? error.message : String(error),
-      );
+      return pino(options, transport);
+    } catch (error) {
+      if (process.env.DEBUG_LOGGER) {
+        console.error(
+          "Logger transport disabled; falling back to direct file destination.",
+          error instanceof Error ? error.message : String(error),
+        );
+      }
     }
-    const destinationStream = pino.destination({
-      dest: destination,
-      sync: false,
-    });
-    return pino(options, destinationStream);
   }
+
+  const destinationStream = pino.destination({
+    dest: destination,
+    sync: false,
+  });
+  return pino(options, destinationStream);
 }
 
 /** Convenience logger for quick use (category defaults to "default"). */
