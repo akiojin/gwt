@@ -335,14 +335,18 @@ export function BranchListScreen(props: BranchListScreenProps) {
     const toolLines =
       props.toolStatuses && props.toolStatuses.length > 0 ? 1 : 0;
     const statsLines = 1;
+    const loadingLines = 1;
     const footerMessageLines = props.cleanupUI?.footerMessage ? 1 : 0;
+    const branchLines = 1;
     const footerLines = 1;
     return (
       headerLines +
       filterLines +
       toolLines +
       statsLines +
+      loadingLines +
       footerMessageLines +
+      branchLines +
       footerLines
     );
   });
@@ -912,7 +916,7 @@ export function BranchListScreen(props: BranchListScreenProps) {
       return "(none)";
     }
     const selected = branches[selectedIndex()];
-    return selected?.label ?? selected?.name ?? "(none)";
+    return selected?.name ?? "(none)";
   });
 
   return (
@@ -941,14 +945,18 @@ export function BranchListScreen(props: BranchListScreenProps) {
       {renderSegmentLine(statsSegments())}
 
       <box flexDirection="column" flexGrow={1}>
-        <LoadingIndicator
-          isLoading={Boolean(props.loading) && props.branches.length === 0}
-          message="Loading Git information..."
-          width={layoutWidth()}
-          {...(props.loadingIndicatorDelay !== undefined
-            ? { delay: props.loadingIndicatorDelay }
-            : {})}
-        />
+        {Boolean(props.loading) && props.branches.length === 0 ? (
+          <LoadingIndicator
+            isLoading
+            message="Loading Git information..."
+            width={layoutWidth()}
+            {...(props.loadingIndicatorDelay !== undefined
+              ? { delay: props.loadingIndicatorDelay }
+              : {})}
+          />
+        ) : (
+          <text>{padLine("", layoutWidth())}</text>
+        )}
 
         {props.error && (
           <>
