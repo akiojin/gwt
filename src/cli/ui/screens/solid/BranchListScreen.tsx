@@ -942,7 +942,7 @@ export function BranchListScreen(props: BranchListScreenProps) {
 
       <box flexDirection="column" flexGrow={1}>
         <LoadingIndicator
-          isLoading={Boolean(props.loading)}
+          isLoading={Boolean(props.loading) && props.branches.length === 0}
           message="Loading Git information..."
           width={layoutWidth()}
           {...(props.loadingIndicatorDelay !== undefined
