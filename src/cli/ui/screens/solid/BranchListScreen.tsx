@@ -601,6 +601,7 @@ export function BranchListScreen(props: BranchListScreenProps) {
     }
 
     if (key.name === "return" || key.name === "linefeed") {
+      key.preventDefault();
       const selected = filteredBranches()[selectedIndex()];
       if (selected) {
         props.onSelect(selected);
