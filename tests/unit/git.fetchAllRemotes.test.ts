@@ -1,12 +1,4 @@
-import {
-  describe,
-  it,
-  expect,
-  mock,
-  beforeEach,
-  afterEach,
-  
-} from "bun:test";
+import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
 import { fetchAllRemotes } from "../../src/git.js";
 
 mock.module("execa", () => ({

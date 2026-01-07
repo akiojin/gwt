@@ -1,8 +1,5 @@
-import { describe, it, expect, mock, beforeEach, afterEach, spyOn } from "bun:test";
+import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
 import type { SelectionResult } from "../../src/cli/ui/App.solid.js";
-
-type ViWithDoMock = typeof vi & { doMock?: typeof mock.module };
-const viWithDoMock = vi as unknown as ViWithDoMock;
 if (!mock.module) {
   mock.module = mock.module.bind(vi);
 }
@@ -88,9 +85,7 @@ describe("main error handling", () => {
     }));
 
     mock.module?.("../../src/worktree.js", async () => {
-      const actual = await import(
-        typeof import("../../src/worktree.js")
-      >("../../src/worktree.js");
+      const actual = await import("../../src/worktree.js");
       return {
         ...actual,
         worktreeExists: mock(async () => null),
