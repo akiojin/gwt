@@ -4,7 +4,7 @@
  * T201-T204: _launchCodingAgent()と_resolveCommand()のテスト
  */
 
-import { describe, it, expect, beforeEach, afterEach,  mock } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
 import type {
   CodingAgent,
   CodingAgentLaunchOptions,

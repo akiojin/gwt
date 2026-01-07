@@ -865,12 +865,20 @@ export function AppSolid(props: AppSolidProps) {
             continue;
           }
           const worktreePath = branch.worktree?.path ?? null;
-          tasks.push({
+          const cleanupType: CleanupTask["cleanupType"] = worktreePath
+            ? "worktree-and-branch"
+            : "branch-only";
+          const baseTask = {
             branch: branch.name,
             worktreePath,
-            cleanupType: worktreePath ? "worktree-and-branch" : "branch-only",
-            isAccessible: branch.worktree?.isAccessible,
-          });
+            cleanupType,
+          };
+          const isAccessible = branch.worktree?.isAccessible;
+          tasks.push(
+            isAccessible === undefined
+              ? baseTask
+              : { ...baseTask, isAccessible },
+          );
         }
       } else {
         const targets = await getMergedPRWorktrees();
@@ -883,12 +891,18 @@ export function AppSolid(props: AppSolidProps) {
             skipCounts.unsafe += 1;
             continue;
           }
-          tasks.push({
+          const cleanupType: CleanupTask["cleanupType"] = target.cleanupType;
+          const baseTask = {
             branch: target.branch,
             worktreePath: target.worktreePath,
-            cleanupType: target.cleanupType,
-            isAccessible: target.isAccessible,
-          });
+            cleanupType,
+          };
+          const isAccessible = target.isAccessible;
+          tasks.push(
+            isAccessible === undefined
+              ? baseTask
+              : { ...baseTask, isAccessible },
+          );
         }
       }
 

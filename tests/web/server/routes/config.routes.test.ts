@@ -1,6 +1,6 @@
 import Fastify from "fastify";
 import type { FastifyInstance } from "fastify";
-import { describe, expect, it, beforeEach, afterEach,  mock } from "bun:test";
+import { describe, expect, it, beforeEach, afterEach, mock } from "bun:test";
 import type { EnvironmentHistoryEntry } from "../../../../src/types/api.js";
 import type { CodingAgentsConfig } from "../../../../src/types/tools.js";
 import { registerConfigRoutes } from "../../../../src/web/server/routes/config.js";
@@ -8,10 +8,7 @@ import { registerConfigRoutes } from "../../../../src/web/server/routes/config.j
 const mockLoadCodingAgentsConfig = mock();
 const mockSaveCodingAgentsConfig = mock();
 const mockLoadEnvHistory = mock();
-const mockRecordEnvHistory = mock<
-  [EnvironmentHistoryEntry[]],
-  Promise<void>
->();
+const mockRecordEnvHistory = mock<[EnvironmentHistoryEntry[]], Promise<void>>();
 const mockGetImportedEnvKeys = mock(() => []);
 
 mock.module("../../../../src/config/tools.ts", () => ({
