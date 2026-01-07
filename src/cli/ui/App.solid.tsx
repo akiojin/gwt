@@ -86,6 +86,7 @@ import {
   isValidProfileName,
   type ProfilesConfig,
 } from "../../types/profiles.js";
+import { BRANCH_PREFIXES } from "../../config/constants.js";
 
 export type ExecutionMode = "normal" | "continue" | "resume";
 
@@ -160,7 +161,7 @@ const toSelectedBranchState = (branch: BranchItem): SelectedBranchState => {
   };
 };
 
-const inferBranchCategory = (branchName: string): BranchItem["branchType"] => {
+const _inferBranchCategory = (branchName: string): BranchItem["branchType"] => {
   const normalized = branchName.replace(/^origin\//, "");
   if (normalized === "main") return "main";
   if (normalized === "develop") return "develop";
@@ -1340,16 +1341,22 @@ export function AppSolid(props: AppSolidProps) {
             setSuppressCreateKey(null);
             setCreateBranchName(value);
           }}
-          onSubmit={(value) => {
+          onSubmit={(value, branchType) => {
             const trimmed = value.trim();
             if (!trimmed) {
               return;
             }
+            // Add prefix based on selected branch type
+            const prefixKey =
+              branchType.toUpperCase() as keyof typeof BRANCH_PREFIXES;
+            const prefix = BRANCH_PREFIXES[prefixKey] ?? "";
+            const fullBranchName = `${prefix}${trimmed}`;
+
             setSelectedBranch({
-              name: trimmed,
-              displayName: trimmed,
+              name: fullBranchName,
+              displayName: fullBranchName,
               branchType: "local",
-              branchCategory: inferBranchCategory(trimmed),
+              branchCategory: branchType,
             });
             setIsNewBranch(true);
             setNewBranchBaseRef(baseBranchRef);

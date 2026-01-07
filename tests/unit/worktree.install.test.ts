@@ -1,5 +1,12 @@
-import type { Mock } from "bun:test";
-import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
+import {
+  describe,
+  it,
+  expect,
+  mock,
+  beforeEach,
+  afterEach,
+  type Mock,
+} from "bun:test";
 import path from "node:path";
 
 const accessMock = mock();
@@ -207,6 +214,40 @@ describe("dependency installer", () => {
 
       expect(result.skipped).toBe(true);
       expect(result.manager).toBe("bun");
+    });
+
+    // FR-040a: パッケージマネージャーの出力をそのまま標準出力/標準エラーに表示
+    it("passes stdout and stderr as inherit to show package manager output directly (FR-040a)", async () => {
+      setupExistingFiles([path.join(WORKTREE, "pnpm-lock.yaml")]);
+      (execa as Mock).mockResolvedValue({ stdout: "", stderr: "" });
+
+      await installDependenciesForWorktree(WORKTREE);
+
+      expect(execa).toHaveBeenCalledWith(
+        "pnpm",
+        ["install", "--frozen-lockfile"],
+        expect.objectContaining({
+          cwd: WORKTREE,
+          stdout: "inherit",
+          stderr: "inherit",
+        }),
+      );
+    });
+
+    // FR-040b: スピナー表示を行わない（startSpinnerがインポートされていないことを確認）
+    it("does not use spinner during dependency installation (FR-040b)", async () => {
+      // このテストは、dependency-installer.tsがstartSpinnerをインポートしていないことを
+      // 静的に検証する。実装でスピナーを使用するとインポートが必要になり、
+      // そのインポートが削除されていることでFR-040bの遵守を確認できる。
+      const moduleSource = await Bun.file(
+        path.join(
+          import.meta.dir,
+          "../../src/services/dependency-installer.ts",
+        ),
+      ).text();
+
+      expect(moduleSource).not.toContain('from "../utils/spinner');
+      expect(moduleSource).not.toContain("startSpinner");
     });
   });
 });
