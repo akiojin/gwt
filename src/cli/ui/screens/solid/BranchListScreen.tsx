@@ -7,7 +7,6 @@ import type { ToolStatus } from "../../../../utils/command.js";
 import { getLatestActivityTimestamp } from "../../utils/branchFormatter.js";
 import stringWidth from "string-width";
 import { Header } from "../../components/solid/Header.js";
-
 type IndicatorColor = "cyan" | "green" | "yellow" | "red";
 
 interface CleanupIndicator {
@@ -597,6 +596,7 @@ export function BranchListScreen(props: BranchListScreenProps) {
     }
 
     if (key.name === "return" || key.name === "linefeed") {
+      key.preventDefault();
       const selected = filteredBranches()[selectedIndex()];
       if (selected) {
         props.onSelect(selected);
