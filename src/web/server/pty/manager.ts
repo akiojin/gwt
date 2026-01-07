@@ -8,6 +8,7 @@
 import * as pty from "node-pty";
 import type { IPty } from "node-pty";
 import { randomUUID } from "node:crypto";
+import { execa } from "execa";
 import type { CodingAgentSession } from "../../../types/api.js";
 import {
   resolveClaudeCommand,
@@ -17,6 +18,11 @@ import {
   type ResolvedCommand,
 } from "../../../services/codingAgentResolver.js";
 import { loadCodingAgentsConfig } from "../../../config/tools.js";
+import { saveSession } from "../../../config/index.js";
+import {
+  findLatestClaudeSession,
+  findLatestCodexSession,
+} from "../../../utils/session.js";
 import { createLogger } from "../../../logging/logger.js";
 
 const logger = createLogger({ category: "pty" });
@@ -47,12 +53,18 @@ export class PTYManager {
       bypassApprovals?: boolean;
       extraArgs?: string[];
       customToolId?: string | null;
+      resumeSessionId?: string | null;
     } = {},
   ): Promise<{ sessionId: string; session: CodingAgentSession }> {
     const cols = options.cols ?? 80;
     const rows = options.rows ?? 24;
     const toolName = options.toolName ?? null;
     const sessionId = randomUUID();
+    const startedAt = Date.now();
+    const resumeSessionId =
+      options.resumeSessionId && options.resumeSessionId.trim().length > 0
+        ? options.resumeSessionId.trim()
+        : null;
 
     logger.debug(
       { sessionId, toolType, mode, worktreePath, cols, rows },
@@ -65,6 +77,7 @@ export class PTYManager {
       bypassApprovals?: boolean;
       extraArgs?: string[];
       customToolId?: string | null;
+      sessionId?: string | null;
     } = {};
 
     if (toolName !== null) {
@@ -81,6 +94,9 @@ export class PTYManager {
     }
     if (options.customToolId !== undefined) {
       resolverOptions.customToolId = options.customToolId;
+    }
+    if (options.resumeSessionId !== undefined) {
+      resolverOptions.sessionId = options.resumeSessionId;
     }
 
     const resolved = await this.resolveCommand(toolType, mode, resolverOptions);
@@ -152,6 +168,14 @@ export class PTYManager {
     };
 
     this.instances.set(sessionId, { ptyProcess, session });
+
+    ptyProcess.onExit(() => {
+      void this.persistSessionIdOnExit({
+        session,
+        startedAt,
+        resumeSessionId,
+      });
+    });
 
     return { sessionId, session };
   }
@@ -230,6 +254,7 @@ export class PTYManager {
       bypassApprovals?: boolean;
       extraArgs?: string[];
       customToolId?: string | null;
+      sessionId?: string | null;
     },
   ): Promise<ResolvedCommand> {
     if (toolType === "custom") {
@@ -256,6 +281,7 @@ export class PTYManager {
         mode: "normal" | "continue" | "resume";
         bypassApprovals?: boolean;
         extraArgs?: string[];
+        sessionId?: string | null;
       } = { mode };
 
       if (options.bypassApprovals !== undefined) {
@@ -263,6 +289,9 @@ export class PTYManager {
       }
       if (options.extraArgs && options.extraArgs.length > 0) {
         codexOptions.extraArgs = options.extraArgs;
+      }
+      if (options.sessionId) {
+        codexOptions.sessionId = options.sessionId;
       }
 
       return resolveCodexCommand(codexOptions);
@@ -272,6 +301,7 @@ export class PTYManager {
       mode: "normal" | "continue" | "resume";
       skipPermissions?: boolean;
       extraArgs?: string[];
+      sessionId?: string | null;
     } = { mode };
 
     if (options.skipPermissions !== undefined) {
@@ -279,6 +309,9 @@ export class PTYManager {
     }
     if (options.extraArgs && options.extraArgs.length > 0) {
       claudeOptions.extraArgs = options.extraArgs;
+    }
+    if (options.sessionId) {
+      claudeOptions.sessionId = options.sessionId;
     }
 
     return resolveClaudeCommand(claudeOptions);
@@ -293,6 +326,83 @@ export class PTYManager {
     );
     return sharedEnv;
   }
+
+  private async persistSessionIdOnExit(params: {
+    session: CodingAgentSession;
+    startedAt: number;
+    resumeSessionId: string | null;
+  }): Promise<void> {
+    const { session, startedAt, resumeSessionId } = params;
+    if (
+      session.agentType !== "claude-code" &&
+      session.agentType !== "codex-cli"
+    ) {
+      return;
+    }
+
+    const finishedAt = Date.now();
+    let detectedSessionId: string | null = null;
+
+    try {
+      if (session.agentType === "codex-cli") {
+        const latest = await findLatestCodexSession({
+          since: startedAt - 60_000,
+          until: finishedAt + 60_000,
+          preferClosestTo: finishedAt,
+          windowMs: 60 * 60 * 1000,
+          cwd: session.worktreePath,
+        });
+        detectedSessionId = latest?.id ?? null;
+      } else if (session.agentType === "claude-code") {
+        const latest = await findLatestClaudeSession(session.worktreePath, {
+          since: startedAt - 60_000,
+          until: finishedAt + 60_000,
+          preferClosestTo: finishedAt,
+          windowMs: 60 * 60 * 1000,
+        });
+        detectedSessionId = latest?.id ?? null;
+      }
+    } catch (error: unknown) {
+      logger.debug(
+        { err: error, sessionId: session.sessionId },
+        "Failed to detect session ID",
+      );
+    }
+
+    const finalSessionId = detectedSessionId ?? resumeSessionId;
+    if (!finalSessionId) {
+      return;
+    }
+
+    try {
+      const context = await resolveGitContext(session.worktreePath);
+      if (!context.repoRoot) {
+        return;
+      }
+
+      await saveSession({
+        lastWorktreePath: session.worktreePath,
+        lastBranch: context.branchName,
+        lastUsedTool:
+          session.agentType === "custom"
+            ? (session.agentName ?? "custom")
+            : session.agentType,
+        toolLabel:
+          session.agentType === "custom"
+            ? (session.agentName ?? "Custom")
+            : agentLabelFromType(session.agentType),
+        mode: session.mode,
+        timestamp: Date.now(),
+        repositoryRoot: context.repoRoot,
+        lastSessionId: finalSessionId,
+      });
+    } catch (error: unknown) {
+      logger.debug(
+        { err: error, sessionId: session.sessionId },
+        "Failed to persist session ID",
+      );
+    }
+  }
 }
 
 function isRootUser(): boolean {
@@ -301,4 +411,39 @@ function isRootUser(): boolean {
   } catch {
     return false;
   }
+}
+
+async function resolveGitContext(worktreePath: string): Promise<{
+  repoRoot: string | null;
+  branchName: string | null;
+}> {
+  try {
+    const { stdout: repoRoot } = await execa(
+      "git",
+      ["rev-parse", "--show-toplevel"],
+      { cwd: worktreePath },
+    );
+    const normalizedRoot = repoRoot.trim();
+    let branchName: string | null = null;
+    try {
+      const { stdout: branchStdout } = await execa(
+        "git",
+        ["rev-parse", "--abbrev-ref", "HEAD"],
+        { cwd: worktreePath },
+      );
+      branchName = branchStdout.trim() || null;
+    } catch {
+      branchName = null;
+    }
+
+    return { repoRoot: normalizedRoot || null, branchName };
+  } catch {
+    return { repoRoot: null, branchName: null };
+  }
+}
+
+function agentLabelFromType(agentType: "claude-code" | "codex-cli" | "custom") {
+  if (agentType === "claude-code") return "Claude";
+  if (agentType === "codex-cli") return "Codex";
+  return "Custom";
 }

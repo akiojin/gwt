@@ -138,17 +138,30 @@ export interface ClaudeCommandOptions {
   mode?: "normal" | "continue" | "resume";
   skipPermissions?: boolean;
   extraArgs?: string[];
+  sessionId?: string | null;
 }
 
 export function buildClaudeArgs(options: ClaudeCommandOptions = {}): string[] {
   const args: string[] = [];
+  const sessionId =
+    options.sessionId && options.sessionId.trim().length > 0
+      ? options.sessionId.trim()
+      : null;
 
   switch (options.mode) {
     case "continue":
-      args.push("-c");
+      if (sessionId) {
+        args.push("--resume", sessionId);
+      } else {
+        args.push("-c");
+      }
       break;
     case "resume":
-      args.push("-r");
+      if (sessionId) {
+        args.push("--resume", sessionId);
+      } else {
+        args.push("-r");
+      }
       break;
     default:
       break;
@@ -210,17 +223,30 @@ export interface CodexCommandOptions {
   mode?: "normal" | "continue" | "resume";
   bypassApprovals?: boolean;
   extraArgs?: string[];
+  sessionId?: string | null;
 }
 
 export function buildCodexArgs(options: CodexCommandOptions = {}): string[] {
   const args: string[] = [];
+  const sessionId =
+    options.sessionId && options.sessionId.trim().length > 0
+      ? options.sessionId.trim()
+      : null;
 
   switch (options.mode) {
     case "continue":
-      args.push("resume", "--last");
+      if (sessionId) {
+        args.push("resume", sessionId);
+      } else {
+        args.push("resume", "--last");
+      }
       break;
     case "resume":
-      args.push("resume");
+      if (sessionId) {
+        args.push("resume", sessionId);
+      } else {
+        args.push("resume");
+      }
       break;
     default:
       break;

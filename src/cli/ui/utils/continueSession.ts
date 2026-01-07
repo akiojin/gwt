@@ -1,4 +1,9 @@
 import type { SessionData, ToolSessionEntry } from "../../../config/index.js";
+import {
+  findLatestClaudeSessionId,
+  findLatestCodexSessionId,
+  findLatestGeminiSessionId,
+} from "../../../utils/session.js";
 
 export interface ContinueSessionContext {
   history: ToolSessionEntry[];
@@ -6,6 +11,10 @@ export interface ContinueSessionContext {
   branch: string;
   toolId: string;
   repoRoot: string | null;
+  lookupLatestSessionId?: (params: {
+    toolId: string;
+    worktreePath: string;
+  }) => Promise<string | null>;
 }
 
 /**
@@ -39,6 +48,41 @@ export async function resolveContinueSessionId(
     sessionData.lastUsedTool === toolId
   ) {
     return sessionData.lastSessionId;
+  }
+
+  const latestEntry = findLatestBranchSession(history, branch, toolId);
+  const worktreePath = latestEntry?.worktreePath ?? null;
+  if (!worktreePath) {
+    return null;
+  }
+
+  if (context.lookupLatestSessionId) {
+    const lookupResult = await context.lookupLatestSessionId({
+      toolId,
+      worktreePath,
+    });
+    return lookupResult ?? null;
+  }
+
+  return lookupLatestSessionIdForTool(toolId, worktreePath);
+}
+
+async function lookupLatestSessionIdForTool(
+  toolId: string,
+  worktreePath: string,
+): Promise<string | null> {
+  try {
+    if (toolId === "claude-code") {
+      return await findLatestClaudeSessionId(worktreePath);
+    }
+    if (toolId === "codex-cli") {
+      return await findLatestCodexSessionId({ cwd: worktreePath });
+    }
+    if (toolId === "gemini-cli") {
+      return await findLatestGeminiSessionId(worktreePath);
+    }
+  } catch {
+    return null;
   }
 
   return null;

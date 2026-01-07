@@ -46,3 +46,11 @@ description: "Continue/Resumeで正しいセッションを再開するための
 - [x] **T0503** `[US5]` Quick StartのUIテストと統合テスト（前回設定で続きから/新規、履歴なしフォールバック）を追加。
 - [x] **T0504** `[US5]` Quick Startの表示ルールをツール別に分岐し、CodexのみReasoningを表示、Start newではセッションIDを非表示にするUIテストを追加（`src/cli/ui/__tests__/components/screens/BranchQuickStartScreen.test.tsx`）。
 - [ ] **T0505** `[US5]` 同一ブランチでツールごとに直近設定を保持し、Quick Startでツール別行（Resume/Start new）を生成するロジックとテストを追加する。
+
+## フェーズ8: Web UI セッションID表示/再開 (P1)
+- [ ] **T0601** `[US6]` Web API型に`resumeSessionId`/`sessionId`を追加し、互換性を維持する（`src/types/api.ts`）。
+- [ ] **T0602** `[US6]` Web UIで最終セッションIDを表示し、Continue/Resume起動時にIDを送信する（`src/web/client/src/pages/BranchDetailPage.tsx`, `src/web/client/src/components/branch-detail/BranchInfoCards.tsx`）。
+- [ ] **T0603** `[US6]` Web APIで`resumeSessionId`を受け取り、Codex/Claudeの起動引数に反映する（`src/web/server/routes/sessions.ts`, `src/web/server/pty/manager.ts`, `src/services/codingAgentResolver.ts`）。
+- [ ] **T0604** `[US6]` Web UI起動セッションの終了時にID検出と履歴保存を行う（`src/web/server/pty/manager.ts`, `src/utils/session/*`）。
+- [ ] **T0605** `[US6]` `getLastToolUsageMap`の後方互換で`lastSessionId`を補完する（`src/config/index.ts`）。
+- [ ] **T0606** `[US6]` `buildClaudeArgs`/`buildCodexArgs`のID指定をユニットテストで検証する（`tests/unit/*codingAgentResolver*.test.ts`）。
