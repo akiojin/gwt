@@ -3,6 +3,28 @@
 **仕様ID**: `SPEC-d2f4762a`
 **ポリシー**: CLAUDE.md の TDD ルールに基づき、必ず RED→GREEN→リグレッションチェックの順に進める。
 
+## フェーズ0: ブランチ一覧アイコンのASCII再整理 (優先度: P1)
+
+**ストーリー**: ブランチ一覧の選択/Worktree/安全アイコンをASCII表記へ整理し、アイコン間にスペースを入れてカーソル記号は表示しない。
+
+**価値**: 端末幅のズレを防ぎつつ、直感的な記号で一覧表示の視認性を維持する。
+
+### 仕様更新
+
+- [x] **T901** [P] [共通] `specs/SPEC-d2f4762a/spec.md` のアイコン仕様とカーソル非表示要件を更新
+- [x] **T902** [P] [共通] `specs/SPEC-d2f4762a/plan.md` のアイコン方針をASCIIに更新
+- [x] **T903** [P] [共通] `specs/SPEC-d27be71b/spec.md` の意思決定ログを更新（ASCII整理を反映）
+- [x] **T904** [P] [共通] `CLAUDE.md` のアイコン方針をASCIIに戻す
+
+### テスト（TDD）
+
+- [x] **T911** [US4] `src/cli/ui/__tests__/solid/BranchListScreen.test.tsx` にASCIIアイコンとカーソル非表示の表示テストを追加
+
+### 実装
+
+- [x] **T921** [US4] `src/cli/ui/screens/solid/BranchListScreen.tsx` の選択/Worktree/安全アイコンをASCIIに更新
+- [x] **T922** [US4] `src/cli/ui/screens/solid/BranchListScreen.tsx` のカーソル記号を非表示のまま維持する
+
 ## フェーズ1: セットアップ（共有インフラストラクチャ）
 
 ### セットアップタスク

@@ -13,6 +13,15 @@ const makeStats = (overrides: Partial<Statistics> = {}): Statistics => ({
   ...overrides,
 });
 
+const statsForBranches = (branches: BranchItem[]): Statistics => ({
+  localCount: branches.filter((branch) => branch.type === "local").length,
+  remoteCount: branches.filter((branch) => branch.type === "remote").length,
+  worktreeCount: branches.filter((branch) => Boolean(branch.worktreeStatus))
+    .length,
+  changesCount: branches.filter((branch) => branch.hasChanges).length,
+  lastUpdated: new Date("2025-01-01T00:00:00Z"),
+});
+
 const createBranch = (overrides: Partial<BranchItem> = {}): BranchItem => {
   const hasWorktree = Boolean(overrides.worktree);
   const base: BranchItem = {
@@ -38,6 +47,7 @@ const renderBranchList = async (props: {
   branches: BranchItem[];
   stats?: Statistics;
   workingDirectory?: string;
+  selectedBranches?: string[];
 }) => {
   const testSetup = await testRender(
     () => (
@@ -46,6 +56,9 @@ const renderBranchList = async (props: {
         stats={props.stats ?? makeStats()}
         onSelect={() => {}}
         workingDirectory={props.workingDirectory}
+        {...(props.selectedBranches
+          ? { selectedBranches: props.selectedBranches }
+          : {})}
       />
     ),
     { width: 80, height: 24 },
@@ -53,6 +66,45 @@ const renderBranchList = async (props: {
   await testSetup.renderOnce();
   return testSetup;
 };
+
+describe("BranchListScreen icons", () => {
+  it("renders ASCII icons with spacing and no cursor prefix", async () => {
+    const branches = [
+      createBranch({
+        name: "feature/active-clean",
+        label: "feature/active-clean",
+        value: "feature/active-clean",
+        worktreeStatus: "active",
+        safeToCleanup: true,
+      }),
+      createBranch({
+        name: "feature/no-worktree",
+        label: "feature/no-worktree",
+        value: "feature/no-worktree",
+        worktreeStatus: undefined,
+        safeToCleanup: false,
+        hasUnpushedCommits: true,
+        mergedPR: undefined,
+      }),
+    ];
+
+    const testSetup = await renderBranchList({
+      branches,
+      stats: statsForBranches(branches),
+      selectedBranches: ["feature/active-clean"],
+    });
+
+    try {
+      const frame = testSetup.captureCharFrame();
+      expect(frame).toMatch(/\[\*\] w {2,}feature\/active-clean/);
+      expect(frame).toContain("[ ] . ! feature/no-worktree");
+      expect(frame).not.toContain(">[*]");
+      expect(frame).not.toContain(">[ ]");
+    } finally {
+      testSetup.renderer.destroy();
+    }
+  });
+});
 
 describe("BranchListScreen worktree footer", () => {
   it("shows selected worktree path", async () => {
