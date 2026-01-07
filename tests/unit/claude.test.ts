@@ -100,14 +100,14 @@ const createChildProcess = (
 };
 
 /**
- * NOTE: Most tests in this file are skipped because Bun's vitest compatibility
- * does not support module mocking (mock.module). The real execa is called instead
+ * NOTE: Most tests in this file are skipped because Bun's mock.module
+ * does not fully support module mocking. The real execa is called instead
  * of the mock, causing tests to fail.
  *
  * Core functionality is verified in:
  * - tests/unit/utils/command.test.ts (findCommand, caching, fallback paths)
  *
- * These tests can be re-enabled when Bun improves vitest module mocking support.
+ * These tests can be re-enabled when Bun improves module mocking support.
  */
 describe("launchClaudeCode - Root User Detection", () => {
   let originalGetuid: (() => number) | undefined;
@@ -705,6 +705,66 @@ describe("launchClaudeCode - Root User Detection", () => {
       // Verify that the actual arguments are included in the log
       expect(consoleLogSpy).toHaveBeenCalledWith(
         expect.stringContaining("--dangerously-skip-permissions"),
+      );
+    });
+  });
+
+  describe("Launch/Exit Logs", () => {
+    // Skipped: Bun does not support mock.module for execa module
+    it.skip("should display launch message with rocket emoji at startup", async () => {
+      mockExeca.mockImplementation(() => createChildProcess());
+
+      await launchClaudeCode("/test/path");
+
+      // Verify that launch message is logged with 🚀 emoji
+      expect(consoleLogSpy).toHaveBeenCalledWith(
+        expect.stringContaining("🚀 Launching Claude Code..."),
+      );
+    });
+
+    // Skipped: Bun does not support mock.module for execa module
+    it.skip("should display working directory in launch logs", async () => {
+      mockExeca.mockImplementation(() => createChildProcess());
+
+      await launchClaudeCode("/test/path");
+
+      // Verify working directory is shown
+      expect(consoleLogSpy).toHaveBeenCalledWith(
+        expect.stringContaining("Working directory: /test/path"),
+      );
+    });
+
+    // Skipped: Bun does not support mock.module for execa module
+    it.skip("should display session ID after agent exits when captured", async () => {
+      mockExeca.mockImplementation(() => createChildProcess());
+
+      // Mock session detection to return a session ID
+      const mockFindLatestClaudeSession =
+        sessionUtils.findLatestClaudeSession as unknown as ReturnType<
+          typeof mock
+        >;
+      mockFindLatestClaudeSession.mockResolvedValueOnce({
+        id: "test-session-123",
+        cwd: "/test/path",
+      });
+
+      await launchClaudeCode("/test/path");
+
+      // Verify session ID is displayed after exit
+      expect(consoleLogSpy).toHaveBeenCalledWith(
+        expect.stringContaining("🆔 Session ID: test-session-123"),
+      );
+    });
+
+    // Skipped: Bun does not support mock.module for execa module
+    it.skip("should display model info when custom model is specified", async () => {
+      mockExeca.mockImplementation(() => createChildProcess());
+
+      await launchClaudeCode("/test/path", { model: "sonnet" });
+
+      // Verify model info is logged with 🎯 emoji
+      expect(consoleLogSpy).toHaveBeenCalledWith(
+        expect.stringContaining("🎯 Model: sonnet"),
       );
     });
   });

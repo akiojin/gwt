@@ -1,7 +1,7 @@
 preload = ["@opentui/solid/preload"]
 
 [test]
-preload = ["./bun.setup.ts"]
+preload = ["@opentui/solid/preload", "./bun.setup.ts"]
 timeout = 10000
 root = "."
 

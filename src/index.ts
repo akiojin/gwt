@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
 import path from "node:path";
-import { platform } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
   isGitRepository,
@@ -33,6 +32,7 @@ import {
   getTerminalStreams,
   resetTerminalModes,
   waitForUserAcknowledgement,
+  writeTerminalLine,
 } from "./utils/terminal.js";
 import { createLogger } from "./logging/logger.js";
 import { getCodingAgentById, getSharedEnvironment } from "./config/tools.js";
@@ -62,7 +62,8 @@ import { isGitRelatedError, isRecoverableError } from "./utils/error-utils.js";
 const ERROR_PROMPT = chalk.yellow(
   "Review the error details, then press Enter to continue.",
 );
-const POST_SESSION_DELAY_MS = 3000;
+const SUCCESS_PROMPT = chalk.green("Press Enter to return to main menu...");
+const POST_SESSION_DELAY_MS = 500;
 
 // Category: cli
 const appLogger = createLogger({ category: "cli" });
@@ -75,17 +76,17 @@ async function waitForErrorAcknowledgement(): Promise<void> {
  * Simple print functions (replacing legacy UI display functions)
  */
 function printError(message: string): void {
-  console.error(chalk.red(`❌ ${message}`));
+  writeTerminalLine(chalk.red(`❌ ${message}`), "stderr");
   appLogger.error({ message });
 }
 
 function printInfo(message: string): void {
-  console.log(chalk.blue(`ℹ️  ${message}`));
+  writeTerminalLine(chalk.blue(`ℹ️  ${message}`));
   appLogger.info({ message });
 }
 
 function printWarning(message: string): void {
-  console.warn(chalk.yellow(`⚠️  ${message}`));
+  writeTerminalLine(chalk.yellow(`⚠️  ${message}`), "stderr");
   appLogger.warn({ message });
 }
 
@@ -208,11 +209,10 @@ async function mainSolidUI(): Promise<SelectionResult | undefined> {
     mouseMovePreference === "true" || mouseMovePreference === "1";
   const altScreenPreference =
     process.env.GWT_UI_ALT_SCREEN?.trim().toLowerCase();
-  const defaultAltScreen = platform() === "win32" ? false : true;
+  // Ink.js版ではalternate screenを使用していなかったため、デフォルトをfalseに
+  // alternate screenを使用するとコーディングエージェント起動/終了ログが見えなくなる
   const useAlternateScreen =
-    altScreenPreference === undefined || altScreenPreference === ""
-      ? defaultAltScreen
-      : altScreenPreference === "true" || altScreenPreference === "1";
+    altScreenPreference === "true" || altScreenPreference === "1";
 
   if (typeof terminal.stdin.resume === "function") {
     terminal.stdin.resume();
@@ -500,10 +500,11 @@ export async function handleAIToolWorkflow(
         ({ branch: divergedBranch, remoteAhead, localAhead }) => {
           const highlight =
             divergedBranch === branch ? " (selected branch)" : "";
-          console.warn(
+          writeTerminalLine(
             chalk.yellow(
               `   • ${divergedBranch}${highlight}  remote:+${remoteAhead}  local:+${localAhead}`,
             ),
+            "stderr",
           );
         },
       );
@@ -807,7 +808,8 @@ export async function handleAIToolWorkflow(
 
     // Small buffer before returning to branch list to avoid abrupt screen swap
     await new Promise((resolve) => setTimeout(resolve, POST_SESSION_DELAY_MS));
-    printInfo("Session completed successfully. Returning to main menu...");
+    printInfo("Session completed successfully.");
+    await waitForUserAcknowledgement(SUCCESS_PROMPT);
     return;
   } catch (error) {
     // Handle recoverable errors (Git, Worktree, Codex errors)
@@ -939,7 +941,9 @@ export function isEntryPoint(metaUrl: string, argv1?: string): boolean {
 // Run the application if this module is executed directly
 if (isEntryPoint(import.meta.url, process.argv[1])) {
   main().catch(async (error) => {
-    console.error("Fatal error:", error);
+    const details =
+      error instanceof Error ? (error.stack ?? error.message) : String(error);
+    writeTerminalLine(`Fatal error: ${details}`, "stderr");
     await waitForErrorAcknowledgement();
     process.exit(1);
   });

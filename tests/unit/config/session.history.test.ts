@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { describe, it, expect, mock, beforeEach } from "bun:test";
 import * as config from "../../../src/config/index";
 
@@ -16,11 +17,15 @@ mock.module("node:fs/promises", () => {
   };
 });
 
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
 
 describe("config/index.ts - session history", () => {
   beforeEach(() => {
-    mock.restore();
+    // Clear mock call counts and reset implementations
+    (readFile as any).mockReset();
+    (writeFile as any).mockReset();
+    (mkdir as any).mockReset();
+    (readdir as any).mockReset();
   });
 
   it("appends to history and caps at 100 entries", async () => {

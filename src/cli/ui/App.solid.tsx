@@ -20,6 +20,10 @@ import type { FormattedLogEntry } from "../../logging/formatter.js";
 import { BranchListScreen } from "./screens/solid/BranchListScreen.js";
 import { HelpOverlay } from "./components/solid/HelpOverlay.js";
 import {
+  WizardController,
+  type WizardResult,
+} from "./components/solid/WizardController.js";
+import {
   SelectorScreen,
   type SelectorItem,
 } from "./screens/solid/SelectorScreen.js";
@@ -56,7 +60,11 @@ import {
   type WorktreeInfo as WorktreeEntry,
 } from "../../worktree.js";
 import { detectAllToolStatuses, type ToolStatus } from "../../utils/command.js";
-import { getConfig } from "../../config/index.js";
+import {
+  getConfig,
+  loadSession,
+  type ToolSessionEntry,
+} from "../../config/index.js";
 import { getAllCodingAgents } from "../../config/tools.js";
 import {
   buildLogFilePath,
@@ -185,6 +193,7 @@ export function AppSolid(props: AppSolidProps) {
   );
   const [screenStack, setScreenStack] = createSignal<AppScreen[]>([]);
   const [helpVisible, setHelpVisible] = createSignal(false);
+  const [wizardVisible, setWizardVisible] = createSignal(false);
 
   const [branchItems, setBranchItems] = createSignal<BranchItem[]>(
     props.branches ?? [],
@@ -235,6 +244,22 @@ export function AppSolid(props: AppSolidProps) {
     null,
   );
   const [defaultBaseBranch, setDefaultBaseBranch] = createSignal("main");
+
+  // セッション履歴（最終使用エージェントなど）
+  const [sessionHistory, setSessionHistory] = createSignal<ToolSessionEntry[]>(
+    [],
+  );
+
+  // 選択中ブランチの履歴をフィルタリング
+  const historyForBranch = createMemo(() => {
+    const history = sessionHistory();
+    const branch = selectedBranch();
+    if (!branch) return [];
+    // 選択中ブランチにマッチする履歴エントリを新しい順で返す
+    return history
+      .filter((entry) => entry.branch === branch.name)
+      .sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0));
+  });
 
   const [logEntries, setLogEntries] = createSignal<FormattedLogEntry[]>([]);
   const [logLoading, setLogLoading] = createSignal(false);
@@ -508,6 +533,18 @@ export function AppSolid(props: AppSolidProps) {
       .catch(() => setDefaultBaseBranch("main"));
   });
 
+  // セッション履歴をロード（最終使用エージェントなど）
+  onMount(() => {
+    void getRepositoryRoot()
+      .then((repoRoot) => loadSession(repoRoot))
+      .then((session) => {
+        if (session?.history) {
+          setSessionHistory(session.history);
+        }
+      })
+      .catch(() => setSessionHistory([]));
+  });
+
   onMount(() => {
     void getAllCodingAgents()
       .then((agents) => {
@@ -568,14 +605,124 @@ export function AppSolid(props: AppSolidProps) {
     setCreationSource(null);
     setSelectedTool(null);
     setSelectedMode("normal");
-    navigateTo("tool-select");
+    // FR-044: ウィザードポップアップをレイヤー表示
+    setWizardVisible(true);
   };
 
   const handleQuickCreate = (branch: BranchItem | null) => {
+    // 選択中のブランチをベースにウィザードを開始
+    if (branch) {
+      setSelectedBranch(toSelectedBranchState(branch));
+    }
     setCreationSource(branch ? toSelectedBranchState(branch) : null);
     setCreateBranchName("");
     setSuppressCreateKey("n");
-    navigateTo("worktree-create");
+    // FR-044: ウィザードポップアップをレイヤー表示（アクション選択から開始）
+    setWizardVisible(true);
+  };
+
+  // FR-049: Escapeキーでウィザードをキャンセル
+  const handleWizardClose = () => {
+    setWizardVisible(false);
+  };
+
+  // ウィザード完了時の処理
+  const handleWizardComplete = (result: WizardResult) => {
+    setWizardVisible(false);
+
+    const branch = selectedBranch();
+    if (!branch) {
+      return;
+    }
+
+    // 新規ブランチ作成の場合、ブランチ名を設定
+    const isCreatingNew = result.isNewBranch ?? false;
+    const finalBranchName = result.branchName
+      ? `${result.branchType ?? ""}${result.branchName}`
+      : branch.name;
+
+    // 新規作成時は選択中のブランチがベースとなる
+    const baseBranchRef = isCreatingNew ? branch.name : null;
+    const normalizedModel = normalizeModelId(result.tool, result.model);
+
+    exitApp({
+      branch: finalBranchName,
+      displayName: branch.displayName,
+      branchType: branch.branchType,
+      ...(branch.remoteBranch ? { remoteBranch: branch.remoteBranch } : {}),
+      ...(isCreatingNew
+        ? {
+            isNewBranch: true,
+            ...(baseBranchRef ? { baseBranch: baseBranchRef } : {}),
+          }
+        : {}),
+      tool: result.tool,
+      mode: result.mode,
+      skipPermissions: result.skipPermissions,
+      ...(normalizedModel !== undefined ? { model: normalizedModel } : {}),
+      ...(result.reasoningLevel !== undefined
+        ? { inferenceLevel: result.reasoningLevel }
+        : {}),
+    });
+  };
+
+  // FR-010: クイックスタートからのResume（前回設定で続きから）
+  const handleWizardResume = (entry: ToolSessionEntry) => {
+    setWizardVisible(false);
+
+    const branch = selectedBranch();
+    if (!branch) {
+      return;
+    }
+
+    const normalizedModel = normalizeModelId(
+      entry.toolId as CodingAgentId,
+      entry.model ?? undefined,
+    );
+
+    exitApp({
+      branch: branch.name,
+      displayName: branch.displayName,
+      branchType: branch.branchType,
+      ...(branch.remoteBranch ? { remoteBranch: branch.remoteBranch } : {}),
+      tool: entry.toolId as CodingAgentId,
+      mode: "continue",
+      skipPermissions: entry.skipPermissions ?? false,
+      ...(normalizedModel !== undefined ? { model: normalizedModel } : {}),
+      ...(entry.reasoningLevel
+        ? { inferenceLevel: entry.reasoningLevel as InferenceLevel }
+        : {}),
+      ...(entry.sessionId ? { sessionId: entry.sessionId } : {}),
+    });
+  };
+
+  // FR-010: クイックスタートからのStartNew（前回設定で新規）
+  const handleWizardStartNew = (entry: ToolSessionEntry) => {
+    setWizardVisible(false);
+
+    const branch = selectedBranch();
+    if (!branch) {
+      return;
+    }
+
+    const normalizedModel = normalizeModelId(
+      entry.toolId as CodingAgentId,
+      entry.model ?? undefined,
+    );
+
+    exitApp({
+      branch: branch.name,
+      displayName: branch.displayName,
+      branchType: branch.branchType,
+      ...(branch.remoteBranch ? { remoteBranch: branch.remoteBranch } : {}),
+      tool: entry.toolId as CodingAgentId,
+      mode: "normal",
+      skipPermissions: entry.skipPermissions ?? false,
+      ...(normalizedModel !== undefined ? { model: normalizedModel } : {}),
+      ...(entry.reasoningLevel
+        ? { inferenceLevel: entry.reasoningLevel as InferenceLevel }
+        : {}),
+    });
   };
 
   const handleRepairWorktrees = async () => {
@@ -911,6 +1058,7 @@ export function AppSolid(props: AppSolidProps) {
           onCreateBranch={handleQuickCreate}
           cleanupUI={cleanupUI}
           helpVisible={helpVisible()}
+          wizardVisible={wizardVisible()}
         />
       );
     }
@@ -1256,6 +1404,16 @@ export function AppSolid(props: AppSolidProps) {
     <>
       {renderCurrentScreen()}
       <HelpOverlay visible={helpVisible()} context={currentScreen()} />
+      {/* FR-044: ウィザードポップアップをレイヤー表示 */}
+      <WizardController
+        visible={wizardVisible()}
+        selectedBranchName={selectedBranch()?.name ?? ""}
+        history={historyForBranch()}
+        onClose={handleWizardClose}
+        onComplete={handleWizardComplete}
+        onResume={handleWizardResume}
+        onStartNew={handleWizardStartNew}
+      />
     </>
   );
 }
