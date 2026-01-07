@@ -5,6 +5,7 @@ import {
   createChildStdio,
   getTerminalStreams,
   resetTerminalModes,
+  writeTerminalLine,
 } from "./utils/terminal.js";
 import { findCommand } from "./utils/command.js";
 import { findLatestGeminiSessionId } from "./utils/session.js";
@@ -54,14 +55,14 @@ export async function launchGeminiCLI(
       throw new Error(`Worktree path does not exist: ${worktreePath}`);
     }
 
-    console.log(chalk.blue("🚀 Launching Gemini CLI..."));
-    console.log(chalk.gray(`   Working directory: ${worktreePath}`));
+    writeTerminalLine(chalk.blue("🚀 Launching Gemini CLI..."));
+    writeTerminalLine(chalk.gray(`   Working directory: ${worktreePath}`));
 
     const args: string[] = [];
 
     if (options.model) {
       args.push("--model", options.model);
-      console.log(chalk.green(`   🎯 Model: ${options.model}`));
+      writeTerminalLine(chalk.green(`   🎯 Model: ${options.model}`));
     }
 
     // Handle execution mode
@@ -109,31 +110,35 @@ export async function launchGeminiCLI(
     switch (options.mode) {
       case "continue":
         if (resumeSessionId) {
-          console.log(
+          writeTerminalLine(
             chalk.cyan(
               `   ⏭️  Continuing specific session: ${resumeSessionId}`,
             ),
           );
         } else {
-          console.log(chalk.cyan("   ⏭️  Continuing most recent session"));
+          writeTerminalLine(
+            chalk.cyan("   ⏭️  Continuing most recent session"),
+          );
         }
         break;
       case "resume":
         if (resumeSessionId) {
-          console.log(chalk.cyan(`   🔄 Resuming session: ${resumeSessionId}`));
+          writeTerminalLine(
+            chalk.cyan(`   🔄 Resuming session: ${resumeSessionId}`),
+          );
         } else {
-          console.log(chalk.cyan("   🔄 Resuming session (latest)"));
+          writeTerminalLine(chalk.cyan("   🔄 Resuming session (latest)"));
         }
         break;
       case "normal":
       default:
-        console.log(chalk.green("   ✨ Starting new session"));
+        writeTerminalLine(chalk.green("   ✨ Starting new session"));
         break;
     }
 
     // Handle skip permissions (YOLO mode)
     if (options.skipPermissions) {
-      console.log(
+      writeTerminalLine(
         chalk.yellow("   ⚠️  Auto-approving all actions (YOLO mode)"),
       );
     }
@@ -185,21 +190,23 @@ export async function launchGeminiCLI(
 
       if (geminiLookup.source === "installed" && geminiLookup.path) {
         // Use the full path to avoid PATH issues in non-interactive shells
-        console.log(
+        writeTerminalLine(
           chalk.green("   ✨ Using locally installed gemini command"),
         );
         return await run(geminiLookup.path, runArgs);
       }
-      console.log(
+      writeTerminalLine(
         chalk.cyan("   🔄 Falling back to bunx @google/gemini-cli@latest"),
       );
-      console.log(
+      writeTerminalLine(
         chalk.yellow(
           "   💡 Recommended: Install Gemini CLI globally for faster startup",
         ),
       );
-      console.log(chalk.yellow("      npm install -g @google/gemini-cli"));
-      console.log("");
+      writeTerminalLine(
+        chalk.yellow("      npm install -g @google/gemini-cli"),
+      );
+      writeTerminalLine("");
       const shouldSkipDelay =
         typeof process !== "undefined" &&
         (process.env?.NODE_ENV === "test" || Boolean(process.env?.VITEST));
@@ -220,7 +227,7 @@ export async function launchGeminiCLI(
           resumeSessionId;
         if (shouldRetry) {
           fellBackToLatest = true;
-          console.log(
+          writeTerminalLine(
             chalk.yellow(
               `   ⚠️  Failed to resume session ${resumeSessionId}. Retrying with latest session...`,
             ),
@@ -254,12 +261,12 @@ export async function launchGeminiCLI(
     }
 
     if (capturedSessionId) {
-      console.log(chalk.cyan(`\n   🆔 Session ID: ${capturedSessionId}`));
-      console.log(
+      writeTerminalLine(chalk.cyan(`\n   🆔 Session ID: ${capturedSessionId}`));
+      writeTerminalLine(
         chalk.gray(`   Resume command: gemini --resume ${capturedSessionId}`),
       );
     } else {
-      console.log(
+      writeTerminalLine(
         chalk.yellow(
           "\n   ℹ️  Could not determine Gemini session ID automatically.",
         ),
@@ -288,30 +295,38 @@ export async function launchGeminiCLI(
     }
 
     if (process.platform === "win32") {
-      console.error(chalk.red("\n💡 Windows troubleshooting tips:"));
+      writeTerminalLine(
+        chalk.red("\n💡 Windows troubleshooting tips:"),
+        "stderr",
+      );
       if (hasLocalGemini) {
-        console.error(
+        writeTerminalLine(
           chalk.yellow(
             "   1. Confirm that Gemini CLI is installed and the 'gemini' command is on PATH",
           ),
+          "stderr",
         );
-        console.error(
+        writeTerminalLine(
           chalk.yellow('   2. Run "gemini --version" to verify the setup'),
+          "stderr",
         );
       } else {
-        console.error(
+        writeTerminalLine(
           chalk.yellow(
             "   1. Confirm that Bun is installed and bunx is available",
           ),
+          "stderr",
         );
-        console.error(
+        writeTerminalLine(
           chalk.yellow(
             '   2. Run "bunx @google/gemini-cli@latest -- --version" to verify the setup',
           ),
+          "stderr",
         );
       }
-      console.error(
+      writeTerminalLine(
         chalk.yellow("   3. Restart your terminal or IDE to refresh PATH"),
+        "stderr",
       );
     }
 
@@ -332,11 +347,12 @@ export async function isGeminiCLIAvailable(): Promise<boolean> {
   } catch (error: unknown) {
     const err = error as NodeJS.ErrnoException;
     if (err.code === "ENOENT") {
-      console.error(chalk.yellow("\n⚠️  bunx command not found"));
-      console.error(
+      writeTerminalLine(chalk.yellow("\n⚠️  bunx command not found"), "stderr");
+      writeTerminalLine(
         chalk.gray(
           "   Install Bun and confirm that bunx is available before continuing",
         ),
+        "stderr",
       );
     }
     return false;

@@ -32,6 +32,7 @@ import {
   getTerminalStreams,
   resetTerminalModes,
   waitForUserAcknowledgement,
+  writeTerminalLine,
 } from "./utils/terminal.js";
 import { createLogger } from "./logging/logger.js";
 import { getCodingAgentById, getSharedEnvironment } from "./config/tools.js";
@@ -75,17 +76,17 @@ async function waitForErrorAcknowledgement(): Promise<void> {
  * Simple print functions (replacing legacy UI display functions)
  */
 function printError(message: string): void {
-  console.error(chalk.red(`❌ ${message}`));
+  writeTerminalLine(chalk.red(`❌ ${message}`), "stderr");
   appLogger.error({ message });
 }
 
 function printInfo(message: string): void {
-  console.log(chalk.blue(`ℹ️  ${message}`));
+  writeTerminalLine(chalk.blue(`ℹ️  ${message}`));
   appLogger.info({ message });
 }
 
 function printWarning(message: string): void {
-  console.warn(chalk.yellow(`⚠️  ${message}`));
+  writeTerminalLine(chalk.yellow(`⚠️  ${message}`), "stderr");
   appLogger.warn({ message });
 }
 
@@ -499,10 +500,11 @@ export async function handleAIToolWorkflow(
         ({ branch: divergedBranch, remoteAhead, localAhead }) => {
           const highlight =
             divergedBranch === branch ? " (selected branch)" : "";
-          console.warn(
+          writeTerminalLine(
             chalk.yellow(
               `   • ${divergedBranch}${highlight}  remote:+${remoteAhead}  local:+${localAhead}`,
             ),
+            "stderr",
           );
         },
       );
@@ -939,7 +941,9 @@ export function isEntryPoint(metaUrl: string, argv1?: string): boolean {
 // Run the application if this module is executed directly
 if (isEntryPoint(import.meta.url, process.argv[1])) {
   main().catch(async (error) => {
-    console.error("Fatal error:", error);
+    const details =
+      error instanceof Error ? (error.stack ?? error.message) : String(error);
+    writeTerminalLine(`Fatal error: ${details}`, "stderr");
     await waitForErrorAcknowledgement();
     process.exit(1);
   });
