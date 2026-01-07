@@ -22,7 +22,7 @@ export interface StepProps {
 const useEdgeScroll = (options: {
   getSelectedIndex: () => number;
   getItemCount: () => number;
-  focused?: boolean;
+  focused?: boolean | undefined;
 }) => {
   const scroll = useWizardScroll();
   useKeyboard((key) => {
