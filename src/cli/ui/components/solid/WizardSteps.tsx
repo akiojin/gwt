@@ -19,13 +19,15 @@ export interface StepProps {
   focused?: boolean;
 }
 
-const useEdgeScroll = (options: {
+const useEnsureSelectionVisible = (options: {
   getSelectedIndex: () => number;
   getItemCount: () => number;
+  baseLine: number;
+  linesPerItem?: number;
   getFocused?: () => boolean | undefined;
 }) => {
   const scroll = useWizardScroll();
-  useKeyboard((key) => {
+  createEffect(() => {
     if (options.getFocused && options.getFocused() === false) {
       return;
     }
@@ -36,19 +38,16 @@ const useEdgeScroll = (options: {
     if (itemCount <= 0) {
       return;
     }
-    if (key.name === "up") {
-      if (options.getSelectedIndex() <= 0 && scroll.scrollByLines(-1)) {
-        key.preventDefault();
-      }
-      return;
-    }
-    if (key.name === "down") {
-      if (
-        options.getSelectedIndex() >= itemCount - 1 &&
-        scroll.scrollByLines(1)
-      ) {
-        key.preventDefault();
-      }
+    const safeIndex = Math.min(
+      Math.max(options.getSelectedIndex(), 0),
+      itemCount - 1,
+    );
+    const linesPerItem = options.linesPerItem ?? 1;
+    const startLine = options.baseLine + safeIndex * linesPerItem;
+    const endLine = startLine + Math.max(0, linesPerItem - 1);
+    scroll.ensureLineVisible(startLine);
+    if (endLine !== startLine) {
+      scroll.ensureLineVisible(endLine);
     }
   });
 };
@@ -76,10 +75,11 @@ const ACTION_OPTIONS: SelectInputItem[] = [
 
 export function ActionSelectStep(props: ActionSelectStepProps) {
   const [selectedIndex, setSelectedIndex] = createSignal(0);
-  useEdgeScroll({
+  useEnsureSelectionVisible({
     getSelectedIndex: selectedIndex,
     getItemCount: () => ACTION_OPTIONS.length,
     getFocused: () => props.focused,
+    baseLine: 4,
   });
 
   const handleChange = (item: SelectInputItem | null) => {
@@ -129,10 +129,11 @@ const BRANCH_TYPES: SelectInputItem[] = [
 
 export function BranchTypeStep(props: BranchTypeStepProps) {
   const [selectedIndex, setSelectedIndex] = createSignal(0);
-  useEdgeScroll({
+  useEnsureSelectionVisible({
     getSelectedIndex: selectedIndex,
     getItemCount: () => BRANCH_TYPES.length,
     getFocused: () => props.focused,
+    baseLine: 2,
   });
 
   const handleChange = (item: SelectInputItem | null) => {
@@ -175,6 +176,16 @@ export interface BranchNameStepProps extends StepProps {
 export function BranchNameStep(props: BranchNameStepProps) {
   const [name, setName] = createSignal("");
   const scroll = useWizardScroll();
+
+  createEffect(() => {
+    if (props.focused === false) {
+      return;
+    }
+    if (!scroll) {
+      return;
+    }
+    scroll.ensureLineVisible(2);
+  });
 
   useKeyboard((key) => {
     if (props.focused === false) {
@@ -241,10 +252,11 @@ const AGENTS: SelectInputItem[] = [
 
 export function AgentSelectStep(props: AgentSelectStepProps) {
   const [selectedIndex, setSelectedIndex] = createSignal(0);
-  useEdgeScroll({
+  useEnsureSelectionVisible({
     getSelectedIndex: selectedIndex,
     getItemCount: () => AGENTS.length,
     getFocused: () => props.focused,
+    baseLine: 2,
   });
 
   const handleChange = (item: SelectInputItem | null) => {
@@ -301,10 +313,11 @@ function getModelItems(agentId: CodingAgentId): SelectInputItem[] {
 export function ModelSelectStep(props: ModelSelectStepProps) {
   const [selectedIndex, setSelectedIndex] = createSignal(0);
   const models = () => getModelItems(props.agentId);
-  useEdgeScroll({
+  useEnsureSelectionVisible({
     getSelectedIndex: selectedIndex,
     getItemCount: () => models().length,
     getFocused: () => props.focused,
+    baseLine: 2,
   });
 
   createEffect(() => {
@@ -364,10 +377,11 @@ const REASONING_LEVELS: SelectInputItem[] = [
 
 export function ReasoningLevelStep(props: ReasoningLevelStepProps) {
   const [selectedIndex, setSelectedIndex] = createSignal(0);
-  useEdgeScroll({
+  useEnsureSelectionVisible({
     getSelectedIndex: selectedIndex,
     getItemCount: () => REASONING_LEVELS.length,
     getFocused: () => props.focused,
+    baseLine: 2,
   });
 
   const handleChange = (item: SelectInputItem | null) => {
@@ -422,10 +436,11 @@ const EXECUTION_MODES: SelectInputItem[] = [
 
 export function ExecutionModeStep(props: ExecutionModeStepProps) {
   const [selectedIndex, setSelectedIndex] = createSignal(0);
-  useEdgeScroll({
+  useEnsureSelectionVisible({
     getSelectedIndex: selectedIndex,
     getItemCount: () => EXECUTION_MODES.length,
     getFocused: () => props.focused,
+    baseLine: 2,
   });
 
   const handleChange = (item: SelectInputItem | null) => {
@@ -471,10 +486,11 @@ const SKIP_OPTIONS: SelectInputItem[] = [
 
 export function SkipPermissionsStep(props: SkipPermissionsStepProps) {
   const [selectedIndex, setSelectedIndex] = createSignal(0);
-  useEdgeScroll({
+  useEnsureSelectionVisible({
     getSelectedIndex: selectedIndex,
     getItemCount: () => SKIP_OPTIONS.length,
     getFocused: () => props.focused,
+    baseLine: 2,
   });
 
   const handleChange = (item: SelectInputItem | null) => {

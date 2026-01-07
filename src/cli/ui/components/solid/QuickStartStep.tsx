@@ -1,6 +1,5 @@
 /** @jsxImportSource @opentui/solid */
 import { TextAttributes } from "@opentui/core";
-import { useKeyboard } from "@opentui/solid";
 import { createEffect, createMemo, createSignal } from "solid-js";
 import type { ToolSessionEntry } from "../../../../config/index.js";
 import { SelectInput, type SelectInputItem } from "./SelectInput.js";
@@ -80,25 +79,24 @@ export function QuickStartStep(props: QuickStartStepProps) {
     return result;
   });
 
-  useKeyboard((key) => {
+  createEffect(() => {
     if (props.focused === false) {
       return;
     }
     if (!scroll) {
       return;
     }
-    const maxIndex = items().length - 1;
-    if (key.name === "up") {
-      if (selectedIndex() <= 0 && scroll.scrollByLines(-1)) {
-        key.preventDefault();
-      }
+    const count = items().length;
+    if (count <= 0) {
       return;
     }
-    if (key.name === "down") {
-      if (selectedIndex() >= maxIndex && scroll.scrollByLines(1)) {
-        key.preventDefault();
-      }
-    }
+    const safeIndex = Math.min(Math.max(selectedIndex(), 0), count - 1);
+    const baseLine = 3;
+    const linesPerItem = 2;
+    const startLine = baseLine + safeIndex * linesPerItem;
+    const endLine = startLine + linesPerItem - 1;
+    scroll.ensureLineVisible(startLine);
+    scroll.ensureLineVisible(endLine);
   });
 
   const handleSelect = (item: SelectInputItem) => {
