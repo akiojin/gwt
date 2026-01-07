@@ -383,14 +383,8 @@ export class PTYManager {
       await saveSession({
         lastWorktreePath: session.worktreePath,
         lastBranch: context.branchName,
-        lastUsedTool:
-          session.agentType === "custom"
-            ? (session.agentName ?? "custom")
-            : session.agentType,
-        toolLabel:
-          session.agentType === "custom"
-            ? (session.agentName ?? "Custom")
-            : agentLabelFromType(session.agentType),
+        lastUsedTool: session.agentType,
+        toolLabel: agentLabelFromType(session.agentType),
         mode: session.mode,
         timestamp: Date.now(),
         repositoryRoot: context.repoRoot,
