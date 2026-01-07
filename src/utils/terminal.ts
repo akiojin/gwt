@@ -214,6 +214,30 @@ export function resetTerminalModes(
   }
 }
 
+export function writeTerminalLine(
+  message: string,
+  stream: "stdout" | "stderr" = "stdout",
+): void {
+  const terminal = getTerminalStreams();
+  const target = stream === "stderr" ? terminal.stderr : terminal.stdout;
+  const payload = message.endsWith("\n") ? message : `${message}\n`;
+
+  if (target && typeof target.write === "function") {
+    try {
+      target.write(payload);
+      return;
+    } catch {
+      // Ignore write errors and fall back to console.
+    }
+  }
+
+  if (stream === "stderr") {
+    console.error(message);
+  } else {
+    console.log(message);
+  }
+}
+
 /**
  * Creates stdio settings for launching a child process.
  *

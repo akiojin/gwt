@@ -1,14 +1,15 @@
-import { describe, it, expect, mock, beforeEach, afterEach, spyOn } from "bun:test";
+import {
+  describe,
+  it,
+  expect,
+  mock,
+  beforeEach,
+  afterEach,
+  spyOn,
+} from "bun:test";
 import { PassThrough } from "node:stream";
 
-// Vitest shim for environments lacking vi.hoisted (e.g., bun)
-if (typeof (vi as Record<string, unknown>).hoisted !== "function") {
-  // @ts-expect-error injected shim
-}
-
-const { execaMock } = (({
-  execaMock: mock(),
-}));
+const execaMock = mock();
 
 mock.module("execa", () => ({
   execa: execaMock,
@@ -16,11 +17,6 @@ mock.module("execa", () => ({
 
 describe("worktree spinner integration", () => {
   beforeEach(() => {
-    if (
-      typeof (vi as { resetModules?: () => void }).resetModules === "function"
-    ) {
-      (vi as { resetModules: () => void }).resetModules();
-    }
     execaMock.mockReset();
   });
 
@@ -32,12 +28,13 @@ describe("worktree spinner integration", () => {
     const stopSpinner = mock();
 
     const spinnerModule = await import("../../src/utils/spinner.js");
-    const startSpinnerSpy = vi
-      .spyOn(spinnerModule, "startSpinner")
-      .mockImplementation((message: string) => {
-        stopSpinner.mockName(`stopSpinner:${message}`);
-        return stopSpinner;
-      });
+    const startSpinnerSpy = spyOn(
+      spinnerModule,
+      "startSpinner",
+    ).mockImplementation((message: string) => {
+      stopSpinner.mockName(`stopSpinner:${message}`);
+      return stopSpinner;
+    });
 
     const gitModule = await import("../../src/git.js");
     spyOn(gitModule, "ensureGitignoreEntry").mockResolvedValue(undefined);

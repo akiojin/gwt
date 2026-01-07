@@ -1,4 +1,5 @@
-import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
+/* eslint-disable @typescript-eslint/no-explicit-any */
+import { describe, it, expect, mock, beforeEach } from "bun:test";
 import * as config from "../../../src/config/index";
 
 // Mock node:fs/promises
@@ -29,11 +30,11 @@ import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
 
 describe("config/index.ts - Session Management", () => {
   beforeEach(() => {
-    mock.restore();
-  });
-
-  afterEach(() => {
-    mock.restore();
+    // Clear mock call counts and reset implementations
+    (readFile as any).mockReset();
+    (writeFile as any).mockReset();
+    (mkdir as any).mockReset();
+    (readdir as any).mockReset();
   });
 
   describe("saveSession (T301)", () => {

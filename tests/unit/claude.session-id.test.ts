@@ -1,7 +1,5 @@
-/**
- * @vitest-environment node
- */
-import { afterAll, beforeEach, describe, expect, it,  mock } from "bun:test";
+import type { Mock } from "bun:test";
+import { afterAll, beforeEach, describe, expect, it, mock } from "bun:test";
 
 mock.module("execa", () => ({
   execa: mock(),
