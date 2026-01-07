@@ -1,5 +1,13 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { describe, it, expect, mock, beforeEach, afterEach, spyOn } from "bun:test";
+import {
+  describe,
+  it,
+  expect,
+  mock,
+  beforeEach,
+  afterEach,
+  spyOn,
+} from "bun:test";
 import path from "node:path";
 import * as worktree from "../../src/worktree";
 

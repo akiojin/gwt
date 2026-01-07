@@ -1,44 +1,31 @@
-import {
-  describe,
-  it,
-  expect,
-  mock,
-  beforeEach,
-  afterEach,
-  
-} from "bun:test";
+import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
 
 // Mock all dependencies
 mock.module("execa", () => ({
   execa: mock(),
 }));
 
-const existsSyncMock = (
-  mock((targetPath?: string) => {
-    if (typeof targetPath !== "string") {
-      return false;
-    }
-    const normalized = targetPath.replace(/\\/g, "/");
-    if (normalized.includes("/path/to/repo/.worktrees")) {
-      return false;
-    }
-    return true;
-  }),
-);
+const existsSyncMock = mock((targetPath?: string) => {
+  if (typeof targetPath !== "string") {
+    return false;
+  }
+  const normalized = targetPath.replace(/\\/g, "/");
+  if (normalized.includes("/path/to/repo/.worktrees")) {
+    return false;
+  }
+  return true;
+});
 
 mock.module("node:fs", () => ({
   existsSync: existsSyncMock,
 }));
 
-const mkdirMock = (mock(async () => undefined));
-const readFileMock = (mock(async () => ""));
-const writeFileMock = (mock(async () => undefined));
+const mkdirMock = mock(async () => undefined);
+const readFileMock = mock(async () => "");
+const writeFileMock = mock(async () => undefined);
 
 mock.module("node:fs/promises", async () => {
-  const actual =
-    await import(
-      "node:fs/promises",
-    );
+  const actual = await import("node:fs/promises");
 
   const mocked = {
     ...actual,

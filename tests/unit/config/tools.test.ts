@@ -2,7 +2,7 @@
  * カスタムツール設定管理機能のテスト
  */
 
-import { describe, it, expect, beforeEach, afterEach,  mock } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
 import { readFile as _readFile } from "node:fs/promises";
 import { homedir as _homedir } from "node:os";
 import _path from "node:path";
@@ -117,7 +117,7 @@ describe("validateToolConfig", () => {
   });
 
   it("id重複がある場合、エラーをスロー", () => {
-    const tools = [
+    const _tools = [
       {
         id: "duplicate-id",
         displayName: "Tool 1",
