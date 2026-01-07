@@ -62,6 +62,7 @@ import {
 import { detectAllToolStatuses, type ToolStatus } from "../../utils/command.js";
 import {
   getConfig,
+  getLastToolUsageMap,
   loadSession,
   type ToolSessionEntry,
 } from "../../config/index.js";
@@ -420,15 +421,21 @@ export function AppSolid(props: AppSolidProps) {
       const worktreesPromise = listAdditionalWorktrees();
       const localBranchesPromise = getLocalBranches(repoRoot);
       const currentBranchPromise = getCurrentBranch(repoRoot);
+      const lastToolUsagePromise = getLastToolUsageMap(repoRoot);
 
-      const localBranches = await withTimeout(
-        localBranchesPromise,
-        BRANCH_LOAD_TIMEOUT_MS,
-      ).catch(() => []);
-      const currentBranch = await withTimeout(
-        currentBranchPromise,
-        BRANCH_LOAD_TIMEOUT_MS,
-      ).catch(() => null);
+      const [localBranches, currentBranch, worktrees, lastToolUsageMap] =
+        await Promise.all([
+          withTimeout(localBranchesPromise, BRANCH_LOAD_TIMEOUT_MS).catch(
+            () => [],
+          ),
+          withTimeout(currentBranchPromise, BRANCH_LOAD_TIMEOUT_MS).catch(
+            () => null,
+          ),
+          withTimeout(worktreesPromise, BRANCH_LOAD_TIMEOUT_MS).catch(() => []),
+          withTimeout(lastToolUsagePromise, BRANCH_LOAD_TIMEOUT_MS).catch(
+            () => new Map<string, ToolSessionEntry>(),
+          ),
+        ]);
 
       if (currentBranch) {
         localBranches.forEach((branch) => {
@@ -438,12 +445,11 @@ export function AppSolid(props: AppSolidProps) {
         });
       }
 
-      const worktrees = await withTimeout(
-        worktreesPromise,
-        BRANCH_LOAD_TIMEOUT_MS,
-      ).catch(() => []);
-
-      const initial = buildBranchList(localBranches, worktrees);
+      const initial = buildBranchList(
+        localBranches,
+        worktrees,
+        lastToolUsageMap,
+      );
       setBranchItems(initial.items);
       setStats(buildStats(initial.items));
 
@@ -459,7 +465,11 @@ export function AppSolid(props: AppSolidProps) {
           ).catch(() => worktrees),
         ]);
 
-        const full = buildBranchList(branches, latestWorktrees);
+        const full = buildBranchList(
+          branches,
+          latestWorktrees,
+          lastToolUsageMap,
+        );
         setBranchItems(full.items);
         setStats(buildStats(full.items));
       })();
@@ -1440,6 +1450,7 @@ const withTimeout = async <T,>(
 const buildBranchList = (
   branches: BranchInfo[],
   worktrees: WorktreeEntry[],
+  lastToolUsageMap?: Map<string, ToolSessionEntry>,
 ) => {
   const localBranchNames = new Set(
     branches.filter((branch) => branch.type === "local").map((b) => b.name),
@@ -1467,13 +1478,15 @@ const buildBranchList = (
   }
 
   const enriched = filtered.map((branch) => {
+    const lastToolUsage = lastToolUsageMap?.get(branch.name);
+    const baseBranch = lastToolUsage ? { ...branch, lastToolUsage } : branch;
     if (branch.type === "local") {
       const worktree = worktreeMap.get(branch.name);
       if (worktree) {
-        return { ...branch, worktree };
+        return { ...baseBranch, worktree };
       }
     }
-    return branch;
+    return baseBranch;
   });
 
   const items = formatBranchItems(enriched, worktreeMap);
