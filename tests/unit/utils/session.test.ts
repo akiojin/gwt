@@ -1,7 +1,4 @@
-/**
- * @vitest-environment node
- */
-import { describe, it, expect, beforeEach,  mock } from "bun:test";
+import { describe, it, expect, beforeEach, mock } from "bun:test";
 import path from "node:path";
 
 mock.module("node:fs/promises", () => {
@@ -50,7 +47,10 @@ const equalsPath = (value: string, expected: string) =>
 
 describe("utils/session", () => {
   beforeEach(() => {
-    mock.restore();
+    // Clear mock call counts and reset implementations
+    readdirMock.mockReset();
+    readFileMock.mockReset();
+    statMock.mockReset();
   });
 
   describe("isValidUuidSessionId", () => {

@@ -52,6 +52,8 @@ export interface BranchListScreenProps {
   onToggleSelect?: (branchName: string) => void;
   toolStatuses?: ToolStatus[] | undefined;
   helpVisible?: boolean;
+  /** ウィザードポップアップ表示中は入力を無効化 */
+  wizardVisible?: boolean;
 }
 
 const VIEW_MODES: BranchViewMode[] = ["all", "local", "remote"];
@@ -499,6 +501,10 @@ export function BranchListScreen(props: BranchListScreenProps) {
   };
 
   useKeyboard((key) => {
+    // FR-044: ウィザードポップアップ表示中は入力を無効化
+    if (props.wizardVisible) {
+      return;
+    }
     if (props.helpVisible) {
       return;
     }
@@ -753,10 +759,8 @@ export function BranchListScreen(props: BranchListScreenProps) {
   };
 
   const footerActions = [
-    { key: "enter", description: "Select" },
     { key: "f", description: "Filter" },
     { key: "tab", description: "Mode" },
-    { key: "n", description: "New" },
     { key: "r", description: "Refresh" },
     { key: "c", description: "Cleanup" },
     { key: "x", description: "Repair" },

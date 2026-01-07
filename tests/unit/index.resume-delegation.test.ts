@@ -1,11 +1,6 @@
-import { beforeEach, describe, expect, it,  mock } from "bun:test";
+import { beforeEach, describe, expect, it, mock } from "bun:test";
 import type { SelectionResult } from "../../src/cli/ui/App.solid.js";
 import type { ExecutionMode } from "../../src/cli/ui/App.solid.js";
-
-// Vitest shim for environments lacking vi.hoisted (e.g., bun)
-if (typeof (vi as Record<string, unknown>).hoisted !== "function") {
-  // @ts-expect-error injected shim
-}
 
 const {
   ensureWorktreeMock,
@@ -26,7 +21,7 @@ const {
   getUncommittedChangesCountMock,
   getUnpushedCommitsCountMock,
   pushBranchToRemoteMock,
-} = (({
+} = {
   ensureWorktreeMock: mock(async () => "/repo/worktrees/feature/resume"),
   fetchAllRemotesMock: mock(async () => undefined),
   pullFastForwardMock: mock(async () => undefined),
@@ -81,18 +76,13 @@ const {
   getUncommittedChangesCountMock: mock(async () => 0),
   getUnpushedCommitsCountMock: mock(async () => 0),
   pushBranchToRemoteMock: mock(async () => undefined),
-}));
+};
 
-const waitForUserAcknowledgementMock = (
-  (mock<() => Promise<void>>()),
-);
+const waitForUserAcknowledgementMock = mock<() => Promise<void>>();
+const confirmYesNoMock = mock<() => Promise<boolean>>();
 
-const confirmYesNoMock = ((mock<() => Promise<boolean>>()));
 mock.module("../../src/git.js", async () => {
-  const actual =
-    await import("../../src/git.js
-      "../../src/git.js",
-    );
+  const actual = await import("../../src/git.js");
   return {
     ...actual,
     getRepositoryRoot: getRepositoryRootMock,
@@ -109,9 +99,7 @@ mock.module("../../src/git.js", async () => {
 });
 
 mock.module("../../src/worktree.js", async () => {
-  const actual = await import("../../src/worktree.js
-    "../../src/worktree.js",
-  );
+  const actual = await import("../../src/worktree.js");
   return {
     ...actual,
     worktreeExists: worktreeExistsMock,
@@ -129,15 +117,13 @@ mock.module("../../src/services/WorktreeOrchestrator.js", () => ({
   },
 }));
 
-const DependencyInstallErrorMock = (
-  () =>
-    class DependencyInstallError extends Error {
-      constructor(message?: string) {
-        super(message);
-        this.name = "DependencyInstallError";
-      }
-    },
-);
+const DependencyInstallErrorMock = () =>
+  class DependencyInstallError extends Error {
+    constructor(message?: string) {
+      super(message);
+      this.name = "DependencyInstallError";
+    }
+  };
 
 mock.module("../../src/services/dependency-installer.js", () => ({
   installDependenciesForWorktree: installDependenciesMock,
@@ -175,9 +161,7 @@ mock.module("../../src/utils/session.js", () => ({
 }));
 
 mock.module("../../src/utils/terminal.js", async () => {
-  const actual = await import(
-    typeof import("../../src/utils/terminal.js")
-  >("../../src/utils/terminal.js");
+  const actual = await import("../../src/utils/terminal.js");
   return {
     ...actual,
     waitForUserAcknowledgement: waitForUserAcknowledgementMock,
@@ -185,14 +169,13 @@ mock.module("../../src/utils/terminal.js", async () => {
 });
 
 mock.module("../../src/utils/prompt.js", async () => {
-  const actual = await import(
-    typeof import("../../src/utils/prompt.js")
-  >("../../src/utils/prompt.js");
+  const actual = await import("../../src/utils/prompt.js");
   return {
     ...actual,
     confirmYesNo: confirmYesNoMock,
   };
 });
+
 // Import after mocks are set up
 import { handleAIToolWorkflow } from "../../src/index.js";
 
@@ -243,11 +226,9 @@ describe("handleAIToolWorkflow - Resume delegation", () => {
       sessionId: null,
     };
 
-    // TODO: use setSystemTime for fake timers in bun;
     const run = handleAIToolWorkflow(selection);
-    await new Promise(r => setTimeout(r, 3000));
+    await new Promise((r) => setTimeout(r, 3000));
     await run;
-    // TODO: restore real timers;
 
     expect(loadSessionMock).not.toHaveBeenCalled();
     expect(launchCodexCLIMock).toHaveBeenCalledWith(
@@ -266,11 +247,9 @@ describe("handleAIToolWorkflow - Resume delegation", () => {
       sessionId: null,
     };
 
-    // TODO: use setSystemTime for fake timers in bun;
     const run = handleAIToolWorkflow(selection);
-    await new Promise(r => setTimeout(r, 3000));
+    await new Promise((r) => setTimeout(r, 3000));
     await run;
-    // TODO: restore real timers;
 
     expect(loadSessionMock).toHaveBeenCalledTimes(1);
     expect(launchCodexCLIMock).toHaveBeenCalledWith(

@@ -38,7 +38,7 @@
 
 ## フェーズ3: 統合とポリッシュ
 
-- [ ] **T201** [統合] `package.json` に従い `bun run format:check` / `bunx --bun markdownlint-cli "**/*.md" --config .markdownlint.json --ignore-path .markdownlintignore` / `bun run lint` を実行し、失敗があれば修正
+- [x] **T201** [統合] `package.json` に従い `bun run format:check` / `bunx --bun markdownlint-cli "**/*.md" --config .markdownlint.json --ignore-path .markdownlintignore` / `bun run lint` を実行し、失敗があれば修正
 
 ## フェーズ4: ユーザーストーリー6 - Worktree作成時のstaleディレクトリ自動回復
 
@@ -48,10 +48,60 @@
 
 ### テスト（TDD）
 
-- [ ] **T301** [US6] `tests/integration/branch-creation.test.ts` にstaleディレクトリを検出して削除→再作成できるテストを追加
-- [ ] **T302** [US6] `tests/integration/branch-creation.test.ts` にstale判定できない既存ディレクトリは削除せずエラーになるテストを追加
+- [x] **T301** [US6] `tests/integration/branch-creation.test.ts` にstaleディレクトリを検出して削除→再作成できるテストを追加
+- [x] **T302** [US6] `tests/integration/branch-creation.test.ts` にstale判定できない既存ディレクトリは削除せずエラーになるテストを追加
 
 ### 実装
 
-- [ ] **T303** [US6] `src/worktree.ts` にstale判定・削除処理を追加し、`createWorktree`の前処理として実行
-- [ ] **T304** [US6] `src/worktree.ts` に判定不能な既存ディレクトリ向けの明確なエラーメッセージを追加
+- [x] **T303** [US6] `src/worktree.ts` にstale判定・削除処理を追加し、`createWorktree`の前処理として実行
+- [x] **T304** [US6] `src/worktree.ts` に判定不能な既存ディレクトリ向けの明確なエラーメッセージを追加
+
+## フェーズ5: ユーザーストーリー8 - ブランチ選択後のウィザードポップアップ (優先度: P0)
+
+**依存関係**: なし
+
+**ストーリー**: ブランチ選択後、ブランチ一覧画面の上にウィザードポップアップが表示され、7ステップの設定選択フローを経てAIツールを起動する。
+
+**価値**: 画面遷移ではなくレイヤー表示により、コンテキストを維持しながら設定を進められる。
+
+### テスト（TDD）
+
+- [x] **T401** [US8] `src/cli/ui/__tests__/solid/components/WizardPopup.test.tsx` にウィザードポップアップの表示/非表示テストを追加
+- [x] **T402** [US8] `src/cli/ui/__tests__/solid/components/WizardPopup.test.tsx` に背景オーバーレイ（半透過）の表示テストを追加
+- [x] **T403** [US8] `src/cli/ui/__tests__/solid/components/WizardPopup.test.tsx` にステップ表示テストを追加（Escapeキーテストはhook制約により視覚テストに変更）
+- [x] **T404** [US8] `src/cli/ui/__tests__/solid/components/WizardPopup.test.tsx` にステップ表示・枠線テストを追加
+- [x] **T405** [US8] `src/cli/ui/__tests__/solid/components/WizardSteps.test.tsx` にブランチタイプ選択ステップのテストを追加
+- [x] **T406** [US8] `src/cli/ui/__tests__/solid/components/WizardSteps.test.tsx` にブランチ名入力ステップのテストを追加
+- [x] **T407** [US8] `src/cli/ui/__tests__/solid/components/WizardSteps.test.tsx` にコーディングエージェント選択ステップのテストを追加
+- [x] **T408** [US8] `src/cli/ui/__tests__/solid/components/WizardSteps.test.tsx` にモデル選択ステップのテストを追加
+- [x] **T409** [US8] `src/cli/ui/__tests__/solid/components/WizardSteps.test.tsx` に推論レベル選択ステップ（Codexのみ）のテストを追加
+- [x] **T410** [US8] `src/cli/ui/__tests__/solid/components/WizardSteps.test.tsx` に実行モード選択ステップのテストを追加
+- [x] **T411** [US8] `src/cli/ui/__tests__/solid/components/WizardSteps.test.tsx` に権限スキップ確認ステップのテストを追加
+
+### 実装
+
+- [x] **T412** [US8] `src/cli/ui/components/solid/WizardPopup.tsx` にウィザードポップアップコンポーネントを作成（z-index、オーバーレイ）
+- [x] **T413** [US8] `src/cli/ui/components/solid/WizardSteps.tsx` に各ステップコンポーネントを作成
+- [x] **T414** [US8] `src/cli/ui/App.solid.tsx` にウィザードポップアップの統合（BranchListScreenからの起動）
+
+## フェーズ6: ユーザーストーリー9 - 前回履歴からのクイック選択ポップアップ (優先度: P1)
+
+**依存関係**: US8（ウィザードポップアップUI）
+
+**ストーリー**: ブランチ選択時に履歴がある場合、クイック選択画面を表示し、エージェントごとの「Resume/Start new」を選べる。
+
+**価値**: 毎回ツールとモデルを選択する手間を削減し、高速に再開できる。
+
+### テスト（TDD）
+
+- [x] **T501** [US9] `src/cli/ui/__tests__/solid/components/QuickStartStep.test.tsx` にクイック選択画面の表示テストを追加
+- [x] **T502** [US9] `src/cli/ui/__tests__/solid/components/QuickStartStep.test.tsx` にヘルプテキスト表示テストを追加
+- [x] **T503** [US9] `src/cli/ui/__tests__/solid/components/QuickStartStep.test.tsx` に「Resume with previous settings」選択時の動作テストを追加
+- [x] **T504** [US9] `src/cli/ui/__tests__/solid/components/QuickStartStep.test.tsx` に「Start new with previous settings」選択時の動作テストを追加
+- [x] **T505** [US9] `src/cli/ui/__tests__/solid/components/QuickStartStep.test.tsx` に「Choose different settings...」選択時の動作テストを追加
+- [x] **T506** [US9] `src/cli/ui/__tests__/solid/components/QuickStartStep.test.tsx` に履歴がない場合のスキップテストを追加
+
+### 実装
+
+- [x] **T507** [US9] `src/cli/ui/components/solid/QuickStartStep.tsx` にクイック選択ステップコンポーネントを作成
+- [x] **T508** [US9] `src/cli/ui/components/solid/WizardController.tsx` にクイック選択ステップの統合（履歴有無による分岐）

@@ -6,8 +6,12 @@ import {
   createChildStdio,
   getTerminalStreams,
   resetTerminalModes,
+  writeTerminalLine,
 } from "./utils/terminal.js";
-import { findLatestCodexSession } from "./utils/session.js";
+import {
+  findLatestCodexSession,
+  waitForCodexSessionId,
+} from "./utils/session.js";
 
 const CODEX_CLI_PACKAGE = "@openai/codex@latest";
 
@@ -101,16 +105,16 @@ export async function launchCodexCLI(
       throw new Error(`Worktree path does not exist: ${worktreePath}`);
     }
 
-    console.log(chalk.blue("🚀 Launching Codex CLI..."));
-    console.log(chalk.gray(`   Working directory: ${worktreePath}`));
+    writeTerminalLine(chalk.blue("🚀 Launching Codex CLI..."));
+    writeTerminalLine(chalk.gray(`   Working directory: ${worktreePath}`));
 
     const args: string[] = [];
     const model = options.model ?? DEFAULT_CODEX_MODEL;
     const reasoningEffort =
       options.reasoningEffort ?? DEFAULT_CODEX_REASONING_EFFORT;
 
-    console.log(chalk.green(`   🎯 Model: ${model}`));
-    console.log(chalk.green(`   🧠 Reasoning: ${reasoningEffort}`));
+    writeTerminalLine(chalk.green(`   🎯 Model: ${model}`));
+    writeTerminalLine(chalk.green(`   🧠 Reasoning: ${reasoningEffort}`));
 
     const resumeSessionId =
       options.sessionId && options.sessionId.trim().length > 0
@@ -124,36 +128,36 @@ export async function launchCodexCLI(
       case "continue":
         if (resumeSessionId) {
           args.push("resume", resumeSessionId);
-          console.log(
+          writeTerminalLine(
             chalk.cyan(
               `   ⏭️  Resuming specific Codex session: ${resumeSessionId}`,
             ),
           );
         } else {
           args.push("resume", "--last");
-          console.log(chalk.cyan("   ⏭️  Resuming last Codex session"));
+          writeTerminalLine(chalk.cyan("   ⏭️  Resuming last Codex session"));
         }
         break;
       case "resume":
         if (resumeSessionId) {
           args.push("resume", resumeSessionId);
-          console.log(
+          writeTerminalLine(
             chalk.cyan(`   🔄 Resuming Codex session: ${resumeSessionId}`),
           );
         } else {
           args.push("resume");
-          console.log(chalk.cyan("   🔄 Resume command"));
+          writeTerminalLine(chalk.cyan("   🔄 Resume command"));
         }
         break;
       case "normal":
       default:
-        console.log(chalk.green("   ✨ Starting new session"));
+        writeTerminalLine(chalk.green("   ✨ Starting new session"));
         break;
     }
 
     if (options.bypassApprovals) {
       args.push("--yolo");
-      console.log(chalk.yellow("   ⚠️  Bypassing approvals and sandbox"));
+      writeTerminalLine(chalk.yellow("   ⚠️  Bypassing approvals and sandbox"));
     }
 
     if (options.extraArgs && options.extraArgs.length > 0) {
@@ -164,7 +168,7 @@ export async function launchCodexCLI(
 
     args.push(...codexArgs);
 
-    console.log(chalk.gray(`   📋 Args: ${args.join(" ")}`));
+    writeTerminalLine(chalk.gray(`   📋 Args: ${args.join(" ")}`));
 
     terminal.exitRawMode();
     resetTerminalModes(terminal.stdout);
@@ -207,7 +211,7 @@ export async function launchCodexCLI(
     }
 
     // File-based session detection only - no stdout capture
-    // Use only findLatestCodexSession with short timeout, skip sessionProbe to avoid hanging
+    // Use only file inspection with a short wait to avoid hanging
     let capturedSessionId: string | null = null;
     const finishedAt = Date.now();
     try {
@@ -226,14 +230,25 @@ export async function launchCodexCLI(
     } catch {
       capturedSessionId = usedExplicitSessionId ? resumeSessionId : null;
     }
+    const shouldSkipWait =
+      typeof process !== "undefined" &&
+      (process.env?.NODE_ENV === "test" || Boolean(process.env?.VITEST));
+    if (!capturedSessionId && !shouldSkipWait) {
+      capturedSessionId = await waitForCodexSessionId({
+        startedAt,
+        timeoutMs: 15_000,
+        pollIntervalMs: 1_000,
+        cwd: worktreePath,
+      });
+    }
 
     if (capturedSessionId) {
-      console.log(chalk.cyan(`\n   🆔 Session ID: ${capturedSessionId}`));
-      console.log(
+      writeTerminalLine(chalk.cyan(`\n   🆔 Session ID: ${capturedSessionId}`));
+      writeTerminalLine(
         chalk.gray(`   Resume command: codex resume ${capturedSessionId}`),
       );
     } else {
-      console.log(
+      writeTerminalLine(
         chalk.yellow(
           "\n   ℹ️  Could not determine Codex session ID automatically.",
         ),
@@ -250,19 +265,25 @@ export async function launchCodexCLI(
         : `Failed to launch Codex CLI: ${details || "Unknown error"}`;
 
     if (platform() === "win32") {
-      console.error(chalk.red("\n💡 Windows troubleshooting tips:"));
-      console.error(
+      writeTerminalLine(
+        chalk.red("\n💡 Windows troubleshooting tips:"),
+        "stderr",
+      );
+      writeTerminalLine(
         chalk.yellow(
           "   1. Confirm that Bun is installed and bunx is available",
         ),
+        "stderr",
       );
-      console.error(
+      writeTerminalLine(
         chalk.yellow(
           '   2. Run "bunx @openai/codex@latest -- --help" to verify the setup',
         ),
+        "stderr",
       );
-      console.error(
+      writeTerminalLine(
         chalk.yellow("   3. Restart your terminal or IDE to refresh PATH"),
+        "stderr",
       );
     }
 
@@ -283,7 +304,7 @@ export async function isCodexAvailable(): Promise<boolean> {
   } catch (error: unknown) {
     const err = error as NodeJS.ErrnoException;
     if (err.code === "ENOENT") {
-      console.error(chalk.yellow("\n⚠️  bunx command not found"));
+      writeTerminalLine(chalk.yellow("\n⚠️  bunx command not found"), "stderr");
     }
     return false;
   }

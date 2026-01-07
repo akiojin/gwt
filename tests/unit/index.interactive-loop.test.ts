@@ -1,20 +1,20 @@
-import { beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
+import type { Mock } from "bun:test";
+import {
+  beforeEach,
+  afterEach,
+  describe,
+  expect,
+  it,
+  mock,
+  spyOn,
+} from "bun:test";
 import type { SelectionResult } from "../../src/cli/ui/App.solid.js";
 import { runInteractiveLoop } from "../../src/index.js";
 
-// Vitest shim for environments lacking vi.hoisted (e.g., bun)
-if (typeof (vi as Record<string, unknown>).hoisted !== "function") {
-  // @ts-expect-error injected shim
-}
-
-const waitForUserAcknowledgementMock = (
-  (mock<() => Promise<void>>()),
-);
+const waitForUserAcknowledgementMock = mock<() => Promise<void>>();
 
 mock.module("../../src/utils/terminal.js", async () => {
-  const actual = await import(
-    typeof import("../../src/utils/terminal.js")
-  >("../../src/utils/terminal.js");
+  const actual = await import("../../src/utils/terminal.js");
   return {
     ...actual,
     waitForUserAcknowledgement: waitForUserAcknowledgementMock,
@@ -45,14 +45,14 @@ describe("runInteractiveLoop", () => {
   });
 
   it("re-renders the UI after workflow errors instead of exiting", async () => {
-    const uiHandler = vi
-      .fn<() => Promise<SelectionResult | undefined>>()
+    const uiHandler = mock<() => Promise<SelectionResult | undefined>>();
+    uiHandler
       .mockResolvedValueOnce(baseSelection)
       .mockResolvedValueOnce(undefined);
 
-    const workflowHandler = vi
-      .fn<(selection: SelectionResult) => Promise<void>>()
-      .mockRejectedValueOnce(new Error("codex failed"));
+    const workflowHandler =
+      mock<(selection: SelectionResult) => Promise<void>>();
+    workflowHandler.mockRejectedValueOnce(new Error("codex failed"));
 
     await runInteractiveLoop(uiHandler, workflowHandler);
 
@@ -62,14 +62,14 @@ describe("runInteractiveLoop", () => {
   });
 
   it("recovers when the UI handler throws and allows retry", async () => {
-    const uiHandler = vi
-      .fn<() => Promise<SelectionResult | undefined>>()
+    const uiHandler = mock<() => Promise<SelectionResult | undefined>>();
+    uiHandler
       .mockRejectedValueOnce(new Error("ui crash"))
       .mockResolvedValueOnce(undefined);
 
-    const workflowHandler = mock<
-      (selection: SelectionResult) => Promise<void>
-    >(async () => {});
+    const workflowHandler = mock<(selection: SelectionResult) => Promise<void>>(
+      async () => {},
+    );
 
     await runInteractiveLoop(uiHandler, workflowHandler);
 

@@ -250,4 +250,69 @@ describe("codex.ts", () => {
 
     consoleSpy.mockRestore();
   });
+
+  describe("Launch/Exit Logs", () => {
+    it("should display launch message with rocket emoji at startup", async () => {
+      const consoleSpy = spyOn(console, "log").mockImplementation(() => {});
+
+      await launchCodexCLI(worktreePath);
+
+      // Verify that launch message is logged with 🚀 emoji
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringContaining("🚀 Launching Codex CLI..."),
+      );
+
+      consoleSpy.mockRestore();
+    });
+
+    it("should display working directory in launch logs", async () => {
+      const consoleSpy = spyOn(console, "log").mockImplementation(() => {});
+
+      await launchCodexCLI(worktreePath);
+
+      // Verify working directory is shown
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`Working directory: ${worktreePath}`),
+      );
+
+      consoleSpy.mockRestore();
+    });
+
+    it("should display session ID after agent exits when captured", async () => {
+      const consoleSpy = spyOn(console, "log").mockImplementation(() => {});
+
+      // Mock session detection to return a session ID
+      const { findLatestCodexSession } =
+        await import("../../src/utils/session.js");
+      const mockFindLatestCodexSession =
+        findLatestCodexSession as unknown as Mock;
+      mockFindLatestCodexSession.mockResolvedValueOnce({
+        id: "codex-session-456",
+        fullPath: "/mock/path/session.jsonl",
+        mtime: new Date(),
+      });
+
+      await launchCodexCLI(worktreePath);
+
+      // Verify session ID is displayed after exit
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringContaining("🆔 Session ID: codex-session-456"),
+      );
+
+      consoleSpy.mockRestore();
+    });
+
+    it("should display model info when custom model is specified", async () => {
+      const consoleSpy = spyOn(console, "log").mockImplementation(() => {});
+
+      await launchCodexCLI(worktreePath, { model: "gpt-5.2-codex" });
+
+      // Verify model info is logged with 🎯 emoji
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringContaining("🎯 Model: gpt-5.2-codex"),
+      );
+
+      consoleSpy.mockRestore();
+    });
+  });
 });

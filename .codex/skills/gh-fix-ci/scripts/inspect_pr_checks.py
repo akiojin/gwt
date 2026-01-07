@@ -106,16 +106,23 @@ def main() -> int:
     if pr_value is None:
         return 1
 
+    merge_status = fetch_merge_status(pr_value, repo_root)
+    merge_conflict = build_merge_conflict_result(merge_status)
+
     checks = fetch_checks(pr_value, repo_root)
     if checks is None:
         return 1
 
     failing = [c for c in checks if is_failing(c)]
-    if not failing:
+
+    results = []
+    if merge_conflict:
+        results.append(merge_conflict)
+
+    if not failing and not results:
         print(f"PR #{pr_value}: no failing checks detected.")
         return 0
 
-    results = []
     for check in failing:
         results.append(
             analyze_check(
@@ -127,7 +134,12 @@ def main() -> int:
         )
 
     if args.json:
-        print(json.dumps({"pr": pr_value, "results": results}, indent=2))
+        print(
+            json.dumps(
+                {"pr": pr_value, "mergeStatus": merge_status, "results": results},
+                indent=2,
+            )
+        )
     else:
         render_results(pr_value, results)
 
@@ -173,6 +185,42 @@ def resolve_pr(pr_value: str | None, repo_root: Path) -> str | None:
         print("Error: no PR number found.", file=sys.stderr)
         return None
     return str(number)
+
+
+def fetch_merge_status(pr_value: str, repo_root: Path) -> dict[str, Any] | None:
+    fields = ["mergeable", "mergeStateStatus", "url"]
+    result = run_gh_command(
+        ["pr", "view", pr_value, "--json", ",".join(fields)],
+        cwd=repo_root,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        data = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
+def build_merge_conflict_result(
+    merge_status: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not merge_status:
+        return None
+    mergeable = normalize_field(merge_status.get("mergeable"))
+    merge_state = normalize_field(merge_status.get("mergeStateStatus"))
+    if mergeable != "conflicting" and merge_state != "dirty":
+        return None
+    return {
+        "name": "Merge conflicts",
+        "status": "conflict",
+        "detailsUrl": merge_status.get("url", ""),
+        "mergeable": merge_status.get("mergeable"),
+        "mergeStateStatus": merge_status.get("mergeStateStatus"),
+        "note": "PR has merge conflicts and cannot be merged as-is.",
+    }
 
 
 def fetch_checks(pr_value: str, repo_root: Path) -> list[dict[str, Any]] | None:
