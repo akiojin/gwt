@@ -197,14 +197,9 @@ async function mainSolidUI(): Promise<SelectionResult | undefined> {
   // Register cleanup for signal handlers
   registerExitCleanup(performTerminalCleanup);
   let selectionResult: SelectionResult | undefined;
-  // デフォルトではマウスキャプチャを無効にしてOSレベルのコピー機能を使用可能にする
-  // GWT_UI_MOUSE=true で有効化可能
-  const mousePreference = process.env.GWT_UI_MOUSE?.trim().toLowerCase();
-  const useMouse = mousePreference === "true" || mousePreference === "1";
-  const mouseMovePreference =
-    process.env.GWT_UI_MOUSE_MOVE?.trim().toLowerCase();
-  const enableMouseMovement =
-    mouseMovePreference === "true" || mouseMovePreference === "1";
+  // マウスキャプチャを有効にしてSelection APIで選択終了時にクリップボードへコピー
+  const useMouse = true;
+  const enableMouseMovement = false;
   const altScreenPreference =
     process.env.GWT_UI_ALT_SCREEN?.trim().toLowerCase();
   // Ink.js版ではalternate screenを使用していなかったため、デフォルトをfalseに
