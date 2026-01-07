@@ -924,19 +924,22 @@ export function BranchListScreen(props: BranchListScreenProps) {
     </box>
   );
 
-  const selectedBranchLabel = createMemo(() => {
+  const selectedWorktreeLabel = createMemo(() => {
     const branches = filteredBranches();
     if (branches.length === 0) {
       return "(none)";
     }
     const selected = branches[selectedIndex()];
-    if (!selected?.name) {
+    if (!selected) {
       return "(none)";
     }
-    if (selected.type === "remote") {
-      return selected.name;
+    if (selected.worktree?.path) {
+      return selected.worktree.path;
     }
-    return `refs/heads/${selected.name}`;
+    if (selected.isCurrent && props.workingDirectory) {
+      return props.workingDirectory;
+    }
+    return "(none)";
   });
 
   return (
@@ -1041,7 +1044,7 @@ export function BranchListScreen(props: BranchListScreenProps) {
       )}
 
       <text attributes={TextAttributes.DIM}>
-        {padLine(`Branch: ${selectedBranchLabel()}`, layoutWidth())}
+        {padLine(`Worktree: ${selectedWorktreeLabel()}`, layoutWidth())}
       </text>
 
       {renderSegmentLine(footerSegments())}
