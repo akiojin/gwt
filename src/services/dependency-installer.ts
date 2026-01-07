@@ -1,7 +1,6 @@
 import path from "node:path";
 import fs from "node:fs/promises";
 import { execa } from "execa";
-import { startSpinner } from "../utils/spinner.js";
 
 export type PackageManager = "bun" | "pnpm" | "npm";
 
@@ -144,10 +143,6 @@ export async function installDependenciesForWorktree(
 
   const [binary, ...args] = detection.command;
 
-  const spinner = startSpinner(
-    `Installing dependencies via ${detection.manager} (${path.basename(detection.lockfile)})`,
-  );
-
   try {
     await execa(binary, args, {
       cwd: worktreePath,
@@ -187,8 +182,6 @@ export async function installDependenciesForWorktree(
       reason: "install-failed",
       message: failureMessage,
     };
-  } finally {
-    spinner();
   }
 
   return {
