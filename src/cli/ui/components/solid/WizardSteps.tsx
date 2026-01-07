@@ -1,10 +1,12 @@
 /** @jsxImportSource @opentui/solid */
 import { TextAttributes } from "@opentui/core";
-import { createSignal } from "solid-js";
+import { useKeyboard } from "@opentui/solid";
+import { createEffect, createSignal } from "solid-js";
 import { SelectInput, type SelectInputItem } from "./SelectInput.js";
 import { TextInput } from "./TextInput.js";
 import { getModelOptions } from "../../utils/modelOptions.js";
 import type { CodingAgentId } from "../../types.js";
+import { useWizardScroll } from "./WizardPopup.js";
 
 /**
  * WizardSteps - ウィザードの各ステップコンポーネント
@@ -16,6 +18,40 @@ export interface StepProps {
   onBack: () => void;
   focused?: boolean;
 }
+
+const useEdgeScroll = (options: {
+  getSelectedIndex: () => number;
+  getItemCount: () => number;
+  focused?: boolean | undefined;
+}) => {
+  const scroll = useWizardScroll();
+  useKeyboard((key) => {
+    if (options.focused === false) {
+      return;
+    }
+    if (!scroll) {
+      return;
+    }
+    const itemCount = options.getItemCount();
+    if (itemCount <= 0) {
+      return;
+    }
+    if (key.name === "up") {
+      if (options.getSelectedIndex() <= 0 && scroll.scrollByLines(-1)) {
+        key.preventDefault();
+      }
+      return;
+    }
+    if (key.name === "down") {
+      if (
+        options.getSelectedIndex() >= itemCount - 1 &&
+        scroll.scrollByLines(1)
+      ) {
+        key.preventDefault();
+      }
+    }
+  });
+};
 
 // アクション選択ステップ（既存を開く / 新規作成）
 export type BranchAction = "open-existing" | "create-new";
@@ -39,6 +75,26 @@ const ACTION_OPTIONS: SelectInputItem[] = [
 ];
 
 export function ActionSelectStep(props: ActionSelectStepProps) {
+  const [selectedIndex, setSelectedIndex] = createSignal(0);
+  useEdgeScroll({
+    getSelectedIndex: selectedIndex,
+    getItemCount: () => ACTION_OPTIONS.length,
+    focused: props.focused,
+  });
+
+  const handleChange = (item: SelectInputItem | null) => {
+    if (!item) {
+      setSelectedIndex(0);
+      return;
+    }
+    const nextIndex = ACTION_OPTIONS.findIndex(
+      (candidate) => candidate.value === item.value,
+    );
+    if (nextIndex >= 0) {
+      setSelectedIndex(nextIndex);
+    }
+  };
+
   return (
     <box flexDirection="column">
       <text fg="cyan" attributes={TextAttributes.BOLD}>
@@ -50,6 +106,7 @@ export function ActionSelectStep(props: ActionSelectStepProps) {
       <SelectInput
         items={ACTION_OPTIONS}
         onSelect={(item) => props.onSelect(item.value as BranchAction)}
+        onChange={handleChange}
         focused={props.focused ?? true}
       />
       <text> </text>
@@ -71,6 +128,26 @@ const BRANCH_TYPES: SelectInputItem[] = [
 ];
 
 export function BranchTypeStep(props: BranchTypeStepProps) {
+  const [selectedIndex, setSelectedIndex] = createSignal(0);
+  useEdgeScroll({
+    getSelectedIndex: selectedIndex,
+    getItemCount: () => BRANCH_TYPES.length,
+    focused: props.focused,
+  });
+
+  const handleChange = (item: SelectInputItem | null) => {
+    if (!item) {
+      setSelectedIndex(0);
+      return;
+    }
+    const nextIndex = BRANCH_TYPES.findIndex(
+      (candidate) => candidate.value === item.value,
+    );
+    if (nextIndex >= 0) {
+      setSelectedIndex(nextIndex);
+    }
+  };
+
   return (
     <box flexDirection="column">
       <text fg="cyan" attributes={TextAttributes.BOLD}>
@@ -80,6 +157,7 @@ export function BranchTypeStep(props: BranchTypeStepProps) {
       <SelectInput
         items={BRANCH_TYPES}
         onSelect={(item) => props.onSelect(item.value)}
+        onChange={handleChange}
         focused={props.focused ?? true}
       />
       <text> </text>
@@ -96,6 +174,27 @@ export interface BranchNameStepProps extends StepProps {
 
 export function BranchNameStep(props: BranchNameStepProps) {
   const [name, setName] = createSignal("");
+  const scroll = useWizardScroll();
+
+  useKeyboard((key) => {
+    if (props.focused === false) {
+      return;
+    }
+    if (!scroll) {
+      return;
+    }
+    if (key.name === "up") {
+      if (scroll.scrollByLines(-1)) {
+        key.preventDefault();
+      }
+      return;
+    }
+    if (key.name === "down") {
+      if (scroll.scrollByLines(1)) {
+        key.preventDefault();
+      }
+    }
+  });
 
   return (
     <box flexDirection="column">
@@ -141,6 +240,26 @@ const AGENTS: SelectInputItem[] = [
 ];
 
 export function AgentSelectStep(props: AgentSelectStepProps) {
+  const [selectedIndex, setSelectedIndex] = createSignal(0);
+  useEdgeScroll({
+    getSelectedIndex: selectedIndex,
+    getItemCount: () => AGENTS.length,
+    focused: props.focused,
+  });
+
+  const handleChange = (item: SelectInputItem | null) => {
+    if (!item) {
+      setSelectedIndex(0);
+      return;
+    }
+    const nextIndex = AGENTS.findIndex(
+      (candidate) => candidate.value === item.value,
+    );
+    if (nextIndex >= 0) {
+      setSelectedIndex(nextIndex);
+    }
+  };
+
   return (
     <box flexDirection="column">
       <text fg="cyan" attributes={TextAttributes.BOLD}>
@@ -150,6 +269,7 @@ export function AgentSelectStep(props: AgentSelectStepProps) {
       <SelectInput
         items={AGENTS}
         onSelect={(item) => props.onSelect(item.value)}
+        onChange={handleChange}
         focused={props.focused ?? true}
       />
       <text> </text>
@@ -179,7 +299,38 @@ function getModelItems(agentId: CodingAgentId): SelectInputItem[] {
 }
 
 export function ModelSelectStep(props: ModelSelectStepProps) {
+  const [selectedIndex, setSelectedIndex] = createSignal(0);
   const models = () => getModelItems(props.agentId);
+  useEdgeScroll({
+    getSelectedIndex: selectedIndex,
+    getItemCount: () => models().length,
+    focused: props.focused,
+  });
+
+  createEffect(() => {
+    const count = models().length;
+    if (count <= 0) {
+      setSelectedIndex(0);
+      return;
+    }
+    const maxIndex = count - 1;
+    if (selectedIndex() > maxIndex) {
+      setSelectedIndex(maxIndex);
+    }
+  });
+
+  const handleChange = (item: SelectInputItem | null) => {
+    if (!item) {
+      setSelectedIndex(0);
+      return;
+    }
+    const nextIndex = models().findIndex(
+      (candidate) => candidate.value === item.value,
+    );
+    if (nextIndex >= 0) {
+      setSelectedIndex(nextIndex);
+    }
+  };
 
   return (
     <box flexDirection="column">
@@ -190,6 +341,7 @@ export function ModelSelectStep(props: ModelSelectStepProps) {
       <SelectInput
         items={models()}
         onSelect={(item) => props.onSelect(item.value)}
+        onChange={handleChange}
         focused={props.focused ?? true}
       />
       <text> </text>
@@ -211,6 +363,26 @@ const REASONING_LEVELS: SelectInputItem[] = [
 ];
 
 export function ReasoningLevelStep(props: ReasoningLevelStepProps) {
+  const [selectedIndex, setSelectedIndex] = createSignal(0);
+  useEdgeScroll({
+    getSelectedIndex: selectedIndex,
+    getItemCount: () => REASONING_LEVELS.length,
+    focused: props.focused,
+  });
+
+  const handleChange = (item: SelectInputItem | null) => {
+    if (!item) {
+      setSelectedIndex(0);
+      return;
+    }
+    const nextIndex = REASONING_LEVELS.findIndex(
+      (candidate) => candidate.value === item.value,
+    );
+    if (nextIndex >= 0) {
+      setSelectedIndex(nextIndex);
+    }
+  };
+
   return (
     <box flexDirection="column">
       <text fg="cyan" attributes={TextAttributes.BOLD}>
@@ -220,6 +392,7 @@ export function ReasoningLevelStep(props: ReasoningLevelStepProps) {
       <SelectInput
         items={REASONING_LEVELS}
         onSelect={(item) => props.onSelect(item.value)}
+        onChange={handleChange}
         focused={props.focused ?? true}
       />
       <text> </text>
@@ -248,6 +421,26 @@ const EXECUTION_MODES: SelectInputItem[] = [
 ];
 
 export function ExecutionModeStep(props: ExecutionModeStepProps) {
+  const [selectedIndex, setSelectedIndex] = createSignal(0);
+  useEdgeScroll({
+    getSelectedIndex: selectedIndex,
+    getItemCount: () => EXECUTION_MODES.length,
+    focused: props.focused,
+  });
+
+  const handleChange = (item: SelectInputItem | null) => {
+    if (!item) {
+      setSelectedIndex(0);
+      return;
+    }
+    const nextIndex = EXECUTION_MODES.findIndex(
+      (candidate) => candidate.value === item.value,
+    );
+    if (nextIndex >= 0) {
+      setSelectedIndex(nextIndex);
+    }
+  };
+
   return (
     <box flexDirection="column">
       <text fg="cyan" attributes={TextAttributes.BOLD}>
@@ -257,6 +450,7 @@ export function ExecutionModeStep(props: ExecutionModeStepProps) {
       <SelectInput
         items={EXECUTION_MODES}
         onSelect={(item) => props.onSelect(item.value)}
+        onChange={handleChange}
         focused={props.focused ?? true}
       />
       <text> </text>
@@ -276,6 +470,26 @@ const SKIP_OPTIONS: SelectInputItem[] = [
 ];
 
 export function SkipPermissionsStep(props: SkipPermissionsStepProps) {
+  const [selectedIndex, setSelectedIndex] = createSignal(0);
+  useEdgeScroll({
+    getSelectedIndex: selectedIndex,
+    getItemCount: () => SKIP_OPTIONS.length,
+    focused: props.focused,
+  });
+
+  const handleChange = (item: SelectInputItem | null) => {
+    if (!item) {
+      setSelectedIndex(0);
+      return;
+    }
+    const nextIndex = SKIP_OPTIONS.findIndex(
+      (candidate) => candidate.value === item.value,
+    );
+    if (nextIndex >= 0) {
+      setSelectedIndex(nextIndex);
+    }
+  };
+
   return (
     <box flexDirection="column">
       <text fg="cyan" attributes={TextAttributes.BOLD}>
@@ -285,6 +499,7 @@ export function SkipPermissionsStep(props: SkipPermissionsStepProps) {
       <SelectInput
         items={SKIP_OPTIONS}
         onSelect={(item) => props.onSelect(item.value === "true")}
+        onChange={handleChange}
         focused={props.focused ?? true}
       />
       <text> </text>

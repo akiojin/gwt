@@ -161,3 +161,19 @@
 
 - [x] **T721** [US0] `src/cli/ui/screens/solid/BranchListScreen.tsx` のFilter/Mode表示ラベルとフッターアクションを更新
 - [x] **T722** [US0] `src/cli/ui/components/solid/Header.tsx` のProfile表示ラベルにショートカットを併記
+
+## フェーズ9: ユーザーストーリー8 - ウィザードポップアップのスクロール対応 (優先度: P1)
+
+**ストーリー**: ウィザードポップアップの内容が表示領域を超える場合でも、ポップアップ内でスクロールできるようにして内容のはみ出しを防ぐ。
+
+**価値**: 端末サイズが小さい環境でも、ウィザード内の全項目に到達できる。
+
+### テスト（TDD）
+
+- [x] **T731** [US8] `src/cli/ui/__tests__/solid/components/WizardPopup.test.tsx` にポップアップ内スクロールの表示テストを追加
+- [x] **T733** [US8] `src/cli/ui/__tests__/solid/components/WizardPopup.test.tsx` に上下キーでのスクロールテストを追加
+
+### 実装
+
+- [x] **T732** [US8] `src/cli/ui/components/solid/WizardPopup.tsx` にスクロールコンテナを追加し、内容のはみ出しを防止
+- [x] **T734** [US8] `src/cli/ui/components/solid/WizardPopup.tsx` と `src/cli/ui/components/solid/WizardSteps.tsx` で上下キーによるスクロールを実装
