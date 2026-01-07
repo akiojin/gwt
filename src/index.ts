@@ -61,7 +61,8 @@ import { isGitRelatedError, isRecoverableError } from "./utils/error-utils.js";
 const ERROR_PROMPT = chalk.yellow(
   "Review the error details, then press Enter to continue.",
 );
-const POST_SESSION_DELAY_MS = 3000;
+const SUCCESS_PROMPT = chalk.green("Press Enter to return to main menu...");
+const POST_SESSION_DELAY_MS = 500;
 
 // Category: cli
 const appLogger = createLogger({ category: "cli" });
@@ -805,7 +806,8 @@ export async function handleAIToolWorkflow(
 
     // Small buffer before returning to branch list to avoid abrupt screen swap
     await new Promise((resolve) => setTimeout(resolve, POST_SESSION_DELAY_MS));
-    printInfo("Session completed successfully. Returning to main menu...");
+    printInfo("Session completed successfully.");
+    await waitForUserAcknowledgement(SUCCESS_PROMPT);
     return;
   } catch (error) {
     // Handle recoverable errors (Git, Worktree, Codex errors)
