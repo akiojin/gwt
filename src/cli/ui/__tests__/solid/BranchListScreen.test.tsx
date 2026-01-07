@@ -51,7 +51,7 @@ const renderScreen = async (branches: BranchItem[], selected: string[]) => {
 };
 
 describe("BranchListScreen icons", () => {
-  it("renders emoji icons without cursor prefix", async () => {
+  it("renders ASCII icons with spacing and no cursor prefix", async () => {
     const branches = [
       buildBranch({
         name: "feature/active-clean",
@@ -77,10 +77,10 @@ describe("BranchListScreen icons", () => {
 
     try {
       const frame = captureCharFrame();
-      expect(frame).toContain("✅🟢⭕️ feature/active-clean");
-      expect(frame).toContain("☑️⚪❌ feature/no-worktree");
-      expect(frame).not.toContain(">✅");
-      expect(frame).not.toContain(">☑️");
+      expect(frame).toMatch(/\[\*\] w {2,}feature\/active-clean/);
+      expect(frame).toContain("[ ] . ! feature/no-worktree");
+      expect(frame).not.toContain(">[*]");
+      expect(frame).not.toContain(">[ ]");
     } finally {
       cleanup();
     }

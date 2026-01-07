@@ -57,31 +57,9 @@ export interface BranchListScreenProps {
 
 const VIEW_MODES: BranchViewMode[] = ["all", "local", "remote"];
 
-const WIDTH_OVERRIDES: Record<string, number> = {
-  "✅": 2,
-  "☑": 2,
-  "☑️": 2,
-  "🟢": 2,
-  "⚪": 2,
-  "🔴": 2,
-  "⭕": 2,
-  "⭕️": 2,
-  "❌": 2,
-};
+const getCharWidth = (char: string): number => stringWidth(char);
 
-const getCharWidth = (char: string): number => {
-  const baseWidth = stringWidth(char);
-  const override = WIDTH_OVERRIDES[char];
-  return override !== undefined ? Math.max(baseWidth, override) : baseWidth;
-};
-
-const measureDisplayWidth = (value: string): number => {
-  let width = 0;
-  for (const char of Array.from(value)) {
-    width += getCharWidth(char);
-  }
-  return width;
-};
+const measureDisplayWidth = (value: string): number => stringWidth(value);
 
 const truncateToWidth = (value: string, maxWidth: number): string => {
   if (maxWidth <= 0) {
@@ -677,20 +655,20 @@ export function BranchListScreen(props: BranchListScreenProps) {
 
     const isChecked = selectedSet().has(branch.name);
     const isWarning = Boolean(branch.hasUnpushedCommits) || !branch.mergedPR;
-    const selectionIcon = isChecked ? "✅" : "☑️";
+    const selectionIcon = isChecked ? "[*]" : "[ ]";
     const selectionColor = isChecked && isWarning ? "red" : undefined;
-    let worktreeIcon = "⚪";
+    let worktreeIcon = ".";
     let worktreeColor: IndicatorColor | "gray" = "gray";
     if (branch.worktreeStatus === "active") {
-      worktreeIcon = "🟢";
+      worktreeIcon = "w";
       worktreeColor = "green";
     } else if (branch.worktreeStatus === "inaccessible") {
-      worktreeIcon = "🔴";
+      worktreeIcon = "x";
       worktreeColor = "red";
     }
-    const safeIcon = branch.safeToCleanup === true ? "⭕️" : "❌";
-    const safeColor: IndicatorColor =
-      branch.safeToCleanup === true ? "green" : "red";
+    const safeIcon = branch.safeToCleanup === true ? " " : "!";
+    const safeColor: IndicatorColor | undefined =
+      branch.safeToCleanup === true ? undefined : "red";
 
     let commitText = "---";
     const latestActivitySec = getLatestActivityTimestamp(branch);
@@ -728,7 +706,7 @@ export function BranchListScreen(props: BranchListScreenProps) {
         ? branch.remoteName
         : branch.name;
 
-    const staticPrefix = `${leadingIndicator}${selectionIcon}${worktreeIcon}${safeIcon} `;
+    const staticPrefix = `${leadingIndicator}${selectionIcon} ${worktreeIcon} ${safeIcon} `;
     const staticPrefixWidth = measureDisplayWidth(staticPrefix);
     const maxLeftDisplayWidth = Math.max(0, columns - timestampWidth - 1);
     const maxLabelWidth = Math.max(0, maxLeftDisplayWidth - staticPrefixWidth);
@@ -763,7 +741,9 @@ export function BranchListScreen(props: BranchListScreenProps) {
       appendSegment(segments, { text: leadingIndicator, fg: indicatorColor });
     }
     appendSegment(segments, { text: selectionIcon, fg: selectionColor });
+    appendSegment(segments, { text: " " });
     appendSegment(segments, { text: worktreeIcon, fg: worktreeColor });
+    appendSegment(segments, { text: " " });
     appendSegment(segments, { text: safeIcon, fg: safeColor });
     appendSegment(segments, { text: " " });
     appendSegment(segments, { text: truncatedLabel });
