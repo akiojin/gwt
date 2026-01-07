@@ -7,21 +7,18 @@ mock.module("execa", () => ({
   execa: mock(),
 }));
 
-const existsSyncMock = (mock(() => false));
+const existsSyncMock = mock(() => false);
 
 mock.module("node:fs", () => ({
   existsSync: (...args: unknown[]) => existsSyncMock(...args),
 }));
 
-const mkdirMock = (mock(async () => undefined));
-const readFileMock = (mock(async () => ""));
-const writeFileMock = (mock(async () => undefined));
+const mkdirMock = mock(async () => undefined);
+const readFileMock = mock(async () => "");
+const writeFileMock = mock(async () => undefined);
 
 mock.module("node:fs/promises", async () => {
-  const actual =
-    await import(
-      "node:fs/promises",
-    );
+  const actual = await import("node:fs/promises");
 
   const mocked = {
     ...actual,
@@ -43,7 +40,7 @@ mock.module("node:fs/promises", async () => {
 
 import { execa } from "execa";
 
-const execaMock = ((execa) as Mock);
+const execaMock = execa as Mock;
 
 describe("Integration: Release Branch and Version Management (T208)", () => {
   beforeEach(() => {

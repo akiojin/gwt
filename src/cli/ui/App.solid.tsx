@@ -53,9 +53,13 @@ import {
   getCurrentBranch,
   getLocalBranches,
   getRepositoryRoot,
+  deleteBranch,
 } from "../../git.js";
 import {
+  getMergedPRWorktrees,
+  isProtectedBranchName,
   listAdditionalWorktrees,
+  removeWorktree,
   repairWorktrees,
   type WorktreeInfo as WorktreeEntry,
 } from "../../worktree.js";
@@ -125,6 +129,20 @@ export type AppScreen =
 
 type ProfileInputMode = "create-profile" | "add-env" | "edit-env";
 type ProfileConfirmMode = "delete-profile" | "delete-env";
+type StatusColor = "cyan" | "green" | "yellow" | "red";
+
+interface CleanupIndicator {
+  icon: string;
+  isSpinning?: boolean;
+  color?: StatusColor;
+}
+
+interface CleanupTask {
+  branch: string;
+  worktreePath: string | null;
+  cleanupType: "worktree-and-branch" | "branch-only";
+  isAccessible?: boolean;
+}
 
 export interface AppSolidProps {
   onExit?: (result?: SelectionResult) => void;
@@ -229,9 +247,12 @@ export function AppSolid(props: AppSolidProps) {
   const [branchFooterMessage, setBranchFooterMessage] = createSignal<{
     text: string;
     isSpinning?: boolean;
-    color?: "cyan" | "green" | "yellow" | "red";
+    color?: StatusColor;
   } | null>(null);
   const [branchInputLocked, setBranchInputLocked] = createSignal(false);
+  const [cleanupIndicators, setCleanupIndicators] = createSignal<
+    Record<string, CleanupIndicator>
+  >({});
   const [isNewBranch, setIsNewBranch] = createSignal(false);
   const [newBranchBaseRef, setNewBranchBaseRef] = createSignal<string | null>(
     null,
@@ -377,6 +398,17 @@ export function AppSolid(props: AppSolidProps) {
     }
     const previous = stack[stack.length - 1] ?? DEFAULT_SCREEN;
     setScreenStack(stack.slice(0, -1));
+
+    // branch-list に戻る場合は選択状態をリセット
+    if (previous === "branch-list") {
+      setSelectedBranch(null);
+      setSelectedTool(null);
+      setSelectedMode("normal");
+      setIsNewBranch(false);
+      setNewBranchBaseRef(null);
+      setCreationSource(null);
+    }
+
     setCurrentScreen(previous);
   };
 
@@ -588,7 +620,7 @@ export function AppSolid(props: AppSolidProps) {
 
   const showBranchFooterMessage = (
     text: string,
-    color: "cyan" | "green" | "yellow" | "red",
+    color: StatusColor,
     options?: { spinning?: boolean; timeoutMs?: number },
   ) => {
     if (branchFooterTimer) {
@@ -606,6 +638,21 @@ export function AppSolid(props: AppSolidProps) {
         setBranchFooterMessage(null);
       }, timeout);
     }
+  };
+
+  const setCleanupIndicator = (
+    branchName: string,
+    indicator: CleanupIndicator | null,
+  ) => {
+    setCleanupIndicators((prev) => {
+      const next = { ...prev };
+      if (indicator) {
+        next[branchName] = indicator;
+      } else {
+        delete next[branchName];
+      }
+      return next;
+    });
   };
 
   const handleBranchSelect = (branch: BranchItem) => {
@@ -733,6 +780,212 @@ export function AppSolid(props: AppSolidProps) {
         ? { inferenceLevel: entry.reasoningLevel as InferenceLevel }
         : {}),
     });
+  };
+
+  const buildSkipNotice = (
+    skip: {
+      unsafe: number;
+      protected: number;
+      remote: number;
+      current: number;
+    },
+    unsafeLabel: string,
+  ): string | null => {
+    const parts: string[] = [];
+    if (skip.unsafe > 0) {
+      parts.push(`${skip.unsafe} ${unsafeLabel}`);
+    }
+    if (skip.protected > 0) {
+      parts.push(`${skip.protected} protected`);
+    }
+    if (skip.remote > 0) {
+      parts.push(`${skip.remote} remote-only`);
+    }
+    if (skip.current > 0) {
+      parts.push(`${skip.current} current`);
+    }
+    if (parts.length === 0) {
+      return null;
+    }
+    return `Skipped branches: ${parts.join(", ")}.`;
+  };
+
+  const handleCleanupCommand = async () => {
+    if (branchInputLocked()) {
+      return;
+    }
+
+    const selection = selectedBranches();
+    const hasSelection = selection.length > 0;
+    const skipCounts = {
+      unsafe: 0,
+      protected: 0,
+      remote: 0,
+      current: 0,
+    };
+
+    setBranchInputLocked(true);
+    setCleanupIndicators({});
+    showBranchFooterMessage(
+      hasSelection
+        ? "Preparing cleanup..."
+        : "Scanning for cleanup candidates...",
+      "yellow",
+      { spinning: true, timeoutMs: 0 },
+    );
+
+    try {
+      const tasks: CleanupTask[] = [];
+
+      if (hasSelection) {
+        const branchMap = new Map(
+          branchItems().map((branch) => [branch.name, branch]),
+        );
+        for (const branchName of selection) {
+          const branch = branchMap.get(branchName);
+          if (!branch) {
+            continue;
+          }
+          if (branch.type === "remote") {
+            skipCounts.remote += 1;
+            continue;
+          }
+          if (isProtectedBranchName(branch.name)) {
+            skipCounts.protected += 1;
+            continue;
+          }
+          if (branch.isCurrent) {
+            skipCounts.current += 1;
+            continue;
+          }
+          const isWarning =
+            Boolean(branch.hasUnpushedCommits) || !branch.mergedPR;
+          if (isWarning) {
+            skipCounts.unsafe += 1;
+            continue;
+          }
+          const worktreePath = branch.worktree?.path ?? null;
+          const cleanupType: CleanupTask["cleanupType"] = worktreePath
+            ? "worktree-and-branch"
+            : "branch-only";
+          const baseTask = {
+            branch: branch.name,
+            worktreePath,
+            cleanupType,
+          };
+          const isAccessible = branch.worktree?.isAccessible;
+          tasks.push(
+            isAccessible === undefined
+              ? baseTask
+              : { ...baseTask, isAccessible },
+          );
+        }
+      } else {
+        const targets = await getMergedPRWorktrees();
+        for (const target of targets) {
+          if (isProtectedBranchName(target.branch)) {
+            skipCounts.protected += 1;
+            continue;
+          }
+          if (target.hasUncommittedChanges || target.hasUnpushedCommits) {
+            skipCounts.unsafe += 1;
+            continue;
+          }
+          const cleanupType: CleanupTask["cleanupType"] = target.cleanupType;
+          const baseTask = {
+            branch: target.branch,
+            worktreePath: target.worktreePath,
+            cleanupType,
+          };
+          const isAccessible = target.isAccessible;
+          tasks.push(
+            isAccessible === undefined
+              ? baseTask
+              : { ...baseTask, isAccessible },
+          );
+        }
+      }
+
+      const skipNotice = buildSkipNotice(
+        skipCounts,
+        hasSelection
+          ? "with unpushed commits or unmerged PRs"
+          : "with uncommitted or unpushed changes",
+      );
+
+      if (tasks.length === 0) {
+        const baseMessage = hasSelection
+          ? "No eligible branches selected for cleanup."
+          : "No cleanup candidates found.";
+        showBranchFooterMessage(
+          skipNotice ? `${baseMessage} ${skipNotice}` : baseMessage,
+          "yellow",
+        );
+        return;
+      }
+
+      setCleanupIndicators(() => {
+        const next: Record<string, CleanupIndicator> = {};
+        tasks.forEach((task) => {
+          next[task.branch] = {
+            icon: "-",
+            isSpinning: true,
+            color: "yellow",
+          };
+        });
+        return next;
+      });
+
+      showBranchFooterMessage(
+        `Cleaning up ${tasks.length} branch(es)...`,
+        "yellow",
+        { spinning: true, timeoutMs: 0 },
+      );
+
+      let successCount = 0;
+      let failedCount = 0;
+
+      for (const task of tasks) {
+        try {
+          if (task.cleanupType === "worktree-and-branch" && task.worktreePath) {
+            await removeWorktree(
+              task.worktreePath,
+              task.isAccessible === false,
+            );
+          }
+          await deleteBranch(task.branch, true);
+          setCleanupIndicator(task.branch, { icon: "v", color: "green" });
+          successCount += 1;
+        } catch {
+          setCleanupIndicator(task.branch, { icon: "x", color: "red" });
+          failedCount += 1;
+        }
+      }
+
+      setSelectedBranches([]);
+      await refreshBranches();
+
+      const skippedTotal =
+        skipCounts.unsafe +
+        skipCounts.protected +
+        skipCounts.remote +
+        skipCounts.current;
+      const summaryParts = [`${successCount} cleaned`];
+      if (failedCount > 0) {
+        summaryParts.push(`${failedCount} failed`);
+      }
+      if (skippedTotal > 0) {
+        summaryParts.push(`${skippedTotal} skipped`);
+      }
+      const summary = `Cleanup finished: ${summaryParts.join(", ")}.`;
+      const message = skipNotice ? `${summary} ${skipNotice}` : summary;
+      showBranchFooterMessage(message, failedCount > 0 ? "red" : "green");
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      showBranchFooterMessage(`Cleanup failed: ${errorMessage}`, "red");
+    } finally {
+      setBranchInputLocked(false);
+    }
   };
 
   const handleRepairWorktrees = async () => {
@@ -1041,7 +1294,7 @@ export function AppSolid(props: AppSolidProps) {
 
     if (screen === "branch-list") {
       const cleanupUI = {
-        indicators: {},
+        indicators: cleanupIndicators(),
         footerMessage: branchFooterMessage(),
         inputLocked: branchInputLocked(),
       };
@@ -1051,6 +1304,7 @@ export function AppSolid(props: AppSolidProps) {
           stats={stats()}
           onSelect={handleBranchSelect}
           onQuit={() => exitApp(undefined)}
+          onCleanupCommand={handleCleanupCommand}
           onRefresh={refreshBranches}
           onRepairWorktrees={handleRepairWorktrees}
           loading={loading()}

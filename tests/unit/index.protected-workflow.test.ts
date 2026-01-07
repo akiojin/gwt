@@ -21,7 +21,7 @@ const {
   getUncommittedChangesCountMock,
   getUnpushedCommitsCountMock,
   pushBranchToRemoteMock,
-} = (({
+} = {
   execaMock: mock(async () => ({ stdout: "" })),
   ensureWorktreeMock: mock(async () => "/repo"),
   fetchAllRemotesMock: mock(async () => undefined),
@@ -44,34 +44,26 @@ const {
   getUncommittedChangesCountMock: mock(async () => 0),
   getUnpushedCommitsCountMock: mock(async () => 0),
   pushBranchToRemoteMock: mock(async () => undefined),
-}));
+};
 
-const DependencyInstallErrorMock = (
-  () =>
-    class extends Error {
-      constructor(message?: string) {
-        super(message);
-        this.name = "DependencyInstallError";
-      }
-    },
-);
+const DependencyInstallErrorMock = class DependencyInstallError extends Error {
+  constructor(message?: string) {
+    super(message);
+    this.name = "DependencyInstallError";
+  }
+};
 
-const waitForUserAcknowledgementMock = (
-  (mock<() => Promise<void>>()),
-);
+const waitForUserAcknowledgementMock = mock<() => Promise<void>>();
 
-const waitForEnterMock = ((mock<() => Promise<void>>()));
+const waitForEnterMock = mock<() => Promise<void>>();
 
-const confirmYesNoMock = ((mock<() => Promise<boolean>>()));
+const confirmYesNoMock = mock<() => Promise<boolean>>();
 mock.module("execa", () => ({
   execa: execaMock,
 }));
 
 mock.module("../../src/git.js", async () => {
-  const actual =
-    await import("../../src/git.js
-      "../../src/git.js",
-    );
+  const actual = await import("../../src/git.js");
   return {
     isGitRepository: mock(),
     getRepositoryRoot: getRepositoryRootMock,
@@ -90,9 +82,7 @@ mock.module("../../src/git.js", async () => {
 });
 
 mock.module("../../src/worktree.js", async () => {
-  const actual = await import("../../src/worktree.js
-    "../../src/worktree.js",
-  );
+  const actual = await import("../../src/worktree.js");
   return {
     worktreeExists: worktreeExistsMock,
     resolveWorktreePathForBranch: mock(async (branch: string) => ({
@@ -153,9 +143,7 @@ mock.module("../../src/config/index.js", () => ({
 }));
 
 mock.module("../../src/utils/terminal.js", async () => {
-  const actual = await import(
-    typeof import("../../src/utils/terminal.js")
-  >("../../src/utils/terminal.js");
+  const actual = await import("../../src/utils/terminal.js");
   return {
     ...actual,
     waitForUserAcknowledgement: waitForUserAcknowledgementMock,
@@ -163,9 +151,7 @@ mock.module("../../src/utils/terminal.js", async () => {
 });
 
 mock.module("../../src/utils/prompt.js", async () => {
-  const actual = await import(
-    typeof import("../../src/utils/prompt.js")
-  >("../../src/utils/prompt.js");
+  const actual = await import("../../src/utils/prompt.js");
   return {
     ...actual,
     waitForEnter: waitForEnterMock,
