@@ -3,6 +3,28 @@
 **仕様ID**: `SPEC-d2f4762a`
 **ポリシー**: CLAUDE.md の TDD ルールに基づき、必ず RED→GREEN→リグレッションチェックの順に進める。
 
+## フェーズ0: ブランチ一覧アイコンの絵文字復帰 (優先度: P1)
+
+**ストーリー**: ブランチ一覧の選択/Worktree/安全アイコンを絵文字に戻し、カーソル記号を表示しない。
+
+**価値**: 以前の視認性とユーザーの記憶に合わせ、分かりやすい一覧表示を復元する。
+
+### 仕様更新
+
+- [x] **T901** [P] [共通] `specs/SPEC-d2f4762a/spec.md` のアイコン仕様とカーソル非表示要件を更新
+- [x] **T902** [P] [共通] `specs/SPEC-d2f4762a/plan.md` のアイコン方針を絵文字に更新
+- [x] **T903** [P] [共通] `specs/SPEC-d27be71b/spec.md` の意思決定ログを更新（絵文字復帰を反映）
+- [x] **T904** [P] [共通] `CLAUDE.md` のアイコン方針を更新（ブランチ一覧は絵文字を許容）
+
+### テスト（TDD）
+
+- [x] **T911** [US4] `src/cli/ui/__tests__/solid/BranchListScreen.test.tsx` に絵文字アイコンとカーソル非表示の表示テストを追加
+
+### 実装
+
+- [x] **T921** [US4] `src/cli/ui/screens/solid/BranchListScreen.tsx` の選択/Worktree/安全アイコンを絵文字に戻す
+- [x] **T922** [US4] `src/cli/ui/screens/solid/BranchListScreen.tsx` のカーソル記号を非表示のまま維持する
+
 ## フェーズ1: セットアップ（共有インフラストラクチャ）
 
 ### セットアップタスク

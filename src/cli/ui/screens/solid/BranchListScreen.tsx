@@ -57,9 +57,31 @@ export interface BranchListScreenProps {
 
 const VIEW_MODES: BranchViewMode[] = ["all", "local", "remote"];
 
-const getCharWidth = (char: string): number => stringWidth(char);
+const WIDTH_OVERRIDES: Record<string, number> = {
+  "✅": 2,
+  "☑": 2,
+  "☑️": 2,
+  "🟢": 2,
+  "⚪": 2,
+  "🔴": 2,
+  "⭕": 2,
+  "⭕️": 2,
+  "❌": 2,
+};
 
-const measureDisplayWidth = (value: string): number => stringWidth(value);
+const getCharWidth = (char: string): number => {
+  const baseWidth = stringWidth(char);
+  const override = WIDTH_OVERRIDES[char];
+  return override !== undefined ? Math.max(baseWidth, override) : baseWidth;
+};
+
+const measureDisplayWidth = (value: string): number => {
+  let width = 0;
+  for (const char of Array.from(value)) {
+    width += getCharWidth(char);
+  }
+  return width;
+};
 
 const truncateToWidth = (value: string, maxWidth: number): string => {
   if (maxWidth <= 0) {
@@ -655,18 +677,18 @@ export function BranchListScreen(props: BranchListScreenProps) {
 
     const isChecked = selectedSet().has(branch.name);
     const isWarning = Boolean(branch.hasUnpushedCommits) || !branch.mergedPR;
-    const selectionIcon = isChecked ? "[x]" : "[ ]";
+    const selectionIcon = isChecked ? "✅" : "☑️";
     const selectionColor = isChecked && isWarning ? "red" : undefined;
-    let worktreeIcon = ".";
+    let worktreeIcon = "⚪";
     let worktreeColor: IndicatorColor | "gray" = "gray";
     if (branch.worktreeStatus === "active") {
-      worktreeIcon = "W";
+      worktreeIcon = "🟢";
       worktreeColor = "green";
     } else if (branch.worktreeStatus === "inaccessible") {
-      worktreeIcon = "X";
+      worktreeIcon = "🔴";
       worktreeColor = "red";
     }
-    const safeIcon = branch.safeToCleanup === true ? "OK" : "!!";
+    const safeIcon = branch.safeToCleanup === true ? "⭕️" : "❌";
     const safeColor: IndicatorColor =
       branch.safeToCleanup === true ? "green" : "red";
 
