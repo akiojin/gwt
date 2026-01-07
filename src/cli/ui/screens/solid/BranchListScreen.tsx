@@ -757,12 +757,9 @@ export function BranchListScreen(props: BranchListScreenProps) {
   };
 
   const footerActions = [
-    { key: "f", description: "Filter" },
-    { key: "tab", description: "Mode" },
     { key: "r", description: "Refresh" },
     { key: "c", description: "Cleanup" },
     { key: "x", description: "Repair" },
-    { key: "p", description: "Profiles" },
     { key: "l", description: "Logs" },
   ];
 
@@ -771,7 +768,7 @@ export function BranchListScreen(props: BranchListScreenProps) {
     const query = filterQuery();
 
     appendSegment(segments, {
-      text: "Filter: ",
+      text: "Filter(f): ",
       attributes: TextAttributes.DIM,
     });
     if (filterMode()) {
@@ -837,7 +834,10 @@ export function BranchListScreen(props: BranchListScreenProps) {
     const segments: TextSegment[] = [];
     const separator = "  ";
 
-    appendSegment(segments, { text: "Mode: ", attributes: TextAttributes.DIM });
+    appendSegment(segments, {
+      text: "Mode(tab): ",
+      attributes: TextAttributes.DIM,
+    });
     appendSegment(segments, {
       text: formatViewModeLabel(viewMode()),
       fg: "white",

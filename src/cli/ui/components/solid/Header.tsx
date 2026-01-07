@@ -47,7 +47,7 @@ export function Header({
   let displayTitle = version ? `${title} v${version}` : title;
   if (activeProfile !== undefined) {
     const profileLabel = activeProfile ?? "(none)";
-    displayTitle = `${displayTitle} | Profile: ${profileLabel}`;
+    displayTitle = `${displayTitle} | Profile(p): ${profileLabel}`;
   }
 
   return (
