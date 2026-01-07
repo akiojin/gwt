@@ -197,12 +197,10 @@ async function mainSolidUI(): Promise<SelectionResult | undefined> {
   // Register cleanup for signal handlers
   registerExitCleanup(performTerminalCleanup);
   let selectionResult: SelectionResult | undefined;
+  // デフォルトではマウスキャプチャを無効にしてOSレベルのコピー機能を使用可能にする
+  // GWT_UI_MOUSE=true で有効化可能
   const mousePreference = process.env.GWT_UI_MOUSE?.trim().toLowerCase();
-  const useMouse =
-    mousePreference === undefined ||
-    mousePreference === "" ||
-    mousePreference === "true" ||
-    mousePreference === "1";
+  const useMouse = mousePreference === "true" || mousePreference === "1";
   const mouseMovePreference =
     process.env.GWT_UI_MOUSE_MOVE?.trim().toLowerCase();
   const enableMouseMovement =
