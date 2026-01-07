@@ -7,6 +7,7 @@ import type { ToolStatus } from "../../../../utils/command.js";
 import { getLatestActivityTimestamp } from "../../utils/branchFormatter.js";
 import stringWidth from "string-width";
 import { Header } from "../../components/solid/Header.js";
+import { useTextSelection } from "../../hooks/solid/useTextSelection.js";
 
 type IndicatorColor = "cyan" | "green" | "yellow" | "red";
 
@@ -306,6 +307,9 @@ function LoadingIndicator(props: LoadingIndicatorProps) {
 
 export function BranchListScreen(props: BranchListScreenProps) {
   const terminal = useTerminalDimensions();
+
+  // Enable mouse text selection and clipboard copy
+  useTextSelection();
 
   const [filterQuery, setFilterQuery] = createSignal("");
   const [filterMode, setFilterMode] = createSignal(false);
