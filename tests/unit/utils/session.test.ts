@@ -1,6 +1,3 @@
-/**
- * @vitest-environment node
- */
 import { describe, it, expect, beforeEach, mock } from "bun:test";
 import path from "node:path";
 

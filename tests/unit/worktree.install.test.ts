@@ -1,18 +1,11 @@
+import type { Mock } from "bun:test";
 import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
 import path from "node:path";
 
-// Vitest shim for environments lacking vi.hoisted (e.g., bun)
-if (typeof (vi as Record<string, unknown>).hoisted !== "function") {
-  // @ts-expect-error injected shim
-}
-
-const accessMock = (mock());
+const accessMock = mock();
 
 mock.module("node:fs/promises", async () => {
-  const actual =
-    await import(
-      "node:fs/promises",
-    );
+  const actual = await import("node:fs/promises");
 
   return {
     ...actual,
@@ -110,7 +103,7 @@ describe("dependency installer", () => {
   describe("installDependenciesForWorktree", () => {
     it("runs bun install with frozen-lockfile", async () => {
       setupExistingFiles([path.join(WORKTREE, "bun.lock")]);
-      (execa as any).mockResolvedValue({ stdout: "", stderr: "" });
+      (execa as Mock).mockResolvedValue({ stdout: "", stderr: "" });
 
       await installDependenciesForWorktree(WORKTREE);
 
@@ -123,7 +116,7 @@ describe("dependency installer", () => {
 
     it("runs pnpm install when pnpm lock is present", async () => {
       setupExistingFiles([path.join(WORKTREE, "pnpm-lock.yaml")]);
-      (execa as any).mockResolvedValue({ stdout: "", stderr: "" });
+      (execa as Mock).mockResolvedValue({ stdout: "", stderr: "" });
 
       await installDependenciesForWorktree(WORKTREE);
 
@@ -136,7 +129,7 @@ describe("dependency installer", () => {
 
     it("runs npm ci when package-lock exists", async () => {
       setupExistingFiles([path.join(WORKTREE, "package-lock.json")]);
-      (execa as any).mockResolvedValue({ stdout: "", stderr: "" });
+      (execa as Mock).mockResolvedValue({ stdout: "", stderr: "" });
 
       await installDependenciesForWorktree(WORKTREE);
 
@@ -149,7 +142,7 @@ describe("dependency installer", () => {
 
     it("runs npm install when only package.json exists", async () => {
       setupExistingFiles([path.join(WORKTREE, "package.json")]);
-      (execa as any).mockResolvedValue({ stdout: "", stderr: "" });
+      (execa as Mock).mockResolvedValue({ stdout: "", stderr: "" });
 
       await installDependenciesForWorktree(WORKTREE);
 
@@ -176,7 +169,7 @@ describe("dependency installer", () => {
     it("skips when install command fails", async () => {
       const lockfilePath = path.join(WORKTREE, "bun.lock");
       setupExistingFiles([lockfilePath]);
-      (execa as any).mockRejectedValue(new Error("boom"));
+      (execa as Mock).mockRejectedValue(new Error("boom"));
 
       await expect(
         installDependenciesForWorktree(WORKTREE),
@@ -208,7 +201,7 @@ describe("dependency installer", () => {
     it("skips when package manager binary is missing (ENOENT)", async () => {
       setupExistingFiles([path.join(WORKTREE, "bun.lock")]);
       const enoent = Object.assign(new Error("not found"), { code: "ENOENT" });
-      (execa as any).mockRejectedValueOnce(enoent);
+      (execa as Mock).mockRejectedValueOnce(enoent);
 
       const result = await installDependenciesForWorktree(WORKTREE);
 
