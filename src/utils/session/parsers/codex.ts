@@ -63,6 +63,8 @@ export async function findLatestCodexSession(
     return b.mtime - a.mtime;
   });
 
+  let fallbackMissingCwd: CodexSessionInfo | null = null;
+
   for (const file of ordered) {
     // Priority 1: Extract session ID from filename (most reliable for Codex)
     const filenameMatch = path.basename(file.fullPath).match(UUID_REGEX);
@@ -73,6 +75,9 @@ export async function findLatestCodexSession(
         const info = await readSessionInfoFromFile(file.fullPath);
         if (matchesCwd(info.cwd, options.cwd)) {
           return { id: sessionId, mtime: file.mtime };
+        }
+        if (!info.cwd && !fallbackMissingCwd) {
+          fallbackMissingCwd = { id: sessionId, mtime: file.mtime };
         }
         continue; // cwd doesn't match, try next file
       }
@@ -86,12 +91,15 @@ export async function findLatestCodexSession(
       if (matchesCwd(info.cwd, options.cwd)) {
         return { id: info.id, mtime: file.mtime };
       }
+      if (!info.cwd && !fallbackMissingCwd) {
+        fallbackMissingCwd = { id: info.id, mtime: file.mtime };
+      }
       continue;
     }
     return { id: info.id, mtime: file.mtime };
   }
 
-  return null;
+  return fallbackMissingCwd;
 }
 
 /**
