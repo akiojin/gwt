@@ -1,8 +1,10 @@
 /** @jsxImportSource @opentui/solid */
 import { TextAttributes } from "@opentui/core";
-import { createEffect, createMemo } from "solid-js";
+import { useKeyboard } from "@opentui/solid";
+import { createEffect, createMemo, createSignal } from "solid-js";
 import type { ToolSessionEntry } from "../../../../config/index.js";
 import { SelectInput, type SelectInputItem } from "./SelectInput.js";
+import { useWizardScroll } from "./WizardPopup.js";
 
 /**
  * QuickStartStep - 前回履歴からのクイック選択ステップ
@@ -26,6 +28,9 @@ interface QuickStartItem extends SelectInputItem {
 }
 
 export function QuickStartStep(props: QuickStartStepProps) {
+  const [selectedIndex, setSelectedIndex] = createSignal(0);
+  const scroll = useWizardScroll();
+
   // T506: 履歴がない場合は自動的に onChooseDifferent を呼ぶ
   createEffect(() => {
     if (props.history.length === 0) {
@@ -75,6 +80,27 @@ export function QuickStartStep(props: QuickStartStepProps) {
     return result;
   });
 
+  useKeyboard((key) => {
+    if (props.focused === false) {
+      return;
+    }
+    if (!scroll) {
+      return;
+    }
+    const maxIndex = items().length - 1;
+    if (key.name === "up") {
+      if (selectedIndex() <= 0 && scroll.scrollByLines(-1)) {
+        key.preventDefault();
+      }
+      return;
+    }
+    if (key.name === "down") {
+      if (selectedIndex() >= maxIndex && scroll.scrollByLines(1)) {
+        key.preventDefault();
+      }
+    }
+  });
+
   const handleSelect = (item: SelectInputItem) => {
     const quickItem = item as QuickStartItem;
     switch (quickItem.action) {
@@ -94,6 +120,19 @@ export function QuickStartStep(props: QuickStartStepProps) {
     }
   };
 
+  const handleChange = (item: SelectInputItem | null) => {
+    if (!item) {
+      setSelectedIndex(0);
+      return;
+    }
+    const nextIndex = items().findIndex((candidate) => {
+      return candidate.value === item.value;
+    });
+    if (nextIndex >= 0) {
+      setSelectedIndex(nextIndex);
+    }
+  };
+
   return (
     <box flexDirection="column" padding={1}>
       <text fg="cyan" attributes={TextAttributes.BOLD}>
@@ -103,6 +142,7 @@ export function QuickStartStep(props: QuickStartStepProps) {
       <SelectInput
         items={items()}
         onSelect={handleSelect}
+        onChange={handleChange}
         focused={props.focused ?? true}
         showDescription={true}
       />
