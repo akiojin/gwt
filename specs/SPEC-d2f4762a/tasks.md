@@ -105,3 +105,17 @@
 
 - [x] **T507** [US9] `src/cli/ui/components/solid/QuickStartStep.tsx` にクイック選択ステップコンポーネントを作成
 - [x] **T508** [US9] `src/cli/ui/components/solid/WizardController.tsx` にクイック選択ステップの統合（履歴有無による分岐）
+
+## フェーズ7: ユーザーストーリー7 - 選択中Worktreeフルパス表示 (優先度: P2)
+
+**ストーリー**: ブランチ一覧のフッター直上に、選択中ブランチのWorktreeフルパスを表示する。Worktreeが存在しないが現在ブランチの場合は起動時の作業ディレクトリを表示し、ブランチ一覧が空の場合は`Worktree: (none)`を表示する。
+
+**価値**: Worktreeの実体パスを正確に確認でき、誤操作や環境移行時の混乱を防げる。
+
+### テスト（TDD）
+
+- [x] **T601** [US7] `src/cli/ui/__tests__/solid/BranchListScreen.test.tsx` に Worktree 行の表示（worktree path / (none) / workingDirectory フォールバック）テストを追加
+
+### 実装
+
+- [x] **T602** [US7] `src/cli/ui/screens/solid/BranchListScreen.tsx` のフッター表示を `Worktree:` に置き換え、表示ロジックを追加
