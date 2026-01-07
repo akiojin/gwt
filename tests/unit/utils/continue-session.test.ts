@@ -95,6 +95,35 @@ describe("resolveContinueSessionId", () => {
     expect(result).toBeNull();
   });
 
+  it("falls back to tool lookup when no sessionId is stored", async () => {
+    const history: ToolSessionEntry[] = [
+      {
+        branch,
+        toolId,
+        worktreePath: "/wt1",
+        toolLabel: "Codex",
+        timestamp: 1,
+      },
+    ];
+    const sessionData = {
+      lastBranch: branch,
+      lastUsedTool: toolId,
+      lastSessionId: null,
+    } as SessionData;
+    const lookupLatestSessionId = mock(async () => "lookup-1");
+
+    const result = await resolveContinueSessionId({
+      history,
+      sessionData,
+      branch,
+      toolId,
+      repoRoot,
+      lookupLatestSessionId,
+    });
+
+    expect(result).toBe("lookup-1");
+  });
+
   it("returns null when branch/tool do not match", async () => {
     const sessionData = {
       lastBranch: "other",

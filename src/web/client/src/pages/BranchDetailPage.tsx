@@ -285,6 +285,13 @@ export function BranchDetailPage() {
           : selectedTool.target === "custom"
             ? "custom"
             : "claude-code";
+      const resumeSessionId =
+        selectedMode === "normal"
+          ? null
+          : latestToolUsage?.sessionId &&
+              latestToolUsage.toolId === selectedToolId
+            ? latestToolUsage.sessionId
+            : null;
       const extraArgs = extraArgsText
         .split(/\s+/)
         .map((c) => c.trim())
@@ -301,6 +308,7 @@ export function BranchDetailPage() {
         ...(selectedTool.target === "codex"
           ? { bypassApprovals: skipPermissions }
           : {}),
+        ...(resumeSessionId ? { resumeSessionId } : {}),
         ...(extraArgs.length ? { extraArgs } : {}),
       } as const;
 

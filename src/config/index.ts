@@ -277,6 +277,7 @@ export async function getLastToolUsageMap(
         worktreePath: parsed.lastWorktreePath,
         toolId: parsed.lastUsedTool ?? "unknown",
         toolLabel: parsed.toolLabel ?? parsed.lastUsedTool ?? "Custom",
+        sessionId: parsed.lastSessionId ?? null,
         mode: parsed.mode ?? null,
         model: parsed.model ?? null,
         reasoningLevel: parsed.reasoningLevel ?? null,
