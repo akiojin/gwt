@@ -1,5 +1,6 @@
 /** @jsxImportSource @opentui/solid */
-import { Show } from "solid-js";
+import type { ScrollBoxRenderable } from "@opentui/core";
+import { createContext, Show, useContext } from "solid-js";
 import type { JSX } from "solid-js";
 
 export interface WizardPopupProps {
@@ -8,6 +9,18 @@ export interface WizardPopupProps {
   onComplete: (result: unknown) => void;
   children?: JSX.Element;
 }
+
+interface WizardScrollContextValue {
+  scrollByLines: (delta: number) => boolean;
+  canScrollUp: () => boolean;
+  canScrollDown: () => boolean;
+}
+
+const WizardScrollContext = createContext<WizardScrollContextValue | null>(
+  null,
+);
+
+export const useWizardScroll = () => useContext(WizardScrollContext);
 
 /**
  * WizardPopup - ブランチ選択後のウィザードポップアップコンテナ
@@ -19,6 +32,41 @@ export interface WizardPopupProps {
  * ステップ管理とキーボード処理はWizardControllerで行う
  */
 export function WizardPopup(props: WizardPopupProps) {
+  let scrollRef: ScrollBoxRenderable | undefined;
+
+  const getScrollState = () => {
+    if (!scrollRef) {
+      return { scrollTop: 0, maxScrollTop: 0 };
+    }
+    const maxScrollTop = Math.max(
+      0,
+      scrollRef.scrollHeight - scrollRef.viewport.height,
+    );
+    return { scrollTop: scrollRef.scrollTop, maxScrollTop };
+  };
+
+  const scrollByLines = (delta: number) => {
+    if (!scrollRef || delta === 0) {
+      return false;
+    }
+    const { scrollTop, maxScrollTop } = getScrollState();
+    if (delta < 0 && scrollTop <= 0) {
+      return false;
+    }
+    if (delta > 0 && scrollTop >= maxScrollTop) {
+      return false;
+    }
+    scrollRef.scrollBy(delta, "absolute");
+    return true;
+  };
+
+  const scrollContextValue: WizardScrollContextValue = {
+    scrollByLines,
+    canScrollUp: () => getScrollState().scrollTop > 0,
+    canScrollDown: () =>
+      getScrollState().scrollTop < getScrollState().maxScrollTop,
+  };
+
   return (
     <Show when={props.visible}>
       {/* Popup content - centered overlay without full-screen background */}
@@ -35,8 +83,25 @@ export function WizardPopup(props: WizardPopupProps) {
         backgroundColor="black"
         flexDirection="column"
         padding={1}
+        overflow="hidden"
       >
-        {props.children}
+        <WizardScrollContext.Provider value={scrollContextValue}>
+          <scrollbox
+            ref={(node) => {
+              scrollRef = node;
+            }}
+            flexGrow={1}
+            flexShrink={1}
+            minHeight={0}
+            scrollX={false}
+            scrollY
+            scrollbarOptions={{ visible: false }}
+            verticalScrollbarOptions={{ visible: false }}
+            horizontalScrollbarOptions={{ visible: false }}
+          >
+            {props.children}
+          </scrollbox>
+        </WizardScrollContext.Provider>
       </box>
     </Show>
   );

@@ -1,7 +1,10 @@
 /** @jsxImportSource @opentui/solid */
 import { describe, expect, it } from "bun:test";
-import { testRender } from "@opentui/solid";
-import { WizardPopup } from "../../../components/solid/WizardPopup.js";
+import { testRender, useKeyboard } from "@opentui/solid";
+import {
+  WizardPopup,
+  useWizardScroll,
+} from "../../../components/solid/WizardPopup.js";
 
 const renderWizard = async (
   props: {
@@ -29,6 +32,7 @@ const renderWizard = async (
     captureCharFrame: testSetup.captureCharFrame,
     renderOnce: testSetup.renderOnce,
     mockInput: testSetup.mockInput,
+    mockMouse: testSetup.mockMouse,
     cleanup: () => testSetup.renderer.destroy(),
   };
 };
@@ -127,6 +131,100 @@ describe("WizardPopup", () => {
         expect(frame).toMatch(/[┌┐└┘│─]/);
       } finally {
         cleanup();
+      }
+    });
+  });
+
+  // T701: ポップアップ内のスクロール検証
+  describe("scrolling", () => {
+    it("scrolls long content within the popup", async () => {
+      const testSetup = await testRender(
+        () => (
+          <WizardPopup visible onClose={() => {}} onComplete={() => {}}>
+            <box flexDirection="column">
+              {Array.from({ length: 30 }, (_, index) => (
+                <text>{`Line ${String(index + 1).padStart(2, "0")}`}</text>
+              ))}
+            </box>
+          </WizardPopup>
+        ),
+        { width: 60, height: 20 },
+      );
+      await testSetup.renderOnce();
+
+      try {
+        const frame = testSetup.captureCharFrame();
+        expect(frame).toContain("Line 01");
+        expect(frame).not.toContain("Line 20");
+
+        for (let i = 0; i < 16; i += 1) {
+          await testSetup.mockMouse.scroll(30, 10, "down");
+          await testSetup.renderOnce();
+        }
+
+        const scrolledFrame = testSetup.captureCharFrame();
+        expect(scrolledFrame).toContain("Line 20");
+      } finally {
+        testSetup.renderer.destroy();
+      }
+    });
+  });
+
+  // T703: 上下キーでのスクロール検証
+  describe("keyboard scrolling", () => {
+    const ArrowKeyScrollContent = () => {
+      const scroll = useWizardScroll();
+      useKeyboard((key) => {
+        if (!scroll) {
+          return;
+        }
+        if (key.name === "down") {
+          if (scroll.scrollByLines(1)) {
+            key.preventDefault();
+          }
+          return;
+        }
+        if (key.name === "up") {
+          if (scroll.scrollByLines(-1)) {
+            key.preventDefault();
+          }
+        }
+      });
+
+      return (
+        <box flexDirection="column">
+          {Array.from({ length: 30 }, (_, index) => (
+            <text>{`Line ${String(index + 1).padStart(2, "0")}`}</text>
+          ))}
+        </box>
+      );
+    };
+
+    it("scrolls long content with arrow keys", async () => {
+      const testSetup = await testRender(
+        () => (
+          <WizardPopup visible onClose={() => {}} onComplete={() => {}}>
+            <ArrowKeyScrollContent />
+          </WizardPopup>
+        ),
+        { width: 60, height: 20 },
+      );
+      await testSetup.renderOnce();
+
+      try {
+        const frame = testSetup.captureCharFrame();
+        expect(frame).toContain("Line 01");
+        expect(frame).not.toContain("Line 20");
+
+        for (let i = 0; i < 16; i += 1) {
+          testSetup.mockInput.pressArrow("down");
+          await testSetup.renderOnce();
+        }
+
+        const scrolledFrame = testSetup.captureCharFrame();
+        expect(scrolledFrame).toContain("Line 20");
+      } finally {
+        testSetup.renderer.destroy();
       }
     });
   });
