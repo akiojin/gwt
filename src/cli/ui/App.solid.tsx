@@ -377,6 +377,17 @@ export function AppSolid(props: AppSolidProps) {
     }
     const previous = stack[stack.length - 1] ?? DEFAULT_SCREEN;
     setScreenStack(stack.slice(0, -1));
+
+    // branch-list に戻る場合は選択状態をリセット
+    if (previous === "branch-list") {
+      setSelectedBranch(null);
+      setSelectedTool(null);
+      setSelectedMode("normal");
+      setIsNewBranch(false);
+      setNewBranchBaseRef(null);
+      setCreationSource(null);
+    }
+
     setCurrentScreen(previous);
   };
 
