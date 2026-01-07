@@ -70,7 +70,7 @@ describe("BranchListScreen", () => {
 
   it("should render header with title", () => {
     const onSelect = vi.fn();
-    const { getByText, getAllByText } = render(
+    const { getByText } = render(
       <BranchListScreen
         branches={mockBranches}
         stats={mockStats}
@@ -125,9 +125,20 @@ describe("BranchListScreen", () => {
 
   it("should display selected branch full path above footer help", () => {
     const onSelect = vi.fn();
+    const branchesWithWorktree: BranchItem[] = [
+      {
+        ...mockBranches[0],
+        worktree: {
+          path: "/gwt/.worktrees/main",
+          locked: false,
+          prunable: false,
+        },
+      } as BranchItem,
+      mockBranches[1] as BranchItem,
+    ];
     const { lastFrame } = inkRender(
       <BranchListScreen
-        branches={mockBranches}
+        branches={branchesWithWorktree}
         stats={mockStats}
         onSelect={onSelect}
       />,
@@ -135,7 +146,7 @@ describe("BranchListScreen", () => {
     );
 
     const output = stripAnsi(stripControlSequences(lastFrame() ?? ""));
-    expect(output).toContain("Branch: main");
+    expect(output).toContain("Worktree: /gwt/.worktrees/main");
   });
 
   it("should handle empty branch list", () => {
@@ -155,7 +166,7 @@ describe("BranchListScreen", () => {
     expect(container).toBeDefined();
   });
 
-  it("should display Branch: (none) when branch list is empty", () => {
+  it("should display Worktree: (none) when branch list is empty", () => {
     const onSelect = vi.fn();
     const emptyStats: Statistics = {
       localCount: 0,
@@ -171,7 +182,7 @@ describe("BranchListScreen", () => {
     );
 
     const output = stripAnsi(stripControlSequences(lastFrame() ?? ""));
-    expect(output).toContain("Branch: (none)");
+    expect(output).toContain("Worktree: (none)");
   });
 
   it("should display loading indicator after the configured delay", async () => {

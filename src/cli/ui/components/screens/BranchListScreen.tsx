@@ -366,9 +366,9 @@ export const BranchListScreen = React.memo(function BranchListScreen({
     { key: "l", description: "Logs" },
   ];
 
-  const selectedBranchName =
-    filteredBranches[selectedIndex]?.name ?? "(none)";
-  const selectedBranchLabel = `Branch: ${selectedBranchName}`;
+  const selectedBranch = filteredBranches[selectedIndex];
+  const worktreePath = selectedBranch?.worktree?.path;
+  const selectedBranchLabel = `Worktree: ${worktreePath ?? "(none)"}`;
 
   const formatLatestCommit = useCallback((timestamp?: number) => {
     if (!timestamp || Number.isNaN(timestamp)) {
