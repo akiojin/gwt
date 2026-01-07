@@ -22,11 +22,11 @@ export interface StepProps {
 const useEdgeScroll = (options: {
   getSelectedIndex: () => number;
   getItemCount: () => number;
-  focused?: boolean | undefined;
+  getFocused?: () => boolean | undefined;
 }) => {
   const scroll = useWizardScroll();
   useKeyboard((key) => {
-    if (options.focused === false) {
+    if (options.getFocused && options.getFocused() === false) {
       return;
     }
     if (!scroll) {
@@ -79,7 +79,7 @@ export function ActionSelectStep(props: ActionSelectStepProps) {
   useEdgeScroll({
     getSelectedIndex: selectedIndex,
     getItemCount: () => ACTION_OPTIONS.length,
-    focused: props.focused,
+    getFocused: () => props.focused,
   });
 
   const handleChange = (item: SelectInputItem | null) => {
@@ -132,7 +132,7 @@ export function BranchTypeStep(props: BranchTypeStepProps) {
   useEdgeScroll({
     getSelectedIndex: selectedIndex,
     getItemCount: () => BRANCH_TYPES.length,
-    focused: props.focused,
+    getFocused: () => props.focused,
   });
 
   const handleChange = (item: SelectInputItem | null) => {
@@ -244,7 +244,7 @@ export function AgentSelectStep(props: AgentSelectStepProps) {
   useEdgeScroll({
     getSelectedIndex: selectedIndex,
     getItemCount: () => AGENTS.length,
-    focused: props.focused,
+    getFocused: () => props.focused,
   });
 
   const handleChange = (item: SelectInputItem | null) => {
@@ -304,7 +304,7 @@ export function ModelSelectStep(props: ModelSelectStepProps) {
   useEdgeScroll({
     getSelectedIndex: selectedIndex,
     getItemCount: () => models().length,
-    focused: props.focused,
+    getFocused: () => props.focused,
   });
 
   createEffect(() => {
@@ -367,7 +367,7 @@ export function ReasoningLevelStep(props: ReasoningLevelStepProps) {
   useEdgeScroll({
     getSelectedIndex: selectedIndex,
     getItemCount: () => REASONING_LEVELS.length,
-    focused: props.focused,
+    getFocused: () => props.focused,
   });
 
   const handleChange = (item: SelectInputItem | null) => {
@@ -425,7 +425,7 @@ export function ExecutionModeStep(props: ExecutionModeStepProps) {
   useEdgeScroll({
     getSelectedIndex: selectedIndex,
     getItemCount: () => EXECUTION_MODES.length,
-    focused: props.focused,
+    getFocused: () => props.focused,
   });
 
   const handleChange = (item: SelectInputItem | null) => {
@@ -474,7 +474,7 @@ export function SkipPermissionsStep(props: SkipPermissionsStepProps) {
   useEdgeScroll({
     getSelectedIndex: selectedIndex,
     getItemCount: () => SKIP_OPTIONS.length,
-    focused: props.focused,
+    getFocused: () => props.focused,
   });
 
   const handleChange = (item: SelectInputItem | null) => {
