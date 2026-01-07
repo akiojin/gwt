@@ -655,20 +655,20 @@ export function BranchListScreen(props: BranchListScreenProps) {
 
     const isChecked = selectedSet().has(branch.name);
     const isWarning = Boolean(branch.hasUnpushedCommits) || !branch.mergedPR;
-    const selectionIcon = isChecked ? "[x]" : "[ ]";
+    const selectionIcon = isChecked ? "[*]" : "[ ]";
     const selectionColor = isChecked && isWarning ? "red" : undefined;
     let worktreeIcon = ".";
     let worktreeColor: IndicatorColor | "gray" = "gray";
     if (branch.worktreeStatus === "active") {
-      worktreeIcon = "W";
+      worktreeIcon = "w";
       worktreeColor = "green";
     } else if (branch.worktreeStatus === "inaccessible") {
-      worktreeIcon = "X";
+      worktreeIcon = "x";
       worktreeColor = "red";
     }
-    const safeIcon = branch.safeToCleanup === true ? "OK" : "!!";
-    const safeColor: IndicatorColor =
-      branch.safeToCleanup === true ? "green" : "red";
+    const safeIcon = branch.safeToCleanup === true ? " " : "!";
+    const safeColor: IndicatorColor | undefined =
+      branch.safeToCleanup === true ? undefined : "red";
 
     let commitText = "---";
     const latestActivitySec = getLatestActivityTimestamp(branch);
@@ -706,7 +706,7 @@ export function BranchListScreen(props: BranchListScreenProps) {
         ? branch.remoteName
         : branch.name;
 
-    const staticPrefix = `${leadingIndicator}${selectionIcon}${worktreeIcon}${safeIcon} `;
+    const staticPrefix = `${leadingIndicator}${selectionIcon} ${worktreeIcon} ${safeIcon} `;
     const staticPrefixWidth = measureDisplayWidth(staticPrefix);
     const maxLeftDisplayWidth = Math.max(0, columns - timestampWidth - 1);
     const maxLabelWidth = Math.max(0, maxLeftDisplayWidth - staticPrefixWidth);
@@ -741,7 +741,9 @@ export function BranchListScreen(props: BranchListScreenProps) {
       appendSegment(segments, { text: leadingIndicator, fg: indicatorColor });
     }
     appendSegment(segments, { text: selectionIcon, fg: selectionColor });
+    appendSegment(segments, { text: " " });
     appendSegment(segments, { text: worktreeIcon, fg: worktreeColor });
+    appendSegment(segments, { text: " " });
     appendSegment(segments, { text: safeIcon, fg: safeColor });
     appendSegment(segments, { text: " " });
     appendSegment(segments, { text: truncatedLabel });
@@ -922,19 +924,22 @@ export function BranchListScreen(props: BranchListScreenProps) {
     </box>
   );
 
-  const selectedBranchLabel = createMemo(() => {
+  const selectedWorktreeLabel = createMemo(() => {
     const branches = filteredBranches();
     if (branches.length === 0) {
       return "(none)";
     }
     const selected = branches[selectedIndex()];
-    if (!selected?.name) {
+    if (!selected) {
       return "(none)";
     }
-    if (selected.type === "remote") {
-      return selected.name;
+    if (selected.worktree?.path) {
+      return selected.worktree.path;
     }
-    return `refs/heads/${selected.name}`;
+    if (selected.isCurrent && props.workingDirectory) {
+      return props.workingDirectory;
+    }
+    return "(none)";
   });
 
   return (
@@ -1039,7 +1044,7 @@ export function BranchListScreen(props: BranchListScreenProps) {
       )}
 
       <text attributes={TextAttributes.DIM}>
-        {padLine(`Branch: ${selectedBranchLabel()}`, layoutWidth())}
+        {padLine(`Worktree: ${selectedWorktreeLabel()}`, layoutWidth())}
       </text>
 
       {renderSegmentLine(footerSegments())}

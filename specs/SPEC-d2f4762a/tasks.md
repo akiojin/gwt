@@ -3,6 +3,28 @@
 **仕様ID**: `SPEC-d2f4762a`
 **ポリシー**: CLAUDE.md の TDD ルールに基づき、必ず RED→GREEN→リグレッションチェックの順に進める。
 
+## フェーズ0: ブランチ一覧アイコンのASCII再整理 (優先度: P1)
+
+**ストーリー**: ブランチ一覧の選択/Worktree/安全アイコンをASCII表記へ整理し、アイコン間にスペースを入れてカーソル記号は表示しない。
+
+**価値**: 端末幅のズレを防ぎつつ、直感的な記号で一覧表示の視認性を維持する。
+
+### 仕様更新
+
+- [x] **T901** [P] [共通] `specs/SPEC-d2f4762a/spec.md` のアイコン仕様とカーソル非表示要件を更新
+- [x] **T902** [P] [共通] `specs/SPEC-d2f4762a/plan.md` のアイコン方針をASCIIに更新
+- [x] **T903** [P] [共通] `specs/SPEC-d27be71b/spec.md` の意思決定ログを更新（ASCII整理を反映）
+- [x] **T904** [P] [共通] `CLAUDE.md` のアイコン方針をASCIIに戻す
+
+### テスト（TDD）
+
+- [x] **T911** [US4] `src/cli/ui/__tests__/solid/BranchListScreen.test.tsx` にASCIIアイコンとカーソル非表示の表示テストを追加
+
+### 実装
+
+- [x] **T921** [US4] `src/cli/ui/screens/solid/BranchListScreen.tsx` の選択/Worktree/安全アイコンをASCIIに更新
+- [x] **T922** [US4] `src/cli/ui/screens/solid/BranchListScreen.tsx` のカーソル記号を非表示のまま維持する
+
 ## フェーズ1: セットアップ（共有インフラストラクチャ）
 
 ### セットアップタスク
@@ -105,3 +127,17 @@
 
 - [x] **T507** [US9] `src/cli/ui/components/solid/QuickStartStep.tsx` にクイック選択ステップコンポーネントを作成
 - [x] **T508** [US9] `src/cli/ui/components/solid/WizardController.tsx` にクイック選択ステップの統合（履歴有無による分岐）
+
+## フェーズ7: ユーザーストーリー7 - 選択中Worktreeフルパス表示 (優先度: P2)
+
+**ストーリー**: ブランチ一覧のフッター直上に、選択中ブランチのWorktreeフルパスを表示する。Worktreeが存在しないが現在ブランチの場合は起動時の作業ディレクトリを表示し、ブランチ一覧が空の場合は`Worktree: (none)`を表示する。
+
+**価値**: Worktreeの実体パスを正確に確認でき、誤操作や環境移行時の混乱を防げる。
+
+### テスト（TDD）
+
+- [x] **T601** [US7] `src/cli/ui/__tests__/solid/BranchListScreen.test.tsx` に Worktree 行の表示（worktree path / (none) / workingDirectory フォールバック）テストを追加
+
+### 実装
+
+- [x] **T602** [US7] `src/cli/ui/screens/solid/BranchListScreen.tsx` のフッター表示を `Worktree:` に置き換え、表示ロジックを追加
