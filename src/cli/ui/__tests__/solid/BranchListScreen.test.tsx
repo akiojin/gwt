@@ -48,6 +48,7 @@ const renderBranchList = async (props: {
   stats?: Statistics;
   workingDirectory?: string;
   selectedBranches?: string[];
+  activeProfile?: string | null;
 }) => {
   const testSetup = await testRender(
     () => (
@@ -56,6 +57,9 @@ const renderBranchList = async (props: {
         stats={props.stats ?? makeStats()}
         onSelect={() => {}}
         workingDirectory={props.workingDirectory}
+        {...(props.activeProfile !== undefined
+          ? { activeProfile: props.activeProfile }
+          : {})}
         {...(props.selectedBranches
           ? { selectedBranches: props.selectedBranches }
           : {})}
@@ -154,6 +158,33 @@ describe("BranchListScreen worktree footer", () => {
     try {
       const frame = testSetup.captureCharFrame();
       expect(frame).toContain("Worktree: (none)");
+    } finally {
+      testSetup.renderer.destroy();
+    }
+  });
+});
+
+describe("BranchListScreen shortcut hints", () => {
+  it("shows shortcuts in labels and omits them from footer", async () => {
+    const branch = createBranch({
+      name: "feature/shortcuts",
+      label: "feature/shortcuts",
+      value: "feature/shortcuts",
+    });
+    const testSetup = await renderBranchList({
+      branches: [branch],
+      stats: makeStats({ localCount: 1 }),
+      activeProfile: "dev",
+    });
+
+    try {
+      const frame = testSetup.captureCharFrame();
+      expect(frame).toContain("Filter(f): (press f to filter)");
+      expect(frame).toContain("Mode(tab): All");
+      expect(frame).toContain("Profile(p): dev");
+      expect(frame).not.toContain("[f] Filter");
+      expect(frame).not.toContain("[tab] Mode");
+      expect(frame).not.toContain("[p] Profiles");
     } finally {
       testSetup.renderer.destroy();
     }

@@ -141,3 +141,23 @@
 ### 実装
 
 - [x] **T602** [US7] `src/cli/ui/screens/solid/BranchListScreen.tsx` のフッター表示を `Worktree:` に置き換え、表示ロジックを追加
+
+## フェーズ8: フッターヘルプ整理とショートカット併記 (優先度: P2)
+
+**ストーリー**: ブランチ一覧で画面内に表示される要素（Filter行/Mode/Profiles）にショートカットを併記し、フッターヘルプからは削除する。
+
+**価値**: 重複した案内を減らし、視認性と理解度を高める。
+
+### 仕様更新
+
+- [x] **T701** [P] [共通] `specs/SPEC-d2f4762a/spec.md` にフッターヘルプ整理と`Filter(f)`/`Mode(tab)`/`Profile(p)`表記を反映
+- [x] **T702** [P] [共通] `specs/SPEC-d2f4762a/plan.md` のハイレベルToDoにフッターヘルプ更新を追記
+
+### テスト（TDD）
+
+- [x] **T711** [US0] `src/cli/ui/__tests__/solid/BranchListScreen.test.tsx` に`Filter(f)`/`Mode(tab)`/`Profile(p)`の表示とフッターヘルプからの除外を確認するテストを追加
+
+### 実装
+
+- [x] **T721** [US0] `src/cli/ui/screens/solid/BranchListScreen.tsx` のFilter/Mode表示ラベルとフッターアクションを更新
+- [x] **T722** [US0] `src/cli/ui/components/solid/Header.tsx` のProfile表示ラベルにショートカットを併記
