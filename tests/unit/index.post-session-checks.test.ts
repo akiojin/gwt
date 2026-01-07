@@ -21,7 +21,7 @@ const {
   confirmYesNoMock,
   waitForEnterMock,
   resolveWorktreePathForBranchMock,
-} = (({
+} = {
   ensureWorktreeMock: mock(async () => "/repo/.worktrees/feature"),
   fetchAllRemotesMock: mock(async () => undefined),
   pullFastForwardMock: mock(async () => undefined),
@@ -46,13 +46,10 @@ const {
   confirmYesNoMock: mock(async () => false),
   waitForEnterMock: mock(async () => undefined),
   resolveWorktreePathForBranchMock: mock(async () => ({ path: null })),
-}));
+};
 
 mock.module("../../src/git.js", async () => {
-  const actual =
-    await import("../../src/git.js
-      "../../src/git.js",
-    );
+  const actual = await import("../../src/git.js");
   return {
     ...actual,
     getRepositoryRoot: getRepositoryRootMock,
@@ -70,9 +67,7 @@ mock.module("../../src/git.js", async () => {
 });
 
 mock.module("../../src/worktree.js", async () => {
-  const actual = await import("../../src/worktree.js
-    "../../src/worktree.js",
-  );
+  const actual = await import("../../src/worktree.js");
   return {
     ...actual,
     worktreeExists: worktreeExistsMock,
@@ -89,9 +84,7 @@ mock.module("../../src/services/WorktreeOrchestrator.js", () => ({
 }));
 
 mock.module("../../src/services/dependency-installer.js", async () => {
-  const actual = await import(
-    typeof import("../../src/services/dependency-installer.js")
-  >("../../src/services/dependency-installer.js");
+  const actual = await import("../../src/services/dependency-installer.js");
   return {
     ...actual,
     installDependenciesForWorktree: installDependenciesMock,
@@ -135,9 +128,7 @@ mock.module("../../src/utils/session.js", () => ({
 }));
 
 mock.module("../../src/utils/prompt.js", async () => {
-  const actual = await import(
-    typeof import("../../src/utils/prompt.js")
-  >("../../src/utils/prompt.js");
+  const actual = await import("../../src/utils/prompt.js");
   return {
     ...actual,
     confirmYesNo: confirmYesNoMock,
@@ -197,7 +188,7 @@ describe("handleAIToolWorkflow - post session checks", () => {
     getUncommittedChangesCountMock.mockResolvedValue(2);
 
     const run = handleAIToolWorkflow(selection);
-    await new Promise(r => setTimeout(r, 3000));
+    await new Promise((r) => setTimeout(r, 3000));
     await run;
 
     const messages = warnSpy.mock.calls.flat().join(" ");
@@ -218,7 +209,7 @@ describe("handleAIToolWorkflow - post session checks", () => {
     getUnpushedCommitsCountMock.mockResolvedValue(3);
 
     const run = handleAIToolWorkflow(selection);
-    await new Promise(r => setTimeout(r, 3000));
+    await new Promise((r) => setTimeout(r, 3000));
     await run;
 
     const messages = warnSpy.mock.calls.flat().join(" ");
@@ -241,7 +232,7 @@ describe("handleAIToolWorkflow - post session checks", () => {
     getUnpushedCommitsCountMock.mockResolvedValue(1);
 
     const run = handleAIToolWorkflow(selection);
-    await new Promise(r => setTimeout(r, 3000));
+    await new Promise((r) => setTimeout(r, 3000));
     await run;
 
     const messages = warnSpy.mock.calls.flat().join(" ");
@@ -262,7 +253,7 @@ describe("handleAIToolWorkflow - post session checks", () => {
     hasUnpushedCommitsMock.mockResolvedValue(false);
 
     const run = handleAIToolWorkflow(selection);
-    await new Promise(r => setTimeout(r, 3000));
+    await new Promise((r) => setTimeout(r, 3000));
     await run;
 
     expect(waitForEnterMock).not.toHaveBeenCalled();

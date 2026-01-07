@@ -1,10 +1,10 @@
-import { describe, it, expect, beforeEach,  mock } from "bun:test";
+import { describe, it, expect, beforeEach, mock } from "bun:test";
 
-const mocks = (({
+const mocks = {
   mockGenerateWorktreePath: mock(),
   mockCreateWorktree: mock(),
   mockListAdditionalWorktrees: mock(),
-}));
+};
 
 mock.module("../../../../../src/worktree.js", () => ({
   listAdditionalWorktrees: mocks.mockListAdditionalWorktrees,
