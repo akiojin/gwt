@@ -55,5 +55,14 @@
 - [ ] T131 stdout/stderr ログに `agentId` を付与する (`src/launcher.ts`)
 - [ ] T132 Log Viewer で agent stdout/stderr が表示されることを検証 (`src/cli/ui/__tests__/solid/LogScreen.test.tsx`)
 
-## Phase 8: 回帰チェック
+## Phase 8: ログ一覧の表示強化
+- [ ] T170 [Test] フィルタ入力で一覧が絞り込まれることを確認 (`src/cli/ui/__tests__/solid/LogScreen.test.tsx`)
+- [ ] T171 [Test] 表示レベル切替が循環することを確認 (`src/cli/ui/__tests__/solid/LogScreen.test.tsx`)
+- [ ] T172 [Test] `r`/`t`/`w` のキーバインドが動作することを確認 (`src/cli/ui/__tests__/solid/LogScreen.test.tsx`)
+- [ ] T180 フィルタ入力モードの実装（一覧上部に入力行を表示） (`src/cli/ui/screens/solid/LogScreen.tsx`)
+- [ ] T181 表示レベルの循環としきい値フィルタの実装 (`src/cli/ui/screens/solid/LogScreen.tsx`)
+- [ ] T182 `r`/`t` による再読込・tail 切替の実装 (`src/cli/ui/App.solid.tsx` / `src/cli/ui/screens/solid/LogScreen.tsx`)
+- [ ] T183 `w` による折り返し切替と一覧列揃えの実装 (`src/cli/ui/screens/solid/LogScreen.tsx`)
+
+## Phase 9: 回帰チェック
 - [ ] T160 既存ログ表示の回帰テストを実行（関連テスト + lint/format）
