@@ -65,7 +65,6 @@ import {
   repairWorktrees,
   type WorktreeInfo as WorktreeEntry,
 } from "../../worktree.js";
-import { detectAllToolStatuses, type ToolStatus } from "../../utils/command.js";
 import {
   getConfig,
   getLastToolUsageMap,
@@ -110,6 +109,7 @@ export interface SelectionResult {
   model?: string | null;
   inferenceLevel?: InferenceLevel;
   sessionId?: string | null;
+  toolVersion?: string | null;
 }
 
 export type AppScreen =
@@ -154,7 +154,6 @@ export interface AppSolidProps {
   workingDirectory?: string;
   branches?: BranchItem[];
   stats?: Statistics;
-  toolStatuses?: ToolStatus[];
 }
 
 const DEFAULT_SCREEN: AppScreen = "branch-list";
@@ -211,9 +210,6 @@ export function AppSolid(props: AppSolidProps) {
 
   const [toolItems, setToolItems] = createSignal<SelectorItem[]>([]);
   const [toolError, setToolError] = createSignal<Error | null>(null);
-  const [toolStatuses, setToolStatuses] = createSignal<ToolStatus[]>(
-    props.toolStatuses ?? [],
-  );
 
   const [version, setVersion] = createSignal<string | null>(
     props.version ?? null,
@@ -544,14 +540,6 @@ export function AppSolid(props: AppSolidProps) {
   });
 
   onMount(() => {
-    if (!props.toolStatuses) {
-      void detectAllToolStatuses()
-        .then((statuses) => setToolStatuses(statuses))
-        .catch(() => setToolStatuses([]));
-    }
-  });
-
-  onMount(() => {
     void refreshProfiles();
   });
 
@@ -706,6 +694,9 @@ export function AppSolid(props: AppSolidProps) {
       ...(result.reasoningLevel !== undefined
         ? { inferenceLevel: result.reasoningLevel }
         : {}),
+      ...(result.toolVersion !== undefined
+        ? { toolVersion: result.toolVersion }
+        : {}),
     });
   };
 
@@ -736,6 +727,9 @@ export function AppSolid(props: AppSolidProps) {
         ? { inferenceLevel: entry.reasoningLevel as InferenceLevel }
         : {}),
       ...(entry.sessionId ? { sessionId: entry.sessionId } : {}),
+      ...(entry.toolVersion !== undefined
+        ? { toolVersion: entry.toolVersion }
+        : {}),
     });
   };
 
@@ -764,6 +758,9 @@ export function AppSolid(props: AppSolidProps) {
       ...(normalizedModel !== undefined ? { model: normalizedModel } : {}),
       ...(entry.reasoningLevel
         ? { inferenceLevel: entry.reasoningLevel as InferenceLevel }
+        : {}),
+      ...(entry.toolVersion !== undefined
+        ? { toolVersion: entry.toolVersion }
         : {}),
     });
   };
@@ -1304,7 +1301,6 @@ export function AppSolid(props: AppSolidProps) {
           lastUpdated={stats().lastUpdated}
           version={version()}
           workingDirectory={workingDirectory()}
-          toolStatuses={toolStatuses()}
           activeProfile={activeProfile()}
           onOpenLogs={() => navigateTo("log-list")}
           onOpenProfiles={() => navigateTo("profile")}
