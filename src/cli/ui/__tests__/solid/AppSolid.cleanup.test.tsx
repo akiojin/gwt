@@ -53,7 +53,21 @@ describe("AppSolid cleanup command", () => {
   it("runs cleanup for selected branches when pressing c", async () => {
     const deleteBranchMock = mock(async () => {});
     const removeWorktreeMock = mock(async () => {});
-    const getMergedPRWorktreesMock = mock(async () => []);
+    const getCleanupStatusMock = mock(async () => [
+      {
+        worktreePath: "/tmp/worktree",
+        branch: "feature/cleanup-target",
+        hasUncommittedChanges: false,
+        hasUnpushedCommits: false,
+        cleanupType: "worktree-and-branch",
+        hasRemoteBranch: true,
+        hasUniqueCommits: false,
+        hasUpstream: true,
+        upstream: "origin/feature/cleanup-target",
+        isAccessible: true,
+        reasons: ["no-diff-with-base"],
+      },
+    ]);
 
     mock.module?.("../../../../worktree.js", () => ({
       listAdditionalWorktrees: mock(async () => []),
@@ -63,7 +77,7 @@ describe("AppSolid cleanup command", () => {
         failures: [],
       })),
       removeWorktree: removeWorktreeMock,
-      getMergedPRWorktrees: getMergedPRWorktreesMock,
+      getCleanupStatus: getCleanupStatusMock,
       isProtectedBranchName: mock(() => false),
     }));
 
@@ -132,15 +146,31 @@ describe("AppSolid cleanup command", () => {
   });
 
   it("maps cleanup safety indicators from cleanup candidates", async () => {
-    const getMergedPRWorktreesMock = mock(async () => [
+    const getCleanupStatusMock = mock(async () => [
       {
         worktreePath: "/tmp/safe",
         branch: "feature/safe",
-        pullRequest: null,
         hasUncommittedChanges: false,
         hasUnpushedCommits: false,
         cleanupType: "worktree-and-branch",
         hasRemoteBranch: true,
+        hasUniqueCommits: false,
+        hasUpstream: true,
+        upstream: "origin/feature/safe",
+        isAccessible: true,
+        reasons: ["no-diff-with-base"],
+      },
+      {
+        worktreePath: null,
+        branch: "feature/unsafe",
+        hasUncommittedChanges: false,
+        hasUnpushedCommits: false,
+        cleanupType: "branch-only",
+        hasRemoteBranch: false,
+        hasUniqueCommits: false,
+        hasUpstream: false,
+        upstream: null,
+        reasons: [],
       },
     ]);
 
@@ -152,7 +182,7 @@ describe("AppSolid cleanup command", () => {
         failures: [],
       })),
       removeWorktree: mock(async () => {}),
-      getMergedPRWorktrees: getMergedPRWorktreesMock,
+      getCleanupStatus: getCleanupStatusMock,
       isProtectedBranchName: mock(() => false),
     }));
 
