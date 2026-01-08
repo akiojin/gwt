@@ -10,10 +10,10 @@ import type { CodingAgentId } from "../../types.js";
 import { useWizardScroll } from "./WizardPopup.js";
 import {
   fetchPackageVersions,
-  getInstalledPackageInfo,
   parsePackageCommand,
 } from "../../../../utils/npmRegistry.js";
 import { BUILTIN_CODING_AGENTS } from "../../../../config/builtin-coding-agents.js";
+import { findCommand } from "../../../../utils/command.js";
 
 /**
  * WizardSteps - ウィザードの各ステップコンポーネント
@@ -640,24 +640,35 @@ async function fetchVersionOptions(
   });
 }
 
-// インストール済みパッケージ情報を取得
+// エージェントIDからコマンド名へのマッピング
+const AGENT_COMMAND_MAP: Record<string, string> = {
+  "claude-code": "claude",
+  "codex-cli": "codex",
+  "gemini-cli": "gemini",
+  opencode: "opencode",
+};
+
+// インストール済みコマンド情報を取得（findCommandと統一）
 async function fetchInstalledOption(
   agentId: string,
 ): Promise<SelectInputItem | null> {
-  const packageName = getPackageNameForAgent(agentId);
-  if (!packageName) {
+  const commandName = AGENT_COMMAND_MAP[agentId];
+  if (!commandName) {
     return null;
   }
 
-  const info = await getInstalledPackageInfo(packageName);
-  if (!info) {
+  const result = await findCommand(commandName);
+  if (result.source !== "installed" || !result.path) {
     return null;
   }
+
+  // バージョン表示（v1.0.3 → 1.0.3 形式に）
+  const version = result.version?.replace(/^v/, "") ?? "unknown";
 
   return {
-    label: `installed@${info.version}`,
+    label: `installed@${version}`,
     value: "installed",
-    description: info.path,
+    description: result.path,
   };
 }
 
