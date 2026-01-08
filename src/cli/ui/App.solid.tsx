@@ -39,6 +39,9 @@ import { ProfileScreen } from "./screens/solid/ProfileScreen.js";
 import { ProfileEnvScreen } from "./screens/solid/ProfileEnvScreen.js";
 import { calculateStatistics } from "./utils/statisticsCalculator.js";
 import { formatBranchItems } from "./utils/branchFormatter.js";
+import { createLogger } from "../../logging/logger.js";
+
+const logger = createLogger({ category: "app" });
 import {
   getDefaultInferenceForModel,
   getDefaultModelOption,
@@ -987,6 +990,15 @@ export function AppSolid(props: AppSolidProps) {
     try {
       const result = await repairWorktrees(targets);
       await refreshBranches();
+
+      // エラー詳細をログに出力
+      if (result.failedCount > 0) {
+        logger.error(
+          { failures: result.failures, targets },
+          "Worktree repair failed for some branches",
+        );
+      }
+
       const message =
         result.failedCount > 0
           ? `Repair finished: ${result.repairedCount} repaired, ${result.failedCount} failed.`
@@ -999,6 +1011,7 @@ export function AppSolid(props: AppSolidProps) {
       );
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
+      logger.error({ error: err, targets }, "Worktree repair threw an error");
       showBranchFooterMessage(`Repair failed: ${errorMessage}`, "red");
     } finally {
       setBranchInputLocked(false);
