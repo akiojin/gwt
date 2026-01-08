@@ -655,7 +655,8 @@ export function BranchListScreen(props: BranchListScreenProps) {
 
     const isChecked = selectedSet().has(branch.name);
     const hasUncommitted = branch.worktree?.hasUncommittedChanges === true;
-    const isWarning = Boolean(branch.hasUnpushedCommits) || hasUncommitted;
+    const hasUnpushed = branch.hasUnpushedCommits === true;
+    const isWarning = hasUnpushed || hasUncommitted;
     const selectionIcon = isChecked ? "[*]" : "[ ]";
     const selectionColor = isChecked && isWarning ? "red" : undefined;
     let worktreeIcon = ".";
@@ -667,13 +668,21 @@ export function BranchListScreen(props: BranchListScreenProps) {
       worktreeIcon = "x";
       worktreeColor = "red";
     }
-    const safeIcon = branch.safeToCleanup === true ? " " : "!";
-    const safeColor: IndicatorColor | undefined =
-      branch.safeToCleanup === true
-        ? undefined
-        : branch.isUnmerged
-          ? "yellow"
-          : "red";
+    let safeIcon = " ";
+    let safeColor: IndicatorColor | undefined;
+    if (branch.safeToCleanup === true) {
+      safeIcon = " ";
+      safeColor = undefined;
+    } else if (isWarning) {
+      safeIcon = "*";
+      safeColor = "red";
+    } else if (branch.isUnmerged) {
+      safeIcon = "!";
+      safeColor = "yellow";
+    } else {
+      safeIcon = "!";
+      safeColor = "red";
+    }
 
     let commitText = "---";
     const latestActivitySec = getLatestActivityTimestamp(branch);

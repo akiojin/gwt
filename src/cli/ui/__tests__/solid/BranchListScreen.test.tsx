@@ -101,7 +101,7 @@ describe("BranchListScreen icons", () => {
     try {
       const frame = testSetup.captureCharFrame();
       expect(frame).toMatch(/\[\*\] w {2,}feature\/active-clean/);
-      expect(frame).toContain("[ ] . ! feature/no-worktree");
+      expect(frame).toContain("[ ] . * feature/no-worktree");
       expect(frame).not.toContain(">[*]");
       expect(frame).not.toContain(">[ ]");
     } finally {
