@@ -5,6 +5,7 @@ import { TextAttributes } from "@opentui/core";
 import type { BranchItem, BranchViewMode, Statistics } from "../../types.js";
 import { getLatestActivityTimestamp } from "../../utils/branchFormatter.js";
 import stringWidth from "string-width";
+import { getAgentTerminalColor } from "../../../../utils/coding-agent-colors.js";
 import { Header } from "../../components/solid/Header.js";
 type IndicatorColor = "cyan" | "green" | "yellow" | "red";
 
@@ -225,22 +226,9 @@ const formatViewModeLabel = (mode: BranchViewMode): string => {
   }
 };
 
+// Use shared color utility for consistent agent colors (SPEC-3b0ed29b FR-024~FR-027)
 const getToolColor = (label: string, toolId?: string | null): string => {
-  switch (toolId) {
-    case "claude-code":
-      return "yellow";
-    case "codex-cli":
-      return "cyan";
-    case "gemini-cli":
-      return "magenta";
-    default: {
-      const trimmed = label.trim().toLowerCase();
-      if (!toolId || trimmed === "unknown") {
-        return "gray";
-      }
-      return "white";
-    }
-  }
+  return getAgentTerminalColor(toolId, label);
 };
 
 interface LoadingIndicatorProps {
