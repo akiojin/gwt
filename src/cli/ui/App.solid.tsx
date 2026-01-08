@@ -61,6 +61,7 @@ import {
 import {
   isProtectedBranchName,
   listAdditionalWorktrees,
+  getMergedPRWorktrees,
   removeWorktree,
   repairWorktrees,
   type WorktreeInfo as WorktreeEntry,
@@ -161,6 +162,15 @@ const DEFAULT_SCREEN: AppScreen = "branch-list";
 const buildStats = (branches: BranchItem[]): Statistics =>
   calculateStatistics(branches);
 
+const applyCleanupSafety = (
+  items: BranchItem[],
+  safeBranches: Set<string>,
+): BranchItem[] =>
+  items.map((branch) => ({
+    ...branch,
+    safeToCleanup: safeBranches.has(branch.name),
+  }));
+
 const toLocalBranchName = (name: string): string => {
   const segments = name.split("/");
   if (segments.length <= 1) {
@@ -235,6 +245,9 @@ export function AppSolid(props: AppSolidProps) {
   const [cleanupIndicators, setCleanupIndicators] = createSignal<
     Record<string, CleanupIndicator>
   >({});
+  const [cleanupSafeBranches, setCleanupSafeBranches] = createSignal<
+    Set<string>
+  >(new Set());
   const [isNewBranch, setIsNewBranch] = createSignal(false);
   const [newBranchBaseRef, setNewBranchBaseRef] = createSignal<string | null>(
     null,
@@ -331,6 +344,23 @@ export function AppSolid(props: AppSolidProps) {
       .map(([key, value]) => ({ key, value: String(value) }))
       .sort((a, b) => a.key.localeCompare(b.key)),
   );
+
+  const refreshCleanupSafety = async () => {
+    try {
+      const cleanupTargets = await getMergedPRWorktrees();
+      const safeBranches = new Set(
+        cleanupTargets.map((target) => target.branch),
+      );
+      setCleanupSafeBranches(safeBranches);
+      setBranchItems((items) => applyCleanupSafety(items, safeBranches));
+    } catch (err) {
+      logger.warn({ err }, "Failed to refresh cleanup safety indicators");
+      const empty = new Set<string>();
+      setCleanupSafeBranches(empty);
+      setBranchItems((items) => applyCleanupSafety(items, empty));
+    }
+  };
+
   let logNotificationTimer: ReturnType<typeof setTimeout> | null = null;
   let branchFooterTimer: ReturnType<typeof setTimeout> | null = null;
   const BRANCH_LOAD_TIMEOUT_MS = 3000;
@@ -430,6 +460,7 @@ export function AppSolid(props: AppSolidProps) {
   const refreshBranches = async () => {
     setLoading(true);
     setError(null);
+    void refreshCleanupSafety();
     try {
       const repoRoot = await getRepositoryRoot();
       const worktreesPromise = listAdditionalWorktrees();
@@ -464,8 +495,12 @@ export function AppSolid(props: AppSolidProps) {
         worktrees,
         lastToolUsageMap,
       );
-      setBranchItems(initial.items);
-      setStats(buildStats(initial.items));
+      const initialItems = applyCleanupSafety(
+        initial.items,
+        cleanupSafeBranches(),
+      );
+      setBranchItems(initialItems);
+      setStats(buildStats(initialItems));
 
       void (async () => {
         const [branches, latestWorktrees] = await Promise.all([
@@ -484,8 +519,9 @@ export function AppSolid(props: AppSolidProps) {
           latestWorktrees,
           lastToolUsageMap,
         );
-        setBranchItems(full.items);
-        setStats(buildStats(full.items));
+        const fullItems = applyCleanupSafety(full.items, cleanupSafeBranches());
+        setBranchItems(fullItems);
+        setStats(buildStats(fullItems));
       })();
     } catch (err) {
       setError(err instanceof Error ? err : new Error(String(err)));
@@ -519,8 +555,10 @@ export function AppSolid(props: AppSolidProps) {
 
   createEffect(() => {
     if (props.branches) {
-      setBranchItems(props.branches);
-      setStats(props.stats ?? buildStats(props.branches));
+      const safeBranches = cleanupSafeBranches();
+      const nextItems = applyCleanupSafety(props.branches, safeBranches);
+      setBranchItems(nextItems);
+      setStats(props.stats ?? buildStats(nextItems));
       setLoading(false);
     }
   });
@@ -528,6 +566,12 @@ export function AppSolid(props: AppSolidProps) {
   onMount(() => {
     if (!props.branches) {
       void refreshBranches();
+    }
+  });
+
+  onMount(() => {
+    if (props.branches) {
+      void refreshCleanupSafety();
     }
   });
 
