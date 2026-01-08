@@ -25,6 +25,7 @@ interface CleanupUIState {
   indicators: Record<string, CleanupIndicator>;
   footerMessage: CleanupFooterMessage | null;
   inputLocked: boolean;
+  safetyLoading?: boolean;
 }
 
 export interface BranchListScreenProps {
@@ -345,7 +346,10 @@ export function BranchListScreen(props: BranchListScreenProps) {
   );
 
   const cleanupSpinnerActive = createMemo(
-    () => hasSpinningIndicator() || hasSpinningFooter(),
+    () =>
+      hasSpinningIndicator() ||
+      hasSpinningFooter() ||
+      props.cleanupUI?.safetyLoading === true,
   );
 
   createEffect(() => {
@@ -654,7 +658,9 @@ export function BranchListScreen(props: BranchListScreenProps) {
       !isSelected && indicatorInfo?.color ? indicatorInfo.color : undefined;
 
     const isChecked = selectedSet().has(branch.name);
-    const isWarning = Boolean(branch.hasUnpushedCommits) || !branch.mergedPR;
+    const hasUncommitted = branch.worktree?.hasUncommittedChanges === true;
+    const hasUnpushed = branch.hasUnpushedCommits === true;
+    const isWarning = hasUnpushed || hasUncommitted;
     const selectionIcon = isChecked ? "[*]" : "[ ]";
     const selectionColor = isChecked && isWarning ? "red" : undefined;
     let worktreeIcon = ".";
@@ -666,9 +672,34 @@ export function BranchListScreen(props: BranchListScreenProps) {
       worktreeIcon = "x";
       worktreeColor = "red";
     }
-    const safeIcon = branch.safeToCleanup === true ? " " : "!";
-    const safeColor: IndicatorColor | undefined =
-      branch.safeToCleanup === true ? undefined : "red";
+    const isRemoteBranch = branch.type === "remote";
+    const safetyLoading = props.cleanupUI?.safetyLoading === true;
+    const spinnerFrame = cleanupSpinnerFrame();
+
+    let safeIcon = " ";
+    let safeColor: IndicatorColor | undefined;
+    if (isRemoteBranch) {
+      safeIcon = " ";
+      safeColor = undefined;
+    } else if (hasUncommitted) {
+      safeIcon = "!";
+      safeColor = "red";
+    } else if (hasUnpushed) {
+      safeIcon = "!";
+      safeColor = "yellow";
+    } else if (branch.isUnmerged) {
+      safeIcon = "*";
+      safeColor = "yellow";
+    } else if (safetyLoading) {
+      safeIcon = spinnerFrame ?? "-";
+      safeColor = undefined;
+    } else if (branch.safeToCleanup === true) {
+      safeIcon = " ";
+      safeColor = undefined;
+    } else {
+      safeIcon = "!";
+      safeColor = "red";
+    }
 
     let commitText = "---";
     const latestActivitySec = getLatestActivityTimestamp(branch);

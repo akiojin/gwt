@@ -11,6 +11,7 @@ import type {
   BranchItem,
   BranchInfo,
   CodingAgentId,
+  CleanupStatus,
   InferenceLevel,
   SelectedBranchState,
   Statistics,
@@ -60,6 +61,7 @@ import {
 } from "../../git.js";
 import {
   isProtectedBranchName,
+  getCleanupStatus,
   listAdditionalWorktrees,
   removeWorktree,
   repairWorktrees,
@@ -161,6 +163,35 @@ const DEFAULT_SCREEN: AppScreen = "branch-list";
 const buildStats = (branches: BranchItem[]): Statistics =>
   calculateStatistics(branches);
 
+const applyCleanupStatus = (
+  items: BranchItem[],
+  statusByBranch: Map<string, CleanupStatus>,
+): BranchItem[] =>
+  items.map((branch) => {
+    const status = statusByBranch.get(branch.name);
+    if (!status) {
+      return { ...branch, safeToCleanup: false, isUnmerged: false };
+    }
+    const safeToCleanup =
+      status.hasUpstream && status.reasons.includes("no-diff-with-base");
+    const isUnmerged = status.hasUpstream && status.hasUniqueCommits;
+    const worktree = branch.worktree
+      ? {
+          ...branch.worktree,
+          ...(status.hasUncommittedChanges !== undefined
+            ? { hasUncommittedChanges: status.hasUncommittedChanges }
+            : {}),
+        }
+      : undefined;
+    const base: BranchItem = {
+      ...branch,
+      safeToCleanup,
+      isUnmerged,
+      hasUnpushedCommits: status.hasUnpushedCommits,
+    };
+    return worktree ? { ...base, worktree } : base;
+  });
+
 const toLocalBranchName = (name: string): string => {
   const segments = name.split("/");
   if (segments.length <= 1) {
@@ -235,6 +266,10 @@ export function AppSolid(props: AppSolidProps) {
   const [cleanupIndicators, setCleanupIndicators] = createSignal<
     Record<string, CleanupIndicator>
   >({});
+  const [cleanupStatusByBranch, setCleanupStatusByBranch] = createSignal<
+    Map<string, CleanupStatus>
+  >(new Map());
+  const [cleanupSafetyLoading, setCleanupSafetyLoading] = createSignal(false);
   const [isNewBranch, setIsNewBranch] = createSignal(false);
   const [newBranchBaseRef, setNewBranchBaseRef] = createSignal<string | null>(
     null,
@@ -331,6 +366,36 @@ export function AppSolid(props: AppSolidProps) {
       .map(([key, value]) => ({ key, value: String(value) }))
       .sort((a, b) => a.key.localeCompare(b.key)),
   );
+
+  let cleanupSafetyRequestId = 0;
+  const refreshCleanupSafety = async () => {
+    const requestId = ++cleanupSafetyRequestId;
+    setCleanupSafetyLoading(true);
+    try {
+      const cleanupStatuses = await getCleanupStatus();
+      if (requestId !== cleanupSafetyRequestId) {
+        return;
+      }
+      const statusByBranch = new Map(
+        cleanupStatuses.map((status) => [status.branch, status]),
+      );
+      setCleanupStatusByBranch(statusByBranch);
+      setBranchItems((items) => applyCleanupStatus(items, statusByBranch));
+    } catch (err) {
+      if (requestId !== cleanupSafetyRequestId) {
+        return;
+      }
+      logger.warn({ err }, "Failed to refresh cleanup safety indicators");
+      const empty = new Map<string, CleanupStatus>();
+      setCleanupStatusByBranch(empty);
+      setBranchItems((items) => applyCleanupStatus(items, empty));
+    } finally {
+      if (requestId === cleanupSafetyRequestId) {
+        setCleanupSafetyLoading(false);
+      }
+    }
+  };
+
   let logNotificationTimer: ReturnType<typeof setTimeout> | null = null;
   let branchFooterTimer: ReturnType<typeof setTimeout> | null = null;
   const BRANCH_LOAD_TIMEOUT_MS = 3000;
@@ -430,6 +495,7 @@ export function AppSolid(props: AppSolidProps) {
   const refreshBranches = async () => {
     setLoading(true);
     setError(null);
+    void refreshCleanupSafety();
     try {
       const repoRoot = await getRepositoryRoot();
       const worktreesPromise = listAdditionalWorktrees();
@@ -464,8 +530,12 @@ export function AppSolid(props: AppSolidProps) {
         worktrees,
         lastToolUsageMap,
       );
-      setBranchItems(initial.items);
-      setStats(buildStats(initial.items));
+      const initialItems = applyCleanupStatus(
+        initial.items,
+        cleanupStatusByBranch(),
+      );
+      setBranchItems(initialItems);
+      setStats(buildStats(initialItems));
 
       void (async () => {
         const [branches, latestWorktrees] = await Promise.all([
@@ -484,8 +554,12 @@ export function AppSolid(props: AppSolidProps) {
           latestWorktrees,
           lastToolUsageMap,
         );
-        setBranchItems(full.items);
-        setStats(buildStats(full.items));
+        const fullItems = applyCleanupStatus(
+          full.items,
+          cleanupStatusByBranch(),
+        );
+        setBranchItems(fullItems);
+        setStats(buildStats(fullItems));
       })();
     } catch (err) {
       setError(err instanceof Error ? err : new Error(String(err)));
@@ -519,8 +593,10 @@ export function AppSolid(props: AppSolidProps) {
 
   createEffect(() => {
     if (props.branches) {
-      setBranchItems(props.branches);
-      setStats(props.stats ?? buildStats(props.branches));
+      const statusByBranch = cleanupStatusByBranch();
+      const nextItems = applyCleanupStatus(props.branches, statusByBranch);
+      setBranchItems(nextItems);
+      setStats(props.stats ?? buildStats(nextItems));
       setLoading(false);
     }
   });
@@ -528,6 +604,12 @@ export function AppSolid(props: AppSolidProps) {
   onMount(() => {
     if (!props.branches) {
       void refreshBranches();
+    }
+  });
+
+  onMount(() => {
+    if (props.branches) {
+      void refreshCleanupSafety();
     }
   });
 
@@ -841,9 +923,14 @@ export function AppSolid(props: AppSolidProps) {
             skipCounts.current += 1;
             continue;
           }
-          const isWarning =
-            Boolean(branch.hasUnpushedCommits) || !branch.mergedPR;
-          if (isWarning) {
+          const hasUncommitted =
+            branch.worktree?.hasUncommittedChanges === true;
+          const hasUnpushed = branch.hasUnpushedCommits === true;
+          if (hasUncommitted || hasUnpushed) {
+            skipCounts.unsafe += 1;
+            continue;
+          }
+          if (branch.safeToCleanup !== true) {
             skipCounts.unsafe += 1;
             continue;
           }
@@ -873,7 +960,7 @@ export function AppSolid(props: AppSolidProps) {
       const skipNotice = buildSkipNotice(
         skipCounts,
         hasSelection
-          ? "with unpushed commits or unmerged PRs"
+          ? "unsafe (uncommitted/unpushed, unmerged, or missing upstream)"
           : "with uncommitted or unpushed changes",
       );
 
@@ -1285,6 +1372,7 @@ export function AppSolid(props: AppSolidProps) {
         indicators: cleanupIndicators(),
         footerMessage: branchFooterMessage(),
         inputLocked: branchInputLocked(),
+        safetyLoading: cleanupSafetyLoading(),
       };
       return (
         <BranchListScreen
