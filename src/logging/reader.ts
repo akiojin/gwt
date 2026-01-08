@@ -108,6 +108,10 @@ export async function readLogLinesForDate(
     }
   }
 
-  const fallbackDate = preferred?.date ?? files[0].date;
+  const fallback = files[0];
+  if (!fallback) {
+    return { date: preferredDate, lines: [] };
+  }
+  const fallbackDate = preferred?.date ?? fallback.date;
   return { date: fallbackDate, lines: [] };
 }
