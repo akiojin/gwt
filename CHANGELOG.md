@@ -11,6 +11,13 @@
 * tools.json の customTools → customCodingAgents マイグレーション対応 ([#476](https://github.com/akiojin/gwt/issues/476)) ([99f1c7f](https://github.com/akiojin/gwt/commit/99f1c7f3b9263e087de0c3c4cd96de8adccbe229))
 
 
+## [4.11.2](https://github.com/akiojin/gwt/compare/v4.11.1...v4.11.2) (2026-01-08)
+
+
+### Bug Fixes
+
+* 安全アイコン表示のルールを更新 ([#516](https://github.com/akiojin/gwt/issues/516)) ([70a15f7](https://github.com/akiojin/gwt/commit/70a15f72e0ea5adcc32b7d59bf0c8d13082b675f))
+
 ## [4.11.1](https://github.com/akiojin/gwt/compare/v4.11.0...v4.11.1) (2026-01-08)
 
 
