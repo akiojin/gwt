@@ -604,7 +604,8 @@ export async function repairWorktrees(
 
   try {
     // git worktree repairを引数なしで実行（全Worktreeを修復）
-    await execa("git", ["worktree", "repair"]);
+    const repoRoot = await getRepositoryRoot();
+    await execa("git", ["worktree", "repair"], { cwd: repoRoot });
 
     // 修復後のアクセス可能性を確認
     const afterWorktrees = await listAdditionalWorktrees();
