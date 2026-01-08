@@ -655,7 +655,7 @@ async function fetchInstalledOption(
   }
 
   return {
-    label: `installed (${info.version})`,
+    label: `installed@${info.version}`,
     value: "installed",
     description: info.path,
   };
