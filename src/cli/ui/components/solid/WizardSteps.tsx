@@ -1,5 +1,6 @@
 /** @jsxImportSource @opentui/solid */
 import { TextAttributes } from "@opentui/core";
+import type { SelectRenderable } from "@opentui/core";
 import { useKeyboard } from "@opentui/solid";
 import { createEffect, createSignal } from "solid-js";
 import { SelectInput, type SelectInputItem } from "./SelectInput.js";
@@ -19,37 +20,72 @@ export interface StepProps {
   focused?: boolean;
 }
 
-const useEdgeScroll = (options: {
+const useEnsureSelectionVisible = (options: {
   getSelectedIndex: () => number;
   getItemCount: () => number;
-  focused?: boolean | undefined;
+  getSelectRef: () => SelectRenderable | undefined;
+  linesPerItem?: number;
+  getFocused?: () => boolean | undefined;
 }) => {
   const scroll = useWizardScroll();
-  useKeyboard((key) => {
-    if (options.focused === false) {
+  const ensureIndexVisible = (index: number) => {
+    if (!scroll) {
       return;
     }
-    if (!scroll) {
+    const selectRef = options.getSelectRef();
+    if (!selectRef) {
+      return;
+    }
+    const linesPerItem = Math.max(1, options.linesPerItem ?? 1);
+    const startLine = selectRef.y + Math.max(0, index) * linesPerItem;
+    const endLine = startLine + Math.max(0, linesPerItem - 1);
+    scroll.ensureLineVisible(startLine);
+    if (endLine !== startLine) {
+      scroll.ensureLineVisible(endLine);
+    }
+  };
+
+  createEffect(() => {
+    if (options.getFocused && options.getFocused() === false) {
       return;
     }
     const itemCount = options.getItemCount();
     if (itemCount <= 0) {
       return;
     }
-    if (key.name === "up") {
-      if (options.getSelectedIndex() <= 0 && scroll.scrollByLines(-1)) {
-        key.preventDefault();
-      }
+    const safeIndex = Math.min(
+      Math.max(options.getSelectedIndex(), 0),
+      itemCount - 1,
+    );
+    ensureIndexVisible(safeIndex);
+  });
+
+  useKeyboard((key) => {
+    if (options.getFocused && options.getFocused() === false) {
       return;
     }
-    if (key.name === "down") {
-      if (
-        options.getSelectedIndex() >= itemCount - 1 &&
-        scroll.scrollByLines(1)
-      ) {
-        key.preventDefault();
-      }
+    if (!scroll) {
+      return;
     }
+    if (key.name !== "up" && key.name !== "down") {
+      return;
+    }
+    const itemCount = options.getItemCount();
+    if (itemCount <= 0) {
+      return;
+    }
+    const currentIndex = Math.min(
+      Math.max(options.getSelectedIndex(), 0),
+      itemCount - 1,
+    );
+    const nextIndex =
+      key.name === "up"
+        ? Math.max(0, currentIndex - 1)
+        : Math.min(itemCount - 1, currentIndex + 1);
+    if (nextIndex === currentIndex) {
+      return;
+    }
+    ensureIndexVisible(nextIndex);
   });
 };
 
@@ -76,10 +112,14 @@ const ACTION_OPTIONS: SelectInputItem[] = [
 
 export function ActionSelectStep(props: ActionSelectStepProps) {
   const [selectedIndex, setSelectedIndex] = createSignal(0);
-  useEdgeScroll({
+  const [selectRef, setSelectRef] = createSignal<SelectRenderable | undefined>(
+    undefined,
+  );
+  useEnsureSelectionVisible({
     getSelectedIndex: selectedIndex,
     getItemCount: () => ACTION_OPTIONS.length,
-    focused: props.focused,
+    getFocused: () => props.focused,
+    getSelectRef: selectRef,
   });
 
   const handleChange = (item: SelectInputItem | null) => {
@@ -108,6 +148,7 @@ export function ActionSelectStep(props: ActionSelectStepProps) {
         onSelect={(item) => props.onSelect(item.value as BranchAction)}
         onChange={handleChange}
         focused={props.focused ?? true}
+        selectRef={setSelectRef}
       />
       <text> </text>
       <text attributes={TextAttributes.DIM}>[Enter] Select [Esc] Cancel</text>
@@ -129,10 +170,14 @@ const BRANCH_TYPES: SelectInputItem[] = [
 
 export function BranchTypeStep(props: BranchTypeStepProps) {
   const [selectedIndex, setSelectedIndex] = createSignal(0);
-  useEdgeScroll({
+  const [selectRef, setSelectRef] = createSignal<SelectRenderable | undefined>(
+    undefined,
+  );
+  useEnsureSelectionVisible({
     getSelectedIndex: selectedIndex,
     getItemCount: () => BRANCH_TYPES.length,
-    focused: props.focused,
+    getFocused: () => props.focused,
+    getSelectRef: selectRef,
   });
 
   const handleChange = (item: SelectInputItem | null) => {
@@ -159,6 +204,7 @@ export function BranchTypeStep(props: BranchTypeStepProps) {
         onSelect={(item) => props.onSelect(item.value)}
         onChange={handleChange}
         focused={props.focused ?? true}
+        selectRef={setSelectRef}
       />
       <text> </text>
       <text attributes={TextAttributes.DIM}>[Enter] Select [Esc] Back</text>
@@ -175,6 +221,16 @@ export interface BranchNameStepProps extends StepProps {
 export function BranchNameStep(props: BranchNameStepProps) {
   const [name, setName] = createSignal("");
   const scroll = useWizardScroll();
+
+  createEffect(() => {
+    if (props.focused === false) {
+      return;
+    }
+    if (!scroll) {
+      return;
+    }
+    scroll.ensureLineVisible(2);
+  });
 
   useKeyboard((key) => {
     if (props.focused === false) {
@@ -241,10 +297,14 @@ const AGENTS: SelectInputItem[] = [
 
 export function AgentSelectStep(props: AgentSelectStepProps) {
   const [selectedIndex, setSelectedIndex] = createSignal(0);
-  useEdgeScroll({
+  const [selectRef, setSelectRef] = createSignal<SelectRenderable | undefined>(
+    undefined,
+  );
+  useEnsureSelectionVisible({
     getSelectedIndex: selectedIndex,
     getItemCount: () => AGENTS.length,
-    focused: props.focused,
+    getFocused: () => props.focused,
+    getSelectRef: selectRef,
   });
 
   const handleChange = (item: SelectInputItem | null) => {
@@ -271,6 +331,7 @@ export function AgentSelectStep(props: AgentSelectStepProps) {
         onSelect={(item) => props.onSelect(item.value)}
         onChange={handleChange}
         focused={props.focused ?? true}
+        selectRef={setSelectRef}
       />
       <text> </text>
       <text attributes={TextAttributes.DIM}>[Enter] Select [Esc] Back</text>
@@ -300,11 +361,15 @@ function getModelItems(agentId: CodingAgentId): SelectInputItem[] {
 
 export function ModelSelectStep(props: ModelSelectStepProps) {
   const [selectedIndex, setSelectedIndex] = createSignal(0);
+  const [selectRef, setSelectRef] = createSignal<SelectRenderable | undefined>(
+    undefined,
+  );
   const models = () => getModelItems(props.agentId);
-  useEdgeScroll({
+  useEnsureSelectionVisible({
     getSelectedIndex: selectedIndex,
     getItemCount: () => models().length,
-    focused: props.focused,
+    getFocused: () => props.focused,
+    getSelectRef: selectRef,
   });
 
   createEffect(() => {
@@ -343,6 +408,7 @@ export function ModelSelectStep(props: ModelSelectStepProps) {
         onSelect={(item) => props.onSelect(item.value)}
         onChange={handleChange}
         focused={props.focused ?? true}
+        selectRef={setSelectRef}
       />
       <text> </text>
       <text attributes={TextAttributes.DIM}>[Enter] Select [Esc] Back</text>
@@ -364,10 +430,14 @@ const REASONING_LEVELS: SelectInputItem[] = [
 
 export function ReasoningLevelStep(props: ReasoningLevelStepProps) {
   const [selectedIndex, setSelectedIndex] = createSignal(0);
-  useEdgeScroll({
+  const [selectRef, setSelectRef] = createSignal<SelectRenderable | undefined>(
+    undefined,
+  );
+  useEnsureSelectionVisible({
     getSelectedIndex: selectedIndex,
     getItemCount: () => REASONING_LEVELS.length,
-    focused: props.focused,
+    getFocused: () => props.focused,
+    getSelectRef: selectRef,
   });
 
   const handleChange = (item: SelectInputItem | null) => {
@@ -394,6 +464,7 @@ export function ReasoningLevelStep(props: ReasoningLevelStepProps) {
         onSelect={(item) => props.onSelect(item.value)}
         onChange={handleChange}
         focused={props.focused ?? true}
+        selectRef={setSelectRef}
       />
       <text> </text>
       <text attributes={TextAttributes.DIM}>[Enter] Select [Esc] Back</text>
@@ -422,10 +493,14 @@ const EXECUTION_MODES: SelectInputItem[] = [
 
 export function ExecutionModeStep(props: ExecutionModeStepProps) {
   const [selectedIndex, setSelectedIndex] = createSignal(0);
-  useEdgeScroll({
+  const [selectRef, setSelectRef] = createSignal<SelectRenderable | undefined>(
+    undefined,
+  );
+  useEnsureSelectionVisible({
     getSelectedIndex: selectedIndex,
     getItemCount: () => EXECUTION_MODES.length,
-    focused: props.focused,
+    getFocused: () => props.focused,
+    getSelectRef: selectRef,
   });
 
   const handleChange = (item: SelectInputItem | null) => {
@@ -452,6 +527,7 @@ export function ExecutionModeStep(props: ExecutionModeStepProps) {
         onSelect={(item) => props.onSelect(item.value)}
         onChange={handleChange}
         focused={props.focused ?? true}
+        selectRef={setSelectRef}
       />
       <text> </text>
       <text attributes={TextAttributes.DIM}>[Enter] Select [Esc] Back</text>
@@ -471,10 +547,14 @@ const SKIP_OPTIONS: SelectInputItem[] = [
 
 export function SkipPermissionsStep(props: SkipPermissionsStepProps) {
   const [selectedIndex, setSelectedIndex] = createSignal(0);
-  useEdgeScroll({
+  const [selectRef, setSelectRef] = createSignal<SelectRenderable | undefined>(
+    undefined,
+  );
+  useEnsureSelectionVisible({
     getSelectedIndex: selectedIndex,
     getItemCount: () => SKIP_OPTIONS.length,
-    focused: props.focused,
+    getFocused: () => props.focused,
+    getSelectRef: selectRef,
   });
 
   const handleChange = (item: SelectInputItem | null) => {
@@ -501,6 +581,7 @@ export function SkipPermissionsStep(props: SkipPermissionsStepProps) {
         onSelect={(item) => props.onSelect(item.value === "true")}
         onChange={handleChange}
         focused={props.focused ?? true}
+        selectRef={setSelectRef}
       />
       <text> </text>
       <text attributes={TextAttributes.DIM}>[Enter] Select [Esc] Back</text>
