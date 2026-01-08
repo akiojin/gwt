@@ -414,6 +414,23 @@ export function BranchListScreen(props: BranchListScreenProps) {
     return result;
   });
 
+  // ツールラベルの最大幅を動的に計算
+  const maxToolWidth = createMemo(() => {
+    const MIN_TOOL_WIDTH = 7; // "Unknown" の幅
+    let maxWidth = MIN_TOOL_WIDTH;
+    for (const branch of filteredBranches()) {
+      const toolLabel =
+        branch.lastToolUsageLabel?.split("|")?.[0]?.trim() ??
+        branch.lastToolUsage?.toolId ??
+        "Unknown";
+      const width = stringWidth(toolLabel);
+      if (width > maxWidth) {
+        maxWidth = width;
+      }
+    }
+    return maxWidth;
+  });
+
   createEffect(() => {
     filterQuery();
     viewMode();
@@ -685,9 +702,9 @@ export function BranchListScreen(props: BranchListScreenProps) {
       return v + " ".repeat(padding);
     };
 
-    const TOOL_WIDTH = 7;
+    const toolWidth = maxToolWidth();
     const DATE_WIDTH = 16;
-    const paddedTool = formatFixedWidth(toolLabelRaw, TOOL_WIDTH);
+    const paddedTool = formatFixedWidth(toolLabelRaw, toolWidth);
     const paddedDate =
       commitText === "---"
         ? " ".repeat(DATE_WIDTH)
