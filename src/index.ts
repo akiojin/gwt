@@ -27,7 +27,10 @@ import {
   isProtectedBranchName,
   switchToProtectedBranch,
   resolveWorktreePathForBranch,
+  generateWorktreePath,
 } from "./worktree.js";
+import { execa } from "execa";
+import fs from "node:fs";
 import {
   getTerminalStreams,
   resetTerminalModes,
@@ -307,15 +310,42 @@ export async function handleAIToolWorkflow(
       ensureOptions.isNewBranch = !localExists;
     }
 
-    const existingWorktreeResolution =
-      await resolveWorktreePathForBranch(branch);
-    const existingWorktree = existingWorktreeResolution.path;
+    let existingWorktreeResolution = await resolveWorktreePathForBranch(branch);
+    let existingWorktree = existingWorktreeResolution.path;
+
+    // mismatch検出時に自動修復を試みる
     if (!existingWorktree && existingWorktreeResolution.mismatch) {
       const actualBranch =
         existingWorktreeResolution.mismatch.actualBranch ?? "unknown";
       printWarning(
-        `Worktree mismatch detected: ${existingWorktreeResolution.mismatch.path} is checked out to '${actualBranch}'. Creating or reusing the correct worktree for '${branch}'.`,
+        `Worktree mismatch detected: ${existingWorktreeResolution.mismatch.path} is checked out to '${actualBranch}'. Attempting to repair...`,
       );
+
+      // 正しいworktreeパスを計算
+      const expectedPath = await generateWorktreePath(repoRoot, branch);
+
+      // 期待されるパスにworktreeディレクトリが存在する場合、修復を試みる
+      if (fs.existsSync(expectedPath)) {
+        try {
+          await execa("git", ["worktree", "repair", expectedPath], {
+            cwd: repoRoot,
+          });
+          printInfo(`Worktree path repaired: ${expectedPath}`);
+
+          // 修復後に再度解決を試みる
+          existingWorktreeResolution =
+            await resolveWorktreePathForBranch(branch);
+          existingWorktree = existingWorktreeResolution.path;
+        } catch {
+          printWarning(
+            `Failed to repair worktree. Creating or reusing the correct worktree for '${branch}'.`,
+          );
+        }
+      } else {
+        printWarning(
+          `Expected worktree path does not exist: ${expectedPath}. Creating new worktree for '${branch}'.`,
+        );
+      }
     }
 
     const isProtectedBranch =
