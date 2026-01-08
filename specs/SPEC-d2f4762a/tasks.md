@@ -180,7 +180,7 @@
 
 ## フェーズ10: ユーザーストーリー4 - 安全判定と表示の更新 (優先度: P1)
 
-**ストーリー**: upstream の有無とマージ状態を安全判定に反映し、未コミット/未プッシュは赤色の安全アイコン`*`、未マージは黄色`!`で警告する。
+**ストーリー**: upstream の有無とマージ状態を安全判定に反映し、未コミット/未プッシュは赤色の安全アイコン`*`、未マージは黄色`!`で警告し、判定中はスピナーを表示する。
 
 **価値**: 安全条件の誤認を防ぎ、削除判断の誤りを減らす。
 
@@ -188,13 +188,17 @@
 
 - [x] **T801** [P] [共通] `specs/SPEC-d2f4762a/spec.md` の安全判定ルールと色指定を更新
 - [x] **T802** [P] [共通] `specs/SPEC-d2f4762a/plan.md` の安全判定方針を更新
+- [x] **T803** [P] [共通] `specs/SPEC-d2f4762a/spec.md` に安全判定スピナー/リモートブランチ空白の要件を追記
+- [x] **T804** [P] [共通] `specs/SPEC-d2f4762a/plan.md` に安全判定スピナー/リモートブランチ空白の方針を追記
 
 ### テスト（TDD）
 
 - [x] **T811** [US4] `src/cli/ui/__tests__/solid/BranchListScreen.test.tsx` に未コミット/未プッシュの赤い安全アイコン`*`と未マージの黄色`!`を確認するテストを追加
 - [x] **T812** [US4] `src/cli/ui/__tests__/solid/AppSolid.cleanup.test.tsx` にupstream未設定時の安全判定除外を確認するテストを追加
+- [x] **T813** [US4] `src/cli/ui/__tests__/solid/BranchListScreen.test.tsx` に安全判定中のスピナーとリモートブランチ空白を確認するテストを追加
 
 ### 実装
 
 - [x] **T821** [US4] `src/cli/ui/App.solid.tsx` にupstream/マージ/未コミット・未プッシュの安全判定反映ロジックを追加
 - [x] **T822** [US4] `src/cli/ui/screens/solid/BranchListScreen.tsx` の安全アイコン色分けを更新
+- [x] **T823** [US4] `src/cli/ui/screens/solid/BranchListScreen.tsx` に安全判定スピナー/リモートブランチ空白の表示を追加
