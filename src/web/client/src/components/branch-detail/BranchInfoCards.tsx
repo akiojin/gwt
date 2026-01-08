@@ -2,6 +2,10 @@ import React from "react";
 import { Card, CardHeader, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import type { Branch, LastToolUsage } from "../../../../../types/api.js";
+import {
+  getAgentTailwindClass,
+  getAgentBgTailwindClass,
+} from "@/lib/coding-agent-colors";
 
 interface BranchInfoCardsProps {
   branch: Branch;
@@ -158,7 +162,10 @@ export function BranchInfoCards({
           </CardHeader>
           <CardContent>
             <div className="flex flex-wrap items-center gap-2 text-sm">
-              <Badge variant="outline">
+              <Badge
+                variant="outline"
+                className={`${getAgentTailwindClass(latestToolUsage.toolId)} ${getAgentBgTailwindClass(latestToolUsage.toolId)}`}
+              >
                 {renderToolUsage(latestToolUsage)}
               </Badge>
               <span className="text-muted-foreground">

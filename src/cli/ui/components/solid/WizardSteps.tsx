@@ -8,6 +8,7 @@ import { TextInput } from "./TextInput.js";
 import { getModelOptions } from "../../utils/modelOptions.js";
 import type { CodingAgentId } from "../../types.js";
 import { useWizardScroll } from "./WizardPopup.js";
+import { getAgentTerminalColor } from "../../../../utils/coding-agent-colors.js";
 
 /**
  * WizardSteps - ウィザードの各ステップコンポーネント
@@ -276,7 +277,13 @@ export interface AgentSelectStepProps extends StepProps {
   onSelect: (agentId: string) => void;
 }
 
-const AGENTS: SelectInputItem[] = [
+interface AgentItem {
+  label: string;
+  value: string;
+  description: string;
+}
+
+const AGENTS: AgentItem[] = [
   {
     label: "Claude Code",
     value: "claude-code",
@@ -297,28 +304,31 @@ const AGENTS: SelectInputItem[] = [
 
 export function AgentSelectStep(props: AgentSelectStepProps) {
   const [selectedIndex, setSelectedIndex] = createSignal(0);
-  const [selectRef, setSelectRef] = createSignal<SelectRenderable | undefined>(
-    undefined,
-  );
-  useEnsureSelectionVisible({
-    getSelectedIndex: selectedIndex,
-    getItemCount: () => AGENTS.length,
-    getFocused: () => props.focused,
-    getSelectRef: selectRef,
+  const scroll = useWizardScroll();
+
+  // Keyboard navigation
+  useKeyboard((key) => {
+    if (props.focused === false) return;
+
+    if (key.name === "up") {
+      setSelectedIndex((i) => Math.max(0, i - 1));
+    } else if (key.name === "down") {
+      setSelectedIndex((i) => Math.min(AGENTS.length - 1, i + 1));
+    } else if (key.name === "return") {
+      const agent = AGENTS[selectedIndex()];
+      if (agent) {
+        props.onSelect(agent.value);
+      }
+    }
   });
 
-  const handleChange = (item: SelectInputItem | null) => {
-    if (!item) {
-      setSelectedIndex(0);
-      return;
-    }
-    const nextIndex = AGENTS.findIndex(
-      (candidate) => candidate.value === item.value,
-    );
-    if (nextIndex >= 0) {
-      setSelectedIndex(nextIndex);
-    }
-  };
+  // Ensure selected item is visible in scroll container
+  createEffect(() => {
+    if (!scroll || props.focused === false) return;
+    // Header line (title) + empty line + selected index
+    const lineOffset = 2 + selectedIndex();
+    scroll.ensureLineVisible(lineOffset);
+  });
 
   return (
     <box flexDirection="column">
@@ -326,13 +336,21 @@ export function AgentSelectStep(props: AgentSelectStepProps) {
         Select coding agent:
       </text>
       <text> </text>
-      <SelectInput
-        items={AGENTS}
-        onSelect={(item) => props.onSelect(item.value)}
-        onChange={handleChange}
-        focused={props.focused ?? true}
-        selectRef={setSelectRef}
-      />
+      {AGENTS.map((agent, index) => {
+        const isSelected = () => selectedIndex() === index;
+        const agentColor = getAgentTerminalColor(agent.value);
+        return isSelected() ? (
+          <text bg="cyan" fg="black">
+            {"> "}
+            {agent.label}
+          </text>
+        ) : (
+          <text fg={agentColor}>
+            {"  "}
+            {agent.label}
+          </text>
+        );
+      })}
       <text> </text>
       <text attributes={TextAttributes.DIM}>[Enter] Select [Esc] Back</text>
     </box>
