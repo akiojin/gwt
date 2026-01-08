@@ -9,17 +9,34 @@ import {
   spyOn,
 } from "bun:test";
 import type { SelectionResult } from "../../src/cli/ui/App.solid.js";
-import { runInteractiveLoop } from "../../src/index.js";
 
 const waitForUserAcknowledgementMock = mock<() => Promise<void>>();
 
-mock.module("../../src/utils/terminal.js", async () => {
-  const actual = await import("../../src/utils/terminal.js");
-  return {
-    ...actual,
-    waitForUserAcknowledgement: waitForUserAcknowledgementMock,
-  };
-});
+const mockTerminalStreams = {
+  stdin: { isTTY: false, on: () => {} } as unknown as NodeJS.ReadStream,
+  stdout: { write: () => {} } as unknown as NodeJS.WriteStream,
+  stderr: { write: () => {} } as unknown as NodeJS.WriteStream,
+  usingFallback: false,
+  exitRawMode: mock(),
+};
+
+const mockChildStdio = {
+  stdin: "inherit",
+  stdout: "inherit",
+  stderr: "inherit",
+  cleanup: mock(),
+};
+
+mock.module("../../src/utils/terminal.js", () => ({
+  getTerminalStreams: mock(() => mockTerminalStreams),
+  resetTerminalModes: mock(),
+  writeTerminalLine: mock(),
+  createChildStdio: mock(() => mockChildStdio),
+  waitForUserAcknowledgement: waitForUserAcknowledgementMock,
+}));
+
+// Import after mocks are set up
+import { runInteractiveLoop } from "../../src/index.js";
 
 describe("runInteractiveLoop", () => {
   const baseSelection: SelectionResult = {
