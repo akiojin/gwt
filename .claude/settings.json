@@ -34,6 +34,7 @@
     "cli-design@akiojin-skills": true,
     "gh-fix-ci@akiojin-skills": true,
     "requirements-spec-kit@akiojin-skills": true,
-    "typescript-lsp@claude-plugins-official": true
+    "typescript-lsp@claude-plugins-official": true,
+    "ralph-loop@claude-plugins-official": true
   }
 }
