@@ -135,7 +135,7 @@ const truncateSegmentsToWidth = (
 const padSegmentsToWidth = (
   segments: TextSegment[],
   width: number,
-  padStyle?: Pick<TextSegment, "fg" | "bg" | "attributes">,
+  padStyle?: Pick<TextSegment, "fg" | "bg">,
 ): TextSegment[] => {
   const totalWidth = measureSegmentsWidth(segments);
   if (totalWidth >= width) {
