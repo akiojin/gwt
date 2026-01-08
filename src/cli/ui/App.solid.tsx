@@ -269,6 +269,7 @@ export function AppSolid(props: AppSolidProps) {
   const [cleanupStatusByBranch, setCleanupStatusByBranch] = createSignal<
     Map<string, CleanupStatus>
   >(new Map());
+  const [cleanupSafetyLoading, setCleanupSafetyLoading] = createSignal(false);
   const [isNewBranch, setIsNewBranch] = createSignal(false);
   const [newBranchBaseRef, setNewBranchBaseRef] = createSignal<string | null>(
     null,
@@ -366,19 +367,32 @@ export function AppSolid(props: AppSolidProps) {
       .sort((a, b) => a.key.localeCompare(b.key)),
   );
 
+  let cleanupSafetyRequestId = 0;
   const refreshCleanupSafety = async () => {
+    const requestId = ++cleanupSafetyRequestId;
+    setCleanupSafetyLoading(true);
     try {
       const cleanupStatuses = await getCleanupStatus();
+      if (requestId !== cleanupSafetyRequestId) {
+        return;
+      }
       const statusByBranch = new Map(
         cleanupStatuses.map((status) => [status.branch, status]),
       );
       setCleanupStatusByBranch(statusByBranch);
       setBranchItems((items) => applyCleanupStatus(items, statusByBranch));
     } catch (err) {
+      if (requestId !== cleanupSafetyRequestId) {
+        return;
+      }
       logger.warn({ err }, "Failed to refresh cleanup safety indicators");
       const empty = new Map<string, CleanupStatus>();
       setCleanupStatusByBranch(empty);
       setBranchItems((items) => applyCleanupStatus(items, empty));
+    } finally {
+      if (requestId === cleanupSafetyRequestId) {
+        setCleanupSafetyLoading(false);
+      }
     }
   };
 
@@ -1358,6 +1372,7 @@ export function AppSolid(props: AppSolidProps) {
         indicators: cleanupIndicators(),
         footerMessage: branchFooterMessage(),
         inputLocked: branchInputLocked(),
+        safetyLoading: cleanupSafetyLoading(),
       };
       return (
         <BranchListScreen

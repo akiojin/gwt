@@ -25,6 +25,7 @@ interface CleanupUIState {
   indicators: Record<string, CleanupIndicator>;
   footerMessage: CleanupFooterMessage | null;
   inputLocked: boolean;
+  safetyLoading?: boolean;
 }
 
 export interface BranchListScreenProps {
@@ -345,7 +346,10 @@ export function BranchListScreen(props: BranchListScreenProps) {
   );
 
   const cleanupSpinnerActive = createMemo(
-    () => hasSpinningIndicator() || hasSpinningFooter(),
+    () =>
+      hasSpinningIndicator() ||
+      hasSpinningFooter() ||
+      props.cleanupUI?.safetyLoading === true,
   );
 
   createEffect(() => {
@@ -668,10 +672,17 @@ export function BranchListScreen(props: BranchListScreenProps) {
       worktreeIcon = "x";
       worktreeColor = "red";
     }
+    const isRemoteBranch = branch.type === "remote";
+    const safetyLoading = props.cleanupUI?.safetyLoading === true;
+    const spinnerFrame = cleanupSpinnerFrame();
+
     let safeIcon = " ";
     let safeColor: IndicatorColor | undefined;
-    if (branch.safeToCleanup === true) {
+    if (isRemoteBranch) {
       safeIcon = " ";
+      safeColor = undefined;
+    } else if (safetyLoading) {
+      safeIcon = spinnerFrame ?? "-";
       safeColor = undefined;
     } else if (isWarning) {
       safeIcon = "*";
@@ -679,6 +690,9 @@ export function BranchListScreen(props: BranchListScreenProps) {
     } else if (branch.isUnmerged) {
       safeIcon = "!";
       safeColor = "yellow";
+    } else if (branch.safeToCleanup === true) {
+      safeIcon = " ";
+      safeColor = undefined;
     } else {
       safeIcon = "!";
       safeColor = "red";

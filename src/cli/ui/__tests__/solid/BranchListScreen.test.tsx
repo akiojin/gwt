@@ -2,6 +2,7 @@
 import { describe, expect, it } from "bun:test";
 import { testRender } from "@opentui/solid";
 import { BranchListScreen } from "../../screens/solid/BranchListScreen.js";
+import type { BranchListScreenProps } from "../../screens/solid/BranchListScreen.js";
 import type { BranchItem, Statistics } from "../../types.js";
 
 const makeStats = (overrides: Partial<Statistics> = {}): Statistics => ({
@@ -49,6 +50,7 @@ const renderBranchList = async (props: {
   workingDirectory?: string;
   selectedBranches?: string[];
   activeProfile?: string | null;
+  cleanupUI?: BranchListScreenProps["cleanupUI"];
 }) => {
   const testSetup = await testRender(
     () => (
@@ -63,6 +65,7 @@ const renderBranchList = async (props: {
         {...(props.selectedBranches
           ? { selectedBranches: props.selectedBranches }
           : {})}
+        {...(props.cleanupUI ? { cleanupUI: props.cleanupUI } : {})}
       />
     ),
     { width: 80, height: 24 },
@@ -104,6 +107,45 @@ describe("BranchListScreen icons", () => {
       expect(frame).toContain("[ ] . * feature/no-worktree");
       expect(frame).not.toContain(">[*]");
       expect(frame).not.toContain(">[ ]");
+    } finally {
+      testSetup.renderer.destroy();
+    }
+  });
+
+  it("shows spinner during safety checks and blank icon for remote branches", async () => {
+    const branches = [
+      createBranch({
+        name: "feature/loading",
+        label: "feature/loading",
+        value: "feature/loading",
+        worktree: { path: "/tmp/worktree", locked: false, prunable: false },
+      }),
+      createBranch({
+        name: "origin/remote-only",
+        label: "origin/remote-only",
+        value: "origin/remote-only",
+        type: "remote",
+        hasRemoteCounterpart: false,
+        worktree: undefined,
+        worktreeStatus: undefined,
+      }),
+    ];
+
+    const testSetup = await renderBranchList({
+      branches,
+      stats: statsForBranches(branches),
+      cleanupUI: {
+        indicators: {},
+        footerMessage: null,
+        inputLocked: false,
+        safetyLoading: true,
+      },
+    });
+
+    try {
+      const frame = testSetup.captureCharFrame();
+      expect(frame).toMatch(/\[ \] w [-\\|/] feature\/loading/);
+      expect(frame).toMatch(/\[ \] \. {2,}origin\/remote-only/);
     } finally {
       testSetup.renderer.destroy();
     }
