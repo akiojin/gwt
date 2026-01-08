@@ -130,4 +130,96 @@ describe("AppSolid cleanup command", () => {
       testSetup.renderer.destroy();
     }
   });
+
+  it("maps cleanup safety indicators from cleanup candidates", async () => {
+    const getMergedPRWorktreesMock = mock(async () => [
+      {
+        worktreePath: "/tmp/safe",
+        branch: "feature/safe",
+        pullRequest: null,
+        hasUncommittedChanges: false,
+        hasUnpushedCommits: false,
+        cleanupType: "worktree-and-branch",
+        hasRemoteBranch: true,
+      },
+    ]);
+
+    mock.module?.("../../../../worktree.js", () => ({
+      listAdditionalWorktrees: mock(async () => []),
+      repairWorktrees: mock(async () => ({
+        repairedCount: 0,
+        failedCount: 0,
+        failures: [],
+      })),
+      removeWorktree: mock(async () => {}),
+      getMergedPRWorktrees: getMergedPRWorktreesMock,
+      isProtectedBranchName: mock(() => false),
+    }));
+
+    mock.module?.("../../../../git.js", () => ({
+      getRepositoryRoot: mock(async () => "/repo"),
+      getAllBranches: mock(async () => []),
+      getLocalBranches: mock(async () => []),
+      getCurrentBranch: mock(async () => "main"),
+      deleteBranch: mock(async () => {}),
+    }));
+
+    mock.module?.("../../../../config/index.js", () => ({
+      getConfig: mock(async () => ({ defaultBaseBranch: "main" })),
+      getLastToolUsageMap: mock(async () => new Map()),
+      loadSession: mock(async () => null),
+    }));
+
+    mock.module?.("../../../../config/tools.js", () => ({
+      getAllCodingAgents: mock(async () => [
+        { id: "codex-cli", displayName: "Codex CLI" },
+      ]),
+    }));
+
+    mock.module?.("../../../../config/profiles.js", () => ({
+      loadProfiles: mock(async () => ({ profiles: {}, activeProfile: null })),
+      createProfile: mock(async () => {}),
+      updateProfile: mock(async () => {}),
+      deleteProfile: mock(async () => {}),
+      setActiveProfile: mock(async () => {}),
+    }));
+
+    const { AppSolid } = await import("../../App.solid.js");
+
+    const safeBranch = createBranch({
+      name: "feature/safe",
+      label: "feature/safe",
+      value: "feature/safe",
+    });
+    const unsafeBranch = createBranch({
+      name: "feature/unsafe",
+      label: "feature/unsafe",
+      value: "feature/unsafe",
+      worktree: undefined,
+      worktreeStatus: undefined,
+    });
+
+    const testSetup = await testRender(
+      () => (
+        <AppSolid
+          branches={[safeBranch, unsafeBranch]}
+          stats={makeStats({ localCount: 2, worktreeCount: 1 })}
+          version={null}
+          toolStatuses={[]}
+        />
+      ),
+      { width: 80, height: 24 },
+    );
+    await testSetup.renderOnce();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await testSetup.renderOnce();
+
+    try {
+      const frame = testSetup.captureCharFrame();
+      expect(frame).toMatch(/\[ \] w {2,}feature\/safe/);
+      expect(frame).toContain("[ ] w ! feature/unsafe");
+    } finally {
+      testSetup.renderer.destroy();
+    }
+  });
 });
