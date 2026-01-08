@@ -8,6 +8,7 @@ import { useTerminalSize } from "../../hooks/solid/useTerminalSize.js";
 import type { FormattedLogEntry } from "../../../../logging/formatter.js";
 import { useScrollableList } from "../../hooks/solid/useScrollableList.js";
 import stringWidth from "string-width";
+import { getLogLevelColor, selectionStyle } from "../../core/theme.js";
 
 export interface LogScreenProps {
   entries: FormattedLogEntry[];
@@ -84,6 +85,82 @@ const padToWidth = (value: string, width: number): string => {
   const padding = Math.max(0, width - measureWidth(truncated));
   return `${truncated}${" ".repeat(padding)}`;
 };
+
+interface TextSegment {
+  text: string;
+  fg?: string;
+  bg?: string;
+  attributes?: TextAttributes;
+}
+
+const appendSegment = (segments: TextSegment[], segment: TextSegment) => {
+  if (!segment.text) {
+    return;
+  }
+  segments.push(segment);
+};
+
+const measureSegmentsWidth = (segments: TextSegment[]): number =>
+  segments.reduce((total, segment) => total + measureWidth(segment.text), 0);
+
+const truncateSegmentsToWidth = (
+  segments: TextSegment[],
+  maxWidth: number,
+): TextSegment[] => {
+  if (maxWidth <= 0) {
+    return [];
+  }
+  const result: TextSegment[] = [];
+  let currentWidth = 0;
+  for (const segment of segments) {
+    if (currentWidth >= maxWidth) {
+      break;
+    }
+    const segmentWidth = measureWidth(segment.text);
+    if (currentWidth + segmentWidth <= maxWidth) {
+      result.push(segment);
+      currentWidth += segmentWidth;
+      continue;
+    }
+    const remaining = maxWidth - currentWidth;
+    const truncated = truncateToWidth(segment.text, remaining);
+    if (truncated) {
+      result.push({ ...segment, text: truncated });
+      currentWidth += measureWidth(truncated);
+    }
+    break;
+  }
+  return result;
+};
+
+const padSegmentsToWidth = (
+  segments: TextSegment[],
+  width: number,
+  padStyle?: Pick<TextSegment, "fg" | "bg" | "attributes">,
+): TextSegment[] => {
+  const totalWidth = measureSegmentsWidth(segments);
+  if (totalWidth >= width) {
+    return segments;
+  }
+  const padding = " ".repeat(Math.max(0, width - totalWidth));
+  if (!padding) {
+    return segments;
+  }
+  return [
+    ...segments,
+    {
+      text: padding,
+      ...(padStyle ?? {}),
+    },
+  ];
+};
+
+const applySelectionStyle = (segments: TextSegment[]): TextSegment[] =>
+  segments.map((segment) => ({
+    text: segment.text,
+    fg: selectionStyle.fg,
+    bg: selectionStyle.bg,
+  }));
 
 const resolveEntryLevel = (entry: FormattedLogEntry): number => {
   const rawLevel = entry.raw?.level;
@@ -326,20 +403,30 @@ export function LogScreen(props: LogScreenProps) {
     return actions;
   });
 
-  const formatEntryLine = (entry: FormattedLogEntry): string => {
+  const formatEntrySegments = (entry: FormattedLogEntry): TextSegment[] => {
     const levelText = padToWidth(entry.levelLabel, levelWidth());
     const categoryText = padToWidth(entry.category, categoryWidth());
-    const prefix = `[${entry.timeLabel}] [${levelText}] [${categoryText}] `;
+    const segments: TextSegment[] = [];
+    appendSegment(segments, { text: `[${entry.timeLabel}] ` });
+    appendSegment(segments, { text: "[" });
+    appendSegment(segments, {
+      text: levelText,
+      fg: getLogLevelColor(entry.levelLabel),
+    });
+    appendSegment(segments, { text: "] " });
+    appendSegment(segments, { text: "[" });
+    appendSegment(segments, { text: categoryText });
+    appendSegment(segments, { text: "] " });
+    appendSegment(segments, { text: entry.message });
     if (wrapEnabled()) {
-      return `${prefix}${entry.message}`;
+      return segments;
     }
 
     const maxWidth = terminal().columns;
-    const remaining = Math.max(0, maxWidth - measureWidth(prefix));
-    if (remaining <= 0) {
-      return truncateToWidth(prefix, maxWidth);
+    if (measureSegmentsWidth(segments) <= maxWidth) {
+      return segments;
     }
-    return `${prefix}${truncateToWidth(entry.message, remaining)}`;
+    return truncateSegmentsToWidth(segments, maxWidth);
   };
 
   const filterLabel = createMemo(() => {
@@ -413,14 +500,33 @@ export function LogScreen(props: LogScreenProps) {
             {list.visibleItems().map((entry, index) => {
               const absoluteIndex = list.scrollOffset() + index;
               const isSelected = absoluteIndex === list.selectedIndex();
+              const maxWidth = terminal().columns;
+              const baseSegments = formatEntrySegments(entry);
+              const selectedSegments = isSelected
+                ? applySelectionStyle(baseSegments)
+                : baseSegments;
+              const displaySegments =
+                isSelected && measureSegmentsWidth(selectedSegments) < maxWidth
+                  ? padSegmentsToWidth(
+                      selectedSegments,
+                      maxWidth,
+                      selectionStyle,
+                    )
+                  : selectedSegments;
               return (
-                <text
-                  {...(isSelected
-                    ? { fg: "cyan", attributes: TextAttributes.BOLD }
-                    : {})}
-                >
-                  {formatEntryLine(entry)}
-                </text>
+                <box flexDirection="row">
+                  {displaySegments.map((segment) => (
+                    <text
+                      {...(segment.fg ? { fg: segment.fg } : {})}
+                      {...(segment.bg ? { bg: segment.bg } : {})}
+                      {...(segment.attributes !== undefined
+                        ? { attributes: segment.attributes }
+                        : {})}
+                    >
+                      {segment.text}
+                    </text>
+                  ))}
+                </box>
               );
             })}
           </box>

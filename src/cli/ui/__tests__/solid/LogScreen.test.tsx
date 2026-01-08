@@ -1,6 +1,7 @@
 /** @jsxImportSource @opentui/solid */
 import { describe, expect, it, mock } from "bun:test";
 import { testRender } from "@opentui/solid";
+import { parseColor } from "@opentui/core";
 import { createSignal } from "solid-js";
 import type { FormattedLogEntry } from "../../../../logging/formatter.js";
 
@@ -19,6 +20,30 @@ const makeEntry = (
   json: JSON.stringify({ message }, null, 2),
   ...overrides,
 });
+
+const findLine = (frame: string, needle: string) => {
+  const lines = frame.split("\n");
+  const index = lines.findIndex((line) => line.includes(needle));
+  if (index < 0) {
+    throw new Error(`Line not found: ${needle}`);
+  }
+  return { index, line: lines[index] ?? "" };
+};
+
+const readColorAt = (
+  buffer: Float32Array,
+  width: number,
+  row: number,
+  col: number,
+) => {
+  const offset = (row * width + col) * 4;
+  return [
+    Math.round(buffer[offset] * 255),
+    Math.round(buffer[offset + 1] * 255),
+    Math.round(buffer[offset + 2] * 255),
+    Math.round(buffer[offset + 3] * 255),
+  ] as const;
+};
 
 describe("LogScreen", () => {
   it("updates entries when data changes", async () => {
@@ -202,6 +227,94 @@ describe("LogScreen", () => {
       await testSetup.renderOnce();
       const frame = testSetup.captureCharFrame();
       expect(frame).toContain("...");
+    } finally {
+      testSetup.renderer.destroy();
+    }
+  });
+
+  it("highlights the selected row with full-width cyan background", async () => {
+    const entries = [
+      makeEntry("alpha", {
+        id: "1",
+        raw: { level: 30, time: "2026-01-08T00:00:00.000Z", category: "cli" },
+      }),
+      makeEntry("beta", {
+        id: "2",
+        raw: { level: 30, time: "2026-01-08T00:00:01.000Z", category: "cli" },
+      }),
+    ];
+
+    const { LogScreen } = await import("../../screens/solid/LogScreen.js");
+
+    const width = 60;
+    const testSetup = await testRender(
+      () => (
+        <LogScreen
+          entries={entries}
+          onBack={() => {}}
+          onSelect={() => {}}
+          onCopy={() => {}}
+        />
+      ),
+      { width, height: 16 },
+    );
+
+    try {
+      await testSetup.renderOnce();
+      const frame = testSetup.captureCharFrame();
+      const { index: row } = findLine(frame, "alpha");
+      const buffers = testSetup.renderer.currentRenderBuffer.buffers;
+      const bg = readColorAt(buffers.bg, width, row, width - 1);
+      const fg = readColorAt(buffers.fg, width, row, width - 1);
+
+      expect(bg).toEqual(parseColor("cyan").toInts());
+      expect(fg).toEqual(parseColor("black").toInts());
+    } finally {
+      testSetup.renderer.destroy();
+    }
+  });
+
+  it("colors the level column for non-selected rows", async () => {
+    const entries = [
+      makeEntry("first", {
+        id: "1",
+        levelLabel: "INFO",
+        raw: { level: 30, time: "2026-01-08T00:00:00.000Z", category: "cli" },
+      }),
+      makeEntry("second", {
+        id: "2",
+        levelLabel: "ERROR",
+        raw: { level: 50, time: "2026-01-08T00:00:01.000Z", category: "cli" },
+      }),
+    ];
+
+    const { LogScreen } = await import("../../screens/solid/LogScreen.js");
+
+    const width = 80;
+    const testSetup = await testRender(
+      () => (
+        <LogScreen
+          entries={entries}
+          onBack={() => {}}
+          onSelect={() => {}}
+          onCopy={() => {}}
+        />
+      ),
+      { width, height: 16 },
+    );
+
+    try {
+      await testSetup.renderOnce();
+      testSetup.mockInput.pressArrow("down");
+      await testSetup.renderOnce();
+      const frame = testSetup.captureCharFrame();
+      const { index: row, line } = findLine(frame, "first");
+      const levelIndex = line.indexOf("INFO");
+      expect(levelIndex).toBeGreaterThanOrEqual(0);
+
+      const buffers = testSetup.renderer.currentRenderBuffer.buffers;
+      const fg = readColorAt(buffers.fg, width, row, levelIndex);
+      expect(fg).toEqual(parseColor("green").toInts());
     } finally {
       testSetup.renderer.destroy();
     }

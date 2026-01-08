@@ -7,6 +7,7 @@ import { getLatestActivityTimestamp } from "../../utils/branchFormatter.js";
 import stringWidth from "string-width";
 import { getAgentTerminalColor } from "../../../../utils/coding-agent-colors.js";
 import { Header } from "../../components/solid/Header.js";
+import { selectionStyle } from "../../core/theme.js";
 type IndicatorColor = "cyan" | "green" | "yellow" | "red" | "brightGreen";
 
 interface CleanupIndicator {
@@ -191,8 +192,8 @@ const fitSegmentsToWidth = (
 const applySelectionStyle = (segments: TextSegment[]): TextSegment[] =>
   segments.map((segment) => ({
     text: segment.text,
-    fg: "black",
-    bg: "cyan",
+    fg: selectionStyle.fg,
+    bg: selectionStyle.bg,
   }));
 
 const CLEANUP_SPINNER_FRAMES = ["-", "\\", "|", "/"];
