@@ -827,9 +827,11 @@ async function getWorktreesWithPRStatus(): Promise<WorktreeWithPR[]> {
 async function getOrphanedLocalBranchStatuses({
   baseBranch,
   repoRoot,
+  onProgress,
 }: {
   baseBranch: string;
   repoRoot: string;
+  onProgress?: (status: CleanupStatus) => void;
 }): Promise<CleanupStatus[]> {
   try {
     // 並列実行で高速化
@@ -921,6 +923,7 @@ async function getOrphanedLocalBranchStatuses({
           upstream,
           reasons,
         });
+        onProgress?.(statuses[statuses.length - 1]);
       }
     }
 
@@ -940,7 +943,11 @@ async function getOrphanedLocalBranchStatuses({
   }
 }
 
-export async function getCleanupStatus(): Promise<CleanupStatus[]> {
+export async function getCleanupStatus({
+  onProgress,
+}: {
+  onProgress?: (status: CleanupStatus) => void;
+} = {}): Promise<CleanupStatus[]> {
   const [config, repoRoot, worktreesWithPR] = await Promise.all([
     getConfig(),
     getRepositoryRoot(),
@@ -951,6 +958,7 @@ export async function getCleanupStatus(): Promise<CleanupStatus[]> {
   const orphanedStatuses = await getOrphanedLocalBranchStatuses({
     baseBranch,
     repoRoot,
+    onProgress,
   });
   const statuses: CleanupStatus[] = [];
 
@@ -1042,6 +1050,7 @@ export async function getCleanupStatus(): Promise<CleanupStatus[]> {
         ? {}
         : { invalidReason: "Path not accessible in current environment" }),
     });
+    onProgress?.(statuses[statuses.length - 1]);
   }
 
   statuses.push(...orphanedStatuses);

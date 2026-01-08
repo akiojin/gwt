@@ -252,4 +252,133 @@ describe("AppSolid cleanup command", () => {
       testSetup.renderer.destroy();
     }
   });
+
+  it("updates safety icons as each branch check completes", async () => {
+    let releaseSecond: (() => void) | null = null;
+    const progressGate = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    const getCleanupStatusMock = mock(
+      async ({
+        onProgress,
+      }: { onProgress?: (status: { branch: string }) => void } = {}) => {
+        const firstStatus = {
+          worktreePath: "/tmp/first",
+          branch: "feature/first",
+          hasUncommittedChanges: false,
+          hasUnpushedCommits: false,
+          cleanupType: "worktree-and-branch",
+          hasRemoteBranch: true,
+          hasUniqueCommits: false,
+          hasUpstream: true,
+          upstream: "origin/feature/first",
+          isAccessible: true,
+          reasons: ["no-diff-with-base"],
+        };
+        const secondStatus = {
+          worktreePath: "/tmp/second",
+          branch: "feature/second",
+          hasUncommittedChanges: false,
+          hasUnpushedCommits: false,
+          cleanupType: "worktree-and-branch",
+          hasRemoteBranch: true,
+          hasUniqueCommits: true,
+          hasUpstream: true,
+          upstream: "origin/feature/second",
+          isAccessible: true,
+          reasons: ["remote-synced"],
+        };
+
+        onProgress?.(firstStatus);
+        await progressGate;
+        onProgress?.(secondStatus);
+        return [firstStatus, secondStatus];
+      },
+    );
+
+    mock.module?.("../../../../worktree.js", () => ({
+      listAdditionalWorktrees: mock(async () => []),
+      repairWorktrees: mock(async () => ({
+        repairedCount: 0,
+        failedCount: 0,
+        failures: [],
+      })),
+      removeWorktree: mock(async () => {}),
+      getCleanupStatus: getCleanupStatusMock,
+      isProtectedBranchName: mock(() => false),
+    }));
+
+    mock.module?.("../../../../git.js", () => ({
+      getRepositoryRoot: mock(async () => "/repo"),
+      getAllBranches: mock(async () => []),
+      getLocalBranches: mock(async () => []),
+      getCurrentBranch: mock(async () => "main"),
+      deleteBranch: mock(async () => {}),
+    }));
+
+    mock.module?.("../../../../config/index.js", () => ({
+      getConfig: mock(async () => ({ defaultBaseBranch: "main" })),
+      getLastToolUsageMap: mock(async () => new Map()),
+      loadSession: mock(async () => null),
+    }));
+
+    mock.module?.("../../../../config/tools.js", () => ({
+      getAllCodingAgents: mock(async () => [
+        { id: "codex-cli", displayName: "Codex CLI" },
+      ]),
+    }));
+
+    mock.module?.("../../../../config/profiles.js", () => ({
+      loadProfiles: mock(async () => ({ profiles: {}, activeProfile: null })),
+      createProfile: mock(async () => {}),
+      updateProfile: mock(async () => {}),
+      deleteProfile: mock(async () => {}),
+      setActiveProfile: mock(async () => {}),
+    }));
+
+    const { AppSolid } = await import("../../App.solid.js");
+
+    const firstBranch = createBranch({
+      name: "feature/first",
+      label: "feature/first",
+      value: "feature/first",
+      worktree: { path: "/tmp/first", locked: false, prunable: false },
+    });
+    const secondBranch = createBranch({
+      name: "feature/second",
+      label: "feature/second",
+      value: "feature/second",
+      worktree: { path: "/tmp/second", locked: false, prunable: false },
+    });
+
+    const testSetup = await testRender(
+      () => (
+        <AppSolid
+          branches={[firstBranch, secondBranch]}
+          stats={makeStats({ localCount: 2, worktreeCount: 2 })}
+          version={null}
+          toolStatuses={[]}
+        />
+      ),
+      { width: 80, height: 24 },
+    );
+    await testSetup.renderOnce();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await testSetup.renderOnce();
+
+    try {
+      let frame = testSetup.captureCharFrame();
+      expect(frame).toMatch(/\[ \] w o feature\/first/);
+      expect(frame).toMatch(/\[ \] w [-\\|/] feature\/second/);
+
+      releaseSecond?.();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await testSetup.renderOnce();
+
+      frame = testSetup.captureCharFrame();
+      expect(frame).toMatch(/\[ \] w \* feature\/second/);
+    } finally {
+      testSetup.renderer.destroy();
+    }
+  });
 });
