@@ -54,7 +54,8 @@ export function QuickStartStep(props: QuickStartStepProps) {
       const reasoningInfo = entry.reasoningLevel
         ? `, ${entry.reasoningLevel}`
         : "";
-      const settingsDesc = `${entry.toolLabel}, ${entry.model}${reasoningInfo}`;
+      const versionInfo = entry.toolVersion ? `@${entry.toolVersion}` : "";
+      const settingsDesc = `${entry.toolLabel}${versionInfo}, ${entry.model}${reasoningInfo}`;
       const resumeDesc = entry.sessionId
         ? `${settingsDesc}, session ${entry.sessionId}`
         : settingsDesc;

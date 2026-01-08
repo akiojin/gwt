@@ -17,7 +17,7 @@ export const CLAUDE_CODE_TOOL: CodingAgent = {
   id: "claude-code",
   displayName: "Claude Code",
   type: "bunx",
-  command: "@anthropic-ai/claude-code@latest",
+  command: "@anthropic-ai/claude-code",
   modeArgs: {
     normal: [],
     continue: ["-c"],
@@ -36,7 +36,7 @@ export const CODEX_CLI_TOOL: CodingAgent = {
   id: "codex-cli",
   displayName: "Codex",
   type: "bunx",
-  command: "@openai/codex@latest",
+  command: "@openai/codex",
   defaultArgs: Array.from(CODEX_DEFAULT_ARGS),
   modeArgs: {
     normal: [],
@@ -52,7 +52,7 @@ export const GEMINI_CLI_TOOL: CodingAgent = {
   id: "gemini-cli",
   displayName: "Gemini",
   type: "bunx",
-  command: "@google/gemini-cli@latest",
+  command: "@google/gemini-cli",
   modeArgs: {
     normal: [],
     continue: ["-r", "latest"],
@@ -68,7 +68,7 @@ export const OPENCODE_TOOL: CodingAgent = {
   id: "opencode",
   displayName: "OpenCode",
   type: "bunx",
-  command: "opencode-ai@latest",
+  command: "opencode-ai",
   modeArgs: {
     normal: [],
     continue: ["-c"],
