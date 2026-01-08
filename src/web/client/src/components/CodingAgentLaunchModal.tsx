@@ -21,6 +21,7 @@ import { useStartSession } from "../hooks/useSessions";
 import { useCreateWorktree } from "../hooks/useWorktrees";
 import { useSyncBranch } from "../hooks/useBranches";
 import { ApiError } from "../lib/api";
+import { getAgentTailwindClass } from "@/lib/coding-agent-colors";
 
 const BUILTIN_AGENT_SUMMARIES: Record<string, AgentSummary> = {
   "claude-code": {
@@ -421,7 +422,11 @@ export function CodingAgentLaunchModal({
                 </SelectTrigger>
                 <SelectContent>
                   {availableAgents.map((agent) => (
-                    <SelectItem key={agent.id} value={agent.id}>
+                    <SelectItem
+                      key={agent.id}
+                      value={agent.id}
+                      className={getAgentTailwindClass(agent.id)}
+                    >
                       {agent.label}
                     </SelectItem>
                   ))}
