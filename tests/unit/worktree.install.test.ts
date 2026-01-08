@@ -11,6 +11,7 @@ import path from "node:path";
 
 const accessMock = mock();
 
+// Avoid async import here to prevent Bun module-mock deadlocks.
 mock.module("node:fs/promises", () => ({
   access: accessMock,
   default: {
