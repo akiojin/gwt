@@ -7,7 +7,7 @@ import { getLatestActivityTimestamp } from "../../utils/branchFormatter.js";
 import stringWidth from "string-width";
 import { getAgentTerminalColor } from "../../../../utils/coding-agent-colors.js";
 import { Header } from "../../components/solid/Header.js";
-type IndicatorColor = "cyan" | "green" | "yellow" | "red";
+type IndicatorColor = "cyan" | "green" | "yellow" | "red" | "brightGreen";
 
 interface CleanupIndicator {
   icon: string;
@@ -26,6 +26,7 @@ interface CleanupUIState {
   footerMessage: CleanupFooterMessage | null;
   inputLocked: boolean;
   safetyLoading?: boolean;
+  safetyPendingBranches?: Set<string>;
 }
 
 export interface BranchListScreenProps {
@@ -667,19 +668,26 @@ export function BranchListScreen(props: BranchListScreenProps) {
     let worktreeColor: IndicatorColor | "gray" = "gray";
     if (branch.worktreeStatus === "active") {
       worktreeIcon = "w";
-      worktreeColor = "green";
+      worktreeColor = "brightGreen";
     } else if (branch.worktreeStatus === "inaccessible") {
       worktreeIcon = "x";
       worktreeColor = "red";
     }
     const isRemoteBranch = branch.type === "remote";
     const safetyLoading = props.cleanupUI?.safetyLoading === true;
+    const safetyPendingBranches = props.cleanupUI?.safetyPendingBranches;
+    const isSafetyPending = safetyPendingBranches
+      ? safetyPendingBranches.has(branch.name)
+      : safetyLoading;
     const spinnerFrame = cleanupSpinnerFrame();
 
     let safeIcon = " ";
     let safeColor: IndicatorColor | undefined;
     if (isRemoteBranch) {
       safeIcon = " ";
+      safeColor = undefined;
+    } else if (isSafetyPending) {
+      safeIcon = spinnerFrame ?? "-";
       safeColor = undefined;
     } else if (hasUncommitted) {
       safeIcon = "!";
@@ -690,12 +698,9 @@ export function BranchListScreen(props: BranchListScreenProps) {
     } else if (branch.isUnmerged) {
       safeIcon = "*";
       safeColor = "yellow";
-    } else if (safetyLoading) {
-      safeIcon = spinnerFrame ?? "-";
-      safeColor = undefined;
     } else if (branch.safeToCleanup === true) {
-      safeIcon = " ";
-      safeColor = undefined;
+      safeIcon = "o";
+      safeColor = "brightGreen";
     } else {
       safeIcon = "!";
       safeColor = "red";

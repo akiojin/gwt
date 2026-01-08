@@ -270,6 +270,9 @@ export function AppSolid(props: AppSolidProps) {
     Map<string, CleanupStatus>
   >(new Map());
   const [cleanupSafetyLoading, setCleanupSafetyLoading] = createSignal(false);
+  const [cleanupSafetyPending, setCleanupSafetyPending] = createSignal<
+    Set<string>
+  >(new Set<string>());
   const [isNewBranch, setIsNewBranch] = createSignal(false);
   const [newBranchBaseRef, setNewBranchBaseRef] = createSignal<string | null>(
     null,
@@ -370,28 +373,56 @@ export function AppSolid(props: AppSolidProps) {
   let cleanupSafetyRequestId = 0;
   const refreshCleanupSafety = async () => {
     const requestId = ++cleanupSafetyRequestId;
-    setCleanupSafetyLoading(true);
-    try {
-      const cleanupStatuses = await getCleanupStatus();
+    const pendingBranches = buildCleanupSafetyPending(branchItems());
+    setCleanupSafetyPending(pendingBranches);
+    setCleanupSafetyLoading(pendingBranches.size > 0);
+    const statusByBranch = new Map<string, CleanupStatus>();
+    const applyProgress = (status: CleanupStatus) => {
       if (requestId !== cleanupSafetyRequestId) {
         return;
       }
-      const statusByBranch = new Map(
-        cleanupStatuses.map((status) => [status.branch, status]),
-      );
-      setCleanupStatusByBranch(statusByBranch);
-      setBranchItems((items) => applyCleanupStatus(items, statusByBranch));
+      statusByBranch.set(status.branch, status);
+      batch(() => {
+        setCleanupStatusByBranch(new Map(statusByBranch));
+        setBranchItems((items) => applyCleanupStatus(items, statusByBranch));
+        setCleanupSafetyPending((prev) => {
+          if (!prev.has(status.branch)) {
+            return prev;
+          }
+          const next = new Set(prev);
+          next.delete(status.branch);
+          return next;
+        });
+      });
+    };
+    try {
+      const cleanupStatuses = await getCleanupStatus({
+        onProgress: applyProgress,
+      });
+      if (requestId !== cleanupSafetyRequestId) {
+        return;
+      }
+      if (cleanupStatuses.length > statusByBranch.size) {
+        cleanupStatuses.forEach((status) => {
+          if (!statusByBranch.has(status.branch)) {
+            applyProgress(status);
+          }
+        });
+      }
     } catch (err) {
       if (requestId !== cleanupSafetyRequestId) {
         return;
       }
       logger.warn({ err }, "Failed to refresh cleanup safety indicators");
       const empty = new Map<string, CleanupStatus>();
-      setCleanupStatusByBranch(empty);
-      setBranchItems((items) => applyCleanupStatus(items, empty));
+      batch(() => {
+        setCleanupStatusByBranch(empty);
+        setBranchItems((items) => applyCleanupStatus(items, empty));
+      });
     } finally {
       if (requestId === cleanupSafetyRequestId) {
         setCleanupSafetyLoading(false);
+        setCleanupSafetyPending(new Set<string>());
       }
     }
   };
