@@ -1,5 +1,6 @@
 /** @jsxImportSource @opentui/solid */
 import { TextAttributes } from "@opentui/core";
+import type { SelectRenderable } from "@opentui/core";
 import { useKeyboard } from "@opentui/solid";
 import { createEffect, createMemo, createSignal } from "solid-js";
 import type { ToolSessionEntry } from "../../../../config/index.js";
@@ -29,6 +30,9 @@ interface QuickStartItem extends SelectInputItem {
 
 export function QuickStartStep(props: QuickStartStepProps) {
   const [selectedIndex, setSelectedIndex] = createSignal(0);
+  const [selectRef, setSelectRef] = createSignal<SelectRenderable | undefined>(
+    undefined,
+  );
   const scroll = useWizardScroll();
 
   // T506: 履歴がない場合は自動的に onChooseDifferent を呼ぶ
@@ -83,6 +87,35 @@ export function QuickStartStep(props: QuickStartStepProps) {
     return result;
   });
 
+  const ensureIndexVisible = (index: number) => {
+    if (!scroll) {
+      return;
+    }
+    const select = selectRef();
+    if (!select) {
+      return;
+    }
+    const linesPerItem = 2;
+    const startLine = select.y + Math.max(0, index) * linesPerItem;
+    const endLine = startLine + Math.max(0, linesPerItem - 1);
+    scroll.ensureLineVisible(startLine);
+    if (endLine !== startLine) {
+      scroll.ensureLineVisible(endLine);
+    }
+  };
+
+  createEffect(() => {
+    if (props.focused === false) {
+      return;
+    }
+    const count = items().length;
+    if (count <= 0) {
+      return;
+    }
+    const safeIndex = Math.min(Math.max(selectedIndex(), 0), count - 1);
+    ensureIndexVisible(safeIndex);
+  });
+
   useKeyboard((key) => {
     if (props.focused === false) {
       return;
@@ -90,18 +123,22 @@ export function QuickStartStep(props: QuickStartStepProps) {
     if (!scroll) {
       return;
     }
-    const maxIndex = items().length - 1;
-    if (key.name === "up") {
-      if (selectedIndex() <= 0 && scroll.scrollByLines(-1)) {
-        key.preventDefault();
-      }
+    if (key.name !== "up" && key.name !== "down") {
       return;
     }
-    if (key.name === "down") {
-      if (selectedIndex() >= maxIndex && scroll.scrollByLines(1)) {
-        key.preventDefault();
-      }
+    const count = items().length;
+    if (count <= 0) {
+      return;
     }
+    const currentIndex = Math.min(Math.max(selectedIndex(), 0), count - 1);
+    const nextIndex =
+      key.name === "up"
+        ? Math.max(0, currentIndex - 1)
+        : Math.min(count - 1, currentIndex + 1);
+    if (nextIndex === currentIndex) {
+      return;
+    }
+    ensureIndexVisible(nextIndex);
   });
 
   const handleSelect = (item: SelectInputItem) => {
@@ -148,6 +185,7 @@ export function QuickStartStep(props: QuickStartStepProps) {
         onChange={handleChange}
         focused={props.focused ?? true}
         showDescription={true}
+        selectRef={setSelectRef}
       />
       <text> </text>
       <text attributes={TextAttributes.DIM}>
