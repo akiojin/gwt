@@ -653,6 +653,7 @@ export async function handleAIToolWorkflow(
           model?: string;
           reasoningEffort?: CodexReasoningEffort;
           sessionId?: string | null;
+          version?: string | null;
         } = {
           mode:
             mode === "resume"
@@ -663,6 +664,7 @@ export async function handleAIToolWorkflow(
           bypassApprovals: skipPermissions,
           envOverrides: sharedEnv,
           sessionId: resumeSessionId,
+          version: toolVersion ?? null,
         };
         if (normalizedModel) {
           launchOptions.model = normalizedModel;
@@ -679,6 +681,7 @@ export async function handleAIToolWorkflow(
           envOverrides?: Record<string, string>;
           model?: string;
           sessionId?: string | null;
+          version?: string | null;
         } = {
           mode:
             mode === "resume"
@@ -689,25 +692,34 @@ export async function handleAIToolWorkflow(
           skipPermissions,
           envOverrides: sharedEnv,
           sessionId: resumeSessionId,
+          version: toolVersion ?? null,
         };
         if (normalizedModel) {
           launchOptions.model = normalizedModel;
         }
         launchResult = await launchGeminiCLI(worktreePath, launchOptions);
       } else {
-        // Custom coding agent
+        // Custom coding agent (including OpenCode)
         printInfo(`Launching custom agent: ${agentConfig.displayName}`);
-        launchResult = await launchCodingAgent(agentConfig, {
-          mode:
-            mode === "resume"
-              ? "resume"
-              : mode === "continue"
-                ? "continue"
-                : "normal",
-          skipPermissions,
-          cwd: worktreePath,
-          sharedEnv,
-        });
+        const customLaunchOptions: import("./types/tools.js").CodingAgentLaunchOptions =
+          {
+            mode:
+              mode === "resume"
+                ? "resume"
+                : mode === "continue"
+                  ? "continue"
+                  : "normal",
+            skipPermissions,
+            cwd: worktreePath,
+            sharedEnv,
+          };
+        if (toolVersion) {
+          customLaunchOptions.version = toolVersion;
+        }
+        launchResult = await launchCodingAgent(
+          agentConfig,
+          customLaunchOptions,
+        );
       }
     } finally {
       // FR-043: Clear the periodic timestamp update timer

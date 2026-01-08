@@ -6,9 +6,11 @@
  */
 
 import { execa } from "execa";
+import chalk from "chalk";
 import type { CodingAgent, CodingAgentLaunchOptions } from "./types/tools.js";
 import { createLogger } from "./logging/logger.js";
 import { resolveVersionSuffix } from "./utils/npmRegistry.js";
+import { writeTerminalLine } from "./utils/terminal.js";
 
 const logger = createLogger({ category: "launcher" });
 
@@ -152,12 +154,22 @@ export async function launchCodingAgent(
     case "bunx": {
       // bunx経由でパッケージ実行
       // バージョン指定がある場合はパッケージ名に付与
+      const selectedVersion = options.version ?? "installed";
       const versionSuffix = resolveVersionSuffix(options.version);
       const packageWithVersion = `${agent.command}${versionSuffix}`;
+
+      // FR-072: Log version information
+      if (selectedVersion === "installed") {
+        writeTerminalLine(chalk.green(`   📦 Version: installed`));
+      } else {
+        writeTerminalLine(chalk.green(`   📦 Version: @${selectedVersion}`));
+      }
+      writeTerminalLine(chalk.cyan(`   🔄 Using bunx ${packageWithVersion}`));
+
       // bunx [package@version] [args...]
       await execa("bunx", [packageWithVersion, ...args], execaOptions);
       logger.info(
-        { agentId: agent.id, version: options.version ?? "installed" },
+        { agentId: agent.id, version: selectedVersion },
         "Coding agent completed (bunx)",
       );
       break;
