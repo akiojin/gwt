@@ -1,6 +1,6 @@
 /** @jsxImportSource @opentui/solid */
 import { useKeyboard } from "@opentui/solid";
-import { createMemo } from "solid-js";
+import { createMemo, mergeProps } from "solid-js";
 import { TextAttributes } from "@opentui/core";
 import { Header } from "../../components/solid/Header.js";
 import { Footer } from "../../components/solid/Footer.js";
@@ -22,59 +22,55 @@ export interface LogScreenProps {
   helpVisible?: boolean;
 }
 
-export function LogScreen({
-  entries,
-  loading = false,
-  error = null,
-  onBack,
-  onSelect,
-  onCopy,
-  onPickDate,
-  notification,
-  version,
-  selectedDate,
-  helpVisible = false,
-}: LogScreenProps) {
+export function LogScreen(props: LogScreenProps) {
+  const merged = mergeProps(
+    {
+      loading: false,
+      error: null,
+      helpVisible: false,
+    },
+    props,
+  );
   const terminal = useTerminalSize();
   const listHeight = createMemo(() => {
     const headerRows = 2;
     const infoRows = 1;
     const footerRows = 1;
-    const notificationRows = notification ? 1 : 0;
+    const notificationRows = merged.notification ? 1 : 0;
     const reserved = headerRows + infoRows + footerRows + notificationRows;
     return Math.max(1, terminal().rows - reserved);
   });
 
   const list = useScrollableList({
-    items: () => entries,
+    items: () => merged.entries,
     visibleCount: listHeight,
   });
 
-  const currentEntry = createMemo(() => entries[list.selectedIndex()]);
+  const currentEntry = createMemo(() => merged.entries[list.selectedIndex()]);
 
   const updateSelectedIndex = (value: number | ((prev: number) => number)) => {
     list.setSelectedIndex(value);
   };
 
   useKeyboard((key) => {
-    if (helpVisible) {
+    if (merged.helpVisible) {
       return;
     }
     if (key.name === "escape" || key.name === "q") {
-      onBack();
+      merged.onBack();
       return;
     }
 
     if (key.name === "c") {
       const entry = currentEntry();
       if (entry) {
-        onCopy(entry);
+        merged.onCopy(entry);
       }
       return;
     }
 
     if (key.name === "d") {
-      onPickDate?.();
+      merged.onPickDate?.();
       return;
     }
 
@@ -104,14 +100,14 @@ export function LogScreen({
     }
 
     if (key.name === "end") {
-      updateSelectedIndex(entries.length - 1);
+      updateSelectedIndex(merged.entries.length - 1);
       return;
     }
 
     if (key.name === "return" || key.name === "linefeed") {
       const entry = currentEntry();
       if (entry) {
-        onSelect(entry);
+        merged.onSelect(entry);
       }
     }
   });
@@ -128,25 +124,31 @@ export function LogScreen({
 
   return (
     <box flexDirection="column" height={terminal().rows}>
-      <Header title="gwt - Log Viewer" titleColor="cyan" version={version} />
+      <Header
+        title="gwt - Log Viewer"
+        titleColor="cyan"
+        version={merged.version}
+      />
 
-      {notification ? (
-        <text fg={notification.tone === "error" ? "red" : "green"}>
-          {notification.message}
+      {merged.notification ? (
+        <text fg={merged.notification.tone === "error" ? "red" : "green"}>
+          {merged.notification.message}
         </text>
       ) : null}
 
       <box flexDirection="row">
         <text attributes={TextAttributes.DIM}>Date: </text>
-        <text attributes={TextAttributes.BOLD}>{selectedDate ?? "---"}</text>
+        <text attributes={TextAttributes.BOLD}>
+          {merged.selectedDate ?? "---"}
+        </text>
         <text attributes={TextAttributes.DIM}> Total: </text>
-        <text attributes={TextAttributes.BOLD}>{entries.length}</text>
+        <text attributes={TextAttributes.BOLD}>{merged.entries.length}</text>
       </box>
 
       <box flexDirection="column" flexGrow={1}>
-        {loading ? (
+        {merged.loading ? (
           <text fg="gray">Loading logs...</text>
-        ) : entries.length === 0 ? (
+        ) : merged.entries.length === 0 ? (
           <text fg="gray">No logs available.</text>
         ) : (
           <box flexDirection="column">
@@ -166,7 +168,7 @@ export function LogScreen({
           </box>
         )}
 
-        {error ? <text fg="red">{error}</text> : null}
+        {merged.error ? <text fg="red">{merged.error}</text> : null}
       </box>
 
       <Footer actions={footerActions()} />
