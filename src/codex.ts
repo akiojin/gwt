@@ -12,8 +12,9 @@ import {
   findLatestCodexSession,
   waitForCodexSessionId,
 } from "./utils/session.js";
+import { findCommand } from "./utils/command.js";
 
-const CODEX_CLI_PACKAGE = "@openai/codex@latest";
+const CODEX_CLI_PACKAGE = "@openai/codex";
 
 /**
  * Reasoning effort levels supported by Codex CLI.
@@ -95,6 +96,7 @@ export async function launchCodexCLI(
     model?: string;
     reasoningEffort?: CodexReasoningEffort;
     sessionId?: string | null;
+    version?: string | null;
   } = {},
 ): Promise<{ sessionId?: string | null }> {
   const terminal = getTerminalStreams();
@@ -184,28 +186,91 @@ export async function launchCodexCLI(
       ),
     );
 
-    try {
-      const execChild = async (child: Promise<unknown>) => {
-        try {
-          await child;
-        } catch (execError: unknown) {
-          // Treat SIGINT/SIGTERM as normal exit (user pressed Ctrl+C)
-          const signal = (execError as { signal?: unknown })?.signal;
-          if (signal === "SIGINT" || signal === "SIGTERM") {
-            return;
-          }
-          throw execError;
-        }
-      };
+    // Auto-detect locally installed codex command
+    const codexLookup = await findCommand("codex");
 
-      const child = execa("bunx", [CODEX_CLI_PACKAGE, ...args], {
-        cwd: worktreePath,
-        stdin: childStdio.stdin,
-        stdout: childStdio.stdout,
-        stderr: childStdio.stderr,
-        env,
-      });
-      await execChild(child);
+    const execChild = async (child: Promise<unknown>) => {
+      try {
+        await child;
+      } catch (execError: unknown) {
+        // Treat SIGINT/SIGTERM as normal exit (user pressed Ctrl+C)
+        const signal = (execError as { signal?: unknown })?.signal;
+        if (signal === "SIGINT" || signal === "SIGTERM") {
+          return;
+        }
+        throw execError;
+      }
+    };
+
+    // Determine execution strategy based on version selection
+    const selectedVersion = options.version ?? "installed";
+    const useLocalInstall =
+      selectedVersion === "installed" &&
+      codexLookup.source === "installed" &&
+      codexLookup.path;
+
+    // Log version information (FR-072)
+    if (selectedVersion === "installed") {
+      writeTerminalLine(chalk.green(`   📦 Version: installed`));
+    } else {
+      writeTerminalLine(chalk.green(`   📦 Version: @${selectedVersion}`));
+    }
+
+    try {
+      if (useLocalInstall && codexLookup.path) {
+        // FR-066: Use locally installed command only when "installed" is selected
+        writeTerminalLine(
+          chalk.green("   ✨ Using locally installed codex command"),
+        );
+        const child = execa(codexLookup.path, args, {
+          cwd: worktreePath,
+          stdin: childStdio.stdin,
+          stdout: childStdio.stdout,
+          stderr: childStdio.stderr,
+          env,
+        });
+        await execChild(child);
+      } else {
+        // FR-067, FR-068: Use bunx with version suffix for latest/specific versions
+        // FR-066a: Also fallback to bunx when "installed" selected but not available
+        const versionSuffix =
+          selectedVersion === "installed" ? "" : `@${selectedVersion}`;
+        const packageWithVersion = `${CODEX_CLI_PACKAGE}${versionSuffix}`;
+
+        if (selectedVersion === "installed") {
+          // Fallback message only when installed was selected but not available
+          writeTerminalLine(
+            chalk.cyan(`   🔄 Falling back to bunx ${packageWithVersion}`),
+          );
+          writeTerminalLine(
+            chalk.yellow(
+              "   💡 Recommended: Install Codex CLI globally for faster startup",
+            ),
+          );
+          writeTerminalLine(chalk.yellow("      npm install -g @openai/codex"));
+          writeTerminalLine("");
+          const shouldSkipDelay =
+            typeof process !== "undefined" &&
+            (process.env?.NODE_ENV === "test" || Boolean(process.env?.VITEST));
+          if (!shouldSkipDelay) {
+            await new Promise((resolve) => setTimeout(resolve, 2000));
+          }
+        } else {
+          // For latest or specific version, just show which package is being used
+          writeTerminalLine(
+            chalk.cyan(`   🔄 Using bunx ${packageWithVersion}`),
+          );
+        }
+
+        const child = execa("bunx", [packageWithVersion, ...args], {
+          cwd: worktreePath,
+          stdin: childStdio.stdin,
+          stdout: childStdio.stdout,
+          stderr: childStdio.stderr,
+          env,
+        });
+        await execChild(child);
+      }
     } finally {
       childStdio.cleanup();
     }
@@ -299,7 +364,7 @@ export async function launchCodexCLI(
  */
 export async function isCodexAvailable(): Promise<boolean> {
   try {
-    await execa("bunx", [CODEX_CLI_PACKAGE, "--help"]);
+    await execa("bunx", [`${CODEX_CLI_PACKAGE}@latest`, "--help"]);
     return true;
   } catch (error: unknown) {
     const err = error as NodeJS.ErrnoException;
