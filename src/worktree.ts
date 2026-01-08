@@ -581,9 +581,82 @@ export interface RepairResult {
 }
 
 /**
+ * Worktreeパス修復の結果
+ */
+export interface RepairPathResult {
+  /** 修復成功 (git worktree repair) */
+  repaired: boolean;
+  /** 古いメタデータ削除成功 (git worktree remove --force) */
+  removed: boolean;
+  /** 修復後の新しいパス (repaired=trueの場合のみ) */
+  newPath?: string;
+}
+
+/**
+ * 単一のworktreeパスを修復する共通関数
+ *
+ * パターンA: 期待されるパスにディレクトリが存在する
+ *   → git worktree repair <expectedPath> で修復
+ *
+ * パターンB: ディレクトリが存在しない（リモート環境で作成されたメタデータのみ残っている）
+ *   → git worktree remove --force <currentPath> でメタデータを削除
+ *
+ * @param branch ブランチ名
+ * @param currentPath 現在gitメタデータに記録されているパス
+ * @param repoRoot リポジトリルートパス
+ * @returns 修復結果
+ */
+export async function repairWorktreePath(
+  branch: string,
+  currentPath: string,
+  repoRoot: string,
+): Promise<RepairPathResult> {
+  const expectedPath = await generateWorktreePath(repoRoot, branch);
+  const fsSync = await import("node:fs");
+
+  if (fsSync.existsSync(expectedPath)) {
+    // パターンA: ディレクトリが存在する → repair
+    logger.info(
+      { branch, expectedPath, currentPath },
+      "repairWorktreePath: directory exists, attempting repair",
+    );
+    try {
+      await execa("git", ["worktree", "repair", expectedPath], {
+        cwd: repoRoot,
+      });
+      return { repaired: true, removed: false, newPath: expectedPath };
+    } catch (error) {
+      logger.warn(
+        { branch, expectedPath, error },
+        "repairWorktreePath: repair failed",
+      );
+      return { repaired: false, removed: false };
+    }
+  } else {
+    // パターンB: ディレクトリが存在しない → 古いメタデータを削除
+    logger.info(
+      { branch, currentPath, expectedPath },
+      "repairWorktreePath: directory not found, removing stale metadata",
+    );
+    try {
+      await execa("git", ["worktree", "remove", "--force", currentPath], {
+        cwd: repoRoot,
+      });
+      return { repaired: false, removed: true };
+    } catch (error) {
+      logger.warn(
+        { branch, currentPath, error },
+        "repairWorktreePath: remove failed",
+      );
+      return { repaired: false, removed: false };
+    }
+  }
+}
+
+/**
  * Worktreeのパス不整合を修復
- * git worktree repairを引数なしで実行し、全Worktreeを修復
- * @param targetBranches 修復対象のブランチ名配列（修復前後の比較用）
+ * 共通関数repairWorktreePathを使用して各ブランチを修復
+ * @param targetBranches 修復対象のブランチ名配列
  * @returns 修復結果（成功数、失敗数、失敗詳細）
  */
 export async function repairWorktrees(
@@ -599,10 +672,10 @@ export async function repairWorktrees(
     return result;
   }
 
-  // 修復前のアクセス可能性を記録
+  // 修復前のworktree一覧を取得（現在のパスを知るため）
   const beforeWorktrees = await listAdditionalWorktrees();
-  const beforeAccessible = new Map(
-    beforeWorktrees.map((w) => [w.branch, w.isAccessible]),
+  const worktreePathMap = new Map(
+    beforeWorktrees.map((w) => [w.branch, w.path]),
   );
 
   // デバッグログ: worktreeリストのブランチ名を出力
@@ -618,82 +691,53 @@ export async function repairWorktrees(
     "repairWorktrees: before state",
   );
 
-  try {
-    const repoRoot = await getRepositoryRoot();
-    const fsSync = await import("node:fs");
+  const repoRoot = await getRepositoryRoot();
 
-    // 対象ブランチごとに、正しいworktreeパスを計算して修復を試みる
-    for (const branch of targetBranches) {
-      const expectedPath = await generateWorktreePath(repoRoot, branch);
-
-      // 期待されるパスにworktreeディレクトリが存在する場合、そのパスを指定して修復
-      if (fsSync.existsSync(expectedPath)) {
-        logger.info(
-          { branch, expectedPath },
-          "repairWorktrees: repairing with expected path",
-        );
-        try {
-          await execa("git", ["worktree", "repair", expectedPath], {
-            cwd: repoRoot,
-          });
-        } catch (repairError) {
-          logger.warn(
-            { branch, expectedPath, error: repairError },
-            "repairWorktrees: repair with path failed",
-          );
-        }
-      }
-    }
-
-    // 全体の修復も実行（念のため）
-    await execa("git", ["worktree", "repair"], { cwd: repoRoot });
-
-    // 修復後のアクセス可能性を確認
-    const afterWorktrees = await listAdditionalWorktrees();
-    const afterAccessible = new Map(
-      afterWorktrees.map((w) => [w.branch, w.isAccessible]),
-    );
-
-    // デバッグログ: 修復後の状態
-    logger.info(
-      {
-        afterWorktrees: afterWorktrees.map((w) => ({
-          branch: w.branch,
-          path: w.path,
-          isAccessible: w.isAccessible,
-        })),
-      },
-      "repairWorktrees: after state",
-    );
-
-    // 対象ブランチの修復結果を集計
-    for (const branch of targetBranches) {
-      const wasBefore = beforeAccessible.get(branch);
-      const isAfter = afterAccessible.get(branch);
-
-      logger.info(
-        { branch, wasBefore, isAfter },
-        "repairWorktrees: checking branch",
-      );
-
-      if (wasBefore === false && isAfter === true) {
-        result.repairedCount++;
-      } else if (wasBefore === false && isAfter === false) {
-        result.failedCount++;
-        result.failures.push({
-          path: branch,
-          error: "Worktree still inaccessible after repair",
-        });
-      }
-    }
-  } catch (error) {
-    // repair自体が失敗した場合
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    for (const branch of targetBranches) {
+  // 対象ブランチごとに共通関数を使用して修復
+  for (const branch of targetBranches) {
+    const currentPath = worktreePathMap.get(branch);
+    if (!currentPath) {
+      logger.warn({ branch }, "repairWorktrees: branch not found in worktrees");
       result.failedCount++;
-      result.failures.push({ path: branch, error: errorMessage });
+      result.failures.push({
+        path: branch,
+        error: "Branch not found in worktrees",
+      });
+      continue;
+    }
+
+    const repairResult = await repairWorktreePath(
+      branch,
+      currentPath,
+      repoRoot,
+    );
+
+    if (repairResult.repaired) {
+      result.repairedCount++;
+    } else if (repairResult.removed) {
+      // メタデータ削除は「修復」としてカウント（新規作成が可能になるため）
+      result.repairedCount++;
+    } else {
+      result.failedCount++;
+      result.failures.push({
+        path: branch,
+        error: "Worktree repair failed",
+      });
     }
   }
+
+  // 修復後のアクセス可能性を確認（デバッグログ用）
+  const afterWorktrees = await listAdditionalWorktrees();
+  logger.info(
+    {
+      afterWorktrees: afterWorktrees.map((w) => ({
+        branch: w.branch,
+        path: w.path,
+        isAccessible: w.isAccessible,
+      })),
+    },
+    "repairWorktrees: after state",
+  );
 
   return result;
 }
