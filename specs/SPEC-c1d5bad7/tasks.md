@@ -42,15 +42,17 @@
 - [ ] T100〜T160 を順に実施（TDD 優先）
 
 ## Phase 6: ブランチ連動ログ
-- [ ] T100 [Test] ログ対象ディレクトリ決定ロジックのテスト追加 (`tests/cli/logviewer.test.ts` など既存構成に合わせる)
+- [ ] T100 [Test] ログ対象ディレクトリ決定ロジックのテスト追加（worktree優先/現在ブランチfallback/それ以外は空） (`tests/cli/logviewer.test.ts` など既存構成に合わせる)
 - [ ] T101 ログ対象ディレクトリ決定ロジックの実装 (`src/cli/ui/App.solid.tsx` / `src/logging/reader.ts` など)
+- [ ] T102 ブランチ一覧のカーソルブランチを log viewer に渡す (`src/cli/ui/App.solid.tsx`)
 - [ ] T110 [Test] Log Viewer に Branch/Source を表示するテスト追加 (`src/cli/ui/__tests__/solid/LogScreen.test.tsx`)
 - [ ] T111 Log Viewer の Branch/Source 表示実装 (`src/cli/ui/screens/solid/LogScreen.tsx`)
 
 ## Phase 7: エージェント stdout/stderr 取り込み
-- [ ] T120 [Research] stdout/stderr 取り込みの方式を確定（PTY/opt-in 方針）
-- [ ] T130 [Test] 取り込みログが JSONL で保存されることを検証 (`tests/logging/agent-output.test.ts` など)
-- [ ] T131 取り込み処理の実装 (`src/launcher.ts` / `src/logging/logger.ts`)
+- [ ] T120 [Test] opt-in 無効時は stdout/stderr を取り込まないことを検証 (`tests/logging/agent-output.test.ts` など)
+- [ ] T121 [Test] opt-in 有効時に stdout/stderr が JSONL に追記されることを検証 (`tests/logging/agent-output.test.ts` など)
+- [ ] T130 opt-in 判定と出力取り込みの実装（`GWT_CAPTURE_AGENT_OUTPUT`） (`src/launcher.ts` / `src/logging/logger.ts`)
+- [ ] T131 stdout/stderr ログに `agentId` を付与する (`src/launcher.ts`)
 - [ ] T132 Log Viewer で agent stdout/stderr が表示されることを検証 (`src/cli/ui/__tests__/solid/LogScreen.test.tsx`)
 
 ## Phase 8: 回帰チェック

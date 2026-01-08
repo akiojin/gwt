@@ -7,7 +7,7 @@
 
 - ブランチ一覧で選択中のブランチに対応する worktree のログを表示する。
 - ログ一覧に Branch/Source を表示し、当日が空の場合は同一ディレクトリ内の最新ログへフォールバックする。
-- コーディングエージェント stdout/stderr をログとして取り込む（方法は要確認）。
+- コーディングエージェント stdout/stderr を **opt-in** でログとして取り込む（`GWT_CAPTURE_AGENT_OUTPUT=true|1`）。
 
 ## 技術コンテキスト
 
@@ -40,18 +40,18 @@ src/
 ## フェーズ0: 調査
 
 - 既存のログ出力/読み込み経路と worktree 情報の取得フローを確認済み
-- コーディングエージェントの stdout/stderr 取り込みは、TTY/PTY の扱いを再調査が必要
+- stdout/stderr 取り込みは PTY 経由でミラーリングし、TTY体験を維持する方針
 
 ## フェーズ1: 設計
 
-- **ログ対象ディレクトリ決定**: ブランチの worktree basename → `~/.gwt/logs/<basename>`
+- **ログ対象ディレクトリ決定**: ブランチの worktree basename → `~/.gwt/logs/<basename>`（現在ブランチの worktree 無しは起動ディレクトリをフォールバック）
 - **表示追加**: Log Viewer に Branch/Source を表示
-- **stdout/stderr 取り込み**: PTY 経由でのストリームミラーリング案を検討
+- **stdout/stderr 取り込み**: PTY 経由でストリームをミラーリングし、ログへ追記
 
 ## 実装戦略
 
 1. **P1**: ブランチ連動ログ表示と UI 表示追加
-2. **P2**: エージェント stdout/stderr 取り込み（要確認事項を確定後）
+2. **P2**: エージェント stdout/stderr 取り込み（opt-in）
 
 ## テスト戦略
 
@@ -69,6 +69,3 @@ src/
 ## 次のステップ
 
 - `tasks.md` を更新し、TDD の実行順序を確定する
-- **要確認事項**
-  - 現在ブランチで worktree が無い場合のフォールバック扱い
-  - stdout/stderr 取り込みの常時/opt-in 方針

@@ -28,7 +28,7 @@
 - 遷移時、**カーソル位置のブランチ**を対象にログ対象ディレクトリを決定する
 - ログ対象ディレクトリは、対象ブランチの **worktree パスの basename** を用いて `~/.gwt/logs/<basename>/` を参照する
 - 対象ブランチに worktree が無い、またはアクセス不可の場合は「ログがありません」と表示する
-  - **要確認**: 現在ブランチで worktree が無い場合のみ、起動ディレクトリをフォールバックとして扱うか
+  - ただし、**対象ブランチが現在ブランチ**で worktree パスが無い場合は、起動ディレクトリの basename をフォールバックに使用する
 - ログ一覧画面に **Branch** と **Source**（ログ対象ディレクトリ）を表示する
 
 ### 2. ログ一覧画面の表示
@@ -63,10 +63,11 @@
 ### 6. コーディングエージェント stdout/stderr の取り込み
 
 - gwt から起動したコーディングエージェントの stdout/stderr をログとして取り込む
+- 取り込みは **opt-in** とし、環境変数 `GWT_CAPTURE_AGENT_OUTPUT` が `true` または `1` の場合のみ有効にする
 - 取り込みログは JSONL として `~/.gwt/logs/<basename>/<YYYY-MM-DD>.jsonl` に追記する
 - stdout/stderr は `category` を分けて識別できるようにする
   - 例: `agent.stdout`, `agent.stderr`
-- **要確認**: 取り込みは常時有効か、明示的な opt-in（環境変数/設定）にするか
+- stdout/stderr のログには `agentId` を含める
 
 ## キーバインド一覧
 
