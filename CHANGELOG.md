@@ -11,6 +11,40 @@
 * tools.json の customTools → customCodingAgents マイグレーション対応 ([#476](https://github.com/akiojin/gwt/issues/476)) ([99f1c7f](https://github.com/akiojin/gwt/commit/99f1c7f3b9263e087de0c3c4cd96de8adccbe229))
 
 
+## [4.11.0](https://github.com/akiojin/gwt/compare/v4.10.0...v4.11.0) (2026-01-08)
+
+
+### Features
+
+* OpenTUI移行 ([#487](https://github.com/akiojin/gwt/issues/487)) ([ed1c872](https://github.com/akiojin/gwt/commit/ed1c872d2e031784c46bbb1ce572866a03de47ef))
+* **ui:** コーディングエージェント名の一貫した色づけを実装 ([#511](https://github.com/akiojin/gwt/issues/511)) ([7fdb2ad](https://github.com/akiojin/gwt/commit/7fdb2ad99f712d9bbbd60bfca5d28f5b8b81e783))
+* Worktreeパス修復機能を追加 (SPEC-902a89dc) ([#484](https://github.com/akiojin/gwt/issues/484)) ([2c36efa](https://github.com/akiojin/gwt/commit/2c36efaa27d11744a8dc5616c335bc5574c9683d))
+* コーディングエージェントのバージョン選択機能を改善 ([#510](https://github.com/akiojin/gwt/issues/510)) ([a4bab47](https://github.com/akiojin/gwt/commit/a4bab47a3e0fd13967cc7301d1058477fbf59ab8))
+* ショートカット表記を画面内に統合 ([#503](https://github.com/akiojin/gwt/issues/503)) ([d0d9fa2](https://github.com/akiojin/gwt/commit/d0d9fa29ac1e478d61dde0965252e509fe1693f8))
+* ブランチ選択のフルパス表示 ([#486](https://github.com/akiojin/gwt/issues/486)) ([1c6dd54](https://github.com/akiojin/gwt/commit/1c6dd549cdc1a8f3b1b374ed8e4dc330649737ef))
+* 新規ブランチ作成時にブランチタイプ選択とプレフィックス自動付加を追加 ([#494](https://github.com/akiojin/gwt/issues/494)) ([2010f6c](https://github.com/akiojin/gwt/commit/2010f6c37095e98c79dfe20110524df92862ac28))
+
+
+### Bug Fixes
+
+* **cli:** keep wizard cursor visible in popup ([#506](https://github.com/akiojin/gwt/issues/506)) ([3a2744a](https://github.com/akiojin/gwt/commit/3a2744aabfec7800cb47d5cc740c3cb4b6e36335))
+* **cli:** keep wizard cursor visible in popup ([#507](https://github.com/akiojin/gwt/issues/507)) ([c0f67cc](https://github.com/akiojin/gwt/commit/c0f67cc2c955037ef7ed63bb2a37e39b0cdd4577))
+* CLI終了時のシグナルハンドリング改善と各種ドキュメント修正 ([#489](https://github.com/akiojin/gwt/issues/489)) ([fe178da](https://github.com/akiojin/gwt/commit/fe178dac9b20c3e391e6f232a40c533407636340))
+* divergenceでも起動を継続 ([#483](https://github.com/akiojin/gwt/issues/483)) ([e04d872](https://github.com/akiojin/gwt/commit/e04d872c5ab30e67a9dddab8df9f191c76af2232))
+* ESCキャンセル後にウィザードが開かない問題を修正 ([#501](https://github.com/akiojin/gwt/issues/501)) ([1a905f3](https://github.com/akiojin/gwt/commit/1a905f3a8807bc1ff9e6e3e13ee5d625b24d2c32))
+* Repair機能のクロス環境対応とUI改善 ([#508](https://github.com/akiojin/gwt/issues/508)) ([f02c9f0](https://github.com/akiojin/gwt/commit/f02c9f073d4b197b0d50dddf20c59a96e31acb7c))
+* show worktree path in branch footer ([#499](https://github.com/akiojin/gwt/issues/499)) ([9d7ceec](https://github.com/akiojin/gwt/commit/9d7ceec012e77fabc4254dbddb342427cba14b15))
+* stabilize OpenTUI solid tests and UI layout ([#490](https://github.com/akiojin/gwt/issues/490)) ([af276b9](https://github.com/akiojin/gwt/commit/af276b9bb06c8140c6d878c86244a5f643e6f1b6))
+* Worktree修復ロジックの統一化とクロス環境対応 ([#509](https://github.com/akiojin/gwt/issues/509)) ([413213c](https://github.com/akiojin/gwt/commit/413213c8de0b6425ad6f1c24774d647aa6fad4a5))
+* ウィザードのfocus型を厳密オプションに合わせる ([de24488](https://github.com/akiojin/gwt/commit/de244887061bc859970d779100839a4ba353de72))
+* ウィザード内スクロールの上下キー対応を追加 ([80d62c1](https://github.com/akiojin/gwt/commit/80d62c10796cbc1b8ad108a6ba3dae6d43a1f3ec))
+* ウィザード内スクロールの上下キー対応を追加 ([97685df](https://github.com/akiojin/gwt/commit/97685df5c1c71fdf7473778b60aa93cb9586ddaf))
+* セッションIDの表示と再開を改善 ([#505](https://github.com/akiojin/gwt/issues/505)) ([0ad5aa5](https://github.com/akiojin/gwt/commit/0ad5aa5394f683e4db847dc12db381eae1f7d2e4))
+* ブランチ一覧にセッション履歴を反映 ([#497](https://github.com/akiojin/gwt/issues/497)) ([090a5e7](https://github.com/akiojin/gwt/commit/090a5e739b76699ee6a06fab69dd4d70a1b06090))
+* ブランチ一覧のASCII表記を調整 ([#500](https://github.com/akiojin/gwt/issues/500)) ([9f3e752](https://github.com/akiojin/gwt/commit/9f3e752132b3313e66b8efac7726679197004bfa))
+* 依存関係インストール時のスピナー表示を削除 ([#496](https://github.com/akiojin/gwt/issues/496)) ([3c53f51](https://github.com/akiojin/gwt/commit/3c53f5135befea8a71f07695e2e74576d6d31fed))
+* 起動ログの出力経路とCodexセッションID検出を改善 ([#495](https://github.com/akiojin/gwt/issues/495)) ([e9da151](https://github.com/akiojin/gwt/commit/e9da1517b1cdedfd0e8a8eff03a6d44654c5fdf3))
+
 ## [4.9.1](https://github.com/akiojin/gwt/compare/v4.9.0...v4.9.1) (2026-01-04)
 
 
@@ -779,4 +813,3 @@ Co-Authored-By: Claude <noreply@anthropic.com>
 * set Opus 4.5 as default and remove explicit Default option ([86f60fa](https://github.com/akiojin/gwt/commit/86f60fadd8232920bf01f457a370bd2243066f0e))
 * update default Claude Code model to Opus 4.5 ([1dd909e](https://github.com/akiojin/gwt/commit/1dd909ed87a55ce3bb796deb0431d0027571dae2))
 * update Opus model version to 4.5 ([307faeb](https://github.com/akiojin/gwt/commit/307faeb66ebac0ca89b01c07ee19d213797c4d5c))
-
