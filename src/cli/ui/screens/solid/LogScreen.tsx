@@ -90,7 +90,6 @@ interface TextSegment {
   text: string;
   fg?: string;
   bg?: string;
-  attributes?: TextAttributes;
 }
 
 const appendSegment = (segments: TextSegment[], segment: TextSegment) => {
@@ -519,9 +518,6 @@ export function LogScreen(props: LogScreenProps) {
                     <text
                       {...(segment.fg ? { fg: segment.fg } : {})}
                       {...(segment.bg ? { bg: segment.bg } : {})}
-                      {...(segment.attributes !== undefined
-                        ? { attributes: segment.attributes }
-                        : {})}
                     >
                       {segment.text}
                     </text>
