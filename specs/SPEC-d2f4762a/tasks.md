@@ -191,10 +191,10 @@
 
 ### テスト（TDD）
 
-- [ ] **T811** [US4] `src/cli/ui/__tests__/solid/BranchListScreen.test.tsx` に未コミット/未プッシュの赤`[*]`と未マージの黄色`!`を確認するテストを追加
-- [ ] **T812** [US4] `src/cli/ui/__tests__/solid/AppSolid.cleanup.test.tsx` にupstream未設定時の安全判定除外を確認するテストを追加
+- [x] **T811** [US4] `src/cli/ui/__tests__/solid/BranchListScreen.test.tsx` に未コミット/未プッシュの赤`[*]`と未マージの黄色`!`を確認するテストを追加
+- [x] **T812** [US4] `src/cli/ui/__tests__/solid/AppSolid.cleanup.test.tsx` にupstream未設定時の安全判定除外を確認するテストを追加
 
 ### 実装
 
-- [ ] **T821** [US4] `src/cli/ui/App.solid.tsx` にupstream/マージ/未コミット・未プッシュの安全判定反映ロジックを追加
-- [ ] **T822** [US4] `src/cli/ui/screens/solid/BranchListScreen.tsx` の安全アイコン色分けを更新
+- [x] **T821** [US4] `src/cli/ui/App.solid.tsx` にupstream/マージ/未コミット・未プッシュの安全判定反映ロジックを追加
+- [x] **T822** [US4] `src/cli/ui/screens/solid/BranchListScreen.tsx` の安全アイコン色分けを更新
