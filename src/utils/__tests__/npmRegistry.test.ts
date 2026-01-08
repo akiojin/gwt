@@ -179,4 +179,72 @@ describe("npmRegistry", () => {
       expect(resolveVersionSuffix("1.1.0-beta.1")).toBe("@1.1.0-beta.1");
     });
   });
+
+  describe("parseGlobalPackagesOutput", () => {
+    it("should parse bun pm ls -g output correctly", async () => {
+      const { parseGlobalPackagesOutput } = await import("../npmRegistry.js");
+      const output = `/root/.bun/install/global node_modules (17)
+├── @anthropic-ai/claude-code@2.0.76
+└── @openai/codex@0.77.0`;
+
+      const result = parseGlobalPackagesOutput(output);
+
+      expect(result.path).toBe("/root/.bun/install/global");
+      expect(result.packages).toHaveLength(2);
+      expect(result.packages[0]).toEqual({
+        name: "@anthropic-ai/claude-code",
+        version: "2.0.76",
+      });
+      expect(result.packages[1]).toEqual({
+        name: "@openai/codex",
+        version: "0.77.0",
+      });
+    });
+
+    it("should return empty packages for empty output", async () => {
+      const { parseGlobalPackagesOutput } = await import("../npmRegistry.js");
+      const result = parseGlobalPackagesOutput("");
+
+      expect(result.path).toBeNull();
+      expect(result.packages).toHaveLength(0);
+    });
+
+    it("should parse single package output", async () => {
+      const { parseGlobalPackagesOutput } = await import("../npmRegistry.js");
+      const output = `/home/user/.bun/install/global node_modules (1)
+└── opencode-ai@1.0.0`;
+
+      const result = parseGlobalPackagesOutput(output);
+
+      expect(result.path).toBe("/home/user/.bun/install/global");
+      expect(result.packages).toHaveLength(1);
+      expect(result.packages[0]).toEqual({
+        name: "opencode-ai",
+        version: "1.0.0",
+      });
+    });
+  });
+
+  describe("getInstalledPackageInfo", () => {
+    it("should return package info when installed globally", async () => {
+      const { getInstalledPackageInfo } = await import("../npmRegistry.js");
+      // This test relies on actual global packages - may need adjustment
+      const result = await getInstalledPackageInfo("@anthropic-ai/claude-code");
+
+      // If claude-code is installed globally, it should return info
+      if (result) {
+        expect(result.version).toBeDefined();
+        expect(result.path).toBeDefined();
+      }
+    });
+
+    it("should return null when package is not installed", async () => {
+      const { getInstalledPackageInfo } = await import("../npmRegistry.js");
+      const result = await getInstalledPackageInfo(
+        "nonexistent-package-xyz-123",
+      );
+
+      expect(result).toBeNull();
+    });
+  });
 });

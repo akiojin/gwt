@@ -10,6 +10,7 @@ import type { CodingAgentId } from "../../types.js";
 import { useWizardScroll } from "./WizardPopup.js";
 import {
   fetchPackageVersions,
+  getInstalledPackageInfo,
   parsePackageCommand,
 } from "../../../../utils/npmRegistry.js";
 import { BUILTIN_CODING_AGENTS } from "../../../../config/builtin-coding-agents.js";
@@ -600,19 +601,12 @@ export interface VersionSelectStepProps extends StepProps {
   onSelect: (version: string) => void;
 }
 
-// 静的オプション（常に表示）
-const STATIC_VERSION_OPTIONS: SelectInputItem[] = [
-  {
-    label: "installed",
-    value: "installed",
-    description: "Use cached version (bunx default)",
-  },
-  {
-    label: "latest",
-    value: "latest",
-    description: "Always fetch latest version",
-  },
-];
+// latest オプション（常に表示）
+const LATEST_OPTION: SelectInputItem = {
+  label: "latest",
+  value: "latest",
+  description: "Always fetch latest version",
+};
 
 // エージェントIDからパッケージ名を取得
 function getPackageNameForAgent(agentId: string): string | null {
@@ -646,8 +640,32 @@ async function fetchVersionOptions(
   });
 }
 
+// インストール済みパッケージ情報を取得
+async function fetchInstalledOption(
+  agentId: string,
+): Promise<SelectInputItem | null> {
+  const packageName = getPackageNameForAgent(agentId);
+  if (!packageName) {
+    return null;
+  }
+
+  const info = await getInstalledPackageInfo(packageName);
+  if (!info) {
+    return null;
+  }
+
+  return {
+    label: `installed (${info.version})`,
+    value: "installed",
+    description: info.path,
+  };
+}
+
 export function VersionSelectStep(props: VersionSelectStepProps) {
   const [selectedIndex, setSelectedIndex] = createSignal(0);
+  const [selectRef, setSelectRef] = createSignal<SelectRenderable | undefined>(
+    undefined,
+  );
 
   // npmレジストリからバージョン取得
   const [versionOptions] = createResource(
@@ -655,16 +673,37 @@ export function VersionSelectStep(props: VersionSelectStepProps) {
     fetchVersionOptions,
   );
 
-  // 全オプション（静的 + 動的）
+  // インストール済み情報を取得
+  const [installedOption] = createResource(
+    () => props.agentId,
+    fetchInstalledOption,
+  );
+
+  // 全オプション（installed + latest + 動的）
   const allOptions = (): SelectInputItem[] => {
+    const options: SelectInputItem[] = [];
+
+    // installedオプション（インストール済みの場合のみ）
+    const installed = installedOption();
+    if (installed) {
+      options.push(installed);
+    }
+
+    // latestオプション（常に表示）
+    options.push(LATEST_OPTION);
+
+    // npmレジストリから取得したバージョン
     const dynamic = versionOptions() ?? [];
-    return [...STATIC_VERSION_OPTIONS, ...dynamic];
+    options.push(...dynamic);
+
+    return options;
   };
 
-  useEdgeScroll({
+  useEnsureSelectionVisible({
     getSelectedIndex: selectedIndex,
     getItemCount: () => allOptions().length,
-    focused: props.focused,
+    getFocused: () => props.focused,
+    getSelectRef: selectRef,
   });
 
   createEffect(() => {
@@ -716,6 +755,7 @@ export function VersionSelectStep(props: VersionSelectStepProps) {
         onSelect={(item) => props.onSelect(item.value)}
         onChange={handleChange}
         focused={props.focused ?? true}
+        selectRef={setSelectRef}
       />
       <text> </text>
       <text attributes={TextAttributes.DIM}>[Enter] Select [Esc] Back</text>
