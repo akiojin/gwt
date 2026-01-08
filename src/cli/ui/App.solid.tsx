@@ -39,6 +39,9 @@ import { ProfileScreen } from "./screens/solid/ProfileScreen.js";
 import { ProfileEnvScreen } from "./screens/solid/ProfileEnvScreen.js";
 import { calculateStatistics } from "./utils/statisticsCalculator.js";
 import { formatBranchItems } from "./utils/branchFormatter.js";
+import { createLogger } from "../../logging/logger.js";
+
+const logger = createLogger({ category: "app" });
 import {
   getDefaultInferenceForModel,
   getDefaultModelOption,
@@ -56,7 +59,6 @@ import {
   deleteBranch,
 } from "../../git.js";
 import {
-  getMergedPRWorktrees,
   isProtectedBranchName,
   listAdditionalWorktrees,
   removeWorktree,
@@ -178,22 +180,6 @@ const toSelectedBranchState = (branch: BranchItem): SelectedBranchState => {
     branchCategory: branch.branchType,
     ...(isRemote ? { remoteBranch: branch.name } : {}),
   };
-};
-
-const _inferBranchCategory = (branchName: string): BranchItem["branchType"] => {
-  const normalized = branchName.replace(/^origin\//, "");
-  if (normalized === "main") return "main";
-  if (normalized === "develop") return "develop";
-  const prefix = normalized.split("/")[0] ?? "";
-  switch (prefix) {
-    case "feature":
-    case "bugfix":
-    case "hotfix":
-    case "release":
-      return prefix;
-    default:
-      return "other";
-  }
 };
 
 export function AppSolid(props: AppSolidProps) {
@@ -881,29 +867,10 @@ export function AppSolid(props: AppSolidProps) {
           );
         }
       } else {
-        const targets = await getMergedPRWorktrees();
-        for (const target of targets) {
-          if (isProtectedBranchName(target.branch)) {
-            skipCounts.protected += 1;
-            continue;
-          }
-          if (target.hasUncommittedChanges || target.hasUnpushedCommits) {
-            skipCounts.unsafe += 1;
-            continue;
-          }
-          const cleanupType: CleanupTask["cleanupType"] = target.cleanupType;
-          const baseTask = {
-            branch: target.branch,
-            worktreePath: target.worktreePath,
-            cleanupType,
-          };
-          const isAccessible = target.isAccessible;
-          tasks.push(
-            isAccessible === undefined
-              ? baseTask
-              : { ...baseTask, isAccessible },
-          );
-        }
+        // FR-028: 選択が0件の場合は警告を表示して処理をスキップ
+        setBranchInputLocked(false);
+        showBranchFooterMessage("No branches selected.", "yellow");
+        return;
       }
 
       const skipNotice = buildSkipNotice(
@@ -992,8 +959,22 @@ export function AppSolid(props: AppSolidProps) {
     if (branchInputLocked()) {
       return;
     }
+
+    // FR-002/FR-007: 選択済みブランチのみを対象とする
+    const selection = selectedBranches();
+    if (selection.length === 0) {
+      showBranchFooterMessage("No branches selected.", "yellow");
+      return;
+    }
+
+    // 選択されたブランチのうち、inaccessibleなものを修復対象とする
+    const selectionSet = new Set(selection);
     const targets = branchItems()
-      .filter((branch) => branch.worktreeStatus === "inaccessible")
+      .filter(
+        (branch) =>
+          selectionSet.has(branch.name) &&
+          branch.worktreeStatus === "inaccessible",
+      )
       .map((branch) => branch.name);
 
     if (targets.length === 0) {
@@ -1009,6 +990,15 @@ export function AppSolid(props: AppSolidProps) {
     try {
       const result = await repairWorktrees(targets);
       await refreshBranches();
+
+      // エラー詳細をログに出力
+      if (result.failedCount > 0) {
+        logger.error(
+          { failures: result.failures, targets },
+          "Worktree repair failed for some branches",
+        );
+      }
+
       const message =
         result.failedCount > 0
           ? `Repair finished: ${result.repairedCount} repaired, ${result.failedCount} failed.`
@@ -1021,6 +1011,7 @@ export function AppSolid(props: AppSolidProps) {
       );
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
+      logger.error({ error: err, targets }, "Worktree repair threw an error");
       showBranchFooterMessage(`Repair failed: ${errorMessage}`, "red");
     } finally {
       setBranchInputLocked(false);
