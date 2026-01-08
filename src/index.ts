@@ -27,6 +27,7 @@ import {
   isProtectedBranchName,
   switchToProtectedBranch,
   resolveWorktreePathForBranch,
+  repairWorktreePath,
 } from "./worktree.js";
 import {
   getTerminalStreams,
@@ -308,15 +309,37 @@ export async function handleAIToolWorkflow(
       ensureOptions.isNewBranch = !localExists;
     }
 
-    const existingWorktreeResolution =
-      await resolveWorktreePathForBranch(branch);
-    const existingWorktree = existingWorktreeResolution.path;
+    let existingWorktreeResolution = await resolveWorktreePathForBranch(branch);
+    let existingWorktree = existingWorktreeResolution.path;
+
+    // mismatch検出時に自動修復を試みる (FR-009〜FR-013)
     if (!existingWorktree && existingWorktreeResolution.mismatch) {
       const actualBranch =
         existingWorktreeResolution.mismatch.actualBranch ?? "unknown";
       printWarning(
-        `Worktree mismatch detected: ${existingWorktreeResolution.mismatch.path} is checked out to '${actualBranch}'. Creating or reusing the correct worktree for '${branch}'.`,
+        `Worktree mismatch detected: ${existingWorktreeResolution.mismatch.path} is checked out to '${actualBranch}'. Attempting to repair...`,
       );
+
+      // 共通修復関数を使用してパス修復を試みる
+      const repairResult = await repairWorktreePath(
+        branch,
+        existingWorktreeResolution.mismatch.path,
+        repoRoot,
+      );
+
+      if (repairResult.repaired) {
+        // FR-012: 修復成功時のメッセージ
+        printInfo(`Worktree path repaired: ${repairResult.newPath}`);
+
+        // 修復後に再度解決を試みる
+        existingWorktreeResolution = await resolveWorktreePathForBranch(branch);
+        existingWorktree = existingWorktreeResolution.path;
+      } else if (repairResult.removed) {
+        // FR-013: メタデータ削除成功時のメッセージ
+        printInfo(`Stale worktree metadata removed. Creating new worktree...`);
+      } else {
+        printWarning(`Failed to repair worktree for '${branch}'.`);
+      }
     }
 
     const isProtectedBranch =
