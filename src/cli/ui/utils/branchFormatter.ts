@@ -1,94 +1,9 @@
 import type {
   BranchInfo,
   BranchItem,
-  BranchType,
   WorktreeStatus,
   WorktreeInfo,
 } from "../types.js";
-import stringWidth from "string-width";
-
-// Icon mappings
-const branchIcons: Record<BranchType, string> = {
-  main: "⚡",
-  develop: "⚡",
-  feature: "✨",
-  bugfix: "🐛",
-  hotfix: "🔥",
-  release: "🚀",
-  other: "📌",
-};
-
-const worktreeIcons: Record<Exclude<WorktreeStatus, undefined>, string> = {
-  active: "🟢",
-  inaccessible: "🔴",
-};
-
-const changeIcons = {
-  current: "👉",
-  hasChanges: "💾",
-  unpushed: "📤",
-  openPR: "🔃",
-  mergedPR: "✅",
-  warning: "⚠️",
-};
-
-const remoteIcon = "☁";
-
-// Sync status icons
-const syncIcons = {
-  upToDate: "✓",
-  ahead: "↑",
-  behind: "↓",
-  diverged: "↕",
-  none: "-",
-  remoteOnly: "☁",
-};
-
-// Remote column markers
-const remoteMarkers = {
-  tracked: "🔗", // ローカル+同名リモートあり
-  localOnly: "💻", // ローカルのみ（リモートなし）
-  remoteOnly: "☁️", // リモートのみ（ローカルなし）
-};
-
-// Emoji width varies by terminal. Provide explicit minimum widths so we never
-// underestimate and accidentally push the row past the terminal columns.
-const iconWidthOverrides: Record<string, number> = {
-  // Remote icon
-  [remoteIcon]: 1,
-  // Branch type icons
-  "⚡": 1,
-  "✨": 1,
-  "🐛": 1,
-  "🔥": 1,
-  "🚀": 1,
-  "📌": 1,
-  // Worktree status icons
-  "🟢": 2,
-  "⚪": 2,
-  "🔴": 2,
-  // Change status icons
-  "👉": 1,
-  "💾": 1,
-  "📤": 1,
-  "🔃": 1,
-  "✅": 1,
-  "⚠️": 2,
-  "⚠": 1,
-  "🛡": 2,
-  "☑": 2,
-  "☐": 2,
-  // Remote markers
-  "🔗": 1,
-  "💻": 1,
-  "☁️": 1,
-};
-
-const getIconWidth = (icon: string): number => {
-  const baseWidth = stringWidth(icon);
-  const override = iconWidthOverrides[icon];
-  return override !== undefined ? Math.max(baseWidth, override) : baseWidth;
-};
 
 export interface FormatOptions {
   hasChanges?: boolean;
@@ -117,8 +32,11 @@ function buildLastToolUsageLabel(
 ): string | null {
   if (!usage) return null;
   const toolText = mapToolLabel(usage.toolId, usage.toolLabel);
+  // バージョン情報を追加（存在しない場合は@latest）
+  const versionSuffix = usage.toolVersion ? `@${usage.toolVersion}` : "@latest";
+  const labelWithVersion = `${toolText}${versionSuffix}`;
   const timestamp = usage.timestamp ? formatTimestamp(usage.timestamp) : null;
-  const parts = [toolText];
+  const parts = [labelWithVersion];
   if (timestamp) {
     parts.push(timestamp);
   }
@@ -146,106 +64,10 @@ export function formatBranchItem(
   options: FormatOptions = {},
 ): BranchItem {
   const hasChanges = options.hasChanges ?? false;
-  const COLUMN_WIDTH = 2; // Fixed width for each icon column
-
-  // Helper to pad icon to fixed width
-  const padIcon = (icon: string): string => {
-    const width = getIconWidth(icon);
-    const padding = Math.max(0, COLUMN_WIDTH - width);
-    return icon + " ".repeat(padding);
-  };
-
-  // Column 1: Branch type icon (always present)
-  const branchTypeIcon = padIcon(branchIcons[branch.branchType]);
-
-  // Column 2: Worktree status icon
-  let worktreeStatus: WorktreeStatus;
-  let worktreeIcon: string;
+  let worktreeStatus: WorktreeStatus | undefined;
   if (branch.worktree) {
-    if (branch.worktree.isAccessible === false) {
-      worktreeStatus = "inaccessible";
-      worktreeIcon = padIcon(worktreeIcons.inaccessible);
-    } else {
-      worktreeStatus = "active";
-      worktreeIcon = padIcon(worktreeIcons.active);
-    }
-  } else {
-    worktreeIcon = " ".repeat(COLUMN_WIDTH);
-  }
-
-  // Column 3: Change status icon (priority: ✏️ > ⬆️ > 🔀 > ✅ > ⚠️ > ⭐)
-  let changesIcon: string;
-  if (hasChanges) {
-    changesIcon = padIcon(changeIcons.hasChanges);
-  } else if (branch.hasUnpushedCommits) {
-    changesIcon = padIcon(changeIcons.unpushed);
-  } else if (branch.openPR) {
-    changesIcon = padIcon(changeIcons.openPR);
-  } else if (branch.mergedPR) {
-    changesIcon = padIcon(changeIcons.mergedPR);
-  } else if (branch.worktree?.isAccessible === false) {
-    changesIcon = padIcon(changeIcons.warning);
-  } else if (branch.isCurrent) {
-    changesIcon = padIcon(changeIcons.current);
-  } else {
-    changesIcon = " ".repeat(COLUMN_WIDTH);
-  }
-
-  // Column 4: Remote status (✓ for tracked, L for local-only, R for remote-only)
-  let remoteStatusStr: string;
-  if (branch.type === "remote") {
-    // リモートのみのブランチ
-    remoteStatusStr = padIcon(remoteMarkers.remoteOnly);
-  } else if (branch.hasRemoteCounterpart) {
-    // ローカルブランチで同名リモートあり
-    remoteStatusStr = padIcon(remoteMarkers.tracked);
-  } else {
-    // ローカルブランチでリモートなし
-    remoteStatusStr = padIcon(remoteMarkers.localOnly);
-  }
-
-  // Column 5: Sync status (=, ↑N, ↓N, ↕, -)
-  // 5文字固定幅（アイコン1文字 + 数字最大4桁）、9999超は「9999+」表示
-  const SYNC_COLUMN_WIDTH = 6; // アイコン1 + 数字4 + スペース1
-
-  // 数字を4桁以内にフォーマット（9999超は9999+）
-  const formatSyncNumber = (n: number): string => {
-    if (n > 9999) return "9999+";
-    return String(n);
-  };
-
-  // Sync列を固定幅でパディング
-  const padSyncColumn = (content: string): string => {
-    const width = stringWidth(content);
-    const padding = Math.max(0, SYNC_COLUMN_WIDTH - width);
-    return content + " ".repeat(padding);
-  };
-
-  let syncStatusStr: string;
-  if (branch.type === "remote") {
-    // リモートのみ → 比較不可
-    syncStatusStr = padSyncColumn(syncIcons.none);
-  } else if (branch.divergence) {
-    const { ahead, behind, upToDate } = branch.divergence;
-    if (upToDate) {
-      syncStatusStr = padSyncColumn(syncIcons.upToDate);
-    } else if (ahead > 0 && behind > 0) {
-      // diverged: ↕ のみ表示（詳細は別途表示可能）
-      syncStatusStr = padSyncColumn(syncIcons.diverged);
-    } else if (ahead > 0) {
-      // ahead: ↑N の形式
-      syncStatusStr = padSyncColumn(
-        `${syncIcons.ahead}${formatSyncNumber(ahead)}`,
-      );
-    } else {
-      // behind: ↓N の形式
-      syncStatusStr = padSyncColumn(
-        `${syncIcons.behind}${formatSyncNumber(behind)}`,
-      );
-    }
-  } else {
-    // divergence情報なし
-    syncStatusStr = padSyncColumn(syncIcons.none);
+    worktreeStatus =
+      branch.worktree.isAccessible === false ? "inaccessible" : "active";
   }
 
   // Build Local/Remote name for display
@@ -263,37 +85,8 @@ export function formatBranchItem(
     displayName = branch.name;
   }
 
-  // Build label with fixed-width columns
-  // Format: [Type][Worktree][Changes][Remote][Sync] DisplayName
-  const label = `${branchTypeIcon}${worktreeIcon}${changesIcon}${remoteStatusStr}${syncStatusStr}${displayName}`;
-
-  // Collect icons for compatibility
+  const label = displayName;
   const icons: string[] = [];
-  icons.push(branchIcons[branch.branchType]);
-  if (worktreeStatus) {
-    icons.push(
-      worktreeStatus === "active"
-        ? worktreeIcons.active
-        : worktreeIcons.inaccessible,
-    );
-  }
-  // Add change icon based on priority
-  if (hasChanges) {
-    icons.push(changeIcons.hasChanges);
-  } else if (branch.hasUnpushedCommits) {
-    icons.push(changeIcons.unpushed);
-  } else if (branch.openPR) {
-    icons.push(changeIcons.openPR);
-  } else if (branch.mergedPR) {
-    icons.push(changeIcons.mergedPR);
-  } else if (branch.worktree?.isAccessible === false) {
-    icons.push(changeIcons.warning);
-  } else if (branch.isCurrent) {
-    icons.push(changeIcons.current);
-  }
-  if (branch.type === "remote") {
-    icons.push(remoteIcon);
-  }
 
   // Determine sync status for BranchItem
   let syncStatus: BranchItem["syncStatus"];

@@ -5,11 +5,12 @@ import {
   createChildStdio,
   getTerminalStreams,
   resetTerminalModes,
+  writeTerminalLine,
 } from "./utils/terminal.js";
 import { findCommand } from "./utils/command.js";
 import { findLatestGeminiSessionId } from "./utils/session.js";
 
-const GEMINI_CLI_PACKAGE = "@google/gemini-cli@latest";
+const GEMINI_CLI_PACKAGE = "@google/gemini-cli";
 
 /**
  * Error wrapper used by `launchGeminiCLI` to preserve the original failure
@@ -44,6 +45,7 @@ export async function launchGeminiCLI(
     envOverrides?: Record<string, string>;
     model?: string;
     sessionId?: string | null;
+    version?: string | null;
   } = {},
 ): Promise<{ sessionId?: string | null }> {
   const terminal = getTerminalStreams();
@@ -54,14 +56,14 @@ export async function launchGeminiCLI(
       throw new Error(`Worktree path does not exist: ${worktreePath}`);
     }
 
-    console.log(chalk.blue("🚀 Launching Gemini CLI..."));
-    console.log(chalk.gray(`   Working directory: ${worktreePath}`));
+    writeTerminalLine(chalk.blue("🚀 Launching Gemini CLI..."));
+    writeTerminalLine(chalk.gray(`   Working directory: ${worktreePath}`));
 
     const args: string[] = [];
 
     if (options.model) {
       args.push("--model", options.model);
-      console.log(chalk.green(`   🎯 Model: ${options.model}`));
+      writeTerminalLine(chalk.green(`   🎯 Model: ${options.model}`));
     }
 
     // Handle execution mode
@@ -109,31 +111,35 @@ export async function launchGeminiCLI(
     switch (options.mode) {
       case "continue":
         if (resumeSessionId) {
-          console.log(
+          writeTerminalLine(
             chalk.cyan(
               `   ⏭️  Continuing specific session: ${resumeSessionId}`,
             ),
           );
         } else {
-          console.log(chalk.cyan("   ⏭️  Continuing most recent session"));
+          writeTerminalLine(
+            chalk.cyan("   ⏭️  Continuing most recent session"),
+          );
         }
         break;
       case "resume":
         if (resumeSessionId) {
-          console.log(chalk.cyan(`   🔄 Resuming session: ${resumeSessionId}`));
+          writeTerminalLine(
+            chalk.cyan(`   🔄 Resuming session: ${resumeSessionId}`),
+          );
         } else {
-          console.log(chalk.cyan("   🔄 Resuming session (latest)"));
+          writeTerminalLine(chalk.cyan("   🔄 Resuming session (latest)"));
         }
         break;
       case "normal":
       default:
-        console.log(chalk.green("   ✨ Starting new session"));
+        writeTerminalLine(chalk.green("   ✨ Starting new session"));
         break;
     }
 
     // Handle skip permissions (YOLO mode)
     if (options.skipPermissions) {
-      console.log(
+      writeTerminalLine(
         chalk.yellow("   ⚠️  Auto-approving all actions (YOLO mode)"),
       );
     }
@@ -157,6 +163,17 @@ export async function launchGeminiCLI(
     // Preserve TTY for interactive UI (colors/width) by inheriting stdout/stderr.
     // Session ID is determined via file-based detection after exit.
     let capturedSessionId: string | null = null;
+
+    // Determine execution strategy based on version selection
+    // FR-063b: "installed" option only appears when local command exists
+    const selectedVersion = options.version ?? "installed";
+
+    // Log version information (FR-072)
+    if (selectedVersion === "installed") {
+      writeTerminalLine(chalk.green(`   📦 Version: installed`));
+    } else {
+      writeTerminalLine(chalk.green(`   📦 Version: @${selectedVersion}`));
+    }
 
     const runGemini = async (runArgs: string[]): Promise<void> => {
       const execChild = async (child: Promise<unknown>) => {
@@ -183,30 +200,19 @@ export async function launchGeminiCLI(
         await execChild(child);
       };
 
-      if (geminiLookup.source === "installed" && geminiLookup.path) {
-        // Use the full path to avoid PATH issues in non-interactive shells
-        console.log(
+      if (selectedVersion === "installed" && geminiLookup.path) {
+        // FR-066: Use locally installed command when "installed" is selected
+        // FR-063b guarantees local command exists when this option is shown
+        writeTerminalLine(
           chalk.green("   ✨ Using locally installed gemini command"),
         );
         return await run(geminiLookup.path, runArgs);
       }
-      console.log(
-        chalk.cyan("   🔄 Falling back to bunx @google/gemini-cli@latest"),
-      );
-      console.log(
-        chalk.yellow(
-          "   💡 Recommended: Install Gemini CLI globally for faster startup",
-        ),
-      );
-      console.log(chalk.yellow("      npm install -g @google/gemini-cli"));
-      console.log("");
-      const shouldSkipDelay =
-        typeof process !== "undefined" &&
-        (process.env?.NODE_ENV === "test" || Boolean(process.env?.VITEST));
-      if (!shouldSkipDelay) {
-        await new Promise((resolve) => setTimeout(resolve, 2000));
-      }
-      return await run("bunx", [GEMINI_CLI_PACKAGE, ...runArgs]);
+
+      // FR-067, FR-068: Use bunx with version suffix for latest/specific versions
+      const packageWithVersion = `${GEMINI_CLI_PACKAGE}@${selectedVersion}`;
+      writeTerminalLine(chalk.cyan(`   🔄 Using bunx ${packageWithVersion}`));
+      return await run("bunx", [packageWithVersion, ...runArgs]);
     };
 
     let fellBackToLatest = false;
@@ -220,7 +226,7 @@ export async function launchGeminiCLI(
           resumeSessionId;
         if (shouldRetry) {
           fellBackToLatest = true;
-          console.log(
+          writeTerminalLine(
             chalk.yellow(
               `   ⚠️  Failed to resume session ${resumeSessionId}. Retrying with latest session...`,
             ),
@@ -254,12 +260,12 @@ export async function launchGeminiCLI(
     }
 
     if (capturedSessionId) {
-      console.log(chalk.cyan(`\n   🆔 Session ID: ${capturedSessionId}`));
-      console.log(
+      writeTerminalLine(chalk.cyan(`\n   🆔 Session ID: ${capturedSessionId}`));
+      writeTerminalLine(
         chalk.gray(`   Resume command: gemini --resume ${capturedSessionId}`),
       );
     } else {
-      console.log(
+      writeTerminalLine(
         chalk.yellow(
           "\n   ℹ️  Could not determine Gemini session ID automatically.",
         ),
@@ -288,30 +294,38 @@ export async function launchGeminiCLI(
     }
 
     if (process.platform === "win32") {
-      console.error(chalk.red("\n💡 Windows troubleshooting tips:"));
+      writeTerminalLine(
+        chalk.red("\n💡 Windows troubleshooting tips:"),
+        "stderr",
+      );
       if (hasLocalGemini) {
-        console.error(
+        writeTerminalLine(
           chalk.yellow(
             "   1. Confirm that Gemini CLI is installed and the 'gemini' command is on PATH",
           ),
+          "stderr",
         );
-        console.error(
+        writeTerminalLine(
           chalk.yellow('   2. Run "gemini --version" to verify the setup'),
+          "stderr",
         );
       } else {
-        console.error(
+        writeTerminalLine(
           chalk.yellow(
             "   1. Confirm that Bun is installed and bunx is available",
           ),
+          "stderr",
         );
-        console.error(
+        writeTerminalLine(
           chalk.yellow(
             '   2. Run "bunx @google/gemini-cli@latest -- --version" to verify the setup',
           ),
+          "stderr",
         );
       }
-      console.error(
+      writeTerminalLine(
         chalk.yellow("   3. Restart your terminal or IDE to refresh PATH"),
+        "stderr",
       );
     }
 
@@ -327,16 +341,17 @@ export async function launchGeminiCLI(
  */
 export async function isGeminiCLIAvailable(): Promise<boolean> {
   try {
-    await execa("bunx", [GEMINI_CLI_PACKAGE, "--version"]);
+    await execa("bunx", [`${GEMINI_CLI_PACKAGE}@latest`, "--version"]);
     return true;
   } catch (error: unknown) {
     const err = error as NodeJS.ErrnoException;
     if (err.code === "ENOENT") {
-      console.error(chalk.yellow("\n⚠️  bunx command not found"));
-      console.error(
+      writeTerminalLine(chalk.yellow("\n⚠️  bunx command not found"), "stderr");
+      writeTerminalLine(
         chalk.gray(
           "   Install Bun and confirm that bunx is available before continuing",
         ),
+        "stderr",
       );
     }
     return false;

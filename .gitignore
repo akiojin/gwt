@@ -81,4 +81,5 @@ test-results/
 # Temporary folders
 tmp/
 temp/
+.tmp-tests/
 .worktrees/

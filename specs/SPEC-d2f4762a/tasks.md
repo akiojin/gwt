@@ -3,6 +3,28 @@
 **仕様ID**: `SPEC-d2f4762a`
 **ポリシー**: CLAUDE.md の TDD ルールに基づき、必ず RED→GREEN→リグレッションチェックの順に進める。
 
+## フェーズ0: ブランチ一覧アイコンのASCII再整理 (優先度: P1)
+
+**ストーリー**: ブランチ一覧の選択/Worktree/安全アイコンをASCII表記へ整理し、アイコン間にスペースを入れてカーソル記号は表示しない。
+
+**価値**: 端末幅のズレを防ぎつつ、直感的な記号で一覧表示の視認性を維持する。
+
+### 仕様更新
+
+- [x] **T901** [P] [共通] `specs/SPEC-d2f4762a/spec.md` のアイコン仕様とカーソル非表示要件を更新
+- [x] **T902** [P] [共通] `specs/SPEC-d2f4762a/plan.md` のアイコン方針をASCIIに更新
+- [x] **T903** [P] [共通] `specs/SPEC-d27be71b/spec.md` の意思決定ログを更新（ASCII整理を反映）
+- [x] **T904** [P] [共通] `CLAUDE.md` のアイコン方針をASCIIに戻す
+
+### テスト（TDD）
+
+- [x] **T911** [US4] `src/cli/ui/__tests__/solid/BranchListScreen.test.tsx` にASCIIアイコンとカーソル非表示の表示テストを追加
+
+### 実装
+
+- [x] **T921** [US4] `src/cli/ui/screens/solid/BranchListScreen.tsx` の選択/Worktree/安全アイコンをASCIIに更新
+- [x] **T922** [US4] `src/cli/ui/screens/solid/BranchListScreen.tsx` のカーソル記号を非表示のまま維持する
+
 ## フェーズ1: セットアップ（共有インフラストラクチャ）
 
 ### セットアップタスク
@@ -33,10 +55,12 @@
 - [x] **T108** [US0] `src/cli/ui/__tests__/hooks/useGitData.nonblocking.test.tsx` にフェッチが解決しなくてもローディングが解除されるテストを追加
 - [x] **T109** [US0] `tests/unit/git.fetchAllRemotes.test.ts` に`fetchAllRemotes`がタイムアウト/非対話設定を渡すテストを追加
 - [x] **T110** [US0] `src/git.ts` と `src/cli/ui/hooks/useGitData.ts` を更新し、フェッチのタイムアウトと非ブロッキングを実装
+- [x] **T111** [US0] `src/cli/ui/__tests__/components/screens/BranchListScreen.test.tsx` に選択中ブランチのフルパス表示（`Branch: ...`）と空表示時の`Branch: (none)`のテストを追加
+- [x] **T112** [US0] `src/cli/ui/components/screens/BranchListScreen.tsx` にフッターヘルプ直上のフルパス表示と固定行数調整を実装
 
 ## フェーズ3: 統合とポリッシュ
 
-- [ ] **T201** [統合] `package.json` に従い `bun run format:check` / `bunx --bun markdownlint-cli "**/*.md" --config .markdownlint.json --ignore-path .markdownlintignore` / `bun run lint` を実行し、失敗があれば修正
+- [x] **T201** [統合] `package.json` に従い `bun run format:check` / `bunx --bun markdownlint-cli "**/*.md" --config .markdownlint.json --ignore-path .markdownlintignore` / `bun run lint` を実行し、失敗があれば修正
 
 ## フェーズ4: ユーザーストーリー6 - Worktree作成時のstaleディレクトリ自動回復
 
@@ -46,10 +70,110 @@
 
 ### テスト（TDD）
 
-- [ ] **T301** [US6] `tests/integration/branch-creation.test.ts` にstaleディレクトリを検出して削除→再作成できるテストを追加
-- [ ] **T302** [US6] `tests/integration/branch-creation.test.ts` にstale判定できない既存ディレクトリは削除せずエラーになるテストを追加
+- [x] **T301** [US6] `tests/integration/branch-creation.test.ts` にstaleディレクトリを検出して削除→再作成できるテストを追加
+- [x] **T302** [US6] `tests/integration/branch-creation.test.ts` にstale判定できない既存ディレクトリは削除せずエラーになるテストを追加
 
 ### 実装
 
-- [ ] **T303** [US6] `src/worktree.ts` にstale判定・削除処理を追加し、`createWorktree`の前処理として実行
-- [ ] **T304** [US6] `src/worktree.ts` に判定不能な既存ディレクトリ向けの明確なエラーメッセージを追加
+- [x] **T303** [US6] `src/worktree.ts` にstale判定・削除処理を追加し、`createWorktree`の前処理として実行
+- [x] **T304** [US6] `src/worktree.ts` に判定不能な既存ディレクトリ向けの明確なエラーメッセージを追加
+
+## フェーズ5: ユーザーストーリー8 - ブランチ選択後のウィザードポップアップ (優先度: P0)
+
+**依存関係**: なし
+
+**ストーリー**: ブランチ選択後、ブランチ一覧画面の上にウィザードポップアップが表示され、7ステップの設定選択フローを経てAIツールを起動する。
+
+**価値**: 画面遷移ではなくレイヤー表示により、コンテキストを維持しながら設定を進められる。
+
+### テスト（TDD）
+
+- [x] **T401** [US8] `src/cli/ui/__tests__/solid/components/WizardPopup.test.tsx` にウィザードポップアップの表示/非表示テストを追加
+- [x] **T402** [US8] `src/cli/ui/__tests__/solid/components/WizardPopup.test.tsx` に背景オーバーレイ（半透過）の表示テストを追加
+- [x] **T403** [US8] `src/cli/ui/__tests__/solid/components/WizardPopup.test.tsx` にステップ表示テストを追加（Escapeキーテストはhook制約により視覚テストに変更）
+- [x] **T404** [US8] `src/cli/ui/__tests__/solid/components/WizardPopup.test.tsx` にステップ表示・枠線テストを追加
+- [x] **T405** [US8] `src/cli/ui/__tests__/solid/components/WizardSteps.test.tsx` にブランチタイプ選択ステップのテストを追加
+- [x] **T406** [US8] `src/cli/ui/__tests__/solid/components/WizardSteps.test.tsx` にブランチ名入力ステップのテストを追加
+- [x] **T407** [US8] `src/cli/ui/__tests__/solid/components/WizardSteps.test.tsx` にコーディングエージェント選択ステップのテストを追加
+- [x] **T408** [US8] `src/cli/ui/__tests__/solid/components/WizardSteps.test.tsx` にモデル選択ステップのテストを追加
+- [x] **T409** [US8] `src/cli/ui/__tests__/solid/components/WizardSteps.test.tsx` に推論レベル選択ステップ（Codexのみ）のテストを追加
+- [x] **T410** [US8] `src/cli/ui/__tests__/solid/components/WizardSteps.test.tsx` に実行モード選択ステップのテストを追加
+- [x] **T411** [US8] `src/cli/ui/__tests__/solid/components/WizardSteps.test.tsx` に権限スキップ確認ステップのテストを追加
+
+### 実装
+
+- [x] **T412** [US8] `src/cli/ui/components/solid/WizardPopup.tsx` にウィザードポップアップコンポーネントを作成（z-index、オーバーレイ）
+- [x] **T413** [US8] `src/cli/ui/components/solid/WizardSteps.tsx` に各ステップコンポーネントを作成
+- [x] **T414** [US8] `src/cli/ui/App.solid.tsx` にウィザードポップアップの統合（BranchListScreenからの起動）
+
+## フェーズ6: ユーザーストーリー9 - 前回履歴からのクイック選択ポップアップ (優先度: P1)
+
+**依存関係**: US8（ウィザードポップアップUI）
+
+**ストーリー**: ブランチ選択時に履歴がある場合、クイック選択画面を表示し、エージェントごとの「Resume/Start new」を選べる。
+
+**価値**: 毎回ツールとモデルを選択する手間を削減し、高速に再開できる。
+
+### テスト（TDD）
+
+- [x] **T501** [US9] `src/cli/ui/__tests__/solid/components/QuickStartStep.test.tsx` にクイック選択画面の表示テストを追加
+- [x] **T502** [US9] `src/cli/ui/__tests__/solid/components/QuickStartStep.test.tsx` にヘルプテキスト表示テストを追加
+- [x] **T503** [US9] `src/cli/ui/__tests__/solid/components/QuickStartStep.test.tsx` に「Resume with previous settings」選択時の動作テストを追加
+- [x] **T504** [US9] `src/cli/ui/__tests__/solid/components/QuickStartStep.test.tsx` に「Start new with previous settings」選択時の動作テストを追加
+- [x] **T505** [US9] `src/cli/ui/__tests__/solid/components/QuickStartStep.test.tsx` に「Choose different settings...」選択時の動作テストを追加
+- [x] **T506** [US9] `src/cli/ui/__tests__/solid/components/QuickStartStep.test.tsx` に履歴がない場合のスキップテストを追加
+
+### 実装
+
+- [x] **T507** [US9] `src/cli/ui/components/solid/QuickStartStep.tsx` にクイック選択ステップコンポーネントを作成
+- [x] **T508** [US9] `src/cli/ui/components/solid/WizardController.tsx` にクイック選択ステップの統合（履歴有無による分岐）
+
+## フェーズ7: ユーザーストーリー7 - 選択中Worktreeフルパス表示 (優先度: P2)
+
+**ストーリー**: ブランチ一覧のフッター直上に、選択中ブランチのWorktreeフルパスを表示する。Worktreeが存在しないが現在ブランチの場合は起動時の作業ディレクトリを表示し、ブランチ一覧が空の場合は`Worktree: (none)`を表示する。
+
+**価値**: Worktreeの実体パスを正確に確認でき、誤操作や環境移行時の混乱を防げる。
+
+### テスト（TDD）
+
+- [x] **T601** [US7] `src/cli/ui/__tests__/solid/BranchListScreen.test.tsx` に Worktree 行の表示（worktree path / (none) / workingDirectory フォールバック）テストを追加
+
+### 実装
+
+- [x] **T602** [US7] `src/cli/ui/screens/solid/BranchListScreen.tsx` のフッター表示を `Worktree:` に置き換え、表示ロジックを追加
+
+## フェーズ8: フッターヘルプ整理とショートカット併記 (優先度: P2)
+
+**ストーリー**: ブランチ一覧で画面内に表示される要素（Filter行/Mode/Profiles）にショートカットを併記し、フッターヘルプからは削除する。
+
+**価値**: 重複した案内を減らし、視認性と理解度を高める。
+
+### 仕様更新
+
+- [x] **T701** [P] [共通] `specs/SPEC-d2f4762a/spec.md` にフッターヘルプ整理と`Filter(f)`/`Mode(tab)`/`Profile(p)`表記を反映
+- [x] **T702** [P] [共通] `specs/SPEC-d2f4762a/plan.md` のハイレベルToDoにフッターヘルプ更新を追記
+
+### テスト（TDD）
+
+- [x] **T711** [US0] `src/cli/ui/__tests__/solid/BranchListScreen.test.tsx` に`Filter(f)`/`Mode(tab)`/`Profile(p)`の表示とフッターヘルプからの除外を確認するテストを追加
+
+### 実装
+
+- [x] **T721** [US0] `src/cli/ui/screens/solid/BranchListScreen.tsx` のFilter/Mode表示ラベルとフッターアクションを更新
+- [x] **T722** [US0] `src/cli/ui/components/solid/Header.tsx` のProfile表示ラベルにショートカットを併記
+
+## フェーズ9: ユーザーストーリー8 - ウィザードポップアップのスクロール対応 (優先度: P1)
+
+**ストーリー**: ウィザードポップアップの内容が表示領域を超える場合でも、ポップアップ内でスクロールできるようにして内容のはみ出しを防ぐ。
+
+**価値**: 端末サイズが小さい環境でも、ウィザード内の全項目に到達できる。
+
+### テスト（TDD）
+
+- [x] **T731** [US8] `src/cli/ui/__tests__/solid/components/WizardPopup.test.tsx` にポップアップ内スクロールの表示テストを追加
+- [x] **T733** [US8] `src/cli/ui/__tests__/solid/components/WizardPopup.test.tsx` に上下キーでのスクロールテストを追加
+
+### 実装
+
+- [x] **T732** [US8] `src/cli/ui/components/solid/WizardPopup.tsx` にスクロールコンテナを追加し、内容のはみ出しを防止
+- [x] **T734** [US8] `src/cli/ui/components/solid/WizardPopup.tsx` と `src/cli/ui/components/solid/WizardSteps.tsx` で上下キーによるスクロールを実装

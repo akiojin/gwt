@@ -2,18 +2,19 @@ import {
   describe,
   it,
   expect,
-  vi,
+  mock,
   beforeAll,
   beforeEach,
   afterEach,
-} from "vitest";
+  spyOn,
+} from "bun:test";
 import { EventEmitter } from "node:events";
 import * as sessionUtils from "../../src/utils/session.js";
 
 // Define mock state that will be used across mocks
-const mockExistsSync = vi.fn(() => false);
-const stdoutWrite = vi.fn();
-const stderrWrite = vi.fn();
+const mockExistsSync = mock(() => false);
+const stdoutWrite = mock();
+const stderrWrite = mock();
 
 const mockTerminalStreams = {
   stdin: { id: "stdin" } as unknown as NodeJS.ReadStream,
@@ -23,49 +24,49 @@ const mockTerminalStreams = {
   stdoutFd: undefined as number | undefined,
   stderrFd: undefined as number | undefined,
   usingFallback: false,
-  exitRawMode: vi.fn(),
+  exitRawMode: mock(),
 };
 
 const mockChildStdio: {
   stdin: unknown;
   stdout: unknown;
   stderr: unknown;
-  cleanup: ReturnType<typeof vi.fn>;
+  cleanup: Mock;
 } = {
   stdin: "inherit",
   stdout: "inherit",
   stderr: "inherit",
-  cleanup: vi.fn(),
+  cleanup: mock(),
 };
 
 // Mock execa before importing
-vi.mock("execa", () => ({
-  execa: vi.fn(),
-  default: { execa: vi.fn() },
+mock.module("execa", () => ({
+  execa: mock(),
+  default: { execa: mock() },
 }));
 
 // Mock existsSync to return false by default (for fallback path checks in findCommand)
 // Individual tests can override this if they need existsSync to return true
-vi.mock("fs", async () => {
+mock.module("fs", async () => {
   return {
     existsSync: (...args: unknown[]) => mockExistsSync(...args),
-    readFileSync: vi.fn(() => "Linux version 6.1.0"),
+    readFileSync: mock(() => "Linux version 6.1.0"),
     default: {
       existsSync: (...args: unknown[]) => mockExistsSync(...args),
-      readFileSync: vi.fn(() => "Linux version 6.1.0"),
+      readFileSync: mock(() => "Linux version 6.1.0"),
     },
   };
 });
 
-vi.mock("../../src/utils/terminal", () => ({
-  getTerminalStreams: vi.fn(() => mockTerminalStreams),
-  createChildStdio: vi.fn(() => mockChildStdio),
-  resetTerminalModes: vi.fn(),
+mock.module("../../src/utils/terminal", () => ({
+  getTerminalStreams: mock(() => mockTerminalStreams),
+  createChildStdio: mock(() => mockChildStdio),
+  resetTerminalModes: mock(),
 }));
-vi.mock("../../src/utils/session", () => ({
-  waitForClaudeSessionId: vi.fn(async () => null),
-  findLatestClaudeSessionId: vi.fn(async () => null),
-  findLatestClaudeSession: vi.fn(async () => null),
+mock.module("../../src/utils/session", () => ({
+  waitForClaudeSessionId: mock(async () => null),
+  findLatestClaudeSessionId: mock(async () => null),
+  findLatestClaudeSession: mock(async () => null),
 }));
 
 import { launchClaudeCode } from "../../src/claude.js";
@@ -80,10 +81,10 @@ let claudeIsInstalled = false;
 let detectedClaudeCommand = "bunx"; // default fallback
 
 // Get typed mock
-const mockExeca = execa as ReturnType<typeof vi.fn>;
+const mockExeca = execa as Mock;
 
 // Mock console.log to avoid test output clutter
-let consoleLogSpy: ReturnType<typeof vi.spyOn>;
+let consoleLogSpy: Mock;
 const createChildProcess = (
   onEmit?: (stdout: EventEmitter, stderr: EventEmitter) => void,
 ) => {
@@ -99,14 +100,14 @@ const createChildProcess = (
 };
 
 /**
- * NOTE: Most tests in this file are skipped because Bun's vitest compatibility
- * does not support module mocking (vi.mock). The real execa is called instead
+ * NOTE: Most tests in this file are skipped because Bun's mock.module
+ * does not fully support module mocking. The real execa is called instead
  * of the mock, causing tests to fail.
  *
  * Core functionality is verified in:
  * - tests/unit/utils/command.test.ts (findCommand, caching, fallback paths)
  *
- * These tests can be re-enabled when Bun improves vitest module mocking support.
+ * These tests can be re-enabled when Bun improves module mocking support.
  */
 describe("launchClaudeCode - Root User Detection", () => {
   let originalGetuid: (() => number) | undefined;
@@ -120,7 +121,7 @@ describe("launchClaudeCode - Root User Detection", () => {
   });
 
   beforeEach(() => {
-    vi.clearAllMocks();
+    mock.restore();
     clearCommandLookupCache(); // Clear command lookup cache between tests
     // Return true for worktree path checks, false for fallback path checks
     mockExistsSync.mockImplementation((path: string) => {
@@ -131,7 +132,7 @@ describe("launchClaudeCode - Root User Detection", () => {
       // Fallback paths for command detection should return false
       return false;
     });
-    consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    consoleLogSpy = spyOn(console, "log").mockImplementation(() => {});
     mockTerminalStreams.exitRawMode.mockClear();
     stdoutWrite.mockClear();
     stderrWrite.mockClear();
@@ -162,14 +163,14 @@ describe("launchClaudeCode - Root User Detection", () => {
     }
   });
 
-  // Skipped: Bun does not support vi.mock for execa module
+  // Skipped: Bun does not support mock.module for execa module
   it.skip("captures sessionId from file-based detection and returns it", async () => {
     process.getuid = () => 1000;
 
     // Mock findLatestClaudeSession to return session info
     const mockFindLatestClaudeSession =
       sessionUtils.findLatestClaudeSession as unknown as ReturnType<
-        typeof vi.fn
+        typeof mock
       >;
     mockFindLatestClaudeSession.mockResolvedValueOnce({
       id: "123e4567-e89b-12d3-a456-426614174000",
@@ -183,7 +184,7 @@ describe("launchClaudeCode - Root User Detection", () => {
   });
 
   describe("T104: Root user detection logic", () => {
-    // Skipped: Bun does not support vi.mock for execa module
+    // Skipped: Bun does not support mock.module for execa module
     it.skip("should detect root user when process.getuid() returns 0", async () => {
       // Mock process.getuid to return 0 (root user)
       process.getuid = () => 0;
@@ -211,7 +212,7 @@ describe("launchClaudeCode - Root User Detection", () => {
       );
     });
 
-    // Skipped: Bun does not support vi.mock for execa module
+    // Skipped: Bun does not support mock.module for execa module
     it.skip("should not detect root user when process.getuid() returns non-zero", async () => {
       // Mock process.getuid to return 1000 (non-root user)
       process.getuid = () => 1000;
@@ -238,7 +239,7 @@ describe("launchClaudeCode - Root User Detection", () => {
       );
     });
 
-    // Skipped: Bun does not support vi.mock for execa module
+    // Skipped: Bun does not support mock.module for execa module
     it.skip("should handle environments where process.getuid() is not available", async () => {
       // Mock process without getuid (e.g., Windows)
       delete (process as unknown as { getuid?: () => number }).getuid;
@@ -267,7 +268,7 @@ describe("launchClaudeCode - Root User Detection", () => {
   });
 
   describe("T105: IS_SANDBOX=1 set when skipPermissions=true and root", () => {
-    // Skipped: Bun does not support vi.mock for execa module
+    // Skipped: Bun does not support mock.module for execa module
     it.skip("should set IS_SANDBOX=1 when both root user and skipPermissions=true", async () => {
       // Mock root user
       process.getuid = () => 0;
@@ -291,7 +292,7 @@ describe("launchClaudeCode - Root User Detection", () => {
   });
 
   describe("Continue mode without saved session", () => {
-    // Skipped: Bun does not support vi.mock for execa module
+    // Skipped: Bun does not support mock.module for execa module
     it.skip("falls back to new session when no sessionId is provided", async () => {
       mockExeca.mockResolvedValue({ stdout: "", stderr: "", exitCode: 0 });
 
@@ -323,7 +324,7 @@ describe("launchClaudeCode - Root User Detection", () => {
       }
     });
 
-    // Skipped: Bun does not support vi.mock for execa module
+    // Skipped: Bun does not support mock.module for execa module
     it.skip("adds --chrome on supported platforms", async () => {
       delete process.env.WSL_DISTRO_NAME;
       delete process.env.WSL_INTEROP;
@@ -344,7 +345,7 @@ describe("launchClaudeCode - Root User Detection", () => {
       );
     });
 
-    // Skipped: Bun does not support vi.mock for execa module
+    // Skipped: Bun does not support mock.module for execa module
     it.skip("adds --chrome on Windows platform", async () => {
       Object.defineProperty(process, "platform", {
         ...(originalPlatformDescriptor ?? {
@@ -372,7 +373,7 @@ describe("launchClaudeCode - Root User Detection", () => {
       expect(args).toContain("--chrome");
     });
 
-    // Skipped: Bun does not support vi.mock for execa module
+    // Skipped: Bun does not support mock.module for execa module
     it.skip("adds --chrome on macOS platform", async () => {
       Object.defineProperty(process, "platform", {
         ...(originalPlatformDescriptor ?? {
@@ -399,7 +400,7 @@ describe("launchClaudeCode - Root User Detection", () => {
       expect(args).toContain("--chrome");
     });
 
-    // Skipped: Bun does not support vi.mock for execa module
+    // Skipped: Bun does not support mock.module for execa module
     it.skip("skips --chrome on WSL environments", async () => {
       process.env.WSL_DISTRO_NAME = "Ubuntu";
       delete process.env.WSL_INTEROP;
@@ -422,7 +423,7 @@ describe("launchClaudeCode - Root User Detection", () => {
   });
 
   describe("T106: IS_SANDBOX=1 not set when skipPermissions=false", () => {
-    // Skipped: Bun does not support vi.mock for execa module
+    // Skipped: Bun does not support mock.module for execa module
     it.skip("should not set IS_SANDBOX=1 when skipPermissions=false even if root", async () => {
       // Mock root user
       process.getuid = () => 0;
@@ -458,7 +459,7 @@ describe("launchClaudeCode - Root User Detection", () => {
       }
     });
 
-    // Skipped: Bun does not support vi.mock for execa module
+    // Skipped: Bun does not support mock.module for execa module
     it.skip("should not set IS_SANDBOX=1 when skipPermissions is undefined", async () => {
       // Mock root user
       process.getuid = () => 0;
@@ -491,7 +492,7 @@ describe("launchClaudeCode - Root User Detection", () => {
   });
 
   describe("T203-T205: Warning message display", () => {
-    // Skipped: Bun does not support vi.mock for execa module
+    // Skipped: Bun does not support mock.module for execa module
     it.skip("T204: should display warning message when root user and skipPermissions=true", async () => {
       // Mock root user
       process.getuid = () => 0;
@@ -516,7 +517,7 @@ describe("launchClaudeCode - Root User Detection", () => {
       );
     });
 
-    // Skipped: Bun does not support vi.mock for execa module
+    // Skipped: Bun does not support mock.module for execa module
     it.skip("T205: should not display sandbox warning when non-root user", async () => {
       // Mock non-root user
       process.getuid = () => 1000;
@@ -541,7 +542,7 @@ describe("launchClaudeCode - Root User Detection", () => {
       );
     });
 
-    // Skipped: Bun does not support vi.mock for execa module
+    // Skipped: Bun does not support mock.module for execa module
     it.skip("should not display any warning when skipPermissions=false", async () => {
       // Mock root user
       process.getuid = () => 0;
@@ -568,7 +569,7 @@ describe("launchClaudeCode - Root User Detection", () => {
   });
 
   describe("TTY handoff", () => {
-    // Skipped: Bun does not support vi.mock for execa module
+    // Skipped: Bun does not support mock.module for execa module
     it.skip("should pass fallback file descriptors when usingFallback is true", async () => {
       mockTerminalStreams.usingFallback = true;
       mockChildStdio.stdin = 101;
@@ -607,7 +608,7 @@ describe("launchClaudeCode - Root User Detection", () => {
     // These tests verify the auto-detection behavior works correctly
     // with whatever command is detected in the environment
 
-    // Skipped: Bun does not support vi.mock for execa module
+    // Skipped: Bun does not support mock.module for execa module
     it.skip("should pass arguments correctly with detected command", async () => {
       mockExeca.mockImplementation(() => createChildProcess());
 
@@ -630,7 +631,7 @@ describe("launchClaudeCode - Root User Detection", () => {
       );
     });
 
-    // Skipped: Bun does not support vi.mock for execa module
+    // Skipped: Bun does not support mock.module for execa module
     it.skip("should pass skipPermissions flag correctly", async () => {
       process.getuid = () => 0; // root user
       mockExeca.mockImplementation(() => createChildProcess());
@@ -657,7 +658,7 @@ describe("launchClaudeCode - Root User Detection", () => {
       );
     });
 
-    // Skipped: Bun does not support vi.mock for execa module
+    // Skipped: Bun does not support mock.module for execa module
     it.skip("should use correct command based on environment detection", async () => {
       mockExeca.mockImplementation(() => createChildProcess());
 
@@ -690,7 +691,7 @@ describe("launchClaudeCode - Root User Detection", () => {
   });
 
   describe("FR-008: Launch arguments display", () => {
-    // Skipped: Bun does not support vi.mock for execa module
+    // Skipped: Bun does not support mock.module for execa module
     it.skip("should display launch arguments in console log", async () => {
       mockExeca.mockImplementation(() => createChildProcess());
 
@@ -704,6 +705,66 @@ describe("launchClaudeCode - Root User Detection", () => {
       // Verify that the actual arguments are included in the log
       expect(consoleLogSpy).toHaveBeenCalledWith(
         expect.stringContaining("--dangerously-skip-permissions"),
+      );
+    });
+  });
+
+  describe("Launch/Exit Logs", () => {
+    // Skipped: Bun does not support mock.module for execa module
+    it.skip("should display launch message with rocket emoji at startup", async () => {
+      mockExeca.mockImplementation(() => createChildProcess());
+
+      await launchClaudeCode("/test/path");
+
+      // Verify that launch message is logged with 🚀 emoji
+      expect(consoleLogSpy).toHaveBeenCalledWith(
+        expect.stringContaining("🚀 Launching Claude Code..."),
+      );
+    });
+
+    // Skipped: Bun does not support mock.module for execa module
+    it.skip("should display working directory in launch logs", async () => {
+      mockExeca.mockImplementation(() => createChildProcess());
+
+      await launchClaudeCode("/test/path");
+
+      // Verify working directory is shown
+      expect(consoleLogSpy).toHaveBeenCalledWith(
+        expect.stringContaining("Working directory: /test/path"),
+      );
+    });
+
+    // Skipped: Bun does not support mock.module for execa module
+    it.skip("should display session ID after agent exits when captured", async () => {
+      mockExeca.mockImplementation(() => createChildProcess());
+
+      // Mock session detection to return a session ID
+      const mockFindLatestClaudeSession =
+        sessionUtils.findLatestClaudeSession as unknown as ReturnType<
+          typeof mock
+        >;
+      mockFindLatestClaudeSession.mockResolvedValueOnce({
+        id: "test-session-123",
+        cwd: "/test/path",
+      });
+
+      await launchClaudeCode("/test/path");
+
+      // Verify session ID is displayed after exit
+      expect(consoleLogSpy).toHaveBeenCalledWith(
+        expect.stringContaining("🆔 Session ID: test-session-123"),
+      );
+    });
+
+    // Skipped: Bun does not support mock.module for execa module
+    it.skip("should display model info when custom model is specified", async () => {
+      mockExeca.mockImplementation(() => createChildProcess());
+
+      await launchClaudeCode("/test/path", { model: "sonnet" });
+
+      // Verify model info is logged with 🎯 emoji
+      expect(consoleLogSpy).toHaveBeenCalledWith(
+        expect.stringContaining("🎯 Model: sonnet"),
       );
     });
   });

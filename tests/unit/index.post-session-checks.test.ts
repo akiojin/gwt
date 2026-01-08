@@ -1,5 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { SelectionResult } from "../../src/cli/ui/components/App.js";
+import { beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
+import type { SelectionResult } from "../../src/cli/ui/App.solid.js";
 
 const {
   ensureWorktreeMock,
@@ -21,46 +21,43 @@ const {
   confirmYesNoMock,
   waitForEnterMock,
   resolveWorktreePathForBranchMock,
-} = vi.hoisted(() => ({
-  ensureWorktreeMock: vi.fn(async () => "/repo/.worktrees/feature"),
-  fetchAllRemotesMock: vi.fn(async () => undefined),
-  pullFastForwardMock: vi.fn(async () => undefined),
-  getBranchDivergenceStatusesMock: vi.fn(async () => []),
-  launchCodexCLIMock: vi.fn(async () => ({ sessionId: null as string | null })),
-  saveSessionMock: vi.fn(async () => undefined),
-  loadSessionMock: vi.fn(async () => null),
-  worktreeExistsMock: vi.fn(async () => null),
-  getRepositoryRootMock: vi.fn(async () => "/repo"),
-  installDependenciesMock: vi.fn(async () => ({
+} = {
+  ensureWorktreeMock: mock(async () => "/repo/.worktrees/feature"),
+  fetchAllRemotesMock: mock(async () => undefined),
+  pullFastForwardMock: mock(async () => undefined),
+  getBranchDivergenceStatusesMock: mock(async () => []),
+  launchCodexCLIMock: mock(async () => ({ sessionId: null as string | null })),
+  saveSessionMock: mock(async () => undefined),
+  loadSessionMock: mock(async () => null),
+  worktreeExistsMock: mock(async () => null),
+  getRepositoryRootMock: mock(async () => "/repo"),
+  installDependenciesMock: mock(async () => ({
     skipped: true as const,
     manager: null,
     lockfile: null,
     reason: "missing-lockfile" as const,
   })),
-  findLatestCodexSessionMock: vi.fn(async () => null),
-  hasUncommittedChangesMock: vi.fn(async () => false),
-  hasUnpushedCommitsMock: vi.fn(async () => false),
-  getUncommittedChangesCountMock: vi.fn(async () => 0),
-  getUnpushedCommitsCountMock: vi.fn(async () => 0),
-  pushBranchToRemoteMock: vi.fn(async () => undefined),
-  confirmYesNoMock: vi.fn(async () => false),
-  waitForEnterMock: vi.fn(async () => undefined),
-  resolveWorktreePathForBranchMock: vi.fn(async () => ({ path: null })),
-}));
+  findLatestCodexSessionMock: mock(async () => null),
+  hasUncommittedChangesMock: mock(async () => false),
+  hasUnpushedCommitsMock: mock(async () => false),
+  getUncommittedChangesCountMock: mock(async () => 0),
+  getUnpushedCommitsCountMock: mock(async () => 0),
+  pushBranchToRemoteMock: mock(async () => undefined),
+  confirmYesNoMock: mock(async () => false),
+  waitForEnterMock: mock(async () => undefined),
+  resolveWorktreePathForBranchMock: mock(async () => ({ path: null })),
+};
 
-vi.mock("../../src/git.js", async () => {
-  const actual =
-    await vi.importActual<typeof import("../../src/git.js")>(
-      "../../src/git.js",
-    );
+mock.module("../../src/git.js", async () => {
+  const actual = await import("../../src/git.js");
   return {
     ...actual,
     getRepositoryRoot: getRepositoryRootMock,
     fetchAllRemotes: fetchAllRemotesMock,
     pullFastForward: pullFastForwardMock,
     getBranchDivergenceStatuses: getBranchDivergenceStatusesMock,
-    branchExists: vi.fn(async () => true),
-    getCurrentBranch: vi.fn(async () => "develop"),
+    branchExists: mock(async () => true),
+    getCurrentBranch: mock(async () => "develop"),
     hasUncommittedChanges: hasUncommittedChangesMock,
     hasUnpushedCommits: hasUnpushedCommitsMock,
     getUncommittedChangesCount: getUncommittedChangesCountMock,
@@ -69,49 +66,48 @@ vi.mock("../../src/git.js", async () => {
   };
 });
 
-vi.mock("../../src/worktree.js", async () => {
-  const actual = await vi.importActual<typeof import("../../src/worktree.js")>(
-    "../../src/worktree.js",
-  );
+mock.module("../../src/worktree.js", async () => {
+  const actual = await import("../../src/worktree.js");
   return {
     ...actual,
     worktreeExists: worktreeExistsMock,
     resolveWorktreePathForBranch: resolveWorktreePathForBranchMock,
-    isProtectedBranchName: vi.fn(() => false),
-    switchToProtectedBranch: vi.fn(),
+    isProtectedBranchName: mock(() => false),
+    switchToProtectedBranch: mock(),
   };
 });
 
-vi.mock("../../src/services/WorktreeOrchestrator.js", () => ({
+mock.module("../../src/services/WorktreeOrchestrator.js", () => ({
   WorktreeOrchestrator: class {
     ensureWorktree = ensureWorktreeMock;
   },
 }));
 
-vi.mock("../../src/services/dependency-installer.js", async () => {
-  const actual = await vi.importActual<
-    typeof import("../../src/services/dependency-installer.js")
-  >("../../src/services/dependency-installer.js");
+mock.module("../../src/services/dependency-installer.js", async () => {
+  const actual = await import("../../src/services/dependency-installer.js");
   return {
     ...actual,
     installDependenciesForWorktree: installDependenciesMock,
   };
 });
 
-vi.mock("../../src/config/tools.js", () => ({
-  getToolById: vi.fn(() => ({
+mock.module("../../src/config/tools.js", () => ({
+  getCodingAgentById: mock(async () => ({
     id: "codex-cli",
     displayName: "Codex",
+    type: "command",
+    command: "codex",
+    modeArgs: { normal: [] },
   })),
-  getSharedEnvironment: vi.fn(async () => ({})),
+  getSharedEnvironment: mock(async () => ({})),
 }));
 
-vi.mock("../../src/config/index.js", () => ({
+mock.module("../../src/config/index.js", () => ({
   saveSession: saveSessionMock,
   loadSession: loadSessionMock,
 }));
 
-vi.mock("../../src/codex.js", () => ({
+mock.module("../../src/codex.js", () => ({
   launchCodexCLI: launchCodexCLIMock,
   CodexError: class CodexError extends Error {
     constructor(
@@ -124,17 +120,15 @@ vi.mock("../../src/codex.js", () => ({
   },
 }));
 
-vi.mock("../../src/utils/session.js", () => ({
+mock.module("../../src/utils/session.js", () => ({
   findLatestCodexSession: findLatestCodexSessionMock,
-  findLatestClaudeSession: vi.fn(async () => null),
-  findLatestGeminiSession: vi.fn(async () => null),
-  findLatestClaudeSessionId: vi.fn(async () => null),
+  findLatestClaudeSession: mock(async () => null),
+  findLatestGeminiSession: mock(async () => null),
+  findLatestClaudeSessionId: mock(async () => null),
 }));
 
-vi.mock("../../src/utils/prompt.js", async () => {
-  const actual = await vi.importActual<
-    typeof import("../../src/utils/prompt.js")
-  >("../../src/utils/prompt.js");
+mock.module("../../src/utils/prompt.js", async () => {
+  const actual = await import("../../src/utils/prompt.js");
   return {
     ...actual,
     confirmYesNo: confirmYesNoMock,
@@ -187,14 +181,14 @@ const selection: SelectionResult = {
 
 describe("handleAIToolWorkflow - post session checks", () => {
   it("warns when uncommitted changes exist and waits 3 seconds", async () => {
-    vi.useFakeTimers();
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // TODO: use setSystemTime for fake timers in bun;
+    const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
 
     hasUncommittedChangesMock.mockResolvedValue(true);
     getUncommittedChangesCountMock.mockResolvedValue(2);
 
     const run = handleAIToolWorkflow(selection);
-    await vi.advanceTimersByTimeAsync(3000);
+    await new Promise((r) => setTimeout(r, 3000));
     await run;
 
     const messages = warnSpy.mock.calls.flat().join(" ");
@@ -204,18 +198,18 @@ describe("handleAIToolWorkflow - post session checks", () => {
     expect(pushBranchToRemoteMock).not.toHaveBeenCalled();
 
     warnSpy.mockRestore();
-    vi.useRealTimers();
+    // TODO: restore real timers;
   });
 
   it("warns when unpushed commits exist and waits 3 seconds", async () => {
-    vi.useFakeTimers();
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // TODO: use setSystemTime for fake timers in bun;
+    const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
 
     hasUnpushedCommitsMock.mockResolvedValue(true);
     getUnpushedCommitsCountMock.mockResolvedValue(3);
 
     const run = handleAIToolWorkflow(selection);
-    await vi.advanceTimersByTimeAsync(3000);
+    await new Promise((r) => setTimeout(r, 3000));
     await run;
 
     const messages = warnSpy.mock.calls.flat().join(" ");
@@ -225,12 +219,12 @@ describe("handleAIToolWorkflow - post session checks", () => {
     expect(pushBranchToRemoteMock).not.toHaveBeenCalled();
 
     warnSpy.mockRestore();
-    vi.useRealTimers();
+    // TODO: restore real timers;
   });
 
   it("warns for both uncommitted and unpushed changes before waiting", async () => {
-    vi.useFakeTimers();
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // TODO: use setSystemTime for fake timers in bun;
+    const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
 
     hasUncommittedChangesMock.mockResolvedValue(true);
     hasUnpushedCommitsMock.mockResolvedValue(true);
@@ -238,7 +232,7 @@ describe("handleAIToolWorkflow - post session checks", () => {
     getUnpushedCommitsCountMock.mockResolvedValue(1);
 
     const run = handleAIToolWorkflow(selection);
-    await vi.advanceTimersByTimeAsync(3000);
+    await new Promise((r) => setTimeout(r, 3000));
     await run;
 
     const messages = warnSpy.mock.calls.flat().join(" ");
@@ -249,23 +243,23 @@ describe("handleAIToolWorkflow - post session checks", () => {
     expect(pushBranchToRemoteMock).not.toHaveBeenCalled();
 
     warnSpy.mockRestore();
-    vi.useRealTimers();
+    // TODO: restore real timers;
   });
 
   it("uses 3-second delay when no uncommitted or unpushed changes exist", async () => {
-    vi.useFakeTimers();
+    // TODO: use setSystemTime for fake timers in bun;
 
     hasUncommittedChangesMock.mockResolvedValue(false);
     hasUnpushedCommitsMock.mockResolvedValue(false);
 
     const run = handleAIToolWorkflow(selection);
-    await vi.advanceTimersByTimeAsync(3000);
+    await new Promise((r) => setTimeout(r, 3000));
     await run;
 
     expect(waitForEnterMock).not.toHaveBeenCalled();
     expect(confirmYesNoMock).not.toHaveBeenCalled();
     expect(pushBranchToRemoteMock).not.toHaveBeenCalled();
 
-    vi.useRealTimers();
+    // TODO: restore real timers;
   });
 });

@@ -1,46 +1,34 @@
-import {
-  describe,
-  it,
-  expect,
-  vi,
-  beforeEach,
-  afterEach,
-  type MockedFunction,
-} from "vitest";
+import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
 
 // Mock all dependencies
-vi.mock("execa", () => ({
-  execa: vi.fn(),
+mock.module("execa", () => ({
+  execa: mock(),
 }));
 
-const existsSyncMock = vi.hoisted(() =>
-  vi.fn((targetPath?: string) => {
-    if (typeof targetPath !== "string") {
-      return false;
-    }
-    if (
-      targetPath.includes("/path/to/repo/.worktrees") ||
-      targetPath === "/path/to/worktree"
-    ) {
-      return false;
-    }
-    return true;
-  }),
-);
+const existsSyncMock = mock((targetPath?: string) => {
+  if (typeof targetPath !== "string") {
+    return false;
+  }
+  const normalized = targetPath.replace(/\\/g, "/");
+  if (
+    normalized.includes("/path/to/repo/.worktrees") ||
+    normalized === "/path/to/worktree"
+  ) {
+    return false;
+  }
+  return true;
+});
 
-vi.mock("node:fs", () => ({
+mock.module("node:fs", () => ({
   existsSync: existsSyncMock,
 }));
 
-const mkdirMock = vi.hoisted(() => vi.fn(async () => undefined));
-const readFileMock = vi.hoisted(() => vi.fn(async () => ""));
-const writeFileMock = vi.hoisted(() => vi.fn(async () => undefined));
+const mkdirMock = mock(async () => undefined);
+const readFileMock = mock(async () => "");
+const writeFileMock = mock(async () => undefined);
 
-vi.mock("node:fs/promises", async () => {
-  const actual =
-    await vi.importActual<typeof import("node:fs/promises")>(
-      "node:fs/promises",
-    );
+mock.module("node:fs/promises", async () => {
+  const actual = await import("node:fs/promises");
 
   const mocked = {
     ...actual,
@@ -66,10 +54,10 @@ import * as worktree from "../../src/worktree";
 const execaMock = execa as MockedFunction<typeof execa>;
 
 describe("E2E: Complete Branch to Worktree Flow", () => {
-  let repoRootSpy: ReturnType<typeof vi.spyOn>;
+  let repoRootSpy: Mock;
 
   beforeEach(() => {
-    vi.clearAllMocks();
+    mock.restore();
     mkdirMock.mockClear();
     readFileMock.mockClear();
     writeFileMock.mockClear();
@@ -80,7 +68,7 @@ describe("E2E: Complete Branch to Worktree Flow", () => {
   });
 
   afterEach(() => {
-    vi.restoreAllMocks();
+    mock.restore();
     repoRootSpy?.mockRestore();
   });
 

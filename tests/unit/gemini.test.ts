@@ -1,16 +1,24 @@
-import { describe, it, expect, vi, beforeEach, afterAll } from "vitest";
+import {
+  describe,
+  it,
+  expect,
+  mock,
+  beforeEach,
+  afterAll,
+  spyOn,
+} from "bun:test";
 
 type MockStdio = "inherit" | number;
 
 // Mock execa before importing
-vi.mock("execa", () => ({
-  execa: vi.fn(),
-  default: { execa: vi.fn() },
+mock.module("execa", () => ({
+  execa: mock(),
+  default: { execa: mock() },
 }));
 
-vi.mock("fs", () => ({
-  existsSync: vi.fn(() => true),
-  default: { existsSync: vi.fn(() => true) },
+mock.module("fs", () => ({
+  existsSync: mock(() => true),
+  default: { existsSync: mock(() => true) },
 }));
 
 const mockTerminalStreams = {
@@ -21,25 +29,25 @@ const mockTerminalStreams = {
   stdoutFd: undefined as number | undefined,
   stderrFd: undefined as number | undefined,
   usingFallback: false,
-  exitRawMode: vi.fn(),
+  exitRawMode: mock(),
 };
 
 const mockChildStdio = {
   stdin: "inherit" as MockStdio,
   stdout: "inherit" as MockStdio,
   stderr: "inherit" as MockStdio,
-  cleanup: vi.fn(),
+  cleanup: mock(),
 };
 
-vi.mock("../../src/utils/terminal", () => ({
-  getTerminalStreams: vi.fn(() => mockTerminalStreams),
-  createChildStdio: vi.fn(() => mockChildStdio),
-  resetTerminalModes: vi.fn(),
+mock.module("../../src/utils/terminal", () => ({
+  getTerminalStreams: mock(() => mockTerminalStreams),
+  createChildStdio: mock(() => mockChildStdio),
+  resetTerminalModes: mock(),
 }));
 
 // Mock findCommand to control command discovery behavior
-const mockFindCommand = vi.fn();
-vi.mock("../../src/utils/command", () => ({
+const mockFindCommand = mock();
+mock.module("../../src/utils/command", () => ({
   findCommand: (...args: unknown[]) => mockFindCommand(...args),
 }));
 
@@ -48,16 +56,16 @@ import { execa } from "execa";
 import { existsSync } from "fs";
 
 // Get typed mocks
-const mockExeca = execa as ReturnType<typeof vi.fn>;
-const mockExistsSync = existsSync as ReturnType<typeof vi.fn>;
+const mockExeca = execa as Mock;
+const mockExistsSync = existsSync as Mock;
 
 // Mock console.log to avoid test output clutter
-let consoleLogSpy: ReturnType<typeof vi.spyOn>;
+let consoleLogSpy: Mock;
 
 describe("launchGeminiCLI", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
-    consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    mock.restore();
+    consoleLogSpy = spyOn(console, "log").mockImplementation(() => {});
     mockTerminalStreams.exitRawMode.mockClear();
     mockChildStdio.cleanup.mockClear();
     mockChildStdio.stdin = "inherit";
@@ -70,8 +78,8 @@ describe("launchGeminiCLI", () => {
   });
 
   afterAll(() => {
-    vi.restoreAllMocks();
-    vi.resetModules();
+    mock.restore();
+    // resetModules not needed in bun;
   });
 
   describe("基本起動テスト", () => {
@@ -339,9 +347,9 @@ describe("launchGeminiCLI", () => {
     it("T011: Windowsプラットフォームでトラブルシューティングメッセージを表示", async () => {
       // Mock platform to Windows
       const originalPlatform = process.platform;
-      const consoleErrorSpy = vi
-        .spyOn(console, "error")
-        .mockImplementation(() => {});
+      const consoleErrorSpy = spyOn(console, "error").mockImplementation(
+        () => {},
+      );
       Object.defineProperty(process, "platform", {
         value: "win32",
         configurable: true,
@@ -510,8 +518,7 @@ describe("launchGeminiCLI", () => {
 
       const { resetTerminalModes } =
         await import("../../src/utils/terminal.js");
-      const mockResetTerminalModes =
-        resetTerminalModes as unknown as ReturnType<typeof vi.fn>;
+      const mockResetTerminalModes = resetTerminalModes as unknown as Mock;
 
       expect(mockResetTerminalModes).toHaveBeenCalledTimes(2);
       expect(mockResetTerminalModes).toHaveBeenNthCalledWith(
@@ -544,8 +551,7 @@ describe("launchGeminiCLI", () => {
 
       const { resetTerminalModes } =
         await import("../../src/utils/terminal.js");
-      const mockResetTerminalModes =
-        resetTerminalModes as unknown as ReturnType<typeof vi.fn>;
+      const mockResetTerminalModes = resetTerminalModes as unknown as Mock;
 
       expect(mockResetTerminalModes).toHaveBeenCalledTimes(2);
     });
@@ -554,4 +560,94 @@ describe("launchGeminiCLI", () => {
   // Note: FR-008 (Launch arguments display) is not implemented in gemini.ts
   // Unlike Claude and Codex, Gemini CLI does not log the args before launch.
   // This is intentional as Gemini's argument handling is simpler.
+
+  describe("Launch/Exit Logs", () => {
+    it("should display launch message with rocket emoji at startup", async () => {
+      mockFindCommand.mockResolvedValue({
+        available: true,
+        path: null,
+        source: "bunx",
+      });
+      mockExeca.mockResolvedValue({
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+      });
+
+      await launchGeminiCLI("/test/path");
+
+      // Verify that launch message is logged with 🚀 emoji
+      expect(consoleLogSpy).toHaveBeenCalledWith(
+        expect.stringContaining("🚀 Launching Gemini CLI..."),
+      );
+    });
+
+    it("should display working directory in launch logs", async () => {
+      mockFindCommand.mockResolvedValue({
+        available: true,
+        path: null,
+        source: "bunx",
+      });
+      mockExeca.mockResolvedValue({
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+      });
+
+      await launchGeminiCLI("/test/path");
+
+      // Verify working directory is shown
+      expect(consoleLogSpy).toHaveBeenCalledWith(
+        expect.stringContaining("Working directory: /test/path"),
+      );
+    });
+
+    it("should display model info when custom model is specified", async () => {
+      mockFindCommand.mockResolvedValue({
+        available: true,
+        path: null,
+        source: "bunx",
+      });
+      mockExeca.mockResolvedValue({
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+      });
+
+      await launchGeminiCLI("/test/path", { model: "gemini-2.5-flash" });
+
+      // Verify model info is logged with 🎯 emoji
+      expect(consoleLogSpy).toHaveBeenCalledWith(
+        expect.stringContaining("🎯 Model: gemini-2.5-flash"),
+      );
+    });
+
+    it("should display session ID after agent exits when captured", async () => {
+      // Mock findCommand
+      mockFindCommand.mockResolvedValue({
+        available: true,
+        path: null,
+        source: "bunx",
+      });
+      mockExeca.mockResolvedValue({
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+      });
+
+      // Mock session detection
+      mock.module("../../src/utils/session", () => ({
+        waitForCodexSessionId: mock(async () => null),
+        findLatestCodexSession: mock(async () => null),
+        findLatestGeminiSessionId: mock(async () => "gemini-session-789"),
+      }));
+
+      await launchGeminiCLI("/test/path");
+
+      // Verify session ID is displayed after exit
+      expect(consoleLogSpy).toHaveBeenCalledWith(
+        expect.stringContaining("🆔 Session ID: gemini-session-789"),
+      );
+    });
+  });
 });

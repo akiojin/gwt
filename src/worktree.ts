@@ -2,6 +2,9 @@ import { execa } from "execa";
 import fs from "node:fs/promises";
 import path from "node:path";
 import chalk from "chalk";
+import { createLogger } from "./logging/logger.js";
+
+const logger = createLogger({ category: "worktree" });
 import {
   WorktreeConfig,
   WorktreeWithPR,
@@ -109,9 +112,13 @@ export interface WorktreeInfo {
   path: string;
   branch: string;
   head: string;
+  locked?: boolean;
+  prunable?: boolean;
   isAccessible?: boolean;
   invalidReason?: string;
   hasUncommittedChanges?: boolean;
+  isLocked?: boolean;
+  isPrunable?: boolean;
 }
 
 async function listWorktrees(): Promise<WorktreeInfo[]> {
@@ -131,11 +138,37 @@ async function listWorktrees(): Promise<WorktreeInfo[]> {
         if (currentWorktree.path) {
           worktrees.push(currentWorktree as WorktreeInfo);
         }
-        currentWorktree = { path: line.substring(9) };
+        currentWorktree = {
+          path: line.substring(9),
+          locked: false,
+          prunable: false,
+          isLocked: false,
+          isPrunable: false,
+        };
       } else if (line.startsWith("HEAD ")) {
         currentWorktree.head = line.substring(5);
       } else if (line.startsWith("branch ")) {
         currentWorktree.branch = line.substring(7).replace("refs/heads/", "");
+      } else if (line === "locked" || line.startsWith("locked ")) {
+        currentWorktree.locked = true;
+        currentWorktree.isLocked = true;
+        if (line.startsWith("locked ")) {
+          const reason = line.substring(7).trim();
+          if (reason) {
+            currentWorktree.invalidReason ??= reason;
+          }
+        }
+      } else if (line === "prunable" || line.startsWith("prunable ")) {
+        currentWorktree.prunable = true;
+        currentWorktree.isPrunable = true;
+        if (line.startsWith("prunable ")) {
+          const reason = line.substring(9).trim();
+          if (reason) {
+            currentWorktree.invalidReason ??= reason;
+          }
+        }
+      } else if (line.startsWith("reason ")) {
+        currentWorktree.invalidReason = line.substring(7);
       } else if (line === "") {
         if (currentWorktree.path) {
           worktrees.push(currentWorktree as WorktreeInfo);
@@ -173,7 +206,8 @@ export async function listAdditionalWorktrees(): Promise<WorktreeInfo[]> {
       .filter((worktree) => worktree.path !== repoRoot)
       .map((worktree) => {
         // パスの存在を確認
-        const isAccessible = fs.existsSync(worktree.path);
+        const exists = fs.existsSync(worktree.path);
+        const isAccessible = exists && !worktree.prunable;
 
         const result: WorktreeInfo = {
           ...worktree,
@@ -181,7 +215,11 @@ export async function listAdditionalWorktrees(): Promise<WorktreeInfo[]> {
         };
 
         if (!isAccessible) {
-          result.invalidReason = "Path not accessible in current environment";
+          if (!exists) {
+            result.invalidReason = "Path not accessible in current environment";
+          } else if (worktree.prunable && !result.invalidReason) {
+            result.invalidReason = "Worktree is marked prunable";
+          }
         }
 
         return result;
@@ -534,6 +572,174 @@ export async function removeWorktree(
       error,
     );
   }
+}
+
+export interface RepairResult {
+  repairedCount: number;
+  failedCount: number;
+  failures: Array<{ path: string; error: string }>;
+}
+
+/**
+ * Worktreeパス修復の結果
+ */
+export interface RepairPathResult {
+  /** 修復成功 (git worktree repair) */
+  repaired: boolean;
+  /** 古いメタデータ削除成功 (git worktree remove --force) */
+  removed: boolean;
+  /** 修復後の新しいパス (repaired=trueの場合のみ) */
+  newPath?: string;
+}
+
+/**
+ * 単一のworktreeパスを修復する共通関数
+ *
+ * パターンA: 期待されるパスにディレクトリが存在する
+ *   → git worktree repair <expectedPath> で修復
+ *
+ * パターンB: ディレクトリが存在しない（リモート環境で作成されたメタデータのみ残っている）
+ *   → git worktree remove --force <currentPath> でメタデータを削除
+ *
+ * @param branch ブランチ名
+ * @param currentPath 現在gitメタデータに記録されているパス
+ * @param repoRoot リポジトリルートパス
+ * @returns 修復結果
+ */
+export async function repairWorktreePath(
+  branch: string,
+  currentPath: string,
+  repoRoot: string,
+): Promise<RepairPathResult> {
+  const expectedPath = await generateWorktreePath(repoRoot, branch);
+  const fsSync = await import("node:fs");
+
+  if (fsSync.existsSync(expectedPath)) {
+    // パターンA: ディレクトリが存在する → repair
+    logger.info(
+      { branch, expectedPath, currentPath },
+      "repairWorktreePath: directory exists, attempting repair",
+    );
+    try {
+      await execa("git", ["worktree", "repair", expectedPath], {
+        cwd: repoRoot,
+      });
+      return { repaired: true, removed: false, newPath: expectedPath };
+    } catch (error) {
+      logger.warn(
+        { branch, expectedPath, error },
+        "repairWorktreePath: repair failed",
+      );
+      return { repaired: false, removed: false };
+    }
+  } else {
+    // パターンB: ディレクトリが存在しない → 古いメタデータを削除
+    logger.info(
+      { branch, currentPath, expectedPath },
+      "repairWorktreePath: directory not found, removing stale metadata",
+    );
+    try {
+      await execa("git", ["worktree", "remove", "--force", currentPath], {
+        cwd: repoRoot,
+      });
+      return { repaired: false, removed: true };
+    } catch (error) {
+      logger.warn(
+        { branch, currentPath, error },
+        "repairWorktreePath: remove failed",
+      );
+      return { repaired: false, removed: false };
+    }
+  }
+}
+
+/**
+ * Worktreeのパス不整合を修復
+ * 共通関数repairWorktreePathを使用して各ブランチを修復
+ * @param targetBranches 修復対象のブランチ名配列
+ * @returns 修復結果（成功数、失敗数、失敗詳細）
+ */
+export async function repairWorktrees(
+  targetBranches: string[],
+): Promise<RepairResult> {
+  const result: RepairResult = {
+    repairedCount: 0,
+    failedCount: 0,
+    failures: [],
+  };
+
+  if (targetBranches.length === 0) {
+    return result;
+  }
+
+  // 修復前のworktree一覧を取得（現在のパスを知るため）
+  const beforeWorktrees = await listAdditionalWorktrees();
+  const worktreePathMap = new Map(
+    beforeWorktrees.map((w) => [w.branch, w.path]),
+  );
+
+  // デバッグログ: worktreeリストのブランチ名を出力
+  logger.info(
+    {
+      targetBranches,
+      worktreeBranches: beforeWorktrees.map((w) => ({
+        branch: w.branch,
+        path: w.path,
+        isAccessible: w.isAccessible,
+      })),
+    },
+    "repairWorktrees: before state",
+  );
+
+  const repoRoot = await getRepositoryRoot();
+
+  // 対象ブランチごとに共通関数を使用して修復
+  for (const branch of targetBranches) {
+    const currentPath = worktreePathMap.get(branch);
+    if (!currentPath) {
+      logger.warn({ branch }, "repairWorktrees: branch not found in worktrees");
+      result.failedCount++;
+      result.failures.push({
+        path: branch,
+        error: "Branch not found in worktrees",
+      });
+      continue;
+    }
+
+    const repairResult = await repairWorktreePath(
+      branch,
+      currentPath,
+      repoRoot,
+    );
+
+    if (repairResult.repaired) {
+      result.repairedCount++;
+    } else if (repairResult.removed) {
+      // メタデータ削除は「修復」としてカウント（新規作成が可能になるため）
+      result.repairedCount++;
+    } else {
+      result.failedCount++;
+      result.failures.push({
+        path: branch,
+        error: "Worktree repair failed",
+      });
+    }
+  }
+
+  // 修復後のアクセス可能性を確認（デバッグログ用）
+  const afterWorktrees = await listAdditionalWorktrees();
+  logger.info(
+    {
+      afterWorktrees: afterWorktrees.map((w) => ({
+        branch: w.branch,
+        path: w.path,
+        isAccessible: w.isAccessible,
+      })),
+    },
+    "repairWorktrees: after state",
+  );
+
+  return result;
 }
 
 async function getWorktreesWithPRStatus(): Promise<WorktreeWithPR[]> {

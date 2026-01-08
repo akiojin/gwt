@@ -1,9 +1,58 @@
-import { describe, it, expect, beforeEach } from "bun:test";
+import { describe, it, expect, beforeEach, mock } from "bun:test";
+
+const execaMock = mock();
+const existsSyncMock = mock(() => false);
+
+mock.module("execa", () => ({
+  execa: (...args: unknown[]) => execaMock(...args),
+}));
+
+mock.module("fs", () => ({
+  existsSync: (...args: unknown[]) => existsSyncMock(...args),
+  default: {
+    existsSync: (...args: unknown[]) => existsSyncMock(...args),
+  },
+}));
+
+const setupCommandMocks = () => {
+  execaMock.mockReset();
+  existsSyncMock.mockReset();
+  existsSyncMock.mockReturnValue(false);
+  execaMock.mockImplementation(
+    async (command: string, args?: readonly string[]) => {
+      if ((command === "which" || command === "where") && args?.[0]) {
+        const target = args[0];
+        const installed = new Set([
+          "ls",
+          "where",
+          "claude",
+          "codex",
+          "gemini",
+          "opencode",
+        ]);
+        if (installed.has(target)) {
+          return { stdout: `/usr/bin/${target}` };
+        }
+        throw new Error("Command not found");
+      }
+
+      if (args?.[0] === "--version") {
+        if (command.includes("nonexistent")) {
+          throw new Error("ENOENT");
+        }
+        return { stdout: `${command} 1.2.3` };
+      }
+
+      return { stdout: "" };
+    },
+  );
+};
 
 describe("command utilities", () => {
   let commandModule: typeof import("../../../src/utils/command.js");
 
   beforeEach(async () => {
+    setupCommandMocks();
     // Re-import module
     // Note: Bun doesn't fully support module mocking, so we test the actual implementation
     commandModule = await import("../../../src/utils/command.js");
@@ -66,7 +115,7 @@ describe("command utilities", () => {
     it("returns status for all builtin tools", async () => {
       const results = await commandModule.detectAllToolStatuses();
 
-      expect(results).toHaveLength(3);
+      expect(results).toHaveLength(4);
 
       // Check Claude
       const claude = results.find((t) => t.id === "claude-code");
@@ -85,6 +134,12 @@ describe("command utilities", () => {
       expect(gemini).toBeDefined();
       expect(gemini?.name).toBe("Gemini");
       expect(["installed", "bunx"]).toContain(gemini?.status);
+
+      // Check OpenCode
+      const opencode = results.find((t) => t.id === "opencode");
+      expect(opencode).toBeDefined();
+      expect(opencode?.name).toBe("OpenCode");
+      expect(["installed", "bunx"]).toContain(opencode?.status);
     });
 
     it("returns ToolStatus with correct structure", async () => {
@@ -107,6 +162,7 @@ describe("getCommandVersion", () => {
   let commandModule: typeof import("../../../src/utils/command.js");
 
   beforeEach(async () => {
+    setupCommandMocks();
     commandModule = await import("../../../src/utils/command.js");
     commandModule.clearCommandLookupCache();
   });
@@ -131,6 +187,7 @@ describe("findCommand with version", () => {
   let commandModule: typeof import("../../../src/utils/command.js");
 
   beforeEach(async () => {
+    setupCommandMocks();
     commandModule = await import("../../../src/utils/command.js");
     commandModule.clearCommandLookupCache();
   });
@@ -149,9 +206,9 @@ describe("findCommand with version", () => {
     const result = await commandModule.findCommand("ls");
     if (result.source === "installed") {
       // Version is either a string starting with 'v' or null
-      expect(
-        result.version === null || result.version?.startsWith("v"),
-      ).toBe(true);
+      expect(result.version === null || result.version?.startsWith("v")).toBe(
+        true,
+      );
     }
   });
 });
@@ -160,6 +217,7 @@ describe("detectAllToolStatuses with version", () => {
   let commandModule: typeof import("../../../src/utils/command.js");
 
   beforeEach(async () => {
+    setupCommandMocks();
     commandModule = await import("../../../src/utils/command.js");
     commandModule.clearCommandLookupCache();
   });
@@ -182,9 +240,9 @@ describe("detectAllToolStatuses with version", () => {
     for (const tool of results) {
       if (tool.status === "installed") {
         // Version is either a string starting with 'v' or null
-        expect(
-          tool.version === null || tool.version?.startsWith("v"),
-        ).toBe(true);
+        expect(tool.version === null || tool.version?.startsWith("v")).toBe(
+          true,
+        );
       }
     }
   });
@@ -192,6 +250,7 @@ describe("detectAllToolStatuses with version", () => {
 
 describe("KNOWN_INSTALL_PATHS coverage", () => {
   beforeEach(async () => {
+    setupCommandMocks();
     const { clearCommandLookupCache } =
       await import("../../../src/utils/command.js");
     clearCommandLookupCache();

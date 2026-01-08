@@ -1,43 +1,31 @@
-import {
-  describe,
-  it,
-  expect,
-  vi,
-  beforeEach,
-  afterEach,
-  type MockedFunction,
-} from "vitest";
+import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
 
 // Mock all dependencies
-vi.mock("execa", () => ({
-  execa: vi.fn(),
+mock.module("execa", () => ({
+  execa: mock(),
 }));
 
-const existsSyncMock = vi.hoisted(() =>
-  vi.fn((targetPath?: string) => {
-    if (typeof targetPath !== "string") {
-      return false;
-    }
-    if (targetPath.includes("/path/to/repo/.worktrees")) {
-      return false;
-    }
-    return true;
-  }),
-);
+const existsSyncMock = mock((targetPath?: string) => {
+  if (typeof targetPath !== "string") {
+    return false;
+  }
+  const normalized = targetPath.replace(/\\/g, "/");
+  if (normalized.includes("/path/to/repo/.worktrees")) {
+    return false;
+  }
+  return true;
+});
 
-vi.mock("node:fs", () => ({
+mock.module("node:fs", () => ({
   existsSync: existsSyncMock,
 }));
 
-const mkdirMock = vi.hoisted(() => vi.fn(async () => undefined));
-const readFileMock = vi.hoisted(() => vi.fn(async () => ""));
-const writeFileMock = vi.hoisted(() => vi.fn(async () => undefined));
+const mkdirMock = mock(async () => undefined);
+const readFileMock = mock(async () => "");
+const writeFileMock = mock(async () => undefined);
 
-vi.mock("node:fs/promises", async () => {
-  const actual =
-    await vi.importActual<typeof import("node:fs/promises")>(
-      "node:fs/promises",
-    );
+mock.module("node:fs/promises", async () => {
+  const actual = await import("node:fs/promises");
 
   const mocked = {
     ...actual,
@@ -60,11 +48,11 @@ vi.mock("node:fs/promises", async () => {
 import { execa } from "execa";
 import * as git from "../../src/git";
 import * as worktree from "../../src/worktree";
-const execaMock = execa as MockedFunction<typeof execa>;
+const execaMock = execa as unknown;
 
 describe("E2E: Create Branch Workflow (T209)", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    mock.restore();
     mkdirMock.mockClear();
     readFileMock.mockClear();
     writeFileMock.mockClear();
@@ -72,7 +60,7 @@ describe("E2E: Create Branch Workflow (T209)", () => {
   });
 
   afterEach(() => {
-    vi.restoreAllMocks();
+    mock.restore();
   });
 
   describe("Complete Branch Creation Workflows", () => {

@@ -10,6 +10,10 @@ import {
   TableHead,
   TableCell,
 } from "@/components/ui/table";
+import {
+  getAgentTailwindClass,
+  normalizeAgentToToolId,
+} from "@/lib/coding-agent-colors";
 
 interface SessionInfo {
   sessionId: string;
@@ -131,7 +135,9 @@ export function SessionHistoryTable({
                         {SESSION_STATUS_LABEL[session.status]}
                       </Badge>
                     </TableCell>
-                    <TableCell className="font-medium">
+                    <TableCell
+                      className={`font-medium ${getAgentTailwindClass(normalizeAgentToToolId(session.agentType))}`}
+                    >
                       {agentLabel(session.agentType, session.agentName)}
                     </TableCell>
                     <TableCell>

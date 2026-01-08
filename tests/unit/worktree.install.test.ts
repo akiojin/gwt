@@ -1,19 +1,18 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import {
+  describe,
+  it,
+  expect,
+  mock,
+  beforeEach,
+  afterEach,
+  type Mock,
+} from "bun:test";
 import path from "node:path";
 
-// Vitest shim for environments lacking vi.hoisted (e.g., bun)
-if (typeof (vi as Record<string, unknown>).hoisted !== "function") {
-  // @ts-expect-error injected shim
-  vi.hoisted = (factory: () => unknown) => factory();
-}
+const accessMock = mock();
 
-const accessMock = vi.hoisted(() => vi.fn());
-
-vi.mock("node:fs/promises", async () => {
-  const actual =
-    await vi.importActual<typeof import("node:fs/promises")>(
-      "node:fs/promises",
-    );
+mock.module("node:fs/promises", async () => {
+  const actual = await import("node:fs/promises");
 
   return {
     ...actual,
@@ -26,8 +25,8 @@ vi.mock("node:fs/promises", async () => {
   };
 });
 
-vi.mock("execa", () => ({
-  execa: vi.fn(),
+mock.module("execa", () => ({
+  execa: mock(),
 }));
 
 import { execa } from "execa";
@@ -51,12 +50,12 @@ function setupExistingFiles(files: string[]): void {
 
 describe("dependency installer", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    mock.restore();
     accessMock.mockReset();
   });
 
   afterEach(() => {
-    vi.restoreAllMocks();
+    mock.restore();
   });
 
   describe("detectPackageManager", () => {
@@ -111,7 +110,7 @@ describe("dependency installer", () => {
   describe("installDependenciesForWorktree", () => {
     it("runs bun install with frozen-lockfile", async () => {
       setupExistingFiles([path.join(WORKTREE, "bun.lock")]);
-      (execa as any).mockResolvedValue({ stdout: "", stderr: "" });
+      (execa as Mock).mockResolvedValue({ stdout: "", stderr: "" });
 
       await installDependenciesForWorktree(WORKTREE);
 
@@ -124,7 +123,7 @@ describe("dependency installer", () => {
 
     it("runs pnpm install when pnpm lock is present", async () => {
       setupExistingFiles([path.join(WORKTREE, "pnpm-lock.yaml")]);
-      (execa as any).mockResolvedValue({ stdout: "", stderr: "" });
+      (execa as Mock).mockResolvedValue({ stdout: "", stderr: "" });
 
       await installDependenciesForWorktree(WORKTREE);
 
@@ -137,7 +136,7 @@ describe("dependency installer", () => {
 
     it("runs npm ci when package-lock exists", async () => {
       setupExistingFiles([path.join(WORKTREE, "package-lock.json")]);
-      (execa as any).mockResolvedValue({ stdout: "", stderr: "" });
+      (execa as Mock).mockResolvedValue({ stdout: "", stderr: "" });
 
       await installDependenciesForWorktree(WORKTREE);
 
@@ -150,7 +149,7 @@ describe("dependency installer", () => {
 
     it("runs npm install when only package.json exists", async () => {
       setupExistingFiles([path.join(WORKTREE, "package.json")]);
-      (execa as any).mockResolvedValue({ stdout: "", stderr: "" });
+      (execa as Mock).mockResolvedValue({ stdout: "", stderr: "" });
 
       await installDependenciesForWorktree(WORKTREE);
 
@@ -177,7 +176,7 @@ describe("dependency installer", () => {
     it("skips when install command fails", async () => {
       const lockfilePath = path.join(WORKTREE, "bun.lock");
       setupExistingFiles([lockfilePath]);
-      (execa as any).mockRejectedValue(new Error("boom"));
+      (execa as Mock).mockRejectedValue(new Error("boom"));
 
       await expect(
         installDependenciesForWorktree(WORKTREE),
@@ -209,12 +208,46 @@ describe("dependency installer", () => {
     it("skips when package manager binary is missing (ENOENT)", async () => {
       setupExistingFiles([path.join(WORKTREE, "bun.lock")]);
       const enoent = Object.assign(new Error("not found"), { code: "ENOENT" });
-      (execa as any).mockRejectedValueOnce(enoent);
+      (execa as Mock).mockRejectedValueOnce(enoent);
 
       const result = await installDependenciesForWorktree(WORKTREE);
 
       expect(result.skipped).toBe(true);
       expect(result.manager).toBe("bun");
+    });
+
+    // FR-040a: パッケージマネージャーの出力をそのまま標準出力/標準エラーに表示
+    it("passes stdout and stderr as inherit to show package manager output directly (FR-040a)", async () => {
+      setupExistingFiles([path.join(WORKTREE, "pnpm-lock.yaml")]);
+      (execa as Mock).mockResolvedValue({ stdout: "", stderr: "" });
+
+      await installDependenciesForWorktree(WORKTREE);
+
+      expect(execa).toHaveBeenCalledWith(
+        "pnpm",
+        ["install", "--frozen-lockfile"],
+        expect.objectContaining({
+          cwd: WORKTREE,
+          stdout: "inherit",
+          stderr: "inherit",
+        }),
+      );
+    });
+
+    // FR-040b: スピナー表示を行わない（startSpinnerがインポートされていないことを確認）
+    it("does not use spinner during dependency installation (FR-040b)", async () => {
+      // このテストは、dependency-installer.tsがstartSpinnerをインポートしていないことを
+      // 静的に検証する。実装でスピナーを使用するとインポートが必要になり、
+      // そのインポートが削除されていることでFR-040bの遵守を確認できる。
+      const moduleSource = await Bun.file(
+        path.join(
+          import.meta.dir,
+          "../../src/services/dependency-installer.ts",
+        ),
+      ).text();
+
+      expect(moduleSource).not.toContain('from "../utils/spinner');
+      expect(moduleSource).not.toContain("startSpinner");
     });
   });
 });

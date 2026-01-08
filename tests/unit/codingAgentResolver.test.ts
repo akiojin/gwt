@@ -1,14 +1,14 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, mock, beforeEach } from "bun:test";
 
-const mockExeca = vi.fn();
-const mockGetToolById = vi.fn();
+const mockExeca = mock();
+const mockGetToolById = mock();
 
-vi.mock("execa", () => ({
+mock.module("execa", () => ({
   execa: (...args: unknown[]) => mockExeca(...args),
   default: { execa: (...args: unknown[]) => mockExeca(...args) },
 }));
 
-vi.mock("../../src/config/tools.js", () => ({
+mock.module("../../src/config/tools.js", () => ({
   getCodingAgentById: (...args: unknown[]) => mockGetToolById(...args),
 }));
 
@@ -109,6 +109,16 @@ describe("codingAgentResolver", () => {
     ]);
   });
 
+  it("builds Codex arguments with explicit session id", () => {
+    expect(
+      buildCodexArgs({
+        mode: "continue",
+        sessionId: "session-123",
+        extraArgs: ["--custom"],
+      }),
+    ).toEqual(["resume", "session-123", "--custom", ...CODEX_DEFAULT_ARGS]);
+  });
+
   it("resolves Codex fallback command with composed args", async () => {
     mockExeca.mockImplementation(async (cmd, args) => {
       if (cmd === detectionCommand && args[0] === "codex") {
@@ -137,6 +147,15 @@ describe("codingAgentResolver", () => {
         extraArgs: ["--foo"],
       }),
     ).toEqual(["-r", "--dangerously-skip-permissions", "--foo"]);
+  });
+
+  it("builds Claude args with explicit session id", () => {
+    expect(
+      buildClaudeArgs({
+        mode: "resume",
+        sessionId: "session-456",
+      }),
+    ).toEqual(["--resume", "session-456"]);
   });
 
   it("resolves custom coding agents defined in tools.json", async () => {

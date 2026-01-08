@@ -1,12 +1,10 @@
-/**
- * @vitest-environment node
- */
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, mock } from "bun:test";
+import path from "node:path";
 
-vi.mock("node:fs/promises", () => {
-  const readdir = vi.fn();
-  const readFile = vi.fn();
-  const stat = vi.fn();
+mock.module("node:fs/promises", () => {
+  const readdir = mock();
+  const readFile = mock();
+  const stat = mock();
   return {
     readdir,
     readFile,
@@ -15,8 +13,8 @@ vi.mock("node:fs/promises", () => {
   };
 });
 
-vi.mock("node:os", () => {
-  const homedir = vi.fn(() => "/home/test");
+mock.module("node:os", () => {
+  const homedir = mock(() => "/home/test");
   return {
     homedir,
     default: { homedir },
@@ -36,15 +34,23 @@ import {
 } from "../../../src/utils/session.js";
 
 type ReaddirOptions = { withFileTypes?: boolean };
-type MockFn = ReturnType<typeof vi.fn>;
+type MockFn = Mock;
 
 const readdirMock = readdir as unknown as MockFn;
 const readFileMock = readFile as unknown as MockFn;
 const statMock = stat as unknown as MockFn;
+const normalizePath = (value: string) => value.replace(/\\/g, "/");
+const endsWithPath = (value: string, suffix: string) =>
+  normalizePath(value).endsWith(suffix);
+const equalsPath = (value: string, expected: string) =>
+  normalizePath(value) === expected;
 
 describe("utils/session", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    // Clear mock call counts and reset implementations
+    readdirMock.mockReset();
+    readFileMock.mockReset();
+    statMock.mockReset();
   });
 
   describe("isValidUuidSessionId", () => {
@@ -109,13 +115,13 @@ describe("utils/session", () => {
 
     readdirMock.mockImplementation((dir: string, opts?: ReaddirOptions) => {
       if (opts?.withFileTypes) {
-        if (dir.endsWith("/.codex/sessions")) {
+        if (endsWithPath(dir, "/.codex/sessions")) {
           return Promise.resolve([dirent("2025", "dir")]);
         }
-        if (dir.endsWith("/.codex/sessions/2025")) {
+        if (endsWithPath(dir, "/.codex/sessions/2025")) {
           return Promise.resolve([dirent("12", "dir")]);
         }
-        if (dir.endsWith("/.codex/sessions/2025/12")) {
+        if (endsWithPath(dir, "/.codex/sessions/2025/12")) {
           return Promise.resolve([
             dirent(
               "rollout-2025-12-06T15-12-04-019af438-56b3-7b32-bf8e-a5faeba5c9db.jsonl",
@@ -144,13 +150,13 @@ describe("utils/session", () => {
 
     readdirMock.mockImplementation((dir: string, opts?: ReaddirOptions) => {
       if (opts?.withFileTypes) {
-        if (dir.endsWith("/.codex/sessions")) {
+        if (endsWithPath(dir, "/.codex/sessions")) {
           return Promise.resolve([dirent("2025", "dir")]);
         }
-        if (dir.endsWith("/.codex/sessions/2025")) {
+        if (endsWithPath(dir, "/.codex/sessions/2025")) {
           return Promise.resolve([dirent("12", "dir")]);
         }
-        if (dir.endsWith("/.codex/sessions/2025/12")) {
+        if (endsWithPath(dir, "/.codex/sessions/2025/12")) {
           return Promise.resolve([
             dirent(`rollout-2025-12-07T16-40-59-${sessionUuid}.jsonl`, "file"),
           ]);
@@ -186,13 +192,13 @@ describe("utils/session", () => {
 
     readdirMock.mockImplementation((dir: string, opts?: ReaddirOptions) => {
       if (opts?.withFileTypes) {
-        if (dir.endsWith("/.codex/sessions")) {
+        if (endsWithPath(dir, "/.codex/sessions")) {
           return Promise.resolve([dirent("2025", "dir")]);
         }
-        if (dir.endsWith("/.codex/sessions/2025")) {
+        if (endsWithPath(dir, "/.codex/sessions/2025")) {
           return Promise.resolve([dirent("12", "dir")]);
         }
-        if (dir.endsWith("/.codex/sessions/2025/12")) {
+        if (endsWithPath(dir, "/.codex/sessions/2025/12")) {
           return Promise.resolve([
             dirent(`rollout-${sessionUuid}.jsonl`, "file"),
           ]);
@@ -213,6 +219,40 @@ describe("utils/session", () => {
     expect(id).toBe(sessionUuid);
   });
 
+  it("findLatestCodexSessionId falls back when cwd is missing in session file", async () => {
+    const dirent = (name: string, type: "file" | "dir") => ({
+      name,
+      isFile: () => type === "file",
+      isDirectory: () => type === "dir",
+    });
+
+    const sessionUuid = "99999999-9999-9999-9999-999999999999";
+
+    readdirMock.mockImplementation((dir: string, opts?: ReaddirOptions) => {
+      if (opts?.withFileTypes) {
+        if (endsWithPath(dir, "/.codex/sessions")) {
+          return Promise.resolve([dirent("2025", "dir")]);
+        }
+        if (endsWithPath(dir, "/.codex/sessions/2025")) {
+          return Promise.resolve([dirent("12", "dir")]);
+        }
+        if (endsWithPath(dir, "/.codex/sessions/2025/12")) {
+          return Promise.resolve([
+            dirent(`rollout-${sessionUuid}.jsonl`, "file"),
+          ]);
+        }
+      }
+      return Promise.resolve([]);
+    });
+    statMock.mockResolvedValue({ mtimeMs: 700 });
+    readFileMock.mockResolvedValue("{}");
+
+    const id = await findLatestCodexSessionId({
+      cwd: "/repo/.worktrees/branch",
+    });
+    expect(id).toBe(sessionUuid);
+  });
+
   it("findLatestCodexSessionId can pick session closest to reference time", async () => {
     const dirent = (name: string, type: "file" | "dir") => ({
       name,
@@ -226,13 +266,13 @@ describe("utils/session", () => {
 
     readdirMock.mockImplementation((dir: string, opts?: ReaddirOptions) => {
       if (opts?.withFileTypes) {
-        if (dir.endsWith("/.codex/sessions")) {
+        if (endsWithPath(dir, "/.codex/sessions")) {
           return Promise.resolve([dirent("2025", "dir")]);
         }
-        if (dir.endsWith("/.codex/sessions/2025")) {
+        if (endsWithPath(dir, "/.codex/sessions/2025")) {
           return Promise.resolve([dirent("12", "dir")]);
         }
-        if (dir.endsWith("/.codex/sessions/2025/12")) {
+        if (endsWithPath(dir, "/.codex/sessions/2025/12")) {
           return Promise.resolve([
             dirent(`rollout-${earlyUuid}.jsonl`, "file"),
             dirent(`rollout-${lateUuid}.jsonl`, "file"),
@@ -274,15 +314,15 @@ describe("utils/session", () => {
     readdirMock.mockImplementation((dir: string, opts?: ReaddirOptions) => {
       calls.push(dir);
       if (opts?.withFileTypes) {
-        if (dir.endsWith("/.codex/sessions")) {
+        if (endsWithPath(dir, "/.codex/sessions")) {
           return Promise.resolve([dirent("2025", "dir")]);
         }
-        if (dir.endsWith("/.codex/sessions/2025")) {
+        if (endsWithPath(dir, "/.codex/sessions/2025")) {
           return Promise.resolve([dirent("12", "dir")]);
         }
-        if (dir.endsWith("/.codex/sessions/2025/12")) {
+        if (endsWithPath(dir, "/.codex/sessions/2025/12")) {
           // Only on second pass we expose the file
-          if (calls.filter((c) => c.endsWith("/2025/12")).length >= 2) {
+          if (calls.filter((c) => endsWithPath(c, "/2025/12")).length >= 2) {
             return Promise.resolve([
               dirent(`rollout-${waitUuid}.jsonl`, "file"),
             ]);
@@ -316,12 +356,12 @@ describe("utils/session", () => {
 
     readdirMock.mockImplementation((dir: string, opts?: ReaddirOptions) => {
       if (opts?.withFileTypes) {
-        if (dir.endsWith("/projects/-repo/sessions")) {
+        if (endsWithPath(dir, "/projects/-repo/sessions")) {
           // First call: no files, second call: file appears
           const count = readdirMock.mock.calls.filter(
             (call) =>
               typeof call[0] === "string" &&
-              call[0].endsWith("/projects/-repo/sessions"),
+              endsWithPath(call[0], "/projects/-repo/sessions"),
           ).length;
           if (count >= 1) {
             return Promise.resolve([dirent(`${claudeUuid}.jsonl`, "file")]);
@@ -352,7 +392,7 @@ describe("utils/session", () => {
 
     readdirMock.mockImplementation((dir: string, opts?: ReaddirOptions) => {
       if (opts?.withFileTypes) {
-        if (dir.endsWith("/projects/-repo--worktrees-branch/sessions")) {
+        if (endsWithPath(dir, "/projects/-repo--worktrees-branch/sessions")) {
           return Promise.resolve([dirent(`${dotdashUuid}.jsonl`, "file")]);
         }
         return Promise.resolve([]);
@@ -389,7 +429,13 @@ describe("utils/session", () => {
     const id = await findLatestClaudeSessionId("/repos/sample");
     expect(id).toBe(jsonlUuid);
     expect(readdir).toHaveBeenCalledWith(
-      "/home/test/.claude/projects/-repos-sample/sessions",
+      path.join(
+        "/home/test",
+        ".claude",
+        "projects",
+        "-repos-sample",
+        "sessions",
+      ),
       { withFileTypes: true },
     );
   });
@@ -409,12 +455,12 @@ describe("utils/session", () => {
 
     readdirMock.mockImplementation((dir: string, opts?: ReaddirOptions) => {
       if (opts?.withFileTypes) {
-        if (dir === "/custom/codex/sessions") {
+        if (equalsPath(dir, "/custom/codex/sessions")) {
           return Promise.resolve([
             dirent(`rollout-${customCodexUuid}.jsonl`, "file"),
           ]);
         }
-        if (dir === "/custom/claude/projects/-repo/sessions") {
+        if (equalsPath(dir, "/custom/claude/projects/-repo/sessions")) {
           return Promise.resolve([dirent(`${customClaudeUuid}.jsonl`, "file")]);
         }
       }
@@ -449,10 +495,12 @@ describe("utils/session", () => {
     // First call (.claude) will throw, second (.config/claude) returns file
     readdirMock.mockImplementation((dir: string, opts?: ReaddirOptions) => {
       if (opts?.withFileTypes) {
-        if (dir === "/home/test/.claude/projects/-repo/sessions") {
+        if (equalsPath(dir, "/home/test/.claude/projects/-repo/sessions")) {
           return Promise.reject(new Error("missing"));
         }
-        if (dir === "/home/test/.config/claude/projects/-repo/sessions") {
+        if (
+          equalsPath(dir, "/home/test/.config/claude/projects/-repo/sessions")
+        ) {
           return Promise.resolve([dirent(`${cfgClaudeUuid}.jsonl`, "file")]);
         }
       }
@@ -522,16 +570,16 @@ describe("utils/session", () => {
     // collectFilesRecursive walks through directories recursively
     readdirMock.mockImplementation((dir: string, opts?: ReaddirOptions) => {
       if (opts?.withFileTypes) {
-        if (dir.endsWith("/.gemini/tmp")) {
+        if (endsWithPath(dir, "/.gemini/tmp")) {
           return Promise.resolve([
             dirent("projA", "dir"),
             dirent("projB", "dir"),
           ]);
         }
-        if (dir.endsWith("/projA")) {
+        if (endsWithPath(dir, "/projA")) {
           return Promise.resolve([dirent("a.json", "file")]);
         }
-        if (dir.endsWith("/projB")) {
+        if (endsWithPath(dir, "/projB")) {
           return Promise.resolve([dirent("b.json", "file")]);
         }
         return Promise.resolve([]);

@@ -2,48 +2,44 @@ import {
   describe,
   it,
   expect,
-  vi,
+  mock,
   beforeEach,
   afterEach,
-  type MockedFunction,
-} from "vitest";
+  spyOn,
+} from "bun:test";
 import * as git from "../../src/git";
 import * as worktree from "../../src/worktree";
 
 // Mock execa
-vi.mock("execa", () => ({
-  execa: vi.fn(),
+mock.module("execa", () => ({
+  execa: mock(),
 }));
 
-const existsSyncMock = vi.hoisted(() =>
-  vi.fn((input: string | URL) => {
-    const value = String(input);
-    if (value.includes("/path/to/repo/.worktrees")) {
-      return false;
-    }
-    if (
-      value.includes("/path/to/worktree") ||
-      value.includes("/path/to/new-worktree")
-    ) {
-      return false;
-    }
-    return true;
-  }),
-);
+const existsSyncMock = mock((input: string | URL) => {
+  const value = String(input);
+  const normalized = value.replace(/\\/g, "/");
+  if (normalized.includes("/path/to/repo/.worktrees")) {
+    return false;
+  }
+  if (
+    normalized.includes("/path/to/worktree") ||
+    normalized.includes("/path/to/new-worktree")
+  ) {
+    return false;
+  }
+  return true;
+});
 
-vi.mock("node:fs", () => ({
+mock.module("node:fs", () => ({
   existsSync: existsSyncMock,
 }));
 
-const mkdirMock = vi.hoisted(() => vi.fn(async () => undefined));
-const readFileMock = vi.hoisted(() => vi.fn(async () => ""));
-const writeFileMock = vi.hoisted(() => vi.fn(async () => undefined));
+const mkdirMock = mock(async () => undefined);
+const readFileMock = mock(async () => "");
+const writeFileMock = mock(async () => undefined);
 
-vi.mock("node:fs/promises", async () => {
-  const actual =
-    await vi.importActual<typeof import("node:fs/promises")>(
-      "node:fs/promises",
-    );
+mock.module("node:fs/promises", async () => {
+  const actual = await import("node:fs/promises");
 
   const mocked = {
     ...actual,
@@ -68,7 +64,7 @@ const execaMock = execa as MockedFunction<typeof execa>;
 
 describe("Integration: Branch Selection to Worktree Creation", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    mock.restore();
     mkdirMock.mockClear();
     readFileMock.mockClear();
     writeFileMock.mockClear();
@@ -76,7 +72,7 @@ describe("Integration: Branch Selection to Worktree Creation", () => {
   });
 
   afterEach(() => {
-    vi.restoreAllMocks();
+    mock.restore();
   });
 
   describe("Branch Selection Flow (T108)", () => {
@@ -205,7 +201,7 @@ branch refs/heads/feature/test
           };
         },
       );
-      vi.spyOn(git, "getCurrentBranchName").mockResolvedValue("feature/test");
+      spyOn(git, "getCurrentBranchName").mockResolvedValue("feature/test");
 
       // Check if worktree exists
       const existingWorktree = await worktree.worktreeExists("feature/test");

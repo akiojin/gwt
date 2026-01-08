@@ -13,6 +13,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
+import { getAgentTailwindClass } from "@/lib/coding-agent-colors";
 import type { ApiCodingAgent, Branch } from "../../../../../types/api.js";
 
 type ToolMode = "normal" | "continue" | "resume";
@@ -45,7 +46,7 @@ interface ToolLauncherProps {
   isStartingSession: boolean;
   isSyncingBranch: boolean;
   needsRemoteSync: boolean;
-  hasBlockingDivergence: boolean;
+  hasConflictingDivergence: boolean;
   onToolChange: (toolId: string) => void;
   onModeChange: (mode: ToolMode) => void;
   onSkipPermissionsChange: (skip: boolean) => void;
@@ -88,7 +89,7 @@ export function ToolLauncher({
   isStartingSession,
   isSyncingBranch,
   needsRemoteSync,
-  hasBlockingDivergence,
+  hasConflictingDivergence,
   onToolChange,
   onModeChange,
   onSkipPermissionsChange,
@@ -170,7 +171,11 @@ export function ToolLauncher({
                   </SelectTrigger>
                   <SelectContent>
                     {availableTools.map((tool) => (
-                      <SelectItem key={tool.id} value={tool.id}>
+                      <SelectItem
+                        key={tool.id}
+                        value={tool.id}
+                        className={getAgentTailwindClass(tool.id)}
+                      >
                         {tool.label}
                       </SelectItem>
                     ))}
@@ -243,11 +248,12 @@ export function ToolLauncher({
               </Alert>
             )}
 
-            {hasBlockingDivergence && (
+            {hasConflictingDivergence && (
               <Alert variant="warning" data-testid="divergence-warning">
                 <AlertDescription>
                   <p>
-                    リモートとローカルの両方に未解決の差分があるため、起動をブロックしています。
+                    リモートとローカルの両方に未解決の差分があります。起動は可能ですが、
+                    衝突を避けるために差分の解消を推奨します。
                   </p>
                   <ul className="mt-2 list-inside list-disc text-xs text-muted-foreground">
                     <li>
@@ -266,7 +272,6 @@ export function ToolLauncher({
                 disabled={
                   isStartingSession ||
                   !selectedTool ||
-                  hasBlockingDivergence ||
                   needsRemoteSync ||
                   isSyncingBranch
                 }

@@ -1,12 +1,13 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+/* eslint-disable @typescript-eslint/no-explicit-any */
+import { describe, it, expect, mock, beforeEach } from "bun:test";
 import * as config from "../../../src/config/index";
 
 // Mock fs/promises
-vi.mock("node:fs/promises", () => {
-  const readFile = vi.fn();
-  const writeFile = vi.fn();
-  const mkdir = vi.fn();
-  const readdir = vi.fn();
+mock.module("node:fs/promises", () => {
+  const readFile = mock();
+  const writeFile = mock();
+  const mkdir = mock();
+  const readdir = mock();
   return {
     readFile,
     writeFile,
@@ -16,11 +17,15 @@ vi.mock("node:fs/promises", () => {
   };
 });
 
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
 
 describe("config/index.ts - session history", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    // Clear mock call counts and reset implementations
+    (readFile as any).mockReset();
+    (writeFile as any).mockReset();
+    (mkdir as any).mockReset();
+    (readdir as any).mockReset();
   });
 
   it("appends to history and caps at 100 entries", async () => {

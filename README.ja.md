@@ -10,7 +10,7 @@ Claude Code / Codex CLI / Gemini CLI 対応の対話型Gitワークツリーマ�
 
 ## ✨ 主要機能
 
-- 🎯 **モダンReactベースUI**: Ink.jsによるスムーズでレスポンシブなターミナルインターフェースとリアルタイム更新
+- 🎯 **モダンOpenTUIベースUI**: OpenTUI + SolidJSによるスムーズでレスポンシブなターミナルインターフェースとリアルタイム更新
 - 🖼️ **フルスクリーンレイアウト**: 統計情報付きの固定ヘッダー、スクロール可能なブランチリスト、キーボードショートカット付きの常時表示フッター
 - 🌟 **スマートブランチ作成**: ガイド付きプロンプトと自動ベースブランチ選択でfeature、bugfix、hotfix、releaseブランチを作成
 - 🔄 **高度なワークツリー管理**: 作成、クリーンアップ、パス最適化を含む完全なライフサイクル管理
@@ -183,7 +183,7 @@ gwt
 - ドラフトPRとして作成すると自動マージを防げます: `gh pr create --draft`
 - 自動マージワークフローはこの設定を尊重し、ドラフトPRはスキップします
 
-技術的な詳細については、[specs/SPEC-cff08403/](specs/SPEC-cff08403/)を参照してください。
+技術的な詳細については、`.github/workflows/auto-merge.yml` ワークフローファイルを参照してください。
 
 ## システム要件
 
@@ -243,7 +243,7 @@ Claude Code で以下のコマンドを実行して、仕様駆動開発を活�
 @akiojin/gwt/
 ├── src/
 │   ├── cli/
-│   │   └── ui/          # Ink.js ReactコンポーネントによるターミナルUI
+│   │   └── ui/          # OpenTUI + SolidJSコンポーネントによるターミナルUI
 │   ├── web/             # Web UIサーバー（Express + React）
 │   ├── services/        # コアビジネスロジック
 │   ├── repositories/    # データアクセス層
@@ -338,7 +338,7 @@ bun run start
 
 ## リリースプロセス
 
-利用者の方は GitHub Releases もしくは npm で公開される最新版をご利用ください。リリース自動化の概要は [docs/release-guide.md](./docs/release-guide.md)（日本語版: [docs/release-guide.ja.md](./docs/release-guide.ja.md)）にまとめており、詳細設計は `specs/SPEC-57fde06f/` を参照してください。
+利用者の方は GitHub Releases もしくは npm で公開される最新版をご利用ください。リリース自動化の概要は [docs/release-guide.md](./docs/release-guide.md)（日本語版: [docs/release-guide.ja.md](./docs/release-guide.ja.md)）にまとめています。
 
 ## トラブルシューティング
 

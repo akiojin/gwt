@@ -1,47 +1,43 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import {
+  describe,
+  it,
+  expect,
+  mock,
+  beforeEach,
+  afterEach,
+  spyOn,
+} from "bun:test";
 import { PassThrough } from "node:stream";
 
-// Vitest shim for environments lacking vi.hoisted (e.g., bun)
-if (typeof (vi as Record<string, unknown>).hoisted !== "function") {
-  // @ts-expect-error injected shim
-  vi.hoisted = (factory: () => unknown) => factory();
-}
+const execaMock = mock();
 
-const { execaMock } = vi.hoisted(() => ({
-  execaMock: vi.fn(),
-}));
-
-vi.mock("execa", () => ({
+mock.module("execa", () => ({
   execa: execaMock,
 }));
 
 describe("worktree spinner integration", () => {
   beforeEach(() => {
-    if (
-      typeof (vi as { resetModules?: () => void }).resetModules === "function"
-    ) {
-      (vi as { resetModules: () => void }).resetModules();
-    }
     execaMock.mockReset();
   });
 
   afterEach(() => {
-    vi.restoreAllMocks();
+    mock.restore();
   });
 
   it("should start and stop spinner during worktree creation", async () => {
-    const stopSpinner = vi.fn();
+    const stopSpinner = mock();
 
     const spinnerModule = await import("../../src/utils/spinner.js");
-    const startSpinnerSpy = vi
-      .spyOn(spinnerModule, "startSpinner")
-      .mockImplementation((message: string) => {
-        stopSpinner.mockName(`stopSpinner:${message}`);
-        return stopSpinner;
-      });
+    const startSpinnerSpy = spyOn(
+      spinnerModule,
+      "startSpinner",
+    ).mockImplementation((message: string) => {
+      stopSpinner.mockName(`stopSpinner:${message}`);
+      return stopSpinner;
+    });
 
     const gitModule = await import("../../src/git.js");
-    vi.spyOn(gitModule, "ensureGitignoreEntry").mockResolvedValue(undefined);
+    spyOn(gitModule, "ensureGitignoreEntry").mockResolvedValue(undefined);
 
     execaMock.mockImplementation(() => {
       let resolvePromise: (value: unknown) => void = () => {};

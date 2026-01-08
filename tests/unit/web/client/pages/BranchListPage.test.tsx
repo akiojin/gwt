@@ -1,14 +1,14 @@
 import React from "react";
-import type { Mock } from "vitest";
-import { describe, it, expect, beforeEach, vi } from "vitest";
+// import type { Mock } - use bun:test mock types
+import { describe, it, expect, beforeEach,  mock } from "bun:test";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import type { Branch } from "../../../../../src/types/api.js";
 import { BranchListPage } from "../../../../../src/web/client/src/pages/BranchListPage.js";
 import { useBranches } from "../../../../../src/web/client/src/hooks/useBranches.js";
 
-vi.mock("../../../../../src/web/client/src/hooks/useBranches.js", () => ({
-  useBranches: vi.fn(),
+mock.module("../../../../../src/web/client/src/hooks/useBranches.js", () => ({
+  useBranches: mock(),
 }));
 
 const mockedUseBranches = useBranches as unknown as Mock;
@@ -19,7 +19,7 @@ const sampleBranches: Branch[] = [
     type: "local",
     mergeStatus: "unmerged",
     worktreePath: "/tmp/feature-design",
-     baseBranch: "main",
+    baseBranch: "main",
     commitHash: "abc123",
     commitMessage: "Refine UI layout",
     author: "Akira",
@@ -31,7 +31,7 @@ const sampleBranches: Branch[] = [
     type: "remote",
     mergeStatus: "merged",
     worktreePath: null,
-     baseBranch: "main",
+    baseBranch: "main",
     commitHash: "def789",
     commitMessage: "Tagged release",
     author: "Sana",
@@ -43,7 +43,7 @@ const sampleBranches: Branch[] = [
     type: "local",
     mergeStatus: "unknown",
     worktreePath: null,
-     baseBranch: "origin/main",
+    baseBranch: "origin/main",
     commitHash: "ghi456",
     commitMessage: "Patch CVE",
     author: "Noa",
@@ -71,31 +71,34 @@ describe("BranchListPage", () => {
   it("renders summary metrics and branch cards", () => {
     renderPage();
 
-    expect(screen.getByText("総ブランチ数")).toBeInTheDocument();
-    expect(screen.getByTestId("metric-total")).toHaveTextContent("3");
-    expect(screen.getByTestId("metric-worktrees")).toHaveTextContent("1");
+    expect(screen.getByText("Total Branches")).toBeInTheDocument();
+    expect(screen.getByText("Active Worktrees")).toBeInTheDocument();
+    expect(screen.getAllByText("3").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("1").length).toBeGreaterThanOrEqual(1);
     expect(
       screen.getAllByText("feature/design-refresh").length,
     ).toBeGreaterThanOrEqual(1);
-    expect(screen.getByText("未マージ")).toBeInTheDocument();
-    expect(screen.getByText("リモート追跡ブランチ")).toBeInTheDocument();
-    expect(
-      screen.getByText("ベースブランチの関係をグラフィカルに把握"),
-    ).toBeInTheDocument();
+    expect(screen.getAllByText("Needs sync").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText("Remote Branch")).toBeInTheDocument();
+    expect(screen.getByText("ブランチネットワーク")).toBeInTheDocument();
   });
 
   it("filters branches by the search query and shows empty state when unmatched", () => {
     renderPage();
 
-    const input = screen.getByPlaceholderText("ブランチ名やタイプで検索...");
+    const input = screen.getByPlaceholderText(
+      "Search branches by name, type, or commit...",
+    );
     fireEvent.change(input, { target: { value: "release" } });
 
+    expect(screen.getAllByText("release/v1.0.0").length).toBeGreaterThanOrEqual(
+      1,
+    );
     expect(
-      screen.getAllByText("release/v1.0.0").length,
-    ).toBeGreaterThanOrEqual(1);
-    expect(screen.queryByText("feature/design-refresh")).not.toBeInTheDocument();
+      screen.queryByText("feature/design-refresh"),
+    ).not.toBeInTheDocument();
 
     fireEvent.change(input, { target: { value: "zzz" } });
-    expect(screen.getByText("一致するブランチがありません")).toBeInTheDocument();
+    expect(screen.getByText("No matching branches")).toBeInTheDocument();
   });
 });

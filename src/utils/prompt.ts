@@ -95,7 +95,7 @@ async function runReadlinePrompt<T>(
 }
 
 /**
- * Wait for Enter using the same terminal streams as Ink.
+ * Wait for Enter using the same terminal streams as the CLI UI.
  * Falls back to no-op on non-interactive stdin to avoid blocking pipelines.
  */
 export async function waitForEnter(promptMessage: string): Promise<void> {

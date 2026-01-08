@@ -210,7 +210,7 @@ export function BranchDetailPage() {
   // Computed values
   const canStartSession = Boolean(branch.worktreePath);
   const divergenceInfo = branch.divergence ?? null;
-  const hasBlockingDivergence = Boolean(
+  const hasConflictingDivergence = Boolean(
     divergenceInfo && divergenceInfo.ahead > 0 && divergenceInfo.behind > 0,
   );
   const needsRemoteSync = Boolean(
@@ -218,7 +218,7 @@ export function BranchDetailPage() {
     divergenceInfo &&
     divergenceInfo.behind > 0 &&
     divergenceInfo.ahead === 0 &&
-    !hasBlockingDivergence,
+    !hasConflictingDivergence,
   );
   const isSyncingBranch = syncBranch.isPending;
 
@@ -270,14 +270,6 @@ export function BranchDetailPage() {
       return;
     }
 
-    if (hasBlockingDivergence) {
-      setBanner({
-        type: "error",
-        message: "差分を解消してから起動してください。",
-      });
-      return;
-    }
-
     if (
       skipPermissions &&
       !window.confirm("権限チェックをスキップして起動します。続行しますか？")
@@ -293,6 +285,13 @@ export function BranchDetailPage() {
           : selectedTool.target === "custom"
             ? "custom"
             : "claude-code";
+      const resumeSessionId =
+        selectedMode === "normal"
+          ? null
+          : latestToolUsage?.sessionId &&
+              latestToolUsage.toolId === selectedToolId
+            ? latestToolUsage.sessionId
+            : null;
       const extraArgs = extraArgsText
         .split(/\s+/)
         .map((c) => c.trim())
@@ -309,6 +308,7 @@ export function BranchDetailPage() {
         ...(selectedTool.target === "codex"
           ? { bypassApprovals: skipPermissions }
           : {}),
+        ...(resumeSessionId ? { resumeSessionId } : {}),
         ...(extraArgs.length ? { extraArgs } : {}),
       } as const;
 
@@ -478,7 +478,7 @@ export function BranchDetailPage() {
               isStartingSession={isStartingSession}
               isSyncingBranch={isSyncingBranch}
               needsRemoteSync={needsRemoteSync}
-              hasBlockingDivergence={hasBlockingDivergence}
+              hasConflictingDivergence={hasConflictingDivergence}
               onToolChange={setSelectedToolId}
               onModeChange={setSelectedMode}
               onSkipPermissionsChange={setSkipPermissions}

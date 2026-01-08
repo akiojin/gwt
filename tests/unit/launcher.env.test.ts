@@ -1,22 +1,22 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import type { CustomAITool } from "../../src/types/tools.js";
+import { describe, it, expect, mock, beforeEach } from "bun:test";
+import type { CodingAgent } from "../../src/types/tools.js";
 
-const execaMock = vi.fn();
+const execaMock = mock();
 
-vi.mock("execa", () => ({
+mock.module("execa", () => ({
   execa: (...args: unknown[]) => execaMock(...args),
 }));
 
-import { launchCustomAITool } from "../../src/launcher.js";
+import { launchCodingAgent } from "../../src/launcher.js";
 
-describe("launchCustomAITool environment merging", () => {
+describe("launchCodingAgent environment merging", () => {
   beforeEach(() => {
     execaMock.mockReset();
     execaMock.mockResolvedValue({ stdout: "" });
   });
 
   it("merges shared env with tool env", async () => {
-    const tool: CustomAITool = {
+    const tool: CodingAgent = {
       id: "custom",
       displayName: "Custom",
       type: "path",
@@ -25,7 +25,7 @@ describe("launchCustomAITool environment merging", () => {
       env: { TOOL_ONLY: "tool" },
     };
 
-    await launchCustomAITool(tool, {
+    await launchCodingAgent(tool, {
       sharedEnv: { SHARED_TOKEN: "shared" },
     });
 

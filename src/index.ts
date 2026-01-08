@@ -13,30 +13,27 @@ import {
   hasUnpushedCommits,
   getUncommittedChangesCount,
   getUnpushedCommitsCount,
-  GitError,
 } from "./git.js";
 import { launchClaudeCode } from "./claude.js";
-import {
-  launchCodexCLI,
-  CodexError,
-  type CodexReasoningEffort,
-} from "./codex.js";
-import { launchGeminiCLI, GeminiError } from "./gemini.js";
+import { launchCodexCLI, type CodexReasoningEffort } from "./codex.js";
+import { launchGeminiCLI } from "./gemini.js";
 import {
   WorktreeOrchestrator,
   type EnsureWorktreeOptions,
 } from "./services/WorktreeOrchestrator.js";
 import chalk from "chalk";
-import type { SelectionResult } from "./cli/ui/components/App.js";
+import type { SelectionResult } from "./cli/ui/App.solid.js";
 import {
   isProtectedBranchName,
   switchToProtectedBranch,
-  WorktreeError,
   resolveWorktreePathForBranch,
+  repairWorktreePath,
 } from "./worktree.js";
 import {
   getTerminalStreams,
+  resetTerminalModes,
   waitForUserAcknowledgement,
+  writeTerminalLine,
 } from "./utils/terminal.js";
 import { createLogger } from "./logging/logger.js";
 import { getCodingAgentById, getSharedEnvironment } from "./config/tools.js";
@@ -47,7 +44,12 @@ import {
   findLatestClaudeSession,
   findLatestGeminiSession,
 } from "./utils/session.js";
-import { getPackageVersion } from "./utils.js";
+import {
+  getPackageVersion,
+  setupExitHandlers,
+  registerExitCleanup,
+  clearExitCleanup,
+} from "./utils.js";
 import { findLatestClaudeSessionId } from "./utils/session.js";
 import { resolveContinueSessionId } from "./cli/ui/utils/continueSession.js";
 import { normalizeModelId } from "./cli/ui/utils/modelOptions.js";
@@ -56,12 +58,13 @@ import {
   DependencyInstallError,
   type DependencyInstallResult,
 } from "./services/dependency-installer.js";
-import { waitForEnter } from "./utils/prompt.js";
+import { isGitRelatedError, isRecoverableError } from "./utils/error-utils.js";
 
 const ERROR_PROMPT = chalk.yellow(
   "Review the error details, then press Enter to continue.",
 );
-const POST_SESSION_DELAY_MS = 3000;
+const SUCCESS_PROMPT = chalk.green("Press Enter to return to main menu...");
+const POST_SESSION_DELAY_MS = 500;
 
 // Category: cli
 const appLogger = createLogger({ category: "cli" });
@@ -74,87 +77,23 @@ async function waitForErrorAcknowledgement(): Promise<void> {
  * Simple print functions (replacing legacy UI display functions)
  */
 function printError(message: string): void {
-  console.error(chalk.red(`❌ ${message}`));
+  writeTerminalLine(chalk.red(`❌ ${message}`), "stderr");
   appLogger.error({ message });
 }
 
 function printInfo(message: string): void {
-  console.log(chalk.blue(`ℹ️  ${message}`));
+  writeTerminalLine(chalk.blue(`ℹ️  ${message}`));
   appLogger.info({ message });
 }
 
 function printWarning(message: string): void {
-  console.warn(chalk.yellow(`⚠️  ${message}`));
+  writeTerminalLine(chalk.yellow(`⚠️  ${message}`), "stderr");
   appLogger.warn({ message });
 }
 
 type GitStepResult<T> = { ok: true; value: T } | { ok: false };
 
-function isGitRelatedError(error: unknown): boolean {
-  if (!error) {
-    return false;
-  }
-
-  if (error instanceof GitError || error instanceof WorktreeError) {
-    return true;
-  }
-
-  if (error instanceof Error) {
-    return error.name === "GitError" || error.name === "WorktreeError";
-  }
-
-  if (
-    typeof error === "object" &&
-    "name" in (error as Record<string, unknown>)
-  ) {
-    const name = (error as { name?: string }).name;
-    return name === "GitError" || name === "WorktreeError";
-  }
-
-  return false;
-}
-
-function isRecoverableError(error: unknown): boolean {
-  if (!error) {
-    return false;
-  }
-
-  if (
-    error instanceof GitError ||
-    error instanceof WorktreeError ||
-    error instanceof CodexError ||
-    error instanceof GeminiError ||
-    error instanceof DependencyInstallError
-  ) {
-    return true;
-  }
-
-  if (error instanceof Error) {
-    return (
-      error.name === "GitError" ||
-      error.name === "WorktreeError" ||
-      error.name === "CodexError" ||
-      error.name === "GeminiError" ||
-      error.name === "DependencyInstallError"
-    );
-  }
-
-  if (
-    typeof error === "object" &&
-    "name" in (error as Record<string, unknown>)
-  ) {
-    const name = (error as { name?: string }).name;
-    return (
-      name === "GitError" ||
-      name === "WorktreeError" ||
-      name === "CodexError" ||
-      name === "GeminiError" ||
-      name === "DependencyInstallError"
-    );
-  }
-
-  return false;
-}
+// Note: isGitRelatedError and isRecoverableError are now imported from ./utils/error-utils.js
 
 async function runGitStep<T>(
   description: string,
@@ -240,49 +179,71 @@ async function showVersion(): Promise<void> {
 }
 
 /**
- * Main function for Ink.js UI
+ * Performs terminal cleanup when exiting.
+ */
+function performTerminalCleanup(): void {
+  const terminal = getTerminalStreams();
+  terminal.exitRawMode();
+  resetTerminalModes(terminal.stdout);
+}
+
+/**
+ * Main function for OpenTUI UI
  * Returns SelectionResult if user made selections, undefined if user quit
  */
-async function mainInkUI(): Promise<SelectionResult | undefined> {
-  const { render } = await import("ink");
-  const React = await import("react");
-  const { App } = await import("./cli/ui/components/App.js");
+async function mainSolidUI(): Promise<SelectionResult | undefined> {
+  const { renderSolidApp } = await import("./opentui/index.solid.js");
   const terminal = getTerminalStreams();
 
+  // Register cleanup for signal handlers
+  registerExitCleanup(performTerminalCleanup);
   let selectionResult: SelectionResult | undefined;
+  // マウスキャプチャを有効にしてSelection APIで選択終了時にクリップボードへコピー
+  const useMouse = true;
+  const enableMouseMovement = false;
+  const altScreenPreference =
+    process.env.GWT_UI_ALT_SCREEN?.trim().toLowerCase();
+  // Ink.js版ではalternate screenを使用していなかったため、デフォルトをfalseに
+  // alternate screenを使用するとコーディングエージェント起動/終了ログが見えなくなる
+  const useAlternateScreen =
+    altScreenPreference === "true" || altScreenPreference === "1";
 
-  // Resume stdin to ensure it's ready for Ink.js
   if (typeof terminal.stdin.resume === "function") {
     terminal.stdin.resume();
   }
+  if (typeof terminal.stdin.setRawMode === "function") {
+    try {
+      terminal.stdin.setRawMode(true);
+    } catch {
+      // Ignore raw mode errors and let OpenTUI handle setup.
+    }
+  }
 
-  const { unmount, waitUntilExit } = render(
-    React.createElement(App, {
-      onExit: (result?: SelectionResult) => {
-        selectionResult = result;
-      },
-    }),
-    {
-      stdin: terminal.stdin,
-      stdout: terminal.stdout,
-      stderr: terminal.stderr,
-      patchConsole: false,
-    },
-  );
-
-  // Wait for user to exit
   try {
-    await waitUntilExit();
+    await renderSolidApp(
+      {
+        onExit: (result?: SelectionResult) => {
+          selectionResult = result;
+        },
+      },
+      {
+        stdin: terminal.stdin,
+        stdout: terminal.stdout,
+        exitOnCtrlC: true,
+        useAlternateScreen,
+        useMouse,
+        enableMouseMovement,
+      },
+    );
   } finally {
-    terminal.exitRawMode();
+    performTerminalCleanup();
     if (typeof terminal.stdin.pause === "function") {
       terminal.stdin.pause();
     }
-    // Inkが残した data リスナーが子プロセス入力を奪わないようクリーンアップ
     terminal.stdin.removeAllListeners?.("data");
     terminal.stdin.removeAllListeners?.("keypress");
     terminal.stdin.removeAllListeners?.("readable");
-    unmount();
+    clearExitCleanup();
   }
 
   return selectionResult;
@@ -299,12 +260,15 @@ export async function handleAIToolWorkflow(
     displayName,
     branchType,
     remoteBranch,
+    baseBranch,
+    isNewBranch,
     tool,
     mode,
     skipPermissions,
     model,
     inferenceLevel,
     sessionId: selectedSessionId,
+    toolVersion,
   } = selectionResult;
 
   const branchLabel = displayName ?? branch;
@@ -330,7 +294,14 @@ export async function handleAIToolWorkflow(
     // Determine ensure options (local vs remote branch)
     const ensureOptions: EnsureWorktreeOptions = {};
 
-    if (branchType === "remote") {
+    if (isNewBranch) {
+      ensureOptions.isNewBranch = true;
+      if (baseBranch) {
+        ensureOptions.baseBranch = baseBranch;
+      }
+    }
+
+    if (branchType === "remote" && !isNewBranch) {
       const remoteRef = remoteBranch ?? branch;
       const localExists = await branchExists(branch);
 
@@ -338,15 +309,37 @@ export async function handleAIToolWorkflow(
       ensureOptions.isNewBranch = !localExists;
     }
 
-    const existingWorktreeResolution =
-      await resolveWorktreePathForBranch(branch);
-    const existingWorktree = existingWorktreeResolution.path;
+    let existingWorktreeResolution = await resolveWorktreePathForBranch(branch);
+    let existingWorktree = existingWorktreeResolution.path;
+
+    // mismatch検出時に自動修復を試みる (FR-009〜FR-013)
     if (!existingWorktree && existingWorktreeResolution.mismatch) {
       const actualBranch =
         existingWorktreeResolution.mismatch.actualBranch ?? "unknown";
       printWarning(
-        `Worktree mismatch detected: ${existingWorktreeResolution.mismatch.path} is checked out to '${actualBranch}'. Creating or reusing the correct worktree for '${branch}'.`,
+        `Worktree mismatch detected: ${existingWorktreeResolution.mismatch.path} is checked out to '${actualBranch}'. Attempting to repair...`,
       );
+
+      // 共通修復関数を使用してパス修復を試みる
+      const repairResult = await repairWorktreePath(
+        branch,
+        existingWorktreeResolution.mismatch.path,
+        repoRoot,
+      );
+
+      if (repairResult.repaired) {
+        // FR-012: 修復成功時のメッセージ
+        printInfo(`Worktree path repaired: ${repairResult.newPath}`);
+
+        // 修復後に再度解決を試みる
+        existingWorktreeResolution = await resolveWorktreePathForBranch(branch);
+        existingWorktree = existingWorktreeResolution.path;
+      } else if (repairResult.removed) {
+        // FR-013: メタデータ削除成功時のメッセージ
+        printInfo(`Stale worktree metadata removed. Creating new worktree...`);
+      } else {
+        printWarning(`Failed to repair worktree for '${branch}'.`);
+      }
     }
 
     const isProtectedBranch =
@@ -496,16 +489,21 @@ export async function handleAIToolWorkflow(
       divergenceBranches.add(sanitizedRemoteBranch);
     }
 
-    const divergenceResult = await runGitStep("check branch divergence", () =>
-      getBranchDivergenceStatuses({
+    let divergenceStatuses: Awaited<
+      ReturnType<typeof getBranchDivergenceStatuses>
+    > = [];
+    try {
+      divergenceStatuses = await getBranchDivergenceStatuses({
         cwd: repoRoot,
         branches: Array.from(divergenceBranches),
-      }),
-    );
-    if (!divergenceResult.ok) {
-      return;
+      });
+    } catch (error) {
+      const details = error instanceof Error ? error.message : String(error);
+      printWarning(
+        `Failed to check branch divergence. Error: ${details}. Continuing without blocking.`,
+      );
+      divergenceStatuses = [];
     }
-    const divergenceStatuses = divergenceResult.value;
     const divergedBranches = divergenceStatuses.filter(
       (status) => status.remoteAhead > 0 && status.localAhead > 0,
     );
@@ -519,24 +517,18 @@ export async function handleAIToolWorkflow(
         ({ branch: divergedBranch, remoteAhead, localAhead }) => {
           const highlight =
             divergedBranch === branch ? " (selected branch)" : "";
-          console.warn(
+          writeTerminalLine(
             chalk.yellow(
               `   • ${divergedBranch}${highlight}  remote:+${remoteAhead}  local:+${localAhead}`,
             ),
+            "stderr",
           );
         },
       );
 
       printWarning(
-        "Resolve these divergences (e.g., rebase or merge) before launching to avoid conflicts.",
+        "Resolve these divergences (e.g., rebase or merge) to avoid conflicts. Continuing without blocking.",
       );
-      await waitForEnter(
-        "Press Enter to return to the main menu and resolve these issues manually.",
-      );
-      printWarning(
-        "AI tool launch has been cancelled until divergences are resolved.",
-      );
-      return;
     } else if (fastForwardError) {
       printWarning(
         `Fast-forward pull could not complete (${fastForwardError.message}). Continuing without blocking.`,
@@ -635,6 +627,7 @@ export async function handleAIToolWorkflow(
           model?: string;
           sessionId?: string | null;
           chrome?: boolean;
+          version?: string | null;
         } = {
           mode:
             mode === "resume"
@@ -646,6 +639,7 @@ export async function handleAIToolWorkflow(
           envOverrides: sharedEnv,
           sessionId: resumeSessionId,
           chrome: true,
+          version: toolVersion ?? null,
         };
         if (normalizedModel) {
           launchOptions.model = normalizedModel;
@@ -659,6 +653,7 @@ export async function handleAIToolWorkflow(
           model?: string;
           reasoningEffort?: CodexReasoningEffort;
           sessionId?: string | null;
+          version?: string | null;
         } = {
           mode:
             mode === "resume"
@@ -669,6 +664,7 @@ export async function handleAIToolWorkflow(
           bypassApprovals: skipPermissions,
           envOverrides: sharedEnv,
           sessionId: resumeSessionId,
+          version: toolVersion ?? null,
         };
         if (normalizedModel) {
           launchOptions.model = normalizedModel;
@@ -685,6 +681,7 @@ export async function handleAIToolWorkflow(
           envOverrides?: Record<string, string>;
           model?: string;
           sessionId?: string | null;
+          version?: string | null;
         } = {
           mode:
             mode === "resume"
@@ -695,25 +692,34 @@ export async function handleAIToolWorkflow(
           skipPermissions,
           envOverrides: sharedEnv,
           sessionId: resumeSessionId,
+          version: toolVersion ?? null,
         };
         if (normalizedModel) {
           launchOptions.model = normalizedModel;
         }
         launchResult = await launchGeminiCLI(worktreePath, launchOptions);
       } else {
-        // Custom coding agent
+        // Custom coding agent (including OpenCode)
         printInfo(`Launching custom agent: ${agentConfig.displayName}`);
-        launchResult = await launchCodingAgent(agentConfig, {
-          mode:
-            mode === "resume"
-              ? "resume"
-              : mode === "continue"
-                ? "continue"
-                : "normal",
-          skipPermissions,
-          cwd: worktreePath,
-          sharedEnv,
-        });
+        const customLaunchOptions: import("./types/tools.js").CodingAgentLaunchOptions =
+          {
+            mode:
+              mode === "resume"
+                ? "resume"
+                : mode === "continue"
+                  ? "continue"
+                  : "normal",
+            skipPermissions,
+            cwd: worktreePath,
+            sharedEnv,
+          };
+        if (toolVersion) {
+          customLaunchOptions.version = toolVersion;
+        }
+        launchResult = await launchCodingAgent(
+          agentConfig,
+          customLaunchOptions,
+        );
       }
     } finally {
       // FR-043: Clear the periodic timestamp update timer
@@ -833,7 +839,8 @@ export async function handleAIToolWorkflow(
 
     // Small buffer before returning to branch list to avoid abrupt screen swap
     await new Promise((resolve) => setTimeout(resolve, POST_SESSION_DELAY_MS));
-    printInfo("Session completed successfully. Returning to main menu...");
+    printInfo("Session completed successfully.");
+    await waitForUserAcknowledgement(SUCCESS_PROMPT);
     return;
   } catch (error) {
     // Handle recoverable errors (Git, Worktree, Codex errors)
@@ -851,6 +858,10 @@ export async function handleAIToolWorkflow(
 type UIHandler = () => Promise<SelectionResult | undefined>;
 type WorkflowHandler = (selection: SelectionResult) => Promise<void>;
 
+function resolveUIHandler(): UIHandler {
+  return mainSolidUI;
+}
+
 function logLoopError(error: unknown, context: "ui" | "workflow"): void {
   const label = context === "ui" ? "UI" : "workflow";
   if (error instanceof Error) {
@@ -861,10 +872,10 @@ function logLoopError(error: unknown, context: "ui" | "workflow"): void {
 }
 
 export async function runInteractiveLoop(
-  uiHandler: UIHandler = mainInkUI,
+  uiHandler: UIHandler = resolveUIHandler(),
   workflowHandler: WorkflowHandler = handleAIToolWorkflow,
 ): Promise<void> {
-  // Main loop: UI → AI Tool → back to UI
+  // Main loop: UI → Coding Agent → back to UI
   while (true) {
     let selectionResult: SelectionResult | undefined;
 
@@ -895,6 +906,9 @@ export async function runInteractiveLoop(
  * Main entry point
  */
 export async function main(): Promise<void> {
+  // Setup global signal handlers for clean exit
+  setupExitHandlers();
+
   // Parse command line arguments
   const args = process.argv.slice(2);
   const showVersionFlag = args.includes("-v") || args.includes("--version");
@@ -939,6 +953,9 @@ export async function main(): Promise<void> {
   }
 
   await runInteractiveLoop();
+
+  // Ensure clean exit with code 0
+  process.exit(0);
 }
 
 export function isEntryPoint(metaUrl: string, argv1?: string): boolean {
@@ -955,7 +972,9 @@ export function isEntryPoint(metaUrl: string, argv1?: string): boolean {
 // Run the application if this module is executed directly
 if (isEntryPoint(import.meta.url, process.argv[1])) {
   main().catch(async (error) => {
-    console.error("Fatal error:", error);
+    const details =
+      error instanceof Error ? (error.stack ?? error.message) : String(error);
+    writeTerminalLine(`Fatal error: ${details}`, "stderr");
     await waitForErrorAcknowledgement();
     process.exit(1);
   });

@@ -112,6 +112,8 @@ export interface LastToolUsage {
   mode?: "normal" | "continue" | "resume" | null;
   model?: string | null;
   timestamp: number; // epoch millis
+  sessionId?: string | null;
+  toolVersion?: string | null;
 }
 
 /**
@@ -177,6 +179,7 @@ export interface StartSessionRequest {
   bypassApprovals?: boolean;
   extraArgs?: string[];
   customAgentId?: string | null;
+  resumeSessionId?: string | null;
 }
 
 export type UpdateConfigRequest = ConfigPayload;

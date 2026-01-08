@@ -1,12 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { SelectionResult } from "../../src/cli/ui/components/App.js";
-import type { ExecutionMode } from "../../src/cli/ui/components/screens/ExecutionModeSelectorScreen.js";
-
-// Vitest shim for environments lacking vi.hoisted (e.g., bun)
-if (typeof (vi as Record<string, unknown>).hoisted !== "function") {
-  // @ts-expect-error injected shim
-  vi.hoisted = (factory: () => unknown) => factory();
-}
+import { beforeEach, describe, expect, it, mock } from "bun:test";
+import type { SelectionResult } from "../../src/cli/ui/App.solid.js";
+import type { ExecutionMode } from "../../src/cli/ui/App.solid.js";
 
 const {
   ensureWorktreeMock,
@@ -15,7 +9,7 @@ const {
   getBranchDivergenceStatusesMock,
   worktreeExistsMock,
   getRepositoryRootMock,
-  getToolByIdMock,
+  getCodingAgentByIdMock,
   getSharedEnvironmentMock,
   installDependenciesMock,
   launchCodexCLIMock,
@@ -27,23 +21,29 @@ const {
   getUncommittedChangesCountMock,
   getUnpushedCommitsCountMock,
   pushBranchToRemoteMock,
-} = vi.hoisted(() => ({
-  ensureWorktreeMock: vi.fn(async () => "/repo/worktrees/feature/resume"),
-  fetchAllRemotesMock: vi.fn(async () => undefined),
-  pullFastForwardMock: vi.fn(async () => undefined),
-  getBranchDivergenceStatusesMock: vi.fn(async () => []),
-  worktreeExistsMock: vi.fn(async () => null),
-  getRepositoryRootMock: vi.fn(async () => "/repo"),
-  getToolByIdMock: vi.fn(() => ({ id: "codex-cli", displayName: "Codex" })),
-  getSharedEnvironmentMock: vi.fn(async () => ({})),
-  installDependenciesMock: vi.fn(async () => ({
+} = {
+  ensureWorktreeMock: mock(async () => "/repo/worktrees/feature/resume"),
+  fetchAllRemotesMock: mock(async () => undefined),
+  pullFastForwardMock: mock(async () => undefined),
+  getBranchDivergenceStatusesMock: mock(async () => []),
+  worktreeExistsMock: mock(async () => null),
+  getRepositoryRootMock: mock(async () => "/repo"),
+  getCodingAgentByIdMock: mock(async () => ({
+    id: "codex-cli",
+    displayName: "Codex",
+    type: "command",
+    command: "codex",
+    modeArgs: { normal: [] },
+  })),
+  getSharedEnvironmentMock: mock(async () => ({})),
+  installDependenciesMock: mock(async () => ({
     skipped: false as const,
     manager: "bun" as const,
     lockfile: "/repo/bun.lock",
   })),
-  launchCodexCLIMock: vi.fn(async () => ({ sessionId: null })),
-  saveSessionMock: vi.fn(async () => undefined),
-  loadSessionMock: vi.fn(async () => ({
+  launchCodexCLIMock: mock(async () => ({ sessionId: null })),
+  saveSessionMock: mock(async () => undefined),
+  loadSessionMock: mock(async () => ({
     lastWorktreePath: "/repo/worktrees/feature/resume",
     lastBranch: "feature/resume",
     lastUsedTool: "codex-cli",
@@ -70,31 +70,26 @@ const {
       },
     ],
   })),
-  findLatestCodexSessionMock: vi.fn(async () => null),
-  hasUncommittedChangesMock: vi.fn(async () => false),
-  hasUnpushedCommitsMock: vi.fn(async () => false),
-  getUncommittedChangesCountMock: vi.fn(async () => 0),
-  getUnpushedCommitsCountMock: vi.fn(async () => 0),
-  pushBranchToRemoteMock: vi.fn(async () => undefined),
-}));
+  findLatestCodexSessionMock: mock(async () => null),
+  hasUncommittedChangesMock: mock(async () => false),
+  hasUnpushedCommitsMock: mock(async () => false),
+  getUncommittedChangesCountMock: mock(async () => 0),
+  getUnpushedCommitsCountMock: mock(async () => 0),
+  pushBranchToRemoteMock: mock(async () => undefined),
+};
 
-const waitForUserAcknowledgementMock = vi.hoisted(() =>
-  vi.fn<() => Promise<void>>(),
-);
+const waitForUserAcknowledgementMock = mock<() => Promise<void>>();
+const confirmYesNoMock = mock<() => Promise<boolean>>();
 
-const confirmYesNoMock = vi.hoisted(() => vi.fn<() => Promise<boolean>>());
-vi.mock("../../src/git.js", async () => {
-  const actual =
-    await vi.importActual<typeof import("../../src/git.js")>(
-      "../../src/git.js",
-    );
+mock.module("../../src/git.js", async () => {
+  const actual = await import("../../src/git.js");
   return {
     ...actual,
     getRepositoryRoot: getRepositoryRootMock,
     fetchAllRemotes: fetchAllRemotesMock,
     pullFastForward: pullFastForwardMock,
     getBranchDivergenceStatuses: getBranchDivergenceStatusesMock,
-    branchExists: vi.fn(async () => true),
+    branchExists: mock(async () => true),
     hasUncommittedChanges: hasUncommittedChangesMock,
     hasUnpushedCommits: hasUnpushedCommitsMock,
     getUncommittedChangesCount: getUncommittedChangesCountMock,
@@ -103,53 +98,49 @@ vi.mock("../../src/git.js", async () => {
   };
 });
 
-vi.mock("../../src/worktree.js", async () => {
-  const actual = await vi.importActual<typeof import("../../src/worktree.js")>(
-    "../../src/worktree.js",
-  );
+mock.module("../../src/worktree.js", async () => {
+  const actual = await import("../../src/worktree.js");
   return {
     ...actual,
     worktreeExists: worktreeExistsMock,
-    resolveWorktreePathForBranch: vi.fn(async (branch: string) => ({
+    resolveWorktreePathForBranch: mock(async (branch: string) => ({
       path: await worktreeExistsMock(branch),
     })),
-    isProtectedBranchName: vi.fn(() => false),
-    switchToProtectedBranch: vi.fn(async () => "none" as const),
+    isProtectedBranchName: mock(() => false),
+    switchToProtectedBranch: mock(async () => "none" as const),
   };
 });
 
-vi.mock("../../src/services/WorktreeOrchestrator.js", () => ({
+mock.module("../../src/services/WorktreeOrchestrator.js", () => ({
   WorktreeOrchestrator: class {
     ensureWorktree = ensureWorktreeMock;
   },
 }));
 
-const DependencyInstallErrorMock = vi.hoisted(
-  () =>
-    class DependencyInstallError extends Error {
-      constructor(message?: string) {
-        super(message);
-        this.name = "DependencyInstallError";
-      }
-    },
-);
+const DependencyInstallErrorMock = () =>
+  class DependencyInstallError extends Error {
+    constructor(message?: string) {
+      super(message);
+      this.name = "DependencyInstallError";
+    }
+  };
 
-vi.mock("../../src/services/dependency-installer.js", () => ({
+mock.module("../../src/services/dependency-installer.js", () => ({
   installDependenciesForWorktree: installDependenciesMock,
   DependencyInstallError: DependencyInstallErrorMock,
 }));
 
-vi.mock("../../src/config/tools.js", () => ({
-  getToolById: getToolByIdMock,
+mock.module("../../src/config/tools.js", () => ({
+  getCodingAgentById: getCodingAgentByIdMock,
   getSharedEnvironment: getSharedEnvironmentMock,
 }));
 
-vi.mock("../../src/config/index.js", () => ({
+mock.module("../../src/config/index.js", () => ({
   saveSession: saveSessionMock,
   loadSession: loadSessionMock,
 }));
 
-vi.mock("../../src/codex.js", () => ({
+mock.module("../../src/codex.js", () => ({
   launchCodexCLI: launchCodexCLIMock,
   CodexError: class CodexError extends Error {
     constructor(
@@ -162,32 +153,29 @@ vi.mock("../../src/codex.js", () => ({
   },
 }));
 
-vi.mock("../../src/utils/session.js", () => ({
+mock.module("../../src/utils/session.js", () => ({
   findLatestCodexSession: findLatestCodexSessionMock,
-  findLatestClaudeSession: vi.fn(async () => null),
-  findLatestGeminiSession: vi.fn(async () => null),
-  findLatestClaudeSessionId: vi.fn(async () => null),
+  findLatestClaudeSession: mock(async () => null),
+  findLatestGeminiSession: mock(async () => null),
+  findLatestClaudeSessionId: mock(async () => null),
 }));
 
-vi.mock("../../src/utils/terminal.js", async () => {
-  const actual = await vi.importActual<
-    typeof import("../../src/utils/terminal.js")
-  >("../../src/utils/terminal.js");
+mock.module("../../src/utils/terminal.js", async () => {
+  const actual = await import("../../src/utils/terminal.js");
   return {
     ...actual,
     waitForUserAcknowledgement: waitForUserAcknowledgementMock,
   };
 });
 
-vi.mock("../../src/utils/prompt.js", async () => {
-  const actual = await vi.importActual<
-    typeof import("../../src/utils/prompt.js")
-  >("../../src/utils/prompt.js");
+mock.module("../../src/utils/prompt.js", async () => {
+  const actual = await import("../../src/utils/prompt.js");
   return {
     ...actual,
     confirmYesNo: confirmYesNoMock,
   };
 });
+
 // Import after mocks are set up
 import { handleAIToolWorkflow } from "../../src/index.js";
 
@@ -198,7 +186,7 @@ beforeEach(() => {
   getBranchDivergenceStatusesMock.mockClear();
   worktreeExistsMock.mockClear();
   getRepositoryRootMock.mockClear();
-  getToolByIdMock.mockClear();
+  getCodingAgentByIdMock.mockClear();
   getSharedEnvironmentMock.mockClear();
   installDependenciesMock.mockClear();
   launchCodexCLIMock.mockClear();
@@ -238,11 +226,9 @@ describe("handleAIToolWorkflow - Resume delegation", () => {
       sessionId: null,
     };
 
-    vi.useFakeTimers();
     const run = handleAIToolWorkflow(selection);
-    await vi.advanceTimersByTimeAsync(3000);
+    await new Promise((r) => setTimeout(r, 3000));
     await run;
-    vi.useRealTimers();
 
     expect(loadSessionMock).not.toHaveBeenCalled();
     expect(launchCodexCLIMock).toHaveBeenCalledWith(
@@ -261,11 +247,9 @@ describe("handleAIToolWorkflow - Resume delegation", () => {
       sessionId: null,
     };
 
-    vi.useFakeTimers();
     const run = handleAIToolWorkflow(selection);
-    await vi.advanceTimersByTimeAsync(3000);
+    await new Promise((r) => setTimeout(r, 3000));
     await run;
-    vi.useRealTimers();
 
     expect(loadSessionMock).toHaveBeenCalledTimes(1);
     expect(launchCodexCLIMock).toHaveBeenCalledWith(

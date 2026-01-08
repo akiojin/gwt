@@ -1,20 +1,17 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import type { SelectionResult } from "../../src/cli/ui/components/App.js";
-
-type ViWithDoMock = typeof vi & { doMock?: typeof vi.mock };
-const viWithDoMock = vi as unknown as ViWithDoMock;
-if (!viWithDoMock.doMock) {
-  viWithDoMock.doMock = vi.mock.bind(vi);
+import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
+import type { SelectionResult } from "../../src/cli/ui/App.solid.js";
+if (!mock.module) {
+  mock.module = mock.module.bind(vi);
 }
 
 describe("main error handling", () => {
   beforeEach(() => {
-    vi.resetModules();
+    // resetModules not needed in bun;
   });
 
   afterEach(() => {
-    vi.clearAllMocks();
-    vi.restoreAllMocks();
+    mock.restore();
+    mock.restore();
   });
 
   it("AIツールの起動失敗時でもCLIが継続する", async () => {
@@ -31,136 +28,111 @@ describe("main error handling", () => {
       undefined,
     ];
 
-    const waitForUserAcknowledgement = vi.fn(async () => {});
+    const waitForUserAcknowledgement = mock(async () => {});
     const stdinMock = {
       isTTY: true,
-      resume: vi.fn(),
-      pause: vi.fn(),
-      on: vi.fn(),
-      removeAllListeners: vi.fn(),
-      setRawMode: vi.fn(),
+      resume: mock(),
+      pause: mock(),
+      on: mock(),
+      removeAllListeners: mock(),
+      setRawMode: mock(),
     } as unknown as NodeJS.ReadStream;
     const stdoutMock = {
-      write: vi.fn(),
+      write: mock(),
     } as unknown as NodeJS.WriteStream;
     const stderrMock = {
-      write: vi.fn(),
+      write: mock(),
     } as unknown as NodeJS.WriteStream;
 
-    viWithDoMock.doMock?.("../../src/utils/terminal.js", () => {
+    mock.module?.("../../src/utils/terminal.js", () => {
       return {
-        getTerminalStreams: vi.fn(() => ({
+        getTerminalStreams: mock(() => ({
           stdin: stdinMock,
           stdout: stdoutMock,
           stderr: stderrMock,
           usingFallback: false,
-          exitRawMode: vi.fn(),
+          exitRawMode: mock(),
         })),
+        resetTerminalModes: mock(),
         waitForUserAcknowledgement,
-        createChildStdio: vi.fn(() => ({
+        createChildStdio: mock(() => ({
           stdin: "inherit" as const,
           stdout: "inherit" as const,
           stderr: "inherit" as const,
-          cleanup: vi.fn(),
+          cleanup: mock(),
         })),
       };
     });
 
-    const renderSpy = vi.fn(
-      (
-        element:
-          | {
-              props?: {
-                onExit?: (value?: SelectionResult | undefined) => void;
-              };
-            }
-          | undefined,
-      ) => {
+    const renderSpy = mock(
+      async (props: {
+        onExit?: (value?: SelectionResult | undefined) => void;
+      }) => {
         const next = selectionQueue.shift();
-        element?.props?.onExit?.(next);
-        return {
-          unmount: vi.fn(),
-          waitUntilExit: () => Promise.resolve(),
-        };
+        props.onExit?.(next);
       },
     );
 
-    viWithDoMock.doMock?.("ink", () => ({
-      render: renderSpy,
+    mock.module?.("../../src/opentui/index.solid.js", () => ({
+      renderSolidApp: renderSpy,
     }));
 
-    viWithDoMock.doMock?.("react", () => {
-      const createElement = <P>(type: unknown, props: P) => ({ type, props });
-      const memo = <P>(component: P) => component;
-      return {
-        default: { createElement, memo },
-        createElement,
-        memo,
-        Component: class Component {},
-      };
-    });
-
-    viWithDoMock.doMock?.("../../src/cli/ui/components/App.js", () => ({
-      App: (props: unknown) => props,
+    mock.module?.("../../src/git.js", () => ({
+      isGitRepository: mock(async () => true),
+      getRepositoryRoot: mock(async () => "/repo"),
+      branchExists: mock(async () => false),
+      getCurrentBranch: mock(async () => "main"),
     }));
 
-    viWithDoMock.doMock?.("../../src/git.js", () => ({
-      isGitRepository: vi.fn(async () => true),
-      getRepositoryRoot: vi.fn(async () => "/repo"),
-      branchExists: vi.fn(async () => false),
-      getCurrentBranch: vi.fn(async () => "main"),
-    }));
-
-    viWithDoMock.doMock?.("../../src/worktree.js", async () => {
-      const actual = await vi.importActual<
-        typeof import("../../src/worktree.js")
-      >("../../src/worktree.js");
+    mock.module?.("../../src/worktree.js", async () => {
+      const actual = await import("../../src/worktree.js");
       return {
         ...actual,
-        worktreeExists: vi.fn(async () => null),
-        resolveWorktreePathForBranch: vi.fn(async () => ({ path: null })),
-        generateWorktreePath: vi.fn(
+        worktreeExists: mock(async () => null),
+        resolveWorktreePathForBranch: mock(async () => ({ path: null })),
+        generateWorktreePath: mock(
           async (_repo: string, branch: string) => `/worktrees/${branch}`,
         ),
-        createWorktree: vi.fn(async () => {}),
+        createWorktree: mock(async () => {}),
       };
     });
 
-    const ensureWorktreeMock = vi.fn(async () => "/tmp/worktree");
-    viWithDoMock.doMock?.("../../src/services/WorktreeOrchestrator.js", () => ({
+    const ensureWorktreeMock = mock(async () => "/tmp/worktree");
+    mock.module?.("../../src/services/WorktreeOrchestrator.js", () => ({
       WorktreeOrchestrator: class {
         ensureWorktree = ensureWorktreeMock;
       },
     }));
 
-    viWithDoMock.doMock?.("../../src/config/tools.js", () => ({
+    mock.module?.("../../src/config/tools.js", () => ({
       CONFIG_DIR: "/tmp/gwt-test",
-      getToolById: vi.fn(async () => ({
+      getCodingAgentById: mock(async () => ({
         id: "codex-cli",
         displayName: "Codex CLI",
         type: "command",
         command: "codex",
         modeArgs: { normal: [] },
       })),
+      getSharedEnvironment: mock(async () => ({})),
     }));
 
-    viWithDoMock.doMock?.("../../src/config/index.js", () => ({
-      saveSession: vi.fn(async () => {}),
+    mock.module?.("../../src/config/index.js", () => ({
+      saveSession: mock(async () => {}),
     }));
 
-    viWithDoMock.doMock?.("../../src/claude.js", () => ({
-      launchClaudeCode: vi.fn(async () => {}),
+    mock.module?.("../../src/claude.js", () => ({
+      launchClaudeCode: mock(async () => {}),
     }));
 
     const codexError = new Error("Codex failed");
-    viWithDoMock.doMock?.("../../src/codex.js", () => ({
-      launchCodexCLI: vi.fn(async () => {
+    mock.module?.("../../src/codex.js", () => ({
+      launchCodexCLI: mock(async () => {
         throw codexError;
       }),
     }));
 
-    viWithDoMock.doMock?.("../../src/launcher.js", () => ({
-      launchCustomAITool: vi.fn(async () => {}),
+    mock.module?.("../../src/launcher.js", () => ({
+      launchCodingAgent: mock(async () => {}),
     }));
 
     const processExitSpy = vi

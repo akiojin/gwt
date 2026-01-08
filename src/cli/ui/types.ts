@@ -180,11 +180,11 @@ export interface GitHubPRResponse {
 }
 
 // ========================================
-// Ink.js UI Types (Phase 2+)
+// CLI UI Types
 // ========================================
 
 /**
- * Screen types for Ink.js UI
+ * Screen types for CLI UI
  */
 export type ScreenType =
   | "branch-list"

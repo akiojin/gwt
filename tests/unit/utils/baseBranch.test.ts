@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, mock } from "bun:test";
 import {
   resolveBaseBranchRef,
   resolveBaseBranchLabel,
@@ -20,7 +20,7 @@ const remoteBranch: SelectedBranchState = {
 
 describe("resolveBaseBranchRef", () => {
   it("prefers creation source branch reference when available", () => {
-    const fallback = vi.fn(() => "develop");
+    const fallback = mock(() => "develop");
 
     const result = resolveBaseBranchRef(localBranch, null, fallback);
 
@@ -29,7 +29,7 @@ describe("resolveBaseBranchRef", () => {
   });
 
   it("uses remote reference when creation source branch tracks a remote", () => {
-    const fallback = vi.fn(() => "develop");
+    const fallback = mock(() => "develop");
 
     const result = resolveBaseBranchRef(remoteBranch, null, fallback);
 
@@ -37,7 +37,7 @@ describe("resolveBaseBranchRef", () => {
   });
 
   it("falls back to selected branch when creation source is null", () => {
-    const fallback = vi.fn(() => "develop");
+    const fallback = mock(() => "develop");
 
     const result = resolveBaseBranchRef(null, remoteBranch, fallback);
 
@@ -46,7 +46,7 @@ describe("resolveBaseBranchRef", () => {
   });
 
   it("uses default resolver when no branch information is available", () => {
-    const fallback = vi.fn(() => "develop");
+    const fallback = mock(() => "develop");
 
     const result = resolveBaseBranchRef(null, null, fallback);
 
@@ -57,7 +57,7 @@ describe("resolveBaseBranchRef", () => {
 
 describe("resolveBaseBranchLabel", () => {
   it("prefers creation source label when provided", () => {
-    const fallback = vi.fn(() => "develop");
+    const fallback = mock(() => "develop");
 
     const result = resolveBaseBranchLabel(localBranch, remoteBranch, fallback);
 
@@ -65,7 +65,7 @@ describe("resolveBaseBranchLabel", () => {
   });
 
   it("falls back to selected branch label when creation source is null", () => {
-    const fallback = vi.fn(() => "develop");
+    const fallback = mock(() => "develop");
 
     const result = resolveBaseBranchLabel(null, remoteBranch, fallback);
 
@@ -73,7 +73,7 @@ describe("resolveBaseBranchLabel", () => {
   });
 
   it("falls back to default label when neither branch is available", () => {
-    const fallback = vi.fn(() => "develop");
+    const fallback = mock(() => "develop");
 
     const result = resolveBaseBranchLabel(null, null, fallback);
 

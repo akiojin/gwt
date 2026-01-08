@@ -1,23 +1,21 @@
-/**
- * @vitest-environment node
- */
-import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Mock } from "bun:test";
+import { afterAll, beforeEach, describe, expect, it, mock } from "bun:test";
 
-vi.mock("execa", () => ({
-  execa: vi.fn(),
-  default: { execa: vi.fn() },
+mock.module("execa", () => ({
+  execa: mock(),
+  default: { execa: mock() },
 }));
 
-vi.mock("fs", () => ({
-  existsSync: vi.fn(() => true),
-  default: { existsSync: vi.fn(() => true) },
+mock.module("fs", () => ({
+  existsSync: mock(() => true),
+  default: { existsSync: mock(() => true) },
 }));
 
-const exitRawModeMock = vi.fn();
+const exitRawModeMock = mock();
 const mockTerminalStreams = {
   stdin: { id: "stdin" } as unknown as NodeJS.ReadStream,
-  stdout: { id: "stdout", write: vi.fn() } as unknown as NodeJS.WriteStream,
-  stderr: { id: "stderr", write: vi.fn() } as unknown as NodeJS.WriteStream,
+  stdout: { id: "stdout", write: mock() } as unknown as NodeJS.WriteStream,
+  stderr: { id: "stderr", write: mock() } as unknown as NodeJS.WriteStream,
   stdinFd: undefined as number | undefined,
   stdoutFd: undefined as number | undefined,
   stderrFd: undefined as number | undefined,
@@ -29,21 +27,21 @@ const mockChildStdio = {
   stdin: "inherit" as const,
   stdout: "inherit" as const,
   stderr: "inherit" as const,
-  cleanup: vi.fn(),
+  cleanup: mock(),
 };
 
-vi.mock("../../src/utils/terminal", () => ({
-  getTerminalStreams: vi.fn(() => mockTerminalStreams),
-  createChildStdio: vi.fn(() => mockChildStdio),
-  resetTerminalModes: vi.fn(),
+mock.module("../../src/utils/terminal", () => ({
+  getTerminalStreams: mock(() => mockTerminalStreams),
+  createChildStdio: mock(() => mockChildStdio),
+  resetTerminalModes: mock(),
 }));
 
-vi.mock("../../src/utils/session", () => ({
-  findLatestClaudeSession: vi.fn(),
+mock.module("../../src/utils/session", () => ({
+  findLatestClaudeSession: mock(),
 }));
 
-vi.mock("../../src/utils/command", () => ({
-  findCommand: vi.fn().mockResolvedValue({
+mock.module("../../src/utils/command", () => ({
+  findCommand: mock().mockResolvedValue({
     available: true,
     path: "/usr/local/bin/claude",
     source: "installed",
@@ -55,21 +53,21 @@ const MOCK_CLAUDE_PATH = "/usr/local/bin/claude";
 import { execa } from "execa";
 import { launchClaudeCode } from "../../src/claude";
 
-const mockExeca = execa as unknown as ReturnType<typeof vi.fn>;
+const mockExeca = execa as unknown as Mock;
 
 describe("launchClaudeCode - session id", () => {
   const worktreePath = "/test/path";
 
   beforeEach(() => {
-    vi.clearAllMocks();
+    mock.restore();
     exitRawModeMock.mockClear();
     mockChildStdio.cleanup.mockClear();
     mockExeca.mockResolvedValue({ stdout: "", stderr: "", exitCode: 0 });
   });
 
   afterAll(() => {
-    vi.restoreAllMocks();
-    vi.resetModules();
+    mock.restore();
+    // resetModules not needed in bun;
   });
 
   it("keeps explicit sessionId on continue even when another session is detected", async () => {
@@ -78,7 +76,7 @@ describe("launchClaudeCode - session id", () => {
     const { findLatestClaudeSession } =
       await import("../../src/utils/session.js");
     const findLatestClaudeSessionMock =
-      findLatestClaudeSession as unknown as ReturnType<typeof vi.fn>;
+      findLatestClaudeSession as unknown as Mock;
     findLatestClaudeSessionMock.mockResolvedValueOnce({
       id: detected,
       mtime: Date.now(),
@@ -105,7 +103,7 @@ describe("launchClaudeCode - session id", () => {
     const { findLatestClaudeSession } =
       await import("../../src/utils/session.js");
     const findLatestClaudeSessionMock =
-      findLatestClaudeSession as unknown as ReturnType<typeof vi.fn>;
+      findLatestClaudeSession as unknown as Mock;
     findLatestClaudeSessionMock.mockResolvedValueOnce({
       id: detected,
       mtime: Date.now(),

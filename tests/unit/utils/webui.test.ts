@@ -2,13 +2,23 @@
  * Tests for Web UI utility functions
  * Spec: SPEC-1f56fd80 (FR-006)
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach } from "bun:test";
 import * as net from "node:net";
 import { resolveWebUiPort, isPortInUse } from "../../../src/utils/webui.js";
 
 describe("resolveWebUiPort", () => {
-  it("returns default port 3000 when PORT env is undefined", () => {
-    expect(resolveWebUiPort(undefined)).toBe(3000);
+  it("returns default port 3001 when PORT env is undefined", () => {
+    const originalPort = process.env.PORT;
+    try {
+      delete process.env.PORT;
+      expect(resolveWebUiPort(undefined)).toBe(3001);
+    } finally {
+      if (originalPort === undefined) {
+        delete process.env.PORT;
+      } else {
+        process.env.PORT = originalPort;
+      }
+    }
   });
 
   it("returns parsed port when valid PORT is provided", () => {
@@ -16,9 +26,9 @@ describe("resolveWebUiPort", () => {
   });
 
   it("returns default port when PORT is invalid", () => {
-    expect(resolveWebUiPort("invalid")).toBe(3000);
-    expect(resolveWebUiPort("-1")).toBe(3000);
-    expect(resolveWebUiPort("99999")).toBe(3000);
+    expect(resolveWebUiPort("invalid")).toBe(3001);
+    expect(resolveWebUiPort("-1")).toBe(3001);
+    expect(resolveWebUiPort("99999")).toBe(3001);
   });
 });
 

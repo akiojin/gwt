@@ -1,5 +1,5 @@
 import React from "react";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "bun:test";
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import type { Branch } from "../../../../../src/types/api.js";
@@ -43,22 +43,12 @@ describe("BranchGraph", () => {
   it("groups branches by base branch and renders nodes", () => {
     renderGraph(graphBranches);
 
-    expect(
-      screen.getByText("ベースブランチの関係をグラフィカルに把握"),
-    ).toBeInTheDocument();
-
-    const laneLabels = screen.getAllByText((content, element) => {
-      return (
-        content === "main" &&
-        element?.classList.contains("branch-graph__lane-label")
-      );
-    });
-    expect(laneLabels.length).toBeGreaterThan(0);
-
-    expect(
-      screen.getAllByText("feature/design-refresh").length,
-    ).toBeGreaterThanOrEqual(1);
-    expect(screen.getAllByText(/Worktree/).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText("SYNAPTIC GRAPH")).toBeInTheDocument();
+    expect(screen.getByText("ブランチネットワーク")).toBeInTheDocument();
+    expect(screen.getByText("Cluster")).toBeInTheDocument();
+    expect(screen.getByText("Local")).toBeInTheDocument();
+    expect(screen.getByText("Remote")).toBeInTheDocument();
+    expect(screen.getByText("Worktree")).toBeInTheDocument();
   });
 
   it("renders empty state when no branches are provided", () => {

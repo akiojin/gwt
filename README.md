@@ -10,7 +10,7 @@ Interactive Git worktree manager with Coding Agent selection (Claude Code / Code
 
 ## ✨ Key Features
 
-- 🎯 **Modern React-based UI**: Built with Ink.js for a smooth, responsive terminal interface with real-time updates
+- 🎯 **Modern OpenTUI-based UI**: Built with OpenTUI + SolidJS for a smooth, responsive terminal interface with real-time updates
 - 🖼️ **Full-screen Layout**: Persistent header with statistics, scrollable branch list, and always-visible footer with keyboard shortcuts
 - 🌟 **Smart Branch Creation**: Create feature, bugfix, hotfix, or release branches with guided prompts and automatic base branch selection
 - 🔄 **Advanced Worktree Management**: Complete lifecycle management including creation, cleanup, and path optimization
@@ -183,7 +183,7 @@ The repository includes an automated PR merge workflow that streamlines the deve
 - Create PRs as drafts to prevent auto-merge: `gh pr create --draft`
 - The auto-merge workflow respects this setting and will skip draft PRs
 
-For technical details, see [specs/SPEC-cff08403/](specs/SPEC-cff08403/).
+For technical details, see the `.github/workflows/auto-merge.yml` workflow file.
 
 ## System Requirements
 
@@ -243,7 +243,7 @@ For more details, see the [Spec Kit documentation](https://github.com/akiojin/sp
 @akiojin/gwt/
 ├── src/
 │   ├── cli/
-│   │   └── ui/          # Ink.js React components for terminal UI
+│   │   └── ui/          # OpenTUI + SolidJS components for terminal UI
 │   ├── web/             # Web UI server (Express + React)
 │   ├── services/        # Core business logic
 │   ├── repositories/    # Data access layer
@@ -338,7 +338,7 @@ bun run start
 
 ## Release Process
 
-We ship releases through release-please. End users can simply install the latest published package (via npm or the GitHub Releases tab) and rely on versioned artifacts. Maintainers who need the full workflow should read [docs/release-guide.md](./docs/release-guide.md) (日本語版: [docs/release-guide.ja.md](./docs/release-guide.ja.md)) and the in-depth specs under `specs/SPEC-57fde06f/`.
+We ship releases through release-please. End users can simply install the latest published package (via npm or the GitHub Releases tab) and rely on versioned artifacts. Maintainers who need the full workflow should read [docs/release-guide.md](./docs/release-guide.md) (日本語版: [docs/release-guide.ja.md](./docs/release-guide.ja.md)).
 
 ## Troubleshooting
 

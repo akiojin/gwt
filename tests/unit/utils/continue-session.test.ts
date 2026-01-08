@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, mock } from "bun:test";
 import {
   resolveContinueSessionId,
   findLatestBranchSession,
@@ -71,7 +71,7 @@ describe("resolveContinueSessionId", () => {
       branch,
       toolId,
       repoRoot,
-      lookupLatestSessionId: vi.fn(),
+      lookupLatestSessionId: mock(),
     });
 
     expect(result).toBe("last-1");
@@ -93,6 +93,35 @@ describe("resolveContinueSessionId", () => {
     });
 
     expect(result).toBeNull();
+  });
+
+  it("falls back to tool lookup when no sessionId is stored", async () => {
+    const history: ToolSessionEntry[] = [
+      {
+        branch,
+        toolId,
+        worktreePath: "/wt1",
+        toolLabel: "Codex",
+        timestamp: 1,
+      },
+    ];
+    const sessionData = {
+      lastBranch: branch,
+      lastUsedTool: toolId,
+      lastSessionId: null,
+    } as SessionData;
+    const lookupLatestSessionId = mock(async () => "lookup-1");
+
+    const result = await resolveContinueSessionId({
+      history,
+      sessionData,
+      branch,
+      toolId,
+      repoRoot,
+      lookupLatestSessionId,
+    });
+
+    expect(result).toBe("lookup-1");
   });
 
   it("returns null when branch/tool do not match", async () => {
