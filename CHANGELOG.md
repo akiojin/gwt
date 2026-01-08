@@ -11,6 +11,14 @@
 * tools.json の customTools → customCodingAgents マイグレーション対応 ([#476](https://github.com/akiojin/gwt/issues/476)) ([99f1c7f](https://github.com/akiojin/gwt/commit/99f1c7f3b9263e087de0c3c4cd96de8adccbe229))
 
 
+## [4.11.1](https://github.com/akiojin/gwt/compare/v4.11.0...v4.11.1) (2026-01-08)
+
+
+### Bug Fixes
+
+* saveSessionにtoolVersionを追加して履歴に保存 ([#515](https://github.com/akiojin/gwt/issues/515)) ([c2066f9](https://github.com/akiojin/gwt/commit/c2066f97c2cf37959a4d529260b18cb7b1d4c2fe))
+* クリーンアップ安全表示を候補判定に連動 ([#514](https://github.com/akiojin/gwt/issues/514)) ([389a9e6](https://github.com/akiojin/gwt/commit/389a9e6f39a63db31647fee47ec4184862fbed18))
+
 ## [4.11.0](https://github.com/akiojin/gwt/compare/v4.10.0...v4.11.0) (2026-01-08)
 
 
