@@ -66,3 +66,10 @@
 
 ## Phase 9: 回帰チェック
 - [ ] T160 既存ログ表示の回帰テストを実行（関連テスト + lint/format）
+
+## Phase 10: CLIカラーリング統一
+- [x] T190 [Test] ログ一覧の選択行がシアン背景で全幅表示されることを確認 (`src/cli/ui/__tests__/solid/LogScreen.test.tsx`)
+- [x] T191 [Test] ログ一覧の `LEVEL` 列がレベル配色で表示されることを確認 (`src/cli/ui/__tests__/solid/LogScreen.test.tsx`)
+- [x] T192 共有カラー定義（選択行/ログレベル）を追加 (`src/cli/ui/core/theme.ts`)
+- [x] T193 ログ一覧の選択行/レベル配色を反映 (`src/cli/ui/screens/solid/LogScreen.tsx`)
+- [x] T194 CLI全体の選択行スタイルを統一（Selector/Env/Confirm/SelectInput など） (`src/cli/ui/screens/solid/*.tsx`, `src/cli/ui/components/solid/SelectInput.tsx`)
