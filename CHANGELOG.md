@@ -11,6 +11,13 @@
 * tools.json の customTools → customCodingAgents マイグレーション対応 ([#476](https://github.com/akiojin/gwt/issues/476)) ([99f1c7f](https://github.com/akiojin/gwt/commit/99f1c7f3b9263e087de0c3c4cd96de8adccbe229))
 
 
+## [4.11.6](https://github.com/akiojin/gwt/compare/v4.11.5...v4.11.6) (2026-01-08)
+
+
+### Bug Fixes
+
+* **test:** worktree.test.tsのVitest依存を削除してBun互換に修正 ([#533](https://github.com/akiojin/gwt/issues/533)) ([d4f9998](https://github.com/akiojin/gwt/commit/d4f99983516f1f56596bded6a23176129d030b5b))
+
 ## [4.11.5](https://github.com/akiojin/gwt/compare/v4.11.4...v4.11.5) (2026-01-08)
 
 
