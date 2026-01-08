@@ -35,6 +35,7 @@ export interface ToolSessionEntry {
   model?: string | null;
   reasoningLevel?: string | null;
   skipPermissions?: boolean | null;
+  toolVersion?: string | null;
   timestamp: number;
 }
 

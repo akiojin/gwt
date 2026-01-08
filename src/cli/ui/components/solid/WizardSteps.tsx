@@ -1,12 +1,17 @@
 /** @jsxImportSource @opentui/solid */
 import { TextAttributes } from "@opentui/core";
 import { useKeyboard } from "@opentui/solid";
-import { createEffect, createSignal } from "solid-js";
+import { createEffect, createResource, createSignal } from "solid-js";
 import { SelectInput, type SelectInputItem } from "./SelectInput.js";
 import { TextInput } from "./TextInput.js";
 import { getModelOptions } from "../../utils/modelOptions.js";
 import type { CodingAgentId } from "../../types.js";
 import { useWizardScroll } from "./WizardPopup.js";
+import {
+  fetchPackageVersions,
+  parsePackageCommand,
+} from "../../../../utils/npmRegistry.js";
+import { BUILTIN_CODING_AGENTS } from "../../../../config/builtin-coding-agents.js";
 
 /**
  * WizardSteps - ウィザードの各ステップコンポーネント
@@ -499,6 +504,135 @@ export function SkipPermissionsStep(props: SkipPermissionsStepProps) {
       <SelectInput
         items={SKIP_OPTIONS}
         onSelect={(item) => props.onSelect(item.value === "true")}
+        onChange={handleChange}
+        focused={props.focused ?? true}
+      />
+      <text> </text>
+      <text attributes={TextAttributes.DIM}>[Enter] Select [Esc] Back</text>
+    </box>
+  );
+}
+
+// バージョン選択ステップ
+export interface VersionSelectStepProps extends StepProps {
+  agentId: CodingAgentId;
+  onSelect: (version: string) => void;
+}
+
+// 静的オプション（常に表示）
+const STATIC_VERSION_OPTIONS: SelectInputItem[] = [
+  {
+    label: "installed",
+    value: "installed",
+    description: "Use cached version (bunx default)",
+  },
+  {
+    label: "latest",
+    value: "latest",
+    description: "Always fetch latest version",
+  },
+];
+
+// エージェントIDからパッケージ名を取得
+function getPackageNameForAgent(agentId: string): string | null {
+  const agent = BUILTIN_CODING_AGENTS.find((a) => a.id === agentId);
+  if (!agent || agent.type !== "bunx") {
+    return null;
+  }
+  const { packageName } = parsePackageCommand(agent.command);
+  return packageName;
+}
+
+// バージョン一覧を取得
+async function fetchVersionOptions(
+  agentId: string,
+): Promise<SelectInputItem[]> {
+  const packageName = getPackageNameForAgent(agentId);
+  if (!packageName) {
+    return [];
+  }
+
+  const versions = await fetchPackageVersions(packageName);
+  return versions.map((v) => {
+    const item: SelectInputItem = {
+      label: v.isPrerelease ? `${v.version} (pre)` : v.version,
+      value: v.version,
+    };
+    if (v.publishedAt) {
+      item.description = new Date(v.publishedAt).toLocaleDateString();
+    }
+    return item;
+  });
+}
+
+export function VersionSelectStep(props: VersionSelectStepProps) {
+  const [selectedIndex, setSelectedIndex] = createSignal(0);
+
+  // npmレジストリからバージョン取得
+  const [versionOptions] = createResource(
+    () => props.agentId,
+    fetchVersionOptions,
+  );
+
+  // 全オプション（静的 + 動的）
+  const allOptions = (): SelectInputItem[] => {
+    const dynamic = versionOptions() ?? [];
+    return [...STATIC_VERSION_OPTIONS, ...dynamic];
+  };
+
+  useEdgeScroll({
+    getSelectedIndex: selectedIndex,
+    getItemCount: () => allOptions().length,
+    focused: props.focused,
+  });
+
+  createEffect(() => {
+    const count = allOptions().length;
+    if (count <= 0) {
+      setSelectedIndex(0);
+      return;
+    }
+    const maxIndex = count - 1;
+    if (selectedIndex() > maxIndex) {
+      setSelectedIndex(maxIndex);
+    }
+  });
+
+  const handleChange = (item: SelectInputItem | null) => {
+    if (!item) {
+      setSelectedIndex(0);
+      return;
+    }
+    const nextIndex = allOptions().findIndex(
+      (candidate) => candidate.value === item.value,
+    );
+    if (nextIndex >= 0) {
+      setSelectedIndex(nextIndex);
+    }
+  };
+
+  const statusText = () => {
+    if (versionOptions.loading) {
+      return "Fetching versions...";
+    }
+    if (versionOptions.error) {
+      return "Could not fetch versions";
+    }
+    return null;
+  };
+
+  return (
+    <box flexDirection="column">
+      <text fg="cyan" attributes={TextAttributes.BOLD}>
+        Select version:
+      </text>
+      {statusText() && (
+        <text attributes={TextAttributes.DIM}>{statusText()}</text>
+      )}
+      <text> </text>
+      <SelectInput
+        items={allOptions()}
+        onSelect={(item) => props.onSelect(item.value)}
         onChange={handleChange}
         focused={props.focused ?? true}
       />

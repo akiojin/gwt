@@ -8,6 +8,7 @@
 import { execa } from "execa";
 import type { CodingAgent, CodingAgentLaunchOptions } from "./types/tools.js";
 import { createLogger } from "./logging/logger.js";
+import { resolveVersionSuffix } from "./utils/npmRegistry.js";
 
 const logger = createLogger({ category: "launcher" });
 
@@ -150,9 +151,15 @@ export async function launchCodingAgent(
 
     case "bunx": {
       // bunx経由でパッケージ実行
-      // bunx [package] [args...]
-      await execa("bunx", [agent.command, ...args], execaOptions);
-      logger.info({ agentId: agent.id }, "Coding agent completed (bunx)");
+      // バージョン指定がある場合はパッケージ名に付与
+      const versionSuffix = resolveVersionSuffix(options.version);
+      const packageWithVersion = `${agent.command}${versionSuffix}`;
+      // bunx [package@version] [args...]
+      await execa("bunx", [packageWithVersion, ...args], execaOptions);
+      logger.info(
+        { agentId: agent.id, version: options.version ?? "installed" },
+        "Coding agent completed (bunx)",
+      );
       break;
     }
 
