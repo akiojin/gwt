@@ -346,11 +346,17 @@ export function BranchListScreen(props: BranchListScreenProps) {
     () => props.cleanupUI?.footerMessage?.isSpinning ?? false,
   );
 
+  const safetyPendingActive = createMemo(() => {
+    const pending = props.cleanupUI?.safetyPendingBranches;
+    if (pending) {
+      return pending.size > 0;
+    }
+    return props.cleanupUI?.safetyLoading === true;
+  });
+
   const cleanupSpinnerActive = createMemo(
     () =>
-      hasSpinningIndicator() ||
-      hasSpinningFooter() ||
-      props.cleanupUI?.safetyLoading === true,
+      hasSpinningIndicator() || hasSpinningFooter() || safetyPendingActive(),
   );
 
   createEffect(() => {
