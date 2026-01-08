@@ -37,3 +37,21 @@
 - [P] T001 and T002 can run in parallel
 - [P] T010 and T020 tests can be authored in parallel
 - [P] T030 can start after T011 is complete
+
+## 追加作業ToDo (2026-01-08)
+- [ ] T100〜T160 を順に実施（TDD 優先）
+
+## Phase 6: ブランチ連動ログ
+- [ ] T100 [Test] ログ対象ディレクトリ決定ロジックのテスト追加 (`tests/cli/logviewer.test.ts` など既存構成に合わせる)
+- [ ] T101 ログ対象ディレクトリ決定ロジックの実装 (`src/cli/ui/App.solid.tsx` / `src/logging/reader.ts` など)
+- [ ] T110 [Test] Log Viewer に Branch/Source を表示するテスト追加 (`src/cli/ui/__tests__/solid/LogScreen.test.tsx`)
+- [ ] T111 Log Viewer の Branch/Source 表示実装 (`src/cli/ui/screens/solid/LogScreen.tsx`)
+
+## Phase 7: エージェント stdout/stderr 取り込み
+- [ ] T120 [Research] stdout/stderr 取り込みの方式を確定（PTY/opt-in 方針）
+- [ ] T130 [Test] 取り込みログが JSONL で保存されることを検証 (`tests/logging/agent-output.test.ts` など)
+- [ ] T131 取り込み処理の実装 (`src/launcher.ts` / `src/logging/logger.ts`)
+- [ ] T132 Log Viewer で agent stdout/stderr が表示されることを検証 (`src/cli/ui/__tests__/solid/LogScreen.test.tsx`)
+
+## Phase 8: 回帰チェック
+- [ ] T160 既存ログ表示の回帰テストを実行（関連テスト + lint/format）
