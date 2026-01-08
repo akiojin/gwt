@@ -262,11 +262,8 @@ export async function launchClaudeCode(
     };
 
     // Determine execution strategy based on version selection
+    // FR-063b: "installed" option only appears when local command exists
     const selectedVersion = options.version ?? "installed";
-    const useLocalInstall =
-      selectedVersion === "installed" &&
-      claudeLookup.source === "installed" &&
-      claudeLookup.path;
 
     // Log version information (FR-072)
     if (selectedVersion === "installed") {
@@ -276,8 +273,9 @@ export async function launchClaudeCode(
     }
 
     try {
-      if (useLocalInstall && claudeLookup.path) {
-        // FR-066: Use locally installed command only when "installed" is selected
+      if (selectedVersion === "installed" && claudeLookup.path) {
+        // FR-066: Use locally installed command when "installed" is selected
+        // FR-063b guarantees local command exists when this option is shown
         writeTerminalLine(
           chalk.green("   ✨ Using locally installed claude command"),
         );
@@ -290,59 +288,17 @@ export async function launchClaudeCode(
         });
       } else {
         // FR-067, FR-068: Use bunx with version suffix for latest/specific versions
-        // FR-066a: Also fallback to bunx when "installed" selected but not available
-        const versionSuffix =
-          selectedVersion === "installed" ? "" : `@${selectedVersion}`;
-        const packageWithVersion = `@anthropic-ai/claude-code${versionSuffix}`;
+        const packageWithVersion = `@anthropic-ai/claude-code@${selectedVersion}`;
 
         const useNpx = npxLookup?.source === "installed" && npxLookup?.path;
-        if (selectedVersion === "installed") {
-          // Fallback message only when installed was selected but not available
-          if (useNpx) {
-            writeTerminalLine(
-              chalk.cyan(`   🔄 Falling back to npx ${packageWithVersion}`),
-            );
-          } else {
-            writeTerminalLine(
-              chalk.cyan(`   🔄 Falling back to bunx ${packageWithVersion}`),
-            );
-          }
+        if (useNpx) {
           writeTerminalLine(
-            chalk.yellow(
-              "   💡 Recommended: Install Claude Code via official method for faster startup",
-            ),
+            chalk.cyan(`   🔄 Using npx ${packageWithVersion}`),
           );
-          writeTerminalLine(
-            chalk.yellow("      macOS/Linux: brew install --cask claude-code"),
-          );
-          writeTerminalLine(
-            chalk.yellow(
-              "      or: curl -fsSL https://claude.ai/install.sh | bash",
-            ),
-          );
-          writeTerminalLine(
-            chalk.yellow(
-              "      Windows: irm https://claude.ai/install.ps1 | iex",
-            ),
-          );
-          writeTerminalLine("");
-          const shouldSkipDelay =
-            typeof process !== "undefined" &&
-            (process.env?.NODE_ENV === "test" || Boolean(process.env?.VITEST));
-          if (!shouldSkipDelay) {
-            await new Promise((resolve) => setTimeout(resolve, 2000));
-          }
         } else {
-          // For latest or specific version, just show which package is being used
-          if (useNpx) {
-            writeTerminalLine(
-              chalk.cyan(`   🔄 Using npx ${packageWithVersion}`),
-            );
-          } else {
-            writeTerminalLine(
-              chalk.cyan(`   🔄 Using bunx ${packageWithVersion}`),
-            );
-          }
+          writeTerminalLine(
+            chalk.cyan(`   🔄 Using bunx ${packageWithVersion}`),
+          );
         }
 
         if (useNpx && npxLookup?.path) {

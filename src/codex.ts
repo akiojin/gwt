@@ -203,11 +203,8 @@ export async function launchCodexCLI(
     };
 
     // Determine execution strategy based on version selection
+    // FR-063b: "installed" option only appears when local command exists
     const selectedVersion = options.version ?? "installed";
-    const useLocalInstall =
-      selectedVersion === "installed" &&
-      codexLookup.source === "installed" &&
-      codexLookup.path;
 
     // Log version information (FR-072)
     if (selectedVersion === "installed") {
@@ -217,8 +214,9 @@ export async function launchCodexCLI(
     }
 
     try {
-      if (useLocalInstall && codexLookup.path) {
-        // FR-066: Use locally installed command only when "installed" is selected
+      if (selectedVersion === "installed" && codexLookup.path) {
+        // FR-066: Use locally installed command when "installed" is selected
+        // FR-063b guarantees local command exists when this option is shown
         writeTerminalLine(
           chalk.green("   ✨ Using locally installed codex command"),
         );
@@ -232,35 +230,8 @@ export async function launchCodexCLI(
         await execChild(child);
       } else {
         // FR-067, FR-068: Use bunx with version suffix for latest/specific versions
-        // FR-066a: Also fallback to bunx when "installed" selected but not available
-        const versionSuffix =
-          selectedVersion === "installed" ? "" : `@${selectedVersion}`;
-        const packageWithVersion = `${CODEX_CLI_PACKAGE}${versionSuffix}`;
-
-        if (selectedVersion === "installed") {
-          // Fallback message only when installed was selected but not available
-          writeTerminalLine(
-            chalk.cyan(`   🔄 Falling back to bunx ${packageWithVersion}`),
-          );
-          writeTerminalLine(
-            chalk.yellow(
-              "   💡 Recommended: Install Codex CLI globally for faster startup",
-            ),
-          );
-          writeTerminalLine(chalk.yellow("      npm install -g @openai/codex"));
-          writeTerminalLine("");
-          const shouldSkipDelay =
-            typeof process !== "undefined" &&
-            (process.env?.NODE_ENV === "test" || Boolean(process.env?.VITEST));
-          if (!shouldSkipDelay) {
-            await new Promise((resolve) => setTimeout(resolve, 2000));
-          }
-        } else {
-          // For latest or specific version, just show which package is being used
-          writeTerminalLine(
-            chalk.cyan(`   🔄 Using bunx ${packageWithVersion}`),
-          );
-        }
+        const packageWithVersion = `${CODEX_CLI_PACKAGE}@${selectedVersion}`;
+        writeTerminalLine(chalk.cyan(`   🔄 Using bunx ${packageWithVersion}`));
 
         const child = execa("bunx", [packageWithVersion, ...args], {
           cwd: worktreePath,
