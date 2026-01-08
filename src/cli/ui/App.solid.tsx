@@ -76,9 +76,8 @@ import {
 } from "../../config/index.js";
 import { getAllCodingAgents } from "../../config/tools.js";
 import {
-  buildLogFilePath,
   getTodayLogDate,
-  readLogFileLines,
+  readLogLinesForDate,
   resolveLogDir,
 } from "../../logging/reader.js";
 import { parseLogLines } from "../../logging/formatter.js";
@@ -327,7 +326,7 @@ export function AppSolid(props: AppSolidProps) {
   const [logError, setLogError] = createSignal<string | null>(null);
   const [logSelectedEntry, setLogSelectedEntry] =
     createSignal<FormattedLogEntry | null>(null);
-  const [logSelectedDate, _setLogSelectedDate] = createSignal<string | null>(
+  const [logSelectedDate, setLogSelectedDate] = createSignal<string | null>(
     getTodayLogDate(),
   );
   const [logNotification, setLogNotification] = createSignal<{
@@ -530,9 +529,14 @@ export function AppSolid(props: AppSolidProps) {
     setLogLoading(true);
     setLogError(null);
     try {
-      const filePath = buildLogFilePath(logDir(), targetDate);
-      const lines = await readLogFileLines(filePath);
-      const parsed = parseLogLines(lines, { limit: 100 });
+      const result = await readLogLinesForDate(logDir(), targetDate);
+      if (!result) {
+        setLogEntries([]);
+        setLogSelectedDate(targetDate);
+        return;
+      }
+      setLogSelectedDate(result.date);
+      const parsed = parseLogLines(result.lines, { limit: 100 });
       setLogEntries(parsed);
     } catch (err) {
       setLogEntries([]);

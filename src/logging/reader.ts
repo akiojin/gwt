@@ -74,3 +74,40 @@ export async function listRecentLogFiles(
   const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
   return files.filter((file) => file.mtimeMs >= cutoff);
 }
+
+export interface LogReadResult {
+  date: string;
+  lines: string[];
+}
+
+export async function readLogLinesForDate(
+  logDir: string,
+  preferredDate: string,
+): Promise<LogReadResult | null> {
+  const files = await listLogFiles(logDir);
+  if (files.length === 0) {
+    return null;
+  }
+
+  const ordered: LogFileInfo[] = [];
+  const preferred = files.find((file) => file.date === preferredDate);
+  if (preferred) {
+    ordered.push(preferred);
+  }
+  for (const file of files) {
+    if (preferred && file.date === preferred.date) {
+      continue;
+    }
+    ordered.push(file);
+  }
+
+  for (const file of ordered) {
+    const lines = await readLogFileLines(file.path);
+    if (lines.length > 0) {
+      return { date: file.date, lines };
+    }
+  }
+
+  const fallbackDate = preferred?.date ?? files[0].date;
+  return { date: fallbackDate, lines: [] };
+}
