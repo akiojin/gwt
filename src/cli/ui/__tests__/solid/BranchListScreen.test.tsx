@@ -104,7 +104,7 @@ describe("BranchListScreen icons", () => {
     try {
       const frame = testSetup.captureCharFrame();
       expect(frame).toMatch(/\[\*\] w {2,}feature\/active-clean/);
-      expect(frame).toContain("[ ] . * feature/no-worktree");
+      expect(frame).toContain("[ ] . ! feature/no-worktree");
       expect(frame).not.toContain(">[*]");
       expect(frame).not.toContain(">[ ]");
     } finally {
@@ -119,6 +119,14 @@ describe("BranchListScreen icons", () => {
         label: "feature/loading",
         value: "feature/loading",
         worktree: { path: "/tmp/worktree", locked: false, prunable: false },
+      }),
+      createBranch({
+        name: "feature/unmerged",
+        label: "feature/unmerged",
+        value: "feature/unmerged",
+        worktree: { path: "/tmp/worktree2", locked: false, prunable: false },
+        isUnmerged: true,
+        safeToCleanup: false,
       }),
       createBranch({
         name: "origin/remote-only",
@@ -145,6 +153,7 @@ describe("BranchListScreen icons", () => {
     try {
       const frame = testSetup.captureCharFrame();
       expect(frame).toMatch(/\[ \] w [-\\|/] feature\/loading/);
+      expect(frame).toMatch(/\[ \] w \* feature\/unmerged/);
       expect(frame).toMatch(/\[ \] \. {2,}origin\/remote-only/);
     } finally {
       testSetup.renderer.destroy();

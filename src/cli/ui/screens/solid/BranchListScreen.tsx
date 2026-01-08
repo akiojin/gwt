@@ -681,15 +681,18 @@ export function BranchListScreen(props: BranchListScreenProps) {
     if (isRemoteBranch) {
       safeIcon = " ";
       safeColor = undefined;
+    } else if (hasUncommitted) {
+      safeIcon = "!";
+      safeColor = "red";
+    } else if (hasUnpushed) {
+      safeIcon = "!";
+      safeColor = "yellow";
+    } else if (branch.isUnmerged) {
+      safeIcon = "*";
+      safeColor = "yellow";
     } else if (safetyLoading) {
       safeIcon = spinnerFrame ?? "-";
       safeColor = undefined;
-    } else if (isWarning) {
-      safeIcon = "*";
-      safeColor = "red";
-    } else if (branch.isUnmerged) {
-      safeIcon = "!";
-      safeColor = "yellow";
     } else if (branch.safeToCleanup === true) {
       safeIcon = " ";
       safeColor = undefined;
