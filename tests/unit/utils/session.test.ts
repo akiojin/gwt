@@ -219,6 +219,40 @@ describe("utils/session", () => {
     expect(id).toBe(sessionUuid);
   });
 
+  it("findLatestCodexSessionId falls back when cwd is missing in session file", async () => {
+    const dirent = (name: string, type: "file" | "dir") => ({
+      name,
+      isFile: () => type === "file",
+      isDirectory: () => type === "dir",
+    });
+
+    const sessionUuid = "99999999-9999-9999-9999-999999999999";
+
+    readdirMock.mockImplementation((dir: string, opts?: ReaddirOptions) => {
+      if (opts?.withFileTypes) {
+        if (endsWithPath(dir, "/.codex/sessions")) {
+          return Promise.resolve([dirent("2025", "dir")]);
+        }
+        if (endsWithPath(dir, "/.codex/sessions/2025")) {
+          return Promise.resolve([dirent("12", "dir")]);
+        }
+        if (endsWithPath(dir, "/.codex/sessions/2025/12")) {
+          return Promise.resolve([
+            dirent(`rollout-${sessionUuid}.jsonl`, "file"),
+          ]);
+        }
+      }
+      return Promise.resolve([]);
+    });
+    statMock.mockResolvedValue({ mtimeMs: 700 });
+    readFileMock.mockResolvedValue("{}");
+
+    const id = await findLatestCodexSessionId({
+      cwd: "/repo/.worktrees/branch",
+    });
+    expect(id).toBe(sessionUuid);
+  });
+
   it("findLatestCodexSessionId can pick session closest to reference time", async () => {
     const dirent = (name: string, type: "file" | "dir") => ({
       name,

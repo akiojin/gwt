@@ -169,6 +169,14 @@ export function BranchInfoCards({
                   @ {latestToolUsage.worktreePath}
                 </span>
               )}
+              {latestToolUsage.sessionId && (
+                <span className="text-xs text-muted-foreground">
+                  Session ID:{" "}
+                  <code className="rounded bg-muted px-1.5 py-0.5 font-mono">
+                    {latestToolUsage.sessionId}
+                  </code>
+                </span>
+              )}
             </div>
           </CardContent>
         </Card>

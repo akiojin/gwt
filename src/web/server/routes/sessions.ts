@@ -60,6 +60,7 @@ export async function registerSessionRoutes(
         bypassApprovals,
         extraArgs,
         customAgentId,
+        resumeSessionId,
       } = request.body;
 
       logger.debug(
@@ -73,6 +74,7 @@ export async function registerSessionRoutes(
         bypassApprovals?: boolean;
         extraArgs?: string[];
         customToolId?: string | null;
+        resumeSessionId?: string | null;
       } = {};
 
       if (typeof agentName !== "undefined") {
@@ -89,6 +91,9 @@ export async function registerSessionRoutes(
       }
       if (typeof customAgentId !== "undefined") {
         spawnOptions.customToolId = customAgentId;
+      }
+      if (typeof resumeSessionId !== "undefined") {
+        spawnOptions.resumeSessionId = resumeSessionId;
       }
 
       if (agentType === "custom" && !agentName && !customAgentId) {
@@ -138,6 +143,7 @@ export async function registerSessionRoutes(
               ? (agentName ?? "Custom")
               : agentLabelFromType(agentType),
           mode,
+          lastSessionId: resumeSessionId ?? null,
           timestamp: Date.now(),
           repositoryRoot: repoRoot.trim(),
         });

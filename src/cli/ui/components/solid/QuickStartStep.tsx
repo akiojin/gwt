@@ -55,11 +55,14 @@ export function QuickStartStep(props: QuickStartStepProps) {
         ? `, ${entry.reasoningLevel}`
         : "";
       const settingsDesc = `${entry.toolLabel}, ${entry.model}${reasoningInfo}`;
+      const resumeDesc = entry.sessionId
+        ? `${settingsDesc}, session ${entry.sessionId}`
+        : settingsDesc;
 
       result.push({
         label: "Resume session (previous settings)",
         value: `resume-${entry.toolId}`,
-        description: settingsDesc,
+        description: resumeDesc,
         action: "resume",
         entry,
       });
