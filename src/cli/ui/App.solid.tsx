@@ -182,14 +182,14 @@ const applyCleanupStatus = (
             ? { hasUncommittedChanges: status.hasUncommittedChanges }
             : {}),
         }
-      : branch.worktree;
-    return {
+      : undefined;
+    const base: BranchItem = {
       ...branch,
       safeToCleanup,
       isUnmerged,
       hasUnpushedCommits: status.hasUnpushedCommits,
-      worktree,
     };
+    return worktree ? { ...base, worktree } : base;
   });
 
 const toLocalBranchName = (name: string): string => {

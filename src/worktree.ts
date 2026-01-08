@@ -1081,9 +1081,11 @@ export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
         hasUnpushedCommits: status.hasUnpushedCommits,
         cleanupType: status.cleanupType,
         hasRemoteBranch: status.hasRemoteBranch,
-        isAccessible: status.isAccessible,
         reasons: status.reasons,
       };
+      if (status.isAccessible !== undefined) {
+        target.isAccessible = status.isAccessible;
+      }
       if (status.invalidReason) {
         target.invalidReason = status.invalidReason;
       }
