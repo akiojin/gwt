@@ -268,6 +268,7 @@ export async function handleAIToolWorkflow(
     model,
     inferenceLevel,
     sessionId: selectedSessionId,
+    toolVersion,
   } = selectionResult;
 
   const branchLabel = displayName ?? branch;
@@ -626,6 +627,7 @@ export async function handleAIToolWorkflow(
           model?: string;
           sessionId?: string | null;
           chrome?: boolean;
+          version?: string | null;
         } = {
           mode:
             mode === "resume"
@@ -637,6 +639,7 @@ export async function handleAIToolWorkflow(
           envOverrides: sharedEnv,
           sessionId: resumeSessionId,
           chrome: true,
+          version: toolVersion ?? null,
         };
         if (normalizedModel) {
           launchOptions.model = normalizedModel;
