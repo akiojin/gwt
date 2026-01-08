@@ -557,6 +557,7 @@ export async function handleAIToolWorkflow(
       model: normalizedModel ?? null,
       reasoningLevel: inferenceLevel ?? null,
       skipPermissions: skipPermissions ?? null,
+      toolVersion: toolVersion ?? null,
       timestamp: Date.now(),
       repositoryRoot: repoRoot,
     });
@@ -604,6 +605,7 @@ export async function handleAIToolWorkflow(
             model: normalizedModel ?? null,
             reasoningLevel: inferenceLevel ?? null,
             skipPermissions: skipPermissions ?? null,
+            toolVersion: toolVersion ?? null,
             timestamp: Date.now(),
             repositoryRoot: repoRoot,
           },
@@ -797,6 +799,7 @@ export async function handleAIToolWorkflow(
       model: normalizedModel ?? null,
       reasoningLevel: inferenceLevel ?? null,
       skipPermissions: skipPermissions ?? null,
+      toolVersion: toolVersion ?? null,
       timestamp: Date.now(),
       repositoryRoot: repoRoot,
       lastSessionId: finalSessionId,
