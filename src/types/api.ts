@@ -113,6 +113,7 @@ export interface LastToolUsage {
   model?: string | null;
   timestamp: number; // epoch millis
   sessionId?: string | null;
+  toolVersion?: string | null;
 }
 
 /**

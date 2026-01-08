@@ -216,6 +216,15 @@ export interface CodingAgentConfig {
  *
  * launchCodingAgent() 関数の引数として使用。
  */
+/**
+ * バージョン選択
+ *
+ * - "installed": bunxのデフォルト動作（キャッシュ優先）
+ * - "latest": 常に最新版をダウンロード
+ * - その他: 具体的なバージョン番号（例: "1.0.3", "2.1.0-beta.1"）
+ */
+export type VersionSelection = "installed" | "latest" | string;
+
 export interface CodingAgentLaunchOptions {
   /**
    * 実行モード
@@ -247,4 +256,14 @@ export interface CodingAgentLaunchOptions {
    * 共有環境変数（共通env + ローカル取り込み）
    */
   sharedEnv?: Record<string, string>;
+
+  /**
+   * バージョン選択
+   *
+   * bunxタイプのエージェントでのみ使用。
+   * - "installed": bunxのデフォルト動作（キャッシュ優先）
+   * - "latest": 常に最新版をダウンロード
+   * - その他: 具体的なバージョン番号
+   */
+  version?: VersionSelection;
 }

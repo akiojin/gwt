@@ -3,7 +3,6 @@ import { createEffect, createMemo, createSignal } from "solid-js";
 import { useKeyboard, useTerminalDimensions } from "@opentui/solid";
 import { TextAttributes } from "@opentui/core";
 import type { BranchItem, BranchViewMode, Statistics } from "../../types.js";
-import type { ToolStatus } from "../../../../utils/command.js";
 import { getLatestActivityTimestamp } from "../../utils/branchFormatter.js";
 import stringWidth from "string-width";
 import { Header } from "../../components/solid/Header.js";
@@ -48,7 +47,6 @@ export interface BranchListScreenProps {
   activeProfile?: string | null;
   selectedBranches?: string[];
   onToggleSelect?: (branchName: string) => void;
-  toolStatuses?: ToolStatus[] | undefined;
   helpVisible?: boolean;
   /** ウィザードポップアップ表示中は入力を無効化 */
   wizardVisible?: boolean;
@@ -322,8 +320,6 @@ export function BranchListScreen(props: BranchListScreenProps) {
   const fixedLines = createMemo(() => {
     const headerLines = 2 + (props.workingDirectory ? 1 : 0);
     const filterLines = 1;
-    const toolLines =
-      props.toolStatuses && props.toolStatuses.length > 0 ? 1 : 0;
     const statsLines = 1;
     const loadingLines = 1;
     const footerMessageLines = props.cleanupUI?.footerMessage ? 1 : 0;
@@ -332,7 +328,6 @@ export function BranchListScreen(props: BranchListScreenProps) {
     return (
       headerLines +
       filterLines +
-      toolLines +
       statsLines +
       loadingLines +
       footerMessageLines +
@@ -417,6 +412,23 @@ export function BranchListScreen(props: BranchListScreenProps) {
     }
 
     return result;
+  });
+
+  // ツールラベルの最大幅を動的に計算
+  const maxToolWidth = createMemo(() => {
+    const MIN_TOOL_WIDTH = 7; // "Unknown" の幅
+    let maxWidth = MIN_TOOL_WIDTH;
+    for (const branch of filteredBranches()) {
+      const toolLabel =
+        branch.lastToolUsageLabel?.split("|")?.[0]?.trim() ??
+        branch.lastToolUsage?.toolId ??
+        "Unknown";
+      const width = stringWidth(toolLabel);
+      if (width > maxWidth) {
+        maxWidth = width;
+      }
+    }
+    return maxWidth;
   });
 
   createEffect(() => {
@@ -690,9 +702,9 @@ export function BranchListScreen(props: BranchListScreenProps) {
       return v + " ".repeat(padding);
     };
 
-    const TOOL_WIDTH = 7;
+    const toolWidth = maxToolWidth();
     const DATE_WIDTH = 16;
-    const paddedTool = formatFixedWidth(toolLabelRaw, TOOL_WIDTH);
+    const paddedTool = formatFixedWidth(toolLabelRaw, toolWidth);
     const paddedDate =
       commitText === "---"
         ? " ".repeat(DATE_WIDTH)
@@ -794,38 +806,6 @@ export function BranchListScreen(props: BranchListScreenProps) {
         attributes: TextAttributes.DIM,
       });
     }
-
-    return fitSegmentsToWidth(segments, layoutWidth());
-  });
-
-  const toolStatusSegments = createMemo(() => {
-    const toolStatuses = props.toolStatuses ?? [];
-    if (toolStatuses.length === 0) {
-      return null;
-    }
-
-    const segments: TextSegment[] = [];
-    appendSegment(segments, {
-      text: "Tools: ",
-      attributes: TextAttributes.DIM,
-    });
-    toolStatuses.forEach((tool, index) => {
-      const statusLabel =
-        tool.status === "installed" && tool.version
-          ? tool.version
-          : tool.status;
-      appendSegment(segments, { text: `${tool.name}: ` });
-      appendSegment(segments, {
-        text: statusLabel,
-        fg: tool.status === "installed" ? "green" : "yellow",
-      });
-      if (index < toolStatuses.length - 1) {
-        appendSegment(segments, {
-          text: " | ",
-          attributes: TextAttributes.DIM,
-        });
-      }
-    });
 
     return fitSegmentsToWidth(segments, layoutWidth());
   });
@@ -958,8 +938,6 @@ export function BranchListScreen(props: BranchListScreenProps) {
       />
 
       {renderSegmentLine(filterLineSegments())}
-
-      {toolStatusSegments() && renderSegmentLine(toolStatusSegments() ?? [])}
 
       {renderSegmentLine(statsSegments())}
 

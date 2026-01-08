@@ -11,6 +11,7 @@ import {
   BranchTypeStep,
   BranchNameStep,
   AgentSelectStep,
+  VersionSelectStep,
   ModelSelectStep,
   ReasoningLevelStep,
   ExecutionModeStep,
@@ -30,6 +31,8 @@ export interface WizardResult {
   branchName?: string;
   // For action selection
   isNewBranch?: boolean;
+  // For version selection
+  toolVersion?: string | null;
 }
 
 export interface WizardControllerProps {
@@ -48,6 +51,7 @@ type WizardStep =
   | "branch-type"
   | "branch-name"
   | "agent-select"
+  | "version-select"
   | "model-select"
   | "reasoning-level"
   | "execution-mode"
@@ -72,6 +76,9 @@ export function WizardController(props: WizardControllerProps) {
   const [branchType, setBranchType] = createSignal<string>("");
   const [branchName, setBranchName] = createSignal<string>("");
   const [selectedAgent, setSelectedAgent] = createSignal<CodingAgentId | null>(
+    null,
+  );
+  const [selectedVersion, setSelectedVersion] = createSignal<string | null>(
     null,
   );
   const [selectedModel, setSelectedModel] = createSignal<string>("");
@@ -102,6 +109,7 @@ export function WizardController(props: WizardControllerProps) {
     setBranchType("");
     setBranchName("");
     setSelectedAgent(null);
+    setSelectedVersion(null);
     setSelectedModel("");
     setReasoningLevel(undefined);
     setExecutionMode("normal");
@@ -192,6 +200,12 @@ export function WizardController(props: WizardControllerProps) {
 
   const handleAgentSelect = (agentId: string) => {
     setSelectedAgent(agentId as CodingAgentId);
+    goToStep("version-select");
+  };
+
+  const handleVersionSelect = (version: string) => {
+    // "installed" は null として保存（bunx のデフォルト動作）
+    setSelectedVersion(version === "installed" ? null : version);
     goToStep("model-select");
   };
 
@@ -222,6 +236,7 @@ export function WizardController(props: WizardControllerProps) {
     const currentBranchType = branchType();
     const currentBranchName = branchName();
     const creatingNew = isCreatingNewBranch();
+    const currentVersion = selectedVersion();
 
     const result: WizardResult = {
       tool: agent,
@@ -229,6 +244,7 @@ export function WizardController(props: WizardControllerProps) {
       mode: executionMode(),
       skipPermissions: skip,
       isNewBranch: creatingNew,
+      toolVersion: currentVersion,
       ...(needsReasoningLevel() && currentReasoningLevel !== undefined
         ? { reasoningLevel: currentReasoningLevel }
         : {}),
@@ -293,6 +309,17 @@ export function WizardController(props: WizardControllerProps) {
       return (
         <AgentSelectStep
           onSelect={handleAgentSelect}
+          onBack={goBack}
+          focused={focused}
+        />
+      );
+    }
+
+    if (currentStep === "version-select") {
+      return (
+        <VersionSelectStep
+          agentId={selectedAgent() ?? "claude-code"}
+          onSelect={handleVersionSelect}
           onBack={goBack}
           focused={focused}
         />

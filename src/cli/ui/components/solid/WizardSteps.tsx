@@ -2,12 +2,18 @@
 import { TextAttributes } from "@opentui/core";
 import type { SelectRenderable } from "@opentui/core";
 import { useKeyboard } from "@opentui/solid";
-import { createEffect, createSignal } from "solid-js";
+import { createEffect, createResource, createSignal } from "solid-js";
 import { SelectInput, type SelectInputItem } from "./SelectInput.js";
 import { TextInput } from "./TextInput.js";
 import { getModelOptions } from "../../utils/modelOptions.js";
 import type { CodingAgentId } from "../../types.js";
 import { useWizardScroll } from "./WizardPopup.js";
+import {
+  fetchPackageVersions,
+  parsePackageCommand,
+} from "../../../../utils/npmRegistry.js";
+import { BUILTIN_CODING_AGENTS } from "../../../../config/builtin-coding-agents.js";
+import { findCommand } from "../../../../utils/command.js";
 
 /**
  * WizardSteps - ウィザードの各ステップコンポーネント
@@ -579,6 +585,185 @@ export function SkipPermissionsStep(props: SkipPermissionsStepProps) {
       <SelectInput
         items={SKIP_OPTIONS}
         onSelect={(item) => props.onSelect(item.value === "true")}
+        onChange={handleChange}
+        focused={props.focused ?? true}
+        selectRef={setSelectRef}
+      />
+      <text> </text>
+      <text attributes={TextAttributes.DIM}>[Enter] Select [Esc] Back</text>
+    </box>
+  );
+}
+
+// バージョン選択ステップ
+export interface VersionSelectStepProps extends StepProps {
+  agentId: CodingAgentId;
+  onSelect: (version: string) => void;
+}
+
+// latest オプション（常に表示）
+const LATEST_OPTION: SelectInputItem = {
+  label: "latest",
+  value: "latest",
+  description: "Always fetch latest version",
+};
+
+// エージェントIDからパッケージ名を取得
+function getPackageNameForAgent(agentId: string): string | null {
+  const agent = BUILTIN_CODING_AGENTS.find((a) => a.id === agentId);
+  if (!agent || agent.type !== "bunx") {
+    return null;
+  }
+  const { packageName } = parsePackageCommand(agent.command);
+  return packageName;
+}
+
+// バージョン一覧を取得
+async function fetchVersionOptions(
+  agentId: string,
+): Promise<SelectInputItem[]> {
+  const packageName = getPackageNameForAgent(agentId);
+  if (!packageName) {
+    return [];
+  }
+
+  const versions = await fetchPackageVersions(packageName);
+  return versions.map((v) => {
+    const item: SelectInputItem = {
+      label: v.isPrerelease ? `${v.version} (pre)` : v.version,
+      value: v.version,
+    };
+    if (v.publishedAt) {
+      item.description = new Date(v.publishedAt).toLocaleDateString();
+    }
+    return item;
+  });
+}
+
+// エージェントIDからコマンド名へのマッピング
+const AGENT_COMMAND_MAP: Record<string, string> = {
+  "claude-code": "claude",
+  "codex-cli": "codex",
+  "gemini-cli": "gemini",
+  opencode: "opencode",
+};
+
+// インストール済みコマンド情報を取得（findCommandと統一）
+async function fetchInstalledOption(
+  agentId: string,
+): Promise<SelectInputItem | null> {
+  const commandName = AGENT_COMMAND_MAP[agentId];
+  if (!commandName) {
+    return null;
+  }
+
+  const result = await findCommand(commandName);
+  if (result.source !== "installed" || !result.path) {
+    return null;
+  }
+
+  // バージョン表示（v1.0.3 → 1.0.3 形式に）
+  const version = result.version?.replace(/^v/, "") ?? "unknown";
+
+  return {
+    label: `installed@${version}`,
+    value: "installed",
+    description: result.path,
+  };
+}
+
+export function VersionSelectStep(props: VersionSelectStepProps) {
+  const [selectedIndex, setSelectedIndex] = createSignal(0);
+  const [selectRef, setSelectRef] = createSignal<SelectRenderable | undefined>(
+    undefined,
+  );
+
+  // npmレジストリからバージョン取得
+  const [versionOptions] = createResource(
+    () => props.agentId,
+    fetchVersionOptions,
+  );
+
+  // インストール済み情報を取得
+  const [installedOption] = createResource(
+    () => props.agentId,
+    fetchInstalledOption,
+  );
+
+  // 全オプション（installed + latest + 動的）
+  const allOptions = (): SelectInputItem[] => {
+    const options: SelectInputItem[] = [];
+
+    // installedオプション（インストール済みの場合のみ）
+    const installed = installedOption();
+    if (installed) {
+      options.push(installed);
+    }
+
+    // latestオプション（常に表示）
+    options.push(LATEST_OPTION);
+
+    // npmレジストリから取得したバージョン
+    const dynamic = versionOptions() ?? [];
+    options.push(...dynamic);
+
+    return options;
+  };
+
+  useEnsureSelectionVisible({
+    getSelectedIndex: selectedIndex,
+    getItemCount: () => allOptions().length,
+    getFocused: () => props.focused,
+    getSelectRef: selectRef,
+  });
+
+  createEffect(() => {
+    const count = allOptions().length;
+    if (count <= 0) {
+      setSelectedIndex(0);
+      return;
+    }
+    const maxIndex = count - 1;
+    if (selectedIndex() > maxIndex) {
+      setSelectedIndex(maxIndex);
+    }
+  });
+
+  const handleChange = (item: SelectInputItem | null) => {
+    if (!item) {
+      setSelectedIndex(0);
+      return;
+    }
+    const nextIndex = allOptions().findIndex(
+      (candidate) => candidate.value === item.value,
+    );
+    if (nextIndex >= 0) {
+      setSelectedIndex(nextIndex);
+    }
+  };
+
+  const statusText = () => {
+    if (versionOptions.loading) {
+      return "Fetching versions...";
+    }
+    if (versionOptions.error) {
+      return "Could not fetch versions";
+    }
+    return null;
+  };
+
+  return (
+    <box flexDirection="column">
+      <text fg="cyan" attributes={TextAttributes.BOLD}>
+        Select version:
+      </text>
+      {statusText() && (
+        <text attributes={TextAttributes.DIM}>{statusText()}</text>
+      )}
+      <text> </text>
+      <SelectInput
+        items={allOptions()}
+        onSelect={(item) => props.onSelect(item.value)}
         onChange={handleChange}
         focused={props.focused ?? true}
         selectRef={setSelectRef}
