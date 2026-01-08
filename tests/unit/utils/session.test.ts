@@ -1,15 +1,17 @@
 import { describe, it, expect, beforeEach, mock } from "bun:test";
 import path from "node:path";
 
-mock.module("node:fs/promises", () => {
+mock.module("node:fs/promises", async () => {
+  const actual = await import("node:fs/promises");
   const readdir = mock();
   const readFile = mock();
   const stat = mock();
   return {
+    ...actual,
     readdir,
     readFile,
     stat,
-    default: { readdir, readFile, stat },
+    default: { ...actual.default, readdir, readFile, stat },
   };
 });
 
