@@ -119,7 +119,7 @@
 - **FR-014**: Web UIのセッション起動APIは`resumeSessionId`を受け取り、Claude/Codexの起動引数に反映しなければならない。未指定時は既存のフォールバック挙動を維持する。
 - **FR-015**: Web UIで起動したClaude/Codexセッションも終了時にセッションIDを検出し、`SessionData`の履歴へ保存しなければならない（検出失敗時は警告のみ）。
 - **FR-016**: `ToolSessionEntry`に`toolVersion`フィールド（オプショナル）を追加し、使用したエージェントのバージョンを保存しなければならない。バージョン情報がない場合は`null`または未定義として扱う。
-- **FR-017**: ブランチ一覧のツール表示を`ToolName@X.Y.Z | YYYY-MM-DD HH:mm`形式で表示しなければならない。バージョン情報がない場合は従来通り`ToolName | YYYY-MM-DD HH:mm`形式で表示する。
+- **FR-017**: ブランチ一覧のツール表示を`ToolName@X.Y.Z | YYYY-MM-DD HH:mm`形式で表示しなければならない。バージョン情報がない場合は`ToolName@latest | YYYY-MM-DD HH:mm`形式で表示する。
 
 ### 主要エンティティ
 - **SessionData**: `lastWorktreePath`, `lastBranch`, `lastUsedTool`, `mode`, `model`, 追加で `lastSessionId` を持つ。履歴`history[]`に`sessionId`/`toolId`/`branch`/`timestamp`を保持。

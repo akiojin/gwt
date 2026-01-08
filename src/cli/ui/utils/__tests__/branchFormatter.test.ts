@@ -34,7 +34,7 @@ describe("branchFormatter", () => {
       expect(item.lastToolUsageLabel).toBe("Claude@1.0.3 | 2024-01-08 12:00");
     });
 
-    it("should format as 'ToolName | 2024-01-08 12:00' when version is null", () => {
+    it("should format as 'ToolName@latest | 2024-01-08 12:00' when version is null", () => {
       const branch: BranchInfo = {
         ...baseBranch,
         lastToolUsage: {
@@ -48,10 +48,10 @@ describe("branchFormatter", () => {
       };
 
       const item = formatBranchItem(branch);
-      expect(item.lastToolUsageLabel).toBe("Claude | 2024-01-08 12:00");
+      expect(item.lastToolUsageLabel).toBe("Claude@latest | 2024-01-08 12:00");
     });
 
-    it("should format as 'ToolName | 2024-01-08 12:00' when version is undefined", () => {
+    it("should format as 'ToolName@latest | 2024-01-08 12:00' when version is undefined", () => {
       const branch: BranchInfo = {
         ...baseBranch,
         lastToolUsage: {
@@ -64,7 +64,7 @@ describe("branchFormatter", () => {
       };
 
       const item = formatBranchItem(branch);
-      expect(item.lastToolUsageLabel).toBe("Claude | 2024-01-08 12:00");
+      expect(item.lastToolUsageLabel).toBe("Claude@latest | 2024-01-08 12:00");
     });
 
     it("should format Codex with version", () => {
