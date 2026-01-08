@@ -10,6 +10,7 @@ import {
   WorktreeWithPR,
   CleanupTarget,
   CleanupReason,
+  CleanupStatus,
 } from "./cli/ui/types.js";
 import { getPullRequestByBranch } from "./github.js";
 import {
@@ -46,6 +47,65 @@ async function getUpstreamBranch(branch: string): Promise<string | null> {
     return null;
   }
 }
+
+const parseRemoteRef = (
+  ref: string,
+): { remote: string; branch: string } | null => {
+  const segments = ref.split("/");
+  if (segments.length < 2) {
+    return null;
+  }
+  const [remote, ...rest] = segments;
+  const branch = rest.join("/");
+  if (!remote || !branch) {
+    return null;
+  }
+  return { remote, branch };
+};
+
+async function resolveUpstreamStatus(
+  branch: string,
+  repoRoot: string,
+): Promise<{ upstream: string | null; hasUpstream: boolean }> {
+  const upstream = await getUpstreamBranch(branch);
+  if (!upstream) {
+    return { upstream: null, hasUpstream: false };
+  }
+  const parsed = parseRemoteRef(upstream);
+  if (!parsed) {
+    return { upstream, hasUpstream: false };
+  }
+  if (parsed.branch !== branch) {
+    return { upstream, hasUpstream: false };
+  }
+  const exists = await checkRemoteBranchExists(parsed.branch, parsed.remote, {
+    cwd: repoRoot,
+  });
+  return { upstream, hasUpstream: exists };
+}
+
+const buildCleanupReasons = ({
+  hasUniqueCommits,
+  hasUncommitted,
+  hasUnpushed,
+  hasUpstream,
+}: {
+  hasUniqueCommits: boolean;
+  hasUncommitted: boolean;
+  hasUnpushed: boolean;
+  hasUpstream: boolean;
+}): CleanupReason[] => {
+  if (!hasUpstream) {
+    return [];
+  }
+  if (!hasUniqueCommits && !hasUncommitted && !hasUnpushed) {
+    return ["no-diff-with-base"];
+  }
+  if (hasUniqueCommits && !hasUncommitted && !hasUnpushed) {
+    return ["remote-synced"];
+  }
+  return [];
+};
 
 // Re-export WorktreeConfig for external use
 export type { WorktreeConfig };
@@ -764,13 +824,13 @@ async function getWorktreesWithPRStatus(): Promise<WorktreeWithPR[]> {
  * worktreeに存在しないローカルブランチのクリーンアップ候補を取得
  * @returns {Promise<CleanupTarget[]>} クリーンアップ候補の配列
  */
-async function getOrphanedLocalBranches({
+async function getOrphanedLocalBranchStatuses({
   baseBranch,
   repoRoot,
 }: {
   baseBranch: string;
   repoRoot: string;
-}): Promise<CleanupTarget[]> {
+}): Promise<CleanupStatus[]> {
   try {
     // 並列実行で高速化
     const [localBranches, worktrees] = await Promise.all([
@@ -778,7 +838,7 @@ async function getOrphanedLocalBranches({
       listAdditionalWorktrees(),
     ]);
 
-    const cleanupTargets: CleanupTarget[] = [];
+    const statuses: CleanupStatus[] = [];
     const worktreeBranches = new Set(
       worktrees.map((w) => w.branch).filter(Boolean),
     );
@@ -822,10 +882,11 @@ async function getOrphanedLocalBranches({
           hasUnpushed = true;
         }
 
-        const reasons: CleanupReason[] = [];
-
-        const upstreamBranch = await getUpstreamBranch(localBranch.name);
-        const comparisonBase = upstreamBranch ?? baseBranch;
+        const { upstream, hasUpstream } = await resolveUpstreamStatus(
+          localBranch.name,
+          repoRoot,
+        );
+        const comparisonBase = upstream ?? baseBranch;
 
         const hasUniqueCommits = await branchHasUniqueCommitsComparedToBase(
           localBranch.name,
@@ -833,9 +894,12 @@ async function getOrphanedLocalBranches({
           repoRoot,
         );
 
-        if (!hasUniqueCommits) {
-          reasons.push("no-diff-with-base");
-        }
+        const reasons = buildCleanupReasons({
+          hasUniqueCommits,
+          hasUncommitted: false,
+          hasUnpushed,
+          hasUpstream,
+        });
 
         if (process.env.DEBUG_CLEANUP) {
           console.log(
@@ -845,41 +909,28 @@ async function getOrphanedLocalBranches({
           );
         }
 
-        let hasRemoteBranch = false;
-        try {
-          hasRemoteBranch = await checkRemoteBranchExists(localBranch.name);
-        } catch {
-          hasRemoteBranch = false;
-        }
-
-        if (!hasUnpushed && hasRemoteBranch && hasUniqueCommits) {
-          reasons.push("remote-synced");
-        }
-
-        if (reasons.length > 0) {
-          cleanupTargets.push({
-            worktreePath: null, // worktreeは存在しない
-            branch: localBranch.name,
-            pullRequest: null,
-            hasUncommittedChanges: false, // worktreeが存在しないため常にfalse
-            hasUnpushedCommits: hasUnpushed,
-            cleanupType: "branch-only",
-            hasRemoteBranch,
-            reasons,
-          });
-        }
+        statuses.push({
+          worktreePath: null, // worktreeは存在しない
+          branch: localBranch.name,
+          hasUncommittedChanges: false, // worktreeが存在しないため常にfalse
+          hasUnpushedCommits: hasUnpushed,
+          cleanupType: "branch-only",
+          hasRemoteBranch: hasUpstream,
+          hasUniqueCommits,
+          hasUpstream,
+          upstream,
+          reasons,
+        });
       }
     }
 
     if (process.env.DEBUG_CLEANUP) {
       console.log(
-        chalk.cyan(
-          `Debug: Found ${cleanupTargets.length} orphaned branch cleanup targets`,
-        ),
+        chalk.cyan(`Debug: Found ${statuses.length} orphaned branch statuses`),
       );
     }
 
-    return cleanupTargets;
+    return statuses;
   } catch (error) {
     console.error(chalk.red("Error: Failed to get orphaned local branches"));
     if (process.env.DEBUG_CLEANUP) {
@@ -889,11 +940,7 @@ async function getOrphanedLocalBranches({
   }
 }
 
-/**
- * マージ済みPRに関連するworktreeおよびローカルブランチのクリーンアップ候補を取得
- * @returns {Promise<CleanupTarget[]>} クリーンアップ候補の配列
- */
-export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
+export async function getCleanupStatus(): Promise<CleanupStatus[]> {
   const [config, repoRoot, worktreesWithPR] = await Promise.all([
     getConfig(),
     getRepositoryRoot(),
@@ -901,11 +948,11 @@ export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
   ]);
   const baseBranch = config.defaultBaseBranch || GIT_CONFIG.DEFAULT_BASE_BRANCH;
 
-  const orphanedBranches = await getOrphanedLocalBranches({
+  const orphanedStatuses = await getOrphanedLocalBranchStatuses({
     baseBranch,
     repoRoot,
   });
-  const cleanupTargets: CleanupTarget[] = [];
+  const statuses: CleanupStatus[] = [];
 
   if (process.env.DEBUG_CLEANUP) {
     console.log(chalk.cyan("Debug: Available worktrees:"));
@@ -915,32 +962,19 @@ export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
   }
 
   for (const worktree of worktreesWithPR) {
-    // 保護対象ブランチはスキップ
-    if (isProtectedBranchName(worktree.branch)) {
-      if (process.env.DEBUG_CLEANUP) {
-        console.log(
-          chalk.yellow(`Debug: Skipping protected branch ${worktree.branch}`),
-        );
-      }
-      continue;
-    }
-
     if (process.env.DEBUG_CLEANUP) {
       console.log(chalk.gray(`Debug: Checking worktree ${worktree.branch}`));
     }
 
-    const cleanupReasons: CleanupReason[] = [];
-
     // worktreeパスの存在を確認
-    const fs = await import("node:fs");
-    // Some test environments mock node:fs without existsSync on the module root.
+    const fsSync = await import("node:fs");
     const existsSync =
-      typeof fs.existsSync === "function"
-        ? fs.existsSync
-        : typeof (fs as { default?: { existsSync?: unknown } }).default
+      typeof fsSync.existsSync === "function"
+        ? fsSync.existsSync
+        : typeof (fsSync as { default?: { existsSync?: unknown } }).default
               ?.existsSync === "function"
-          ? (fs as { default: { existsSync: (p: string) => boolean } }).default
-              .existsSync
+          ? (fsSync as { default: { existsSync: (p: string) => boolean } })
+              .default.existsSync
           : null;
 
     const isAccessible = existsSync ? existsSync(worktree.worktreePath) : false;
@@ -949,14 +983,12 @@ export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
     let hasUnpushed = false;
 
     if (isAccessible) {
-      // worktreeが存在する場合のみ状態をチェック
       try {
         [hasUncommitted, hasUnpushed] = await Promise.all([
           hasUncommittedChanges(worktree.worktreePath),
           hasUnpushedCommits(worktree.worktreePath, worktree.branch),
         ]);
       } catch (error) {
-        // エラーが発生した場合はデフォルト値を使用
         if (process.env.DEBUG_CLEANUP) {
           console.log(
             chalk.yellow(
@@ -967,15 +999,11 @@ export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
       }
     }
 
-    let hasRemoteBranch = false;
-    try {
-      hasRemoteBranch = await checkRemoteBranchExists(worktree.branch);
-    } catch {
-      hasRemoteBranch = false;
-    }
-
-    const upstreamBranch = await getUpstreamBranch(worktree.branch);
-    const comparisonBase = upstreamBranch ?? baseBranch;
+    const { upstream, hasUpstream } = await resolveUpstreamStatus(
+      worktree.branch,
+      repoRoot,
+    );
+    const comparisonBase = upstream ?? baseBranch;
 
     const hasUniqueCommits = await branchHasUniqueCommitsComparedToBase(
       worktree.branch,
@@ -983,61 +1011,86 @@ export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
       repoRoot,
     );
 
-    // 差分がない場合はベース同等としてクリーンアップ候補
-    if (!hasUniqueCommits) {
-      cleanupReasons.push("no-diff-with-base");
-    } else if (!hasUncommitted && !hasUnpushed && hasRemoteBranch) {
-      // 未マージでも、ローカルに未コミット/未プッシュがなくリモートが最新ならローカルのみクリーンアップ許可
-      cleanupReasons.push("remote-synced");
-    }
+    const reasons = buildCleanupReasons({
+      hasUniqueCommits,
+      hasUncommitted,
+      hasUnpushed,
+      hasUpstream,
+    });
 
     if (process.env.DEBUG_CLEANUP) {
       console.log(
         chalk.gray(
-          `Debug: Cleanup reasons for ${worktree.branch}: ${cleanupReasons.length > 0 ? cleanupReasons.join(", ") : "none"}`,
+          `Debug: Cleanup reasons for ${worktree.branch}: ${reasons.length > 0 ? reasons.join(", ") : "none"}`,
         ),
       );
     }
 
-    if (cleanupReasons.length === 0) {
-      continue;
-    }
-
-    const target: CleanupTarget = {
+    statuses.push({
       worktreePath: worktree.worktreePath,
       branch: worktree.branch,
-      pullRequest: null,
       hasUncommittedChanges: hasUncommitted,
       hasUnpushedCommits: hasUnpushed,
       cleanupType: "worktree-and-branch",
-      hasRemoteBranch,
+      hasRemoteBranch: hasUpstream,
+      hasUniqueCommits,
+      hasUpstream,
+      upstream,
       isAccessible,
-      reasons: cleanupReasons,
-    };
-
-    if (!isAccessible) {
-      target.invalidReason = "Path not accessible in current environment";
-    }
-
-    cleanupTargets.push(target);
+      reasons,
+      ...(isAccessible
+        ? {}
+        : { invalidReason: "Path not accessible in current environment" }),
+    });
   }
 
-  // orphanedBranches (ローカルブランチのみの削除対象) を追加
-  cleanupTargets.push(...orphanedBranches);
+  statuses.push(...orphanedStatuses);
 
   if (process.env.DEBUG_CLEANUP) {
-    const worktreeTargets = cleanupTargets.filter(
-      (t) => t.cleanupType === "worktree-and-branch",
+    const worktreeTargets = statuses.filter(
+      (t) => t.cleanupType === "worktree-and-branch" && t.reasons.length > 0,
     ).length;
-    const branchOnlyTargets = cleanupTargets.filter(
-      (t) => t.cleanupType === "branch-only",
+    const branchOnlyTargets = statuses.filter(
+      (t) => t.cleanupType === "branch-only" && t.reasons.length > 0,
     ).length;
     console.log(
       chalk.cyan(
-        `Debug: Found ${cleanupTargets.length} cleanup targets (${worktreeTargets} worktree+branch, ${branchOnlyTargets} branch-only)`,
+        `Debug: Found ${worktreeTargets + branchOnlyTargets} cleanup targets (${worktreeTargets} worktree+branch, ${branchOnlyTargets} branch-only)`,
       ),
     );
   }
+
+  return statuses;
+}
+
+/**
+ * マージ済みPRに関連するworktreeおよびローカルブランチのクリーンアップ候補を取得
+ * @returns {Promise<CleanupTarget[]>} クリーンアップ候補の配列
+ */
+export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
+  const statuses = await getCleanupStatus();
+  const cleanupTargets = statuses
+    .filter((status) => status.reasons.length > 0)
+    .filter((status) => !isProtectedBranchName(status.branch))
+    .map((status) => {
+      const target: CleanupTarget = {
+        worktreePath: status.worktreePath,
+        branch: status.branch,
+        pullRequest: null,
+        hasUncommittedChanges: status.hasUncommittedChanges,
+        hasUnpushedCommits: status.hasUnpushedCommits,
+        cleanupType: status.cleanupType,
+        hasRemoteBranch: status.hasRemoteBranch,
+        reasons: status.reasons,
+      };
+      if (status.isAccessible !== undefined) {
+        target.isAccessible = status.isAccessible;
+      }
+      if (status.invalidReason) {
+        target.invalidReason = status.invalidReason;
+      }
+      return target;
+    });
 
   return cleanupTargets;
 }

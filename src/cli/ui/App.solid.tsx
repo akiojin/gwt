@@ -11,6 +11,7 @@ import type {
   BranchItem,
   BranchInfo,
   CodingAgentId,
+  CleanupStatus,
   InferenceLevel,
   SelectedBranchState,
   Statistics,
@@ -60,8 +61,8 @@ import {
 } from "../../git.js";
 import {
   isProtectedBranchName,
+  getCleanupStatus,
   listAdditionalWorktrees,
-  getMergedPRWorktrees,
   removeWorktree,
   repairWorktrees,
   type WorktreeInfo as WorktreeEntry,
@@ -162,14 +163,34 @@ const DEFAULT_SCREEN: AppScreen = "branch-list";
 const buildStats = (branches: BranchItem[]): Statistics =>
   calculateStatistics(branches);
 
-const applyCleanupSafety = (
+const applyCleanupStatus = (
   items: BranchItem[],
-  safeBranches: Set<string>,
+  statusByBranch: Map<string, CleanupStatus>,
 ): BranchItem[] =>
-  items.map((branch) => ({
-    ...branch,
-    safeToCleanup: safeBranches.has(branch.name),
-  }));
+  items.map((branch) => {
+    const status = statusByBranch.get(branch.name);
+    if (!status) {
+      return { ...branch, safeToCleanup: false, isUnmerged: false };
+    }
+    const safeToCleanup =
+      status.hasUpstream && status.reasons.includes("no-diff-with-base");
+    const isUnmerged = status.hasUpstream && status.hasUniqueCommits;
+    const worktree = branch.worktree
+      ? {
+          ...branch.worktree,
+          ...(status.hasUncommittedChanges !== undefined
+            ? { hasUncommittedChanges: status.hasUncommittedChanges }
+            : {}),
+        }
+      : undefined;
+    const base: BranchItem = {
+      ...branch,
+      safeToCleanup,
+      isUnmerged,
+      hasUnpushedCommits: status.hasUnpushedCommits,
+    };
+    return worktree ? { ...base, worktree } : base;
+  });
 
 const toLocalBranchName = (name: string): string => {
   const segments = name.split("/");
@@ -245,9 +266,10 @@ export function AppSolid(props: AppSolidProps) {
   const [cleanupIndicators, setCleanupIndicators] = createSignal<
     Record<string, CleanupIndicator>
   >({});
-  const [cleanupSafeBranches, setCleanupSafeBranches] = createSignal<
-    Set<string>
-  >(new Set());
+  const [cleanupStatusByBranch, setCleanupStatusByBranch] = createSignal<
+    Map<string, CleanupStatus>
+  >(new Map());
+  const [cleanupSafetyLoading, setCleanupSafetyLoading] = createSignal(false);
   const [isNewBranch, setIsNewBranch] = createSignal(false);
   const [newBranchBaseRef, setNewBranchBaseRef] = createSignal<string | null>(
     null,
@@ -345,19 +367,32 @@ export function AppSolid(props: AppSolidProps) {
       .sort((a, b) => a.key.localeCompare(b.key)),
   );
 
+  let cleanupSafetyRequestId = 0;
   const refreshCleanupSafety = async () => {
+    const requestId = ++cleanupSafetyRequestId;
+    setCleanupSafetyLoading(true);
     try {
-      const cleanupTargets = await getMergedPRWorktrees();
-      const safeBranches = new Set(
-        cleanupTargets.map((target) => target.branch),
+      const cleanupStatuses = await getCleanupStatus();
+      if (requestId !== cleanupSafetyRequestId) {
+        return;
+      }
+      const statusByBranch = new Map(
+        cleanupStatuses.map((status) => [status.branch, status]),
       );
-      setCleanupSafeBranches(safeBranches);
-      setBranchItems((items) => applyCleanupSafety(items, safeBranches));
+      setCleanupStatusByBranch(statusByBranch);
+      setBranchItems((items) => applyCleanupStatus(items, statusByBranch));
     } catch (err) {
+      if (requestId !== cleanupSafetyRequestId) {
+        return;
+      }
       logger.warn({ err }, "Failed to refresh cleanup safety indicators");
-      const empty = new Set<string>();
-      setCleanupSafeBranches(empty);
-      setBranchItems((items) => applyCleanupSafety(items, empty));
+      const empty = new Map<string, CleanupStatus>();
+      setCleanupStatusByBranch(empty);
+      setBranchItems((items) => applyCleanupStatus(items, empty));
+    } finally {
+      if (requestId === cleanupSafetyRequestId) {
+        setCleanupSafetyLoading(false);
+      }
     }
   };
 
@@ -495,9 +530,9 @@ export function AppSolid(props: AppSolidProps) {
         worktrees,
         lastToolUsageMap,
       );
-      const initialItems = applyCleanupSafety(
+      const initialItems = applyCleanupStatus(
         initial.items,
-        cleanupSafeBranches(),
+        cleanupStatusByBranch(),
       );
       setBranchItems(initialItems);
       setStats(buildStats(initialItems));
@@ -519,7 +554,10 @@ export function AppSolid(props: AppSolidProps) {
           latestWorktrees,
           lastToolUsageMap,
         );
-        const fullItems = applyCleanupSafety(full.items, cleanupSafeBranches());
+        const fullItems = applyCleanupStatus(
+          full.items,
+          cleanupStatusByBranch(),
+        );
         setBranchItems(fullItems);
         setStats(buildStats(fullItems));
       })();
@@ -555,8 +593,8 @@ export function AppSolid(props: AppSolidProps) {
 
   createEffect(() => {
     if (props.branches) {
-      const safeBranches = cleanupSafeBranches();
-      const nextItems = applyCleanupSafety(props.branches, safeBranches);
+      const statusByBranch = cleanupStatusByBranch();
+      const nextItems = applyCleanupStatus(props.branches, statusByBranch);
       setBranchItems(nextItems);
       setStats(props.stats ?? buildStats(nextItems));
       setLoading(false);
@@ -885,9 +923,14 @@ export function AppSolid(props: AppSolidProps) {
             skipCounts.current += 1;
             continue;
           }
-          const isWarning =
-            Boolean(branch.hasUnpushedCommits) || !branch.mergedPR;
-          if (isWarning) {
+          const hasUncommitted =
+            branch.worktree?.hasUncommittedChanges === true;
+          const hasUnpushed = branch.hasUnpushedCommits === true;
+          if (hasUncommitted || hasUnpushed) {
+            skipCounts.unsafe += 1;
+            continue;
+          }
+          if (branch.safeToCleanup !== true) {
             skipCounts.unsafe += 1;
             continue;
           }
@@ -917,7 +960,7 @@ export function AppSolid(props: AppSolidProps) {
       const skipNotice = buildSkipNotice(
         skipCounts,
         hasSelection
-          ? "with unpushed commits or unmerged PRs"
+          ? "unsafe (uncommitted/unpushed, unmerged, or missing upstream)"
           : "with uncommitted or unpushed changes",
       );
 
@@ -1329,6 +1372,7 @@ export function AppSolid(props: AppSolidProps) {
         indicators: cleanupIndicators(),
         footerMessage: branchFooterMessage(),
         inputLocked: branchInputLocked(),
+        safetyLoading: cleanupSafetyLoading(),
       };
       return (
         <BranchListScreen
