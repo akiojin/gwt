@@ -39,7 +39,7 @@ export interface BranchListScreenProps {
   onCreateBranch?: (branch: BranchItem | null) => void;
   onRefresh?: () => void;
   onOpenProfiles?: () => void;
-  onOpenLogs?: () => void;
+  onOpenLogs?: (branch: BranchItem | null) => void;
   loading?: boolean;
   error?: Error | null;
   lastUpdated?: Date | null;
@@ -639,7 +639,8 @@ export function BranchListScreen(props: BranchListScreenProps) {
     } else if (key.name === "p" || key.sequence === "p") {
       props.onOpenProfiles?.();
     } else if (key.name === "l" || key.sequence === "l") {
-      props.onOpenLogs?.();
+      const selected = filteredBranches()[selectedIndex()] ?? null;
+      props.onOpenLogs?.(selected);
     }
   });
 

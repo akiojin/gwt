@@ -19,6 +19,8 @@ export interface LogScreenProps {
   notification?: { message: string; tone: "success" | "error" } | null;
   version?: string | null;
   selectedDate?: string | null;
+  branchLabel?: string | null;
+  sourceLabel?: string | null;
   helpVisible?: boolean;
 }
 
@@ -27,6 +29,8 @@ export function LogScreen(props: LogScreenProps) {
     {
       loading: false,
       error: null,
+      branchLabel: null,
+      sourceLabel: null,
       helpVisible: false,
     },
     props,
@@ -34,7 +38,7 @@ export function LogScreen(props: LogScreenProps) {
   const terminal = useTerminalSize();
   const listHeight = createMemo(() => {
     const headerRows = 2;
-    const infoRows = 1;
+    const infoRows = 2;
     const footerRows = 1;
     const notificationRows = merged.notification ? 1 : 0;
     const reserved = headerRows + infoRows + footerRows + notificationRows;
@@ -135,6 +139,17 @@ export function LogScreen(props: LogScreenProps) {
           {merged.notification.message}
         </text>
       ) : null}
+
+      <box flexDirection="row">
+        <text attributes={TextAttributes.DIM}>Branch: </text>
+        <text attributes={TextAttributes.BOLD}>
+          {merged.branchLabel ?? "(none)"}
+        </text>
+        <text attributes={TextAttributes.DIM}> Source: </text>
+        <text attributes={TextAttributes.BOLD}>
+          {merged.sourceLabel ?? "(none)"}
+        </text>
+      </box>
 
       <box flexDirection="row">
         <text attributes={TextAttributes.DIM}>Date: </text>

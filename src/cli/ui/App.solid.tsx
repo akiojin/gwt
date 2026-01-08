@@ -78,7 +78,7 @@ import { getAllCodingAgents } from "../../config/tools.js";
 import {
   getTodayLogDate,
   readLogLinesForDate,
-  resolveLogDir,
+  resolveLogTarget,
 } from "../../logging/reader.js";
 import { parseLogLines } from "../../logging/formatter.js";
 import { copyToClipboard } from "./utils/clipboard.js";
@@ -333,6 +333,9 @@ export function AppSolid(props: AppSolidProps) {
     message: string;
     tone: "success" | "error";
   } | null>(null);
+  const [logTargetBranch, setLogTargetBranch] = createSignal<BranchItem | null>(
+    null,
+  );
 
   const [profileItems, setProfileItems] = createSignal<
     { name: string; displayName?: string; isActive?: boolean }[]
@@ -363,7 +366,26 @@ export function AppSolid(props: AppSolidProps) {
   const [profileConfirmMode, setProfileConfirmMode] =
     createSignal<ProfileConfirmMode>("delete-profile");
 
-  const logDir = createMemo(() => resolveLogDir(workingDirectory()));
+  const logTarget = createMemo(() =>
+    resolveLogTarget(logTargetBranch(), workingDirectory()),
+  );
+  const logBranchLabel = createMemo(() => logTargetBranch()?.label ?? null);
+  const logSourceLabel = createMemo(() => {
+    const target = logTarget();
+    if (!target.sourcePath) {
+      return "(none)";
+    }
+    if (
+      target.reason === "current-working-directory" ||
+      target.reason === "working-directory"
+    ) {
+      return `${target.sourcePath} (cwd)`;
+    }
+    if (target.reason === "worktree-inaccessible") {
+      return `${target.sourcePath} (inaccessible)`;
+    }
+    return target.sourcePath;
+  });
   const selectedProfileConfig = createMemo(() => {
     const name = selectedProfileName();
     const config = profilesConfig();
@@ -529,7 +551,13 @@ export function AppSolid(props: AppSolidProps) {
     setLogLoading(true);
     setLogError(null);
     try {
-      const result = await readLogLinesForDate(logDir(), targetDate);
+      const target = logTarget();
+      if (!target.logDir) {
+        setLogEntries([]);
+        setLogSelectedDate(targetDate);
+        return;
+      }
+      const result = await readLogLinesForDate(target.logDir, targetDate);
       if (!result) {
         setLogEntries([]);
         setLogSelectedDate(targetDate);
@@ -715,6 +743,7 @@ export function AppSolid(props: AppSolidProps) {
 
   createEffect(() => {
     if (currentScreen() === "log-list") {
+      logTarget();
       void loadLogEntries(logSelectedDate());
     }
   });
@@ -1445,7 +1474,12 @@ export function AppSolid(props: AppSolidProps) {
           version={version()}
           workingDirectory={workingDirectory()}
           activeProfile={activeProfile()}
-          onOpenLogs={() => navigateTo("log-list")}
+          onOpenLogs={(branch) => {
+            setLogTargetBranch(branch);
+            setLogSelectedEntry(null);
+            setLogSelectedDate(getTodayLogDate());
+            navigateTo("log-list");
+          }}
           onOpenProfiles={() => navigateTo("profile")}
           selectedBranches={selectedBranches()}
           onToggleSelect={toggleSelectedBranch}
@@ -1531,6 +1565,8 @@ export function AppSolid(props: AppSolidProps) {
           notification={logNotification()}
           version={version()}
           selectedDate={logSelectedDate()}
+          branchLabel={logBranchLabel()}
+          sourceLabel={logSourceLabel()}
           helpVisible={helpVisible()}
         />
       );

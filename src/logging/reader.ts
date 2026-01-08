@@ -9,11 +9,70 @@ export interface LogFileInfo {
   mtimeMs: number;
 }
 
+export type LogTargetReason =
+  | "worktree"
+  | "worktree-inaccessible"
+  | "current-working-directory"
+  | "working-directory"
+  | "no-worktree";
+
+export interface LogTargetBranch {
+  name: string;
+  isCurrent?: boolean;
+  worktree?: { path: string; isAccessible?: boolean } | undefined;
+}
+
+export interface LogTargetResolution {
+  logDir: string | null;
+  sourcePath: string | null;
+  reason: LogTargetReason;
+}
+
 const LOG_FILENAME_PATTERN = /^\d{4}-\d{2}-\d{2}\.jsonl$/;
 
 export function resolveLogDir(cwd: string = process.cwd()): string {
   const cwdBase = path.basename(cwd) || "workspace";
   return path.join(os.homedir(), ".gwt", "logs", cwdBase);
+}
+
+export function resolveLogTarget(
+  branch: LogTargetBranch | null,
+  workingDirectory: string = process.cwd(),
+): LogTargetResolution {
+  if (!branch) {
+    return {
+      logDir: resolveLogDir(workingDirectory),
+      sourcePath: workingDirectory,
+      reason: "working-directory",
+    };
+  }
+
+  const worktreePath = branch.worktree?.path;
+  if (worktreePath) {
+    const accessible = branch.worktree?.isAccessible !== false;
+    if (accessible) {
+      return {
+        logDir: resolveLogDir(worktreePath),
+        sourcePath: worktreePath,
+        reason: "worktree",
+      };
+    }
+    return {
+      logDir: null,
+      sourcePath: worktreePath,
+      reason: "worktree-inaccessible",
+    };
+  }
+
+  if (branch.isCurrent) {
+    return {
+      logDir: resolveLogDir(workingDirectory),
+      sourcePath: workingDirectory,
+      reason: "current-working-directory",
+    };
+  }
+
+  return { logDir: null, sourcePath: null, reason: "no-worktree" };
 }
 
 export function buildLogFilePath(logDir: string, date: string): string {

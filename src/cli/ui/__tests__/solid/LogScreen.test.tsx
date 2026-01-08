@@ -26,6 +26,8 @@ describe("LogScreen", () => {
       () => (
         <LogScreen
           entries={entries()}
+          branchLabel="feature/logs"
+          sourceLabel="/tmp/feature-logs"
           onBack={() => {}}
           onSelect={() => {}}
           onCopy={() => {}}
@@ -37,6 +39,8 @@ describe("LogScreen", () => {
     try {
       await testSetup.renderOnce();
       let frame = testSetup.captureCharFrame();
+      expect(frame).toContain("Branch: feature/logs");
+      expect(frame).toContain("Source: /tmp/feature-logs");
       expect(frame).toContain("No logs available.");
 
       setEntries([makeEntry("Hello")]);
