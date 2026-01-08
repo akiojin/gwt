@@ -204,7 +204,8 @@ export async function runAgentWithPty(
           "Agent exited with non-zero code",
         );
       }
-      resolve({ exitCode, signal });
+      const normalizedSignal = signal ?? null;
+      resolve({ exitCode, signal: normalizedSignal });
     });
   });
 }
