@@ -11,6 +11,13 @@
 * tools.json の customTools → customCodingAgents マイグレーション対応 ([#476](https://github.com/akiojin/gwt/issues/476)) ([99f1c7f](https://github.com/akiojin/gwt/commit/99f1c7f3b9263e087de0c3c4cd96de8adccbe229))
 
 
+## [4.11.4](https://github.com/akiojin/gwt/compare/v4.11.3...v4.11.4) (2026-01-08)
+
+
+### Bug Fixes
+
+* **test:** Bun互換性のためのテスト修正 ([#527](https://github.com/akiojin/gwt/issues/527)) ([6d4c3d4](https://github.com/akiojin/gwt/commit/6d4c3d4158bb949d013cd77ad40c91fce93a9178))
+
 ## [4.11.3](https://github.com/akiojin/gwt/compare/v4.11.2...v4.11.3) (2026-01-08)
 
 
