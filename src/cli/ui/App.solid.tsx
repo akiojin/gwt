@@ -333,6 +333,7 @@ export function AppSolid(props: AppSolidProps) {
     message: string;
     tone: "success" | "error";
   } | null>(null);
+  const [logTailEnabled, setLogTailEnabled] = createSignal(false);
   const [logTargetBranch, setLogTargetBranch] = createSignal<BranchItem | null>(
     null,
   );
@@ -468,6 +469,7 @@ export function AppSolid(props: AppSolidProps) {
   };
 
   let logNotificationTimer: ReturnType<typeof setTimeout> | null = null;
+  let logTailTimer: ReturnType<typeof setInterval> | null = null;
   let branchFooterTimer: ReturnType<typeof setTimeout> | null = null;
   const BRANCH_LOAD_TIMEOUT_MS = 3000;
   const BRANCH_FULL_LOAD_TIMEOUT_MS = 8000;
@@ -572,6 +574,17 @@ export function AppSolid(props: AppSolidProps) {
     } finally {
       setLogLoading(false);
     }
+  };
+
+  const clearLogTailTimer = () => {
+    if (logTailTimer) {
+      clearInterval(logTailTimer);
+      logTailTimer = null;
+    }
+  };
+
+  const toggleLogTail = () => {
+    setLogTailEnabled((prev) => !prev);
   };
 
   const refreshBranches = async () => {
@@ -748,10 +761,22 @@ export function AppSolid(props: AppSolidProps) {
     }
   });
 
+  createEffect(() => {
+    if (currentScreen() !== "log-list" || !logTailEnabled()) {
+      clearLogTailTimer();
+      return;
+    }
+    clearLogTailTimer();
+    logTailTimer = setInterval(() => {
+      void loadLogEntries(logSelectedDate());
+    }, 1500);
+  });
+
   onCleanup(() => {
     if (logNotificationTimer) {
       clearTimeout(logNotificationTimer);
     }
+    clearLogTailTimer();
     if (branchFooterTimer) {
       clearTimeout(branchFooterTimer);
     }
@@ -1478,6 +1503,7 @@ export function AppSolid(props: AppSolidProps) {
             setLogTargetBranch(branch);
             setLogSelectedEntry(null);
             setLogSelectedDate(getTodayLogDate());
+            setLogTailEnabled(false);
             navigateTo("log-list");
           }}
           onOpenProfiles={() => navigateTo("profile")}
@@ -1562,11 +1588,14 @@ export function AppSolid(props: AppSolidProps) {
               showLogNotification("Failed to copy to clipboard.", "error");
             }
           }}
+          onReload={() => void loadLogEntries(logSelectedDate())}
+          onToggleTail={toggleLogTail}
           notification={logNotification()}
           version={version()}
           selectedDate={logSelectedDate()}
           branchLabel={logBranchLabel()}
           sourceLabel={logSourceLabel()}
+          tailing={logTailEnabled()}
           helpVisible={helpVisible()}
         />
       );
