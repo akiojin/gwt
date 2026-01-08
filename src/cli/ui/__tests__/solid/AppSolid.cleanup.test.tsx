@@ -246,7 +246,7 @@ describe("AppSolid cleanup command", () => {
 
     try {
       const frame = testSetup.captureCharFrame();
-      expect(frame).toMatch(/\[ \] w {2,}feature\/safe/);
+      expect(frame).toMatch(/\[ \] w o feature\/safe/);
       expect(frame).toContain("[ ] w ! feature/unsafe");
     } finally {
       testSetup.renderer.destroy();
