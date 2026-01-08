@@ -32,8 +32,11 @@ function buildLastToolUsageLabel(
 ): string | null {
   if (!usage) return null;
   const toolText = mapToolLabel(usage.toolId, usage.toolLabel);
+  // バージョン情報を追加（存在しない場合は@latest）
+  const versionSuffix = usage.toolVersion ? `@${usage.toolVersion}` : "@latest";
+  const labelWithVersion = `${toolText}${versionSuffix}`;
   const timestamp = usage.timestamp ? formatTimestamp(usage.timestamp) : null;
-  const parts = [toolText];
+  const parts = [labelWithVersion];
   if (timestamp) {
     parts.push(timestamp);
   }

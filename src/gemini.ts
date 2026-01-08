@@ -10,7 +10,7 @@ import {
 import { findCommand } from "./utils/command.js";
 import { findLatestGeminiSessionId } from "./utils/session.js";
 
-const GEMINI_CLI_PACKAGE = "@google/gemini-cli@latest";
+const GEMINI_CLI_PACKAGE = "@google/gemini-cli";
 
 /**
  * Error wrapper used by `launchGeminiCLI` to preserve the original failure
@@ -45,6 +45,7 @@ export async function launchGeminiCLI(
     envOverrides?: Record<string, string>;
     model?: string;
     sessionId?: string | null;
+    version?: string | null;
   } = {},
 ): Promise<{ sessionId?: string | null }> {
   const terminal = getTerminalStreams();
@@ -163,6 +164,17 @@ export async function launchGeminiCLI(
     // Session ID is determined via file-based detection after exit.
     let capturedSessionId: string | null = null;
 
+    // Determine execution strategy based on version selection
+    // FR-063b: "installed" option only appears when local command exists
+    const selectedVersion = options.version ?? "installed";
+
+    // Log version information (FR-072)
+    if (selectedVersion === "installed") {
+      writeTerminalLine(chalk.green(`   📦 Version: installed`));
+    } else {
+      writeTerminalLine(chalk.green(`   📦 Version: @${selectedVersion}`));
+    }
+
     const runGemini = async (runArgs: string[]): Promise<void> => {
       const execChild = async (child: Promise<unknown>) => {
         try {
@@ -188,32 +200,19 @@ export async function launchGeminiCLI(
         await execChild(child);
       };
 
-      if (geminiLookup.source === "installed" && geminiLookup.path) {
-        // Use the full path to avoid PATH issues in non-interactive shells
+      if (selectedVersion === "installed" && geminiLookup.path) {
+        // FR-066: Use locally installed command when "installed" is selected
+        // FR-063b guarantees local command exists when this option is shown
         writeTerminalLine(
           chalk.green("   ✨ Using locally installed gemini command"),
         );
         return await run(geminiLookup.path, runArgs);
       }
-      writeTerminalLine(
-        chalk.cyan("   🔄 Falling back to bunx @google/gemini-cli@latest"),
-      );
-      writeTerminalLine(
-        chalk.yellow(
-          "   💡 Recommended: Install Gemini CLI globally for faster startup",
-        ),
-      );
-      writeTerminalLine(
-        chalk.yellow("      npm install -g @google/gemini-cli"),
-      );
-      writeTerminalLine("");
-      const shouldSkipDelay =
-        typeof process !== "undefined" &&
-        (process.env?.NODE_ENV === "test" || Boolean(process.env?.VITEST));
-      if (!shouldSkipDelay) {
-        await new Promise((resolve) => setTimeout(resolve, 2000));
-      }
-      return await run("bunx", [GEMINI_CLI_PACKAGE, ...runArgs]);
+
+      // FR-067, FR-068: Use bunx with version suffix for latest/specific versions
+      const packageWithVersion = `${GEMINI_CLI_PACKAGE}@${selectedVersion}`;
+      writeTerminalLine(chalk.cyan(`   🔄 Using bunx ${packageWithVersion}`));
+      return await run("bunx", [packageWithVersion, ...runArgs]);
     };
 
     let fellBackToLatest = false;
@@ -342,7 +341,7 @@ export async function launchGeminiCLI(
  */
 export async function isGeminiCLIAvailable(): Promise<boolean> {
   try {
-    await execa("bunx", [GEMINI_CLI_PACKAGE, "--version"]);
+    await execa("bunx", [`${GEMINI_CLI_PACKAGE}@latest`, "--version"]);
     return true;
   } catch (error: unknown) {
     const err = error as NodeJS.ErrnoException;
