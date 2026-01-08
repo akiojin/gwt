@@ -1,6 +1,7 @@
 /** @jsxImportSource @opentui/solid */
 import { useKeyboard, useRenderer } from "@opentui/solid";
 import {
+  batch,
   createEffect,
   createMemo,
   createSignal,
@@ -192,6 +193,24 @@ const applyCleanupStatus = (
     return worktree ? { ...base, worktree } : base;
   });
 
+const buildCleanupSafetyPending = (items: BranchItem[]): Set<string> => {
+  const pending = new Set<string>();
+  for (const branch of items) {
+    if (branch.type === "remote") {
+      continue;
+    }
+    if (branch.worktree) {
+      pending.add(branch.name);
+      continue;
+    }
+    if (isProtectedBranchName(branch.name)) {
+      continue;
+    }
+    pending.add(branch.name);
+  }
+  return pending;
+};
+
 const toLocalBranchName = (name: string): string => {
   const segments = name.split("/");
   if (segments.length <= 1) {
@@ -272,7 +291,7 @@ export function AppSolid(props: AppSolidProps) {
   const [cleanupSafetyLoading, setCleanupSafetyLoading] = createSignal(false);
   const [cleanupSafetyPending, setCleanupSafetyPending] = createSignal<
     Set<string>
-  >(new Set<string>());
+  >(new Set());
   const [isNewBranch, setIsNewBranch] = createSignal(false);
   const [newBranchBaseRef, setNewBranchBaseRef] = createSignal<string | null>(
     null,
@@ -526,7 +545,6 @@ export function AppSolid(props: AppSolidProps) {
   const refreshBranches = async () => {
     setLoading(true);
     setError(null);
-    void refreshCleanupSafety();
     try {
       const repoRoot = await getRepositoryRoot();
       const worktreesPromise = listAdditionalWorktrees();
@@ -567,6 +585,7 @@ export function AppSolid(props: AppSolidProps) {
       );
       setBranchItems(initialItems);
       setStats(buildStats(initialItems));
+      void refreshCleanupSafety();
 
       void (async () => {
         const [branches, latestWorktrees] = await Promise.all([
@@ -1404,6 +1423,7 @@ export function AppSolid(props: AppSolidProps) {
         footerMessage: branchFooterMessage(),
         inputLocked: branchInputLocked(),
         safetyLoading: cleanupSafetyLoading(),
+        safetyPendingBranches: cleanupSafetyPending(),
       };
       return (
         <BranchListScreen
