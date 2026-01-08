@@ -883,11 +883,17 @@ describe("git.ts - Branch Operations", () => {
 });
 
 describe("git.ts - Gitignore Operations", () => {
+  // Restore all mocks to ensure fs module is not affected
+  beforeEach(() => {
+    mock.restore();
+  });
+
   describe("ensureGitignoreEntry", () => {
     let tempDir: string;
 
     beforeEach(async () => {
-      // Create temporary directory for tests
+      // Restore mocks and create temporary directory for tests
+      mock.restore();
       tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "git-test-"));
     });
 
