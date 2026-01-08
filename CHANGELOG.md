@@ -11,6 +11,13 @@
 * tools.json の customTools → customCodingAgents マイグレーション対応 ([#476](https://github.com/akiojin/gwt/issues/476)) ([99f1c7f](https://github.com/akiojin/gwt/commit/99f1c7f3b9263e087de0c3c4cd96de8adccbe229))
 
 
+## [4.11.5](https://github.com/akiojin/gwt/compare/v4.11.4...v4.11.5) (2026-01-08)
+
+
+### Bug Fixes
+
+* **ci:** publishワークフローにテストタイムアウトを追加 ([#530](https://github.com/akiojin/gwt/issues/530)) ([de12b7f](https://github.com/akiojin/gwt/commit/de12b7f65d174dc44421e4022a302155c9336f45))
+
 ## [4.11.4](https://github.com/akiojin/gwt/compare/v4.11.3...v4.11.4) (2026-01-08)
 
 
