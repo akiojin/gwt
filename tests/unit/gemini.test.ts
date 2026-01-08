@@ -18,7 +18,8 @@ mock.module("execa", () => ({
 
 mock.module("fs", () => ({
   existsSync: mock(() => true),
-  default: { existsSync: mock(() => true) },
+  mkdirSync: mock(),
+  default: { existsSync: mock(() => true), mkdirSync: mock() },
 }));
 
 const mockTerminalStreams = {

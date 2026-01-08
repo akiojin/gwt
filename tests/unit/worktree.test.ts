@@ -21,11 +21,13 @@ mock.module("node:fs", () => {
   const existsSync = mock();
   const statSync = mock(() => ({ isDirectory: () => true }));
   const readFileSync = mock(() => "");
+  const mkdirSync = mock();
   return {
     existsSync,
     statSync,
     readFileSync,
-    default: { existsSync, statSync, readFileSync },
+    mkdirSync,
+    default: { existsSync, statSync, readFileSync, mkdirSync },
   };
 });
 

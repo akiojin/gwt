@@ -8,11 +8,13 @@ mock.module("execa", () => ({
 const existsSync = mock();
 const statSync = mock();
 const readFileSync = mock();
+const mkdirSync = mock();
 
 mock.module("node:fs", () => ({
   existsSync,
   statSync,
   readFileSync,
+  mkdirSync,
 }));
 
 import { execa } from "execa";

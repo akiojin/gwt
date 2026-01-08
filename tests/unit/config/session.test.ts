@@ -3,17 +3,19 @@ import { describe, it, expect, mock, beforeEach } from "bun:test";
 import * as config from "../../../src/config/index";
 
 // Mock node:fs/promises
-mock.module("node:fs/promises", () => {
+mock.module("node:fs/promises", async () => {
+  const actual = await import("node:fs/promises");
   const readFile = mock();
   const writeFile = mock();
   const mkdir = mock();
   const readdir = mock();
   return {
+    ...actual,
     readFile,
     writeFile,
     mkdir,
     readdir,
-    default: { readFile, writeFile, mkdir, readdir },
+    default: { ...actual.default, readFile, writeFile, mkdir, readdir },
   };
 });
 
