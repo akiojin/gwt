@@ -204,8 +204,8 @@ export function WizardController(props: WizardControllerProps) {
   };
 
   const handleVersionSelect = (version: string) => {
-    // "installed" は null として保存（bunx のデフォルト動作）
-    setSelectedVersion(version === "installed" ? null : version);
+    // "installed" を明示的に保存し、未指定時は後方互換で "latest" にフォールバックできるようにする
+    setSelectedVersion(version);
     goToStep("model-select");
   };
 

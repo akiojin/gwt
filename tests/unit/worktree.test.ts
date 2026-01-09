@@ -777,7 +777,7 @@ branch refs/heads/feature/no-diff
       expect(remoteExistsSpy).toHaveBeenCalled();
     });
 
-    it("uses upstream branch as comparison base when determining cleanup candidates", async () => {
+    it("uses base branch as comparison base when determining cleanup candidates", async () => {
       const configSpy = spyOn(configModule, "getConfig").mockResolvedValue({
         defaultBaseBranch: "main",
         skipPermissions: false,
@@ -847,7 +847,7 @@ branch refs/heads/feature/upstream
       expect(targets).toHaveLength(1);
       expect(branchHasUniqueSpy).toHaveBeenCalledWith(
         "feature/upstream",
-        "origin/develop",
+        "main",
         "/repo",
       );
 

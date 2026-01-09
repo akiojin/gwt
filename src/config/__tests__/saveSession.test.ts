@@ -53,7 +53,7 @@ describe("saveSession", () => {
     expect(loaded?.history?.[0]?.toolVersion).toBe("2.1.1");
   });
 
-  it("should save null toolVersion when not provided", async () => {
+  it("should save latest toolVersion when not provided", async () => {
     // Arrange
     const sessionData = {
       lastWorktreePath: testRepoRoot,
@@ -73,7 +73,7 @@ describe("saveSession", () => {
     // Assert
     expect(loaded).not.toBeNull();
     expect(loaded?.history).toHaveLength(1);
-    expect(loaded?.history?.[0]?.toolVersion).toBeNull();
+    expect(loaded?.history?.[0]?.toolVersion).toBe("latest");
   });
 
   it("should preserve toolVersion across multiple saves", async () => {

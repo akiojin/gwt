@@ -48,6 +48,14 @@ const DEFAULT_CONFIG: AppConfig = {
   worktreeNamingPattern: "{repo}-{branch}",
 };
 
+function normalizeToolVersion(version?: string | null): string {
+  if (!version) {
+    return "latest";
+  }
+  const trimmed = version.trim();
+  return trimmed.length > 0 ? trimmed : "latest";
+}
+
 /**
  * 設定ファイルを読み込む
  */
@@ -121,6 +129,7 @@ export async function saveSession(
   try {
     const sessionPath = getSessionFilePath(sessionData.repositoryRoot);
     const sessionDir = path.dirname(sessionPath);
+    const resolvedToolVersion = normalizeToolVersion(sessionData.toolVersion);
 
     // ディレクトリを作成
     await mkdir(sessionDir, { recursive: true });
@@ -154,7 +163,7 @@ export async function saveSession(
         model: sessionData.model ?? null,
         reasoningLevel: sessionData.reasoningLevel ?? null,
         skipPermissions: sessionData.skipPermissions ?? false,
-        toolVersion: sessionData.toolVersion ?? null,
+        toolVersion: resolvedToolVersion,
         timestamp: sessionData.timestamp,
       };
       existingHistory = [...existingHistory, entry].slice(-100); // keep latest 100
@@ -166,6 +175,7 @@ export async function saveSession(
       lastSessionId: sessionData.lastSessionId ?? null,
       reasoningLevel: sessionData.reasoningLevel ?? null,
       skipPermissions: sessionData.skipPermissions ?? false,
+      toolVersion: resolvedToolVersion,
     };
 
     await writeFile(sessionPath, JSON.stringify(payload, null, 2), "utf-8");
