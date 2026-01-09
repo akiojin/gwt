@@ -285,6 +285,8 @@ export function AppSolid(props: AppSolidProps) {
   const [selectedBranches, setSelectedBranches] = createSignal<string[]>([]);
   const [unsafeSelectionConfirmVisible, setUnsafeSelectionConfirmVisible] =
     createSignal(false);
+  const [unsafeConfirmInputLocked, setUnsafeConfirmInputLocked] =
+    createSignal(false);
   const [unsafeSelectionTarget, setUnsafeSelectionTarget] = createSignal<
     string | null
   >(null);
@@ -317,6 +319,13 @@ export function AppSolid(props: AppSolidProps) {
     null,
   );
   const [defaultBaseBranch, setDefaultBaseBranch] = createSignal("main");
+
+  const suppressBranchInputOnce = () => {
+    setUnsafeConfirmInputLocked(true);
+    queueMicrotask(() => {
+      setUnsafeConfirmInputLocked(false);
+    });
+  };
 
   const unsafeConfirmBoxWidth = createMemo(() => {
     const columns = terminal().columns || 80;
@@ -1479,6 +1488,7 @@ export function AppSolid(props: AppSolidProps) {
   };
 
   const confirmUnsafeSelection = (confirmed: boolean) => {
+    suppressBranchInputOnce();
     const target = unsafeSelectionTarget();
     setUnsafeSelectionConfirmVisible(false);
     setUnsafeSelectionTarget(null);
@@ -1541,7 +1551,7 @@ export function AppSolid(props: AppSolidProps) {
       const cleanupUI = {
         indicators: cleanupIndicators(),
         footerMessage: branchFooterMessage(),
-        inputLocked: branchInputLocked(),
+        inputLocked: branchInputLocked() || unsafeConfirmInputLocked(),
         safetyLoading: cleanupSafetyLoading(),
         safetyPendingBranches: cleanupSafetyPending(),
       };

@@ -221,6 +221,25 @@
 
 - [x] **T1002** [US4] `src/cli/ui/screens/solid/BranchListScreen.tsx` の凡例行に `o Safe` を追加
 
+## フェーズ16: ユーザーストーリー4 - unsafe確認Enterの伝搬抑止 (優先度: P2)
+
+**ストーリー**: unsafe選択の警告ダイアログで Enter により OK/Cancel を確定した際、ブランチ一覧の Enter 選択が発火しないようにする。
+
+**価値**: 意図しないブランチ選択/ウィザード起動を防止する。
+
+### 仕様更新
+
+- [x] **T1003** [P] [共通] `specs/SPEC-d2f4762a/spec.md` に Enter 伝搬抑止の受け入れ条件と要件を追記
+- [x] **T1004** [P] [共通] `specs/SPEC-d2f4762a/plan.md` に伝搬抑止の方針を追記
+
+### テスト（TDD）
+
+- [x] **T1005** [US4] `src/cli/ui/__tests__/solid/AppSolid.cleanup.test.tsx` に Enter 確定時のブランチ選択が起きないテストを追加
+
+### 実装
+
+- [x] **T1006** [US4] `src/cli/ui/App.solid.tsx` の unsafe確認確定時にブランチ一覧入力を抑止
+
 ## フェーズ7: ユーザーストーリー7 - 選択中Worktreeフルパス表示 (優先度: P2)
 
 **ストーリー**: ブランチ一覧のフッター直上に、選択中ブランチのWorktreeフルパスを表示する。Worktreeが存在しないが現在ブランチの場合は起動時の作業ディレクトリを表示し、ブランチ一覧が空の場合は`Worktree: (none)`を表示する。
