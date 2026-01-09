@@ -9,12 +9,12 @@ import { getModelOptions } from "../../utils/modelOptions.js";
 import type { CodingAgentId } from "../../types.js";
 import { useWizardScroll } from "./WizardPopup.js";
 import { getAgentTerminalColor } from "../../../../utils/coding-agent-colors.js";
+import { getVersionCache } from "../../utils/versionCache.js";
 import {
-  fetchPackageVersions,
-  parsePackageCommand,
-} from "../../../../utils/npmRegistry.js";
-import { BUILTIN_CODING_AGENTS } from "../../../../config/builtin-coding-agents.js";
-import { findCommand } from "../../../../utils/command.js";
+  fetchInstalledVersionForAgent,
+  versionInfoToSelectItem,
+  createInstalledOption,
+} from "../../utils/versionFetcher.js";
 
 /**
  * WizardSteps - ウィザードの各ステップコンポーネント
@@ -629,89 +629,31 @@ const LATEST_OPTION: SelectInputItem = {
   description: "Always fetch latest version",
 };
 
-// エージェントIDからパッケージ名を取得
-function getPackageNameForAgent(agentId: string): string | null {
-  const agent = BUILTIN_CODING_AGENTS.find((a) => a.id === agentId);
-  if (!agent || agent.type !== "bunx") {
-    return null;
-  }
-  const { packageName } = parsePackageCommand(agent.command);
-  return packageName;
-}
-
-// バージョン一覧を取得
-async function fetchVersionOptions(
-  agentId: string,
-): Promise<SelectInputItem[]> {
-  const packageName = getPackageNameForAgent(agentId);
-  if (!packageName) {
-    return [];
-  }
-
-  const versions = await fetchPackageVersions(packageName);
-  return versions.map((v) => {
-    const item: SelectInputItem = {
-      label: v.isPrerelease ? `${v.version} (pre)` : v.version,
-      value: v.version,
-    };
-    if (v.publishedAt) {
-      item.description = new Date(v.publishedAt).toLocaleDateString();
-    }
-    return item;
-  });
-}
-
-// エージェントIDからコマンド名へのマッピング
-const AGENT_COMMAND_MAP: Record<string, string> = {
-  "claude-code": "claude",
-  "codex-cli": "codex",
-  "gemini-cli": "gemini",
-  opencode: "opencode",
-};
-
-// インストール済みコマンド情報を取得（findCommandと統一）
-async function fetchInstalledOption(
-  agentId: string,
-): Promise<SelectInputItem | null> {
-  const commandName = AGENT_COMMAND_MAP[agentId];
-  if (!commandName) {
-    return null;
-  }
-
-  const result = await findCommand(commandName);
-  if (result.source !== "installed" || !result.path) {
-    return null;
-  }
-
-  // バージョン表示（v1.0.3 → 1.0.3 形式に）
-  const version = result.version?.replace(/^v/, "") ?? "unknown";
-
-  return {
-    label: `installed@${version}`,
-    value: "installed",
-    description: result.path,
-  };
-}
-
 export function VersionSelectStep(props: VersionSelectStepProps) {
   const [selectedIndex, setSelectedIndex] = createSignal(0);
   const [selectRef, setSelectRef] = createSignal<SelectRenderable | undefined>(
     undefined,
   );
 
-  // npmレジストリからバージョン取得
-  const [versionOptions] = createResource(
-    () => props.agentId,
-    fetchVersionOptions,
-  );
+  // FR-029: Use cached versions from startup prefetch (no npm registry re-access)
+  const cachedVersions = () => {
+    const cached = getVersionCache(props.agentId);
+    if (!cached) {
+      return []; // FR-031: Fallback to empty, UI will show "latest" only
+    }
+    return cached.map(versionInfoToSelectItem);
+  };
 
-  // インストール済み情報を取得
+  // インストール済み情報を取得 (still needs async fetch for local command check)
   const [installedOption] = createResource(
     () => props.agentId,
-    fetchInstalledOption,
+    async (agentId: string) => {
+      const installed = await fetchInstalledVersionForAgent(agentId);
+      return installed ? createInstalledOption(installed) : null;
+    },
   );
 
-  // 全オプション（installed + latest + 動的）
+  // 全オプション（installed + latest + cached versions）
   const allOptions = (): SelectInputItem[] => {
     const options: SelectInputItem[] = [];
 
@@ -724,9 +666,9 @@ export function VersionSelectStep(props: VersionSelectStepProps) {
     // latestオプション（常に表示）
     options.push(LATEST_OPTION);
 
-    // npmレジストリから取得したバージョン
-    const dynamic = versionOptions() ?? [];
-    options.push(...dynamic);
+    // FR-029: Use cached versions (no npm registry re-access)
+    const cached = cachedVersions();
+    options.push(...cached);
 
     return options;
   };
@@ -764,11 +706,11 @@ export function VersionSelectStep(props: VersionSelectStepProps) {
   };
 
   const statusText = () => {
-    if (versionOptions.loading) {
-      return "Fetching versions...";
-    }
-    if (versionOptions.error) {
-      return "Could not fetch versions";
+    // FR-029: No loading state since we use cached versions from startup
+    // FR-031: Show message if cache is empty (failed to fetch at startup)
+    const cached = cachedVersions();
+    if (cached.length === 0) {
+      return "Version list unavailable (using latest)";
     }
     return null;
   };
