@@ -78,7 +78,8 @@
 ### 7. コーディングエージェント stdout/stderr の取り込み
 
 - gwt から起動したコーディングエージェントの stdout/stderr をログとして取り込む
-- 取り込みは **opt-in** とし、環境変数 `GWT_CAPTURE_AGENT_OUTPUT` が `true` または `1` の場合のみ有効にする
+- 取り込みは **デフォルトで有効** とする
+- 環境変数 `GWT_CAPTURE_AGENT_OUTPUT` が `false` または `0` の場合のみ無効にする（大文字小文字は区別しない）
 - 取り込みログは JSONL として `~/.gwt/logs/<basename>/<YYYY-MM-DD>.jsonl` に追記する
 - stdout/stderr は `category` を分けて識別できるようにする
   - 例: `agent.stdout`, `agent.stderr`

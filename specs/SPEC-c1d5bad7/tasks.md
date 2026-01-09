@@ -49,9 +49,9 @@
 - [ ] T111 Log Viewer の Branch/Source 表示実装 (`src/cli/ui/screens/solid/LogScreen.tsx`)
 
 ## Phase 7: エージェント stdout/stderr 取り込み
-- [ ] T120 [Test] opt-in 無効時は stdout/stderr を取り込まないことを検証 (`tests/logging/agent-output.test.ts` など)
-- [ ] T121 [Test] opt-in 有効時に stdout/stderr が JSONL に追記されることを検証 (`tests/logging/agent-output.test.ts` など)
-- [ ] T130 opt-in 判定と出力取り込みの実装（`GWT_CAPTURE_AGENT_OUTPUT`） (`src/launcher.ts` / `src/logging/logger.ts`)
+- [x] T120 [Test] デフォルト有効で stdout/stderr を取り込むことを検証 (`tests/logging/agent-output.test.ts` など)
+- [x] T121 [Test] `GWT_CAPTURE_AGENT_OUTPUT=false|0` で無効化できることを検証 (`tests/logging/agent-output.test.ts` など)
+- [x] T130 デフォルト有効/opt-out 判定と出力取り込みの実装（`GWT_CAPTURE_AGENT_OUTPUT`） (`src/launcher.ts` / `src/logging/agentOutput.ts`)
 - [ ] T131 stdout/stderr ログに `agentId` を付与する (`src/launcher.ts`)
 - [ ] T132 Log Viewer で agent stdout/stderr が表示されることを検証 (`src/cli/ui/__tests__/solid/LogScreen.test.tsx`)
 
