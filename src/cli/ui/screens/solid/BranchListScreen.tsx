@@ -925,6 +925,56 @@ export function BranchListScreen(props: BranchListScreenProps) {
     return fitSegmentsToWidth(segments, layoutWidth());
   });
 
+  const statusLegendSegments = createMemo(() => {
+    const segments: TextSegment[] = [];
+    const separator = "  ";
+
+    appendSegment(segments, {
+      text: "Legend: ",
+      attributes: TextAttributes.DIM,
+    });
+
+    appendSegment(segments, {
+      text: "!",
+      fg: "red",
+      attributes: TextAttributes.BOLD,
+    });
+    appendSegment(segments, {
+      text: " Uncommitted",
+      fg: "red",
+    });
+    appendSegment(segments, {
+      text: separator,
+      attributes: TextAttributes.DIM,
+    });
+
+    appendSegment(segments, {
+      text: "!",
+      fg: "yellow",
+      attributes: TextAttributes.BOLD,
+    });
+    appendSegment(segments, {
+      text: " Unpushed",
+      fg: "yellow",
+    });
+    appendSegment(segments, {
+      text: separator,
+      attributes: TextAttributes.DIM,
+    });
+
+    appendSegment(segments, {
+      text: "*",
+      fg: "yellow",
+      attributes: TextAttributes.BOLD,
+    });
+    appendSegment(segments, {
+      text: " Unmerged",
+      fg: "yellow",
+    });
+
+    return fitSegmentsToWidth(segments, layoutWidth());
+  });
+
   const footerSegments = createMemo(() => {
     const segments: TextSegment[] = [];
     const separator = "  ";
@@ -1010,7 +1060,7 @@ export function BranchListScreen(props: BranchListScreenProps) {
               : {})}
           />
         ) : (
-          <text>{padLine("", layoutWidth())}</text>
+          renderSegmentLine(statusLegendSegments())
         )}
 
         {props.error && (

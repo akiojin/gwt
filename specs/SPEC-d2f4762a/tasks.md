@@ -164,6 +164,25 @@
 - [x] **T981** [US4] `src/cli/ui/App.solid.tsx` のクリーンアップ選択ロジックを更新し、安全判定・保護ブランチによる除外を廃止する
 - [x] **T982** [US4] `src/cli/ui/App.solid.tsx` の修復対象判定から `worktreeStatus === "inaccessible"` 条件を除外する
 
+## フェーズ13: ユーザーストーリー4 - 安全アイコン凡例の表示 (優先度: P2)
+
+**ストーリー**: Mode(tab)行の直下に安全アイコンの凡例行を表示し、未コミット/未プッシュ/未マージの意味を説明する。
+
+**価値**: 安全アイコンの意味を即座に理解でき、誤操作の防止につながる。
+
+### 仕様更新
+
+- [x] **T991** [P] [共通] `specs/SPEC-d2f4762a/spec.md` に安全アイコン凡例行の要件とシナリオを追記
+- [x] **T992** [P] [共通] `specs/SPEC-d2f4762a/plan.md` に凡例行の方針とToDoを追記
+
+### テスト（TDD）
+
+- [x] **T993** [US4] `src/cli/ui/__tests__/solid/BranchListScreen.test.tsx` に凡例行の表示テストを追加
+
+### 実装
+
+- [x] **T994** [US4] `src/cli/ui/screens/solid/BranchListScreen.tsx` に凡例行を表示
+
 ## フェーズ7: ユーザーストーリー7 - 選択中Worktreeフルパス表示 (優先度: P2)
 
 **ストーリー**: ブランチ一覧のフッター直上に、選択中ブランチのWorktreeフルパスを表示する。Worktreeが存在しないが現在ブランチの場合は起動時の作業ディレクトリを表示し、ブランチ一覧が空の場合は`Worktree: (none)`を表示する。

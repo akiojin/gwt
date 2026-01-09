@@ -242,6 +242,27 @@ describe("BranchListScreen shortcut hints", () => {
   });
 });
 
+describe("BranchListScreen status legend", () => {
+  it("shows legend for uncommitted/unpushed/unmerged indicators", async () => {
+    const branch = createBranch({
+      name: "feature/legend",
+      label: "feature/legend",
+      value: "feature/legend",
+    });
+    const testSetup = await renderBranchList({
+      branches: [branch],
+      stats: makeStats({ localCount: 1 }),
+    });
+
+    try {
+      const frame = testSetup.captureCharFrame();
+      expect(frame).toContain("Legend: ! Uncommitted  ! Unpushed  * Unmerged");
+    } finally {
+      testSetup.renderer.destroy();
+    }
+  });
+});
+
 describe("BranchListScreen cursor position stability (FR-037a)", () => {
   it("preserves cursor position when safety check completes", async () => {
     const { createSignal } = await import("solid-js");
