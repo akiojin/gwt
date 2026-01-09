@@ -67,7 +67,7 @@ describe("launchCodexCLI - session id", () => {
   const worktreePath = "/tmp/worktree";
 
   beforeEach(() => {
-    mock.restore();
+    mockExeca.mockReset();
     exitRawModeMock.mockClear();
     mockChildStdio.cleanup.mockClear();
     mockExeca.mockResolvedValue({ stdout: "", stderr: "", exitCode: 0 });

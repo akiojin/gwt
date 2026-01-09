@@ -117,8 +117,7 @@ describe("codex.ts", () => {
   const worktreePath = "/tmp/worktree";
 
   beforeEach(() => {
-    mock.restore();
-    mock.clearAllMocks();
+    (execa as ReturnType<typeof mock>).mockReset();
     mockTerminalStreams.exitRawMode.mockClear();
     stdoutWrite.mockClear();
     stderrWrite.mockClear();

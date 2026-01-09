@@ -58,8 +58,6 @@ describe("startSystemTray (SPEC-1f56fd80)", () => {
 
   afterEach(() => {
     process.env = originalEnv;
-    mock.restore();
-    mock.restore();
   });
 
   it("T010: Web UI 起動後にトレイが初期化される", async () => {

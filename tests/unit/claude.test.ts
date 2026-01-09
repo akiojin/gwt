@@ -144,7 +144,7 @@ describe("launchClaudeCode - Root User Detection", () => {
   });
 
   beforeEach(() => {
-    mock.restore();
+    (execa as ReturnType<typeof mock>).mockReset();
     clearCommandLookupCache(); // Clear command lookup cache between tests
     // Return true for worktree path checks, false for fallback path checks
     mockExistsSync.mockImplementation((...args: unknown[]) => {

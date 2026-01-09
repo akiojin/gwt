@@ -15,8 +15,7 @@ describe("main error handling", () => {
   });
 
   afterEach(() => {
-    mock.restore();
-    mock.restore();
+    // Module mocks are preserved across tests
   });
 
   it("AIツールの起動失敗時でもCLIが継続する", async () => {

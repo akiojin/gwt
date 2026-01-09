@@ -72,15 +72,14 @@ describe("launchClaudeCode - session id", () => {
   const worktreePath = "/test/path";
 
   beforeEach(() => {
-    mock.restore();
+    mockExeca.mockReset();
     exitRawModeMock.mockClear();
     mockChildStdio.cleanup.mockClear();
     mockExeca.mockResolvedValue({ stdout: "", stderr: "", exitCode: 0 });
   });
 
   afterAll(() => {
-    mock.restore();
-    // resetModules not needed in bun;
+    mockExeca.mockReset();
   });
 
   it("keeps explicit sessionId on continue even when another session is detected", async () => {

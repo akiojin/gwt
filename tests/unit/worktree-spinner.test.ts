@@ -21,7 +21,7 @@ describe("worktree spinner integration", () => {
   });
 
   afterEach(() => {
-    mock.restore();
+    execaMock.mockReset();
   });
 
   it("should start and stop spinner during worktree creation", async () => {

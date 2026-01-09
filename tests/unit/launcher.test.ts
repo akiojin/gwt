@@ -4,7 +4,7 @@
  * T201-T204: _launchCodingAgent()と_resolveCommand()のテスト
  */
 
-import { describe, it, expect, beforeEach, afterEach,  mock } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
 import type {
   CodingAgent,
   CodingAgentLaunchOptions,
@@ -27,9 +27,7 @@ describe("_launchCodingAgent - type='path'", () => {
     _launchCodingAgent = mock();
   });
 
-  afterEach(() => {
-    mock.restore();
-  });
+  afterEach(() => {});
 
   it("絶対パスでツールを直接実行できる", async () => {
     const _tool: CodingAgent = {
@@ -152,9 +150,7 @@ describe("_launchCodingAgent - type='bunx'", () => {
     _launchCodingAgent = mock();
   });
 
-  afterEach(() => {
-    mock.restore();
-  });
+  afterEach(() => {});
 
   it("bunx経由でパッケージを実行できる", async () => {
     const _tool: CodingAgent = {
@@ -260,9 +256,7 @@ describe("_launchCodingAgent - type='command'", () => {
     _launchCodingAgent = mock();
   });
 
-  afterEach(() => {
-    mock.restore();
-  });
+  afterEach(() => {});
 
   it("PATH環境変数からコマンドを解決して実行できる", async () => {
     const _tool: CodingAgent = {
@@ -387,9 +381,7 @@ describe("_resolveCommand", () => {
     _resolveCommand = mock();
   });
 
-  afterEach(() => {
-    mock.restore();
-  });
+  afterEach(() => {});
 
   it("Unix/Linuxでwhichコマンドを使用してコマンドパスを解決できる", async () => {
     // TODO: 実装後にテストを記述

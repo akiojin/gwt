@@ -11,11 +11,11 @@ const execaMock = execa as unknown as Mock;
 
 describe("fetchAllRemotes", () => {
   beforeEach(() => {
-    mock.restore();
+    (execa as ReturnType<typeof mock>).mockReset();
   });
 
   afterEach(() => {
-    mock.restore();
+    (execa as ReturnType<typeof mock>).mockReset();
   });
 
   it("passes timeout and disables interactive prompts", async () => {

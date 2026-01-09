@@ -77,9 +77,9 @@ const mockExistsSync = existsSync as Mock;
 let consoleLogSpy: Mock;
 
 describe("launchGeminiCLI", () => {
-  beforeEach(() => {
-    mock.restore();
-    mock.clearAllMocks();
+  beforeEach(async () => {
+    (execa as ReturnType<typeof mock>).mockReset();
+    consoleLogSpy?.mockRestore();
     consoleLogSpy = spyOn(console, "log").mockImplementation(() => {});
     mockTerminalStreams.exitRawMode.mockClear();
     mockChildStdio.cleanup.mockClear();
@@ -90,11 +90,13 @@ describe("launchGeminiCLI", () => {
     mockExistsSync.mockReturnValue(true);
     // Reset findCommand mock
     mockFindCommand.mockReset();
+    // Reset terminal mocks
+    const { resetTerminalModes } = await import("../../src/utils/terminal.js");
+    (resetTerminalModes as Mock).mockClear();
   });
 
   afterAll(() => {
-    mock.restore();
-    // resetModules not needed in bun;
+    (execa as ReturnType<typeof mock>).mockReset();
   });
 
   describe("基本起動テスト", () => {

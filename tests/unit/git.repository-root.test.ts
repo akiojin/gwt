@@ -34,7 +34,7 @@ import { getRepositoryRoot } from "../../src/git.js";
 
 describe("getRepositoryRoot - worktree resolution", () => {
   beforeEach(() => {
-    mock.restore();
+    (execa as ReturnType<typeof mock>).mockReset();
     mock.clearAllMocks();
   });
 
