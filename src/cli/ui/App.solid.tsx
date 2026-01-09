@@ -76,10 +76,10 @@ import {
 } from "../../config/index.js";
 import { getAllCodingAgents } from "../../config/tools.js";
 import {
-  buildLogFilePath,
+  clearLogFiles,
   getTodayLogDate,
-  readLogFileLines,
-  resolveLogDir,
+  readLogLinesForDate,
+  resolveLogTarget,
 } from "../../logging/reader.js";
 import { parseLogLines } from "../../logging/formatter.js";
 import { copyToClipboard } from "./utils/clipboard.js";
@@ -330,13 +330,17 @@ export function AppSolid(props: AppSolidProps) {
   const [logError, setLogError] = createSignal<string | null>(null);
   const [logSelectedEntry, setLogSelectedEntry] =
     createSignal<FormattedLogEntry | null>(null);
-  const [logSelectedDate, _setLogSelectedDate] = createSignal<string | null>(
+  const [logSelectedDate, setLogSelectedDate] = createSignal<string | null>(
     getTodayLogDate(),
   );
   const [logNotification, setLogNotification] = createSignal<{
     message: string;
     tone: "success" | "error";
   } | null>(null);
+  const [logTailEnabled, setLogTailEnabled] = createSignal(false);
+  const [logTargetBranch, setLogTargetBranch] = createSignal<BranchItem | null>(
+    null,
+  );
 
   const [profileItems, setProfileItems] = createSignal<
     { name: string; displayName?: string; isActive?: boolean }[]
@@ -367,7 +371,26 @@ export function AppSolid(props: AppSolidProps) {
   const [profileConfirmMode, setProfileConfirmMode] =
     createSignal<ProfileConfirmMode>("delete-profile");
 
-  const logDir = createMemo(() => resolveLogDir(workingDirectory()));
+  const logTarget = createMemo(() =>
+    resolveLogTarget(logTargetBranch(), workingDirectory()),
+  );
+  const logBranchLabel = createMemo(() => logTargetBranch()?.label ?? null);
+  const logSourceLabel = createMemo(() => {
+    const target = logTarget();
+    if (!target.sourcePath) {
+      return "(none)";
+    }
+    if (
+      target.reason === "current-working-directory" ||
+      target.reason === "working-directory"
+    ) {
+      return `${target.sourcePath} (cwd)`;
+    }
+    if (target.reason === "worktree-inaccessible") {
+      return `${target.sourcePath} (inaccessible)`;
+    }
+    return target.sourcePath;
+  });
   const selectedProfileConfig = createMemo(() => {
     const name = selectedProfileName();
     const config = profilesConfig();
@@ -450,6 +473,7 @@ export function AppSolid(props: AppSolidProps) {
   };
 
   let logNotificationTimer: ReturnType<typeof setTimeout> | null = null;
+  let logTailTimer: ReturnType<typeof setInterval> | null = null;
   let branchFooterTimer: ReturnType<typeof setTimeout> | null = null;
   const BRANCH_LOAD_TIMEOUT_MS = 3000;
   const BRANCH_FULL_LOAD_TIMEOUT_MS = 8000;
@@ -533,15 +557,57 @@ export function AppSolid(props: AppSolidProps) {
     setLogLoading(true);
     setLogError(null);
     try {
-      const filePath = buildLogFilePath(logDir(), targetDate);
-      const lines = await readLogFileLines(filePath);
-      const parsed = parseLogLines(lines, { limit: 100 });
+      const target = logTarget();
+      if (!target.logDir) {
+        setLogEntries([]);
+        setLogSelectedDate(targetDate);
+        return;
+      }
+      const result = await readLogLinesForDate(target.logDir, targetDate);
+      if (!result) {
+        setLogEntries([]);
+        setLogSelectedDate(targetDate);
+        return;
+      }
+      setLogSelectedDate(result.date);
+      const parsed = parseLogLines(result.lines, { limit: 100 });
       setLogEntries(parsed);
     } catch (err) {
       setLogEntries([]);
       setLogError(err instanceof Error ? err.message : "Failed to load logs");
     } finally {
       setLogLoading(false);
+    }
+  };
+
+  const clearLogTailTimer = () => {
+    if (logTailTimer) {
+      clearInterval(logTailTimer);
+      logTailTimer = null;
+    }
+  };
+
+  const toggleLogTail = () => {
+    setLogTailEnabled((prev) => !prev);
+  };
+
+  const resetLogFiles = async () => {
+    const target = logTarget();
+    if (!target.logDir) {
+      showLogNotification("No logs available.", "error");
+      return;
+    }
+    try {
+      const cleared = await clearLogFiles(target.logDir);
+      if (cleared === 0) {
+        showLogNotification("No logs to reset.", "error");
+      } else {
+        showLogNotification("Logs cleared.", "success");
+      }
+      await loadLogEntries(logSelectedDate());
+    } catch (err) {
+      logger.warn({ err }, "Failed to clear log files");
+      showLogNotification("Failed to reset logs.", "error");
     }
   };
 
@@ -714,14 +780,27 @@ export function AppSolid(props: AppSolidProps) {
 
   createEffect(() => {
     if (currentScreen() === "log-list") {
+      logTarget();
       void loadLogEntries(logSelectedDate());
     }
+  });
+
+  createEffect(() => {
+    if (currentScreen() !== "log-list" || !logTailEnabled()) {
+      clearLogTailTimer();
+      return;
+    }
+    clearLogTailTimer();
+    logTailTimer = setInterval(() => {
+      void loadLogEntries(logSelectedDate());
+    }, 1500);
   });
 
   onCleanup(() => {
     if (logNotificationTimer) {
       clearTimeout(logNotificationTimer);
     }
+    clearLogTailTimer();
     if (branchFooterTimer) {
       clearTimeout(branchFooterTimer);
     }
@@ -1444,7 +1523,13 @@ export function AppSolid(props: AppSolidProps) {
           version={version()}
           workingDirectory={workingDirectory()}
           activeProfile={activeProfile()}
-          onOpenLogs={() => navigateTo("log-list")}
+          onOpenLogs={(branch) => {
+            setLogTargetBranch(branch);
+            setLogSelectedEntry(null);
+            setLogSelectedDate(getTodayLogDate());
+            setLogTailEnabled(false);
+            navigateTo("log-list");
+          }}
           onOpenProfiles={() => navigateTo("profile")}
           selectedBranches={selectedBranches()}
           onToggleSelect={toggleSelectedBranch}
@@ -1529,9 +1614,15 @@ export function AppSolid(props: AppSolidProps) {
               showLogNotification("Failed to copy to clipboard.", "error");
             }
           }}
+          onReload={() => void loadLogEntries(logSelectedDate())}
+          onToggleTail={toggleLogTail}
+          onReset={() => void resetLogFiles()}
           notification={logNotification()}
           version={version()}
           selectedDate={logSelectedDate()}
+          branchLabel={logBranchLabel()}
+          sourceLabel={logSourceLabel()}
+          tailing={logTailEnabled()}
           helpVisible={helpVisible()}
         />
       );

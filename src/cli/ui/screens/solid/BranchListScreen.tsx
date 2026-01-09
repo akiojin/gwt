@@ -3,10 +3,14 @@ import { createEffect, createMemo, createSignal, on } from "solid-js";
 import { useKeyboard, useTerminalDimensions } from "@opentui/solid";
 import { TextAttributes } from "@opentui/core";
 import type { BranchItem, BranchViewMode, Statistics } from "../../types.js";
-import { getLatestActivityTimestamp } from "../../utils/branchFormatter.js";
+import {
+  formatLocalDateTime,
+  getLatestActivityTimestamp,
+} from "../../utils/branchFormatter.js";
 import stringWidth from "string-width";
 import { getAgentTerminalColor } from "../../../../utils/coding-agent-colors.js";
 import { Header } from "../../components/solid/Header.js";
+import { selectionStyle } from "../../core/theme.js";
 type IndicatorColor = "cyan" | "green" | "yellow" | "red" | "brightGreen";
 
 interface CleanupIndicator {
@@ -39,7 +43,7 @@ export interface BranchListScreenProps {
   onCreateBranch?: (branch: BranchItem | null) => void;
   onRefresh?: () => void;
   onOpenProfiles?: () => void;
-  onOpenLogs?: () => void;
+  onOpenLogs?: (branch: BranchItem | null) => void;
   loading?: boolean;
   error?: Error | null;
   lastUpdated?: Date | null;
@@ -195,8 +199,8 @@ const fitSegmentsToWidth = (
 const applySelectionStyle = (segments: TextSegment[]): TextSegment[] =>
   segments.map((segment) => ({
     text: segment.text,
-    fg: "black",
-    bg: "cyan",
+    fg: selectionStyle.fg,
+    bg: selectionStyle.bg,
   }));
 
 const CLEANUP_SPINNER_FRAMES = ["-", "\\", "|", "/"];
@@ -520,14 +524,8 @@ export function BranchListScreen(props: BranchListScreenProps) {
       return "---";
     }
 
-    const date = new Date(timestamp * 1000);
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, "0");
-    const day = String(date.getDate()).padStart(2, "0");
-    const hours = String(date.getHours()).padStart(2, "0");
-    const minutes = String(date.getMinutes()).padStart(2, "0");
-
-    return `${year}-${month}-${day} ${hours}:${minutes}`;
+    const formatted = formatLocalDateTime(timestamp * 1000);
+    return formatted || "---";
   };
 
   useKeyboard((key) => {
@@ -663,7 +661,8 @@ export function BranchListScreen(props: BranchListScreenProps) {
     } else if (key.name === "p" || key.sequence === "p") {
       props.onOpenProfiles?.();
     } else if (key.name === "l" || key.sequence === "l") {
-      props.onOpenLogs?.();
+      const selected = filteredBranches()[selectedIndex()] ?? null;
+      props.onOpenLogs?.(selected);
     }
   });
 

@@ -7,6 +7,31 @@ import type { BranchInfo } from "../../types.js";
 
 // TDD: テストを先に書き、実装は後から行う
 
+const LOCAL_DATE_TIME_FORMATTER = new Intl.DateTimeFormat(undefined, {
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+
+const formatLocalDateTime = (timestampMs: number): string => {
+  const date = new Date(timestampMs);
+  const parts = LOCAL_DATE_TIME_FORMATTER.formatToParts(date);
+  const get = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((part) => part.type === type)?.value;
+  const year = get("year");
+  const month = get("month");
+  const day = get("day");
+  const hour = get("hour");
+  const minute = get("minute");
+  if (!year || !month || !day || !hour || !minute) {
+    return LOCAL_DATE_TIME_FORMATTER.format(date);
+  }
+  return `${year}-${month}-${day} ${hour}:${minute}`;
+};
+
 describe("branchFormatter", () => {
   describe("buildLastToolUsageLabel with version", () => {
     const baseBranch: BranchInfo = {
@@ -31,7 +56,11 @@ describe("branchFormatter", () => {
       };
 
       const item = formatBranchItem(branch);
-      expect(item.lastToolUsageLabel).toBe("Claude@1.0.3 | 2024-01-08 12:00");
+      expect(item.lastToolUsageLabel).toBe(
+        `Claude@1.0.3 | ${formatLocalDateTime(
+          new Date("2024-01-08T12:00:00").getTime(),
+        )}`,
+      );
     });
 
     it("should format as 'ToolName@latest | 2024-01-08 12:00' when version is null", () => {
@@ -48,7 +77,11 @@ describe("branchFormatter", () => {
       };
 
       const item = formatBranchItem(branch);
-      expect(item.lastToolUsageLabel).toBe("Claude@latest | 2024-01-08 12:00");
+      expect(item.lastToolUsageLabel).toBe(
+        `Claude@latest | ${formatLocalDateTime(
+          new Date("2024-01-08T12:00:00").getTime(),
+        )}`,
+      );
     });
 
     it("should format as 'ToolName@latest | 2024-01-08 12:00' when version is undefined", () => {
@@ -64,7 +97,11 @@ describe("branchFormatter", () => {
       };
 
       const item = formatBranchItem(branch);
-      expect(item.lastToolUsageLabel).toBe("Claude@latest | 2024-01-08 12:00");
+      expect(item.lastToolUsageLabel).toBe(
+        `Claude@latest | ${formatLocalDateTime(
+          new Date("2024-01-08T12:00:00").getTime(),
+        )}`,
+      );
     });
 
     it("should format Codex with version", () => {
@@ -82,7 +119,9 @@ describe("branchFormatter", () => {
 
       const item = formatBranchItem(branch);
       expect(item.lastToolUsageLabel).toBe(
-        "Codex@2.1.0-beta.1 | 2024-01-08 15:30",
+        `Codex@2.1.0-beta.1 | ${formatLocalDateTime(
+          new Date("2024-01-08T15:30:00").getTime(),
+        )}`,
       );
     });
 
@@ -100,7 +139,11 @@ describe("branchFormatter", () => {
       };
 
       const item = formatBranchItem(branch);
-      expect(item.lastToolUsageLabel).toBe("Gemini@0.5.0 | 2024-01-08 09:15");
+      expect(item.lastToolUsageLabel).toBe(
+        `Gemini@0.5.0 | ${formatLocalDateTime(
+          new Date("2024-01-08T09:15:00").getTime(),
+        )}`,
+      );
     });
 
     it("should format custom tool with version", () => {
@@ -117,7 +160,11 @@ describe("branchFormatter", () => {
       };
 
       const item = formatBranchItem(branch);
-      expect(item.lastToolUsageLabel).toBe("MyTool@1.0.0 | 2024-01-08 10:00");
+      expect(item.lastToolUsageLabel).toBe(
+        `MyTool@1.0.0 | ${formatLocalDateTime(
+          new Date("2024-01-08T10:00:00").getTime(),
+        )}`,
+      );
     });
 
     it("should return null when lastToolUsage is undefined", () => {

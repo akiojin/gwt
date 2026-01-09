@@ -59,6 +59,7 @@ export function createLogger(config: LoggerConfig = {}): Logger {
     const destinationStream = pino.destination({
       dest: destination,
       sync: true,
+      append: true,
     });
     return pino(options, destinationStream);
   }
@@ -89,6 +90,7 @@ export function createLogger(config: LoggerConfig = {}): Logger {
   const destinationStream = pino.destination({
     dest: destination,
     sync: false,
+    append: true,
   });
   return pino(options, destinationStream);
 }
