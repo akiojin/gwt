@@ -16,6 +16,7 @@ import {
   readFileContent,
   checkFileStat,
 } from "../common.js";
+import { listAllWorktrees } from "../../../worktree.js";
 
 /**
  * Encodes a project path for Claude's directory structure.
@@ -75,36 +76,72 @@ function getClaudeRootCandidates(): string[] {
  * 3. ~/.claude/history.jsonl (global history fallback)
  *
  * @param cwd - The working directory to find sessions for
- * @param options - Search options (since, until, preferClosestTo, windowMs)
+ * @param options - Search options (since, until, preferClosestTo, windowMs, branch/worktrees)
  * @returns Session info with ID and modification time, or null if not found
  */
 export async function findLatestClaudeSession(
   cwd: string,
-  options: Omit<SessionSearchOptions, "cwd"> = {},
+  options: SessionSearchOptions = {},
 ): Promise<ClaudeSessionInfo | null> {
   const rootCandidates = getClaudeRootCandidates();
-  const encodedPaths = generateClaudeProjectPathCandidates(cwd);
+  const branchFilter =
+    typeof options.branch === "string" && options.branch.trim().length > 0
+      ? options.branch.trim()
+      : null;
 
-  for (const claudeRoot of rootCandidates) {
-    for (const encoded of encodedPaths) {
-      const projectDir = path.join(claudeRoot, "projects", encoded);
-      const sessionsDir = path.join(projectDir, "sessions");
+  let cwdCandidates: string[] = [];
+  if (branchFilter) {
+    let worktrees: { path: string; branch: string }[] = [];
+    if (Array.isArray(options.worktrees) && options.worktrees.length > 0) {
+      worktrees = options.worktrees
+        .filter((entry) => entry?.path && entry?.branch)
+        .map((entry) => ({ path: entry.path, branch: entry.branch }));
+    } else {
+      try {
+        const allWorktrees = await listAllWorktrees();
+        worktrees = allWorktrees
+          .filter((entry) => entry?.path && entry?.branch)
+          .map((entry) => ({ path: entry.path, branch: entry.branch }));
+      } catch {
+        worktrees = [];
+      }
+    }
+    const matches = worktrees
+      .filter((entry) => entry.branch === branchFilter)
+      .map((entry) => entry.path);
+    if (!matches.length) return null;
+    cwdCandidates = matches;
+  } else {
+    const baseCwd = options.cwd ?? cwd;
+    if (!baseCwd) return null;
+    cwdCandidates = [baseCwd];
+  }
 
-      // 1) Look under sessions/ (official location)
-      const session = await findNewestSessionIdFromDir(
-        sessionsDir,
-        false,
-        options,
-      );
-      if (session) return session;
+  const uniqueCwds = Array.from(new Set(cwdCandidates));
 
-      // 2) Look directly under project dir and subdirs
-      const rootSession = await findNewestSessionIdFromDir(
-        projectDir,
-        true,
-        options,
-      );
-      if (rootSession) return rootSession;
+  for (const candidateCwd of uniqueCwds) {
+    const encodedPaths = generateClaudeProjectPathCandidates(candidateCwd);
+    for (const claudeRoot of rootCandidates) {
+      for (const encoded of encodedPaths) {
+        const projectDir = path.join(claudeRoot, "projects", encoded);
+        const sessionsDir = path.join(projectDir, "sessions");
+
+        // 1) Look under sessions/ (official location)
+        const session = await findNewestSessionIdFromDir(
+          sessionsDir,
+          false,
+          options,
+        );
+        if (session) return session;
+
+        // 2) Look directly under project dir and subdirs
+        const rootSession = await findNewestSessionIdFromDir(
+          projectDir,
+          true,
+          options,
+        );
+        if (rootSession) return rootSession;
+      }
     }
   }
 
@@ -124,7 +161,10 @@ export async function findLatestClaudeSession(
           typeof parsed.project === "string" ? parsed.project : null;
         const sessionId =
           typeof parsed.sessionId === "string" ? parsed.sessionId : null;
-        if (project && sessionId && matchesCwd(project, cwd)) {
+        const matchesProject = uniqueCwds.some((candidate) =>
+          matchesCwd(project, candidate),
+        );
+        if (project && sessionId && matchesProject) {
           return { id: sessionId, mtime: historyStat.mtimeMs };
         }
       } catch {
@@ -141,14 +181,14 @@ export async function findLatestClaudeSession(
 /**
  * Finds the latest Claude session ID for a given working directory.
  * @param cwd - The working directory to find sessions for
- * @param options - Search options (since, until, preferClosestTo, windowMs)
+ * @param options - Search options (since, until, preferClosestTo, windowMs, branch/worktrees)
  * @returns Session ID string or null if not found
  */
 export async function findLatestClaudeSessionId(
   cwd: string,
-  options: Omit<SessionSearchOptions, "cwd"> = {},
+  options: SessionSearchOptions = {},
 ): Promise<string | null> {
-  const found = await findLatestClaudeSession(cwd, options);
+  const found = await findLatestClaudeSession(options.cwd ?? cwd, options);
   return found?.id ?? null;
 }
 
@@ -167,6 +207,9 @@ export async function waitForClaudeSessionId(
     until?: number;
     preferClosestTo?: number;
     windowMs?: number;
+    branch?: string | null;
+    worktrees?: { path: string; branch: string }[] | null;
+    cwd?: string | null;
   } = {},
 ): Promise<string | null> {
   const timeoutMs = options.timeoutMs ?? 120_000;
@@ -180,6 +223,10 @@ export async function waitForClaudeSessionId(
   if (options.preferClosestTo !== undefined)
     searchOptions.preferClosestTo = options.preferClosestTo;
   if (options.windowMs !== undefined) searchOptions.windowMs = options.windowMs;
+  if (options.branch !== undefined) searchOptions.branch = options.branch;
+  if (options.worktrees !== undefined)
+    searchOptions.worktrees = options.worktrees;
+  if (options.cwd !== undefined) searchOptions.cwd = options.cwd;
 
   while (Date.now() < deadline) {
     const found = await findLatestClaudeSession(cwd, searchOptions);

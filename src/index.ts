@@ -610,6 +610,7 @@ export async function handleAIToolWorkflow(
           model?: string;
           sessionId?: string | null;
           chrome?: boolean;
+          branch?: string | null;
         } = {
           mode:
             mode === "resume"
@@ -621,6 +622,7 @@ export async function handleAIToolWorkflow(
           envOverrides: sharedEnv,
           sessionId: resumeSessionId,
           chrome: true,
+          branch,
         };
         if (normalizedModel) {
           launchOptions.model = normalizedModel;
@@ -705,10 +707,15 @@ export async function handleAIToolWorkflow(
       resumeSessionId ??
       null;
 
+    const branchWorktrees = branch ? [{ path: worktreePath, branch }] : null;
+
     if (!finalSessionId && tool === "claude-code") {
       try {
         finalSessionId =
-          (await findLatestClaudeSessionId(worktreePath)) ?? null;
+          (await findLatestClaudeSessionId(worktreePath, {
+            branch,
+            worktrees: branchWorktrees,
+          })) ?? null;
       } catch {
         finalSessionId = null;
       }
@@ -724,6 +731,7 @@ export async function handleAIToolWorkflow(
           windowMs: 60 * 60 * 1000,
           cwd: worktreePath,
           branch,
+          worktrees: branchWorktrees,
         });
         if (latest) {
           finalSessionId = latest.id;
@@ -738,6 +746,8 @@ export async function handleAIToolWorkflow(
           until: finishedAt + 60_000,
           preferClosestTo: finishedAt,
           windowMs: 60 * 60 * 1000,
+          branch,
+          worktrees: branchWorktrees,
         });
         if (latestClaude) {
           finalSessionId = latestClaude.id;
@@ -754,6 +764,7 @@ export async function handleAIToolWorkflow(
           windowMs: 60 * 60 * 1000,
           cwd: worktreePath,
           branch,
+          worktrees: branchWorktrees,
         });
         if (latestGemini) {
           finalSessionId = latestGemini.id;

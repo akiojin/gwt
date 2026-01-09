@@ -170,7 +170,7 @@ describe("QuickStartStep", () => {
 
       try {
         // 矢印キーで最後の項目（Choose different settings）を選択
-        for (let i = 0; i < 5; i++) {
+        for (let i = 0; i < 4; i++) {
           testSetup.mockInput.pressArrow("down");
           await testSetup.renderOnce();
         }
@@ -244,6 +244,35 @@ describe("QuickStartStep", () => {
         const frame = testSetup.captureCharFrame();
         expect(frame).not.toContain("Resume session");
         expect(frame).toContain("Start new (previous settings)");
+        expect(frame).toContain("Choose different settings");
+      } finally {
+        testSetup.renderer.destroy();
+      }
+    });
+  });
+
+  describe("multi-tool display", () => {
+    it("renders tool-specific descriptions and session id only for resume", async () => {
+      const testSetup = await testRender(
+        () => (
+          <QuickStartStep
+            history={mockHistory}
+            onResume={() => {}}
+            onStartNew={() => {}}
+            onChooseDifferent={() => {}}
+            onBack={() => {}}
+          />
+        ),
+        { width: 90, height: 24 },
+      );
+      await testSetup.renderOnce();
+
+      try {
+        const frame = testSetup.captureCharFrame();
+        expect(frame).toContain("Claude Code, claude-sonnet-4-20250514");
+        expect(frame).toContain("Codex CLI, o3-mini, high");
+        expect(frame).toContain("Session: session-123");
+        expect(frame).toContain("Session: session-456");
       } finally {
         testSetup.renderer.destroy();
       }

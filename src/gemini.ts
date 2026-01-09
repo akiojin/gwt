@@ -256,6 +256,9 @@ export async function launchGeminiCLI(
           (await findLatestGeminiSessionId(worktreePath, {
             cwd: worktreePath,
             branch: options.branch ?? null,
+            worktrees: options.branch
+              ? [{ path: worktreePath, branch: options.branch }]
+              : null,
           })) ?? null;
       } catch {
         capturedSessionId = null;

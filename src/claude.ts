@@ -50,6 +50,7 @@ export async function launchClaudeCode(
     model?: string;
     sessionId?: string | null;
     chrome?: boolean;
+    branch?: string | null;
   } = {},
 ): Promise<{ sessionId?: string | null }> {
   const terminal = getTerminalStreams();
@@ -343,12 +344,17 @@ export async function launchClaudeCode(
     // Use only findLatestClaudeSession with short timeout, skip sessionProbe to avoid hanging
     let capturedSessionId: string | null = null;
     const finishedAt = Date.now();
+    const branchWorktrees = options.branch
+      ? [{ path: worktreePath, branch: options.branch }]
+      : null;
     try {
       const latest = await findLatestClaudeSession(worktreePath, {
         since: startedAt,
         until: finishedAt + 30_000,
         preferClosestTo: finishedAt,
         windowMs: 10 * 60 * 1000,
+        branch: options.branch ?? null,
+        worktrees: branchWorktrees,
       });
       const detectedSessionId = latest?.id ?? null;
       // When we explicitly resumed a specific session, keep that ID as the source of truth.

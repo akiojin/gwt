@@ -27,6 +27,7 @@ import {
   findLatestClaudeSessionId,
   findLatestCodexSessionId,
   findLatestGeminiSessionId,
+  findLatestOpenCodeSessionId,
   waitForClaudeSessionId,
   waitForCodexSessionId,
   isValidUuidSessionId,
@@ -278,6 +279,186 @@ describe("utils/session", () => {
         { path: `/repo/.worktrees/${branchB}`, branch: branchB },
       ],
     });
+
+    expect(id).toBe(uuidA);
+  });
+
+  it("findLatestClaudeSessionId selects session matching branch via worktrees", async () => {
+    const dirent = (name: string, type: "file" | "dir") => ({
+      name,
+      isFile: () => type === "file",
+      isDirectory: () => type === "dir",
+    });
+
+    const branchA = "branch-a";
+    const branchB = "branch-b";
+    const uuidA = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+    const uuidB = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+
+    readdirMock.mockImplementation((dir: string, opts?: ReaddirOptions) => {
+      if (opts?.withFileTypes) {
+        if (endsWithPath(dir, "/projects/-repo--worktrees-branch-a/sessions")) {
+          return Promise.resolve([dirent(`${uuidA}.jsonl`, "file")]);
+        }
+        if (endsWithPath(dir, "/projects/-repo--worktrees-branch-b/sessions")) {
+          return Promise.resolve([dirent(`${uuidB}.jsonl`, "file")]);
+        }
+      }
+      return Promise.resolve([]);
+    });
+
+    statMock.mockImplementation((filePath: string) => {
+      if (filePath.includes(uuidA)) {
+        return Promise.resolve({ mtimeMs: 1_000 });
+      }
+      return Promise.resolve({ mtimeMs: 2_000 });
+    });
+
+    readFileMock.mockImplementation((filePath: string) => {
+      if (filePath.includes(uuidA)) {
+        return Promise.resolve(JSON.stringify({ session_id: uuidA }));
+      }
+      return Promise.resolve(JSON.stringify({ session_id: uuidB }));
+    });
+
+    const id = await findLatestClaudeSessionId("/repo/.worktrees/branch-b", {
+      branch: branchA,
+      worktrees: [
+        { path: `/repo/.worktrees/${branchA}`, branch: branchA },
+        { path: `/repo/.worktrees/${branchB}`, branch: branchB },
+      ],
+    });
+
+    expect(id).toBe(uuidA);
+  });
+
+  it("findLatestGeminiSessionId selects session matching branch via worktrees", async () => {
+    const dirent = (name: string, type: "file" | "dir") => ({
+      name,
+      isFile: () => type === "file",
+      isDirectory: () => type === "dir",
+    });
+
+    const branchA = "feature-a";
+    const branchB = "feature-b";
+    const uuidA = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+    const uuidB = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+
+    readdirMock.mockImplementation((dir: string, opts?: ReaddirOptions) => {
+      if (opts?.withFileTypes) {
+        if (endsWithPath(dir, "/.gemini/tmp")) {
+          return Promise.resolve([
+            dirent("projA", "dir"),
+            dirent("projB", "dir"),
+          ]);
+        }
+        if (endsWithPath(dir, "/projA")) {
+          return Promise.resolve([dirent("a.json", "file")]);
+        }
+        if (endsWithPath(dir, "/projB")) {
+          return Promise.resolve([dirent("b.json", "file")]);
+        }
+      }
+      return Promise.resolve([]);
+    });
+
+    statMock.mockImplementation((filePath: string) => {
+      return Promise.resolve({
+        mtimeMs: filePath.includes("b.json") ? 2_000 : 1_000,
+      });
+    });
+
+    readFileMock.mockImplementation((filePath: string) => {
+      if (filePath.includes("a.json")) {
+        return Promise.resolve(
+          JSON.stringify({
+            id: uuidA,
+            cwd: `/repo/.worktrees/${branchA}`,
+          }),
+        );
+      }
+      return Promise.resolve(
+        JSON.stringify({
+          id: uuidB,
+          cwd: `/repo/.worktrees/${branchB}`,
+        }),
+      );
+    });
+
+    const id = await findLatestGeminiSessionId(`/repo/.worktrees/${branchB}`, {
+      branch: branchA,
+      worktrees: [
+        { path: `/repo/.worktrees/${branchA}`, branch: branchA },
+        { path: `/repo/.worktrees/${branchB}`, branch: branchB },
+      ],
+    });
+
+    expect(id).toBe(uuidA);
+  });
+
+  it("findLatestOpenCodeSessionId selects session matching branch via worktrees", async () => {
+    const dirent = (name: string, type: "file" | "dir") => ({
+      name,
+      isFile: () => type === "file",
+      isDirectory: () => type === "dir",
+    });
+
+    const branchA = "feature-a";
+    const branchB = "feature-b";
+    const uuidA = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
+    const uuidB = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+
+    readdirMock.mockImplementation((dir: string, opts?: ReaddirOptions) => {
+      if (opts?.withFileTypes) {
+        if (endsWithPath(dir, "/.local/share/opencode/storage/session")) {
+          return Promise.resolve([
+            dirent("projA", "dir"),
+            dirent("projB", "dir"),
+          ]);
+        }
+        if (endsWithPath(dir, "/projA")) {
+          return Promise.resolve([dirent("a.json", "file")]);
+        }
+        if (endsWithPath(dir, "/projB")) {
+          return Promise.resolve([dirent("b.json", "file")]);
+        }
+      }
+      return Promise.resolve([]);
+    });
+
+    statMock.mockImplementation((filePath: string) => {
+      return Promise.resolve({
+        mtimeMs: filePath.includes("b.json") ? 5_000 : 1_000,
+      });
+    });
+
+    readFileMock.mockImplementation((filePath: string) => {
+      if (filePath.includes("a.json")) {
+        return Promise.resolve(
+          JSON.stringify({
+            id: uuidA,
+            directory: `/repo/.worktrees/${branchA}`,
+          }),
+        );
+      }
+      return Promise.resolve(
+        JSON.stringify({
+          id: uuidB,
+          directory: `/repo/.worktrees/${branchB}`,
+        }),
+      );
+    });
+
+    const id = await findLatestOpenCodeSessionId(
+      `/repo/.worktrees/${branchB}`,
+      {
+        branch: branchA,
+        worktrees: [
+          { path: `/repo/.worktrees/${branchA}`, branch: branchA },
+          { path: `/repo/.worktrees/${branchB}`, branch: branchB },
+        ],
+      },
+    );
 
     expect(id).toBe(uuidA);
   });
