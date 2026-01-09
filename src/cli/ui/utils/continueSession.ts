@@ -6,6 +6,7 @@ import {
   findLatestGeminiSession,
   findLatestOpenCodeSession,
 } from "../../../utils/session/index.js";
+import { listAllWorktrees } from "../../../worktree.js";
 
 export interface ContinueSessionContext {
   history: ToolSessionEntry[];
@@ -116,6 +117,7 @@ export interface QuickStartSessionLookups {
   findLatestClaudeSession?: typeof findLatestClaudeSession;
   findLatestGeminiSession?: typeof findLatestGeminiSession;
   findLatestOpenCodeSession?: typeof findLatestOpenCodeSession;
+  listAllWorktrees?: typeof listAllWorktrees;
 }
 
 export async function refreshQuickStartEntries(
@@ -127,9 +129,22 @@ export async function refreshQuickStartEntries(
   const worktreePath = context.worktreePath ?? null;
   if (!worktreePath) return entries;
 
+  const lookupWorktrees = lookups.listAllWorktrees ?? listAllWorktrees;
+  let resolvedWorktrees: { path: string; branch: string }[] | null = null;
+  try {
+    const allWorktrees = await lookupWorktrees();
+    resolvedWorktrees = allWorktrees
+      .filter((entry) => entry?.path && entry?.branch)
+      .map((entry) => ({ path: entry.path, branch: entry.branch }));
+  } catch {
+    resolvedWorktrees = null;
+  }
+
   const searchOptions: SessionSearchOptions = {
     branch: context.branch,
-    worktrees: [{ path: worktreePath, branch: context.branch }],
+    ...(resolvedWorktrees && resolvedWorktrees.length > 0
+      ? { worktrees: resolvedWorktrees }
+      : {}),
   };
 
   const lookupCodex = lookups.findLatestCodexSession ?? findLatestCodexSession;

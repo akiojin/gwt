@@ -27,6 +27,7 @@ import {
   isProtectedBranchName,
   switchToProtectedBranch,
   resolveWorktreePathForBranch,
+  listAllWorktrees,
 } from "./worktree.js";
 import {
   getTerminalStreams,
@@ -707,14 +708,28 @@ export async function handleAIToolWorkflow(
       resumeSessionId ??
       null;
 
-    const branchWorktrees = branch ? [{ path: worktreePath, branch }] : null;
+    let resolvedWorktrees: { path: string; branch: string }[] | null = null;
+    if (branch) {
+      try {
+        const allWorktrees = await listAllWorktrees();
+        resolvedWorktrees = allWorktrees
+          .filter((entry) => entry?.path && entry?.branch)
+          .map((entry) => ({ path: entry.path, branch: entry.branch }));
+      } catch {
+        resolvedWorktrees = null;
+      }
+    }
+    const worktreeLookupOptions =
+      resolvedWorktrees && resolvedWorktrees.length > 0
+        ? { worktrees: resolvedWorktrees }
+        : {};
 
     if (!finalSessionId && tool === "claude-code") {
       try {
         finalSessionId =
           (await findLatestClaudeSessionId(worktreePath, {
             branch,
-            worktrees: branchWorktrees,
+            ...worktreeLookupOptions,
           })) ?? null;
       } catch {
         finalSessionId = null;
@@ -731,7 +746,7 @@ export async function handleAIToolWorkflow(
           windowMs: 60 * 60 * 1000,
           cwd: worktreePath,
           branch,
-          worktrees: branchWorktrees,
+          ...worktreeLookupOptions,
         });
         if (latest) {
           finalSessionId = latest.id;
@@ -747,7 +762,7 @@ export async function handleAIToolWorkflow(
           preferClosestTo: finishedAt,
           windowMs: 60 * 60 * 1000,
           branch,
-          worktrees: branchWorktrees,
+          ...worktreeLookupOptions,
         });
         if (latestClaude) {
           finalSessionId = latestClaude.id;
@@ -764,7 +779,7 @@ export async function handleAIToolWorkflow(
           windowMs: 60 * 60 * 1000,
           cwd: worktreePath,
           branch,
-          worktrees: branchWorktrees,
+          ...worktreeLookupOptions,
         });
         if (latestGemini) {
           finalSessionId = latestGemini.id;

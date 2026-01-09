@@ -15,6 +15,9 @@ const findLatestOpenCodeSession = mock(async () => ({
   id: "opencode-latest",
   mtime: 50,
 }));
+const listAllWorktrees = mock(async () => [
+  { path: "/repo/.worktrees/feature-a", branch: "feature/a" },
+]);
 
 describe("refreshQuickStartEntries", () => {
   beforeEach(() => {
@@ -22,6 +25,10 @@ describe("refreshQuickStartEntries", () => {
     findLatestClaudeSession.mockClear();
     findLatestGeminiSession.mockClear();
     findLatestOpenCodeSession.mockClear();
+    listAllWorktrees.mockClear();
+    listAllWorktrees.mockResolvedValue([
+      { path: "/repo/.worktrees/feature-a", branch: "feature/a" },
+    ]);
   });
 
   it("updates sessionId per tool when worktreePath is provided", async () => {
@@ -75,6 +82,7 @@ describe("refreshQuickStartEntries", () => {
         findLatestClaudeSession,
         findLatestGeminiSession,
         findLatestOpenCodeSession,
+        listAllWorktrees,
       },
     );
 
@@ -114,10 +122,51 @@ describe("refreshQuickStartEntries", () => {
         findLatestClaudeSession,
         findLatestGeminiSession,
         findLatestOpenCodeSession,
+        listAllWorktrees,
       },
     );
 
     expect(refreshed).toEqual(entries);
     expect(findLatestCodexSession).not.toHaveBeenCalled();
+  });
+
+  it("uses full worktree list when resolving sessions for repo root", async () => {
+    listAllWorktrees.mockResolvedValueOnce([
+      { path: "/repo", branch: "main" },
+      { path: "/repo/.worktrees/feature-a", branch: "feature/a" },
+    ]);
+
+    const entries: ToolSessionEntry[] = [
+      {
+        toolId: "codex-cli",
+        toolLabel: "Codex",
+        branch: "main",
+        worktreePath: "/repo",
+        model: "o3-mini",
+        mode: "normal",
+        timestamp: 1,
+      },
+    ];
+
+    await refreshQuickStartEntries(
+      entries,
+      {
+        branch: "main",
+        worktreePath: "/repo",
+      },
+      {
+        findLatestCodexSession,
+        findLatestClaudeSession,
+        findLatestGeminiSession,
+        findLatestOpenCodeSession,
+        listAllWorktrees,
+      },
+    );
+
+    const options = findLatestCodexSession.mock.calls[0]?.[0];
+    expect(options?.worktrees).toEqual([
+      { path: "/repo", branch: "main" },
+      { path: "/repo/.worktrees/feature-a", branch: "feature/a" },
+    ]);
   });
 });
