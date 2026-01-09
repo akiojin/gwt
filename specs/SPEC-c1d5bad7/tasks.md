@@ -74,3 +74,8 @@
 - [x] T192 共有カラー定義（選択行/ログレベル）を追加 (`src/cli/ui/core/theme.ts`)
 - [x] T193 ログ一覧の選択行/レベル配色を反映 (`src/cli/ui/screens/solid/LogScreen.tsx`)
 - [x] T194 CLI全体の選択行スタイルを統一（Selector/Env/Confirm/SelectInput など） (`src/cli/ui/screens/solid/*.tsx`, `src/cli/ui/components/solid/SelectInput.tsx`)
+
+## 追加作業ToDo (2026-01-09)
+- [x] T200 [Test] ログ一覧の時刻表示がシステムロケールのローカル時刻になることを検証 (`src/logging/formatter.ts` 周辺)
+- [x] T201 ブランチ一覧とログ一覧の時刻表示をローカル時刻へ切り替え (`src/cli/ui/utils/branchFormatter.ts`, `src/cli/ui/screens/solid/BranchListScreen.tsx`, `src/logging/formatter.ts`)
+- [x] T202 既存テストの期待値をローカル時刻に合わせて更新 (`src/cli/ui/utils/__tests__/branchFormatter.test.ts`, `src/cli/ui/__tests__/utils/branchFormatter.test.ts`)
