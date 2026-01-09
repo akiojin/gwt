@@ -1,5 +1,5 @@
 /** @jsxImportSource @opentui/solid */
-import { createEffect, createMemo, createSignal } from "solid-js";
+import { createEffect, createMemo, createSignal, on } from "solid-js";
 import { useKeyboard, useTerminalDimensions } from "@opentui/solid";
 import { TextAttributes } from "@opentui/core";
 import type { BranchItem, BranchViewMode, Statistics } from "../../types.js";
@@ -434,12 +434,18 @@ export function BranchListScreen(props: BranchListScreenProps) {
     return maxWidth;
   });
 
-  createEffect(() => {
-    filterQuery();
-    viewMode();
-    setSelectedIndex(0);
-    setScrollOffset(0);
-  });
+  // FR-037 / FR-037a: filterQueryまたはviewModeが実際に変更されたときのみカーソルをリセット
+  // defer: true により初回実行をスキップし、安全状態更新時のリセットを防止
+  createEffect(
+    on(
+      () => [filterQuery(), viewMode()],
+      () => {
+        setSelectedIndex(0);
+        setScrollOffset(0);
+      },
+      { defer: true },
+    ),
+  );
 
   createEffect(() => {
     const total = filteredBranches().length;
