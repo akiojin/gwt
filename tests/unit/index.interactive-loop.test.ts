@@ -8,17 +8,33 @@ import {
   spyOn,
 } from "bun:test";
 import type { SelectionResult } from "../../src/cli/ui/App.solid.js";
-import { runInteractiveLoop } from "../../src/index.js";
 
 const waitForUserAcknowledgementMock = mock<() => Promise<void>>();
+const writeMock = mock();
+const mockStreams = {
+  stdin: process.stdin,
+  stdout: { write: writeMock } as NodeJS.WriteStream,
+  stderr: { write: writeMock } as NodeJS.WriteStream,
+  stdinFd: undefined as number | undefined,
+  stdoutFd: undefined as number | undefined,
+  stderrFd: undefined as number | undefined,
+  usingFallback: false,
+  exitRawMode: mock(),
+};
+const mockChildStdio = {
+  stdin: "inherit" as const,
+  stdout: "inherit" as const,
+  stderr: "inherit" as const,
+  cleanup: mock(),
+};
 
-mock.module("../../src/utils/terminal.js", async () => {
-  const actual = await import("../../src/utils/terminal.js");
-  return {
-    ...actual,
-    waitForUserAcknowledgement: waitForUserAcknowledgementMock,
-  };
-});
+mock.module("../../src/utils/terminal.js", () => ({
+  getTerminalStreams: mock(() => mockStreams),
+  resetTerminalModes: mock(),
+  waitForUserAcknowledgement: waitForUserAcknowledgementMock,
+  writeTerminalLine: mock(),
+  createChildStdio: mock(() => mockChildStdio),
+}));
 
 describe("runInteractiveLoop", () => {
   const baseSelection: SelectionResult = {
@@ -44,6 +60,7 @@ describe("runInteractiveLoop", () => {
   });
 
   it("re-renders the UI after workflow errors instead of exiting", async () => {
+    const { runInteractiveLoop } = await import("../../src/index.js");
     const uiHandler = mock<() => Promise<SelectionResult | undefined>>();
     uiHandler
       .mockResolvedValueOnce(baseSelection)
@@ -61,6 +78,7 @@ describe("runInteractiveLoop", () => {
   });
 
   it("recovers when the UI handler throws and allows retry", async () => {
+    const { runInteractiveLoop } = await import("../../src/index.js");
     const uiHandler = mock<() => Promise<SelectionResult | undefined>>();
     uiHandler
       .mockRejectedValueOnce(new Error("ui crash"))

@@ -20,10 +20,12 @@ import { execa } from "execa";
 describe("git.ts - Branch Operations", () => {
   beforeEach(() => {
     mock.restore();
+    mock.clearAllMocks();
   });
 
   afterEach(() => {
     mock.restore();
+    mock.clearAllMocks();
   });
 
   describe("getLocalBranches (T102)", () => {
@@ -996,10 +998,12 @@ describe("git.ts - Gitignore Operations", () => {
 describe("git.ts - Batch Merge Operations", () => {
   beforeEach(() => {
     mock.restore();
+    mock.clearAllMocks();
   });
 
   afterEach(() => {
     mock.restore();
+    mock.clearAllMocks();
   });
 
   describe("mergeFromBranch (T108-T109)", () => {
@@ -1191,6 +1195,7 @@ describe("git.ts - Batch Merge Operations", () => {
 describe("getBranchDivergenceStatuses", () => {
   beforeEach(() => {
     mock.restore();
+    mock.clearAllMocks();
   });
 
   it("should return divergence counts for branches with remotes", async () => {
@@ -1315,6 +1320,7 @@ describe("getBranchDivergenceStatuses", () => {
 describe("pullFastForward", () => {
   beforeEach(() => {
     mock.restore();
+    mock.clearAllMocks();
   });
 
   it("should call git pull with --ff-only", async () => {
@@ -1349,10 +1355,12 @@ describe("pullFastForward", () => {
 describe("git.ts - cwd parameter support", () => {
   beforeEach(() => {
     mock.restore();
+    mock.clearAllMocks();
   });
 
   afterEach(() => {
     mock.restore();
+    mock.clearAllMocks();
   });
 
   describe("getLocalBranches with cwd", () => {

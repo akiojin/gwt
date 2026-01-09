@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
+import { beforeEach, describe, expect, it, mock } from "bun:test";
 import type { SelectionResult } from "../../src/cli/ui/App.solid.js";
 import type { ExecutionMode } from "../../src/cli/ui/App.solid.js";
 
@@ -74,42 +74,74 @@ const waitForUserAcknowledgementMock = mock<() => Promise<void>>();
 const waitForEnterMock = mock<() => Promise<void>>();
 
 const confirmYesNoMock = mock<() => Promise<boolean>>();
+const writeTerminalMock = mock();
+const writeTerminalLineMock = mock();
+const terminalStreamsMock = {
+  stdin: process.stdin,
+  stdout: { write: writeTerminalMock } as NodeJS.WriteStream,
+  stderr: { write: writeTerminalMock } as NodeJS.WriteStream,
+  stdinFd: undefined as number | undefined,
+  stdoutFd: undefined as number | undefined,
+  stderrFd: undefined as number | undefined,
+  usingFallback: false,
+  exitRawMode: mock(),
+};
+const mockChildStdio = {
+  stdin: "inherit" as const,
+  stdout: "inherit" as const,
+  stderr: "inherit" as const,
+  cleanup: mock(),
+};
 mock.module("execa", () => ({
   execa: execaMock,
 }));
 
-mock.module("../../src/git.js", async () => {
-  const actual = await import("../../src/git.js");
-  return {
-    isGitRepository: mock(),
-    getRepositoryRoot: getRepositoryRootMock,
-    branchExists: branchExistsMock,
-    fetchAllRemotes: fetchAllRemotesMock,
-    pullFastForward: pullFastForwardMock,
-    getBranchDivergenceStatuses: getBranchDivergenceStatusesMock,
-    getCurrentBranch: getCurrentBranchMock,
-    hasUncommittedChanges: hasUncommittedChangesMock,
-    hasUnpushedCommits: hasUnpushedCommitsMock,
-    getUncommittedChangesCount: getUncommittedChangesCountMock,
-    getUnpushedCommitsCount: getUnpushedCommitsCountMock,
-    pushBranchToRemote: pushBranchToRemoteMock,
-    GitError: actual.GitError,
-  };
-});
+mock.module("../../src/git.js", () => ({
+  isGitRepository: mock(async () => true),
+  getRepositoryRoot: getRepositoryRootMock,
+  branchExists: branchExistsMock,
+  fetchAllRemotes: fetchAllRemotesMock,
+  pullFastForward: pullFastForwardMock,
+  getBranchDivergenceStatuses: getBranchDivergenceStatusesMock,
+  getCurrentBranch: getCurrentBranchMock,
+  hasUncommittedChanges: hasUncommittedChangesMock,
+  hasUnpushedCommits: hasUnpushedCommitsMock,
+  getUncommittedChangesCount: getUncommittedChangesCountMock,
+  getUnpushedCommitsCount: getUnpushedCommitsCountMock,
+  pushBranchToRemote: pushBranchToRemoteMock,
+  GitError: class GitError extends Error {
+    constructor(
+      message: string,
+      public cause?: unknown,
+    ) {
+      super(message);
+      this.name = "GitError";
+    }
+  },
+}));
 
-mock.module("../../src/worktree.js", async () => {
-  const actual = await import("../../src/worktree.js");
-  return {
-    worktreeExists: worktreeExistsMock,
-    resolveWorktreePathForBranch: mock(async (branch: string) => ({
-      path: await worktreeExistsMock(branch),
-    })),
-    isProtectedBranchName: (name: string) =>
-      name === "main" || name === "origin/main",
-    switchToProtectedBranch: switchToProtectedBranchMock,
-    WorktreeError: actual.WorktreeError,
-  };
-});
+mock.module("../../src/worktree.js", () => ({
+  worktreeExists: worktreeExistsMock,
+  resolveWorktreePathForBranch: mock(async (branch: string) => ({
+    path: await worktreeExistsMock(branch),
+  })),
+  isProtectedBranchName: (name: string) =>
+    name === "main" || name === "origin/main",
+  switchToProtectedBranch: switchToProtectedBranchMock,
+  listAllWorktrees: mock(async () => []),
+  listAdditionalWorktrees: mock(async () => []),
+  generateWorktreePath: mock(async () => "/repo/.worktrees/feature"),
+  createWorktree: mock(async () => undefined),
+  WorktreeError: class WorktreeError extends Error {
+    constructor(
+      message: string,
+      public cause?: unknown,
+    ) {
+      super(message);
+      this.name = "WorktreeError";
+    }
+  },
+}));
 
 mock.module("../../src/services/WorktreeOrchestrator.js", () => ({
   WorktreeOrchestrator: class {
@@ -124,6 +156,15 @@ mock.module("../../src/services/dependency-installer.js", () => ({
 
 mock.module("../../src/claude.js", () => ({
   launchClaudeCode: launchClaudeCodeMock,
+  ClaudeError: class ClaudeError extends Error {
+    constructor(
+      message: string,
+      public cause?: unknown,
+    ) {
+      super(message);
+      this.name = "ClaudeError";
+    }
+  },
 }));
 
 mock.module("../../src/codex.js", () => ({
@@ -156,29 +197,25 @@ mock.module("../../src/config/tools.js", () => ({
 
 mock.module("../../src/config/index.js", () => ({
   saveSession: saveSessionMock,
+  loadSession: mock(async () => null),
 }));
 
-mock.module("../../src/utils/terminal.js", async () => {
-  const actual = await import("../../src/utils/terminal.js");
-  return {
-    ...actual,
-    waitForUserAcknowledgement: waitForUserAcknowledgementMock,
-  };
-});
+mock.module("../../src/utils/terminal.js", () => ({
+  getTerminalStreams: mock(() => terminalStreamsMock),
+  resetTerminalModes: mock(),
+  waitForUserAcknowledgement: waitForUserAcknowledgementMock,
+  writeTerminalLine: writeTerminalLineMock,
+  createChildStdio: mock(() => mockChildStdio),
+}));
 
-mock.module("../../src/utils/prompt.js", async () => {
-  const actual = await import("../../src/utils/prompt.js");
-  return {
-    ...actual,
-    waitForEnter: waitForEnterMock,
-    confirmYesNo: confirmYesNoMock,
-  };
-});
+mock.module("../../src/utils/prompt.js", () => ({
+  waitForEnter: waitForEnterMock,
+  confirmYesNo: confirmYesNoMock,
+}));
 
-// Import after mocks are set up
-import { handleAIToolWorkflow } from "../../src/index.js";
+let handleAIToolWorkflow: typeof import("../../src/index.js").handleAIToolWorkflow;
 
-beforeEach(() => {
+beforeEach(async () => {
   execaMock.mockClear();
   ensureWorktreeMock.mockClear();
   fetchAllRemotesMock.mockClear();
@@ -198,6 +235,8 @@ beforeEach(() => {
   getUncommittedChangesCountMock.mockClear();
   getUnpushedCommitsCountMock.mockClear();
   pushBranchToRemoteMock.mockClear();
+  writeTerminalMock.mockReset();
+  writeTerminalLineMock.mockReset();
   installDependenciesMock.mockResolvedValue({
     skipped: false,
     manager: "bun",
@@ -217,6 +256,8 @@ beforeEach(() => {
   switchToProtectedBranchMock.mockResolvedValue("local");
   branchExistsMock.mockResolvedValue(true);
   getCurrentBranchMock.mockResolvedValue("develop");
+
+  ({ handleAIToolWorkflow } = await import("../../src/index.js"));
 });
 
 describe("handleAIToolWorkflow - protected branches", () => {
@@ -328,7 +369,7 @@ describe("handleAIToolWorkflow - divergence handling", () => {
     expect(pullFastForwardMock).toHaveBeenCalledWith("/repo");
     expect(launchClaudeCodeMock).toHaveBeenCalled();
     expect(saveSessionMock).toHaveBeenCalled();
-    expect(waitForUserAcknowledgementMock).not.toHaveBeenCalled();
+    expect(waitForUserAcknowledgementMock).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -417,7 +458,7 @@ describe("handleAIToolWorkflow - dependency installation", () => {
     await handleAIToolWorkflow(selection);
 
     expect(installDependenciesMock).toHaveBeenCalled();
-    expect(waitForUserAcknowledgementMock).not.toHaveBeenCalled();
+    expect(waitForUserAcknowledgementMock).toHaveBeenCalledTimes(1);
   });
 
   it("warns and continues when dependency metadata is missing", async () => {
@@ -427,8 +468,6 @@ describe("handleAIToolWorkflow - dependency installation", () => {
       skipped: true,
       reason: "missing-lockfile",
     });
-
-    const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
 
     const selection: SelectionResult = {
       branch: "feature/test",
@@ -443,15 +482,12 @@ describe("handleAIToolWorkflow - dependency installation", () => {
     await handleAIToolWorkflow(selection);
 
     expect(installDependenciesMock).toHaveBeenCalled();
-    expect(waitForUserAcknowledgementMock).not.toHaveBeenCalled();
+    expect(waitForUserAcknowledgementMock).toHaveBeenCalledTimes(1);
     expect(launchClaudeCodeMock).toHaveBeenCalled();
-    expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining(
-        "Skipping automatic install because no lockfiles",
-      ),
+    const messages = writeTerminalLineMock.mock.calls.flat().join(" ");
+    expect(messages).toContain(
+      "Skipping automatic install because no lockfiles",
     );
-
-    warnSpy.mockRestore();
   });
 
   it("warns with details when dependency installation fails", async () => {
@@ -463,8 +499,6 @@ describe("handleAIToolWorkflow - dependency installation", () => {
       message: "Dependency installation failed (bun). Command: bun install",
     });
 
-    const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
-
     const selection: SelectionResult = {
       branch: "feature/test",
       displayName: "feature/test",
@@ -478,15 +512,10 @@ describe("handleAIToolWorkflow - dependency installation", () => {
     await handleAIToolWorkflow(selection);
 
     expect(installDependenciesMock).toHaveBeenCalled();
-    expect(waitForUserAcknowledgementMock).not.toHaveBeenCalled();
+    expect(waitForUserAcknowledgementMock).toHaveBeenCalledTimes(1);
     expect(launchClaudeCodeMock).toHaveBeenCalled();
-    expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining("Dependency installation failed via bun"),
-    );
-    expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining("Details: Dependency installation failed"),
-    );
-
-    warnSpy.mockRestore();
+    const messages = writeTerminalLineMock.mock.calls.flat().join(" ");
+    expect(messages).toContain("Dependency installation failed via bun");
+    expect(messages).toContain("Details: Dependency installation failed");
   });
 });

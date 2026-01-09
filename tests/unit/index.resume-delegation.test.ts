@@ -82,36 +82,69 @@ const {
 
 const waitForUserAcknowledgementMock = mock<() => Promise<void>>();
 const confirmYesNoMock = mock<() => Promise<boolean>>();
+const writeTerminalMock = mock();
+const writeTerminalLineMock = mock();
+const terminalStreamsMock = {
+  stdin: process.stdin,
+  stdout: { write: writeTerminalMock } as NodeJS.WriteStream,
+  stderr: { write: writeTerminalMock } as NodeJS.WriteStream,
+  stdinFd: undefined as number | undefined,
+  stdoutFd: undefined as number | undefined,
+  stderrFd: undefined as number | undefined,
+  usingFallback: false,
+  exitRawMode: mock(),
+};
+const mockChildStdio = {
+  stdin: "inherit" as const,
+  stdout: "inherit" as const,
+  stderr: "inherit" as const,
+  cleanup: mock(),
+};
 
-mock.module("../../src/git.js", async () => {
-  const actual = await import("../../src/git.js");
-  return {
-    ...actual,
-    getRepositoryRoot: getRepositoryRootMock,
-    fetchAllRemotes: fetchAllRemotesMock,
-    pullFastForward: pullFastForwardMock,
-    getBranchDivergenceStatuses: getBranchDivergenceStatusesMock,
-    branchExists: mock(async () => true),
-    hasUncommittedChanges: hasUncommittedChangesMock,
-    hasUnpushedCommits: hasUnpushedCommitsMock,
-    getUncommittedChangesCount: getUncommittedChangesCountMock,
-    getUnpushedCommitsCount: getUnpushedCommitsCountMock,
-    pushBranchToRemote: pushBranchToRemoteMock,
-  };
-});
+mock.module("../../src/git.js", () => ({
+  isGitRepository: mock(async () => true),
+  getRepositoryRoot: getRepositoryRootMock,
+  fetchAllRemotes: fetchAllRemotesMock,
+  pullFastForward: pullFastForwardMock,
+  getBranchDivergenceStatuses: getBranchDivergenceStatusesMock,
+  branchExists: mock(async () => true),
+  hasUncommittedChanges: hasUncommittedChangesMock,
+  hasUnpushedCommits: hasUnpushedCommitsMock,
+  getUncommittedChangesCount: getUncommittedChangesCountMock,
+  getUnpushedCommitsCount: getUnpushedCommitsCountMock,
+  pushBranchToRemote: pushBranchToRemoteMock,
+  GitError: class GitError extends Error {
+    constructor(
+      message: string,
+      public cause?: unknown,
+    ) {
+      super(message);
+      this.name = "GitError";
+    }
+  },
+}));
 
-mock.module("../../src/worktree.js", async () => {
-  const actual = await import("../../src/worktree.js");
-  return {
-    ...actual,
-    worktreeExists: worktreeExistsMock,
-    resolveWorktreePathForBranch: mock(async (branch: string) => ({
-      path: await worktreeExistsMock(branch),
-    })),
-    isProtectedBranchName: mock(() => false),
-    switchToProtectedBranch: mock(async () => "none" as const),
-  };
-});
+mock.module("../../src/worktree.js", () => ({
+  worktreeExists: worktreeExistsMock,
+  resolveWorktreePathForBranch: mock(async (branch: string) => ({
+    path: await worktreeExistsMock(branch),
+  })),
+  isProtectedBranchName: mock(() => false),
+  switchToProtectedBranch: mock(async () => "none" as const),
+  listAllWorktrees: mock(async () => []),
+  listAdditionalWorktrees: mock(async () => []),
+  generateWorktreePath: mock(async () => "/repo/worktrees/feature/resume"),
+  createWorktree: mock(async () => undefined),
+  WorktreeError: class WorktreeError extends Error {
+    constructor(
+      message: string,
+      public cause?: unknown,
+    ) {
+      super(message);
+      this.name = "WorktreeError";
+    }
+  },
+}));
 
 mock.module("../../src/services/WorktreeOrchestrator.js", () => ({
   WorktreeOrchestrator: class {
@@ -119,17 +152,14 @@ mock.module("../../src/services/WorktreeOrchestrator.js", () => ({
   },
 }));
 
-const DependencyInstallErrorMock = () =>
-  class DependencyInstallError extends Error {
+mock.module("../../src/services/dependency-installer.js", () => ({
+  installDependenciesForWorktree: installDependenciesMock,
+  DependencyInstallError: class DependencyInstallError extends Error {
     constructor(message?: string) {
       super(message);
       this.name = "DependencyInstallError";
     }
-  };
-
-mock.module("../../src/services/dependency-installer.js", () => ({
-  installDependenciesForWorktree: installDependenciesMock,
-  DependencyInstallError: DependencyInstallErrorMock,
+  },
 }));
 
 mock.module("../../src/config/tools.js", () => ({
@@ -159,29 +189,25 @@ mock.module("../../src/utils/session.js", () => ({
   findLatestCodexSession: findLatestCodexSessionMock,
   findLatestClaudeSession: mock(async () => null),
   findLatestGeminiSession: mock(async () => null),
+  findLatestGeminiSessionId: mock(async () => null),
   findLatestClaudeSessionId: mock(async () => null),
 }));
 
-mock.module("../../src/utils/terminal.js", async () => {
-  const actual = await import("../../src/utils/terminal.js");
-  return {
-    ...actual,
-    waitForUserAcknowledgement: waitForUserAcknowledgementMock,
-  };
-});
+mock.module("../../src/utils/terminal.js", () => ({
+  getTerminalStreams: mock(() => terminalStreamsMock),
+  resetTerminalModes: mock(),
+  waitForUserAcknowledgement: waitForUserAcknowledgementMock,
+  writeTerminalLine: writeTerminalLineMock,
+  createChildStdio: mock(() => mockChildStdio),
+}));
 
-mock.module("../../src/utils/prompt.js", async () => {
-  const actual = await import("../../src/utils/prompt.js");
-  return {
-    ...actual,
-    confirmYesNo: confirmYesNoMock,
-  };
-});
+mock.module("../../src/utils/prompt.js", () => ({
+  confirmYesNo: confirmYesNoMock,
+}));
 
-// Import after mocks are set up
-import { handleAIToolWorkflow } from "../../src/index.js";
+let handleAIToolWorkflow: typeof import("../../src/index.js").handleAIToolWorkflow;
 
-beforeEach(() => {
+beforeEach(async () => {
   ensureWorktreeMock.mockClear();
   fetchAllRemotesMock.mockClear();
   pullFastForwardMock.mockClear();
@@ -204,11 +230,15 @@ beforeEach(() => {
   waitForUserAcknowledgementMock.mockResolvedValue(undefined);
   confirmYesNoMock.mockClear();
   confirmYesNoMock.mockResolvedValue(false);
+  writeTerminalMock.mockReset();
+  writeTerminalLineMock.mockReset();
   hasUncommittedChangesMock.mockResolvedValue(false);
   hasUnpushedCommitsMock.mockResolvedValue(false);
   getUncommittedChangesCountMock.mockResolvedValue(0);
   getUnpushedCommitsCountMock.mockResolvedValue(0);
   pushBranchToRemoteMock.mockResolvedValue(undefined);
+
+  ({ handleAIToolWorkflow } = await import("../../src/index.js"));
 });
 
 describe("handleAIToolWorkflow - Resume delegation", () => {

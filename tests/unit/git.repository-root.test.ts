@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach,  mock } from "bun:test";
+import { describe, it, expect, beforeEach, mock } from "bun:test";
 
 mock.module("execa", () => ({
   execa: mock(),
@@ -8,11 +8,25 @@ mock.module("execa", () => ({
 const existsSync = mock();
 const statSync = mock();
 const readFileSync = mock();
+const readdirSync = mock(() => []);
+const unlinkSync = mock();
+const mkdirSync = mock();
 
 mock.module("node:fs", () => ({
   existsSync,
   statSync,
   readFileSync,
+  readdirSync,
+  unlinkSync,
+  mkdirSync,
+  default: {
+    existsSync,
+    statSync,
+    readFileSync,
+    readdirSync,
+    unlinkSync,
+    mkdirSync,
+  },
 }));
 
 import { execa } from "execa";
@@ -21,6 +35,7 @@ import { getRepositoryRoot } from "../../src/git.js";
 describe("getRepositoryRoot - worktree resolution", () => {
   beforeEach(() => {
     mock.restore();
+    mock.clearAllMocks();
   });
 
   it("should strip .worktrees segment and return real repo root", async () => {

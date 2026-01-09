@@ -64,7 +64,8 @@ describe("worktree spinner integration", () => {
       return child;
     });
 
-    const worktree = await import("../../src/worktree");
+    const worktree =
+      await import("../../src/worktree.ts?worktree-spinner-test");
 
     await worktree.createWorktree({
       branchName: "feature/test",

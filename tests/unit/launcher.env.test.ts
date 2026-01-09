@@ -7,12 +7,14 @@ mock.module("execa", () => ({
   execa: (...args: unknown[]) => execaMock(...args),
 }));
 
-import { launchCodingAgent } from "../../src/launcher.js";
+let launchCodingAgent: typeof import("../../src/launcher.js").launchCodingAgent;
 
 describe("launchCodingAgent environment merging", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     execaMock.mockReset();
     execaMock.mockResolvedValue({ stdout: "" });
+    ({ launchCodingAgent } =
+      await import("../../src/launcher.js?launcher-env-test"));
   });
 
   it("merges shared env with tool env", async () => {

@@ -1,9 +1,10 @@
-import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 
 let tempHome = "";
 const originalHomeEnv = process.env.GWT_HOME;
+let importCounter = 0;
 
 describe("shared environment config", () => {
   let loadCodingAgentsConfig: typeof import("../../../src/config/tools.js").loadCodingAgentsConfig;
@@ -15,7 +16,10 @@ describe("shared environment config", () => {
     tempHome = await mkdtemp(path.join(base, "gwt-tools-"));
     process.env.GWT_HOME = tempHome;
     // resetModules not needed in bun;
-    const module = await import("../../../src/config/tools.js");
+    importCounter += 1;
+    const module = await import(
+      `../../../src/config/tools.js?tools-shared-env=${importCounter}`
+    );
     loadCodingAgentsConfig = module.loadCodingAgentsConfig;
     saveCodingAgentsConfig = module.saveCodingAgentsConfig;
   });

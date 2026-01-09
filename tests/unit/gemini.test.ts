@@ -16,10 +16,24 @@ mock.module("execa", () => ({
   default: { execa: mock() },
 }));
 
-mock.module("fs", () => ({
-  existsSync: mock(() => true),
-  default: { existsSync: mock(() => true) },
-}));
+mock.module("fs", () => {
+  const existsSync = mock(() => true);
+  const mkdirSync = mock();
+  const readdirSync = mock(() => []);
+  const statSync = mock(() => ({
+    isFile: () => false,
+    mtime: new Date(),
+  }));
+  const unlinkSync = mock();
+  return {
+    existsSync,
+    mkdirSync,
+    readdirSync,
+    statSync,
+    unlinkSync,
+    default: { existsSync, mkdirSync, readdirSync, statSync, unlinkSync },
+  };
+});
 
 const mockTerminalStreams = {
   stdin: { id: "stdin" } as unknown as NodeJS.ReadStream,
@@ -65,6 +79,7 @@ let consoleLogSpy: Mock;
 describe("launchGeminiCLI", () => {
   beforeEach(() => {
     mock.restore();
+    mock.clearAllMocks();
     consoleLogSpy = spyOn(console, "log").mockImplementation(() => {});
     mockTerminalStreams.exitRawMode.mockClear();
     mockChildStdio.cleanup.mockClear();

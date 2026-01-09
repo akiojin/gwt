@@ -56,12 +56,27 @@ mock.module("execa", () => ({
 // Mock existsSync to return false by default (for fallback path checks in findCommand)
 // Individual tests can override this if they need existsSync to return true
 mock.module("fs", async () => {
+  const readdirSync = mock(() => []);
+  const statSync = mock(() => ({
+    isFile: () => false,
+    mtime: new Date(),
+  }));
+  const unlinkSync = mock();
+  const mkdirSync = mock();
   return {
     existsSync: (...args: unknown[]) => mockExistsSync(...args),
     readFileSync: mock(() => "Linux version 6.1.0"),
+    readdirSync,
+    statSync,
+    unlinkSync,
+    mkdirSync,
     default: {
       existsSync: (...args: unknown[]) => mockExistsSync(...args),
       readFileSync: mock(() => "Linux version 6.1.0"),
+      readdirSync,
+      statSync,
+      unlinkSync,
+      mkdirSync,
     },
   };
 });

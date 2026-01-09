@@ -1,23 +1,23 @@
-import { describe, it, expect, beforeEach, mock } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
 
 const execaMock = mock<(...args: unknown[]) => unknown>();
 const existsSyncMock = mock<(...args: unknown[]) => boolean>(() => false);
-
-mock.module("execa", () => ({
-  execa: (...args: unknown[]) => execaMock(...args),
-}));
-
-mock.module("fs", () => ({
-  existsSync: (...args: unknown[]) => existsSyncMock(...args),
-  default: {
-    existsSync: (...args: unknown[]) => existsSyncMock(...args),
-  },
-}));
+const readdirSyncMock = mock<(...args: unknown[]) => string[]>(() => []);
+const statSyncMock = mock<
+  (...args: unknown[]) => { isFile: () => boolean; mtime: Date }
+>(() => ({ isFile: () => false, mtime: new Date() }));
+const unlinkSyncMock = mock<(...args: unknown[]) => void>(() => {});
+const mkdirSyncMock = mock<(...args: unknown[]) => void>(() => {});
 
 const setupCommandMocks = () => {
   execaMock.mockReset();
   existsSyncMock.mockReset();
+  readdirSyncMock.mockReset();
+  statSyncMock.mockReset();
+  unlinkSyncMock.mockReset();
+  mkdirSyncMock.mockReset();
   existsSyncMock.mockReturnValue(false);
+  readdirSyncMock.mockReturnValue([]);
   execaMock.mockImplementation(async (...args: unknown[]) => {
     const [command, argList] = args as [string, readonly string[] | undefined];
     if ((command === "which" || command === "where") && argList?.[0]) {
@@ -49,15 +49,41 @@ const setupCommandMocks = () => {
 
 describe("command utilities", () => {
   let commandModule: typeof import("../../../src/utils/command.js");
+  let importCounter = 0;
 
   beforeEach(async () => {
+    mock.restore();
+    mock.module("execa", () => ({
+      execa: (...args: unknown[]) => execaMock(...args),
+    }));
+    mock.module("fs", () => ({
+      existsSync: (...args: unknown[]) => existsSyncMock(...args),
+      readdirSync: (...args: unknown[]) => readdirSyncMock(...args),
+      statSync: (...args: unknown[]) => statSyncMock(...args),
+      unlinkSync: (...args: unknown[]) => unlinkSyncMock(...args),
+      mkdirSync: (...args: unknown[]) => mkdirSyncMock(...args),
+      default: {
+        existsSync: (...args: unknown[]) => existsSyncMock(...args),
+        readdirSync: (...args: unknown[]) => readdirSyncMock(...args),
+        statSync: (...args: unknown[]) => statSyncMock(...args),
+        unlinkSync: (...args: unknown[]) => unlinkSyncMock(...args),
+        mkdirSync: (...args: unknown[]) => mkdirSyncMock(...args),
+      },
+    }));
     setupCommandMocks();
     // Re-import module
     // Note: Bun doesn't fully support module mocking, so we test the actual implementation
-    commandModule = await import("../../../src/utils/command.js");
+    importCounter += 1;
+    commandModule = await import(
+      `../../../src/utils/command.ts?command-test=${importCounter}`
+    );
 
     // Clear command lookup cache before each test
     commandModule.clearCommandLookupCache();
+  });
+
+  afterEach(() => {
+    mock.restore();
   });
 
   describe("findCommand - integration tests", () => {

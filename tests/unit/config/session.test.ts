@@ -1,40 +1,44 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { describe, it, expect, mock, beforeEach } from "bun:test";
-import * as config from "../../../src/config/index";
+import {
+  describe,
+  it,
+  expect,
+  mock,
+  beforeEach,
+  afterEach,
+  spyOn,
+} from "bun:test";
+import * as fsPromises from "node:fs/promises";
+import * as os from "node:os";
 
-// Mock node:fs/promises
-mock.module("node:fs/promises", () => {
-  const readFile = mock();
-  const writeFile = mock();
-  const mkdir = mock();
-  const readdir = mock();
-  return {
-    readFile,
-    writeFile,
-    mkdir,
-    readdir,
-    default: { readFile, writeFile, mkdir, readdir },
-  };
-});
-
-// Mock node:os
-mock.module("node:os", () => {
-  const homedir = mock(() => "/home/testuser");
-  return {
-    homedir,
-    default: { homedir },
-  };
-});
-
-import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
+let config: typeof import("../../../src/config/index.ts");
+let readFile: ReturnType<typeof spyOn>;
+let writeFile: ReturnType<typeof spyOn>;
+let mkdir: ReturnType<typeof spyOn>;
+let readdir: ReturnType<typeof spyOn>;
+let homedir: ReturnType<typeof spyOn>;
+let tmpdir: ReturnType<typeof spyOn>;
+let importCounter = 0;
 
 describe("config/index.ts - Session Management", () => {
-  beforeEach(() => {
-    // Clear mock call counts and reset implementations
-    (readFile as any).mockReset();
-    (writeFile as any).mockReset();
-    (mkdir as any).mockReset();
-    (readdir as any).mockReset();
+  beforeEach(async () => {
+    mock.restore();
+    readFile = spyOn(fsPromises, "readFile");
+    writeFile = spyOn(fsPromises, "writeFile");
+    mkdir = spyOn(fsPromises, "mkdir");
+    readdir = spyOn(fsPromises, "readdir");
+    homedir = spyOn(os, "homedir");
+    tmpdir = spyOn(os, "tmpdir");
+    homedir.mockReturnValue("/home/testuser");
+    tmpdir.mockReturnValue("/tmp");
+    importCounter += 1;
+    config = await import(
+      `../../../src/config/index.ts?session-test=${importCounter}`
+    );
+  });
+
+  afterEach(() => {
+    mock.restore();
   });
 
   describe("saveSession (T301)", () => {
@@ -214,8 +218,8 @@ describe("config/index.ts - Session Management", () => {
       const sessions = await config.getAllSessions();
 
       expect(sessions).toHaveLength(2);
-      expect(sessions[0]!.lastBranch).toBe("feature/test1"); // Most recent first
-      expect(sessions[1]!.lastBranch).toBe("feature/test2");
+      expect(sessions[0]?.lastBranch).toBe("feature/test1"); // Most recent first
+      expect(sessions[1]?.lastBranch).toBe("feature/test2");
     });
 
     it("should filter out expired sessions", async () => {
@@ -250,7 +254,7 @@ describe("config/index.ts - Session Management", () => {
       const sessions = await config.getAllSessions();
 
       expect(sessions).toHaveLength(1);
-      expect(sessions[0]!.lastBranch).toBe("feature/valid");
+      expect(sessions[0]?.lastBranch).toBe("feature/valid");
     });
 
     it("should return empty array when session directory does not exist", async () => {
@@ -314,21 +318,26 @@ describe("config/index.ts - Session Management", () => {
         },
       ];
 
+      const [first, second, third] = sessions;
+      if (!first || !second || !third) {
+        throw new Error("Expected three session entries.");
+      }
+
       (readFile as any).mockImplementation((path: string) => {
         if (path.includes("repo1"))
-          return Promise.resolve(JSON.stringify(sessions[0]!));
+          return Promise.resolve(JSON.stringify(first));
         if (path.includes("repo2"))
-          return Promise.resolve(JSON.stringify(sessions[1]!));
+          return Promise.resolve(JSON.stringify(second));
         if (path.includes("repo3"))
-          return Promise.resolve(JSON.stringify(sessions[2]!));
+          return Promise.resolve(JSON.stringify(third));
         return Promise.reject(new Error("File not found"));
       });
 
       const result = await config.getAllSessions();
 
-      expect(result[0]!.lastBranch).toBe("branch2"); // Newest
-      expect(result[1]!.lastBranch).toBe("branch3");
-      expect(result[2]!.lastBranch).toBe("branch1"); // Oldest
+      expect(result[0]?.lastBranch).toBe("branch2"); // Newest
+      expect(result[1]?.lastBranch).toBe("branch3");
+      expect(result[2]?.lastBranch).toBe("branch1"); // Oldest
     });
   });
 });

@@ -5,10 +5,24 @@ mock.module("execa", () => ({
   default: { execa: mock() },
 }));
 
-mock.module("fs", () => ({
-  existsSync: mock(() => true),
-  default: { existsSync: mock(() => true) },
-}));
+mock.module("fs", () => {
+  const existsSync = mock(() => true);
+  const mkdirSync = mock();
+  const readdirSync = mock(() => []);
+  const statSync = mock(() => ({
+    isFile: () => false,
+    mtime: new Date(),
+  }));
+  const unlinkSync = mock();
+  return {
+    existsSync,
+    mkdirSync,
+    readdirSync,
+    statSync,
+    unlinkSync,
+    default: { existsSync, mkdirSync, readdirSync, statSync, unlinkSync },
+  };
+});
 
 const exitRawModeMock = mock();
 const mockTerminalStreams = {

@@ -1,45 +1,39 @@
-import { describe, it, expect, beforeEach, mock } from "bun:test";
-import path from "node:path";
-
-mock.module("node:fs/promises", () => {
-  const readdir = mock();
-  const readFile = mock();
-  const stat = mock();
-  return {
-    readdir,
-    readFile,
-    stat,
-    default: { readdir, readFile, stat },
-  };
-});
-
-mock.module("node:os", () => {
-  const homedir = mock(() => "/home/test");
-  return {
-    homedir,
-    default: { homedir },
-  };
-});
-
-import { readdir, readFile, stat } from "node:fs/promises";
 import {
-  encodeClaudeProjectPath,
-  findLatestClaudeSessionId,
-  findLatestCodexSessionId,
-  findLatestGeminiSessionId,
-  findLatestOpenCodeSessionId,
-  waitForClaudeSessionId,
-  waitForCodexSessionId,
-  isValidUuidSessionId,
-  claudeSessionFileExists,
-} from "../../../src/utils/session.js";
+  describe,
+  it,
+  expect,
+  beforeAll,
+  beforeEach,
+  afterEach,
+  mock,
+  spyOn,
+} from "bun:test";
+import path from "node:path";
+import * as fsPromises from "node:fs/promises";
+import * as os from "node:os";
+
+let readdir: ReturnType<typeof spyOn>;
+let readFile: ReturnType<typeof spyOn>;
+let stat: ReturnType<typeof spyOn>;
+let homedir: ReturnType<typeof spyOn>;
+let tmpdir: ReturnType<typeof spyOn>;
+let encodeClaudeProjectPath: typeof import("../../../src/utils/session.ts").encodeClaudeProjectPath;
+let findLatestClaudeSessionId: typeof import("../../../src/utils/session.ts").findLatestClaudeSessionId;
+let findLatestCodexSessionId: typeof import("../../../src/utils/session.ts").findLatestCodexSessionId;
+let findLatestGeminiSessionId: typeof import("../../../src/utils/session.ts").findLatestGeminiSessionId;
+let findLatestOpenCodeSessionId: typeof import("../../../src/utils/session.ts").findLatestOpenCodeSessionId;
+let waitForClaudeSessionId: typeof import("../../../src/utils/session.ts").waitForClaudeSessionId;
+let waitForCodexSessionId: typeof import("../../../src/utils/session.ts").waitForCodexSessionId;
+let isValidUuidSessionId: typeof import("../../../src/utils/session.ts").isValidUuidSessionId;
+let claudeSessionFileExists: typeof import("../../../src/utils/session.ts").claudeSessionFileExists;
+let importCounter = 0;
 
 type ReaddirOptions = { withFileTypes?: boolean };
 type MockFn = Mock;
 
-const readdirMock = readdir as unknown as MockFn;
-const readFileMock = readFile as unknown as MockFn;
-const statMock = stat as unknown as MockFn;
+let readdirMock: MockFn;
+let readFileMock: MockFn;
+let statMock: MockFn;
 const normalizePath = (value: string) => value.replace(/\\/g, "/");
 const endsWithPath = (value: string, suffix: string) =>
   normalizePath(value).endsWith(suffix);
@@ -47,11 +41,78 @@ const equalsPath = (value: string, expected: string) =>
   normalizePath(value) === expected;
 
 describe("utils/session", () => {
+  beforeAll(async () => {
+    importCounter += 1;
+    const commonModulePath = `../../../src/utils/session/common.ts?utils-session-common=${importCounter}`;
+    const sessionIndexPath = `../../../src/utils/session/index.ts?utils-session-index=${importCounter}`;
+    mock.module(
+      "../../../src/utils/session/common.js",
+      () => import(commonModulePath),
+    );
+    mock.module(
+      "../../../src/utils/session/parsers/codex.js",
+      () =>
+        import(
+          `../../../src/utils/session/parsers/codex.ts?utils-session-codex=${importCounter}`
+        ),
+    );
+    mock.module(
+      "../../../src/utils/session/parsers/claude.js",
+      () =>
+        import(
+          `../../../src/utils/session/parsers/claude.ts?utils-session-claude=${importCounter}`
+        ),
+    );
+    mock.module(
+      "../../../src/utils/session/parsers/gemini.js",
+      () =>
+        import(
+          `../../../src/utils/session/parsers/gemini.ts?utils-session-gemini=${importCounter}`
+        ),
+    );
+    mock.module(
+      "../../../src/utils/session/parsers/opencode.js",
+      () =>
+        import(
+          `../../../src/utils/session/parsers/opencode.ts?utils-session-opencode=${importCounter}`
+        ),
+    );
+    mock.module(
+      "../../../src/utils/session/index.js",
+      () => import(sessionIndexPath),
+    );
+    const sessionModule = await import(
+      `../../../src/utils/session.ts?utils-session=${importCounter}`
+    );
+    ({
+      encodeClaudeProjectPath,
+      findLatestClaudeSessionId,
+      findLatestCodexSessionId,
+      findLatestGeminiSessionId,
+      findLatestOpenCodeSessionId,
+      waitForClaudeSessionId,
+      waitForCodexSessionId,
+      isValidUuidSessionId,
+      claudeSessionFileExists,
+    } = sessionModule);
+  });
+
   beforeEach(() => {
-    // Clear mock call counts and reset implementations
-    readdirMock.mockReset();
-    readFileMock.mockReset();
-    statMock.mockReset();
+    mock.restore();
+    readdir = spyOn(fsPromises, "readdir");
+    readFile = spyOn(fsPromises, "readFile");
+    stat = spyOn(fsPromises, "stat");
+    homedir = spyOn(os, "homedir");
+    tmpdir = spyOn(os, "tmpdir");
+    homedir.mockReturnValue("/home/test");
+    tmpdir.mockReturnValue("/tmp");
+    readdirMock = readdir as unknown as MockFn;
+    readFileMock = readFile as unknown as MockFn;
+    statMock = stat as unknown as MockFn;
+  });
+
+  afterEach(() => {
+    mock.restore();
   });
 
   describe("isValidUuidSessionId", () => {

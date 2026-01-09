@@ -1,4 +1,4 @@
-import { describe, it, expect, mock, beforeEach, spyOn } from "bun:test";
+import { describe, it, expect, mock, beforeEach } from "bun:test";
 import { EventEmitter } from "node:events";
 
 // Mock modules before importing
@@ -7,14 +7,34 @@ mock.module("execa", () => ({
   default: { execa: mock() },
 }));
 
-mock.module("fs", () => ({
-  existsSync: mock(() => true),
-  default: { existsSync: mock(() => true) },
-}));
+mock.module("fs", () => {
+  const existsSync = mock(() => true);
+  const mkdirSync = mock();
+  const readdirSync = mock(() => []);
+  const statSync = mock(() => ({
+    isFile: () => false,
+    mtime: new Date(),
+  }));
+  const unlinkSync = mock();
+  return {
+    existsSync,
+    mkdirSync,
+    readdirSync,
+    statSync,
+    unlinkSync,
+    default: { existsSync, mkdirSync, readdirSync, statSync, unlinkSync },
+  };
+});
 
 mock.module("os", () => ({
+  homedir: mock(() => "/home/test"),
   platform: mock(() => "darwin"),
-  default: { platform: mock(() => "darwin") },
+  tmpdir: mock(() => "/tmp"),
+  default: {
+    homedir: mock(() => "/home/test"),
+    platform: mock(() => "darwin"),
+    tmpdir: mock(() => "/tmp"),
+  },
 }));
 
 const stdoutWrite = mock();
@@ -98,6 +118,7 @@ describe("codex.ts", () => {
 
   beforeEach(() => {
     mock.restore();
+    mock.clearAllMocks();
     mockTerminalStreams.exitRawMode.mockClear();
     stdoutWrite.mockClear();
     stderrWrite.mockClear();
@@ -232,55 +253,41 @@ describe("codex.ts", () => {
     expect(args[enableIndex + 1]).toBe("skills");
   });
 
-  it("should display launch arguments in console log (FR-008)", async () => {
-    const consoleSpy = spyOn(console, "log").mockImplementation(() => {});
-
+  it("should display launch arguments in output (FR-008)", async () => {
     await launchCodexCLI(worktreePath);
 
     // Verify that args are logged with 📋 prefix
-    expect(consoleSpy).toHaveBeenCalledWith(
+    expect(stdoutWrite).toHaveBeenCalledWith(
       expect.stringContaining("📋 Args:"),
     );
 
     // Verify that the actual arguments are included in the log
-    expect(consoleSpy).toHaveBeenCalledWith(
+    expect(stdoutWrite).toHaveBeenCalledWith(
       expect.stringContaining("--enable"),
     );
-    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining("skills"));
-
-    consoleSpy.mockRestore();
+    expect(stdoutWrite).toHaveBeenCalledWith(expect.stringContaining("skills"));
   });
 
   describe("Launch/Exit Logs", () => {
     it("should display launch message with rocket emoji at startup", async () => {
-      const consoleSpy = spyOn(console, "log").mockImplementation(() => {});
-
       await launchCodexCLI(worktreePath);
 
       // Verify that launch message is logged with 🚀 emoji
-      expect(consoleSpy).toHaveBeenCalledWith(
+      expect(stdoutWrite).toHaveBeenCalledWith(
         expect.stringContaining("🚀 Launching Codex CLI..."),
       );
-
-      consoleSpy.mockRestore();
     });
 
     it("should display working directory in launch logs", async () => {
-      const consoleSpy = spyOn(console, "log").mockImplementation(() => {});
-
       await launchCodexCLI(worktreePath);
 
       // Verify working directory is shown
-      expect(consoleSpy).toHaveBeenCalledWith(
+      expect(stdoutWrite).toHaveBeenCalledWith(
         expect.stringContaining(`Working directory: ${worktreePath}`),
       );
-
-      consoleSpy.mockRestore();
     });
 
     it("should display session ID after agent exits when captured", async () => {
-      const consoleSpy = spyOn(console, "log").mockImplementation(() => {});
-
       // Mock session detection to return a session ID
       const { findLatestCodexSession } =
         await import("../../src/utils/session.js");
@@ -295,24 +302,18 @@ describe("codex.ts", () => {
       await launchCodexCLI(worktreePath);
 
       // Verify session ID is displayed after exit
-      expect(consoleSpy).toHaveBeenCalledWith(
+      expect(stdoutWrite).toHaveBeenCalledWith(
         expect.stringContaining("🆔 Session ID: codex-session-456"),
       );
-
-      consoleSpy.mockRestore();
     });
 
     it("should display model info when custom model is specified", async () => {
-      const consoleSpy = spyOn(console, "log").mockImplementation(() => {});
-
       await launchCodexCLI(worktreePath, { model: "gpt-5.2-codex" });
 
       // Verify model info is logged with 🎯 emoji
-      expect(consoleSpy).toHaveBeenCalledWith(
+      expect(stdoutWrite).toHaveBeenCalledWith(
         expect.stringContaining("🎯 Model: gpt-5.2-codex"),
       );
-
-      consoleSpy.mockRestore();
     });
   });
 });
