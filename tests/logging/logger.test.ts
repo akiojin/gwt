@@ -95,6 +95,26 @@ describe("createLogger", () => {
     delete process.env.LOG_LEVEL;
   });
 
+  it("appends to existing log files instead of truncating", () => {
+    const logfile = path.join(TMP_DIR, "append.log");
+    fs.writeFileSync(logfile, "seed\n");
+
+    const logger = createLogger({
+      logDir: TMP_DIR,
+      filename: "append.log",
+      category: "cli",
+      sync: true,
+    });
+
+    logger.info("appended");
+    logger.flush?.();
+
+    const content = fs.readFileSync(logfile, "utf-8");
+    expect(content.startsWith("seed\n")).toBe(true);
+    const lines = content.trim().split("\n");
+    expect(lines.length).toBeGreaterThanOrEqual(2);
+  });
+
   it("multiple logger instances can write to same log file without corruption", () => {
     const logfile = path.join(TMP_DIR, "multilogger.log");
     fs.writeFileSync(logfile, ""); // Clear file

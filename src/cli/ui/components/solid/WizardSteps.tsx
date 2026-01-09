@@ -9,6 +9,7 @@ import { getModelOptions } from "../../utils/modelOptions.js";
 import type { CodingAgentId } from "../../types.js";
 import { useWizardScroll } from "./WizardPopup.js";
 import { getAgentTerminalColor } from "../../../../utils/coding-agent-colors.js";
+import { selectionStyle } from "../../core/theme.js";
 import {
   fetchPackageVersions,
   parsePackageCommand,
@@ -346,7 +347,7 @@ export function AgentSelectStep(props: AgentSelectStepProps) {
         const isSelected = () => selectedIndex() === index;
         const agentColor = getAgentTerminalColor(agent.value);
         return isSelected() ? (
-          <text bg="cyan" fg="black">
+          <text bg={selectionStyle.bg} fg={selectionStyle.fg}>
             {"> "}
             {agent.label}
           </text>

@@ -1,6 +1,7 @@
 /** @jsxImportSource @opentui/solid */
 import type { SelectOption, SelectRenderable } from "@opentui/core";
 import type { Ref } from "solid-js";
+import { selectionStyle } from "../../core/theme.js";
 
 export interface SelectInputItem {
   label: string;
@@ -69,6 +70,9 @@ export function SelectInput(props: SelectInputProps) {
       <select
         options={options()}
         height={computedHeight()}
+        selectedBackgroundColor={selectionStyle.bg}
+        selectedTextColor={selectionStyle.fg}
+        selectedDescriptionColor={selectionStyle.fg}
         {...(props.selectedIndex !== undefined && {
           selectedIndex: props.selectedIndex,
         })}

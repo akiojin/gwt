@@ -9,6 +9,10 @@ import { execa } from "execa";
 import chalk from "chalk";
 import type { CodingAgent, CodingAgentLaunchOptions } from "./types/tools.js";
 import { createLogger } from "./logging/logger.js";
+import {
+  runAgentWithPty,
+  shouldCaptureAgentOutput,
+} from "./logging/agentOutput.js";
 import { resolveVersionSuffix } from "./utils/npmRegistry.js";
 import { writeTerminalLine } from "./utils/terminal.js";
 
@@ -125,12 +129,30 @@ export async function launchCodingAgent(
     ...(options.sharedEnv ?? {}),
     ...(agent.env ?? {}),
   };
+  const workingDir = options.cwd ?? process.cwd();
+  const captureOutput = shouldCaptureAgentOutput(env);
 
   // execa共通オプション（cwdがundefinedの場合は含めない）
   const execaOptions = {
     stdio: "inherit" as const,
-    ...(options.cwd ? { cwd: options.cwd } : {}),
+    ...(workingDir ? { cwd: workingDir } : {}),
     env,
+  };
+
+  const runWithCapture = async (command: string, commandArgs: string[]) => {
+    const result = await runAgentWithPty({
+      command,
+      args: commandArgs,
+      cwd: workingDir,
+      env,
+      agentId: agent.id,
+    });
+    if (result.signal !== null && result.signal !== undefined) {
+      throw new Error(`Coding agent terminated by signal ${result.signal}`);
+    }
+    if (result.exitCode !== null && result.exitCode !== 0) {
+      throw new Error(`Coding agent exited with code ${result.exitCode}`);
+    }
   };
 
   logger.info(
@@ -146,7 +168,11 @@ export async function launchCodingAgent(
   switch (agent.type) {
     case "path": {
       // 絶対パスで直接実行
-      await execa(agent.command, args, execaOptions);
+      if (captureOutput) {
+        await runWithCapture(agent.command, args);
+      } else {
+        await execa(agent.command, args, execaOptions);
+      }
       logger.info({ agentId: agent.id }, "Coding agent completed (path)");
       break;
     }
@@ -167,7 +193,12 @@ export async function launchCodingAgent(
       writeTerminalLine(chalk.cyan(`   🔄 Using bunx ${packageWithVersion}`));
 
       // bunx [package@version] [args...]
-      await execa("bunx", [packageWithVersion, ...args], execaOptions);
+      const bunxCommand = captureOutput ? await resolveCommand("bunx") : "bunx";
+      if (captureOutput) {
+        await runWithCapture(bunxCommand, [packageWithVersion, ...args]);
+      } else {
+        await execa("bunx", [packageWithVersion, ...args], execaOptions);
+      }
       logger.info(
         { agentId: agent.id, version: selectedVersion },
         "Coding agent completed (bunx)",
@@ -178,7 +209,11 @@ export async function launchCodingAgent(
     case "command": {
       // PATH解決 → 実行
       const resolvedPath = await resolveCommand(agent.command);
-      await execa(resolvedPath, args, execaOptions);
+      if (captureOutput) {
+        await runWithCapture(resolvedPath, args);
+      } else {
+        await execa(resolvedPath, args, execaOptions);
+      }
       logger.info({ agentId: agent.id }, "Coding agent completed (command)");
       break;
     }
