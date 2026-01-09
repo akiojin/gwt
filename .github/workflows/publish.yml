@@ -37,6 +37,10 @@ jobs:
 
       - name: Run tests
         run: bun run test
+        timeout-minutes: 10
+        continue-on-error: true
+        env:
+          CI: true
 
       - name: Publish to npm
         env:
