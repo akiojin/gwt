@@ -231,6 +231,36 @@ describe("LogScreen", () => {
     }
   });
 
+  it("triggers reset and shows Reset in footer", async () => {
+    const onReset = mock();
+    const { LogScreen } = await import("../../screens/solid/LogScreen.js");
+
+    const testSetup = await testRender(
+      () => (
+        <LogScreen
+          entries={[]}
+          onBack={() => {}}
+          onSelect={() => {}}
+          onCopy={() => {}}
+          onReset={onReset}
+        />
+      ),
+      { width: 80, height: 16 },
+    );
+
+    try {
+      await testSetup.renderOnce();
+      const frame = testSetup.captureCharFrame();
+      expect(frame).toContain("Reset");
+
+      await testSetup.mockInput.typeText("x");
+      await testSetup.renderOnce();
+      expect(onReset).toHaveBeenCalledTimes(1);
+    } finally {
+      testSetup.renderer.destroy();
+    }
+  });
+
   it("highlights the selected row with full-width cyan background", async () => {
     const entries = [
       makeEntry("alpha", {

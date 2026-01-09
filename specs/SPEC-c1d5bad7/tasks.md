@@ -79,3 +79,7 @@
 - [x] T200 [Test] ログ一覧の時刻表示がシステムロケールのローカル時刻になることを検証 (`src/logging/formatter.ts` 周辺)
 - [x] T201 ブランチ一覧とログ一覧の時刻表示をローカル時刻へ切り替え (`src/cli/ui/utils/branchFormatter.ts`, `src/cli/ui/screens/solid/BranchListScreen.tsx`, `src/logging/formatter.ts`)
 - [x] T202 既存テストの期待値をローカル時刻に合わせて更新 (`src/cli/ui/utils/__tests__/branchFormatter.test.ts`, `src/cli/ui/__tests__/utils/branchFormatter.test.ts`)
+- [x] T210 [Test] `x` でログリセットが発火し、フッターに Reset が表示されることを検証 (`src/cli/ui/__tests__/solid/LogScreen.test.tsx`)
+- [x] T211 [Test] ログリセットで対象ログファイルが空になることを検証 (`tests/logging/reader.test.ts`)
+- [x] T212 ログ対象ディレクトリ内のログファイルを空にするヘルパーを追加 (`src/logging/reader.ts`)
+- [x] T213 Log Viewer の `x` キーバインドとリセット通知を実装 (`src/cli/ui/screens/solid/LogScreen.tsx`, `src/cli/ui/App.solid.tsx`)

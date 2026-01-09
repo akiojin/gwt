@@ -20,6 +20,7 @@ export interface LogScreenProps {
   onPickDate?: () => void;
   onReload?: () => void;
   onToggleTail?: () => void;
+  onReset?: () => void;
   notification?: { message: string; tone: "success" | "error" } | null;
   version?: string | null;
   selectedDate?: string | null;
@@ -321,6 +322,11 @@ export function LogScreen(props: LogScreenProps) {
       return;
     }
 
+    if (key.name === "x") {
+      merged.onReset?.();
+      return;
+    }
+
     if (key.name === "down") {
       updateSelectedIndex((prev) => prev + 1);
       return;
@@ -368,6 +374,7 @@ export function LogScreen(props: LogScreenProps) {
       { key: "v", description: "Level" },
       { key: "r", description: "Reload" },
       { key: "t", description: "Tail" },
+      { key: "x", description: "Reset" },
       { key: "esc", description: "Back" },
     ];
     return actions;

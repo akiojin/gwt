@@ -76,6 +76,7 @@ import {
 } from "../../config/index.js";
 import { getAllCodingAgents } from "../../config/tools.js";
 import {
+  clearLogFiles,
   getTodayLogDate,
   readLogLinesForDate,
   resolveLogTarget,
@@ -585,6 +586,26 @@ export function AppSolid(props: AppSolidProps) {
 
   const toggleLogTail = () => {
     setLogTailEnabled((prev) => !prev);
+  };
+
+  const resetLogFiles = async () => {
+    const target = logTarget();
+    if (!target.logDir) {
+      showLogNotification("No logs available.", "error");
+      return;
+    }
+    try {
+      const cleared = await clearLogFiles(target.logDir);
+      if (cleared === 0) {
+        showLogNotification("No logs to reset.", "error");
+      } else {
+        showLogNotification("Logs cleared.", "success");
+      }
+      await loadLogEntries(logSelectedDate());
+    } catch (err) {
+      logger.warn({ err }, "Failed to clear log files");
+      showLogNotification("Failed to reset logs.", "error");
+    }
   };
 
   const refreshBranches = async () => {
@@ -1590,6 +1611,7 @@ export function AppSolid(props: AppSolidProps) {
           }}
           onReload={() => void loadLogEntries(logSelectedDate())}
           onToggleTail={toggleLogTail}
+          onReset={() => void resetLogFiles()}
           notification={logNotification()}
           version={version()}
           selectedDate={logSelectedDate()}

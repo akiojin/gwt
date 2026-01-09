@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import fs from "node:fs";
 import path from "node:path";
 import {
+  clearLogFiles,
   readLogLinesForDate,
   resolveLogDir,
   resolveLogTarget,
@@ -65,6 +66,34 @@ describe("readLogLinesForDate", () => {
 
     expect(result?.date).toBe("2026-01-07");
     expect(result?.lines).toEqual([fallback]);
+  });
+});
+
+describe("clearLogFiles", () => {
+  beforeEach(() => {
+    fs.rmSync(TMP_DIR, { recursive: true, force: true });
+    fs.mkdirSync(TMP_DIR, { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(TMP_DIR, { recursive: true, force: true });
+  });
+
+  it("clears only log files in the target directory", async () => {
+    const line = sampleLine("keep");
+    const first = writeLogFile("2026-01-08", [line]);
+    const second = writeLogFile("2026-01-07", [line]);
+    const other = path.join(TMP_DIR, "notes.txt");
+    fs.writeFileSync(other, "do not delete");
+
+    const cleared = await clearLogFiles(TMP_DIR);
+
+    expect(cleared).toBe(2);
+    expect(fs.existsSync(first)).toBe(true);
+    expect(fs.readFileSync(first, "utf-8")).toBe("");
+    expect(fs.existsSync(second)).toBe(true);
+    expect(fs.readFileSync(second, "utf-8")).toBe("");
+    expect(fs.existsSync(other)).toBe(true);
   });
 });
 

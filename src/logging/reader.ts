@@ -125,6 +125,23 @@ export async function listLogFiles(logDir: string): Promise<LogFileInfo[]> {
   }
 }
 
+export async function clearLogFiles(logDir: string): Promise<number> {
+  const files = await listLogFiles(logDir);
+  let cleared = 0;
+  for (const file of files) {
+    try {
+      await fs.truncate(file.path, 0);
+      cleared += 1;
+    } catch (error) {
+      const err = error as NodeJS.ErrnoException;
+      if (err.code !== "ENOENT") {
+        throw error;
+      }
+    }
+  }
+  return cleared;
+}
+
 export async function listRecentLogFiles(
   logDir: string,
   days = 7,
