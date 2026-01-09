@@ -192,6 +192,11 @@ function performTerminalCleanup(): void {
  * Returns SelectionResult if user made selections, undefined if user quit
  */
 async function mainSolidUI(): Promise<SelectionResult | undefined> {
+  if (!("Bun" in globalThis)) {
+    throw new Error(
+      "OpenTUI requires the Bun runtime. Run with Bun (e.g. bunx @akiojin/gwt@latest).",
+    );
+  }
   const { renderSolidApp } = await import("./opentui/index.solid.js");
   const terminal = getTerminalStreams();
 
