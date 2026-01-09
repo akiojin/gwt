@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
+import { beforeEach, describe, expect, it, mock } from "bun:test";
 import type { SelectionResult } from "../../src/cli/ui/App.solid.js";
 
 const {
@@ -21,6 +21,8 @@ const {
   confirmYesNoMock,
   waitForEnterMock,
   resolveWorktreePathForBranchMock,
+  waitForUserAcknowledgementMock,
+  writeTerminalLineMock,
 } = {
   ensureWorktreeMock: mock(async () => "/repo/.worktrees/feature"),
   fetchAllRemotesMock: mock(async () => undefined),
@@ -46,36 +48,40 @@ const {
   confirmYesNoMock: mock(async () => false),
   waitForEnterMock: mock(async () => undefined),
   resolveWorktreePathForBranchMock: mock(async () => ({ path: null })),
+  waitForUserAcknowledgementMock: mock(async () => undefined),
+  writeTerminalLineMock: mock(),
 };
 
-mock.module("../../src/git.js", async () => {
-  const actual = await import("../../src/git.js");
-  return {
-    ...actual,
-    getRepositoryRoot: getRepositoryRootMock,
-    fetchAllRemotes: fetchAllRemotesMock,
-    pullFastForward: pullFastForwardMock,
-    getBranchDivergenceStatuses: getBranchDivergenceStatusesMock,
-    branchExists: mock(async () => true),
-    getCurrentBranch: mock(async () => "develop"),
-    hasUncommittedChanges: hasUncommittedChangesMock,
-    hasUnpushedCommits: hasUnpushedCommitsMock,
-    getUncommittedChangesCount: getUncommittedChangesCountMock,
-    getUnpushedCommitsCount: getUnpushedCommitsCountMock,
-    pushBranchToRemote: pushBranchToRemoteMock,
-  };
-});
+const mockTerminalStreams = {
+  stdin: { isTTY: false, on: () => {} } as unknown as NodeJS.ReadStream,
+  stdout: { write: () => {} } as unknown as NodeJS.WriteStream,
+  stderr: { write: () => {} } as unknown as NodeJS.WriteStream,
+  usingFallback: false,
+  exitRawMode: mock(),
+};
 
-mock.module("../../src/worktree.js", async () => {
-  const actual = await import("../../src/worktree.js");
-  return {
-    ...actual,
-    worktreeExists: worktreeExistsMock,
-    resolveWorktreePathForBranch: resolveWorktreePathForBranchMock,
-    isProtectedBranchName: mock(() => false),
-    switchToProtectedBranch: mock(),
-  };
-});
+mock.module("../../src/git.js", () => ({
+  isGitRepository: mock(async () => true),
+  getRepositoryRoot: getRepositoryRootMock,
+  fetchAllRemotes: fetchAllRemotesMock,
+  pullFastForward: pullFastForwardMock,
+  getBranchDivergenceStatuses: getBranchDivergenceStatusesMock,
+  branchExists: mock(async () => true),
+  getCurrentBranch: mock(async () => "develop"),
+  hasUncommittedChanges: hasUncommittedChangesMock,
+  hasUnpushedCommits: hasUnpushedCommitsMock,
+  getUncommittedChangesCount: getUncommittedChangesCountMock,
+  getUnpushedCommitsCount: getUnpushedCommitsCountMock,
+  pushBranchToRemote: pushBranchToRemoteMock,
+}));
+
+mock.module("../../src/worktree.js", () => ({
+  worktreeExists: worktreeExistsMock,
+  resolveWorktreePathForBranch: resolveWorktreePathForBranchMock,
+  isProtectedBranchName: mock(() => false),
+  switchToProtectedBranch: mock(),
+  repairWorktreePath: mock(async () => null),
+}));
 
 mock.module("../../src/services/WorktreeOrchestrator.js", () => ({
   WorktreeOrchestrator: class {
@@ -83,13 +89,17 @@ mock.module("../../src/services/WorktreeOrchestrator.js", () => ({
   },
 }));
 
-mock.module("../../src/services/dependency-installer.js", async () => {
-  const actual = await import("../../src/services/dependency-installer.js");
-  return {
-    ...actual,
-    installDependenciesForWorktree: installDependenciesMock,
-  };
-});
+class DependencyInstallError extends Error {
+  constructor(message?: string) {
+    super(message);
+    this.name = "DependencyInstallError";
+  }
+}
+
+mock.module("../../src/services/dependency-installer.js", () => ({
+  installDependenciesForWorktree: installDependenciesMock,
+  DependencyInstallError,
+}));
 
 mock.module("../../src/config/tools.js", () => ({
   getCodingAgentById: mock(async () => ({
@@ -127,14 +137,17 @@ mock.module("../../src/utils/session.js", () => ({
   findLatestClaudeSessionId: mock(async () => null),
 }));
 
-mock.module("../../src/utils/prompt.js", async () => {
-  const actual = await import("../../src/utils/prompt.js");
-  return {
-    ...actual,
-    confirmYesNo: confirmYesNoMock,
-    waitForEnter: waitForEnterMock,
-  };
-});
+mock.module("../../src/utils/terminal.js", () => ({
+  getTerminalStreams: mock(() => mockTerminalStreams),
+  resetTerminalModes: mock(),
+  writeTerminalLine: (...args: unknown[]) => writeTerminalLineMock(...args),
+  waitForUserAcknowledgement: waitForUserAcknowledgementMock,
+}));
+
+mock.module("../../src/utils/prompt.js", () => ({
+  confirmYesNo: confirmYesNoMock,
+  waitForEnter: waitForEnterMock,
+}));
 
 import { handleAIToolWorkflow } from "../../src/index.js";
 
@@ -157,6 +170,8 @@ beforeEach(() => {
   pushBranchToRemoteMock.mockClear();
   confirmYesNoMock.mockClear();
   waitForEnterMock.mockClear();
+  waitForUserAcknowledgementMock.mockClear();
+  writeTerminalLineMock.mockClear();
   resolveWorktreePathForBranchMock.mockClear();
 
   getBranchDivergenceStatusesMock.mockResolvedValue([]);
@@ -168,6 +183,7 @@ beforeEach(() => {
   getUnpushedCommitsCountMock.mockResolvedValue(0);
   confirmYesNoMock.mockResolvedValue(false);
   resolveWorktreePathForBranchMock.mockResolvedValue({ path: null });
+  waitForUserAcknowledgementMock.mockResolvedValue(undefined);
 });
 
 const selection: SelectionResult = {
@@ -182,8 +198,6 @@ const selection: SelectionResult = {
 describe("handleAIToolWorkflow - post session checks", () => {
   it("warns when uncommitted changes exist and waits 3 seconds", async () => {
     // TODO: use setSystemTime for fake timers in bun;
-    const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
-
     hasUncommittedChangesMock.mockResolvedValue(true);
     getUncommittedChangesCountMock.mockResolvedValue(2);
 
@@ -191,20 +205,19 @@ describe("handleAIToolWorkflow - post session checks", () => {
     await new Promise((r) => setTimeout(r, 3000));
     await run;
 
-    const messages = warnSpy.mock.calls.flat().join(" ");
+    const messages = writeTerminalLineMock.mock.calls
+      .filter(([, stream]) => stream === "stderr")
+      .map(([message]) => message)
+      .join(" ");
     expect(messages).toContain("Uncommitted changes detected");
     expect(waitForEnterMock).not.toHaveBeenCalled();
     expect(confirmYesNoMock).not.toHaveBeenCalled();
     expect(pushBranchToRemoteMock).not.toHaveBeenCalled();
-
-    warnSpy.mockRestore();
     // TODO: restore real timers;
   });
 
   it("warns when unpushed commits exist and waits 3 seconds", async () => {
     // TODO: use setSystemTime for fake timers in bun;
-    const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
-
     hasUnpushedCommitsMock.mockResolvedValue(true);
     getUnpushedCommitsCountMock.mockResolvedValue(3);
 
@@ -212,20 +225,19 @@ describe("handleAIToolWorkflow - post session checks", () => {
     await new Promise((r) => setTimeout(r, 3000));
     await run;
 
-    const messages = warnSpy.mock.calls.flat().join(" ");
+    const messages = writeTerminalLineMock.mock.calls
+      .filter(([, stream]) => stream === "stderr")
+      .map(([message]) => message)
+      .join(" ");
     expect(messages).toContain("Unpushed commits detected");
     expect(waitForEnterMock).not.toHaveBeenCalled();
     expect(confirmYesNoMock).not.toHaveBeenCalled();
     expect(pushBranchToRemoteMock).not.toHaveBeenCalled();
-
-    warnSpy.mockRestore();
     // TODO: restore real timers;
   });
 
   it("warns for both uncommitted and unpushed changes before waiting", async () => {
     // TODO: use setSystemTime for fake timers in bun;
-    const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
-
     hasUncommittedChangesMock.mockResolvedValue(true);
     hasUnpushedCommitsMock.mockResolvedValue(true);
     getUncommittedChangesCountMock.mockResolvedValue(1);
@@ -235,14 +247,15 @@ describe("handleAIToolWorkflow - post session checks", () => {
     await new Promise((r) => setTimeout(r, 3000));
     await run;
 
-    const messages = warnSpy.mock.calls.flat().join(" ");
+    const messages = writeTerminalLineMock.mock.calls
+      .filter(([, stream]) => stream === "stderr")
+      .map(([message]) => message)
+      .join(" ");
     expect(messages).toContain("Uncommitted changes detected");
     expect(messages).toContain("Unpushed commits detected");
     expect(waitForEnterMock).not.toHaveBeenCalled();
     expect(confirmYesNoMock).not.toHaveBeenCalled();
     expect(pushBranchToRemoteMock).not.toHaveBeenCalled();
-
-    warnSpy.mockRestore();
     // TODO: restore real timers;
   });
 

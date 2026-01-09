@@ -1,5 +1,7 @@
 /** @jsxImportSource @opentui/solid */
-import type { SelectOption } from "@opentui/core";
+import type { SelectOption, SelectRenderable } from "@opentui/core";
+import type { Ref } from "solid-js";
+import { selectionStyle } from "../../core/theme.js";
 
 export interface SelectInputItem {
   label: string;
@@ -17,6 +19,7 @@ export interface SelectInputProps {
   wrapSelection?: boolean;
   /** 明示的に高さを指定。undefined の場合はアイテム数から計算 */
   height?: number;
+  selectRef?: Ref<SelectRenderable>;
 }
 
 export function SelectInput(props: SelectInputProps) {
@@ -67,6 +70,9 @@ export function SelectInput(props: SelectInputProps) {
       <select
         options={options()}
         height={computedHeight()}
+        selectedBackgroundColor={selectionStyle.bg}
+        selectedTextColor={selectionStyle.fg}
+        selectedDescriptionColor={selectionStyle.fg}
         {...(props.selectedIndex !== undefined && {
           selectedIndex: props.selectedIndex,
         })}
@@ -75,6 +81,7 @@ export function SelectInput(props: SelectInputProps) {
         wrapSelection={props.wrapSelection ?? false}
         onSelect={handleSelect}
         onChange={handleChange}
+        {...(props.selectRef ? { ref: props.selectRef } : {})}
       />
     </box>
   );

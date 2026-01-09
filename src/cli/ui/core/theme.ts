@@ -33,6 +33,8 @@ export const colors = {
   selected: "cyan",
   highlighted: "cyan",
   disabled: "gray",
+  selectionBackground: "cyan",
+  selectionText: "black",
 
   // Branch type colors
   branchFeature: "green",
@@ -63,6 +65,36 @@ export const colors = {
 
 export type ColorName = keyof typeof colors;
 export type ColorValue = (typeof colors)[ColorName];
+
+export type LogLevelLabel =
+  | "TRACE"
+  | "DEBUG"
+  | "INFO"
+  | "WARN"
+  | "ERROR"
+  | "FATAL";
+
+export const logLevelColors: Record<LogLevelLabel, ColorValue> = {
+  TRACE: colors.textDim,
+  DEBUG: colors.info,
+  INFO: colors.success,
+  WARN: colors.warning,
+  ERROR: colors.error,
+  FATAL: colors.error,
+};
+
+export const selectionStyle = {
+  fg: colors.selectionText,
+  bg: colors.selectionBackground,
+} as const;
+
+export const getLogLevelColor = (label?: string | null): ColorValue => {
+  if (!label) {
+    return colors.text;
+  }
+  const normalized = label.toUpperCase() as LogLevelLabel;
+  return logLevelColors[normalized] ?? colors.text;
+};
 
 // ========================================
 // Icon Definitions

@@ -1,15 +1,17 @@
 import { describe, it, expect, beforeEach, mock } from "bun:test";
 import path from "node:path";
 
-mock.module("node:fs/promises", () => {
+mock.module("node:fs/promises", async () => {
+  const actual = await import("node:fs/promises");
   const readdir = mock();
   const readFile = mock();
   const stat = mock();
   return {
+    ...actual,
     readdir,
     readFile,
     stat,
-    default: { readdir, readFile, stat },
+    default: { ...actual.default, readdir, readFile, stat },
   };
 });
 
@@ -213,6 +215,40 @@ describe("utils/session", () => {
     );
 
     // Should match: /repo/.worktrees/branch starts with /repo
+    const id = await findLatestCodexSessionId({
+      cwd: "/repo/.worktrees/branch",
+    });
+    expect(id).toBe(sessionUuid);
+  });
+
+  it("findLatestCodexSessionId falls back when cwd is missing in session file", async () => {
+    const dirent = (name: string, type: "file" | "dir") => ({
+      name,
+      isFile: () => type === "file",
+      isDirectory: () => type === "dir",
+    });
+
+    const sessionUuid = "99999999-9999-9999-9999-999999999999";
+
+    readdirMock.mockImplementation((dir: string, opts?: ReaddirOptions) => {
+      if (opts?.withFileTypes) {
+        if (endsWithPath(dir, "/.codex/sessions")) {
+          return Promise.resolve([dirent("2025", "dir")]);
+        }
+        if (endsWithPath(dir, "/.codex/sessions/2025")) {
+          return Promise.resolve([dirent("12", "dir")]);
+        }
+        if (endsWithPath(dir, "/.codex/sessions/2025/12")) {
+          return Promise.resolve([
+            dirent(`rollout-${sessionUuid}.jsonl`, "file"),
+          ]);
+        }
+      }
+      return Promise.resolve([]);
+    });
+    statMock.mockResolvedValue({ mtimeMs: 700 });
+    readFileMock.mockResolvedValue("{}");
+
     const id = await findLatestCodexSessionId({
       cwd: "/repo/.worktrees/branch",
     });

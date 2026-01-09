@@ -1,13 +1,17 @@
 /** @jsxImportSource @opentui/solid */
-import { createEffect, createMemo, createSignal } from "solid-js";
+import { createEffect, createMemo, createSignal, on } from "solid-js";
 import { useKeyboard, useTerminalDimensions } from "@opentui/solid";
 import { TextAttributes } from "@opentui/core";
 import type { BranchItem, BranchViewMode, Statistics } from "../../types.js";
-import type { ToolStatus } from "../../../../utils/command.js";
-import { getLatestActivityTimestamp } from "../../utils/branchFormatter.js";
+import {
+  formatLocalDateTime,
+  getLatestActivityTimestamp,
+} from "../../utils/branchFormatter.js";
 import stringWidth from "string-width";
+import { getAgentTerminalColor } from "../../../../utils/coding-agent-colors.js";
 import { Header } from "../../components/solid/Header.js";
-type IndicatorColor = "cyan" | "green" | "yellow" | "red";
+import { selectionStyle } from "../../core/theme.js";
+type IndicatorColor = "cyan" | "green" | "yellow" | "red" | "brightGreen";
 
 interface CleanupIndicator {
   icon: string;
@@ -25,6 +29,8 @@ interface CleanupUIState {
   indicators: Record<string, CleanupIndicator>;
   footerMessage: CleanupFooterMessage | null;
   inputLocked: boolean;
+  safetyLoading?: boolean;
+  safetyPendingBranches?: Set<string>;
 }
 
 export interface BranchListScreenProps {
@@ -37,7 +43,7 @@ export interface BranchListScreenProps {
   onCreateBranch?: (branch: BranchItem | null) => void;
   onRefresh?: () => void;
   onOpenProfiles?: () => void;
-  onOpenLogs?: () => void;
+  onOpenLogs?: (branch: BranchItem | null) => void;
   loading?: boolean;
   error?: Error | null;
   lastUpdated?: Date | null;
@@ -48,10 +54,15 @@ export interface BranchListScreenProps {
   activeProfile?: string | null;
   selectedBranches?: string[];
   onToggleSelect?: (branchName: string) => void;
-  toolStatuses?: ToolStatus[] | undefined;
   helpVisible?: boolean;
   /** ウィザードポップアップ表示中は入力を無効化 */
   wizardVisible?: boolean;
+  /** 確認ダイアログ表示中は入力を無効化 */
+  confirmVisible?: boolean;
+  /** カーソル位置（外部から制御する場合） */
+  cursorPosition?: number;
+  /** カーソル位置変更時のコールバック */
+  onCursorPositionChange?: (index: number) => void;
 }
 
 const VIEW_MODES: BranchViewMode[] = ["all", "local", "remote"];
@@ -190,8 +201,8 @@ const fitSegmentsToWidth = (
 const applySelectionStyle = (segments: TextSegment[]): TextSegment[] =>
   segments.map((segment) => ({
     text: segment.text,
-    fg: "black",
-    bg: "cyan",
+    fg: selectionStyle.fg,
+    bg: selectionStyle.bg,
   }));
 
 const CLEANUP_SPINNER_FRAMES = ["-", "\\", "|", "/"];
@@ -227,22 +238,9 @@ const formatViewModeLabel = (mode: BranchViewMode): string => {
   }
 };
 
+// Use shared color utility for consistent agent colors (SPEC-3b0ed29b FR-024~FR-027)
 const getToolColor = (label: string, toolId?: string | null): string => {
-  switch (toolId) {
-    case "claude-code":
-      return "yellow";
-    case "codex-cli":
-      return "cyan";
-    case "gemini-cli":
-      return "magenta";
-    default: {
-      const trimmed = label.trim().toLowerCase();
-      if (!toolId || trimmed === "unknown") {
-        return "gray";
-      }
-      return "white";
-    }
-  }
+  return getAgentTerminalColor(toolId, label);
 };
 
 interface LoadingIndicatorProps {
@@ -311,7 +309,21 @@ export function BranchListScreen(props: BranchListScreenProps) {
   const [filterQuery, setFilterQuery] = createSignal("");
   const [filterMode, setFilterMode] = createSignal(false);
   const [viewMode, setViewMode] = createSignal<BranchViewMode>("all");
-  const [selectedIndex, setSelectedIndex] = createSignal(0);
+
+  // カーソル位置: 外部制御（props.cursorPosition）が優先、なければ内部状態を使用
+  const [internalSelectedIndex, setInternalSelectedIndex] = createSignal(
+    props.cursorPosition ?? 0,
+  );
+  const selectedIndex = () => props.cursorPosition ?? internalSelectedIndex();
+  const setSelectedIndex = (
+    value: number | ((prev: number) => number),
+  ): void => {
+    const newValue =
+      typeof value === "function" ? value(selectedIndex()) : value;
+    setInternalSelectedIndex(newValue);
+    props.onCursorPositionChange?.(newValue);
+  };
+
   const [scrollOffset, setScrollOffset] = createSignal(0);
   const [cleanupSpinnerIndex, setCleanupSpinnerIndex] = createSignal(0);
   const [cursorIndex, setCursorIndex] = createSignal(0);
@@ -322,8 +334,6 @@ export function BranchListScreen(props: BranchListScreenProps) {
   const fixedLines = createMemo(() => {
     const headerLines = 2 + (props.workingDirectory ? 1 : 0);
     const filterLines = 1;
-    const toolLines =
-      props.toolStatuses && props.toolStatuses.length > 0 ? 1 : 0;
     const statsLines = 1;
     const loadingLines = 1;
     const footerMessageLines = props.cleanupUI?.footerMessage ? 1 : 0;
@@ -332,7 +342,6 @@ export function BranchListScreen(props: BranchListScreenProps) {
     return (
       headerLines +
       filterLines +
-      toolLines +
       statsLines +
       loadingLines +
       footerMessageLines +
@@ -361,8 +370,17 @@ export function BranchListScreen(props: BranchListScreenProps) {
     () => props.cleanupUI?.footerMessage?.isSpinning ?? false,
   );
 
+  const safetyPendingActive = createMemo(() => {
+    const pending = props.cleanupUI?.safetyPendingBranches;
+    if (pending) {
+      return pending.size > 0;
+    }
+    return props.cleanupUI?.safetyLoading === true;
+  });
+
   const cleanupSpinnerActive = createMemo(
-    () => hasSpinningIndicator() || hasSpinningFooter(),
+    () =>
+      hasSpinningIndicator() || hasSpinningFooter() || safetyPendingActive(),
   );
 
   createEffect(() => {
@@ -419,12 +437,35 @@ export function BranchListScreen(props: BranchListScreenProps) {
     return result;
   });
 
-  createEffect(() => {
-    filterQuery();
-    viewMode();
-    setSelectedIndex(0);
-    setScrollOffset(0);
+  // ツールラベルの最大幅を動的に計算
+  const maxToolWidth = createMemo(() => {
+    const MIN_TOOL_WIDTH = 7; // "Unknown" の幅
+    let maxWidth = MIN_TOOL_WIDTH;
+    for (const branch of filteredBranches()) {
+      const toolLabel =
+        branch.lastToolUsageLabel?.split("|")?.[0]?.trim() ??
+        branch.lastToolUsage?.toolId ??
+        "Unknown";
+      const width = stringWidth(toolLabel);
+      if (width > maxWidth) {
+        maxWidth = width;
+      }
+    }
+    return maxWidth;
   });
+
+  // FR-037 / FR-037a: filterQueryまたはviewModeが実際に変更されたときのみカーソルをリセット
+  // defer: true により初回実行をスキップし、安全状態更新時のリセットを防止
+  createEffect(
+    on(
+      () => [filterQuery(), viewMode()],
+      () => {
+        setSelectedIndex(0);
+        setScrollOffset(0);
+      },
+      { defer: true },
+    ),
+  );
 
   createEffect(() => {
     const total = filteredBranches().length;
@@ -485,19 +526,16 @@ export function BranchListScreen(props: BranchListScreenProps) {
       return "---";
     }
 
-    const date = new Date(timestamp * 1000);
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, "0");
-    const day = String(date.getDate()).padStart(2, "0");
-    const hours = String(date.getHours()).padStart(2, "0");
-    const minutes = String(date.getMinutes()).padStart(2, "0");
-
-    return `${year}-${month}-${day} ${hours}:${minutes}`;
+    const formatted = formatLocalDateTime(timestamp * 1000);
+    return formatted || "---";
   };
 
   useKeyboard((key) => {
     // FR-044: ウィザードポップアップ表示中は入力を無効化
     if (props.wizardVisible) {
+      return;
+    }
+    if (props.confirmVisible) {
       return;
     }
     if (props.helpVisible) {
@@ -628,7 +666,8 @@ export function BranchListScreen(props: BranchListScreenProps) {
     } else if (key.name === "p" || key.sequence === "p") {
       props.onOpenProfiles?.();
     } else if (key.name === "l" || key.sequence === "l") {
-      props.onOpenLogs?.();
+      const selected = filteredBranches()[selectedIndex()] ?? null;
+      props.onOpenLogs?.(selected);
     }
   });
 
@@ -654,21 +693,52 @@ export function BranchListScreen(props: BranchListScreenProps) {
       !isSelected && indicatorInfo?.color ? indicatorInfo.color : undefined;
 
     const isChecked = selectedSet().has(branch.name);
-    const isWarning = Boolean(branch.hasUnpushedCommits) || !branch.mergedPR;
+    const hasUncommitted = branch.worktree?.hasUncommittedChanges === true;
+    const hasUnpushed = branch.hasUnpushedCommits === true;
+    const isWarning = hasUnpushed || hasUncommitted;
     const selectionIcon = isChecked ? "[*]" : "[ ]";
     const selectionColor = isChecked && isWarning ? "red" : undefined;
     let worktreeIcon = ".";
     let worktreeColor: IndicatorColor | "gray" = "gray";
     if (branch.worktreeStatus === "active") {
       worktreeIcon = "w";
-      worktreeColor = "green";
+      worktreeColor = "brightGreen";
     } else if (branch.worktreeStatus === "inaccessible") {
       worktreeIcon = "x";
       worktreeColor = "red";
     }
-    const safeIcon = branch.safeToCleanup === true ? " " : "!";
-    const safeColor: IndicatorColor | undefined =
-      branch.safeToCleanup === true ? undefined : "red";
+    const isRemoteBranch = branch.type === "remote";
+    const safetyLoading = props.cleanupUI?.safetyLoading === true;
+    const safetyPendingBranches = props.cleanupUI?.safetyPendingBranches;
+    const isSafetyPending = safetyPendingBranches
+      ? safetyPendingBranches.has(branch.name)
+      : safetyLoading;
+    const spinnerFrame = cleanupSpinnerFrame();
+
+    let safeIcon = " ";
+    let safeColor: IndicatorColor | undefined;
+    if (isRemoteBranch) {
+      safeIcon = " ";
+      safeColor = undefined;
+    } else if (isSafetyPending) {
+      safeIcon = spinnerFrame ?? "-";
+      safeColor = undefined;
+    } else if (hasUncommitted) {
+      safeIcon = "!";
+      safeColor = "red";
+    } else if (hasUnpushed) {
+      safeIcon = "!";
+      safeColor = "yellow";
+    } else if (branch.isUnmerged) {
+      safeIcon = "*";
+      safeColor = "yellow";
+    } else if (branch.safeToCleanup === true) {
+      safeIcon = "o";
+      safeColor = "brightGreen";
+    } else {
+      safeIcon = "!";
+      safeColor = "red";
+    }
 
     let commitText = "---";
     const latestActivitySec = getLatestActivityTimestamp(branch);
@@ -690,9 +760,9 @@ export function BranchListScreen(props: BranchListScreenProps) {
       return v + " ".repeat(padding);
     };
 
-    const TOOL_WIDTH = 7;
+    const toolWidth = maxToolWidth();
     const DATE_WIDTH = 16;
-    const paddedTool = formatFixedWidth(toolLabelRaw, TOOL_WIDTH);
+    const paddedTool = formatFixedWidth(toolLabelRaw, toolWidth);
     const paddedDate =
       commitText === "---"
         ? " ".repeat(DATE_WIDTH)
@@ -798,38 +868,6 @@ export function BranchListScreen(props: BranchListScreenProps) {
     return fitSegmentsToWidth(segments, layoutWidth());
   });
 
-  const toolStatusSegments = createMemo(() => {
-    const toolStatuses = props.toolStatuses ?? [];
-    if (toolStatuses.length === 0) {
-      return null;
-    }
-
-    const segments: TextSegment[] = [];
-    appendSegment(segments, {
-      text: "Tools: ",
-      attributes: TextAttributes.DIM,
-    });
-    toolStatuses.forEach((tool, index) => {
-      const statusLabel =
-        tool.status === "installed" && tool.version
-          ? tool.version
-          : tool.status;
-      appendSegment(segments, { text: `${tool.name}: ` });
-      appendSegment(segments, {
-        text: statusLabel,
-        fg: tool.status === "installed" ? "green" : "yellow",
-      });
-      if (index < toolStatuses.length - 1) {
-        appendSegment(segments, {
-          text: " | ",
-          attributes: TextAttributes.DIM,
-        });
-      }
-    });
-
-    return fitSegmentsToWidth(segments, layoutWidth());
-  });
-
   const statsSegments = createMemo(() => {
     const segments: TextSegment[] = [];
     const separator = "  ";
@@ -883,6 +921,70 @@ export function BranchListScreen(props: BranchListScreenProps) {
         fg: "gray",
       });
     }
+
+    return fitSegmentsToWidth(segments, layoutWidth());
+  });
+
+  const statusLegendSegments = createMemo(() => {
+    const segments: TextSegment[] = [];
+    const separator = "  ";
+
+    appendSegment(segments, {
+      text: "Legend: ",
+      attributes: TextAttributes.DIM,
+    });
+
+    appendSegment(segments, {
+      text: "o",
+      fg: "brightGreen",
+      attributes: TextAttributes.BOLD,
+    });
+    appendSegment(segments, {
+      text: " Safe",
+      fg: "brightGreen",
+    });
+    appendSegment(segments, {
+      text: separator,
+      attributes: TextAttributes.DIM,
+    });
+
+    appendSegment(segments, {
+      text: "!",
+      fg: "red",
+      attributes: TextAttributes.BOLD,
+    });
+    appendSegment(segments, {
+      text: " Uncommitted",
+      fg: "red",
+    });
+    appendSegment(segments, {
+      text: separator,
+      attributes: TextAttributes.DIM,
+    });
+
+    appendSegment(segments, {
+      text: "!",
+      fg: "yellow",
+      attributes: TextAttributes.BOLD,
+    });
+    appendSegment(segments, {
+      text: " Unpushed",
+      fg: "yellow",
+    });
+    appendSegment(segments, {
+      text: separator,
+      attributes: TextAttributes.DIM,
+    });
+
+    appendSegment(segments, {
+      text: "*",
+      fg: "yellow",
+      attributes: TextAttributes.BOLD,
+    });
+    appendSegment(segments, {
+      text: " Unmerged",
+      fg: "yellow",
+    });
 
     return fitSegmentsToWidth(segments, layoutWidth());
   });
@@ -959,8 +1061,6 @@ export function BranchListScreen(props: BranchListScreenProps) {
 
       {renderSegmentLine(filterLineSegments())}
 
-      {toolStatusSegments() && renderSegmentLine(toolStatusSegments() ?? [])}
-
       {renderSegmentLine(statsSegments())}
 
       <box flexDirection="column" flexGrow={1}>
@@ -974,7 +1074,7 @@ export function BranchListScreen(props: BranchListScreenProps) {
               : {})}
           />
         ) : (
-          <text>{padLine("", layoutWidth())}</text>
+          renderSegmentLine(statusLegendSegments())
         )}
 
         {props.error && (

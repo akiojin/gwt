@@ -1,16 +1,18 @@
 import { describe, it, expect, mock, beforeEach } from "bun:test";
 
-mock.module("node:fs/promises", () => {
+mock.module("node:fs/promises", async () => {
+  const actual = await import("node:fs/promises");
   const readFile = mock();
   const writeFile = mock();
   const mkdir = mock();
   const readdir = mock();
   return {
+    ...actual,
     readFile,
     writeFile,
     mkdir,
     readdir,
-    default: { readFile, writeFile, mkdir, readdir },
+    default: { ...actual.default, readFile, writeFile, mkdir, readdir },
   };
 });
 
@@ -23,7 +25,9 @@ describe("getLastToolUsageMap", () => {
   });
 
   it("returns latest entry per branch", async () => {
-    (readFile as any).mockResolvedValue(
+    (
+      readFile as unknown as { mockResolvedValue: (v: string) => void }
+    ).mockResolvedValue(
       JSON.stringify({
         history: [
           {
@@ -67,7 +71,9 @@ describe("getLastToolUsageMap", () => {
   });
 
   it("handles missing file gracefully", async () => {
-    (readFile as any).mockRejectedValue(new Error("not found"));
+    (
+      readFile as unknown as { mockRejectedValue: (e: Error) => void }
+    ).mockRejectedValue(new Error("not found"));
 
     const map = await getLastToolUsageMap("/repo");
     expect(map.size).toBe(0);

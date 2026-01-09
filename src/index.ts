@@ -27,6 +27,7 @@ import {
   isProtectedBranchName,
   switchToProtectedBranch,
   resolveWorktreePathForBranch,
+  repairWorktreePath,
 } from "./worktree.js";
 import {
   getTerminalStreams,
@@ -191,6 +192,11 @@ function performTerminalCleanup(): void {
  * Returns SelectionResult if user made selections, undefined if user quit
  */
 async function mainSolidUI(): Promise<SelectionResult | undefined> {
+  if (!("Bun" in globalThis)) {
+    throw new Error(
+      "OpenTUI requires the Bun runtime. Run with Bun (e.g. bunx @akiojin/gwt@latest).",
+    );
+  }
   const { renderSolidApp } = await import("./opentui/index.solid.js");
   const terminal = getTerminalStreams();
 
@@ -267,6 +273,7 @@ export async function handleAIToolWorkflow(
     model,
     inferenceLevel,
     sessionId: selectedSessionId,
+    toolVersion,
   } = selectionResult;
 
   const branchLabel = displayName ?? branch;
@@ -307,15 +314,37 @@ export async function handleAIToolWorkflow(
       ensureOptions.isNewBranch = !localExists;
     }
 
-    const existingWorktreeResolution =
-      await resolveWorktreePathForBranch(branch);
-    const existingWorktree = existingWorktreeResolution.path;
+    let existingWorktreeResolution = await resolveWorktreePathForBranch(branch);
+    let existingWorktree = existingWorktreeResolution.path;
+
+    // mismatch検出時に自動修復を試みる (FR-009〜FR-013)
     if (!existingWorktree && existingWorktreeResolution.mismatch) {
       const actualBranch =
         existingWorktreeResolution.mismatch.actualBranch ?? "unknown";
       printWarning(
-        `Worktree mismatch detected: ${existingWorktreeResolution.mismatch.path} is checked out to '${actualBranch}'. Creating or reusing the correct worktree for '${branch}'.`,
+        `Worktree mismatch detected: ${existingWorktreeResolution.mismatch.path} is checked out to '${actualBranch}'. Attempting to repair...`,
       );
+
+      // 共通修復関数を使用してパス修復を試みる
+      const repairResult = await repairWorktreePath(
+        branch,
+        existingWorktreeResolution.mismatch.path,
+        repoRoot,
+      );
+
+      if (repairResult.repaired) {
+        // FR-012: 修復成功時のメッセージ
+        printInfo(`Worktree path repaired: ${repairResult.newPath}`);
+
+        // 修復後に再度解決を試みる
+        existingWorktreeResolution = await resolveWorktreePathForBranch(branch);
+        existingWorktree = existingWorktreeResolution.path;
+      } else if (repairResult.removed) {
+        // FR-013: メタデータ削除成功時のメッセージ
+        printInfo(`Stale worktree metadata removed. Creating new worktree...`);
+      } else {
+        printWarning(`Failed to repair worktree for '${branch}'.`);
+      }
     }
 
     const isProtectedBranch =
@@ -533,6 +562,7 @@ export async function handleAIToolWorkflow(
       model: normalizedModel ?? null,
       reasoningLevel: inferenceLevel ?? null,
       skipPermissions: skipPermissions ?? null,
+      toolVersion: toolVersion ?? null,
       timestamp: Date.now(),
       repositoryRoot: repoRoot,
     });
@@ -580,6 +610,7 @@ export async function handleAIToolWorkflow(
             model: normalizedModel ?? null,
             reasoningLevel: inferenceLevel ?? null,
             skipPermissions: skipPermissions ?? null,
+            toolVersion: toolVersion ?? null,
             timestamp: Date.now(),
             repositoryRoot: repoRoot,
           },
@@ -603,6 +634,7 @@ export async function handleAIToolWorkflow(
           model?: string;
           sessionId?: string | null;
           chrome?: boolean;
+          version?: string | null;
         } = {
           mode:
             mode === "resume"
@@ -614,6 +646,7 @@ export async function handleAIToolWorkflow(
           envOverrides: sharedEnv,
           sessionId: resumeSessionId,
           chrome: true,
+          version: toolVersion ?? null,
         };
         if (normalizedModel) {
           launchOptions.model = normalizedModel;
@@ -627,6 +660,7 @@ export async function handleAIToolWorkflow(
           model?: string;
           reasoningEffort?: CodexReasoningEffort;
           sessionId?: string | null;
+          version?: string | null;
         } = {
           mode:
             mode === "resume"
@@ -637,6 +671,7 @@ export async function handleAIToolWorkflow(
           bypassApprovals: skipPermissions,
           envOverrides: sharedEnv,
           sessionId: resumeSessionId,
+          version: toolVersion ?? null,
         };
         if (normalizedModel) {
           launchOptions.model = normalizedModel;
@@ -653,6 +688,7 @@ export async function handleAIToolWorkflow(
           envOverrides?: Record<string, string>;
           model?: string;
           sessionId?: string | null;
+          version?: string | null;
         } = {
           mode:
             mode === "resume"
@@ -663,25 +699,34 @@ export async function handleAIToolWorkflow(
           skipPermissions,
           envOverrides: sharedEnv,
           sessionId: resumeSessionId,
+          version: toolVersion ?? null,
         };
         if (normalizedModel) {
           launchOptions.model = normalizedModel;
         }
         launchResult = await launchGeminiCLI(worktreePath, launchOptions);
       } else {
-        // Custom coding agent
+        // Custom coding agent (including OpenCode)
         printInfo(`Launching custom agent: ${agentConfig.displayName}`);
-        launchResult = await launchCodingAgent(agentConfig, {
-          mode:
-            mode === "resume"
-              ? "resume"
-              : mode === "continue"
-                ? "continue"
-                : "normal",
-          skipPermissions,
-          cwd: worktreePath,
-          sharedEnv,
-        });
+        const customLaunchOptions: import("./types/tools.js").CodingAgentLaunchOptions =
+          {
+            mode:
+              mode === "resume"
+                ? "resume"
+                : mode === "continue"
+                  ? "continue"
+                  : "normal",
+            skipPermissions,
+            cwd: worktreePath,
+            sharedEnv,
+          };
+        if (toolVersion) {
+          customLaunchOptions.version = toolVersion;
+        }
+        launchResult = await launchCodingAgent(
+          agentConfig,
+          customLaunchOptions,
+        );
       }
     } finally {
       // FR-043: Clear the periodic timestamp update timer
@@ -759,6 +804,7 @@ export async function handleAIToolWorkflow(
       model: normalizedModel ?? null,
       reasoningLevel: inferenceLevel ?? null,
       skipPermissions: skipPermissions ?? null,
+      toolVersion: toolVersion ?? null,
       timestamp: Date.now(),
       repositoryRoot: repoRoot,
       lastSessionId: finalSessionId,

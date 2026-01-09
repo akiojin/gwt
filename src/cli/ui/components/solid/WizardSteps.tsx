@@ -1,12 +1,21 @@
 /** @jsxImportSource @opentui/solid */
 import { TextAttributes } from "@opentui/core";
+import type { SelectRenderable } from "@opentui/core";
 import { useKeyboard } from "@opentui/solid";
-import { createEffect, createSignal } from "solid-js";
+import { createEffect, createResource, createSignal } from "solid-js";
 import { SelectInput, type SelectInputItem } from "./SelectInput.js";
 import { TextInput } from "./TextInput.js";
 import { getModelOptions } from "../../utils/modelOptions.js";
 import type { CodingAgentId } from "../../types.js";
 import { useWizardScroll } from "./WizardPopup.js";
+import { getAgentTerminalColor } from "../../../../utils/coding-agent-colors.js";
+import { getVersionCache } from "../../utils/versionCache.js";
+import { selectionStyle } from "../../core/theme.js";
+import {
+  fetchInstalledVersionForAgent,
+  versionInfoToSelectItem,
+  createInstalledOption,
+} from "../../utils/versionFetcher.js";
 
 /**
  * WizardSteps - ウィザードの各ステップコンポーネント
@@ -19,37 +28,72 @@ export interface StepProps {
   focused?: boolean;
 }
 
-const useEdgeScroll = (options: {
+const useEnsureSelectionVisible = (options: {
   getSelectedIndex: () => number;
   getItemCount: () => number;
-  focused?: boolean | undefined;
+  getSelectRef: () => SelectRenderable | undefined;
+  linesPerItem?: number;
+  getFocused?: () => boolean | undefined;
 }) => {
   const scroll = useWizardScroll();
-  useKeyboard((key) => {
-    if (options.focused === false) {
+  const ensureIndexVisible = (index: number) => {
+    if (!scroll) {
       return;
     }
-    if (!scroll) {
+    const selectRef = options.getSelectRef();
+    if (!selectRef) {
+      return;
+    }
+    const linesPerItem = Math.max(1, options.linesPerItem ?? 1);
+    const startLine = selectRef.y + Math.max(0, index) * linesPerItem;
+    const endLine = startLine + Math.max(0, linesPerItem - 1);
+    scroll.ensureLineVisible(startLine);
+    if (endLine !== startLine) {
+      scroll.ensureLineVisible(endLine);
+    }
+  };
+
+  createEffect(() => {
+    if (options.getFocused && options.getFocused() === false) {
       return;
     }
     const itemCount = options.getItemCount();
     if (itemCount <= 0) {
       return;
     }
-    if (key.name === "up") {
-      if (options.getSelectedIndex() <= 0 && scroll.scrollByLines(-1)) {
-        key.preventDefault();
-      }
+    const safeIndex = Math.min(
+      Math.max(options.getSelectedIndex(), 0),
+      itemCount - 1,
+    );
+    ensureIndexVisible(safeIndex);
+  });
+
+  useKeyboard((key) => {
+    if (options.getFocused && options.getFocused() === false) {
       return;
     }
-    if (key.name === "down") {
-      if (
-        options.getSelectedIndex() >= itemCount - 1 &&
-        scroll.scrollByLines(1)
-      ) {
-        key.preventDefault();
-      }
+    if (!scroll) {
+      return;
     }
+    if (key.name !== "up" && key.name !== "down") {
+      return;
+    }
+    const itemCount = options.getItemCount();
+    if (itemCount <= 0) {
+      return;
+    }
+    const currentIndex = Math.min(
+      Math.max(options.getSelectedIndex(), 0),
+      itemCount - 1,
+    );
+    const nextIndex =
+      key.name === "up"
+        ? Math.max(0, currentIndex - 1)
+        : Math.min(itemCount - 1, currentIndex + 1);
+    if (nextIndex === currentIndex) {
+      return;
+    }
+    ensureIndexVisible(nextIndex);
   });
 };
 
@@ -76,10 +120,14 @@ const ACTION_OPTIONS: SelectInputItem[] = [
 
 export function ActionSelectStep(props: ActionSelectStepProps) {
   const [selectedIndex, setSelectedIndex] = createSignal(0);
-  useEdgeScroll({
+  const [selectRef, setSelectRef] = createSignal<SelectRenderable | undefined>(
+    undefined,
+  );
+  useEnsureSelectionVisible({
     getSelectedIndex: selectedIndex,
     getItemCount: () => ACTION_OPTIONS.length,
-    focused: props.focused,
+    getFocused: () => props.focused,
+    getSelectRef: selectRef,
   });
 
   const handleChange = (item: SelectInputItem | null) => {
@@ -108,6 +156,7 @@ export function ActionSelectStep(props: ActionSelectStepProps) {
         onSelect={(item) => props.onSelect(item.value as BranchAction)}
         onChange={handleChange}
         focused={props.focused ?? true}
+        selectRef={setSelectRef}
       />
       <text> </text>
       <text attributes={TextAttributes.DIM}>[Enter] Select [Esc] Cancel</text>
@@ -129,10 +178,14 @@ const BRANCH_TYPES: SelectInputItem[] = [
 
 export function BranchTypeStep(props: BranchTypeStepProps) {
   const [selectedIndex, setSelectedIndex] = createSignal(0);
-  useEdgeScroll({
+  const [selectRef, setSelectRef] = createSignal<SelectRenderable | undefined>(
+    undefined,
+  );
+  useEnsureSelectionVisible({
     getSelectedIndex: selectedIndex,
     getItemCount: () => BRANCH_TYPES.length,
-    focused: props.focused,
+    getFocused: () => props.focused,
+    getSelectRef: selectRef,
   });
 
   const handleChange = (item: SelectInputItem | null) => {
@@ -159,6 +212,7 @@ export function BranchTypeStep(props: BranchTypeStepProps) {
         onSelect={(item) => props.onSelect(item.value)}
         onChange={handleChange}
         focused={props.focused ?? true}
+        selectRef={setSelectRef}
       />
       <text> </text>
       <text attributes={TextAttributes.DIM}>[Enter] Select [Esc] Back</text>
@@ -175,6 +229,16 @@ export interface BranchNameStepProps extends StepProps {
 export function BranchNameStep(props: BranchNameStepProps) {
   const [name, setName] = createSignal("");
   const scroll = useWizardScroll();
+
+  createEffect(() => {
+    if (props.focused === false) {
+      return;
+    }
+    if (!scroll) {
+      return;
+    }
+    scroll.ensureLineVisible(2);
+  });
 
   useKeyboard((key) => {
     if (props.focused === false) {
@@ -220,7 +284,13 @@ export interface AgentSelectStepProps extends StepProps {
   onSelect: (agentId: string) => void;
 }
 
-const AGENTS: SelectInputItem[] = [
+interface AgentItem {
+  label: string;
+  value: string;
+  description: string;
+}
+
+const AGENTS: AgentItem[] = [
   {
     label: "Claude Code",
     value: "claude-code",
@@ -241,24 +311,31 @@ const AGENTS: SelectInputItem[] = [
 
 export function AgentSelectStep(props: AgentSelectStepProps) {
   const [selectedIndex, setSelectedIndex] = createSignal(0);
-  useEdgeScroll({
-    getSelectedIndex: selectedIndex,
-    getItemCount: () => AGENTS.length,
-    focused: props.focused,
+  const scroll = useWizardScroll();
+
+  // Keyboard navigation
+  useKeyboard((key) => {
+    if (props.focused === false) return;
+
+    if (key.name === "up") {
+      setSelectedIndex((i) => Math.max(0, i - 1));
+    } else if (key.name === "down") {
+      setSelectedIndex((i) => Math.min(AGENTS.length - 1, i + 1));
+    } else if (key.name === "return") {
+      const agent = AGENTS[selectedIndex()];
+      if (agent) {
+        props.onSelect(agent.value);
+      }
+    }
   });
 
-  const handleChange = (item: SelectInputItem | null) => {
-    if (!item) {
-      setSelectedIndex(0);
-      return;
-    }
-    const nextIndex = AGENTS.findIndex(
-      (candidate) => candidate.value === item.value,
-    );
-    if (nextIndex >= 0) {
-      setSelectedIndex(nextIndex);
-    }
-  };
+  // Ensure selected item is visible in scroll container
+  createEffect(() => {
+    if (!scroll || props.focused === false) return;
+    // Header line (title) + empty line + selected index
+    const lineOffset = 2 + selectedIndex();
+    scroll.ensureLineVisible(lineOffset);
+  });
 
   return (
     <box flexDirection="column">
@@ -266,12 +343,21 @@ export function AgentSelectStep(props: AgentSelectStepProps) {
         Select coding agent:
       </text>
       <text> </text>
-      <SelectInput
-        items={AGENTS}
-        onSelect={(item) => props.onSelect(item.value)}
-        onChange={handleChange}
-        focused={props.focused ?? true}
-      />
+      {AGENTS.map((agent, index) => {
+        const isSelected = () => selectedIndex() === index;
+        const agentColor = getAgentTerminalColor(agent.value);
+        return isSelected() ? (
+          <text bg={selectionStyle.bg} fg={selectionStyle.fg}>
+            {"> "}
+            {agent.label}
+          </text>
+        ) : (
+          <text fg={agentColor}>
+            {"  "}
+            {agent.label}
+          </text>
+        );
+      })}
       <text> </text>
       <text attributes={TextAttributes.DIM}>[Enter] Select [Esc] Back</text>
     </box>
@@ -300,11 +386,15 @@ function getModelItems(agentId: CodingAgentId): SelectInputItem[] {
 
 export function ModelSelectStep(props: ModelSelectStepProps) {
   const [selectedIndex, setSelectedIndex] = createSignal(0);
+  const [selectRef, setSelectRef] = createSignal<SelectRenderable | undefined>(
+    undefined,
+  );
   const models = () => getModelItems(props.agentId);
-  useEdgeScroll({
+  useEnsureSelectionVisible({
     getSelectedIndex: selectedIndex,
     getItemCount: () => models().length,
-    focused: props.focused,
+    getFocused: () => props.focused,
+    getSelectRef: selectRef,
   });
 
   createEffect(() => {
@@ -343,6 +433,7 @@ export function ModelSelectStep(props: ModelSelectStepProps) {
         onSelect={(item) => props.onSelect(item.value)}
         onChange={handleChange}
         focused={props.focused ?? true}
+        selectRef={setSelectRef}
       />
       <text> </text>
       <text attributes={TextAttributes.DIM}>[Enter] Select [Esc] Back</text>
@@ -364,10 +455,14 @@ const REASONING_LEVELS: SelectInputItem[] = [
 
 export function ReasoningLevelStep(props: ReasoningLevelStepProps) {
   const [selectedIndex, setSelectedIndex] = createSignal(0);
-  useEdgeScroll({
+  const [selectRef, setSelectRef] = createSignal<SelectRenderable | undefined>(
+    undefined,
+  );
+  useEnsureSelectionVisible({
     getSelectedIndex: selectedIndex,
     getItemCount: () => REASONING_LEVELS.length,
-    focused: props.focused,
+    getFocused: () => props.focused,
+    getSelectRef: selectRef,
   });
 
   const handleChange = (item: SelectInputItem | null) => {
@@ -394,6 +489,7 @@ export function ReasoningLevelStep(props: ReasoningLevelStepProps) {
         onSelect={(item) => props.onSelect(item.value)}
         onChange={handleChange}
         focused={props.focused ?? true}
+        selectRef={setSelectRef}
       />
       <text> </text>
       <text attributes={TextAttributes.DIM}>[Enter] Select [Esc] Back</text>
@@ -422,10 +518,14 @@ const EXECUTION_MODES: SelectInputItem[] = [
 
 export function ExecutionModeStep(props: ExecutionModeStepProps) {
   const [selectedIndex, setSelectedIndex] = createSignal(0);
-  useEdgeScroll({
+  const [selectRef, setSelectRef] = createSignal<SelectRenderable | undefined>(
+    undefined,
+  );
+  useEnsureSelectionVisible({
     getSelectedIndex: selectedIndex,
     getItemCount: () => EXECUTION_MODES.length,
-    focused: props.focused,
+    getFocused: () => props.focused,
+    getSelectRef: selectRef,
   });
 
   const handleChange = (item: SelectInputItem | null) => {
@@ -452,6 +552,7 @@ export function ExecutionModeStep(props: ExecutionModeStepProps) {
         onSelect={(item) => props.onSelect(item.value)}
         onChange={handleChange}
         focused={props.focused ?? true}
+        selectRef={setSelectRef}
       />
       <text> </text>
       <text attributes={TextAttributes.DIM}>[Enter] Select [Esc] Back</text>
@@ -471,10 +572,14 @@ const SKIP_OPTIONS: SelectInputItem[] = [
 
 export function SkipPermissionsStep(props: SkipPermissionsStepProps) {
   const [selectedIndex, setSelectedIndex] = createSignal(0);
-  useEdgeScroll({
+  const [selectRef, setSelectRef] = createSignal<SelectRenderable | undefined>(
+    undefined,
+  );
+  useEnsureSelectionVisible({
     getSelectedIndex: selectedIndex,
     getItemCount: () => SKIP_OPTIONS.length,
-    focused: props.focused,
+    getFocused: () => props.focused,
+    getSelectRef: selectRef,
   });
 
   const handleChange = (item: SelectInputItem | null) => {
@@ -501,6 +606,128 @@ export function SkipPermissionsStep(props: SkipPermissionsStepProps) {
         onSelect={(item) => props.onSelect(item.value === "true")}
         onChange={handleChange}
         focused={props.focused ?? true}
+        selectRef={setSelectRef}
+      />
+      <text> </text>
+      <text attributes={TextAttributes.DIM}>[Enter] Select [Esc] Back</text>
+    </box>
+  );
+}
+
+// バージョン選択ステップ
+export interface VersionSelectStepProps extends StepProps {
+  agentId: CodingAgentId;
+  onSelect: (version: string) => void;
+}
+
+// latest オプション（常に表示）
+const LATEST_OPTION: SelectInputItem = {
+  label: "latest",
+  value: "latest",
+  description: "Always fetch latest version",
+};
+
+export function VersionSelectStep(props: VersionSelectStepProps) {
+  const [selectedIndex, setSelectedIndex] = createSignal(0);
+  const [selectRef, setSelectRef] = createSignal<SelectRenderable | undefined>(
+    undefined,
+  );
+
+  // FR-029: Use cached versions from startup prefetch (no npm registry re-access)
+  const cachedVersions = () => {
+    const cached = getVersionCache(props.agentId);
+    if (!cached) {
+      return []; // FR-031: Fallback to empty, UI will show "latest" only
+    }
+    return cached.map(versionInfoToSelectItem);
+  };
+
+  // インストール済み情報を取得 (still needs async fetch for local command check)
+  const [installedOption] = createResource(
+    () => props.agentId,
+    async (agentId: string) => {
+      const installed = await fetchInstalledVersionForAgent(agentId);
+      return installed ? createInstalledOption(installed) : null;
+    },
+  );
+
+  // 全オプション（installed + latest + cached versions）
+  const allOptions = (): SelectInputItem[] => {
+    const options: SelectInputItem[] = [];
+
+    // installedオプション（インストール済みの場合のみ）
+    const installed = installedOption();
+    if (installed) {
+      options.push(installed);
+    }
+
+    // latestオプション（常に表示）
+    options.push(LATEST_OPTION);
+
+    // FR-029: Use cached versions (no npm registry re-access)
+    const cached = cachedVersions();
+    options.push(...cached);
+
+    return options;
+  };
+
+  useEnsureSelectionVisible({
+    getSelectedIndex: selectedIndex,
+    getItemCount: () => allOptions().length,
+    getFocused: () => props.focused,
+    getSelectRef: selectRef,
+  });
+
+  createEffect(() => {
+    const count = allOptions().length;
+    if (count <= 0) {
+      setSelectedIndex(0);
+      return;
+    }
+    const maxIndex = count - 1;
+    if (selectedIndex() > maxIndex) {
+      setSelectedIndex(maxIndex);
+    }
+  });
+
+  const handleChange = (item: SelectInputItem | null) => {
+    if (!item) {
+      setSelectedIndex(0);
+      return;
+    }
+    const nextIndex = allOptions().findIndex(
+      (candidate) => candidate.value === item.value,
+    );
+    if (nextIndex >= 0) {
+      setSelectedIndex(nextIndex);
+    }
+  };
+
+  const statusText = () => {
+    // FR-029: No loading state since we use cached versions from startup
+    // FR-031: Show message if cache is empty (failed to fetch at startup)
+    const cached = cachedVersions();
+    if (cached.length === 0) {
+      return "Version list unavailable (using latest)";
+    }
+    return null;
+  };
+
+  return (
+    <box flexDirection="column">
+      <text fg="cyan" attributes={TextAttributes.BOLD}>
+        Select version:
+      </text>
+      {statusText() && (
+        <text attributes={TextAttributes.DIM}>{statusText()}</text>
+      )}
+      <text> </text>
+      <SelectInput
+        items={allOptions()}
+        onSelect={(item) => props.onSelect(item.value)}
+        onChange={handleChange}
+        focused={props.focused ?? true}
+        selectRef={setSelectRef}
       />
       <text> </text>
       <text attributes={TextAttributes.DIM}>[Enter] Select [Esc] Back</text>

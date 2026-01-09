@@ -21,11 +21,13 @@ mock.module("node:fs", () => {
   const existsSync = mock();
   const statSync = mock(() => ({ isDirectory: () => true }));
   const readFileSync = mock(() => "");
+  const mkdirSync = mock();
   return {
     existsSync,
     statSync,
     readFileSync,
-    default: { existsSync, statSync, readFileSync },
+    mkdirSync,
+    default: { existsSync, statSync, readFileSync, mkdirSync },
   };
 });
 
@@ -61,9 +63,10 @@ branch refs/heads/feature/test
         stderr: "",
         exitCode: 0,
       });
-      const getCurrentBranchNameSpy = vi
-        .spyOn(git, "getCurrentBranchName")
-        .mockResolvedValue("feature/test");
+      const getCurrentBranchNameSpy = spyOn(
+        git,
+        "getCurrentBranchName",
+      ).mockResolvedValue("feature/test");
 
       const path = await worktree.worktreeExists("feature/test");
 
@@ -190,12 +193,13 @@ branch refs/heads/feature/test
 
     beforeEach(() => {
       mkdirSpy = spyOn(fsPromises, "mkdir").mockResolvedValue(undefined);
-      getWorktreeRootSpy = vi
-        .spyOn(git, "getWorktreeRoot")
-        .mockResolvedValue("/path/to/worktree-current");
-      ensureGitignoreEntrySpy = vi
-        .spyOn(git, "ensureGitignoreEntry")
-        .mockResolvedValue();
+      getWorktreeRootSpy = spyOn(git, "getWorktreeRoot").mockResolvedValue(
+        "/path/to/worktree-current",
+      );
+      ensureGitignoreEntrySpy = spyOn(
+        git,
+        "ensureGitignoreEntry",
+      ).mockResolvedValue();
     });
 
     afterEach(() => {
@@ -463,9 +467,9 @@ branch refs/heads/feature/test
 
     beforeEach(() => {
       branchExistsSpy = spyOn(git, "branchExists").mockResolvedValue(false);
-      getCurrentBranchSpy = vi
-        .spyOn(git, "getCurrentBranch")
-        .mockResolvedValue("develop");
+      getCurrentBranchSpy = spyOn(git, "getCurrentBranch").mockResolvedValue(
+        "develop",
+      );
       (execa as any).mockResolvedValue({
         stdout: "",
         stderr: "",
@@ -654,61 +658,67 @@ branch refs/heads/feature/test
         worktreeNamingPattern: "{repo}-{branch}",
       });
 
-      const repoRootSpy = vi
-        .spyOn(git, "getRepositoryRoot")
-        .mockResolvedValue("/repo");
+      const repoRootSpy = spyOn(git, "getRepositoryRoot").mockResolvedValue(
+        "/repo",
+      );
 
-      const pullRequestByBranchSpy = vi
-        .spyOn(github, "getPullRequestByBranch")
-        .mockResolvedValue(null);
+      const pullRequestByBranchSpy = spyOn(
+        github,
+        "getPullRequestByBranch",
+      ).mockResolvedValue(null);
 
-      const getLocalBranchesSpy = vi
-        .spyOn(git, "getLocalBranches")
-        .mockResolvedValue([
-          {
-            name: "feature/no-diff",
-            type: "local",
-            branchType: "feature",
-            isCurrent: false,
-          },
-          {
-            name: "feature/orphan",
-            type: "local",
-            branchType: "feature",
-            isCurrent: false,
-          },
-          {
-            name: "main",
-            type: "local",
-            branchType: "main",
-            isCurrent: true,
-          },
-        ]);
+      const getLocalBranchesSpy = spyOn(
+        git,
+        "getLocalBranches",
+      ).mockResolvedValue([
+        {
+          name: "feature/no-diff",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+        },
+        {
+          name: "feature/orphan",
+          type: "local",
+          branchType: "feature",
+          isCurrent: false,
+        },
+        {
+          name: "main",
+          type: "local",
+          branchType: "main",
+          isCurrent: true,
+        },
+      ]);
 
-      const hasUncommittedSpy = vi
-        .spyOn(git, "hasUncommittedChanges")
-        .mockResolvedValue(false);
+      const hasUncommittedSpy = spyOn(
+        git,
+        "hasUncommittedChanges",
+      ).mockResolvedValue(false);
 
-      const hasUnpushedSpy = vi
-        .spyOn(git, "hasUnpushedCommits")
-        .mockResolvedValue(false);
+      const hasUnpushedSpy = spyOn(git, "hasUnpushedCommits").mockResolvedValue(
+        false,
+      );
 
-      const hasUnpushedRepoSpy = vi
-        .spyOn(git, "hasUnpushedCommitsInRepo")
-        .mockResolvedValue(false);
+      const hasUnpushedRepoSpy = spyOn(
+        git,
+        "hasUnpushedCommitsInRepo",
+      ).mockResolvedValue(false);
 
-      const branchHasUniqueSpy = vi
-        .spyOn(git, "branchHasUniqueCommitsComparedToBase")
-        .mockImplementation(async (branch) => {
-          if (branch === "feature/no-diff" || branch === "feature/orphan") {
-            return false;
-          }
-          return true;
-        });
+      const branchHasUniqueSpy = spyOn(
+        git,
+        "branchHasUniqueCommitsComparedToBase",
+      ).mockImplementation(async (branch) => {
+        if (branch === "feature/no-diff" || branch === "feature/orphan") {
+          return false;
+        }
+        return true;
+      });
 
-      const remoteExistsSpy = vi
-        .spyOn(git, "checkRemoteBranchExists")
-        .mockResolvedValue(false);
+      const remoteExistsSpy = spyOn(
+        git,
+        "checkRemoteBranchExists",
+      ).mockResolvedValue(false);
 
       (execa as any).mockImplementation(
         async (command: string, args?: readonly string[]) => {
@@ -767,7 +777,7 @@ branch refs/heads/feature/no-diff
       expect(remoteExistsSpy).toHaveBeenCalled();
     });
 
-    it("uses upstream branch as comparison base when determining cleanup candidates", async () => {
+    it("uses base branch as comparison base when determining cleanup candidates", async () => {
       const configSpy = spyOn(configModule, "getConfig").mockResolvedValue({
         defaultBaseBranch: "main",
         skipPermissions: false,
@@ -776,9 +786,9 @@ branch refs/heads/feature/no-diff
         worktreeNamingPattern: "{repo}-{branch}",
       });
 
-      const repoRootSpy = vi
-        .spyOn(git, "getRepositoryRoot")
-        .mockResolvedValue("/repo");
+      const repoRootSpy = spyOn(git, "getRepositoryRoot").mockResolvedValue(
+        "/repo",
+      );
 
       spyOn(github, "getPullRequestByBranch").mockResolvedValue(null);
       spyOn(git, "getLocalBranches").mockResolvedValue([]);
@@ -786,9 +796,10 @@ branch refs/heads/feature/no-diff
       spyOn(git, "hasUnpushedCommits").mockResolvedValue(false);
       spyOn(git, "hasUnpushedCommitsInRepo").mockResolvedValue(false);
 
-      const branchHasUniqueSpy = vi
-        .spyOn(git, "branchHasUniqueCommitsComparedToBase")
-        .mockResolvedValue(false);
+      const branchHasUniqueSpy = spyOn(
+        git,
+        "branchHasUniqueCommitsComparedToBase",
+      ).mockResolvedValue(false);
 
       spyOn(git, "checkRemoteBranchExists").mockResolvedValue(false);
 
@@ -836,7 +847,7 @@ branch refs/heads/feature/upstream
       expect(targets).toHaveLength(1);
       expect(branchHasUniqueSpy).toHaveBeenCalledWith(
         "feature/upstream",
-        "origin/develop",
+        "main",
         "/repo",
       );
 

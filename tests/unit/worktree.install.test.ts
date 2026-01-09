@@ -11,19 +11,13 @@ import path from "node:path";
 
 const accessMock = mock();
 
-mock.module("node:fs/promises", async () => {
-  const actual = await import("node:fs/promises");
-
-  return {
-    ...actual,
+// Avoid async import here to prevent Bun module-mock deadlocks.
+mock.module("node:fs/promises", () => ({
+  access: accessMock,
+  default: {
     access: accessMock,
-    default: {
-      ...actual.default,
-      access: accessMock,
-    },
-    constants: actual.constants,
-  };
-});
+  },
+}));
 
 mock.module("execa", () => ({
   execa: mock(),
@@ -50,12 +44,13 @@ function setupExistingFiles(files: string[]): void {
 
 describe("dependency installer", () => {
   beforeEach(() => {
-    mock.restore();
     accessMock.mockReset();
+    (execa as Mock).mockReset();
   });
 
   afterEach(() => {
-    mock.restore();
+    accessMock.mockReset();
+    (execa as Mock).mockReset();
   });
 
   describe("detectPackageManager", () => {

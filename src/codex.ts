@@ -12,8 +12,13 @@ import {
   findLatestCodexSession,
   waitForCodexSessionId,
 } from "./utils/session.js";
+import { findCommand } from "./utils/command.js";
+import {
+  runAgentWithPty,
+  shouldCaptureAgentOutput,
+} from "./logging/agentOutput.js";
 
-const CODEX_CLI_PACKAGE = "@openai/codex@latest";
+const CODEX_CLI_PACKAGE = "@openai/codex";
 
 /**
  * Reasoning effort levels supported by Codex CLI.
@@ -95,6 +100,7 @@ export async function launchCodexCLI(
     model?: string;
     reasoningEffort?: CodexReasoningEffort;
     sessionId?: string | null;
+    version?: string | null;
   } = {},
 ): Promise<{ sessionId?: string | null }> {
   const terminal = getTerminalStreams();
@@ -173,8 +179,6 @@ export async function launchCodexCLI(
     terminal.exitRawMode();
     resetTerminalModes(terminal.stdout);
 
-    const childStdio = createChildStdio();
-
     const env = Object.fromEntries(
       Object.entries({
         ...process.env,
@@ -183,22 +187,51 @@ export async function launchCodexCLI(
         (entry): entry is [string, string] => typeof entry[1] === "string",
       ),
     );
+    const captureOutput = shouldCaptureAgentOutput(env);
+    const childStdio = captureOutput ? null : createChildStdio();
 
-    try {
-      const execChild = async (child: Promise<unknown>) => {
-        try {
-          await child;
-        } catch (execError: unknown) {
-          // Treat SIGINT/SIGTERM as normal exit (user pressed Ctrl+C)
-          const signal = (execError as { signal?: unknown })?.signal;
-          if (signal === "SIGINT" || signal === "SIGTERM") {
-            return;
-          }
-          throw execError;
+    // Auto-detect locally installed codex command
+    const codexLookup = await findCommand("codex");
+
+    const execChild = async (child: Promise<unknown>) => {
+      try {
+        await child;
+      } catch (execError: unknown) {
+        // Treat SIGINT/SIGTERM as normal exit (user pressed Ctrl+C)
+        const signal = (execError as { signal?: unknown })?.signal;
+        if (signal === "SIGINT" || signal === "SIGTERM") {
+          return;
         }
-      };
+        throw execError;
+      }
+    };
+    const isInterruptSignal = (signal?: number | null) =>
+      signal === 2 || signal === 15;
+    const runCommand = async (command: string, commandArgs: string[]) => {
+      if (captureOutput) {
+        const result = await runAgentWithPty({
+          command,
+          args: commandArgs,
+          cwd: worktreePath,
+          env,
+          agentId: "codex-cli",
+        });
+        if (isInterruptSignal(result.signal)) {
+          return;
+        }
+        if (result.exitCode !== null && result.exitCode !== 0) {
+          throw new Error(
+            `Codex CLI exited with code ${result.exitCode ?? "unknown"}`,
+          );
+        }
+        return;
+      }
 
-      const child = execa("bunx", [CODEX_CLI_PACKAGE, ...args], {
+      if (!childStdio) {
+        return;
+      }
+
+      const child = execa(command, commandArgs, {
         cwd: worktreePath,
         stdin: childStdio.stdin,
         stdout: childStdio.stdout,
@@ -206,8 +239,46 @@ export async function launchCodexCLI(
         env,
       });
       await execChild(child);
+    };
+
+    // Determine execution strategy based on version selection
+    // FR-063b: "installed" option only appears when local command exists
+    const requestedVersion = options.version ?? "latest";
+    let selectedVersion = requestedVersion;
+
+    if (requestedVersion === "installed" && !codexLookup.path) {
+      writeTerminalLine(
+        chalk.yellow(
+          "   ⚠️  Installed codex command not found. Falling back to latest.",
+        ),
+      );
+      selectedVersion = "latest";
+    }
+
+    // Log version information (FR-072)
+    if (selectedVersion === "installed") {
+      writeTerminalLine(chalk.green(`   📦 Version: installed`));
+    } else {
+      writeTerminalLine(chalk.green(`   📦 Version: @${selectedVersion}`));
+    }
+
+    try {
+      if (selectedVersion === "installed" && codexLookup.path) {
+        // FR-066: Use locally installed command when "installed" is selected
+        // FR-063b guarantees local command exists when this option is shown
+        writeTerminalLine(
+          chalk.green("   ✨ Using locally installed codex command"),
+        );
+        await runCommand(codexLookup.path, args);
+      } else {
+        // FR-067, FR-068: Use bunx with version suffix for latest/specific versions
+        const packageWithVersion = `${CODEX_CLI_PACKAGE}@${selectedVersion}`;
+        writeTerminalLine(chalk.cyan(`   🔄 Using bunx ${packageWithVersion}`));
+
+        await runCommand("bunx", [packageWithVersion, ...args]);
+      }
     } finally {
-      childStdio.cleanup();
+      childStdio?.cleanup();
     }
 
     // File-based session detection only - no stdout capture
@@ -299,7 +370,7 @@ export async function launchCodexCLI(
  */
 export async function isCodexAvailable(): Promise<boolean> {
   try {
-    await execa("bunx", [CODEX_CLI_PACKAGE, "--help"]);
+    await execa("bunx", [`${CODEX_CLI_PACKAGE}@latest`, "--help"]);
     return true;
   } catch (error: unknown) {
     const err = error as NodeJS.ErrnoException;

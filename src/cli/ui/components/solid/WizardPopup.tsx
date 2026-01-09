@@ -12,6 +12,7 @@ export interface WizardPopupProps {
 
 interface WizardScrollContextValue {
   scrollByLines: (delta: number) => boolean;
+  ensureLineVisible: (lineIndex: number) => boolean;
   canScrollUp: () => boolean;
   canScrollDown: () => boolean;
 }
@@ -60,8 +61,34 @@ export function WizardPopup(props: WizardPopupProps) {
     return true;
   };
 
+  const ensureLineVisible = (lineIndex: number) => {
+    if (!scrollRef) {
+      return false;
+    }
+    const viewportHeight = scrollRef.viewport.height;
+    if (viewportHeight <= 0) {
+      return false;
+    }
+    const safeIndex = Math.max(0, lineIndex);
+    const { scrollTop, maxScrollTop } = getScrollState();
+    if (safeIndex < scrollTop) {
+      scrollRef.scrollTo(Math.max(0, safeIndex));
+      return true;
+    }
+    if (safeIndex >= scrollTop + viewportHeight) {
+      const nextTop = Math.min(
+        maxScrollTop,
+        Math.max(0, safeIndex - viewportHeight + 1),
+      );
+      scrollRef.scrollTo(nextTop);
+      return true;
+    }
+    return false;
+  };
+
   const scrollContextValue: WizardScrollContextValue = {
     scrollByLines,
+    ensureLineVisible,
     canScrollUp: () => getScrollState().scrollTop > 0,
     canScrollDown: () =>
       getScrollState().scrollTop < getScrollState().maxScrollTop,
