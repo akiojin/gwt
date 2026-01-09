@@ -9,6 +9,10 @@ import {
 } from "./utils/terminal.js";
 import { findCommand } from "./utils/command.js";
 import { findLatestClaudeSession } from "./utils/session.js";
+import {
+  runAgentWithPty,
+  shouldCaptureAgentOutput,
+} from "./logging/agentOutput.js";
 
 const CLAUDE_CLI_PACKAGE = "@anthropic-ai/claude-code@latest";
 
@@ -231,7 +235,8 @@ export async function launchClaudeCode(
       ),
     );
 
-    const childStdio = createChildStdio();
+    const captureOutput = shouldCaptureAgentOutput(launchEnv);
+    const childStdio = captureOutput ? null : createChildStdio();
 
     // Auto-detect locally installed claude command
     const claudeLookup = await findCommand("claude");
@@ -259,6 +264,37 @@ export async function launchClaudeCode(
         }
         throw error;
       }
+    };
+
+    const runCommand = async (file: string, fileArgs: string[]) => {
+      if (captureOutput) {
+        const result = await runAgentWithPty({
+          command: file,
+          args: fileArgs,
+          cwd: worktreePath,
+          env: launchEnv,
+          agentId: "claude-code",
+        });
+        if (result.signal !== null && result.signal !== undefined) {
+          throw new Error(`Claude Code terminated by signal ${result.signal}`);
+        }
+        if (result.exitCode !== null && result.exitCode !== 0) {
+          throw new Error(`Claude Code exited with code ${result.exitCode}`);
+        }
+        return;
+      }
+
+      if (!childStdio) {
+        return;
+      }
+
+      await execInteractive(file, fileArgs, {
+        cwd: worktreePath,
+        stdin: childStdio.stdin,
+        stdout: childStdio.stdout,
+        stderr: childStdio.stderr,
+        env: launchEnv,
+      });
     };
 
     // Determine execution strategy based on version selection
@@ -289,13 +325,7 @@ export async function launchClaudeCode(
         writeTerminalLine(
           chalk.green("   ✨ Using locally installed claude command"),
         );
-        await execInteractive(claudeLookup.path, args, {
-          cwd: worktreePath,
-          stdin: childStdio.stdin,
-          stdout: childStdio.stdout,
-          stderr: childStdio.stderr,
-          env: launchEnv,
-        });
+        await runCommand(claudeLookup.path, args);
       } else {
         // FR-067, FR-068: Use bunx with version suffix for latest/specific versions
         const packageWithVersion = `@anthropic-ai/claude-code@${selectedVersion}`;
@@ -312,29 +342,13 @@ export async function launchClaudeCode(
         }
 
         if (useNpx && npxLookup?.path) {
-          await execInteractive(
-            npxLookup.path,
-            ["-y", packageWithVersion, ...args],
-            {
-              cwd: worktreePath,
-              stdin: childStdio.stdin,
-              stdout: childStdio.stdout,
-              stderr: childStdio.stderr,
-              env: launchEnv,
-            },
-          );
+          await runCommand(npxLookup.path, ["-y", packageWithVersion, ...args]);
         } else {
-          await execInteractive("bunx", [packageWithVersion, ...args], {
-            cwd: worktreePath,
-            stdin: childStdio.stdin,
-            stdout: childStdio.stdout,
-            stderr: childStdio.stderr,
-            env: launchEnv,
-          });
+          await runCommand("bunx", [packageWithVersion, ...args]);
         }
       }
     } finally {
-      childStdio.cleanup();
+      childStdio?.cleanup();
     }
 
     // File-based session detection only - no stdout capture

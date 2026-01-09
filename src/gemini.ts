@@ -9,6 +9,10 @@ import {
 } from "./utils/terminal.js";
 import { findCommand } from "./utils/command.js";
 import { findLatestGeminiSessionId } from "./utils/session.js";
+import {
+  runAgentWithPty,
+  shouldCaptureAgentOutput,
+} from "./logging/agentOutput.js";
 
 const GEMINI_CLI_PACKAGE = "@google/gemini-cli";
 
@@ -154,8 +158,8 @@ export async function launchGeminiCLI(
         (entry): entry is [string, string] => typeof entry[1] === "string",
       ),
     );
-
-    const childStdio = createChildStdio();
+    const captureOutput = shouldCaptureAgentOutput(baseEnv);
+    const childStdio = captureOutput ? null : createChildStdio();
 
     // Auto-detect locally installed gemini command
     const geminiLookup = await findCommand("gemini");
@@ -198,8 +202,33 @@ export async function launchGeminiCLI(
           throw execError;
         }
       };
+      const isInterruptSignal = (signal?: number | null) =>
+        signal === 2 || signal === 15;
 
       const run = async (cmd: string, args: string[]) => {
+        if (captureOutput) {
+          const result = await runAgentWithPty({
+            command: cmd,
+            args,
+            cwd: worktreePath,
+            env: baseEnv,
+            agentId: "gemini-cli",
+          });
+          if (isInterruptSignal(result.signal)) {
+            return;
+          }
+          if (result.exitCode !== null && result.exitCode !== 0) {
+            throw new Error(
+              `Gemini CLI exited with code ${result.exitCode ?? "unknown"}`,
+            );
+          }
+          return;
+        }
+
+        if (!childStdio) {
+          return;
+        }
+
         const child = execa(cmd, args, {
           cwd: worktreePath,
           stdin: childStdio.stdin,
@@ -247,7 +276,7 @@ export async function launchGeminiCLI(
         }
       }
     } finally {
-      childStdio.cleanup();
+      childStdio?.cleanup();
     }
 
     const explicitResumeSucceeded = usedExplicitSessionId && !fellBackToLatest;

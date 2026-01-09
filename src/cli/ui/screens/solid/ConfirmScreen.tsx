@@ -1,7 +1,9 @@
 /** @jsxImportSource @opentui/solid */
-import { TextAttributes } from "@opentui/core";
 import { useKeyboard } from "@opentui/solid";
 import { createSignal } from "solid-js";
+import stringWidth from "string-width";
+import { useTerminalSize } from "../../hooks/solid/useTerminalSize.js";
+import { selectionStyle } from "../../core/theme.js";
 
 export interface ConfirmScreenProps {
   message: string;
@@ -21,6 +23,12 @@ export function ConfirmScreen({
   helpVisible = false,
 }: ConfirmScreenProps) {
   const [selectedIndex, setSelectedIndex] = createSignal(defaultNo ? 1 : 0);
+  const terminal = useTerminalSize();
+
+  const padLine = (value: string, width: number) => {
+    const padding = Math.max(0, width - stringWidth(value));
+    return padding > 0 ? `${value}${" ".repeat(padding)}` : value;
+  };
 
   const confirm = (confirmed: boolean) => {
     onConfirm(confirmed);
@@ -54,13 +62,14 @@ export function ConfirmScreen({
     }
   });
 
-  const renderOption = (label: string, isSelected: boolean) => (
-    <text
-      {...(isSelected ? { fg: "cyan", attributes: TextAttributes.BOLD } : {})}
-    >
-      {label}
-    </text>
-  );
+  const renderOption = (label: string, isSelected: boolean) =>
+    isSelected ? (
+      <text fg={selectionStyle.fg} bg={selectionStyle.bg}>
+        {padLine(label, terminal().columns)}
+      </text>
+    ) : (
+      <text>{label}</text>
+    );
 
   return (
     <box flexDirection="column">

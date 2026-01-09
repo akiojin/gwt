@@ -1,12 +1,16 @@
 /** @jsxImportSource @opentui/solid */
-import { createEffect, createMemo, createSignal } from "solid-js";
+import { createEffect, createMemo, createSignal, on } from "solid-js";
 import { useKeyboard, useTerminalDimensions } from "@opentui/solid";
 import { TextAttributes } from "@opentui/core";
 import type { BranchItem, BranchViewMode, Statistics } from "../../types.js";
-import { getLatestActivityTimestamp } from "../../utils/branchFormatter.js";
+import {
+  formatLocalDateTime,
+  getLatestActivityTimestamp,
+} from "../../utils/branchFormatter.js";
 import stringWidth from "string-width";
 import { getAgentTerminalColor } from "../../../../utils/coding-agent-colors.js";
 import { Header } from "../../components/solid/Header.js";
+import { selectionStyle } from "../../core/theme.js";
 type IndicatorColor = "cyan" | "green" | "yellow" | "red" | "brightGreen";
 
 interface CleanupIndicator {
@@ -39,7 +43,7 @@ export interface BranchListScreenProps {
   onCreateBranch?: (branch: BranchItem | null) => void;
   onRefresh?: () => void;
   onOpenProfiles?: () => void;
-  onOpenLogs?: () => void;
+  onOpenLogs?: (branch: BranchItem | null) => void;
   loading?: boolean;
   error?: Error | null;
   lastUpdated?: Date | null;
@@ -53,6 +57,10 @@ export interface BranchListScreenProps {
   helpVisible?: boolean;
   /** ウィザードポップアップ表示中は入力を無効化 */
   wizardVisible?: boolean;
+  /** カーソル位置（外部から制御する場合） */
+  cursorPosition?: number;
+  /** カーソル位置変更時のコールバック */
+  onCursorPositionChange?: (index: number) => void;
 }
 
 const VIEW_MODES: BranchViewMode[] = ["all", "local", "remote"];
@@ -191,8 +199,8 @@ const fitSegmentsToWidth = (
 const applySelectionStyle = (segments: TextSegment[]): TextSegment[] =>
   segments.map((segment) => ({
     text: segment.text,
-    fg: "black",
-    bg: "cyan",
+    fg: selectionStyle.fg,
+    bg: selectionStyle.bg,
   }));
 
 const CLEANUP_SPINNER_FRAMES = ["-", "\\", "|", "/"];
@@ -299,7 +307,21 @@ export function BranchListScreen(props: BranchListScreenProps) {
   const [filterQuery, setFilterQuery] = createSignal("");
   const [filterMode, setFilterMode] = createSignal(false);
   const [viewMode, setViewMode] = createSignal<BranchViewMode>("all");
-  const [selectedIndex, setSelectedIndex] = createSignal(0);
+
+  // カーソル位置: 外部制御（props.cursorPosition）が優先、なければ内部状態を使用
+  const [internalSelectedIndex, setInternalSelectedIndex] = createSignal(
+    props.cursorPosition ?? 0,
+  );
+  const selectedIndex = () => props.cursorPosition ?? internalSelectedIndex();
+  const setSelectedIndex = (
+    value: number | ((prev: number) => number),
+  ): void => {
+    const newValue =
+      typeof value === "function" ? value(selectedIndex()) : value;
+    setInternalSelectedIndex(newValue);
+    props.onCursorPositionChange?.(newValue);
+  };
+
   const [scrollOffset, setScrollOffset] = createSignal(0);
   const [cleanupSpinnerIndex, setCleanupSpinnerIndex] = createSignal(0);
   const [cursorIndex, setCursorIndex] = createSignal(0);
@@ -430,12 +452,18 @@ export function BranchListScreen(props: BranchListScreenProps) {
     return maxWidth;
   });
 
-  createEffect(() => {
-    filterQuery();
-    viewMode();
-    setSelectedIndex(0);
-    setScrollOffset(0);
-  });
+  // FR-037 / FR-037a: filterQueryまたはviewModeが実際に変更されたときのみカーソルをリセット
+  // defer: true により初回実行をスキップし、安全状態更新時のリセットを防止
+  createEffect(
+    on(
+      () => [filterQuery(), viewMode()],
+      () => {
+        setSelectedIndex(0);
+        setScrollOffset(0);
+      },
+      { defer: true },
+    ),
+  );
 
   createEffect(() => {
     const total = filteredBranches().length;
@@ -496,14 +524,8 @@ export function BranchListScreen(props: BranchListScreenProps) {
       return "---";
     }
 
-    const date = new Date(timestamp * 1000);
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, "0");
-    const day = String(date.getDate()).padStart(2, "0");
-    const hours = String(date.getHours()).padStart(2, "0");
-    const minutes = String(date.getMinutes()).padStart(2, "0");
-
-    return `${year}-${month}-${day} ${hours}:${minutes}`;
+    const formatted = formatLocalDateTime(timestamp * 1000);
+    return formatted || "---";
   };
 
   useKeyboard((key) => {
@@ -639,7 +661,8 @@ export function BranchListScreen(props: BranchListScreenProps) {
     } else if (key.name === "p" || key.sequence === "p") {
       props.onOpenProfiles?.();
     } else if (key.name === "l" || key.sequence === "l") {
-      props.onOpenLogs?.();
+      const selected = filteredBranches()[selectedIndex()] ?? null;
+      props.onOpenLogs?.(selected);
     }
   });
 

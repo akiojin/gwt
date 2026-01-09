@@ -13,6 +13,10 @@ import {
   waitForCodexSessionId,
 } from "./utils/session.js";
 import { findCommand } from "./utils/command.js";
+import {
+  runAgentWithPty,
+  shouldCaptureAgentOutput,
+} from "./logging/agentOutput.js";
 
 const CODEX_CLI_PACKAGE = "@openai/codex";
 
@@ -175,8 +179,6 @@ export async function launchCodexCLI(
     terminal.exitRawMode();
     resetTerminalModes(terminal.stdout);
 
-    const childStdio = createChildStdio();
-
     const env = Object.fromEntries(
       Object.entries({
         ...process.env,
@@ -185,6 +187,8 @@ export async function launchCodexCLI(
         (entry): entry is [string, string] => typeof entry[1] === "string",
       ),
     );
+    const captureOutput = shouldCaptureAgentOutput(env);
+    const childStdio = captureOutput ? null : createChildStdio();
 
     // Auto-detect locally installed codex command
     const codexLookup = await findCommand("codex");
@@ -200,6 +204,41 @@ export async function launchCodexCLI(
         }
         throw execError;
       }
+    };
+    const isInterruptSignal = (signal?: number | null) =>
+      signal === 2 || signal === 15;
+    const runCommand = async (command: string, commandArgs: string[]) => {
+      if (captureOutput) {
+        const result = await runAgentWithPty({
+          command,
+          args: commandArgs,
+          cwd: worktreePath,
+          env,
+          agentId: "codex-cli",
+        });
+        if (isInterruptSignal(result.signal)) {
+          return;
+        }
+        if (result.exitCode !== null && result.exitCode !== 0) {
+          throw new Error(
+            `Codex CLI exited with code ${result.exitCode ?? "unknown"}`,
+          );
+        }
+        return;
+      }
+
+      if (!childStdio) {
+        return;
+      }
+
+      const child = execa(command, commandArgs, {
+        cwd: worktreePath,
+        stdin: childStdio.stdin,
+        stdout: childStdio.stdout,
+        stderr: childStdio.stderr,
+        env,
+      });
+      await execChild(child);
     };
 
     // Determine execution strategy based on version selection
@@ -230,30 +269,16 @@ export async function launchCodexCLI(
         writeTerminalLine(
           chalk.green("   ✨ Using locally installed codex command"),
         );
-        const child = execa(codexLookup.path, args, {
-          cwd: worktreePath,
-          stdin: childStdio.stdin,
-          stdout: childStdio.stdout,
-          stderr: childStdio.stderr,
-          env,
-        });
-        await execChild(child);
+        await runCommand(codexLookup.path, args);
       } else {
         // FR-067, FR-068: Use bunx with version suffix for latest/specific versions
         const packageWithVersion = `${CODEX_CLI_PACKAGE}@${selectedVersion}`;
         writeTerminalLine(chalk.cyan(`   🔄 Using bunx ${packageWithVersion}`));
 
-        const child = execa("bunx", [packageWithVersion, ...args], {
-          cwd: worktreePath,
-          stdin: childStdio.stdin,
-          stdout: childStdio.stdout,
-          stderr: childStdio.stderr,
-          env,
-        });
-        await execChild(child);
+        await runCommand("bunx", [packageWithVersion, ...args]);
       }
     } finally {
-      childStdio.cleanup();
+      childStdio?.cleanup();
     }
 
     // File-based session detection only - no stdout capture

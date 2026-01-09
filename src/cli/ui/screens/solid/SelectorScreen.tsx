@@ -6,6 +6,8 @@ import { Header } from "../../components/solid/Header.js";
 import { Footer } from "../../components/solid/Footer.js";
 import { useTerminalSize } from "../../hooks/solid/useTerminalSize.js";
 import { useScrollableList } from "../../hooks/solid/useScrollableList.js";
+import stringWidth from "string-width";
+import { selectionStyle } from "../../core/theme.js";
 
 export interface SelectorItem {
   label: string;
@@ -29,6 +31,11 @@ export interface SelectorScreenProps {
 
 const clamp = (value: number, min: number, max: number) =>
   Math.min(Math.max(value, min), max);
+
+const padLine = (value: string, width: number): string => {
+  const padding = Math.max(0, width - stringWidth(value));
+  return padding > 0 ? `${value}${" ".repeat(padding)}` : value;
+};
 
 export function SelectorScreen({
   title,
@@ -140,23 +147,27 @@ export function SelectorScreen({
             {list.visibleItems().map((item, index) => {
               const absoluteIndex = list.scrollOffset() + index;
               const isSelected = absoluteIndex === selectedIndex();
+              const descriptionText =
+                showDescription && item.description
+                  ? ` - ${item.description}`
+                  : "";
+              const fullLine = `${item.label}${descriptionText}`;
               return (
                 <box flexDirection="row">
-                  <text
-                    {...(isSelected
-                      ? { fg: "cyan", attributes: TextAttributes.BOLD }
-                      : {})}
-                  >
-                    {item.label}
-                  </text>
-                  {showDescription && item.description ? (
-                    <text
-                      attributes={TextAttributes.DIM}
-                      {...(isSelected ? { fg: "cyan" } : {})}
-                    >
-                      {` - ${item.description}`}
+                  {isSelected ? (
+                    <text fg={selectionStyle.fg} bg={selectionStyle.bg}>
+                      {padLine(fullLine, terminal().columns)}
                     </text>
-                  ) : null}
+                  ) : (
+                    <>
+                      <text>{item.label}</text>
+                      {showDescription && item.description ? (
+                        <text attributes={TextAttributes.DIM}>
+                          {` - ${item.description}`}
+                        </text>
+                      ) : null}
+                    </>
+                  )}
                 </box>
               );
             })}
