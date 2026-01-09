@@ -935,6 +935,20 @@ export function BranchListScreen(props: BranchListScreenProps) {
     });
 
     appendSegment(segments, {
+      text: "o",
+      fg: "brightGreen",
+      attributes: TextAttributes.BOLD,
+    });
+    appendSegment(segments, {
+      text: " Safe",
+      fg: "brightGreen",
+    });
+    appendSegment(segments, {
+      text: separator,
+      attributes: TextAttributes.DIM,
+    });
+
+    appendSegment(segments, {
       text: "!",
       fg: "red",
       attributes: TextAttributes.BOLD,

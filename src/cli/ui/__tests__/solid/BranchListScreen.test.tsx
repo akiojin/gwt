@@ -256,7 +256,9 @@ describe("BranchListScreen status legend", () => {
 
     try {
       const frame = testSetup.captureCharFrame();
-      expect(frame).toContain("Legend: ! Uncommitted  ! Unpushed  * Unmerged");
+      expect(frame).toContain(
+        "Legend: o Safe  ! Uncommitted  ! Unpushed  * Unmerged",
+      );
     } finally {
       testSetup.renderer.destroy();
     }

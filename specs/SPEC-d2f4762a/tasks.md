@@ -202,6 +202,25 @@
 
 - [x] **T998** [US4] `src/cli/ui/screens/solid/ConfirmScreen.tsx` と `src/cli/ui/App.solid.tsx` を更新し、ダイアログ内幅で反転表示する
 
+## フェーズ15: ユーザーストーリー4 - 凡例にSafe表示を追加 (優先度: P2)
+
+**ストーリー**: 安全アイコンの凡例に `o Safe` を追加し、安全状態が即時に理解できるようにする。
+
+**価値**: 警告アイコンだけでなく安全状態も明示され、一覧の理解が早くなる。
+
+### 仕様更新
+
+- [x] **T999** [P] [共通] `specs/SPEC-d2f4762a/spec.md` の凡例行を `o Safe` を含む内容に更新
+- [x] **T1000** [P] [共通] `specs/SPEC-d2f4762a/plan.md` の凡例説明に Safe を追加
+
+### テスト（TDD）
+
+- [x] **T1001** [US4] `src/cli/ui/__tests__/solid/BranchListScreen.test.tsx` の凡例表示テストを `o Safe` に更新
+
+### 実装
+
+- [x] **T1002** [US4] `src/cli/ui/screens/solid/BranchListScreen.tsx` の凡例行に `o Safe` を追加
+
 ## フェーズ7: ユーザーストーリー7 - 選択中Worktreeフルパス表示 (優先度: P2)
 
 **ストーリー**: ブランチ一覧のフッター直上に、選択中ブランチのWorktreeフルパスを表示する。Worktreeが存在しないが現在ブランチの場合は起動時の作業ディレクトリを表示し、ブランチ一覧が空の場合は`Worktree: (none)`を表示する。
