@@ -318,12 +318,9 @@ export function AgentSelectStep(props: AgentSelectStepProps) {
 
     if (key.name === "up") {
       setSelectedIndex((i) => Math.max(0, i - 1));
-      key.preventDefault();
     } else if (key.name === "down") {
       setSelectedIndex((i) => Math.min(AGENTS.length - 1, i + 1));
-      key.preventDefault();
     } else if (key.name === "return") {
-      key.preventDefault();
       const agent = AGENTS[selectedIndex()];
       if (agent) {
         props.onSelect(agent.value);
