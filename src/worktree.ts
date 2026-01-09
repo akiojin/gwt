@@ -911,7 +911,7 @@ async function getOrphanedLocalBranchStatuses({
           );
         }
 
-        statuses.push({
+        const status: CleanupStatus = {
           worktreePath: null, // worktreeは存在しない
           branch: localBranch.name,
           hasUncommittedChanges: false, // worktreeが存在しないため常にfalse
@@ -922,8 +922,9 @@ async function getOrphanedLocalBranchStatuses({
           hasUpstream,
           upstream,
           reasons,
-        });
-        onProgress?.(statuses[statuses.length - 1]);
+        };
+        statuses.push(status);
+        onProgress?.(status);
       }
     }
 
@@ -958,7 +959,7 @@ export async function getCleanupStatus({
   const orphanedStatuses = await getOrphanedLocalBranchStatuses({
     baseBranch,
     repoRoot,
-    onProgress,
+    ...(onProgress ? { onProgress } : {}),
   });
   const statuses: CleanupStatus[] = [];
 
@@ -1034,7 +1035,7 @@ export async function getCleanupStatus({
       );
     }
 
-    statuses.push({
+    const status: CleanupStatus = {
       worktreePath: worktree.worktreePath,
       branch: worktree.branch,
       hasUncommittedChanges: hasUncommitted,
@@ -1049,8 +1050,9 @@ export async function getCleanupStatus({
       ...(isAccessible
         ? {}
         : { invalidReason: "Path not accessible in current environment" }),
-    });
-    onProgress?.(statuses[statuses.length - 1]);
+    };
+    statuses.push(status);
+    onProgress?.(status);
   }
 
   statuses.push(...orphanedStatuses);
