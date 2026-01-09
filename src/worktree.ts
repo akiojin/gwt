@@ -1,5 +1,5 @@
 import { execa } from "execa";
-import fs from "node:fs/promises";
+import { lstat, mkdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import chalk from "chalk";
 import { createLogger } from "./logging/logger.js";
@@ -247,6 +247,10 @@ async function listWorktrees(): Promise<WorktreeInfo[]> {
   }
 }
 
+export async function listAllWorktrees(): Promise<WorktreeInfo[]> {
+  return listWorktrees();
+}
+
 /**
  * 追加のworktree（メインworktreeを除く）の一覧を取得
  * @returns {Promise<WorktreeInfo[]>} worktree情報の配列
@@ -411,9 +415,9 @@ async function assessStaleWorktreeDirectory(
     return { status: "stale", reason: "missing .git" };
   }
 
-  let gitMetaStat: Awaited<ReturnType<typeof fs.lstat>>;
+  let gitMetaStat: Awaited<ReturnType<typeof lstat>>;
   try {
-    gitMetaStat = await fs.lstat(gitMetaPath);
+    gitMetaStat = await lstat(gitMetaPath);
   } catch {
     return { status: "unknown", reason: "unable to stat .git" };
   }
@@ -428,7 +432,7 @@ async function assessStaleWorktreeDirectory(
 
   let gitMetaContents = "";
   try {
-    gitMetaContents = await fs.readFile(gitMetaPath, "utf8");
+    gitMetaContents = await readFile(gitMetaPath, "utf8");
   } catch {
     return { status: "unknown", reason: "unable to read .git" };
   }
@@ -469,7 +473,7 @@ export async function createWorktree(config: WorktreeConfig): Promise<void> {
   try {
     const staleness = await assessStaleWorktreeDirectory(config.worktreePath);
     if (staleness.status === "stale") {
-      await fs.rm(config.worktreePath, { recursive: true, force: true });
+      await rm(config.worktreePath, { recursive: true, force: true });
     } else if (staleness.status === "unknown") {
       const reason = staleness.reason ? ` (${staleness.reason})` : "";
       throw new WorktreeError(
@@ -480,7 +484,7 @@ export async function createWorktree(config: WorktreeConfig): Promise<void> {
     const worktreeParentDir = path.dirname(config.worktreePath);
 
     try {
-      await fs.mkdir(worktreeParentDir, { recursive: true });
+      await mkdir(worktreeParentDir, { recursive: true });
     } catch (error: unknown) {
       const errorWithCode = error as { code?: unknown; message?: unknown };
       const code =

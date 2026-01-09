@@ -17,6 +17,7 @@ const graphBranches: Branch[] = [
     commitDate: "2025-11-09T12:00:00.000Z",
     divergence: { ahead: 1, behind: 0, upToDate: false },
     baseBranch: "main",
+    hasUnpushedCommits: false,
   },
   {
     name: "hotfix/security",
@@ -29,6 +30,7 @@ const graphBranches: Branch[] = [
     commitDate: "2025-11-07T08:00:00.000Z",
     divergence: { ahead: 0, behind: 2, upToDate: false },
     baseBranch: "origin/main",
+    hasUnpushedCommits: false,
   },
 ];
 

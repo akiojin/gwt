@@ -1,33 +1,34 @@
-import { describe, it, expect, mock, beforeEach } from "bun:test";
+import {
+  describe,
+  it,
+  expect,
+  mock,
+  beforeEach,
+  afterEach,
+  spyOn,
+} from "bun:test";
+import * as fsPromises from "node:fs/promises";
 
-mock.module("node:fs/promises", async () => {
-  const actual = await import("node:fs/promises");
-  const readFile = mock();
-  const writeFile = mock();
-  const mkdir = mock();
-  const readdir = mock();
-  return {
-    ...actual,
-    readFile,
-    writeFile,
-    mkdir,
-    readdir,
-    default: { ...actual.default, readFile, writeFile, mkdir, readdir },
-  };
-});
-
-import { readFile } from "node:fs/promises";
-import { getLastToolUsageMap } from "../../../src/config/index";
+let readFile: ReturnType<typeof spyOn>;
+let getLastToolUsageMap: typeof import("../../../src/config/index.ts").getLastToolUsageMap;
+let importCounter = 0;
 
 describe("getLastToolUsageMap", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
+    mock.restore();
+    readFile = spyOn(fsPromises, "readFile");
+    importCounter += 1;
+    ({ getLastToolUsageMap } = await import(
+      `../../../src/config/index.ts?history-map=${importCounter}`
+    ));
+  });
+
+  afterEach(() => {
     mock.restore();
   });
 
   it("returns latest entry per branch", async () => {
-    (
-      readFile as unknown as { mockResolvedValue: (v: string) => void }
-    ).mockResolvedValue(
+    readFile.mockResolvedValue(
       JSON.stringify({
         history: [
           {
@@ -71,9 +72,7 @@ describe("getLastToolUsageMap", () => {
   });
 
   it("handles missing file gracefully", async () => {
-    (
-      readFile as unknown as { mockRejectedValue: (e: Error) => void }
-    ).mockRejectedValue(new Error("not found"));
+    readFile.mockRejectedValue(new Error("not found"));
 
     const map = await getLastToolUsageMap("/repo");
     expect(map.size).toBe(0);

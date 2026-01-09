@@ -1,5 +1,5 @@
 import path from "node:path";
-import fs from "node:fs/promises";
+import { access } from "node:fs/promises";
 import { execa } from "execa";
 
 export type PackageManager = "bun" | "pnpm" | "npm";
@@ -72,7 +72,7 @@ const INSTALL_CANDIDATES: PackageManagerCandidate[] = [
 
 async function fileExists(targetPath: string): Promise<boolean> {
   try {
-    await fs.access(targetPath);
+    await access(targetPath);
     return true;
   } catch (error) {
     const code = (error as NodeJS.ErrnoException)?.code;

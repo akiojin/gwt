@@ -21,7 +21,7 @@ describe("worktree spinner integration", () => {
   });
 
   afterEach(() => {
-    mock.restore();
+    execaMock.mockReset();
   });
 
   it("should start and stop spinner during worktree creation", async () => {
@@ -58,13 +58,15 @@ describe("worktree spinner integration", () => {
       setTimeout(() => {
         stdout.emit("data", Buffer.from("progress"));
         stdout.end();
+        stderr.end();
         resolvePromise({ stdout: "", stderr: "", exitCode: 0 });
       }, 0);
 
       return child;
     });
 
-    const worktree = await import("../../src/worktree");
+    const worktree =
+      await import("../../src/worktree.ts?worktree-spinner-test");
 
     await worktree.createWorktree({
       branchName: "feature/test",

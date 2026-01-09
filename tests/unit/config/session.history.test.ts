@@ -1,33 +1,35 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { describe, it, expect, mock, beforeEach } from "bun:test";
-import * as config from "../../../src/config/index";
+import {
+  describe,
+  it,
+  expect,
+  mock,
+  beforeEach,
+  afterEach,
+  spyOn,
+} from "bun:test";
+import * as fsPromises from "node:fs/promises";
 
-// Mock fs/promises
-mock.module("node:fs/promises", async () => {
-  const actual = await import("node:fs/promises");
-  const readFile = mock();
-  const writeFile = mock();
-  const mkdir = mock();
-  const readdir = mock();
-  return {
-    ...actual,
-    readFile,
-    writeFile,
-    mkdir,
-    readdir,
-    default: { ...actual.default, readFile, writeFile, mkdir, readdir },
-  };
-});
-
-import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
+let config: typeof import("../../../src/config/index.ts");
+let readFile: ReturnType<typeof spyOn>;
+let writeFile: ReturnType<typeof spyOn>;
+let mkdir: ReturnType<typeof spyOn>;
+let importCounter = 0;
 
 describe("config/index.ts - session history", () => {
-  beforeEach(() => {
-    // Clear mock call counts and reset implementations
-    (readFile as any).mockReset();
-    (writeFile as any).mockReset();
-    (mkdir as any).mockReset();
-    (readdir as any).mockReset();
+  beforeEach(async () => {
+    mock.restore();
+    readFile = spyOn(fsPromises, "readFile");
+    writeFile = spyOn(fsPromises, "writeFile");
+    mkdir = spyOn(fsPromises, "mkdir");
+    importCounter += 1;
+    config = await import(
+      `../../../src/config/index.ts?session-history=${importCounter}`
+    );
+  });
+
+  afterEach(() => {
+    mock.restore();
   });
 
   it("appends to history and caps at 100 entries", async () => {

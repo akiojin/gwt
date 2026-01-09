@@ -32,12 +32,14 @@ export function useAsyncOperation<T, Args extends unknown[]>(
   );
 
   const isLoading = createMemo(() => state().status === "loading");
-  const error = createMemo(() =>
-    state().status === "error" ? state().error : null,
-  );
-  const data = createMemo(() =>
-    state().status === "success" ? state().data : null,
-  );
+  const error = createMemo(() => {
+    const current = state();
+    return current.status === "error" ? current.error : null;
+  });
+  const data = createMemo(() => {
+    const current = state();
+    return current.status === "success" ? current.data : null;
+  });
 
   const setState = (next: AsyncState<T>) => {
     setStateInternal(next);

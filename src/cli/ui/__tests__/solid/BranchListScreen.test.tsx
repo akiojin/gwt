@@ -183,8 +183,6 @@ describe("BranchListScreen worktree footer", () => {
   it("falls back to working directory for current branch without worktree", async () => {
     const branch = createBranch({
       isCurrent: true,
-      worktree: undefined,
-      worktreeStatus: undefined,
     });
     const testSetup = await renderBranchList({
       branches: [branch],

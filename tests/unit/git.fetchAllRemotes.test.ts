@@ -7,15 +7,15 @@ mock.module("execa", () => ({
 
 import { execa } from "execa";
 
-const execaMock = execa as Mock<typeof execa>;
+const execaMock = execa as unknown as Mock;
 
 describe("fetchAllRemotes", () => {
   beforeEach(() => {
-    mock.restore();
+    (execa as ReturnType<typeof mock>).mockReset();
   });
 
   afterEach(() => {
-    mock.restore();
+    (execa as ReturnType<typeof mock>).mockReset();
   });
 
   it("passes timeout and disables interactive prompts", async () => {
@@ -23,12 +23,14 @@ describe("fetchAllRemotes", () => {
       stdout: "",
       stderr: "",
       exitCode: 0,
-    } as { stdout: string; stderr: string; exitCode: number });
+    });
 
     await fetchAllRemotes({ cwd: "/repo", timeoutMs: 5000 });
 
     const call = execaMock.mock.calls[0];
-    expect(call).toBeDefined();
+    if (!call) {
+      throw new Error("Expected execa call");
+    }
 
     const [, , options] = call as [
       string,

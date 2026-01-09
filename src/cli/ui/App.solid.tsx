@@ -75,6 +75,10 @@ import {
   loadSession,
   type ToolSessionEntry,
 } from "../../config/index.js";
+import {
+  findLatestBranchSessionsByTool,
+  refreshQuickStartEntries,
+} from "./utils/continueSession.js";
 import { getAllCodingAgents } from "../../config/tools.js";
 import {
   clearLogFiles,
@@ -232,6 +236,7 @@ const toSelectedBranchState = (branch: BranchItem): SelectedBranchState => {
     displayName: branch.name,
     branchType: branch.type,
     branchCategory: branch.branchType,
+    worktreePath: branch.worktree?.path ?? null,
     ...(isRemote ? { remoteBranch: branch.name } : {}),
   };
 };
@@ -341,16 +346,49 @@ export function AppSolid(props: AppSolidProps) {
   const [sessionHistory, setSessionHistory] = createSignal<ToolSessionEntry[]>(
     [],
   );
+  const [quickStartHistory, setQuickStartHistory] = createSignal<
+    ToolSessionEntry[]
+  >([]);
 
   // 選択中ブランチの履歴をフィルタリング
   const historyForBranch = createMemo(() => {
     const history = sessionHistory();
     const branch = selectedBranch();
     if (!branch) return [];
-    // 選択中ブランチにマッチする履歴エントリを新しい順で返す
-    return history
-      .filter((entry) => entry.branch === branch.name)
-      .sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0));
+    return findLatestBranchSessionsByTool(
+      history,
+      branch.name,
+      branch.worktreePath ?? null,
+    );
+  });
+
+  createEffect(() => {
+    setQuickStartHistory(historyForBranch());
+  });
+
+  createEffect(() => {
+    const branch = selectedBranch();
+    const baseHistory = historyForBranch();
+    if (!wizardVisible() || !branch || baseHistory.length === 0) {
+      return;
+    }
+
+    const worktreePath = branch.worktreePath ?? null;
+    if (!worktreePath) {
+      return;
+    }
+
+    const branchName = branch.name;
+    void (async () => {
+      const refreshed = await refreshQuickStartEntries(baseHistory, {
+        branch: branchName,
+        worktreePath,
+      });
+      if (selectedBranch()?.name !== branchName) {
+        return;
+      }
+      setQuickStartHistory(refreshed);
+    })();
   });
 
   const [logEntries, setLogEntries] = createSignal<FormattedLogEntry[]>([]);
@@ -952,6 +990,11 @@ export function AppSolid(props: AppSolidProps) {
 
   // FR-010: クイックスタートからのResume（前回設定で続きから）
   const handleWizardResume = (entry: ToolSessionEntry) => {
+    if (!entry.sessionId) {
+      handleWizardStartNew(entry);
+      return;
+    }
+
     setWizardVisible(false);
 
     const branch = selectedBranch();
@@ -1977,7 +2020,7 @@ export function AppSolid(props: AppSolidProps) {
       <WizardController
         visible={wizardVisible()}
         selectedBranchName={selectedBranch()?.name ?? ""}
-        history={historyForBranch()}
+        history={quickStartHistory()}
         onClose={handleWizardClose}
         onComplete={handleWizardComplete}
         onResume={handleWizardResume}

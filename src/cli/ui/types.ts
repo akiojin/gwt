@@ -113,6 +113,7 @@ export interface SelectedBranchState {
   branchType: "local" | "remote";
   branchCategory: BranchInfo["branchType"];
   remoteBranch?: string;
+  worktreePath?: string | null;
 }
 
 export interface UIFilter {

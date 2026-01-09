@@ -49,6 +49,7 @@ export async function launchGeminiCLI(
     envOverrides?: Record<string, string>;
     model?: string;
     sessionId?: string | null;
+    branch?: string | null;
     version?: string | null;
   } = {},
 ): Promise<{ sessionId?: string | null }> {
@@ -294,6 +295,10 @@ export async function launchGeminiCLI(
         capturedSessionId =
           (await findLatestGeminiSessionId(worktreePath, {
             cwd: worktreePath,
+            branch: options.branch ?? null,
+            worktrees: options.branch
+              ? [{ path: worktreePath, branch: options.branch }]
+              : null,
           })) ?? null;
       } catch {
         capturedSessionId = null;

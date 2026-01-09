@@ -1,4 +1,4 @@
-import { describe, it, expect, mock, beforeEach, spyOn } from "bun:test";
+import { describe, it, expect, mock, beforeEach } from "bun:test";
 import { EventEmitter } from "node:events";
 
 // Mock modules before importing
@@ -7,18 +7,33 @@ mock.module("execa", () => ({
   default: { execa: mock() },
 }));
 
-mock.module("fs", () => ({
-  existsSync: mock(() => true),
-  mkdirSync: mock(),
-  default: { existsSync: mock(() => true), mkdirSync: mock() },
-}));
+mock.module("fs", () => {
+  const existsSync = mock(() => true);
+  const mkdirSync = mock();
+  const readdirSync = mock(() => []);
+  const statSync = mock(() => ({
+    isFile: () => false,
+    mtime: new Date(),
+  }));
+  const unlinkSync = mock();
+  return {
+    existsSync,
+    mkdirSync,
+    readdirSync,
+    statSync,
+    unlinkSync,
+    default: { existsSync, mkdirSync, readdirSync, statSync, unlinkSync },
+  };
+});
 
 mock.module("os", () => ({
+  homedir: mock(() => "/home/test"),
   platform: mock(() => "darwin"),
-  homedir: mock(() => "/mock/home"),
+  tmpdir: mock(() => "/tmp"),
   default: {
+    homedir: mock(() => "/home/test"),
     platform: mock(() => "darwin"),
-    homedir: mock(() => "/mock/home"),
+    tmpdir: mock(() => "/tmp"),
   },
 }));
 
@@ -102,7 +117,7 @@ describe("codex.ts", () => {
   const worktreePath = "/tmp/worktree";
 
   beforeEach(() => {
-    mock.restore();
+    (execa as ReturnType<typeof mock>).mockReset();
     mockTerminalStreams.exitRawMode.mockClear();
     stdoutWrite.mockClear();
     stderrWrite.mockClear();
@@ -237,23 +252,19 @@ describe("codex.ts", () => {
     expect(args[enableIndex + 1]).toBe("skills");
   });
 
-  it("should display launch arguments in console log (FR-008)", async () => {
-    const consoleSpy = spyOn(console, "log").mockImplementation(() => {});
-
+  it("should display launch arguments in output (FR-008)", async () => {
     await launchCodexCLI(worktreePath);
 
     // Verify that args are logged with 📋 prefix
-    expect(consoleSpy).toHaveBeenCalledWith(
+    expect(stdoutWrite).toHaveBeenCalledWith(
       expect.stringContaining("📋 Args:"),
     );
 
     // Verify that the actual arguments are included in the log
-    expect(consoleSpy).toHaveBeenCalledWith(
+    expect(stdoutWrite).toHaveBeenCalledWith(
       expect.stringContaining("--enable"),
     );
-    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining("skills"));
-
-    consoleSpy.mockRestore();
+    expect(stdoutWrite).toHaveBeenCalledWith(expect.stringContaining("skills"));
   });
 
   describe("Launch/Exit Logs", () => {

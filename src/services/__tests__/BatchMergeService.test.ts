@@ -1,6 +1,6 @@
 import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
 import { BatchMergeService } from "../BatchMergeService";
-import type { BatchMergeConfig } from "../../ui/types";
+import type { BatchMergeConfig, BatchMergeProgress } from "../../cli/ui/types";
 
 // Mock git module
 mock.module("../../git", () => ({
@@ -235,7 +235,9 @@ describe("BatchMergeService", () => {
       (
         worktree.generateWorktreePath as ReturnType<typeof mock>
       ).mockResolvedValue("/repo/.worktrees/feature-b");
-      (worktree.createWorktree as ReturnType<typeof mock>).mockResolvedValue();
+      (worktree.createWorktree as ReturnType<typeof mock>).mockResolvedValue(
+        undefined,
+      );
 
       const worktreePath = await service.ensureWorktree("feature/b");
 
@@ -271,7 +273,9 @@ describe("BatchMergeService", () => {
     });
 
     it("should successfully merge without conflicts", async () => {
-      (git.mergeFromBranch as ReturnType<typeof mock>).mockResolvedValue();
+      (git.mergeFromBranch as ReturnType<typeof mock>).mockResolvedValue(
+        undefined,
+      );
       (git.hasMergeConflict as ReturnType<typeof mock>).mockResolvedValue(
         false,
       );
@@ -293,7 +297,7 @@ describe("BatchMergeService", () => {
         new Error("Merge conflict"),
       );
       (git.hasMergeConflict as ReturnType<typeof mock>).mockResolvedValue(true);
-      (git.abortMerge as ReturnType<typeof mock>).mockResolvedValue();
+      (git.abortMerge as ReturnType<typeof mock>).mockResolvedValue(undefined);
 
       const status = await service.mergeBranch("feature/a", "main", config);
 
@@ -339,11 +343,13 @@ describe("BatchMergeService", () => {
     });
 
     it("should rollback with resetToHead after successful dry-run merge", async () => {
-      (git.mergeFromBranch as ReturnType<typeof mock>).mockResolvedValue();
+      (git.mergeFromBranch as ReturnType<typeof mock>).mockResolvedValue(
+        undefined,
+      );
       (git.hasMergeConflict as ReturnType<typeof mock>).mockResolvedValue(
         false,
       );
-      (git.resetToHead as ReturnType<typeof mock>).mockResolvedValue();
+      (git.resetToHead as ReturnType<typeof mock>).mockResolvedValue(undefined);
 
       const status = await service.mergeBranch(
         "feature/a",
@@ -368,7 +374,7 @@ describe("BatchMergeService", () => {
         new Error("CONFLICT (content)"),
       );
       (git.hasMergeConflict as ReturnType<typeof mock>).mockResolvedValue(true);
-      (git.abortMerge as ReturnType<typeof mock>).mockResolvedValue();
+      (git.abortMerge as ReturnType<typeof mock>).mockResolvedValue(undefined);
 
       const status = await service.mergeBranch(
         "feature/a",
@@ -405,14 +411,18 @@ describe("BatchMergeService", () => {
     });
 
     it("should push successfully after merge when autoPush is enabled", async () => {
-      (git.mergeFromBranch as ReturnType<typeof mock>).mockResolvedValue();
+      (git.mergeFromBranch as ReturnType<typeof mock>).mockResolvedValue(
+        undefined,
+      );
       (git.hasMergeConflict as ReturnType<typeof mock>).mockResolvedValue(
         false,
       );
       (git.getCurrentBranchName as ReturnType<typeof mock>).mockResolvedValue(
         "feature/a",
       );
-      (git.pushBranchToRemote as ReturnType<typeof mock>).mockResolvedValue();
+      (git.pushBranchToRemote as ReturnType<typeof mock>).mockResolvedValue(
+        undefined,
+      );
 
       const status = await service.mergeBranch(
         "feature/a",
@@ -431,7 +441,9 @@ describe("BatchMergeService", () => {
     });
 
     it("should handle push failure without failing merge", async () => {
-      (git.mergeFromBranch as ReturnType<typeof mock>).mockResolvedValue();
+      (git.mergeFromBranch as ReturnType<typeof mock>).mockResolvedValue(
+        undefined,
+      );
       (git.hasMergeConflict as ReturnType<typeof mock>).mockResolvedValue(
         false,
       );
@@ -455,7 +467,9 @@ describe("BatchMergeService", () => {
 
     it("should not push when autoPush is false", async () => {
       const noPushConfig = { ...autoPushConfig, autoPush: false };
-      (git.mergeFromBranch as ReturnType<typeof mock>).mockResolvedValue();
+      (git.mergeFromBranch as ReturnType<typeof mock>).mockResolvedValue(
+        undefined,
+      );
       (git.hasMergeConflict as ReturnType<typeof mock>).mockResolvedValue(
         false,
       );
@@ -482,7 +496,9 @@ describe("BatchMergeService", () => {
         autoPush: false,
       };
 
-      (git.fetchAllRemotes as ReturnType<typeof mock>).mockResolvedValue();
+      (git.fetchAllRemotes as ReturnType<typeof mock>).mockResolvedValue(
+        undefined,
+      );
       (git.getRepositoryRoot as ReturnType<typeof mock>).mockResolvedValue(
         "/repo",
       );
@@ -492,8 +508,12 @@ describe("BatchMergeService", () => {
       (worktree.generateWorktreePath as ReturnType<typeof mock>)
         .mockResolvedValueOnce("/repo/.worktrees/feature-a")
         .mockResolvedValueOnce("/repo/.worktrees/feature-b");
-      (worktree.createWorktree as ReturnType<typeof mock>).mockResolvedValue();
-      (git.mergeFromBranch as ReturnType<typeof mock>).mockResolvedValue();
+      (worktree.createWorktree as ReturnType<typeof mock>).mockResolvedValue(
+        undefined,
+      );
+      (git.mergeFromBranch as ReturnType<typeof mock>).mockResolvedValue(
+        undefined,
+      );
       (git.hasMergeConflict as ReturnType<typeof mock>).mockResolvedValue(
         false,
       );

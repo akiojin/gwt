@@ -7,7 +7,7 @@ mock.module("execa", () => ({
   execa: mock(),
 }));
 
-const existsSyncMock = mock(() => false);
+const existsSyncMock = mock<(...args: unknown[]) => boolean>(() => false);
 
 mock.module("node:fs", () => ({
   existsSync: (...args: unknown[]) => existsSyncMock(...args),
