@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 import('../dist/index.js').then(module => {
   if (module.main) {
     return module.main();
