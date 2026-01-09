@@ -88,8 +88,8 @@ export function WizardController(props: WizardControllerProps) {
   const [executionMode, setExecutionMode] =
     createSignal<ExecutionMode>("normal");
 
-  // キー伝播防止: 最初のフレームでは focused を無効にする
-  const [isInitialFrame, setIsInitialFrame] = createSignal(true);
+  // キー伝播防止: ステップ遷移直後は focused を無効にする
+  const [isTransitioning, setIsTransitioning] = createSignal(true);
 
   // Reset state when wizard becomes visible
   function getInitialStep(): WizardStep {
@@ -115,6 +115,13 @@ export function WizardController(props: WizardControllerProps) {
     setExecutionMode("normal");
   };
 
+  // ステップ遷移時にキー伝搬防止を有効化するヘルパー
+  const startTransition = () => {
+    setIsTransitioning(true);
+    // 50ms後にフォーカスを有効化（キー伝搬を防止しつつ、応答性を維持）
+    setTimeout(() => setIsTransitioning(false), 50);
+  };
+
   // Reset wizard when it becomes visible
   let prevVisible = false;
   createEffect(() => {
@@ -123,19 +130,17 @@ export function WizardController(props: WizardControllerProps) {
       resetWizard();
       // キー伝播防止: 最初の数フレームでは focused を無効にする
       // Enter キーが複数フレームにわたって伝播する可能性があるため、長めに設定
-      setIsInitialFrame(true);
-      // 十分な時間を置いて focused を有効化 (150ms)
-      setTimeout(() => setIsInitialFrame(false), 150);
+      startTransition();
     }
     prevVisible = visible;
   });
 
   // Handle keyboard events for step navigation
-  // T412: 最初のフレームでは Enter キーをブロックして伝播を防ぐ
+  // T412: ステップ遷移直後は Enter キーをブロックして伝播を防ぐ
   useKeyboard((key) => {
     if (!props.visible) return;
-    // 最初のフレームでは Enter キーを無視（ブランチ選択からの伝播防止）
-    if (isInitialFrame() && key.name === "return") {
+    // ステップ遷移直後は Enter キーを無視（ステップ間のキー伝播防止）
+    if (isTransitioning() && key.name === "return") {
       return;
     }
     if (key.name === "escape") {
@@ -146,6 +151,8 @@ export function WizardController(props: WizardControllerProps) {
   const goToStep = (nextStep: WizardStep) => {
     setStepHistory((prev) => [...prev, step()]);
     setStep(nextStep);
+    // ステップ遷移時にキー伝搬防止を有効化
+    startTransition();
   };
 
   const goBack = () => {
@@ -157,6 +164,8 @@ export function WizardController(props: WizardControllerProps) {
     const previousStep = history[history.length - 1] ?? "agent-select";
     setStepHistory(history.slice(0, -1));
     setStep(previousStep);
+    // ステップ遷移時にキー伝搬防止を有効化
+    startTransition();
   };
 
   // Determine if reasoning level step is needed
@@ -204,8 +213,8 @@ export function WizardController(props: WizardControllerProps) {
   };
 
   const handleVersionSelect = (version: string) => {
-    // "installed" は null として保存（bunx のデフォルト動作）
-    setSelectedVersion(version === "installed" ? null : version);
+    // "installed" を明示的に保存し、未指定時は後方互換で "latest" にフォールバックできるようにする
+    setSelectedVersion(version);
     goToStep("model-select");
   };
 
@@ -258,7 +267,7 @@ export function WizardController(props: WizardControllerProps) {
 
   const renderStep = () => {
     const currentStep = step();
-    const focused = !isInitialFrame();
+    const focused = !isTransitioning();
 
     if (currentStep === "action-select") {
       return (
