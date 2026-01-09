@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, mock } from "bun:test";
 
 const execaMock = mock();
 const existsSyncMock = mock(() => false);
+const mkdirSyncMock = mock();
 
 mock.module("execa", () => ({
   execa: (...args: unknown[]) => execaMock(...args),
@@ -9,14 +10,17 @@ mock.module("execa", () => ({
 
 mock.module("fs", () => ({
   existsSync: (...args: unknown[]) => existsSyncMock(...args),
+  mkdirSync: (...args: unknown[]) => mkdirSyncMock(...args),
   default: {
     existsSync: (...args: unknown[]) => existsSyncMock(...args),
+    mkdirSync: (...args: unknown[]) => mkdirSyncMock(...args),
   },
 }));
 
 const setupCommandMocks = () => {
   execaMock.mockReset();
   existsSyncMock.mockReset();
+  mkdirSyncMock.mockReset();
   existsSyncMock.mockReturnValue(false);
   execaMock.mockImplementation(
     async (command: string, args?: readonly string[]) => {

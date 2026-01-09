@@ -51,9 +51,11 @@ mock.module("fs", async () => {
   return {
     existsSync: (...args: unknown[]) => mockExistsSync(...args),
     readFileSync: mock(() => "Linux version 6.1.0"),
+    mkdirSync: mock(),
     default: {
       existsSync: (...args: unknown[]) => mockExistsSync(...args),
       readFileSync: mock(() => "Linux version 6.1.0"),
+      mkdirSync: mock(),
     },
   };
 });
