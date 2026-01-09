@@ -58,6 +58,7 @@ describe("worktree spinner integration", () => {
       setTimeout(() => {
         stdout.emit("data", Buffer.from("progress"));
         stdout.end();
+        stderr.end();
         resolvePromise({ stdout: "", stderr: "", exitCode: 0 });
       }, 0);
 

@@ -24,8 +24,13 @@
 - [x] Align CLI launch output assertions with terminal stream writes
 - [x] Adjust dependency-installer imports to allow access spying
 - [x] Align worktree fs/promises imports with test spies
+- [x] Close worktree spinner test stderr stream to avoid dangling handles
+
+## Quality checks
+- [x] Run build:opentui
+- [x] Run dist bundle integrity test
 
 ## Pending
-- [ ] Re-run full unit suite (current run stalls after utils/session.test.ts with maxConcurrency=1)
-- [ ] Re-run quality/build checks (dist bundle, build:opentui)
+- [ ] Re-run full unit suite (still stalls after utils/session.test.ts with maxConcurrency=1)
+- [ ] Identify open handles or lingering mocks causing utils/session stall in full run
 - [ ] Prepare PR summary once tests are green
