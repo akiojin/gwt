@@ -230,7 +230,10 @@ describe("SkipPermissionsStep", () => {
       // Enterキーで選択（デフォルトはYes）
       testSetup.mockInput.pressEnter();
       await testSetup.renderOnce();
-      expect(selected).toBe(true);
+      if (selected === null) {
+        throw new Error("Expected selection");
+      }
+      expect(selected === true).toBe(true);
     } finally {
       testSetup.renderer.destroy();
     }

@@ -71,7 +71,6 @@ describe("resolveContinueSessionId", () => {
       branch,
       toolId,
       repoRoot,
-      lookupLatestSessionId: mock(),
     });
 
     expect(result).toBe("last-1");

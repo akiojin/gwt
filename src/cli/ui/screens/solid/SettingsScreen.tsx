@@ -25,7 +25,9 @@ export function SettingsScreen({
   const items = settings.map((setting) => ({
     label: setting.label,
     value: setting.value,
-    description: setting.description,
+    ...(setting.description !== undefined
+      ? { description: setting.description }
+      : {}),
   }));
 
   const handleSelect = (item: { label: string; value: string }) => {
@@ -40,8 +42,8 @@ export function SettingsScreen({
       title="gwt - Settings"
       items={items}
       onSelect={handleSelect}
-      onBack={onBack}
-      version={version}
+      {...(onBack ? { onBack } : {})}
+      {...(version !== undefined ? { version } : {})}
       emptyMessage="No settings available."
       showDescription
       helpVisible={helpVisible}

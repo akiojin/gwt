@@ -1,5 +1,13 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { describe, it, expect, mock, beforeEach, afterEach, spyOn } from "bun:test";
+import {
+  describe,
+  it,
+  expect,
+  mock,
+  beforeEach,
+  afterEach,
+  spyOn,
+} from "bun:test";
 import path from "node:path";
 import * as worktree from "../../src/worktree";
 
@@ -691,7 +699,7 @@ branch refs/heads/feature/test
 
       const branchHasUniqueSpy = vi
         .spyOn(git, "branchHasUniqueCommitsComparedToBase")
-        .mockImplementation(async (branch) => {
+        .mockImplementation(async (branch: string) => {
           if (branch === "feature/no-diff" || branch === "feature/orphan") {
             return false;
           }
@@ -833,6 +841,9 @@ branch refs/heads/feature/upstream
       );
 
       const target = targets[0];
+      if (!target) {
+        throw new Error("Expected target");
+      }
       expect(target.reasons).toContain("no-diff-with-base");
       expect(target.reasons).not.toContain("merged-pr");
 
@@ -1007,11 +1018,13 @@ branch refs/heads/feature/old
         const worktreeList = await worktree.listAdditionalWorktrees();
 
         expect(worktreeList).toHaveLength(1);
-        expect(worktreeList[0].path).toBe(
-          "/path/to/repo/.git/worktree/feature-old",
-        );
-        expect(worktreeList[0].branch).toBe("feature/old");
-        expect(worktreeList[0].isAccessible).toBe(true);
+        const first = worktreeList[0];
+        if (!first) {
+          throw new Error("Expected worktree entry");
+        }
+        expect(first.path).toBe("/path/to/repo/.git/worktree/feature-old");
+        expect(first.branch).toBe("feature/old");
+        expect(first.isAccessible).toBe(true);
       });
 
       it("should list both legacy and new worktree paths together", async () => {

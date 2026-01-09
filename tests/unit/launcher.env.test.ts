@@ -30,7 +30,11 @@ describe("launchCodingAgent environment merging", () => {
     });
 
     expect(execaMock).toHaveBeenCalled();
-    const [, , options] = execaMock.mock.calls[0];
+    const firstCall = execaMock.mock.calls[0];
+    if (!firstCall) {
+      throw new Error("Expected execa call");
+    }
+    const [, , options] = firstCall;
     expect(options.env.SHARED_TOKEN).toBe("shared");
     expect(options.env.TOOL_ONLY).toBe("tool");
   });

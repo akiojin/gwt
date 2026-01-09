@@ -24,9 +24,11 @@ const {
   pullFastForwardMock: mock(async () => undefined),
   getBranchDivergenceStatusesMock: mock(async () => []),
   launchCodexCLIMock: mock(async () => ({ sessionId: null as string | null })),
-  saveSessionMock: mock(async () => undefined),
+  saveSessionMock: mock<(...args: unknown[]) => Promise<void>>(
+    async () => undefined,
+  ),
   loadSessionMock: mock(async () => null),
-  worktreeExistsMock: mock(async () => null),
+  worktreeExistsMock: mock(async (_branch: string) => null),
   getRepositoryRootMock: mock(async () => "/repo"),
   installDependenciesMock: mock(async () => ({
     skipped: true as const,
@@ -185,11 +187,14 @@ describe("handleAIToolWorkflow - session ID persistence", () => {
 
     await handleAIToolWorkflow(selection);
 
-    const lastSaved = saveSessionMock.mock.calls.at(-1)?.[0] as
-      | { lastSessionId?: string | null }
-      | undefined;
+    const calls = saveSessionMock.mock.calls;
+    const lastCall = calls[calls.length - 1];
+    if (!lastCall) {
+      throw new Error("Expected session save call");
+    }
+    const lastSaved = lastCall[0] as { lastSessionId?: string | null };
 
-    expect(lastSaved?.lastSessionId).toBe(explicit);
+    expect(lastSaved.lastSessionId).toBe(explicit);
     expect(findLatestCodexSessionMock).not.toHaveBeenCalled();
   });
 });

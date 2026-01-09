@@ -336,7 +336,7 @@ describe("launchGeminiCLI", () => {
 
       try {
         await launchGeminiCLI("/test/path");
-        expect.fail("Should have thrown an error");
+        throw new Error("Should have thrown an error");
       } catch (error: unknown) {
         const err = error as Error & { cause?: unknown };
         expect(err.name).toBe("GeminiError");

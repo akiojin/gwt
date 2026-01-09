@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach,  mock } from "bun:test";
+import { describe, it, expect, beforeEach, mock } from "bun:test";
 
-const execaMock = mock();
-const existsSyncMock = mock(() => false);
+const execaMock = mock<(...args: unknown[]) => unknown>();
+const existsSyncMock = mock<(...args: unknown[]) => boolean>(() => false);
 
 mock.module("execa", () => ({
   execa: (...args: unknown[]) => execaMock(...args),
@@ -18,34 +18,33 @@ const setupCommandMocks = () => {
   execaMock.mockReset();
   existsSyncMock.mockReset();
   existsSyncMock.mockReturnValue(false);
-  execaMock.mockImplementation(
-    async (command: string, args?: readonly string[]) => {
-      if ((command === "which" || command === "where") && args?.[0]) {
-        const target = args[0];
-        const installed = new Set([
-          "ls",
-          "where",
-          "claude",
-          "codex",
-          "gemini",
-          "opencode",
-        ]);
-        if (installed.has(target)) {
-          return { stdout: `/usr/bin/${target}` };
-        }
-        throw new Error("Command not found");
+  execaMock.mockImplementation(async (...args: unknown[]) => {
+    const [command, argList] = args as [string, readonly string[] | undefined];
+    if ((command === "which" || command === "where") && argList?.[0]) {
+      const target = argList[0];
+      const installed = new Set([
+        "ls",
+        "where",
+        "claude",
+        "codex",
+        "gemini",
+        "opencode",
+      ]);
+      if (installed.has(target)) {
+        return { stdout: `/usr/bin/${target}` };
       }
+      throw new Error("Command not found");
+    }
 
-      if (args?.[0] === "--version") {
-        if (command.includes("nonexistent")) {
-          throw new Error("ENOENT");
-        }
-        return { stdout: `${command} 1.2.3` };
+    if (argList?.[0] === "--version") {
+      if (command.includes("nonexistent")) {
+        throw new Error("ENOENT");
       }
+      return { stdout: `${command} 1.2.3` };
+    }
 
-      return { stdout: "" };
-    },
-  );
+    return { stdout: "" };
+  });
 };
 
 describe("command utilities", () => {
@@ -120,26 +119,38 @@ describe("command utilities", () => {
       // Check Claude
       const claude = results.find((t) => t.id === "claude-code");
       expect(claude).toBeDefined();
-      expect(claude?.name).toBe("Claude");
-      expect(["installed", "bunx"]).toContain(claude?.status);
+      if (!claude) {
+        throw new Error("Claude status not found");
+      }
+      expect(claude.name).toBe("Claude");
+      expect(["installed", "bunx"]).toContain(claude.status);
 
       // Check Codex
       const codex = results.find((t) => t.id === "codex-cli");
       expect(codex).toBeDefined();
-      expect(codex?.name).toBe("Codex");
-      expect(["installed", "bunx"]).toContain(codex?.status);
+      if (!codex) {
+        throw new Error("Codex status not found");
+      }
+      expect(codex.name).toBe("Codex");
+      expect(["installed", "bunx"]).toContain(codex.status);
 
       // Check Gemini
       const gemini = results.find((t) => t.id === "gemini-cli");
       expect(gemini).toBeDefined();
-      expect(gemini?.name).toBe("Gemini");
-      expect(["installed", "bunx"]).toContain(gemini?.status);
+      if (!gemini) {
+        throw new Error("Gemini status not found");
+      }
+      expect(gemini.name).toBe("Gemini");
+      expect(["installed", "bunx"]).toContain(gemini.status);
 
       // Check OpenCode
       const opencode = results.find((t) => t.id === "opencode");
       expect(opencode).toBeDefined();
-      expect(opencode?.name).toBe("OpenCode");
-      expect(["installed", "bunx"]).toContain(opencode?.status);
+      if (!opencode) {
+        throw new Error("OpenCode status not found");
+      }
+      expect(opencode.name).toBe("OpenCode");
+      expect(["installed", "bunx"]).toContain(opencode.status);
     });
 
     it("returns ToolStatus with correct structure", async () => {

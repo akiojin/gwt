@@ -59,7 +59,7 @@ mock.module("node:fs/promises", async () => {
 import { execa } from "execa";
 import * as git from "../../src/git";
 import * as worktree from "../../src/worktree";
-const execaMock = execa as MockedFunction<typeof execa>;
+const execaMock = execa as unknown as Mock;
 
 describe("E2E: Complete Branch to Worktree Flow", () => {
   let repoRootSpy: Mock;

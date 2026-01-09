@@ -214,8 +214,8 @@ describe("config/index.ts - Session Management", () => {
       const sessions = await config.getAllSessions();
 
       expect(sessions).toHaveLength(2);
-      expect(sessions[0].lastBranch).toBe("feature/test1"); // Most recent first
-      expect(sessions[1].lastBranch).toBe("feature/test2");
+      expect(sessions[0]!.lastBranch).toBe("feature/test1"); // Most recent first
+      expect(sessions[1]!.lastBranch).toBe("feature/test2");
     });
 
     it("should filter out expired sessions", async () => {
@@ -250,7 +250,7 @@ describe("config/index.ts - Session Management", () => {
       const sessions = await config.getAllSessions();
 
       expect(sessions).toHaveLength(1);
-      expect(sessions[0].lastBranch).toBe("feature/valid");
+      expect(sessions[0]!.lastBranch).toBe("feature/valid");
     });
 
     it("should return empty array when session directory does not exist", async () => {
@@ -316,19 +316,19 @@ describe("config/index.ts - Session Management", () => {
 
       (readFile as any).mockImplementation((path: string) => {
         if (path.includes("repo1"))
-          return Promise.resolve(JSON.stringify(sessions[0]));
+          return Promise.resolve(JSON.stringify(sessions[0]!));
         if (path.includes("repo2"))
-          return Promise.resolve(JSON.stringify(sessions[1]));
+          return Promise.resolve(JSON.stringify(sessions[1]!));
         if (path.includes("repo3"))
-          return Promise.resolve(JSON.stringify(sessions[2]));
+          return Promise.resolve(JSON.stringify(sessions[2]!));
         return Promise.reject(new Error("File not found"));
       });
 
       const result = await config.getAllSessions();
 
-      expect(result[0].lastBranch).toBe("branch2"); // Newest
-      expect(result[1].lastBranch).toBe("branch3");
-      expect(result[2].lastBranch).toBe("branch1"); // Oldest
+      expect(result[0]!.lastBranch).toBe("branch2"); // Newest
+      expect(result[1]!.lastBranch).toBe("branch3");
+      expect(result[2]!.lastBranch).toBe("branch1"); // Oldest
     });
   });
 });

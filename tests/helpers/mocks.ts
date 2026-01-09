@@ -1,6 +1,11 @@
 import { mock } from "bun:test";
-import type { ExecaReturnValue } from "execa";
 import type { CleanupTarget } from "../../src/cli/ui/types";
+
+type ExecaResult = {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+};
 
 /**
  * execaのモック - Gitコマンド、GitHub CLI、AIツールの実行をモック
@@ -13,7 +18,7 @@ export function mockExeca(
     async (
       command: string,
       args?: readonly string[],
-    ): Promise<Partial<ExecaReturnValue>> => {
+    ): Promise<Partial<ExecaResult>> => {
       const _fullCommand = args ? `${command} ${args.join(" ")}` : command;
 
       // Gitコマンドのモック
@@ -24,14 +29,14 @@ export function mockExeca(
               stdout: "* main\n  feature/test\n  hotfix/bug",
               stderr: "",
               exitCode: 0,
-            } as Partial<ExecaReturnValue>;
+            } as Partial<ExecaResult>;
           }
           if (args.includes("-r")) {
             return {
               stdout: "  origin/main\n  origin/develop",
               stderr: "",
               exitCode: 0,
-            } as Partial<ExecaReturnValue>;
+            } as Partial<ExecaResult>;
           }
         }
         if (args?.[0] === "worktree" && args[1] === "list") {
@@ -40,14 +45,14 @@ export function mockExeca(
               "/path/to/main  abc123 [main]\n/path/to/feature  def456 [feature/test]",
             stderr: "",
             exitCode: 0,
-          } as Partial<ExecaReturnValue>;
+          } as Partial<ExecaResult>;
         }
         if (args?.[0] === "status") {
           return {
             stdout: "On branch main\nnothing to commit, working tree clean",
             stderr: "",
             exitCode: 0,
-          } as Partial<ExecaReturnValue>;
+          } as Partial<ExecaResult>;
         }
       }
 
@@ -67,14 +72,14 @@ export function mockExeca(
             ]),
             stderr: "",
             exitCode: 0,
-          } as Partial<ExecaReturnValue>;
+          } as Partial<ExecaResult>;
         }
         if (args?.[0] === "auth" && args[1] === "status") {
           return {
             stdout: "Logged in to github.com as testuser",
             stderr: "",
             exitCode: 0,
-          } as Partial<ExecaReturnValue>;
+          } as Partial<ExecaResult>;
         }
       }
 
@@ -84,7 +89,7 @@ export function mockExeca(
           stdout: `${command} executed successfully`,
           stderr: "",
           exitCode: 0,
-        } as Partial<ExecaReturnValue>;
+        } as Partial<ExecaResult>;
       }
 
       // デフォルトの応答
@@ -92,7 +97,7 @@ export function mockExeca(
         stdout: defaultStdout,
         stderr: defaultStderr,
         exitCode: 0,
-      } as Partial<ExecaReturnValue>;
+      } as Partial<ExecaResult>;
     },
   );
 }
@@ -201,7 +206,7 @@ export function createMockCleanupTarget(
     hasUnpushedCommits: false,
     hasRemoteBranch: true,
     cleanupType: "worktree-and-branch" as const,
-    reasons: ["merged-pr"],
+    reasons: ["remote-synced"],
     ...overrides,
   };
 }

@@ -53,7 +53,11 @@ describe("startSystemTray (SPEC-1f56fd80)", () => {
     await startSystemTray("http://localhost:3000", { platform: "win32" });
 
     expect(createMock).toHaveBeenCalledTimes(1);
-    const options = createMock.mock.calls[0][0] as {
+    const firstCall = createMock.mock.calls[0];
+    if (!firstCall) {
+      throw new Error("Expected tray create call");
+    }
+    const options = firstCall[0] as {
       menu?: { title?: string; items?: Array<{ title?: string }> };
     };
     expect(options.menu?.title).toMatch(/gwt/i);

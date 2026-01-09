@@ -26,7 +26,7 @@ const {
   fetchAllRemotesMock: mock(async () => undefined),
   pullFastForwardMock: mock(async () => undefined),
   getBranchDivergenceStatusesMock: mock(async () => []),
-  worktreeExistsMock: mock(async () => null),
+  worktreeExistsMock: mock(async (_branch: string) => null),
   getRepositoryRootMock: mock(async () => "/repo"),
   getCodingAgentByIdMock: mock(async () => ({
     id: "codex-cli",
@@ -42,7 +42,9 @@ const {
     lockfile: "/repo/bun.lock",
   })),
   launchCodexCLIMock: mock(async () => ({ sessionId: null })),
-  saveSessionMock: mock(async () => undefined),
+  saveSessionMock: mock<(...args: unknown[]) => Promise<void>>(
+    async () => undefined,
+  ),
   loadSessionMock: mock(async () => ({
     lastWorktreePath: "/repo/worktrees/feature/resume",
     lastBranch: "feature/resume",

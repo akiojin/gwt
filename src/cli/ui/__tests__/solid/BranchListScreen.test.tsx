@@ -55,7 +55,9 @@ const renderBranchList = async (props: {
         branches={props.branches}
         stats={props.stats ?? makeStats()}
         onSelect={() => {}}
-        workingDirectory={props.workingDirectory}
+        {...(props.workingDirectory !== undefined
+          ? { workingDirectory: props.workingDirectory }
+          : {})}
         {...(props.selectedBranches
           ? { selectedBranches: props.selectedBranches }
           : {})}
@@ -81,10 +83,8 @@ describe("BranchListScreen icons", () => {
         name: "feature/no-worktree",
         label: "feature/no-worktree",
         value: "feature/no-worktree",
-        worktreeStatus: undefined,
         safeToCleanup: false,
         hasUnpushedCommits: true,
-        mergedPR: undefined,
       }),
     ];
 
@@ -128,8 +128,6 @@ describe("BranchListScreen worktree footer", () => {
   it("falls back to working directory for current branch without worktree", async () => {
     const branch = createBranch({
       isCurrent: true,
-      worktree: undefined,
-      worktreeStatus: undefined,
     });
     const testSetup = await renderBranchList({
       branches: [branch],

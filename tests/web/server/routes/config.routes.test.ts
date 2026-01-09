@@ -1,28 +1,27 @@
 import Fastify from "fastify";
-import type { FastifyInstance } from "fastify";
-import { describe, expect, it, beforeEach, afterEach,  mock } from "bun:test";
+import { describe, expect, it, beforeEach, afterEach, mock } from "bun:test";
 import type { EnvironmentHistoryEntry } from "../../../../src/types/api.js";
 import type { CodingAgentsConfig } from "../../../../src/types/tools.js";
+import type { WebFastifyInstance } from "../../../../src/web/server/types.js";
 import { registerConfigRoutes } from "../../../../src/web/server/routes/config.js";
 
 const mockLoadCodingAgentsConfig = mock();
 const mockSaveCodingAgentsConfig = mock();
 const mockLoadEnvHistory = mock();
-const mockRecordEnvHistory = mock<
-  [EnvironmentHistoryEntry[]],
-  Promise<void>
->();
-const mockGetImportedEnvKeys = mock(() => []);
+const mockRecordEnvHistory =
+  mock<(entries: EnvironmentHistoryEntry[]) => Promise<void>>();
+const mockGetImportedEnvKeys = mock<() => string[]>(() => []);
 
 mock.module("../../../../src/config/tools.ts", () => ({
   loadCodingAgentsConfig: () => mockLoadCodingAgentsConfig(),
-  saveCodingAgentsConfig: (...args: unknown[]) =>
-    mockSaveCodingAgentsConfig(...args),
+  saveCodingAgentsConfig: (config: CodingAgentsConfig) =>
+    mockSaveCodingAgentsConfig(config),
 }));
 
 mock.module("../../../../src/config/env-history.ts", () => ({
   loadEnvHistory: () => mockLoadEnvHistory(),
-  recordEnvHistory: (...args: unknown[]) => mockRecordEnvHistory(...args),
+  recordEnvHistory: (entries: EnvironmentHistoryEntry[]) =>
+    mockRecordEnvHistory(entries),
 }));
 
 mock.module("../../../../src/web/server/env/importer.ts", () => ({
@@ -30,7 +29,7 @@ mock.module("../../../../src/web/server/env/importer.ts", () => ({
 }));
 
 describe("config routes", () => {
-  let fastify: FastifyInstance;
+  let fastify: WebFastifyInstance;
 
   beforeEach(() => {
     mockLoadCodingAgentsConfig.mockReset();
@@ -38,7 +37,7 @@ describe("config routes", () => {
     mockLoadEnvHistory.mockReset();
     mockRecordEnvHistory.mockReset();
     mockGetImportedEnvKeys.mockReset();
-    fastify = Fastify();
+    fastify = Fastify() as WebFastifyInstance;
   });
 
   afterEach(() => {
@@ -137,7 +136,11 @@ describe("config routes", () => {
 
     expect(response.statusCode).toBe(200);
     expect(mockSaveCodingAgentsConfig).toHaveBeenCalledTimes(1);
-    expect(mockSaveCodingAgentsConfig.mock.calls[0][0]).toMatchObject({
+    const saveCall = mockSaveCodingAgentsConfig.mock.calls[0];
+    if (!saveCall) {
+      throw new Error("Expected save config call");
+    }
+    expect(saveCall[0]).toMatchObject({
       env: { NEW_KEY: "new-value" },
       customCodingAgents: [
         expect.objectContaining({

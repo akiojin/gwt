@@ -26,17 +26,33 @@ const {
   ensureWorktreeMock: mock(async () => "/repo"),
   fetchAllRemotesMock: mock(async () => undefined),
   pullFastForwardMock: mock(async () => undefined),
-  getBranchDivergenceStatusesMock: mock(async () => []),
+  getBranchDivergenceStatusesMock: mock<
+    () => Promise<
+      Array<{ branch: string; remoteAhead: number; localAhead: number }>
+    >
+  >(async () => []),
   launchClaudeCodeMock: mock(async () => undefined),
-  saveSessionMock: mock(async () => undefined),
-  worktreeExistsMock: mock(async () => null),
-  switchToProtectedBranchMock: mock(async () => "local" as const),
+  saveSessionMock: mock<(...args: unknown[]) => Promise<void>>(
+    async () => undefined,
+  ),
+  worktreeExistsMock: mock(async (_branch: string) => null),
+  switchToProtectedBranchMock: mock<() => Promise<"none" | "local" | "remote">>(
+    async () => "local" as const,
+  ),
   branchExistsMock: mock(async () => true),
   getRepositoryRootMock: mock(async () => "/repo"),
   getCurrentBranchMock: mock(async () => "develop"),
-  installDependenciesMock: mock(async () => ({
-    skipped: false as const,
-    manager: "bun" as const,
+  installDependenciesMock: mock<
+    () => Promise<{
+      skipped: boolean;
+      manager: string | null;
+      lockfile: string | null;
+      reason?: string;
+      message?: string;
+    }>
+  >(async () => ({
+    skipped: false,
+    manager: "bun",
     lockfile: "/repo/bun.lock",
   })),
   hasUncommittedChangesMock: mock(async () => false),
@@ -46,13 +62,12 @@ const {
   pushBranchToRemoteMock: mock(async () => undefined),
 };
 
-const DependencyInstallErrorMock = () =>
-  class DependencyInstallError extends Error {
-    constructor(message?: string) {
-      super(message);
-      this.name = "DependencyInstallError";
-    }
-  };
+class DependencyInstallErrorMock extends Error {
+  constructor(message?: string) {
+    super(message);
+    this.name = "DependencyInstallError";
+  }
+}
 
 const waitForUserAcknowledgementMock = mock<() => Promise<void>>();
 

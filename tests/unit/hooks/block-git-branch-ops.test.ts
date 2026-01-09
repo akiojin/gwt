@@ -46,13 +46,17 @@ describeOrSkip("block-git-branch-ops.sh hook", () => {
         reject: false,
       });
       return {
-        exitCode: result.exitCode,
+        exitCode: result.exitCode ?? 0,
         stdout: result.stdout,
         stderr: result.stderr,
       };
     } catch (error: unknown) {
       const fallback = error as
-        | (NodeJS.ErrnoException & { stdout?: string; stderr?: string })
+        | (NodeJS.ErrnoException & {
+            stdout?: string;
+            stderr?: string;
+            exitCode?: number;
+          })
         | undefined;
 
       return {

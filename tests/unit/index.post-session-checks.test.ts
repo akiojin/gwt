@@ -27,9 +27,11 @@ const {
   pullFastForwardMock: mock(async () => undefined),
   getBranchDivergenceStatusesMock: mock(async () => []),
   launchCodexCLIMock: mock(async () => ({ sessionId: null as string | null })),
-  saveSessionMock: mock(async () => undefined),
+  saveSessionMock: mock<(...args: unknown[]) => Promise<void>>(
+    async () => undefined,
+  ),
   loadSessionMock: mock(async () => null),
-  worktreeExistsMock: mock(async () => null),
+  worktreeExistsMock: mock(async (_branch: string) => null),
   getRepositoryRootMock: mock(async () => "/repo"),
   installDependenciesMock: mock(async () => ({
     skipped: true as const,

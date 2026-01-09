@@ -108,7 +108,11 @@ describe("QuickStartStep", () => {
         testSetup.mockInput.pressEnter();
         await testSetup.renderOnce();
         expect(resumedEntry).not.toBeNull();
-        expect(resumedEntry?.toolId).toBe("claude-code");
+        const assertedEntry = resumedEntry as ToolSessionEntry | null;
+        if (!assertedEntry) {
+          throw new Error("Expected resumed entry");
+        }
+        expect(assertedEntry.toolId).toBe("claude-code");
       } finally {
         testSetup.renderer.destroy();
       }

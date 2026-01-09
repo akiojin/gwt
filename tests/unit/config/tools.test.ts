@@ -2,7 +2,7 @@
  * カスタムツール設定管理機能のテスト
  */
 
-import { describe, it, expect, beforeEach, afterEach,  mock } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
 import { readFile as _readFile } from "node:fs/promises";
 import { homedir as _homedir } from "node:os";
 import _path from "node:path";
@@ -20,15 +20,15 @@ let _getAllTools: any;
 // 実装後にインポートを有効化
 // import {
 //   loadToolsConfig,
-//   validateToolConfig,
-//   getToolById,
-//   getAllTools,
+//   _validateToolConfig,
+//   _getToolById,
+//   _getAllTools,
 // } from "../../../src/config/tools.js";
 
 describe("loadToolsConfig", () => {
   beforeEach(() => {
     // 実装前は空の関数をモック
-    loadToolsConfig = mock();
+    _loadToolsConfig = mock();
   });
 
   afterEach(() => {
@@ -56,9 +56,9 @@ describe("loadToolsConfig", () => {
   });
 });
 
-describe("validateToolConfig", () => {
+describe("_validateToolConfig", () => {
   beforeEach(() => {
-    validateToolConfig = mock();
+    _validateToolConfig = mock();
   });
 
   it("必須フィールドが全て存在する場合、検証が成功", () => {
@@ -162,9 +162,9 @@ describe("validateToolConfig", () => {
   });
 });
 
-describe("getToolById", () => {
+describe("_getToolById", () => {
   beforeEach(() => {
-    getToolById = mock();
+    _getToolById = mock();
   });
 
   it("存在するIDの場合、ツールを返す", () => {
@@ -178,9 +178,9 @@ describe("getToolById", () => {
   });
 });
 
-describe("getAllTools", () => {
+describe("_getAllTools", () => {
   beforeEach(() => {
-    getAllTools = mock();
+    _getAllTools = mock();
   });
 
   it("ビルトインツール（Claude Code, Codex CLI）が含まれる", () => {
