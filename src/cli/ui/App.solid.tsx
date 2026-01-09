@@ -1054,23 +1054,8 @@ export function AppSolid(props: AppSolidProps) {
             skipCounts.remote += 1;
             continue;
           }
-          if (isProtectedBranchName(branch.name)) {
-            skipCounts.protected += 1;
-            continue;
-          }
           if (branch.isCurrent) {
             skipCounts.current += 1;
-            continue;
-          }
-          const hasUncommitted =
-            branch.worktree?.hasUncommittedChanges === true;
-          const hasUnpushed = branch.hasUnpushedCommits === true;
-          if (hasUncommitted || hasUnpushed) {
-            skipCounts.unsafe += 1;
-            continue;
-          }
-          if (branch.safeToCleanup !== true) {
-            skipCounts.unsafe += 1;
             continue;
           }
           const worktreePath = branch.worktree?.path ?? null;
@@ -1190,13 +1175,14 @@ export function AppSolid(props: AppSolidProps) {
       return;
     }
 
-    // 選択されたブランチのうち、inaccessibleなものを修復対象とする
+    // 選択されたローカルブランチのうち、Worktreeを持つものを修復対象とする
     const selectionSet = new Set(selection);
     const targets = branchItems()
       .filter(
         (branch) =>
           selectionSet.has(branch.name) &&
-          branch.worktreeStatus === "inaccessible",
+          branch.type !== "remote" &&
+          branch.worktreeStatus !== undefined,
       )
       .map((branch) => branch.name);
 

@@ -147,6 +147,23 @@
 - [x] **T962** [US4] `src/cli/ui/App.solid.tsx` にunsafe選択時の警告OK/Cancel表示と選択確定/維持ロジックを追加
 - [x] **T963** [US4] `src/cli/ui/screens/solid/BranchListScreen.tsx` に警告表示中の入力ロックを追加
 
+## フェーズ12: ユーザーストーリー4 - 選択済みブランチの優先実行 (優先度: P1)
+
+**ストーリー**: チェック済みブランチは安全判定に関係なくクリーンアップ/修復の対象に含める（リモートは除外、クリーンアップ時の現在ブランチは除外）。
+
+**価値**: 意図的に選択したブランチを確実に処理でき、操作の予測性が向上する。
+
+### テスト（TDD）
+
+- [x] **T971** [US4] `src/cli/ui/__tests__/solid/AppSolid.cleanup.test.tsx` にunsafe/保護ブランチが選択されている場合でもクリーンアップ対象になるテストを追加
+- [x] **T972** [US4] `src/cli/ui/__tests__/solid/AppSolid.cleanup.test.tsx` に現在ブランチが選択されている場合はクリーンアップ対象から除外されるテストを追加
+- [x] **T973** [US4] `src/cli/ui/__tests__/solid/AppSolid.cleanup.test.tsx` に修復でアクセス可能なWorktreeも対象になるテストを追加
+
+### 実装
+
+- [x] **T981** [US4] `src/cli/ui/App.solid.tsx` のクリーンアップ選択ロジックを更新し、安全判定・保護ブランチによる除外を廃止する
+- [x] **T982** [US4] `src/cli/ui/App.solid.tsx` の修復対象判定から `worktreeStatus === "inaccessible"` 条件を除外する
+
 ## フェーズ7: ユーザーストーリー7 - 選択中Worktreeフルパス表示 (優先度: P2)
 
 **ストーリー**: ブランチ一覧のフッター直上に、選択中ブランチのWorktreeフルパスを表示する。Worktreeが存在しないが現在ブランチの場合は起動時の作業ディレクトリを表示し、ブランチ一覧が空の場合は`Worktree: (none)`を表示する。
