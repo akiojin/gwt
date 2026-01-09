@@ -6,7 +6,8 @@ import {
 } from "../../src/logging/agentOutput.js";
 
 describe("shouldCaptureAgentOutput", () => {
-  it("returns true only for true/1 (case-insensitive)", () => {
+  it("defaults to true and allows opt-out with false/0", () => {
+    expect(shouldCaptureAgentOutput({})).toBe(true);
     expect(shouldCaptureAgentOutput({ GWT_CAPTURE_AGENT_OUTPUT: "true" })).toBe(
       true,
     );
@@ -22,7 +23,12 @@ describe("shouldCaptureAgentOutput", () => {
     expect(shouldCaptureAgentOutput({ GWT_CAPTURE_AGENT_OUTPUT: "0" })).toBe(
       false,
     );
-    expect(shouldCaptureAgentOutput({})).toBe(false);
+    expect(
+      shouldCaptureAgentOutput({ GWT_CAPTURE_AGENT_OUTPUT: "FALSE" }),
+    ).toBe(false);
+    expect(shouldCaptureAgentOutput({ GWT_CAPTURE_AGENT_OUTPUT: "" })).toBe(
+      true,
+    );
   });
 });
 

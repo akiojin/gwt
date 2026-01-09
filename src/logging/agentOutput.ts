@@ -10,11 +10,14 @@ export function shouldCaptureAgentOutput(
   env: NodeJS.ProcessEnv = process.env,
 ): boolean {
   const raw = env[CAPTURE_AGENT_OUTPUT_ENV];
-  if (!raw) {
-    return false;
+  if (raw === undefined) {
+    return true;
   }
   const normalized = String(raw).trim().toLowerCase();
-  return normalized === "true" || normalized === "1";
+  if (!normalized) {
+    return true;
+  }
+  return normalized !== "false" && normalized !== "0";
 }
 
 // eslint-disable-next-line no-control-regex
