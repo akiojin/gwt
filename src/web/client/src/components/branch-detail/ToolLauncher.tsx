@@ -13,6 +13,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
+import { getAgentTailwindClass } from "@/lib/coding-agent-colors";
 import type { ApiCodingAgent, Branch } from "../../../../../types/api.js";
 
 type ToolMode = "normal" | "continue" | "resume";
@@ -170,7 +171,11 @@ export function ToolLauncher({
                   </SelectTrigger>
                   <SelectContent>
                     {availableTools.map((tool) => (
-                      <SelectItem key={tool.id} value={tool.id}>
+                      <SelectItem
+                        key={tool.id}
+                        value={tool.id}
+                        className={getAgentTailwindClass(tool.id)}
+                      >
                         {tool.label}
                       </SelectItem>
                     ))}

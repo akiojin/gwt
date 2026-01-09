@@ -53,6 +53,29 @@ describe("QuickStartStep", () => {
         testSetup.renderer.destroy();
       }
     });
+
+    it("renders session id for resume description when available", async () => {
+      const testSetup = await testRender(
+        () => (
+          <QuickStartStep
+            history={mockHistory}
+            onResume={() => {}}
+            onStartNew={() => {}}
+            onChooseDifferent={() => {}}
+            onBack={() => {}}
+          />
+        ),
+        { width: 80, height: 24 },
+      );
+      await testSetup.renderOnce();
+
+      try {
+        const frame = testSetup.captureCharFrame();
+        expect(frame).toContain("session-123");
+      } finally {
+        testSetup.renderer.destroy();
+      }
+    });
   });
 
   // T502: ヘルプテキストの表示テスト

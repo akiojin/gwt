@@ -163,6 +163,21 @@ export interface CleanupTarget {
   reasons?: CleanupReason[];
 }
 
+export interface CleanupStatus {
+  branch: string;
+  worktreePath: string | null;
+  hasUncommittedChanges: boolean;
+  hasUnpushedCommits: boolean;
+  hasRemoteBranch: boolean;
+  hasUniqueCommits: boolean;
+  hasUpstream: boolean;
+  upstream?: string | null;
+  cleanupType: "worktree-and-branch" | "branch-only";
+  isAccessible?: boolean;
+  invalidReason?: string;
+  reasons: CleanupReason[];
+}
+
 export interface GitHubPRAuthor {
   id?: string;
   is_bot?: boolean;
@@ -240,8 +255,10 @@ export interface BranchItem extends BranchInfo {
   syncStatus?: SyncStatus;
   syncInfo?: string | undefined;
   remoteName?: string | undefined;
-  // クリーンアップ判定で「未コミット/未プッシュなし かつマージ済み」と評価された場合に true
+  // クリーンアップ候補判定で安全と評価された場合に true
   safeToCleanup?: boolean;
+  // ベースブランチとの差分があり未マージと判定された場合に true
+  isUnmerged?: boolean;
 }
 
 /**

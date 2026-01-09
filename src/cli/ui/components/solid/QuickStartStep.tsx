@@ -1,8 +1,11 @@
 /** @jsxImportSource @opentui/solid */
 import { TextAttributes } from "@opentui/core";
-import { createEffect, createMemo } from "solid-js";
+import type { SelectRenderable } from "@opentui/core";
+import { useKeyboard } from "@opentui/solid";
+import { createEffect, createMemo, createSignal } from "solid-js";
 import type { ToolSessionEntry } from "../../../../config/index.js";
 import { SelectInput, type SelectInputItem } from "./SelectInput.js";
+import { useWizardScroll } from "./WizardPopup.js";
 
 /**
  * QuickStartStep - 前回履歴からのクイック選択ステップ
@@ -26,6 +29,12 @@ interface QuickStartItem extends SelectInputItem {
 }
 
 export function QuickStartStep(props: QuickStartStepProps) {
+  const [selectedIndex, setSelectedIndex] = createSignal(0);
+  const [selectRef, setSelectRef] = createSignal<SelectRenderable | undefined>(
+    undefined,
+  );
+  const scroll = useWizardScroll();
+
   // T506: 履歴がない場合は自動的に onChooseDifferent を呼ぶ
   createEffect(() => {
     if (props.history.length === 0) {
@@ -91,6 +100,60 @@ export function QuickStartStep(props: QuickStartStepProps) {
     return result;
   });
 
+  const ensureIndexVisible = (index: number) => {
+    if (!scroll) {
+      return;
+    }
+    const select = selectRef();
+    if (!select) {
+      return;
+    }
+    const linesPerItem = 2;
+    const startLine = select.y + Math.max(0, index) * linesPerItem;
+    const endLine = startLine + Math.max(0, linesPerItem - 1);
+    scroll.ensureLineVisible(startLine);
+    if (endLine !== startLine) {
+      scroll.ensureLineVisible(endLine);
+    }
+  };
+
+  createEffect(() => {
+    if (props.focused === false) {
+      return;
+    }
+    const count = items().length;
+    if (count <= 0) {
+      return;
+    }
+    const safeIndex = Math.min(Math.max(selectedIndex(), 0), count - 1);
+    ensureIndexVisible(safeIndex);
+  });
+
+  useKeyboard((key) => {
+    if (props.focused === false) {
+      return;
+    }
+    if (!scroll) {
+      return;
+    }
+    if (key.name !== "up" && key.name !== "down") {
+      return;
+    }
+    const count = items().length;
+    if (count <= 0) {
+      return;
+    }
+    const currentIndex = Math.min(Math.max(selectedIndex(), 0), count - 1);
+    const nextIndex =
+      key.name === "up"
+        ? Math.max(0, currentIndex - 1)
+        : Math.min(count - 1, currentIndex + 1);
+    if (nextIndex === currentIndex) {
+      return;
+    }
+    ensureIndexVisible(nextIndex);
+  });
+
   const handleSelect = (item: SelectInputItem) => {
     const quickItem = item as QuickStartItem;
     switch (quickItem.action) {
@@ -110,6 +173,19 @@ export function QuickStartStep(props: QuickStartStepProps) {
     }
   };
 
+  const handleChange = (item: SelectInputItem | null) => {
+    if (!item) {
+      setSelectedIndex(0);
+      return;
+    }
+    const nextIndex = items().findIndex((candidate) => {
+      return candidate.value === item.value;
+    });
+    if (nextIndex >= 0) {
+      setSelectedIndex(nextIndex);
+    }
+  };
+
   return (
     <box flexDirection="column" padding={1}>
       <text fg="cyan" attributes={TextAttributes.BOLD}>
@@ -119,8 +195,10 @@ export function QuickStartStep(props: QuickStartStepProps) {
       <SelectInput
         items={items()}
         onSelect={handleSelect}
+        onChange={handleChange}
         focused={props.focused ?? true}
         showDescription={true}
+        selectRef={setSelectRef}
       />
       <text> </text>
       <text attributes={TextAttributes.DIM}>

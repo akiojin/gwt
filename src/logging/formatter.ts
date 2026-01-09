@@ -19,17 +19,36 @@ const LEVEL_LABELS: Record<number, string> = {
   60: "FATAL",
 };
 
+const LOCAL_TIME_FORMATTER = new Intl.DateTimeFormat(undefined, {
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false,
+});
+
+const formatLocalTimeParts = (date: Date): string => {
+  const parts = LOCAL_TIME_FORMATTER.formatToParts(date);
+  const get = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((part) => part.type === type)?.value;
+  const hour = get("hour");
+  const minute = get("minute");
+  const second = get("second");
+
+  if (!hour || !minute || !second) {
+    return LOCAL_TIME_FORMATTER.format(date);
+  }
+
+  return `${hour}:${minute}:${second}`;
+};
+
 const formatTimeLabel = (
   value: unknown,
 ): { label: string; timestamp: number | null } => {
   if (typeof value === "string" || typeof value === "number") {
     const date = new Date(value);
     if (!Number.isNaN(date.getTime())) {
-      const hours = String(date.getHours()).padStart(2, "0");
-      const minutes = String(date.getMinutes()).padStart(2, "0");
-      const seconds = String(date.getSeconds()).padStart(2, "0");
       return {
-        label: `${hours}:${minutes}:${seconds}`,
+        label: formatLocalTimeParts(date),
         timestamp: date.getTime(),
       };
     }

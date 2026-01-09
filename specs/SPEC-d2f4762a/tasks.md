@@ -118,6 +118,10 @@
 
 - [x] **T501** [US9] `src/cli/ui/__tests__/solid/components/QuickStartStep.test.tsx` にクイック選択画面の表示テストを追加
 - [x] **T502** [US9] `src/cli/ui/__tests__/solid/components/QuickStartStep.test.tsx` にヘルプテキスト表示テストを追加
+
+## 追加作業ToDo (2026-01-09)
+- [x] **T950** [Test] 最終アクティビティ/ツール表示の時刻がローカル時刻で表示されることを検証 (`src/cli/ui/utils/__tests__/branchFormatter.test.ts`, `src/cli/ui/__tests__/utils/branchFormatter.test.ts`)
+- [x] **T951** [実装] ブランチ一覧の時刻表示をローカル時刻へ切り替え (`src/cli/ui/utils/branchFormatter.ts`, `src/cli/ui/screens/solid/BranchListScreen.tsx`)
 - [x] **T503** [US9] `src/cli/ui/__tests__/solid/components/QuickStartStep.test.tsx` に「Resume with previous settings」選択時の動作テストを追加
 - [x] **T504** [US9] `src/cli/ui/__tests__/solid/components/QuickStartStep.test.tsx` に「Start new with previous settings」選択時の動作テストを追加
 - [x] **T505** [US9] `src/cli/ui/__tests__/solid/components/QuickStartStep.test.tsx` に「Choose different settings...」選択時の動作テストを追加
@@ -127,6 +131,114 @@
 
 - [x] **T507** [US9] `src/cli/ui/components/solid/QuickStartStep.tsx` にクイック選択ステップコンポーネントを作成
 - [x] **T508** [US9] `src/cli/ui/components/solid/WizardController.tsx` にクイック選択ステップの統合（履歴有無による分岐）
+
+## フェーズ11: ユーザーストーリー4 - unsafeブランチ選択の確認 (優先度: P1)
+
+**ストーリー**: 安全ではないブランチを`space`でチェックしようとした場合、警告OK/Cancelを表示し、OKでチェック、Cancelで未選択を維持する。
+
+**価値**: 誤削除リスクの高いブランチを選択する際に、意図確認を必須化できる。
+
+### テスト（TDD）
+
+- [x] **T961** [US4] `src/cli/ui/__tests__/solid/AppSolid.cleanup.test.tsx` にunsafeブランチ選択時の警告表示とOK/Cancel動作のテストを追加
+
+### 実装
+
+- [x] **T962** [US4] `src/cli/ui/App.solid.tsx` にunsafe選択時の警告OK/Cancel表示と選択確定/維持ロジックを追加
+- [x] **T963** [US4] `src/cli/ui/screens/solid/BranchListScreen.tsx` に警告表示中の入力ロックを追加
+
+## フェーズ12: ユーザーストーリー4 - 選択済みブランチの優先実行 (優先度: P1)
+
+**ストーリー**: チェック済みブランチは安全判定に関係なくクリーンアップ/修復の対象に含める（リモートは除外、クリーンアップ時の現在ブランチは除外）。
+
+**価値**: 意図的に選択したブランチを確実に処理でき、操作の予測性が向上する。
+
+### テスト（TDD）
+
+- [x] **T971** [US4] `src/cli/ui/__tests__/solid/AppSolid.cleanup.test.tsx` にunsafe/保護ブランチが選択されている場合でもクリーンアップ対象になるテストを追加
+- [x] **T972** [US4] `src/cli/ui/__tests__/solid/AppSolid.cleanup.test.tsx` に現在ブランチが選択されている場合はクリーンアップ対象から除外されるテストを追加
+- [x] **T973** [US4] `src/cli/ui/__tests__/solid/AppSolid.cleanup.test.tsx` に修復でアクセス可能なWorktreeも対象になるテストを追加
+
+### 実装
+
+- [x] **T981** [US4] `src/cli/ui/App.solid.tsx` のクリーンアップ選択ロジックを更新し、安全判定・保護ブランチによる除外を廃止する
+- [x] **T982** [US4] `src/cli/ui/App.solid.tsx` の修復対象判定から `worktreeStatus === "inaccessible"` 条件を除外する
+
+## フェーズ13: ユーザーストーリー4 - 安全アイコン凡例の表示 (優先度: P2)
+
+**ストーリー**: Mode(tab)行の直下に安全アイコンの凡例行を表示し、未コミット/未プッシュ/未マージの意味を説明する。
+
+**価値**: 安全アイコンの意味を即座に理解でき、誤操作の防止につながる。
+
+### 仕様更新
+
+- [x] **T991** [P] [共通] `specs/SPEC-d2f4762a/spec.md` に安全アイコン凡例行の要件とシナリオを追記
+- [x] **T992** [P] [共通] `specs/SPEC-d2f4762a/plan.md` に凡例行の方針とToDoを追記
+
+### テスト（TDD）
+
+- [x] **T993** [US4] `src/cli/ui/__tests__/solid/BranchListScreen.test.tsx` に凡例行の表示テストを追加
+
+### 実装
+
+- [x] **T994** [US4] `src/cli/ui/screens/solid/BranchListScreen.tsx` に凡例行を表示
+
+## フェーズ14: ユーザーストーリー4 - unsafe警告ダイアログの反転範囲修正 (優先度: P2)
+
+**ストーリー**: unsafe選択の警告ダイアログで OK/Cancel の反転表示が枠外に広がらないようにする。
+
+**価値**: 画面の視認性を保ち、ダイアログの境界が明確になる。
+
+### 仕様更新
+
+- [x] **T995** [P] [共通] `specs/SPEC-d2f4762a/spec.md` に反転範囲の要件を追記
+- [x] **T996** [P] [共通] `specs/SPEC-d2f4762a/plan.md` に反転範囲の方針を追記
+
+### テスト（TDD）
+
+- [x] **T997** [US4] `src/cli/ui/__tests__/solid/ConfirmScreen.test.tsx` に反転範囲がダイアログ幅に収まるテストを追加
+
+### 実装
+
+- [x] **T998** [US4] `src/cli/ui/screens/solid/ConfirmScreen.tsx` と `src/cli/ui/App.solid.tsx` を更新し、ダイアログ内幅で反転表示する
+
+## フェーズ15: ユーザーストーリー4 - 凡例にSafe表示を追加 (優先度: P2)
+
+**ストーリー**: 安全アイコンの凡例に `o Safe` を追加し、安全状態が即時に理解できるようにする。
+
+**価値**: 警告アイコンだけでなく安全状態も明示され、一覧の理解が早くなる。
+
+### 仕様更新
+
+- [x] **T999** [P] [共通] `specs/SPEC-d2f4762a/spec.md` の凡例行を `o Safe` を含む内容に更新
+- [x] **T1000** [P] [共通] `specs/SPEC-d2f4762a/plan.md` の凡例説明に Safe を追加
+
+### テスト（TDD）
+
+- [x] **T1001** [US4] `src/cli/ui/__tests__/solid/BranchListScreen.test.tsx` の凡例表示テストを `o Safe` に更新
+
+### 実装
+
+- [x] **T1002** [US4] `src/cli/ui/screens/solid/BranchListScreen.tsx` の凡例行に `o Safe` を追加
+
+## フェーズ16: ユーザーストーリー4 - unsafe確認Enterの伝搬抑止 (優先度: P2)
+
+**ストーリー**: unsafe選択の警告ダイアログで Enter により OK/Cancel を確定した際、ブランチ一覧の Enter 選択が発火しないようにする。
+
+**価値**: 意図しないブランチ選択/ウィザード起動を防止する。
+
+### 仕様更新
+
+- [x] **T1003** [P] [共通] `specs/SPEC-d2f4762a/spec.md` に Enter 伝搬抑止の受け入れ条件と要件を追記
+- [x] **T1004** [P] [共通] `specs/SPEC-d2f4762a/plan.md` に伝搬抑止の方針を追記
+
+### テスト（TDD）
+
+- [x] **T1005** [US4] `src/cli/ui/__tests__/solid/AppSolid.cleanup.test.tsx` に Enter 確定時のブランチ選択が起きないテストを追加
+
+### 実装
+
+- [x] **T1006** [US4] `src/cli/ui/App.solid.tsx` の unsafe確認確定時にブランチ一覧入力を抑止
 
 ## フェーズ7: ユーザーストーリー7 - 選択中Worktreeフルパス表示 (優先度: P2)
 
@@ -141,3 +253,79 @@
 ### 実装
 
 - [x] **T602** [US7] `src/cli/ui/screens/solid/BranchListScreen.tsx` のフッター表示を `Worktree:` に置き換え、表示ロジックを追加
+
+## フェーズ8: フッターヘルプ整理とショートカット併記 (優先度: P2)
+
+**ストーリー**: ブランチ一覧で画面内に表示される要素（Filter行/Mode/Profiles）にショートカットを併記し、フッターヘルプからは削除する。
+
+**価値**: 重複した案内を減らし、視認性と理解度を高める。
+
+### 仕様更新
+
+- [x] **T701** [P] [共通] `specs/SPEC-d2f4762a/spec.md` にフッターヘルプ整理と`Filter(f)`/`Mode(tab)`/`Profile(p)`表記を反映
+- [x] **T702** [P] [共通] `specs/SPEC-d2f4762a/plan.md` のハイレベルToDoにフッターヘルプ更新を追記
+
+### テスト（TDD）
+
+- [x] **T711** [US0] `src/cli/ui/__tests__/solid/BranchListScreen.test.tsx` に`Filter(f)`/`Mode(tab)`/`Profile(p)`の表示とフッターヘルプからの除外を確認するテストを追加
+
+### 実装
+
+- [x] **T721** [US0] `src/cli/ui/screens/solid/BranchListScreen.tsx` のFilter/Mode表示ラベルとフッターアクションを更新
+- [x] **T722** [US0] `src/cli/ui/components/solid/Header.tsx` のProfile表示ラベルにショートカットを併記
+
+## フェーズ9: ユーザーストーリー8 - ウィザードポップアップのスクロール対応 (優先度: P1)
+
+**ストーリー**: ウィザードポップアップの内容が表示領域を超える場合でも、ポップアップ内でスクロールできるようにして内容のはみ出しを防ぐ。
+
+**価値**: 端末サイズが小さい環境でも、ウィザード内の全項目に到達できる。
+
+### テスト（TDD）
+
+- [x] **T731** [US8] `src/cli/ui/__tests__/solid/components/WizardPopup.test.tsx` にポップアップ内スクロールの表示テストを追加
+- [x] **T733** [US8] `src/cli/ui/__tests__/solid/components/WizardPopup.test.tsx` に上下キーでのスクロールテストを追加
+
+### 実装
+
+- [x] **T732** [US8] `src/cli/ui/components/solid/WizardPopup.tsx` にスクロールコンテナを追加し、内容のはみ出しを防止
+- [x] **T734** [US8] `src/cli/ui/components/solid/WizardPopup.tsx` と `src/cli/ui/components/solid/WizardSteps.tsx` で上下キーによるスクロールを実装
+
+## フェーズ10: ユーザーストーリー4 - 安全判定と表示の更新 (優先度: P1)
+
+**ストーリー**: upstream の有無とマージ状態を安全判定に反映し、未コミットは赤色の安全アイコン`!`、未プッシュは黄色`!`、未マージは黄色`*`で警告し、判定中はスピナーを表示する。
+
+**価値**: 安全条件の誤認を防ぎ、削除判断の誤りを減らす。
+
+### 仕様更新
+
+- [x] **T801** [P] [共通] `specs/SPEC-d2f4762a/spec.md` の安全判定ルールと色指定を更新
+- [x] **T802** [P] [共通] `specs/SPEC-d2f4762a/plan.md` の安全判定方針を更新
+- [x] **T803** [P] [共通] `specs/SPEC-d2f4762a/spec.md` に安全判定スピナー/リモートブランチ空白の要件を追記
+- [x] **T804** [P] [共通] `specs/SPEC-d2f4762a/plan.md` に安全判定スピナー/リモートブランチ空白の方針を追記
+- [x] **T805** [P] [共通] `specs/SPEC-d2f4762a/spec.md` の安全時アイコンを緑色`o`に更新
+- [x] **T806** [P] [共通] `specs/SPEC-d2f4762a/plan.md` の安全時アイコン方針に緑色`o`を追記
+- [x] **T807** [P] [共通] `specs/SPEC-d27be71b/spec.md` の意思決定ログを安全時`o`に更新
+- [x] **T816** [P] [共通] `specs/SPEC-d2f4762a/spec.md` の安全判定スピナーをブランチ単位で順次更新する要件を追記
+- [x] **T817** [P] [共通] `specs/SPEC-d2f4762a/plan.md` の安全判定スピナー方針にブランチ単位更新を追記
+- [x] **T826** [P] [共通] `specs/SPEC-d2f4762a/spec.md` の安全/Worktreeアイコンの明るい緑表示を追記
+- [x] **T827** [P] [共通] `specs/SPEC-d2f4762a/plan.md` の明るい緑表示方針を更新
+
+### テスト（TDD）
+
+- [x] **T811** [US4] `src/cli/ui/__tests__/solid/BranchListScreen.test.tsx` に未コミット/未プッシュの`!`と未マージの`*`を確認するテストを追加
+- [x] **T812** [US4] `src/cli/ui/__tests__/solid/AppSolid.cleanup.test.tsx` にupstream未設定時の安全判定除外を確認するテストを追加
+- [x] **T813** [US4] `src/cli/ui/__tests__/solid/BranchListScreen.test.tsx` に安全判定中のスピナーとリモートブランチ空白を確認するテストを追加
+- [x] **T814** [US4] `src/cli/ui/__tests__/solid/BranchListScreen.test.tsx` の安全時`o`表示テストを更新
+- [x] **T815** [US4] `src/cli/ui/__tests__/solid/AppSolid.cleanup.test.tsx` の安全時`o`表示テストを更新
+- [x] **T818** [US4] `src/cli/ui/__tests__/solid/BranchListScreen.test.tsx` に安全判定スピナーのブランチ単位更新テストを追加
+- [x] **T819** [US4] `src/cli/ui/__tests__/solid/AppSolid.cleanup.test.tsx` に安全判定の逐次更新を確認するテストを追加
+- [x] **T820** [US4] 色変更に伴う表示確認（自動テスト追加不要の確認）
+
+### 実装
+
+- [x] **T821** [US4] `src/cli/ui/App.solid.tsx` にupstream/マージ/未コミット・未プッシュの安全判定反映ロジックを追加
+- [x] **T822** [US4] `src/cli/ui/screens/solid/BranchListScreen.tsx` の安全アイコン色分けを更新
+- [x] **T823** [US4] `src/cli/ui/screens/solid/BranchListScreen.tsx` に安全判定スピナー/リモートブランチ空白の表示を追加
+- [x] **T824** [US4] `src/cli/ui/screens/solid/BranchListScreen.tsx` の安全時`o`表示を追加
+- [x] **T825** [US4] `src/cli/ui/App.solid.tsx` と `src/worktree.ts` に安全判定スピナーのブランチ単位更新を実装
+- [x] **T828** [US4] `src/cli/ui/screens/solid/BranchListScreen.tsx` の安全/Worktree明るい緑表示を更新

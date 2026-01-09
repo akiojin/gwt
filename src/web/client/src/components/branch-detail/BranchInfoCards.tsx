@@ -2,6 +2,10 @@ import React from "react";
 import { Card, CardHeader, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import type { Branch, LastToolUsage } from "../../../../../types/api.js";
+import {
+  getAgentTailwindClass,
+  getAgentBgTailwindClass,
+} from "@/lib/coding-agent-colors";
 
 interface BranchInfoCardsProps {
   branch: Branch;
@@ -158,7 +162,10 @@ export function BranchInfoCards({
           </CardHeader>
           <CardContent>
             <div className="flex flex-wrap items-center gap-2 text-sm">
-              <Badge variant="outline">
+              <Badge
+                variant="outline"
+                className={`${getAgentTailwindClass(latestToolUsage.toolId)} ${getAgentBgTailwindClass(latestToolUsage.toolId)}`}
+              >
                 {renderToolUsage(latestToolUsage)}
               </Badge>
               <span className="text-muted-foreground">
@@ -167,6 +174,14 @@ export function BranchInfoCards({
               {latestToolUsage.worktreePath && (
                 <span className="text-xs text-muted-foreground">
                   @ {latestToolUsage.worktreePath}
+                </span>
+              )}
+              {latestToolUsage.sessionId && (
+                <span className="text-xs text-muted-foreground">
+                  Session ID:{" "}
+                  <code className="rounded bg-muted px-1.5 py-0.5 font-mono">
+                    {latestToolUsage.sessionId}
+                  </code>
                 </span>
               )}
             </div>

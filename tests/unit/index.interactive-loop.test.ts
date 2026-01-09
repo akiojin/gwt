@@ -36,6 +36,9 @@ mock.module("../../src/utils/terminal.js", () => ({
   createChildStdio: mock(() => mockChildStdio),
 }));
 
+// Import after mocks are set up (using underscore prefix to indicate intentional non-use at top level)
+import { runInteractiveLoop as _runInteractiveLoop } from "../../src/index.js";
+
 describe("runInteractiveLoop", () => {
   const baseSelection: SelectionResult = {
     branch: "feature/example",

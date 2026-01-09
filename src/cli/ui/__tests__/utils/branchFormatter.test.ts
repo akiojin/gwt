@@ -1,9 +1,35 @@
+/* eslint-disable @typescript-eslint/no-non-null-assertion */
 import { describe, it, expect } from "bun:test";
 import {
   formatBranchItem,
   formatBranchItems,
 } from "../../utils/branchFormatter.js";
 import type { BranchInfo } from "../../types.js";
+
+const LOCAL_DATE_TIME_FORMATTER = new Intl.DateTimeFormat(undefined, {
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+
+const formatLocalDateTime = (timestampMs: number): string => {
+  const date = new Date(timestampMs);
+  const parts = LOCAL_DATE_TIME_FORMATTER.formatToParts(date);
+  const get = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((part) => part.type === type)?.value;
+  const year = get("year");
+  const month = get("month");
+  const day = get("day");
+  const hour = get("hour");
+  const minute = get("minute");
+  if (!year || !month || !day || !hour || !minute) {
+    return LOCAL_DATE_TIME_FORMATTER.format(date);
+  }
+  return `${year}-${month}-${day} ${hour}:${minute}`;
+};
 
 describe("branchFormatter", () => {
   describe("formatBranchItem", () => {
@@ -46,8 +72,9 @@ describe("branchFormatter", () => {
 
       const result = formatBranchItem(branchInfo);
 
-      expect(result.lastToolUsageLabel).toContain("Codex");
-      expect(result.lastToolUsageLabel).toContain("2025-11-26");
+      expect(result.lastToolUsageLabel).toBe(
+        `Codex@latest | ${formatLocalDateTime(branchInfo.lastToolUsage.timestamp)}`,
+      );
     });
 
     it("should set lastToolUsageLabel to null when no usage exists", () => {

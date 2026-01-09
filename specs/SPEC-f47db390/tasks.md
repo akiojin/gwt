@@ -45,10 +45,12 @@ description: "Continue/Resumeで正しいセッションを再開するための
 - [x] **T0502** `[US5]` 履歴が存在する場合はQuick Startへ遷移し、選択結果に応じてツール/モデル/セッションIDを事前セットするロジックを実装（履歴なしは従来フロー）。
 - [x] **T0503** `[US5]` Quick StartのUIテストと統合テスト（前回設定で続きから/新規、履歴なしフォールバック）を追加。
 - [x] **T0504** `[US5]` Quick Startの表示ルールをツール別に分岐し、CodexのみReasoningを表示、Start newではセッションIDを非表示にするUIテストを追加（`src/cli/ui/__tests__/components/screens/BranchQuickStartScreen.test.tsx`）。
-- [x] **T0505** `[US5]` 選択ブランチのworktreePathを保持し、履歴をブランチ+worktree単位でツール別最新に集約する（`src/cli/ui/types.ts`, `src/cli/ui/App.solid.tsx`, `src/cli/ui/utils/continueSession.ts`）。
-- [x] **T0506** `[US5]` Quick StartのUIをツール別行に更新し、ResumeはsessionIdがある場合のみ表示、CodexのみReasoning表示にする。UIテストを更新（`src/cli/ui/components/solid/QuickStartStep.tsx`, `src/cli/ui/__tests__/solid/components/QuickStartStep.test.tsx`）。
+- [ ] **T0505** `[US5]` 同一ブランチでツールごとに直近設定を保持し、Quick Startでツール別行（Resume/Start new）を生成するロジックとテストを追加する。
 
-## フェーズ8: US6 ブランチ整合セッション再解決 (P1)
-- [x] **T0601** `[US6]` Claudeセッション検出にブランチ/worktreeフィルタを追加し、起動フローからブランチ情報を渡す（`src/utils/session/parsers/claude.ts`, `src/claude.ts`, `src/index.ts`）。
-- [x] **T0602** `[US6]` Quick Start表示時にセッションファイルを再走査して最新IDへ更新する（`src/cli/ui/utils/continueSession.ts`, `src/cli/ui/App.solid.tsx`）。
-- [x] **T0603** `[US6]` ブランチ整合のユニットテストを追加（Claude/Gemini/OpenCode）し、Quick Start再走査のユニットテストを追加（`tests/unit/utils/session.test.ts`, `tests/unit/utils/continue-session.test.ts`）。
+## フェーズ8: Web UI セッションID表示/再開 (P1)
+- [ ] **T0601** `[US6]` Web API型に`resumeSessionId`/`sessionId`を追加し、互換性を維持する（`src/types/api.ts`）。
+- [ ] **T0602** `[US6]` Web UIで最終セッションIDを表示し、Continue/Resume起動時にIDを送信する（`src/web/client/src/pages/BranchDetailPage.tsx`, `src/web/client/src/components/branch-detail/BranchInfoCards.tsx`）。
+- [ ] **T0603** `[US6]` Web APIで`resumeSessionId`を受け取り、Codex/Claudeの起動引数に反映する（`src/web/server/routes/sessions.ts`, `src/web/server/pty/manager.ts`, `src/services/codingAgentResolver.ts`）。
+- [ ] **T0604** `[US6]` Web UI起動セッションの終了時にID検出と履歴保存を行う（`src/web/server/pty/manager.ts`, `src/utils/session/*`）。
+- [ ] **T0605** `[US6]` `getLastToolUsageMap`の後方互換で`lastSessionId`を補完する（`src/config/index.ts`）。
+- [ ] **T0606** `[US6]` `buildClaudeArgs`/`buildCodexArgs`のID指定をユニットテストで検証する（`tests/unit/*codingAgentResolver*.test.ts`）。

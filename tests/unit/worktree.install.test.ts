@@ -44,7 +44,8 @@ describe("dependency installer", () => {
   });
 
   afterEach(() => {
-    mock.restore();
+    accessMock.mockReset();
+    execaMock.mockReset();
   });
 
   describe("detectPackageManager", () => {

@@ -1,12 +1,4 @@
-import {
-  describe,
-  it,
-  expect,
-  mock,
-  beforeEach,
-  afterEach,
-  spyOn,
-} from "bun:test";
+import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
 
 // Mock all dependencies
 mock.module("execa", () => ({

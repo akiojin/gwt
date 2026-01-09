@@ -2,11 +2,15 @@ import { execa } from "execa";
 import { lstat, mkdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import chalk from "chalk";
+import { createLogger } from "./logging/logger.js";
+
+const logger = createLogger({ category: "worktree" });
 import {
   WorktreeConfig,
   WorktreeWithPR,
   CleanupTarget,
   CleanupReason,
+  CleanupStatus,
 } from "./cli/ui/types.js";
 import { getPullRequestByBranch } from "./github.js";
 import {
@@ -43,6 +47,65 @@ async function getUpstreamBranch(branch: string): Promise<string | null> {
     return null;
   }
 }
+
+const parseRemoteRef = (
+  ref: string,
+): { remote: string; branch: string } | null => {
+  const segments = ref.split("/");
+  if (segments.length < 2) {
+    return null;
+  }
+  const [remote, ...rest] = segments;
+  const branch = rest.join("/");
+  if (!remote || !branch) {
+    return null;
+  }
+  return { remote, branch };
+};
+
+async function resolveUpstreamStatus(
+  branch: string,
+  repoRoot: string,
+): Promise<{ upstream: string | null; hasUpstream: boolean }> {
+  const upstream = await getUpstreamBranch(branch);
+  if (!upstream) {
+    return { upstream: null, hasUpstream: false };
+  }
+  const parsed = parseRemoteRef(upstream);
+  if (!parsed) {
+    return { upstream, hasUpstream: false };
+  }
+  if (parsed.branch !== branch) {
+    return { upstream, hasUpstream: false };
+  }
+  const exists = await checkRemoteBranchExists(parsed.branch, parsed.remote, {
+    cwd: repoRoot,
+  });
+  return { upstream, hasUpstream: exists };
+}
+
+const buildCleanupReasons = ({
+  hasUniqueCommits,
+  hasUncommitted,
+  hasUnpushed,
+  hasUpstream,
+}: {
+  hasUniqueCommits: boolean;
+  hasUncommitted: boolean;
+  hasUnpushed: boolean;
+  hasUpstream: boolean;
+}): CleanupReason[] => {
+  if (!hasUpstream) {
+    return [];
+  }
+  if (!hasUniqueCommits && !hasUncommitted && !hasUnpushed) {
+    return ["no-diff-with-base"];
+  }
+  if (hasUniqueCommits && !hasUncommitted && !hasUnpushed) {
+    return ["remote-synced"];
+  }
+  return [];
+};
 
 // Re-export WorktreeConfig for external use
 export type { WorktreeConfig };
@@ -582,9 +645,82 @@ export interface RepairResult {
 }
 
 /**
+ * Worktreeパス修復の結果
+ */
+export interface RepairPathResult {
+  /** 修復成功 (git worktree repair) */
+  repaired: boolean;
+  /** 古いメタデータ削除成功 (git worktree remove --force) */
+  removed: boolean;
+  /** 修復後の新しいパス (repaired=trueの場合のみ) */
+  newPath?: string;
+}
+
+/**
+ * 単一のworktreeパスを修復する共通関数
+ *
+ * パターンA: 期待されるパスにディレクトリが存在する
+ *   → git worktree repair <expectedPath> で修復
+ *
+ * パターンB: ディレクトリが存在しない（リモート環境で作成されたメタデータのみ残っている）
+ *   → git worktree remove --force <currentPath> でメタデータを削除
+ *
+ * @param branch ブランチ名
+ * @param currentPath 現在gitメタデータに記録されているパス
+ * @param repoRoot リポジトリルートパス
+ * @returns 修復結果
+ */
+export async function repairWorktreePath(
+  branch: string,
+  currentPath: string,
+  repoRoot: string,
+): Promise<RepairPathResult> {
+  const expectedPath = await generateWorktreePath(repoRoot, branch);
+  const fsSync = await import("node:fs");
+
+  if (fsSync.existsSync(expectedPath)) {
+    // パターンA: ディレクトリが存在する → repair
+    logger.info(
+      { branch, expectedPath, currentPath },
+      "repairWorktreePath: directory exists, attempting repair",
+    );
+    try {
+      await execa("git", ["worktree", "repair", expectedPath], {
+        cwd: repoRoot,
+      });
+      return { repaired: true, removed: false, newPath: expectedPath };
+    } catch (error) {
+      logger.warn(
+        { branch, expectedPath, error },
+        "repairWorktreePath: repair failed",
+      );
+      return { repaired: false, removed: false };
+    }
+  } else {
+    // パターンB: ディレクトリが存在しない → 古いメタデータを削除
+    logger.info(
+      { branch, currentPath, expectedPath },
+      "repairWorktreePath: directory not found, removing stale metadata",
+    );
+    try {
+      await execa("git", ["worktree", "remove", "--force", currentPath], {
+        cwd: repoRoot,
+      });
+      return { repaired: false, removed: true };
+    } catch (error) {
+      logger.warn(
+        { branch, currentPath, error },
+        "repairWorktreePath: remove failed",
+      );
+      return { repaired: false, removed: false };
+    }
+  }
+}
+
+/**
  * Worktreeのパス不整合を修復
- * git worktree repairを引数なしで実行し、全Worktreeを修復
- * @param targetBranches 修復対象のブランチ名配列（修復前後の比較用）
+ * 共通関数repairWorktreePathを使用して各ブランチを修復
+ * @param targetBranches 修復対象のブランチ名配列
  * @returns 修復結果（成功数、失敗数、失敗詳細）
  */
 export async function repairWorktrees(
@@ -600,45 +736,72 @@ export async function repairWorktrees(
     return result;
   }
 
-  // 修復前のアクセス可能性を記録
+  // 修復前のworktree一覧を取得（現在のパスを知るため）
   const beforeWorktrees = await listAdditionalWorktrees();
-  const beforeAccessible = new Map(
-    beforeWorktrees.map((w) => [w.branch, w.isAccessible]),
+  const worktreePathMap = new Map(
+    beforeWorktrees.map((w) => [w.branch, w.path]),
   );
 
-  try {
-    // git worktree repairを引数なしで実行（全Worktreeを修復）
-    await execa("git", ["worktree", "repair"]);
+  // デバッグログ: worktreeリストのブランチ名を出力
+  logger.info(
+    {
+      targetBranches,
+      worktreeBranches: beforeWorktrees.map((w) => ({
+        branch: w.branch,
+        path: w.path,
+        isAccessible: w.isAccessible,
+      })),
+    },
+    "repairWorktrees: before state",
+  );
 
-    // 修復後のアクセス可能性を確認
-    const afterWorktrees = await listAdditionalWorktrees();
-    const afterAccessible = new Map(
-      afterWorktrees.map((w) => [w.branch, w.isAccessible]),
+  const repoRoot = await getRepositoryRoot();
+
+  // 対象ブランチごとに共通関数を使用して修復
+  for (const branch of targetBranches) {
+    const currentPath = worktreePathMap.get(branch);
+    if (!currentPath) {
+      logger.warn({ branch }, "repairWorktrees: branch not found in worktrees");
+      result.failedCount++;
+      result.failures.push({
+        path: branch,
+        error: "Branch not found in worktrees",
+      });
+      continue;
+    }
+
+    const repairResult = await repairWorktreePath(
+      branch,
+      currentPath,
+      repoRoot,
     );
 
-    // 対象ブランチの修復結果を集計
-    for (const branch of targetBranches) {
-      const wasBefore = beforeAccessible.get(branch);
-      const isAfter = afterAccessible.get(branch);
-
-      if (wasBefore === false && isAfter === true) {
-        result.repairedCount++;
-      } else if (wasBefore === false && isAfter === false) {
-        result.failedCount++;
-        result.failures.push({
-          path: branch,
-          error: "Worktree still inaccessible after repair",
-        });
-      }
-    }
-  } catch (error) {
-    // repair自体が失敗した場合
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    for (const branch of targetBranches) {
+    if (repairResult.repaired) {
+      result.repairedCount++;
+    } else if (repairResult.removed) {
+      // メタデータ削除は「修復」としてカウント（新規作成が可能になるため）
+      result.repairedCount++;
+    } else {
       result.failedCount++;
-      result.failures.push({ path: branch, error: errorMessage });
+      result.failures.push({
+        path: branch,
+        error: "Worktree repair failed",
+      });
     }
   }
+
+  // 修復後のアクセス可能性を確認（デバッグログ用）
+  const afterWorktrees = await listAdditionalWorktrees();
+  logger.info(
+    {
+      afterWorktrees: afterWorktrees.map((w) => ({
+        branch: w.branch,
+        path: w.path,
+        isAccessible: w.isAccessible,
+      })),
+    },
+    "repairWorktrees: after state",
+  );
 
   return result;
 }
@@ -665,13 +828,15 @@ async function getWorktreesWithPRStatus(): Promise<WorktreeWithPR[]> {
  * worktreeに存在しないローカルブランチのクリーンアップ候補を取得
  * @returns {Promise<CleanupTarget[]>} クリーンアップ候補の配列
  */
-async function getOrphanedLocalBranches({
+async function getOrphanedLocalBranchStatuses({
   baseBranch,
   repoRoot,
+  onProgress,
 }: {
   baseBranch: string;
   repoRoot: string;
-}): Promise<CleanupTarget[]> {
+  onProgress?: (status: CleanupStatus) => void;
+}): Promise<CleanupStatus[]> {
   try {
     // 並列実行で高速化
     const [localBranches, worktrees] = await Promise.all([
@@ -679,7 +844,7 @@ async function getOrphanedLocalBranches({
       listAdditionalWorktrees(),
     ]);
 
-    const cleanupTargets: CleanupTarget[] = [];
+    const statuses: CleanupStatus[] = [];
     const worktreeBranches = new Set(
       worktrees.map((w) => w.branch).filter(Boolean),
     );
@@ -723,20 +888,23 @@ async function getOrphanedLocalBranches({
           hasUnpushed = true;
         }
 
-        const reasons: CleanupReason[] = [];
-
-        const upstreamBranch = await getUpstreamBranch(localBranch.name);
-        const comparisonBase = upstreamBranch ?? baseBranch;
-
-        const hasUniqueCommits = await branchHasUniqueCommitsComparedToBase(
+        const { upstream, hasUpstream } = await resolveUpstreamStatus(
           localBranch.name,
-          comparisonBase,
           repoRoot,
         );
 
-        if (!hasUniqueCommits) {
-          reasons.push("no-diff-with-base");
-        }
+        const hasUniqueCommits = await branchHasUniqueCommitsComparedToBase(
+          localBranch.name,
+          baseBranch,
+          repoRoot,
+        );
+
+        const reasons = buildCleanupReasons({
+          hasUniqueCommits,
+          hasUncommitted: false,
+          hasUnpushed,
+          hasUpstream,
+        });
 
         if (process.env.DEBUG_CLEANUP) {
           console.log(
@@ -746,41 +914,30 @@ async function getOrphanedLocalBranches({
           );
         }
 
-        let hasRemoteBranch = false;
-        try {
-          hasRemoteBranch = await checkRemoteBranchExists(localBranch.name);
-        } catch {
-          hasRemoteBranch = false;
-        }
-
-        if (!hasUnpushed && hasRemoteBranch && hasUniqueCommits) {
-          reasons.push("remote-synced");
-        }
-
-        if (reasons.length > 0) {
-          cleanupTargets.push({
-            worktreePath: null, // worktreeは存在しない
-            branch: localBranch.name,
-            pullRequest: null,
-            hasUncommittedChanges: false, // worktreeが存在しないため常にfalse
-            hasUnpushedCommits: hasUnpushed,
-            cleanupType: "branch-only",
-            hasRemoteBranch,
-            reasons,
-          });
-        }
+        const status: CleanupStatus = {
+          worktreePath: null, // worktreeは存在しない
+          branch: localBranch.name,
+          hasUncommittedChanges: false, // worktreeが存在しないため常にfalse
+          hasUnpushedCommits: hasUnpushed,
+          cleanupType: "branch-only",
+          hasRemoteBranch: hasUpstream,
+          hasUniqueCommits,
+          hasUpstream,
+          upstream,
+          reasons,
+        };
+        statuses.push(status);
+        onProgress?.(status);
       }
     }
 
     if (process.env.DEBUG_CLEANUP) {
       console.log(
-        chalk.cyan(
-          `Debug: Found ${cleanupTargets.length} orphaned branch cleanup targets`,
-        ),
+        chalk.cyan(`Debug: Found ${statuses.length} orphaned branch statuses`),
       );
     }
 
-    return cleanupTargets;
+    return statuses;
   } catch (error) {
     console.error(chalk.red("Error: Failed to get orphaned local branches"));
     if (process.env.DEBUG_CLEANUP) {
@@ -790,11 +947,11 @@ async function getOrphanedLocalBranches({
   }
 }
 
-/**
- * マージ済みPRに関連するworktreeおよびローカルブランチのクリーンアップ候補を取得
- * @returns {Promise<CleanupTarget[]>} クリーンアップ候補の配列
- */
-export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
+export async function getCleanupStatus({
+  onProgress,
+}: {
+  onProgress?: (status: CleanupStatus) => void;
+} = {}): Promise<CleanupStatus[]> {
   const [config, repoRoot, worktreesWithPR] = await Promise.all([
     getConfig(),
     getRepositoryRoot(),
@@ -802,11 +959,12 @@ export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
   ]);
   const baseBranch = config.defaultBaseBranch || GIT_CONFIG.DEFAULT_BASE_BRANCH;
 
-  const orphanedBranches = await getOrphanedLocalBranches({
+  const orphanedStatuses = await getOrphanedLocalBranchStatuses({
     baseBranch,
     repoRoot,
+    ...(onProgress ? { onProgress } : {}),
   });
-  const cleanupTargets: CleanupTarget[] = [];
+  const statuses: CleanupStatus[] = [];
 
   if (process.env.DEBUG_CLEANUP) {
     console.log(chalk.cyan("Debug: Available worktrees:"));
@@ -816,32 +974,19 @@ export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
   }
 
   for (const worktree of worktreesWithPR) {
-    // 保護対象ブランチはスキップ
-    if (isProtectedBranchName(worktree.branch)) {
-      if (process.env.DEBUG_CLEANUP) {
-        console.log(
-          chalk.yellow(`Debug: Skipping protected branch ${worktree.branch}`),
-        );
-      }
-      continue;
-    }
-
     if (process.env.DEBUG_CLEANUP) {
       console.log(chalk.gray(`Debug: Checking worktree ${worktree.branch}`));
     }
 
-    const cleanupReasons: CleanupReason[] = [];
-
     // worktreeパスの存在を確認
-    const fs = await import("node:fs");
-    // Some test environments mock node:fs without existsSync on the module root.
+    const fsSync = await import("node:fs");
     const existsSync =
-      typeof fs.existsSync === "function"
-        ? fs.existsSync
-        : typeof (fs as { default?: { existsSync?: unknown } }).default
+      typeof fsSync.existsSync === "function"
+        ? fsSync.existsSync
+        : typeof (fsSync as { default?: { existsSync?: unknown } }).default
               ?.existsSync === "function"
-          ? (fs as { default: { existsSync: (p: string) => boolean } }).default
-              .existsSync
+          ? (fsSync as { default: { existsSync: (p: string) => boolean } })
+              .default.existsSync
           : null;
 
     const isAccessible = existsSync ? existsSync(worktree.worktreePath) : false;
@@ -850,14 +995,12 @@ export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
     let hasUnpushed = false;
 
     if (isAccessible) {
-      // worktreeが存在する場合のみ状態をチェック
       try {
         [hasUncommitted, hasUnpushed] = await Promise.all([
           hasUncommittedChanges(worktree.worktreePath),
           hasUnpushedCommits(worktree.worktreePath, worktree.branch),
         ]);
       } catch (error) {
-        // エラーが発生した場合はデフォルト値を使用
         if (process.env.DEBUG_CLEANUP) {
           console.log(
             chalk.yellow(
@@ -868,77 +1011,99 @@ export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
       }
     }
 
-    let hasRemoteBranch = false;
-    try {
-      hasRemoteBranch = await checkRemoteBranchExists(worktree.branch);
-    } catch {
-      hasRemoteBranch = false;
-    }
-
-    const upstreamBranch = await getUpstreamBranch(worktree.branch);
-    const comparisonBase = upstreamBranch ?? baseBranch;
-
-    const hasUniqueCommits = await branchHasUniqueCommitsComparedToBase(
+    const { upstream, hasUpstream } = await resolveUpstreamStatus(
       worktree.branch,
-      comparisonBase,
       repoRoot,
     );
 
-    // 差分がない場合はベース同等としてクリーンアップ候補
-    if (!hasUniqueCommits) {
-      cleanupReasons.push("no-diff-with-base");
-    } else if (!hasUncommitted && !hasUnpushed && hasRemoteBranch) {
-      // 未マージでも、ローカルに未コミット/未プッシュがなくリモートが最新ならローカルのみクリーンアップ許可
-      cleanupReasons.push("remote-synced");
-    }
+    const hasUniqueCommits = await branchHasUniqueCommitsComparedToBase(
+      worktree.branch,
+      baseBranch,
+      repoRoot,
+    );
+
+    const reasons = buildCleanupReasons({
+      hasUniqueCommits,
+      hasUncommitted,
+      hasUnpushed,
+      hasUpstream,
+    });
 
     if (process.env.DEBUG_CLEANUP) {
       console.log(
         chalk.gray(
-          `Debug: Cleanup reasons for ${worktree.branch}: ${cleanupReasons.length > 0 ? cleanupReasons.join(", ") : "none"}`,
+          `Debug: Cleanup reasons for ${worktree.branch}: ${reasons.length > 0 ? reasons.join(", ") : "none"}`,
         ),
       );
     }
 
-    if (cleanupReasons.length === 0) {
-      continue;
-    }
-
-    const target: CleanupTarget = {
+    const status: CleanupStatus = {
       worktreePath: worktree.worktreePath,
       branch: worktree.branch,
-      pullRequest: null,
       hasUncommittedChanges: hasUncommitted,
       hasUnpushedCommits: hasUnpushed,
       cleanupType: "worktree-and-branch",
-      hasRemoteBranch,
+      hasRemoteBranch: hasUpstream,
+      hasUniqueCommits,
+      hasUpstream,
+      upstream,
       isAccessible,
-      reasons: cleanupReasons,
+      reasons,
+      ...(isAccessible
+        ? {}
+        : { invalidReason: "Path not accessible in current environment" }),
     };
-
-    if (!isAccessible) {
-      target.invalidReason = "Path not accessible in current environment";
-    }
-
-    cleanupTargets.push(target);
+    statuses.push(status);
+    onProgress?.(status);
   }
 
-  // orphanedBranches (ローカルブランチのみの削除対象) を追加
-  cleanupTargets.push(...orphanedBranches);
+  statuses.push(...orphanedStatuses);
 
   if (process.env.DEBUG_CLEANUP) {
-    const worktreeTargets = cleanupTargets.filter(
-      (t) => t.cleanupType === "worktree-and-branch",
+    const worktreeTargets = statuses.filter(
+      (t) => t.cleanupType === "worktree-and-branch" && t.reasons.length > 0,
     ).length;
-    const branchOnlyTargets = cleanupTargets.filter(
-      (t) => t.cleanupType === "branch-only",
+    const branchOnlyTargets = statuses.filter(
+      (t) => t.cleanupType === "branch-only" && t.reasons.length > 0,
     ).length;
     console.log(
       chalk.cyan(
-        `Debug: Found ${cleanupTargets.length} cleanup targets (${worktreeTargets} worktree+branch, ${branchOnlyTargets} branch-only)`,
+        `Debug: Found ${worktreeTargets + branchOnlyTargets} cleanup targets (${worktreeTargets} worktree+branch, ${branchOnlyTargets} branch-only)`,
       ),
     );
   }
+
+  return statuses;
+}
+
+/**
+ * マージ済みPRに関連するworktreeおよびローカルブランチのクリーンアップ候補を取得
+ * @returns {Promise<CleanupTarget[]>} クリーンアップ候補の配列
+ */
+export async function getMergedPRWorktrees(): Promise<CleanupTarget[]> {
+  const statuses = await getCleanupStatus();
+  const cleanupTargets = statuses
+    .filter((status) => status.reasons.length > 0)
+    .filter((status) => !isProtectedBranchName(status.branch))
+    .map((status) => {
+      const target: CleanupTarget = {
+        worktreePath: status.worktreePath,
+        branch: status.branch,
+        pullRequest: null,
+        hasUncommittedChanges: status.hasUncommittedChanges,
+        hasUnpushedCommits: status.hasUnpushedCommits,
+        cleanupType: status.cleanupType,
+        hasRemoteBranch: status.hasRemoteBranch,
+        reasons: status.reasons,
+      };
+      if (status.isAccessible !== undefined) {
+        target.isAccessible = status.isAccessible;
+      }
+      if (status.invalidReason) {
+        target.invalidReason = status.invalidReason;
+      }
+      return target;
+    });
 
   return cleanupTargets;
 }

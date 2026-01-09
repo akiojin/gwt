@@ -117,7 +117,7 @@ describe("_validateToolConfig", () => {
   });
 
   it("id重複がある場合、エラーをスロー", () => {
-    const tools = [
+    const _tools = [
       {
         id: "duplicate-id",
         displayName: "Tool 1",

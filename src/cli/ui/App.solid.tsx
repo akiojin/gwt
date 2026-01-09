@@ -1,6 +1,7 @@
 /** @jsxImportSource @opentui/solid */
 import { useKeyboard, useRenderer } from "@opentui/solid";
 import {
+  batch,
   createEffect,
   createMemo,
   createSignal,
@@ -11,6 +12,7 @@ import type {
   BranchItem,
   BranchInfo,
   CodingAgentId,
+  CleanupStatus,
   InferenceLevel,
   SelectedBranchState,
   Statistics,
@@ -34,11 +36,15 @@ import { LoadingIndicatorScreen } from "./screens/solid/LoadingIndicator.js";
 import { WorktreeCreateScreen } from "./screens/solid/WorktreeCreateScreen.js";
 import { InputScreen } from "./screens/solid/InputScreen.js";
 import { ConfirmScreen } from "./screens/solid/ConfirmScreen.js";
+import { useTerminalSize } from "./hooks/solid/useTerminalSize.js";
 import { EnvironmentScreen } from "./screens/solid/EnvironmentScreen.js";
 import { ProfileScreen } from "./screens/solid/ProfileScreen.js";
 import { ProfileEnvScreen } from "./screens/solid/ProfileEnvScreen.js";
 import { calculateStatistics } from "./utils/statisticsCalculator.js";
 import { formatBranchItems } from "./utils/branchFormatter.js";
+import { createLogger } from "../../logging/logger.js";
+
+const logger = createLogger({ category: "app" });
 import {
   getDefaultInferenceForModel,
   getDefaultModelOption,
@@ -53,13 +59,16 @@ import {
   getCurrentBranch,
   getLocalBranches,
   getRepositoryRoot,
+  deleteBranch,
 } from "../../git.js";
 import {
+  isProtectedBranchName,
+  getCleanupStatus,
   listAdditionalWorktrees,
+  removeWorktree,
   repairWorktrees,
   type WorktreeInfo as WorktreeEntry,
 } from "../../worktree.js";
-import { detectAllToolStatuses, type ToolStatus } from "../../utils/command.js";
 import {
   getConfig,
   getLastToolUsageMap,
@@ -72,10 +81,10 @@ import {
 } from "./utils/continueSession.js";
 import { getAllCodingAgents } from "../../config/tools.js";
 import {
-  buildLogFilePath,
+  clearLogFiles,
   getTodayLogDate,
-  readLogFileLines,
-  resolveLogDir,
+  readLogLinesForDate,
+  resolveLogTarget,
 } from "../../logging/reader.js";
 import { parseLogLines } from "../../logging/formatter.js";
 import { copyToClipboard } from "./utils/clipboard.js";
@@ -92,8 +101,12 @@ import {
   type ProfilesConfig,
 } from "../../types/profiles.js";
 import { BRANCH_PREFIXES } from "../../config/constants.js";
+import { prefetchAgentVersions } from "./utils/versionCache.js";
+import { getBunxAgentIds } from "./utils/versionFetcher.js";
 
 export type ExecutionMode = "normal" | "continue" | "resume";
+
+const UNSAFE_SELECTION_MESSAGE = "Unsafe branch selected. Select anyway?";
 
 export interface SelectionResult {
   branch: string;
@@ -108,6 +121,7 @@ export interface SelectionResult {
   model?: string | null;
   inferenceLevel?: InferenceLevel;
   sessionId?: string | null;
+  toolVersion?: string | null;
 }
 
 export type AppScreen =
@@ -129,6 +143,20 @@ export type AppScreen =
 
 type ProfileInputMode = "create-profile" | "add-env" | "edit-env";
 type ProfileConfirmMode = "delete-profile" | "delete-env";
+type StatusColor = "cyan" | "green" | "yellow" | "red";
+
+interface CleanupIndicator {
+  icon: string;
+  isSpinning?: boolean;
+  color?: StatusColor;
+}
+
+interface CleanupTask {
+  branch: string;
+  worktreePath: string | null;
+  cleanupType: "worktree-and-branch" | "branch-only";
+  isAccessible?: boolean;
+}
 
 export interface AppSolidProps {
   onExit?: (result?: SelectionResult) => void;
@@ -138,13 +166,59 @@ export interface AppSolidProps {
   workingDirectory?: string;
   branches?: BranchItem[];
   stats?: Statistics;
-  toolStatuses?: ToolStatus[];
 }
 
 const DEFAULT_SCREEN: AppScreen = "branch-list";
 
 const buildStats = (branches: BranchItem[]): Statistics =>
   calculateStatistics(branches);
+
+const applyCleanupStatus = (
+  items: BranchItem[],
+  statusByBranch: Map<string, CleanupStatus>,
+): BranchItem[] =>
+  items.map((branch) => {
+    const status = statusByBranch.get(branch.name);
+    if (!status) {
+      return { ...branch, safeToCleanup: false, isUnmerged: false };
+    }
+    const safeToCleanup =
+      status.hasUpstream && status.reasons.includes("no-diff-with-base");
+    const isUnmerged = status.hasUpstream && status.hasUniqueCommits;
+    const worktree = branch.worktree
+      ? {
+          ...branch.worktree,
+          ...(status.hasUncommittedChanges !== undefined
+            ? { hasUncommittedChanges: status.hasUncommittedChanges }
+            : {}),
+        }
+      : undefined;
+    const base: BranchItem = {
+      ...branch,
+      safeToCleanup,
+      isUnmerged,
+      hasUnpushedCommits: status.hasUnpushedCommits,
+    };
+    return worktree ? { ...base, worktree } : base;
+  });
+
+const buildCleanupSafetyPending = (items: BranchItem[]): Set<string> => {
+  const pending = new Set<string>();
+  for (const branch of items) {
+    if (branch.type === "remote") {
+      continue;
+    }
+    if (branch.worktree) {
+      pending.add(branch.name);
+      continue;
+    }
+    if (isProtectedBranchName(branch.name)) {
+      continue;
+    }
+    pending.add(branch.name);
+  }
+  return pending;
+};
 
 const toLocalBranchName = (name: string): string => {
   const segments = name.split("/");
@@ -167,24 +241,9 @@ const toSelectedBranchState = (branch: BranchItem): SelectedBranchState => {
   };
 };
 
-const _inferBranchCategory = (branchName: string): BranchItem["branchType"] => {
-  const normalized = branchName.replace(/^origin\//, "");
-  if (normalized === "main") return "main";
-  if (normalized === "develop") return "develop";
-  const prefix = normalized.split("/")[0] ?? "";
-  switch (prefix) {
-    case "feature":
-    case "bugfix":
-    case "hotfix":
-    case "release":
-      return prefix;
-    default:
-      return "other";
-  }
-};
-
 export function AppSolid(props: AppSolidProps) {
   const renderer = useRenderer();
+  const terminal = useTerminalSize();
   let hasExited = false;
 
   const exitApp = (result?: SelectionResult) => {
@@ -210,11 +269,11 @@ export function AppSolid(props: AppSolidProps) {
   const [loading, setLoading] = createSignal(!props.branches);
   const [error, setError] = createSignal<Error | null>(null);
 
+  // ブランチ一覧のカーソル位置（グローバル管理で再マウント時もリセットされない）
+  const [branchCursorPosition, setBranchCursorPosition] = createSignal(0);
+
   const [toolItems, setToolItems] = createSignal<SelectorItem[]>([]);
   const [toolError, setToolError] = createSignal<Error | null>(null);
-  const [toolStatuses, setToolStatuses] = createSignal<ToolStatus[]>(
-    props.toolStatuses ?? [],
-  );
 
   const [version, setVersion] = createSignal<string | null>(
     props.version ?? null,
@@ -231,12 +290,29 @@ export function AppSolid(props: AppSolidProps) {
   );
   const [selectedMode, setSelectedMode] = createSignal<ExecutionMode>("normal");
   const [selectedBranches, setSelectedBranches] = createSignal<string[]>([]);
+  const [unsafeSelectionConfirmVisible, setUnsafeSelectionConfirmVisible] =
+    createSignal(false);
+  const [unsafeConfirmInputLocked, setUnsafeConfirmInputLocked] =
+    createSignal(false);
+  const [unsafeSelectionTarget, setUnsafeSelectionTarget] = createSignal<
+    string | null
+  >(null);
   const [branchFooterMessage, setBranchFooterMessage] = createSignal<{
     text: string;
     isSpinning?: boolean;
-    color?: "cyan" | "green" | "yellow" | "red";
+    color?: StatusColor;
   } | null>(null);
   const [branchInputLocked, setBranchInputLocked] = createSignal(false);
+  const [cleanupIndicators, setCleanupIndicators] = createSignal<
+    Record<string, CleanupIndicator>
+  >({});
+  const [cleanupStatusByBranch, setCleanupStatusByBranch] = createSignal<
+    Map<string, CleanupStatus>
+  >(new Map());
+  const [cleanupSafetyLoading, setCleanupSafetyLoading] = createSignal(false);
+  const [cleanupSafetyPending, setCleanupSafetyPending] = createSignal<
+    Set<string>
+  >(new Set());
   const [isNewBranch, setIsNewBranch] = createSignal(false);
   const [newBranchBaseRef, setNewBranchBaseRef] = createSignal<string | null>(
     null,
@@ -250,6 +326,21 @@ export function AppSolid(props: AppSolidProps) {
     null,
   );
   const [defaultBaseBranch, setDefaultBaseBranch] = createSignal("main");
+
+  const suppressBranchInputOnce = () => {
+    setUnsafeConfirmInputLocked(true);
+    queueMicrotask(() => {
+      setUnsafeConfirmInputLocked(false);
+    });
+  };
+
+  const unsafeConfirmBoxWidth = createMemo(() => {
+    const columns = terminal().columns || 80;
+    return Math.max(1, Math.floor(columns * 0.6));
+  });
+  const unsafeConfirmContentWidth = createMemo(() =>
+    Math.max(0, unsafeConfirmBoxWidth() - 4),
+  );
 
   // セッション履歴（最終使用エージェントなど）
   const [sessionHistory, setSessionHistory] = createSignal<ToolSessionEntry[]>(
@@ -305,13 +396,17 @@ export function AppSolid(props: AppSolidProps) {
   const [logError, setLogError] = createSignal<string | null>(null);
   const [logSelectedEntry, setLogSelectedEntry] =
     createSignal<FormattedLogEntry | null>(null);
-  const [logSelectedDate, _setLogSelectedDate] = createSignal<string | null>(
+  const [logSelectedDate, setLogSelectedDate] = createSignal<string | null>(
     getTodayLogDate(),
   );
   const [logNotification, setLogNotification] = createSignal<{
     message: string;
     tone: "success" | "error";
   } | null>(null);
+  const [logTailEnabled, setLogTailEnabled] = createSignal(false);
+  const [logTargetBranch, setLogTargetBranch] = createSignal<BranchItem | null>(
+    null,
+  );
 
   const [profileItems, setProfileItems] = createSignal<
     { name: string; displayName?: string; isActive?: boolean }[]
@@ -342,7 +437,26 @@ export function AppSolid(props: AppSolidProps) {
   const [profileConfirmMode, setProfileConfirmMode] =
     createSignal<ProfileConfirmMode>("delete-profile");
 
-  const logDir = createMemo(() => resolveLogDir(workingDirectory()));
+  const logTarget = createMemo(() =>
+    resolveLogTarget(logTargetBranch(), workingDirectory()),
+  );
+  const logBranchLabel = createMemo(() => logTargetBranch()?.label ?? null);
+  const logSourceLabel = createMemo(() => {
+    const target = logTarget();
+    if (!target.sourcePath) {
+      return "(none)";
+    }
+    if (
+      target.reason === "current-working-directory" ||
+      target.reason === "working-directory"
+    ) {
+      return `${target.sourcePath} (cwd)`;
+    }
+    if (target.reason === "worktree-inaccessible") {
+      return `${target.sourcePath} (inaccessible)`;
+    }
+    return target.sourcePath;
+  });
   const selectedProfileConfig = createMemo(() => {
     const name = selectedProfileName();
     const config = profilesConfig();
@@ -366,7 +480,66 @@ export function AppSolid(props: AppSolidProps) {
       .map(([key, value]) => ({ key, value: String(value) }))
       .sort((a, b) => a.key.localeCompare(b.key)),
   );
+
+  let cleanupSafetyRequestId = 0;
+  const refreshCleanupSafety = async () => {
+    const requestId = ++cleanupSafetyRequestId;
+    const pendingBranches = buildCleanupSafetyPending(branchItems());
+    setCleanupSafetyPending(pendingBranches);
+    setCleanupSafetyLoading(pendingBranches.size > 0);
+    const statusByBranch = new Map<string, CleanupStatus>();
+    const applyProgress = (status: CleanupStatus) => {
+      if (requestId !== cleanupSafetyRequestId) {
+        return;
+      }
+      statusByBranch.set(status.branch, status);
+      batch(() => {
+        setCleanupStatusByBranch(new Map(statusByBranch));
+        setBranchItems((items) => applyCleanupStatus(items, statusByBranch));
+        setCleanupSafetyPending((prev) => {
+          if (!prev.has(status.branch)) {
+            return prev;
+          }
+          const next = new Set(prev);
+          next.delete(status.branch);
+          return next;
+        });
+      });
+    };
+    try {
+      const cleanupStatuses = await getCleanupStatus({
+        onProgress: applyProgress,
+      });
+      if (requestId !== cleanupSafetyRequestId) {
+        return;
+      }
+      if (cleanupStatuses.length > statusByBranch.size) {
+        cleanupStatuses.forEach((status) => {
+          if (!statusByBranch.has(status.branch)) {
+            applyProgress(status);
+          }
+        });
+      }
+    } catch (err) {
+      if (requestId !== cleanupSafetyRequestId) {
+        return;
+      }
+      logger.warn({ err }, "Failed to refresh cleanup safety indicators");
+      const empty = new Map<string, CleanupStatus>();
+      batch(() => {
+        setCleanupStatusByBranch(empty);
+        setBranchItems((items) => applyCleanupStatus(items, empty));
+      });
+    } finally {
+      if (requestId === cleanupSafetyRequestId) {
+        setCleanupSafetyLoading(false);
+        setCleanupSafetyPending(new Set<string>());
+      }
+    }
+  };
+
   let logNotificationTimer: ReturnType<typeof setTimeout> | null = null;
+  let logTailTimer: ReturnType<typeof setInterval> | null = null;
   let branchFooterTimer: ReturnType<typeof setTimeout> | null = null;
   const BRANCH_LOAD_TIMEOUT_MS = 3000;
   const BRANCH_FULL_LOAD_TIMEOUT_MS = 8000;
@@ -415,6 +588,17 @@ export function AppSolid(props: AppSolidProps) {
     }
     const previous = stack[stack.length - 1] ?? DEFAULT_SCREEN;
     setScreenStack(stack.slice(0, -1));
+
+    // branch-list に戻る場合は選択状態をリセット
+    if (previous === "branch-list") {
+      setSelectedBranch(null);
+      setSelectedTool(null);
+      setSelectedMode("normal");
+      setIsNewBranch(false);
+      setNewBranchBaseRef(null);
+      setCreationSource(null);
+    }
+
     setCurrentScreen(previous);
   };
 
@@ -439,15 +623,57 @@ export function AppSolid(props: AppSolidProps) {
     setLogLoading(true);
     setLogError(null);
     try {
-      const filePath = buildLogFilePath(logDir(), targetDate);
-      const lines = await readLogFileLines(filePath);
-      const parsed = parseLogLines(lines, { limit: 100 });
+      const target = logTarget();
+      if (!target.logDir) {
+        setLogEntries([]);
+        setLogSelectedDate(targetDate);
+        return;
+      }
+      const result = await readLogLinesForDate(target.logDir, targetDate);
+      if (!result) {
+        setLogEntries([]);
+        setLogSelectedDate(targetDate);
+        return;
+      }
+      setLogSelectedDate(result.date);
+      const parsed = parseLogLines(result.lines, { limit: 100 });
       setLogEntries(parsed);
     } catch (err) {
       setLogEntries([]);
       setLogError(err instanceof Error ? err.message : "Failed to load logs");
     } finally {
       setLogLoading(false);
+    }
+  };
+
+  const clearLogTailTimer = () => {
+    if (logTailTimer) {
+      clearInterval(logTailTimer);
+      logTailTimer = null;
+    }
+  };
+
+  const toggleLogTail = () => {
+    setLogTailEnabled((prev) => !prev);
+  };
+
+  const resetLogFiles = async () => {
+    const target = logTarget();
+    if (!target.logDir) {
+      showLogNotification("No logs available.", "error");
+      return;
+    }
+    try {
+      const cleared = await clearLogFiles(target.logDir);
+      if (cleared === 0) {
+        showLogNotification("No logs to reset.", "error");
+      } else {
+        showLogNotification("Logs cleared.", "success");
+      }
+      await loadLogEntries(logSelectedDate());
+    } catch (err) {
+      logger.warn({ err }, "Failed to clear log files");
+      showLogNotification("Failed to reset logs.", "error");
     }
   };
 
@@ -488,8 +714,13 @@ export function AppSolid(props: AppSolidProps) {
         worktrees,
         lastToolUsageMap,
       );
-      setBranchItems(initial.items);
-      setStats(buildStats(initial.items));
+      const initialItems = applyCleanupStatus(
+        initial.items,
+        cleanupStatusByBranch(),
+      );
+      setBranchItems(initialItems);
+      setStats(buildStats(initialItems));
+      void refreshCleanupSafety();
 
       void (async () => {
         const [branches, latestWorktrees] = await Promise.all([
@@ -508,8 +739,12 @@ export function AppSolid(props: AppSolidProps) {
           latestWorktrees,
           lastToolUsageMap,
         );
-        setBranchItems(full.items);
-        setStats(buildStats(full.items));
+        const fullItems = applyCleanupStatus(
+          full.items,
+          cleanupStatusByBranch(),
+        );
+        setBranchItems(fullItems);
+        setStats(buildStats(fullItems));
       })();
     } catch (err) {
       setError(err instanceof Error ? err : new Error(String(err)));
@@ -543,8 +778,10 @@ export function AppSolid(props: AppSolidProps) {
 
   createEffect(() => {
     if (props.branches) {
-      setBranchItems(props.branches);
-      setStats(props.stats ?? buildStats(props.branches));
+      const statusByBranch = cleanupStatusByBranch();
+      const nextItems = applyCleanupStatus(props.branches, statusByBranch);
+      setBranchItems(nextItems);
+      setStats(props.stats ?? buildStats(nextItems));
       setLoading(false);
     }
   });
@@ -556,18 +793,16 @@ export function AppSolid(props: AppSolidProps) {
   });
 
   onMount(() => {
-    if (props.version === undefined) {
-      void getPackageVersion()
-        .then((value) => setVersion(value ?? null))
-        .catch(() => setVersion(null));
+    if (props.branches) {
+      void refreshCleanupSafety();
     }
   });
 
   onMount(() => {
-    if (!props.toolStatuses) {
-      void detectAllToolStatuses()
-        .then((statuses) => setToolStatuses(statuses))
-        .catch(() => setToolStatuses([]));
+    if (props.version === undefined) {
+      void getPackageVersion()
+        .then((value) => setVersion(value ?? null))
+        .catch(() => setVersion(null));
     }
   });
 
@@ -609,16 +844,37 @@ export function AppSolid(props: AppSolidProps) {
       });
   });
 
+  // FR-028: Prefetch npm versions for all bunx-type agents at startup (background)
+  onMount(() => {
+    const bunxAgentIds = getBunxAgentIds();
+    void prefetchAgentVersions(bunxAgentIds).catch(() => {
+      // Silently handle errors - cache will return null and UI will show "latest" only
+    });
+  });
+
   createEffect(() => {
     if (currentScreen() === "log-list") {
+      logTarget();
       void loadLogEntries(logSelectedDate());
     }
+  });
+
+  createEffect(() => {
+    if (currentScreen() !== "log-list" || !logTailEnabled()) {
+      clearLogTailTimer();
+      return;
+    }
+    clearLogTailTimer();
+    logTailTimer = setInterval(() => {
+      void loadLogEntries(logSelectedDate());
+    }, 1500);
   });
 
   onCleanup(() => {
     if (logNotificationTimer) {
       clearTimeout(logNotificationTimer);
     }
+    clearLogTailTimer();
     if (branchFooterTimer) {
       clearTimeout(branchFooterTimer);
     }
@@ -626,7 +882,7 @@ export function AppSolid(props: AppSolidProps) {
 
   const showBranchFooterMessage = (
     text: string,
-    color: "cyan" | "green" | "yellow" | "red",
+    color: StatusColor,
     options?: { spinning?: boolean; timeoutMs?: number },
   ) => {
     if (branchFooterTimer) {
@@ -644,6 +900,21 @@ export function AppSolid(props: AppSolidProps) {
         setBranchFooterMessage(null);
       }, timeout);
     }
+  };
+
+  const setCleanupIndicator = (
+    branchName: string,
+    indicator: CleanupIndicator | null,
+  ) => {
+    setCleanupIndicators((prev) => {
+      const next = { ...prev };
+      if (indicator) {
+        next[branchName] = indicator;
+      } else {
+        delete next[branchName];
+      }
+      return next;
+    });
   };
 
   const handleBranchSelect = (branch: BranchItem) => {
@@ -711,6 +982,9 @@ export function AppSolid(props: AppSolidProps) {
       ...(result.reasoningLevel !== undefined
         ? { inferenceLevel: result.reasoningLevel }
         : {}),
+      ...(result.toolVersion !== undefined
+        ? { toolVersion: result.toolVersion }
+        : {}),
     });
   };
 
@@ -746,6 +1020,9 @@ export function AppSolid(props: AppSolidProps) {
         ? { inferenceLevel: entry.reasoningLevel as InferenceLevel }
         : {}),
       ...(entry.sessionId ? { sessionId: entry.sessionId } : {}),
+      ...(entry.toolVersion !== undefined
+        ? { toolVersion: entry.toolVersion }
+        : {}),
     });
   };
 
@@ -775,15 +1052,210 @@ export function AppSolid(props: AppSolidProps) {
       ...(entry.reasoningLevel
         ? { inferenceLevel: entry.reasoningLevel as InferenceLevel }
         : {}),
+      ...(entry.toolVersion !== undefined
+        ? { toolVersion: entry.toolVersion }
+        : {}),
     });
+  };
+
+  const buildSkipNotice = (
+    skip: {
+      unsafe: number;
+      protected: number;
+      remote: number;
+      current: number;
+    },
+    unsafeLabel: string,
+  ): string | null => {
+    const parts: string[] = [];
+    if (skip.unsafe > 0) {
+      parts.push(`${skip.unsafe} ${unsafeLabel}`);
+    }
+    if (skip.protected > 0) {
+      parts.push(`${skip.protected} protected`);
+    }
+    if (skip.remote > 0) {
+      parts.push(`${skip.remote} remote-only`);
+    }
+    if (skip.current > 0) {
+      parts.push(`${skip.current} current`);
+    }
+    if (parts.length === 0) {
+      return null;
+    }
+    return `Skipped branches: ${parts.join(", ")}.`;
+  };
+
+  const handleCleanupCommand = async () => {
+    if (branchInputLocked()) {
+      return;
+    }
+
+    const selection = selectedBranches();
+    const hasSelection = selection.length > 0;
+    const skipCounts = {
+      unsafe: 0,
+      protected: 0,
+      remote: 0,
+      current: 0,
+    };
+
+    setBranchInputLocked(true);
+    setCleanupIndicators({});
+    showBranchFooterMessage(
+      hasSelection
+        ? "Preparing cleanup..."
+        : "Scanning for cleanup candidates...",
+      "yellow",
+      { spinning: true, timeoutMs: 0 },
+    );
+
+    try {
+      const tasks: CleanupTask[] = [];
+
+      if (hasSelection) {
+        const branchMap = new Map(
+          branchItems().map((branch) => [branch.name, branch]),
+        );
+        for (const branchName of selection) {
+          const branch = branchMap.get(branchName);
+          if (!branch) {
+            continue;
+          }
+          if (branch.type === "remote") {
+            skipCounts.remote += 1;
+            continue;
+          }
+          if (branch.isCurrent) {
+            skipCounts.current += 1;
+            continue;
+          }
+          const worktreePath = branch.worktree?.path ?? null;
+          const cleanupType: CleanupTask["cleanupType"] = worktreePath
+            ? "worktree-and-branch"
+            : "branch-only";
+          const baseTask = {
+            branch: branch.name,
+            worktreePath,
+            cleanupType,
+          };
+          const isAccessible = branch.worktree?.isAccessible;
+          tasks.push(
+            isAccessible === undefined
+              ? baseTask
+              : { ...baseTask, isAccessible },
+          );
+        }
+      } else {
+        // FR-028: 選択が0件の場合は警告を表示して処理をスキップ
+        setBranchInputLocked(false);
+        showBranchFooterMessage("No branches selected.", "yellow");
+        return;
+      }
+
+      const skipNotice = buildSkipNotice(
+        skipCounts,
+        hasSelection
+          ? "unsafe (uncommitted/unpushed, unmerged, or missing upstream)"
+          : "with uncommitted or unpushed changes",
+      );
+
+      if (tasks.length === 0) {
+        const baseMessage = hasSelection
+          ? "No eligible branches selected for cleanup."
+          : "No cleanup candidates found.";
+        showBranchFooterMessage(
+          skipNotice ? `${baseMessage} ${skipNotice}` : baseMessage,
+          "yellow",
+        );
+        return;
+      }
+
+      setCleanupIndicators(() => {
+        const next: Record<string, CleanupIndicator> = {};
+        tasks.forEach((task) => {
+          next[task.branch] = {
+            icon: "-",
+            isSpinning: true,
+            color: "yellow",
+          };
+        });
+        return next;
+      });
+
+      showBranchFooterMessage(
+        `Cleaning up ${tasks.length} branch(es)...`,
+        "yellow",
+        { spinning: true, timeoutMs: 0 },
+      );
+
+      let successCount = 0;
+      let failedCount = 0;
+
+      for (const task of tasks) {
+        try {
+          if (task.cleanupType === "worktree-and-branch" && task.worktreePath) {
+            await removeWorktree(
+              task.worktreePath,
+              task.isAccessible === false,
+            );
+          }
+          await deleteBranch(task.branch, true);
+          setCleanupIndicator(task.branch, { icon: "v", color: "green" });
+          successCount += 1;
+        } catch {
+          setCleanupIndicator(task.branch, { icon: "x", color: "red" });
+          failedCount += 1;
+        }
+      }
+
+      setSelectedBranches([]);
+      await refreshBranches();
+
+      const skippedTotal =
+        skipCounts.unsafe +
+        skipCounts.protected +
+        skipCounts.remote +
+        skipCounts.current;
+      const summaryParts = [`${successCount} cleaned`];
+      if (failedCount > 0) {
+        summaryParts.push(`${failedCount} failed`);
+      }
+      if (skippedTotal > 0) {
+        summaryParts.push(`${skippedTotal} skipped`);
+      }
+      const summary = `Cleanup finished: ${summaryParts.join(", ")}.`;
+      const message = skipNotice ? `${summary} ${skipNotice}` : summary;
+      showBranchFooterMessage(message, failedCount > 0 ? "red" : "green");
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      showBranchFooterMessage(`Cleanup failed: ${errorMessage}`, "red");
+    } finally {
+      setBranchInputLocked(false);
+    }
   };
 
   const handleRepairWorktrees = async () => {
     if (branchInputLocked()) {
       return;
     }
+
+    // FR-002/FR-007: 選択済みブランチのみを対象とする
+    const selection = selectedBranches();
+    if (selection.length === 0) {
+      showBranchFooterMessage("No branches selected.", "yellow");
+      return;
+    }
+
+    // 選択されたローカルブランチのうち、Worktreeを持つものを修復対象とする
+    const selectionSet = new Set(selection);
     const targets = branchItems()
-      .filter((branch) => branch.worktreeStatus === "inaccessible")
+      .filter(
+        (branch) =>
+          selectionSet.has(branch.name) &&
+          branch.type !== "remote" &&
+          branch.worktreeStatus !== undefined,
+      )
       .map((branch) => branch.name);
 
     if (targets.length === 0) {
@@ -799,6 +1271,15 @@ export function AppSolid(props: AppSolidProps) {
     try {
       const result = await repairWorktrees(targets);
       await refreshBranches();
+
+      // エラー詳細をログに出力
+      if (result.failedCount > 0) {
+        logger.error(
+          { failures: result.failures, targets },
+          "Worktree repair failed for some branches",
+        );
+      }
+
       const message =
         result.failedCount > 0
           ? `Repair finished: ${result.repairedCount} repaired, ${result.failedCount} failed.`
@@ -811,6 +1292,7 @@ export function AppSolid(props: AppSolidProps) {
       );
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
+      logger.error({ error: err, targets }, "Worktree repair threw an error");
       showBranchFooterMessage(`Repair failed: ${errorMessage}`, "red");
     } finally {
       setBranchInputLocked(false);
@@ -1024,15 +1506,51 @@ export function AppSolid(props: AppSolidProps) {
   };
 
   const toggleSelectedBranch = (branchName: string) => {
-    setSelectedBranches((prev) => {
-      const next = new Set(prev);
-      if (next.has(branchName)) {
-        next.delete(branchName);
-      } else {
-        next.add(branchName);
-      }
-      return Array.from(next);
-    });
+    if (unsafeSelectionConfirmVisible()) {
+      return;
+    }
+    const currentSelection = new Set(selectedBranches());
+    if (currentSelection.has(branchName)) {
+      currentSelection.delete(branchName);
+      setSelectedBranches(Array.from(currentSelection));
+      return;
+    }
+
+    const branch = branchItems().find((item) => item.name === branchName);
+    const pending = cleanupSafetyPending();
+    const hasSafetyPending = pending.has(branchName);
+    const hasUncommitted = branch?.worktree?.hasUncommittedChanges === true;
+    const hasUnpushed = branch?.hasUnpushedCommits === true;
+    const isUnmerged = branch?.isUnmerged === true;
+    const safeToCleanup = branch?.safeToCleanup === true;
+    const isRemoteBranch = branch?.type === "remote";
+    const isUnsafe =
+      Boolean(branch) &&
+      !isRemoteBranch &&
+      !hasSafetyPending &&
+      (hasUncommitted || hasUnpushed || isUnmerged || !safeToCleanup);
+
+    if (branch && isUnsafe) {
+      setUnsafeSelectionTarget(branch.name);
+      setUnsafeSelectionConfirmVisible(true);
+      return;
+    }
+
+    currentSelection.add(branchName);
+    setSelectedBranches(Array.from(currentSelection));
+  };
+
+  const confirmUnsafeSelection = (confirmed: boolean) => {
+    suppressBranchInputOnce();
+    const target = unsafeSelectionTarget();
+    setUnsafeSelectionConfirmVisible(false);
+    setUnsafeSelectionTarget(null);
+    if (!confirmed || !target) {
+      return;
+    }
+    setSelectedBranches((prev) =>
+      prev.includes(target) ? prev : [...prev, target],
+    );
   };
 
   const handleToolSelect = (item: SelectorItem) => {
@@ -1084,9 +1602,11 @@ export function AppSolid(props: AppSolidProps) {
 
     if (screen === "branch-list") {
       const cleanupUI = {
-        indicators: {},
+        indicators: cleanupIndicators(),
         footerMessage: branchFooterMessage(),
-        inputLocked: branchInputLocked(),
+        inputLocked: branchInputLocked() || unsafeConfirmInputLocked(),
+        safetyLoading: cleanupSafetyLoading(),
+        safetyPendingBranches: cleanupSafetyPending(),
       };
       return (
         <BranchListScreen
@@ -1094,6 +1614,7 @@ export function AppSolid(props: AppSolidProps) {
           stats={stats()}
           onSelect={handleBranchSelect}
           onQuit={() => exitApp(undefined)}
+          onCleanupCommand={handleCleanupCommand}
           onRefresh={refreshBranches}
           onRepairWorktrees={handleRepairWorktrees}
           loading={loading()}
@@ -1102,9 +1623,14 @@ export function AppSolid(props: AppSolidProps) {
           lastUpdated={stats().lastUpdated}
           version={version()}
           workingDirectory={workingDirectory()}
-          toolStatuses={toolStatuses()}
           activeProfile={activeProfile()}
-          onOpenLogs={() => navigateTo("log-list")}
+          onOpenLogs={(branch) => {
+            setLogTargetBranch(branch);
+            setLogSelectedEntry(null);
+            setLogSelectedDate(getTodayLogDate());
+            setLogTailEnabled(false);
+            navigateTo("log-list");
+          }}
           onOpenProfiles={() => navigateTo("profile")}
           selectedBranches={selectedBranches()}
           onToggleSelect={toggleSelectedBranch}
@@ -1112,6 +1638,9 @@ export function AppSolid(props: AppSolidProps) {
           cleanupUI={cleanupUI}
           helpVisible={helpVisible()}
           wizardVisible={wizardVisible()}
+          confirmVisible={unsafeSelectionConfirmVisible()}
+          cursorPosition={branchCursorPosition()}
+          onCursorPositionChange={setBranchCursorPosition}
         />
       );
     }
@@ -1187,9 +1716,15 @@ export function AppSolid(props: AppSolidProps) {
               showLogNotification("Failed to copy to clipboard.", "error");
             }
           }}
+          onReload={() => void loadLogEntries(logSelectedDate())}
+          onToggleTail={toggleLogTail}
+          onReset={() => void resetLogFiles()}
           notification={logNotification()}
           version={version()}
           selectedDate={logSelectedDate()}
+          branchLabel={logBranchLabel()}
+          sourceLabel={logSourceLabel()}
+          tailing={logTailEnabled()}
           helpVisible={helpVisible()}
         />
       );
@@ -1456,6 +1991,30 @@ export function AppSolid(props: AppSolidProps) {
   return (
     <>
       {renderCurrentScreen()}
+      {unsafeSelectionConfirmVisible() && (
+        <box
+          position="absolute"
+          top="30%"
+          left="20%"
+          width={unsafeConfirmBoxWidth()}
+          zIndex={110}
+          border
+          borderStyle="single"
+          borderColor="yellow"
+          backgroundColor="black"
+          padding={1}
+        >
+          <ConfirmScreen
+            message={UNSAFE_SELECTION_MESSAGE}
+            onConfirm={confirmUnsafeSelection}
+            yesLabel="OK"
+            noLabel="Cancel"
+            defaultNo
+            helpVisible={helpVisible()}
+            width={unsafeConfirmContentWidth()}
+          />
+        </box>
+      )}
       <HelpOverlay visible={helpVisible()} context={currentScreen()} />
       {/* FR-044: ウィザードポップアップをレイヤー表示 */}
       <WizardController

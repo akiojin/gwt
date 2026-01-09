@@ -100,7 +100,7 @@ describe("launchGeminiCLI", () => {
   });
 
   describe("基本起動テスト", () => {
-    it("T001: bunx経由で正常に起動できる", async () => {
+    it("T001: installed未検出時はlatestへフォールバックして起動できる", async () => {
       // Mock findCommand to return bunx fallback (gemini not installed)
       mockFindCommand.mockResolvedValue({
         available: true,
@@ -115,7 +115,7 @@ describe("launchGeminiCLI", () => {
         exitCode: 0,
       });
 
-      await launchGeminiCLI("/test/path");
+      await launchGeminiCLI("/test/path", { version: "installed" });
 
       // findCommand should be called for gemini
       expect(mockFindCommand).toHaveBeenCalledWith("gemini");
@@ -134,7 +134,9 @@ describe("launchGeminiCLI", () => {
 
       // Verify fallback message
       expect(consoleLogSpy).toHaveBeenCalledWith(
-        expect.stringContaining("Falling back to bunx"),
+        expect.stringContaining(
+          "Installed gemini command not found. Falling back to latest.",
+        ),
       );
     });
 
@@ -153,7 +155,7 @@ describe("launchGeminiCLI", () => {
         exitCode: 0,
       });
 
-      await launchGeminiCLI("/test/path");
+      await launchGeminiCLI("/test/path", { version: "installed" });
 
       // findCommand should be called for gemini
       expect(mockFindCommand).toHaveBeenCalledWith("gemini");

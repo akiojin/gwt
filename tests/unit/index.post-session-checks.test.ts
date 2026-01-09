@@ -113,6 +113,7 @@ mock.module("../../src/worktree.js", () => ({
   listAdditionalWorktrees: mock(async () => []),
   generateWorktreePath: mock(async () => "/repo/.worktrees/feature"),
   createWorktree: mock(async () => undefined),
+  repairWorktreePath: mock(async () => null),
   WorktreeError: class WorktreeError extends Error {
     constructor(
       message: string,
@@ -210,6 +211,8 @@ beforeEach(async () => {
   pushBranchToRemoteMock.mockClear();
   confirmYesNoMock.mockClear();
   waitForEnterMock.mockClear();
+  waitForUserAcknowledgementMock.mockClear();
+  writeTerminalLineMock.mockClear();
   resolveWorktreePathForBranchMock.mockClear();
   waitForUserAcknowledgementMock.mockReset();
   writeTerminalMock.mockReset();
@@ -224,6 +227,7 @@ beforeEach(async () => {
   getUnpushedCommitsCountMock.mockResolvedValue(0);
   confirmYesNoMock.mockResolvedValue(false);
   resolveWorktreePathForBranchMock.mockResolvedValue({ path: null });
+  waitForUserAcknowledgementMock.mockResolvedValue(undefined);
 
   ({ handleAIToolWorkflow } = await import("../../src/index.js"));
 });

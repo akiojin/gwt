@@ -10,7 +10,8 @@ const bundlePath = resolve(
 
 describe("Dist bundle integrity", () => {
   it("reflects BranchList cleanup UI implementation", async () => {
-    await access(bundlePath, constants.F_OK);
+    // Check file exists - access() resolves to undefined/null on success
+    await expect(access(bundlePath, constants.F_OK)).resolves.toBeFalsy();
 
     const content = await readFile(bundlePath, "utf8");
 
