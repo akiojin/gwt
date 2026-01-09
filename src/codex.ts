@@ -204,7 +204,17 @@ export async function launchCodexCLI(
 
     // Determine execution strategy based on version selection
     // FR-063b: "installed" option only appears when local command exists
-    const selectedVersion = options.version ?? "latest";
+    const requestedVersion = options.version ?? "latest";
+    let selectedVersion = requestedVersion;
+
+    if (requestedVersion === "installed" && !codexLookup.path) {
+      writeTerminalLine(
+        chalk.yellow(
+          "   ⚠️  Installed codex command not found. Falling back to latest.",
+        ),
+      );
+      selectedVersion = "latest";
+    }
 
     // Log version information (FR-072)
     if (selectedVersion === "installed") {

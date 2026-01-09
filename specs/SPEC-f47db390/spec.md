@@ -121,6 +121,7 @@
 - **FR-016**: `ToolSessionEntry`に`toolVersion`フィールド（オプショナル）を追加し、使用したエージェントのバージョンを保存しなければならない。後方互換のため`null`/未定義も許容するが、起動時は`latest`として解釈する。
 - **FR-017**: ブランチ一覧のツール表示を`ToolName@X.Y.Z | YYYY-MM-DD HH:mm`形式で表示しなければならない。バージョン情報がない場合は`ToolName@latest | YYYY-MM-DD HH:mm`形式で表示する。
 - **FR-018**: 保存済み履歴に`toolVersion`が無い（null/未定義/空）場合、起動時は`latest`を選択し、次回保存時には`toolVersion`を`latest`として保存しなければならない。
+- **FR-019**: `toolVersion`が`installed`でもローカルコマンドが見つからない場合は`latest`へフォールバックし、bunxで起動しなければならない。
 
 ### 主要エンティティ
 - **SessionData**: `lastWorktreePath`, `lastBranch`, `lastUsedTool`, `mode`, `model`, 追加で `lastSessionId` を持つ。履歴`history[]`に`sessionId`/`toolId`/`branch`/`timestamp`を保持。
