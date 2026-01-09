@@ -12,6 +12,7 @@ export interface ConfirmScreenProps {
   noLabel?: string;
   defaultNo?: boolean;
   helpVisible?: boolean;
+  width?: number;
 }
 
 export function ConfirmScreen({
@@ -21,9 +22,11 @@ export function ConfirmScreen({
   noLabel = "No",
   defaultNo = false,
   helpVisible = false,
+  width,
 }: ConfirmScreenProps) {
   const [selectedIndex, setSelectedIndex] = createSignal(defaultNo ? 1 : 0);
   const terminal = useTerminalSize();
+  const contentWidth = () => Math.max(0, width ?? terminal().columns);
 
   const padLine = (value: string, width: number) => {
     const padding = Math.max(0, width - stringWidth(value));
@@ -65,7 +68,7 @@ export function ConfirmScreen({
   const renderOption = (label: string, isSelected: boolean) =>
     isSelected ? (
       <text fg={selectionStyle.fg} bg={selectionStyle.bg}>
-        {padLine(label, terminal().columns)}
+        {padLine(label, contentWidth())}
       </text>
     ) : (
       <text>{label}</text>

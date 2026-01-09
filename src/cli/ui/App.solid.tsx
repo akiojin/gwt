@@ -36,6 +36,7 @@ import { LoadingIndicatorScreen } from "./screens/solid/LoadingIndicator.js";
 import { WorktreeCreateScreen } from "./screens/solid/WorktreeCreateScreen.js";
 import { InputScreen } from "./screens/solid/InputScreen.js";
 import { ConfirmScreen } from "./screens/solid/ConfirmScreen.js";
+import { useTerminalSize } from "./hooks/solid/useTerminalSize.js";
 import { EnvironmentScreen } from "./screens/solid/EnvironmentScreen.js";
 import { ProfileScreen } from "./screens/solid/ProfileScreen.js";
 import { ProfileEnvScreen } from "./screens/solid/ProfileEnvScreen.js";
@@ -235,6 +236,7 @@ const toSelectedBranchState = (branch: BranchItem): SelectedBranchState => {
 
 export function AppSolid(props: AppSolidProps) {
   const renderer = useRenderer();
+  const terminal = useTerminalSize();
   let hasExited = false;
 
   const exitApp = (result?: SelectionResult) => {
@@ -315,6 +317,14 @@ export function AppSolid(props: AppSolidProps) {
     null,
   );
   const [defaultBaseBranch, setDefaultBaseBranch] = createSignal("main");
+
+  const unsafeConfirmBoxWidth = createMemo(() => {
+    const columns = terminal().columns || 80;
+    return Math.max(1, Math.floor(columns * 0.6));
+  });
+  const unsafeConfirmContentWidth = createMemo(() =>
+    Math.max(0, unsafeConfirmBoxWidth() - 4),
+  );
 
   // セッション履歴（最終使用エージェントなど）
   const [sessionHistory, setSessionHistory] = createSignal<ToolSessionEntry[]>(
@@ -1923,7 +1933,7 @@ export function AppSolid(props: AppSolidProps) {
           position="absolute"
           top="30%"
           left="20%"
-          width="60%"
+          width={unsafeConfirmBoxWidth()}
           zIndex={110}
           border
           borderStyle="single"
@@ -1938,6 +1948,7 @@ export function AppSolid(props: AppSolidProps) {
             noLabel="Cancel"
             defaultNo
             helpVisible={helpVisible()}
+            width={unsafeConfirmContentWidth()}
           />
         </box>
       )}

@@ -183,6 +183,25 @@
 
 - [x] **T994** [US4] `src/cli/ui/screens/solid/BranchListScreen.tsx` に凡例行を表示
 
+## フェーズ14: ユーザーストーリー4 - unsafe警告ダイアログの反転範囲修正 (優先度: P2)
+
+**ストーリー**: unsafe選択の警告ダイアログで OK/Cancel の反転表示が枠外に広がらないようにする。
+
+**価値**: 画面の視認性を保ち、ダイアログの境界が明確になる。
+
+### 仕様更新
+
+- [x] **T995** [P] [共通] `specs/SPEC-d2f4762a/spec.md` に反転範囲の要件を追記
+- [x] **T996** [P] [共通] `specs/SPEC-d2f4762a/plan.md` に反転範囲の方針を追記
+
+### テスト（TDD）
+
+- [x] **T997** [US4] `src/cli/ui/__tests__/solid/ConfirmScreen.test.tsx` に反転範囲がダイアログ幅に収まるテストを追加
+
+### 実装
+
+- [x] **T998** [US4] `src/cli/ui/screens/solid/ConfirmScreen.tsx` と `src/cli/ui/App.solid.tsx` を更新し、ダイアログ内幅で反転表示する
+
 ## フェーズ7: ユーザーストーリー7 - 選択中Worktreeフルパス表示 (優先度: P2)
 
 **ストーリー**: ブランチ一覧のフッター直上に、選択中ブランチのWorktreeフルパスを表示する。Worktreeが存在しないが現在ブランチの場合は起動時の作業ディレクトリを表示し、ブランチ一覧が空の場合は`Worktree: (none)`を表示する。
