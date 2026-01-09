@@ -9,7 +9,10 @@ import { execa } from "execa";
 import chalk from "chalk";
 import type { CodingAgent, CodingAgentLaunchOptions } from "./types/tools.js";
 import { createLogger } from "./logging/logger.js";
-import { resolveVersionSuffix } from "./utils/npmRegistry.js";
+import {
+  parsePackageCommand,
+  resolveVersionSuffix,
+} from "./utils/npmRegistry.js";
 import { writeTerminalLine } from "./utils/terminal.js";
 
 const logger = createLogger({ category: "launcher" });
@@ -154,9 +157,12 @@ export async function launchCodingAgent(
     case "bunx": {
       // bunx経由でパッケージ実行
       // バージョン指定がある場合はパッケージ名に付与
-      const selectedVersion = options.version ?? "installed";
-      const versionSuffix = resolveVersionSuffix(options.version);
-      const packageWithVersion = `${agent.command}${versionSuffix}`;
+      const { packageName, version: embeddedVersion } = parsePackageCommand(
+        agent.command,
+      );
+      const selectedVersion = options.version ?? embeddedVersion ?? "latest";
+      const versionSuffix = resolveVersionSuffix(selectedVersion);
+      const packageWithVersion = `${packageName}${versionSuffix}`;
 
       // FR-072: Log version information
       if (selectedVersion === "installed") {

@@ -263,7 +263,7 @@ export async function launchClaudeCode(
 
     // Determine execution strategy based on version selection
     // FR-063b: "installed" option only appears when local command exists
-    const selectedVersion = options.version ?? "installed";
+    const selectedVersion = options.version ?? "latest";
 
     // Log version information (FR-072)
     if (selectedVersion === "installed") {
