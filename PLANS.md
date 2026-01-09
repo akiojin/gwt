@@ -30,7 +30,10 @@
 - [x] Run build:opentui
 - [x] Run dist bundle integrity test
 
-## Pending
-- [ ] Re-run full unit suite (still stalls after utils/session.test.ts with maxConcurrency=1)
-- [ ] Identify open handles or lingering mocks causing utils/session stall in full run
-- [ ] Prepare PR summary once tests are green
+## Mock isolation fix
+- [x] Replace mock.restore() with mockReset() in test files to preserve module mocks
+- [x] Fix gemini.test.ts to reset resetTerminalModes mock in beforeEach
+- [x] Fix consoleLogSpy restoration in gemini.test.ts
+
+## Remaining issues (for follow-up)
+- [ ] Full test suite may still experience timing issues in CI - investigate if needed
