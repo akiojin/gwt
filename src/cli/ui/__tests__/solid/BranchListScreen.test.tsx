@@ -103,7 +103,7 @@ describe("BranchListScreen icons", () => {
 
     try {
       const frame = testSetup.captureCharFrame();
-      expect(frame).toMatch(/\[\*\] w {2,}feature\/active-clean/);
+      expect(frame).toMatch(/\[\*\] w o feature\/active-clean/);
       expect(frame).toContain("[ ] . ! feature/no-worktree");
       expect(frame).not.toContain(">[*]");
       expect(frame).not.toContain(">[ ]");
@@ -112,7 +112,7 @@ describe("BranchListScreen icons", () => {
     }
   });
 
-  it("shows spinner during safety checks and blank icon for remote branches", async () => {
+  it("shows spinner for pending safety checks and blank icon for remote branches", async () => {
     const branches = [
       createBranch({
         name: "feature/loading",
@@ -146,7 +146,7 @@ describe("BranchListScreen icons", () => {
         indicators: {},
         footerMessage: null,
         inputLocked: false,
-        safetyLoading: true,
+        safetyPendingBranches: new Set(["feature/loading"]),
       },
     });
 
