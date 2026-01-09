@@ -888,11 +888,10 @@ async function getOrphanedLocalBranchStatuses({
           localBranch.name,
           repoRoot,
         );
-        const comparisonBase = upstream ?? baseBranch;
 
         const hasUniqueCommits = await branchHasUniqueCommitsComparedToBase(
           localBranch.name,
-          comparisonBase,
+          baseBranch,
           repoRoot,
         );
 
@@ -1012,11 +1011,10 @@ export async function getCleanupStatus({
       worktree.branch,
       repoRoot,
     );
-    const comparisonBase = upstream ?? baseBranch;
 
     const hasUniqueCommits = await branchHasUniqueCommitsComparedToBase(
       worktree.branch,
-      comparisonBase,
+      baseBranch,
       repoRoot,
     );
 

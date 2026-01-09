@@ -299,7 +299,17 @@ export async function launchClaudeCode(
 
     // Determine execution strategy based on version selection
     // FR-063b: "installed" option only appears when local command exists
-    const selectedVersion = options.version ?? "installed";
+    const requestedVersion = options.version ?? "latest";
+    let selectedVersion = requestedVersion;
+
+    if (requestedVersion === "installed" && !claudeLookup.path) {
+      writeTerminalLine(
+        chalk.yellow(
+          "   ⚠️  Installed claude command not found. Falling back to latest.",
+        ),
+      );
+      selectedVersion = "latest";
+    }
 
     // Log version information (FR-072)
     if (selectedVersion === "installed") {
