@@ -58,4 +58,18 @@ jobs:
         run: bun install
 
       - name: Validate commit messages (PR commits)
-        run: bunx commitlint --from "${{ github.event.pull_request.base.sha }}" --to "${{ github.event.pull_request.head.sha }}" --verbose
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # Count commits in PR
+          COMMIT_COUNT=$(git rev-list --count "$BASE_SHA".."$HEAD_SHA")
+          echo "Total commits in PR: $COMMIT_COUNT"
+
+          # If too many commits (merged history), check only recent commits
+          if [ "$COMMIT_COUNT" -gt 100 ]; then
+            echo "Large commit count detected, checking last 50 commits only"
+            bunx commitlint --from "HEAD~50" --to "HEAD" --verbose
+          else
+            bunx commitlint --from "$BASE_SHA" --to "$HEAD_SHA" --verbose
+          fi
