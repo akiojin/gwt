@@ -184,11 +184,11 @@ describe("LogScreen", () => {
     }
   });
 
-  it("triggers reload/tail and toggles wrap", async () => {
+  it("triggers reload/tail and truncates long lines", async () => {
     const onReload = mock();
     const onToggleTail = mock();
     const longMessage =
-      "this-is-a-very-long-log-line-that-should-be-truncated-when-wrap-is-off";
+      "this-is-a-very-long-log-line-that-should-be-truncated-with-ellipsis";
     const entries = [
       makeEntry(longMessage, {
         id: "1",
@@ -223,10 +223,9 @@ describe("LogScreen", () => {
       await testSetup.renderOnce();
       expect(onToggleTail).toHaveBeenCalledTimes(1);
 
-      await testSetup.mockInput.typeText("w");
-      await testSetup.renderOnce();
       const frame = testSetup.captureCharFrame();
       expect(frame).toContain("...");
+      expect(frame).not.toContain("Wrap:");
     } finally {
       testSetup.renderer.destroy();
     }

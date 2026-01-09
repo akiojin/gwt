@@ -163,7 +163,6 @@ export function LogScreen(props: LogScreenProps) {
   const terminal = useTerminalSize();
   const [filterQuery, setFilterQuery] = createSignal("");
   const [filterMode, setFilterMode] = createSignal(false);
-  const [wrapEnabled, setWrapEnabled] = createSignal(true);
   const [levelMode, setLevelMode] = createSignal<LevelMode>("ALL");
 
   const filteredEntries = createMemo(() => {
@@ -322,11 +321,6 @@ export function LogScreen(props: LogScreenProps) {
       return;
     }
 
-    if (key.name === "w") {
-      setWrapEnabled((prev) => !prev);
-      return;
-    }
-
     if (key.name === "down") {
       updateSelectedIndex((prev) => prev + 1);
       return;
@@ -374,7 +368,6 @@ export function LogScreen(props: LogScreenProps) {
       { key: "v", description: "Level" },
       { key: "r", description: "Reload" },
       { key: "t", description: "Tail" },
-      { key: "w", description: "Wrap" },
       { key: "esc", description: "Back" },
     ];
     return actions;
@@ -395,10 +388,6 @@ export function LogScreen(props: LogScreenProps) {
     appendSegment(segments, { text: categoryText });
     appendSegment(segments, { text: "] " });
     appendSegment(segments, { text: entry.message });
-    if (wrapEnabled()) {
-      return segments;
-    }
-
     const maxWidth = terminal().columns;
     if (measureSegmentsWidth(segments) <= maxWidth) {
       return segments;
@@ -451,10 +440,6 @@ export function LogScreen(props: LogScreenProps) {
         <text attributes={TextAttributes.BOLD}>
           {merged.tailing ? "ON" : "OFF"}
         </text>
-        <text attributes={TextAttributes.DIM}> Wrap: </text>
-        <text attributes={TextAttributes.BOLD}>
-          {wrapEnabled() ? "ON" : "OFF"}
-        </text>
       </box>
 
       <box flexDirection="row">
@@ -485,7 +470,7 @@ export function LogScreen(props: LogScreenProps) {
                   {...(isSelected
                     ? { fg: selectionStyle.fg, bg: selectionStyle.bg }
                     : {})}
-                  wrapMode={wrapEnabled() ? "char" : "none"}
+                  wrapMode="none"
                   width={terminal().columns}
                 >
                   {isSelected
