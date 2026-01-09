@@ -36,6 +36,7 @@ import { LoadingIndicatorScreen } from "./screens/solid/LoadingIndicator.js";
 import { WorktreeCreateScreen } from "./screens/solid/WorktreeCreateScreen.js";
 import { InputScreen } from "./screens/solid/InputScreen.js";
 import { ConfirmScreen } from "./screens/solid/ConfirmScreen.js";
+import { useTerminalSize } from "./hooks/solid/useTerminalSize.js";
 import { EnvironmentScreen } from "./screens/solid/EnvironmentScreen.js";
 import { ProfileScreen } from "./screens/solid/ProfileScreen.js";
 import { ProfileEnvScreen } from "./screens/solid/ProfileEnvScreen.js";
@@ -100,6 +101,8 @@ import { prefetchAgentVersions } from "./utils/versionCache.js";
 import { getBunxAgentIds } from "./utils/versionFetcher.js";
 
 export type ExecutionMode = "normal" | "continue" | "resume";
+
+const UNSAFE_SELECTION_MESSAGE = "Unsafe branch selected. Select anyway?";
 
 export interface SelectionResult {
   branch: string;
@@ -235,6 +238,7 @@ const toSelectedBranchState = (branch: BranchItem): SelectedBranchState => {
 
 export function AppSolid(props: AppSolidProps) {
   const renderer = useRenderer();
+  const terminal = useTerminalSize();
   let hasExited = false;
 
   const exitApp = (result?: SelectionResult) => {
@@ -281,6 +285,13 @@ export function AppSolid(props: AppSolidProps) {
   );
   const [selectedMode, setSelectedMode] = createSignal<ExecutionMode>("normal");
   const [selectedBranches, setSelectedBranches] = createSignal<string[]>([]);
+  const [unsafeSelectionConfirmVisible, setUnsafeSelectionConfirmVisible] =
+    createSignal(false);
+  const [unsafeConfirmInputLocked, setUnsafeConfirmInputLocked] =
+    createSignal(false);
+  const [unsafeSelectionTarget, setUnsafeSelectionTarget] = createSignal<
+    string | null
+  >(null);
   const [branchFooterMessage, setBranchFooterMessage] = createSignal<{
     text: string;
     isSpinning?: boolean;
@@ -310,6 +321,21 @@ export function AppSolid(props: AppSolidProps) {
     null,
   );
   const [defaultBaseBranch, setDefaultBaseBranch] = createSignal("main");
+
+  const suppressBranchInputOnce = () => {
+    setUnsafeConfirmInputLocked(true);
+    queueMicrotask(() => {
+      setUnsafeConfirmInputLocked(false);
+    });
+  };
+
+  const unsafeConfirmBoxWidth = createMemo(() => {
+    const columns = terminal().columns || 80;
+    return Math.max(1, Math.floor(columns * 0.6));
+  });
+  const unsafeConfirmContentWidth = createMemo(() =>
+    Math.max(0, unsafeConfirmBoxWidth() - 4),
+  );
 
   // セッション履歴（最終使用エージェントなど）
   const [sessionHistory, setSessionHistory] = createSignal<ToolSessionEntry[]>(
@@ -1057,23 +1083,8 @@ export function AppSolid(props: AppSolidProps) {
             skipCounts.remote += 1;
             continue;
           }
-          if (isProtectedBranchName(branch.name)) {
-            skipCounts.protected += 1;
-            continue;
-          }
           if (branch.isCurrent) {
             skipCounts.current += 1;
-            continue;
-          }
-          const hasUncommitted =
-            branch.worktree?.hasUncommittedChanges === true;
-          const hasUnpushed = branch.hasUnpushedCommits === true;
-          if (hasUncommitted || hasUnpushed) {
-            skipCounts.unsafe += 1;
-            continue;
-          }
-          if (branch.safeToCleanup !== true) {
-            skipCounts.unsafe += 1;
             continue;
           }
           const worktreePath = branch.worktree?.path ?? null;
@@ -1193,13 +1204,14 @@ export function AppSolid(props: AppSolidProps) {
       return;
     }
 
-    // 選択されたブランチのうち、inaccessibleなものを修復対象とする
+    // 選択されたローカルブランチのうち、Worktreeを持つものを修復対象とする
     const selectionSet = new Set(selection);
     const targets = branchItems()
       .filter(
         (branch) =>
           selectionSet.has(branch.name) &&
-          branch.worktreeStatus === "inaccessible",
+          branch.type !== "remote" &&
+          branch.worktreeStatus !== undefined,
       )
       .map((branch) => branch.name);
 
@@ -1451,15 +1463,51 @@ export function AppSolid(props: AppSolidProps) {
   };
 
   const toggleSelectedBranch = (branchName: string) => {
-    setSelectedBranches((prev) => {
-      const next = new Set(prev);
-      if (next.has(branchName)) {
-        next.delete(branchName);
-      } else {
-        next.add(branchName);
-      }
-      return Array.from(next);
-    });
+    if (unsafeSelectionConfirmVisible()) {
+      return;
+    }
+    const currentSelection = new Set(selectedBranches());
+    if (currentSelection.has(branchName)) {
+      currentSelection.delete(branchName);
+      setSelectedBranches(Array.from(currentSelection));
+      return;
+    }
+
+    const branch = branchItems().find((item) => item.name === branchName);
+    const pending = cleanupSafetyPending();
+    const hasSafetyPending = pending.has(branchName);
+    const hasUncommitted = branch?.worktree?.hasUncommittedChanges === true;
+    const hasUnpushed = branch?.hasUnpushedCommits === true;
+    const isUnmerged = branch?.isUnmerged === true;
+    const safeToCleanup = branch?.safeToCleanup === true;
+    const isRemoteBranch = branch?.type === "remote";
+    const isUnsafe =
+      Boolean(branch) &&
+      !isRemoteBranch &&
+      !hasSafetyPending &&
+      (hasUncommitted || hasUnpushed || isUnmerged || !safeToCleanup);
+
+    if (branch && isUnsafe) {
+      setUnsafeSelectionTarget(branch.name);
+      setUnsafeSelectionConfirmVisible(true);
+      return;
+    }
+
+    currentSelection.add(branchName);
+    setSelectedBranches(Array.from(currentSelection));
+  };
+
+  const confirmUnsafeSelection = (confirmed: boolean) => {
+    suppressBranchInputOnce();
+    const target = unsafeSelectionTarget();
+    setUnsafeSelectionConfirmVisible(false);
+    setUnsafeSelectionTarget(null);
+    if (!confirmed || !target) {
+      return;
+    }
+    setSelectedBranches((prev) =>
+      prev.includes(target) ? prev : [...prev, target],
+    );
   };
 
   const handleToolSelect = (item: SelectorItem) => {
@@ -1513,7 +1561,7 @@ export function AppSolid(props: AppSolidProps) {
       const cleanupUI = {
         indicators: cleanupIndicators(),
         footerMessage: branchFooterMessage(),
-        inputLocked: branchInputLocked(),
+        inputLocked: branchInputLocked() || unsafeConfirmInputLocked(),
         safetyLoading: cleanupSafetyLoading(),
         safetyPendingBranches: cleanupSafetyPending(),
       };
@@ -1547,6 +1595,7 @@ export function AppSolid(props: AppSolidProps) {
           cleanupUI={cleanupUI}
           helpVisible={helpVisible()}
           wizardVisible={wizardVisible()}
+          confirmVisible={unsafeSelectionConfirmVisible()}
           cursorPosition={branchCursorPosition()}
           onCursorPositionChange={setBranchCursorPosition}
         />
@@ -1899,6 +1948,30 @@ export function AppSolid(props: AppSolidProps) {
   return (
     <>
       {renderCurrentScreen()}
+      {unsafeSelectionConfirmVisible() && (
+        <box
+          position="absolute"
+          top="30%"
+          left="20%"
+          width={unsafeConfirmBoxWidth()}
+          zIndex={110}
+          border
+          borderStyle="single"
+          borderColor="yellow"
+          backgroundColor="black"
+          padding={1}
+        >
+          <ConfirmScreen
+            message={UNSAFE_SELECTION_MESSAGE}
+            onConfirm={confirmUnsafeSelection}
+            yesLabel="OK"
+            noLabel="Cancel"
+            defaultNo
+            helpVisible={helpVisible()}
+            width={unsafeConfirmContentWidth()}
+          />
+        </box>
+      )}
       <HelpOverlay visible={helpVisible()} context={currentScreen()} />
       {/* FR-044: ウィザードポップアップをレイヤー表示 */}
       <WizardController

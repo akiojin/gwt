@@ -57,6 +57,8 @@ export interface BranchListScreenProps {
   helpVisible?: boolean;
   /** ウィザードポップアップ表示中は入力を無効化 */
   wizardVisible?: boolean;
+  /** 確認ダイアログ表示中は入力を無効化 */
+  confirmVisible?: boolean;
   /** カーソル位置（外部から制御する場合） */
   cursorPosition?: number;
   /** カーソル位置変更時のコールバック */
@@ -533,6 +535,9 @@ export function BranchListScreen(props: BranchListScreenProps) {
     if (props.wizardVisible) {
       return;
     }
+    if (props.confirmVisible) {
+      return;
+    }
     if (props.helpVisible) {
       return;
     }
@@ -920,6 +925,70 @@ export function BranchListScreen(props: BranchListScreenProps) {
     return fitSegmentsToWidth(segments, layoutWidth());
   });
 
+  const statusLegendSegments = createMemo(() => {
+    const segments: TextSegment[] = [];
+    const separator = "  ";
+
+    appendSegment(segments, {
+      text: "Legend: ",
+      attributes: TextAttributes.DIM,
+    });
+
+    appendSegment(segments, {
+      text: "o",
+      fg: "brightGreen",
+      attributes: TextAttributes.BOLD,
+    });
+    appendSegment(segments, {
+      text: " Safe",
+      fg: "brightGreen",
+    });
+    appendSegment(segments, {
+      text: separator,
+      attributes: TextAttributes.DIM,
+    });
+
+    appendSegment(segments, {
+      text: "!",
+      fg: "red",
+      attributes: TextAttributes.BOLD,
+    });
+    appendSegment(segments, {
+      text: " Uncommitted",
+      fg: "red",
+    });
+    appendSegment(segments, {
+      text: separator,
+      attributes: TextAttributes.DIM,
+    });
+
+    appendSegment(segments, {
+      text: "!",
+      fg: "yellow",
+      attributes: TextAttributes.BOLD,
+    });
+    appendSegment(segments, {
+      text: " Unpushed",
+      fg: "yellow",
+    });
+    appendSegment(segments, {
+      text: separator,
+      attributes: TextAttributes.DIM,
+    });
+
+    appendSegment(segments, {
+      text: "*",
+      fg: "yellow",
+      attributes: TextAttributes.BOLD,
+    });
+    appendSegment(segments, {
+      text: " Unmerged",
+      fg: "yellow",
+    });
+
+    return fitSegmentsToWidth(segments, layoutWidth());
+  });
+
   const footerSegments = createMemo(() => {
     const segments: TextSegment[] = [];
     const separator = "  ";
@@ -1005,7 +1074,7 @@ export function BranchListScreen(props: BranchListScreenProps) {
               : {})}
           />
         ) : (
-          <text>{padLine("", layoutWidth())}</text>
+          renderSegmentLine(statusLegendSegments())
         )}
 
         {props.error && (
