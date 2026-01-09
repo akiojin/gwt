@@ -33,8 +33,7 @@ describe("startSystemTray (SPEC-1f56fd80)", () => {
       title: "separator",
     };
     mock.module("node:module", async () => {
-      const actual =
-        await import(typeof import("node:module")>("node:module");
+      const actual = await import("node:module");
       const mocked = {
         ...actual,
         createRequire: () => () => ({ default: createMock }),

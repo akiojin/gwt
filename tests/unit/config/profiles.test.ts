@@ -3,7 +3,7 @@
  * @see specs/SPEC-dafff079/spec.md
  */
 
-import { describe, it, expect, beforeEach, afterEach,  mock } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
@@ -69,7 +69,7 @@ describe("loadProfiles", () => {
   beforeEach(async () => {
     process.env.GWT_HOME = testDir;
     await mkdir(path.join(testDir, ".gwt"), { recursive: true });
-    await // resetModules not needed in bun;
+    // resetModules not needed in bun;
     const module = await import("../../../src/config/profiles.js");
     loadProfiles = module.loadProfiles;
     saveProfiles = module.saveProfiles;
@@ -82,7 +82,7 @@ describe("loadProfiles", () => {
       process.env.GWT_HOME = originalGwtHome;
     }
     await rm(testDir, { recursive: true, force: true });
-    await // resetModules not needed in bun;
+    // resetModules not needed in bun;
   });
 
   it("設定ファイルが存在しない場合、デフォルト設定を返す", async () => {
@@ -137,7 +137,7 @@ describe("saveProfiles", () => {
   beforeEach(async () => {
     process.env.GWT_HOME = testDir;
     await mkdir(path.join(testDir, ".gwt"), { recursive: true });
-    await // resetModules not needed in bun;
+    // resetModules not needed in bun;
     const module = await import("../../../src/config/profiles.js");
     loadProfiles = module.loadProfiles;
     saveProfiles = module.saveProfiles;
@@ -150,7 +150,7 @@ describe("saveProfiles", () => {
       process.env.GWT_HOME = originalGwtHome;
     }
     await rm(testDir, { recursive: true, force: true });
-    await // resetModules not needed in bun;
+    // resetModules not needed in bun;
   });
 
   it("設定を正常に保存できる", async () => {
@@ -194,7 +194,7 @@ describe("getActiveProfile", () => {
   beforeEach(async () => {
     process.env.GWT_HOME = testDir;
     await mkdir(path.join(testDir, ".gwt"), { recursive: true });
-    await // resetModules not needed in bun;
+    // resetModules not needed in bun;
     const module = await import("../../../src/config/profiles.js");
     loadProfiles = module.loadProfiles;
     saveProfiles = module.saveProfiles;
@@ -208,7 +208,7 @@ describe("getActiveProfile", () => {
       process.env.GWT_HOME = originalGwtHome;
     }
     await rm(testDir, { recursive: true, force: true });
-    await // resetModules not needed in bun;
+    // resetModules not needed in bun;
   });
 
   it("アクティブなプロファイルが設定されている場合、そのプロファイルを返す", async () => {
@@ -275,7 +275,7 @@ describe("getActiveProfileName", () => {
   beforeEach(async () => {
     process.env.GWT_HOME = testDir;
     await mkdir(path.join(testDir, ".gwt"), { recursive: true });
-    await // resetModules not needed in bun;
+    // resetModules not needed in bun;
     const module = await import("../../../src/config/profiles.js");
     getActiveProfileName = module.getActiveProfileName;
   });
@@ -287,7 +287,7 @@ describe("getActiveProfileName", () => {
       process.env.GWT_HOME = originalGwtHome;
     }
     await rm(testDir, { recursive: true, force: true });
-    await // resetModules not needed in bun;
+    // resetModules not needed in bun;
   });
 
   it("アクティブなプロファイル名を返す", async () => {
@@ -332,7 +332,7 @@ describe("setActiveProfile", () => {
   beforeEach(async () => {
     process.env.GWT_HOME = testDir;
     await mkdir(path.join(testDir, ".gwt"), { recursive: true });
-    await // resetModules not needed in bun;
+    // resetModules not needed in bun;
     const module = await import("../../../src/config/profiles.js");
     setActiveProfile = module.setActiveProfile;
     getActiveProfileName = module.getActiveProfileName;
@@ -345,7 +345,7 @@ describe("setActiveProfile", () => {
       process.env.GWT_HOME = originalGwtHome;
     }
     await rm(testDir, { recursive: true, force: true });
-    await // resetModules not needed in bun;
+    // resetModules not needed in bun;
   });
 
   it("アクティブなプロファイルを設定できる", async () => {
@@ -420,7 +420,7 @@ describe("createProfile", () => {
   beforeEach(async () => {
     process.env.GWT_HOME = testDir;
     await mkdir(path.join(testDir, ".gwt"), { recursive: true });
-    await // resetModules not needed in bun;
+    // resetModules not needed in bun;
     const module = await import("../../../src/config/profiles.js");
     createProfile = module.createProfile;
     loadProfiles = module.loadProfiles;
@@ -433,7 +433,7 @@ describe("createProfile", () => {
       process.env.GWT_HOME = originalGwtHome;
     }
     await rm(testDir, { recursive: true, force: true });
-    await // resetModules not needed in bun;
+    // resetModules not needed in bun;
   });
 
   it("新しいプロファイルを作成できる", async () => {
@@ -493,7 +493,7 @@ describe("updateProfile", () => {
   beforeEach(async () => {
     process.env.GWT_HOME = testDir;
     await mkdir(path.join(testDir, ".gwt"), { recursive: true });
-    await // resetModules not needed in bun;
+    // resetModules not needed in bun;
     const module = await import("../../../src/config/profiles.js");
     updateProfile = module.updateProfile;
     loadProfiles = module.loadProfiles;
@@ -506,7 +506,7 @@ describe("updateProfile", () => {
       process.env.GWT_HOME = originalGwtHome;
     }
     await rm(testDir, { recursive: true, force: true });
-    await // resetModules not needed in bun;
+    // resetModules not needed in bun;
   });
 
   it("プロファイルを更新できる", async () => {
@@ -549,7 +549,7 @@ describe("deleteProfile", () => {
   beforeEach(async () => {
     process.env.GWT_HOME = testDir;
     await mkdir(path.join(testDir, ".gwt"), { recursive: true });
-    await // resetModules not needed in bun;
+    // resetModules not needed in bun;
     const module = await import("../../../src/config/profiles.js");
     deleteProfile = module.deleteProfile;
     loadProfiles = module.loadProfiles;
@@ -562,7 +562,7 @@ describe("deleteProfile", () => {
       process.env.GWT_HOME = originalGwtHome;
     }
     await rm(testDir, { recursive: true, force: true });
-    await // resetModules not needed in bun;
+    // resetModules not needed in bun;
   });
 
   it("プロファイルを削除できる", async () => {
@@ -623,7 +623,7 @@ describe("resolveProfileEnv", () => {
   beforeEach(async () => {
     process.env.GWT_HOME = testDir;
     await mkdir(path.join(testDir, ".gwt"), { recursive: true });
-    await // resetModules not needed in bun;
+    // resetModules not needed in bun;
     const module = await import("../../../src/config/profiles.js");
     resolveProfileEnv = module.resolveProfileEnv;
   });
@@ -635,7 +635,7 @@ describe("resolveProfileEnv", () => {
       process.env.GWT_HOME = originalGwtHome;
     }
     await rm(testDir, { recursive: true, force: true });
-    await // resetModules not needed in bun;
+    // resetModules not needed in bun;
   });
 
   it("アクティブなプロファイルの環境変数を返す", async () => {
