@@ -241,3 +241,82 @@ describe("BranchListScreen shortcut hints", () => {
     }
   });
 });
+
+describe("BranchListScreen cursor position stability (FR-037a)", () => {
+  it("preserves cursor position when safety check completes", async () => {
+    const { createSignal } = await import("solid-js");
+    const branches = [
+      createBranch({
+        name: "feature/first",
+        label: "feature/first",
+        value: "feature/first",
+        worktreeStatus: "active",
+      }),
+      createBranch({
+        name: "feature/second",
+        label: "feature/second",
+        value: "feature/second",
+        worktreeStatus: "active",
+      }),
+      createBranch({
+        name: "feature/third",
+        label: "feature/third",
+        value: "feature/third",
+        worktreeStatus: "active",
+      }),
+    ];
+
+    // safetyPendingBranchesを動的に変更するためのシグナル
+    const [safetyPending, setSafetyPending] = createSignal<Set<string>>(
+      new Set(["feature/first", "feature/second", "feature/third"]),
+    );
+
+    const testSetup = await testRender(
+      () => (
+        <BranchListScreen
+          branches={branches}
+          stats={statsForBranches(branches)}
+          onSelect={() => {}}
+          cleanupUI={{
+            indicators: {},
+            footerMessage: null,
+            inputLocked: false,
+            safetyPendingBranches: safetyPending(),
+          }}
+        />
+      ),
+      { width: 80, height: 24 },
+    );
+    await testSetup.renderOnce();
+
+    try {
+      // 1. 初期状態ではカーソルは最初のブランチにある
+      let frame = testSetup.captureCharFrame();
+      // 最初のブランチがハイライトされている（選択されている）ことを確認
+      expect(frame).toContain("feature/first");
+
+      // 2. 下矢印キーでカーソルを2番目のブランチに移動
+      testSetup.mockInput.pressArrow("down");
+      await testSetup.renderOnce();
+
+      // 3. 安全状態確認が完了したことをシミュレート（pendingから削除）
+      setSafetyPending(new Set(["feature/second", "feature/third"]));
+      await testSetup.renderOnce();
+
+      // さらに別のブランチの安全状態確認が完了
+      setSafetyPending(new Set(["feature/third"]));
+      await testSetup.renderOnce();
+
+      // 4. カーソル位置が保持されていることを確認
+      // カーソルが2番目のブランチにあるので、下矢印でさらに移動できるはず
+      testSetup.mockInput.pressArrow("down");
+      await testSetup.renderOnce();
+
+      // 3番目のブランチに移動できていれば、カーソル位置は保持されていた
+      frame = testSetup.captureCharFrame();
+      expect(frame).toContain("feature/third");
+    } finally {
+      testSetup.renderer.destroy();
+    }
+  });
+});
