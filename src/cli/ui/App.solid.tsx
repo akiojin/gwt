@@ -1,6 +1,7 @@
 /** @jsxImportSource @opentui/solid */
 import { useKeyboard, useRenderer } from "@opentui/solid";
 import {
+  batch,
   createEffect,
   createMemo,
   createSignal,
@@ -192,6 +193,24 @@ const applyCleanupStatus = (
     return worktree ? { ...base, worktree } : base;
   });
 
+const buildCleanupSafetyPending = (items: BranchItem[]): Set<string> => {
+  const pending = new Set<string>();
+  for (const branch of items) {
+    if (branch.type === "remote") {
+      continue;
+    }
+    if (branch.worktree) {
+      pending.add(branch.name);
+      continue;
+    }
+    if (isProtectedBranchName(branch.name)) {
+      continue;
+    }
+    pending.add(branch.name);
+  }
+  return pending;
+};
+
 const toLocalBranchName = (name: string): string => {
   const segments = name.split("/");
   if (segments.length <= 1) {
@@ -270,6 +289,9 @@ export function AppSolid(props: AppSolidProps) {
     Map<string, CleanupStatus>
   >(new Map());
   const [cleanupSafetyLoading, setCleanupSafetyLoading] = createSignal(false);
+  const [cleanupSafetyPending, setCleanupSafetyPending] = createSignal<
+    Set<string>
+  >(new Set());
   const [isNewBranch, setIsNewBranch] = createSignal(false);
   const [newBranchBaseRef, setNewBranchBaseRef] = createSignal<string | null>(
     null,
@@ -370,28 +392,56 @@ export function AppSolid(props: AppSolidProps) {
   let cleanupSafetyRequestId = 0;
   const refreshCleanupSafety = async () => {
     const requestId = ++cleanupSafetyRequestId;
-    setCleanupSafetyLoading(true);
-    try {
-      const cleanupStatuses = await getCleanupStatus();
+    const pendingBranches = buildCleanupSafetyPending(branchItems());
+    setCleanupSafetyPending(pendingBranches);
+    setCleanupSafetyLoading(pendingBranches.size > 0);
+    const statusByBranch = new Map<string, CleanupStatus>();
+    const applyProgress = (status: CleanupStatus) => {
       if (requestId !== cleanupSafetyRequestId) {
         return;
       }
-      const statusByBranch = new Map(
-        cleanupStatuses.map((status) => [status.branch, status]),
-      );
-      setCleanupStatusByBranch(statusByBranch);
-      setBranchItems((items) => applyCleanupStatus(items, statusByBranch));
+      statusByBranch.set(status.branch, status);
+      batch(() => {
+        setCleanupStatusByBranch(new Map(statusByBranch));
+        setBranchItems((items) => applyCleanupStatus(items, statusByBranch));
+        setCleanupSafetyPending((prev) => {
+          if (!prev.has(status.branch)) {
+            return prev;
+          }
+          const next = new Set(prev);
+          next.delete(status.branch);
+          return next;
+        });
+      });
+    };
+    try {
+      const cleanupStatuses = await getCleanupStatus({
+        onProgress: applyProgress,
+      });
+      if (requestId !== cleanupSafetyRequestId) {
+        return;
+      }
+      if (cleanupStatuses.length > statusByBranch.size) {
+        cleanupStatuses.forEach((status) => {
+          if (!statusByBranch.has(status.branch)) {
+            applyProgress(status);
+          }
+        });
+      }
     } catch (err) {
       if (requestId !== cleanupSafetyRequestId) {
         return;
       }
       logger.warn({ err }, "Failed to refresh cleanup safety indicators");
       const empty = new Map<string, CleanupStatus>();
-      setCleanupStatusByBranch(empty);
-      setBranchItems((items) => applyCleanupStatus(items, empty));
+      batch(() => {
+        setCleanupStatusByBranch(empty);
+        setBranchItems((items) => applyCleanupStatus(items, empty));
+      });
     } finally {
       if (requestId === cleanupSafetyRequestId) {
         setCleanupSafetyLoading(false);
+        setCleanupSafetyPending(new Set<string>());
       }
     }
   };
@@ -495,7 +545,6 @@ export function AppSolid(props: AppSolidProps) {
   const refreshBranches = async () => {
     setLoading(true);
     setError(null);
-    void refreshCleanupSafety();
     try {
       const repoRoot = await getRepositoryRoot();
       const worktreesPromise = listAdditionalWorktrees();
@@ -536,6 +585,7 @@ export function AppSolid(props: AppSolidProps) {
       );
       setBranchItems(initialItems);
       setStats(buildStats(initialItems));
+      void refreshCleanupSafety();
 
       void (async () => {
         const [branches, latestWorktrees] = await Promise.all([
@@ -1373,6 +1423,7 @@ export function AppSolid(props: AppSolidProps) {
         footerMessage: branchFooterMessage(),
         inputLocked: branchInputLocked(),
         safetyLoading: cleanupSafetyLoading(),
+        safetyPendingBranches: cleanupSafetyPending(),
       };
       return (
         <BranchListScreen

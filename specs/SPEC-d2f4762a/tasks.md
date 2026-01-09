@@ -190,15 +190,30 @@
 - [x] **T802** [P] [共通] `specs/SPEC-d2f4762a/plan.md` の安全判定方針を更新
 - [x] **T803** [P] [共通] `specs/SPEC-d2f4762a/spec.md` に安全判定スピナー/リモートブランチ空白の要件を追記
 - [x] **T804** [P] [共通] `specs/SPEC-d2f4762a/plan.md` に安全判定スピナー/リモートブランチ空白の方針を追記
+- [x] **T805** [P] [共通] `specs/SPEC-d2f4762a/spec.md` の安全時アイコンを緑色`o`に更新
+- [x] **T806** [P] [共通] `specs/SPEC-d2f4762a/plan.md` の安全時アイコン方針に緑色`o`を追記
+- [x] **T807** [P] [共通] `specs/SPEC-d27be71b/spec.md` の意思決定ログを安全時`o`に更新
+- [x] **T816** [P] [共通] `specs/SPEC-d2f4762a/spec.md` の安全判定スピナーをブランチ単位で順次更新する要件を追記
+- [x] **T817** [P] [共通] `specs/SPEC-d2f4762a/plan.md` の安全判定スピナー方針にブランチ単位更新を追記
+- [x] **T826** [P] [共通] `specs/SPEC-d2f4762a/spec.md` の安全/Worktreeアイコンの明るい緑表示を追記
+- [x] **T827** [P] [共通] `specs/SPEC-d2f4762a/plan.md` の明るい緑表示方針を更新
 
 ### テスト（TDD）
 
 - [x] **T811** [US4] `src/cli/ui/__tests__/solid/BranchListScreen.test.tsx` に未コミット/未プッシュの`!`と未マージの`*`を確認するテストを追加
 - [x] **T812** [US4] `src/cli/ui/__tests__/solid/AppSolid.cleanup.test.tsx` にupstream未設定時の安全判定除外を確認するテストを追加
 - [x] **T813** [US4] `src/cli/ui/__tests__/solid/BranchListScreen.test.tsx` に安全判定中のスピナーとリモートブランチ空白を確認するテストを追加
+- [x] **T814** [US4] `src/cli/ui/__tests__/solid/BranchListScreen.test.tsx` の安全時`o`表示テストを更新
+- [x] **T815** [US4] `src/cli/ui/__tests__/solid/AppSolid.cleanup.test.tsx` の安全時`o`表示テストを更新
+- [x] **T818** [US4] `src/cli/ui/__tests__/solid/BranchListScreen.test.tsx` に安全判定スピナーのブランチ単位更新テストを追加
+- [x] **T819** [US4] `src/cli/ui/__tests__/solid/AppSolid.cleanup.test.tsx` に安全判定の逐次更新を確認するテストを追加
+- [x] **T820** [US4] 色変更に伴う表示確認（自動テスト追加不要の確認）
 
 ### 実装
 
 - [x] **T821** [US4] `src/cli/ui/App.solid.tsx` にupstream/マージ/未コミット・未プッシュの安全判定反映ロジックを追加
 - [x] **T822** [US4] `src/cli/ui/screens/solid/BranchListScreen.tsx` の安全アイコン色分けを更新
 - [x] **T823** [US4] `src/cli/ui/screens/solid/BranchListScreen.tsx` に安全判定スピナー/リモートブランチ空白の表示を追加
+- [x] **T824** [US4] `src/cli/ui/screens/solid/BranchListScreen.tsx` の安全時`o`表示を追加
+- [x] **T825** [US4] `src/cli/ui/App.solid.tsx` と `src/worktree.ts` に安全判定スピナーのブランチ単位更新を実装
+- [x] **T828** [US4] `src/cli/ui/screens/solid/BranchListScreen.tsx` の安全/Worktree明るい緑表示を更新
