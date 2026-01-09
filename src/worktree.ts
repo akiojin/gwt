@@ -827,9 +827,11 @@ async function getWorktreesWithPRStatus(): Promise<WorktreeWithPR[]> {
 async function getOrphanedLocalBranchStatuses({
   baseBranch,
   repoRoot,
+  onProgress,
 }: {
   baseBranch: string;
   repoRoot: string;
+  onProgress?: (status: CleanupStatus) => void;
 }): Promise<CleanupStatus[]> {
   try {
     // 並列実行で高速化
@@ -909,7 +911,7 @@ async function getOrphanedLocalBranchStatuses({
           );
         }
 
-        statuses.push({
+        const status: CleanupStatus = {
           worktreePath: null, // worktreeは存在しない
           branch: localBranch.name,
           hasUncommittedChanges: false, // worktreeが存在しないため常にfalse
@@ -920,7 +922,9 @@ async function getOrphanedLocalBranchStatuses({
           hasUpstream,
           upstream,
           reasons,
-        });
+        };
+        statuses.push(status);
+        onProgress?.(status);
       }
     }
 
@@ -940,7 +944,11 @@ async function getOrphanedLocalBranchStatuses({
   }
 }
 
-export async function getCleanupStatus(): Promise<CleanupStatus[]> {
+export async function getCleanupStatus({
+  onProgress,
+}: {
+  onProgress?: (status: CleanupStatus) => void;
+} = {}): Promise<CleanupStatus[]> {
   const [config, repoRoot, worktreesWithPR] = await Promise.all([
     getConfig(),
     getRepositoryRoot(),
@@ -951,6 +959,7 @@ export async function getCleanupStatus(): Promise<CleanupStatus[]> {
   const orphanedStatuses = await getOrphanedLocalBranchStatuses({
     baseBranch,
     repoRoot,
+    ...(onProgress ? { onProgress } : {}),
   });
   const statuses: CleanupStatus[] = [];
 
@@ -1026,7 +1035,7 @@ export async function getCleanupStatus(): Promise<CleanupStatus[]> {
       );
     }
 
-    statuses.push({
+    const status: CleanupStatus = {
       worktreePath: worktree.worktreePath,
       branch: worktree.branch,
       hasUncommittedChanges: hasUncommitted,
@@ -1041,7 +1050,9 @@ export async function getCleanupStatus(): Promise<CleanupStatus[]> {
       ...(isAccessible
         ? {}
         : { invalidReason: "Path not accessible in current environment" }),
-    });
+    };
+    statuses.push(status);
+    onProgress?.(status);
   }
 
   statuses.push(...orphanedStatuses);
