@@ -184,6 +184,10 @@ async function listWorktrees(): Promise<WorktreeInfo[]> {
   }
 }
 
+export async function listAllWorktrees(): Promise<WorktreeInfo[]> {
+  return listWorktrees();
+}
+
 /**
  * 追加のworktree（メインworktreeを除く）の一覧を取得
  * @returns {Promise<WorktreeInfo[]>} worktree情報の配列

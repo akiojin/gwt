@@ -45,6 +45,7 @@ export async function launchGeminiCLI(
     envOverrides?: Record<string, string>;
     model?: string;
     sessionId?: string | null;
+    branch?: string | null;
   } = {},
 ): Promise<{ sessionId?: string | null }> {
   const terminal = getTerminalStreams();
@@ -254,6 +255,7 @@ export async function launchGeminiCLI(
         capturedSessionId =
           (await findLatestGeminiSessionId(worktreePath, {
             cwd: worktreePath,
+            branch: options.branch ?? null,
           })) ?? null;
       } catch {
         capturedSessionId = null;

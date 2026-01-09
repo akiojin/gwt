@@ -678,6 +678,11 @@ export function AppSolid(props: AppSolidProps) {
 
   // FR-010: クイックスタートからのResume（前回設定で続きから）
   const handleWizardResume = (entry: ToolSessionEntry) => {
+    if (!entry.sessionId) {
+      handleWizardStartNew(entry);
+      return;
+    }
+
     setWizardVisible(false);
 
     const branch = selectedBranch();

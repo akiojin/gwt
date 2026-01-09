@@ -36,6 +36,10 @@ export function QuickStartStep(props: QuickStartStepProps) {
   // Build selection items from history
   // 最新の履歴エントリのみを使用（重複排除済み）
   const latestEntry = createMemo(() => props.history[0] ?? null);
+  const canResume = createMemo(() => {
+    const entry = latestEntry();
+    return Boolean(entry?.sessionId && entry.sessionId.trim().length > 0);
+  });
 
   const items = createMemo<QuickStartItem[]>(() => {
     const result: QuickStartItem[] = [];
@@ -47,13 +51,15 @@ export function QuickStartStep(props: QuickStartStepProps) {
         : "";
       const settingsDesc = `${entry.toolLabel}, ${entry.model}${reasoningInfo}`;
 
-      result.push({
-        label: "Resume session (previous settings)",
-        value: `resume-${entry.toolId}`,
-        description: settingsDesc,
-        action: "resume",
-        entry,
-      });
+      if (canResume()) {
+        result.push({
+          label: "Resume session (previous settings)",
+          value: `resume-${entry.toolId}`,
+          description: settingsDesc,
+          action: "resume",
+          entry,
+        });
+      }
 
       result.push({
         label: "Start new (previous settings)",

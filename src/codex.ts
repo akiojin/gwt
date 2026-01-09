@@ -95,6 +95,7 @@ export async function launchCodexCLI(
     model?: string;
     reasoningEffort?: CodexReasoningEffort;
     sessionId?: string | null;
+    branch?: string | null;
   } = {},
 ): Promise<{ sessionId?: string | null }> {
   const terminal = getTerminalStreams();
@@ -221,6 +222,7 @@ export async function launchCodexCLI(
         preferClosestTo: finishedAt,
         windowMs: 10 * 60 * 1000,
         cwd: worktreePath,
+        branch: options.branch ?? null,
       });
       const detectedSessionId = latest?.id ?? null;
       // When we explicitly resumed a specific session, keep that ID as the source of truth.

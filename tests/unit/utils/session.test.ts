@@ -219,6 +219,69 @@ describe("utils/session", () => {
     expect(id).toBe(sessionUuid);
   });
 
+  it("findLatestCodexSessionId selects session matching branch via worktrees", async () => {
+    const dirent = (name: string, type: "file" | "dir") => ({
+      name,
+      isFile: () => type === "file",
+      isDirectory: () => type === "dir",
+    });
+
+    const branchA = "feature-a";
+    const branchB = "feature-b";
+    const uuidA = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+    const uuidB = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+
+    readdirMock.mockImplementation((dir: string, opts?: ReaddirOptions) => {
+      if (opts?.withFileTypes) {
+        if (endsWithPath(dir, "/.codex/sessions")) {
+          return Promise.resolve([dirent("2025", "dir")]);
+        }
+        if (endsWithPath(dir, "/.codex/sessions/2025")) {
+          return Promise.resolve([dirent("12", "dir")]);
+        }
+        if (endsWithPath(dir, "/.codex/sessions/2025/12")) {
+          return Promise.resolve([
+            dirent(`rollout-${uuidA}.jsonl`, "file"),
+            dirent(`rollout-${uuidB}.jsonl`, "file"),
+          ]);
+        }
+      }
+      return Promise.resolve([]);
+    });
+
+    statMock.mockImplementation((filePath: string) => {
+      if (filePath.includes(uuidA)) {
+        return Promise.resolve({ mtimeMs: 1_000 });
+      }
+      return Promise.resolve({ mtimeMs: 2_000 });
+    });
+
+    readFileMock.mockImplementation((filePath: string) => {
+      if (filePath.includes(uuidA)) {
+        return Promise.resolve(
+          JSON.stringify({
+            payload: { id: uuidA, cwd: `/repo/.worktrees/${branchA}` },
+          }),
+        );
+      }
+      return Promise.resolve(
+        JSON.stringify({
+          payload: { id: uuidB, cwd: `/repo/.worktrees/${branchB}` },
+        }),
+      );
+    });
+
+    const id = await findLatestCodexSessionId({
+      branch: branchA,
+      worktrees: [
+        { path: `/repo/.worktrees/${branchA}`, branch: branchA },
+        { path: `/repo/.worktrees/${branchB}`, branch: branchB },
+      ],
+    });
+
+    expect(id).toBe(uuidA);
+  });
+
   it("findLatestCodexSessionId can pick session closest to reference time", async () => {
     const dirent = (name: string, type: "file" | "dir") => ({
       name,

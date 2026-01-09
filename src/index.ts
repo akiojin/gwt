@@ -634,6 +634,7 @@ export async function handleAIToolWorkflow(
           model?: string;
           reasoningEffort?: CodexReasoningEffort;
           sessionId?: string | null;
+          branch?: string | null;
         } = {
           mode:
             mode === "resume"
@@ -644,6 +645,7 @@ export async function handleAIToolWorkflow(
           bypassApprovals: skipPermissions,
           envOverrides: sharedEnv,
           sessionId: resumeSessionId,
+          branch,
         };
         if (normalizedModel) {
           launchOptions.model = normalizedModel;
@@ -660,6 +662,7 @@ export async function handleAIToolWorkflow(
           envOverrides?: Record<string, string>;
           model?: string;
           sessionId?: string | null;
+          branch?: string | null;
         } = {
           mode:
             mode === "resume"
@@ -670,6 +673,7 @@ export async function handleAIToolWorkflow(
           skipPermissions,
           envOverrides: sharedEnv,
           sessionId: resumeSessionId,
+          branch,
         };
         if (normalizedModel) {
           launchOptions.model = normalizedModel;
@@ -719,6 +723,7 @@ export async function handleAIToolWorkflow(
           preferClosestTo: finishedAt,
           windowMs: 60 * 60 * 1000,
           cwd: worktreePath,
+          branch,
         });
         if (latest) {
           finalSessionId = latest.id;
@@ -748,6 +753,7 @@ export async function handleAIToolWorkflow(
           preferClosestTo: finishedAt,
           windowMs: 60 * 60 * 1000,
           cwd: worktreePath,
+          branch,
         });
         if (latestGemini) {
           finalSessionId = latestGemini.id;

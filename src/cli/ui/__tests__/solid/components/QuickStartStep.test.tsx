@@ -211,4 +211,42 @@ describe("QuickStartStep", () => {
       }
     });
   });
+
+  describe("missing sessionId", () => {
+    it("does not render Resume option when sessionId is missing", async () => {
+      const historyWithoutSession: ToolSessionEntry[] = [
+        {
+          toolId: "claude-code",
+          toolLabel: "Claude Code",
+          branch: "feature/test",
+          worktreePath: "/path/to/worktree",
+          model: "claude-sonnet-4-20250514",
+          mode: "normal",
+          timestamp: Date.now(),
+          sessionId: null,
+        },
+      ];
+      const testSetup = await testRender(
+        () => (
+          <QuickStartStep
+            history={historyWithoutSession}
+            onResume={() => {}}
+            onStartNew={() => {}}
+            onChooseDifferent={() => {}}
+            onBack={() => {}}
+          />
+        ),
+        { width: 80, height: 24 },
+      );
+      await testSetup.renderOnce();
+
+      try {
+        const frame = testSetup.captureCharFrame();
+        expect(frame).not.toContain("Resume session");
+        expect(frame).toContain("Start new (previous settings)");
+      } finally {
+        testSetup.renderer.destroy();
+      }
+    });
+  });
 });
