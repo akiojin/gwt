@@ -89,7 +89,6 @@ const padToWidth = (value: string, width: number): string => {
 interface TextSegment {
   text: string;
   fg?: string;
-  bg?: string;
 }
 
 const appendSegment = (segments: TextSegment[], segment: TextSegment) => {
@@ -132,34 +131,13 @@ const truncateSegmentsToWidth = (
   return result;
 };
 
-const padSegmentsToWidth = (
-  segments: TextSegment[],
-  width: number,
-  padStyle?: Pick<TextSegment, "fg" | "bg">,
-): TextSegment[] => {
-  const totalWidth = measureSegmentsWidth(segments);
-  if (totalWidth >= width) {
-    return segments;
-  }
-  const padding = " ".repeat(Math.max(0, width - totalWidth));
-  if (!padding) {
-    return segments;
-  }
-  return [
-    ...segments,
-    {
-      text: padding,
-      ...(padStyle ?? {}),
-    },
-  ];
-};
+const segmentsToText = (segments: TextSegment[]): string =>
+  segments.map((segment) => segment.text).join("");
 
-const applySelectionStyle = (segments: TextSegment[]): TextSegment[] =>
-  segments.map((segment) => ({
-    text: segment.text,
-    fg: selectionStyle.fg,
-    bg: selectionStyle.bg,
-  }));
+const padLine = (value: string, width: number): string => {
+  const padding = Math.max(0, width - measureWidth(value));
+  return padding > 0 ? `${value}${" ".repeat(padding)}` : value;
+};
 
 const resolveEntryLevel = (entry: FormattedLogEntry): number => {
   const rawLevel = entry.raw?.level;
@@ -499,30 +477,27 @@ export function LogScreen(props: LogScreenProps) {
             {list.visibleItems().map((entry, index) => {
               const absoluteIndex = list.scrollOffset() + index;
               const isSelected = absoluteIndex === list.selectedIndex();
-              const maxWidth = terminal().columns;
-              const baseSegments = formatEntrySegments(entry);
-              const selectedSegments = isSelected
-                ? applySelectionStyle(baseSegments)
-                : baseSegments;
-              const displaySegments =
-                isSelected && measureSegmentsWidth(selectedSegments) < maxWidth
-                  ? padSegmentsToWidth(
-                      selectedSegments,
-                      maxWidth,
-                      selectionStyle,
-                    )
-                  : selectedSegments;
+              const segments = formatEntrySegments(entry);
+              const lineText = segmentsToText(segments);
+              const selectedContent = padLine(lineText, terminal().columns);
               return (
-                <box flexDirection="row">
-                  {displaySegments.map((segment) => (
-                    <text
-                      {...(segment.fg ? { fg: segment.fg } : {})}
-                      {...(segment.bg ? { bg: segment.bg } : {})}
-                    >
-                      {segment.text}
-                    </text>
-                  ))}
-                </box>
+                <text
+                  {...(isSelected
+                    ? { fg: selectionStyle.fg, bg: selectionStyle.bg }
+                    : {})}
+                  wrapMode={wrapEnabled() ? "char" : "none"}
+                  width={terminal().columns}
+                >
+                  {isSelected
+                    ? selectedContent
+                    : segments.map((segment) =>
+                        segment.fg ? (
+                          <span style={{ fg: segment.fg }}>{segment.text}</span>
+                        ) : (
+                          segment.text
+                        ),
+                      )}
+                </text>
               );
             })}
           </box>
