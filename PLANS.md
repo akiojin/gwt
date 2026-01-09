@@ -23,9 +23,9 @@
 - [x] Replace node:fs/promises module mocks with spies in config/worktree tests
 - [x] Align CLI launch output assertions with terminal stream writes
 - [x] Adjust dependency-installer imports to allow access spying
+- [x] Align worktree fs/promises imports with test spies
 
 ## Pending
-- [ ] Re-run full unit suite and fix remaining cross-file mock leakage
+- [ ] Re-run full unit suite (current run stalls after utils/session.test.ts with maxConcurrency=1)
 - [ ] Re-run quality/build checks (dist bundle, build:opentui)
-- [ ] Confirm worktree installer/unit regressions after mock changes
 - [ ] Prepare PR summary once tests are green

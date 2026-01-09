@@ -8,6 +8,7 @@ const statSyncMock = mock<
 >(() => ({ isFile: () => false, mtime: new Date() }));
 const unlinkSyncMock = mock<(...args: unknown[]) => void>(() => {});
 const mkdirSyncMock = mock<(...args: unknown[]) => void>(() => {});
+let moduleCounter = 0;
 
 const setupCommandMocks = () => {
   execaMock.mockReset();
@@ -49,7 +50,6 @@ const setupCommandMocks = () => {
 
 describe("command utilities", () => {
   let commandModule: typeof import("../../../src/utils/command.js");
-  let importCounter = 0;
 
   beforeEach(async () => {
     mock.restore();
@@ -73,9 +73,9 @@ describe("command utilities", () => {
     setupCommandMocks();
     // Re-import module
     // Note: Bun doesn't fully support module mocking, so we test the actual implementation
-    importCounter += 1;
+    moduleCounter += 1;
     commandModule = await import(
-      `../../../src/utils/command.ts?command-test=${importCounter}`
+      `../../../src/utils/command.ts?command-test=${moduleCounter}`
     );
 
     // Clear command lookup cache before each test
@@ -199,8 +199,12 @@ describe("getCommandVersion", () => {
   let commandModule: typeof import("../../../src/utils/command.js");
 
   beforeEach(async () => {
+    mock.restore();
     setupCommandMocks();
-    commandModule = await import("../../../src/utils/command.js");
+    moduleCounter += 1;
+    commandModule = await import(
+      `../../../src/utils/command.ts?command-version=${moduleCounter}`
+    );
     commandModule.clearCommandLookupCache();
   });
 
@@ -224,8 +228,12 @@ describe("findCommand with version", () => {
   let commandModule: typeof import("../../../src/utils/command.js");
 
   beforeEach(async () => {
+    mock.restore();
     setupCommandMocks();
-    commandModule = await import("../../../src/utils/command.js");
+    moduleCounter += 1;
+    commandModule = await import(
+      `../../../src/utils/command.ts?command-version=${moduleCounter}`
+    );
     commandModule.clearCommandLookupCache();
   });
 
@@ -254,8 +262,12 @@ describe("detectAllToolStatuses with version", () => {
   let commandModule: typeof import("../../../src/utils/command.js");
 
   beforeEach(async () => {
+    mock.restore();
     setupCommandMocks();
-    commandModule = await import("../../../src/utils/command.js");
+    moduleCounter += 1;
+    commandModule = await import(
+      `../../../src/utils/command.ts?command-version=${moduleCounter}`
+    );
     commandModule.clearCommandLookupCache();
   });
 
@@ -287,14 +299,20 @@ describe("detectAllToolStatuses with version", () => {
 
 describe("KNOWN_INSTALL_PATHS coverage", () => {
   beforeEach(async () => {
+    mock.restore();
     setupCommandMocks();
-    const { clearCommandLookupCache } =
-      await import("../../../src/utils/command.js");
+    const { clearCommandLookupCache } = await import(
+      `../../../src/utils/command.ts?command-version=${moduleCounter + 1}`
+    );
+    moduleCounter += 1;
     clearCommandLookupCache();
   });
 
   it("checks fallback paths for claude", async () => {
-    const { findCommand } = await import("../../../src/utils/command.js");
+    moduleCounter += 1;
+    const { findCommand } = await import(
+      `../../../src/utils/command.ts?command-version=${moduleCounter}`
+    );
 
     // This test verifies that fallback path checking works
     // by checking the result structure
@@ -306,7 +324,10 @@ describe("KNOWN_INSTALL_PATHS coverage", () => {
   });
 
   it("checks fallback paths for codex", async () => {
-    const { findCommand } = await import("../../../src/utils/command.js");
+    moduleCounter += 1;
+    const { findCommand } = await import(
+      `../../../src/utils/command.ts?command-version=${moduleCounter}`
+    );
 
     const result = await findCommand("codex");
 
@@ -316,7 +337,10 @@ describe("KNOWN_INSTALL_PATHS coverage", () => {
   });
 
   it("checks fallback paths for gemini", async () => {
-    const { findCommand } = await import("../../../src/utils/command.js");
+    moduleCounter += 1;
+    const { findCommand } = await import(
+      `../../../src/utils/command.ts?command-version=${moduleCounter}`
+    );
 
     const result = await findCommand("gemini");
 

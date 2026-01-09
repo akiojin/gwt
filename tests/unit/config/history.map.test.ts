@@ -9,7 +9,7 @@ import {
 } from "bun:test";
 import * as fsPromises from "node:fs/promises";
 
-let readFile: ReturnType<typeof spyOn<typeof fsPromises, "readFile">>;
+let readFile: ReturnType<typeof spyOn>;
 let getLastToolUsageMap: typeof import("../../../src/config/index.ts").getLastToolUsageMap;
 let importCounter = 0;
 
