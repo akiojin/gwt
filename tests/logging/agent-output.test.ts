@@ -6,8 +6,9 @@ import {
 } from "../../src/logging/agentOutput.js";
 
 describe("shouldCaptureAgentOutput", () => {
-  it("defaults to true and allows opt-out with false/0", () => {
-    expect(shouldCaptureAgentOutput({})).toBe(true);
+  it("defaults to false and allows opt-in with true/1", () => {
+    // Default is false to avoid PTY stdin/stdout conflicts with OpenTUI
+    expect(shouldCaptureAgentOutput({})).toBe(false);
     expect(shouldCaptureAgentOutput({ GWT_CAPTURE_AGENT_OUTPUT: "true" })).toBe(
       true,
     );
@@ -26,8 +27,9 @@ describe("shouldCaptureAgentOutput", () => {
     expect(
       shouldCaptureAgentOutput({ GWT_CAPTURE_AGENT_OUTPUT: "FALSE" }),
     ).toBe(false);
+    // Empty string defaults to false
     expect(shouldCaptureAgentOutput({ GWT_CAPTURE_AGENT_OUTPUT: "" })).toBe(
-      true,
+      false,
     );
   });
 });

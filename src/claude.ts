@@ -266,6 +266,11 @@ export async function launchClaudeCode(
       }
     };
 
+    // Treat SIGHUP (1), SIGINT (2), SIGTERM (15) as normal exit signals
+    // SIGHUP can occur when the PTY closes, SIGINT/SIGTERM are user interrupts
+    const isNormalExitSignal = (signal?: number | null) =>
+      signal === 1 || signal === 2 || signal === 15;
+
     const runCommand = async (file: string, fileArgs: string[]) => {
       if (captureOutput) {
         const result = await runAgentWithPty({
@@ -275,8 +280,9 @@ export async function launchClaudeCode(
           env: launchEnv,
           agentId: "claude-code",
         });
-        if (result.signal !== null && result.signal !== undefined) {
-          throw new Error(`Claude Code terminated by signal ${result.signal}`);
+        // Treat normal exit signals (SIGHUP, SIGINT, SIGTERM) as successful exit
+        if (isNormalExitSignal(result.signal)) {
+          return;
         }
         if (result.exitCode !== null && result.exitCode !== 0) {
           throw new Error(`Claude Code exited with code ${result.exitCode}`);

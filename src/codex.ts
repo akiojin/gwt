@@ -205,8 +205,10 @@ export async function launchCodexCLI(
         throw execError;
       }
     };
-    const isInterruptSignal = (signal?: number | null) =>
-      signal === 2 || signal === 15;
+    // Treat SIGHUP (1), SIGINT (2), SIGTERM (15) as normal exit signals
+    // SIGHUP can occur when the PTY closes, SIGINT/SIGTERM are user interrupts
+    const isNormalExitSignal = (signal?: number | null) =>
+      signal === 1 || signal === 2 || signal === 15;
     const runCommand = async (command: string, commandArgs: string[]) => {
       if (captureOutput) {
         const result = await runAgentWithPty({
@@ -216,7 +218,7 @@ export async function launchCodexCLI(
           env,
           agentId: "codex-cli",
         });
-        if (isInterruptSignal(result.signal)) {
+        if (isNormalExitSignal(result.signal)) {
           return;
         }
         if (result.exitCode !== null && result.exitCode !== 0) {

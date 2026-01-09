@@ -11,13 +11,15 @@ export function shouldCaptureAgentOutput(
 ): boolean {
   const raw = env[CAPTURE_AGENT_OUTPUT_ENV];
   if (raw === undefined) {
-    return true;
+    // Default to false to avoid PTY stdin/stdout conflicts with OpenTUI.
+    // Set GWT_CAPTURE_AGENT_OUTPUT=true to enable agent output logging.
+    return false;
   }
   const normalized = String(raw).trim().toLowerCase();
   if (!normalized) {
-    return true;
+    return false;
   }
-  return normalized !== "false" && normalized !== "0";
+  return normalized === "true" || normalized === "1";
 }
 
 // eslint-disable-next-line no-control-regex

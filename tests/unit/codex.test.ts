@@ -15,7 +15,11 @@ mock.module("fs", () => ({
 
 mock.module("os", () => ({
   platform: mock(() => "darwin"),
-  default: { platform: mock(() => "darwin") },
+  homedir: mock(() => "/mock/home"),
+  default: {
+    platform: mock(() => "darwin"),
+    homedir: mock(() => "/mock/home"),
+  },
 }));
 
 const stdoutWrite = mock();
@@ -254,33 +258,33 @@ describe("codex.ts", () => {
 
   describe("Launch/Exit Logs", () => {
     it("should display launch message with rocket emoji at startup", async () => {
-      const consoleSpy = spyOn(console, "log").mockImplementation(() => {});
+      stdoutWrite.mockClear();
 
       await launchCodexCLI(worktreePath);
 
-      // Verify that launch message is logged with 🚀 emoji
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining("🚀 Launching Codex CLI..."),
-      );
-
-      consoleSpy.mockRestore();
+      // Verify that launch message is logged with 🚀 emoji via terminal.stdout.write
+      const calls = stdoutWrite.mock.calls.map((c: unknown[]) => String(c[0]));
+      expect(
+        calls.some((c: string) => c.includes("🚀 Launching Codex CLI...")),
+      ).toBe(true);
     });
 
     it("should display working directory in launch logs", async () => {
-      const consoleSpy = spyOn(console, "log").mockImplementation(() => {});
+      stdoutWrite.mockClear();
 
       await launchCodexCLI(worktreePath);
 
       // Verify working directory is shown
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining(`Working directory: ${worktreePath}`),
-      );
-
-      consoleSpy.mockRestore();
+      const calls = stdoutWrite.mock.calls.map((c: unknown[]) => String(c[0]));
+      expect(
+        calls.some((c: string) =>
+          c.includes(`Working directory: ${worktreePath}`),
+        ),
+      ).toBe(true);
     });
 
     it("should display session ID after agent exits when captured", async () => {
-      const consoleSpy = spyOn(console, "log").mockImplementation(() => {});
+      stdoutWrite.mockClear();
 
       // Mock session detection to return a session ID
       const { findLatestCodexSession } =
@@ -296,24 +300,24 @@ describe("codex.ts", () => {
       await launchCodexCLI(worktreePath);
 
       // Verify session ID is displayed after exit
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining("🆔 Session ID: codex-session-456"),
-      );
-
-      consoleSpy.mockRestore();
+      const calls = stdoutWrite.mock.calls.map((c: unknown[]) => String(c[0]));
+      expect(
+        calls.some((c: string) =>
+          c.includes("🆔 Session ID: codex-session-456"),
+        ),
+      ).toBe(true);
     });
 
     it("should display model info when custom model is specified", async () => {
-      const consoleSpy = spyOn(console, "log").mockImplementation(() => {});
+      stdoutWrite.mockClear();
 
       await launchCodexCLI(worktreePath, { model: "gpt-5.2-codex" });
 
       // Verify model info is logged with 🎯 emoji
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining("🎯 Model: gpt-5.2-codex"),
-      );
-
-      consoleSpy.mockRestore();
+      const calls = stdoutWrite.mock.calls.map((c: unknown[]) => String(c[0]));
+      expect(
+        calls.some((c: string) => c.includes("🎯 Model: gpt-5.2-codex")),
+      ).toBe(true);
     });
   });
 });
