@@ -99,6 +99,8 @@ import { BRANCH_PREFIXES } from "../../config/constants.js";
 
 export type ExecutionMode = "normal" | "continue" | "resume";
 
+const UNSAFE_SELECTION_MESSAGE = "Unsafe branch selected. Select anyway?";
+
 export interface SelectionResult {
   branch: string;
   displayName: string;
@@ -279,6 +281,11 @@ export function AppSolid(props: AppSolidProps) {
   );
   const [selectedMode, setSelectedMode] = createSignal<ExecutionMode>("normal");
   const [selectedBranches, setSelectedBranches] = createSignal<string[]>([]);
+  const [unsafeSelectionConfirmVisible, setUnsafeSelectionConfirmVisible] =
+    createSignal(false);
+  const [unsafeSelectionTarget, setUnsafeSelectionTarget] = createSignal<
+    string | null
+  >(null);
   const [branchFooterMessage, setBranchFooterMessage] = createSignal<{
     text: string;
     isSpinning?: boolean;
@@ -1441,15 +1448,50 @@ export function AppSolid(props: AppSolidProps) {
   };
 
   const toggleSelectedBranch = (branchName: string) => {
-    setSelectedBranches((prev) => {
-      const next = new Set(prev);
-      if (next.has(branchName)) {
-        next.delete(branchName);
-      } else {
-        next.add(branchName);
-      }
-      return Array.from(next);
-    });
+    if (unsafeSelectionConfirmVisible()) {
+      return;
+    }
+    const currentSelection = new Set(selectedBranches());
+    if (currentSelection.has(branchName)) {
+      currentSelection.delete(branchName);
+      setSelectedBranches(Array.from(currentSelection));
+      return;
+    }
+
+    const branch = branchItems().find((item) => item.name === branchName);
+    const pending = cleanupSafetyPending();
+    const hasSafetyPending = pending.has(branchName);
+    const hasUncommitted = branch?.worktree?.hasUncommittedChanges === true;
+    const hasUnpushed = branch?.hasUnpushedCommits === true;
+    const isUnmerged = branch?.isUnmerged === true;
+    const safeToCleanup = branch?.safeToCleanup === true;
+    const isRemoteBranch = branch?.type === "remote";
+    const isUnsafe =
+      Boolean(branch) &&
+      !isRemoteBranch &&
+      !hasSafetyPending &&
+      (hasUncommitted || hasUnpushed || isUnmerged || !safeToCleanup);
+
+    if (branch && isUnsafe) {
+      setUnsafeSelectionTarget(branch.name);
+      setUnsafeSelectionConfirmVisible(true);
+      return;
+    }
+
+    currentSelection.add(branchName);
+    setSelectedBranches(Array.from(currentSelection));
+  };
+
+  const confirmUnsafeSelection = (confirmed: boolean) => {
+    const target = unsafeSelectionTarget();
+    setUnsafeSelectionConfirmVisible(false);
+    setUnsafeSelectionTarget(null);
+    if (!confirmed || !target) {
+      return;
+    }
+    setSelectedBranches((prev) =>
+      prev.includes(target) ? prev : [...prev, target],
+    );
   };
 
   const handleToolSelect = (item: SelectorItem) => {
@@ -1537,6 +1579,7 @@ export function AppSolid(props: AppSolidProps) {
           cleanupUI={cleanupUI}
           helpVisible={helpVisible()}
           wizardVisible={wizardVisible()}
+          confirmVisible={unsafeSelectionConfirmVisible()}
           cursorPosition={branchCursorPosition()}
           onCursorPositionChange={setBranchCursorPosition}
         />
@@ -1889,6 +1932,29 @@ export function AppSolid(props: AppSolidProps) {
   return (
     <>
       {renderCurrentScreen()}
+      {unsafeSelectionConfirmVisible() && (
+        <box
+          position="absolute"
+          top="30%"
+          left="20%"
+          width="60%"
+          zIndex={110}
+          border
+          borderStyle="single"
+          borderColor="yellow"
+          backgroundColor="black"
+          padding={1}
+        >
+          <ConfirmScreen
+            message={UNSAFE_SELECTION_MESSAGE}
+            onConfirm={confirmUnsafeSelection}
+            yesLabel="OK"
+            noLabel="Cancel"
+            defaultNo
+            helpVisible={helpVisible()}
+          />
+        </box>
+      )}
       <HelpOverlay visible={helpVisible()} context={currentScreen()} />
       {/* FR-044: ウィザードポップアップをレイヤー表示 */}
       <WizardController

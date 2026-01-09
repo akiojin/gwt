@@ -57,6 +57,8 @@ export interface BranchListScreenProps {
   helpVisible?: boolean;
   /** ウィザードポップアップ表示中は入力を無効化 */
   wizardVisible?: boolean;
+  /** 確認ダイアログ表示中は入力を無効化 */
+  confirmVisible?: boolean;
   /** カーソル位置（外部から制御する場合） */
   cursorPosition?: number;
   /** カーソル位置変更時のコールバック */
@@ -531,6 +533,9 @@ export function BranchListScreen(props: BranchListScreenProps) {
   useKeyboard((key) => {
     // FR-044: ウィザードポップアップ表示中は入力を無効化
     if (props.wizardVisible) {
+      return;
+    }
+    if (props.confirmVisible) {
       return;
     }
     if (props.helpVisible) {

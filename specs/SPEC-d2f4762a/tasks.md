@@ -132,6 +132,21 @@
 - [x] **T507** [US9] `src/cli/ui/components/solid/QuickStartStep.tsx` にクイック選択ステップコンポーネントを作成
 - [x] **T508** [US9] `src/cli/ui/components/solid/WizardController.tsx` にクイック選択ステップの統合（履歴有無による分岐）
 
+## フェーズ11: ユーザーストーリー4 - unsafeブランチ選択の確認 (優先度: P1)
+
+**ストーリー**: 安全ではないブランチを`space`でチェックしようとした場合、警告OK/Cancelを表示し、OKでチェック、Cancelで未選択を維持する。
+
+**価値**: 誤削除リスクの高いブランチを選択する際に、意図確認を必須化できる。
+
+### テスト（TDD）
+
+- [x] **T961** [US4] `src/cli/ui/__tests__/solid/AppSolid.cleanup.test.tsx` にunsafeブランチ選択時の警告表示とOK/Cancel動作のテストを追加
+
+### 実装
+
+- [x] **T962** [US4] `src/cli/ui/App.solid.tsx` にunsafe選択時の警告OK/Cancel表示と選択確定/維持ロジックを追加
+- [x] **T963** [US4] `src/cli/ui/screens/solid/BranchListScreen.tsx` に警告表示中の入力ロックを追加
+
 ## フェーズ7: ユーザーストーリー7 - 選択中Worktreeフルパス表示 (優先度: P2)
 
 **ストーリー**: ブランチ一覧のフッター直上に、選択中ブランチのWorktreeフルパスを表示する。Worktreeが存在しないが現在ブランチの場合は起動時の作業ディレクトリを表示し、ブランチ一覧が空の場合は`Worktree: (none)`を表示する。
