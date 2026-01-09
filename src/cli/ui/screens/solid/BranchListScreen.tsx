@@ -53,6 +53,10 @@ export interface BranchListScreenProps {
   helpVisible?: boolean;
   /** ウィザードポップアップ表示中は入力を無効化 */
   wizardVisible?: boolean;
+  /** カーソル位置（外部から制御する場合） */
+  cursorPosition?: number;
+  /** カーソル位置変更時のコールバック */
+  onCursorPositionChange?: (index: number) => void;
 }
 
 const VIEW_MODES: BranchViewMode[] = ["all", "local", "remote"];
@@ -299,7 +303,21 @@ export function BranchListScreen(props: BranchListScreenProps) {
   const [filterQuery, setFilterQuery] = createSignal("");
   const [filterMode, setFilterMode] = createSignal(false);
   const [viewMode, setViewMode] = createSignal<BranchViewMode>("all");
-  const [selectedIndex, setSelectedIndex] = createSignal(0);
+
+  // カーソル位置: 外部制御（props.cursorPosition）が優先、なければ内部状態を使用
+  const [internalSelectedIndex, setInternalSelectedIndex] = createSignal(
+    props.cursorPosition ?? 0,
+  );
+  const selectedIndex = () => props.cursorPosition ?? internalSelectedIndex();
+  const setSelectedIndex = (
+    value: number | ((prev: number) => number),
+  ): void => {
+    const newValue =
+      typeof value === "function" ? value(selectedIndex()) : value;
+    setInternalSelectedIndex(newValue);
+    props.onCursorPositionChange?.(newValue);
+  };
+
   const [scrollOffset, setScrollOffset] = createSignal(0);
   const [cleanupSpinnerIndex, setCleanupSpinnerIndex] = createSignal(0);
   const [cursorIndex, setCursorIndex] = createSignal(0);

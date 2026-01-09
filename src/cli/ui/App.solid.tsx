@@ -260,6 +260,9 @@ export function AppSolid(props: AppSolidProps) {
   const [loading, setLoading] = createSignal(!props.branches);
   const [error, setError] = createSignal<Error | null>(null);
 
+  // ブランチ一覧のカーソル位置（グローバル管理で再マウント時もリセットされない）
+  const [branchCursorPosition, setBranchCursorPosition] = createSignal(0);
+
   const [toolItems, setToolItems] = createSignal<SelectorItem[]>([]);
   const [toolError, setToolError] = createSignal<Error | null>(null);
 
@@ -1459,6 +1462,8 @@ export function AppSolid(props: AppSolidProps) {
           cleanupUI={cleanupUI}
           helpVisible={helpVisible()}
           wizardVisible={wizardVisible()}
+          cursorPosition={branchCursorPosition()}
+          onCursorPositionChange={setBranchCursorPosition}
         />
       );
     }
