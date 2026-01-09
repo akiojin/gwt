@@ -217,7 +217,7 @@ export async function waitForClaudeSessionId(
   const deadline = Date.now() + timeoutMs;
 
   // Build search options once outside the loop
-  const searchOptions: Omit<SessionSearchOptions, "cwd"> = {};
+  const searchOptions: SessionSearchOptions = {};
   if (options.since !== undefined) searchOptions.since = options.since;
   if (options.until !== undefined) searchOptions.until = options.until;
   if (options.preferClosestTo !== undefined)
@@ -229,7 +229,10 @@ export async function waitForClaudeSessionId(
   if (options.cwd !== undefined) searchOptions.cwd = options.cwd;
 
   while (Date.now() < deadline) {
-    const found = await findLatestClaudeSession(cwd, searchOptions);
+    const found = await findLatestClaudeSession(
+      options.cwd ?? cwd,
+      searchOptions,
+    );
     if (found?.id) return found.id;
     await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
   }
