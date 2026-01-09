@@ -8,6 +8,7 @@ export interface FormattedLogEntry {
   message: string;
   summary: string;
   json: string;
+  displayJson: string;
 }
 
 const LEVEL_LABELS: Record<number, string> = {
@@ -26,6 +27,16 @@ const LOCAL_TIME_FORMATTER = new Intl.DateTimeFormat(undefined, {
   hour12: false,
 });
 
+const TIME_KEYS = new Set([
+  "time",
+  "timestamp",
+  "startedAt",
+  "endedAt",
+  "updatedAt",
+  "createdAt",
+  "lastUpdated",
+]);
+
 const formatLocalTimeParts = (date: Date): string => {
   const parts = LOCAL_TIME_FORMATTER.formatToParts(date);
   const get = (type: Intl.DateTimeFormatPartTypes) =>
@@ -40,6 +51,82 @@ const formatLocalTimeParts = (date: Date): string => {
 
   return `${hour}:${minute}:${second}`;
 };
+
+const pad = (value: number, length = 2) => String(value).padStart(length, "0");
+
+const formatLocalIso = (date: Date): string => {
+  const year = date.getFullYear();
+  const month = pad(date.getMonth() + 1);
+  const day = pad(date.getDate());
+  const hour = pad(date.getHours());
+  const minute = pad(date.getMinutes());
+  const second = pad(date.getSeconds());
+  const millisecond = pad(date.getMilliseconds(), 3);
+  const offsetMinutes = -date.getTimezoneOffset();
+  const sign = offsetMinutes >= 0 ? "+" : "-";
+  const offsetAbs = Math.abs(offsetMinutes);
+  const offsetHour = pad(Math.floor(offsetAbs / 60));
+  const offsetMinute = pad(offsetAbs % 60);
+  return `${year}-${month}-${day}T${hour}:${minute}:${second}.${millisecond}${sign}${offsetHour}:${offsetMinute}`;
+};
+
+const parseTimestampValue = (value: unknown): Date | null => {
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value;
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const normalized = value < 1_000_000_000_000 ? value * 1000 : value;
+    const date = new Date(normalized);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    if (/^\\d+$/.test(trimmed)) {
+      const parsed = Number(trimmed);
+      if (Number.isFinite(parsed)) {
+        const normalized = parsed < 1_000_000_000_000 ? parsed * 1000 : parsed;
+        const date = new Date(normalized);
+        return Number.isNaN(date.getTime()) ? null : date;
+      }
+    }
+    const date = new Date(trimmed);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+  return null;
+};
+
+const formatLogDisplayValue = (value: unknown, key?: string): unknown => {
+  if (key && TIME_KEYS.has(key)) {
+    const date = parseTimestampValue(value);
+    if (date) {
+      return formatLocalIso(date);
+    }
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => formatLogDisplayValue(item));
+  }
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>).map(
+      ([entryKey, entryValue]) => [
+        entryKey,
+        formatLogDisplayValue(entryValue, entryKey),
+      ],
+    );
+    return Object.fromEntries(entries);
+  }
+  return value;
+};
+
+const formatLogDisplayPayload = (
+  payload: Record<string, unknown>,
+): Record<string, unknown> =>
+  Object.fromEntries(
+    Object.entries(payload).map(([key, value]) => [
+      key,
+      formatLogDisplayValue(value, key),
+    ]),
+  );
 
 const formatTimeLabel = (
   value: unknown,
@@ -98,6 +185,11 @@ export function parseLogLines(
       const summary =
         `[${timeLabel}] [${levelLabel}] [${category}] ${message}`.trim();
       const json = JSON.stringify(parsed, null, 2);
+      const displayJson = JSON.stringify(
+        formatLogDisplayPayload(parsed),
+        null,
+        2,
+      );
       const id = `${timestamp ?? "unknown"}-${index}`;
 
       entries.push({
@@ -110,6 +202,7 @@ export function parseLogLines(
         message,
         summary,
         json,
+        displayJson,
       });
     } catch {
       // Skip malformed JSON lines

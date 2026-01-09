@@ -43,7 +43,7 @@ export function LogDetailScreen({
     if (!entry) {
       return ["No logs available."];
     }
-    return entry.json.split("\n");
+    return (entry.displayJson ?? entry.json).split("\n");
   });
 
   const footerActions = [

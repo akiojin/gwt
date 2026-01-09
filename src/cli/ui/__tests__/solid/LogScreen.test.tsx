@@ -18,6 +18,7 @@ const makeEntry = (
   message,
   summary: `[00:00:00] [INFO] [cli] ${message}`,
   json: JSON.stringify({ message }, null, 2),
+  displayJson: JSON.stringify({ message }, null, 2),
   ...overrides,
 });
 
