@@ -25,6 +25,8 @@ Phase 6 (US4: 残りスクリーン)
 Phase 7 (US5: ヘルプオーバーレイ)
                               ↓
 Phase 8 (統合・仕上げ)
+                              ↓
+Phase 9 (US6: OpenTUI 内蔵コンソール無効化)
 ```
 
 ## フェーズ1: セットアップ（共有インフラストラクチャ）
@@ -238,6 +240,20 @@ Phase 8 (統合・仕上げ)
 - [x] **T714** [統合] `bunx --bun markdownlint-cli "**/*.md" --config .markdownlint.json --ignore-path .markdownlintignore` 成功を確認
 - [x] **T715** [統合] `bun run lint` 成功を確認
 - [x] **T716** [統合] `bun run type-check` 成功を確認
+
+## フェーズ9: US6 - OpenTUI 内蔵コンソール無効化
+
+**ストーリー**: OpenTUI の内蔵コンソールを無効化し、UI オーバーレイ表示を抑止する
+
+**価値**: Docker/TTY 環境でも UI がログコンソールに遮られない
+
+### テスト（TDD 必須）
+
+- [x] **T717** [US6] `tests/unit/main.opentui-console.test.ts` に OpenTUI レンダラー設定で内蔵コンソールが無効化されることのテストを追加
+
+### 実装
+
+- [x] **T718** [US6] T717の後に `src/index.ts` で OpenTUI レンダラー設定の内蔵コンソール無効化を適用
 - [x] **T717** [統合] `bun run build` 成功を確認
 
 ### ドキュメント
