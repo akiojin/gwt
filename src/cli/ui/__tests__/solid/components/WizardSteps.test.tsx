@@ -1,15 +1,24 @@
 /** @jsxImportSource @opentui/solid */
-import { describe, expect, it } from "bun:test";
+import { beforeEach, describe, expect, it } from "bun:test";
 import { testRender } from "@opentui/solid";
 import {
   BranchTypeStep,
   BranchNameStep,
   AgentSelectStep,
+  VersionSelectStep,
   ModelSelectStep,
   ReasoningLevelStep,
   ExecutionModeStep,
   SkipPermissionsStep,
 } from "../../../components/solid/WizardSteps.js";
+import {
+  clearInstalledVersionCache,
+  setInstalledVersionCache,
+} from "../../../utils/installedVersionCache.js";
+import {
+  clearVersionCache,
+  setVersionCache,
+} from "../../../utils/versionCache.js";
 
 // T405: ブランチタイプ選択ステップのテスト
 describe("BranchTypeStep", () => {
@@ -122,6 +131,65 @@ describe("AgentSelectStep", () => {
     try {
       const frame = testSetup.captureCharFrame();
       expect(frame).toContain("Claude Code");
+    } finally {
+      testSetup.renderer.destroy();
+    }
+  });
+});
+
+// T407a: バージョン選択ステップのテスト
+describe("VersionSelectStep", () => {
+  beforeEach(() => {
+    clearInstalledVersionCache();
+    clearVersionCache();
+  });
+
+  it("renders installed option from cache", async () => {
+    setInstalledVersionCache("claude-code", {
+      version: "1.2.3",
+      path: "/usr/local/bin/claude",
+    });
+    setVersionCache("claude-code", []);
+
+    const testSetup = await testRender(
+      () => (
+        <VersionSelectStep
+          agentId="claude-code"
+          onSelect={() => {}}
+          onBack={() => {}}
+        />
+      ),
+      { width: 60, height: 20 },
+    );
+    await testSetup.renderOnce();
+
+    try {
+      const frame = testSetup.captureCharFrame();
+      expect(frame).toContain("Select version");
+      expect(frame).toContain("installed@1.2.3");
+      expect(frame).toContain("latest");
+    } finally {
+      testSetup.renderer.destroy();
+    }
+  });
+
+  it("does not render installed option when cache is empty", async () => {
+    const testSetup = await testRender(
+      () => (
+        <VersionSelectStep
+          agentId="claude-code"
+          onSelect={() => {}}
+          onBack={() => {}}
+        />
+      ),
+      { width: 60, height: 20 },
+    );
+    await testSetup.renderOnce();
+
+    try {
+      const frame = testSetup.captureCharFrame();
+      expect(frame).toContain("latest");
+      expect(frame).not.toContain("installed@");
     } finally {
       testSetup.renderer.destroy();
     }
