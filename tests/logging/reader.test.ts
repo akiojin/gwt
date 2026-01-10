@@ -6,6 +6,7 @@ import {
   readLogLinesForDate,
   resolveLogDir,
   resolveLogTarget,
+  selectLogTargetByRecency,
 } from "../../src/logging/reader.js";
 
 const TMP_DIR = path.join(process.cwd(), ".tmp-log-reader");
@@ -48,8 +49,12 @@ describe("readLogLinesForDate", () => {
   it("falls back to the latest available log file when preferred is missing", async () => {
     const latest = sampleLine("latest");
     const older = sampleLine("older");
-    writeLogFile("2026-01-07", [latest]);
-    writeLogFile("2026-01-05", [older]);
+    const latestPath = writeLogFile("2026-01-07", [latest]);
+    const olderPath = writeLogFile("2026-01-05", [older]);
+    const oldTime = new Date("2026-01-06T00:00:00.000Z");
+    const newTime = new Date("2026-01-09T00:00:00.000Z");
+    fs.utimesSync(olderPath, oldTime, oldTime);
+    fs.utimesSync(latestPath, newTime, newTime);
 
     const result = await readLogLinesForDate(TMP_DIR, "2026-01-08");
 
@@ -66,6 +71,22 @@ describe("readLogLinesForDate", () => {
 
     expect(result?.date).toBe("2026-01-07");
     expect(result?.lines).toEqual([fallback]);
+  });
+
+  it("prefers newest mtime when falling back to available logs", async () => {
+    const olderLine = sampleLine("older");
+    const newestLine = sampleLine("newest");
+    const olderPath = writeLogFile("2026-01-07", [olderLine]);
+    const newestPath = writeLogFile("2026-01-05", [newestLine]);
+    const oldTime = new Date("2026-01-08T00:00:00.000Z");
+    const newTime = new Date("2026-01-10T00:00:00.000Z");
+    fs.utimesSync(olderPath, oldTime, oldTime);
+    fs.utimesSync(newestPath, newTime, newTime);
+
+    const result = await readLogLinesForDate(TMP_DIR, "2026-01-09");
+
+    expect(result?.date).toBe("2026-01-05");
+    expect(result?.lines).toEqual([newestLine]);
   });
 });
 
@@ -160,5 +181,50 @@ describe("resolveLogTarget", () => {
     expect(result.logDir).toBe(resolveLogDir("/repo/root"));
     expect(result.sourcePath).toBe("/repo/root");
     expect(result.reason).toBe("working-directory");
+  });
+});
+
+describe("selectLogTargetByRecency", () => {
+  const PRIMARY_DIR = path.join(TMP_DIR, "primary");
+  const FALLBACK_DIR = path.join(TMP_DIR, "fallback");
+
+  beforeEach(() => {
+    fs.rmSync(TMP_DIR, { recursive: true, force: true });
+    fs.mkdirSync(PRIMARY_DIR, { recursive: true });
+    fs.mkdirSync(FALLBACK_DIR, { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(TMP_DIR, { recursive: true, force: true });
+  });
+
+  it("falls back to working directory when primary logs are older", async () => {
+    const primaryLine = sampleLine("primary");
+    const fallbackLine = sampleLine("fallback");
+    const primaryPath = path.join(PRIMARY_DIR, "2026-01-08.jsonl");
+    const fallbackPath = path.join(FALLBACK_DIR, "2026-01-08.jsonl");
+    fs.writeFileSync(primaryPath, `${primaryLine}\n`);
+    fs.writeFileSync(fallbackPath, `${fallbackLine}\n`);
+
+    const oldTime = new Date("2026-01-08T00:00:00.000Z");
+    const newTime = new Date("2026-01-10T00:00:00.000Z");
+    fs.utimesSync(primaryPath, oldTime, oldTime);
+    fs.utimesSync(fallbackPath, newTime, newTime);
+
+    const primary = {
+      logDir: PRIMARY_DIR,
+      sourcePath: "/tmp/worktree",
+      reason: "worktree" as const,
+    };
+    const fallback = {
+      logDir: FALLBACK_DIR,
+      sourcePath: "/repo/root",
+      reason: "working-directory" as const,
+    };
+
+    const selected = await selectLogTargetByRecency(primary, fallback);
+
+    expect(selected.logDir).toBe(FALLBACK_DIR);
+    expect(selected.reason).toBe("working-directory-fallback");
   });
 });
