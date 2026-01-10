@@ -119,7 +119,6 @@ export async function findLatestCodexSession(
       return { id: sessionId, mtime: file.mtime };
     }
 
-    // Priority 2: Fallback to reading file content if filename lacks UUID
     // (already handled via info above)
   }
 
