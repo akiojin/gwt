@@ -83,6 +83,11 @@ mock.module("../../src/utils/session", () => ({
   findLatestCodexSession: mock(async () => null),
 }));
 
+const mockFindCommand = mock();
+mock.module("../../src/utils/command", () => ({
+  findCommand: (...args: unknown[]) => mockFindCommand(...args),
+}));
+
 import { execa } from "execa";
 import {
   DEFAULT_CODEX_MODEL,
@@ -143,6 +148,13 @@ describe("codex.ts", () => {
     mockChildStdio.stdout = "inherit";
     mockChildStdio.stderr = "inherit";
     mockExeca.mockImplementation(() => createChildProcess());
+    mockFindCommand.mockReset();
+    mockFindCommand.mockResolvedValue({
+      available: true,
+      path: null,
+      source: "bunx",
+      version: null,
+    });
   });
 
   it("uses gpt-5.2-codex as the default model", () => {
@@ -262,7 +274,7 @@ describe("codex.ts", () => {
     mockChildStdio.stderr = "inherit";
   });
 
-  it("should include --enable skills in default arguments (FR-202)", async () => {
+  it("should omit --enable skills in default arguments (FR-202)", async () => {
     await launchCodexCLI(worktreePath);
 
     const args = getExecaArgs();
@@ -273,8 +285,26 @@ describe("codex.ts", () => {
         arg === "--enable" && args[i + 1] === "skills",
     );
 
+    expect(enableIndex).toBe(-1);
+  });
+
+  it("should include --enable skills when using pre-0.80 installed Codex", async () => {
+    mockFindCommand.mockResolvedValueOnce({
+      available: true,
+      path: "/usr/bin/codex",
+      source: "installed",
+      version: "v0.79.0",
+    });
+
+    await launchCodexCLI(worktreePath, { version: "installed" });
+
+    const args = getExecaArgs();
+    const enableIndex = args.findIndex(
+      (arg: string, i: number) =>
+        arg === "--enable" && args[i + 1] === "skills",
+    );
+
     expect(enableIndex).toBeGreaterThan(-1);
-    expect(args[enableIndex]).toBe("--enable");
     expect(args[enableIndex + 1]).toBe("skills");
   });
 
@@ -290,7 +320,11 @@ describe("codex.ts", () => {
     expect(stdoutWrite).toHaveBeenCalledWith(
       expect.stringContaining("--enable"),
     );
-    expect(stdoutWrite).toHaveBeenCalledWith(expect.stringContaining("skills"));
+    expect(stdoutWrite).toHaveBeenCalledWith(
+      expect.stringContaining("web_search_request"),
+    );
+    const calls = stdoutWrite.mock.calls.map((c: unknown[]) => String(c[0]));
+    expect(calls.some((c: string) => c.includes("skills"))).toBe(false);
   });
 
   describe("Launch/Exit Logs", () => {
