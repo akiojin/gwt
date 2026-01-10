@@ -1,4 +1,5 @@
 import { describe, it, expect, spyOn, beforeEach, afterEach } from "bun:test";
+import { getPackageVersion } from "./utils";
 import * as utils from "./utils";
 
 // showVersion関数のテスト（TDD Green phase）
@@ -28,7 +29,6 @@ describe("showVersion via CLI args", () => {
     consoleLogSpy.mockRestore();
     consoleErrorSpy.mockRestore();
     processExitSpy.mockRestore();
-
     // process.argvを復元
     process.argv = originalArgv;
   });
@@ -37,32 +37,34 @@ describe("showVersion via CLI args", () => {
     // Arrange: CLIフラグを設定
     process.argv = ["node", "index.js", "--version"];
 
-    // getPackageVersion()をモック
-    const mockVersion = "2.6.1";
-    spyOn(utils, "getPackageVersion").mockResolvedValue(mockVersion);
+    const expectedVersion = await getPackageVersion();
+    if (!expectedVersion) {
+      throw new Error("Failed to resolve package version for test.");
+    }
 
     // Act: main()を呼び出す
     const { main } = await import("./index");
     await main();
 
     // Assert: 標準出力にバージョンが表示されることを期待
-    expect(consoleLogSpy).toHaveBeenCalledWith(mockVersion);
+    expect(consoleLogSpy).toHaveBeenCalledWith(expectedVersion);
   }, 30000);
 
   it("正常系: -vフラグでバージョンを表示する", async () => {
     // Arrange: CLIフラグを設定
     process.argv = ["node", "index.js", "-v"];
 
-    // getPackageVersion()をモック
-    const mockVersion = "1.12.3";
-    spyOn(utils, "getPackageVersion").mockResolvedValue(mockVersion);
+    const expectedVersion = await getPackageVersion();
+    if (!expectedVersion) {
+      throw new Error("Failed to resolve package version for test.");
+    }
 
     // Act: main()を呼び出す
     const { main } = await import("./index");
     await main();
 
     // Assert: 標準出力にバージョンが表示されることを期待
-    expect(consoleLogSpy).toHaveBeenCalledWith(mockVersion);
+    expect(consoleLogSpy).toHaveBeenCalledWith(expectedVersion);
   }, 30000);
 
   // Note: This test is skipped due to module caching issues in CI environment
@@ -72,7 +74,10 @@ describe("showVersion via CLI args", () => {
     process.argv = ["node", "index.js", "--version"];
 
     // getPackageVersion()をモックしてnullを返す
-    spyOn(utils, "getPackageVersion").mockResolvedValue(null);
+    const getPackageVersionSpy = spyOn(
+      utils,
+      "getPackageVersion",
+    ).mockResolvedValue(null);
 
     // Act: main()を呼び出す
     const { main } = await import("./index");
@@ -83,5 +88,6 @@ describe("showVersion via CLI args", () => {
       expect.stringContaining("Error"),
     );
     expect(processExitSpy).toHaveBeenCalledWith(1);
+    getPackageVersionSpy.mockRestore();
   });
 });

@@ -183,8 +183,6 @@ describe("BranchListScreen worktree footer", () => {
   it("falls back to working directory for current branch without worktree", async () => {
     const branch = createBranch({
       isCurrent: true,
-      worktree: undefined,
-      worktreeStatus: undefined,
     });
     const testSetup = await renderBranchList({
       branches: [branch],
@@ -236,6 +234,29 @@ describe("BranchListScreen shortcut hints", () => {
       expect(frame).not.toContain("[f] Filter");
       expect(frame).not.toContain("[tab] Mode");
       expect(frame).not.toContain("[p] Profiles");
+    } finally {
+      testSetup.renderer.destroy();
+    }
+  });
+});
+
+describe("BranchListScreen status legend", () => {
+  it("shows legend for uncommitted/unpushed/unmerged indicators", async () => {
+    const branch = createBranch({
+      name: "feature/legend",
+      label: "feature/legend",
+      value: "feature/legend",
+    });
+    const testSetup = await renderBranchList({
+      branches: [branch],
+      stats: makeStats({ localCount: 1 }),
+    });
+
+    try {
+      const frame = testSetup.captureCharFrame();
+      expect(frame).toContain(
+        "Legend: o Safe  ! Uncommitted  ! Unpushed  * Unmerged",
+      );
     } finally {
       testSetup.renderer.destroy();
     }

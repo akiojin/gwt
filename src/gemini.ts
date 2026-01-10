@@ -49,6 +49,7 @@ export async function launchGeminiCLI(
     envOverrides?: Record<string, string>;
     model?: string;
     sessionId?: string | null;
+    branch?: string | null;
     version?: string | null;
   } = {},
 ): Promise<{ sessionId?: string | null }> {
@@ -202,8 +203,10 @@ export async function launchGeminiCLI(
           throw execError;
         }
       };
-      const isInterruptSignal = (signal?: number | null) =>
-        signal === 2 || signal === 15;
+      // Treat SIGHUP (1), SIGINT (2), SIGTERM (15) as normal exit signals
+      // SIGHUP can occur when the PTY closes, SIGINT/SIGTERM are user interrupts
+      const isNormalExitSignal = (signal?: number | null) =>
+        signal === 1 || signal === 2 || signal === 15;
 
       const run = async (cmd: string, args: string[]) => {
         if (captureOutput) {
@@ -214,7 +217,7 @@ export async function launchGeminiCLI(
             env: baseEnv,
             agentId: "gemini-cli",
           });
-          if (isInterruptSignal(result.signal)) {
+          if (isNormalExitSignal(result.signal)) {
             return;
           }
           if (result.exitCode !== null && result.exitCode !== 0) {
@@ -292,6 +295,10 @@ export async function launchGeminiCLI(
         capturedSessionId =
           (await findLatestGeminiSessionId(worktreePath, {
             cwd: worktreePath,
+            branch: options.branch ?? null,
+            worktrees: options.branch
+              ? [{ path: worktreePath, branch: options.branch }]
+              : null,
           })) ?? null;
       } catch {
         capturedSessionId = null;

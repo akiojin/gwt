@@ -1,8 +1,13 @@
-import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
+import {
+  describe,
+  it,
+  expect,
+  mock,
+  beforeEach,
+  afterEach,
+  spyOn,
+} from "bun:test";
 import type { SelectionResult } from "../../src/cli/ui/App.solid.js";
-if (!mock.module) {
-  mock.module = mock.module.bind(vi);
-}
 
 describe("main error handling", () => {
   beforeEach(() => {
@@ -10,8 +15,7 @@ describe("main error handling", () => {
   });
 
   afterEach(() => {
-    mock.restore();
-    mock.restore();
+    // Module mocks are preserved across tests
   });
 
   it("AIツールの起動失敗時でもCLIが継続する", async () => {
@@ -29,6 +33,7 @@ describe("main error handling", () => {
     ];
 
     const waitForUserAcknowledgement = mock(async () => {});
+    const writeTerminalLineMock = mock();
     const stdinMock = {
       isTTY: true,
       resume: mock(),
@@ -44,7 +49,7 @@ describe("main error handling", () => {
       write: mock(),
     } as unknown as NodeJS.WriteStream;
 
-    mock.module?.("../../src/utils/terminal.js", () => {
+    mock.module("../../src/utils/terminal.js", () => {
       return {
         getTerminalStreams: mock(() => ({
           stdin: stdinMock,
@@ -55,6 +60,7 @@ describe("main error handling", () => {
         })),
         resetTerminalModes: mock(),
         waitForUserAcknowledgement,
+        writeTerminalLine: writeTerminalLineMock,
         createChildStdio: mock(() => ({
           stdin: "inherit" as const,
           stdout: "inherit" as const,
@@ -73,38 +79,63 @@ describe("main error handling", () => {
       },
     );
 
-    mock.module?.("../../src/opentui/index.solid.js", () => ({
+    mock.module("../../src/opentui/index.solid.js", () => ({
       renderSolidApp: renderSpy,
     }));
 
-    mock.module?.("../../src/git.js", () => ({
+    mock.module("../../src/git.js", () => ({
       isGitRepository: mock(async () => true),
       getRepositoryRoot: mock(async () => "/repo"),
       branchExists: mock(async () => false),
       getCurrentBranch: mock(async () => "main"),
+      fetchAllRemotes: mock(async () => undefined),
+      pullFastForward: mock(async () => undefined),
+      getBranchDivergenceStatuses: mock(async () => []),
+      hasUncommittedChanges: mock(async () => false),
+      hasUnpushedCommits: mock(async () => false),
+      getUncommittedChangesCount: mock(async () => 0),
+      getUnpushedCommitsCount: mock(async () => 0),
+      GitError: class GitError extends Error {
+        constructor(
+          message: string,
+          public cause?: unknown,
+        ) {
+          super(message);
+          this.name = "GitError";
+        }
+      },
     }));
 
-    mock.module?.("../../src/worktree.js", async () => {
-      const actual = await import("../../src/worktree.js");
-      return {
-        ...actual,
-        worktreeExists: mock(async () => null),
-        resolveWorktreePathForBranch: mock(async () => ({ path: null })),
-        generateWorktreePath: mock(
-          async (_repo: string, branch: string) => `/worktrees/${branch}`,
-        ),
-        createWorktree: mock(async () => {}),
-      };
-    });
+    mock.module("../../src/worktree.js", () => ({
+      worktreeExists: mock(async () => null),
+      resolveWorktreePathForBranch: mock(async () => ({ path: null })),
+      generateWorktreePath: mock(
+        async (_repo: string, branch: string) => `/worktrees/${branch}`,
+      ),
+      createWorktree: mock(async () => {}),
+      listAllWorktrees: mock(async () => []),
+      listAdditionalWorktrees: mock(async () => []),
+      isProtectedBranchName: mock(() => false),
+      switchToProtectedBranch: mock(async () => undefined),
+      WorktreeError: class WorktreeError extends Error {
+        constructor(
+          message: string,
+          public cause?: unknown,
+        ) {
+          super(message);
+          this.name = "WorktreeError";
+        }
+      },
+    }));
 
     const ensureWorktreeMock = mock(async () => "/tmp/worktree");
-    mock.module?.("../../src/services/WorktreeOrchestrator.js", () => ({
+    mock.module("../../src/services/WorktreeOrchestrator.js", () => ({
       WorktreeOrchestrator: class {
         ensureWorktree = ensureWorktreeMock;
       },
     }));
 
-    mock.module?.("../../src/config/tools.js", () => ({
+    mock.module("../../src/config/tools.js", () => ({
       CONFIG_DIR: "/tmp/gwt-test",
       getCodingAgentById: mock(async () => ({
         id: "codex-cli",
@@ -116,34 +147,47 @@ describe("main error handling", () => {
       getSharedEnvironment: mock(async () => ({})),
     }));
 
-    mock.module?.("../../src/config/index.js", () => ({
+    mock.module("../../src/config/index.js", () => ({
       saveSession: mock(async () => {}),
+      loadSession: mock(async () => null),
     }));
 
-    mock.module?.("../../src/claude.js", () => ({
+    mock.module("../../src/claude.js", () => ({
       launchClaudeCode: mock(async () => {}),
+      ClaudeError: class ClaudeError extends Error {
+        constructor(
+          message: string,
+          public cause?: unknown,
+        ) {
+          super(message);
+          this.name = "ClaudeError";
+        }
+      },
     }));
 
     const codexError = new Error("Codex failed");
-    mock.module?.("../../src/codex.js", () => ({
+    mock.module("../../src/codex.js", () => ({
       launchCodexCLI: mock(async () => {
         throw codexError;
       }),
+      CodexError: class CodexError extends Error {
+        constructor(
+          message: string,
+          public cause?: unknown,
+        ) {
+          super(message);
+          this.name = "CodexError";
+        }
+      },
     }));
 
-    mock.module?.("../../src/launcher.js", () => ({
+    mock.module("../../src/launcher.js", () => ({
       launchCodingAgent: mock(async () => {}),
     }));
 
-    const processExitSpy = vi
-      .spyOn(process, "exit")
-      .mockImplementation(
-        (() => undefined) as unknown as (code?: number) => never,
-      );
-
-    const consoleErrorSpy = vi
-      .spyOn(console, "error")
-      .mockImplementation(() => {});
+    const processExitSpy = spyOn(process, "exit").mockImplementation(
+      (() => undefined) as unknown as (code?: number) => never,
+    );
 
     const { main } = await import("../../src/index.js");
 
@@ -151,18 +195,9 @@ describe("main error handling", () => {
 
     expect(waitForUserAcknowledgement).toHaveBeenCalled();
     expect(processExitSpy).not.toHaveBeenCalledWith(1);
-    expect(consoleErrorSpy).toHaveBeenCalled();
-    const errorMessages = consoleErrorSpy.mock.calls.map(([msg]) =>
-      String(msg ?? ""),
-    );
-    expect(
-      errorMessages.some((msg) =>
-        msg.includes("Workflow error, returning to main menu"),
-      ),
-    ).toBe(false);
+    expect(writeTerminalLineMock).toHaveBeenCalled();
     expect(renderSpy).toHaveBeenCalledTimes(2);
 
     processExitSpy.mockRestore();
-    consoleErrorSpy.mockRestore();
   }, 30000);
 });

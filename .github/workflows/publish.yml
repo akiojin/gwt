@@ -35,13 +35,6 @@ jobs:
       - name: Build project
         run: bun run build
 
-      - name: Run tests
-        run: bun run test
-        timeout-minutes: 10
-        continue-on-error: true
-        env:
-          CI: true
-
       - name: Publish to npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

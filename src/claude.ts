@@ -13,8 +13,10 @@ import {
   runAgentWithPty,
   shouldCaptureAgentOutput,
 } from "./logging/agentOutput.js";
+import { createLogger } from "./logging/logger.js";
 
 const CLAUDE_CLI_PACKAGE = "@anthropic-ai/claude-code@latest";
+const logger = createLogger({ category: "claude" });
 
 /**
  * Error wrapper used by `launchClaudeCode` to preserve the original failure
@@ -54,6 +56,7 @@ export async function launchClaudeCode(
     model?: string;
     sessionId?: string | null;
     chrome?: boolean;
+    branch?: string | null;
     version?: string | null;
   } = {},
 ): Promise<{ sessionId?: string | null }> {
@@ -266,7 +269,12 @@ export async function launchClaudeCode(
       }
     };
 
+    // Treat SIGINT (2), SIGTERM (15) as normal exit signals (user interrupts)
+    const isNormalExitSignal = (signal?: number | null) =>
+      signal === 2 || signal === 15;
+
     const runCommand = async (file: string, fileArgs: string[]) => {
+      const runStartedAt = Date.now();
       if (captureOutput) {
         const result = await runAgentWithPty({
           command: file,
@@ -275,11 +283,26 @@ export async function launchClaudeCode(
           env: launchEnv,
           agentId: "claude-code",
         });
-        if (result.signal !== null && result.signal !== undefined) {
-          throw new Error(`Claude Code terminated by signal ${result.signal}`);
+        const durationMs = Date.now() - runStartedAt;
+        const exitCode = result.exitCode ?? null;
+        const signal = result.signal ?? null;
+        const signalIsNormal = isNormalExitSignal(signal);
+        const hasError =
+          (!signalIsNormal && signal !== null && signal !== undefined) ||
+          (exitCode !== null && exitCode !== 0);
+        if (hasError) {
+          logger.error({ exitCode, signal, durationMs }, "Claude Code exited");
+        } else {
+          logger.info({ exitCode, signal, durationMs }, "Claude Code exited");
         }
-        if (result.exitCode !== null && result.exitCode !== 0) {
-          throw new Error(`Claude Code exited with code ${result.exitCode}`);
+        if (signalIsNormal) {
+          return;
+        }
+        if (signal !== null && signal !== undefined) {
+          throw new Error(`Claude Code terminated by signal ${signal}`);
+        }
+        if (exitCode !== null && exitCode !== 0) {
+          throw new Error(`Claude Code exited with code ${exitCode}`);
         }
         return;
       }
@@ -288,13 +311,32 @@ export async function launchClaudeCode(
         return;
       }
 
-      await execInteractive(file, fileArgs, {
-        cwd: worktreePath,
-        stdin: childStdio.stdin,
-        stdout: childStdio.stdout,
-        stderr: childStdio.stderr,
-        env: launchEnv,
-      });
+      try {
+        await execInteractive(file, fileArgs, {
+          cwd: worktreePath,
+          stdin: childStdio.stdin,
+          stdout: childStdio.stdout,
+          stderr: childStdio.stderr,
+          env: launchEnv,
+        });
+        const durationMs = Date.now() - runStartedAt;
+        logger.info(
+          { exitCode: 0, signal: null, durationMs },
+          "Claude Code exited",
+        );
+      } catch (execError: unknown) {
+        const durationMs = Date.now() - runStartedAt;
+        const exitCode =
+          (execError as { exitCode?: number | null })?.exitCode ?? null;
+        const signal =
+          (execError as { signal?: string | null })?.signal ?? null;
+        if (signal === "SIGINT" || signal === "SIGTERM") {
+          logger.info({ exitCode, signal, durationMs }, "Claude Code exited");
+          return;
+        }
+        logger.error({ exitCode, signal, durationMs }, "Claude Code failed");
+        throw execError;
+      }
     };
 
     // Determine execution strategy based on version selection
@@ -355,12 +397,17 @@ export async function launchClaudeCode(
     // Use only findLatestClaudeSession with short timeout, skip sessionProbe to avoid hanging
     let capturedSessionId: string | null = null;
     const finishedAt = Date.now();
+    const branchWorktrees = options.branch
+      ? [{ path: worktreePath, branch: options.branch }]
+      : null;
     try {
       const latest = await findLatestClaudeSession(worktreePath, {
         since: startedAt,
         until: finishedAt + 30_000,
         preferClosestTo: finishedAt,
         windowMs: 10 * 60 * 1000,
+        branch: options.branch ?? null,
+        worktrees: branchWorktrees,
       });
       const detectedSessionId = latest?.id ?? null;
       // When we explicitly resumed a specific session, keep that ID as the source of truth.

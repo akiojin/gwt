@@ -1,6 +1,6 @@
 import React from "react";
 // import type { Mock } - use bun:test mock types
-import { describe, it, expect, beforeEach,  mock } from "bun:test";
+import { describe, it, expect, beforeEach, mock } from "bun:test";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import type { Branch } from "../../../../../src/types/api.js";
@@ -25,6 +25,7 @@ const sampleBranches: Branch[] = [
     author: "Akira",
     commitDate: "2025-11-10T09:00:00.000Z",
     divergence: { ahead: 2, behind: 0, upToDate: false },
+    hasUnpushedCommits: true,
   },
   {
     name: "release/v1.0.0",
@@ -37,6 +38,7 @@ const sampleBranches: Branch[] = [
     author: "Sana",
     commitDate: "2025-11-05T04:00:00.000Z",
     divergence: { ahead: 0, behind: 0, upToDate: true },
+    hasUnpushedCommits: false,
   },
   {
     name: "hotfix/security",
@@ -49,6 +51,7 @@ const sampleBranches: Branch[] = [
     author: "Noa",
     commitDate: "2025-11-03T01:00:00.000Z",
     divergence: { ahead: 0, behind: 3, upToDate: false },
+    hasUnpushedCommits: false,
   },
 ];
 

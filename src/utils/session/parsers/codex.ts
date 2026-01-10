@@ -14,8 +14,10 @@ import {
   UUID_REGEX,
   collectFilesIterative,
   matchesCwd,
+  resolveBranchFromCwd,
   readSessionInfoFromFile,
 } from "../common.js";
+import { listAllWorktrees } from "../../../worktree.js";
 
 /**
  * Finds the latest Codex session with optional time filtering and cwd matching.
@@ -63,43 +65,64 @@ export async function findLatestCodexSession(
     return b.mtime - a.mtime;
   });
 
-  let fallbackMissingCwd: CodexSessionInfo | null = null;
+  const branchFilter =
+    typeof options.branch === "string" && options.branch.trim().length > 0
+      ? options.branch.trim()
+      : null;
+  const shouldCheckBranch = Boolean(branchFilter);
+  const shouldCheckCwd = Boolean(options.cwd) && !shouldCheckBranch;
+
+  let worktrees: { path: string; branch: string }[] = [];
+  if (shouldCheckBranch) {
+    if (Array.isArray(options.worktrees) && options.worktrees.length > 0) {
+      worktrees = options.worktrees
+        .filter((entry) => entry?.path && entry?.branch)
+        .map((entry) => ({ path: entry.path, branch: entry.branch }));
+    } else {
+      try {
+        const allWorktrees = await listAllWorktrees();
+        worktrees = allWorktrees
+          .filter((entry) => entry?.path && entry?.branch)
+          .map((entry) => ({ path: entry.path, branch: entry.branch }));
+      } catch {
+        worktrees = [];
+      }
+    }
+    if (!worktrees.length) return null;
+  }
 
   for (const file of ordered) {
     // Priority 1: Extract session ID from filename (most reliable for Codex)
     const filenameMatch = path.basename(file.fullPath).match(UUID_REGEX);
-    if (filenameMatch) {
-      const sessionId = filenameMatch[0];
-      // If cwd filtering is needed, read file content to check cwd
-      if (options.cwd) {
-        const info = await readSessionInfoFromFile(file.fullPath);
-        if (matchesCwd(info.cwd, options.cwd)) {
-          return { id: sessionId, mtime: file.mtime };
-        }
-        if (!info.cwd && !fallbackMissingCwd) {
-          fallbackMissingCwd = { id: sessionId, mtime: file.mtime };
-        }
-        continue; // cwd doesn't match, try next file
+    const idFromName = filenameMatch?.[0] ?? null;
+    const needsInfo = shouldCheckBranch || shouldCheckCwd || !idFromName;
+    const info = needsInfo
+      ? await readSessionInfoFromFile(file.fullPath)
+      : null;
+    const sessionCwd = info?.cwd ?? null;
+
+    if (shouldCheckBranch) {
+      const resolvedBranch = resolveBranchFromCwd(sessionCwd, worktrees);
+      if (resolvedBranch !== branchFilter) {
+        continue;
       }
+    }
+
+    if (shouldCheckCwd && options.cwd) {
+      if (!matchesCwd(sessionCwd, options.cwd)) {
+        continue;
+      }
+    }
+
+    const sessionId = idFromName ?? info?.id ?? null;
+    if (sessionId) {
       return { id: sessionId, mtime: file.mtime };
     }
 
-    // Priority 2: Fallback to reading file content if filename lacks UUID
-    const info = await readSessionInfoFromFile(file.fullPath);
-    if (!info.id) continue;
-    if (options.cwd) {
-      if (matchesCwd(info.cwd, options.cwd)) {
-        return { id: info.id, mtime: file.mtime };
-      }
-      if (!info.cwd && !fallbackMissingCwd) {
-        fallbackMissingCwd = { id: info.id, mtime: file.mtime };
-      }
-      continue;
-    }
-    return { id: info.id, mtime: file.mtime };
+    // (already handled via info above)
   }
 
-  return fallbackMissingCwd;
+  return null;
 }
 
 /**

@@ -132,6 +132,121 @@
 - [x] **T507** [US9] `src/cli/ui/components/solid/QuickStartStep.tsx` にクイック選択ステップコンポーネントを作成
 - [x] **T508** [US9] `src/cli/ui/components/solid/WizardController.tsx` にクイック選択ステップの統合（履歴有無による分岐）
 
+## フェーズ11: ユーザーストーリー4 - unsafeブランチ選択の確認 (優先度: P1)
+
+**ストーリー**: 安全ではないブランチを`space`でチェックしようとした場合、警告OK/Cancelを表示し、OKでチェック、Cancelで未選択を維持する。
+
+**価値**: 誤削除リスクの高いブランチを選択する際に、意図確認を必須化できる。
+
+### テスト（TDD）
+
+- [x] **T961** [US4] `src/cli/ui/__tests__/solid/AppSolid.cleanup.test.tsx` にunsafeブランチ選択時の警告表示とOK/Cancel動作のテストを追加
+
+### 実装
+
+- [x] **T962** [US4] `src/cli/ui/App.solid.tsx` にunsafe選択時の警告OK/Cancel表示と選択確定/維持ロジックを追加
+- [x] **T963** [US4] `src/cli/ui/screens/solid/BranchListScreen.tsx` に警告表示中の入力ロックを追加
+
+## フェーズ12: ユーザーストーリー4 - 選択済みブランチの優先実行 (優先度: P1)
+
+**ストーリー**: チェック済みブランチは安全判定に関係なくクリーンアップ/修復の対象に含める（リモートは除外、クリーンアップ時の現在ブランチは除外）。
+
+**価値**: 意図的に選択したブランチを確実に処理でき、操作の予測性が向上する。
+
+### テスト（TDD）
+
+- [x] **T971** [US4] `src/cli/ui/__tests__/solid/AppSolid.cleanup.test.tsx` にunsafe/保護ブランチが選択されている場合でもクリーンアップ対象になるテストを追加
+- [x] **T972** [US4] `src/cli/ui/__tests__/solid/AppSolid.cleanup.test.tsx` に現在ブランチが選択されている場合はクリーンアップ対象から除外されるテストを追加
+- [x] **T973** [US4] `src/cli/ui/__tests__/solid/AppSolid.cleanup.test.tsx` に修復でアクセス可能なWorktreeも対象になるテストを追加
+
+### 実装
+
+- [x] **T981** [US4] `src/cli/ui/App.solid.tsx` のクリーンアップ選択ロジックを更新し、安全判定・保護ブランチによる除外を廃止する
+- [x] **T982** [US4] `src/cli/ui/App.solid.tsx` の修復対象判定から `worktreeStatus === "inaccessible"` 条件を除外する
+
+## フェーズ13: ユーザーストーリー4 - 安全アイコン凡例の表示 (優先度: P2)
+
+**ストーリー**: Mode(tab)行の直下に安全アイコンの凡例行を表示し、未コミット/未プッシュ/未マージの意味を説明する。
+
+**価値**: 安全アイコンの意味を即座に理解でき、誤操作の防止につながる。
+
+### 仕様更新
+
+- [x] **T991** [P] [共通] `specs/SPEC-d2f4762a/spec.md` に安全アイコン凡例行の要件とシナリオを追記
+- [x] **T992** [P] [共通] `specs/SPEC-d2f4762a/plan.md` に凡例行の方針とToDoを追記
+
+### テスト（TDD）
+
+- [x] **T993** [US4] `src/cli/ui/__tests__/solid/BranchListScreen.test.tsx` に凡例行の表示テストを追加
+
+### 実装
+
+- [x] **T994** [US4] `src/cli/ui/screens/solid/BranchListScreen.tsx` に凡例行を表示
+
+## フェーズ14: ユーザーストーリー4 - unsafe警告ダイアログの反転範囲修正 (優先度: P2)
+
+**ストーリー**: unsafe選択の警告ダイアログで OK/Cancel の反転表示が枠外に広がらないようにする。
+
+**価値**: 画面の視認性を保ち、ダイアログの境界が明確になる。
+
+### 仕様更新
+
+- [x] **T995** [P] [共通] `specs/SPEC-d2f4762a/spec.md` に反転範囲の要件を追記
+- [x] **T996** [P] [共通] `specs/SPEC-d2f4762a/plan.md` に反転範囲の方針を追記
+
+### テスト（TDD）
+
+- [x] **T997** [US4] `src/cli/ui/__tests__/solid/ConfirmScreen.test.tsx` に反転範囲がダイアログ幅に収まるテストを追加
+
+## 追加作業ToDo (2026-01-10)
+- [x] **T1100** [共通] `specs/SPEC-d2f4762a/spec.md` と `specs/SPEC-d2f4762a/plan.md` に安全判定中の選択確認とバージョン選択の自動遷移防止要件を追記
+- [ ] **T1101** [US4] 安全判定中のブランチ選択で警告が表示されるテストを追加（`src/cli/ui/__tests__/solid/AppSolid.cleanup.test.tsx`）
+- [ ] **T1102** [US4] 安全判定中の`space`選択時に警告を出し、OK/Cancelで選択を制御する実装を追加（`src/cli/ui/App.solid.tsx`）
+- [ ] **T1103** [US10] バージョン選択ステップが自動遷移しないテストを追加（`src/cli/ui/__tests__/solid/components/WizardController.test.tsx` など）
+- [ ] **T1104** [US10] エージェント選択後のEnter伝播を抑止し、バージョン選択が必ず表示されるように実装を更新（`src/cli/ui/components/solid/WizardController.tsx`）
+
+### 実装
+
+- [x] **T998** [US4] `src/cli/ui/screens/solid/ConfirmScreen.tsx` と `src/cli/ui/App.solid.tsx` を更新し、ダイアログ内幅で反転表示する
+
+## フェーズ15: ユーザーストーリー4 - 凡例にSafe表示を追加 (優先度: P2)
+
+**ストーリー**: 安全アイコンの凡例に `o Safe` を追加し、安全状態が即時に理解できるようにする。
+
+**価値**: 警告アイコンだけでなく安全状態も明示され、一覧の理解が早くなる。
+
+### 仕様更新
+
+- [x] **T999** [P] [共通] `specs/SPEC-d2f4762a/spec.md` の凡例行を `o Safe` を含む内容に更新
+- [x] **T1000** [P] [共通] `specs/SPEC-d2f4762a/plan.md` の凡例説明に Safe を追加
+
+### テスト（TDD）
+
+- [x] **T1001** [US4] `src/cli/ui/__tests__/solid/BranchListScreen.test.tsx` の凡例表示テストを `o Safe` に更新
+
+### 実装
+
+- [x] **T1002** [US4] `src/cli/ui/screens/solid/BranchListScreen.tsx` の凡例行に `o Safe` を追加
+
+## フェーズ16: ユーザーストーリー4 - unsafe確認Enterの伝搬抑止 (優先度: P2)
+
+**ストーリー**: unsafe選択の警告ダイアログで Enter により OK/Cancel を確定した際、ブランチ一覧の Enter 選択が発火しないようにする。
+
+**価値**: 意図しないブランチ選択/ウィザード起動を防止する。
+
+### 仕様更新
+
+- [x] **T1003** [P] [共通] `specs/SPEC-d2f4762a/spec.md` に Enter 伝搬抑止の受け入れ条件と要件を追記
+- [x] **T1004** [P] [共通] `specs/SPEC-d2f4762a/plan.md` に伝搬抑止の方針を追記
+
+### テスト（TDD）
+
+- [x] **T1005** [US4] `src/cli/ui/__tests__/solid/AppSolid.cleanup.test.tsx` に Enter 確定時のブランチ選択が起きないテストを追加
+
+### 実装
+
+- [x] **T1006** [US4] `src/cli/ui/App.solid.tsx` の unsafe確認確定時にブランチ一覧入力を抑止
+
 ## フェーズ7: ユーザーストーリー7 - 選択中Worktreeフルパス表示 (優先度: P2)
 
 **ストーリー**: ブランチ一覧のフッター直上に、選択中ブランチのWorktreeフルパスを表示する。Worktreeが存在しないが現在ブランチの場合は起動時の作業ディレクトリを表示し、ブランチ一覧が空の場合は`Worktree: (none)`を表示する。

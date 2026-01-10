@@ -11,6 +11,9 @@ function readLastLine(file: string): Record<string, unknown> {
   const content = fs.readFileSync(file, "utf-8").trim().split("\n");
   const lines = content.filter(Boolean);
   const last = lines[lines.length - 1];
+  if (!last) {
+    throw new Error("Expected log line");
+  }
   return JSON.parse(last);
 }
 
@@ -90,7 +93,11 @@ describe("createLogger", () => {
     logger.error("should appear");
 
     const lines = fs.readFileSync(logfile, "utf-8").trim().split("\n");
-    const last = JSON.parse(lines[lines.length - 1]);
+    const lastLine = lines[lines.length - 1];
+    if (!lastLine) {
+      throw new Error("Expected log line");
+    }
+    const last = JSON.parse(lastLine);
     expect(last.msg).toBe("should appear");
     delete process.env.LOG_LEVEL;
   });
@@ -135,10 +142,11 @@ describe("createLogger", () => {
     // Write logs from all loggers (simulating concurrent writes)
     for (let i = 0; i < LOGS_PER_LOGGER; i++) {
       for (let j = 0; j < LOGGER_COUNT; j++) {
-        loggers[j].info(
-          { loggerId: j, index: i },
-          `Message ${i} from logger ${j}`,
-        );
+        const logger = loggers[j];
+        if (!logger) {
+          throw new Error("Expected logger instance");
+        }
+        logger.info({ loggerId: j, index: i }, `Message ${i} from logger ${j}`);
       }
     }
 

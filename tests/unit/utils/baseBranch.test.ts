@@ -9,12 +9,14 @@ const localBranch: SelectedBranchState = {
   name: "feature/feature1",
   displayName: "feature/feature1",
   branchType: "local",
+  branchCategory: "feature",
 };
 
 const remoteBranch: SelectedBranchState = {
   name: "feature/feature1",
   displayName: "origin/feature/feature1",
   branchType: "remote",
+  branchCategory: "feature",
   remoteBranch: "origin/feature/feature1",
 };
 

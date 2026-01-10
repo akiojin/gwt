@@ -111,8 +111,13 @@ profiles:
     const config = await loadProfiles();
     expect(config.version).toBe("1.0");
     expect(config.activeProfile).toBe("development");
-    expect(config.profiles.development.displayName).toBe("Development");
-    expect(config.profiles.development.env.DEBUG).toBe("true");
+    const development = config.profiles.development;
+    expect(development).toBeDefined();
+    if (!development) {
+      throw new Error("Expected development profile to exist");
+    }
+    expect(development.displayName).toBe("Development");
+    expect(development.env.DEBUG).toBe("true");
   });
 
   it("不正なYAML形式の場合、エラーをスローする", async () => {
@@ -169,7 +174,12 @@ describe("saveProfiles", () => {
     const loaded = await loadProfiles();
 
     expect(loaded.activeProfile).toBe("production");
-    expect(loaded.profiles.production.env.NODE_ENV).toBe("production");
+    const production = loaded.profiles.production;
+    expect(production).toBeDefined();
+    if (!production) {
+      throw new Error("Expected production profile to exist");
+    }
+    expect(production.env.NODE_ENV).toBe("production");
   });
 
   it("ディレクトリが存在しない場合、自動的に作成する", async () => {
@@ -446,8 +456,12 @@ describe("createProfile", () => {
     await createProfile("staging", newProfile);
 
     const config = await loadProfiles();
-    expect(config.profiles.staging).toBeDefined();
-    expect(config.profiles.staging.displayName).toBe("Staging");
+    const staging = config.profiles.staging;
+    expect(staging).toBeDefined();
+    if (!staging) {
+      throw new Error("Expected staging profile to exist");
+    }
+    expect(staging.displayName).toBe("Staging");
   });
 
   it("既存のプロファイル名で作成しようとするとエラー", async () => {
@@ -531,9 +545,14 @@ profiles:
     });
 
     const config = await loadProfiles();
-    expect(config.profiles.development.displayName).toBe("Dev Environment");
-    expect(config.profiles.development.env.DEBUG).toBe("false");
-    expect(config.profiles.development.env.NEW_VAR).toBe("value");
+    const development = config.profiles.development;
+    expect(development).toBeDefined();
+    if (!development) {
+      throw new Error("Expected development profile to exist");
+    }
+    expect(development.displayName).toBe("Dev Environment");
+    expect(development.env.DEBUG).toBe("false");
+    expect(development.env.NEW_VAR).toBe("value");
   });
 
   it("存在しないプロファイルを更新しようとするとエラー", async () => {

@@ -42,40 +42,52 @@ export function QuickStartStep(props: QuickStartStepProps) {
     }
   });
 
-  // Build selection items from history
-  // 最新の履歴エントリのみを使用（重複排除済み）
-  const latestEntry = createMemo(() => props.history[0] ?? null);
+  const buildSettingsDescription = (entry: ToolSessionEntry): string => {
+    const parts: string[] = [];
+    if (entry.toolLabel) {
+      parts.push(entry.toolLabel);
+    } else if (entry.toolId) {
+      parts.push(entry.toolId);
+    }
+    if (entry.model) {
+      parts.push(entry.model);
+    }
+    if (entry.toolId === "codex-cli" && entry.reasoningLevel) {
+      parts.push(entry.reasoningLevel);
+    }
+    return parts.join(", ");
+  };
 
   const items = createMemo<QuickStartItem[]>(() => {
     const result: QuickStartItem[] = [];
-    const entry = latestEntry();
 
-    if (entry) {
-      const reasoningInfo = entry.reasoningLevel
-        ? `, ${entry.reasoningLevel}`
-        : "";
-      const versionInfo = entry.toolVersion ? `@${entry.toolVersion}` : "";
-      const settingsDesc = `${entry.toolLabel}${versionInfo}, ${entry.model}${reasoningInfo}`;
-      const resumeDesc = entry.sessionId
-        ? `${settingsDesc}, session ${entry.sessionId}`
-        : settingsDesc;
+    props.history.forEach((entry, index) => {
+      if (!entry) return;
+      const settingsDesc = buildSettingsDescription(entry);
+      const sessionId =
+        entry.sessionId && entry.sessionId.trim().length > 0
+          ? entry.sessionId.trim()
+          : null;
+      const suffix = `${entry.toolId ?? "tool"}-${index}`;
 
-      result.push({
-        label: "Resume session (previous settings)",
-        value: `resume-${entry.toolId}`,
-        description: resumeDesc,
-        action: "resume",
-        entry,
-      });
+      if (sessionId) {
+        result.push({
+          label: "Resume session (previous settings)",
+          value: `resume-${suffix}`,
+          description: `${settingsDesc} | Session: ${sessionId}`,
+          action: "resume",
+          entry,
+        });
+      }
 
       result.push({
         label: "Start new (previous settings)",
-        value: `start-new-${entry.toolId}`,
+        value: `start-new-${suffix}`,
         description: settingsDesc,
         action: "start-new",
         entry,
       });
-    }
+    });
 
     // Add "Choose different settings..." at the end
     result.push({

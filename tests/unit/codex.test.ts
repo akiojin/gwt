@@ -1,4 +1,4 @@
-import { describe, it, expect, mock, beforeEach, spyOn } from "bun:test";
+import { describe, it, expect, mock, beforeEach } from "bun:test";
 import { EventEmitter } from "node:events";
 
 // Mock modules before importing
@@ -7,15 +7,44 @@ mock.module("execa", () => ({
   default: { execa: mock() },
 }));
 
-mock.module("fs", () => ({
-  existsSync: mock(() => true),
-  mkdirSync: mock(),
-  default: { existsSync: mock(() => true), mkdirSync: mock() },
-}));
+mock.module("fs", () => {
+  const existsSync = mock(() => true);
+  const mkdirSync = mock();
+  const readdirSync = mock(() => []);
+  const statSync = mock(() => ({
+    isFile: () => false,
+    mtime: new Date(),
+  }));
+  const unlinkSync = mock();
+  return {
+    existsSync,
+    mkdirSync,
+    readdirSync,
+    statSync,
+    unlinkSync,
+    default: { existsSync, mkdirSync, readdirSync, statSync, unlinkSync },
+  };
+});
 
 mock.module("os", () => ({
+  homedir: mock(() => "/home/test"),
   platform: mock(() => "darwin"),
-  default: { platform: mock(() => "darwin") },
+  release: mock(() => "23.0.0"),
+  tmpdir: mock(() => "/tmp"),
+  default: {
+    homedir: mock(() => "/home/test"),
+    platform: mock(() => "darwin"),
+    release: mock(() => "23.0.0"),
+    tmpdir: mock(() => "/tmp"),
+  },
+}));
+
+const shouldCaptureAgentOutputMock = mock(() => false);
+const runAgentWithPtyMock = mock(async () => ({ exitCode: 0, signal: null }));
+
+mock.module("../../src/logging/agentOutput.js", () => ({
+  runAgentWithPty: runAgentWithPtyMock,
+  shouldCaptureAgentOutput: shouldCaptureAgentOutputMock,
 }));
 
 const stdoutWrite = mock();
@@ -54,6 +83,11 @@ mock.module("../../src/utils/session", () => ({
   findLatestCodexSession: mock(async () => null),
 }));
 
+const mockFindCommand = mock();
+mock.module("../../src/utils/command", () => ({
+  findCommand: (...args: unknown[]) => mockFindCommand(...args),
+}));
+
 import { execa } from "execa";
 import {
   DEFAULT_CODEX_MODEL,
@@ -67,8 +101,11 @@ const mockExeca = execa as Mock;
 
 type ExecaCall = [unknown, string[], Record<string, unknown>];
 
-const getExecaCall = (index = 0): ExecaCall =>
-  mockExeca.mock.calls[index] as unknown as ExecaCall;
+const getExecaCall = (index?: number): ExecaCall => {
+  const calls = mockExeca.mock.calls;
+  const resolvedIndex = index ?? Math.max(0, calls.length - 1);
+  return calls[resolvedIndex] as unknown as ExecaCall;
+};
 
 const getExecaArgs = (index = 0): string[] => getExecaCall(index)[1];
 
@@ -98,7 +135,11 @@ describe("codex.ts", () => {
   const worktreePath = "/tmp/worktree";
 
   beforeEach(() => {
-    mock.restore();
+    (execa as ReturnType<typeof mock>).mockReset();
+    shouldCaptureAgentOutputMock.mockReset();
+    runAgentWithPtyMock.mockReset();
+    shouldCaptureAgentOutputMock.mockReturnValue(false);
+    runAgentWithPtyMock.mockResolvedValue({ exitCode: 0, signal: null });
     mockTerminalStreams.exitRawMode.mockClear();
     stdoutWrite.mockClear();
     stderrWrite.mockClear();
@@ -107,6 +148,13 @@ describe("codex.ts", () => {
     mockChildStdio.stdout = "inherit";
     mockChildStdio.stderr = "inherit";
     mockExeca.mockImplementation(() => createChildProcess());
+    mockFindCommand.mockReset();
+    mockFindCommand.mockResolvedValue({
+      available: true,
+      path: null,
+      source: "bunx",
+      version: null,
+    });
   });
 
   it("uses gpt-5.2-codex as the default model", () => {
@@ -116,7 +164,7 @@ describe("codex.ts", () => {
   it("should append default Codex CLI arguments on launch", async () => {
     await launchCodexCLI(worktreePath);
 
-    expect(execa).toHaveBeenCalledTimes(1);
+    expect(execa).toHaveBeenCalled();
     const [, args, options] = getExecaCall();
 
     expect(args).toEqual(["@openai/codex@latest", ...DEFAULT_CODEX_ARGS]);
@@ -129,6 +177,15 @@ describe("codex.ts", () => {
     // exitRawMode is called once before child process and once in finally block
     expect(mockTerminalStreams.exitRawMode).toHaveBeenCalledTimes(2);
     expect(mockChildStdio.cleanup).toHaveBeenCalledTimes(1);
+  });
+
+  it("throws when capture mode exits with unexpected signal", async () => {
+    shouldCaptureAgentOutputMock.mockReturnValue(true);
+    runAgentWithPtyMock.mockResolvedValueOnce({ exitCode: null, signal: 1 });
+
+    await expect(launchCodexCLI(worktreePath)).rejects.toThrow(
+      "Failed to launch Codex CLI",
+    );
   });
 
   it("captures sessionId from file-based session detection", async () => {
@@ -217,7 +274,7 @@ describe("codex.ts", () => {
     mockChildStdio.stderr = "inherit";
   });
 
-  it("should include --enable skills in default arguments (FR-202)", async () => {
+  it("should omit --enable skills in default arguments (FR-202)", async () => {
     await launchCodexCLI(worktreePath);
 
     const args = getExecaArgs();
@@ -228,59 +285,77 @@ describe("codex.ts", () => {
         arg === "--enable" && args[i + 1] === "skills",
     );
 
+    expect(enableIndex).toBe(-1);
+  });
+
+  it("should include --enable skills when using pre-0.80 installed Codex", async () => {
+    mockFindCommand.mockResolvedValueOnce({
+      available: true,
+      path: "/usr/bin/codex",
+      source: "installed",
+      version: "v0.79.0",
+    });
+
+    await launchCodexCLI(worktreePath, { version: "installed" });
+
+    const args = getExecaArgs();
+    const enableIndex = args.findIndex(
+      (arg: string, i: number) =>
+        arg === "--enable" && args[i + 1] === "skills",
+    );
+
     expect(enableIndex).toBeGreaterThan(-1);
-    expect(args[enableIndex]).toBe("--enable");
     expect(args[enableIndex + 1]).toBe("skills");
   });
 
-  it("should display launch arguments in console log (FR-008)", async () => {
-    const consoleSpy = spyOn(console, "log").mockImplementation(() => {});
-
+  it("should display launch arguments in output (FR-008)", async () => {
     await launchCodexCLI(worktreePath);
 
     // Verify that args are logged with 📋 prefix
-    expect(consoleSpy).toHaveBeenCalledWith(
+    expect(stdoutWrite).toHaveBeenCalledWith(
       expect.stringContaining("📋 Args:"),
     );
 
     // Verify that the actual arguments are included in the log
-    expect(consoleSpy).toHaveBeenCalledWith(
+    expect(stdoutWrite).toHaveBeenCalledWith(
       expect.stringContaining("--enable"),
     );
-    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining("skills"));
-
-    consoleSpy.mockRestore();
+    expect(stdoutWrite).toHaveBeenCalledWith(
+      expect.stringContaining("web_search_request"),
+    );
+    const calls = stdoutWrite.mock.calls.map((c: unknown[]) => String(c[0]));
+    expect(calls.some((c: string) => c.includes("skills"))).toBe(false);
   });
 
   describe("Launch/Exit Logs", () => {
     it("should display launch message with rocket emoji at startup", async () => {
-      const consoleSpy = spyOn(console, "log").mockImplementation(() => {});
+      stdoutWrite.mockClear();
 
       await launchCodexCLI(worktreePath);
 
-      // Verify that launch message is logged with 🚀 emoji
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining("🚀 Launching Codex CLI..."),
-      );
-
-      consoleSpy.mockRestore();
+      // Verify that launch message is logged with 🚀 emoji via terminal.stdout.write
+      const calls = stdoutWrite.mock.calls.map((c: unknown[]) => String(c[0]));
+      expect(
+        calls.some((c: string) => c.includes("🚀 Launching Codex CLI...")),
+      ).toBe(true);
     });
 
     it("should display working directory in launch logs", async () => {
-      const consoleSpy = spyOn(console, "log").mockImplementation(() => {});
+      stdoutWrite.mockClear();
 
       await launchCodexCLI(worktreePath);
 
       // Verify working directory is shown
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining(`Working directory: ${worktreePath}`),
-      );
-
-      consoleSpy.mockRestore();
+      const calls = stdoutWrite.mock.calls.map((c: unknown[]) => String(c[0]));
+      expect(
+        calls.some((c: string) =>
+          c.includes(`Working directory: ${worktreePath}`),
+        ),
+      ).toBe(true);
     });
 
     it("should display session ID after agent exits when captured", async () => {
-      const consoleSpy = spyOn(console, "log").mockImplementation(() => {});
+      stdoutWrite.mockClear();
 
       // Mock session detection to return a session ID
       const { findLatestCodexSession } =
@@ -296,24 +371,24 @@ describe("codex.ts", () => {
       await launchCodexCLI(worktreePath);
 
       // Verify session ID is displayed after exit
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining("🆔 Session ID: codex-session-456"),
-      );
-
-      consoleSpy.mockRestore();
+      const calls = stdoutWrite.mock.calls.map((c: unknown[]) => String(c[0]));
+      expect(
+        calls.some((c: string) =>
+          c.includes("🆔 Session ID: codex-session-456"),
+        ),
+      ).toBe(true);
     });
 
     it("should display model info when custom model is specified", async () => {
-      const consoleSpy = spyOn(console, "log").mockImplementation(() => {});
+      stdoutWrite.mockClear();
 
       await launchCodexCLI(worktreePath, { model: "gpt-5.2-codex" });
 
       // Verify model info is logged with 🎯 emoji
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining("🎯 Model: gpt-5.2-codex"),
-      );
-
-      consoleSpy.mockRestore();
+      const calls = stdoutWrite.mock.calls.map((c: unknown[]) => String(c[0]));
+      expect(
+        calls.some((c: string) => c.includes("🎯 Model: gpt-5.2-codex")),
+      ).toBe(true);
     });
   });
 });

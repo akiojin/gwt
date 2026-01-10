@@ -103,6 +103,19 @@ const MODEL_OPTIONS: Record<string, ModelOption[]> = {
       description: "Fastest for simple tasks",
     },
   ],
+  opencode: [
+    {
+      id: "",
+      label: "Default (Auto)",
+      description: "Use OpenCode default model",
+      isDefault: true,
+    },
+    {
+      id: "__custom__",
+      label: "Custom (provider/model)",
+      description: "Enter a provider/model identifier",
+    },
+  ],
 };
 
 export function getModelOptions(tool: CodingAgentId): ModelOption[] {
@@ -144,6 +157,9 @@ export function normalizeModelId(
   if (model === null || model === undefined) return model ?? null;
   const trimmed = model.trim();
   if (!trimmed) return null;
+  if (tool === "opencode" && trimmed === "__custom__") {
+    return null;
+  }
   if (tool === "claude-code") {
     const lower = trimmed.toLowerCase();
     if (lower === "opuss") return "opus";

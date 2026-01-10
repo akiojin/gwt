@@ -1,5 +1,4 @@
-import type { MergedPullRequest } from "../../src/github";
-import type { CleanupTarget } from "../../src/cli/ui/types";
+import type { MergedPullRequest, CleanupTarget } from "../../src/cli/ui/types";
 
 /**
  * テスト用のマージ済みPRデータ
@@ -8,25 +7,22 @@ export const mergedPullRequests: MergedPullRequest[] = [
   {
     number: 123,
     title: "Add user authentication feature",
-    headRefName: "feature/user-auth",
-    url: "https://github.com/test/repo/pull/123",
-    state: "MERGED",
+    branch: "feature/user-auth",
+    author: "Akira",
     mergedAt: "2025-01-01T10:00:00Z",
   },
   {
     number: 124,
     title: "Fix security vulnerability",
-    headRefName: "hotfix/security-patch",
-    url: "https://github.com/test/repo/pull/124",
-    state: "MERGED",
+    branch: "hotfix/security-patch",
+    author: "Sana",
     mergedAt: "2025-01-02T15:30:00Z",
   },
   {
     number: 125,
     title: "Update dashboard UI",
-    headRefName: "feature/dashboard",
-    url: "https://github.com/test/repo/pull/125",
-    state: "MERGED",
+    branch: "feature/dashboard",
+    author: "Noa",
     mergedAt: "2025-01-03T09:15:00Z",
   },
 ];
@@ -49,7 +45,7 @@ export const cleanupTargets: CleanupTarget[] = [
     hasUnpushedCommits: false,
     hasRemoteBranch: true,
     cleanupType: "worktree-and-branch",
-    reasons: ["merged-pr"],
+    reasons: ["remote-synced"],
   },
   {
     branch: "hotfix/security-patch",
@@ -65,7 +61,7 @@ export const cleanupTargets: CleanupTarget[] = [
     hasUnpushedCommits: false,
     hasRemoteBranch: true,
     cleanupType: "branch-only",
-    reasons: ["merged-pr"],
+    reasons: ["remote-synced"],
   },
   {
     branch: "feature/dashboard",
@@ -81,6 +77,6 @@ export const cleanupTargets: CleanupTarget[] = [
     hasUnpushedCommits: true, // 未プッシュコミットあり
     hasRemoteBranch: false,
     cleanupType: "worktree-and-branch",
-    reasons: ["merged-pr"],
+    reasons: ["remote-synced"],
   },
 ];

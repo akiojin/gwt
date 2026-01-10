@@ -1,68 +1,89 @@
-import { describe, it, expect, beforeEach, mock } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
 
-const execaMock = mock();
-const existsSyncMock = mock(() => false);
-const mkdirSyncMock = mock();
-
-mock.module("execa", () => ({
-  execa: (...args: unknown[]) => execaMock(...args),
-}));
-
-mock.module("fs", () => ({
-  existsSync: (...args: unknown[]) => existsSyncMock(...args),
-  mkdirSync: (...args: unknown[]) => mkdirSyncMock(...args),
-  default: {
-    existsSync: (...args: unknown[]) => existsSyncMock(...args),
-    mkdirSync: (...args: unknown[]) => mkdirSyncMock(...args),
-  },
-}));
+const execaMock = mock<(...args: unknown[]) => unknown>();
+const existsSyncMock = mock<(...args: unknown[]) => boolean>(() => false);
+const readdirSyncMock = mock<(...args: unknown[]) => string[]>(() => []);
+const statSyncMock = mock<
+  (...args: unknown[]) => { isFile: () => boolean; mtime: Date }
+>(() => ({ isFile: () => false, mtime: new Date() }));
+const unlinkSyncMock = mock<(...args: unknown[]) => void>(() => {});
+const mkdirSyncMock = mock<(...args: unknown[]) => void>(() => {});
+let moduleCounter = 0;
 
 const setupCommandMocks = () => {
   execaMock.mockReset();
   existsSyncMock.mockReset();
+  readdirSyncMock.mockReset();
+  statSyncMock.mockReset();
+  unlinkSyncMock.mockReset();
   mkdirSyncMock.mockReset();
   existsSyncMock.mockReturnValue(false);
-  execaMock.mockImplementation(
-    async (command: string, args?: readonly string[]) => {
-      if ((command === "which" || command === "where") && args?.[0]) {
-        const target = args[0];
-        const installed = new Set([
-          "ls",
-          "where",
-          "claude",
-          "codex",
-          "gemini",
-          "opencode",
-        ]);
-        if (installed.has(target)) {
-          return { stdout: `/usr/bin/${target}` };
-        }
-        throw new Error("Command not found");
+  readdirSyncMock.mockReturnValue([]);
+  execaMock.mockImplementation(async (...args: unknown[]) => {
+    const [command, argList] = args as [string, readonly string[] | undefined];
+    if ((command === "which" || command === "where") && argList?.[0]) {
+      const target = argList[0];
+      const installed = new Set([
+        "ls",
+        "where",
+        "claude",
+        "codex",
+        "gemini",
+        "opencode",
+      ]);
+      if (installed.has(target)) {
+        return { stdout: `/usr/bin/${target}` };
       }
+      throw new Error("Command not found");
+    }
 
-      if (args?.[0] === "--version") {
-        if (command.includes("nonexistent")) {
-          throw new Error("ENOENT");
-        }
-        return { stdout: `${command} 1.2.3` };
+    if (argList?.[0] === "--version") {
+      if (command.includes("nonexistent")) {
+        throw new Error("ENOENT");
       }
+      return { stdout: `${command} 1.2.3` };
+    }
 
-      return { stdout: "" };
-    },
-  );
+    return { stdout: "" };
+  });
 };
 
 describe("command utilities", () => {
   let commandModule: typeof import("../../../src/utils/command.js");
 
   beforeEach(async () => {
+    mock.restore();
+    mock.module("execa", () => ({
+      execa: (...args: unknown[]) => execaMock(...args),
+    }));
+    mock.module("fs", () => ({
+      existsSync: (...args: unknown[]) => existsSyncMock(...args),
+      readdirSync: (...args: unknown[]) => readdirSyncMock(...args),
+      statSync: (...args: unknown[]) => statSyncMock(...args),
+      unlinkSync: (...args: unknown[]) => unlinkSyncMock(...args),
+      mkdirSync: (...args: unknown[]) => mkdirSyncMock(...args),
+      default: {
+        existsSync: (...args: unknown[]) => existsSyncMock(...args),
+        readdirSync: (...args: unknown[]) => readdirSyncMock(...args),
+        statSync: (...args: unknown[]) => statSyncMock(...args),
+        unlinkSync: (...args: unknown[]) => unlinkSyncMock(...args),
+        mkdirSync: (...args: unknown[]) => mkdirSyncMock(...args),
+      },
+    }));
     setupCommandMocks();
     // Re-import module
     // Note: Bun doesn't fully support module mocking, so we test the actual implementation
-    commandModule = await import("../../../src/utils/command.js");
+    moduleCounter += 1;
+    commandModule = await import(
+      `../../../src/utils/command.ts?command-test=${moduleCounter}`
+    );
 
     // Clear command lookup cache before each test
     commandModule.clearCommandLookupCache();
+  });
+
+  afterEach(() => {
+    mock.restore();
   });
 
   describe("findCommand - integration tests", () => {
@@ -124,26 +145,38 @@ describe("command utilities", () => {
       // Check Claude
       const claude = results.find((t) => t.id === "claude-code");
       expect(claude).toBeDefined();
-      expect(claude?.name).toBe("Claude");
-      expect(["installed", "bunx"]).toContain(claude?.status);
+      if (!claude) {
+        throw new Error("Claude status not found");
+      }
+      expect(claude.name).toBe("Claude");
+      expect(["installed", "bunx"]).toContain(claude.status);
 
       // Check Codex
       const codex = results.find((t) => t.id === "codex-cli");
       expect(codex).toBeDefined();
-      expect(codex?.name).toBe("Codex");
-      expect(["installed", "bunx"]).toContain(codex?.status);
+      if (!codex) {
+        throw new Error("Codex status not found");
+      }
+      expect(codex.name).toBe("Codex");
+      expect(["installed", "bunx"]).toContain(codex.status);
 
       // Check Gemini
       const gemini = results.find((t) => t.id === "gemini-cli");
       expect(gemini).toBeDefined();
-      expect(gemini?.name).toBe("Gemini");
-      expect(["installed", "bunx"]).toContain(gemini?.status);
+      if (!gemini) {
+        throw new Error("Gemini status not found");
+      }
+      expect(gemini.name).toBe("Gemini");
+      expect(["installed", "bunx"]).toContain(gemini.status);
 
       // Check OpenCode
       const opencode = results.find((t) => t.id === "opencode");
       expect(opencode).toBeDefined();
-      expect(opencode?.name).toBe("OpenCode");
-      expect(["installed", "bunx"]).toContain(opencode?.status);
+      if (!opencode) {
+        throw new Error("OpenCode status not found");
+      }
+      expect(opencode.name).toBe("OpenCode");
+      expect(["installed", "bunx"]).toContain(opencode.status);
     });
 
     it("returns ToolStatus with correct structure", async () => {
@@ -166,8 +199,12 @@ describe("getCommandVersion", () => {
   let commandModule: typeof import("../../../src/utils/command.js");
 
   beforeEach(async () => {
+    mock.restore();
     setupCommandMocks();
-    commandModule = await import("../../../src/utils/command.js");
+    moduleCounter += 1;
+    commandModule = await import(
+      `../../../src/utils/command.ts?command-version=${moduleCounter}`
+    );
     commandModule.clearCommandLookupCache();
   });
 
@@ -191,8 +228,12 @@ describe("findCommand with version", () => {
   let commandModule: typeof import("../../../src/utils/command.js");
 
   beforeEach(async () => {
+    mock.restore();
     setupCommandMocks();
-    commandModule = await import("../../../src/utils/command.js");
+    moduleCounter += 1;
+    commandModule = await import(
+      `../../../src/utils/command.ts?command-version=${moduleCounter}`
+    );
     commandModule.clearCommandLookupCache();
   });
 
@@ -221,8 +262,12 @@ describe("detectAllToolStatuses with version", () => {
   let commandModule: typeof import("../../../src/utils/command.js");
 
   beforeEach(async () => {
+    mock.restore();
     setupCommandMocks();
-    commandModule = await import("../../../src/utils/command.js");
+    moduleCounter += 1;
+    commandModule = await import(
+      `../../../src/utils/command.ts?command-version=${moduleCounter}`
+    );
     commandModule.clearCommandLookupCache();
   });
 
@@ -254,14 +299,20 @@ describe("detectAllToolStatuses with version", () => {
 
 describe("KNOWN_INSTALL_PATHS coverage", () => {
   beforeEach(async () => {
+    mock.restore();
     setupCommandMocks();
-    const { clearCommandLookupCache } =
-      await import("../../../src/utils/command.js");
+    const { clearCommandLookupCache } = await import(
+      `../../../src/utils/command.ts?command-version=${moduleCounter + 1}`
+    );
+    moduleCounter += 1;
     clearCommandLookupCache();
   });
 
   it("checks fallback paths for claude", async () => {
-    const { findCommand } = await import("../../../src/utils/command.js");
+    moduleCounter += 1;
+    const { findCommand } = await import(
+      `../../../src/utils/command.ts?command-version=${moduleCounter}`
+    );
 
     // This test verifies that fallback path checking works
     // by checking the result structure
@@ -273,7 +324,10 @@ describe("KNOWN_INSTALL_PATHS coverage", () => {
   });
 
   it("checks fallback paths for codex", async () => {
-    const { findCommand } = await import("../../../src/utils/command.js");
+    moduleCounter += 1;
+    const { findCommand } = await import(
+      `../../../src/utils/command.ts?command-version=${moduleCounter}`
+    );
 
     const result = await findCommand("codex");
 
@@ -283,7 +337,10 @@ describe("KNOWN_INSTALL_PATHS coverage", () => {
   });
 
   it("checks fallback paths for gemini", async () => {
-    const { findCommand } = await import("../../../src/utils/command.js");
+    moduleCounter += 1;
+    const { findCommand } = await import(
+      `../../../src/utils/command.ts?command-version=${moduleCounter}`
+    );
 
     const result = await findCommand("gemini");
 

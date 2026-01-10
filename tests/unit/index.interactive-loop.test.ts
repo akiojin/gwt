@@ -1,4 +1,3 @@
-import type { Mock } from "bun:test";
 import {
   beforeEach,
   afterEach,
@@ -11,32 +10,34 @@ import {
 import type { SelectionResult } from "../../src/cli/ui/App.solid.js";
 
 const waitForUserAcknowledgementMock = mock<() => Promise<void>>();
-
-const mockTerminalStreams = {
-  stdin: { isTTY: false, on: () => {} } as unknown as NodeJS.ReadStream,
-  stdout: { write: () => {} } as unknown as NodeJS.WriteStream,
-  stderr: { write: () => {} } as unknown as NodeJS.WriteStream,
+const writeMock = mock();
+const mockStreams = {
+  stdin: process.stdin,
+  stdout: { write: writeMock } as NodeJS.WriteStream,
+  stderr: { write: writeMock } as NodeJS.WriteStream,
+  stdinFd: undefined as number | undefined,
+  stdoutFd: undefined as number | undefined,
+  stderrFd: undefined as number | undefined,
   usingFallback: false,
   exitRawMode: mock(),
 };
-
 const mockChildStdio = {
-  stdin: "inherit",
-  stdout: "inherit",
-  stderr: "inherit",
+  stdin: "inherit" as const,
+  stdout: "inherit" as const,
+  stderr: "inherit" as const,
   cleanup: mock(),
 };
 
 mock.module("../../src/utils/terminal.js", () => ({
-  getTerminalStreams: mock(() => mockTerminalStreams),
+  getTerminalStreams: mock(() => mockStreams),
   resetTerminalModes: mock(),
+  waitForUserAcknowledgement: waitForUserAcknowledgementMock,
   writeTerminalLine: mock(),
   createChildStdio: mock(() => mockChildStdio),
-  waitForUserAcknowledgement: waitForUserAcknowledgementMock,
 }));
 
-// Import after mocks are set up
-import { runInteractiveLoop } from "../../src/index.js";
+// Import after mocks are set up (using underscore prefix to indicate intentional non-use at top level)
+import { runInteractiveLoop as _runInteractiveLoop } from "../../src/index.js";
 
 describe("runInteractiveLoop", () => {
   const baseSelection: SelectionResult = {
@@ -62,6 +63,7 @@ describe("runInteractiveLoop", () => {
   });
 
   it("re-renders the UI after workflow errors instead of exiting", async () => {
+    const { runInteractiveLoop } = await import("../../src/index.js");
     const uiHandler = mock<() => Promise<SelectionResult | undefined>>();
     uiHandler
       .mockResolvedValueOnce(baseSelection)
@@ -79,6 +81,7 @@ describe("runInteractiveLoop", () => {
   });
 
   it("recovers when the UI handler throws and allows retry", async () => {
+    const { runInteractiveLoop } = await import("../../src/index.js");
     const uiHandler = mock<() => Promise<SelectionResult | undefined>>();
     uiHandler
       .mockRejectedValueOnce(new Error("ui crash"))

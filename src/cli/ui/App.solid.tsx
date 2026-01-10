@@ -36,6 +36,7 @@ import { LoadingIndicatorScreen } from "./screens/solid/LoadingIndicator.js";
 import { WorktreeCreateScreen } from "./screens/solid/WorktreeCreateScreen.js";
 import { InputScreen } from "./screens/solid/InputScreen.js";
 import { ConfirmScreen } from "./screens/solid/ConfirmScreen.js";
+import { useTerminalSize } from "./hooks/solid/useTerminalSize.js";
 import { EnvironmentScreen } from "./screens/solid/EnvironmentScreen.js";
 import { ProfileScreen } from "./screens/solid/ProfileScreen.js";
 import { ProfileEnvScreen } from "./screens/solid/ProfileEnvScreen.js";
@@ -59,6 +60,7 @@ import {
   getLocalBranches,
   getRepositoryRoot,
   deleteBranch,
+  fetchAllRemotes,
 } from "../../git.js";
 import {
   isProtectedBranchName,
@@ -74,12 +76,18 @@ import {
   loadSession,
   type ToolSessionEntry,
 } from "../../config/index.js";
+import {
+  findLatestBranchSessionsByTool,
+  refreshQuickStartEntries,
+} from "./utils/continueSession.js";
 import { getAllCodingAgents } from "../../config/tools.js";
 import {
   clearLogFiles,
   getTodayLogDate,
   readLogLinesForDate,
   resolveLogTarget,
+  selectLogTargetByRecency,
+  type LogTargetResolution,
 } from "../../logging/reader.js";
 import { parseLogLines } from "../../logging/formatter.js";
 import { copyToClipboard } from "./utils/clipboard.js";
@@ -101,6 +109,9 @@ import { prefetchInstalledVersions } from "./utils/installedVersionCache.js";
 import { getBunxAgentIds } from "./utils/versionFetcher.js";
 
 export type ExecutionMode = "normal" | "continue" | "resume";
+
+const UNSAFE_SELECTION_MESSAGE = "Unsafe branch selected. Select anyway?";
+const SAFETY_PENDING_MESSAGE = "Safety check in progress. Select anyway?";
 
 export interface SelectionResult {
   branch: string;
@@ -230,12 +241,14 @@ const toSelectedBranchState = (branch: BranchItem): SelectedBranchState => {
     displayName: branch.name,
     branchType: branch.type,
     branchCategory: branch.branchType,
+    worktreePath: branch.worktree?.path ?? null,
     ...(isRemote ? { remoteBranch: branch.name } : {}),
   };
 };
 
 export function AppSolid(props: AppSolidProps) {
   const renderer = useRenderer();
+  const terminal = useTerminalSize();
   let hasExited = false;
 
   const exitApp = (result?: SelectionResult) => {
@@ -282,6 +295,16 @@ export function AppSolid(props: AppSolidProps) {
   );
   const [selectedMode, setSelectedMode] = createSignal<ExecutionMode>("normal");
   const [selectedBranches, setSelectedBranches] = createSignal<string[]>([]);
+  const [unsafeSelectionConfirmVisible, setUnsafeSelectionConfirmVisible] =
+    createSignal(false);
+  const [unsafeConfirmInputLocked, setUnsafeConfirmInputLocked] =
+    createSignal(false);
+  const [unsafeSelectionTarget, setUnsafeSelectionTarget] = createSignal<
+    string | null
+  >(null);
+  const [unsafeSelectionMessage, setUnsafeSelectionMessage] = createSignal(
+    UNSAFE_SELECTION_MESSAGE,
+  );
   const [branchFooterMessage, setBranchFooterMessage] = createSignal<{
     text: string;
     isSpinning?: boolean;
@@ -312,20 +335,68 @@ export function AppSolid(props: AppSolidProps) {
   );
   const [defaultBaseBranch, setDefaultBaseBranch] = createSignal("main");
 
+  const suppressBranchInputOnce = () => {
+    setUnsafeConfirmInputLocked(true);
+    queueMicrotask(() => {
+      setUnsafeConfirmInputLocked(false);
+    });
+  };
+
+  const unsafeConfirmBoxWidth = createMemo(() => {
+    const columns = terminal().columns || 80;
+    return Math.max(1, Math.floor(columns * 0.6));
+  });
+  const unsafeConfirmContentWidth = createMemo(() =>
+    Math.max(0, unsafeConfirmBoxWidth() - 4),
+  );
+
   // セッション履歴（最終使用エージェントなど）
   const [sessionHistory, setSessionHistory] = createSignal<ToolSessionEntry[]>(
     [],
   );
+  const [quickStartHistory, setQuickStartHistory] = createSignal<
+    ToolSessionEntry[]
+  >([]);
 
   // 選択中ブランチの履歴をフィルタリング
   const historyForBranch = createMemo(() => {
     const history = sessionHistory();
     const branch = selectedBranch();
     if (!branch) return [];
-    // 選択中ブランチにマッチする履歴エントリを新しい順で返す
-    return history
-      .filter((entry) => entry.branch === branch.name)
-      .sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0));
+    return findLatestBranchSessionsByTool(
+      history,
+      branch.name,
+      branch.worktreePath ?? null,
+    );
+  });
+
+  createEffect(() => {
+    setQuickStartHistory(historyForBranch());
+  });
+
+  createEffect(() => {
+    const branch = selectedBranch();
+    const baseHistory = historyForBranch();
+    if (!wizardVisible() || !branch || baseHistory.length === 0) {
+      return;
+    }
+
+    const worktreePath = branch.worktreePath ?? null;
+    if (!worktreePath) {
+      return;
+    }
+
+    const branchName = branch.name;
+    void (async () => {
+      const refreshed = await refreshQuickStartEntries(baseHistory, {
+        branch: branchName,
+        worktreePath,
+      });
+      if (selectedBranch()?.name !== branchName) {
+        return;
+      }
+      setQuickStartHistory(refreshed);
+    })();
   });
 
   const [logEntries, setLogEntries] = createSignal<FormattedLogEntry[]>([]);
@@ -374,12 +445,20 @@ export function AppSolid(props: AppSolidProps) {
   const [profileConfirmMode, setProfileConfirmMode] =
     createSignal<ProfileConfirmMode>("delete-profile");
 
-  const logTarget = createMemo(() =>
+  const [logEffectiveTarget, setLogEffectiveTarget] =
+    createSignal<LogTargetResolution | null>(null);
+  const logPrimaryTarget = createMemo(() =>
     resolveLogTarget(logTargetBranch(), workingDirectory()),
+  );
+  const logFallbackTarget = createMemo(() =>
+    resolveLogTarget(null, workingDirectory()),
+  );
+  const logActiveTarget = createMemo(
+    () => logEffectiveTarget() ?? logPrimaryTarget(),
   );
   const logBranchLabel = createMemo(() => logTargetBranch()?.label ?? null);
   const logSourceLabel = createMemo(() => {
-    const target = logTarget();
+    const target = logActiveTarget();
     if (!target.sourcePath) {
       return "(none)";
     }
@@ -389,10 +468,17 @@ export function AppSolid(props: AppSolidProps) {
     ) {
       return `${target.sourcePath} (cwd)`;
     }
+    if (target.reason === "working-directory-fallback") {
+      return `${target.sourcePath} (cwd fallback)`;
+    }
     if (target.reason === "worktree-inaccessible") {
       return `${target.sourcePath} (inaccessible)`;
     }
     return target.sourcePath;
+  });
+  createEffect(() => {
+    logPrimaryTarget();
+    setLogEffectiveTarget(null);
   });
   const selectedProfileConfig = createMemo(() => {
     const name = selectedProfileName();
@@ -560,7 +646,13 @@ export function AppSolid(props: AppSolidProps) {
     setLogLoading(true);
     setLogError(null);
     try {
-      const target = logTarget();
+      const primaryTarget = logPrimaryTarget();
+      const fallbackTarget = logFallbackTarget();
+      const target = await selectLogTargetByRecency(
+        primaryTarget,
+        fallbackTarget,
+      );
+      setLogEffectiveTarget(target);
       if (!target.logDir) {
         setLogEntries([]);
         setLogSelectedDate(targetDate);
@@ -595,7 +687,7 @@ export function AppSolid(props: AppSolidProps) {
   };
 
   const resetLogFiles = async () => {
-    const target = logTarget();
+    const target = logActiveTarget();
     if (!target.logDir) {
       showLogNotification("No logs available.", "error");
       return;
@@ -660,6 +752,14 @@ export function AppSolid(props: AppSolidProps) {
       void refreshCleanupSafety();
 
       void (async () => {
+        // Fetch remote updates with --prune to remove stale tracking refs
+        await withTimeout(
+          fetchAllRemotes({ cwd: repoRoot }),
+          BRANCH_FULL_LOAD_TIMEOUT_MS,
+        ).catch(() => {
+          // Ignore fetch errors (e.g., network issues)
+        });
+
         const [branches, latestWorktrees] = await Promise.all([
           withTimeout(
             getAllBranches(repoRoot),
@@ -795,7 +895,7 @@ export function AppSolid(props: AppSolidProps) {
 
   createEffect(() => {
     if (currentScreen() === "log-list") {
-      logTarget();
+      logPrimaryTarget();
       void loadLogEntries(logSelectedDate());
     }
   });
@@ -931,6 +1031,11 @@ export function AppSolid(props: AppSolidProps) {
 
   // FR-010: クイックスタートからのResume（前回設定で続きから）
   const handleWizardResume = (entry: ToolSessionEntry) => {
+    if (!entry.sessionId) {
+      handleWizardStartNew(entry);
+      return;
+    }
+
     setWizardVisible(false);
 
     const branch = selectedBranch();
@@ -1062,23 +1167,8 @@ export function AppSolid(props: AppSolidProps) {
             skipCounts.remote += 1;
             continue;
           }
-          if (isProtectedBranchName(branch.name)) {
-            skipCounts.protected += 1;
-            continue;
-          }
           if (branch.isCurrent) {
             skipCounts.current += 1;
-            continue;
-          }
-          const hasUncommitted =
-            branch.worktree?.hasUncommittedChanges === true;
-          const hasUnpushed = branch.hasUnpushedCommits === true;
-          if (hasUncommitted || hasUnpushed) {
-            skipCounts.unsafe += 1;
-            continue;
-          }
-          if (branch.safeToCleanup !== true) {
-            skipCounts.unsafe += 1;
             continue;
           }
           const worktreePath = branch.worktree?.path ?? null;
@@ -1198,13 +1288,14 @@ export function AppSolid(props: AppSolidProps) {
       return;
     }
 
-    // 選択されたブランチのうち、inaccessibleなものを修復対象とする
+    // 選択されたローカルブランチのうち、Worktreeを持つものを修復対象とする
     const selectionSet = new Set(selection);
     const targets = branchItems()
       .filter(
         (branch) =>
           selectionSet.has(branch.name) &&
-          branch.worktreeStatus === "inaccessible",
+          branch.type !== "remote" &&
+          branch.worktreeStatus !== undefined,
       )
       .map((branch) => branch.name);
 
@@ -1456,15 +1547,59 @@ export function AppSolid(props: AppSolidProps) {
   };
 
   const toggleSelectedBranch = (branchName: string) => {
-    setSelectedBranches((prev) => {
-      const next = new Set(prev);
-      if (next.has(branchName)) {
-        next.delete(branchName);
-      } else {
-        next.add(branchName);
-      }
-      return Array.from(next);
-    });
+    if (unsafeSelectionConfirmVisible()) {
+      return;
+    }
+    const currentSelection = new Set(selectedBranches());
+    if (currentSelection.has(branchName)) {
+      currentSelection.delete(branchName);
+      setSelectedBranches(Array.from(currentSelection));
+      return;
+    }
+
+    const branch = branchItems().find((item) => item.name === branchName);
+    const pending = cleanupSafetyPending();
+    const hasSafetyPending = pending.has(branchName);
+    const hasUncommitted = branch?.worktree?.hasUncommittedChanges === true;
+    const hasUnpushed = branch?.hasUnpushedCommits === true;
+    const isUnmerged = branch?.isUnmerged === true;
+    const safeToCleanup = branch?.safeToCleanup === true;
+    const isRemoteBranch = branch?.type === "remote";
+    const isUnsafe =
+      Boolean(branch) &&
+      !isRemoteBranch &&
+      !hasSafetyPending &&
+      (hasUncommitted || hasUnpushed || isUnmerged || !safeToCleanup);
+
+    if (branch && hasSafetyPending) {
+      setUnsafeSelectionTarget(branch.name);
+      setUnsafeSelectionMessage(SAFETY_PENDING_MESSAGE);
+      setUnsafeSelectionConfirmVisible(true);
+      return;
+    }
+    if (branch && isUnsafe) {
+      setUnsafeSelectionTarget(branch.name);
+      setUnsafeSelectionMessage(UNSAFE_SELECTION_MESSAGE);
+      setUnsafeSelectionConfirmVisible(true);
+      return;
+    }
+
+    currentSelection.add(branchName);
+    setSelectedBranches(Array.from(currentSelection));
+  };
+
+  const confirmUnsafeSelection = (confirmed: boolean) => {
+    suppressBranchInputOnce();
+    const target = unsafeSelectionTarget();
+    setUnsafeSelectionConfirmVisible(false);
+    setUnsafeSelectionTarget(null);
+    setUnsafeSelectionMessage(UNSAFE_SELECTION_MESSAGE);
+    if (!confirmed || !target) {
+      return;
+    }
+    setSelectedBranches((prev) =>
+      prev.includes(target) ? prev : [...prev, target],
+    );
   };
 
   const handleToolSelect = (item: SelectorItem) => {
@@ -1518,7 +1653,7 @@ export function AppSolid(props: AppSolidProps) {
       const cleanupUI = {
         indicators: cleanupIndicators(),
         footerMessage: branchFooterMessage(),
-        inputLocked: branchInputLocked(),
+        inputLocked: branchInputLocked() || unsafeConfirmInputLocked(),
         safetyLoading: cleanupSafetyLoading(),
         safetyPendingBranches: cleanupSafetyPending(),
       };
@@ -1552,6 +1687,7 @@ export function AppSolid(props: AppSolidProps) {
           cleanupUI={cleanupUI}
           helpVisible={helpVisible()}
           wizardVisible={wizardVisible()}
+          confirmVisible={unsafeSelectionConfirmVisible()}
           cursorPosition={branchCursorPosition()}
           onCursorPositionChange={setBranchCursorPosition}
         />
@@ -1904,12 +2040,36 @@ export function AppSolid(props: AppSolidProps) {
   return (
     <>
       {renderCurrentScreen()}
+      {unsafeSelectionConfirmVisible() && (
+        <box
+          position="absolute"
+          top="30%"
+          left="20%"
+          width={unsafeConfirmBoxWidth()}
+          zIndex={110}
+          border
+          borderStyle="single"
+          borderColor="yellow"
+          backgroundColor="black"
+          padding={1}
+        >
+          <ConfirmScreen
+            message={unsafeSelectionMessage()}
+            onConfirm={confirmUnsafeSelection}
+            yesLabel="OK"
+            noLabel="Cancel"
+            defaultNo
+            helpVisible={helpVisible()}
+            width={unsafeConfirmContentWidth()}
+          />
+        </box>
+      )}
       <HelpOverlay visible={helpVisible()} context={currentScreen()} />
       {/* FR-044: ウィザードポップアップをレイヤー表示 */}
       <WizardController
         visible={wizardVisible()}
         selectedBranchName={selectedBranch()?.name ?? ""}
-        history={historyForBranch()}
+        history={quickStartHistory()}
         onClose={handleWizardClose}
         onComplete={handleWizardComplete}
         onResume={handleWizardResume}

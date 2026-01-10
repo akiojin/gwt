@@ -5,29 +5,16 @@ import {
   mock,
   beforeEach,
   afterEach,
-  type Mock,
+  spyOn,
 } from "bun:test";
+import * as fsPromises from "node:fs/promises";
 import path from "node:path";
 
-const accessMock = mock();
-
-// Avoid async import here to prevent Bun module-mock deadlocks.
-mock.module("node:fs/promises", () => ({
-  access: accessMock,
-  default: {
-    access: accessMock,
-  },
-}));
-
-mock.module("execa", () => ({
-  execa: mock(),
-}));
-
-import { execa } from "execa";
-import {
-  detectPackageManager,
-  installDependenciesForWorktree,
-} from "../../src/services/dependency-installer";
+let accessMock: ReturnType<typeof spyOn>;
+let execaMock: ReturnType<typeof mock>;
+let detectPackageManager: typeof import("../../src/services/dependency-installer.ts").detectPackageManager;
+let installDependenciesForWorktree: typeof import("../../src/services/dependency-installer.ts").installDependenciesForWorktree;
+let importCounter = 0;
 
 const WORKTREE = "/repo/.worktrees/feature-x";
 
@@ -43,14 +30,22 @@ function setupExistingFiles(files: string[]): void {
 }
 
 describe("dependency installer", () => {
-  beforeEach(() => {
-    accessMock.mockReset();
-    (execa as Mock).mockReset();
+  beforeEach(async () => {
+    mock.restore();
+    accessMock = spyOn(fsPromises, "access");
+    execaMock = mock();
+    mock.module("execa", () => ({
+      execa: (...args: unknown[]) => execaMock(...args),
+    }));
+    importCounter += 1;
+    ({ detectPackageManager, installDependenciesForWorktree } = await import(
+      `../../src/services/dependency-installer.ts?worktree-install=${importCounter}`
+    ));
   });
 
   afterEach(() => {
     accessMock.mockReset();
-    (execa as Mock).mockReset();
+    execaMock.mockReset();
   });
 
   describe("detectPackageManager", () => {
@@ -105,11 +100,11 @@ describe("dependency installer", () => {
   describe("installDependenciesForWorktree", () => {
     it("runs bun install with frozen-lockfile", async () => {
       setupExistingFiles([path.join(WORKTREE, "bun.lock")]);
-      (execa as Mock).mockResolvedValue({ stdout: "", stderr: "" });
+      execaMock.mockResolvedValue({ stdout: "", stderr: "" });
 
       await installDependenciesForWorktree(WORKTREE);
 
-      expect(execa).toHaveBeenCalledWith(
+      expect(execaMock).toHaveBeenCalledWith(
         "bun",
         ["install", "--frozen-lockfile"],
         expect.objectContaining({ cwd: WORKTREE }),
@@ -118,11 +113,11 @@ describe("dependency installer", () => {
 
     it("runs pnpm install when pnpm lock is present", async () => {
       setupExistingFiles([path.join(WORKTREE, "pnpm-lock.yaml")]);
-      (execa as Mock).mockResolvedValue({ stdout: "", stderr: "" });
+      execaMock.mockResolvedValue({ stdout: "", stderr: "" });
 
       await installDependenciesForWorktree(WORKTREE);
 
-      expect(execa).toHaveBeenCalledWith(
+      expect(execaMock).toHaveBeenCalledWith(
         "pnpm",
         ["install", "--frozen-lockfile"],
         expect.objectContaining({ cwd: WORKTREE }),
@@ -131,11 +126,11 @@ describe("dependency installer", () => {
 
     it("runs npm ci when package-lock exists", async () => {
       setupExistingFiles([path.join(WORKTREE, "package-lock.json")]);
-      (execa as Mock).mockResolvedValue({ stdout: "", stderr: "" });
+      execaMock.mockResolvedValue({ stdout: "", stderr: "" });
 
       await installDependenciesForWorktree(WORKTREE);
 
-      expect(execa).toHaveBeenCalledWith(
+      expect(execaMock).toHaveBeenCalledWith(
         "npm",
         ["ci"],
         expect.objectContaining({ cwd: WORKTREE }),
@@ -144,11 +139,11 @@ describe("dependency installer", () => {
 
     it("runs npm install when only package.json exists", async () => {
       setupExistingFiles([path.join(WORKTREE, "package.json")]);
-      (execa as Mock).mockResolvedValue({ stdout: "", stderr: "" });
+      execaMock.mockResolvedValue({ stdout: "", stderr: "" });
 
       await installDependenciesForWorktree(WORKTREE);
 
-      expect(execa).toHaveBeenCalledWith(
+      expect(execaMock).toHaveBeenCalledWith(
         "npm",
         ["install"],
         expect.objectContaining({ cwd: WORKTREE }),
@@ -171,7 +166,7 @@ describe("dependency installer", () => {
     it("skips when install command fails", async () => {
       const lockfilePath = path.join(WORKTREE, "bun.lock");
       setupExistingFiles([lockfilePath]);
-      (execa as Mock).mockRejectedValue(new Error("boom"));
+      execaMock.mockRejectedValue(new Error("boom"));
 
       await expect(
         installDependenciesForWorktree(WORKTREE),
@@ -203,7 +198,7 @@ describe("dependency installer", () => {
     it("skips when package manager binary is missing (ENOENT)", async () => {
       setupExistingFiles([path.join(WORKTREE, "bun.lock")]);
       const enoent = Object.assign(new Error("not found"), { code: "ENOENT" });
-      (execa as Mock).mockRejectedValueOnce(enoent);
+      execaMock.mockRejectedValueOnce(enoent);
 
       const result = await installDependenciesForWorktree(WORKTREE);
 
@@ -214,11 +209,11 @@ describe("dependency installer", () => {
     // FR-040a: パッケージマネージャーの出力をそのまま標準出力/標準エラーに表示
     it("passes stdout and stderr as inherit to show package manager output directly (FR-040a)", async () => {
       setupExistingFiles([path.join(WORKTREE, "pnpm-lock.yaml")]);
-      (execa as Mock).mockResolvedValue({ stdout: "", stderr: "" });
+      execaMock.mockResolvedValue({ stdout: "", stderr: "" });
 
       await installDependenciesForWorktree(WORKTREE);
 
-      expect(execa).toHaveBeenCalledWith(
+      expect(execaMock).toHaveBeenCalledWith(
         "pnpm",
         ["install", "--frozen-lockfile"],
         expect.objectContaining({

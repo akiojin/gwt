@@ -1,9 +1,15 @@
 import type { SessionData, ToolSessionEntry } from "../../../config/index.js";
+import type { SessionSearchOptions } from "../../../utils/session/index.js";
 import {
+  findLatestClaudeSession,
   findLatestClaudeSessionId,
+  findLatestCodexSession,
   findLatestCodexSessionId,
+  findLatestGeminiSession,
   findLatestGeminiSessionId,
-} from "../../../utils/session.js";
+  findLatestOpenCodeSession,
+} from "../../../utils/session/index.js";
+import { listAllWorktrees } from "../../../worktree.js";
 
 export interface ContinueSessionContext {
   history: ToolSessionEntry[];
@@ -122,10 +128,10 @@ export function findLatestBranchSessionsByTool(
   const byBranch = history.filter((entry) => entry && entry.branch === branch);
   if (!byBranch.length) return [];
 
-  const scoped = worktreePath
+  const source = worktreePath
     ? byBranch.filter((entry) => entry.worktreePath === worktreePath)
     : byBranch;
-  const source = scoped.length ? scoped : byBranch;
+  if (!source.length) return [];
 
   const latestByTool = new Map<string, ToolSessionEntry>();
   for (const entry of source) {
@@ -141,4 +147,85 @@ export function findLatestBranchSessionsByTool(
   return Array.from(latestByTool.values()).sort(
     (a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0),
   );
+}
+
+export interface QuickStartRefreshContext {
+  branch: string;
+  worktreePath?: string | null;
+}
+
+export interface QuickStartSessionLookups {
+  findLatestCodexSession?: typeof findLatestCodexSession;
+  findLatestClaudeSession?: typeof findLatestClaudeSession;
+  findLatestGeminiSession?: typeof findLatestGeminiSession;
+  findLatestOpenCodeSession?: typeof findLatestOpenCodeSession;
+  listAllWorktrees?: typeof listAllWorktrees;
+}
+
+export async function refreshQuickStartEntries(
+  entries: ToolSessionEntry[],
+  context: QuickStartRefreshContext,
+  lookups: QuickStartSessionLookups = {},
+): Promise<ToolSessionEntry[]> {
+  if (!entries.length) return entries;
+  const worktreePath = context.worktreePath ?? null;
+  if (!worktreePath) return entries;
+
+  const lookupWorktrees = lookups.listAllWorktrees ?? listAllWorktrees;
+  let resolvedWorktrees: { path: string; branch: string }[] | null = null;
+  try {
+    const allWorktrees = await lookupWorktrees();
+    resolvedWorktrees = allWorktrees
+      .filter((entry) => entry?.path && entry?.branch)
+      .map((entry) => ({ path: entry.path, branch: entry.branch }));
+  } catch {
+    resolvedWorktrees = null;
+  }
+
+  const searchOptions: SessionSearchOptions = {
+    branch: context.branch,
+    ...(resolvedWorktrees && resolvedWorktrees.length > 0
+      ? { worktrees: resolvedWorktrees }
+      : {}),
+  };
+
+  const lookupCodex = lookups.findLatestCodexSession ?? findLatestCodexSession;
+  const lookupClaude =
+    lookups.findLatestClaudeSession ?? findLatestClaudeSession;
+  const lookupGemini =
+    lookups.findLatestGeminiSession ?? findLatestGeminiSession;
+  const lookupOpenCode =
+    lookups.findLatestOpenCodeSession ?? findLatestOpenCodeSession;
+
+  const updated = await Promise.all(
+    entries.map(async (entry) => {
+      let latest: { id: string; mtime: number } | null = null;
+      switch (entry.toolId) {
+        case "codex-cli":
+          latest = await lookupCodex(searchOptions);
+          break;
+        case "claude-code":
+          latest = await lookupClaude(worktreePath, searchOptions);
+          break;
+        case "gemini-cli":
+          latest = await lookupGemini(searchOptions);
+          break;
+        case "opencode":
+          latest = await lookupOpenCode(searchOptions);
+          break;
+        default:
+          return entry;
+      }
+
+      if (!latest?.id) return entry;
+      const updatedTimestamp = Math.max(entry.timestamp ?? 0, latest.mtime);
+      return {
+        ...entry,
+        sessionId: latest.id,
+        timestamp: updatedTimestamp,
+      };
+    }),
+  );
+
+  return updated.sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0));
 }

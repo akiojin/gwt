@@ -218,6 +218,28 @@ describe("ModelSelectStep", () => {
       testSetup.renderer.destroy();
     }
   });
+
+  it("renders model options for OpenCode", async () => {
+    const testSetup = await testRender(
+      () => (
+        <ModelSelectStep
+          agentId="opencode"
+          onSelect={() => {}}
+          onBack={() => {}}
+        />
+      ),
+      { width: 60, height: 20 },
+    );
+    await testSetup.renderOnce();
+
+    try {
+      const frame = testSetup.captureCharFrame();
+      expect(frame).toContain("Default (Auto)");
+      expect(frame).toContain("Custom");
+    } finally {
+      testSetup.renderer.destroy();
+    }
+  });
 });
 
 // T409: 推論レベル選択ステップ（Codexのみ）のテスト
@@ -298,7 +320,10 @@ describe("SkipPermissionsStep", () => {
       // Enterキーで選択（デフォルトはYes）
       testSetup.mockInput.pressEnter();
       await testSetup.renderOnce();
-      expect(selected).toBe(true);
+      if (selected === null) {
+        throw new Error("Expected selection");
+      }
+      expect(selected === true).toBe(true);
     } finally {
       testSetup.renderer.destroy();
     }

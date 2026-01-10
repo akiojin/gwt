@@ -441,6 +441,54 @@ export function ModelSelectStep(props: ModelSelectStepProps) {
   );
 }
 
+// T408b: カスタムモデル入力ステップ
+export interface ModelInputStepProps extends StepProps {
+  agentId: CodingAgentId;
+  onSubmit: (value: string) => void;
+}
+
+export function ModelInputStep(props: ModelInputStepProps) {
+  const [value, setValue] = createSignal("");
+  const scroll = useWizardScroll();
+  const placeholder = props.agentId === "opencode" ? "provider/model" : "model";
+
+  createEffect(() => {
+    if (props.focused === false) {
+      return;
+    }
+    if (!scroll) {
+      return;
+    }
+    scroll.ensureLineVisible(2);
+  });
+
+  const handleSubmit = (next: string) => {
+    const trimmed = next.trim();
+    if (!trimmed) {
+      return;
+    }
+    props.onSubmit(trimmed);
+  };
+
+  return (
+    <box flexDirection="column">
+      <text fg="cyan" attributes={TextAttributes.BOLD}>
+        Enter custom model:
+      </text>
+      <text> </text>
+      <TextInput
+        value={value()}
+        onChange={setValue}
+        onSubmit={handleSubmit}
+        placeholder={placeholder}
+        focused={props.focused ?? true}
+      />
+      <text> </text>
+      <text attributes={TextAttributes.DIM}>[Enter] Submit [Esc] Back</text>
+    </box>
+  );
+}
+
 // T409: 推論レベル選択ステップ（Codexのみ）
 export interface ReasoningLevelStepProps extends StepProps {
   onSelect: (level: string) => void;
