@@ -37,21 +37,6 @@ jobs:
         env:
           CI: true
 
-      - name: Generate coverage report
-        run: bun run test:coverage
-        timeout-minutes: 5
-        continue-on-error: true
-
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
-        with:
-          files: ./coverage/lcov.info
-          flags: unittests
-          name: codecov-umbrella
-          fail_ci_if_error: false
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-
   build:
     name: Build
     runs-on: ubuntu-latest
