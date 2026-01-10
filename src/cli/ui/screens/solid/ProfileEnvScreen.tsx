@@ -1,11 +1,12 @@
 /** @jsxImportSource @opentui/solid */
-import { TextAttributes } from "@opentui/core";
 import { useKeyboard } from "@opentui/solid";
 import { createMemo } from "solid-js";
 import { Header } from "../../components/solid/Header.js";
 import { Footer } from "../../components/solid/Footer.js";
 import { useTerminalSize } from "../../hooks/solid/useTerminalSize.js";
 import { useScrollableList } from "../../hooks/solid/useScrollableList.js";
+import stringWidth from "string-width";
+import { selectionStyle } from "../../core/theme.js";
 
 export interface ProfileEnvVariable {
   key: string;
@@ -39,6 +40,10 @@ export function ProfileEnvScreen({
   helpVisible = false,
 }: ProfileEnvScreenProps) {
   const terminal = useTerminalSize();
+  const padLine = (value: string, width: number) => {
+    const padding = Math.max(0, width - stringWidth(value));
+    return padding > 0 ? `${value}${" ".repeat(padding)}` : value;
+  };
   const listHeight = createMemo(() => {
     const headerRows = 2;
     const footerRows = 1;
@@ -163,22 +168,21 @@ export function ProfileEnvScreen({
             {list.visibleItems().map((variable, index) => {
               const absoluteIndex = list.scrollOffset() + index;
               const isSelected = absoluteIndex === list.selectedIndex();
-              const attributes = isSelected ? TextAttributes.BOLD : undefined;
-              const color = isSelected ? "cyan" : undefined;
               return (
                 <box flexDirection="row">
-                  <text
-                    {...(color ? { fg: color } : {})}
-                    {...(attributes !== undefined ? { attributes } : {})}
-                  >
-                    {variable.key}
-                  </text>
-                  <text
-                    {...(color ? { fg: color } : {})}
-                    {...(attributes !== undefined ? { attributes } : {})}
-                  >
-                    ={variable.value}
-                  </text>
+                  {isSelected ? (
+                    <text fg={selectionStyle.fg} bg={selectionStyle.bg}>
+                      {padLine(
+                        `${variable.key}=${variable.value}`,
+                        terminal().columns,
+                      )}
+                    </text>
+                  ) : (
+                    <>
+                      <text>{variable.key}</text>
+                      <text>={variable.value}</text>
+                    </>
+                  )}
                 </box>
               );
             })}

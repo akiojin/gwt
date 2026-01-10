@@ -16,6 +16,10 @@ export interface SessionSearchOptions {
   windowMs?: number;
   /** Working directory filter */
   cwd?: string | null;
+  /** Branch name filter (resolved from session cwd via worktree paths) */
+  branch?: string | null;
+  /** Optional worktree list to avoid shelling out for branch mapping */
+  worktrees?: { path: string; branch: string }[] | null;
 }
 
 /**

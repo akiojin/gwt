@@ -2,8 +2,15 @@
  * 環境変数プロファイル管理機能のテスト
  * @see specs/SPEC-dafff079/spec.md
  */
-
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+/* eslint-disable @typescript-eslint/no-non-null-assertion */
+import {
+  describe,
+  it,
+  expect,
+  beforeEach,
+  afterEach,
+  mock as _mock,
+} from "bun:test";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
@@ -111,8 +118,8 @@ profiles:
     const config = await loadProfiles();
     expect(config.version).toBe("1.0");
     expect(config.activeProfile).toBe("development");
-    expect(config.profiles.development.displayName).toBe("Development");
-    expect(config.profiles.development.env.DEBUG).toBe("true");
+    expect(config.profiles.development!.displayName).toBe("Development");
+    expect(config.profiles.development!.env.DEBUG).toBe("true");
   });
 
   it("不正なYAML形式の場合、エラーをスローする", async () => {
@@ -169,7 +176,7 @@ describe("saveProfiles", () => {
     const loaded = await loadProfiles();
 
     expect(loaded.activeProfile).toBe("production");
-    expect(loaded.profiles.production.env.NODE_ENV).toBe("production");
+    expect(loaded.profiles.production!.env.NODE_ENV).toBe("production");
   });
 
   it("ディレクトリが存在しない場合、自動的に作成する", async () => {
@@ -447,7 +454,7 @@ describe("createProfile", () => {
 
     const config = await loadProfiles();
     expect(config.profiles.staging).toBeDefined();
-    expect(config.profiles.staging.displayName).toBe("Staging");
+    expect(config.profiles.staging!.displayName).toBe("Staging");
   });
 
   it("既存のプロファイル名で作成しようとするとエラー", async () => {
@@ -531,9 +538,9 @@ profiles:
     });
 
     const config = await loadProfiles();
-    expect(config.profiles.development.displayName).toBe("Dev Environment");
-    expect(config.profiles.development.env.DEBUG).toBe("false");
-    expect(config.profiles.development.env.NEW_VAR).toBe("value");
+    expect(config.profiles.development!.displayName).toBe("Dev Environment");
+    expect(config.profiles.development!.env.DEBUG).toBe("false");
+    expect(config.profiles.development!.env.NEW_VAR).toBe("value");
   });
 
   it("存在しないプロファイルを更新しようとするとエラー", async () => {

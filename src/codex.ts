@@ -13,6 +13,10 @@ import {
   waitForCodexSessionId,
 } from "./utils/session.js";
 import { findCommand } from "./utils/command.js";
+import {
+  runAgentWithPty,
+  shouldCaptureAgentOutput,
+} from "./logging/agentOutput.js";
 
 const CODEX_CLI_PACKAGE = "@openai/codex";
 
@@ -96,6 +100,7 @@ export async function launchCodexCLI(
     model?: string;
     reasoningEffort?: CodexReasoningEffort;
     sessionId?: string | null;
+    branch?: string | null;
     version?: string | null;
   } = {},
 ): Promise<{ sessionId?: string | null }> {
@@ -175,8 +180,6 @@ export async function launchCodexCLI(
     terminal.exitRawMode();
     resetTerminalModes(terminal.stdout);
 
-    const childStdio = createChildStdio();
-
     const env = Object.fromEntries(
       Object.entries({
         ...process.env,
@@ -185,6 +188,8 @@ export async function launchCodexCLI(
         (entry): entry is [string, string] => typeof entry[1] === "string",
       ),
     );
+    const captureOutput = shouldCaptureAgentOutput(env);
+    const childStdio = captureOutput ? null : createChildStdio();
 
     // Auto-detect locally installed codex command
     const codexLookup = await findCommand("codex");
@@ -201,10 +206,57 @@ export async function launchCodexCLI(
         throw execError;
       }
     };
+    // Treat SIGHUP (1), SIGINT (2), SIGTERM (15) as normal exit signals
+    // SIGHUP can occur when the PTY closes, SIGINT/SIGTERM are user interrupts
+    const isNormalExitSignal = (signal?: number | null) =>
+      signal === 1 || signal === 2 || signal === 15;
+    const runCommand = async (command: string, commandArgs: string[]) => {
+      if (captureOutput) {
+        const result = await runAgentWithPty({
+          command,
+          args: commandArgs,
+          cwd: worktreePath,
+          env,
+          agentId: "codex-cli",
+        });
+        if (isNormalExitSignal(result.signal)) {
+          return;
+        }
+        if (result.exitCode !== null && result.exitCode !== 0) {
+          throw new Error(
+            `Codex CLI exited with code ${result.exitCode ?? "unknown"}`,
+          );
+        }
+        return;
+      }
+
+      if (!childStdio) {
+        return;
+      }
+
+      const child = execa(command, commandArgs, {
+        cwd: worktreePath,
+        stdin: childStdio.stdin,
+        stdout: childStdio.stdout,
+        stderr: childStdio.stderr,
+        env,
+      });
+      await execChild(child);
+    };
 
     // Determine execution strategy based on version selection
     // FR-063b: "installed" option only appears when local command exists
-    const selectedVersion = options.version ?? "installed";
+    const requestedVersion = options.version ?? "latest";
+    let selectedVersion = requestedVersion;
+
+    if (requestedVersion === "installed" && !codexLookup.path) {
+      writeTerminalLine(
+        chalk.yellow(
+          "   ⚠️  Installed codex command not found. Falling back to latest.",
+        ),
+      );
+      selectedVersion = "latest";
+    }
 
     // Log version information (FR-072)
     if (selectedVersion === "installed") {
@@ -220,30 +272,16 @@ export async function launchCodexCLI(
         writeTerminalLine(
           chalk.green("   ✨ Using locally installed codex command"),
         );
-        const child = execa(codexLookup.path, args, {
-          cwd: worktreePath,
-          stdin: childStdio.stdin,
-          stdout: childStdio.stdout,
-          stderr: childStdio.stderr,
-          env,
-        });
-        await execChild(child);
+        await runCommand(codexLookup.path, args);
       } else {
         // FR-067, FR-068: Use bunx with version suffix for latest/specific versions
         const packageWithVersion = `${CODEX_CLI_PACKAGE}@${selectedVersion}`;
         writeTerminalLine(chalk.cyan(`   🔄 Using bunx ${packageWithVersion}`));
 
-        const child = execa("bunx", [packageWithVersion, ...args], {
-          cwd: worktreePath,
-          stdin: childStdio.stdin,
-          stdout: childStdio.stdout,
-          stderr: childStdio.stderr,
-          env,
-        });
-        await execChild(child);
+        await runCommand("bunx", [packageWithVersion, ...args]);
       }
     } finally {
-      childStdio.cleanup();
+      childStdio?.cleanup();
     }
 
     // File-based session detection only - no stdout capture
@@ -257,6 +295,10 @@ export async function launchCodexCLI(
         preferClosestTo: finishedAt,
         windowMs: 10 * 60 * 1000,
         cwd: worktreePath,
+        branch: options.branch ?? null,
+        worktrees: options.branch
+          ? [{ path: worktreePath, branch: options.branch }]
+          : null,
       });
       const detectedSessionId = latest?.id ?? null;
       // When we explicitly resumed a specific session, keep that ID as the source of truth.

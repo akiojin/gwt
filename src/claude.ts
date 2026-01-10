@@ -9,6 +9,10 @@ import {
 } from "./utils/terminal.js";
 import { findCommand } from "./utils/command.js";
 import { findLatestClaudeSession } from "./utils/session.js";
+import {
+  runAgentWithPty,
+  shouldCaptureAgentOutput,
+} from "./logging/agentOutput.js";
 
 const CLAUDE_CLI_PACKAGE = "@anthropic-ai/claude-code@latest";
 
@@ -50,6 +54,7 @@ export async function launchClaudeCode(
     model?: string;
     sessionId?: string | null;
     chrome?: boolean;
+    branch?: string | null;
     version?: string | null;
   } = {},
 ): Promise<{ sessionId?: string | null }> {
@@ -231,7 +236,8 @@ export async function launchClaudeCode(
       ),
     );
 
-    const childStdio = createChildStdio();
+    const captureOutput = shouldCaptureAgentOutput(launchEnv);
+    const childStdio = captureOutput ? null : createChildStdio();
 
     // Auto-detect locally installed claude command
     const claudeLookup = await findCommand("claude");
@@ -261,9 +267,56 @@ export async function launchClaudeCode(
       }
     };
 
+    // Treat SIGHUP (1), SIGINT (2), SIGTERM (15) as normal exit signals
+    // SIGHUP can occur when the PTY closes, SIGINT/SIGTERM are user interrupts
+    const isNormalExitSignal = (signal?: number | null) =>
+      signal === 1 || signal === 2 || signal === 15;
+
+    const runCommand = async (file: string, fileArgs: string[]) => {
+      if (captureOutput) {
+        const result = await runAgentWithPty({
+          command: file,
+          args: fileArgs,
+          cwd: worktreePath,
+          env: launchEnv,
+          agentId: "claude-code",
+        });
+        // Treat normal exit signals (SIGHUP, SIGINT, SIGTERM) as successful exit
+        if (isNormalExitSignal(result.signal)) {
+          return;
+        }
+        if (result.exitCode !== null && result.exitCode !== 0) {
+          throw new Error(`Claude Code exited with code ${result.exitCode}`);
+        }
+        return;
+      }
+
+      if (!childStdio) {
+        return;
+      }
+
+      await execInteractive(file, fileArgs, {
+        cwd: worktreePath,
+        stdin: childStdio.stdin,
+        stdout: childStdio.stdout,
+        stderr: childStdio.stderr,
+        env: launchEnv,
+      });
+    };
+
     // Determine execution strategy based on version selection
     // FR-063b: "installed" option only appears when local command exists
-    const selectedVersion = options.version ?? "installed";
+    const requestedVersion = options.version ?? "latest";
+    let selectedVersion = requestedVersion;
+
+    if (requestedVersion === "installed" && !claudeLookup.path) {
+      writeTerminalLine(
+        chalk.yellow(
+          "   ⚠️  Installed claude command not found. Falling back to latest.",
+        ),
+      );
+      selectedVersion = "latest";
+    }
 
     // Log version information (FR-072)
     if (selectedVersion === "installed") {
@@ -279,13 +332,7 @@ export async function launchClaudeCode(
         writeTerminalLine(
           chalk.green("   ✨ Using locally installed claude command"),
         );
-        await execInteractive(claudeLookup.path, args, {
-          cwd: worktreePath,
-          stdin: childStdio.stdin,
-          stdout: childStdio.stdout,
-          stderr: childStdio.stderr,
-          env: launchEnv,
-        });
+        await runCommand(claudeLookup.path, args);
       } else {
         // FR-067, FR-068: Use bunx with version suffix for latest/specific versions
         const packageWithVersion = `@anthropic-ai/claude-code@${selectedVersion}`;
@@ -302,41 +349,30 @@ export async function launchClaudeCode(
         }
 
         if (useNpx && npxLookup?.path) {
-          await execInteractive(
-            npxLookup.path,
-            ["-y", packageWithVersion, ...args],
-            {
-              cwd: worktreePath,
-              stdin: childStdio.stdin,
-              stdout: childStdio.stdout,
-              stderr: childStdio.stderr,
-              env: launchEnv,
-            },
-          );
+          await runCommand(npxLookup.path, ["-y", packageWithVersion, ...args]);
         } else {
-          await execInteractive("bunx", [packageWithVersion, ...args], {
-            cwd: worktreePath,
-            stdin: childStdio.stdin,
-            stdout: childStdio.stdout,
-            stderr: childStdio.stderr,
-            env: launchEnv,
-          });
+          await runCommand("bunx", [packageWithVersion, ...args]);
         }
       }
     } finally {
-      childStdio.cleanup();
+      childStdio?.cleanup();
     }
 
     // File-based session detection only - no stdout capture
     // Use only findLatestClaudeSession with short timeout, skip sessionProbe to avoid hanging
     let capturedSessionId: string | null = null;
     const finishedAt = Date.now();
+    const branchWorktrees = options.branch
+      ? [{ path: worktreePath, branch: options.branch }]
+      : null;
     try {
       const latest = await findLatestClaudeSession(worktreePath, {
         since: startedAt,
         until: finishedAt + 30_000,
         preferClosestTo: finishedAt,
         windowMs: 10 * 60 * 1000,
+        branch: options.branch ?? null,
+        worktrees: branchWorktrees,
       });
       const detectedSessionId = latest?.id ?? null;
       // When we explicitly resumed a specific session, keep that ID as the source of truth.

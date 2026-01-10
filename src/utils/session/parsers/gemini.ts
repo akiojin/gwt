@@ -12,8 +12,10 @@ import type { GeminiSessionInfo, SessionSearchOptions } from "../types.js";
 import {
   collectFilesIterative,
   matchesCwd,
+  resolveBranchFromCwd,
   readSessionInfoFromFile,
 } from "../common.js";
+import { listAllWorktrees } from "../../../worktree.js";
 
 /**
  * Finds the latest Gemini session with optional time filtering and cwd matching.
@@ -57,15 +59,50 @@ export async function findLatestGeminiSession(
     return b.mtime - a.mtime;
   });
 
+  const branchFilter =
+    typeof options.branch === "string" && options.branch.trim().length > 0
+      ? options.branch.trim()
+      : null;
+  const shouldCheckBranch = Boolean(branchFilter);
+  const shouldCheckCwd = Boolean(options.cwd) && !shouldCheckBranch;
+
+  let worktrees: { path: string; branch: string }[] = [];
+  if (shouldCheckBranch) {
+    if (Array.isArray(options.worktrees) && options.worktrees.length > 0) {
+      worktrees = options.worktrees
+        .filter((entry) => entry?.path && entry?.branch)
+        .map((entry) => ({ path: entry.path, branch: entry.branch }));
+    } else {
+      try {
+        const allWorktrees = await listAllWorktrees();
+        worktrees = allWorktrees
+          .filter((entry) => entry?.path && entry?.branch)
+          .map((entry) => ({ path: entry.path, branch: entry.branch }));
+      } catch {
+        worktrees = [];
+      }
+    }
+    if (!worktrees.length) return null;
+  }
+
   for (const file of pool) {
     const info = await readSessionInfoFromFile(file.fullPath);
     if (!info.id) continue;
-    if (options.cwd) {
-      if (matchesCwd(info.cwd, options.cwd)) {
-        return { id: info.id, mtime: file.mtime };
+    const sessionCwd = info.cwd ?? null;
+
+    if (shouldCheckBranch) {
+      const resolvedBranch = resolveBranchFromCwd(sessionCwd, worktrees);
+      if (resolvedBranch !== branchFilter) {
+        continue;
       }
-      continue;
     }
+
+    if (shouldCheckCwd && options.cwd) {
+      if (!matchesCwd(sessionCwd, options.cwd)) {
+        continue;
+      }
+    }
+
     return { id: info.id, mtime: file.mtime };
   }
 
@@ -82,7 +119,11 @@ export async function findLatestGeminiSessionId(
   cwd: string,
   options: SessionSearchOptions = {},
 ): Promise<string | null> {
-  const searchOptions: SessionSearchOptions = { cwd: options.cwd ?? cwd };
+  const searchOptions: SessionSearchOptions = {
+    cwd: options.cwd ?? cwd,
+    branch: options.branch ?? null,
+    worktrees: options.worktrees ?? null,
+  };
   if (options.since !== undefined) searchOptions.since = options.since;
   if (options.until !== undefined) searchOptions.until = options.until;
   if (options.preferClosestTo !== undefined)

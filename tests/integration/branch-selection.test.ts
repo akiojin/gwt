@@ -60,7 +60,7 @@ mock.module("node:fs/promises", async () => {
 });
 
 import { execa } from "execa";
-const execaMock = execa as MockedFunction<typeof execa>;
+const execaMock = execa as unknown as Mock;
 
 describe("Integration: Branch Selection to Worktree Creation", () => {
   beforeEach(() => {

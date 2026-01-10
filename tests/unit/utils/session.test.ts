@@ -1,46 +1,39 @@
-import { describe, it, expect, beforeEach, mock } from "bun:test";
-import path from "node:path";
-
-mock.module("node:fs/promises", async () => {
-  const actual = await import("node:fs/promises");
-  const readdir = mock();
-  const readFile = mock();
-  const stat = mock();
-  return {
-    ...actual,
-    readdir,
-    readFile,
-    stat,
-    default: { ...actual.default, readdir, readFile, stat },
-  };
-});
-
-mock.module("node:os", () => {
-  const homedir = mock(() => "/home/test");
-  return {
-    homedir,
-    default: { homedir },
-  };
-});
-
-import { readdir, readFile, stat } from "node:fs/promises";
 import {
-  encodeClaudeProjectPath,
-  findLatestClaudeSessionId,
-  findLatestCodexSessionId,
-  findLatestGeminiSessionId,
-  waitForClaudeSessionId,
-  waitForCodexSessionId,
-  isValidUuidSessionId,
-  claudeSessionFileExists,
-} from "../../../src/utils/session.js";
+  describe,
+  it,
+  expect,
+  beforeAll,
+  beforeEach,
+  afterEach,
+  mock,
+  spyOn,
+} from "bun:test";
+import path from "node:path";
+import * as fsPromises from "node:fs/promises";
+import * as os from "node:os";
+
+let readdir: ReturnType<typeof spyOn>;
+let readFile: ReturnType<typeof spyOn>;
+let stat: ReturnType<typeof spyOn>;
+let homedir: ReturnType<typeof spyOn>;
+let tmpdir: ReturnType<typeof spyOn>;
+let encodeClaudeProjectPath: typeof import("../../../src/utils/session.ts").encodeClaudeProjectPath;
+let findLatestClaudeSessionId: typeof import("../../../src/utils/session.ts").findLatestClaudeSessionId;
+let findLatestCodexSessionId: typeof import("../../../src/utils/session.ts").findLatestCodexSessionId;
+let findLatestGeminiSessionId: typeof import("../../../src/utils/session.ts").findLatestGeminiSessionId;
+let findLatestOpenCodeSessionId: typeof import("../../../src/utils/session.ts").findLatestOpenCodeSessionId;
+let waitForClaudeSessionId: typeof import("../../../src/utils/session.ts").waitForClaudeSessionId;
+let waitForCodexSessionId: typeof import("../../../src/utils/session.ts").waitForCodexSessionId;
+let isValidUuidSessionId: typeof import("../../../src/utils/session.ts").isValidUuidSessionId;
+let claudeSessionFileExists: typeof import("../../../src/utils/session.ts").claudeSessionFileExists;
+let importCounter = 0;
 
 type ReaddirOptions = { withFileTypes?: boolean };
 type MockFn = Mock;
 
-const readdirMock = readdir as unknown as MockFn;
-const readFileMock = readFile as unknown as MockFn;
-const statMock = stat as unknown as MockFn;
+let readdirMock: MockFn;
+let readFileMock: MockFn;
+let statMock: MockFn;
 const normalizePath = (value: string) => value.replace(/\\/g, "/");
 const endsWithPath = (value: string, suffix: string) =>
   normalizePath(value).endsWith(suffix);
@@ -48,11 +41,78 @@ const equalsPath = (value: string, expected: string) =>
   normalizePath(value) === expected;
 
 describe("utils/session", () => {
+  beforeAll(async () => {
+    importCounter += 1;
+    const commonModulePath = `../../../src/utils/session/common.ts?utils-session-common=${importCounter}`;
+    const sessionIndexPath = `../../../src/utils/session/index.ts?utils-session-index=${importCounter}`;
+    mock.module(
+      "../../../src/utils/session/common.js",
+      () => import(commonModulePath),
+    );
+    mock.module(
+      "../../../src/utils/session/parsers/codex.js",
+      () =>
+        import(
+          `../../../src/utils/session/parsers/codex.ts?utils-session-codex=${importCounter}`
+        ),
+    );
+    mock.module(
+      "../../../src/utils/session/parsers/claude.js",
+      () =>
+        import(
+          `../../../src/utils/session/parsers/claude.ts?utils-session-claude=${importCounter}`
+        ),
+    );
+    mock.module(
+      "../../../src/utils/session/parsers/gemini.js",
+      () =>
+        import(
+          `../../../src/utils/session/parsers/gemini.ts?utils-session-gemini=${importCounter}`
+        ),
+    );
+    mock.module(
+      "../../../src/utils/session/parsers/opencode.js",
+      () =>
+        import(
+          `../../../src/utils/session/parsers/opencode.ts?utils-session-opencode=${importCounter}`
+        ),
+    );
+    mock.module(
+      "../../../src/utils/session/index.js",
+      () => import(sessionIndexPath),
+    );
+    const sessionModule = await import(
+      `../../../src/utils/session.ts?utils-session=${importCounter}`
+    );
+    ({
+      encodeClaudeProjectPath,
+      findLatestClaudeSessionId,
+      findLatestCodexSessionId,
+      findLatestGeminiSessionId,
+      findLatestOpenCodeSessionId,
+      waitForClaudeSessionId,
+      waitForCodexSessionId,
+      isValidUuidSessionId,
+      claudeSessionFileExists,
+    } = sessionModule);
+  });
+
   beforeEach(() => {
-    // Clear mock call counts and reset implementations
-    readdirMock.mockReset();
-    readFileMock.mockReset();
-    statMock.mockReset();
+    mock.restore();
+    readdir = spyOn(fsPromises, "readdir");
+    readFile = spyOn(fsPromises, "readFile");
+    stat = spyOn(fsPromises, "stat");
+    homedir = spyOn(os, "homedir");
+    tmpdir = spyOn(os, "tmpdir");
+    homedir.mockReturnValue("/home/test");
+    tmpdir.mockReturnValue("/tmp");
+    readdirMock = readdir as unknown as MockFn;
+    readFileMock = readFile as unknown as MockFn;
+    statMock = stat as unknown as MockFn;
+  });
+
+  afterEach(() => {
+    mock.restore();
   });
 
   describe("isValidUuidSessionId", () => {
@@ -221,14 +281,17 @@ describe("utils/session", () => {
     expect(id).toBe(sessionUuid);
   });
 
-  it("findLatestCodexSessionId falls back when cwd is missing in session file", async () => {
+  it("findLatestCodexSessionId selects session matching branch via worktrees", async () => {
     const dirent = (name: string, type: "file" | "dir") => ({
       name,
       isFile: () => type === "file",
       isDirectory: () => type === "dir",
     });
 
-    const sessionUuid = "99999999-9999-9999-9999-999999999999";
+    const branchA = "feature-a";
+    const branchB = "feature-b";
+    const uuidA = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+    const uuidB = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
 
     readdirMock.mockImplementation((dir: string, opts?: ReaddirOptions) => {
       if (opts?.withFileTypes) {
@@ -240,19 +303,225 @@ describe("utils/session", () => {
         }
         if (endsWithPath(dir, "/.codex/sessions/2025/12")) {
           return Promise.resolve([
-            dirent(`rollout-${sessionUuid}.jsonl`, "file"),
+            dirent(`rollout-${uuidA}.jsonl`, "file"),
+            dirent(`rollout-${uuidB}.jsonl`, "file"),
           ]);
         }
       }
       return Promise.resolve([]);
     });
-    statMock.mockResolvedValue({ mtimeMs: 700 });
-    readFileMock.mockResolvedValue("{}");
+
+    statMock.mockImplementation((filePath: string) => {
+      if (filePath.includes(uuidA)) {
+        return Promise.resolve({ mtimeMs: 1_000 });
+      }
+      return Promise.resolve({ mtimeMs: 2_000 });
+    });
+
+    readFileMock.mockImplementation((filePath: string) => {
+      if (filePath.includes(uuidA)) {
+        return Promise.resolve(
+          JSON.stringify({
+            payload: { id: uuidA, cwd: `/repo/.worktrees/${branchA}` },
+          }),
+        );
+      }
+      return Promise.resolve(
+        JSON.stringify({
+          payload: { id: uuidB, cwd: `/repo/.worktrees/${branchB}` },
+        }),
+      );
+    });
 
     const id = await findLatestCodexSessionId({
-      cwd: "/repo/.worktrees/branch",
+      branch: branchA,
+      worktrees: [
+        { path: `/repo/.worktrees/${branchA}`, branch: branchA },
+        { path: `/repo/.worktrees/${branchB}`, branch: branchB },
+      ],
     });
-    expect(id).toBe(sessionUuid);
+
+    expect(id).toBe(uuidA);
+  });
+
+  it("findLatestClaudeSessionId selects session matching branch via worktrees", async () => {
+    const dirent = (name: string, type: "file" | "dir") => ({
+      name,
+      isFile: () => type === "file",
+      isDirectory: () => type === "dir",
+    });
+
+    const branchA = "branch-a";
+    const branchB = "branch-b";
+    const uuidA = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+    const uuidB = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+
+    readdirMock.mockImplementation((dir: string, opts?: ReaddirOptions) => {
+      if (opts?.withFileTypes) {
+        if (endsWithPath(dir, "/projects/-repo--worktrees-branch-a/sessions")) {
+          return Promise.resolve([dirent(`${uuidA}.jsonl`, "file")]);
+        }
+        if (endsWithPath(dir, "/projects/-repo--worktrees-branch-b/sessions")) {
+          return Promise.resolve([dirent(`${uuidB}.jsonl`, "file")]);
+        }
+      }
+      return Promise.resolve([]);
+    });
+
+    statMock.mockImplementation((filePath: string) => {
+      if (filePath.includes(uuidA)) {
+        return Promise.resolve({ mtimeMs: 1_000 });
+      }
+      return Promise.resolve({ mtimeMs: 2_000 });
+    });
+
+    readFileMock.mockImplementation((filePath: string) => {
+      if (filePath.includes(uuidA)) {
+        return Promise.resolve(JSON.stringify({ session_id: uuidA }));
+      }
+      return Promise.resolve(JSON.stringify({ session_id: uuidB }));
+    });
+
+    const id = await findLatestClaudeSessionId("/repo/.worktrees/branch-b", {
+      branch: branchA,
+      worktrees: [
+        { path: `/repo/.worktrees/${branchA}`, branch: branchA },
+        { path: `/repo/.worktrees/${branchB}`, branch: branchB },
+      ],
+    });
+
+    expect(id).toBe(uuidA);
+  });
+
+  it("findLatestGeminiSessionId selects session matching branch via worktrees", async () => {
+    const dirent = (name: string, type: "file" | "dir") => ({
+      name,
+      isFile: () => type === "file",
+      isDirectory: () => type === "dir",
+    });
+
+    const branchA = "feature-a";
+    const branchB = "feature-b";
+    const uuidA = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+    const uuidB = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+
+    readdirMock.mockImplementation((dir: string, opts?: ReaddirOptions) => {
+      if (opts?.withFileTypes) {
+        if (endsWithPath(dir, "/.gemini/tmp")) {
+          return Promise.resolve([
+            dirent("projA", "dir"),
+            dirent("projB", "dir"),
+          ]);
+        }
+        if (endsWithPath(dir, "/projA")) {
+          return Promise.resolve([dirent("a.json", "file")]);
+        }
+        if (endsWithPath(dir, "/projB")) {
+          return Promise.resolve([dirent("b.json", "file")]);
+        }
+      }
+      return Promise.resolve([]);
+    });
+
+    statMock.mockImplementation((filePath: string) => {
+      return Promise.resolve({
+        mtimeMs: filePath.includes("b.json") ? 2_000 : 1_000,
+      });
+    });
+
+    readFileMock.mockImplementation((filePath: string) => {
+      if (filePath.includes("a.json")) {
+        return Promise.resolve(
+          JSON.stringify({
+            id: uuidA,
+            cwd: `/repo/.worktrees/${branchA}`,
+          }),
+        );
+      }
+      return Promise.resolve(
+        JSON.stringify({
+          id: uuidB,
+          cwd: `/repo/.worktrees/${branchB}`,
+        }),
+      );
+    });
+
+    const id = await findLatestGeminiSessionId(`/repo/.worktrees/${branchB}`, {
+      branch: branchA,
+      worktrees: [
+        { path: `/repo/.worktrees/${branchA}`, branch: branchA },
+        { path: `/repo/.worktrees/${branchB}`, branch: branchB },
+      ],
+    });
+
+    expect(id).toBe(uuidA);
+  });
+
+  it("findLatestOpenCodeSessionId selects session matching branch via worktrees", async () => {
+    const dirent = (name: string, type: "file" | "dir") => ({
+      name,
+      isFile: () => type === "file",
+      isDirectory: () => type === "dir",
+    });
+
+    const branchA = "feature-a";
+    const branchB = "feature-b";
+    const uuidA = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
+    const uuidB = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+
+    readdirMock.mockImplementation((dir: string, opts?: ReaddirOptions) => {
+      if (opts?.withFileTypes) {
+        if (endsWithPath(dir, "/.local/share/opencode/storage/session")) {
+          return Promise.resolve([
+            dirent("projA", "dir"),
+            dirent("projB", "dir"),
+          ]);
+        }
+        if (endsWithPath(dir, "/projA")) {
+          return Promise.resolve([dirent("a.json", "file")]);
+        }
+        if (endsWithPath(dir, "/projB")) {
+          return Promise.resolve([dirent("b.json", "file")]);
+        }
+      }
+      return Promise.resolve([]);
+    });
+
+    statMock.mockImplementation((filePath: string) => {
+      return Promise.resolve({
+        mtimeMs: filePath.includes("b.json") ? 5_000 : 1_000,
+      });
+    });
+
+    readFileMock.mockImplementation((filePath: string) => {
+      if (filePath.includes("a.json")) {
+        return Promise.resolve(
+          JSON.stringify({
+            id: uuidA,
+            directory: `/repo/.worktrees/${branchA}`,
+          }),
+        );
+      }
+      return Promise.resolve(
+        JSON.stringify({
+          id: uuidB,
+          directory: `/repo/.worktrees/${branchB}`,
+        }),
+      );
+    });
+
+    const id = await findLatestOpenCodeSessionId(
+      `/repo/.worktrees/${branchB}`,
+      {
+        branch: branchA,
+        worktrees: [
+          { path: `/repo/.worktrees/${branchA}`, branch: branchA },
+          { path: `/repo/.worktrees/${branchB}`, branch: branchB },
+        ],
+      },
+    );
+
+    expect(id).toBe(uuidA);
   });
 
   it("findLatestCodexSessionId can pick session closest to reference time", async () => {

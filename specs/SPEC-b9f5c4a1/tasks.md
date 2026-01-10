@@ -55,3 +55,7 @@
 - [P] T060-T065 can run in parallel (independent files)
 - [P] T070-T072 can run in parallel (independent files)
 - [P] T080-T083 can run in parallel (independent files)
+
+## 追加作業ToDo (2026-01-09)
+- [x] T090 [Test] 既存ログに追記され、起動時にログが上書きされないことを検証 (`tests/logging/logger.test.ts`)
+- [x] T091 logger の file destination を追記モードで開くよう修正 (`src/logging/logger.ts`)

@@ -1,6 +1,6 @@
 import React from "react";
 // import type { Mock } - use bun:test mock types
-import { describe, it, expect, beforeEach,  mock } from "bun:test";
+import { describe, it, expect, beforeEach, mock } from "bun:test";
 import {
   fireEvent,
   render,
@@ -126,7 +126,11 @@ describe("ConfigPage", () => {
       expect(mutateAsync).toHaveBeenCalled();
     });
 
-    const payload = mutateAsync.mock.calls[0][0];
+    const firstCall = mutateAsync.mock.calls[0];
+    if (!firstCall) {
+      throw new Error("Expected mutation call");
+    }
+    const payload = firstCall[0];
     expect(payload.env).toEqual([]);
     expect(payload.codingAgents).toHaveLength(2);
     expect(payload.codingAgents[1]).toMatchObject({

@@ -131,7 +131,11 @@ describe("QuickStartStep", () => {
         testSetup.mockInput.pressEnter();
         await testSetup.renderOnce();
         expect(resumedEntry).not.toBeNull();
-        expect(resumedEntry?.toolId).toBe("claude-code");
+        const assertedEntry = resumedEntry as ToolSessionEntry | null;
+        if (!assertedEntry) {
+          throw new Error("Expected resumed entry");
+        }
+        expect(assertedEntry.toolId).toBe("claude-code");
       } finally {
         testSetup.renderer.destroy();
       }
@@ -193,7 +197,7 @@ describe("QuickStartStep", () => {
 
       try {
         // 矢印キーで最後の項目（Choose different settings）を選択
-        for (let i = 0; i < 5; i++) {
+        for (let i = 0; i < 4; i++) {
           testSetup.mockInput.pressArrow("down");
           await testSetup.renderOnce();
         }
@@ -229,6 +233,73 @@ describe("QuickStartStep", () => {
       try {
         // 履歴がない場合は自動的に onChooseDifferent が呼ばれる
         expect(chooseDifferentCalled).toBe(true);
+      } finally {
+        testSetup.renderer.destroy();
+      }
+    });
+  });
+
+  describe("missing sessionId", () => {
+    it("does not render Resume option when sessionId is missing", async () => {
+      const historyWithoutSession: ToolSessionEntry[] = [
+        {
+          toolId: "claude-code",
+          toolLabel: "Claude Code",
+          branch: "feature/test",
+          worktreePath: "/path/to/worktree",
+          model: "claude-sonnet-4-20250514",
+          mode: "normal",
+          timestamp: Date.now(),
+          sessionId: null,
+        },
+      ];
+      const testSetup = await testRender(
+        () => (
+          <QuickStartStep
+            history={historyWithoutSession}
+            onResume={() => {}}
+            onStartNew={() => {}}
+            onChooseDifferent={() => {}}
+            onBack={() => {}}
+          />
+        ),
+        { width: 80, height: 24 },
+      );
+      await testSetup.renderOnce();
+
+      try {
+        const frame = testSetup.captureCharFrame();
+        expect(frame).not.toContain("Resume session");
+        expect(frame).toContain("Start new (previous settings)");
+        expect(frame).toContain("Choose different settings");
+      } finally {
+        testSetup.renderer.destroy();
+      }
+    });
+  });
+
+  describe("multi-tool display", () => {
+    it("renders tool-specific descriptions and session id only for resume", async () => {
+      const testSetup = await testRender(
+        () => (
+          <QuickStartStep
+            history={mockHistory}
+            onResume={() => {}}
+            onStartNew={() => {}}
+            onChooseDifferent={() => {}}
+            onBack={() => {}}
+          />
+        ),
+        { width: 90, height: 24 },
+      );
+      await testSetup.renderOnce();
+
+      try {
+        const frame = testSetup.captureCharFrame();
+        expect(frame).toContain("Claude Code, claude-sonnet-4-20250514");
+        expect(frame).toContain("Codex CLI, o3-mini, high");
+        expect(frame).toContain("Session: session-123");
+        expect(frame).toContain("Session: session-456");
       } finally {
         testSetup.renderer.destroy();
       }

@@ -11,8 +11,16 @@ import {
 import { EventEmitter } from "node:events";
 import * as sessionUtils from "../../src/utils/session.js";
 
+const getFirstMockCall = (calls: unknown[][], label: string): unknown[] => {
+  const call = calls[0];
+  if (!call) {
+    throw new Error(`Expected ${label} call`);
+  }
+  return call;
+};
+
 // Define mock state that will be used across mocks
-const mockExistsSync = mock(() => false);
+const mockExistsSync = mock<(...args: unknown[]) => boolean>(() => false);
 const stdoutWrite = mock();
 const stderrWrite = mock();
 
@@ -48,14 +56,27 @@ mock.module("execa", () => ({
 // Mock existsSync to return false by default (for fallback path checks in findCommand)
 // Individual tests can override this if they need existsSync to return true
 mock.module("fs", async () => {
+  const readdirSync = mock(() => []);
+  const statSync = mock(() => ({
+    isFile: () => false,
+    mtime: new Date(),
+  }));
+  const unlinkSync = mock();
+  const mkdirSync = mock();
   return {
     existsSync: (...args: unknown[]) => mockExistsSync(...args),
     readFileSync: mock(() => "Linux version 6.1.0"),
-    mkdirSync: mock(),
+    readdirSync,
+    statSync,
+    unlinkSync,
+    mkdirSync,
     default: {
       existsSync: (...args: unknown[]) => mockExistsSync(...args),
       readFileSync: mock(() => "Linux version 6.1.0"),
-      mkdirSync: mock(),
+      readdirSync,
+      statSync,
+      unlinkSync,
+      mkdirSync,
     },
   };
 });
@@ -123,10 +144,14 @@ describe("launchClaudeCode - Root User Detection", () => {
   });
 
   beforeEach(() => {
-    mock.restore();
+    (execa as ReturnType<typeof mock>).mockReset();
     clearCommandLookupCache(); // Clear command lookup cache between tests
     // Return true for worktree path checks, false for fallback path checks
-    mockExistsSync.mockImplementation((path: string) => {
+    mockExistsSync.mockImplementation((...args: unknown[]) => {
+      const [path] = args as [string];
+      if (typeof path !== "string") {
+        return false;
+      }
       // Worktree paths used in tests
       if (path === "/test/path" || path.includes("worktree")) {
         return true;
@@ -201,7 +226,7 @@ describe("launchClaudeCode - Root User Detection", () => {
 
       // Verify execa was called with IS_SANDBOX=1 in env
       // The command depends on whether claude is installed in the test environment
-      const call = mockExeca.mock.calls[0];
+      const call = getFirstMockCall(mockExeca.mock.calls, "execa");
       expect(call[0]).toBe(detectedClaudeCommand);
       expect(call[2]).toEqual(
         expect.objectContaining({
@@ -228,7 +253,7 @@ describe("launchClaudeCode - Root User Detection", () => {
       await launchClaudeCode("/test/path", { skipPermissions: true });
 
       // Verify sandbox env is injected even for non-root users
-      const call = mockExeca.mock.calls[0];
+      const call = getFirstMockCall(mockExeca.mock.calls, "execa");
       expect(call[0]).toBe(detectedClaudeCommand);
       expect(call[2]).toEqual(
         expect.objectContaining({
@@ -255,7 +280,7 @@ describe("launchClaudeCode - Root User Detection", () => {
       await launchClaudeCode("/test/path", { skipPermissions: true });
 
       // Verify sandbox env is injected even when getuid is unavailable
-      const call = mockExeca.mock.calls[0];
+      const call = getFirstMockCall(mockExeca.mock.calls, "execa");
       expect(call[0]).toBe(detectedClaudeCommand);
       expect(call[2]).toEqual(
         expect.objectContaining({
@@ -279,7 +304,7 @@ describe("launchClaudeCode - Root User Detection", () => {
 
       await launchClaudeCode("/test/path", { skipPermissions: true });
 
-      const call = mockExeca.mock.calls[0];
+      const call = getFirstMockCall(mockExeca.mock.calls, "execa");
       expect(call[0]).toBe(detectedClaudeCommand);
       expect(call[1] as string[]).toEqual(
         expect.arrayContaining(["--dangerously-skip-permissions"]),
@@ -301,7 +326,7 @@ describe("launchClaudeCode - Root User Detection", () => {
       await launchClaudeCode("/test/path", { mode: "continue" });
 
       // First call is the actual launch
-      const call = mockExeca.mock.calls[0];
+      const call = getFirstMockCall(mockExeca.mock.calls, "execa");
       expect(call[0]).toBe(detectedClaudeCommand);
       const args = call[1] as string[];
       expect(args).not.toContain("-c");
@@ -339,7 +364,7 @@ describe("launchClaudeCode - Root User Detection", () => {
 
       await launchClaudeCode("/test/path", { chrome: true });
 
-      const call = mockExeca.mock.calls[0];
+      const call = getFirstMockCall(mockExeca.mock.calls, "execa");
       const args = call[1] as string[];
       expect(args).toContain("--chrome");
       expect(consoleLogSpy).toHaveBeenCalledWith(
@@ -397,7 +422,7 @@ describe("launchClaudeCode - Root User Detection", () => {
 
       await launchClaudeCode("/test/path", { chrome: true });
 
-      const call = mockExeca.mock.calls[0];
+      const call = getFirstMockCall(mockExeca.mock.calls, "execa");
       const args = call[1] as string[];
       expect(args).toContain("--chrome");
     });
@@ -415,7 +440,7 @@ describe("launchClaudeCode - Root User Detection", () => {
 
       await launchClaudeCode("/test/path", { chrome: true });
 
-      const call = mockExeca.mock.calls[0];
+      const call = getFirstMockCall(mockExeca.mock.calls, "execa");
       const args = call[1] as string[];
       expect(args).not.toContain("--chrome");
       expect(consoleLogSpy).toHaveBeenCalledWith(
@@ -442,7 +467,7 @@ describe("launchClaudeCode - Root User Detection", () => {
 
       await launchClaudeCode("/test/path", { skipPermissions: false });
 
-      const call = mockExeca.mock.calls[0];
+      const call = getFirstMockCall(mockExeca.mock.calls, "execa");
       const options = call[2] as Record<string, unknown>;
       expect(options.stdout).toBe("inherit");
       expect(options.stderr).toBe("inherit");
@@ -478,7 +503,7 @@ describe("launchClaudeCode - Root User Detection", () => {
 
       await launchClaudeCode("/test/path", {});
 
-      const call = mockExeca.mock.calls[0];
+      const call = getFirstMockCall(mockExeca.mock.calls, "execa");
       const options = call[2] as Record<string, unknown>;
       expect(options.stdout).toBe("inherit");
       expect(options.stderr).toBe("inherit");
@@ -587,7 +612,7 @@ describe("launchClaudeCode - Root User Detection", () => {
       await launchClaudeCode("/test/path");
 
       // Verify file descriptors are passed correctly
-      const call = mockExeca.mock.calls[0];
+      const call = getFirstMockCall(mockExeca.mock.calls, "execa");
       expect(call[0]).toBe(detectedClaudeCommand);
       expect(call[2]).toEqual(
         expect.objectContaining({
@@ -620,7 +645,7 @@ describe("launchClaudeCode - Root User Detection", () => {
       });
 
       // Verify arguments are passed correctly to the detected command
-      const call = mockExeca.mock.calls[0];
+      const call = getFirstMockCall(mockExeca.mock.calls, "execa");
       expect(call[0]).toBe(detectedClaudeCommand);
       const args = call[1] as string[];
       expect(args).toContain("-r"); // resume mode
@@ -643,7 +668,7 @@ describe("launchClaudeCode - Root User Detection", () => {
         extraArgs: ["--verbose"],
       });
 
-      const call = mockExeca.mock.calls[0];
+      const call = getFirstMockCall(mockExeca.mock.calls, "execa");
       expect(call[0]).toBe(detectedClaudeCommand);
       const args = call[1] as string[];
       expect(args).toContain("--dangerously-skip-permissions");
@@ -667,7 +692,7 @@ describe("launchClaudeCode - Root User Detection", () => {
       await launchClaudeCode("/test/path");
 
       // The command should match what was detected
-      const call = mockExeca.mock.calls[0];
+      const call = getFirstMockCall(mockExeca.mock.calls, "execa");
       expect(call[0]).toBe(detectedClaudeCommand);
 
       // Log message should indicate which path was used

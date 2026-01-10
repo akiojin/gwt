@@ -16,11 +16,24 @@ mock.module("execa", () => ({
   default: { execa: mock() },
 }));
 
-mock.module("fs", () => ({
-  existsSync: mock(() => true),
-  mkdirSync: mock(),
-  default: { existsSync: mock(() => true), mkdirSync: mock() },
-}));
+mock.module("fs", () => {
+  const existsSync = mock(() => true);
+  const mkdirSync = mock();
+  const readdirSync = mock(() => []);
+  const statSync = mock(() => ({
+    isFile: () => false,
+    mtime: new Date(),
+  }));
+  const unlinkSync = mock();
+  return {
+    existsSync,
+    mkdirSync,
+    readdirSync,
+    statSync,
+    unlinkSync,
+    default: { existsSync, mkdirSync, readdirSync, statSync, unlinkSync },
+  };
+});
 
 const mockTerminalStreams = {
   stdin: { id: "stdin" } as unknown as NodeJS.ReadStream,
@@ -64,8 +77,9 @@ const mockExistsSync = existsSync as Mock;
 let consoleLogSpy: Mock;
 
 describe("launchGeminiCLI", () => {
-  beforeEach(() => {
-    mock.restore();
+  beforeEach(async () => {
+    (execa as ReturnType<typeof mock>).mockReset();
+    consoleLogSpy?.mockRestore();
     consoleLogSpy = spyOn(console, "log").mockImplementation(() => {});
     mockTerminalStreams.exitRawMode.mockClear();
     mockChildStdio.cleanup.mockClear();
@@ -76,15 +90,17 @@ describe("launchGeminiCLI", () => {
     mockExistsSync.mockReturnValue(true);
     // Reset findCommand mock
     mockFindCommand.mockReset();
+    // Reset terminal mocks
+    const { resetTerminalModes } = await import("../../src/utils/terminal.js");
+    (resetTerminalModes as Mock).mockClear();
   });
 
   afterAll(() => {
-    mock.restore();
-    // resetModules not needed in bun;
+    (execa as ReturnType<typeof mock>).mockReset();
   });
 
   describe("基本起動テスト", () => {
-    it("T001: bunx経由で正常に起動できる", async () => {
+    it("T001: installed未検出時はlatestへフォールバックして起動できる", async () => {
       // Mock findCommand to return bunx fallback (gemini not installed)
       mockFindCommand.mockResolvedValue({
         available: true,
@@ -99,7 +115,7 @@ describe("launchGeminiCLI", () => {
         exitCode: 0,
       });
 
-      await launchGeminiCLI("/test/path");
+      await launchGeminiCLI("/test/path", { version: "installed" });
 
       // findCommand should be called for gemini
       expect(mockFindCommand).toHaveBeenCalledWith("gemini");
@@ -118,7 +134,9 @@ describe("launchGeminiCLI", () => {
 
       // Verify fallback message
       expect(consoleLogSpy).toHaveBeenCalledWith(
-        expect.stringContaining("Falling back to bunx"),
+        expect.stringContaining(
+          "Installed gemini command not found. Falling back to latest.",
+        ),
       );
     });
 
@@ -137,7 +155,7 @@ describe("launchGeminiCLI", () => {
         exitCode: 0,
       });
 
-      await launchGeminiCLI("/test/path");
+      await launchGeminiCLI("/test/path", { version: "installed" });
 
       // findCommand should be called for gemini
       expect(mockFindCommand).toHaveBeenCalledWith("gemini");
@@ -337,7 +355,7 @@ describe("launchGeminiCLI", () => {
 
       try {
         await launchGeminiCLI("/test/path");
-        expect.fail("Should have thrown an error");
+        throw new Error("Should have thrown an error");
       } catch (error: unknown) {
         const err = error as Error & { cause?: unknown };
         expect(err.name).toBe("GeminiError");

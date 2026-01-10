@@ -48,7 +48,7 @@ mock.module("node:fs/promises", async () => {
 import { execa } from "execa";
 import * as git from "../../src/git";
 import * as worktree from "../../src/worktree";
-const execaMock = execa as unknown;
+const execaMock = execa as unknown as Mock;
 
 describe("E2E: Create Branch Workflow (T209)", () => {
   beforeEach(() => {

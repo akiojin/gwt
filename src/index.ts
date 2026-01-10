@@ -27,6 +27,7 @@ import {
   isProtectedBranchName,
   switchToProtectedBranch,
   resolveWorktreePathForBranch,
+  listAllWorktrees,
   repairWorktreePath,
 } from "./worktree.js";
 import {
@@ -192,6 +193,11 @@ function performTerminalCleanup(): void {
  * Returns SelectionResult if user made selections, undefined if user quit
  */
 async function mainSolidUI(): Promise<SelectionResult | undefined> {
+  if (!("Bun" in globalThis)) {
+    throw new Error(
+      "OpenTUI requires the Bun runtime. Run with Bun (e.g. bunx @akiojin/gwt@latest).",
+    );
+  }
   const { renderSolidApp } = await import("./opentui/index.solid.js");
   const terminal = getTerminalStreams();
 
@@ -629,6 +635,7 @@ export async function handleAIToolWorkflow(
           model?: string;
           sessionId?: string | null;
           chrome?: boolean;
+          branch?: string | null;
           version?: string | null;
         } = {
           mode:
@@ -641,6 +648,7 @@ export async function handleAIToolWorkflow(
           envOverrides: sharedEnv,
           sessionId: resumeSessionId,
           chrome: true,
+          branch,
           version: toolVersion ?? null,
         };
         if (normalizedModel) {
@@ -655,6 +663,7 @@ export async function handleAIToolWorkflow(
           model?: string;
           reasoningEffort?: CodexReasoningEffort;
           sessionId?: string | null;
+          branch?: string | null;
           version?: string | null;
         } = {
           mode:
@@ -666,6 +675,7 @@ export async function handleAIToolWorkflow(
           bypassApprovals: skipPermissions,
           envOverrides: sharedEnv,
           sessionId: resumeSessionId,
+          branch,
           version: toolVersion ?? null,
         };
         if (normalizedModel) {
@@ -683,6 +693,7 @@ export async function handleAIToolWorkflow(
           envOverrides?: Record<string, string>;
           model?: string;
           sessionId?: string | null;
+          branch?: string | null;
           version?: string | null;
         } = {
           mode:
@@ -694,6 +705,7 @@ export async function handleAIToolWorkflow(
           skipPermissions,
           envOverrides: sharedEnv,
           sessionId: resumeSessionId,
+          branch,
           version: toolVersion ?? null,
         };
         if (normalizedModel) {
@@ -734,10 +746,29 @@ export async function handleAIToolWorkflow(
       resumeSessionId ??
       null;
 
+    let resolvedWorktrees: { path: string; branch: string }[] | null = null;
+    if (branch) {
+      try {
+        const allWorktrees = await listAllWorktrees();
+        resolvedWorktrees = allWorktrees
+          .filter((entry) => entry?.path && entry?.branch)
+          .map((entry) => ({ path: entry.path, branch: entry.branch }));
+      } catch {
+        resolvedWorktrees = null;
+      }
+    }
+    const worktreeLookupOptions =
+      resolvedWorktrees && resolvedWorktrees.length > 0
+        ? { worktrees: resolvedWorktrees }
+        : {};
+
     if (!finalSessionId && tool === "claude-code") {
       try {
         finalSessionId =
-          (await findLatestClaudeSessionId(worktreePath)) ?? null;
+          (await findLatestClaudeSessionId(worktreePath, {
+            branch,
+            ...worktreeLookupOptions,
+          })) ?? null;
       } catch {
         finalSessionId = null;
       }
@@ -752,6 +783,8 @@ export async function handleAIToolWorkflow(
           preferClosestTo: finishedAt,
           windowMs: 60 * 60 * 1000,
           cwd: worktreePath,
+          branch,
+          ...worktreeLookupOptions,
         });
         if (latest) {
           finalSessionId = latest.id;
@@ -766,6 +799,8 @@ export async function handleAIToolWorkflow(
           until: finishedAt + 60_000,
           preferClosestTo: finishedAt,
           windowMs: 60 * 60 * 1000,
+          branch,
+          ...worktreeLookupOptions,
         });
         if (latestClaude) {
           finalSessionId = latestClaude.id;
@@ -781,6 +816,8 @@ export async function handleAIToolWorkflow(
           preferClosestTo: finishedAt,
           windowMs: 60 * 60 * 1000,
           cwd: worktreePath,
+          branch,
+          ...worktreeLookupOptions,
         });
         if (latestGemini) {
           finalSessionId = latestGemini.id;

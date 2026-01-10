@@ -9,45 +9,118 @@ import {
   spyOn,
 } from "bun:test";
 import path from "node:path";
-import * as worktree from "../../src/worktree";
+import * as fsPromisesModule from "node:fs/promises";
 
-// Mock execa
-mock.module("execa", () => ({
-  execa: mock(),
-}));
-
-// Mock node:fs
-mock.module("node:fs", () => {
-  const existsSync = mock();
-  const statSync = mock(() => ({ isDirectory: () => true }));
-  const readFileSync = mock(() => "");
-  const mkdirSync = mock();
-  return {
-    existsSync,
-    statSync,
-    readFileSync,
-    mkdirSync,
-    default: { existsSync, statSync, readFileSync, mkdirSync },
-  };
-});
-
-import { execa } from "execa";
-import fs from "node:fs";
-import fsPromises from "node:fs/promises";
-import * as git from "../../src/git";
-import * as github from "../../src/github";
-import * as configModule from "../../src/config/index";
+let worktree: typeof import("../../src/worktree.ts");
+let git: typeof import("../../src/git.ts");
+let github: typeof import("../../src/github.ts");
+let configModule: typeof import("../../src/config/index.ts");
+let execa: typeof import("execa").execa;
+let fs: typeof import("node:fs").default;
+let execaMock: ReturnType<typeof mock>;
+let fsPromisesMocks: {
+  mkdir: ReturnType<typeof mock>;
+  rm: ReturnType<typeof mock>;
+  lstat: ReturnType<typeof mock>;
+  readFile: ReturnType<typeof mock>;
+};
+let moduleCounter = 0;
 
 describe("worktree.ts - Worktree Operations", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     mock.restore();
+    mock.clearAllMocks();
+    execaMock = mock();
+    const existsSync = mock();
+    const statSync = mock(() => ({ isDirectory: () => true }));
+    const mkdirSync = mock();
+    const readdirSync = mock(() => []);
+    const unlinkSync = mock();
+    const readFileSync = mock(() => "");
+    existsSync.mockReturnValue(false);
+    fsPromisesMocks = {
+      mkdir: spyOn(fsPromisesModule, "mkdir"),
+      rm: spyOn(fsPromisesModule, "rm"),
+      lstat: spyOn(fsPromisesModule, "lstat"),
+      readFile: spyOn(fsPromisesModule, "readFile"),
+    };
+    mock.module("execa", () => ({
+      execa: (...args: unknown[]) => execaMock(...args),
+    }));
+    mock.module("node:fs", () => ({
+      existsSync,
+      statSync,
+      mkdirSync,
+      readdirSync,
+      unlinkSync,
+      readFileSync,
+      default: {
+        existsSync,
+        statSync,
+        mkdirSync,
+        readdirSync,
+        unlinkSync,
+        readFileSync,
+      },
+    }));
+    moduleCounter += 1;
+    const gitModule = {
+      getRepositoryRoot: mock(),
+      getCurrentBranchName: mock(),
+      getWorktreeRoot: mock(),
+      ensureGitignoreEntry: mock(),
+      branchExists: mock(),
+      getCurrentBranch: mock(),
+      hasUncommittedChanges: mock(),
+      hasUnpushedCommits: mock(),
+      hasUnpushedCommitsInRepo: mock(),
+      branchHasUniqueCommitsComparedToBase: mock(),
+      checkRemoteBranchExists: mock(),
+      getLocalBranches: mock(),
+    };
+    gitModule.getRepositoryRoot.mockResolvedValue("/path/to/repo");
+    gitModule.getWorktreeRoot.mockResolvedValue("/path/to/worktree-current");
+    gitModule.ensureGitignoreEntry.mockResolvedValue(undefined);
+    gitModule.branchExists.mockResolvedValue(false);
+    gitModule.getCurrentBranch.mockResolvedValue("develop");
+    const githubModule = {
+      getPullRequestByBranch: mock(),
+    };
+    const configModuleFresh = {
+      getConfig: mock(),
+    };
+    mock.module("../../src/git.js", () => gitModule);
+    mock.module("../../src/github.js", () => githubModule);
+    mock.module("../../src/config/index.js", () => configModuleFresh);
+    worktree = await import(
+      `../../src/worktree.ts?worktree-test=${moduleCounter}`
+    );
+    execa = execaMock as unknown as typeof import("execa").execa;
+    ({ default: fs } = await import("node:fs"));
+    git = gitModule;
+    github = githubModule as typeof import("../../src/github.ts");
+    configModule =
+      configModuleFresh as typeof import("../../src/config/index.ts");
   });
 
   afterEach(() => {
     mock.restore();
+    mock.clearAllMocks();
   });
 
   describe("worktreeExists (T104)", () => {
+    let repoRootSpy: Mock;
+
+    beforeEach(() => {
+      repoRootSpy = spyOn(git, "getRepositoryRoot").mockResolvedValue(
+        "/path/to/repo",
+      );
+    });
+
+    afterEach(() => {
+      repoRootSpy.mockRestore();
+    });
+
     it("should return worktree path if worktree exists for branch", async () => {
       const mockOutput = `worktree /path/to/repo
 HEAD abc1234
@@ -192,7 +265,8 @@ branch refs/heads/feature/test
     let ensureGitignoreEntrySpy: Mock;
 
     beforeEach(() => {
-      mkdirSpy = spyOn(fsPromises, "mkdir").mockResolvedValue(undefined);
+      mkdirSpy = fsPromisesMocks.mkdir;
+      mkdirSpy.mockResolvedValue(undefined);
       getWorktreeRootSpy = spyOn(git, "getWorktreeRoot").mockResolvedValue(
         "/path/to/worktree-current",
       );
@@ -203,7 +277,7 @@ branch refs/heads/feature/test
     });
 
     afterEach(() => {
-      mkdirSpy.mockRestore();
+      mkdirSpy.mockReset();
       getWorktreeRootSpy.mockRestore();
       ensureGitignoreEntrySpy.mockRestore();
     });
@@ -708,7 +782,7 @@ branch refs/heads/feature/test
       const branchHasUniqueSpy = spyOn(
         git,
         "branchHasUniqueCommitsComparedToBase",
-      ).mockImplementation(async (branch) => {
+      ).mockImplementation(async (branch: string) => {
         if (branch === "feature/no-diff" || branch === "feature/orphan") {
           return false;
         }
@@ -777,7 +851,7 @@ branch refs/heads/feature/no-diff
       expect(remoteExistsSpy).toHaveBeenCalled();
     });
 
-    it("uses upstream branch as comparison base when determining cleanup candidates", async () => {
+    it("uses base branch as comparison base when determining cleanup candidates", async () => {
       const configSpy = spyOn(configModule, "getConfig").mockResolvedValue({
         defaultBaseBranch: "main",
         skipPermissions: false,
@@ -847,11 +921,14 @@ branch refs/heads/feature/upstream
       expect(targets).toHaveLength(1);
       expect(branchHasUniqueSpy).toHaveBeenCalledWith(
         "feature/upstream",
-        "origin/develop",
+        "main",
         "/repo",
       );
 
       const target = targets[0];
+      if (!target) {
+        throw new Error("Expected target");
+      }
       expect(target.reasons).toContain("no-diff-with-base");
       expect(target.reasons).not.toContain("merged-pr");
 
@@ -1026,11 +1103,13 @@ branch refs/heads/feature/old
         const worktreeList = await worktree.listAdditionalWorktrees();
 
         expect(worktreeList).toHaveLength(1);
-        expect(worktreeList[0].path).toBe(
-          "/path/to/repo/.git/worktree/feature-old",
-        );
-        expect(worktreeList[0].branch).toBe("feature/old");
-        expect(worktreeList[0].isAccessible).toBe(true);
+        const first = worktreeList[0];
+        if (!first) {
+          throw new Error("Expected worktree entry");
+        }
+        expect(first.path).toBe("/path/to/repo/.git/worktree/feature-old");
+        expect(first.branch).toBe("feature/old");
+        expect(first.isAccessible).toBe(true);
       });
 
       it("should list both legacy and new worktree paths together", async () => {

@@ -1,5 +1,5 @@
 import { execa } from "execa";
-import fs from "node:fs/promises";
+import { lstat, mkdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import chalk from "chalk";
 import { createLogger } from "./logging/logger.js";
@@ -247,6 +247,10 @@ async function listWorktrees(): Promise<WorktreeInfo[]> {
   }
 }
 
+export async function listAllWorktrees(): Promise<WorktreeInfo[]> {
+  return listWorktrees();
+}
+
 /**
  * 追加のworktree（メインworktreeを除く）の一覧を取得
  * @returns {Promise<WorktreeInfo[]>} worktree情報の配列
@@ -411,9 +415,9 @@ async function assessStaleWorktreeDirectory(
     return { status: "stale", reason: "missing .git" };
   }
 
-  let gitMetaStat: Awaited<ReturnType<typeof fs.lstat>>;
+  let gitMetaStat: Awaited<ReturnType<typeof lstat>>;
   try {
-    gitMetaStat = await fs.lstat(gitMetaPath);
+    gitMetaStat = await lstat(gitMetaPath);
   } catch {
     return { status: "unknown", reason: "unable to stat .git" };
   }
@@ -428,7 +432,7 @@ async function assessStaleWorktreeDirectory(
 
   let gitMetaContents = "";
   try {
-    gitMetaContents = await fs.readFile(gitMetaPath, "utf8");
+    gitMetaContents = await readFile(gitMetaPath, "utf8");
   } catch {
     return { status: "unknown", reason: "unable to read .git" };
   }
@@ -469,7 +473,7 @@ export async function createWorktree(config: WorktreeConfig): Promise<void> {
   try {
     const staleness = await assessStaleWorktreeDirectory(config.worktreePath);
     if (staleness.status === "stale") {
-      await fs.rm(config.worktreePath, { recursive: true, force: true });
+      await rm(config.worktreePath, { recursive: true, force: true });
     } else if (staleness.status === "unknown") {
       const reason = staleness.reason ? ` (${staleness.reason})` : "";
       throw new WorktreeError(
@@ -480,7 +484,7 @@ export async function createWorktree(config: WorktreeConfig): Promise<void> {
     const worktreeParentDir = path.dirname(config.worktreePath);
 
     try {
-      await fs.mkdir(worktreeParentDir, { recursive: true });
+      await mkdir(worktreeParentDir, { recursive: true });
     } catch (error: unknown) {
       const errorWithCode = error as { code?: unknown; message?: unknown };
       const code =
@@ -827,9 +831,11 @@ async function getWorktreesWithPRStatus(): Promise<WorktreeWithPR[]> {
 async function getOrphanedLocalBranchStatuses({
   baseBranch,
   repoRoot,
+  onProgress,
 }: {
   baseBranch: string;
   repoRoot: string;
+  onProgress?: (status: CleanupStatus) => void;
 }): Promise<CleanupStatus[]> {
   try {
     // 並列実行で高速化
@@ -886,11 +892,10 @@ async function getOrphanedLocalBranchStatuses({
           localBranch.name,
           repoRoot,
         );
-        const comparisonBase = upstream ?? baseBranch;
 
         const hasUniqueCommits = await branchHasUniqueCommitsComparedToBase(
           localBranch.name,
-          comparisonBase,
+          baseBranch,
           repoRoot,
         );
 
@@ -909,7 +914,7 @@ async function getOrphanedLocalBranchStatuses({
           );
         }
 
-        statuses.push({
+        const status: CleanupStatus = {
           worktreePath: null, // worktreeは存在しない
           branch: localBranch.name,
           hasUncommittedChanges: false, // worktreeが存在しないため常にfalse
@@ -920,7 +925,9 @@ async function getOrphanedLocalBranchStatuses({
           hasUpstream,
           upstream,
           reasons,
-        });
+        };
+        statuses.push(status);
+        onProgress?.(status);
       }
     }
 
@@ -940,7 +947,11 @@ async function getOrphanedLocalBranchStatuses({
   }
 }
 
-export async function getCleanupStatus(): Promise<CleanupStatus[]> {
+export async function getCleanupStatus({
+  onProgress,
+}: {
+  onProgress?: (status: CleanupStatus) => void;
+} = {}): Promise<CleanupStatus[]> {
   const [config, repoRoot, worktreesWithPR] = await Promise.all([
     getConfig(),
     getRepositoryRoot(),
@@ -951,6 +962,7 @@ export async function getCleanupStatus(): Promise<CleanupStatus[]> {
   const orphanedStatuses = await getOrphanedLocalBranchStatuses({
     baseBranch,
     repoRoot,
+    ...(onProgress ? { onProgress } : {}),
   });
   const statuses: CleanupStatus[] = [];
 
@@ -1003,11 +1015,10 @@ export async function getCleanupStatus(): Promise<CleanupStatus[]> {
       worktree.branch,
       repoRoot,
     );
-    const comparisonBase = upstream ?? baseBranch;
 
     const hasUniqueCommits = await branchHasUniqueCommitsComparedToBase(
       worktree.branch,
-      comparisonBase,
+      baseBranch,
       repoRoot,
     );
 
@@ -1026,7 +1037,7 @@ export async function getCleanupStatus(): Promise<CleanupStatus[]> {
       );
     }
 
-    statuses.push({
+    const status: CleanupStatus = {
       worktreePath: worktree.worktreePath,
       branch: worktree.branch,
       hasUncommittedChanges: hasUncommitted,
@@ -1041,7 +1052,9 @@ export async function getCleanupStatus(): Promise<CleanupStatus[]> {
       ...(isAccessible
         ? {}
         : { invalidReason: "Path not accessible in current environment" }),
-    });
+    };
+    statuses.push(status);
+    onProgress?.(status);
   }
 
   statuses.push(...orphanedStatuses);

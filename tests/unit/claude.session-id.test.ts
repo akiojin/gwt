@@ -1,4 +1,3 @@
-import type { Mock } from "bun:test";
 import { afterAll, beforeEach, describe, expect, it, mock } from "bun:test";
 
 mock.module("execa", () => ({
@@ -6,11 +5,24 @@ mock.module("execa", () => ({
   default: { execa: mock() },
 }));
 
-mock.module("fs", () => ({
-  existsSync: mock(() => true),
-  mkdirSync: mock(),
-  default: { existsSync: mock(() => true), mkdirSync: mock() },
-}));
+mock.module("fs", () => {
+  const existsSync = mock(() => true);
+  const mkdirSync = mock();
+  const readdirSync = mock(() => []);
+  const statSync = mock(() => ({
+    isFile: () => false,
+    mtime: new Date(),
+  }));
+  const unlinkSync = mock();
+  return {
+    existsSync,
+    mkdirSync,
+    readdirSync,
+    statSync,
+    unlinkSync,
+    default: { existsSync, mkdirSync, readdirSync, statSync, unlinkSync },
+  };
+});
 
 const exitRawModeMock = mock();
 const mockTerminalStreams = {
@@ -60,15 +72,14 @@ describe("launchClaudeCode - session id", () => {
   const worktreePath = "/test/path";
 
   beforeEach(() => {
-    mock.restore();
+    mockExeca.mockReset();
     exitRawModeMock.mockClear();
     mockChildStdio.cleanup.mockClear();
     mockExeca.mockResolvedValue({ stdout: "", stderr: "", exitCode: 0 });
   });
 
   afterAll(() => {
-    mock.restore();
-    // resetModules not needed in bun;
+    mockExeca.mockReset();
   });
 
   it("keeps explicit sessionId on continue even when another session is detected", async () => {

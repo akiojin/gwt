@@ -7,12 +7,14 @@ mock.module("execa", () => ({
   execa: (...args: unknown[]) => execaMock(...args),
 }));
 
-import { launchCodingAgent } from "../../src/launcher.js";
+let launchCodingAgent: typeof import("../../src/launcher.js").launchCodingAgent;
 
 describe("launchCodingAgent environment merging", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     execaMock.mockReset();
     execaMock.mockResolvedValue({ stdout: "" });
+    ({ launchCodingAgent } =
+      await import("../../src/launcher.js?launcher-env-test"));
   });
 
   it("merges shared env with tool env", async () => {
@@ -30,7 +32,11 @@ describe("launchCodingAgent environment merging", () => {
     });
 
     expect(execaMock).toHaveBeenCalled();
-    const [, , options] = execaMock.mock.calls[0];
+    const firstCall = execaMock.mock.calls[0];
+    if (!firstCall) {
+      throw new Error("Expected execa call");
+    }
+    const [, , options] = firstCall;
     expect(options.env.SHARED_TOKEN).toBe("shared");
     expect(options.env.TOOL_ONLY).toBe("tool");
   });

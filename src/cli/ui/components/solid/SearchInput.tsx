@@ -27,7 +27,7 @@ export function SearchInput({
       <input
         value={value}
         onChange={onChange}
-        onSubmit={onSubmit}
+        {...(onSubmit ? { onSubmit } : {})}
         placeholder={placeholder}
         width={inputWidth}
         focused={isFocused}

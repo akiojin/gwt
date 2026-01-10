@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { describe, it, expect, mock, beforeEach } from "bun:test";
 import * as config from "../../src/config/index";
 
@@ -58,6 +59,10 @@ describe("Integration: Session Resume Workflow (T305)", () => {
     const sessions = await config.getAllSessions();
 
     expect(sessions).toHaveLength(2);
-    expect(sessions[0].timestamp).toBeGreaterThan(sessions[1].timestamp);
+    const [first, second] = sessions;
+    if (!first || !second) {
+      throw new Error("Expected two sessions");
+    }
+    expect(first.timestamp).toBeGreaterThan(second.timestamp);
   });
 });

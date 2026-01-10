@@ -9,6 +9,10 @@ import {
 } from "./utils/terminal.js";
 import { findCommand } from "./utils/command.js";
 import { findLatestGeminiSessionId } from "./utils/session.js";
+import {
+  runAgentWithPty,
+  shouldCaptureAgentOutput,
+} from "./logging/agentOutput.js";
 
 const GEMINI_CLI_PACKAGE = "@google/gemini-cli";
 
@@ -45,6 +49,7 @@ export async function launchGeminiCLI(
     envOverrides?: Record<string, string>;
     model?: string;
     sessionId?: string | null;
+    branch?: string | null;
     version?: string | null;
   } = {},
 ): Promise<{ sessionId?: string | null }> {
@@ -154,8 +159,8 @@ export async function launchGeminiCLI(
         (entry): entry is [string, string] => typeof entry[1] === "string",
       ),
     );
-
-    const childStdio = createChildStdio();
+    const captureOutput = shouldCaptureAgentOutput(baseEnv);
+    const childStdio = captureOutput ? null : createChildStdio();
 
     // Auto-detect locally installed gemini command
     const geminiLookup = await findCommand("gemini");
@@ -166,7 +171,17 @@ export async function launchGeminiCLI(
 
     // Determine execution strategy based on version selection
     // FR-063b: "installed" option only appears when local command exists
-    const selectedVersion = options.version ?? "installed";
+    const requestedVersion = options.version ?? "latest";
+    let selectedVersion = requestedVersion;
+
+    if (requestedVersion === "installed" && !geminiLookup.path) {
+      writeTerminalLine(
+        chalk.yellow(
+          "   ⚠️  Installed gemini command not found. Falling back to latest.",
+        ),
+      );
+      selectedVersion = "latest";
+    }
 
     // Log version information (FR-072)
     if (selectedVersion === "installed") {
@@ -188,8 +203,35 @@ export async function launchGeminiCLI(
           throw execError;
         }
       };
+      // Treat SIGHUP (1), SIGINT (2), SIGTERM (15) as normal exit signals
+      // SIGHUP can occur when the PTY closes, SIGINT/SIGTERM are user interrupts
+      const isNormalExitSignal = (signal?: number | null) =>
+        signal === 1 || signal === 2 || signal === 15;
 
       const run = async (cmd: string, args: string[]) => {
+        if (captureOutput) {
+          const result = await runAgentWithPty({
+            command: cmd,
+            args,
+            cwd: worktreePath,
+            env: baseEnv,
+            agentId: "gemini-cli",
+          });
+          if (isNormalExitSignal(result.signal)) {
+            return;
+          }
+          if (result.exitCode !== null && result.exitCode !== 0) {
+            throw new Error(
+              `Gemini CLI exited with code ${result.exitCode ?? "unknown"}`,
+            );
+          }
+          return;
+        }
+
+        if (!childStdio) {
+          return;
+        }
+
         const child = execa(cmd, args, {
           cwd: worktreePath,
           stdin: childStdio.stdin,
@@ -237,7 +279,7 @@ export async function launchGeminiCLI(
         }
       }
     } finally {
-      childStdio.cleanup();
+      childStdio?.cleanup();
     }
 
     const explicitResumeSucceeded = usedExplicitSessionId && !fellBackToLatest;
@@ -253,6 +295,10 @@ export async function launchGeminiCLI(
         capturedSessionId =
           (await findLatestGeminiSessionId(worktreePath, {
             cwd: worktreePath,
+            branch: options.branch ?? null,
+            worktrees: options.branch
+              ? [{ path: worktreePath, branch: options.branch }]
+              : null,
           })) ?? null;
       } catch {
         capturedSessionId = null;

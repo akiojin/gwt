@@ -5,8 +5,8 @@ import {
   createWorktree,
   generateWorktreePath,
   removeWorktree,
-} from "../../../worktree.js";
-import { deleteBranch, getRepositoryRoot } from "../../../git.js";
+} from "../../../../worktree.js";
+import { deleteBranch, getRepositoryRoot } from "../../../../git.js";
 
 export interface UseGitOperationsResult {
   state: Accessor<AsyncState<unknown>>;
@@ -36,9 +36,10 @@ export function useGitOperations(): UseGitOperationsResult {
   });
 
   const isLoading = createMemo(() => state().status === "loading");
-  const error = createMemo(() =>
-    state().status === "error" ? state().error : null,
-  );
+  const error = createMemo(() => {
+    const current = state();
+    return current.status === "error" ? current.error : null;
+  });
 
   const run = async <T>(operation: () => Promise<T>): Promise<T> => {
     setState({ status: "loading" });

@@ -444,3 +444,31 @@ export function matchesCwd(
     isPathPrefix(normalizedSession, normalizedTarget)
   );
 }
+
+/**
+ * Resolves a branch name for a session cwd using worktree paths.
+ * Picks the worktree with the longest matching path prefix.
+ */
+export function resolveBranchFromCwd(
+  sessionCwd: string | null,
+  worktrees: { path: string; branch: string }[],
+): string | null {
+  if (!sessionCwd) return null;
+  const normalizedSession = normalizePath(sessionCwd);
+  let bestMatch: { branch: string; path: string } | null = null;
+
+  for (const worktree of worktrees) {
+    if (!worktree?.path || !worktree.branch) continue;
+    const normalizedPath = normalizePath(worktree.path);
+    if (
+      normalizedSession === normalizedPath ||
+      isPathPrefix(normalizedPath, normalizedSession)
+    ) {
+      if (!bestMatch || normalizedPath.length > bestMatch.path.length) {
+        bestMatch = { branch: worktree.branch, path: normalizedPath };
+      }
+    }
+  }
+
+  return bestMatch?.branch ?? null;
+}

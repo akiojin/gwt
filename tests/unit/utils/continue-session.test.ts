@@ -71,7 +71,6 @@ describe("resolveContinueSessionId", () => {
       branch,
       toolId,
       repoRoot,
-      lookupLatestSessionId: mock(),
     });
 
     expect(result).toBe("last-1");
@@ -259,5 +258,25 @@ describe("resolveContinueSessionId", () => {
     );
     expect(results.map((r) => r.sessionId)).toContain("codex-current");
     expect(results.map((r) => r.sessionId)).not.toContain("codex-other");
+  });
+
+  it("findLatestBranchSessionsByTool returns empty when worktree has no matches", () => {
+    const history: ToolSessionEntry[] = [
+      {
+        branch,
+        toolId: "codex-cli",
+        toolLabel: "Codex",
+        worktreePath: "/wt-other",
+        timestamp: 10,
+        sessionId: "codex-other",
+      },
+    ];
+
+    const results = findLatestBranchSessionsByTool(
+      history,
+      branch,
+      "/wt-current",
+    );
+    expect(results.length).toBe(0);
   });
 });

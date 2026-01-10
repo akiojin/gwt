@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
+import { beforeEach, describe, expect, it, mock } from "bun:test";
 import type { SelectionResult } from "../../src/cli/ui/App.solid.js";
 
 const {
@@ -21,17 +21,17 @@ const {
   confirmYesNoMock,
   waitForEnterMock,
   resolveWorktreePathForBranchMock,
-  waitForUserAcknowledgementMock,
-  writeTerminalLineMock,
 } = {
   ensureWorktreeMock: mock(async () => "/repo/.worktrees/feature"),
   fetchAllRemotesMock: mock(async () => undefined),
   pullFastForwardMock: mock(async () => undefined),
   getBranchDivergenceStatusesMock: mock(async () => []),
   launchCodexCLIMock: mock(async () => ({ sessionId: null as string | null })),
-  saveSessionMock: mock(async () => undefined),
+  saveSessionMock: mock<(...args: unknown[]) => Promise<void>>(
+    async () => undefined,
+  ),
   loadSessionMock: mock(async () => null),
-  worktreeExistsMock: mock(async () => null),
+  worktreeExistsMock: mock(async (_branch: string) => null),
   getRepositoryRootMock: mock(async () => "/repo"),
   installDependenciesMock: mock(async () => ({
     skipped: true as const,
@@ -48,17 +48,37 @@ const {
   confirmYesNoMock: mock(async () => false),
   waitForEnterMock: mock(async () => undefined),
   resolveWorktreePathForBranchMock: mock(async () => ({ path: null })),
-  waitForUserAcknowledgementMock: mock(async () => undefined),
-  writeTerminalLineMock: mock(),
 };
 
-const mockTerminalStreams = {
-  stdin: { isTTY: false, on: () => {} } as unknown as NodeJS.ReadStream,
-  stdout: { write: () => {} } as unknown as NodeJS.WriteStream,
-  stderr: { write: () => {} } as unknown as NodeJS.WriteStream,
+const waitForUserAcknowledgementMock = mock<() => Promise<void>>(
+  async () => undefined,
+);
+const writeTerminalMock = mock();
+const writeTerminalLineMock = mock();
+const terminalStreamsMock = {
+  stdin: process.stdin,
+  stdout: { write: writeTerminalMock } as NodeJS.WriteStream,
+  stderr: { write: writeTerminalMock } as NodeJS.WriteStream,
+  stdinFd: undefined as number | undefined,
+  stdoutFd: undefined as number | undefined,
+  stderrFd: undefined as number | undefined,
   usingFallback: false,
   exitRawMode: mock(),
 };
+const mockChildStdio = {
+  stdin: "inherit" as const,
+  stdout: "inherit" as const,
+  stderr: "inherit" as const,
+  cleanup: mock(),
+};
+
+mock.module("../../src/utils/terminal.js", () => ({
+  getTerminalStreams: mock(() => terminalStreamsMock),
+  resetTerminalModes: mock(),
+  waitForUserAcknowledgement: waitForUserAcknowledgementMock,
+  writeTerminalLine: writeTerminalLineMock,
+  createChildStdio: mock(() => mockChildStdio),
+}));
 
 mock.module("../../src/git.js", () => ({
   isGitRepository: mock(async () => true),
@@ -73,6 +93,15 @@ mock.module("../../src/git.js", () => ({
   getUncommittedChangesCount: getUncommittedChangesCountMock,
   getUnpushedCommitsCount: getUnpushedCommitsCountMock,
   pushBranchToRemote: pushBranchToRemoteMock,
+  GitError: class GitError extends Error {
+    constructor(
+      message: string,
+      public cause?: unknown,
+    ) {
+      super(message);
+      this.name = "GitError";
+    }
+  },
 }));
 
 mock.module("../../src/worktree.js", () => ({
@@ -80,7 +109,20 @@ mock.module("../../src/worktree.js", () => ({
   resolveWorktreePathForBranch: resolveWorktreePathForBranchMock,
   isProtectedBranchName: mock(() => false),
   switchToProtectedBranch: mock(),
+  listAllWorktrees: mock(async () => []),
+  listAdditionalWorktrees: mock(async () => []),
+  generateWorktreePath: mock(async () => "/repo/.worktrees/feature"),
+  createWorktree: mock(async () => undefined),
   repairWorktreePath: mock(async () => null),
+  WorktreeError: class WorktreeError extends Error {
+    constructor(
+      message: string,
+      public cause?: unknown,
+    ) {
+      super(message);
+      this.name = "WorktreeError";
+    }
+  },
 }));
 
 mock.module("../../src/services/WorktreeOrchestrator.js", () => ({
@@ -89,16 +131,17 @@ mock.module("../../src/services/WorktreeOrchestrator.js", () => ({
   },
 }));
 
-class DependencyInstallError extends Error {
-  constructor(message?: string) {
-    super(message);
-    this.name = "DependencyInstallError";
-  }
-}
-
 mock.module("../../src/services/dependency-installer.js", () => ({
   installDependenciesForWorktree: installDependenciesMock,
-  DependencyInstallError,
+  DependencyInstallError: class DependencyInstallError extends Error {
+    constructor(
+      message: string,
+      public cause?: unknown,
+    ) {
+      super(message);
+      this.name = "DependencyInstallError";
+    }
+  },
 }));
 
 mock.module("../../src/config/tools.js", () => ({
@@ -134,24 +177,22 @@ mock.module("../../src/utils/session.js", () => ({
   findLatestCodexSession: findLatestCodexSessionMock,
   findLatestClaudeSession: mock(async () => null),
   findLatestGeminiSession: mock(async () => null),
+  findLatestGeminiSessionId: mock(async () => null),
   findLatestClaudeSessionId: mock(async () => null),
 }));
 
-mock.module("../../src/utils/terminal.js", () => ({
-  getTerminalStreams: mock(() => mockTerminalStreams),
-  resetTerminalModes: mock(),
-  writeTerminalLine: (...args: unknown[]) => writeTerminalLineMock(...args),
-  waitForUserAcknowledgement: waitForUserAcknowledgementMock,
-}));
+mock.module("../../src/utils/prompt.js", async () => {
+  const actual = await import("../../src/utils/prompt.js");
+  return {
+    ...actual,
+    confirmYesNo: confirmYesNoMock,
+    waitForEnter: waitForEnterMock,
+  };
+});
 
-mock.module("../../src/utils/prompt.js", () => ({
-  confirmYesNo: confirmYesNoMock,
-  waitForEnter: waitForEnterMock,
-}));
+let handleAIToolWorkflow: typeof import("../../src/index.js").handleAIToolWorkflow;
 
-import { handleAIToolWorkflow } from "../../src/index.js";
-
-beforeEach(() => {
+beforeEach(async () => {
   ensureWorktreeMock.mockClear();
   fetchAllRemotesMock.mockClear();
   pullFastForwardMock.mockClear();
@@ -173,6 +214,9 @@ beforeEach(() => {
   waitForUserAcknowledgementMock.mockClear();
   writeTerminalLineMock.mockClear();
   resolveWorktreePathForBranchMock.mockClear();
+  waitForUserAcknowledgementMock.mockReset();
+  writeTerminalMock.mockReset();
+  writeTerminalLineMock.mockReset();
 
   getBranchDivergenceStatusesMock.mockResolvedValue([]);
   worktreeExistsMock.mockResolvedValue(null);
@@ -184,6 +228,8 @@ beforeEach(() => {
   confirmYesNoMock.mockResolvedValue(false);
   resolveWorktreePathForBranchMock.mockResolvedValue({ path: null });
   waitForUserAcknowledgementMock.mockResolvedValue(undefined);
+
+  ({ handleAIToolWorkflow } = await import("../../src/index.js"));
 });
 
 const selection: SelectionResult = {
@@ -205,14 +251,12 @@ describe("handleAIToolWorkflow - post session checks", () => {
     await new Promise((r) => setTimeout(r, 3000));
     await run;
 
-    const messages = writeTerminalLineMock.mock.calls
-      .filter(([, stream]) => stream === "stderr")
-      .map(([message]) => message)
-      .join(" ");
+    const messages = writeTerminalLineMock.mock.calls.flat().join(" ");
     expect(messages).toContain("Uncommitted changes detected");
     expect(waitForEnterMock).not.toHaveBeenCalled();
     expect(confirmYesNoMock).not.toHaveBeenCalled();
     expect(pushBranchToRemoteMock).not.toHaveBeenCalled();
+
     // TODO: restore real timers;
   });
 
@@ -225,14 +269,12 @@ describe("handleAIToolWorkflow - post session checks", () => {
     await new Promise((r) => setTimeout(r, 3000));
     await run;
 
-    const messages = writeTerminalLineMock.mock.calls
-      .filter(([, stream]) => stream === "stderr")
-      .map(([message]) => message)
-      .join(" ");
+    const messages = writeTerminalLineMock.mock.calls.flat().join(" ");
     expect(messages).toContain("Unpushed commits detected");
     expect(waitForEnterMock).not.toHaveBeenCalled();
     expect(confirmYesNoMock).not.toHaveBeenCalled();
     expect(pushBranchToRemoteMock).not.toHaveBeenCalled();
+
     // TODO: restore real timers;
   });
 
@@ -247,15 +289,13 @@ describe("handleAIToolWorkflow - post session checks", () => {
     await new Promise((r) => setTimeout(r, 3000));
     await run;
 
-    const messages = writeTerminalLineMock.mock.calls
-      .filter(([, stream]) => stream === "stderr")
-      .map(([message]) => message)
-      .join(" ");
+    const messages = writeTerminalLineMock.mock.calls.flat().join(" ");
     expect(messages).toContain("Uncommitted changes detected");
     expect(messages).toContain("Unpushed commits detected");
     expect(waitForEnterMock).not.toHaveBeenCalled();
     expect(confirmYesNoMock).not.toHaveBeenCalled();
     expect(pushBranchToRemoteMock).not.toHaveBeenCalled();
+
     // TODO: restore real timers;
   });
 
