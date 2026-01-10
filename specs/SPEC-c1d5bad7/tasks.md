@@ -83,3 +83,9 @@
 - [x] T211 [Test] ログリセットで対象ログファイルが空になることを検証 (`tests/logging/reader.test.ts`)
 - [x] T212 ログ対象ディレクトリ内のログファイルを空にするヘルパーを追加 (`src/logging/reader.ts`)
 - [x] T213 Log Viewer の `x` キーバインドとリセット通知を実装 (`src/cli/ui/screens/solid/LogScreen.tsx`, `src/cli/ui/App.solid.tsx`)
+
+## 追加作業ToDo (2026-01-10)
+- [x] T220 [Spec] `specs/SPEC-c1d5bad7/spec.md` と `specs/SPEC-c1d5bad7/plan.md` に最新ログフォールバックとmtime判定の要件を追記
+- [ ] T221 [Test] worktreeログが空/古い場合の起動ディレクトリフォールバックを検証するテストを追加（`src/cli/ui/__tests__/solid/LogScreen.test.tsx`）
+- [ ] T222 [Test] 最新ログ判定がmtime優先であることを検証するテストを追加（`tests/logging/reader.test.ts` など）
+- [ ] T223 [Impl] ログ対象ディレクトリの決定ロジックを更新し、必要に応じて起動ディレクトリにフォールバックする（`src/logging/reader.ts` / `src/cli/ui/App.solid.tsx`）

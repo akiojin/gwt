@@ -486,6 +486,97 @@ describe("AppSolid unsafe selection confirm", () => {
     }
   });
 
+  it("shows confirm when safety check is pending", async () => {
+    let resolveStatus: ((value: unknown[]) => void) | null = null;
+    const pendingPromise = new Promise<unknown[]>((resolve) => {
+      resolveStatus = resolve;
+    });
+    const getCleanupStatusMock = mock(async () => pendingPromise);
+
+    mock.module?.("../../../../worktree.js", () => ({
+      listAdditionalWorktrees: mock(async () => []),
+      repairWorktrees: mock(async () => ({
+        repairedCount: 0,
+        failedCount: 0,
+        failures: [],
+      })),
+      removeWorktree: mock(async () => {}),
+      getCleanupStatus: getCleanupStatusMock,
+      isProtectedBranchName: mock(() => false),
+    }));
+
+    mock.module?.("../../../../git.js", () => ({
+      getRepositoryRoot: mock(async () => "/repo"),
+      getAllBranches: mock(async () => []),
+      getLocalBranches: mock(async () => []),
+      getCurrentBranch: mock(async () => "main"),
+      deleteBranch: mock(async () => {}),
+    }));
+
+    mock.module?.("../../../../config/index.js", () => ({
+      getConfig: mock(async () => ({ defaultBaseBranch: "main" })),
+      getLastToolUsageMap: mock(async () => new Map()),
+      loadSession: mock(async () => null),
+    }));
+
+    mock.module?.("../../../../config/tools.js", () => ({
+      getAllCodingAgents: mock(async () => [
+        { id: "codex-cli", displayName: "Codex CLI" },
+      ]),
+    }));
+
+    mock.module?.("../../../../config/profiles.js", () => ({
+      loadProfiles: mock(async () => ({ profiles: {}, activeProfile: null })),
+      createProfile: mock(async () => {}),
+      updateProfile: mock(async () => {}),
+      deleteProfile: mock(async () => {}),
+      setActiveProfile: mock(async () => {}),
+    }));
+
+    const { AppSolid } = await import("../../App.solid.js");
+
+    const branch = createBranch({
+      name: "feature/pending",
+      label: "feature/pending",
+      value: "feature/pending",
+    });
+    const stats = makeStats({ localCount: 1, worktreeCount: 1 });
+
+    const testSetup = await testRender(
+      () => (
+        <AppSolid
+          branches={[branch]}
+          stats={stats}
+          version={null}
+          toolStatuses={[]}
+        />
+      ),
+      { width: 80, height: 24 },
+    );
+    await testSetup.renderOnce();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await testSetup.renderOnce();
+
+    try {
+      await testSetup.mockInput.typeText(" ");
+      await testSetup.renderOnce();
+
+      let frame = testSetup.captureCharFrame();
+      expect(frame).toContain("Safety check in progress. Select anyway?");
+
+      await testSetup.mockInput.typeText("n");
+      await testSetup.renderOnce();
+
+      frame = testSetup.captureCharFrame();
+      expect(frame).toContain("[ ] w");
+      expect(frame).toContain("feature/pending");
+      expect(frame).not.toContain("Safety check in progress. Select anyway?");
+    } finally {
+      resolveStatus?.([]);
+      testSetup.renderer.destroy();
+    }
+  });
+
   it("does not propagate Enter from confirm to branch selection", async () => {
     const getCleanupStatusMock = mock(async () => [
       {

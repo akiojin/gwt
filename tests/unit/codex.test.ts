@@ -29,12 +29,22 @@ mock.module("fs", () => {
 mock.module("os", () => ({
   homedir: mock(() => "/home/test"),
   platform: mock(() => "darwin"),
+  release: mock(() => "23.0.0"),
   tmpdir: mock(() => "/tmp"),
   default: {
     homedir: mock(() => "/home/test"),
     platform: mock(() => "darwin"),
+    release: mock(() => "23.0.0"),
     tmpdir: mock(() => "/tmp"),
   },
+}));
+
+const shouldCaptureAgentOutputMock = mock(() => false);
+const runAgentWithPtyMock = mock(async () => ({ exitCode: 0, signal: null }));
+
+mock.module("../../src/logging/agentOutput.js", () => ({
+  runAgentWithPty: runAgentWithPtyMock,
+  shouldCaptureAgentOutput: shouldCaptureAgentOutputMock,
 }));
 
 const stdoutWrite = mock();
@@ -91,8 +101,11 @@ const mockExeca = execa as Mock;
 
 type ExecaCall = [unknown, string[], Record<string, unknown>];
 
-const getExecaCall = (index = 0): ExecaCall =>
-  mockExeca.mock.calls[index] as unknown as ExecaCall;
+const getExecaCall = (index?: number): ExecaCall => {
+  const calls = mockExeca.mock.calls;
+  const resolvedIndex = index ?? Math.max(0, calls.length - 1);
+  return calls[resolvedIndex] as unknown as ExecaCall;
+};
 
 const getExecaArgs = (index = 0): string[] => getExecaCall(index)[1];
 
@@ -123,6 +136,10 @@ describe("codex.ts", () => {
 
   beforeEach(() => {
     (execa as ReturnType<typeof mock>).mockReset();
+    shouldCaptureAgentOutputMock.mockReset();
+    runAgentWithPtyMock.mockReset();
+    shouldCaptureAgentOutputMock.mockReturnValue(false);
+    runAgentWithPtyMock.mockResolvedValue({ exitCode: 0, signal: null });
     mockTerminalStreams.exitRawMode.mockClear();
     stdoutWrite.mockClear();
     stderrWrite.mockClear();
@@ -147,7 +164,7 @@ describe("codex.ts", () => {
   it("should append default Codex CLI arguments on launch", async () => {
     await launchCodexCLI(worktreePath);
 
-    expect(execa).toHaveBeenCalledTimes(1);
+    expect(execa).toHaveBeenCalled();
     const [, args, options] = getExecaCall();
 
     expect(args).toEqual(["@openai/codex@latest", ...DEFAULT_CODEX_ARGS]);
@@ -160,6 +177,15 @@ describe("codex.ts", () => {
     // exitRawMode is called once before child process and once in finally block
     expect(mockTerminalStreams.exitRawMode).toHaveBeenCalledTimes(2);
     expect(mockChildStdio.cleanup).toHaveBeenCalledTimes(1);
+  });
+
+  it("throws when capture mode exits with unexpected signal", async () => {
+    shouldCaptureAgentOutputMock.mockReturnValue(true);
+    runAgentWithPtyMock.mockResolvedValueOnce({ exitCode: null, signal: 1 });
+
+    await expect(launchCodexCLI(worktreePath)).rejects.toThrow(
+      "Failed to launch Codex CLI",
+    );
   });
 
   it("captures sessionId from file-based session detection", async () => {

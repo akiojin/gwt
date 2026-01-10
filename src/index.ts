@@ -727,6 +727,9 @@ export async function handleAIToolWorkflow(
             cwd: worktreePath,
             sharedEnv,
           };
+        if (tool === "opencode" && normalizedModel) {
+          customLaunchOptions.extraArgs = ["-m", normalizedModel];
+        }
         if (toolVersion) {
           customLaunchOptions.version = toolVersion;
         }
