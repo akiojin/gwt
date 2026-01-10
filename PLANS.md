@@ -37,3 +37,9 @@
 
 ## Remaining issues (for follow-up)
 - [ ] Full test suite may still experience timing issues in CI - investigate if needed
+
+## Codex skills flag compatibility (v0.80.0+)
+- [x] Update SPEC-3b0ed29b spec/plan/tasks for skills flag gating
+- [x] Add unit tests for Codex skills flag gating (codex + resolver)
+- [x] Implement version-aware skills flag handling for Codex CLI launches
+- [x] Run targeted unit tests for Codex launch/resolver changes

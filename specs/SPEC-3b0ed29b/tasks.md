@@ -14,3 +14,7 @@
 - [x] **T3012** バージョンキャッシュの実装: App.solid.tsx で起動時にバージョン情報を事前取得
 - [x] **T3013** WizardSteps.tsx の VersionSelectStep をキャッシュ参照に変更
 - [x] **T3014** ビルド・テスト検証と動作確認
+- [x] **T3015** Codex CLI v0.80.0+で`--enable skills`が無効になる要件を仕様に追記する
+- [x] **T3016** Codex起動/Resolverのユニットテストに、v0.79.xでは`--enable skills`が付与され、v0.80.0+では付与されないことを追加する
+- [x] **T3017** Codex起動引数とResolverにバージョン判定ロジックを追加し、`--enable skills`の付与を切り替える
+- [x] **T3018** 対象ユニットテストを実行して成功させる

@@ -4,6 +4,7 @@
 **作成日**: 2025-12-06
 **ステータス**: 実装済み
 **入力**: ユーザー説明: "コーディングエージェント対応: gwtから各コーディングエージェント（Claude Code、Codex、Gemini、OpenCode）を起動する機能。各エージェントは独自のデフォルト引数を持ち、モード（新規/継続/再開）に応じた引数、権限スキップオプション、およびCodex CLIのスキル機能（--enable skills）などの機能拡張オプションを提供する。"
+**追記**: 2026-01-10 Codex CLI v0.80.0 以降では `--enable skills` が未知フラグになるため、バージョンに応じて付与を切り替える必要がある。
 
 ## 概要
 
@@ -21,7 +22,7 @@ gwtから各コーディングエージェント（Claude Code、Codex、Gemini�
 
 **受け入れシナリオ**:
 
-1. **前提条件** gwtが起動しブランチが選択されている、**操作** エージェント選択画面でCodexを選択して起動、**期待結果** Codexが`--enable web_search_request`、`--enable skills`、`--sandbox workspace-write`などのデフォルト引数付きで起動する
+1. **前提条件** gwtが起動しブランチが選択されている、**操作** エージェント選択画面でCodexを選択して起動、**期待結果** Codexが`--enable web_search_request`、(v0.80.0未満の場合のみ)`--enable skills`、`--sandbox workspace-write`などのデフォルト引数付きで起動する
 2. **前提条件** gwtが起動しブランチが選択されている、**操作** エージェント選択画面でClaude Codeを選択して起動、**期待結果** Claude Codeがデフォルト設定で起動し、モデル選択が可能
 3. **前提条件** gwtが起動しブランチが選択されている、**操作** エージェント選択画面でGeminiを選択して起動、**期待結果** Gemini CLIがデフォルト設定で起動する
 4. **前提条件** gwtが起動しブランチが選択されている、**操作** エージェント選択画面でOpenCodeを選択して起動、**期待結果** OpenCodeがデフォルト設定で起動する
@@ -64,18 +65,18 @@ gwtから各コーディングエージェント（Claude Code、Codex、Gemini�
 
 ---
 
-### ユーザーストーリー 4 - Codex CLIのスキル機能を利用 (優先度: P1)
+### ユーザーストーリー 4 - Codex CLIのスキル互換起動 (優先度: P1)
 
-開発者がCodex CLIを起動する際、スキル機能が自動的に有効化され、`~/.codex/skills/`に配置したカスタムスキルを利用できる。
+開発者がCodex CLIを起動する際、CLIバージョンに応じてスキル用フラグの付与を切り替え、v0.80.0以上では`--enable skills`を付与せずに起動でき、v0.79.x以前では`--enable skills`を付与してスキルを利用できる。
 
-**この優先度の理由**: スキル機能はCodex CLIの重要な拡張機能であり、開発者の生産性を向上させる。デフォルトで有効化することで、追加設定なしでスキルを活用できる。
+**この優先度の理由**: スキル機能はCodex CLIの重要な拡張機能であり、v0.80.0以上では誤ったフラグが起動失敗を招くため、互換性の維持が必須となる。
 
-**独立したテスト**: Codexを起動し、`--enable skills`引数がプロセスに渡されることを確認すれば検証できる。スキルファイルが存在する場合、Codex CLI内でスキルが利用可能であることを確認できる。
+**独立したテスト**: Codex CLIをv0.79.xとv0.80.0+で起動し、前者では`--enable skills`が渡され、後者では渡されないことを確認できる。
 
 **受け入れシナリオ**:
 
-1. **前提条件** ~/.codex/skills/にスキルファイルが存在、**操作** gwtからCodexを起動、**期待結果** `--enable skills`引数が渡され、スキルがCodex CLI内で利用可能
-2. **前提条件** スキルファイルが存在しない、**操作** gwtからCodexを起動、**期待結果** `--enable skills`引数が渡されるが、スキルは利用不可（エラーにはならない）
+1. **前提条件** Codex CLI v0.79.xを使用、**操作** gwtからCodexを起動、**期待結果** `--enable skills`引数が渡され、スキルがCodex CLI内で利用可能
+2. **前提条件** Codex CLI v0.80.0以上を使用、**操作** gwtからCodexを起動、**期待結果** `--enable skills`引数が渡されず、起動が失敗しない
 
 ---
 
@@ -199,6 +200,7 @@ gwtから各コーディングエージェント（Claude Code、Codex、Gemini�
 - worktreeパスが存在しない場合、起動前にエラーを返し、エージェントは起動しない
 - `git worktree list` の情報と実際のWorktreeのチェックアウトブランチが一致しない場合は再利用せず警告する
 - 既存履歴に誤ったモデル名が保存されている場合は正規化された表記で表示する
+- Codex CLI v0.80.0以上では`--enable skills`が未知フラグとなるため、起動引数から除外する
 - Windows環境でのエラー発生時は、プラットフォーム固有のトラブルシューティングメッセージを表示する
 - Claude CodeのChrome拡張機能統合が未対応の環境（例: WSL）では`--chrome`を付与せずに起動し、警告を表示する
 - 環境変数に同じキーが共有envとエージェント固有envの両方に存在する場合、エージェント固有の環境変数が優先される
@@ -256,7 +258,7 @@ gwtから各コーディングエージェント（Claude Code、Codex、Gemini�
 #### Codex固有要件
 
 - **FR-201**: Codexは、デフォルト引数として`--enable web_search_request`を含め**なければならない**
-- **FR-202**: Codexは、デフォルト引数として`--enable skills`を含め、スキル機能を有効化**しなければならない**
+- **FR-202**: Codexは、Codex CLIバージョンが0.80.0未満の場合にのみ`--enable skills`を付与し、0.80.0以上またはバージョン判定不能の場合は付与してはならない
 - **FR-203**: Codexは、デフォルト引数として`--sandbox workspace-write`を含め**なければならない**
 - **FR-204**: Codexは、デフォルト引数として推論設定（`-c model_reasoning_effort`、`-c model_reasoning_summaries`）を含め**なければならない**
 - **FR-205**: Codexは、継続モード時に`resume --last`を、再開モード時に`resume`を渡さ**なければならない**
@@ -336,6 +338,7 @@ gwtから各コーディングエージェント（Claude Code、Codex、Gemini�
 ## 参考資料 *(該当する場合)*
 
 - [OpenAI Codex CLI ドキュメント](https://developers.openai.com/codex/cli/)
+- [OpenAI Codex Skills ドキュメント](https://developers.openai.com/codex/skills)
 - [Claude Code ドキュメント](https://claude.ai/docs)
 - [Gemini CLI ドキュメント](https://ai.google.dev/gemini-api/docs/cli)
 - [OpenCode ドキュメント](https://opencode.ai/docs/cli/)

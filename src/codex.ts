@@ -17,6 +17,10 @@ import {
   runAgentWithPty,
   shouldCaptureAgentOutput,
 } from "./logging/agentOutput.js";
+import {
+  shouldEnableCodexSkillsFlag,
+  withCodexSkillsFlag,
+} from "./shared/codingAgentConstants.js";
 
 const CODEX_CLI_PACKAGE = "@openai/codex";
 
@@ -47,8 +51,6 @@ export const buildDefaultCodexArgs = (
 ): string[] => [
   "--enable",
   "web_search_request",
-  "--enable",
-  "skills",
   `--model=${model}`,
   "--sandbox",
   "workspace-write",
@@ -171,7 +173,18 @@ export async function launchCodexCLI(
       args.push(...options.extraArgs);
     }
 
-    const codexArgs = buildDefaultCodexArgs(model, reasoningEffort);
+    const requestedVersion = options.version ?? "latest";
+    const codexLookup = await findCommand("codex");
+    const skillsFlagVersion =
+      requestedVersion === "installed"
+        ? (codexLookup.version ?? null)
+        : requestedVersion === "latest"
+          ? null
+          : requestedVersion;
+    const codexArgs = withCodexSkillsFlag(
+      buildDefaultCodexArgs(model, reasoningEffort),
+      shouldEnableCodexSkillsFlag(skillsFlagVersion),
+    );
 
     args.push(...codexArgs);
 
@@ -191,8 +204,7 @@ export async function launchCodexCLI(
     const captureOutput = shouldCaptureAgentOutput(env);
     const childStdio = captureOutput ? null : createChildStdio();
 
-    // Auto-detect locally installed codex command
-    const codexLookup = await findCommand("codex");
+    // codexLookup is used to decide local vs bunx execution
 
     const execChild = async (child: Promise<unknown>) => {
       try {
@@ -246,7 +258,6 @@ export async function launchCodexCLI(
 
     // Determine execution strategy based on version selection
     // FR-063b: "installed" option only appears when local command exists
-    const requestedVersion = options.version ?? "latest";
     let selectedVersion = requestedVersion;
 
     if (requestedVersion === "installed" && !codexLookup.path) {
