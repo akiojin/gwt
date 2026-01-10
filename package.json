@@ -1,6 +1,6 @@
 {
   "name": "@akiojin/gwt",
-  "version": "4.11.6",
+  "version": "4.12.0",
   "description": "Interactive Git worktree manager with Coding Agent selection (Claude Code / Codex CLI / Gemini CLI)",
   "main": "dist/index.js",
   "bin": {

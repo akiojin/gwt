@@ -11,6 +11,26 @@
 * tools.json の customTools → customCodingAgents マイグレーション対応 ([#476](https://github.com/akiojin/gwt/issues/476)) ([99f1c7f](https://github.com/akiojin/gwt/commit/99f1c7f3b9263e087de0c3c4cd96de8adccbe229))
 
 
+## [4.12.0](https://github.com/akiojin/gwt/compare/v4.11.6...v4.12.0) (2026-01-10)
+
+
+### Features
+
+* コーディングエージェントバージョンの起動時キャッシュ (FR-028～FR-031) ([#542](https://github.com/akiojin/gwt/issues/542)) ([671b41e](https://github.com/akiojin/gwt/commit/671b41eaa428b158d24aada7a14217888e80f2e1))
+
+
+### Bug Fixes
+
+* cleanup safety and tool version fallbacks ([#543](https://github.com/akiojin/gwt/issues/543)) ([c6518c0](https://github.com/akiojin/gwt/commit/c6518c032d47ba8f9f62a531b5c67eed34202682))
+* Quick Startセッション解決をブランチ基準に修正 ([#547](https://github.com/akiojin/gwt/issues/547)) ([4e92ea9](https://github.com/akiojin/gwt/commit/4e92ea9f62d86c1216efd5e4a4246e1f1cd1e943))
+* run UI with bun runtime ([#537](https://github.com/akiojin/gwt/issues/537)) ([384441b](https://github.com/akiojin/gwt/commit/384441b34d8c486ad0b5f9ec8690686766bcec6b))
+* unsafe確認ダイアログ反転と凡例のSafe追加 ([#544](https://github.com/akiojin/gwt/issues/544)) ([1b627f7](https://github.com/akiojin/gwt/commit/1b627f7de994c435c3061f6be41a24236f5eccaf))
+* カーソル位置をグローバル管理に変更して安全状態更新時のリセットを防止 ([#541](https://github.com/akiojin/gwt/issues/541)) ([dcb9f74](https://github.com/akiojin/gwt/commit/dcb9f74ab506e765f1be8c011a5cd27843435fb2))
+* コーディングエージェント起動時の即時終了問題を修正 ([633f0d6](https://github.com/akiojin/gwt/commit/633f0d65aa3724eb38c6084433b6da1cc688d342)), closes [#546](https://github.com/akiojin/gwt/issues/546)
+* ログビューア表示と配色の統一 ([#538](https://github.com/akiojin/gwt/issues/538)) ([1067a0c](https://github.com/akiojin/gwt/commit/1067a0c15d5349c8f7e7840649fe2a43967391c5))
+* 安全アイコンの安全表示を緑oに変更 ([#525](https://github.com/akiojin/gwt/issues/525)) ([f0e7ba9](https://github.com/akiojin/gwt/commit/f0e7ba9b5f01bfc2bd55173afe1d60ca434d2fde))
+* 安全状態確認時のカーソルリセット問題を修正 ([#539](https://github.com/akiojin/gwt/issues/539)) ([77db8ea](https://github.com/akiojin/gwt/commit/77db8ea3c629affbb930fc2074efb4a312837895))
+
 ## [4.11.6](https://github.com/akiojin/gwt/compare/v4.11.5...v4.11.6) (2026-01-08)
 
 
