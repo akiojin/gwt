@@ -60,6 +60,7 @@ import {
   getLocalBranches,
   getRepositoryRoot,
   deleteBranch,
+  fetchAllRemotes,
 } from "../../git.js";
 import {
   isProtectedBranchName,
@@ -750,6 +751,14 @@ export function AppSolid(props: AppSolidProps) {
       void refreshCleanupSafety();
 
       void (async () => {
+        // Fetch remote updates with --prune to remove stale tracking refs
+        await withTimeout(
+          fetchAllRemotes({ cwd: repoRoot }),
+          BRANCH_FULL_LOAD_TIMEOUT_MS,
+        ).catch(() => {
+          // Ignore fetch errors (e.g., network issues)
+        });
+
         const [branches, latestWorktrees] = await Promise.all([
           withTimeout(
             getAllBranches(repoRoot),
