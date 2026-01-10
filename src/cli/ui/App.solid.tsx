@@ -97,6 +97,7 @@ import {
 } from "../../types/profiles.js";
 import { BRANCH_PREFIXES } from "../../config/constants.js";
 import { prefetchAgentVersions } from "./utils/versionCache.js";
+import { prefetchInstalledVersions } from "./utils/installedVersionCache.js";
 import { getBunxAgentIds } from "./utils/versionFetcher.js";
 
 export type ExecutionMode = "normal" | "continue" | "resume";
@@ -785,6 +786,10 @@ export function AppSolid(props: AppSolidProps) {
     const bunxAgentIds = getBunxAgentIds();
     void prefetchAgentVersions(bunxAgentIds).catch(() => {
       // Silently handle errors - cache will return null and UI will show "latest" only
+    });
+    // FR-017: Prefetch installed versions for all builtin agents at startup
+    void prefetchInstalledVersions(bunxAgentIds).catch(() => {
+      // Silently handle errors - cache will return null and UI won't show "installed"
     });
   });
 
