@@ -17,8 +17,10 @@ import {
   runAgentWithPty,
   shouldCaptureAgentOutput,
 } from "./logging/agentOutput.js";
+import { createLogger } from "./logging/logger.js";
 
 const CODEX_CLI_PACKAGE = "@openai/codex";
+const logger = createLogger({ category: "codex" });
 
 /**
  * Reasoning effort levels supported by Codex CLI.
@@ -196,21 +198,30 @@ export async function launchCodexCLI(
 
     const execChild = async (child: Promise<unknown>) => {
       try {
-        await child;
+        const result = (await child) as {
+          exitCode?: number | null;
+          signal?: string | null;
+        };
+        return {
+          exitCode: result.exitCode ?? 0,
+          signal: result.signal ?? null,
+        };
       } catch (execError: unknown) {
         // Treat SIGINT/SIGTERM as normal exit (user pressed Ctrl+C)
         const signal = (execError as { signal?: unknown })?.signal;
+        const exitCode =
+          (execError as { exitCode?: number | null })?.exitCode ?? null;
         if (signal === "SIGINT" || signal === "SIGTERM") {
-          return;
+          return { exitCode, signal };
         }
         throw execError;
       }
     };
-    // Treat SIGHUP (1), SIGINT (2), SIGTERM (15) as normal exit signals
-    // SIGHUP can occur when the PTY closes, SIGINT/SIGTERM are user interrupts
+    // Treat SIGINT (2), SIGTERM (15) as normal exit signals (user interrupts)
     const isNormalExitSignal = (signal?: number | null) =>
-      signal === 1 || signal === 2 || signal === 15;
+      signal === 2 || signal === 15;
     const runCommand = async (command: string, commandArgs: string[]) => {
+      const runStartedAt = Date.now();
       if (captureOutput) {
         const result = await runAgentWithPty({
           command,
@@ -219,12 +230,27 @@ export async function launchCodexCLI(
           env,
           agentId: "codex-cli",
         });
-        if (isNormalExitSignal(result.signal)) {
+        const durationMs = Date.now() - runStartedAt;
+        const exitCode = result.exitCode ?? null;
+        const signal = result.signal ?? null;
+        const signalIsNormal = isNormalExitSignal(signal);
+        const hasError =
+          (!signalIsNormal && signal !== null && signal !== undefined) ||
+          (exitCode !== null && exitCode !== 0);
+        if (hasError) {
+          logger.error({ exitCode, signal, durationMs }, "Codex CLI exited");
+        } else {
+          logger.info({ exitCode, signal, durationMs }, "Codex CLI exited");
+        }
+        if (signalIsNormal) {
           return;
         }
-        if (result.exitCode !== null && result.exitCode !== 0) {
+        if (signal !== null && signal !== undefined) {
+          throw new Error(`Codex CLI terminated by signal ${signal}`);
+        }
+        if (exitCode !== null && exitCode !== 0) {
           throw new Error(
-            `Codex CLI exited with code ${result.exitCode ?? "unknown"}`,
+            `Codex CLI exited with code ${exitCode ?? "unknown"}`,
           );
         }
         return;
@@ -234,14 +260,33 @@ export async function launchCodexCLI(
         return;
       }
 
-      const child = execa(command, commandArgs, {
-        cwd: worktreePath,
-        stdin: childStdio.stdin,
-        stdout: childStdio.stdout,
-        stderr: childStdio.stderr,
-        env,
-      });
-      await execChild(child);
+      try {
+        const child = execa(command, commandArgs, {
+          cwd: worktreePath,
+          stdin: childStdio.stdin,
+          stdout: childStdio.stdout,
+          stderr: childStdio.stderr,
+          env,
+        });
+        const result = await execChild(child);
+        const durationMs = Date.now() - runStartedAt;
+        logger.info(
+          {
+            exitCode: result.exitCode ?? null,
+            signal: result.signal,
+            durationMs,
+          },
+          "Codex CLI exited",
+        );
+      } catch (execError: unknown) {
+        const durationMs = Date.now() - runStartedAt;
+        const exitCode =
+          (execError as { exitCode?: number | null })?.exitCode ?? null;
+        const signal =
+          (execError as { signal?: string | null })?.signal ?? null;
+        logger.error({ exitCode, signal, durationMs }, "Codex CLI failed");
+        throw execError;
+      }
     };
 
     // Determine execution strategy based on version selection

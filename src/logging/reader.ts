@@ -14,6 +14,7 @@ export type LogTargetReason =
   | "worktree-inaccessible"
   | "current-working-directory"
   | "working-directory"
+  | "working-directory-fallback"
   | "no-worktree";
 
 export interface LogTargetBranch {
@@ -115,7 +116,7 @@ export async function listLogFiles(logDir: string): Promise<LogFileInfo[]> {
       }
     }
 
-    return files.sort((a, b) => b.date.localeCompare(a.date));
+    return files.sort((a, b) => b.mtimeMs - a.mtimeMs);
   } catch (error) {
     const err = error as NodeJS.ErrnoException;
     if (err.code === "ENOENT") {
@@ -123,6 +124,53 @@ export async function listLogFiles(logDir: string): Promise<LogFileInfo[]> {
     }
     throw error;
   }
+}
+
+const getLatestLogMtimeWithContent = async (
+  logDir: string,
+): Promise<number | null> => {
+  const files = await listLogFiles(logDir);
+  for (const file of files) {
+    const lines = await readLogFileLines(file.path);
+    if (lines.length > 0) {
+      return file.mtimeMs;
+    }
+  }
+  return null;
+};
+
+export async function selectLogTargetByRecency(
+  primary: LogTargetResolution,
+  fallback: LogTargetResolution,
+): Promise<LogTargetResolution> {
+  if (!primary.logDir || !primary.sourcePath) {
+    return primary;
+  }
+  if (!fallback.logDir || !fallback.sourcePath) {
+    return primary;
+  }
+  if (primary.logDir === fallback.logDir) {
+    return primary;
+  }
+  if (primary.reason !== "worktree") {
+    return primary;
+  }
+
+  const [primaryMtime, fallbackMtime] = await Promise.all([
+    getLatestLogMtimeWithContent(primary.logDir),
+    getLatestLogMtimeWithContent(fallback.logDir),
+  ]);
+
+  if (
+    fallbackMtime !== null &&
+    (primaryMtime === null || fallbackMtime > primaryMtime)
+  ) {
+    return {
+      ...fallback,
+      reason: "working-directory-fallback",
+    };
+  }
+  return primary;
 }
 
 export async function clearLogFiles(logDir: string): Promise<number> {

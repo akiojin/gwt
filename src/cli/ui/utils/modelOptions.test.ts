@@ -75,6 +75,12 @@ describe("modelOptions", () => {
     ]);
   });
 
+  it("includes OpenCode default and custom options", () => {
+    expect(byId("opencode")).toEqual(["", "__custom__"]);
+    const defaultModel = getDefaultModelOption("opencode");
+    expect(defaultModel?.id).toBe("");
+  });
+
   it("normalizes known Claude model typos and casing", () => {
     expect(normalizeModelId("claude-code", "opuss")).toBe("opus");
     expect(normalizeModelId("claude-code", "Opus")).toBe("opus");
