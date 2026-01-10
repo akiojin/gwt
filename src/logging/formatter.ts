@@ -131,14 +131,12 @@ const formatLogDisplayPayload = (
 const formatTimeLabel = (
   value: unknown,
 ): { label: string; timestamp: number | null } => {
-  if (typeof value === "string" || typeof value === "number") {
-    const date = new Date(value);
-    if (!Number.isNaN(date.getTime())) {
-      return {
-        label: formatLocalTimeParts(date),
-        timestamp: date.getTime(),
-      };
-    }
+  const date = parseTimestampValue(value);
+  if (date) {
+    return {
+      label: formatLocalTimeParts(date),
+      timestamp: date.getTime(),
+    };
   }
 
   return { label: "--:--:--", timestamp: null };
