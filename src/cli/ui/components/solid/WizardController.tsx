@@ -1,5 +1,11 @@
 /** @jsxImportSource @opentui/solid */
-import { createSignal, createEffect, createMemo, Show } from "solid-js";
+import {
+  createSignal,
+  createEffect,
+  createMemo,
+  onCleanup,
+  Show,
+} from "solid-js";
 import { useKeyboard } from "@opentui/solid";
 import type { ToolSessionEntry } from "../../../../config/index.js";
 import type { CodingAgentId, InferenceLevel } from "../../types.js";
@@ -13,6 +19,7 @@ import {
   AgentSelectStep,
   VersionSelectStep,
   ModelSelectStep,
+  ModelInputStep,
   ReasoningLevelStep,
   ExecutionModeStep,
   SkipPermissionsStep,
@@ -53,6 +60,7 @@ type WizardStep =
   | "agent-select"
   | "version-select"
   | "model-select"
+  | "model-input"
   | "reasoning-level"
   | "execution-mode"
   | "skip-permissions";
@@ -87,9 +95,11 @@ export function WizardController(props: WizardControllerProps) {
   >(undefined);
   const [executionMode, setExecutionMode] =
     createSignal<ExecutionMode>("normal");
+  const [versionSelectionReady, setVersionSelectionReady] = createSignal(false);
 
   // キー伝播防止: ステップ遷移直後は focused を無効にする
   const [isTransitioning, setIsTransitioning] = createSignal(true);
+  let versionSelectionTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Reset state when wizard becomes visible
   function getInitialStep(): WizardStep {
@@ -168,6 +178,28 @@ export function WizardController(props: WizardControllerProps) {
     startTransition();
   };
 
+  createEffect(() => {
+    const currentStep = step();
+    if (versionSelectionTimer) {
+      clearTimeout(versionSelectionTimer);
+      versionSelectionTimer = null;
+    }
+    if (currentStep === "version-select") {
+      setVersionSelectionReady(false);
+      versionSelectionTimer = setTimeout(() => {
+        setVersionSelectionReady(true);
+      }, 50);
+      return;
+    }
+    setVersionSelectionReady(false);
+  });
+
+  onCleanup(() => {
+    if (versionSelectionTimer) {
+      clearTimeout(versionSelectionTimer);
+    }
+  });
+
   // Determine if reasoning level step is needed
   const needsReasoningLevel = createMemo(() => {
     return selectedAgent() === "codex-cli";
@@ -213,13 +245,34 @@ export function WizardController(props: WizardControllerProps) {
   };
 
   const handleVersionSelect = (version: string) => {
+    if (!versionSelectionReady() || step() !== "version-select") {
+      return;
+    }
     // "installed" を明示的に保存し、未指定時は後方互換で "latest" にフォールバックできるようにする
     setSelectedVersion(version);
     goToStep("model-select");
   };
 
   const handleModelSelect = (model: string) => {
+    const agent = selectedAgent();
+    if (agent === "opencode" && model === "__custom__") {
+      goToStep("model-input");
+      return;
+    }
     setSelectedModel(model);
+    if (needsReasoningLevel()) {
+      goToStep("reasoning-level");
+    } else {
+      goToStep("execution-mode");
+    }
+  };
+
+  const handleModelInputSubmit = (value: string) => {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return;
+    }
+    setSelectedModel(trimmed);
     if (needsReasoningLevel()) {
       goToStep("reasoning-level");
     } else {
@@ -340,6 +393,17 @@ export function WizardController(props: WizardControllerProps) {
         <ModelSelectStep
           agentId={selectedAgent() ?? "claude-code"}
           onSelect={handleModelSelect}
+          onBack={goBack}
+          focused={focused}
+        />
+      );
+    }
+
+    if (currentStep === "model-input") {
+      return (
+        <ModelInputStep
+          agentId={selectedAgent() ?? "claude-code"}
+          onSubmit={handleModelInputSubmit}
           onBack={goBack}
           focused={focused}
         />
