@@ -33,4 +33,4 @@
 
 - All checklist items pass
 - Specification is ready for `/speckit.plan` phase
-- FR-202 (Codex skills feature) is the new requirement to be implemented
+- FR-202 (Codex skills feature) is updated to be version-gated for v0.80.0+

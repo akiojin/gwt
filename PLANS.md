@@ -51,3 +51,9 @@
 - [ ] 実装: 起動異常終了の検知/ログ記録
 - [ ] 実装: OpenCodeモデル選択のデフォルト/任意入力
 - [ ] 実装: ログビューアの最新ログフォールバック/mtime判定
+
+## Codex skills flag compatibility (v0.80.0+)
+- [x] Update SPEC-3b0ed29b spec/plan/tasks for skills flag gating
+- [x] Add unit tests for Codex skills flag gating (codex + resolver)
+- [x] Implement version-aware skills flag handling for Codex CLI launches
+- [x] Run targeted unit tests for Codex launch/resolver changes
