@@ -1,6 +1,7 @@
 import { execa, type Options as ExecaOptions } from "execa";
 import chalk from "chalk";
 import { existsSync, readFileSync } from "fs";
+import os from "node:os";
 import {
   createChildStdio,
   getTerminalStreams,
@@ -269,6 +270,12 @@ export async function launchClaudeCode(
       }
     };
 
+    const signalNumberToName: ReadonlyMap<number, string> = new Map(
+      Object.entries(os.constants.signals)
+        .filter(([, value]) => typeof value === "number")
+        .map(([name, value]) => [value as number, name]),
+    );
+
     const normalizeSignal = (
       signal?: number | string | null,
     ): string | null => {
@@ -276,21 +283,21 @@ export async function launchClaudeCode(
         return null;
       }
       if (typeof signal === "number") {
-        if (signal === 1) return "SIGHUP";
-        if (signal === 2) return "SIGINT";
-        if (signal === 3) return "SIGQUIT";
-        if (signal === 6) return "SIGABRT";
-        if (signal === 9) return "SIGKILL";
-        if (signal === 15) return "SIGTERM";
-        return String(signal);
+        return signalNumberToName.get(signal) ?? String(signal);
       }
-      return signal;
+      return signal.trim().toUpperCase();
     };
 
     // Treat SIGINT (2), SIGTERM (15) as normal exit signals (user interrupts)
-    const isNormalExitSignal = (signal?: number | string | null) => {
+    const isNormalExitSignal = (
+      signal?: number | string | null,
+      exitCode?: number | null,
+    ) => {
       const normalized = normalizeSignal(signal);
-      return normalized === "SIGINT" || normalized === "SIGTERM";
+      if (normalized === "SIGINT" || normalized === "SIGTERM") {
+        return true;
+      }
+      return exitCode === 130 || exitCode === 143;
     };
 
     const runCommand = async (file: string, fileArgs: string[]) => {
@@ -307,10 +314,11 @@ export async function launchClaudeCode(
         const exitCode = result.exitCode ?? null;
         const rawSignal = result.signal ?? null;
         const signal = normalizeSignal(rawSignal);
-        const signalIsNormal = isNormalExitSignal(rawSignal);
+        const signalIsNormal = isNormalExitSignal(rawSignal, exitCode);
+        const exitCodeIsNormal = exitCode === 130 || exitCode === 143;
         const hasError =
           (!signalIsNormal && signal !== null && signal !== undefined) ||
-          (exitCode !== null && exitCode !== 0);
+          (exitCode !== null && exitCode !== 0 && !exitCodeIsNormal);
         if (hasError) {
           logger.error({ exitCode, signal, durationMs }, "Claude Code exited");
         } else {
@@ -352,7 +360,7 @@ export async function launchClaudeCode(
         const rawSignal =
           (execError as { signal?: string | number | null })?.signal ?? null;
         const signal = normalizeSignal(rawSignal);
-        if (isNormalExitSignal(rawSignal)) {
+        if (isNormalExitSignal(rawSignal, exitCode)) {
           logger.info({ exitCode, signal, durationMs }, "Claude Code exited");
           return;
         }
