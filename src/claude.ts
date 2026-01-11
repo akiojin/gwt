@@ -276,7 +276,11 @@ export async function launchClaudeCode(
         return null;
       }
       if (typeof signal === "number") {
+        if (signal === 1) return "SIGHUP";
         if (signal === 2) return "SIGINT";
+        if (signal === 3) return "SIGQUIT";
+        if (signal === 6) return "SIGABRT";
+        if (signal === 9) return "SIGKILL";
         if (signal === 15) return "SIGTERM";
         return String(signal);
       }
