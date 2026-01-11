@@ -457,14 +457,18 @@ impl Model {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3), // Header
+                Constraint::Length(7), // Boxed header (title + 5 lines + borders)
                 Constraint::Min(0),    // Content
                 Constraint::Length(3), // Footer
             ])
             .split(frame.area());
 
-        // Header
-        self.view_header(frame, chunks[0]);
+        // Header (for branch list screen, render boxed header)
+        if matches!(self.screen, Screen::BranchList) {
+            self.view_boxed_header(frame, chunks[0]);
+        } else {
+            self.view_header(frame, chunks[0]);
+        }
 
         // Content
         match self.screen {
@@ -486,6 +490,120 @@ impl Model {
         if self.wizard.visible {
             render_wizard(&self.wizard, frame, frame.area());
         }
+    }
+
+    /// Boxed header for branch list screen
+    fn view_boxed_header(&self, frame: &mut Frame, area: Rect) {
+        let version = env!("CARGO_PKG_VERSION");
+        let offline_indicator = if self.is_offline { " [OFFLINE]" } else { "" };
+        let profile = self.branch_list.active_profile.as_deref().unwrap_or("default");
+        let working_dir = self.branch_list.working_directory.as_deref()
+            .unwrap_or_else(|| self.repo_root.to_str().unwrap_or("."));
+
+        // Title for the box
+        let title = format!(" gwt - Branch Selection v{}{} ", version, offline_indicator);
+        let header_block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(title)
+            .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+
+        let inner = header_block.inner(area);
+        frame.render_widget(header_block, area);
+
+        // Inner content layout (5 lines)
+        let inner_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1), // Working Directory
+                Constraint::Length(1), // Profile
+                Constraint::Length(1), // Filter
+                Constraint::Length(1), // Stats
+                Constraint::Min(0),    // Remaining space
+            ])
+            .split(inner);
+
+        // Line 1: Working Directory
+        let working_dir_line = Line::from(vec![
+            Span::styled("Working Directory: ", Style::default().fg(Color::DarkGray)),
+            Span::raw(working_dir),
+        ]);
+        frame.render_widget(Paragraph::new(working_dir_line), inner_chunks[0]);
+
+        // Line 2: Profile
+        let profile_line = Line::from(vec![
+            Span::styled("Profile(p): ", Style::default().fg(Color::DarkGray)),
+            Span::raw(profile),
+        ]);
+        frame.render_widget(Paragraph::new(profile_line), inner_chunks[1]);
+
+        // Line 3: Filter
+        let filtered = self.branch_list.filtered_branches();
+        let total = self.branch_list.branches.len();
+        let mut filter_spans = vec![
+            Span::styled("Filter(f): ", Style::default().fg(Color::DarkGray)),
+        ];
+        if self.branch_list.filter_mode {
+            if self.branch_list.filter.is_empty() {
+                filter_spans.push(Span::styled("Type to search...", Style::default().fg(Color::DarkGray)));
+            } else {
+                filter_spans.push(Span::raw(&self.branch_list.filter));
+            }
+            filter_spans.push(Span::styled("|", Style::default().fg(Color::White)));
+        } else {
+            filter_spans.push(Span::styled(
+                if self.branch_list.filter.is_empty() { "(press f to filter)" } else { &self.branch_list.filter },
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        if !self.branch_list.filter.is_empty() {
+            filter_spans.push(Span::styled(
+                format!(" (Showing {} of {})", filtered.len(), total),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        frame.render_widget(Paragraph::new(Line::from(filter_spans)), inner_chunks[2]);
+
+        // Line 4: Stats
+        let stats = &self.branch_list.stats;
+        let relative_time = self.branch_list.format_relative_time();
+        let mut stats_spans = vec![
+            Span::styled("Mode(tab): ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                self.branch_list.view_mode.label(),
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  ", Style::default()),
+            Span::styled("Local: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                stats.local_count.to_string(),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  ", Style::default()),
+            Span::styled("Remote: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                stats.remote_count.to_string(),
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  ", Style::default()),
+            Span::styled("Worktrees: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                stats.worktree_count.to_string(),
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  ", Style::default()),
+            Span::styled("Changes: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                stats.changes_count.to_string(),
+                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+            ),
+        ];
+        if !relative_time.is_empty() {
+            stats_spans.push(Span::styled("  ", Style::default()));
+            stats_spans.push(Span::styled("Updated: ", Style::default().fg(Color::DarkGray)));
+            stats_spans.push(Span::styled(relative_time, Style::default().fg(Color::DarkGray)));
+        }
+        frame.render_widget(Paragraph::new(Line::from(stats_spans)), inner_chunks[3]);
     }
 
     fn view_header(&self, frame: &mut Frame, area: Rect) {

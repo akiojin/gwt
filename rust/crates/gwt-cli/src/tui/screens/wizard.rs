@@ -53,12 +53,14 @@ impl CodingAgent {
         }
     }
 
+    /// Agent-specific colors per SPEC-3b0ed29b FR-025
+    /// Claude Code=yellow, Codex=cyan, Gemini=magenta, OpenCode=green
     pub fn color(&self) -> Color {
         match self {
-            CodingAgent::ClaudeCode => Color::Rgb(255, 175, 100), // Orange
-            CodingAgent::CodexCli => Color::Rgb(100, 200, 100),   // Green
-            CodingAgent::GeminiCli => Color::Rgb(100, 150, 255),  // Blue
-            CodingAgent::OpenCode => Color::Rgb(200, 100, 200),   // Purple
+            CodingAgent::ClaudeCode => Color::Yellow,             // Yellow (#f6e05e)
+            CodingAgent::CodexCli => Color::Cyan,                 // Cyan (#4fd1c5)
+            CodingAgent::GeminiCli => Color::Magenta,             // Magenta (#d53f8c)
+            CodingAgent::OpenCode => Color::Green,                // Green (#48bb78)
         }
     }
 
@@ -72,69 +74,129 @@ impl CodingAgent {
     }
 }
 
-/// Model options for each agent
+/// Reasoning level (Codex only) - defined before ModelOption which uses it
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReasoningLevel {
+    Low,
+    #[default]
+    Medium,
+    High,
+    XHigh,
+}
+
+impl ReasoningLevel {
+    pub fn label(&self) -> &'static str {
+        match self {
+            ReasoningLevel::Low => "low",
+            ReasoningLevel::Medium => "medium",
+            ReasoningLevel::High => "high",
+            ReasoningLevel::XHigh => "xhigh",
+        }
+    }
+
+    pub fn description(&self) -> &'static str {
+        match self {
+            ReasoningLevel::Low => "Faster, less thorough",
+            ReasoningLevel::Medium => "Balanced",
+            ReasoningLevel::High => "Slower, more thorough",
+            ReasoningLevel::XHigh => "Extended high reasoning",
+        }
+    }
+
+    pub fn all() -> &'static [ReasoningLevel] {
+        &[ReasoningLevel::Low, ReasoningLevel::Medium, ReasoningLevel::High, ReasoningLevel::XHigh]
+    }
+}
+
+/// Model options for each agent (matches modelOptions.ts)
 #[derive(Debug, Clone)]
 pub struct ModelOption {
     pub id: String,
     pub label: String,
     pub description: Option<String>,
+    pub is_default: bool,
+    /// Supported inference levels for this model (Codex only)
+    pub inference_levels: Vec<ReasoningLevel>,
+    /// Default inference level for this model
+    pub default_inference: Option<ReasoningLevel>,
+}
+
+impl ModelOption {
+    fn new(id: &str, label: &str, description: &str) -> Self {
+        Self {
+            id: id.to_string(),
+            label: label.to_string(),
+            description: Some(description.to_string()),
+            is_default: false,
+            inference_levels: vec![],
+            default_inference: None,
+        }
+    }
+
+    fn default_option(label: &str, description: &str) -> Self {
+        Self {
+            id: String::new(),
+            label: label.to_string(),
+            description: Some(description.to_string()),
+            is_default: true,
+            inference_levels: vec![],
+            default_inference: None,
+        }
+    }
+
+    fn with_base_levels(mut self) -> Self {
+        self.inference_levels = vec![ReasoningLevel::High, ReasoningLevel::Medium, ReasoningLevel::Low];
+        self.default_inference = Some(ReasoningLevel::High);
+        self
+    }
+
+    fn with_max_levels(mut self) -> Self {
+        self.inference_levels = vec![ReasoningLevel::XHigh, ReasoningLevel::High, ReasoningLevel::Medium, ReasoningLevel::Low];
+        self.default_inference = Some(ReasoningLevel::Medium);
+        self
+    }
+
+    fn with_default_inference(mut self, level: ReasoningLevel) -> Self {
+        self.default_inference = Some(level);
+        self
+    }
 }
 
 impl CodingAgent {
+    /// Get model options matching modelOptions.ts
     pub fn models(&self) -> Vec<ModelOption> {
         match self {
             CodingAgent::ClaudeCode => vec![
-                ModelOption {
-                    id: "claude-sonnet-4-20250514".to_string(),
-                    label: "Claude Sonnet 4".to_string(),
-                    description: Some("Latest Sonnet model".to_string()),
-                },
-                ModelOption {
-                    id: "claude-opus-4-20250514".to_string(),
-                    label: "Claude Opus 4".to_string(),
-                    description: Some("Most capable model".to_string()),
-                },
-                ModelOption {
-                    id: "claude-3-5-sonnet-20241022".to_string(),
-                    label: "Claude 3.5 Sonnet".to_string(),
-                    description: Some("Previous generation".to_string()),
-                },
+                ModelOption::default_option("Default (Auto)", "Use Claude Code default behavior"),
+                ModelOption::new("opus", "Opus 4.5", "Official Opus alias for Claude Code (non-custom, matches /model option)."),
+                ModelOption::new("sonnet", "Sonnet 4.5", "Official Sonnet alias for Claude Code."),
+                ModelOption::new("haiku", "Haiku 4.5", "Official Haiku alias for Claude Code (fastest model, non-custom)."),
             ],
             CodingAgent::CodexCli => vec![
-                ModelOption {
-                    id: "o3-mini".to_string(),
-                    label: "o3-mini".to_string(),
-                    description: Some("Fast reasoning model".to_string()),
-                },
-                ModelOption {
-                    id: "o1".to_string(),
-                    label: "o1".to_string(),
-                    description: Some("Full reasoning model".to_string()),
-                },
-                ModelOption {
-                    id: "gpt-4o".to_string(),
-                    label: "GPT-4o".to_string(),
-                    description: Some("General purpose model".to_string()),
-                },
+                ModelOption::default_option("Default (Auto)", "Use Codex default model")
+                    .with_base_levels()
+                    .with_default_inference(ReasoningLevel::High),
+                ModelOption::new("gpt-5.2-codex", "gpt-5.2-codex", "Latest frontier agentic coding model")
+                    .with_max_levels()
+                    .with_default_inference(ReasoningLevel::High),
+                ModelOption::new("gpt-5.1-codex-max", "gpt-5.1-codex-max", "Codex-optimized flagship for deep and fast reasoning.")
+                    .with_max_levels(),
+                ModelOption::new("gpt-5.1-codex-mini", "gpt-5.1-codex-mini", "Optimized for codex. Cheaper, faster, but less capable.")
+                    .with_base_levels(),
+                ModelOption::new("gpt-5.2", "gpt-5.2", "Latest frontier model with improvements across knowledge, reasoning and coding")
+                    .with_max_levels(),
             ],
             CodingAgent::GeminiCli => vec![
-                ModelOption {
-                    id: "gemini-2.0-flash".to_string(),
-                    label: "Gemini 2.0 Flash".to_string(),
-                    description: Some("Fast model".to_string()),
-                },
-                ModelOption {
-                    id: "gemini-2.5-pro".to_string(),
-                    label: "Gemini 2.5 Pro".to_string(),
-                    description: Some("Most capable model".to_string()),
-                },
+                ModelOption::default_option("Default (Auto)", "Use Gemini CLI default model"),
+                ModelOption::new("gemini-3-pro-preview", "Pro (gemini-3-pro-preview)", "Default Pro. Falls back to gemini-2.5-pro when preview is unavailable."),
+                ModelOption::new("gemini-3-flash-preview", "Flash (gemini-3-flash-preview)", "Next-generation high-speed model"),
+                ModelOption::new("gemini-2.5-pro", "Pro (gemini-2.5-pro)", "Stable Pro model for deep reasoning and creativity"),
+                ModelOption::new("gemini-2.5-flash", "Flash (gemini-2.5-flash)", "Balance of speed and reasoning"),
+                ModelOption::new("gemini-2.5-flash-lite", "Flash-Lite (gemini-2.5-flash-lite)", "Fastest for simple tasks"),
             ],
             CodingAgent::OpenCode => vec![
-                ModelOption {
-                    id: "custom".to_string(),
-                    label: "Custom".to_string(),
-                    description: Some("Enter provider/model".to_string()),
-                },
+                ModelOption::default_option("Default (Auto)", "Use OpenCode default model"),
+                ModelOption::new("__custom__", "Custom (provider/model)", "Enter a provider/model identifier"),
             ],
         }
     }
@@ -168,40 +230,6 @@ impl ExecutionMode {
 
     pub fn all() -> &'static [ExecutionMode] {
         &[ExecutionMode::Normal, ExecutionMode::Continue, ExecutionMode::Resume]
-    }
-}
-
-/// Reasoning level (Codex only)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ReasoningLevel {
-    Low,
-    #[default]
-    Medium,
-    High,
-    XHigh,
-}
-
-impl ReasoningLevel {
-    pub fn label(&self) -> &'static str {
-        match self {
-            ReasoningLevel::Low => "low",
-            ReasoningLevel::Medium => "medium",
-            ReasoningLevel::High => "high",
-            ReasoningLevel::XHigh => "xhigh",
-        }
-    }
-
-    pub fn description(&self) -> &'static str {
-        match self {
-            ReasoningLevel::Low => "Faster, less thorough",
-            ReasoningLevel::Medium => "Balanced",
-            ReasoningLevel::High => "Slower, more thorough",
-            ReasoningLevel::XHigh => "Extended high reasoning",
-        }
-    }
-
-    pub fn all() -> &'static [ReasoningLevel] {
-        &[ReasoningLevel::Low, ReasoningLevel::Medium, ReasoningLevel::High, ReasoningLevel::XHigh]
     }
 }
 
