@@ -110,12 +110,31 @@ def parse_args() -> argparse.Namespace:
         help="Resolve review threads after confirmation.",
     )
     parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip confirmation prompts.",
+    )
+    parser.add_argument(
         "--add-comment",
         type=str,
         default=None,
         help="Add a comment to the PR with the specified message.",
     )
     return parser.parse_args()
+
+
+def confirm_action(prompt: str, assume_yes: bool) -> bool:
+    if assume_yes:
+        return True
+    if not sys.stdin.isatty():
+        print(
+            "Error: confirmation required for --resolve-threads. "
+            "Re-run with --yes to skip the prompt.",
+            file=sys.stderr,
+        )
+        return False
+    response = input(prompt).strip().lower()
+    return response in ("y", "yes")
 
 
 def main() -> int:
@@ -131,6 +150,12 @@ def main() -> int:
     pr_value = resolve_pr(args.pr, repo_root)
     if pr_value is None:
         return 1
+
+    if args.resolve_threads and args.mode not in ("reviews", "all"):
+        print(
+            "Warning: --resolve-threads only applies to --mode reviews or --mode all.",
+            file=sys.stderr,
+        )
 
     # Handle --add-comment action
     if args.add_comment:
@@ -159,19 +184,41 @@ def main() -> int:
         if change_requests:
             has_issues = True
 
-        unresolved_threads = fetch_unresolved_threads(pr_value, repo_root)
+        unresolved_threads, threads_truncated, threads_error = fetch_unresolved_threads(
+            pr_value, repo_root
+        )
         results["unresolvedThreads"] = unresolved_threads
-        if unresolved_threads:
+        if threads_truncated:
+            results["unresolvedThreadsTruncated"] = True
+        if threads_error:
+            results["unresolvedThreadsError"] = threads_error
             has_issues = True
 
         # Handle --resolve-threads
         if args.resolve_threads and unresolved_threads:
-            resolved_count = 0
-            for thread in unresolved_threads:
-                thread_id = thread.get("id")
-                if thread_id and resolve_thread(thread_id, repo_root):
-                    resolved_count += 1
-            results["resolvedThreadsCount"] = resolved_count
+            if confirm_action(
+                f"Resolve {len(unresolved_threads)} review thread(s)? [y/N] ",
+                args.yes,
+            ):
+                resolved_count = 0
+                for thread in unresolved_threads:
+                    thread_id = thread.get("id")
+                    if thread_id and resolve_thread(thread_id, repo_root):
+                        resolved_count += 1
+                results["resolvedThreadsCount"] = resolved_count
+                if resolved_count == len(unresolved_threads):
+                    unresolved_threads = []
+                    results["unresolvedThreads"] = []
+                else:
+                    print(
+                        "Warning: some review threads failed to resolve.",
+                        file=sys.stderr,
+                    )
+            else:
+                print("Skipped resolving review threads.", file=sys.stderr)
+
+        if unresolved_threads:
+            has_issues = True
 
     # CI checks
     if args.mode in ("checks", "all"):
@@ -294,9 +341,8 @@ def check_conflicts(pr_value: str, repo_root: Path) -> dict[str, Any]:
     mergeable_raw = data.get("mergeable")
     merge_state_status = data.get("mergeStateStatus", "UNKNOWN")
 
-    # Handle different return types from gh CLI:
-    # - Older versions: boolean (true/false)
-    # - Newer versions: string ("MERGEABLE", "CONFLICTING", "UNKNOWN")
+    # gh currently reports mergeable as a string enum; keep boolean handling as
+    # a backward-compatibility fallback for older clients.
     if isinstance(mergeable_raw, bool):
         # Older gh CLI: boolean value
         has_conflicts = not mergeable_raw
@@ -348,8 +394,18 @@ def fetch_change_requests(pr_value: str, repo_root: Path) -> list[dict[str, Any]
     if not isinstance(reviews, list):
         return []
 
-    change_requests = []
+    latest_by_reviewer: dict[str, dict[str, Any]] = {}
     for review in reviews:
+        reviewer = review.get("user", {}).get("login")
+        if not reviewer:
+            continue
+        submitted_at = review.get("submitted_at") or ""
+        existing = latest_by_reviewer.get(reviewer)
+        if not existing or submitted_at > (existing.get("submitted_at") or ""):
+            latest_by_reviewer[reviewer] = review
+
+    change_requests = []
+    for review in latest_by_reviewer.values():
         if review.get("state") == "CHANGES_REQUESTED":
             change_requests.append({
                 "id": review.get("id"),
@@ -366,15 +422,18 @@ def fetch_change_requests(pr_value: str, repo_root: Path) -> list[dict[str, Any]
 # Unresolved review threads
 # =============================================================================
 
-def fetch_unresolved_threads(pr_value: str, repo_root: Path) -> list[dict[str, Any]]:
+def fetch_unresolved_threads(
+    pr_value: str,
+    repo_root: Path,
+) -> tuple[list[dict[str, Any]], bool, str | None]:
     """Fetch unresolved review threads using GraphQL."""
     repo_slug = fetch_repo_slug(repo_root)
     if not repo_slug:
-        return []
+        return [], False, "Failed to resolve repository slug"
 
     parsed = parse_repo_owner_name(repo_slug)
     if not parsed:
-        return []
+        return [], False, "Failed to parse repository owner/name"
 
     owner, repo = parsed
 
@@ -383,6 +442,10 @@ def fetch_unresolved_threads(pr_value: str, repo_root: Path) -> list[dict[str, A
       repository(owner: $owner, name: $repo) {
         pullRequest(number: $number) {
           reviewThreads(first: 100) {
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
             nodes {
               id
               isResolved
@@ -390,6 +453,10 @@ def fetch_unresolved_threads(pr_value: str, repo_root: Path) -> list[dict[str, A
               path
               line
               comments(first: 10) {
+                pageInfo {
+                  hasNextPage
+                  endCursor
+                }
                 nodes {
                   author { login }
                   body
@@ -415,25 +482,36 @@ def fetch_unresolved_threads(pr_value: str, repo_root: Path) -> list[dict[str, A
     )
 
     if result.returncode != 0:
-        return []
+        message = (result.stderr or result.stdout or "").strip()
+        return [], False, message or "Failed to fetch review threads"
 
     try:
         data = json.loads(result.stdout or "{}")
     except json.JSONDecodeError:
-        return []
+        return [], False, "Failed to parse GraphQL response"
 
-    threads = (
+    errors = data.get("errors")
+    if errors:
+        return [], False, f"GraphQL errors: {json.dumps(errors)}"
+
+    review_threads = (
         data.get("data", {})
         .get("repository", {})
         .get("pullRequest", {})
         .get("reviewThreads", {})
-        .get("nodes", [])
     )
+    threads = review_threads.get("nodes", [])
+    truncated = False
+    if review_threads.get("pageInfo", {}).get("hasNextPage"):
+        truncated = True
 
     unresolved = []
     for thread in threads:
         if not thread.get("isResolved"):
-            comments = thread.get("comments", {}).get("nodes", [])
+            comments_info = thread.get("comments", {})
+            comments = comments_info.get("nodes", [])
+            if comments_info.get("pageInfo", {}).get("hasNextPage"):
+                truncated = True
             formatted_comments = []
             for comment in comments:
                 formatted_comments.append({
@@ -449,7 +527,14 @@ def fetch_unresolved_threads(pr_value: str, repo_root: Path) -> list[dict[str, A
                 "comments": formatted_comments,
             })
 
-    return unresolved
+    if truncated:
+        print(
+            "Warning: review thread results may be truncated. "
+            "Consider adding pagination if you need full coverage.",
+            file=sys.stderr,
+        )
+
+    return unresolved, truncated, None
 
 
 # =============================================================================
@@ -484,6 +569,13 @@ def resolve_thread(thread_id: str, repo_root: Path) -> bool:
     try:
         data = json.loads(result.stdout or "{}")
     except json.JSONDecodeError:
+        return False
+    errors = data.get("errors")
+    if errors:
+        print(
+            f"GraphQL errors while resolving thread {thread_id}: {json.dumps(errors)}",
+            file=sys.stderr,
+        )
         return False
 
     thread = data.get("data", {}).get("resolveReviewThread", {}).get("thread", {})

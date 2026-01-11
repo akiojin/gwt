@@ -47,8 +47,8 @@ python "<path-to-skill>/scripts/inspect_pr_checks.py" --repo "." --pr "<number>"
 # JSON output
 python "<path-to-skill>/scripts/inspect_pr_checks.py" --repo "." --pr "<number>" --json
 
-# Resolve all unresolved threads after fixing
-python "<path-to-skill>/scripts/inspect_pr_checks.py" --repo "." --pr "<number>" --resolve-threads
+# Resolve all unresolved threads after fixing (reviews/all only; prompts unless --yes)
+python "<path-to-skill>/scripts/inspect_pr_checks.py" --repo "." --pr "<number>" --mode reviews --resolve-threads --yes
 
 # Add a comment to notify reviewers
 python "<path-to-skill>/scripts/inspect_pr_checks.py" --repo "." --pr "<number>" --add-comment "Fixed all issues. Please re-review."
@@ -95,8 +95,9 @@ python "<path-to-skill>/scripts/inspect_pr_checks.py" --repo "." --pr "<number>"
    - Apply the approved plan, summarize diffs/tests.
 
 7. **Resolve review threads (optional).**
-   - With `--resolve-threads`, resolve all unresolved threads via GraphQL mutation.
-   - Requires `Repository Permissions > Contents: Read and Write`.
+   - Use `--resolve-threads` with `--mode reviews` or `--mode all`.
+   - The script prompts for confirmation unless `--yes` is provided.
+   - Requires `Pull requests: Write` permission. `Metadata` may be required; `Contents` can be required for some repos or auth setups.
 
 8. **Notify reviewers (optional).**
    - With `--add-comment "message"`, post a comment to the PR.
@@ -122,11 +123,12 @@ Comprehensive PR inspection tool. Exits non-zero when issues remain.
 | `--context` | 30 | Context lines around failure markers |
 | `--json` | false | Emit JSON output |
 | `--resolve-threads` | false | Resolve unresolved review threads |
+| `--yes` | false | Skip confirmation prompts |
 | `--add-comment` | (none) | Add a comment to the PR |
 
 **Exit codes:**
 
-- `0`: No issues found
+- `0`: No issues found (or `--add-comment` succeeded)
 - `1`: Issues detected or error occurred
 
 ## New Features
@@ -161,7 +163,7 @@ Use `--resolve-threads` to mark threads as resolved via GraphQL mutation `resolv
 
 **Required permissions:**
 
-- Fine-grained PAT: `Pull requests` + `Contents: Read and Write`
+- Fine-grained PAT: `Pull requests: Write` (add `Metadata`, and optionally `Contents`, if you hit access errors)
 - Classic PAT: `repo` scope
 
 ### Reviewer Notification
