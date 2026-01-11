@@ -5,7 +5,7 @@
  * マイグレーションロジックのユニットテスト
  * ファイルI/O統合テストは bun test で実行
  */
-
+/* eslint-disable @typescript-eslint/no-non-null-assertion */
 import { describe, it, expect } from "bun:test";
 import type { CodingAgentsConfig } from "../../../src/types/tools.js";
 

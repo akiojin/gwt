@@ -2,8 +2,15 @@
  * 環境変数プロファイル管理機能のテスト
  * @see specs/SPEC-dafff079/spec.md
  */
-
-import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
+/* eslint-disable @typescript-eslint/no-non-null-assertion */
+import {
+  describe,
+  it,
+  expect,
+  beforeEach,
+  afterEach,
+  mock as _mock,
+} from "bun:test";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
