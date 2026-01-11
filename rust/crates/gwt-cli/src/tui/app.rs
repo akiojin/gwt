@@ -17,7 +17,9 @@ use std::time::{Duration, Instant};
 
 use super::screens::{
     BranchItem, BranchListState, HelpState, LogsState, SettingsState, WorktreeCreateState,
+    ConfirmState, ErrorState, ProfilesState, EnvironmentState,
     render_branch_list, render_help, render_logs, render_settings, render_worktree_create,
+    render_confirm, render_error, render_profiles, render_environment,
 };
 
 /// Application state (Model in Elm Architecture)
@@ -44,6 +46,14 @@ pub struct Model {
     logs: LogsState,
     /// Help state
     help: HelpState,
+    /// Confirm dialog state
+    confirm: ConfirmState,
+    /// Error display state
+    error: ErrorState,
+    /// Profiles state
+    profiles: ProfilesState,
+    /// Environment variables state
+    environment: EnvironmentState,
     /// Status message
     status_message: Option<String>,
     /// Is offline
@@ -62,6 +72,10 @@ pub enum Screen {
     Settings,
     Logs,
     Help,
+    Confirm,
+    Error,
+    Profiles,
+    Environment,
 }
 
 /// Messages (Events in Elm Architecture)
@@ -87,6 +101,14 @@ pub enum Message {
     Tab,
     CycleFilter,
     ToggleSearch,
+    /// Toggle filter mode in branch list
+    ToggleFilterMode,
+    /// Cycle view mode (All/Local/Remote)
+    CycleViewMode,
+    /// Toggle branch selection
+    ToggleSelection,
+    /// Space key for selection
+    Space,
 }
 
 impl Model {
@@ -106,6 +128,10 @@ impl Model {
             settings: SettingsState::new(),
             logs: LogsState::new(),
             help: HelpState::new(),
+            confirm: ConfirmState::new(),
+            error: ErrorState::new(),
+            profiles: ProfilesState::new(),
+            environment: EnvironmentState::new(),
             status_message: None,
             is_offline: false,
             active_count: 0,
@@ -198,7 +224,10 @@ impl Model {
                 self.status_message = None;
             }
             Message::NavigateBack => {
-                if let Some(prev_screen) = self.screen_stack.pop() {
+                // Check if we're in filter mode first
+                if matches!(self.screen, Screen::BranchList) && self.branch_list.filter_mode {
+                    self.branch_list.exit_filter_mode();
+                } else if let Some(prev_screen) = self.screen_stack.pop() {
                     self.screen = prev_screen;
                 }
                 self.status_message = None;
@@ -218,6 +247,10 @@ impl Model {
                 Screen::Settings => self.settings.select_next(),
                 Screen::Logs => self.logs.select_next(),
                 Screen::Help => self.help.scroll_down(),
+                Screen::Error => self.error.scroll_down(),
+                Screen::Profiles => self.profiles.select_next(),
+                Screen::Environment => self.environment.select_next(),
+                Screen::Confirm => {}
             },
             Message::SelectPrev => match self.screen {
                 Screen::BranchList => self.branch_list.select_prev(),
@@ -225,6 +258,10 @@ impl Model {
                 Screen::Settings => self.settings.select_prev(),
                 Screen::Logs => self.logs.select_prev(),
                 Screen::Help => self.help.scroll_up(),
+                Screen::Error => self.error.scroll_up(),
+                Screen::Profiles => self.profiles.select_prev(),
+                Screen::Environment => self.environment.select_prev(),
+                Screen::Confirm => {}
             },
             Message::PageUp => match self.screen {
                 Screen::BranchList => self.branch_list.page_up(10),
@@ -281,20 +318,16 @@ impl Model {
             Message::Char(c) => {
                 if matches!(self.screen, Screen::WorktreeCreate) {
                     self.worktree_create.insert_char(c);
-                } else if matches!(self.screen, Screen::BranchList) {
-                    // Filter mode
-                    let mut filter = self.branch_list.filter.clone();
-                    filter.push(c);
-                    self.branch_list.set_filter(filter);
+                } else if matches!(self.screen, Screen::BranchList) && self.branch_list.filter_mode {
+                    // Filter mode - add character to filter
+                    self.branch_list.filter_push(c);
                 }
             }
             Message::Backspace => {
                 if matches!(self.screen, Screen::WorktreeCreate) {
                     self.worktree_create.delete_char();
-                } else if matches!(self.screen, Screen::BranchList) {
-                    let mut filter = self.branch_list.filter.clone();
-                    filter.pop();
-                    self.branch_list.set_filter(filter);
+                } else if matches!(self.screen, Screen::BranchList) && self.branch_list.filter_mode {
+                    self.branch_list.filter_pop();
                 }
             }
             Message::CursorLeft => {
@@ -319,6 +352,21 @@ impl Model {
             Message::ToggleSearch => {
                 if matches!(self.screen, Screen::Logs) {
                     self.logs.toggle_search();
+                }
+            }
+            Message::ToggleFilterMode => {
+                if matches!(self.screen, Screen::BranchList) {
+                    self.branch_list.toggle_filter_mode();
+                }
+            }
+            Message::CycleViewMode => {
+                if matches!(self.screen, Screen::BranchList) {
+                    self.branch_list.cycle_view_mode();
+                }
+            }
+            Message::ToggleSelection | Message::Space => {
+                if matches!(self.screen, Screen::BranchList) {
+                    self.branch_list.toggle_selection();
                 }
             }
         }
@@ -371,6 +419,10 @@ impl Model {
             Screen::Settings => render_settings(&self.settings, frame, chunks[1]),
             Screen::Logs => render_logs(&self.logs, frame, chunks[1]),
             Screen::Help => render_help(&self.help, frame, chunks[1]),
+            Screen::Confirm => render_confirm(&self.confirm, frame, chunks[1]),
+            Screen::Error => render_error(&self.error, frame, chunks[1]),
+            Screen::Profiles => render_profiles(&self.profiles, frame, chunks[1]),
+            Screen::Environment => render_environment(&self.environment, frame, chunks[1]),
         }
 
         // Footer
@@ -378,10 +430,26 @@ impl Model {
     }
 
     fn view_header(&self, frame: &mut Frame, area: Rect) {
+        let version = env!("CARGO_PKG_VERSION");
         let offline_indicator = if self.is_offline { " [OFFLINE]" } else { "" };
-        let stats = format!("({}/{} active)", self.active_count, self.total_count);
 
-        let title = format!(" gwt - Git Worktree Manager {} {} ", stats, offline_indicator);
+        // Format working directory
+        let working_dir = self.repo_root.display().to_string();
+        let short_dir = if working_dir.len() > 40 {
+            format!("...{}", &working_dir[working_dir.len() - 37..])
+        } else {
+            working_dir
+        };
+
+        let profile = self.branch_list.active_profile.as_deref().unwrap_or("default");
+
+        let title = format!(
+            " gwt v{} | {} | Profile: {} {}",
+            version,
+            short_dir,
+            profile,
+            offline_indicator
+        );
         let header = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
@@ -391,11 +459,21 @@ impl Model {
 
     fn view_footer(&self, frame: &mut Frame, area: Rect) {
         let keybinds = match self.screen {
-            Screen::BranchList => "[q] Quit | [?] Help | [Enter] Create | [n] New | [s] Settings | [l] Logs | Type to filter",
+            Screen::BranchList => {
+                if self.branch_list.filter_mode {
+                    "[Esc] Exit filter | [Enter] Apply | Type to search"
+                } else {
+                    "[q] Quit | [?] Help | [f] Filter | [Tab] Mode | [Space] Select | [Enter] Create | [n] New"
+                }
+            }
             Screen::WorktreeCreate => "[Enter] Next | [Esc] Back",
             Screen::Settings => "[Tab] Category | [Esc] Back",
             Screen::Logs => "[f] Filter | [/] Search | [Esc] Back",
             Screen::Help => "[Esc] Close | [Up/Down] Scroll",
+            Screen::Confirm => "[Left/Right] Select | [Enter] Confirm | [Esc] Cancel",
+            Screen::Error => "[Enter/Esc] Close | [Up/Down] Scroll",
+            Screen::Profiles => "[Enter] Activate | [n] New | [d] Delete | [e] Edit env | [Esc] Back",
+            Screen::Environment => "[n] New | [e] Edit | [d] Delete | [v] Toggle visibility | [Esc] Back",
         };
 
         let status = self.status_message.as_deref().unwrap_or("");
@@ -456,7 +534,10 @@ pub fn run() -> Result<(), GwtError> {
                         }
                     }
                     (KeyCode::Esc, _) => {
-                        if model.screen_stack.is_empty() && matches!(model.screen, Screen::BranchList) {
+                        // Check filter mode first
+                        if matches!(model.screen, Screen::BranchList) && model.branch_list.filter_mode {
+                            Some(Message::NavigateBack)
+                        } else if model.screen_stack.is_empty() && matches!(model.screen, Screen::BranchList) {
                             Some(Message::Quit)
                         } else {
                             Some(Message::NavigateBack)
@@ -496,6 +577,8 @@ pub fn run() -> Result<(), GwtError> {
                     (KeyCode::Char('f'), KeyModifiers::NONE) => {
                         if matches!(model.screen, Screen::Logs) {
                             Some(Message::CycleFilter)
+                        } else if matches!(model.screen, Screen::BranchList) {
+                            Some(Message::ToggleFilterMode)
                         } else {
                             Some(Message::Char('f'))
                         }
@@ -503,11 +586,26 @@ pub fn run() -> Result<(), GwtError> {
                     (KeyCode::Char('/'), KeyModifiers::NONE) => {
                         if matches!(model.screen, Screen::Logs) {
                             Some(Message::ToggleSearch)
+                        } else if matches!(model.screen, Screen::BranchList) {
+                            Some(Message::ToggleFilterMode)
                         } else {
                             Some(Message::Char('/'))
                         }
                     }
-                    (KeyCode::Tab, _) => Some(Message::Tab),
+                    (KeyCode::Char(' '), _) => {
+                        if matches!(model.screen, Screen::BranchList) {
+                            Some(Message::Space)
+                        } else {
+                            Some(Message::Char(' '))
+                        }
+                    }
+                    (KeyCode::Tab, _) => {
+                        if matches!(model.screen, Screen::BranchList) {
+                            Some(Message::CycleViewMode)
+                        } else {
+                            Some(Message::Tab)
+                        }
+                    }
                     (KeyCode::Up, _) => Some(Message::SelectPrev),
                     (KeyCode::Down, _) => Some(Message::SelectNext),
                     (KeyCode::PageUp, _) => Some(Message::PageUp),
