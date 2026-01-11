@@ -5,7 +5,6 @@
  * マイグレーションロジックのユニットテスト
  * ファイルI/O統合テストは bun test で実行
  */
-
 import { describe, it, expect } from "bun:test";
 import type { CodingAgentsConfig } from "../../../src/types/tools.js";
 
