@@ -8,6 +8,24 @@ use ratatui::{prelude::*, widgets::*};
 use std::collections::HashSet;
 use std::time::Instant;
 
+/// Get terminal color for coding agent (SPEC-3b0ed29b FR-024~FR-027)
+fn get_agent_color(tool_id: Option<&str>) -> Color {
+    match tool_id {
+        Some(id) => match id.to_lowercase().as_str() {
+            "claude-code" | "claude" => Color::Yellow,
+            "codex-cli" | "codex" => Color::Cyan,
+            "gemini-cli" | "gemini" => Color::Magenta,
+            "opencode" | "open-code" => Color::Green,
+            _ if id.to_lowercase().contains("claude") => Color::Yellow,
+            _ if id.to_lowercase().contains("codex") => Color::Cyan,
+            _ if id.to_lowercase().contains("gemini") => Color::Magenta,
+            _ if id.to_lowercase().contains("opencode") => Color::Green,
+            _ => Color::White,
+        },
+        None => Color::Gray,
+    }
+}
+
 /// View mode for branch list
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ViewMode {
@@ -169,6 +187,9 @@ impl BranchItem {
     }
 }
 
+/// Spinner animation frames
+const SPINNER_FRAMES: &[char] = &['|', '/', '-', '\\'];
+
 /// Branch list state
 #[derive(Debug, Default)]
 pub struct BranchListState {
@@ -182,10 +203,12 @@ pub struct BranchListState {
     pub stats: Statistics,
     pub last_updated: Option<Instant>,
     pub is_loading: bool,
+    pub loading_started: Option<Instant>,
     pub error: Option<String>,
     pub version: Option<String>,
     pub working_directory: Option<String>,
     pub active_profile: Option<String>,
+    pub spinner_frame: usize,
 }
 
 impl BranchListState {
@@ -357,7 +380,7 @@ impl BranchListState {
     }
 
     /// Get relative time string
-    fn format_relative_time(&self) -> String {
+    pub fn format_relative_time(&self) -> String {
         if let Some(updated) = self.last_updated {
             let elapsed = updated.elapsed();
             let secs = elapsed.as_secs();
@@ -370,6 +393,38 @@ impl BranchListState {
             }
         } else {
             String::new()
+        }
+    }
+
+    /// Set loading state
+    pub fn set_loading(&mut self, loading: bool) {
+        self.is_loading = loading;
+        if loading {
+            self.loading_started = Some(Instant::now());
+        } else {
+            self.loading_started = None;
+        }
+    }
+
+    /// Advance spinner frame (call on tick)
+    pub fn tick_spinner(&mut self) {
+        self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
+    }
+
+    /// Get current spinner character
+    pub fn spinner_char(&self) -> char {
+        SPINNER_FRAMES[self.spinner_frame]
+    }
+
+    /// Check if loading indicator should be visible (after delay)
+    pub fn should_show_spinner(&self, delay_ms: u64) -> bool {
+        if !self.is_loading {
+            return false;
+        }
+        if let Some(started) = self.loading_started {
+            started.elapsed().as_millis() >= delay_ms as u128
+        } else {
+            false
         }
     }
 }
@@ -502,18 +557,33 @@ fn render_legend_line(frame: &mut Frame, area: Rect) {
 fn render_branches(state: &BranchListState, frame: &mut Frame, area: Rect) {
     let filtered = state.filtered_branches();
 
+    // Show loading spinner when loading and branches are empty
     if filtered.is_empty() {
-        let text = if state.is_loading {
-            "Loading branches..."
+        if state.should_show_spinner(300) {
+            // Show animated spinner after 300ms delay
+            let spinner = state.spinner_char();
+            let text = format!("{} Loading Git information...", spinner);
+            let paragraph = Paragraph::new(text)
+                .style(Style::default().fg(Color::Yellow))
+                .alignment(Alignment::Center);
+            frame.render_widget(paragraph, area);
+        } else if state.is_loading {
+            // Before delay, show simple message
+            let paragraph = Paragraph::new("Loading...")
+                .style(Style::default().fg(Color::DarkGray))
+                .alignment(Alignment::Center);
+            frame.render_widget(paragraph, area);
         } else if state.filter.is_empty() {
-            "No branches found"
+            let paragraph = Paragraph::new("No branches found")
+                .style(Style::default().fg(Color::DarkGray))
+                .alignment(Alignment::Center);
+            frame.render_widget(paragraph, area);
         } else {
-            "No branches match your filter"
-        };
-        let paragraph = Paragraph::new(text)
-            .style(Style::default().fg(Color::DarkGray))
-            .alignment(Alignment::Center);
-        frame.render_widget(paragraph, area);
+            let paragraph = Paragraph::new("No branches match your filter")
+                .style(Style::default().fg(Color::DarkGray))
+                .alignment(Alignment::Center);
+            frame.render_widget(paragraph, area);
+        }
         return;
     }
 
@@ -575,10 +645,11 @@ fn render_branch_row(branch: &BranchItem, is_selected: bool, selected_set: &Hash
     };
     spans.push(Span::raw(display_name.to_string()));
 
-    // Tool usage (if available)
+    // Tool usage (if available) with agent-specific color (SPEC-3b0ed29b)
     if let Some(tool) = &branch.last_tool_usage {
+        let agent_color = get_agent_color(Some(tool.as_str()));
         spans.push(Span::raw(" "));
-        spans.push(Span::styled(tool.clone(), Style::default().fg(Color::Cyan)));
+        spans.push(Span::styled(format!("[{}]", tool), Style::default().fg(agent_color)));
     }
 
     let style = if is_selected {

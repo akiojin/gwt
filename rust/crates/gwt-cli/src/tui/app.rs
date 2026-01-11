@@ -255,6 +255,8 @@ impl Model {
                         self.status_message = None;
                     }
                 }
+                // Update spinner animation
+                self.branch_list.tick_spinner();
             }
             Message::SelectNext => match self.screen {
                 Screen::BranchList => self.branch_list.select_next(),
@@ -374,15 +376,9 @@ impl Model {
             }
             Message::OpenWizard => {
                 // Open wizard for selected branch (FR-044)
+                // Always open wizard regardless of worktree status (matches TypeScript behavior)
                 if let Some(branch) = self.branch_list.selected_branch() {
-                    if branch.has_worktree {
-                        self.status_message = Some(format!(
-                            "Worktree already exists: {}",
-                            branch.worktree_path.as_deref().unwrap_or("")
-                        ));
-                    } else {
-                        self.wizard.open_for_branch(&branch.name);
-                    }
+                    self.wizard.open_for_branch(&branch.name);
                 } else {
                     self.status_message = Some("No branch selected".to_string());
                 }
