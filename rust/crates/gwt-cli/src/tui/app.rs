@@ -560,7 +560,8 @@ pub fn run() -> Result<(), GwtError> {
                         }
                     }
                     (KeyCode::Char('n'), KeyModifiers::NONE) => {
-                        if matches!(model.screen, Screen::BranchList) {
+                        // In filter mode, 'n' goes to filter input
+                        if matches!(model.screen, Screen::BranchList) && !model.branch_list.filter_mode {
                             model.worktree_create = WorktreeCreateState::new().with_base_branches(
                                 model.branch_list.branches.iter().map(|b| b.name.clone()).collect()
                             );
@@ -570,14 +571,16 @@ pub fn run() -> Result<(), GwtError> {
                         }
                     }
                     (KeyCode::Char('s'), KeyModifiers::NONE) => {
-                        if matches!(model.screen, Screen::BranchList) {
+                        // In filter mode, 's' goes to filter input
+                        if matches!(model.screen, Screen::BranchList) && !model.branch_list.filter_mode {
                             Some(Message::NavigateTo(Screen::Settings))
                         } else {
                             Some(Message::Char('s'))
                         }
                     }
                     (KeyCode::Char('r'), KeyModifiers::NONE) => {
-                        if matches!(model.screen, Screen::BranchList) {
+                        // In filter mode, 'r' goes to filter input
+                        if matches!(model.screen, Screen::BranchList) && !model.branch_list.filter_mode {
                             Some(Message::RefreshData)
                         } else {
                             Some(Message::Char('r'))
@@ -585,7 +588,8 @@ pub fn run() -> Result<(), GwtError> {
                     }
                     (KeyCode::Char('c'), KeyModifiers::NONE) => {
                         // Cleanup command - not yet implemented fully
-                        if matches!(model.screen, Screen::BranchList) {
+                        // In filter mode, 'c' goes to filter input
+                        if matches!(model.screen, Screen::BranchList) && !model.branch_list.filter_mode {
                             // TODO: Show cleanup dialog
                             model.status_message = Some("Cleanup not yet implemented".to_string());
                             None
@@ -595,7 +599,8 @@ pub fn run() -> Result<(), GwtError> {
                     }
                     (KeyCode::Char('x'), KeyModifiers::NONE) => {
                         // Repair worktrees command
-                        if matches!(model.screen, Screen::BranchList) {
+                        // In filter mode, 'x' goes to filter input
+                        if matches!(model.screen, Screen::BranchList) && !model.branch_list.filter_mode {
                             // TODO: Show repair dialog
                             model.status_message = Some("Repair not yet implemented".to_string());
                             None
@@ -604,14 +609,16 @@ pub fn run() -> Result<(), GwtError> {
                         }
                     }
                     (KeyCode::Char('p'), KeyModifiers::NONE) => {
-                        if matches!(model.screen, Screen::BranchList) {
+                        // In filter mode, 'p' goes to filter input
+                        if matches!(model.screen, Screen::BranchList) && !model.branch_list.filter_mode {
                             Some(Message::NavigateTo(Screen::Profiles))
                         } else {
                             Some(Message::Char('p'))
                         }
                     }
                     (KeyCode::Char('l'), KeyModifiers::NONE) => {
-                        if matches!(model.screen, Screen::BranchList) {
+                        // In filter mode, 'l' goes to filter input
+                        if matches!(model.screen, Screen::BranchList) && !model.branch_list.filter_mode {
                             Some(Message::NavigateTo(Screen::Logs))
                         } else {
                             Some(Message::Char('l'))
