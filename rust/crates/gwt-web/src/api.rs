@@ -8,7 +8,7 @@ use axum::{
 use gwt_core::{
     config::Settings,
     error::GwtError,
-    git::{Branch, Repository},
+    git::Branch,
     worktree::{WorktreeManager, WorktreeStatus},
 };
 use serde::{Deserialize, Serialize};

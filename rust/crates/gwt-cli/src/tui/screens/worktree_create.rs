@@ -1,5 +1,7 @@
 //! Worktree Create Wizard Screen
 
+#![allow(dead_code)] // Screen components for future use
+
 use ratatui::{prelude::*, widgets::*};
 
 /// Worktree creation wizard steps
@@ -292,16 +294,14 @@ fn render_confirm_step(state: &WorktreeCreateState, frame: &mut Frame, area: Rec
     let base_line = format!("    Base: {}", base);
     let new_branch_line = format!("    Create new branch: {}", if state.create_new_branch { "Yes" } else { "No" });
 
-    let text = vec![
-        "",
+    let text = ["",
         "  Summary:",
         "",
         &branch_line,
         &base_line,
         &new_branch_line,
         "",
-        "  Press Enter to create, or Esc to go back.",
-    ];
+        "  Press Enter to create, or Esc to go back."];
 
     let paragraph = Paragraph::new(text.join("\n")).block(
         Block::default()

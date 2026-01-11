@@ -108,7 +108,7 @@ impl AgentTrait for ClaudeAgent {
 
         let mut cmd = self.build_command(prompt, directory);
 
-        let mut child = cmd.spawn().map_err(|e| {
+        let child = cmd.spawn().map_err(|e| {
             GwtError::Internal(format!("Failed to spawn Claude Code: {}", e))
         })?;
 

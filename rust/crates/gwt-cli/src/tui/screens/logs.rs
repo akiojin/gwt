@@ -1,5 +1,7 @@
 //! Logs Screen
 
+#![allow(dead_code)] // Screen components for future use
+
 use ratatui::{prelude::*, widgets::*};
 
 /// Log entry type (local copy for TUI)

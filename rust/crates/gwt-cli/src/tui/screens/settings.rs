@@ -1,5 +1,7 @@
 //! Settings Screen
 
+#![allow(dead_code)] // Screen components for future use
+
 use gwt_core::config::Settings;
 use ratatui::{prelude::*, widgets::*};
 

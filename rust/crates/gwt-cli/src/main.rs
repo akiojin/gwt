@@ -4,7 +4,7 @@ use clap::Parser;
 use gwt_core::config::Settings;
 use gwt_core::error::GwtError;
 use gwt_core::worktree::WorktreeManager;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 mod cli;
 mod tui;
@@ -250,7 +250,7 @@ fn cmd_clean(repo_root: &PathBuf, dry_run: bool, prune: bool) -> Result<(), GwtE
     Ok(())
 }
 
-fn cmd_logs(repo_root: &PathBuf, settings: &Settings, limit: usize) -> Result<(), GwtError> {
+fn cmd_logs(repo_root: &Path, settings: &Settings, limit: usize) -> Result<(), GwtError> {
     let log_dir = settings.log_dir(repo_root);
     let reader = gwt_core::logging::LogReader::new(&log_dir);
 
@@ -278,7 +278,7 @@ fn cmd_serve(port: u16, address: &str) -> Result<(), GwtError> {
     Ok(())
 }
 
-fn cmd_init(repo_root: &PathBuf, force: bool) -> Result<(), GwtError> {
+fn cmd_init(repo_root: &Path, force: bool) -> Result<(), GwtError> {
     let config_path = repo_root.join(".gwt.toml");
 
     if config_path.exists() && !force {

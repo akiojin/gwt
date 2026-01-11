@@ -85,7 +85,7 @@ impl WorktreeManager {
 
         // Return the created worktree
         self.get_by_path(&path)?
-            .ok_or_else(|| GwtError::WorktreeNotFound { path })
+            .ok_or(GwtError::WorktreeNotFound { path })
     }
 
     /// Create a new worktree with a new branch
@@ -135,7 +135,7 @@ impl WorktreeManager {
 
         // Return the created worktree
         self.get_by_path(&path)?
-            .ok_or_else(|| GwtError::WorktreeNotFound { path })
+            .ok_or(GwtError::WorktreeNotFound { path })
     }
 
     /// Remove a worktree by path
@@ -188,9 +188,7 @@ impl WorktreeManager {
 
     /// Check if a branch is protected
     pub fn is_protected(branch_name: &str) -> bool {
-        PROTECTED_BRANCHES
-            .iter()
-            .any(|&protected| branch_name == protected)
+        PROTECTED_BRANCHES.contains(&branch_name)
     }
 
     /// Detect orphaned worktrees

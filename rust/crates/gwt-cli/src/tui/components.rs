@@ -1,5 +1,7 @@
 //! TUI Components
 
+#![allow(dead_code)] // UI components for future use
+
 use ratatui::{
     prelude::*,
     widgets::*,

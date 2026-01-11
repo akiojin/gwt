@@ -1,5 +1,7 @@
 //! API client for backend communication
 
+#![allow(dead_code)] // API functions for frontend use
+
 use gloo_net::http::Request;
 use serde::Deserialize;
 

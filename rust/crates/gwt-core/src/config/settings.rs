@@ -72,7 +72,7 @@ impl Default for WebSettings {
 }
 
 /// Agent settings
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentSettings {
     /// Default agent to use
@@ -83,17 +83,6 @@ pub struct AgentSettings {
     pub codex_path: Option<PathBuf>,
     /// Gemini CLI path
     pub gemini_path: Option<PathBuf>,
-}
-
-impl Default for AgentSettings {
-    fn default() -> Self {
-        Self {
-            default_agent: None,
-            claude_path: None,
-            codex_path: None,
-            gemini_path: None,
-        }
-    }
 }
 
 impl Settings {
@@ -217,10 +206,15 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let config_path = temp.path().join(".gwt.toml");
 
-        let mut settings = Settings::default();
-        settings.protected_branches = vec!["main".to_string(), "release".to_string()];
-        settings.debug = true;
-        settings.web.port = 9090;
+        let settings = Settings {
+            protected_branches: vec!["main".to_string(), "release".to_string()],
+            debug: true,
+            web: WebSettings {
+                port: 9090,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
 
         settings.save(&config_path).unwrap();
 

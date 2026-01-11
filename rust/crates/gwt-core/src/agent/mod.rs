@@ -202,7 +202,7 @@ pub fn get_command_version(command: &str, version_flag: &str) -> Option<String> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    
 
     #[test]
     fn test_agent_type_name() {

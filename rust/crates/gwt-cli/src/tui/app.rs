@@ -1,5 +1,7 @@
 //! TUI Application with Elm Architecture
 
+#![allow(dead_code)] // TUI application components for future expansion
+
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
     execute,
@@ -308,10 +310,7 @@ impl Model {
             Message::RefreshData => {
                 self.refresh_data();
             }
-            Message::Tab => match self.screen {
-                Screen::Settings => self.settings.next_category(),
-                _ => {}
-            },
+            Message::Tab => if let Screen::Settings = self.screen { self.settings.next_category() },
             Message::CycleFilter => {
                 if matches!(self.screen, Screen::Logs) {
                     self.logs.cycle_filter();

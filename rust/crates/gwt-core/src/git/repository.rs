@@ -244,12 +244,12 @@ impl Repository {
         let mut current: Option<WorktreeInfo> = None;
 
         for line in stdout.lines() {
-            if line.starts_with("worktree ") {
+            if let Some(path) = line.strip_prefix("worktree ") {
                 if let Some(wt) = current.take() {
                     worktrees.push(wt);
                 }
                 current = Some(WorktreeInfo {
-                    path: PathBuf::from(&line[9..]),
+                    path: PathBuf::from(path),
                     head: String::new(),
                     branch: None,
                     is_bare: false,
@@ -258,10 +258,9 @@ impl Repository {
                     is_prunable: false,
                 });
             } else if let Some(ref mut wt) = current {
-                if line.starts_with("HEAD ") {
-                    wt.head = line[5..].to_string();
-                } else if line.starts_with("branch ") {
-                    let branch = &line[7..];
+                if let Some(head) = line.strip_prefix("HEAD ") {
+                    wt.head = head.to_string();
+                } else if let Some(branch) = line.strip_prefix("branch ") {
                     // Convert refs/heads/xxx to xxx
                     wt.branch = Some(
                         branch

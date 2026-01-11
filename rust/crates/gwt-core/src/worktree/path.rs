@@ -16,7 +16,7 @@ impl WorktreePath {
 
     /// Sanitize branch name for use as directory name
     fn sanitize_branch_name(name: &str) -> String {
-        name.replace('/', "-").replace('\\', "-")
+        name.replace(['/', '\\'], "-")
     }
 }
 

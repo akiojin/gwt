@@ -1,5 +1,7 @@
 //! JSON to TOML migration
 
+#![allow(dead_code)] // Migration functions for future use
+
 use crate::error::{GwtError, Result};
 use std::path::Path;
 

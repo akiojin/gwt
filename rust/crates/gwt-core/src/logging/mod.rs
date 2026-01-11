@@ -29,11 +29,10 @@ pub fn cleanup_old_logs(log_dir: &Path, retention_days: u32) -> Result<usize> {
             if let Ok(metadata) = entry.metadata() {
                 if let Ok(modified) = metadata.modified() {
                     let modified: chrono::DateTime<Utc> = modified.into();
-                    if modified < cutoff {
-                        if std::fs::remove_file(&path).is_ok() {
+                    if modified < cutoff
+                        && std::fs::remove_file(&path).is_ok() {
                             removed += 1;
                         }
-                    }
                 }
             }
         }

@@ -1,5 +1,7 @@
 //! Branch List Screen
 
+#![allow(dead_code)] // Screen components for future use
+
 use gwt_core::git::{Branch, DivergenceStatus};
 use gwt_core::worktree::Worktree;
 use ratatui::{prelude::*, widgets::*};

@@ -1,5 +1,7 @@
 //! Event handling for TUI
 
+#![allow(dead_code)] // Event types for future use
+
 use crossterm::event::{KeyCode, KeyModifiers};
 
 /// Key event representation

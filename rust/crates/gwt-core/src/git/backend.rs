@@ -1,5 +1,7 @@
 //! Git backend abstraction for gix/external command switching
 
+#![allow(dead_code)] // Backend implementations for future use
+
 use crate::error::Result;
 use std::path::Path;
 
