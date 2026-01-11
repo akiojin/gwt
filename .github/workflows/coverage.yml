@@ -5,6 +5,11 @@ on:
     # 毎日 UTC 0:00 (JST 9:00) に実行
     - cron: '0 0 * * *'
   workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch to checkout
+        required: false
+        default: develop
 
 jobs:
   coverage:
@@ -15,12 +20,12 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          ref: develop
+          ref: ${{ github.event.inputs.ref || 'develop' }}
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.3.5
 
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
@@ -37,7 +42,7 @@ jobs:
           CI: true
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v5
         with:
           files: ./coverage/lcov.info
           flags: unittests

@@ -269,9 +269,25 @@ export async function launchClaudeCode(
       }
     };
 
+    const normalizeSignal = (
+      signal?: number | string | null,
+    ): string | null => {
+      if (signal === null || signal === undefined) {
+        return null;
+      }
+      if (typeof signal === "number") {
+        if (signal === 2) return "SIGINT";
+        if (signal === 15) return "SIGTERM";
+        return String(signal);
+      }
+      return signal;
+    };
+
     // Treat SIGINT (2), SIGTERM (15) as normal exit signals (user interrupts)
-    const isNormalExitSignal = (signal?: number | null) =>
-      signal === 2 || signal === 15;
+    const isNormalExitSignal = (signal?: number | string | null) => {
+      const normalized = normalizeSignal(signal);
+      return normalized === "SIGINT" || normalized === "SIGTERM";
+    };
 
     const runCommand = async (file: string, fileArgs: string[]) => {
       const runStartedAt = Date.now();
@@ -285,8 +301,9 @@ export async function launchClaudeCode(
         });
         const durationMs = Date.now() - runStartedAt;
         const exitCode = result.exitCode ?? null;
-        const signal = result.signal ?? null;
-        const signalIsNormal = isNormalExitSignal(signal);
+        const rawSignal = result.signal ?? null;
+        const signal = normalizeSignal(rawSignal);
+        const signalIsNormal = isNormalExitSignal(rawSignal);
         const hasError =
           (!signalIsNormal && signal !== null && signal !== undefined) ||
           (exitCode !== null && exitCode !== 0);
@@ -328,9 +345,10 @@ export async function launchClaudeCode(
         const durationMs = Date.now() - runStartedAt;
         const exitCode =
           (execError as { exitCode?: number | null })?.exitCode ?? null;
-        const signal =
-          (execError as { signal?: string | null })?.signal ?? null;
-        if (signal === "SIGINT" || signal === "SIGTERM") {
+        const rawSignal =
+          (execError as { signal?: string | number | null })?.signal ?? null;
+        const signal = normalizeSignal(rawSignal);
+        if (isNormalExitSignal(rawSignal)) {
           logger.info({ exitCode, signal, durationMs }, "Claude Code exited");
           return;
         }

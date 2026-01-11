@@ -167,13 +167,15 @@ describe("OpenTUI console config", () => {
     const originalArgv = [...process.argv];
     process.argv = ["node", "index.js"];
 
-    const { main } = await import("../../src/index.js");
-    await expect(main()).resolves.toBeUndefined();
+    try {
+      const { main } = await import("../../src/index.js");
+      await expect(main()).resolves.toBeUndefined();
 
-    expect(capturedConfig?.useConsole).toBe(false);
-    expect(capturedConfig?.openConsoleOnError).toBe(false);
-
-    process.argv = originalArgv;
-    processExitSpy.mockRestore();
+      expect(capturedConfig?.useConsole).toBe(false);
+      expect(capturedConfig?.openConsoleOnError).toBe(false);
+    } finally {
+      process.argv = originalArgv;
+      processExitSpy.mockRestore();
+    }
   });
 });

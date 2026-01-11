@@ -94,7 +94,6 @@
 ## 使用中の技術
 - TypeScript 5.8 + Bun >= 1.0 + OpenTUI (SolidJS), React 19, @opentui/core, @opentui/solid, solid-js (SPEC-d27be71b)
 - ファイル/ローカル Git メタデータ（DB なし） (SPEC-d27be71b)
-- TypeScript 5.8 + Bun >= 1.0 + Ink.js (現行), React 19, @opentui/core, @opentui/solid, solid-js (SPEC-d27be71b)
 
 ## 最近の変更
 - SPEC-d27be71b: 追加: TypeScript 5.8 + Bun >= 1.0 + OpenTUI (SolidJS), React 19, @opentui/core, @opentui/solid, solid-js

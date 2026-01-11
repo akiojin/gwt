@@ -249,17 +249,17 @@ Phase 9 (US6: OpenTUI 内蔵コンソール無効化)
 
 ### テスト（TDD 必須）
 
-- [x] **T717** [US6] `tests/unit/main.opentui-console.test.ts` に OpenTUI レンダラー設定で内蔵コンソールが無効化されることのテストを追加
+- [x] **T720** [US6] `tests/unit/main.opentui-console.test.ts` に OpenTUI レンダラー設定で内蔵コンソールが無効化されることのテストを追加
 
 ### 実装
 
-- [x] **T718** [US6] T717の後に `src/index.ts` で OpenTUI レンダラー設定の内蔵コンソール無効化を適用
-- [x] **T717** [統合] `bun run build` 成功を確認
+- [x] **T721** [US6] T720の後に `src/index.ts` で OpenTUI レンダラー設定の内蔵コンソール無効化を適用
+- [x] **T722** [統合] `bun run build` 成功を確認
 
 ### ドキュメント
 
-- [x] **T718** [P] [ドキュメント] `README.md` に OpenTUI 移行完了を反映
-- [x] **T719** [P] [ドキュメント] `CLAUDE.md` に SolidJS 開発ガイドラインを追加
+- [x] **T723** [P] [ドキュメント] `README.md` に OpenTUI 移行完了を反映
+- [x] **T724** [P] [ドキュメント] `CLAUDE.md` に SolidJS 開発ガイドラインを追加
 
 **✅ 完了基準**: 全テストパス + 性能目標達成 + Ink.js 依存完全削除
 
@@ -309,7 +309,8 @@ Phase 9 (US6: OpenTUI 内蔵コンソール無効化)
 | Phase 6: US4 残りスクリーン | 20 | 8 | 12 |
 | Phase 7: US5 ヘルプオーバーレイ | 4 | 0 | 4 |
 | Phase 8: 統合 | 19 | 2 | 17 |
-| **合計** | **95** | **37** | **58** |
+| Phase 9: US6 OpenTUI 内蔵コンソール無効化 | 5 | 2 | 3 |
+| **合計** | **100** | **39** | **61** |
 
 ## 推奨 MVP 範囲
 
