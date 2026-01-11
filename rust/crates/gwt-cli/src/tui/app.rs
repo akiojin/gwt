@@ -3,7 +3,7 @@
 #![allow(dead_code)] // TUI application components for future expansion
 
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
+    event::{self, Event, KeyCode, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -383,6 +383,8 @@ impl Model {
                     } else {
                         self.wizard.open_for_branch(&branch.name);
                     }
+                } else {
+                    self.status_message = Some("No branch selected".to_string());
                 }
             }
             Message::OpenWizardNewBranch => {
@@ -556,7 +558,7 @@ pub fn run() -> Result<(), GwtError> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -782,8 +784,7 @@ pub fn run() -> Result<(), GwtError> {
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
+        LeaveAlternateScreen
     )?;
     terminal.show_cursor()?;
 
