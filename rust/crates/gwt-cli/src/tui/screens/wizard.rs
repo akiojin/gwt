@@ -574,18 +574,23 @@ pub fn render_wizard(state: &WizardState, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    // Calculate popup dimensions (60% of screen, centered)
-    let popup_width = (area.width as f32 * 0.6) as u16;
-    let popup_height = (area.height as f32 * 0.6) as u16;
+    // Render dark overlay background (FR-048 alternative implementation)
+    let overlay = Block::default()
+        .style(Style::default().bg(Color::Rgb(20, 20, 30)));
+    frame.render_widget(overlay, area);
+
+    // Calculate popup dimensions (60% of screen, min 40x15) per FR-045
+    let popup_width = ((area.width as f32 * 0.6) as u16).max(40);
+    let popup_height = ((area.height as f32 * 0.6) as u16).max(15);
     let popup_x = area.x + (area.width.saturating_sub(popup_width)) / 2;
     let popup_y = area.y + (area.height.saturating_sub(popup_height)) / 2;
 
     let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
 
-    // Clear background with dim overlay effect
+    // Clear popup area
     frame.render_widget(Clear, popup_area);
 
-    // Popup border
+    // Popup border with close hint (FR-047)
     let title = match state.step {
         WizardStep::BranchTypeSelect => " Select Branch Type ",
         WizardStep::BranchNameInput => " Enter Branch Name ",
@@ -600,8 +605,8 @@ pub fn render_wizard(state: &WizardState, frame: &mut Frame, area: Rect) {
     let popup_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan))
-        .title(title)
-        .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+        .title_top(Line::from(title).style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)))
+        .title_top(Line::from(" [ESC] ").right_aligned());
 
     let inner_area = popup_block.inner(popup_area);
     frame.render_widget(popup_block, popup_area);
@@ -736,6 +741,8 @@ fn render_agent_step(state: &WizardState, frame: &mut Frame, area: Rect) {
 
 fn render_model_step(state: &WizardState, frame: &mut Frame, area: Rect) {
     let models = state.agent.models();
+    let available_width = area.width as usize;
+
     let items: Vec<ListItem> = models
         .iter()
         .enumerate()
@@ -751,7 +758,26 @@ fn render_model_step(state: &WizardState, frame: &mut Frame, area: Rect) {
             let text = if desc.is_empty() {
                 format!("{}{}", prefix, model.label)
             } else {
-                format!("{}{:<20} {}", prefix, model.label, desc)
+                // Dynamic width calculation to prevent text cutoff
+                let label_width = model.label.len().min(25);
+                let separator = " - ";
+                let prefix_len = 2; // "> " or "  "
+                let max_desc_width = available_width
+                    .saturating_sub(prefix_len + label_width + separator.len());
+
+                let truncated_desc = if desc.len() > max_desc_width && max_desc_width > 3 {
+                    format!("{}...", &desc[..max_desc_width.saturating_sub(3)])
+                } else if max_desc_width == 0 {
+                    String::new()
+                } else {
+                    desc.to_string()
+                };
+
+                if truncated_desc.is_empty() {
+                    format!("{}{}", prefix, model.label)
+                } else {
+                    format!("{}{}{}{}", prefix, model.label, separator, truncated_desc)
+                }
             };
             ListItem::new(text).style(style)
         })

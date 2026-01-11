@@ -58,6 +58,8 @@ pub struct Model {
     wizard: WizardState,
     /// Status message
     status_message: Option<String>,
+    /// Status message timestamp (for auto-clear)
+    status_message_time: Option<Instant>,
     /// Is offline
     is_offline: bool,
     /// Active worktree count
@@ -148,6 +150,7 @@ impl Model {
             environment: EnvironmentState::new(),
             wizard: WizardState::new(),
             status_message: None,
+            status_message_time: None,
             is_offline: false,
             active_count: 0,
             total_count: 0,
@@ -186,12 +189,11 @@ impl Model {
         }
 
         // Load settings
-        if let Ok(settings) = gwt_core::config::Settings::load(&self.repo_root) {
-            self.settings = SettingsState::new().with_settings(settings);
-        }
+        let settings = gwt_core::config::Settings::load(&self.repo_root).unwrap_or_default();
+        self.settings = SettingsState::new().with_settings(settings.clone());
 
-        // Load logs
-        let log_dir = self.repo_root.join(".gwt").join("logs");
+        // Load logs from configured log directory
+        let log_dir = settings.log_dir(&self.repo_root);
         if log_dir.exists() {
             let reader = gwt_core::logging::LogReader::new(&log_dir);
             if let Ok(entries) = reader.read_latest(100) {
@@ -208,6 +210,22 @@ impl Model {
                 self.logs = LogsState::new().with_entries(tui_entries);
             }
         }
+
+        // Load profiles (initialize with default profile if none exist)
+        // For now, create a simple default profile until a full profile manager is implemented
+        use super::screens::profiles::ProfileItem;
+        let profiles = vec![
+            ProfileItem {
+                name: "default".to_string(),
+                is_active: true,
+                env_count: 0,
+                description: Some("Default profile".to_string()),
+            },
+        ];
+        self.profiles = super::screens::ProfilesState::new().with_profiles(profiles);
+        self.branch_list.active_profile = Some("default".to_string());
+        self.branch_list.working_directory = Some(self.repo_root.display().to_string());
+        self.branch_list.version = Some(env!("CARGO_PKG_VERSION").to_string());
     }
 
     /// Update function (Elm Architecture)
@@ -232,6 +250,7 @@ impl Model {
                 }
                 self.last_ctrl_c = Some(now);
                 self.status_message = Some("Press Ctrl+C again to quit".to_string());
+                self.status_message_time = Some(Instant::now());
             }
             Message::NavigateTo(screen) => {
                 self.screen_stack.push(self.screen.clone());
@@ -242,6 +261,9 @@ impl Model {
                 // Check if we're in filter mode first
                 if matches!(self.screen, Screen::BranchList) && self.branch_list.filter_mode {
                     self.branch_list.exit_filter_mode();
+                } else if matches!(self.screen, Screen::Profiles) && self.profiles.create_mode {
+                    // Exit profile create mode
+                    self.profiles.exit_create_mode();
                 } else if let Some(prev_screen) = self.screen_stack.pop() {
                     self.screen = prev_screen;
                 }
@@ -252,7 +274,13 @@ impl Model {
                 if let Some(last) = self.last_ctrl_c {
                     if Instant::now().duration_since(last) > Duration::from_secs(2) {
                         self.ctrl_c_count = 0;
+                    }
+                }
+                // Auto-clear status message after 3 seconds
+                if let Some(time) = self.status_message_time {
+                    if Instant::now().duration_since(time) > Duration::from_secs(3) {
                         self.status_message = None;
+                        self.status_message_time = None;
                     }
                 }
                 // Update spinner animation
@@ -326,6 +354,9 @@ impl Model {
                 } else if matches!(self.screen, Screen::BranchList) && self.branch_list.filter_mode {
                     // Filter mode - add character to filter
                     self.branch_list.filter_push(c);
+                } else if matches!(self.screen, Screen::Profiles) && self.profiles.create_mode {
+                    // Profile create mode - add character to name
+                    self.profiles.insert_char(c);
                 }
             }
             Message::Backspace => {
@@ -333,16 +364,22 @@ impl Model {
                     self.worktree_create.delete_char();
                 } else if matches!(self.screen, Screen::BranchList) && self.branch_list.filter_mode {
                     self.branch_list.filter_pop();
+                } else if matches!(self.screen, Screen::Profiles) && self.profiles.create_mode {
+                    self.profiles.delete_char();
                 }
             }
             Message::CursorLeft => {
                 if matches!(self.screen, Screen::WorktreeCreate) {
                     self.worktree_create.cursor_left();
+                } else if matches!(self.screen, Screen::Profiles) && self.profiles.create_mode {
+                    self.profiles.cursor_left();
                 }
             }
             Message::CursorRight => {
                 if matches!(self.screen, Screen::WorktreeCreate) {
                     self.worktree_create.cursor_right();
+                } else if matches!(self.screen, Screen::Profiles) && self.profiles.create_mode {
+                    self.profiles.cursor_right();
                 }
             }
             Message::RefreshData => {
@@ -381,6 +418,7 @@ impl Model {
                     self.wizard.open_for_branch(&branch.name);
                 } else {
                     self.status_message = Some("No branch selected".to_string());
+                    self.status_message_time = Some(Instant::now());
                 }
             }
             Message::OpenWizardNewBranch => {
@@ -441,6 +479,7 @@ impl Model {
             match result {
                 Ok(wt) => {
                     self.status_message = Some(format!("Created worktree: {}", wt.path.display()));
+                    self.status_message_time = Some(Instant::now());
                     self.refresh_data();
                     self.screen = Screen::BranchList;
                     self.screen_stack.clear();
@@ -457,7 +496,7 @@ impl Model {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(7), // Boxed header (title + 5 lines + borders)
+                Constraint::Length(6), // Boxed header (title + 4 lines + borders)
                 Constraint::Min(0),    // Content
                 Constraint::Length(3), // Footer
             ])
@@ -472,7 +511,7 @@ impl Model {
 
         // Content
         match self.screen {
-            Screen::BranchList => render_branch_list(&self.branch_list, frame, chunks[1]),
+            Screen::BranchList => render_branch_list(&self.branch_list, frame, chunks[1], self.status_message.as_deref()),
             Screen::WorktreeCreate => render_worktree_create(&self.worktree_create, frame, chunks[1]),
             Screen::Settings => render_settings(&self.settings, frame, chunks[1]),
             Screen::Logs => render_logs(&self.logs, frame, chunks[1]),
@@ -511,7 +550,7 @@ impl Model {
         let inner = header_block.inner(area);
         frame.render_widget(header_block, area);
 
-        // Inner content layout (5 lines)
+        // Inner content layout (4 lines - no remaining space needed)
         let inner_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -519,7 +558,6 @@ impl Model {
                 Constraint::Length(1), // Profile
                 Constraint::Length(1), // Filter
                 Constraint::Length(1), // Stats
-                Constraint::Min(0),    // Remaining space
             ])
             .split(inner);
 
@@ -760,6 +798,10 @@ pub fn run() -> Result<(), GwtError> {
                         if matches!(model.screen, Screen::BranchList) && !model.branch_list.filter_mode {
                             // Open wizard for new branch (FR-008)
                             Some(Message::OpenWizardNewBranch)
+                        } else if matches!(model.screen, Screen::Profiles) {
+                            // Create new profile
+                            model.profiles.enter_create_mode();
+                            None
                         } else {
                             Some(Message::Char('n'))
                         }
@@ -786,6 +828,7 @@ pub fn run() -> Result<(), GwtError> {
                         if matches!(model.screen, Screen::BranchList) && !model.branch_list.filter_mode {
                             // TODO: Show cleanup dialog
                             model.status_message = Some("Cleanup not yet implemented".to_string());
+                            model.status_message_time = Some(Instant::now());
                             None
                         } else {
                             Some(Message::Char('c'))
@@ -797,6 +840,7 @@ pub fn run() -> Result<(), GwtError> {
                         if matches!(model.screen, Screen::BranchList) && !model.branch_list.filter_mode {
                             // TODO: Show repair dialog
                             model.status_message = Some("Repair not yet implemented".to_string());
+                            model.status_message_time = Some(Instant::now());
                             None
                         } else {
                             Some(Message::Char('x'))

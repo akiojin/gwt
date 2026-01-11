@@ -2,6 +2,7 @@
 
 #![allow(dead_code)]
 
+use chrono::{DateTime, Local, TimeZone, Utc};
 use gwt_core::git::{Branch, DivergenceStatus};
 use gwt_core::worktree::Worktree;
 use ratatui::{prelude::*, widgets::*};
@@ -23,6 +24,54 @@ fn get_agent_color(tool_id: Option<&str>) -> Color {
             _ => Color::White,
         },
         None => Color::Gray,
+    }
+}
+
+/// Branch name type for sorting priority (SPEC-d2f4762a FR-003a)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum BranchNameType {
+    Main,
+    Develop,
+    Feature,
+    Bugfix,
+    Hotfix,
+    Release,
+    Other,
+}
+
+/// Get branch name type for sorting
+fn get_branch_name_type(name: &str) -> BranchNameType {
+    let lower = name.to_lowercase();
+    // Strip remote prefix for comparison
+    let name_part = lower.split('/').last().unwrap_or(&lower);
+
+    if name_part == "main" || name_part == "master" {
+        BranchNameType::Main
+    } else if name_part == "develop" || name_part == "dev" {
+        BranchNameType::Develop
+    } else if lower.contains("feature/") {
+        BranchNameType::Feature
+    } else if lower.contains("bugfix/") || lower.contains("bug/") {
+        BranchNameType::Bugfix
+    } else if lower.contains("hotfix/") {
+        BranchNameType::Hotfix
+    } else if lower.contains("release/") {
+        BranchNameType::Release
+    } else {
+        BranchNameType::Other
+    }
+}
+
+/// Format timestamp as local datetime (FR-041)
+/// Returns format: "YYYY-MM-DD HH:mm"
+fn format_local_datetime(timestamp: i64) -> String {
+    let datetime = Utc.timestamp_opt(timestamp, 0);
+    match datetime {
+        chrono::LocalResult::Single(dt) => {
+            let local: DateTime<Local> = dt.into();
+            local.format("%Y-%m-%d %H:%M").to_string()
+        }
+        _ => "---".to_string(),
     }
 }
 
@@ -230,6 +279,14 @@ impl BranchListState {
     }
 
     /// Get filtered branches based on view mode and filter
+    /// Sorted according to SPEC-d2f4762a FR-003a:
+    /// 1. Current branch (highest priority)
+    /// 2. main branch
+    /// 3. develop branch (only if main exists)
+    /// 4. Branches with worktree
+    /// 5. Latest activity timestamp (descending)
+    /// 6. Local branches (over remote)
+    /// 7. Alphabetical order
     pub fn filtered_branches(&self) -> Vec<&BranchItem> {
         let mut result: Vec<&BranchItem> = self.branches.iter().collect();
 
@@ -251,6 +308,73 @@ impl BranchListState {
                 .filter(|b| b.name.to_lowercase().contains(&filter_lower))
                 .collect();
         }
+
+        // Check if main branch exists for develop priority
+        let has_main = result.iter().any(|b| {
+            get_branch_name_type(&b.name) == BranchNameType::Main
+        });
+
+        // Sort according to 7-level priority rules
+        result.sort_by(|a, b| {
+            // 1. Current branch first
+            if a.is_current && !b.is_current {
+                return std::cmp::Ordering::Less;
+            }
+            if !a.is_current && b.is_current {
+                return std::cmp::Ordering::Greater;
+            }
+
+            // 2. main branch second
+            let a_type = get_branch_name_type(&a.name);
+            let b_type = get_branch_name_type(&b.name);
+            if a_type == BranchNameType::Main && b_type != BranchNameType::Main {
+                return std::cmp::Ordering::Less;
+            }
+            if a_type != BranchNameType::Main && b_type == BranchNameType::Main {
+                return std::cmp::Ordering::Greater;
+            }
+
+            // 3. develop branch third (only if main exists)
+            if has_main {
+                if a_type == BranchNameType::Develop && b_type != BranchNameType::Develop {
+                    return std::cmp::Ordering::Less;
+                }
+                if a_type != BranchNameType::Develop && b_type == BranchNameType::Develop {
+                    return std::cmp::Ordering::Greater;
+                }
+            }
+
+            // 4. Branches with worktree prioritized
+            if a.has_worktree && !b.has_worktree {
+                return std::cmp::Ordering::Less;
+            }
+            if !a.has_worktree && b.has_worktree {
+                return std::cmp::Ordering::Greater;
+            }
+
+            // 5. Latest activity timestamp (descending - newest first)
+            match (a.last_commit_timestamp, b.last_commit_timestamp) {
+                (Some(a_ts), Some(b_ts)) => {
+                    if b_ts != a_ts {
+                        return b_ts.cmp(&a_ts); // descending
+                    }
+                }
+                (Some(_), None) => return std::cmp::Ordering::Less,
+                (None, Some(_)) => return std::cmp::Ordering::Greater,
+                (None, None) => {}
+            }
+
+            // 6. Local branches over remote
+            if a.branch_type == BranchType::Local && b.branch_type == BranchType::Remote {
+                return std::cmp::Ordering::Less;
+            }
+            if a.branch_type == BranchType::Remote && b.branch_type == BranchType::Local {
+                return std::cmp::Ordering::Greater;
+            }
+
+            // 7. Alphabetical order
+            a.name.to_lowercase().cmp(&b.name.to_lowercase())
+        });
 
         result
     }
@@ -430,27 +554,59 @@ impl BranchListState {
 }
 
 /// Render branch list screen
+/// Note: Header, Stats, Filter are rendered by app.rs view_boxed_header
+/// This function only renders: Legend + BranchList + WorktreePath/Status
 pub fn render_branch_list(
     state: &BranchListState,
     frame: &mut Frame,
     area: Rect,
+    status_message: Option<&str>,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // Filter line
-            Constraint::Length(1), // Stats line
             Constraint::Length(1), // Legend line
-            Constraint::Min(3),    // Branch list
-            Constraint::Length(1), // Worktree path
+            Constraint::Min(3),    // Branch list (FR-003)
+            Constraint::Length(1), // Worktree path or Status message
         ])
         .split(area);
 
-    render_filter_line(state, frame, chunks[0]);
-    render_stats_line(state, frame, chunks[1]);
-    render_legend_line(frame, chunks[2]);
-    render_branches(state, frame, chunks[3]);
-    render_worktree_path(state, frame, chunks[4]);
+    render_legend_line(frame, chunks[0]);
+    render_branches(state, frame, chunks[1]);
+    render_worktree_path(state, frame, chunks[2], status_message);
+}
+
+/// Render header line (FR-001, FR-001a)
+fn render_header(state: &BranchListState, frame: &mut Frame, area: Rect) {
+    let title = "GWT - Git Worktree Manager";
+    let version = state.version.as_deref().unwrap_or("dev");
+    let working_dir = state.working_directory.as_deref().unwrap_or(".");
+
+    let mut spans = vec![
+        Span::styled(
+            title,
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(" v{}", version),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(" | ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            working_dir,
+            Style::default().fg(Color::White),
+        ),
+    ];
+
+    // Add profile info if available (FR-001a)
+    if let Some(profile) = &state.active_profile {
+        spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled("Profile(p): ", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(profile, Style::default().fg(Color::Yellow)));
+    }
+
+    let line = Line::from(spans);
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 /// Render filter line
@@ -652,6 +808,13 @@ fn render_branch_row(branch: &BranchItem, is_selected: bool, selected_set: &Hash
         spans.push(Span::styled(format!("[{}]", tool), Style::default().fg(agent_color)));
     }
 
+    // Last activity timestamp (FR-003, FR-041)
+    if let Some(timestamp) = branch.last_commit_timestamp {
+        let formatted = format_local_datetime(timestamp);
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(formatted, Style::default().fg(Color::DarkGray)));
+    }
+
     let style = if is_selected {
         Style::default().bg(Color::Blue).fg(Color::White)
     } else {
@@ -661,8 +824,18 @@ fn render_branch_row(branch: &BranchItem, is_selected: bool, selected_set: &Hash
     ListItem::new(Line::from(spans)).style(style)
 }
 
-/// Render worktree path line
-fn render_worktree_path(state: &BranchListState, frame: &mut Frame, area: Rect) {
+/// Render worktree path line or status message
+fn render_worktree_path(state: &BranchListState, frame: &mut Frame, area: Rect, status_message: Option<&str>) {
+    // If there's a status message, show it instead of worktree path
+    if let Some(status) = status_message {
+        let line = Line::from(vec![
+            Span::styled(status, Style::default().fg(Color::Yellow)),
+        ]);
+        frame.render_widget(Paragraph::new(line), area);
+        return;
+    }
+
+    // Otherwise, show worktree path
     let path = if let Some(branch) = state.selected_branch() {
         branch.worktree_path.clone().unwrap_or_else(|| "(none)".to_string())
     } else {
@@ -673,6 +846,38 @@ fn render_worktree_path(state: &BranchListState, frame: &mut Frame, area: Rect) 
         Span::styled("Worktree: ", Style::default().fg(Color::DarkGray)),
         Span::styled(path, Style::default().fg(Color::DarkGray)),
     ];
+
+    let line = Line::from(spans);
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+/// Render footer line with keybindings (FR-004)
+fn render_footer(frame: &mut Frame, area: Rect) {
+    let keybinds = vec![
+        ("Enter", "Select"),
+        ("n", "New"),
+        ("r", "Refresh"),
+        ("c", "Cleanup"),
+        ("x", "Repair"),
+        ("l", "Logs"),
+        ("p", "Profile"),
+        ("f", "Filter"),
+        ("tab", "Mode"),
+        ("?", "Help"),
+        ("q", "Quit"),
+    ];
+
+    let mut spans = Vec::new();
+    for (i, (key, action)) in keybinds.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" ", Style::default()));
+        }
+        spans.push(Span::styled("[", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(*key, Style::default().fg(Color::Cyan)));
+        spans.push(Span::styled(":", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(*action, Style::default().fg(Color::White)));
+        spans.push(Span::styled("]", Style::default().fg(Color::DarkGray)));
+    }
 
     let line = Line::from(spans);
     frame.render_widget(Paragraph::new(line), area);
