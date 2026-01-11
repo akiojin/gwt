@@ -463,7 +463,8 @@ impl Model {
                 if self.branch_list.filter_mode {
                     "[Esc] Exit filter | [Enter] Apply | Type to search"
                 } else {
-                    "[q] Quit | [?] Help | [f] Filter | [Tab] Mode | [Space] Select | [Enter] Create | [n] New"
+                    // Match TypeScript: [r] Refresh | [c] Cleanup | [x] Repair | [l] Logs
+                    "[r] Refresh | [c] Cleanup | [x] Repair | [l] Logs"
                 }
             }
             Screen::WorktreeCreate => "[Enter] Next | [Esc] Back",
@@ -527,18 +528,26 @@ pub fn run() -> Result<(), GwtError> {
                 let msg = match (key.code, key.modifiers) {
                     (KeyCode::Char('c'), KeyModifiers::CONTROL) => Some(Message::CtrlC),
                     (KeyCode::Char('q'), KeyModifiers::NONE) => {
-                        if matches!(model.screen, Screen::BranchList) {
-                            Some(Message::Quit)
-                        } else {
-                            Some(Message::Char('q'))
-                        }
+                        // 'q' does not quit in BranchList (matches TypeScript behavior)
+                        Some(Message::Char('q'))
                     }
                     (KeyCode::Esc, _) => {
-                        // Check filter mode first
-                        if matches!(model.screen, Screen::BranchList) && model.branch_list.filter_mode {
-                            Some(Message::NavigateBack)
-                        } else if model.screen_stack.is_empty() && matches!(model.screen, Screen::BranchList) {
-                            Some(Message::Quit)
+                        // Esc behavior matches TypeScript:
+                        // - In filter mode: exit filter mode (handled by NavigateBack)
+                        // - In BranchList with filter query: clear query
+                        // - Otherwise: navigate back (but NOT quit from main screen)
+                        if matches!(model.screen, Screen::BranchList) {
+                            if model.branch_list.filter_mode {
+                                // Exit filter mode (clear query if any, then exit mode)
+                                Some(Message::NavigateBack)
+                            } else if !model.branch_list.filter.is_empty() {
+                                // Clear filter query
+                                model.branch_list.clear_filter();
+                                None
+                            } else {
+                                // On main screen without filter - do nothing (TypeScript doesn't quit here)
+                                None
+                            }
                         } else {
                             Some(Message::NavigateBack)
                         }
@@ -565,6 +574,40 @@ pub fn run() -> Result<(), GwtError> {
                             Some(Message::NavigateTo(Screen::Settings))
                         } else {
                             Some(Message::Char('s'))
+                        }
+                    }
+                    (KeyCode::Char('r'), KeyModifiers::NONE) => {
+                        if matches!(model.screen, Screen::BranchList) {
+                            Some(Message::RefreshData)
+                        } else {
+                            Some(Message::Char('r'))
+                        }
+                    }
+                    (KeyCode::Char('c'), KeyModifiers::NONE) => {
+                        // Cleanup command - not yet implemented fully
+                        if matches!(model.screen, Screen::BranchList) {
+                            // TODO: Show cleanup dialog
+                            model.status_message = Some("Cleanup not yet implemented".to_string());
+                            None
+                        } else {
+                            Some(Message::Char('c'))
+                        }
+                    }
+                    (KeyCode::Char('x'), KeyModifiers::NONE) => {
+                        // Repair worktrees command
+                        if matches!(model.screen, Screen::BranchList) {
+                            // TODO: Show repair dialog
+                            model.status_message = Some("Repair not yet implemented".to_string());
+                            None
+                        } else {
+                            Some(Message::Char('x'))
+                        }
+                    }
+                    (KeyCode::Char('p'), KeyModifiers::NONE) => {
+                        if matches!(model.screen, Screen::BranchList) {
+                            Some(Message::NavigateTo(Screen::Profiles))
+                        } else {
+                            Some(Message::Char('p'))
                         }
                     }
                     (KeyCode::Char('l'), KeyModifiers::NONE) => {
