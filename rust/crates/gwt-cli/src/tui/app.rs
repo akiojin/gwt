@@ -17,9 +17,9 @@ use std::time::{Duration, Instant};
 
 use super::screens::{
     BranchItem, BranchListState, HelpState, LogsState, SettingsState, WorktreeCreateState,
-    ConfirmState, ErrorState, ProfilesState, EnvironmentState,
+    ConfirmState, ErrorState, ProfilesState, EnvironmentState, WizardState,
     render_branch_list, render_help, render_logs, render_settings, render_worktree_create,
-    render_confirm, render_error, render_profiles, render_environment,
+    render_confirm, render_error, render_profiles, render_environment, render_wizard,
 };
 
 /// Application state (Model in Elm Architecture)
@@ -54,6 +54,8 @@ pub struct Model {
     profiles: ProfilesState,
     /// Environment variables state
     environment: EnvironmentState,
+    /// Wizard popup state
+    wizard: WizardState,
     /// Status message
     status_message: Option<String>,
     /// Is offline
@@ -109,6 +111,18 @@ pub enum Message {
     ToggleSelection,
     /// Space key for selection
     Space,
+    /// Open wizard for selected branch
+    OpenWizard,
+    /// Open wizard for new branch
+    OpenWizardNewBranch,
+    /// Wizard: select next item
+    WizardNext,
+    /// Wizard: select prev item
+    WizardPrev,
+    /// Wizard: confirm current step
+    WizardConfirm,
+    /// Wizard: go back or close
+    WizardBack,
 }
 
 impl Model {
@@ -132,6 +146,7 @@ impl Model {
             error: ErrorState::new(),
             profiles: ProfilesState::new(),
             environment: EnvironmentState::new(),
+            wizard: WizardState::new(),
             status_message: None,
             is_offline: false,
             active_count: 0,
@@ -287,20 +302,8 @@ impl Model {
             },
             Message::Enter => match &self.screen {
                 Screen::BranchList => {
-                    // Start worktree creation for selected branch
-                    if let Some(branch) = self.branch_list.selected_branch() {
-                        if branch.has_worktree {
-                            self.status_message = Some(format!(
-                                "Worktree already exists: {}",
-                                branch.worktree_path.as_deref().unwrap_or("")
-                            ));
-                        } else {
-                            self.worktree_create.branch_name = branch.name.clone();
-                            self.worktree_create.branch_name_cursor = branch.name.len();
-                            self.worktree_create.create_new_branch = false;
-                            self.update(Message::NavigateTo(Screen::WorktreeCreate));
-                        }
-                    }
+                    // Open wizard for selected branch (FR-007)
+                    self.update(Message::OpenWizard);
                 }
                 Screen::WorktreeCreate => {
                     if self.worktree_create.is_confirm_step() {
@@ -369,6 +372,59 @@ impl Model {
                     self.branch_list.toggle_selection();
                 }
             }
+            Message::OpenWizard => {
+                // Open wizard for selected branch (FR-044)
+                if let Some(branch) = self.branch_list.selected_branch() {
+                    if branch.has_worktree {
+                        self.status_message = Some(format!(
+                            "Worktree already exists: {}",
+                            branch.worktree_path.as_deref().unwrap_or("")
+                        ));
+                    } else {
+                        self.wizard.open_for_branch(&branch.name);
+                    }
+                }
+            }
+            Message::OpenWizardNewBranch => {
+                // Open wizard for new branch
+                self.wizard.open_for_new_branch();
+            }
+            Message::WizardNext => {
+                if self.wizard.visible {
+                    self.wizard.select_next();
+                }
+            }
+            Message::WizardPrev => {
+                if self.wizard.visible {
+                    self.wizard.select_prev();
+                }
+            }
+            Message::WizardConfirm => {
+                if self.wizard.visible {
+                    if self.wizard.is_complete() {
+                        // Start worktree creation with wizard settings
+                        let branch_name = if self.wizard.is_new_branch {
+                            self.wizard.full_branch_name()
+                        } else {
+                            self.wizard.branch_name.clone()
+                        };
+                        self.worktree_create.branch_name = branch_name;
+                        self.worktree_create.branch_name_cursor = self.worktree_create.branch_name.len();
+                        self.worktree_create.create_new_branch = self.wizard.is_new_branch;
+                        // Store wizard settings for later use
+                        self.wizard.close();
+                        // Create the worktree directly
+                        self.create_worktree();
+                    } else {
+                        self.wizard.next_step();
+                    }
+                }
+            }
+            Message::WizardBack => {
+                if self.wizard.visible {
+                    self.wizard.prev_step();
+                }
+            }
         }
     }
 
@@ -427,6 +483,11 @@ impl Model {
 
         // Footer
         self.view_footer(frame, chunks[2]);
+
+        // Wizard overlay (FR-044: popup on top of branch list)
+        if self.wizard.visible {
+            render_wizard(&self.wizard, frame, frame.area());
+        }
     }
 
     fn view_header(&self, frame: &mut Frame, area: Rect) {
@@ -525,7 +586,34 @@ pub fn run() -> Result<(), GwtError> {
 
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
-                let msg = match (key.code, key.modifiers) {
+                // Wizard has priority when visible
+                let msg = if model.wizard.visible {
+                    match key.code {
+                        KeyCode::Esc => Some(Message::WizardBack),
+                        KeyCode::Enter => Some(Message::WizardConfirm),
+                        KeyCode::Up => Some(Message::WizardPrev),
+                        KeyCode::Down => Some(Message::WizardNext),
+                        KeyCode::Backspace => {
+                            model.wizard.delete_char();
+                            None
+                        }
+                        KeyCode::Left => {
+                            model.wizard.cursor_left();
+                            None
+                        }
+                        KeyCode::Right => {
+                            model.wizard.cursor_right();
+                            None
+                        }
+                        KeyCode::Char(c) if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
+                            model.wizard.insert_char(c);
+                            None
+                        }
+                        _ => None,
+                    }
+                } else {
+                    // Normal key handling
+                    match (key.code, key.modifiers) {
                     (KeyCode::Char('c'), KeyModifiers::CONTROL) => Some(Message::CtrlC),
                     (KeyCode::Char('q'), KeyModifiers::NONE) => {
                         // 'q' does not quit in BranchList (matches TypeScript behavior)
@@ -562,10 +650,8 @@ pub fn run() -> Result<(), GwtError> {
                     (KeyCode::Char('n'), KeyModifiers::NONE) => {
                         // In filter mode, 'n' goes to filter input
                         if matches!(model.screen, Screen::BranchList) && !model.branch_list.filter_mode {
-                            model.worktree_create = WorktreeCreateState::new().with_base_branches(
-                                model.branch_list.branches.iter().map(|b| b.name.clone()).collect()
-                            );
-                            Some(Message::NavigateTo(Screen::WorktreeCreate))
+                            // Open wizard for new branch (FR-008)
+                            Some(Message::OpenWizardNewBranch)
                         } else {
                             Some(Message::Char('n'))
                         }
@@ -670,6 +756,7 @@ pub fn run() -> Result<(), GwtError> {
                         Some(Message::Char(c))
                     }
                     _ => None,
+                    }
                 };
 
                 if let Some(msg) = msg {
