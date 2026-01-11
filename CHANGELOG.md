@@ -18,6 +18,17 @@
 * 安全アイコンの安全表示を緑に変更 ([#525](https://github.com/akiojin/gwt/issues/525)) ([f0e7ba9](https://github.com/akiojin/gwt/commit/f0e7ba9b5f01bfc2bd55173afe1d60ca434d2fde))
 * 安全状態確認時のカーソルリセット問題を修正 ([#539](https://github.com/akiojin/gwt/issues/539)) ([77db8ea](https://github.com/akiojin/gwt/commit/77db8ea3c629affbb930fc2074efb4a312837895))
 
+## [4.12.2](https://github.com/akiojin/gwt/compare/v4.12.1...v4.12.2) (2026-01-11)
+
+
+### Bug Fixes
+
+* address review feedback ([5ab4f2c](https://github.com/akiojin/gwt/commit/5ab4f2c4c464d67c3119206b3a126690970ffd98))
+* gh-fix-ciとシグナル処理を改善 ([6a1a8ff](https://github.com/akiojin/gwt/commit/6a1a8ffb21e25c18f0726d000814ea22ee17734f))
+* gh-fix-ciの検出と解決フローを改善 ([5e35bbd](https://github.com/akiojin/gwt/commit/5e35bbde31ca3144c1cea6f2bf8a8ba40a191ab3))
+* map additional signals ([472cd48](https://github.com/akiojin/gwt/commit/472cd489794328ff6f500705e928ee990ff3e98f))
+* シグナル正規化と終了判定を改善 ([569b6bb](https://github.com/akiojin/gwt/commit/569b6bbb9c5e4552374f125253c918dfca64c0eb))
+
 ## [4.12.1](https://github.com/akiojin/gwt/compare/v4.12.0...v4.12.1) (2026-01-11)
 
 
