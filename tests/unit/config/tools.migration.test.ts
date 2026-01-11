@@ -5,7 +5,6 @@
  * マイグレーションロジックのユニットテスト
  * ファイルI/O統合テストは bun test で実行
  */
-/* eslint-disable @typescript-eslint/no-non-null-assertion */
 import { describe, it, expect } from "bun:test";
 import type { CodingAgentsConfig } from "../../../src/types/tools.js";
 
@@ -49,8 +48,13 @@ describe("tools.json schema migration (SPEC-29e16bd0)", () => {
     const config = migrateConfig(rawConfig);
 
     expect(config.customCodingAgents).toHaveLength(1);
-    expect(config.customCodingAgents[0]!.id).toBe("test-agent");
-    expect(config.customCodingAgents[0]!.displayName).toBe("Test Agent");
+    const [agent] = config.customCodingAgents;
+    expect(agent).toBeDefined();
+    if (!agent) {
+      throw new Error("Expected customCodingAgents[0] to exist");
+    }
+    expect(agent.id).toBe("test-agent");
+    expect(agent.displayName).toBe("Test Agent");
   });
 
   it("customCodingAgentsもcustomToolsも存在しない場合、空配列にフォールバック", () => {
@@ -81,7 +85,12 @@ describe("tools.json schema migration (SPEC-29e16bd0)", () => {
     const config = migrateConfig(rawConfig);
 
     expect(config.customCodingAgents).toHaveLength(1);
-    expect(config.customCodingAgents[0]!.id).toBe("new-agent");
+    const [agent] = config.customCodingAgents;
+    expect(agent).toBeDefined();
+    if (!agent) {
+      throw new Error("Expected customCodingAgents[0] to exist");
+    }
+    expect(agent.id).toBe("new-agent");
   });
 
   it("両方のフィールドが存在する場合、customCodingAgentsを優先", () => {
@@ -110,7 +119,12 @@ describe("tools.json schema migration (SPEC-29e16bd0)", () => {
     const config = migrateConfig(rawConfig);
 
     expect(config.customCodingAgents).toHaveLength(1);
-    expect(config.customCodingAgents[0]!.id).toBe("new-agent");
+    const [agent] = config.customCodingAgents;
+    expect(agent).toBeDefined();
+    if (!agent) {
+      throw new Error("Expected customCodingAgents[0] to exist");
+    }
+    expect(agent.id).toBe("new-agent");
   });
 
   it("customCodingAgentsがnullの場合、空配列にフォールバック", () => {

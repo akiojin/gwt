@@ -172,7 +172,6 @@ export async function selectLogTargetByRecency(
   }
   return primary;
 }
-
 export async function clearLogFiles(logDir: string): Promise<number> {
   const files = await listLogFiles(logDir);
   let cleared = 0;

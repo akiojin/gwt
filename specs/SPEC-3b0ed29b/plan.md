@@ -92,6 +92,27 @@ tests/
 1. **外部CLIの仕様変更**: 起動時の挙動が変わる
    - **緩和策**: エラーハンドリングを保守的にし、ログに詳細を残す
 
+## 補足: Codex CLI skills フラグ互換
+
+- Codex CLI v0.80.0+ では `--enable skills` が未知フラグとなるため、起動引数から除外する。
+- v0.79.x 以前では `--enable skills` を付与してスキルを利用可能にする。
+- CLI/TUI起動とWeb UI起動の両方で同じ判定を適用する。
+
+### 対象ファイル
+
+- `src/shared/codingAgentConstants.ts`: 互換判定ヘルパー追加
+- `src/codex.ts`: バージョンに応じたフラグ付与
+- `src/services/codingAgentResolver.ts`: installed/bunxでの付与切り替え
+- `tests/unit/codex.test.ts`
+- `tests/unit/codingAgentResolver.test.ts`
+- `tests/unit/services/codingAgentResolver.test.ts`
+
+### 互換テスト
+
+- v0.80.0+ (latest) では `--enable skills` が含まれないこと
+- installed v0.79.x では `--enable skills` が含まれること
+- 既存の引数順序と起動経路が維持されること
+
 ## 次のステップ
 
 1. ⏭️ `specs/SPEC-3b0ed29b/tasks.md` を更新

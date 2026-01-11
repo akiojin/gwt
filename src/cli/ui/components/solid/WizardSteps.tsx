@@ -2,7 +2,7 @@
 import { TextAttributes } from "@opentui/core";
 import type { SelectRenderable } from "@opentui/core";
 import { useKeyboard } from "@opentui/solid";
-import { createEffect, createResource, createSignal } from "solid-js";
+import { createEffect, createSignal } from "solid-js";
 import { SelectInput, type SelectInputItem } from "./SelectInput.js";
 import { TextInput } from "./TextInput.js";
 import { getModelOptions } from "../../utils/modelOptions.js";
@@ -12,10 +12,10 @@ import { getAgentTerminalColor } from "../../../../utils/coding-agent-colors.js"
 import { getVersionCache } from "../../utils/versionCache.js";
 import { selectionStyle } from "../../core/theme.js";
 import {
-  fetchInstalledVersionForAgent,
   versionInfoToSelectItem,
   createInstalledOption,
 } from "../../utils/versionFetcher.js";
+import { getInstalledVersionCache } from "../../utils/installedVersionCache.js";
 
 /**
  * WizardSteps - ウィザードの各ステップコンポーネント
@@ -690,14 +690,11 @@ export function VersionSelectStep(props: VersionSelectStepProps) {
     return cached.map(versionInfoToSelectItem);
   };
 
-  // インストール済み情報を取得 (still needs async fetch for local command check)
-  const [installedOption] = createResource(
-    () => props.agentId,
-    async (agentId: string) => {
-      const installed = await fetchInstalledVersionForAgent(agentId);
-      return installed ? createInstalledOption(installed) : null;
-    },
-  );
+  // インストール済み情報は起動時にキャッシュ済み（FR-017）
+  const installedOption = () => {
+    const installed = getInstalledVersionCache(props.agentId);
+    return installed ? createInstalledOption(installed) : null;
+  };
 
   // 全オプション（installed + latest + cached versions）
   const allOptions = (): SelectInputItem[] => {
