@@ -18,6 +18,16 @@
 * 安全アイコンの安全表示を緑に変更 ([#525](https://github.com/akiojin/gwt/issues/525)) ([f0e7ba9](https://github.com/akiojin/gwt/commit/f0e7ba9b5f01bfc2bd55173afe1d60ca434d2fde))
 * 安全状態確認時のカーソルリセット問題を修正 ([#539](https://github.com/akiojin/gwt/issues/539)) ([77db8ea](https://github.com/akiojin/gwt/commit/77db8ea3c629affbb930fc2074efb4a312837895))
 
+## [4.12.1](https://github.com/akiojin/gwt/compare/v4.12.0...v4.12.1) (2026-01-11)
+
+
+### Bug Fixes
+
+* bunx実行時にBunで再実行する ([#558](https://github.com/akiojin/gwt/issues/558)) ([ed2ad0b](https://github.com/akiojin/gwt/commit/ed2ad0b073fd0672e074cd88914c148cd778908e))
+* cache installed versions for wizard ([#555](https://github.com/akiojin/gwt/issues/555)) ([13738bb](https://github.com/akiojin/gwt/commit/13738bb885d50e796767ceba263b247b9827f080))
+* Codex skillsフラグをバージョン判定で切替 ([#552](https://github.com/akiojin/gwt/issues/552)) ([6825a81](https://github.com/akiojin/gwt/commit/6825a8119974beb6750a9bf0c8e215737557ba49))
+* ブランチリフレッシュ時にリモート追跡参照を更新 & CI/CD最適化 ([#554](https://github.com/akiojin/gwt/issues/554)) ([929a5ce](https://github.com/akiojin/gwt/commit/929a5ceca5e601d96d2a49bff8dee7b7bf3867dd))
+
 ## [4.11.6](https://github.com/akiojin/gwt/compare/v4.11.5...v4.11.6) (2026-01-07)
 
 
