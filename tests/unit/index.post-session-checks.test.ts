@@ -130,7 +130,6 @@ mock.module("../../src/services/WorktreeOrchestrator.js", () => ({
     ensureWorktree = ensureWorktreeMock;
   },
 }));
-
 mock.module("../../src/services/dependency-installer.js", () => ({
   installDependenciesForWorktree: installDependenciesMock,
   DependencyInstallError: class DependencyInstallError extends Error {
@@ -256,7 +255,6 @@ describe("handleAIToolWorkflow - post session checks", () => {
     expect(waitForEnterMock).not.toHaveBeenCalled();
     expect(confirmYesNoMock).not.toHaveBeenCalled();
     expect(pushBranchToRemoteMock).not.toHaveBeenCalled();
-
     // TODO: restore real timers;
   });
 
@@ -274,7 +272,6 @@ describe("handleAIToolWorkflow - post session checks", () => {
     expect(waitForEnterMock).not.toHaveBeenCalled();
     expect(confirmYesNoMock).not.toHaveBeenCalled();
     expect(pushBranchToRemoteMock).not.toHaveBeenCalled();
-
     // TODO: restore real timers;
   });
 
@@ -295,7 +292,6 @@ describe("handleAIToolWorkflow - post session checks", () => {
     expect(waitForEnterMock).not.toHaveBeenCalled();
     expect(confirmYesNoMock).not.toHaveBeenCalled();
     expect(pushBranchToRemoteMock).not.toHaveBeenCalled();
-
     // TODO: restore real timers;
   });
 

@@ -2,7 +2,7 @@
 import { TextAttributes } from "@opentui/core";
 import type { SelectRenderable } from "@opentui/core";
 import { useKeyboard } from "@opentui/solid";
-import { createEffect, createResource, createSignal } from "solid-js";
+import { createEffect, createSignal } from "solid-js";
 import { SelectInput, type SelectInputItem } from "./SelectInput.js";
 import { TextInput } from "./TextInput.js";
 import { getModelOptions } from "../../utils/modelOptions.js";
@@ -12,10 +12,10 @@ import { getAgentTerminalColor } from "../../../../utils/coding-agent-colors.js"
 import { getVersionCache } from "../../utils/versionCache.js";
 import { selectionStyle } from "../../core/theme.js";
 import {
-  fetchInstalledVersionForAgent,
   versionInfoToSelectItem,
   createInstalledOption,
 } from "../../utils/versionFetcher.js";
+import { getInstalledVersionCache } from "../../utils/installedVersionCache.js";
 
 /**
  * WizardSteps - ウィザードの各ステップコンポーネント
@@ -441,6 +441,54 @@ export function ModelSelectStep(props: ModelSelectStepProps) {
   );
 }
 
+// T408b: カスタムモデル入力ステップ
+export interface ModelInputStepProps extends StepProps {
+  agentId: CodingAgentId;
+  onSubmit: (value: string) => void;
+}
+
+export function ModelInputStep(props: ModelInputStepProps) {
+  const [value, setValue] = createSignal("");
+  const scroll = useWizardScroll();
+  const placeholder = props.agentId === "opencode" ? "provider/model" : "model";
+
+  createEffect(() => {
+    if (props.focused === false) {
+      return;
+    }
+    if (!scroll) {
+      return;
+    }
+    scroll.ensureLineVisible(2);
+  });
+
+  const handleSubmit = (next: string) => {
+    const trimmed = next.trim();
+    if (!trimmed) {
+      return;
+    }
+    props.onSubmit(trimmed);
+  };
+
+  return (
+    <box flexDirection="column">
+      <text fg="cyan" attributes={TextAttributes.BOLD}>
+        Enter custom model:
+      </text>
+      <text> </text>
+      <TextInput
+        value={value()}
+        onChange={setValue}
+        onSubmit={handleSubmit}
+        placeholder={placeholder}
+        focused={props.focused ?? true}
+      />
+      <text> </text>
+      <text attributes={TextAttributes.DIM}>[Enter] Submit [Esc] Back</text>
+    </box>
+  );
+}
+
 // T409: 推論レベル選択ステップ（Codexのみ）
 export interface ReasoningLevelStepProps extends StepProps {
   onSelect: (level: string) => void;
@@ -642,14 +690,11 @@ export function VersionSelectStep(props: VersionSelectStepProps) {
     return cached.map(versionInfoToSelectItem);
   };
 
-  // インストール済み情報を取得 (still needs async fetch for local command check)
-  const [installedOption] = createResource(
-    () => props.agentId,
-    async (agentId: string) => {
-      const installed = await fetchInstalledVersionForAgent(agentId);
-      return installed ? createInstalledOption(installed) : null;
-    },
-  );
+  // インストール済み情報は起動時にキャッシュ済み（FR-017）
+  const installedOption = () => {
+    const installed = getInstalledVersionCache(props.agentId);
+    return installed ? createInstalledOption(installed) : null;
+  };
 
   // 全オプション（installed + latest + cached versions）
   const allOptions = (): SelectInputItem[] => {

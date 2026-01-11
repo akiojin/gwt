@@ -60,6 +60,7 @@ import {
   getLocalBranches,
   getRepositoryRoot,
   deleteBranch,
+  fetchAllRemotes,
 } from "../../git.js";
 import {
   isProtectedBranchName,
@@ -85,6 +86,8 @@ import {
   getTodayLogDate,
   readLogLinesForDate,
   resolveLogTarget,
+  selectLogTargetByRecency,
+  type LogTargetResolution,
 } from "../../logging/reader.js";
 import { parseLogLines } from "../../logging/formatter.js";
 import { copyToClipboard } from "./utils/clipboard.js";
@@ -102,11 +105,13 @@ import {
 } from "../../types/profiles.js";
 import { BRANCH_PREFIXES } from "../../config/constants.js";
 import { prefetchAgentVersions } from "./utils/versionCache.js";
+import { prefetchInstalledVersions } from "./utils/installedVersionCache.js";
 import { getBunxAgentIds } from "./utils/versionFetcher.js";
 
 export type ExecutionMode = "normal" | "continue" | "resume";
 
 const UNSAFE_SELECTION_MESSAGE = "Unsafe branch selected. Select anyway?";
+const SAFETY_PENDING_MESSAGE = "Safety check in progress. Select anyway?";
 
 export interface SelectionResult {
   branch: string;
@@ -297,6 +302,9 @@ export function AppSolid(props: AppSolidProps) {
   const [unsafeSelectionTarget, setUnsafeSelectionTarget] = createSignal<
     string | null
   >(null);
+  const [unsafeSelectionMessage, setUnsafeSelectionMessage] = createSignal(
+    UNSAFE_SELECTION_MESSAGE,
+  );
   const [branchFooterMessage, setBranchFooterMessage] = createSignal<{
     text: string;
     isSpinning?: boolean;
@@ -437,12 +445,20 @@ export function AppSolid(props: AppSolidProps) {
   const [profileConfirmMode, setProfileConfirmMode] =
     createSignal<ProfileConfirmMode>("delete-profile");
 
-  const logTarget = createMemo(() =>
+  const [logEffectiveTarget, setLogEffectiveTarget] =
+    createSignal<LogTargetResolution | null>(null);
+  const logPrimaryTarget = createMemo(() =>
     resolveLogTarget(logTargetBranch(), workingDirectory()),
+  );
+  const logFallbackTarget = createMemo(() =>
+    resolveLogTarget(null, workingDirectory()),
+  );
+  const logActiveTarget = createMemo(
+    () => logEffectiveTarget() ?? logPrimaryTarget(),
   );
   const logBranchLabel = createMemo(() => logTargetBranch()?.label ?? null);
   const logSourceLabel = createMemo(() => {
-    const target = logTarget();
+    const target = logActiveTarget();
     if (!target.sourcePath) {
       return "(none)";
     }
@@ -452,10 +468,17 @@ export function AppSolid(props: AppSolidProps) {
     ) {
       return `${target.sourcePath} (cwd)`;
     }
+    if (target.reason === "working-directory-fallback") {
+      return `${target.sourcePath} (cwd fallback)`;
+    }
     if (target.reason === "worktree-inaccessible") {
       return `${target.sourcePath} (inaccessible)`;
     }
     return target.sourcePath;
+  });
+  createEffect(() => {
+    logPrimaryTarget();
+    setLogEffectiveTarget(null);
   });
   const selectedProfileConfig = createMemo(() => {
     const name = selectedProfileName();
@@ -623,7 +646,13 @@ export function AppSolid(props: AppSolidProps) {
     setLogLoading(true);
     setLogError(null);
     try {
-      const target = logTarget();
+      const primaryTarget = logPrimaryTarget();
+      const fallbackTarget = logFallbackTarget();
+      const target = await selectLogTargetByRecency(
+        primaryTarget,
+        fallbackTarget,
+      );
+      setLogEffectiveTarget(target);
       if (!target.logDir) {
         setLogEntries([]);
         setLogSelectedDate(targetDate);
@@ -658,7 +687,7 @@ export function AppSolid(props: AppSolidProps) {
   };
 
   const resetLogFiles = async () => {
-    const target = logTarget();
+    const target = logActiveTarget();
     if (!target.logDir) {
       showLogNotification("No logs available.", "error");
       return;
@@ -723,6 +752,14 @@ export function AppSolid(props: AppSolidProps) {
       void refreshCleanupSafety();
 
       void (async () => {
+        // Fetch remote updates with --prune to remove stale tracking refs
+        await withTimeout(
+          fetchAllRemotes({ cwd: repoRoot }),
+          BRANCH_FULL_LOAD_TIMEOUT_MS,
+        ).catch(() => {
+          // Ignore fetch errors (e.g., network issues)
+        });
+
         const [branches, latestWorktrees] = await Promise.all([
           withTimeout(
             getAllBranches(repoRoot),
@@ -850,11 +887,15 @@ export function AppSolid(props: AppSolidProps) {
     void prefetchAgentVersions(bunxAgentIds).catch(() => {
       // Silently handle errors - cache will return null and UI will show "latest" only
     });
+    // FR-017: Prefetch installed versions for all builtin agents at startup
+    void prefetchInstalledVersions(bunxAgentIds).catch(() => {
+      // Silently handle errors - cache will return null and UI won't show "installed"
+    });
   });
 
   createEffect(() => {
     if (currentScreen() === "log-list") {
-      logTarget();
+      logPrimaryTarget();
       void loadLogEntries(logSelectedDate());
     }
   });
@@ -1530,8 +1571,15 @@ export function AppSolid(props: AppSolidProps) {
       !hasSafetyPending &&
       (hasUncommitted || hasUnpushed || isUnmerged || !safeToCleanup);
 
+    if (branch && hasSafetyPending) {
+      setUnsafeSelectionTarget(branch.name);
+      setUnsafeSelectionMessage(SAFETY_PENDING_MESSAGE);
+      setUnsafeSelectionConfirmVisible(true);
+      return;
+    }
     if (branch && isUnsafe) {
       setUnsafeSelectionTarget(branch.name);
+      setUnsafeSelectionMessage(UNSAFE_SELECTION_MESSAGE);
       setUnsafeSelectionConfirmVisible(true);
       return;
     }
@@ -1545,6 +1593,7 @@ export function AppSolid(props: AppSolidProps) {
     const target = unsafeSelectionTarget();
     setUnsafeSelectionConfirmVisible(false);
     setUnsafeSelectionTarget(null);
+    setUnsafeSelectionMessage(UNSAFE_SELECTION_MESSAGE);
     if (!confirmed || !target) {
       return;
     }
@@ -2005,7 +2054,7 @@ export function AppSolid(props: AppSolidProps) {
           padding={1}
         >
           <ConfirmScreen
-            message={UNSAFE_SELECTION_MESSAGE}
+            message={unsafeSelectionMessage()}
             onConfirm={confirmUnsafeSelection}
             yesLabel="OK"
             noLabel="Cancel"

@@ -9,6 +9,7 @@ const {
   pullFastForwardMock,
   getBranchDivergenceStatusesMock,
   launchClaudeCodeMock,
+  launchCodingAgentMock,
   saveSessionMock,
   worktreeExistsMock,
   switchToProtectedBranchMock,
@@ -21,6 +22,7 @@ const {
   getUncommittedChangesCountMock,
   getUnpushedCommitsCountMock,
   pushBranchToRemoteMock,
+  getCodingAgentByIdMock,
 } = {
   execaMock: mock(async () => ({ stdout: "" })),
   ensureWorktreeMock: mock(async () => "/repo"),
@@ -32,6 +34,7 @@ const {
     >
   >(async () => []),
   launchClaudeCodeMock: mock(async () => undefined),
+  launchCodingAgentMock: mock(async () => undefined),
   saveSessionMock: mock<(...args: unknown[]) => Promise<void>>(
     async () => undefined,
   ),
@@ -60,6 +63,13 @@ const {
   getUncommittedChangesCountMock: mock(async () => 0),
   getUnpushedCommitsCountMock: mock(async () => 0),
   pushBranchToRemoteMock: mock(async () => undefined),
+  getCodingAgentByIdMock: mock(async () => ({
+    id: "claude-code",
+    displayName: "Claude Code",
+    type: "bunx",
+    command: "@anthropic-ai/claude-code@latest",
+    modeArgs: { normal: [], continue: ["-c"], resume: ["-r"] },
+  })),
 };
 
 class DependencyInstallErrorMock extends Error {
@@ -181,17 +191,12 @@ mock.module("../../src/codex.js", () => ({
 }));
 
 mock.module("../../src/launcher.js", () => ({
-  launchCodingAgent: mock(async () => undefined),
+  launchCodingAgent: launchCodingAgentMock,
 }));
 
 mock.module("../../src/config/tools.js", () => ({
-  getCodingAgentById: mock(async () => ({
-    id: "claude-code",
-    displayName: "Claude Code",
-    type: "bunx",
-    command: "@anthropic-ai/claude-code@latest",
-    modeArgs: { normal: [], continue: ["-c"], resume: ["-r"] },
-  })),
+  getCodingAgentById: getCodingAgentByIdMock,
+  getAllCodingAgents: mock(async () => []),
   getSharedEnvironment: mock(async () => ({})),
 }));
 
@@ -235,6 +240,15 @@ beforeEach(async () => {
   getUncommittedChangesCountMock.mockClear();
   getUnpushedCommitsCountMock.mockClear();
   pushBranchToRemoteMock.mockClear();
+  launchCodingAgentMock.mockClear();
+  getCodingAgentByIdMock.mockReset();
+  getCodingAgentByIdMock.mockResolvedValue({
+    id: "claude-code",
+    displayName: "Claude Code",
+    type: "bunx",
+    command: "@anthropic-ai/claude-code@latest",
+    modeArgs: { normal: [], continue: ["-c"], resume: ["-r"] },
+  });
   writeTerminalMock.mockReset();
   writeTerminalLineMock.mockReset();
   installDependenciesMock.mockResolvedValue({
@@ -517,5 +531,36 @@ describe("handleAIToolWorkflow - dependency installation", () => {
     const messages = writeTerminalLineMock.mock.calls.flat().join(" ");
     expect(messages).toContain("Dependency installation failed via bun");
     expect(messages).toContain("Details: Dependency installation failed");
+  });
+});
+
+describe("handleAIToolWorkflow - OpenCode model args", () => {
+  it("passes provider/model to launchCodingAgent as -m for OpenCode", async () => {
+    getCodingAgentByIdMock.mockResolvedValueOnce({
+      id: "opencode",
+      displayName: "OpenCode",
+      type: "bunx",
+      command: "opencode-ai",
+      modeArgs: { normal: [], continue: ["-c"], resume: ["-s"] },
+    });
+
+    const selection: SelectionResult = {
+      branch: "feature/opencode",
+      displayName: "feature/opencode",
+      branchType: "local",
+      tool: "opencode",
+      mode: "normal" as ExecutionMode,
+      skipPermissions: false,
+      model: "openai/gpt-4.1",
+    };
+
+    await handleAIToolWorkflow(selection);
+
+    expect(launchCodingAgentMock).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "opencode" }),
+      expect.objectContaining({
+        extraArgs: ["-m", "openai/gpt-4.1"],
+      }),
+    );
   });
 });

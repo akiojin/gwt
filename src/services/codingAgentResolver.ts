@@ -5,10 +5,13 @@ import { CLAUDE_CODE_TOOL } from "../config/builtin-coding-agents.js";
 import {
   CODEX_DEFAULT_ARGS,
   CLAUDE_PERMISSION_SKIP_ARGS,
+  shouldEnableCodexSkillsFlag,
+  withCodexSkillsFlag,
 } from "../shared/codingAgentConstants.js";
 import { prepareCodingAgentExecution } from "./codingAgentCommandResolver.js";
 import type { CodingAgentLaunchOptions } from "../types/tools.js";
 import { createLogger } from "../logging/logger.js";
+import { findCommand } from "../utils/command.js";
 
 const logger = createLogger({ category: "resolver" });
 
@@ -267,17 +270,21 @@ export function buildCodexArgs(options: CodexCommandOptions = {}): string[] {
 export async function resolveCodexCommand(
   options: CodexCommandOptions = {},
 ): Promise<ResolvedCommand> {
-  const args = buildCodexArgs(options);
+  const codexLookup = await findCommand("codex");
+  const baseArgs = buildCodexArgs(options);
+  const args = withCodexSkillsFlag(
+    baseArgs,
+    shouldEnableCodexSkillsFlag(codexLookup.version),
+  );
 
   // フルパスを取得（node-ptyはシェルを経由しないため必要）
-  const codexPath = await resolveCommandPath("codex");
-  if (codexPath) {
+  if (codexLookup.source === "installed" && codexLookup.path) {
     logger.info(
-      { command: codexPath, usesFallback: false },
+      { command: codexLookup.path, usesFallback: false },
       "Codex command resolved",
     );
     return {
-      command: codexPath,
+      command: codexLookup.path,
       args,
       usesFallback: false,
     };

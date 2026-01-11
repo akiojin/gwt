@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 import { describe, it, expect, mock, beforeEach } from "bun:test";
 import * as config from "../../src/config/index";
 
@@ -26,13 +25,16 @@ mock.module("node:os", () => {
 
 import { readFile, readdir } from "node:fs/promises";
 
+const readFileMock = readFile as unknown as ReturnType<typeof mock>;
+const readdirMock = readdir as unknown as ReturnType<typeof mock>;
+
 describe("Integration: Session Resume Workflow (T305)", () => {
   beforeEach(() => {
     mock.restore();
   });
 
   it("should list and select from multiple sessions", async () => {
-    (readdir as any).mockResolvedValue(["repo1.json", "repo2.json"]);
+    readdirMock.mockResolvedValue(["repo1.json", "repo2.json"]);
 
     const session1: config.SessionData = {
       lastWorktreePath: "/path/to/worktree1",
@@ -48,7 +50,7 @@ describe("Integration: Session Resume Workflow (T305)", () => {
       repositoryRoot: "/path/to/repo2",
     };
 
-    (readFile as any).mockImplementation((path: string) => {
+    readFileMock.mockImplementation((path: string) => {
       if (path.includes("repo1"))
         return Promise.resolve(JSON.stringify(session1));
       if (path.includes("repo2"))
