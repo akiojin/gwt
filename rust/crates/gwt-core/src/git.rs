@@ -8,6 +8,6 @@ mod remote;
 mod repository;
 
 pub use backend::GitBackend;
-pub use branch::Branch;
+pub use branch::{Branch, DivergenceStatus};
 pub use remote::Remote;
-pub use repository::Repository;
+pub use repository::{Repository, WorktreeInfo};

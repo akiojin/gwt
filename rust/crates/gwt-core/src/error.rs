@@ -53,6 +53,15 @@ pub enum GwtError {
     #[error("[E1012] Git executable not found")]
     GitNotFound,
 
+    #[error("[E1013] Git operation failed: {operation}: {details}")]
+    GitOperationFailed { operation: String, details: String },
+
+    #[error("[E1014] Branch create failed: {name}: {details}")]
+    BranchCreateFailed { name: String, details: String },
+
+    #[error("[E1015] Branch delete failed: {name}: {details}")]
+    BranchDeleteFailed { name: String, details: String },
+
     // E2xxx: Worktree operation errors
     #[error("[E2001] Worktree not found: {path}")]
     WorktreeNotFound { path: PathBuf },
@@ -151,6 +160,9 @@ impl GwtError {
             Self::BranchDiverged { .. } => "E1010",
             Self::GitCommandFailed { .. } => "E1011",
             Self::GitNotFound => "E1012",
+            Self::GitOperationFailed { .. } => "E1013",
+            Self::BranchCreateFailed { .. } => "E1014",
+            Self::BranchDeleteFailed { .. } => "E1015",
             // E2xxx
             Self::WorktreeNotFound { .. } => "E2001",
             Self::WorktreeAlreadyExists { .. } => "E2002",

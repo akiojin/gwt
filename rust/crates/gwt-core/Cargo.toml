@@ -22,6 +22,8 @@ fs2.workspace = true
 directories.workspace = true
 chrono.workspace = true
 uuid.workspace = true
+async-trait = "0.1"
+which = "7"
 
 [dev-dependencies]
 tempfile.workspace = true

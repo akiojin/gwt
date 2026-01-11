@@ -4,4 +4,5 @@ pub mod api;
 pub mod server;
 pub mod websocket;
 
-pub use server::serve;
+pub use api::AppState;
+pub use server::{serve, serve_with_config, ServerConfig};

@@ -1,34 +1,291 @@
 //! Remote operations
 
-use crate::error::Result;
+use crate::error::{GwtError, Result};
+use std::path::Path;
+use std::process::Command;
 
 /// Represents a Git remote
 #[derive(Debug, Clone)]
 pub struct Remote {
     /// Remote name (e.g., "origin")
     pub name: String,
-    /// Remote URL
-    pub url: String,
+    /// Fetch URL
+    pub fetch_url: String,
+    /// Push URL (may differ from fetch URL)
+    pub push_url: String,
 }
 
 impl Remote {
     /// Create a new remote instance
     pub fn new(name: impl Into<String>, url: impl Into<String>) -> Self {
+        let url = url.into();
         Self {
             name: name.into(),
-            url: url.into(),
+            fetch_url: url.clone(),
+            push_url: url,
         }
     }
 
     /// List all remotes in a repository
-    pub fn list(_repo_path: &std::path::Path) -> Result<Vec<Remote>> {
-        // TODO: Implement using gix
-        Ok(Vec::new())
+    pub fn list(repo_path: &Path) -> Result<Vec<Remote>> {
+        let output = Command::new("git")
+            .args(["remote", "-v"])
+            .current_dir(repo_path)
+            .output()
+            .map_err(|e| GwtError::GitOperationFailed {
+                operation: "remote -v".to_string(),
+                details: e.to_string(),
+            })?;
+
+        if !output.status.success() {
+            return Err(GwtError::GitOperationFailed {
+                operation: "remote -v".to_string(),
+                details: String::from_utf8_lossy(&output.stderr).to_string(),
+            });
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut remotes: Vec<Remote> = Vec::new();
+
+        for line in stdout.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 3 {
+                let name = parts[0];
+                let url = parts[1];
+                let kind = parts[2]; // (fetch) or (push)
+
+                // Find or create remote
+                let remote = remotes.iter_mut().find(|r| r.name == name);
+                match remote {
+                    Some(r) => {
+                        if kind == "(fetch)" {
+                            r.fetch_url = url.to_string();
+                        } else if kind == "(push)" {
+                            r.push_url = url.to_string();
+                        }
+                    }
+                    None => {
+                        let mut new_remote = Remote::new(name, url);
+                        if kind == "(push)" {
+                            new_remote.push_url = url.to_string();
+                        }
+                        remotes.push(new_remote);
+                    }
+                }
+            }
+        }
+
+        Ok(remotes)
+    }
+
+    /// Get a specific remote by name
+    pub fn get(repo_path: &Path, name: &str) -> Result<Option<Remote>> {
+        let remotes = Self::list(repo_path)?;
+        Ok(remotes.into_iter().find(|r| r.name == name))
+    }
+
+    /// Fetch this remote
+    pub fn fetch(repo_path: &Path, name: &str, prune: bool) -> Result<()> {
+        let mut args = vec!["fetch", name];
+        if prune {
+            args.push("--prune");
+        }
+
+        let output = Command::new("git")
+            .args(&args)
+            .current_dir(repo_path)
+            .output()
+            .map_err(|e| GwtError::GitOperationFailed {
+                operation: format!("fetch {name}"),
+                details: e.to_string(),
+            })?;
+
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(GwtError::GitOperationFailed {
+                operation: format!("fetch {name}"),
+                details: String::from_utf8_lossy(&output.stderr).to_string(),
+            })
+        }
     }
 
     /// Fetch all remotes
-    pub fn fetch_all(_repo_path: &std::path::Path) -> Result<()> {
-        // TODO: Implement using gix or external git
-        Ok(())
+    pub fn fetch_all(repo_path: &Path, prune: bool) -> Result<()> {
+        let mut args = vec!["fetch", "--all"];
+        if prune {
+            args.push("--prune");
+        }
+
+        let output = Command::new("git")
+            .args(&args)
+            .current_dir(repo_path)
+            .output()
+            .map_err(|e| GwtError::GitOperationFailed {
+                operation: "fetch --all".to_string(),
+                details: e.to_string(),
+            })?;
+
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(GwtError::GitOperationFailed {
+                operation: "fetch --all".to_string(),
+                details: String::from_utf8_lossy(&output.stderr).to_string(),
+            })
+        }
+    }
+
+    /// Check if a remote exists
+    pub fn exists(repo_path: &Path, name: &str) -> Result<bool> {
+        let remotes = Self::list(repo_path)?;
+        Ok(remotes.iter().any(|r| r.name == name))
+    }
+
+    /// Add a new remote
+    pub fn add(repo_path: &Path, name: &str, url: &str) -> Result<Remote> {
+        let output = Command::new("git")
+            .args(["remote", "add", name, url])
+            .current_dir(repo_path)
+            .output()
+            .map_err(|e| GwtError::GitOperationFailed {
+                operation: "remote add".to_string(),
+                details: e.to_string(),
+            })?;
+
+        if output.status.success() {
+            Ok(Remote::new(name, url))
+        } else {
+            Err(GwtError::GitOperationFailed {
+                operation: format!("remote add {name}"),
+                details: String::from_utf8_lossy(&output.stderr).to_string(),
+            })
+        }
+    }
+
+    /// Remove a remote
+    pub fn remove(repo_path: &Path, name: &str) -> Result<()> {
+        let output = Command::new("git")
+            .args(["remote", "remove", name])
+            .current_dir(repo_path)
+            .output()
+            .map_err(|e| GwtError::GitOperationFailed {
+                operation: "remote remove".to_string(),
+                details: e.to_string(),
+            })?;
+
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(GwtError::GitOperationFailed {
+                operation: format!("remote remove {name}"),
+                details: String::from_utf8_lossy(&output.stderr).to_string(),
+            })
+        }
+    }
+
+    /// Update remote tracking references
+    pub fn update_refs(repo_path: &Path) -> Result<()> {
+        let output = Command::new("git")
+            .args(["remote", "update", "--prune"])
+            .current_dir(repo_path)
+            .output()
+            .map_err(|e| GwtError::GitOperationFailed {
+                operation: "remote update".to_string(),
+                details: e.to_string(),
+            })?;
+
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(GwtError::GitOperationFailed {
+                operation: "remote update".to_string(),
+                details: String::from_utf8_lossy(&output.stderr).to_string(),
+            })
+        }
+    }
+
+    /// Check network connectivity to remote
+    pub fn is_reachable(repo_path: &Path, name: &str) -> bool {
+        let output = Command::new("git")
+            .args(["ls-remote", "--exit-code", name])
+            .current_dir(repo_path)
+            .output();
+
+        match output {
+            Ok(o) => o.status.success(),
+            Err(_) => false,
+        }
+    }
+
+    /// Get default remote (usually "origin")
+    pub fn default(repo_path: &Path) -> Result<Option<Remote>> {
+        // Try origin first
+        if let Some(remote) = Self::get(repo_path, "origin")? {
+            return Ok(Some(remote));
+        }
+
+        // Fall back to first remote
+        let remotes = Self::list(repo_path)?;
+        Ok(remotes.into_iter().next())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn create_test_repo() -> TempDir {
+        let temp = TempDir::new().unwrap();
+        Command::new("git")
+            .args(["init"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        temp
+    }
+
+    #[test]
+    fn test_list_empty() {
+        let temp = create_test_repo();
+        let remotes = Remote::list(temp.path()).unwrap();
+        assert!(remotes.is_empty());
+    }
+
+    #[test]
+    fn test_add_remote() {
+        let temp = create_test_repo();
+        let remote = Remote::add(temp.path(), "origin", "https://github.com/test/test.git").unwrap();
+        assert_eq!(remote.name, "origin");
+        assert!(Remote::exists(temp.path(), "origin").unwrap());
+    }
+
+    #[test]
+    fn test_remove_remote() {
+        let temp = create_test_repo();
+        Remote::add(temp.path(), "origin", "https://github.com/test/test.git").unwrap();
+        assert!(Remote::exists(temp.path(), "origin").unwrap());
+        Remote::remove(temp.path(), "origin").unwrap();
+        assert!(!Remote::exists(temp.path(), "origin").unwrap());
+    }
+
+    #[test]
+    fn test_default_remote() {
+        let temp = create_test_repo();
+        Remote::add(temp.path(), "origin", "https://github.com/test/test.git").unwrap();
+        let default = Remote::default(temp.path()).unwrap();
+        assert!(default.is_some());
+        assert_eq!(default.unwrap().name, "origin");
     }
 }
