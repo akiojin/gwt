@@ -494,20 +494,12 @@ impl Model {
         let version = env!("CARGO_PKG_VERSION");
         let offline_indicator = if self.is_offline { " [OFFLINE]" } else { "" };
 
-        // Format working directory
-        let working_dir = self.repo_root.display().to_string();
-        let short_dir = if working_dir.len() > 40 {
-            format!("...{}", &working_dir[working_dir.len() - 37..])
-        } else {
-            working_dir
-        };
-
         let profile = self.branch_list.active_profile.as_deref().unwrap_or("default");
 
+        // Match TypeScript format: gwt - Branch Selection v{version} | Profile(p): {name}
         let title = format!(
-            " gwt v{} | {} | Profile: {} {}",
+            " gwt - Branch Selection v{} | Profile(p): {} {}",
             version,
-            short_dir,
             profile,
             offline_indicator
         );
