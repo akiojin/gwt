@@ -1,0 +1,24 @@
+[package]
+name = "gwt-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "CLI for Git Worktree Manager"
+
+[[bin]]
+name = "gwt"
+path = "src/main.rs"
+
+[dependencies]
+gwt-core = { path = "../gwt-core" }
+thiserror.workspace = true
+tokio.workspace = true
+clap.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
