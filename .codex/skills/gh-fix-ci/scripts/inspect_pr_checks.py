@@ -123,7 +123,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def confirm_action(prompt: str, assume_yes: bool) -> bool:
+def confirm_action(prompt: str, *, assume_yes: bool) -> bool:
     if assume_yes:
         return True
     if not sys.stdin.isatty():
@@ -198,7 +198,7 @@ def main() -> int:
         if args.resolve_threads and unresolved_threads:
             if confirm_action(
                 f"Resolve {len(unresolved_threads)} review thread(s)? [y/N] ",
-                args.yes,
+                assume_yes=args.yes,
             ):
                 resolved_count = 0
                 for thread in unresolved_threads:
@@ -210,6 +210,9 @@ def main() -> int:
                     unresolved_threads = []
                     results["unresolvedThreads"] = []
                 else:
+                    results["failedToResolveCount"] = (
+                        len(unresolved_threads) - resolved_count
+                    )
                     print(
                         "Warning: some review threads failed to resolve.",
                         file=sys.stderr,

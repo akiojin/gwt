@@ -18,6 +18,11 @@ import { createLogger } from "./logging/logger.js";
 
 const CLAUDE_CLI_PACKAGE = "@anthropic-ai/claude-code@latest";
 const logger = createLogger({ category: "claude" });
+const signalNumberToName: ReadonlyMap<number, string> = new Map(
+  Object.entries(os.constants.signals)
+    .filter(([, value]) => typeof value === "number")
+    .map(([name, value]) => [value as number, name]),
+);
 
 /**
  * Error wrapper used by `launchClaudeCode` to preserve the original failure
@@ -270,12 +275,6 @@ export async function launchClaudeCode(
       }
     };
 
-    const signalNumberToName: ReadonlyMap<number, string> = new Map(
-      Object.entries(os.constants.signals)
-        .filter(([, value]) => typeof value === "number")
-        .map(([name, value]) => [value as number, name]),
-    );
-
     const normalizeSignal = (
       signal?: number | string | null,
     ): string | null => {
@@ -314,11 +313,11 @@ export async function launchClaudeCode(
         const exitCode = result.exitCode ?? null;
         const rawSignal = result.signal ?? null;
         const signal = normalizeSignal(rawSignal);
+        // isNormalExitSignal covers SIGINT/SIGTERM and 130/143 exit codes.
         const signalIsNormal = isNormalExitSignal(rawSignal, exitCode);
-        const exitCodeIsNormal = exitCode === 130 || exitCode === 143;
         const hasError =
           (!signalIsNormal && signal !== null && signal !== undefined) ||
-          (exitCode !== null && exitCode !== 0 && !exitCodeIsNormal);
+          (exitCode !== null && exitCode !== 0 && !signalIsNormal);
         if (hasError) {
           logger.error({ exitCode, signal, durationMs }, "Claude Code exited");
         } else {
