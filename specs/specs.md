@@ -8,7 +8,7 @@
 | SPEC ID | タイトル | 作成日 |
 | --- | --- | --- |
 | [SPEC-d2f4762a](SPEC-d2f4762a/spec.md) | 機能仕様: ブランチ選択画面（Branch Selection Screen） | 2025-11-18 |
-| [SPEC-d27be71b](SPEC-d27be71b/spec.md) | SPEC-d27be71b: Ink.js から OpenTUI への移行 | 2026-01-04 |
+| [SPEC-d27be71b](SPEC-d27be71b/spec.md) | SPEC-d27be71b: Ink.js から OpenTUI への移行 | 2026-01-10 |
 | [SPEC-c1d5bad7](SPEC-c1d5bad7/spec.md) | ログ一覧・詳細表示・クリップボードコピー機能 | 2025-12-25 |
 | [SPEC-f47db390](SPEC-f47db390/spec.md) | 機能仕様: セッションID永続化とContinue/Resume強化 | 2025-12-06 |
 | [SPEC-dafff079](SPEC-dafff079/spec.md) | 機能仕様: 環境変数プロファイル機能 | 2025-12-15 |

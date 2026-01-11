@@ -239,6 +239,8 @@ async function mainSolidUI(): Promise<SelectionResult | undefined> {
         useAlternateScreen,
         useMouse,
         enableMouseMovement,
+        useConsole: false,
+        openConsoleOnError: false,
       },
     );
   } finally {

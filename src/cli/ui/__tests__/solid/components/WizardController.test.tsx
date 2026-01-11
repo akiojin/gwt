@@ -42,9 +42,6 @@ describe("WizardController", () => {
       let frame = testSetup.captureCharFrame();
       expect(frame).toContain("What would you like to do?");
 
-      await new Promise((resolve) => setTimeout(resolve, 60));
-      await testSetup.renderOnce();
-
       // Open existing worktree
       testSetup.mockInput.pressEnter();
       await testSetup.renderOnce();
@@ -52,13 +49,8 @@ describe("WizardController", () => {
       frame = testSetup.captureCharFrame();
       expect(frame).toContain("Select coding agent:");
 
-      await new Promise((resolve) => setTimeout(resolve, 60));
-      await testSetup.renderOnce();
-
       // Select default agent (Enter)
       testSetup.mockInput.pressEnter();
-      await testSetup.renderOnce();
-      await new Promise((resolve) => setTimeout(resolve, 60));
       await testSetup.renderOnce();
 
       frame = testSetup.captureCharFrame();

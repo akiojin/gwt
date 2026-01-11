@@ -1,6 +1,6 @@
 # 実装計画: Ink.js から OpenTUI への移行
 
-**仕様ID**: `SPEC-d27be71b` | **日付**: 2026-01-04 | **仕様書**: [specs/SPEC-d27be71b/spec.md](specs/SPEC-d27be71b/spec.md)
+**仕様ID**: `SPEC-d27be71b` | **日付**: 2026-01-10 | **仕様書**: [specs/SPEC-d27be71b/spec.md](specs/SPEC-d27be71b/spec.md)
 **入力**: `/specs/SPEC-d27be71b/spec.md` からの機能仕様
 
 ## 概要
@@ -35,6 +35,7 @@
 - ログ/画面出力分離（specs/SPEC-b9f5c4a1 参照）
 - **Zig コアはブラックボックス**として扱い、TypeScript レイヤーのみメンテ
 - **テストカバレッジ 100% 維持必須**
+- OpenTUI の内蔵コンソールは無効化し、UI オーバーレイを表示しない
 
 **スケール/範囲**: CLI UI（15 スクリーン + 10 以上のコンポーネント）と関連テスト 307+ 件
 
@@ -182,6 +183,7 @@ tests/
 - **テストフレームワーク**: OpenTUI/OpenCode のテスト方法を**調査してから決定**
   - Vitest 継続が有力だが、solid-testing-library の評価が必要
 - **ユニットテスト**: 既存の 307+ UI テストを OpenTUI 向けに移植し**100% 維持**
+- **ユニットテスト**: OpenTUI の内蔵コンソール無効化設定が適用されることを検証
 - **統合テスト**: 画面遷移/入力操作の統合テストを維持
 - **エンドツーエンドテスト**: Playwright（Web）への影響は維持
 - **パフォーマンステスト**:
