@@ -2,10 +2,15 @@ import { describe, it, expect, mock, beforeEach } from "bun:test";
 
 const mockExeca = mock();
 const mockGetToolById = mock();
+const mockFindCommand = mock();
 
 mock.module("execa", () => ({
   execa: (...args: unknown[]) => mockExeca(...args),
   default: { execa: (...args: unknown[]) => mockExeca(...args) },
+}));
+
+mock.module("../../src/utils/command", () => ({
+  findCommand: (...args: unknown[]) => mockFindCommand(...args),
 }));
 
 mock.module("../../src/config/tools.js", () => ({
@@ -34,6 +39,13 @@ function notFoundError(): Error & { code: string } {
 beforeEach(() => {
   mockExeca.mockReset();
   mockGetToolById.mockReset();
+  mockFindCommand.mockReset();
+  mockFindCommand.mockResolvedValue({
+    available: true,
+    path: null,
+    source: "bunx",
+    version: null,
+  });
   __resetBunxCacheForTests();
 });
 
@@ -137,6 +149,24 @@ describe("codingAgentResolver", () => {
     expect(result.command).toBe("/usr/bin/bunx");
     expect(result.args[0]).toBe("@openai/codex@latest");
     expect(result.args.slice(1)).toEqual(["resume", ...CODEX_DEFAULT_ARGS]);
+  });
+
+  it("adds --enable skills for installed Codex < 0.80.0", async () => {
+    mockFindCommand.mockResolvedValueOnce({
+      available: true,
+      path: "/usr/bin/codex",
+      source: "installed",
+      version: "v0.79.0",
+    });
+
+    const result = await resolveCodexCommand({ mode: "normal" });
+    const enableIndex = result.args.findIndex(
+      (arg, i) => arg === "--enable" && result.args[i + 1] === "skills",
+    );
+
+    expect(result.command).toBe("/usr/bin/codex");
+    expect(result.usesFallback).toBe(false);
+    expect(enableIndex).toBeGreaterThan(-1);
   });
 
   it("builds Claude args with convenience helper", () => {
