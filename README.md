@@ -8,53 +8,72 @@ Interactive Git worktree manager with Coding Agent selection (Claude Code / Code
 
 `@akiojin/gwt` is a powerful CLI tool that revolutionizes Git worktree management through an intuitive interface. It seamlessly integrates with Claude Code / Codex CLI / Gemini CLI workflows, providing intelligent branch selection, automated worktree creation, and comprehensive project management capabilities.
 
-## ✨ Key Features
+## Key Features
 
-- 🎯 **Modern OpenTUI-based UI**: Built with OpenTUI + SolidJS for a smooth, responsive terminal interface with real-time updates
-- 🖼️ **Full-screen Layout**: Persistent header with statistics, scrollable branch list, and always-visible footer with keyboard shortcuts
-- 🌟 **Smart Branch Creation**: Create feature, bugfix, hotfix, or release branches with guided prompts and automatic base branch selection
-- 🔄 **Advanced Worktree Management**: Complete lifecycle management including creation, cleanup, and path optimization
-- 🤖 **Coding Agent Selection**: Choose between Claude Code / Codex CLI / Gemini CLI through the interactive launcher
-- 🚀 **Coding Agent Integration**: Launch the selected agent in the worktree (Claude Code includes permission handling and post-change flow)
-- 🔒 **Worktree Command Restriction**: PreToolUse hooks enforce worktree boundaries, blocking directory navigation, branch switching, and file operations outside the worktree
-- 📊 **GitHub PR Integration**: Automatic cleanup of merged pull request branches and worktrees
-- 🛠️ **Change Management**: Built-in support for committing, stashing, or discarding changes after development sessions
-- 📦 **Universal Package**: Install once, use across all your projects with consistent behavior
-- 🔍 **Real-time Statistics**: Live updates of branch and worktree counts with automatic terminal resize handling
+- **Modern TUI**: Built with Ratatui for a smooth, responsive terminal interface
+- **Full-screen Layout**: Persistent header with statistics, scrollable branch list, and always-visible footer with keyboard shortcuts
+- **Smart Branch Creation**: Create feature, bugfix, hotfix, or release branches with guided prompts and automatic base branch selection
+- **Advanced Worktree Management**: Complete lifecycle management including creation, cleanup, and path optimization
+- **Coding Agent Selection**: Choose between Claude Code / Codex CLI / Gemini CLI through the interactive launcher
+- **Coding Agent Integration**: Launch the selected agent in the worktree (Claude Code includes permission handling and post-change flow)
+- **GitHub PR Integration**: Automatic cleanup of merged pull request branches and worktrees
+- **Change Management**: Built-in support for committing, stashing, or discarding changes after development sessions
+- **Universal Package**: Install once, use across all your projects with consistent behavior
+- **Real-time Statistics**: Live updates of branch and worktree counts with automatic terminal resize handling
 
 ## Installation
 
-### Global Installation (Recommended)
+### From GitHub Releases (Recommended)
 
-Install globally with your preferred package manager:
+Download pre-built binaries from the [Releases page](https://github.com/akiojin/gwt/releases):
 
-#### bun (global install)
+- `gwt-linux-x86_64` - Linux x86_64
+- `gwt-linux-aarch64` - Linux ARM64
+- `gwt-macos-x86_64` - macOS Intel
+- `gwt-macos-aarch64` - macOS Apple Silicon
+- `gwt-windows-x86_64.exe` - Windows x86_64
 
 ```bash
-bun add -g @akiojin/gwt
+# Example for Linux x86_64
+curl -L https://github.com/akiojin/gwt/releases/latest/download/gwt-linux-x86_64 -o gwt
+chmod +x gwt
+sudo mv gwt /usr/local/bin/
 ```
 
-### One-time Usage
+### Via npm/bunx
 
-Run without installation using bunx:
-
-#### bunx (bun)
+Install globally or run without installation:
 
 ```bash
+# Global install
+npm install -g @akiojin/gwt
+bun add -g @akiojin/gwt
+
+# One-time execution
+npx @akiojin/gwt
 bunx @akiojin/gwt
 ```
 
-> Note (Linux): If installation fails with a `node-gyp` error like `Error: not found: make`, you're missing build tools needed to compile native dependencies (e.g., `node-pty`). This is common on `linux/arm64` and minimal images like `node:* -slim`.
->
-> - Debian/Ubuntu: `apt-get update && apt-get install -y build-essential`
-> - Alpine: `apk add --no-cache build-base python3`
+### Build from Source
+
+```bash
+# Clone the repository
+git clone https://github.com/akiojin/gwt.git
+cd gwt
+
+# Build release binary
+cargo build --release
+
+# The binary is at target/release/gwt
+./target/release/gwt
+```
 
 ## Quick Start
 
 Run in any Git repository:
 
 ```bash
-# If installed globally
+# If installed globally or in PATH
 gwt
 
 # Or use bunx for one-time execution
@@ -69,8 +88,21 @@ gwt --help
 
 # Check version
 gwt --version
-# or
-gwt -v
+
+# List worktrees
+gwt list
+
+# Add worktree for existing branch
+gwt add feature/my-feature
+
+# Create new branch with worktree
+gwt add -n feature/new-feature --base develop
+
+# Remove worktree
+gwt remove feature/old-feature
+
+# Cleanup orphaned worktrees
+gwt clean
 ```
 
 The tool presents an interactive interface with the following options:
@@ -79,38 +111,6 @@ The tool presents an interactive interface with the following options:
 2. **Create New Branch**: Guided branch creation with type selection (feature/bugfix/hotfix/release)
 3. **Manage Worktrees**: View, open, or remove existing worktrees
 4. **Cleanup Branches**: Remove merged PR branches or branches identical to their base directly from the CLI
-
-## Web UI & Custom AI Tools
-
-### Launching the Web UI
-
-```bash
-# Start the interactive CLI:
-gwt
-
-# Start the Web UI server:
-gwt serve
-# or without global install
-bunx @akiojin/gwt serve
-```
-
-- The Web UI is available by default at <http://localhost:3000>
-- System tray integration is currently supported on **Windows only** (it is automatically disabled on macOS/Linux)
-- The branch list mirrors the CLI view, including search and worktree creation
-- Detailed branch pages let you start Coding Agent sessions directly from the browser
-
-### Managing Custom Coding Agents
-
-- Navigate to **Config** (top-right button on the dashboard or `/config`) to view and edit `~/.gwt/tools.json`
-- Add/edit Coding Agents with execution type (`path` / `bunx` / `command`), default arguments, mode-specific arguments, permission skip arguments, and environment variables
-- Changes are written to the same `tools.json` file that the CLI uses, so both channels stay in sync
-- When launching from the branch detail page you can:
-  - Select any custom Coding Agent
-  - Choose `normal` / `continue` / `resume` mode
-  - Append extra arguments
-  - Opt into the same `--dangerously-skip-permissions` flow as the CLI (with confirmation)
-
-> Tip: use the Web UI to quickly iterate on custom Coding Agent definitions, then run them from either the CLI or browser without editing JSON manually.
 
 ## Advanced Workflows
 
@@ -160,112 +160,29 @@ gwt
 - **Authentication Check**: Verify GitHub CLI setup before operations
 - **Remote Sync**: Fetch latest changes before cleanup operations
 
-### Automated PR Merge
-
-The repository includes an automated PR merge workflow that streamlines the development process:
-
-- **Automatic Merge**: PRs are automatically merged when all CI checks (Test, Lint) pass and there are no conflicts
-- **Merge Method**: Uses merge commit to preserve full commit history
-- **Smart Skip Logic**: Automatically skips draft PRs, conflicted PRs, and failed CI runs
-- **Target Branch**: Active for PRs targeting `develop` branch (feature integration)
-- **Safety First**: Respects branch protection rules and requires successful CI completion
-
-**How it works:**
-
-1. PR is created targeting `develop`
-2. CI workflows (Test, Lint) run automatically
-3. When all CI checks pass and no conflicts exist, the PR is automatically merged to `develop`
-4. Changes accumulate on `develop` until ready for release
-5. Use `/release` command to create Release PR and trigger release-please
-
-**Disabling auto-merge:**
-
-- Create PRs as drafts to prevent auto-merge: `gh pr create --draft`
-- The auto-merge workflow respects this setting and will skip draft PRs
-
-For technical details, see the `.github/workflows/auto-merge.yml` workflow file.
-
 ## System Requirements
 
-- **Bun**: >= 1.0.0
-- **Node.js** (optional): Recommended >= 18.0.0 when working with Node-based tooling
-- **pnpm**: >= 8.0.0 (for CI/CD and Docker environments - uses hardlinked node_modules)
+- **Rust**: Stable toolchain (for building from source)
 - **Git**: Latest version with worktree support
 - **Coding Agent**: At least one of Claude Code, Codex CLI, or Gemini CLI should be available
 - **GitHub CLI**: Required for PR cleanup features (optional)
-- **Python**: >= 3.11 (for Spec Kit CLI)
-- **uv**: Python package manager (for Spec Kit CLI)
-- **Build tools** (Linux): `make` + a C/C++ toolchain may be required when native dependencies are built from source (common on `linux/arm64` and minimal Docker images)
-
-## Spec-Driven Development with Spec Kit
-
-This project uses **@akiojin/spec-kit**, a Japanese-localized version of GitHub's Spec Kit for spec-driven development workflows.
-
-### Installing Spec Kit CLI
-
-```bash
-# Install globally with uv
-uv tool install specify-cli --from git+https://github.com/akiojin/spec-kit.git
-
-# Verify installation
-specify --help
-```
-
-### Available Spec Kit Commands
-
-Execute these commands in Claude Code to leverage spec-driven development:
-
-- `/speckit.constitution` - Define project principles and guidelines
-- `/speckit.specify` - Create feature specifications
-- `/speckit.plan` - Create technical implementation plans
-- `/speckit.tasks` - Generate actionable task lists
-- `/speckit.implement` - Execute implementation
-
-### Optional Quality Assurance Commands
-
-- `/speckit.clarify` - Resolve ambiguities before planning
-- `/speckit.analyze` - Validate consistency between spec, plan, and tasks
-- `/speckit.checklist` - Verify requirement coverage and clarity
-
-### Spec Kit Workflow
-
-1. Start with `/speckit.constitution` to establish project foundations
-2. Use `/speckit.specify` to define what you want to build
-3. Run `/speckit.plan` to create technical architecture
-4. Generate tasks with `/speckit.tasks`
-5. Implement with `/speckit.implement`
-
-For more details, see the [Spec Kit documentation](https://github.com/akiojin/spec-kit).
+- **bun/npm**: Required for bunx/npx execution method
 
 ## Project Structure
 
-```
+```text
 @akiojin/gwt/
-├── src/
-│   ├── cli/
-│   │   └── ui/          # OpenTUI + SolidJS components for terminal UI
-│   ├── web/             # Web UI server (Express + React)
-│   ├── services/        # Core business logic
-│   ├── repositories/    # Data access layer
-│   ├── config/          # Configuration management
-│   ├── logging/         # Structured logging (pino)
-│   ├── shared/          # Shared utilities and types
-│   └── types/           # TypeScript type definitions
-├── bin/
-│   └── gwt.js # Executable wrapper
-├── .claude/             # Claude Code configuration
-│   ├── commands/        # Spec Kit slash commands
-│   ├── settings.json    # Hook configuration
-│   └── hooks/           # PreToolUse hooks for command restriction
-│       ├── block-cd-command.sh        # Restricts cd commands to worktree
-│       ├── block-git-branch-ops.sh    # Controls git branch operations
-│       └── block-file-ops.sh          # Restricts file operations to worktree
-├── .specify/            # Spec Kit scripts and templates
-│   ├── memory/          # Project memory files
-│   ├── scripts/         # Automation scripts
-│   └── templates/       # Specification templates
+├── Cargo.toml           # Workspace configuration
+├── crates/
+│   ├── gwt-cli/         # CLI entry point and TUI (Ratatui)
+│   ├── gwt-core/        # Core library (worktree management)
+│   ├── gwt-web/         # Web server (future)
+│   └── gwt-frontend/    # Web frontend (future)
+├── package.json         # npm distribution wrapper
+├── bin/gwt.js           # Binary wrapper script
+├── scripts/postinstall.js  # Binary download script
 ├── specs/               # Feature specifications
-└── dist/                # Compiled JavaScript output
+└── docs/                # Documentation
 ```
 
 ## Development
@@ -277,64 +194,54 @@ For more details, see the [Spec Kit documentation](https://github.com/akiojin/sp
 git clone https://github.com/akiojin/gwt.git
 cd gwt
 
-# Install dependencies (bun)
-bun install
+# Build the project
+cargo build
 
-# Build the project (bun)
-bun run build
+# Run tests
+cargo test
+
+# Run with debug output
+cargo run
 ```
 
-### Available Scripts
+### Available Commands
 
 ```bash
-# Development mode with auto-rebuild (bun)
-bun run dev
+# Development build
+cargo build
 
-# Production build (bun)
-bun run build
+# Release build
+cargo build --release
 
-# Type checking (bun)
-bun run type-check
+# Run tests
+cargo test
 
-# Code linting (bun)
-bun run lint
+# Run clippy lints
+cargo clippy --all-targets --all-features -- -D warnings
 
-# Clean build artifacts (bun)
-bun run clean
+# Format code
+cargo fmt
 
-# Test the CLI locally (bun)
-bun run start
+# Run the CLI locally
+cargo run
 ```
 
 ### Development Workflow
 
 1. **Fork and Clone**: Fork the repository and clone your fork
 2. **Create Branch**: Use the tool itself to create a feature branch
-3. **Development**: Make changes with TypeScript support
-4. **Testing**: Test CLI functionality with `bun run start`
-5. **Quality Checks**: Run `bun run type-check` and `bun run lint`
+3. **Development**: Make changes with Rust
+4. **Testing**: Test CLI functionality with `cargo run`
+5. **Quality Checks**: Run `cargo clippy` and `cargo fmt --check`
 6. **Pull Request**: Submit a PR with clear description
 
 ### Code Structure
 
-- **Entry Point**: `src/index.ts` - Main application logic
-- **Core Modules**: Git operations, worktree management, Claude integration
-- **UI Components**: Modular interface components in `src/ui/`
-- **Type Safety**: Comprehensive TypeScript definitions
-- **Error Handling**: Robust error management across all modules
-
-## Integration Examples
-
-### Custom Scripts
-
-```bash
-# Package.json script example
-{
-  "scripts": {
-    "worktree": "gwt"
-  }
-}
-```
+- **Entry Point**: `crates/gwt-cli/src/main.rs` - Main application logic
+- **Core Modules**: Git operations, worktree management in `gwt-core`
+- **TUI Components**: Ratatui-based interface in `gwt-cli/src/tui/`
+- **Type Safety**: Comprehensive Rust type definitions
+- **Error Handling**: Robust error management with `thiserror`
 
 ## Release Process
 
@@ -344,17 +251,17 @@ We ship releases through release-please. End users can simply install the latest
 
 ### Common Issues
 
-**Permission Errors**: Ensure Claude Code has proper directory permissions
+**Permission Errors**: Ensure proper directory permissions
 **Git Worktree Conflicts**: Use the cleanup feature to remove stale worktrees
 **GitHub Authentication**: Run `gh auth login` before using PR cleanup features
-**Bun Version**: Verify Bun >= 1.0.0 with `bun --version`
+**Binary Not Found**: Ensure the gwt binary is in your PATH
 
 ### Debug Mode
 
 For verbose output, set the environment variable:
 
 ```bash
-DEBUG=gwt gwt
+GWT_DEBUG=1 gwt
 ```
 
 ## License
@@ -367,7 +274,7 @@ We welcome contributions! Please read our contributing guidelines:
 
 1. **Issues**: Report bugs or request features via GitHub Issues
 2. **Pull Requests**: Follow the development workflow above
-3. **Code Style**: Maintain TypeScript best practices and existing patterns
+3. **Code Style**: Maintain Rust best practices and existing patterns
 4. **Documentation**: Update README and code comments for significant changes
 
 ### Contributors
@@ -380,22 +287,3 @@ We welcome contributions! Please read our contributing guidelines:
 - **Documentation**: This README and inline code documentation
 - **Issues**: GitHub Issues for bug reports and feature requests
 - **Discussions**: GitHub Discussions for questions and community support
-
-### Icon Legend
-
-- **Branch Type (first 3 columns)**:
-  - ⚡ main/develop
-  - ✨ feature
-  - 🐛 bugfix
-  - 🔥 hotfix
-  - 📦 release
-  - 📌 other
-- **Worktree Status**:
-  - 🟢 has worktree
-  - 🔴 has worktree (inaccessible)
-- **Branch Status**:
-  - ✏️ uncommitted changes
-  - ⚠️ warning
-  - ⭐ current branch
-- **Location column**: blank = local exists, `☁` = remote only
-- **Selection column**: in color environments, selection is shown with `>` prefix (with space) instead of background inversion

@@ -1,7 +1,0 @@
-preload = ["@opentui/solid/preload"]
-
-[test]
-preload = ["./scripts/solid-test-preload.ts", "./bun.setup.ts"]
-timeout = 10000
-root = "."
-maxConcurrency = 1
