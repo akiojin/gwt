@@ -95,6 +95,8 @@ fn is_prerelease(version: &str) -> bool {
 /// Wizard step types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WizardStep {
+    /// Quick Start: Show previous settings per agent (FR-050, SPEC-f47db390)
+    QuickStart,
     #[default]
     AgentSelect,
     ModelSelect,
@@ -105,6 +107,36 @@ pub enum WizardStep {
     // New branch flow
     BranchTypeSelect,
     BranchNameInput,
+}
+
+/// Quick Start option types (FR-050)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuickStartAction {
+    /// Resume with previous settings (uses sessionId)
+    ResumeWithPrevious,
+    /// Start new with previous settings (no sessionId)
+    StartNewWithPrevious,
+    /// Choose different settings
+    ChooseDifferent,
+}
+
+/// Quick Start entry for a tool (FR-050)
+#[derive(Debug, Clone)]
+pub struct QuickStartEntry {
+    /// Tool ID
+    pub tool_id: String,
+    /// Tool label (display name)
+    pub tool_label: String,
+    /// Model used
+    pub model: Option<String>,
+    /// Reasoning level (Codex only)
+    pub reasoning_level: Option<String>,
+    /// Tool version
+    pub version: Option<String>,
+    /// Session ID for resume
+    pub session_id: Option<String>,
+    /// Skip permissions setting
+    pub skip_permissions: Option<bool>,
 }
 
 /// Coding agent types
@@ -549,6 +581,13 @@ pub struct WizardState {
     pub skip_permissions: bool,
     /// Scroll offset for popup content
     pub scroll_offset: usize,
+    // Quick Start (FR-050, SPEC-f47db390)
+    /// Quick Start entries per tool
+    pub quick_start_entries: Vec<QuickStartEntry>,
+    /// Selected Quick Start index (flattened: each tool has 2 options + 1 choose different)
+    pub quick_start_index: usize,
+    /// Whether Quick Start should be shown (has previous history)
+    pub has_quick_start: bool,
 }
 
 impl WizardState {
@@ -559,13 +598,25 @@ impl WizardState {
         }
     }
 
-    /// Open wizard for existing branch
-    pub fn open_for_branch(&mut self, branch_name: &str) {
+    /// Open wizard for existing branch (FR-050)
+    /// If history entries are provided, shows Quick Start first
+    pub fn open_for_branch(&mut self, branch_name: &str, history: Vec<QuickStartEntry>) {
         self.visible = true;
         self.is_new_branch = false;
         self.branch_name = branch_name.to_string();
-        self.step = WizardStep::AgentSelect;
         self.reset_selections();
+
+        // FR-050: Show Quick Start if history exists
+        if history.is_empty() {
+            self.step = WizardStep::AgentSelect;
+            self.has_quick_start = false;
+            self.quick_start_entries.clear();
+        } else {
+            self.step = WizardStep::QuickStart;
+            self.has_quick_start = true;
+            self.quick_start_entries = history;
+            self.quick_start_index = 0;
+        }
     }
 
     /// Open wizard for new branch
@@ -574,6 +625,8 @@ impl WizardState {
         self.is_new_branch = true;
         self.step = WizardStep::BranchTypeSelect;
         self.reset_selections();
+        self.has_quick_start = false;
+        self.quick_start_entries.clear();
     }
 
     /// Reset all selections to default
@@ -595,6 +648,91 @@ impl WizardState {
         self.new_branch_name.clear();
         self.cursor = 0;
         self.scroll_offset = 0;
+        self.quick_start_index = 0;
+    }
+
+    /// Get the total number of Quick Start options (FR-050)
+    /// Each tool has 2 options (Resume, Start New) + 1 "Choose different settings"
+    pub fn quick_start_option_count(&self) -> usize {
+        if self.quick_start_entries.is_empty() {
+            0
+        } else {
+            // Each entry has 2 options, plus 1 "Choose different" at the end
+            self.quick_start_entries.len() * 2 + 1
+        }
+    }
+
+    /// Get the selected Quick Start action and tool index (FR-050)
+    /// Returns (action, tool_index) or None if "Choose different" is selected
+    pub fn selected_quick_start_action(&self) -> Option<(QuickStartAction, usize)> {
+        if self.quick_start_entries.is_empty() {
+            return None;
+        }
+
+        let entries_count = self.quick_start_entries.len();
+        let choose_different_index = entries_count * 2;
+
+        if self.quick_start_index >= choose_different_index {
+            // "Choose different settings" selected
+            return None;
+        }
+
+        // Each tool has 2 options: Resume (even index), Start New (odd index)
+        let tool_index = self.quick_start_index / 2;
+        let is_resume = self.quick_start_index.is_multiple_of(2);
+
+        let action = if is_resume {
+            QuickStartAction::ResumeWithPrevious
+        } else {
+            QuickStartAction::StartNewWithPrevious
+        };
+
+        Some((action, tool_index))
+    }
+
+    /// Apply Quick Start selection to wizard state (FR-050)
+    pub fn apply_quick_start_selection(&mut self, tool_index: usize, action: QuickStartAction) {
+        if let Some(entry) = self.quick_start_entries.get(tool_index) {
+            // Map tool_id to CodingAgent
+            self.agent = match entry.tool_id.as_str() {
+                "claude-code" => CodingAgent::ClaudeCode,
+                "codex-cli" => CodingAgent::CodexCli,
+                "gemini-cli" => CodingAgent::GeminiCli,
+                "opencode" => CodingAgent::OpenCode,
+                _ => CodingAgent::ClaudeCode,
+            };
+
+            // Set model if available
+            if let Some(model) = &entry.model {
+                self.model = model.clone();
+            }
+
+            // Set reasoning level for Codex
+            if let Some(level) = &entry.reasoning_level {
+                self.reasoning_level = match level.as_str() {
+                    "low" => ReasoningLevel::Low,
+                    "medium" => ReasoningLevel::Medium,
+                    "high" => ReasoningLevel::High,
+                    "xhigh" => ReasoningLevel::XHigh,
+                    _ => ReasoningLevel::Medium,
+                };
+            }
+
+            // Set version if available
+            if let Some(version) = &entry.version {
+                self.version = version.clone();
+            }
+
+            // Set skip permissions
+            self.skip_permissions = entry.skip_permissions.unwrap_or(false);
+
+            // Set execution mode based on action
+            self.execution_mode = match action {
+                QuickStartAction::ResumeWithPrevious => ExecutionMode::Resume,
+                QuickStartAction::StartNewWithPrevious => ExecutionMode::Normal,
+                QuickStartAction::ChooseDifferent => ExecutionMode::Normal,
+            };
+        }
     }
 
     /// Fetch versions for current agent (FR-063, FR-064)
@@ -655,6 +793,12 @@ impl WizardState {
     /// Go to next step
     pub fn next_step(&mut self) {
         self.step = match self.step {
+            WizardStep::QuickStart => {
+                // FR-050: Handle Quick Start selection
+                // Next step depends on selection - handled by caller via apply_quick_start_selection
+                // If "Choose different" is selected, go to AgentSelect
+                WizardStep::AgentSelect
+            }
             WizardStep::BranchTypeSelect => WizardStep::BranchNameInput,
             WizardStep::BranchNameInput => WizardStep::AgentSelect,
             WizardStep::AgentSelect => {
@@ -692,6 +836,11 @@ impl WizardState {
     /// Go to previous step
     pub fn prev_step(&mut self) -> bool {
         let prev = match self.step {
+            WizardStep::QuickStart => {
+                // FR-050: Escape in Quick Start closes wizard
+                self.close();
+                return false;
+            }
             WizardStep::BranchTypeSelect => {
                 self.close();
                 return false;
@@ -700,6 +849,9 @@ impl WizardState {
             WizardStep::AgentSelect => {
                 if self.is_new_branch {
                     WizardStep::BranchNameInput
+                } else if self.has_quick_start {
+                    // FR-050: Go back to Quick Start if available
+                    WizardStep::QuickStart
                 } else {
                     self.close();
                     return false;
@@ -725,6 +877,13 @@ impl WizardState {
     /// Select next item in current step
     pub fn select_next(&mut self) {
         match self.step {
+            WizardStep::QuickStart => {
+                // FR-050: Navigate Quick Start options
+                let max = self.quick_start_option_count().saturating_sub(1);
+                if self.quick_start_index < max {
+                    self.quick_start_index += 1;
+                }
+            }
             WizardStep::AgentSelect => {
                 let max = CodingAgent::all().len().saturating_sub(1);
                 if self.agent_index < max {
@@ -783,6 +942,12 @@ impl WizardState {
     /// Select previous item in current step
     pub fn select_prev(&mut self) {
         match self.step {
+            WizardStep::QuickStart => {
+                // FR-050: Navigate Quick Start options
+                if self.quick_start_index > 0 {
+                    self.quick_start_index -= 1;
+                }
+            }
             WizardStep::AgentSelect => {
                 if self.agent_index > 0 {
                     self.agent_index -= 1;
@@ -896,6 +1061,7 @@ pub fn render_wizard(state: &WizardState, frame: &mut Frame, area: Rect) {
 
     // Popup border with close hint (FR-047)
     let title = match state.step {
+        WizardStep::QuickStart => " Quick Start ",
         WizardStep::BranchTypeSelect => " Select Branch Type ",
         WizardStep::BranchNameInput => " Enter Branch Name ",
         WizardStep::AgentSelect => " Select Coding Agent ",
@@ -930,6 +1096,7 @@ pub fn render_wizard(state: &WizardState, frame: &mut Frame, area: Rect) {
     );
 
     match state.step {
+        WizardStep::QuickStart => render_quick_start_step(state, frame, content_area),
         WizardStep::BranchTypeSelect => render_branch_type_step(state, frame, content_area),
         WizardStep::BranchNameInput => render_branch_name_step(state, frame, content_area),
         WizardStep::AgentSelect => render_agent_step(state, frame, content_area),
@@ -956,6 +1123,127 @@ pub fn render_wizard(state: &WizardState, frame: &mut Frame, area: Rect) {
         .style(Style::default().fg(Color::DarkGray))
         .alignment(Alignment::Center);
     frame.render_widget(footer, footer_area);
+}
+
+/// Render Quick Start step (FR-050, SPEC-f47db390)
+fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
+    let mut items: Vec<ListItem> = Vec::new();
+
+    // Show branch name
+    let branch_info = Paragraph::new(format!("Branch: {}", state.branch_name)).style(
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    );
+    let branch_area = Rect::new(area.x, area.y, area.width, 1);
+    frame.render_widget(branch_info, branch_area);
+
+    let list_area = Rect::new(
+        area.x,
+        area.y + 2,
+        area.width,
+        area.height.saturating_sub(2),
+    );
+
+    // Build options list per tool (FR-050)
+    for (tool_idx, entry) in state.quick_start_entries.iter().enumerate() {
+        // Tool header with agent color
+        let agent_color = match entry.tool_id.as_str() {
+            "claude-code" => Color::Yellow,
+            "codex-cli" => Color::Cyan,
+            "gemini-cli" => Color::Magenta,
+            "opencode" => Color::Green,
+            _ => Color::White,
+        };
+
+        // Build tool info string with model (FR-011: Codex shows reasoning level)
+        let tool_info = if entry.tool_id == "codex-cli" {
+            if let Some(level) = &entry.reasoning_level {
+                format!(
+                    "{} ({}, Reasoning: {})",
+                    entry.tool_label,
+                    entry.model.as_deref().unwrap_or("default"),
+                    level
+                )
+            } else {
+                format!(
+                    "{} ({})",
+                    entry.tool_label,
+                    entry.model.as_deref().unwrap_or("default")
+                )
+            }
+        } else {
+            format!(
+                "{} ({})",
+                entry.tool_label,
+                entry.model.as_deref().unwrap_or("default")
+            )
+        };
+
+        // Tool header line
+        items.push(ListItem::new(tool_info).style(Style::default().fg(agent_color)));
+
+        // Resume option (show session ID if available)
+        let resume_idx = tool_idx * 2;
+        let resume_selected = state.quick_start_index == resume_idx;
+        let resume_prefix = if resume_selected { "> " } else { "  " };
+        let resume_style = if resume_selected {
+            Style::default().bg(Color::Cyan).fg(Color::Black)
+        } else {
+            Style::default()
+        };
+        let resume_text = if let Some(sid) = &entry.session_id {
+            format!(
+                "{}Resume with previous settings ({}...)",
+                resume_prefix,
+                &sid[..sid.len().min(8)]
+            )
+        } else {
+            format!("{}Resume with previous settings", resume_prefix)
+        };
+        items.push(ListItem::new(resume_text).style(resume_style));
+
+        // Start new option (FR-011: no session ID shown)
+        let new_idx = tool_idx * 2 + 1;
+        let new_selected = state.quick_start_index == new_idx;
+        let new_prefix = if new_selected { "> " } else { "  " };
+        let new_style = if new_selected {
+            Style::default().bg(Color::Cyan).fg(Color::Black)
+        } else {
+            Style::default()
+        };
+        items.push(
+            ListItem::new(format!("{}Start new with previous settings", new_prefix))
+                .style(new_style),
+        );
+
+        // Empty line between tools
+        if tool_idx < state.quick_start_entries.len() - 1 {
+            items.push(ListItem::new(""));
+        }
+    }
+
+    // Separator
+    items.push(
+        ListItem::new("─".repeat(list_area.width as usize))
+            .style(Style::default().fg(Color::DarkGray)),
+    );
+
+    // "Choose different settings" option
+    let choose_different_idx = state.quick_start_entries.len() * 2;
+    let choose_selected = state.quick_start_index >= choose_different_idx;
+    let choose_prefix = if choose_selected { "> " } else { "  " };
+    let choose_style = if choose_selected {
+        Style::default().bg(Color::Cyan).fg(Color::Black)
+    } else {
+        Style::default()
+    };
+    items.push(
+        ListItem::new(format!("{}Choose different settings...", choose_prefix)).style(choose_style),
+    );
+
+    let list = List::new(items);
+    frame.render_widget(list, list_area);
 }
 
 fn render_branch_type_step(state: &WizardState, frame: &mut Frame, area: Rect) {
@@ -1231,11 +1519,34 @@ mod tests {
     #[test]
     fn test_wizard_open_for_branch() {
         let mut state = WizardState::new();
-        state.open_for_branch("feature/test");
+        state.open_for_branch("feature/test", vec![]);
         assert!(state.visible);
         assert!(!state.is_new_branch);
         assert_eq!(state.branch_name, "feature/test");
+        // No history, so should start at AgentSelect
         assert_eq!(state.step, WizardStep::AgentSelect);
+    }
+
+    #[test]
+    fn test_wizard_open_for_branch_with_history() {
+        let mut state = WizardState::new();
+        let history = vec![QuickStartEntry {
+            tool_id: "claude-code".to_string(),
+            tool_label: "Claude Code".to_string(),
+            model: Some("sonnet".to_string()),
+            reasoning_level: None,
+            version: Some("1.0.0".to_string()),
+            session_id: Some("abc123".to_string()),
+            skip_permissions: None,
+        }];
+        state.open_for_branch("feature/test", history);
+        assert!(state.visible);
+        assert!(!state.is_new_branch);
+        assert_eq!(state.branch_name, "feature/test");
+        // With history, should start at QuickStart
+        assert_eq!(state.step, WizardStep::QuickStart);
+        assert!(state.has_quick_start);
+        assert_eq!(state.quick_start_entries.len(), 1);
     }
 
     #[test]
@@ -1250,7 +1561,7 @@ mod tests {
     #[test]
     fn test_wizard_step_navigation() {
         let mut state = WizardState::new();
-        state.open_for_branch("test");
+        state.open_for_branch("test", vec![]);
 
         assert_eq!(state.step, WizardStep::AgentSelect);
         state.next_step();
@@ -1262,7 +1573,7 @@ mod tests {
     #[test]
     fn test_wizard_codex_reasoning_step() {
         let mut state = WizardState::new();
-        state.open_for_branch("test");
+        state.open_for_branch("test", vec![]);
         state.agent = CodingAgent::CodexCli;
         state.agent_index = 1;
 
@@ -1274,7 +1585,7 @@ mod tests {
     #[test]
     fn test_wizard_selection() {
         let mut state = WizardState::new();
-        state.open_for_branch("test");
+        state.open_for_branch("test", vec![]);
 
         state.select_next();
         assert_eq!(state.agent_index, 1);

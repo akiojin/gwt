@@ -159,6 +159,35 @@ pub fn get_last_tool_usage_map(repo_root: &Path) -> HashMap<String, ToolSessionE
     map
 }
 
+/// Get session history entries for a specific branch, grouped by tool (FR-050)
+/// Returns the latest entry for each tool that was used on this branch
+/// This is used for the Quick Start feature
+pub fn get_branch_tool_history(repo_root: &Path, branch: &str) -> Vec<ToolSessionEntry> {
+    let main_root = crate::git::get_main_repo_root(repo_root);
+    let session = match load_ts_session(&main_root) {
+        Some(s) => s,
+        None => return vec![],
+    };
+
+    // Collect entries for this branch, keeping only the latest per tool
+    let mut tool_map: HashMap<String, ToolSessionEntry> = HashMap::new();
+
+    for entry in session.history {
+        if entry.branch == branch {
+            let existing = tool_map.get(&entry.tool_id);
+            if existing.is_none() || existing.unwrap().timestamp < entry.timestamp {
+                tool_map.insert(entry.tool_id.clone(), entry);
+            }
+        }
+    }
+
+    // Sort by timestamp (most recent first)
+    let mut entries: Vec<ToolSessionEntry> = tool_map.into_values().collect();
+    entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+
+    entries
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

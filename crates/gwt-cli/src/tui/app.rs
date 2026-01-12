@@ -7,6 +7,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use gwt_core::config::get_branch_tool_history;
 use gwt_core::error::GwtError;
 use gwt_core::git::Branch;
 use gwt_core::worktree::WorktreeManager;
@@ -19,8 +20,8 @@ use super::screens::{
     render_branch_list, render_confirm, render_environment, render_error, render_help, render_logs,
     render_profiles, render_settings, render_wizard, render_worktree_create, BranchItem,
     BranchListState, CodingAgent, ConfirmState, EnvironmentState, ErrorState, ExecutionMode,
-    HelpState, LogsState, ProfilesState, ReasoningLevel, SettingsState, WizardState,
-    WorktreeCreateState,
+    HelpState, LogsState, ProfilesState, QuickStartEntry, ReasoningLevel, SettingsState,
+    WizardState, WorktreeCreateState,
 };
 
 /// Configuration for launching a coding agent after TUI exits
@@ -471,7 +472,21 @@ impl Model {
                 // Open wizard for selected branch (FR-044)
                 // Always open wizard regardless of worktree status (matches TypeScript behavior)
                 if let Some(branch) = self.branch_list.selected_branch() {
-                    self.wizard.open_for_branch(&branch.name);
+                    // FR-050: Load session history for Quick Start feature
+                    let ts_history = get_branch_tool_history(&self.repo_root, &branch.name);
+                    let history: Vec<QuickStartEntry> = ts_history
+                        .into_iter()
+                        .map(|entry| QuickStartEntry {
+                            tool_id: entry.tool_id,
+                            tool_label: entry.tool_label,
+                            model: entry.model,
+                            reasoning_level: entry.reasoning_level,
+                            version: entry.tool_version,
+                            session_id: entry.session_id,
+                            skip_permissions: entry.skip_permissions,
+                        })
+                        .collect();
+                    self.wizard.open_for_branch(&branch.name, history);
                 } else {
                     self.status_message = Some("No branch selected".to_string());
                     self.status_message_time = Some(Instant::now());
