@@ -911,6 +911,8 @@ impl WizardState {
                 if self.version_index < max {
                     self.version_index += 1;
                     self.version = self.version_options[self.version_index].value.clone();
+                    // FR-062: Scroll to keep cursor in view
+                    self.ensure_version_visible();
                 }
             }
             WizardStep::ExecutionMode => {
@@ -970,6 +972,8 @@ impl WizardState {
                 if self.version_index > 0 {
                     self.version_index -= 1;
                     self.version = self.version_options[self.version_index].value.clone();
+                    // FR-062: Scroll to keep cursor in view
+                    self.ensure_version_visible();
                 }
             }
             WizardStep::ExecutionMode => {
@@ -1030,6 +1034,26 @@ impl WizardState {
     /// Get full branch name for new branch
     pub fn full_branch_name(&self) -> String {
         format!("{}{}", self.branch_type.prefix(), self.new_branch_name)
+    }
+
+    /// Ensure version selection is visible (FR-062)
+    /// Adjusts scroll_offset to keep version_index within visible area
+    fn ensure_version_visible(&mut self) {
+        const VISIBLE_ITEMS: usize = 8; // Approximate visible items in popup
+
+        // Scroll down if cursor is below visible area
+        if self.version_index >= self.scroll_offset + VISIBLE_ITEMS {
+            self.scroll_offset = self.version_index.saturating_sub(VISIBLE_ITEMS - 1);
+        }
+        // Scroll up if cursor is above visible area
+        if self.version_index < self.scroll_offset {
+            self.scroll_offset = self.version_index;
+        }
+    }
+
+    /// Get visible item count for wizard popup (FR-060)
+    pub fn visible_items_count(&self, available_height: usize) -> usize {
+        available_height.saturating_sub(2).max(3) // Leave room for header/footer
     }
 
     /// Check if wizard is complete
@@ -1417,11 +1441,29 @@ fn render_reasoning_step(state: &WizardState, frame: &mut Frame, area: Rect) {
 
 fn render_version_step(state: &WizardState, frame: &mut Frame, area: Rect) {
     let available_width = area.width as usize;
+    let available_height = area.height as usize;
+
+    // FR-060: Calculate visible items based on available height
+    let visible_count = available_height.min(state.version_options.len());
+    let scroll_offset = state.scroll_offset;
+
+    // FR-060: Show scroll indicator if there are more items
+    let has_more_above = scroll_offset > 0;
+    let has_more_below = scroll_offset + visible_count < state.version_options.len();
+
+    // Reserve space for scroll indicators
+    let list_height = if has_more_above || has_more_below {
+        visible_count.saturating_sub(1)
+    } else {
+        visible_count
+    };
 
     let items: Vec<ListItem> = state
         .version_options
         .iter()
         .enumerate()
+        .skip(scroll_offset)
+        .take(list_height)
         .map(|(i, opt)| {
             let is_selected = i == state.version_index;
             let prefix = if is_selected { "> " } else { "  " };
@@ -1460,8 +1502,33 @@ fn render_version_step(state: &WizardState, frame: &mut Frame, area: Rect) {
         })
         .collect();
 
+    // Render scroll indicator at top if needed (FR-060)
+    let mut y_offset = 0;
+    if has_more_above {
+        let indicator =
+            Paragraph::new("  ^ more above ^").style(Style::default().fg(Color::DarkGray));
+        let indicator_area = Rect::new(area.x, area.y, area.width, 1);
+        frame.render_widget(indicator, indicator_area);
+        y_offset = 1;
+    }
+
+    // Render list
+    let list_area = Rect::new(area.x, area.y + y_offset, area.width, list_height as u16);
     let list = List::new(items);
-    frame.render_widget(list, area);
+    frame.render_widget(list, list_area);
+
+    // Render scroll indicator at bottom if needed (FR-060)
+    if has_more_below {
+        let indicator =
+            Paragraph::new("  v more below v").style(Style::default().fg(Color::DarkGray));
+        let indicator_area = Rect::new(
+            area.x,
+            area.y + y_offset + list_height as u16,
+            area.width,
+            1,
+        );
+        frame.render_widget(indicator, indicator_area);
+    }
 }
 
 fn render_execution_mode_step(state: &WizardState, frame: &mut Frame, area: Rect) {
