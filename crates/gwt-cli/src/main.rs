@@ -365,31 +365,43 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<(), GwtError> {
     let npm_package = config.agent.npm_package();
 
     // Determine execution method based on version selection
-    let (executable, mut base_args) = if config.version == "installed" {
+    let (executable, mut base_args, using_local) = if config.version == "installed" {
         // FR-066: Try local command first
         match which::which(cmd_name) {
-            Ok(path) => (path.to_string_lossy().to_string(), vec![]),
+            Ok(path) => (path.to_string_lossy().to_string(), vec![], true),
             Err(_) => {
                 // FR-019: Fallback to bunx @package@latest if local not found
                 eprintln!("Note: Local '{}' not found, using bunx fallback", cmd_name);
-                get_bunx_command(npm_package, "latest")
+                let (exe, args) = get_bunx_command(npm_package, "latest");
+                (exe, args, false)
             }
         }
     } else if config.version == "latest" {
         // FR-067: Use bunx @package@latest
-        get_bunx_command(npm_package, "latest")
+        let (exe, args) = get_bunx_command(npm_package, "latest");
+        (exe, args, false)
     } else {
         // FR-068: Use bunx @package@X.Y.Z for specific version
-        get_bunx_command(npm_package, &config.version)
+        let (exe, args) = get_bunx_command(npm_package, &config.version);
+        (exe, args, false)
     };
 
     // Build agent-specific arguments
     let agent_args = build_agent_args(&config);
     base_args.extend(agent_args);
 
-    // Print launch info (FR-072)
+    // Print launch info (FR-072, FR-073)
     println!("Launching {} in {}", config.agent.label(), config.worktree_path.display());
-    println!("Version: @{}", config.version);
+    // FR-072: Version format varies by selection type
+    if config.version == "installed" {
+        println!("Version: installed");
+        // FR-073: Only show "Using locally installed" for installed selection
+        if using_local {
+            println!("Using locally installed");
+        }
+    } else {
+        println!("Version: @{}", config.version);
+    }
     println!("Command: {} {}", executable, base_args.join(" "));
     println!();
 
