@@ -742,8 +742,8 @@ impl Model {
                 if self.branch_list.filter_mode {
                     "[Esc] Exit filter | [Enter] Apply | Type to search"
                 } else {
-                    // Match TypeScript: [r] Refresh | [c] Cleanup | [x] Repair | [l] Logs
-                    "[r] Refresh | [c] Cleanup | [x] Repair | [l] Logs"
+                    // FR-004: Enter: Select, n: New, r: Refresh, c: Cleanup, x: Repair, l: Logs
+                    "[Enter] Select | [n] New | [r] Refresh | [c] Cleanup | [x] Repair | [l] Logs"
                 }
             }
             Screen::WorktreeCreate => "[Enter] Next | [Esc] Back",
