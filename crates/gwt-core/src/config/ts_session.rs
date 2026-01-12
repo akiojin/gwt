@@ -4,7 +4,7 @@
 //! stored at ~/.config/gwt/sessions/{repoName}_{hash}.json
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Local, TimeZone, Utc};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -36,10 +36,12 @@ pub struct ToolSessionEntry {
 
 impl ToolSessionEntry {
     /// Format tool usage for display (FR-070)
-    /// Returns: "ToolLabel@version"
+    /// Returns: "ToolLabel@version | YYYY-MM-DD HH:mm" (local time)
     pub fn format_tool_usage(&self) -> String {
         let version = self.tool_version.as_deref().unwrap_or("latest");
-        format!("{}@{}", self.tool_label, version)
+        let local_time = self.datetime().with_timezone(&Local);
+        let formatted_time = local_time.format("%Y-%m-%d %H:%M").to_string();
+        format!("{}@{} | {}", self.tool_label, version, formatted_time)
     }
 
     /// Get timestamp as DateTime
@@ -185,7 +187,11 @@ mod tests {
             tool_version: Some("1.0.3".to_string()),
             timestamp: 1704067200000,
         };
-        assert_eq!(entry.format_tool_usage(), "Claude Code@1.0.3");
+        // FR-070: Format includes date/time (timezone-dependent)
+        let result = entry.format_tool_usage();
+        assert!(result.starts_with("Claude Code@1.0.3 | "));
+        assert!(result.contains("-")); // Date separator
+        assert!(result.contains(":")); // Time separator
     }
 
     #[test]
@@ -203,6 +209,8 @@ mod tests {
             tool_version: None,
             timestamp: 1704067200000,
         };
-        assert_eq!(entry.format_tool_usage(), "Codex CLI@latest");
+        // FR-070: Format includes date/time (timezone-dependent)
+        let result = entry.format_tool_usage();
+        assert!(result.starts_with("Codex CLI@latest | "));
     }
 }
