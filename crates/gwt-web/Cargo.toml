@@ -1,0 +1,24 @@
+[package]
+name = "gwt-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Web server for Git Worktree Manager"
+
+[dependencies]
+gwt-core = { path = "../gwt-core" }
+thiserror.workspace = true
+tokio.workspace = true
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+rust-embed.workspace = true
+tokio-tungstenite.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

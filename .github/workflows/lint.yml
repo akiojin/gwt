@@ -6,73 +6,48 @@ on:
 
 jobs:
   lint:
-    name: ESLint & Prettier
+    name: Clippy & Rustfmt
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          bun-version: latest
-
-      - name: Install dependencies
-        run: bun install
-
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Run Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Check formatting
+        run: cargo fmt --all -- --check
       - name: Run Markdownlint
         uses: nosborn/github-action-markdown-cli@v3.3.0
         with:
           files: .
           config_file: .markdownlint.json
           ignore_files: |
-            node_modules/
+            target/
             CHANGELOG.md
-
-      - name: Run ESLint
-        run: bun run lint
-
-      - name: Check formatting
-        run: bun run format:check
-        continue-on-error: true
-
-      - name: Run TypeScript type check
-        run: bun run type-check
 
   commitlint:
     name: Commit Message Lint
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-
-      - name: Install dependencies
-        run: bun install
-
-      - name: Validate commit messages (PR commits)
-        # Note: continue-on-error for PRs with merged/diverged history
-        # Commitlint may fail on historical commits that don't follow conventions
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install -g @commitlint/cli @commitlint/config-conventional
+      - name: Validate commit messages
         continue-on-error: true
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          # Count commits in PR
           COMMIT_COUNT=$(git rev-list --count "$BASE_SHA".."$HEAD_SHA")
-          echo "Total commits in PR: $COMMIT_COUNT"
-
-          # If too many commits (merged history), check only recent commits
           if [ "$COMMIT_COUNT" -gt 100 ]; then
-            echo "Large commit count detected, checking last 50 commits only"
-            bunx commitlint --from "HEAD~50" --to "HEAD" --verbose
+            commitlint --from "HEAD~50" --to "HEAD" --verbose
           else
-            bunx commitlint --from "$BASE_SHA" --to "$HEAD_SHA" --verbose
+            commitlint --from "$BASE_SHA" --to "$HEAD_SHA" --verbose
           fi

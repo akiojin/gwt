@@ -1,12 +1,13 @@
 <!-- markdownlint-disable MD013 -->
 # 仕様一覧
 
-**最終更新**: 2026-01-09
+**最終更新**: 2026-01-11
 
 このファイルは `.specify/scripts/bash/update-specs-index.sh` により自動生成されました。
 
 | SPEC ID | タイトル | 作成日 |
 | --- | --- | --- |
+| [SPEC-1d62511e](SPEC-1d62511e/spec.md) | SPEC-1d62511e: TypeScript/Bun から Rust への完全移行 | 2026-01-11 |
 | [SPEC-d2f4762a](SPEC-d2f4762a/spec.md) | 機能仕様: ブランチ選択画面（Branch Selection Screen） | 2025-11-18 |
 | [SPEC-d27be71b](SPEC-d27be71b/spec.md) | SPEC-d27be71b: Ink.js から OpenTUI への移行 | 2026-01-04 |
 | [SPEC-c1d5bad7](SPEC-c1d5bad7/spec.md) | ログ一覧・詳細表示・クリップボードコピー機能 | 2025-12-25 |

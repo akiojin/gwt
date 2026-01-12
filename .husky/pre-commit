@@ -1,2 +1,7 @@
 #!/usr/bin/env sh
-bunx lint-staged
+
+# Run cargo fmt check on staged Rust files
+cargo fmt --all -- --check
+
+# Run cargo clippy on staged changes
+cargo clippy --all-targets --all-features -- -D warnings

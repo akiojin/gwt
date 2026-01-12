@@ -1,0 +1,24 @@
+[package]
+name = "gwt-frontend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Web frontend for Git Worktree Manager (Leptos CSR)"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+leptos.workspace = true
+leptos_router.workspace = true
+gloo-net.workspace = true
+wasm-bindgen.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+console_error_panic_hook.workspace = true
+
+[features]
+default = []
+hydrate = ["leptos/hydrate"]

@@ -200,10 +200,12 @@
 
 ## 追加作業ToDo (2026-01-10)
 - [x] **T1100** [共通] `specs/SPEC-d2f4762a/spec.md` と `specs/SPEC-d2f4762a/plan.md` に安全判定中の選択確認とバージョン選択の自動遷移防止要件を追記
-- [ ] **T1101** [US4] 安全判定中のブランチ選択で警告が表示されるテストを追加（`src/cli/ui/__tests__/solid/AppSolid.cleanup.test.tsx`）
-- [ ] **T1102** [US4] 安全判定中の`space`選択時に警告を出し、OK/Cancelで選択を制御する実装を追加（`src/cli/ui/App.solid.tsx`）
-- [ ] **T1103** [US10] バージョン選択ステップが自動遷移しないテストを追加（`src/cli/ui/__tests__/solid/components/WizardController.test.tsx` など）
-- [ ] **T1104** [US10] エージェント選択後のEnter伝播を抑止し、バージョン選択が必ず表示されるように実装を更新（`src/cli/ui/components/solid/WizardController.tsx`）
+- [x] **T1101** [US4] 安全判定中のブランチ選択で警告が表示される実装（Rust版: `crates/gwt-cli/src/tui/app.rs` - `safe_to_cleanup.is_none()` で判定中を検出）
+- [x] **T1102** [US4] 安全判定中の`space`選択時に警告を出し、OK/Cancelで選択を制御する実装（Rust版: `crates/gwt-cli/src/tui/app.rs` - `ConfirmState::unsafe_selection_warning`）
+- [x] **T1103** [US10] バージョン選択ステップが自動遷移しない実装（Rust版: `crates/gwt-cli/src/tui/screens/wizard.rs` - 各ステップで明示的Enter必須）
+- [x] **T1104** [US10] エージェント選択後のEnter伝播を抑止し、バージョン選択が必ず表示される実装（Rust版: `WizardConfirm` → `next_step()` の明示的呼び出し）
+
+> **Note**: T1101-T1104はTypeScript版のタスクでしたが、Rust移行（2026-01-11）により同等機能がRustで実装されています。
 
 ### 実装
 

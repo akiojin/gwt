@@ -1,0 +1,102 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/gwt-core",
+    "crates/gwt-cli",
+    "crates/gwt-web",
+    "crates/gwt-frontend",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/akiojin/gwt"
+authors = ["akiojin"]
+
+[workspace.dependencies]
+# Error handling
+thiserror = "2"
+
+# Git operations
+gix = { version = "0.70", default-features = false, features = [
+    "blocking-network-client",
+    "worktree-mutation",
+] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Configuration
+figment = { version = "0.10", features = ["toml", "env"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+serde_json = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+tracing-appender = "0.2"
+
+# File locking
+fs2 = "0.4"
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# TUI
+ratatui = "0.29"
+crossterm = "0.28"
+
+# Web server
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
+rust-embed = "8"
+
+# WebSocket
+tokio-tungstenite = "0.26"
+
+# Leptos (WASM frontend)
+leptos = { version = "0.7", features = ["csr"] }
+leptos_router = "0.7"
+gloo-net = "0.6"
+wasm-bindgen = "0.2"
+console_error_panic_hook = "0.1"
+
+# Testing
+tempfile = "3"
+
+# Benchmarks
+criterion = { version = "0.6", features = ["html_reports"] }
+
+# Utilities
+directories = "6"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+
+# HTTP client (blocking)
+ureq = { version = "3", features = ["json"] }
+
+# URL encoding
+urlencoding = "2"
+
+# Base64 encoding
+base64 = "0.22"
+
+# Home directory
+dirs = "6"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[profile.bench]
+inherits = "release"
+debug = true
