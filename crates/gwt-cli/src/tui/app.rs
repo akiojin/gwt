@@ -154,6 +154,8 @@ pub enum Message {
     WizardConfirm,
     /// Wizard: go back or close
     WizardBack,
+    /// Repair worktrees (x key)
+    RepairWorktrees,
 }
 
 impl Model {
@@ -475,6 +477,26 @@ impl Model {
             }
             Message::RefreshData => {
                 self.refresh_data();
+            }
+            Message::RepairWorktrees => {
+                // Run git worktree repair
+                match WorktreeManager::new(&self.repo_root) {
+                    Ok(manager) => match manager.repair() {
+                        Ok(()) => {
+                            self.status_message =
+                                Some("Worktrees repaired successfully".to_string());
+                            // Refresh data after repair
+                            self.refresh_data();
+                        }
+                        Err(e) => {
+                            self.status_message = Some(format!("Repair failed: {}", e));
+                        }
+                    },
+                    Err(e) => {
+                        self.status_message = Some(format!("Failed to open repository: {}", e));
+                    }
+                }
+                self.status_message_time = Some(Instant::now());
             }
             Message::Tab => {
                 if let Screen::Settings = self.screen {
@@ -1147,11 +1169,7 @@ pub fn run() -> Result<Option<AgentLaunchConfig>, GwtError> {
                             if matches!(model.screen, Screen::BranchList)
                                 && !model.branch_list.filter_mode
                             {
-                                // TODO: Show repair dialog
-                                model.status_message =
-                                    Some("Repair not yet implemented".to_string());
-                                model.status_message_time = Some(Instant::now());
-                                None
+                                Some(Message::RepairWorktrees)
                             } else {
                                 Some(Message::Char('x'))
                             }
