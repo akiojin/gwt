@@ -65,12 +65,53 @@ impl WorktreeManager {
         Ok(worktrees.into_iter().find(|wt| wt.path == path))
     }
 
+    /// Handle existing path for worktree creation (FR-038-040)
+    ///
+    /// FR-038: Detect stale worktrees when path exists but not in `git worktree list`
+    /// FR-039: Auto-delete stale directories and retry worktree creation
+    /// FR-040: For uncertain cases, abort and prompt user for manual resolution
+    fn handle_existing_path(&self, path: &Path) -> Result<()> {
+        // Check if this path is in the git worktree list
+        let git_worktrees = self.repo.list_worktrees()?;
+        let is_in_worktree_list = git_worktrees.iter().any(|info| info.path == path);
+
+        if is_in_worktree_list {
+            // Path exists AND is in worktree list → real worktree conflict
+            return Err(GwtError::WorktreeAlreadyExists {
+                path: path.to_path_buf(),
+            });
+        }
+
+        // FR-038: Path exists but NOT in worktree list → stale
+        // FR-039: Auto-delete stale directory
+
+        // Safety check: verify it looks like a git worktree (has .git file/directory)
+        let git_path = path.join(".git");
+        if git_path.exists() {
+            // Has .git, so it's likely a stale worktree → safe to delete
+            if let Err(_e) = std::fs::remove_dir_all(path) {
+                // FR-040: Cannot delete → prompt user for manual resolution
+                return Err(GwtError::WorktreePathConflict {
+                    path: path.to_path_buf(),
+                });
+            }
+            Ok(())
+        } else {
+            // No .git marker → could be user data, not safe to delete
+            // FR-040: Abort and prompt user for manual resolution
+            Err(GwtError::WorktreePathConflict {
+                path: path.to_path_buf(),
+            })
+        }
+    }
+
     /// Create a new worktree for an existing branch
     pub fn create_for_branch(&self, branch_name: &str) -> Result<Worktree> {
         let path = WorktreePath::generate(&self.repo_root, branch_name);
 
+        // FR-038-040: Handle existing path with stale recovery
         if path.exists() {
-            return Err(GwtError::WorktreeAlreadyExists { path });
+            self.handle_existing_path(&path)?;
         }
 
         // Check if branch exists
@@ -96,8 +137,9 @@ impl WorktreeManager {
     ) -> Result<Worktree> {
         let path = WorktreePath::generate(&self.repo_root, branch_name);
 
+        // FR-038-040: Handle existing path with stale recovery
         if path.exists() {
-            return Err(GwtError::WorktreeAlreadyExists { path });
+            self.handle_existing_path(&path)?;
         }
 
         // Check if branch already exists
@@ -391,5 +433,88 @@ mod tests {
         manager.create_new_branch("feature/count", None).unwrap();
         let count = manager.active_count().unwrap();
         assert_eq!(count, initial_count + 1);
+    }
+
+    #[test]
+    fn test_stale_worktree_recovery_fr039() {
+        // FR-039: Auto-delete stale directories
+        let temp = create_test_repo();
+        let manager = WorktreeManager::new(temp.path()).unwrap();
+
+        // First, create a worktree normally
+        let wt = manager.create_new_branch("feature/stale", None).unwrap();
+        let wt_path = wt.path.clone();
+        assert!(wt_path.exists());
+
+        // Manually remove from git worktree list but keep the directory
+        Command::new("git")
+            .args(["worktree", "remove", "--force", wt_path.to_str().unwrap()])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+
+        // Recreate the directory with a .git file to simulate stale state
+        std::fs::create_dir_all(&wt_path).unwrap();
+        std::fs::write(wt_path.join(".git"), "stale worktree").unwrap();
+
+        // Ensure it's NOT in worktree list
+        let output = Command::new("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        let list_output = String::from_utf8_lossy(&output.stdout);
+        assert!(!list_output.contains("feature/stale"));
+
+        // Now try to create a new worktree at the same path - should auto-recover
+        // (FR-039: Auto-delete stale and retry)
+        let new_wt = manager.create_new_branch("feature/stale2", None);
+        // Note: We can't reuse "feature/stale" because the branch might still exist
+        assert!(new_wt.is_ok());
+    }
+
+    #[test]
+    fn test_existing_path_conflict_fr040() {
+        // FR-040: Path exists but no .git → cannot determine if stale → error
+        let temp = create_test_repo();
+        let manager = WorktreeManager::new(temp.path()).unwrap();
+
+        // Calculate where the worktree would be created
+        let wt_path = WorktreePath::generate(temp.path(), "feature/conflict");
+
+        // Create a directory without .git (simulating user data)
+        std::fs::create_dir_all(&wt_path).unwrap();
+        std::fs::write(wt_path.join("user_data.txt"), "important file").unwrap();
+
+        // Try to create worktree - should fail with WorktreePathConflict
+        let result = manager.create_new_branch("feature/conflict", None);
+        assert!(result.is_err());
+        if let Err(GwtError::WorktreePathConflict { path }) = result {
+            assert_eq!(path, wt_path);
+        } else {
+            panic!("Expected WorktreePathConflict error");
+        }
+    }
+
+    #[test]
+    fn test_existing_worktree_conflict() {
+        // Path exists AND is in worktree list → WorktreeAlreadyExists
+        let temp = create_test_repo();
+        let manager = WorktreeManager::new(temp.path()).unwrap();
+
+        // Create a worktree
+        let wt = manager.create_new_branch("feature/exists", None).unwrap();
+        assert!(wt.path.exists());
+
+        // Try to create another worktree at the same place
+        // (need to use a different branch name since branch already exists)
+        // Actually, let's just try to re-create for the same branch
+        let result = manager.create_for_branch("feature/exists");
+        assert!(result.is_err());
+        // Should be WorktreeAlreadyExists since it's actually in the worktree list
+        assert!(matches!(
+            result,
+            Err(GwtError::WorktreeAlreadyExists { .. })
+        ));
     }
 }

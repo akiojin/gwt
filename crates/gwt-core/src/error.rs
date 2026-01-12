@@ -87,6 +87,9 @@ pub enum GwtError {
     #[error("[E2008] Worktree locked by another process: {path}")]
     WorktreeLocked { path: PathBuf },
 
+    #[error("[E2009] Path exists but not a stale worktree - please remove manually: {path}")]
+    WorktreePathConflict { path: PathBuf },
+
     // E3xxx: Configuration errors
     #[error("[E3001] Configuration file not found: {path}")]
     ConfigNotFound { path: PathBuf },
@@ -172,6 +175,7 @@ impl GwtError {
             Self::WorktreePathInvalid { .. } => "E2006",
             Self::OrphanedWorktree { .. } => "E2007",
             Self::WorktreeLocked { .. } => "E2008",
+            Self::WorktreePathConflict { .. } => "E2009",
             // E3xxx
             Self::ConfigNotFound { .. } => "E3001",
             Self::ConfigParseError { .. } => "E3002",
