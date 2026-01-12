@@ -466,11 +466,11 @@ fn build_agent_args(config: &AgentLaunchConfig) -> Vec<String> {
                 ExecutionMode::Normal => {}
             }
 
-            // Model selection (Codex uses -c config syntax)
+            // Model selection (Codex uses -m or --model)
             if let Some(model) = &config.model {
                 if !model.is_empty() {
-                    args.push("-c".to_string());
-                    args.push(format!("model=\"{}\"", model));
+                    args.push("-m".to_string());
+                    args.push(model.clone());
                 }
             }
 
