@@ -36,42 +36,50 @@ impl HelpState {
 
 /// Help content sections
 const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
-    ("Navigation", &[
-        ("Up/k", "Move selection up"),
-        ("Down/j", "Move selection down"),
-        ("PageUp", "Page up"),
-        ("PageDown", "Page down"),
-        ("Home/g", "Go to first item"),
-        ("End/G", "Go to last item"),
-    ]),
-    ("Actions", &[
-        ("Enter", "Select/Confirm"),
-        ("n", "New worktree"),
-        ("d", "Delete worktree"),
-        ("s", "Switch to worktree"),
-        ("r", "Refresh data"),
-    ]),
-    ("Screens", &[
-        ("1", "Branch list"),
-        ("2", "Worktree list"),
-        ("3", "Settings"),
-        ("4", "Logs"),
-    ]),
-    ("General", &[
-        ("?/F1", "Show this help"),
-        ("/", "Search/Filter"),
-        ("Tab", "Next section/tab"),
-        ("Esc", "Close/Cancel/Back"),
-        ("q", "Quit application"),
-    ]),
+    (
+        "Navigation",
+        &[
+            ("Up/k", "Move selection up"),
+            ("Down/j", "Move selection down"),
+            ("PageUp", "Page up"),
+            ("PageDown", "Page down"),
+            ("Home/g", "Go to first item"),
+            ("End/G", "Go to last item"),
+        ],
+    ),
+    (
+        "Actions",
+        &[
+            ("Enter", "Select/Confirm"),
+            ("n", "New worktree"),
+            ("d", "Delete worktree"),
+            ("s", "Switch to worktree"),
+            ("r", "Refresh data"),
+        ],
+    ),
+    (
+        "Screens",
+        &[
+            ("1", "Branch list"),
+            ("2", "Worktree list"),
+            ("3", "Settings"),
+            ("4", "Logs"),
+        ],
+    ),
+    (
+        "General",
+        &[
+            ("?/F1", "Show this help"),
+            ("/", "Search/Filter"),
+            ("Tab", "Next section/tab"),
+            ("Esc", "Close/Cancel/Back"),
+            ("q", "Quit application"),
+        ],
+    ),
 ];
 
 /// Render help overlay
-pub fn render_help(
-    state: &HelpState,
-    frame: &mut Frame,
-    area: Rect,
-) {
+pub fn render_help(state: &HelpState, frame: &mut Frame, area: Rect) {
     // Calculate centered area (80% width, 80% height)
     let popup_area = centered_rect(80, 80, area);
 
@@ -83,21 +91,18 @@ pub fn render_help(
 
     for (section_title, items) in HELP_SECTIONS {
         // Section header
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!(" {} ", section_title),
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-            ),
-        ]));
+        lines.push(Line::from(vec![Span::styled(
+            format!(" {} ", section_title),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )]));
         lines.push(Line::from(""));
 
         // Items
         for (key, desc) in *items {
             lines.push(Line::from(vec![
-                Span::styled(
-                    format!("  {:12}", key),
-                    Style::default().fg(Color::Yellow),
-                ),
+                Span::styled(format!("  {:12}", key), Style::default().fg(Color::Yellow)),
                 Span::raw(" - "),
                 Span::raw(*desc),
             ]));
@@ -106,18 +111,13 @@ pub fn render_help(
     }
 
     // Footer
-    lines.push(Line::from(vec![
-        Span::styled(
-            " Press Esc or ? to close ",
-            Style::default().fg(Color::DarkGray),
-        ),
-    ]));
+    lines.push(Line::from(vec![Span::styled(
+        " Press Esc or ? to close ",
+        Style::default().fg(Color::DarkGray),
+    )]));
 
     // Apply scroll offset
-    let visible_lines: Vec<Line> = lines
-        .into_iter()
-        .skip(state.scroll_offset)
-        .collect();
+    let visible_lines: Vec<Line> = lines.into_iter().skip(state.scroll_offset).collect();
 
     let help = Paragraph::new(visible_lines)
         .block(

@@ -19,18 +19,10 @@ pub struct Branch {
 
 /// Fetch worktrees from the API
 pub async fn fetch_worktrees() -> Result<Vec<Worktree>, gloo_net::Error> {
-    Request::get("/api/worktrees")
-        .send()
-        .await?
-        .json()
-        .await
+    Request::get("/api/worktrees").send().await?.json().await
 }
 
 /// Fetch branches from the API
 pub async fn fetch_branches() -> Result<Vec<Branch>, gloo_net::Error> {
-    Request::get("/api/branches")
-        .send()
-        .await?
-        .json()
-        .await
+    Request::get("/api/branches").send().await?.json().await
 }

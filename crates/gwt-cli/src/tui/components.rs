@@ -2,10 +2,7 @@
 
 #![allow(dead_code)] // UI components for future use
 
-use ratatui::{
-    prelude::*,
-    widgets::*,
-};
+use ratatui::{prelude::*, widgets::*};
 
 /// Header component with statistics
 pub struct Header<'a> {
@@ -85,8 +82,8 @@ impl<'a> Footer<'a> {
             text.push_str(msg);
         }
 
-        let footer = Paragraph::new(format!(" {} ", text))
-            .block(Block::default().borders(Borders::ALL));
+        let footer =
+            Paragraph::new(format!(" {} ", text)).block(Block::default().borders(Borders::ALL));
         frame.render_widget(footer, area);
     }
 }
@@ -151,8 +148,7 @@ impl<'a, T> ScrollableList<'a, T> {
             let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(Some("^"))
                 .end_symbol(Some("v"));
-            let mut scrollbar_state = ScrollbarState::new(self.items.len())
-                .position(self.selected);
+            let mut scrollbar_state = ScrollbarState::new(self.items.len()).position(self.selected);
             frame.render_stateful_widget(
                 scrollbar,
                 area.inner(Margin {
@@ -206,22 +202,17 @@ impl<'a> TextInput<'a> {
             Style::default()
         };
 
-        let input = Paragraph::new(display_value)
-            .style(style)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(format!(" {} ", self.label)),
-            );
+        let input = Paragraph::new(display_value).style(style).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" {} ", self.label)),
+        );
 
         frame.render_widget(input, area);
 
         // Show cursor
         if !self.value.is_empty() || self.placeholder.is_empty() {
-            frame.set_cursor_position(Position::new(
-                area.x + self.cursor as u16 + 1,
-                area.y + 1,
-            ));
+            frame.set_cursor_position(Position::new(area.x + self.cursor as u16 + 1, area.y + 1));
         }
     }
 }

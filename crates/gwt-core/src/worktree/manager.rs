@@ -141,9 +141,11 @@ impl WorktreeManager {
     /// Remove a worktree by path
     pub fn remove(&self, path: &Path, force: bool) -> Result<()> {
         // Check if worktree exists
-        let wt = self.get_by_path(path)?.ok_or_else(|| GwtError::WorktreeNotFound {
-            path: path.to_path_buf(),
-        })?;
+        let wt = self
+            .get_by_path(path)?
+            .ok_or_else(|| GwtError::WorktreeNotFound {
+                path: path.to_path_buf(),
+            })?;
 
         // Check for protected branch
         if let Some(ref branch) = wt.branch {
@@ -167,9 +169,11 @@ impl WorktreeManager {
 
     /// Remove a worktree and delete the branch
     pub fn remove_with_branch(&self, path: &Path, force: bool) -> Result<()> {
-        let wt = self.get_by_path(path)?.ok_or_else(|| GwtError::WorktreeNotFound {
-            path: path.to_path_buf(),
-        })?;
+        let wt = self
+            .get_by_path(path)?
+            .ok_or_else(|| GwtError::WorktreeNotFound {
+                path: path.to_path_buf(),
+            })?;
 
         let branch_name = wt.branch.clone();
 

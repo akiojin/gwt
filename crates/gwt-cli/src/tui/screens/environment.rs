@@ -104,7 +104,9 @@ impl EnvironmentState {
 
     /// Enter edit mode for existing variable
     pub fn start_edit(&mut self) {
-        let var_data = self.selected_variable().map(|v| (v.key.clone(), v.value.clone()));
+        let var_data = self
+            .selected_variable()
+            .map(|v| (v.key.clone(), v.value.clone()));
         if let Some((key, value)) = var_data {
             self.edit_mode = true;
             self.is_new = false;
@@ -167,8 +169,12 @@ impl EnvironmentState {
             self.cursor -= 1;
             let cursor = self.cursor;
             match self.edit_field {
-                EditField::Key => { self.edit_key.remove(cursor); }
-                EditField::Value => { self.edit_value.remove(cursor); }
+                EditField::Key => {
+                    self.edit_key.remove(cursor);
+                }
+                EditField::Value => {
+                    self.edit_value.remove(cursor);
+                }
             }
         }
     }
@@ -227,7 +233,11 @@ pub fn render_environment(state: &EnvironmentState, frame: &mut Frame, area: Rec
 
     // Header
     let profile_info = state.profile_name.as_deref().unwrap_or("default");
-    let visibility = if state.show_values { "visible" } else { "hidden" };
+    let visibility = if state.show_values {
+        "visible"
+    } else {
+        "hidden"
+    };
     let header = Paragraph::new(format!(
         "Environment Variables | Profile: {} | Values: {} ({} vars)",
         profile_info,
@@ -299,8 +309,7 @@ pub fn render_environment(state: &EnvironmentState, frame: &mut Frame, area: Rec
             width: area.width - 4,
             height: 1,
         };
-        let error_msg = Paragraph::new(error.as_str())
-            .style(Style::default().fg(Color::Red));
+        let error_msg = Paragraph::new(error.as_str()).style(Style::default().fg(Color::Red));
         frame.render_widget(error_msg, error_area);
     }
 }
@@ -310,7 +319,11 @@ fn render_edit_area(state: &EnvironmentState, frame: &mut Frame, area: Rect) {
     let edit_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow))
-        .title(if state.is_new { " New Variable " } else { " Edit Variable " });
+        .title(if state.is_new {
+            " New Variable "
+        } else {
+            " Edit Variable "
+        });
 
     let inner = edit_block.inner(area);
     frame.render_widget(edit_block, area);
@@ -325,7 +338,9 @@ fn render_edit_area(state: &EnvironmentState, frame: &mut Frame, area: Rect) {
 
     // Key field
     let key_style = if state.edit_field == EditField::Key {
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::DarkGray)
     };
@@ -342,7 +357,9 @@ fn render_edit_area(state: &EnvironmentState, frame: &mut Frame, area: Rect) {
 
     // Value field
     let value_style = if state.edit_field == EditField::Value {
-        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::DarkGray)
     };
@@ -372,8 +389,16 @@ mod tests {
     #[test]
     fn test_env_navigation() {
         let vars = vec![
-            EnvItem { key: "FOO".to_string(), value: "bar".to_string(), is_secret: false },
-            EnvItem { key: "SECRET".to_string(), value: "hidden".to_string(), is_secret: true },
+            EnvItem {
+                key: "FOO".to_string(),
+                value: "bar".to_string(),
+                is_secret: false,
+            },
+            EnvItem {
+                key: "SECRET".to_string(),
+                value: "hidden".to_string(),
+                is_secret: true,
+            },
         ];
 
         let mut state = EnvironmentState::new().with_variables(vars);
@@ -388,9 +413,11 @@ mod tests {
 
     #[test]
     fn test_edit_mode() {
-        let vars = vec![
-            EnvItem { key: "FOO".to_string(), value: "bar".to_string(), is_secret: false },
-        ];
+        let vars = vec![EnvItem {
+            key: "FOO".to_string(),
+            value: "bar".to_string(),
+            is_secret: false,
+        }];
 
         let mut state = EnvironmentState::new().with_variables(vars);
 

@@ -149,10 +149,7 @@ pub fn render_confirm(state: &ConfirmState, frame: &mut Frame, area: Rect) {
     let button_area = chunks[2];
     let button_layout = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(50),
-            Constraint::Percentage(50),
-        ])
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(button_area);
 
     // Cancel button
@@ -174,12 +171,10 @@ pub fn render_confirm(state: &ConfirmState, frame: &mut Frame, area: Rect) {
         } else {
             Style::default().bg(Color::Green).fg(Color::Black)
         }
+    } else if state.is_dangerous {
+        Style::default().fg(Color::Red)
     } else {
-        if state.is_dangerous {
-            Style::default().fg(Color::Red)
-        } else {
-            Style::default().fg(Color::Green)
-        }
+        Style::default().fg(Color::Green)
     };
     let confirm_text = format!("[ {} ]", state.confirm_label);
     let confirm = Paragraph::new(confirm_text)

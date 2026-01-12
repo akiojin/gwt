@@ -66,14 +66,14 @@ impl ErrorState {
     }
 
     /// Set severity to warning
-    pub fn as_warning(mut self) -> Self {
+    pub fn with_warning_severity(mut self) -> Self {
         self.severity = ErrorSeverity::Warning;
         self.title = "Warning".to_string();
         self
     }
 
     /// Set severity to info
-    pub fn as_info(mut self) -> Self {
+    pub fn with_info_severity(mut self) -> Self {
         self.severity = ErrorSeverity::Info;
         self.title = "Information".to_string();
         self
@@ -100,8 +100,13 @@ pub fn render_error(state: &ErrorState, frame: &mut Frame, area: Rect) {
     let dialog_width = 70.min(area.width.saturating_sub(4));
     let base_height = 8;
     let details_height = state.details.len().min(10) as u16;
-    let suggestions_height = if state.suggestions.is_empty() { 0 } else { state.suggestions.len() as u16 + 2 };
-    let dialog_height = (base_height + details_height + suggestions_height).min(area.height.saturating_sub(4));
+    let suggestions_height = if state.suggestions.is_empty() {
+        0
+    } else {
+        state.suggestions.len() as u16 + 2
+    };
+    let dialog_height =
+        (base_height + details_height + suggestions_height).min(area.height.saturating_sub(4));
 
     // Center the dialog
     let dialog_area = centered_rect(dialog_width, dialog_height, area);
@@ -252,19 +257,22 @@ mod tests {
         let error = ErrorState::from_error("Error");
         assert_eq!(error.title, "Error");
 
-        let warning = ErrorState::from_error("Warning").as_warning();
+        let warning = ErrorState::from_error("Warning").with_warning_severity();
         assert_eq!(warning.title, "Warning");
         assert_eq!(warning.severity, ErrorSeverity::Warning);
 
-        let info = ErrorState::from_error("Info").as_info();
+        let info = ErrorState::from_error("Info").with_info_severity();
         assert_eq!(info.title, "Information");
         assert_eq!(info.severity, ErrorSeverity::Info);
     }
 
     #[test]
     fn test_scroll() {
-        let mut state = ErrorState::from_error("Error")
-            .with_details(vec!["Line 1".to_string(), "Line 2".to_string(), "Line 3".to_string()]);
+        let mut state = ErrorState::from_error("Error").with_details(vec![
+            "Line 1".to_string(),
+            "Line 2".to_string(),
+            "Line 3".to_string(),
+        ]);
 
         assert_eq!(state.scroll_offset, 0);
 

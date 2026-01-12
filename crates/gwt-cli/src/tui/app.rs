@@ -16,11 +16,11 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use super::screens::{
-    BranchItem, BranchListState, HelpState, LogsState, SettingsState, WorktreeCreateState,
-    ConfirmState, ErrorState, ProfilesState, EnvironmentState, WizardState,
-    render_branch_list, render_help, render_logs, render_settings, render_worktree_create,
-    render_confirm, render_error, render_profiles, render_environment, render_wizard,
-    CodingAgent, ExecutionMode, ReasoningLevel,
+    render_branch_list, render_confirm, render_environment, render_error, render_help, render_logs,
+    render_profiles, render_settings, render_wizard, render_worktree_create, BranchItem,
+    BranchListState, CodingAgent, ConfirmState, EnvironmentState, ErrorState, ExecutionMode,
+    HelpState, LogsState, ProfilesState, ReasoningLevel, SettingsState, WizardState,
+    WorktreeCreateState,
 };
 
 /// Configuration for launching a coding agent after TUI exits
@@ -260,14 +260,12 @@ impl Model {
         // Load profiles (initialize with default profile if none exist)
         // For now, create a simple default profile until a full profile manager is implemented
         use super::screens::profiles::ProfileItem;
-        let profiles = vec![
-            ProfileItem {
-                name: "default".to_string(),
-                is_active: true,
-                env_count: 0,
-                description: Some("Default profile".to_string()),
-            },
-        ];
+        let profiles = vec![ProfileItem {
+            name: "default".to_string(),
+            is_active: true,
+            env_count: 0,
+            description: Some("Default profile".to_string()),
+        }];
         self.profiles = super::screens::ProfilesState::new().with_profiles(profiles);
         self.branch_list.active_profile = Some("default".to_string());
         self.branch_list.working_directory = Some(self.repo_root.display().to_string());
@@ -397,7 +395,8 @@ impl Model {
             Message::Char(c) => {
                 if matches!(self.screen, Screen::WorktreeCreate) {
                     self.worktree_create.insert_char(c);
-                } else if matches!(self.screen, Screen::BranchList) && self.branch_list.filter_mode {
+                } else if matches!(self.screen, Screen::BranchList) && self.branch_list.filter_mode
+                {
                     // Filter mode - add character to filter
                     self.branch_list.filter_push(c);
                 } else if matches!(self.screen, Screen::Profiles) && self.profiles.create_mode {
@@ -408,7 +407,8 @@ impl Model {
             Message::Backspace => {
                 if matches!(self.screen, Screen::WorktreeCreate) {
                     self.worktree_create.delete_char();
-                } else if matches!(self.screen, Screen::BranchList) && self.branch_list.filter_mode {
+                } else if matches!(self.screen, Screen::BranchList) && self.branch_list.filter_mode
+                {
                     self.branch_list.filter_pop();
                 } else if matches!(self.screen, Screen::Profiles) && self.profiles.create_mode {
                     self.profiles.delete_char();
@@ -431,7 +431,11 @@ impl Model {
             Message::RefreshData => {
                 self.refresh_data();
             }
-            Message::Tab => if let Screen::Settings = self.screen { self.settings.next_category() },
+            Message::Tab => {
+                if let Screen::Settings = self.screen {
+                    self.settings.next_category()
+                }
+            }
             Message::CycleFilter => {
                 if matches!(self.screen, Screen::Logs) {
                     self.logs.cycle_filter();
@@ -491,7 +495,8 @@ impl Model {
                             self.wizard.branch_name.clone()
                         };
                         self.worktree_create.branch_name = branch_name;
-                        self.worktree_create.branch_name_cursor = self.worktree_create.branch_name.len();
+                        self.worktree_create.branch_name_cursor =
+                            self.worktree_create.branch_name.len();
                         self.worktree_create.create_new_branch = self.wizard.is_new_branch;
                         // Store wizard settings for later use
                         self.wizard.close();
@@ -583,8 +588,15 @@ impl Model {
 
         // Content
         match self.screen {
-            Screen::BranchList => render_branch_list(&self.branch_list, frame, chunks[1], self.status_message.as_deref()),
-            Screen::WorktreeCreate => render_worktree_create(&self.worktree_create, frame, chunks[1]),
+            Screen::BranchList => render_branch_list(
+                &self.branch_list,
+                frame,
+                chunks[1],
+                self.status_message.as_deref(),
+            ),
+            Screen::WorktreeCreate => {
+                render_worktree_create(&self.worktree_create, frame, chunks[1])
+            }
             Screen::Settings => render_settings(&self.settings, frame, chunks[1]),
             Screen::Logs => render_logs(&self.logs, frame, chunks[1]),
             Screen::Help => render_help(&self.help, frame, chunks[1]),
@@ -607,8 +619,15 @@ impl Model {
     fn view_boxed_header(&self, frame: &mut Frame, area: Rect) {
         let version = env!("CARGO_PKG_VERSION");
         let offline_indicator = if self.is_offline { " [OFFLINE]" } else { "" };
-        let profile = self.branch_list.active_profile.as_deref().unwrap_or("default");
-        let working_dir = self.branch_list.working_directory.as_deref()
+        let profile = self
+            .branch_list
+            .active_profile
+            .as_deref()
+            .unwrap_or("default");
+        let working_dir = self
+            .branch_list
+            .working_directory
+            .as_deref()
             .unwrap_or_else(|| self.repo_root.to_str().unwrap_or("."));
 
         // Title for the box
@@ -617,7 +636,11 @@ impl Model {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
             .title(title)
-            .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+            .title_style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            );
 
         let inner = header_block.inner(area);
         frame.render_widget(header_block, area);
@@ -650,19 +673,27 @@ impl Model {
         // Line 3: Filter
         let filtered = self.branch_list.filtered_branches();
         let total = self.branch_list.branches.len();
-        let mut filter_spans = vec![
-            Span::styled("Filter(f): ", Style::default().fg(Color::DarkGray)),
-        ];
+        let mut filter_spans = vec![Span::styled(
+            "Filter(f): ",
+            Style::default().fg(Color::DarkGray),
+        )];
         if self.branch_list.filter_mode {
             if self.branch_list.filter.is_empty() {
-                filter_spans.push(Span::styled("Type to search...", Style::default().fg(Color::DarkGray)));
+                filter_spans.push(Span::styled(
+                    "Type to search...",
+                    Style::default().fg(Color::DarkGray),
+                ));
             } else {
                 filter_spans.push(Span::raw(&self.branch_list.filter));
             }
             filter_spans.push(Span::styled("|", Style::default().fg(Color::White)));
         } else {
             filter_spans.push(Span::styled(
-                if self.branch_list.filter.is_empty() { "(press f to filter)" } else { &self.branch_list.filter },
+                if self.branch_list.filter.is_empty() {
+                    "(press f to filter)"
+                } else {
+                    &self.branch_list.filter
+                },
                 Style::default().fg(Color::DarkGray),
             ));
         }
@@ -681,37 +712,53 @@ impl Model {
             Span::styled("Mode(tab): ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 self.branch_list.view_mode.label(),
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled("  ", Style::default()),
             Span::styled("Local: ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 stats.local_count.to_string(),
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled("  ", Style::default()),
             Span::styled("Remote: ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 stats.remote_count.to_string(),
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled("  ", Style::default()),
             Span::styled("Worktrees: ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 stats.worktree_count.to_string(),
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled("  ", Style::default()),
             Span::styled("Changes: ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 stats.changes_count.to_string(),
-                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
             ),
         ];
         if !relative_time.is_empty() {
             stats_spans.push(Span::styled("  ", Style::default()));
-            stats_spans.push(Span::styled("Updated: ", Style::default().fg(Color::DarkGray)));
-            stats_spans.push(Span::styled(relative_time, Style::default().fg(Color::DarkGray)));
+            stats_spans.push(Span::styled(
+                "Updated: ",
+                Style::default().fg(Color::DarkGray),
+            ));
+            stats_spans.push(Span::styled(
+                relative_time,
+                Style::default().fg(Color::DarkGray),
+            ));
         }
         frame.render_widget(Paragraph::new(Line::from(stats_spans)), inner_chunks[3]);
     }
@@ -720,14 +767,16 @@ impl Model {
         let version = env!("CARGO_PKG_VERSION");
         let offline_indicator = if self.is_offline { " [OFFLINE]" } else { "" };
 
-        let profile = self.branch_list.active_profile.as_deref().unwrap_or("default");
+        let profile = self
+            .branch_list
+            .active_profile
+            .as_deref()
+            .unwrap_or("default");
 
         // Match TypeScript format: gwt - Branch Selection v{version} | Profile(p): {name}
         let title = format!(
             " gwt - Branch Selection v{} | Profile(p): {} {}",
-            version,
-            profile,
-            offline_indicator
+            version, profile, offline_indicator
         );
         let header = Block::default()
             .borders(Borders::ALL)
@@ -752,8 +801,12 @@ impl Model {
             Screen::Help => "[Esc] Close | [Up/Down] Scroll",
             Screen::Confirm => "[Left/Right] Select | [Enter] Confirm | [Esc] Cancel",
             Screen::Error => "[Enter/Esc] Close | [Up/Down] Scroll",
-            Screen::Profiles => "[Enter] Activate | [n] New | [d] Delete | [e] Edit env | [Esc] Back",
-            Screen::Environment => "[n] New | [e] Edit | [d] Delete | [v] Toggle visibility | [Esc] Back",
+            Screen::Profiles => {
+                "[Enter] Activate | [n] New | [d] Delete | [e] Edit env | [Esc] Back"
+            }
+            Screen::Environment => {
+                "[n] New | [e] Edit | [d] Delete | [v] Toggle visibility | [Esc] Back"
+            }
         };
 
         let status = self.status_message.as_deref().unwrap_or("");
@@ -774,7 +827,6 @@ impl Model {
             .block(Block::default().borders(Borders::ALL));
         frame.render_widget(footer, area);
     }
-
 }
 
 /// Run the TUI application
@@ -824,7 +876,9 @@ pub fn run() -> Result<Option<AgentLaunchConfig>, GwtError> {
                             model.wizard.cursor_right();
                             None
                         }
-                        KeyCode::Char(c) if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
+                        KeyCode::Char(c)
+                            if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+                        {
                             model.wizard.insert_char(c);
                             None
                         }
@@ -833,154 +887,174 @@ pub fn run() -> Result<Option<AgentLaunchConfig>, GwtError> {
                 } else {
                     // Normal key handling
                     match (key.code, key.modifiers) {
-                    (KeyCode::Char('c'), KeyModifiers::CONTROL) => Some(Message::CtrlC),
-                    (KeyCode::Char('q'), KeyModifiers::NONE) => {
-                        // 'q' does not quit in BranchList (matches TypeScript behavior)
-                        Some(Message::Char('q'))
-                    }
-                    (KeyCode::Esc, _) => {
-                        // Esc behavior matches TypeScript:
-                        // - In filter mode: exit filter mode (handled by NavigateBack)
-                        // - In BranchList with filter query: clear query
-                        // - Otherwise: navigate back (but NOT quit from main screen)
-                        if matches!(model.screen, Screen::BranchList) {
-                            if model.branch_list.filter_mode {
-                                // Exit filter mode (clear query if any, then exit mode)
+                        (KeyCode::Char('c'), KeyModifiers::CONTROL) => Some(Message::CtrlC),
+                        (KeyCode::Char('q'), KeyModifiers::NONE) => {
+                            // 'q' does not quit in BranchList (matches TypeScript behavior)
+                            Some(Message::Char('q'))
+                        }
+                        (KeyCode::Esc, _) => {
+                            // Esc behavior matches TypeScript:
+                            // - In filter mode: exit filter mode (handled by NavigateBack)
+                            // - In BranchList with filter query: clear query
+                            // - Otherwise: navigate back (but NOT quit from main screen)
+                            if matches!(model.screen, Screen::BranchList) {
+                                if model.branch_list.filter_mode {
+                                    // Exit filter mode (clear query if any, then exit mode)
+                                    Some(Message::NavigateBack)
+                                } else if !model.branch_list.filter.is_empty() {
+                                    // Clear filter query
+                                    model.branch_list.clear_filter();
+                                    None
+                                } else {
+                                    // On main screen without filter - do nothing (TypeScript doesn't quit here)
+                                    None
+                                }
+                            } else {
                                 Some(Message::NavigateBack)
-                            } else if !model.branch_list.filter.is_empty() {
-                                // Clear filter query
-                                model.branch_list.clear_filter();
+                            }
+                        }
+                        (KeyCode::Char('?') | KeyCode::Char('h'), KeyModifiers::NONE) => {
+                            if matches!(model.screen, Screen::BranchList | Screen::Help) {
+                                Some(Message::NavigateTo(Screen::Help))
+                            } else {
+                                Some(Message::Char(if key.code == KeyCode::Char('?') {
+                                    '?'
+                                } else {
+                                    'h'
+                                }))
+                            }
+                        }
+                        (KeyCode::Char('n'), KeyModifiers::NONE) => {
+                            // In filter mode, 'n' goes to filter input
+                            if matches!(model.screen, Screen::BranchList)
+                                && !model.branch_list.filter_mode
+                            {
+                                // Open wizard for new branch (FR-008)
+                                Some(Message::OpenWizardNewBranch)
+                            } else if matches!(model.screen, Screen::Profiles) {
+                                // Create new profile
+                                model.profiles.enter_create_mode();
                                 None
                             } else {
-                                // On main screen without filter - do nothing (TypeScript doesn't quit here)
-                                None
+                                Some(Message::Char('n'))
                             }
-                        } else {
-                            Some(Message::NavigateBack)
                         }
-                    }
-                    (KeyCode::Char('?') | KeyCode::Char('h'), KeyModifiers::NONE) => {
-                        if matches!(model.screen, Screen::BranchList | Screen::Help) {
-                            Some(Message::NavigateTo(Screen::Help))
-                        } else {
-                            Some(Message::Char(if key.code == KeyCode::Char('?') { '?' } else { 'h' }))
+                        (KeyCode::Char('s'), KeyModifiers::NONE) => {
+                            // In filter mode, 's' goes to filter input
+                            if matches!(model.screen, Screen::BranchList)
+                                && !model.branch_list.filter_mode
+                            {
+                                Some(Message::NavigateTo(Screen::Settings))
+                            } else {
+                                Some(Message::Char('s'))
+                            }
                         }
-                    }
-                    (KeyCode::Char('n'), KeyModifiers::NONE) => {
-                        // In filter mode, 'n' goes to filter input
-                        if matches!(model.screen, Screen::BranchList) && !model.branch_list.filter_mode {
-                            // Open wizard for new branch (FR-008)
-                            Some(Message::OpenWizardNewBranch)
-                        } else if matches!(model.screen, Screen::Profiles) {
-                            // Create new profile
-                            model.profiles.enter_create_mode();
-                            None
-                        } else {
-                            Some(Message::Char('n'))
+                        (KeyCode::Char('r'), KeyModifiers::NONE) => {
+                            // In filter mode, 'r' goes to filter input
+                            if matches!(model.screen, Screen::BranchList)
+                                && !model.branch_list.filter_mode
+                            {
+                                Some(Message::RefreshData)
+                            } else {
+                                Some(Message::Char('r'))
+                            }
                         }
-                    }
-                    (KeyCode::Char('s'), KeyModifiers::NONE) => {
-                        // In filter mode, 's' goes to filter input
-                        if matches!(model.screen, Screen::BranchList) && !model.branch_list.filter_mode {
-                            Some(Message::NavigateTo(Screen::Settings))
-                        } else {
-                            Some(Message::Char('s'))
+                        (KeyCode::Char('c'), KeyModifiers::NONE) => {
+                            // Cleanup command - not yet implemented fully
+                            // In filter mode, 'c' goes to filter input
+                            if matches!(model.screen, Screen::BranchList)
+                                && !model.branch_list.filter_mode
+                            {
+                                // TODO: Show cleanup dialog
+                                model.status_message =
+                                    Some("Cleanup not yet implemented".to_string());
+                                model.status_message_time = Some(Instant::now());
+                                None
+                            } else {
+                                Some(Message::Char('c'))
+                            }
                         }
-                    }
-                    (KeyCode::Char('r'), KeyModifiers::NONE) => {
-                        // In filter mode, 'r' goes to filter input
-                        if matches!(model.screen, Screen::BranchList) && !model.branch_list.filter_mode {
-                            Some(Message::RefreshData)
-                        } else {
-                            Some(Message::Char('r'))
+                        (KeyCode::Char('x'), KeyModifiers::NONE) => {
+                            // Repair worktrees command
+                            // In filter mode, 'x' goes to filter input
+                            if matches!(model.screen, Screen::BranchList)
+                                && !model.branch_list.filter_mode
+                            {
+                                // TODO: Show repair dialog
+                                model.status_message =
+                                    Some("Repair not yet implemented".to_string());
+                                model.status_message_time = Some(Instant::now());
+                                None
+                            } else {
+                                Some(Message::Char('x'))
+                            }
                         }
-                    }
-                    (KeyCode::Char('c'), KeyModifiers::NONE) => {
-                        // Cleanup command - not yet implemented fully
-                        // In filter mode, 'c' goes to filter input
-                        if matches!(model.screen, Screen::BranchList) && !model.branch_list.filter_mode {
-                            // TODO: Show cleanup dialog
-                            model.status_message = Some("Cleanup not yet implemented".to_string());
-                            model.status_message_time = Some(Instant::now());
-                            None
-                        } else {
-                            Some(Message::Char('c'))
+                        (KeyCode::Char('p'), KeyModifiers::NONE) => {
+                            // In filter mode, 'p' goes to filter input
+                            if matches!(model.screen, Screen::BranchList)
+                                && !model.branch_list.filter_mode
+                            {
+                                Some(Message::NavigateTo(Screen::Profiles))
+                            } else {
+                                Some(Message::Char('p'))
+                            }
                         }
-                    }
-                    (KeyCode::Char('x'), KeyModifiers::NONE) => {
-                        // Repair worktrees command
-                        // In filter mode, 'x' goes to filter input
-                        if matches!(model.screen, Screen::BranchList) && !model.branch_list.filter_mode {
-                            // TODO: Show repair dialog
-                            model.status_message = Some("Repair not yet implemented".to_string());
-                            model.status_message_time = Some(Instant::now());
-                            None
-                        } else {
-                            Some(Message::Char('x'))
+                        (KeyCode::Char('l'), KeyModifiers::NONE) => {
+                            // In filter mode, 'l' goes to filter input
+                            if matches!(model.screen, Screen::BranchList)
+                                && !model.branch_list.filter_mode
+                            {
+                                Some(Message::NavigateTo(Screen::Logs))
+                            } else {
+                                Some(Message::Char('l'))
+                            }
                         }
-                    }
-                    (KeyCode::Char('p'), KeyModifiers::NONE) => {
-                        // In filter mode, 'p' goes to filter input
-                        if matches!(model.screen, Screen::BranchList) && !model.branch_list.filter_mode {
-                            Some(Message::NavigateTo(Screen::Profiles))
-                        } else {
-                            Some(Message::Char('p'))
+                        (KeyCode::Char('f'), KeyModifiers::NONE) => {
+                            if matches!(model.screen, Screen::Logs) {
+                                Some(Message::CycleFilter)
+                            } else if matches!(model.screen, Screen::BranchList) {
+                                Some(Message::ToggleFilterMode)
+                            } else {
+                                Some(Message::Char('f'))
+                            }
                         }
-                    }
-                    (KeyCode::Char('l'), KeyModifiers::NONE) => {
-                        // In filter mode, 'l' goes to filter input
-                        if matches!(model.screen, Screen::BranchList) && !model.branch_list.filter_mode {
-                            Some(Message::NavigateTo(Screen::Logs))
-                        } else {
-                            Some(Message::Char('l'))
+                        (KeyCode::Char('/'), KeyModifiers::NONE) => {
+                            if matches!(model.screen, Screen::Logs) {
+                                Some(Message::ToggleSearch)
+                            } else if matches!(model.screen, Screen::BranchList) {
+                                Some(Message::ToggleFilterMode)
+                            } else {
+                                Some(Message::Char('/'))
+                            }
                         }
-                    }
-                    (KeyCode::Char('f'), KeyModifiers::NONE) => {
-                        if matches!(model.screen, Screen::Logs) {
-                            Some(Message::CycleFilter)
-                        } else if matches!(model.screen, Screen::BranchList) {
-                            Some(Message::ToggleFilterMode)
-                        } else {
-                            Some(Message::Char('f'))
+                        (KeyCode::Char(' '), _) => {
+                            if matches!(model.screen, Screen::BranchList) {
+                                Some(Message::Space)
+                            } else {
+                                Some(Message::Char(' '))
+                            }
                         }
-                    }
-                    (KeyCode::Char('/'), KeyModifiers::NONE) => {
-                        if matches!(model.screen, Screen::Logs) {
-                            Some(Message::ToggleSearch)
-                        } else if matches!(model.screen, Screen::BranchList) {
-                            Some(Message::ToggleFilterMode)
-                        } else {
-                            Some(Message::Char('/'))
+                        (KeyCode::Tab, _) => {
+                            if matches!(model.screen, Screen::BranchList) {
+                                Some(Message::CycleViewMode)
+                            } else {
+                                Some(Message::Tab)
+                            }
                         }
-                    }
-                    (KeyCode::Char(' '), _) => {
-                        if matches!(model.screen, Screen::BranchList) {
-                            Some(Message::Space)
-                        } else {
-                            Some(Message::Char(' '))
+                        (KeyCode::Up, _) => Some(Message::SelectPrev),
+                        (KeyCode::Down, _) => Some(Message::SelectNext),
+                        (KeyCode::PageUp, _) => Some(Message::PageUp),
+                        (KeyCode::PageDown, _) => Some(Message::PageDown),
+                        (KeyCode::Home, _) => Some(Message::GoHome),
+                        (KeyCode::End, _) => Some(Message::GoEnd),
+                        (KeyCode::Enter, _) => Some(Message::Enter),
+                        (KeyCode::Backspace, _) => Some(Message::Backspace),
+                        (KeyCode::Left, _) => Some(Message::CursorLeft),
+                        (KeyCode::Right, _) => Some(Message::CursorRight),
+                        (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                            Some(Message::Char(c))
                         }
-                    }
-                    (KeyCode::Tab, _) => {
-                        if matches!(model.screen, Screen::BranchList) {
-                            Some(Message::CycleViewMode)
-                        } else {
-                            Some(Message::Tab)
-                        }
-                    }
-                    (KeyCode::Up, _) => Some(Message::SelectPrev),
-                    (KeyCode::Down, _) => Some(Message::SelectNext),
-                    (KeyCode::PageUp, _) => Some(Message::PageUp),
-                    (KeyCode::PageDown, _) => Some(Message::PageDown),
-                    (KeyCode::Home, _) => Some(Message::GoHome),
-                    (KeyCode::End, _) => Some(Message::GoEnd),
-                    (KeyCode::Enter, _) => Some(Message::Enter),
-                    (KeyCode::Backspace, _) => Some(Message::Backspace),
-                    (KeyCode::Left, _) => Some(Message::CursorLeft),
-                    (KeyCode::Right, _) => Some(Message::CursorRight),
-                    (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
-                        Some(Message::Char(c))
-                    }
-                    _ => None,
+                        _ => None,
                     }
                 };
 
@@ -1018,10 +1092,7 @@ pub fn run() -> Result<Option<AgentLaunchConfig>, GwtError> {
 
     // Restore terminal
     disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen
-    )?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
     Ok(pending_launch)

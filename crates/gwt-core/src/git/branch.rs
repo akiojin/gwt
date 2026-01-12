@@ -275,7 +275,12 @@ impl Branch {
     /// Get divergence (ahead, behind) between branch and upstream
     fn get_divergence(repo_path: &Path, branch: &str, upstream: &str) -> Result<(usize, usize)> {
         let output = Command::new("git")
-            .args(["rev-list", "--left-right", "--count", &format!("{branch}...{upstream}")])
+            .args([
+                "rev-list",
+                "--left-right",
+                "--count",
+                &format!("{branch}...{upstream}"),
+            ])
             .current_dir(repo_path)
             .output()
             .map_err(|e| GwtError::GitOperationFailed {
@@ -308,14 +313,22 @@ impl Branch {
             (0, 0) => DivergenceStatus::UpToDate,
             (a, 0) => DivergenceStatus::Ahead(a),
             (0, b) => DivergenceStatus::Behind(b),
-            (a, b) => DivergenceStatus::Diverged { ahead: a, behind: b },
+            (a, b) => DivergenceStatus::Diverged {
+                ahead: a,
+                behind: b,
+            },
         }
     }
 
     /// Check if a branch exists locally
     pub fn exists(repo_path: &Path, name: &str) -> Result<bool> {
         let output = Command::new("git")
-            .args(["show-ref", "--verify", "--quiet", &format!("refs/heads/{name}")])
+            .args([
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{name}"),
+            ])
             .current_dir(repo_path)
             .output()
             .map_err(|e| GwtError::GitOperationFailed {
@@ -482,7 +495,10 @@ mod tests {
         };
         assert_eq!(
             branch.divergence_status(),
-            DivergenceStatus::Diverged { ahead: 2, behind: 1 }
+            DivergenceStatus::Diverged {
+                ahead: 2,
+                behind: 1
+            }
         );
     }
 }

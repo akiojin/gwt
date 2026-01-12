@@ -43,7 +43,7 @@ enum BranchNameType {
 fn get_branch_name_type(name: &str) -> BranchNameType {
     let lower = name.to_lowercase();
     // Strip remote prefix for comparison
-    let name_part = lower.split('/').last().unwrap_or(&lower);
+    let name_part = lower.split('/').next_back().unwrap_or(&lower);
 
     if name_part == "main" || name_part == "master" {
         BranchNameType::Main
@@ -163,7 +163,10 @@ pub enum WorktreeStatus {
 impl BranchItem {
     pub fn from_branch(branch: &Branch, worktrees: &[Worktree]) -> Self {
         let worktree = worktrees.iter().find(|wt| {
-            wt.branch.as_ref().map(|b| b == &branch.name).unwrap_or(false)
+            wt.branch
+                .as_ref()
+                .map(|b| b == &branch.name)
+                .unwrap_or(false)
         });
 
         let worktree_status = if let Some(wt) = worktree {
@@ -268,8 +271,14 @@ impl BranchListState {
     pub fn with_branches(mut self, branches: Vec<BranchItem>) -> Self {
         // Calculate statistics
         self.stats = Statistics {
-            local_count: branches.iter().filter(|b| b.branch_type == BranchType::Local).count(),
-            remote_count: branches.iter().filter(|b| b.branch_type == BranchType::Remote || b.has_remote_counterpart).count(),
+            local_count: branches
+                .iter()
+                .filter(|b| b.branch_type == BranchType::Local)
+                .count(),
+            remote_count: branches
+                .iter()
+                .filter(|b| b.branch_type == BranchType::Remote || b.has_remote_counterpart)
+                .count(),
             worktree_count: branches.iter().filter(|b| b.has_worktree).count(),
             changes_count: branches.iter().filter(|b| b.has_changes).count(),
         };
@@ -293,10 +302,12 @@ impl BranchListState {
         // Apply view mode filter
         result = match self.view_mode {
             ViewMode::All => result,
-            ViewMode::Local => result.into_iter()
+            ViewMode::Local => result
+                .into_iter()
                 .filter(|b| b.branch_type == BranchType::Local)
                 .collect(),
-            ViewMode::Remote => result.into_iter()
+            ViewMode::Remote => result
+                .into_iter()
                 .filter(|b| b.branch_type == BranchType::Remote || b.has_remote_counterpart)
                 .collect(),
         };
@@ -304,15 +315,13 @@ impl BranchListState {
         // Apply text filter
         if !self.filter.is_empty() {
             let filter_lower = self.filter.to_lowercase();
-            result = result.into_iter()
-                .filter(|b| b.name.to_lowercase().contains(&filter_lower))
-                .collect();
+            result.retain(|b| b.name.to_lowercase().contains(&filter_lower));
         }
 
         // Check if main branch exists for develop priority
-        let has_main = result.iter().any(|b| {
-            get_branch_name_type(&b.name) == BranchNameType::Main
-        });
+        let has_main = result
+            .iter()
+            .any(|b| get_branch_name_type(&b.name) == BranchNameType::Main);
 
         // Sort according to 7-level priority rules
         result.sort_by(|a, b| {
@@ -585,23 +594,25 @@ fn render_header(state: &BranchListState, frame: &mut Frame, area: Rect) {
     let mut spans = vec![
         Span::styled(
             title,
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!(" v{}", version),
             Style::default().fg(Color::DarkGray),
         ),
         Span::styled(" | ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            working_dir,
-            Style::default().fg(Color::White),
-        ),
+        Span::styled(working_dir, Style::default().fg(Color::White)),
     ];
 
     // Add profile info if available (FR-001a)
     if let Some(profile) = &state.active_profile {
         spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
-        spans.push(Span::styled("Profile(p): ", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(
+            "Profile(p): ",
+            Style::default().fg(Color::DarkGray),
+        ));
         spans.push(Span::styled(profile, Style::default().fg(Color::Yellow)));
     }
 
@@ -614,20 +625,28 @@ fn render_filter_line(state: &BranchListState, frame: &mut Frame, area: Rect) {
     let filtered = state.filtered_branches();
     let total = state.branches.len();
 
-    let mut spans = vec![
-        Span::styled("Filter(f): ", Style::default().fg(Color::DarkGray)),
-    ];
+    let mut spans = vec![Span::styled(
+        "Filter(f): ",
+        Style::default().fg(Color::DarkGray),
+    )];
 
     if state.filter_mode {
         if state.filter.is_empty() {
-            spans.push(Span::styled("Type to search...", Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled(
+                "Type to search...",
+                Style::default().fg(Color::DarkGray),
+            ));
         } else {
             spans.push(Span::raw(&state.filter));
         }
         spans.push(Span::styled("|", Style::default().fg(Color::White)));
     } else {
         spans.push(Span::styled(
-            if state.filter.is_empty() { "(press f to filter)" } else { &state.filter },
+            if state.filter.is_empty() {
+                "(press f to filter)"
+            } else {
+                &state.filter
+            },
             Style::default().fg(Color::DarkGray),
         ));
     }
@@ -649,39 +668,55 @@ fn render_stats_line(state: &BranchListState, frame: &mut Frame, area: Rect) {
         Span::styled("Mode(tab): ", Style::default().fg(Color::DarkGray)),
         Span::styled(
             state.view_mode.label(),
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled("  ", Style::default()),
         Span::styled("Local: ", Style::default().fg(Color::DarkGray)),
         Span::styled(
             state.stats.local_count.to_string(),
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled("  ", Style::default()),
         Span::styled("Remote: ", Style::default().fg(Color::DarkGray)),
         Span::styled(
             state.stats.remote_count.to_string(),
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled("  ", Style::default()),
         Span::styled("Worktrees: ", Style::default().fg(Color::DarkGray)),
         Span::styled(
             state.stats.worktree_count.to_string(),
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled("  ", Style::default()),
         Span::styled("Changes: ", Style::default().fg(Color::DarkGray)),
         Span::styled(
             state.stats.changes_count.to_string(),
-            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
         ),
     ];
 
     let relative_time = state.format_relative_time();
     if !relative_time.is_empty() {
         spans.push(Span::styled("  ", Style::default()));
-        spans.push(Span::styled("Updated: ", Style::default().fg(Color::DarkGray)));
-        spans.push(Span::styled(relative_time, Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(
+            "Updated: ",
+            Style::default().fg(Color::DarkGray),
+        ));
+        spans.push(Span::styled(
+            relative_time,
+            Style::default().fg(Color::DarkGray),
+        ));
     }
 
     let line = Line::from(spans);
@@ -692,16 +727,34 @@ fn render_stats_line(state: &BranchListState, frame: &mut Frame, area: Rect) {
 fn render_legend_line(frame: &mut Frame, area: Rect) {
     let spans = vec![
         Span::styled("Legend: ", Style::default().fg(Color::DarkGray)),
-        Span::styled("o", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "o",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(" Safe", Style::default().fg(Color::Green)),
         Span::styled("  ", Style::default()),
-        Span::styled("!", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "!",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ),
         Span::styled(" Uncommitted", Style::default().fg(Color::Red)),
         Span::styled("  ", Style::default()),
-        Span::styled("!", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "!",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(" Unpushed", Style::default().fg(Color::Yellow)),
         Span::styled("  ", Style::default()),
-        Span::styled("*", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "*",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(" Unmerged", Style::default().fg(Color::Yellow)),
     ];
 
@@ -760,19 +813,18 @@ fn render_branches(state: &BranchListState, frame: &mut Frame, area: Rect) {
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("^"))
             .end_symbol(Some("v"));
-        let mut scrollbar_state = ScrollbarState::new(filtered.len())
-            .position(state.selected);
-        frame.render_stateful_widget(
-            scrollbar,
-            area,
-            &mut scrollbar_state,
-        );
+        let mut scrollbar_state = ScrollbarState::new(filtered.len()).position(state.selected);
+        frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
     }
 }
 
 /// Render a single branch row
 /// FR-070: Tool display format: ToolName@X.Y.Z | YYYY-MM-DD HH:mm (local time)
-fn render_branch_row(branch: &BranchItem, is_selected: bool, selected_set: &HashSet<String>) -> ListItem<'static> {
+fn render_branch_row(
+    branch: &BranchItem,
+    is_selected: bool,
+    selected_set: &HashSet<String>,
+) -> ListItem<'static> {
     let is_checked = selected_set.contains(&branch.name);
     let selection_icon = if is_checked { "[*]" } else { "[ ]" };
     let (worktree_icon, worktree_color) = branch.worktree_icon();
@@ -809,12 +861,18 @@ fn render_branch_row(branch: &BranchItem, is_selected: bool, selected_set: &Hash
         let agent_id = tool.split('@').next();
         let agent_color = get_agent_color(agent_id);
         spans.push(Span::raw(" "));
-        spans.push(Span::styled(tool.to_string(), Style::default().fg(agent_color)));
+        spans.push(Span::styled(
+            tool.to_string(),
+            Style::default().fg(agent_color),
+        ));
     } else if let Some(timestamp) = branch.last_commit_timestamp {
         // No tool usage, but has timestamp (from git commit)
         let formatted = format_local_datetime(timestamp);
         spans.push(Span::raw(" "));
-        spans.push(Span::styled(formatted, Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(
+            formatted,
+            Style::default().fg(Color::DarkGray),
+        ));
     }
 
     let style = if is_selected {
@@ -827,19 +885,28 @@ fn render_branch_row(branch: &BranchItem, is_selected: bool, selected_set: &Hash
 }
 
 /// Render worktree path line or status message
-fn render_worktree_path(state: &BranchListState, frame: &mut Frame, area: Rect, status_message: Option<&str>) {
+fn render_worktree_path(
+    state: &BranchListState,
+    frame: &mut Frame,
+    area: Rect,
+    status_message: Option<&str>,
+) {
     // If there's a status message, show it instead of worktree path
     if let Some(status) = status_message {
-        let line = Line::from(vec![
-            Span::styled(status, Style::default().fg(Color::Yellow)),
-        ]);
+        let line = Line::from(vec![Span::styled(
+            status,
+            Style::default().fg(Color::Yellow),
+        )]);
         frame.render_widget(Paragraph::new(line), area);
         return;
     }
 
     // Otherwise, show worktree path
     let path = if let Some(branch) = state.selected_branch() {
-        branch.worktree_path.clone().unwrap_or_else(|| "(none)".to_string())
+        branch
+            .worktree_path
+            .clone()
+            .unwrap_or_else(|| "(none)".to_string())
     } else {
         "(none)".to_string()
     };

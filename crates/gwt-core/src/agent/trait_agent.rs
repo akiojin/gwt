@@ -103,11 +103,7 @@ pub trait AgentTrait: Send + Sync {
     async fn run_task(&self, prompt: &str) -> Result<TaskResult>;
 
     /// Run a task in a specific directory (path as &Path)
-    async fn run_in_directory_path(
-        &self,
-        directory: &Path,
-        prompt: &str,
-    ) -> Result<TaskResult>;
+    async fn run_in_directory_path(&self, directory: &Path, prompt: &str) -> Result<TaskResult>;
 
     /// Cancel a running task
     async fn cancel(&self) -> Result<()>;

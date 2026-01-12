@@ -36,8 +36,8 @@ impl ClaudeAgent {
             return None;
         }
 
-        let version = get_command_version("claude", "--version")
-            .unwrap_or_else(|| "unknown".to_string());
+        let version =
+            get_command_version("claude", "--version").unwrap_or_else(|| "unknown".to_string());
 
         // Check if authenticated
         let authenticated = std::process::Command::new("claude")
@@ -96,21 +96,18 @@ impl AgentTrait for ClaudeAgent {
     }
 
     async fn run_task(&self, prompt: &str) -> Result<TaskResult> {
-        self.run_in_directory_path(&self.working_dir.clone(), prompt).await
+        self.run_in_directory_path(&self.working_dir.clone(), prompt)
+            .await
     }
 
-    async fn run_in_directory_path(
-        &self,
-        directory: &Path,
-        prompt: &str,
-    ) -> Result<TaskResult> {
+    async fn run_in_directory_path(&self, directory: &Path, prompt: &str) -> Result<TaskResult> {
         let start = Instant::now();
 
         let mut cmd = self.build_command(prompt, directory);
 
-        let child = cmd.spawn().map_err(|e| {
-            GwtError::Internal(format!("Failed to spawn Claude Code: {}", e))
-        })?;
+        let child = cmd
+            .spawn()
+            .map_err(|e| GwtError::Internal(format!("Failed to spawn Claude Code: {}", e)))?;
 
         // Store child for potential cancellation
         {
@@ -118,9 +115,10 @@ impl AgentTrait for ClaudeAgent {
             *child_guard = None; // We can't store the child directly since we need to wait on it
         }
 
-        let output = child.wait_with_output().await.map_err(|e| {
-            GwtError::Internal(format!("Failed to run Claude Code: {}", e))
-        })?;
+        let output = child
+            .wait_with_output()
+            .await
+            .map_err(|e| GwtError::Internal(format!("Failed to run Claude Code: {}", e)))?;
 
         let duration = start.elapsed().as_millis() as u64;
 
@@ -151,9 +149,10 @@ impl AgentTrait for ClaudeAgent {
             guard.take()
         };
         if let Some(mut child) = child_opt {
-            child.kill().await.map_err(|e| {
-                GwtError::Internal(format!("Failed to kill process: {}", e))
-            })?;
+            child
+                .kill()
+                .await
+                .map_err(|e| GwtError::Internal(format!("Failed to kill process: {}", e)))?;
         }
         Ok(())
     }

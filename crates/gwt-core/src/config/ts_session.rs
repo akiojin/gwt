@@ -107,10 +107,18 @@ pub fn load_ts_session(repo_root: &Path) -> Option<TsSessionData> {
 
 /// Get the last tool usage for each branch from TypeScript session history
 /// Returns a map of branch name -> ToolSessionEntry
+///
+/// This function automatically resolves worktree paths to the main repository root
+/// before looking up the session file, ensuring compatibility with TypeScript session files
+/// which are keyed by main repository path.
 pub fn get_last_tool_usage_map(repo_root: &Path) -> HashMap<String, ToolSessionEntry> {
     let mut map = HashMap::new();
 
-    let session = match load_ts_session(repo_root) {
+    // Resolve worktree path to main repository root (FR-070)
+    // TypeScript session files are keyed by main repo path, not worktree path
+    let main_root = crate::git::get_main_repo_root(repo_root);
+
+    let session = match load_ts_session(&main_root) {
         Some(s) => s,
         None => return map,
     };

@@ -98,7 +98,7 @@ pub enum WizardStep {
     #[default]
     AgentSelect,
     ModelSelect,
-    ReasoningLevel,    // Codex only
+    ReasoningLevel, // Codex only
     VersionSelect,
     ExecutionMode,
     SkipPermissions,
@@ -140,10 +140,10 @@ impl CodingAgent {
     /// Claude Code=yellow, Codex=cyan, Gemini=magenta, OpenCode=green
     pub fn color(&self) -> Color {
         match self {
-            CodingAgent::ClaudeCode => Color::Yellow,             // Yellow (#f6e05e)
-            CodingAgent::CodexCli => Color::Cyan,                 // Cyan (#4fd1c5)
-            CodingAgent::GeminiCli => Color::Magenta,             // Magenta (#d53f8c)
-            CodingAgent::OpenCode => Color::Green,                // Green (#48bb78)
+            CodingAgent::ClaudeCode => Color::Yellow, // Yellow (#f6e05e)
+            CodingAgent::CodexCli => Color::Cyan,     // Cyan (#4fd1c5)
+            CodingAgent::GeminiCli => Color::Magenta, // Magenta (#d53f8c)
+            CodingAgent::OpenCode => Color::Green,    // Green (#48bb78)
         }
     }
 
@@ -225,9 +225,7 @@ pub fn fetch_package_versions(package_name: &str) -> Vec<VersionInfo> {
     // Collect versions with publish times
     let mut versions_with_time: Vec<(String, String)> = versions
         .keys()
-        .filter_map(|v| {
-            time.get(v).map(|t| (v.clone(), t.clone()))
-        })
+        .filter_map(|v| time.get(v).map(|t| (v.clone(), t.clone())))
         .collect();
 
     // Sort by publish date (newest first)
@@ -250,10 +248,7 @@ pub fn detect_installed_version(agent: CodingAgent) -> Option<InstalledVersionIn
     let cmd_name = agent.command_name();
 
     // Try to get version using --version flag
-    let output = Command::new(cmd_name)
-        .arg("--version")
-        .output()
-        .ok()?;
+    let output = Command::new(cmd_name).arg("--version").output().ok()?;
 
     if !output.status.success() {
         return None;
@@ -261,21 +256,18 @@ pub fn detect_installed_version(agent: CodingAgent) -> Option<InstalledVersionIn
 
     let version_str = String::from_utf8_lossy(&output.stdout);
     // Parse version from output (format varies: "v1.0.3", "1.0.3", "claude 1.0.3", etc.)
-    let version = version_str
-        .lines()
-        .next()
-        .and_then(|line| {
-            // Extract version number (semver pattern)
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            parts.iter().find_map(|p| {
-                let v = p.trim_start_matches('v');
-                if v.chars().next().map_or(false, |c| c.is_ascii_digit()) {
-                    Some(v.to_string())
-                } else {
-                    None
-                }
-            })
-        })?;
+    let version = version_str.lines().next().and_then(|line| {
+        // Extract version number (semver pattern)
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        parts.iter().find_map(|p| {
+            let v = p.trim_start_matches('v');
+            if v.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                Some(v.to_string())
+            } else {
+                None
+            }
+        })
+    })?;
 
     // Try to get path using 'which' command
     let path = Command::new("which")
@@ -324,7 +316,12 @@ impl ReasoningLevel {
     }
 
     pub fn all() -> &'static [ReasoningLevel] {
-        &[ReasoningLevel::Low, ReasoningLevel::Medium, ReasoningLevel::High, ReasoningLevel::XHigh]
+        &[
+            ReasoningLevel::Low,
+            ReasoningLevel::Medium,
+            ReasoningLevel::High,
+            ReasoningLevel::XHigh,
+        ]
     }
 }
 
@@ -365,13 +362,22 @@ impl ModelOption {
     }
 
     fn with_base_levels(mut self) -> Self {
-        self.inference_levels = vec![ReasoningLevel::High, ReasoningLevel::Medium, ReasoningLevel::Low];
+        self.inference_levels = vec![
+            ReasoningLevel::High,
+            ReasoningLevel::Medium,
+            ReasoningLevel::Low,
+        ];
         self.default_inference = Some(ReasoningLevel::High);
         self
     }
 
     fn with_max_levels(mut self) -> Self {
-        self.inference_levels = vec![ReasoningLevel::XHigh, ReasoningLevel::High, ReasoningLevel::Medium, ReasoningLevel::Low];
+        self.inference_levels = vec![
+            ReasoningLevel::XHigh,
+            ReasoningLevel::High,
+            ReasoningLevel::Medium,
+            ReasoningLevel::Low,
+        ];
         self.default_inference = Some(ReasoningLevel::Medium);
         self
     }
@@ -449,7 +455,11 @@ impl ExecutionMode {
     }
 
     pub fn all() -> &'static [ExecutionMode] {
-        &[ExecutionMode::Normal, ExecutionMode::Continue, ExecutionMode::Resume]
+        &[
+            ExecutionMode::Normal,
+            ExecutionMode::Continue,
+            ExecutionMode::Resume,
+        ]
     }
 }
 
@@ -483,7 +493,12 @@ impl BranchType {
     }
 
     pub fn all() -> &'static [BranchType] {
-        &[BranchType::Feature, BranchType::Bugfix, BranchType::Hotfix, BranchType::Release]
+        &[
+            BranchType::Feature,
+            BranchType::Bugfix,
+            BranchType::Hotfix,
+            BranchType::Release,
+        ]
     }
 }
 
@@ -751,7 +766,10 @@ impl WizardState {
             }
             WizardStep::BranchTypeSelect => {
                 let types = BranchType::all();
-                let current_idx = types.iter().position(|t| *t == self.branch_type).unwrap_or(0);
+                let current_idx = types
+                    .iter()
+                    .position(|t| *t == self.branch_type)
+                    .unwrap_or(0);
                 if current_idx < types.len() - 1 {
                     self.branch_type = types[current_idx + 1];
                 }
@@ -800,7 +818,10 @@ impl WizardState {
             }
             WizardStep::BranchTypeSelect => {
                 let types = BranchType::all();
-                let current_idx = types.iter().position(|t| *t == self.branch_type).unwrap_or(0);
+                let current_idx = types
+                    .iter()
+                    .position(|t| *t == self.branch_type)
+                    .unwrap_or(0);
                 if current_idx > 0 {
                     self.branch_type = types[current_idx - 1];
                 }
@@ -859,8 +880,7 @@ pub fn render_wizard(state: &WizardState, frame: &mut Frame, area: Rect) {
     }
 
     // Render dark overlay background (FR-048 alternative implementation)
-    let overlay = Block::default()
-        .style(Style::default().bg(Color::Rgb(20, 20, 30)));
+    let overlay = Block::default().style(Style::default().bg(Color::Rgb(20, 20, 30)));
     frame.render_widget(overlay, area);
 
     // Calculate popup dimensions (60% of screen, min 40x15) per FR-045
@@ -889,7 +909,13 @@ pub fn render_wizard(state: &WizardState, frame: &mut Frame, area: Rect) {
     let popup_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan))
-        .title_top(Line::from(title).style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)))
+        .title_top(
+            Line::from(title).style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        )
         .title_top(Line::from(" [ESC] ").right_aligned());
 
     let inner_area = popup_block.inner(popup_area);
@@ -964,8 +990,11 @@ fn render_branch_name_step(state: &WizardState, frame: &mut Frame, area: Rect) {
         .split(area);
 
     // Label
-    let label = Paragraph::new(format!("Branch: {}", state.branch_type.prefix()))
-        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+    let label = Paragraph::new(format!("Branch: {}", state.branch_type.prefix())).style(
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    );
     frame.render_widget(label, chunks[0]);
 
     // Input field
@@ -984,18 +1013,18 @@ fn render_branch_name_step(state: &WizardState, frame: &mut Frame, area: Rect) {
 
     // Show cursor
     if !state.new_branch_name.is_empty() || state.cursor == 0 {
-        frame.set_cursor_position((
-            chunks[2].x + state.cursor as u16,
-            chunks[2].y,
-        ));
+        frame.set_cursor_position((chunks[2].x + state.cursor as u16, chunks[2].y));
     }
 }
 
 fn render_agent_step(state: &WizardState, frame: &mut Frame, area: Rect) {
     // Show branch name if selecting for existing branch
     let start_y = if !state.is_new_branch {
-        let branch_info = Paragraph::new(format!("Branch: {}", state.branch_name))
-            .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+        let branch_info = Paragraph::new(format!("Branch: {}", state.branch_name)).style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        );
         frame.render_widget(branch_info, Rect::new(area.x, area.y, area.width, 1));
         2
     } else {
@@ -1018,7 +1047,12 @@ fn render_agent_step(state: &WizardState, frame: &mut Frame, area: Rect) {
         })
         .collect();
 
-    let list_area = Rect::new(area.x, area.y + start_y as u16, area.width, area.height.saturating_sub(start_y as u16));
+    let list_area = Rect::new(
+        area.x,
+        area.y + start_y as u16,
+        area.width,
+        area.height.saturating_sub(start_y as u16),
+    );
     let list = List::new(items);
     frame.render_widget(list, list_area);
 }
@@ -1046,8 +1080,8 @@ fn render_model_step(state: &WizardState, frame: &mut Frame, area: Rect) {
                 let label_width = model.label.len().min(25);
                 let separator = " - ";
                 let prefix_len = 2; // "> " or "  "
-                let max_desc_width = available_width
-                    .saturating_sub(prefix_len + label_width + separator.len());
+                let max_desc_width =
+                    available_width.saturating_sub(prefix_len + label_width + separator.len());
 
                 let truncated_desc = if desc.len() > max_desc_width && max_desc_width > 3 {
                     format!("{}...", &desc[..max_desc_width.saturating_sub(3)])
@@ -1114,8 +1148,8 @@ fn render_version_step(state: &WizardState, frame: &mut Frame, area: Rect) {
                 let label_width = opt.label.len().min(20);
                 let separator = " - ";
                 let prefix_len = 2;
-                let max_desc_width = available_width
-                    .saturating_sub(prefix_len + label_width + separator.len());
+                let max_desc_width =
+                    available_width.saturating_sub(prefix_len + label_width + separator.len());
 
                 let truncated_desc = if desc.len() > max_desc_width && max_desc_width > 3 {
                     format!("{}...", &desc[..max_desc_width.saturating_sub(3)])

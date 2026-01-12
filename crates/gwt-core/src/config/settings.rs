@@ -135,8 +135,7 @@ impl Settings {
 
     /// Get global config directory
     pub fn global_config_dir() -> Option<PathBuf> {
-        directories::ProjectDirs::from("", "", "gwt")
-            .map(|dirs| dirs.config_dir().to_path_buf())
+        directories::ProjectDirs::from("", "", "gwt").map(|dirs| dirs.config_dir().to_path_buf())
     }
 
     /// Get log directory path

@@ -176,11 +176,7 @@ impl LogsState {
 }
 
 /// Render logs screen
-pub fn render_logs(
-    state: &LogsState,
-    frame: &mut Frame,
-    area: Rect,
-) {
+pub fn render_logs(state: &LogsState, frame: &mut Frame, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -213,8 +209,7 @@ fn render_header(state: &LogsState, frame: &mut Frame, area: Rect) {
         state.filter.name()
     );
 
-    let header = Paragraph::new("")
-        .block(Block::default().borders(Borders::ALL).title(title));
+    let header = Paragraph::new("").block(Block::default().borders(Borders::ALL).title(title));
     frame.render_widget(header, area);
 }
 
@@ -254,11 +249,13 @@ fn render_entries(state: &LogsState, frame: &mut Frame, area: Rect) {
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("^"))
             .end_symbol(Some("v"));
-        let mut scrollbar_state = ScrollbarState::new(filtered.len())
-            .position(state.selected);
+        let mut scrollbar_state = ScrollbarState::new(filtered.len()).position(state.selected);
         frame.render_stateful_widget(
             scrollbar,
-            area.inner(Margin { vertical: 1, horizontal: 0 }),
+            area.inner(Margin {
+                vertical: 1,
+                horizontal: 0,
+            }),
             &mut scrollbar_state,
         );
     }
@@ -297,10 +294,7 @@ fn render_log_entry(entry: &LogEntry, is_selected: bool) -> ListItem<'static> {
             Style::default().fg(Color::DarkGray),
         ),
         Span::raw(" "),
-        Span::styled(
-            format!("{:5}", entry.level),
-            level_style,
-        ),
+        Span::styled(format!("{:5}", entry.level), level_style),
         Span::raw(" "),
         Span::raw(entry.message.clone()),
     ];
@@ -327,14 +321,12 @@ fn render_search_bar(state: &LogsState, frame: &mut Frame, area: Rect) {
         Style::default()
     };
 
-    let search = Paragraph::new(display_text)
-        .style(text_style)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan))
-                .title(" Search "),
-        );
+    let search = Paragraph::new(display_text).style(text_style).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(" Search "),
+    );
     frame.render_widget(search, area);
 
     // Cursor
@@ -346,8 +338,8 @@ fn render_search_bar(state: &LogsState, frame: &mut Frame, area: Rect) {
 
 fn render_instructions(frame: &mut Frame, area: Rect) {
     let instructions = "[Up/Down] Navigate | [f] Filter | [/] Search | [Esc] Back";
-    let paragraph = Paragraph::new(format!(" {} ", instructions))
-        .block(Block::default().borders(Borders::ALL));
+    let paragraph =
+        Paragraph::new(format!(" {} ", instructions)).block(Block::default().borders(Borders::ALL));
     frame.render_widget(paragraph, area);
 }
 

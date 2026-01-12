@@ -44,7 +44,9 @@ impl ProfilesState {
     /// Initialize with profiles
     pub fn with_profiles(mut self, profiles: Vec<ProfileItem>) -> Self {
         self.profiles = profiles;
-        self.active_profile = self.profiles.iter()
+        self.active_profile = self
+            .profiles
+            .iter()
             .find(|p| p.is_active)
             .map(|p| p.name.clone());
         self
@@ -123,7 +125,10 @@ impl ProfilesState {
         if self.profiles.iter().any(|p| p.name == name) {
             return Err("Profile with this name already exists");
         }
-        if !name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+        if !name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+        {
             return Err("Profile name can only contain letters, numbers, hyphens, and underscores");
         }
         Ok(name.to_string())
@@ -171,7 +176,11 @@ pub fn render_profiles(state: &ProfilesState, frame: &mut Frame, area: Rect) {
                 let line = Line::from(vec![
                     Span::styled(
                         format!("{} ", active_marker),
-                        Style::default().fg(if profile.is_active { Color::Green } else { Color::DarkGray }),
+                        Style::default().fg(if profile.is_active {
+                            Color::Green
+                        } else {
+                            Color::DarkGray
+                        }),
                     ),
                     Span::raw(&profile.name),
                     Span::styled(
@@ -191,8 +200,7 @@ pub fn render_profiles(state: &ProfilesState, frame: &mut Frame, area: Rect) {
             })
             .collect();
 
-        let list = List::new(items)
-            .block(Block::default().borders(Borders::NONE));
+        let list = List::new(items).block(Block::default().borders(Borders::NONE));
         frame.render_widget(list, chunks[1]);
     }
 
@@ -224,14 +232,15 @@ pub fn render_profiles(state: &ProfilesState, frame: &mut Frame, area: Rect) {
 
         // Show cursor
         if !state.new_name.is_empty() {
-            frame.set_cursor_position((
-                input_inner.x + state.cursor as u16,
-                input_inner.y,
-            ));
+            frame.set_cursor_position((input_inner.x + state.cursor as u16, input_inner.y));
         }
     } else {
         // Show actions
-        let actions = if state.selected_profile().map(|p| p.is_active).unwrap_or(false) {
+        let actions = if state
+            .selected_profile()
+            .map(|p| p.is_active)
+            .unwrap_or(false)
+        {
             "[n] New | [d] Delete | [e] Edit env | [Esc] Back"
         } else {
             "[Enter] Activate | [n] New | [d] Delete | [e] Edit env | [Esc] Back"
@@ -251,8 +260,7 @@ pub fn render_profiles(state: &ProfilesState, frame: &mut Frame, area: Rect) {
             width: area.width - 4,
             height: 1,
         };
-        let error_msg = Paragraph::new(error.as_str())
-            .style(Style::default().fg(Color::Red));
+        let error_msg = Paragraph::new(error.as_str()).style(Style::default().fg(Color::Red));
         frame.render_widget(error_msg, error_area);
     }
 }

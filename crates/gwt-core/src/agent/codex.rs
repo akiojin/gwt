@@ -36,8 +36,8 @@ impl CodexAgent {
             return None;
         }
 
-        let version = get_command_version("codex", "--version")
-            .unwrap_or_else(|| "unknown".to_string());
+        let version =
+            get_command_version("codex", "--version").unwrap_or_else(|| "unknown".to_string());
 
         // Check if authenticated (Codex uses API key from env)
         let authenticated = std::env::var("OPENAI_API_KEY").is_ok();
@@ -92,25 +92,23 @@ impl AgentTrait for CodexAgent {
     }
 
     async fn run_task(&self, prompt: &str) -> Result<TaskResult> {
-        self.run_in_directory_path(&self.working_dir.clone(), prompt).await
+        self.run_in_directory_path(&self.working_dir.clone(), prompt)
+            .await
     }
 
-    async fn run_in_directory_path(
-        &self,
-        directory: &Path,
-        prompt: &str,
-    ) -> Result<TaskResult> {
+    async fn run_in_directory_path(&self, directory: &Path, prompt: &str) -> Result<TaskResult> {
         let start = Instant::now();
 
         let mut cmd = self.build_command(prompt, directory);
 
-        let child = cmd.spawn().map_err(|e| {
-            GwtError::Internal(format!("Failed to spawn Codex CLI: {}", e))
-        })?;
+        let child = cmd
+            .spawn()
+            .map_err(|e| GwtError::Internal(format!("Failed to spawn Codex CLI: {}", e)))?;
 
-        let output = child.wait_with_output().await.map_err(|e| {
-            GwtError::Internal(format!("Failed to run Codex CLI: {}", e))
-        })?;
+        let output = child
+            .wait_with_output()
+            .await
+            .map_err(|e| GwtError::Internal(format!("Failed to run Codex CLI: {}", e)))?;
 
         let duration = start.elapsed().as_millis() as u64;
 
@@ -136,9 +134,10 @@ impl AgentTrait for CodexAgent {
             guard.take()
         };
         if let Some(mut child) = child_opt {
-            child.kill().await.map_err(|e| {
-                GwtError::Internal(format!("Failed to kill process: {}", e))
-            })?;
+            child
+                .kill()
+                .await
+                .map_err(|e| GwtError::Internal(format!("Failed to kill process: {}", e)))?;
         }
         Ok(())
     }

@@ -77,6 +77,39 @@ impl Repository {
         &self.root
     }
 
+    /// Get the main repository root (resolves through worktree to main repo)
+    /// For worktrees, this returns the path to the main repository.
+    /// For normal repos, this returns the same as root().
+    pub fn main_repo_root(&self) -> PathBuf {
+        // Use git rev-parse --git-common-dir to get the common git directory
+        let output = Command::new("git")
+            .args(["rev-parse", "--git-common-dir"])
+            .current_dir(&self.root)
+            .output();
+
+        match output {
+            Ok(o) if o.status.success() => {
+                let common_dir = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                // common_dir is like "/gwt/.git" - parent is the repo root
+                let common_path = PathBuf::from(&common_dir);
+                if common_path.is_absolute() {
+                    common_path
+                        .parent()
+                        .map(|p| p.to_path_buf())
+                        .unwrap_or_else(|| self.root.clone())
+                } else {
+                    // Relative path - resolve from current root
+                    self.root
+                        .join(&common_path)
+                        .parent()
+                        .map(|p| p.to_path_buf())
+                        .unwrap_or_else(|| self.root.clone())
+                }
+            }
+            _ => self.root.clone(),
+        }
+    }
+
     /// Get internal gix repository reference
     fn gix_repo(&self) -> Option<&gix::Repository> {
         self.gix_repo.as_ref()
@@ -412,6 +445,38 @@ pub struct WorktreeInfo {
     pub is_prunable: bool,
 }
 
+/// Get the main repository root from any path (resolves through worktree to main repo)
+/// This is a standalone function that doesn't require a Repository instance.
+/// For worktrees, this returns the path to the main repository.
+/// For normal repos or non-repo paths, this returns the original path.
+pub fn get_main_repo_root(path: &Path) -> PathBuf {
+    let output = Command::new("git")
+        .args(["rev-parse", "--git-common-dir"])
+        .current_dir(path)
+        .output();
+
+    match output {
+        Ok(o) if o.status.success() => {
+            let common_dir = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            let common_path = PathBuf::from(&common_dir);
+            if common_path.is_absolute() {
+                common_path
+                    .parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| path.to_path_buf())
+            } else {
+                // Relative path - resolve from current path
+                let resolved = path.join(&common_path);
+                resolved
+                    .parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| path.to_path_buf())
+            }
+        }
+        _ => path.to_path_buf(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -475,7 +540,9 @@ mod tests {
         // Git 2.28+ defaults to main, older versions use master
         let name = repo.head_name().unwrap();
         // Initial repo might not have a valid HEAD yet
-        assert!(name.is_none() || name.as_deref() == Some("main") || name.as_deref() == Some("master"));
+        assert!(
+            name.is_none() || name.as_deref() == Some("main") || name.as_deref() == Some("master")
+        );
     }
 
     #[test]

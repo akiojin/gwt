@@ -135,7 +135,9 @@ impl WorktreeCreateState {
 
     /// Get selected base branch
     pub fn selected_base_branch(&self) -> Option<&str> {
-        self.base_branches.get(self.selected_base).map(|s| s.as_str())
+        self.base_branches
+            .get(self.selected_base)
+            .map(|s| s.as_str())
     }
 
     /// Is confirmation step?
@@ -145,11 +147,7 @@ impl WorktreeCreateState {
 }
 
 /// Render worktree create wizard
-pub fn render_worktree_create(
-    state: &WorktreeCreateState,
-    frame: &mut Frame,
-    area: Rect,
-) {
+pub fn render_worktree_create(state: &WorktreeCreateState, frame: &mut Frame, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -192,7 +190,9 @@ fn render_progress(state: &WorktreeCreateState, frame: &mut Frame, area: Rect) {
         .enumerate()
         .flat_map(|(i, step)| {
             let style = if i == current_step {
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
             } else if i < current_step {
                 Style::default().fg(Color::Green)
             } else {
@@ -207,7 +207,11 @@ fn render_progress(state: &WorktreeCreateState, frame: &mut Frame, area: Rect) {
 
     let progress = Paragraph::new(Line::from(spans))
         .alignment(Alignment::Center)
-        .block(Block::default().borders(Borders::ALL).title(" Create Worktree "));
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Create Worktree "),
+        );
     frame.render_widget(progress, area);
 }
 
@@ -241,14 +245,12 @@ fn render_branch_name_step(state: &WorktreeCreateState, frame: &mut Frame, area:
         Style::default()
     };
 
-    let input = Paragraph::new(display_text)
-        .style(text_style)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(input_style)
-                .title(" Branch Name "),
-        );
+    let input = Paragraph::new(display_text).style(text_style).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(input_style)
+            .title(" Branch Name "),
+    );
     frame.render_widget(input, chunks[0]);
 
     // Cursor
@@ -259,8 +261,7 @@ fn render_branch_name_step(state: &WorktreeCreateState, frame: &mut Frame, area:
 
     // Error message
     if let Some(ref error) = state.error_message {
-        let error_text = Paragraph::new(error.as_str())
-            .style(Style::default().fg(Color::Red));
+        let error_text = Paragraph::new(error.as_str()).style(Style::default().fg(Color::Red));
         frame.render_widget(error_text, chunks[1]);
     }
 }
@@ -292,22 +293,24 @@ fn render_confirm_step(state: &WorktreeCreateState, frame: &mut Frame, area: Rec
     let base = state.selected_base_branch().unwrap_or("main");
     let branch_line = format!("    Branch: {}", state.branch_name);
     let base_line = format!("    Base: {}", base);
-    let new_branch_line = format!("    Create new branch: {}", if state.create_new_branch { "Yes" } else { "No" });
+    let new_branch_line = format!(
+        "    Create new branch: {}",
+        if state.create_new_branch { "Yes" } else { "No" }
+    );
 
-    let text = ["",
+    let text = [
+        "",
         "  Summary:",
         "",
         &branch_line,
         &base_line,
         &new_branch_line,
         "",
-        "  Press Enter to create, or Esc to go back."];
+        "  Press Enter to create, or Esc to go back.",
+    ];
 
-    let paragraph = Paragraph::new(text.join("\n")).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" Confirm "),
-    );
+    let paragraph = Paragraph::new(text.join("\n"))
+        .block(Block::default().borders(Borders::ALL).title(" Confirm "));
     frame.render_widget(paragraph, area);
 }
 
@@ -318,8 +321,8 @@ fn render_instructions(state: &WorktreeCreateState, frame: &mut Frame, area: Rec
         WorktreeCreateStep::Confirm => "[Enter] Create | [Esc] Back",
     };
 
-    let paragraph = Paragraph::new(format!(" {} ", instructions))
-        .block(Block::default().borders(Borders::ALL));
+    let paragraph =
+        Paragraph::new(format!(" {} ", instructions)).block(Block::default().borders(Borders::ALL));
     frame.render_widget(paragraph, area);
 }
 

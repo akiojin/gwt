@@ -29,8 +29,7 @@ impl KeyEvent {
 
     /// Check if this is Ctrl+C
     pub fn is_ctrl_c(&self) -> bool {
-        matches!(self.code, KeyCode::Char('c'))
-            && self.modifiers.contains(KeyModifiers::CONTROL)
+        matches!(self.code, KeyCode::Char('c')) && self.modifiers.contains(KeyModifiers::CONTROL)
     }
 
     /// Check if this is Enter

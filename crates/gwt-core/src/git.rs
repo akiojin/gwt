@@ -10,4 +10,4 @@ mod repository;
 pub use backend::GitBackend;
 pub use branch::{Branch, DivergenceStatus};
 pub use remote::Remote;
-pub use repository::{Repository, WorktreeInfo};
+pub use repository::{get_main_repo_root, Repository, WorktreeInfo};

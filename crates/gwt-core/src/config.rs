@@ -12,4 +12,6 @@ pub use migration::migrate_json_to_toml;
 pub use profile::Profile;
 pub use session::{get_session_for_branch, load_sessions_from_worktrees, Session};
 pub use settings::Settings;
-pub use ts_session::{get_last_tool_usage_map, get_ts_session_path, load_ts_session, ToolSessionEntry, TsSessionData};
+pub use ts_session::{
+    get_last_tool_usage_map, get_ts_session_path, load_ts_session, ToolSessionEntry, TsSessionData,
+};

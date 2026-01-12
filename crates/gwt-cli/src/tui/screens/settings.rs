@@ -55,7 +55,10 @@ impl SettingsState {
             SettingsCategory::General => vec![
                 ("Default Base Branch", settings.default_base_branch.clone()),
                 ("Debug Mode", format!("{}", settings.debug)),
-                ("Log Retention Days", format!("{}", settings.log_retention_days)),
+                (
+                    "Log Retention Days",
+                    format!("{}", settings.log_retention_days),
+                ),
             ],
             SettingsCategory::Worktree => vec![
                 ("Worktree Root", settings.worktree_root.clone()),
@@ -67,9 +70,32 @@ impl SettingsState {
                 ("CORS Enabled", format!("{}", settings.web.cors)),
             ],
             SettingsCategory::Agent => vec![
-                ("Default Agent", settings.agent.default_agent.clone().unwrap_or_else(|| "None".to_string())),
-                ("Claude Path", settings.agent.claude_path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "Not set".to_string())),
-                ("Codex Path", settings.agent.codex_path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "Not set".to_string())),
+                (
+                    "Default Agent",
+                    settings
+                        .agent
+                        .default_agent
+                        .clone()
+                        .unwrap_or_else(|| "None".to_string()),
+                ),
+                (
+                    "Claude Path",
+                    settings
+                        .agent
+                        .claude_path
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "Not set".to_string()),
+                ),
+                (
+                    "Codex Path",
+                    settings
+                        .agent
+                        .codex_path
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "Not set".to_string()),
+                ),
             ],
         }
     }
@@ -113,11 +139,7 @@ impl SettingsState {
 }
 
 /// Render settings screen
-pub fn render_settings(
-    state: &SettingsState,
-    frame: &mut Frame,
-    area: Rect,
-) {
+pub fn render_settings(state: &SettingsState, frame: &mut Frame, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -149,7 +171,9 @@ fn render_tabs(state: &SettingsState, frame: &mut Frame, area: Rect) {
         .iter()
         .map(|(name, cat)| {
             let style = if *cat == state.category {
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
             };
@@ -207,15 +231,18 @@ fn render_settings_content(state: &SettingsState, frame: &mut Frame, area: Rect)
         SettingsCategory::Agent => "Agent",
     };
 
-    let list = List::new(list_items)
-        .block(Block::default().borders(Borders::ALL).title(format!(" {} Settings ", category_name)));
+    let list = List::new(list_items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" {} Settings ", category_name)),
+    );
     frame.render_widget(list, area);
 }
 
 fn render_instructions(frame: &mut Frame, area: Rect) {
     let instructions = "[Tab] Category | [Up/Down] Select | [Enter] Edit | [Esc] Back";
-    let paragraph = Paragraph::new(format!(" {} ", instructions))
-        .block(Block::default().borders(Borders::ALL));
+    let paragraph =
+        Paragraph::new(format!(" {} ", instructions)).block(Block::default().borders(Borders::ALL));
     frame.render_widget(paragraph, area);
 }
 

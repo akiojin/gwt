@@ -152,9 +152,9 @@ impl AgentManager {
 
     /// Run a task with the best available agent
     pub async fn run_task(&self, prompt: &str) -> Result<TaskResult> {
-        let agent = self.get_best_agent().ok_or_else(|| {
-            GwtError::Internal("No coding agent available".to_string())
-        })?;
+        let agent = self
+            .get_best_agent()
+            .ok_or_else(|| GwtError::Internal("No coding agent available".to_string()))?;
 
         agent.run_task(prompt).await
     }
@@ -165,11 +165,13 @@ impl AgentManager {
         worktree_path: impl AsRef<Path>,
         prompt: &str,
     ) -> Result<TaskResult> {
-        let agent = self.get_best_agent().ok_or_else(|| {
-            GwtError::Internal("No coding agent available".to_string())
-        })?;
+        let agent = self
+            .get_best_agent()
+            .ok_or_else(|| GwtError::Internal("No coding agent available".to_string()))?;
 
-        agent.run_in_directory_path(worktree_path.as_ref(), prompt).await
+        agent
+            .run_in_directory_path(worktree_path.as_ref(), prompt)
+            .await
     }
 }
 
@@ -202,7 +204,6 @@ pub fn get_command_version(command: &str, version_flag: &str) -> Option<String> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
 
     #[test]
     fn test_agent_type_name() {

@@ -90,7 +90,10 @@ fn cmd_list(repo_root: &PathBuf, format: OutputFormat) -> Result<(), GwtError> {
             );
             println!("{}", "-".repeat(88));
             for wt in &worktrees {
-                let branch = wt.branch.clone().unwrap_or_else(|| "(detached)".to_string());
+                let branch = wt
+                    .branch
+                    .clone()
+                    .unwrap_or_else(|| "(detached)".to_string());
                 let changes = if wt.has_changes { "dirty" } else { "clean" };
                 println!(
                     "{:<40} {:<30} {:<10} {:<8}",
@@ -267,10 +270,7 @@ fn cmd_logs(repo_root: &Path, settings: &Settings, limit: usize) -> Result<(), G
     }
 
     for entry in entries {
-        println!(
-            "{} [{}] {}",
-            entry.timestamp, entry.level, entry.message
-        );
+        println!("{} [{}] {}", entry.timestamp, entry.level, entry.message);
     }
 
     Ok(())
@@ -391,7 +391,11 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<(), GwtError> {
     base_args.extend(agent_args);
 
     // Print launch info (FR-072, FR-073)
-    println!("Launching {} in {}", config.agent.label(), config.worktree_path.display());
+    println!(
+        "Launching {} in {}",
+        config.agent.label(),
+        config.worktree_path.display()
+    );
     // FR-072: Version format varies by selection type
     if config.version == "installed" {
         println!("Version: installed");

@@ -266,7 +266,8 @@ mod tests {
     #[test]
     fn test_add_remote() {
         let temp = create_test_repo();
-        let remote = Remote::add(temp.path(), "origin", "https://github.com/test/test.git").unwrap();
+        let remote =
+            Remote::add(temp.path(), "origin", "https://github.com/test/test.git").unwrap();
         assert_eq!(remote.name, "origin");
         assert!(Remote::exists(temp.path(), "origin").unwrap());
     }

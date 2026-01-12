@@ -36,12 +36,12 @@ impl GeminiAgent {
             return None;
         }
 
-        let version = get_command_version("gemini", "--version")
-            .unwrap_or_else(|| "unknown".to_string());
+        let version =
+            get_command_version("gemini", "--version").unwrap_or_else(|| "unknown".to_string());
 
         // Check if authenticated (Gemini uses API key from env or config)
-        let authenticated = std::env::var("GOOGLE_API_KEY").is_ok()
-            || std::env::var("GEMINI_API_KEY").is_ok();
+        let authenticated =
+            std::env::var("GOOGLE_API_KEY").is_ok() || std::env::var("GEMINI_API_KEY").is_ok();
 
         Some(AgentInfo {
             name: "Gemini CLI".to_string(),
@@ -92,25 +92,23 @@ impl AgentTrait for GeminiAgent {
     }
 
     async fn run_task(&self, prompt: &str) -> Result<TaskResult> {
-        self.run_in_directory_path(&self.working_dir.clone(), prompt).await
+        self.run_in_directory_path(&self.working_dir.clone(), prompt)
+            .await
     }
 
-    async fn run_in_directory_path(
-        &self,
-        directory: &Path,
-        prompt: &str,
-    ) -> Result<TaskResult> {
+    async fn run_in_directory_path(&self, directory: &Path, prompt: &str) -> Result<TaskResult> {
         let start = Instant::now();
 
         let mut cmd = self.build_command(prompt, directory);
 
-        let child = cmd.spawn().map_err(|e| {
-            GwtError::Internal(format!("Failed to spawn Gemini CLI: {}", e))
-        })?;
+        let child = cmd
+            .spawn()
+            .map_err(|e| GwtError::Internal(format!("Failed to spawn Gemini CLI: {}", e)))?;
 
-        let output = child.wait_with_output().await.map_err(|e| {
-            GwtError::Internal(format!("Failed to run Gemini CLI: {}", e))
-        })?;
+        let output = child
+            .wait_with_output()
+            .await
+            .map_err(|e| GwtError::Internal(format!("Failed to run Gemini CLI: {}", e)))?;
 
         let duration = start.elapsed().as_millis() as u64;
 
@@ -136,9 +134,10 @@ impl AgentTrait for GeminiAgent {
             guard.take()
         };
         if let Some(mut child) = child_opt {
-            child.kill().await.map_err(|e| {
-                GwtError::Internal(format!("Failed to kill process: {}", e))
-            })?;
+            child
+                .kill()
+                .await
+                .map_err(|e| GwtError::Internal(format!("Failed to kill process: {}", e)))?;
         }
         Ok(())
     }

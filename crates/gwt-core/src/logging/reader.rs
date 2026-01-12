@@ -57,11 +57,7 @@ impl LogReader {
     }
 
     /// Read entries from a log file with pagination
-    pub fn read_entries(
-        path: &Path,
-        offset: usize,
-        limit: usize,
-    ) -> Result<(Vec<LogEntry>, bool)> {
+    pub fn read_entries(path: &Path, offset: usize, limit: usize) -> Result<(Vec<LogEntry>, bool)> {
         let file = File::open(path)?;
         let reader = BufReader::new(file);
 
@@ -127,8 +123,10 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let log_file = temp.path().join("test.jsonl");
 
-        let entries = [r#"{"timestamp":"2024-01-01T00:00:00Z","level":"INFO","message":"test1"}"#,
-            r#"{"timestamp":"2024-01-01T00:00:01Z","level":"DEBUG","message":"test2"}"#];
+        let entries = [
+            r#"{"timestamp":"2024-01-01T00:00:00Z","level":"INFO","message":"test1"}"#,
+            r#"{"timestamp":"2024-01-01T00:00:01Z","level":"DEBUG","message":"test2"}"#,
+        ];
         std::fs::write(&log_file, entries.join("\n")).unwrap();
 
         let (read_entries, has_more) = LogReader::read_entries(&log_file, 0, 10).unwrap();
