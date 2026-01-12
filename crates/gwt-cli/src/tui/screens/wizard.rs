@@ -39,7 +39,8 @@ pub struct VersionOption {
 impl VersionOption {
     fn installed(version: &str, path: &str) -> Self {
         Self {
-            label: format!("installed@{}", version),
+            // FR-063a: Display as "installed (X.Y.Z)" with path in description
+            label: format!("installed ({})", version),
             value: "installed".to_string(),
             description: Some(path.to_string()),
         }
