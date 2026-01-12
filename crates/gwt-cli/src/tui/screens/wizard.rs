@@ -160,7 +160,7 @@ impl CodingAgent {
         match self {
             CodingAgent::ClaudeCode => "@anthropic-ai/claude-code",
             CodingAgent::CodexCli => "@openai/codex",
-            CodingAgent::GeminiCli => "@anthropic-ai/gemini-cli",
+            CodingAgent::GeminiCli => "@google/gemini-cli",
             CodingAgent::OpenCode => "opencode-ai",
         }
     }
