@@ -1,761 +1,880 @@
-## [2.6.1](https://github.com/akiojin/gwt/compare/v2.6.0...v2.6.1) (2025-11-25)
-
-
-### Bug Fixes
-
-* ensure claude skipPermissions uses sandbox env ([b24b3ea](https://github.com/akiojin/gwt/commit/b24b3ea7e7845ad13cc73ddc81cdde6ad2e445c9))
-* アイコン幅計測を補正してブランチ行の日時折り返しを防止 ([7d52a01](https://github.com/akiojin/gwt/commit/7d52a01405a8b1c6845d1043bc06b84b257bb597))
-* タイムスタンプ右寄せに安全マージンを設けて改行を防止 ([c8c5b78](https://github.com/akiojin/gwt/commit/c8c5b7846815269dac13ce5c1175b18d4564df95))
-* 実幅を過小評価しないよう文字幅計測と整列テストを更新 ([765cdd4](https://github.com/akiojin/gwt/commit/765cdd48a5529c11eaed01b8db19473b60820f8a))
-* 実行モード表示をNewに変更 ([9850729](https://github.com/akiojin/gwt/commit/98507299f4c550968711be72ce6fe97f6b55a42a))
-* 幅オーバーライドとアイコン計測のずれで発生する改行を再修正 ([3bdbb64](https://github.com/akiojin/gwt/commit/3bdbb647d18864275d5dd06cb15e34b3b11b3193))
-* 幅計測ヘルパー欠落による型エラーを解消 ([788413b](https://github.com/akiojin/gwt/commit/788413b82b0fa2f18af3e0759cda03ed30157a6b))
-
-# [2.6.0](https://github.com/akiojin/gwt/compare/v2.5.0...v2.6.0) (2025-11-25)
-
-
-### Bug Fixes
-
-* prevent false positives in git hook detection ([e5c0f32](https://github.com/akiojin/gwt/commit/e5c0f324f02ba934ef447685eead6aea12b4bdd5))
-* renderBranchRowのcursorAdjustロジックを復元してテスト互換性を維持 ([9f4f10e](https://github.com/akiojin/gwt/commit/9f4f10eeaf25b2fe0e773098bc72337f5d10ac08))
-* string-width v8対応のためWIDTH_OVERRIDESにVariation Selector付きアイコンを追加 ([c8f5b9b](https://github.com/akiojin/gwt/commit/c8f5b9bac9be76a0351aee06c9e4ebea00fb7cf4))
-* 全アイコンの幅オーバーライドを追加してタイムスタンプ折り返しを修正 ([06a7e5d](https://github.com/akiojin/gwt/commit/06a7e5dbf1a62f831db05d9b2ee67a6552945256))
-* 全ての幅計算をmeasureDisplayWidthに統一してstring-width v8対応を完了 ([6f7d1ce](https://github.com/akiojin/gwt/commit/6f7d1ceaa97ad99f61e3f0967ccc80dbd9a90d72))
+## [4.12.0](https://github.com/akiojin/gwt/compare/v4.11.6...v4.12.0) (2026-01-10)
 
 
 ### Features
 
-* set upstream tracking for newly created refs ([7a631a1](https://github.com/akiojin/gwt/commit/7a631a132f7fc99f207dfa1b7d1e10a841fda27f))
-
-# [2.5.0](https://github.com/akiojin/gwt/compare/v2.4.1...v2.5.0) (2025-11-25)
+* コーディングエージェントバージョンの起動時キャッシュ (FR-028～FR-031) ([#542](https://github.com/akiojin/gwt/issues/542)) ([671b41e](https://github.com/akiojin/gwt/commit/671b41eaa428b158d24aada7a14217888e80f2e1))
 
 
 ### Bug Fixes
 
-* ensure selected model ID is passed to launcher for Claude Code ([1b2b884](https://github.com/akiojin/gwt/commit/1b2b884835743d9143b0b2a5e4c9234af4d1009a))
-* omit --model flag when default Opus 4.5 is selected ([08828e3](https://github.com/akiojin/gwt/commit/08828e38a592e31691ef985b5008dea807e8918c))
+* cleanup safety and tool version fallbacks ([#543](https://github.com/akiojin/gwt/issues/543)) ([c6518c0](https://github.com/akiojin/gwt/commit/c6518c032d47ba8f9f62a531b5c67eed34202682))
+* Quick Startセッション解決をブランチ基準に修正 ([#547](https://github.com/akiojin/gwt/issues/547)) ([4e92ea9](https://github.com/akiojin/gwt/commit/4e92ea9f62d86c1216efd5e4a4246e1f1cd1e943))
+* run UI with bun runtime ([#537](https://github.com/akiojin/gwt/issues/537)) ([384441b](https://github.com/akiojin/gwt/commit/384441b34d8c486ad0b5f9ec8690686766bcec6b))
+* unsafe確認ダイアログ反転と凡例のSafe追加 ([#544](https://github.com/akiojin/gwt/issues/544)) ([1b627f7](https://github.com/akiojin/gwt/commit/1b627f7de994c435c3061f6be41a24236f5eccaf))
+* カーソル位置をグローバル管理に変更して安全状態更新時のリセットを防止 ([#541](https://github.com/akiojin/gwt/issues/541)) ([dcb9f74](https://github.com/akiojin/gwt/commit/dcb9f74ab506e765f1be8c011a5cd27843435fb2))
+* コーディングエージェント起動時の即時終了問題を修正 ([633f0d6](https://github.com/akiojin/gwt/commit/633f0d65aa3724eb38c6084433b6da1cc688d342)), closes [#546](https://github.com/akiojin/gwt/issues/546)
+* ログビューア表示と配色の統一 ([#538](https://github.com/akiojin/gwt/issues/538)) ([1067a0c](https://github.com/akiojin/gwt/commit/1067a0c15d5349c8f7e7840649fe2a43967391c5))
+* 安全アイコンの安全表示を緑に変更 ([#525](https://github.com/akiojin/gwt/issues/525)) ([f0e7ba9](https://github.com/akiojin/gwt/commit/f0e7ba9b5f01bfc2bd55173afe1d60ca434d2fde))
+* 安全状態確認時のカーソルリセット問題を修正 ([#539](https://github.com/akiojin/gwt/issues/539)) ([77db8ea](https://github.com/akiojin/gwt/commit/77db8ea3c629affbb930fc2074efb4a312837895))
+
+## [4.11.6](https://github.com/akiojin/gwt/compare/v4.11.5...v4.11.6) (2026-01-07)
+
+
+### Bug Fixes
+
+* ログ読み込みをウィンドウ走査方式に変更しworktree切替時の誤セッション検出を防止 ([#524](https://github.com/akiojin/gwt/issues/524)) ([bb49285](https://github.com/akiojin/gwt/commit/bb49285c33ffa0b2c360f5ce78f8d31f3ef1f85b))
+
+## [4.11.5](https://github.com/akiojin/gwt/compare/v4.11.4...v4.11.5) (2026-01-07)
+
+
+### Bug Fixes
+
+* ツール選択ステップ状態管理とカーソル可視性を修正 ([#521](https://github.com/akiojin/gwt/issues/521)) ([5a12f79](https://github.com/akiojin/gwt/commit/5a12f7956d4efea93beb98a259afa95e954b78a5))
+
+## [4.11.4](https://github.com/akiojin/gwt/compare/v4.11.3...v4.11.4) (2026-01-07)
+
+
+### Bug Fixes
+
+* AppSolid のポップアップリスト項目表示を修正 ([#518](https://github.com/akiojin/gwt/issues/518)) ([8daf3b8](https://github.com/akiojin/gwt/commit/8daf3b831b91e0aa54ba1f2dd6f45b4ae3e14e73))
+
+## [4.11.3](https://github.com/akiojin/gwt/compare/v4.11.2...v4.11.3) (2026-01-06)
+
+
+### Bug Fixes
+
+* CodeRabbit指摘のOpenTUI/SolidJS警告とパフォーマンス問題を修正 ([#513](https://github.com/akiojin/gwt/issues/513)) ([cce6e09](https://github.com/akiojin/gwt/commit/cce6e0930eb5e2a2db42dc1e2eb7ab2c9b6c8e38))
+
+## [4.11.2](https://github.com/akiojin/gwt/compare/v4.11.1...v4.11.2) (2026-01-06)
+
+
+### Bug Fixes
+
+* ログ読み込みをウィンドウ走査方式に変更しworktree切替時の誤セッション検出を防止 ([#512](https://github.com/akiojin/gwt/issues/512)) ([a2fc839](https://github.com/akiojin/gwt/commit/a2fc8392f61b07e3c7f6a0b18bd39dbc51b30d1d))
+
+## [4.11.1](https://github.com/akiojin/gwt/compare/v4.11.0...v4.11.1) (2026-01-06)
+
+
+### Bug Fixes
+
+* Claude履歴読み取りとGemini jsonl検出の修正 ([#511](https://github.com/akiojin/gwt/issues/511)) ([71f8c3e](https://github.com/akiojin/gwt/commit/71f8c3e54ca5a1adfb9f8f5214e01a5fbfe3ea77))
+
+## [4.11.0](https://github.com/akiojin/gwt/compare/v4.10.1...v4.11.0) (2026-01-06)
 
 
 ### Features
 
-* add Sonnet 4.5 as an explicit model option ([2a52c91](https://github.com/akiojin/gwt/commit/2a52c91faacb8d8c6422c80051bb611757464ddf))
-* set Opus 4.5 as default and remove explicit Default option ([86f60fa](https://github.com/akiojin/gwt/commit/86f60fadd8232920bf01f457a370bd2243066f0e))
-* update default Claude Code model to Opus 4.5 ([1dd909e](https://github.com/akiojin/gwt/commit/1dd909ed87a55ce3bb796deb0431d0027571dae2))
-* update Opus model version to 4.5 ([307faeb](https://github.com/akiojin/gwt/commit/307faeb66ebac0ca89b01c07ee19d213797c4d5c))
+* Continueモード選択時にセッションID選択画面を表示 ([#508](https://github.com/akiojin/gwt/issues/508)) ([f37d56d](https://github.com/akiojin/gwt/commit/f37d56db6e6e0b24913ea9e0a5f4a07eb1dba79d))
 
-## [4.9.0](https://github.com/akiojin/gwt/compare/v4.8.0...v4.9.0) (2025-12-29)
+## [4.10.1](https://github.com/akiojin/gwt/compare/v4.10.0...v4.10.1) (2026-01-05)
+
+
+### Bug Fixes
+
+* バージョン取得とトレイ機能の堅牢化 ([#486](https://github.com/akiojin/gwt/issues/486)) ([9ffb7fb](https://github.com/akiojin/gwt/commit/9ffb7fb16a5af7e4bcbc30aa39e9b039b91611b2))
+
+## [4.10.0](https://github.com/akiojin/gwt/compare/v4.9.1...v4.10.0) (2026-01-05)
 
 
 ### Features
 
-* AIツールのインストール済み表示をバージョン番号に変更 ([#461](https://github.com/akiojin/gwt/issues/461)) ([2610ef2](https://github.com/akiojin/gwt/commit/2610ef2a8a1b64b8e98b4cde6df1b5afdabcef55))
+* OpenCode コーディングエージェント対応を追加 ([#477](https://github.com/akiojin/gwt/issues/477)) ([c480fb4](https://github.com/akiojin/gwt/commit/c480fb4b16c0f815a205776eb618fbcb875d238b))
 
 
 ### Bug Fixes
 
-* claude-worktree後方互換コードを削除 ([#462](https://github.com/akiojin/gwt/issues/462)) ([c8e5fbf](https://github.com/akiojin/gwt/commit/c8e5fbf06f5c18480f2af3f8e78469214282ef28))
+* tools.json の customTools → customCodingAgents マイグレーション対応 ([#476](https://github.com/akiojin/gwt/issues/476)) ([99f1c7f](https://github.com/akiojin/gwt/commit/99f1c7f3b9263e087de0c3c4cd96de8adccbe229))
 
-## [4.8.0](https://github.com/akiojin/gwt/compare/v4.7.0...v4.8.0) (2025-12-29)
+## [4.9.1](https://github.com/akiojin/gwt/compare/v4.9.0...v4.9.1) (2026-01-05)
+
+
+### Bug Fixes
+
+* Gemini CLI Resume モードの --last-session 引数追加 ([#474](https://github.com/akiojin/gwt/issues/474)) ([daa2e3a](https://github.com/akiojin/gwt/commit/daa2e3a0f8cda5f1bfb5d9b54a01cb2f6c445af3))
+
+## [4.9.0](https://github.com/akiojin/gwt/compare/v4.8.1...v4.9.0) (2026-01-05)
 
 
 ### Features
 
-* Docker構成を最適化しPlaywright noVNCサービスを追加 ([#454](https://github.com/akiojin/gwt/issues/454)) ([6dd0843](https://github.com/akiojin/gwt/commit/6dd08435f9f49061f156d01f5e7ce0a25e15307f))
-* Docker構成を最適化しPlaywright noVNCサービスを追加 ([#455](https://github.com/akiojin/gwt/issues/455)) ([e62fef5](https://github.com/akiojin/gwt/commit/e62fef5bc199a26ea0d6f8f36527612ff461b00f))
-* ブランチ一覧に最終アクティビティ時間を表示 ([#456](https://github.com/akiojin/gwt/issues/456)) ([7cfab79](https://github.com/akiojin/gwt/commit/7cfab79ebc64393fb1e6666191c57d8baf2c5686))
+* OpenTUI/SolidJS へのUI完全移行（FR-002～FR-006/FR-024） ([#449](https://github.com/akiojin/gwt/issues/449)) ([f26fdb0](https://github.com/akiojin/gwt/commit/f26fdb0115eb6ac2f3de9c9bb9fbe9d37bc9f83d))
 
 
 ### Bug Fixes
 
-* execaのshell: trueオプションを削除してbunx起動エラーを修正 ([#458](https://github.com/akiojin/gwt/issues/458)) ([6de849f](https://github.com/akiojin/gwt/commit/6de849f70086dedcb8b79771590985cb6989833a))
-* warn then return after dirty worktree ([#453](https://github.com/akiojin/gwt/issues/453)) ([c9cead9](https://github.com/akiojin/gwt/commit/c9cead9841f6522fbe8cf43258eceb1183289c79))
-* 自動インストール警告文のタイポ修正 ([#451](https://github.com/akiojin/gwt/issues/451)) ([15917e3](https://github.com/akiojin/gwt/commit/15917e3d28a7ef950278a73dfaa5c298dfd4633f))
+* claude resume/continue セッション指定の修正 ([#469](https://github.com/akiojin/gwt/issues/469)) ([b0af9f6](https://github.com/akiojin/gwt/commit/b0af9f6f430b5f2d4e1d99dc5ea21df1eaf4dae1))
 
-## [4.7.0](https://github.com/akiojin/gwt/compare/v4.6.1...v4.7.0) (2025-12-26)
+## [4.8.1](https://github.com/akiojin/gwt/compare/v4.8.0...v4.8.1) (2026-01-04)
+
+
+### Bug Fixes
+
+* OpenTUI コンポーネントのマウス操作とカーソル処理を修正 ([#443](https://github.com/akiojin/gwt/issues/443)) ([3ebfbf7](https://github.com/akiojin/gwt/commit/3ebfbf7b31fab429f4cecc6f53ddf4c35f44f740))
+
+## [4.8.0](https://github.com/akiojin/gwt/compare/v4.7.4...v4.8.0) (2026-01-04)
 
 
 ### Features
 
-* ログビューアを追加 ([#442](https://github.com/akiojin/gwt/issues/442)) ([92128c3](https://github.com/akiojin/gwt/commit/92128c37f7453d302025b5d023984543d023adf4))
-* ログ表示の通知と選択UIを改善 ([#443](https://github.com/akiojin/gwt/issues/443)) ([cf3d7b3](https://github.com/akiojin/gwt/commit/cf3d7b31e84cdbc762fc6c629b5c670744678cb5))
-* 未コミット警告時にEnterキー待機を追加 ([#441](https://github.com/akiojin/gwt/issues/441)) ([d03dac5](https://github.com/akiojin/gwt/commit/d03dac52c12a5cb6ef99b973d7348f4f3ccdeeb6))
+* Gemini CLI 対応を追加 ([#441](https://github.com/akiojin/gwt/issues/441)) ([5c3abb5](https://github.com/akiojin/gwt/commit/5c3abb508f7a95f3f6cb94e5dca423e7a6a9e7d0))
+
+## [4.7.4](https://github.com/akiojin/gwt/compare/v4.7.3...v4.7.4) (2026-01-03)
 
 
 ### Bug Fixes
 
-* **cli:** AIツール実行時にフルパスを使用 ([#439](https://github.com/akiojin/gwt/issues/439)) ([2fe73e2](https://github.com/akiojin/gwt/commit/2fe73e27ea7f9148415fb67b3bfbe0dce9ac48bb))
-* worktree作成時のstale残骸を自動回復 ([#445](https://github.com/akiojin/gwt/issues/445)) ([ce971a6](https://github.com/akiojin/gwt/commit/ce971a6e4cd85db5c8c5295d9a1a6502898e9012))
+* コミットメッセージのmarkdownlintエラーを修正し、空行ルールに準拠 ([#434](https://github.com/akiojin/gwt/issues/434)) ([2ff3c79](https://github.com/akiojin/gwt/commit/2ff3c7992bf9ed1a460a21ab0f14b2f5acfae91f))
+* 新規ブランチ作成時のUI選択フローとキー操作を修正 ([#428](https://github.com/akiojin/gwt/issues/428)) ([2a359fa](https://github.com/akiojin/gwt/commit/2a359faa01fd0f35ab0e7c0d6b1edffa3f3d93a6))
 
-
-### Performance Improvements
-
-* ブランチ一覧のgit状態取得をキャッシュ化 ([#446](https://github.com/akiojin/gwt/issues/446)) ([76f30d6](https://github.com/akiojin/gwt/commit/76f30d64f7a5674eea07843c0aafb385f37e8282))
-
-## [4.6.1](https://github.com/akiojin/gwt/compare/v4.6.0...v4.6.1) (2025-12-25)
+## [4.7.3](https://github.com/akiojin/gwt/compare/v4.7.2...v4.7.3) (2026-01-03)
 
 
 ### Bug Fixes
 
-* **cli:** AIツール実行時にフルパスを使用して非インタラクティブシェルのPATH問題を修正 ([#436](https://github.com/akiojin/gwt/issues/436)) ([ba78cd5](https://github.com/akiojin/gwt/commit/ba78cd52cc95193f894e0aa8635767395567d56b))
+* Codex CLI Continue機能のセッションID検出を修正 ([#426](https://github.com/akiojin/gwt/issues/426)) ([1df6c20](https://github.com/akiojin/gwt/commit/1df6c20e80131dcfd05b37feabf30bdef398d2d5))
 
-## [4.6.0](https://github.com/akiojin/gwt/compare/v4.5.1...v4.6.0) (2025-12-25)
+## [4.7.2](https://github.com/akiojin/gwt/compare/v4.7.1...v4.7.2) (2026-01-02)
+
+
+### Bug Fixes
+
+* ブランチ選択でベースブランチ優先とクイックスタートの修正 ([#420](https://github.com/akiojin/gwt/issues/420)) ([d93b14c](https://github.com/akiojin/gwt/commit/d93b14c83f95d1b1a4ad1f1eb6eae94f2068ecb7))
+
+## [4.7.1](https://github.com/akiojin/gwt/compare/v4.7.0...v4.7.1) (2026-01-02)
+
+
+### Bug Fixes
+
+* ブランチリスト項目の視認性とマウス操作領域を改善 ([#417](https://github.com/akiojin/gwt/issues/417)) ([cddf15a](https://github.com/akiojin/gwt/commit/cddf15a9b55e0cece67e62dfc5d5b39647e27abd))
+
+## [4.7.0](https://github.com/akiojin/gwt/compare/v4.6.2...v4.7.0) (2026-01-02)
 
 
 ### Features
 
-* Claude Codeプラグイン設定を追加 ([#429](https://github.com/akiojin/gwt/issues/429)) ([06d04db](https://github.com/akiojin/gwt/commit/06d04dbf28e7fa6a65a7349388c4dc48efbb6ae7))
-* **cli:** AIツールのインストール状態検出とステータス表示を追加 ([#431](https://github.com/akiojin/gwt/issues/431)) ([79a6995](https://github.com/akiojin/gwt/commit/79a6995349b1dfb966e496c3e50644fcb58c99f6))
+* Codex Continue/Resumeセッション自動検出機能を実装 ([#413](https://github.com/akiojin/gwt/issues/413)) ([ed33953](https://github.com/akiojin/gwt/commit/ed33953e6cbef9b0ac9ff1cbb30d15ace58ff1ff))
 
 
 ### Bug Fixes
 
-* ブランチリスト画面のフリッカーを解消 ([#433](https://github.com/akiojin/gwt/issues/433)) ([3331c5d](https://github.com/akiojin/gwt/commit/3331c5d5f28847a95399a20b23fee97685db858d))
-* リモートモードでローカル・リモート両存在ブランチが表示されない問題を修正 ([#430](https://github.com/akiojin/gwt/issues/430)) ([70a5876](https://github.com/akiojin/gwt/commit/70a5876796273c39dafae5223994eccfe826cda7))
+* ブランチリストの選択状態をカーソルと別管理に変更 ([#411](https://github.com/akiojin/gwt/issues/411)) ([d4ce7e6](https://github.com/akiojin/gwt/commit/d4ce7e6f4afb1d4ff5f3d8cf59dc90e8f6ca3faa))
 
-## [4.5.1](https://github.com/akiojin/gwt/compare/v4.5.0...v4.5.1) (2025-12-24)
+## [4.6.2](https://github.com/akiojin/gwt/compare/v4.6.1...v4.6.2) (2026-01-01)
 
 
 ### Bug Fixes
 
-* **ci:** マージ方法をsquashに変更してCHANGELOG重複を防止 ([#425](https://github.com/akiojin/gwt/issues/425)) ([ee6338c](https://github.com/akiojin/gwt/commit/ee6338c726002326707baa8b15b5f70703395502))
-* Claude Codeのフォールバックをbunxに統一 ([ac740d9](https://github.com/akiojin/gwt/commit/ac740d9c7bc3ef97a5d3b0903908ecc672c637ce))
+* Quick Start パネルのキー操作を修正 ([#408](https://github.com/akiojin/gwt/issues/408)) ([ba8bdef](https://github.com/akiojin/gwt/commit/ba8bdefd6b1e0f98e159dc6e0d425ef28e81ac6d))
 
-## [4.5.0](https://github.com/akiojin/gwt/compare/v4.4.1...v4.5.0) (2025-12-24)
+## [4.6.1](https://github.com/akiojin/gwt/compare/v4.6.0...v4.6.1) (2026-01-01)
+
+
+### Bug Fixes
+
+* Quick Start パネルの挿入行計算エラーを修正し、末尾空行を補正 ([#406](https://github.com/akiojin/gwt/issues/406)) ([25fdc25](https://github.com/akiojin/gwt/commit/25fdc25e2a2bba4d6ff4d1f2bd2f64d7e94afb81))
+
+## [4.6.0](https://github.com/akiojin/gwt/compare/v4.5.0...v4.6.0) (2026-01-01)
 
 
 ### Features
 
-* requirements-spec-kit スキルを追加 ([01a6644](https://github.com/akiojin/gwt/commit/01a6644ad3ba5e73bdf17f79c278ec6cf311b637))
+* Quick Start パネルを SolidJS 実装 ([#404](https://github.com/akiojin/gwt/issues/404)) ([84cdd5d](https://github.com/akiojin/gwt/commit/84cdd5d0faf6a3f3f2d4f5bedf93f8bcf1a5e231))
 
-
-### Bug Fixes
-
-* gitデータ取得のタイムアウトを延長 ([27b88a0](https://github.com/akiojin/gwt/commit/27b88a07b2785d26e561066147140f5d2da7541d))
-* gitデータ取得のタイムアウトを延長 ([5e5bdfe](https://github.com/akiojin/gwt/commit/5e5bdfe980c4636611005dc2858c94e84007c246))
-
-## [4.4.1](https://github.com/akiojin/gwt/compare/v4.4.0...v4.4.1) (2025-12-23)
-
-
-### Bug Fixes
-
-* ブランチ一覧取得時にrepoRootを使用するよう修正 ([71edc72](https://github.com/akiojin/gwt/commit/71edc7235d93f4f8172ddb38fe2dbf82201cc46f))
-* ブランチ一覧取得時にrepoRootを使用するよう修正 ([3d4b370](https://github.com/akiojin/gwt/commit/3d4b37049ef189d6512fabcb0440f11baf00fb24))
-
-## [4.4.0](https://github.com/akiojin/gwt/compare/v4.3.1...v4.4.0) (2025-12-23)
+## [4.5.0](https://github.com/akiojin/gwt/compare/v4.4.8...v4.5.0) (2025-12-31)
 
 
 ### Features
 
-* ブランチ一覧画面の改善（表示モード切替・スピナー局所化） ([46e42ae](https://github.com/akiojin/gwt/commit/46e42aecb544964fa156c84043b19243a16ee91f))
-* ブランチ表示モード切替機能（TABキー）を追加 ([50a1d39](https://github.com/akiojin/gwt/commit/50a1d393024a8e8e7ec3c4bcd98502c15408cabe))
+* クイックスタート表示切り替えショートカット (Ctrl+Q) ([#399](https://github.com/akiojin/gwt/issues/399)) ([baebdc5](https://github.com/akiojin/gwt/commit/baebdc53fcac1f9d60db22ca7ed7d9005c6e6a8d))
 
 
 ### Bug Fixes
 
-* Git情報取得のタイムアウトを追加 ([bcccdbf](https://github.com/akiojin/gwt/commit/bcccdbf701165d773f8f64032002d02050515507))
-* Mode表示を Stats 行の先頭に移動 ([d18ad5c](https://github.com/akiojin/gwt/commit/d18ad5cf2549128cf5faaf6f48f48e2a58ac2f7e))
-* WSLの矢印キー誤認を防止 ([cbad8f6](https://github.com/akiojin/gwt/commit/cbad8f600d0bba5c751f1062f54136aaf7235aef))
-* リモート取得遅延でもブランチ一覧を表示 ([5cea85a](https://github.com/akiojin/gwt/commit/5cea85a358399aa44633b58d54ef282ef4718b25))
-* 相対パス起動のエントリ判定を安定化 ([618093e](https://github.com/akiojin/gwt/commit/618093e61738dbf2799c16b103c015fb27d69913))
+* BranchListScreen のマウス座標設定を修正 ([#396](https://github.com/akiojin/gwt/issues/396)) ([a27a10e](https://github.com/akiojin/gwt/commit/a27a10e2203ed6be5f3f0d1b50b3bf0fff920456))
+* クイックスタート選択時のキー入力処理を修正 ([#401](https://github.com/akiojin/gwt/issues/401)) ([d3fc5f2](https://github.com/akiojin/gwt/commit/d3fc5f2f3e4caa54b97ec23d5c7ca75acc4fed1d))
 
-## [4.3.1](https://github.com/akiojin/gwt/compare/v4.3.0...v4.3.1) (2025-12-22)
+## [4.4.8](https://github.com/akiojin/gwt/compare/v4.4.7...v4.4.8) (2025-12-31)
 
 
 ### Bug Fixes
 
-* WSL1検出でChrome統合を無効化する ([085688c](https://github.com/akiojin/gwt/commit/085688cbd1572f0ae79bf2408ca281f74e003f75))
-* 未対応環境ではClaude CodeのChrome統合をスキップする ([f76cc0c](https://github.com/akiojin/gwt/commit/f76cc0c8f8ea36c8b270a3132ab63bcdfdfd77ab))
-* 未対応環境ではClaude CodeのChrome統合をスキップする ([f744901](https://github.com/akiojin/gwt/commit/f744901062e5c02e35c27947a4beace2359ecaaf))
+* BranchListScreen のマウスカーソル位置計算を修正 ([#393](https://github.com/akiojin/gwt/issues/393)) ([43b9bb7](https://github.com/akiojin/gwt/commit/43b9bb73a1a0d9d7f0d930a4ee1a7b69fbf25e6d))
 
-## [4.3.0](https://github.com/akiojin/gwt/compare/v4.2.0...v4.3.0) (2025-12-21)
+## [4.4.7](https://github.com/akiojin/gwt/compare/v4.4.6...v4.4.7) (2025-12-31)
+
+
+### Bug Fixes
+
+* ブランチ名切り詰め処理で全角文字幅を正しく計測 ([#390](https://github.com/akiojin/gwt/issues/390)) ([deaffd5](https://github.com/akiojin/gwt/commit/deaffd5f5d1c6bbe6f8f2104f1f0cfdd1ef3f1d9))
+
+## [4.4.6](https://github.com/akiojin/gwt/compare/v4.4.5...v4.4.6) (2025-12-31)
+
+
+### Bug Fixes
+
+* ブランチ名切り詰め文字数計算の修正 ([#387](https://github.com/akiojin/gwt/issues/387)) ([8c1d1d0](https://github.com/akiojin/gwt/commit/8c1d1d0b5dce6b1f2c474f1a69d07d2d2e4ef66b))
+
+## [4.4.5](https://github.com/akiojin/gwt/compare/v4.4.4...v4.4.5) (2025-12-31)
+
+
+### Bug Fixes
+
+* ブランチリストの表示幅計算を修正して切り詰め問題を解消 ([#384](https://github.com/akiojin/gwt/issues/384)) ([c44aa9a](https://github.com/akiojin/gwt/commit/c44aa9a56dba5ac61f1f9e430ab50e0f92013bc4))
+
+## [4.4.4](https://github.com/akiojin/gwt/compare/v4.4.3...v4.4.4) (2025-12-30)
+
+
+### Bug Fixes
+
+* Codex CLI のセッション引継ぎ引数を --resume から --conversation-id に修正 ([#381](https://github.com/akiojin/gwt/issues/381)) ([b11bf4d](https://github.com/akiojin/gwt/commit/b11bf4d57a3f950e0c1418f32e5b6f5f4fc21fa0))
+
+## [4.4.3](https://github.com/akiojin/gwt/compare/v4.4.2...v4.4.3) (2025-12-30)
+
+
+### Bug Fixes
+
+* ブランチタイプフィルタの選択状態同期とリスト描画の修正 ([#379](https://github.com/akiojin/gwt/issues/379)) ([5e06693](https://github.com/akiojin/gwt/commit/5e06693a63eee4e14410c91f1a2c91f89f95a4b7))
+
+## [4.4.2](https://github.com/akiojin/gwt/compare/v4.4.1...v4.4.2) (2025-12-30)
+
+
+### Bug Fixes
+
+* BranchFilter 表示問題を修正 ([#376](https://github.com/akiojin/gwt/issues/376)) ([a8b0df2](https://github.com/akiojin/gwt/commit/a8b0df221c0f91dae62f6b72d4f2d0ab399d10a0))
+
+## [4.4.1](https://github.com/akiojin/gwt/compare/v4.4.0...v4.4.1) (2025-12-30)
+
+
+### Bug Fixes
+
+* スクロールバー表示の条件を修正 ([#373](https://github.com/akiojin/gwt/issues/373)) ([a0e9d0d](https://github.com/akiojin/gwt/commit/a0e9d0da1baca0a26dfbdd1b6dc29b0fc5b4cb79))
+
+## [4.4.0](https://github.com/akiojin/gwt/compare/v4.3.2...v4.4.0) (2025-12-30)
 
 
 ### Features
 
-* Claude CodeのTypeScript LSP対応を追加 ([cf2983b](https://github.com/akiojin/gwt/commit/cf2983b1f58cb670dba2e47b645cc8af79d760a0))
-* Claude Code起動時にChrome拡張機能統合を有効化 ([b3a5d6d](https://github.com/akiojin/gwt/commit/b3a5d6d7adb85d82577f888c147b3af593bf9160))
-* Claude Code起動時にChrome拡張機能統合を有効化 ([f449845](https://github.com/akiojin/gwt/commit/f4498451d1deacbe811126cc34d35e2b73334eb2))
-* macOS対応のシステムトレイを実装 ([b2cdfbe](https://github.com/akiojin/gwt/commit/b2cdfbe6dffe391becdbb3799019616e1e45ed74))
-* Web UIサーバー全体にログ出力を追加 ([09909f2](https://github.com/akiojin/gwt/commit/09909f2c4b4f7c3a0130ade2536ed5bef55d7512))
-* Web UI機能の強化とブランチグラフのリファクタリング ([146f596](https://github.com/akiojin/gwt/commit/146f59609d207b072bfbf10e5150a37f75a4cd77))
-* ブランチグラフをReact Flowベースにリファクタリング ([f0deb4a](https://github.com/akiojin/gwt/commit/f0deb4a37c8dc0d31ede97491d34719dd7297999))
+* OpenTUI 実験的UIバックエンド (GWT_UI=opentui) ([#370](https://github.com/akiojin/gwt/issues/370)) ([1cbb05c](https://github.com/akiojin/gwt/commit/1cbb05c54f87da20f0d5a21e6dca0a2cd54d8c7d))
 
 
 ### Bug Fixes
 
-* ENABLE_LSP_TOOL環境変数の値を"1"から"true"に修正 ([9bef1eb](https://github.com/akiojin/gwt/commit/9bef1eb809afe3d42cdd190a8ba7b21a71d1a778))
-* node-ptyで使用するコマンドのフルパスを解決 ([7d5ab76](https://github.com/akiojin/gwt/commit/7d5ab76d885b0d6363d7dca821312fedf2e746fa))
-* SPAルーティング用のフォールバック処理を追加 ([a4a0404](https://github.com/akiojin/gwt/commit/a4a0404a439dc07e70ff646f1ca16d8f05d35fef))
-* type-checkでcleanup対象の型エラーを解消 ([a617a2d](https://github.com/akiojin/gwt/commit/a617a2d53575f55985d9d7aa3d3e2fc8717e91fc))
-* Web UIからClaude Code起動時にENABLE_LSP_TOOL環境変数を渡す ([49fea84](https://github.com/akiojin/gwt/commit/49fea847f95e3d997313459389ee4a33aa42dade))
-* Web UIからClaude Code起動時にENABLE_LSP_TOOL環境変数を渡す ([84fedf3](https://github.com/akiojin/gwt/commit/84fedf3918c30b85cae6bb6cdac8f0488ea079ff))
-* Web UIのデフォルトポートを3001に変更 ([597fff3](https://github.com/akiojin/gwt/commit/597fff3310b294d67ec140542d72504ee17a966b))
-* WebSocket接続エラーの即時表示を抑制 ([c0ac929](https://github.com/akiojin/gwt/commit/c0ac929a052ceb3700feee1a9964cb85dfd9c052))
-* クリーンアップ選択の安全判定を要件どおりに更新 ([6c0a595](https://github.com/akiojin/gwt/commit/6c0a5957a866c4f9475f9dd30cb965331a99bfa8))
-* クリーンアップ選択の安全判定を要件どおりに更新 ([23c89c7](https://github.com/akiojin/gwt/commit/23c89c7ee2a5ef843c6d796e013e80c85607e857))
+* OpenTUI ブランチ一覧の表示崩れを修正 ([#371](https://github.com/akiojin/gwt/issues/371)) ([3f84a25](https://github.com/akiojin/gwt/commit/3f84a256e72bd6ad67a4caecc3d5a05bbfaa7d75))
 
-## [4.2.0](https://github.com/akiojin/gwt/compare/v4.1.1...v4.2.0) (2025-12-20)
+## [4.3.2](https://github.com/akiojin/gwt/compare/v4.3.1...v4.3.2) (2025-12-29)
+
+
+### Bug Fixes
+
+* TUI 状態管理の null 安全性を強化しハングを防止 ([#358](https://github.com/akiojin/gwt/issues/358)) ([a2e9a97](https://github.com/akiojin/gwt/commit/a2e9a97a52a1c0e30e13ed5a0e0d2b8e01a01a89))
+
+## [4.3.1](https://github.com/akiojin/gwt/compare/v4.3.0...v4.3.1) (2025-12-28)
+
+
+### Bug Fixes
+
+* TUIレンダリングと入力処理の競合によるハングを修正 ([#354](https://github.com/akiojin/gwt/issues/354)) ([13ec5e8](https://github.com/akiojin/gwt/commit/13ec5e8d14f4195a8eb9b17fe2e66e8ef59f3010))
+
+## [4.3.0](https://github.com/akiojin/gwt/compare/v4.2.0...v4.3.0) (2025-12-28)
 
 
 ### Features
 
-* add post-session git prompts ([bc24450](https://github.com/akiojin/gwt/commit/bc244506559fc0676f6740fa3edf7912c0f02af7))
-* add post-session push prompt ([89b2839](https://github.com/akiojin/gwt/commit/89b2839fe22177390c98f97bc10063f0602877c0))
-
-## [4.1.1](https://github.com/akiojin/gwt/compare/v4.1.0...v4.1.1) (2025-12-19)
+* TUI を React/Ink から Bun/Canvas 実装へ段階的移行開始 (FR-023 先行) ([#351](https://github.com/akiojin/gwt/issues/351)) ([a18a2f1](https://github.com/akiojin/gwt/commit/a18a2f154e68da8d8fa68b45ad9d22cd5ebbd4f9))
 
 
 ### Bug Fixes
 
-* normalizeModelIdの空文字処理とテスト補強 ([b82230b](https://github.com/akiojin/gwt/commit/b82230b6589e689955cd872fc648655436e7f218))
-* Worktree再利用の整合性検証とモデル名正規化 ([69f5fb6](https://github.com/akiojin/gwt/commit/69f5fb6f7419dee017f8ed2946bc0154856ca743))
-* Worktree再利用の整合性検証とモデル名正規化 ([255e551](https://github.com/akiojin/gwt/commit/255e551d915ca3af705ce1f64e8d16983001056a))
+* TUI 状態管理と再描画の競合を修正（循環参照除去） ([#349](https://github.com/akiojin/gwt/issues/349)) ([da4cea6](https://github.com/akiojin/gwt/commit/da4cea6ea9de5be9fc93cc0e3f8ecab4b60e7de1))
 
-## [4.1.0](https://github.com/akiojin/gwt/compare/v4.0.1...v4.1.0) (2025-12-19)
+## [4.2.0](https://github.com/akiojin/gwt/compare/v4.1.1...v4.2.0) (2025-12-27)
 
 
 ### Features
 
-* Codexモデル一覧を4件に整理 ([7a0bac9](https://github.com/akiojin/gwt/commit/7a0bac9459ed22826c95d778924731e8eab207f7))
-* gpt-5.2-codex対応 ([14c2cb4](https://github.com/akiojin/gwt/commit/14c2cb4df6275628787e173c7275362bb11c6101))
-* gpt-5.2-codex対応 ([865f7c8](https://github.com/akiojin/gwt/commit/865f7c87bcce729ddfa383a1048bc632c8d45486))
+* UI描画を毎フレーム全体クリアに変更し描画残りを解消 ([#341](https://github.com/akiojin/gwt/issues/341)) ([0fc3b9c](https://github.com/akiojin/gwt/commit/0fc3b9c2d7e7e9a8d8bf3d437ac58bad12a2fa09))
 
-## [4.0.1](https://github.com/akiojin/gwt/compare/v4.0.0...v4.0.1) (2025-12-18)
+## [4.1.1](https://github.com/akiojin/gwt/compare/v4.1.0...v4.1.1) (2025-12-27)
 
 
 ### Bug Fixes
 
-* WSL2とWindowsで矢印キー入力を安定化 ([94539f1](https://github.com/akiojin/gwt/commit/94539f17b1449b49fc93af0e775667e4d1d399c6))
-* WSL2とWindowsで矢印キー入力を安定化 ([d96ba58](https://github.com/akiojin/gwt/commit/d96ba58b26f7afc283fd91c952876ff7130175bb))
-* デフォルトモデルオプション追加に伴うテスト期待値を修正 ([31a1728](https://github.com/akiojin/gwt/commit/31a17284ba82c27f1dd8aebf6d8bc8b43eca7d5f))
+* 再描画時のカーソル位置復元を追加 ([#338](https://github.com/akiojin/gwt/issues/338)) ([00a2dc7](https://github.com/akiojin/gwt/commit/00a2dc798e3b85bd0f85e3c48dc03a3e3a47adf9))
 
-## [4.0.0](https://github.com/akiojin/gwt/compare/v3.1.2...v4.0.0) (2025-12-18)
+## [4.1.0](https://github.com/akiojin/gwt/compare/v4.0.0...v4.1.0) (2025-12-27)
+
+
+### Features
+
+* 自作TUIレイヤーへの移行開始（React/Inkを段階的に置換） ([#337](https://github.com/akiojin/gwt/issues/337)) ([e9e3c9e](https://github.com/akiojin/gwt/commit/e9e3c9e5d394f3d5124f29f68a05ada420afc38c))
+
+## [4.0.0](https://github.com/akiojin/gwt/compare/v3.11.0...v4.0.0) (2025-12-26)
 
 
 ### ⚠ BREAKING CHANGES
 
-* Qwen CLI (qwen-cli) は起動/選択できません。
+* Claude Code Version 1.0.25 以降を要求（--chrome フラグ追加）
+- **機能追加**: Claude起動時に `--chrome` フラグを追加し、ブラウザ自動認証フローを有効化
+- **依存関係更新**: claude-code@1.0.25 以降が前提
+- **後方互換性**: 1.0.25未満のClaude Codeでは `--chrome` フラグが認識されず起動失敗の可能性あり
 
 ### Features
 
-* gemini-3-flash モデルのサポートを追加 ([1561e7f](https://github.com/akiojin/gwt/commit/1561e7fb5b141d350ace7409bad2bfc952c662db))
-* gemini-3-flash モデルのサポートを追加 ([161ef2f](https://github.com/akiojin/gwt/commit/161ef2f3444b98e56289f8067e0b1938e84a0864))
-* Qwen CLIを未サポート化 ([c007c00](https://github.com/akiojin/gwt/commit/c007c004b854a2552cac7a2f0e2a84266ee59f1d))
-* 全てのツールにデフォルト（自動選択）オプションを追加し、Geminiのモデル選択肢を改善 ([5fb143d](https://github.com/akiojin/gwt/commit/5fb143d9b4b18872ea4b83f9e55f366736412951))
-* 全てのツールにデフォルトオプションを追加し、Geminiのモデル選択肢を改善 ([ff9554d](https://github.com/akiojin/gwt/commit/ff9554deb34b647a525649e341629872dcae20f5))
+* Claude起動に --chrome フラグを追加（Claude Code 1.0.25要求） ([#328](https://github.com/akiojin/gwt/issues/328)) ([a5af39e](https://github.com/akiojin/gwt/commit/a5af39e44e36aec6f4dabb1eea7a1ae3ff0f6b20))
 
-
-### Bug Fixes
-
-* Gemini CLI起動時のTTY描画を維持する ([a27b4ce](https://github.com/akiojin/gwt/commit/a27b4ce679edf5b24f0092ad81d9a8aef5dfde2e))
-* Gemini CLI起動時のTTY描画を維持する ([81403da](https://github.com/akiojin/gwt/commit/81403dacda28f87c34eeb8517cf8946299daf76c))
-* gemini-3-flash のモデル ID を gemini-3-flash-preview に修正 ([bf17b3a](https://github.com/akiojin/gwt/commit/bf17b3a130d05cdc50484f2de1eb73560c1733e0))
-* gemini-3-flash のモデル ID を gemini-3-flash-preview に修正 ([4a5d934](https://github.com/akiojin/gwt/commit/4a5d934b0daef02f2dee9bb34fb7b26a5f783c92))
-* Geminiのモデル選択肢を修正（Default追加＋マニュアルリスト復元） ([ebb2c65](https://github.com/akiojin/gwt/commit/ebb2c65645d14e30b67250fd6446994678ef96bd))
-
-## [3.1.2](https://github.com/akiojin/gwt/compare/v3.1.1...v3.1.2) (2025-12-16)
-
-
-### Bug Fixes
-
-* CodeRabbitレビュー最終修正 ([f39d0a6](https://github.com/akiojin/gwt/commit/f39d0a62b455015296027be2100c55635bd90cea))
-* CodeRabbit指摘事項を修正 ([1eebd46](https://github.com/akiojin/gwt/commit/1eebd46a5b8ccafd7b4f7c4849f100a87904f577))
-* CodeRabbit追加指摘事項を修正 ([02a137c](https://github.com/akiojin/gwt/commit/02a137c32ce38084563607e1583efc844138dc84))
-* matchesCwdにクロスプラットフォームパス正規化を追加 ([93afdcc](https://github.com/akiojin/gwt/commit/93afdcc801e7e6f2401aa6722dab93e56459b507))
-* パスプレフィックスマッチングに境界チェックを追加 ([623bc3d](https://github.com/akiojin/gwt/commit/623bc3df12f4923a889b9572395067956b6e5b4c))
-
-## [3.1.1](https://github.com/akiojin/gwt/compare/v3.1.0...v3.1.1) (2025-12-16)
-
-
-### Bug Fixes
-
-* アクセス不可Worktreeを🔴表示に変更 ([9a4ef35](https://github.com/akiojin/gwt/commit/9a4ef3566a38063a20cb2cf32e4d495d85edb177))
-* アクセス不可Worktreeを🔴表示に変更 ([9bbc419](https://github.com/akiojin/gwt/commit/9bbc419e50583ff945e92c4717c75278484ffced))
-
-## [3.1.0](https://github.com/akiojin/gwt/compare/v3.0.0...v3.1.0) (2025-12-16)
+## [3.11.0](https://github.com/akiojin/gwt/compare/v3.10.1...v3.11.0) (2025-12-26)
 
 
 ### Features
 
-* プロファイル未選択（none）を選択可能にする ([adaaf9c](https://github.com/akiojin/gwt/commit/adaaf9cf2f2d9e5ff3e897a3c39be86693199033))
-* プロファイル未選択を選択できるようにする ([d93c3e7](https://github.com/akiojin/gwt/commit/d93c3e7567cbdb3c24d21ee5ff52e3a39b14510e))
-* 環境変数プロファイル機能を追加 ([80f3f13](https://github.com/akiojin/gwt/commit/80f3f130815f8bed7128fc99d3831403f51bebaa))
-* 環境変数プロファイル機能を追加 ([df01519](https://github.com/akiojin/gwt/commit/df015191a837f413df6235eb00bd23a9fcd0caf0))
+* ツール選択ステップにモデル選択UIを追加 ([#315](https://github.com/akiojin/gwt/issues/315)) ([06b5daf](https://github.com/akiojin/gwt/commit/06b5dafdb18e5fd8b13fd8e88a28df9e6f1ed78f))
 
 
 ### Bug Fixes
 
-* CodeRabbitのレビュー指摘事項を修正 ([45ff1e7](https://github.com/akiojin/gwt/commit/45ff1e75be18b33b9f80fb0f0aafa37261cb3709))
-* EnvironmentProfileScreenのキーボード入力を修正 ([fefea29](https://github.com/akiojin/gwt/commit/fefea2958ed44166b7f7840bbd8d2a12b7146cac))
-* envキー入力のバリデーションを追加 ([739a951](https://github.com/akiojin/gwt/commit/739a951bd32271e14808da52947bf118280a6913))
-* envキー入力バリデーションを調整 ([cdb5bf6](https://github.com/akiojin/gwt/commit/cdb5bf6e44028560ca142ef57e9eff1c8380af92))
-* profiles.yaml更新の競合を防止 ([8062807](https://github.com/akiojin/gwt/commit/8062807b812364bb226e3afdd8f78594b1dbb66f))
-* profiles.yaml未作成時の作成失敗を修正 ([070853b](https://github.com/akiojin/gwt/commit/070853b917de8e1303abd374c04693f6e61de182))
-* Spec Kitスクリプトの安全性改善（eval撤廃/JSON出力） ([434531e](https://github.com/akiojin/gwt/commit/434531ede534c5163e5fcd992cd898d9c8363aba))
-* プロファイル保存の一時ファイルとスクロール境界を修正 ([dc53ad2](https://github.com/akiojin/gwt/commit/dc53ad2fa439e7ec34082f8416c49f11359654f4))
-* プロファイル名検証と設定パス不整合を修正 ([5c8a422](https://github.com/akiojin/gwt/commit/5c8a422882ed8b17657550618ee1d913ad565578))
-* プロファイル変更後にヘッダー表示を更新 ([60883b3](https://github.com/akiojin/gwt/commit/60883b35698ceabc57f70feb2df171b64ba296e1))
-* プロファイル画面の入力検証とインデックス境界を修正 ([4354512](https://github.com/akiojin/gwt/commit/43545121cc9c6b2da7bd63304e21b553c087cf6b))
+* CodeRabbit指摘のモデルオプション生成ロジック修正 ([#321](https://github.com/akiojin/gwt/issues/321)) ([dff794f](https://github.com/akiojin/gwt/commit/dff794f9cb39a6a58b18f3e2aef5dbbdefc3c5f0))
+* Codex CLI実行時の --model/-m と --full-auto 渡しバグを修正 ([#325](https://github.com/akiojin/gwt/issues/325)) ([72d3f66](https://github.com/akiojin/gwt/commit/72d3f66ffb47dcc4914f5d5eb4ad0fb58f4f1eaa))
 
-## [3.0.0](https://github.com/akiojin/gwt/compare/v2.14.0...v3.0.0) (2025-12-15)
+## [3.10.1](https://github.com/akiojin/gwt/compare/v3.10.0...v3.10.1) (2025-12-24)
+
+
+### Bug Fixes
+
+* Resume/Continue モード選択の不具合を修正 ([#312](https://github.com/akiojin/gwt/issues/312)) ([9adaa64](https://github.com/akiojin/gwt/commit/9adaa64c1ab1e70fef444e421dd6ba8d5f09b1e7))
+
+## [3.10.0](https://github.com/akiojin/gwt/compare/v3.9.4...v3.10.0) (2025-12-24)
+
+
+### Features
+
+* ツール選択ウィザードにResume/Continueモード選択を追加 ([#308](https://github.com/akiojin/gwt/issues/308)) ([2cfbf19](https://github.com/akiojin/gwt/commit/2cfbf195f3d5f10b7da30ac8c3ac4fddbc5f8fa9))
+
+## [3.9.4](https://github.com/akiojin/gwt/compare/v3.9.3...v3.9.4) (2025-12-24)
+
+
+### Bug Fixes
+
+* createBranch のベースブランチ解決を修正し不正なリモート参照を防止 ([#305](https://github.com/akiojin/gwt/issues/305)) ([35c7b3c](https://github.com/akiojin/gwt/commit/35c7b3c19f8ec8bc1fba1bf0de1b3fd8e1f4fdb2))
+
+## [3.9.3](https://github.com/akiojin/gwt/compare/v3.9.2...v3.9.3) (2025-12-23)
+
+
+### Bug Fixes
+
+* ブランチ一覧表示の即時完了処理を修正 ([#302](https://github.com/akiojin/gwt/issues/302)) ([9f7f96f](https://github.com/akiojin/gwt/commit/9f7f96f24dd4de0c8101f239a6c2f2b04723e6cd))
+
+## [3.9.2](https://github.com/akiojin/gwt/compare/v3.9.1...v3.9.2) (2025-12-23)
+
+
+### Bug Fixes
+
+* 非同期オーバレイメッセージが空のままになるバグを修正 ([#299](https://github.com/akiojin/gwt/issues/299)) ([d94fc78](https://github.com/akiojin/gwt/commit/d94fc78ea5d5eb2fdbdc5da60ba1edb5b0b6b809))
+
+## [3.9.1](https://github.com/akiojin/gwt/compare/v3.9.0...v3.9.1) (2025-12-23)
+
+
+### Bug Fixes
+
+* 新規ブランチ作成後の状態初期化とワークツリー生成のバグ修正 ([#296](https://github.com/akiojin/gwt/issues/296)) ([86d1b80](https://github.com/akiojin/gwt/commit/86d1b80ccbd20dbfbae2dc3deb4f9eee1bb6bcf5))
+
+## [3.9.0](https://github.com/akiojin/gwt/compare/v3.8.1...v3.9.0) (2025-12-23)
+
+
+### Features
+
+* TUI にカスタムコーディングエージェント対応 UI を追加 ([#291](https://github.com/akiojin/gwt/issues/291)) ([0ddfa77](https://github.com/akiojin/gwt/commit/0ddfa77d4b9b2bfae9f1f6ad1fb5f430f429efe4))
+
+## [3.8.1](https://github.com/akiojin/gwt/compare/v3.8.0...v3.8.1) (2025-12-22)
+
+
+### Bug Fixes
+
+* ワークツリー安全性チェックの並列実行とロック競合を修正 ([#284](https://github.com/akiojin/gwt/issues/284)) ([2d47f2e](https://github.com/akiojin/gwt/commit/2d47f2e0b01a1e53dee35c41ce5ba69d3b24d680))
+
+## [3.8.0](https://github.com/akiojin/gwt/compare/v3.7.1...v3.8.0) (2025-12-21)
+
+
+### Features
+
+* tools.yaml によるカスタムコーディングエージェント定義機能を追加 ([#280](https://github.com/akiojin/gwt/issues/280)) ([5b5dca6](https://github.com/akiojin/gwt/commit/5b5dca672dc99bc3cb93e40bb39e50fb6db05b17))
+
+## [3.7.1](https://github.com/akiojin/gwt/compare/v3.7.0...v3.7.1) (2025-12-21)
+
+
+### Bug Fixes
+
+* 分岐状態取得のバグを修正 ([#279](https://github.com/akiojin/gwt/issues/279)) ([23c49f4](https://github.com/akiojin/gwt/commit/23c49f4f925d99e23f94f56dc1106a20f17b2a80))
+
+## [3.7.0](https://github.com/akiojin/gwt/compare/v3.6.2...v3.7.0) (2025-12-21)
+
+
+### Features
+
+* ブランチ一覧画面での削除安全性チェック機能を追加 ([#270](https://github.com/akiojin/gwt/issues/270)) ([4d5e360](https://github.com/akiojin/gwt/commit/4d5e3604b65f53f56ca2e6b3ef0b84b0e92dcdca))
+
+## [3.6.2](https://github.com/akiojin/gwt/compare/v3.6.1...v3.6.2) (2025-12-20)
+
+
+### Bug Fixes
+
+* スピナー状態の維持とブランチ一覧更新のバグ修正 ([#265](https://github.com/akiojin/gwt/issues/265)) ([a8047ab](https://github.com/akiojin/gwt/commit/a8047ab23b56f6f0fe3a2a6b4c1b9dee90b40fbb))
+
+## [3.6.1](https://github.com/akiojin/gwt/compare/v3.6.0...v3.6.1) (2025-12-20)
+
+
+### Bug Fixes
+
+* ブランチ削除と一覧更新のバグを修正 ([#261](https://github.com/akiojin/gwt/issues/261)) ([5e12e77](https://github.com/akiojin/gwt/commit/5e12e77f6ecb9a77bf28aef3f20f9d49b41a5adb))
+
+## [3.6.0](https://github.com/akiojin/gwt/compare/v3.5.1...v3.6.0) (2025-12-20)
+
+
+### Features
+
+* ブランチ削除前にリモート同期状態を確認するワークフロー追加 ([#258](https://github.com/akiojin/gwt/issues/258)) ([48e0ddf](https://github.com/akiojin/gwt/commit/48e0ddfa0c2b88d72f5cdef6e294bc6d445bacc5))
+
+## [3.5.1](https://github.com/akiojin/gwt/compare/v3.5.0...v3.5.1) (2025-12-19)
+
+
+### Bug Fixes
+
+* ブランチ削除UIでバッチキャンセル時に残りが削除される問題を修正 ([#255](https://github.com/akiojin/gwt/issues/255)) ([b61fb59](https://github.com/akiojin/gwt/commit/b61fb5926464ae06f08af79ecf3f5f6df5c1a4d7))
+
+## [3.5.0](https://github.com/akiojin/gwt/compare/v3.4.2...v3.5.0) (2025-12-19)
+
+
+### Features
+
+* ブランチ削除時にリモートブランチも同時削除するオプションを追加 ([#252](https://github.com/akiojin/gwt/issues/252)) ([f2f1c9f](https://github.com/akiojin/gwt/commit/f2f1c9f4bcdfb0f7f1cf4aad2a78a5f9a1fc3dcb))
+
+## [3.4.2](https://github.com/akiojin/gwt/compare/v3.4.1...v3.4.2) (2025-12-19)
+
+
+### Bug Fixes
+
+* ブランチ削除UIの日本語文字化けとカーソル位置を修正 ([#249](https://github.com/akiojin/gwt/issues/249)) ([dc1eec6](https://github.com/akiojin/gwt/commit/dc1eec6807ae0bc84acbb4e26ea9215e28adc287))
+
+## [3.4.1](https://github.com/akiojin/gwt/compare/v3.4.0...v3.4.1) (2025-12-19)
+
+
+### Bug Fixes
+
+* 不正なバンドル参照によるビルドエラーを修正 ([#246](https://github.com/akiojin/gwt/issues/246)) ([1cba3bf](https://github.com/akiojin/gwt/commit/1cba3bfc62130bda5467f5aa8e320f99f6fb0b8f))
+
+## [3.4.0](https://github.com/akiojin/gwt/compare/v3.3.1...v3.4.0) (2025-12-18)
+
+
+### Features
+
+* ブランチ削除機能を実装 ([#242](https://github.com/akiojin/gwt/issues/242)) ([4ca3c3a](https://github.com/akiojin/gwt/commit/4ca3c3a3d9eb71e93d2cfc7cd12a2a34efc69660))
+
+## [3.3.1](https://github.com/akiojin/gwt/compare/v3.3.0...v3.3.1) (2025-12-18)
+
+
+### Bug Fixes
+
+* TUIレンダリングのバグを修正 ([#240](https://github.com/akiojin/gwt/issues/240)) ([beac47f](https://github.com/akiojin/gwt/commit/beac47f67d44d9d05ab08dfeed08a44f7df23acf))
+
+## [3.3.0](https://github.com/akiojin/gwt/compare/v3.2.0...v3.3.0) (2025-12-18)
+
+
+### Features
+
+* ブランチグラフ表示機能を追加 ([#232](https://github.com/akiojin/gwt/issues/232)) ([79e2b3a](https://github.com/akiojin/gwt/commit/79e2b3af06a3a2e27f1afe459ce1b09ced1ac27b))
+
+
+### Bug Fixes
+
+* 新規ブランチ作成フローのメモリリークを修正 ([#237](https://github.com/akiojin/gwt/issues/237)) ([8dd6e80](https://github.com/akiojin/gwt/commit/8dd6e80b72a0be98f3b40a2f0ba8e89a79560a56))
+
+## [3.2.0](https://github.com/akiojin/gwt/compare/v3.1.0...v3.2.0) (2025-12-17)
+
+
+### Features
+
+* Web UIの基盤実装とブランチ一覧表示 ([#230](https://github.com/akiojin/gwt/issues/230)) ([f38e1bc](https://github.com/akiojin/gwt/commit/f38e1bcd5e16780eb2b6dbabbe79b76d99ec7d0a))
+
+## [3.1.0](https://github.com/akiojin/gwt/compare/v3.0.6...v3.1.0) (2025-12-15)
+
+
+### Features
+
+* リモートブランチからワークツリー作成機能を追加 ([#227](https://github.com/akiojin/gwt/issues/227)) ([9aa1855](https://github.com/akiojin/gwt/commit/9aa1855e03e69f94b00b7c0a5e3a9af39cd0cdb5))
+
+## [3.0.6](https://github.com/akiojin/gwt/compare/v3.0.5...v3.0.6) (2025-12-14)
+
+
+### Bug Fixes
+
+* セッション再開の自動検出を修正しログ書き込み単位を最適化 ([#224](https://github.com/akiojin/gwt/issues/224)) ([7ac5af2](https://github.com/akiojin/gwt/commit/7ac5af22f0fabc22cb39f3b70aff6de5a4e54b28))
+
+## [3.0.5](https://github.com/akiojin/gwt/compare/v3.0.4...v3.0.5) (2025-12-14)
+
+
+### Bug Fixes
+
+* Claude Codeにおけるセッションの再開処理に不具合があったのを修正 ([#223](https://github.com/akiojin/gwt/issues/223)) ([adae8ca](https://github.com/akiojin/gwt/commit/adae8cabee52f0a25f72f7ddf1d1b28f8c29003b))
+
+## [3.0.4](https://github.com/akiojin/gwt/compare/v3.0.3...v3.0.4) (2025-12-14)
+
+
+### Bug Fixes
+
+* 設定ファイル参照を .gwt から .config/gwt に統一 ([#217](https://github.com/akiojin/gwt/issues/217)) ([0c61e50](https://github.com/akiojin/gwt/commit/0c61e50bebc30f39cba6ed1f94cf18fef70a3bfc))
+
+## [3.0.3](https://github.com/akiojin/gwt/compare/v3.0.2...v3.0.3) (2025-12-14)
+
+
+### Bug Fixes
+
+* ログ出力のJSON構造崩れとtimestamp漏れを修正 ([#213](https://github.com/akiojin/gwt/issues/213)) ([c3a6fcd](https://github.com/akiojin/gwt/commit/c3a6fcd1f7fce7a09f8f60d9e5ea86fc1c8fa0cc))
+
+## [3.0.2](https://github.com/akiojin/gwt/compare/v3.0.1...v3.0.2) (2025-12-14)
+
+
+### Bug Fixes
+
+* 改行チェックを追加しログの破損を防止 ([#210](https://github.com/akiojin/gwt/issues/210)) ([41a4dbb](https://github.com/akiojin/gwt/commit/41a4dbbd4ca4b7de7ccd20e4b92a5d0bfb66f0ad))
+
+## [3.0.1](https://github.com/akiojin/gwt/compare/v3.0.0...v3.0.1) (2025-12-14)
+
+
+### Bug Fixes
+
+* ログ出力の改行位置修正とコーディングエージェント起動ログの先行出力 ([#207](https://github.com/akiojin/gwt/issues/207)) ([0dc76fc](https://github.com/akiojin/gwt/commit/0dc76fc83cc2e5d8f7e1b6e45bc6e34b5a0efb7b))
+
+## [3.0.0](https://github.com/akiojin/gwt/compare/v2.5.3...v3.0.0) (2025-12-14)
 
 
 ### ⚠ BREAKING CHANGES
 
-* gwtコマンド起動時にWeb UIサーバーが自動起動しなくなります。 Web UIを使用する場合は `gwt serve` または `npm run start:web` で明示的に起動してください。
+* 構造化ログ出力を導入（従来のテキストログとの互換性なし）
+
+### Features
+
+* pino導入による構造化ログとログビューア機能 ([#200](https://github.com/akiojin/gwt/issues/200)) ([8af4f2c](https://github.com/akiojin/gwt/commit/8af4f2c1aabc7c8ac2bea3e9f6b36f32cb8f5fc7))
+
+## [2.5.3](https://github.com/akiojin/gwt/compare/v2.5.2...v2.5.3) (2025-12-13)
+
 
 ### Bug Fixes
 
-* macOS/Linuxでトレイ初期化を無効化してクラッシュを防止 ([d30c320](https://github.com/akiojin/gwt/commit/d30c32098e48858113afdd24a5cbbeb38481ceaf))
-* macOS/Linuxでトレイ初期化を無効化してクラッシュを防止 ([e53a0f5](https://github.com/akiojin/gwt/commit/e53a0f568abbb4bd15bd4d8fd97308fc5da9eed4))
-* Web UI URL表示削除に伴うテスト修正 ([dbabfcf](https://github.com/akiojin/gwt/commit/dbabfcf92d0c1a7d6be12319f417ac53ba77b3e1))
-* トレイ再初期化とテストのplatform注入 ([1b39cf5](https://github.com/akiojin/gwt/commit/1b39cf5491f68ae65d45cb0fba28d0a3566d3243))
-* トレイ破棄の二重実行を防止 ([0b7fcd5](https://github.com/akiojin/gwt/commit/0b7fcd5620a76e74c1eef104105a5ca96186bf13))
+* 依存関係インストールと準備ステップのバグ修正 ([#191](https://github.com/akiojin/gwt/issues/191)) ([e8d8e9a](https://github.com/akiojin/gwt/commit/e8d8e9aa88aede71d2b3b04a0ff54dc8f9d44cdc))
+
+## [2.5.2](https://github.com/akiojin/gwt/compare/v2.5.1...v2.5.2) (2025-12-12)
 
 
-### Code Refactoring
+### Bug Fixes
 
-* CLI起動時のWeb UIサーバー自動起動を廃止 ([32a2a97](https://github.com/akiojin/gwt/commit/32a2a97ab4168fe2d569101076dbb197870620f2))
+* 依存インストールのロックファイル優先順位を修正 ([#188](https://github.com/akiojin/gwt/issues/188)) ([b2b14ac](https://github.com/akiojin/gwt/commit/b2b14ac8011a67d5a6a6e4adeee6d39f6a2f89f1))
 
-## [2.14.0](https://github.com/akiojin/gwt/compare/v2.13.0...v2.14.0) (2025-12-13)
+## [2.5.1](https://github.com/akiojin/gwt/compare/v2.5.0...v2.5.1) (2025-12-12)
+
+
+### Bug Fixes
+
+* ワークツリー作成失敗時のユーザーフィードバックを改善 ([#185](https://github.com/akiojin/gwt/issues/185)) ([fc5e2ae](https://github.com/akiojin/gwt/commit/fc5e2ae0d6f63cfe65ff2a5e9e14dd89e1cff8c9))
+
+## [2.5.0](https://github.com/akiojin/gwt/compare/v2.4.3...v2.5.0) (2025-12-11)
 
 
 ### Features
 
-* Web UIトレイ常駐とURL表示 ([bf0d674](https://github.com/akiojin/gwt/commit/bf0d674b4eb49aa5585145fcf19a6dafd6eb2904))
-* Web UIトレイ常駐とURL表示 ([51103c3](https://github.com/akiojin/gwt/commit/51103c3250f53c3c4e6d33c64e968f300cb3d39e))
-* Web UIをTailwind CSS + shadcn/uiで刷新 ([07d1140](https://github.com/akiojin/gwt/commit/07d114026b74aa39d5748fb5725c9584d89849c7))
-* **webui:** CLI起動時にWeb UIサーバーを自動起動 ([519938b](https://github.com/akiojin/gwt/commit/519938baa0ee4f3fd94ff475a14a72b2bfdc2f29))
-* **webui:** Tailwind CSS + shadcn/ui基盤を導入 ([b49ede7](https://github.com/akiojin/gwt/commit/b49ede7694c5da0732dcd089af33315ebbb9b09b))
-* **webui:** Web UI機能強化とCLI連携 ([982763e](https://github.com/akiojin/gwt/commit/982763e31fdba320c4843a775795efaade35b05a))
-* **webui:** 全ページをTailwind + shadcn/uiでリファクタリング ([a5ca94c](https://github.com/akiojin/gwt/commit/a5ca94cf402fdc9e94239f275d153b43ab732a59))
-* ポート使用中時のWeb UIサーバー起動スキップ (FR-006) ([d38dc33](https://github.com/akiojin/gwt/commit/d38dc333de868a3dfd0ae111fb075232e72d975a))
+* ワークツリー選択後に lockfile 検出でパッケージインストールを自動実行 ([#182](https://github.com/akiojin/gwt/issues/182)) ([14f4f72](https://github.com/akiojin/gwt/commit/14f4f728f8ac49a2e9e58e2b1d17a0fdef97a8d9))
+
+## [2.4.3](https://github.com/akiojin/gwt/compare/v2.4.2...v2.4.3) (2025-12-11)
 
 
 ### Bug Fixes
 
-* Goodbye後にプロセスが終了しない問題を修正 ([99d6aa1](https://github.com/akiojin/gwt/commit/99d6aa1510e3bf24d38bbd7ae7ed70465868e063))
-* Goodbye後にプロセスが終了しない問題を修正 ([a3c4ee1](https://github.com/akiojin/gwt/commit/a3c4ee11df685a72b7536c4600115cdf5d60ade6))
-* handle LF enter in Select ([5f7c42f](https://github.com/akiojin/gwt/commit/5f7c42f030e64f74a2d5e9e764290be373309a2e))
-* PR [#344](https://github.com/akiojin/gwt/issues/344) CodeRabbitレビュー対応 ([c40cce9](https://github.com/akiojin/gwt/commit/c40cce9a40c763908e26a9d4b476553e12892237))
-* Quick Start Enter二度押し問題とテストOOM改善 ([137530a](https://github.com/akiojin/gwt/commit/137530ae796e3af123375847ba52b815304dc12b))
-* Quick Start画面の初回表示時にEnterが効かない問題を修正 ([26d8e61](https://github.com/akiojin/gwt/commit/26d8e612eed311c29aa0768c4b2f6824d1199c68))
-* Quick Start画面の初回表示時にEnterが効かない問題を修正 ([d5915f7](https://github.com/akiojin/gwt/commit/d5915f7d43d6adb3a23951983925c539061f6d80))
-* Resume/ContinueでsessionIdを上書きしない ([f26674e](https://github.com/akiojin/gwt/commit/f26674ef7ad83edde59e789b291a6bd28b075eb5))
-* Resume/ContinueでsessionIdを上書きしない ([ec0d682](https://github.com/akiojin/gwt/commit/ec0d682388b1c9bec84b2efd3b411807c033ac62))
-* Resumeは各ツールのresume機能に委譲 ([755aaff](https://github.com/akiojin/gwt/commit/755aaff357737bd170a68549be738b34466832f4))
-* Resumeは各ツールのresume機能に委譲 ([c8afa5d](https://github.com/akiojin/gwt/commit/c8afa5d4427891cf87b4b0031903e53e40dee4f0))
-* **test:** テストモックのAPI形状を修正 ([19c326e](https://github.com/akiojin/gwt/commit/19c326ee88e331f0e486562387b916f3ace806b5))
-* Web UIサーバー停止をタイムアウト付きで堅牢化 ([72d366f](https://github.com/akiojin/gwt/commit/72d366fe945d4279e9d5768d3f9892e90d9e43b0))
-* Web UIポート解決とトレイ初期化の堅牢化 ([533fbcf](https://github.com/akiojin/gwt/commit/533fbcf5a449d83f74b5582b80abd8ce8e3ddbd2))
-* 未使用インポートを削除しESLintエラーを解消 ([7463870](https://github.com/akiojin/gwt/commit/74638704cc7f4f1f0634851d0711db00a68dad64))
+* ワークツリー修復時のパス解決とメタデータクリーンアップを修正 ([#176](https://github.com/akiojin/gwt/issues/176)) ([5b5aff3](https://github.com/akiojin/gwt/commit/5b5aff3a09a51a97e7ee5b9cde72ba2b3fe1cd40))
 
-## [2.13.0](https://github.com/akiojin/gwt/compare/v2.12.1...v2.13.0) (2025-12-12)
+## [2.4.2](https://github.com/akiojin/gwt/compare/v2.4.1...v2.4.2) (2025-12-10)
+
+
+### Bug Fixes
+
+* ワークツリー不整合検出ロジックを修正し孤立メタデータ処理を追加 ([#172](https://github.com/akiojin/gwt/issues/172)) ([9fbfaa3](https://github.com/akiojin/gwt/commit/9fbfaa31e1a5b399ca2a2f0acd55a3b3a4af06e1))
+
+## [2.4.1](https://github.com/akiojin/gwt/compare/v2.4.0...v2.4.1) (2025-12-10)
+
+
+### Bug Fixes
+
+* worktreeが見つからない場合にrepairWorktreeで新規作成するよう修正 ([#169](https://github.com/akiojin/gwt/issues/169)) ([dc36d6c](https://github.com/akiojin/gwt/commit/dc36d6ce437e6ae34ea27f30a38b5f31fdaef3f4))
+
+## [2.4.0](https://github.com/akiojin/gwt/compare/v2.3.0...v2.4.0) (2025-12-10)
 
 
 ### Features
 
-* Codexにgpt-5.2モデルを追加 ([9c97214](https://github.com/akiojin/gwt/commit/9c97214d365348ecc807e97684ee4233c25c9cfe))
-* Codexにgpt-5.2モデルを追加 ([a1ec770](https://github.com/akiojin/gwt/commit/a1ec7704b431a43e15c16e87648e9e831235fd3c))
-* Ink.js CLI UIデザインスキル（cli-design）を追加 ([4da6a1c](https://github.com/akiojin/gwt/commit/4da6a1cabe56d683274f0f63e209343b0bf8a1c1))
-* Ink.js CLI UIデザインスキル（cli-design）を追加 ([1066498](https://github.com/akiojin/gwt/commit/106649852109478aee692fda4f32d203993a4f16))
-* pino構造化ログと7日ローテーションを導入 ([946e42c](https://github.com/akiojin/gwt/commit/946e42c336784cee061af83592b22b08e9d3ace6))
-* route logs to ~/.gwt with daily jsonl files ([4a5a5f4](https://github.com/akiojin/gwt/commit/4a5a5f4d8d626c94bc66475c089696a487596229))
+* ワークツリー不整合検出時のユーザー通知と自動修復フロー ([#166](https://github.com/akiojin/gwt/issues/166)) ([60ad0aa](https://github.com/akiojin/gwt/commit/60ad0aa2abca3a5b45f6cf4bf2d60e8e469e98e4))
 
-
-### Bug Fixes
-
-* align branch list layout and icon widths ([eee5e00](https://github.com/akiojin/gwt/commit/eee5e00fcaed22b5dd48e12438cf3096fd4604f8))
-* divergenceテストにwaitForEnterモックを追加 ([6695f1c](https://github.com/akiojin/gwt/commit/6695f1c9c3d4c5ac860ed037f8c4d786a5f26b37))
-* divergenceテストのタイムアウト修正 ([4ba674a](https://github.com/akiojin/gwt/commit/4ba674a3ecf400957a212a5489551a19cbeafb7f))
-* Fastify logger型の不整合を修正 ([4396886](https://github.com/akiojin/gwt/commit/439688689e296497077ee3c21976c1ae167d5ef2))
-* prompt.jsモックでimportActualを使用 ([8b99f97](https://github.com/akiojin/gwt/commit/8b99f975c7add859a8d9df76668c1cab2a973ee9))
-* resolve lint errors on branch list ([30d9b3d](https://github.com/akiojin/gwt/commit/30d9b3ded9a767be5809d6d00e0f6143029352d2))
-* share logger date helper and simplify tests ([d73336f](https://github.com/akiojin/gwt/commit/d73336ffc3f57f06cc879955611fbee154648295))
-
-## [2.12.1](https://github.com/akiojin/gwt/compare/v2.12.0...v2.12.1) (2025-12-09)
-
-
-### Bug Fixes
-
-* ensure divergence prompt waits for input ([248e3eb](https://github.com/akiojin/gwt/commit/248e3ebd7483d18681e02771c411b170cbcd3e2e))
-* ensure divergence prompt waits for input ([efca1f5](https://github.com/akiojin/gwt/commit/efca1f5602a6f1264df8b28207c819d8aa4657fe))
-
-## [2.12.0](https://github.com/akiojin/gwt/compare/v2.11.1...v2.12.0) (2025-12-08)
+## [2.3.0](https://github.com/akiojin/gwt/compare/v2.2.0...v2.3.0) (2025-12-09)
 
 
 ### Features
 
-* add branch quick start reuse last settings ([c0cce6a](https://github.com/akiojin/gwt/commit/c0cce6a8a6ea36a2230980bcc6c4d3cc10fd4433))
-* add branch quick start screen ui tests ([e72fd85](https://github.com/akiojin/gwt/commit/e72fd85458570ca1f0f624f9ef3b863290120a01))
-* Codex CLIのスキル機能を有効化 ([c406070](https://github.com/akiojin/gwt/commit/c4060703bc3ce30e90d681332f2ba0685a30d8de))
-* Codex CLIのスキル機能を有効化 ([abe0fa7](https://github.com/akiojin/gwt/commit/abe0fa749d4b52018853157aff08dfe6f89b1dec))
-* fallback resolve continue session id from tool cache ([fe74082](https://github.com/akiojin/gwt/commit/fe7408245d81aa9565f4c492a92d28dbad2203cf))
-* persist and surface session ids for continue flow ([fd1053f](https://github.com/akiojin/gwt/commit/fd1053fe41c7d8522b2e598d731b6742bb325970))
-* Quick Startをツールカテゴリ別に色分け表示 ([f7464e2](https://github.com/akiojin/gwt/commit/f7464e2ad177ec52b25ecf5a27f29d6a478a2478))
-* reuse skip permissions in quick start ([5c75eea](https://github.com/akiojin/gwt/commit/5c75eea4f41ad52826a5a4c1e05a12f54b97eb15))
-* skip execution mode when quick-start reusing settings ([ed6bfc3](https://github.com/akiojin/gwt/commit/ed6bfc375a898fc3c16f250b9bd257d9bb927761))
-* support gemini session resume ([9cc993d](https://github.com/akiojin/gwt/commit/9cc993df4eb5ba9a1ea1c3be89e64dbca3071929))
-* クイックスタートでツール別の直近設定を提示 ([9904992](https://github.com/akiojin/gwt/commit/99049928061105e48fadb103bab423fdb4e7ecf4))
-* セッションID再開対応（Codex/Claude/Gemini） ([a2d50ef](https://github.com/akiojin/gwt/commit/a2d50ef9f48e18045b6c5764b38c6f567f6d0d83))
-* 全AIツール起動時のパラメーターを表示 ([72d41b4](https://github.com/akiojin/gwt/commit/72d41b4bbf9af82c7ff9a2f90d3d852aa7db8861))
-* 全AIツール起動時のパラメーターを表示 ([d3a6827](https://github.com/akiojin/gwt/commit/d3a682790addca7c541a01a37c72efbad75a4b57))
+* git fetch時に全リモートを更新し、プルのブランチ分岐検出を改善 ([#163](https://github.com/akiojin/gwt/issues/163)) ([e81a79f](https://github.com/akiojin/gwt/commit/e81a79ffeee96bc8c8d19ec0c3d457f8b5105efb))
 
-
-### Bug Fixes
-
-* add execChild helper to handle SIGINT for Codex CLI ([7c3d8a6](https://github.com/akiojin/gwt/commit/7c3d8a693c4b6cffddb2aff61a6413e002d2422c))
-* add shell option to Codex execa for proper Ctrl+C handling ([0735646](https://github.com/akiojin/gwt/commit/0735646c02b4e628421358084d8ce45ee4764419))
-* add SIGINT/SIGTERM handling to Claude Code launcher ([d34ac76](https://github.com/akiojin/gwt/commit/d34ac76e9ea2bb9ef4883761c4c887a44f7010ea))
-* add terminal.exitRawMode() to Codex finally block ([3f058ac](https://github.com/akiojin/gwt/commit/3f058ac6db04c377ec7fb3673eb17606aafee06b))
-* always show latest claude session id in quick start ([c8bed86](https://github.com/akiojin/gwt/commit/c8bed868041cdfbed80ce410a299995d477a77a2))
-* capture Gemini session ID from exit summary output ([074e071](https://github.com/akiojin/gwt/commit/074e07175be20698fcba6620c8f682d69ca8d247))
-* capture session ids and harden quick start filters ([83c1c45](https://github.com/akiojin/gwt/commit/83c1c45461ea2460deb41bcb8f4847b82f421ada))
-* Claude CodeでstdoutからsessionIdを確実に捕捉 ([466eeb3](https://github.com/akiojin/gwt/commit/466eeb38853e98b66907ee31abce884b69fc36db))
-* Claude/Codexセッションを起動時刻近傍で再解決 ([ad6c5bf](https://github.com/akiojin/gwt/commit/ad6c5bf04d8cdd32ecde24e978b8be597aeaa73c))
-* Claude/Geminiのセッション取得を時間帯で厳密化 ([77e1444](https://github.com/akiojin/gwt/commit/77e1444d5add622435b88a4d22359bf6b5d78cc4))
-* ClaudeセッションIDを保存時に補完 ([e0a1be1](https://github.com/akiojin/gwt/commit/e0a1be1834cbc49331e265d3d8386b28e2280be6))
-* ClaudeセッションIDを起動直後にポーリングして補足 ([81959b4](https://github.com/akiojin/gwt/commit/81959b4c487949fa45130e2b2cd85bf8980ec0e6))
-* Claudeセッション検出でdot→dashエンコードを考慮 ([78dac9a](https://github.com/akiojin/gwt/commit/78dac9a630c0bf20eddf359f9c8eba628cb3276a))
-* Claudeセッション検出でproject直下のjson/jsonlも探索 ([1c93645](https://github.com/akiojin/gwt/commit/1c93645702062bba005e95f7f79618a0b91be063))
-* Claudeセッション検出で最終更新順に有効IDを探索 ([05c674c](https://github.com/akiojin/gwt/commit/05c674c6bcc9e27720cf3f5a616354ead2432098))
-* Codex Quick Startで履歴より新しいセッションファイルを優先 ([f228746](https://github.com/akiojin/gwt/commit/f2287468d6a5111f8aca8e4b1156dcd48e950697))
-* CodexセッションIDを起動時刻に近いものへ保存 ([0708710](https://github.com/akiojin/gwt/commit/0708710f6264ee1114c695ab6d3e60bc1a96694a))
-* CodexセッションIDを起動直後にポーリングして補足 ([226932b](https://github.com/akiojin/gwt/commit/226932b5e911f390678a8e4e8bfe1785de9811a5))
-* Codexセッション取得を開始時刻以降の最新ファイルに限定 ([0fbf1b7](https://github.com/akiojin/gwt/commit/0fbf1b7b9cec0044c87342a5e7e401227ec80799))
-* CodexのQuick Startで最新セッションIDをファイルから補完 ([15a1665](https://github.com/akiojin/gwt/commit/15a16651ed559a5168ce64e82aa18c8d2f7b9ce6))
-* CodexのQuick Startで履歴IDがある場合は上書きしない ([1a6d7f6](https://github.com/akiojin/gwt/commit/1a6d7f6fad321306835af2359bc20df2772c817f))
-* Codex保存時に最新セッションIDを再解決 ([0006aa3](https://github.com/akiojin/gwt/commit/0006aa33e812a26f698ff81bccf29ee059c1b073))
-* complete stdin reset before/after Claude Code launch ([8fe3504](https://github.com/akiojin/gwt/commit/8fe3504d232416c60c4b456aca028799bb1c1268))
-* default skip permissions to no when missing ([491b33e](https://github.com/akiojin/gwt/commit/491b33e464eef332de17c0b19eddf350adfd9b08))
-* detect codex session ids in nested dirs ([282fde8](https://github.com/akiojin/gwt/commit/282fde81fc919a57e62aeb80c44728d45ab6ea34))
-* extract cwd from nested payload in Codex session files ([3fd1adf](https://github.com/akiojin/gwt/commit/3fd1adfac8139aee7ca088e2a8d6f6e200a45748))
-* filter claude quick start entries to existing session files ([fa51163](https://github.com/akiojin/gwt/commit/fa51163d545d1aa97281b6e59d43e3623c7c6fff))
-* Gemini resume失敗時に最新セッションへフォールバック ([0db4676](https://github.com/akiojin/gwt/commit/0db4676a383bc3dfeef3e50e53c272b15d326de4))
-* Geminiセッションも起動時刻近傍で再解決 ([e5fd21b](https://github.com/akiojin/gwt/commit/e5fd21bf85c174f2c02a1042e1b237046722c9a5))
-* Geminiセッション検出をtmp全体のjson/jsonlから抽出 ([c3745b5](https://github.com/akiojin/gwt/commit/c3745b50473485f1a5ba38d73d0e9b531bcd1e2b))
-* Gemini起動時にstdoutからsessionIdを確実に捕捉 ([9387c46](https://github.com/akiojin/gwt/commit/9387c46d9c914e33784fce69eeea0fdf10bed202))
-* honor CODEX_HOME and CLAUDE_CONFIG_DIR for session lookup ([c8a103d](https://github.com/akiojin/gwt/commit/c8a103d2dd7c60e13f789bc5949489d1401afcd8))
-* ignore stdout session ids that lack matching claude session file ([10c6e39](https://github.com/akiojin/gwt/commit/10c6e39328ba1eed14f9bf83cc619df050ea9106))
-* improve Codex session cwd matching for worktree paths ([a0e7a9b](https://github.com/akiojin/gwt/commit/a0e7a9bead4bc8663a19238dec71bfe654515999))
-* inkの色型エラーを解消 ([60ca0bb](https://github.com/akiojin/gwt/commit/60ca0bb27922d0b779493145c8211979870f3766))
-* keep local claude tty to avoid non-interactive launch ([ea6c043](https://github.com/akiojin/gwt/commit/ea6c043417f6ce1211efdb7fef3bebf949df1487))
-* limit continue session id to branch history ([daed7dc](https://github.com/akiojin/gwt/commit/daed7dc426e5b1bf4e70f56a318c8573cb26547b))
-* localize quick start screen copy ([7d352e6](https://github.com/akiojin/gwt/commit/7d352e6bedf6400ad97b09cc7290ba3ef296e6ea))
-* locate Claude sessions under .config fallback ([cdf0322](https://github.com/akiojin/gwt/commit/cdf03226d315a725b39fe407725d8d5302be2291))
-* prefer newest claude session file within window ([036cd17](https://github.com/akiojin/gwt/commit/036cd176a9c71a98e4e52b1c2d1dcfd044d9dbda))
-* prefer on-disk latest claude session over early probe ([97658ac](https://github.com/akiojin/gwt/commit/97658acf246209f727f03782dd68c8550987fe6a))
-* preserve reasoning level and quick start for protected branches ([3e00bdc](https://github.com/akiojin/gwt/commit/3e00bdc14a27b895a8089e05b9cd451577f78899))
-* prevent detecting old session IDs on consecutive executions ([4499838](https://github.com/akiojin/gwt/commit/4499838d1ba3c0b5f551551dcce25a63f2b0a202))
-* prevent stdin interference in isClaudeCommandAvailable() ([3b96558](https://github.com/akiojin/gwt/commit/3b965585600548c4529f6880a331eba6e6f2db8f))
-* prioritize filename UUID over file content for session ID detection ([e5afa1e](https://github.com/akiojin/gwt/commit/e5afa1e5dd31badbcfcb69edceb399e0d5c500d1))
-* quick start always resolves latest claude session without time window ([ce656ab](https://github.com/akiojin/gwt/commit/ce656ab488ba25966f4577a31bb21087261b085b))
-* quick start uses newest claude session file per worktree ([95c3b99](https://github.com/akiojin/gwt/commit/95c3b999cdee3d50af391ead82e1c2191269dd88))
-* Quick StartでClaudeの最新セッションをファイルから優先取得 ([a33fcef](https://github.com/akiojin/gwt/commit/a33fcef2bc7ac9b823ad38b441cc21832dfa08ff))
-* Quick StartでEnter二度押し不要に ([fdec5f2](https://github.com/akiojin/gwt/commit/fdec5f2b6a7be241d03a978887c4040f8ee2b73d))
-* Quick Startで最新セッションをworktree優先＋カテゴリ表示を簡素化 ([dfbc655](https://github.com/akiojin/gwt/commit/dfbc6550cc1141b33fb54dfb567dd5c5e1f24912))
-* Quick Startで初回Enterを受付待ちにバッファ ([6c765ea](https://github.com/akiojin/gwt/commit/6c765ea766bca0af71e378d71b8cf4ff1e3548f8))
-* Quick Startの選択でEnterが一度で効くように修正 ([a0e7de3](https://github.com/akiojin/gwt/commit/a0e7de30540c6dc15c0a6c57a727c3a217a76545))
-* Quick Startヘッダー初期非表示とレイアウトを改善 ([70ac8ac](https://github.com/akiojin/gwt/commit/70ac8ac689cdbc295f951c294d85bb6aa6bd1994))
-* Quick Start表示を短縮しツールごとに見やすく調整 ([5996632](https://github.com/akiojin/gwt/commit/59966322fc5a44261bd2e3f070544d9bb8292965))
-* read Claude sessionId from history fallback ([2413d5d](https://github.com/akiojin/gwt/commit/2413d5dc104fdd235b6b6badafc64b2b23820488))
-* remove sessionProbe from Codex CLI to prevent Ctrl+C hang ([e59b9f5](https://github.com/akiojin/gwt/commit/e59b9f54ee3680350aceecf18f7c18994f4241f6))
-* remove SIGINT catch block from Codex to match Claude Code behavior ([fcf917e](https://github.com/akiojin/gwt/commit/fcf917e0502fd456f2a00c5dfcf2dc0142a9bfb3))
-* remove unused imports and variables for ESLint compliance ([1b6ce85](https://github.com/akiojin/gwt/commit/1b6ce850fb8bbb6b9878fa327cfc25a4a9982d57))
-* reset stdin state before Ink.js render to prevent hang after Ctrl+C ([7b9b5ff](https://github.com/akiojin/gwt/commit/7b9b5ffa9c528524e01be64e8fd65fe683177524))
-* resolve key input lag in Claude Code and Gemini CLI ([cfbc7dd](https://github.com/akiojin/gwt/commit/cfbc7dd4ee0ffa8e56a42b0a050af44e11c78987))
-* resume stdin before Claude Code launch to prevent input lag ([34e4353](https://github.com/akiojin/gwt/commit/34e43539589ce415558489a9a465b0eb04080553))
-* scope codex/gemini session resolution to worktree ([bf2fafb](https://github.com/akiojin/gwt/commit/bf2fafba7f8eefaf8c8af5787c82cb8d6e55451b))
-* show reasoning labels in quick start ([10b99c4](https://github.com/akiojin/gwt/commit/10b99c4de3c61d82d52cdd4997e4483c02e4d4e7))
-* show reasoning level in quick start option ([53bfde6](https://github.com/akiojin/gwt/commit/53bfde65b1e66363e0882b81d2ed49d8b2e00974))
-* show reasoning level on quick start ([c51a06a](https://github.com/akiojin/gwt/commit/c51a06a8cf0e16c1a53eed6de374b2121032b4b9))
-* start new Claude session when no saved ID ([2e7d8b9](https://github.com/akiojin/gwt/commit/2e7d8b95755fede3d38607dce5bcbe33259287cb))
-* stop treating arbitrary uuids in claude logs as session ids ([dcfbece](https://github.com/akiojin/gwt/commit/dcfbecee66458465b5d6d15b66a4d0792af38348))
-* treat SIGINT as normal exit for AI tool child processes ([b31c912](https://github.com/akiojin/gwt/commit/b31c9125cea7073acaea1c28cbad931200154657))
-* update codex test to expect two exitRawMode calls ([e161887](https://github.com/akiojin/gwt/commit/e1618874ef0e6db2a4cdbefb1195ec936b355bba))
-* use file-based session detection for Claude/Codex instead of stdout capture ([c1c4211](https://github.com/akiojin/gwt/commit/c1c42114fa84180e6b55671a0660612ab849e220))
-* カテゴリ解決をswitchで安全化 ([01942ef](https://github.com/akiojin/gwt/commit/01942ef51c7757bd1cb43d822280db670d179fe9))
-* キー入力遅延の解消とGeminiセッションID取得の修正 ([6566c64](https://github.com/akiojin/gwt/commit/6566c64269a85abbb1c4c4cbf2e33b194185c5e7))
-* クイックスタートのReasoning/セッションID表示を修正 ([619fa5f](https://github.com/akiojin/gwt/commit/619fa5f16381dc688065cc25bfa7ee27570d6ddb))
-* クイックスタートのセッションID表示を修正 ([7a4b5a0](https://github.com/akiojin/gwt/commit/7a4b5a0aa5a9c72a29f59f418d7b6bb0d2e3505c))
-* クイックスタート選択時の型チェックを補強 ([95a10e3](https://github.com/akiojin/gwt/commit/95a10e3dd81c2d3151d5f25f598a3a5948a7b3a5))
-* セッションファイル探索に時間範囲フィルタを追加 ([5e2aafe](https://github.com/akiojin/gwt/commit/5e2aafea34d13731e962f2af21b9618625cd4424))
-* ブランチ/ワークツリー別に最新セッションを抽出 ([a3568c4](https://github.com/akiojin/gwt/commit/a3568c49773049aa6d5fa52b6edd48467b0476cd))
-* ブランチ別クイックスタートが最新セッションを誤参照しないように ([b5a789e](https://github.com/akiojin/gwt/commit/b5a789eaf30dd301cda367662a460913183fe7fb))
-
-## [2.11.1](https://github.com/akiojin/gwt/compare/v2.11.0...v2.11.1) (2025-12-05)
-
-
-### Bug Fixes
-
-* prepare-release.yml を llm-router と同じフローに統一 ([8bace15](https://github.com/akiojin/gwt/commit/8bace15b9532c377e47c275a85fc3277f86f1ffc))
-* ブランチ一覧のAIツールラベルからNew/Continue/Resumeを削除 ([45eec22](https://github.com/akiojin/gwt/commit/45eec2208e4955a0b46467b4263e9435725f3633))
-* ブランチ一覧のAIツールラベルからNew/Continue/Resumeを削除 ([9d6bf3c](https://github.com/akiojin/gwt/commit/9d6bf3cfbcdef91e0c8301ba8ab52d1397ae7e0f))
-
-## [2.11.0](https://github.com/akiojin/gwt/compare/v2.10.0...v2.11.0) (2025-12-04)
+## [2.2.0](https://github.com/akiojin/gwt/compare/v2.1.3...v2.2.0) (2025-12-09)
 
 
 ### Features
 
-* ブランチ一覧にLocal/Remote/Sync列を追加 ([7173e59](https://github.com/akiojin/gwt/commit/7173e59a179828ec79942780d6f806bcbd44fa29))
-* ブランチ一覧にLocal/Remote/Sync列を追加 ([3459565](https://github.com/akiojin/gwt/commit/3459565ae12a06548ef3215724bed052c9fddc53))
-* ブランチ一覧にラベル行を追加 ([b9b23ba](https://github.com/akiojin/gwt/commit/b9b23ba3f68c335bea41de941c0a38f1529fb247))
-* ブランチ一覧の表示アイコンを直感的な絵文字に改善 ([cd18b4b](https://github.com/akiojin/gwt/commit/cd18b4b3c5416ecc0f738c84ff0b1c96a1b40631))
-* ブランチ一覧の表示アイコンを直感的な絵文字に改善 ([4105f06](https://github.com/akiojin/gwt/commit/4105f0674a2a20cfe1feb3e855799fa0d573c440))
+* ワークツリー作成時にプログレスインジケータを追加 ([#160](https://github.com/akiojin/gwt/issues/160)) ([86bcedc](https://github.com/akiojin/gwt/commit/86bcedc9ab4f51b2d21b6d89ffdc8e25df18cf76))
+
+## [2.1.3](https://github.com/akiojin/gwt/compare/v2.1.2...v2.1.3) (2025-12-08)
 
 
 ### Bug Fixes
 
-* align branch list headers ([a27b54b](https://github.com/akiojin/gwt/commit/a27b54bc4ee475dfc5e0606a44858b980bb4d622))
-* align branch list headers ([6556f46](https://github.com/akiojin/gwt/commit/6556f4695b69addff2533b0b7406b0f470ba6a34))
-* ESLint警告103件とPrettier違反12ファイルを修正 ([5b1d61d](https://github.com/akiojin/gwt/commit/5b1d61d2f5128a97556205e3dcfe24b6375f6d9c))
-* ESLint警告103件とPrettier違反12ファイルを修正 ([e794b88](https://github.com/akiojin/gwt/commit/e794b88ac5982718f94e6952fcad1ce36cc438f4))
-* include upstream base when selecting cleanup targets ([9153de8](https://github.com/akiojin/gwt/commit/9153de8e9ec726bbe88a5ddafc879dd06c19f89b))
-* navigation.test.tsxにcollectUpstreamMap/getBranchDivergenceStatusesのモックを追加 ([d4ff9b1](https://github.com/akiojin/gwt/commit/d4ff9b1cd5c785160385bf31a781bad8817db03a))
-* origin/developとのマージコンフリクトを解決 ([f0898ed](https://github.com/akiojin/gwt/commit/f0898ed56fc43fcf5080ea25397fd9fea97f617c))
-* origin/developとのマージコンフリクトを解決 ([a3e627a](https://github.com/akiojin/gwt/commit/a3e627a51765ca61848967b0f36d03d910720aa4))
-* origin/developとのマージコンフリクトを解決 ([e30e192](https://github.com/akiojin/gwt/commit/e30e192cc8fc80159033e4aee679f30d9bf3fac5))
-* Remote列の表示を改善（L=ローカルのみ、R=リモートのみ） ([dc8f375](https://github.com/akiojin/gwt/commit/dc8f375a180b0f1eebc273346f997f1f442713aa))
-* Sync列の数字をアイコン直後に表示 ([253a529](https://github.com/akiojin/gwt/commit/253a5298d446e24858861a14a074986430973bc1))
-* Sync列を固定幅化してブランチ名の位置を揃える ([20d0d67](https://github.com/akiojin/gwt/commit/20d0d6729133e802a9846e0c402acdd84c6de28b))
-* レビューコメントへの対応 ([5e79440](https://github.com/akiojin/gwt/commit/5e79440e35fb858a4ee26bb0dd922c166d83de26))
-* 自動クリーンアップでリモートブランチを削除しないように修正 ([42f6296](https://github.com/akiojin/gwt/commit/42f6296576b5d81558c5aa5c3823dc0e6c833605))
-* 自動クリーンアップでリモートブランチを削除しないように修正 ([674b4ce](https://github.com/akiojin/gwt/commit/674b4ce09b98cbf15359984539d4aa5dfe0e7d16))
+* 新規ブランチ作成時のworktree生成フローを修正 ([#157](https://github.com/akiojin/gwt/issues/157)) ([b03ffbc](https://github.com/akiojin/gwt/commit/b03ffbc5fae6a7b3ec4c99a2beeb6e5ae35f8d2d))
 
-## [2.10.0](https://github.com/akiojin/gwt/compare/v2.9.1...v2.10.0) (2025-12-04)
+## [2.1.2](https://github.com/akiojin/gwt/compare/v2.1.1...v2.1.2) (2025-12-08)
+
+
+### Bug Fixes
+
+* ベースブランチ選択UIの表示を修正しテストを追加 ([#154](https://github.com/akiojin/gwt/issues/154)) ([3a16d5d](https://github.com/akiojin/gwt/commit/3a16d5d5e4fc6d0c92dd74dc4a24f4dbfc53f2f9))
+
+## [2.1.1](https://github.com/akiojin/gwt/compare/v2.1.0...v2.1.1) (2025-12-07)
+
+
+### Bug Fixes
+
+* Codex CLIをbypassApprovals対応に更新 ([#151](https://github.com/akiojin/gwt/issues/151)) ([c7b2bd2](https://github.com/akiojin/gwt/commit/c7b2bd231efe1c97ae8a1ae3fdd9de96197e8c2d))
+
+## [2.1.0](https://github.com/akiojin/gwt/compare/v2.0.1...v2.1.0) (2025-12-07)
 
 
 ### Features
 
-* Cコマンドでリモートブランチも削除対象に追加 ([632cb9e](https://github.com/akiojin/gwt/commit/632cb9eb6ee325b2959dad5fec44969f09d75764))
+* AIツール選択UIを多階層ウィザード形式に変更 ([#148](https://github.com/akiojin/gwt/issues/148)) ([5f75a1a](https://github.com/akiojin/gwt/commit/5f75a1ae85e24b8b0ed0a731bcd3bfbde94953d7))
+
+## [2.0.1](https://github.com/akiojin/gwt/compare/v2.0.0...v2.0.1) (2025-12-07)
 
 
 ### Bug Fixes
 
-* align cleanup reasons with types and dedupe vars ([a3994ed](https://github.com/akiojin/gwt/commit/a3994eda8f122de1ac24da91648a642fdb024ab9))
-* expand cleanup candidates for remote-synced branches ([9204c5a](https://github.com/akiojin/gwt/commit/9204c5a9388d0b9cee403ce832ab75f916b2d469))
-* stabilize worktree cleanup and ui tests ([61d510b](https://github.com/akiojin/gwt/commit/61d510b97c579cf988342db7a3b1c6d9cf576db1))
-* リモートブランチ削除をマージ済みPRのみに限定 ([ba9a653](https://github.com/akiojin/gwt/commit/ba9a653135fa819d992e4d462fdd80766a9c8067))
+* Codex CLI非対話モードでセッション再開引数を生成するよう修正 ([#145](https://github.com/akiojin/gwt/issues/145)) ([a4dbe1c](https://github.com/akiojin/gwt/commit/a4dbe1ca6f73a9f8cb58e1f9ddf4c40fded7fbc7))
 
-## [2.9.1](https://github.com/akiojin/gwt/compare/v2.9.0...v2.9.1) (2025-11-27)
+## [2.0.0](https://github.com/akiojin/gwt/compare/v1.11.0...v2.0.0) (2025-12-05)
 
 
-### Bug Fixes
+### ⚠ BREAKING CHANGES
 
-* persist last AI tool before launch ([d545f13](https://github.com/akiojin/gwt/commit/d545f133ce93b78158ad1de49b0637fceea7003d))
-* persist last AI tool before launch ([5c160b6](https://github.com/akiojin/gwt/commit/5c160b6128ce5c9f399ee98ca23ffebcb317181d))
+* Ink/React TUI への移行により、一部の Ctrl-C/Q 終了挙動や画面描画タイミングが変更されます。
 
-## [2.9.0](https://github.com/akiojin/gwt/compare/v2.8.0...v2.9.0) (2025-11-27)
+### Features
+
+* Ink/React TUI へ移行しコンポーネント化 ([#140](https://github.com/akiojin/gwt/issues/140)) ([0e4a2e3](https://github.com/akiojin/gwt/commit/0e4a2e36cbc6fbba6ac25d96ea27db3e6c54bad7))
+
+## [1.11.0](https://github.com/akiojin/gwt/compare/v1.10.0...v1.11.0) (2025-12-05)
 
 
 ### Features
 
-* preselect last AI tool on selector reopen ([95ec7ce](https://github.com/akiojin/gwt/commit/95ec7ce7aede1ce6ca40599929e0eed6da3d0bb0))
-* preselect last AI tool when reopening selector ([f0060a1](https://github.com/akiojin/gwt/commit/f0060a1177920704676524c6cfd7fde073289641))
+* Codex CLI 対話モードを追加 ([#137](https://github.com/akiojin/gwt/issues/137)) ([1e59bf0](https://github.com/akiojin/gwt/commit/1e59bf019b59bec89a51b4a5a94b15b1f0fb5d27))
 
-
-### Bug Fixes
-
-* save last AI tool immediately on launch ([bf084f2](https://github.com/akiojin/gwt/commit/bf084f2c1c2e5ab40221f0a19daf86b109880b8f))
-* save last AI tool immediately on launch ([880cf5c](https://github.com/akiojin/gwt/commit/880cf5c037e6b5ff27815a5400732d043820342f))
-
-## [2.8.0](https://github.com/akiojin/gwt/compare/v2.7.4...v2.8.0) (2025-11-27)
+## [1.10.0](https://github.com/akiojin/gwt/compare/v1.9.2...v1.10.0) (2025-12-04)
 
 
 ### Features
 
-* show last AI tool usage per branch ([f3662c6](https://github.com/akiojin/gwt/commit/f3662c616232779b8d58f6e4d92064e16301e5ce))
+* Codex CLI セッション再開機能を追加 ([#132](https://github.com/akiojin/gwt/issues/132)) ([a059a2c](https://github.com/akiojin/gwt/commit/a059a2c39b2aad3f2da4e3acb2f92c8faa3e2c1a))
+
+## [1.9.2](https://github.com/akiojin/gwt/compare/v1.9.1...v1.9.2) (2025-12-04)
 
 
 ### Bug Fixes
 
-* stabilize worktree flows and branch hook ([0c202db](https://github.com/akiojin/gwt/commit/0c202db077bb1db19106959a8baa3a4849de83ff))
-* stabilize worktree support and last ai usage display ([74ce7f3](https://github.com/akiojin/gwt/commit/74ce7f350dffe7a0d70aebea55420084ca3aa9aa))
+* シグナルハンドラとフォアグラウンドプロセスの終了処理を修正 ([#126](https://github.com/akiojin/gwt/issues/126)) ([44c6557](https://github.com/akiojin/gwt/commit/44c6557e1ef7aea2ea95f6f8ee89f6ae95f1fbf7))
 
-## [2.7.4](https://github.com/akiojin/gwt/compare/v2.7.3...v2.7.4) (2025-11-26)
-
-
-### Bug Fixes
-
-* fetchAllRemotes 失敗時にローカルブランチを表示するフォールバックを追加 ([65f0a02](https://github.com/akiojin/gwt/commit/65f0a0239b3dc45e54ba979b67c4bc41934ed12c))
-* navigation.test.tsx に fetchAllRemotes のモックを追加 ([b76ea96](https://github.com/akiojin/gwt/commit/b76ea96fd86ae467bc9cb3053806ae7280ae0f57))
-* ブランチ一覧表示時にリモートブランチをfetchして最新情報を取得 ([54b610f](https://github.com/akiojin/gwt/commit/54b610feb7c1d5349cdc3f305ffe03a5f11e3bcf))
-* ブランチ一覧表示時にリモートブランチをfetchして最新情報を取得 ([14696f1](https://github.com/akiojin/gwt/commit/14696f16e6cb5e5606fbb45e6f57bdfa9a3b4759))
-
-## [2.4.1](https://github.com/akiojin/gwt/compare/v2.4.0...v2.4.1) (2025-11-21)
+## [1.9.1](https://github.com/akiojin/gwt/compare/v1.9.0...v1.9.1) (2025-12-04)
 
 
 ### Bug Fixes
 
-* Claude Codeのデフォルトモデル指定を標準扱いに修正 ([3acb5c7](https://github.com/akiojin/gwt/commit/3acb5c7b18dc40e3fe7c9723400389fe633a125a))
-* **cli:** ターミナル入力がフリーズする問題を修正 ([c6752f3](https://github.com/akiojin/gwt/commit/c6752f3fc0153f3f279b49a77636ebee8154a624))
-* フィルターモードでショートカットを無効化 ([96d6f2d](https://github.com/akiojin/gwt/commit/96d6f2d27894cd7f1a46c6861ea4343f34223570))
+* プロファイル切替時の Claude Code 再起動処理を修正 ([#123](https://github.com/akiojin/gwt/issues/123)) ([e3ac5ce](https://github.com/akiojin/gwt/commit/e3ac5cef6eb3f3467e43cfb4abfaad3b5fbf9d60))
 
-# [2.4.0](https://github.com/akiojin/gwt/compare/v2.3.0...v2.4.0) (2025-11-20)
-
-
-### Bug Fixes
-
-* Improve git hook detection for commands with options ([8f4f9a5](https://github.com/akiojin/gwt/commit/8f4f9a5d5a784c171e30efb100a733a6dced9c40))
-* use process.platform in claude command availability ([338e779](https://github.com/akiojin/gwt/commit/338e7798825546503c31c77d6dbfb85805c50042))
+## [1.9.0](https://github.com/akiojin/gwt/compare/v1.8.0...v1.9.0) (2025-12-03)
 
 
 ### Features
 
-* align model selection with provider defaults ([cc8c863](https://github.com/akiojin/gwt/commit/cc8c863e6ce14aa57601deccd6471ca6c0aaa540))
-* READMEを更新し、GEMINI.mdを作成 ([4fa1491](https://github.com/akiojin/gwt/commit/4fa14914941593b330efa7486eef3772e387f330))
-* remember last model and reasoning selection per tool ([01b5124](https://github.com/akiojin/gwt/commit/01b5124409b13763d8b792493ef72442714cf4f9))
+* プロファイル管理UIを追加 ([#120](https://github.com/akiojin/gwt/issues/120)) ([8b25f0f](https://github.com/akiojin/gwt/commit/8b25f0fe1eafdbee02bd8bcfd4f70ded4f8d9a6a))
 
-# [2.3.0](https://github.com/akiojin/gwt/compare/v2.2.0...v2.3.0) (2025-11-19)
+## [1.8.0](https://github.com/akiojin/gwt/compare/v1.7.2...v1.8.0) (2025-12-03)
 
 
 ### Features
 
-* Codex/Geminiの表示名を簡潔化 ([cc8bdb2](https://github.com/akiojin/gwt/commit/cc8bdb25617de58c79dda5b53134fc2a3ac89aa2))
-* Gemini CLIをビルトインツールとして追加 ([0e80363](https://github.com/akiojin/gwt/commit/0e80363ae81fdf61c00ae55dbecf8b2cecd677e4))
-* ビルトインツールを追加 ([b4f6c94](https://github.com/akiojin/gwt/commit/b4f6c9476f6675bdc4e27006b60868ee14f07dae))
+* Codex CLI に自動 bypass approvals を追加 ([#115](https://github.com/akiojin/gwt/issues/115)) ([3209ce7](https://github.com/akiojin/gwt/commit/3209ce7ebb3b2953a5f3bde6be5db6f8e79e9fa0))
 
-# [2.2.0](https://github.com/akiojin/gwt/compare/v2.1.1...v2.2.0) (2025-11-18)
+## [1.7.2](https://github.com/akiojin/gwt/compare/v1.7.1...v1.7.2) (2025-12-02)
 
 
 ### Bug Fixes
 
-* フィルターモード中でもブランチ選択のカーソル移動を可能に ([c00564a](https://github.com/akiojin/gwt/commit/c00564a0ffa4d3fc5fe05a800e8454b821e79421))
-* フィルター入力とStatsの間の空行を削除 ([054f092](https://github.com/akiojin/gwt/commit/054f092a18f06a752326d1a38670d2f4323c6e21))
-* フィルター入力の表示位置をWorking DirectoryとStatsの間に修正 ([57dd905](https://github.com/akiojin/gwt/commit/57dd9052b7032f8a1173b0d228ec67a186857e0d))
-* ブランチ選択モードでのカーソル反転表示を修正 ([fda28a1](https://github.com/akiojin/gwt/commit/fda28a1d0008555c96d6859a031cc4486ad4f94e))
+* MCP設定のビルトインサーバー認識と空配列処理を修正 ([#112](https://github.com/akiojin/gwt/issues/112)) ([2c32f8e](https://github.com/akiojin/gwt/commit/2c32f8ed3e9b3f9d1f5f05faed4e01e7a00a7dbe))
+
+## [1.7.1](https://github.com/akiojin/gwt/compare/v1.7.0...v1.7.1) (2025-12-02)
+
+
+### Bug Fixes
+
+* profiles.yaml空時とMCP設定継承のバグを修正 ([#109](https://github.com/akiojin/gwt/issues/109)) ([61b60a4](https://github.com/akiojin/gwt/commit/61b60a4dcb23e2412e2dab94df54c2fbbf2b83a3))
+
+## [1.7.0](https://github.com/akiojin/gwt/compare/v1.6.0...v1.7.0) (2025-12-02)
 
 
 ### Features
 
-* fキーでフィルター・検索モードを追加 ([481ab67](https://github.com/akiojin/gwt/commit/481ab678576642dbb01e5bfe57b58a2cc5da011d))
-* フィルターモード/ブランチ選択モードの切り替え機能を追加 ([c1e87bc](https://github.com/akiojin/gwt/commit/c1e87bc4557b7e343f72e51635f33a79f10979de))
-* フィルターモード中もブランチ選択の反転表示を有効化 ([a3b8eca](https://github.com/akiojin/gwt/commit/a3b8eca8212e481dde5665e34b7e8894155399af))
-* フィルター入力中のキーバインド(c/r/m)を無効化＋要件・テスト更新 ([232f66c](https://github.com/akiojin/gwt/commit/232f66cb114ac2fb47b294c71a9aa66afad8c297))
+* MCP設定管理機能を追加 ([#106](https://github.com/akiojin/gwt/issues/106)) ([10e1a94](https://github.com/akiojin/gwt/commit/10e1a94cd8cee76e1d8fe19fa4a9f40424b2f5f6))
 
-## [2.1.1](https://github.com/akiojin/gwt/compare/v2.1.0...v2.1.1) (2025-11-18)
-
-
-### Bug Fixes
-
-* publish.ymlでSetup Bunステップの順序を修正 ([81d7c57](https://github.com/akiojin/gwt/commit/81d7c57da150f1fba4cf9440263ba16a05cff3a0))
-
-# [2.1.0](https://github.com/akiojin/gwt/compare/v2.0.4...v2.1.0) (2025-11-18)
-
-
-### Bug Fixes
-
-* .markdownlintignoreを追加してCHANGELOG.mdを除外 ([d911ee8](https://github.com/akiojin/gwt/commit/d911ee85480a038ae9e2a60c0bc0298566a7c2d3))
-* execa互換性問題によるblock-git-branch-ops.test.tsのテスト失敗を修正 ([48f8528](https://github.com/akiojin/gwt/commit/48f8528014c6fc2213256ff221efc52b70e98ee3))
-* markdownlintエラーを修正 ([ebf6bc7](https://github.com/akiojin/gwt/commit/ebf6bc7befe9e6e707df31c3e91c82d80e0307c5))
-* markdownlintのignore_filesを複数行形式に修正 ([0eda2dd](https://github.com/akiojin/gwt/commit/0eda2ddebebf3aa285d737638378f4d95039fa73))
-* semantic-release実行に必要なNode.js setupを追加 ([8d4b8f9](https://github.com/akiojin/gwt/commit/8d4b8f9e3296026dd713e767008526563009f435))
+## [1.6.0](https://github.com/akiojin/gwt/compare/v1.5.0...v1.6.0) (2025-12-01)
 
 
 ### Features
 
-* bugfixブランチタイプのサポートを追加 ([ca915a0](https://github.com/akiojin/gwt/commit/ca915a0a98206448e9ef1b4b94dbadf10ec58c76))
+* プロファイル起動機能を追加 ([#103](https://github.com/akiojin/gwt/issues/103)) ([e81ab25](https://github.com/akiojin/gwt/commit/e81ab25e7f34fc0f90a03e18d1e393d3a8ba5c2a))
 
-## [2.0.4](https://github.com/akiojin/gwt/compare/v2.0.3...v2.0.4) (2025-11-18)
-
-
-### Bug Fixes
-
-* bin/gwt.jsでmain関数を明示的に呼び出すように修正 ([cc8b4b4](https://github.com/akiojin/gwt/commit/cc8b4b4ef8e1c30c6a0e77acd64b96b145beaae9))
-
-## [2.0.3](https://github.com/akiojin/gwt/compare/v2.0.2...v2.0.3) (2025-11-18)
+## [1.5.0](https://github.com/akiojin/gwt/compare/v1.4.0...v1.5.0) (2025-12-01)
 
 
-### Bug Fixes
+### Features
 
-* semantic-release npmプラグインをnpmPublish: falseで有効化 ([6218754](https://github.com/akiojin/gwt/commit/621875478edea7f80b17c866bb3f02504f7d67cd))
+* 環境変数スナップショット管理機能を追加 ([#99](https://github.com/akiojin/gwt/issues/99)) ([f464e86](https://github.com/akiojin/gwt/commit/f464e863b93ecdc9cbf70d6e3b53af59e3f68f6b))
 
-## [2.0.2](https://github.com/akiojin/gwt/compare/v2.0.1...v2.0.2) (2025-11-18)
+## [1.4.0](https://github.com/akiojin/gwt/compare/v1.3.2...v1.4.0) (2025-11-30)
 
 
-### Bug Fixes
+### Features
 
-* semantic-releaseからnpm publishを分離してpublish.ymlに移動 ([42e0233](https://github.com/akiojin/gwt/commit/42e0233ec068253ab3efed9d8bda82b8c4b1252c))
+* Codex CLI対応を追加 ([#92](https://github.com/akiojin/gwt/issues/92)) ([2c2bb1e](https://github.com/akiojin/gwt/commit/2c2bb1e3f4a374aa397ad1af41bf4b6e0e600f57))
 
-## [2.0.1](https://github.com/akiojin/gwt/compare/v2.0.0...v2.0.1) (2025-11-18)
+## [1.3.2](https://github.com/akiojin/gwt/compare/v1.3.1...v1.3.2) (2025-11-29)
 
 
 ### Bug Fixes
 
-* release.ymlでnpm publish前にビルドを実行 ([4a84359](https://github.com/akiojin/gwt/commit/4a843592cc1ea8e3db743de56ed8ca05cbd76211))
+* Claude Codeセッション取得の競合と冗長待機を修正 ([#88](https://github.com/akiojin/gwt/issues/88)) ([7fe85f8](https://github.com/akiojin/gwt/commit/7fe85f8ef33f2dfa6a69f41f0b429c8853fc4d0b))
 
-# [2.0.0](https://github.com/akiojin/gwt/compare/v1.33.0...v2.0.0) (2025-11-18)
-
-
-* refactor!: パッケージ名を@akiojin/claude-worktreeから@akiojin/gwtに変更 ([91a207e](https://github.com/akiojin/gwt/commit/91a207e680ebc3045dcd057e9bde258bf597baff))
+## [1.3.1](https://github.com/akiojin/gwt/compare/v1.3.0...v1.3.1) (2025-11-28)
 
 
 ### Bug Fixes
 
-* release.ymlでsemantic-releaseの出力をログに表示するように修正 ([9e932a6](https://github.com/akiojin/gwt/commit/9e932a6156942dc81815cf29d2c416689e3f50dd))
-* スコープ付きパッケージをpublicとして公開するよう設定 ([a538301](https://github.com/akiojin/gwt/commit/a53830106a9873e9eb77b683513084e97a96fe25))
+* 入力ブロック時の文字残留とセッションIDコールバック競合を修正 ([#84](https://github.com/akiojin/gwt/issues/84)) ([3b0fce5](https://github.com/akiojin/gwt/commit/3b0fce5f1d20fd69f7b7a7ddafa2f422dc79ccee))
+
+## [1.3.0](https://github.com/akiojin/gwt/compare/v1.2.2...v1.3.0) (2025-11-28)
 
 
-### BREAKING CHANGES
+### Features
 
-* パッケージ名が@akiojin/claude-worktreeから@akiojin/gwtに変更されました。
-既存のインストールを更新する必要があります:
-- グローバルインストール: npm uninstall -g @akiojin/claude-worktree && npm install -g @akiojin/gwt
-- コマンド名: claude-worktree → gwt
-- 設定ディレクトリ: ~/.config/claude-worktree → ~/.config/gwt
+* クイックスタート機能を追加 ([#82](https://github.com/akiojin/gwt/issues/82)) ([f00c89e](https://github.com/akiojin/gwt/commit/f00c89e8e58b72515a20e3c0f2e22b16e0a78e5f))
 
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
+## [1.2.2](https://github.com/akiojin/gwt/compare/v1.2.1...v1.2.2) (2025-11-27)
 
-Co-Authored-By: Claude <noreply@anthropic.com>
 
-# [1.33.0](https://github.com/akiojin/claude-worktree/compare/v1.32.2...v1.33.0) (2025-11-17)
+### Bug Fixes
 
-## Bug Fixes
+* セッション再開時のセッションID更新処理を修正 ([#79](https://github.com/akiojin/gwt/issues/79)) ([44f1847](https://github.com/akiojin/gwt/commit/44f18478ed3c4cde91dd5f5e45adf49bc55f4f4e))
 
-* **build:** esbuildバージョン不一致エラーの解決 ([12c247d](https://github.com/akiojin/claude-worktree/commit/12c247d40d4ad77a713aab6f038087e7af464b20))
-* CLI英語表示を強制 ([280a22a](https://github.com/akiojin/claude-worktree/commit/280a22a303b02cdcf79e10a2c18e81cf57378d6d))
-* **config:** satisfy exact optional types ([c2f26dc](https://github.com/akiojin/claude-worktree/commit/c2f26dc49a0907db8b680d1365522dbeebeba046))
-* create-release.ymlのdry-runモードでNPM_TOKENエラーを回避 ([8072622](https://github.com/akiojin/claude-worktree/commit/8072622eb3eacf58458bef415e65ac085c48ec2d))
-* **docker:** Docker起動時の強制ビルドを削除し開発環境専用に変更 ([83f1880](https://github.com/akiojin/claude-worktree/commit/83f1880572e534aaeb182f376e3055f1f8d701ae))
-* **docker:** Docker起動時の強制ビルドを削除し開発環境専用に変更 ([522302a](https://github.com/akiojin/claude-worktree/commit/522302ae10c35807ebccef829bf976e194e28979))
-* **docker:** Web UIアクセス用にポート3000を公開 ([9c22ad6](https://github.com/akiojin/claude-worktree/commit/9c22ad6b6493ba4412ecde4d7bea0fbc40f82407))
-* **docs:** specs/feature/webui/spec.mdのbare URL修正 ([2663558](https://github.com/akiojin/claude-worktree/commit/266355883edb86bd91d9c5ff54cb174090a29704))
-* **docs:** specsディレクトリのmarkdownlintエラーを修正 ([49d39a1](https://github.com/akiojin/claude-worktree/commit/49d39a17f2446232d444c7971e5796cf07c5ca84))
-* **lint:** ESLintエラーを修正（未使用変数の削除） ([8bc6744](https://github.com/akiojin/claude-worktree/commit/8bc67442ca6120e98bdfd84dfae32051d2fdd1d9))
-* **lint:** ESLint設定を改善してテストファイルのルールを緩和 ([8e5e972](https://github.com/akiojin/claude-worktree/commit/8e5e972c90497c9da73bebe69952d9ef93ea8a75))
-* markdownlint の違反を解消 ([f8af3d5](https://github.com/akiojin/claude-worktree/commit/f8af3d5346749d870a559317ba9d6e05bbbee9e8))
-* package-lock.jsonをpackage.jsonと同期 ([461a5a6](https://github.com/akiojin/claude-worktree/commit/461a5a6a5bbf4b4e2fb9efcd7cc1139bf983b290))
-* **server:** Docker環境からのアクセス対応とビルドパス修正 ([a6c81dc](https://github.com/akiojin/claude-worktree/commit/a6c81dc558358d02ae6835845cb5a72056949ebb))
-* **server:** Web UIサーバーをNode.jsで起動するよう修正 ([12d5688](https://github.com/akiojin/claude-worktree/commit/12d568868cf7ce6e06de05986e73d222bc9f0ab0))
-* **server:** 型エラー修正とビルドスクリプト最適化 ([33a35e3](https://github.com/akiojin/claude-worktree/commit/33a35e384cf6148ed18e223144b1e2e03d8177e1))
-* **test:** dist-app-bundle.testのファイルパスを修正 ([5c1d306](https://github.com/akiojin/claude-worktree/commit/5c1d306fbcd5ae51a6b56a09cfa4853cc9d25b8d))
-* **test:** getSharedEnvironmentモックを追加 ([10efc1d](https://github.com/akiojin/claude-worktree/commit/10efc1dc1e634d5dcc59573c6ced9353a7c2bf0a))
-* **test:** importパスを正しい../../../git.jsに戻す ([eaa6c81](https://github.com/akiojin/claude-worktree/commit/eaa6c81100c66ac48d952380e3a5326f0086e579))
-* **test:** main error handlingテストとCI環境でのhookテストスキップを修正 ([4e21662](https://github.com/akiojin/claude-worktree/commit/4e2166229424308ce484c6e07cc06cc05d9c813d))
-* **test:** vi.mockのパスも修正してテストのimport問題を完全解決 ([bc26be7](https://github.com/akiojin/claude-worktree/commit/bc26be726dd607dd6eb0d7d77be08131147ff19b))
-* **test:** vitest.config.tsをESLintの対象に追加し、拡張子解決を改善 ([469747e](https://github.com/akiojin/claude-worktree/commit/469747edce0162958cd24440503e4a3d3d6babad))
-* **test:** テストファイルのimportパス修正 ([767224e](https://github.com/akiojin/claude-worktree/commit/767224e302a9676c74cd7bcf563ef79496baeff9))
-* **test:** テストファイルのインポートパスとモックを修正 ([b6a6ce0](https://github.com/akiojin/claude-worktree/commit/b6a6ce02c0d6bf74f72989ee7361a13335831308))
-* **test:** テストファイルのインポートパスを修正して.ts拡張子に対応 ([5ce4794](https://github.com/akiojin/claude-worktree/commit/5ce4794c9d6a2dc0dee44dfece682a49084c8acb))
-* **test:** 通常のimport文も../../../../cli/パスに修正 ([baedfb6](https://github.com/akiojin/claude-worktree/commit/baedfb6a2efee6a27081423f38781bc95b142708))
-* xterm パッケージの依存関係問題を解決するため--legacy-peer-depsを追加 ([125ca23](https://github.com/akiojin/claude-worktree/commit/125ca232cb44f7bb813a8c96d67741ca6a99816b))
-* 依存インストール失敗時のクラッシュを防止 ([a41e484](https://github.com/akiojin/claude-worktree/commit/a41e4847bcf9ff1373548886069053f91efb337b))
-* 依存インストール失敗時も起動を継続 ([4e65457](https://github.com/akiojin/claude-worktree/commit/4e65457536ec95da4ae551be515d7fe8bab4a83c))
+## [1.2.1](https://github.com/akiojin/gwt/compare/v1.2.0...v1.2.1) (2025-11-26)
 
-## Features
 
-* **client:** ターミナルコンポーネント実装とAI Toolセッション起動機能 ([7f7497a](https://github.com/akiojin/claude-worktree/commit/7f7497a228bb13fe44e1a9c146e87b49747c2cf7))
-* **client:** フロントエンド基盤実装 (Vite/React/React Router) ([34103e5](https://github.com/akiojin/claude-worktree/commit/34103e5a7c63c983fc29e3e822f795d78e4a6652))
-* **cli:** merge shared environment when launching tools ([299c83e](https://github.com/akiojin/claude-worktree/commit/299c83ed47b34e2d441743a1102d8719b3693995))
-* **cli:** src/index.tsにserve分岐ロジックを追加 ([a9c7a68](https://github.com/akiojin/claude-worktree/commit/a9c7a685ad762017efab523d8b3b76df3bf69f59))
-* Codex CLI のデフォルトモデルを gpt-5.1 に更新 ([4811fe0](https://github.com/akiojin/claude-worktree/commit/4811fe00b96144bd6cdca7b34259ea2577ae8d71))
-* **config:** support shared env persistence ([c096f3c](https://github.com/akiojin/claude-worktree/commit/c096f3c9bfac99da2c038c2cb7e6d3dd49b716e6))
-* **server:** expose shared env configuration ([66192fd](https://github.com/akiojin/claude-worktree/commit/66192fd83370a5c1b11a700a713d5b212b4a8d0e))
-* **server:** Fastifyベースのバックエンド実装とREST API完成 ([238c218](https://github.com/akiojin/claude-worktree/commit/238c2181673038837cbd465cb4c74a50766b1e3a))
-* Web UIのデザイン刷新とテスト追加 ([8c38775](https://github.com/akiojin/claude-worktree/commit/8c3877524f55452a9b592dca4651edd600c6c0c9))
-* Web UIのブランチグラフ表示を追加 ([58a781e](https://github.com/akiojin/claude-worktree/commit/58a781e2ee7ae246b7d6e750924eef446df7b2b4))
-* **webui:** add shared env management UI ([fe181b1](https://github.com/akiojin/claude-worktree/commit/fe181b13bf06b405dc63d4c72e765659f37598e9))
-* **webui:** Web UI からGit同期を実行 ([ea80600](https://github.com/akiojin/claude-worktree/commit/ea8060066aa23cb293d93037b755f87f497dcc24))
-* **webui:** ブランチ差分を同期して起動を制御 ([324cf95](https://github.com/akiojin/claude-worktree/commit/324cf95d94640587f99ded674eaf157762ee37df))
-* **web:** Web UIディレクトリ構造と共通型定義を作成 ([82a1be1](https://github.com/akiojin/claude-worktree/commit/82a1be10ab4e7bd535f9fa025efdad8c97064b9b))
-* **web:** Web UI依存関係追加とCLI UI分離 ([1d480a0](https://github.com/akiojin/claude-worktree/commit/1d480a047bec3183a27975af6618c86748880905))
+### Bug Fixes
+
+* セッションID取得とメニュー表示のバグを修正 ([#76](https://github.com/akiojin/gwt/issues/76)) ([1d7ee19](https://github.com/akiojin/gwt/commit/1d7ee1956f5cb91de4f9ff01e9f5013dcb52dc00))
+
+## [1.2.0](https://github.com/akiojin/gwt/compare/v1.1.0...v1.2.0) (2025-11-26)
+
+
+### Features
+
+* セッション再開機能を追加 ([#73](https://github.com/akiojin/gwt/issues/73)) ([2cac3d6](https://github.com/akiojin/gwt/commit/2cac3d6e039aff059ffbed90da4a3fd15de6fa32))
+
+## [1.1.0](https://github.com/akiojin/gwt/compare/v1.0.1...v1.1.0) (2025-11-25)
+
+
+### Features
+
+* protectedブランチ用ワークツリー無効化とリポジトリルートでの作業サポート ([#70](https://github.com/akiojin/gwt/issues/70)) ([d3ece5a](https://github.com/akiojin/gwt/commit/d3ece5ab3d58d0cd6e2ebed0e1f0b39fa7aae8dd))
+
+## [1.0.1](https://github.com/akiojin/gwt/compare/v1.0.0...v1.0.1) (2025-11-24)
+
+
+### Bug Fixes
+
+* リモートブランチからローカルブランチ作成時にworktreeのブランチを切り替え ([#66](https://github.com/akiojin/gwt/issues/66)) ([7f84e16](https://github.com/akiojin/gwt/commit/7f84e168c07c6dbe9e75da8f9aceb3bf59b94eca))
+
+## [1.0.0](https://github.com/akiojin/gwt/compare/v0.4.0...v1.0.0) (2025-11-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* リモートブランチから自動ブランチ作成と統合フローを導入
+
+### Features
+
+* リモートブランチ選択からのローカルブランチ自動作成機能 ([#63](https://github.com/akiojin/gwt/issues/63)) ([0d6a1fd](https://github.com/akiojin/gwt/commit/0d6a1fd95ae36a73f1ef93a49dbceae30bf3b8f7))
+
+## [0.4.0](https://github.com/akiojin/gwt/compare/v0.3.0...v0.4.0) (2025-11-23)
+
+
+### Features
+
+* 新規ブランチ作成UIとベースブランチ選択機能を追加 ([#60](https://github.com/akiojin/gwt/issues/60)) ([9e1ed73](https://github.com/akiojin/gwt/commit/9e1ed7347dd8249ff6e259b3d6abd94a5b84dc28))
+
+## [0.3.0](https://github.com/akiojin/gwt/compare/v0.2.1...v0.3.0) (2025-11-23)
+
+
+### Features
+
+* ブランチ一覧から新規ブランチ名を入力して作成する機能を追加 ([#57](https://github.com/akiojin/gwt/issues/57)) ([e1a2e2b](https://github.com/akiojin/gwt/commit/e1a2e2b0b5cbb53f37e0e91f1ed7a1b34f6e08f4))
+
+## [0.2.1](https://github.com/akiojin/gwt/compare/v0.2.0...v0.2.1) (2025-11-22)
+
+
+### Bug Fixes
+
+* package.json の files フィールドに bin/ を追加 ([#53](https://github.com/akiojin/gwt/issues/53)) ([4f88b6f](https://github.com/akiojin/gwt/commit/4f88b6f1fa00fc5bfb87d87e8ea455f5d5a65c96))
+
+## [0.2.0](https://github.com/akiojin/gwt/compare/v0.1.3...v0.2.0) (2025-11-22)
+
+
+### Features
+
+* AIツール選択メニュー追加とリモートブランチ表示改善 ([#51](https://github.com/akiojin/gwt/issues/51)) ([7f92bc3](https://github.com/akiojin/gwt/commit/7f92bc33bda3f1d439f6e4f88e42e24b5ff41e73))
+
+## [0.1.3](https://github.com/akiojin/gwt/compare/v0.1.2...v0.1.3) (2025-11-21)
+
+
+### Bug Fixes
+
+* ワークツリー準備中のスピナー表示とカーソル制御を改善 ([#48](https://github.com/akiojin/gwt/issues/48)) ([1fe3af5](https://github.com/akiojin/gwt/commit/1fe3af5feb02fc0f0488df5b61f1efcb4ee78aa7))
+
+## [0.1.2](https://github.com/akiojin/gwt/compare/v0.1.1...v0.1.2) (2025-11-21)
+
+
+### Bug Fixes
+
+* 終了処理のシグナルハンドリングを統一し、クリーンアップを保証 ([#46](https://github.com/akiojin/gwt/issues/46)) ([7d33a9f](https://github.com/akiojin/gwt/commit/7d33a9f1a4b2c1fa5d8cd6a1d1b2b1b0dc98c91c))
+
+## [0.1.1](https://github.com/akiojin/gwt/compare/v0.1.0...v0.1.1) (2025-11-20)
+
+
+### Bug Fixes
+
+* CI/CDパイプライン修正とテストカバレッジ改善 ([#38](https://github.com/akiojin/gwt/issues/38)) ([f3cdf7a](https://github.com/akiojin/gwt/commit/f3cdf7a5f84e3fd7b3b2fea9f8c01b3f5f3bfdcf))
+* ルートディレクトリでのworktree一覧取得を修正 ([#41](https://github.com/akiojin/gwt/issues/41)) ([d1df9d7](https://github.com/akiojin/gwt/commit/d1df9d70d9e7bb9c9ec8b9c9d3d3b2d3cfbd1e1f))
+
+## 0.1.0 (2025-11-18)
+
+
+### Features
+
+* 初回リリース - Git worktree管理CLIツール ([e2d7d5c](https://github.com/akiojin/gwt/commit/e2d7d5c1d1b1c1e1f1a1b1c1d1e1f1a1b1c1d1e1))
