@@ -875,8 +875,9 @@ fn render_branch_row(
         ));
     }
 
+    // FR-018: Selected branch shown with cyan background
     let style = if is_selected {
-        Style::default().bg(Color::Blue).fg(Color::White)
+        Style::default().bg(Color::Cyan).fg(Color::Black)
     } else {
         Style::default()
     };
@@ -901,13 +902,21 @@ fn render_worktree_path(
         return;
     }
 
-    // Otherwise, show worktree path
+    // Otherwise, show worktree path (FR-004a, FR-004b, FR-004c)
     let path = if let Some(branch) = state.selected_branch() {
-        branch
-            .worktree_path
-            .clone()
-            .unwrap_or_else(|| "(none)".to_string())
+        if let Some(wt_path) = &branch.worktree_path {
+            wt_path.clone()
+        } else if branch.is_current {
+            // FR-004c: Current branch without worktree shows working directory
+            state
+                .working_directory
+                .clone()
+                .unwrap_or_else(|| "(none)".to_string())
+        } else {
+            "(none)".to_string()
+        }
     } else {
+        // FR-004b: No branch selected
         "(none)".to_string()
     };
 

@@ -376,8 +376,13 @@ impl Model {
             },
             Message::Enter => match &self.screen {
                 Screen::BranchList => {
-                    // Open wizard for selected branch (FR-007)
-                    self.update(Message::OpenWizard);
+                    if self.branch_list.filter_mode {
+                        // FR-020: Enter in filter mode exits filter mode
+                        self.branch_list.exit_filter_mode();
+                    } else {
+                        // Open wizard for selected branch (FR-007)
+                        self.update(Message::OpenWizard);
+                    }
                 }
                 Screen::WorktreeCreate => {
                     if self.worktree_create.is_confirm_step() {
@@ -452,7 +457,8 @@ impl Model {
                 }
             }
             Message::CycleViewMode => {
-                if matches!(self.screen, Screen::BranchList) {
+                // FR-036: Tab disabled in filter mode
+                if matches!(self.screen, Screen::BranchList) && !self.branch_list.filter_mode {
                     self.branch_list.cycle_view_mode();
                 }
             }
