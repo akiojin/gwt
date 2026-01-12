@@ -802,21 +802,14 @@ fn render_branch_row(branch: &BranchItem, is_selected: bool, selected_set: &Hash
     };
     spans.push(Span::raw(display_name.to_string()));
 
-    // Tool usage and timestamp (FR-070)
-    // Format: ToolName@X.Y.Z | YYYY-MM-DD HH:mm
+    // Tool usage display (FR-070)
+    // format_tool_usage() already returns: "ToolName@X.Y.Z | YYYY-MM-DD HH:mm"
     if let Some(tool) = &branch.last_tool_usage {
-        // Extract agent id from tool string (format: AgentName@version)
+        // Extract agent id from tool string for coloring (format: AgentName@version | datetime)
         let agent_id = tool.split('@').next();
         let agent_color = get_agent_color(agent_id);
         spans.push(Span::raw(" "));
         spans.push(Span::styled(tool.to_string(), Style::default().fg(agent_color)));
-
-        // Add timestamp with pipe separator
-        if let Some(timestamp) = branch.last_commit_timestamp {
-            let formatted = format_local_datetime(timestamp);
-            spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
-            spans.push(Span::styled(formatted, Style::default().fg(Color::DarkGray)));
-        }
     } else if let Some(timestamp) = branch.last_commit_timestamp {
         // No tool usage, but has timestamp (from git commit)
         let formatted = format_local_datetime(timestamp);
