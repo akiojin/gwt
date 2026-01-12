@@ -62,6 +62,35 @@ impl ConfirmState {
         }
     }
 
+    /// Create an unsafe branch selection warning dialog (FR-029b)
+    pub fn unsafe_selection_warning(
+        branch_name: &str,
+        has_uncommitted: bool,
+        has_unpushed: bool,
+        is_unmerged: bool,
+    ) -> Self {
+        let mut reasons = Vec::new();
+        if has_uncommitted {
+            reasons.push("- Has uncommitted changes".to_string());
+        }
+        if has_unpushed {
+            reasons.push("- Has unpushed commits".to_string());
+        }
+        if is_unmerged {
+            reasons.push("- Is unmerged with main branch".to_string());
+        }
+
+        Self {
+            title: "Warning: Unsafe Branch".to_string(),
+            message: format!("Branch '{}' may have unsaved work:", branch_name),
+            details: reasons,
+            confirm_label: "OK".to_string(),
+            cancel_label: "Cancel".to_string(),
+            selected_confirm: false,
+            is_dangerous: true,
+        }
+    }
+
     /// Toggle selection
     pub fn toggle_selection(&mut self) {
         self.selected_confirm = !self.selected_confirm;

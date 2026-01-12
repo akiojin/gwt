@@ -19,9 +19,9 @@ use std::time::{Duration, Instant};
 use super::screens::{
     render_branch_list, render_confirm, render_environment, render_error, render_help, render_logs,
     render_profiles, render_settings, render_wizard, render_worktree_create, BranchItem,
-    BranchListState, CodingAgent, ConfirmState, EnvironmentState, ErrorState, ExecutionMode,
-    HelpState, LogsState, ProfilesState, QuickStartEntry, ReasoningLevel, SettingsState,
-    WizardState, WorktreeCreateState,
+    BranchListState, BranchType, CodingAgent, ConfirmState, EnvironmentState, ErrorState,
+    ExecutionMode, HelpState, LogsState, ProfilesState, QuickStartEntry, ReasoningLevel,
+    SettingsState, WizardState, WorktreeCreateState,
 };
 
 /// Configuration for launching a coding agent after TUI exits
@@ -91,6 +91,8 @@ pub struct Model {
     total_count: usize,
     /// Pending agent launch configuration (set when wizard completes)
     pending_agent_launch: Option<AgentLaunchConfig>,
+    /// Pending unsafe branch selection (FR-029b)
+    pending_unsafe_selection: Option<String>,
 }
 
 /// Screen types
@@ -180,6 +182,7 @@ impl Model {
             active_count: 0,
             total_count: 0,
             pending_agent_launch: None,
+            pending_unsafe_selection: None,
         };
 
         // Load initial data
@@ -309,6 +312,12 @@ impl Model {
                 } else if matches!(self.screen, Screen::Profiles) && self.profiles.create_mode {
                     // Exit profile create mode
                     self.profiles.exit_create_mode();
+                } else if matches!(self.screen, Screen::Confirm) {
+                    // FR-029d: Cancel unsafe branch selection warning without selecting branch
+                    self.pending_unsafe_selection = None;
+                    if let Some(prev_screen) = self.screen_stack.pop() {
+                        self.screen = prev_screen;
+                    }
                 } else if let Some(prev_screen) = self.screen_stack.pop() {
                     self.screen = prev_screen;
                 }
@@ -393,6 +402,20 @@ impl Model {
                         self.worktree_create.next_step();
                     }
                 }
+                Screen::Confirm => {
+                    // FR-029d: Handle unsafe branch selection confirmation
+                    if self.confirm.is_confirmed() {
+                        // User confirmed - add branch to selection (FR-030)
+                        if let Some(branch_name) = self.pending_unsafe_selection.take() {
+                            self.branch_list.selected_branches.insert(branch_name);
+                        }
+                    }
+                    // Clear pending and return to previous screen
+                    self.pending_unsafe_selection = None;
+                    if let Some(prev_screen) = self.screen_stack.pop() {
+                        self.screen = prev_screen;
+                    }
+                }
                 Screen::Help => {
                     self.update(Message::NavigateBack);
                 }
@@ -425,6 +448,9 @@ impl Model {
                     self.worktree_create.cursor_left();
                 } else if matches!(self.screen, Screen::Profiles) && self.profiles.create_mode {
                     self.profiles.cursor_left();
+                } else if matches!(self.screen, Screen::Confirm) {
+                    // FR-029c: Left/Right toggle selection in confirm dialog
+                    self.confirm.toggle_selection();
                 }
             }
             Message::CursorRight => {
@@ -432,6 +458,9 @@ impl Model {
                     self.worktree_create.cursor_right();
                 } else if matches!(self.screen, Screen::Profiles) && self.profiles.create_mode {
                     self.profiles.cursor_right();
+                } else if matches!(self.screen, Screen::Confirm) {
+                    // FR-029c: Left/Right toggle selection in confirm dialog
+                    self.confirm.toggle_selection();
                 }
             }
             Message::RefreshData => {
@@ -465,7 +494,38 @@ impl Model {
             }
             Message::ToggleSelection | Message::Space => {
                 if matches!(self.screen, Screen::BranchList) {
-                    self.branch_list.toggle_selection();
+                    // FR-029b-e: Check if branch is unsafe before selecting
+                    if let Some(branch) = self.branch_list.selected_branch() {
+                        let is_selected = self.branch_list.selected_branches.contains(&branch.name);
+
+                        // Only show warning when selecting (not deselecting)
+                        if !is_selected {
+                            // Check if branch is unsafe (FR-029b/FR-029e)
+                            let is_unsafe = branch.has_changes
+                                || branch.has_unpushed
+                                || branch.is_unmerged
+                                || branch.safe_to_cleanup.is_none(); // Unknown = treat as potentially unsafe
+
+                            if is_unsafe && branch.branch_type == BranchType::Local {
+                                // Show warning dialog for unsafe branch selection
+                                self.confirm = ConfirmState::unsafe_selection_warning(
+                                    &branch.name,
+                                    branch.has_changes,
+                                    branch.has_unpushed,
+                                    branch.is_unmerged,
+                                );
+                                self.pending_unsafe_selection = Some(branch.name.clone());
+                                self.screen_stack.push(self.screen.clone());
+                                self.screen = Screen::Confirm;
+                            } else {
+                                // Safe to select directly
+                                self.branch_list.toggle_selection();
+                            }
+                        } else {
+                            // Always allow deselection
+                            self.branch_list.toggle_selection();
+                        }
+                    }
                 }
             }
             Message::OpenWizard => {

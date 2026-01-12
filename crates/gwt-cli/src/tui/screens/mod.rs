@@ -11,7 +11,7 @@ pub mod settings;
 pub mod wizard;
 pub mod worktree_create;
 
-pub use branch_list::{render_branch_list, BranchItem, BranchListState};
+pub use branch_list::{render_branch_list, BranchItem, BranchListState, BranchType};
 pub use confirm::{render_confirm, ConfirmState};
 pub use environment::{render_environment, EnvironmentState};
 pub use error::{render_error, ErrorState};
