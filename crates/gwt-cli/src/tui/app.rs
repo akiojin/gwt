@@ -93,6 +93,8 @@ pub struct Model {
     pending_agent_launch: Option<AgentLaunchConfig>,
     /// Pending unsafe branch selection (FR-029b)
     pending_unsafe_selection: Option<String>,
+    /// Pending cleanup branches (FR-010)
+    pending_cleanup_branches: Vec<String>,
 }
 
 /// Screen types
@@ -183,6 +185,7 @@ impl Model {
             total_count: 0,
             pending_agent_launch: None,
             pending_unsafe_selection: None,
+            pending_cleanup_branches: Vec::new(),
         };
 
         // Load initial data
@@ -313,8 +316,9 @@ impl Model {
                     // Exit profile create mode
                     self.profiles.exit_create_mode();
                 } else if matches!(self.screen, Screen::Confirm) {
-                    // FR-029d: Cancel unsafe branch selection warning without selecting branch
+                    // FR-029d: Cancel confirm dialog without executing action
                     self.pending_unsafe_selection = None;
+                    self.pending_cleanup_branches.clear();
                     if let Some(prev_screen) = self.screen_stack.pop() {
                         self.screen = prev_screen;
                     }
@@ -403,15 +407,21 @@ impl Model {
                     }
                 }
                 Screen::Confirm => {
-                    // FR-029d: Handle unsafe branch selection confirmation
                     if self.confirm.is_confirmed() {
-                        // User confirmed - add branch to selection (FR-030)
+                        // FR-029d: Handle unsafe branch selection confirmation
                         if let Some(branch_name) = self.pending_unsafe_selection.take() {
+                            // User confirmed - add branch to selection (FR-030)
                             self.branch_list.selected_branches.insert(branch_name);
                         }
+                        // FR-010: Handle cleanup confirmation
+                        if !self.pending_cleanup_branches.is_empty() {
+                            let branches = std::mem::take(&mut self.pending_cleanup_branches);
+                            self.execute_cleanup(&branches);
+                        }
                     }
-                    // Clear pending and return to previous screen
+                    // Clear pending state and return to previous screen
                     self.pending_unsafe_selection = None;
+                    self.pending_cleanup_branches.clear();
                     if let Some(prev_screen) = self.screen_stack.pop() {
                         self.screen = prev_screen;
                     }
@@ -647,6 +657,41 @@ impl Model {
                 }
             }
         }
+    }
+
+    /// Execute branch cleanup (FR-010)
+    fn execute_cleanup(&mut self, branches: &[String]) {
+        let mut deleted = 0;
+        let mut errors = Vec::new();
+
+        for branch_name in branches {
+            // Try to delete the branch
+            match Branch::delete(&self.repo_root, branch_name, false) {
+                Ok(_) => {
+                    deleted += 1;
+                    // Remove from selection
+                    self.branch_list.selected_branches.remove(branch_name);
+                }
+                Err(e) => {
+                    errors.push(format!("{}: {}", branch_name, e));
+                }
+            }
+        }
+
+        // Show result message
+        if errors.is_empty() {
+            self.status_message = Some(format!("Deleted {} branch(es).", deleted));
+        } else {
+            self.status_message = Some(format!(
+                "Deleted {} branch(es), {} failed.",
+                deleted,
+                errors.len()
+            ));
+        }
+        self.status_message_time = Some(Instant::now());
+
+        // Refresh data to reflect changes (FR-008b)
+        self.refresh_data();
     }
 
     /// View function (Elm Architecture)
@@ -1041,16 +1086,57 @@ pub fn run() -> Result<Option<AgentLaunchConfig>, GwtError> {
                             }
                         }
                         (KeyCode::Char('c'), KeyModifiers::NONE) => {
-                            // Cleanup command - not yet implemented fully
+                            // FR-010: Cleanup command
                             // In filter mode, 'c' goes to filter input
                             if matches!(model.screen, Screen::BranchList)
                                 && !model.branch_list.filter_mode
                             {
-                                // TODO: Show cleanup dialog
-                                model.status_message =
-                                    Some("Cleanup not yet implemented".to_string());
-                                model.status_message_time = Some(Instant::now());
-                                None
+                                // FR-028: Check if branches are selected
+                                if model.branch_list.selected_branches.is_empty() {
+                                    model.status_message =
+                                        Some("No branches selected.".to_string());
+                                    model.status_message_time = Some(Instant::now());
+                                    None
+                                } else {
+                                    // FR-028a-b: Filter out remote branches and current branch
+                                    let cleanup_branches: Vec<String> = model
+                                        .branch_list
+                                        .selected_branches
+                                        .iter()
+                                        .filter(|name| {
+                                            // Find the branch in the list
+                                            model
+                                                .branch_list
+                                                .branches
+                                                .iter()
+                                                .find(|b| &b.name == *name)
+                                                .map(|b| {
+                                                    // Exclude remote branches and current branch
+                                                    b.branch_type == BranchType::Local
+                                                        && !b.is_current
+                                                })
+                                                .unwrap_or(false)
+                                        })
+                                        .cloned()
+                                        .collect();
+
+                                    if cleanup_branches.is_empty() {
+                                        let excluded = model.branch_list.selected_branches.len();
+                                        model.status_message = Some(format!(
+                                            "{} branch(es) excluded (remote or current).",
+                                            excluded
+                                        ));
+                                        model.status_message_time = Some(Instant::now());
+                                        None
+                                    } else {
+                                        // Show cleanup confirmation dialog
+                                        model.confirm = ConfirmState::cleanup(&cleanup_branches);
+                                        model.pending_cleanup_branches = cleanup_branches;
+                                        model.screen_stack.push(model.screen.clone());
+                                        model.screen = Screen::Confirm;
+                                        None
+                                    }
+                                }
                             } else {
                                 Some(Message::Char('c'))
                             }
