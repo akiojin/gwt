@@ -55,11 +55,6 @@ pub fn BranchList() -> impl IntoView {
                                 error.set(None);
                                 is_working.set(true);
                                 let base = base_branch.get().trim().to_string();
-                                let refresh = refresh.clone();
-                                let branch_name = branch_name.clone();
-                                let base_branch = base_branch.clone();
-                                let is_working = is_working.clone();
-                                let error = error.clone();
                                 spawn_local(async move {
                                     let req = api::CreateBranchRequest {
                                         name,
@@ -122,8 +117,6 @@ pub fn BranchList() -> impl IntoView {
                                                             <button
                                                                 class="text-sm bg-slate-900 text-white px-3 py-1 rounded-full hover:opacity-90"
                                                                 on:click=move |_| {
-                                                                    let refresh = refresh.clone();
-                                                                    let error = error.clone();
                                                                     let name = name_for_worktree.clone();
                                                                     spawn_local(async move {
                                                                         let req = api::CreateWorktreeRequest {
@@ -151,8 +144,6 @@ pub fn BranchList() -> impl IntoView {
                                                                 }
                                                                 let window = web_sys::window().expect("window");
                                                                 if window.confirm_with_message("Delete this branch?").unwrap_or(false) {
-                                                                    let refresh = refresh.clone();
-                                                                    let error = error.clone();
                                                                     let name = name_for_delete.clone();
                                                                     spawn_local(async move {
                                                                         if api::delete_branch(&name).await.is_err() {

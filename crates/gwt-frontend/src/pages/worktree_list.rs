@@ -65,11 +65,6 @@ pub fn WorktreeList() -> impl IntoView {
                                 is_working.set(true);
                                 let base = base_branch.get().trim().to_string();
                                 let new_branch = create_new.get();
-                                let refresh = refresh.clone();
-                                let branch_name = branch_name.clone();
-                                let base_branch = base_branch.clone();
-                                let is_working = is_working.clone();
-                                let error = error.clone();
                                 spawn_local(async move {
                                     let req = api::CreateWorktreeRequest {
                                         branch: name,
@@ -134,8 +129,6 @@ pub fn WorktreeList() -> impl IntoView {
                                                                 }
                                                                 let window = web_sys::window().expect("window");
                                                                 if window.confirm_with_message("Delete this worktree?").unwrap_or(false) {
-                                                                    let refresh = refresh.clone();
-                                                                    let error = error.clone();
                                                                     let branch_name = branch_name.clone();
                                                                     spawn_local(async move {
                                                                         if api::delete_worktree(&branch_name).await.is_err() {

@@ -2,6 +2,8 @@
 
 use chrono::Utc;
 use clap::Parser;
+use gwt_core::agent::codex::codex_default_args;
+use gwt_core::agent::get_command_version;
 use gwt_core::config::{save_session_entry, Settings, ToolSessionEntry};
 use gwt_core::error::GwtError;
 use gwt_core::worktree::WorktreeManager;
@@ -658,7 +660,13 @@ fn build_agent_args(config: &AgentLaunchConfig) -> Vec<String> {
                 args.push("--yolo".to_string());
             }
 
-            args.extend(codex_default_args(config.model.as_deref()));
+            let reasoning_override = config.reasoning_level.map(|r| r.label());
+            let skills_flag_version = resolve_codex_skills_flag_version(config);
+            args.extend(codex_default_args(
+                config.model.as_deref(),
+                reasoning_override,
+                skills_flag_version.as_deref(),
+            ));
         }
         CodingAgent::GeminiCli => {
             // Model selection (Gemini uses -m or --model)
@@ -697,31 +705,10 @@ fn build_agent_args(config: &AgentLaunchConfig) -> Vec<String> {
     args
 }
 
-fn codex_default_args(model_override: Option<&str>) -> Vec<String> {
-    let mut args = Vec::new();
-    args.push("--search".to_string());
-    if let Some(model) = model_override {
-        if !model.is_empty() {
-            args.push(format!("--model=\"{}\"", model));
-        } else {
-            args.push("--model=\"gpt-5-codex\"".to_string());
-        }
-    } else {
-        args.push("--model=\"gpt-5-codex\"".to_string());
+fn resolve_codex_skills_flag_version(config: &AgentLaunchConfig) -> Option<String> {
+    match config.version.as_str() {
+        "installed" => get_command_version("codex", "--version"),
+        "latest" => None,
+        other => Some(other.to_string()),
     }
-    args.push("--sandbox".to_string());
-    args.push("workspace-write".to_string());
-    args.push("-c".to_string());
-    args.push("model_reasoning_effort=\"high\"".to_string());
-    args.push("-c".to_string());
-    args.push("model_reasoning_summaries=\"detailed\"".to_string());
-    args.push("-c".to_string());
-    args.push("sandbox_workspace_write.network_access=true".to_string());
-    args.push("-c".to_string());
-    args.push("shell_environment_policy.inherit=all".to_string());
-    args.push("-c".to_string());
-    args.push("shell_environment_policy.ignore_default_excludes=true".to_string());
-    args.push("-c".to_string());
-    args.push("shell_environment_policy.experimental_use_profile=true".to_string());
-    args
 }
