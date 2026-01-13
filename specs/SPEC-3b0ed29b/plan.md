@@ -23,6 +23,7 @@
 2. 起動ログは整形ヘルパーで統一し、Working directory/Model/Reasoning/Mode/Skip/Args/Version/Execution method を出力する。
 3. 起動終了時は exit classification (success/interrupted/failure) を行い、TUIへの復帰コンテキストに変換する。
 4. OpenCodeモデルは固定リストに default/custom を保持し、空リストを許さない。
+5. Codexの権限スキップ時はスキップフラグが後勝ちになるように引数順を調整し、Claude Codeのスキップ時に`IS_SANDBOX=1`を必ず付与する。
 
 ## 4. 実装ステップ (ハイレベル ToDo)
 
@@ -30,11 +31,12 @@
 2. 起動ログ整形ヘルパーを追加し、ログ出力を統一する。
 3. 終了判定の分類とエラー表示/一覧復帰を実装する。
 4. OpenCodeのモデル選択デフォルト/カスタム入力を明示し、ユニットテストで空リストを防止する。
-5. `cargo build --release` でビルド確認する。
+5. Codexデフォルトモデル/モデル選択肢を仕様に合わせ、権限スキップの引数順序と`IS_SANDBOX`付与を修正する。
+6. `cargo build --release` でビルド確認する。
 
 ## 5. テスト戦略
 
-- ユニットテスト: codex skip flag、起動ログ整形、終了分類、OpenCodeモデル選択。
+- ユニットテスト: codex skip flag、codexデフォルトモデル、起動ログ整形、終了分類、OpenCodeモデル選択。
 - ビルド検証: `cargo build --release`。
 
 ## 6. リスクと軽減策

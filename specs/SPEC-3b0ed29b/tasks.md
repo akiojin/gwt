@@ -33,3 +33,11 @@
 ## 統合
 
 - [x] **T3190** [統合] `cargo build --release` を実行してビルド確認する
+
+## 追加作業: Codexモデル/スキップ権限の互換修正 (2026-01-14)
+
+- [x] **T3150** [Test] `crates/gwt-core/src/agent/codex.rs` のデフォルトモデルとスキップ時引数構成のテストを更新する
+- [x] **T3151** [Test] `crates/gwt-cli/src/main.rs` にCodexのスキップフラグが末尾に来ることを確認するテストを追加する
+- [x] **T3152** [実装] `crates/gwt-core/src/agent/codex.rs` のデフォルトモデルを仕様に合わせて更新し、スキップ時はsandbox設定を抑止する
+- [x] **T3153** [実装] `crates/gwt-cli/src/tui/screens/wizard.rs` のCodexモデル選択肢を仕様に合わせて更新する
+- [x] **T3154** [実装] `crates/gwt-cli/src/main.rs` でClaude Codeのスキップ時に`IS_SANDBOX=1`を必ず付与する

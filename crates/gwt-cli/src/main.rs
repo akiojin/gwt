@@ -561,10 +561,7 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
     for (key, value) in &config.env {
         command.env(key, value);
     }
-    if config.skip_permissions
-        && !env_has_key(&config.env, "IS_SANDBOX")
-        && config.agent == CodingAgent::ClaudeCode
-    {
+    if config.skip_permissions && config.agent == CodingAgent::ClaudeCode {
         command.env("IS_SANDBOX", "1");
     }
 
@@ -667,10 +664,6 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
             })
         }
     }
-}
-
-fn env_has_key(env: &[(String, String)], key: &str) -> bool {
-    env.iter().any(|(k, _)| k == key)
 }
 
 /// Get bunx command and base args for npm package execution
@@ -832,10 +825,15 @@ fn build_agent_args(config: &AgentLaunchConfig) -> Vec<String> {
 
             // Skip permissions (Codex uses versioned flag)
             let flag_version = resolve_codex_flag_version(config);
-            if config.skip_permissions {
-                let flag = codex_skip_permissions_flag(flag_version.as_deref());
-                args.push(flag.to_string());
-            }
+            let skip_flag = if config.skip_permissions {
+                Some(codex_skip_permissions_flag(flag_version.as_deref()))
+            } else {
+                None
+            };
+            let bypass_sandbox = matches!(
+                skip_flag,
+                Some("--dangerously-bypass-approvals-and-sandbox")
+            );
 
             let reasoning_override = config.reasoning_level.map(|r| r.label());
             let skills_flag_version = flag_version;
@@ -843,7 +841,12 @@ fn build_agent_args(config: &AgentLaunchConfig) -> Vec<String> {
                 config.model.as_deref(),
                 reasoning_override,
                 skills_flag_version.as_deref(),
+                bypass_sandbox,
             ));
+
+            if let Some(flag) = skip_flag {
+                args.push(flag.to_string());
+            }
         }
         CodingAgent::GeminiCli => {
             // Model selection (Gemini uses -m or --model)
@@ -990,7 +993,7 @@ mod tests {
         let agent_args = vec![
             "resume".to_string(),
             "--last".to_string(),
-            "--model=gpt-5.2-codex".to_string(),
+            "--model=gpt-5.1-codex".to_string(),
             "-c".to_string(),
             "model_reasoning_effort=high".to_string(),
         ];
@@ -1005,7 +1008,7 @@ mod tests {
         );
         assert!(lines.contains(&"Launching Codex CLI...".to_string()));
         assert!(lines.contains(&"Working directory: /tmp/worktree".to_string()));
-        assert!(lines.contains(&"Model: gpt-5.2-codex".to_string()));
+        assert!(lines.contains(&"Model: gpt-5.1-codex".to_string()));
         assert!(lines.contains(&"Reasoning: high".to_string()));
         assert!(lines.contains(&"Mode: Continue session".to_string()));
         assert!(lines.contains(&"Skip permissions: enabled".to_string()));
@@ -1013,7 +1016,7 @@ mod tests {
         assert!(lines.contains(&"Using bunx @openai/codex@latest".to_string()));
         assert!(lines
             .iter()
-            .any(|line| line.contains("Args: resume --last --model=gpt-5.2-codex")));
+            .any(|line| line.contains("Args: resume --last --model=gpt-5.1-codex")));
     }
 
     #[test]
@@ -1035,5 +1038,19 @@ mod tests {
         assert!(lines.contains(&"Model: sonnet".to_string()));
         assert!(!lines.iter().any(|line| line.starts_with("Reasoning: ")));
         assert!(lines.contains(&"Using locally installed claude".to_string()));
+    }
+
+    #[test]
+    fn test_build_agent_args_codex_skip_flag_last() {
+        let mut config = sample_config(CodingAgent::CodexCli);
+        config.execution_mode = ExecutionMode::Normal;
+        config.model = None;
+        let args = build_agent_args(&config);
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("--dangerously-bypass-approvals-and-sandbox")
+        );
+        assert!(!args.contains(&"--sandbox".to_string()));
+        assert!(!args.contains(&"sandbox_workspace_write.network_access=true".to_string()));
     }
 }

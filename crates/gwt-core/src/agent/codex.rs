@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::process::Command;
 
-const DEFAULT_CODEX_MODEL: &str = "gpt-5.2-codex";
+const DEFAULT_CODEX_MODEL: &str = "gpt-5.1-codex";
 const DEFAULT_CODEX_REASONING: &str = "high";
 const CODEX_SKILLS_FLAG_DEPRECATED_FROM: &str = "0.80.0";
 const CODEX_SKIP_FLAG_DEPRECATED_FROM: &str = "0.80.0";
@@ -72,7 +72,7 @@ impl CodexAgent {
         let mut cmd = Command::new("codex");
         let version = get_command_version("codex", "--version");
         cmd.arg("--quiet")
-            .args(codex_default_args(None, None, version.as_deref()))
+            .args(codex_default_args(None, None, version.as_deref(), false))
             .arg(prompt)
             .current_dir(directory)
             .stdin(Stdio::null())
@@ -196,6 +196,7 @@ pub fn codex_default_args(
     model_override: Option<&str>,
     reasoning_override: Option<&str>,
     skills_flag_version: Option<&str>,
+    bypass_sandbox: bool,
 ) -> Vec<String> {
     let model = model_override
         .map(str::trim)
@@ -210,21 +211,35 @@ pub fn codex_default_args(
         "--enable".to_string(),
         "web_search_request".to_string(),
         format!("--model={}", model),
-        "--sandbox".to_string(),
-        "workspace-write".to_string(),
+    ];
+
+    if !bypass_sandbox {
+        args.push("--sandbox".to_string());
+        args.push("workspace-write".to_string());
+    }
+
+    args.extend([
         "-c".to_string(),
         format!("model_reasoning_effort={}", reasoning),
         "-c".to_string(),
         "model_reasoning_summaries=detailed".to_string(),
-        "-c".to_string(),
-        "sandbox_workspace_write.network_access=true".to_string(),
+    ]);
+
+    if !bypass_sandbox {
+        args.extend([
+            "-c".to_string(),
+            "sandbox_workspace_write.network_access=true".to_string(),
+        ]);
+    }
+
+    args.extend([
         "-c".to_string(),
         "shell_environment_policy.inherit=all".to_string(),
         "-c".to_string(),
         "shell_environment_policy.ignore_default_excludes=true".to_string(),
         "-c".to_string(),
         "shell_environment_policy.experimental_use_profile=true".to_string(),
-    ];
+    ]);
 
     let enable_skills = should_enable_codex_skills_flag(skills_flag_version);
     args = with_codex_skills_flag(args, enable_skills);
@@ -339,33 +354,40 @@ mod tests {
 
     #[test]
     fn test_codex_default_args_defaults() {
-        let args = codex_default_args(None, None, None);
+        let args = codex_default_args(None, None, None, false);
         assert!(args.contains(&"--enable".to_string()));
         assert!(args.contains(&"web_search_request".to_string()));
-        assert!(args.contains(&"--model=gpt-5.2-codex".to_string()));
+        assert!(args.contains(&"--model=gpt-5.1-codex".to_string()));
         assert!(args.contains(&"model_reasoning_effort=high".to_string()));
     }
 
     #[test]
     fn test_codex_default_args_overrides() {
-        let args = codex_default_args(Some("gpt-5.2"), Some("xhigh"), None);
+        let args = codex_default_args(Some("gpt-5.2"), Some("xhigh"), None, false);
         assert!(args.contains(&"--model=gpt-5.2".to_string()));
         assert!(args.contains(&"model_reasoning_effort=xhigh".to_string()));
     }
 
     #[test]
     fn test_codex_skills_flag_version_gate() {
-        let args_old = codex_default_args(None, None, Some("0.79.0"));
+        let args_old = codex_default_args(None, None, Some("0.79.0"), false);
         let skills_present_old = args_old.iter().enumerate().any(|(idx, arg)| {
             arg == "--enable" && args_old.get(idx + 1).is_some_and(|v| v == "skills")
         });
         assert!(skills_present_old);
 
-        let args_new = codex_default_args(None, None, Some("0.80.0"));
+        let args_new = codex_default_args(None, None, Some("0.80.0"), false);
         let skills_present_new = args_new.iter().enumerate().any(|(idx, arg)| {
             arg == "--enable" && args_new.get(idx + 1).is_some_and(|v| v == "skills")
         });
         assert!(!skills_present_new);
+    }
+
+    #[test]
+    fn test_codex_default_args_bypass_sandbox() {
+        let args = codex_default_args(None, None, None, true);
+        assert!(!args.contains(&"--sandbox".to_string()));
+        assert!(!args.contains(&"sandbox_workspace_write.network_access=true".to_string()));
     }
 
     #[test]

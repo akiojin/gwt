@@ -434,9 +434,6 @@ impl CodingAgent {
                 ModelOption::default_option("Default (Auto)", "Use Codex default model")
                     .with_base_levels()
                     .with_default_inference(ReasoningLevel::High),
-                ModelOption::new("gpt-5.2-codex", "gpt-5.2-codex", "Latest frontier agentic coding model")
-                    .with_max_levels()
-                    .with_default_inference(ReasoningLevel::High),
                 ModelOption::new("gpt-5.1-codex-max", "gpt-5.1-codex-max", "Codex-optimized flagship for deep and fast reasoning.")
                     .with_max_levels(),
                 ModelOption::new("gpt-5.1-codex-mini", "gpt-5.1-codex-mini", "Optimized for codex. Cheaper, faster, but less capable.")
