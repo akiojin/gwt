@@ -10,6 +10,7 @@ use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::api::{self, AppState};
+use crate::static_files;
 
 /// Server configuration
 pub struct ServerConfig {
@@ -76,7 +77,12 @@ fn build_router(state: Arc<AppState>, cors_enabled: bool) -> Router {
         // .route("/ws/terminal", get(websocket::ws_handler))
         .with_state(state);
 
-    let router = Router::new().nest("/api", api_routes);
+    // Static file routes for frontend
+    let static_routes = Router::new()
+        .route("/", get(static_files::serve_index))
+        .route("/*path", get(static_files::serve_static));
+
+    let router = Router::new().nest("/api", api_routes).merge(static_routes);
 
     if cors_enabled {
         let cors = CorsLayer::new()
