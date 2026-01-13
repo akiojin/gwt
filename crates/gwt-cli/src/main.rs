@@ -514,7 +514,6 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<(), GwtError> {
         command.env(key, value);
     }
     if config.skip_permissions
-        && is_root_user()
         && !env_has_key(&config.env, "IS_SANDBOX")
         && config.agent == CodingAgent::ClaudeCode
     {
@@ -582,17 +581,6 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<(), GwtError> {
     }
 
     Ok(())
-}
-
-fn is_root_user() -> bool {
-    #[cfg(unix)]
-    {
-        unsafe { libc::geteuid() == 0 }
-    }
-    #[cfg(not(unix))]
-    {
-        false
-    }
 }
 
 fn env_has_key(env: &[(String, String)], key: &str) -> bool {

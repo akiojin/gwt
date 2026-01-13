@@ -64,21 +64,8 @@ impl ClaudeAgent {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        if is_root_user() {
-            cmd.env("IS_SANDBOX", "1");
-        }
+        cmd.env("IS_SANDBOX", "1");
         cmd
-    }
-}
-
-fn is_root_user() -> bool {
-    #[cfg(unix)]
-    {
-        unsafe { libc::geteuid() == 0 }
-    }
-    #[cfg(not(unix))]
-    {
-        false
     }
 }
 
