@@ -1,7 +1,8 @@
 //! gwt - Git Worktree Manager CLI
 
+use chrono::Utc;
 use clap::Parser;
-use gwt_core::config::Settings;
+use gwt_core::config::{save_session_entry, Settings, ToolSessionEntry};
 use gwt_core::error::GwtError;
 use gwt_core::worktree::WorktreeManager;
 use std::path::{Path, PathBuf};
@@ -408,6 +409,24 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<(), GwtError> {
     }
     println!("Command: {} {}", executable, base_args.join(" "));
     println!();
+
+    // FR-069, FR-042: Save session entry before launching agent
+    let session_entry = ToolSessionEntry {
+        branch: config.branch_name.clone(),
+        worktree_path: Some(config.worktree_path.to_string_lossy().to_string()),
+        tool_id: config.agent.id().to_string(),
+        tool_label: config.agent.label().to_string(),
+        session_id: None, // Will be updated if agent returns session ID
+        mode: Some(config.execution_mode.label().to_string()),
+        model: config.model.clone(),
+        reasoning_level: config.reasoning_level.map(|r| r.label().to_string()),
+        skip_permissions: Some(config.skip_permissions),
+        tool_version: Some(config.version.clone()),
+        timestamp: Utc::now().timestamp_millis(),
+    };
+    if let Err(e) = save_session_entry(&config.worktree_path, session_entry) {
+        eprintln!("Warning: Failed to save session: {}", e);
+    }
 
     // Execute the command
     let status = Command::new(&executable)

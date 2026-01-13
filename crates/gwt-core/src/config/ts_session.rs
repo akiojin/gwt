@@ -1,34 +1,34 @@
-//! TypeScript session file compatibility (FR-070)
+//! TypeScript session file compatibility (FR-069, FR-070)
 //!
-//! Reads session history from TypeScript-format session files
+//! Reads and writes session history from/to TypeScript-format session files
 //! stored at ~/.config/gwt/sessions/{repoName}_{hash}.json
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::{DateTime, Local, TimeZone, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// Tool session entry from TypeScript format (FR-070)
-#[derive(Debug, Clone, Deserialize)]
+/// Tool session entry from TypeScript format (FR-069, FR-070)
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolSessionEntry {
     pub branch: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_path: Option<String>,
     pub tool_id: String,
     pub tool_label: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_level: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skip_permissions: Option<bool>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_version: Option<String>,
     /// Unix timestamp in milliseconds
     pub timestamp: i64,
@@ -53,22 +53,22 @@ impl ToolSessionEntry {
 }
 
 /// TypeScript session data structure
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TsSessionData {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_worktree_path: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_branch: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_used_tool: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_session_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_label: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_version: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     pub timestamp: i64,
     pub repository_root: String,
@@ -103,6 +103,59 @@ pub fn load_ts_session(repo_root: &Path) -> Option<TsSessionData> {
 
     let content = std::fs::read_to_string(&session_path).ok()?;
     serde_json::from_str(&content).ok()
+}
+
+/// Save session entry to TypeScript-compatible session file (FR-069)
+///
+/// Adds a new entry to the session history and updates last-used fields.
+/// Creates the session file if it doesn't exist.
+pub fn save_session_entry(
+    repo_root: &Path,
+    entry: ToolSessionEntry,
+) -> Result<(), std::io::Error> {
+    // Resolve to main repo root for consistency
+    let main_root = crate::git::get_main_repo_root(repo_root);
+    let session_path = get_ts_session_path(&main_root);
+
+    // Load existing session or create new one
+    let mut session = load_ts_session(&main_root).unwrap_or_else(|| TsSessionData {
+        last_worktree_path: None,
+        last_branch: None,
+        last_used_tool: None,
+        last_session_id: None,
+        tool_label: None,
+        tool_version: None,
+        model: None,
+        timestamp: Utc::now().timestamp_millis(),
+        repository_root: main_root.to_string_lossy().to_string(),
+        history: Vec::new(),
+    });
+
+    // Update last-used fields
+    session.last_worktree_path = entry.worktree_path.clone();
+    session.last_branch = Some(entry.branch.clone());
+    session.last_used_tool = Some(entry.tool_id.clone());
+    session.last_session_id = entry.session_id.clone();
+    session.tool_label = Some(entry.tool_label.clone());
+    session.tool_version = entry.tool_version.clone();
+    session.model = entry.model.clone();
+    session.timestamp = entry.timestamp;
+
+    // Add entry to history
+    session.history.push(entry);
+
+    // Ensure parent directory exists
+    if let Some(parent) = session_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    // Write to file
+    let content = serde_json::to_string_pretty(&session).map_err(|e| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
+    })?;
+    std::fs::write(&session_path, content)?;
+
+    Ok(())
 }
 
 /// Get the last tool usage for each branch from TypeScript session history
