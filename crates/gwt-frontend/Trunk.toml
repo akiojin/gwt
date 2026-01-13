@@ -1,0 +1,22 @@
+# Trunk configuration for gwt-frontend
+# https://trunkrs.dev/configuration/
+
+[build]
+# Build output directory
+dist = "dist"
+# Use release mode for smaller WASM
+# release = true
+
+[watch]
+# Directories to watch for changes
+watch = ["src", "index.html"]
+
+[serve]
+# Development server address
+address = "127.0.0.1"
+# Development server port
+port = 8080
+# Proxy API requests to the backend
+[[serve.proxy]]
+backend = "http://127.0.0.1:3000/api/"
+rewrite = "/api/"
