@@ -797,9 +797,23 @@ impl WizardState {
         self.step = match self.step {
             WizardStep::QuickStart => {
                 // FR-050: Handle Quick Start selection
-                // Next step depends on selection - handled by caller via apply_quick_start_selection
-                // If "Choose different" is selected, go to AgentSelect
-                WizardStep::AgentSelect
+                if let Some((action, tool_index)) = self.selected_quick_start_action() {
+                    match action {
+                        QuickStartAction::ResumeWithPrevious
+                        | QuickStartAction::StartNewWithPrevious => {
+                            // Apply settings from history and skip to completion
+                            self.apply_quick_start_selection(tool_index, action);
+                            WizardStep::SkipPermissions
+                        }
+                        QuickStartAction::ChooseDifferent => {
+                            // Go to agent selection for manual configuration
+                            WizardStep::AgentSelect
+                        }
+                    }
+                } else {
+                    // No history, go to agent selection
+                    WizardStep::AgentSelect
+                }
             }
             WizardStep::BranchTypeSelect => WizardStep::BranchNameInput,
             WizardStep::BranchNameInput => WizardStep::AgentSelect,
@@ -1667,5 +1681,92 @@ mod tests {
         state.select_prev();
         assert_eq!(state.agent_index, 0);
         assert_eq!(state.agent, CodingAgent::ClaudeCode);
+    }
+
+    #[test]
+    fn test_quick_start_resume_skips_to_completion() {
+        let mut state = WizardState::new();
+        let history = vec![QuickStartEntry {
+            tool_id: "claude-code".to_string(),
+            tool_label: "Claude Code".to_string(),
+            model: Some("sonnet".to_string()),
+            reasoning_level: None,
+            version: Some("1.0.0".to_string()),
+            session_id: Some("abc123".to_string()),
+            skip_permissions: Some(true),
+        }];
+        state.open_for_branch("feature/test", history);
+
+        // Should start at QuickStart
+        assert_eq!(state.step, WizardStep::QuickStart);
+
+        // Index 0 = Resume with previous settings (first tool)
+        state.quick_start_index = 0;
+
+        // Call next_step - should skip to SkipPermissions (completion)
+        state.next_step();
+        assert_eq!(state.step, WizardStep::SkipPermissions);
+
+        // Settings should be applied
+        assert_eq!(state.agent, CodingAgent::ClaudeCode);
+        assert_eq!(state.model, "sonnet");
+        assert_eq!(state.version, "1.0.0");
+        assert_eq!(state.execution_mode, ExecutionMode::Resume);
+        assert!(state.skip_permissions);
+    }
+
+    #[test]
+    fn test_quick_start_new_skips_to_completion() {
+        let mut state = WizardState::new();
+        let history = vec![QuickStartEntry {
+            tool_id: "codex-cli".to_string(),
+            tool_label: "Codex CLI".to_string(),
+            model: Some("o3-mini".to_string()),
+            reasoning_level: Some("high".to_string()),
+            version: Some("2.0.0".to_string()),
+            session_id: Some("xyz789".to_string()),
+            skip_permissions: Some(false),
+        }];
+        state.open_for_branch("feature/test", history);
+
+        assert_eq!(state.step, WizardStep::QuickStart);
+
+        // Index 1 = Start new with previous settings (first tool)
+        state.quick_start_index = 1;
+
+        // Call next_step - should skip to SkipPermissions (completion)
+        state.next_step();
+        assert_eq!(state.step, WizardStep::SkipPermissions);
+
+        // Settings should be applied with Normal mode (not Resume)
+        assert_eq!(state.agent, CodingAgent::CodexCli);
+        assert_eq!(state.model, "o3-mini");
+        assert_eq!(state.reasoning_level, ReasoningLevel::High);
+        assert_eq!(state.execution_mode, ExecutionMode::Normal);
+        assert!(!state.skip_permissions);
+    }
+
+    #[test]
+    fn test_quick_start_choose_different_goes_to_agent_select() {
+        let mut state = WizardState::new();
+        let history = vec![QuickStartEntry {
+            tool_id: "claude-code".to_string(),
+            tool_label: "Claude Code".to_string(),
+            model: Some("sonnet".to_string()),
+            reasoning_level: None,
+            version: Some("1.0.0".to_string()),
+            session_id: Some("abc123".to_string()),
+            skip_permissions: None,
+        }];
+        state.open_for_branch("feature/test", history);
+
+        assert_eq!(state.step, WizardStep::QuickStart);
+
+        // Index 2 = "Choose different settings..."
+        state.quick_start_index = 2;
+
+        // Call next_step - should go to AgentSelect
+        state.next_step();
+        assert_eq!(state.step, WizardStep::AgentSelect);
     }
 }
