@@ -31,6 +31,13 @@
 - [x] **T9915** [実装] `crates/gwt-core/src/git/branch.rs` にベースブランチとの差分取得ヘルパーを追加
 - [x] **T9916** [実装] `crates/gwt-cli/src/tui/app.rs` で未コミット/未プッシュの即時判定と未マージ判定を反映
 
+## 追加作業: PRタイトル取得の非ブロッキング化 (2026-01-13)
+
+- [x] **T9917** [P] [共通] `specs/SPEC-d2f4762a/spec.md` にPRタイトル取得の非ブロッキング要件を追記
+- [x] **T9918** [P] [共通] `specs/SPEC-d2f4762a/plan.md` にPRタイトル取得をバックグラウンドで行う方針を追記
+- [x] **T9919** [Test] `crates/gwt-cli/src/tui/screens/branch_list.rs` にPRタイトル更新でフィルタが再計算されるテストを追加
+- [x] **T9920** [実装] `crates/gwt-cli/src/tui/app.rs` でPRタイトル取得をバックグラウンド実行し、到着後に一覧へ反映
+
 ## フェーズ0: ブランチ一覧アイコンのASCII再整理 (優先度: P1)
 
 **ストーリー**: ブランチ一覧の選択/Worktree/安全アイコンをASCII表記へ整理し、アイコン間にスペースを入れてカーソル記号は表示しない。

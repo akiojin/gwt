@@ -13,8 +13,11 @@ use gwt_core::error::GwtError;
 use gwt_core::git::{Branch, PrCache};
 use gwt_core::worktree::WorktreeManager;
 use ratatui::{prelude::*, widgets::*};
+use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use super::screens::branch_list::WorktreeStatus;
@@ -78,6 +81,10 @@ impl TuiEntryContext {
     }
 }
 
+struct PrTitleUpdate {
+    titles: HashMap<String, String>,
+}
+
 /// Application state (Model in Elm Architecture)
 pub struct Model {
     /// Whether the app should quit
@@ -130,8 +137,8 @@ pub struct Model {
     pending_unsafe_selection: Option<String>,
     /// Pending cleanup branches (FR-010)
     pending_cleanup_branches: Vec<String>,
-    /// PR cache for title search (FR-016)
-    pr_cache: PrCache,
+    /// PR title update receiver
+    pr_title_rx: Option<Receiver<PrTitleUpdate>>,
 }
 
 /// Screen types
@@ -230,7 +237,7 @@ impl Model {
             pending_agent_launch: None,
             pending_unsafe_selection: None,
             pending_cleanup_branches: Vec::new(),
-            pr_cache: PrCache::new(),
+            pr_title_rx: None,
         };
 
         // Load initial data
@@ -253,9 +260,6 @@ impl Model {
                 // Load tool usage from TypeScript session file (FR-070)
                 let tool_usage_map = gwt_core::config::get_last_tool_usage_map(&self.repo_root);
 
-                // FR-016: Populate PR cache for PR title search
-                self.pr_cache.populate(&self.repo_root);
-
                 let mut branch_items: Vec<BranchItem> = branches
                     .iter()
                     .map(|b| {
@@ -269,11 +273,6 @@ impl Model {
                             let session_timestamp = entry.timestamp / 1000; // Convert ms to seconds
                             let git_timestamp = item.last_commit_timestamp.unwrap_or(0);
                             item.last_commit_timestamp = Some(session_timestamp.max(git_timestamp));
-                        }
-
-                        // FR-016: Set PR title from cache
-                        if let Some(title) = self.pr_cache.get_title(&b.name) {
-                            item.pr_title = Some(title.to_string());
                         }
 
                         // Safety check short-circuit: use immediate signals first
@@ -313,6 +312,7 @@ impl Model {
                 self.total_count = branch_items.len();
                 self.active_count = branch_items.iter().filter(|b| b.has_worktree).count();
                 self.branch_list = BranchListState::new().with_branches(branch_items);
+                self.spawn_pr_title_fetch(&branches);
 
                 // Get base branches for worktree create
                 let base_branches: Vec<String> = branches
@@ -350,6 +350,32 @@ impl Model {
         self.branch_list.version = Some(env!("CARGO_PKG_VERSION").to_string());
     }
 
+    fn spawn_pr_title_fetch(&mut self, branches: &[Branch]) {
+        if branches.is_empty() {
+            self.pr_title_rx = None;
+            return;
+        }
+
+        let repo_root = self.repo_root.clone();
+        let branch_names: Vec<String> = branches.iter().map(|b| b.name.clone()).collect();
+        let (tx, rx) = mpsc::channel();
+        self.pr_title_rx = Some(rx);
+
+        thread::spawn(move || {
+            let mut cache = PrCache::new();
+            cache.populate(&repo_root);
+
+            let mut titles = HashMap::new();
+            for name in branch_names {
+                if let Some(title) = cache.get_title(&name) {
+                    titles.insert(name, title.to_string());
+                }
+            }
+
+            let _ = tx.send(PrTitleUpdate { titles });
+        });
+    }
+
     fn apply_entry_context(&mut self, context: Option<TuiEntryContext>) {
         if let Some(context) = context {
             if let Some(message) = context.status_message {
@@ -360,6 +386,23 @@ impl Model {
                 self.error = ErrorState::from_error(&message);
                 self.screen_stack.push(self.screen.clone());
                 self.screen = Screen::Error;
+            }
+        }
+    }
+
+    fn apply_pr_title_updates(&mut self) {
+        let Some(rx) = &self.pr_title_rx else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(update) => {
+                self.branch_list.apply_pr_titles(&update.titles);
+                self.pr_title_rx = None;
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.pr_title_rx = None;
             }
         }
     }
@@ -559,6 +602,7 @@ impl Model {
                 }
                 // Update spinner animation
                 self.branch_list.tick_spinner();
+                self.apply_pr_title_updates();
             }
             Message::SelectNext => match self.screen {
                 Screen::BranchList => self.branch_list.select_next(),

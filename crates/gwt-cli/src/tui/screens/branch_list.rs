@@ -5,7 +5,7 @@
 use gwt_core::git::{Branch, DivergenceStatus};
 use gwt_core::worktree::Worktree;
 use ratatui::{prelude::*, widgets::*};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 /// Get terminal color for coding agent (SPEC-3b0ed29b FR-024~FR-027)
@@ -550,6 +550,20 @@ impl BranchListState {
         self.filter = filter;
         self.selected = 0;
         self.offset = 0;
+        self.rebuild_filtered_cache();
+    }
+
+    pub fn apply_pr_titles(&mut self, titles: &HashMap<String, String>) {
+        if titles.is_empty() {
+            return;
+        }
+
+        for item in &mut self.branches {
+            if let Some(title) = titles.get(&item.name) {
+                item.pr_title = Some(title.clone());
+            }
+        }
+
         self.rebuild_filtered_cache();
     }
 
@@ -1128,6 +1142,62 @@ mod tests {
         let after_filter = state.filter_cache_version;
         state.cycle_view_mode();
         assert!(state.filter_cache_version > after_filter);
+    }
+
+    #[test]
+    fn test_apply_pr_titles_updates_filter_results() {
+        let branches = vec![
+            BranchItem {
+                name: "feature/one".to_string(),
+                branch_type: BranchType::Local,
+                is_current: false,
+                has_worktree: false,
+                worktree_path: None,
+                worktree_status: WorktreeStatus::None,
+                has_changes: false,
+                has_unpushed: false,
+                divergence: DivergenceStatus::UpToDate,
+                has_remote_counterpart: false,
+                remote_name: None,
+                safe_to_cleanup: Some(true),
+                is_unmerged: false,
+                last_commit_timestamp: None,
+                last_tool_usage: None,
+                is_selected: false,
+                pr_title: None,
+            },
+            BranchItem {
+                name: "feature/two".to_string(),
+                branch_type: BranchType::Local,
+                is_current: false,
+                has_worktree: false,
+                worktree_path: None,
+                worktree_status: WorktreeStatus::None,
+                has_changes: false,
+                has_unpushed: false,
+                divergence: DivergenceStatus::UpToDate,
+                has_remote_counterpart: false,
+                remote_name: None,
+                safe_to_cleanup: Some(true),
+                is_unmerged: false,
+                last_commit_timestamp: None,
+                last_tool_usage: None,
+                is_selected: false,
+                pr_title: None,
+            },
+        ];
+
+        let mut state = BranchListState::new().with_branches(branches);
+        state.set_filter("cool".to_string());
+        assert_eq!(state.filtered_branches().len(), 0);
+
+        let mut titles = HashMap::new();
+        titles.insert("feature/one".to_string(), "Cool PR".to_string());
+        state.apply_pr_titles(&titles);
+
+        let filtered = state.filtered_branches();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "feature/one");
     }
 
     #[test]
