@@ -17,6 +17,12 @@
 - [x] **T9907** [実装] `crates/gwt-cli/src/tui/app.rs` と `crates/gwt-cli/src/tui/screens/branch_list.rs` から統計/Updated表示を削除
 - [x] **T9908** [実装] `crates/gwt-core/src/config/ts_session.rs` のツール表示フォーマットから時刻を削除し、関連コメントを更新
 
+## 追加作業: ブランチ一覧フッターのEnter表記削除 (2026-01-13)
+
+- [x] **T9909** [P] [共通] `specs/SPEC-d2f4762a/spec.md` のフッター要件から Enter 表記を削除
+- [x] **T9910** [P] [共通] `specs/SPEC-d2f4762a/plan.md` にフッターのEnter表記削除を追記
+- [x] **T9911** [実装] ブランチ一覧のフッター表示から Enter 表記を削除（`crates/gwt-cli/src/tui/app.rs`, `crates/gwt-cli/src/tui/screens/branch_list.rs`）
+
 ## フェーズ0: ブランチ一覧アイコンのASCII再整理 (優先度: P1)
 
 **ストーリー**: ブランチ一覧の選択/Worktree/安全アイコンをASCII表記へ整理し、アイコン間にスペースを入れてカーソル記号は表示しない。

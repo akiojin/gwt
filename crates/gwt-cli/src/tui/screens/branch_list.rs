@@ -924,7 +924,6 @@ fn render_worktree_path(
 /// Render footer line with keybindings (FR-004)
 fn render_footer(frame: &mut Frame, area: Rect) {
     let keybinds = vec![
-        ("Enter", "Select"),
         ("r", "Refresh"),
         ("c", "Cleanup"),
         ("x", "Repair"),

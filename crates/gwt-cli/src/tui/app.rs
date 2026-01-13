@@ -1175,10 +1175,10 @@ impl Model {
         let keybinds = match self.screen {
             Screen::BranchList => {
                 if self.branch_list.filter_mode {
-                    "[Esc] Exit filter | [Enter] Apply | Type to search"
+                    "[Esc] Exit filter | Type to search"
                 } else {
-                    // FR-004: Enter: Select, r: Refresh, c: Cleanup, x: Repair, l: Logs
-                    "[Enter] Select | [r] Refresh | [c] Cleanup | [x] Repair | [l] Logs"
+                    // FR-004: r: Refresh, c: Cleanup, x: Repair, l: Logs
+                    "[r] Refresh | [c] Cleanup | [x] Repair | [l] Logs"
                 }
             }
             Screen::WorktreeCreate => "[Enter] Next | [Esc] Back",
