@@ -2,7 +2,6 @@
 
 #![allow(dead_code)]
 
-use chrono::{DateTime, Local, TimeZone, Utc};
 use gwt_core::git::{Branch, DivergenceStatus};
 use gwt_core::worktree::Worktree;
 use ratatui::{prelude::*, widgets::*};
@@ -59,19 +58,6 @@ fn get_branch_name_type(name: &str) -> BranchNameType {
         BranchNameType::Release
     } else {
         BranchNameType::Other
-    }
-}
-
-/// Format timestamp as local datetime (FR-041)
-/// Returns format: "YYYY-MM-DD HH:mm"
-fn format_local_datetime(timestamp: i64) -> String {
-    let datetime = Utc.timestamp_opt(timestamp, 0);
-    match datetime {
-        chrono::LocalResult::Single(dt) => {
-            let local: DateTime<Local> = dt.into();
-            local.format("%Y-%m-%d %H:%M").to_string()
-        }
-        _ => "---".to_string(),
     }
 }
 
@@ -267,7 +253,6 @@ pub struct BranchListState {
     pub view_mode: ViewMode,
     pub selected_branches: HashSet<String>,
     pub stats: Statistics,
-    pub last_updated: Option<Instant>,
     pub is_loading: bool,
     pub loading_started: Option<Instant>,
     pub error: Option<String>,
@@ -299,7 +284,6 @@ impl BranchListState {
         };
         self.branches = branches;
         self.rebuild_filtered_cache();
-        self.last_updated = Some(Instant::now());
         self
     }
 
@@ -569,23 +553,6 @@ impl BranchListState {
         self.rebuild_filtered_cache();
     }
 
-    /// Get relative time string
-    pub fn format_relative_time(&self) -> String {
-        if let Some(updated) = self.last_updated {
-            let elapsed = updated.elapsed();
-            let secs = elapsed.as_secs();
-            if secs < 60 {
-                format!("{}s ago", secs)
-            } else if secs < 3600 {
-                format!("{}m ago", secs / 60)
-            } else {
-                format!("{}h ago", secs / 3600)
-            }
-        } else {
-            String::new()
-        }
-    }
-
     /// Set loading state
     pub fn set_loading(&mut self, loading: bool) {
         self.is_loading = loading;
@@ -620,7 +587,7 @@ impl BranchListState {
 }
 
 /// Render branch list screen
-/// Note: Header, Stats, Filter are rendered by app.rs view_boxed_header
+/// Note: Header, Filter, Mode are rendered by app.rs view_boxed_header
 /// This function only renders: Legend + BranchList + WorktreePath/Status
 pub fn render_branch_list(
     state: &BranchListState,
@@ -719,9 +686,9 @@ fn render_filter_line(state: &BranchListState, frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(line), area);
 }
 
-/// Render stats line
+/// Render mode line
 fn render_stats_line(state: &BranchListState, frame: &mut Frame, area: Rect) {
-    let mut spans = vec![
+    let spans = vec![
         Span::styled("Mode(tab): ", Style::default().fg(Color::DarkGray)),
         Span::styled(
             state.view_mode.label(),
@@ -729,52 +696,7 @@ fn render_stats_line(state: &BranchListState, frame: &mut Frame, area: Rect) {
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("  ", Style::default()),
-        Span::styled("Local: ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            state.stats.local_count.to_string(),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("  ", Style::default()),
-        Span::styled("Remote: ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            state.stats.remote_count.to_string(),
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("  ", Style::default()),
-        Span::styled("Worktrees: ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            state.stats.worktree_count.to_string(),
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("  ", Style::default()),
-        Span::styled("Changes: ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            state.stats.changes_count.to_string(),
-            Style::default()
-                .fg(Color::Magenta)
-                .add_modifier(Modifier::BOLD),
-        ),
     ];
-
-    let relative_time = state.format_relative_time();
-    if !relative_time.is_empty() {
-        spans.push(Span::styled("  ", Style::default()));
-        spans.push(Span::styled(
-            "Updated: ",
-            Style::default().fg(Color::DarkGray),
-        ));
-        spans.push(Span::styled(
-            relative_time,
-            Style::default().fg(Color::DarkGray),
-        ));
-    }
 
     let line = Line::from(spans);
     frame.render_widget(Paragraph::new(line), area);
@@ -894,7 +816,7 @@ fn render_branches(state: &BranchListState, frame: &mut Frame, area: Rect) {
 }
 
 /// Render a single branch row
-/// FR-070: Tool display format: ToolName@X.Y.Z | YYYY-MM-DD HH:mm (local time)
+/// FR-070: Tool display format: ToolName@X.Y.Z
 /// FR-031b: Show spinner for safety check pending branches
 fn render_branch_row(
     branch: &BranchItem,
@@ -933,23 +855,15 @@ fn render_branch_row(
     spans.push(Span::raw(display_name.to_string()));
 
     // Tool usage display (FR-070)
-    // format_tool_usage() already returns: "ToolName@X.Y.Z | YYYY-MM-DD HH:mm"
+    // format_tool_usage() already returns: "ToolName@X.Y.Z"
     if let Some(tool) = &branch.last_tool_usage {
-        // Extract agent id from tool string for coloring (format: AgentName@version | datetime)
+        // Extract agent id from tool string for coloring (format: AgentName@version)
         let agent_id = tool.split('@').next();
         let agent_color = get_agent_color(agent_id);
         spans.push(Span::raw(" "));
         spans.push(Span::styled(
             tool.to_string(),
             Style::default().fg(agent_color),
-        ));
-    } else if let Some(timestamp) = branch.last_commit_timestamp {
-        // No tool usage, but has timestamp (from git commit)
-        let formatted = format_local_datetime(timestamp);
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled(
-            formatted,
-            Style::default().fg(Color::DarkGray),
         ));
     }
 

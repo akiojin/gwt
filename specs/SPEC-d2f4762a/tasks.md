@@ -8,6 +8,15 @@
 - [x] **T9901** [P] [US0] `specs/SPEC-d2f4762a/spec.md` から `n` キー記述を削除し、ウィザード手順を整理
 - [x] **T9902** [US0] `crates/gwt-cli/src/tui/app.rs` などで BranchList の `n` ショートカットを除外し、フッター/ヘルプ表示を更新
 
+## 追加作業: ブランチ一覧の統計/最終更新表示削除 (2026-01-13)
+
+- [x] **T9903** [P] [共通] `specs/SPEC-d2f4762a/spec.md` から統計情報/最終更新時刻の表示要件とシナリオを削除し、Mode(tab)行/ツール表示の記述を更新
+- [x] **T9904** [P] [共通] `specs/SPEC-d2f4762a/plan.md` にMode(tab)行の表示方針（統計/Updated非表示）を追記
+- [x] **T9905** [P] [共通] `specs/SPEC-f47db390/spec.md` のツール表示フォーマットを`ToolName@X.Y.Z`形式へ更新
+- [x] **T9906** [Test] `crates/gwt-core/src/config/ts_session.rs` のツール表示フォーマットテストを更新（時刻表示の削除）
+- [x] **T9907** [実装] `crates/gwt-cli/src/tui/app.rs` と `crates/gwt-cli/src/tui/screens/branch_list.rs` から統計/Updated表示を削除
+- [x] **T9908** [実装] `crates/gwt-core/src/config/ts_session.rs` のツール表示フォーマットから時刻を削除し、関連コメントを更新
+
 ## フェーズ0: ブランチ一覧アイコンのASCII再整理 (優先度: P1)
 
 **ストーリー**: ブランチ一覧の選択/Worktree/安全アイコンをASCII表記へ整理し、アイコン間にスペースを入れてカーソル記号は表示しない。
@@ -125,8 +134,6 @@
 - [x] **T502** [US9] `src/cli/ui/__tests__/solid/components/QuickStartStep.test.tsx` にヘルプテキスト表示テストを追加
 
 ## 追加作業ToDo (2026-01-09)
-- [x] **T950** [Test] 最終アクティビティ/ツール表示の時刻がローカル時刻で表示されることを検証 (`src/cli/ui/utils/__tests__/branchFormatter.test.ts`, `src/cli/ui/__tests__/utils/branchFormatter.test.ts`)
-- [x] **T951** [実装] ブランチ一覧の時刻表示をローカル時刻へ切り替え (`src/cli/ui/utils/branchFormatter.ts`, `src/cli/ui/screens/solid/BranchListScreen.tsx`)
 - [x] **T503** [US9] `src/cli/ui/__tests__/solid/components/QuickStartStep.test.tsx` に「Resume with previous settings」選択時の動作テストを追加
 - [x] **T504** [US9] `src/cli/ui/__tests__/solid/components/QuickStartStep.test.tsx` に「Start new with previous settings」選択時の動作テストを追加
 - [x] **T505** [US9] `src/cli/ui/__tests__/solid/components/QuickStartStep.test.tsx` に「Choose different settings...」選択時の動作テストを追加

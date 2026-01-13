@@ -58,7 +58,7 @@ impl Session {
     }
 
     /// Format tool usage string for display (FR-070)
-    /// Returns format: "ToolName@X.Y.Z | YYYY-MM-DD HH:mm" (local time)
+    /// Returns format: "ToolName@X.Y.Z"
     pub fn format_tool_usage(&self) -> Option<String> {
         let label = self.agent_label.as_ref().or(self.agent.as_ref())?;
         let version = self.tool_version.as_deref().unwrap_or("latest");

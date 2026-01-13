@@ -1080,7 +1080,7 @@ impl Model {
                 Constraint::Length(1), // Working Directory
                 Constraint::Length(1), // Profile
                 Constraint::Length(1), // Filter
-                Constraint::Length(1), // Stats
+                Constraint::Length(1), // Mode
             ])
             .split(inner);
 
@@ -1135,10 +1135,8 @@ impl Model {
         }
         frame.render_widget(Paragraph::new(Line::from(filter_spans)), inner_chunks[2]);
 
-        // Line 4: Stats
-        let stats = &self.branch_list.stats;
-        let relative_time = self.branch_list.format_relative_time();
-        let mut stats_spans = vec![
+        // Line 4: Mode
+        let mode_spans = vec![
             Span::raw(" "),
             Span::styled("Mode(tab): ", Style::default().fg(Color::DarkGray)),
             Span::styled(
@@ -1147,51 +1145,8 @@ impl Model {
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  ", Style::default()),
-            Span::styled("Local: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                stats.local_count.to_string(),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  ", Style::default()),
-            Span::styled("Remote: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                stats.remote_count.to_string(),
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  ", Style::default()),
-            Span::styled("Worktrees: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                stats.worktree_count.to_string(),
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  ", Style::default()),
-            Span::styled("Changes: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                stats.changes_count.to_string(),
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
-            ),
         ];
-        if !relative_time.is_empty() {
-            stats_spans.push(Span::styled("  ", Style::default()));
-            stats_spans.push(Span::styled(
-                "Updated: ",
-                Style::default().fg(Color::DarkGray),
-            ));
-            stats_spans.push(Span::styled(
-                relative_time,
-                Style::default().fg(Color::DarkGray),
-            ));
-        }
-        frame.render_widget(Paragraph::new(Line::from(stats_spans)), inner_chunks[3]);
+        frame.render_widget(Paragraph::new(Line::from(mode_spans)), inner_chunks[3]);
     }
 
     fn view_header(&self, frame: &mut Frame, area: Rect) {
