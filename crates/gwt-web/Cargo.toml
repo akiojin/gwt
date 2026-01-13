@@ -6,9 +6,10 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Web server for Git Worktree Manager"
+publish = false  # Not ready for publishing (Phase 4 - future work)
 
 [dependencies]
-gwt-core = { path = "../gwt-core" }
+gwt-core = { path = "../gwt-core", version = "5.0.0" }
 thiserror.workspace = true
 tokio.workspace = true
 axum.workspace = true

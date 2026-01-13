@@ -6,6 +6,9 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Core library for Git Worktree Manager"
+readme = "../../README.md"
+keywords = ["git", "worktree", "cli", "productivity", "development"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 thiserror.workspace = true

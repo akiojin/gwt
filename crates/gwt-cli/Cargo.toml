@@ -5,14 +5,17 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "CLI for Git Worktree Manager"
+description = "CLI for Git Worktree Manager with AI coding agent integration"
+readme = "../../README.md"
+keywords = ["git", "worktree", "cli", "tui", "ai-coding"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "gwt"
 path = "src/main.rs"
 
 [dependencies]
-gwt-core = { path = "../gwt-core" }
+gwt-core = { path = "../gwt-core", version = "5.0.0" }
 thiserror.workspace = true
 tokio.workspace = true
 clap.workspace = true

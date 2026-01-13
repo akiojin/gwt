@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Web frontend for Git Worktree Manager (Leptos CSR)"
+publish = false  # Not ready for publishing (Phase 4 - future work)
 
 [lib]
 crate-type = ["cdylib", "rlib"]
