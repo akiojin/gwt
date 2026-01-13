@@ -1,7 +1,7 @@
 //! Axum web server
 
 use axum::{
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
     Router,
 };
 use std::net::SocketAddr;
@@ -69,6 +69,9 @@ fn build_router(state: Arc<AppState>, cors_enabled: bool) -> Router {
         .route("/branches/:name", delete(api::delete_branch))
         // Settings
         .route("/settings", get(api::get_settings))
+        .route("/settings", put(api::update_settings))
+        // Sessions
+        .route("/sessions", get(api::get_sessions))
         .with_state(state);
 
     let router = Router::new().nest("/api", api_routes);

@@ -6,7 +6,7 @@ use axum::{
     Json,
 };
 use gwt_core::{
-    config::Settings,
+    config::{load_ts_session, Settings},
     error::GwtError,
     git::Branch,
     worktree::{WorktreeManager, WorktreeStatus},
@@ -89,6 +89,34 @@ pub struct SettingsResponse {
     pub default_base_branch: String,
     pub worktree_root: String,
     pub protected_branches: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateSettingsRequest {
+    #[serde(default)]
+    pub default_base_branch: Option<String>,
+    #[serde(default)]
+    pub worktree_root: Option<String>,
+    #[serde(default)]
+    pub protected_branches: Option<Vec<String>>,
+}
+
+#[derive(Serialize)]
+pub struct SessionResponse {
+    pub branch: String,
+    pub tool_id: String,
+    pub tool_label: String,
+    pub model: Option<String>,
+    pub session_id: Option<String>,
+    pub timestamp: i64,
+}
+
+#[derive(Serialize)]
+pub struct SessionHistoryResponse {
+    pub last_branch: Option<String>,
+    pub last_tool: Option<String>,
+    pub last_session_id: Option<String>,
+    pub history: Vec<SessionResponse>,
 }
 
 fn map_err(e: GwtError) -> (StatusCode, Json<ErrorResponse>) {
@@ -241,6 +269,69 @@ pub async fn get_settings(
         worktree_root: settings.worktree_root,
         protected_branches: settings.protected_branches,
     }))
+}
+
+/// Update settings endpoint
+pub async fn update_settings(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UpdateSettingsRequest>,
+) -> Result<Json<SettingsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let mut settings = Settings::load(&state.repo_path).unwrap_or_default();
+
+    // Apply updates
+    if let Some(base) = req.default_base_branch {
+        settings.default_base_branch = base;
+    }
+    if let Some(root) = req.worktree_root {
+        settings.worktree_root = root;
+    }
+    if let Some(protected) = req.protected_branches {
+        settings.protected_branches = protected;
+    }
+
+    // Save settings
+    settings.save(&state.repo_path).map_err(map_err)?;
+
+    Ok(Json(SettingsResponse {
+        default_base_branch: settings.default_base_branch,
+        worktree_root: settings.worktree_root,
+        protected_branches: settings.protected_branches,
+    }))
+}
+
+/// Get session history endpoint
+pub async fn get_sessions(State(state): State<Arc<AppState>>) -> Json<SessionHistoryResponse> {
+    let session = load_ts_session(&state.repo_path);
+
+    match session {
+        Some(data) => {
+            let history: Vec<SessionResponse> = data
+                .history
+                .iter()
+                .map(|entry| SessionResponse {
+                    branch: entry.branch.clone(),
+                    tool_id: entry.tool_id.clone(),
+                    tool_label: entry.tool_label.clone(),
+                    model: entry.model.clone(),
+                    session_id: entry.session_id.clone(),
+                    timestamp: entry.timestamp,
+                })
+                .collect();
+
+            Json(SessionHistoryResponse {
+                last_branch: data.last_branch,
+                last_tool: data.last_used_tool,
+                last_session_id: data.last_session_id,
+                history,
+            })
+        }
+        None => Json(SessionHistoryResponse {
+            last_branch: None,
+            last_tool: None,
+            last_session_id: None,
+            history: vec![],
+        }),
+    }
 }
 
 #[cfg(test)]
