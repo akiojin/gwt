@@ -338,3 +338,24 @@
 - [x] **T824** [US4] `src/cli/ui/screens/solid/BranchListScreen.tsx` の安全時`o`表示を追加
 - [x] **T825** [US4] `src/cli/ui/App.solid.tsx` と `src/worktree.ts` に安全判定スピナーのブランチ単位更新を実装
 - [x] **T828** [US4] `src/cli/ui/screens/solid/BranchListScreen.tsx` の安全/Worktree明るい緑表示を更新
+
+## フェーズ11: ユーザーストーリー11 - 大量ブランチでも滑らかな操作 (優先度: P1)
+
+**ストーリー**: 1000件以上のブランチでも、表示・スクロール・入力が滑らかに行えるようにし、再計算はフィルター/モード変更時のみに限定する。
+
+**価値**: 大規模リポジトリでもUIが止まらず、日常運用のストレスを解消する。
+
+### 仕様更新
+
+- [x] **T1101** [P] [共通] `specs/SPEC-d2f4762a/spec.md` に大量ブランチ対応の要件とシナリオを追記
+- [x] **T1102** [P] [共通] `specs/SPEC-d2f4762a/plan.md` に大量ブランチ対応の方針を追記
+
+### テスト（TDD）
+
+- [x] **T1103** [US11] `crates/gwt-cli/src/tui/screens/branch_list.rs` にフィルター/モード変更時のみ再計算されることを確認するテストを追加
+- [x] **T1104** [US11] `crates/gwt-cli/src/tui/screens/branch_list.rs` に可視範囲描画が維持されることを確認するテストを追加
+
+### 実装
+
+- [x] **T1105** [US11] `crates/gwt-cli/src/tui/screens/branch_list.rs` にフィルター/モード変更時のみの再計算キャッシュを実装
+- [x] **T1106** [US11] `crates/gwt-cli/src/tui/screens/branch_list.rs` の描画経路で可視範囲のみ描画する処理を明示化し、ローディング表示の維持を実装

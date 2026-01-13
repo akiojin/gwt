@@ -16,11 +16,12 @@ pub fn App() -> impl IntoView {
     view! {
         <Router>
             <components::Header />
-            <main class="container mx-auto p-4">
+            <main class="container mx-auto px-4 py-8 md:py-12">
                 <Routes fallback=|| view! { <pages::NotFound /> }>
                     <Route path=path!("/") view=pages::WorktreeList />
                     <Route path=path!("/worktrees") view=pages::WorktreeList />
                     <Route path=path!("/branches") view=pages::BranchList />
+                    <Route path=path!("/terminal") view=pages::Terminal />
                     <Route path=path!("/settings") view=pages::Settings />
                 </Routes>
             </main>

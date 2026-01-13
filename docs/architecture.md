@@ -1,203 +1,99 @@
 # Architecture Documentation
 
-`@akiojin/gwt`のアーキテクチャ設計ドキュメント。
+`gwt`（Rust版）のアーキテクチャ設計ドキュメント。
 
 ## Overview
 
-gwtはGit worktreeを活用した対話型ブランチ管理CLIツールです。Claude CodeまたはCodex CLIと統合し、効率的な開発ワークフローを実現します。
+gwtはGit worktreeを活用した対話型ブランチ管理ツールです。Rustで単一バイナリ化され、CLI TUIとWeb UIの両方を提供します。Coding Agent（Claude Code/Codex CLI/Gemini CLI）との統合により、ブランチ単位の開発フローを高速化します。
 
 ## Architecture Diagram
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                      CLI Interface                      │
-│                     (src/index.ts)                      │
-└──────────────────┬──────────────────────────────────────┘
-                   │
-        ┌──────────┴──────────┬──────────────┬────────────┐
-        │                     │              │            │
-┌───────▼────────┐  ┌────────▼────────┐  ┌─▼──────┐  ┌──▼───────┐
-│  Git Module    │  │ Worktree Module │  │ GitHub │  │  Coding  │
-│  (src/git.ts)  │  │(src/worktree.ts)│  │ Module │  │Integration│
-└───────┬────────┘  └────────┬────────┘  └─┬──────┘  └──┬───────┘
-        │                    │              │            │
-┌───────▼────────┐  ┌────────▼────────┐  ┌─▼──────┐  ┌──▼───────┐
-│ Branch Mgmt    │  │  WT Creation    │  │PR Mgmt │  │ Claude   │
-│ Version Mgmt   │  │  WT Removal     │  │PR List │  │  Codex   │
-│ Change Mgmt    │  │  WT List        │  └────────┘  └──────────┘
-└────────────────┘  └─────────────────┘
-        │                    │
-        └──────────┬─────────┘
-                   │
-        ┌──────────▼──────────┐
-        │  Session Management │
-        │ (src/config/index.ts)│
-        └─────────────────────┘
-                   │
-        ┌──────────▼──────────┐
-        │    UI Components    │
-        │    (src/ui/)        │
-        │  - Table Display    │
-        │  - Formatting       │
-        └─────────────────────┘
+┌──────────────────────────────┐
+│         gwt-cli (TUI)         │
+│   CLI/TUI/Flow Orchestration  │
+└──────────────┬───────────────┘
+               │ uses
+┌──────────────▼───────────────┐
+│           gwt-core            │
+│ Git/Worktree/Config/Logging   │
+│ Agent/Session/Error/Lock      │
+└──────────────┬───────────────┘
+               │
+┌──────────────▼───────────────┐
+│           gwt-web             │
+│ Axum REST/WebSocket/PTY       │
+└──────────────┬───────────────┘
+               │ serves
+┌──────────────▼───────────────┐
+│        gwt-frontend           │
+│        Leptos CSR UI          │
+└──────────────────────────────┘
 ```
 
 ## Module Responsibilities
 
-### 1. CLI Interface (`src/index.ts`)
+### 1. gwt-cli（`crates/gwt-cli`）
 
 **責務:**
 
-- コマンドライン引数のパース
-- ユーザー入力の受付（inquirer）
-- 各モジュールのオーケストレーション
-- エラーハンドリングと終了処理
+- コマンドライン引数のパースと起動モード制御
+- RatatuiベースのTUI描画と入力処理
+- gwt-coreを利用したGit/Worktree操作のオーケストレーション
+- エラー表示とユーザー操作フローの管理
 
-**主要な関数:**
+**主な画面:**
 
-- `main()`: エントリーポイント
-- `handleSelection()`: ユーザー選択のルーティング
-- `handleBranchSelection()`: ブランチ選択フロー
-- `handleCreateNewBranch()`: 新規ブランチ作成フロー
-- `handleManageWorktrees()`: ワークツリー管理フロー
-- `handleCleanupMergedPRs()`: PRクリーンアップフロー
+- ブランチ一覧
+- Worktree作成ウィザード
+- セッション/ログ/設定画面
 
-**依存関係:**
-
-- `git.ts` - Git操作
-- `worktree.ts` - ワークツリー管理
-- `github.ts` - GitHub統合
-- `claude.ts` / `codex.ts` - Coding Agent 統合
-- `config/index.ts` - セッション管理
-
-### 2. Git Module (`src/git.ts`)
+### 2. gwt-core（`crates/gwt-core`）
 
 **責務:**
 
-- Gitコマンドの実行と抽象化
-- ブランチ管理（作成、削除、一覧取得）
-- バージョン管理（package.jsonの読み書き）
-- 変更管理（コミット、stash、破棄）
+- Git操作（gix + 外部gitフォールバック）
+- Worktree管理（作成・削除・修復・ロック）
+- 設定/セッション管理（TOML + 自動移行）
+- ログ管理（JSON Lines）
+- Coding Agent起動とセッション履歴
+- エラーコードとメッセージ定義
 
-**主要な関数:**
+**永続データ:**
 
-- `getAllBranches()`: 全ブランチ取得
-- `createBranch()`: ブランチ作成
-- `deleteBranch()`: ブランチ削除
-- `getCurrentVersion()`: 現在のバージョン取得
-- `calculateNewVersion()`: 新バージョン計算
-- `hasUncommittedChanges()`: 未コミット変更チェック
-- `commitChanges()`: 変更をコミット
+- `~/.gwt/.gwt.toml`
+- `~/.gwt/sessions/`
+- `~/.gwt/profiles.yaml`
+- `~/.gwt/logs/`
 
-**技術スタック:**
-
-- `execa` - Gitコマンド実行
-- `node:fs` - ファイルシステム操作
-
-### 3. Worktree Module (`src/worktree.ts`)
+### 3. gwt-web（`crates/gwt-web`）
 
 **責務:**
 
-- Gitワークツリーの作成と削除
-- ワークツリー一覧の取得
-- ワークツリーパスの生成
+- AxumベースのREST API
+- WebSocket/PTYによる端末ストリーム
+- WASM/静的アセットの配信
 
-**主要な関数:**
+**提供API:**
 
-- `worktreeExists()`: ワークツリー存在チェック
-- `createWorktree()`: ワークツリー作成
-- `removeWorktree()`: ワークツリー削除
-- `listAdditionalWorktrees()`: ワークツリー一覧
-- `generateWorktreePath()`: パス生成
+- Worktree/Branch一覧・作成・削除
+- 設定取得・更新
+- セッション履歴取得
 
-**技術スタック:**
-
-- `execa` - Git worktreeコマンド実行
-- `node:path` - パス操作
-
-### 4. GitHub Module (`src/github.ts`)
+### 4. gwt-frontend（`crates/gwt-frontend`）
 
 **責務:**
 
-- GitHub CLIとの統合
-- マージ済みPRの取得
-- PR情報の解析
+- Leptos CSRによるWeb UI
+- API呼び出しと画面状態の同期
+- xterm.jsによる端末表示
 
-**主要な関数:**
+**主な画面:**
 
-- `getMergedPullRequests()`: マージ済みPR取得
-- `isGitHubCLIAvailable()`: GitHub CLI可用性チェック
-- `checkGitHubAuth()`: 認証状態チェック
-
-**技術スタック:**
-
-- `execa` - `gh`コマンド実行
-
-### 5. Coding Agent Integration
-
-#### Claude Code (`src/claude.ts`)
-
-**責務:**
-
-- Claude Codeの起動と管理
-- 実行モードの設定
-
-**主要な関数:**
-
-- `launchClaudeCode()`: Claude Code起動
-- `isClaudeCodeAvailable()`: 可用性チェック
-
-#### Codex CLI (`src/codex.ts`)
-
-**責務:**
-
-- Codex CLIの起動と管理
-- 実行モードの設定
-
-**主要な関数:**
-
-- `launchCodexCLI()`: Codex CLI起動
-- `isCodexAvailable()`: 可用性チェック
-
-**技術スタック:**
-
-- `execa` - Coding Agent プロセス起動
-- `node:child_process` - プロセス管理
-
-### 6. Session Management (`src/config/index.ts`)
-
-**責務:**
-
-- セッション情報の永続化
-- セッション履歴の管理
-- 継続/再開機能のサポート
-
-**主要な関数:**
-
-- `saveSession()`: セッション保存
-- `loadSession()`: 最新セッション読み込み
-- `getAllSessions()`: 全セッション取得
-
-**データ保存:**
-
-- `~/.config/gwt/sessions.json`
-
-**技術スタック:**
-
-- `node:fs` - ファイル操作
-- `node:os` - ホームディレクトリ取得
-
-### 7. UI Components (`src/ui/`)
-
-**責務:**
-
-- ブランチテーブルの生成
-- フォーマット済み出力
-- ユーザーインタラクション
-
-**主要な関数:**
-
-- `createBranchTable()`: ブランチ選択テーブル生成
+- Worktree一覧
+- Branch一覧
+- Terminal
+- Settings
 - `formatDisplay()`: 出力フォーマット
 
 **技術スタック:**

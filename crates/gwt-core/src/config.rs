@@ -9,7 +9,7 @@ mod settings;
 mod ts_session;
 
 pub use migration::migrate_json_to_toml;
-pub use profile::Profile;
+pub use profile::{Profile, ProfilesConfig};
 pub use session::{get_session_for_branch, load_sessions_from_worktrees, Session};
 pub use settings::Settings;
 pub use ts_session::{

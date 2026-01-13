@@ -642,6 +642,15 @@ fn WorktreeList() -> impl IntoView {
 }
 ```
 
+### 4.3 WebSocket/PTY/端末連携
+
+- WebSocketはlocalhost限定で、接続時にPTYセッションを生成する。
+- 入力はPTYへ転送し、出力はWebSocketへストリーミングする。
+- 端末サイズ変更は専用メッセージで通知し、PTYサイズを更新する。
+- 切断時は子プロセスとPTYを確実に破棄し、セッションを残さない。
+- フロントエンドはxterm.jsで端末表示・入力・リサイズを扱う。
+- wasm-opt最適化はTrunk設定で `z` を適用する。
+
 ## Phase 5: 品質・配布
 
 ### 5.1 統合テスト (テンポラリリポジトリ)

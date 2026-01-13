@@ -8,7 +8,26 @@
 //! - E5xxx: Web API errors
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use thiserror::Error;
+
+const ERROR_MESSAGES_TOML: &str = include_str!("../../../messages/errors.toml");
+
+fn error_messages() -> &'static toml::Value {
+    static MESSAGES: OnceLock<toml::Value> = OnceLock::new();
+    MESSAGES.get_or_init(|| {
+        toml::from_str(ERROR_MESSAGES_TOML)
+            .unwrap_or_else(|_| toml::Value::Table(Default::default()))
+    })
+}
+
+macro_rules! error_code {
+    ($error:expr, { $($pat:pat => $code:expr,)+ }) => {
+        match $error {
+            $($pat => $code,)+
+        }
+    };
+}
 
 /// Result type alias using GwtError
 pub type Result<T> = std::result::Result<T, GwtError>;
@@ -149,7 +168,7 @@ pub enum GwtError {
 impl GwtError {
     /// Get the error code as a string (e.g., "E1001")
     pub fn code(&self) -> &'static str {
-        match self {
+        error_code!(self, {
             // E1xxx
             Self::RepositoryNotFound { .. } => "E1001",
             Self::NotAGitRepository { .. } => "E1002",
@@ -197,7 +216,22 @@ impl GwtError {
             // E9xxx
             Self::Io(_) => "E9001",
             Self::Internal(_) => "E9002",
+        })
+    }
+
+    /// Get embedded error message for this error code, if available
+    pub fn message(&self) -> Option<String> {
+        let code = self.code();
+        let messages = error_messages();
+        let table = messages.as_table()?;
+        for section in table.values() {
+            if let Some(section_table) = section.as_table() {
+                if let Some(value) = section_table.get(code).and_then(|v| v.as_str()) {
+                    return Some(value.to_string());
+                }
+            }
         }
+        None
     }
 
     /// Get the error category

@@ -54,7 +54,7 @@ impl CodexAgent {
     fn build_command(&self, prompt: &str, directory: &Path) -> Command {
         let mut cmd = Command::new("codex");
         cmd.arg("--quiet")
-            .arg("--approval-mode=full-auto")
+            .args(codex_default_args(None))
             .arg(prompt)
             .current_dir(directory)
             .stdin(Stdio::null())
@@ -62,6 +62,35 @@ impl CodexAgent {
             .stderr(Stdio::piped());
         cmd
     }
+}
+
+fn codex_default_args(model_override: Option<&str>) -> Vec<String> {
+    let mut args = Vec::new();
+    args.push("--search".to_string());
+    if let Some(model) = model_override {
+        if !model.is_empty() {
+            args.push(format!("--model=\"{}\"", model));
+        } else {
+            args.push("--model=\"gpt-5-codex\"".to_string());
+        }
+    } else {
+        args.push("--model=\"gpt-5-codex\"".to_string());
+    }
+    args.push("--sandbox".to_string());
+    args.push("workspace-write".to_string());
+    args.push("-c".to_string());
+    args.push("model_reasoning_effort=\"high\"".to_string());
+    args.push("-c".to_string());
+    args.push("model_reasoning_summaries=\"detailed\"".to_string());
+    args.push("-c".to_string());
+    args.push("sandbox_workspace_write.network_access=true".to_string());
+    args.push("-c".to_string());
+    args.push("shell_environment_policy.inherit=all".to_string());
+    args.push("-c".to_string());
+    args.push("shell_environment_policy.ignore_default_excludes=true".to_string());
+    args.push("-c".to_string());
+    args.push("shell_environment_policy.experimental_use_profile=true".to_string());
+    args
 }
 
 #[async_trait]

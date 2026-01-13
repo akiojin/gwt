@@ -4,11 +4,45 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>gwt - Git Worktree Manager</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=Work+Sans:wght@400;500;600&display=swap" />
     <!-- Tailwind CSS CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
+    <!-- xterm.js -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm/css/xterm.css" />
+    <script src="https://cdn.jsdelivr.net/npm/xterm/lib/xterm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit/lib/xterm-addon-fit.js"></script>
+    <style>
+        :root {
+            --ink: #0f172a;
+            --muted: #5b6470;
+            --accent: #e05d3c;
+            --accent-2: #1f7a8c;
+            --panel: #ffffff;
+            --panel-border: rgba(15, 23, 42, 0.08);
+        }
+        body {
+            font-family: "Work Sans", sans-serif;
+            color: var(--ink);
+            background:
+                radial-gradient(1200px 600px at 10% -10%, rgba(224, 93, 60, 0.18), transparent 60%),
+                radial-gradient(900px 500px at 90% 0%, rgba(31, 122, 140, 0.18), transparent 60%),
+                #f5f2ec;
+        }
+        .brand-title {
+            font-family: "Space Grotesk", sans-serif;
+            letter-spacing: 0.02em;
+        }
+        .panel {
+            background: var(--panel);
+            border: 1px solid var(--panel-border);
+            box-shadow: 0 20px 40px rgba(15, 23, 42, 0.08);
+        }
+    </style>
     <link data-trunk rel="rust" data-wasm-opt="z" />
 </head>
-<body class="min-h-screen bg-gray-100">
+<body class="min-h-screen">
     <!-- App will be mounted here -->
 </body>
 </html>

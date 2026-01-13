@@ -68,12 +68,14 @@ pub fn init_logger(config: &LogConfig) -> Result<()> {
         None
     };
 
-    // Set up filter
-    let filter = if config.debug {
-        EnvFilter::new("gwt=debug,info")
-    } else {
-        EnvFilter::new("gwt=info,warn")
-    };
+    // Set up filter (RUST_LOG takes precedence when present)
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        if config.debug {
+            EnvFilter::new("gwt=debug,info")
+        } else {
+            EnvFilter::new("gwt=info,warn")
+        }
+    });
 
     // Initialize subscriber
     tracing_subscriber::registry()

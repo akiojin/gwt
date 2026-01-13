@@ -101,7 +101,7 @@ pub struct UpdateSettingsRequest {
     pub protected_branches: Option<Vec<String>>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct SessionResponse {
     pub branch: String,
     pub tool_id: String,
@@ -111,7 +111,7 @@ pub struct SessionResponse {
     pub timestamp: i64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct SessionHistoryResponse {
     pub last_branch: Option<String>,
     pub last_tool: Option<String>,
