@@ -603,6 +603,11 @@ impl Model {
             }
             Message::WizardConfirm => {
                 if self.wizard.visible {
+                    // FR-074: Block first Enter in VersionSelect to prevent auto-advance
+                    if self.wizard.block_next_enter {
+                        self.wizard.block_next_enter = false;
+                        return;
+                    }
                     if self.wizard.is_complete() {
                         // Start worktree creation with wizard settings
                         let branch_name = if self.wizard.is_new_branch {

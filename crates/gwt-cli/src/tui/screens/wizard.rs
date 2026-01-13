@@ -588,6 +588,8 @@ pub struct WizardState {
     pub quick_start_index: usize,
     /// Whether Quick Start should be shown (has previous history)
     pub has_quick_start: bool,
+    /// FR-074: Block first Enter in VersionSelect to prevent auto-advance
+    pub block_next_enter: bool,
 }
 
 impl WizardState {
@@ -818,12 +820,16 @@ impl WizardState {
                 } else {
                     // Fetch versions when entering VersionSelect (FR-063)
                     self.fetch_versions_for_agent();
+                    // FR-074: Block first Enter to prevent auto-advance
+                    self.block_next_enter = true;
                     WizardStep::VersionSelect
                 }
             }
             WizardStep::ReasoningLevel => {
                 // Fetch versions when entering VersionSelect (FR-063)
                 self.fetch_versions_for_agent();
+                // FR-074: Block first Enter to prevent auto-advance
+                self.block_next_enter = true;
                 WizardStep::VersionSelect
             }
             WizardStep::VersionSelect => WizardStep::ExecutionMode,
