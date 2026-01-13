@@ -72,6 +72,8 @@ fn build_router(state: Arc<AppState>, cors_enabled: bool) -> Router {
         .route("/settings", put(api::update_settings))
         // Sessions
         .route("/sessions", get(api::get_sessions))
+        // WebSocket: placeholder - requires axum "ws" feature
+        // .route("/ws/terminal", get(websocket::ws_handler))
         .with_state(state);
 
     let router = Router::new().nest("/api", api_routes);
