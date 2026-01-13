@@ -3,7 +3,7 @@
 #![allow(dead_code)] // API functions for frontend use
 
 use gloo_net::http::Request;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Worktree response from API
 #[derive(Debug, Clone, Deserialize)]
@@ -74,4 +74,43 @@ pub async fn fetch_settings() -> Result<Settings, gloo_net::Error> {
 /// Fetch session history from the API
 pub async fn fetch_sessions() -> Result<SessionHistory, gloo_net::Error> {
     Request::get("/api/sessions").send().await?.json().await
+}
+
+#[derive(Debug, Serialize)]
+pub struct CreateWorktreeRequest {
+    pub branch: String,
+    pub new_branch: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_branch: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CreateBranchRequest {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+}
+
+pub async fn create_worktree(req: CreateWorktreeRequest) -> Result<(), gloo_net::Error> {
+    Request::post("/api/worktrees").json(&req)?.send().await?;
+    Ok(())
+}
+
+pub async fn delete_worktree(branch: &str) -> Result<(), gloo_net::Error> {
+    Request::delete(&format!("/api/worktrees/{}", branch))
+        .send()
+        .await?;
+    Ok(())
+}
+
+pub async fn create_branch(req: CreateBranchRequest) -> Result<(), gloo_net::Error> {
+    Request::post("/api/branches").json(&req)?.send().await?;
+    Ok(())
+}
+
+pub async fn delete_branch(name: &str) -> Result<(), gloo_net::Error> {
+    Request::delete(&format!("/api/branches/{}", name))
+        .send()
+        .await?;
+    Ok(())
 }

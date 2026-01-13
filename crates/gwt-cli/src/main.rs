@@ -55,6 +55,9 @@ fn run() -> Result<(), GwtError> {
         Some(cmd) => handle_command(cmd, &repo_root, &settings),
         None => {
             // Interactive TUI mode
+            if let Ok(manager) = WorktreeManager::new(&repo_root) {
+                let _ = manager.auto_cleanup_orphans();
+            }
             match tui::run()? {
                 Some(launch_config) => launch_coding_agent(launch_config),
                 None => Ok(()),
@@ -503,14 +506,23 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<(), GwtError> {
     }
 
     // Spawn the agent process (FR-043: allows periodic timestamp updates)
-    let mut child = Command::new(&executable)
-        .args(&base_args)
-        .current_dir(&config.worktree_path)
-        .spawn()
-        .map_err(|e| GwtError::AgentLaunchFailed {
-            name: cmd_name.to_string(),
-            reason: format!("Failed to execute '{}': {}", executable, e),
-        })?;
+    let mut command = Command::new(&executable);
+    command.args(&base_args).current_dir(&config.worktree_path);
+    for (key, value) in &config.env {
+        command.env(key, value);
+    }
+    if config.skip_permissions
+        && is_root_user()
+        && !env_has_key(&config.env, "IS_SANDBOX")
+        && config.agent == CodingAgent::ClaudeCode
+    {
+        command.env("IS_SANDBOX", "1");
+    }
+
+    let mut child = command.spawn().map_err(|e| GwtError::AgentLaunchFailed {
+        name: cmd_name.to_string(),
+        reason: format!("Failed to execute '{}': {}", executable, e),
+    })?;
 
     // FR-043: Start background thread to update timestamp every 30 seconds
     let running = Arc::new(AtomicBool::new(true));
@@ -570,6 +582,21 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<(), GwtError> {
     Ok(())
 }
 
+fn is_root_user() -> bool {
+    #[cfg(unix)]
+    {
+        unsafe { libc::geteuid() == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+fn env_has_key(env: &[(String, String)], key: &str) -> bool {
+    env.iter().any(|(k, _)| k == key)
+}
+
 /// Get bunx command and base args for npm package execution
 fn get_bunx_command(npm_package: &str, version: &str) -> (String, Vec<String>) {
     // Try bunx first, then npx as fallback
@@ -626,18 +653,12 @@ fn build_agent_args(config: &AgentLaunchConfig) -> Vec<String> {
                 ExecutionMode::Normal => {}
             }
 
-            // Model selection (Codex uses -m or --model)
-            if let Some(model) = &config.model {
-                if !model.is_empty() {
-                    args.push("-m".to_string());
-                    args.push(model.clone());
-                }
+            // Skip permissions (Codex uses --yolo)
+            if config.skip_permissions {
+                args.push("--yolo".to_string());
             }
 
-            // Skip permissions (Codex uses --full-auto for YOLO mode)
-            if config.skip_permissions {
-                args.push("--full-auto".to_string());
-            }
+            args.extend(codex_default_args(config.model.as_deref()));
         }
         CodingAgent::GeminiCli => {
             // Model selection (Gemini uses -m or --model)
@@ -673,5 +694,34 @@ fn build_agent_args(config: &AgentLaunchConfig) -> Vec<String> {
         }
     }
 
+    args
+}
+
+fn codex_default_args(model_override: Option<&str>) -> Vec<String> {
+    let mut args = Vec::new();
+    args.push("--search".to_string());
+    if let Some(model) = model_override {
+        if !model.is_empty() {
+            args.push(format!("--model=\"{}\"", model));
+        } else {
+            args.push("--model=\"gpt-5-codex\"".to_string());
+        }
+    } else {
+        args.push("--model=\"gpt-5-codex\"".to_string());
+    }
+    args.push("--sandbox".to_string());
+    args.push("workspace-write".to_string());
+    args.push("-c".to_string());
+    args.push("model_reasoning_effort=\"high\"".to_string());
+    args.push("-c".to_string());
+    args.push("model_reasoning_summaries=\"detailed\"".to_string());
+    args.push("-c".to_string());
+    args.push("sandbox_workspace_write.network_access=true".to_string());
+    args.push("-c".to_string());
+    args.push("shell_environment_policy.inherit=all".to_string());
+    args.push("-c".to_string());
+    args.push("shell_environment_policy.ignore_default_excludes=true".to_string());
+    args.push("-c".to_string());
+    args.push("shell_environment_policy.experimental_use_profile=true".to_string());
     args
 }

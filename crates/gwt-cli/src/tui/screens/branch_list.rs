@@ -259,6 +259,7 @@ const SPINNER_FRAMES: &[char] = &['|', '/', '-', '\\'];
 #[derive(Debug, Default)]
 pub struct BranchListState {
     pub branches: Vec<BranchItem>,
+    pub filtered_indices: Vec<usize>,
     pub selected: usize,
     pub offset: usize,
     pub filter: String,
@@ -274,6 +275,7 @@ pub struct BranchListState {
     pub working_directory: Option<String>,
     pub active_profile: Option<String>,
     pub spinner_frame: usize,
+    pub filter_cache_version: u64,
 }
 
 impl BranchListState {
@@ -296,8 +298,125 @@ impl BranchListState {
             changes_count: branches.iter().filter(|b| b.has_changes).count(),
         };
         self.branches = branches;
+        self.rebuild_filtered_cache();
         self.last_updated = Some(Instant::now());
         self
+    }
+
+    fn rebuild_filtered_cache(&mut self) {
+        let mut result: Vec<usize> = self.branches.iter().enumerate().map(|(i, _)| i).collect();
+
+        result.retain(|&index| {
+            let branch = &self.branches[index];
+            match self.view_mode {
+                ViewMode::All => true,
+                ViewMode::Local => branch.branch_type == BranchType::Local,
+                ViewMode::Remote => {
+                    branch.branch_type == BranchType::Remote || branch.has_remote_counterpart
+                }
+            }
+        });
+
+        if !self.filter.is_empty() {
+            let filter_lower = self.filter.to_lowercase();
+            result.retain(|&index| {
+                let branch = &self.branches[index];
+                if branch.name.to_lowercase().contains(&filter_lower) {
+                    return true;
+                }
+                if let Some(ref pr_title) = branch.pr_title {
+                    return pr_title.to_lowercase().contains(&filter_lower);
+                }
+                false
+            });
+        }
+
+        let has_main = result
+            .iter()
+            .any(|&index| get_branch_name_type(&self.branches[index].name) == BranchNameType::Main);
+
+        result.sort_by(|&a_index, &b_index| {
+            let a = &self.branches[a_index];
+            let b = &self.branches[b_index];
+
+            if a.is_current && !b.is_current {
+                return std::cmp::Ordering::Less;
+            }
+            if !a.is_current && b.is_current {
+                return std::cmp::Ordering::Greater;
+            }
+
+            let a_type = get_branch_name_type(&a.name);
+            let b_type = get_branch_name_type(&b.name);
+            if a_type == BranchNameType::Main && b_type != BranchNameType::Main {
+                return std::cmp::Ordering::Less;
+            }
+            if a_type != BranchNameType::Main && b_type == BranchNameType::Main {
+                return std::cmp::Ordering::Greater;
+            }
+
+            if has_main {
+                if a_type == BranchNameType::Develop && b_type != BranchNameType::Develop {
+                    return std::cmp::Ordering::Less;
+                }
+                if a_type != BranchNameType::Develop && b_type == BranchNameType::Develop {
+                    return std::cmp::Ordering::Greater;
+                }
+            }
+
+            if a.has_worktree && !b.has_worktree {
+                return std::cmp::Ordering::Less;
+            }
+            if !a.has_worktree && b.has_worktree {
+                return std::cmp::Ordering::Greater;
+            }
+
+            if let (Some(a_time), Some(b_time)) = (a.last_commit_timestamp, b.last_commit_timestamp)
+            {
+                if a_time != b_time {
+                    return b_time.cmp(&a_time);
+                }
+            } else if a.last_commit_timestamp.is_some() {
+                return std::cmp::Ordering::Less;
+            } else if b.last_commit_timestamp.is_some() {
+                return std::cmp::Ordering::Greater;
+            }
+
+            if a.branch_type == BranchType::Local && b.branch_type == BranchType::Remote {
+                return std::cmp::Ordering::Less;
+            }
+            if a.branch_type == BranchType::Remote && b.branch_type == BranchType::Local {
+                return std::cmp::Ordering::Greater;
+            }
+
+            a.name.to_lowercase().cmp(&b.name.to_lowercase())
+        });
+
+        self.filtered_indices = result;
+        self.filter_cache_version = self.filter_cache_version.wrapping_add(1);
+        if !self.filtered_indices.is_empty() {
+            self.selected = self.selected.min(self.filtered_indices.len() - 1);
+        } else {
+            self.selected = 0;
+            self.offset = 0;
+        }
+        self.ensure_visible();
+    }
+
+    pub fn filtered_len(&self) -> usize {
+        self.filtered_indices.len()
+    }
+
+    pub fn filtered_branch_at(&self, index: usize) -> Option<&BranchItem> {
+        self.filtered_indices
+            .get(index)
+            .and_then(|&idx| self.branches.get(idx))
+    }
+
+    pub fn visible_filtered_indices(&self, visible_height: usize) -> &[usize] {
+        let start = self.offset.min(self.filtered_indices.len());
+        let end = (start + visible_height).min(self.filtered_indices.len());
+        &self.filtered_indices[start..end]
     }
 
     /// Get filtered branches based on view mode and filter
@@ -310,107 +429,10 @@ impl BranchListState {
     /// 6. Local branches (over remote)
     /// 7. Alphabetical order
     pub fn filtered_branches(&self) -> Vec<&BranchItem> {
-        let mut result: Vec<&BranchItem> = self.branches.iter().collect();
-
-        // Apply view mode filter
-        result = match self.view_mode {
-            ViewMode::All => result,
-            ViewMode::Local => result
-                .into_iter()
-                .filter(|b| b.branch_type == BranchType::Local)
-                .collect(),
-            ViewMode::Remote => result
-                .into_iter()
-                .filter(|b| b.branch_type == BranchType::Remote || b.has_remote_counterpart)
-                .collect(),
-        };
-
-        // Apply text filter (FR-015: branch name, FR-016: PR title)
-        if !self.filter.is_empty() {
-            let filter_lower = self.filter.to_lowercase();
-            result.retain(|b| {
-                // FR-015: Match branch name (case-insensitive)
-                if b.name.to_lowercase().contains(&filter_lower) {
-                    return true;
-                }
-                // FR-016: Match PR title if available (case-insensitive)
-                if let Some(ref pr_title) = b.pr_title {
-                    if pr_title.to_lowercase().contains(&filter_lower) {
-                        return true;
-                    }
-                }
-                false
-            });
-        }
-
-        // Check if main branch exists for develop priority
-        let has_main = result
+        self.filtered_indices
             .iter()
-            .any(|b| get_branch_name_type(&b.name) == BranchNameType::Main);
-
-        // Sort according to 7-level priority rules
-        result.sort_by(|a, b| {
-            // 1. Current branch first
-            if a.is_current && !b.is_current {
-                return std::cmp::Ordering::Less;
-            }
-            if !a.is_current && b.is_current {
-                return std::cmp::Ordering::Greater;
-            }
-
-            // 2. main branch second
-            let a_type = get_branch_name_type(&a.name);
-            let b_type = get_branch_name_type(&b.name);
-            if a_type == BranchNameType::Main && b_type != BranchNameType::Main {
-                return std::cmp::Ordering::Less;
-            }
-            if a_type != BranchNameType::Main && b_type == BranchNameType::Main {
-                return std::cmp::Ordering::Greater;
-            }
-
-            // 3. develop branch third (only if main exists)
-            if has_main {
-                if a_type == BranchNameType::Develop && b_type != BranchNameType::Develop {
-                    return std::cmp::Ordering::Less;
-                }
-                if a_type != BranchNameType::Develop && b_type == BranchNameType::Develop {
-                    return std::cmp::Ordering::Greater;
-                }
-            }
-
-            // 4. Branches with worktree prioritized
-            if a.has_worktree && !b.has_worktree {
-                return std::cmp::Ordering::Less;
-            }
-            if !a.has_worktree && b.has_worktree {
-                return std::cmp::Ordering::Greater;
-            }
-
-            // 5. Latest activity timestamp (descending - newest first)
-            match (a.last_commit_timestamp, b.last_commit_timestamp) {
-                (Some(a_ts), Some(b_ts)) => {
-                    if b_ts != a_ts {
-                        return b_ts.cmp(&a_ts); // descending
-                    }
-                }
-                (Some(_), None) => return std::cmp::Ordering::Less,
-                (None, Some(_)) => return std::cmp::Ordering::Greater,
-                (None, None) => {}
-            }
-
-            // 6. Local branches over remote
-            if a.branch_type == BranchType::Local && b.branch_type == BranchType::Remote {
-                return std::cmp::Ordering::Less;
-            }
-            if a.branch_type == BranchType::Remote && b.branch_type == BranchType::Local {
-                return std::cmp::Ordering::Greater;
-            }
-
-            // 7. Alphabetical order
-            a.name.to_lowercase().cmp(&b.name.to_lowercase())
-        });
-
-        result
+            .filter_map(|&index| self.branches.get(index))
+            .collect()
     }
 
     /// Cycle view mode
@@ -418,6 +440,14 @@ impl BranchListState {
         self.view_mode = self.view_mode.cycle();
         self.selected = 0;
         self.offset = 0;
+        self.rebuild_filtered_cache();
+    }
+
+    pub fn set_view_mode(&mut self, view_mode: ViewMode) {
+        self.view_mode = view_mode;
+        self.selected = 0;
+        self.offset = 0;
+        self.rebuild_filtered_cache();
     }
 
     /// Toggle filter mode
@@ -440,6 +470,7 @@ impl BranchListState {
         self.filter.clear();
         self.selected = 0;
         self.offset = 0;
+        self.rebuild_filtered_cache();
     }
 
     /// Add char to filter
@@ -447,11 +478,13 @@ impl BranchListState {
         self.filter.push(c);
         self.selected = 0;
         self.offset = 0;
+        self.rebuild_filtered_cache();
     }
 
     /// Remove char from filter
     pub fn filter_pop(&mut self) {
         self.filter.pop();
+        self.rebuild_filtered_cache();
     }
 
     /// Toggle selection for current branch
@@ -468,8 +501,7 @@ impl BranchListState {
 
     /// Move selection up
     pub fn select_prev(&mut self) {
-        let filtered = self.filtered_branches();
-        if !filtered.is_empty() && self.selected > 0 {
+        if self.filtered_len() > 0 && self.selected > 0 {
             self.selected -= 1;
             self.ensure_visible();
         }
@@ -477,8 +509,8 @@ impl BranchListState {
 
     /// Move selection down
     pub fn select_next(&mut self) {
-        let filtered = self.filtered_branches();
-        if !filtered.is_empty() && self.selected < filtered.len() - 1 {
+        let filtered_len = self.filtered_len();
+        if filtered_len > 0 && self.selected < filtered_len - 1 {
             self.selected += 1;
             self.ensure_visible();
         }
@@ -492,9 +524,9 @@ impl BranchListState {
 
     /// Page down
     pub fn page_down(&mut self, page_size: usize) {
-        let filtered = self.filtered_branches();
-        if !filtered.is_empty() {
-            self.selected = (self.selected + page_size).min(filtered.len() - 1);
+        let filtered_len = self.filtered_len();
+        if filtered_len > 0 {
+            self.selected = (self.selected + page_size).min(filtered_len - 1);
             self.ensure_visible();
         }
     }
@@ -507,9 +539,9 @@ impl BranchListState {
 
     /// Go to end
     pub fn go_end(&mut self) {
-        let filtered = self.filtered_branches();
-        if !filtered.is_empty() {
-            self.selected = filtered.len() - 1;
+        let filtered_len = self.filtered_len();
+        if filtered_len > 0 {
+            self.selected = filtered_len - 1;
         }
         self.ensure_visible();
     }
@@ -526,8 +558,7 @@ impl BranchListState {
 
     /// Get currently selected branch
     pub fn selected_branch(&self) -> Option<&BranchItem> {
-        let filtered = self.filtered_branches();
-        filtered.get(self.selected).copied()
+        self.filtered_branch_at(self.selected)
     }
 
     /// Update filter and reset selection
@@ -535,6 +566,7 @@ impl BranchListState {
         self.filter = filter;
         self.selected = 0;
         self.offset = 0;
+        self.rebuild_filtered_cache();
     }
 
     /// Get relative time string
@@ -647,7 +679,7 @@ fn render_header(state: &BranchListState, frame: &mut Frame, area: Rect) {
 
 /// Render filter line
 fn render_filter_line(state: &BranchListState, frame: &mut Frame, area: Rect) {
-    let filtered = state.filtered_branches();
+    let filtered_len = state.filtered_len();
     let total = state.branches.len();
 
     let mut spans = vec![Span::styled(
@@ -678,7 +710,7 @@ fn render_filter_line(state: &BranchListState, frame: &mut Frame, area: Rect) {
 
     if !state.filter.is_empty() {
         spans.push(Span::styled(
-            format!(" (Showing {} of {})", filtered.len(), total),
+            format!(" (Showing {} of {})", filtered_len, total),
             Style::default().fg(Color::DarkGray),
         ));
     }
@@ -789,10 +821,10 @@ fn render_legend_line(frame: &mut Frame, area: Rect) {
 
 /// Render branches list
 fn render_branches(state: &BranchListState, frame: &mut Frame, area: Rect) {
-    let filtered = state.filtered_branches();
+    let filtered_len = state.filtered_len();
 
     // Show loading spinner when loading and branches are empty
-    if filtered.is_empty() {
+    if filtered_len == 0 {
         if state.should_show_spinner(300) {
             // Show animated spinner after 300ms delay
             let spinner = state.spinner_char();
@@ -824,30 +856,39 @@ fn render_branches(state: &BranchListState, frame: &mut Frame, area: Rect) {
     let visible_height = area.height as usize;
     // FR-031b: Pass spinner_frame for safety check pending indicator
     let spinner_frame = state.spinner_frame;
-    let items: Vec<ListItem> = filtered
+    let mut items: Vec<ListItem> = state
+        .visible_filtered_indices(visible_height)
         .iter()
         .enumerate()
-        .skip(state.offset)
-        .take(visible_height)
-        .map(|(i, branch)| {
+        .map(|(i, index)| {
+            let branch = &state.branches[*index];
             render_branch_row(
                 branch,
-                i == state.selected,
+                state.offset + i == state.selected,
                 &state.selected_branches,
                 spinner_frame,
             )
         })
         .collect();
 
+    if state.is_loading && items.len() < visible_height {
+        let spinner = state.spinner_char();
+        let text = format!("{} Loading more...", spinner);
+        items.push(ListItem::new(Line::from(Span::styled(
+            text,
+            Style::default().fg(Color::DarkGray),
+        ))));
+    }
+
     let list = List::new(items);
     frame.render_widget(list, area);
 
     // Scrollbar
-    if filtered.len() > visible_height {
+    if filtered_len > visible_height {
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("^"))
             .end_symbol(Some("v"));
-        let mut scrollbar_state = ScrollbarState::new(filtered.len()).position(state.selected);
+        let mut scrollbar_state = ScrollbarState::new(filtered_len).position(state.selected);
         frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
     }
 }
@@ -1112,11 +1153,138 @@ mod tests {
 
         assert_eq!(state.filtered_branches().len(), 2);
 
-        state.view_mode = ViewMode::Local;
+        state.set_view_mode(ViewMode::Local);
         assert_eq!(state.filtered_branches().len(), 1);
         assert_eq!(state.filtered_branches()[0].name, "main");
 
-        state.view_mode = ViewMode::Remote;
+        state.set_view_mode(ViewMode::Remote);
         assert_eq!(state.filtered_branches().len(), 2); // main has remote counterpart
+    }
+
+    #[test]
+    fn test_filter_cache_rebuilds_only_on_filter_or_mode_change() {
+        let branches = vec![
+            BranchItem {
+                name: "main".to_string(),
+                branch_type: BranchType::Local,
+                is_current: true,
+                has_worktree: true,
+                worktree_path: None,
+                worktree_status: WorktreeStatus::Active,
+                has_changes: false,
+                has_unpushed: false,
+                divergence: DivergenceStatus::UpToDate,
+                has_remote_counterpart: true,
+                remote_name: None,
+                safe_to_cleanup: Some(true),
+                is_unmerged: false,
+                last_commit_timestamp: None,
+                last_tool_usage: None,
+                is_selected: false,
+                pr_title: None,
+            },
+            BranchItem {
+                name: "feature/one".to_string(),
+                branch_type: BranchType::Local,
+                is_current: false,
+                has_worktree: false,
+                worktree_path: None,
+                worktree_status: WorktreeStatus::None,
+                has_changes: false,
+                has_unpushed: false,
+                divergence: DivergenceStatus::UpToDate,
+                has_remote_counterpart: false,
+                remote_name: None,
+                safe_to_cleanup: Some(true),
+                is_unmerged: false,
+                last_commit_timestamp: None,
+                last_tool_usage: None,
+                is_selected: false,
+                pr_title: None,
+            },
+        ];
+
+        let mut state = BranchListState::new().with_branches(branches);
+        let initial_version = state.filter_cache_version;
+
+        state.select_next();
+        assert_eq!(state.filter_cache_version, initial_version);
+
+        state.set_filter("main".to_string());
+        assert!(state.filter_cache_version > initial_version);
+
+        let after_filter = state.filter_cache_version;
+        state.cycle_view_mode();
+        assert!(state.filter_cache_version > after_filter);
+    }
+
+    #[test]
+    fn test_visible_filtered_indices_respects_offset_and_height() {
+        let branches = vec![
+            BranchItem {
+                name: "main".to_string(),
+                branch_type: BranchType::Local,
+                is_current: true,
+                has_worktree: true,
+                worktree_path: None,
+                worktree_status: WorktreeStatus::Active,
+                has_changes: false,
+                has_unpushed: false,
+                divergence: DivergenceStatus::UpToDate,
+                has_remote_counterpart: true,
+                remote_name: None,
+                safe_to_cleanup: Some(true),
+                is_unmerged: false,
+                last_commit_timestamp: None,
+                last_tool_usage: None,
+                is_selected: false,
+                pr_title: None,
+            },
+            BranchItem {
+                name: "feature/one".to_string(),
+                branch_type: BranchType::Local,
+                is_current: false,
+                has_worktree: false,
+                worktree_path: None,
+                worktree_status: WorktreeStatus::None,
+                has_changes: false,
+                has_unpushed: false,
+                divergence: DivergenceStatus::UpToDate,
+                has_remote_counterpart: false,
+                remote_name: None,
+                safe_to_cleanup: Some(true),
+                is_unmerged: false,
+                last_commit_timestamp: None,
+                last_tool_usage: None,
+                is_selected: false,
+                pr_title: None,
+            },
+            BranchItem {
+                name: "feature/two".to_string(),
+                branch_type: BranchType::Local,
+                is_current: false,
+                has_worktree: false,
+                worktree_path: None,
+                worktree_status: WorktreeStatus::None,
+                has_changes: false,
+                has_unpushed: false,
+                divergence: DivergenceStatus::UpToDate,
+                has_remote_counterpart: false,
+                remote_name: None,
+                safe_to_cleanup: Some(true),
+                is_unmerged: false,
+                last_commit_timestamp: None,
+                last_tool_usage: None,
+                is_selected: false,
+                pr_title: None,
+            },
+        ];
+
+        let mut state = BranchListState::new().with_branches(branches);
+        state.offset = 1;
+        let visible = state.visible_filtered_indices(2);
+        assert_eq!(visible.len(), 2);
+        assert_eq!(state.branches[visible[0]].name, "feature/one");
+        assert_eq!(state.branches[visible[1]].name, "feature/two");
     }
 }

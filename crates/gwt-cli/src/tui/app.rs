@@ -8,6 +8,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use gwt_core::config::get_branch_tool_history;
+use gwt_core::config::{Profile, ProfilesConfig};
 use gwt_core::error::GwtError;
 use gwt_core::git::{Branch, PrCache};
 use gwt_core::worktree::WorktreeManager;
@@ -43,6 +44,8 @@ pub struct AgentLaunchConfig {
     pub execution_mode: ExecutionMode,
     /// Skip permission prompts
     pub skip_permissions: bool,
+    /// Environment variables to apply
+    pub env: Vec<(String, String)>,
 }
 
 /// Application state (Model in Elm Architecture)
@@ -75,6 +78,8 @@ pub struct Model {
     error: ErrorState,
     /// Profiles state
     profiles: ProfilesState,
+    /// Profiles configuration
+    profiles_config: ProfilesConfig,
     /// Environment variables state
     environment: EnvironmentState,
     /// Wizard popup state
@@ -180,6 +185,7 @@ impl Model {
             confirm: ConfirmState::new(),
             error: ErrorState::new(),
             profiles: ProfilesState::new(),
+            profiles_config: ProfilesConfig::default(),
             environment: EnvironmentState::new(),
             wizard: WizardState::new(),
             status_message: None,
@@ -279,19 +285,138 @@ impl Model {
             }
         }
 
-        // Load profiles (initialize with default profile if none exist)
-        // For now, create a simple default profile until a full profile manager is implemented
-        use super::screens::profiles::ProfileItem;
-        let profiles = vec![ProfileItem {
-            name: "default".to_string(),
-            is_active: true,
-            env_count: 0,
-            description: Some("Default profile".to_string()),
-        }];
-        self.profiles = super::screens::ProfilesState::new().with_profiles(profiles);
-        self.branch_list.active_profile = Some("default".to_string());
+        self.load_profiles();
         self.branch_list.working_directory = Some(self.repo_root.display().to_string());
         self.branch_list.version = Some(env!("CARGO_PKG_VERSION").to_string());
+    }
+
+    fn load_profiles(&mut self) {
+        let profiles_config = ProfilesConfig::load().unwrap_or_default();
+        self.profiles_config = profiles_config.clone();
+
+        let mut names: Vec<String> = profiles_config.profiles.keys().cloned().collect();
+        names.sort();
+
+        let profiles = names
+            .into_iter()
+            .filter_map(|name| {
+                profiles_config.profiles.get(&name).map(|profile| {
+                    super::screens::profiles::ProfileItem {
+                        name: name.clone(),
+                        is_active: profiles_config.active.as_deref() == Some(name.as_str()),
+                        env_count: profile.env.len(),
+                        description: if profile.description.is_empty() {
+                            None
+                        } else {
+                            Some(profile.description.clone())
+                        },
+                    }
+                })
+            })
+            .collect();
+
+        self.profiles = ProfilesState::new().with_profiles(profiles);
+        self.branch_list.active_profile = self.profiles_config.active.clone();
+    }
+
+    fn save_profiles(&mut self) {
+        if let Err(e) = self.profiles_config.save() {
+            self.status_message = Some(format!("Failed to save profiles: {}", e));
+            self.status_message_time = Some(Instant::now());
+            return;
+        }
+        self.load_profiles();
+    }
+
+    fn active_env_overrides(&self) -> Vec<(String, String)> {
+        self.profiles_config
+            .active_profile()
+            .map(|profile| {
+                let mut pairs: Vec<(String, String)> = profile
+                    .env
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                pairs.sort_by(|a, b| a.0.cmp(&b.0));
+                pairs
+            })
+            .unwrap_or_default()
+    }
+
+    fn open_environment_editor(&mut self, profile_name: &str) {
+        let vars = self
+            .profiles_config
+            .profiles
+            .get(profile_name)
+            .map(|profile| {
+                let mut items: Vec<super::screens::environment::EnvItem> = profile
+                    .env
+                    .iter()
+                    .map(|(k, v)| super::screens::environment::EnvItem {
+                        key: k.clone(),
+                        value: v.clone(),
+                        is_secret: false,
+                    })
+                    .collect();
+                items.sort_by(|a, b| a.key.cmp(&b.key));
+                items
+            })
+            .unwrap_or_default();
+
+        self.environment = EnvironmentState::new()
+            .with_profile(profile_name)
+            .with_variables(vars);
+        self.screen_stack.push(self.screen.clone());
+        self.screen = Screen::Environment;
+    }
+
+    fn persist_environment(&mut self) {
+        let profile_name = match self.environment.profile_name.clone() {
+            Some(name) => name,
+            None => return,
+        };
+        let profile = self
+            .profiles_config
+            .profiles
+            .entry(profile_name.clone())
+            .or_insert_with(|| Profile::new(profile_name.clone()));
+        profile.env.clear();
+        for var in &self.environment.variables {
+            profile.env.insert(var.key.clone(), var.value.clone());
+        }
+        self.save_profiles();
+    }
+
+    fn delete_selected_profile(&mut self) {
+        let selected = match self.profiles.selected_profile() {
+            Some(item) => item.name.clone(),
+            None => return,
+        };
+
+        if self.profiles_config.active.as_deref() == Some(selected.as_str()) {
+            self.status_message = Some("Active profile cannot be deleted.".to_string());
+            self.status_message_time = Some(Instant::now());
+            return;
+        }
+
+        self.profiles_config.profiles.remove(&selected);
+        if self.profiles_config.profiles.is_empty() {
+            self.profiles_config = ProfilesConfig::default();
+        }
+        self.save_profiles();
+    }
+
+    fn delete_selected_env(&mut self) {
+        if self.environment.variables.is_empty() {
+            return;
+        }
+        if self.environment.selected < self.environment.variables.len() {
+            self.environment.variables.remove(self.environment.selected);
+            if self.environment.selected >= self.environment.variables.len() {
+                self.environment.selected = self.environment.variables.len().saturating_sub(1);
+            }
+            self.persist_environment();
+        }
     }
 
     /// Update function (Elm Architecture)
@@ -330,6 +455,8 @@ impl Model {
                 } else if matches!(self.screen, Screen::Profiles) && self.profiles.create_mode {
                     // Exit profile create mode
                     self.profiles.exit_create_mode();
+                } else if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
+                    self.environment.cancel_edit();
                 } else if matches!(self.screen, Screen::Confirm) {
                     // FR-029d: Cancel confirm dialog without executing action
                     self.pending_unsafe_selection = None;
@@ -441,6 +568,60 @@ impl Model {
                         self.screen = prev_screen;
                     }
                 }
+                Screen::Profiles => {
+                    if self.profiles.create_mode {
+                        match self.profiles.validate_new_name() {
+                            Ok(name) => {
+                                if self.profiles_config.profiles.contains_key(&name) {
+                                    self.profiles.error =
+                                        Some("Profile already exists".to_string());
+                                } else {
+                                    self.profiles_config
+                                        .profiles
+                                        .insert(name.clone(), Profile::new(&name));
+                                    self.profiles_config.set_active(Some(name.clone()));
+                                    self.profiles.exit_create_mode();
+                                    self.save_profiles();
+                                }
+                            }
+                            Err(msg) => {
+                                self.profiles.error = Some(msg.to_string());
+                            }
+                        }
+                    } else if let Some(item) = self.profiles.selected_profile() {
+                        self.profiles_config.set_active(Some(item.name.clone()));
+                        self.save_profiles();
+                    }
+                }
+                Screen::Environment => {
+                    if self.environment.edit_mode {
+                        match self.environment.validate() {
+                            Ok((key, value)) => {
+                                if self.environment.is_new {
+                                    self.environment.variables.push(
+                                        super::screens::environment::EnvItem {
+                                            key,
+                                            value,
+                                            is_secret: false,
+                                        },
+                                    );
+                                } else if let Some(var) = self
+                                    .environment
+                                    .variables
+                                    .get_mut(self.environment.selected)
+                                {
+                                    var.key = key;
+                                    var.value = value;
+                                }
+                                self.environment.cancel_edit();
+                                self.persist_environment();
+                            }
+                            Err(msg) => {
+                                self.environment.error = Some(msg.to_string());
+                            }
+                        }
+                    }
+                }
                 Screen::Help => {
                     self.update(Message::NavigateBack);
                 }
@@ -456,6 +637,8 @@ impl Model {
                 } else if matches!(self.screen, Screen::Profiles) && self.profiles.create_mode {
                     // Profile create mode - add character to name
                     self.profiles.insert_char(c);
+                } else if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
+                    self.environment.insert_char(c);
                 }
             }
             Message::Backspace => {
@@ -466,6 +649,8 @@ impl Model {
                     self.branch_list.filter_pop();
                 } else if matches!(self.screen, Screen::Profiles) && self.profiles.create_mode {
                     self.profiles.delete_char();
+                } else if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
+                    self.environment.delete_char();
                 }
             }
             Message::CursorLeft => {
@@ -473,6 +658,8 @@ impl Model {
                     self.worktree_create.cursor_left();
                 } else if matches!(self.screen, Screen::Profiles) && self.profiles.create_mode {
                     self.profiles.cursor_left();
+                } else if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
+                    self.environment.cursor_left();
                 } else if matches!(self.screen, Screen::Confirm) {
                     // FR-029c: Left/Right toggle selection in confirm dialog
                     self.confirm.toggle_selection();
@@ -483,6 +670,8 @@ impl Model {
                     self.worktree_create.cursor_right();
                 } else if matches!(self.screen, Screen::Profiles) && self.profiles.create_mode {
                     self.profiles.cursor_right();
+                } else if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
+                    self.environment.cursor_right();
                 } else if matches!(self.screen, Screen::Confirm) {
                     // FR-029c: Left/Right toggle selection in confirm dialog
                     self.confirm.toggle_selection();
@@ -684,6 +873,7 @@ impl Model {
                         version: self.wizard.version.clone(),
                         execution_mode: self.wizard.execution_mode,
                         skip_permissions: self.wizard.skip_permissions,
+                        env: self.active_env_overrides(),
                     };
 
                     // Store the launch config and quit TUI
@@ -789,7 +979,7 @@ impl Model {
             .branch_list
             .active_profile
             .as_deref()
-            .unwrap_or("default");
+            .unwrap_or("(none)");
         let working_dir = self
             .branch_list
             .working_directory
@@ -1101,6 +1291,9 @@ pub fn run() -> Result<Option<AgentLaunchConfig>, GwtError> {
                                 // Create new profile
                                 model.profiles.enter_create_mode();
                                 None
+                            } else if matches!(model.screen, Screen::Environment) {
+                                model.environment.start_new();
+                                None
                             } else {
                                 Some(Message::Char('n'))
                             }
@@ -1179,6 +1372,39 @@ pub fn run() -> Result<Option<AgentLaunchConfig>, GwtError> {
                                 }
                             } else {
                                 Some(Message::Char('c'))
+                            }
+                        }
+                        (KeyCode::Char('d'), KeyModifiers::NONE) => {
+                            if matches!(model.screen, Screen::Profiles) {
+                                model.delete_selected_profile();
+                                None
+                            } else if matches!(model.screen, Screen::Environment) {
+                                model.delete_selected_env();
+                                None
+                            } else {
+                                Some(Message::Char('d'))
+                            }
+                        }
+                        (KeyCode::Char('e'), KeyModifiers::NONE) => {
+                            if matches!(model.screen, Screen::Profiles) {
+                                if let Some(item) = model.profiles.selected_profile() {
+                                    let name = item.name.clone();
+                                    model.open_environment_editor(&name);
+                                }
+                                None
+                            } else if matches!(model.screen, Screen::Environment) {
+                                model.environment.start_edit();
+                                None
+                            } else {
+                                Some(Message::Char('e'))
+                            }
+                        }
+                        (KeyCode::Char('v'), KeyModifiers::NONE) => {
+                            if matches!(model.screen, Screen::Environment) {
+                                model.environment.toggle_visibility();
+                                None
+                            } else {
+                                Some(Message::Char('v'))
                             }
                         }
                         (KeyCode::Char('x'), KeyModifiers::NONE) => {
