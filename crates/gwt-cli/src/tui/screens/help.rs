@@ -51,7 +51,6 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
         "Actions",
         &[
             ("Enter", "Select/Confirm"),
-            ("n", "New worktree"),
             ("d", "Delete worktree"),
             ("s", "Switch to worktree"),
             ("r", "Refresh data"),

@@ -17,6 +17,7 @@ use std::io;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use super::screens::branch_list::WorktreeStatus;
 use super::screens::{
     render_branch_list, render_confirm, render_environment, render_error, render_help, render_logs,
     render_profiles, render_settings, render_wizard, render_worktree_create, BranchItem,
@@ -944,10 +945,30 @@ impl Model {
     fn execute_cleanup(&mut self, branches: &[String]) {
         let mut deleted = 0;
         let mut errors = Vec::new();
+        let manager = WorktreeManager::new(&self.repo_root).ok();
 
         for branch_name in branches {
+            let branch_item = self
+                .branch_list
+                .branches
+                .iter()
+                .find(|b| &b.name == branch_name);
+
+            if let (Some(manager), Some(item)) = (manager.as_ref(), branch_item) {
+                if let Some(path) = item.worktree_path.as_deref() {
+                    let force_remove = item.worktree_status == WorktreeStatus::Inaccessible
+                        || item.has_changes
+                        || WorktreeManager::is_protected(&item.name);
+                    let path_buf = PathBuf::from(path);
+                    if let Err(e) = manager.remove(&path_buf, force_remove) {
+                        errors.push(format!("{}: {}", branch_name, e));
+                        continue;
+                    }
+                }
+            }
+
             // Try to delete the branch
-            match Branch::delete(&self.repo_root, branch_name, false) {
+            match Branch::delete(&self.repo_root, branch_name, true) {
                 Ok(_) => {
                     deleted += 1;
                     // Remove from selection
@@ -1065,6 +1086,7 @@ impl Model {
 
         // Line 1: Working Directory
         let working_dir_line = Line::from(vec![
+            Span::raw(" "),
             Span::styled("Working Directory: ", Style::default().fg(Color::DarkGray)),
             Span::raw(working_dir),
         ]);
@@ -1072,6 +1094,7 @@ impl Model {
 
         // Line 2: Profile
         let profile_line = Line::from(vec![
+            Span::raw(" "),
             Span::styled("Profile(p): ", Style::default().fg(Color::DarkGray)),
             Span::raw(profile),
         ]);
@@ -1080,10 +1103,10 @@ impl Model {
         // Line 3: Filter
         let filtered = self.branch_list.filtered_branches();
         let total = self.branch_list.branches.len();
-        let mut filter_spans = vec![Span::styled(
-            "Filter(f): ",
-            Style::default().fg(Color::DarkGray),
-        )];
+        let mut filter_spans = vec![
+            Span::raw(" "),
+            Span::styled("Filter(f): ", Style::default().fg(Color::DarkGray)),
+        ];
         if self.branch_list.filter_mode {
             if self.branch_list.filter.is_empty() {
                 filter_spans.push(Span::styled(
@@ -1116,6 +1139,7 @@ impl Model {
         let stats = &self.branch_list.stats;
         let relative_time = self.branch_list.format_relative_time();
         let mut stats_spans = vec![
+            Span::raw(" "),
             Span::styled("Mode(tab): ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 self.branch_list.view_mode.label(),
@@ -1198,8 +1222,8 @@ impl Model {
                 if self.branch_list.filter_mode {
                     "[Esc] Exit filter | [Enter] Apply | Type to search"
                 } else {
-                    // FR-004: Enter: Select, n: New, r: Refresh, c: Cleanup, x: Repair, l: Logs
-                    "[Enter] Select | [n] New | [r] Refresh | [c] Cleanup | [x] Repair | [l] Logs"
+                    // FR-004: Enter: Select, r: Refresh, c: Cleanup, x: Repair, l: Logs
+                    "[Enter] Select | [r] Refresh | [c] Cleanup | [x] Repair | [l] Logs"
                 }
             }
             Screen::WorktreeCreate => "[Enter] Next | [Esc] Back",
@@ -1340,12 +1364,12 @@ pub fn run_with_context(
                             }
                         }
                         (KeyCode::Char('n'), KeyModifiers::NONE) => {
-                            // In filter mode, 'n' goes to filter input
-                            if matches!(model.screen, Screen::BranchList)
-                                && !model.branch_list.filter_mode
-                            {
-                                // Open wizard for new branch (FR-008)
-                                Some(Message::OpenWizardNewBranch)
+                            if matches!(model.screen, Screen::BranchList) {
+                                if model.branch_list.filter_mode {
+                                    Some(Message::Char('n'))
+                                } else {
+                                    None
+                                }
                             } else if matches!(model.screen, Screen::Profiles) {
                                 // Create new profile
                                 model.profiles.enter_create_mode();
