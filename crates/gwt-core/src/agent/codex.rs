@@ -14,6 +14,9 @@ use tokio::process::Command;
 const DEFAULT_CODEX_MODEL: &str = "gpt-5.2-codex";
 const DEFAULT_CODEX_REASONING: &str = "high";
 const CODEX_SKILLS_FLAG_DEPRECATED_FROM: &str = "0.80.0";
+const CODEX_SKIP_FLAG_DEPRECATED_FROM: &str = "0.80.0";
+const CODEX_SKIP_FLAG_LEGACY: &str = "--yolo";
+const CODEX_SKIP_FLAG_DANGEROUS: &str = "--dangerously-bypass-approvals-and-sandbox";
 const MODEL_FLAG_PREFIX: &str = "--model=";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,6 +153,21 @@ fn should_enable_codex_skills_flag(version: Option<&str>) -> bool {
     match (parsed, threshold) {
         (Some(parsed), Some(threshold)) => compare_versions(&parsed, &threshold) == Ordering::Less,
         _ => false,
+    }
+}
+
+pub fn codex_skip_permissions_flag(version: Option<&str>) -> &'static str {
+    let parsed = parse_version(version);
+    let threshold = parse_version(Some(CODEX_SKIP_FLAG_DEPRECATED_FROM));
+    match (parsed, threshold) {
+        (Some(parsed), Some(threshold)) => {
+            if compare_versions(&parsed, &threshold) == Ordering::Less {
+                CODEX_SKIP_FLAG_LEGACY
+            } else {
+                CODEX_SKIP_FLAG_DANGEROUS
+            }
+        }
+        _ => CODEX_SKIP_FLAG_DANGEROUS,
     }
 }
 
@@ -348,5 +366,27 @@ mod tests {
             arg == "--enable" && args_new.get(idx + 1).is_some_and(|v| v == "skills")
         });
         assert!(!skills_present_new);
+    }
+
+    #[test]
+    fn test_codex_skip_permissions_flag_version_gate() {
+        assert_eq!(codex_skip_permissions_flag(Some("0.79.9")), "--yolo");
+        assert_eq!(
+            codex_skip_permissions_flag(Some("0.80.0")),
+            "--dangerously-bypass-approvals-and-sandbox"
+        );
+        assert_eq!(
+            codex_skip_permissions_flag(Some("codex-cli 0.80.1")),
+            "--dangerously-bypass-approvals-and-sandbox"
+        );
+        assert_eq!(codex_skip_permissions_flag(Some("v0.79.0")), "--yolo");
+        assert_eq!(
+            codex_skip_permissions_flag(None),
+            "--dangerously-bypass-approvals-and-sandbox"
+        );
+        assert_eq!(
+            codex_skip_permissions_flag(Some("unknown")),
+            "--dangerously-bypass-approvals-and-sandbox"
+        );
     }
 }

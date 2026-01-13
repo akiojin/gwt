@@ -2,7 +2,7 @@
 
 use chrono::Utc;
 use clap::Parser;
-use gwt_core::agent::codex::codex_default_args;
+use gwt_core::agent::codex::{codex_default_args, codex_skip_permissions_flag};
 use gwt_core::agent::get_command_version;
 use gwt_core::config::{save_session_entry, Settings, ToolSessionEntry};
 use gwt_core::error::GwtError;
@@ -12,13 +12,14 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use tracing::{error, info, warn};
 
 mod cli;
 mod tui;
 
 use cli::{Cli, Commands, OutputFormat};
-use tui::{AgentLaunchConfig, CodingAgent, ExecutionMode};
+use tui::{AgentLaunchConfig, CodingAgent, ExecutionMode, TuiEntryContext};
 
 fn main() {
     if let Err(e) = run() {
@@ -60,10 +61,28 @@ fn run() -> Result<(), GwtError> {
             if let Ok(manager) = WorktreeManager::new(&repo_root) {
                 let _ = manager.auto_cleanup_orphans();
             }
-            match tui::run()? {
-                Some(launch_config) => launch_coding_agent(launch_config),
-                None => Ok(()),
+            let mut entry: Option<TuiEntryContext> = None;
+            loop {
+                let selection = tui::run_with_context(entry.take())?;
+                match selection {
+                    Some(launch_config) => match launch_coding_agent(launch_config) {
+                        Ok(AgentExitKind::Success) => {
+                            entry = Some(TuiEntryContext::success(
+                                "Session completed successfully.".to_string(),
+                            ));
+                        }
+                        Ok(AgentExitKind::Interrupted) => {
+                            entry =
+                                Some(TuiEntryContext::warning("Session interrupted.".to_string()));
+                        }
+                        Err(err) => {
+                            entry = Some(TuiEntryContext::error(err.to_string()));
+                        }
+                    },
+                    None => break,
+                }
             }
+            Ok(())
         }
     }
 }
@@ -431,21 +450,28 @@ fn install_dependencies(worktree_path: &Path) -> Result<(), GwtError> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentExitKind {
+    Success,
+    Interrupted,
+}
+
 /// Launch a coding agent after TUI exits
 ///
 /// Version selection behavior (FR-066, FR-067, FR-068):
 /// - "installed": Use local command if available, fallback to bunx @package@latest
 /// - "latest": Use bunx @package@latest
 /// - specific version: Use bunx @package@X.Y.Z
-fn launch_coding_agent(config: AgentLaunchConfig) -> Result<(), GwtError> {
+fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtError> {
     // FR-040a/FR-040b: Install dependencies before launching agent
     install_dependencies(&config.worktree_path)?;
+    let started_at = Instant::now();
 
     let cmd_name = config.agent.command_name();
     let npm_package = config.agent.npm_package();
 
     // Determine execution method based on version selection
-    let (executable, mut base_args, using_local) = if config.version == "installed" {
+    let (executable, base_args, using_local) = if config.version == "installed" {
         // FR-066: Try local command first
         match which::which(cmd_name) {
             Ok(path) => (path.to_string_lossy().to_string(), vec![], true),
@@ -466,27 +492,47 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<(), GwtError> {
         (exe, args, false)
     };
 
+    let package_spec = base_args.first().cloned();
+
     // Build agent-specific arguments
     let agent_args = build_agent_args(&config);
-    base_args.extend(agent_args);
+    let mut command_args = base_args;
+    command_args.extend(agent_args.clone());
 
-    // Print launch info (FR-072, FR-073)
-    println!(
-        "Launching {} in {}",
-        config.agent.label(),
-        config.worktree_path.display()
-    );
-    // FR-072: Version format varies by selection type
-    if config.version == "installed" {
-        println!("Version: installed");
-        // FR-073: Only show "Using locally installed" for installed selection
-        if using_local {
-            println!("Using locally installed");
+    let selected_version = if config.version == "installed" && !using_local {
+        "latest".to_string()
+    } else {
+        config.version.clone()
+    };
+    let version_label = if selected_version == "installed" {
+        "installed".to_string()
+    } else {
+        format!("@{}", selected_version)
+    };
+
+    let execution_method = if selected_version == "installed" && using_local {
+        ExecutionMethod::Installed {
+            command: cmd_name.to_string(),
         }
     } else {
-        println!("Version: @{}", config.version);
+        let label = runner_label(&executable).unwrap_or_else(|| "bunx".to_string());
+        let package_spec = package_spec.unwrap_or_else(|| {
+            if selected_version == "latest" {
+                format!("{}@latest", npm_package)
+            } else {
+                format!("{}@{}", npm_package, selected_version)
+            }
+        });
+        ExecutionMethod::Runner {
+            label,
+            package_spec,
+        }
+    };
+
+    let log_lines = build_launch_log_lines(&config, &agent_args, &version_label, &execution_method);
+    for line in log_lines {
+        println!("{}", line);
     }
-    println!("Command: {} {}", executable, base_args.join(" "));
     println!();
 
     // FR-069, FR-042: Save session entry before launching agent
@@ -500,7 +546,7 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<(), GwtError> {
         model: config.model.clone(),
         reasoning_level: config.reasoning_level.map(|r| r.label().to_string()),
         skip_permissions: Some(config.skip_permissions),
-        tool_version: Some(config.version.clone()),
+        tool_version: Some(selected_version.clone()),
         timestamp: Utc::now().timestamp_millis(),
     };
     if let Err(e) = save_session_entry(&config.worktree_path, session_entry) {
@@ -509,7 +555,9 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<(), GwtError> {
 
     // Spawn the agent process (FR-043: allows periodic timestamp updates)
     let mut command = Command::new(&executable);
-    command.args(&base_args).current_dir(&config.worktree_path);
+    command
+        .args(&command_args)
+        .current_dir(&config.worktree_path);
     for (key, value) in &config.env {
         command.env(key, value);
     }
@@ -532,7 +580,7 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<(), GwtError> {
     let branch_name = config.branch_name.clone();
     let agent_id = config.agent.id().to_string();
     let agent_label = config.agent.label().to_string();
-    let version = config.version.clone();
+    let version = selected_version.clone();
     let model = config.model.clone();
     let mode = config.execution_mode.label().to_string();
     let reasoning_level = config.reasoning_level.map(|r| r.label().to_string());
@@ -576,11 +624,49 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<(), GwtError> {
     running.store(false, Ordering::Relaxed);
     let _ = updater_thread.join();
 
-    if !status.success() {
-        eprintln!("Warning: {} exited with status: {}", cmd_name, status);
+    let duration_ms = started_at.elapsed().as_millis();
+    let exit_info = classify_exit_status(status);
+    match exit_info {
+        ExitClassification::Success => {
+            info!(
+                agent_id = config.agent.id(),
+                version = selected_version,
+                duration_ms = duration_ms as u64,
+                "Agent exited successfully"
+            );
+            Ok(AgentExitKind::Success)
+        }
+        ExitClassification::Interrupted => {
+            warn!(
+                agent_id = config.agent.id(),
+                version = selected_version,
+                duration_ms = duration_ms as u64,
+                "Agent session interrupted"
+            );
+            Ok(AgentExitKind::Interrupted)
+        }
+        ExitClassification::Failure { code, signal } => {
+            error!(
+                agent_id = config.agent.id(),
+                version = selected_version,
+                exit_code = code,
+                signal = signal,
+                duration_ms = duration_ms as u64,
+                "Agent exited with failure"
+            );
+            let reason = if let Some(signal) = signal {
+                format!("Terminated by signal {}", signal)
+            } else if let Some(code) = code {
+                format!("Exited with status {}", code)
+            } else {
+                "Exited with unknown status".to_string()
+            };
+            Err(GwtError::AgentLaunchFailed {
+                name: cmd_name.to_string(),
+                reason,
+            })
+        }
     }
-
-    Ok(())
 }
 
 fn env_has_key(env: &[(String, String)], key: &str) -> bool {
@@ -602,6 +688,107 @@ fn get_bunx_command(npm_package: &str, version: &str) -> (String, Vec<String>) {
     };
 
     (bunx_path, vec![package_spec])
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ExecutionMethod {
+    Installed { command: String },
+    Runner { label: String, package_spec: String },
+}
+
+fn execution_mode_label(mode: ExecutionMode) -> &'static str {
+    match mode {
+        ExecutionMode::Normal => "Start new session",
+        ExecutionMode::Continue => "Continue session",
+        ExecutionMode::Resume => "Resume session",
+    }
+}
+
+fn extract_codex_model_reasoning(args: &[String]) -> (Option<String>, Option<String>) {
+    let mut model = None;
+    let mut reasoning = None;
+    for arg in args {
+        if let Some(value) = arg.strip_prefix("--model=") {
+            model = Some(value.to_string());
+        }
+        if let Some(value) = arg.strip_prefix("model_reasoning_effort=") {
+            reasoning = Some(value.to_string());
+        }
+    }
+    (model, reasoning)
+}
+
+fn build_launch_log_lines(
+    config: &AgentLaunchConfig,
+    agent_args: &[String],
+    version_label: &str,
+    execution_method: &ExecutionMethod,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push(format!("Launching {}...", config.agent.label()));
+    lines.push(format!(
+        "Working directory: {}",
+        config.worktree_path.display()
+    ));
+
+    match config.agent {
+        CodingAgent::CodexCli => {
+            let (model, reasoning) = extract_codex_model_reasoning(agent_args);
+            if let Some(model) = model {
+                lines.push(format!("Model: {}", model));
+            }
+            if let Some(reasoning) = reasoning {
+                lines.push(format!("Reasoning: {}", reasoning));
+            }
+        }
+        _ => {
+            if let Some(model) = config.model.as_ref().filter(|m| !m.is_empty()) {
+                lines.push(format!("Model: {}", model));
+            }
+        }
+    }
+
+    lines.push(format!(
+        "Mode: {}",
+        execution_mode_label(config.execution_mode)
+    ));
+    lines.push(format!(
+        "Skip permissions: {}",
+        if config.skip_permissions {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    ));
+
+    let args_text = if agent_args.is_empty() {
+        "(none)".to_string()
+    } else {
+        agent_args.join(" ")
+    };
+    lines.push(format!("Args: {}", args_text));
+    lines.push(format!("Version: {}", version_label));
+
+    match execution_method {
+        ExecutionMethod::Installed { command } => {
+            lines.push(format!("Using locally installed {}", command));
+        }
+        ExecutionMethod::Runner {
+            label,
+            package_spec,
+        } => {
+            lines.push(format!("Using {} {}", label, package_spec));
+        }
+    }
+
+    lines
+}
+
+fn runner_label(executable: &str) -> Option<String> {
+    std::path::Path::new(executable)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_string())
 }
 
 /// Build agent-specific command line arguments
@@ -643,13 +830,15 @@ fn build_agent_args(config: &AgentLaunchConfig) -> Vec<String> {
                 ExecutionMode::Normal => {}
             }
 
-            // Skip permissions (Codex uses --yolo)
+            // Skip permissions (Codex uses versioned flag)
+            let flag_version = resolve_codex_flag_version(config);
             if config.skip_permissions {
-                args.push("--yolo".to_string());
+                let flag = codex_skip_permissions_flag(flag_version.as_deref());
+                args.push(flag.to_string());
             }
 
             let reasoning_override = config.reasoning_level.map(|r| r.label());
-            let skills_flag_version = resolve_codex_skills_flag_version(config);
+            let skills_flag_version = flag_version;
             args.extend(codex_default_args(
                 config.model.as_deref(),
                 reasoning_override,
@@ -693,10 +882,158 @@ fn build_agent_args(config: &AgentLaunchConfig) -> Vec<String> {
     args
 }
 
-fn resolve_codex_skills_flag_version(config: &AgentLaunchConfig) -> Option<String> {
+fn resolve_codex_flag_version(config: &AgentLaunchConfig) -> Option<String> {
     match config.version.as_str() {
         "installed" => get_command_version("codex", "--version"),
         "latest" => None,
         other => Some(other.to_string()),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExitClassification {
+    Success,
+    Interrupted,
+    Failure {
+        code: Option<i32>,
+        signal: Option<i32>,
+    },
+}
+
+fn classify_exit(code: Option<i32>, signal: Option<i32>) -> ExitClassification {
+    if code == Some(0) && signal.is_none() {
+        return ExitClassification::Success;
+    }
+
+    if let Some(sig) = signal {
+        if sig == 2 || sig == 15 {
+            return ExitClassification::Interrupted;
+        }
+    }
+
+    if matches!(code, Some(130 | 143)) {
+        return ExitClassification::Interrupted;
+    }
+
+    ExitClassification::Failure { code, signal }
+}
+
+#[cfg(unix)]
+fn exit_signal(status: &std::process::ExitStatus) -> Option<i32> {
+    use std::os::unix::process::ExitStatusExt;
+    status.signal()
+}
+
+#[cfg(not(unix))]
+fn exit_signal(_status: &std::process::ExitStatus) -> Option<i32> {
+    None
+}
+
+fn classify_exit_status(status: std::process::ExitStatus) -> ExitClassification {
+    classify_exit(status.code(), exit_signal(&status))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_config(agent: CodingAgent) -> AgentLaunchConfig {
+        AgentLaunchConfig {
+            worktree_path: PathBuf::from("/tmp/worktree"),
+            branch_name: "feature/test".to_string(),
+            agent,
+            model: Some("sonnet".to_string()),
+            reasoning_level: None,
+            version: "latest".to_string(),
+            execution_mode: ExecutionMode::Continue,
+            skip_permissions: true,
+            env: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_classify_exit_success() {
+        assert!(matches!(
+            classify_exit(Some(0), None),
+            ExitClassification::Success
+        ));
+    }
+
+    #[test]
+    fn test_classify_exit_interrupted_signal() {
+        assert!(matches!(
+            classify_exit(None, Some(2)),
+            ExitClassification::Interrupted
+        ));
+    }
+
+    #[test]
+    fn test_classify_exit_interrupted_code() {
+        assert!(matches!(
+            classify_exit(Some(130), None),
+            ExitClassification::Interrupted
+        ));
+    }
+
+    #[test]
+    fn test_classify_exit_failure() {
+        assert!(matches!(
+            classify_exit(Some(1), None),
+            ExitClassification::Failure { .. }
+        ));
+    }
+
+    #[test]
+    fn test_build_launch_log_lines_codex() {
+        let mut config = sample_config(CodingAgent::CodexCli);
+        config.model = None;
+        let agent_args = vec![
+            "resume".to_string(),
+            "--last".to_string(),
+            "--model=gpt-5.2-codex".to_string(),
+            "-c".to_string(),
+            "model_reasoning_effort=high".to_string(),
+        ];
+        let lines = build_launch_log_lines(
+            &config,
+            &agent_args,
+            "@latest",
+            &ExecutionMethod::Runner {
+                label: "bunx".to_string(),
+                package_spec: "@openai/codex@latest".to_string(),
+            },
+        );
+        assert!(lines.contains(&"Launching Codex CLI...".to_string()));
+        assert!(lines.contains(&"Working directory: /tmp/worktree".to_string()));
+        assert!(lines.contains(&"Model: gpt-5.2-codex".to_string()));
+        assert!(lines.contains(&"Reasoning: high".to_string()));
+        assert!(lines.contains(&"Mode: Continue session".to_string()));
+        assert!(lines.contains(&"Skip permissions: enabled".to_string()));
+        assert!(lines.contains(&"Version: @latest".to_string()));
+        assert!(lines.contains(&"Using bunx @openai/codex@latest".to_string()));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("Args: resume --last --model=gpt-5.2-codex")));
+    }
+
+    #[test]
+    fn test_build_launch_log_lines_non_codex() {
+        let config = sample_config(CodingAgent::ClaudeCode);
+        let agent_args = vec![
+            "--model".to_string(),
+            "sonnet".to_string(),
+            "--dangerously-skip-permissions".to_string(),
+        ];
+        let lines = build_launch_log_lines(
+            &config,
+            &agent_args,
+            "installed",
+            &ExecutionMethod::Installed {
+                command: "claude".to_string(),
+            },
+        );
+        assert!(lines.contains(&"Model: sonnet".to_string()));
+        assert!(!lines.iter().any(|line| line.starts_with("Reasoning: ")));
+        assert!(lines.contains(&"Using locally installed claude".to_string()));
     }
 }

@@ -48,6 +48,35 @@ pub struct AgentLaunchConfig {
     pub env: Vec<(String, String)>,
 }
 
+#[derive(Debug, Clone)]
+pub struct TuiEntryContext {
+    status_message: Option<String>,
+    error_message: Option<String>,
+}
+
+impl TuiEntryContext {
+    pub fn success(message: String) -> Self {
+        Self {
+            status_message: Some(message),
+            error_message: None,
+        }
+    }
+
+    pub fn warning(message: String) -> Self {
+        Self {
+            status_message: Some(message),
+            error_message: None,
+        }
+    }
+
+    pub fn error(message: String) -> Self {
+        Self {
+            status_message: None,
+            error_message: Some(message),
+        }
+    }
+}
+
 /// Application state (Model in Elm Architecture)
 pub struct Model {
     /// Whether the app should quit
@@ -168,6 +197,10 @@ pub enum Message {
 impl Model {
     /// Create a new model
     pub fn new() -> Self {
+        Self::new_with_context(None)
+    }
+
+    pub fn new_with_context(context: Option<TuiEntryContext>) -> Self {
         let repo_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
         let mut model = Self {
@@ -201,6 +234,7 @@ impl Model {
 
         // Load initial data
         model.refresh_data();
+        model.apply_entry_context(context);
         model
     }
 
@@ -288,6 +322,20 @@ impl Model {
         self.load_profiles();
         self.branch_list.working_directory = Some(self.repo_root.display().to_string());
         self.branch_list.version = Some(env!("CARGO_PKG_VERSION").to_string());
+    }
+
+    fn apply_entry_context(&mut self, context: Option<TuiEntryContext>) {
+        if let Some(context) = context {
+            if let Some(message) = context.status_message {
+                self.status_message = Some(message);
+                self.status_message_time = Some(Instant::now());
+            }
+            if let Some(message) = context.error_message {
+                self.error = ErrorState::from_error(&message);
+                self.screen_stack.push(self.screen.clone());
+                self.screen = Screen::Error;
+            }
+        }
     }
 
     fn load_profiles(&mut self) {
@@ -623,6 +671,9 @@ impl Model {
                     }
                 }
                 Screen::Help => {
+                    self.update(Message::NavigateBack);
+                }
+                Screen::Error => {
                     self.update(Message::NavigateBack);
                 }
                 _ => {}
@@ -1188,6 +1239,14 @@ impl Model {
 /// Run the TUI application
 /// Returns agent launch configuration if wizard completed, None otherwise
 pub fn run() -> Result<Option<AgentLaunchConfig>, GwtError> {
+    run_with_context(None)
+}
+
+/// Run the TUI application with optional entry context
+/// Returns agent launch configuration if wizard completed, None otherwise
+pub fn run_with_context(
+    context: Option<TuiEntryContext>,
+) -> Result<Option<AgentLaunchConfig>, GwtError> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -1196,7 +1255,7 @@ pub fn run() -> Result<Option<AgentLaunchConfig>, GwtError> {
     let mut terminal = Terminal::new(backend)?;
 
     // Create app state
-    let mut model = Model::new();
+    let mut model = Model::new_with_context(context);
 
     // Event loop
     let tick_rate = Duration::from_millis(250);

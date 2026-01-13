@@ -1646,6 +1646,14 @@ mod tests {
     }
 
     #[test]
+    fn test_opencode_model_options_include_default_and_custom() {
+        let options = CodingAgent::OpenCode.models();
+        assert!(!options.is_empty());
+        assert!(options.iter().any(|option| option.is_default));
+        assert!(options.iter().any(|option| option.id == "__custom__"));
+    }
+
+    #[test]
     fn test_wizard_step_navigation() {
         let mut state = WizardState::new();
         state.open_for_branch("test", vec![]);
