@@ -211,23 +211,32 @@ impl BranchItem {
     }
 
     /// Get safety icon and color
-    pub fn safety_icon(&self) -> (&'static str, Color) {
+    /// FR-031b: If spinner_frame is provided and safety check is pending, show spinner
+    pub fn safety_icon(&self, spinner_frame: Option<usize>) -> (String, Color) {
         if self.branch_type == BranchType::Remote {
-            return (" ", Color::Reset);
+            // FR-031c: Remote branches show empty safety icon
+            return (" ".to_string(), Color::Reset);
         }
         if self.has_changes {
-            return ("!", Color::Red);
+            return ("!".to_string(), Color::Red);
         }
         if self.has_unpushed {
-            return ("!", Color::Yellow);
+            return ("!".to_string(), Color::Yellow);
         }
         if self.is_unmerged {
-            return ("*", Color::Yellow);
+            return ("*".to_string(), Color::Yellow);
         }
         if self.safe_to_cleanup == Some(true) {
-            return ("o", Color::Green);
+            return ("o".to_string(), Color::Green);
         }
-        ("!", Color::Red)
+        // FR-031b: Safety check pending - show spinner if frame provided
+        if self.safe_to_cleanup.is_none() {
+            if let Some(frame) = spinner_frame {
+                let spinner_char = SPINNER_FRAMES[frame % SPINNER_FRAMES.len()];
+                return (spinner_char.to_string(), Color::Yellow);
+            }
+        }
+        ("!".to_string(), Color::Red)
     }
 
     /// Get worktree icon and color
@@ -798,12 +807,21 @@ fn render_branches(state: &BranchListState, frame: &mut Frame, area: Rect) {
     }
 
     let visible_height = area.height as usize;
+    // FR-031b: Pass spinner_frame for safety check pending indicator
+    let spinner_frame = state.spinner_frame;
     let items: Vec<ListItem> = filtered
         .iter()
         .enumerate()
         .skip(state.offset)
         .take(visible_height)
-        .map(|(i, branch)| render_branch_row(branch, i == state.selected, &state.selected_branches))
+        .map(|(i, branch)| {
+            render_branch_row(
+                branch,
+                i == state.selected,
+                &state.selected_branches,
+                spinner_frame,
+            )
+        })
         .collect();
 
     let list = List::new(items);
@@ -821,15 +839,18 @@ fn render_branches(state: &BranchListState, frame: &mut Frame, area: Rect) {
 
 /// Render a single branch row
 /// FR-070: Tool display format: ToolName@X.Y.Z | YYYY-MM-DD HH:mm (local time)
+/// FR-031b: Show spinner for safety check pending branches
 fn render_branch_row(
     branch: &BranchItem,
     is_selected: bool,
     selected_set: &HashSet<String>,
+    spinner_frame: usize,
 ) -> ListItem<'static> {
     let is_checked = selected_set.contains(&branch.name);
     let selection_icon = if is_checked { "[*]" } else { "[ ]" };
     let (worktree_icon, worktree_color) = branch.worktree_icon();
-    let (safety_icon, safety_color) = branch.safety_icon();
+    // FR-031b: Pass spinner_frame for pending safety check
+    let (safety_icon, safety_color) = branch.safety_icon(Some(spinner_frame));
 
     let mut spans = vec![
         Span::styled(

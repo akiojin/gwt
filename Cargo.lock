@@ -1951,7 +1951,7 @@ checksum = "17e2ac29387b1aa07a1e448f7bb4f35b500787971e965b02842b900afa5c8f6f"
 
 [[package]]
 name = "gwt-cli"
-version = "0.1.0"
+version = "5.0.0"
 dependencies = [
  "chrono",
  "clap",
@@ -1971,7 +1971,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-core"
-version = "0.1.0"
+version = "5.0.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -1997,7 +1997,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-frontend"
-version = "0.1.0"
+version = "5.0.0"
 dependencies = [
  "console_error_panic_hook",
  "gloo-net",
@@ -2010,7 +2010,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-web"
-version = "0.1.0"
+version = "5.0.0"
 dependencies = [
  "axum",
  "gwt-core",
