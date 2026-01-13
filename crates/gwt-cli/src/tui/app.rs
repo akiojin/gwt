@@ -85,6 +85,18 @@ struct PrTitleUpdate {
     titles: HashMap<String, String>,
 }
 
+struct SafetyUpdate {
+    branch: String,
+    has_unpushed: bool,
+    is_unmerged: bool,
+    safe_to_cleanup: bool,
+}
+
+struct SafetyCheckTarget {
+    branch: String,
+    upstream: String,
+}
+
 /// Application state (Model in Elm Architecture)
 pub struct Model {
     /// Whether the app should quit
@@ -139,6 +151,8 @@ pub struct Model {
     pending_cleanup_branches: Vec<String>,
     /// PR title update receiver
     pr_title_rx: Option<Receiver<PrTitleUpdate>>,
+    /// Safety check update receiver
+    safety_rx: Option<Receiver<SafetyUpdate>>,
 }
 
 /// Screen types
@@ -238,6 +252,7 @@ impl Model {
             pending_unsafe_selection: None,
             pending_cleanup_branches: Vec::new(),
             pr_title_rx: None,
+            safety_rx: None,
         };
 
         // Load initial data
@@ -254,11 +269,12 @@ impl Model {
 
         if let Ok(manager) = WorktreeManager::new(&self.repo_root) {
             // Get branches
-            if let Ok(branches) = Branch::list(&self.repo_root) {
+            if let Ok(branches) = Branch::list_basic(&self.repo_root) {
                 let worktrees = manager.list().unwrap_or_default();
 
                 // Load tool usage from TypeScript session file (FR-070)
                 let tool_usage_map = gwt_core::config::get_last_tool_usage_map(&self.repo_root);
+                let mut safety_targets = Vec::new();
 
                 let mut branch_items: Vec<BranchItem> = branches
                     .iter()
@@ -277,21 +293,18 @@ impl Model {
 
                         // Safety check short-circuit: use immediate signals first
                         if item.branch_type == BranchType::Local {
-                            if b.ahead > 0 {
-                                item.has_unpushed = true;
-                            }
-
                             if item.has_changes
                                 || item.has_unpushed
                                 || !b.has_remote
                                 || !base_branch_exists
                             {
                                 item.safe_to_cleanup = Some(false);
-                            } else if let Ok((ahead, _)) =
-                                Branch::divergence_between(&self.repo_root, &b.name, &base_branch)
-                            {
-                                item.is_unmerged = ahead > 0;
-                                item.safe_to_cleanup = Some(!item.is_unmerged);
+                            } else if let Some(upstream) = b.upstream.clone() {
+                                item.safe_to_cleanup = None;
+                                safety_targets.push(SafetyCheckTarget {
+                                    branch: b.name.clone(),
+                                    upstream,
+                                });
                             } else {
                                 item.safe_to_cleanup = Some(false);
                             }
@@ -312,6 +325,7 @@ impl Model {
                 self.total_count = branch_items.len();
                 self.active_count = branch_items.iter().filter(|b| b.has_worktree).count();
                 self.branch_list = BranchListState::new().with_branches(branch_items);
+                self.spawn_safety_checks(safety_targets, base_branch.clone());
                 self.spawn_pr_title_fetch(&branches);
 
                 // Get base branches for worktree create
@@ -376,6 +390,68 @@ impl Model {
         });
     }
 
+    fn spawn_safety_checks(&mut self, targets: Vec<SafetyCheckTarget>, base_branch: String) {
+        if targets.is_empty() {
+            self.safety_rx = None;
+            return;
+        }
+
+        let repo_root = self.repo_root.clone();
+        let (tx, rx) = mpsc::channel();
+        self.safety_rx = Some(rx);
+
+        thread::spawn(move || {
+            for target in targets {
+                let mut has_unpushed = false;
+                let mut is_unmerged = false;
+                let mut safe_to_cleanup = false;
+
+                let unpushed_result =
+                    Branch::divergence_between(&repo_root, &target.branch, &target.upstream);
+                match unpushed_result {
+                    Ok((ahead, _)) => {
+                        if ahead > 0 {
+                            has_unpushed = true;
+                        }
+                    }
+                    Err(_) => {
+                        let _ = tx.send(SafetyUpdate {
+                            branch: target.branch,
+                            has_unpushed,
+                            is_unmerged,
+                            safe_to_cleanup,
+                        });
+                        continue;
+                    }
+                }
+
+                if has_unpushed {
+                    let _ = tx.send(SafetyUpdate {
+                        branch: target.branch,
+                        has_unpushed,
+                        is_unmerged,
+                        safe_to_cleanup,
+                    });
+                    continue;
+                }
+
+                if let Ok((ahead, _)) =
+                    Branch::divergence_between(&repo_root, &target.branch, &base_branch)
+                {
+                    is_unmerged = ahead > 0;
+                    safe_to_cleanup = !is_unmerged;
+                }
+
+                let _ = tx.send(SafetyUpdate {
+                    branch: target.branch,
+                    has_unpushed,
+                    is_unmerged,
+                    safe_to_cleanup,
+                });
+            }
+        });
+    }
+
     fn apply_entry_context(&mut self, context: Option<TuiEntryContext>) {
         if let Some(context) = context {
             if let Some(message) = context.status_message {
@@ -403,6 +479,30 @@ impl Model {
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
                 self.pr_title_rx = None;
+            }
+        }
+    }
+
+    fn apply_safety_updates(&mut self) {
+        let Some(rx) = &self.safety_rx else {
+            return;
+        };
+
+        loop {
+            match rx.try_recv() {
+                Ok(update) => {
+                    self.branch_list.apply_safety_update(
+                        &update.branch,
+                        update.has_unpushed,
+                        update.is_unmerged,
+                        update.safe_to_cleanup,
+                    );
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.safety_rx = None;
+                    break;
+                }
             }
         }
     }
@@ -603,6 +703,7 @@ impl Model {
                 // Update spinner animation
                 self.branch_list.tick_spinner();
                 self.apply_pr_title_updates();
+                self.apply_safety_updates();
             }
             Message::SelectNext => match self.screen {
                 Screen::BranchList => self.branch_list.select_next(),
@@ -1076,15 +1177,24 @@ impl Model {
             ])
             .split(frame.area());
 
+        let base_screen = if matches!(self.screen, Screen::Confirm) {
+            self.screen_stack
+                .last()
+                .cloned()
+                .unwrap_or(Screen::BranchList)
+        } else {
+            self.screen.clone()
+        };
+
         // Header (for branch list screen, render boxed header)
-        if matches!(self.screen, Screen::BranchList) {
+        if matches!(base_screen, Screen::BranchList) {
             self.view_boxed_header(frame, chunks[0]);
         } else {
             self.view_header(frame, chunks[0]);
         }
 
         // Content
-        match self.screen {
+        match base_screen {
             Screen::BranchList => render_branch_list(
                 &self.branch_list,
                 frame,
@@ -1097,10 +1207,14 @@ impl Model {
             Screen::Settings => render_settings(&self.settings, frame, chunks[1]),
             Screen::Logs => render_logs(&self.logs, frame, chunks[1]),
             Screen::Help => render_help(&self.help, frame, chunks[1]),
-            Screen::Confirm => render_confirm(&self.confirm, frame, chunks[1]),
             Screen::Error => render_error(&self.error, frame, chunks[1]),
             Screen::Profiles => render_profiles(&self.profiles, frame, chunks[1]),
             Screen::Environment => render_environment(&self.environment, frame, chunks[1]),
+            Screen::Confirm => {}
+        }
+
+        if matches!(self.screen, Screen::Confirm) {
+            render_confirm(&self.confirm, frame, chunks[1]);
         }
 
         // Footer

@@ -42,6 +42,15 @@ impl Branch {
 
     /// List all local branches in a repository
     pub fn list(repo_path: &Path) -> Result<Vec<Branch>> {
+        Self::list_with_options(repo_path, true)
+    }
+
+    /// List all local branches without computing divergence (fast path)
+    pub fn list_basic(repo_path: &Path) -> Result<Vec<Branch>> {
+        Self::list_with_options(repo_path, false)
+    }
+
+    fn list_with_options(repo_path: &Path, include_divergence: bool) -> Result<Vec<Branch>> {
         let output = Command::new("git")
             .args([
                 "for-each-ref",
@@ -89,11 +98,15 @@ impl Branch {
                     commit_timestamp,
                 };
 
-                // Get ahead/behind counts if upstream exists
-                if let Some(ref up) = upstream {
-                    if let Ok((ahead, behind)) = Self::get_divergence(repo_path, &branch.name, up) {
-                        branch.ahead = ahead;
-                        branch.behind = behind;
+                if include_divergence {
+                    // Get ahead/behind counts if upstream exists
+                    if let Some(ref up) = upstream {
+                        if let Ok((ahead, behind)) =
+                            Self::get_divergence(repo_path, &branch.name, up)
+                        {
+                            branch.ahead = ahead;
+                            branch.behind = behind;
+                        }
                     }
                 }
 
@@ -506,12 +519,65 @@ mod tests {
         temp
     }
 
+    fn create_repo_with_remote() -> (TempDir, String) {
+        let temp = create_test_repo();
+        let origin = TempDir::new().unwrap();
+
+        Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(origin.path())
+            .output()
+            .unwrap();
+
+        let branch = Branch::current(temp.path()).unwrap().unwrap().name;
+
+        Command::new("git")
+            .args(["remote", "add", "origin", origin.path().to_str().unwrap()])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+
+        Command::new("git")
+            .args(["push", "-u", "origin", &branch])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+
+        std::fs::write(temp.path().join("ahead.txt"), "ahead").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "ahead"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+
+        (temp, branch)
+    }
+
     #[test]
     fn test_list_branches() {
         let temp = create_test_repo();
         let branches = Branch::list(temp.path()).unwrap();
         assert_eq!(branches.len(), 1);
         assert!(branches[0].is_current);
+    }
+
+    #[test]
+    fn test_list_basic_skips_divergence() {
+        let (temp, branch) = create_repo_with_remote();
+
+        let branches_full = Branch::list(temp.path()).unwrap();
+        let branch_full = branches_full.iter().find(|b| b.name == branch).unwrap();
+        assert!(branch_full.ahead > 0);
+
+        let branches_basic = Branch::list_basic(temp.path()).unwrap();
+        let branch_basic = branches_basic.iter().find(|b| b.name == branch).unwrap();
+        assert_eq!(branch_basic.ahead, 0);
+        assert_eq!(branch_basic.behind, 0);
     }
 
     #[test]

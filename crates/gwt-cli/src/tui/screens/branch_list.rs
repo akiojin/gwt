@@ -567,6 +567,22 @@ impl BranchListState {
         self.rebuild_filtered_cache();
     }
 
+    pub fn apply_safety_update(
+        &mut self,
+        branch_name: &str,
+        has_unpushed: bool,
+        is_unmerged: bool,
+        safe_to_cleanup: bool,
+    ) {
+        if let Some(item) = self.branches.iter_mut().find(|b| b.name == branch_name) {
+            if item.safe_to_cleanup.is_none() {
+                item.has_unpushed = has_unpushed;
+                item.is_unmerged = is_unmerged;
+                item.safe_to_cleanup = Some(safe_to_cleanup);
+            }
+        }
+    }
+
     /// Set loading state
     pub fn set_loading(&mut self, loading: bool) {
         self.is_loading = loading;
@@ -1198,6 +1214,70 @@ mod tests {
         let filtered = state.filtered_branches();
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].name, "feature/one");
+    }
+
+    #[test]
+    fn test_apply_safety_update_updates_pending_branch() {
+        let branches = vec![
+            BranchItem {
+                name: "feature/one".to_string(),
+                branch_type: BranchType::Local,
+                is_current: false,
+                has_worktree: false,
+                worktree_path: None,
+                worktree_status: WorktreeStatus::None,
+                has_changes: false,
+                has_unpushed: false,
+                divergence: DivergenceStatus::UpToDate,
+                has_remote_counterpart: false,
+                remote_name: None,
+                safe_to_cleanup: None,
+                is_unmerged: false,
+                last_commit_timestamp: None,
+                last_tool_usage: None,
+                is_selected: false,
+                pr_title: None,
+            },
+            BranchItem {
+                name: "feature/two".to_string(),
+                branch_type: BranchType::Local,
+                is_current: false,
+                has_worktree: false,
+                worktree_path: None,
+                worktree_status: WorktreeStatus::None,
+                has_changes: false,
+                has_unpushed: false,
+                divergence: DivergenceStatus::UpToDate,
+                has_remote_counterpart: false,
+                remote_name: None,
+                safe_to_cleanup: Some(false),
+                is_unmerged: false,
+                last_commit_timestamp: None,
+                last_tool_usage: None,
+                is_selected: false,
+                pr_title: None,
+            },
+        ];
+
+        let mut state = BranchListState::new().with_branches(branches);
+        state.apply_safety_update("feature/one", true, false, false);
+
+        let item = state
+            .branches
+            .iter()
+            .find(|b| b.name == "feature/one")
+            .unwrap();
+        assert!(item.has_unpushed);
+        assert_eq!(item.safe_to_cleanup, Some(false));
+        assert!(!item.is_unmerged);
+
+        state.apply_safety_update("feature/two", false, false, true);
+        let item = state
+            .branches
+            .iter()
+            .find(|b| b.name == "feature/two")
+            .unwrap();
+        assert_eq!(item.safe_to_cleanup, Some(false));
     }
 
     #[test]

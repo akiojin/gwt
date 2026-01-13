@@ -38,6 +38,15 @@
 - [x] **T9919** [Test] `crates/gwt-cli/src/tui/screens/branch_list.rs` にPRタイトル更新でフィルタが再計算されるテストを追加
 - [x] **T9920** [実装] `crates/gwt-cli/src/tui/app.rs` でPRタイトル取得をバックグラウンド実行し、到着後に一覧へ反映
 
+## 追加作業: 安全判定の非ブロッキング化と確認ダイアログのポップアップ表示 (2026-01-14)
+
+- [x] **T9921** [P] [共通] `specs/SPEC-d2f4762a/spec.md` にクリーンアップ確認/警告ダイアログのポップアップ表示要件を追記
+- [x] **T9922** [P] [共通] `specs/SPEC-d2f4762a/plan.md` にポップアップ表示方針を追記
+- [x] **T9923** [Test] `crates/gwt-core/src/git/branch.rs` に`list_basic`の動作テストを追加
+- [x] **T9924** [Test] `crates/gwt-cli/src/tui/screens/branch_list.rs` に安全判定更新の反映テストを追加
+- [x] **T9925** [実装] `crates/gwt-core/src/git/branch.rs` に軽量ブランチ一覧取得とCLI側の非ブロッキング安全判定を実装
+- [x] **T9926** [実装] `crates/gwt-cli/src/tui/app.rs` の確認ダイアログをブランチ一覧上のポップアップとして描画
+
 ## フェーズ0: ブランチ一覧アイコンのASCII再整理 (優先度: P1)
 
 **ストーリー**: ブランチ一覧の選択/Worktree/安全アイコンをASCII表記へ整理し、アイコン間にスペースを入れてカーソル記号は表示しない。
