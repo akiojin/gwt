@@ -203,7 +203,8 @@ impl BranchItem {
             },
             safe_to_cleanup: None,
             is_unmerged: false,
-            last_commit_timestamp: None,
+            // FR-041: Set commit timestamp from git
+            last_commit_timestamp: branch.commit_timestamp,
             last_tool_usage: None,
             is_selected: false,
         }

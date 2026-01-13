@@ -212,8 +212,11 @@ impl Model {
                         // Set tool usage from TypeScript session history (FR-070)
                         if let Some(entry) = tool_usage_map.get(&b.name) {
                             item.last_tool_usage = Some(entry.format_tool_usage());
-                            // Set timestamp from session entry (convert ms to seconds)
-                            item.last_commit_timestamp = Some(entry.timestamp / 1000);
+                            // FR-041: Compare git commit timestamp and session timestamp,
+                            // use the newer one
+                            let session_timestamp = entry.timestamp / 1000; // Convert ms to seconds
+                            let git_timestamp = item.last_commit_timestamp.unwrap_or(0);
+                            item.last_commit_timestamp = Some(session_timestamp.max(git_timestamp));
                         }
                         item
                     })

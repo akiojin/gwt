@@ -21,6 +21,8 @@ pub struct Branch {
     pub ahead: usize,
     /// Commits behind upstream
     pub behind: usize,
+    /// Last commit timestamp (Unix timestamp in seconds) - FR-041
+    pub commit_timestamp: Option<i64>,
 }
 
 impl Branch {
@@ -34,6 +36,7 @@ impl Branch {
             commit: commit.into(),
             ahead: 0,
             behind: 0,
+            commit_timestamp: None,
         }
     }
 
@@ -42,7 +45,7 @@ impl Branch {
         let output = Command::new("git")
             .args([
                 "for-each-ref",
-                "--format=%(refname:short)%09%(objectname:short)%09%(upstream:short)%09%(HEAD)",
+                "--format=%(refname:short)%09%(objectname:short)%09%(upstream:short)%09%(HEAD)%09%(committerdate:unix)",
                 "refs/heads/",
             ])
             .current_dir(repo_path)
@@ -64,7 +67,7 @@ impl Branch {
 
         for line in stdout.lines() {
             let parts: Vec<&str> = line.split('\t').collect();
-            if parts.len() >= 4 {
+            if parts.len() >= 5 {
                 let name = parts[0].to_string();
                 let commit = parts[1].to_string();
                 let upstream = if parts[2].is_empty() {
@@ -73,6 +76,7 @@ impl Branch {
                     Some(parts[2].to_string())
                 };
                 let is_current = parts[3] == "*";
+                let commit_timestamp = parts[4].parse::<i64>().ok();
 
                 let mut branch = Branch {
                     name,
@@ -82,6 +86,7 @@ impl Branch {
                     commit,
                     ahead: 0,
                     behind: 0,
+                    commit_timestamp,
                 };
 
                 // Get ahead/behind counts if upstream exists
@@ -104,7 +109,7 @@ impl Branch {
         let output = Command::new("git")
             .args([
                 "for-each-ref",
-                "--format=%(refname:short)%09%(objectname:short)",
+                "--format=%(refname:short)%09%(objectname:short)%09%(committerdate:unix)",
                 "refs/remotes/",
             ])
             .current_dir(repo_path)
@@ -126,11 +131,12 @@ impl Branch {
 
         for line in stdout.lines() {
             let parts: Vec<&str> = line.split('\t').collect();
-            if parts.len() >= 2 {
+            if parts.len() >= 3 {
                 // Skip HEAD refs
                 if parts[0].ends_with("/HEAD") {
                     continue;
                 }
+                let commit_timestamp = parts[2].parse::<i64>().ok();
                 branches.push(Branch {
                     name: parts[0].to_string(),
                     is_current: false,
@@ -139,6 +145,7 @@ impl Branch {
                     commit: parts[1].to_string(),
                     ahead: 0,
                     behind: 0,
+                    commit_timestamp,
                 });
             }
         }
@@ -180,6 +187,23 @@ impl Branch {
             .trim()
             .to_string();
 
+        // Get commit timestamp (FR-041)
+        let timestamp_output = Command::new("git")
+            .args(["log", "-1", "--format=%ct", "HEAD"])
+            .current_dir(repo_path)
+            .output();
+
+        let commit_timestamp = timestamp_output.ok().and_then(|o| {
+            if o.status.success() {
+                String::from_utf8_lossy(&o.stdout)
+                    .trim()
+                    .parse::<i64>()
+                    .ok()
+            } else {
+                None
+            }
+        });
+
         // Get upstream
         let upstream_output = Command::new("git")
             .args(["rev-parse", "--abbrev-ref", "@{u}"])
@@ -202,6 +226,7 @@ impl Branch {
             commit,
             ahead: 0,
             behind: 0,
+            commit_timestamp,
         };
 
         // Get ahead/behind
@@ -492,6 +517,7 @@ mod tests {
             commit: "abc123".to_string(),
             ahead: 2,
             behind: 1,
+            commit_timestamp: None,
         };
         assert_eq!(
             branch.divergence_status(),
