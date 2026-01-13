@@ -7,6 +7,10 @@ use gwt_core::error::GwtError;
 use gwt_core::worktree::WorktreeManager;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 mod cli;
 mod tui;
@@ -428,15 +432,66 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<(), GwtError> {
         eprintln!("Warning: Failed to save session: {}", e);
     }
 
-    // Execute the command
-    let status = Command::new(&executable)
+    // Spawn the agent process (FR-043: allows periodic timestamp updates)
+    let mut child = Command::new(&executable)
         .args(&base_args)
         .current_dir(&config.worktree_path)
-        .status()
+        .spawn()
         .map_err(|e| GwtError::AgentLaunchFailed {
             name: cmd_name.to_string(),
             reason: format!("Failed to execute '{}': {}", executable, e),
         })?;
+
+    // FR-043: Start background thread to update timestamp every 30 seconds
+    let running = Arc::new(AtomicBool::new(true));
+    let running_clone = Arc::clone(&running);
+    let worktree_path = config.worktree_path.clone();
+    let branch_name = config.branch_name.clone();
+    let agent_id = config.agent.id().to_string();
+    let agent_label = config.agent.label().to_string();
+    let version = config.version.clone();
+    let model = config.model.clone();
+    let mode = config.execution_mode.label().to_string();
+    let reasoning_level = config.reasoning_level.map(|r| r.label().to_string());
+    let skip_permissions = config.skip_permissions;
+
+    let updater_thread = thread::spawn(move || {
+        while running_clone.load(Ordering::Relaxed) {
+            // Wait 30 seconds before updating
+            thread::sleep(Duration::from_secs(30));
+
+            // Check if still running before updating
+            if !running_clone.load(Ordering::Relaxed) {
+                break;
+            }
+
+            // Update timestamp (FR-043)
+            let entry = ToolSessionEntry {
+                branch: branch_name.clone(),
+                worktree_path: Some(worktree_path.to_string_lossy().to_string()),
+                tool_id: agent_id.clone(),
+                tool_label: agent_label.clone(),
+                session_id: None,
+                mode: Some(mode.clone()),
+                model: model.clone(),
+                reasoning_level: reasoning_level.clone(),
+                skip_permissions: Some(skip_permissions),
+                tool_version: Some(version.clone()),
+                timestamp: Utc::now().timestamp_millis(),
+            };
+            let _ = save_session_entry(&worktree_path, entry);
+        }
+    });
+
+    // Wait for the agent process to finish
+    let status = child.wait().map_err(|e| GwtError::AgentLaunchFailed {
+        name: cmd_name.to_string(),
+        reason: format!("Failed to wait for '{}': {}", executable, e),
+    })?;
+
+    // Signal the updater thread to stop and wait for it
+    running.store(false, Ordering::Relaxed);
+    let _ = updater_thread.join();
 
     if !status.success() {
         eprintln!("Warning: {} exited with status: {}", cmd_name, status);

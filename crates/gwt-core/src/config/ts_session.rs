@@ -109,10 +109,7 @@ pub fn load_ts_session(repo_root: &Path) -> Option<TsSessionData> {
 ///
 /// Adds a new entry to the session history and updates last-used fields.
 /// Creates the session file if it doesn't exist.
-pub fn save_session_entry(
-    repo_root: &Path,
-    entry: ToolSessionEntry,
-) -> Result<(), std::io::Error> {
+pub fn save_session_entry(repo_root: &Path, entry: ToolSessionEntry) -> Result<(), std::io::Error> {
     // Resolve to main repo root for consistency
     let main_root = crate::git::get_main_repo_root(repo_root);
     let session_path = get_ts_session_path(&main_root);
@@ -150,9 +147,8 @@ pub fn save_session_entry(
     }
 
     // Write to file
-    let content = serde_json::to_string_pretty(&session).map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-    })?;
+    let content = serde_json::to_string_pretty(&session)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
     std::fs::write(&session_path, content)?;
 
     Ok(())
