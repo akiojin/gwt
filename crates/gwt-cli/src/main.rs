@@ -359,6 +359,73 @@ fn check_git_available() -> bool {
         .is_ok()
 }
 
+/// Detect package manager from lock files (FR-040a)
+fn detect_package_manager(worktree_path: &Path) -> Option<&'static str> {
+    // Check lock files in order of preference
+    if worktree_path.join("bun.lockb").exists() || worktree_path.join("bun.lock").exists() {
+        Some("bun")
+    } else if worktree_path.join("pnpm-lock.yaml").exists() {
+        Some("pnpm")
+    } else if worktree_path.join("yarn.lock").exists() {
+        Some("yarn")
+    } else if worktree_path.join("package-lock.json").exists() {
+        Some("npm")
+    } else if worktree_path.join("package.json").exists() {
+        // Default to npm if package.json exists but no lock file
+        Some("npm")
+    } else {
+        None
+    }
+}
+
+/// Install dependencies in worktree (FR-040a, FR-040b)
+///
+/// FR-040a: Display package manager output directly to stdout/stderr
+/// FR-040b: Do NOT use spinner during installation (output would conflict)
+fn install_dependencies(worktree_path: &Path) -> Result<(), GwtError> {
+    // Check if package.json exists
+    if !worktree_path.join("package.json").exists() {
+        return Ok(());
+    }
+
+    // Check if node_modules already exists (skip if already installed)
+    if worktree_path.join("node_modules").exists() {
+        return Ok(());
+    }
+
+    // Detect package manager
+    let pm = match detect_package_manager(worktree_path) {
+        Some(pm) => pm,
+        None => return Ok(()),
+    };
+
+    println!("Installing dependencies with {}...", pm);
+    println!();
+
+    // FR-040a: Run package manager with inherited stdout/stderr (no capture)
+    // FR-040b: No spinner - just let output flow directly
+    let status = Command::new(pm)
+        .arg("install")
+        .current_dir(worktree_path)
+        .status()
+        .map_err(|e| GwtError::AgentLaunchFailed {
+            name: pm.to_string(),
+            reason: format!("Failed to run '{}': {}", pm, e),
+        })?;
+
+    if !status.success() {
+        eprintln!();
+        eprintln!("Warning: {} install exited with status: {}", pm, status);
+        // Don't fail - let the user decide whether to continue
+    } else {
+        println!();
+        println!("Dependencies installed successfully.");
+    }
+
+    println!();
+    Ok(())
+}
+
 /// Launch a coding agent after TUI exits
 ///
 /// Version selection behavior (FR-066, FR-067, FR-068):
@@ -366,6 +433,9 @@ fn check_git_available() -> bool {
 /// - "latest": Use bunx @package@latest
 /// - specific version: Use bunx @package@X.Y.Z
 fn launch_coding_agent(config: AgentLaunchConfig) -> Result<(), GwtError> {
+    // FR-040a/FR-040b: Install dependencies before launching agent
+    install_dependencies(&config.worktree_path)?;
+
     let cmd_name = config.agent.command_name();
     let npm_package = config.agent.npm_package();
 
