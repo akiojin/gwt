@@ -9,7 +9,7 @@ use crossterm::{
 };
 use gwt_core::config::get_branch_tool_history;
 use gwt_core::error::GwtError;
-use gwt_core::git::Branch;
+use gwt_core::git::{Branch, PrCache};
 use gwt_core::worktree::WorktreeManager;
 use ratatui::{prelude::*, widgets::*};
 use std::io;
@@ -95,6 +95,8 @@ pub struct Model {
     pending_unsafe_selection: Option<String>,
     /// Pending cleanup branches (FR-010)
     pending_cleanup_branches: Vec<String>,
+    /// PR cache for title search (FR-016)
+    pr_cache: PrCache,
 }
 
 /// Screen types
@@ -188,6 +190,7 @@ impl Model {
             pending_agent_launch: None,
             pending_unsafe_selection: None,
             pending_cleanup_branches: Vec::new(),
+            pr_cache: PrCache::new(),
         };
 
         // Load initial data
@@ -205,6 +208,9 @@ impl Model {
                 // Load tool usage from TypeScript session file (FR-070)
                 let tool_usage_map = gwt_core::config::get_last_tool_usage_map(&self.repo_root);
 
+                // FR-016: Populate PR cache for PR title search
+                self.pr_cache.populate(&self.repo_root);
+
                 let mut branch_items: Vec<BranchItem> = branches
                     .iter()
                     .map(|b| {
@@ -217,6 +223,10 @@ impl Model {
                             let session_timestamp = entry.timestamp / 1000; // Convert ms to seconds
                             let git_timestamp = item.last_commit_timestamp.unwrap_or(0);
                             item.last_commit_timestamp = Some(session_timestamp.max(git_timestamp));
+                        }
+                        // FR-016: Set PR title from cache
+                        if let Some(title) = self.pr_cache.get_title(&b.name) {
+                            item.pr_title = Some(title.to_string());
                         }
                         item
                     })

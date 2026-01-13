@@ -149,6 +149,8 @@ pub struct BranchItem {
     pub last_commit_timestamp: Option<i64>,
     pub last_tool_usage: Option<String>,
     pub is_selected: bool,
+    /// PR title for search (FR-016)
+    pub pr_title: Option<String>,
 }
 
 /// Worktree status
@@ -207,6 +209,7 @@ impl BranchItem {
             last_commit_timestamp: branch.commit_timestamp,
             last_tool_usage: None,
             is_selected: false,
+            pr_title: None, // FR-016: Will be populated from PrCache
         }
     }
 
@@ -322,10 +325,22 @@ impl BranchListState {
                 .collect(),
         };
 
-        // Apply text filter
+        // Apply text filter (FR-015: branch name, FR-016: PR title)
         if !self.filter.is_empty() {
             let filter_lower = self.filter.to_lowercase();
-            result.retain(|b| b.name.to_lowercase().contains(&filter_lower));
+            result.retain(|b| {
+                // FR-015: Match branch name (case-insensitive)
+                if b.name.to_lowercase().contains(&filter_lower) {
+                    return true;
+                }
+                // FR-016: Match PR title if available (case-insensitive)
+                if let Some(ref pr_title) = b.pr_title {
+                    if pr_title.to_lowercase().contains(&filter_lower) {
+                        return true;
+                    }
+                }
+                false
+            });
         }
 
         // Check if main branch exists for develop priority
@@ -1014,6 +1029,7 @@ mod tests {
                 last_commit_timestamp: None,
                 last_tool_usage: None,
                 is_selected: false,
+                pr_title: None,
             },
             BranchItem {
                 name: "develop".to_string(),
@@ -1032,6 +1048,7 @@ mod tests {
                 last_commit_timestamp: None,
                 last_tool_usage: None,
                 is_selected: false,
+                pr_title: None,
             },
         ];
 
@@ -1068,6 +1085,7 @@ mod tests {
                 last_commit_timestamp: None,
                 last_tool_usage: None,
                 is_selected: false,
+                pr_title: None,
             },
             BranchItem {
                 name: "remotes/origin/main".to_string(),
@@ -1086,6 +1104,7 @@ mod tests {
                 last_commit_timestamp: None,
                 last_tool_usage: None,
                 is_selected: false,
+                pr_title: None,
             },
         ];
 
