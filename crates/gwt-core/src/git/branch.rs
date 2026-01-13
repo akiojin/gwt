@@ -328,6 +328,43 @@ impl Branch {
         }
     }
 
+    /// Get divergence (ahead, behind) between two refs
+    pub fn divergence_between(repo_path: &Path, left: &str, right: &str) -> Result<(usize, usize)> {
+        let output = Command::new("git")
+            .args([
+                "rev-list",
+                "--left-right",
+                "--count",
+                &format!("{left}...{right}"),
+            ])
+            .current_dir(repo_path)
+            .output()
+            .map_err(|e| GwtError::GitOperationFailed {
+                operation: "rev-list".to_string(),
+                details: e.to_string(),
+            })?;
+
+        if !output.status.success() {
+            return Err(GwtError::GitOperationFailed {
+                operation: "rev-list".to_string(),
+                details: String::from_utf8_lossy(&output.stderr).to_string(),
+            });
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let parts: Vec<&str> = stdout.trim().split('\t').collect();
+        if parts.len() == 2 {
+            let ahead = parts[0].parse().unwrap_or(0);
+            let behind = parts[1].parse().unwrap_or(0);
+            Ok((ahead, behind))
+        } else {
+            Err(GwtError::GitOperationFailed {
+                operation: "rev-list parse".to_string(),
+                details: stdout.to_string(),
+            })
+        }
+    }
+
     /// Get the divergence status from remote
     pub fn divergence_status(&self) -> DivergenceStatus {
         if !self.has_remote {
@@ -505,6 +542,34 @@ mod tests {
         assert!(Branch::exists(temp.path(), "feature/test").unwrap());
         Branch::delete(temp.path(), "feature/test", false).unwrap();
         assert!(!Branch::exists(temp.path(), "feature/test").unwrap());
+    }
+
+    #[test]
+    fn test_divergence_between() {
+        let temp = create_test_repo();
+        let base = Branch::current(temp.path()).unwrap().unwrap().name;
+
+        Command::new("git")
+            .args(["checkout", "-b", "feature/test"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        std::fs::write(temp.path().join("feature.txt"), "feature").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "feature"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+
+        let (ahead, behind) =
+            Branch::divergence_between(temp.path(), "feature/test", &base).unwrap();
+        assert!(ahead > 0);
+        assert_eq!(behind, 0);
     }
 
     #[test]

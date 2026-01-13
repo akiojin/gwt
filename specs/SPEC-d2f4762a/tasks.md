@@ -23,6 +23,14 @@
 - [x] **T9910** [P] [共通] `specs/SPEC-d2f4762a/plan.md` にフッターのEnter表記削除を追記
 - [x] **T9911** [実装] ブランチ一覧のフッター表示から Enter 表記を削除（`crates/gwt-cli/src/tui/app.rs`, `crates/gwt-cli/src/tui/screens/branch_list.rs`）
 
+## 追加作業: 安全判定の即時確定と未マージ判定の高速化 (2026-01-13)
+
+- [x] **T9912** [P] [共通] `specs/SPEC-d2f4762a/spec.md` に未コミット/未プッシュの即時確定と未マージ判定の要件を追記
+- [x] **T9913** [P] [共通] `specs/SPEC-d2f4762a/plan.md` に安全判定の即時確定方針を追記
+- [x] **T9914** [Test] `crates/gwt-core/src/git/branch.rs` にベースブランチ差分判定のテストを追加
+- [x] **T9915** [実装] `crates/gwt-core/src/git/branch.rs` にベースブランチとの差分取得ヘルパーを追加
+- [x] **T9916** [実装] `crates/gwt-cli/src/tui/app.rs` で未コミット/未プッシュの即時判定と未マージ判定を反映
+
 ## フェーズ0: ブランチ一覧アイコンのASCII再整理 (優先度: P1)
 
 **ストーリー**: ブランチ一覧の選択/Worktree/安全アイコンをASCII表記へ整理し、アイコン間にスペースを入れてカーソル記号は表示しない。

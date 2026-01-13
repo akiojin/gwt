@@ -241,6 +241,10 @@ impl Model {
 
     /// Refresh data from repository
     fn refresh_data(&mut self) {
+        let settings = gwt_core::config::Settings::load(&self.repo_root).unwrap_or_default();
+        let base_branch = settings.default_base_branch.clone();
+        let base_branch_exists = Branch::exists(&self.repo_root, &base_branch).unwrap_or(false);
+
         if let Ok(manager) = WorktreeManager::new(&self.repo_root) {
             // Get branches
             if let Ok(branches) = Branch::list(&self.repo_root) {
@@ -256,6 +260,7 @@ impl Model {
                     .iter()
                     .map(|b| {
                         let mut item = BranchItem::from_branch(b, &worktrees);
+
                         // Set tool usage from TypeScript session history (FR-070)
                         if let Some(entry) = tool_usage_map.get(&b.name) {
                             item.last_tool_usage = Some(entry.format_tool_usage());
@@ -265,10 +270,34 @@ impl Model {
                             let git_timestamp = item.last_commit_timestamp.unwrap_or(0);
                             item.last_commit_timestamp = Some(session_timestamp.max(git_timestamp));
                         }
+
                         // FR-016: Set PR title from cache
                         if let Some(title) = self.pr_cache.get_title(&b.name) {
                             item.pr_title = Some(title.to_string());
                         }
+
+                        // Safety check short-circuit: use immediate signals first
+                        if item.branch_type == BranchType::Local {
+                            if b.ahead > 0 {
+                                item.has_unpushed = true;
+                            }
+
+                            if item.has_changes
+                                || item.has_unpushed
+                                || !b.has_remote
+                                || !base_branch_exists
+                            {
+                                item.safe_to_cleanup = Some(false);
+                            } else if let Ok((ahead, _)) =
+                                Branch::divergence_between(&self.repo_root, &b.name, &base_branch)
+                            {
+                                item.is_unmerged = ahead > 0;
+                                item.safe_to_cleanup = Some(!item.is_unmerged);
+                            } else {
+                                item.safe_to_cleanup = Some(false);
+                            }
+                        }
+
                         item
                     })
                     .collect();
@@ -284,10 +313,8 @@ impl Model {
                 self.total_count = branch_items.len();
                 self.active_count = branch_items.iter().filter(|b| b.has_worktree).count();
                 self.branch_list = BranchListState::new().with_branches(branch_items);
-            }
 
-            // Get base branches for worktree create
-            if let Ok(branches) = Branch::list(&self.repo_root) {
+                // Get base branches for worktree create
                 let base_branches: Vec<String> = branches
                     .iter()
                     .filter(|b| !b.name.starts_with("remotes/"))
@@ -297,8 +324,6 @@ impl Model {
             }
         }
 
-        // Load settings
-        let settings = gwt_core::config::Settings::load(&self.repo_root).unwrap_or_default();
         self.settings = SettingsState::new().with_settings(settings.clone());
 
         // Load logs from configured log directory
