@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use thiserror::Error;
 
-const ERROR_MESSAGES_TOML: &str = include_str!("../../../messages/errors.toml");
+const ERROR_MESSAGES_TOML: &str = include_str!("errors.toml");
 
 fn error_messages() -> &'static toml::Value {
     static MESSAGES: OnceLock<toml::Value> = OnceLock::new();

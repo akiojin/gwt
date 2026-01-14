@@ -1,0 +1,52 @@
+[git]
+E1001 = "Repository not found"
+E1002 = "Not a git repository"
+E1003 = "Branch not found"
+E1004 = "Branch already exists"
+E1005 = "Remote not found"
+E1006 = "Fetch failed"
+E1007 = "Fast-forward pull failed"
+E1008 = "Uncommitted changes detected"
+E1009 = "Unpushed commits detected"
+E1010 = "Branch diverged from remote"
+E1011 = "Git command failed"
+E1012 = "Git executable not found"
+E1013 = "Git operation failed"
+E1014 = "Branch create failed"
+E1015 = "Branch delete failed"
+
+[worktree]
+E2001 = "Worktree not found"
+E2002 = "Worktree already exists"
+E2003 = "Failed to create worktree"
+E2004 = "Failed to remove worktree"
+E2005 = "Protected branch cannot be deleted"
+E2006 = "Worktree path invalid"
+E2007 = "Orphaned worktree detected"
+E2008 = "Worktree locked by another process"
+E2009 = "Path exists but is not a stale worktree"
+
+[config]
+E3001 = "Configuration file not found"
+E3002 = "Configuration parse error"
+E3003 = "Configuration write error"
+E3004 = "Invalid configuration value"
+E3005 = "Profile not found"
+E3006 = "Session not found"
+E3007 = "Configuration migration failed"
+
+[agent]
+E4001 = "Agent not found"
+E4002 = "Agent launch failed"
+E4003 = "Agent configuration invalid"
+E4004 = "Agent process terminated unexpectedly"
+
+[web]
+E5001 = "Server bind failed"
+E5002 = "WebSocket connection failed"
+E5003 = "API request failed"
+E5004 = "PTY spawn failed"
+
+[general]
+E9001 = "IO error"
+E9002 = "Internal error"
