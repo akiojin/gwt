@@ -101,10 +101,18 @@ pub enum BranchType {
 pub enum SafetyStatus {
     #[default]
     Unknown,
+    Pending,
     Safe,
     Uncommitted,
     Unpushed,
     Unmerged,
+    Unsafe,
+}
+
+impl SafetyStatus {
+    pub fn is_unsafe(self) -> bool {
+        !matches!(self, SafetyStatus::Safe)
+    }
 }
 
 /// Statistics for branch list
@@ -131,6 +139,7 @@ pub struct BranchItem {
     pub has_remote_counterpart: bool,
     pub remote_name: Option<String>,
     pub safe_to_cleanup: Option<bool>,
+    pub safety_status: SafetyStatus,
     pub is_unmerged: bool,
     pub last_commit_timestamp: Option<i64>,
     pub last_tool_usage: Option<String>,
@@ -173,7 +182,7 @@ impl BranchItem {
             BranchType::Local
         };
 
-        Self {
+        let mut item = Self {
             name: branch.name.clone(),
             branch_type,
             is_current: branch.is_current,
@@ -190,13 +199,38 @@ impl BranchItem {
                 None
             },
             safe_to_cleanup: None,
+            safety_status: SafetyStatus::Unknown,
             is_unmerged: false,
             // FR-041: Set commit timestamp from git
             last_commit_timestamp: branch.commit_timestamp,
             last_tool_usage: None,
             is_selected: false,
             pr_title: None, // FR-016: Will be populated from PrCache
-        }
+        };
+        item.update_safety_status();
+        item
+    }
+
+    pub fn update_safety_status(&mut self) {
+        self.safety_status = if self.branch_type == BranchType::Remote {
+            SafetyStatus::Unknown
+        } else if self.has_changes {
+            SafetyStatus::Uncommitted
+        } else if self.has_unpushed {
+            SafetyStatus::Unpushed
+        } else if self.is_unmerged {
+            SafetyStatus::Unmerged
+        } else if self.safe_to_cleanup == Some(true) {
+            SafetyStatus::Safe
+        } else if self.safe_to_cleanup.is_none() {
+            SafetyStatus::Pending
+        } else {
+            SafetyStatus::Unsafe
+        };
+    }
+
+    pub fn is_unsafe(&self) -> bool {
+        self.safety_status.is_unsafe()
     }
 
     /// Get safety icon and color
@@ -206,26 +240,22 @@ impl BranchItem {
             // FR-031c: Remote branches show empty safety icon
             return (" ".to_string(), Color::Reset);
         }
-        if self.has_changes {
-            return ("!".to_string(), Color::Red);
-        }
-        if self.has_unpushed {
-            return ("!".to_string(), Color::Yellow);
-        }
-        if self.is_unmerged {
-            return ("*".to_string(), Color::Yellow);
-        }
-        if self.safe_to_cleanup == Some(true) {
-            return ("o".to_string(), Color::Green);
-        }
-        // FR-031b: Safety check pending - show spinner if frame provided
-        if self.safe_to_cleanup.is_none() {
-            if let Some(frame) = spinner_frame {
-                let spinner_char = SPINNER_FRAMES[frame % SPINNER_FRAMES.len()];
-                return (spinner_char.to_string(), Color::Yellow);
+        match self.safety_status {
+            SafetyStatus::Uncommitted => ("!".to_string(), Color::Red),
+            SafetyStatus::Unpushed => ("!".to_string(), Color::Yellow),
+            SafetyStatus::Unmerged => ("*".to_string(), Color::Yellow),
+            SafetyStatus::Safe => ("o".to_string(), Color::Green),
+            SafetyStatus::Pending => {
+                // FR-031b: Safety check pending - show spinner if frame provided
+                if let Some(frame) = spinner_frame {
+                    let spinner_char = SPINNER_FRAMES[frame % SPINNER_FRAMES.len()];
+                    (spinner_char.to_string(), Color::Yellow)
+                } else {
+                    ("!".to_string(), Color::Red)
+                }
             }
+            SafetyStatus::Unknown | SafetyStatus::Unsafe => ("!".to_string(), Color::Red),
         }
-        ("!".to_string(), Color::Red)
     }
 
     /// Get worktree icon and color
@@ -579,6 +609,7 @@ impl BranchListState {
                 item.has_unpushed = has_unpushed;
                 item.is_unmerged = is_unmerged;
                 item.safe_to_cleanup = Some(safe_to_cleanup);
+                item.update_safety_status();
             }
         }
     }
@@ -1008,6 +1039,7 @@ mod tests {
                 has_remote_counterpart: true,
                 remote_name: None,
                 safe_to_cleanup: Some(true),
+                safety_status: SafetyStatus::Safe,
                 is_unmerged: false,
                 last_commit_timestamp: None,
                 last_tool_usage: None,
@@ -1027,6 +1059,7 @@ mod tests {
                 has_remote_counterpart: false,
                 remote_name: None,
                 safe_to_cleanup: None,
+                safety_status: SafetyStatus::Pending,
                 is_unmerged: false,
                 last_commit_timestamp: None,
                 last_tool_usage: None,
@@ -1064,6 +1097,7 @@ mod tests {
                 has_remote_counterpart: true,
                 remote_name: None,
                 safe_to_cleanup: Some(true),
+                safety_status: SafetyStatus::Safe,
                 is_unmerged: false,
                 last_commit_timestamp: None,
                 last_tool_usage: None,
@@ -1083,6 +1117,7 @@ mod tests {
                 has_remote_counterpart: false,
                 remote_name: Some("remotes/origin/main".to_string()),
                 safe_to_cleanup: None,
+                safety_status: SafetyStatus::Unknown,
                 is_unmerged: false,
                 last_commit_timestamp: None,
                 last_tool_usage: None,
@@ -1119,6 +1154,7 @@ mod tests {
                 has_remote_counterpart: true,
                 remote_name: None,
                 safe_to_cleanup: Some(true),
+                safety_status: SafetyStatus::Safe,
                 is_unmerged: false,
                 last_commit_timestamp: None,
                 last_tool_usage: None,
@@ -1138,6 +1174,7 @@ mod tests {
                 has_remote_counterpart: false,
                 remote_name: None,
                 safe_to_cleanup: Some(true),
+                safety_status: SafetyStatus::Safe,
                 is_unmerged: false,
                 last_commit_timestamp: None,
                 last_tool_usage: None,
@@ -1176,6 +1213,7 @@ mod tests {
                 has_remote_counterpart: false,
                 remote_name: None,
                 safe_to_cleanup: Some(true),
+                safety_status: SafetyStatus::Safe,
                 is_unmerged: false,
                 last_commit_timestamp: None,
                 last_tool_usage: None,
@@ -1195,6 +1233,7 @@ mod tests {
                 has_remote_counterpart: false,
                 remote_name: None,
                 safe_to_cleanup: Some(true),
+                safety_status: SafetyStatus::Safe,
                 is_unmerged: false,
                 last_commit_timestamp: None,
                 last_tool_usage: None,
@@ -1217,6 +1256,54 @@ mod tests {
     }
 
     #[test]
+    fn test_update_safety_status_prioritizes_flags() {
+        let mut item = BranchItem {
+            name: "feature/one".to_string(),
+            branch_type: BranchType::Local,
+            is_current: false,
+            has_worktree: false,
+            worktree_path: None,
+            worktree_status: WorktreeStatus::None,
+            has_changes: true,
+            has_unpushed: true,
+            divergence: DivergenceStatus::UpToDate,
+            has_remote_counterpart: false,
+            remote_name: None,
+            safe_to_cleanup: Some(true),
+            safety_status: SafetyStatus::Unknown,
+            is_unmerged: true,
+            last_commit_timestamp: None,
+            last_tool_usage: None,
+            is_selected: false,
+            pr_title: None,
+        };
+
+        item.update_safety_status();
+        assert_eq!(item.safety_status, SafetyStatus::Uncommitted);
+
+        item.has_changes = false;
+        item.update_safety_status();
+        assert_eq!(item.safety_status, SafetyStatus::Unpushed);
+
+        item.has_unpushed = false;
+        item.update_safety_status();
+        assert_eq!(item.safety_status, SafetyStatus::Unmerged);
+
+        item.is_unmerged = false;
+        item.safe_to_cleanup = Some(true);
+        item.update_safety_status();
+        assert_eq!(item.safety_status, SafetyStatus::Safe);
+
+        item.safe_to_cleanup = None;
+        item.update_safety_status();
+        assert_eq!(item.safety_status, SafetyStatus::Pending);
+
+        item.safe_to_cleanup = Some(false);
+        item.update_safety_status();
+        assert_eq!(item.safety_status, SafetyStatus::Unsafe);
+    }
+
+    #[test]
     fn test_apply_safety_update_updates_pending_branch() {
         let branches = vec![
             BranchItem {
@@ -1232,6 +1319,7 @@ mod tests {
                 has_remote_counterpart: false,
                 remote_name: None,
                 safe_to_cleanup: None,
+                safety_status: SafetyStatus::Pending,
                 is_unmerged: false,
                 last_commit_timestamp: None,
                 last_tool_usage: None,
@@ -1251,6 +1339,7 @@ mod tests {
                 has_remote_counterpart: false,
                 remote_name: None,
                 safe_to_cleanup: Some(false),
+                safety_status: SafetyStatus::Unsafe,
                 is_unmerged: false,
                 last_commit_timestamp: None,
                 last_tool_usage: None,
@@ -1270,6 +1359,7 @@ mod tests {
         assert!(item.has_unpushed);
         assert_eq!(item.safe_to_cleanup, Some(false));
         assert!(!item.is_unmerged);
+        assert_eq!(item.safety_status, SafetyStatus::Unpushed);
 
         state.apply_safety_update("feature/two", false, false, true);
         let item = state
@@ -1278,6 +1368,7 @@ mod tests {
             .find(|b| b.name == "feature/two")
             .unwrap();
         assert_eq!(item.safe_to_cleanup, Some(false));
+        assert_eq!(item.safety_status, SafetyStatus::Unsafe);
     }
 
     #[test]
@@ -1296,6 +1387,7 @@ mod tests {
                 has_remote_counterpart: true,
                 remote_name: None,
                 safe_to_cleanup: Some(true),
+                safety_status: SafetyStatus::Safe,
                 is_unmerged: false,
                 last_commit_timestamp: None,
                 last_tool_usage: None,
@@ -1315,6 +1407,7 @@ mod tests {
                 has_remote_counterpart: false,
                 remote_name: None,
                 safe_to_cleanup: Some(true),
+                safety_status: SafetyStatus::Safe,
                 is_unmerged: false,
                 last_commit_timestamp: None,
                 last_tool_usage: None,
@@ -1334,6 +1427,7 @@ mod tests {
                 has_remote_counterpart: false,
                 remote_name: None,
                 safe_to_cleanup: Some(true),
+                safety_status: SafetyStatus::Safe,
                 is_unmerged: false,
                 last_commit_timestamp: None,
                 last_tool_usage: None,

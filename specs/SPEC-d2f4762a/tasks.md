@@ -52,6 +52,13 @@
 - [x] **T9927** [P] [共通] `specs/SPEC-d2f4762a/spec.md` にクリーンアップ実行中の画面更新抑止を追記
 - [x] **T9928** [P] [共通] `specs/SPEC-d2f4762a/plan.md` にクリーンアップ中の画面更新抑止方針を追記
 
+## 追加作業: 安全判定キャッシュの統一 (2026-01-14)
+
+- [x] **T9929** [P] [共通] `specs/SPEC-d2f4762a/spec.md` に安全状態の統一要件を追記
+- [x] **T9930** [P] [共通] `specs/SPEC-d2f4762a/plan.md` に安全状態キャッシュ統一方針を追記
+- [x] **T9931** [Test] `crates/gwt-cli/src/tui/screens/branch_list.rs` に安全状態更新のテストを追加
+- [x] **T9932** [実装] `crates/gwt-cli/src/tui/screens/branch_list.rs` と `crates/gwt-cli/src/tui/app.rs` で安全状態キャッシュを追加し、表示と警告判定を統一
+
 ## フェーズ0: ブランチ一覧アイコンのASCII再整理 (優先度: P1)
 
 **ストーリー**: ブランチ一覧の選択/Worktree/安全アイコンをASCII表記へ整理し、アイコン間にスペースを入れてカーソル記号は表示しない。

@@ -310,6 +310,7 @@ impl Model {
                             }
                         }
 
+                        item.update_safety_status();
                         item
                     })
                     .collect();
@@ -957,7 +958,7 @@ impl Model {
                         // Only show warning when selecting (not deselecting)
                         if !is_selected {
                             // Check if branch is unsafe (FR-029b/FR-029e)
-                            let is_unsafe = branch.safe_to_cleanup != Some(true);
+                            let is_unsafe = branch.is_unsafe();
 
                             if is_unsafe && branch.branch_type == BranchType::Local {
                                 // Show warning dialog for unsafe branch selection
