@@ -11,28 +11,71 @@ permissions:
   id-token: write
 
 jobs:
-  release-please:
-    name: Release Please
+  create-tag:
+    name: Create Tag and Release
     runs-on: ubuntu-latest
+    # Only run on release branch merges (commits starting with "chore(release):")
+    if: startsWith(github.event.head_commit.message, 'chore(release):')
     outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
+      tag_name: ${{ steps.tag.outputs.tag_name }}
+      version: ${{ steps.tag.outputs.version }}
     steps:
-      - uses: googleapis/release-please-action@v4
-        id: release
-        with:
-          token: ${{ secrets.PERSONAL_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
-          manifest-file: .release-please-manifest.json
-          config-file: .release-please-config.json
-          target-branch: main
+      - uses: actions/checkout@v4
+
+      - name: Get version from Cargo.toml
+        id: tag
+        run: |
+          VERSION=$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          TAG_NAME="v${VERSION}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
+          echo "Version: $VERSION, Tag: $TAG_NAME"
+
+      - name: Check if tag exists
+        id: check-tag
+        run: |
+          TAG_NAME="${{ steps.tag.outputs.tag_name }}"
+          if git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Tag $TAG_NAME already exists"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Tag $TAG_NAME does not exist"
+          fi
+
+      - name: Create and push tag
+        if: steps.check-tag.outputs.exists == 'false'
+        run: |
+          TAG_NAME="${{ steps.tag.outputs.tag_name }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG_NAME" -m "Release $TAG_NAME"
+          git push origin "$TAG_NAME"
+
+      - name: Create GitHub Release
+        if: steps.check-tag.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ steps.tag.outputs.tag_name }}
+        run: |
+          # Extract changelog for this version
+          if [ -f CHANGELOG.md ]; then
+            NOTES=$(sed -n "/## \[${TAG_NAME#v}\]/,/## \[/p" CHANGELOG.md | head -n -1)
+          else
+            NOTES="Release $TAG_NAME"
+          fi
+
+          gh release create "$TAG_NAME" \
+            --title "$TAG_NAME" \
+            --notes "$NOTES" \
+            --draft=false
 
   publish-crates:
     name: Publish to crates.io
-    needs: release-please
-    if: needs.release-please.outputs.release_created == 'true'
+    needs: create-tag
     runs-on: ubuntu-latest
     environment: release
-    continue-on-error: true  # Don't block other jobs if crates.io publish fails
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -58,8 +101,7 @@ jobs:
 
   build-binaries:
     name: Build (${{ matrix.target }})
-    needs: release-please
-    if: needs.release-please.outputs.release_created == 'true'
+    needs: create-tag
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -115,8 +157,7 @@ jobs:
 
   upload-release:
     name: Upload to GitHub Release
-    needs: [release-please, build-binaries]
-    if: needs.release-please.outputs.release_created == 'true'
+    needs: [create-tag, build-binaries, publish-crates]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -128,13 +169,12 @@ jobs:
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.release-please.outputs.tag_name }}
+          tag_name: ${{ needs.create-tag.outputs.tag_name }}
           files: artifacts/**/*
 
   publish-npm:
     name: Publish to npm
-    needs: [release-please, upload-release]
-    if: needs.release-please.outputs.release_created == 'true'
+    needs: [create-tag, upload-release]
     runs-on: ubuntu-latest
     environment: release
     steps:

@@ -10,10 +10,12 @@ develop から main への Release PR を作成し、マージ後に完全自動
 ## 実行内容
 
 1. `gh workflow run prepare-release.yml --ref develop` を実行
-2. develop → main の Release PR を作成
-3. CI チェック通過後、Release PR が main に自動マージ
-4. GitHub Actions が以下を自動実行 (**release.yml** で統合処理):
-   - release-please でタグ・GitHub Release・Release PR を作成
+2. Conventional Commits を解析してバージョン自動判定
+3. git-cliff で CHANGELOG.md を更新
+4. Cargo.toml, package.json のバージョンを更新
+5. release/YYYYMMDD-HHMMSS ブランチから main への PR を作成
+6. CI チェック通過後、Release PR が main にマージされると以下を自動実行:
+   - タグ・GitHub Release を作成
    - crates.io へ公開 (Trusted Publishing)
    - クロスコンパイル済みバイナリを GitHub Release にアップロード
    - npm へ公開 (provenance 付き)
@@ -35,7 +37,7 @@ gh workflow run prepare-release.yml --ref develop
 
 ```bash
 # Release PR を確認
-gh pr list --base main --head develop
+gh pr list --base main
 
 # Release PR を手動マージ（自動マージが有効でない場合）
 gh pr merge <PR番号> --merge
