@@ -1,12 +1,21 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
-## [5.1.0] - 2026-01-14
+## [5.2.0] - 2026-01-14
+
+### Bug Fixes
+
+- Remove publish-crates dependency from upload-release job
+- Add sync-develop job to sync main back to develop after release
 
 ### Miscellaneous Tasks
 
 - Remove release-please manifest (migrating to custom action)
 - Remove release-please config (migrating to custom action)
+- Sync version with main (5.1.0)
+- Sync version with main (5.1.0)
+- Sync CHANGELOG.md from main after v5.1.0 release
+- Sync main to develop after v5.1.0 release (#594)
 
 ## [gwt-v6.0.1] - 2026-01-14
 
