@@ -89,8 +89,12 @@
 
 - feature/\* ブランチは develop へ Auto Merge し、develop で次回リリース候補を蓄積する。
 - `/release` コマンド（または `gh workflow run prepare-release.yml --ref develop`）で develop → main の Release PR を作成する。
-- Release PR が main にマージされると `.github/workflows/release.yml` が release-please でタグ・GitHub Release・Release PR を作成する。
-- `v*` タグの push をトリガーに `.github/workflows/publish.yml` がクロスコンパイル済みバイナリを GitHub Release にアップロードする。
+- Release PR が main にマージされると `.github/workflows/release.yml` が以下を自動実行:
+  - release-please でタグ・GitHub Release・Release PR を作成
+  - crates.io へ公開（Trusted Publishing）
+  - クロスコンパイル済みバイナリを GitHub Release にアップロード
+  - npm へ公開（provenance 付き）
+- package.json のバージョンは release-please が自動更新（extra-files 設定）。
 
 ## 使用中の技術
 
