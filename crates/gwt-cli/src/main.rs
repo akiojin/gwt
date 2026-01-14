@@ -7,6 +7,8 @@ use gwt_core::agent::get_command_version;
 use gwt_core::config::{save_session_entry, Settings, ToolSessionEntry};
 use gwt_core::error::GwtError;
 use gwt_core::worktree::WorktreeManager;
+use std::fs;
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -621,6 +623,25 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
     running.store(false, Ordering::Relaxed);
     let _ = updater_thread.join();
 
+    if let Some(session_id) = detect_agent_session_id(&config) {
+        let entry = ToolSessionEntry {
+            branch: config.branch_name.clone(),
+            worktree_path: Some(config.worktree_path.to_string_lossy().to_string()),
+            tool_id: config.agent.id().to_string(),
+            tool_label: config.agent.label().to_string(),
+            session_id: Some(session_id),
+            mode: Some(config.execution_mode.label().to_string()),
+            model: config.model.clone(),
+            reasoning_level: config.reasoning_level.map(|r| r.label().to_string()),
+            skip_permissions: Some(config.skip_permissions),
+            tool_version: Some(selected_version.clone()),
+            timestamp: Utc::now().timestamp_millis(),
+        };
+        if let Err(e) = save_session_entry(&config.worktree_path, entry) {
+            eprintln!("Warning: Failed to save session: {}", e);
+        }
+    }
+
     let duration_ms = started_at.elapsed().as_millis();
     let exit_info = classify_exit_status(status);
     match exit_info {
@@ -782,6 +803,277 @@ fn runner_label(executable: &str) -> Option<String> {
         .file_name()
         .and_then(|name| name.to_str())
         .map(|name| name.to_string())
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+}
+
+fn encode_claude_project_path(path: &Path) -> String {
+    path.to_string_lossy()
+        .chars()
+        .map(|ch| match ch {
+            '/' | '\\' | '.' | ':' => '-',
+            _ => ch,
+        })
+        .collect()
+}
+
+fn parse_generic_session_id(path: &Path) -> Option<String> {
+    let content = fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let keys = [
+        "session_id",
+        "sessionId",
+        "id",
+        "chat_id",
+        "chatId",
+        "conversation_id",
+        "conversationId",
+    ];
+    for key in keys {
+        if let Some(val) = value.get(key) {
+            if let Some(text) = val.as_str() {
+                return Some(text.to_string());
+            }
+            if let Some(num) = val.as_i64() {
+                return Some(num.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn parse_codex_session_meta(path: &Path) -> Option<(String, Option<String>)> {
+    let file = fs::File::open(path).ok()?;
+    let reader = std::io::BufReader::new(file);
+    for line in reader.lines().take(5) {
+        let line = line.ok()?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_str(&line).ok()?;
+        let payload = value.get("payload")?;
+        let id = payload.get("id")?.as_str()?.to_string();
+        let cwd = payload
+            .get("cwd")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        return Some((id, cwd));
+    }
+    None
+}
+
+fn detect_codex_session_id_at(home: &Path, worktree_path: &Path) -> Option<String> {
+    let root = home.join(".codex").join("sessions");
+    if !root.exists() {
+        return None;
+    }
+    let target_str = worktree_path.to_string_lossy().to_string();
+    let target_canon = fs::canonicalize(worktree_path).ok();
+    let mut latest_match: Option<(std::time::SystemTime, String)> = None;
+    let mut latest_any: Option<(std::time::SystemTime, String)> = None;
+    let mut stack = vec![root];
+
+    while let Some(dir) = stack.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let metadata = match entry.metadata() {
+                Ok(metadata) => metadata,
+                Err(_) => continue,
+            };
+            if metadata.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let modified = metadata
+                .modified()
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            let Some((id, cwd)) = parse_codex_session_meta(&path) else {
+                continue;
+            };
+            let should_update_any = latest_any
+                .as_ref()
+                .map(|(time, _)| modified > *time)
+                .unwrap_or(true);
+            if should_update_any {
+                latest_any = Some((modified, id.clone()));
+            }
+
+            if let Some(cwd) = cwd {
+                let matches_target = if cwd == target_str {
+                    true
+                } else {
+                    let cwd_path = PathBuf::from(&cwd);
+                    match (fs::canonicalize(&cwd_path).ok(), target_canon.as_ref()) {
+                        (Some(cwd_canon), Some(target_canon)) => cwd_canon == *target_canon,
+                        _ => false,
+                    }
+                };
+                if matches_target {
+                    let should_update_match = latest_match
+                        .as_ref()
+                        .map(|(time, _)| modified > *time)
+                        .unwrap_or(true);
+                    if should_update_match {
+                        latest_match = Some((modified, id));
+                    }
+                }
+            }
+        }
+    }
+
+    latest_match
+        .or(latest_any)
+        .map(|(_, session_id)| session_id)
+}
+
+fn detect_claude_session_id_at(home: &Path, worktree_path: &Path) -> Option<String> {
+    let project_dir = home
+        .join(".claude")
+        .join("projects")
+        .join(encode_claude_project_path(worktree_path));
+    if !project_dir.exists() {
+        return None;
+    }
+    let entries = fs::read_dir(&project_dir).ok()?;
+    let mut latest: Option<(std::time::SystemTime, String)> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+        let modified = metadata
+            .modified()
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        let stem = path.file_stem().and_then(|s| s.to_str())?.to_string();
+        let should_update = latest
+            .as_ref()
+            .map(|(time, _)| modified > *time)
+            .unwrap_or(true);
+        if should_update {
+            latest = Some((modified, stem));
+        }
+    }
+    latest.map(|(_, session_id)| session_id)
+}
+
+fn detect_gemini_session_id_at(home: &Path) -> Option<String> {
+    let root = home.join(".gemini").join("tmp");
+    if !root.exists() {
+        return None;
+    }
+    let mut latest: Option<(std::time::SystemTime, PathBuf)> = None;
+    let mut stack = vec![root];
+    while let Some(dir) = stack.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let metadata = match entry.metadata() {
+                Ok(metadata) => metadata,
+                Err(_) => continue,
+            };
+            if metadata.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let path_text = path.to_string_lossy();
+            if !path_text.contains("/chats/") {
+                continue;
+            }
+            let modified = metadata
+                .modified()
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            let should_update = latest
+                .as_ref()
+                .map(|(time, _)| modified > *time)
+                .unwrap_or(true);
+            if should_update {
+                latest = Some((modified, path));
+            }
+        }
+    }
+    let path = latest.map(|(_, path)| path)?;
+    parse_generic_session_id(&path).or_else(|| {
+        path.file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string())
+    })
+}
+
+fn detect_opencode_session_id_at(home: &Path) -> Option<String> {
+    let root = home.join(".local").join("share").join("opencode");
+    if !root.exists() {
+        return None;
+    }
+    let mut latest: Option<(std::time::SystemTime, PathBuf)> = None;
+    let mut stack = vec![root];
+    while let Some(dir) = stack.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let metadata = match entry.metadata() {
+                Ok(metadata) => metadata,
+                Err(_) => continue,
+            };
+            if metadata.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let ext = path.extension().and_then(|ext| ext.to_str());
+            if ext != Some("json") && ext != Some("jsonl") {
+                continue;
+            }
+            let modified = metadata
+                .modified()
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            let should_update = latest
+                .as_ref()
+                .map(|(time, _)| modified > *time)
+                .unwrap_or(true);
+            if should_update {
+                latest = Some((modified, path));
+            }
+        }
+    }
+    let path = latest.map(|(_, path)| path)?;
+    parse_generic_session_id(&path).or_else(|| {
+        path.file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string())
+    })
+}
+
+fn detect_agent_session_id(config: &AgentLaunchConfig) -> Option<String> {
+    let home = home_dir()?;
+    match config.agent {
+        CodingAgent::CodexCli => detect_codex_session_id_at(&home, &config.worktree_path),
+        CodingAgent::ClaudeCode => detect_claude_session_id_at(&home, &config.worktree_path),
+        CodingAgent::GeminiCli => detect_gemini_session_id_at(&home),
+        CodingAgent::OpenCode => detect_opencode_session_id_at(&home),
+    }
 }
 
 /// Build agent-specific command line arguments
@@ -964,6 +1256,9 @@ fn classify_exit_status(status: std::process::ExitStatus) -> ExitClassification 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::thread::sleep;
+    use tempfile::TempDir;
 
     fn sample_config(agent: CodingAgent) -> AgentLaunchConfig {
         AgentLaunchConfig {
@@ -1120,5 +1415,50 @@ mod tests {
         let args = build_agent_args(&config);
         let resume_pos = args.iter().position(|arg| arg == "-s").unwrap();
         assert_eq!(args.get(resume_pos + 1), Some(&"oc-1".to_string()));
+    }
+
+    #[test]
+    fn test_detect_codex_session_id_prefers_matching_cwd() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        let sessions_dir = home.join(".codex").join("sessions").join("2026");
+        fs::create_dir_all(&sessions_dir).unwrap();
+
+        let match_path = sessions_dir.join("match.jsonl");
+        fs::write(
+            &match_path,
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"match\",\"cwd\":\"/repo/wt\"}}",
+        )
+        .unwrap();
+
+        sleep(std::time::Duration::from_secs(1));
+
+        let other_path = sessions_dir.join("other.jsonl");
+        fs::write(
+            &other_path,
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"other\",\"cwd\":\"/repo/other\"}}",
+        )
+        .unwrap();
+
+        let id = detect_codex_session_id_at(home, Path::new("/repo/wt"));
+        assert_eq!(id.as_deref(), Some("match"));
+    }
+
+    #[test]
+    fn test_detect_claude_session_id_uses_latest_file() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        let project_dir = home
+            .join(".claude")
+            .join("projects")
+            .join(encode_claude_project_path(Path::new("/repo/wt")));
+        fs::create_dir_all(&project_dir).unwrap();
+
+        fs::write(project_dir.join("first.jsonl"), "{}").unwrap();
+        sleep(std::time::Duration::from_secs(1));
+        fs::write(project_dir.join("second.jsonl"), "{}").unwrap();
+
+        let id = detect_claude_session_id_at(home, Path::new("/repo/wt"));
+        assert_eq!(id.as_deref(), Some("second"));
     }
 }
