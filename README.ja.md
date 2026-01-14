@@ -59,19 +59,22 @@ npx @akiojin/gwt
 bunx @akiojin/gwt
 ```
 
-### cargo 経由（ソースビルド）
+### Cargo 経由
 
 Cargo で CLI を直接インストールできます:
 
 ```bash
-# GitHub からインストール
+# crates.io からインストール（Rustユーザー推奨）
+cargo install gwt-cli
+
+# cargo-binstall でインストール（高速、プリビルドバイナリをダウンロード）
+cargo binstall gwt-cli
+
+# GitHub からインストール（最新開発版）
 cargo install --git https://github.com/akiojin/gwt --package gwt-cli --bin gwt --locked
 
 # ローカルチェックアウトからインストール
 cargo install --path crates/gwt-cli
-
-# そのまま実行
-cargo run -p gwt-cli
 ```
 
 ### ソースからビルド

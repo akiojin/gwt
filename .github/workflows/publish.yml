@@ -9,6 +9,25 @@ permissions:
   contents: write
 
 jobs:
+  publish-crates:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Publish gwt-core first (gwt-cli depends on it)
+      - name: Publish gwt-core
+        run: cargo publish -p gwt-core --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        continue-on-error: true  # Skip if already published
+
+      - name: Wait for crates.io index update
+        run: sleep 30
+
+      - name: Publish gwt-cli
+        run: cargo publish -p gwt-cli --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
   build-binaries:
     name: Build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
@@ -66,7 +85,7 @@ jobs:
 
   release:
     name: Create Release
-    needs: build-binaries
+    needs: [build-binaries, publish-crates]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

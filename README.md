@@ -59,19 +59,22 @@ npx @akiojin/gwt
 bunx @akiojin/gwt
 ```
 
-### Via cargo (build from source)
+### Via Cargo
 
 Install the CLI with Cargo:
 
 ```bash
-# Install from GitHub
+# From crates.io (recommended for Rust users)
+cargo install gwt-cli
+
+# With cargo-binstall (faster, downloads prebuilt binary)
+cargo binstall gwt-cli
+
+# From GitHub (latest development version)
 cargo install --git https://github.com/akiojin/gwt --package gwt-cli --bin gwt --locked
 
 # Or, from a local checkout
 cargo install --path crates/gwt-cli
-
-# Or run directly from source
-cargo run -p gwt-cli
 ```
 
 ### Build from Source
