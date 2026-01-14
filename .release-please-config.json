@@ -21,6 +21,11 @@
           "type": "toml",
           "path": "crates/gwt-cli/Cargo.toml",
           "jsonpath": "$.package.version"
+        },
+        {
+          "type": "toml",
+          "path": "crates/gwt-cli/Cargo.toml",
+          "jsonpath": "$.dependencies.gwt-core.version"
         }
       ]
     }
