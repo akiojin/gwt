@@ -2,11 +2,11 @@
 
 [English](README.md)
 
-Claude Code / Codex CLI / Gemini CLI 対応の対話型Gitワークツリーマネージャー（グラフィカルなブランチ選択と高度なワークフロー管理機能付き）
+Claude Code / Codex CLI / Gemini CLI / OpenCode 対応の対話型Gitワークツリーマネージャー（グラフィカルなブランチ選択と高度なワークフロー管理機能付き）
 
 ## 概要
 
-`@akiojin/gwt`は、直感的なインターフェースを通じてGitワークツリー管理を革新する強力なCLIツールです。Claude Code / Codex CLI / Gemini CLI の開発ワークフローとシームレスに統合し、インテリジェントなブランチ選択、自動ワークツリー作成、包括的なプロジェクト管理機能を提供します。
+`@akiojin/gwt`は、直感的なインターフェースを通じてGitワークツリー管理を革新する強力なCLIツールです。Claude Code / Codex CLI / Gemini CLI / OpenCode の開発ワークフローとシームレスに統合し、インテリジェントなブランチ選択、自動ワークツリー作成、包括的なプロジェクト管理機能を提供します。
 
 ## 移行ステータス
 
@@ -15,17 +15,18 @@ Rust版はCLI/TUIの主要フローとWeb UI（REST + WebSocket端末）まで�
 ## 主要機能
 
 - **モダンTUI**: Ratatuiによるスムーズでレスポンシブなターミナルインターフェース
-- **フルスクリーンレイアウト**: 統計情報付きの固定ヘッダー、スクロール可能なブランチリスト、キーボードショートカット付きの常時表示フッター
+- **フルスクリーンレイアウト**: リポジトリ情報付きの固定ヘッダー、枠線付きのブランチリスト、キーボードショートカット付きの常時表示フッター
 - **スマートブランチ作成**: ガイド付きプロンプトと自動ベースブランチ選択でfeature、bugfix、hotfix、releaseブランチを作成
-- **高度なワークツリー管理**: 作成、クリーンアップ、パス最適化を含む完全なライフサイクル管理
-- **Coding Agent 選択**: 起動時の対話型ランチャーで Claude Code / Codex CLI / Gemini CLI を選択
+- **高度なワークツリー管理**: 作成、Worktreeのあるブランチのクリーンアップ、パス最適化を含む完全なライフサイクル管理
+- **Coding Agent 選択**: 起動時の対話型ランチャーでビルトイン（Claude Code / Codex CLI / Gemini CLI / OpenCode）または `~/.gwt/tools.json` 定義のカスタムを選択
 - **Coding Agent 統合**: 選択したコーディングエージェントをワークツリーで起動（Claude Codeは権限設定・変更処理の統合あり）
 - **GitHub PR統合**: マージされたプルリクエストのブランチとワークツリーの自動クリーンアップ
 - **変更管理**: 開発セッション後のコミット、stash、破棄の内蔵サポート
 - **ユニバーサルパッケージ**: 一度インストールすれば全プロジェクトで一貫した動作
-- **リアルタイム統計**: 自動ターミナルリサイズ対応でブランチ・ワークツリー数をライブ更新
 
 ## インストール
+
+GitHub Releases を正とし、npm/bunx では該当リリースのバイナリをダウンロードして実行します。
 
 ### GitHub Releasesから（推奨）
 
@@ -56,6 +57,21 @@ bun add -g @akiojin/gwt
 # 一回限りの実行
 npx @akiojin/gwt
 bunx @akiojin/gwt
+```
+
+### cargo 経由（ソースビルド）
+
+Cargo で CLI を直接インストールできます:
+
+```bash
+# GitHub からインストール
+cargo install --git https://github.com/akiojin/gwt --package gwt-cli --bin gwt --locked
+
+# ローカルチェックアウトからインストール
+cargo install --path crates/gwt-cli
+
+# そのまま実行
+cargo run -p gwt-cli
 ```
 
 ### ソースからビルド
@@ -114,7 +130,54 @@ gwt clean
 1. **既存ブランチを選択**: ワークツリー自動作成機能付きでローカル・リモートブランチから選択
 2. **新規ブランチ作成**: タイプ選択（feature/bugfix/hotfix/release）によるガイド付きブランチ作成
 3. **ワークツリー管理**: 既存ワークツリーの表示、オープン、削除
-4. **ブランチクリーンアップ**: マージ済みPRやベースブランチと差分がないブランチ／ワークツリーをローカルから自動削除
+4. **ブランチクリーンアップ**: マージ済みPRやベースブランチと差分がないブランチ／ワークツリーをローカルから自動削除（Worktreeのないブランチは対象外）
+
+## コーディングエージェント
+
+gwt は PATH 上のエージェントを検出し、ランチャーに表示します。
+
+対応エージェント（ビルトイン）:
+
+- Claude Code (`claude`)
+- Codex CLI (`codex`)
+- Gemini CLI (`gemini`)
+- OpenCode (`opencode`)
+
+### カスタムコーディングエージェント
+
+カスタムエージェントは `~/.gwt/tools.json` に定義するとランチャーに表示されます。
+
+最小例:
+
+```json
+{
+  "version": "1.0.0",
+  "customCodingAgents": [
+    {
+      "id": "aider",
+      "displayName": "Aider",
+      "type": "command",
+      "command": "aider",
+      "defaultArgs": ["--no-git"],
+      "modeArgs": {
+        "normal": [],
+        "continue": ["--resume"],
+        "resume": ["--resume"]
+      },
+      "permissionSkipArgs": ["--yes"],
+      "env": {
+        "OPENAI_API_KEY": "sk-..."
+      }
+    }
+  ]
+}
+```
+
+補足:
+
+- `type` は `path` / `bunx` / `command` を指定します。
+- `modeArgs` で実行モード別の引数を定義します（Normal/Continue/Resume）。
+- `env` はエージェントごとの環境変数（任意）です。
 
 ## 高度なワークフロー
 
@@ -168,7 +231,7 @@ gwt
 
 - **Rust**: Stableツールチェーン（ソースからビルドする場合）
 - **Git**: ワークツリーサポート付き最新版
-- **Coding Agent**: 少なくともいずれかが必要（Claude Code、Codex CLI、または Gemini CLI）
+- **Coding Agent**: 少なくともビルトインまたはカスタムのいずれかが必要
 - **GitHub CLI**: PR クリーンアップ機能に必要（オプション）
 - **bun/npm**: bunx/npx実行方式に必要
 

@@ -1061,7 +1061,14 @@ impl Model {
     fn create_worktree(&mut self) {
         if let Ok(manager) = WorktreeManager::new(&self.repo_root) {
             let branch = &self.worktree_create.branch_name;
-            let base = self.worktree_create.selected_base_branch();
+            let base = if self.worktree_create.create_new_branch {
+                self.wizard
+                    .base_branch_override
+                    .as_deref()
+                    .or_else(|| self.worktree_create.selected_base_branch())
+            } else {
+                None
+            };
 
             // First try to get existing worktree for this branch
             let existing_wt = manager.get_by_branch(branch).ok().flatten();

@@ -79,6 +79,7 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
 
 /// Render help overlay
 pub fn render_help(state: &HelpState, frame: &mut Frame, area: Rect) {
+    const H_PADDING: u16 = 2;
     // Calculate centered area (80% width, 80% height)
     let popup_area = centered_rect(80, 80, area);
 
@@ -118,17 +119,24 @@ pub fn render_help(state: &HelpState, frame: &mut Frame, area: Rect) {
     // Apply scroll offset
     let visible_lines: Vec<Line> = lines.into_iter().skip(state.scroll_offset).collect();
 
-    let help = Paragraph::new(visible_lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan))
-                .title(" Help ")
-                .title_alignment(Alignment::Center),
-        )
-        .wrap(Wrap { trim: false });
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(" Help ")
+        .title_alignment(Alignment::Center);
 
-    frame.render_widget(help, popup_area);
+    let inner_area = block.inner(popup_area);
+    let content_area = Rect::new(
+        inner_area.x + H_PADDING,
+        inner_area.y,
+        inner_area.width.saturating_sub(H_PADDING.saturating_mul(2)),
+        inner_area.height,
+    );
+
+    frame.render_widget(block, popup_area);
+
+    let help = Paragraph::new(visible_lines).wrap(Wrap { trim: false });
+    frame.render_widget(help, content_area);
 }
 
 /// Helper to create centered rect

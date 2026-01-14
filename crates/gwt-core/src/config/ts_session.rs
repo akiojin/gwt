@@ -129,12 +129,47 @@ pub fn get_ts_session_path(repo_root: &Path) -> PathBuf {
 /// Load TypeScript session data for a repository
 pub fn load_ts_session(repo_root: &Path) -> Option<TsSessionData> {
     let session_path = get_ts_session_path(repo_root);
-    if !session_path.exists() {
-        return None;
+    if let Ok(content) = std::fs::read_to_string(&session_path) {
+        if let Ok(session) = serde_json::from_str(&content) {
+            return Some(session);
+        }
     }
 
-    let content = std::fs::read_to_string(&session_path).ok()?;
-    serde_json::from_str(&content).ok()
+    // Fallback: if the exact hash path is missing or invalid, try to locate
+    // the latest session file that matches the repo name.
+    let repo_name = repo_root.file_name()?.to_string_lossy().to_string();
+    let session_dir = session_path.parent()?;
+    let prefix = format!("{}_", repo_name);
+    let mut latest: Option<TsSessionData> = None;
+
+    let entries = std::fs::read_dir(session_dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let file_name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(name) => name,
+            None => continue,
+        };
+        if !file_name.starts_with(&prefix) || !file_name.ends_with(".json") {
+            continue;
+        }
+        let content = match std::fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(_) => continue,
+        };
+        let session: TsSessionData = match serde_json::from_str(&content) {
+            Ok(session) => session,
+            Err(_) => continue,
+        };
+        let should_update = latest
+            .as_ref()
+            .map(|current| session.timestamp > current.timestamp)
+            .unwrap_or(true);
+        if should_update {
+            latest = Some(session);
+        }
+    }
+
+    latest
 }
 
 /// Save session entry to TypeScript-compatible session file (FR-069)
@@ -252,11 +287,54 @@ pub fn get_branch_tool_history(repo_root: &Path, branch: &str) -> Vec<ToolSessio
 
     // Collect entries for this branch, keeping only the latest per tool
     let mut tool_map: HashMap<String, ToolSessionEntry> = HashMap::new();
+    let TsSessionData {
+        history,
+        last_worktree_path,
+        last_branch,
+        last_used_tool,
+        last_session_id,
+        tool_label,
+        tool_version,
+        model,
+        timestamp,
+        ..
+    } = session;
 
-    for entry in session.history {
+    for entry in history {
         if entry.branch == branch {
             let existing = tool_map.get(&entry.tool_id);
             if existing.is_none() || existing.unwrap().timestamp < entry.timestamp {
+                tool_map.insert(entry.tool_id.clone(), entry);
+            }
+        }
+    }
+
+    if tool_map.is_empty() {
+        if let Some(last_branch_name) = last_branch {
+            if last_branch_name == branch {
+                let fallback_tool_id = last_used_tool.unwrap_or_default();
+                let label = tool_label
+                    .or_else(|| {
+                        if fallback_tool_id.is_empty() {
+                            None
+                        } else {
+                            Some(fallback_tool_id.clone())
+                        }
+                    })
+                    .unwrap_or_else(|| "Custom".to_string());
+                let entry = ToolSessionEntry {
+                    branch: last_branch_name,
+                    worktree_path: last_worktree_path,
+                    tool_id: fallback_tool_id,
+                    tool_label: label,
+                    session_id: last_session_id,
+                    mode: None,
+                    model,
+                    reasoning_level: None,
+                    skip_permissions: None,
+                    tool_version,
+                    timestamp,
+                };
                 tool_map.insert(entry.tool_id.clone(), entry);
             }
         }
@@ -288,6 +366,91 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let result = load_ts_session(temp.path());
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_load_session_fallback_by_repo_name() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let prev_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", temp.path());
+
+        let session_dir = temp.path().join(".config").join("gwt").join("sessions");
+        std::fs::create_dir_all(&session_dir).unwrap();
+
+        let repo_root = PathBuf::from("/workspaces/sample-repo");
+        let session = TsSessionData {
+            last_worktree_path: None,
+            last_branch: Some("feature/test".to_string()),
+            last_used_tool: Some("codex-cli".to_string()),
+            last_session_id: None,
+            tool_label: Some("Codex CLI".to_string()),
+            tool_version: Some("latest".to_string()),
+            model: Some("gpt-5.2-codex".to_string()),
+            timestamp: 1_700_000_000_000,
+            repository_root: "/workspaces/other-path".to_string(),
+            history: Vec::new(),
+        };
+
+        // Create a file with a different hash but the same repo name prefix.
+        let fallback_path = session_dir.join("sample-repo_other.json");
+        let content = serde_json::to_string_pretty(&session).unwrap();
+        std::fs::write(&fallback_path, content).unwrap();
+
+        let loaded = load_ts_session(&repo_root).expect("fallback session should load");
+        assert_eq!(loaded.timestamp, session.timestamp);
+        assert_eq!(loaded.last_branch, session.last_branch);
+
+        match prev_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    fn test_get_branch_tool_history_fallback_to_last_branch() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let prev_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", temp.path());
+
+        let repo_root = temp.path().join("sample-repo");
+        std::fs::create_dir_all(&repo_root).unwrap();
+
+        let session = TsSessionData {
+            last_worktree_path: Some("/path/to/wt".to_string()),
+            last_branch: Some("feature/test".to_string()),
+            last_used_tool: Some("codex-cli".to_string()),
+            last_session_id: Some("session-123".to_string()),
+            tool_label: Some("Codex CLI".to_string()),
+            tool_version: Some("latest".to_string()),
+            model: Some("gpt-5.2-codex".to_string()),
+            timestamp: 1_700_000_000_000,
+            repository_root: repo_root.to_string_lossy().to_string(),
+            history: Vec::new(),
+        };
+
+        let session_path = get_ts_session_path(&repo_root);
+        if let Some(parent) = session_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let content = serde_json::to_string_pretty(&session).unwrap();
+        std::fs::write(&session_path, content).unwrap();
+
+        let entries = get_branch_tool_history(&repo_root, "feature/test");
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry.branch, "feature/test");
+        assert_eq!(entry.tool_id, "codex-cli");
+        assert_eq!(entry.tool_label, "Codex CLI");
+        assert_eq!(entry.model.as_deref(), Some("gpt-5.2-codex"));
+        assert_eq!(entry.tool_version.as_deref(), Some("latest"));
+        assert_eq!(entry.session_id.as_deref(), Some("session-123"));
+
+        match prev_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
     }
 
     #[test]

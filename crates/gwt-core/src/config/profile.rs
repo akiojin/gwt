@@ -161,6 +161,7 @@ mod tests {
 
     #[test]
     fn test_profiles_config_roundtrip() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
         let prev_home = std::env::var_os("HOME");
         std::env::set_var("HOME", temp.path());

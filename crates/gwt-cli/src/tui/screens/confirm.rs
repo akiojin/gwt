@@ -114,6 +114,7 @@ impl ConfirmState {
 
 /// Render confirmation dialog
 pub fn render_confirm(state: &ConfirmState, frame: &mut Frame, area: Rect) {
+    const H_PADDING: usize = 2;
     let message_lines: Vec<String> = state
         .message
         .lines()
@@ -147,8 +148,11 @@ pub fn render_confirm(state: &ConfirmState, frame: &mut Frame, area: Rect) {
 
     // Calculate dialog size
     let max_width = area.width.saturating_sub(4).max(20) as usize;
-    let dialog_width = ((max_content_len + 4).max(40)).min(max_width) as u16;
-    let inner_width = dialog_width.saturating_sub(2).max(1) as usize;
+    let desired_width = max_content_len + 2 + (H_PADDING * 2);
+    let dialog_width = (desired_width.max(40)).min(max_width) as u16;
+    let inner_width = dialog_width
+        .saturating_sub(2 + (H_PADDING * 2) as u16)
+        .max(1) as usize;
 
     let wrapped_line_count = |lines: &[String], width: usize| -> usize {
         if width == 0 {
@@ -211,6 +215,12 @@ pub fn render_confirm(state: &ConfirmState, frame: &mut Frame, area: Rect) {
         .title_style(Style::default().add_modifier(Modifier::BOLD));
 
     let inner_area = block.inner(dialog_area);
+    let content_area = Rect::new(
+        inner_area.x + H_PADDING as u16,
+        inner_area.y,
+        inner_area.width.saturating_sub((H_PADDING * 2) as u16),
+        inner_area.height,
+    );
     frame.render_widget(block, dialog_area);
 
     // Layout for content
@@ -222,7 +232,7 @@ pub fn render_confirm(state: &ConfirmState, frame: &mut Frame, area: Rect) {
             Constraint::Length(1),                     // Spacer
             Constraint::Length(1),                     // Buttons
         ])
-        .split(inner_area);
+        .split(content_area);
 
     // Message
     let message_style = if state.is_dangerous {

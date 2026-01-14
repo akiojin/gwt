@@ -114,6 +114,7 @@
 - **FR-008**: セッションIDを提供しないツールでは、既存の保存ロジックを変更せず、Continue/ResumeでIDを要求しない。
 - **FR-009**: Gemini CLIでは終了後に`~/.gemini/tmp/<project_hash>/chats/*.json`の最新ファイルからIDを抽出し、Continue/Resume時は`--resume <id>`を優先、ID不明時は`--resume`（latest）にフォールバックしなければならない。
 - **FR-010**: ブランチ選択直後、同ブランチの最新履歴が存在する場合は前回の`toolId/model/sessionId`を提示するクイック選択を表示し、「前回設定で続きから」「前回設定で新規」「設定を選び直す」の3択を提供しなければならない。履歴が無い場合は従来のツール選択にフォールバックする。
+- **FR-010a**: `history` が空でも `lastBranch/lastUsedTool` が対象ブランチに一致する場合は、Quick Start 用の単一履歴として扱い、クイック選択を表示しなければならない。
 - **FR-011**: Quick Startの表示内容はツール能力に応じて切り替えること。CodexのみReasoningレベルを表示し、他ツールでは非表示とする。また「Start new with previous settings」ではセッションIDを表示しない。
 - **FR-012**: 同一ブランチで複数ツールを利用した場合、各ツールごとに直近設定（toolId/model/reasoningLevel/skipPermissions/sessionId）を保持し、Quick Startでツール別の「Resume with previous settings / Start new with previous settings」を提示する。履歴が無いツールは表示しない。
 - **FR-016**: Quick Startで「前回設定で続きから/新規」を選択した場合、Execution Mode/Skip Permissions/セッション選択を表示せず、履歴の設定を適用して即時起動しなければならない。
