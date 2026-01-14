@@ -17,7 +17,6 @@ jobs:
       - uses: googleapis/release-please-action@v4
         with:
           token: ${{ secrets.PERSONAL_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
-          release-type: rust
           manifest-file: .release-please-manifest.json
           config-file: .release-please-config.json
           target-branch: main
