@@ -129,12 +129,47 @@ pub fn get_ts_session_path(repo_root: &Path) -> PathBuf {
 /// Load TypeScript session data for a repository
 pub fn load_ts_session(repo_root: &Path) -> Option<TsSessionData> {
     let session_path = get_ts_session_path(repo_root);
-    if !session_path.exists() {
-        return None;
+    if let Ok(content) = std::fs::read_to_string(&session_path) {
+        if let Ok(session) = serde_json::from_str(&content) {
+            return Some(session);
+        }
     }
 
-    let content = std::fs::read_to_string(&session_path).ok()?;
-    serde_json::from_str(&content).ok()
+    // Fallback: if the exact hash path is missing or invalid, try to locate
+    // the latest session file that matches the repo name.
+    let repo_name = repo_root.file_name()?.to_string_lossy().to_string();
+    let session_dir = session_path.parent()?;
+    let prefix = format!("{}_", repo_name);
+    let mut latest: Option<TsSessionData> = None;
+
+    let entries = std::fs::read_dir(session_dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let file_name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(name) => name,
+            None => continue,
+        };
+        if !file_name.starts_with(&prefix) || !file_name.ends_with(".json") {
+            continue;
+        }
+        let content = match std::fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(_) => continue,
+        };
+        let session: TsSessionData = match serde_json::from_str(&content) {
+            Ok(session) => session,
+            Err(_) => continue,
+        };
+        let should_update = latest
+            .as_ref()
+            .map(|current| session.timestamp > current.timestamp)
+            .unwrap_or(true);
+        if should_update {
+            latest = Some(session);
+        }
+    }
+
+    latest
 }
 
 /// Save session entry to TypeScript-compatible session file (FR-069)
@@ -288,6 +323,45 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let result = load_ts_session(temp.path());
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_load_session_fallback_by_repo_name() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let prev_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", temp.path());
+
+        let session_dir = temp.path().join(".config").join("gwt").join("sessions");
+        std::fs::create_dir_all(&session_dir).unwrap();
+
+        let repo_root = PathBuf::from("/workspaces/sample-repo");
+        let session = TsSessionData {
+            last_worktree_path: None,
+            last_branch: Some("feature/test".to_string()),
+            last_used_tool: Some("codex-cli".to_string()),
+            last_session_id: None,
+            tool_label: Some("Codex CLI".to_string()),
+            tool_version: Some("latest".to_string()),
+            model: Some("gpt-5.2-codex".to_string()),
+            timestamp: 1_700_000_000_000,
+            repository_root: "/workspaces/other-path".to_string(),
+            history: Vec::new(),
+        };
+
+        // Create a file with a different hash but the same repo name prefix.
+        let fallback_path = session_dir.join("sample-repo_other.json");
+        let content = serde_json::to_string_pretty(&session).unwrap();
+        std::fs::write(&fallback_path, content).unwrap();
+
+        let loaded = load_ts_session(&repo_root).expect("fallback session should load");
+        assert_eq!(loaded.timestamp, session.timestamp);
+        assert_eq!(loaded.last_branch, session.last_branch);
+
+        match prev_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
     }
 
     #[test]

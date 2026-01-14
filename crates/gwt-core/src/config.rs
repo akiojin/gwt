@@ -16,3 +16,6 @@ pub use ts_session::{
     get_branch_tool_history, get_last_tool_usage_map, get_ts_session_path, load_ts_session,
     save_session_entry, ToolSessionEntry, TsSessionData,
 };
+
+#[cfg(test)]
+pub(crate) static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
