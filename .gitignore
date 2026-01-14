@@ -13,6 +13,10 @@ PLANS.md
 # npm wrapper (for bunx distribution)
 node_modules/
 
+# Downloaded native binaries (postinstall downloads these)
+bin/gwt
+bin/gwt.exe
+
 # Environment variables
 .env
 .env.local
