@@ -800,8 +800,16 @@ fn build_agent_args(config: &AgentLaunchConfig) -> Vec<String> {
 
             // Execution mode (FR-102)
             match config.execution_mode {
-                ExecutionMode::Continue => args.push("-c".to_string()),
-                ExecutionMode::Resume => args.push("-r".to_string()),
+                ExecutionMode::Continue | ExecutionMode::Resume => {
+                    if let Some(session_id) = &config.session_id {
+                        args.push("--resume".to_string());
+                        args.push(session_id.clone());
+                    } else if matches!(config.execution_mode, ExecutionMode::Continue) {
+                        args.push("-c".to_string());
+                    } else {
+                        args.push("-r".to_string());
+                    }
+                }
                 ExecutionMode::Normal => {}
             }
 
@@ -813,12 +821,13 @@ fn build_agent_args(config: &AgentLaunchConfig) -> Vec<String> {
         CodingAgent::CodexCli => {
             // Execution mode - resume subcommand must come first
             match config.execution_mode {
-                ExecutionMode::Continue => {
+                ExecutionMode::Continue | ExecutionMode::Resume => {
                     args.push("resume".to_string());
-                    args.push("--last".to_string());
-                }
-                ExecutionMode::Resume => {
-                    args.push("resume".to_string());
+                    if let Some(session_id) = &config.session_id {
+                        args.push(session_id.clone());
+                    } else if matches!(config.execution_mode, ExecutionMode::Continue) {
+                        args.push("--last".to_string());
+                    }
                 }
                 ExecutionMode::Normal => {}
             }
@@ -861,7 +870,11 @@ fn build_agent_args(config: &AgentLaunchConfig) -> Vec<String> {
             match config.execution_mode {
                 ExecutionMode::Continue | ExecutionMode::Resume => {
                     args.push("-r".to_string());
-                    args.push("latest".to_string());
+                    if let Some(session_id) = &config.session_id {
+                        args.push(session_id.clone());
+                    } else {
+                        args.push("latest".to_string());
+                    }
                 }
                 ExecutionMode::Normal => {}
             }
@@ -878,6 +891,18 @@ fn build_agent_args(config: &AgentLaunchConfig) -> Vec<String> {
                     args.push("--model".to_string());
                     args.push(model.clone());
                 }
+            }
+
+            // Execution mode
+            match config.execution_mode {
+                ExecutionMode::Continue => args.push("-c".to_string()),
+                ExecutionMode::Resume => {
+                    if let Some(session_id) = &config.session_id {
+                        args.push("-s".to_string());
+                        args.push(session_id.clone());
+                    }
+                }
+                ExecutionMode::Normal => {}
             }
         }
     }
@@ -949,6 +974,7 @@ mod tests {
             reasoning_level: None,
             version: "latest".to_string(),
             execution_mode: ExecutionMode::Continue,
+            session_id: None,
             skip_permissions: true,
             env: Vec::new(),
         }
@@ -1052,5 +1078,47 @@ mod tests {
         );
         assert!(!args.contains(&"--sandbox".to_string()));
         assert!(!args.contains(&"sandbox_workspace_write.network_access=true".to_string()));
+    }
+
+    #[test]
+    fn test_build_agent_args_codex_includes_session_id() {
+        let mut config = sample_config(CodingAgent::CodexCli);
+        config.session_id = Some("sess-123".to_string());
+        let args = build_agent_args(&config);
+        assert_eq!(args.first(), Some(&"resume".to_string()));
+        assert_eq!(args.get(1), Some(&"sess-123".to_string()));
+        assert!(!args.contains(&"--last".to_string()));
+    }
+
+    #[test]
+    fn test_build_agent_args_claude_resume_uses_session_id() {
+        let mut config = sample_config(CodingAgent::ClaudeCode);
+        config.execution_mode = ExecutionMode::Resume;
+        config.session_id = Some("abc123".to_string());
+        let args = build_agent_args(&config);
+        let resume_pos = args.iter().position(|arg| arg == "--resume").unwrap();
+        assert_eq!(args.get(resume_pos + 1), Some(&"abc123".to_string()));
+        assert!(!args.contains(&"-r".to_string()));
+        assert!(!args.contains(&"-c".to_string()));
+    }
+
+    #[test]
+    fn test_build_agent_args_gemini_resume_uses_session_id() {
+        let mut config = sample_config(CodingAgent::GeminiCli);
+        config.execution_mode = ExecutionMode::Resume;
+        config.session_id = Some("g-999".to_string());
+        let args = build_agent_args(&config);
+        let resume_pos = args.iter().position(|arg| arg == "-r").unwrap();
+        assert_eq!(args.get(resume_pos + 1), Some(&"g-999".to_string()));
+    }
+
+    #[test]
+    fn test_build_agent_args_opencode_resume_uses_session_id() {
+        let mut config = sample_config(CodingAgent::OpenCode);
+        config.execution_mode = ExecutionMode::Resume;
+        config.session_id = Some("oc-1".to_string());
+        let args = build_agent_args(&config);
+        let resume_pos = args.iter().position(|arg| arg == "-s").unwrap();
+        assert_eq!(args.get(resume_pos + 1), Some(&"oc-1".to_string()));
     }
 }

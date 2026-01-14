@@ -582,6 +582,8 @@ pub struct WizardState {
     pub execution_mode_index: usize,
     /// Skip permissions
     pub skip_permissions: bool,
+    /// Session ID for resume/continue
+    pub session_id: Option<String>,
     /// Scroll offset for popup content
     pub scroll_offset: usize,
     // Quick Start (FR-050, SPEC-f47db390)
@@ -649,6 +651,7 @@ impl WizardState {
         self.execution_mode = ExecutionMode::default();
         self.execution_mode_index = 0;
         self.skip_permissions = false;
+        self.session_id = None;
         self.branch_type = BranchType::default();
         self.new_branch_name.clear();
         self.cursor = 0;
@@ -733,9 +736,19 @@ impl WizardState {
 
             // Set execution mode based on action
             self.execution_mode = match action {
-                QuickStartAction::ResumeWithPrevious => ExecutionMode::Resume,
+                QuickStartAction::ResumeWithPrevious => {
+                    if entry.session_id.is_some() {
+                        ExecutionMode::Resume
+                    } else {
+                        ExecutionMode::Continue
+                    }
+                }
                 QuickStartAction::StartNewWithPrevious => ExecutionMode::Normal,
                 QuickStartAction::ChooseDifferent => ExecutionMode::Normal,
+            };
+            self.session_id = match action {
+                QuickStartAction::ResumeWithPrevious => entry.session_id.clone(),
+                _ => None,
             };
         }
     }
@@ -1757,6 +1770,7 @@ mod tests {
         assert_eq!(state.version, "1.0.0");
         assert_eq!(state.execution_mode, ExecutionMode::Resume);
         assert!(state.skip_permissions);
+        assert_eq!(state.session_id.as_deref(), Some("abc123"));
     }
 
     #[test]
@@ -1789,6 +1803,7 @@ mod tests {
         assert_eq!(state.reasoning_level, ReasoningLevel::High);
         assert_eq!(state.execution_mode, ExecutionMode::Normal);
         assert!(!state.skip_permissions);
+        assert!(state.session_id.is_none());
     }
 
     #[test]
@@ -1813,5 +1828,6 @@ mod tests {
         let result = state.confirm();
         assert_eq!(result, WizardConfirmResult::Advance);
         assert_eq!(state.step, WizardStep::AgentSelect);
+        assert!(state.session_id.is_none());
     }
 }

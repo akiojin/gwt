@@ -47,6 +47,11 @@ description: "Continue/Resumeで正しいセッションを再開するための
 - [x] **T0609** `[Test]` `crates/gwt-cli/src/tui/screens/wizard.rs` にQuick Start確定時の即時完了テストを追加
 - [x] **T0610** `[実装]` `crates/gwt-cli/src/tui/screens/wizard.rs` と `crates/gwt-cli/src/tui/app.rs` でQuick Start確定時にExecution Mode/Skip Permissionsをスキップして即時起動する
 
+## 追加作業: Quick StartのセッションID引数反映 (2026-01-14)
+
+- [x] **T0611** `[Test]` `crates/gwt-cli/src/main.rs` にsession_idが起動引数へ反映されるテストを追加
+- [x] **T0612** `[実装]` `crates/gwt-cli/src/tui/screens/wizard.rs` と `crates/gwt-cli/src/main.rs` でQuick Startのsession_idを起動引数に反映
+
 ## フェーズ7: ブランチクイックスタート (P1)
 - [x] **T0501** `[US5]` ブランチ選択後に前回ツール/モデル/セッションIDを提示するQuick Start画面を追加（Inkコンポーネント新設）。
 - [x] **T0502** `[US5]` 履歴が存在する場合はQuick Startへ遷移し、選択結果に応じてツール/モデル/セッションIDを事前セットするロジックを実装（履歴なしは従来フロー）。

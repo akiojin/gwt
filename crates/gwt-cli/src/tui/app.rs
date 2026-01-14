@@ -46,6 +46,8 @@ pub struct AgentLaunchConfig {
     pub version: String,
     /// Execution mode
     pub execution_mode: ExecutionMode,
+    /// Session ID for resume/continue when available
+    pub session_id: Option<String>,
     /// Skip permission prompts
     pub skip_permissions: bool,
     /// Environment variables to apply
@@ -1093,6 +1095,7 @@ impl Model {
                         },
                         version: self.wizard.version.clone(),
                         execution_mode: self.wizard.execution_mode,
+                        session_id: self.wizard.session_id.clone(),
                         skip_permissions: self.wizard.skip_permissions,
                         env: self.active_env_overrides(),
                     };
