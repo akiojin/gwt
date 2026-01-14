@@ -15,15 +15,14 @@ The Rust implementation covers the core CLI/TUI workflow and the Web UI (REST + 
 ## Key Features
 
 - **Modern TUI**: Built with Ratatui for a smooth, responsive terminal interface
-- **Full-screen Layout**: Persistent header with statistics, scrollable branch list, and always-visible footer with keyboard shortcuts
+- **Full-screen Layout**: Persistent header with repo context, boxed branch list, and always-visible footer with keyboard shortcuts
 - **Smart Branch Creation**: Create feature, bugfix, hotfix, or release branches with guided prompts and automatic base branch selection
-- **Advanced Worktree Management**: Complete lifecycle management including creation, cleanup, and path optimization
+- **Advanced Worktree Management**: Complete lifecycle management including creation, cleanup of worktree-backed branches, and path optimization
 - **Coding Agent Selection**: Choose between Claude Code / Codex CLI / Gemini CLI through the interactive launcher
 - **Coding Agent Integration**: Launch the selected agent in the worktree (Claude Code includes permission handling and post-change flow)
 - **GitHub PR Integration**: Automatic cleanup of merged pull request branches and worktrees
 - **Change Management**: Built-in support for committing, stashing, or discarding changes after development sessions
 - **Universal Package**: Install once, use across all your projects with consistent behavior
-- **Real-time Statistics**: Live updates of branch and worktree counts with automatic terminal resize handling
 
 ## Installation
 
@@ -114,7 +113,7 @@ The tool presents an interactive interface with the following options:
 1. **Select Existing Branch**: Choose from local or remote branches with worktree auto-creation
 2. **Create New Branch**: Guided branch creation with type selection (feature/bugfix/hotfix/release)
 3. **Manage Worktrees**: View, open, or remove existing worktrees
-4. **Cleanup Branches**: Remove merged PR branches or branches identical to their base directly from the CLI
+4. **Cleanup Branches**: Remove merged PR branches or branches identical to their base directly from the CLI (branches without worktrees are excluded)
 
 ## Advanced Workflows
 
