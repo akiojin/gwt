@@ -12,10 +12,6 @@ Claude Code / Codex CLI / Gemini CLI / OpenCode 対応の対話型Gitワーク�
 
 Rust版はCLI/TUIの主要フローとWeb UI（REST + WebSocket端末）まで実装済みです。残作業はGitバックエンドのフォールバック範囲の整理、ドキュメント整備、リリース周りの調整に集中しています。
 
-## 移行ステータス
-
-Rust版はCLI/TUIの主要フローとWeb UI（REST + WebSocket端末）まで実装済みです。残作業はGitバックエンドのフォールバック範囲の整理、ドキュメント整備、リリース周りの調整に集中しています。
-
 ## 主要機能
 
 - **モダンTUI**: Ratatuiによるスムーズでレスポンシブなターミナルインターフェース
