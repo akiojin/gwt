@@ -3,14 +3,29 @@
   "default-branch": "main",
   "packages": {
     ".": {
-      "release-type": "rust",
+      "release-type": "node",
       "bump-minor-pre-major": true,
       "bump-patch-for-minor-pre-major": true,
       "extra-files": [
         {
-          "type": "json",
-          "path": "package.json",
-          "jsonpath": "$.version"
+          "type": "toml",
+          "path": "Cargo.toml",
+          "jsonpath": "$.workspace.package.version"
+        },
+        {
+          "type": "toml",
+          "path": "crates/gwt-core/Cargo.toml",
+          "jsonpath": "$.package.version"
+        },
+        {
+          "type": "toml",
+          "path": "crates/gwt-cli/Cargo.toml",
+          "jsonpath": "$.package.version"
+        },
+        {
+          "type": "toml",
+          "path": "crates/gwt-cli/Cargo.toml",
+          "jsonpath": "$.dependencies.gwt-core.version"
         }
       ]
     }
