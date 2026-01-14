@@ -18,7 +18,7 @@ The Rust implementation covers the core CLI/TUI workflow and the Web UI (REST + 
 - **Full-screen Layout**: Persistent header with repo context, boxed branch list, and always-visible footer with keyboard shortcuts
 - **Smart Branch Creation**: Create feature, bugfix, hotfix, or release branches with guided prompts and automatic base branch selection
 - **Advanced Worktree Management**: Complete lifecycle management including creation, cleanup of worktree-backed branches, and path optimization
-- **Coding Agent Selection**: Choose between Claude Code / Codex CLI / Gemini CLI / OpenCode through the interactive launcher
+- **Coding Agent Selection**: Choose between built-in agents (Claude Code / Codex CLI / Gemini CLI / OpenCode) or custom coding agents defined in `~/.gwt/tools.json`
 - **Coding Agent Integration**: Launch the selected agent in the worktree (Claude Code includes permission handling and post-change flow)
 - **GitHub PR Integration**: Automatic cleanup of merged pull request branches and worktrees
 - **Change Management**: Built-in support for committing, stashing, or discarding changes after development sessions
@@ -136,22 +136,48 @@ The tool presents an interactive interface with the following options:
 
 gwt detects agents available on PATH and lists them in the launcher.
 
-Supported agents:
+Supported agents (built-in):
 
 - Claude Code (`claude`)
 - Codex CLI (`codex`)
 - Gemini CLI (`gemini`)
 - OpenCode (`opencode`)
 
-### Custom agent/model (OpenCode)
+### Custom coding agents
 
-OpenCode supports multiple providers. In the wizard:
+Custom agents are defined in `~/.gwt/tools.json` and will appear in the launcher.
 
-1. Select **OpenCode**
-2. On **Model**, choose **Custom (provider/model)**
-3. Enter a provider/model identifier (example: `openai/gpt-5.2`)
+Minimal example:
 
-gwt passes the value to `opencode --model`. Ensure OpenCode is configured for the provider you select.
+```json
+{
+  "version": "1.0.0",
+  "customCodingAgents": [
+    {
+      "id": "aider",
+      "displayName": "Aider",
+      "type": "command",
+      "command": "aider",
+      "defaultArgs": ["--no-git"],
+      "modeArgs": {
+        "normal": [],
+        "continue": ["--resume"],
+        "resume": ["--resume"]
+      },
+      "permissionSkipArgs": ["--yes"],
+      "env": {
+        "OPENAI_API_KEY": "sk-..."
+      }
+    }
+  ]
+}
+```
+
+Notes:
+
+- `type` supports `path`, `bunx`, or `command`.
+- `modeArgs` defines args per execution mode (Normal/Continue/Resume).
+- `env` is optional per-agent environment variables.
 
 ## Advanced Workflows
 
@@ -205,7 +231,7 @@ gwt
 
 - **Rust**: Stable toolchain (for building from source)
 - **Git**: Latest version with worktree support
-- **Coding Agent**: At least one of Claude Code, Codex CLI, Gemini CLI, or OpenCode should be available
+- **Coding Agent**: At least one built-in agent or a custom coding agent should be available
 - **GitHub CLI**: Required for PR cleanup features (optional)
 - **bun/npm**: Required for bunx/npx execution method
 

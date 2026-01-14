@@ -18,7 +18,7 @@ Rust版はCLI/TUIの主要フローとWeb UI（REST + WebSocket端末）まで�
 - **フルスクリーンレイアウト**: リポジトリ情報付きの固定ヘッダー、枠線付きのブランチリスト、キーボードショートカット付きの常時表示フッター
 - **スマートブランチ作成**: ガイド付きプロンプトと自動ベースブランチ選択でfeature、bugfix、hotfix、releaseブランチを作成
 - **高度なワークツリー管理**: 作成、Worktreeのあるブランチのクリーンアップ、パス最適化を含む完全なライフサイクル管理
-- **Coding Agent 選択**: 起動時の対話型ランチャーで Claude Code / Codex CLI / Gemini CLI / OpenCode を選択
+- **Coding Agent 選択**: 起動時の対話型ランチャーでビルトイン（Claude Code / Codex CLI / Gemini CLI / OpenCode）または `~/.gwt/tools.json` 定義のカスタムを選択
 - **Coding Agent 統合**: 選択したコーディングエージェントをワークツリーで起動（Claude Codeは権限設定・変更処理の統合あり）
 - **GitHub PR統合**: マージされたプルリクエストのブランチとワークツリーの自動クリーンアップ
 - **変更管理**: 開発セッション後のコミット、stash、破棄の内蔵サポート
@@ -136,22 +136,48 @@ gwt clean
 
 gwt は PATH 上のエージェントを検出し、ランチャーに表示します。
 
-対応エージェント:
+対応エージェント（ビルトイン）:
 
 - Claude Code (`claude`)
 - Codex CLI (`codex`)
 - Gemini CLI (`gemini`)
 - OpenCode (`opencode`)
 
-### カスタムエージェント/モデル (OpenCode)
+### カスタムコーディングエージェント
 
-OpenCode は複数プロバイダに対応します。ウィザードで:
+カスタムエージェントは `~/.gwt/tools.json` に定義するとランチャーに表示されます。
 
-1. **OpenCode** を選択
-2. **Model** で **Custom (provider/model)** を選択
-3. `provider/model` を入力（例: `openai/gpt-5.2`）
+最小例:
 
-gwt は `opencode --model` にそのまま渡します。選択したプロバイダは OpenCode 側で設定してください。
+```json
+{
+  "version": "1.0.0",
+  "customCodingAgents": [
+    {
+      "id": "aider",
+      "displayName": "Aider",
+      "type": "command",
+      "command": "aider",
+      "defaultArgs": ["--no-git"],
+      "modeArgs": {
+        "normal": [],
+        "continue": ["--resume"],
+        "resume": ["--resume"]
+      },
+      "permissionSkipArgs": ["--yes"],
+      "env": {
+        "OPENAI_API_KEY": "sk-..."
+      }
+    }
+  ]
+}
+```
+
+補足:
+
+- `type` は `path` / `bunx` / `command` を指定します。
+- `modeArgs` で実行モード別の引数を定義します（Normal/Continue/Resume）。
+- `env` はエージェントごとの環境変数（任意）です。
 
 ## 高度なワークフロー
 
@@ -205,7 +231,7 @@ gwt
 
 - **Rust**: Stableツールチェーン（ソースからビルドする場合）
 - **Git**: ワークツリーサポート付き最新版
-- **Coding Agent**: 少なくともいずれかが必要（Claude Code、Codex CLI、Gemini CLI、または OpenCode）
+- **Coding Agent**: 少なくともビルトインまたはカスタムのいずれかが必要
 - **GitHub CLI**: PR クリーンアップ機能に必要（オプション）
 - **bun/npm**: bunx/npx実行方式に必要
 
