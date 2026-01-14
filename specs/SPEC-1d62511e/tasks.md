@@ -20,6 +20,7 @@
 - [x] **T1.1.6**: workspace.dependencies に共通依存関係設定 (dep: T1.1.1)
 - [x] **T1.1.7**: .gitignore, rustfmt.toml, clippy.toml, deny.toml 設定
 - [x] **T1.1.8**: MSRV設定（latest stable）
+- [x] **T1.1.9**: .gitignore に `*.local.*` を追加し、ローカル専用ファイルを追跡対象外にする
 
 ### 1.2 エラーハンドリング基盤 (gwt-core)
 

@@ -1,6 +1,7 @@
 .claude/settings.local.json
 .docker/bash_history
 PLANS.md
+*.local.*
 
 # Serena MCP tool cache directory
 .serena/

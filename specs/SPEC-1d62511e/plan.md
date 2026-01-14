@@ -79,6 +79,8 @@ mkdir -p crates/{gwt-core,gwt-cli,gwt-web,gwt-frontend}
 mkdir -p benches tests/{integration,e2e} messages
 ```
 
+補足: `.gitignore` に `*.local.*` を追加し、ローカル専用ファイルを追跡対象から除外する。
+
 ### 1.2 エラー型設計 (thiserror + カテゴリ別コード)
 
 **ファイル**: `crates/gwt-core/src/error/mod.rs`

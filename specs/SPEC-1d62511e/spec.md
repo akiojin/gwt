@@ -8,7 +8,7 @@ Git Worktree Manager (gwt) を TypeScript/Bun から Rust へ完全移行する�
 ## ステータス
 
 - **作成日**: 2026-01-11
-- **最終更新**: 2026-01-13
+- **最終更新**: 2026-01-14
 - **ステータス**: In Progress
 - **優先度**: High
 
@@ -238,6 +238,10 @@ Git Worktree Manager (gwt) を TypeScript/Bun から Rust へ完全移行する�
 
 - [x] git コマンドが必須（起動時チェック）
 - [x] Rust最新stable（MSRV設定なし）
+
+#### NFR-006: リポジトリ運用
+
+- [x] ローカル専用ファイル（`*.local.*`）はGitで追跡せず、`.gitignore`で除外する
 
 ## アーキテクチャ
 
