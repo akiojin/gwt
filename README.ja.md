@@ -2,11 +2,11 @@
 
 [English](README.md)
 
-Claude Code / Codex CLI / Gemini CLI 対応の対話型Gitワークツリーマネージャー（グラフィカルなブランチ選択と高度なワークフロー管理機能付き）
+Claude Code / Codex CLI / Gemini CLI / OpenCode 対応の対話型Gitワークツリーマネージャー（グラフィカルなブランチ選択と高度なワークフロー管理機能付き）
 
 ## 概要
 
-`@akiojin/gwt`は、直感的なインターフェースを通じてGitワークツリー管理を革新する強力なCLIツールです。Claude Code / Codex CLI / Gemini CLI の開発ワークフローとシームレスに統合し、インテリジェントなブランチ選択、自動ワークツリー作成、包括的なプロジェクト管理機能を提供します。
+`@akiojin/gwt`は、直感的なインターフェースを通じてGitワークツリー管理を革新する強力なCLIツールです。Claude Code / Codex CLI / Gemini CLI / OpenCode の開発ワークフローとシームレスに統合し、インテリジェントなブランチ選択、自動ワークツリー作成、包括的なプロジェクト管理機能を提供します。
 
 ## 移行ステータス
 
@@ -18,7 +18,7 @@ Rust版はCLI/TUIの主要フローとWeb UI（REST + WebSocket端末）まで�
 - **フルスクリーンレイアウト**: リポジトリ情報付きの固定ヘッダー、枠線付きのブランチリスト、キーボードショートカット付きの常時表示フッター
 - **スマートブランチ作成**: ガイド付きプロンプトと自動ベースブランチ選択でfeature、bugfix、hotfix、releaseブランチを作成
 - **高度なワークツリー管理**: 作成、Worktreeのあるブランチのクリーンアップ、パス最適化を含む完全なライフサイクル管理
-- **Coding Agent 選択**: 起動時の対話型ランチャーで Claude Code / Codex CLI / Gemini CLI を選択
+- **Coding Agent 選択**: 起動時の対話型ランチャーで Claude Code / Codex CLI / Gemini CLI / OpenCode を選択
 - **Coding Agent 統合**: 選択したコーディングエージェントをワークツリーで起動（Claude Codeは権限設定・変更処理の統合あり）
 - **GitHub PR統合**: マージされたプルリクエストのブランチとワークツリーの自動クリーンアップ
 - **変更管理**: 開発セッション後のコミット、stash、破棄の内蔵サポート
@@ -115,6 +115,27 @@ gwt clean
 3. **ワークツリー管理**: 既存ワークツリーの表示、オープン、削除
 4. **ブランチクリーンアップ**: マージ済みPRやベースブランチと差分がないブランチ／ワークツリーをローカルから自動削除（Worktreeのないブランチは対象外）
 
+## コーディングエージェント
+
+gwt は PATH 上のエージェントを検出し、ランチャーに表示します。
+
+対応エージェント:
+
+- Claude Code (`claude`)
+- Codex CLI (`codex`)
+- Gemini CLI (`gemini`)
+- OpenCode (`opencode`)
+
+### カスタムエージェント/モデル (OpenCode)
+
+OpenCode は複数プロバイダに対応します。ウィザードで:
+
+1. **OpenCode** を選択
+2. **Model** で **Custom (provider/model)** を選択
+3. `provider/model` を入力（例: `openai/gpt-5.2`）
+
+gwt は `opencode --model` にそのまま渡します。選択したプロバイダは OpenCode 側で設定してください。
+
 ## 高度なワークフロー
 
 ### ブランチ戦略
@@ -167,7 +188,7 @@ gwt
 
 - **Rust**: Stableツールチェーン（ソースからビルドする場合）
 - **Git**: ワークツリーサポート付き最新版
-- **Coding Agent**: 少なくともいずれかが必要（Claude Code、Codex CLI、または Gemini CLI）
+- **Coding Agent**: 少なくともいずれかが必要（Claude Code、Codex CLI、Gemini CLI、または OpenCode）
 - **GitHub CLI**: PR クリーンアップ機能に必要（オプション）
 - **bun/npm**: bunx/npx実行方式に必要
 

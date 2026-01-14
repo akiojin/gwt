@@ -2,11 +2,11 @@
 
 [日本語](README.ja.md)
 
-Interactive Git worktree manager with Coding Agent selection (Claude Code / Codex CLI / Gemini CLI), graphical branch selection, and advanced workflow management.
+Interactive Git worktree manager with Coding Agent selection (Claude Code / Codex CLI / Gemini CLI / OpenCode), graphical branch selection, and advanced workflow management.
 
 ## Overview
 
-`@akiojin/gwt` is a powerful CLI tool that revolutionizes Git worktree management through an intuitive interface. It seamlessly integrates with Claude Code / Codex CLI / Gemini CLI workflows, providing intelligent branch selection, automated worktree creation, and comprehensive project management capabilities.
+`@akiojin/gwt` is a powerful CLI tool that revolutionizes Git worktree management through an intuitive interface. It seamlessly integrates with Claude Code / Codex CLI / Gemini CLI / OpenCode workflows, providing intelligent branch selection, automated worktree creation, and comprehensive project management capabilities.
 
 ## Migration Status
 
@@ -18,7 +18,7 @@ The Rust implementation covers the core CLI/TUI workflow and the Web UI (REST + 
 - **Full-screen Layout**: Persistent header with repo context, boxed branch list, and always-visible footer with keyboard shortcuts
 - **Smart Branch Creation**: Create feature, bugfix, hotfix, or release branches with guided prompts and automatic base branch selection
 - **Advanced Worktree Management**: Complete lifecycle management including creation, cleanup of worktree-backed branches, and path optimization
-- **Coding Agent Selection**: Choose between Claude Code / Codex CLI / Gemini CLI through the interactive launcher
+- **Coding Agent Selection**: Choose between Claude Code / Codex CLI / Gemini CLI / OpenCode through the interactive launcher
 - **Coding Agent Integration**: Launch the selected agent in the worktree (Claude Code includes permission handling and post-change flow)
 - **GitHub PR Integration**: Automatic cleanup of merged pull request branches and worktrees
 - **Change Management**: Built-in support for committing, stashing, or discarding changes after development sessions
@@ -115,6 +115,27 @@ The tool presents an interactive interface with the following options:
 3. **Manage Worktrees**: View, open, or remove existing worktrees
 4. **Cleanup Branches**: Remove merged PR branches or branches identical to their base directly from the CLI (branches without worktrees are excluded)
 
+## Coding Agents
+
+gwt detects agents available on PATH and lists them in the launcher.
+
+Supported agents:
+
+- Claude Code (`claude`)
+- Codex CLI (`codex`)
+- Gemini CLI (`gemini`)
+- OpenCode (`opencode`)
+
+### Custom agent/model (OpenCode)
+
+OpenCode supports multiple providers. In the wizard:
+
+1. Select **OpenCode**
+2. On **Model**, choose **Custom (provider/model)**
+3. Enter a provider/model identifier (example: `openai/gpt-5.2`)
+
+gwt passes the value to `opencode --model`. Ensure OpenCode is configured for the provider you select.
+
 ## Advanced Workflows
 
 ### Branch Strategy
@@ -167,7 +188,7 @@ gwt
 
 - **Rust**: Stable toolchain (for building from source)
 - **Git**: Latest version with worktree support
-- **Coding Agent**: At least one of Claude Code, Codex CLI, or Gemini CLI should be available
+- **Coding Agent**: At least one of Claude Code, Codex CLI, Gemini CLI, or OpenCode should be available
 - **GitHub CLI**: Required for PR cleanup features (optional)
 - **bun/npm**: Required for bunx/npx execution method
 
