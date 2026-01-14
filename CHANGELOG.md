@@ -18,6 +18,15 @@
 * 安全アイコンの安全表示を緑に変更 ([#525](https://github.com/akiojin/gwt/issues/525)) ([f0e7ba9](https://github.com/akiojin/gwt/commit/f0e7ba9b5f01bfc2bd55173afe1d60ca434d2fde))
 * 安全状態確認時のカーソルリセット問題を修正 ([#539](https://github.com/akiojin/gwt/issues/539)) ([77db8ea](https://github.com/akiojin/gwt/commit/77db8ea3c629affbb930fc2074efb4a312837895))
 
+## [6.0.1](https://github.com/akiojin/gwt/compare/gwt-v6.0.0...gwt-v6.0.1) (2026-01-14)
+
+
+### Bug Fixes
+
+* exclude native binary from npm package ([#575](https://github.com/akiojin/gwt/issues/575)) ([ae0f6db](https://github.com/akiojin/gwt/commit/ae0f6db91ff67f4992774f2cb0ba5f1d4225d578))
+* restore release-please config from main ([7e30a2d](https://github.com/akiojin/gwt/commit/7e30a2db5128b11336528c13304b6a91bd4dc6bb))
+* support gwt-v* tag pattern in publish workflow ([#573](https://github.com/akiojin/gwt/issues/573)) ([7c64a10](https://github.com/akiojin/gwt/commit/7c64a10944beeb6335c71a8982fe1896889632eb))
+
 ## [6.0.0](https://github.com/akiojin/gwt/compare/gwt-v5.0.0...gwt-v6.0.0) (2026-01-14)
 
 
