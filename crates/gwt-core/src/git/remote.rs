@@ -136,6 +136,34 @@ impl Remote {
         }
     }
 
+    /// Push a branch to a remote
+    pub fn push(repo_path: &Path, name: &str, branch: &str, set_upstream: bool) -> Result<()> {
+        let mut args = vec!["push"];
+        if set_upstream {
+            args.push("-u");
+        }
+        args.push(name);
+        args.push(branch);
+
+        let output = Command::new("git")
+            .args(&args)
+            .current_dir(repo_path)
+            .output()
+            .map_err(|e| GwtError::GitOperationFailed {
+                operation: format!("push {name}"),
+                details: e.to_string(),
+            })?;
+
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(GwtError::GitOperationFailed {
+                operation: format!("push {name}"),
+                details: String::from_utf8_lossy(&output.stderr).to_string(),
+            })
+        }
+    }
+
     /// Check if a remote exists
     pub fn exists(repo_path: &Path, name: &str) -> Result<bool> {
         let remotes = Self::list(repo_path)?;
@@ -288,5 +316,54 @@ mod tests {
         let default = Remote::default(temp.path()).unwrap();
         assert!(default.is_some());
         assert_eq!(default.unwrap().name, "origin");
+    }
+
+    #[test]
+    fn test_push_to_local_remote() {
+        let temp = create_test_repo();
+
+        std::fs::write(temp.path().join("README.md"), "# Test").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "Initial commit"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+
+        let remote_dir = TempDir::new().unwrap();
+        Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(remote_dir.path())
+            .output()
+            .unwrap();
+
+        Remote::add(
+            temp.path(),
+            "origin",
+            remote_dir.path().to_string_lossy().as_ref(),
+        )
+        .unwrap();
+
+        let branch = crate::git::Branch::current(temp.path())
+            .unwrap()
+            .map(|b| b.name)
+            .unwrap_or_else(|| "main".to_string());
+
+        Remote::push(temp.path(), "origin", &branch, true).unwrap();
+
+        let output = Command::new("git")
+            .args([
+                "--git-dir",
+                remote_dir.path().to_str().unwrap(),
+                "rev-parse",
+                &branch,
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
     }
 }

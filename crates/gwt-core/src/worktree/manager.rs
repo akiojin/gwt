@@ -242,6 +242,16 @@ impl WorktreeManager {
         CleanupCandidate::detect(&self.repo_root)
     }
 
+    /// Auto-clean orphaned worktrees on startup
+    pub fn auto_cleanup_orphans(&self) -> Result<usize> {
+        let orphans = self.detect_orphans();
+        if orphans.is_empty() {
+            return Ok(0);
+        }
+        self.prune()?;
+        Ok(orphans.len())
+    }
+
     /// Prune orphaned worktree metadata
     pub fn prune(&self) -> Result<()> {
         self.repo.prune_worktrees()
@@ -433,6 +443,27 @@ mod tests {
         manager.create_new_branch("feature/count", None).unwrap();
         let count = manager.active_count().unwrap();
         assert_eq!(count, initial_count + 1);
+    }
+
+    #[test]
+    fn test_auto_cleanup_orphans_on_startup() {
+        let temp = create_test_repo();
+        let manager = WorktreeManager::new(temp.path()).unwrap();
+
+        let wt = manager.create_new_branch("feature/orphan", None).unwrap();
+        let wt_path = wt.path.clone();
+        assert!(wt_path.exists());
+
+        std::fs::remove_dir_all(&wt_path).unwrap();
+
+        let detected = manager.detect_orphans();
+        assert!(!detected.is_empty());
+
+        let cleaned = manager.auto_cleanup_orphans().unwrap();
+        assert_eq!(cleaned, detected.len());
+
+        let remaining = manager.detect_orphans();
+        assert!(remaining.is_empty());
     }
 
     #[test]

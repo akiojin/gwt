@@ -1,5 +1,6 @@
 //! Settings management
 
+use super::migration::auto_migrate;
 use crate::error::{GwtError, Result};
 use figment::{
     providers::{Env, Format, Toml},
@@ -88,6 +89,7 @@ pub struct AgentSettings {
 impl Settings {
     /// Load settings from configuration files and environment
     pub fn load(repo_root: &Path) -> Result<Self> {
+        auto_migrate(repo_root)?;
         let config_path = Self::find_config_file(repo_root);
 
         let mut figment = Figment::new().merge(Toml::string(&Self::default_toml()));
@@ -198,6 +200,23 @@ mod tests {
         assert!(settings.protected_branches.contains(&"main".to_string()));
         assert!(!settings.debug);
         assert_eq!(settings.web.port, 8080);
+    }
+
+    #[test]
+    fn test_load_auto_migrates_json() {
+        let temp = TempDir::new().unwrap();
+        let json_path = temp.path().join(".gwt.json");
+        let toml_path = temp.path().join(".gwt.toml");
+
+        std::fs::write(
+            &json_path,
+            r#"{"default_base_branch":"develop","worktree_root":".worktrees"}"#,
+        )
+        .unwrap();
+
+        let settings = Settings::load(temp.path()).unwrap();
+        assert!(toml_path.exists());
+        assert_eq!(settings.default_base_branch, "develop");
     }
 
     #[test]

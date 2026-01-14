@@ -8,6 +8,10 @@ Interactive Git worktree manager with Coding Agent selection (Claude Code / Code
 
 `@akiojin/gwt` is a powerful CLI tool that revolutionizes Git worktree management through an intuitive interface. It seamlessly integrates with Claude Code / Codex CLI / Gemini CLI workflows, providing intelligent branch selection, automated worktree creation, and comprehensive project management capabilities.
 
+## Migration Status
+
+The Rust implementation covers the core CLI/TUI workflow and the Web UI (REST + WebSocket terminal). Remaining work is focused on Git backend fallback coverage, documentation polish, and release packaging.
+
 ## Key Features
 
 - **Modern TUI**: Built with Ratatui for a smooth, responsive terminal interface

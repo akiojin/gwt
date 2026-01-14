@@ -109,6 +109,12 @@ pub enum WizardStep {
     BranchNameInput,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WizardConfirmResult {
+    Advance,
+    Complete,
+}
+
 /// Quick Start option types (FR-050)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuickStartAction {
@@ -434,7 +440,7 @@ impl CodingAgent {
                 ModelOption::default_option("Default (Auto)", "Use Codex default model")
                     .with_base_levels()
                     .with_default_inference(ReasoningLevel::High),
-                ModelOption::new("gpt-5.2-codex", "gpt-5.2-codex", "Latest frontier agentic coding model")
+                ModelOption::new("gpt-5.2-codex", "gpt-5.2-codex", "Codex flagship with extra-high reasoning support.")
                     .with_max_levels()
                     .with_default_inference(ReasoningLevel::High),
                 ModelOption::new("gpt-5.1-codex-max", "gpt-5.1-codex-max", "Codex-optimized flagship for deep and fast reasoning.")
@@ -579,6 +585,8 @@ pub struct WizardState {
     pub execution_mode_index: usize,
     /// Skip permissions
     pub skip_permissions: bool,
+    /// Session ID for resume/continue
+    pub session_id: Option<String>,
     /// Scroll offset for popup content
     pub scroll_offset: usize,
     // Quick Start (FR-050, SPEC-f47db390)
@@ -644,6 +652,7 @@ impl WizardState {
         self.execution_mode = ExecutionMode::default();
         self.execution_mode_index = 0;
         self.skip_permissions = false;
+        self.session_id = None;
         self.branch_type = BranchType::default();
         self.new_branch_name.clear();
         self.cursor = 0;
@@ -728,9 +737,19 @@ impl WizardState {
 
             // Set execution mode based on action
             self.execution_mode = match action {
-                QuickStartAction::ResumeWithPrevious => ExecutionMode::Resume,
+                QuickStartAction::ResumeWithPrevious => {
+                    if entry.session_id.is_some() {
+                        ExecutionMode::Resume
+                    } else {
+                        ExecutionMode::Continue
+                    }
+                }
                 QuickStartAction::StartNewWithPrevious => ExecutionMode::Normal,
                 QuickStartAction::ChooseDifferent => ExecutionMode::Normal,
+            };
+            self.session_id = match action {
+                QuickStartAction::ResumeWithPrevious => entry.session_id.clone(),
+                _ => None,
             };
         }
     }
@@ -795,9 +814,23 @@ impl WizardState {
         self.step = match self.step {
             WizardStep::QuickStart => {
                 // FR-050: Handle Quick Start selection
-                // Next step depends on selection - handled by caller via apply_quick_start_selection
-                // If "Choose different" is selected, go to AgentSelect
-                WizardStep::AgentSelect
+                if let Some((action, tool_index)) = self.selected_quick_start_action() {
+                    match action {
+                        QuickStartAction::ResumeWithPrevious
+                        | QuickStartAction::StartNewWithPrevious => {
+                            // Apply settings from history and skip to completion
+                            self.apply_quick_start_selection(tool_index, action);
+                            WizardStep::SkipPermissions
+                        }
+                        QuickStartAction::ChooseDifferent => {
+                            // Go to agent selection for manual configuration
+                            WizardStep::AgentSelect
+                        }
+                    }
+                } else {
+                    // No history, go to agent selection
+                    WizardStep::AgentSelect
+                }
             }
             WizardStep::BranchTypeSelect => WizardStep::BranchNameInput,
             WizardStep::BranchNameInput => WizardStep::AgentSelect,
@@ -872,6 +905,38 @@ impl WizardState {
         self.step = prev;
         self.scroll_offset = 0;
         true
+    }
+
+    pub fn confirm(&mut self) -> WizardConfirmResult {
+        if self.step == WizardStep::QuickStart {
+            if let Some((action, tool_index)) = self.selected_quick_start_action() {
+                match action {
+                    QuickStartAction::ResumeWithPrevious
+                    | QuickStartAction::StartNewWithPrevious => {
+                        self.apply_quick_start_selection(tool_index, action);
+                        self.step = WizardStep::SkipPermissions;
+                        self.scroll_offset = 0;
+                        return WizardConfirmResult::Complete;
+                    }
+                    QuickStartAction::ChooseDifferent => {
+                        self.step = WizardStep::AgentSelect;
+                        self.scroll_offset = 0;
+                        return WizardConfirmResult::Advance;
+                    }
+                }
+            } else {
+                self.step = WizardStep::AgentSelect;
+                self.scroll_offset = 0;
+                return WizardConfirmResult::Advance;
+            }
+        }
+
+        if self.is_complete() {
+            WizardConfirmResult::Complete
+        } else {
+            self.next_step();
+            WizardConfirmResult::Advance
+        }
     }
 
     /// Select next item in current step
@@ -1626,6 +1691,37 @@ mod tests {
     }
 
     #[test]
+    fn test_opencode_model_options_include_default_and_custom() {
+        let options = CodingAgent::OpenCode.models();
+        assert!(!options.is_empty());
+        assert!(options.iter().any(|option| option.is_default));
+        assert!(options.iter().any(|option| option.id == "__custom__"));
+    }
+
+    #[test]
+    fn test_codex_model_options_include_gpt_52_codex() {
+        let options = CodingAgent::CodexCli.models();
+        let models: Vec<&ModelOption> =
+            options.iter().filter(|option| !option.is_default).collect();
+        let ids: Vec<&str> = models.iter().map(|option| option.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "gpt-5.2-codex",
+                "gpt-5.1-codex-max",
+                "gpt-5.1-codex-mini",
+                "gpt-5.2",
+            ]
+        );
+        let gpt_52 = models
+            .iter()
+            .find(|option| option.id == "gpt-5.2-codex")
+            .expect("gpt-5.2-codex option missing");
+        assert!(gpt_52.inference_levels.contains(&ReasoningLevel::XHigh));
+        assert_eq!(gpt_52.default_inference, Some(ReasoningLevel::High));
+    }
+
+    #[test]
     fn test_wizard_step_navigation() {
         let mut state = WizardState::new();
         state.open_for_branch("test", vec![]);
@@ -1661,5 +1757,97 @@ mod tests {
         state.select_prev();
         assert_eq!(state.agent_index, 0);
         assert_eq!(state.agent, CodingAgent::ClaudeCode);
+    }
+
+    #[test]
+    fn test_quick_start_resume_skips_to_completion() {
+        let mut state = WizardState::new();
+        let history = vec![QuickStartEntry {
+            tool_id: "claude-code".to_string(),
+            tool_label: "Claude Code".to_string(),
+            model: Some("sonnet".to_string()),
+            reasoning_level: None,
+            version: Some("1.0.0".to_string()),
+            session_id: Some("abc123".to_string()),
+            skip_permissions: Some(true),
+        }];
+        state.open_for_branch("feature/test", history);
+
+        // Should start at QuickStart
+        assert_eq!(state.step, WizardStep::QuickStart);
+
+        // Index 0 = Resume with previous settings (first tool)
+        state.quick_start_index = 0;
+
+        // Confirm should complete immediately
+        let result = state.confirm();
+        assert_eq!(result, WizardConfirmResult::Complete);
+        assert_eq!(state.step, WizardStep::SkipPermissions);
+
+        // Settings should be applied
+        assert_eq!(state.agent, CodingAgent::ClaudeCode);
+        assert_eq!(state.model, "sonnet");
+        assert_eq!(state.version, "1.0.0");
+        assert_eq!(state.execution_mode, ExecutionMode::Resume);
+        assert!(state.skip_permissions);
+        assert_eq!(state.session_id.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn test_quick_start_new_skips_to_completion() {
+        let mut state = WizardState::new();
+        let history = vec![QuickStartEntry {
+            tool_id: "codex-cli".to_string(),
+            tool_label: "Codex CLI".to_string(),
+            model: Some("o3-mini".to_string()),
+            reasoning_level: Some("high".to_string()),
+            version: Some("2.0.0".to_string()),
+            session_id: Some("xyz789".to_string()),
+            skip_permissions: Some(false),
+        }];
+        state.open_for_branch("feature/test", history);
+
+        assert_eq!(state.step, WizardStep::QuickStart);
+
+        // Index 1 = Start new with previous settings (first tool)
+        state.quick_start_index = 1;
+
+        // Confirm should complete immediately
+        let result = state.confirm();
+        assert_eq!(result, WizardConfirmResult::Complete);
+        assert_eq!(state.step, WizardStep::SkipPermissions);
+
+        // Settings should be applied with Normal mode (not Resume)
+        assert_eq!(state.agent, CodingAgent::CodexCli);
+        assert_eq!(state.model, "o3-mini");
+        assert_eq!(state.reasoning_level, ReasoningLevel::High);
+        assert_eq!(state.execution_mode, ExecutionMode::Normal);
+        assert!(!state.skip_permissions);
+        assert!(state.session_id.is_none());
+    }
+
+    #[test]
+    fn test_quick_start_choose_different_goes_to_agent_select() {
+        let mut state = WizardState::new();
+        let history = vec![QuickStartEntry {
+            tool_id: "claude-code".to_string(),
+            tool_label: "Claude Code".to_string(),
+            model: Some("sonnet".to_string()),
+            reasoning_level: None,
+            version: Some("1.0.0".to_string()),
+            session_id: Some("abc123".to_string()),
+            skip_permissions: None,
+        }];
+        state.open_for_branch("feature/test", history);
+
+        assert_eq!(state.step, WizardStep::QuickStart);
+
+        // Index 2 = "Choose different settings..."
+        state.quick_start_index = 2;
+
+        let result = state.confirm();
+        assert_eq!(result, WizardConfirmResult::Advance);
+        assert_eq!(state.step, WizardStep::AgentSelect);
+        assert!(state.session_id.is_none());
     }
 }

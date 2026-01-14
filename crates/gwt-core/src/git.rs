@@ -4,10 +4,12 @@
 
 mod backend;
 mod branch;
+mod pullrequest;
 mod remote;
 mod repository;
 
 pub use backend::GitBackend;
 pub use branch::{Branch, DivergenceStatus};
+pub use pullrequest::{PrCache, PullRequest};
 pub use remote::Remote;
 pub use repository::{get_main_repo_root, Repository, WorktreeInfo};

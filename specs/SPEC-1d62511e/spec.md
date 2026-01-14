@@ -8,8 +8,8 @@ Git Worktree Manager (gwt) を TypeScript/Bun から Rust へ完全移行する�
 ## ステータス
 
 - **作成日**: 2026-01-11
-- **最終更新**: 2026-01-11
-- **ステータス**: Draft
+- **最終更新**: 2026-01-14
+- **ステータス**: In Progress
 - **優先度**: High
 
 ## 背景と動機
@@ -102,115 +102,122 @@ Git Worktree Manager (gwt) を TypeScript/Bun から Rust へ完全移行する�
 
 #### FR-001: Git操作
 
-- [ ] リポジトリ検出・ルート取得
-- [ ] ブランチ一覧取得・作成・削除
-- [ ] リモート操作（fetch, pull, push）
-- [ ] Fast-Forward Pull
-- [ ] 未コミット/未プッシュ検出
-- [ ] ブランチ乖離状態（divergence）検出
-- [ ] 外部gitコマンド必須チェック（起動時）
+- [x] リポジトリ検出・ルート取得
+- [x] ブランチ一覧取得・作成・削除
+- [x] リモート操作（fetch, pull, push）
+- [x] Fast-Forward Pull
+- [x] 未コミット/未プッシュ検出
+- [x] ブランチ乖離状態（divergence）検出
+- [x] 外部gitコマンド必須チェック（起動時）
 
 #### FR-002: Worktree管理
 
-- [ ] Worktree一覧取得
-- [ ] Worktree作成・削除
-- [ ] パス生成（`.worktrees/{branch-name}`）
-- [ ] 保護ブランチ判定（main/master/develop）
-- [ ] Worktreeパス修復機能
-- [ ] クリーンアップ候補判定
-- [ ] 中途半端なWorktreeの自動クリーンアップ（起動時）
-- [ ] Worktree単位のファイルロック（flock）
+- [x] Worktree一覧取得
+- [x] Worktree作成・削除
+- [x] パス生成（`.worktrees/{branch-name}`）
+- [x] 保護ブランチ判定（main/master/develop）
+- [x] Worktreeパス修復機能
+- [x] クリーンアップ候補判定
+- [x] 中途半端なWorktreeの自動クリーンアップ（起動時）
+- [x] Worktree単位のファイルロック（flock）
 
 #### FR-003: CLI TUI
 
-- [ ] フルスクリーンTUI（Ratatui + ratatui-async-template）
-- [ ] Elmアーキテクチャ（Model-Update-View）
-- [ ] 画面スタック保持（戻る時に状態復元）
-- [ ] ブランチ一覧画面（メイン）
-  - [ ] 遅延読み込み（1000+ブランチ対応）
-  - [ ] 現行ソート順維持
-- [ ] Worktree作成ウィザード
-- [ ] 削除確認ダイアログ
-- [ ] エラー表示画面
-- [ ] テキスト入力画面
-- [ ] 選択肢提示画面
-- [ ] プロファイル管理画面
-- [ ] 環境変数管理画面
-- [ ] 設定画面
-- [ ] ログ表示画面
-- [ ] ヘルプオーバーレイ
-- [ ] キーボードショートカット（現行維持：矢印キー中心）
-- [ ] オフライン表示（ヘッダーに[OFFLINE]アイコン）
-- [ ] Ctrl+C二度押し終了（一度目無視、二度目でクリーンアップ終了）
+- [x] フルスクリーンTUI（Ratatui + ratatui-async-template）
+- [x] Elmアーキテクチャ（Model-Update-View）
+- [x] 画面スタック保持（戻る時に状態復元）
+- [x] ブランチ一覧画面（メイン）
+  - [x] 遅延読み込み（1000+ブランチ対応）
+  - [x] 現行ソート順維持
+- [x] Worktree作成ウィザード
+- [x] 削除確認ダイアログ
+- [x] エラー表示画面
+- [x] テキスト入力画面
+- [x] 選択肢提示画面
+- [x] プロファイル管理画面
+- [x] 環境変数管理画面
+- [x] 設定画面
+- [x] ログ表示画面
+- [x] ヘルプオーバーレイ
+- [x] キーボードショートカット（現行維持：矢印キー中心）
+- [x] オフライン表示（ヘッダーに[OFFLINE]アイコン）
+- [x] Ctrl+C二度押し終了（一度目無視、二度目でクリーンアップ終了）
 
 #### FR-004: Web UI
 
-- [ ] Axum Webサーバー（localhostのみ、認証なし）
-- [ ] REST API（worktrees, branches, sessions, config）
-- [ ] WebSocket（端末通信）
-- [ ] Leptos フロントエンド（CSRのみ、WASM埋め込み）
-- [ ] 端末エミュレーション
+- [x] Axum Webサーバー（localhostのみ、認証なし）
+- [x] REST API（worktrees, branches, sessions, config）
+- [x] WebSocket（端末通信）
+  - [x] WebSocket接続時にPTYセッションを作成し、接続中のみプロセスを維持する
+  - [x] クライアント入力はPTYへ転送し、PTY出力はWebSocketへストリームする
+  - [x] 端末リサイズは専用メッセージで通知し、PTYサイズへ反映する
+  - [x] セッション終了/切断時は子プロセスとPTYを確実に破棄する
+  - [x] 端末出力/エラーは英語メッセージで通知する
+- [x] Leptos フロントエンド（CSRのみ、WASM埋め込み）
+- [x] 端末エミュレーション（xterm.jsでWebSocket接続、入力/出力/リサイズ対応）
+- [x] Worktree/Branchの作成・削除操作をWeb UIから実行可能
 - [ ] システムトレイ統合（Windows）
 
 #### FR-005: Coding Agent統合
 
-- [ ] Claude Code起動（continue/resume対応）
-- [ ] Codex CLI起動（推論レベル設定）
-- [ ] Gemini CLI起動
-- [ ] セッション管理（ID保存・履歴）
-- [ ] 環境変数渡し
-- [ ] Agent終了までブロッキング待機
+- [x] Claude Code起動（continue/resume対応）
+- [x] Codex CLI起動（推論レベル設定）
+- [x] Gemini CLI起動
+- [x] セッション管理（ID保存・履歴）
+- [x] 環境変数渡し
+- [x] Agent終了までブロッキング待機
 
 #### FR-006: 設定管理
 
-- [ ] 設定ファイル読み込み（TOML形式、.gwt.toml）
-- [ ] 既存JSON設定の自動TOML変換
-- [ ] 環境変数サポート（GWT_*）
-- [ ] プロファイル機能
-- [ ] セッション保存・復元（TOML形式）
-- [ ] 既存JSONセッションの自動TOML変換
+- [x] 設定ファイル読み込み（TOML形式、.gwt.toml）
+- [x] 既存JSON設定の自動TOML変換
+- [x] 環境変数サポート（GWT_*）
+- [x] プロファイル機能
+- [x] セッション保存・復元（TOML形式）
+- [x] 既存JSONセッションの自動TOML変換
 
 #### FR-007: ログシステム
 
-- [ ] JSON Lines形式（Pino互換）
-- [ ] スパン情報追加（関数名、ファイル:line）
-- [ ] カテゴリ別ログ
-- [ ] ログローテーション（7日保持）
-- [ ] ログ閲覧機能
+- [x] JSON Lines形式（Pino互換）
+- [x] スパン情報追加（関数名、ファイル:line）
+- [x] カテゴリ別ログ
+- [x] ログローテーション（7日保持）
+- [x] ログ閲覧機能
 
 #### FR-008: GitHub統合
 
-- [ ] PR情報取得
-- [ ] マージ状態確認
+- [x] PR情報取得
+- [x] マージ状態確認
 - [ ] 自動クリーンアップ候補判定
 - [ ] オフライン時はグレースフルデグレード
 
 #### FR-009: エラーハンドリング
 
-- [ ] thiserrorによる細粒度エラー型
-- [ ] カテゴリ別エラーコード（E1xxx=Git, E2xxx=Worktree, E3xxx=Config...）
-- [ ] エラーメッセージのバイナリ埋め込み（include_str!）
+- [x] thiserrorによる細粒度エラー型
+- [x] カテゴリ別エラーコード（E1xxx=Git, E2xxx=Worktree, E3xxx=Config...）
+- [x] エラーメッセージのバイナリ埋め込み（include_str!）
 
 #### FR-010: デバッグ
 
-- [ ] RUST_LOG環境変数でログレベル制御
-- [ ] --debugフラグでデバッグモード有効化
+- [x] RUST_LOG環境変数でログレベル制御
+- [x] --debugフラグでデバッグモード有効化
 
 ### 非機能要件
 
 #### NFR-001: 互換性
 
-- [ ] 既存設定ファイル（.gwt.json）の自動TOML変換
-- [ ] 既存セッションファイルの自動TOML変換
-- [ ] 既存ログ形式（JSON Lines）の維持 + スパン拡張
-- [ ] コマンドライン引数の互換性（serve, --help, --version）
-- [ ] キーバインドの完全互換
+- [x] 既存設定ファイル（.gwt.json）の自動TOML変換
+- [x] 既存セッションファイルの自動TOML変換
+- [x] 既存ログ形式（JSON Lines）の維持 + スパン拡張
+- [x] コマンドライン引数の互換性（serve, --help, --version）
+- [x] キーバインドの完全互換
 
 #### NFR-002: パフォーマンス
 
 - [ ] 起動時間: < 100ms
 - [ ] ブランチ一覧取得: < 500ms（1000ブランチ）
 - [ ] メモリ使用量: < 50MB（通常操作時）
+- [x] WASM最適化（wasm-opt: `z`）
 - [ ] criterionによるベンチマーク（CIで回帰検出）
 
 #### NFR-003: 配布
@@ -229,8 +236,12 @@ Git Worktree Manager (gwt) を TypeScript/Bun から Rust へ完全移行する�
 
 #### NFR-005: 前提条件
 
-- [ ] git コマンドが必須（起動時チェック）
-- [ ] Rust最新stable（MSRV設定なし）
+- [x] git コマンドが必須（起動時チェック）
+- [x] Rust最新stable（MSRV設定なし）
+
+#### NFR-006: リポジトリ運用
+
+- [x] ローカル専用ファイル（`*.local.*`）はGitで追跡せず、`.gitignore`で除外する
 
 ## アーキテクチャ
 

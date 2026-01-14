@@ -21,6 +21,8 @@ pub struct Branch {
     pub ahead: usize,
     /// Commits behind upstream
     pub behind: usize,
+    /// Last commit timestamp (Unix timestamp in seconds) - FR-041
+    pub commit_timestamp: Option<i64>,
 }
 
 impl Branch {
@@ -34,15 +36,25 @@ impl Branch {
             commit: commit.into(),
             ahead: 0,
             behind: 0,
+            commit_timestamp: None,
         }
     }
 
     /// List all local branches in a repository
     pub fn list(repo_path: &Path) -> Result<Vec<Branch>> {
+        Self::list_with_options(repo_path, true)
+    }
+
+    /// List all local branches without computing divergence (fast path)
+    pub fn list_basic(repo_path: &Path) -> Result<Vec<Branch>> {
+        Self::list_with_options(repo_path, false)
+    }
+
+    fn list_with_options(repo_path: &Path, include_divergence: bool) -> Result<Vec<Branch>> {
         let output = Command::new("git")
             .args([
                 "for-each-ref",
-                "--format=%(refname:short)%09%(objectname:short)%09%(upstream:short)%09%(HEAD)",
+                "--format=%(refname:short)%09%(objectname:short)%09%(upstream:short)%09%(HEAD)%09%(committerdate:unix)",
                 "refs/heads/",
             ])
             .current_dir(repo_path)
@@ -64,7 +76,7 @@ impl Branch {
 
         for line in stdout.lines() {
             let parts: Vec<&str> = line.split('\t').collect();
-            if parts.len() >= 4 {
+            if parts.len() >= 5 {
                 let name = parts[0].to_string();
                 let commit = parts[1].to_string();
                 let upstream = if parts[2].is_empty() {
@@ -73,6 +85,7 @@ impl Branch {
                     Some(parts[2].to_string())
                 };
                 let is_current = parts[3] == "*";
+                let commit_timestamp = parts[4].parse::<i64>().ok();
 
                 let mut branch = Branch {
                     name,
@@ -82,13 +95,18 @@ impl Branch {
                     commit,
                     ahead: 0,
                     behind: 0,
+                    commit_timestamp,
                 };
 
-                // Get ahead/behind counts if upstream exists
-                if let Some(ref up) = upstream {
-                    if let Ok((ahead, behind)) = Self::get_divergence(repo_path, &branch.name, up) {
-                        branch.ahead = ahead;
-                        branch.behind = behind;
+                if include_divergence {
+                    // Get ahead/behind counts if upstream exists
+                    if let Some(ref up) = upstream {
+                        if let Ok((ahead, behind)) =
+                            Self::get_divergence(repo_path, &branch.name, up)
+                        {
+                            branch.ahead = ahead;
+                            branch.behind = behind;
+                        }
                     }
                 }
 
@@ -104,7 +122,7 @@ impl Branch {
         let output = Command::new("git")
             .args([
                 "for-each-ref",
-                "--format=%(refname:short)%09%(objectname:short)",
+                "--format=%(refname:short)%09%(objectname:short)%09%(committerdate:unix)",
                 "refs/remotes/",
             ])
             .current_dir(repo_path)
@@ -126,11 +144,12 @@ impl Branch {
 
         for line in stdout.lines() {
             let parts: Vec<&str> = line.split('\t').collect();
-            if parts.len() >= 2 {
+            if parts.len() >= 3 {
                 // Skip HEAD refs
                 if parts[0].ends_with("/HEAD") {
                     continue;
                 }
+                let commit_timestamp = parts[2].parse::<i64>().ok();
                 branches.push(Branch {
                     name: parts[0].to_string(),
                     is_current: false,
@@ -139,6 +158,7 @@ impl Branch {
                     commit: parts[1].to_string(),
                     ahead: 0,
                     behind: 0,
+                    commit_timestamp,
                 });
             }
         }
@@ -180,6 +200,23 @@ impl Branch {
             .trim()
             .to_string();
 
+        // Get commit timestamp (FR-041)
+        let timestamp_output = Command::new("git")
+            .args(["log", "-1", "--format=%ct", "HEAD"])
+            .current_dir(repo_path)
+            .output();
+
+        let commit_timestamp = timestamp_output.ok().and_then(|o| {
+            if o.status.success() {
+                String::from_utf8_lossy(&o.stdout)
+                    .trim()
+                    .parse::<i64>()
+                    .ok()
+            } else {
+                None
+            }
+        });
+
         // Get upstream
         let upstream_output = Command::new("git")
             .args(["rev-parse", "--abbrev-ref", "@{u}"])
@@ -202,6 +239,7 @@ impl Branch {
             commit,
             ahead: 0,
             behind: 0,
+            commit_timestamp,
         };
 
         // Get ahead/behind
@@ -300,6 +338,43 @@ impl Branch {
             Ok((ahead, behind))
         } else {
             Ok((0, 0))
+        }
+    }
+
+    /// Get divergence (ahead, behind) between two refs
+    pub fn divergence_between(repo_path: &Path, left: &str, right: &str) -> Result<(usize, usize)> {
+        let output = Command::new("git")
+            .args([
+                "rev-list",
+                "--left-right",
+                "--count",
+                &format!("{left}...{right}"),
+            ])
+            .current_dir(repo_path)
+            .output()
+            .map_err(|e| GwtError::GitOperationFailed {
+                operation: "rev-list".to_string(),
+                details: e.to_string(),
+            })?;
+
+        if !output.status.success() {
+            return Err(GwtError::GitOperationFailed {
+                operation: "rev-list".to_string(),
+                details: String::from_utf8_lossy(&output.stderr).to_string(),
+            });
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let parts: Vec<&str> = stdout.trim().split('\t').collect();
+        if parts.len() == 2 {
+            let ahead = parts[0].parse().unwrap_or(0);
+            let behind = parts[1].parse().unwrap_or(0);
+            Ok((ahead, behind))
+        } else {
+            Err(GwtError::GitOperationFailed {
+                operation: "rev-list parse".to_string(),
+                details: stdout.to_string(),
+            })
         }
     }
 
@@ -444,12 +519,65 @@ mod tests {
         temp
     }
 
+    fn create_repo_with_remote() -> (TempDir, String) {
+        let temp = create_test_repo();
+        let origin = TempDir::new().unwrap();
+
+        Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(origin.path())
+            .output()
+            .unwrap();
+
+        let branch = Branch::current(temp.path()).unwrap().unwrap().name;
+
+        Command::new("git")
+            .args(["remote", "add", "origin", origin.path().to_str().unwrap()])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+
+        Command::new("git")
+            .args(["push", "-u", "origin", &branch])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+
+        std::fs::write(temp.path().join("ahead.txt"), "ahead").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "ahead"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+
+        (temp, branch)
+    }
+
     #[test]
     fn test_list_branches() {
         let temp = create_test_repo();
         let branches = Branch::list(temp.path()).unwrap();
         assert_eq!(branches.len(), 1);
         assert!(branches[0].is_current);
+    }
+
+    #[test]
+    fn test_list_basic_skips_divergence() {
+        let (temp, branch) = create_repo_with_remote();
+
+        let branches_full = Branch::list(temp.path()).unwrap();
+        let branch_full = branches_full.iter().find(|b| b.name == branch).unwrap();
+        assert!(branch_full.ahead > 0);
+
+        let branches_basic = Branch::list_basic(temp.path()).unwrap();
+        let branch_basic = branches_basic.iter().find(|b| b.name == branch).unwrap();
+        assert_eq!(branch_basic.ahead, 0);
+        assert_eq!(branch_basic.behind, 0);
     }
 
     #[test]
@@ -483,6 +611,34 @@ mod tests {
     }
 
     #[test]
+    fn test_divergence_between() {
+        let temp = create_test_repo();
+        let base = Branch::current(temp.path()).unwrap().unwrap().name;
+
+        Command::new("git")
+            .args(["checkout", "-b", "feature/test"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        std::fs::write(temp.path().join("feature.txt"), "feature").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "feature"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+
+        let (ahead, behind) =
+            Branch::divergence_between(temp.path(), "feature/test", &base).unwrap();
+        assert!(ahead > 0);
+        assert_eq!(behind, 0);
+    }
+
+    #[test]
     fn test_divergence_status() {
         let branch = Branch {
             name: "main".to_string(),
@@ -492,6 +648,7 @@ mod tests {
             commit: "abc123".to_string(),
             ahead: 2,
             behind: 1,
+            commit_timestamp: None,
         };
         assert_eq!(
             branch.divergence_status(),

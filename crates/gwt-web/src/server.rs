@@ -1,7 +1,7 @@
 //! Axum web server
 
 use axum::{
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
     Router,
 };
 use std::net::SocketAddr;
@@ -10,6 +10,8 @@ use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::api::{self, AppState};
+use crate::static_files;
+use crate::websocket;
 
 /// Server configuration
 pub struct ServerConfig {
@@ -62,16 +64,31 @@ fn build_router(state: Arc<AppState>, cors_enabled: bool) -> Router {
         // Worktrees
         .route("/worktrees", get(api::list_worktrees))
         .route("/worktrees", post(api::create_worktree))
-        .route("/worktrees/:branch", delete(api::delete_worktree))
+        .route("/worktrees/{branch}", delete(api::delete_worktree))
         // Branches
         .route("/branches", get(api::list_branches))
         .route("/branches", post(api::create_branch))
-        .route("/branches/:name", delete(api::delete_branch))
+        .route("/branches/{name}", delete(api::delete_branch))
         // Settings
         .route("/settings", get(api::get_settings))
+        .route("/settings", put(api::update_settings))
+        // Sessions
+        .route("/sessions", get(api::get_sessions))
+        .with_state(state.clone());
+
+    let ws_routes = Router::new()
+        .route("/ws/terminal", get(websocket::ws_handler))
         .with_state(state);
 
-    let router = Router::new().nest("/api", api_routes);
+    // Static file routes for frontend
+    let static_routes = Router::new()
+        .route("/", get(static_files::serve_index))
+        .route("/{*path}", get(static_files::serve_static));
+
+    let router = Router::new()
+        .nest("/api", api_routes)
+        .merge(ws_routes)
+        .merge(static_routes);
 
     if cors_enabled {
         let cors = CorsLayer::new()
@@ -107,6 +124,13 @@ pub async fn serve_with_config(config: ServerConfig) -> Result<(), Box<dyn std::
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::{to_bytes, Body};
+    use axum::http::Request;
+    use axum::http::StatusCode;
+    use gwt_core::config::{save_session_entry, ToolSessionEntry};
+    use std::env;
+    use tempfile::TempDir;
+    use tower::ServiceExt;
 
     #[test]
     fn test_server_config_default() {
@@ -127,5 +151,52 @@ mod tests {
         assert_eq!(config.address, "0.0.0.0");
         assert!(!config.cors_enabled);
         assert_eq!(config.repo_path, PathBuf::from("/tmp/repo"));
+    }
+
+    #[tokio::test]
+    async fn test_sessions_endpoint_returns_history() {
+        let temp_home = TempDir::new().unwrap();
+        let prev_home = env::var_os("HOME");
+        env::set_var("HOME", temp_home.path());
+
+        let repo = TempDir::new().unwrap();
+        let entry = ToolSessionEntry {
+            branch: "feature/test".to_string(),
+            worktree_path: Some(repo.path().to_string_lossy().to_string()),
+            tool_id: "codex-cli".to_string(),
+            tool_label: "Codex CLI".to_string(),
+            session_id: Some("session-123".to_string()),
+            mode: Some("normal".to_string()),
+            model: Some("gpt-5".to_string()),
+            reasoning_level: None,
+            skip_permissions: Some(true),
+            tool_version: Some("latest".to_string()),
+            timestamp: 1_700_000_000_000,
+        };
+        save_session_entry(repo.path(), entry).unwrap();
+
+        let state = Arc::new(AppState::new(repo.path()));
+        let app = build_router(state, false);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/sessions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let parsed: api::SessionHistoryResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed.history.len(), 1);
+        assert_eq!(parsed.history[0].branch, "feature/test");
+
+        match prev_home {
+            Some(value) => env::set_var("HOME", value),
+            None => env::remove_var("HOME"),
+        }
     }
 }
