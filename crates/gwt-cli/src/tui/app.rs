@@ -955,6 +955,10 @@ impl Model {
                 if matches!(self.screen, Screen::BranchList) {
                     // FR-029b-e: Check if branch is unsafe before selecting
                     if let Some(branch) = self.branch_list.selected_branch() {
+                        if !branch.has_worktree {
+                            // FR-028d: Branches without worktrees cannot be selected.
+                            return;
+                        }
                         let is_selected = self.branch_list.selected_branches.contains(&branch.name);
 
                         // Only show warning when selecting (not deselecting)
@@ -1563,9 +1567,10 @@ pub fn run_with_context(
                                                 .iter()
                                                 .find(|b| &b.name == *name)
                                                 .map(|b| {
-                                                    // Exclude remote branches and current branch
+                                                    // Exclude remote branches, current branch, and no-worktree
                                                     b.branch_type == BranchType::Local
                                                         && !b.is_current
+                                                        && b.has_worktree
                                                 })
                                                 .unwrap_or(false)
                                         })
@@ -1575,7 +1580,7 @@ pub fn run_with_context(
                                     if cleanup_branches.is_empty() {
                                         let excluded = model.branch_list.selected_branches.len();
                                         model.status_message = Some(format!(
-                                            "{} branch(es) excluded (remote or current).",
+                                            "{} branch(es) excluded (remote, current, or no worktree).",
                                             excluded
                                         ));
                                         model.status_message_time = Some(Instant::now());
@@ -1750,6 +1755,8 @@ pub fn run_with_context(
 mod tests {
     use super::*;
     use crate::tui::screens::wizard::WizardStep;
+    use crate::tui::screens::{BranchItem, BranchListState};
+    use gwt_core::git::Branch;
 
     #[test]
     fn test_version_select_single_enter_advances() {
@@ -1765,5 +1772,20 @@ mod tests {
 
         model.update(Message::WizardConfirm);
         assert_eq!(model.wizard.step, WizardStep::ExecutionMode);
+    }
+
+    #[test]
+    fn test_space_ignores_branch_without_worktree() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+        let branch = Branch::new("feature/no-worktree", "deadbeef");
+        let item = BranchItem::from_branch(&branch, &[]);
+        model.branch_list = BranchListState::new().with_branches(vec![item]);
+
+        model.update(Message::Space);
+
+        assert!(model.branch_list.selected_branches.is_empty());
+        assert!(model.pending_unsafe_selection.is_none());
+        assert!(matches!(model.screen, Screen::BranchList));
     }
 }
