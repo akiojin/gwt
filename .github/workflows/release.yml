@@ -32,6 +32,7 @@ jobs:
     if: needs.release-please.outputs.release_created == 'true'
     runs-on: ubuntu-latest
     environment: release
+    continue-on-error: true  # Don't block other jobs if crates.io publish fails
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -114,7 +115,7 @@ jobs:
 
   upload-release:
     name: Upload to GitHub Release
-    needs: [release-please, build-binaries, publish-crates]
+    needs: [release-please, build-binaries]
     if: needs.release-please.outputs.release_created == 'true'
     runs-on: ubuntu-latest
     steps:
