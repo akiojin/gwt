@@ -26,6 +26,8 @@ The Rust implementation covers the core CLI/TUI workflow and the Web UI (REST + 
 
 ## Installation
 
+GitHub Releases are the source of truth for prebuilt binaries. The npm/bunx wrapper downloads the matching release asset on install.
+
 ### From GitHub Releases (Recommended)
 
 Download pre-built binaries from the [Releases page](https://github.com/akiojin/gwt/releases):
@@ -55,6 +57,21 @@ bun add -g @akiojin/gwt
 # One-time execution
 npx @akiojin/gwt
 bunx @akiojin/gwt
+```
+
+### Via cargo (build from source)
+
+Install the CLI with Cargo:
+
+```bash
+# Install from GitHub
+cargo install --git https://github.com/akiojin/gwt --package gwt-cli --bin gwt --locked
+
+# Or, from a local checkout
+cargo install --path crates/gwt-cli
+
+# Or run directly from source
+cargo run -p gwt-cli
 ```
 
 ### Build from Source

@@ -26,6 +26,8 @@ Rust版はCLI/TUIの主要フローとWeb UI（REST + WebSocket端末）まで�
 
 ## インストール
 
+GitHub Releases を正とし、npm/bunx では該当リリースのバイナリをダウンロードして実行します。
+
 ### GitHub Releasesから（推奨）
 
 [Releasesページ](https://github.com/akiojin/gwt/releases)からプリビルドバイナリをダウンロード:
@@ -55,6 +57,21 @@ bun add -g @akiojin/gwt
 # 一回限りの実行
 npx @akiojin/gwt
 bunx @akiojin/gwt
+```
+
+### cargo 経由（ソースビルド）
+
+Cargo で CLI を直接インストールできます:
+
+```bash
+# GitHub からインストール
+cargo install --git https://github.com/akiojin/gwt --package gwt-cli --bin gwt --locked
+
+# ローカルチェックアウトからインストール
+cargo install --path crates/gwt-cli
+
+# そのまま実行
+cargo run -p gwt-cli
 ```
 
 ### ソースからビルド
