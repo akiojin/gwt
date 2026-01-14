@@ -116,7 +116,7 @@ impl ConfirmState {
 pub fn render_confirm(state: &ConfirmState, frame: &mut Frame, area: Rect) {
     // Calculate dialog size
     let dialog_width = 60.min(area.width.saturating_sub(4));
-    let content_lines = 3 + state.details.len() as u16; // title + message + buttons + details
+    let content_lines = 4 + state.details.len() as u16; // title + message + details + spacer + buttons
     let dialog_height = (content_lines + 4).min(area.height.saturating_sub(4));
 
     // Center the dialog
@@ -147,7 +147,8 @@ pub fn render_confirm(state: &ConfirmState, frame: &mut Frame, area: Rect) {
         .constraints([
             Constraint::Length(2), // Message
             Constraint::Min(1),    // Details
-            Constraint::Length(3), // Buttons
+            Constraint::Length(1), // Spacer
+            Constraint::Length(1), // Buttons
         ])
         .split(inner_area);
 
@@ -168,14 +169,21 @@ pub fn render_confirm(state: &ConfirmState, frame: &mut Frame, area: Rect) {
             .details
             .iter()
             .take(chunks[1].height as usize)
-            .map(|d| Line::from(d.as_str()).style(Style::default().fg(Color::DarkGray)))
+            .map(|d| {
+                let line_text = if d.starts_with(' ') {
+                    d.clone()
+                } else {
+                    format!(" {}", d)
+                };
+                Line::from(line_text).style(Style::default().fg(Color::DarkGray))
+            })
             .collect();
         let details = Paragraph::new(details_text);
         frame.render_widget(details, chunks[1]);
     }
 
     // Buttons
-    let button_area = chunks[2];
+    let button_area = chunks[3];
     let button_layout = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
