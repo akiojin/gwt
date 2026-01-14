@@ -452,3 +452,18 @@
 
 - [x] **T1203** [US8] `crates/gwt-cli/src/tui/screens/wizard.rs` にブランチアクション選択ステップを追加し、Choose different settings... から分岐させる
 - [x] **T1204** [US8] `crates/gwt-cli/src/tui/app.rs` で「選択ブランチをベースに新規ブランチ作成」を反映する
+
+## 追加作業: ウィザード幅の自動調整と省略表示 (2026-01-14)
+
+### 仕様更新
+
+- [x] **T1210** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` にウィザード幅の自動調整と省略表示を追記
+
+### テスト（TDD）
+
+- [x] **T1211** [US8] `crates/gwt-cli/src/tui/screens/wizard.rs` に省略処理と幅計算のユニットテストを追加
+
+### 実装
+
+- [x] **T1212** [US8] `crates/gwt-cli/src/tui/screens/wizard.rs` にウィザード幅の自動調整を実装
+- [x] **T1213** [US8] `crates/gwt-cli/src/tui/screens/wizard.rs` にラベル短縮と省略処理を実装

@@ -1191,8 +1191,9 @@ pub fn render_wizard(state: &WizardState, frame: &mut Frame, area: Rect) {
     let overlay = Block::default().style(Style::default().bg(Color::Rgb(20, 20, 30)));
     frame.render_widget(overlay, area);
 
-    // Calculate popup dimensions (60% of screen, min 40x15) per FR-045
-    let popup_width = ((area.width as f32 * 0.6) as u16).max(40);
+    // Calculate popup dimensions (content-aware width, min 40x15) per FR-045
+    let max_width = area.width.saturating_sub(2).max(1);
+    let popup_width = wizard_popup_width(state, max_width);
     let popup_height = ((area.height as f32 * 0.6) as u16).max(15);
     let popup_x = area.x + (area.width.saturating_sub(popup_width)) / 2;
     let popup_y = area.y + (area.height.saturating_sub(popup_height)) / 2;
@@ -1203,18 +1204,7 @@ pub fn render_wizard(state: &WizardState, frame: &mut Frame, area: Rect) {
     frame.render_widget(Clear, popup_area);
 
     // Popup border with close hint (FR-047)
-    let title = match state.step {
-        WizardStep::QuickStart => " Quick Start ",
-        WizardStep::BranchAction => " Select Branch Action ",
-        WizardStep::BranchTypeSelect => " Select Branch Type ",
-        WizardStep::BranchNameInput => " Enter Branch Name ",
-        WizardStep::AgentSelect => " Select Coding Agent ",
-        WizardStep::ModelSelect => " Select Model ",
-        WizardStep::ReasoningLevel => " Select Reasoning Level ",
-        WizardStep::VersionSelect => " Select Version ",
-        WizardStep::ExecutionMode => " Select Execution Mode ",
-        WizardStep::SkipPermissions => " Skip Permissions? ",
-    };
+    let title = wizard_title(state.step);
 
     let popup_block = Block::default()
         .borders(Borders::ALL)
@@ -1270,12 +1260,175 @@ pub fn render_wizard(state: &WizardState, frame: &mut Frame, area: Rect) {
     frame.render_widget(footer, footer_area);
 }
 
+fn wizard_title(step: WizardStep) -> &'static str {
+    match step {
+        WizardStep::QuickStart => " Quick Start ",
+        WizardStep::BranchAction => " Select Branch Action ",
+        WizardStep::BranchTypeSelect => " Select Branch Type ",
+        WizardStep::BranchNameInput => " Enter Branch Name ",
+        WizardStep::AgentSelect => " Select Coding Agent ",
+        WizardStep::ModelSelect => " Select Model ",
+        WizardStep::ReasoningLevel => " Select Reasoning Level ",
+        WizardStep::VersionSelect => " Select Version ",
+        WizardStep::ExecutionMode => " Select Execution Mode ",
+        WizardStep::SkipPermissions => " Skip Permissions? ",
+    }
+}
+
+fn text_width(text: &str) -> usize {
+    text.chars().count()
+}
+
+fn truncate_with_ellipsis(text: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if text_width(text) <= max_width {
+        return text.to_string();
+    }
+    if max_width <= 3 {
+        return ".".repeat(max_width);
+    }
+    let mut truncated = String::new();
+    for (i, ch) in text.chars().enumerate() {
+        if i >= max_width.saturating_sub(3) {
+            break;
+        }
+        truncated.push(ch);
+    }
+    truncated.push_str("...");
+    truncated
+}
+
+fn wizard_popup_width(state: &WizardState, max_width: u16) -> u16 {
+    let min_width = 40u16.min(max_width);
+    let content_width = wizard_required_content_width(state);
+    let content_width = content_width.min(u16::MAX as usize) as u16;
+    let desired = content_width.saturating_add(4);
+    desired.max(min_width).min(max_width)
+}
+
+fn wizard_required_content_width(state: &WizardState) -> usize {
+    let mut max_line = 0usize;
+    let esc_width = text_width(" [ESC] ");
+    max_line = max_line.max(text_width(wizard_title(state.step)) + esc_width + 2);
+
+    let mut consider = |text: String| {
+        max_line = max_line.max(text_width(&text));
+    };
+
+    match state.step {
+        WizardStep::QuickStart => {
+            consider(format!("Branch: {}", state.branch_name));
+            for entry in &state.quick_start_entries {
+                let tool_info = if entry.tool_id == "codex-cli" {
+                    if let Some(level) = &entry.reasoning_level {
+                        format!(
+                            "{} ({}, Reasoning: {})",
+                            entry.tool_label,
+                            entry.model.as_deref().unwrap_or("default"),
+                            level
+                        )
+                    } else {
+                        format!(
+                            "{} ({})",
+                            entry.tool_label,
+                            entry.model.as_deref().unwrap_or("default")
+                        )
+                    }
+                } else {
+                    format!(
+                        "{} ({})",
+                        entry.tool_label,
+                        entry.model.as_deref().unwrap_or("default")
+                    )
+                };
+                consider(tool_info);
+                let resume_text = if let Some(sid) = &entry.session_id {
+                    let short = &sid[..sid.len().min(8)];
+                    format!("  Resume with previous settings ({}...)", short)
+                } else {
+                    "  Resume with previous settings".to_string()
+                };
+                consider(resume_text);
+                consider("  Start new with previous settings".to_string());
+            }
+            consider("  Choose different settings...".to_string());
+        }
+        WizardStep::BranchAction => {
+            consider(format!("Branch: {}", state.branch_name));
+            consider("  Use selected branch".to_string());
+            consider("  Create new from selected".to_string());
+        }
+        WizardStep::BranchTypeSelect => {
+            for t in BranchType::all() {
+                consider(format!("  {:<12} {}", t.prefix(), t.description()));
+            }
+        }
+        WizardStep::BranchNameInput => {
+            consider(format!("Branch: {}", state.branch_type.prefix()));
+            let input_text = if state.new_branch_name.is_empty() {
+                "Enter branch name...".to_string()
+            } else {
+                state.new_branch_name.clone()
+            };
+            consider(input_text);
+        }
+        WizardStep::AgentSelect => {
+            if !state.is_new_branch {
+                consider(format!("Branch: {}", state.branch_name));
+            }
+            for agent in CodingAgent::all() {
+                consider(format!("  {}", agent.label()));
+            }
+        }
+        WizardStep::ModelSelect => {
+            for model in state.agent.models() {
+                if let Some(desc) = &model.description {
+                    consider(format!("  {} - {}", model.label, desc));
+                } else {
+                    consider(format!("  {}", model.label));
+                }
+            }
+        }
+        WizardStep::ReasoningLevel => {
+            for level in ReasoningLevel::all() {
+                consider(format!("  {:<10} {}", level.label(), level.description()));
+            }
+        }
+        WizardStep::VersionSelect => {
+            for opt in &state.version_options {
+                if let Some(desc) = &opt.description {
+                    consider(format!("  {} - {}", opt.label, desc));
+                } else {
+                    consider(format!("  {}", opt.label));
+                }
+            }
+        }
+        WizardStep::ExecutionMode => {
+            for mode in ExecutionMode::all() {
+                consider(format!("  {:<12} {}", mode.label(), mode.description()));
+            }
+        }
+        WizardStep::SkipPermissions => {
+            consider("  Yes   Skip permission prompts".to_string());
+            consider("  No    Show permission prompts".to_string());
+        }
+    }
+
+    max_line
+}
+
 /// Render Quick Start step (FR-050, SPEC-f47db390)
 fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
     let mut items: Vec<ListItem> = Vec::new();
 
     // Show branch name
-    let branch_info = Paragraph::new(format!("Branch: {}", state.branch_name)).style(
+    let branch_text = truncate_with_ellipsis(
+        &format!("Branch: {}", state.branch_name),
+        area.width as usize,
+    );
+    let branch_info = Paragraph::new(branch_text).style(
         Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
@@ -1326,6 +1479,7 @@ fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
         };
 
         // Tool header line
+        let tool_info = truncate_with_ellipsis(&tool_info, list_area.width as usize);
         items.push(ListItem::new(tool_info).style(Style::default().fg(agent_color)));
 
         // Resume option (show session ID if available)
@@ -1346,6 +1500,7 @@ fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
         } else {
             format!("{}Resume with previous settings", resume_prefix)
         };
+        let resume_text = truncate_with_ellipsis(&resume_text, list_area.width as usize);
         items.push(ListItem::new(resume_text).style(resume_style));
 
         // Start new option (FR-011: no session ID shown)
@@ -1357,10 +1512,11 @@ fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
         } else {
             Style::default()
         };
-        items.push(
-            ListItem::new(format!("{}Start new with previous settings", new_prefix))
-                .style(new_style),
+        let new_text = truncate_with_ellipsis(
+            &format!("{}Start new with previous settings", new_prefix),
+            list_area.width as usize,
         );
+        items.push(ListItem::new(new_text).style(new_style));
 
         // Empty line between tools
         if tool_idx < state.quick_start_entries.len() - 1 {
@@ -1383,9 +1539,11 @@ fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
     } else {
         Style::default()
     };
-    items.push(
-        ListItem::new(format!("{}Choose different settings...", choose_prefix)).style(choose_style),
+    let choose_text = truncate_with_ellipsis(
+        &format!("{}Choose different settings...", choose_prefix),
+        list_area.width as usize,
     );
+    items.push(ListItem::new(choose_text).style(choose_style));
 
     let list = List::new(items);
     frame.render_widget(list, list_area);
@@ -1394,7 +1552,11 @@ fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
 /// Render branch action step (FR-052)
 fn render_branch_action_step(state: &WizardState, frame: &mut Frame, area: Rect) {
     // Show branch name
-    let branch_info = Paragraph::new(format!("Branch: {}", state.branch_name)).style(
+    let branch_text = truncate_with_ellipsis(
+        &format!("Branch: {}", state.branch_name),
+        area.width as usize,
+    );
+    let branch_info = Paragraph::new(branch_text).style(
         Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
@@ -1409,10 +1571,7 @@ fn render_branch_action_step(state: &WizardState, frame: &mut Frame, area: Rect)
         area.height.saturating_sub(2),
     );
 
-    let options = [
-        "Use selected branch",
-        "Create new branch from selected branch",
-    ];
+    let options = ["Use selected branch", "Create new from selected"];
     let mut items: Vec<ListItem> = Vec::new();
     for (idx, label) in options.iter().enumerate() {
         let selected = state.branch_action_index == idx;
@@ -1422,7 +1581,9 @@ fn render_branch_action_step(state: &WizardState, frame: &mut Frame, area: Rect)
         } else {
             Style::default()
         };
-        items.push(ListItem::new(format!("{}{}", prefix, label)).style(style));
+        let text =
+            truncate_with_ellipsis(&format!("{}{}", prefix, label), list_area.width as usize);
+        items.push(ListItem::new(text).style(style));
     }
 
     let list = List::new(items);
@@ -1441,7 +1602,10 @@ fn render_branch_type_step(state: &WizardState, frame: &mut Frame, area: Rect) {
             } else {
                 Style::default()
             };
-            let text = format!("{}{:<12} {}", prefix, t.prefix(), t.description());
+            let text = truncate_with_ellipsis(
+                &format!("{}{:<12} {}", prefix, t.prefix(), t.description()),
+                area.width as usize,
+            );
             ListItem::new(text).style(style)
         })
         .collect();
@@ -1461,7 +1625,11 @@ fn render_branch_name_step(state: &WizardState, frame: &mut Frame, area: Rect) {
         .split(area);
 
     // Label
-    let label = Paragraph::new(format!("Branch: {}", state.branch_type.prefix())).style(
+    let label_text = truncate_with_ellipsis(
+        &format!("Branch: {}", state.branch_type.prefix()),
+        chunks[0].width as usize,
+    );
+    let label = Paragraph::new(label_text).style(
         Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
@@ -1491,7 +1659,11 @@ fn render_branch_name_step(state: &WizardState, frame: &mut Frame, area: Rect) {
 fn render_agent_step(state: &WizardState, frame: &mut Frame, area: Rect) {
     // Show branch name if selecting for existing branch
     let start_y = if !state.is_new_branch {
-        let branch_info = Paragraph::new(format!("Branch: {}", state.branch_name)).style(
+        let branch_text = truncate_with_ellipsis(
+            &format!("Branch: {}", state.branch_name),
+            area.width as usize,
+        );
+        let branch_info = Paragraph::new(branch_text).style(
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -1514,7 +1686,11 @@ fn render_agent_step(state: &WizardState, frame: &mut Frame, area: Rect) {
             } else {
                 Style::default().fg(agent.color())
             };
-            ListItem::new(format!("{}{}", prefix, agent.label())).style(style)
+            let text = truncate_with_ellipsis(
+                &format!("{}{}", prefix, agent.label()),
+                area.width as usize,
+            );
+            ListItem::new(text).style(style)
         })
         .collect();
 
@@ -1589,7 +1765,10 @@ fn render_reasoning_step(state: &WizardState, frame: &mut Frame, area: Rect) {
             } else {
                 Style::default()
             };
-            let text = format!("{}{:<10} {}", prefix, level.label(), level.description());
+            let text = truncate_with_ellipsis(
+                &format!("{}{:<10} {}", prefix, level.label(), level.description()),
+                area.width as usize,
+            );
             ListItem::new(text).style(style)
         })
         .collect();
@@ -1703,7 +1882,10 @@ fn render_execution_mode_step(state: &WizardState, frame: &mut Frame, area: Rect
             } else {
                 Style::default()
             };
-            let text = format!("{}{:<12} {}", prefix, mode.label(), mode.description());
+            let text = truncate_with_ellipsis(
+                &format!("{}{:<12} {}", prefix, mode.label(), mode.description()),
+                area.width as usize,
+            );
             ListItem::new(text).style(style)
         })
         .collect();
@@ -1729,7 +1911,10 @@ fn render_skip_permissions_step(state: &WizardState, frame: &mut Frame, area: Re
             } else {
                 "Show permission prompts"
             };
-            let text = format!("{}{:<6} {}", prefix, label, desc);
+            let text = truncate_with_ellipsis(
+                &format!("{}{:<6} {}", prefix, label, desc),
+                area.width as usize,
+            );
             ListItem::new(text).style(style)
         })
         .collect();
@@ -1810,6 +1995,36 @@ mod tests {
         assert_eq!(state.step, WizardStep::BranchTypeSelect);
         assert!(state.is_new_branch);
         assert_eq!(state.base_branch_override.as_deref(), Some("feature/test"));
+    }
+
+    #[test]
+    fn test_truncate_with_ellipsis() {
+        assert_eq!(truncate_with_ellipsis("short", 10), "short");
+        assert_eq!(truncate_with_ellipsis("toolong", 3), "...");
+        assert_eq!(truncate_with_ellipsis("toolong", 2), "..");
+        assert_eq!(truncate_with_ellipsis("toolong", 0), "");
+        assert_eq!(truncate_with_ellipsis("abcdefgh", 6), "abc...");
+    }
+
+    #[test]
+    fn test_wizard_popup_width_clamps_to_max() {
+        let mut state = WizardState::new();
+        state.open_for_branch("feature/test", vec![]);
+        state.step = WizardStep::BranchAction;
+
+        let width = wizard_popup_width(&state, 30);
+        assert_eq!(width, 30);
+    }
+
+    #[test]
+    fn test_wizard_popup_width_expands_for_long_branch() {
+        let mut state = WizardState::new();
+        state.open_for_branch("feature/very-long-branch-name", vec![]);
+        state.step = WizardStep::BranchAction;
+
+        let width = wizard_popup_width(&state, 120);
+        assert!(width >= 40);
+        assert!(width <= 120);
     }
 
     #[test]
