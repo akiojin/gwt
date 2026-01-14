@@ -3,7 +3,7 @@
   "default-branch": "main",
   "packages": {
     ".": {
-      "release-type": "rust",
+      "release-type": "cargo-workspace",
       "bump-minor-pre-major": true,
       "bump-patch-for-minor-pre-major": true
     }
