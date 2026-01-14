@@ -75,6 +75,7 @@ jobs:
     needs: create-tag
     runs-on: ubuntu-latest
     environment: release
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
