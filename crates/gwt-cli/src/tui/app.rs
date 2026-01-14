@@ -26,7 +26,7 @@ use super::screens::{
     render_profiles, render_settings, render_wizard, render_worktree_create, BranchItem,
     BranchListState, BranchType, CodingAgent, ConfirmState, EnvironmentState, ErrorState,
     ExecutionMode, HelpState, LogsState, ProfilesState, QuickStartEntry, ReasoningLevel,
-    SettingsState, WizardState, WorktreeCreateState,
+    SettingsState, WizardConfirmResult, WizardState, WorktreeCreateState,
 };
 
 /// Configuration for launching a coding agent after TUI exits
@@ -1027,23 +1027,24 @@ impl Model {
                         self.wizard.block_next_enter = false;
                         return;
                     }
-                    if self.wizard.is_complete() {
-                        // Start worktree creation with wizard settings
-                        let branch_name = if self.wizard.is_new_branch {
-                            self.wizard.full_branch_name()
-                        } else {
-                            self.wizard.branch_name.clone()
-                        };
-                        self.worktree_create.branch_name = branch_name;
-                        self.worktree_create.branch_name_cursor =
-                            self.worktree_create.branch_name.len();
-                        self.worktree_create.create_new_branch = self.wizard.is_new_branch;
-                        // Store wizard settings for later use
-                        self.wizard.close();
-                        // Create the worktree directly
-                        self.create_worktree();
-                    } else {
-                        self.wizard.next_step();
+                    match self.wizard.confirm() {
+                        WizardConfirmResult::Complete => {
+                            // Start worktree creation with wizard settings
+                            let branch_name = if self.wizard.is_new_branch {
+                                self.wizard.full_branch_name()
+                            } else {
+                                self.wizard.branch_name.clone()
+                            };
+                            self.worktree_create.branch_name = branch_name;
+                            self.worktree_create.branch_name_cursor =
+                                self.worktree_create.branch_name.len();
+                            self.worktree_create.create_new_branch = self.wizard.is_new_branch;
+                            // Store wizard settings for later use
+                            self.wizard.close();
+                            // Create the worktree directly
+                            self.create_worktree();
+                        }
+                        WizardConfirmResult::Advance => {}
                     }
                 }
             }

@@ -20,6 +20,7 @@ pub use logs::{render_logs, LogsState};
 pub use profiles::{render_profiles, ProfilesState};
 pub use settings::{render_settings, SettingsState};
 pub use wizard::{
-    render_wizard, CodingAgent, ExecutionMode, QuickStartEntry, ReasoningLevel, WizardState,
+    render_wizard, CodingAgent, ExecutionMode, QuickStartEntry, ReasoningLevel,
+    WizardConfirmResult, WizardState,
 };
 pub use worktree_create::{render_worktree_create, WorktreeCreateState};

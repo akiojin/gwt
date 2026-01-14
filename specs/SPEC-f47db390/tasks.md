@@ -40,6 +40,13 @@ description: "Continue/Resumeで正しいセッションを再開するための
 - [x] **T9001** `[共通]` フォーマット/リンター/markdownlintをローカル実行し、エラーを解消する。
 - [x] **T9002** `[共通]` `bun run test` と `bun run build` を完走させ、失敗がないことを確認する。
 
+## 追加作業: Rust版 Quick Startの即時起動 (2026-01-14)
+
+- [x] **T0607** `[P][共通]` `specs/SPEC-f47db390/spec.md` にQuick Start即時起動要件を追記
+- [x] **T0608** `[P][共通]` `specs/SPEC-f47db390/plan.md` にQuick Start即時起動方針を追記
+- [x] **T0609** `[Test]` `crates/gwt-cli/src/tui/screens/wizard.rs` にQuick Start確定時の即時完了テストを追加
+- [x] **T0610** `[実装]` `crates/gwt-cli/src/tui/screens/wizard.rs` と `crates/gwt-cli/src/tui/app.rs` でQuick Start確定時にExecution Mode/Skip Permissionsをスキップして即時起動する
+
 ## フェーズ7: ブランチクイックスタート (P1)
 - [x] **T0501** `[US5]` ブランチ選択後に前回ツール/モデル/セッションIDを提示するQuick Start画面を追加（Inkコンポーネント新設）。
 - [x] **T0502** `[US5]` 履歴が存在する場合はQuick Startへ遷移し、選択結果に応じてツール/モデル/セッションIDを事前セットするロジックを実装（履歴なしは従来フロー）。

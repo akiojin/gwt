@@ -109,6 +109,12 @@ pub enum WizardStep {
     BranchNameInput,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WizardConfirmResult {
+    Advance,
+    Complete,
+}
+
 /// Quick Start option types (FR-050)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuickStartAction {
@@ -889,6 +895,38 @@ impl WizardState {
         self.step = prev;
         self.scroll_offset = 0;
         true
+    }
+
+    pub fn confirm(&mut self) -> WizardConfirmResult {
+        if self.step == WizardStep::QuickStart {
+            if let Some((action, tool_index)) = self.selected_quick_start_action() {
+                match action {
+                    QuickStartAction::ResumeWithPrevious
+                    | QuickStartAction::StartNewWithPrevious => {
+                        self.apply_quick_start_selection(tool_index, action);
+                        self.step = WizardStep::SkipPermissions;
+                        self.scroll_offset = 0;
+                        return WizardConfirmResult::Complete;
+                    }
+                    QuickStartAction::ChooseDifferent => {
+                        self.step = WizardStep::AgentSelect;
+                        self.scroll_offset = 0;
+                        return WizardConfirmResult::Advance;
+                    }
+                }
+            } else {
+                self.step = WizardStep::AgentSelect;
+                self.scroll_offset = 0;
+                return WizardConfirmResult::Advance;
+            }
+        }
+
+        if self.is_complete() {
+            WizardConfirmResult::Complete
+        } else {
+            self.next_step();
+            WizardConfirmResult::Advance
+        }
     }
 
     /// Select next item in current step
@@ -1708,8 +1746,9 @@ mod tests {
         // Index 0 = Resume with previous settings (first tool)
         state.quick_start_index = 0;
 
-        // Call next_step - should skip to SkipPermissions (completion)
-        state.next_step();
+        // Confirm should complete immediately
+        let result = state.confirm();
+        assert_eq!(result, WizardConfirmResult::Complete);
         assert_eq!(state.step, WizardStep::SkipPermissions);
 
         // Settings should be applied
@@ -1739,8 +1778,9 @@ mod tests {
         // Index 1 = Start new with previous settings (first tool)
         state.quick_start_index = 1;
 
-        // Call next_step - should skip to SkipPermissions (completion)
-        state.next_step();
+        // Confirm should complete immediately
+        let result = state.confirm();
+        assert_eq!(result, WizardConfirmResult::Complete);
         assert_eq!(state.step, WizardStep::SkipPermissions);
 
         // Settings should be applied with Normal mode (not Resume)
@@ -1770,8 +1810,8 @@ mod tests {
         // Index 2 = "Choose different settings..."
         state.quick_start_index = 2;
 
-        // Call next_step - should go to AgentSelect
-        state.next_step();
+        let result = state.confirm();
+        assert_eq!(result, WizardConfirmResult::Advance);
         assert_eq!(state.step, WizardStep::AgentSelect);
     }
 }
