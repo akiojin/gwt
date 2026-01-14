@@ -59,6 +59,12 @@
 - [x] **T9931** [Test] `crates/gwt-cli/src/tui/screens/branch_list.rs` に安全状態更新のテストを追加
 - [x] **T9932** [実装] `crates/gwt-cli/src/tui/screens/branch_list.rs` と `crates/gwt-cli/src/tui/app.rs` で安全状態キャッシュを追加し、表示と警告判定を統一
 
+## 追加作業: バージョン選択のEnter二重入力解消 (2026-01-14)
+
+- [x] **T9933** [US10] `crates/gwt-cli/src/tui/app.rs` にバージョン選択でEnterを1回押せば次ステップへ進むことを検証するテストを追加
+- [x] **T9934** [US10] バージョン選択で二重Enterが不要になるようEnter処理のガードを見直す（`crates/gwt-cli/src/tui/app.rs`, `crates/gwt-cli/src/tui/screens/wizard.rs`）
+- [x] **T9935** `cargo test -p gwt-cli` と `cargo build --release` を実行し、失敗がないことを確認する
+
 ## フェーズ0: ブランチ一覧アイコンのASCII再整理 (優先度: P1)
 
 **ストーリー**: ブランチ一覧の選択/Worktree/安全アイコンをASCII表記へ整理し、アイコン間にスペースを入れてカーソル記号は表示しない。

@@ -3,7 +3,7 @@
 #![allow(dead_code)] // TUI application components for future expansion
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -1024,11 +1024,6 @@ impl Model {
             }
             Message::WizardConfirm => {
                 if self.wizard.visible {
-                    // FR-074: Block first Enter in VersionSelect to prevent auto-advance
-                    if self.wizard.block_next_enter {
-                        self.wizard.block_next_enter = false;
-                        return;
-                    }
                     match self.wizard.confirm() {
                         WizardConfirmResult::Complete => {
                             // Start worktree creation with wizard settings
@@ -1436,11 +1431,12 @@ pub fn run_with_context(
 
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
+                let enter_is_press = key.kind == KeyEventKind::Press;
                 // Wizard has priority when visible
                 let msg = if model.wizard.visible {
                     match key.code {
                         KeyCode::Esc => Some(Message::WizardBack),
-                        KeyCode::Enter => Some(Message::WizardConfirm),
+                        KeyCode::Enter if enter_is_press => Some(Message::WizardConfirm),
                         KeyCode::Up => Some(Message::WizardPrev),
                         KeyCode::Down => Some(Message::WizardNext),
                         KeyCode::Backspace => {
@@ -1699,7 +1695,7 @@ pub fn run_with_context(
                         (KeyCode::PageDown, _) => Some(Message::PageDown),
                         (KeyCode::Home, _) => Some(Message::GoHome),
                         (KeyCode::End, _) => Some(Message::GoEnd),
-                        (KeyCode::Enter, _) => Some(Message::Enter),
+                        (KeyCode::Enter, _) if enter_is_press => Some(Message::Enter),
                         (KeyCode::Backspace, _) => Some(Message::Backspace),
                         (KeyCode::Left, _) => Some(Message::CursorLeft),
                         (KeyCode::Right, _) => Some(Message::CursorRight),
@@ -1748,4 +1744,26 @@ pub fn run_with_context(
     terminal.show_cursor()?;
 
     Ok(pending_launch)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::screens::wizard::WizardStep;
+
+    #[test]
+    fn test_version_select_single_enter_advances() {
+        let mut model = Model::new_with_context(None);
+        model.wizard.visible = true;
+        model.wizard.step = WizardStep::ModelSelect;
+        model.wizard.agent = CodingAgent::ClaudeCode;
+        model.wizard.agent_index = 0;
+        model.wizard.versions_fetched = true;
+
+        model.update(Message::WizardConfirm);
+        assert_eq!(model.wizard.step, WizardStep::VersionSelect);
+
+        model.update(Message::WizardConfirm);
+        assert_eq!(model.wizard.step, WizardStep::ExecutionMode);
+    }
 }
