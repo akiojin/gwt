@@ -97,6 +97,8 @@ fn is_prerelease(version: &str) -> bool {
 pub enum WizardStep {
     /// Quick Start: Show previous settings per agent (FR-050, SPEC-f47db390)
     QuickStart,
+    /// Branch action: use selected branch or create new branch from it (FR-052)
+    BranchAction,
     #[default]
     AgentSelect,
     ModelSelect,
@@ -589,6 +591,12 @@ pub struct WizardState {
     pub session_id: Option<String>,
     /// Scroll offset for popup content
     pub scroll_offset: usize,
+    /// Branch action selection index (0: use selected, 1: create new)
+    pub branch_action_index: usize,
+    /// Whether branch action step is part of this flow
+    pub has_branch_action: bool,
+    /// Base branch override when creating new branch from selected branch
+    pub base_branch_override: Option<String>,
     // Quick Start (FR-050, SPEC-f47db390)
     /// Quick Start entries per tool
     pub quick_start_entries: Vec<QuickStartEntry>,
@@ -613,10 +621,11 @@ impl WizardState {
         self.is_new_branch = false;
         self.branch_name = branch_name.to_string();
         self.reset_selections();
+        self.has_branch_action = true;
 
         // FR-050: Show Quick Start if history exists
         if history.is_empty() {
-            self.step = WizardStep::AgentSelect;
+            self.step = WizardStep::BranchAction;
             self.has_quick_start = false;
             self.quick_start_entries.clear();
         } else {
@@ -635,6 +644,7 @@ impl WizardState {
         self.reset_selections();
         self.has_quick_start = false;
         self.quick_start_entries.clear();
+        self.has_branch_action = false;
     }
 
     /// Reset all selections to default
@@ -657,6 +667,9 @@ impl WizardState {
         self.new_branch_name.clear();
         self.cursor = 0;
         self.scroll_offset = 0;
+        self.branch_action_index = 0;
+        self.has_branch_action = false;
+        self.base_branch_override = None;
         self.quick_start_index = 0;
     }
 
@@ -823,13 +836,24 @@ impl WizardState {
                             WizardStep::SkipPermissions
                         }
                         QuickStartAction::ChooseDifferent => {
-                            // Go to agent selection for manual configuration
-                            WizardStep::AgentSelect
+                            // Go to branch action selection for manual configuration
+                            WizardStep::BranchAction
                         }
                     }
                 } else {
-                    // No history, go to agent selection
+                    // No history, go to branch action selection
+                    WizardStep::BranchAction
+                }
+            }
+            WizardStep::BranchAction => {
+                if self.branch_action_index == 0 {
+                    self.is_new_branch = false;
+                    self.base_branch_override = None;
                     WizardStep::AgentSelect
+                } else {
+                    self.is_new_branch = true;
+                    self.base_branch_override = Some(self.branch_name.clone());
+                    WizardStep::BranchTypeSelect
                 }
             }
             WizardStep::BranchTypeSelect => WizardStep::BranchNameInput,
@@ -874,14 +898,28 @@ impl WizardState {
                 self.close();
                 return false;
             }
+            WizardStep::BranchAction => {
+                if self.has_quick_start {
+                    WizardStep::QuickStart
+                } else {
+                    self.close();
+                    return false;
+                }
+            }
             WizardStep::BranchTypeSelect => {
-                self.close();
-                return false;
+                if self.base_branch_override.is_some() {
+                    WizardStep::BranchAction
+                } else {
+                    self.close();
+                    return false;
+                }
             }
             WizardStep::BranchNameInput => WizardStep::BranchTypeSelect,
             WizardStep::AgentSelect => {
                 if self.is_new_branch {
                     WizardStep::BranchNameInput
+                } else if self.has_branch_action {
+                    WizardStep::BranchAction
                 } else if self.has_quick_start {
                     // FR-050: Go back to Quick Start if available
                     WizardStep::QuickStart
@@ -919,14 +957,20 @@ impl WizardState {
                         return WizardConfirmResult::Complete;
                     }
                     QuickStartAction::ChooseDifferent => {
-                        self.step = WizardStep::AgentSelect;
+                        self.step = WizardStep::BranchAction;
                         self.scroll_offset = 0;
+                        self.branch_action_index = 0;
+                        self.is_new_branch = false;
+                        self.base_branch_override = None;
                         return WizardConfirmResult::Advance;
                     }
                 }
             } else {
-                self.step = WizardStep::AgentSelect;
+                self.step = WizardStep::BranchAction;
                 self.scroll_offset = 0;
+                self.branch_action_index = 0;
+                self.is_new_branch = false;
+                self.base_branch_override = None;
                 return WizardConfirmResult::Advance;
             }
         }
@@ -947,6 +991,11 @@ impl WizardState {
                 let max = self.quick_start_option_count().saturating_sub(1);
                 if self.quick_start_index < max {
                     self.quick_start_index += 1;
+                }
+            }
+            WizardStep::BranchAction => {
+                if self.branch_action_index < 1 {
+                    self.branch_action_index += 1;
                 }
             }
             WizardStep::AgentSelect => {
@@ -1013,6 +1062,11 @@ impl WizardState {
                 // FR-050: Navigate Quick Start options
                 if self.quick_start_index > 0 {
                     self.quick_start_index -= 1;
+                }
+            }
+            WizardStep::BranchAction => {
+                if self.branch_action_index > 0 {
+                    self.branch_action_index -= 1;
                 }
             }
             WizardStep::AgentSelect => {
@@ -1151,6 +1205,7 @@ pub fn render_wizard(state: &WizardState, frame: &mut Frame, area: Rect) {
     // Popup border with close hint (FR-047)
     let title = match state.step {
         WizardStep::QuickStart => " Quick Start ",
+        WizardStep::BranchAction => " Select Branch Action ",
         WizardStep::BranchTypeSelect => " Select Branch Type ",
         WizardStep::BranchNameInput => " Enter Branch Name ",
         WizardStep::AgentSelect => " Select Coding Agent ",
@@ -1186,6 +1241,7 @@ pub fn render_wizard(state: &WizardState, frame: &mut Frame, area: Rect) {
 
     match state.step {
         WizardStep::QuickStart => render_quick_start_step(state, frame, content_area),
+        WizardStep::BranchAction => render_branch_action_step(state, frame, content_area),
         WizardStep::BranchTypeSelect => render_branch_type_step(state, frame, content_area),
         WizardStep::BranchNameInput => render_branch_name_step(state, frame, content_area),
         WizardStep::AgentSelect => render_agent_step(state, frame, content_area),
@@ -1330,6 +1386,44 @@ fn render_quick_start_step(state: &WizardState, frame: &mut Frame, area: Rect) {
     items.push(
         ListItem::new(format!("{}Choose different settings...", choose_prefix)).style(choose_style),
     );
+
+    let list = List::new(items);
+    frame.render_widget(list, list_area);
+}
+
+/// Render branch action step (FR-052)
+fn render_branch_action_step(state: &WizardState, frame: &mut Frame, area: Rect) {
+    // Show branch name
+    let branch_info = Paragraph::new(format!("Branch: {}", state.branch_name)).style(
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    );
+    let branch_area = Rect::new(area.x, area.y, area.width, 1);
+    frame.render_widget(branch_info, branch_area);
+
+    let list_area = Rect::new(
+        area.x,
+        area.y + 2,
+        area.width,
+        area.height.saturating_sub(2),
+    );
+
+    let options = [
+        "Use selected branch",
+        "Create new branch from selected branch",
+    ];
+    let mut items: Vec<ListItem> = Vec::new();
+    for (idx, label) in options.iter().enumerate() {
+        let selected = state.branch_action_index == idx;
+        let prefix = if selected { "> " } else { "  " };
+        let style = if selected {
+            Style::default().bg(Color::Cyan).fg(Color::Black)
+        } else {
+            Style::default()
+        };
+        items.push(ListItem::new(format!("{}{}", prefix, label)).style(style));
+    }
 
     let list = List::new(items);
     frame.render_widget(list, list_area);
@@ -1655,8 +1749,8 @@ mod tests {
         assert!(state.visible);
         assert!(!state.is_new_branch);
         assert_eq!(state.branch_name, "feature/test");
-        // No history, so should start at AgentSelect
-        assert_eq!(state.step, WizardStep::AgentSelect);
+        // No history, so should start at BranchAction
+        assert_eq!(state.step, WizardStep::BranchAction);
     }
 
     #[test]
@@ -1688,6 +1782,34 @@ mod tests {
         assert!(state.visible);
         assert!(state.is_new_branch);
         assert_eq!(state.step, WizardStep::BranchTypeSelect);
+    }
+
+    #[test]
+    fn test_branch_action_use_selected_goes_to_agent_select() {
+        let mut state = WizardState::new();
+        state.open_for_branch("feature/test", vec![]);
+        assert_eq!(state.step, WizardStep::BranchAction);
+
+        state.branch_action_index = 0;
+        let result = state.confirm();
+        assert_eq!(result, WizardConfirmResult::Advance);
+        assert_eq!(state.step, WizardStep::AgentSelect);
+        assert!(!state.is_new_branch);
+        assert!(state.base_branch_override.is_none());
+    }
+
+    #[test]
+    fn test_branch_action_create_new_goes_to_branch_type_select() {
+        let mut state = WizardState::new();
+        state.open_for_branch("feature/test", vec![]);
+        assert_eq!(state.step, WizardStep::BranchAction);
+
+        state.branch_action_index = 1;
+        let result = state.confirm();
+        assert_eq!(result, WizardConfirmResult::Advance);
+        assert_eq!(state.step, WizardStep::BranchTypeSelect);
+        assert!(state.is_new_branch);
+        assert_eq!(state.base_branch_override.as_deref(), Some("feature/test"));
     }
 
     #[test]
@@ -1726,6 +1848,9 @@ mod tests {
         let mut state = WizardState::new();
         state.open_for_branch("test", vec![]);
 
+        assert_eq!(state.step, WizardStep::BranchAction);
+        state.branch_action_index = 0;
+        state.next_step();
         assert_eq!(state.step, WizardStep::AgentSelect);
         state.next_step();
         assert_eq!(state.step, WizardStep::ModelSelect);
@@ -1737,6 +1862,8 @@ mod tests {
     fn test_wizard_codex_reasoning_step() {
         let mut state = WizardState::new();
         state.open_for_branch("test", vec![]);
+        state.branch_action_index = 0;
+        state.next_step();
         state.agent = CodingAgent::CodexCli;
         state.agent_index = 1;
 
@@ -1749,6 +1876,8 @@ mod tests {
     fn test_wizard_selection() {
         let mut state = WizardState::new();
         state.open_for_branch("test", vec![]);
+        state.branch_action_index = 0;
+        state.next_step();
 
         state.select_next();
         assert_eq!(state.agent_index, 1);
@@ -1827,7 +1956,7 @@ mod tests {
     }
 
     #[test]
-    fn test_quick_start_choose_different_goes_to_agent_select() {
+    fn test_quick_start_choose_different_goes_to_branch_action() {
         let mut state = WizardState::new();
         let history = vec![QuickStartEntry {
             tool_id: "claude-code".to_string(),
@@ -1847,7 +1976,7 @@ mod tests {
 
         let result = state.confirm();
         assert_eq!(result, WizardConfirmResult::Advance);
-        assert_eq!(state.step, WizardStep::AgentSelect);
+        assert_eq!(state.step, WizardStep::BranchAction);
         assert!(state.session_id.is_none());
     }
 }

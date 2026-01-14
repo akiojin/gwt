@@ -437,3 +437,18 @@
 
 - [x] **T1105** [US11] `crates/gwt-cli/src/tui/screens/branch_list.rs` にフィルター/モード変更時のみの再計算キャッシュを実装
 - [x] **T1106** [US11] `crates/gwt-cli/src/tui/screens/branch_list.rs` の描画経路で可視範囲のみ描画する処理を明示化し、ローディング表示の維持を実装
+
+## 追加作業: ブランチ選択後のアクション選択 (2026-01-14)
+
+### 仕様更新
+
+- [x] **T1201** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` にブランチアクション選択フローを追記
+
+### テスト（TDD）
+
+- [x] **T1202** [US8] `crates/gwt-cli/src/tui/screens/wizard.rs` にブランチアクション選択の遷移テストを追加
+
+### 実装
+
+- [x] **T1203** [US8] `crates/gwt-cli/src/tui/screens/wizard.rs` にブランチアクション選択ステップを追加し、Choose different settings... から分岐させる
+- [x] **T1204** [US8] `crates/gwt-cli/src/tui/app.rs` で「選択ブランチをベースに新規ブランチ作成」を反映する
