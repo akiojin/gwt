@@ -2,26 +2,31 @@
 
 [日本語](README.ja.md)
 
-Interactive Git worktree manager with Coding Agent selection (Claude Code / Codex CLI / Gemini CLI), graphical branch selection, and advanced workflow management.
+Interactive Git worktree manager with Coding Agent selection (Claude Code / Codex CLI / Gemini CLI / OpenCode), graphical branch selection, and advanced workflow management.
 
 ## Overview
 
-`@akiojin/gwt` is a powerful CLI tool that revolutionizes Git worktree management through an intuitive interface. It seamlessly integrates with Claude Code / Codex CLI / Gemini CLI workflows, providing intelligent branch selection, automated worktree creation, and comprehensive project management capabilities.
+`@akiojin/gwt` is a powerful CLI tool that revolutionizes Git worktree management through an intuitive interface. It seamlessly integrates with Claude Code / Codex CLI / Gemini CLI / OpenCode workflows, providing intelligent branch selection, automated worktree creation, and comprehensive project management capabilities.
+
+## Migration Status
+
+The Rust implementation covers the core CLI/TUI workflow and the Web UI (REST + WebSocket terminal). Remaining work is focused on Git backend fallback coverage, documentation polish, and release packaging.
 
 ## Key Features
 
 - **Modern TUI**: Built with Ratatui for a smooth, responsive terminal interface
-- **Full-screen Layout**: Persistent header with statistics, scrollable branch list, and always-visible footer with keyboard shortcuts
+- **Full-screen Layout**: Persistent header with repo context, boxed branch list, and always-visible footer with keyboard shortcuts
 - **Smart Branch Creation**: Create feature, bugfix, hotfix, or release branches with guided prompts and automatic base branch selection
-- **Advanced Worktree Management**: Complete lifecycle management including creation, cleanup, and path optimization
-- **Coding Agent Selection**: Choose between Claude Code / Codex CLI / Gemini CLI through the interactive launcher
+- **Advanced Worktree Management**: Complete lifecycle management including creation, cleanup of worktree-backed branches, and path optimization
+- **Coding Agent Selection**: Choose between built-in agents (Claude Code / Codex CLI / Gemini CLI / OpenCode) or custom coding agents defined in `~/.gwt/tools.json`
 - **Coding Agent Integration**: Launch the selected agent in the worktree (Claude Code includes permission handling and post-change flow)
 - **GitHub PR Integration**: Automatic cleanup of merged pull request branches and worktrees
 - **Change Management**: Built-in support for committing, stashing, or discarding changes after development sessions
 - **Universal Package**: Install once, use across all your projects with consistent behavior
-- **Real-time Statistics**: Live updates of branch and worktree counts with automatic terminal resize handling
 
 ## Installation
+
+GitHub Releases are the source of truth for prebuilt binaries. The npm/bunx wrapper downloads the matching release asset on install.
 
 ### From GitHub Releases (Recommended)
 
@@ -52,6 +57,24 @@ bun add -g @akiojin/gwt
 # One-time execution
 npx @akiojin/gwt
 bunx @akiojin/gwt
+```
+
+### Via Cargo
+
+Install the CLI with Cargo:
+
+```bash
+# From crates.io (recommended for Rust users)
+cargo install gwt-cli
+
+# With cargo-binstall (faster, downloads prebuilt binary)
+cargo binstall gwt-cli
+
+# From GitHub (latest development version)
+cargo install --git https://github.com/akiojin/gwt --package gwt-cli --bin gwt --locked
+
+# Or, from a local checkout
+cargo install --path crates/gwt-cli
 ```
 
 ### Build from Source
@@ -110,7 +133,54 @@ The tool presents an interactive interface with the following options:
 1. **Select Existing Branch**: Choose from local or remote branches with worktree auto-creation
 2. **Create New Branch**: Guided branch creation with type selection (feature/bugfix/hotfix/release)
 3. **Manage Worktrees**: View, open, or remove existing worktrees
-4. **Cleanup Branches**: Remove merged PR branches or branches identical to their base directly from the CLI
+4. **Cleanup Branches**: Remove merged PR branches or branches identical to their base directly from the CLI (branches without worktrees are excluded)
+
+## Coding Agents
+
+gwt detects agents available on PATH and lists them in the launcher.
+
+Supported agents (built-in):
+
+- Claude Code (`claude`)
+- Codex CLI (`codex`)
+- Gemini CLI (`gemini`)
+- OpenCode (`opencode`)
+
+### Custom coding agents
+
+Custom agents are defined in `~/.gwt/tools.json` and will appear in the launcher.
+
+Minimal example:
+
+```json
+{
+  "version": "1.0.0",
+  "customCodingAgents": [
+    {
+      "id": "aider",
+      "displayName": "Aider",
+      "type": "command",
+      "command": "aider",
+      "defaultArgs": ["--no-git"],
+      "modeArgs": {
+        "normal": [],
+        "continue": ["--resume"],
+        "resume": ["--resume"]
+      },
+      "permissionSkipArgs": ["--yes"],
+      "env": {
+        "OPENAI_API_KEY": "sk-..."
+      }
+    }
+  ]
+}
+```
+
+Notes:
+
+- `type` supports `path`, `bunx`, or `command`.
+- `modeArgs` defines args per execution mode (Normal/Continue/Resume).
+- `env` is optional per-agent environment variables.
 
 ## Advanced Workflows
 
@@ -164,7 +234,7 @@ gwt
 
 - **Rust**: Stable toolchain (for building from source)
 - **Git**: Latest version with worktree support
-- **Coding Agent**: At least one of Claude Code, Codex CLI, or Gemini CLI should be available
+- **Coding Agent**: At least one built-in agent or a custom coding agent should be available
 - **GitHub CLI**: Required for PR cleanup features (optional)
 - **bun/npm**: Required for bunx/npx execution method
 

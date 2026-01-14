@@ -7,7 +7,7 @@
 
 - 対象は Codex のモデル選択とデフォルト引数に限定する。
 - 既存の起動フロー、フラグ順序、セッション処理は変更しない。
-- 変更対象ファイルは `src/cli/ui/utils/modelOptions.ts`、`src/codex.ts`、`src/shared/aiToolConstants.ts` と関連テスト。
+- 変更対象ファイルは `crates/gwt-cli/src/tui/screens/wizard.rs`、`crates/gwt-core/src/agent/codex.rs`、`crates/gwt-cli/src/main.rs` と関連テスト。
 
 ## 2. 成功基準との対応
 
@@ -26,18 +26,17 @@
 ## 4. 実装ステップ (ハイレベル ToDo)
 
 1. **テスト更新 (RED)**
-   - Codex のモデル一覧テストと UI 選択テストの期待値を4件限定と gpt-5.2-codex に合わせて更新する。
-   - デフォルトモデルを参照するテストデータを gpt-5.2-codex に更新する。
+   - `crates/gwt-cli/src/tui/screens/wizard.rs` の Codex モデル一覧テストを gpt-5.2-codex と 4件限定に合わせて更新する。
+   - `crates/gwt-core/src/agent/codex.rs` と `crates/gwt-cli/src/main.rs` のデフォルトモデル期待値を gpt-5.2-codex に更新する。
 2. **実装更新 (GREEN)**
-   - `src/cli/ui/utils/modelOptions.ts` から gpt-5.1-codex と gpt-5.1 を除外し、gpt-5.2-codex を先頭寄りに配置する。
-   - `src/codex.ts` と `src/shared/aiToolConstants.ts` のデフォルトモデルを gpt-5.2-codex に更新する。
+   - `crates/gwt-cli/src/tui/screens/wizard.rs` の Codex モデル一覧に gpt-5.2-codex を追加し、4件の並び順を調整する。
+   - `crates/gwt-core/src/agent/codex.rs` のデフォルトモデルを gpt-5.2-codex に更新する。
 3. **バリデーション**
    - 関連ユニットテストを実行し、失敗がないことを確認する。
 
 ## 5. テスト戦略
 
-- ユニットテスト: `src/cli/ui/utils/modelOptions.test.ts`、`src/cli/ui/__tests__/components/ModelSelectorScreen.initial.test.tsx`、`tests/unit/codex.test.ts`。
-- 既存の画面テスト（Quick Start、branchFormatter、index 系）のモデル文字列を更新して整合性を維持する。
+- ユニットテスト: `crates/gwt-cli/src/tui/screens/wizard.rs`、`crates/gwt-core/src/agent/codex.rs`、`crates/gwt-cli/src/main.rs`。
 
 ## 6. リスクと軽減策
 

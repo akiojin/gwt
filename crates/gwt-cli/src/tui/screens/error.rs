@@ -96,6 +96,7 @@ impl ErrorState {
 
 /// Render error screen
 pub fn render_error(state: &ErrorState, frame: &mut Frame, area: Rect) {
+    const H_PADDING: u16 = 2;
     // Calculate dialog size
     let dialog_width = 70.min(area.width.saturating_sub(4));
     let base_height = 8;
@@ -141,6 +142,12 @@ pub fn render_error(state: &ErrorState, frame: &mut Frame, area: Rect) {
         .title_style(Style::default().add_modifier(Modifier::BOLD));
 
     let inner_area = block.inner(dialog_area);
+    let content_area = Rect::new(
+        inner_area.x + H_PADDING,
+        inner_area.y,
+        inner_area.width.saturating_sub(H_PADDING.saturating_mul(2)),
+        inner_area.height,
+    );
     frame.render_widget(block, dialog_area);
 
     // Layout
@@ -158,7 +165,7 @@ pub fn render_error(state: &ErrorState, frame: &mut Frame, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(constraints)
-        .split(inner_area);
+        .split(content_area);
 
     let mut chunk_idx = 0;
 

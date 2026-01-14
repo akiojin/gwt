@@ -114,10 +114,86 @@ impl ConfirmState {
 
 /// Render confirmation dialog
 pub fn render_confirm(state: &ConfirmState, frame: &mut Frame, area: Rect) {
+    const H_PADDING: usize = 2;
+    let message_lines: Vec<String> = state
+        .message
+        .lines()
+        .map(|line| format!(" {}", line))
+        .collect();
+    let details_lines: Vec<String> = state
+        .details
+        .iter()
+        .map(|detail| {
+            if detail.starts_with(' ') {
+                detail.clone()
+            } else {
+                format!("  {}", detail)
+            }
+        })
+        .collect();
+    let button_text = format!("[ {} ]  [ {} ]", state.cancel_label, state.confirm_label);
+
+    let max_line_len = |lines: &[String]| -> usize {
+        lines
+            .iter()
+            .map(|line| line.chars().count())
+            .max()
+            .unwrap_or(0)
+    };
+
+    let max_content_len = max_line_len(&message_lines)
+        .max(max_line_len(&details_lines))
+        .max(button_text.chars().count())
+        .max(state.title.chars().count() + 2);
+
     // Calculate dialog size
-    let dialog_width = 60.min(area.width.saturating_sub(4));
-    let content_lines = 3 + state.details.len() as u16; // title + message + buttons + details
-    let dialog_height = (content_lines + 4).min(area.height.saturating_sub(4));
+    let max_width = area.width.saturating_sub(4).max(20) as usize;
+    let desired_width = max_content_len + 2 + (H_PADDING * 2);
+    let dialog_width = (desired_width.max(40)).min(max_width) as u16;
+    let inner_width = dialog_width
+        .saturating_sub(2 + (H_PADDING * 2) as u16)
+        .max(1) as usize;
+
+    let wrapped_line_count = |lines: &[String], width: usize| -> usize {
+        if width == 0 {
+            return lines.len();
+        }
+        lines
+            .iter()
+            .map(|line| {
+                let len = line.chars().count();
+                if len == 0 {
+                    1
+                } else {
+                    len.div_ceil(width)
+                }
+            })
+            .sum()
+    };
+
+    let mut message_height = wrapped_line_count(&message_lines, inner_width);
+    let mut details_height = wrapped_line_count(&details_lines, inner_width);
+    let spacer_height = 1usize;
+    let buttons_height = 1usize;
+
+    let content_height = message_height + details_height + spacer_height + buttons_height;
+    let max_height = area.height.saturating_sub(4).max(5) as usize;
+    let dialog_height = (content_height + 2).min(max_height) as u16;
+
+    let available_inner = dialog_height.saturating_sub(2) as usize;
+    let reserved = spacer_height + buttons_height;
+    if message_height + reserved > available_inner {
+        details_height = 0;
+    } else {
+        let max_details = available_inner.saturating_sub(message_height + reserved);
+        if details_height > max_details {
+            details_height = max_details;
+        }
+    }
+
+    if message_height > available_inner.saturating_sub(reserved) {
+        message_height = available_inner.saturating_sub(reserved);
+    }
 
     // Center the dialog
     let dialog_area = centered_rect(dialog_width, dialog_height, area);
@@ -139,17 +215,24 @@ pub fn render_confirm(state: &ConfirmState, frame: &mut Frame, area: Rect) {
         .title_style(Style::default().add_modifier(Modifier::BOLD));
 
     let inner_area = block.inner(dialog_area);
+    let content_area = Rect::new(
+        inner_area.x + H_PADDING as u16,
+        inner_area.y,
+        inner_area.width.saturating_sub((H_PADDING * 2) as u16),
+        inner_area.height,
+    );
     frame.render_widget(block, dialog_area);
 
     // Layout for content
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2), // Message
-            Constraint::Min(1),    // Details
-            Constraint::Length(3), // Buttons
+            Constraint::Length(message_height as u16), // Message
+            Constraint::Length(details_height as u16), // Details
+            Constraint::Length(1),                     // Spacer
+            Constraint::Length(1),                     // Buttons
         ])
-        .split(inner_area);
+        .split(content_area);
 
     // Message
     let message_style = if state.is_dangerous {
@@ -157,30 +240,28 @@ pub fn render_confirm(state: &ConfirmState, frame: &mut Frame, area: Rect) {
     } else {
         Style::default()
     };
-    let message = Paragraph::new(state.message.clone())
-        .style(message_style)
-        .alignment(Alignment::Center);
+    let message = Paragraph::new(
+        message_lines
+            .iter()
+            .map(|line| Line::from(line.as_str()))
+            .collect::<Vec<Line>>(),
+    )
+    .style(message_style)
+    .wrap(Wrap { trim: false });
     frame.render_widget(message, chunks[0]);
 
     // Details
-    if !state.details.is_empty() {
-        let details_text: Vec<Line> = state
-            .details
+    if !details_lines.is_empty() && details_height > 0 {
+        let details_text: Vec<Line> = details_lines
             .iter()
-            .take(chunks[1].height as usize)
-            .map(|d| Line::from(d.as_str()).style(Style::default().fg(Color::DarkGray)))
+            .take(details_height)
+            .map(|line| Line::from(line.as_str()).style(Style::default().fg(Color::DarkGray)))
             .collect();
-        let details = Paragraph::new(details_text);
+        let details = Paragraph::new(details_text).wrap(Wrap { trim: false });
         frame.render_widget(details, chunks[1]);
     }
 
     // Buttons
-    let button_area = chunks[2];
-    let button_layout = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(button_area);
-
     // Cancel button
     let cancel_style = if !state.selected_confirm {
         Style::default().bg(Color::DarkGray).fg(Color::White)
@@ -188,10 +269,6 @@ pub fn render_confirm(state: &ConfirmState, frame: &mut Frame, area: Rect) {
         Style::default().fg(Color::DarkGray)
     };
     let cancel_text = format!("[ {} ]", state.cancel_label);
-    let cancel = Paragraph::new(cancel_text)
-        .style(cancel_style)
-        .alignment(Alignment::Center);
-    frame.render_widget(cancel, button_layout[0]);
 
     // Confirm button
     let confirm_style = if state.selected_confirm {
@@ -206,10 +283,14 @@ pub fn render_confirm(state: &ConfirmState, frame: &mut Frame, area: Rect) {
         Style::default().fg(Color::Green)
     };
     let confirm_text = format!("[ {} ]", state.confirm_label);
-    let confirm = Paragraph::new(confirm_text)
-        .style(confirm_style)
-        .alignment(Alignment::Center);
-    frame.render_widget(confirm, button_layout[1]);
+
+    let button_line = Line::from(vec![
+        Span::styled(cancel_text, cancel_style),
+        Span::raw("  "),
+        Span::styled(confirm_text, confirm_style),
+    ]);
+    let buttons = Paragraph::new(button_line).alignment(Alignment::Center);
+    frame.render_widget(buttons, chunks[3]);
 }
 
 /// Helper function to create a centered rect

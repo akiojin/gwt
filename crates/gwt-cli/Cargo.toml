@@ -5,14 +5,17 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "CLI for Git Worktree Manager"
+description = "CLI for Git Worktree Manager with AI coding agent integration"
+readme = "../../README.md"
+keywords = ["git", "worktree", "cli", "tui", "ai-coding"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "gwt"
 path = "src/main.rs"
 
 [dependencies]
-gwt-core = { path = "../gwt-core" }
+gwt-core = { path = "../gwt-core", version = "5.0.0" }
 thiserror.workspace = true
 tokio.workspace = true
 clap.workspace = true
@@ -25,6 +28,28 @@ ureq.workspace = true
 serde.workspace = true
 urlencoding.workspace = true
 which = "7"
+libc.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+
+# cargo-binstall support for prebuilt binary installation
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/gwt-{ target }{ archive-suffix }"
+bin-dir = "gwt{ binary-ext }"
+pkg-fmt = "bin"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/gwt-windows-x86_64.exe"
+
+[package.metadata.binstall.overrides.x86_64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/v{ version }/gwt-linux-x86_64"
+
+[package.metadata.binstall.overrides.aarch64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/v{ version }/gwt-linux-aarch64"
+
+[package.metadata.binstall.overrides.x86_64-apple-darwin]
+pkg-url = "{ repo }/releases/download/v{ version }/gwt-macos-x86_64"
+
+[package.metadata.binstall.overrides.aarch64-apple-darwin]
+pkg-url = "{ repo }/releases/download/v{ version }/gwt-macos-aarch64"

@@ -64,6 +64,7 @@ impl ClaudeAgent {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        cmd.env("IS_SANDBOX", "1");
         cmd
     }
 }

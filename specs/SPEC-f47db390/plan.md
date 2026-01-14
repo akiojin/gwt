@@ -61,6 +61,8 @@ specs/SPEC-f47db390/
 ### UI
 - SessionSelectorScreenに実データを配線し、ツール・ブランチ・時刻・IDを表示。空時は警告表示。
 - Branch選択直後にQuick Start画面を追加し、前回のツール/モデル/セッションIDを提示。「前回設定で続きから」「前回設定で新規」「設定を選び直す」を選べる。
+- Quick Startで「前回設定で続きから/新規」を選択した場合はExecution Mode/Skip Permissions/セッション選択をスキップし、履歴設定を適用して即時起動する。
+- Quick Startの履歴が空でも`lastBranch/lastUsedTool`が一致する場合は単一履歴として扱い、Quick Startを表示する。
 - Web UIのブランチ詳細で最終セッションIDを表示し、Continue/Resumeで自動的に適用する。
 
 ## フェーズ2: タスク生成

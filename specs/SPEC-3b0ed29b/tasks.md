@@ -1,26 +1,43 @@
-# タスク: AIツール起動機能（Codex gpt-5.2対応）
+# タスク: コーディングエージェント起動の互換性整備（Rust）
 
-- [x] **T3001** 仕様書にgpt-5.2とExtra high推論レベルを追加する（受け入れシナリオ、FR追記）
-- [x] **T3002** Codexモデル選択肢にgpt-5.2を追加し、推論レベルxhighを選択可能にする実装をTDDで更新する（モデル一覧・推論レベルUI・Quick Start表示のテスト含む）
-- [x] **T3003** Codex起動オプションが`--model=gpt-5.2`を渡せること、xhigh指定が`model_reasoning_effort`に反映されることをユニットテストで検証する
-- [x] **T3004** Worktree再利用時のブランチ整合性検証とモデル名正規化の要件を仕様に追記する
-- [x] **T3005** Worktree整合性チェックとモデル名正規化のテストを追加する（worktreeExists/モデル選択/Quick Start）
-- [x] **T3006** Worktree整合性チェック・警告表示とモデル名正規化を実装する
-- [x] **T3007** Claude CodeのChrome拡張機能統合が未対応環境でスキップされる要件を仕様に追記する
-- [x] **T3008** Claude Code起動テストに、未対応環境で`--chrome`が付与されないことを追加する
-- [x] **T3009** Claude Code起動時にChrome統合のサポート判定を行い、未対応なら警告して`--chrome`を省く
-- [x] **T3010** テスト実行とタスク更新（T3008-T3009）を完了する
-- [x] **T3011** バージョンキャッシュ機能のテスト作成（TDD）: 起動時取得、キャッシュ参照、フォールバック
-- [x] **T3012** バージョンキャッシュの実装: App.solid.tsx で起動時にバージョン情報を事前取得
-- [x] **T3013** WizardSteps.tsx の VersionSelectStep をキャッシュ参照に変更
-- [x] **T3014** ビルド・テスト検証と動作確認
-- [x] **T3015** 仕様に起動直後の異常終了検知とOpenCodeモデル選択の要件を追記する
-- [ ] **T3016** 起動直後の異常終了（終了コード/シグナル）を検知するテストを追加する（launcher/agent起動系）
-- [ ] **T3017** OpenCode選択時にモデル一覧が空にならないことを検証するUIテストを追加する
-- [ ] **T3018** 異常終了時のエラー表示とログ記録を実装する
-- [ ] **T3019** OpenCodeモデル選択のデフォルト/任意入力対応を実装する
-- [ ] **T3020** 影響範囲の回帰テストと品質チェックを実行する
-- [x] **T3021** Codex CLI v0.80.0+で`--enable skills`が無効になる要件を仕様に追記する
-- [x] **T3022** Codex起動/Resolverのユニットテストに、v0.79.xでは`--enable skills`が付与され、v0.80.0+では付与されないことを追加する
-- [x] **T3023** Codex起動引数とResolverにバージョン判定ロジックを追加し、`--enable skills`の付与を切り替える
-- [x] **T3024** 対象ユニットテストを実行して成功させる
+**仕様ID**: `SPEC-3b0ed29b`
+**ポリシー**: CLAUDE.md の TDD ルールに基づき、必ず RED→GREEN→リグレッションチェックの順に進める。
+**テスト**: `cargo test`（必要な範囲）
+
+## ユーザーストーリー3 - 権限スキップモードでの起動 (優先度: P2)
+
+- [x] **T3101** [P] [US3] `crates/gwt-core/src/agent/codex.rs` にCodexの権限スキップフラグ選択ヘルパーを追加し、v0.79.x/v0.80.0+/不明のユニットテストを追加する
+- [x] **T3102** [US3] T3101の後に `crates/gwt-cli/src/main.rs` のCodex起動引数で新ヘルパーを使用し、skip permissionsに正しいフラグを渡す
+
+## ユーザーストーリー11 - 起動直後の異常終了を検知して可視化する (優先度: P1)
+
+- [x] **T3111** [P] [US11] `crates/gwt-cli/src/main.rs` に終了判定（成功/中断/異常）を行うヘルパーを追加し、単体テストを追加する
+- [x] **T3112** [US11] T3111の後に `crates/gwt-cli/src/main.rs` の起動処理で異常終了をエラーとして扱い、終了コード/シグナル/経過時間をログ出力する
+- [x] **T3113** [US11] `crates/gwt-cli/src/tui/app.rs` でエラー画面をEnter/Escで閉じられるようにし、必要なテストを追加する
+
+## ユーザーストーリー13 - セッション完了後にブランチ一覧へ戻る (優先度: P2)
+
+- [x] **T3121** [US13] `crates/gwt-cli/src/tui.rs` / `crates/gwt-cli/src/tui/app.rs` に起動結果のコンテキスト注入を追加し、成功/失敗メッセージを表示できるようにする
+- [x] **T3122** [US13] `crates/gwt-cli/src/main.rs` の対話ループを更新し、起動終了後にブランチ一覧へ復帰する
+
+## ユーザーストーリー1 - デフォルト起動ログの整備 (優先度: P1)
+
+- [x] **T3131** [P] [US1] `crates/gwt-cli/src/main.rs` に起動ログの整形ヘルパーを追加し、Working directory/Model/Reasoning/Mode/Skip/Args/Version/実行方法が出力されることをテストする
+- [x] **T3132** [US1] T3131の後に `crates/gwt-cli/src/main.rs` の起動ログをヘルパー経由で統一する
+
+## ユーザーストーリー12 - OpenCodeモデル選択が空で止まらない (優先度: P1)
+
+- [x] **T3141** [P] [US12] `crates/gwt-cli/src/tui/screens/wizard.rs` のOpenCodeモデル選択に default/custom の選択肢を含め、空リストにならないことを担保する
+- [x] **T3142** [US12] `crates/gwt-cli/src/tui/screens/wizard.rs` にOpenCodeモデル選択が空にならないことを検証するユニットテストを追加する
+
+## 統合
+
+- [x] **T3190** [統合] `cargo build --release` を実行してビルド確認する
+
+## 追加作業: Codexモデル/スキップ権限の互換修正 (2026-01-14)
+
+- [x] **T3150** [Test] `crates/gwt-core/src/agent/codex.rs` のデフォルトモデルとスキップ時引数構成のテストを更新する
+- [x] **T3151** [Test] `crates/gwt-cli/src/main.rs` にCodexのスキップフラグが末尾に来ることを確認するテストを追加する
+- [x] **T3152** [実装] `crates/gwt-core/src/agent/codex.rs` のデフォルトモデルを仕様に合わせて更新し、スキップ時はsandbox設定を抑止する
+- [x] **T3153** [実装] `crates/gwt-cli/src/tui/screens/wizard.rs` のCodexモデル選択肢を仕様に合わせて更新する
+- [x] **T3154** [実装] `crates/gwt-cli/src/main.rs` でClaude Codeのスキップ時に`IS_SANDBOX=1`を必ず付与する

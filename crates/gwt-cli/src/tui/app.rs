@@ -3,25 +3,30 @@
 #![allow(dead_code)] // TUI application components for future expansion
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use gwt_core::config::get_branch_tool_history;
+use gwt_core::config::{Profile, ProfilesConfig};
 use gwt_core::error::GwtError;
-use gwt_core::git::Branch;
+use gwt_core::git::{Branch, PrCache};
 use gwt_core::worktree::WorktreeManager;
 use ratatui::{prelude::*, widgets::*};
+use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread;
 use std::time::{Duration, Instant};
 
+use super::screens::branch_list::WorktreeStatus;
 use super::screens::{
     render_branch_list, render_confirm, render_environment, render_error, render_help, render_logs,
     render_profiles, render_settings, render_wizard, render_worktree_create, BranchItem,
     BranchListState, BranchType, CodingAgent, ConfirmState, EnvironmentState, ErrorState,
     ExecutionMode, HelpState, LogsState, ProfilesState, QuickStartEntry, ReasoningLevel,
-    SettingsState, WizardState, WorktreeCreateState,
+    SettingsState, WizardConfirmResult, WizardState, WorktreeCreateState,
 };
 
 /// Configuration for launching a coding agent after TUI exits
@@ -41,8 +46,57 @@ pub struct AgentLaunchConfig {
     pub version: String,
     /// Execution mode
     pub execution_mode: ExecutionMode,
+    /// Session ID for resume/continue when available
+    pub session_id: Option<String>,
     /// Skip permission prompts
     pub skip_permissions: bool,
+    /// Environment variables to apply
+    pub env: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TuiEntryContext {
+    status_message: Option<String>,
+    error_message: Option<String>,
+}
+
+impl TuiEntryContext {
+    pub fn success(message: String) -> Self {
+        Self {
+            status_message: Some(message),
+            error_message: None,
+        }
+    }
+
+    pub fn warning(message: String) -> Self {
+        Self {
+            status_message: Some(message),
+            error_message: None,
+        }
+    }
+
+    pub fn error(message: String) -> Self {
+        Self {
+            status_message: None,
+            error_message: Some(message),
+        }
+    }
+}
+
+struct PrTitleUpdate {
+    titles: HashMap<String, String>,
+}
+
+struct SafetyUpdate {
+    branch: String,
+    has_unpushed: bool,
+    is_unmerged: bool,
+    safe_to_cleanup: bool,
+}
+
+struct SafetyCheckTarget {
+    branch: String,
+    upstream: String,
 }
 
 /// Application state (Model in Elm Architecture)
@@ -75,6 +129,8 @@ pub struct Model {
     error: ErrorState,
     /// Profiles state
     profiles: ProfilesState,
+    /// Profiles configuration
+    profiles_config: ProfilesConfig,
     /// Environment variables state
     environment: EnvironmentState,
     /// Wizard popup state
@@ -95,6 +151,10 @@ pub struct Model {
     pending_unsafe_selection: Option<String>,
     /// Pending cleanup branches (FR-010)
     pending_cleanup_branches: Vec<String>,
+    /// PR title update receiver
+    pr_title_rx: Option<Receiver<PrTitleUpdate>>,
+    /// Safety check update receiver
+    safety_rx: Option<Receiver<SafetyUpdate>>,
 }
 
 /// Screen types
@@ -161,6 +221,10 @@ pub enum Message {
 impl Model {
     /// Create a new model
     pub fn new() -> Self {
+        Self::new_with_context(None)
+    }
+
+    pub fn new_with_context(context: Option<TuiEntryContext>) -> Self {
         let repo_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
         let mut model = Self {
@@ -178,6 +242,7 @@ impl Model {
             confirm: ConfirmState::new(),
             error: ErrorState::new(),
             profiles: ProfilesState::new(),
+            profiles_config: ProfilesConfig::default(),
             environment: EnvironmentState::new(),
             wizard: WizardState::new(),
             status_message: None,
@@ -188,33 +253,66 @@ impl Model {
             pending_agent_launch: None,
             pending_unsafe_selection: None,
             pending_cleanup_branches: Vec::new(),
+            pr_title_rx: None,
+            safety_rx: None,
         };
 
         // Load initial data
         model.refresh_data();
+        model.apply_entry_context(context);
         model
     }
 
     /// Refresh data from repository
     fn refresh_data(&mut self) {
+        let settings = gwt_core::config::Settings::load(&self.repo_root).unwrap_or_default();
+        let base_branch = settings.default_base_branch.clone();
+        let base_branch_exists = Branch::exists(&self.repo_root, &base_branch).unwrap_or(false);
+
         if let Ok(manager) = WorktreeManager::new(&self.repo_root) {
             // Get branches
-            if let Ok(branches) = Branch::list(&self.repo_root) {
+            if let Ok(branches) = Branch::list_basic(&self.repo_root) {
                 let worktrees = manager.list().unwrap_or_default();
 
                 // Load tool usage from TypeScript session file (FR-070)
                 let tool_usage_map = gwt_core::config::get_last_tool_usage_map(&self.repo_root);
+                let mut safety_targets = Vec::new();
 
                 let mut branch_items: Vec<BranchItem> = branches
                     .iter()
                     .map(|b| {
                         let mut item = BranchItem::from_branch(b, &worktrees);
+
                         // Set tool usage from TypeScript session history (FR-070)
                         if let Some(entry) = tool_usage_map.get(&b.name) {
                             item.last_tool_usage = Some(entry.format_tool_usage());
-                            // Set timestamp from session entry (convert ms to seconds)
-                            item.last_commit_timestamp = Some(entry.timestamp / 1000);
+                            // FR-041: Compare git commit timestamp and session timestamp,
+                            // use the newer one
+                            let session_timestamp = entry.timestamp / 1000; // Convert ms to seconds
+                            let git_timestamp = item.last_commit_timestamp.unwrap_or(0);
+                            item.last_commit_timestamp = Some(session_timestamp.max(git_timestamp));
                         }
+
+                        // Safety check short-circuit: use immediate signals first
+                        if item.branch_type == BranchType::Local {
+                            if item.has_changes
+                                || item.has_unpushed
+                                || !b.has_remote
+                                || !base_branch_exists
+                            {
+                                item.safe_to_cleanup = Some(false);
+                            } else if let Some(upstream) = b.upstream.clone() {
+                                item.safe_to_cleanup = None;
+                                safety_targets.push(SafetyCheckTarget {
+                                    branch: b.name.clone(),
+                                    upstream,
+                                });
+                            } else {
+                                item.safe_to_cleanup = Some(false);
+                            }
+                        }
+
+                        item.update_safety_status();
                         item
                     })
                     .collect();
@@ -230,10 +328,10 @@ impl Model {
                 self.total_count = branch_items.len();
                 self.active_count = branch_items.iter().filter(|b| b.has_worktree).count();
                 self.branch_list = BranchListState::new().with_branches(branch_items);
-            }
+                self.spawn_safety_checks(safety_targets, base_branch.clone());
+                self.spawn_pr_title_fetch(&branches);
 
-            // Get base branches for worktree create
-            if let Ok(branches) = Branch::list(&self.repo_root) {
+                // Get base branches for worktree create
                 let base_branches: Vec<String> = branches
                     .iter()
                     .filter(|b| !b.name.starts_with("remotes/"))
@@ -243,8 +341,6 @@ impl Model {
             }
         }
 
-        // Load settings
-        let settings = gwt_core::config::Settings::load(&self.repo_root).unwrap_or_default();
         self.settings = SettingsState::new().with_settings(settings.clone());
 
         // Load logs from configured log directory
@@ -266,19 +362,281 @@ impl Model {
             }
         }
 
-        // Load profiles (initialize with default profile if none exist)
-        // For now, create a simple default profile until a full profile manager is implemented
-        use super::screens::profiles::ProfileItem;
-        let profiles = vec![ProfileItem {
-            name: "default".to_string(),
-            is_active: true,
-            env_count: 0,
-            description: Some("Default profile".to_string()),
-        }];
-        self.profiles = super::screens::ProfilesState::new().with_profiles(profiles);
-        self.branch_list.active_profile = Some("default".to_string());
+        self.load_profiles();
         self.branch_list.working_directory = Some(self.repo_root.display().to_string());
         self.branch_list.version = Some(env!("CARGO_PKG_VERSION").to_string());
+    }
+
+    fn spawn_pr_title_fetch(&mut self, branches: &[Branch]) {
+        if branches.is_empty() {
+            self.pr_title_rx = None;
+            return;
+        }
+
+        let repo_root = self.repo_root.clone();
+        let branch_names: Vec<String> = branches.iter().map(|b| b.name.clone()).collect();
+        let (tx, rx) = mpsc::channel();
+        self.pr_title_rx = Some(rx);
+
+        thread::spawn(move || {
+            let mut cache = PrCache::new();
+            cache.populate(&repo_root);
+
+            let mut titles = HashMap::new();
+            for name in branch_names {
+                if let Some(title) = cache.get_title(&name) {
+                    titles.insert(name, title.to_string());
+                }
+            }
+
+            let _ = tx.send(PrTitleUpdate { titles });
+        });
+    }
+
+    fn spawn_safety_checks(&mut self, targets: Vec<SafetyCheckTarget>, base_branch: String) {
+        if targets.is_empty() {
+            self.safety_rx = None;
+            return;
+        }
+
+        let repo_root = self.repo_root.clone();
+        let (tx, rx) = mpsc::channel();
+        self.safety_rx = Some(rx);
+
+        thread::spawn(move || {
+            for target in targets {
+                let mut has_unpushed = false;
+                let mut is_unmerged = false;
+                let mut safe_to_cleanup = false;
+
+                let unpushed_result =
+                    Branch::divergence_between(&repo_root, &target.branch, &target.upstream);
+                match unpushed_result {
+                    Ok((ahead, _)) => {
+                        if ahead > 0 {
+                            has_unpushed = true;
+                        }
+                    }
+                    Err(_) => {
+                        let _ = tx.send(SafetyUpdate {
+                            branch: target.branch,
+                            has_unpushed,
+                            is_unmerged,
+                            safe_to_cleanup,
+                        });
+                        continue;
+                    }
+                }
+
+                if has_unpushed {
+                    let _ = tx.send(SafetyUpdate {
+                        branch: target.branch,
+                        has_unpushed,
+                        is_unmerged,
+                        safe_to_cleanup,
+                    });
+                    continue;
+                }
+
+                if let Ok((ahead, _)) =
+                    Branch::divergence_between(&repo_root, &target.branch, &base_branch)
+                {
+                    is_unmerged = ahead > 0;
+                    safe_to_cleanup = !is_unmerged;
+                }
+
+                let _ = tx.send(SafetyUpdate {
+                    branch: target.branch,
+                    has_unpushed,
+                    is_unmerged,
+                    safe_to_cleanup,
+                });
+            }
+        });
+    }
+
+    fn apply_entry_context(&mut self, context: Option<TuiEntryContext>) {
+        if let Some(context) = context {
+            if let Some(message) = context.status_message {
+                self.status_message = Some(message);
+                self.status_message_time = Some(Instant::now());
+            }
+            if let Some(message) = context.error_message {
+                self.error = ErrorState::from_error(&message);
+                self.screen_stack.push(self.screen.clone());
+                self.screen = Screen::Error;
+            }
+        }
+    }
+
+    fn apply_pr_title_updates(&mut self) {
+        let Some(rx) = &self.pr_title_rx else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(update) => {
+                self.branch_list.apply_pr_titles(&update.titles);
+                self.pr_title_rx = None;
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.pr_title_rx = None;
+            }
+        }
+    }
+
+    fn apply_safety_updates(&mut self) {
+        let Some(rx) = &self.safety_rx else {
+            return;
+        };
+
+        loop {
+            match rx.try_recv() {
+                Ok(update) => {
+                    self.branch_list.apply_safety_update(
+                        &update.branch,
+                        update.has_unpushed,
+                        update.is_unmerged,
+                        update.safe_to_cleanup,
+                    );
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.safety_rx = None;
+                    break;
+                }
+            }
+        }
+    }
+
+    fn load_profiles(&mut self) {
+        let profiles_config = ProfilesConfig::load().unwrap_or_default();
+        self.profiles_config = profiles_config.clone();
+
+        let mut names: Vec<String> = profiles_config.profiles.keys().cloned().collect();
+        names.sort();
+
+        let profiles = names
+            .into_iter()
+            .filter_map(|name| {
+                profiles_config.profiles.get(&name).map(|profile| {
+                    super::screens::profiles::ProfileItem {
+                        name: name.clone(),
+                        is_active: profiles_config.active.as_deref() == Some(name.as_str()),
+                        env_count: profile.env.len(),
+                        description: if profile.description.is_empty() {
+                            None
+                        } else {
+                            Some(profile.description.clone())
+                        },
+                    }
+                })
+            })
+            .collect();
+
+        self.profiles = ProfilesState::new().with_profiles(profiles);
+        self.branch_list.active_profile = self.profiles_config.active.clone();
+    }
+
+    fn save_profiles(&mut self) {
+        if let Err(e) = self.profiles_config.save() {
+            self.status_message = Some(format!("Failed to save profiles: {}", e));
+            self.status_message_time = Some(Instant::now());
+            return;
+        }
+        self.load_profiles();
+    }
+
+    fn active_env_overrides(&self) -> Vec<(String, String)> {
+        self.profiles_config
+            .active_profile()
+            .map(|profile| {
+                let mut pairs: Vec<(String, String)> = profile
+                    .env
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                pairs.sort_by(|a, b| a.0.cmp(&b.0));
+                pairs
+            })
+            .unwrap_or_default()
+    }
+
+    fn open_environment_editor(&mut self, profile_name: &str) {
+        let vars = self
+            .profiles_config
+            .profiles
+            .get(profile_name)
+            .map(|profile| {
+                let mut items: Vec<super::screens::environment::EnvItem> = profile
+                    .env
+                    .iter()
+                    .map(|(k, v)| super::screens::environment::EnvItem {
+                        key: k.clone(),
+                        value: v.clone(),
+                        is_secret: false,
+                    })
+                    .collect();
+                items.sort_by(|a, b| a.key.cmp(&b.key));
+                items
+            })
+            .unwrap_or_default();
+
+        self.environment = EnvironmentState::new()
+            .with_profile(profile_name)
+            .with_variables(vars);
+        self.screen_stack.push(self.screen.clone());
+        self.screen = Screen::Environment;
+    }
+
+    fn persist_environment(&mut self) {
+        let profile_name = match self.environment.profile_name.clone() {
+            Some(name) => name,
+            None => return,
+        };
+        let profile = self
+            .profiles_config
+            .profiles
+            .entry(profile_name.clone())
+            .or_insert_with(|| Profile::new(profile_name.clone()));
+        profile.env.clear();
+        for var in &self.environment.variables {
+            profile.env.insert(var.key.clone(), var.value.clone());
+        }
+        self.save_profiles();
+    }
+
+    fn delete_selected_profile(&mut self) {
+        let selected = match self.profiles.selected_profile() {
+            Some(item) => item.name.clone(),
+            None => return,
+        };
+
+        if self.profiles_config.active.as_deref() == Some(selected.as_str()) {
+            self.status_message = Some("Active profile cannot be deleted.".to_string());
+            self.status_message_time = Some(Instant::now());
+            return;
+        }
+
+        self.profiles_config.profiles.remove(&selected);
+        if self.profiles_config.profiles.is_empty() {
+            self.profiles_config = ProfilesConfig::default();
+        }
+        self.save_profiles();
+    }
+
+    fn delete_selected_env(&mut self) {
+        if self.environment.variables.is_empty() {
+            return;
+        }
+        if self.environment.selected < self.environment.variables.len() {
+            self.environment.variables.remove(self.environment.selected);
+            if self.environment.selected >= self.environment.variables.len() {
+                self.environment.selected = self.environment.variables.len().saturating_sub(1);
+            }
+            self.persist_environment();
+        }
     }
 
     /// Update function (Elm Architecture)
@@ -317,6 +675,8 @@ impl Model {
                 } else if matches!(self.screen, Screen::Profiles) && self.profiles.create_mode {
                     // Exit profile create mode
                     self.profiles.exit_create_mode();
+                } else if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
+                    self.environment.cancel_edit();
                 } else if matches!(self.screen, Screen::Confirm) {
                     // FR-029d: Cancel confirm dialog without executing action
                     self.pending_unsafe_selection = None;
@@ -345,6 +705,8 @@ impl Model {
                 }
                 // Update spinner animation
                 self.branch_list.tick_spinner();
+                self.apply_pr_title_updates();
+                self.apply_safety_updates();
             }
             Message::SelectNext => match self.screen {
                 Screen::BranchList => self.branch_list.select_next(),
@@ -428,7 +790,64 @@ impl Model {
                         self.screen = prev_screen;
                     }
                 }
+                Screen::Profiles => {
+                    if self.profiles.create_mode {
+                        match self.profiles.validate_new_name() {
+                            Ok(name) => {
+                                if self.profiles_config.profiles.contains_key(&name) {
+                                    self.profiles.error =
+                                        Some("Profile already exists".to_string());
+                                } else {
+                                    self.profiles_config
+                                        .profiles
+                                        .insert(name.clone(), Profile::new(&name));
+                                    self.profiles_config.set_active(Some(name.clone()));
+                                    self.profiles.exit_create_mode();
+                                    self.save_profiles();
+                                }
+                            }
+                            Err(msg) => {
+                                self.profiles.error = Some(msg.to_string());
+                            }
+                        }
+                    } else if let Some(item) = self.profiles.selected_profile() {
+                        self.profiles_config.set_active(Some(item.name.clone()));
+                        self.save_profiles();
+                    }
+                }
+                Screen::Environment => {
+                    if self.environment.edit_mode {
+                        match self.environment.validate() {
+                            Ok((key, value)) => {
+                                if self.environment.is_new {
+                                    self.environment.variables.push(
+                                        super::screens::environment::EnvItem {
+                                            key,
+                                            value,
+                                            is_secret: false,
+                                        },
+                                    );
+                                } else if let Some(var) = self
+                                    .environment
+                                    .variables
+                                    .get_mut(self.environment.selected)
+                                {
+                                    var.key = key;
+                                    var.value = value;
+                                }
+                                self.environment.cancel_edit();
+                                self.persist_environment();
+                            }
+                            Err(msg) => {
+                                self.environment.error = Some(msg.to_string());
+                            }
+                        }
+                    }
+                }
                 Screen::Help => {
+                    self.update(Message::NavigateBack);
+                }
+                Screen::Error => {
                     self.update(Message::NavigateBack);
                 }
                 _ => {}
@@ -443,6 +862,8 @@ impl Model {
                 } else if matches!(self.screen, Screen::Profiles) && self.profiles.create_mode {
                     // Profile create mode - add character to name
                     self.profiles.insert_char(c);
+                } else if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
+                    self.environment.insert_char(c);
                 }
             }
             Message::Backspace => {
@@ -453,6 +874,8 @@ impl Model {
                     self.branch_list.filter_pop();
                 } else if matches!(self.screen, Screen::Profiles) && self.profiles.create_mode {
                     self.profiles.delete_char();
+                } else if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
+                    self.environment.delete_char();
                 }
             }
             Message::CursorLeft => {
@@ -460,6 +883,8 @@ impl Model {
                     self.worktree_create.cursor_left();
                 } else if matches!(self.screen, Screen::Profiles) && self.profiles.create_mode {
                     self.profiles.cursor_left();
+                } else if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
+                    self.environment.cursor_left();
                 } else if matches!(self.screen, Screen::Confirm) {
                     // FR-029c: Left/Right toggle selection in confirm dialog
                     self.confirm.toggle_selection();
@@ -470,6 +895,8 @@ impl Model {
                     self.worktree_create.cursor_right();
                 } else if matches!(self.screen, Screen::Profiles) && self.profiles.create_mode {
                     self.profiles.cursor_right();
+                } else if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
+                    self.environment.cursor_right();
                 } else if matches!(self.screen, Screen::Confirm) {
                     // FR-029c: Left/Right toggle selection in confirm dialog
                     self.confirm.toggle_selection();
@@ -528,15 +955,16 @@ impl Model {
                 if matches!(self.screen, Screen::BranchList) {
                     // FR-029b-e: Check if branch is unsafe before selecting
                     if let Some(branch) = self.branch_list.selected_branch() {
+                        if !branch.has_worktree {
+                            // FR-028d: Branches without worktrees cannot be selected.
+                            return;
+                        }
                         let is_selected = self.branch_list.selected_branches.contains(&branch.name);
 
                         // Only show warning when selecting (not deselecting)
                         if !is_selected {
                             // Check if branch is unsafe (FR-029b/FR-029e)
-                            let is_unsafe = branch.has_changes
-                                || branch.has_unpushed
-                                || branch.is_unmerged
-                                || branch.safe_to_cleanup.is_none(); // Unknown = treat as potentially unsafe
+                            let is_unsafe = branch.is_unsafe();
 
                             if is_unsafe && branch.branch_type == BranchType::Local {
                                 // Show warning dialog for unsafe branch selection
@@ -600,23 +1028,24 @@ impl Model {
             }
             Message::WizardConfirm => {
                 if self.wizard.visible {
-                    if self.wizard.is_complete() {
-                        // Start worktree creation with wizard settings
-                        let branch_name = if self.wizard.is_new_branch {
-                            self.wizard.full_branch_name()
-                        } else {
-                            self.wizard.branch_name.clone()
-                        };
-                        self.worktree_create.branch_name = branch_name;
-                        self.worktree_create.branch_name_cursor =
-                            self.worktree_create.branch_name.len();
-                        self.worktree_create.create_new_branch = self.wizard.is_new_branch;
-                        // Store wizard settings for later use
-                        self.wizard.close();
-                        // Create the worktree directly
-                        self.create_worktree();
-                    } else {
-                        self.wizard.next_step();
+                    match self.wizard.confirm() {
+                        WizardConfirmResult::Complete => {
+                            // Start worktree creation with wizard settings
+                            let branch_name = if self.wizard.is_new_branch {
+                                self.wizard.full_branch_name()
+                            } else {
+                                self.wizard.branch_name.clone()
+                            };
+                            self.worktree_create.branch_name = branch_name;
+                            self.worktree_create.branch_name_cursor =
+                                self.worktree_create.branch_name.len();
+                            self.worktree_create.create_new_branch = self.wizard.is_new_branch;
+                            // Store wizard settings for later use
+                            self.wizard.close();
+                            // Create the worktree directly
+                            self.create_worktree();
+                        }
+                        WizardConfirmResult::Advance => {}
                     }
                 }
             }
@@ -632,7 +1061,14 @@ impl Model {
     fn create_worktree(&mut self) {
         if let Ok(manager) = WorktreeManager::new(&self.repo_root) {
             let branch = &self.worktree_create.branch_name;
-            let base = self.worktree_create.selected_base_branch();
+            let base = if self.worktree_create.create_new_branch {
+                self.wizard
+                    .base_branch_override
+                    .as_deref()
+                    .or_else(|| self.worktree_create.selected_base_branch())
+            } else {
+                None
+            };
 
             // First try to get existing worktree for this branch
             let existing_wt = manager.get_by_branch(branch).ok().flatten();
@@ -665,7 +1101,9 @@ impl Model {
                         },
                         version: self.wizard.version.clone(),
                         execution_mode: self.wizard.execution_mode,
+                        session_id: self.wizard.session_id.clone(),
                         skip_permissions: self.wizard.skip_permissions,
+                        env: self.active_env_overrides(),
                     };
 
                     // Store the launch config and quit TUI
@@ -685,10 +1123,30 @@ impl Model {
     fn execute_cleanup(&mut self, branches: &[String]) {
         let mut deleted = 0;
         let mut errors = Vec::new();
+        let manager = WorktreeManager::new(&self.repo_root).ok();
 
         for branch_name in branches {
+            let branch_item = self
+                .branch_list
+                .branches
+                .iter()
+                .find(|b| &b.name == branch_name);
+
+            if let (Some(manager), Some(item)) = (manager.as_ref(), branch_item) {
+                if let Some(path) = item.worktree_path.as_deref() {
+                    let force_remove = item.worktree_status == WorktreeStatus::Inaccessible
+                        || item.has_changes
+                        || WorktreeManager::is_protected(&item.name);
+                    let path_buf = PathBuf::from(path);
+                    if let Err(e) = manager.remove(&path_buf, force_remove) {
+                        errors.push(format!("{}: {}", branch_name, e));
+                        continue;
+                    }
+                }
+            }
+
             // Try to delete the branch
-            match Branch::delete(&self.repo_root, branch_name, false) {
+            match Branch::delete(&self.repo_root, branch_name, true) {
                 Ok(_) => {
                     deleted += 1;
                     // Remove from selection
@@ -727,15 +1185,24 @@ impl Model {
             ])
             .split(frame.area());
 
+        let base_screen = if matches!(self.screen, Screen::Confirm) {
+            self.screen_stack
+                .last()
+                .cloned()
+                .unwrap_or(Screen::BranchList)
+        } else {
+            self.screen.clone()
+        };
+
         // Header (for branch list screen, render boxed header)
-        if matches!(self.screen, Screen::BranchList) {
+        if matches!(base_screen, Screen::BranchList) {
             self.view_boxed_header(frame, chunks[0]);
         } else {
             self.view_header(frame, chunks[0]);
         }
 
         // Content
-        match self.screen {
+        match base_screen {
             Screen::BranchList => render_branch_list(
                 &self.branch_list,
                 frame,
@@ -748,10 +1215,14 @@ impl Model {
             Screen::Settings => render_settings(&self.settings, frame, chunks[1]),
             Screen::Logs => render_logs(&self.logs, frame, chunks[1]),
             Screen::Help => render_help(&self.help, frame, chunks[1]),
-            Screen::Confirm => render_confirm(&self.confirm, frame, chunks[1]),
             Screen::Error => render_error(&self.error, frame, chunks[1]),
             Screen::Profiles => render_profiles(&self.profiles, frame, chunks[1]),
             Screen::Environment => render_environment(&self.environment, frame, chunks[1]),
+            Screen::Confirm => {}
+        }
+
+        if matches!(self.screen, Screen::Confirm) {
+            render_confirm(&self.confirm, frame, chunks[1]);
         }
 
         // Footer
@@ -771,7 +1242,7 @@ impl Model {
             .branch_list
             .active_profile
             .as_deref()
-            .unwrap_or("default");
+            .unwrap_or("(none)");
         let working_dir = self
             .branch_list
             .working_directory
@@ -800,12 +1271,13 @@ impl Model {
                 Constraint::Length(1), // Working Directory
                 Constraint::Length(1), // Profile
                 Constraint::Length(1), // Filter
-                Constraint::Length(1), // Stats
+                Constraint::Length(1), // Mode
             ])
             .split(inner);
 
         // Line 1: Working Directory
         let working_dir_line = Line::from(vec![
+            Span::raw(" "),
             Span::styled("Working Directory: ", Style::default().fg(Color::DarkGray)),
             Span::raw(working_dir),
         ]);
@@ -813,6 +1285,7 @@ impl Model {
 
         // Line 2: Profile
         let profile_line = Line::from(vec![
+            Span::raw(" "),
             Span::styled("Profile(p): ", Style::default().fg(Color::DarkGray)),
             Span::raw(profile),
         ]);
@@ -821,10 +1294,10 @@ impl Model {
         // Line 3: Filter
         let filtered = self.branch_list.filtered_branches();
         let total = self.branch_list.branches.len();
-        let mut filter_spans = vec![Span::styled(
-            "Filter(f): ",
-            Style::default().fg(Color::DarkGray),
-        )];
+        let mut filter_spans = vec![
+            Span::raw(" "),
+            Span::styled("Filter(f): ", Style::default().fg(Color::DarkGray)),
+        ];
         if self.branch_list.filter_mode {
             if self.branch_list.filter.is_empty() {
                 filter_spans.push(Span::styled(
@@ -853,10 +1326,9 @@ impl Model {
         }
         frame.render_widget(Paragraph::new(Line::from(filter_spans)), inner_chunks[2]);
 
-        // Line 4: Stats
-        let stats = &self.branch_list.stats;
-        let relative_time = self.branch_list.format_relative_time();
-        let mut stats_spans = vec![
+        // Line 4: Mode
+        let mode_spans = vec![
+            Span::raw(" "),
             Span::styled("Mode(tab): ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 self.branch_list.view_mode.label(),
@@ -864,51 +1336,8 @@ impl Model {
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  ", Style::default()),
-            Span::styled("Local: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                stats.local_count.to_string(),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  ", Style::default()),
-            Span::styled("Remote: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                stats.remote_count.to_string(),
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  ", Style::default()),
-            Span::styled("Worktrees: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                stats.worktree_count.to_string(),
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  ", Style::default()),
-            Span::styled("Changes: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                stats.changes_count.to_string(),
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
-            ),
         ];
-        if !relative_time.is_empty() {
-            stats_spans.push(Span::styled("  ", Style::default()));
-            stats_spans.push(Span::styled(
-                "Updated: ",
-                Style::default().fg(Color::DarkGray),
-            ));
-            stats_spans.push(Span::styled(
-                relative_time,
-                Style::default().fg(Color::DarkGray),
-            ));
-        }
-        frame.render_widget(Paragraph::new(Line::from(stats_spans)), inner_chunks[3]);
+        frame.render_widget(Paragraph::new(Line::from(mode_spans)), inner_chunks[3]);
     }
 
     fn view_header(&self, frame: &mut Frame, area: Rect) {
@@ -937,10 +1366,10 @@ impl Model {
         let keybinds = match self.screen {
             Screen::BranchList => {
                 if self.branch_list.filter_mode {
-                    "[Esc] Exit filter | [Enter] Apply | Type to search"
+                    "[Esc] Exit filter | Type to search"
                 } else {
-                    // FR-004: Enter: Select, n: New, r: Refresh, c: Cleanup, x: Repair, l: Logs
-                    "[Enter] Select | [n] New | [r] Refresh | [c] Cleanup | [x] Repair | [l] Logs"
+                    // FR-004: r: Refresh, c: Cleanup, x: Repair, l: Logs
+                    "[r] Refresh | [c] Cleanup | [x] Repair | [l] Logs"
                 }
             }
             Screen::WorktreeCreate => "[Enter] Next | [Esc] Back",
@@ -980,6 +1409,14 @@ impl Model {
 /// Run the TUI application
 /// Returns agent launch configuration if wizard completed, None otherwise
 pub fn run() -> Result<Option<AgentLaunchConfig>, GwtError> {
+    run_with_context(None)
+}
+
+/// Run the TUI application with optional entry context
+/// Returns agent launch configuration if wizard completed, None otherwise
+pub fn run_with_context(
+    context: Option<TuiEntryContext>,
+) -> Result<Option<AgentLaunchConfig>, GwtError> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -988,7 +1425,7 @@ pub fn run() -> Result<Option<AgentLaunchConfig>, GwtError> {
     let mut terminal = Terminal::new(backend)?;
 
     // Create app state
-    let mut model = Model::new();
+    let mut model = Model::new_with_context(context);
 
     // Event loop
     let tick_rate = Duration::from_millis(250);
@@ -1005,11 +1442,12 @@ pub fn run() -> Result<Option<AgentLaunchConfig>, GwtError> {
 
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
+                let enter_is_press = key.kind == KeyEventKind::Press;
                 // Wizard has priority when visible
                 let msg = if model.wizard.visible {
                     match key.code {
                         KeyCode::Esc => Some(Message::WizardBack),
-                        KeyCode::Enter => Some(Message::WizardConfirm),
+                        KeyCode::Enter if enter_is_press => Some(Message::WizardConfirm),
                         KeyCode::Up => Some(Message::WizardPrev),
                         KeyCode::Down => Some(Message::WizardNext),
                         KeyCode::Backspace => {
@@ -1073,15 +1511,18 @@ pub fn run() -> Result<Option<AgentLaunchConfig>, GwtError> {
                             }
                         }
                         (KeyCode::Char('n'), KeyModifiers::NONE) => {
-                            // In filter mode, 'n' goes to filter input
-                            if matches!(model.screen, Screen::BranchList)
-                                && !model.branch_list.filter_mode
-                            {
-                                // Open wizard for new branch (FR-008)
-                                Some(Message::OpenWizardNewBranch)
+                            if matches!(model.screen, Screen::BranchList) {
+                                if model.branch_list.filter_mode {
+                                    Some(Message::Char('n'))
+                                } else {
+                                    None
+                                }
                             } else if matches!(model.screen, Screen::Profiles) {
                                 // Create new profile
                                 model.profiles.enter_create_mode();
+                                None
+                            } else if matches!(model.screen, Screen::Environment) {
+                                model.environment.start_new();
                                 None
                             } else {
                                 Some(Message::Char('n'))
@@ -1133,9 +1574,10 @@ pub fn run() -> Result<Option<AgentLaunchConfig>, GwtError> {
                                                 .iter()
                                                 .find(|b| &b.name == *name)
                                                 .map(|b| {
-                                                    // Exclude remote branches and current branch
+                                                    // Exclude remote branches, current branch, and no-worktree
                                                     b.branch_type == BranchType::Local
                                                         && !b.is_current
+                                                        && b.has_worktree
                                                 })
                                                 .unwrap_or(false)
                                         })
@@ -1145,7 +1587,7 @@ pub fn run() -> Result<Option<AgentLaunchConfig>, GwtError> {
                                     if cleanup_branches.is_empty() {
                                         let excluded = model.branch_list.selected_branches.len();
                                         model.status_message = Some(format!(
-                                            "{} branch(es) excluded (remote or current).",
+                                            "{} branch(es) excluded (remote, current, or no worktree).",
                                             excluded
                                         ));
                                         model.status_message_time = Some(Instant::now());
@@ -1161,6 +1603,39 @@ pub fn run() -> Result<Option<AgentLaunchConfig>, GwtError> {
                                 }
                             } else {
                                 Some(Message::Char('c'))
+                            }
+                        }
+                        (KeyCode::Char('d'), KeyModifiers::NONE) => {
+                            if matches!(model.screen, Screen::Profiles) {
+                                model.delete_selected_profile();
+                                None
+                            } else if matches!(model.screen, Screen::Environment) {
+                                model.delete_selected_env();
+                                None
+                            } else {
+                                Some(Message::Char('d'))
+                            }
+                        }
+                        (KeyCode::Char('e'), KeyModifiers::NONE) => {
+                            if matches!(model.screen, Screen::Profiles) {
+                                if let Some(item) = model.profiles.selected_profile() {
+                                    let name = item.name.clone();
+                                    model.open_environment_editor(&name);
+                                }
+                                None
+                            } else if matches!(model.screen, Screen::Environment) {
+                                model.environment.start_edit();
+                                None
+                            } else {
+                                Some(Message::Char('e'))
+                            }
+                        }
+                        (KeyCode::Char('v'), KeyModifiers::NONE) => {
+                            if matches!(model.screen, Screen::Environment) {
+                                model.environment.toggle_visibility();
+                                None
+                            } else {
+                                Some(Message::Char('v'))
                             }
                         }
                         (KeyCode::Char('x'), KeyModifiers::NONE) => {
@@ -1232,7 +1707,7 @@ pub fn run() -> Result<Option<AgentLaunchConfig>, GwtError> {
                         (KeyCode::PageDown, _) => Some(Message::PageDown),
                         (KeyCode::Home, _) => Some(Message::GoHome),
                         (KeyCode::End, _) => Some(Message::GoEnd),
-                        (KeyCode::Enter, _) => Some(Message::Enter),
+                        (KeyCode::Enter, _) if enter_is_press => Some(Message::Enter),
                         (KeyCode::Backspace, _) => Some(Message::Backspace),
                         (KeyCode::Left, _) => Some(Message::CursorLeft),
                         (KeyCode::Right, _) => Some(Message::CursorRight),
@@ -1281,4 +1756,43 @@ pub fn run() -> Result<Option<AgentLaunchConfig>, GwtError> {
     terminal.show_cursor()?;
 
     Ok(pending_launch)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::screens::wizard::WizardStep;
+    use crate::tui::screens::{BranchItem, BranchListState};
+    use gwt_core::git::Branch;
+
+    #[test]
+    fn test_version_select_single_enter_advances() {
+        let mut model = Model::new_with_context(None);
+        model.wizard.visible = true;
+        model.wizard.step = WizardStep::ModelSelect;
+        model.wizard.agent = CodingAgent::ClaudeCode;
+        model.wizard.agent_index = 0;
+        model.wizard.versions_fetched = true;
+
+        model.update(Message::WizardConfirm);
+        assert_eq!(model.wizard.step, WizardStep::VersionSelect);
+
+        model.update(Message::WizardConfirm);
+        assert_eq!(model.wizard.step, WizardStep::ExecutionMode);
+    }
+
+    #[test]
+    fn test_space_ignores_branch_without_worktree() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+        let branch = Branch::new("feature/no-worktree", "deadbeef");
+        let item = BranchItem::from_branch(&branch, &[]);
+        model.branch_list = BranchListState::new().with_branches(vec![item]);
+
+        model.update(Message::Space);
+
+        assert!(model.branch_list.selected_branches.is_empty());
+        assert!(model.pending_unsafe_selection.is_none());
+        assert!(matches!(model.screen, Screen::BranchList));
+    }
 }

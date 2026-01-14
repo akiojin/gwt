@@ -127,9 +127,9 @@ impl ProfilesState {
         }
         if !name
             .chars()
-            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
         {
-            return Err("Profile name can only contain letters, numbers, hyphens, and underscores");
+            return Err("Profile name can only contain lowercase letters, numbers, and hyphens");
         }
         Ok(name.to_string())
     }
@@ -327,7 +327,7 @@ mod tests {
         state.new_name = "".to_string();
         assert!(state.validate_new_name().is_err());
 
-        state.new_name = "valid-name_123".to_string();
+        state.new_name = "valid-name-123".to_string();
         assert!(state.validate_new_name().is_ok());
 
         state.new_name = "invalid name!".to_string();

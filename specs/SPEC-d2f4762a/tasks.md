@@ -3,6 +3,86 @@
 **仕様ID**: `SPEC-d2f4762a`
 **ポリシー**: CLAUDE.md の TDD ルールに基づき、必ず RED→GREEN→リグレッションチェックの順に進める。
 
+## 追加作業: Rust版キーバインド整合 (2026-01-13)
+
+- [x] **T9901** [P] [US0] `specs/SPEC-d2f4762a/spec.md` から `n` キー記述を削除し、ウィザード手順を整理
+- [x] **T9902** [US0] `crates/gwt-cli/src/tui/app.rs` などで BranchList の `n` ショートカットを除外し、フッター/ヘルプ表示を更新
+
+## 追加作業: ブランチ一覧の統計/最終更新表示削除 (2026-01-13)
+
+- [x] **T9903** [P] [共通] `specs/SPEC-d2f4762a/spec.md` から統計情報/最終更新時刻の表示要件とシナリオを削除し、Mode(tab)行/ツール表示の記述を更新
+- [x] **T9904** [P] [共通] `specs/SPEC-d2f4762a/plan.md` にMode(tab)行の表示方針（統計/Updated非表示）を追記
+- [x] **T9905** [P] [共通] `specs/SPEC-f47db390/spec.md` のツール表示フォーマットを`ToolName@X.Y.Z`形式へ更新
+- [x] **T9906** [Test] `crates/gwt-core/src/config/ts_session.rs` のツール表示フォーマットテストを更新（時刻表示の削除）
+- [x] **T9907** [実装] `crates/gwt-cli/src/tui/app.rs` と `crates/gwt-cli/src/tui/screens/branch_list.rs` から統計/Updated表示を削除
+- [x] **T9908** [実装] `crates/gwt-core/src/config/ts_session.rs` のツール表示フォーマットから時刻を削除し、関連コメントを更新
+
+## 追加作業: ブランチ一覧フッターのEnter表記削除 (2026-01-13)
+
+- [x] **T9909** [P] [共通] `specs/SPEC-d2f4762a/spec.md` のフッター要件から Enter 表記を削除
+- [x] **T9910** [P] [共通] `specs/SPEC-d2f4762a/plan.md` にフッターのEnter表記削除を追記
+- [x] **T9911** [実装] ブランチ一覧のフッター表示から Enter 表記を削除（`crates/gwt-cli/src/tui/app.rs`, `crates/gwt-cli/src/tui/screens/branch_list.rs`）
+
+## 追加作業: 安全判定の即時確定と未マージ判定の高速化 (2026-01-13)
+
+- [x] **T9912** [P] [共通] `specs/SPEC-d2f4762a/spec.md` に未コミット/未プッシュの即時確定と未マージ判定の要件を追記
+- [x] **T9913** [P] [共通] `specs/SPEC-d2f4762a/plan.md` に安全判定の即時確定方針を追記
+- [x] **T9914** [Test] `crates/gwt-core/src/git/branch.rs` にベースブランチ差分判定のテストを追加
+- [x] **T9915** [実装] `crates/gwt-core/src/git/branch.rs` にベースブランチとの差分取得ヘルパーを追加
+- [x] **T9916** [実装] `crates/gwt-cli/src/tui/app.rs` で未コミット/未プッシュの即時判定と未マージ判定を反映
+
+## 追加作業: PRタイトル取得の非ブロッキング化 (2026-01-13)
+
+- [x] **T9917** [P] [共通] `specs/SPEC-d2f4762a/spec.md` にPRタイトル取得の非ブロッキング要件を追記
+- [x] **T9918** [P] [共通] `specs/SPEC-d2f4762a/plan.md` にPRタイトル取得をバックグラウンドで行う方針を追記
+- [x] **T9919** [Test] `crates/gwt-cli/src/tui/screens/branch_list.rs` にPRタイトル更新でフィルタが再計算されるテストを追加
+- [x] **T9920** [実装] `crates/gwt-cli/src/tui/app.rs` でPRタイトル取得をバックグラウンド実行し、到着後に一覧へ反映
+
+## 追加作業: 安全判定の非ブロッキング化と確認ダイアログのポップアップ表示 (2026-01-14)
+
+- [x] **T9921** [P] [共通] `specs/SPEC-d2f4762a/spec.md` にクリーンアップ確認/警告ダイアログのポップアップ表示要件を追記
+- [x] **T9922** [P] [共通] `specs/SPEC-d2f4762a/plan.md` にポップアップ表示方針を追記
+- [x] **T9923** [Test] `crates/gwt-core/src/git/branch.rs` に`list_basic`の動作テストを追加
+- [x] **T9924** [Test] `crates/gwt-cli/src/tui/screens/branch_list.rs` に安全判定更新の反映テストを追加
+- [x] **T9925** [実装] `crates/gwt-core/src/git/branch.rs` に軽量ブランチ一覧取得とCLI側の非ブロッキング安全判定を実装
+- [x] **T9926** [実装] `crates/gwt-cli/src/tui/app.rs` の確認ダイアログをブランチ一覧上のポップアップとして描画
+
+## 追加作業: クリーンアップ中の画面更新なしを明記 (2026-01-14)
+
+- [x] **T9927** [P] [共通] `specs/SPEC-d2f4762a/spec.md` にクリーンアップ実行中の画面更新抑止を追記
+- [x] **T9928** [P] [共通] `specs/SPEC-d2f4762a/plan.md` にクリーンアップ中の画面更新抑止方針を追記
+
+## 追加作業: 安全判定キャッシュの統一 (2026-01-14)
+
+- [x] **T9929** [P] [共通] `specs/SPEC-d2f4762a/spec.md` に安全状態の統一要件を追記
+- [x] **T9930** [P] [共通] `specs/SPEC-d2f4762a/plan.md` に安全状態キャッシュ統一方針を追記
+- [x] **T9931** [Test] `crates/gwt-cli/src/tui/screens/branch_list.rs` に安全状態更新のテストを追加
+- [x] **T9932** [実装] `crates/gwt-cli/src/tui/screens/branch_list.rs` と `crates/gwt-cli/src/tui/app.rs` で安全状態キャッシュを追加し、表示と警告判定を統一
+
+## 追加作業: バージョン選択のEnter二重入力解消 (2026-01-14)
+
+- [x] **T9933** [US10] `crates/gwt-cli/src/tui/app.rs` にバージョン選択でEnterを1回押せば次ステップへ進むことを検証するテストを追加
+- [x] **T9934** [US10] バージョン選択で二重Enterが不要になるようEnter処理のガードを見直す（`crates/gwt-cli/src/tui/app.rs`, `crates/gwt-cli/src/tui/screens/wizard.rs`）
+- [x] **T9935** `cargo test -p gwt-cli` と `cargo build --release` を実行し、失敗がないことを確認する
+
+## 追加作業: ブランチ一覧の枠線表示 (2026-01-14)
+
+- [x] **T9936** [US0] `crates/gwt-cli/src/tui/screens/branch_list.rs` にブランチ一覧の枠線表示を検証するテストを追加
+- [x] **T9937** [US0] ブランチ一覧の描画を枠線付きに変更する（`crates/gwt-cli/src/tui/screens/branch_list.rs`）
+- [x] **T9938** `cargo test -p gwt-cli` と `cargo build --release` を実行し、失敗がないことを確認する
+
+## 追加作業: ツール表示名の短縮 (2026-01-14)
+
+- [x] **T9939** [US0] `crates/gwt-core/src/config/ts_session.rs` と `crates/gwt-core/src/config/session.rs` のツール表示名が短縮されることを検証するテストを追加
+- [x] **T9940** [US0] ツール表示名を `Codex` / `Claude` / `Gemini` / `OpenCode` に短縮する（`crates/gwt-core/src/config/ts_session.rs`, `crates/gwt-core/src/config/session.rs`）
+- [x] **T9941** `cargo test -p gwt-core` と `cargo build --release` を実行し、失敗がないことを確認する
+
+## 追加作業: Worktreeのないブランチを選択不可にする (2026-01-14)
+
+- [x] **T9942** [US4] `crates/gwt-cli/src/tui/app.rs` にWorktreeのないブランチを`space`で選択できないことを検証するテストを追加
+- [x] **T9943** [US4] Worktreeのないブランチは選択できず、クリーンアップ対象にも含めないようにする（`crates/gwt-cli/src/tui/app.rs`）
+- [x] **T9944** `cargo test -p gwt-cli` と `cargo build --release` を実行し、失敗がないことを確認する
+
 ## フェーズ0: ブランチ一覧アイコンのASCII再整理 (優先度: P1)
 
 **ストーリー**: ブランチ一覧の選択/Worktree/安全アイコンをASCII表記へ整理し、アイコン間にスペースを入れてカーソル記号は表示しない。
@@ -120,8 +200,6 @@
 - [x] **T502** [US9] `src/cli/ui/__tests__/solid/components/QuickStartStep.test.tsx` にヘルプテキスト表示テストを追加
 
 ## 追加作業ToDo (2026-01-09)
-- [x] **T950** [Test] 最終アクティビティ/ツール表示の時刻がローカル時刻で表示されることを検証 (`src/cli/ui/utils/__tests__/branchFormatter.test.ts`, `src/cli/ui/__tests__/utils/branchFormatter.test.ts`)
-- [x] **T951** [実装] ブランチ一覧の時刻表示をローカル時刻へ切り替え (`src/cli/ui/utils/branchFormatter.ts`, `src/cli/ui/screens/solid/BranchListScreen.tsx`)
 - [x] **T503** [US9] `src/cli/ui/__tests__/solid/components/QuickStartStep.test.tsx` に「Resume with previous settings」選択時の動作テストを追加
 - [x] **T504** [US9] `src/cli/ui/__tests__/solid/components/QuickStartStep.test.tsx` に「Start new with previous settings」選択時の動作テストを追加
 - [x] **T505** [US9] `src/cli/ui/__tests__/solid/components/QuickStartStep.test.tsx` に「Choose different settings...」選択時の動作テストを追加
@@ -338,3 +416,69 @@
 - [x] **T824** [US4] `src/cli/ui/screens/solid/BranchListScreen.tsx` の安全時`o`表示を追加
 - [x] **T825** [US4] `src/cli/ui/App.solid.tsx` と `src/worktree.ts` に安全判定スピナーのブランチ単位更新を実装
 - [x] **T828** [US4] `src/cli/ui/screens/solid/BranchListScreen.tsx` の安全/Worktree明るい緑表示を更新
+
+## フェーズ11: ユーザーストーリー11 - 大量ブランチでも滑らかな操作 (優先度: P1)
+
+**ストーリー**: 1000件以上のブランチでも、表示・スクロール・入力が滑らかに行えるようにし、再計算はフィルター/モード変更時のみに限定する。
+
+**価値**: 大規模リポジトリでもUIが止まらず、日常運用のストレスを解消する。
+
+### 仕様更新
+
+- [x] **T1101** [P] [共通] `specs/SPEC-d2f4762a/spec.md` に大量ブランチ対応の要件とシナリオを追記
+- [x] **T1102** [P] [共通] `specs/SPEC-d2f4762a/plan.md` に大量ブランチ対応の方針を追記
+
+### テスト（TDD）
+
+- [x] **T1103** [US11] `crates/gwt-cli/src/tui/screens/branch_list.rs` にフィルター/モード変更時のみ再計算されることを確認するテストを追加
+- [x] **T1104** [US11] `crates/gwt-cli/src/tui/screens/branch_list.rs` に可視範囲描画が維持されることを確認するテストを追加
+
+### 実装
+
+- [x] **T1105** [US11] `crates/gwt-cli/src/tui/screens/branch_list.rs` にフィルター/モード変更時のみの再計算キャッシュを実装
+- [x] **T1106** [US11] `crates/gwt-cli/src/tui/screens/branch_list.rs` の描画経路で可視範囲のみ描画する処理を明示化し、ローディング表示の維持を実装
+
+## 追加作業: ブランチ選択後のアクション選択 (2026-01-14)
+
+### 仕様更新
+
+- [x] **T1201** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` にブランチアクション選択フローを追記
+
+### テスト（TDD）
+
+- [x] **T1202** [US8] `crates/gwt-cli/src/tui/screens/wizard.rs` にブランチアクション選択の遷移テストを追加
+
+### 実装
+
+- [x] **T1203** [US8] `crates/gwt-cli/src/tui/screens/wizard.rs` にブランチアクション選択ステップを追加し、Choose different settings... から分岐させる
+- [x] **T1204** [US8] `crates/gwt-cli/src/tui/app.rs` で「選択ブランチをベースに新規ブランチ作成」を反映する
+
+## 追加作業: ウィザード幅の自動調整と省略表示 (2026-01-14)
+
+### 仕様更新
+
+- [x] **T1210** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` にウィザード幅の自動調整と省略表示を追記
+
+### テスト（TDD）
+
+- [x] **T1211** [US8] `crates/gwt-cli/src/tui/screens/wizard.rs` に省略処理と幅計算のユニットテストを追加
+
+### 実装
+
+- [x] **T1212** [US8] `crates/gwt-cli/src/tui/screens/wizard.rs` にウィザード幅の自動調整を実装
+- [x] **T1213** [US8] `crates/gwt-cli/src/tui/screens/wizard.rs` にラベル短縮と省略処理を実装
+
+## 追加作業: ポップアップ左右余白の追加 (2026-01-14)
+
+### 仕様更新
+
+- [x] **T1220** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` にポップアップ左右余白の要件を追記
+
+### テスト（TDD）
+
+- [x] **T1221** [US8] `crates/gwt-cli/src/tui/screens/wizard.rs` に左右余白の幅計算テストを追加
+
+### 実装
+
+- [x] **T1222** [US8] `crates/gwt-cli/src/tui/screens/wizard.rs` に左右余白を追加
+- [x] **T1223** [US8] `crates/gwt-cli/src/tui/screens/confirm.rs` `crates/gwt-cli/src/tui/screens/error.rs` `crates/gwt-cli/src/tui/screens/help.rs` に左右余白を追加
