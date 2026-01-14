@@ -467,3 +467,18 @@
 
 - [x] **T1212** [US8] `crates/gwt-cli/src/tui/screens/wizard.rs` にウィザード幅の自動調整を実装
 - [x] **T1213** [US8] `crates/gwt-cli/src/tui/screens/wizard.rs` にラベル短縮と省略処理を実装
+
+## 追加作業: ポップアップ左右余白の追加 (2026-01-14)
+
+### 仕様更新
+
+- [x] **T1220** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` にポップアップ左右余白の要件を追記
+
+### テスト（TDD）
+
+- [x] **T1221** [US8] `crates/gwt-cli/src/tui/screens/wizard.rs` に左右余白の幅計算テストを追加
+
+### 実装
+
+- [x] **T1222** [US8] `crates/gwt-cli/src/tui/screens/wizard.rs` に左右余白を追加
+- [x] **T1223** [US8] `crates/gwt-cli/src/tui/screens/confirm.rs` `crates/gwt-cli/src/tui/screens/error.rs` `crates/gwt-cli/src/tui/screens/help.rs` に左右余白を追加

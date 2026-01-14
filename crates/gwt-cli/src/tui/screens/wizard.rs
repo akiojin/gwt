@@ -1222,10 +1222,11 @@ pub fn render_wizard(state: &WizardState, frame: &mut Frame, area: Rect) {
     frame.render_widget(popup_block, popup_area);
 
     // Render step content
+    const H_PADDING: u16 = 2;
     let content_area = Rect::new(
-        inner_area.x + 1,
+        inner_area.x + H_PADDING,
         inner_area.y + 1,
-        inner_area.width.saturating_sub(2),
+        inner_area.width.saturating_sub(H_PADDING.saturating_mul(2)),
         inner_area.height.saturating_sub(4),
     );
 
@@ -1301,10 +1302,13 @@ fn truncate_with_ellipsis(text: &str, max_width: usize) -> String {
 }
 
 fn wizard_popup_width(state: &WizardState, max_width: u16) -> u16 {
+    const H_PADDING: u16 = 2;
     let min_width = 40u16.min(max_width);
     let content_width = wizard_required_content_width(state);
     let content_width = content_width.min(u16::MAX as usize) as u16;
-    let desired = content_width.saturating_add(4);
+    let desired = content_width
+        .saturating_add(2) // borders
+        .saturating_add(H_PADDING.saturating_mul(2));
     desired.max(min_width).min(max_width)
 }
 
@@ -2025,6 +2029,18 @@ mod tests {
         let width = wizard_popup_width(&state, 120);
         assert!(width >= 40);
         assert!(width <= 120);
+    }
+
+    #[test]
+    fn test_wizard_popup_width_includes_padding() {
+        let mut state = WizardState::new();
+        state.open_for_branch("feature/test", vec![]);
+        state.step = WizardStep::BranchAction;
+
+        let content = wizard_required_content_width(&state) as u16;
+        let expected = (content + 6).max(40);
+        let width = wizard_popup_width(&state, 200);
+        assert_eq!(width, expected);
     }
 
     #[test]
