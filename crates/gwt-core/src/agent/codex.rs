@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::process::Command;
 
-const DEFAULT_CODEX_MODEL: &str = "gpt-5.1-codex";
+const DEFAULT_CODEX_MODEL: &str = "gpt-5.2-codex";
 const DEFAULT_CODEX_REASONING: &str = "high";
 const CODEX_SKILLS_FLAG_DEPRECATED_FROM: &str = "0.80.0";
 const CODEX_SKIP_FLAG_DEPRECATED_FROM: &str = "0.80.0";
@@ -357,7 +357,7 @@ mod tests {
         let args = codex_default_args(None, None, None, false);
         assert!(args.contains(&"--enable".to_string()));
         assert!(args.contains(&"web_search_request".to_string()));
-        assert!(args.contains(&"--model=gpt-5.1-codex".to_string()));
+        assert!(args.contains(&"--model=gpt-5.2-codex".to_string()));
         assert!(args.contains(&"model_reasoning_effort=high".to_string()));
     }
 

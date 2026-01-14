@@ -1314,7 +1314,7 @@ mod tests {
         let agent_args = vec![
             "resume".to_string(),
             "--last".to_string(),
-            "--model=gpt-5.1-codex".to_string(),
+            "--model=gpt-5.2-codex".to_string(),
             "-c".to_string(),
             "model_reasoning_effort=high".to_string(),
         ];
@@ -1329,7 +1329,7 @@ mod tests {
         );
         assert!(lines.contains(&"Launching Codex CLI...".to_string()));
         assert!(lines.contains(&"Working directory: /tmp/worktree".to_string()));
-        assert!(lines.contains(&"Model: gpt-5.1-codex".to_string()));
+        assert!(lines.contains(&"Model: gpt-5.2-codex".to_string()));
         assert!(lines.contains(&"Reasoning: high".to_string()));
         assert!(lines.contains(&"Mode: Continue session".to_string()));
         assert!(lines.contains(&"Skip permissions: enabled".to_string()));
@@ -1337,7 +1337,7 @@ mod tests {
         assert!(lines.contains(&"Using bunx @openai/codex@latest".to_string()));
         assert!(lines
             .iter()
-            .any(|line| line.contains("Args: resume --last --model=gpt-5.1-codex")));
+            .any(|line| line.contains("Args: resume --last --model=gpt-5.2-codex")));
     }
 
     #[test]

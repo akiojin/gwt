@@ -2,7 +2,7 @@
 
 **仕様ID**: `SPEC-96e694b4`
 **作成日**: 2025-12-18
-**ステータス**: 実装済み
+**ステータス**: 改修中
 **入力**: ユーザー説明: "gpt-5.2-codexがリリースされましたので、対応して下さい。これもExtra Highに対応しています。"
 
 ## ユーザーシナリオとテスト *(必須)*
@@ -106,5 +106,5 @@
 ## 参考資料
 
 - [OpenAI Codex CLI ドキュメント](https://developers.openai.com/codex/cli/)
-- [既存実装: src/codex.ts](../../src/codex.ts)
-- [既存実装: src/cli/ui/utils/modelOptions.ts](../../src/cli/ui/utils/modelOptions.ts)
+- [既存実装: crates/gwt-core/src/agent/codex.rs](../../crates/gwt-core/src/agent/codex.rs)
+- [既存実装: crates/gwt-cli/src/tui/screens/wizard.rs](../../crates/gwt-cli/src/tui/screens/wizard.rs)

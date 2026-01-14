@@ -5,19 +5,16 @@
 
 ## フェーズ1: RED
 
-- [x] **T3001** `src/cli/ui/utils/modelOptions.test.ts` と `src/cli/ui/__tests__/components/ModelSelectorScreen.initial.test.tsx` の期待値を gpt-5.2-codex に更新する。
-- [x] **T3002** Codex の既定モデルを参照しているテストデータを gpt-5.2-codex に更新する（`src/cli/ui/__tests__/components/screens/BranchQuickStartScreen.test.tsx`、`src/cli/ui/__tests__/utils/branchFormatter.test.ts`、`tests/unit/index.*.test.ts`）。
-- [x] **T3003** `tests/unit/codex.test.ts` にデフォルトモデルの期待値を追加・更新する。
-- [x] **T3101** `src/cli/ui/utils/modelOptions.test.ts` と `src/cli/ui/__tests__/components/ModelSelectorScreen.initial.test.tsx` のモデル一覧を4件に限定する期待値へ更新する。
+- [x] **T3201** [US1] `crates/gwt-cli/src/tui/screens/wizard.rs` に Codex モデル一覧のテストを追加し、非defaultのモデルIDが `gpt-5.2-codex`, `gpt-5.1-codex-max`, `gpt-5.1-codex-mini`, `gpt-5.2` の順で4件であることと、`gpt-5.2-codex` が Extra high を含むことを検証する。
+- [x] **T3202** [US2] `crates/gwt-core/src/agent/codex.rs` のデフォルトモデルテストを `gpt-5.2-codex` 期待に更新する。
+- [x] **T3203** [US2] `crates/gwt-cli/src/main.rs` の起動ログテストを `gpt-5.2-codex` 期待に更新する。
 
 ## フェーズ2: GREEN
 
-- [x] **T3004** `src/cli/ui/utils/modelOptions.ts` に gpt-5.2-codex を追加し、Extra high を選択可能にする。
-- [x] **T3005** `src/codex.ts` と `src/shared/aiToolConstants.ts` のデフォルトモデルを gpt-5.2-codex に更新する。
-- [x] **T3102** `src/cli/ui/utils/modelOptions.ts` から gpt-5.1-codex と gpt-5.1 を除外し、4件の並び順を調整する。
+- [x] **T3204** [US1] `crates/gwt-cli/src/tui/screens/wizard.rs` の Codex モデル一覧に `gpt-5.2-codex` を追加し、並び順を仕様に合わせて調整する。
+- [x] **T3205** [US2] `crates/gwt-core/src/agent/codex.rs` のデフォルトモデルを `gpt-5.2-codex` に更新する。
 
 ## フェーズ3: リグレッションチェック
 
-- [x] **T3006** 関連ユニットテストを実行し、モデル更新に起因する失敗がないことを確認する。
-- [x] **T3007** `.specify/scripts/bash/update-specs-index.sh` を実行して仕様一覧を更新する。
-- [x] **T3103** 4件限定のモデル一覧に関するユニットテストを実行し、失敗がないことを確認する。
+- [x] **T3206** `cargo test -p gwt-cli -p gwt-core` を実行し、モデル更新に起因する失敗がないことを確認する。
+- [x] **T3207** `cargo build --release` を実行し、ビルドが成功することを確認する。
