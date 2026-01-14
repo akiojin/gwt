@@ -157,7 +157,7 @@ jobs:
 
   upload-release:
     name: Upload to GitHub Release
-    needs: [create-tag, build-binaries, publish-crates]
+    needs: [create-tag, build-binaries]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -188,3 +188,23 @@ jobs:
         run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  sync-develop:
+    name: Sync main to develop
+    needs: [create-tag, publish-npm]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Sync main to develop
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin develop
+          git checkout develop
+          git merge main -m "chore: sync main to develop after ${{ needs.create-tag.outputs.tag_name }} release"
+          git push origin develop
