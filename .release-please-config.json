@@ -3,9 +3,26 @@
   "default-branch": "main",
   "packages": {
     ".": {
-      "release-type": "cargo-workspace",
+      "release-type": "node",
       "bump-minor-pre-major": true,
-      "bump-patch-for-minor-pre-major": true
+      "bump-patch-for-minor-pre-major": true,
+      "extra-files": [
+        {
+          "type": "toml",
+          "path": "Cargo.toml",
+          "jsonpath": "$.workspace.package.version"
+        },
+        {
+          "type": "toml",
+          "path": "crates/gwt-core/Cargo.toml",
+          "jsonpath": "$.package.version"
+        },
+        {
+          "type": "toml",
+          "path": "crates/gwt-cli/Cargo.toml",
+          "jsonpath": "$.package.version"
+        }
+      ]
     }
   },
   "pull-request-title-pattern": "chore(release): ${version}"
