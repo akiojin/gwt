@@ -39,7 +39,8 @@ impl ToolSessionEntry {
     /// Returns: "ToolLabel@version"
     pub fn format_tool_usage(&self) -> String {
         let version = self.tool_version.as_deref().unwrap_or("latest");
-        format!("{}@{}", self.tool_label, version)
+        let label = short_tool_label(Some(&self.tool_id), &self.tool_label);
+        format!("{}@{}", label, version)
     }
 
     /// Get timestamp as DateTime
@@ -48,6 +49,39 @@ impl ToolSessionEntry {
             .single()
             .unwrap_or_else(Utc::now)
     }
+}
+
+fn short_tool_label(tool_id: Option<&str>, tool_label: &str) -> String {
+    let id = tool_id.unwrap_or("");
+    let id_lower = id.to_lowercase();
+    if id_lower.contains("claude") {
+        return "Claude".to_string();
+    }
+    if id_lower.contains("codex") {
+        return "Codex".to_string();
+    }
+    if id_lower.contains("gemini") {
+        return "Gemini".to_string();
+    }
+    if id_lower.contains("opencode") || id_lower.contains("open-code") {
+        return "OpenCode".to_string();
+    }
+
+    let label_lower = tool_label.to_lowercase();
+    if label_lower.contains("claude") {
+        return "Claude".to_string();
+    }
+    if label_lower.contains("codex") {
+        return "Codex".to_string();
+    }
+    if label_lower.contains("gemini") {
+        return "Gemini".to_string();
+    }
+    if label_lower.contains("opencode") || label_lower.contains("open-code") {
+        return "OpenCode".to_string();
+    }
+
+    tool_label.to_string()
 }
 
 /// TypeScript session data structure
@@ -272,7 +306,7 @@ mod tests {
             timestamp: 1704067200000,
         };
         let result = entry.format_tool_usage();
-        assert_eq!(result, "Claude Code@1.0.3");
+        assert_eq!(result, "Claude@1.0.3");
     }
 
     #[test]
@@ -291,6 +325,6 @@ mod tests {
             timestamp: 1704067200000,
         };
         let result = entry.format_tool_usage();
-        assert_eq!(result, "Codex CLI@latest");
+        assert_eq!(result, "Codex@latest");
     }
 }

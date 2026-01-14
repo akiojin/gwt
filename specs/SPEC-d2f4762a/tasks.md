@@ -71,6 +71,12 @@
 - [x] **T9937** [US0] ブランチ一覧の描画を枠線付きに変更する（`crates/gwt-cli/src/tui/screens/branch_list.rs`）
 - [x] **T9938** `cargo test -p gwt-cli` と `cargo build --release` を実行し、失敗がないことを確認する
 
+## 追加作業: ツール表示名の短縮 (2026-01-14)
+
+- [x] **T9939** [US0] `crates/gwt-core/src/config/ts_session.rs` と `crates/gwt-core/src/config/session.rs` のツール表示名が短縮されることを検証するテストを追加
+- [x] **T9940** [US0] ツール表示名を `Codex` / `Claude` / `Gemini` / `OpenCode` に短縮する（`crates/gwt-core/src/config/ts_session.rs`, `crates/gwt-core/src/config/session.rs`）
+- [x] **T9941** `cargo test -p gwt-core` と `cargo build --release` を実行し、失敗がないことを確認する
+
 ## フェーズ0: ブランチ一覧アイコンのASCII再整理 (優先度: P1)
 
 **ストーリー**: ブランチ一覧の選択/Worktree/安全アイコンをASCII表記へ整理し、アイコン間にスペースを入れてカーソル記号は表示しない。

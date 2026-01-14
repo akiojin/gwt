@@ -61,8 +61,9 @@ impl Session {
     /// Returns format: "ToolName@X.Y.Z"
     pub fn format_tool_usage(&self) -> Option<String> {
         let label = self.agent_label.as_ref().or(self.agent.as_ref())?;
+        let short_label = short_tool_label(self.agent.as_deref(), label);
         let version = self.tool_version.as_deref().unwrap_or("latest");
-        Some(format!("{}@{}", label, version))
+        Some(format!("{}@{}", short_label, version))
     }
 
     /// Save session to file
@@ -127,6 +128,39 @@ impl Session {
     }
 }
 
+fn short_tool_label(tool_id: Option<&str>, tool_label: &str) -> String {
+    let id = tool_id.unwrap_or("");
+    let id_lower = id.to_lowercase();
+    if id_lower.contains("claude") {
+        return "Claude".to_string();
+    }
+    if id_lower.contains("codex") {
+        return "Codex".to_string();
+    }
+    if id_lower.contains("gemini") {
+        return "Gemini".to_string();
+    }
+    if id_lower.contains("opencode") || id_lower.contains("open-code") {
+        return "OpenCode".to_string();
+    }
+
+    let label_lower = tool_label.to_lowercase();
+    if label_lower.contains("claude") {
+        return "Claude".to_string();
+    }
+    if label_lower.contains("codex") {
+        return "Codex".to_string();
+    }
+    if label_lower.contains("gemini") {
+        return "Gemini".to_string();
+    }
+    if label_lower.contains("opencode") || label_lower.contains("open-code") {
+        return "OpenCode".to_string();
+    }
+
+    tool_label.to_string()
+}
+
 /// Load all sessions from worktrees
 pub fn load_sessions_from_worktrees(worktrees: &[crate::worktree::Worktree]) -> Vec<Session> {
     worktrees
@@ -173,5 +207,24 @@ mod tests {
         let loaded = Session::load_for_worktree(temp.path()).unwrap();
         assert_eq!(loaded.branch, "feature/legacy");
         assert!(Session::session_path(temp.path()).exists());
+    }
+
+    #[test]
+    fn test_format_tool_usage_short_label() {
+        let mut session = Session::new("/repo/.worktrees/feature", "feature/test");
+        session.agent_label = Some("Claude Code".to_string());
+        session.tool_version = Some("1.0.3".to_string());
+        assert_eq!(
+            session.format_tool_usage(),
+            Some("Claude@1.0.3".to_string())
+        );
+
+        let mut session = Session::new("/repo/.worktrees/feature", "feature/test");
+        session.agent = Some("codex-cli".to_string());
+        session.tool_version = None;
+        assert_eq!(
+            session.format_tool_usage(),
+            Some("Codex@latest".to_string())
+        );
     }
 }
