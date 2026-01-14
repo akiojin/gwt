@@ -206,5 +206,6 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git fetch origin develop
           git checkout develop
-          git merge main -m "chore: sync main to develop after ${{ needs.create-tag.outputs.tag_name }} release"
+          # Use -X theirs to prefer main's changes on conflict
+          git merge main -X theirs -m "chore: sync main to develop after ${{ needs.create-tag.outputs.tag_name }} release"
           git push origin develop
