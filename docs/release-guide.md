@@ -9,13 +9,16 @@ feature/* → PR → develop (auto merge)
                            ↓
               /release (prepare-release.yml)
                            ↓
-              develop → main PR → auto-merge
-                           ↓ (release.yml)
-               release-please: tag, GitHub Release, Release PR
-                           ↓ (release.yml - on release created)
-               crates.io publish (Trusted Publishing)
-               cross-compile binaries → GitHub Release upload
-               npm publish (with provenance)
+              Conventional Commits analysis → version bump
+              git-cliff → CHANGELOG.md update
+              Cargo.toml, package.json → version update
+                           ↓
+              release/YYYYMMDD-HHMMSS → main PR
+                           ↓ (release.yml - on merge)
+              Create tag & GitHub Release
+              crates.io publish (Trusted Publishing)
+              cross-compile binaries → GitHub Release upload
+              npm publish (with provenance)
 ```
 
 ## Maintainer Checklist (TL;DR)
@@ -32,5 +35,7 @@ feature/* → PR → develop (auto merge)
 
 ## References
 
-- `.claude/commands/release.md`
-- GitHub Actions workflows: `prepare-release.yml`, `release.yml`, `auto-merge.yml`
+- [akiojin/create-release-pr](https://github.com/akiojin/create-release-pr) – Reusable action for creating release PRs
+- `.github/workflows/prepare-release.yml` – Workflow to trigger release
+- `.github/workflows/release.yml` – Workflow for publishing
+- `cliff.toml` – git-cliff configuration for CHANGELOG generation

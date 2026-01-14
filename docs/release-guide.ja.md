@@ -6,16 +6,19 @@
 
 ```text
 feature/* → PR → develop (自動マージ)
-                            ↓
-               /release (prepare-release.yml)
-                            ↓
-               develop → main PR → 自動マージ
-                            ↓ (release.yml)
-               release-please: タグ・GitHub Release・Release PR 作成
-                            ↓ (release.yml - リリース作成時)
-               crates.io 公開 (Trusted Publishing)
-               クロスコンパイル → GitHub Release アップロード
-               npm 公開 (provenance 付き)
+                           ↓
+              /release (prepare-release.yml)
+                           ↓
+              Conventional Commits解析 → バージョン自動判定
+              git-cliff → CHANGELOG.md 更新
+              Cargo.toml, package.json → バージョン更新
+                           ↓
+              release/YYYYMMDD-HHMMSS → main PR
+                           ↓ (release.yml - マージ時)
+              タグ・GitHub Release 作成
+              crates.io 公開 (Trusted Publishing)
+              クロスコンパイル → GitHub Release アップロード
+              npm 公開 (provenance 付き)
 ```
 
 ## メンテナーチェックリスト（要点）
@@ -32,5 +35,7 @@ feature/* → PR → develop (自動マージ)
 
 ## 参考ファイル
 
-- `.claude/commands/release.md`
-- GitHub Actions: `prepare-release.yml`, `release.yml`, `auto-merge.yml`
+- [akiojin/create-release-pr](https://github.com/akiojin/create-release-pr) – 再利用可能なリリースPR作成Action
+- `.github/workflows/prepare-release.yml` – リリーストリガー用ワークフロー
+- `.github/workflows/release.yml` – 公開用ワークフロー
+- `cliff.toml` – git-cliff設定（CHANGELOG生成）
