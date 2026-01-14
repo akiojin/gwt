@@ -157,7 +157,7 @@ jobs:
 
   upload-release:
     name: Upload to GitHub Release
-    needs: [create-tag, build-binaries, publish-crates]
+    needs: [create-tag, build-binaries]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
