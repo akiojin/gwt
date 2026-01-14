@@ -2,7 +2,7 @@ name: Publish
 
 on:
   push:
-    tags: ['v*']
+    tags: ['v*', 'gwt-v*']  # Support both tag patterns (release-please uses gwt-v*)
   workflow_dispatch:
 
 permissions:
