@@ -1,12 +1,13 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
-## [5.2.0] - 2026-01-14
+## [5.3.0] - 2026-01-14
 
 ### Bug Fixes
 
 - Remove publish-crates dependency from upload-release job
 - Add sync-develop job to sync main back to develop after release
+- Use -X theirs option in sync-develop to resolve conflicts automatically
 
 ### Miscellaneous Tasks
 
