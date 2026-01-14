@@ -65,6 +65,12 @@
 - [x] **T9934** [US10] バージョン選択で二重Enterが不要になるようEnter処理のガードを見直す（`crates/gwt-cli/src/tui/app.rs`, `crates/gwt-cli/src/tui/screens/wizard.rs`）
 - [x] **T9935** `cargo test -p gwt-cli` と `cargo build --release` を実行し、失敗がないことを確認する
 
+## 追加作業: ブランチ一覧の枠線表示 (2026-01-14)
+
+- [x] **T9936** [US0] `crates/gwt-cli/src/tui/screens/branch_list.rs` にブランチ一覧の枠線表示を検証するテストを追加
+- [x] **T9937** [US0] ブランチ一覧の描画を枠線付きに変更する（`crates/gwt-cli/src/tui/screens/branch_list.rs`）
+- [x] **T9938** `cargo test -p gwt-cli` と `cargo build --release` を実行し、失敗がないことを確認する
+
 ## フェーズ0: ブランチ一覧アイコンのASCII再整理 (優先度: P1)
 
 **ストーリー**: ブランチ一覧の選択/Worktree/安全アイコンをASCII表記へ整理し、アイコン間にスペースを入れてカーソル記号は表示しない。

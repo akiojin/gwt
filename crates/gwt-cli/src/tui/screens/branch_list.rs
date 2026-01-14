@@ -804,6 +804,13 @@ fn render_legend_line(frame: &mut Frame, area: Rect) {
 
 /// Render branches list
 fn render_branches(state: &BranchListState, frame: &mut Frame, area: Rect) {
+    let block = Block::default().borders(Borders::ALL);
+    frame.render_widget(block.clone(), area);
+    let inner_area = block.inner(area);
+    if inner_area.width == 0 || inner_area.height == 0 {
+        return;
+    }
+
     let filtered_len = state.filtered_len();
 
     // Show loading spinner when loading and branches are empty
@@ -815,28 +822,28 @@ fn render_branches(state: &BranchListState, frame: &mut Frame, area: Rect) {
             let paragraph = Paragraph::new(text)
                 .style(Style::default().fg(Color::Yellow))
                 .alignment(Alignment::Center);
-            frame.render_widget(paragraph, area);
+            frame.render_widget(paragraph, inner_area);
         } else if state.is_loading {
             // Before delay, show simple message
             let paragraph = Paragraph::new("Loading...")
                 .style(Style::default().fg(Color::DarkGray))
                 .alignment(Alignment::Center);
-            frame.render_widget(paragraph, area);
+            frame.render_widget(paragraph, inner_area);
         } else if state.filter.is_empty() {
             let paragraph = Paragraph::new("No branches found")
                 .style(Style::default().fg(Color::DarkGray))
                 .alignment(Alignment::Center);
-            frame.render_widget(paragraph, area);
+            frame.render_widget(paragraph, inner_area);
         } else {
             let paragraph = Paragraph::new("No branches match your filter")
                 .style(Style::default().fg(Color::DarkGray))
                 .alignment(Alignment::Center);
-            frame.render_widget(paragraph, area);
+            frame.render_widget(paragraph, inner_area);
         }
         return;
     }
 
-    let visible_height = area.height as usize;
+    let visible_height = inner_area.height as usize;
     // FR-031b: Pass spinner_frame for safety check pending indicator
     let spinner_frame = state.spinner_frame;
     let mut items: Vec<ListItem> = state
@@ -864,7 +871,7 @@ fn render_branches(state: &BranchListState, frame: &mut Frame, area: Rect) {
     }
 
     let list = List::new(items);
-    frame.render_widget(list, area);
+    frame.render_widget(list, inner_area);
 
     // Scrollbar
     if filtered_len > visible_height {
@@ -872,7 +879,7 @@ fn render_branches(state: &BranchListState, frame: &mut Frame, area: Rect) {
             .begin_symbol(Some("^"))
             .end_symbol(Some("v"));
         let mut scrollbar_state = ScrollbarState::new(filtered_len).position(state.selected);
-        frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
+        frame.render_stateful_widget(scrollbar, inner_area, &mut scrollbar_state);
     }
 }
 
@@ -1015,6 +1022,8 @@ fn render_footer(frame: &mut Frame, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
 
     #[test]
     fn test_view_mode_cycle() {
@@ -1079,6 +1088,47 @@ mod tests {
 
         state.select_prev();
         assert_eq!(state.selected, 0);
+    }
+
+    #[test]
+    fn test_render_branches_draws_border() {
+        let branches = vec![BranchItem {
+            name: "main".to_string(),
+            branch_type: BranchType::Local,
+            is_current: true,
+            has_worktree: true,
+            worktree_path: Some("/path".to_string()),
+            worktree_status: WorktreeStatus::Active,
+            has_changes: false,
+            has_unpushed: false,
+            divergence: DivergenceStatus::UpToDate,
+            has_remote_counterpart: true,
+            remote_name: None,
+            safe_to_cleanup: Some(true),
+            safety_status: SafetyStatus::Safe,
+            is_unmerged: false,
+            last_commit_timestamp: None,
+            last_tool_usage: None,
+            is_selected: false,
+            pr_title: None,
+        }];
+
+        let state = BranchListState::new().with_branches(branches);
+        let backend = TestBackend::new(20, 5);
+        let mut terminal = Terminal::new(backend).expect("terminal init");
+
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render_branches(&state, f, area);
+            })
+            .expect("draw");
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(0, 0)].symbol(), "┌");
+        assert_eq!(buffer[(19, 0)].symbol(), "┐");
+        assert_eq!(buffer[(0, 4)].symbol(), "└");
+        assert_eq!(buffer[(19, 4)].symbol(), "┘");
     }
 
     #[test]
