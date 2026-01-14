@@ -12,6 +12,10 @@ Interactive Git worktree manager with Coding Agent selection (Claude Code / Code
 
 The Rust implementation covers the core CLI/TUI workflow and the Web UI (REST + WebSocket terminal). Remaining work is focused on Git backend fallback coverage, documentation polish, and release packaging.
 
+## Migration Status
+
+The Rust implementation covers the core CLI/TUI workflow and the Web UI (REST + WebSocket terminal). Remaining work is focused on Git backend fallback coverage, documentation polish, and release packaging.
+
 ## Key Features
 
 - **Modern TUI**: Built with Ratatui for a smooth, responsive terminal interface
