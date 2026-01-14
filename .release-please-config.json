@@ -5,7 +5,14 @@
     ".": {
       "release-type": "rust",
       "bump-minor-pre-major": true,
-      "bump-patch-for-minor-pre-major": true
+      "bump-patch-for-minor-pre-major": true,
+      "extra-files": [
+        {
+          "type": "json",
+          "path": "package.json",
+          "jsonpath": "$.version"
+        }
+      ]
     }
   },
   "pull-request-title-pattern": "chore(release): ${version}"
