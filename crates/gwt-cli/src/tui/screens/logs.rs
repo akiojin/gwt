@@ -58,6 +58,7 @@ pub struct LogsState {
     pub filter: LogLevelFilter,
     pub search: String,
     pub is_searching: bool,
+    pub show_detail: bool,
 }
 
 impl LogsState {
@@ -173,10 +174,35 @@ impl LogsState {
         let filtered = self.filtered_entries();
         filtered.get(self.selected).copied()
     }
+
+    /// Toggle detail view
+    pub fn toggle_detail(&mut self) {
+        if self.selected_entry().is_some() {
+            self.show_detail = !self.show_detail;
+        }
+    }
+
+    /// Close detail view
+    pub fn close_detail(&mut self) {
+        self.show_detail = false;
+    }
+
+    /// Check if detail view is shown
+    pub fn is_detail_shown(&self) -> bool {
+        self.show_detail
+    }
 }
 
 /// Render logs screen
 pub fn render_logs(state: &LogsState, frame: &mut Frame, area: Rect) {
+    // If detail view is shown, render it as an overlay
+    if state.show_detail {
+        if let Some(entry) = state.selected_entry() {
+            render_detail_view(entry, frame, area);
+            return;
+        }
+    }
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -337,9 +363,51 @@ fn render_search_bar(state: &LogsState, frame: &mut Frame, area: Rect) {
 }
 
 fn render_instructions(frame: &mut Frame, area: Rect) {
-    let instructions = "[Up/Down] Navigate | [f] Filter | [/] Search | [Esc] Back";
+    let instructions = "[Up/Down] Navigate | [Enter] Detail | [f] Filter | [/] Search | [Esc] Back";
     let paragraph =
         Paragraph::new(format!(" {} ", instructions)).block(Block::default().borders(Borders::ALL));
+    frame.render_widget(paragraph, area);
+}
+
+fn render_detail_view(entry: &LogEntry, frame: &mut Frame, area: Rect) {
+    let level_style = match entry.level.as_str() {
+        "ERROR" => Style::default().fg(Color::Red),
+        "WARN" => Style::default().fg(Color::Yellow),
+        "INFO" => Style::default().fg(Color::Green),
+        "DEBUG" => Style::default().fg(Color::Blue),
+        "TRACE" => Style::default().fg(Color::DarkGray),
+        _ => Style::default(),
+    };
+
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("Timestamp: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(&entry.timestamp),
+        ]),
+        Line::from(vec![
+            Span::styled("Level:     ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(&entry.level, level_style),
+        ]),
+        Line::from(vec![
+            Span::styled("Target:    ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(&entry.target),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Message:",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(entry.message.clone()),
+    ];
+
+    let paragraph = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Log Detail ")
+                .title_bottom(" [Esc] Close "),
+        );
     frame.render_widget(paragraph, area);
 }
 

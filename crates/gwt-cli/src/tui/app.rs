@@ -681,6 +681,12 @@ impl Model {
                     self.profiles.exit_create_mode();
                 } else if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
                     self.environment.cancel_edit();
+                } else if matches!(self.screen, Screen::Logs) && self.logs.is_searching {
+                    // Exit log search mode
+                    self.logs.toggle_search();
+                } else if matches!(self.screen, Screen::Logs) && self.logs.is_detail_shown() {
+                    // Close log detail view
+                    self.logs.close_detail();
                 } else if matches!(self.screen, Screen::Confirm) {
                     // FR-029d: Cancel confirm dialog without executing action
                     self.pending_unsafe_selection = None;
@@ -854,6 +860,9 @@ impl Model {
                 Screen::Error => {
                     self.update(Message::NavigateBack);
                 }
+                Screen::Logs => {
+                    self.logs.toggle_detail();
+                }
                 _ => {}
             },
             Message::Char(c) => {
@@ -868,6 +877,9 @@ impl Model {
                     self.profiles.insert_char(c);
                 } else if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
                     self.environment.insert_char(c);
+                } else if matches!(self.screen, Screen::Logs) && self.logs.is_searching {
+                    // Log search mode - add character to search
+                    self.logs.search.push(c);
                 }
             }
             Message::Backspace => {
@@ -880,6 +892,9 @@ impl Model {
                     self.profiles.delete_char();
                 } else if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
                     self.environment.delete_char();
+                } else if matches!(self.screen, Screen::Logs) && self.logs.is_searching {
+                    // Log search mode - delete character
+                    self.logs.search.pop();
                 }
             }
             Message::CursorLeft => {
