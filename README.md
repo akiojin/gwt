@@ -30,7 +30,7 @@ GitHub Releases are the source of truth for prebuilt binaries. The npm/bunx wrap
 
 ### From GitHub Releases (Recommended)
 
-Download pre-built binaries from the [Releases page](https://github.com/akiojin/gwt/releases):
+Download pre-built binaries from the [Releases page](https://github.com/akiojin/gwt/releases). Each release includes binaries for all supported platforms:
 
 - `gwt-linux-x86_64` - Linux x86_64
 - `gwt-linux-aarch64` - Linux ARM64
