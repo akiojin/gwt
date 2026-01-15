@@ -6,16 +6,14 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "CLI for Git Worktree Manager with AI coding agent integration"
-readme = "../../README.md"
-keywords = ["git", "worktree", "cli", "tui", "ai-coding"]
-categories = ["command-line-utilities", "development-tools"]
+publish = false  # Distributed via GitHub Release and npm only
 
 [[bin]]
 name = "gwt"
 path = "src/main.rs"
 
 [dependencies]
-gwt-core = { version = "6.0.3", path = "../gwt-core" }
+gwt-core.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 clap.workspace = true
