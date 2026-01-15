@@ -9,21 +9,24 @@ feature/* → PR → develop (auto merge)
                            ↓
               /release (prepare-release.yml)
                            ↓
-              develop → main PR 作成 → auto-merge
-                           ↓ (release.yml)
-               release-please がタグ・GitHub Release・Release PR 作成
-                           ↓ (Release PR auto-merge)
-               main にリリースコミット反映
-                           ↓ (publish.yml - v* tag trigger)
-                        npm publish
+              Conventional Commits analysis → version bump
+              git-cliff → CHANGELOG.md update
+              Cargo.toml, package.json → version update
+                           ↓
+              release/YYYYMMDD-HHMMSS → main PR
+                           ↓ (release.yml - on merge)
+              Create tag & GitHub Release
+              crates.io publish (Trusted Publishing)
+              cross-compile binaries → GitHub Release upload
+              npm publish (with provenance)
 ```
 
 ## Maintainer Checklist (TL;DR)
 
-1. **Prepare** – ensure `develop` has all desired commits and `bun run lint && bun run test && bun run build` succeed.
+1. **Prepare** – ensure `develop` has all desired commits and `cargo test && cargo build --release` succeed.
 2. **Trigger** – run `/release` in Claude Code or execute `gh workflow run prepare-release.yml --ref develop` locally (requires `gh auth login`).
-3. **Monitor** – watch `prepare-release.yml` until the Release PR is created, then monitor `release.yml` and `publish.yml` from the Actions tab.
-4. **Verify** – confirm the `vX.Y.Z` tag and (if enabled) the npm package version.
+3. **Monitor** – watch `prepare-release.yml` until the Release PR is created, then monitor `release.yml` from the Actions tab.
+4. **Verify** – confirm the `vX.Y.Z` tag, crates.io publication, GitHub Release binaries, and npm package version.
 
 ## Where to Read More
 
@@ -32,5 +35,7 @@ feature/* → PR → develop (auto merge)
 
 ## References
 
-- `.claude/commands/release.md`
-- GitHub Actions workflows: `prepare-release.yml`, `release.yml`, `publish.yml`, `auto-merge.yml`
+- [akiojin/create-release-pr](https://github.com/akiojin/create-release-pr) – Reusable action for creating release PRs
+- `.github/workflows/prepare-release.yml` – Workflow to trigger release
+- `.github/workflows/release.yml` – Workflow for publishing
+- `cliff.toml` – git-cliff configuration for CHANGELOG generation
