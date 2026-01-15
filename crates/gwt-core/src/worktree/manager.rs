@@ -45,6 +45,15 @@ impl WorktreeManager {
                 }
             }
 
+            tracing::debug!(
+                "Worktree: branch={:?}, path={:?}, status={:?}, has_changes={}, has_unpushed={}",
+                wt.branch,
+                wt.path,
+                wt.status,
+                wt.has_changes,
+                wt.has_unpushed
+            );
+
             worktrees.push(wt);
         }
 
