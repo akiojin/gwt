@@ -352,11 +352,14 @@ impl Model {
                 // Convert gwt_core LogEntry to TUI LogEntry
                 let tui_entries: Vec<super::screens::logs::LogEntry> = entries
                     .into_iter()
-                    .map(|e| super::screens::logs::LogEntry {
-                        timestamp: e.timestamp,
-                        level: e.level,
-                        message: e.message,
-                        target: e.target,
+                    .map(|e| {
+                        let message = e.message().to_string();
+                        super::screens::logs::LogEntry {
+                            timestamp: e.timestamp,
+                            level: e.level,
+                            message,
+                            target: e.target,
+                        }
                     })
                     .collect();
                 self.logs = LogsState::new().with_entries(tui_entries);

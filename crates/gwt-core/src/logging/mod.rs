@@ -75,25 +75,24 @@ mod tests {
 
     #[test]
     fn test_log_json_structure_has_required_fields() {
-        // Test that LogEntry can parse JSON with required fields (timestamp, level, message)
-        // and optional category field
+        // Test that LogEntry can parse tracing-subscriber JSON format
+        // Format: { timestamp, level, fields: { message, category, ... }, target }
         let json_with_category = r#"{
             "timestamp": "2024-01-01T00:00:00Z",
             "level": "INFO",
-            "message": "test message",
-            "category": "worktree"
+            "fields": {
+                "message": "test message",
+                "category": "worktree"
+            },
+            "target": "gwt"
         }"#;
 
         let entry: LogEntry = serde_json::from_str(json_with_category).unwrap();
         assert_eq!(entry.timestamp, "2024-01-01T00:00:00Z");
         assert_eq!(entry.level, "INFO");
-        assert_eq!(entry.message, "test message");
-
-        // category is in the fields map due to #[serde(flatten)]
-        assert_eq!(
-            entry.fields.get("category"),
-            Some(&serde_json::Value::String("worktree".to_string()))
-        );
+        assert_eq!(entry.message(), "test message");
+        assert_eq!(entry.category(), Some("worktree"));
+        assert_eq!(entry.target, "gwt");
     }
 
     #[test]
@@ -103,14 +102,14 @@ mod tests {
 
         for category in categories {
             let json = format!(
-                r#"{{"timestamp":"2024-01-01T00:00:00Z","level":"INFO","message":"test","category":"{}"}}"#,
+                r#"{{"timestamp":"2024-01-01T00:00:00Z","level":"INFO","fields":{{"message":"test","category":"{}"}},"target":"gwt"}}"#,
                 category
             );
 
             let entry: LogEntry = serde_json::from_str(&json).unwrap();
             assert_eq!(
-                entry.fields.get("category"),
-                Some(&serde_json::Value::String(category.to_string())),
+                entry.category(),
+                Some(category),
                 "Category '{}' should be preserved",
                 category
             );
@@ -120,12 +119,12 @@ mod tests {
     #[test]
     fn test_log_append_preserves_existing_entries() {
         let temp = TempDir::new().unwrap();
-        let log_file = temp.path().join("test.jsonl");
+        let log_file = temp.path().join("gwt.jsonl.2024-01-01");
 
-        // Write initial entries
+        // Write initial entries (tracing-subscriber format)
         let initial_entries = [
-            r#"{"timestamp":"2024-01-01T00:00:00Z","level":"INFO","message":"entry1"}"#,
-            r#"{"timestamp":"2024-01-01T00:00:01Z","level":"INFO","message":"entry2"}"#,
+            r#"{"timestamp":"2024-01-01T00:00:00Z","level":"INFO","fields":{"message":"entry1"},"target":"gwt"}"#,
+            r#"{"timestamp":"2024-01-01T00:00:01Z","level":"INFO","fields":{"message":"entry2"},"target":"gwt"}"#,
         ];
         std::fs::write(&log_file, initial_entries.join("\n") + "\n").unwrap();
 
@@ -135,28 +134,28 @@ mod tests {
         let mut file = OpenOptions::new().append(true).open(&log_file).unwrap();
         writeln!(
             file,
-            r#"{{"timestamp":"2024-01-01T00:00:02Z","level":"INFO","message":"entry3"}}"#
+            r#"{{"timestamp":"2024-01-01T00:00:02Z","level":"INFO","fields":{{"message":"entry3"}},"target":"gwt"}}"#
         )
         .unwrap();
 
         // Read all entries and verify none were lost
         let (entries, _) = LogReader::read_entries(&log_file, 0, 100).unwrap();
         assert_eq!(entries.len(), 3, "All entries should be preserved after append");
-        assert_eq!(entries[0].message, "entry1", "First entry should be preserved");
-        assert_eq!(entries[1].message, "entry2", "Second entry should be preserved");
-        assert_eq!(entries[2].message, "entry3", "New entry should be appended");
+        assert_eq!(entries[0].message(), "entry1", "First entry should be preserved");
+        assert_eq!(entries[1].message(), "entry2", "Second entry should be preserved");
+        assert_eq!(entries[2].message(), "entry3", "New entry should be appended");
     }
 
     #[test]
     fn test_each_log_line_is_valid_json() {
         let temp = TempDir::new().unwrap();
-        let log_file = temp.path().join("test.jsonl");
+        let log_file = temp.path().join("gwt.jsonl.2024-01-01");
 
-        // Write multiple entries
+        // Write multiple entries (tracing-subscriber format)
         let entries = [
-            r#"{"timestamp":"2024-01-01T00:00:00Z","level":"INFO","message":"test1","category":"cli"}"#,
-            r#"{"timestamp":"2024-01-01T00:00:01Z","level":"DEBUG","message":"test2","category":"git"}"#,
-            r#"{"timestamp":"2024-01-01T00:00:02Z","level":"WARN","message":"test3","category":"worktree"}"#,
+            r#"{"timestamp":"2024-01-01T00:00:00Z","level":"INFO","fields":{"message":"test1","category":"cli"},"target":"gwt"}"#,
+            r#"{"timestamp":"2024-01-01T00:00:01Z","level":"DEBUG","fields":{"message":"test2","category":"git"},"target":"gwt"}"#,
+            r#"{"timestamp":"2024-01-01T00:00:02Z","level":"WARN","fields":{"message":"test3","category":"worktree"},"target":"gwt"}"#,
         ];
         std::fs::write(&log_file, entries.join("\n") + "\n").unwrap();
 

@@ -343,7 +343,7 @@ fn cmd_logs(repo_root: &Path, settings: &Settings, limit: usize) -> Result<(), G
     }
 
     for entry in entries {
-        println!("{} [{}] {}", entry.timestamp, entry.level, entry.message);
+        println!("{} [{}] {}", entry.timestamp, entry.level, entry.message());
     }
 
     Ok(())
