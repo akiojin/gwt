@@ -116,6 +116,27 @@ impl EnvironmentState {
         self.selected_display_item().and_then(|item| item.profile_index)
     }
 
+    pub fn selected_is_overridden(&self) -> bool {
+        matches!(
+            self.selected_display_item().map(|item| item.kind),
+            Some(EnvDisplayKind::Overridden)
+        )
+    }
+
+    pub fn selected_is_added(&self) -> bool {
+        matches!(
+            self.selected_display_item().map(|item| item.kind),
+            Some(EnvDisplayKind::Added)
+        )
+    }
+
+    pub fn selected_is_os_only(&self) -> bool {
+        matches!(
+            self.selected_display_item().map(|item| item.kind),
+            Some(EnvDisplayKind::OsOnly)
+        )
+    }
+
     /// Move selection up
     pub fn select_prev(&mut self) {
         if self.edit_mode {
@@ -541,7 +562,7 @@ pub fn render_environment(state: &mut EnvironmentState, frame: &mut Frame, area:
     if state.edit_mode {
         render_edit_area(state, frame, chunks[2]);
     } else {
-        let actions = "[Enter/e] Edit | [n] New | [d] Delete | [v] Toggle visibility | [Esc] Back";
+        let actions = "[Enter/e] Edit | [n] New | [d] Delete (profile) | [r] Reset (OS) | [v] Toggle visibility | [Esc] Back";
         let footer = Paragraph::new(actions)
             .style(Style::default().fg(Color::DarkGray))
             .block(Block::default().borders(Borders::TOP));
@@ -831,5 +852,50 @@ mod tests {
         state.page_down();
         assert_eq!(state.selected, 6);
         assert_eq!(state.scroll_offset, 4);
+    }
+
+    #[test]
+    fn test_selected_kind_helpers() {
+        let os_vars = vec![
+            OsEnvItem {
+                key: "A".to_string(),
+                value: "os-a".to_string(),
+            },
+            OsEnvItem {
+                key: "B".to_string(),
+                value: "os-b".to_string(),
+            },
+        ];
+        let profile_vars = vec![
+            EnvItem {
+                key: "B".to_string(),
+                value: "profile-b".to_string(),
+                is_secret: false,
+            },
+            EnvItem {
+                key: "C".to_string(),
+                value: "profile-c".to_string(),
+                is_secret: false,
+            },
+        ];
+
+        let mut state = EnvironmentState::new()
+            .with_os_variables(os_vars)
+            .with_variables(profile_vars);
+
+        state.selected = 0; // A: OS only
+        assert!(state.selected_is_os_only());
+        assert!(!state.selected_is_overridden());
+        assert!(!state.selected_is_added());
+
+        state.selected = 1; // B: overridden
+        assert!(state.selected_is_overridden());
+        assert!(!state.selected_is_os_only());
+        assert!(!state.selected_is_added());
+
+        state.selected = 2; // C: added
+        assert!(state.selected_is_added());
+        assert!(!state.selected_is_os_only());
+        assert!(!state.selected_is_overridden());
     }
 }

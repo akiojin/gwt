@@ -630,20 +630,41 @@ impl Model {
     }
 
     fn delete_selected_env(&mut self) {
-        let selected_index = match self.environment.selected_profile_index() {
-            Some(index) => index,
-            None => {
-                self.status_message =
-                    Some("Cannot delete OS environment variable.".to_string());
-                self.status_message_time = Some(Instant::now());
-                return;
-            }
+        if self.environment.selected_is_os_only() {
+            return;
+        }
+        if self.environment.selected_is_overridden() {
+            self.status_message =
+                Some("Use 'r' to reset overridden environment variable.".to_string());
+            self.status_message_time = Some(Instant::now());
+            return;
+        }
+        let Some(selected_index) = self.environment.selected_profile_index() else {
+            return;
         };
 
         if selected_index < self.environment.variables.len() {
             self.environment.variables.remove(selected_index);
             self.environment.refresh_selection();
             self.persist_environment();
+        }
+    }
+
+    fn reset_selected_env(&mut self) {
+        if !self.environment.selected_is_overridden() {
+            self.status_message = Some("No overridden environment variable selected.".to_string());
+            self.status_message_time = Some(Instant::now());
+            return;
+        }
+        let Some(selected_index) = self.environment.selected_profile_index() else {
+            return;
+        };
+        if selected_index < self.environment.variables.len() {
+            self.environment.variables.remove(selected_index);
+            self.environment.refresh_selection();
+            self.persist_environment();
+            self.status_message = Some("Environment variable reset to OS value.".to_string());
+            self.status_message_time = Some(Instant::now());
         }
     }
 
@@ -1406,7 +1427,7 @@ impl Model {
                 if self.environment.edit_mode {
                     "[Enter] Save | [Tab] Switch | [Esc] Cancel"
                 } else {
-                    "[Enter/e] Edit | [n] New | [d] Delete | [v] Toggle visibility | [Esc] Back"
+                    "[Enter/e] Edit | [n] New | [d] Delete (profile) | [r] Reset (OS) | [v] Toggle visibility | [Esc] Back"
                 }
             }
         };
@@ -1625,6 +1646,13 @@ pub fn run_with_context(
                                 && !model.branch_list.filter_mode
                             {
                                 Some(Message::RefreshData)
+                            } else if matches!(model.screen, Screen::Environment) {
+                                if model.environment.edit_mode {
+                                    Some(Message::Char('r'))
+                                } else {
+                                    model.reset_selected_env();
+                                    None
+                                }
                             } else {
                                 Some(Message::Char('r'))
                             }
