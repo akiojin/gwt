@@ -27,12 +27,14 @@ All notable changes to this project will be documented in this file.
 - Add version to gwt-core dependency for crates.io publishing
 - Use cross for Linux ARM64 musl build
 - Add id-token permission for npm provenance and pin cross version
+- Clarify npm wrapper auto-download behavior in README
 - Support merge commit in release workflow trigger
 - Add workflow_dispatch support to release workflow trigger
 
 ### Documentation
 
 - パッケージ公開状況をCLAUDE.mdに追記
+- Remove crates.io references from documentation
 
 ### Miscellaneous Tasks
 
