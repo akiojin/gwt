@@ -25,6 +25,7 @@ description: "環境変数プロファイル機能（Ratatui）のタスク"
 - [x] **T008** [US4] `crates/gwt-cli/src/tui/screens/environment.rs` に赤色取り消し線の無効化表示を追加
 - [x] **T009** [US4] `crates/gwt-cli/src/tui/app.rs` で無効化状態の保存とエージェント起動への反映を追加
 - [x] **T010** [US4] `crates/gwt-cli/src/main.rs` で `env_remove` を反映
+- [x] **T011** [US3] `crates/gwt-cli/src/tui/app.rs` に Space アクティブ化と Enter 編集の分離を追加
 
 ## フェーズ2: テスト（TDD）
 
@@ -35,6 +36,7 @@ description: "環境変数プロファイル機能（Ratatui）のタスク"
 - [x] **T105** [US3] `crates/gwt-cli/src/tui/screens/profiles.rs` にアクション表示の Enter 表記テストを追加
 - [x] **T106** [US4] `crates/gwt-cli/src/tui/screens/environment.rs` に選択種別ヘルパーテストを追加
 - [x] **T107** [US4] `crates/gwt-cli/src/tui/screens/environment.rs` に無効化表示の分類テストを更新
+- [x] **T108** [US3] `crates/gwt-cli/src/tui/screens/profiles.rs` の Space 表記を更新
 
 ## フェーズ3: 統合とチェック
 
