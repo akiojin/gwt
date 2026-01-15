@@ -24,11 +24,11 @@ use super::screens::branch_list::WorktreeStatus;
 use super::screens::environment::EditField;
 use super::screens::{
     collect_os_env, render_branch_list, render_confirm, render_environment, render_error,
-    render_help, render_logs, render_os_environment, render_profiles, render_settings,
-    render_wizard, render_worktree_create, BranchItem, BranchListState, BranchType, CodingAgent,
-    ConfirmState, EnvironmentState, ErrorState, ExecutionMode, HelpState, LogsState,
-    OsEnvironmentState, ProfilesState, QuickStartEntry, ReasoningLevel, SettingsState,
-    WizardConfirmResult, WizardState, WorktreeCreateState,
+    render_help, render_logs, render_profiles, render_settings, render_wizard,
+    render_worktree_create, BranchItem, BranchListState, BranchType, CodingAgent, ConfirmState,
+    EnvironmentState, ErrorState, ExecutionMode, HelpState, LogsState, ProfilesState,
+    QuickStartEntry, ReasoningLevel, SettingsState, WizardConfirmResult, WizardState,
+    WorktreeCreateState,
 };
 
 /// Configuration for launching a coding agent after TUI exits
@@ -135,8 +135,6 @@ pub struct Model {
     profiles_config: ProfilesConfig,
     /// Environment variables state
     environment: EnvironmentState,
-    /// OS environment variables state
-    os_environment: OsEnvironmentState,
     /// Wizard popup state
     wizard: WizardState,
     /// Status message
@@ -173,7 +171,6 @@ pub enum Screen {
     Error,
     Profiles,
     Environment,
-    EnvironmentOs,
 }
 
 /// Messages (Events in Elm Architecture)
@@ -249,7 +246,6 @@ impl Model {
             profiles: ProfilesState::new(),
             profiles_config: ProfilesConfig::default(),
             environment: EnvironmentState::new(),
-            os_environment: OsEnvironmentState::new(),
             wizard: WizardState::new(),
             status_message: None,
             status_message_time: None,
@@ -591,30 +587,10 @@ impl Model {
 
         self.environment = EnvironmentState::new()
             .with_profile(profile_name)
-            .with_variables(vars);
+            .with_variables(vars)
+            .with_os_variables(collect_os_env());
         self.screen_stack.push(self.screen.clone());
         self.screen = Screen::Environment;
-    }
-
-    fn open_os_environment(&mut self) {
-        let profile_name = self
-            .environment
-            .profile_name
-            .as_deref()
-            .unwrap_or("default");
-        let highlight_keys: Vec<String> = self
-            .environment
-            .variables
-            .iter()
-            .map(|var| var.key.clone())
-            .collect();
-        let vars = collect_os_env();
-        self.os_environment = OsEnvironmentState::new()
-            .with_profile(profile_name)
-            .with_variables(vars)
-            .with_highlight_keys(highlight_keys);
-        self.screen_stack.push(self.screen.clone());
-        self.screen = Screen::EnvironmentOs;
     }
 
     fn persist_environment(&mut self) {
@@ -654,14 +630,19 @@ impl Model {
     }
 
     fn delete_selected_env(&mut self) {
-        if self.environment.variables.is_empty() {
-            return;
-        }
-        if self.environment.selected < self.environment.variables.len() {
-            self.environment.variables.remove(self.environment.selected);
-            if self.environment.selected >= self.environment.variables.len() {
-                self.environment.selected = self.environment.variables.len().saturating_sub(1);
+        let selected_index = match self.environment.selected_profile_index() {
+            Some(index) => index,
+            None => {
+                self.status_message =
+                    Some("Cannot delete OS environment variable.".to_string());
+                self.status_message_time = Some(Instant::now());
+                return;
             }
+        };
+
+        if selected_index < self.environment.variables.len() {
+            self.environment.variables.remove(selected_index);
+            self.environment.refresh_selection();
             self.persist_environment();
         }
     }
@@ -744,7 +725,6 @@ impl Model {
                 Screen::Error => self.error.scroll_down(),
                 Screen::Profiles => self.profiles.select_next(),
                 Screen::Environment => self.environment.select_next(),
-                Screen::EnvironmentOs => self.os_environment.select_next(),
                 Screen::Confirm => {}
             },
             Message::SelectPrev => match self.screen {
@@ -756,33 +736,32 @@ impl Model {
                 Screen::Error => self.error.scroll_up(),
                 Screen::Profiles => self.profiles.select_prev(),
                 Screen::Environment => self.environment.select_prev(),
-                Screen::EnvironmentOs => self.os_environment.select_prev(),
                 Screen::Confirm => {}
             },
             Message::PageUp => match self.screen {
                 Screen::BranchList => self.branch_list.page_up(10),
                 Screen::Logs => self.logs.page_up(10),
                 Screen::Help => self.help.page_up(),
-                Screen::EnvironmentOs => self.os_environment.page_up(),
+                Screen::Environment => self.environment.page_up(),
                 _ => {}
             },
             Message::PageDown => match self.screen {
                 Screen::BranchList => self.branch_list.page_down(10),
                 Screen::Logs => self.logs.page_down(10),
                 Screen::Help => self.help.page_down(),
-                Screen::EnvironmentOs => self.os_environment.page_down(),
+                Screen::Environment => self.environment.page_down(),
                 _ => {}
             },
             Message::GoHome => match self.screen {
                 Screen::BranchList => self.branch_list.go_home(),
                 Screen::Logs => self.logs.go_home(),
-                Screen::EnvironmentOs => self.os_environment.go_home(),
+                Screen::Environment => self.environment.go_home(),
                 _ => {}
             },
             Message::GoEnd => match self.screen {
                 Screen::BranchList => self.branch_list.go_end(),
                 Screen::Logs => self.logs.go_end(),
-                Screen::EnvironmentOs => self.os_environment.go_end(),
+                Screen::Environment => self.environment.go_end(),
                 _ => {}
             },
             Message::Enter => match &self.screen {
@@ -860,21 +839,24 @@ impl Model {
                                             is_secret: false,
                                         },
                                     );
-                                } else if let Some(var) = self
-                                    .environment
-                                    .variables
-                                    .get_mut(self.environment.selected)
+                                } else if let Some(index) =
+                                    self.environment.selected_profile_index()
                                 {
-                                    var.key = key;
-                                    var.value = value;
+                                    if let Some(var) = self.environment.variables.get_mut(index) {
+                                        var.key = key;
+                                        var.value = value;
+                                    }
                                 }
                                 self.environment.cancel_edit();
+                                self.environment.refresh_selection();
                                 self.persist_environment();
                             }
                             Err(msg) => {
                                 self.environment.error = Some(msg.to_string());
                             }
                         }
+                    } else {
+                        self.environment.start_edit_selected();
                     }
                 }
                 Screen::Help => {
@@ -1250,8 +1232,7 @@ impl Model {
             Screen::Help => render_help(&self.help, frame, chunks[1]),
             Screen::Error => render_error(&self.error, frame, chunks[1]),
             Screen::Profiles => render_profiles(&self.profiles, frame, chunks[1]),
-            Screen::Environment => render_environment(&self.environment, frame, chunks[1]),
-            Screen::EnvironmentOs => render_os_environment(&mut self.os_environment, frame, chunks[1]),
+            Screen::Environment => render_environment(&mut self.environment, frame, chunks[1]),
             Screen::Confirm => {}
         }
 
@@ -1423,10 +1404,9 @@ impl Model {
                 if self.environment.edit_mode {
                     "[Enter] Save | [Tab] Switch | [Esc] Cancel"
                 } else {
-                    "[n] New | [e] Edit | [d] Delete | [v] Toggle visibility | [o] OS env | [Esc] Back"
+                    "[Enter/e] Edit | [n] New | [d] Delete | [v] Toggle visibility | [Esc] Back"
                 }
             }
-            Screen::EnvironmentOs => "[Esc] Back | [Up/Down] Scroll",
         };
 
         let status = self.status_message.as_deref().unwrap_or("");
@@ -1730,7 +1710,7 @@ pub fn run_with_context(
                                 if model.environment.edit_mode {
                                     Some(Message::Char('e'))
                                 } else {
-                                    model.environment.start_edit();
+                                    model.environment.start_edit_selected();
                                     None
                                 }
                             } else {
@@ -1747,18 +1727,6 @@ pub fn run_with_context(
                                 }
                             } else {
                                 Some(Message::Char('v'))
-                            }
-                        }
-                        (KeyCode::Char('o'), KeyModifiers::NONE) => {
-                            if matches!(model.screen, Screen::Environment) {
-                                if model.environment.edit_mode {
-                                    Some(Message::Char('o'))
-                                } else {
-                                    model.open_os_environment();
-                                    None
-                                }
-                            } else {
-                                Some(Message::Char('o'))
                             }
                         }
                         (KeyCode::Char('x'), KeyModifiers::NONE) => {
