@@ -20,6 +20,7 @@ description: "環境変数プロファイル機能（Ratatui）のタスク"
 - [x] **T003** [US6] `crates/gwt-cli/src/tui/app.rs` に Enter 編集・OSのみ削除警告・スクロールキー統合を追加
 - [x] **T005** [US3] `crates/gwt-cli/src/tui/app.rs` に Enter で環境変数編集へ遷移する処理を追加
 - [x] **T004** [US4] `crates/gwt-cli/src/tui/screens/mod.rs` からOS専用画面の公開を削除
+- [x] **T006** [US4] `crates/gwt-cli/src/tui/app.rs` に `r` リセット操作を追加
 
 ## フェーズ2: テスト（TDD）
 
@@ -28,6 +29,7 @@ description: "環境変数プロファイル機能（Ratatui）のタスク"
 - [x] **T103** [US6] `crates/gwt-cli/src/tui/screens/environment.rs` の hidden 表示マスクテストを更新
 - [x] **T104** [US6] `crates/gwt-cli/src/tui/app.rs` の編集確定処理テストを維持
 - [x] **T105** [US3] `crates/gwt-cli/src/tui/screens/profiles.rs` にアクション表示の Enter 表記テストを追加
+- [x] **T106** [US4] `crates/gwt-cli/src/tui/screens/environment.rs` に選択種別ヘルパーテストを追加
 
 ## フェーズ3: 統合とチェック
 
