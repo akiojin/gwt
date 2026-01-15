@@ -14,8 +14,12 @@ jobs:
   create-tag:
     name: Create Tag and Release
     runs-on: ubuntu-latest
-    # Only run on release branch merges (commits starting with "chore(release):")
-    if: startsWith(github.event.head_commit.message, 'chore(release):')
+    # Only run on release branch merges
+    # Supports both squash merge (message starts with 'chore(release):')
+    # and merge commit (message contains 'release/' branch name)
+    if: |
+      startsWith(github.event.head_commit.message, 'chore(release):') ||
+      contains(github.event.head_commit.message, 'from akiojin/release/')
     outputs:
       tag_name: ${{ steps.tag.outputs.tag_name }}
       version: ${{ steps.tag.outputs.version }}
