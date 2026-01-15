@@ -3,7 +3,7 @@
 #![allow(dead_code)] // TUI application components for future expansion
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -21,6 +21,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::screens::branch_list::WorktreeStatus;
+use super::screens::environment::EditField;
 use super::screens::{
     render_branch_list, render_confirm, render_environment, render_error, render_help, render_logs,
     render_profiles, render_settings, render_wizard, render_worktree_create, BranchItem,
@@ -1379,10 +1380,18 @@ impl Model {
             Screen::Confirm => "[Left/Right] Select | [Enter] Confirm | [Esc] Cancel",
             Screen::Error => "[Enter/Esc] Close | [Up/Down] Scroll",
             Screen::Profiles => {
-                "[Enter] Activate | [n] New | [d] Delete | [e] Edit env | [Esc] Back"
+                if self.profiles.create_mode {
+                    "[Enter] Save | [Esc] Cancel"
+                } else {
+                    "[Enter] Activate | [n] New | [d] Delete | [e] Edit env | [Esc] Back"
+                }
             }
             Screen::Environment => {
-                "[n] New | [e] Edit | [d] Delete | [v] Toggle visibility | [Esc] Back"
+                if self.environment.edit_mode {
+                    "[Enter] Save | [Tab] Switch | [Esc] Cancel"
+                } else {
+                    "[n] New | [e] Edit | [d] Delete | [v] Toggle visibility | [Esc] Back"
+                }
             }
         };
 
@@ -1403,6 +1412,54 @@ impl Model {
             .style(style)
             .block(Block::default().borders(Borders::ALL));
         frame.render_widget(footer, area);
+    }
+
+    fn text_input_active(&self) -> bool {
+        matches!(self.screen, Screen::Profiles) && self.profiles.create_mode
+            || matches!(self.screen, Screen::Environment) && self.environment.edit_mode
+    }
+
+    fn handle_text_input_key(&mut self, key: KeyEvent, enter_is_press: bool) -> Option<Message> {
+        let is_env_new = matches!(self.screen, Screen::Environment)
+            && self.environment.edit_mode
+            && self.environment.is_new;
+        let is_env_key_field = matches!(self.screen, Screen::Environment)
+            && self.environment.edit_field == EditField::Key;
+
+        match key.code {
+            KeyCode::Esc => Some(Message::NavigateBack),
+            KeyCode::Enter if enter_is_press => {
+                if is_env_new && is_env_key_field {
+                    self.environment.switch_field();
+                    None
+                } else {
+                    Some(Message::Enter)
+                }
+            }
+            KeyCode::Backspace => Some(Message::Backspace),
+            KeyCode::Left => Some(Message::CursorLeft),
+            KeyCode::Right => Some(Message::CursorRight),
+            KeyCode::Tab => {
+                if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
+                    self.environment.switch_field();
+                }
+                None
+            }
+            KeyCode::BackTab => {
+                if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
+                    self.environment.switch_field();
+                }
+                None
+            }
+            KeyCode::Char(c) => {
+                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    None
+                } else {
+                    Some(Message::Char(c))
+                }
+            }
+            _ => None,
+        }
     }
 }
 
@@ -1470,6 +1527,8 @@ pub fn run_with_context(
                         }
                         _ => None,
                     }
+                } else if model.text_input_active() {
+                    model.handle_text_input_key(key, is_key_press)
                 } else {
                     // Normal key handling
                     match (key.code, key.modifiers) {
@@ -1524,8 +1583,12 @@ pub fn run_with_context(
                                 model.profiles.enter_create_mode();
                                 None
                             } else if matches!(model.screen, Screen::Environment) {
-                                model.environment.start_new();
-                                None
+                                if model.environment.edit_mode {
+                                    Some(Message::Char('n'))
+                                } else {
+                                    model.environment.start_new();
+                                    None
+                                }
                             } else {
                                 Some(Message::Char('n'))
                             }
@@ -1612,8 +1675,12 @@ pub fn run_with_context(
                                 model.delete_selected_profile();
                                 None
                             } else if matches!(model.screen, Screen::Environment) {
-                                model.delete_selected_env();
-                                None
+                                if model.environment.edit_mode {
+                                    Some(Message::Char('d'))
+                                } else {
+                                    model.delete_selected_env();
+                                    None
+                                }
                             } else {
                                 Some(Message::Char('d'))
                             }
@@ -1626,16 +1693,24 @@ pub fn run_with_context(
                                 }
                                 None
                             } else if matches!(model.screen, Screen::Environment) {
-                                model.environment.start_edit();
-                                None
+                                if model.environment.edit_mode {
+                                    Some(Message::Char('e'))
+                                } else {
+                                    model.environment.start_edit();
+                                    None
+                                }
                             } else {
                                 Some(Message::Char('e'))
                             }
                         }
                         (KeyCode::Char('v'), KeyModifiers::NONE) => {
                             if matches!(model.screen, Screen::Environment) {
-                                model.environment.toggle_visibility();
-                                None
+                                if model.environment.edit_mode {
+                                    Some(Message::Char('v'))
+                                } else {
+                                    model.environment.toggle_visibility();
+                                    None
+                                }
                             } else {
                                 Some(Message::Char('v'))
                             }
@@ -1796,5 +1871,42 @@ mod tests {
         assert!(model.branch_list.selected_branches.is_empty());
         assert!(model.pending_unsafe_selection.is_none());
         assert!(matches!(model.screen, Screen::BranchList));
+    }
+
+    #[test]
+    fn test_profile_input_disables_shortcuts() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::Profiles;
+        model.profiles.enter_create_mode();
+
+        let key = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE);
+        let msg = model.handle_text_input_key(key, true);
+        assert!(matches!(msg, Some(Message::Char('n'))));
+    }
+
+    #[test]
+    fn test_environment_input_switches_field_on_tab() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::Environment;
+        model.environment.start_new();
+        assert_eq!(model.environment.edit_field, EditField::Key);
+
+        let key = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        let msg = model.handle_text_input_key(key, true);
+        assert!(msg.is_none());
+        assert_eq!(model.environment.edit_field, EditField::Value);
+    }
+
+    #[test]
+    fn test_environment_input_enter_moves_to_value_field() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::Environment;
+        model.environment.start_new();
+        assert_eq!(model.environment.edit_field, EditField::Key);
+
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let msg = model.handle_text_input_key(key, true);
+        assert!(msg.is_none());
+        assert_eq!(model.environment.edit_field, EditField::Value);
     }
 }
