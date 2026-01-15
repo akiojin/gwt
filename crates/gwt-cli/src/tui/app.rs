@@ -1380,10 +1380,18 @@ impl Model {
             Screen::Confirm => "[Left/Right] Select | [Enter] Confirm | [Esc] Cancel",
             Screen::Error => "[Enter/Esc] Close | [Up/Down] Scroll",
             Screen::Profiles => {
-                "[Enter] Activate | [n] New | [d] Delete | [e] Edit env | [Esc] Back"
+                if self.profiles.create_mode {
+                    "[Enter] Save | [Esc] Cancel"
+                } else {
+                    "[Enter] Activate | [n] New | [d] Delete | [e] Edit env | [Esc] Back"
+                }
             }
             Screen::Environment => {
-                "[n] New | [e] Edit | [d] Delete | [v] Toggle visibility | [Esc] Back"
+                if self.environment.edit_mode {
+                    "[Enter] Save | [Tab] Switch | [Esc] Cancel"
+                } else {
+                    "[n] New | [e] Edit | [d] Delete | [v] Toggle visibility | [Esc] Back"
+                }
             }
         };
 
@@ -1573,8 +1581,12 @@ pub fn run_with_context(
                                 model.profiles.enter_create_mode();
                                 None
                             } else if matches!(model.screen, Screen::Environment) {
-                                model.environment.start_new();
-                                None
+                                if model.environment.edit_mode {
+                                    Some(Message::Char('n'))
+                                } else {
+                                    model.environment.start_new();
+                                    None
+                                }
                             } else {
                                 Some(Message::Char('n'))
                             }
@@ -1661,8 +1673,12 @@ pub fn run_with_context(
                                 model.delete_selected_profile();
                                 None
                             } else if matches!(model.screen, Screen::Environment) {
-                                model.delete_selected_env();
-                                None
+                                if model.environment.edit_mode {
+                                    Some(Message::Char('d'))
+                                } else {
+                                    model.delete_selected_env();
+                                    None
+                                }
                             } else {
                                 Some(Message::Char('d'))
                             }
@@ -1675,16 +1691,24 @@ pub fn run_with_context(
                                 }
                                 None
                             } else if matches!(model.screen, Screen::Environment) {
-                                model.environment.start_edit();
-                                None
+                                if model.environment.edit_mode {
+                                    Some(Message::Char('e'))
+                                } else {
+                                    model.environment.start_edit();
+                                    None
+                                }
                             } else {
                                 Some(Message::Char('e'))
                             }
                         }
                         (KeyCode::Char('v'), KeyModifiers::NONE) => {
                             if matches!(model.screen, Screen::Environment) {
-                                model.environment.toggle_visibility();
-                                None
+                                if model.environment.edit_mode {
+                                    Some(Message::Char('v'))
+                                } else {
+                                    model.environment.toggle_visibility();
+                                    None
+                                }
                             } else {
                                 Some(Message::Char('v'))
                             }

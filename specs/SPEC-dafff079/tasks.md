@@ -64,3 +64,13 @@ description: "環境変数プロファイル機能（OpenTUI）のタスク"
 ### 実装
 
 - [x] **T711** [US6] `crates/gwt-cli/src/tui/app.rs` に新規環境変数の Enter/Tab で値入力へ移動する処理を追加
+
+## 追加作業: 値の表示切替でマスク表示 (2026-01-14)
+
+### テスト（TDD）
+
+- [x] **T720** [US6] `crates/gwt-cli/src/tui/screens/environment.rs` に hidden 表示が全値マスクになるテストを追加
+
+### 実装
+
+- [x] **T721** [US6] `crates/gwt-cli/src/tui/screens/environment.rs` に hidden 表示時のマスク表示を実装
