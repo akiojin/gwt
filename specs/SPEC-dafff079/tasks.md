@@ -42,3 +42,35 @@ description: "環境変数プロファイル機能（OpenTUI）のタスク"
 
 - [ ] **T501** [統合] `bun run build` を実行し、OpenTUIのビルドが成功することを確認する
 - [ ] **T502** [統合] `bun run format:check` / `bunx --bun markdownlint-cli "**/*.md" --config .markdownlint.json --ignore-path .markdownlintignore` / `bun run lint` を実行し、lint要件を満たす
+
+## 追加作業: 入力モードのショートカット無効化 (2026-01-14)
+
+### テスト（TDD）
+
+- [x] **T701** [US7] `crates/gwt-cli/src/tui/app.rs` にプロファイル作成入力中のショートカット抑止テストを追加
+- [x] **T702** [US7] `crates/gwt-cli/src/tui/app.rs` に環境変数入力中のショートカット抑止テストを追加
+- [x] **T703** [US8] `crates/gwt-cli/src/tui/screens/environment.rs` に空値プレースホルダーが保存値へ混入しないテストを追加
+
+### 実装
+
+- [x] **T704** [US7] `crates/gwt-cli/src/tui/app.rs` に入力モード時のキー処理優先（ショートカット無効化）を実装
+
+## 追加作業: 環境変数のキー/値フォーカス移動 (2026-01-14)
+
+### テスト（TDD）
+
+- [x] **T710** [US6] `crates/gwt-cli/src/tui/app.rs` に新規環境変数の Enter/Tab で値入力へ移動するテストを追加
+
+### 実装
+
+- [x] **T711** [US6] `crates/gwt-cli/src/tui/app.rs` に新規環境変数の Enter/Tab で値入力へ移動する処理を追加
+
+## 追加作業: 値の表示切替でマスク表示 (2026-01-14)
+
+### テスト（TDD）
+
+- [x] **T720** [US6] `crates/gwt-cli/src/tui/screens/environment.rs` に hidden 表示が全値マスクになるテストを追加
+
+### 実装
+
+- [x] **T721** [US6] `crates/gwt-cli/src/tui/screens/environment.rs` に hidden 表示時のマスク表示を実装
