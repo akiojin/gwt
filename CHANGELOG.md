@@ -1,7 +1,28 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [6.0.1] - 2026-01-15
+
+### Bug Fixes
+
+- Support merge commit in release workflow trigger
+- Support merge commit in release workflow trigger
+- Add workflow_dispatch support to release workflow trigger
+
+### Documentation
+
+- パッケージ公開状況をCLAUDE.mdに追記
+
+### Miscellaneous Tasks
+
+- Sync main to develop after v6.0.0 release
+- バージョンを 6.0.3 に統一
+
 ## [6.0.0] - 2026-01-15
+
+### Bug Fixes
+
+- Update migration status in README
 
 ### Miscellaneous Tasks
 
