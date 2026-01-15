@@ -823,8 +823,10 @@ impl Model {
                             }
                         }
                     } else if let Some(item) = self.profiles.selected_profile() {
-                        self.profiles_config.set_active(Some(item.name.clone()));
+                        let name = item.name.clone();
+                        self.profiles_config.set_active(Some(name.clone()));
                         self.save_profiles();
+                        self.open_environment_editor(&name);
                     }
                 }
                 Screen::Environment => {
@@ -1397,7 +1399,7 @@ impl Model {
                 if self.profiles.create_mode {
                     "[Enter] Save | [Esc] Cancel"
                 } else {
-                    "[Enter] Activate | [n] New | [d] Delete | [e] Edit env | [Esc] Back"
+                    "[Enter] Edit env | [n] New | [d] Delete | [Esc] Back"
                 }
             }
             Screen::Environment => {
@@ -1700,13 +1702,7 @@ pub fn run_with_context(
                             }
                         }
                         (KeyCode::Char('e'), KeyModifiers::NONE) => {
-                            if matches!(model.screen, Screen::Profiles) {
-                                if let Some(item) = model.profiles.selected_profile() {
-                                    let name = item.name.clone();
-                                    model.open_environment_editor(&name);
-                                }
-                                None
-                            } else if matches!(model.screen, Screen::Environment) {
+                            if matches!(model.screen, Screen::Environment) {
                                 if model.environment.edit_mode {
                                     Some(Message::Char('e'))
                                 } else {

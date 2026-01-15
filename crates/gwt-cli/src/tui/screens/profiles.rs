@@ -236,15 +236,7 @@ pub fn render_profiles(state: &ProfilesState, frame: &mut Frame, area: Rect) {
         }
     } else {
         // Show actions
-        let actions = if state
-            .selected_profile()
-            .map(|p| p.is_active)
-            .unwrap_or(false)
-        {
-            "[n] New | [d] Delete | [e] Edit env | [Esc] Back"
-        } else {
-            "[Enter] Activate | [n] New | [d] Delete | [e] Edit env | [Esc] Back"
-        };
+        let actions = profile_actions_text();
 
         let footer = Paragraph::new(actions)
             .style(Style::default().fg(Color::DarkGray))
@@ -263,6 +255,10 @@ pub fn render_profiles(state: &ProfilesState, frame: &mut Frame, area: Rect) {
         let error_msg = Paragraph::new(error.as_str()).style(Style::default().fg(Color::Red));
         frame.render_widget(error_msg, error_area);
     }
+}
+
+fn profile_actions_text() -> &'static str {
+    "[Enter] Edit env | [n] New | [d] Delete | [Esc] Back"
 }
 
 #[cfg(test)]
@@ -332,5 +328,13 @@ mod tests {
 
         state.new_name = "invalid name!".to_string();
         assert!(state.validate_new_name().is_err());
+    }
+
+    #[test]
+    fn test_profile_actions_text_uses_enter_for_env() {
+        assert_eq!(
+            profile_actions_text(),
+            "[Enter] Edit env | [n] New | [d] Delete | [Esc] Back"
+        );
     }
 }
