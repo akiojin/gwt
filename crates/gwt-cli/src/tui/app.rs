@@ -1528,7 +1528,7 @@ pub fn run_with_context(
                         _ => None,
                     }
                 } else if model.text_input_active() {
-                    model.handle_text_input_key(key, enter_is_press)
+                    model.handle_text_input_key(key, is_key_press)
                 } else {
                     // Normal key handling
                     match (key.code, key.modifiers) {
