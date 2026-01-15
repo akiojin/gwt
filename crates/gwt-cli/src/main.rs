@@ -739,7 +739,7 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
             let reason = if let Some(signal) = signal {
                 format!("Terminated by signal {}", signal)
             } else if let Some(code) = code {
-                format!("Exited with status {}", code)
+                format_exit_code(code)
             } else {
                 "Exited with unknown status".to_string()
             };
@@ -1317,6 +1317,35 @@ fn classify_exit_status(status: std::process::ExitStatus) -> ExitClassification 
     classify_exit(status.code(), exit_signal(&status))
 }
 
+/// Format exit code with platform-specific explanation
+fn format_exit_code(code: i32) -> String {
+    // Negative codes on Windows are typically NTSTATUS values
+    if code < 0 {
+        let ntstatus = code as u32;
+        if let Some(desc) = describe_ntstatus(ntstatus) {
+            return format!("Exited with status {} (0x{:08X}: {})", code, ntstatus, desc);
+        }
+        return format!("Exited with status {} (0x{:08X})", code, ntstatus);
+    }
+    format!("Exited with status {}", code)
+}
+
+/// Describe common NTSTATUS codes (Windows-specific error codes)
+fn describe_ntstatus(code: u32) -> Option<&'static str> {
+    match code {
+        0xC0000005 => Some("STATUS_ACCESS_VIOLATION"),
+        0xC0000017 => Some("STATUS_NO_MEMORY"),
+        0xC000001D => Some("STATUS_ILLEGAL_INSTRUCTION"),
+        0xC00000FD => Some("STATUS_STACK_OVERFLOW"),
+        0xC0000135 => Some("STATUS_DLL_NOT_FOUND"),
+        0xC0000139 => Some("STATUS_ENTRYPOINT_NOT_FOUND"),
+        0xC0000142 => Some("STATUS_DLL_INIT_FAILED"),
+        0xC0000374 => Some("STATUS_HEAP_CORRUPTION"),
+        0xC0000409 => Some("STATUS_STACK_BUFFER_OVERRUN"),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1524,5 +1553,50 @@ mod tests {
 
         let id = detect_claude_session_id_at(home, Path::new("/repo/wt"));
         assert_eq!(id.as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn test_format_exit_code_normal() {
+        assert_eq!(format_exit_code(0), "Exited with status 0");
+        assert_eq!(format_exit_code(1), "Exited with status 1");
+        assert_eq!(format_exit_code(127), "Exited with status 127");
+    }
+
+    #[test]
+    fn test_format_exit_code_negative_known() {
+        // 0xC0000409 as i32 = -1073740791 (STATUS_STACK_BUFFER_OVERRUN)
+        let result = format_exit_code(-1073740791);
+        assert!(result.contains("-1073740791"));
+        assert!(result.contains("0xC0000409"));
+        assert!(result.contains("STATUS_STACK_BUFFER_OVERRUN"));
+
+        // 0xC0000374 as i32 = -1073740940 (STATUS_HEAP_CORRUPTION)
+        let result = format_exit_code(-1073740940);
+        assert!(result.contains("-1073740940"));
+        assert!(result.contains("0xC0000374"));
+        assert!(result.contains("STATUS_HEAP_CORRUPTION"));
+    }
+
+    #[test]
+    fn test_format_exit_code_negative_unknown() {
+        // Unknown NTSTATUS (0xFFFFFFFF = -1)
+        let result = format_exit_code(-1);
+        assert!(result.contains("-1"));
+        assert!(result.contains("0x"));
+        // No STATUS_ description for unknown code
+        assert!(!result.contains("STATUS_"));
+    }
+
+    #[test]
+    fn test_describe_ntstatus() {
+        assert_eq!(
+            describe_ntstatus(0xC0000374),
+            Some("STATUS_HEAP_CORRUPTION")
+        );
+        assert_eq!(
+            describe_ntstatus(0xC0000005),
+            Some("STATUS_ACCESS_VIOLATION")
+        );
+        assert_eq!(describe_ntstatus(0x12345678), None);
     }
 }
