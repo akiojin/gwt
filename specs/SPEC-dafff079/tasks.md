@@ -54,3 +54,13 @@ description: "環境変数プロファイル機能（OpenTUI）のタスク"
 ### 実装
 
 - [x] **T704** [US7] `crates/gwt-cli/src/tui/app.rs` に入力モード時のキー処理優先（ショートカット無効化）を実装
+
+## 追加作業: 環境変数のキー/値フォーカス移動 (2026-01-14)
+
+### テスト（TDD）
+
+- [x] **T710** [US6] `crates/gwt-cli/src/tui/app.rs` に新規環境変数の Enter/Tab で値入力へ移動するテストを追加
+
+### 実装
+
+- [x] **T711** [US6] `crates/gwt-cli/src/tui/app.rs` に新規環境変数の Enter/Tab で値入力へ移動する処理を追加

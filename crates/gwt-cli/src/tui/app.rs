@@ -21,6 +21,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::screens::branch_list::WorktreeStatus;
+use super::screens::environment::EditField;
 use super::screens::{
     render_branch_list, render_confirm, render_environment, render_error, render_help, render_logs,
     render_profiles, render_settings, render_wizard, render_worktree_create, BranchItem,
@@ -1411,13 +1412,32 @@ impl Model {
     }
 
     fn handle_text_input_key(&mut self, key: KeyEvent, enter_is_press: bool) -> Option<Message> {
+        let is_env_new = matches!(self.screen, Screen::Environment)
+            && self.environment.edit_mode
+            && self.environment.is_new;
+        let is_env_key_field = matches!(self.screen, Screen::Environment)
+            && self.environment.edit_field == EditField::Key;
+
         match key.code {
             KeyCode::Esc => Some(Message::NavigateBack),
-            KeyCode::Enter if enter_is_press => Some(Message::Enter),
+            KeyCode::Enter if enter_is_press => {
+                if is_env_new && is_env_key_field {
+                    self.environment.switch_field();
+                    None
+                } else {
+                    Some(Message::Enter)
+                }
+            }
             KeyCode::Backspace => Some(Message::Backspace),
             KeyCode::Left => Some(Message::CursorLeft),
             KeyCode::Right => Some(Message::CursorRight),
             KeyCode::Tab => {
+                if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
+                    self.environment.switch_field();
+                }
+                None
+            }
+            KeyCode::BackTab => {
                 if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
                     self.environment.switch_field();
                 }
@@ -1792,7 +1812,6 @@ pub fn run_with_context(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::screens::environment::EditField;
     use crate::tui::screens::wizard::WizardStep;
     use crate::tui::screens::{BranchItem, BranchListState};
     use gwt_core::git::Branch;
@@ -1847,6 +1866,19 @@ mod tests {
         assert_eq!(model.environment.edit_field, EditField::Key);
 
         let key = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        let msg = model.handle_text_input_key(key, true);
+        assert!(msg.is_none());
+        assert_eq!(model.environment.edit_field, EditField::Value);
+    }
+
+    #[test]
+    fn test_environment_input_enter_moves_to_value_field() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::Environment;
+        model.environment.start_new();
+        assert_eq!(model.environment.edit_field, EditField::Key);
+
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         let msg = model.handle_text_input_key(key, true);
         assert!(msg.is_none());
         assert_eq!(model.environment.edit_field, EditField::Value);
