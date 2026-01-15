@@ -49,11 +49,31 @@ impl LogReader {
         let mut files: Vec<PathBuf> = std::fs::read_dir(&self.log_dir)?
             .filter_map(|e| e.ok())
             .map(|e| e.path())
-            .filter(|p| p.extension().map(|e| e == "jsonl").unwrap_or(false))
+            .filter(|p| Self::is_log_file(p))
             .collect();
 
         files.sort_by(|a, b| b.cmp(a)); // Newest first
         Ok(files)
+    }
+
+    /// Check if a path is a log file
+    /// Supports both formats:
+    /// - Legacy: `YYYY-MM-DD.jsonl` or `*.jsonl`
+    /// - tracing-appender: `gwt.jsonl.YYYY-MM-DD`
+    pub(crate) fn is_log_file(path: &Path) -> bool {
+        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+        // Legacy format: ends with .jsonl
+        if path.extension().map(|e| e == "jsonl").unwrap_or(false) {
+            return true;
+        }
+
+        // tracing-appender format: gwt.jsonl.YYYY-MM-DD
+        if file_name.starts_with("gwt.jsonl.") {
+            return true;
+        }
+
+        false
     }
 
     /// Read entries from a log file with pagination
