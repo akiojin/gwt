@@ -110,7 +110,7 @@ jobs:
           sudo apt-get install -y musl-tools
       - name: Install cross (Linux ARM64)
         if: matrix.target == 'aarch64-unknown-linux-musl'
-        run: cargo install cross --git https://github.com/cross-rs/cross
+        run: cargo install cross --git https://github.com/cross-rs/cross --tag v0.2.5
       - name: Build (cross)
         if: matrix.target == 'aarch64-unknown-linux-musl'
         run: cross build --release --target ${{ matrix.target }}
@@ -154,6 +154,9 @@ jobs:
     needs: [create-tag, upload-release]
     runs-on: ubuntu-latest
     environment: release
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
