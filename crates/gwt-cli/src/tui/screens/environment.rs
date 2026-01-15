@@ -528,13 +528,22 @@ pub fn collect_os_env() -> Vec<OsEnvItem> {
 
 /// Render environment screen
 pub fn render_environment(state: &mut EnvironmentState, frame: &mut Frame, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
+    let constraints = if state.edit_mode {
+        vec![
             Constraint::Length(2), // Header
             Constraint::Min(5),    // Variables list
-            Constraint::Length(4), // Edit area or actions
-        ])
+            Constraint::Length(4), // Edit area
+        ]
+    } else {
+        vec![
+            Constraint::Length(2), // Header
+            Constraint::Min(5),    // Variables list
+        ]
+    };
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
         .split(area);
 
     // Header
@@ -598,15 +607,9 @@ pub fn render_environment(state: &mut EnvironmentState, frame: &mut Frame, area:
         frame.render_widget(list, chunks[1]);
     }
 
-    // Edit area or actions
+    // Edit area
     if state.edit_mode {
         render_edit_area(state, frame, chunks[2]);
-    } else {
-        let actions = environment_actions_text();
-        let footer = Paragraph::new(actions)
-            .style(Style::default().fg(Color::DarkGray))
-            .block(Block::default().borders(Borders::TOP));
-        frame.render_widget(footer, chunks[2]);
     }
 
     // Show error
@@ -696,9 +699,6 @@ fn format_display_value(value: &str) -> String {
     value.to_string()
 }
 
-fn environment_actions_text() -> &'static str {
-    "[Enter] Edit | [n] New | [d] Delete (profile)/Disable (OS) | [r] Reset (override) | [Esc] Back"
-}
 
 #[cfg(test)]
 mod tests {
@@ -964,11 +964,4 @@ mod tests {
         assert!(!state.selected_is_added());
     }
 
-    #[test]
-    fn test_environment_actions_text_uses_enter_only() {
-        assert_eq!(
-            environment_actions_text(),
-            "[Enter] Edit | [n] New | [d] Delete (profile)/Disable (OS) | [r] Reset (override) | [Esc] Back"
-        );
-    }
 }
