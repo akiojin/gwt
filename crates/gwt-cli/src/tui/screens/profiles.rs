@@ -258,7 +258,7 @@ pub fn render_profiles(state: &ProfilesState, frame: &mut Frame, area: Rect) {
 }
 
 fn profile_actions_text() -> &'static str {
-    "[Enter] Edit env | [n] New | [d] Delete | [Esc] Back"
+    "[Space] Activate | [Enter] Edit env | [n] New | [d] Delete | [Esc] Back"
 }
 
 #[cfg(test)]
@@ -334,7 +334,7 @@ mod tests {
     fn test_profile_actions_text_uses_enter_for_env() {
         assert_eq!(
             profile_actions_text(),
-            "[Enter] Edit env | [n] New | [d] Delete | [Esc] Back"
+            "[Space] Activate | [Enter] Edit env | [n] New | [d] Delete | [Esc] Back"
         );
     }
 }

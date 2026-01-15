@@ -651,6 +651,23 @@ impl Model {
         self.save_profiles();
     }
 
+    fn activate_selected_profile(&mut self) {
+        let selected = match self.profiles.selected_profile() {
+            Some(item) => item.name.clone(),
+            None => return,
+        };
+        self.profiles_config.set_active(Some(selected.clone()));
+        self.save_profiles();
+        if let Some(index) = self
+            .profiles
+            .profiles
+            .iter()
+            .position(|profile| profile.name == selected)
+        {
+            self.profiles.selected = index;
+        }
+    }
+
     fn delete_selected_env(&mut self) {
         if self.environment.selected_is_overridden() {
             self.status_message =
@@ -877,8 +894,6 @@ impl Model {
                         }
                     } else if let Some(item) = self.profiles.selected_profile() {
                         let name = item.name.clone();
-                        self.profiles_config.set_active(Some(name.clone()));
-                        self.save_profiles();
                         self.open_environment_editor(&name);
                     }
                 }
@@ -1056,6 +1071,8 @@ impl Model {
                             self.branch_list.toggle_selection();
                         }
                     }
+                } else if matches!(self.screen, Screen::Profiles) && !self.profiles.create_mode {
+                    self.activate_selected_profile();
                 }
             }
             Message::OpenWizard => {
@@ -1453,7 +1470,7 @@ impl Model {
                 if self.profiles.create_mode {
                     "[Enter] Save | [Esc] Cancel"
                 } else {
-                    "[Enter] Edit env | [n] New | [d] Delete | [Esc] Back"
+                    "[Space] Activate | [Enter] Edit env | [n] New | [d] Delete | [Esc] Back"
                 }
             }
             Screen::Environment => {
