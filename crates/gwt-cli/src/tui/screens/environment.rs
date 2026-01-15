@@ -602,7 +602,7 @@ pub fn render_environment(state: &mut EnvironmentState, frame: &mut Frame, area:
     if state.edit_mode {
         render_edit_area(state, frame, chunks[2]);
     } else {
-        let actions = "[Enter/e] Edit | [n] New | [d] Delete (profile)/Disable (OS) | [r] Reset (override) | [Esc] Back";
+        let actions = environment_actions_text();
         let footer = Paragraph::new(actions)
             .style(Style::default().fg(Color::DarkGray))
             .block(Block::default().borders(Borders::TOP));
@@ -694,6 +694,10 @@ fn render_edit_area(state: &EnvironmentState, frame: &mut Frame, area: Rect) {
 
 fn format_display_value(value: &str) -> String {
     value.to_string()
+}
+
+fn environment_actions_text() -> &'static str {
+    "[Enter] Edit | [n] New | [d] Delete (profile)/Disable (OS) | [r] Reset (override) | [Esc] Back"
 }
 
 #[cfg(test)]
@@ -958,5 +962,13 @@ mod tests {
         assert!(state.selected_is_os_entry());
         assert!(!state.selected_is_overridden());
         assert!(!state.selected_is_added());
+    }
+
+    #[test]
+    fn test_environment_actions_text_uses_enter_only() {
+        assert_eq!(
+            environment_actions_text(),
+            "[Enter] Edit | [n] New | [d] Delete (profile)/Disable (OS) | [r] Reset (override) | [Esc] Back"
+        );
     }
 }
