@@ -1,7 +1,23 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [5.5.0] - 2026-01-15
+
+### Miscellaneous Tasks
+
+- Sync main to develop after v5.4.0 release
+
 ## [5.4.0] - 2026-01-15
+
+### Bug Fixes
+
+- Use workspace version inheritance for subcrates
+- Windows NTSTATUSコードを人間可読形式で表示 (#609)
+- Use musl static linking for Linux binaries to resolve GLIBC dependency (#610)
+
+### Features
+
+- ログビューア機能の実装と構造化ログの強化 (#606)
 
 ### Miscellaneous Tasks
 
