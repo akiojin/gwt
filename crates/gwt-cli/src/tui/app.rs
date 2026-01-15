@@ -217,6 +217,8 @@ pub enum Message {
     WizardBack,
     /// Repair worktrees (x key)
     RepairWorktrees,
+    /// Copy selected log to clipboard
+    CopyLogToClipboard,
 }
 
 impl Model {
@@ -352,11 +354,24 @@ impl Model {
                 // Convert gwt_core LogEntry to TUI LogEntry
                 let tui_entries: Vec<super::screens::logs::LogEntry> = entries
                     .into_iter()
-                    .map(|e| super::screens::logs::LogEntry {
-                        timestamp: e.timestamp,
-                        level: e.level,
-                        message: e.message,
-                        target: e.target,
+                    .map(|e| {
+                        let message = e.message().to_string();
+                        let category = e.category().map(|s| s.to_string());
+                        // Convert extra fields to HashMap<String, String>
+                        let extra: std::collections::HashMap<String, String> = e
+                            .fields
+                            .extra
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.to_string()))
+                            .collect();
+                        super::screens::logs::LogEntry {
+                            timestamp: e.timestamp,
+                            level: e.level,
+                            message,
+                            target: e.target,
+                            category,
+                            extra,
+                        }
                     })
                     .collect();
                 self.logs = LogsState::new().with_entries(tui_entries);
@@ -678,6 +693,12 @@ impl Model {
                     self.profiles.exit_create_mode();
                 } else if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
                     self.environment.cancel_edit();
+                } else if matches!(self.screen, Screen::Logs) && self.logs.is_searching {
+                    // Exit log search mode
+                    self.logs.toggle_search();
+                } else if matches!(self.screen, Screen::Logs) && self.logs.is_detail_shown() {
+                    // Close log detail view
+                    self.logs.close_detail();
                 } else if matches!(self.screen, Screen::Confirm) {
                     // FR-029d: Cancel confirm dialog without executing action
                     self.pending_unsafe_selection = None;
@@ -851,6 +872,9 @@ impl Model {
                 Screen::Error => {
                     self.update(Message::NavigateBack);
                 }
+                Screen::Logs => {
+                    self.logs.toggle_detail();
+                }
                 _ => {}
             },
             Message::Char(c) => {
@@ -865,6 +889,9 @@ impl Model {
                     self.profiles.insert_char(c);
                 } else if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
                     self.environment.insert_char(c);
+                } else if matches!(self.screen, Screen::Logs) && self.logs.is_searching {
+                    // Log search mode - add character to search
+                    self.logs.search.push(c);
                 }
             }
             Message::Backspace => {
@@ -877,6 +904,9 @@ impl Model {
                     self.profiles.delete_char();
                 } else if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
                     self.environment.delete_char();
+                } else if matches!(self.screen, Screen::Logs) && self.logs.is_searching {
+                    // Log search mode - delete character
+                    self.logs.search.pop();
                 }
             }
             Message::CursorLeft => {
@@ -925,6 +955,27 @@ impl Model {
                     }
                 }
                 self.status_message_time = Some(Instant::now());
+            }
+            Message::CopyLogToClipboard => {
+                if matches!(self.screen, Screen::Logs) {
+                    if let Some(entry) = self.logs.selected_entry() {
+                        let text = entry.to_clipboard_string();
+                        match arboard::Clipboard::new() {
+                            Ok(mut clipboard) => match clipboard.set_text(&text) {
+                                Ok(()) => {
+                                    self.status_message = Some("Copied to clipboard".to_string());
+                                }
+                                Err(e) => {
+                                    self.status_message = Some(format!("Failed to copy: {}", e));
+                                }
+                            },
+                            Err(e) => {
+                                self.status_message = Some(format!("Clipboard unavailable: {}", e));
+                            }
+                        }
+                        self.status_message_time = Some(Instant::now());
+                    }
+                }
             }
             Message::Tab => {
                 if let Screen::Settings = self.screen {
@@ -1614,11 +1665,14 @@ pub fn run_with_context(
                             }
                         }
                         (KeyCode::Char('c'), KeyModifiers::NONE) => {
-                            // FR-010: Cleanup command
-                            // In filter mode, 'c' goes to filter input
-                            if matches!(model.screen, Screen::BranchList)
+                            // Copy to clipboard on Logs screen
+                            if matches!(model.screen, Screen::Logs) && !model.logs.is_searching {
+                                Some(Message::CopyLogToClipboard)
+                            } else if matches!(model.screen, Screen::BranchList)
                                 && !model.branch_list.filter_mode
                             {
+                                // FR-010: Cleanup command
+                                // In filter mode, 'c' goes to filter input
                                 // FR-028: Check if branches are selected
                                 if model.branch_list.selected_branches.is_empty() {
                                     model.status_message =

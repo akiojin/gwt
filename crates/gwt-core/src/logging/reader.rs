@@ -6,24 +6,48 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
-/// Log entry from JSON Lines file
+/// Fields from tracing-subscriber JSON output
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct LogFields {
+    /// Log message
+    #[serde(default)]
+    pub message: String,
+    /// Category field
+    #[serde(default)]
+    pub category: Option<String>,
+    /// Additional fields
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Log entry from JSON Lines file (tracing-subscriber format)
 #[derive(Debug, Clone, Deserialize)]
 pub struct LogEntry {
     /// Timestamp
     pub timestamp: String,
     /// Log level
     pub level: String,
-    /// Log message
-    pub message: String,
     /// Target module
     #[serde(default)]
     pub target: String,
+    /// Fields containing message and other data
+    #[serde(default)]
+    pub fields: LogFields,
     /// Span information
     #[serde(default)]
     pub span: Option<serde_json::Value>,
-    /// Additional fields
-    #[serde(flatten)]
-    pub fields: serde_json::Map<String, serde_json::Value>,
+}
+
+impl LogEntry {
+    /// Get the log message
+    pub fn message(&self) -> &str {
+        &self.fields.message
+    }
+
+    /// Get the category if present
+    pub fn category(&self) -> Option<&str> {
+        self.fields.category.as_deref()
+    }
 }
 
 /// Log reader for lazy loading of log files
@@ -49,11 +73,31 @@ impl LogReader {
         let mut files: Vec<PathBuf> = std::fs::read_dir(&self.log_dir)?
             .filter_map(|e| e.ok())
             .map(|e| e.path())
-            .filter(|p| p.extension().map(|e| e == "jsonl").unwrap_or(false))
+            .filter(|p| Self::is_log_file(p))
             .collect();
 
         files.sort_by(|a, b| b.cmp(a)); // Newest first
         Ok(files)
+    }
+
+    /// Check if a path is a log file
+    /// Supports both formats:
+    /// - Legacy: `YYYY-MM-DD.jsonl` or `*.jsonl`
+    /// - tracing-appender: `gwt.jsonl.YYYY-MM-DD`
+    pub(crate) fn is_log_file(path: &Path) -> bool {
+        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+        // Legacy format: ends with .jsonl
+        if path.extension().map(|e| e == "jsonl").unwrap_or(false) {
+            return true;
+        }
+
+        // tracing-appender format: gwt.jsonl.YYYY-MM-DD
+        if file_name.starts_with("gwt.jsonl.") {
+            return true;
+        }
+
+        false
     }
 
     /// Read entries from a log file with pagination
