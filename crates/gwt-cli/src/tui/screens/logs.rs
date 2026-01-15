@@ -400,14 +400,12 @@ fn render_detail_view(entry: &LogEntry, frame: &mut Frame, area: Rect) {
         Line::from(entry.message.clone()),
     ];
 
-    let paragraph = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Log Detail ")
-                .title_bottom(" [Esc] Close "),
-        );
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Log Detail ")
+            .title_bottom(" [Esc] Close "),
+    );
     frame.render_widget(paragraph, area);
 }
 

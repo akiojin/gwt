@@ -108,7 +108,11 @@ impl WorktreeManager {
 
     /// Create a new worktree for an existing branch
     pub fn create_for_branch(&self, branch_name: &str) -> Result<Worktree> {
-        debug!(category = "worktree", branch = branch_name, "Creating worktree for existing branch");
+        debug!(
+            category = "worktree",
+            branch = branch_name,
+            "Creating worktree for existing branch"
+        );
         let path = WorktreePath::generate(&self.repo_root, branch_name);
 
         // FR-038-040: Handle existing path with stale recovery
@@ -118,7 +122,11 @@ impl WorktreeManager {
 
         // Check if branch exists
         if !Branch::exists(&self.repo_root, branch_name)? {
-            error!(category = "worktree", branch = branch_name, "Branch not found");
+            error!(
+                category = "worktree",
+                branch = branch_name,
+                "Branch not found"
+            );
             return Err(GwtError::BranchNotFound {
                 name: branch_name.to_string(),
             });
@@ -163,7 +171,11 @@ impl WorktreeManager {
 
         // Check if branch already exists
         if Branch::exists(&self.repo_root, branch_name)? {
-            error!(category = "worktree", branch = branch_name, "Branch already exists");
+            error!(
+                category = "worktree",
+                branch = branch_name,
+                "Branch already exists"
+            );
             return Err(GwtError::BranchAlreadyExists {
                 name: branch_name.to_string(),
             });
@@ -173,7 +185,11 @@ impl WorktreeManager {
         if let Some(base) = base_branch {
             // Verify base branch exists
             if !Branch::exists(&self.repo_root, base)? {
-                error!(category = "worktree", branch = base, "Base branch not found");
+                error!(
+                    category = "worktree",
+                    branch = base,
+                    "Base branch not found"
+                );
                 return Err(GwtError::BranchNotFound {
                     name: base.to_string(),
                 });

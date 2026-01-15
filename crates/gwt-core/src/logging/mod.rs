@@ -140,10 +140,26 @@ mod tests {
 
         // Read all entries and verify none were lost
         let (entries, _) = LogReader::read_entries(&log_file, 0, 100).unwrap();
-        assert_eq!(entries.len(), 3, "All entries should be preserved after append");
-        assert_eq!(entries[0].message(), "entry1", "First entry should be preserved");
-        assert_eq!(entries[1].message(), "entry2", "Second entry should be preserved");
-        assert_eq!(entries[2].message(), "entry3", "New entry should be appended");
+        assert_eq!(
+            entries.len(),
+            3,
+            "All entries should be preserved after append"
+        );
+        assert_eq!(
+            entries[0].message(),
+            "entry1",
+            "First entry should be preserved"
+        );
+        assert_eq!(
+            entries[1].message(),
+            "entry2",
+            "Second entry should be preserved"
+        );
+        assert_eq!(
+            entries[2].message(),
+            "entry3",
+            "New entry should be appended"
+        );
     }
 
     #[test]
