@@ -54,6 +54,8 @@ pub struct AgentLaunchConfig {
     pub skip_permissions: bool,
     /// Environment variables to apply
     pub env: Vec<(String, String)>,
+    /// Environment variables to remove
+    pub env_remove: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -565,8 +567,21 @@ impl Model {
             .unwrap_or_default()
     }
 
+    fn active_env_removals(&self) -> Vec<String> {
+        self.profiles_config
+            .active_profile()
+            .map(|profile| {
+                let mut removals = profile.disabled_env.clone();
+                removals.retain(|key| !profile.env.contains_key(key));
+                removals.sort();
+                removals.dedup();
+                removals
+            })
+            .unwrap_or_default()
+    }
+
     fn open_environment_editor(&mut self, profile_name: &str) {
-        let vars = self
+        let (vars, disabled_keys) = self
             .profiles_config
             .profiles
             .get(profile_name)
@@ -581,13 +596,14 @@ impl Model {
                     })
                     .collect();
                 items.sort_by(|a, b| a.key.cmp(&b.key));
-                items
+                (items, profile.disabled_env.clone())
             })
-            .unwrap_or_default();
+            .unwrap_or_else(|| (Vec::new(), Vec::new()));
 
         self.environment = EnvironmentState::new()
             .with_profile(profile_name)
             .with_variables(vars)
+            .with_disabled_keys(disabled_keys)
             .with_os_variables(collect_os_env());
         self.screen_stack.push(self.screen.clone());
         self.screen = Screen::Environment;
@@ -607,6 +623,12 @@ impl Model {
         for var in &self.environment.variables {
             profile.env.insert(var.key.clone(), var.value.clone());
         }
+        let mut disabled = self.environment.disabled_keys.clone();
+        disabled.retain(|key| !profile.env.contains_key(key));
+        disabled.sort();
+        disabled.dedup();
+        profile.disabled_env = disabled.clone();
+        self.environment.disabled_keys = disabled;
         self.save_profiles();
     }
 
@@ -630,13 +652,23 @@ impl Model {
     }
 
     fn delete_selected_env(&mut self) {
-        if self.environment.selected_is_os_only() {
-            return;
-        }
         if self.environment.selected_is_overridden() {
             self.status_message =
                 Some("Use 'r' to reset overridden environment variable.".to_string());
             self.status_message_time = Some(Instant::now());
+            return;
+        }
+        if self.environment.selected_is_os_entry() {
+            if let Some(key) = self.environment.selected_key() {
+                let disabled = self.environment.toggle_disabled_key(&key);
+                self.persist_environment();
+                self.status_message = Some(if disabled {
+                    "OS environment variable disabled.".to_string()
+                } else {
+                    "OS environment variable enabled.".to_string()
+                });
+                self.status_message_time = Some(Instant::now());
+            }
             return;
         }
         let Some(selected_index) = self.environment.selected_profile_index() else {
@@ -1142,6 +1174,7 @@ impl Model {
                         session_id: self.wizard.session_id.clone(),
                         skip_permissions: self.wizard.skip_permissions,
                         env: self.active_env_overrides(),
+                        env_remove: self.active_env_removals(),
                     };
 
                     // Store the launch config and quit TUI
@@ -1427,7 +1460,7 @@ impl Model {
                 if self.environment.edit_mode {
                     "[Enter] Save | [Tab] Switch | [Esc] Cancel"
                 } else {
-                    "[Enter/e] Edit | [n] New | [d] Delete (profile) | [r] Reset (OS) | [v] Toggle visibility | [Esc] Back"
+                    "[Enter/e] Edit | [n] New | [d] Delete (profile)/Disable (OS) | [r] Reset (override) | [v] Toggle visibility | [Esc] Back"
                 }
             }
         };

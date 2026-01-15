@@ -28,6 +28,7 @@ pub struct OsEnvItem {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EnvDisplayKind {
     OsOnly,
+    OsDisabled,
     Added,
     Overridden,
 }
@@ -55,6 +56,8 @@ pub struct EnvironmentState {
     pub variables: Vec<EnvItem>,
     /// OS environment variables
     pub os_variables: Vec<OsEnvItem>,
+    /// Disabled OS environment variable keys
+    pub disabled_keys: Vec<String>,
     /// Currently selected index
     pub selected: usize,
     /// Scroll offset for large lists
@@ -100,6 +103,15 @@ impl EnvironmentState {
         self
     }
 
+    /// Initialize with disabled OS keys
+    pub fn with_disabled_keys(mut self, mut keys: Vec<String>) -> Self {
+        keys.sort();
+        keys.dedup();
+        self.disabled_keys = keys;
+        self.clamp_selection();
+        self
+    }
+
     /// Set profile context
     pub fn with_profile(mut self, profile: &str) -> Self {
         self.profile_name = Some(profile.to_string());
@@ -135,6 +147,24 @@ impl EnvironmentState {
             self.selected_display_item().map(|item| item.kind),
             Some(EnvDisplayKind::OsOnly)
         )
+    }
+
+    pub fn selected_is_os_disabled(&self) -> bool {
+        matches!(
+            self.selected_display_item().map(|item| item.kind),
+            Some(EnvDisplayKind::OsDisabled)
+        )
+    }
+
+    pub fn selected_is_os_entry(&self) -> bool {
+        matches!(
+            self.selected_display_item().map(|item| item.kind),
+            Some(EnvDisplayKind::OsOnly | EnvDisplayKind::OsDisabled)
+        )
+    }
+
+    pub fn selected_key(&self) -> Option<String> {
+        self.selected_display_item().map(|item| item.key)
     }
 
     /// Move selection up
@@ -371,6 +401,17 @@ impl EnvironmentState {
         }
     }
 
+    pub fn toggle_disabled_key(&mut self, key: &str) -> bool {
+        if let Some(pos) = self.disabled_keys.iter().position(|item| item == key) {
+            self.disabled_keys.remove(pos);
+            false
+        } else {
+            self.disabled_keys.push(key.to_string());
+            self.disabled_keys.sort();
+            true
+        }
+    }
+
     pub fn set_viewport(&mut self, height: usize) {
         self.viewport_height = height;
         self.ensure_visible();
@@ -428,12 +469,19 @@ impl EnvironmentState {
                     kind: EnvDisplayKind::Added,
                     profile_index: Some(*index),
                 },
-                (None, Some(os_value)) => DisplayEnvItem {
-                    key,
-                    value: os_value.clone(),
-                    kind: EnvDisplayKind::OsOnly,
-                    profile_index: None,
-                },
+                (None, Some(os_value)) => {
+                    let kind = if self.disabled_keys.contains(&key) {
+                        EnvDisplayKind::OsDisabled
+                    } else {
+                        EnvDisplayKind::OsOnly
+                    };
+                    DisplayEnvItem {
+                        key,
+                        value: os_value.clone(),
+                        kind,
+                        profile_index: None,
+                    }
+                }
                 (None, None) => DisplayEnvItem {
                     key,
                     value: String::new(),
@@ -532,16 +580,22 @@ pub fn render_environment(state: &mut EnvironmentState, frame: &mut Frame, area:
             .map(|(i, item)| {
                 let absolute_index = start + i;
                 let value_display = format_display_value(&item.value, state.show_values);
-                let key_style = match item.kind {
-                    EnvDisplayKind::Overridden => Style::default().fg(Color::Yellow),
-                    EnvDisplayKind::Added => Style::default().fg(Color::Green),
-                    EnvDisplayKind::OsOnly => Style::default(),
+                let (key_style, value_style) = match item.kind {
+                    EnvDisplayKind::Overridden => (Style::default().fg(Color::Yellow), Style::default()),
+                    EnvDisplayKind::Added => (Style::default().fg(Color::Green), Style::default()),
+                    EnvDisplayKind::OsDisabled => {
+                        let style = Style::default()
+                            .fg(Color::Red)
+                            .add_modifier(Modifier::CROSSED_OUT);
+                        (style, style)
+                    }
+                    EnvDisplayKind::OsOnly => (Style::default(), Style::default()),
                 };
 
                 let line = Line::from(vec![
                     Span::styled(&item.key, key_style),
                     Span::raw(" = "),
-                    Span::raw(value_display),
+                    Span::styled(value_display, value_style),
                 ]);
 
                 let style = if absolute_index == state.selected && !state.edit_mode {
@@ -562,7 +616,7 @@ pub fn render_environment(state: &mut EnvironmentState, frame: &mut Frame, area:
     if state.edit_mode {
         render_edit_area(state, frame, chunks[2]);
     } else {
-        let actions = "[Enter/e] Edit | [n] New | [d] Delete (profile) | [r] Reset (OS) | [v] Toggle visibility | [Esc] Back";
+        let actions = "[Enter/e] Edit | [n] New | [d] Delete (profile)/Disable (OS) | [r] Reset (override) | [v] Toggle visibility | [Esc] Back";
         let footer = Paragraph::new(actions)
             .style(Style::default().fg(Color::DarkGray))
             .block(Block::default().borders(Borders::TOP));
@@ -793,6 +847,10 @@ mod tests {
                 value: "/tmp".to_string(),
             },
             OsEnvItem {
+                key: "PATH".to_string(),
+                value: "/bin".to_string(),
+            },
+            OsEnvItem {
                 key: "TOKEN".to_string(),
                 value: "os-value".to_string(),
             },
@@ -812,13 +870,19 @@ mod tests {
 
         let state = EnvironmentState::new()
             .with_os_variables(os_vars)
-            .with_variables(profile_vars);
+            .with_variables(profile_vars)
+            .with_disabled_keys(vec!["HOME".to_string()]);
         let items = state.display_items();
 
         let home = items.iter().find(|item| item.key == "HOME").unwrap();
-        assert_eq!(home.kind, EnvDisplayKind::OsOnly);
+        assert_eq!(home.kind, EnvDisplayKind::OsDisabled);
         assert_eq!(home.value, "/tmp");
         assert!(home.profile_index.is_none());
+
+        let path = items.iter().find(|item| item.key == "PATH").unwrap();
+        assert_eq!(path.kind, EnvDisplayKind::OsOnly);
+        assert_eq!(path.value, "/bin");
+        assert!(path.profile_index.is_none());
 
         let token = items.iter().find(|item| item.key == "TOKEN").unwrap();
         assert_eq!(token.kind, EnvDisplayKind::Overridden);
@@ -865,6 +929,10 @@ mod tests {
                 key: "B".to_string(),
                 value: "os-b".to_string(),
             },
+            OsEnvItem {
+                key: "D".to_string(),
+                value: "os-d".to_string(),
+            },
         ];
         let profile_vars = vec![
             EnvItem {
@@ -881,21 +949,32 @@ mod tests {
 
         let mut state = EnvironmentState::new()
             .with_os_variables(os_vars)
-            .with_variables(profile_vars);
+            .with_variables(profile_vars)
+            .with_disabled_keys(vec!["A".to_string()]);
 
-        state.selected = 0; // A: OS only
-        assert!(state.selected_is_os_only());
+        let items = state.display_items();
+        let index_for = |key: &str| items.iter().position(|item| item.key == key).unwrap();
+
+        state.selected = index_for("A");
+        assert!(state.selected_is_os_disabled());
+        assert!(state.selected_is_os_entry());
         assert!(!state.selected_is_overridden());
         assert!(!state.selected_is_added());
 
-        state.selected = 1; // B: overridden
+        state.selected = index_for("B");
         assert!(state.selected_is_overridden());
-        assert!(!state.selected_is_os_only());
+        assert!(!state.selected_is_os_entry());
         assert!(!state.selected_is_added());
 
-        state.selected = 2; // C: added
+        state.selected = index_for("C");
         assert!(state.selected_is_added());
-        assert!(!state.selected_is_os_only());
+        assert!(!state.selected_is_os_entry());
         assert!(!state.selected_is_overridden());
+
+        state.selected = index_for("D");
+        assert!(state.selected_is_os_only());
+        assert!(state.selected_is_os_entry());
+        assert!(!state.selected_is_overridden());
+        assert!(!state.selected_is_added());
     }
 }

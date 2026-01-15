@@ -560,6 +560,9 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
     command
         .args(&command_args)
         .current_dir(&config.worktree_path);
+    for key in &config.env_remove {
+        command.env_remove(key);
+    }
     for (key, value) in &config.env {
         command.env(key, value);
     }
@@ -1272,6 +1275,7 @@ mod tests {
             session_id: None,
             skip_permissions: true,
             env: Vec::new(),
+            env_remove: Vec::new(),
         }
     }
 
