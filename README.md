@@ -26,7 +26,7 @@ The Rust implementation covers the core CLI/TUI workflow and the Web UI (REST + 
 
 ## Installation
 
-GitHub Releases are the source of truth for prebuilt binaries. The npm/bunx wrapper downloads the matching release asset on install.
+GitHub Releases are the source of truth for prebuilt binaries. The npm/bunx wrapper automatically downloads the matching release asset on install.
 
 ### From GitHub Releases (Recommended)
 
