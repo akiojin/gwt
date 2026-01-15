@@ -1,13 +1,27 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
-## [5.3.0] - 2026-01-14
+## [5.4.0] - 2026-01-15
+
+### Miscellaneous Tasks
+
+- Sync main to develop after v5.3.0 release
+
+## [5.1.0] - 2026-01-14
 
 ### Bug Fixes
 
 - Remove publish-crates dependency from upload-release job
 - Add sync-develop job to sync main back to develop after release
 - Use -X theirs option in sync-develop to resolve conflicts automatically
+- Add on-demand binary download for bunx compatibility (#600)
+- Filter key events by KeyEventKind::Press to prevent double input on Windows (#601)
+
+### Features
+
+- Bun-to-rust移行と周辺改善 (#602)
+- Add structured debug logging for worktree change detection (#603)
+- Migrate from release-please to custom release action (#587)
 
 ### Miscellaneous Tasks
 
