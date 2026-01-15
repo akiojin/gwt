@@ -21,6 +21,10 @@ description: "環境変数プロファイル機能（Ratatui）のタスク"
 - [x] **T005** [US3] `crates/gwt-cli/src/tui/app.rs` に Enter で環境変数編集へ遷移する処理を追加
 - [x] **T004** [US4] `crates/gwt-cli/src/tui/screens/mod.rs` からOS専用画面の公開を削除
 - [x] **T006** [US4] `crates/gwt-cli/src/tui/app.rs` に `r` リセット操作を追加
+- [x] **T007** [US4] `crates/gwt-core/src/config/profile.rs` にOS無効化リストを追加
+- [x] **T008** [US4] `crates/gwt-cli/src/tui/screens/environment.rs` に赤色取り消し線の無効化表示を追加
+- [x] **T009** [US4] `crates/gwt-cli/src/tui/app.rs` で無効化状態の保存とエージェント起動への反映を追加
+- [x] **T010** [US4] `crates/gwt-cli/src/main.rs` で `env_remove` を反映
 
 ## フェーズ2: テスト（TDD）
 
@@ -30,6 +34,7 @@ description: "環境変数プロファイル機能（Ratatui）のタスク"
 - [x] **T104** [US6] `crates/gwt-cli/src/tui/app.rs` の編集確定処理テストを維持
 - [x] **T105** [US3] `crates/gwt-cli/src/tui/screens/profiles.rs` にアクション表示の Enter 表記テストを追加
 - [x] **T106** [US4] `crates/gwt-cli/src/tui/screens/environment.rs` に選択種別ヘルパーテストを追加
+- [x] **T107** [US4] `crates/gwt-cli/src/tui/screens/environment.rs` に無効化表示の分類テストを更新
 
 ## フェーズ3: 統合とチェック
 
