@@ -205,12 +205,34 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Sync main to develop
+      - name: Create sync PR to develop
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ needs.create-tag.outputs.tag_name }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git fetch origin develop
-          git checkout develop
-          # Use -X theirs to prefer main's changes on conflict
-          git merge main -X theirs -m "chore: sync main to develop after ${{ needs.create-tag.outputs.tag_name }} release"
-          git push origin develop
+
+          # Create a temporary branch for the sync
+          SYNC_BRANCH="sync-main-to-develop-$(date +%Y%m%d-%H%M%S)"
+          git checkout -b "$SYNC_BRANCH"
+          git push origin "$SYNC_BRANCH"
+
+          # Create PR from sync branch to develop
+          PR_URL=$(gh pr create \
+            --base develop \
+            --head "$SYNC_BRANCH" \
+            --title "chore: sync main to develop after ${TAG_NAME} release" \
+            --body "## Summary
+
+          Automated sync of main branch to develop after ${TAG_NAME} release.
+
+          This PR synchronizes version updates and release artifacts from main back to develop.
+
+          ---
+          This PR was automatically created by the release workflow.")
+
+          echo "Created PR: $PR_URL"
+
+          # Enable auto-merge with merge commit
+          gh pr merge "$PR_URL" --auto --merge
