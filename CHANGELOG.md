@@ -1,7 +1,17 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [6.0.1] - 2026-01-15
+
+### Miscellaneous Tasks
+
+- Sync main to develop after v6.0.0 release
+
 ## [6.0.0] - 2026-01-15
+
+### Bug Fixes
+
+- Update migration status in README
 
 ### Miscellaneous Tasks
 
