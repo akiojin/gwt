@@ -259,13 +259,7 @@ pub fn render_environment(state: &EnvironmentState, frame: &mut Frame, area: Rec
             .iter()
             .enumerate()
             .map(|(i, var)| {
-                let value_display = if var.is_secret && !state.show_values {
-                    "********".to_string()
-                } else if state.show_values {
-                    var.value.clone()
-                } else {
-                    format!("{}...", &var.value.chars().take(10).collect::<String>())
-                };
+                let value_display = format_value(var, state.show_values);
 
                 let secret_marker = if var.is_secret { " [secret]" } else { "" };
 
@@ -382,6 +376,14 @@ fn render_edit_area(state: &EnvironmentState, frame: &mut Frame, area: Rect) {
     frame.set_cursor_position((cursor_x, cursor_y));
 }
 
+fn format_value(var: &EnvItem, show_values: bool) -> String {
+    if show_values {
+        var.value.clone()
+    } else {
+        "********".to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,5 +461,35 @@ mod tests {
 
         state.edit_key = "invalid-key".to_string();
         assert!(state.validate().is_err());
+    }
+
+    #[test]
+    fn test_empty_value_placeholder_not_saved() {
+        let vars = vec![EnvItem {
+            key: "EMPTY".to_string(),
+            value: "".to_string(),
+            is_secret: false,
+        }];
+
+        let mut state = EnvironmentState::new().with_variables(vars);
+        state.start_edit();
+
+        let (key, value) = state.validate().expect("validation should pass");
+        assert_eq!(key, "EMPTY");
+        assert!(value.is_empty());
+    }
+
+    #[test]
+    fn test_hidden_values_are_masked() {
+        let vars = vec![EnvItem {
+            key: "TOKEN".to_string(),
+            value: "secret-value".to_string(),
+            is_secret: false,
+        }];
+
+        let state = EnvironmentState::new().with_variables(vars);
+        let masked = format_value(&state.variables[0], false);
+
+        assert_eq!(masked, "********");
     }
 }

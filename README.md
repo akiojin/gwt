@@ -75,6 +75,9 @@ cargo install --git https://github.com/akiojin/gwt --package gwt-cli --bin gwt -
 
 # Or, from a local checkout
 cargo install --path crates/gwt-cli
+
+# Or run directly from source
+cargo run -p gwt-cli
 ```
 
 ### Build from Source
