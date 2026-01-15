@@ -1,6 +1,6 @@
 [package]
 name = "gwt-web"
-version = "5.0.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -9,7 +9,7 @@ description = "Web server for Git Worktree Manager"
 publish = false  # Not ready for publishing (Phase 4 - future work)
 
 [dependencies]
-gwt-core = { path = "../gwt-core" }
+gwt-core.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 axum = { workspace = true, features = ["ws"] }

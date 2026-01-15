@@ -15,6 +15,9 @@ repository = "https://github.com/akiojin/gwt"
 authors = ["akiojin"]
 
 [workspace.dependencies]
+# Internal crates
+gwt-core = { path = "crates/gwt-core" }
+
 # Error handling
 thiserror = "2"
 
