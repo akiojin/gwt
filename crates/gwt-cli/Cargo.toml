@@ -15,7 +15,7 @@ name = "gwt"
 path = "src/main.rs"
 
 [dependencies]
-gwt-core = { path = "../gwt-core" }
+gwt-core = { version = "6.0.3", path = "../gwt-core" }
 thiserror.workspace = true
 tokio.workspace = true
 clap.workspace = true
