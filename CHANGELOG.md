@@ -15,6 +15,7 @@ All notable changes to this project will be documented in this file.
 
 - Support merge commit in release workflow trigger
 - Add version to gwt-core dependency for crates.io publishing
+- Use cross for Linux ARM64 musl build
 - Support merge commit in release workflow trigger
 - Add workflow_dispatch support to release workflow trigger
 
