@@ -23,11 +23,12 @@ use std::time::{Duration, Instant};
 use super::screens::branch_list::WorktreeStatus;
 use super::screens::environment::EditField;
 use super::screens::{
-    render_branch_list, render_confirm, render_environment, render_error, render_help, render_logs,
-    render_profiles, render_settings, render_wizard, render_worktree_create, BranchItem,
-    BranchListState, BranchType, CodingAgent, ConfirmState, EnvironmentState, ErrorState,
-    ExecutionMode, HelpState, LogsState, ProfilesState, QuickStartEntry, ReasoningLevel,
-    SettingsState, WizardConfirmResult, WizardState, WorktreeCreateState,
+    collect_os_env, render_branch_list, render_confirm, render_environment, render_error,
+    render_help, render_logs, render_os_environment, render_profiles, render_settings,
+    render_wizard, render_worktree_create, BranchItem, BranchListState, BranchType, CodingAgent,
+    ConfirmState, EnvironmentState, ErrorState, ExecutionMode, HelpState, LogsState,
+    OsEnvironmentState, ProfilesState, QuickStartEntry, ReasoningLevel, SettingsState,
+    WizardConfirmResult, WizardState, WorktreeCreateState,
 };
 
 /// Configuration for launching a coding agent after TUI exits
@@ -134,6 +135,8 @@ pub struct Model {
     profiles_config: ProfilesConfig,
     /// Environment variables state
     environment: EnvironmentState,
+    /// OS environment variables state
+    os_environment: OsEnvironmentState,
     /// Wizard popup state
     wizard: WizardState,
     /// Status message
@@ -170,6 +173,7 @@ pub enum Screen {
     Error,
     Profiles,
     Environment,
+    EnvironmentOs,
 }
 
 /// Messages (Events in Elm Architecture)
@@ -245,6 +249,7 @@ impl Model {
             profiles: ProfilesState::new(),
             profiles_config: ProfilesConfig::default(),
             environment: EnvironmentState::new(),
+            os_environment: OsEnvironmentState::new(),
             wizard: WizardState::new(),
             status_message: None,
             status_message_time: None,
@@ -591,6 +596,27 @@ impl Model {
         self.screen = Screen::Environment;
     }
 
+    fn open_os_environment(&mut self) {
+        let profile_name = self
+            .environment
+            .profile_name
+            .as_deref()
+            .unwrap_or("default");
+        let highlight_keys: Vec<String> = self
+            .environment
+            .variables
+            .iter()
+            .map(|var| var.key.clone())
+            .collect();
+        let vars = collect_os_env();
+        self.os_environment = OsEnvironmentState::new()
+            .with_profile(profile_name)
+            .with_variables(vars)
+            .with_highlight_keys(highlight_keys);
+        self.screen_stack.push(self.screen.clone());
+        self.screen = Screen::EnvironmentOs;
+    }
+
     fn persist_environment(&mut self) {
         let profile_name = match self.environment.profile_name.clone() {
             Some(name) => name,
@@ -718,6 +744,7 @@ impl Model {
                 Screen::Error => self.error.scroll_down(),
                 Screen::Profiles => self.profiles.select_next(),
                 Screen::Environment => self.environment.select_next(),
+                Screen::EnvironmentOs => self.os_environment.select_next(),
                 Screen::Confirm => {}
             },
             Message::SelectPrev => match self.screen {
@@ -729,28 +756,33 @@ impl Model {
                 Screen::Error => self.error.scroll_up(),
                 Screen::Profiles => self.profiles.select_prev(),
                 Screen::Environment => self.environment.select_prev(),
+                Screen::EnvironmentOs => self.os_environment.select_prev(),
                 Screen::Confirm => {}
             },
             Message::PageUp => match self.screen {
                 Screen::BranchList => self.branch_list.page_up(10),
                 Screen::Logs => self.logs.page_up(10),
                 Screen::Help => self.help.page_up(),
+                Screen::EnvironmentOs => self.os_environment.page_up(),
                 _ => {}
             },
             Message::PageDown => match self.screen {
                 Screen::BranchList => self.branch_list.page_down(10),
                 Screen::Logs => self.logs.page_down(10),
                 Screen::Help => self.help.page_down(),
+                Screen::EnvironmentOs => self.os_environment.page_down(),
                 _ => {}
             },
             Message::GoHome => match self.screen {
                 Screen::BranchList => self.branch_list.go_home(),
                 Screen::Logs => self.logs.go_home(),
+                Screen::EnvironmentOs => self.os_environment.go_home(),
                 _ => {}
             },
             Message::GoEnd => match self.screen {
                 Screen::BranchList => self.branch_list.go_end(),
                 Screen::Logs => self.logs.go_end(),
+                Screen::EnvironmentOs => self.os_environment.go_end(),
                 _ => {}
             },
             Message::Enter => match &self.screen {
@@ -1176,7 +1208,7 @@ impl Model {
     }
 
     /// View function (Elm Architecture)
-    pub fn view(&self, frame: &mut Frame) {
+    pub fn view(&mut self, frame: &mut Frame) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -1219,6 +1251,7 @@ impl Model {
             Screen::Error => render_error(&self.error, frame, chunks[1]),
             Screen::Profiles => render_profiles(&self.profiles, frame, chunks[1]),
             Screen::Environment => render_environment(&self.environment, frame, chunks[1]),
+            Screen::EnvironmentOs => render_os_environment(&mut self.os_environment, frame, chunks[1]),
             Screen::Confirm => {}
         }
 
@@ -1390,9 +1423,10 @@ impl Model {
                 if self.environment.edit_mode {
                     "[Enter] Save | [Tab] Switch | [Esc] Cancel"
                 } else {
-                    "[n] New | [e] Edit | [d] Delete | [v] Toggle visibility | [Esc] Back"
+                    "[n] New | [e] Edit | [d] Delete | [v] Toggle visibility | [o] OS env | [Esc] Back"
                 }
             }
+            Screen::EnvironmentOs => "[Esc] Back | [Up/Down] Scroll",
         };
 
         let status = self.status_message.as_deref().unwrap_or("");
@@ -1713,6 +1747,18 @@ pub fn run_with_context(
                                 }
                             } else {
                                 Some(Message::Char('v'))
+                            }
+                        }
+                        (KeyCode::Char('o'), KeyModifiers::NONE) => {
+                            if matches!(model.screen, Screen::Environment) {
+                                if model.environment.edit_mode {
+                                    Some(Message::Char('o'))
+                                } else {
+                                    model.open_os_environment();
+                                    None
+                                }
+                            } else {
+                                Some(Message::Char('o'))
                             }
                         }
                         (KeyCode::Char('x'), KeyModifiers::NONE) => {

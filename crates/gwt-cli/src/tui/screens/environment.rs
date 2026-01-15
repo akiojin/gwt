@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 use ratatui::{prelude::*, widgets::*};
+use std::collections::HashSet;
 
 /// Environment variable item
 #[derive(Debug, Clone)]
@@ -13,6 +14,135 @@ pub struct EnvItem {
     pub value: String,
     /// Is the value masked (for secrets)
     pub is_secret: bool,
+}
+
+/// OS environment variable item
+#[derive(Debug, Clone)]
+pub struct OsEnvItem {
+    /// Variable key
+    pub key: String,
+    /// Variable value
+    pub value: String,
+}
+
+/// OS environment variables state
+#[derive(Debug, Default)]
+pub struct OsEnvironmentState {
+    /// Environment variables
+    pub variables: Vec<OsEnvItem>,
+    /// Currently selected index
+    pub selected: usize,
+    /// Scroll offset for large lists
+    scroll_offset: usize,
+    /// Keys to highlight (overridden by profile)
+    highlight_keys: HashSet<String>,
+    /// Profile name (context)
+    pub profile_name: Option<String>,
+    /// Cached viewport height for scroll calculations
+    viewport_height: usize,
+}
+
+impl OsEnvironmentState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Initialize with variables
+    pub fn with_variables(mut self, variables: Vec<OsEnvItem>) -> Self {
+        self.variables = variables;
+        if self.selected >= self.variables.len() {
+            self.selected = self.variables.len().saturating_sub(1);
+        }
+        self.ensure_visible();
+        self
+    }
+
+    /// Set profile context
+    pub fn with_profile(mut self, profile: &str) -> Self {
+        self.profile_name = Some(profile.to_string());
+        self
+    }
+
+    /// Set highlight keys
+    pub fn with_highlight_keys<I, S>(mut self, keys: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.highlight_keys = keys.into_iter().map(Into::into).collect();
+        self
+    }
+
+    pub fn is_highlighted(&self, key: &str) -> bool {
+        self.highlight_keys.contains(key)
+    }
+
+    pub fn set_viewport(&mut self, height: usize) {
+        self.viewport_height = height;
+        self.ensure_visible();
+    }
+
+    pub fn select_next(&mut self) {
+        if self.selected + 1 < self.variables.len() {
+            self.selected += 1;
+            self.ensure_visible();
+        }
+    }
+
+    pub fn select_prev(&mut self) {
+        if self.selected > 0 {
+            self.selected -= 1;
+            self.ensure_visible();
+        }
+    }
+
+    pub fn page_down(&mut self) {
+        if self.variables.is_empty() {
+            return;
+        }
+        let step = self.viewport_height.max(1);
+        self.selected = (self.selected + step).min(self.variables.len() - 1);
+        self.ensure_visible();
+    }
+
+    pub fn page_up(&mut self) {
+        let step = self.viewport_height.max(1);
+        self.selected = self.selected.saturating_sub(step);
+        self.ensure_visible();
+    }
+
+    pub fn go_home(&mut self) {
+        self.selected = 0;
+        self.scroll_offset = 0;
+    }
+
+    pub fn go_end(&mut self) {
+        if self.variables.is_empty() {
+            return;
+        }
+        self.selected = self.variables.len() - 1;
+        if self.viewport_height > 0 {
+            self.scroll_offset = self.selected.saturating_sub(self.viewport_height - 1);
+        }
+    }
+
+    fn ensure_visible(&mut self) {
+        if self.viewport_height == 0 {
+            return;
+        }
+        if self.selected < self.scroll_offset {
+            self.scroll_offset = self.selected;
+        } else if self.selected >= self.scroll_offset + self.viewport_height {
+            self.scroll_offset = self.selected + 1 - self.viewport_height;
+        }
+    }
+
+    fn visible_range(&self) -> (usize, usize) {
+        let height = self.viewport_height.max(1);
+        let start = self.scroll_offset.min(self.variables.len());
+        let end = (start + height).min(self.variables.len());
+        (start, end)
+    }
 }
 
 /// Input field being edited
@@ -220,6 +350,15 @@ impl EnvironmentState {
     }
 }
 
+/// Collect OS environment variables as a sorted list.
+pub fn collect_os_env() -> Vec<OsEnvItem> {
+    let mut vars: Vec<OsEnvItem> = std::env::vars()
+        .map(|(key, value)| OsEnvItem { key, value })
+        .collect();
+    vars.sort_by(|a, b| a.key.cmp(&b.key));
+    vars
+}
+
 /// Render environment screen
 pub fn render_environment(state: &EnvironmentState, frame: &mut Frame, area: Rect) {
     let chunks = Layout::default()
@@ -306,6 +445,66 @@ pub fn render_environment(state: &EnvironmentState, frame: &mut Frame, area: Rec
         let error_msg = Paragraph::new(error.as_str()).style(Style::default().fg(Color::Red));
         frame.render_widget(error_msg, error_area);
     }
+}
+
+/// Render OS environment variables screen
+pub fn render_os_environment(state: &mut OsEnvironmentState, frame: &mut Frame, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2), // Header
+            Constraint::Min(5),    // Variables list
+        ])
+        .split(area);
+
+    let profile_info = state.profile_name.as_deref().unwrap_or("default");
+    let header = Paragraph::new(format!(
+        "OS Environment Variables | Profile: {} ({})",
+        profile_info,
+        state.variables.len()
+    ))
+    .style(Style::default().fg(Color::Cyan));
+    frame.render_widget(header, chunks[0]);
+
+    let list_height = chunks[1].height as usize;
+    state.set_viewport(list_height);
+
+    if state.variables.is_empty() {
+        let empty = Paragraph::new("No OS environment variables.")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center);
+        frame.render_widget(empty, chunks[1]);
+        return;
+    }
+
+    let (start, end) = state.visible_range();
+    let items: Vec<ListItem> = state.variables[start..end]
+        .iter()
+        .enumerate()
+        .map(|(i, var)| {
+            let absolute_index = start + i;
+            let is_selected = absolute_index == state.selected;
+            let key_style = if state.is_highlighted(&var.key) {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default()
+            };
+            let line = Line::from(vec![
+                Span::styled(&var.key, key_style),
+                Span::raw("="),
+                Span::raw(&var.value),
+            ]);
+            let style = if is_selected {
+                Style::default().bg(Color::Blue).fg(Color::White)
+            } else {
+                Style::default()
+            };
+            ListItem::new(line).style(style)
+        })
+        .collect();
+
+    let list = List::new(items);
+    frame.render_widget(list, chunks[1]);
 }
 
 /// Render edit area
@@ -491,5 +690,65 @@ mod tests {
         let masked = format_value(&state.variables[0], false);
 
         assert_eq!(masked, "********");
+    }
+
+    #[test]
+    fn test_collect_os_env_includes_added_var() {
+        let key = "GWT_TEST_OS_ENV";
+        let prev = std::env::var_os(key);
+        std::env::set_var(key, "1");
+
+        let vars = collect_os_env();
+        let found = vars.iter().any(|var| var.key == key && var.value == "1");
+        assert!(found);
+
+        match prev {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    #[test]
+    fn test_os_env_highlight_keys() {
+        let vars = vec![
+            OsEnvItem {
+                key: "HOME".to_string(),
+                value: "/tmp".to_string(),
+            },
+            OsEnvItem {
+                key: "TOKEN".to_string(),
+                value: "secret".to_string(),
+            },
+        ];
+
+        let state = OsEnvironmentState::new()
+            .with_variables(vars)
+            .with_highlight_keys(vec!["TOKEN".to_string()]);
+
+        assert!(state.is_highlighted("TOKEN"));
+        assert!(!state.is_highlighted("HOME"));
+    }
+
+    #[test]
+    fn test_os_env_scroll_offset_updates() {
+        let vars = (0..10)
+            .map(|i| OsEnvItem {
+                key: format!("KEY{:02}", i),
+                value: "value".to_string(),
+            })
+            .collect();
+
+        let mut state = OsEnvironmentState::new().with_variables(vars);
+        state.set_viewport(3);
+
+        state.select_next();
+        state.select_next();
+        state.select_next();
+        assert_eq!(state.selected, 3);
+        assert_eq!(state.scroll_offset, 1);
+
+        state.page_down();
+        assert_eq!(state.selected, 6);
+        assert_eq!(state.scroll_offset, 4);
     }
 }
