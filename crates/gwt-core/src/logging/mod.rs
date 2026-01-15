@@ -71,4 +71,111 @@ mod tests {
         assert!(path_str.starts_with("/logs/gwt."));
         assert!(path_str.ends_with(".jsonl"));
     }
+
+    #[test]
+    fn test_log_json_structure_has_required_fields() {
+        // Test that LogEntry can parse JSON with required fields (timestamp, level, message)
+        // and optional category field
+        let json_with_category = r#"{
+            "timestamp": "2024-01-01T00:00:00Z",
+            "level": "INFO",
+            "message": "test message",
+            "category": "worktree"
+        }"#;
+
+        let entry: LogEntry = serde_json::from_str(json_with_category).unwrap();
+        assert_eq!(entry.timestamp, "2024-01-01T00:00:00Z");
+        assert_eq!(entry.level, "INFO");
+        assert_eq!(entry.message, "test message");
+
+        // category is in the fields map due to #[serde(flatten)]
+        assert_eq!(
+            entry.fields.get("category"),
+            Some(&serde_json::Value::String("worktree".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_log_category_field_preserved() {
+        // Test that different category values are correctly parsed
+        let categories = ["cli", "worktree", "git", "server"];
+
+        for category in categories {
+            let json = format!(
+                r#"{{"timestamp":"2024-01-01T00:00:00Z","level":"INFO","message":"test","category":"{}"}}"#,
+                category
+            );
+
+            let entry: LogEntry = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                entry.fields.get("category"),
+                Some(&serde_json::Value::String(category.to_string())),
+                "Category '{}' should be preserved",
+                category
+            );
+        }
+    }
+
+    #[test]
+    fn test_log_append_preserves_existing_entries() {
+        let temp = TempDir::new().unwrap();
+        let log_file = temp.path().join("test.jsonl");
+
+        // Write initial entries
+        let initial_entries = [
+            r#"{"timestamp":"2024-01-01T00:00:00Z","level":"INFO","message":"entry1"}"#,
+            r#"{"timestamp":"2024-01-01T00:00:01Z","level":"INFO","message":"entry2"}"#,
+        ];
+        std::fs::write(&log_file, initial_entries.join("\n") + "\n").unwrap();
+
+        // Simulate append (like a new session would do)
+        use std::fs::OpenOptions;
+        use std::io::Write;
+        let mut file = OpenOptions::new().append(true).open(&log_file).unwrap();
+        writeln!(
+            file,
+            r#"{{"timestamp":"2024-01-01T00:00:02Z","level":"INFO","message":"entry3"}}"#
+        )
+        .unwrap();
+
+        // Read all entries and verify none were lost
+        let (entries, _) = LogReader::read_entries(&log_file, 0, 100).unwrap();
+        assert_eq!(entries.len(), 3, "All entries should be preserved after append");
+        assert_eq!(entries[0].message, "entry1", "First entry should be preserved");
+        assert_eq!(entries[1].message, "entry2", "Second entry should be preserved");
+        assert_eq!(entries[2].message, "entry3", "New entry should be appended");
+    }
+
+    #[test]
+    fn test_each_log_line_is_valid_json() {
+        let temp = TempDir::new().unwrap();
+        let log_file = temp.path().join("test.jsonl");
+
+        // Write multiple entries
+        let entries = [
+            r#"{"timestamp":"2024-01-01T00:00:00Z","level":"INFO","message":"test1","category":"cli"}"#,
+            r#"{"timestamp":"2024-01-01T00:00:01Z","level":"DEBUG","message":"test2","category":"git"}"#,
+            r#"{"timestamp":"2024-01-01T00:00:02Z","level":"WARN","message":"test3","category":"worktree"}"#,
+        ];
+        std::fs::write(&log_file, entries.join("\n") + "\n").unwrap();
+
+        // Read file line by line and verify each line is valid JSON
+        use std::io::{BufRead, BufReader};
+        let file = std::fs::File::open(&log_file).unwrap();
+        let reader = BufReader::new(file);
+
+        for (i, line) in reader.lines().enumerate() {
+            let line = line.unwrap();
+            if line.is_empty() {
+                continue;
+            }
+            let result: std::result::Result<serde_json::Value, _> = serde_json::from_str(&line);
+            assert!(
+                result.is_ok(),
+                "Line {} should be valid JSON: {}",
+                i + 1,
+                line
+            );
+        }
+    }
 }

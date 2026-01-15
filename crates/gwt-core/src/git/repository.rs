@@ -3,6 +3,7 @@
 use crate::error::{GwtError, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use tracing::{debug, error, info};
 
 /// Represents a Git repository
 #[derive(Debug)]
@@ -322,6 +323,14 @@ impl Repository {
 
     /// Create a new worktree
     pub fn create_worktree(&self, path: &Path, branch: &str, new_branch: bool) -> Result<()> {
+        debug!(
+            category = "git",
+            path = %path.display(),
+            branch,
+            new_branch,
+            "Creating git worktree"
+        );
+
         let mut args = vec!["worktree", "add"];
 
         if new_branch {
@@ -346,17 +355,41 @@ impl Repository {
             })?;
 
         if output.status.success() {
+            info!(
+                category = "git",
+                operation = "worktree_add",
+                path = %path.display(),
+                branch,
+                new_branch,
+                "Git worktree created"
+            );
             Ok(())
         } else {
+            let err_msg = String::from_utf8_lossy(&output.stderr).to_string();
+            error!(
+                category = "git",
+                operation = "worktree_add",
+                path = %path.display(),
+                branch,
+                error = err_msg.as_str(),
+                "Failed to create git worktree"
+            );
             Err(GwtError::GitOperationFailed {
                 operation: "worktree add".to_string(),
-                details: String::from_utf8_lossy(&output.stderr).to_string(),
+                details: err_msg,
             })
         }
     }
 
     /// Remove a worktree
     pub fn remove_worktree(&self, path: &Path, force: bool) -> Result<()> {
+        debug!(
+            category = "git",
+            path = %path.display(),
+            force,
+            "Removing git worktree"
+        );
+
         let path_str = path.to_string_lossy();
         let args = if force {
             vec!["worktree", "remove", "--force", &path_str]
@@ -374,17 +407,34 @@ impl Repository {
             })?;
 
         if output.status.success() {
+            info!(
+                category = "git",
+                operation = "worktree_remove",
+                path = %path.display(),
+                force,
+                "Git worktree removed"
+            );
             Ok(())
         } else {
+            let err_msg = String::from_utf8_lossy(&output.stderr).to_string();
+            error!(
+                category = "git",
+                operation = "worktree_remove",
+                path = %path.display(),
+                error = err_msg.as_str(),
+                "Failed to remove git worktree"
+            );
             Err(GwtError::GitOperationFailed {
                 operation: "worktree remove".to_string(),
-                details: String::from_utf8_lossy(&output.stderr).to_string(),
+                details: err_msg,
             })
         }
     }
 
     /// Prune stale worktree metadata
     pub fn prune_worktrees(&self) -> Result<()> {
+        debug!(category = "git", "Pruning stale worktree metadata");
+
         let output = Command::new("git")
             .args(["worktree", "prune"])
             .current_dir(&self.root)
@@ -395,17 +445,31 @@ impl Repository {
             })?;
 
         if output.status.success() {
+            info!(
+                category = "git",
+                operation = "worktree_prune",
+                "Worktree metadata pruned"
+            );
             Ok(())
         } else {
+            let err_msg = String::from_utf8_lossy(&output.stderr).to_string();
+            error!(
+                category = "git",
+                operation = "worktree_prune",
+                error = err_msg.as_str(),
+                "Failed to prune worktree metadata"
+            );
             Err(GwtError::GitOperationFailed {
                 operation: "worktree prune".to_string(),
-                details: String::from_utf8_lossy(&output.stderr).to_string(),
+                details: err_msg,
             })
         }
     }
 
     /// Repair worktree administrative files
     pub fn repair_worktrees(&self) -> Result<()> {
+        debug!(category = "git", "Repairing worktree administrative files");
+
         let output = Command::new("git")
             .args(["worktree", "repair"])
             .current_dir(&self.root)
@@ -416,11 +480,23 @@ impl Repository {
             })?;
 
         if output.status.success() {
+            info!(
+                category = "git",
+                operation = "worktree_repair",
+                "Worktree administrative files repaired"
+            );
             Ok(())
         } else {
+            let err_msg = String::from_utf8_lossy(&output.stderr).to_string();
+            error!(
+                category = "git",
+                operation = "worktree_repair",
+                error = err_msg.as_str(),
+                "Failed to repair worktree administrative files"
+            );
             Err(GwtError::GitOperationFailed {
                 operation: "worktree repair".to_string(),
-                details: String::from_utf8_lossy(&output.stderr).to_string(),
+                details: err_msg,
             })
         }
     }
