@@ -99,6 +99,30 @@
   - クロスコンパイル済みバイナリを GitHub Release にアップロード
   - npm へ公開（provenance 付き）
 
+## パッケージ公開状況
+
+> **重要**: 各プラットフォームのバージョンは独立して管理されており、一度公開したバージョンは再利用不可。リリース前に必ず各プラットフォームの最新バージョンを確認すること。
+
+| プラットフォーム | パッケージ名 | 確認コマンド |
+|----------------|-------------|-------------|
+| crates.io | `gwt-cli`, `gwt-core` | `curl -s https://crates.io/api/v1/crates/gwt-cli \| jq '.crate.max_version'` |
+| npmjs | `@akiojin/gwt` | `npm view @akiojin/gwt version` |
+| GitHub Release | - | `gh release list --repo akiojin/gwt --limit 1` |
+
+### 現在の公開バージョン（2026-01-15 時点）
+
+| プラットフォーム | 最新バージョン | 備考 |
+|----------------|--------------|------|
+| crates.io | 6.0.2 | |
+| npmjs (実際) | 6.0.2 | `latest` タグは 5.4.0 を指している |
+| GitHub Release | v6.0.1 | |
+
+### 次回リリース時の注意
+
+- **次回リリースは 6.0.3 以上** にする必要がある（crates.io に 6.0.2 が存在するため）
+- npm の `latest` タグが古いバージョンを指している場合は手動で修正が必要:
+  `npm dist-tag add @akiojin/gwt@<version> latest`
+
 ## 使用中の技術
 
 - Rust (Stable) + Ratatui TUI フレームワーク
