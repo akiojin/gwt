@@ -26,7 +26,7 @@ The Rust implementation covers the core CLI/TUI workflow and the Web UI (REST + 
 
 ## Installation
 
-GitHub Releases are the source of truth for prebuilt binaries. The npm/bunx wrapper downloads the matching release asset on install.
+GitHub Releases are the source of truth for prebuilt binaries. The npm/bunx wrapper automatically downloads the matching release asset on install.
 
 ### From GitHub Releases (Recommended)
 
@@ -64,10 +64,7 @@ bunx @akiojin/gwt
 Install the CLI with Cargo:
 
 ```bash
-# From crates.io (recommended for Rust users)
-cargo install gwt-cli
-
-# With cargo-binstall (faster, downloads prebuilt binary)
+# With cargo-binstall (faster, downloads prebuilt binary from GitHub Releases)
 cargo binstall gwt-cli
 
 # From GitHub (latest development version)

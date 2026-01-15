@@ -95,7 +95,6 @@
   - release/YYYYMMDD-HHMMSS ブランチから main への PR を作成
 - Release PR が main にマージされると `.github/workflows/release.yml` が以下を自動実行:
   - タグ・GitHub Release を作成
-  - crates.io へ公開（Trusted Publishing）
   - クロスコンパイル済みバイナリを GitHub Release にアップロード
   - npm へ公開（provenance 付き）
 
@@ -105,17 +104,8 @@
 
 | プラットフォーム | パッケージ名 | 確認コマンド |
 |----------------|-------------|-------------|
-| crates.io | `gwt-cli`, `gwt-core` | `curl -s https://crates.io/api/v1/crates/gwt-cli \| jq '.crate.max_version'` |
 | npmjs | `@akiojin/gwt` | `npm view @akiojin/gwt version` |
 | GitHub Release | - | `gh release list --repo akiojin/gwt --limit 1` |
-
-### 現在の公開バージョン（2026-01-15 時点）
-
-| プラットフォーム | 最新バージョン | 備考 |
-|----------------|--------------|------|
-| crates.io | 6.0.3 | |
-| npmjs | 6.0.3 | |
-| GitHub Release | v6.0.3 | |
 
 ### 次回リリース時の注意
 
