@@ -1499,14 +1499,14 @@ pub fn run_with_context(
 
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
-                let enter_is_press = key.kind == KeyEventKind::Press;
+                let is_key_press = key.kind == KeyEventKind::Press;
                 // Wizard has priority when visible
                 let msg = if model.wizard.visible {
                     match key.code {
                         KeyCode::Esc => Some(Message::WizardBack),
-                        KeyCode::Enter if enter_is_press => Some(Message::WizardConfirm),
-                        KeyCode::Up => Some(Message::WizardPrev),
-                        KeyCode::Down => Some(Message::WizardNext),
+                        KeyCode::Enter if is_key_press => Some(Message::WizardConfirm),
+                        KeyCode::Up if is_key_press => Some(Message::WizardPrev),
+                        KeyCode::Down if is_key_press => Some(Message::WizardNext),
                         KeyCode::Backspace => {
                             model.wizard.delete_char();
                             None
@@ -1532,7 +1532,9 @@ pub fn run_with_context(
                 } else {
                     // Normal key handling
                     match (key.code, key.modifiers) {
-                        (KeyCode::Char('c'), KeyModifiers::CONTROL) => Some(Message::CtrlC),
+                        (KeyCode::Char('c'), KeyModifiers::CONTROL) if is_key_press => {
+                            Some(Message::CtrlC)
+                        }
                         (KeyCode::Char('q'), KeyModifiers::NONE) => {
                             // 'q' does not quit in BranchList (matches TypeScript behavior)
                             Some(Message::Char('q'))
@@ -1776,13 +1778,13 @@ pub fn run_with_context(
                                 Some(Message::Tab)
                             }
                         }
-                        (KeyCode::Up, _) => Some(Message::SelectPrev),
-                        (KeyCode::Down, _) => Some(Message::SelectNext),
-                        (KeyCode::PageUp, _) => Some(Message::PageUp),
-                        (KeyCode::PageDown, _) => Some(Message::PageDown),
-                        (KeyCode::Home, _) => Some(Message::GoHome),
-                        (KeyCode::End, _) => Some(Message::GoEnd),
-                        (KeyCode::Enter, _) if enter_is_press => Some(Message::Enter),
+                        (KeyCode::Up, _) if is_key_press => Some(Message::SelectPrev),
+                        (KeyCode::Down, _) if is_key_press => Some(Message::SelectNext),
+                        (KeyCode::PageUp, _) if is_key_press => Some(Message::PageUp),
+                        (KeyCode::PageDown, _) if is_key_press => Some(Message::PageDown),
+                        (KeyCode::Home, _) if is_key_press => Some(Message::GoHome),
+                        (KeyCode::End, _) if is_key_press => Some(Message::GoEnd),
+                        (KeyCode::Enter, _) if is_key_press => Some(Message::Enter),
                         (KeyCode::Backspace, _) => Some(Message::Backspace),
                         (KeyCode::Left, _) => Some(Message::CursorLeft),
                         (KeyCode::Right, _) => Some(Message::CursorRight),
