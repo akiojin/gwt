@@ -64,10 +64,7 @@ bunx @akiojin/gwt
 Install the CLI with Cargo:
 
 ```bash
-# From crates.io (recommended for Rust users)
-cargo install gwt-cli
-
-# With cargo-binstall (faster, downloads prebuilt binary)
+# With cargo-binstall (faster, downloads prebuilt binary from GitHub Releases)
 cargo binstall gwt-cli
 
 # From GitHub (latest development version)
