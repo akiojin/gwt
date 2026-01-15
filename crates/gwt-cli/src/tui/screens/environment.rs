@@ -123,7 +123,8 @@ impl EnvironmentState {
     }
 
     pub fn selected_profile_index(&self) -> Option<usize> {
-        self.selected_display_item().and_then(|item| item.profile_index)
+        self.selected_display_item()
+            .and_then(|item| item.profile_index)
     }
 
     pub fn selected_is_overridden(&self) -> bool {
@@ -576,7 +577,9 @@ pub fn render_environment(state: &mut EnvironmentState, frame: &mut Frame, area:
                 let absolute_index = start + i;
                 let value_display = format_display_value(&item.value);
                 let (key_style, value_style) = match item.kind {
-                    EnvDisplayKind::Overridden => (Style::default().fg(Color::Yellow), Style::default()),
+                    EnvDisplayKind::Overridden => {
+                        (Style::default().fg(Color::Yellow), Style::default())
+                    }
                     EnvDisplayKind::Added => (Style::default().fg(Color::Green), Style::default()),
                     EnvDisplayKind::OsDisabled => {
                         let style = Style::default()
