@@ -1,11 +1,20 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [6.0.3] - 2026-01-15
+
+### Bug Fixes
+
+- Bump version to 6.0.3 (crates.io already has 6.0.2)
+- Bump package.json version to 6.0.3
+- Add version to gwt-core dependency for crates.io publishing
+
 ## [6.0.1] - 2026-01-15
 
 ### Bug Fixes
 
 - Support merge commit in release workflow trigger
+- Add version to gwt-core dependency for crates.io publishing
 - Support merge commit in release workflow trigger
 - Add workflow_dispatch support to release workflow trigger
 
@@ -17,6 +26,14 @@ All notable changes to this project will be documented in this file.
 
 - Sync main to develop after v6.0.0 release
 - バージョンを 6.0.3 に統一
+
+### Refactor
+
+- Use workspace dependencies for internal crates
+
+### Ci
+
+- Use cargo-workspaces for crates.io publishing
 
 ## [6.0.0] - 2026-01-15
 
