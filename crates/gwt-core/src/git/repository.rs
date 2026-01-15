@@ -127,7 +127,16 @@ impl Repository {
                 details: e.to_string(),
             })?;
 
-        Ok(!output.stdout.is_empty())
+        let has_changes = !output.stdout.is_empty();
+
+        tracing::debug!(
+            "has_uncommitted_changes: path={:?}, has_changes={}, output={:?}",
+            self.root,
+            has_changes,
+            String::from_utf8_lossy(&output.stdout)
+        );
+
+        Ok(has_changes)
     }
 
     /// Check if there are unpushed commits
