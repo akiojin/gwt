@@ -1423,10 +1423,12 @@ impl Model {
                 }
                 None
             }
-            KeyCode::Char(c)
-                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
-            {
-                Some(Message::Char(c))
+            KeyCode::Char(c) => {
+                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    None
+                } else {
+                    Some(Message::Char(c))
+                }
             }
             _ => None,
         }
