@@ -49,12 +49,20 @@ fn run() -> Result<(), GwtError> {
     let settings = Settings::load(&repo_root).unwrap_or_default();
 
     // Initialize logging
+    // Note: settings.log_dir() already includes workspace name, so we pass empty workspace
     let log_config = gwt_core::logging::LogConfig {
         debug: cli.debug || std::env::var("GWT_DEBUG").is_ok(),
         log_dir: settings.log_dir(&repo_root),
+        workspace: String::new(),
         ..Default::default()
     };
     gwt_core::logging::init_logger(&log_config)?;
+
+    info!(
+        repo_root = %repo_root.display(),
+        debug = log_config.debug,
+        "gwt started"
+    );
 
     match cli.command {
         Some(cmd) => handle_command(cmd, &repo_root, &settings),
@@ -166,6 +174,15 @@ fn cmd_add(
     new_branch: bool,
     base: Option<&str>,
 ) -> Result<(), GwtError> {
+    info!(
+        category = "cli",
+        command = "add",
+        branch,
+        new_branch,
+        base = base.unwrap_or("HEAD"),
+        "Executing add command"
+    );
+
     let manager = WorktreeManager::new(repo_root)?;
 
     let wt = if new_branch {
@@ -186,6 +203,15 @@ fn cmd_remove(
     force: bool,
     delete_branch: bool,
 ) -> Result<(), GwtError> {
+    info!(
+        category = "cli",
+        command = "remove",
+        target,
+        force,
+        delete_branch,
+        "Executing remove command"
+    );
+
     let manager = WorktreeManager::new(repo_root)?;
 
     // Find worktree by branch name or path
@@ -213,6 +239,14 @@ fn cmd_remove(
 }
 
 fn cmd_switch(repo_root: &PathBuf, branch: &str, new_window: bool) -> Result<(), GwtError> {
+    info!(
+        category = "cli",
+        command = "switch",
+        branch,
+        new_window,
+        "Executing switch command"
+    );
+
     let manager = WorktreeManager::new(repo_root)?;
 
     let wt = manager
@@ -258,6 +292,14 @@ fn cmd_switch(repo_root: &PathBuf, branch: &str, new_window: bool) -> Result<(),
 }
 
 fn cmd_clean(repo_root: &PathBuf, dry_run: bool, prune: bool) -> Result<(), GwtError> {
+    info!(
+        category = "cli",
+        command = "clean",
+        dry_run,
+        prune,
+        "Executing clean command"
+    );
+
     let manager = WorktreeManager::new(repo_root)?;
 
     let orphans = manager.detect_orphans();
@@ -301,7 +343,7 @@ fn cmd_logs(repo_root: &Path, settings: &Settings, limit: usize) -> Result<(), G
     }
 
     for entry in entries {
-        println!("{} [{}] {}", entry.timestamp, entry.level, entry.message);
+        println!("{} [{}] {}", entry.timestamp, entry.level, entry.message());
     }
 
     Ok(())
@@ -330,6 +372,14 @@ fn cmd_init(repo_root: &Path, force: bool) -> Result<(), GwtError> {
 }
 
 fn cmd_lock(repo_root: &PathBuf, target: &str, reason: Option<&str>) -> Result<(), GwtError> {
+    info!(
+        category = "cli",
+        command = "lock",
+        target,
+        reason = reason.unwrap_or("none"),
+        "Executing lock command"
+    );
+
     let manager = WorktreeManager::new(repo_root)?;
 
     let wt = manager
@@ -345,6 +395,13 @@ fn cmd_lock(repo_root: &PathBuf, target: &str, reason: Option<&str>) -> Result<(
 }
 
 fn cmd_unlock(repo_root: &PathBuf, target: &str) -> Result<(), GwtError> {
+    info!(
+        category = "cli",
+        command = "unlock",
+        target,
+        "Executing unlock command"
+    );
+
     let manager = WorktreeManager::new(repo_root)?;
 
     let wt = manager
@@ -360,6 +417,13 @@ fn cmd_unlock(repo_root: &PathBuf, target: &str) -> Result<(), GwtError> {
 }
 
 fn cmd_repair(repo_root: &PathBuf, target: Option<&str>) -> Result<(), GwtError> {
+    info!(
+        category = "cli",
+        command = "repair",
+        target = target.unwrap_or("all"),
+        "Executing repair command"
+    );
+
     let manager = WorktreeManager::new(repo_root)?;
 
     if let Some(target) = target {
