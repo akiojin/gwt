@@ -699,7 +699,6 @@ fn format_display_value(value: &str) -> String {
     value.to_string()
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -963,5 +962,4 @@ mod tests {
         assert!(!state.selected_is_overridden());
         assert!(!state.selected_is_added());
     }
-
 }
