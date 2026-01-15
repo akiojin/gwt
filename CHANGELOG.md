@@ -1,12 +1,29 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
-## [5.1.0] - 2026-01-14
+## [5.4.0] - 2026-01-15
+
+### Bug Fixes
+
+- Remove publish-crates dependency from upload-release job
+- Add sync-develop job to sync main back to develop after release
+- Use -X theirs option in sync-develop to resolve conflicts automatically
+- Add on-demand binary download for bunx compatibility (#600)
+- Filter key events by KeyEventKind::Press to prevent double input on Windows (#601)
+
+### Features
+
+- Bun-to-rust移行と周辺改善 (#602)
+- Add structured debug logging for worktree change detection (#603)
 
 ### Miscellaneous Tasks
 
 - Remove release-please manifest (migrating to custom action)
 - Remove release-please config (migrating to custom action)
+- Sync version with main (5.1.0)
+- Sync version with main (5.1.0)
+- Sync CHANGELOG.md from main after v5.1.0 release
+- Sync main to develop after v5.1.0 release (#594)
 
 ## [gwt-v6.0.1] - 2026-01-14
 
