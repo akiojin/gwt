@@ -57,10 +57,15 @@ impl Repository {
         let path = path.as_ref();
         match gix::open(path) {
             Ok(repo) => {
-                let root = repo
-                    .work_dir()
-                    .map(|p| p.to_path_buf())
-                    .unwrap_or_else(|| repo.git_dir().to_path_buf());
+                let work_dir = repo.work_dir().map(|p| p.to_path_buf());
+                let git_dir = repo.git_dir().to_path_buf();
+                let root = work_dir.clone().unwrap_or_else(|| git_dir.clone());
+
+                tracing::debug!(
+                    "Repository::open: input_path={:?}, work_dir={:?}, git_dir={:?}, resolved_root={:?}",
+                    path, work_dir, git_dir, root
+                );
+
                 Ok(Self {
                     root,
                     gix_repo: Some(repo),
