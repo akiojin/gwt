@@ -1,6 +1,6 @@
 [package]
 name = "gwt-cli"
-version = "6.0.2"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -15,7 +15,7 @@ name = "gwt"
 path = "src/main.rs"
 
 [dependencies]
-gwt-core = { path = "../gwt-core", version = "6.0.2" }
+gwt-core = { path = "../gwt-core" }
 thiserror.workspace = true
 tokio.workspace = true
 clap.workspace = true

@@ -58,10 +58,15 @@ impl Repository {
         let path = path.as_ref();
         match gix::open(path) {
             Ok(repo) => {
-                let root = repo
-                    .work_dir()
-                    .map(|p| p.to_path_buf())
-                    .unwrap_or_else(|| repo.git_dir().to_path_buf());
+                let work_dir = repo.work_dir().map(|p| p.to_path_buf());
+                let git_dir = repo.git_dir().to_path_buf();
+                let root = work_dir.clone().unwrap_or_else(|| git_dir.clone());
+
+                tracing::debug!(
+                    "Repository::open: input_path={:?}, work_dir={:?}, git_dir={:?}, resolved_root={:?}",
+                    path, work_dir, git_dir, root
+                );
+
                 Ok(Self {
                     root,
                     gix_repo: Some(repo),
@@ -128,7 +133,16 @@ impl Repository {
                 details: e.to_string(),
             })?;
 
-        Ok(!output.stdout.is_empty())
+        let has_changes = !output.stdout.is_empty();
+
+        tracing::debug!(
+            "has_uncommitted_changes: path={:?}, has_changes={}, output={:?}",
+            self.root,
+            has_changes,
+            String::from_utf8_lossy(&output.stdout)
+        );
+
+        Ok(has_changes)
     }
 
     /// Check if there are unpushed commits
