@@ -1460,7 +1460,7 @@ impl Model {
                 if self.environment.edit_mode {
                     "[Enter] Save | [Tab] Switch | [Esc] Cancel"
                 } else {
-                    "[Enter/e] Edit | [n] New | [d] Delete (profile)/Disable (OS) | [r] Reset (override) | [v] Toggle visibility | [Esc] Back"
+                    "[Enter/e] Edit | [n] New | [d] Delete (profile)/Disable (OS) | [r] Reset (override) | [Esc] Back"
                 }
             }
         };
@@ -1772,18 +1772,6 @@ pub fn run_with_context(
                                 }
                             } else {
                                 Some(Message::Char('e'))
-                            }
-                        }
-                        (KeyCode::Char('v'), KeyModifiers::NONE) => {
-                            if matches!(model.screen, Screen::Environment) {
-                                if model.environment.edit_mode {
-                                    Some(Message::Char('v'))
-                                } else {
-                                    model.environment.toggle_visibility();
-                                    None
-                                }
-                            } else {
-                                Some(Message::Char('v'))
                             }
                         }
                         (KeyCode::Char('x'), KeyModifiers::NONE) => {

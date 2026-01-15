@@ -78,8 +78,6 @@ pub struct EnvironmentState {
     pub cursor: usize,
     /// Error message
     pub error: Option<String>,
-    /// Show values (toggle visibility)
-    pub show_values: bool,
     /// Profile name (context)
     pub profile_name: Option<String>,
 }
@@ -236,11 +234,6 @@ impl EnvironmentState {
         if self.viewport_height > 0 {
             self.scroll_offset = self.selected.saturating_sub(self.viewport_height - 1);
         }
-    }
-
-    /// Toggle value visibility
-    pub fn toggle_visibility(&mut self) {
-        self.show_values = !self.show_values;
     }
 
     /// Enter edit mode for new variable
@@ -546,17 +539,10 @@ pub fn render_environment(state: &mut EnvironmentState, frame: &mut Frame, area:
 
     // Header
     let profile_info = state.profile_name.as_deref().unwrap_or("default");
-    let visibility = if state.show_values {
-        "visible"
-    } else {
-        "hidden"
-    };
     let total_vars = state.display_len();
     let header = Paragraph::new(format!(
-        "Environment Variables | Profile: {} | Values: {} ({} vars)",
-        profile_info,
-        visibility,
-        total_vars
+        "Environment Variables | Profile: {} | ({} vars)",
+        profile_info, total_vars
     ))
     .style(Style::default().fg(Color::Cyan));
     frame.render_widget(header, chunks[0]);
@@ -579,7 +565,7 @@ pub fn render_environment(state: &mut EnvironmentState, frame: &mut Frame, area:
             .enumerate()
             .map(|(i, item)| {
                 let absolute_index = start + i;
-                let value_display = format_display_value(&item.value, state.show_values);
+                let value_display = format_display_value(&item.value);
                 let (key_style, value_style) = match item.kind {
                     EnvDisplayKind::Overridden => (Style::default().fg(Color::Yellow), Style::default()),
                     EnvDisplayKind::Added => (Style::default().fg(Color::Green), Style::default()),
@@ -616,7 +602,7 @@ pub fn render_environment(state: &mut EnvironmentState, frame: &mut Frame, area:
     if state.edit_mode {
         render_edit_area(state, frame, chunks[2]);
     } else {
-        let actions = "[Enter/e] Edit | [n] New | [d] Delete (profile)/Disable (OS) | [r] Reset (override) | [v] Toggle visibility | [Esc] Back";
+        let actions = "[Enter/e] Edit | [n] New | [d] Delete (profile)/Disable (OS) | [r] Reset (override) | [Esc] Back";
         let footer = Paragraph::new(actions)
             .style(Style::default().fg(Color::DarkGray))
             .block(Block::default().borders(Borders::TOP));
@@ -706,12 +692,8 @@ fn render_edit_area(state: &EnvironmentState, frame: &mut Frame, area: Rect) {
     frame.set_cursor_position((cursor_x, cursor_y));
 }
 
-fn format_display_value(value: &str, show_values: bool) -> String {
-    if show_values {
-        value.to_string()
-    } else {
-        "********".to_string()
-    }
+fn format_display_value(value: &str) -> String {
+    value.to_string()
 }
 
 #[cfg(test)]
@@ -810,7 +792,7 @@ mod tests {
     }
 
     #[test]
-    fn test_hidden_values_are_masked() {
+    fn test_values_are_visible() {
         let vars = vec![EnvItem {
             key: "TOKEN".to_string(),
             value: "secret-value".to_string(),
@@ -818,9 +800,9 @@ mod tests {
         }];
 
         let state = EnvironmentState::new().with_variables(vars);
-        let masked = format_display_value(&state.variables[0].value, false);
+        let visible = format_display_value(&state.variables[0].value);
 
-        assert_eq!(masked, "********");
+        assert_eq!(visible, "secret-value");
     }
 
     #[test]
