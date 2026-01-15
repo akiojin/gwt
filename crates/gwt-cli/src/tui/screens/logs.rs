@@ -3,6 +3,7 @@
 #![allow(dead_code)] // Screen components for future use
 
 use ratatui::{prelude::*, widgets::*};
+use serde_json;
 
 /// Log entry type (local copy for TUI)
 #[derive(Debug, Clone)]
@@ -11,6 +12,30 @@ pub struct LogEntry {
     pub level: String,
     pub message: String,
     pub target: String,
+    pub category: Option<String>,
+    pub extra: std::collections::HashMap<String, String>,
+}
+
+impl LogEntry {
+    /// Format log entry for clipboard copy as JSON
+    pub fn to_clipboard_string(&self) -> String {
+        let mut json = serde_json::json!({
+            "timestamp": self.timestamp,
+            "level": self.level,
+            "target": self.target,
+            "message": self.message,
+        });
+
+        if let Some(ref cat) = self.category {
+            json["category"] = serde_json::json!(cat);
+        }
+
+        if !self.extra.is_empty() {
+            json["extra"] = serde_json::json!(self.extra);
+        }
+
+        serde_json::to_string_pretty(&json).unwrap_or_else(|_| format!("{:?}", self))
+    }
 }
 
 /// Log level filter
@@ -58,6 +83,7 @@ pub struct LogsState {
     pub filter: LogLevelFilter,
     pub search: String,
     pub is_searching: bool,
+    pub show_detail: bool,
 }
 
 impl LogsState {
@@ -173,10 +199,35 @@ impl LogsState {
         let filtered = self.filtered_entries();
         filtered.get(self.selected).copied()
     }
+
+    /// Toggle detail view
+    pub fn toggle_detail(&mut self) {
+        if self.selected_entry().is_some() {
+            self.show_detail = !self.show_detail;
+        }
+    }
+
+    /// Close detail view
+    pub fn close_detail(&mut self) {
+        self.show_detail = false;
+    }
+
+    /// Check if detail view is shown
+    pub fn is_detail_shown(&self) -> bool {
+        self.show_detail
+    }
 }
 
 /// Render logs screen
 pub fn render_logs(state: &LogsState, frame: &mut Frame, area: Rect) {
+    // If detail view is shown, render it as an overlay
+    if state.show_detail {
+        if let Some(entry) = state.selected_entry() {
+            render_detail_view(entry, frame, area);
+            return;
+        }
+    }
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -337,9 +388,74 @@ fn render_search_bar(state: &LogsState, frame: &mut Frame, area: Rect) {
 }
 
 fn render_instructions(frame: &mut Frame, area: Rect) {
-    let instructions = "[Up/Down] Navigate | [f] Filter | [/] Search | [Esc] Back";
+    let instructions =
+        "[Up/Down] Navigate | [Enter] Detail | [c] Copy | [f] Filter | [/] Search | [Esc] Back";
     let paragraph =
         Paragraph::new(format!(" {} ", instructions)).block(Block::default().borders(Borders::ALL));
+    frame.render_widget(paragraph, area);
+}
+
+fn render_detail_view(entry: &LogEntry, frame: &mut Frame, area: Rect) {
+    let level_style = match entry.level.as_str() {
+        "ERROR" => Style::default().fg(Color::Red),
+        "WARN" => Style::default().fg(Color::Yellow),
+        "INFO" => Style::default().fg(Color::Green),
+        "DEBUG" => Style::default().fg(Color::Blue),
+        "TRACE" => Style::default().fg(Color::DarkGray),
+        _ => Style::default(),
+    };
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("Timestamp: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(&entry.timestamp),
+        ]),
+        Line::from(vec![
+            Span::styled("Level:     ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(&entry.level, level_style),
+        ]),
+        Line::from(vec![
+            Span::styled("Target:    ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(&entry.target),
+        ]),
+    ];
+
+    // Show category if present
+    if let Some(ref category) = entry.category {
+        lines.push(Line::from(vec![
+            Span::styled("Category:  ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(category, Style::default().fg(Color::Cyan)),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Message:",
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(entry.message.clone()));
+
+    // Show extra fields if present
+    if !entry.extra.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Extra Fields:",
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        for (key, value) in &entry.extra {
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {}: ", key), Style::default().fg(Color::DarkGray)),
+                Span::raw(value),
+            ]));
+        }
+    }
+
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Log Detail ")
+            .title_bottom(" [c] Copy | [Esc] Close "),
+    );
     frame.render_widget(paragraph, area);
 }
 
@@ -354,18 +470,24 @@ mod tests {
                 level: "INFO".to_string(),
                 message: "Test message 1".to_string(),
                 target: "test".to_string(),
+                category: Some("worktree".to_string()),
+                extra: std::collections::HashMap::new(),
             },
             LogEntry {
                 timestamp: "2024-01-01T12:00:01Z".to_string(),
                 level: "ERROR".to_string(),
                 message: "Error message".to_string(),
                 target: "test".to_string(),
+                category: None,
+                extra: std::collections::HashMap::new(),
             },
             LogEntry {
                 timestamp: "2024-01-01T12:00:02Z".to_string(),
                 level: "DEBUG".to_string(),
                 message: "Debug message".to_string(),
                 target: "test".to_string(),
+                category: Some("git".to_string()),
+                extra: std::collections::HashMap::new(),
             },
         ]
     }
@@ -409,5 +531,43 @@ mod tests {
 
         state.cycle_filter();
         assert_eq!(state.filter, LogLevelFilter::Warn);
+    }
+
+    #[test]
+    fn test_to_clipboard_string_json_format() {
+        let entry = LogEntry {
+            timestamp: "2024-01-01T12:00:00Z".to_string(),
+            level: "INFO".to_string(),
+            message: "Test message".to_string(),
+            target: "test".to_string(),
+            category: Some("worktree".to_string()),
+            extra: std::collections::HashMap::new(),
+        };
+
+        let clipboard_text = entry.to_clipboard_string();
+        // Should be valid JSON
+        let parsed: serde_json::Value = serde_json::from_str(&clipboard_text).unwrap();
+        assert_eq!(parsed["timestamp"], "2024-01-01T12:00:00Z");
+        assert_eq!(parsed["level"], "INFO");
+        assert_eq!(parsed["target"], "test");
+        assert_eq!(parsed["message"], "Test message");
+        assert_eq!(parsed["category"], "worktree");
+    }
+
+    #[test]
+    fn test_to_clipboard_string_without_category() {
+        let entry = LogEntry {
+            timestamp: "2024-01-01T12:00:00Z".to_string(),
+            level: "ERROR".to_string(),
+            message: "Error occurred".to_string(),
+            target: "test".to_string(),
+            category: None,
+            extra: std::collections::HashMap::new(),
+        };
+
+        let clipboard_text = entry.to_clipboard_string();
+        let parsed: serde_json::Value = serde_json::from_str(&clipboard_text).unwrap();
+        assert_eq!(parsed["level"], "ERROR");
+        assert!(parsed.get("category").is_none());
     }
 }

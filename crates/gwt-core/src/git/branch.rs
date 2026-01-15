@@ -3,6 +3,7 @@
 use crate::error::{GwtError, Result};
 use std::path::Path;
 use std::process::Command;
+use tracing::{debug, error, info};
 
 /// Represents a Git branch
 #[derive(Debug, Clone)]
@@ -255,6 +256,8 @@ impl Branch {
 
     /// Create a new branch from a base
     pub fn create(repo_path: &Path, name: &str, base: &str) -> Result<Branch> {
+        debug!(category = "git", branch = name, base, "Creating branch");
+
         let output = Command::new("git")
             .args(["branch", name, base])
             .current_dir(repo_path)
@@ -265,9 +268,17 @@ impl Branch {
             })?;
 
         if !output.status.success() {
+            let err_msg = String::from_utf8_lossy(&output.stderr).to_string();
+            error!(
+                category = "git",
+                branch = name,
+                base,
+                error = err_msg.as_str(),
+                "Failed to create branch"
+            );
             return Err(GwtError::BranchCreateFailed {
                 name: name.to_string(),
-                details: String::from_utf8_lossy(&output.stderr).to_string(),
+                details: err_msg,
             });
         }
 
@@ -285,11 +296,22 @@ impl Branch {
             .trim()
             .to_string();
 
+        info!(
+            category = "git",
+            operation = "branch_create",
+            branch = name,
+            base,
+            commit = commit.as_str(),
+            "Branch created"
+        );
+
         Ok(Branch::new(name, commit))
     }
 
     /// Delete a branch
     pub fn delete(repo_path: &Path, name: &str, force: bool) -> Result<()> {
+        debug!(category = "git", branch = name, force, "Deleting branch");
+
         let flag = if force { "-D" } else { "-d" };
         let output = Command::new("git")
             .args(["branch", flag, name])
@@ -301,11 +323,26 @@ impl Branch {
             })?;
 
         if output.status.success() {
+            info!(
+                category = "git",
+                operation = "branch_delete",
+                branch = name,
+                force,
+                "Branch deleted"
+            );
             Ok(())
         } else {
+            let err_msg = String::from_utf8_lossy(&output.stderr).to_string();
+            error!(
+                category = "git",
+                branch = name,
+                force,
+                error = err_msg.as_str(),
+                "Failed to delete branch"
+            );
             Err(GwtError::BranchDeleteFailed {
                 name: name.to_string(),
-                details: String::from_utf8_lossy(&output.stderr).to_string(),
+                details: err_msg,
             })
         }
     }
@@ -435,6 +472,8 @@ impl Branch {
 
     /// Checkout this branch
     pub fn checkout(repo_path: &Path, name: &str) -> Result<()> {
+        debug!(category = "git", branch = name, "Checking out branch");
+
         let output = Command::new("git")
             .args(["checkout", name])
             .current_dir(repo_path)
@@ -445,11 +484,24 @@ impl Branch {
             })?;
 
         if output.status.success() {
+            info!(
+                category = "git",
+                operation = "checkout",
+                branch = name,
+                "Branch checked out"
+            );
             Ok(())
         } else {
+            let err_msg = String::from_utf8_lossy(&output.stderr).to_string();
+            error!(
+                category = "git",
+                branch = name,
+                error = err_msg.as_str(),
+                "Failed to checkout branch"
+            );
             Err(GwtError::GitOperationFailed {
                 operation: format!("checkout {name}"),
-                details: String::from_utf8_lossy(&output.stderr).to_string(),
+                details: err_msg,
             })
         }
     }
