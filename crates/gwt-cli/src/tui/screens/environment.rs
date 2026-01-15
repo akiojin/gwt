@@ -460,4 +460,20 @@ mod tests {
         state.edit_key = "invalid-key".to_string();
         assert!(state.validate().is_err());
     }
+
+    #[test]
+    fn test_empty_value_placeholder_not_saved() {
+        let vars = vec![EnvItem {
+            key: "EMPTY".to_string(),
+            value: "".to_string(),
+            is_secret: false,
+        }];
+
+        let mut state = EnvironmentState::new().with_variables(vars);
+        state.start_edit();
+
+        let (key, value) = state.validate().expect("validation should pass");
+        assert_eq!(key, "EMPTY");
+        assert!(value.is_empty());
+    }
 }

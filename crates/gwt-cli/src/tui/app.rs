@@ -3,7 +3,7 @@
 #![allow(dead_code)] // TUI application components for future expansion
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -1404,6 +1404,33 @@ impl Model {
             .block(Block::default().borders(Borders::ALL));
         frame.render_widget(footer, area);
     }
+
+    fn text_input_active(&self) -> bool {
+        matches!(self.screen, Screen::Profiles) && self.profiles.create_mode
+            || matches!(self.screen, Screen::Environment) && self.environment.edit_mode
+    }
+
+    fn handle_text_input_key(&mut self, key: KeyEvent, enter_is_press: bool) -> Option<Message> {
+        match key.code {
+            KeyCode::Esc => Some(Message::NavigateBack),
+            KeyCode::Enter if enter_is_press => Some(Message::Enter),
+            KeyCode::Backspace => Some(Message::Backspace),
+            KeyCode::Left => Some(Message::CursorLeft),
+            KeyCode::Right => Some(Message::CursorRight),
+            KeyCode::Tab => {
+                if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
+                    self.environment.switch_field();
+                }
+                None
+            }
+            KeyCode::Char(c)
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                Some(Message::Char(c))
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Run the TUI application
@@ -1470,6 +1497,8 @@ pub fn run_with_context(
                         }
                         _ => None,
                     }
+                } else if model.text_input_active() {
+                    model.handle_text_input_key(key, enter_is_press)
                 } else {
                     // Normal key handling
                     match (key.code, key.modifiers) {
@@ -1761,6 +1790,7 @@ pub fn run_with_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::screens::environment::EditField;
     use crate::tui::screens::wizard::WizardStep;
     use crate::tui::screens::{BranchItem, BranchListState};
     use gwt_core::git::Branch;
@@ -1794,5 +1824,29 @@ mod tests {
         assert!(model.branch_list.selected_branches.is_empty());
         assert!(model.pending_unsafe_selection.is_none());
         assert!(matches!(model.screen, Screen::BranchList));
+    }
+
+    #[test]
+    fn test_profile_input_disables_shortcuts() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::Profiles;
+        model.profiles.enter_create_mode();
+
+        let key = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE);
+        let msg = model.handle_text_input_key(key, true);
+        assert!(matches!(msg, Some(Message::Char('n'))));
+    }
+
+    #[test]
+    fn test_environment_input_switches_field_on_tab() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::Environment;
+        model.environment.start_new();
+        assert_eq!(model.environment.edit_field, EditField::Key);
+
+        let key = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        let msg = model.handle_text_input_key(key, true);
+        assert!(msg.is_none());
+        assert_eq!(model.environment.edit_field, EditField::Value);
     }
 }
