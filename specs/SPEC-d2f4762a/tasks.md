@@ -26,6 +26,13 @@
 - [x] **T9957** [Impl] `crates/gwt-cli/src/tui/screens/settings.rs` に選択中項目の説明エリアを追加
 - [x] **T9958** [Impl] 自動インストール無効時の警告メッセージを簡潔に改善
 
+## 追加作業: 出力検証の自動テスト (2026-01-16)
+
+- [x] **T9959** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` に出力検証の自動テスト要件・方針を追記
+- [x] **T9960** [Test] `crates/gwt-cli/src/main.rs` に自動インストール無効時の警告文を検証するユニットテストを追加
+- [x] **T9961** [Test] `crates/gwt-cli/src/tui/screens/settings.rs` に設定画面のDescription文言を検証するユニットテストを追加
+- [x] **T9962** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
+
 ## 追加作業: Rust版キーバインド整合 (2026-01-13)
 
 - [x] **T9901** [P] [US0] `specs/SPEC-d2f4762a/spec.md` から `n` キー記述を削除し、ウィザード手順を整理
