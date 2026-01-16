@@ -315,7 +315,7 @@ cargo run
 
 ## Release Process
 
-We ship releases through release-please. End users can simply install the latest published package (via npm or the GitHub Releases tab) and rely on versioned artifacts. Maintainers who need the full workflow should read [docs/release-guide.md](./docs/release-guide.md) (日本語版: [docs/release-guide.ja.md](./docs/release-guide.ja.md)).
+End users can install the latest published package (via npm or the GitHub Releases tab). Maintainers should follow the release flow requirements in `specs/SPEC-77b1bc70/spec.md`.
 
 ## Troubleshooting
 
