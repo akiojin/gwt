@@ -1061,6 +1061,21 @@ fn render_worktree_path(
         return;
     }
 
+    if state.is_loading {
+        let line = Line::from(vec![
+            Span::styled(
+                format!("{} ", state.spinner_char()),
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::styled(
+                "Status: Loading branch list...",
+                Style::default().fg(Color::Yellow),
+            ),
+        ]);
+        frame.render_widget(Paragraph::new(line), area);
+        return;
+    }
+
     if let Some(progress) = state.status_progress_line() {
         let line = Line::from(vec![
             Span::styled(
@@ -1282,6 +1297,26 @@ mod tests {
         let buffer = terminal.backend().buffer();
         let line: String = (0..60).map(|x| buffer[(x, 4)].symbol()).collect();
         assert!(line.contains("Status: Updating branch status (1/5)"));
+    }
+
+    #[test]
+    fn test_loading_status_line_renders() {
+        let mut state = BranchListState::new();
+        state.set_loading(true);
+
+        let backend = TestBackend::new(60, 5);
+        let mut terminal = Terminal::new(backend).expect("terminal init");
+
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render_branch_list(&state, f, area, None);
+            })
+            .expect("draw");
+
+        let buffer = terminal.backend().buffer();
+        let line: String = (0..60).map(|x| buffer[(x, 4)].symbol()).collect();
+        assert!(line.contains("Status: Loading branch list..."));
     }
 
     #[test]

@@ -283,9 +283,11 @@ fn render_settings_content(state: &SettingsState, frame: &mut Frame, area: Rect)
 
     if let Some(desc_area) = desc_area {
         let description = selected_description(state);
-        let paragraph = Paragraph::new(description)
-            .wrap(Wrap { trim: true })
-            .block(Block::default().borders(Borders::ALL).title(" Description "));
+        let paragraph = Paragraph::new(description).wrap(Wrap { trim: true }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Description "),
+        );
         frame.render_widget(paragraph, desc_area);
     }
 }
