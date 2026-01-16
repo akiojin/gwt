@@ -10,7 +10,7 @@ use crossterm::{
 use gwt_core::config::get_branch_tool_history;
 use gwt_core::config::{Profile, ProfilesConfig};
 use gwt_core::error::GwtError;
-use gwt_core::git::{Branch, PrCache};
+use gwt_core::git::{Branch, PrCache, Repository};
 use gwt_core::worktree::WorktreeManager;
 use ratatui::{prelude::*, widgets::*};
 use std::collections::HashMap;
@@ -103,6 +103,18 @@ struct SafetyCheckTarget {
     upstream: String,
 }
 
+struct WorktreeStatusUpdate {
+    branch: String,
+    worktree_status: WorktreeStatus,
+    has_changes: bool,
+    failed: bool,
+}
+
+struct WorktreeStatusTarget {
+    branch: String,
+    path: PathBuf,
+}
+
 /// Application state (Model in Elm Architecture)
 pub struct Model {
     /// Whether the app should quit
@@ -159,6 +171,8 @@ pub struct Model {
     pr_title_rx: Option<Receiver<PrTitleUpdate>>,
     /// Safety check update receiver
     safety_rx: Option<Receiver<SafetyUpdate>>,
+    /// Worktree status update receiver
+    worktree_status_rx: Option<Receiver<WorktreeStatusUpdate>>,
 }
 
 /// Screen types
@@ -261,6 +275,7 @@ impl Model {
             pending_cleanup_branches: Vec::new(),
             pr_title_rx: None,
             safety_rx: None,
+            worktree_status_rx: None,
         };
 
         // Load initial data
@@ -278,7 +293,14 @@ impl Model {
         if let Ok(manager) = WorktreeManager::new(&self.repo_root) {
             // Get branches
             if let Ok(branches) = Branch::list_basic(&self.repo_root) {
-                let worktrees = manager.list().unwrap_or_default();
+                let worktrees = manager.list_basic().unwrap_or_default();
+                let worktree_targets: Vec<WorktreeStatusTarget> = worktrees
+                    .iter()
+                    .filter_map(|wt| wt.branch.clone().map(|branch| WorktreeStatusTarget {
+                        branch,
+                        path: wt.path.clone(),
+                    }))
+                    .collect();
 
                 // Load tool usage from TypeScript session file (FR-070)
                 let tool_usage_map = gwt_core::config::get_last_tool_usage_map(&self.repo_root);
@@ -287,7 +309,7 @@ impl Model {
                 let mut branch_items: Vec<BranchItem> = branches
                     .iter()
                     .map(|b| {
-                        let mut item = BranchItem::from_branch(b, &worktrees);
+                        let mut item = BranchItem::from_branch_minimal(b, &worktrees);
 
                         // Set tool usage from TypeScript session history (FR-070)
                         if let Some(entry) = tool_usage_map.get(&b.name) {
@@ -301,11 +323,7 @@ impl Model {
 
                         // Safety check short-circuit: use immediate signals first
                         if item.branch_type == BranchType::Local {
-                            if item.has_changes
-                                || item.has_unpushed
-                                || !b.has_remote
-                                || !base_branch_exists
-                            {
+                            if !b.has_remote || !base_branch_exists {
                                 item.safe_to_cleanup = Some(false);
                             } else if let Some(upstream) = b.upstream.clone() {
                                 item.safe_to_cleanup = None;
@@ -334,7 +352,10 @@ impl Model {
                 self.total_count = branch_items.len();
                 self.active_count = branch_items.iter().filter(|b| b.has_worktree).count();
                 self.branch_list = BranchListState::new().with_branches(branch_items);
+                let total_updates = safety_targets.len() + worktree_targets.len();
+                self.branch_list.reset_status_progress(total_updates);
                 self.spawn_safety_checks(safety_targets, base_branch.clone());
+                self.spawn_worktree_status_checks(worktree_targets);
                 self.spawn_pr_title_fetch(&branches);
 
                 // Get base branches for worktree create
@@ -474,6 +495,59 @@ impl Model {
         });
     }
 
+    fn spawn_worktree_status_checks(&mut self, targets: Vec<WorktreeStatusTarget>) {
+        if targets.is_empty() {
+            self.worktree_status_rx = None;
+            return;
+        }
+
+        let (tx, rx) = mpsc::channel();
+        self.worktree_status_rx = Some(rx);
+
+        thread::spawn(move || {
+            for target in targets {
+                let mut failed = false;
+                let mut worktree_status = WorktreeStatus::Active;
+                let mut has_changes = false;
+
+                if !target.path.exists() {
+                    worktree_status = WorktreeStatus::Inaccessible;
+                } else {
+                    match Repository::open(&target.path) {
+                        Ok(repo) => match repo.has_uncommitted_changes() {
+                            Ok(changes) => {
+                                has_changes = changes;
+                            }
+                            Err(err) => {
+                                failed = true;
+                                tracing::warn!(
+                                    "Failed to check worktree changes for {}: {}",
+                                    target.branch,
+                                    err
+                                );
+                            }
+                        },
+                        Err(err) => {
+                            failed = true;
+                            tracing::warn!(
+                                "Failed to open worktree for {}: {}",
+                                target.branch,
+                                err
+                            );
+                        }
+                    }
+                }
+
+                let _ = tx.send(WorktreeStatusUpdate {
+                    branch: target.branch,
+                    worktree_status,
+                    has_changes,
+                    failed,
+                });
+            }
+        });
+    }
+
     fn apply_entry_context(&mut self, context: Option<TuiEntryContext>) {
         if let Some(context) = context {
             if let Some(message) = context.status_message {
@@ -519,10 +593,37 @@ impl Model {
                         update.is_unmerged,
                         update.safe_to_cleanup,
                     );
+                    self.branch_list.increment_status_progress();
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     self.safety_rx = None;
+                    break;
+                }
+            }
+        }
+    }
+
+    fn apply_worktree_updates(&mut self) {
+        let Some(rx) = &self.worktree_status_rx else {
+            return;
+        };
+
+        loop {
+            match rx.try_recv() {
+                Ok(update) => {
+                    if !update.failed {
+                        self.branch_list.apply_worktree_update(
+                            &update.branch,
+                            update.worktree_status,
+                            update.has_changes,
+                        );
+                    }
+                    self.branch_list.increment_status_progress();
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.worktree_status_rx = None;
                     break;
                 }
             }
@@ -806,6 +907,7 @@ impl Model {
                 self.branch_list.tick_spinner();
                 self.apply_pr_title_updates();
                 self.apply_safety_updates();
+                self.apply_worktree_updates();
             }
             Message::SelectNext => match self.screen {
                 Screen::BranchList => self.branch_list.select_next(),
@@ -1957,6 +2059,7 @@ pub fn run_with_context(
 mod tests {
     use super::*;
     use crate::tui::screens::wizard::WizardStep;
+    use crate::tui::screens::branch_list::SafetyStatus;
     use crate::tui::screens::{BranchItem, BranchListState};
     use gwt_core::git::Branch;
 
@@ -2026,5 +2129,64 @@ mod tests {
         let msg = model.handle_text_input_key(key, true);
         assert!(msg.is_none());
         assert_eq!(model.environment.edit_field, EditField::Value);
+    }
+
+    #[test]
+    fn test_status_progress_does_not_block_branch_navigation() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+
+        let branches = vec![
+            BranchItem {
+                name: "main".to_string(),
+                branch_type: BranchType::Local,
+                is_current: true,
+                has_worktree: true,
+                worktree_path: Some("/path".to_string()),
+                worktree_status: WorktreeStatus::Active,
+                has_changes: false,
+                has_unpushed: false,
+                divergence: gwt_core::git::DivergenceStatus::UpToDate,
+                has_remote_counterpart: true,
+                remote_name: None,
+                safe_to_cleanup: Some(true),
+                safety_status: SafetyStatus::Safe,
+                is_unmerged: false,
+                last_commit_timestamp: None,
+                last_tool_usage: None,
+                is_selected: false,
+                pr_title: None,
+            },
+            BranchItem {
+                name: "feature/one".to_string(),
+                branch_type: BranchType::Local,
+                is_current: false,
+                has_worktree: true,
+                worktree_path: Some("/path2".to_string()),
+                worktree_status: WorktreeStatus::Active,
+                has_changes: false,
+                has_unpushed: false,
+                divergence: gwt_core::git::DivergenceStatus::UpToDate,
+                has_remote_counterpart: true,
+                remote_name: None,
+                safe_to_cleanup: Some(true),
+                safety_status: SafetyStatus::Safe,
+                is_unmerged: false,
+                last_commit_timestamp: None,
+                last_tool_usage: None,
+                is_selected: false,
+                pr_title: None,
+            },
+        ];
+
+        model.branch_list = BranchListState::new().with_branches(branches);
+        model.branch_list.reset_status_progress(2);
+        model.branch_list.increment_status_progress();
+        model.pr_title_rx = None;
+        model.safety_rx = None;
+        model.worktree_status_rx = None;
+
+        model.update(Message::SelectNext);
+        assert_eq!(model.branch_list.selected, 1);
     }
 }
