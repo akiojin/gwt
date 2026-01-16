@@ -9,7 +9,7 @@
 - [ ] **T9946** [Test] `crates/gwt-cli/src/tui/screens/branch_list.rs` に状態更新進捗（`Status: Updating branch status (done/total)`）の表示テストを追加
 - [ ] **T9947** [Test] `crates/gwt-cli/src/tui/app.rs` に起動直後の非同期状態更新がUIをブロックしないことを確認するテストを追加
 - [ ] **T9948** [実装] `crates/gwt-cli/src/tui/screens/branch_list.rs` に進捗表示用の状態と描画を追加し、更新中のみ表示する
-- [ ] **T9949** [実装] `crates/gwt-cli/src/tui/app.rs` で初期一覧表示後に詳細状態のバックグラウンド更新を開始し、完了したブランチから順次反映する
+- [ ] **T9949** [実装] `crates/gwt-cli/src/tui/app.rs` で初期一覧表示後に詳細状態（未コミット/未プッシュ/未マージ/安全判定、upstream/差分、Worktreeアクセス可否）のバックグラウンド更新を開始し、完了したブランチから順次反映する
 - [ ] **T9950** [実装] `crates/gwt-cli/src/tui/app.rs` で`r`キーによる再取得時に進行中の更新を無効化し、最新更新のみ反映する
 - [ ] **T9951** `cargo test -p gwt-cli` と `cargo build --release` を実行し、失敗がないことを確認する
 
