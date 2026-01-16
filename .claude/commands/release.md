@@ -16,7 +16,6 @@ develop から main への Release PR を作成し、マージ後に完全自動
 5. release/YYYYMMDD-HHMMSS ブランチから main への PR を作成
 6. CI チェック通過後、Release PR が main にマージされると以下を自動実行:
    - タグ・GitHub Release を作成
-   - crates.io へ公開 (Trusted Publishing)
    - クロスコンパイル済みバイナリを GitHub Release にアップロード
    - npm へ公開 (provenance 付き)
 

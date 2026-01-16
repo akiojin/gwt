@@ -16,7 +16,6 @@ feature/* → PR → develop (auto merge)
               release/YYYYMMDD-HHMMSS → main PR
                            ↓ (release.yml - on merge)
               Create tag & GitHub Release
-              crates.io publish (Trusted Publishing)
               cross-compile binaries → GitHub Release upload
               npm publish (with provenance)
 ```
@@ -26,7 +25,7 @@ feature/* → PR → develop (auto merge)
 1. **Prepare** – ensure `develop` has all desired commits and `cargo test && cargo build --release` succeed.
 2. **Trigger** – run `/release` in Claude Code or execute `gh workflow run prepare-release.yml --ref develop` locally (requires `gh auth login`).
 3. **Monitor** – watch `prepare-release.yml` until the Release PR is created, then monitor `release.yml` from the Actions tab.
-4. **Verify** – confirm the `vX.Y.Z` tag, crates.io publication, GitHub Release binaries, and npm package version.
+4. **Verify** – confirm the `vX.Y.Z` tag, GitHub Release binaries, and npm package version.
 
 ## Where to Read More
 

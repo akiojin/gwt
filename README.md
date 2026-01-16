@@ -10,7 +10,7 @@ Interactive Git worktree manager with Coding Agent selection (Claude Code / Code
 
 ## Migration Status
 
-The Rust implementation covers the core CLI/TUI workflow and the Web UI (REST + WebSocket terminal). Remaining work is focused on Git backend fallback coverage, documentation polish, and release packaging.
+The Rust implementation covers the core CLI/TUI workflow and the Web UI (REST + WebSocket terminal). The migration from TypeScript/Bun to Rust is complete. Remaining work is focused on documentation polish and continuous improvements.
 
 ## Key Features
 
@@ -26,11 +26,11 @@ The Rust implementation covers the core CLI/TUI workflow and the Web UI (REST + 
 
 ## Installation
 
-GitHub Releases are the source of truth for prebuilt binaries. The npm/bunx wrapper downloads the matching release asset on install.
+GitHub Releases are the source of truth for prebuilt binaries. The npm/bunx wrapper automatically downloads the matching release asset on install.
 
 ### From GitHub Releases (Recommended)
 
-Download pre-built binaries from the [Releases page](https://github.com/akiojin/gwt/releases):
+Download pre-built binaries from the [Releases page](https://github.com/akiojin/gwt/releases). Each release includes binaries for all supported platforms:
 
 - `gwt-linux-x86_64` - Linux x86_64
 - `gwt-linux-aarch64` - Linux ARM64
@@ -64,10 +64,7 @@ bunx @akiojin/gwt
 Install the CLI with Cargo:
 
 ```bash
-# From crates.io (recommended for Rust users)
-cargo install gwt-cli
-
-# With cargo-binstall (faster, downloads prebuilt binary)
+# With cargo-binstall (faster, downloads prebuilt binary from GitHub Releases)
 cargo binstall gwt-cli
 
 # From GitHub (latest development version)
