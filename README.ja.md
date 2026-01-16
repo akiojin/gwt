@@ -30,7 +30,7 @@ GitHub Releases を正とし、npm/bunx では該当リリースのバイナリ�
 
 ### GitHub Releasesから（推奨）
 
-[Releasesページ](https://github.com/akiojin/gwt/releases)からプリビルドバイナリをダウンロード:
+[Releasesページ](https://github.com/akiojin/gwt/releases)からプリビルドバイナリをダウンロード。各リリースには全対応プラットフォームのバイナリが含まれます:
 
 - `gwt-linux-x86_64` - Linux x86_64
 - `gwt-linux-aarch64` - Linux ARM64
