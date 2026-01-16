@@ -492,6 +492,10 @@
 - **FR-040d**: システムは、依存関係インストールが無効で `package.json` が存在し `node_modules` が無い場合、英語の警告を表示して起動を継続**しなければならない**（例: `Skipping dependency install (auto install disabled). Run npm install if needed.`）
 - **FR-040e**: システムは、依存関係インストールを設定（`agent.auto_install_deps`）または環境変数（`GWT_AGENT_AUTO_INSTALL_DEPS`）で有効化できるように**しなければならない**
 
+#### 設定画面の補足表示（新規）
+
+- **FR-076**: システムは、設定画面で選択中の項目に対する補足説明（Description）を英語で表示**しなければならない**
+
 #### ウィザードポップアップUI（新規）
 
 - **FR-044**: システムは、ブランチ選択時にブランチ一覧画面の上にウィザードポップアップをレイヤー表示**しなければならない**

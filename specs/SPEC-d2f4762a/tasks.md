@@ -21,6 +21,11 @@
 - [x] **T9955** [Impl] `crates/gwt-cli/src/main.rs` の依存インストールを設定/環境変数で制御し、無効時は警告のみ表示して即起動する
 - [x] **T9956** `cargo test -p gwt-cli` と `cargo build --release` を実行し、失敗がないことを確認する
 
+## 追加作業: 設定画面の補足表示 (2026-01-16)
+
+- [x] **T9957** [Impl] `crates/gwt-cli/src/tui/screens/settings.rs` に選択中項目の説明エリアを追加
+- [x] **T9958** [Impl] 自動インストール無効時の警告メッセージを簡潔に改善
+
 ## 追加作業: Rust版キーバインド整合 (2026-01-13)
 
 - [x] **T9901** [P] [US0] `specs/SPEC-d2f4762a/spec.md` から `n` キー記述を削除し、ウィザード手順を整理
