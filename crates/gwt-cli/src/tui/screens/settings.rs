@@ -315,4 +315,15 @@ mod tests {
         state.prev_category();
         assert_eq!(state.category, SettingsCategory::Worktree);
     }
+
+    #[test]
+    fn test_selected_description_auto_install_deps() {
+        let mut state = SettingsState::new();
+        state.category = SettingsCategory::Agent;
+        state.selected_item = 1;
+        assert_eq!(
+            selected_description(&state),
+            "If false, dependency install is skipped before launch."
+        );
+    }
 }

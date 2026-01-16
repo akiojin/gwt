@@ -482,6 +482,13 @@ fn should_warn_skip_install(worktree_path: &Path) -> Option<&'static str> {
     detect_package_manager(worktree_path)
 }
 
+fn skip_install_warning_message(pm: &str) -> String {
+    format!(
+        "Auto install disabled. Skipping dependency install. Run \"{} install\" if needed or set GWT_AGENT_AUTO_INSTALL_DEPS=true.",
+        pm
+    )
+}
+
 fn install_dependencies(worktree_path: &Path, auto_install: bool) -> Result<(), GwtError> {
     // Check if package.json exists
     if !worktree_path.join("package.json").exists() {
@@ -490,10 +497,7 @@ fn install_dependencies(worktree_path: &Path, auto_install: bool) -> Result<(), 
 
     if !auto_install {
         if let Some(pm) = should_warn_skip_install(worktree_path) {
-            println!(
-                "Auto install disabled. Skipping dependency install. Run \"{} install\" if needed or set GWT_AGENT_AUTO_INSTALL_DEPS=true.",
-                pm
-            );
+            println!("{}", skip_install_warning_message(pm));
             println!();
         }
         return Ok(());
@@ -1497,6 +1501,15 @@ mod tests {
 
         let pm = should_warn_skip_install(temp.path());
         assert!(pm.is_none());
+    }
+
+    #[test]
+    fn test_skip_install_warning_message_formats() {
+        let message = skip_install_warning_message("npm");
+        assert_eq!(
+            message,
+            "Auto install disabled. Skipping dependency install. Run \"npm install\" if needed or set GWT_AGENT_AUTO_INSTALL_DEPS=true."
+        );
     }
 
     #[test]
