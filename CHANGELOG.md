@@ -1,17 +1,6 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
-
-## [6.0.7] - 2026-01-15
-
-### Bug Fixes
-
-- Clarify npm wrapper auto-download behavior in README
-
-### Documentation
-
-- Remove crates.io references from documentation
-
 ## [6.0.5] - 2026-01-15
 
 ### Bug Fixes
@@ -39,6 +28,7 @@ All notable changes to this project will be documented in this file.
 - Use cross for Linux ARM64 musl build
 - Add id-token permission for npm provenance and pin cross version
 - Clarify npm wrapper auto-download behavior in README
+- Improve release binary documentation clarity in README
 - Support merge commit in release workflow trigger
 - Add workflow_dispatch support to release workflow trigger
 
@@ -46,6 +36,7 @@ All notable changes to this project will be documented in this file.
 
 - パッケージ公開状況をCLAUDE.mdに追記
 - Remove crates.io references from documentation
+- Sync CHANGELOG from main and add v6.0.7 entry
 
 ### Miscellaneous Tasks
 
