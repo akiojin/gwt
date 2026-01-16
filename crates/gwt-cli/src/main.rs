@@ -491,7 +491,7 @@ fn install_dependencies(worktree_path: &Path, auto_install: bool) -> Result<(), 
     if !auto_install {
         if let Some(pm) = should_warn_skip_install(worktree_path) {
             println!(
-                "Skipping dependency install (auto install disabled). Run {} install if needed.",
+                "Auto install disabled. Skipping dependency install. Run \"{} install\" if needed or set GWT_AGENT_AUTO_INSTALL_DEPS=true.",
                 pm
             );
             println!();

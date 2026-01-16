@@ -102,9 +102,17 @@ impl Settings {
 
         figment = figment.merge(Env::prefixed("GWT_").split("_"));
 
-        figment.extract().map_err(|e| GwtError::ConfigParseError {
+        let mut settings: Settings = figment.extract().map_err(|e| GwtError::ConfigParseError {
             reason: e.to_string(),
-        })
+        })?;
+
+        if let Ok(value) = std::env::var("GWT_AGENT_AUTO_INSTALL_DEPS") {
+            if let Some(parsed) = parse_env_bool(&value) {
+                settings.agent.auto_install_deps = parsed;
+            }
+        }
+
+        Ok(settings)
     }
 
     /// Get default TOML configuration
@@ -190,6 +198,14 @@ impl Settings {
     }
 }
 
+fn parse_env_bool(value: &str) -> Option<bool> {
+    match value.trim().to_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,5 +283,16 @@ mod tests {
         std::env::remove_var("GWT_DEBUG");
 
         assert!(settings.debug);
+    }
+
+    #[test]
+    fn test_env_override_auto_install_deps() {
+        let temp = TempDir::new().unwrap();
+
+        std::env::set_var("GWT_AGENT_AUTO_INSTALL_DEPS", "true");
+        let settings = Settings::load(temp.path()).unwrap();
+        std::env::remove_var("GWT_AGENT_AUTO_INSTALL_DEPS");
+
+        assert!(settings.agent.auto_install_deps);
     }
 }
