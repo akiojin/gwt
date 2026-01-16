@@ -13,6 +13,14 @@
 - [ ] **T9950** [実装] `crates/gwt-cli/src/tui/app.rs` で`r`キーによる再取得時に進行中の一覧取得/状態更新を無効化し、最新更新のみ反映する
 - [ ] **T9951** `cargo test -p gwt-cli` と `cargo build --release` を実行し、失敗がないことを確認する
 
+## 追加作業: 依存インストールの非ブロッキング化 (2026-01-16)
+
+- [x] **T9952** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` に依存インストール無効化の要件・方針を追記
+- [x] **T9953** [Test] `crates/gwt-cli/src/main.rs` に自動インストール無効時の警告と起動継続を確認するテストを追加
+- [x] **T9954** [Impl] `crates/gwt-core/src/config/settings.rs` に `agent.auto_install_deps` を追加し、デフォルトを `false` に設定
+- [x] **T9955** [Impl] `crates/gwt-cli/src/main.rs` の依存インストールを設定/環境変数で制御し、無効時は警告のみ表示して即起動する
+- [x] **T9956** `cargo test -p gwt-cli` と `cargo build --release` を実行し、失敗がないことを確認する
+
 ## 追加作業: Rust版キーバインド整合 (2026-01-13)
 
 - [x] **T9901** [P] [US0] `specs/SPEC-d2f4762a/spec.md` から `n` キー記述を削除し、ウィザード手順を整理
