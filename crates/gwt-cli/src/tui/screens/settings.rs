@@ -79,6 +79,10 @@ impl SettingsState {
                         .unwrap_or_else(|| "None".to_string()),
                 ),
                 (
+                    "Auto Install Deps",
+                    format!("{}", settings.agent.auto_install_deps),
+                ),
+                (
                     "Claude Path",
                     settings
                         .agent

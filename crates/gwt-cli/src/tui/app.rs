@@ -56,6 +56,8 @@ pub struct AgentLaunchConfig {
     pub env: Vec<(String, String)>,
     /// Environment variables to remove
     pub env_remove: Vec<String>,
+    /// Auto install dependencies before launching agent
+    pub auto_install_deps: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1325,6 +1327,13 @@ impl Model {
             match result {
                 Ok(wt) => {
                     // Create agent launch configuration
+                    let auto_install_deps = self
+                        .settings
+                        .settings
+                        .as_ref()
+                        .map(|settings| settings.agent.auto_install_deps)
+                        .unwrap_or(false);
+
                     let launch_config = AgentLaunchConfig {
                         worktree_path: wt.path.clone(),
                         branch_name: branch.clone(),
@@ -1345,6 +1354,7 @@ impl Model {
                         skip_permissions: self.wizard.skip_permissions,
                         env: self.active_env_overrides(),
                         env_remove: self.active_env_removals(),
+                        auto_install_deps,
                     };
 
                     // Store the launch config and quit TUI

@@ -472,9 +472,30 @@ fn detect_package_manager(worktree_path: &Path) -> Option<&'static str> {
 ///
 /// FR-040a: Display package manager output directly to stdout/stderr
 /// FR-040b: Do NOT use spinner during installation (output would conflict)
-fn install_dependencies(worktree_path: &Path) -> Result<(), GwtError> {
+fn should_warn_skip_install(worktree_path: &Path) -> Option<&'static str> {
+    if !worktree_path.join("package.json").exists() {
+        return None;
+    }
+    if worktree_path.join("node_modules").exists() {
+        return None;
+    }
+    detect_package_manager(worktree_path)
+}
+
+fn install_dependencies(worktree_path: &Path, auto_install: bool) -> Result<(), GwtError> {
     // Check if package.json exists
     if !worktree_path.join("package.json").exists() {
+        return Ok(());
+    }
+
+    if !auto_install {
+        if let Some(pm) = should_warn_skip_install(worktree_path) {
+            println!(
+                "Skipping dependency install (auto install disabled). Run {} install if needed.",
+                pm
+            );
+            println!();
+        }
         return Ok(());
     }
 
@@ -529,8 +550,8 @@ enum AgentExitKind {
 /// - "latest": Use bunx @package@latest
 /// - specific version: Use bunx @package@X.Y.Z
 fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtError> {
-    // FR-040a/FR-040b: Install dependencies before launching agent
-    install_dependencies(&config.worktree_path)?;
+    // FR-040a/FR-040b: Install dependencies only when enabled
+    install_dependencies(&config.worktree_path, config.auto_install_deps)?;
     let started_at = Instant::now();
 
     let cmd_name = config.agent.command_name();
@@ -1369,6 +1390,7 @@ mod tests {
             skip_permissions: true,
             env: Vec::new(),
             env_remove: Vec::new(),
+            auto_install_deps: false,
         }
     }
 
@@ -1456,6 +1478,25 @@ mod tests {
         assert!(lines.contains(&"Model: sonnet".to_string()));
         assert!(!lines.iter().any(|line| line.starts_with("Reasoning: ")));
         assert!(lines.contains(&"Using locally installed claude".to_string()));
+    }
+
+    #[test]
+    fn test_should_warn_skip_install_detects_missing_node_modules() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("package.json"), "{}").unwrap();
+
+        let pm = should_warn_skip_install(temp.path());
+        assert_eq!(pm, Some("npm"));
+    }
+
+    #[test]
+    fn test_should_warn_skip_install_returns_none_when_installed() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("package.json"), "{}").unwrap();
+        fs::create_dir_all(temp.path().join("node_modules")).unwrap();
+
+        let pm = should_warn_skip_install(temp.path());
+        assert!(pm.is_none());
     }
 
     #[test]

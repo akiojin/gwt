@@ -84,6 +84,8 @@ pub struct AgentSettings {
     pub codex_path: Option<PathBuf>,
     /// Gemini CLI path
     pub gemini_path: Option<PathBuf>,
+    /// Auto install dependencies before launching agent
+    pub auto_install_deps: bool,
 }
 
 impl Settings {
