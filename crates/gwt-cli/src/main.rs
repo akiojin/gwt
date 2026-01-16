@@ -11,8 +11,7 @@ use std::fs;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
@@ -547,6 +546,68 @@ enum AgentExitKind {
     Interrupted,
 }
 
+#[derive(Debug, Clone)]
+struct SessionUpdateContext {
+    worktree_path: PathBuf,
+    branch_name: String,
+    agent_id: String,
+    agent_label: String,
+    version: String,
+    model: Option<String>,
+    mode: String,
+    reasoning_level: Option<String>,
+    skip_permissions: bool,
+}
+
+impl SessionUpdateContext {
+    fn to_entry(&self) -> ToolSessionEntry {
+        ToolSessionEntry {
+            branch: self.branch_name.clone(),
+            worktree_path: Some(self.worktree_path.to_string_lossy().to_string()),
+            tool_id: self.agent_id.clone(),
+            tool_label: self.agent_label.clone(),
+            session_id: None,
+            mode: Some(self.mode.clone()),
+            model: self.model.clone(),
+            reasoning_level: self.reasoning_level.clone(),
+            skip_permissions: Some(self.skip_permissions),
+            tool_version: Some(self.version.clone()),
+            timestamp: Utc::now().timestamp_millis(),
+        }
+    }
+}
+
+struct SessionUpdater {
+    stop_tx: mpsc::Sender<()>,
+    handle: thread::JoinHandle<()>,
+}
+
+impl SessionUpdater {
+    fn stop(self) {
+        let _ = self.stop_tx.send(());
+        let _ = self.handle.join();
+    }
+}
+
+fn spawn_session_updater(context: SessionUpdateContext, interval: Duration) -> SessionUpdater {
+    let (stop_tx, stop_rx) = mpsc::channel();
+    let handle = thread::spawn(move || loop {
+        match stop_rx.recv_timeout(interval) {
+            Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Timeout) => {
+                let entry = context.to_entry();
+                let _ = save_session_entry(&context.worktree_path, entry);
+            }
+        }
+    });
+
+    SessionUpdater { stop_tx, handle }
+}
+
+fn build_launching_message(config: &AgentLaunchConfig) -> String {
+    format!("Launching {}...", config.agent.label())
+}
+
 /// Launch a coding agent after TUI exits
 ///
 /// Version selection behavior (FR-066, FR-067, FR-068):
@@ -554,9 +615,8 @@ enum AgentExitKind {
 /// - "latest": Use bunx @package@latest
 /// - specific version: Use bunx @package@X.Y.Z
 fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtError> {
-    // FR-040a/FR-040b: Install dependencies only when enabled
-    install_dependencies(&config.worktree_path, config.auto_install_deps)?;
-    let started_at = Instant::now();
+    println!("{}", build_launching_message(&config));
+    println!();
 
     let cmd_name = config.agent.command_name();
     let npm_package = config.agent.npm_package();
@@ -626,6 +686,15 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
     }
     println!();
 
+    if config.auto_install_deps {
+        println!("Preparing to install dependencies...");
+        println!();
+    }
+
+    // FR-040a/FR-040b: Install dependencies only when enabled
+    install_dependencies(&config.worktree_path, config.auto_install_deps)?;
+    let started_at = Instant::now();
+
     // FR-069, FR-042: Save session entry before launching agent
     let session_entry = ToolSessionEntry {
         branch: config.branch_name.clone(),
@@ -665,45 +734,18 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
     })?;
 
     // FR-043: Start background thread to update timestamp every 30 seconds
-    let running = Arc::new(AtomicBool::new(true));
-    let running_clone = Arc::clone(&running);
-    let worktree_path = config.worktree_path.clone();
-    let branch_name = config.branch_name.clone();
-    let agent_id = config.agent.id().to_string();
-    let agent_label = config.agent.label().to_string();
-    let version = selected_version.clone();
-    let model = config.model.clone();
-    let mode = config.execution_mode.label().to_string();
-    let reasoning_level = config.reasoning_level.map(|r| r.label().to_string());
-    let skip_permissions = config.skip_permissions;
-
-    let updater_thread = thread::spawn(move || {
-        while running_clone.load(Ordering::Relaxed) {
-            // Wait 30 seconds before updating
-            thread::sleep(Duration::from_secs(30));
-
-            // Check if still running before updating
-            if !running_clone.load(Ordering::Relaxed) {
-                break;
-            }
-
-            // Update timestamp (FR-043)
-            let entry = ToolSessionEntry {
-                branch: branch_name.clone(),
-                worktree_path: Some(worktree_path.to_string_lossy().to_string()),
-                tool_id: agent_id.clone(),
-                tool_label: agent_label.clone(),
-                session_id: None,
-                mode: Some(mode.clone()),
-                model: model.clone(),
-                reasoning_level: reasoning_level.clone(),
-                skip_permissions: Some(skip_permissions),
-                tool_version: Some(version.clone()),
-                timestamp: Utc::now().timestamp_millis(),
-            };
-            let _ = save_session_entry(&worktree_path, entry);
-        }
-    });
+    let update_context = SessionUpdateContext {
+        worktree_path: config.worktree_path.clone(),
+        branch_name: config.branch_name.clone(),
+        agent_id: config.agent.id().to_string(),
+        agent_label: config.agent.label().to_string(),
+        version: selected_version.clone(),
+        model: config.model.clone(),
+        mode: config.execution_mode.label().to_string(),
+        reasoning_level: config.reasoning_level.map(|r| r.label().to_string()),
+        skip_permissions: config.skip_permissions,
+    };
+    let updater = spawn_session_updater(update_context, Duration::from_secs(30));
 
     // Wait for the agent process to finish
     let status = child.wait().map_err(|e| GwtError::AgentLaunchFailed {
@@ -712,8 +754,7 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
     })?;
 
     // Signal the updater thread to stop and wait for it
-    running.store(false, Ordering::Relaxed);
-    let _ = updater_thread.join();
+    updater.stop();
 
     if let Some(session_id) = detect_agent_session_id(&config) {
         let entry = ToolSessionEntry {
@@ -831,7 +872,6 @@ fn build_launch_log_lines(
     execution_method: &ExecutionMethod,
 ) -> Vec<String> {
     let mut lines = Vec::new();
-    lines.push(format!("Launching {}...", config.agent.label()));
     lines.push(format!(
         "Working directory: {}",
         config.worktree_path.display()
@@ -1398,6 +1438,20 @@ mod tests {
         }
     }
 
+    fn sample_update_context(path: PathBuf) -> SessionUpdateContext {
+        SessionUpdateContext {
+            worktree_path: path,
+            branch_name: "feature/test".to_string(),
+            agent_id: "codex-cli".to_string(),
+            agent_label: "Codex CLI".to_string(),
+            version: "latest".to_string(),
+            model: None,
+            mode: ExecutionMode::Continue.label().to_string(),
+            reasoning_level: None,
+            skip_permissions: false,
+        }
+    }
+
     #[test]
     fn test_classify_exit_success() {
         assert!(matches!(
@@ -1431,6 +1485,12 @@ mod tests {
     }
 
     #[test]
+    fn test_build_launching_message() {
+        let config = sample_config(CodingAgent::CodexCli);
+        assert_eq!(build_launching_message(&config), "Launching Codex CLI...");
+    }
+
+    #[test]
     fn test_build_launch_log_lines_codex() {
         let mut config = sample_config(CodingAgent::CodexCli);
         config.model = None;
@@ -1450,7 +1510,6 @@ mod tests {
                 package_spec: "@openai/codex@latest".to_string(),
             },
         );
-        assert!(lines.contains(&"Launching Codex CLI...".to_string()));
         assert!(lines.contains(&"Working directory: /tmp/worktree".to_string()));
         assert!(lines.contains(&"Model: gpt-5.2-codex".to_string()));
         assert!(lines.contains(&"Reasoning: high".to_string()));
@@ -1482,6 +1541,16 @@ mod tests {
         assert!(lines.contains(&"Model: sonnet".to_string()));
         assert!(!lines.iter().any(|line| line.starts_with("Reasoning: ")));
         assert!(lines.contains(&"Using locally installed claude".to_string()));
+    }
+
+    #[test]
+    fn test_session_updater_stop_is_fast() {
+        let temp = TempDir::new().unwrap();
+        let context = sample_update_context(temp.path().to_path_buf());
+        let updater = spawn_session_updater(context, Duration::from_secs(30));
+        let started = Instant::now();
+        updater.stop();
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]
