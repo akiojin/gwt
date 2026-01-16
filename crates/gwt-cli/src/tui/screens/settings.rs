@@ -79,6 +79,10 @@ impl SettingsState {
                         .unwrap_or_else(|| "None".to_string()),
                 ),
                 (
+                    "Auto Install Deps",
+                    format!("{}", settings.agent.auto_install_deps),
+                ),
+                (
                     "Claude Path",
                     settings
                         .agent
@@ -135,6 +139,35 @@ impl SettingsState {
         if self.selected_item > 0 {
             self.selected_item -= 1;
         }
+    }
+}
+
+fn selected_description(state: &SettingsState) -> &'static str {
+    match state.category {
+        SettingsCategory::General => match state.selected_item {
+            0 => "Base branch used for diff checks and cleanup safety.",
+            1 => "Enable verbose logging output.",
+            2 => "Days to keep logs before pruning.",
+            _ => "",
+        },
+        SettingsCategory::Worktree => match state.selected_item {
+            0 => "Relative root directory for worktree creation.",
+            1 => "Branches that cannot be deleted.",
+            _ => "",
+        },
+        SettingsCategory::Web => match state.selected_item {
+            0 => "HTTP port for the Web UI server.",
+            1 => "Bind address for the Web UI server.",
+            2 => "Enable CORS for Web UI requests.",
+            _ => "",
+        },
+        SettingsCategory::Agent => match state.selected_item {
+            0 => "Default coding agent for quick start.",
+            1 => "If false, dependency install is skipped before launch.",
+            2 => "Override path to Claude CLI executable.",
+            3 => "Override path to Codex CLI executable.",
+            _ => "",
+        },
     }
 }
 
@@ -210,6 +243,16 @@ fn render_settings_content(state: &SettingsState, frame: &mut Frame, area: Rect)
         return;
     }
 
+    let (list_area, desc_area) = if area.height >= 6 {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(3)])
+            .split(area);
+        (chunks[0], Some(chunks[1]))
+    } else {
+        (area, None)
+    };
+
     let list_items: Vec<ListItem> = items
         .iter()
         .enumerate()
@@ -236,7 +279,17 @@ fn render_settings_content(state: &SettingsState, frame: &mut Frame, area: Rect)
             .borders(Borders::ALL)
             .title(format!(" {} Settings ", category_name)),
     );
-    frame.render_widget(list, area);
+    frame.render_widget(list, list_area);
+
+    if let Some(desc_area) = desc_area {
+        let description = selected_description(state);
+        let paragraph = Paragraph::new(description).wrap(Wrap { trim: true }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Description "),
+        );
+        frame.render_widget(paragraph, desc_area);
+    }
 }
 
 fn render_instructions(frame: &mut Frame, area: Rect) {
@@ -263,5 +316,16 @@ mod tests {
 
         state.prev_category();
         assert_eq!(state.category, SettingsCategory::Worktree);
+    }
+
+    #[test]
+    fn test_selected_description_auto_install_deps() {
+        let mut state = SettingsState::new();
+        state.category = SettingsCategory::Agent;
+        state.selected_item = 1;
+        assert_eq!(
+            selected_description(&state),
+            "If false, dependency install is skipped before launch."
+        );
     }
 }

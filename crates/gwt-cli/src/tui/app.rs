@@ -10,7 +10,7 @@ use crossterm::{
 use gwt_core::config::get_branch_tool_history;
 use gwt_core::config::{Profile, ProfilesConfig};
 use gwt_core::error::GwtError;
-use gwt_core::git::{Branch, PrCache};
+use gwt_core::git::{Branch, PrCache, Repository};
 use gwt_core::worktree::WorktreeManager;
 use ratatui::{prelude::*, widgets::*};
 use std::collections::HashMap;
@@ -56,6 +56,8 @@ pub struct AgentLaunchConfig {
     pub env: Vec<(String, String)>,
     /// Environment variables to remove
     pub env_remove: Vec<String>,
+    /// Auto install dependencies before launching agent
+    pub auto_install_deps: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -101,6 +103,29 @@ struct SafetyUpdate {
 struct SafetyCheckTarget {
     branch: String,
     upstream: String,
+}
+
+struct WorktreeStatusUpdate {
+    branch: String,
+    worktree_status: WorktreeStatus,
+    has_changes: bool,
+    failed: bool,
+}
+
+struct WorktreeStatusTarget {
+    branch: String,
+    path: PathBuf,
+}
+
+struct BranchListUpdate {
+    branches: Vec<BranchItem>,
+    branch_names: Vec<String>,
+    worktree_targets: Vec<WorktreeStatusTarget>,
+    safety_targets: Vec<SafetyCheckTarget>,
+    base_branches: Vec<String>,
+    base_branch: String,
+    total_count: usize,
+    active_count: usize,
 }
 
 /// Application state (Model in Elm Architecture)
@@ -155,10 +180,14 @@ pub struct Model {
     pending_unsafe_selection: Option<String>,
     /// Pending cleanup branches (FR-010)
     pending_cleanup_branches: Vec<String>,
+    /// Branch list update receiver
+    branch_list_rx: Option<Receiver<BranchListUpdate>>,
     /// PR title update receiver
     pr_title_rx: Option<Receiver<PrTitleUpdate>>,
     /// Safety check update receiver
     safety_rx: Option<Receiver<SafetyUpdate>>,
+    /// Worktree status update receiver
+    worktree_status_rx: Option<Receiver<WorktreeStatusUpdate>>,
 }
 
 /// Screen types
@@ -259,8 +288,10 @@ impl Model {
             pending_agent_launch: None,
             pending_unsafe_selection: None,
             pending_cleanup_branches: Vec::new(),
+            branch_list_rx: None,
             pr_title_rx: None,
             safety_rx: None,
+            worktree_status_rx: None,
         };
 
         // Load initial data
@@ -272,81 +303,6 @@ impl Model {
     /// Refresh data from repository
     fn refresh_data(&mut self) {
         let settings = gwt_core::config::Settings::load(&self.repo_root).unwrap_or_default();
-        let base_branch = settings.default_base_branch.clone();
-        let base_branch_exists = Branch::exists(&self.repo_root, &base_branch).unwrap_or(false);
-
-        if let Ok(manager) = WorktreeManager::new(&self.repo_root) {
-            // Get branches
-            if let Ok(branches) = Branch::list_basic(&self.repo_root) {
-                let worktrees = manager.list().unwrap_or_default();
-
-                // Load tool usage from TypeScript session file (FR-070)
-                let tool_usage_map = gwt_core::config::get_last_tool_usage_map(&self.repo_root);
-                let mut safety_targets = Vec::new();
-
-                let mut branch_items: Vec<BranchItem> = branches
-                    .iter()
-                    .map(|b| {
-                        let mut item = BranchItem::from_branch(b, &worktrees);
-
-                        // Set tool usage from TypeScript session history (FR-070)
-                        if let Some(entry) = tool_usage_map.get(&b.name) {
-                            item.last_tool_usage = Some(entry.format_tool_usage());
-                            // FR-041: Compare git commit timestamp and session timestamp,
-                            // use the newer one
-                            let session_timestamp = entry.timestamp / 1000; // Convert ms to seconds
-                            let git_timestamp = item.last_commit_timestamp.unwrap_or(0);
-                            item.last_commit_timestamp = Some(session_timestamp.max(git_timestamp));
-                        }
-
-                        // Safety check short-circuit: use immediate signals first
-                        if item.branch_type == BranchType::Local {
-                            if item.has_changes
-                                || item.has_unpushed
-                                || !b.has_remote
-                                || !base_branch_exists
-                            {
-                                item.safe_to_cleanup = Some(false);
-                            } else if let Some(upstream) = b.upstream.clone() {
-                                item.safe_to_cleanup = None;
-                                safety_targets.push(SafetyCheckTarget {
-                                    branch: b.name.clone(),
-                                    upstream,
-                                });
-                            } else {
-                                item.safe_to_cleanup = Some(false);
-                            }
-                        }
-
-                        item.update_safety_status();
-                        item
-                    })
-                    .collect();
-
-                // Sort branches by timestamp for those with sessions
-                branch_items.iter_mut().for_each(|item| {
-                    if item.last_commit_timestamp.is_none() {
-                        // Try to get timestamp from git (fallback)
-                        // For now, leave as None - the sort will handle it
-                    }
-                });
-
-                self.total_count = branch_items.len();
-                self.active_count = branch_items.iter().filter(|b| b.has_worktree).count();
-                self.branch_list = BranchListState::new().with_branches(branch_items);
-                self.spawn_safety_checks(safety_targets, base_branch.clone());
-                self.spawn_pr_title_fetch(&branches);
-
-                // Get base branches for worktree create
-                let base_branches: Vec<String> = branches
-                    .iter()
-                    .filter(|b| !b.name.starts_with("remotes/"))
-                    .map(|b| b.name.clone())
-                    .collect();
-                self.worktree_create = WorktreeCreateState::new().with_base_branches(base_branches);
-            }
-        }
-
         self.settings = SettingsState::new().with_settings(settings.clone());
 
         // Load logs from configured log directory
@@ -382,18 +338,122 @@ impl Model {
         }
 
         self.load_profiles();
-        self.branch_list.working_directory = Some(self.repo_root.display().to_string());
-        self.branch_list.version = Some(env!("CARGO_PKG_VERSION").to_string());
+        self.start_branch_list_refresh(settings);
     }
 
-    fn spawn_pr_title_fetch(&mut self, branches: &[Branch]) {
-        if branches.is_empty() {
+    fn start_branch_list_refresh(&mut self, settings: gwt_core::config::Settings) {
+        self.pr_title_rx = None;
+        self.safety_rx = None;
+        self.worktree_status_rx = None;
+        self.branch_list_rx = None;
+        self.total_count = 0;
+        self.active_count = 0;
+
+        let mut branch_list = BranchListState::new();
+        branch_list.active_profile = self.profiles_config.active.clone();
+        branch_list.working_directory = Some(self.repo_root.display().to_string());
+        branch_list.version = Some(env!("CARGO_PKG_VERSION").to_string());
+        branch_list.set_loading(true);
+        self.branch_list = branch_list;
+
+        let repo_root = self.repo_root.clone();
+        let base_branch = settings.default_base_branch.clone();
+        let (tx, rx) = mpsc::channel();
+        self.branch_list_rx = Some(rx);
+
+        thread::spawn(move || {
+            let base_branch_exists = Branch::exists(&repo_root, &base_branch).unwrap_or(false);
+            let worktrees = WorktreeManager::new(&repo_root)
+                .ok()
+                .and_then(|manager| manager.list_basic().ok())
+                .unwrap_or_default();
+            let branches = Branch::list_basic(&repo_root).unwrap_or_default();
+            let worktree_targets: Vec<WorktreeStatusTarget> = worktrees
+                .iter()
+                .filter_map(|wt| {
+                    wt.branch.clone().map(|branch| WorktreeStatusTarget {
+                        branch,
+                        path: wt.path.clone(),
+                    })
+                })
+                .collect();
+
+            // Load tool usage from TypeScript session file (FR-070)
+            let tool_usage_map = gwt_core::config::get_last_tool_usage_map(&repo_root);
+            let mut safety_targets = Vec::new();
+
+            let mut branch_items: Vec<BranchItem> = branches
+                .iter()
+                .map(|b| {
+                    let mut item = BranchItem::from_branch_minimal(b, &worktrees);
+
+                    // Set tool usage from TypeScript session history (FR-070)
+                    if let Some(entry) = tool_usage_map.get(&b.name) {
+                        item.last_tool_usage = Some(entry.format_tool_usage());
+                        // FR-041: Compare git commit timestamp and session timestamp,
+                        // use the newer one
+                        let session_timestamp = entry.timestamp / 1000; // Convert ms to seconds
+                        let git_timestamp = item.last_commit_timestamp.unwrap_or(0);
+                        item.last_commit_timestamp = Some(session_timestamp.max(git_timestamp));
+                    }
+
+                    // Safety check short-circuit: use immediate signals first
+                    if item.branch_type == BranchType::Local {
+                        if !b.has_remote || !base_branch_exists {
+                            item.safe_to_cleanup = Some(false);
+                        } else if let Some(upstream) = b.upstream.clone() {
+                            item.safe_to_cleanup = None;
+                            safety_targets.push(SafetyCheckTarget {
+                                branch: b.name.clone(),
+                                upstream,
+                            });
+                        } else {
+                            item.safe_to_cleanup = Some(false);
+                        }
+                    }
+
+                    item.update_safety_status();
+                    item
+                })
+                .collect();
+
+            // Sort branches by timestamp for those with sessions
+            branch_items.iter_mut().for_each(|item| {
+                if item.last_commit_timestamp.is_none() {
+                    // Try to get timestamp from git (fallback)
+                    // For now, leave as None - the sort will handle it
+                }
+            });
+
+            let total_count = branch_items.len();
+            let active_count = branch_items.iter().filter(|b| b.has_worktree).count();
+            let base_branches: Vec<String> = branches
+                .iter()
+                .filter(|b| !b.name.starts_with("remotes/"))
+                .map(|b| b.name.clone())
+                .collect();
+            let branch_names: Vec<String> = branches.iter().map(|b| b.name.clone()).collect();
+
+            let _ = tx.send(BranchListUpdate {
+                branches: branch_items,
+                branch_names,
+                worktree_targets,
+                safety_targets,
+                base_branches,
+                base_branch,
+                total_count,
+                active_count,
+            });
+        });
+    }
+
+    fn spawn_pr_title_fetch(&mut self, branch_names: Vec<String>) {
+        if branch_names.is_empty() {
             self.pr_title_rx = None;
             return;
         }
 
         let repo_root = self.repo_root.clone();
-        let branch_names: Vec<String> = branches.iter().map(|b| b.name.clone()).collect();
         let (tx, rx) = mpsc::channel();
         self.pr_title_rx = Some(rx);
 
@@ -474,6 +534,59 @@ impl Model {
         });
     }
 
+    fn spawn_worktree_status_checks(&mut self, targets: Vec<WorktreeStatusTarget>) {
+        if targets.is_empty() {
+            self.worktree_status_rx = None;
+            return;
+        }
+
+        let (tx, rx) = mpsc::channel();
+        self.worktree_status_rx = Some(rx);
+
+        thread::spawn(move || {
+            for target in targets {
+                let mut failed = false;
+                let mut worktree_status = WorktreeStatus::Active;
+                let mut has_changes = false;
+
+                if !target.path.exists() {
+                    worktree_status = WorktreeStatus::Inaccessible;
+                } else {
+                    match Repository::open(&target.path) {
+                        Ok(repo) => match repo.has_uncommitted_changes() {
+                            Ok(changes) => {
+                                has_changes = changes;
+                            }
+                            Err(err) => {
+                                failed = true;
+                                tracing::warn!(
+                                    "Failed to check worktree changes for {}: {}",
+                                    target.branch,
+                                    err
+                                );
+                            }
+                        },
+                        Err(err) => {
+                            failed = true;
+                            tracing::warn!(
+                                "Failed to open worktree for {}: {}",
+                                target.branch,
+                                err
+                            );
+                        }
+                    }
+                }
+
+                let _ = tx.send(WorktreeStatusUpdate {
+                    branch: target.branch,
+                    worktree_status,
+                    has_changes,
+                    failed,
+                });
+            }
+        });
+    }
+
     fn apply_entry_context(&mut self, context: Option<TuiEntryContext>) {
         if let Some(context) = context {
             if let Some(message) = context.status_message {
@@ -484,6 +597,40 @@ impl Model {
                 self.error = ErrorState::from_error(&message);
                 self.screen_stack.push(self.screen.clone());
                 self.screen = Screen::Error;
+            }
+        }
+    }
+
+    fn apply_branch_list_updates(&mut self) {
+        let Some(rx) = &self.branch_list_rx else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(update) => {
+                let mut branch_list = BranchListState::new().with_branches(update.branches);
+                branch_list.active_profile = self.profiles_config.active.clone();
+                branch_list.working_directory = Some(self.repo_root.display().to_string());
+                branch_list.version = Some(env!("CARGO_PKG_VERSION").to_string());
+                self.branch_list = branch_list;
+
+                self.total_count = update.total_count;
+                self.active_count = update.active_count;
+
+                let total_updates = update.safety_targets.len() + update.worktree_targets.len();
+                self.branch_list.reset_status_progress(total_updates);
+                self.spawn_safety_checks(update.safety_targets, update.base_branch);
+                self.spawn_worktree_status_checks(update.worktree_targets);
+                self.spawn_pr_title_fetch(update.branch_names);
+
+                self.worktree_create =
+                    WorktreeCreateState::new().with_base_branches(update.base_branches);
+                self.branch_list_rx = None;
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.branch_list.set_loading(false);
+                self.branch_list_rx = None;
             }
         }
     }
@@ -519,10 +666,37 @@ impl Model {
                         update.is_unmerged,
                         update.safe_to_cleanup,
                     );
+                    self.branch_list.increment_status_progress();
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     self.safety_rx = None;
+                    break;
+                }
+            }
+        }
+    }
+
+    fn apply_worktree_updates(&mut self) {
+        let Some(rx) = &self.worktree_status_rx else {
+            return;
+        };
+
+        loop {
+            match rx.try_recv() {
+                Ok(update) => {
+                    if !update.failed {
+                        self.branch_list.apply_worktree_update(
+                            &update.branch,
+                            update.worktree_status,
+                            update.has_changes,
+                        );
+                    }
+                    self.branch_list.increment_status_progress();
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.worktree_status_rx = None;
                     break;
                 }
             }
@@ -804,8 +978,10 @@ impl Model {
                 }
                 // Update spinner animation
                 self.branch_list.tick_spinner();
+                self.apply_branch_list_updates();
                 self.apply_pr_title_updates();
                 self.apply_safety_updates();
+                self.apply_worktree_updates();
             }
             Message::SelectNext => match self.screen {
                 Screen::BranchList => self.branch_list.select_next(),
@@ -1223,6 +1399,13 @@ impl Model {
             match result {
                 Ok(wt) => {
                     // Create agent launch configuration
+                    let auto_install_deps = self
+                        .settings
+                        .settings
+                        .as_ref()
+                        .map(|settings| settings.agent.auto_install_deps)
+                        .unwrap_or(false);
+
                     let launch_config = AgentLaunchConfig {
                         worktree_path: wt.path.clone(),
                         branch_name: branch.clone(),
@@ -1243,6 +1426,7 @@ impl Model {
                         skip_permissions: self.wizard.skip_permissions,
                         env: self.active_env_overrides(),
                         env_remove: self.active_env_removals(),
+                        auto_install_deps,
                     };
 
                     // Store the launch config and quit TUI
@@ -1956,6 +2140,7 @@ pub fn run_with_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::screens::branch_list::SafetyStatus;
     use crate::tui::screens::wizard::WizardStep;
     use crate::tui::screens::{BranchItem, BranchListState};
     use gwt_core::git::Branch;
@@ -2026,5 +2211,75 @@ mod tests {
         let msg = model.handle_text_input_key(key, true);
         assert!(msg.is_none());
         assert_eq!(model.environment.edit_field, EditField::Value);
+    }
+
+    #[test]
+    fn test_refresh_data_starts_branch_list_loading() {
+        let mut model = Model::new_with_context(None);
+
+        assert!(model.branch_list.is_loading);
+        assert!(model.branch_list.branches.is_empty());
+
+        model.update(Message::SelectNext);
+        assert_eq!(model.branch_list.selected, 0);
+    }
+
+    #[test]
+    fn test_status_progress_does_not_block_branch_navigation() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+
+        let branches = vec![
+            BranchItem {
+                name: "main".to_string(),
+                branch_type: BranchType::Local,
+                is_current: true,
+                has_worktree: true,
+                worktree_path: Some("/path".to_string()),
+                worktree_status: WorktreeStatus::Active,
+                has_changes: false,
+                has_unpushed: false,
+                divergence: gwt_core::git::DivergenceStatus::UpToDate,
+                has_remote_counterpart: true,
+                remote_name: None,
+                safe_to_cleanup: Some(true),
+                safety_status: SafetyStatus::Safe,
+                is_unmerged: false,
+                last_commit_timestamp: None,
+                last_tool_usage: None,
+                is_selected: false,
+                pr_title: None,
+            },
+            BranchItem {
+                name: "feature/one".to_string(),
+                branch_type: BranchType::Local,
+                is_current: false,
+                has_worktree: true,
+                worktree_path: Some("/path2".to_string()),
+                worktree_status: WorktreeStatus::Active,
+                has_changes: false,
+                has_unpushed: false,
+                divergence: gwt_core::git::DivergenceStatus::UpToDate,
+                has_remote_counterpart: true,
+                remote_name: None,
+                safe_to_cleanup: Some(true),
+                safety_status: SafetyStatus::Safe,
+                is_unmerged: false,
+                last_commit_timestamp: None,
+                last_tool_usage: None,
+                is_selected: false,
+                pr_title: None,
+            },
+        ];
+
+        model.branch_list = BranchListState::new().with_branches(branches);
+        model.branch_list.reset_status_progress(2);
+        model.branch_list.increment_status_progress();
+        model.pr_title_rx = None;
+        model.safety_rx = None;
+        model.worktree_status_rx = None;
+
+        model.update(Message::SelectNext);
+        assert_eq!(model.branch_list.selected, 1);
     }
 }
