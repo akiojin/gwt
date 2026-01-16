@@ -4,6 +4,7 @@ use super::{CleanupCandidate, Worktree, WorktreePath, WorktreeStatus};
 use crate::error::{GwtError, Result};
 use crate::git::{Branch, Repository};
 use std::path::{Path, PathBuf};
+use tracing::{debug, error, info, warn};
 
 /// Protected branch names that cannot be deleted
 const PROTECTED_BRANCHES: &[&str] = &["main", "master", "develop", "release"];
@@ -44,6 +45,15 @@ impl WorktreeManager {
                     wt.has_unpushed = wt_repo.has_unpushed_commits().unwrap_or(false);
                 }
             }
+
+            tracing::debug!(
+                "Worktree: branch={:?}, path={:?}, status={:?}, has_changes={}, has_unpushed={}",
+                wt.branch,
+                wt.path,
+                wt.status,
+                wt.has_changes,
+                wt.has_unpushed
+            );
 
             worktrees.push(wt);
         }
@@ -107,6 +117,11 @@ impl WorktreeManager {
 
     /// Create a new worktree for an existing branch
     pub fn create_for_branch(&self, branch_name: &str) -> Result<Worktree> {
+        debug!(
+            category = "worktree",
+            branch = branch_name,
+            "Creating worktree for existing branch"
+        );
         let path = WorktreePath::generate(&self.repo_root, branch_name);
 
         // FR-038-040: Handle existing path with stale recovery
@@ -116,6 +131,11 @@ impl WorktreeManager {
 
         // Check if branch exists
         if !Branch::exists(&self.repo_root, branch_name)? {
+            error!(
+                category = "worktree",
+                branch = branch_name,
+                "Branch not found"
+            );
             return Err(GwtError::BranchNotFound {
                 name: branch_name.to_string(),
             });
@@ -125,8 +145,18 @@ impl WorktreeManager {
         self.repo.create_worktree(&path, branch_name, false)?;
 
         // Return the created worktree
-        self.get_by_path(&path)?
-            .ok_or(GwtError::WorktreeNotFound { path })
+        let worktree = self
+            .get_by_path(&path)?
+            .ok_or(GwtError::WorktreeNotFound { path: path.clone() })?;
+
+        info!(
+            category = "worktree",
+            operation = "create",
+            branch = branch_name,
+            path = %worktree.path.display(),
+            "Worktree created for existing branch"
+        );
+        Ok(worktree)
     }
 
     /// Create a new worktree with a new branch
@@ -135,6 +165,12 @@ impl WorktreeManager {
         branch_name: &str,
         base_branch: Option<&str>,
     ) -> Result<Worktree> {
+        debug!(
+            category = "worktree",
+            branch = branch_name,
+            base = base_branch.unwrap_or("HEAD"),
+            "Creating worktree with new branch"
+        );
         let path = WorktreePath::generate(&self.repo_root, branch_name);
 
         // FR-038-040: Handle existing path with stale recovery
@@ -144,6 +180,11 @@ impl WorktreeManager {
 
         // Check if branch already exists
         if Branch::exists(&self.repo_root, branch_name)? {
+            error!(
+                category = "worktree",
+                branch = branch_name,
+                "Branch already exists"
+            );
             return Err(GwtError::BranchAlreadyExists {
                 name: branch_name.to_string(),
             });
@@ -153,6 +194,11 @@ impl WorktreeManager {
         if let Some(base) = base_branch {
             // Verify base branch exists
             if !Branch::exists(&self.repo_root, base)? {
+                error!(
+                    category = "worktree",
+                    branch = base,
+                    "Base branch not found"
+                );
                 return Err(GwtError::BranchNotFound {
                     name: base.to_string(),
                 });
@@ -176,12 +222,30 @@ impl WorktreeManager {
         }
 
         // Return the created worktree
-        self.get_by_path(&path)?
-            .ok_or(GwtError::WorktreeNotFound { path })
+        let worktree = self
+            .get_by_path(&path)?
+            .ok_or(GwtError::WorktreeNotFound { path: path.clone() })?;
+
+        info!(
+            category = "worktree",
+            operation = "create_new_branch",
+            branch = branch_name,
+            base = base_branch.unwrap_or("HEAD"),
+            path = %worktree.path.display(),
+            "Worktree created with new branch"
+        );
+        Ok(worktree)
     }
 
     /// Remove a worktree by path
     pub fn remove(&self, path: &Path, force: bool) -> Result<()> {
+        debug!(
+            category = "worktree",
+            path = %path.display(),
+            force,
+            "Removing worktree"
+        );
+
         // Check if worktree exists
         let wt = self
             .get_by_path(path)?
@@ -189,9 +253,16 @@ impl WorktreeManager {
                 path: path.to_path_buf(),
             })?;
 
+        let branch_name = wt.branch.clone();
+
         // Check for protected branch
         if let Some(ref branch) = wt.branch {
             if Self::is_protected(branch) && !force {
+                warn!(
+                    category = "worktree",
+                    branch = branch.as_str(),
+                    "Attempted to remove protected branch worktree"
+                );
                 return Err(GwtError::ProtectedBranch {
                     branch: branch.clone(),
                 });
@@ -200,17 +271,38 @@ impl WorktreeManager {
 
         // Check for uncommitted changes
         if wt.has_changes && !force {
+            warn!(
+                category = "worktree",
+                path = %path.display(),
+                "Attempted to remove worktree with uncommitted changes"
+            );
             return Err(GwtError::UncommittedChanges);
         }
 
         // Remove worktree
         self.repo.remove_worktree(path, force)?;
 
+        info!(
+            category = "worktree",
+            operation = "remove",
+            path = %path.display(),
+            branch = branch_name.as_deref().unwrap_or("unknown"),
+            force,
+            "Worktree removed"
+        );
+
         Ok(())
     }
 
     /// Remove a worktree and delete the branch
     pub fn remove_with_branch(&self, path: &Path, force: bool) -> Result<()> {
+        debug!(
+            category = "worktree",
+            path = %path.display(),
+            force,
+            "Removing worktree with branch"
+        );
+
         let wt = self
             .get_by_path(path)?
             .ok_or_else(|| GwtError::WorktreeNotFound {
@@ -223,9 +315,16 @@ impl WorktreeManager {
         self.remove(path, force)?;
 
         // Delete branch if it exists
-        if let Some(name) = branch_name {
-            if Branch::exists(&self.repo_root, &name)? {
-                Branch::delete(&self.repo_root, &name, force)?;
+        if let Some(ref name) = branch_name {
+            if Branch::exists(&self.repo_root, name)? {
+                Branch::delete(&self.repo_root, name, force)?;
+                info!(
+                    category = "worktree",
+                    operation = "remove_with_branch",
+                    path = %path.display(),
+                    branch = name.as_str(),
+                    "Branch deleted after worktree removal"
+                );
             }
         }
 
@@ -246,8 +345,17 @@ impl WorktreeManager {
     pub fn auto_cleanup_orphans(&self) -> Result<usize> {
         let orphans = self.detect_orphans();
         if orphans.is_empty() {
+            debug!(category = "worktree", "No orphaned worktrees found");
             return Ok(0);
         }
+
+        info!(
+            category = "worktree",
+            operation = "auto_cleanup",
+            count = orphans.len(),
+            "Cleaning up orphaned worktrees"
+        );
+
         self.prune()?;
         Ok(orphans.len())
     }
@@ -270,6 +378,13 @@ impl WorktreeManager {
 
     /// Lock a worktree
     pub fn lock(&self, path: &Path, reason: Option<&str>) -> Result<()> {
+        debug!(
+            category = "worktree",
+            path = %path.display(),
+            reason = reason.unwrap_or("none"),
+            "Locking worktree"
+        );
+
         let path_str = path.to_string_lossy();
         let mut args = vec!["worktree", "lock", &path_str];
         if let Some(r) = reason {
@@ -287,17 +402,33 @@ impl WorktreeManager {
             })?;
 
         if output.status.success() {
+            info!(
+                category = "worktree",
+                operation = "lock",
+                path = %path.display(),
+                reason = reason.unwrap_or("none"),
+                "Worktree locked"
+            );
             Ok(())
         } else {
+            let err_msg = String::from_utf8_lossy(&output.stderr).to_string();
+            error!(
+                category = "worktree",
+                path = %path.display(),
+                error = err_msg.as_str(),
+                "Failed to lock worktree"
+            );
             Err(GwtError::GitOperationFailed {
                 operation: "worktree lock".to_string(),
-                details: String::from_utf8_lossy(&output.stderr).to_string(),
+                details: err_msg,
             })
         }
     }
 
     /// Unlock a worktree
     pub fn unlock(&self, path: &Path) -> Result<()> {
+        debug!(category = "worktree", path = %path.display(), "Unlocking worktree");
+
         let path_str = path.to_string_lossy();
         let output = std::process::Command::new("git")
             .args(["worktree", "unlock", &path_str])
@@ -309,11 +440,24 @@ impl WorktreeManager {
             })?;
 
         if output.status.success() {
+            info!(
+                category = "worktree",
+                operation = "unlock",
+                path = %path.display(),
+                "Worktree unlocked"
+            );
             Ok(())
         } else {
+            let err_msg = String::from_utf8_lossy(&output.stderr).to_string();
+            error!(
+                category = "worktree",
+                path = %path.display(),
+                error = err_msg.as_str(),
+                "Failed to unlock worktree"
+            );
             Err(GwtError::GitOperationFailed {
                 operation: "worktree unlock".to_string(),
-                details: String::from_utf8_lossy(&output.stderr).to_string(),
+                details: err_msg,
             })
         }
     }

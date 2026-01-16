@@ -30,7 +30,7 @@ GitHub Releases を正とし、npm/bunx では該当リリースのバイナリ�
 
 ### GitHub Releasesから（推奨）
 
-[Releasesページ](https://github.com/akiojin/gwt/releases)からプリビルドバイナリをダウンロード:
+[Releasesページ](https://github.com/akiojin/gwt/releases)からプリビルドバイナリをダウンロード。各リリースには全対応プラットフォームのバイナリが含まれます:
 
 - `gwt-linux-x86_64` - Linux x86_64
 - `gwt-linux-aarch64` - Linux ARM64
@@ -64,10 +64,7 @@ bunx @akiojin/gwt
 Cargo で CLI を直接インストールできます:
 
 ```bash
-# crates.io からインストール（Rustユーザー推奨）
-cargo install gwt-cli
-
-# cargo-binstall でインストール（高速、プリビルドバイナリをダウンロード）
+# cargo-binstall でインストール（高速、GitHub Releasesからプリビルドバイナリをダウンロード）
 cargo binstall gwt-cli
 
 # GitHub からインストール（最新開発版）
@@ -75,6 +72,9 @@ cargo install --git https://github.com/akiojin/gwt --package gwt-cli --bin gwt -
 
 # ローカルチェックアウトからインストール
 cargo install --path crates/gwt-cli
+
+# そのまま実行
+cargo run -p gwt-cli
 ```
 
 ### ソースからビルド

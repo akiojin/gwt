@@ -1,8 +1,8 @@
 ---
-description: "環境変数プロファイル機能（OpenTUI）のタスク"
+description: "環境変数プロファイル機能（Ratatui）のタスク"
 ---
 
-# タスク: 環境変数プロファイル機能（OpenTUI）
+# タスク: 環境変数プロファイル機能（Ratatui）
 
 **入力**: `/specs/SPEC-dafff079/` からの仕様書・計画書
 **前提条件**: `specs/SPEC-dafff079/spec.md`, `specs/SPEC-dafff079/plan.md`
@@ -10,35 +10,34 @@ description: "環境変数プロファイル機能（OpenTUI）のタスク"
 ## フォーマット: `[ID] [P?] [ストーリー] 説明`
 
 - **[P]**: 並列実行可能
-- **[ストーリー]**: US1..US6
+- **[ストーリー]**: US1..US8
 - 説明に正確なファイルパスを含める
 
-## フェーズ1: 既存プロファイル状態の整理（US1/US2）
+## フェーズ1: 統合表示/操作 (US4/US6)
 
-- [ ] **T001** [US1] `src/cli/ui/App.solid.tsx` に `refreshProfiles()` を追加し、`profiles.yaml` 読み込み結果とアクティブ表示を一元化
+- [x] **T001** [US4] `crates/gwt-cli/src/tui/screens/environment.rs` にOS/プロファイル統合表示と色分けロジックを追加
+- [x] **T002** [US4] `crates/gwt-cli/src/tui/app.rs` でOS環境変数取得を環境変数編集画面に統合
+- [x] **T003** [US6] `crates/gwt-cli/src/tui/app.rs` に Enter 編集・OSのみ削除警告・スクロールキー統合を追加
+- [x] **T005** [US3] `crates/gwt-cli/src/tui/app.rs` に Enter で環境変数編集へ遷移する処理を追加
+- [x] **T004** [US4] `crates/gwt-cli/src/tui/screens/mod.rs` からOS専用画面の公開を削除
+- [x] **T006** [US4] `crates/gwt-cli/src/tui/app.rs` に `r` リセット操作を追加
+- [x] **T007** [US4] `crates/gwt-core/src/config/profile.rs` にOS無効化リストを追加
+- [x] **T008** [US4] `crates/gwt-cli/src/tui/screens/environment.rs` に赤色取り消し線の無効化表示を追加
+- [x] **T009** [US4] `crates/gwt-cli/src/tui/app.rs` で無効化状態の保存とエージェント起動への反映を追加
+- [x] **T010** [US4] `crates/gwt-cli/src/main.rs` で `env_remove` を反映
+- [x] **T011** [US3] `crates/gwt-cli/src/tui/app.rs` に Space アクティブ化と Enter 編集の分離を追加
 
-## フェーズ2: プロファイルエディター（US3）
+## フェーズ2: テスト（TDD）
 
-- [ ] **T101** [P] [US3] `src/cli/ui/screens/solid/ProfileScreen.tsx` に `e/n/d` 操作を追加し、選択中プロファイルを通知できるようにする
-- [ ] **T102** [US3] `src/cli/ui/App.solid.tsx` にプロファイル編集・作成・削除画面への遷移を追加する
+- [x] **T101** [US4] `crates/gwt-cli/src/tui/screens/environment.rs` に統合表示の分類テストを追加
+- [x] **T102** [US4] `crates/gwt-cli/src/tui/screens/environment.rs` にスクロールオフセット更新テストを追加
+- [x] **T103** [US6] `crates/gwt-cli/src/tui/screens/environment.rs` の常時表示テストを更新
+- [x] **T104** [US6] `crates/gwt-cli/src/tui/app.rs` の編集確定処理テストを維持
+- [x] **T105** [US3] `crates/gwt-cli/src/tui/screens/profiles.rs` にアクション表示の Enter 表記テストを追加
+- [x] **T106** [US4] `crates/gwt-cli/src/tui/screens/environment.rs` に選択種別ヘルパーテストを追加
+- [x] **T107** [US4] `crates/gwt-cli/src/tui/screens/environment.rs` に無効化表示の分類テストを更新
+- [x] **T108** [US3] `crates/gwt-cli/src/tui/screens/profiles.rs` の Space 表記を更新
 
-## フェーズ3: OS環境変数の表示（US4）
+## フェーズ3: 統合とチェック
 
-- [ ] **T201** [P] [US4] `src/cli/ui/screens/solid/EnvironmentScreen.tsx` に上書きキーの強調表示を追加する
-- [ ] **T202** [US4] `src/cli/ui/App.solid.tsx` で OS 環境変数一覧を生成し、閲覧画面へ遷移できるようにする
-
-## フェーズ4: 作成・削除（US5）
-
-- [ ] **T301** [P] [US5] `src/cli/ui/screens/solid/InputScreen.tsx` に入力幅指定を追加し、プロファイル作成入力に適用する
-- [ ] **T302** [US5] `src/cli/ui/App.solid.tsx` でプロファイル作成フロー（入力→保存→一覧更新）を実装する
-- [ ] **T303** [US5] `src/cli/ui/App.solid.tsx` でプロファイル削除フロー（確認→削除→一覧更新）を実装する
-
-## フェーズ5: 環境変数の編集（US6）
-
-- [ ] **T401** [P] [US6] `src/cli/ui/screens/solid/ProfileEnvScreen.tsx` を新規追加し、環境変数一覧と `a/e/d` 操作を実装する
-- [ ] **T402** [US6] `src/cli/ui/App.solid.tsx` で環境変数の追加/編集/削除フローを実装する
-
-## フェーズ6: 統合とチェック
-
-- [ ] **T501** [統合] `bun run build` を実行し、OpenTUIのビルドが成功することを確認する
-- [ ] **T502** [統合] `bun run format:check` / `bunx --bun markdownlint-cli "**/*.md" --config .markdownlint.json --ignore-path .markdownlintignore` / `bun run lint` を実行し、lint要件を満たす
+- [x] **T201** [統合] `crates/gwt-cli/Cargo.toml` に紐づく `cargo test -p gwt-cli` を実行

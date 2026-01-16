@@ -1,14 +1,12 @@
 [package]
 name = "gwt-core"
-version = "6.0.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Core library for Git Worktree Manager"
-readme = "../../README.md"
-keywords = ["git", "worktree", "cli", "productivity", "development"]
-categories = ["command-line-utilities", "development-tools"]
+publish = false  # Distributed via GitHub Release only
 
 [dependencies]
 thiserror.workspace = true

@@ -3,7 +3,7 @@
 #![allow(dead_code)] // TUI application components for future expansion
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -21,12 +21,14 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::screens::branch_list::WorktreeStatus;
+use super::screens::environment::EditField;
 use super::screens::{
-    render_branch_list, render_confirm, render_environment, render_error, render_help, render_logs,
-    render_profiles, render_settings, render_wizard, render_worktree_create, BranchItem,
-    BranchListState, BranchType, CodingAgent, ConfirmState, EnvironmentState, ErrorState,
-    ExecutionMode, HelpState, LogsState, ProfilesState, QuickStartEntry, ReasoningLevel,
-    SettingsState, WizardConfirmResult, WizardState, WorktreeCreateState,
+    collect_os_env, render_branch_list, render_confirm, render_environment, render_error,
+    render_help, render_logs, render_profiles, render_settings, render_wizard,
+    render_worktree_create, BranchItem, BranchListState, BranchType, CodingAgent, ConfirmState,
+    EnvironmentState, ErrorState, ExecutionMode, HelpState, LogsState, ProfilesState,
+    QuickStartEntry, ReasoningLevel, SettingsState, WizardConfirmResult, WizardState,
+    WorktreeCreateState,
 };
 
 /// Configuration for launching a coding agent after TUI exits
@@ -52,6 +54,8 @@ pub struct AgentLaunchConfig {
     pub skip_permissions: bool,
     /// Environment variables to apply
     pub env: Vec<(String, String)>,
+    /// Environment variables to remove
+    pub env_remove: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -216,6 +220,8 @@ pub enum Message {
     WizardBack,
     /// Repair worktrees (x key)
     RepairWorktrees,
+    /// Copy selected log to clipboard
+    CopyLogToClipboard,
 }
 
 impl Model {
@@ -351,11 +357,24 @@ impl Model {
                 // Convert gwt_core LogEntry to TUI LogEntry
                 let tui_entries: Vec<super::screens::logs::LogEntry> = entries
                     .into_iter()
-                    .map(|e| super::screens::logs::LogEntry {
-                        timestamp: e.timestamp,
-                        level: e.level,
-                        message: e.message,
-                        target: e.target,
+                    .map(|e| {
+                        let message = e.message().to_string();
+                        let category = e.category().map(|s| s.to_string());
+                        // Convert extra fields to HashMap<String, String>
+                        let extra: std::collections::HashMap<String, String> = e
+                            .fields
+                            .extra
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.to_string()))
+                            .collect();
+                        super::screens::logs::LogEntry {
+                            timestamp: e.timestamp,
+                            level: e.level,
+                            message,
+                            target: e.target,
+                            category,
+                            extra,
+                        }
                     })
                     .collect();
                 self.logs = LogsState::new().with_entries(tui_entries);
@@ -563,8 +582,21 @@ impl Model {
             .unwrap_or_default()
     }
 
+    fn active_env_removals(&self) -> Vec<String> {
+        self.profiles_config
+            .active_profile()
+            .map(|profile| {
+                let mut removals = profile.disabled_env.clone();
+                removals.retain(|key| !profile.env.contains_key(key));
+                removals.sort();
+                removals.dedup();
+                removals
+            })
+            .unwrap_or_default()
+    }
+
     fn open_environment_editor(&mut self, profile_name: &str) {
-        let vars = self
+        let (vars, disabled_keys) = self
             .profiles_config
             .profiles
             .get(profile_name)
@@ -579,13 +611,15 @@ impl Model {
                     })
                     .collect();
                 items.sort_by(|a, b| a.key.cmp(&b.key));
-                items
+                (items, profile.disabled_env.clone())
             })
-            .unwrap_or_default();
+            .unwrap_or_else(|| (Vec::new(), Vec::new()));
 
         self.environment = EnvironmentState::new()
             .with_profile(profile_name)
-            .with_variables(vars);
+            .with_variables(vars)
+            .with_disabled_keys(disabled_keys)
+            .with_os_variables(collect_os_env());
         self.screen_stack.push(self.screen.clone());
         self.screen = Screen::Environment;
     }
@@ -604,6 +638,12 @@ impl Model {
         for var in &self.environment.variables {
             profile.env.insert(var.key.clone(), var.value.clone());
         }
+        let mut disabled = self.environment.disabled_keys.clone();
+        disabled.retain(|key| !profile.env.contains_key(key));
+        disabled.sort();
+        disabled.dedup();
+        profile.disabled_env = disabled.clone();
+        self.environment.disabled_keys = disabled;
         self.save_profiles();
     }
 
@@ -626,16 +666,69 @@ impl Model {
         self.save_profiles();
     }
 
+    fn activate_selected_profile(&mut self) {
+        let selected = match self.profiles.selected_profile() {
+            Some(item) => item.name.clone(),
+            None => return,
+        };
+        self.profiles_config.set_active(Some(selected.clone()));
+        self.save_profiles();
+        if let Some(index) = self
+            .profiles
+            .profiles
+            .iter()
+            .position(|profile| profile.name == selected)
+        {
+            self.profiles.selected = index;
+        }
+    }
+
     fn delete_selected_env(&mut self) {
-        if self.environment.variables.is_empty() {
+        if self.environment.selected_is_overridden() {
+            self.status_message =
+                Some("Use 'r' to reset overridden environment variable.".to_string());
+            self.status_message_time = Some(Instant::now());
             return;
         }
-        if self.environment.selected < self.environment.variables.len() {
-            self.environment.variables.remove(self.environment.selected);
-            if self.environment.selected >= self.environment.variables.len() {
-                self.environment.selected = self.environment.variables.len().saturating_sub(1);
+        if self.environment.selected_is_os_entry() {
+            if let Some(key) = self.environment.selected_key() {
+                let disabled = self.environment.toggle_disabled_key(&key);
+                self.persist_environment();
+                self.status_message = Some(if disabled {
+                    "OS environment variable disabled.".to_string()
+                } else {
+                    "OS environment variable enabled.".to_string()
+                });
+                self.status_message_time = Some(Instant::now());
             }
+            return;
+        }
+        let Some(selected_index) = self.environment.selected_profile_index() else {
+            return;
+        };
+
+        if selected_index < self.environment.variables.len() {
+            self.environment.variables.remove(selected_index);
+            self.environment.refresh_selection();
             self.persist_environment();
+        }
+    }
+
+    fn reset_selected_env(&mut self) {
+        if !self.environment.selected_is_overridden() {
+            self.status_message = Some("No overridden environment variable selected.".to_string());
+            self.status_message_time = Some(Instant::now());
+            return;
+        }
+        let Some(selected_index) = self.environment.selected_profile_index() else {
+            return;
+        };
+        if selected_index < self.environment.variables.len() {
+            self.environment.variables.remove(selected_index);
+            self.environment.refresh_selection();
+            self.persist_environment();
+            self.status_message = Some("Environment variable reset to OS value.".to_string());
+            self.status_message_time = Some(Instant::now());
         }
     }
 
@@ -677,6 +770,12 @@ impl Model {
                     self.profiles.exit_create_mode();
                 } else if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
                     self.environment.cancel_edit();
+                } else if matches!(self.screen, Screen::Logs) && self.logs.is_searching {
+                    // Exit log search mode
+                    self.logs.toggle_search();
+                } else if matches!(self.screen, Screen::Logs) && self.logs.is_detail_shown() {
+                    // Close log detail view
+                    self.logs.close_detail();
                 } else if matches!(self.screen, Screen::Confirm) {
                     // FR-029d: Cancel confirm dialog without executing action
                     self.pending_unsafe_selection = None;
@@ -734,22 +833,26 @@ impl Model {
                 Screen::BranchList => self.branch_list.page_up(10),
                 Screen::Logs => self.logs.page_up(10),
                 Screen::Help => self.help.page_up(),
+                Screen::Environment => self.environment.page_up(),
                 _ => {}
             },
             Message::PageDown => match self.screen {
                 Screen::BranchList => self.branch_list.page_down(10),
                 Screen::Logs => self.logs.page_down(10),
                 Screen::Help => self.help.page_down(),
+                Screen::Environment => self.environment.page_down(),
                 _ => {}
             },
             Message::GoHome => match self.screen {
                 Screen::BranchList => self.branch_list.go_home(),
                 Screen::Logs => self.logs.go_home(),
+                Screen::Environment => self.environment.go_home(),
                 _ => {}
             },
             Message::GoEnd => match self.screen {
                 Screen::BranchList => self.branch_list.go_end(),
                 Screen::Logs => self.logs.go_end(),
+                Screen::Environment => self.environment.go_end(),
                 _ => {}
             },
             Message::Enter => match &self.screen {
@@ -811,8 +914,8 @@ impl Model {
                             }
                         }
                     } else if let Some(item) = self.profiles.selected_profile() {
-                        self.profiles_config.set_active(Some(item.name.clone()));
-                        self.save_profiles();
+                        let name = item.name.clone();
+                        self.open_environment_editor(&name);
                     }
                 }
                 Screen::Environment => {
@@ -827,21 +930,24 @@ impl Model {
                                             is_secret: false,
                                         },
                                     );
-                                } else if let Some(var) = self
-                                    .environment
-                                    .variables
-                                    .get_mut(self.environment.selected)
+                                } else if let Some(index) =
+                                    self.environment.selected_profile_index()
                                 {
-                                    var.key = key;
-                                    var.value = value;
+                                    if let Some(var) = self.environment.variables.get_mut(index) {
+                                        var.key = key;
+                                        var.value = value;
+                                    }
                                 }
                                 self.environment.cancel_edit();
+                                self.environment.refresh_selection();
                                 self.persist_environment();
                             }
                             Err(msg) => {
                                 self.environment.error = Some(msg.to_string());
                             }
                         }
+                    } else {
+                        self.environment.start_edit_selected();
                     }
                 }
                 Screen::Help => {
@@ -849,6 +955,9 @@ impl Model {
                 }
                 Screen::Error => {
                     self.update(Message::NavigateBack);
+                }
+                Screen::Logs => {
+                    self.logs.toggle_detail();
                 }
                 _ => {}
             },
@@ -864,6 +973,9 @@ impl Model {
                     self.profiles.insert_char(c);
                 } else if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
                     self.environment.insert_char(c);
+                } else if matches!(self.screen, Screen::Logs) && self.logs.is_searching {
+                    // Log search mode - add character to search
+                    self.logs.search.push(c);
                 }
             }
             Message::Backspace => {
@@ -876,6 +988,9 @@ impl Model {
                     self.profiles.delete_char();
                 } else if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
                     self.environment.delete_char();
+                } else if matches!(self.screen, Screen::Logs) && self.logs.is_searching {
+                    // Log search mode - delete character
+                    self.logs.search.pop();
                 }
             }
             Message::CursorLeft => {
@@ -924,6 +1039,27 @@ impl Model {
                     }
                 }
                 self.status_message_time = Some(Instant::now());
+            }
+            Message::CopyLogToClipboard => {
+                if matches!(self.screen, Screen::Logs) {
+                    if let Some(entry) = self.logs.selected_entry() {
+                        let text = entry.to_clipboard_string();
+                        match arboard::Clipboard::new() {
+                            Ok(mut clipboard) => match clipboard.set_text(&text) {
+                                Ok(()) => {
+                                    self.status_message = Some("Copied to clipboard".to_string());
+                                }
+                                Err(e) => {
+                                    self.status_message = Some(format!("Failed to copy: {}", e));
+                                }
+                            },
+                            Err(e) => {
+                                self.status_message = Some(format!("Clipboard unavailable: {}", e));
+                            }
+                        }
+                        self.status_message_time = Some(Instant::now());
+                    }
+                }
             }
             Message::Tab => {
                 if let Screen::Settings = self.screen {
@@ -986,6 +1122,8 @@ impl Model {
                             self.branch_list.toggle_selection();
                         }
                     }
+                } else if matches!(self.screen, Screen::Profiles) && !self.profiles.create_mode {
+                    self.activate_selected_profile();
                 }
             }
             Message::OpenWizard => {
@@ -1104,6 +1242,7 @@ impl Model {
                         session_id: self.wizard.session_id.clone(),
                         skip_permissions: self.wizard.skip_permissions,
                         env: self.active_env_overrides(),
+                        env_remove: self.active_env_removals(),
                     };
 
                     // Store the launch config and quit TUI
@@ -1175,7 +1314,7 @@ impl Model {
     }
 
     /// View function (Elm Architecture)
-    pub fn view(&self, frame: &mut Frame) {
+    pub fn view(&mut self, frame: &mut Frame) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -1217,7 +1356,7 @@ impl Model {
             Screen::Help => render_help(&self.help, frame, chunks[1]),
             Screen::Error => render_error(&self.error, frame, chunks[1]),
             Screen::Profiles => render_profiles(&self.profiles, frame, chunks[1]),
-            Screen::Environment => render_environment(&self.environment, frame, chunks[1]),
+            Screen::Environment => render_environment(&mut self.environment, frame, chunks[1]),
             Screen::Confirm => {}
         }
 
@@ -1379,10 +1518,18 @@ impl Model {
             Screen::Confirm => "[Left/Right] Select | [Enter] Confirm | [Esc] Cancel",
             Screen::Error => "[Enter/Esc] Close | [Up/Down] Scroll",
             Screen::Profiles => {
-                "[Enter] Activate | [n] New | [d] Delete | [e] Edit env | [Esc] Back"
+                if self.profiles.create_mode {
+                    "[Enter] Save | [Esc] Cancel"
+                } else {
+                    "[Space] Activate | [Enter] Edit env | [n] New | [d] Delete | [Esc] Back"
+                }
             }
             Screen::Environment => {
-                "[n] New | [e] Edit | [d] Delete | [v] Toggle visibility | [Esc] Back"
+                if self.environment.edit_mode {
+                    "[Enter] Save | [Tab] Switch | [Esc] Cancel"
+                } else {
+                    "[Enter] Edit | [n] New | [d] Delete (profile)/Disable (OS) | [r] Reset (override) | [Esc] Back"
+                }
             }
         };
 
@@ -1403,6 +1550,54 @@ impl Model {
             .style(style)
             .block(Block::default().borders(Borders::ALL));
         frame.render_widget(footer, area);
+    }
+
+    fn text_input_active(&self) -> bool {
+        matches!(self.screen, Screen::Profiles) && self.profiles.create_mode
+            || matches!(self.screen, Screen::Environment) && self.environment.edit_mode
+    }
+
+    fn handle_text_input_key(&mut self, key: KeyEvent, enter_is_press: bool) -> Option<Message> {
+        let is_env_new = matches!(self.screen, Screen::Environment)
+            && self.environment.edit_mode
+            && self.environment.is_new;
+        let is_env_key_field = matches!(self.screen, Screen::Environment)
+            && self.environment.edit_field == EditField::Key;
+
+        match key.code {
+            KeyCode::Esc => Some(Message::NavigateBack),
+            KeyCode::Enter if enter_is_press => {
+                if is_env_new && is_env_key_field {
+                    self.environment.switch_field();
+                    None
+                } else {
+                    Some(Message::Enter)
+                }
+            }
+            KeyCode::Backspace => Some(Message::Backspace),
+            KeyCode::Left => Some(Message::CursorLeft),
+            KeyCode::Right => Some(Message::CursorRight),
+            KeyCode::Tab => {
+                if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
+                    self.environment.switch_field();
+                }
+                None
+            }
+            KeyCode::BackTab => {
+                if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
+                    self.environment.switch_field();
+                }
+                None
+            }
+            KeyCode::Char(c) => {
+                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    None
+                } else {
+                    Some(Message::Char(c))
+                }
+            }
+            _ => None,
+        }
     }
 }
 
@@ -1442,14 +1637,14 @@ pub fn run_with_context(
 
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
-                let enter_is_press = key.kind == KeyEventKind::Press;
+                let is_key_press = key.kind == KeyEventKind::Press;
                 // Wizard has priority when visible
                 let msg = if model.wizard.visible {
                     match key.code {
                         KeyCode::Esc => Some(Message::WizardBack),
-                        KeyCode::Enter if enter_is_press => Some(Message::WizardConfirm),
-                        KeyCode::Up => Some(Message::WizardPrev),
-                        KeyCode::Down => Some(Message::WizardNext),
+                        KeyCode::Enter if is_key_press => Some(Message::WizardConfirm),
+                        KeyCode::Up if is_key_press => Some(Message::WizardPrev),
+                        KeyCode::Down if is_key_press => Some(Message::WizardNext),
                         KeyCode::Backspace => {
                             model.wizard.delete_char();
                             None
@@ -1470,10 +1665,14 @@ pub fn run_with_context(
                         }
                         _ => None,
                     }
+                } else if model.text_input_active() {
+                    model.handle_text_input_key(key, is_key_press)
                 } else {
                     // Normal key handling
                     match (key.code, key.modifiers) {
-                        (KeyCode::Char('c'), KeyModifiers::CONTROL) => Some(Message::CtrlC),
+                        (KeyCode::Char('c'), KeyModifiers::CONTROL) if is_key_press => {
+                            Some(Message::CtrlC)
+                        }
                         (KeyCode::Char('q'), KeyModifiers::NONE) => {
                             // 'q' does not quit in BranchList (matches TypeScript behavior)
                             Some(Message::Char('q'))
@@ -1522,8 +1721,12 @@ pub fn run_with_context(
                                 model.profiles.enter_create_mode();
                                 None
                             } else if matches!(model.screen, Screen::Environment) {
-                                model.environment.start_new();
-                                None
+                                if model.environment.edit_mode {
+                                    Some(Message::Char('n'))
+                                } else {
+                                    model.environment.start_new();
+                                    None
+                                }
                             } else {
                                 Some(Message::Char('n'))
                             }
@@ -1544,16 +1747,26 @@ pub fn run_with_context(
                                 && !model.branch_list.filter_mode
                             {
                                 Some(Message::RefreshData)
+                            } else if matches!(model.screen, Screen::Environment) {
+                                if model.environment.edit_mode {
+                                    Some(Message::Char('r'))
+                                } else {
+                                    model.reset_selected_env();
+                                    None
+                                }
                             } else {
                                 Some(Message::Char('r'))
                             }
                         }
                         (KeyCode::Char('c'), KeyModifiers::NONE) => {
-                            // FR-010: Cleanup command
-                            // In filter mode, 'c' goes to filter input
-                            if matches!(model.screen, Screen::BranchList)
+                            // Copy to clipboard on Logs screen
+                            if matches!(model.screen, Screen::Logs) && !model.logs.is_searching {
+                                Some(Message::CopyLogToClipboard)
+                            } else if matches!(model.screen, Screen::BranchList)
                                 && !model.branch_list.filter_mode
                             {
+                                // FR-010: Cleanup command
+                                // In filter mode, 'c' goes to filter input
                                 // FR-028: Check if branches are selected
                                 if model.branch_list.selected_branches.is_empty() {
                                     model.status_message =
@@ -1610,32 +1823,14 @@ pub fn run_with_context(
                                 model.delete_selected_profile();
                                 None
                             } else if matches!(model.screen, Screen::Environment) {
-                                model.delete_selected_env();
-                                None
+                                if model.environment.edit_mode {
+                                    Some(Message::Char('d'))
+                                } else {
+                                    model.delete_selected_env();
+                                    None
+                                }
                             } else {
                                 Some(Message::Char('d'))
-                            }
-                        }
-                        (KeyCode::Char('e'), KeyModifiers::NONE) => {
-                            if matches!(model.screen, Screen::Profiles) {
-                                if let Some(item) = model.profiles.selected_profile() {
-                                    let name = item.name.clone();
-                                    model.open_environment_editor(&name);
-                                }
-                                None
-                            } else if matches!(model.screen, Screen::Environment) {
-                                model.environment.start_edit();
-                                None
-                            } else {
-                                Some(Message::Char('e'))
-                            }
-                        }
-                        (KeyCode::Char('v'), KeyModifiers::NONE) => {
-                            if matches!(model.screen, Screen::Environment) {
-                                model.environment.toggle_visibility();
-                                None
-                            } else {
-                                Some(Message::Char('v'))
                             }
                         }
                         (KeyCode::Char('x'), KeyModifiers::NONE) => {
@@ -1701,13 +1896,13 @@ pub fn run_with_context(
                                 Some(Message::Tab)
                             }
                         }
-                        (KeyCode::Up, _) => Some(Message::SelectPrev),
-                        (KeyCode::Down, _) => Some(Message::SelectNext),
-                        (KeyCode::PageUp, _) => Some(Message::PageUp),
-                        (KeyCode::PageDown, _) => Some(Message::PageDown),
-                        (KeyCode::Home, _) => Some(Message::GoHome),
-                        (KeyCode::End, _) => Some(Message::GoEnd),
-                        (KeyCode::Enter, _) if enter_is_press => Some(Message::Enter),
+                        (KeyCode::Up, _) if is_key_press => Some(Message::SelectPrev),
+                        (KeyCode::Down, _) if is_key_press => Some(Message::SelectNext),
+                        (KeyCode::PageUp, _) if is_key_press => Some(Message::PageUp),
+                        (KeyCode::PageDown, _) if is_key_press => Some(Message::PageDown),
+                        (KeyCode::Home, _) if is_key_press => Some(Message::GoHome),
+                        (KeyCode::End, _) if is_key_press => Some(Message::GoEnd),
+                        (KeyCode::Enter, _) if is_key_press => Some(Message::Enter),
                         (KeyCode::Backspace, _) => Some(Message::Backspace),
                         (KeyCode::Left, _) => Some(Message::CursorLeft),
                         (KeyCode::Right, _) => Some(Message::CursorRight),
@@ -1794,5 +1989,42 @@ mod tests {
         assert!(model.branch_list.selected_branches.is_empty());
         assert!(model.pending_unsafe_selection.is_none());
         assert!(matches!(model.screen, Screen::BranchList));
+    }
+
+    #[test]
+    fn test_profile_input_disables_shortcuts() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::Profiles;
+        model.profiles.enter_create_mode();
+
+        let key = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE);
+        let msg = model.handle_text_input_key(key, true);
+        assert!(matches!(msg, Some(Message::Char('n'))));
+    }
+
+    #[test]
+    fn test_environment_input_switches_field_on_tab() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::Environment;
+        model.environment.start_new();
+        assert_eq!(model.environment.edit_field, EditField::Key);
+
+        let key = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        let msg = model.handle_text_input_key(key, true);
+        assert!(msg.is_none());
+        assert_eq!(model.environment.edit_field, EditField::Value);
+    }
+
+    #[test]
+    fn test_environment_input_enter_moves_to_value_field() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::Environment;
+        model.environment.start_new();
+        assert_eq!(model.environment.edit_field, EditField::Key);
+
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let msg = model.handle_text_input_key(key, true);
+        assert!(msg.is_none());
+        assert_eq!(model.environment.edit_field, EditField::Value);
     }
 }

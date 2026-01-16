@@ -12,6 +12,9 @@ pub struct Profile {
     pub name: String,
     /// Environment variables
     pub env: HashMap<String, String>,
+    /// Disabled OS environment variables
+    #[serde(default)]
+    pub disabled_env: Vec<String>,
     /// Description
     #[serde(default)]
     pub description: String,
@@ -23,6 +26,7 @@ impl Profile {
         Self {
             name: name.into(),
             env: HashMap::new(),
+            disabled_env: Vec::new(),
             description: String::new(),
         }
     }
