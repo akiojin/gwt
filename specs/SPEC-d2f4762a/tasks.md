@@ -3,14 +3,14 @@
 **仕様ID**: `SPEC-d2f4762a`
 **ポリシー**: CLAUDE.md の TDD ルールに基づき、必ず RED→GREEN→リグレッションチェックの順に進める。
 
-## 追加作業: 起動時の非同期状態更新と進捗表示 (2026-01-16)
+## 追加作業: 起動時の完全非同期取得と進捗表示 (2026-01-16)
 
-- [x] **T9945** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` に起動時の非同期状態更新と進捗表示の要件・方針を追記
-- [ ] **T9946** [Test] `crates/gwt-cli/src/tui/screens/branch_list.rs` に状態更新進捗（`Status: Updating branch status (done/total)`）の表示テストを追加
-- [ ] **T9947** [Test] `crates/gwt-cli/src/tui/app.rs` に起動直後の非同期状態更新がUIをブロックしないことを確認するテストを追加
-- [ ] **T9948** [実装] `crates/gwt-cli/src/tui/screens/branch_list.rs` に進捗表示用の状態と描画を追加し、更新中のみ表示する
-- [ ] **T9949** [実装] `crates/gwt-cli/src/tui/app.rs` で初期一覧表示後に詳細状態（未コミット/未プッシュ/未マージ/安全判定、upstream/差分、Worktreeアクセス可否）のバックグラウンド更新を開始し、完了したブランチから順次反映する
-- [ ] **T9950** [実装] `crates/gwt-cli/src/tui/app.rs` で`r`キーによる再取得時に進行中の更新を無効化し、最新更新のみ反映する
+- [x] **T9945** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` に起動時の完全非同期取得と進捗表示の要件・方針を追記
+- [ ] **T9946** [Test] `crates/gwt-cli/src/tui/screens/branch_list.rs` に一覧取得中の進捗表示（`Status: Loading branch list...`）と状態更新進捗（`Status: Updating branch status (done/total)`）の表示テストを追加
+- [ ] **T9947** [Test] `crates/gwt-cli/src/tui/app.rs` に起動直後の一覧取得が非同期であり、UIをブロックしないことを確認するテストを追加
+- [ ] **T9948** [実装] `crates/gwt-cli/src/tui/screens/branch_list.rs` に一覧取得中のローディング表示と進捗表示用の状態/描画を追加する
+- [ ] **T9949** [実装] `crates/gwt-cli/src/tui/app.rs` でブランチ一覧取得も含めてバックグラウンド更新を開始し、完了したブランチから順次反映する
+- [ ] **T9950** [実装] `crates/gwt-cli/src/tui/app.rs` で`r`キーによる再取得時に進行中の一覧取得/状態更新を無効化し、最新更新のみ反映する
 - [ ] **T9951** `cargo test -p gwt-cli` と `cargo build --release` を実行し、失敗がないことを確認する
 
 ## 追加作業: Rust版キーバインド整合 (2026-01-13)
