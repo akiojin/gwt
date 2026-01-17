@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
+use tracing::{debug, error, info};
 
 use super::screens::branch_list::WorktreeStatus;
 use super::screens::environment::EditField;
@@ -102,7 +103,7 @@ struct SafetyUpdate {
 
 struct SafetyCheckTarget {
     branch: String,
-    upstream: String,
+    upstream: Option<String>,
 }
 
 struct WorktreeStatusUpdate {
@@ -262,6 +263,12 @@ impl Model {
     pub fn new_with_context(context: Option<TuiEntryContext>) -> Self {
         let repo_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
+        debug!(
+            category = "tui",
+            repo_root = %repo_root.display(),
+            "Initializing TUI model"
+        );
+
         let mut model = Self {
             should_quit: false,
             ctrl_c_count: 0,
@@ -302,6 +309,12 @@ impl Model {
 
     /// Refresh data from repository
     fn refresh_data(&mut self) {
+        debug!(
+            category = "tui",
+            repo_root = %self.repo_root.display(),
+            "Refreshing data from repository"
+        );
+
         let settings = gwt_core::config::Settings::load(&self.repo_root).unwrap_or_default();
         self.settings = SettingsState::new().with_settings(settings.clone());
 
@@ -399,16 +412,15 @@ impl Model {
 
                     // Safety check short-circuit: use immediate signals first
                     if item.branch_type == BranchType::Local {
-                        if !b.has_remote || !base_branch_exists {
+                        if !base_branch_exists {
                             item.safe_to_cleanup = Some(false);
-                        } else if let Some(upstream) = b.upstream.clone() {
+                        } else {
+                            // Check safety even without upstream (FR-004b)
                             item.safe_to_cleanup = None;
                             safety_targets.push(SafetyCheckTarget {
                                 branch: b.name.clone(),
-                                upstream,
+                                upstream: b.upstream.clone(),
                             });
-                        } else {
-                            item.safe_to_cleanup = Some(false);
                         }
                     }
 
@@ -488,24 +500,17 @@ impl Model {
                 let mut is_unmerged = false;
                 let mut safe_to_cleanup = false;
 
-                let unpushed_result =
-                    Branch::divergence_between(&repo_root, &target.branch, &target.upstream);
-                match unpushed_result {
-                    Ok((ahead, _)) => {
+                // Check for unpushed commits (skip if upstream is not configured)
+                if let Some(ref upstream) = target.upstream {
+                    if let Ok((ahead, _)) =
+                        Branch::divergence_between(&repo_root, &target.branch, upstream)
+                    {
                         if ahead > 0 {
                             has_unpushed = true;
                         }
                     }
-                    Err(_) => {
-                        let _ = tx.send(SafetyUpdate {
-                            branch: target.branch,
-                            has_unpushed,
-                            is_unmerged,
-                            safe_to_cleanup,
-                        });
-                        continue;
-                    }
                 }
+                // If upstream is not configured, continue to check against base branch
 
                 if has_unpushed {
                     let _ = tx.send(SafetyUpdate {
@@ -1373,6 +1378,12 @@ impl Model {
 
     /// Create worktree from wizard state and prepare agent launch
     fn create_worktree(&mut self) {
+        debug!(
+            category = "tui",
+            branch = %self.worktree_create.branch_name,
+            create_new_branch = self.worktree_create.create_new_branch,
+            "Creating worktree from wizard state"
+        );
         if let Ok(manager) = WorktreeManager::new(&self.repo_root) {
             let branch = &self.worktree_create.branch_name;
             let base = if self.worktree_create.create_new_branch {
@@ -1398,6 +1409,13 @@ impl Model {
 
             match result {
                 Ok(wt) => {
+                    info!(
+                        category = "tui",
+                        operation = "create_worktree",
+                        branch = %branch,
+                        worktree_path = %wt.path.display(),
+                        "Worktree created successfully"
+                    );
                     // Create agent launch configuration
                     let auto_install_deps = self
                         .settings
@@ -1434,6 +1452,13 @@ impl Model {
                     self.should_quit = true;
                 }
                 Err(e) => {
+                    error!(
+                        category = "tui",
+                        operation = "create_worktree",
+                        branch = %branch,
+                        error = %e,
+                        "Failed to create worktree"
+                    );
                     self.worktree_create.error_message = Some(e.to_string());
                     self.status_message = Some(format!("Error: {}", e));
                     self.status_message_time = Some(Instant::now());
@@ -1444,6 +1469,11 @@ impl Model {
 
     /// Execute branch cleanup (FR-010)
     fn execute_cleanup(&mut self, branches: &[String]) {
+        debug!(
+            category = "tui",
+            branch_count = branches.len(),
+            "Starting branch cleanup"
+        );
         let mut deleted = 0;
         let mut errors = Vec::new();
         let manager = WorktreeManager::new(&self.repo_root).ok();
@@ -1471,11 +1501,22 @@ impl Model {
             // Try to delete the branch
             match Branch::delete(&self.repo_root, branch_name, true) {
                 Ok(_) => {
+                    debug!(
+                        category = "tui",
+                        branch = %branch_name,
+                        "Branch deleted successfully"
+                    );
                     deleted += 1;
                     // Remove from selection
                     self.branch_list.selected_branches.remove(branch_name);
                 }
                 Err(e) => {
+                    error!(
+                        category = "tui",
+                        branch = %branch_name,
+                        error = %e,
+                        "Failed to delete branch"
+                    );
                     errors.push(format!("{}: {}", branch_name, e));
                 }
             }
@@ -1483,8 +1524,21 @@ impl Model {
 
         // Show result message
         if errors.is_empty() {
+            info!(
+                category = "tui",
+                operation = "cleanup",
+                deleted_count = deleted,
+                "Branch cleanup completed successfully"
+            );
             self.status_message = Some(format!("Deleted {} branch(es).", deleted));
         } else {
+            info!(
+                category = "tui",
+                operation = "cleanup",
+                deleted_count = deleted,
+                error_count = errors.len(),
+                "Branch cleanup completed with errors"
+            );
             self.status_message = Some(format!(
                 "Deleted {} branch(es), {} failed.",
                 deleted,
@@ -1519,8 +1573,11 @@ impl Model {
         let inner_width = frame.area().width.saturating_sub(2) as usize; // borders
         let footer_height = if footer_text_len > inner_width { 4 } else { 3 };
 
-        // Profiles and Environment screens don't need header
-        let needs_header = !matches!(base_screen, Screen::Profiles | Screen::Environment);
+        // Profiles, Environment, and Logs screens don't need header
+        let needs_header = !matches!(
+            base_screen,
+            Screen::Profiles | Screen::Environment | Screen::Logs
+        );
         let header_height = if needs_header { 6 } else { 0 };
 
         let chunks = Layout::default()
@@ -1713,7 +1770,7 @@ impl Model {
             }
             Screen::WorktreeCreate => "[Enter] Next | [Esc] Back",
             Screen::Settings => "[Tab] Category | [Esc] Back",
-            Screen::Logs => "[f] Filter | [/] Search | [Esc] Back",
+            Screen::Logs => "[Up/Down] Navigate | [Enter] Detail | [c] Copy | [f] Filter | [/] Search | [Esc] Back",
             Screen::Help => "[Esc] Close | [Up/Down] Scroll",
             Screen::Confirm => "[Left/Right] Select | [Enter] Confirm | [Esc] Cancel",
             Screen::Error => "[Enter/Esc] Close | [Up/Down] Scroll",

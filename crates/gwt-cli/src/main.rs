@@ -8,13 +8,13 @@ use gwt_core::config::{save_session_entry, Settings, ToolSessionEntry};
 use gwt_core::error::GwtError;
 use gwt_core::worktree::WorktreeManager;
 use std::fs;
-use std::io::BufRead;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 mod cli;
 mod tui;
@@ -540,6 +540,61 @@ fn install_dependencies(worktree_path: &Path, auto_install: bool) -> Result<(), 
     Ok(())
 }
 
+/// Strip ANSI escape codes from a string for clean log output
+fn strip_ansi_codes(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // Skip escape sequence
+            if let Some(&'[') = chars.peek() {
+                chars.next(); // consume '['
+                              // Skip until we hit a letter (end of escape sequence)
+                while let Some(&next) = chars.peek() {
+                    chars.next();
+                    if next.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+/// Spawn a thread to handle agent output (stdout or stderr)
+///
+/// This function reads lines from the given pipe, logs them with ANSI codes stripped,
+/// and writes the original (with ANSI codes) to the specified output.
+fn spawn_output_handler<R: std::io::Read + Send + 'static>(
+    pipe: R,
+    agent_category: String,
+    stream: &'static str,
+    output: fn(&str),
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let reader = BufReader::new(pipe);
+        for line in reader.lines().map_while(Result::ok) {
+            // Write to TTY with ANSI codes preserved
+            output(&line);
+
+            // Log with ANSI codes stripped
+            let plain_line = strip_ansi_codes(&line);
+            if !plain_line.trim().is_empty() {
+                info!(
+                    category = agent_category.as_str(),
+                    stream = stream,
+                    "{}",
+                    plain_line
+                );
+            }
+        }
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AgentExitKind {
     Success,
@@ -717,7 +772,10 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
     let mut command = Command::new(&executable);
     command
         .args(&command_args)
-        .current_dir(&config.worktree_path);
+        .current_dir(&config.worktree_path)
+        .stdin(Stdio::inherit()) // Keep stdin for interactive input
+        .stdout(Stdio::inherit()) // Inherit stdout for TTY detection (interactive mode)
+        .stderr(Stdio::piped()); // Pipe stderr for logging
     for key in &config.env_remove {
         command.env_remove(key);
     }
@@ -732,6 +790,26 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
         name: cmd_name.to_string(),
         reason: format!("Failed to execute '{}': {}", executable, e),
     })?;
+
+    // Spawn output handlers to capture and log agent output
+    let agent_category = format!("agent:{}", config.agent.id());
+    let stdout_handle = child.stdout.take().map(|stdout| {
+        spawn_output_handler(stdout, agent_category.clone(), "stdout", |line| {
+            println!("{}", line);
+        })
+    });
+    let stderr_handle = child.stderr.take().map(|stderr| {
+        spawn_output_handler(stderr, agent_category.clone(), "stderr", |line| {
+            eprintln!("{}", line);
+        })
+    });
+
+    debug!(
+        category = "agent",
+        agent_id = config.agent.id(),
+        worktree_path = %config.worktree_path.display(),
+        "Agent output capture started"
+    );
 
     // FR-043: Start background thread to update timestamp every 30 seconds
     let update_context = SessionUpdateContext {
@@ -755,6 +833,20 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
 
     // Signal the updater thread to stop and wait for it
     updater.stop();
+
+    // Wait for output handler threads to finish
+    if let Some(handle) = stdout_handle {
+        let _ = handle.join();
+    }
+    if let Some(handle) = stderr_handle {
+        let _ = handle.join();
+    }
+
+    debug!(
+        category = "agent",
+        agent_id = config.agent.id(),
+        "Agent output capture finished"
+    );
 
     if let Some(session_id) = detect_agent_session_id(&config) {
         let entry = ToolSessionEntry {
@@ -953,6 +1045,89 @@ fn encode_claude_project_path(path: &Path) -> String {
         .collect()
 }
 
+// ============================================================================
+// History.jsonl schema definitions and parsers
+// ============================================================================
+
+/// Claude Code history.jsonl entry schema
+#[derive(Debug, Clone, serde::Deserialize)]
+struct ClaudeHistoryEntry {
+    #[allow(dead_code)]
+    display: String,
+    #[serde(rename = "pastedContents")]
+    #[allow(dead_code)]
+    pasted_contents: serde_json::Value,
+    timestamp: u64, // milliseconds
+    project: String,
+    #[serde(rename = "sessionId")]
+    session_id: String,
+}
+
+/// Codex history.jsonl entry schema
+#[derive(Debug, Clone, serde::Deserialize)]
+struct CodexHistoryEntry {
+    session_id: String,
+    ts: u64, // seconds
+    #[allow(dead_code)]
+    text: String,
+}
+
+/// Parse Claude Code history.jsonl file
+fn parse_claude_history(home: &Path) -> Vec<ClaudeHistoryEntry> {
+    let path = home.join(".claude").join("history.jsonl");
+    let file = match fs::File::open(&path) {
+        Ok(f) => f,
+        Err(_) => return vec![],
+    };
+    let reader = std::io::BufReader::new(file);
+    reader
+        .lines()
+        .map_while(Result::ok)
+        .filter_map(|line| serde_json::from_str(&line).ok())
+        .collect()
+}
+
+/// Parse Codex history.jsonl file
+fn parse_codex_history(home: &Path) -> Vec<CodexHistoryEntry> {
+    let path = home.join(".codex").join("history.jsonl");
+    let file = match fs::File::open(&path) {
+        Ok(f) => f,
+        Err(_) => return vec![],
+    };
+    let reader = std::io::BufReader::new(file);
+    reader
+        .lines()
+        .map_while(Result::ok)
+        .filter_map(|line| serde_json::from_str(&line).ok())
+        .collect()
+}
+
+/// Get latest session ID for Claude Code from history.jsonl
+fn get_latest_claude_session_id(home: &Path, worktree_path: &Path) -> Option<String> {
+    let history = parse_claude_history(home);
+    let worktree_str = worktree_path.to_string_lossy();
+
+    history
+        .iter()
+        .filter(|e| e.project == worktree_str || worktree_str.ends_with(&e.project))
+        .max_by_key(|e| e.timestamp)
+        .map(|e| e.session_id.clone())
+}
+
+/// Get latest session ID for Codex from history.jsonl
+/// Note: Codex history.jsonl does not have project field, so we return the latest session
+fn get_latest_codex_session_id(home: &Path) -> Option<String> {
+    let history = parse_codex_history(home);
+    history
+        .iter()
+        .max_by_key(|e| e.ts)
+        .map(|e| e.session_id.clone())
+}
+
+// ============================================================================
+// Generic session parsers (legacy)
+// ============================================================================
+
 fn parse_generic_session_id(path: &Path) -> Option<String> {
     let content = fs::read_to_string(path).ok()?;
     let value: serde_json::Value = serde_json::from_str(&content).ok()?;
@@ -999,77 +1174,86 @@ fn parse_codex_session_meta(path: &Path) -> Option<(String, Option<String>)> {
 }
 
 fn detect_codex_session_id_at(home: &Path, worktree_path: &Path) -> Option<String> {
+    // Primary: Scan sessions/ directory with cwd matching
     let root = home.join(".codex").join("sessions");
-    if !root.exists() {
-        return None;
-    }
-    let target_str = worktree_path.to_string_lossy().to_string();
-    let target_canon = fs::canonicalize(worktree_path).ok();
-    let mut latest_match: Option<(std::time::SystemTime, String)> = None;
-    let mut latest_any: Option<(std::time::SystemTime, String)> = None;
-    let mut stack = vec![root];
+    if root.exists() {
+        let target_str = worktree_path.to_string_lossy().to_string();
+        let target_canon = fs::canonicalize(worktree_path).ok();
+        let mut latest_match: Option<(std::time::SystemTime, String)> = None;
+        let mut latest_any: Option<(std::time::SystemTime, String)> = None;
+        let mut stack = vec![root];
 
-    while let Some(dir) = stack.pop() {
-        let entries = match fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(_) => continue,
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let metadata = match entry.metadata() {
-                Ok(metadata) => metadata,
+        while let Some(dir) = stack.pop() {
+            let entries = match fs::read_dir(&dir) {
+                Ok(entries) => entries,
                 Err(_) => continue,
             };
-            if metadata.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
-                continue;
-            }
-            let modified = metadata
-                .modified()
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-            let Some((id, cwd)) = parse_codex_session_meta(&path) else {
-                continue;
-            };
-            let should_update_any = latest_any
-                .as_ref()
-                .map(|(time, _)| modified > *time)
-                .unwrap_or(true);
-            if should_update_any {
-                latest_any = Some((modified, id.clone()));
-            }
-
-            if let Some(cwd) = cwd {
-                let matches_target = if cwd == target_str {
-                    true
-                } else {
-                    let cwd_path = PathBuf::from(&cwd);
-                    match (fs::canonicalize(&cwd_path).ok(), target_canon.as_ref()) {
-                        (Some(cwd_canon), Some(target_canon)) => cwd_canon == *target_canon,
-                        _ => false,
-                    }
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let metadata = match entry.metadata() {
+                    Ok(metadata) => metadata,
+                    Err(_) => continue,
                 };
-                if matches_target {
-                    let should_update_match = latest_match
-                        .as_ref()
-                        .map(|(time, _)| modified > *time)
-                        .unwrap_or(true);
-                    if should_update_match {
-                        latest_match = Some((modified, id));
+                if metadata.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                let modified = metadata
+                    .modified()
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                let Some((id, cwd)) = parse_codex_session_meta(&path) else {
+                    continue;
+                };
+                let should_update_any = latest_any
+                    .as_ref()
+                    .map(|(time, _)| modified > *time)
+                    .unwrap_or(true);
+                if should_update_any {
+                    latest_any = Some((modified, id.clone()));
+                }
+
+                if let Some(cwd) = cwd {
+                    let matches_target = if cwd == target_str {
+                        true
+                    } else {
+                        let cwd_path = PathBuf::from(&cwd);
+                        match (fs::canonicalize(&cwd_path).ok(), target_canon.as_ref()) {
+                            (Some(cwd_canon), Some(target_canon)) => cwd_canon == *target_canon,
+                            _ => false,
+                        }
+                    };
+                    if matches_target {
+                        let should_update_match = latest_match
+                            .as_ref()
+                            .map(|(time, _)| modified > *time)
+                            .unwrap_or(true);
+                        if should_update_match {
+                            latest_match = Some((modified, id));
+                        }
                     }
                 }
             }
         }
+
+        if let Some((_, session_id)) = latest_match.or(latest_any) {
+            return Some(session_id);
+        }
     }
 
-    latest_match
-        .or(latest_any)
-        .map(|(_, session_id)| session_id)
+    // Fallback: Use history.jsonl (returns latest session regardless of project)
+    get_latest_codex_session_id(home)
 }
 
 fn detect_claude_session_id_at(home: &Path, worktree_path: &Path) -> Option<String> {
+    // Primary: Use history.jsonl which has accurate project -> sessionId mapping
+    if let Some(session_id) = get_latest_claude_session_id(home, worktree_path) {
+        return Some(session_id);
+    }
+
+    // Fallback: Scan projects/ directory (legacy behavior)
     let project_dir = home
         .join(".claude")
         .join("projects")
