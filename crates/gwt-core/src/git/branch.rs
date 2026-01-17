@@ -52,6 +52,13 @@ impl Branch {
     }
 
     fn list_with_options(repo_path: &Path, include_divergence: bool) -> Result<Vec<Branch>> {
+        debug!(
+            category = "git",
+            repo_path = %repo_path.display(),
+            include_divergence,
+            "Listing branches"
+        );
+
         let output = Command::new("git")
             .args([
                 "for-each-ref",
@@ -120,6 +127,12 @@ impl Branch {
 
     /// List all remote branches
     pub fn list_remote(repo_path: &Path) -> Result<Vec<Branch>> {
+        debug!(
+            category = "git",
+            repo_path = %repo_path.display(),
+            "Listing remote branches"
+        );
+
         let output = Command::new("git")
             .args([
                 "for-each-ref",
@@ -169,6 +182,12 @@ impl Branch {
 
     /// Get the current branch
     pub fn current(repo_path: &Path) -> Result<Option<Branch>> {
+        debug!(
+            category = "git",
+            repo_path = %repo_path.display(),
+            "Getting current branch"
+        );
+
         let output = Command::new("git")
             .args(["rev-parse", "--abbrev-ref", "HEAD"])
             .current_dir(repo_path)
@@ -448,7 +467,14 @@ impl Branch {
                 details: e.to_string(),
             })?;
 
-        Ok(output.status.success())
+        let exists = output.status.success();
+        debug!(
+            category = "git",
+            branch = name,
+            exists,
+            "Checked branch existence"
+        );
+        Ok(exists)
     }
 
     /// Check if a branch exists remotely

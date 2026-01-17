@@ -8,13 +8,13 @@ use gwt_core::config::{save_session_entry, Settings, ToolSessionEntry};
 use gwt_core::error::GwtError;
 use gwt_core::worktree::WorktreeManager;
 use std::fs;
-use std::io::BufRead;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 mod cli;
 mod tui;
@@ -540,6 +540,61 @@ fn install_dependencies(worktree_path: &Path, auto_install: bool) -> Result<(), 
     Ok(())
 }
 
+/// Strip ANSI escape codes from a string for clean log output
+fn strip_ansi_codes(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // Skip escape sequence
+            if let Some(&'[') = chars.peek() {
+                chars.next(); // consume '['
+                              // Skip until we hit a letter (end of escape sequence)
+                while let Some(&next) = chars.peek() {
+                    chars.next();
+                    if next.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+/// Spawn a thread to handle agent output (stdout or stderr)
+///
+/// This function reads lines from the given pipe, logs them with ANSI codes stripped,
+/// and writes the original (with ANSI codes) to the specified output.
+fn spawn_output_handler<R: std::io::Read + Send + 'static>(
+    pipe: R,
+    agent_category: String,
+    stream: &'static str,
+    output: fn(&str),
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let reader = BufReader::new(pipe);
+        for line in reader.lines().map_while(Result::ok) {
+            // Write to TTY with ANSI codes preserved
+            output(&line);
+
+            // Log with ANSI codes stripped
+            let plain_line = strip_ansi_codes(&line);
+            if !plain_line.trim().is_empty() {
+                info!(
+                    category = agent_category.as_str(),
+                    stream = stream,
+                    "{}",
+                    plain_line
+                );
+            }
+        }
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AgentExitKind {
     Success,
@@ -717,7 +772,10 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
     let mut command = Command::new(&executable);
     command
         .args(&command_args)
-        .current_dir(&config.worktree_path);
+        .current_dir(&config.worktree_path)
+        .stdin(Stdio::inherit()) // Keep stdin for interactive input
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     for key in &config.env_remove {
         command.env_remove(key);
     }
@@ -732,6 +790,26 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
         name: cmd_name.to_string(),
         reason: format!("Failed to execute '{}': {}", executable, e),
     })?;
+
+    // Spawn output handlers to capture and log agent output
+    let agent_category = format!("agent:{}", config.agent.id());
+    let stdout_handle = child.stdout.take().map(|stdout| {
+        spawn_output_handler(stdout, agent_category.clone(), "stdout", |line| {
+            println!("{}", line);
+        })
+    });
+    let stderr_handle = child.stderr.take().map(|stderr| {
+        spawn_output_handler(stderr, agent_category.clone(), "stderr", |line| {
+            eprintln!("{}", line);
+        })
+    });
+
+    debug!(
+        category = "agent",
+        agent_id = config.agent.id(),
+        worktree_path = %config.worktree_path.display(),
+        "Agent output capture started"
+    );
 
     // FR-043: Start background thread to update timestamp every 30 seconds
     let update_context = SessionUpdateContext {
@@ -755,6 +833,20 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
 
     // Signal the updater thread to stop and wait for it
     updater.stop();
+
+    // Wait for output handler threads to finish
+    if let Some(handle) = stdout_handle {
+        let _ = handle.join();
+    }
+    if let Some(handle) = stderr_handle {
+        let _ = handle.join();
+    }
+
+    debug!(
+        category = "agent",
+        agent_id = config.agent.id(),
+        "Agent output capture finished"
+    );
 
     if let Some(session_id) = detect_agent_session_id(&config) {
         let entry = ToolSessionEntry {
