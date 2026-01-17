@@ -288,7 +288,7 @@ fn render_header(state: &LogsState, frame: &mut Frame, area: Rect) {
         state.filter.name()
     );
 
-    let header = Paragraph::new("").block(Block::default().borders(Borders::ALL).title(title));
+    let header = Paragraph::new("").block(Block::default().borders(Borders::BOTTOM).title(title));
     frame.render_widget(header, area);
 }
 

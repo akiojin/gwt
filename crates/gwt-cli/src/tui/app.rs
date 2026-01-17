@@ -1519,8 +1519,9 @@ impl Model {
         let inner_width = frame.area().width.saturating_sub(2) as usize; // borders
         let footer_height = if footer_text_len > inner_width { 4 } else { 3 };
 
-        // Profiles and Environment screens don't need header
-        let needs_header = !matches!(base_screen, Screen::Profiles | Screen::Environment);
+        // Profiles, Environment, and Logs screens don't need header
+        let needs_header =
+            !matches!(base_screen, Screen::Profiles | Screen::Environment | Screen::Logs);
         let header_height = if needs_header { 6 } else { 0 };
 
         let chunks = Layout::default()
