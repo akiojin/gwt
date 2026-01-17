@@ -47,6 +47,30 @@ file .docker/entrypoint.sh
 # (CRLF line terminatorsが含まれていないこと)
 ```
 
+### arm64 環境で `no matching manifest for linux/arm64/v8` が発生する場合
+
+playwright-novnc のイメージが arm64 マニフェストを提供していない場合、arm64 環境では pull 時点で失敗します。以下の手順で amd64 を指定して起動してください。
+
+1. 環境変数を設定
+
+   ```bash
+   export PLAYWRIGHT_NOVNC_PLATFORM=linux/amd64
+   ```
+
+   もしくは `.env` に以下を追加します。
+
+   ```text
+   PLAYWRIGHT_NOVNC_PLATFORM=linux/amd64
+   ```
+
+2. コンテナ起動
+
+   ```bash
+   docker compose up -d
+   ```
+
+> 注意: arm64 上で amd64 を実行するため、Docker Desktop のエミュレーションや qemu-user-static などが有効である必要があります。無効な場合は `exec format error` が発生します。
+
 ### Dockerイメージのクリーンアップ
 
 完全にクリーンな状態から始める場合：

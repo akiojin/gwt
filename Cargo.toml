@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "6.0.3"
+version = "6.0.8"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/akiojin/gwt"
@@ -22,7 +22,7 @@ gwt-core = { path = "crates/gwt-core" }
 thiserror = "2"
 
 # Git operations
-gix = { version = "0.70", default-features = false, features = [
+gix = { version = "0.77", default-features = false, features = [
     "blocking-network-client",
     "worktree-mutation",
 ] }

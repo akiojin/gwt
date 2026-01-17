@@ -8,14 +8,13 @@ use gwt_core::config::{save_session_entry, Settings, ToolSessionEntry};
 use gwt_core::error::GwtError;
 use gwt_core::worktree::WorktreeManager;
 use std::fs;
-use std::io::BufRead;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 mod cli;
 mod tui;
@@ -472,9 +471,34 @@ fn detect_package_manager(worktree_path: &Path) -> Option<&'static str> {
 ///
 /// FR-040a: Display package manager output directly to stdout/stderr
 /// FR-040b: Do NOT use spinner during installation (output would conflict)
-fn install_dependencies(worktree_path: &Path) -> Result<(), GwtError> {
+fn should_warn_skip_install(worktree_path: &Path) -> Option<&'static str> {
+    if !worktree_path.join("package.json").exists() {
+        return None;
+    }
+    if worktree_path.join("node_modules").exists() {
+        return None;
+    }
+    detect_package_manager(worktree_path)
+}
+
+fn skip_install_warning_message(pm: &str) -> String {
+    format!(
+        "Auto install disabled. Skipping dependency install. Run \"{} install\" if needed or set GWT_AGENT_AUTO_INSTALL_DEPS=true.",
+        pm
+    )
+}
+
+fn install_dependencies(worktree_path: &Path, auto_install: bool) -> Result<(), GwtError> {
     // Check if package.json exists
     if !worktree_path.join("package.json").exists() {
+        return Ok(());
+    }
+
+    if !auto_install {
+        if let Some(pm) = should_warn_skip_install(worktree_path) {
+            println!("{}", skip_install_warning_message(pm));
+            println!();
+        }
         return Ok(());
     }
 
@@ -516,10 +540,127 @@ fn install_dependencies(worktree_path: &Path) -> Result<(), GwtError> {
     Ok(())
 }
 
+/// Strip ANSI escape codes from a string for clean log output
+fn strip_ansi_codes(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // Skip escape sequence
+            if let Some(&'[') = chars.peek() {
+                chars.next(); // consume '['
+                              // Skip until we hit a letter (end of escape sequence)
+                while let Some(&next) = chars.peek() {
+                    chars.next();
+                    if next.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+/// Spawn a thread to handle agent output (stdout or stderr)
+///
+/// This function reads lines from the given pipe, logs them with ANSI codes stripped,
+/// and writes the original (with ANSI codes) to the specified output.
+fn spawn_output_handler<R: std::io::Read + Send + 'static>(
+    pipe: R,
+    agent_category: String,
+    stream: &'static str,
+    output: fn(&str),
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let reader = BufReader::new(pipe);
+        for line in reader.lines().map_while(Result::ok) {
+            // Write to TTY with ANSI codes preserved
+            output(&line);
+
+            // Log with ANSI codes stripped
+            let plain_line = strip_ansi_codes(&line);
+            if !plain_line.trim().is_empty() {
+                info!(
+                    category = agent_category.as_str(),
+                    stream = stream,
+                    "{}",
+                    plain_line
+                );
+            }
+        }
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AgentExitKind {
     Success,
     Interrupted,
+}
+
+#[derive(Debug, Clone)]
+struct SessionUpdateContext {
+    worktree_path: PathBuf,
+    branch_name: String,
+    agent_id: String,
+    agent_label: String,
+    version: String,
+    model: Option<String>,
+    mode: String,
+    reasoning_level: Option<String>,
+    skip_permissions: bool,
+}
+
+impl SessionUpdateContext {
+    fn to_entry(&self) -> ToolSessionEntry {
+        ToolSessionEntry {
+            branch: self.branch_name.clone(),
+            worktree_path: Some(self.worktree_path.to_string_lossy().to_string()),
+            tool_id: self.agent_id.clone(),
+            tool_label: self.agent_label.clone(),
+            session_id: None,
+            mode: Some(self.mode.clone()),
+            model: self.model.clone(),
+            reasoning_level: self.reasoning_level.clone(),
+            skip_permissions: Some(self.skip_permissions),
+            tool_version: Some(self.version.clone()),
+            timestamp: Utc::now().timestamp_millis(),
+        }
+    }
+}
+
+struct SessionUpdater {
+    stop_tx: mpsc::Sender<()>,
+    handle: thread::JoinHandle<()>,
+}
+
+impl SessionUpdater {
+    fn stop(self) {
+        let _ = self.stop_tx.send(());
+        let _ = self.handle.join();
+    }
+}
+
+fn spawn_session_updater(context: SessionUpdateContext, interval: Duration) -> SessionUpdater {
+    let (stop_tx, stop_rx) = mpsc::channel();
+    let handle = thread::spawn(move || loop {
+        match stop_rx.recv_timeout(interval) {
+            Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Timeout) => {
+                let entry = context.to_entry();
+                let _ = save_session_entry(&context.worktree_path, entry);
+            }
+        }
+    });
+
+    SessionUpdater { stop_tx, handle }
+}
+
+fn build_launching_message(config: &AgentLaunchConfig) -> String {
+    format!("Launching {}...", config.agent.label())
 }
 
 /// Launch a coding agent after TUI exits
@@ -529,9 +670,8 @@ enum AgentExitKind {
 /// - "latest": Use bunx @package@latest
 /// - specific version: Use bunx @package@X.Y.Z
 fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtError> {
-    // FR-040a/FR-040b: Install dependencies before launching agent
-    install_dependencies(&config.worktree_path)?;
-    let started_at = Instant::now();
+    println!("{}", build_launching_message(&config));
+    println!();
 
     let cmd_name = config.agent.command_name();
     let npm_package = config.agent.npm_package();
@@ -601,6 +741,15 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
     }
     println!();
 
+    if config.auto_install_deps {
+        println!("Preparing to install dependencies...");
+        println!();
+    }
+
+    // FR-040a/FR-040b: Install dependencies only when enabled
+    install_dependencies(&config.worktree_path, config.auto_install_deps)?;
+    let started_at = Instant::now();
+
     // FR-069, FR-042: Save session entry before launching agent
     let session_entry = ToolSessionEntry {
         branch: config.branch_name.clone(),
@@ -623,7 +772,10 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
     let mut command = Command::new(&executable);
     command
         .args(&command_args)
-        .current_dir(&config.worktree_path);
+        .current_dir(&config.worktree_path)
+        .stdin(Stdio::inherit()) // Keep stdin for interactive input
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     for key in &config.env_remove {
         command.env_remove(key);
     }
@@ -639,46 +791,39 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
         reason: format!("Failed to execute '{}': {}", executable, e),
     })?;
 
-    // FR-043: Start background thread to update timestamp every 30 seconds
-    let running = Arc::new(AtomicBool::new(true));
-    let running_clone = Arc::clone(&running);
-    let worktree_path = config.worktree_path.clone();
-    let branch_name = config.branch_name.clone();
-    let agent_id = config.agent.id().to_string();
-    let agent_label = config.agent.label().to_string();
-    let version = selected_version.clone();
-    let model = config.model.clone();
-    let mode = config.execution_mode.label().to_string();
-    let reasoning_level = config.reasoning_level.map(|r| r.label().to_string());
-    let skip_permissions = config.skip_permissions;
-
-    let updater_thread = thread::spawn(move || {
-        while running_clone.load(Ordering::Relaxed) {
-            // Wait 30 seconds before updating
-            thread::sleep(Duration::from_secs(30));
-
-            // Check if still running before updating
-            if !running_clone.load(Ordering::Relaxed) {
-                break;
-            }
-
-            // Update timestamp (FR-043)
-            let entry = ToolSessionEntry {
-                branch: branch_name.clone(),
-                worktree_path: Some(worktree_path.to_string_lossy().to_string()),
-                tool_id: agent_id.clone(),
-                tool_label: agent_label.clone(),
-                session_id: None,
-                mode: Some(mode.clone()),
-                model: model.clone(),
-                reasoning_level: reasoning_level.clone(),
-                skip_permissions: Some(skip_permissions),
-                tool_version: Some(version.clone()),
-                timestamp: Utc::now().timestamp_millis(),
-            };
-            let _ = save_session_entry(&worktree_path, entry);
-        }
+    // Spawn output handlers to capture and log agent output
+    let agent_category = format!("agent:{}", config.agent.id());
+    let stdout_handle = child.stdout.take().map(|stdout| {
+        spawn_output_handler(stdout, agent_category.clone(), "stdout", |line| {
+            println!("{}", line);
+        })
     });
+    let stderr_handle = child.stderr.take().map(|stderr| {
+        spawn_output_handler(stderr, agent_category.clone(), "stderr", |line| {
+            eprintln!("{}", line);
+        })
+    });
+
+    debug!(
+        category = "agent",
+        agent_id = config.agent.id(),
+        worktree_path = %config.worktree_path.display(),
+        "Agent output capture started"
+    );
+
+    // FR-043: Start background thread to update timestamp every 30 seconds
+    let update_context = SessionUpdateContext {
+        worktree_path: config.worktree_path.clone(),
+        branch_name: config.branch_name.clone(),
+        agent_id: config.agent.id().to_string(),
+        agent_label: config.agent.label().to_string(),
+        version: selected_version.clone(),
+        model: config.model.clone(),
+        mode: config.execution_mode.label().to_string(),
+        reasoning_level: config.reasoning_level.map(|r| r.label().to_string()),
+        skip_permissions: config.skip_permissions,
+    };
+    let updater = spawn_session_updater(update_context, Duration::from_secs(30));
 
     // Wait for the agent process to finish
     let status = child.wait().map_err(|e| GwtError::AgentLaunchFailed {
@@ -687,8 +832,21 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
     })?;
 
     // Signal the updater thread to stop and wait for it
-    running.store(false, Ordering::Relaxed);
-    let _ = updater_thread.join();
+    updater.stop();
+
+    // Wait for output handler threads to finish
+    if let Some(handle) = stdout_handle {
+        let _ = handle.join();
+    }
+    if let Some(handle) = stderr_handle {
+        let _ = handle.join();
+    }
+
+    debug!(
+        category = "agent",
+        agent_id = config.agent.id(),
+        "Agent output capture finished"
+    );
 
     if let Some(session_id) = detect_agent_session_id(&config) {
         let entry = ToolSessionEntry {
@@ -806,7 +964,6 @@ fn build_launch_log_lines(
     execution_method: &ExecutionMethod,
 ) -> Vec<String> {
     let mut lines = Vec::new();
-    lines.push(format!("Launching {}...", config.agent.label()));
     lines.push(format!(
         "Working directory: {}",
         config.worktree_path.display()
@@ -888,6 +1045,89 @@ fn encode_claude_project_path(path: &Path) -> String {
         .collect()
 }
 
+// ============================================================================
+// History.jsonl schema definitions and parsers
+// ============================================================================
+
+/// Claude Code history.jsonl entry schema
+#[derive(Debug, Clone, serde::Deserialize)]
+struct ClaudeHistoryEntry {
+    #[allow(dead_code)]
+    display: String,
+    #[serde(rename = "pastedContents")]
+    #[allow(dead_code)]
+    pasted_contents: serde_json::Value,
+    timestamp: u64, // milliseconds
+    project: String,
+    #[serde(rename = "sessionId")]
+    session_id: String,
+}
+
+/// Codex history.jsonl entry schema
+#[derive(Debug, Clone, serde::Deserialize)]
+struct CodexHistoryEntry {
+    session_id: String,
+    ts: u64, // seconds
+    #[allow(dead_code)]
+    text: String,
+}
+
+/// Parse Claude Code history.jsonl file
+fn parse_claude_history(home: &Path) -> Vec<ClaudeHistoryEntry> {
+    let path = home.join(".claude").join("history.jsonl");
+    let file = match fs::File::open(&path) {
+        Ok(f) => f,
+        Err(_) => return vec![],
+    };
+    let reader = std::io::BufReader::new(file);
+    reader
+        .lines()
+        .map_while(Result::ok)
+        .filter_map(|line| serde_json::from_str(&line).ok())
+        .collect()
+}
+
+/// Parse Codex history.jsonl file
+fn parse_codex_history(home: &Path) -> Vec<CodexHistoryEntry> {
+    let path = home.join(".codex").join("history.jsonl");
+    let file = match fs::File::open(&path) {
+        Ok(f) => f,
+        Err(_) => return vec![],
+    };
+    let reader = std::io::BufReader::new(file);
+    reader
+        .lines()
+        .map_while(Result::ok)
+        .filter_map(|line| serde_json::from_str(&line).ok())
+        .collect()
+}
+
+/// Get latest session ID for Claude Code from history.jsonl
+fn get_latest_claude_session_id(home: &Path, worktree_path: &Path) -> Option<String> {
+    let history = parse_claude_history(home);
+    let worktree_str = worktree_path.to_string_lossy();
+
+    history
+        .iter()
+        .filter(|e| e.project == worktree_str || worktree_str.ends_with(&e.project))
+        .max_by_key(|e| e.timestamp)
+        .map(|e| e.session_id.clone())
+}
+
+/// Get latest session ID for Codex from history.jsonl
+/// Note: Codex history.jsonl does not have project field, so we return the latest session
+fn get_latest_codex_session_id(home: &Path) -> Option<String> {
+    let history = parse_codex_history(home);
+    history
+        .iter()
+        .max_by_key(|e| e.ts)
+        .map(|e| e.session_id.clone())
+}
+
+// ============================================================================
+// Generic session parsers (legacy)
+// ============================================================================
+
 fn parse_generic_session_id(path: &Path) -> Option<String> {
     let content = fs::read_to_string(path).ok()?;
     let value: serde_json::Value = serde_json::from_str(&content).ok()?;
@@ -934,77 +1174,86 @@ fn parse_codex_session_meta(path: &Path) -> Option<(String, Option<String>)> {
 }
 
 fn detect_codex_session_id_at(home: &Path, worktree_path: &Path) -> Option<String> {
+    // Primary: Scan sessions/ directory with cwd matching
     let root = home.join(".codex").join("sessions");
-    if !root.exists() {
-        return None;
-    }
-    let target_str = worktree_path.to_string_lossy().to_string();
-    let target_canon = fs::canonicalize(worktree_path).ok();
-    let mut latest_match: Option<(std::time::SystemTime, String)> = None;
-    let mut latest_any: Option<(std::time::SystemTime, String)> = None;
-    let mut stack = vec![root];
+    if root.exists() {
+        let target_str = worktree_path.to_string_lossy().to_string();
+        let target_canon = fs::canonicalize(worktree_path).ok();
+        let mut latest_match: Option<(std::time::SystemTime, String)> = None;
+        let mut latest_any: Option<(std::time::SystemTime, String)> = None;
+        let mut stack = vec![root];
 
-    while let Some(dir) = stack.pop() {
-        let entries = match fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(_) => continue,
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let metadata = match entry.metadata() {
-                Ok(metadata) => metadata,
+        while let Some(dir) = stack.pop() {
+            let entries = match fs::read_dir(&dir) {
+                Ok(entries) => entries,
                 Err(_) => continue,
             };
-            if metadata.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
-                continue;
-            }
-            let modified = metadata
-                .modified()
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-            let Some((id, cwd)) = parse_codex_session_meta(&path) else {
-                continue;
-            };
-            let should_update_any = latest_any
-                .as_ref()
-                .map(|(time, _)| modified > *time)
-                .unwrap_or(true);
-            if should_update_any {
-                latest_any = Some((modified, id.clone()));
-            }
-
-            if let Some(cwd) = cwd {
-                let matches_target = if cwd == target_str {
-                    true
-                } else {
-                    let cwd_path = PathBuf::from(&cwd);
-                    match (fs::canonicalize(&cwd_path).ok(), target_canon.as_ref()) {
-                        (Some(cwd_canon), Some(target_canon)) => cwd_canon == *target_canon,
-                        _ => false,
-                    }
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let metadata = match entry.metadata() {
+                    Ok(metadata) => metadata,
+                    Err(_) => continue,
                 };
-                if matches_target {
-                    let should_update_match = latest_match
-                        .as_ref()
-                        .map(|(time, _)| modified > *time)
-                        .unwrap_or(true);
-                    if should_update_match {
-                        latest_match = Some((modified, id));
+                if metadata.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                let modified = metadata
+                    .modified()
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                let Some((id, cwd)) = parse_codex_session_meta(&path) else {
+                    continue;
+                };
+                let should_update_any = latest_any
+                    .as_ref()
+                    .map(|(time, _)| modified > *time)
+                    .unwrap_or(true);
+                if should_update_any {
+                    latest_any = Some((modified, id.clone()));
+                }
+
+                if let Some(cwd) = cwd {
+                    let matches_target = if cwd == target_str {
+                        true
+                    } else {
+                        let cwd_path = PathBuf::from(&cwd);
+                        match (fs::canonicalize(&cwd_path).ok(), target_canon.as_ref()) {
+                            (Some(cwd_canon), Some(target_canon)) => cwd_canon == *target_canon,
+                            _ => false,
+                        }
+                    };
+                    if matches_target {
+                        let should_update_match = latest_match
+                            .as_ref()
+                            .map(|(time, _)| modified > *time)
+                            .unwrap_or(true);
+                        if should_update_match {
+                            latest_match = Some((modified, id));
+                        }
                     }
                 }
             }
         }
+
+        if let Some((_, session_id)) = latest_match.or(latest_any) {
+            return Some(session_id);
+        }
     }
 
-    latest_match
-        .or(latest_any)
-        .map(|(_, session_id)| session_id)
+    // Fallback: Use history.jsonl (returns latest session regardless of project)
+    get_latest_codex_session_id(home)
 }
 
 fn detect_claude_session_id_at(home: &Path, worktree_path: &Path) -> Option<String> {
+    // Primary: Use history.jsonl which has accurate project -> sessionId mapping
+    if let Some(session_id) = get_latest_claude_session_id(home, worktree_path) {
+        return Some(session_id);
+    }
+
+    // Fallback: Scan projects/ directory (legacy behavior)
     let project_dir = home
         .join(".claude")
         .join("projects")
@@ -1369,6 +1618,21 @@ mod tests {
             skip_permissions: true,
             env: Vec::new(),
             env_remove: Vec::new(),
+            auto_install_deps: false,
+        }
+    }
+
+    fn sample_update_context(path: PathBuf) -> SessionUpdateContext {
+        SessionUpdateContext {
+            worktree_path: path,
+            branch_name: "feature/test".to_string(),
+            agent_id: "codex-cli".to_string(),
+            agent_label: "Codex CLI".to_string(),
+            version: "latest".to_string(),
+            model: None,
+            mode: ExecutionMode::Continue.label().to_string(),
+            reasoning_level: None,
+            skip_permissions: false,
         }
     }
 
@@ -1405,6 +1669,12 @@ mod tests {
     }
 
     #[test]
+    fn test_build_launching_message() {
+        let config = sample_config(CodingAgent::CodexCli);
+        assert_eq!(build_launching_message(&config), "Launching Codex CLI...");
+    }
+
+    #[test]
     fn test_build_launch_log_lines_codex() {
         let mut config = sample_config(CodingAgent::CodexCli);
         config.model = None;
@@ -1424,7 +1694,6 @@ mod tests {
                 package_spec: "@openai/codex@latest".to_string(),
             },
         );
-        assert!(lines.contains(&"Launching Codex CLI...".to_string()));
         assert!(lines.contains(&"Working directory: /tmp/worktree".to_string()));
         assert!(lines.contains(&"Model: gpt-5.2-codex".to_string()));
         assert!(lines.contains(&"Reasoning: high".to_string()));
@@ -1456,6 +1725,44 @@ mod tests {
         assert!(lines.contains(&"Model: sonnet".to_string()));
         assert!(!lines.iter().any(|line| line.starts_with("Reasoning: ")));
         assert!(lines.contains(&"Using locally installed claude".to_string()));
+    }
+
+    #[test]
+    fn test_session_updater_stop_is_fast() {
+        let temp = TempDir::new().unwrap();
+        let context = sample_update_context(temp.path().to_path_buf());
+        let updater = spawn_session_updater(context, Duration::from_secs(30));
+        let started = Instant::now();
+        updater.stop();
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn test_should_warn_skip_install_detects_missing_node_modules() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("package.json"), "{}").unwrap();
+
+        let pm = should_warn_skip_install(temp.path());
+        assert_eq!(pm, Some("npm"));
+    }
+
+    #[test]
+    fn test_should_warn_skip_install_returns_none_when_installed() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("package.json"), "{}").unwrap();
+        fs::create_dir_all(temp.path().join("node_modules")).unwrap();
+
+        let pm = should_warn_skip_install(temp.path());
+        assert!(pm.is_none());
+    }
+
+    #[test]
+    fn test_skip_install_warning_message_formats() {
+        let message = skip_install_warning_message("npm");
+        assert_eq!(
+            message,
+            "Auto install disabled. Skipping dependency install. Run \"npm install\" if needed or set GWT_AGENT_AUTO_INSTALL_DEPS=true."
+        );
     }
 
     #[test]

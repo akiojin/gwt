@@ -61,6 +61,19 @@ impl WorktreeManager {
         Ok(worktrees)
     }
 
+    /// List all worktrees without checking git status (fast path)
+    pub fn list_basic(&self) -> Result<Vec<Worktree>> {
+        let git_worktrees = self.repo.list_worktrees()?;
+        let mut worktrees = Vec::with_capacity(git_worktrees.len());
+
+        for info in &git_worktrees {
+            let wt = Worktree::from_git_info(info);
+            worktrees.push(wt);
+        }
+
+        Ok(worktrees)
+    }
+
     /// Get a specific worktree by branch name
     pub fn get_by_branch(&self, branch_name: &str) -> Result<Option<Worktree>> {
         let worktrees = self.list()?;

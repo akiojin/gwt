@@ -3,6 +3,37 @@
 **仕様ID**: `SPEC-d2f4762a`
 **ポリシー**: CLAUDE.md の TDD ルールに基づき、必ず RED→GREEN→リグレッションチェックの順に進める。
 
+## 追加作業: 起動時の完全非同期取得と進捗表示 (2026-01-16)
+
+- [x] **T9945** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` に起動時の完全非同期取得と進捗表示の要件・方針を追記
+- [x] **T9946** [Test] `crates/gwt-cli/src/tui/screens/branch_list.rs` に一覧取得中の進捗表示（`Status: Loading branch list...`）と状態更新進捗（`Status: Updating branch status (done/total)`）の表示テストを追加
+- [x] **T9947** [Test] `crates/gwt-cli/src/tui/app.rs` に起動直後の一覧取得が非同期であり、UIをブロックしないことを確認するテストを追加
+- [x] **T9948** [実装] `crates/gwt-cli/src/tui/screens/branch_list.rs` に一覧取得中のローディング表示と進捗表示用の状態/描画を追加する
+- [x] **T9949** [実装] `crates/gwt-cli/src/tui/app.rs` でブランチ一覧取得も含めてバックグラウンド更新を開始し、完了したブランチから順次反映する
+- [x] **T9950** [実装] `crates/gwt-cli/src/tui/app.rs` で`r`キーによる再取得時に進行中の一覧取得/状態更新を無効化し、最新更新のみ反映する
+- [ ] **T9951** `cargo test -p gwt-cli` と `cargo build --release` を実行し、失敗がないことを確認する
+  - `cargo test -p gwt-cli` が依存クレート解決エラー（gix-transport で `can't find crate`）で失敗
+
+## 追加作業: 依存インストールの非ブロッキング化 (2026-01-16)
+
+- [x] **T9952** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` に依存インストール無効化の要件・方針を追記
+- [x] **T9953** [Test] `crates/gwt-cli/src/main.rs` に自動インストール無効時の警告と起動継続を確認するテストを追加
+- [x] **T9954** [Impl] `crates/gwt-core/src/config/settings.rs` に `agent.auto_install_deps` を追加し、デフォルトを `false` に設定
+- [x] **T9955** [Impl] `crates/gwt-cli/src/main.rs` の依存インストールを設定/環境変数で制御し、無効時は警告のみ表示して即起動する
+- [x] **T9956** `cargo test -p gwt-cli` と `cargo build --release` を実行し、失敗がないことを確認する
+
+## 追加作業: 設定画面の補足表示 (2026-01-16)
+
+- [x] **T9957** [Impl] `crates/gwt-cli/src/tui/screens/settings.rs` に選択中項目の説明エリアを追加
+- [x] **T9958** [Impl] 自動インストール無効時の警告メッセージを簡潔に改善
+
+## 追加作業: 出力検証の自動テスト (2026-01-16)
+
+- [x] **T9959** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` に出力検証の自動テスト要件・方針を追記
+- [x] **T9960** [Test] `crates/gwt-cli/src/main.rs` に自動インストール無効時の警告文を検証するユニットテストを追加
+- [x] **T9961** [Test] `crates/gwt-cli/src/tui/screens/settings.rs` に設定画面のDescription文言を検証するユニットテストを追加
+- [x] **T9962** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
+
 ## 追加作業: Rust版キーバインド整合 (2026-01-13)
 
 - [x] **T9901** [P] [US0] `specs/SPEC-d2f4762a/spec.md` から `n` キー記述を削除し、ウィザード手順を整理

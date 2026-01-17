@@ -8,6 +8,7 @@ use figment::{
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use tracing::{debug, error, info};
 
 /// Application settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,25 +85,62 @@ pub struct AgentSettings {
     pub codex_path: Option<PathBuf>,
     /// Gemini CLI path
     pub gemini_path: Option<PathBuf>,
+    /// Auto install dependencies before launching agent
+    pub auto_install_deps: bool,
 }
 
 impl Settings {
     /// Load settings from configuration files and environment
     pub fn load(repo_root: &Path) -> Result<Self> {
+        debug!(
+            category = "config",
+            repo_root = %repo_root.display(),
+            "Loading settings"
+        );
+
         auto_migrate(repo_root)?;
         let config_path = Self::find_config_file(repo_root);
 
         let mut figment = Figment::new().merge(Toml::string(&Self::default_toml()));
 
-        if let Some(path) = config_path {
+        if let Some(ref path) = config_path {
+            debug!(
+                category = "config",
+                config_path = %path.display(),
+                "Merging config file"
+            );
             figment = figment.merge(Toml::file(path));
         }
 
         figment = figment.merge(Env::prefixed("GWT_").split("_"));
 
-        figment.extract().map_err(|e| GwtError::ConfigParseError {
-            reason: e.to_string(),
-        })
+        let mut settings: Settings = figment.extract().map_err(|e| {
+            error!(
+                category = "config",
+                error = %e,
+                "Failed to parse config"
+            );
+            GwtError::ConfigParseError {
+                reason: e.to_string(),
+            }
+        })?;
+
+        if let Ok(value) = std::env::var("GWT_AGENT_AUTO_INSTALL_DEPS") {
+            if let Some(parsed) = parse_env_bool(&value) {
+                settings.agent.auto_install_deps = parsed;
+            }
+        }
+
+        info!(
+            category = "config",
+            operation = "load",
+            config_path = config_path.as_ref().map(|p| p.display().to_string()).as_deref(),
+            debug = settings.debug,
+            worktree_root = %settings.worktree_root,
+            "Settings loaded"
+        );
+
+        Ok(settings)
     }
 
     /// Get default TOML configuration
@@ -112,6 +150,12 @@ impl Settings {
 
     /// Find the configuration file
     pub fn find_config_file(repo_root: &Path) -> Option<PathBuf> {
+        debug!(
+            category = "config",
+            repo_root = %repo_root.display(),
+            "Searching for config file"
+        );
+
         // Priority: .gwt.toml > .gwt/config.toml > ~/.config/gwt/config.toml
         let candidates = [
             repo_root.join(".gwt.toml"),
@@ -120,6 +164,11 @@ impl Settings {
 
         for path in candidates {
             if path.exists() {
+                debug!(
+                    category = "config",
+                    config_path = %path.display(),
+                    "Found local config file"
+                );
                 return Some(path);
             }
         }
@@ -128,10 +177,20 @@ impl Settings {
         if let Some(config_dir) = directories::ProjectDirs::from("", "", "gwt") {
             let global_config = config_dir.config_dir().join("config.toml");
             if global_config.exists() {
+                debug!(
+                    category = "config",
+                    config_path = %global_config.display(),
+                    "Found global config file"
+                );
                 return Some(global_config);
             }
         }
 
+        debug!(
+            category = "config",
+            repo_root = %repo_root.display(),
+            "No config file found, using defaults"
+        );
         None
     }
 
@@ -163,8 +222,22 @@ impl Settings {
 
     /// Save settings to file
     pub fn save(&self, path: &Path) -> Result<()> {
-        let content = toml::to_string_pretty(self).map_err(|e| GwtError::ConfigWriteError {
-            reason: e.to_string(),
+        debug!(
+            category = "config",
+            path = %path.display(),
+            "Saving settings"
+        );
+
+        let content = toml::to_string_pretty(self).map_err(|e| {
+            error!(
+                category = "config",
+                path = %path.display(),
+                error = %e,
+                "Failed to serialize settings"
+            );
+            GwtError::ConfigWriteError {
+                reason: e.to_string(),
+            }
         })?;
 
         if let Some(parent) = path.parent() {
@@ -172,19 +245,47 @@ impl Settings {
         }
 
         std::fs::write(path, content)?;
+
+        info!(
+            category = "config",
+            operation = "save",
+            path = %path.display(),
+            "Settings saved"
+        );
         Ok(())
     }
 
     /// Create default config file
     pub fn create_default(path: &Path) -> Result<Self> {
+        debug!(
+            category = "config",
+            path = %path.display(),
+            "Creating default config"
+        );
+
         let settings = Self::default();
         settings.save(path)?;
+
+        info!(
+            category = "config",
+            operation = "create_default",
+            path = %path.display(),
+            "Default config created"
+        );
         Ok(settings)
     }
 
     /// Check if a branch is protected
     pub fn is_branch_protected(&self, branch: &str) -> bool {
         self.protected_branches.iter().any(|p| p == branch)
+    }
+}
+
+fn parse_env_bool(value: &str) -> Option<bool> {
+    match value.trim().to_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
     }
 }
 
@@ -265,5 +366,16 @@ mod tests {
         std::env::remove_var("GWT_DEBUG");
 
         assert!(settings.debug);
+    }
+
+    #[test]
+    fn test_env_override_auto_install_deps() {
+        let temp = TempDir::new().unwrap();
+
+        std::env::set_var("GWT_AGENT_AUTO_INSTALL_DEPS", "true");
+        let settings = Settings::load(temp.path()).unwrap();
+        std::env::remove_var("GWT_AGENT_AUTO_INSTALL_DEPS");
+
+        assert!(settings.agent.auto_install_deps);
     }
 }

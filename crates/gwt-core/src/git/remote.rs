@@ -3,6 +3,7 @@
 use crate::error::{GwtError, Result};
 use std::path::Path;
 use std::process::Command;
+use tracing::{debug, error, info};
 
 /// Represents a Git remote
 #[derive(Debug, Clone)]
@@ -28,6 +29,12 @@ impl Remote {
 
     /// List all remotes in a repository
     pub fn list(repo_path: &Path) -> Result<Vec<Remote>> {
+        debug!(
+            category = "git",
+            repo_path = %repo_path.display(),
+            "Listing remotes"
+        );
+
         let output = Command::new("git")
             .args(["remote", "-v"])
             .current_dir(repo_path)
@@ -75,6 +82,13 @@ impl Remote {
             }
         }
 
+        debug!(
+            category = "git",
+            repo_path = %repo_path.display(),
+            remote_count = remotes.len(),
+            "Remotes listed"
+        );
+
         Ok(remotes)
     }
 
@@ -86,6 +100,14 @@ impl Remote {
 
     /// Fetch this remote
     pub fn fetch(repo_path: &Path, name: &str, prune: bool) -> Result<()> {
+        debug!(
+            category = "git",
+            repo_path = %repo_path.display(),
+            remote = name,
+            prune,
+            "Fetching remote"
+        );
+
         let mut args = vec!["fetch", name];
         if prune {
             args.push("--prune");
@@ -101,17 +123,38 @@ impl Remote {
             })?;
 
         if output.status.success() {
+            info!(
+                category = "git",
+                operation = "fetch",
+                remote = name,
+                prune,
+                "Remote fetched successfully"
+            );
             Ok(())
         } else {
+            let err_msg = String::from_utf8_lossy(&output.stderr).to_string();
+            error!(
+                category = "git",
+                remote = name,
+                error = err_msg.as_str(),
+                "Failed to fetch remote"
+            );
             Err(GwtError::GitOperationFailed {
                 operation: format!("fetch {name}"),
-                details: String::from_utf8_lossy(&output.stderr).to_string(),
+                details: err_msg,
             })
         }
     }
 
     /// Fetch all remotes
     pub fn fetch_all(repo_path: &Path, prune: bool) -> Result<()> {
+        debug!(
+            category = "git",
+            repo_path = %repo_path.display(),
+            prune,
+            "Fetching all remotes"
+        );
+
         let mut args = vec!["fetch", "--all"];
         if prune {
             args.push("--prune");
@@ -127,17 +170,38 @@ impl Remote {
             })?;
 
         if output.status.success() {
+            info!(
+                category = "git",
+                operation = "fetch_all",
+                prune,
+                "All remotes fetched successfully"
+            );
             Ok(())
         } else {
+            let err_msg = String::from_utf8_lossy(&output.stderr).to_string();
+            error!(
+                category = "git",
+                error = err_msg.as_str(),
+                "Failed to fetch all remotes"
+            );
             Err(GwtError::GitOperationFailed {
                 operation: "fetch --all".to_string(),
-                details: String::from_utf8_lossy(&output.stderr).to_string(),
+                details: err_msg,
             })
         }
     }
 
     /// Push a branch to a remote
     pub fn push(repo_path: &Path, name: &str, branch: &str, set_upstream: bool) -> Result<()> {
+        debug!(
+            category = "git",
+            repo_path = %repo_path.display(),
+            remote = name,
+            branch,
+            set_upstream,
+            "Pushing to remote"
+        );
+
         let mut args = vec!["push"];
         if set_upstream {
             args.push("-u");
@@ -155,11 +219,27 @@ impl Remote {
             })?;
 
         if output.status.success() {
+            info!(
+                category = "git",
+                operation = "push",
+                remote = name,
+                branch,
+                set_upstream,
+                "Pushed to remote successfully"
+            );
             Ok(())
         } else {
+            let err_msg = String::from_utf8_lossy(&output.stderr).to_string();
+            error!(
+                category = "git",
+                remote = name,
+                branch,
+                error = err_msg.as_str(),
+                "Failed to push to remote"
+            );
             Err(GwtError::GitOperationFailed {
                 operation: format!("push {name}"),
-                details: String::from_utf8_lossy(&output.stderr).to_string(),
+                details: err_msg,
             })
         }
     }
@@ -172,6 +252,14 @@ impl Remote {
 
     /// Add a new remote
     pub fn add(repo_path: &Path, name: &str, url: &str) -> Result<Remote> {
+        debug!(
+            category = "git",
+            repo_path = %repo_path.display(),
+            remote = name,
+            url,
+            "Adding remote"
+        );
+
         let output = Command::new("git")
             .args(["remote", "add", name, url])
             .current_dir(repo_path)
@@ -182,17 +270,39 @@ impl Remote {
             })?;
 
         if output.status.success() {
+            info!(
+                category = "git",
+                operation = "remote_add",
+                remote = name,
+                url,
+                "Remote added successfully"
+            );
             Ok(Remote::new(name, url))
         } else {
+            let err_msg = String::from_utf8_lossy(&output.stderr).to_string();
+            error!(
+                category = "git",
+                remote = name,
+                url,
+                error = err_msg.as_str(),
+                "Failed to add remote"
+            );
             Err(GwtError::GitOperationFailed {
                 operation: format!("remote add {name}"),
-                details: String::from_utf8_lossy(&output.stderr).to_string(),
+                details: err_msg,
             })
         }
     }
 
     /// Remove a remote
     pub fn remove(repo_path: &Path, name: &str) -> Result<()> {
+        debug!(
+            category = "git",
+            repo_path = %repo_path.display(),
+            remote = name,
+            "Removing remote"
+        );
+
         let output = Command::new("git")
             .args(["remote", "remove", name])
             .current_dir(repo_path)
@@ -203,11 +313,24 @@ impl Remote {
             })?;
 
         if output.status.success() {
+            info!(
+                category = "git",
+                operation = "remote_remove",
+                remote = name,
+                "Remote removed successfully"
+            );
             Ok(())
         } else {
+            let err_msg = String::from_utf8_lossy(&output.stderr).to_string();
+            error!(
+                category = "git",
+                remote = name,
+                error = err_msg.as_str(),
+                "Failed to remove remote"
+            );
             Err(GwtError::GitOperationFailed {
                 operation: format!("remote remove {name}"),
-                details: String::from_utf8_lossy(&output.stderr).to_string(),
+                details: err_msg,
             })
         }
     }
