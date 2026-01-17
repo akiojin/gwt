@@ -256,12 +256,15 @@ pub fn render_logs(state: &LogsState, frame: &mut Frame, area: Rect) {
         }
     }
 
+    // Search bar height: 3 when searching, 0 otherwise
+    let search_bar_height = if state.is_searching { 3 } else { 0 };
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Header/Filter
-            Constraint::Min(0),    // Log entries
-            Constraint::Length(3), // Instructions or search
+            Constraint::Length(3),                 // Header/Filter
+            Constraint::Min(0),                    // Log entries
+            Constraint::Length(search_bar_height), // Search bar (only when searching)
         ])
         .split(area);
 
@@ -271,11 +274,9 @@ pub fn render_logs(state: &LogsState, frame: &mut Frame, area: Rect) {
     // Log entries
     render_entries(state, frame, chunks[1]);
 
-    // Instructions or search bar
+    // Search bar (only when searching)
     if state.is_searching {
         render_search_bar(state, frame, chunks[2]);
-    } else {
-        render_instructions(frame, chunks[2]);
     }
 }
 
@@ -288,7 +289,7 @@ fn render_header(state: &LogsState, frame: &mut Frame, area: Rect) {
         state.filter.name()
     );
 
-    let header = Paragraph::new("").block(Block::default().borders(Borders::ALL).title(title));
+    let header = Paragraph::new("").block(Block::default().borders(Borders::BOTTOM).title(title));
     frame.render_widget(header, area);
 }
 
@@ -399,14 +400,6 @@ fn render_search_bar(state: &LogsState, frame: &mut Frame, area: Rect) {
         area.x + state.search.len() as u16 + 1,
         area.y + 1,
     ));
-}
-
-fn render_instructions(frame: &mut Frame, area: Rect) {
-    let instructions =
-        "[Up/Down] Navigate | [Enter] Detail | [c] Copy | [f] Filter | [/] Search | [Esc] Back";
-    let paragraph =
-        Paragraph::new(format!(" {} ", instructions)).block(Block::default().borders(Borders::ALL));
-    frame.render_widget(paragraph, area);
 }
 
 fn render_detail_view(entry: &LogEntry, frame: &mut Frame, area: Rect) {

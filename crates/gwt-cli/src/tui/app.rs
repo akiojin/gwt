@@ -1519,8 +1519,11 @@ impl Model {
         let inner_width = frame.area().width.saturating_sub(2) as usize; // borders
         let footer_height = if footer_text_len > inner_width { 4 } else { 3 };
 
-        // Profiles and Environment screens don't need header
-        let needs_header = !matches!(base_screen, Screen::Profiles | Screen::Environment);
+        // Profiles, Environment, and Logs screens don't need header
+        let needs_header = !matches!(
+            base_screen,
+            Screen::Profiles | Screen::Environment | Screen::Logs
+        );
         let header_height = if needs_header { 6 } else { 0 };
 
         let chunks = Layout::default()
@@ -1713,7 +1716,7 @@ impl Model {
             }
             Screen::WorktreeCreate => "[Enter] Next | [Esc] Back",
             Screen::Settings => "[Tab] Category | [Esc] Back",
-            Screen::Logs => "[f] Filter | [/] Search | [Esc] Back",
+            Screen::Logs => "[Up/Down] Navigate | [Enter] Detail | [c] Copy | [f] Filter | [/] Search | [Esc] Back",
             Screen::Help => "[Esc] Close | [Up/Down] Scroll",
             Screen::Confirm => "[Left/Right] Select | [Enter] Confirm | [Esc] Cancel",
             Screen::Error => "[Enter/Esc] Close | [Up/Down] Scroll",
