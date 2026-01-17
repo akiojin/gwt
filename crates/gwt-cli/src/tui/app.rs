@@ -1504,7 +1504,7 @@ impl Model {
             .constraints([
                 Constraint::Length(6), // Boxed header (title + 4 lines + borders)
                 Constraint::Min(0),    // Content
-                Constraint::Length(3), // Footer
+                Constraint::Length(4), // Footer (2 lines + borders)
             ])
             .split(frame.area());
 
@@ -1732,6 +1732,7 @@ impl Model {
 
         let footer = Paragraph::new(footer_text)
             .style(style)
+            .wrap(Wrap { trim: true })
             .block(Block::default().borders(Borders::ALL));
         frame.render_widget(footer, area);
     }
@@ -2067,7 +2068,7 @@ pub fn run_with_context(
                             }
                         }
                         (KeyCode::Char(' '), _) => {
-                            if matches!(model.screen, Screen::BranchList) {
+                            if matches!(model.screen, Screen::BranchList | Screen::Profiles) {
                                 Some(Message::Space)
                             } else {
                                 Some(Message::Char(' '))
