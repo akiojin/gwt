@@ -95,9 +95,24 @@
   - release/YYYYMMDD-HHMMSS ブランチから main への PR を作成
 - Release PR が main にマージされると `.github/workflows/release.yml` が以下を自動実行:
   - タグ・GitHub Release を作成
-  - crates.io へ公開（Trusted Publishing）
   - クロスコンパイル済みバイナリを GitHub Release にアップロード
   - npm へ公開（provenance 付き）
+
+## パッケージ公開状況
+
+> **重要**: 各プラットフォームのバージョンは独立して管理されており、一度公開したバージョンは再利用不可。リリース前に必ず各プラットフォームの最新バージョンを確認すること。
+
+| プラットフォーム | パッケージ名 | 確認コマンド |
+| -------------- | ----------- | ----------- |
+| npmjs | `@akiojin/gwt` | `npm view @akiojin/gwt version` |
+| GitHub Release | - | `gh release list --repo akiojin/gwt --limit 1` |
+
+### 次回リリース時の注意
+
+- 各プラットフォームのバージョンは一度公開すると再利用不可
+- リリース前に上記の確認コマンドで最新バージョンをチェックすること
+- npm の `latest` タグが古いバージョンを指している場合は手動で修正が必要:
+  `npm dist-tag add @akiojin/gwt@<version> latest`
 
 ## 使用中の技術
 

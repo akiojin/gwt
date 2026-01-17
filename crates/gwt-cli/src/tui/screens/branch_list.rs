@@ -211,6 +211,52 @@ impl BranchItem {
         item
     }
 
+    pub fn from_branch_minimal(branch: &Branch, worktrees: &[Worktree]) -> Self {
+        let worktree = worktrees.iter().find(|wt| {
+            wt.branch
+                .as_ref()
+                .map(|b| b == &branch.name)
+                .unwrap_or(false)
+        });
+
+        let branch_type = if branch.name.starts_with("remotes/") {
+            BranchType::Remote
+        } else {
+            BranchType::Local
+        };
+
+        let mut item = Self {
+            name: branch.name.clone(),
+            branch_type,
+            is_current: branch.is_current,
+            has_worktree: worktree.is_some(),
+            worktree_path: worktree.map(|wt| wt.path.display().to_string()),
+            worktree_status: if worktree.is_some() {
+                WorktreeStatus::Active
+            } else {
+                WorktreeStatus::None
+            },
+            has_changes: false,
+            has_unpushed: false,
+            divergence: DivergenceStatus::UpToDate,
+            has_remote_counterpart: branch.has_remote,
+            remote_name: if branch.name.starts_with("remotes/") {
+                Some(branch.name.clone())
+            } else {
+                None
+            },
+            safe_to_cleanup: None,
+            safety_status: SafetyStatus::Unknown,
+            is_unmerged: false,
+            last_commit_timestamp: branch.commit_timestamp,
+            last_tool_usage: None,
+            is_selected: false,
+            pr_title: None,
+        };
+        item.update_safety_status();
+        item
+    }
+
     pub fn update_safety_status(&mut self) {
         self.safety_status = if self.branch_type == BranchType::Remote {
             SafetyStatus::Unknown
@@ -291,6 +337,9 @@ pub struct BranchListState {
     pub active_profile: Option<String>,
     pub spinner_frame: usize,
     pub filter_cache_version: u64,
+    pub status_progress_total: usize,
+    pub status_progress_done: usize,
+    pub status_progress_active: bool,
 }
 
 impl BranchListState {
@@ -612,6 +661,56 @@ impl BranchListState {
                 item.update_safety_status();
             }
         }
+    }
+
+    pub fn apply_worktree_update(
+        &mut self,
+        branch_name: &str,
+        worktree_status: WorktreeStatus,
+        has_changes: bool,
+    ) {
+        if let Some(item) = self.branches.iter_mut().find(|b| b.name == branch_name) {
+            let prev_changes = item.has_changes;
+            item.worktree_status = worktree_status;
+            item.has_changes = has_changes;
+            item.update_safety_status();
+
+            if prev_changes != has_changes {
+                if has_changes {
+                    self.stats.changes_count = self.stats.changes_count.saturating_add(1);
+                } else {
+                    self.stats.changes_count = self.stats.changes_count.saturating_sub(1);
+                }
+            }
+        }
+    }
+
+    pub fn reset_status_progress(&mut self, total: usize) {
+        self.status_progress_total = total;
+        self.status_progress_done = 0;
+        self.status_progress_active = total > 0;
+    }
+
+    pub fn increment_status_progress(&mut self) {
+        if !self.status_progress_active {
+            return;
+        }
+        if self.status_progress_done < self.status_progress_total {
+            self.status_progress_done += 1;
+        }
+        if self.status_progress_done >= self.status_progress_total {
+            self.status_progress_active = false;
+        }
+    }
+
+    pub fn status_progress_line(&self) -> Option<String> {
+        if !self.status_progress_active {
+            return None;
+        }
+        Some(format!(
+            "Status: Updating branch status ({}/{})",
+            self.status_progress_done, self.status_progress_total
+        ))
     }
 
     /// Set loading state
@@ -962,6 +1061,33 @@ fn render_worktree_path(
         return;
     }
 
+    if state.is_loading {
+        let line = Line::from(vec![
+            Span::styled(
+                format!("{} ", state.spinner_char()),
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::styled(
+                "Status: Loading branch list...",
+                Style::default().fg(Color::Yellow),
+            ),
+        ]);
+        frame.render_widget(Paragraph::new(line), area);
+        return;
+    }
+
+    if let Some(progress) = state.status_progress_line() {
+        let line = Line::from(vec![
+            Span::styled(
+                format!("{} ", state.spinner_char()),
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::styled(progress, Style::default().fg(Color::Yellow)),
+        ]);
+        frame.render_widget(Paragraph::new(line), area);
+        return;
+    }
+
     // Otherwise, show worktree path (FR-004a, FR-004b, FR-004c)
     let path = if let Some(branch) = state.selected_branch() {
         if let Some(wt_path) = &branch.worktree_path {
@@ -1129,6 +1255,68 @@ mod tests {
         assert_eq!(buffer[(19, 0)].symbol(), "┐");
         assert_eq!(buffer[(0, 4)].symbol(), "└");
         assert_eq!(buffer[(19, 4)].symbol(), "┘");
+    }
+
+    #[test]
+    fn test_status_progress_line_renders() {
+        let branches = vec![BranchItem {
+            name: "main".to_string(),
+            branch_type: BranchType::Local,
+            is_current: true,
+            has_worktree: true,
+            worktree_path: Some("/path".to_string()),
+            worktree_status: WorktreeStatus::Active,
+            has_changes: false,
+            has_unpushed: false,
+            divergence: DivergenceStatus::UpToDate,
+            has_remote_counterpart: true,
+            remote_name: None,
+            safe_to_cleanup: Some(true),
+            safety_status: SafetyStatus::Safe,
+            is_unmerged: false,
+            last_commit_timestamp: None,
+            last_tool_usage: None,
+            is_selected: false,
+            pr_title: None,
+        }];
+
+        let mut state = BranchListState::new().with_branches(branches);
+        state.reset_status_progress(5);
+        state.increment_status_progress();
+
+        let backend = TestBackend::new(60, 5);
+        let mut terminal = Terminal::new(backend).expect("terminal init");
+
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render_branch_list(&state, f, area, None);
+            })
+            .expect("draw");
+
+        let buffer = terminal.backend().buffer();
+        let line: String = (0..60).map(|x| buffer[(x, 4)].symbol()).collect();
+        assert!(line.contains("Status: Updating branch status (1/5)"));
+    }
+
+    #[test]
+    fn test_loading_status_line_renders() {
+        let mut state = BranchListState::new();
+        state.set_loading(true);
+
+        let backend = TestBackend::new(60, 5);
+        let mut terminal = Terminal::new(backend).expect("terminal init");
+
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render_branch_list(&state, f, area, None);
+            })
+            .expect("draw");
+
+        let buffer = terminal.backend().buffer();
+        let line: String = (0..60).map(|x| buffer[(x, 4)].symbol()).collect();
+        assert!(line.contains("Status: Loading branch list..."));
     }
 
     #[test]

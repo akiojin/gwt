@@ -2,6 +2,7 @@
 
 #![allow(dead_code)] // Screen components for future use
 
+use chrono::{DateTime, Local};
 use ratatui::{prelude::*, widgets::*};
 use serde_json;
 
@@ -35,6 +36,33 @@ impl LogEntry {
         }
 
         serde_json::to_string_pretty(&json).unwrap_or_else(|_| format!("{:?}", self))
+    }
+}
+
+/// Convert ISO 8601 UTC timestamp to local time display string (HH:MM:SS)
+fn format_timestamp_local(timestamp: &str) -> String {
+    if let Ok(utc_time) = DateTime::parse_from_rfc3339(timestamp) {
+        let local_time: DateTime<Local> = utc_time.with_timezone(&Local);
+        local_time.format("%H:%M:%S").to_string()
+    } else {
+        // Fallback: extract HH:MM:SS from string
+        if let Some(t_pos) = timestamp.find('T') {
+            let time_part = &timestamp[t_pos + 1..];
+            if time_part.len() >= 8 {
+                return time_part[..8].to_string();
+            }
+        }
+        timestamp.to_string()
+    }
+}
+
+/// Format full timestamp for detail view (YYYY-MM-DD HH:MM:SS TZ)
+fn format_full_timestamp_local(timestamp: &str) -> String {
+    if let Ok(utc_time) = DateTime::parse_from_rfc3339(timestamp) {
+        let local_time: DateTime<Local> = utc_time.with_timezone(&Local);
+        local_time.format("%Y-%m-%d %H:%M:%S %Z").to_string()
+    } else {
+        timestamp.to_string()
     }
 }
 
@@ -228,12 +256,15 @@ pub fn render_logs(state: &LogsState, frame: &mut Frame, area: Rect) {
         }
     }
 
+    // Search bar height: 3 when searching, 0 otherwise
+    let search_bar_height = if state.is_searching { 3 } else { 0 };
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Header/Filter
-            Constraint::Min(0),    // Log entries
-            Constraint::Length(3), // Instructions or search
+            Constraint::Length(3),                 // Header/Filter
+            Constraint::Min(0),                    // Log entries
+            Constraint::Length(search_bar_height), // Search bar (only when searching)
         ])
         .split(area);
 
@@ -243,11 +274,9 @@ pub fn render_logs(state: &LogsState, frame: &mut Frame, area: Rect) {
     // Log entries
     render_entries(state, frame, chunks[1]);
 
-    // Instructions or search bar
+    // Search bar (only when searching)
     if state.is_searching {
         render_search_bar(state, frame, chunks[2]);
-    } else {
-        render_instructions(frame, chunks[2]);
     }
 }
 
@@ -260,7 +289,7 @@ fn render_header(state: &LogsState, frame: &mut Frame, area: Rect) {
         state.filter.name()
     );
 
-    let header = Paragraph::new("").block(Block::default().borders(Borders::ALL).title(title));
+    let header = Paragraph::new("").block(Block::default().borders(Borders::BOTTOM).title(title));
     frame.render_widget(header, area);
 }
 
@@ -322,22 +351,8 @@ fn render_log_entry(entry: &LogEntry, is_selected: bool) -> ListItem<'static> {
         _ => Style::default(),
     };
 
-    // Extract time part from timestamp if possible
-    let time_display = if entry.timestamp.len() >= 8 {
-        // Try to extract HH:MM:SS from ISO timestamp
-        if let Some(t_pos) = entry.timestamp.find('T') {
-            let time_part = &entry.timestamp[t_pos + 1..];
-            if time_part.len() >= 8 {
-                time_part[..8].to_string()
-            } else {
-                entry.timestamp.clone()
-            }
-        } else {
-            entry.timestamp.clone()
-        }
-    } else {
-        entry.timestamp.clone()
-    };
+    // Convert UTC timestamp to local time
+    let time_display = format_timestamp_local(&entry.timestamp);
 
     let spans = vec![
         Span::styled(
@@ -387,14 +402,6 @@ fn render_search_bar(state: &LogsState, frame: &mut Frame, area: Rect) {
     ));
 }
 
-fn render_instructions(frame: &mut Frame, area: Rect) {
-    let instructions =
-        "[Up/Down] Navigate | [Enter] Detail | [c] Copy | [f] Filter | [/] Search | [Esc] Back";
-    let paragraph =
-        Paragraph::new(format!(" {} ", instructions)).block(Block::default().borders(Borders::ALL));
-    frame.render_widget(paragraph, area);
-}
-
 fn render_detail_view(entry: &LogEntry, frame: &mut Frame, area: Rect) {
     let level_style = match entry.level.as_str() {
         "ERROR" => Style::default().fg(Color::Red),
@@ -408,7 +415,7 @@ fn render_detail_view(entry: &LogEntry, frame: &mut Frame, area: Rect) {
     let mut lines = vec![
         Line::from(vec![
             Span::styled("Timestamp: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(&entry.timestamp),
+            Span::raw(format_full_timestamp_local(&entry.timestamp)),
         ]),
         Line::from(vec![
             Span::styled("Level:     ", Style::default().add_modifier(Modifier::BOLD)),

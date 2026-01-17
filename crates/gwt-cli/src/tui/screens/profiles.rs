@@ -137,14 +137,25 @@ impl ProfilesState {
 
 /// Render profiles screen
 pub fn render_profiles(state: &ProfilesState, frame: &mut Frame, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // Header
-            Constraint::Min(5),    // Profile list
-            Constraint::Length(3), // Actions/Input
-        ])
-        .split(area);
+    // Layout depends on create_mode
+    let chunks = if state.create_mode {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3), // Header
+                Constraint::Min(5),    // Profile list
+                Constraint::Length(3), // Input area
+            ])
+            .split(area)
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3), // Header
+                Constraint::Min(0),    // Profile list (takes all remaining space)
+            ])
+            .split(area)
+    };
 
     // Header
     let header_text = format!(
@@ -204,9 +215,8 @@ pub fn render_profiles(state: &ProfilesState, frame: &mut Frame, area: Rect) {
         frame.render_widget(list, chunks[1]);
     }
 
-    // Actions/Input area
+    // Input area (only in create_mode)
     if state.create_mode {
-        // Create mode - show input
         let input_block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Yellow))
@@ -234,22 +244,6 @@ pub fn render_profiles(state: &ProfilesState, frame: &mut Frame, area: Rect) {
         if !state.new_name.is_empty() {
             frame.set_cursor_position((input_inner.x + state.cursor as u16, input_inner.y));
         }
-    } else {
-        // Show actions
-        let actions = if state
-            .selected_profile()
-            .map(|p| p.is_active)
-            .unwrap_or(false)
-        {
-            "[n] New | [d] Delete | [e] Edit env | [Esc] Back"
-        } else {
-            "[Enter] Activate | [n] New | [d] Delete | [e] Edit env | [Esc] Back"
-        };
-
-        let footer = Paragraph::new(actions)
-            .style(Style::default().fg(Color::DarkGray))
-            .block(Block::default().borders(Borders::TOP));
-        frame.render_widget(footer, chunks[2]);
     }
 
     // Show error if any
@@ -263,6 +257,10 @@ pub fn render_profiles(state: &ProfilesState, frame: &mut Frame, area: Rect) {
         let error_msg = Paragraph::new(error.as_str()).style(Style::default().fg(Color::Red));
         frame.render_widget(error_msg, error_area);
     }
+}
+
+fn profile_actions_text() -> &'static str {
+    "[Space] Activate | [Enter] Edit env | [n] New | [d] Delete | [Esc] Back"
 }
 
 #[cfg(test)]
@@ -332,5 +330,13 @@ mod tests {
 
         state.new_name = "invalid name!".to_string();
         assert!(state.validate_new_name().is_err());
+    }
+
+    #[test]
+    fn test_profile_actions_text_uses_enter_for_env() {
+        assert_eq!(
+            profile_actions_text(),
+            "[Space] Activate | [Enter] Edit env | [n] New | [d] Delete | [Esc] Back"
+        );
     }
 }

@@ -13,7 +13,7 @@ pub mod worktree_create;
 
 pub use branch_list::{render_branch_list, BranchItem, BranchListState, BranchType};
 pub use confirm::{render_confirm, ConfirmState};
-pub use environment::{render_environment, EnvironmentState};
+pub use environment::{collect_os_env, render_environment, EnvironmentState};
 pub use error::{render_error, ErrorState};
 pub use help::{render_help, HelpState};
 pub use logs::{render_logs, LogsState};

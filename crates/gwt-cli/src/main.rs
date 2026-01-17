@@ -11,8 +11,7 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
@@ -472,9 +471,34 @@ fn detect_package_manager(worktree_path: &Path) -> Option<&'static str> {
 ///
 /// FR-040a: Display package manager output directly to stdout/stderr
 /// FR-040b: Do NOT use spinner during installation (output would conflict)
-fn install_dependencies(worktree_path: &Path) -> Result<(), GwtError> {
+fn should_warn_skip_install(worktree_path: &Path) -> Option<&'static str> {
+    if !worktree_path.join("package.json").exists() {
+        return None;
+    }
+    if worktree_path.join("node_modules").exists() {
+        return None;
+    }
+    detect_package_manager(worktree_path)
+}
+
+fn skip_install_warning_message(pm: &str) -> String {
+    format!(
+        "Auto install disabled. Skipping dependency install. Run \"{} install\" if needed or set GWT_AGENT_AUTO_INSTALL_DEPS=true.",
+        pm
+    )
+}
+
+fn install_dependencies(worktree_path: &Path, auto_install: bool) -> Result<(), GwtError> {
     // Check if package.json exists
     if !worktree_path.join("package.json").exists() {
+        return Ok(());
+    }
+
+    if !auto_install {
+        if let Some(pm) = should_warn_skip_install(worktree_path) {
+            println!("{}", skip_install_warning_message(pm));
+            println!();
+        }
         return Ok(());
     }
 
@@ -577,6 +601,68 @@ enum AgentExitKind {
     Interrupted,
 }
 
+#[derive(Debug, Clone)]
+struct SessionUpdateContext {
+    worktree_path: PathBuf,
+    branch_name: String,
+    agent_id: String,
+    agent_label: String,
+    version: String,
+    model: Option<String>,
+    mode: String,
+    reasoning_level: Option<String>,
+    skip_permissions: bool,
+}
+
+impl SessionUpdateContext {
+    fn to_entry(&self) -> ToolSessionEntry {
+        ToolSessionEntry {
+            branch: self.branch_name.clone(),
+            worktree_path: Some(self.worktree_path.to_string_lossy().to_string()),
+            tool_id: self.agent_id.clone(),
+            tool_label: self.agent_label.clone(),
+            session_id: None,
+            mode: Some(self.mode.clone()),
+            model: self.model.clone(),
+            reasoning_level: self.reasoning_level.clone(),
+            skip_permissions: Some(self.skip_permissions),
+            tool_version: Some(self.version.clone()),
+            timestamp: Utc::now().timestamp_millis(),
+        }
+    }
+}
+
+struct SessionUpdater {
+    stop_tx: mpsc::Sender<()>,
+    handle: thread::JoinHandle<()>,
+}
+
+impl SessionUpdater {
+    fn stop(self) {
+        let _ = self.stop_tx.send(());
+        let _ = self.handle.join();
+    }
+}
+
+fn spawn_session_updater(context: SessionUpdateContext, interval: Duration) -> SessionUpdater {
+    let (stop_tx, stop_rx) = mpsc::channel();
+    let handle = thread::spawn(move || loop {
+        match stop_rx.recv_timeout(interval) {
+            Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Timeout) => {
+                let entry = context.to_entry();
+                let _ = save_session_entry(&context.worktree_path, entry);
+            }
+        }
+    });
+
+    SessionUpdater { stop_tx, handle }
+}
+
+fn build_launching_message(config: &AgentLaunchConfig) -> String {
+    format!("Launching {}...", config.agent.label())
+}
+
 /// Launch a coding agent after TUI exits
 ///
 /// Version selection behavior (FR-066, FR-067, FR-068):
@@ -584,9 +670,8 @@ enum AgentExitKind {
 /// - "latest": Use bunx @package@latest
 /// - specific version: Use bunx @package@X.Y.Z
 fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtError> {
-    // FR-040a/FR-040b: Install dependencies before launching agent
-    install_dependencies(&config.worktree_path)?;
-    let started_at = Instant::now();
+    println!("{}", build_launching_message(&config));
+    println!();
 
     let cmd_name = config.agent.command_name();
     let npm_package = config.agent.npm_package();
@@ -656,6 +741,15 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
     }
     println!();
 
+    if config.auto_install_deps {
+        println!("Preparing to install dependencies...");
+        println!();
+    }
+
+    // FR-040a/FR-040b: Install dependencies only when enabled
+    install_dependencies(&config.worktree_path, config.auto_install_deps)?;
+    let started_at = Instant::now();
+
     // FR-069, FR-042: Save session entry before launching agent
     let session_entry = ToolSessionEntry {
         branch: config.branch_name.clone(),
@@ -682,6 +776,9 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
         .stdin(Stdio::inherit()) // Keep stdin for interactive input
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    for key in &config.env_remove {
+        command.env_remove(key);
+    }
     for (key, value) in &config.env {
         command.env(key, value);
     }
@@ -715,45 +812,18 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
     );
 
     // FR-043: Start background thread to update timestamp every 30 seconds
-    let running = Arc::new(AtomicBool::new(true));
-    let running_clone = Arc::clone(&running);
-    let worktree_path = config.worktree_path.clone();
-    let branch_name = config.branch_name.clone();
-    let agent_id = config.agent.id().to_string();
-    let agent_label = config.agent.label().to_string();
-    let version = selected_version.clone();
-    let model = config.model.clone();
-    let mode = config.execution_mode.label().to_string();
-    let reasoning_level = config.reasoning_level.map(|r| r.label().to_string());
-    let skip_permissions = config.skip_permissions;
-
-    let updater_thread = thread::spawn(move || {
-        while running_clone.load(Ordering::Relaxed) {
-            // Wait 30 seconds before updating
-            thread::sleep(Duration::from_secs(30));
-
-            // Check if still running before updating
-            if !running_clone.load(Ordering::Relaxed) {
-                break;
-            }
-
-            // Update timestamp (FR-043)
-            let entry = ToolSessionEntry {
-                branch: branch_name.clone(),
-                worktree_path: Some(worktree_path.to_string_lossy().to_string()),
-                tool_id: agent_id.clone(),
-                tool_label: agent_label.clone(),
-                session_id: None,
-                mode: Some(mode.clone()),
-                model: model.clone(),
-                reasoning_level: reasoning_level.clone(),
-                skip_permissions: Some(skip_permissions),
-                tool_version: Some(version.clone()),
-                timestamp: Utc::now().timestamp_millis(),
-            };
-            let _ = save_session_entry(&worktree_path, entry);
-        }
-    });
+    let update_context = SessionUpdateContext {
+        worktree_path: config.worktree_path.clone(),
+        branch_name: config.branch_name.clone(),
+        agent_id: config.agent.id().to_string(),
+        agent_label: config.agent.label().to_string(),
+        version: selected_version.clone(),
+        model: config.model.clone(),
+        mode: config.execution_mode.label().to_string(),
+        reasoning_level: config.reasoning_level.map(|r| r.label().to_string()),
+        skip_permissions: config.skip_permissions,
+    };
+    let updater = spawn_session_updater(update_context, Duration::from_secs(30));
 
     // Wait for the agent process to finish
     let status = child.wait().map_err(|e| GwtError::AgentLaunchFailed {
@@ -762,8 +832,7 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
     })?;
 
     // Signal the updater thread to stop and wait for it
-    running.store(false, Ordering::Relaxed);
-    let _ = updater_thread.join();
+    updater.stop();
 
     // Wait for output handler threads to finish
     if let Some(handle) = stdout_handle {
@@ -831,7 +900,7 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
             let reason = if let Some(signal) = signal {
                 format!("Terminated by signal {}", signal)
             } else if let Some(code) = code {
-                format!("Exited with status {}", code)
+                format_exit_code(code)
             } else {
                 "Exited with unknown status".to_string()
             };
@@ -895,7 +964,6 @@ fn build_launch_log_lines(
     execution_method: &ExecutionMethod,
 ) -> Vec<String> {
     let mut lines = Vec::new();
-    lines.push(format!("Launching {}...", config.agent.label()));
     lines.push(format!(
         "Working directory: {}",
         config.worktree_path.display()
@@ -1409,6 +1477,35 @@ fn classify_exit_status(status: std::process::ExitStatus) -> ExitClassification 
     classify_exit(status.code(), exit_signal(&status))
 }
 
+/// Format exit code with platform-specific explanation
+fn format_exit_code(code: i32) -> String {
+    // Negative codes on Windows are typically NTSTATUS values
+    if code < 0 {
+        let ntstatus = code as u32;
+        if let Some(desc) = describe_ntstatus(ntstatus) {
+            return format!("Exited with status {} (0x{:08X}: {})", code, ntstatus, desc);
+        }
+        return format!("Exited with status {} (0x{:08X})", code, ntstatus);
+    }
+    format!("Exited with status {}", code)
+}
+
+/// Describe common NTSTATUS codes (Windows-specific error codes)
+fn describe_ntstatus(code: u32) -> Option<&'static str> {
+    match code {
+        0xC0000005 => Some("STATUS_ACCESS_VIOLATION"),
+        0xC0000017 => Some("STATUS_NO_MEMORY"),
+        0xC000001D => Some("STATUS_ILLEGAL_INSTRUCTION"),
+        0xC00000FD => Some("STATUS_STACK_OVERFLOW"),
+        0xC0000135 => Some("STATUS_DLL_NOT_FOUND"),
+        0xC0000139 => Some("STATUS_ENTRYPOINT_NOT_FOUND"),
+        0xC0000142 => Some("STATUS_DLL_INIT_FAILED"),
+        0xC0000374 => Some("STATUS_HEAP_CORRUPTION"),
+        0xC0000409 => Some("STATUS_STACK_BUFFER_OVERRUN"),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1428,6 +1525,22 @@ mod tests {
             session_id: None,
             skip_permissions: true,
             env: Vec::new(),
+            env_remove: Vec::new(),
+            auto_install_deps: false,
+        }
+    }
+
+    fn sample_update_context(path: PathBuf) -> SessionUpdateContext {
+        SessionUpdateContext {
+            worktree_path: path,
+            branch_name: "feature/test".to_string(),
+            agent_id: "codex-cli".to_string(),
+            agent_label: "Codex CLI".to_string(),
+            version: "latest".to_string(),
+            model: None,
+            mode: ExecutionMode::Continue.label().to_string(),
+            reasoning_level: None,
+            skip_permissions: false,
         }
     }
 
@@ -1464,6 +1577,12 @@ mod tests {
     }
 
     #[test]
+    fn test_build_launching_message() {
+        let config = sample_config(CodingAgent::CodexCli);
+        assert_eq!(build_launching_message(&config), "Launching Codex CLI...");
+    }
+
+    #[test]
     fn test_build_launch_log_lines_codex() {
         let mut config = sample_config(CodingAgent::CodexCli);
         config.model = None;
@@ -1483,7 +1602,6 @@ mod tests {
                 package_spec: "@openai/codex@latest".to_string(),
             },
         );
-        assert!(lines.contains(&"Launching Codex CLI...".to_string()));
         assert!(lines.contains(&"Working directory: /tmp/worktree".to_string()));
         assert!(lines.contains(&"Model: gpt-5.2-codex".to_string()));
         assert!(lines.contains(&"Reasoning: high".to_string()));
@@ -1515,6 +1633,44 @@ mod tests {
         assert!(lines.contains(&"Model: sonnet".to_string()));
         assert!(!lines.iter().any(|line| line.starts_with("Reasoning: ")));
         assert!(lines.contains(&"Using locally installed claude".to_string()));
+    }
+
+    #[test]
+    fn test_session_updater_stop_is_fast() {
+        let temp = TempDir::new().unwrap();
+        let context = sample_update_context(temp.path().to_path_buf());
+        let updater = spawn_session_updater(context, Duration::from_secs(30));
+        let started = Instant::now();
+        updater.stop();
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn test_should_warn_skip_install_detects_missing_node_modules() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("package.json"), "{}").unwrap();
+
+        let pm = should_warn_skip_install(temp.path());
+        assert_eq!(pm, Some("npm"));
+    }
+
+    #[test]
+    fn test_should_warn_skip_install_returns_none_when_installed() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("package.json"), "{}").unwrap();
+        fs::create_dir_all(temp.path().join("node_modules")).unwrap();
+
+        let pm = should_warn_skip_install(temp.path());
+        assert!(pm.is_none());
+    }
+
+    #[test]
+    fn test_skip_install_warning_message_formats() {
+        let message = skip_install_warning_message("npm");
+        assert_eq!(
+            message,
+            "Auto install disabled. Skipping dependency install. Run \"npm install\" if needed or set GWT_AGENT_AUTO_INSTALL_DEPS=true."
+        );
     }
 
     #[test]
@@ -1616,5 +1772,50 @@ mod tests {
 
         let id = detect_claude_session_id_at(home, Path::new("/repo/wt"));
         assert_eq!(id.as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn test_format_exit_code_normal() {
+        assert_eq!(format_exit_code(0), "Exited with status 0");
+        assert_eq!(format_exit_code(1), "Exited with status 1");
+        assert_eq!(format_exit_code(127), "Exited with status 127");
+    }
+
+    #[test]
+    fn test_format_exit_code_negative_known() {
+        // 0xC0000409 as i32 = -1073740791 (STATUS_STACK_BUFFER_OVERRUN)
+        let result = format_exit_code(-1073740791);
+        assert!(result.contains("-1073740791"));
+        assert!(result.contains("0xC0000409"));
+        assert!(result.contains("STATUS_STACK_BUFFER_OVERRUN"));
+
+        // 0xC0000374 as i32 = -1073740940 (STATUS_HEAP_CORRUPTION)
+        let result = format_exit_code(-1073740940);
+        assert!(result.contains("-1073740940"));
+        assert!(result.contains("0xC0000374"));
+        assert!(result.contains("STATUS_HEAP_CORRUPTION"));
+    }
+
+    #[test]
+    fn test_format_exit_code_negative_unknown() {
+        // Unknown NTSTATUS (0xFFFFFFFF = -1)
+        let result = format_exit_code(-1);
+        assert!(result.contains("-1"));
+        assert!(result.contains("0x"));
+        // No STATUS_ description for unknown code
+        assert!(!result.contains("STATUS_"));
+    }
+
+    #[test]
+    fn test_describe_ntstatus() {
+        assert_eq!(
+            describe_ntstatus(0xC0000374),
+            Some("STATUS_HEAP_CORRUPTION")
+        );
+        assert_eq!(
+            describe_ntstatus(0xC0000005),
+            Some("STATUS_ACCESS_VIOLATION")
+        );
+        assert_eq!(describe_ntstatus(0x12345678), None);
     }
 }
