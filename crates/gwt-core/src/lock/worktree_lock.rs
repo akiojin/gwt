@@ -4,6 +4,7 @@ use crate::error::{GwtError, Result};
 use fs2::FileExt;
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use tracing::{debug, info, warn};
 
 /// Lock file name
 const LOCK_FILE_NAME: &str = ".gwt.lock";
@@ -34,6 +35,13 @@ impl WorktreeLock {
     pub fn try_lock(&mut self) -> Result<bool> {
         let lock_path = self.lock_file_path();
 
+        debug!(
+            category = "lock",
+            worktree_path = %self.worktree_path.display(),
+            lock_path = %lock_path.display(),
+            "Attempting to acquire lock (non-blocking)"
+        );
+
         // Create parent directory if needed
         if let Some(parent) = lock_path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -44,9 +52,22 @@ impl WorktreeLock {
         match file.try_lock_exclusive() {
             Ok(()) => {
                 self.lock_file = Some(file);
+                info!(
+                    category = "lock",
+                    operation = "try_lock",
+                    worktree_path = %self.worktree_path.display(),
+                    "Lock acquired successfully"
+                );
                 Ok(true)
             }
-            Err(_) => Ok(false),
+            Err(_) => {
+                warn!(
+                    category = "lock",
+                    worktree_path = %self.worktree_path.display(),
+                    "Lock already held by another process"
+                );
+                Ok(false)
+            }
         }
     }
 
@@ -54,25 +75,56 @@ impl WorktreeLock {
     pub fn lock(&mut self) -> Result<()> {
         let lock_path = self.lock_file_path();
 
+        debug!(
+            category = "lock",
+            worktree_path = %self.worktree_path.display(),
+            lock_path = %lock_path.display(),
+            "Attempting to acquire lock (blocking)"
+        );
+
         // Create parent directory if needed
         if let Some(parent) = lock_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
         let file = File::create(&lock_path)?;
-        file.lock_exclusive()
-            .map_err(|_| GwtError::WorktreeLocked {
+        file.lock_exclusive().map_err(|_| {
+            warn!(
+                category = "lock",
+                worktree_path = %self.worktree_path.display(),
+                "Failed to acquire lock (timeout or error)"
+            );
+            GwtError::WorktreeLocked {
                 path: self.worktree_path.clone(),
-            })?;
+            }
+        })?;
 
         self.lock_file = Some(file);
+        info!(
+            category = "lock",
+            operation = "lock",
+            worktree_path = %self.worktree_path.display(),
+            "Lock acquired (blocking)"
+        );
         Ok(())
     }
 
     /// Release the lock
     pub fn unlock(&mut self) -> Result<()> {
+        debug!(
+            category = "lock",
+            worktree_path = %self.worktree_path.display(),
+            "Releasing lock"
+        );
+
         if let Some(file) = self.lock_file.take() {
             file.unlock()?;
+            info!(
+                category = "lock",
+                operation = "unlock",
+                worktree_path = %self.worktree_path.display(),
+                "Lock released"
+            );
         }
         Ok(())
     }
@@ -81,13 +133,27 @@ impl WorktreeLock {
     pub fn is_locked(worktree_path: &Path) -> bool {
         let lock_path = worktree_path.join(LOCK_FILE_NAME);
         if !lock_path.exists() {
+            debug!(
+                category = "lock",
+                worktree_path = %worktree_path.display(),
+                is_locked = false,
+                "Lock file does not exist"
+            );
             return false;
         }
 
-        match File::open(&lock_path) {
+        let is_locked = match File::open(&lock_path) {
             Ok(file) => file.try_lock_exclusive().is_err(),
             Err(_) => false,
-        }
+        };
+
+        debug!(
+            category = "lock",
+            worktree_path = %worktree_path.display(),
+            is_locked,
+            "Checked lock status"
+        );
+        is_locked
     }
 }
 
