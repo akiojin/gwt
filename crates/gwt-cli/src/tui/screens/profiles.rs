@@ -140,29 +140,17 @@ pub fn render_profiles(state: &ProfilesState, frame: &mut Frame, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Header
             Constraint::Min(5),    // Profile list
             Constraint::Length(3), // Actions/Input
         ])
         .split(area);
-
-    // Header
-    let header_text = format!(
-        "Profiles ({}) | Active: {}",
-        state.profiles.len(),
-        state.active_profile.as_deref().unwrap_or("none")
-    );
-    let header = Paragraph::new(header_text)
-        .style(Style::default().fg(Color::Cyan))
-        .block(Block::default().borders(Borders::BOTTOM));
-    frame.render_widget(header, chunks[0]);
 
     // Profile list
     if state.profiles.is_empty() {
         let empty = Paragraph::new("No profiles found. Press 'n' to create one.")
             .style(Style::default().fg(Color::DarkGray))
             .alignment(Alignment::Center);
-        frame.render_widget(empty, chunks[1]);
+        frame.render_widget(empty, chunks[0]);
     } else {
         let items: Vec<ListItem> = state
             .profiles
@@ -201,7 +189,7 @@ pub fn render_profiles(state: &ProfilesState, frame: &mut Frame, area: Rect) {
             .collect();
 
         let list = List::new(items).block(Block::default().borders(Borders::NONE));
-        frame.render_widget(list, chunks[1]);
+        frame.render_widget(list, chunks[0]);
     }
 
     // Actions/Input area
@@ -212,8 +200,8 @@ pub fn render_profiles(state: &ProfilesState, frame: &mut Frame, area: Rect) {
             .border_style(Style::default().fg(Color::Yellow))
             .title(" New Profile Name ");
 
-        let input_inner = input_block.inner(chunks[2]);
-        frame.render_widget(input_block, chunks[2]);
+        let input_inner = input_block.inner(chunks[1]);
+        frame.render_widget(input_block, chunks[1]);
 
         let input_text = if state.new_name.is_empty() {
             "Enter profile name...".to_string()
@@ -241,7 +229,7 @@ pub fn render_profiles(state: &ProfilesState, frame: &mut Frame, area: Rect) {
         let footer = Paragraph::new(actions)
             .style(Style::default().fg(Color::DarkGray))
             .block(Block::default().borders(Borders::TOP));
-        frame.render_widget(footer, chunks[2]);
+        frame.render_widget(footer, chunks[1]);
     }
 
     // Show error if any
