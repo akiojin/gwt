@@ -4,26 +4,57 @@
 
 use crate::error::{GwtError, Result};
 use std::path::Path;
+use tracing::{debug, error, info};
 
 /// Migrate JSON configuration to TOML
 pub fn migrate_json_to_toml(json_path: &Path, toml_path: &Path) -> Result<()> {
+    debug!(
+        category = "config",
+        json_path = %json_path.display(),
+        toml_path = %toml_path.display(),
+        "Starting JSON to TOML migration"
+    );
+
     // Read JSON file
     let json_content = std::fs::read_to_string(json_path)?;
 
     // Parse JSON
     let json_value: serde_json::Value =
-        serde_json::from_str(&json_content).map_err(|e| GwtError::MigrationFailed {
-            reason: format!("Failed to parse JSON: {}", e),
+        serde_json::from_str(&json_content).map_err(|e| {
+            error!(
+                category = "config",
+                json_path = %json_path.display(),
+                error = %e,
+                "Failed to parse JSON config"
+            );
+            GwtError::MigrationFailed {
+                reason: format!("Failed to parse JSON: {}", e),
+            }
         })?;
 
     // Convert to TOML
     let toml_content =
-        toml::to_string_pretty(&json_value).map_err(|e| GwtError::MigrationFailed {
-            reason: format!("Failed to convert to TOML: {}", e),
+        toml::to_string_pretty(&json_value).map_err(|e| {
+            error!(
+                category = "config",
+                error = %e,
+                "Failed to convert JSON to TOML"
+            );
+            GwtError::MigrationFailed {
+                reason: format!("Failed to convert to TOML: {}", e),
+            }
         })?;
 
     // Write TOML file
-    std::fs::write(toml_path, toml_content)?;
+    std::fs::write(toml_path, &toml_content)?;
+
+    info!(
+        category = "config",
+        operation = "migration",
+        json_path = %json_path.display(),
+        toml_path = %toml_path.display(),
+        "Migration completed successfully"
+    );
 
     Ok(())
 }
@@ -33,17 +64,42 @@ pub fn needs_migration(repo_root: &Path) -> bool {
     let json_path = repo_root.join(".gwt.json");
     let toml_path = repo_root.join(".gwt.toml");
 
-    json_path.exists() && !toml_path.exists()
+    let needs = json_path.exists() && !toml_path.exists();
+    debug!(
+        category = "config",
+        repo_root = %repo_root.display(),
+        json_exists = json_path.exists(),
+        toml_exists = toml_path.exists(),
+        needs_migration = needs,
+        "Checked migration status"
+    );
+    needs
 }
 
 /// Auto-migrate if needed
 pub fn auto_migrate(repo_root: &Path) -> Result<bool> {
     if needs_migration(repo_root) {
+        debug!(
+            category = "config",
+            repo_root = %repo_root.display(),
+            "Auto-migration triggered"
+        );
         let json_path = repo_root.join(".gwt.json");
         let toml_path = repo_root.join(".gwt.toml");
         migrate_json_to_toml(&json_path, &toml_path)?;
+        info!(
+            category = "config",
+            operation = "auto_migrate",
+            repo_root = %repo_root.display(),
+            "Auto-migration completed"
+        );
         Ok(true)
     } else {
+        debug!(
+            category = "config",
+            repo_root = %repo_root.display(),
+            "Auto-migration skipped (not needed)"
+        );
         Ok(false)
     }
 }
