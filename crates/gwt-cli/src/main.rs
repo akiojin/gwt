@@ -1045,6 +1045,89 @@ fn encode_claude_project_path(path: &Path) -> String {
         .collect()
 }
 
+// ============================================================================
+// History.jsonl schema definitions and parsers
+// ============================================================================
+
+/// Claude Code history.jsonl entry schema
+#[derive(Debug, Clone, serde::Deserialize)]
+struct ClaudeHistoryEntry {
+    #[allow(dead_code)]
+    display: String,
+    #[serde(rename = "pastedContents")]
+    #[allow(dead_code)]
+    pasted_contents: serde_json::Value,
+    timestamp: u64, // milliseconds
+    project: String,
+    #[serde(rename = "sessionId")]
+    session_id: String,
+}
+
+/// Codex history.jsonl entry schema
+#[derive(Debug, Clone, serde::Deserialize)]
+struct CodexHistoryEntry {
+    session_id: String,
+    ts: u64, // seconds
+    #[allow(dead_code)]
+    text: String,
+}
+
+/// Parse Claude Code history.jsonl file
+fn parse_claude_history(home: &Path) -> Vec<ClaudeHistoryEntry> {
+    let path = home.join(".claude").join("history.jsonl");
+    let file = match fs::File::open(&path) {
+        Ok(f) => f,
+        Err(_) => return vec![],
+    };
+    let reader = std::io::BufReader::new(file);
+    reader
+        .lines()
+        .map_while(Result::ok)
+        .filter_map(|line| serde_json::from_str(&line).ok())
+        .collect()
+}
+
+/// Parse Codex history.jsonl file
+fn parse_codex_history(home: &Path) -> Vec<CodexHistoryEntry> {
+    let path = home.join(".codex").join("history.jsonl");
+    let file = match fs::File::open(&path) {
+        Ok(f) => f,
+        Err(_) => return vec![],
+    };
+    let reader = std::io::BufReader::new(file);
+    reader
+        .lines()
+        .map_while(Result::ok)
+        .filter_map(|line| serde_json::from_str(&line).ok())
+        .collect()
+}
+
+/// Get latest session ID for Claude Code from history.jsonl
+fn get_latest_claude_session_id(home: &Path, worktree_path: &Path) -> Option<String> {
+    let history = parse_claude_history(home);
+    let worktree_str = worktree_path.to_string_lossy();
+
+    history
+        .iter()
+        .filter(|e| e.project == worktree_str || worktree_str.ends_with(&e.project))
+        .max_by_key(|e| e.timestamp)
+        .map(|e| e.session_id.clone())
+}
+
+/// Get latest session ID for Codex from history.jsonl
+/// Note: Codex history.jsonl does not have project field, so we return the latest session
+fn get_latest_codex_session_id(home: &Path) -> Option<String> {
+    let history = parse_codex_history(home);
+    history
+        .iter()
+        .max_by_key(|e| e.ts)
+        .map(|e| e.session_id.clone())
+}
+
+// ============================================================================
+// Generic session parsers (legacy)
+// ============================================================================
+
 fn parse_generic_session_id(path: &Path) -> Option<String> {
     let content = fs::read_to_string(path).ok()?;
     let value: serde_json::Value = serde_json::from_str(&content).ok()?;
@@ -1091,77 +1174,86 @@ fn parse_codex_session_meta(path: &Path) -> Option<(String, Option<String>)> {
 }
 
 fn detect_codex_session_id_at(home: &Path, worktree_path: &Path) -> Option<String> {
+    // Primary: Scan sessions/ directory with cwd matching
     let root = home.join(".codex").join("sessions");
-    if !root.exists() {
-        return None;
-    }
-    let target_str = worktree_path.to_string_lossy().to_string();
-    let target_canon = fs::canonicalize(worktree_path).ok();
-    let mut latest_match: Option<(std::time::SystemTime, String)> = None;
-    let mut latest_any: Option<(std::time::SystemTime, String)> = None;
-    let mut stack = vec![root];
+    if root.exists() {
+        let target_str = worktree_path.to_string_lossy().to_string();
+        let target_canon = fs::canonicalize(worktree_path).ok();
+        let mut latest_match: Option<(std::time::SystemTime, String)> = None;
+        let mut latest_any: Option<(std::time::SystemTime, String)> = None;
+        let mut stack = vec![root];
 
-    while let Some(dir) = stack.pop() {
-        let entries = match fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(_) => continue,
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let metadata = match entry.metadata() {
-                Ok(metadata) => metadata,
+        while let Some(dir) = stack.pop() {
+            let entries = match fs::read_dir(&dir) {
+                Ok(entries) => entries,
                 Err(_) => continue,
             };
-            if metadata.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
-                continue;
-            }
-            let modified = metadata
-                .modified()
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-            let Some((id, cwd)) = parse_codex_session_meta(&path) else {
-                continue;
-            };
-            let should_update_any = latest_any
-                .as_ref()
-                .map(|(time, _)| modified > *time)
-                .unwrap_or(true);
-            if should_update_any {
-                latest_any = Some((modified, id.clone()));
-            }
-
-            if let Some(cwd) = cwd {
-                let matches_target = if cwd == target_str {
-                    true
-                } else {
-                    let cwd_path = PathBuf::from(&cwd);
-                    match (fs::canonicalize(&cwd_path).ok(), target_canon.as_ref()) {
-                        (Some(cwd_canon), Some(target_canon)) => cwd_canon == *target_canon,
-                        _ => false,
-                    }
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let metadata = match entry.metadata() {
+                    Ok(metadata) => metadata,
+                    Err(_) => continue,
                 };
-                if matches_target {
-                    let should_update_match = latest_match
-                        .as_ref()
-                        .map(|(time, _)| modified > *time)
-                        .unwrap_or(true);
-                    if should_update_match {
-                        latest_match = Some((modified, id));
+                if metadata.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                let modified = metadata
+                    .modified()
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                let Some((id, cwd)) = parse_codex_session_meta(&path) else {
+                    continue;
+                };
+                let should_update_any = latest_any
+                    .as_ref()
+                    .map(|(time, _)| modified > *time)
+                    .unwrap_or(true);
+                if should_update_any {
+                    latest_any = Some((modified, id.clone()));
+                }
+
+                if let Some(cwd) = cwd {
+                    let matches_target = if cwd == target_str {
+                        true
+                    } else {
+                        let cwd_path = PathBuf::from(&cwd);
+                        match (fs::canonicalize(&cwd_path).ok(), target_canon.as_ref()) {
+                            (Some(cwd_canon), Some(target_canon)) => cwd_canon == *target_canon,
+                            _ => false,
+                        }
+                    };
+                    if matches_target {
+                        let should_update_match = latest_match
+                            .as_ref()
+                            .map(|(time, _)| modified > *time)
+                            .unwrap_or(true);
+                        if should_update_match {
+                            latest_match = Some((modified, id));
+                        }
                     }
                 }
             }
         }
+
+        if let Some((_, session_id)) = latest_match.or(latest_any) {
+            return Some(session_id);
+        }
     }
 
-    latest_match
-        .or(latest_any)
-        .map(|(_, session_id)| session_id)
+    // Fallback: Use history.jsonl (returns latest session regardless of project)
+    get_latest_codex_session_id(home)
 }
 
 fn detect_claude_session_id_at(home: &Path, worktree_path: &Path) -> Option<String> {
+    // Primary: Use history.jsonl which has accurate project -> sessionId mapping
+    if let Some(session_id) = get_latest_claude_session_id(home, worktree_path) {
+        return Some(session_id);
+    }
+
+    // Fallback: Scan projects/ directory (legacy behavior)
     let project_dir = home
         .join(".claude")
         .join("projects")
