@@ -1,26 +1,11 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
-
 ## [6.0.8] - 2026-01-16
 
-### Bug Fixes
-
-- Improve release binary documentation clarity in README
-
 ### Documentation
 
-- Sync CHANGELOG from main and add v6.0.7 entry
-
-## [6.0.7] - 2026-01-15
-
-### Bug Fixes
-
-- Clarify npm wrapper auto-download behavior in README
-
-### Documentation
-
-- Remove crates.io references from documentation
+- Fix CHANGELOG structure with proper version sections
 
 ## [6.0.5] - 2026-01-15
 
@@ -48,20 +33,35 @@ All notable changes to this project will be documented in this file.
 - Add version to gwt-core dependency for crates.io publishing
 - Use cross for Linux ARM64 musl build
 - Add id-token permission for npm provenance and pin cross version
+- Clarify npm wrapper auto-download behavior in README
+- Improve release binary documentation clarity in README
+- ログビューアの時間表示をシステムローカル時間に修正 (#630)
+- Release準備のmain同期をPR経由に変更 (#633)
+- テキスト入力で文字が二重入力されるバグを修正 (#634)
+- プロファイル画面のUX改善 (#635)
+- Main同期とgix APIの互換性修正 (#637)
+- Support merge commit in release workflow trigger
 - Add workflow_dispatch support to release workflow trigger
 
 ### Documentation
 
 - パッケージ公開状況をCLAUDE.mdに追記
+- Remove crates.io references from documentation
+- Sync CHANGELOG from main and add v6.0.7 entry
 
 ### Miscellaneous Tasks
 
 - Sync main to develop after v6.0.0 release
 - バージョンを 6.0.3 に統一
+- リリースフロー要件化とmain→develop同期 (#629)
 
 ### Refactor
 
 - Use workspace dependencies for internal crates
+
+### UX
+
+- 自動インストール文言の検証と設定説明 (#631)
 
 ### Ci
 
