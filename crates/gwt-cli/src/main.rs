@@ -774,8 +774,8 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
         .args(&command_args)
         .current_dir(&config.worktree_path)
         .stdin(Stdio::inherit()) // Keep stdin for interactive input
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stdout(Stdio::inherit()) // Inherit stdout for TTY detection (interactive mode)
+        .stderr(Stdio::piped()); // Pipe stderr for logging
     for key in &config.env_remove {
         command.env_remove(key);
     }
