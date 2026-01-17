@@ -1499,12 +1499,23 @@ impl Model {
 
     /// View function (Elm Architecture)
     pub fn view(&mut self, frame: &mut Frame) {
+        // Calculate footer height dynamically based on text length
+        let keybinds = self.get_footer_keybinds();
+        let status = self.status_message.as_deref().unwrap_or("");
+        let footer_text_len = if status.is_empty() {
+            keybinds.len() + 2 // " {} " format adds 2 spaces
+        } else {
+            keybinds.len() + status.len() + 5 // " {} | {} " format adds 5 chars
+        };
+        let inner_width = frame.area().width.saturating_sub(2) as usize; // borders
+        let footer_height = if footer_text_len > inner_width { 4 } else { 3 };
+
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(6), // Boxed header (title + 4 lines + borders)
-                Constraint::Min(0),    // Content
-                Constraint::Length(4), // Footer (2 lines + borders)
+                Constraint::Length(6),             // Boxed header (title + 4 lines + borders)
+                Constraint::Min(0),                // Content
+                Constraint::Length(footer_height), // Footer (dynamic)
             ])
             .split(frame.area());
 
@@ -1685,13 +1696,12 @@ impl Model {
         frame.render_widget(header, area);
     }
 
-    fn view_footer(&self, frame: &mut Frame, area: Rect) {
-        let keybinds = match self.screen {
+    fn get_footer_keybinds(&self) -> &'static str {
+        match self.screen {
             Screen::BranchList => {
                 if self.branch_list.filter_mode {
                     "[Esc] Exit filter | Type to search"
                 } else {
-                    // FR-004: r: Refresh, c: Cleanup, x: Repair, l: Logs
                     "[r] Refresh | [c] Cleanup | [x] Repair | [l] Logs"
                 }
             }
@@ -1715,7 +1725,11 @@ impl Model {
                     "[Enter] Edit | [n] New | [d] Delete (profile)/Disable (OS) | [r] Reset (override) | [Esc] Back"
                 }
             }
-        };
+        }
+    }
+
+    fn view_footer(&self, frame: &mut Frame, area: Rect) {
+        let keybinds = self.get_footer_keybinds();
 
         let status = self.status_message.as_deref().unwrap_or("");
         let footer_text = if status.is_empty() {
@@ -1730,10 +1744,18 @@ impl Model {
             Style::default()
         };
 
-        let footer = Paragraph::new(footer_text)
+        // Calculate if wrap is needed based on text length and available width
+        let inner_width = area.width.saturating_sub(2); // borders
+        let needs_wrap = footer_text.len() > inner_width as usize;
+
+        let mut footer = Paragraph::new(footer_text)
             .style(style)
-            .wrap(Wrap { trim: true })
             .block(Block::default().borders(Borders::ALL));
+
+        if needs_wrap {
+            footer = footer.wrap(Wrap { trim: true });
+        }
+
         frame.render_widget(footer, area);
     }
 
