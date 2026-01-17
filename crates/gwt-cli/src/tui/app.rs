@@ -1714,7 +1714,7 @@ impl Model {
             }
             Screen::WorktreeCreate => "[Enter] Next | [Esc] Back",
             Screen::Settings => "[Tab] Category | [Esc] Back",
-            Screen::Logs => "[f] Filter | [/] Search | [Esc] Back",
+            Screen::Logs => "[Up/Down] Navigate | [Enter] Detail | [c] Copy | [f] Filter | [/] Search | [Esc] Back",
             Screen::Help => "[Esc] Close | [Up/Down] Scroll",
             Screen::Confirm => "[Left/Right] Select | [Enter] Confirm | [Esc] Cancel",
             Screen::Error => "[Enter/Esc] Close | [Up/Down] Scroll",
