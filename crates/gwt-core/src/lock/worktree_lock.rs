@@ -88,17 +88,16 @@ impl WorktreeLock {
         }
 
         let file = File::create(&lock_path)?;
-        file.lock_exclusive()
-            .map_err(|_| {
-                warn!(
-                    category = "lock",
-                    worktree_path = %self.worktree_path.display(),
-                    "Failed to acquire lock (timeout or error)"
-                );
-                GwtError::WorktreeLocked {
-                    path: self.worktree_path.clone(),
-                }
-            })?;
+        file.lock_exclusive().map_err(|_| {
+            warn!(
+                category = "lock",
+                worktree_path = %self.worktree_path.display(),
+                "Failed to acquire lock (timeout or error)"
+            );
+            GwtError::WorktreeLocked {
+                path: self.worktree_path.clone(),
+            }
+        })?;
 
         self.lock_file = Some(file);
         info!(

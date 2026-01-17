@@ -19,31 +19,29 @@ pub fn migrate_json_to_toml(json_path: &Path, toml_path: &Path) -> Result<()> {
     let json_content = std::fs::read_to_string(json_path)?;
 
     // Parse JSON
-    let json_value: serde_json::Value =
-        serde_json::from_str(&json_content).map_err(|e| {
-            error!(
-                category = "config",
-                json_path = %json_path.display(),
-                error = %e,
-                "Failed to parse JSON config"
-            );
-            GwtError::MigrationFailed {
-                reason: format!("Failed to parse JSON: {}", e),
-            }
-        })?;
+    let json_value: serde_json::Value = serde_json::from_str(&json_content).map_err(|e| {
+        error!(
+            category = "config",
+            json_path = %json_path.display(),
+            error = %e,
+            "Failed to parse JSON config"
+        );
+        GwtError::MigrationFailed {
+            reason: format!("Failed to parse JSON: {}", e),
+        }
+    })?;
 
     // Convert to TOML
-    let toml_content =
-        toml::to_string_pretty(&json_value).map_err(|e| {
-            error!(
-                category = "config",
-                error = %e,
-                "Failed to convert JSON to TOML"
-            );
-            GwtError::MigrationFailed {
-                reason: format!("Failed to convert to TOML: {}", e),
-            }
-        })?;
+    let toml_content = toml::to_string_pretty(&json_value).map_err(|e| {
+        error!(
+            category = "config",
+            error = %e,
+            "Failed to convert JSON to TOML"
+        );
+        GwtError::MigrationFailed {
+            reason: format!("Failed to convert to TOML: {}", e),
+        }
+    })?;
 
     // Write TOML file
     std::fs::write(toml_path, &toml_content)?;

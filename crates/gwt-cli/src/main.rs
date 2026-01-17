@@ -550,7 +550,7 @@ fn strip_ansi_codes(s: &str) -> String {
             // Skip escape sequence
             if let Some(&'[') = chars.peek() {
                 chars.next(); // consume '['
-                // Skip until we hit a letter (end of escape sequence)
+                              // Skip until we hit a letter (end of escape sequence)
                 while let Some(&next) = chars.peek() {
                     chars.next();
                     if next.is_ascii_alphabetic() {
