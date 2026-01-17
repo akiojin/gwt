@@ -22,16 +22,36 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Sync main into develop
+        id: sync-develop
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git fetch origin main
-          git merge --no-ff --no-edit origin/main
-          git push origin HEAD:develop
+          git fetch origin main develop
+          if git merge-base --is-ancestor origin/main origin/develop; then
+            echo "main is already merged into develop."
+            echo "synced=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          head_ref="${GITHUB_REPOSITORY_OWNER}:main"
+          existing_pr=$(gh pr list --base develop --head "$head_ref" --state open --json number -q '.[0].number')
+          if [ -n "$existing_pr" ]; then
+            echo "Sync PR already exists: #$existing_pr"
+          else
+            gh pr create \
+              --base develop \
+              --head "$head_ref" \
+              --title "chore: sync main into develop" \
+              --body "Automated sync to align develop with main before release."
+          fi
+          echo "synced=false" >> "$GITHUB_OUTPUT"
+          exit 1
 
       - uses: akiojin/create-release-pr@v1
+        if: steps.sync-develop.outputs.synced == 'true'
         with:
           source-branch: develop
           target-branch: main

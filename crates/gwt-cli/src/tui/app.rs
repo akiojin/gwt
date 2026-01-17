@@ -1787,9 +1787,9 @@ impl Model {
                     Some(Message::Enter)
                 }
             }
-            KeyCode::Backspace => Some(Message::Backspace),
-            KeyCode::Left => Some(Message::CursorLeft),
-            KeyCode::Right => Some(Message::CursorRight),
+            KeyCode::Backspace if enter_is_press => Some(Message::Backspace),
+            KeyCode::Left if enter_is_press => Some(Message::CursorLeft),
+            KeyCode::Right if enter_is_press => Some(Message::CursorRight),
             KeyCode::Tab => {
                 if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
                     self.environment.switch_field();
@@ -1802,7 +1802,7 @@ impl Model {
                 }
                 None
             }
-            KeyCode::Char(c) => {
+            KeyCode::Char(c) if enter_is_press => {
                 if key.modifiers.contains(KeyModifiers::CONTROL) {
                     None
                 } else {
@@ -2116,10 +2116,12 @@ pub fn run_with_context(
                         (KeyCode::Home, _) if is_key_press => Some(Message::GoHome),
                         (KeyCode::End, _) if is_key_press => Some(Message::GoEnd),
                         (KeyCode::Enter, _) if is_key_press => Some(Message::Enter),
-                        (KeyCode::Backspace, _) => Some(Message::Backspace),
-                        (KeyCode::Left, _) => Some(Message::CursorLeft),
-                        (KeyCode::Right, _) => Some(Message::CursorRight),
-                        (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                        (KeyCode::Backspace, _) if is_key_press => Some(Message::Backspace),
+                        (KeyCode::Left, _) if is_key_press => Some(Message::CursorLeft),
+                        (KeyCode::Right, _) if is_key_press => Some(Message::CursorRight),
+                        (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT)
+                            if is_key_press =>
+                        {
                             Some(Message::Char(c))
                         }
                         _ => None,
