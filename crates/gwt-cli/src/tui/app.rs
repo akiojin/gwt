@@ -1520,8 +1520,10 @@ impl Model {
         let footer_height = if footer_text_len > inner_width { 4 } else { 3 };
 
         // Profiles, Environment, and Logs screens don't need header
-        let needs_header =
-            !matches!(base_screen, Screen::Profiles | Screen::Environment | Screen::Logs);
+        let needs_header = !matches!(
+            base_screen,
+            Screen::Profiles | Screen::Environment | Screen::Logs
+        );
         let header_height = if needs_header { 6 } else { 0 };
 
         let chunks = Layout::default()

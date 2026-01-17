@@ -262,8 +262,8 @@ pub fn render_logs(state: &LogsState, frame: &mut Frame, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),                  // Header/Filter
-            Constraint::Min(0),                     // Log entries
+            Constraint::Length(3),                 // Header/Filter
+            Constraint::Min(0),                    // Log entries
             Constraint::Length(search_bar_height), // Search bar (only when searching)
         ])
         .split(area);
@@ -401,7 +401,6 @@ fn render_search_bar(state: &LogsState, frame: &mut Frame, area: Rect) {
         area.y + 1,
     ));
 }
-
 
 fn render_detail_view(entry: &LogEntry, frame: &mut Frame, area: Rect) {
     let level_style = match entry.level.as_str() {
