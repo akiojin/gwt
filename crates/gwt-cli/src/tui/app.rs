@@ -1499,6 +1499,15 @@ impl Model {
 
     /// View function (Elm Architecture)
     pub fn view(&mut self, frame: &mut Frame) {
+        let base_screen = if matches!(self.screen, Screen::Confirm) {
+            self.screen_stack
+                .last()
+                .cloned()
+                .unwrap_or(Screen::BranchList)
+        } else {
+            self.screen.clone()
+        };
+
         // Calculate footer height dynamically based on text length
         let keybinds = self.get_footer_keybinds();
         let status = self.status_message.as_deref().unwrap_or("");
@@ -1510,29 +1519,26 @@ impl Model {
         let inner_width = frame.area().width.saturating_sub(2) as usize; // borders
         let footer_height = if footer_text_len > inner_width { 4 } else { 3 };
 
+        // Profiles and Environment screens don't need header
+        let needs_header = !matches!(base_screen, Screen::Profiles | Screen::Environment);
+        let header_height = if needs_header { 6 } else { 0 };
+
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(6),             // Boxed header (title + 4 lines + borders)
+                Constraint::Length(header_height), // Header (0 for Profiles/Environment)
                 Constraint::Min(0),                // Content
                 Constraint::Length(footer_height), // Footer (dynamic)
             ])
             .split(frame.area());
 
-        let base_screen = if matches!(self.screen, Screen::Confirm) {
-            self.screen_stack
-                .last()
-                .cloned()
-                .unwrap_or(Screen::BranchList)
-        } else {
-            self.screen.clone()
-        };
-
         // Header (for branch list screen, render boxed header)
-        if matches!(base_screen, Screen::BranchList) {
-            self.view_boxed_header(frame, chunks[0]);
-        } else {
-            self.view_header(frame, chunks[0]);
+        if needs_header {
+            if matches!(base_screen, Screen::BranchList) {
+                self.view_boxed_header(frame, chunks[0]);
+            } else {
+                self.view_header(frame, chunks[0]);
+            }
         }
 
         // Content
