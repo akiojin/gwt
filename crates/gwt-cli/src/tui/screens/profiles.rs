@@ -137,14 +137,25 @@ impl ProfilesState {
 
 /// Render profiles screen
 pub fn render_profiles(state: &ProfilesState, frame: &mut Frame, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // Header
-            Constraint::Min(5),    // Profile list
-            Constraint::Length(3), // Actions/Input
-        ])
-        .split(area);
+    // Layout depends on create_mode
+    let chunks = if state.create_mode {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3), // Header
+                Constraint::Min(5),    // Profile list
+                Constraint::Length(3), // Input area
+            ])
+            .split(area)
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3), // Header
+                Constraint::Min(0),    // Profile list (takes all remaining space)
+            ])
+            .split(area)
+    };
 
     // Header
     let header_text = format!(
@@ -204,9 +215,8 @@ pub fn render_profiles(state: &ProfilesState, frame: &mut Frame, area: Rect) {
         frame.render_widget(list, chunks[1]);
     }
 
-    // Actions/Input area
+    // Input area (only in create_mode)
     if state.create_mode {
-        // Create mode - show input
         let input_block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Yellow))
@@ -234,14 +244,6 @@ pub fn render_profiles(state: &ProfilesState, frame: &mut Frame, area: Rect) {
         if !state.new_name.is_empty() {
             frame.set_cursor_position((input_inner.x + state.cursor as u16, input_inner.y));
         }
-    } else {
-        // Show actions
-        let actions = profile_actions_text();
-
-        let footer = Paragraph::new(actions)
-            .style(Style::default().fg(Color::DarkGray))
-            .block(Block::default().borders(Borders::TOP));
-        frame.render_widget(footer, chunks[2]);
     }
 
     // Show error if any

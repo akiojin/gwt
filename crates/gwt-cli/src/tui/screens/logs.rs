@@ -2,6 +2,7 @@
 
 #![allow(dead_code)] // Screen components for future use
 
+use chrono::{DateTime, Local};
 use ratatui::{prelude::*, widgets::*};
 use serde_json;
 
@@ -35,6 +36,33 @@ impl LogEntry {
         }
 
         serde_json::to_string_pretty(&json).unwrap_or_else(|_| format!("{:?}", self))
+    }
+}
+
+/// Convert ISO 8601 UTC timestamp to local time display string (HH:MM:SS)
+fn format_timestamp_local(timestamp: &str) -> String {
+    if let Ok(utc_time) = DateTime::parse_from_rfc3339(timestamp) {
+        let local_time: DateTime<Local> = utc_time.with_timezone(&Local);
+        local_time.format("%H:%M:%S").to_string()
+    } else {
+        // Fallback: extract HH:MM:SS from string
+        if let Some(t_pos) = timestamp.find('T') {
+            let time_part = &timestamp[t_pos + 1..];
+            if time_part.len() >= 8 {
+                return time_part[..8].to_string();
+            }
+        }
+        timestamp.to_string()
+    }
+}
+
+/// Format full timestamp for detail view (YYYY-MM-DD HH:MM:SS TZ)
+fn format_full_timestamp_local(timestamp: &str) -> String {
+    if let Ok(utc_time) = DateTime::parse_from_rfc3339(timestamp) {
+        let local_time: DateTime<Local> = utc_time.with_timezone(&Local);
+        local_time.format("%Y-%m-%d %H:%M:%S %Z").to_string()
+    } else {
+        timestamp.to_string()
     }
 }
 
@@ -322,22 +350,8 @@ fn render_log_entry(entry: &LogEntry, is_selected: bool) -> ListItem<'static> {
         _ => Style::default(),
     };
 
-    // Extract time part from timestamp if possible
-    let time_display = if entry.timestamp.len() >= 8 {
-        // Try to extract HH:MM:SS from ISO timestamp
-        if let Some(t_pos) = entry.timestamp.find('T') {
-            let time_part = &entry.timestamp[t_pos + 1..];
-            if time_part.len() >= 8 {
-                time_part[..8].to_string()
-            } else {
-                entry.timestamp.clone()
-            }
-        } else {
-            entry.timestamp.clone()
-        }
-    } else {
-        entry.timestamp.clone()
-    };
+    // Convert UTC timestamp to local time
+    let time_display = format_timestamp_local(&entry.timestamp);
 
     let spans = vec![
         Span::styled(
@@ -408,7 +422,7 @@ fn render_detail_view(entry: &LogEntry, frame: &mut Frame, area: Rect) {
     let mut lines = vec![
         Line::from(vec![
             Span::styled("Timestamp: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(&entry.timestamp),
+            Span::raw(format_full_timestamp_local(&entry.timestamp)),
         ]),
         Line::from(vec![
             Span::styled("Level:     ", Style::default().add_modifier(Modifier::BOLD)),

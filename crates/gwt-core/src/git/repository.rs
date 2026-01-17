@@ -23,7 +23,7 @@ impl Repository {
         match gix::discover(path) {
             Ok(repo) => {
                 let root = repo
-                    .work_dir()
+                    .workdir()
                     .map(|p| p.to_path_buf())
                     .unwrap_or_else(|| repo.git_dir().to_path_buf());
                 Ok(Self {
@@ -58,7 +58,7 @@ impl Repository {
         let path = path.as_ref();
         match gix::open(path) {
             Ok(repo) => {
-                let work_dir = repo.work_dir().map(|p| p.to_path_buf());
+                let work_dir = repo.workdir().map(|p| p.to_path_buf());
                 let git_dir = repo.git_dir().to_path_buf();
                 let root = work_dir.clone().unwrap_or_else(|| git_dir.clone());
 

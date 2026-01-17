@@ -20,6 +20,13 @@
 - [x] **T3121** [US13] `crates/gwt-cli/src/tui.rs` / `crates/gwt-cli/src/tui/app.rs` に起動結果のコンテキスト注入を追加し、成功/失敗メッセージを表示できるようにする
 - [x] **T3122** [US13] `crates/gwt-cli/src/main.rs` の対話ループを更新し、起動終了後にブランチ一覧へ復帰する
 
+## ユーザーストーリー14 - 起動/終了時のTUI遷移が固まらない (優先度: P1)
+
+- [x] **T3201** [P] [US14] `crates/gwt-cli/src/main.rs` に起動開始メッセージの即時出力を検証するテストを追加する
+- [x] **T3202** [P] [US14] `crates/gwt-cli/src/main.rs` にセッション更新停止時の待機遅延が短いことを検証するテストを追加する
+- [x] **T3203** [US14] `crates/gwt-cli/src/main.rs` で起動開始メッセージを依存インストール前に出力する
+- [x] **T3204** [US14] `crates/gwt-cli/src/main.rs` のセッション更新待機を停止シグナルで即時解除できるようにする
+
 ## ユーザーストーリー1 - デフォルト起動ログの整備 (優先度: P1)
 
 - [x] **T3131** [P] [US1] `crates/gwt-cli/src/main.rs` に起動ログの整形ヘルパーを追加し、Working directory/Model/Reasoning/Mode/Skip/Args/Version/実行方法が出力されることをテストする
@@ -33,6 +40,7 @@
 ## 統合
 
 - [x] **T3190** [統合] `cargo build --release` を実行してビルド確認する
+- [x] **T3205** [統合] `cargo test -p gwt-cli` と `cargo build --release` を実行して失敗がないことを確認する
 
 ## 追加作業: Codexモデル/スキップ権限の互換修正 (2026-01-14)
 

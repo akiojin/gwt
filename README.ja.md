@@ -315,7 +315,7 @@ cargo run
 
 ## リリースプロセス
 
-利用者の方は GitHub Releases もしくは npm で公開される最新版をご利用ください。リリース自動化の概要は [docs/release-guide.md](./docs/release-guide.md)（日本語版: [docs/release-guide.ja.md](./docs/release-guide.ja.md)）にまとめています。
+利用者の方は GitHub Releases もしくは npm で公開される最新版をご利用ください。メンテナ向けのリリースフロー要件は `specs/SPEC-77b1bc70/spec.md` を参照してください。
 
 ## トラブルシューティング
 
