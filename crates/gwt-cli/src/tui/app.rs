@@ -501,24 +501,15 @@ impl Model {
                 let mut is_unmerged = false;
                 let mut safe_to_cleanup = false;
 
+                // Check for unpushed commits (skip if upstream is not configured)
                 let unpushed_result =
                     Branch::divergence_between(&repo_root, &target.branch, &target.upstream);
-                match unpushed_result {
-                    Ok((ahead, _)) => {
-                        if ahead > 0 {
-                            has_unpushed = true;
-                        }
-                    }
-                    Err(_) => {
-                        let _ = tx.send(SafetyUpdate {
-                            branch: target.branch,
-                            has_unpushed,
-                            is_unmerged,
-                            safe_to_cleanup,
-                        });
-                        continue;
+                if let Ok((ahead, _)) = unpushed_result {
+                    if ahead > 0 {
+                        has_unpushed = true;
                     }
                 }
+                // If upstream is not configured, continue to check against base branch
 
                 if has_unpushed {
                     let _ = tx.send(SafetyUpdate {
