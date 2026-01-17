@@ -103,7 +103,7 @@ struct SafetyUpdate {
 
 struct SafetyCheckTarget {
     branch: String,
-    upstream: String,
+    upstream: Option<String>,
 }
 
 struct WorktreeStatusUpdate {
@@ -412,16 +412,15 @@ impl Model {
 
                     // Safety check short-circuit: use immediate signals first
                     if item.branch_type == BranchType::Local {
-                        if !b.has_remote || !base_branch_exists {
+                        if !base_branch_exists {
                             item.safe_to_cleanup = Some(false);
-                        } else if let Some(upstream) = b.upstream.clone() {
+                        } else {
+                            // Check safety even without upstream (FR-004b)
                             item.safe_to_cleanup = None;
                             safety_targets.push(SafetyCheckTarget {
                                 branch: b.name.clone(),
-                                upstream,
+                                upstream: b.upstream.clone(),
                             });
-                        } else {
-                            item.safe_to_cleanup = Some(false);
                         }
                     }
 
@@ -501,24 +500,17 @@ impl Model {
                 let mut is_unmerged = false;
                 let mut safe_to_cleanup = false;
 
-                let unpushed_result =
-                    Branch::divergence_between(&repo_root, &target.branch, &target.upstream);
-                match unpushed_result {
-                    Ok((ahead, _)) => {
+                // Check for unpushed commits (skip if upstream is not configured)
+                if let Some(ref upstream) = target.upstream {
+                    if let Ok((ahead, _)) =
+                        Branch::divergence_between(&repo_root, &target.branch, upstream)
+                    {
                         if ahead > 0 {
                             has_unpushed = true;
                         }
                     }
-                    Err(_) => {
-                        let _ = tx.send(SafetyUpdate {
-                            branch: target.branch,
-                            has_unpushed,
-                            is_unmerged,
-                            safe_to_cleanup,
-                        });
-                        continue;
-                    }
                 }
+                // If upstream is not configured, continue to check against base branch
 
                 if has_unpushed {
                     let _ = tx.send(SafetyUpdate {
