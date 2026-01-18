@@ -1610,13 +1610,25 @@ impl Model {
         let working_dir = config.worktree_path.to_string_lossy().to_string();
 
         // Determine the agent command based on version (FR-063)
-        // - "latest": use bunx <npm_package>
         // - "installed": use direct binary name
-        // - specific version: use npx <npm_package>@<version>
-        let agent_name = match config.version.as_str() {
-            "latest" => format!("bunx {}", config.agent.npm_package()),
-            "installed" => config.agent.id().to_string(),
-            version => format!("npx {}@{}", config.agent.npm_package(), version),
+        // - "latest" or specific version: use bunx (or npx fallback) with package spec
+        let agent_name = if config.version == "installed" {
+            // Use direct binary name for installed version
+            config.agent.id().to_string()
+        } else {
+            // Try bunx first, then npx as fallback (same logic as single mode)
+            let runner = which::which("bunx")
+                .or_else(|_| which::which("npx"))
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| "bunx".to_string());
+
+            let package_spec = if config.version == "latest" {
+                format!("{}@latest", config.agent.npm_package())
+            } else {
+                format!("{}@{}", config.agent.npm_package(), config.version)
+            };
+
+            format!("{} {}", runner, package_spec)
         };
 
         // Build the agent command
