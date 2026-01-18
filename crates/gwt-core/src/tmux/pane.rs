@@ -13,6 +13,8 @@ pub struct PaneInfo {
     pub pane_id: String,
     pub pane_pid: u32,
     pub current_command: String,
+    /// Current working directory of the pane
+    pub current_path: Option<String>,
 }
 
 /// Represents an agent running in a tmux pane
@@ -125,7 +127,7 @@ pub fn list_panes(session: &str) -> TmuxResult<Vec<PaneInfo>> {
             "-t",
             session,
             "-F",
-            "#{pane_id}:#{pane_pid}:#{pane_current_command}",
+            "#{pane_id}:#{pane_pid}:#{pane_current_command}:#{pane_current_path}",
         ])
         .output()
         .map_err(|e| TmuxError::CommandFailed {
@@ -146,17 +148,19 @@ pub fn list_panes(session: &str) -> TmuxResult<Vec<PaneInfo>> {
 }
 
 /// Parse tmux list-panes output
+/// Format: pane_id:pane_pid:current_command:current_path
 pub fn parse_pane_list(output: &str) -> Vec<PaneInfo> {
     output
         .lines()
         .filter(|line| !line.is_empty())
         .filter_map(|line| {
-            let parts: Vec<&str> = line.splitn(3, ':').collect();
+            let parts: Vec<&str> = line.splitn(4, ':').collect();
             if parts.len() >= 3 {
                 Some(PaneInfo {
                     pane_id: parts[0].to_string(),
                     pane_pid: parts[1].parse().unwrap_or(0),
                     current_command: parts[2].to_string(),
+                    current_path: parts.get(3).map(|s| s.to_string()),
                 })
             } else {
                 None
@@ -418,6 +422,85 @@ pub fn is_process_running(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
+/// Detect orphaned agent panes and match them to worktrees
+///
+/// This function is used to reconnect to existing agent panes when gwt restarts.
+/// It scans all panes in the session and matches their working directory to worktree paths.
+///
+/// # Arguments
+/// * `session` - The tmux session name
+/// * `worktrees` - A slice of (branch_name, worktree_path) tuples
+/// * `gwt_pane_id` - The pane ID of the gwt TUI (to exclude from detection)
+///
+/// # Returns
+/// A vector of AgentPane for each pane whose current_path matches a worktree path
+pub fn detect_orphaned_panes(
+    session: &str,
+    worktrees: &[(String, std::path::PathBuf)],
+    gwt_pane_id: Option<&str>,
+) -> TmuxResult<Vec<AgentPane>> {
+    let panes = list_panes(session)?;
+    let mut agents = Vec::new();
+
+    for pane in panes {
+        // Skip the gwt pane itself
+        if let Some(gwt_id) = gwt_pane_id {
+            if pane.pane_id == gwt_id {
+                continue;
+            }
+        }
+
+        if let Some(current_path) = &pane.current_path {
+            // Check if current_path matches any worktree path
+            for (branch_name, worktree_path) in worktrees {
+                let worktree_str = worktree_path.to_string_lossy();
+                if current_path == worktree_str.as_ref() {
+                    // Found a match - create AgentPane
+                    // Detect agent name from the command
+                    if let Some(agent_name) = detect_agent_name(&pane.current_command) {
+                        agents.push(AgentPane::new(
+                            pane.pane_id.clone(),
+                            branch_name.clone(),
+                            agent_name,
+                            SystemTime::now(), // We don't know the actual start time
+                            pane.pane_pid,
+                        ));
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    Ok(agents)
+}
+
+/// Detect agent name from the pane's current command
+fn detect_agent_name(command: &str) -> Option<String> {
+    let cmd_lower = command.to_lowercase();
+
+    // Known agent commands
+    if cmd_lower.contains("claude") {
+        Some("claude".to_string())
+    } else if cmd_lower.contains("codex") {
+        Some("codex".to_string())
+    } else if cmd_lower.contains("aider") {
+        Some("aider".to_string())
+    } else if cmd_lower.contains("cursor") {
+        Some("cursor".to_string())
+    } else if cmd_lower.contains("cline") {
+        Some("cline".to_string())
+    } else if cmd_lower.contains("copilot") {
+        Some("copilot".to_string())
+    } else if cmd_lower.contains("gemini") {
+        Some("gemini".to_string())
+    } else if cmd_lower.contains("gpt") {
+        Some("gpt".to_string())
+    } else {
+        None // Not a recognized agent
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -484,14 +567,30 @@ mod tests {
 
     #[test]
     fn test_parse_pane_list_output() {
-        let output = "0:12345:bash\n1:12346:claude\n2:12347:codex";
+        let output =
+            "0:12345:bash:/home/user\n1:12346:claude:/home/user/project\n2:12347:codex:/tmp";
         let panes = parse_pane_list(output);
         assert_eq!(panes.len(), 3);
         assert_eq!(panes[0].pane_id, "0");
         assert_eq!(panes[0].pane_pid, 12345);
         assert_eq!(panes[0].current_command, "bash");
+        assert_eq!(panes[0].current_path, Some("/home/user".to_string()));
         assert_eq!(panes[1].pane_id, "1");
         assert_eq!(panes[1].current_command, "claude");
+        assert_eq!(
+            panes[1].current_path,
+            Some("/home/user/project".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_pane_list_without_path() {
+        // Legacy format without current_path
+        let output = "0:12345:bash\n1:12346:claude";
+        let panes = parse_pane_list(output);
+        assert_eq!(panes.len(), 2);
+        assert_eq!(panes[0].current_path, None);
+        assert_eq!(panes[1].current_path, None);
     }
 
     #[test]
@@ -619,5 +718,32 @@ mod tests {
         pane.background_window = None;
         assert!(!pane.is_background);
         assert!(pane.background_window.is_none());
+    }
+
+    #[test]
+    fn test_detect_agent_name_known_agents() {
+        assert_eq!(detect_agent_name("claude"), Some("claude".to_string()));
+        assert_eq!(detect_agent_name("Claude"), Some("claude".to_string()));
+        assert_eq!(detect_agent_name("codex"), Some("codex".to_string()));
+        assert_eq!(detect_agent_name("aider"), Some("aider".to_string()));
+        assert_eq!(detect_agent_name("cursor"), Some("cursor".to_string()));
+        assert_eq!(detect_agent_name("cline"), Some("cline".to_string()));
+        assert_eq!(detect_agent_name("copilot"), Some("copilot".to_string()));
+        assert_eq!(detect_agent_name("gemini"), Some("gemini".to_string()));
+        assert_eq!(detect_agent_name("gpt"), Some("gpt".to_string()));
+    }
+
+    #[test]
+    fn test_detect_agent_name_unknown() {
+        assert_eq!(detect_agent_name("bash"), None);
+        assert_eq!(detect_agent_name("vim"), None);
+        assert_eq!(detect_agent_name("zsh"), None);
+    }
+
+    #[test]
+    fn test_detect_agent_name_case_insensitive() {
+        assert_eq!(detect_agent_name("CLAUDE"), Some("claude".to_string()));
+        assert_eq!(detect_agent_name("Claude"), Some("claude".to_string()));
+        assert_eq!(detect_agent_name("CODEX"), Some("codex".to_string()));
     }
 }

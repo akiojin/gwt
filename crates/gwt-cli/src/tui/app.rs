@@ -353,6 +353,10 @@ impl Model {
 
         // Load initial data
         model.refresh_data();
+
+        // Reconnect to orphaned agent panes (FR-060~062)
+        model.reconnect_orphaned_panes();
+
         model.apply_entry_context(context);
         model
     }
@@ -642,6 +646,70 @@ impl Model {
                 });
             }
         });
+    }
+
+    /// Reconnect to orphaned agent panes on startup (FR-060~062)
+    ///
+    /// This function detects panes that were running before gwt restarted
+    /// by matching their working directory to worktree paths.
+    fn reconnect_orphaned_panes(&mut self) {
+        // Only in tmux multi-mode
+        if !self.tmux_mode.is_multi() {
+            return;
+        }
+
+        let Some(session) = &self.tmux_session else {
+            return;
+        };
+
+        // Get worktree list synchronously for matching
+        let worktrees: Vec<(String, std::path::PathBuf)> =
+            match WorktreeManager::new(&self.repo_root) {
+                Ok(manager) => match manager.list_basic() {
+                    Ok(wts) => wts
+                        .into_iter()
+                        .filter_map(|wt| wt.branch.map(|b| (b, wt.path)))
+                        .collect(),
+                    Err(_) => return,
+                },
+                Err(_) => return,
+            };
+
+        if worktrees.is_empty() {
+            return;
+        }
+
+        // Detect orphaned panes
+        let gwt_pane_id = self.gwt_pane_id.as_deref();
+        match gwt_core::tmux::detect_orphaned_panes(session, &worktrees, gwt_pane_id) {
+            Ok(orphaned_panes) => {
+                if !orphaned_panes.is_empty() {
+                    debug!(
+                        category = "tui",
+                        count = orphaned_panes.len(),
+                        "Reconnected to orphaned agent panes"
+                    );
+
+                    for pane in orphaned_panes {
+                        // Add to agent_panes list
+                        self.agent_panes.push(pane.pane_id.clone());
+                        // Add to pane_list for display
+                        self.pane_list.panes.push(pane);
+                    }
+
+                    // Update branch_list running_agents
+                    self.branch_list
+                        .update_running_agents(&self.pane_list.panes);
+                }
+            }
+            Err(e) => {
+                debug!(
+                    category = "tui",
+                    error = %e,
+                    "Failed to detect orphaned panes"
+                );
+            }
+        }
     }
 
     fn apply_entry_context(&mut self, context: Option<TuiEntryContext>) {

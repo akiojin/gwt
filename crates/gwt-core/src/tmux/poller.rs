@@ -318,6 +318,7 @@ mod tests {
             pane_id: "1".to_string(),
             pane_pid: 12345,
             current_command: "claude".to_string(),
+            current_path: None,
         }];
 
         let closed = registry.update_from_pane_info(&pane_infos);
