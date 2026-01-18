@@ -1091,7 +1091,15 @@ impl Model {
             },
             Message::Enter => match &self.screen {
                 Screen::BranchList => {
-                    if self.branch_list.filter_mode {
+                    if self.split_layout.pane_list_has_focus() {
+                        // FR-040: Enter on pane list focuses the selected pane
+                        if let Some(pane) = self.pane_list.panes.get(self.pane_list.selected) {
+                            if let Err(e) = gwt_core::tmux::pane::select_pane(&pane.pane_id) {
+                                self.status_message = Some(format!("Failed to focus pane: {}", e));
+                                self.status_message_time = Some(Instant::now());
+                            }
+                        }
+                    } else if self.branch_list.filter_mode {
                         // FR-020: Enter in filter mode exits filter mode
                         self.branch_list.exit_filter_mode();
                     } else {
