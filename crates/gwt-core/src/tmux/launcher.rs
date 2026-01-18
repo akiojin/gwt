@@ -205,29 +205,76 @@ pub fn build_agent_command(
     }
 }
 
+/// Get locale environment variables from current process
+///
+/// Returns a list of locale-related environment variables that should be
+/// preserved when launching new panes to avoid encoding issues.
+fn get_locale_env_vars() -> Vec<(String, String)> {
+    const LOCALE_KEYS: &[&str] = &[
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "LC_MESSAGES",
+        "LC_COLLATE",
+        "LC_TIME",
+        "LC_NUMERIC",
+        "LC_MONETARY",
+    ];
+
+    LOCALE_KEYS
+        .iter()
+        .filter_map(|key| std::env::var(key).ok().map(|value| (key.to_string(), value)))
+        .collect()
+}
+
+/// Build locale setup command string
+#[cfg(test)]
+fn build_locale_setup(locale_vars: &[(String, String)]) -> String {
+    locale_vars
+        .iter()
+        .map(|(key, value)| {
+            let escaped_value = value.replace('\'', "'\\''");
+            format!("export {}='{}'", key, escaped_value)
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 /// Launch a command in a new tmux pane (simplified API)
 ///
 /// Creates a new pane below the current one and executes the command.
 /// Uses remain-on-exit to keep the pane visible if the command fails,
 /// allowing the user to see error messages.
+/// Automatically inherits locale environment variables to prevent encoding issues.
 ///
 /// Returns the pane ID of the newly created pane.
 pub fn launch_in_pane(target_pane: &str, working_dir: &str, command: &str) -> TmuxResult<String> {
-    // Create the pane first, then set remain-on-exit and run command
-    // This ensures we can see errors if the command fails
+    // Build args with locale environment variables passed via -e option
+    let locale_vars = get_locale_env_vars();
+    let mut args = vec![
+        "split-window".to_string(),
+        "-v".to_string(), // vertical split (below current pane)
+        "-d".to_string(), // don't switch to new pane (keep focus on gwt)
+        "-t".to_string(),
+        target_pane.to_string(),
+        "-c".to_string(),
+        working_dir.to_string(),
+    ];
+
+    // Add locale environment variables via -e option (tmux 3.0+)
+    for (key, value) in &locale_vars {
+        args.push("-e".to_string());
+        args.push(format!("{}={}", key, value));
+    }
+
+    // Add output format options
+    args.push("-P".to_string()); // print pane info
+    args.push("-F".to_string());
+    args.push("#{pane_id}".to_string());
+
+    // Create the pane
     let output = Command::new("tmux")
-        .args([
-            "split-window",
-            "-v", // vertical split (below current pane)
-            "-d", // don't switch to new pane (keep focus on gwt)
-            "-t",
-            target_pane,
-            "-c",
-            working_dir,
-            "-P", // print pane info
-            "-F",
-            "#{pane_id}",
-        ])
+        .args(&args)
         .output()
         .map_err(|e| TmuxError::PaneCreateFailed {
             reason: e.to_string(),
@@ -259,6 +306,7 @@ pub fn launch_in_pane(target_pane: &str, working_dir: &str, command: &str) -> Tm
 ///
 /// Creates a new pane to the right of the target pane and executes the command.
 /// Uses remain-on-exit to keep the pane visible if the command fails.
+/// Automatically inherits locale environment variables to prevent encoding issues.
 ///
 /// Returns the pane ID of the newly created pane.
 pub fn launch_in_pane_beside(
@@ -266,20 +314,32 @@ pub fn launch_in_pane_beside(
     working_dir: &str,
     command: &str,
 ) -> TmuxResult<String> {
-    // Create the pane first, then set remain-on-exit and run command
+    // Build args with locale environment variables passed via -e option
+    let locale_vars = get_locale_env_vars();
+    let mut args = vec![
+        "split-window".to_string(),
+        "-h".to_string(), // horizontal split (beside target pane)
+        "-d".to_string(), // don't switch to new pane (keep focus on gwt)
+        "-t".to_string(),
+        target_pane.to_string(),
+        "-c".to_string(),
+        working_dir.to_string(),
+    ];
+
+    // Add locale environment variables via -e option (tmux 3.0+)
+    for (key, value) in &locale_vars {
+        args.push("-e".to_string());
+        args.push(format!("{}={}", key, value));
+    }
+
+    // Add output format options
+    args.push("-P".to_string()); // print pane info
+    args.push("-F".to_string());
+    args.push("#{pane_id}".to_string());
+
+    // Create the pane
     let output = Command::new("tmux")
-        .args([
-            "split-window",
-            "-h", // horizontal split (beside target pane)
-            "-d", // don't switch to new pane (keep focus on gwt)
-            "-t",
-            target_pane,
-            "-c",
-            working_dir,
-            "-P", // print pane info
-            "-F",
-            "#{pane_id}",
-        ])
+        .args(&args)
         .output()
         .map_err(|e| TmuxError::PaneCreateFailed {
             reason: e.to_string(),
@@ -477,5 +537,53 @@ mod tests {
         let cmd = build_agent_command("claude", Some(""), None, "normal", None, false, &[]);
         assert_eq!(cmd, "claude");
         assert!(!cmd.contains("--model"));
+    }
+
+    #[test]
+    fn test_build_locale_setup_empty() {
+        let result = build_locale_setup(&[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_build_locale_setup_with_vars() {
+        let vars = vec![
+            ("LANG".to_string(), "en_US.UTF-8".to_string()),
+            ("LC_ALL".to_string(), "en_US.UTF-8".to_string()),
+        ];
+        let result = build_locale_setup(&vars);
+        assert!(result.contains("export LANG='en_US.UTF-8'"));
+        assert!(result.contains("export LC_ALL='en_US.UTF-8'"));
+    }
+
+    #[test]
+    fn test_build_locale_setup_escape_quotes() {
+        let vars = vec![("LANG".to_string(), "it's".to_string())];
+        let result = build_locale_setup(&vars);
+        assert!(result.contains("'it'\\''s'"));
+    }
+
+    #[test]
+    fn test_get_locale_env_vars() {
+        // This test verifies the function doesn't panic and returns a valid structure
+        let vars = get_locale_env_vars();
+        // All returned keys should be valid locale keys
+        let valid_keys = [
+            "LANG",
+            "LC_ALL",
+            "LC_CTYPE",
+            "LC_MESSAGES",
+            "LC_COLLATE",
+            "LC_TIME",
+            "LC_NUMERIC",
+            "LC_MONETARY",
+        ];
+        for (key, _) in &vars {
+            assert!(
+                valid_keys.contains(&key.as_str()),
+                "Unexpected key: {}",
+                key
+            );
+        }
     }
 }
