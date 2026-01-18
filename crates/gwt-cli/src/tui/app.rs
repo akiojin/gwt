@@ -542,11 +542,13 @@ impl Model {
                     continue;
                 }
 
-                if let Ok((ahead, _)) =
-                    Branch::divergence_between(&repo_root, &target.branch, &base_branch)
+                // Check if branch is merged into base using merge-base --is-ancestor
+                // This correctly handles cases where base_branch has advanced beyond the merge point
+                if let Ok(is_merged) =
+                    Branch::is_merged_into(&repo_root, &target.branch, &base_branch)
                 {
-                    is_unmerged = ahead > 0;
-                    safe_to_cleanup = !is_unmerged;
+                    is_unmerged = !is_merged;
+                    safe_to_cleanup = is_merged;
                 }
 
                 let _ = tx.send(SafetyUpdate {
