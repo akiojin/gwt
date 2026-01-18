@@ -205,6 +205,8 @@ pub struct Model {
     pane_list: PaneListState,
     /// Split layout state for tmux multi-mode
     split_layout: SplitLayoutState,
+    /// Last time pane list was updated (for 1-second polling)
+    last_pane_update: Option<Instant>,
 }
 
 /// Screen types
@@ -321,6 +323,7 @@ impl Model {
             agent_panes: Vec::new(),
             pane_list: PaneListState::new(),
             split_layout: SplitLayoutState::new(),
+            last_pane_update: None,
         };
 
         // Initialize tmux session if in multi mode
@@ -749,6 +752,53 @@ impl Model {
         }
     }
 
+    /// FR-033: Update pane list by polling tmux (1-second interval)
+    fn update_pane_list(&mut self) {
+        // Only in tmux multi mode with panes
+        if !self.tmux_mode.is_multi() || self.pane_list.panes.is_empty() {
+            return;
+        }
+
+        // Check if 1 second has passed since last update
+        let now = Instant::now();
+        if let Some(last) = self.last_pane_update {
+            if now.duration_since(last) < Duration::from_secs(1) {
+                return;
+            }
+        }
+        self.last_pane_update = Some(now);
+
+        // Get current tmux panes
+        let Some(session) = &self.tmux_session else {
+            return;
+        };
+
+        let Ok(current_panes) = gwt_core::tmux::pane::list_panes(session) else {
+            return;
+        };
+
+        // Filter out panes that no longer exist
+        let current_pane_ids: std::collections::HashSet<_> =
+            current_panes.iter().map(|p| p.pane_id.as_str()).collect();
+
+        let remaining_panes: Vec<_> = self
+            .pane_list
+            .panes
+            .iter()
+            .filter(|p| current_pane_ids.contains(p.pane_id.as_str()))
+            .cloned()
+            .collect();
+
+        // Also update agent_panes list
+        self.agent_panes
+            .retain(|id| current_pane_ids.contains(id.as_str()));
+
+        // Update if any panes were removed
+        if remaining_panes.len() != self.pane_list.panes.len() {
+            self.pane_list.update_panes(remaining_panes);
+        }
+    }
+
     fn load_profiles(&mut self) {
         let profiles_config = ProfilesConfig::load().unwrap_or_default();
         self.profiles_config = profiles_config.clone();
@@ -1028,6 +1078,8 @@ impl Model {
                 self.apply_pr_title_updates();
                 self.apply_safety_updates();
                 self.apply_worktree_updates();
+                // FR-033: Update pane list every 1 second in tmux multi mode
+                self.update_pane_list();
             }
             Message::SelectNext => match self.screen {
                 Screen::BranchList => {
