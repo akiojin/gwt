@@ -275,19 +275,12 @@ fn build_locale_setup(locale_vars: &[(String, String)]) -> String {
 ///
 /// Creates a new pane below the current one and executes the command.
 /// The pane automatically closes when the command exits (FR-052).
-/// Automatically inherits locale environment variables to prevent encoding issues.
+/// Automatically inherits locale and terminal environment variables to prevent encoding issues.
 ///
 /// Returns the pane ID of the newly created pane.
 pub fn launch_in_pane(target_pane: &str, working_dir: &str, command: &str) -> TmuxResult<String> {
-    // Get user's shell, fallback to bash
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-
-    // Build the shell command that runs as login shell to load locale settings
-    // Using login shell (-l) ensures .bash_profile/.zprofile etc. are loaded
-    let shell_command = format!("{} -lc '{}'", shell, command.replace('\'', "'\\''"));
-
-    // Build args with locale environment variables passed via -e option
-    let locale_vars = get_locale_env_vars();
+    // Build args with environment variables passed via -e option
+    let env_vars = get_locale_env_vars();
     let mut args = vec![
         "split-window".to_string(),
         "-v".to_string(), // vertical split (below current pane)
@@ -298,8 +291,8 @@ pub fn launch_in_pane(target_pane: &str, working_dir: &str, command: &str) -> Tm
         working_dir.to_string(),
     ];
 
-    // Add locale environment variables via -e option (tmux 3.0+)
-    for (key, value) in &locale_vars {
+    // Add environment variables via -e option (tmux 3.0+)
+    for (key, value) in &env_vars {
         args.push("-e".to_string());
         args.push(format!("{}={}", key, value));
     }
@@ -309,10 +302,7 @@ pub fn launch_in_pane(target_pane: &str, working_dir: &str, command: &str) -> Tm
     args.push("-F".to_string());
     args.push("#{pane_id}".to_string());
 
-    // Add the shell command to execute directly
-    args.push(shell_command);
-
-    // Create the pane with the command
+    // Create the pane (starts an interactive shell)
     let output = Command::new("tmux")
         .args(&args)
         .output()
@@ -329,6 +319,18 @@ pub fn launch_in_pane(target_pane: &str, working_dir: &str, command: &str) -> Tm
 
     let pane_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
+    // Set remain-on-exit off so pane auto-closes when command exits (FR-052)
+    let _ = Command::new("tmux")
+        .args(["set-option", "-t", &pane_id, "remain-on-exit", "off"])
+        .output();
+
+    // Send the command to the new pane via send-keys
+    // This ensures stdin/stdout are properly connected to the terminal
+    let command_with_exit = format!("{}; exit", command);
+    let _ = Command::new("tmux")
+        .args(["send-keys", "-t", &pane_id, &command_with_exit, "Enter"])
+        .output();
+
     Ok(pane_id)
 }
 
@@ -336,7 +338,7 @@ pub fn launch_in_pane(target_pane: &str, working_dir: &str, command: &str) -> Tm
 ///
 /// Creates a new pane to the right of the target pane and executes the command.
 /// The pane automatically closes when the command exits (FR-052).
-/// Automatically inherits locale environment variables to prevent encoding issues.
+/// Automatically inherits locale and terminal environment variables to prevent encoding issues.
 ///
 /// Returns the pane ID of the newly created pane.
 pub fn launch_in_pane_beside(
@@ -344,15 +346,8 @@ pub fn launch_in_pane_beside(
     working_dir: &str,
     command: &str,
 ) -> TmuxResult<String> {
-    // Get user's shell, fallback to bash
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-
-    // Build the shell command that runs as login shell to load locale settings
-    // Using login shell (-l) ensures .bash_profile/.zprofile etc. are loaded
-    let shell_command = format!("{} -lc '{}'", shell, command.replace('\'', "'\\''"));
-
-    // Build args with locale environment variables passed via -e option
-    let locale_vars = get_locale_env_vars();
+    // Build args with environment variables passed via -e option
+    let env_vars = get_locale_env_vars();
     let mut args = vec![
         "split-window".to_string(),
         "-h".to_string(), // horizontal split (beside target pane)
@@ -363,8 +358,8 @@ pub fn launch_in_pane_beside(
         working_dir.to_string(),
     ];
 
-    // Add locale environment variables via -e option (tmux 3.0+)
-    for (key, value) in &locale_vars {
+    // Add environment variables via -e option (tmux 3.0+)
+    for (key, value) in &env_vars {
         args.push("-e".to_string());
         args.push(format!("{}={}", key, value));
     }
@@ -374,10 +369,7 @@ pub fn launch_in_pane_beside(
     args.push("-F".to_string());
     args.push("#{pane_id}".to_string());
 
-    // Add the shell command to execute directly
-    args.push(shell_command);
-
-    // Create the pane with the command
+    // Create the pane (starts an interactive shell)
     let output = Command::new("tmux")
         .args(&args)
         .output()
@@ -393,6 +385,18 @@ pub fn launch_in_pane_beside(
     }
 
     let pane_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    // Set remain-on-exit off so pane auto-closes when command exits (FR-052)
+    let _ = Command::new("tmux")
+        .args(["set-option", "-t", &pane_id, "remain-on-exit", "off"])
+        .output();
+
+    // Send the command to the new pane via send-keys
+    // This ensures stdin/stdout are properly connected to the terminal
+    let command_with_exit = format!("{}; exit", command);
+    let _ = Command::new("tmux")
+        .args(["send-keys", "-t", &pane_id, &command_with_exit, "Enter"])
+        .output();
 
     Ok(pane_id)
 }
