@@ -318,7 +318,7 @@ impl BranchItem {
 const SPINNER_FRAMES: &[char] = &['|', '/', '-', '\\'];
 
 /// Branch list state
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct BranchListState {
     pub branches: Vec<BranchItem>,
     pub filtered_indices: Vec<usize>,
@@ -340,6 +340,36 @@ pub struct BranchListState {
     pub status_progress_total: usize,
     pub status_progress_done: usize,
     pub status_progress_active: bool,
+    /// Viewport height for scroll calculations (updated by renderer)
+    pub visible_height: usize,
+}
+
+impl Default for BranchListState {
+    fn default() -> Self {
+        Self {
+            branches: Vec::new(),
+            filtered_indices: Vec::new(),
+            selected: 0,
+            offset: 0,
+            filter: String::new(),
+            filter_mode: false,
+            view_mode: ViewMode::default(),
+            selected_branches: HashSet::new(),
+            stats: Statistics::default(),
+            is_loading: false,
+            loading_started: None,
+            error: None,
+            version: None,
+            working_directory: None,
+            active_profile: None,
+            spinner_frame: 0,
+            filter_cache_version: 0,
+            status_progress_total: 0,
+            status_progress_done: 0,
+            status_progress_active: false,
+            visible_height: 15, // Default fallback (previously hardcoded)
+        }
+    }
 }
 
 impl BranchListState {
@@ -609,13 +639,22 @@ impl BranchListState {
         self.ensure_visible();
     }
 
-    /// Ensure selected item is visible
+    /// Ensure selected item is visible within the viewport
     fn ensure_visible(&mut self) {
-        let visible_window = 15;
+        let visible_window = self.visible_height.max(1);
         if self.selected < self.offset {
             self.offset = self.selected;
         } else if self.selected >= self.offset + visible_window {
             self.offset = self.selected.saturating_sub(visible_window - 1);
+        }
+    }
+
+    /// Update visible height and re-adjust scroll position
+    /// Should be called by renderer when viewport size is known
+    pub fn update_visible_height(&mut self, height: usize) {
+        if self.visible_height != height {
+            self.visible_height = height;
+            self.ensure_visible();
         }
     }
 
@@ -750,7 +789,7 @@ impl BranchListState {
 /// Note: Header, Filter, Mode are rendered by app.rs view_boxed_header
 /// This function only renders: Legend + BranchList + WorktreePath/Status
 pub fn render_branch_list(
-    state: &BranchListState,
+    state: &mut BranchListState,
     frame: &mut Frame,
     area: Rect,
     status_message: Option<&str>,
@@ -764,6 +803,10 @@ pub fn render_branch_list(
             Constraint::Length(1), // Worktree path or Status message
         ])
         .split(area);
+
+    // Calculate visible height from branch list area (accounting for border)
+    let branch_area_height = chunks[1].height.saturating_sub(2) as usize; // -2 for borders
+    state.update_visible_height(branch_area_height);
 
     render_legend_line(frame, chunks[0]);
     render_branches(state, frame, chunks[1], has_focus);
@@ -1247,7 +1290,8 @@ mod tests {
             pr_title: None,
         }];
 
-        let state = BranchListState::new().with_branches(branches);
+        let mut state = BranchListState::new().with_branches(branches);
+        state.update_visible_height(3); // 5 - 2 for borders
         let backend = TestBackend::new(20, 5);
         let mut terminal = Terminal::new(backend).expect("terminal init");
 
@@ -1298,7 +1342,7 @@ mod tests {
         terminal
             .draw(|f| {
                 let area = f.area();
-                render_branch_list(&state, f, area, None, true);
+                render_branch_list(&mut state, f, area, None, true);
             })
             .expect("draw");
 
@@ -1318,7 +1362,7 @@ mod tests {
         terminal
             .draw(|f| {
                 let area = f.area();
-                render_branch_list(&state, f, area, None, true);
+                render_branch_list(&mut state, f, area, None, true);
             })
             .expect("draw");
 
