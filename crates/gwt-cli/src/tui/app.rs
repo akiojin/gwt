@@ -2284,17 +2284,6 @@ impl Model {
             self.screen.clone()
         };
 
-        // Calculate footer height dynamically based on text length
-        let keybinds = self.get_footer_keybinds();
-        let status = self.status_message.as_deref().unwrap_or("");
-        let footer_text_len = if status.is_empty() {
-            keybinds.len() + 2 // " {} " format adds 2 spaces
-        } else {
-            keybinds.len() + status.len() + 5 // " {} | {} " format adds 5 chars
-        };
-        let inner_width = frame.area().width.saturating_sub(2) as usize; // borders
-        let footer_height = if footer_text_len > inner_width { 4 } else { 3 };
-
         // Profiles, Environment, and Logs screens don't need header
         let needs_header = !matches!(
             base_screen,
@@ -2302,12 +2291,29 @@ impl Model {
         );
         let header_height = if needs_header { 6 } else { 0 };
 
+        // BranchList screen doesn't need footer (shortcut legend removed)
+        let needs_footer = !matches!(base_screen, Screen::BranchList);
+        let footer_height = if needs_footer {
+            // Calculate footer height dynamically based on text length
+            let keybinds = self.get_footer_keybinds();
+            let status = self.status_message.as_deref().unwrap_or("");
+            let footer_text_len = if status.is_empty() {
+                keybinds.len() + 2 // " {} " format adds 2 spaces
+            } else {
+                keybinds.len() + status.len() + 5 // " {} | {} " format adds 5 chars
+            };
+            let inner_width = frame.area().width.saturating_sub(2) as usize; // borders
+            if footer_text_len > inner_width { 4 } else { 3 }
+        } else {
+            0
+        };
+
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(header_height), // Header (0 for Profiles/Environment)
                 Constraint::Min(0),                // Content
-                Constraint::Length(footer_height), // Footer (dynamic)
+                Constraint::Length(footer_height), // Footer (0 for BranchList)
             ])
             .split(frame.area());
 
@@ -2351,8 +2357,10 @@ impl Model {
             render_confirm(&self.confirm, frame, chunks[1]);
         }
 
-        // Footer
-        self.view_footer(frame, chunks[2]);
+        // Footer (not for BranchList screen)
+        if needs_footer {
+            self.view_footer(frame, chunks[2]);
+        }
 
         // Wizard overlay (FR-044: popup on top of branch list)
         if self.wizard.visible {

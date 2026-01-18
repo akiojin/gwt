@@ -814,7 +814,7 @@ impl BranchListState {
 
 /// Render branch list screen
 /// Note: Header, Filter, Mode are rendered by app.rs view_boxed_header
-/// This function only renders: Legend + BranchList + WorktreePath/Status
+/// This function only renders: BranchList + WorktreePath/Status
 pub fn render_branch_list(
     state: &mut BranchListState,
     frame: &mut Frame,
@@ -825,19 +825,17 @@ pub fn render_branch_list(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // Legend line
             Constraint::Min(3),    // Branch list (FR-003)
             Constraint::Length(1), // Worktree path or Status message
         ])
         .split(area);
 
     // Calculate visible height from branch list area (accounting for border)
-    let branch_area_height = chunks[1].height.saturating_sub(2) as usize; // -2 for borders
+    let branch_area_height = chunks[0].height.saturating_sub(2) as usize; // -2 for borders
     state.update_visible_height(branch_area_height);
 
-    render_legend_line(frame, chunks[0]);
-    render_branches(state, frame, chunks[1], has_focus);
-    render_worktree_path(state, frame, chunks[2], status_message);
+    render_branches(state, frame, chunks[0], has_focus);
+    render_worktree_path(state, frame, chunks[1], status_message);
 }
 
 /// Render header line (FR-001, FR-001a)
@@ -927,45 +925,6 @@ fn render_stats_line(state: &BranchListState, frame: &mut Frame, area: Rect) {
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
         ),
-    ];
-
-    let line = Line::from(spans);
-    frame.render_widget(Paragraph::new(line), area);
-}
-
-/// Render legend line
-fn render_legend_line(frame: &mut Frame, area: Rect) {
-    let spans = vec![
-        Span::styled("Legend: ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            "o",
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" Safe", Style::default().fg(Color::Green)),
-        Span::styled("  ", Style::default()),
-        Span::styled(
-            "!",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" Uncommitted", Style::default().fg(Color::Red)),
-        Span::styled("  ", Style::default()),
-        Span::styled(
-            "^",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" Unpushed", Style::default().fg(Color::Yellow)),
-        Span::styled("  ", Style::default()),
-        Span::styled(
-            "*",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" Unmerged", Style::default().fg(Color::Yellow)),
     ];
 
     let line = Line::from(spans);
