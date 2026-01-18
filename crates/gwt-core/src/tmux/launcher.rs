@@ -205,11 +205,21 @@ pub fn build_agent_command(
     }
 }
 
-/// Get locale environment variables for UTF-8 support
+/// Get environment variables needed for proper Unicode display in tmux panes
 ///
-/// Returns locale environment variables to ensure UTF-8 encoding in new panes.
+/// Returns locale and terminal environment variables to ensure UTF-8 encoding
+/// and proper Unicode rendering in new panes.
 /// If no locale is configured in the current environment, uses C.UTF-8 as default.
 fn get_locale_env_vars() -> Vec<(String, String)> {
+    let mut vars = Vec::new();
+
+    // Always inherit TERM for proper terminal capabilities (Unicode block elements, etc.)
+    if let Ok(term) = std::env::var("TERM") {
+        if !term.is_empty() {
+            vars.push(("TERM".to_string(), term));
+        }
+    }
+
     // Check if any UTF-8 locale is already set
     let has_utf8_locale = ["LANG", "LC_ALL", "LC_CTYPE"]
         .iter()
@@ -232,22 +242,20 @@ fn get_locale_env_vars() -> Vec<(String, String)> {
             "LC_MONETARY",
         ];
 
-        LOCALE_KEYS
-            .iter()
-            .filter_map(|key| {
-                std::env::var(key)
-                    .ok()
-                    .filter(|v| !v.is_empty())
-                    .map(|value| (key.to_string(), value))
-            })
-            .collect()
+        for key in LOCALE_KEYS {
+            if let Ok(value) = std::env::var(key) {
+                if !value.is_empty() {
+                    vars.push((key.to_string(), value));
+                }
+            }
+        }
     } else {
         // No UTF-8 locale configured, use C.UTF-8 as default
-        vec![
-            ("LANG".to_string(), "C.UTF-8".to_string()),
-            ("LC_ALL".to_string(), "C.UTF-8".to_string()),
-        ]
+        vars.push(("LANG".to_string(), "C.UTF-8".to_string()));
+        vars.push(("LC_ALL".to_string(), "C.UTF-8".to_string()));
     }
+
+    vars
 }
 
 /// Build locale setup command string
@@ -589,8 +597,9 @@ mod tests {
     fn test_get_locale_env_vars() {
         // This test verifies the function doesn't panic and returns a valid structure
         let vars = get_locale_env_vars();
-        // All returned keys should be valid locale keys
+        // All returned keys should be valid environment variable keys
         let valid_keys = [
+            "TERM",
             "LANG",
             "LC_ALL",
             "LC_CTYPE",
