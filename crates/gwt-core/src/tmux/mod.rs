@@ -26,8 +26,8 @@ pub use launcher::{
 pub use logging::{start_logging, stop_logging, LogConfig};
 pub use naming::generate_session_name;
 pub use pane::{
-    force_kill_agent, is_process_running, kill_pane, send_signal, terminate_agent, AgentPane,
-    PaneInfo, TermSignal,
+    force_kill_agent, hide_pane, is_process_running, kill_pane, send_signal, show_pane,
+    terminate_agent, AgentPane, PaneInfo, TermSignal,
 };
 pub use poller::{AgentRegistry, PanePoller, PollMessage, PollerConfig};
 pub use session::TmuxSession;
