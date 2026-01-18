@@ -208,30 +208,25 @@ pub fn build_agent_command(
 /// Launch a command in a new tmux pane (simplified API)
 ///
 /// Creates a new pane below the current one and executes the command.
-/// The command is executed with `exec` to replace the shell process,
-/// ensuring the pane stays open while the agent runs.
+/// Uses remain-on-exit to keep the pane visible if the command fails,
+/// allowing the user to see error messages.
 ///
 /// Returns the pane ID of the newly created pane.
-pub fn launch_in_pane(session: &str, working_dir: &str, command: &str) -> TmuxResult<String> {
-    // Use exec to replace shell with the agent process
-    // This ensures the pane stays open while the agent is running
-    let exec_command = format!("exec {}", command);
-
+pub fn launch_in_pane(target_pane: &str, working_dir: &str, command: &str) -> TmuxResult<String> {
+    // Create the pane first, then set remain-on-exit and run command
+    // This ensures we can see errors if the command fails
     let output = Command::new("tmux")
         .args([
             "split-window",
             "-v", // vertical split (below current pane)
             "-d", // don't switch to new pane (keep focus on gwt)
             "-t",
-            session,
+            target_pane,
             "-c",
             working_dir,
             "-P", // print pane info
             "-F",
             "#{pane_id}",
-            "sh",
-            "-c",
-            &exec_command,
         ])
         .output()
         .map_err(|e| TmuxError::PaneCreateFailed {
@@ -246,13 +241,24 @@ pub fn launch_in_pane(session: &str, working_dir: &str, command: &str) -> TmuxRe
     }
 
     let pane_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    // Set remain-on-exit so we can see errors if command fails
+    let _ = Command::new("tmux")
+        .args(["set-option", "-t", &pane_id, "remain-on-exit", "on"])
+        .output();
+
+    // Send the command to the new pane
+    let _ = Command::new("tmux")
+        .args(["send-keys", "-t", &pane_id, command, "Enter"])
+        .output();
+
     Ok(pane_id)
 }
 
 /// Launch a command in a new tmux pane beside an existing pane (horizontal split)
 ///
 /// Creates a new pane to the right of the target pane and executes the command.
-/// Used for adding additional agents beside existing agent panes.
+/// Uses remain-on-exit to keep the pane visible if the command fails.
 ///
 /// Returns the pane ID of the newly created pane.
 pub fn launch_in_pane_beside(
@@ -260,9 +266,7 @@ pub fn launch_in_pane_beside(
     working_dir: &str,
     command: &str,
 ) -> TmuxResult<String> {
-    // Use exec to replace shell with the agent process
-    let exec_command = format!("exec {}", command);
-
+    // Create the pane first, then set remain-on-exit and run command
     let output = Command::new("tmux")
         .args([
             "split-window",
@@ -275,9 +279,6 @@ pub fn launch_in_pane_beside(
             "-P", // print pane info
             "-F",
             "#{pane_id}",
-            "sh",
-            "-c",
-            &exec_command,
         ])
         .output()
         .map_err(|e| TmuxError::PaneCreateFailed {
@@ -292,6 +293,17 @@ pub fn launch_in_pane_beside(
     }
 
     let pane_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    // Set remain-on-exit so we can see errors if command fails
+    let _ = Command::new("tmux")
+        .args(["set-option", "-t", &pane_id, "remain-on-exit", "on"])
+        .output();
+
+    // Send the command to the new pane
+    let _ = Command::new("tmux")
+        .args(["send-keys", "-t", &pane_id, command, "Enter"])
+        .output();
+
     Ok(pane_id)
 }
 
