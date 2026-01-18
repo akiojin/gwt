@@ -2,7 +2,7 @@
 //!
 //! Displays a list of running agent panes with branch name, agent name, uptime, and state.
 
-use gwt_core::tmux::{AgentPane, AgentState};
+use gwt_core::tmux::AgentPane;
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
@@ -140,38 +140,46 @@ pub fn render_pane_list(state: &mut PaneListState, frame: &mut Frame, area: Rect
 }
 
 /// Create a list item for a pane (FR-031a-e)
-fn create_pane_list_item(pane: &AgentPane, _is_selected: bool, spinner_frame: usize) -> ListItem<'static> {
+fn create_pane_list_item(pane: &AgentPane, _is_selected: bool, _spinner_frame: usize) -> ListItem<'static> {
     let uptime = pane.uptime_string();
 
-    // Get state color and spinner character (FR-031a-d)
-    let (state_color, state_char) = match pane.state {
-        AgentState::Starting => (Color::Blue, pane.state.spinner_char(spinner_frame)),
-        AgentState::Running => (Color::Green, pane.state.spinner_char(spinner_frame)),
-        AgentState::Stopped => (Color::DarkGray, ' '),
-        AgentState::Error => (Color::Red, '!'),
+    // Show [BG] indicator for background (hidden) panes
+    let status_indicator = if pane.is_background {
+        Span::styled("[BG] ", Style::default().fg(Color::DarkGray))
+    } else {
+        Span::raw("")
     };
 
     let spans = vec![
-        // State indicator with spinner
+        status_indicator,
         Span::styled(
-            format!("[{}] ", state_char),
-            Style::default().fg(state_color),
-        ),
-        Span::styled(
-            format!("{:<18}", truncate_string(&pane.branch_name, 18)),
-            Style::default().fg(Color::Green),
+            format!(
+                "{:<20}",
+                truncate_string(&pane.branch_name, if pane.is_background { 15 } else { 20 })
+            ),
+            Style::default().fg(if pane.is_background {
+                Color::DarkGray
+            } else {
+                Color::Green
+            }),
         ),
         Span::raw(" "),
         Span::styled(
             format!("{:<10}", pane.agent_name),
-            Style::default().fg(Color::Cyan),
+            Style::default().fg(if pane.is_background {
+                Color::DarkGray
+            } else {
+                Color::Cyan
+            }),
         ),
         Span::raw(" "),
-        Span::styled(format!("{:>8}", uptime), Style::default().fg(Color::Yellow)),
-        Span::raw(" "),
         Span::styled(
-            format!("{:<8}", pane.state.label()),
-            Style::default().fg(state_color),
+            format!("{:>8}", uptime),
+            Style::default().fg(if pane.is_background {
+                Color::DarkGray
+            } else {
+                Color::Yellow
+            }),
         ),
     ];
 

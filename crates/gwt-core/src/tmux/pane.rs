@@ -2,53 +2,10 @@
 //!
 //! Provides functions to create, list, and manage tmux panes for agents.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
 
 use super::error::{TmuxError, TmuxResult};
-
-/// Agent state for display (FR-031a-e)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum AgentState {
-    /// Starting: Agent is initializing (blue, spinner)
-    #[default]
-    Starting,
-    /// Running: Agent is actively processing (green, spinner)
-    Running,
-    /// Stopped: Agent has no activity for 5+ seconds (gray, static)
-    Stopped,
-    /// Error: Agent encountered an error (red, static)
-    Error,
-}
-
-impl AgentState {
-    /// Get the spinner character for the current frame
-    pub fn spinner_char(&self, frame: usize) -> char {
-        const SPINNER_FRAMES: [char; 4] = ['|', '/', '-', '\\'];
-        match self {
-            AgentState::Starting | AgentState::Running => SPINNER_FRAMES[frame % 4],
-            AgentState::Stopped => ' ',
-            AgentState::Error => '!',
-        }
-    }
-
-    /// Check if this state shows a spinner
-    pub fn has_spinner(&self) -> bool {
-        matches!(self, AgentState::Starting | AgentState::Running)
-    }
-
-    /// Get the display label for the state
-    pub fn label(&self) -> &'static str {
-        match self {
-            AgentState::Starting => "STARTING",
-            AgentState::Running => "RUNNING",
-            AgentState::Stopped => "STOPPED",
-            AgentState::Error => "ERROR",
-        }
-    }
-}
 
 /// Information about a tmux pane
 #[derive(Debug, Clone)]
@@ -66,12 +23,10 @@ pub struct AgentPane {
     pub agent_name: String,
     pub start_time: SystemTime,
     pub pid: u32,
-    /// Current state of the agent (FR-031a-e)
-    pub state: AgentState,
-    /// Hash of last captured pane content for change detection
-    pub last_content_hash: u64,
-    /// Timestamp of last content change
-    pub last_change_time: SystemTime,
+    /// Whether the pane is in background (hidden from GWT window)
+    pub is_background: bool,
+    /// Window ID when pane is in background (for restoring)
+    pub background_window: Option<String>,
 }
 
 impl AgentPane {
@@ -83,55 +38,15 @@ impl AgentPane {
         start_time: SystemTime,
         pid: u32,
     ) -> Self {
-        let now = SystemTime::now();
         Self {
             pane_id,
             branch_name,
             agent_name,
             start_time,
             pid,
-            state: AgentState::Starting,
-            last_content_hash: 0,
-            last_change_time: now,
+            is_background: false,
+            background_window: None,
         }
-    }
-
-    /// Update state based on pane content changes (FR-031e)
-    ///
-    /// Returns true if state changed
-    pub fn update_state(&mut self, current_content_hash: u64) -> bool {
-        let now = SystemTime::now();
-        let old_state = self.state;
-
-        if current_content_hash != self.last_content_hash {
-            // Content changed - agent is running
-            self.last_content_hash = current_content_hash;
-            self.last_change_time = now;
-
-            // Transition from Starting to Running after first content change
-            if self.state == AgentState::Starting {
-                self.state = AgentState::Running;
-            } else if self.state == AgentState::Stopped {
-                // Resume from stopped state
-                self.state = AgentState::Running;
-            }
-        } else {
-            // No content change - check if 5 seconds have passed
-            let elapsed = now
-                .duration_since(self.last_change_time)
-                .unwrap_or(Duration::from_secs(0));
-
-            if elapsed >= Duration::from_secs(5) && self.state != AgentState::Error {
-                self.state = AgentState::Stopped;
-            }
-        }
-
-        old_state != self.state
-    }
-
-    /// Set error state
-    pub fn set_error(&mut self) {
-        self.state = AgentState::Error;
     }
 
     /// Calculate uptime duration
@@ -294,6 +209,107 @@ pub fn select_pane(pane_id: &str) -> TmuxResult<()> {
     Ok(())
 }
 
+/// Hide a pane by moving it to a separate background window
+///
+/// Uses `tmux break-pane` to move the pane to its own window without switching focus.
+///
+/// # Arguments
+/// * `pane_id` - The pane ID to hide
+/// * `window_name` - Name for the background window
+///
+/// # Returns
+/// The window ID of the newly created background window
+pub fn hide_pane(pane_id: &str, window_name: &str) -> TmuxResult<String> {
+    // Get current session first
+    let session_output = Command::new("tmux")
+        .args(["display-message", "-p", "#{session_name}"])
+        .output()
+        .map_err(|e| TmuxError::CommandFailed {
+            command: "display-message".to_string(),
+            reason: e.to_string(),
+        })?;
+
+    let session_name = String::from_utf8_lossy(&session_output.stdout)
+        .trim()
+        .to_string();
+
+    // Break pane into a new window (hidden, don't switch)
+    let output = Command::new("tmux")
+        .args([
+            "break-pane",
+            "-d", // don't switch to the new window
+            "-s",
+            pane_id,
+            "-n",
+            window_name,
+            "-P",
+            "-F",
+            "#{window_id}",
+        ])
+        .output()
+        .map_err(|e| TmuxError::CommandFailed {
+            command: "break-pane".to_string(),
+            reason: e.to_string(),
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(TmuxError::CommandFailed {
+            command: "break-pane".to_string(),
+            reason: stderr.to_string(),
+        });
+    }
+
+    // The break-pane command outputs the new window ID
+    let window_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    // Return the full window reference (session:window)
+    Ok(format!("{}:{}", session_name, window_id))
+}
+
+/// Show a hidden pane by joining it back to the GWT window
+///
+/// Uses `tmux join-pane` to move the pane from its background window back to the main window.
+///
+/// # Arguments
+/// * `background_window` - The background window identifier (session:window_id)
+/// * `target_pane_id` - The pane ID to join beside (usually the GWT pane)
+///
+/// # Returns
+/// The new pane ID after joining
+pub fn show_pane(background_window: &str, target_pane_id: &str) -> TmuxResult<String> {
+    // Join the pane from the background window to the target pane
+    let output = Command::new("tmux")
+        .args([
+            "join-pane",
+            "-d", // don't switch focus
+            "-h", // horizontal split (side by side)
+            "-s",
+            background_window,
+            "-t",
+            target_pane_id,
+            "-P",
+            "-F",
+            "#{pane_id}",
+        ])
+        .output()
+        .map_err(|e| TmuxError::CommandFailed {
+            command: "join-pane".to_string(),
+            reason: e.to_string(),
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(TmuxError::CommandFailed {
+            command: "join-pane".to_string(),
+            reason: stderr.to_string(),
+        });
+    }
+
+    let new_pane_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(new_pane_id)
+}
+
 /// Send keys to a pane (e.g., Ctrl-C for interrupt)
 pub fn send_keys(pane_id: &str, keys: &str) -> TmuxResult<()> {
     let output = Command::new("tmux")
@@ -313,26 +329,6 @@ pub fn send_keys(pane_id: &str, keys: &str) -> TmuxResult<()> {
     }
 
     Ok(())
-}
-
-/// Capture pane content and return its hash (FR-031e)
-///
-/// Returns the hash of the current pane content for state detection.
-/// If capture fails, returns 0 (which will trigger state change detection).
-pub fn capture_pane_content_hash(pane_id: &str) -> u64 {
-    let output = Command::new("tmux")
-        .args(["capture-pane", "-t", pane_id, "-p"])
-        .output();
-
-    match output {
-        Ok(output) if output.status.success() => {
-            let content = String::from_utf8_lossy(&output.stdout);
-            let mut hasher = DefaultHasher::new();
-            content.hash(&mut hasher);
-            hasher.finish()
-        }
-        _ => 0,
-    }
 }
 
 /// Check if exit confirmation is required based on running agents
@@ -589,5 +585,40 @@ mod tests {
         // Current process should be running
         let pid = std::process::id();
         assert!(is_process_running(pid));
+    }
+
+    #[test]
+    fn test_agent_pane_default_not_background() {
+        let pane = AgentPane::new(
+            "1".to_string(),
+            "feature/test".to_string(),
+            "claude".to_string(),
+            SystemTime::now(),
+            12345,
+        );
+        assert!(!pane.is_background);
+        assert!(pane.background_window.is_none());
+    }
+
+    #[test]
+    fn test_agent_pane_background_state() {
+        let mut pane = AgentPane::new(
+            "1".to_string(),
+            "feature/test".to_string(),
+            "claude".to_string(),
+            SystemTime::now(),
+            12345,
+        );
+        // Simulate hiding the pane
+        pane.is_background = true;
+        pane.background_window = Some("session:@1".to_string());
+        assert!(pane.is_background);
+        assert_eq!(pane.background_window, Some("session:@1".to_string()));
+
+        // Simulate showing the pane
+        pane.is_background = false;
+        pane.background_window = None;
+        assert!(!pane.is_background);
+        assert!(pane.background_window.is_none());
     }
 }

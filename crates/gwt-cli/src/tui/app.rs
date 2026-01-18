@@ -271,6 +271,8 @@ pub enum Message {
     RepairWorktrees,
     /// Copy selected log to clipboard
     CopyLogToClipboard,
+    /// Toggle agent pane visibility (show/hide)
+    ToggleAgentPaneVisibility,
 }
 
 impl Model {
@@ -837,29 +839,139 @@ impl Model {
             .iter()
             .filter(|p| current_pane_ids.contains(p.pane_id.as_str()))
             .cloned()
-            .map(|mut pane| {
-                // Capture pane content hash and update state
-                let content_hash = gwt_core::tmux::capture_pane_content_hash(&pane.pane_id);
-                pane.update_state(content_hash);
-                pane
-            })
             .collect();
 
         // Also update agent_panes list
         self.agent_panes
             .retain(|id| current_pane_ids.contains(id.as_str()));
 
-        // Update pane list with new states
-        if updated_panes.len() != self.pane_list.panes.len()
-            || updated_panes
-                .iter()
-                .zip(self.pane_list.panes.iter())
-                .any(|(a, b)| a.state != b.state)
-        {
+        // Update pane list if count changed
+        if updated_panes.len() != self.pane_list.panes.len() {
             self.pane_list.update_panes(updated_panes);
         } else {
-            // Still update for state changes even if count is same
+            // Keep existing panes (with their is_background state)
             std::mem::swap(&mut self.pane_list.panes, &mut updated_panes);
+        }
+    }
+
+    /// Toggle agent pane visibility (show/hide)
+    ///
+    /// When hiding: moves the pane to a separate background window
+    /// When showing: joins the pane back to the GWT window
+    fn toggle_agent_pane_visibility(&mut self) {
+        // Get the selected pane
+        let selected_idx = self.pane_list.selected;
+        let Some(pane) = self.pane_list.panes.get_mut(selected_idx) else {
+            return;
+        };
+
+        if pane.is_background {
+            // Show the pane (join back to GWT window)
+            let Some(background_window) = &pane.background_window else {
+                self.status_message = Some("No background window to restore".to_string());
+                self.status_message_time = Some(Instant::now());
+                return;
+            };
+
+            let Some(gwt_pane_id) = &self.gwt_pane_id else {
+                self.status_message = Some("GWT pane ID not available".to_string());
+                self.status_message_time = Some(Instant::now());
+                return;
+            };
+
+            match gwt_core::tmux::show_pane(background_window, gwt_pane_id) {
+                Ok(new_pane_id) => {
+                    // Update the pane ID and clear background state
+                    pane.pane_id = new_pane_id.clone();
+                    pane.is_background = false;
+                    pane.background_window = None;
+
+                    // Update agent_panes list
+                    self.agent_panes.push(new_pane_id);
+
+                    self.status_message = Some("Pane shown".to_string());
+                }
+                Err(e) => {
+                    self.status_message = Some(format!("Failed to show pane: {}", e));
+                }
+            }
+        } else {
+            // Hide the pane (break to background window)
+            let window_name = format!(
+                "gwt-agent-{}",
+                pane.branch_name.replace('/', "-").replace(' ', "_")
+            );
+
+            match gwt_core::tmux::hide_pane(&pane.pane_id, &window_name) {
+                Ok(background_window) => {
+                    // Remove from agent_panes list
+                    self.agent_panes.retain(|id| id != &pane.pane_id);
+
+                    // Update pane state
+                    pane.is_background = true;
+                    pane.background_window = Some(background_window);
+
+                    self.status_message = Some("Pane hidden".to_string());
+                }
+                Err(e) => {
+                    self.status_message = Some(format!("Failed to hide pane: {}", e));
+                }
+            }
+        }
+        self.status_message_time = Some(Instant::now());
+    }
+
+    /// Show a hidden pane and focus it
+    ///
+    /// If the pane is already visible, just focus it.
+    /// If the pane is in background, show it first then focus.
+    fn show_and_focus_selected_pane(&mut self) {
+        let selected_idx = self.pane_list.selected;
+        let Some(pane) = self.pane_list.panes.get_mut(selected_idx) else {
+            return;
+        };
+
+        if pane.is_background {
+            // Show the pane first (join back to GWT window)
+            let Some(background_window) = &pane.background_window else {
+                self.status_message = Some("No background window to restore".to_string());
+                self.status_message_time = Some(Instant::now());
+                return;
+            };
+
+            let Some(gwt_pane_id) = &self.gwt_pane_id else {
+                self.status_message = Some("GWT pane ID not available".to_string());
+                self.status_message_time = Some(Instant::now());
+                return;
+            };
+
+            match gwt_core::tmux::show_pane(background_window, gwt_pane_id) {
+                Ok(new_pane_id) => {
+                    // Update the pane ID and clear background state
+                    pane.pane_id = new_pane_id.clone();
+                    pane.is_background = false;
+                    pane.background_window = None;
+
+                    // Update agent_panes list
+                    self.agent_panes.push(new_pane_id.clone());
+
+                    // Focus the pane
+                    if let Err(e) = gwt_core::tmux::pane::select_pane(&new_pane_id) {
+                        self.status_message = Some(format!("Failed to focus pane: {}", e));
+                        self.status_message_time = Some(Instant::now());
+                    }
+                }
+                Err(e) => {
+                    self.status_message = Some(format!("Failed to show pane: {}", e));
+                    self.status_message_time = Some(Instant::now());
+                }
+            }
+        } else {
+            // Pane is visible, just focus it
+            if let Err(e) = gwt_core::tmux::pane::select_pane(&pane.pane_id) {
+                self.status_message = Some(format!("Failed to focus pane: {}", e));
+                self.status_message_time = Some(Instant::now());
+            }
         }
     }
 
@@ -1209,12 +1321,8 @@ impl Model {
                 Screen::BranchList => {
                     if self.split_layout.pane_list_has_focus() {
                         // FR-040: Enter on pane list focuses the selected pane
-                        if let Some(pane) = self.pane_list.panes.get(self.pane_list.selected) {
-                            if let Err(e) = gwt_core::tmux::pane::select_pane(&pane.pane_id) {
-                                self.status_message = Some(format!("Failed to focus pane: {}", e));
-                                self.status_message_time = Some(Instant::now());
-                            }
-                        }
+                        // If the pane is in background, show it first then focus
+                        self.show_and_focus_selected_pane();
                     } else if self.branch_list.filter_mode {
                         // FR-020: Enter in filter mode exits filter mode
                         self.branch_list.exit_filter_mode();
@@ -1418,6 +1526,9 @@ impl Model {
                         self.status_message_time = Some(Instant::now());
                     }
                 }
+            }
+            Message::ToggleAgentPaneVisibility => {
+                self.toggle_agent_pane_visibility();
             }
             Message::Tab => {
                 if let Screen::Settings = self.screen {
@@ -2466,6 +2577,18 @@ pub fn run_with_context(
                                 }
                             } else {
                                 Some(Message::Char('d'))
+                            }
+                        }
+                        (KeyCode::Char('v'), KeyModifiers::NONE) => {
+                            // Toggle agent pane visibility (show/hide)
+                            // Only available when pane list has focus in tmux multi mode
+                            if matches!(model.screen, Screen::BranchList)
+                                && model.split_layout.pane_list_has_focus()
+                                && !model.branch_list.filter_mode
+                            {
+                                Some(Message::ToggleAgentPaneVisibility)
+                            } else {
+                                Some(Message::Char('v'))
                             }
                         }
                         (KeyCode::Char('x'), KeyModifiers::NONE) => {
