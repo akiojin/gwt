@@ -326,6 +326,27 @@ End users can install the latest published package (via npm or the GitHub Releas
 **Git Worktree Conflicts**: Use the cleanup feature to remove stale worktrees
 **GitHub Authentication**: Run `gh auth login` before using PR cleanup features
 **Binary Not Found**: Ensure the gwt binary is in your PATH
+**Unicode Character Corruption in Docker + tmux**: If Unicode characters (like the Claude Code logo) appear as underscores in Docker containers with tmux, start tmux with UTF-8 mode:
+
+```bash
+tmux -u
+```
+
+Or add to your `~/.tmux.conf`:
+
+```
+set -gq utf8 on
+```
+
+You may also need to install and configure locales in your Docker container:
+
+```bash
+apt-get update && apt-get install -y locales
+sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen
+locale-gen
+export LANG=en_US.UTF-8
+export LC_ALL=en_US.UTF-8
+```
 
 ### Debug Mode
 

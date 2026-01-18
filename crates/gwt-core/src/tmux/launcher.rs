@@ -205,32 +205,136 @@ pub fn build_agent_command(
     }
 }
 
+/// Detect available UTF-8 locale on the system
+///
+/// Tries common UTF-8 locale names and returns the first available one.
+/// Falls back to "C.UTF-8" if detection fails.
+fn detect_utf8_locale() -> String {
+    use std::process::Command;
+
+    // Try to get available locales
+    if let Ok(output) = Command::new("locale").arg("-a").output() {
+        if output.status.success() {
+            let locales = String::from_utf8_lossy(&output.stdout);
+            // Check for common UTF-8 locales in order of preference
+            let candidates = ["C.utf8", "C.UTF-8", "en_US.utf8", "en_US.UTF-8", "POSIX"];
+            for candidate in candidates {
+                if locales.lines().any(|l| l == candidate) {
+                    return candidate.to_string();
+                }
+            }
+        }
+    }
+
+    // Default fallback
+    "C.UTF-8".to_string()
+}
+
+/// Get environment variables needed for proper Unicode display in tmux panes
+///
+/// Returns locale and terminal environment variables to ensure UTF-8 encoding
+/// and proper Unicode rendering in new panes.
+/// If no locale is configured in the current environment, uses C.UTF-8 as default.
+fn get_locale_env_vars() -> Vec<(String, String)> {
+    let mut vars = Vec::new();
+
+    // Always inherit TERM for proper terminal capabilities (Unicode block elements, etc.)
+    if let Ok(term) = std::env::var("TERM") {
+        if !term.is_empty() {
+            vars.push(("TERM".to_string(), term));
+        }
+    }
+
+    // Check if any UTF-8 locale is already set
+    let has_utf8_locale = ["LANG", "LC_ALL", "LC_CTYPE"].iter().any(|key| {
+        std::env::var(key)
+            .map(|v| v.to_uppercase().contains("UTF-8") || v.to_uppercase().contains("UTF8"))
+            .unwrap_or(false)
+    });
+
+    if has_utf8_locale {
+        // Inherit existing locale settings
+        const LOCALE_KEYS: &[&str] = &[
+            "LANG",
+            "LC_ALL",
+            "LC_CTYPE",
+            "LC_MESSAGES",
+            "LC_COLLATE",
+            "LC_TIME",
+            "LC_NUMERIC",
+            "LC_MONETARY",
+        ];
+
+        for key in LOCALE_KEYS {
+            if let Ok(value) = std::env::var(key) {
+                if !value.is_empty() {
+                    vars.push((key.to_string(), value));
+                }
+            }
+        }
+    } else {
+        // No UTF-8 locale configured, detect available UTF-8 locale
+        // Try C.utf8 first (common on minimal Linux), then C.UTF-8
+        let utf8_locale = detect_utf8_locale();
+        vars.push(("LANG".to_string(), utf8_locale.clone()));
+        vars.push(("LC_ALL".to_string(), utf8_locale));
+    }
+
+    vars
+}
+
+/// Build locale setup command string
+#[cfg(test)]
+fn build_locale_setup(locale_vars: &[(String, String)]) -> String {
+    locale_vars
+        .iter()
+        .map(|(key, value)| {
+            let escaped_value = value.replace('\'', "'\\''");
+            format!("export {}='{}'", key, escaped_value)
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 /// Launch a command in a new tmux pane (simplified API)
 ///
 /// Creates a new pane below the current one and executes the command.
 /// The pane automatically closes when the command exits (FR-052).
+/// Automatically inherits locale and terminal environment variables to prevent encoding issues.
 ///
 /// Returns the pane ID of the newly created pane.
 pub fn launch_in_pane(target_pane: &str, working_dir: &str, command: &str) -> TmuxResult<String> {
-    // Create the pane first, then set remain-on-exit and run command
-    // This ensures we can see errors if the command fails
-    let output = Command::new("tmux")
-        .args([
-            "split-window",
-            "-v", // vertical split (below current pane)
-            "-d", // don't switch to new pane (keep focus on gwt)
-            "-t",
-            target_pane,
-            "-c",
-            working_dir,
-            "-P", // print pane info
-            "-F",
-            "#{pane_id}",
-        ])
-        .output()
-        .map_err(|e| TmuxError::PaneCreateFailed {
-            reason: e.to_string(),
-        })?;
+    // Build args with environment variables passed via -e option
+    let env_vars = get_locale_env_vars();
+    let mut args = vec![
+        "split-window".to_string(),
+        "-v".to_string(), // vertical split (below current pane)
+        "-d".to_string(), // don't switch to new pane (keep focus on gwt)
+        "-t".to_string(),
+        target_pane.to_string(),
+        "-c".to_string(),
+        working_dir.to_string(),
+    ];
+
+    // Add environment variables via -e option (tmux 3.0+)
+    for (key, value) in &env_vars {
+        args.push("-e".to_string());
+        args.push(format!("{}={}", key, value));
+    }
+
+    // Add output format options
+    args.push("-P".to_string()); // print pane info
+    args.push("-F".to_string());
+    args.push("#{pane_id}".to_string());
+
+    // Create the pane (starts an interactive shell)
+    let output =
+        Command::new("tmux")
+            .args(&args)
+            .output()
+            .map_err(|e| TmuxError::PaneCreateFailed {
+                reason: e.to_string(),
+            })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -241,16 +345,27 @@ pub fn launch_in_pane(target_pane: &str, working_dir: &str, command: &str) -> Tm
 
     let pane_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
-    // Set remain-on-exit off so pane auto-closes when agent exits (FR-052)
+    // Set remain-on-exit off so pane auto-closes when command exits (FR-052)
     let _ = Command::new("tmux")
         .args(["set-option", "-t", &pane_id, "remain-on-exit", "off"])
         .output();
 
-    // Send the command to the new pane
-    // Add "; exit" to close the pane when agent exits (FR-052)
-    let command_with_exit = format!("{}; exit", command);
+    // Build environment export commands for send-keys
+    // This ensures environment variables are set in the shell before running the command
+    let env_exports: Vec<String> = env_vars
+        .iter()
+        .map(|(k, v)| format!("export {}='{}'", k, v.replace('\'', "'\\''")))
+        .collect();
+
+    // Send environment setup and command to the new pane via send-keys
+    // This ensures stdin/stdout are properly connected to the terminal
+    let full_command = if env_exports.is_empty() {
+        format!("{}; exit", command)
+    } else {
+        format!("{}; {}; exit", env_exports.join("; "), command)
+    };
     let _ = Command::new("tmux")
-        .args(["send-keys", "-t", &pane_id, &command_with_exit, "Enter"])
+        .args(["send-keys", "-t", &pane_id, &full_command, "Enter"])
         .output();
 
     Ok(pane_id)
@@ -260,6 +375,7 @@ pub fn launch_in_pane(target_pane: &str, working_dir: &str, command: &str) -> Tm
 ///
 /// Creates a new pane to the right of the target pane and executes the command.
 /// The pane automatically closes when the command exits (FR-052).
+/// Automatically inherits locale and terminal environment variables to prevent encoding issues.
 ///
 /// Returns the pane ID of the newly created pane.
 pub fn launch_in_pane_beside(
@@ -267,24 +383,37 @@ pub fn launch_in_pane_beside(
     working_dir: &str,
     command: &str,
 ) -> TmuxResult<String> {
-    // Create the pane first, then set remain-on-exit and run command
-    let output = Command::new("tmux")
-        .args([
-            "split-window",
-            "-h", // horizontal split (beside target pane)
-            "-d", // don't switch to new pane (keep focus on gwt)
-            "-t",
-            target_pane,
-            "-c",
-            working_dir,
-            "-P", // print pane info
-            "-F",
-            "#{pane_id}",
-        ])
-        .output()
-        .map_err(|e| TmuxError::PaneCreateFailed {
-            reason: e.to_string(),
-        })?;
+    // Build args with environment variables passed via -e option
+    let env_vars = get_locale_env_vars();
+    let mut args = vec![
+        "split-window".to_string(),
+        "-h".to_string(), // horizontal split (beside target pane)
+        "-d".to_string(), // don't switch to new pane (keep focus on gwt)
+        "-t".to_string(),
+        target_pane.to_string(),
+        "-c".to_string(),
+        working_dir.to_string(),
+    ];
+
+    // Add environment variables via -e option (tmux 3.0+)
+    for (key, value) in &env_vars {
+        args.push("-e".to_string());
+        args.push(format!("{}={}", key, value));
+    }
+
+    // Add output format options
+    args.push("-P".to_string()); // print pane info
+    args.push("-F".to_string());
+    args.push("#{pane_id}".to_string());
+
+    // Create the pane (starts an interactive shell)
+    let output =
+        Command::new("tmux")
+            .args(&args)
+            .output()
+            .map_err(|e| TmuxError::PaneCreateFailed {
+                reason: e.to_string(),
+            })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -295,16 +424,27 @@ pub fn launch_in_pane_beside(
 
     let pane_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
-    // Set remain-on-exit off so pane auto-closes when agent exits (FR-052)
+    // Set remain-on-exit off so pane auto-closes when command exits (FR-052)
     let _ = Command::new("tmux")
         .args(["set-option", "-t", &pane_id, "remain-on-exit", "off"])
         .output();
 
-    // Send the command to the new pane
-    // Add "; exit" to close the pane when agent exits (FR-052)
-    let command_with_exit = format!("{}; exit", command);
+    // Build environment export commands for send-keys
+    // This ensures environment variables are set in the shell before running the command
+    let env_exports: Vec<String> = env_vars
+        .iter()
+        .map(|(k, v)| format!("export {}='{}'", k, v.replace('\'', "'\\''")))
+        .collect();
+
+    // Send environment setup and command to the new pane via send-keys
+    // This ensures stdin/stdout are properly connected to the terminal
+    let full_command = if env_exports.is_empty() {
+        format!("{}; exit", command)
+    } else {
+        format!("{}; {}; exit", env_exports.join("; "), command)
+    };
     let _ = Command::new("tmux")
-        .args(["send-keys", "-t", &pane_id, &command_with_exit, "Enter"])
+        .args(["send-keys", "-t", &pane_id, &full_command, "Enter"])
         .output();
 
     Ok(pane_id)
@@ -480,5 +620,54 @@ mod tests {
         let cmd = build_agent_command("claude", Some(""), None, "normal", None, false, &[]);
         assert_eq!(cmd, "claude");
         assert!(!cmd.contains("--model"));
+    }
+
+    #[test]
+    fn test_build_locale_setup_empty() {
+        let result = build_locale_setup(&[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_build_locale_setup_with_vars() {
+        let vars = vec![
+            ("LANG".to_string(), "en_US.UTF-8".to_string()),
+            ("LC_ALL".to_string(), "en_US.UTF-8".to_string()),
+        ];
+        let result = build_locale_setup(&vars);
+        assert!(result.contains("export LANG='en_US.UTF-8'"));
+        assert!(result.contains("export LC_ALL='en_US.UTF-8'"));
+    }
+
+    #[test]
+    fn test_build_locale_setup_escape_quotes() {
+        let vars = vec![("LANG".to_string(), "it's".to_string())];
+        let result = build_locale_setup(&vars);
+        assert!(result.contains("'it'\\''s'"));
+    }
+
+    #[test]
+    fn test_get_locale_env_vars() {
+        // This test verifies the function doesn't panic and returns a valid structure
+        let vars = get_locale_env_vars();
+        // All returned keys should be valid environment variable keys
+        let valid_keys = [
+            "TERM",
+            "LANG",
+            "LC_ALL",
+            "LC_CTYPE",
+            "LC_MESSAGES",
+            "LC_COLLATE",
+            "LC_TIME",
+            "LC_NUMERIC",
+            "LC_MONETARY",
+        ];
+        for (key, _) in &vars {
+            assert!(
+                valid_keys.contains(&key.as_str()),
+                "Unexpected key: {}",
+                key
+            );
+        }
     }
 }
