@@ -205,26 +205,49 @@ pub fn build_agent_command(
     }
 }
 
-/// Get locale environment variables from current process
+/// Get locale environment variables for UTF-8 support
 ///
-/// Returns a list of locale-related environment variables that should be
-/// preserved when launching new panes to avoid encoding issues.
+/// Returns locale environment variables to ensure UTF-8 encoding in new panes.
+/// If no locale is configured in the current environment, uses C.UTF-8 as default.
 fn get_locale_env_vars() -> Vec<(String, String)> {
-    const LOCALE_KEYS: &[&str] = &[
-        "LANG",
-        "LC_ALL",
-        "LC_CTYPE",
-        "LC_MESSAGES",
-        "LC_COLLATE",
-        "LC_TIME",
-        "LC_NUMERIC",
-        "LC_MONETARY",
-    ];
-
-    LOCALE_KEYS
+    // Check if any UTF-8 locale is already set
+    let has_utf8_locale = ["LANG", "LC_ALL", "LC_CTYPE"]
         .iter()
-        .filter_map(|key| std::env::var(key).ok().map(|value| (key.to_string(), value)))
-        .collect()
+        .any(|key| {
+            std::env::var(key)
+                .map(|v| v.to_uppercase().contains("UTF-8") || v.to_uppercase().contains("UTF8"))
+                .unwrap_or(false)
+        });
+
+    if has_utf8_locale {
+        // Inherit existing locale settings
+        const LOCALE_KEYS: &[&str] = &[
+            "LANG",
+            "LC_ALL",
+            "LC_CTYPE",
+            "LC_MESSAGES",
+            "LC_COLLATE",
+            "LC_TIME",
+            "LC_NUMERIC",
+            "LC_MONETARY",
+        ];
+
+        LOCALE_KEYS
+            .iter()
+            .filter_map(|key| {
+                std::env::var(key)
+                    .ok()
+                    .filter(|v| !v.is_empty())
+                    .map(|value| (key.to_string(), value))
+            })
+            .collect()
+    } else {
+        // No UTF-8 locale configured, use C.UTF-8 as default
+        vec![
+            ("LANG".to_string(), "C.UTF-8".to_string()),
+            ("LC_ALL".to_string(), "C.UTF-8".to_string()),
+        ]
+    }
 }
 
 /// Build locale setup command string
