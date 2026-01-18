@@ -11,18 +11,22 @@ use gwt_core::config::get_branch_tool_history;
 use gwt_core::config::{Profile, ProfilesConfig};
 use gwt_core::error::GwtError;
 use gwt_core::git::{Branch, PrCache, Repository};
+use gwt_core::tmux::{get_current_session, kill_pane, launcher, AgentPane};
 use gwt_core::worktree::WorktreeManager;
+use gwt_core::TmuxMode;
 use ratatui::{prelude::*, widgets::*};
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use tracing::{debug, error, info};
 
 use super::screens::branch_list::WorktreeStatus;
 use super::screens::environment::EditField;
+use super::screens::pane_list::{render_pane_list, PaneListState};
+use super::screens::split_layout::{calculate_split_layout, SplitLayoutState};
 use super::screens::{
     collect_os_env, render_branch_list, render_confirm, render_environment, render_error,
     render_help, render_logs, render_profiles, render_settings, render_wizard,
@@ -103,7 +107,7 @@ struct SafetyUpdate {
 
 struct SafetyCheckTarget {
     branch: String,
-    upstream: String,
+    upstream: Option<String>,
 }
 
 struct WorktreeStatusUpdate {
@@ -189,6 +193,18 @@ pub struct Model {
     safety_rx: Option<Receiver<SafetyUpdate>>,
     /// Worktree status update receiver
     worktree_status_rx: Option<Receiver<WorktreeStatusUpdate>>,
+    /// Tmux mode (Single or Multi)
+    tmux_mode: TmuxMode,
+    /// Tmux session name (when in multi mode)
+    tmux_session: Option<String>,
+    /// The pane ID where gwt is running (for splitting)
+    gwt_pane_id: Option<String>,
+    /// Launched agent pane IDs (for horizontal layout management)
+    agent_panes: Vec<String>,
+    /// Pane list state for tmux multi-mode
+    pane_list: PaneListState,
+    /// Split layout state for tmux multi-mode
+    split_layout: SplitLayoutState,
 }
 
 /// Screen types
@@ -299,7 +315,30 @@ impl Model {
             pr_title_rx: None,
             safety_rx: None,
             worktree_status_rx: None,
+            tmux_mode: TmuxMode::detect(),
+            tmux_session: None,
+            gwt_pane_id: None,
+            agent_panes: Vec::new(),
+            pane_list: PaneListState::new(),
+            split_layout: SplitLayoutState::new(),
         };
+
+        // Initialize tmux session if in multi mode
+        if model.tmux_mode.is_multi() {
+            // Use the current tmux session, not a generated one
+            model.tmux_session = get_current_session();
+            // Capture the gwt pane ID for splitting
+            model.gwt_pane_id = gwt_core::tmux::get_current_pane_id();
+            // Enable split layout for pane list
+            model.split_layout.enable_tmux_mode();
+            debug!(
+                category = "tui",
+                mode = %model.tmux_mode,
+                session = ?model.tmux_session,
+                gwt_pane_id = ?model.gwt_pane_id,
+                "Tmux multi-mode detected"
+            );
+        }
 
         // Load initial data
         model.refresh_data();
@@ -412,16 +451,15 @@ impl Model {
 
                     // Safety check short-circuit: use immediate signals first
                     if item.branch_type == BranchType::Local {
-                        if !b.has_remote || !base_branch_exists {
+                        if !base_branch_exists {
                             item.safe_to_cleanup = Some(false);
-                        } else if let Some(upstream) = b.upstream.clone() {
+                        } else {
+                            // Check safety even without upstream (FR-004b)
                             item.safe_to_cleanup = None;
                             safety_targets.push(SafetyCheckTarget {
                                 branch: b.name.clone(),
-                                upstream,
+                                upstream: b.upstream.clone(),
                             });
-                        } else {
-                            item.safe_to_cleanup = Some(false);
                         }
                     }
 
@@ -501,24 +539,17 @@ impl Model {
                 let mut is_unmerged = false;
                 let mut safe_to_cleanup = false;
 
-                let unpushed_result =
-                    Branch::divergence_between(&repo_root, &target.branch, &target.upstream);
-                match unpushed_result {
-                    Ok((ahead, _)) => {
+                // Check for unpushed commits (skip if upstream is not configured)
+                if let Some(ref upstream) = target.upstream {
+                    if let Ok((ahead, _)) =
+                        Branch::divergence_between(&repo_root, &target.branch, upstream)
+                    {
                         if ahead > 0 {
                             has_unpushed = true;
                         }
                     }
-                    Err(_) => {
-                        let _ = tx.send(SafetyUpdate {
-                            branch: target.branch,
-                            has_unpushed,
-                            is_unmerged,
-                            safe_to_cleanup,
-                        });
-                        continue;
-                    }
                 }
+                // If upstream is not configured, continue to check against base branch
 
                 if has_unpushed {
                     let _ = tx.send(SafetyUpdate {
@@ -530,11 +561,13 @@ impl Model {
                     continue;
                 }
 
-                if let Ok((ahead, _)) =
-                    Branch::divergence_between(&repo_root, &target.branch, &base_branch)
+                // Check if branch is merged into base using merge-base --is-ancestor
+                // This correctly handles cases where base_branch has advanced beyond the merge point
+                if let Ok(is_merged) =
+                    Branch::is_merged_into(&repo_root, &target.branch, &base_branch)
                 {
-                    is_unmerged = ahead > 0;
-                    safe_to_cleanup = !is_unmerged;
+                    is_unmerged = !is_merged;
+                    safe_to_cleanup = is_merged;
                 }
 
                 let _ = tx.send(SafetyUpdate {
@@ -997,7 +1030,13 @@ impl Model {
                 self.apply_worktree_updates();
             }
             Message::SelectNext => match self.screen {
-                Screen::BranchList => self.branch_list.select_next(),
+                Screen::BranchList => {
+                    if self.split_layout.pane_list_has_focus() {
+                        self.pane_list.select_next();
+                    } else {
+                        self.branch_list.select_next();
+                    }
+                }
                 Screen::WorktreeCreate => self.worktree_create.select_next_base(),
                 Screen::Settings => self.settings.select_next(),
                 Screen::Logs => self.logs.select_next(),
@@ -1008,7 +1047,13 @@ impl Model {
                 Screen::Confirm => {}
             },
             Message::SelectPrev => match self.screen {
-                Screen::BranchList => self.branch_list.select_prev(),
+                Screen::BranchList => {
+                    if self.split_layout.pane_list_has_focus() {
+                        self.pane_list.select_prev();
+                    } else {
+                        self.branch_list.select_prev();
+                    }
+                }
                 Screen::WorktreeCreate => self.worktree_create.select_prev_base(),
                 Screen::Settings => self.settings.select_prev(),
                 Screen::Logs => self.logs.select_prev(),
@@ -1046,7 +1091,15 @@ impl Model {
             },
             Message::Enter => match &self.screen {
                 Screen::BranchList => {
-                    if self.branch_list.filter_mode {
+                    if self.split_layout.pane_list_has_focus() {
+                        // FR-040: Enter on pane list focuses the selected pane
+                        if let Some(pane) = self.pane_list.panes.get(self.pane_list.selected) {
+                            if let Err(e) = gwt_core::tmux::pane::select_pane(&pane.pane_id) {
+                                self.status_message = Some(format!("Failed to focus pane: {}", e));
+                                self.status_message_time = Some(Instant::now());
+                            }
+                        }
+                    } else if self.branch_list.filter_mode {
                         // FR-020: Enter in filter mode exits filter mode
                         self.branch_list.exit_filter_mode();
                     } else {
@@ -1253,6 +1306,9 @@ impl Model {
             Message::Tab => {
                 if let Screen::Settings = self.screen {
                     self.settings.next_category()
+                } else if let Screen::BranchList = self.screen {
+                    // Toggle focus between branch list and pane list in tmux multi-mode
+                    self.split_layout.toggle_focus();
                 }
             }
             Message::CycleFilter => {
@@ -1271,7 +1327,7 @@ impl Model {
                 }
             }
             Message::CycleViewMode => {
-                // FR-036: Tab disabled in filter mode
+                // FR-036: 'm' key disabled in filter mode
                 if matches!(self.screen, Screen::BranchList) && !self.branch_list.filter_mode {
                     self.branch_list.cycle_view_mode();
                 }
@@ -1393,7 +1449,7 @@ impl Model {
             "Creating worktree from wizard state"
         );
         if let Ok(manager) = WorktreeManager::new(&self.repo_root) {
-            let branch = &self.worktree_create.branch_name;
+            let branch = self.worktree_create.branch_name.clone();
             let base = if self.worktree_create.create_new_branch {
                 self.wizard
                     .base_branch_override
@@ -1404,15 +1460,15 @@ impl Model {
             };
 
             // First try to get existing worktree for this branch
-            let existing_wt = manager.get_by_branch(branch).ok().flatten();
+            let existing_wt = manager.get_by_branch(&branch).ok().flatten();
 
             let result = if let Some(wt) = existing_wt {
                 // Worktree already exists, just use it
                 Ok(wt)
             } else if self.worktree_create.create_new_branch {
-                manager.create_new_branch(branch, base)
+                manager.create_new_branch(&branch, base)
             } else {
-                manager.create_for_branch(branch)
+                manager.create_for_branch(&branch)
             };
 
             match result {
@@ -1455,9 +1511,27 @@ impl Model {
                         auto_install_deps,
                     };
 
-                    // Store the launch config and quit TUI
-                    self.pending_agent_launch = Some(launch_config);
-                    self.should_quit = true;
+                    // In multi mode, launch in tmux pane without quitting TUI
+                    if self.tmux_mode.is_multi() && self.gwt_pane_id.is_some() {
+                        match self.launch_agent_in_pane(&launch_config) {
+                            Ok(_) => {
+                                self.status_message =
+                                    Some(format!("Agent launched in tmux pane for {}", branch));
+                                self.status_message_time = Some(Instant::now());
+                                // Close wizard and return to branch list
+                                self.wizard.visible = false;
+                                self.screen = Screen::BranchList;
+                            }
+                            Err(e) => {
+                                self.status_message = Some(format!("Failed to launch: {}", e));
+                                self.status_message_time = Some(Instant::now());
+                            }
+                        }
+                    } else {
+                        // Single mode: store launch config and quit TUI
+                        self.pending_agent_launch = Some(launch_config);
+                        self.should_quit = true;
+                    }
                 }
                 Err(e) => {
                     error!(
@@ -1473,6 +1547,88 @@ impl Model {
                 }
             }
         }
+    }
+
+    /// Launch an agent in a tmux pane (multi mode)
+    ///
+    /// Layout strategy:
+    /// - First agent: vertical split below gwt pane
+    /// - Additional agents: horizontal split beside last agent pane
+    fn launch_agent_in_pane(&mut self, config: &AgentLaunchConfig) -> Result<String, String> {
+        let working_dir = config.worktree_path.to_string_lossy().to_string();
+
+        // Determine the agent command based on version (FR-063)
+        // - "latest": use bunx <npm_package>
+        // - "installed": use direct binary name
+        // - specific version: use npx <npm_package>@<version>
+        let agent_name = match config.version.as_str() {
+            "latest" => format!("bunx {}", config.agent.npm_package()),
+            "installed" => config.agent.id().to_string(),
+            version => format!("npx {}@{}", config.agent.npm_package(), version),
+        };
+
+        // Build the agent command
+        let execution_mode_str = match config.execution_mode {
+            ExecutionMode::Normal => "normal",
+            ExecutionMode::Continue => "continue",
+            ExecutionMode::Resume => "resume",
+        };
+        let command = launcher::build_agent_command(
+            &agent_name,
+            config.model.as_deref(),
+            Some(&config.version),
+            execution_mode_str,
+            config.session_id.as_deref(),
+            config.skip_permissions,
+            &config.env,
+        );
+
+        debug!(
+            category = "tui",
+            gwt_pane_id = ?self.gwt_pane_id,
+            working_dir = %working_dir,
+            command = %command,
+            agent_pane_count = self.agent_panes.len(),
+            "Launching agent in tmux pane"
+        );
+
+        // Determine how to split based on existing agent panes
+        let pane_id = if self.agent_panes.is_empty() {
+            // First agent: vertical split below gwt pane
+            // Use gwt_pane_id as the target for splitting
+            let target = self
+                .gwt_pane_id
+                .as_ref()
+                .ok_or_else(|| "No gwt pane ID available".to_string())?;
+            launcher::launch_in_pane(target, &working_dir, &command)
+        } else {
+            // Additional agents: horizontal split beside last agent pane
+            let last_pane = self.agent_panes.last().unwrap();
+            launcher::launch_in_pane_beside(last_pane, &working_dir, &command)
+        }
+        .map_err(|e| e.to_string())?;
+
+        // Track the new pane
+        self.agent_panes.push(pane_id.clone());
+
+        // Add to pane list for display
+        let branch_name = self
+            .branch_list
+            .selected_branch()
+            .map(|b| b.name.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        let agent_pane = AgentPane::new(
+            pane_id.clone(),
+            branch_name,
+            config.agent.label().to_string(),
+            SystemTime::now(),
+            0, // PID is not tracked by simple launcher
+        );
+        let mut panes = self.pane_list.panes.clone();
+        panes.push(agent_pane);
+        self.pane_list.update_panes(panes);
+
+        Ok(pane_id)
     }
 
     /// Execute branch cleanup (FR-010)
@@ -1608,12 +1764,26 @@ impl Model {
 
         // Content
         match base_screen {
-            Screen::BranchList => render_branch_list(
-                &self.branch_list,
-                frame,
-                chunks[1],
-                self.status_message.as_deref(),
-            ),
+            Screen::BranchList => {
+                // Use split layout for tmux multi-mode
+                let split_areas = calculate_split_layout(chunks[1], &self.split_layout);
+
+                // Update focus state for pane list
+                self.pane_list.has_focus = self.split_layout.pane_list_has_focus();
+
+                // Render branch list
+                render_branch_list(
+                    &self.branch_list,
+                    frame,
+                    split_areas.branch_list,
+                    self.status_message.as_deref(),
+                );
+
+                // Render pane list (only visible in tmux multi mode)
+                if self.split_layout.pane_list_visible {
+                    render_pane_list(&mut self.pane_list, frame, split_areas.pane_list);
+                }
+            }
             Screen::WorktreeCreate => {
                 render_worktree_create(&self.worktree_create, frame, chunks[1])
             }
@@ -1734,7 +1904,7 @@ impl Model {
         // Line 4: Mode
         let mode_spans = vec![
             Span::raw(" "),
-            Span::styled("Mode(tab): ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Mode(m):", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 self.branch_list.view_mode.label(),
                 Style::default()
@@ -2167,11 +2337,12 @@ pub fn run_with_context(
                                 Some(Message::Char(' '))
                             }
                         }
-                        (KeyCode::Tab, _) => {
+                        (KeyCode::Tab, _) => Some(Message::Tab),
+                        (KeyCode::Char('m'), KeyModifiers::NONE) => {
                             if matches!(model.screen, Screen::BranchList) {
                                 Some(Message::CycleViewMode)
                             } else {
-                                Some(Message::Tab)
+                                None
                             }
                         }
                         (KeyCode::Up, _) if is_key_press => Some(Message::SelectPrev),
@@ -2221,6 +2392,25 @@ pub fn run_with_context(
             if !orphans.is_empty() {
                 // Attempt to prune automatically
                 let _ = manager.prune();
+            }
+        }
+    }
+
+    // Cleanup agent panes on exit (tmux multi-mode)
+    if model.tmux_mode.is_multi() && !model.agent_panes.is_empty() {
+        debug!(
+            category = "tui",
+            pane_count = model.agent_panes.len(),
+            "Cleaning up agent panes on exit"
+        );
+        for pane_id in &model.agent_panes {
+            if let Err(e) = kill_pane(pane_id) {
+                debug!(
+                    category = "tui",
+                    pane_id = %pane_id,
+                    error = %e,
+                    "Failed to kill agent pane"
+                );
             }
         }
     }

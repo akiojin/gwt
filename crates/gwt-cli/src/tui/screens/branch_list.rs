@@ -288,7 +288,7 @@ impl BranchItem {
         }
         match self.safety_status {
             SafetyStatus::Uncommitted => ("!".to_string(), Color::Red),
-            SafetyStatus::Unpushed => ("!".to_string(), Color::Yellow),
+            SafetyStatus::Unpushed => ("^".to_string(), Color::Yellow),
             SafetyStatus::Unmerged => ("*".to_string(), Color::Yellow),
             SafetyStatus::Safe => ("o".to_string(), Color::Green),
             SafetyStatus::Pending => {
@@ -849,7 +849,7 @@ fn render_filter_line(state: &BranchListState, frame: &mut Frame, area: Rect) {
 /// Render mode line
 fn render_stats_line(state: &BranchListState, frame: &mut Frame, area: Rect) {
     let spans = vec![
-        Span::styled("Mode(tab): ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Mode(m): ", Style::default().fg(Color::DarkGray)),
         Span::styled(
             state.view_mode.label(),
             Style::default()
@@ -881,7 +881,7 @@ fn render_legend_line(frame: &mut Frame, area: Rect) {
         Span::styled(" Uncommitted", Style::default().fg(Color::Red)),
         Span::styled("  ", Style::default()),
         Span::styled(
-            "!",
+            "^",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
@@ -1124,7 +1124,7 @@ fn render_footer(frame: &mut Frame, area: Rect) {
         ("l", "Logs"),
         ("p", "Profile"),
         ("f", "Filter"),
-        ("tab", "Mode"),
+        ("m", "Mode"),
         ("?", "Help"),
         ("q", "Quit"),
     ];
