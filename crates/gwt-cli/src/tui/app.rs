@@ -7,8 +7,9 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use chrono::Utc;
 use gwt_core::config::get_branch_tool_history;
-use gwt_core::config::{Profile, ProfilesConfig};
+use gwt_core::config::{save_session_entry, Profile, ProfilesConfig, ToolSessionEntry};
 use gwt_core::error::GwtError;
 use gwt_core::git::{Branch, PrCache, Repository};
 use gwt_core::tmux::{get_current_session, kill_pane, launcher, AgentPane};
@@ -1567,6 +1568,34 @@ impl Model {
                     if self.tmux_mode.is_multi() && self.gwt_pane_id.is_some() {
                         match self.launch_agent_in_pane(&launch_config) {
                             Ok(_) => {
+                                // Save session history for Quick Start feature (FR-050)
+                                let session_entry = ToolSessionEntry {
+                                    branch: launch_config.branch_name.clone(),
+                                    worktree_path: Some(
+                                        launch_config.worktree_path.to_string_lossy().to_string(),
+                                    ),
+                                    tool_id: launch_config.agent.id().to_string(),
+                                    tool_label: launch_config.agent.label().to_string(),
+                                    session_id: launch_config.session_id.clone(),
+                                    mode: Some(launch_config.execution_mode.label().to_string()),
+                                    model: launch_config.model.clone(),
+                                    reasoning_level: launch_config
+                                        .reasoning_level
+                                        .map(|r| r.label().to_string()),
+                                    skip_permissions: Some(launch_config.skip_permissions),
+                                    tool_version: Some(launch_config.version.clone()),
+                                    timestamp: Utc::now().timestamp_millis(),
+                                };
+                                if let Err(e) =
+                                    save_session_entry(&launch_config.worktree_path, session_entry)
+                                {
+                                    debug!(
+                                        category = "tui",
+                                        error = %e,
+                                        "Failed to save session history"
+                                    );
+                                }
+
                                 self.status_message =
                                     Some(format!("Agent launched in tmux pane for {}", branch));
                                 self.status_message_time = Some(Instant::now());
