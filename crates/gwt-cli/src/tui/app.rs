@@ -875,11 +875,12 @@ impl Model {
             current_panes.iter().map(|p| p.pane_id.as_str()).collect();
 
         // FR-072: Detect removed panes and update session
-        let removed_panes: Vec<_> = self
+        let removed_panes: Vec<AgentPane> = self
             .pane_list
             .panes
             .iter()
             .filter(|p| !current_pane_ids.contains(p.pane_id.as_str()))
+            .cloned()
             .collect();
 
         for pane in &removed_panes {
