@@ -195,6 +195,8 @@ pub struct Model {
     tmux_mode: TmuxMode,
     /// Tmux session name (when in multi mode)
     tmux_session: Option<String>,
+    /// The pane ID where gwt is running (for splitting)
+    gwt_pane_id: Option<String>,
     /// Launched agent pane IDs (for horizontal layout management)
     agent_panes: Vec<String>,
 }
@@ -309,6 +311,7 @@ impl Model {
             worktree_status_rx: None,
             tmux_mode: TmuxMode::detect(),
             tmux_session: None,
+            gwt_pane_id: None,
             agent_panes: Vec::new(),
         };
 
@@ -316,10 +319,13 @@ impl Model {
         if model.tmux_mode.is_multi() {
             // Use the current tmux session, not a generated one
             model.tmux_session = get_current_session();
+            // Capture the gwt pane ID for splitting
+            model.gwt_pane_id = gwt_core::tmux::get_current_pane_id();
             debug!(
                 category = "tui",
                 mode = %model.tmux_mode,
                 session = ?model.tmux_session,
+                gwt_pane_id = ?model.gwt_pane_id,
                 "Tmux multi-mode detected"
             );
         }
@@ -1473,21 +1479,19 @@ impl Model {
                     };
 
                     // In multi mode, launch in tmux pane without quitting TUI
-                    if self.tmux_mode.is_multi() {
-                        if let Some(session) = self.tmux_session.clone() {
-                            match self.launch_agent_in_pane(&launch_config, &session) {
-                                Ok(_) => {
-                                    self.status_message =
-                                        Some(format!("Agent launched in tmux pane for {}", branch));
-                                    self.status_message_time = Some(Instant::now());
-                                    // Close wizard and return to branch list
-                                    self.wizard.visible = false;
-                                    self.screen = Screen::BranchList;
-                                }
-                                Err(e) => {
-                                    self.status_message = Some(format!("Failed to launch: {}", e));
-                                    self.status_message_time = Some(Instant::now());
-                                }
+                    if self.tmux_mode.is_multi() && self.gwt_pane_id.is_some() {
+                        match self.launch_agent_in_pane(&launch_config) {
+                            Ok(_) => {
+                                self.status_message =
+                                    Some(format!("Agent launched in tmux pane for {}", branch));
+                                self.status_message_time = Some(Instant::now());
+                                // Close wizard and return to branch list
+                                self.wizard.visible = false;
+                                self.screen = Screen::BranchList;
+                            }
+                            Err(e) => {
+                                self.status_message = Some(format!("Failed to launch: {}", e));
+                                self.status_message_time = Some(Instant::now());
                             }
                         }
                     } else {
@@ -1517,11 +1521,7 @@ impl Model {
     /// Layout strategy:
     /// - First agent: vertical split below gwt pane
     /// - Additional agents: horizontal split beside last agent pane
-    fn launch_agent_in_pane(
-        &mut self,
-        config: &AgentLaunchConfig,
-        session: &str,
-    ) -> Result<String, String> {
+    fn launch_agent_in_pane(&mut self, config: &AgentLaunchConfig) -> Result<String, String> {
         let working_dir = config.worktree_path.to_string_lossy().to_string();
         let agent_name = config.agent.id();
 
@@ -1543,7 +1543,7 @@ impl Model {
 
         debug!(
             category = "tui",
-            session = session,
+            gwt_pane_id = ?self.gwt_pane_id,
             working_dir = %working_dir,
             command = %command,
             agent_pane_count = self.agent_panes.len(),
@@ -1553,7 +1553,12 @@ impl Model {
         // Determine how to split based on existing agent panes
         let pane_id = if self.agent_panes.is_empty() {
             // First agent: vertical split below gwt pane
-            launcher::launch_in_pane(session, &working_dir, &command)
+            // Use gwt_pane_id as the target for splitting
+            let target = self
+                .gwt_pane_id
+                .as_ref()
+                .ok_or_else(|| "No gwt pane ID available".to_string())?;
+            launcher::launch_in_pane(target, &working_dir, &command)
         } else {
             // Additional agents: horizontal split beside last agent pane
             let last_pane = self.agent_panes.last().unwrap();

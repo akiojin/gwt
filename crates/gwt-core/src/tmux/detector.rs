@@ -49,6 +49,23 @@ pub fn get_current_session() -> Option<String> {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
 }
 
+/// Get the current tmux pane ID
+///
+/// Returns the pane ID (e.g., "%0", "%1") if running inside tmux, None otherwise.
+/// This is useful for splitting windows relative to the current pane.
+pub fn get_current_pane_id() -> Option<String> {
+    if !is_inside_tmux() {
+        return None;
+    }
+
+    Command::new("tmux")
+        .args(["display-message", "-p", "#{pane_id}"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+}
+
 /// Check if tmux is installed on the system
 ///
 /// Returns Ok(()) if tmux is installed, Err(TmuxError::NotInstalled) otherwise.
@@ -240,5 +257,22 @@ mod tests {
         let result = check_tmux_available();
         // Just verify it returns a valid result (either Ok or Err)
         assert!(result.is_ok() || result.is_err());
+    }
+
+    #[test]
+    fn test_get_current_pane_id_outside_tmux() {
+        // Save original value
+        let original = std::env::var("TMUX").ok();
+
+        // Remove TMUX environment variable
+        std::env::remove_var("TMUX");
+
+        // Should return None when not inside tmux
+        assert!(get_current_pane_id().is_none());
+
+        // Restore original value
+        if let Some(val) = original {
+            std::env::set_var("TMUX", val);
+        }
     }
 }
