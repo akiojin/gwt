@@ -1120,15 +1120,22 @@ impl Model {
         };
         let branch_name = branch.name.clone();
 
-        if let Some(agent) = self.branch_list.get_running_agent(&branch_name) {
-            // Branch has running agent - show and focus the pane
-            if agent.is_background {
-                // Hidden pane - show it first then focus
-                let Some(background_window) = &agent.background_window else {
+        // Find pane in pane_list by branch name
+        if let Some(pane) = self
+            .pane_list
+            .panes
+            .iter_mut()
+            .find(|p| p.branch_name == branch_name)
+        {
+            // Branch has running agent - show and focus the pane (FR-011, FR-012)
+            if pane.is_background {
+                // Hidden pane - show it first then focus (FR-012)
+                let Some(background_window) = &pane.background_window else {
                     self.status_message = Some("No background window to restore".to_string());
                     self.status_message_time = Some(Instant::now());
                     return;
                 };
+                let background_window = background_window.clone();
 
                 let Some(gwt_pane_id) = &self.gwt_pane_id else {
                     self.status_message = Some("GWT pane ID not available".to_string());
@@ -1136,8 +1143,20 @@ impl Model {
                     return;
                 };
 
-                match gwt_core::tmux::show_pane(background_window, gwt_pane_id) {
+                match gwt_core::tmux::show_pane(&background_window, gwt_pane_id) {
                     Ok(new_pane_id) => {
+                        // Update the pane ID and clear background state
+                        pane.pane_id = new_pane_id.clone();
+                        pane.is_background = false;
+                        pane.background_window = None;
+
+                        // Update agent_panes list
+                        self.agent_panes.push(new_pane_id.clone());
+
+                        // Update branch_list running_agents
+                        self.branch_list
+                            .update_running_agents(&self.pane_list.panes);
+
                         // Focus the pane
                         if let Err(e) = gwt_core::tmux::pane::select_pane(&new_pane_id) {
                             self.status_message = Some(format!("Failed to focus pane: {}", e));
@@ -1150,8 +1169,8 @@ impl Model {
                     }
                 }
             } else {
-                // Visible pane - just focus it
-                if let Err(e) = gwt_core::tmux::pane::select_pane(&agent.pane_id) {
+                // Visible pane - just focus it (FR-011)
+                if let Err(e) = gwt_core::tmux::pane::select_pane(&pane.pane_id) {
                     self.status_message = Some(format!("Failed to focus pane: {}", e));
                     self.status_message_time = Some(Instant::now());
                 }
@@ -2035,6 +2054,20 @@ impl Model {
     ///
     /// Uses the same argument building logic as single mode (main.rs)
     fn launch_agent_in_pane(&mut self, config: &AgentLaunchConfig) -> Result<String, String> {
+        // FR-010: One Branch One Pane constraint
+        // Check if an agent is already running on this branch
+        if self
+            .pane_list
+            .panes
+            .iter()
+            .any(|p| p.branch_name == config.branch_name)
+        {
+            return Err(format!(
+                "Agent already running on branch '{}'",
+                config.branch_name
+            ));
+        }
+
         let working_dir = config.worktree_path.to_string_lossy().to_string();
 
         // Build environment variables (same as single mode)
