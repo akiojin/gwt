@@ -246,13 +246,11 @@ fn get_locale_env_vars() -> Vec<(String, String)> {
     }
 
     // Check if any UTF-8 locale is already set
-    let has_utf8_locale = ["LANG", "LC_ALL", "LC_CTYPE"]
-        .iter()
-        .any(|key| {
-            std::env::var(key)
-                .map(|v| v.to_uppercase().contains("UTF-8") || v.to_uppercase().contains("UTF8"))
-                .unwrap_or(false)
-        });
+    let has_utf8_locale = ["LANG", "LC_ALL", "LC_CTYPE"].iter().any(|key| {
+        std::env::var(key)
+            .map(|v| v.to_uppercase().contains("UTF-8") || v.to_uppercase().contains("UTF8"))
+            .unwrap_or(false)
+    });
 
     if has_utf8_locale {
         // Inherit existing locale settings
@@ -330,12 +328,13 @@ pub fn launch_in_pane(target_pane: &str, working_dir: &str, command: &str) -> Tm
     args.push("#{pane_id}".to_string());
 
     // Create the pane (starts an interactive shell)
-    let output = Command::new("tmux")
-        .args(&args)
-        .output()
-        .map_err(|e| TmuxError::PaneCreateFailed {
-            reason: e.to_string(),
-        })?;
+    let output =
+        Command::new("tmux")
+            .args(&args)
+            .output()
+            .map_err(|e| TmuxError::PaneCreateFailed {
+                reason: e.to_string(),
+            })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -408,12 +407,13 @@ pub fn launch_in_pane_beside(
     args.push("#{pane_id}".to_string());
 
     // Create the pane (starts an interactive shell)
-    let output = Command::new("tmux")
-        .args(&args)
-        .output()
-        .map_err(|e| TmuxError::PaneCreateFailed {
-            reason: e.to_string(),
-        })?;
+    let output =
+        Command::new("tmux")
+            .args(&args)
+            .output()
+            .map_err(|e| TmuxError::PaneCreateFailed {
+                reason: e.to_string(),
+            })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
