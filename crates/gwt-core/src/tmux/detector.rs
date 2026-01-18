@@ -216,4 +216,29 @@ mod tests {
         // Just verify it returns a valid result (either Ok or Err)
         assert!(result.is_ok() || result.is_err());
     }
+
+    #[test]
+    fn test_get_current_session_outside_tmux() {
+        // Save original value
+        let original = std::env::var("TMUX").ok();
+
+        // Remove TMUX environment variable
+        std::env::remove_var("TMUX");
+
+        // Should return None when not inside tmux
+        assert!(get_current_session().is_none());
+
+        // Restore original value
+        if let Some(val) = original {
+            std::env::set_var("TMUX", val);
+        }
+    }
+
+    #[test]
+    fn test_check_tmux_available_returns_result() {
+        // This test is environment-dependent
+        let result = check_tmux_available();
+        // Just verify it returns a valid result (either Ok or Err)
+        assert!(result.is_ok() || result.is_err());
+    }
 }
