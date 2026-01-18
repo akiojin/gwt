@@ -2,8 +2,6 @@
 //!
 //! Displays a list of running agent panes with branch name, agent name, and uptime.
 
-#![allow(dead_code)]
-
 use gwt_core::tmux::AgentPane;
 use ratatui::{
     layout::Rect,

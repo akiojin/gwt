@@ -2,8 +2,6 @@
 //!
 //! Provides a top-bottom split layout with branch list above and pane list below.
 
-#![allow(dead_code)]
-
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
 /// Focus state for the split layout
