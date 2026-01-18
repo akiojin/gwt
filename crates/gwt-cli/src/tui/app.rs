@@ -12,7 +12,11 @@ use gwt_core::config::get_branch_tool_history;
 use gwt_core::config::{save_session_entry, Profile, ProfilesConfig, ToolSessionEntry};
 use gwt_core::error::GwtError;
 use gwt_core::git::{Branch, PrCache, Repository};
-use gwt_core::tmux::{get_current_session, kill_pane, launcher, AgentPane};
+use gwt_core::tmux::{
+    break_pane, compute_equal_splits, get_current_session, group_panes_by_left, join_pane_to_target,
+    kill_pane, list_pane_geometries, resize_pane_height, resize_pane_width, launcher, AgentPane,
+    PaneColumn, PaneGeometry, SplitDirection,
+};
 use gwt_core::worktree::WorktreeManager;
 use gwt_core::TmuxMode;
 use ratatui::{prelude::*, widgets::*};
@@ -202,7 +206,7 @@ pub struct Model {
     tmux_session: Option<String>,
     /// The pane ID where gwt is running (for splitting)
     gwt_pane_id: Option<String>,
-    /// Launched agent pane IDs (for horizontal layout management)
+    /// Launched agent pane IDs (visible panes only)
     agent_panes: Vec<String>,
     /// Pane list state for tmux multi-mode
     pane_list: PaneListState,
@@ -700,6 +704,7 @@ impl Model {
                     // Update branch_list running_agents
                     self.branch_list
                         .update_running_agents(&self.pane_list.panes);
+                    self.reflow_agent_layout(None);
                 }
             }
             Err(e) => {
@@ -930,6 +935,9 @@ impl Model {
         self.branch_list.update_running_agents(&self.pane_list.panes);
         // Update spinner frame for branch list display
         self.branch_list.spinner_frame = self.pane_list.spinner_frame;
+        if !removed_panes.is_empty() {
+            self.reflow_agent_layout(None);
+        }
     }
 
     /// Toggle agent pane visibility (show/hide)
@@ -1000,6 +1008,7 @@ impl Model {
 
         // Update branch list with new pane state
         self.branch_list.update_running_agents(&self.pane_list.panes);
+        self.reflow_agent_layout(None);
     }
 
     /// FR-042: Terminate agent pane for the specified branch
@@ -1044,6 +1053,7 @@ impl Model {
                 self.agent_panes.retain(|id| id != &pane.pane_id);
                 // Update branch_list running_agents
                 self.branch_list.update_running_agents(&self.pane_list.panes);
+                self.reflow_agent_layout(None);
 
                 self.status_message = Some(format!("Agent terminated on '{}'", branch_name));
                 self.status_message_time = Some(Instant::now());
@@ -1093,6 +1103,8 @@ impl Model {
 
                     // Update agent_panes list
                     self.agent_panes.push(new_pane_id.clone());
+
+                    self.reflow_agent_layout(Some(&new_pane_id));
 
                     // Focus the pane
                     if let Err(e) = gwt_core::tmux::pane::select_pane(&new_pane_id) {
@@ -1159,6 +1171,8 @@ impl Model {
                         // Update branch_list running_agents
                         self.branch_list
                             .update_running_agents(&self.pane_list.panes);
+
+                        self.reflow_agent_layout(Some(&new_pane_id));
 
                         // Focus the pane
                         if let Err(e) = gwt_core::tmux::pane::select_pane(&new_pane_id) {
@@ -2052,8 +2066,9 @@ impl Model {
     /// Launch an agent in a tmux pane (multi mode)
     ///
     /// Layout strategy:
-    /// - First agent: horizontal split right of gwt pane
-    /// - Additional agents: horizontal split beside last agent pane
+    /// - gwt is left column, agents are placed in right columns
+    /// - Each agent column stacks up to 3 panes (vertical split)
+    /// - When a column reaches 3 panes, a new column is added to the right
     ///
     /// Uses the same argument building logic as single mode (main.rs)
     fn launch_agent_in_pane(&mut self, config: &AgentLaunchConfig) -> Result<String, String> {
@@ -2117,19 +2132,52 @@ impl Model {
             "Launching agent in tmux pane"
         );
 
-        // Determine how to split based on existing agent panes
-        let pane_id = if self.agent_panes.is_empty() {
-            // First agent: vertical split below gwt pane
-            // Use gwt_pane_id as the target for splitting
+        let visible_count = self
+            .pane_list
+            .panes
+            .iter()
+            .filter(|p| !p.is_background)
+            .count();
+        let desired_columns_after = Self::desired_agent_column_count(visible_count + 1);
+        let current_columns = self
+            .agent_layout_snapshot()
+            .map(|(_, columns)| columns)
+            .unwrap_or_default();
+        let needs_new_column = desired_columns_after > current_columns.len();
+
+        // Determine how to split based on current columns
+        let pane_id = if visible_count == 0 {
+            // First agent: split to the right of gwt pane
             let target = self
                 .gwt_pane_id
                 .as_ref()
                 .ok_or_else(|| "No gwt pane ID available".to_string())?;
             launcher::launch_in_pane(target, &working_dir, &command)
+        } else if !needs_new_column {
+            if let Some(last_column) = current_columns.last() {
+                if let Some(target_pane) = last_column.pane_ids.last() {
+                    launcher::launch_in_pane_below(target_pane, &working_dir, &command)
+                } else {
+                    let target = self
+                        .gwt_pane_id
+                        .as_ref()
+                        .ok_or_else(|| "No gwt pane ID available".to_string())?;
+                    launcher::launch_in_pane(target, &working_dir, &command)
+                }
+            } else {
+                let target = self
+                    .gwt_pane_id
+                    .as_ref()
+                    .ok_or_else(|| "No gwt pane ID available".to_string())?;
+                launcher::launch_in_pane(target, &working_dir, &command)
+            }
         } else {
-            // Additional agents: horizontal split beside last agent pane
-            let last_pane = self.agent_panes.last().unwrap();
-            launcher::launch_in_pane_beside(last_pane, &working_dir, &command)
+            // New column will be created in reflow
+            let target = self
+                .gwt_pane_id
+                .as_ref()
+                .ok_or_else(|| "No gwt pane ID available".to_string())?;
+            launcher::launch_in_pane(target, &working_dir, &command)
         }
         .map_err(|e| e.to_string())?;
 
@@ -2186,7 +2234,207 @@ impl Model {
         // Update branch list with new agent info
         self.branch_list.update_running_agents(&self.pane_list.panes);
 
+        // Reflow layout (columns/rows)
+        self.reflow_agent_layout(Some(&pane_id));
+
         Ok(pane_id)
+    }
+
+    fn desired_agent_column_count(count: usize) -> usize {
+        if count == 0 {
+            0
+        } else {
+            (count + 2) / 3
+        }
+    }
+
+    fn visible_agent_pane_ids(&self) -> Vec<String> {
+        self.pane_list
+            .panes
+            .iter()
+            .filter(|p| !p.is_background)
+            .map(|p| p.pane_id.clone())
+            .collect()
+    }
+
+    fn agent_layout_snapshot(&self) -> Option<(PaneGeometry, Vec<PaneColumn>)> {
+        let gwt_pane_id = self.gwt_pane_id.as_deref()?;
+        let geometries = list_pane_geometries(gwt_pane_id).ok()?;
+        let mut geometry_map: HashMap<String, PaneGeometry> = HashMap::new();
+        for geometry in geometries {
+            geometry_map.insert(geometry.pane_id.clone(), geometry);
+        }
+
+        let gwt_geometry = geometry_map.get(gwt_pane_id)?.clone();
+        let visible_ids: std::collections::HashSet<String> =
+            self.visible_agent_pane_ids().into_iter().collect();
+        if visible_ids.is_empty() {
+            return Some((gwt_geometry, Vec::new()));
+        }
+
+        let agent_geometries: Vec<PaneGeometry> = visible_ids
+            .iter()
+            .filter_map(|id| geometry_map.get(id))
+            .cloned()
+            .collect();
+        let columns = group_panes_by_left(&agent_geometries);
+        Some((gwt_geometry, columns))
+    }
+
+    fn rebuild_agent_columns(
+        &mut self,
+        pane_ids: &[String],
+        gwt_pane_id: &str,
+    ) -> Result<HashMap<String, String>, String> {
+        if pane_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let mut columns: Vec<Vec<String>> = Vec::new();
+        for pane_id in pane_ids {
+            if columns.last().map(|c| c.len() == 3).unwrap_or(true) {
+                columns.push(Vec::new());
+            }
+            columns.last_mut().unwrap().push(pane_id.clone());
+        }
+
+        for pane_id in pane_ids {
+            break_pane(pane_id).map_err(|e| e.to_string())?;
+        }
+
+        let mut id_map: HashMap<String, String> = HashMap::new();
+        let mut column_roots: Vec<String> = Vec::new();
+        let mut rightmost_target = gwt_pane_id.to_string();
+
+        for column in &columns {
+            let source = &column[0];
+            let joined =
+                join_pane_to_target(source, &rightmost_target, SplitDirection::Horizontal)
+                    .map_err(|e| e.to_string())?;
+            id_map.insert(source.clone(), joined.clone());
+            rightmost_target = joined.clone();
+            column_roots.push(joined);
+        }
+
+        for (column, root) in columns.iter().zip(column_roots.iter()) {
+            let mut row_target = root.clone();
+            for pane_id in column.iter().skip(1) {
+                let joined =
+                    join_pane_to_target(pane_id, &row_target, SplitDirection::Vertical)
+                        .map_err(|e| e.to_string())?;
+                id_map.insert(pane_id.clone(), joined.clone());
+                row_target = joined;
+            }
+        }
+
+        if !id_map.is_empty() {
+            for pane in &mut self.pane_list.panes {
+                if let Some(new_id) = id_map.get(&pane.pane_id) {
+                    pane.pane_id = new_id.clone();
+                }
+            }
+            for pane_id in &mut self.agent_panes {
+                if let Some(new_id) = id_map.get(pane_id) {
+                    *pane_id = new_id.clone();
+                }
+            }
+            self.branch_list.update_running_agents(&self.pane_list.panes);
+        }
+
+        Ok(id_map)
+    }
+
+    fn reflow_agent_layout(&mut self, focus_pane: Option<&str>) {
+        if !self.tmux_mode.is_multi() {
+            return;
+        }
+        let Some(gwt_pane_id) = self.gwt_pane_id.clone() else {
+            return;
+        };
+
+        let visible_panes = self.visible_agent_pane_ids();
+        if visible_panes.is_empty() {
+            return;
+        }
+
+        let desired_columns = Self::desired_agent_column_count(visible_panes.len());
+        let mut focus_target = focus_pane.map(|id| id.to_string());
+
+        let Some((mut gwt_geometry, mut columns)) = self.agent_layout_snapshot() else {
+            return;
+        };
+
+        if columns.len() != desired_columns {
+            match self.rebuild_agent_columns(&visible_panes, &gwt_pane_id) {
+                Ok(id_map) => {
+                    if let Some(target) = focus_target.as_ref() {
+                        if let Some(new_id) = id_map.get(target) {
+                            focus_target = Some(new_id.clone());
+                        }
+                    }
+                }
+                Err(err) => {
+                    debug!(
+                        category = "tui",
+                        error = %err,
+                        "Failed to rebuild agent layout"
+                    );
+                    return;
+                }
+            }
+
+            if let Some((new_gwt_geometry, new_columns)) = self.agent_layout_snapshot() {
+                gwt_geometry = new_gwt_geometry;
+                columns = new_columns;
+            }
+        }
+
+        if columns.is_empty() {
+            return;
+        }
+
+        let total_width: u16 = gwt_geometry.width + columns.iter().map(|c| c.width).sum::<u16>();
+        let widths = compute_equal_splits(total_width, columns.len() + 1);
+        if let Some(width) = widths.first() {
+            if let Err(err) = resize_pane_width(&gwt_geometry.pane_id, *width) {
+                debug!(
+                    category = "tui",
+                    error = %err,
+                    "Failed to resize gwt pane width"
+                );
+            }
+        }
+
+        for (column, width) in columns.iter().zip(widths.iter().skip(1)) {
+            if let Some(pane_id) = column.pane_ids.first() {
+                if let Err(err) = resize_pane_width(pane_id, *width) {
+                    debug!(
+                        category = "tui",
+                        pane_id = %pane_id,
+                        error = %err,
+                        "Failed to resize agent column width"
+                    );
+                }
+            }
+        }
+
+        for column in &columns {
+            let heights = compute_equal_splits(column.total_height, column.pane_ids.len());
+            for (pane_id, height) in column.pane_ids.iter().zip(heights.into_iter()) {
+                if let Err(err) = resize_pane_height(pane_id, height) {
+                    debug!(
+                        category = "tui",
+                        pane_id = %pane_id,
+                        error = %err,
+                        "Failed to resize agent row height"
+                    );
+                }
+            }
+        }
+
+        if let Some(pane_id) = focus_target {
+            let _ = gwt_core::tmux::pane::select_pane(&pane_id);
+        }
     }
 
     /// Execute branch cleanup (FR-010)

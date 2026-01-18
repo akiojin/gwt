@@ -17,6 +17,32 @@ pub struct PaneInfo {
     pub current_path: Option<String>,
 }
 
+/// Geometry information for a tmux pane
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneGeometry {
+    pub pane_id: String,
+    pub left: u16,
+    pub top: u16,
+    pub width: u16,
+    pub height: u16,
+}
+
+/// Column grouping for panes aligned by left coordinate
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneColumn {
+    pub left: u16,
+    pub width: u16,
+    pub pane_ids: Vec<String>,
+    pub total_height: u16,
+}
+
+/// Split direction for tmux pane operations
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitDirection {
+    Horizontal,
+    Vertical,
+}
+
 /// Represents an agent running in a tmux pane
 #[derive(Debug, Clone)]
 pub struct AgentPane {
@@ -148,6 +174,34 @@ pub fn list_panes(session: &str) -> TmuxResult<Vec<PaneInfo>> {
     Ok(parse_pane_list(&stdout))
 }
 
+/// List pane geometries in a target (window or session)
+pub fn list_pane_geometries(target: &str) -> TmuxResult<Vec<PaneGeometry>> {
+    let output = Command::new("tmux")
+        .args([
+            "list-panes",
+            "-t",
+            target,
+            "-F",
+            "#{pane_id}:#{pane_left}:#{pane_top}:#{pane_width}:#{pane_height}",
+        ])
+        .output()
+        .map_err(|e| TmuxError::CommandFailed {
+            command: "list-panes".to_string(),
+            reason: e.to_string(),
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(TmuxError::CommandFailed {
+            command: "list-panes".to_string(),
+            reason: stderr.to_string(),
+        });
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(parse_pane_geometry_list(&stdout))
+}
+
 /// Parse tmux list-panes output
 /// Format: pane_id:pane_pid:current_command:current_path
 pub fn parse_pane_list(output: &str) -> Vec<PaneInfo> {
@@ -168,6 +222,75 @@ pub fn parse_pane_list(output: &str) -> Vec<PaneInfo> {
             }
         })
         .collect()
+}
+
+/// Parse tmux list-panes output for pane geometry
+/// Format: pane_id:left:top:width:height
+fn parse_pane_geometry_list(output: &str) -> Vec<PaneGeometry> {
+    output
+        .lines()
+        .filter(|line| !line.is_empty())
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.splitn(5, ':').collect();
+            if parts.len() != 5 {
+                return None;
+            }
+            Some(PaneGeometry {
+                pane_id: parts[0].to_string(),
+                left: parts[1].parse().ok()?,
+                top: parts[2].parse().ok()?,
+                width: parts[3].parse().ok()?,
+                height: parts[4].parse().ok()?,
+            })
+        })
+        .collect()
+}
+
+/// Group panes by left coordinate (columns), ordered left-to-right and top-to-bottom
+pub fn group_panes_by_left(panes: &[PaneGeometry]) -> Vec<PaneColumn> {
+    let mut columns: std::collections::BTreeMap<u16, Vec<&PaneGeometry>> =
+        std::collections::BTreeMap::new();
+
+    for pane in panes {
+        columns.entry(pane.left).or_default().push(pane);
+    }
+
+    columns
+        .into_iter()
+        .map(|(left, mut panes)| {
+            panes.sort_by_key(|p| p.top);
+            let width = panes
+                .iter()
+                .map(|p| p.width)
+                .max()
+                .unwrap_or(0);
+            let total_height = panes.iter().map(|p| p.height).sum();
+            let pane_ids = panes.iter().map(|p| p.pane_id.clone()).collect();
+            PaneColumn {
+                left,
+                width,
+                pane_ids,
+                total_height,
+            }
+        })
+        .collect()
+}
+
+/// Compute equal split sizes that sum to total
+pub fn compute_equal_splits(total: u16, parts: usize) -> Vec<u16> {
+    if parts == 0 {
+        return Vec::new();
+    }
+    let parts_u16 = parts as u16;
+    let base = total / parts_u16;
+    let remainder = total % parts_u16;
+    let mut splits = vec![base; parts];
+    if remainder > 0 {
+        if let Some(last) = splits.last_mut() {
+            *last += remainder;
+        }
+    }
+    splits
 }
 
 /// Kill a specific pane
@@ -204,6 +327,48 @@ pub fn select_pane(pane_id: &str) -> TmuxResult<()> {
     if !output.status.success() {
         return Err(TmuxError::PaneNotFound {
             pane_id: pane_id.to_string(),
+        });
+    }
+
+    Ok(())
+}
+
+/// Resize pane width (columns)
+pub fn resize_pane_width(pane_id: &str, width: u16) -> TmuxResult<()> {
+    let output = Command::new("tmux")
+        .args(["resize-pane", "-t", pane_id, "-x", &width.to_string()])
+        .output()
+        .map_err(|e| TmuxError::CommandFailed {
+            command: "resize-pane".to_string(),
+            reason: e.to_string(),
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(TmuxError::CommandFailed {
+            command: "resize-pane".to_string(),
+            reason: stderr.to_string(),
+        });
+    }
+
+    Ok(())
+}
+
+/// Resize pane height (rows)
+pub fn resize_pane_height(pane_id: &str, height: u16) -> TmuxResult<()> {
+    let output = Command::new("tmux")
+        .args(["resize-pane", "-t", pane_id, "-y", &height.to_string()])
+        .output()
+        .map_err(|e| TmuxError::CommandFailed {
+            command: "resize-pane".to_string(),
+            reason: e.to_string(),
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(TmuxError::CommandFailed {
+            command: "resize-pane".to_string(),
+            reason: stderr.to_string(),
         });
     }
 
@@ -268,6 +433,48 @@ pub fn hide_pane(pane_id: &str, window_name: &str) -> TmuxResult<String> {
     Ok(format!("{}:{}", session_name, window_id))
 }
 
+/// Enable tmux mouse support (global option)
+fn enable_mouse() -> TmuxResult<()> {
+    let output = Command::new("tmux")
+        .args(["set", "-g", "mouse", "on"])
+        .output()
+        .map_err(|e| TmuxError::CommandFailed {
+            command: "set".to_string(),
+            reason: e.to_string(),
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(TmuxError::CommandFailed {
+            command: "set".to_string(),
+            reason: stderr.to_string(),
+        });
+    }
+
+    Ok(())
+}
+
+/// Detach a pane into its own window without switching focus
+pub fn break_pane(pane_id: &str) -> TmuxResult<()> {
+    let output = Command::new("tmux")
+        .args(["break-pane", "-d", "-s", pane_id])
+        .output()
+        .map_err(|e| TmuxError::CommandFailed {
+            command: "break-pane".to_string(),
+            reason: e.to_string(),
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(TmuxError::CommandFailed {
+            command: "break-pane".to_string(),
+            reason: stderr.to_string(),
+        });
+    }
+
+    Ok(())
+}
+
 /// Show a hidden pane by joining it back to the GWT window
 ///
 /// Uses `tmux join-pane` to move the pane from its background window back to the main window.
@@ -279,6 +486,9 @@ pub fn hide_pane(pane_id: &str, window_name: &str) -> TmuxResult<String> {
 /// # Returns
 /// The new pane ID after joining
 pub fn show_pane(background_window: &str, target_pane_id: &str) -> TmuxResult<String> {
+    // Ensure mouse mode is on when showing panes
+    let _ = enable_mouse();
+
     // Join the pane from the background window to the target pane
     let output = Command::new("tmux")
         .args([
@@ -309,6 +519,48 @@ pub fn show_pane(background_window: &str, target_pane_id: &str) -> TmuxResult<St
 
     let new_pane_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
     Ok(new_pane_id)
+}
+
+/// Join a pane to a target with a split direction
+pub fn join_pane_to_target(
+    pane_id: &str,
+    target_pane_id: &str,
+    direction: SplitDirection,
+) -> TmuxResult<String> {
+    let split_flag = match direction {
+        SplitDirection::Horizontal => "-h",
+        SplitDirection::Vertical => "-v",
+    };
+
+    let output = Command::new("tmux")
+        .args([
+            "join-pane",
+            "-d",
+            split_flag,
+            "-s",
+            pane_id,
+            "-t",
+            target_pane_id,
+            "-P",
+            "-F",
+            "#{pane_id}",
+        ])
+        .output()
+        .map_err(|e| TmuxError::CommandFailed {
+            command: "join-pane".to_string(),
+            reason: e.to_string(),
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(TmuxError::CommandFailed {
+            command: "join-pane".to_string(),
+            reason: stderr.to_string(),
+        });
+    }
+
+    let joined_pane_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(joined_pane_id)
 }
 
 /// Send keys to a pane (e.g., Ctrl-C for interrupt)
@@ -598,6 +850,58 @@ mod tests {
     fn test_parse_pane_list_empty() {
         let panes = parse_pane_list("");
         assert!(panes.is_empty());
+    }
+
+    #[test]
+    fn test_parse_pane_geometry_list() {
+        let output = "%1:0:0:80:24\n%2:80:0:80:12\n%3:80:12:80:12";
+        let panes = parse_pane_geometry_list(output);
+        assert_eq!(panes.len(), 3);
+        assert_eq!(panes[0].pane_id, "%1");
+        assert_eq!(panes[0].left, 0);
+        assert_eq!(panes[1].top, 0);
+        assert_eq!(panes[2].height, 12);
+    }
+
+    #[test]
+    fn test_group_panes_by_left() {
+        let panes = vec![
+            PaneGeometry {
+                pane_id: "%1".to_string(),
+                left: 0,
+                top: 0,
+                width: 80,
+                height: 24,
+            },
+            PaneGeometry {
+                pane_id: "%2".to_string(),
+                left: 80,
+                top: 12,
+                width: 80,
+                height: 12,
+            },
+            PaneGeometry {
+                pane_id: "%3".to_string(),
+                left: 80,
+                top: 0,
+                width: 80,
+                height: 12,
+            },
+        ];
+        let columns = group_panes_by_left(&panes);
+        assert_eq!(columns.len(), 2);
+        assert_eq!(columns[0].left, 0);
+        assert_eq!(columns[1].left, 80);
+        assert_eq!(columns[1].pane_ids, vec!["%3".to_string(), "%2".to_string()]);
+        assert_eq!(columns[1].total_height, 24);
+    }
+
+    #[test]
+    fn test_compute_equal_splits() {
+        assert_eq!(compute_equal_splits(9, 3), vec![3, 3, 3]);
+        assert_eq!(compute_equal_splits(10, 3), vec![3, 3, 4]);
+        assert_eq!(compute_equal_splits(5, 1), vec![5]);
+        assert!(compute_equal_splits(0, 0).is_empty());
     }
 
     #[test]

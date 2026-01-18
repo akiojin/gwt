@@ -1633,7 +1633,7 @@ mod tests {
             worktree_path: path,
             branch_name: "feature/test".to_string(),
             agent_id: "codex-cli".to_string(),
-            agent_label: "Codex CLI".to_string(),
+            agent_label: "Codex".to_string(),
             version: "latest".to_string(),
             model: None,
             mode: ExecutionMode::Continue.label().to_string(),
@@ -1677,7 +1677,7 @@ mod tests {
     #[test]
     fn test_build_launching_message() {
         let config = sample_config(CodingAgent::CodexCli);
-        assert_eq!(build_launching_message(&config), "Launching Codex CLI...");
+        assert_eq!(build_launching_message(&config), "Launching Codex...");
     }
 
     #[test]

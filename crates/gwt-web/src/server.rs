@@ -164,7 +164,7 @@ mod tests {
             branch: "feature/test".to_string(),
             worktree_path: Some(repo.path().to_string_lossy().to_string()),
             tool_id: "codex-cli".to_string(),
-            tool_label: "Codex CLI".to_string(),
+            tool_label: "Codex".to_string(),
             session_id: Some("session-123".to_string()),
             mode: Some("normal".to_string()),
             model: Some("gpt-5".to_string()),

@@ -165,7 +165,7 @@ fn selected_description(state: &SettingsState) -> &'static str {
             0 => "Default coding agent for quick start.",
             1 => "If false, dependency install is skipped before launch.",
             2 => "Override path to Claude CLI executable.",
-            3 => "Override path to Codex CLI executable.",
+            3 => "Override path to Codex executable.",
             _ => "",
         },
     }
