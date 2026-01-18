@@ -248,6 +248,13 @@ fn build_locale_setup(locale_vars: &[(String, String)]) -> String {
 ///
 /// Returns the pane ID of the newly created pane.
 pub fn launch_in_pane(target_pane: &str, working_dir: &str, command: &str) -> TmuxResult<String> {
+    // Get user's shell, fallback to bash
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+
+    // Build the shell command that runs as login shell to load locale settings
+    // Using login shell (-l) ensures .bash_profile/.zprofile etc. are loaded
+    let shell_command = format!("{} -lc '{}'", shell, command.replace('\'', "'\\''"));
+
     // Build args with locale environment variables passed via -e option
     let locale_vars = get_locale_env_vars();
     let mut args = vec![
@@ -271,7 +278,10 @@ pub fn launch_in_pane(target_pane: &str, working_dir: &str, command: &str) -> Tm
     args.push("-F".to_string());
     args.push("#{pane_id}".to_string());
 
-    // Create the pane
+    // Add the shell command to execute directly
+    args.push(shell_command);
+
+    // Create the pane with the command
     let output = Command::new("tmux")
         .args(&args)
         .output()
@@ -288,18 +298,6 @@ pub fn launch_in_pane(target_pane: &str, working_dir: &str, command: &str) -> Tm
 
     let pane_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
-    // Set remain-on-exit off so pane auto-closes when agent exits (FR-052)
-    let _ = Command::new("tmux")
-        .args(["set-option", "-t", &pane_id, "remain-on-exit", "off"])
-        .output();
-
-    // Send the command to the new pane
-    // Add "; exit" to close the pane when agent exits (FR-052)
-    let command_with_exit = format!("{}; exit", command);
-    let _ = Command::new("tmux")
-        .args(["send-keys", "-t", &pane_id, &command_with_exit, "Enter"])
-        .output();
-
     Ok(pane_id)
 }
 
@@ -315,6 +313,13 @@ pub fn launch_in_pane_beside(
     working_dir: &str,
     command: &str,
 ) -> TmuxResult<String> {
+    // Get user's shell, fallback to bash
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+
+    // Build the shell command that runs as login shell to load locale settings
+    // Using login shell (-l) ensures .bash_profile/.zprofile etc. are loaded
+    let shell_command = format!("{} -lc '{}'", shell, command.replace('\'', "'\\''"));
+
     // Build args with locale environment variables passed via -e option
     let locale_vars = get_locale_env_vars();
     let mut args = vec![
@@ -338,7 +343,10 @@ pub fn launch_in_pane_beside(
     args.push("-F".to_string());
     args.push("#{pane_id}".to_string());
 
-    // Create the pane
+    // Add the shell command to execute directly
+    args.push(shell_command);
+
+    // Create the pane with the command
     let output = Command::new("tmux")
         .args(&args)
         .output()
@@ -354,18 +362,6 @@ pub fn launch_in_pane_beside(
     }
 
     let pane_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
-
-    // Set remain-on-exit off so pane auto-closes when agent exits (FR-052)
-    let _ = Command::new("tmux")
-        .args(["set-option", "-t", &pane_id, "remain-on-exit", "off"])
-        .output();
-
-    // Send the command to the new pane
-    // Add "; exit" to close the pane when agent exits (FR-052)
-    let command_with_exit = format!("{}; exit", command);
-    let _ = Command::new("tmux")
-        .args(["send-keys", "-t", &pane_id, &command_with_exit, "Enter"])
-        .output();
 
     Ok(pane_id)
 }
