@@ -2183,6 +2183,9 @@ impl Model {
             );
         }
 
+        // Update branch list with new agent info
+        self.branch_list.update_running_agents(&self.pane_list.panes);
+
         Ok(pane_id)
     }
 
