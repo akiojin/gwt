@@ -2052,7 +2052,7 @@ impl Model {
     /// Launch an agent in a tmux pane (multi mode)
     ///
     /// Layout strategy:
-    /// - First agent: vertical split below gwt pane
+    /// - First agent: horizontal split right of gwt pane
     /// - Additional agents: horizontal split beside last agent pane
     ///
     /// Uses the same argument building logic as single mode (main.rs)

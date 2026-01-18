@@ -113,7 +113,7 @@ pub fn create_pane(session: &str, working_dir: &str, command: &str) -> TmuxResul
     Ok(pane_id)
 }
 
-/// List all panes in a session
+/// List all panes in a session (across all windows)
 ///
 /// # Arguments
 /// * `session` - The session name
@@ -124,6 +124,7 @@ pub fn list_panes(session: &str) -> TmuxResult<Vec<PaneInfo>> {
     let output = Command::new("tmux")
         .args([
             "list-panes",
+            "-s", // list all panes in session (across all windows)
             "-t",
             session,
             "-F",
