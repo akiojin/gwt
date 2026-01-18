@@ -2,7 +2,7 @@
 
 use super::{CleanupCandidate, Worktree, WorktreePath, WorktreeStatus};
 use crate::error::{GwtError, Result};
-use crate::git::{Branch, Repository};
+use crate::git::{get_main_repo_root, Branch, Repository};
 use std::path::{Path, PathBuf};
 use tracing::{debug, error, info, warn};
 
@@ -19,10 +19,19 @@ pub struct WorktreeManager {
 
 impl WorktreeManager {
     /// Create a new worktree manager
+    ///
+    /// If the given path is inside a worktree, this automatically resolves
+    /// to the main repository root to ensure worktrees are created at the
+    /// correct location (e.g., /repo/.worktrees/ instead of /repo/.worktrees/branch/.worktrees/)
     pub fn new(repo_root: impl AsRef<Path>) -> Result<Self> {
         let repo_root = repo_root.as_ref().to_path_buf();
-        let repo = Repository::discover(&repo_root)?;
-        Ok(Self { repo_root, repo })
+        // Resolve to main repo root in case we're inside a worktree
+        let main_repo_root = get_main_repo_root(&repo_root);
+        let repo = Repository::discover(&main_repo_root)?;
+        Ok(Self {
+            repo_root: main_repo_root,
+            repo,
+        })
     }
 
     /// Get the repository root path
