@@ -1836,11 +1836,13 @@ impl Model {
                 self.pane_list.has_focus = self.split_layout.pane_list_has_focus();
 
                 // Render branch list
+                let branch_list_has_focus = !self.pane_list.has_focus;
                 render_branch_list(
                     &self.branch_list,
                     frame,
                     split_areas.branch_list,
                     self.status_message.as_deref(),
+                    branch_list_has_focus,
                 );
 
                 // Render pane list (only visible in tmux multi mode)

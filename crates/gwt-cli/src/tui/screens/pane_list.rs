@@ -93,7 +93,7 @@ impl PaneListState {
 /// Render the pane list
 pub fn render_pane_list(state: &mut PaneListState, frame: &mut Frame, area: Rect) {
     let border_style = if state.has_focus {
-        Style::default().fg(Color::Cyan)
+        Style::default().fg(Color::White)
     } else {
         Style::default().fg(Color::DarkGray)
     };
