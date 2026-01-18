@@ -67,9 +67,6 @@ fn run() -> Result<(), GwtError> {
         Some(cmd) => handle_command(cmd, &repo_root, &settings),
         None => {
             // Interactive TUI mode
-            if let Ok(manager) = WorktreeManager::new(&repo_root) {
-                let _ = manager.auto_cleanup_orphans();
-            }
             let mut entry: Option<TuiEntryContext> = None;
             loop {
                 let selection = tui::run_with_context(entry.take())?;
