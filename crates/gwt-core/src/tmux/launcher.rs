@@ -248,8 +248,10 @@ pub fn launch_in_pane(target_pane: &str, working_dir: &str, command: &str) -> Tm
         .output();
 
     // Send the command to the new pane
+    // Add "; exit" to auto-close the pane when agent exits (FR-052)
+    let command_with_exit = format!("{}; exit", command);
     let _ = Command::new("tmux")
-        .args(["send-keys", "-t", &pane_id, command, "Enter"])
+        .args(["send-keys", "-t", &pane_id, &command_with_exit, "Enter"])
         .output();
 
     Ok(pane_id)
@@ -300,8 +302,10 @@ pub fn launch_in_pane_beside(
         .output();
 
     // Send the command to the new pane
+    // Add "; exit" to auto-close the pane when agent exits (FR-052)
+    let command_with_exit = format!("{}; exit", command);
     let _ = Command::new("tmux")
-        .args(["send-keys", "-t", &pane_id, command, "Enter"])
+        .args(["send-keys", "-t", &pane_id, &command_with_exit, "Enter"])
         .output();
 
     Ok(pane_id)
