@@ -2,10 +2,53 @@
 //!
 //! Provides functions to create, list, and manage tmux panes for agents.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
 
 use super::error::{TmuxError, TmuxResult};
+
+/// Agent state for display (FR-031a-e)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AgentState {
+    /// Starting: Agent is initializing (blue, spinner)
+    #[default]
+    Starting,
+    /// Running: Agent is actively processing (green, spinner)
+    Running,
+    /// Stopped: Agent has no activity for 5+ seconds (gray, static)
+    Stopped,
+    /// Error: Agent encountered an error (red, static)
+    Error,
+}
+
+impl AgentState {
+    /// Get the spinner character for the current frame
+    pub fn spinner_char(&self, frame: usize) -> char {
+        const SPINNER_FRAMES: [char; 4] = ['|', '/', '-', '\\'];
+        match self {
+            AgentState::Starting | AgentState::Running => SPINNER_FRAMES[frame % 4],
+            AgentState::Stopped => ' ',
+            AgentState::Error => '!',
+        }
+    }
+
+    /// Check if this state shows a spinner
+    pub fn has_spinner(&self) -> bool {
+        matches!(self, AgentState::Starting | AgentState::Running)
+    }
+
+    /// Get the display label for the state
+    pub fn label(&self) -> &'static str {
+        match self {
+            AgentState::Starting => "STARTING",
+            AgentState::Running => "RUNNING",
+            AgentState::Stopped => "STOPPED",
+            AgentState::Error => "ERROR",
+        }
+    }
+}
 
 /// Information about a tmux pane
 #[derive(Debug, Clone)]
@@ -23,6 +66,12 @@ pub struct AgentPane {
     pub agent_name: String,
     pub start_time: SystemTime,
     pub pid: u32,
+    /// Current state of the agent (FR-031a-e)
+    pub state: AgentState,
+    /// Hash of last captured pane content for change detection
+    pub last_content_hash: u64,
+    /// Timestamp of last content change
+    pub last_change_time: SystemTime,
 }
 
 impl AgentPane {
@@ -34,13 +83,55 @@ impl AgentPane {
         start_time: SystemTime,
         pid: u32,
     ) -> Self {
+        let now = SystemTime::now();
         Self {
             pane_id,
             branch_name,
             agent_name,
             start_time,
             pid,
+            state: AgentState::Starting,
+            last_content_hash: 0,
+            last_change_time: now,
         }
+    }
+
+    /// Update state based on pane content changes (FR-031e)
+    ///
+    /// Returns true if state changed
+    pub fn update_state(&mut self, current_content_hash: u64) -> bool {
+        let now = SystemTime::now();
+        let old_state = self.state;
+
+        if current_content_hash != self.last_content_hash {
+            // Content changed - agent is running
+            self.last_content_hash = current_content_hash;
+            self.last_change_time = now;
+
+            // Transition from Starting to Running after first content change
+            if self.state == AgentState::Starting {
+                self.state = AgentState::Running;
+            } else if self.state == AgentState::Stopped {
+                // Resume from stopped state
+                self.state = AgentState::Running;
+            }
+        } else {
+            // No content change - check if 5 seconds have passed
+            let elapsed = now
+                .duration_since(self.last_change_time)
+                .unwrap_or(Duration::from_secs(0));
+
+            if elapsed >= Duration::from_secs(5) && self.state != AgentState::Error {
+                self.state = AgentState::Stopped;
+            }
+        }
+
+        old_state != self.state
+    }
+
+    /// Set error state
+    pub fn set_error(&mut self) {
+        self.state = AgentState::Error;
     }
 
     /// Calculate uptime duration
@@ -222,6 +313,26 @@ pub fn send_keys(pane_id: &str, keys: &str) -> TmuxResult<()> {
     }
 
     Ok(())
+}
+
+/// Capture pane content and return its hash (FR-031e)
+///
+/// Returns the hash of the current pane content for state detection.
+/// If capture fails, returns 0 (which will trigger state change detection).
+pub fn capture_pane_content_hash(pane_id: &str) -> u64 {
+    let output = Command::new("tmux")
+        .args(["capture-pane", "-t", pane_id, "-p"])
+        .output();
+
+    match output {
+        Ok(output) if output.status.success() => {
+            let content = String::from_utf8_lossy(&output.stdout);
+            let mut hasher = DefaultHasher::new();
+            content.hash(&mut hasher);
+            hasher.finish()
+        }
+        _ => 0,
+    }
 }
 
 /// Check if exit confirmation is required based on running agents

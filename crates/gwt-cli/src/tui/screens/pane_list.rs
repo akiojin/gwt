@@ -1,8 +1,8 @@
 //! Pane list component for tmux multi-mode
 //!
-//! Displays a list of running agent panes with branch name, agent name, and uptime.
+//! Displays a list of running agent panes with branch name, agent name, uptime, and state.
 
-use gwt_core::tmux::AgentPane;
+use gwt_core::tmux::{AgentPane, AgentState};
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
@@ -22,6 +22,8 @@ pub struct PaneListState {
     list_state: ListState,
     /// Whether this component has focus
     pub has_focus: bool,
+    /// Spinner animation frame counter (FR-031a-b)
+    pub spinner_frame: usize,
 }
 
 impl PaneListState {
@@ -32,6 +34,7 @@ impl PaneListState {
             selected: 0,
             list_state: ListState::default(),
             has_focus: false,
+            spinner_frame: 0,
         }
     }
 
@@ -113,13 +116,14 @@ pub fn render_pane_list(state: &mut PaneListState, frame: &mut Frame, area: Rect
         return;
     }
 
+    let spinner_frame = state.spinner_frame;
     let items: Vec<ListItem> = state
         .panes
         .iter()
         .enumerate()
         .map(|(i, pane)| {
             let is_selected = i == state.selected && state.has_focus;
-            create_pane_list_item(pane, is_selected)
+            create_pane_list_item(pane, is_selected, spinner_frame)
         })
         .collect();
 
@@ -135,13 +139,26 @@ pub fn render_pane_list(state: &mut PaneListState, frame: &mut Frame, area: Rect
     frame.render_stateful_widget(list, area, &mut state.list_state);
 }
 
-/// Create a list item for a pane
-fn create_pane_list_item(pane: &AgentPane, _is_selected: bool) -> ListItem<'static> {
+/// Create a list item for a pane (FR-031a-e)
+fn create_pane_list_item(pane: &AgentPane, _is_selected: bool, spinner_frame: usize) -> ListItem<'static> {
     let uptime = pane.uptime_string();
 
+    // Get state color and spinner character (FR-031a-d)
+    let (state_color, state_char) = match pane.state {
+        AgentState::Starting => (Color::Blue, pane.state.spinner_char(spinner_frame)),
+        AgentState::Running => (Color::Green, pane.state.spinner_char(spinner_frame)),
+        AgentState::Stopped => (Color::DarkGray, ' '),
+        AgentState::Error => (Color::Red, '!'),
+    };
+
     let spans = vec![
+        // State indicator with spinner
         Span::styled(
-            format!("{:<20}", truncate_string(&pane.branch_name, 20)),
+            format!("[{}] ", state_char),
+            Style::default().fg(state_color),
+        ),
+        Span::styled(
+            format!("{:<18}", truncate_string(&pane.branch_name, 18)),
             Style::default().fg(Color::Green),
         ),
         Span::raw(" "),
@@ -151,6 +168,11 @@ fn create_pane_list_item(pane: &AgentPane, _is_selected: bool) -> ListItem<'stat
         ),
         Span::raw(" "),
         Span::styled(format!("{:>8}", uptime), Style::default().fg(Color::Yellow)),
+        Span::raw(" "),
+        Span::styled(
+            format!("{:<8}", pane.state.label()),
+            Style::default().fg(state_color),
+        ),
     ];
 
     ListItem::new(Line::from(spans))

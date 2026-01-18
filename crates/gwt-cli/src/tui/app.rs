@@ -8,7 +8,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use gwt_core::config::get_branch_tool_history;
-use gwt_core::config::{Profile, ProfilesConfig};
+use gwt_core::config::{save_session_entry, Profile, ProfilesConfig, ToolSessionEntry};
 use gwt_core::error::GwtError;
 use gwt_core::git::{Branch, PrCache, Repository};
 use gwt_core::tmux::{get_current_session, kill_pane, launcher, AgentPane};
@@ -753,9 +753,10 @@ impl Model {
     }
 
     /// FR-033: Update pane list by polling tmux (1-second interval)
+    /// FR-031e: Update agent states based on pane content changes
     fn update_pane_list(&mut self) {
-        // Only in tmux multi mode with panes
-        if !self.tmux_mode.is_multi() || self.pane_list.panes.is_empty() {
+        // Only in tmux multi mode
+        if !self.tmux_mode.is_multi() {
             return;
         }
 
@@ -763,10 +764,21 @@ impl Model {
         let now = Instant::now();
         if let Some(last) = self.last_pane_update {
             if now.duration_since(last) < Duration::from_secs(1) {
+                // Update spinner frame more frequently (every 250ms)
+                let elapsed = now.duration_since(last);
+                if elapsed >= Duration::from_millis(250) {
+                    self.pane_list.spinner_frame = self.pane_list.spinner_frame.wrapping_add(1);
+                }
                 return;
             }
         }
         self.last_pane_update = Some(now);
+        // Update spinner frame on each poll
+        self.pane_list.spinner_frame = self.pane_list.spinner_frame.wrapping_add(1);
+
+        if self.pane_list.panes.is_empty() {
+            return;
+        }
 
         // Get current tmux panes
         let Some(session) = &self.tmux_session else {
@@ -781,21 +793,72 @@ impl Model {
         let current_pane_ids: std::collections::HashSet<_> =
             current_panes.iter().map(|p| p.pane_id.as_str()).collect();
 
-        let remaining_panes: Vec<_> = self
+        // FR-072: Detect removed panes and update session
+        let removed_panes: Vec<_> = self
+            .pane_list
+            .panes
+            .iter()
+            .filter(|p| !current_pane_ids.contains(p.pane_id.as_str()))
+            .collect();
+
+        for pane in &removed_panes {
+            // Save session entry for terminated agent (FR-072)
+            let session_entry = ToolSessionEntry {
+                branch: pane.branch_name.clone(),
+                worktree_path: None,
+                tool_id: pane.agent_name.clone(),
+                tool_label: pane.agent_name.clone(),
+                session_id: None,
+                mode: None,
+                model: None,
+                reasoning_level: None,
+                skip_permissions: None,
+                tool_version: None,
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0),
+            };
+            if let Err(e) = save_session_entry(&self.repo_root, session_entry) {
+                debug!(
+                    category = "tui",
+                    pane_id = %pane.pane_id,
+                    error = %e,
+                    "Failed to save session entry for terminated agent"
+                );
+            }
+        }
+
+        // Update state for each remaining pane (FR-031e)
+        let mut updated_panes: Vec<_> = self
             .pane_list
             .panes
             .iter()
             .filter(|p| current_pane_ids.contains(p.pane_id.as_str()))
             .cloned()
+            .map(|mut pane| {
+                // Capture pane content hash and update state
+                let content_hash = gwt_core::tmux::capture_pane_content_hash(&pane.pane_id);
+                pane.update_state(content_hash);
+                pane
+            })
             .collect();
 
         // Also update agent_panes list
         self.agent_panes
             .retain(|id| current_pane_ids.contains(id.as_str()));
 
-        // Update if any panes were removed
-        if remaining_panes.len() != self.pane_list.panes.len() {
-            self.pane_list.update_panes(remaining_panes);
+        // Update pane list with new states
+        if updated_panes.len() != self.pane_list.panes.len()
+            || updated_panes
+                .iter()
+                .zip(self.pane_list.panes.iter())
+                .any(|(a, b)| a.state != b.state)
+        {
+            self.pane_list.update_panes(updated_panes);
+        } else {
+            // Still update for state changes even if count is same
+            std::mem::swap(&mut self.pane_list.panes, &mut updated_panes);
         }
     }
 
@@ -1692,7 +1755,7 @@ impl Model {
             .unwrap_or_else(|| "unknown".to_string());
         let agent_pane = AgentPane::new(
             pane_id.clone(),
-            branch_name,
+            branch_name.clone(),
             config.agent.label().to_string(),
             SystemTime::now(),
             0, // PID is not tracked by simple launcher
@@ -1700,6 +1763,31 @@ impl Model {
         let mut panes = self.pane_list.panes.clone();
         panes.push(agent_pane);
         self.pane_list.update_panes(panes);
+
+        // FR-071: Save session entry for tmux mode
+        let session_entry = ToolSessionEntry {
+            branch: branch_name,
+            worktree_path: Some(working_dir),
+            tool_id: config.agent.id().to_string(),
+            tool_label: config.agent.label().to_string(),
+            session_id: None,
+            mode: None,
+            model: None,
+            reasoning_level: None,
+            skip_permissions: Some(config.skip_permissions),
+            tool_version: Some(config.version.clone()),
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0),
+        };
+        if let Err(e) = save_session_entry(&self.repo_root, session_entry) {
+            debug!(
+                category = "tui",
+                error = %e,
+                "Failed to save session entry"
+            );
+        }
 
         Ok(pane_id)
     }
