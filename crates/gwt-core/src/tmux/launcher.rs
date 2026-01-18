@@ -395,4 +395,76 @@ mod tests {
         assert_eq!(config.session, "gwt-test");
         assert_eq!(config.branch_name, "feature/test");
     }
+
+    #[test]
+    fn test_build_agent_command_basic() {
+        let cmd = build_agent_command("claude", None, None, "normal", None, false, &[]);
+        assert_eq!(cmd, "claude");
+    }
+
+    #[test]
+    fn test_build_agent_command_with_model() {
+        let cmd = build_agent_command("claude", Some("opus"), None, "normal", None, false, &[]);
+        assert_eq!(cmd, "claude --model opus");
+    }
+
+    #[test]
+    fn test_build_agent_command_continue_mode() {
+        let cmd = build_agent_command("claude", None, None, "continue", None, false, &[]);
+        assert_eq!(cmd, "claude --continue");
+    }
+
+    #[test]
+    fn test_build_agent_command_continue_with_session() {
+        let cmd =
+            build_agent_command("claude", None, None, "continue", Some("abc123"), false, &[]);
+        assert_eq!(cmd, "claude --continue abc123");
+    }
+
+    #[test]
+    fn test_build_agent_command_resume_mode() {
+        let cmd = build_agent_command("claude", None, None, "resume", Some("xyz789"), false, &[]);
+        assert_eq!(cmd, "claude --resume xyz789");
+    }
+
+    #[test]
+    fn test_build_agent_command_skip_permissions() {
+        let cmd = build_agent_command("claude", None, None, "normal", None, true, &[]);
+        assert_eq!(cmd, "claude --dangerously-skip-permissions");
+    }
+
+    #[test]
+    fn test_build_agent_command_with_env() {
+        let env = vec![("API_KEY".to_string(), "secret".to_string())];
+        let cmd = build_agent_command("claude", None, None, "normal", None, false, &env);
+        assert!(cmd.contains("export API_KEY='secret'"));
+        assert!(cmd.contains("claude"));
+    }
+
+    #[test]
+    fn test_build_agent_command_full() {
+        let env = vec![("FOO".to_string(), "bar".to_string())];
+        let cmd = build_agent_command(
+            "claude",
+            Some("sonnet"),
+            Some("1.0.0"),
+            "continue",
+            Some("sess123"),
+            true,
+            &env,
+        );
+        assert!(cmd.contains("export FOO='bar'"));
+        assert!(cmd.contains("claude"));
+        assert!(cmd.contains("--model sonnet"));
+        assert!(cmd.contains("--continue sess123"));
+        assert!(cmd.contains("--dangerously-skip-permissions"));
+    }
+
+    #[test]
+    fn test_build_agent_command_empty_model() {
+        // Empty model should not add --model flag
+        let cmd = build_agent_command("claude", Some(""), None, "normal", None, false, &[]);
+        assert_eq!(cmd, "claude");
+        assert!(!cmd.contains("--model"));
+    }
 }
