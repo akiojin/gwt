@@ -428,8 +428,7 @@ mod tests {
 
     #[test]
     fn test_build_agent_command_continue_with_session() {
-        let cmd =
-            build_agent_command("claude", None, None, "continue", Some("abc123"), false, &[]);
+        let cmd = build_agent_command("claude", None, None, "continue", Some("abc123"), false, &[]);
         assert_eq!(cmd, "claude --continue abc123");
     }
 

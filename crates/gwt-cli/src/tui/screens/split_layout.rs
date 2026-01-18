@@ -24,6 +24,7 @@ impl FocusPanel {
     }
 
     /// Check if branch list has focus
+    #[allow(dead_code)]
     pub fn is_branch_list(&self) -> bool {
         matches!(self, FocusPanel::BranchList)
     }
@@ -61,6 +62,7 @@ impl SplitLayoutState {
     }
 
     /// Disable tmux mode (hide pane list)
+    #[allow(dead_code)]
     pub fn disable_tmux_mode(&mut self) {
         self.pane_list_visible = false;
         self.focus = FocusPanel::BranchList;
@@ -74,6 +76,7 @@ impl SplitLayoutState {
     }
 
     /// Check if branch list has focus
+    #[allow(dead_code)]
     pub fn branch_list_has_focus(&self) -> bool {
         self.focus.is_branch_list()
     }

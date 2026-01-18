@@ -72,16 +72,19 @@ impl PaneListState {
     }
 
     /// Get the currently selected pane
+    #[allow(dead_code)]
     pub fn selected_pane(&self) -> Option<&AgentPane> {
         self.panes.get(self.selected)
     }
 
     /// Check if the list is empty
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.panes.is_empty()
     }
 
     /// Get the number of panes
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.panes.len()
     }
