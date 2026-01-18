@@ -849,7 +849,7 @@ fn render_filter_line(state: &BranchListState, frame: &mut Frame, area: Rect) {
 /// Render mode line
 fn render_stats_line(state: &BranchListState, frame: &mut Frame, area: Rect) {
     let spans = vec![
-        Span::styled("Mode(tab): ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Mode(m): ", Style::default().fg(Color::DarkGray)),
         Span::styled(
             state.view_mode.label(),
             Style::default()
@@ -1124,7 +1124,7 @@ fn render_footer(frame: &mut Frame, area: Rect) {
         ("l", "Logs"),
         ("p", "Profile"),
         ("f", "Filter"),
-        ("tab", "Mode"),
+        ("m", "Mode"),
         ("?", "Help"),
         ("q", "Quit"),
     ];
