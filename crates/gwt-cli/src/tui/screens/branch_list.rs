@@ -288,7 +288,7 @@ impl BranchItem {
         }
         match self.safety_status {
             SafetyStatus::Uncommitted => ("!".to_string(), Color::Red),
-            SafetyStatus::Unpushed => ("!".to_string(), Color::Yellow),
+            SafetyStatus::Unpushed => ("^".to_string(), Color::Yellow),
             SafetyStatus::Unmerged => ("*".to_string(), Color::Yellow),
             SafetyStatus::Safe => ("o".to_string(), Color::Green),
             SafetyStatus::Pending => {
@@ -881,7 +881,7 @@ fn render_legend_line(frame: &mut Frame, area: Rect) {
         Span::styled(" Uncommitted", Style::default().fg(Color::Red)),
         Span::styled("  ", Style::default()),
         Span::styled(
-            "!",
+            "^",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
