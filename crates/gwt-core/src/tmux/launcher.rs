@@ -298,7 +298,7 @@ fn build_locale_setup(locale_vars: &[(String, String)]) -> String {
 
 /// Launch a command in a new tmux pane (simplified API)
 ///
-/// Creates a new pane below the current one and executes the command.
+/// Creates a new pane to the right of the current one and executes the command.
 /// The pane automatically closes when the command exits (FR-052).
 /// Automatically inherits locale and terminal environment variables to prevent encoding issues.
 ///
@@ -308,7 +308,7 @@ pub fn launch_in_pane(target_pane: &str, working_dir: &str, command: &str) -> Tm
     let env_vars = get_locale_env_vars();
     let mut args = vec![
         "split-window".to_string(),
-        "-v".to_string(), // vertical split (below current pane)
+        "-h".to_string(), // horizontal split (right of current pane)
         "-d".to_string(), // don't switch to new pane (keep focus on gwt)
         "-t".to_string(),
         target_pane.to_string(),

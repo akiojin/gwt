@@ -26,7 +26,7 @@ use tracing::{debug, error, info};
 
 use super::screens::branch_list::WorktreeStatus;
 use super::screens::environment::EditField;
-use super::screens::pane_list::{render_pane_list, PaneListState};
+use super::screens::pane_list::PaneListState;
 use super::screens::split_layout::{calculate_split_layout, SplitLayoutState};
 use super::screens::{
     collect_os_env, render_branch_list, render_confirm, render_environment, render_error,
@@ -184,6 +184,8 @@ pub struct Model {
     pending_agent_launch: Option<AgentLaunchConfig>,
     /// Pending unsafe branch selection (FR-029b)
     pending_unsafe_selection: Option<String>,
+    /// Pending agent termination branch (FR-040)
+    pending_agent_termination: Option<String>,
     /// Pending cleanup branches (FR-010)
     pending_cleanup_branches: Vec<String>,
     /// Branch list update receiver
@@ -273,6 +275,10 @@ pub enum Message {
     CopyLogToClipboard,
     /// Toggle agent pane visibility (show/hide)
     ToggleAgentPaneVisibility,
+    /// FR-040: Confirm agent termination (d key)
+    ConfirmAgentTermination,
+    /// Execute agent termination after confirmation
+    ExecuteAgentTermination,
 }
 
 impl Model {
@@ -315,6 +321,7 @@ impl Model {
             total_count: 0,
             pending_agent_launch: None,
             pending_unsafe_selection: None,
+            pending_agent_termination: None,
             pending_cleanup_branches: Vec::new(),
             branch_list_rx: None,
             pr_title_rx: None,
@@ -335,8 +342,6 @@ impl Model {
             model.tmux_session = get_current_session();
             // Capture the gwt pane ID for splitting
             model.gwt_pane_id = gwt_core::tmux::get_current_pane_id();
-            // Enable split layout for pane list
-            model.split_layout.enable_tmux_mode();
             debug!(
                 category = "tui",
                 mode = %model.tmux_mode,
@@ -348,6 +353,10 @@ impl Model {
 
         // Load initial data
         model.refresh_data();
+
+        // Reconnect to orphaned agent panes (FR-060~062)
+        model.reconnect_orphaned_panes();
+
         model.apply_entry_context(context);
         model
     }
@@ -639,6 +648,70 @@ impl Model {
         });
     }
 
+    /// Reconnect to orphaned agent panes on startup (FR-060~062)
+    ///
+    /// This function detects panes that were running before gwt restarted
+    /// by matching their working directory to worktree paths.
+    fn reconnect_orphaned_panes(&mut self) {
+        // Only in tmux multi-mode
+        if !self.tmux_mode.is_multi() {
+            return;
+        }
+
+        let Some(session) = &self.tmux_session else {
+            return;
+        };
+
+        // Get worktree list synchronously for matching
+        let worktrees: Vec<(String, std::path::PathBuf)> =
+            match WorktreeManager::new(&self.repo_root) {
+                Ok(manager) => match manager.list_basic() {
+                    Ok(wts) => wts
+                        .into_iter()
+                        .filter_map(|wt| wt.branch.map(|b| (b, wt.path)))
+                        .collect(),
+                    Err(_) => return,
+                },
+                Err(_) => return,
+            };
+
+        if worktrees.is_empty() {
+            return;
+        }
+
+        // Detect orphaned panes
+        let gwt_pane_id = self.gwt_pane_id.as_deref();
+        match gwt_core::tmux::detect_orphaned_panes(session, &worktrees, gwt_pane_id) {
+            Ok(orphaned_panes) => {
+                if !orphaned_panes.is_empty() {
+                    debug!(
+                        category = "tui",
+                        count = orphaned_panes.len(),
+                        "Reconnected to orphaned agent panes"
+                    );
+
+                    for pane in orphaned_panes {
+                        // Add to agent_panes list
+                        self.agent_panes.push(pane.pane_id.clone());
+                        // Add to pane_list for display
+                        self.pane_list.panes.push(pane);
+                    }
+
+                    // Update branch_list running_agents
+                    self.branch_list
+                        .update_running_agents(&self.pane_list.panes);
+                }
+            }
+            Err(e) => {
+                debug!(
+                    category = "tui",
+                    error = %e,
+                    "Failed to detect orphaned panes"
+                );
+            }
+        }
+    }
+
     fn apply_entry_context(&mut self, context: Option<TuiEntryContext>) {
         if let Some(context) = context {
             if let Some(message) = context.status_message {
@@ -756,9 +829,10 @@ impl Model {
     }
 
     /// FR-033: Update pane list by polling tmux (1-second interval)
+    /// FR-031e: Update agent states based on pane content changes
     fn update_pane_list(&mut self) {
-        // Only in tmux multi mode with panes
-        if !self.tmux_mode.is_multi() || self.pane_list.panes.is_empty() {
+        // Only in tmux multi mode
+        if !self.tmux_mode.is_multi() {
             return;
         }
 
@@ -766,10 +840,21 @@ impl Model {
         let now = Instant::now();
         if let Some(last) = self.last_pane_update {
             if now.duration_since(last) < Duration::from_secs(1) {
+                // Update spinner frame more frequently (every 250ms)
+                let elapsed = now.duration_since(last);
+                if elapsed >= Duration::from_millis(250) {
+                    self.pane_list.spinner_frame = self.pane_list.spinner_frame.wrapping_add(1);
+                }
                 return;
             }
         }
         self.last_pane_update = Some(now);
+        // Update spinner frame on each poll
+        self.pane_list.spinner_frame = self.pane_list.spinner_frame.wrapping_add(1);
+
+        if self.pane_list.panes.is_empty() {
+            return;
+        }
 
         // Get current tmux panes
         let Some(session) = &self.tmux_session else {
@@ -784,7 +869,44 @@ impl Model {
         let current_pane_ids: std::collections::HashSet<_> =
             current_panes.iter().map(|p| p.pane_id.as_str()).collect();
 
-        let remaining_panes: Vec<_> = self
+        // FR-072: Detect removed panes and update session
+        let removed_panes: Vec<_> = self
+            .pane_list
+            .panes
+            .iter()
+            .filter(|p| !current_pane_ids.contains(p.pane_id.as_str()))
+            .collect();
+
+        for pane in &removed_panes {
+            // Save session entry for terminated agent (FR-072)
+            let session_entry = ToolSessionEntry {
+                branch: pane.branch_name.clone(),
+                worktree_path: None,
+                tool_id: pane.agent_name.clone(),
+                tool_label: pane.agent_name.clone(),
+                session_id: None,
+                mode: None,
+                model: None,
+                reasoning_level: None,
+                skip_permissions: None,
+                tool_version: None,
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0),
+            };
+            if let Err(e) = save_session_entry(&self.repo_root, session_entry) {
+                debug!(
+                    category = "tui",
+                    pane_id = %pane.pane_id,
+                    error = %e,
+                    "Failed to save session entry for terminated agent"
+                );
+            }
+        }
+
+        // Update state for each remaining pane (FR-031e)
+        let mut updated_panes: Vec<_> = self
             .pane_list
             .panes
             .iter()
@@ -796,10 +918,18 @@ impl Model {
         self.agent_panes
             .retain(|id| current_pane_ids.contains(id.as_str()));
 
-        // Update if any panes were removed
-        if remaining_panes.len() != self.pane_list.panes.len() {
-            self.pane_list.update_panes(remaining_panes);
+        // Update pane list if count changed
+        if updated_panes.len() != self.pane_list.panes.len() {
+            self.pane_list.update_panes(updated_panes);
+        } else {
+            // Keep existing panes (with their is_background state)
+            std::mem::swap(&mut self.pane_list.panes, &mut updated_panes);
         }
+
+        // Sync running_agents in branch_list with current panes
+        self.branch_list.update_running_agents(&self.pane_list.panes);
+        // Update spinner frame for branch list display
+        self.branch_list.spinner_frame = self.pane_list.spinner_frame;
     }
 
     /// Toggle agent pane visibility (show/hide)
@@ -867,6 +997,67 @@ impl Model {
             }
         }
         self.status_message_time = Some(Instant::now());
+
+        // Update branch list with new pane state
+        self.branch_list.update_running_agents(&self.pane_list.panes);
+    }
+
+    /// FR-042: Terminate agent pane for the specified branch
+    fn terminate_agent_pane(&mut self, branch_name: &str) {
+        // Find the agent pane for this branch
+        let pane_to_kill = self
+            .pane_list
+            .panes
+            .iter()
+            .find(|p| p.branch_name == branch_name)
+            .cloned();
+
+        let Some(pane) = pane_to_kill else {
+            self.status_message = Some("Agent pane not found".to_string());
+            self.status_message_time = Some(Instant::now());
+            return;
+        };
+
+        // Kill the pane using tmux kill-pane
+        let pane_target = if pane.is_background {
+            // For background panes, kill the background window
+            if let Some(ref bg_window) = pane.background_window {
+                bg_window.clone()
+            } else {
+                pane.pane_id.clone()
+            }
+        } else {
+            pane.pane_id.clone()
+        };
+
+        let result = std::process::Command::new("tmux")
+            .args(["kill-pane", "-t", &pane_target])
+            .output();
+
+        match result {
+            Ok(output) if output.status.success() => {
+                // Remove from pane_list
+                self.pane_list
+                    .panes
+                    .retain(|p| p.branch_name != branch_name);
+                // Remove from agent_panes
+                self.agent_panes.retain(|id| id != &pane.pane_id);
+                // Update branch_list running_agents
+                self.branch_list.update_running_agents(&self.pane_list.panes);
+
+                self.status_message = Some(format!("Agent terminated on '{}'", branch_name));
+                self.status_message_time = Some(Instant::now());
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                self.status_message = Some(format!("Failed to terminate: {}", stderr.trim()));
+                self.status_message_time = Some(Instant::now());
+            }
+            Err(e) => {
+                self.status_message = Some(format!("Failed to terminate: {}", e));
+                self.status_message_time = Some(Instant::now());
+            }
+        }
     }
 
     /// Show a hidden pane and focus it
@@ -921,6 +1112,84 @@ impl Model {
                 self.status_message_time = Some(Instant::now());
             }
         }
+    }
+
+    /// Handle Enter key on branch list
+    /// FR-040: If branch has running agent, focus the pane
+    /// FR-041: If branch has no agent, open wizard
+    fn handle_branch_enter(&mut self) {
+        let Some(branch) = self.branch_list.selected_branch() else {
+            return;
+        };
+        let branch_name = branch.name.clone();
+
+        // Find pane in pane_list by branch name
+        if let Some(pane) = self
+            .pane_list
+            .panes
+            .iter_mut()
+            .find(|p| p.branch_name == branch_name)
+        {
+            // Branch has running agent - show and focus the pane (FR-011, FR-012)
+            if pane.is_background {
+                // Hidden pane - show it first then focus (FR-012)
+                let Some(background_window) = &pane.background_window else {
+                    self.status_message = Some("No background window to restore".to_string());
+                    self.status_message_time = Some(Instant::now());
+                    return;
+                };
+                let background_window = background_window.clone();
+
+                let Some(gwt_pane_id) = &self.gwt_pane_id else {
+                    self.status_message = Some("GWT pane ID not available".to_string());
+                    self.status_message_time = Some(Instant::now());
+                    return;
+                };
+
+                match gwt_core::tmux::show_pane(&background_window, gwt_pane_id) {
+                    Ok(new_pane_id) => {
+                        // Update the pane ID and clear background state
+                        pane.pane_id = new_pane_id.clone();
+                        pane.is_background = false;
+                        pane.background_window = None;
+
+                        // Update agent_panes list
+                        self.agent_panes.push(new_pane_id.clone());
+
+                        // Update branch_list running_agents
+                        self.branch_list
+                            .update_running_agents(&self.pane_list.panes);
+
+                        // Focus the pane
+                        if let Err(e) = gwt_core::tmux::pane::select_pane(&new_pane_id) {
+                            self.status_message = Some(format!("Failed to focus pane: {}", e));
+                            self.status_message_time = Some(Instant::now());
+                        }
+                    }
+                    Err(e) => {
+                        self.status_message = Some(format!("Failed to show pane: {}", e));
+                        self.status_message_time = Some(Instant::now());
+                    }
+                }
+            } else {
+                // Visible pane - just focus it (FR-011)
+                if let Err(e) = gwt_core::tmux::pane::select_pane(&pane.pane_id) {
+                    self.status_message = Some(format!("Failed to focus pane: {}", e));
+                    self.status_message_time = Some(Instant::now());
+                }
+            }
+        } else {
+            // No running agent - open wizard
+            self.update(Message::OpenWizard);
+        }
+    }
+
+    /// Check if currently selected branch has a running agent
+    fn selected_branch_has_agent(&self) -> bool {
+        self.branch_list
+            .selected_branch()
+            .map(|branch| self.branch_list.get_running_agent(&branch.name).is_some())
+            .unwrap_or(false)
     }
 
     fn load_profiles(&mut self) {
@@ -1207,11 +1476,7 @@ impl Model {
             }
             Message::SelectNext => match self.screen {
                 Screen::BranchList => {
-                    if self.split_layout.pane_list_has_focus() {
-                        self.pane_list.select_next();
-                    } else {
-                        self.branch_list.select_next();
-                    }
+                    self.branch_list.select_next();
                 }
                 Screen::WorktreeCreate => self.worktree_create.select_next_base(),
                 Screen::Settings => self.settings.select_next(),
@@ -1224,11 +1489,7 @@ impl Model {
             },
             Message::SelectPrev => match self.screen {
                 Screen::BranchList => {
-                    if self.split_layout.pane_list_has_focus() {
-                        self.pane_list.select_prev();
-                    } else {
-                        self.branch_list.select_prev();
-                    }
+                    self.branch_list.select_prev();
                 }
                 Screen::WorktreeCreate => self.worktree_create.select_prev_base(),
                 Screen::Settings => self.settings.select_prev(),
@@ -1267,16 +1528,13 @@ impl Model {
             },
             Message::Enter => match &self.screen {
                 Screen::BranchList => {
-                    if self.split_layout.pane_list_has_focus() {
-                        // FR-040: Enter on pane list focuses the selected pane
-                        // If the pane is in background, show it first then focus
-                        self.show_and_focus_selected_pane();
-                    } else if self.branch_list.filter_mode {
+                    if self.branch_list.filter_mode {
                         // FR-020: Enter in filter mode exits filter mode
                         self.branch_list.exit_filter_mode();
                     } else {
-                        // Open wizard for selected branch (FR-007)
-                        self.update(Message::OpenWizard);
+                        // FR-040: Enter on branch with running agent focuses the pane
+                        // FR-041: Enter on branch without agent opens wizard
+                        self.handle_branch_enter();
                     }
                 }
                 Screen::WorktreeCreate => {
@@ -1299,9 +1557,14 @@ impl Model {
                             let branches = std::mem::take(&mut self.pending_cleanup_branches);
                             self.execute_cleanup(&branches);
                         }
+                        // FR-040: Handle agent termination confirmation
+                        if self.pending_agent_termination.is_some() {
+                            self.update(Message::ExecuteAgentTermination);
+                        }
                     }
                     // Clear pending state and return to previous screen
                     self.pending_unsafe_selection = None;
+                    self.pending_agent_termination = None;
                     self.pending_cleanup_branches.clear();
                     if let Some(prev_screen) = self.screen_stack.pop() {
                         self.screen = prev_screen;
@@ -1478,13 +1741,36 @@ impl Model {
             Message::ToggleAgentPaneVisibility => {
                 self.toggle_agent_pane_visibility();
             }
+            Message::ConfirmAgentTermination => {
+                // FR-041: Show confirmation dialog before terminating agent
+                if let Some(branch) = self.branch_list.selected_branch() {
+                    if self.branch_list.get_running_agent(&branch.name).is_some() {
+                        self.pending_agent_termination = Some(branch.name.clone());
+                        self.confirm = ConfirmState {
+                            title: "Terminate Agent".to_string(),
+                            message: format!("Terminate agent on '{}'?", branch.name),
+                            details: vec!["The agent process will be killed.".to_string()],
+                            confirm_label: "Terminate".to_string(),
+                            cancel_label: "Cancel".to_string(),
+                            selected_confirm: true, // Default to Terminate
+                            is_dangerous: true,
+                        };
+                        self.screen_stack.push(self.screen.clone());
+                        self.screen = Screen::Confirm;
+                    }
+                }
+            }
+            Message::ExecuteAgentTermination => {
+                // FR-042: Execute tmux kill-pane
+                if let Some(branch_name) = self.pending_agent_termination.take() {
+                    self.terminate_agent_pane(&branch_name);
+                }
+            }
             Message::Tab => {
                 if let Screen::Settings = self.screen {
                     self.settings.next_category()
-                } else if let Screen::BranchList = self.screen {
-                    // Toggle focus between branch list and pane list in tmux multi-mode
-                    self.split_layout.toggle_focus();
                 }
+                // Tab no longer toggles focus - PaneList panel is abolished
             }
             Message::CycleFilter => {
                 if matches!(self.screen, Screen::Logs) {
@@ -1688,6 +1974,17 @@ impl Model {
 
                     // In multi mode, launch in tmux pane without quitting TUI
                     if self.tmux_mode.is_multi() && self.gwt_pane_id.is_some() {
+                        // FR-010: Check 1 branch = 1 pane constraint
+                        if self
+                            .branch_list
+                            .get_running_agent(&launch_config.branch_name)
+                            .is_some()
+                        {
+                            self.status_message =
+                                Some("Agent already running on this branch".to_string());
+                            self.status_message_time = Some(Instant::now());
+                            return;
+                        }
                         match self.launch_agent_in_pane(&launch_config) {
                             Ok(_) => {
                                 // Save session history for Quick Start feature (FR-050)
@@ -1755,11 +2052,25 @@ impl Model {
     /// Launch an agent in a tmux pane (multi mode)
     ///
     /// Layout strategy:
-    /// - First agent: vertical split below gwt pane
+    /// - First agent: horizontal split right of gwt pane
     /// - Additional agents: horizontal split beside last agent pane
     ///
     /// Uses the same argument building logic as single mode (main.rs)
     fn launch_agent_in_pane(&mut self, config: &AgentLaunchConfig) -> Result<String, String> {
+        // FR-010: One Branch One Pane constraint
+        // Check if an agent is already running on this branch
+        if self
+            .pane_list
+            .panes
+            .iter()
+            .any(|p| p.branch_name == config.branch_name)
+        {
+            return Err(format!(
+                "Agent already running on branch '{}'",
+                config.branch_name
+            ));
+        }
+
         let working_dir = config.worktree_path.to_string_lossy().to_string();
 
         // Build environment variables (same as single mode)
@@ -1846,6 +2157,34 @@ impl Model {
         let mut panes = self.pane_list.panes.clone();
         panes.push(agent_pane);
         self.pane_list.update_panes(panes);
+
+        // FR-071: Save session entry for tmux mode
+        let session_entry = ToolSessionEntry {
+            branch: config.branch_name.clone(),
+            worktree_path: Some(working_dir),
+            tool_id: config.agent.id().to_string(),
+            tool_label: config.agent.label().to_string(),
+            session_id: None,
+            mode: None,
+            model: None,
+            reasoning_level: None,
+            skip_permissions: Some(config.skip_permissions),
+            tool_version: Some(config.version.clone()),
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0),
+        };
+        if let Err(e) = save_session_entry(&self.repo_root, session_entry) {
+            debug!(
+                category = "tui",
+                error = %e,
+                "Failed to save session entry"
+            );
+        }
+
+        // Update branch list with new agent info
+        self.branch_list.update_running_agents(&self.pane_list.panes);
 
         Ok(pane_id)
     }
@@ -1945,17 +2284,6 @@ impl Model {
             self.screen.clone()
         };
 
-        // Calculate footer height dynamically based on text length
-        let keybinds = self.get_footer_keybinds();
-        let status = self.status_message.as_deref().unwrap_or("");
-        let footer_text_len = if status.is_empty() {
-            keybinds.len() + 2 // " {} " format adds 2 spaces
-        } else {
-            keybinds.len() + status.len() + 5 // " {} | {} " format adds 5 chars
-        };
-        let inner_width = frame.area().width.saturating_sub(2) as usize; // borders
-        let footer_height = if footer_text_len > inner_width { 4 } else { 3 };
-
         // Profiles, Environment, and Logs screens don't need header
         let needs_header = !matches!(
             base_screen,
@@ -1963,12 +2291,29 @@ impl Model {
         );
         let header_height = if needs_header { 6 } else { 0 };
 
+        // BranchList screen doesn't need footer (shortcut legend removed)
+        let needs_footer = !matches!(base_screen, Screen::BranchList);
+        let footer_height = if needs_footer {
+            // Calculate footer height dynamically based on text length
+            let keybinds = self.get_footer_keybinds();
+            let status = self.status_message.as_deref().unwrap_or("");
+            let footer_text_len = if status.is_empty() {
+                keybinds.len() + 2 // " {} " format adds 2 spaces
+            } else {
+                keybinds.len() + status.len() + 5 // " {} | {} " format adds 5 chars
+            };
+            let inner_width = frame.area().width.saturating_sub(2) as usize; // borders
+            if footer_text_len > inner_width { 4 } else { 3 }
+        } else {
+            0
+        };
+
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(header_height), // Header (0 for Profiles/Environment)
                 Constraint::Min(0),                // Content
-                Constraint::Length(footer_height), // Footer (dynamic)
+                Constraint::Length(footer_height), // Footer (0 for BranchList)
             ])
             .split(frame.area());
 
@@ -1984,26 +2329,17 @@ impl Model {
         // Content
         match base_screen {
             Screen::BranchList => {
-                // Use split layout for tmux multi-mode
+                // Use split layout (branch list takes full area, PaneList abolished)
                 let split_areas = calculate_split_layout(chunks[1], &self.split_layout);
 
-                // Update focus state for pane list
-                self.pane_list.has_focus = self.split_layout.pane_list_has_focus();
-
-                // Render branch list
-                let branch_list_has_focus = !self.pane_list.has_focus;
+                // Render branch list (always has focus now)
                 render_branch_list(
                     &mut self.branch_list,
                     frame,
                     split_areas.branch_list,
                     self.status_message.as_deref(),
-                    branch_list_has_focus,
+                    true, // Branch list always has focus
                 );
-
-                // Render pane list (only visible in tmux multi mode)
-                if self.split_layout.pane_list_visible {
-                    render_pane_list(&mut self.pane_list, frame, split_areas.pane_list);
-                }
             }
             Screen::WorktreeCreate => {
                 render_worktree_create(&self.worktree_create, frame, chunks[1])
@@ -2021,8 +2357,10 @@ impl Model {
             render_confirm(&self.confirm, frame, chunks[1]);
         }
 
-        // Footer
-        self.view_footer(frame, chunks[2]);
+        // Footer (not for BranchList screen)
+        if needs_footer {
+            self.view_footer(frame, chunks[2]);
+        }
 
         // Wizard overlay (FR-044: popup on top of branch list)
         if self.wizard.visible {
@@ -2498,16 +2836,22 @@ pub fn run_with_context(
                                     model.delete_selected_env();
                                     None
                                 }
+                            } else if matches!(model.screen, Screen::BranchList)
+                                && !model.branch_list.filter_mode
+                                && model.selected_branch_has_agent()
+                            {
+                                // FR-040: d key to delete agent pane with confirmation
+                                Some(Message::ConfirmAgentTermination)
                             } else {
                                 Some(Message::Char('d'))
                             }
                         }
                         (KeyCode::Char('v'), KeyModifiers::NONE) => {
                             // Toggle agent pane visibility (show/hide)
-                            // Only available when pane list has focus in tmux multi mode
+                            // Available when branch has running agent
                             if matches!(model.screen, Screen::BranchList)
-                                && model.split_layout.pane_list_has_focus()
                                 && !model.branch_list.filter_mode
+                                && model.selected_branch_has_agent()
                             {
                                 Some(Message::ToggleAgentPaneVisibility)
                             } else {
