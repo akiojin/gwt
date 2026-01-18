@@ -43,6 +43,15 @@ pub enum SplitDirection {
     Vertical,
 }
 
+impl SplitDirection {
+    pub fn tmux_flag(self) -> &'static str {
+        match self {
+            SplitDirection::Horizontal => "-h",
+            SplitDirection::Vertical => "-v",
+        }
+    }
+}
+
 /// Represents an agent running in a tmux pane
 #[derive(Debug, Clone)]
 pub struct AgentPane {
@@ -93,6 +102,7 @@ impl AgentPane {
     }
 
     /// Check if termination confirmation is required
+    /// (placeholder for future policy adjustments)
     pub fn requires_termination_confirmation(&self) -> bool {
         // Always require confirmation for running agents
         true
@@ -527,10 +537,7 @@ pub fn join_pane_to_target(
     target_pane_id: &str,
     direction: SplitDirection,
 ) -> TmuxResult<String> {
-    let split_flag = match direction {
-        SplitDirection::Horizontal => "-h",
-        SplitDirection::Vertical => "-v",
-    };
+    let split_flag = direction.tmux_flag();
 
     let output = Command::new("tmux")
         .args([

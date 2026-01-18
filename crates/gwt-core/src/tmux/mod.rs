@@ -33,4 +33,3 @@ pub use pane::{
     PaneColumn, PaneGeometry, PaneInfo, SplitDirection, TermSignal,
 };
 pub use poller::{AgentRegistry, PanePoller, PollMessage, PollerConfig};
-pub use session::TmuxSession;

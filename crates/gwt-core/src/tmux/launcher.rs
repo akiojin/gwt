@@ -9,6 +9,7 @@ use std::time::SystemTime;
 
 use super::error::{TmuxError, TmuxResult};
 use super::pane::{select_pane, AgentPane, SplitDirection};
+use tracing::debug;
 
 /// Configuration for launching an agent in a tmux pane
 #[derive(Debug, Clone)]
@@ -44,13 +45,6 @@ pub struct TmuxLaunchResult {
     pub agent_pane: AgentPane,
 }
 
-fn split_flag(direction: SplitDirection) -> &'static str {
-    match direction {
-        SplitDirection::Horizontal => "-h",
-        SplitDirection::Vertical => "-v",
-    }
-}
-
 fn build_split_window_args(
     target_pane: &str,
     working_dir: &str,
@@ -59,7 +53,7 @@ fn build_split_window_args(
 ) -> Vec<String> {
     let mut args = vec![
         "split-window".to_string(),
-        split_flag(direction).to_string(),
+        direction.tmux_flag().to_string(),
         "-d".to_string(), // don't switch to new pane (keep focus on gwt)
         "-t".to_string(),
         target_pane.to_string(),
@@ -231,8 +225,8 @@ pub fn build_agent_command(
         cmd.push_str(" --dangerously-skip-permissions");
     }
 
-    // Version is typically not used as CLI arg but could be for specific agents
-    let _ = version; // Suppress unused warning
+    // TODO: version is reserved for agent-specific flags.
+    let _version = version;
 
     if parts.is_empty() {
         cmd
@@ -254,7 +248,7 @@ fn detect_utf8_locale() -> String {
         if output.status.success() {
             let locales = String::from_utf8_lossy(&output.stdout);
             // Check for common UTF-8 locales in order of preference
-            let candidates = ["C.utf8", "C.UTF-8", "en_US.utf8", "en_US.UTF-8", "POSIX"];
+            let candidates = ["C.utf8", "C.UTF-8", "en_US.utf8", "en_US.UTF-8"];
             for candidate in candidates {
                 if locales.lines().any(|l| l == candidate) {
                     return candidate.to_string();
@@ -397,9 +391,30 @@ fn launch_in_pane_with_split(
     let pane_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
     // Set remain-on-exit off so pane auto-closes when command exits (FR-052)
-    let _ = Command::new("tmux")
+    match Command::new("tmux")
         .args(["set-option", "-t", &pane_id, "remain-on-exit", "off"])
-        .output();
+        .output()
+    {
+        Ok(output) => {
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                debug!(
+                    category = "tmux",
+                    pane_id = %pane_id,
+                    error = %stderr,
+                    "Failed to set remain-on-exit"
+                );
+            }
+        }
+        Err(e) => {
+            debug!(
+                category = "tmux",
+                pane_id = %pane_id,
+                error = %e,
+                "Failed to set remain-on-exit"
+            );
+        }
+    }
 
     // Build environment export commands for send-keys
     // This ensures environment variables are set in the shell before running the command
@@ -415,9 +430,30 @@ fn launch_in_pane_with_split(
     } else {
         format!("{}; {}; exit", env_exports.join("; "), command)
     };
-    let _ = Command::new("tmux")
+    match Command::new("tmux")
         .args(["send-keys", "-t", &pane_id, &full_command, "Enter"])
-        .output();
+        .output()
+    {
+        Ok(output) => {
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                debug!(
+                    category = "tmux",
+                    pane_id = %pane_id,
+                    error = %stderr,
+                    "Failed to send command to pane"
+                );
+            }
+        }
+        Err(e) => {
+            debug!(
+                category = "tmux",
+                pane_id = %pane_id,
+                error = %e,
+                "Failed to send command to pane"
+            );
+        }
+    }
 
     Ok(pane_id)
 }
@@ -447,8 +483,8 @@ mod tests {
 
     #[test]
     fn test_split_flag() {
-        assert_eq!(split_flag(SplitDirection::Horizontal), "-h");
-        assert_eq!(split_flag(SplitDirection::Vertical), "-v");
+        assert_eq!(SplitDirection::Horizontal.tmux_flag(), "-h");
+        assert_eq!(SplitDirection::Vertical.tmux_flag(), "-v");
     }
 
     #[test]

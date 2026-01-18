@@ -192,14 +192,17 @@ fn create_pane_list_item(pane: &AgentPane, _is_selected: bool, _spinner_frame: u
     ListItem::new(Line::from(spans))
 }
 
-/// Truncate a string to a maximum length (deprecated - PaneList panel abolished)
-#[allow(dead_code)]
+/// Truncate a string to a maximum length
 fn truncate_string(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max_len - 3])
+    let char_count = s.chars().count();
+    if char_count <= max_len {
+        return s.to_string();
     }
+    if max_len <= 3 {
+        return s.chars().take(max_len).collect();
+    }
+    let truncated: String = s.chars().take(max_len - 3).collect();
+    format!("{truncated}...")
 }
 
 #[cfg(test)]
