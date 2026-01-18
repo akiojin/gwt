@@ -149,10 +149,7 @@ fn create_pane_list_item(pane: &AgentPane, _is_selected: bool) -> ListItem<'stat
             Style::default().fg(Color::Cyan),
         ),
         Span::raw(" "),
-        Span::styled(
-            format!("{:>8}", uptime),
-            Style::default().fg(Color::Yellow),
-        ),
+        Span::styled(format!("{:>8}", uptime), Style::default().fg(Color::Yellow)),
     ];
 
     ListItem::new(Line::from(spans))

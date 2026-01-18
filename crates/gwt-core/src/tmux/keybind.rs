@@ -18,8 +18,8 @@ pub fn setup_ctrl_g_keybind(session: &str) -> TmuxResult<()> {
         .args([
             "bind-key",
             "-T",
-            "root",  // root key table (available without prefix)
-            "C-g",   // Ctrl-g
+            "root", // root key table (available without prefix)
+            "C-g",  // Ctrl-g
             "select-pane",
             "-t",
             &format!("{}:{}", session, GWT_PANE_INDEX),

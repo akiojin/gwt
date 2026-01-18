@@ -10,8 +10,8 @@ pub mod help;
 pub mod logs;
 pub mod pane_list;
 pub mod profiles;
-pub mod split_layout;
 pub mod settings;
+pub mod split_layout;
 pub mod wizard;
 pub mod worktree_create;
 
@@ -23,8 +23,8 @@ pub use help::{render_help, HelpState};
 pub use logs::{render_logs, LogsState};
 pub use pane_list::{render_pane_list, PaneListState};
 pub use profiles::{render_profiles, ProfilesState};
-pub use split_layout::{calculate_split_layout, FocusPanel, SplitLayoutState};
 pub use settings::{render_settings, SettingsState};
+pub use split_layout::{calculate_split_layout, FocusPanel, SplitLayoutState};
 pub use wizard::{
     render_wizard, CodingAgent, ExecutionMode, QuickStartEntry, ReasoningLevel,
     WizardConfirmResult, WizardState,

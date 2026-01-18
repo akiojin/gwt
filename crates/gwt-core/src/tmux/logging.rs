@@ -201,11 +201,7 @@ mod tests {
 
     fn temp_log_dir() -> PathBuf {
         let count = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        env::temp_dir().join(format!(
-            "gwt-test-logs-{}-{}",
-            std::process::id(),
-            count
-        ))
+        env::temp_dir().join(format!("gwt-test-logs-{}-{}", std::process::id(), count))
     }
 
     #[test]

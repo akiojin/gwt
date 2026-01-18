@@ -65,12 +65,13 @@ pub fn get_tmux_version() -> TmuxResult<TmuxVersion> {
 /// Parse tmux version string (e.g., "tmux 3.4" or "tmux 2.0a")
 fn parse_tmux_version(version_str: &str) -> TmuxResult<TmuxVersion> {
     // Expected format: "tmux X.Y" or "tmux X.Ya" (with optional suffix)
-    let version_part = version_str
-        .trim()
-        .strip_prefix("tmux ")
-        .ok_or_else(|| TmuxError::VersionParseFailed {
-            output: version_str.to_string(),
-        })?;
+    let version_part =
+        version_str
+            .trim()
+            .strip_prefix("tmux ")
+            .ok_or_else(|| TmuxError::VersionParseFailed {
+                output: version_str.to_string(),
+            })?;
 
     // Remove any non-numeric suffix (like 'a' in '2.0a')
     let version_clean: String = version_part
@@ -85,13 +86,17 @@ fn parse_tmux_version(version_str: &str) -> TmuxResult<TmuxVersion> {
         });
     }
 
-    let major = parts[0].parse().map_err(|_| TmuxError::VersionParseFailed {
-        output: version_str.to_string(),
-    })?;
+    let major = parts[0]
+        .parse()
+        .map_err(|_| TmuxError::VersionParseFailed {
+            output: version_str.to_string(),
+        })?;
 
-    let minor = parts[1].parse().map_err(|_| TmuxError::VersionParseFailed {
-        output: version_str.to_string(),
-    })?;
+    let minor = parts[1]
+        .parse()
+        .map_err(|_| TmuxError::VersionParseFailed {
+            output: version_str.to_string(),
+        })?;
 
     Ok(TmuxVersion { major, minor })
 }

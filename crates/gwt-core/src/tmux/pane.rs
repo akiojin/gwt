@@ -45,9 +45,7 @@ impl AgentPane {
 
     /// Calculate uptime duration
     pub fn uptime(&self) -> Duration {
-        self.start_time
-            .elapsed()
-            .unwrap_or(Duration::from_secs(0))
+        self.start_time.elapsed().unwrap_or(Duration::from_secs(0))
     }
 
     /// Format uptime as a human-readable string

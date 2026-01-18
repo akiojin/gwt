@@ -63,13 +63,14 @@ pub fn create_session_with_command(
         args.push(cmd);
     }
 
-    let output = Command::new("tmux")
-        .args(&args)
-        .output()
-        .map_err(|e| TmuxError::SessionCreateFailed {
-            name: name.to_string(),
-            reason: e.to_string(),
-        })?;
+    let output =
+        Command::new("tmux")
+            .args(&args)
+            .output()
+            .map_err(|e| TmuxError::SessionCreateFailed {
+                name: name.to_string(),
+                reason: e.to_string(),
+            })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
