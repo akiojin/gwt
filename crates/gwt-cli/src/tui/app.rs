@@ -1671,6 +1671,16 @@ impl Model {
         }
         .map_err(|e| e.to_string())?;
 
+        // Focus the new pane (FR-022)
+        if let Err(e) = gwt_core::tmux::pane::select_pane(&pane_id) {
+            debug!(
+                category = "tui",
+                pane_id = %pane_id,
+                error = %e,
+                "Failed to focus new pane"
+            );
+        }
+
         // Track the new pane
         self.agent_panes.push(pane_id.clone());
 
