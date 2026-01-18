@@ -139,18 +139,44 @@ pub fn render_pane_list(state: &mut PaneListState, frame: &mut Frame, area: Rect
 fn create_pane_list_item(pane: &AgentPane, _is_selected: bool) -> ListItem<'static> {
     let uptime = pane.uptime_string();
 
+    // Show [BG] indicator for background (hidden) panes
+    let status_indicator = if pane.is_background {
+        Span::styled("[BG] ", Style::default().fg(Color::DarkGray))
+    } else {
+        Span::raw("")
+    };
+
     let spans = vec![
+        status_indicator,
         Span::styled(
-            format!("{:<20}", truncate_string(&pane.branch_name, 20)),
-            Style::default().fg(Color::Green),
+            format!(
+                "{:<20}",
+                truncate_string(&pane.branch_name, if pane.is_background { 15 } else { 20 })
+            ),
+            Style::default().fg(if pane.is_background {
+                Color::DarkGray
+            } else {
+                Color::Green
+            }),
         ),
         Span::raw(" "),
         Span::styled(
             format!("{:<10}", pane.agent_name),
-            Style::default().fg(Color::Cyan),
+            Style::default().fg(if pane.is_background {
+                Color::DarkGray
+            } else {
+                Color::Cyan
+            }),
         ),
         Span::raw(" "),
-        Span::styled(format!("{:>8}", uptime), Style::default().fg(Color::Yellow)),
+        Span::styled(
+            format!("{:>8}", uptime),
+            Style::default().fg(if pane.is_background {
+                Color::DarkGray
+            } else {
+                Color::Yellow
+            }),
+        ),
     ];
 
     ListItem::new(Line::from(spans))

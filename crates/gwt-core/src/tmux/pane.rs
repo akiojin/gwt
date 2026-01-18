@@ -23,6 +23,10 @@ pub struct AgentPane {
     pub agent_name: String,
     pub start_time: SystemTime,
     pub pid: u32,
+    /// Whether the pane is in background (hidden from GWT window)
+    pub is_background: bool,
+    /// Window ID when pane is in background (for restoring)
+    pub background_window: Option<String>,
 }
 
 impl AgentPane {
@@ -40,6 +44,8 @@ impl AgentPane {
             agent_name,
             start_time,
             pid,
+            is_background: false,
+            background_window: None,
         }
     }
 
@@ -201,6 +207,107 @@ pub fn select_pane(pane_id: &str) -> TmuxResult<()> {
     }
 
     Ok(())
+}
+
+/// Hide a pane by moving it to a separate background window
+///
+/// Uses `tmux break-pane` to move the pane to its own window without switching focus.
+///
+/// # Arguments
+/// * `pane_id` - The pane ID to hide
+/// * `window_name` - Name for the background window
+///
+/// # Returns
+/// The window ID of the newly created background window
+pub fn hide_pane(pane_id: &str, window_name: &str) -> TmuxResult<String> {
+    // Get current session first
+    let session_output = Command::new("tmux")
+        .args(["display-message", "-p", "#{session_name}"])
+        .output()
+        .map_err(|e| TmuxError::CommandFailed {
+            command: "display-message".to_string(),
+            reason: e.to_string(),
+        })?;
+
+    let session_name = String::from_utf8_lossy(&session_output.stdout)
+        .trim()
+        .to_string();
+
+    // Break pane into a new window (hidden, don't switch)
+    let output = Command::new("tmux")
+        .args([
+            "break-pane",
+            "-d", // don't switch to the new window
+            "-s",
+            pane_id,
+            "-n",
+            window_name,
+            "-P",
+            "-F",
+            "#{window_id}",
+        ])
+        .output()
+        .map_err(|e| TmuxError::CommandFailed {
+            command: "break-pane".to_string(),
+            reason: e.to_string(),
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(TmuxError::CommandFailed {
+            command: "break-pane".to_string(),
+            reason: stderr.to_string(),
+        });
+    }
+
+    // The break-pane command outputs the new window ID
+    let window_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    // Return the full window reference (session:window)
+    Ok(format!("{}:{}", session_name, window_id))
+}
+
+/// Show a hidden pane by joining it back to the GWT window
+///
+/// Uses `tmux join-pane` to move the pane from its background window back to the main window.
+///
+/// # Arguments
+/// * `background_window` - The background window identifier (session:window_id)
+/// * `target_pane_id` - The pane ID to join beside (usually the GWT pane)
+///
+/// # Returns
+/// The new pane ID after joining
+pub fn show_pane(background_window: &str, target_pane_id: &str) -> TmuxResult<String> {
+    // Join the pane from the background window to the target pane
+    let output = Command::new("tmux")
+        .args([
+            "join-pane",
+            "-d", // don't switch focus
+            "-h", // horizontal split (side by side)
+            "-s",
+            background_window,
+            "-t",
+            target_pane_id,
+            "-P",
+            "-F",
+            "#{pane_id}",
+        ])
+        .output()
+        .map_err(|e| TmuxError::CommandFailed {
+            command: "join-pane".to_string(),
+            reason: e.to_string(),
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(TmuxError::CommandFailed {
+            command: "join-pane".to_string(),
+            reason: stderr.to_string(),
+        });
+    }
+
+    let new_pane_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(new_pane_id)
 }
 
 /// Send keys to a pane (e.g., Ctrl-C for interrupt)
@@ -478,5 +585,40 @@ mod tests {
         // Current process should be running
         let pid = std::process::id();
         assert!(is_process_running(pid));
+    }
+
+    #[test]
+    fn test_agent_pane_default_not_background() {
+        let pane = AgentPane::new(
+            "1".to_string(),
+            "feature/test".to_string(),
+            "claude".to_string(),
+            SystemTime::now(),
+            12345,
+        );
+        assert!(!pane.is_background);
+        assert!(pane.background_window.is_none());
+    }
+
+    #[test]
+    fn test_agent_pane_background_state() {
+        let mut pane = AgentPane::new(
+            "1".to_string(),
+            "feature/test".to_string(),
+            "claude".to_string(),
+            SystemTime::now(),
+            12345,
+        );
+        // Simulate hiding the pane
+        pane.is_background = true;
+        pane.background_window = Some("session:@1".to_string());
+        assert!(pane.is_background);
+        assert_eq!(pane.background_window, Some("session:@1".to_string()));
+
+        // Simulate showing the pane
+        pane.is_background = false;
+        pane.background_window = None;
+        assert!(!pane.is_background);
+        assert!(pane.background_window.is_none());
     }
 }
