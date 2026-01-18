@@ -208,8 +208,7 @@ pub fn build_agent_command(
 /// Launch a command in a new tmux pane (simplified API)
 ///
 /// Creates a new pane below the current one and executes the command.
-/// Uses remain-on-exit to keep the pane visible if the command fails,
-/// allowing the user to see error messages.
+/// The pane automatically closes when the command exits (FR-052).
 ///
 /// Returns the pane ID of the newly created pane.
 pub fn launch_in_pane(target_pane: &str, working_dir: &str, command: &str) -> TmuxResult<String> {
@@ -242,14 +241,16 @@ pub fn launch_in_pane(target_pane: &str, working_dir: &str, command: &str) -> Tm
 
     let pane_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
-    // Set remain-on-exit so we can see errors if command fails
+    // Set remain-on-exit off so pane auto-closes when agent exits (FR-052)
     let _ = Command::new("tmux")
-        .args(["set-option", "-t", &pane_id, "remain-on-exit", "on"])
+        .args(["set-option", "-t", &pane_id, "remain-on-exit", "off"])
         .output();
 
     // Send the command to the new pane
+    // Add "; exit" to close the pane when agent exits (FR-052)
+    let command_with_exit = format!("{}; exit", command);
     let _ = Command::new("tmux")
-        .args(["send-keys", "-t", &pane_id, command, "Enter"])
+        .args(["send-keys", "-t", &pane_id, &command_with_exit, "Enter"])
         .output();
 
     Ok(pane_id)
@@ -258,7 +259,7 @@ pub fn launch_in_pane(target_pane: &str, working_dir: &str, command: &str) -> Tm
 /// Launch a command in a new tmux pane beside an existing pane (horizontal split)
 ///
 /// Creates a new pane to the right of the target pane and executes the command.
-/// Uses remain-on-exit to keep the pane visible if the command fails.
+/// The pane automatically closes when the command exits (FR-052).
 ///
 /// Returns the pane ID of the newly created pane.
 pub fn launch_in_pane_beside(
@@ -294,14 +295,16 @@ pub fn launch_in_pane_beside(
 
     let pane_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
-    // Set remain-on-exit so we can see errors if command fails
+    // Set remain-on-exit off so pane auto-closes when agent exits (FR-052)
     let _ = Command::new("tmux")
-        .args(["set-option", "-t", &pane_id, "remain-on-exit", "on"])
+        .args(["set-option", "-t", &pane_id, "remain-on-exit", "off"])
         .output();
 
     // Send the command to the new pane
+    // Add "; exit" to close the pane when agent exits (FR-052)
+    let command_with_exit = format!("{}; exit", command);
     let _ = Command::new("tmux")
-        .args(["send-keys", "-t", &pane_id, command, "Enter"])
+        .args(["send-keys", "-t", &pane_id, &command_with_exit, "Enter"])
         .output();
 
     Ok(pane_id)

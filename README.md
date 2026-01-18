@@ -22,6 +22,7 @@ The Rust implementation covers the core CLI/TUI workflow and the Web UI (REST + 
 - **Coding Agent Integration**: Launch the selected agent in the worktree (Claude Code includes permission handling and post-change flow)
 - **GitHub PR Integration**: Automatic cleanup of merged pull request branches and worktrees
 - **Change Management**: Built-in support for committing, stashing, or discarding changes after development sessions
+- **tmux Multi-Agent Mode**: Run multiple coding agents in parallel using tmux panes (automatically enabled when running inside tmux)
 - **Universal Package**: Install once, use across all your projects with consistent behavior
 
 ## Installation
