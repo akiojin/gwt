@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 use gwt_core::git::{Branch, DivergenceStatus};
+use gwt_core::tmux::AgentPane;
 use gwt_core::worktree::Worktree;
 use ratatui::{prelude::*, widgets::*};
 use std::collections::{HashMap, HashSet};
@@ -342,6 +343,8 @@ pub struct BranchListState {
     pub status_progress_active: bool,
     /// Viewport height for scroll calculations (updated by renderer)
     pub visible_height: usize,
+    /// Running agents mapped by branch name (for agent info display)
+    pub running_agents: HashMap<String, AgentPane>,
 }
 
 impl Default for BranchListState {
@@ -368,6 +371,7 @@ impl Default for BranchListState {
             status_progress_done: 0,
             status_progress_active: false,
             visible_height: 15, // Default fallback (previously hardcoded)
+            running_agents: HashMap::new(),
         }
     }
 }
@@ -661,6 +665,20 @@ impl BranchListState {
     /// Get currently selected branch
     pub fn selected_branch(&self) -> Option<&BranchItem> {
         self.filtered_branch_at(self.selected)
+    }
+
+    /// Update running agents map from pane list
+    pub fn update_running_agents(&mut self, panes: &[AgentPane]) {
+        self.running_agents.clear();
+        for pane in panes {
+            self.running_agents
+                .insert(pane.branch_name.clone(), pane.clone());
+        }
+    }
+
+    /// Get running agent for a branch
+    pub fn get_running_agent(&self, branch_name: &str) -> Option<&AgentPane> {
+        self.running_agents.get(branch_name)
     }
 
     /// Update filter and reset selection
@@ -1002,11 +1020,13 @@ fn render_branches(state: &BranchListState, frame: &mut Frame, area: Rect, has_f
         .enumerate()
         .map(|(i, index)| {
             let branch = &state.branches[*index];
+            let running_agent = state.get_running_agent(&branch.name);
             render_branch_row(
                 branch,
                 state.offset + i == state.selected,
                 &state.selected_branches,
                 spinner_frame,
+                running_agent,
             )
         })
         .collect();
@@ -1036,11 +1056,13 @@ fn render_branches(state: &BranchListState, frame: &mut Frame, area: Rect, has_f
 /// Render a single branch row
 /// FR-070: Tool display format: ToolName@X.Y.Z
 /// FR-031b: Show spinner for safety check pending branches
+/// FR-020~024: Running agent info displayed on right side
 fn render_branch_row(
     branch: &BranchItem,
     is_selected: bool,
     selected_set: &HashSet<String>,
     spinner_frame: usize,
+    running_agent: Option<&AgentPane>,
 ) -> ListItem<'static> {
     let is_checked = selected_set.contains(&branch.name);
     let selection_icon = if is_checked { "[*]" } else { "[ ]" };
@@ -1072,10 +1094,44 @@ fn render_branch_row(
     };
     spans.push(Span::raw(display_name.to_string()));
 
-    // Tool usage display (FR-070)
-    // format_tool_usage() already returns: "ToolName@X.Y.Z"
-    if let Some(tool) = &branch.last_tool_usage {
-        // Extract agent id from tool string for coloring (format: AgentName@version)
+    // Running agent info (FR-020~024): [spinner/BG] agent_name uptime
+    if let Some(agent) = running_agent {
+        const SPINNER_FRAMES: [char; 4] = ['|', '/', '-', '\\'];
+        let spinner_char = SPINNER_FRAMES[spinner_frame % 4];
+
+        spans.push(Span::raw(" "));
+
+        if agent.is_background {
+            // Background (hidden) pane - grayed out
+            spans.push(Span::styled("[BG] ", Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled(
+                agent.agent_name.clone(),
+                Style::default().fg(Color::DarkGray),
+            ));
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                agent.uptime_string(),
+                Style::default().fg(Color::DarkGray),
+            ));
+        } else {
+            // Visible running pane - with spinner
+            spans.push(Span::styled(
+                format!("[{}] ", spinner_char),
+                Style::default().fg(Color::Green),
+            ));
+            let agent_color = get_agent_color(Some(&agent.agent_name));
+            spans.push(Span::styled(
+                agent.agent_name.clone(),
+                Style::default().fg(agent_color),
+            ));
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                agent.uptime_string(),
+                Style::default().fg(Color::Yellow),
+            ));
+        }
+    } else if let Some(tool) = &branch.last_tool_usage {
+        // No running agent, but show last tool usage (FR-070)
         let agent_id = tool.split('@').next();
         let agent_color = get_agent_color(agent_id);
         spans.push(Span::raw(" "));

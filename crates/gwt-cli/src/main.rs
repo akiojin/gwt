@@ -6,6 +6,7 @@ use gwt_core::agent::codex::{codex_default_args, codex_skip_permissions_flag};
 use gwt_core::agent::get_command_version;
 use gwt_core::config::{save_session_entry, Settings, ToolSessionEntry};
 use gwt_core::error::GwtError;
+use gwt_core::tmux::is_inside_tmux;
 use gwt_core::worktree::WorktreeManager;
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -66,7 +67,12 @@ fn run() -> Result<(), GwtError> {
     match cli.command {
         Some(cmd) => handle_command(cmd, &repo_root, &settings),
         None => {
-            // Interactive TUI mode
+            // Interactive TUI mode - tmux is required (FR-001, FR-002)
+            if !is_inside_tmux() {
+                eprintln!("gwt requires tmux. Please run inside a tmux session.");
+                std::process::exit(1);
+            }
+
             if let Ok(manager) = WorktreeManager::new(&repo_root) {
                 let _ = manager.auto_cleanup_orphans();
             }

@@ -24,7 +24,7 @@ pub use logs::{render_logs, LogsState};
 pub use pane_list::{render_pane_list, PaneListState};
 pub use profiles::{render_profiles, ProfilesState};
 pub use settings::{render_settings, SettingsState};
-pub use split_layout::{calculate_split_layout, FocusPanel, SplitLayoutState};
+pub use split_layout::{calculate_split_layout, SplitLayoutState};
 pub use wizard::{
     render_wizard, CodingAgent, ExecutionMode, QuickStartEntry, ReasoningLevel,
     WizardConfirmResult, WizardState,

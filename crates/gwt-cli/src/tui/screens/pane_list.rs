@@ -12,6 +12,8 @@ use ratatui::{
 };
 
 /// State for the pane list component
+/// Note: PaneList panel is abolished, but this struct is still used for agent tracking
+#[allow(dead_code)]
 #[derive(Debug, Default)]
 pub struct PaneListState {
     /// List of running agent panes
@@ -20,7 +22,7 @@ pub struct PaneListState {
     pub selected: usize,
     /// List state for ratatui
     list_state: ListState,
-    /// Whether this component has focus
+    /// Whether this component has focus (deprecated)
     pub has_focus: bool,
     /// Spinner animation frame counter (FR-031a-b)
     pub spinner_frame: usize,
@@ -52,7 +54,8 @@ impl PaneListState {
         });
     }
 
-    /// Select the next pane
+    /// Select the next pane (deprecated - PaneList panel abolished)
+    #[allow(dead_code)]
     pub fn select_next(&mut self) {
         if self.panes.is_empty() {
             return;
@@ -61,7 +64,8 @@ impl PaneListState {
         self.list_state.select(Some(self.selected));
     }
 
-    /// Select the previous pane
+    /// Select the previous pane (deprecated - PaneList panel abolished)
+    #[allow(dead_code)]
     pub fn select_prev(&mut self) {
         if self.panes.is_empty() {
             return;
@@ -93,7 +97,8 @@ impl PaneListState {
     }
 }
 
-/// Render the pane list
+/// Render the pane list (deprecated - PaneList panel abolished)
+#[allow(dead_code)]
 pub fn render_pane_list(state: &mut PaneListState, frame: &mut Frame, area: Rect) {
     let border_style = if state.has_focus {
         Style::default().fg(Color::White)
@@ -139,7 +144,8 @@ pub fn render_pane_list(state: &mut PaneListState, frame: &mut Frame, area: Rect
     frame.render_stateful_widget(list, area, &mut state.list_state);
 }
 
-/// Create a list item for a pane (FR-031a-e)
+/// Create a list item for a pane (deprecated - PaneList panel abolished)
+#[allow(dead_code)]
 fn create_pane_list_item(pane: &AgentPane, _is_selected: bool, _spinner_frame: usize) -> ListItem<'static> {
     let uptime = pane.uptime_string();
 
@@ -186,7 +192,8 @@ fn create_pane_list_item(pane: &AgentPane, _is_selected: bool, _spinner_frame: u
     ListItem::new(Line::from(spans))
 }
 
-/// Truncate a string to a maximum length
+/// Truncate a string to a maximum length (deprecated - PaneList panel abolished)
+#[allow(dead_code)]
 fn truncate_string(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_string()

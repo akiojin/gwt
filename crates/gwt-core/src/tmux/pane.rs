@@ -54,18 +54,14 @@ impl AgentPane {
         self.start_time.elapsed().unwrap_or(Duration::from_secs(0))
     }
 
-    /// Format uptime as a human-readable string
+    /// Format uptime as hh:mm:ss
     pub fn uptime_string(&self) -> String {
         let duration = self.uptime();
         let secs = duration.as_secs();
-
-        if secs < 60 {
-            format!("{}s", secs)
-        } else if secs < 3600 {
-            format!("{}m {}s", secs / 60, secs % 60)
-        } else {
-            format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
-        }
+        let hours = secs / 3600;
+        let minutes = (secs % 3600) / 60;
+        let seconds = secs % 60;
+        format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
     }
 
     /// Check if termination confirmation is required
@@ -452,7 +448,8 @@ mod tests {
             12345,
         );
         let uptime = pane.uptime_string();
-        assert!(uptime.contains("1h"));
+        // 3661 seconds = 1h 1m 1s = "01:01:01"
+        assert_eq!(uptime, "01:01:01");
     }
 
     #[test]
@@ -466,7 +463,8 @@ mod tests {
             12345,
         );
         let uptime = pane.uptime_string();
-        assert!(uptime.ends_with("s"));
+        // 45 seconds = "00:00:45"
+        assert_eq!(uptime, "00:00:45");
     }
 
     #[test]
@@ -480,7 +478,8 @@ mod tests {
             12345,
         );
         let uptime = pane.uptime_string();
-        assert!(uptime.contains("m"));
+        // 125 seconds = 2m 5s = "00:02:05"
+        assert_eq!(uptime, "00:02:05");
     }
 
     #[test]
