@@ -205,6 +205,31 @@ pub fn build_agent_command(
     }
 }
 
+/// Detect available UTF-8 locale on the system
+///
+/// Tries common UTF-8 locale names and returns the first available one.
+/// Falls back to "C.UTF-8" if detection fails.
+fn detect_utf8_locale() -> String {
+    use std::process::Command;
+
+    // Try to get available locales
+    if let Ok(output) = Command::new("locale").arg("-a").output() {
+        if output.status.success() {
+            let locales = String::from_utf8_lossy(&output.stdout);
+            // Check for common UTF-8 locales in order of preference
+            let candidates = ["C.utf8", "C.UTF-8", "en_US.utf8", "en_US.UTF-8", "POSIX"];
+            for candidate in candidates {
+                if locales.lines().any(|l| l == candidate) {
+                    return candidate.to_string();
+                }
+            }
+        }
+    }
+
+    // Default fallback
+    "C.UTF-8".to_string()
+}
+
 /// Get environment variables needed for proper Unicode display in tmux panes
 ///
 /// Returns locale and terminal environment variables to ensure UTF-8 encoding
@@ -250,9 +275,11 @@ fn get_locale_env_vars() -> Vec<(String, String)> {
             }
         }
     } else {
-        // No UTF-8 locale configured, use C.UTF-8 as default
-        vars.push(("LANG".to_string(), "C.UTF-8".to_string()));
-        vars.push(("LC_ALL".to_string(), "C.UTF-8".to_string()));
+        // No UTF-8 locale configured, detect available UTF-8 locale
+        // Try C.utf8 first (common on minimal Linux), then C.UTF-8
+        let utf8_locale = detect_utf8_locale();
+        vars.push(("LANG".to_string(), utf8_locale.clone()));
+        vars.push(("LC_ALL".to_string(), utf8_locale));
     }
 
     vars
