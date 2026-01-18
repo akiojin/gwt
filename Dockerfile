@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y \
     jq \
     vim \
     ripgrep \
+    tmux \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
