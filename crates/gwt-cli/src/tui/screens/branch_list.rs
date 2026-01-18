@@ -881,7 +881,7 @@ fn render_legend_line(frame: &mut Frame, area: Rect) {
         Span::styled(" Uncommitted", Style::default().fg(Color::Red)),
         Span::styled("  ", Style::default()),
         Span::styled(
-            "!",
+            "^",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
