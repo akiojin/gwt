@@ -1847,7 +1847,7 @@ impl Model {
                 // Render branch list
                 let branch_list_has_focus = !self.pane_list.has_focus;
                 render_branch_list(
-                    &self.branch_list,
+                    &mut self.branch_list,
                     frame,
                     split_areas.branch_list,
                     self.status_message.as_deref(),
