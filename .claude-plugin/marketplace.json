@@ -4,8 +4,7 @@
   "version": "0.1.0",
   "description": "GWT (Git Worktree) plugins for safe worktree operations",
   "owner": {
-    "name": "akiojin",
-    "email": "akiojin@example.com"
+    "name": "akiojin"
   },
   "plugins": [
     {

@@ -18,7 +18,7 @@ crates/gwt-core/src/tmux/
 ├── logging.rs       -> tests/tmux_logging_tests.rs
 └── error.rs         -> tests/tmux_error_tests.rs
 
-crates/gwt-cli/src/
+crates/gwt-core/src/
 ├── execution_mode.rs -> tests/execution_mode_tests.rs
 └── ui/
     ├── pane_list.rs  -> tests/ui_pane_list_tests.rs

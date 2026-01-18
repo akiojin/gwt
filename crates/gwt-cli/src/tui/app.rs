@@ -2,7 +2,6 @@
 
 #![allow(dead_code)] // TUI application components for future expansion
 
-use chrono::Utc;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
@@ -214,6 +213,8 @@ pub struct Model {
     split_layout: SplitLayoutState,
     /// Last time pane list was updated (for 1-second polling)
     last_pane_update: Option<Instant>,
+    /// Last time spinner was updated (for 250ms refresh)
+    last_spinner_update: Option<Instant>,
 }
 
 /// Screen types
@@ -338,6 +339,7 @@ impl Model {
             pane_list: PaneListState::new(),
             split_layout: SplitLayoutState::new(),
             last_pane_update: None,
+            last_spinner_update: None,
         };
 
         // Initialize tmux session if in multi mode
@@ -843,19 +845,27 @@ impl Model {
 
         // Check if 1 second has passed since last update
         let now = Instant::now();
+        let mut spinner_updated = false;
+        if self
+            .last_spinner_update
+            .map(|last| now.duration_since(last) >= Duration::from_millis(250))
+            .unwrap_or(true)
+        {
+            self.pane_list.spinner_frame = self.pane_list.spinner_frame.wrapping_add(1);
+            self.last_spinner_update = Some(now);
+            spinner_updated = true;
+        }
+
         if let Some(last) = self.last_pane_update {
             if now.duration_since(last) < Duration::from_secs(1) {
-                // Update spinner frame more frequently (every 250ms)
-                let elapsed = now.duration_since(last);
-                if elapsed >= Duration::from_millis(250) {
-                    self.pane_list.spinner_frame = self.pane_list.spinner_frame.wrapping_add(1);
-                }
                 return;
             }
         }
         self.last_pane_update = Some(now);
-        // Update spinner frame on each poll
-        self.pane_list.spinner_frame = self.pane_list.spinner_frame.wrapping_add(1);
+        if !spinner_updated {
+            self.pane_list.spinner_frame = self.pane_list.spinner_frame.wrapping_add(1);
+            self.last_spinner_update = Some(now);
+        }
 
         if self.pane_list.panes.is_empty() {
             return;
@@ -1040,12 +1050,8 @@ impl Model {
             pane.pane_id.clone()
         };
 
-        let result = std::process::Command::new("tmux")
-            .args(["kill-pane", "-t", &pane_target])
-            .output();
-
-        match result {
-            Ok(output) if output.status.success() => {
+        match kill_pane(&pane_target) {
+            Ok(()) => {
                 // Remove from pane_list
                 self.pane_list
                     .panes
@@ -1057,11 +1063,6 @@ impl Model {
                 self.reflow_agent_layout(None);
 
                 self.status_message = Some(format!("Agent terminated on '{}'", branch_name));
-                self.status_message_time = Some(Instant::now());
-            }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                self.status_message = Some(format!("Failed to terminate: {}", stderr.trim()));
                 self.status_message_time = Some(Instant::now());
             }
             Err(e) => {
@@ -1105,6 +1106,7 @@ impl Model {
                     // Update agent_panes list
                     self.agent_panes.push(new_pane_id.clone());
 
+                    self.branch_list.update_running_agents(&self.pane_list.panes);
                     self.reflow_agent_layout(Some(&new_pane_id));
 
                     // Focus the pane
@@ -1136,63 +1138,15 @@ impl Model {
         };
         let branch_name = branch.name.clone();
 
-        // Find pane in pane_list by branch name
-        if let Some(pane) = self
+        // Find pane index in pane_list by branch name
+        if let Some(pane_idx) = self
             .pane_list
             .panes
-            .iter_mut()
-            .find(|p| p.branch_name == branch_name)
+            .iter()
+            .position(|p| p.branch_name == branch_name)
         {
-            // Branch has running agent - show and focus the pane (FR-011, FR-012)
-            if pane.is_background {
-                // Hidden pane - show it first then focus (FR-012)
-                let Some(background_window) = &pane.background_window else {
-                    self.status_message = Some("No background window to restore".to_string());
-                    self.status_message_time = Some(Instant::now());
-                    return;
-                };
-                let background_window = background_window.clone();
-
-                let Some(gwt_pane_id) = &self.gwt_pane_id else {
-                    self.status_message = Some("GWT pane ID not available".to_string());
-                    self.status_message_time = Some(Instant::now());
-                    return;
-                };
-
-                match gwt_core::tmux::show_pane(&background_window, gwt_pane_id) {
-                    Ok(new_pane_id) => {
-                        // Update the pane ID and clear background state
-                        pane.pane_id = new_pane_id.clone();
-                        pane.is_background = false;
-                        pane.background_window = None;
-
-                        // Update agent_panes list
-                        self.agent_panes.push(new_pane_id.clone());
-
-                        // Update branch_list running_agents
-                        self.branch_list
-                            .update_running_agents(&self.pane_list.panes);
-
-                        self.reflow_agent_layout(Some(&new_pane_id));
-
-                        // Focus the pane
-                        if let Err(e) = gwt_core::tmux::pane::select_pane(&new_pane_id) {
-                            self.status_message = Some(format!("Failed to focus pane: {}", e));
-                            self.status_message_time = Some(Instant::now());
-                        }
-                    }
-                    Err(e) => {
-                        self.status_message = Some(format!("Failed to show pane: {}", e));
-                        self.status_message_time = Some(Instant::now());
-                    }
-                }
-            } else {
-                // Visible pane - just focus it (FR-011)
-                if let Err(e) = gwt_core::tmux::pane::select_pane(&pane.pane_id) {
-                    self.status_message = Some(format!("Failed to focus pane: {}", e));
-                    self.status_message_time = Some(Instant::now());
-                }
-            }
+            self.pane_list.selected = pane_idx;
+            self.show_and_focus_selected_pane();
         } else {
             // No running agent - open wizard
             self.update(Message::OpenWizard);
@@ -2002,34 +1956,6 @@ impl Model {
                         }
                         match self.launch_agent_in_pane(&launch_config) {
                             Ok(_) => {
-                                // Save session history for Quick Start feature (FR-050)
-                                let session_entry = ToolSessionEntry {
-                                    branch: launch_config.branch_name.clone(),
-                                    worktree_path: Some(
-                                        launch_config.worktree_path.to_string_lossy().to_string(),
-                                    ),
-                                    tool_id: launch_config.agent.id().to_string(),
-                                    tool_label: launch_config.agent.label().to_string(),
-                                    session_id: launch_config.session_id.clone(),
-                                    mode: Some(launch_config.execution_mode.label().to_string()),
-                                    model: launch_config.model.clone(),
-                                    reasoning_level: launch_config
-                                        .reasoning_level
-                                        .map(|r| r.label().to_string()),
-                                    skip_permissions: Some(launch_config.skip_permissions),
-                                    tool_version: Some(launch_config.version.clone()),
-                                    timestamp: Utc::now().timestamp_millis(),
-                                };
-                                if let Err(e) =
-                                    save_session_entry(&launch_config.worktree_path, session_entry)
-                                {
-                                    debug!(
-                                        category = "tui",
-                                        error = %e,
-                                        "Failed to save session history"
-                                    );
-                                }
-
                                 self.status_message =
                                     Some(format!("Agent launched in tmux pane for {}", branch));
                                 self.status_message_time = Some(Instant::now());
@@ -2213,10 +2139,10 @@ impl Model {
             worktree_path: Some(working_dir),
             tool_id: config.agent.id().to_string(),
             tool_label: config.agent.label().to_string(),
-            session_id: None,
-            mode: None,
-            model: None,
-            reasoning_level: None,
+            session_id: config.session_id.clone(),
+            mode: Some(config.execution_mode.label().to_string()),
+            model: config.model.clone(),
+            reasoning_level: config.reasoning_level.map(|r| r.label().to_string()),
             skip_permissions: Some(config.skip_permissions),
             tool_version: Some(config.version.clone()),
             timestamp: std::time::SystemTime::now()
@@ -2224,7 +2150,7 @@ impl Model {
                 .map(|d| d.as_millis() as i64)
                 .unwrap_or(0),
         };
-        if let Err(e) = save_session_entry(&self.repo_root, session_entry) {
+        if let Err(e) = save_session_entry(&config.worktree_path, session_entry) {
             debug!(
                 category = "tui",
                 error = %e,
@@ -2242,11 +2168,7 @@ impl Model {
     }
 
     fn desired_agent_column_count(count: usize) -> usize {
-        if count == 0 {
-            0
-        } else {
-            (count + 2) / 3
-        }
+        count.div_ceil(3)
     }
 
     fn visible_agent_pane_ids(&self) -> Vec<String> {

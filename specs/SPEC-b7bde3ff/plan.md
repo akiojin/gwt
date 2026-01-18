@@ -214,20 +214,11 @@ gwtにtmuxマルチモードを追加し、複数のコーディングエージ�
 
 ### tmuxコマンド
 
-```text
-tmux new-session -d -s <session-name>    # セッション作成
-tmux split-window -h/-v -c <dir> <cmd>   # ペイン分割
-tmux select-pane -t <pane-id>            # フォーカス移動
-tmux list-panes -F "#{pane_id}:#{pane_pid}:#{pane_current_command}"  # ペイン一覧
-tmux send-keys -t <pane-id> C-c          # 中断シグナル
-tmux kill-pane -t <pane-id>              # ペイン終了
-```
+運用ガイドのコマンド例を参照: `docs/operations.md`
 
 ### Ctrl-g キーバインド設定
 
-```text
-tmux bind-key -n C-g select-pane -t 0    # gwtペイン（0番）へ移動
-```
+運用ガイドのキーバインド例を参照: `docs/operations.md`
 
 ### ペイン状態監視
 

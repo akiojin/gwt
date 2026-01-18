@@ -8,7 +8,7 @@
 json_input=$(cat)
 
 # ツール名を確認
-tool_name=$(echo "$json_input" | jq -r '.tool_name // empty')
+tool_name=$(jq -r '.tool_name // empty' <<< "$json_input")
 
 # Bashツール以外は許可
 if [ "$tool_name" != "Bash" ]; then
@@ -16,7 +16,7 @@ if [ "$tool_name" != "Bash" ]; then
 fi
 
 # コマンドを取得
-command=$(echo "$json_input" | jq -r '.tool_input.command // empty')
+command=$(jq -r '.tool_input.command // empty' <<< "$json_input")
 
 # GIT_DIR の設定パターンをチェック
 # パターン:
@@ -25,14 +25,14 @@ command=$(echo "$json_input" | jq -r '.tool_input.command // empty')
 #   - env GIT_DIR=...
 #   - declare -x GIT_DIR=...
 if echo "$command" | grep -qE '(^|[;&|]|[[:space:]])(export[[:space:]]+)?GIT_DIR[[:space:]]*=|env[[:space:]]+[^;]*GIT_DIR[[:space:]]*=|declare[[:space:]]+-x[[:space:]]+GIT_DIR[[:space:]]*='; then
-    # JSON応答を返す
-    cat <<EOF
-{
-  "decision": "block",
-  "reason": "🚫 GIT_DIR environment variable override is not allowed",
-  "stopReason": "Modifying GIT_DIR in a worktree environment can cause unintended repository operations.\n\nBlocked command: $command\n\nWorktrees have their own .git file pointing to the main repository's worktree directory. Overriding GIT_DIR may break this relationship and cause git commands to operate on the wrong repository."
-}
-EOF
+    # JSON応答を返す（jqで安全にエスケープ）
+    jq -n \
+      --arg cmd "$command" \
+      '{
+        decision: "block",
+        reason: "🚫 GIT_DIR environment variable override is not allowed",
+        stopReason: ("Modifying GIT_DIR in a worktree environment can cause unintended repository operations.\n\nBlocked command: " + $cmd + "\n\nWorktrees have their own .git file pointing to the main repository worktree directory. Overriding GIT_DIR may break this relationship and cause git commands to operate on the wrong repository.")
+      }'
 
     # stderrにもメッセージを出力
     echo "🚫 Blocked: $command" >&2
@@ -43,14 +43,14 @@ fi
 
 # GIT_WORK_TREE の設定も同様にブロック（GIT_DIRと組み合わせて使われることが多い）
 if echo "$command" | grep -qE '(^|[;&|]|[[:space:]])(export[[:space:]]+)?GIT_WORK_TREE[[:space:]]*=|env[[:space:]]+[^;]*GIT_WORK_TREE[[:space:]]*=|declare[[:space:]]+-x[[:space:]]+GIT_WORK_TREE[[:space:]]*='; then
-    # JSON応答を返す
-    cat <<EOF
-{
-  "decision": "block",
-  "reason": "🚫 GIT_WORK_TREE environment variable override is not allowed",
-  "stopReason": "Modifying GIT_WORK_TREE in a worktree environment can cause unintended repository operations.\n\nBlocked command: $command\n\nWorktrees have their own working directory configuration. Overriding GIT_WORK_TREE may cause git commands to operate on the wrong directory."
-}
-EOF
+    # JSON応答を返す（jqで安全にエスケープ）
+    jq -n \
+      --arg cmd "$command" \
+      '{
+        decision: "block",
+        reason: "🚫 GIT_WORK_TREE environment variable override is not allowed",
+        stopReason: ("Modifying GIT_WORK_TREE in a worktree environment can cause unintended repository operations.\n\nBlocked command: " + $cmd + "\n\nWorktrees have their own working directory configuration. Overriding GIT_WORK_TREE may cause git commands to operate on the wrong directory.")
+      }'
 
     # stderrにもメッセージを出力
     echo "🚫 Blocked: $command" >&2

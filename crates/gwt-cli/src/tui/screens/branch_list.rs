@@ -1048,13 +1048,12 @@ fn render_branch_row(
     };
 
     // Calculate left side width: "[*] " + worktree + " " + safety + " " + branch_name
-    // selection_icon(3) + space(1) + worktree_icon(3) + space(1) + safety_icon(~3) + space(1) + name
-    let left_width = 3 + 1 + 3 + 1 + safety_icon.len() + 1 + display_name.len();
+    // selection_icon(3) + space(1) + worktree_icon(1) + space(1) + safety_icon + space(1) + name
+    let left_width = 3 + 1 + 1 + 1 + safety_icon.len() + 1 + display_name.len();
 
     // Build right side (agent info) and calculate its width
     let (right_spans, right_width): (Vec<Span>, usize) = if let Some(agent) = running_agent {
-        const SPINNER_FRAMES: [char; 4] = ['|', '/', '-', '\\'];
-        let spinner_char = SPINNER_FRAMES[spinner_frame % 4];
+        let spinner_char = SPINNER_FRAMES[spinner_frame % SPINNER_FRAMES.len()];
         let agent_display = get_agent_display_name(&agent.agent_name);
         let uptime = agent.uptime_string();
 
