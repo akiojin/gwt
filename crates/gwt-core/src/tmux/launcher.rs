@@ -151,6 +151,95 @@ fn parse_pane_info(output: &str) -> TmuxResult<(String, u32)> {
     Ok((pane_id, pid))
 }
 
+/// Build an agent command string from parameters
+pub fn build_agent_command(
+    agent_name: &str,
+    model: Option<&str>,
+    version: Option<&str>,
+    execution_mode: &str,
+    session_id: Option<&str>,
+    skip_permissions: bool,
+    env: &[(String, String)],
+) -> String {
+    let mut parts = Vec::new();
+
+    // Add environment variable exports
+    for (key, value) in env {
+        let escaped_value = value.replace('\'', "'\\''");
+        parts.push(format!("export {}='{}'", key, escaped_value));
+    }
+
+    // Build the agent command
+    let mut cmd = agent_name.to_string();
+
+    if let Some(m) = model {
+        if !m.is_empty() {
+            cmd.push_str(&format!(" --model {}", m));
+        }
+    }
+
+    if execution_mode == "continue" {
+        cmd.push_str(" --continue");
+        if let Some(sid) = session_id {
+            cmd.push_str(&format!(" {}", sid));
+        }
+    } else if execution_mode == "resume" {
+        cmd.push_str(" --resume");
+        if let Some(sid) = session_id {
+            cmd.push_str(&format!(" {}", sid));
+        }
+    }
+
+    if skip_permissions {
+        cmd.push_str(" --dangerously-skip-permissions");
+    }
+
+    // Version is typically not used as CLI arg but could be for specific agents
+    let _ = version; // Suppress unused warning
+
+    if parts.is_empty() {
+        cmd
+    } else {
+        parts.push(cmd);
+        parts.join("; ")
+    }
+}
+
+/// Launch a command in a new tmux pane (simplified API)
+///
+/// Returns the pane ID of the newly created pane.
+pub fn launch_in_pane(session: &str, working_dir: &str, command: &str) -> TmuxResult<String> {
+    let output = Command::new("tmux")
+        .args([
+            "split-window",
+            "-h", // horizontal split
+            "-t",
+            session,
+            "-c",
+            working_dir,
+            "-P", // print pane info
+            "-F",
+            "#{pane_id}",
+            "sh",
+            "-c",
+            command,
+        ])
+        .output()
+        .map_err(|e| TmuxError::PaneCreateFailed {
+            reason: e.to_string(),
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(TmuxError::PaneCreateFailed {
+            reason: stderr.to_string(),
+        });
+    }
+
+    let pane_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(pane_id)
+}
+
 /// Check if a directory exists and is valid for agent execution
 pub fn validate_working_dir(path: &Path) -> TmuxResult<()> {
     if !path.exists() {

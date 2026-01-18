@@ -16,7 +16,9 @@ pub mod session;
 pub use detector::{check_tmux_installed, get_tmux_version, is_inside_tmux, TmuxVersion};
 pub use error::{TmuxError, TmuxResult};
 pub use keybind::{focus_gwt_pane, remove_ctrl_g_keybind, setup_ctrl_g_keybind, GWT_PANE_INDEX};
-pub use launcher::{launch_agent_in_pane, TmuxLaunchConfig, TmuxLaunchResult};
+pub use launcher::{
+    build_agent_command, launch_agent_in_pane, launch_in_pane, TmuxLaunchConfig, TmuxLaunchResult,
+};
 pub use logging::{start_logging, stop_logging, LogConfig};
 pub use naming::generate_session_name;
 pub use pane::{

@@ -11,7 +11,9 @@ use gwt_core::config::get_branch_tool_history;
 use gwt_core::config::{Profile, ProfilesConfig};
 use gwt_core::error::GwtError;
 use gwt_core::git::{Branch, PrCache, Repository};
+use gwt_core::tmux::{launcher, naming};
 use gwt_core::worktree::WorktreeManager;
+use gwt_core::TmuxMode;
 use ratatui::{prelude::*, widgets::*};
 use std::collections::HashMap;
 use std::io;
@@ -189,6 +191,10 @@ pub struct Model {
     safety_rx: Option<Receiver<SafetyUpdate>>,
     /// Worktree status update receiver
     worktree_status_rx: Option<Receiver<WorktreeStatusUpdate>>,
+    /// Tmux mode (Single or Multi)
+    tmux_mode: TmuxMode,
+    /// Tmux session name (when in multi mode)
+    tmux_session: Option<String>,
 }
 
 /// Screen types
@@ -299,7 +305,25 @@ impl Model {
             pr_title_rx: None,
             safety_rx: None,
             worktree_status_rx: None,
+            tmux_mode: TmuxMode::detect(),
+            tmux_session: None,
         };
+
+        // Initialize tmux session if in multi mode
+        if model.tmux_mode.is_multi() {
+            let repo_name = model
+                .repo_root
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("gwt");
+            model.tmux_session = Some(naming::generate_session_name(repo_name, &[]));
+            debug!(
+                category = "tui",
+                mode = %model.tmux_mode,
+                session = ?model.tmux_session,
+                "Tmux multi-mode detected"
+            );
+        }
 
         // Load initial data
         model.refresh_data();
@@ -1447,9 +1471,29 @@ impl Model {
                         auto_install_deps,
                     };
 
-                    // Store the launch config and quit TUI
-                    self.pending_agent_launch = Some(launch_config);
-                    self.should_quit = true;
+                    // In multi mode, launch in tmux pane without quitting TUI
+                    if self.tmux_mode.is_multi() {
+                        if let Some(session) = &self.tmux_session {
+                            match self.launch_agent_in_pane(&launch_config, session) {
+                                Ok(_) => {
+                                    self.status_message =
+                                        Some(format!("Agent launched in tmux pane for {}", branch));
+                                    self.status_message_time = Some(Instant::now());
+                                    // Close wizard and return to branch list
+                                    self.wizard.visible = false;
+                                    self.screen = Screen::BranchList;
+                                }
+                                Err(e) => {
+                                    self.status_message = Some(format!("Failed to launch: {}", e));
+                                    self.status_message_time = Some(Instant::now());
+                                }
+                            }
+                        }
+                    } else {
+                        // Single mode: store launch config and quit TUI
+                        self.pending_agent_launch = Some(launch_config);
+                        self.should_quit = true;
+                    }
                 }
                 Err(e) => {
                     error!(
@@ -1465,6 +1509,42 @@ impl Model {
                 }
             }
         }
+    }
+
+    /// Launch an agent in a tmux pane (multi mode)
+    fn launch_agent_in_pane(
+        &self,
+        config: &AgentLaunchConfig,
+        session: &str,
+    ) -> Result<String, String> {
+        let working_dir = config.worktree_path.to_string_lossy().to_string();
+        let agent_name = config.agent.id();
+
+        // Build the agent command
+        let execution_mode_str = match config.execution_mode {
+            ExecutionMode::Normal => "normal",
+            ExecutionMode::Continue => "continue",
+            ExecutionMode::Resume => "resume",
+        };
+        let command = launcher::build_agent_command(
+            agent_name,
+            config.model.as_deref(),
+            Some(&config.version),
+            execution_mode_str,
+            config.session_id.as_deref(),
+            config.skip_permissions,
+            &config.env,
+        );
+
+        debug!(
+            category = "tui",
+            session = session,
+            working_dir = %working_dir,
+            command = %command,
+            "Launching agent in tmux pane"
+        );
+
+        launcher::launch_in_pane(session, &working_dir, &command).map_err(|e| e.to_string())
     }
 
     /// Execute branch cleanup (FR-010)
