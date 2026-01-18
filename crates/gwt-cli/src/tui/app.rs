@@ -205,6 +205,8 @@ pub struct Model {
     pane_list: PaneListState,
     /// Split layout state for tmux multi-mode
     split_layout: SplitLayoutState,
+    /// Last time pane list was updated (for 1-second polling)
+    last_pane_update: Option<Instant>,
 }
 
 /// Screen types
@@ -321,6 +323,7 @@ impl Model {
             agent_panes: Vec::new(),
             pane_list: PaneListState::new(),
             split_layout: SplitLayoutState::new(),
+            last_pane_update: None,
         };
 
         // Initialize tmux session if in multi mode
@@ -749,6 +752,53 @@ impl Model {
         }
     }
 
+    /// FR-033: Update pane list by polling tmux (1-second interval)
+    fn update_pane_list(&mut self) {
+        // Only in tmux multi mode with panes
+        if !self.tmux_mode.is_multi() || self.pane_list.panes.is_empty() {
+            return;
+        }
+
+        // Check if 1 second has passed since last update
+        let now = Instant::now();
+        if let Some(last) = self.last_pane_update {
+            if now.duration_since(last) < Duration::from_secs(1) {
+                return;
+            }
+        }
+        self.last_pane_update = Some(now);
+
+        // Get current tmux panes
+        let Some(session) = &self.tmux_session else {
+            return;
+        };
+
+        let Ok(current_panes) = gwt_core::tmux::pane::list_panes(session) else {
+            return;
+        };
+
+        // Filter out panes that no longer exist
+        let current_pane_ids: std::collections::HashSet<_> =
+            current_panes.iter().map(|p| p.pane_id.as_str()).collect();
+
+        let remaining_panes: Vec<_> = self
+            .pane_list
+            .panes
+            .iter()
+            .filter(|p| current_pane_ids.contains(p.pane_id.as_str()))
+            .cloned()
+            .collect();
+
+        // Also update agent_panes list
+        self.agent_panes
+            .retain(|id| current_pane_ids.contains(id.as_str()));
+
+        // Update if any panes were removed
+        if remaining_panes.len() != self.pane_list.panes.len() {
+            self.pane_list.update_panes(remaining_panes);
+        }
+    }
+
     fn load_profiles(&mut self) {
         let profiles_config = ProfilesConfig::load().unwrap_or_default();
         self.profiles_config = profiles_config.clone();
@@ -1028,6 +1078,8 @@ impl Model {
                 self.apply_pr_title_updates();
                 self.apply_safety_updates();
                 self.apply_worktree_updates();
+                // FR-033: Update pane list every 1 second in tmux multi mode
+                self.update_pane_list();
             }
             Message::SelectNext => match self.screen {
                 Screen::BranchList => {
@@ -1554,34 +1606,45 @@ impl Model {
     /// Layout strategy:
     /// - First agent: vertical split below gwt pane
     /// - Additional agents: horizontal split beside last agent pane
+    ///
+    /// Uses the same argument building logic as single mode (main.rs)
     fn launch_agent_in_pane(&mut self, config: &AgentLaunchConfig) -> Result<String, String> {
         let working_dir = config.worktree_path.to_string_lossy().to_string();
 
+        // Build environment variables (same as single mode)
+        let mut env_vars = config.env.clone();
+        // Add IS_SANDBOX=1 for Claude Code with skip_permissions (same as single mode)
+        if config.skip_permissions && config.agent == CodingAgent::ClaudeCode {
+            env_vars.push(("IS_SANDBOX".to_string(), "1".to_string()));
+        }
+
         // Determine the agent command based on version (FR-063)
-        // - "latest": use bunx <npm_package>
         // - "installed": use direct binary name
-        // - specific version: use npx <npm_package>@<version>
-        let agent_name = match config.version.as_str() {
-            "latest" => format!("bunx {}", config.agent.npm_package()),
-            "installed" => config.agent.id().to_string(),
-            version => format!("npx {}@{}", config.agent.npm_package(), version),
+        // - "latest" or specific version: use bunx (or npx fallback) with package spec
+        let (base_cmd, base_args) = if config.version == "installed" {
+            // Use direct binary name for installed version
+            (config.agent.command_name().to_string(), vec![])
+        } else {
+            // Try bunx first, then npx as fallback (same logic as single mode)
+            let runner = which::which("bunx")
+                .or_else(|_| which::which("npx"))
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| "bunx".to_string());
+
+            let package_spec = if config.version == "latest" {
+                format!("{}@latest", config.agent.npm_package())
+            } else {
+                format!("{}@{}", config.agent.npm_package(), config.version)
+            };
+
+            (runner, vec![package_spec])
         };
 
-        // Build the agent command
-        let execution_mode_str = match config.execution_mode {
-            ExecutionMode::Normal => "normal",
-            ExecutionMode::Continue => "continue",
-            ExecutionMode::Resume => "resume",
-        };
-        let command = launcher::build_agent_command(
-            &agent_name,
-            config.model.as_deref(),
-            Some(&config.version),
-            execution_mode_str,
-            config.session_id.as_deref(),
-            config.skip_permissions,
-            &config.env,
-        );
+        // Build agent-specific arguments (same logic as main.rs build_agent_args)
+        let agent_args = build_agent_args_for_tmux(config);
+
+        // Build the full command string
+        let command = build_tmux_command(&env_vars, &base_cmd, &base_args, &agent_args);
 
         debug!(
             category = "tui",
@@ -1772,11 +1835,13 @@ impl Model {
                 self.pane_list.has_focus = self.split_layout.pane_list_has_focus();
 
                 // Render branch list
+                let branch_list_has_focus = !self.pane_list.has_focus;
                 render_branch_list(
                     &self.branch_list,
                     frame,
                     split_areas.branch_list,
                     self.status_message.as_deref(),
+                    branch_list_has_focus,
                 );
 
                 // Render pane list (only visible in tmux multi mode)
@@ -2421,6 +2486,167 @@ pub fn run_with_context(
     terminal.show_cursor()?;
 
     Ok(pending_launch)
+}
+
+/// Build agent-specific command line arguments for tmux mode
+/// (Same logic as main.rs build_agent_args)
+fn build_agent_args_for_tmux(config: &AgentLaunchConfig) -> Vec<String> {
+    use gwt_core::agent::codex::{codex_default_args, codex_skip_permissions_flag};
+
+    let mut args = Vec::new();
+
+    match config.agent {
+        CodingAgent::ClaudeCode => {
+            // Model selection
+            if let Some(model) = &config.model {
+                if !model.is_empty() {
+                    args.push("--model".to_string());
+                    args.push(model.clone());
+                }
+            }
+
+            // Execution mode (FR-102) - same logic as single mode
+            match config.execution_mode {
+                ExecutionMode::Continue | ExecutionMode::Resume => {
+                    if let Some(session_id) = &config.session_id {
+                        args.push("--resume".to_string());
+                        args.push(session_id.clone());
+                    } else if matches!(config.execution_mode, ExecutionMode::Continue) {
+                        args.push("-c".to_string());
+                    } else {
+                        args.push("-r".to_string());
+                    }
+                }
+                ExecutionMode::Normal => {}
+            }
+
+            // Skip permissions
+            if config.skip_permissions {
+                args.push("--dangerously-skip-permissions".to_string());
+            }
+        }
+        CodingAgent::CodexCli => {
+            // Execution mode - resume subcommand must come first
+            match config.execution_mode {
+                ExecutionMode::Continue | ExecutionMode::Resume => {
+                    args.push("resume".to_string());
+                    if let Some(session_id) = &config.session_id {
+                        args.push(session_id.clone());
+                    } else if matches!(config.execution_mode, ExecutionMode::Continue) {
+                        args.push("--last".to_string());
+                    }
+                }
+                ExecutionMode::Normal => {}
+            }
+
+            // Skip permissions (Codex uses versioned flag)
+            let skip_flag = if config.skip_permissions {
+                Some(codex_skip_permissions_flag(None))
+            } else {
+                None
+            };
+            let bypass_sandbox = matches!(
+                skip_flag,
+                Some("--dangerously-bypass-approvals-and-sandbox")
+            );
+
+            let reasoning_override = config.reasoning_level.map(|r| r.label());
+            args.extend(codex_default_args(
+                config.model.as_deref(),
+                reasoning_override,
+                None, // skills_flag_version
+                bypass_sandbox,
+            ));
+
+            if let Some(flag) = skip_flag {
+                args.push(flag.to_string());
+            }
+        }
+        CodingAgent::GeminiCli => {
+            // Model selection (Gemini uses -m or --model)
+            if let Some(model) = &config.model {
+                if !model.is_empty() {
+                    args.push("-m".to_string());
+                    args.push(model.clone());
+                }
+            }
+
+            // Execution mode
+            match config.execution_mode {
+                ExecutionMode::Continue | ExecutionMode::Resume => {
+                    if let Some(session_id) = &config.session_id {
+                        args.push("--resume".to_string());
+                        args.push(session_id.clone());
+                    } else if matches!(config.execution_mode, ExecutionMode::Continue) {
+                        args.push("--continue".to_string());
+                    } else {
+                        args.push("--resume".to_string());
+                    }
+                }
+                ExecutionMode::Normal => {}
+            }
+
+            // Skip permissions
+            if config.skip_permissions {
+                args.push("-y".to_string());
+            }
+        }
+        CodingAgent::OpenCode => {
+            // Model selection
+            if let Some(model) = &config.model {
+                if !model.is_empty() {
+                    args.push("--model".to_string());
+                    args.push(model.clone());
+                }
+            }
+
+            // Execution mode
+            match config.execution_mode {
+                ExecutionMode::Continue | ExecutionMode::Resume => {
+                    if let Some(session_id) = &config.session_id {
+                        args.push("--resume".to_string());
+                        args.push(session_id.clone());
+                    } else if matches!(config.execution_mode, ExecutionMode::Continue) {
+                        args.push("--continue".to_string());
+                    } else {
+                        args.push("--resume".to_string());
+                    }
+                }
+                ExecutionMode::Normal => {}
+            }
+        }
+    }
+
+    args
+}
+
+/// Build the full tmux command string with environment variables
+fn build_tmux_command(
+    env_vars: &[(String, String)],
+    base_cmd: &str,
+    base_args: &[String],
+    agent_args: &[String],
+) -> String {
+    let mut parts = Vec::new();
+
+    // Add environment variable exports
+    for (key, value) in env_vars {
+        let escaped_value = value.replace('\'', "'\\''");
+        parts.push(format!("export {}='{}'", key, escaped_value));
+    }
+
+    // Build the command with all arguments
+    let mut cmd_parts = vec![base_cmd.to_string()];
+    cmd_parts.extend(base_args.iter().cloned());
+    cmd_parts.extend(agent_args.iter().cloned());
+    let full_cmd = cmd_parts.join(" ");
+
+    if parts.is_empty() {
+        full_cmd
+    } else {
+        parts.push(full_cmd);
+        parts.join("; ")
+    }
 }
 
 #[cfg(test)]
