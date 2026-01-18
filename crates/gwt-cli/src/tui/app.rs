@@ -195,6 +195,8 @@ pub struct Model {
     tmux_mode: TmuxMode,
     /// Tmux session name (when in multi mode)
     tmux_session: Option<String>,
+    /// Launched agent pane IDs (for horizontal layout management)
+    agent_panes: Vec<String>,
 }
 
 /// Screen types
@@ -307,6 +309,7 @@ impl Model {
             worktree_status_rx: None,
             tmux_mode: TmuxMode::detect(),
             tmux_session: None,
+            agent_panes: Vec::new(),
         };
 
         // Initialize tmux session if in multi mode
@@ -1407,7 +1410,7 @@ impl Model {
             "Creating worktree from wizard state"
         );
         if let Ok(manager) = WorktreeManager::new(&self.repo_root) {
-            let branch = &self.worktree_create.branch_name;
+            let branch = self.worktree_create.branch_name.clone();
             let base = if self.worktree_create.create_new_branch {
                 self.wizard
                     .base_branch_override
@@ -1418,15 +1421,15 @@ impl Model {
             };
 
             // First try to get existing worktree for this branch
-            let existing_wt = manager.get_by_branch(branch).ok().flatten();
+            let existing_wt = manager.get_by_branch(&branch).ok().flatten();
 
             let result = if let Some(wt) = existing_wt {
                 // Worktree already exists, just use it
                 Ok(wt)
             } else if self.worktree_create.create_new_branch {
-                manager.create_new_branch(branch, base)
+                manager.create_new_branch(&branch, base)
             } else {
-                manager.create_for_branch(branch)
+                manager.create_for_branch(&branch)
             };
 
             match result {
@@ -1471,8 +1474,8 @@ impl Model {
 
                     // In multi mode, launch in tmux pane without quitting TUI
                     if self.tmux_mode.is_multi() {
-                        if let Some(session) = &self.tmux_session {
-                            match self.launch_agent_in_pane(&launch_config, session) {
+                        if let Some(session) = self.tmux_session.clone() {
+                            match self.launch_agent_in_pane(&launch_config, &session) {
                                 Ok(_) => {
                                     self.status_message =
                                         Some(format!("Agent launched in tmux pane for {}", branch));
@@ -1510,8 +1513,12 @@ impl Model {
     }
 
     /// Launch an agent in a tmux pane (multi mode)
+    ///
+    /// Layout strategy:
+    /// - First agent: vertical split below gwt pane
+    /// - Additional agents: horizontal split beside last agent pane
     fn launch_agent_in_pane(
-        &self,
+        &mut self,
         config: &AgentLaunchConfig,
         session: &str,
     ) -> Result<String, String> {
@@ -1539,10 +1546,25 @@ impl Model {
             session = session,
             working_dir = %working_dir,
             command = %command,
+            agent_pane_count = self.agent_panes.len(),
             "Launching agent in tmux pane"
         );
 
-        launcher::launch_in_pane(session, &working_dir, &command).map_err(|e| e.to_string())
+        // Determine how to split based on existing agent panes
+        let pane_id = if self.agent_panes.is_empty() {
+            // First agent: vertical split below gwt pane
+            launcher::launch_in_pane(session, &working_dir, &command)
+        } else {
+            // Additional agents: horizontal split beside last agent pane
+            let last_pane = self.agent_panes.last().unwrap();
+            launcher::launch_in_pane_beside(last_pane, &working_dir, &command)
+        }
+        .map_err(|e| e.to_string())?;
+
+        // Track the new pane
+        self.agent_panes.push(pane_id.clone());
+
+        Ok(pane_id)
     }
 
     /// Execute branch cleanup (FR-010)

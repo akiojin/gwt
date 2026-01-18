@@ -207,12 +207,21 @@ pub fn build_agent_command(
 
 /// Launch a command in a new tmux pane (simplified API)
 ///
+/// Creates a new pane below the current one and executes the command.
+/// The command is executed with `exec` to replace the shell process,
+/// ensuring the pane stays open while the agent runs.
+///
 /// Returns the pane ID of the newly created pane.
 pub fn launch_in_pane(session: &str, working_dir: &str, command: &str) -> TmuxResult<String> {
+    // Use exec to replace shell with the agent process
+    // This ensures the pane stays open while the agent is running
+    let exec_command = format!("exec {}", command);
+
     let output = Command::new("tmux")
         .args([
             "split-window",
-            "-h", // horizontal split
+            "-v", // vertical split (below current pane)
+            "-d", // don't switch to new pane (keep focus on gwt)
             "-t",
             session,
             "-c",
@@ -222,7 +231,53 @@ pub fn launch_in_pane(session: &str, working_dir: &str, command: &str) -> TmuxRe
             "#{pane_id}",
             "sh",
             "-c",
-            command,
+            &exec_command,
+        ])
+        .output()
+        .map_err(|e| TmuxError::PaneCreateFailed {
+            reason: e.to_string(),
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(TmuxError::PaneCreateFailed {
+            reason: stderr.to_string(),
+        });
+    }
+
+    let pane_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(pane_id)
+}
+
+/// Launch a command in a new tmux pane beside an existing pane (horizontal split)
+///
+/// Creates a new pane to the right of the target pane and executes the command.
+/// Used for adding additional agents beside existing agent panes.
+///
+/// Returns the pane ID of the newly created pane.
+pub fn launch_in_pane_beside(
+    target_pane: &str,
+    working_dir: &str,
+    command: &str,
+) -> TmuxResult<String> {
+    // Use exec to replace shell with the agent process
+    let exec_command = format!("exec {}", command);
+
+    let output = Command::new("tmux")
+        .args([
+            "split-window",
+            "-h", // horizontal split (beside target pane)
+            "-d", // don't switch to new pane (keep focus on gwt)
+            "-t",
+            target_pane,
+            "-c",
+            working_dir,
+            "-P", // print pane info
+            "-F",
+            "#{pane_id}",
+            "sh",
+            "-c",
+            &exec_command,
         ])
         .output()
         .map_err(|e| TmuxError::PaneCreateFailed {
