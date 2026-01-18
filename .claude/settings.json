@@ -15,6 +15,10 @@
           {
             "type": "command",
             "command": ".claude/hooks/block-file-ops.sh"
+          },
+          {
+            "type": "command",
+            "command": ".claude/hooks/block-git-dir-override.sh"
           }
         ]
       }
