@@ -2,8 +2,6 @@
 //!
 //! Displays a list of running agent panes with branch name, agent name, and uptime.
 
-#![allow(dead_code)]
-
 use gwt_core::tmux::AgentPane;
 use ratatui::{
     layout::Rect,
@@ -74,16 +72,19 @@ impl PaneListState {
     }
 
     /// Get the currently selected pane
+    #[allow(dead_code)]
     pub fn selected_pane(&self) -> Option<&AgentPane> {
         self.panes.get(self.selected)
     }
 
     /// Check if the list is empty
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.panes.is_empty()
     }
 
     /// Get the number of panes
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.panes.len()
     }
@@ -92,7 +93,7 @@ impl PaneListState {
 /// Render the pane list
 pub fn render_pane_list(state: &mut PaneListState, frame: &mut Frame, area: Rect) {
     let border_style = if state.has_focus {
-        Style::default().fg(Color::Cyan)
+        Style::default().fg(Color::White)
     } else {
         Style::default().fg(Color::DarkGray)
     };

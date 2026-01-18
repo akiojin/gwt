@@ -754,6 +754,7 @@ pub fn render_branch_list(
     frame: &mut Frame,
     area: Rect,
     status_message: Option<&str>,
+    has_focus: bool,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -765,7 +766,7 @@ pub fn render_branch_list(
         .split(area);
 
     render_legend_line(frame, chunks[0]);
-    render_branches(state, frame, chunks[1]);
+    render_branches(state, frame, chunks[1], has_focus);
     render_worktree_path(state, frame, chunks[2], status_message);
 }
 
@@ -902,8 +903,15 @@ fn render_legend_line(frame: &mut Frame, area: Rect) {
 }
 
 /// Render branches list
-fn render_branches(state: &BranchListState, frame: &mut Frame, area: Rect) {
-    let block = Block::default().borders(Borders::ALL);
+fn render_branches(state: &BranchListState, frame: &mut Frame, area: Rect, has_focus: bool) {
+    let border_style = if has_focus {
+        Style::default().fg(Color::White)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style);
     frame.render_widget(block.clone(), area);
     let inner_area = block.inner(area);
     if inner_area.width == 0 || inner_area.height == 0 {
@@ -1246,7 +1254,7 @@ mod tests {
         terminal
             .draw(|f| {
                 let area = f.area();
-                render_branches(&state, f, area);
+                render_branches(&state, f, area, true);
             })
             .expect("draw");
 
@@ -1290,7 +1298,7 @@ mod tests {
         terminal
             .draw(|f| {
                 let area = f.area();
-                render_branch_list(&state, f, area, None);
+                render_branch_list(&state, f, area, None, true);
             })
             .expect("draw");
 
@@ -1310,7 +1318,7 @@ mod tests {
         terminal
             .draw(|f| {
                 let area = f.area();
-                render_branch_list(&state, f, area, None);
+                render_branch_list(&state, f, area, None, true);
             })
             .expect("draw");
 

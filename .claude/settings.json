@@ -1,25 +1,4 @@
 {
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": ".claude/hooks/block-git-branch-ops.sh"
-          },
-          {
-            "type": "command",
-            "command": ".claude/hooks/block-cd-command.sh"
-          },
-          {
-            "type": "command",
-            "command": ".claude/hooks/block-file-ops.sh"
-          }
-        ]
-      }
-    ]
-  },
   "enabledPlugins": {
     "context7@claude-plugins-official": true,
     "frontend-design@claude-plugins-official": true,
@@ -36,6 +15,8 @@
     "requirements-spec-kit@akiojin-skills": true,
     "typescript-lsp@claude-plugins-official": true,
     "ralph-loop@claude-plugins-official": true,
-    "code-simplifier@claude-plugins-official": true
+    "code-simplifier@claude-plugins-official": true,
+    "plugin-dev@claude-plugins-official": true,
+    "worktree-protection-hooks@gwt-plugins": true
   }
 }
