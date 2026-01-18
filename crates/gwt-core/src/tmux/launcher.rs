@@ -351,11 +351,22 @@ pub fn launch_in_pane(target_pane: &str, working_dir: &str, command: &str) -> Tm
         .args(["set-option", "-t", &pane_id, "remain-on-exit", "off"])
         .output();
 
-    // Send the command to the new pane via send-keys
+    // Build environment export commands for send-keys
+    // This ensures environment variables are set in the shell before running the command
+    let env_exports: Vec<String> = env_vars
+        .iter()
+        .map(|(k, v)| format!("export {}='{}'", k, v.replace('\'', "'\\''")))
+        .collect();
+
+    // Send environment setup and command to the new pane via send-keys
     // This ensures stdin/stdout are properly connected to the terminal
-    let command_with_exit = format!("{}; exit", command);
+    let full_command = if env_exports.is_empty() {
+        format!("{}; exit", command)
+    } else {
+        format!("{}; {}; exit", env_exports.join("; "), command)
+    };
     let _ = Command::new("tmux")
-        .args(["send-keys", "-t", &pane_id, &command_with_exit, "Enter"])
+        .args(["send-keys", "-t", &pane_id, &full_command, "Enter"])
         .output();
 
     Ok(pane_id)
@@ -418,11 +429,22 @@ pub fn launch_in_pane_beside(
         .args(["set-option", "-t", &pane_id, "remain-on-exit", "off"])
         .output();
 
-    // Send the command to the new pane via send-keys
+    // Build environment export commands for send-keys
+    // This ensures environment variables are set in the shell before running the command
+    let env_exports: Vec<String> = env_vars
+        .iter()
+        .map(|(k, v)| format!("export {}='{}'", k, v.replace('\'', "'\\''")))
+        .collect();
+
+    // Send environment setup and command to the new pane via send-keys
     // This ensures stdin/stdout are properly connected to the terminal
-    let command_with_exit = format!("{}; exit", command);
+    let full_command = if env_exports.is_empty() {
+        format!("{}; exit", command)
+    } else {
+        format!("{}; {}; exit", env_exports.join("; "), command)
+    };
     let _ = Command::new("tmux")
-        .args(["send-keys", "-t", &pane_id, &command_with_exit, "Enter"])
+        .args(["send-keys", "-t", &pane_id, &full_command, "Enter"])
         .output();
 
     Ok(pane_id)
