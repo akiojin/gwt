@@ -282,8 +282,8 @@ pub fn show_pane(background_window: &str, target_pane_id: &str) -> TmuxResult<St
     let output = Command::new("tmux")
         .args([
             "join-pane",
-            "-d",  // don't switch focus
-            "-h",  // horizontal split (side by side)
+            "-d", // don't switch focus
+            "-h", // horizontal split (side by side)
             "-s",
             background_window,
             "-t",
