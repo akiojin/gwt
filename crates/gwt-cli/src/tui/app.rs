@@ -1685,14 +1685,9 @@ impl Model {
         self.agent_panes.push(pane_id.clone());
 
         // Add to pane list for display
-        let branch_name = self
-            .branch_list
-            .selected_branch()
-            .map(|b| b.name.clone())
-            .unwrap_or_else(|| "unknown".to_string());
         let agent_pane = AgentPane::new(
             pane_id.clone(),
-            branch_name,
+            config.branch_name.clone(),
             config.agent.label().to_string(),
             SystemTime::now(),
             0, // PID is not tracked by simple launcher
