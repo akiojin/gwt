@@ -2,8 +2,6 @@
 //!
 //! Provides a top-bottom split layout with branch list above and pane list below.
 
-#![allow(dead_code)]
-
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
 /// Focus state for the split layout
@@ -26,6 +24,7 @@ impl FocusPanel {
     }
 
     /// Check if branch list has focus
+    #[allow(dead_code)]
     pub fn is_branch_list(&self) -> bool {
         matches!(self, FocusPanel::BranchList)
     }
@@ -63,6 +62,7 @@ impl SplitLayoutState {
     }
 
     /// Disable tmux mode (hide pane list)
+    #[allow(dead_code)]
     pub fn disable_tmux_mode(&mut self) {
         self.pane_list_visible = false;
         self.focus = FocusPanel::BranchList;
@@ -76,6 +76,7 @@ impl SplitLayoutState {
     }
 
     /// Check if branch list has focus
+    #[allow(dead_code)]
     pub fn branch_list_has_focus(&self) -> bool {
         self.focus.is_branch_list()
     }

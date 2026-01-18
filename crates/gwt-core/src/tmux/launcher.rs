@@ -207,22 +207,26 @@ pub fn build_agent_command(
 
 /// Launch a command in a new tmux pane (simplified API)
 ///
+/// Creates a new pane below the current one and executes the command.
+/// Uses remain-on-exit to keep the pane visible if the command fails,
+/// allowing the user to see error messages.
+///
 /// Returns the pane ID of the newly created pane.
-pub fn launch_in_pane(session: &str, working_dir: &str, command: &str) -> TmuxResult<String> {
+pub fn launch_in_pane(target_pane: &str, working_dir: &str, command: &str) -> TmuxResult<String> {
+    // Create the pane first, then set remain-on-exit and run command
+    // This ensures we can see errors if the command fails
     let output = Command::new("tmux")
         .args([
             "split-window",
-            "-h", // horizontal split
+            "-v", // vertical split (below current pane)
+            "-d", // don't switch to new pane (keep focus on gwt)
             "-t",
-            session,
+            target_pane,
             "-c",
             working_dir,
             "-P", // print pane info
             "-F",
             "#{pane_id}",
-            "sh",
-            "-c",
-            command,
         ])
         .output()
         .map_err(|e| TmuxError::PaneCreateFailed {
@@ -237,6 +241,69 @@ pub fn launch_in_pane(session: &str, working_dir: &str, command: &str) -> TmuxRe
     }
 
     let pane_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    // Set remain-on-exit so we can see errors if command fails
+    let _ = Command::new("tmux")
+        .args(["set-option", "-t", &pane_id, "remain-on-exit", "on"])
+        .output();
+
+    // Send the command to the new pane
+    let _ = Command::new("tmux")
+        .args(["send-keys", "-t", &pane_id, command, "Enter"])
+        .output();
+
+    Ok(pane_id)
+}
+
+/// Launch a command in a new tmux pane beside an existing pane (horizontal split)
+///
+/// Creates a new pane to the right of the target pane and executes the command.
+/// Uses remain-on-exit to keep the pane visible if the command fails.
+///
+/// Returns the pane ID of the newly created pane.
+pub fn launch_in_pane_beside(
+    target_pane: &str,
+    working_dir: &str,
+    command: &str,
+) -> TmuxResult<String> {
+    // Create the pane first, then set remain-on-exit and run command
+    let output = Command::new("tmux")
+        .args([
+            "split-window",
+            "-h", // horizontal split (beside target pane)
+            "-d", // don't switch to new pane (keep focus on gwt)
+            "-t",
+            target_pane,
+            "-c",
+            working_dir,
+            "-P", // print pane info
+            "-F",
+            "#{pane_id}",
+        ])
+        .output()
+        .map_err(|e| TmuxError::PaneCreateFailed {
+            reason: e.to_string(),
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(TmuxError::PaneCreateFailed {
+            reason: stderr.to_string(),
+        });
+    }
+
+    let pane_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    // Set remain-on-exit so we can see errors if command fails
+    let _ = Command::new("tmux")
+        .args(["set-option", "-t", &pane_id, "remain-on-exit", "on"])
+        .output();
+
+    // Send the command to the new pane
+    let _ = Command::new("tmux")
+        .args(["send-keys", "-t", &pane_id, command, "Enter"])
+        .output();
+
     Ok(pane_id)
 }
 
@@ -339,5 +406,76 @@ mod tests {
         };
         assert_eq!(config.session, "gwt-test");
         assert_eq!(config.branch_name, "feature/test");
+    }
+
+    #[test]
+    fn test_build_agent_command_basic() {
+        let cmd = build_agent_command("claude", None, None, "normal", None, false, &[]);
+        assert_eq!(cmd, "claude");
+    }
+
+    #[test]
+    fn test_build_agent_command_with_model() {
+        let cmd = build_agent_command("claude", Some("opus"), None, "normal", None, false, &[]);
+        assert_eq!(cmd, "claude --model opus");
+    }
+
+    #[test]
+    fn test_build_agent_command_continue_mode() {
+        let cmd = build_agent_command("claude", None, None, "continue", None, false, &[]);
+        assert_eq!(cmd, "claude --continue");
+    }
+
+    #[test]
+    fn test_build_agent_command_continue_with_session() {
+        let cmd = build_agent_command("claude", None, None, "continue", Some("abc123"), false, &[]);
+        assert_eq!(cmd, "claude --continue abc123");
+    }
+
+    #[test]
+    fn test_build_agent_command_resume_mode() {
+        let cmd = build_agent_command("claude", None, None, "resume", Some("xyz789"), false, &[]);
+        assert_eq!(cmd, "claude --resume xyz789");
+    }
+
+    #[test]
+    fn test_build_agent_command_skip_permissions() {
+        let cmd = build_agent_command("claude", None, None, "normal", None, true, &[]);
+        assert_eq!(cmd, "claude --dangerously-skip-permissions");
+    }
+
+    #[test]
+    fn test_build_agent_command_with_env() {
+        let env = vec![("API_KEY".to_string(), "secret".to_string())];
+        let cmd = build_agent_command("claude", None, None, "normal", None, false, &env);
+        assert!(cmd.contains("export API_KEY='secret'"));
+        assert!(cmd.contains("claude"));
+    }
+
+    #[test]
+    fn test_build_agent_command_full() {
+        let env = vec![("FOO".to_string(), "bar".to_string())];
+        let cmd = build_agent_command(
+            "claude",
+            Some("sonnet"),
+            Some("1.0.0"),
+            "continue",
+            Some("sess123"),
+            true,
+            &env,
+        );
+        assert!(cmd.contains("export FOO='bar'"));
+        assert!(cmd.contains("claude"));
+        assert!(cmd.contains("--model sonnet"));
+        assert!(cmd.contains("--continue sess123"));
+        assert!(cmd.contains("--dangerously-skip-permissions"));
+    }
+
+    #[test]
+    fn test_build_agent_command_empty_model() {
+        // Empty model should not add --model flag
+        let cmd = build_agent_command("claude", Some(""), None, "normal", None, false, &[]);
+        assert_eq!(cmd, "claude");
+        assert!(!cmd.contains("--model"));
     }
 }
