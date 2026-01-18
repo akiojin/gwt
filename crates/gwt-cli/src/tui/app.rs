@@ -997,6 +997,9 @@ impl Model {
             }
         }
         self.status_message_time = Some(Instant::now());
+
+        // Update branch list with new pane state
+        self.branch_list.update_running_agents(&self.pane_list.panes);
     }
 
     /// FR-042: Terminate agent pane for the specified branch

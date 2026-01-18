@@ -27,6 +27,15 @@ fn get_agent_color(tool_id: Option<&str>) -> Color {
     }
 }
 
+/// Get display name for agent (capitalize first letter)
+fn get_agent_display_name(agent_name: &str) -> String {
+    let mut chars = agent_name.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+    }
+}
+
 /// Branch name type for sorting priority (SPEC-d2f4762a FR-003a)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum BranchNameType {
@@ -1027,6 +1036,7 @@ fn render_branches(state: &BranchListState, frame: &mut Frame, area: Rect, has_f
                 &state.selected_branches,
                 spinner_frame,
                 running_agent,
+                inner_area.width,
             )
         })
         .collect();
@@ -1056,13 +1066,14 @@ fn render_branches(state: &BranchListState, frame: &mut Frame, area: Rect, has_f
 /// Render a single branch row
 /// FR-070: Tool display format: ToolName@X.Y.Z
 /// FR-031b: Show spinner for safety check pending branches
-/// FR-020~024: Running agent info displayed on right side
+/// FR-020~024: Running agent info displayed on right side (right-aligned)
 fn render_branch_row(
     branch: &BranchItem,
     is_selected: bool,
     selected_set: &HashSet<String>,
     spinner_frame: usize,
     running_agent: Option<&AgentPane>,
+    width: u16,
 ) -> ListItem<'static> {
     let is_checked = selected_set.contains(&branch.name);
     let selection_icon = if is_checked { "[*]" } else { "[ ]" };
@@ -1070,6 +1081,66 @@ fn render_branch_row(
     // FR-031b: Pass spinner_frame for pending safety check
     let (safety_icon, safety_color) = branch.safety_icon(Some(spinner_frame));
 
+    // Branch name
+    let display_name = if branch.branch_type == BranchType::Remote {
+        branch.remote_name.as_deref().unwrap_or(&branch.name)
+    } else {
+        &branch.name
+    };
+
+    // Calculate left side width: "[*] " + worktree + " " + safety + " " + branch_name
+    // selection_icon(3) + space(1) + worktree_icon(3) + space(1) + safety_icon(~3) + space(1) + name
+    let left_width = 3 + 1 + 3 + 1 + safety_icon.len() + 1 + display_name.len();
+
+    // Build right side (agent info) and calculate its width
+    let (right_spans, right_width): (Vec<Span>, usize) = if let Some(agent) = running_agent {
+        const SPINNER_FRAMES: [char; 4] = ['|', '/', '-', '\\'];
+        let spinner_char = SPINNER_FRAMES[spinner_frame % 4];
+        let agent_display = get_agent_display_name(&agent.agent_name);
+        let uptime = agent.uptime_string();
+
+        if agent.is_background {
+            // Background (hidden) pane - grayed out: "[BG] Agent uptime"
+            let width = 5 + agent_display.len() + 1 + uptime.len(); // "[BG] " + name + " " + uptime
+            let spans = vec![
+                Span::styled("[BG] ", Style::default().fg(Color::DarkGray)),
+                Span::styled(agent_display, Style::default().fg(Color::DarkGray)),
+                Span::styled(" ", Style::default().fg(Color::DarkGray)),
+                Span::styled(uptime, Style::default().fg(Color::DarkGray)),
+            ];
+            (spans, width)
+        } else {
+            // Visible running pane - with spinner: "[X] Agent uptime"
+            let width = 4 + agent_display.len() + 1 + uptime.len(); // "[X] " + name + " " + uptime
+            let agent_color = get_agent_color(Some(&agent.agent_name));
+            let spans = vec![
+                Span::styled(format!("[{}] ", spinner_char), Style::default().fg(Color::Green)),
+                Span::styled(agent_display, Style::default().fg(agent_color)),
+                Span::raw(" "),
+                Span::styled(uptime, Style::default().fg(Color::Yellow)),
+            ];
+            (spans, width)
+        }
+    } else if let Some(tool) = &branch.last_tool_usage {
+        // No running agent, but show last tool usage (FR-070)
+        let agent_id = tool.split('@').next();
+        let agent_color = get_agent_color(agent_id);
+        let spans = vec![Span::styled(tool.to_string(), Style::default().fg(agent_color))];
+        (spans, tool.len())
+    } else {
+        (vec![], 0)
+    };
+
+    // Calculate padding between left and right sides
+    let total_content = left_width + right_width;
+    let available = width as usize;
+    let padding = if total_content < available && right_width > 0 {
+        available.saturating_sub(total_content).saturating_sub(1) // -1 for space before right side
+    } else {
+        1 // minimum single space
+    };
+
+    // Build the complete spans
     let mut spans = vec![
         Span::styled(
             selection_icon,
@@ -1084,61 +1155,13 @@ fn render_branch_row(
         Span::raw(" "),
         Span::styled(safety_icon, Style::default().fg(safety_color)),
         Span::raw(" "),
+        Span::raw(display_name.to_string()),
     ];
 
-    // Branch name
-    let display_name = if branch.branch_type == BranchType::Remote {
-        branch.remote_name.as_deref().unwrap_or(&branch.name)
-    } else {
-        &branch.name
-    };
-    spans.push(Span::raw(display_name.to_string()));
-
-    // Running agent info (FR-020~024): [spinner/BG] agent_name uptime
-    if let Some(agent) = running_agent {
-        const SPINNER_FRAMES: [char; 4] = ['|', '/', '-', '\\'];
-        let spinner_char = SPINNER_FRAMES[spinner_frame % 4];
-
-        spans.push(Span::raw(" "));
-
-        if agent.is_background {
-            // Background (hidden) pane - grayed out
-            spans.push(Span::styled("[BG] ", Style::default().fg(Color::DarkGray)));
-            spans.push(Span::styled(
-                agent.agent_name.clone(),
-                Style::default().fg(Color::DarkGray),
-            ));
-            spans.push(Span::raw(" "));
-            spans.push(Span::styled(
-                agent.uptime_string(),
-                Style::default().fg(Color::DarkGray),
-            ));
-        } else {
-            // Visible running pane - with spinner
-            spans.push(Span::styled(
-                format!("[{}] ", spinner_char),
-                Style::default().fg(Color::Green),
-            ));
-            let agent_color = get_agent_color(Some(&agent.agent_name));
-            spans.push(Span::styled(
-                agent.agent_name.clone(),
-                Style::default().fg(agent_color),
-            ));
-            spans.push(Span::raw(" "));
-            spans.push(Span::styled(
-                agent.uptime_string(),
-                Style::default().fg(Color::Yellow),
-            ));
-        }
-    } else if let Some(tool) = &branch.last_tool_usage {
-        // No running agent, but show last tool usage (FR-070)
-        let agent_id = tool.split('@').next();
-        let agent_color = get_agent_color(agent_id);
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled(
-            tool.to_string(),
-            Style::default().fg(agent_color),
-        ));
+    // Add padding and right side if there's agent info
+    if !right_spans.is_empty() {
+        spans.push(Span::raw(" ".repeat(padding)));
+        spans.extend(right_spans);
     }
 
     // FR-018: Selected branch shown with cyan background
