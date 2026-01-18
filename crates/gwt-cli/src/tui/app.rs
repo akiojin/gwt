@@ -1263,7 +1263,7 @@ impl Model {
                 }
             }
             Message::CycleViewMode => {
-                // FR-036: Tab disabled in filter mode
+                // FR-036: 'm' key disabled in filter mode
                 if matches!(self.screen, Screen::BranchList) && !self.branch_list.filter_mode {
                     self.branch_list.cycle_view_mode();
                 }
@@ -1726,7 +1726,7 @@ impl Model {
         // Line 4: Mode
         let mode_spans = vec![
             Span::raw(" "),
-            Span::styled("Mode(tab): ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Mode(m):", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 self.branch_list.view_mode.label(),
                 Style::default()
@@ -2159,11 +2159,12 @@ pub fn run_with_context(
                                 Some(Message::Char(' '))
                             }
                         }
-                        (KeyCode::Tab, _) => {
+                        (KeyCode::Tab, _) => Some(Message::Tab),
+                        (KeyCode::Char('m'), KeyModifiers::NONE) => {
                             if matches!(model.screen, Screen::BranchList) {
                                 Some(Message::CycleViewMode)
                             } else {
-                                Some(Message::Tab)
+                                None
                             }
                         }
                         (KeyCode::Up, _) if is_key_press => Some(Message::SelectPrev),
