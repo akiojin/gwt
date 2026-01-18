@@ -184,6 +184,8 @@ pub struct Model {
     pending_agent_launch: Option<AgentLaunchConfig>,
     /// Pending unsafe branch selection (FR-029b)
     pending_unsafe_selection: Option<String>,
+    /// Pending agent termination branch (FR-040)
+    pending_agent_termination: Option<String>,
     /// Pending cleanup branches (FR-010)
     pending_cleanup_branches: Vec<String>,
     /// Branch list update receiver
@@ -273,6 +275,10 @@ pub enum Message {
     CopyLogToClipboard,
     /// Toggle agent pane visibility (show/hide)
     ToggleAgentPaneVisibility,
+    /// FR-040: Confirm agent termination (d key)
+    ConfirmAgentTermination,
+    /// Execute agent termination after confirmation
+    ExecuteAgentTermination,
 }
 
 impl Model {
@@ -315,6 +321,7 @@ impl Model {
             total_count: 0,
             pending_agent_launch: None,
             pending_unsafe_selection: None,
+            pending_agent_termination: None,
             pending_cleanup_branches: Vec::new(),
             branch_list_rx: None,
             pr_title_rx: None,
@@ -924,6 +931,64 @@ impl Model {
         self.status_message_time = Some(Instant::now());
     }
 
+    /// FR-042: Terminate agent pane for the specified branch
+    fn terminate_agent_pane(&mut self, branch_name: &str) {
+        // Find the agent pane for this branch
+        let pane_to_kill = self
+            .pane_list
+            .panes
+            .iter()
+            .find(|p| p.branch_name == branch_name)
+            .cloned();
+
+        let Some(pane) = pane_to_kill else {
+            self.status_message = Some("Agent pane not found".to_string());
+            self.status_message_time = Some(Instant::now());
+            return;
+        };
+
+        // Kill the pane using tmux kill-pane
+        let pane_target = if pane.is_background {
+            // For background panes, kill the background window
+            if let Some(ref bg_window) = pane.background_window {
+                bg_window.clone()
+            } else {
+                pane.pane_id.clone()
+            }
+        } else {
+            pane.pane_id.clone()
+        };
+
+        let result = std::process::Command::new("tmux")
+            .args(["kill-pane", "-t", &pane_target])
+            .output();
+
+        match result {
+            Ok(output) if output.status.success() => {
+                // Remove from pane_list
+                self.pane_list
+                    .panes
+                    .retain(|p| p.branch_name != branch_name);
+                // Remove from agent_panes
+                self.agent_panes.retain(|id| id != &pane.pane_id);
+                // Update branch_list running_agents
+                self.branch_list.update_running_agents(&self.pane_list.panes);
+
+                self.status_message = Some(format!("Agent terminated on '{}'", branch_name));
+                self.status_message_time = Some(Instant::now());
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                self.status_message = Some(format!("Failed to terminate: {}", stderr.trim()));
+                self.status_message_time = Some(Instant::now());
+            }
+            Err(e) => {
+                self.status_message = Some(format!("Failed to terminate: {}", e));
+                self.status_message_time = Some(Instant::now());
+            }
+        }
+    }
+
     /// Show a hidden pane and focus it
     ///
     /// If the pane is already visible, just focus it.
@@ -1402,9 +1467,14 @@ impl Model {
                             let branches = std::mem::take(&mut self.pending_cleanup_branches);
                             self.execute_cleanup(&branches);
                         }
+                        // FR-040: Handle agent termination confirmation
+                        if self.pending_agent_termination.is_some() {
+                            self.update(Message::ExecuteAgentTermination);
+                        }
                     }
                     // Clear pending state and return to previous screen
                     self.pending_unsafe_selection = None;
+                    self.pending_agent_termination = None;
                     self.pending_cleanup_branches.clear();
                     if let Some(prev_screen) = self.screen_stack.pop() {
                         self.screen = prev_screen;
@@ -1580,6 +1650,31 @@ impl Model {
             }
             Message::ToggleAgentPaneVisibility => {
                 self.toggle_agent_pane_visibility();
+            }
+            Message::ConfirmAgentTermination => {
+                // FR-041: Show confirmation dialog before terminating agent
+                if let Some(branch) = self.branch_list.selected_branch() {
+                    if self.branch_list.get_running_agent(&branch.name).is_some() {
+                        self.pending_agent_termination = Some(branch.name.clone());
+                        self.confirm = ConfirmState {
+                            title: "Terminate Agent".to_string(),
+                            message: format!("Terminate agent on '{}'?", branch.name),
+                            details: vec!["The agent process will be killed.".to_string()],
+                            confirm_label: "Terminate".to_string(),
+                            cancel_label: "Cancel".to_string(),
+                            selected_confirm: true, // Default to Terminate
+                            is_dangerous: true,
+                        };
+                        self.screen_stack.push(self.screen.clone());
+                        self.screen = Screen::Confirm;
+                    }
+                }
+            }
+            Message::ExecuteAgentTermination => {
+                // FR-042: Execute tmux kill-pane
+                if let Some(branch_name) = self.pending_agent_termination.take() {
+                    self.terminate_agent_pane(&branch_name);
+                }
             }
             Message::Tab => {
                 if let Screen::Settings = self.screen {
@@ -1789,6 +1884,17 @@ impl Model {
 
                     // In multi mode, launch in tmux pane without quitting TUI
                     if self.tmux_mode.is_multi() && self.gwt_pane_id.is_some() {
+                        // FR-010: Check 1 branch = 1 pane constraint
+                        if self
+                            .branch_list
+                            .get_running_agent(&launch_config.branch_name)
+                            .is_some()
+                        {
+                            self.status_message =
+                                Some("Agent already running on this branch".to_string());
+                            self.status_message_time = Some(Instant::now());
+                            return;
+                        }
                         match self.launch_agent_in_pane(&launch_config) {
                             Ok(_) => {
                                 // Save session history for Quick Start feature (FR-050)
@@ -2615,6 +2721,12 @@ pub fn run_with_context(
                                     model.delete_selected_env();
                                     None
                                 }
+                            } else if matches!(model.screen, Screen::BranchList)
+                                && !model.branch_list.filter_mode
+                                && model.selected_branch_has_agent()
+                            {
+                                // FR-040: d key to delete agent pane with confirmation
+                                Some(Message::ConfirmAgentTermination)
                             } else {
                                 Some(Message::Char('d'))
                             }
