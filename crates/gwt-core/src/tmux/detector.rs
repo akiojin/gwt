@@ -33,6 +33,22 @@ pub fn is_inside_tmux() -> bool {
     std::env::var("TMUX").is_ok()
 }
 
+/// Get the current tmux session name
+///
+/// Returns the session name if running inside tmux, None otherwise.
+pub fn get_current_session() -> Option<String> {
+    if !is_inside_tmux() {
+        return None;
+    }
+
+    Command::new("tmux")
+        .args(["display-message", "-p", "#S"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+}
+
 /// Check if tmux is installed on the system
 ///
 /// Returns Ok(()) if tmux is installed, Err(TmuxError::NotInstalled) otherwise.

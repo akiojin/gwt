@@ -13,7 +13,9 @@ pub mod pane;
 pub mod poller;
 pub mod session;
 
-pub use detector::{check_tmux_installed, get_tmux_version, is_inside_tmux, TmuxVersion};
+pub use detector::{
+    check_tmux_installed, get_current_session, get_tmux_version, is_inside_tmux, TmuxVersion,
+};
 pub use error::{TmuxError, TmuxResult};
 pub use keybind::{focus_gwt_pane, remove_ctrl_g_keybind, setup_ctrl_g_keybind, GWT_PANE_INDEX};
 pub use launcher::{

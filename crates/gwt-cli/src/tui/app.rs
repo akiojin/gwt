@@ -11,7 +11,7 @@ use gwt_core::config::get_branch_tool_history;
 use gwt_core::config::{Profile, ProfilesConfig};
 use gwt_core::error::GwtError;
 use gwt_core::git::{Branch, PrCache, Repository};
-use gwt_core::tmux::{launcher, naming};
+use gwt_core::tmux::{get_current_session, launcher};
 use gwt_core::worktree::WorktreeManager;
 use gwt_core::TmuxMode;
 use ratatui::{prelude::*, widgets::*};
@@ -311,12 +311,8 @@ impl Model {
 
         // Initialize tmux session if in multi mode
         if model.tmux_mode.is_multi() {
-            let repo_name = model
-                .repo_root
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("gwt");
-            model.tmux_session = Some(naming::generate_session_name(repo_name, &[]));
+            // Use the current tmux session, not a generated one
+            model.tmux_session = get_current_session();
             debug!(
                 category = "tui",
                 mode = %model.tmux_mode,
