@@ -326,6 +326,27 @@ cargo run
 **Git ワークツリー競合**: クリーンアップ機能を使用して古いワークツリーを削除
 **GitHub認証**: PRクリーンアップ機能使用前に`gh auth login`を実行
 **バイナリが見つからない**: gwtバイナリがPATHに含まれていることを確認
+**Docker + tmux でのUnicode文字化け**: Dockerコンテナ内のtmuxでUnicode文字（Claude Codeのロゴなど）がアンダースコアに化ける場合、tmuxをUTF-8モードで起動してください:
+
+```bash
+tmux -u
+```
+
+または `~/.tmux.conf` に以下を追加:
+
+```
+set -gq utf8 on
+```
+
+Dockerコンテナ内でロケールのインストールと設定が必要な場合もあります:
+
+```bash
+apt-get update && apt-get install -y locales
+sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen
+locale-gen
+export LANG=en_US.UTF-8
+export LC_ALL=en_US.UTF-8
+```
 
 ### デバッグモード
 
