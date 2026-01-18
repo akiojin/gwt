@@ -15,4 +15,4 @@ pub mod tmux;
 pub mod worktree;
 
 pub use error::{GwtError, Result};
-pub use execution_mode::ExecutionMode;
+pub use execution_mode::TmuxMode;

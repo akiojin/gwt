@@ -238,6 +238,85 @@ pub fn is_duplicate_launch(branch: &str, agent: &str, running: &[AgentPane]) -> 
         .any(|p| p.branch_name == branch && p.agent_name == agent)
 }
 
+/// Signal type for terminating processes
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TermSignal {
+    /// SIGTERM (graceful termination)
+    Term,
+    /// SIGKILL (forced termination)
+    Kill,
+}
+
+impl TermSignal {
+    /// Get the signal name for the kill command
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TermSignal::Term => "TERM",
+            TermSignal::Kill => "KILL",
+        }
+    }
+}
+
+/// Send a termination signal to a process
+///
+/// # Arguments
+/// * `pid` - The process ID to signal
+/// * `signal` - The signal type (TERM or KILL)
+pub fn send_signal(pid: u32, signal: TermSignal) -> TmuxResult<()> {
+    let output = Command::new("kill")
+        .args([&format!("-{}", signal.as_str()), &pid.to_string()])
+        .output()
+        .map_err(|e| TmuxError::CommandFailed {
+            command: "kill".to_string(),
+            reason: e.to_string(),
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Process may have already exited, which is fine
+        if !stderr.contains("No such process") {
+            return Err(TmuxError::CommandFailed {
+                command: "kill".to_string(),
+                reason: stderr.to_string(),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+/// Gracefully terminate an agent pane
+///
+/// Sends SIGTERM first, allowing the agent to clean up.
+/// If the process doesn't exit within timeout, caller should escalate to SIGKILL.
+pub fn terminate_agent(pane: &AgentPane) -> TmuxResult<()> {
+    // First try sending Ctrl-C via tmux
+    let _ = send_keys(&pane.pane_id, "C-c");
+
+    // Then send SIGTERM to the process
+    send_signal(pane.pid, TermSignal::Term)
+}
+
+/// Forcefully kill an agent pane
+///
+/// Sends SIGKILL for immediate termination and then kills the tmux pane.
+pub fn force_kill_agent(pane: &AgentPane) -> TmuxResult<()> {
+    // Send SIGKILL to the process
+    let _ = send_signal(pane.pid, TermSignal::Kill);
+
+    // Kill the tmux pane
+    kill_pane(&pane.pane_id)
+}
+
+/// Check if a process is still running
+pub fn is_process_running(pid: u32) -> bool {
+    Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -381,5 +460,25 @@ mod tests {
             12345,
         );
         assert!(pane.requires_termination_confirmation());
+    }
+
+    #[test]
+    fn test_term_signal_as_str() {
+        assert_eq!(TermSignal::Term.as_str(), "TERM");
+        assert_eq!(TermSignal::Kill.as_str(), "KILL");
+    }
+
+    #[test]
+    fn test_is_process_running_nonexistent() {
+        // PID 0 is the kernel, should not be signalable by regular users
+        // PID 99999999 shouldn't exist
+        assert!(!is_process_running(99999999));
+    }
+
+    #[test]
+    fn test_is_process_running_self() {
+        // Current process should be running
+        let pid = std::process::id();
+        assert!(is_process_running(pid));
     }
 }

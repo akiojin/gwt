@@ -7,7 +7,7 @@ use crate::tmux::detector::is_inside_tmux;
 
 /// Execution mode for gwt
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ExecutionMode {
+pub enum TmuxMode {
     /// Single agent mode (traditional, outside tmux)
     #[default]
     Single,
@@ -15,42 +15,42 @@ pub enum ExecutionMode {
     Multi,
 }
 
-impl ExecutionMode {
+impl TmuxMode {
     /// Detect the execution mode based on the current environment
     ///
     /// Returns `Multi` if running inside a tmux session, `Single` otherwise.
     pub fn detect() -> Self {
         if is_inside_tmux() {
-            ExecutionMode::Multi
+            TmuxMode::Multi
         } else {
-            ExecutionMode::Single
+            TmuxMode::Single
         }
     }
 
     /// Check if this is multi-agent mode
     pub fn is_multi(&self) -> bool {
-        matches!(self, ExecutionMode::Multi)
+        matches!(self, TmuxMode::Multi)
     }
 
     /// Check if this is single-agent mode
     pub fn is_single(&self) -> bool {
-        matches!(self, ExecutionMode::Single)
+        matches!(self, TmuxMode::Single)
     }
 
     /// Get a human-readable description of the mode
     pub fn description(&self) -> &'static str {
         match self {
-            ExecutionMode::Single => "Single Agent Mode",
-            ExecutionMode::Multi => "Multi Agent Mode (tmux)",
+            TmuxMode::Single => "Single Agent Mode",
+            TmuxMode::Multi => "Multi Agent Mode (tmux)",
         }
     }
 }
 
-impl std::fmt::Display for ExecutionMode {
+impl std::fmt::Display for TmuxMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ExecutionMode::Single => write!(f, "Single"),
-            ExecutionMode::Multi => write!(f, "Multi"),
+            TmuxMode::Single => write!(f, "Single"),
+            TmuxMode::Multi => write!(f, "Multi"),
         }
     }
 }
@@ -66,8 +66,8 @@ mod tests {
 
         // Remove TMUX environment variable
         std::env::remove_var("TMUX");
-        let mode = ExecutionMode::detect();
-        assert_eq!(mode, ExecutionMode::Single);
+        let mode = TmuxMode::detect();
+        assert_eq!(mode, TmuxMode::Single);
 
         // Restore original value
         if let Some(val) = original {
@@ -82,8 +82,8 @@ mod tests {
 
         // Set TMUX environment variable
         std::env::set_var("TMUX", "/tmp/tmux-1000/default,12345,0");
-        let mode = ExecutionMode::detect();
-        assert_eq!(mode, ExecutionMode::Multi);
+        let mode = TmuxMode::detect();
+        assert_eq!(mode, TmuxMode::Multi);
 
         // Restore original value
         if let Some(val) = original {
@@ -95,30 +95,30 @@ mod tests {
 
     #[test]
     fn test_execution_mode_is_multi() {
-        assert!(ExecutionMode::Multi.is_multi());
-        assert!(!ExecutionMode::Single.is_multi());
+        assert!(TmuxMode::Multi.is_multi());
+        assert!(!TmuxMode::Single.is_multi());
     }
 
     #[test]
     fn test_execution_mode_is_single() {
-        assert!(ExecutionMode::Single.is_single());
-        assert!(!ExecutionMode::Multi.is_single());
+        assert!(TmuxMode::Single.is_single());
+        assert!(!TmuxMode::Multi.is_single());
     }
 
     #[test]
     fn test_execution_mode_display() {
-        assert_eq!(ExecutionMode::Single.to_string(), "Single");
-        assert_eq!(ExecutionMode::Multi.to_string(), "Multi");
+        assert_eq!(TmuxMode::Single.to_string(), "Single");
+        assert_eq!(TmuxMode::Multi.to_string(), "Multi");
     }
 
     #[test]
     fn test_execution_mode_description() {
-        assert!(ExecutionMode::Single.description().contains("Single"));
-        assert!(ExecutionMode::Multi.description().contains("Multi"));
+        assert!(TmuxMode::Single.description().contains("Single"));
+        assert!(TmuxMode::Multi.description().contains("Multi"));
     }
 
     #[test]
     fn test_execution_mode_default() {
-        assert_eq!(ExecutionMode::default(), ExecutionMode::Single);
+        assert_eq!(TmuxMode::default(), TmuxMode::Single);
     }
 }
