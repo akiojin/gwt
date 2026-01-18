@@ -531,6 +531,48 @@ impl Branch {
             })
         }
     }
+
+    /// Check if a branch is merged into the base branch
+    ///
+    /// Uses `git merge-base --is-ancestor` to check if the branch commit
+    /// is an ancestor of the base branch (i.e., all commits are included).
+    ///
+    /// Note: This works for regular merges and fast-forward merges.
+    /// For squash merges, the original branch commits are not ancestors
+    /// of the base branch, so this will return false even if the changes
+    /// were squash-merged.
+    pub fn is_merged_into(repo_path: &Path, branch: &str, base: &str) -> Result<bool> {
+        debug!(
+            category = "git",
+            branch = branch,
+            base = base,
+            "Checking if branch is merged into base"
+        );
+
+        let output = Command::new("git")
+            .args(["merge-base", "--is-ancestor", branch, base])
+            .current_dir(repo_path)
+            .output()
+            .map_err(|e| GwtError::GitOperationFailed {
+                operation: "merge-base".to_string(),
+                details: e.to_string(),
+            })?;
+
+        // Exit code 0 means branch is an ancestor (merged)
+        // Exit code 1 means branch is not an ancestor (not merged)
+        // Other exit codes indicate errors
+        let is_merged = output.status.success();
+
+        debug!(
+            category = "git",
+            branch = branch,
+            base = base,
+            is_merged,
+            "Merge check completed"
+        );
+
+        Ok(is_merged)
+    }
 }
 
 /// Branch divergence status
