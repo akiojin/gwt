@@ -61,6 +61,11 @@ description: "Continue/Resumeで正しいセッションを再開するための
 
 - [x] **T0615** `[Test]` `crates/gwt-core/src/config/ts_session.rs` に`lastBranch`フォールバックでQuick Start履歴が取得できるテストを追加
 - [x] **T0616** `[実装]` `crates/gwt-core/src/config/ts_session.rs` で`history`が空の場合に`lastBranch/lastUsedTool`を Quick Start履歴へ反映する
+
+## 追加作業: Quick Start toolId正規化 (2026-01-19)
+
+- [x] **T0617** `[Test]` `crates/gwt-core/src/config/ts_session.rs` にtoolId正規化で履歴が重複しないことを検証するテストを追加
+- [x] **T0618** `[実装]` `crates/gwt-core/src/config/ts_session.rs` でtoolIdを正規化して保存・読込し、Quick Startの集約キーに反映する
 ## フェーズ7: ブランチクイックスタート (P1)
 - [x] **T0501** `[US5]` ブランチ選択後に前回ツール/モデル/セッションIDを提示するQuick Start画面を追加（Inkコンポーネント新設）。
 - [x] **T0502** `[US5]` 履歴が存在する場合はQuick Startへ遷移し、選択結果に応じてツール/モデル/セッションIDを事前セットするロジックを実装（履歴なしは従来フロー）。

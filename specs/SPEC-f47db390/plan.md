@@ -1,6 +1,6 @@
 # 実装計画: セッションID永続化とContinue/Resume強化
 
-**仕様ID**: `SPEC-f47db390` | **日付**: 2025-12-06 | **更新日**: 2026-01-07 | **仕様書**: [spec.md](./spec.md)  
+**仕様ID**: `SPEC-f47db390` | **日付**: 2025-12-06 | **更新日**: 2026-01-19 | **仕様書**: [spec.md](./spec.md)  
 **入力**: `/specs/SPEC-f47db390/spec.md` からの機能仕様
 
 ## 概要
@@ -63,6 +63,7 @@ specs/SPEC-f47db390/
 - Branch選択直後にQuick Start画面を追加し、前回のツール/モデル/セッションIDを提示。「前回設定で続きから」「前回設定で新規」「設定を選び直す」を選べる。
 - Quick Startで「前回設定で続きから/新規」を選択した場合はExecution Mode/Skip Permissions/セッション選択をスキップし、履歴設定を適用して即時起動する。
 - Quick Startの履歴が空でも`lastBranch/lastUsedTool`が一致する場合は単一履歴として扱い、Quick Startを表示する。
+- Quick Startの履歴は`toolId`を正規化して集約し、同一ツールの重複表示を防ぐ。
 - Web UIのブランチ詳細で最終セッションIDを表示し、Continue/Resumeで自動的に適用する。
 
 ## フェーズ2: タスク生成
