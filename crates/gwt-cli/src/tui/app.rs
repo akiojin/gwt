@@ -341,8 +341,8 @@ pub enum Message {
     RepairWorktrees,
     /// Copy selected log to clipboard
     CopyLogToClipboard,
-    /// Toggle agent pane visibility (show/hide)
-    ToggleAgentPaneVisibility,
+    /// FR-095: Hide active agent pane (ESC key in branch list)
+    HideActiveAgentPane,
     /// FR-040: Confirm agent termination (d key)
     ConfirmAgentTermination,
     /// Execute agent termination after confirmation
@@ -1396,81 +1396,45 @@ impl Model {
         }
     }
 
-    /// Toggle agent pane visibility (show/hide)
-    ///
-    /// When hiding: moves the pane to a separate background window
-    /// When showing: joins the pane back to the GWT window
-    fn toggle_agent_pane_visibility(&mut self) {
-        // Prefer the pane that matches the selected branch to avoid mismatches.
-        let selected_idx = self
-            .branch_list
-            .selected_branch()
-            .and_then(|branch| {
-                self.pane_list
-                    .panes
-                    .iter()
-                    .position(|pane| pane.branch_name == branch.name)
-            })
-            .unwrap_or(self.pane_list.selected);
+    /// FR-095: Check if there is an active (visible) agent pane
+    pub fn has_active_agent_pane(&self) -> bool {
+        self.pane_list.panes.iter().any(|p| !p.is_background)
+    }
 
-        let Some(pane) = self.pane_list.panes.get_mut(selected_idx) else {
+    /// FR-095: Hide the active agent pane (ESC key handler)
+    /// シングルアクティブ制約: アクティブペインは最大1つなので、それを非表示にする
+    fn hide_active_agent_pane(&mut self) {
+        // Find the active pane (is_background == false)
+        let active_idx = self.pane_list.panes.iter().position(|p| !p.is_background);
+
+        let Some(idx) = active_idx else {
+            // No active pane to hide (FR-096: do nothing)
             return;
         };
 
-        self.pane_list.selected = selected_idx;
+        let Some(pane) = self.pane_list.panes.get_mut(idx) else {
+            return;
+        };
 
-        if pane.is_background {
-            // Show the pane (join back to GWT window)
-            if pane.background_window.is_none() {
-                self.status_message = Some("No background window to restore".to_string());
-                self.status_message_time = Some(Instant::now());
-                return;
+        // Hide the pane (break to background window)
+        let window_name = format!(
+            "gwt-agent-{}",
+            pane.branch_name.replace('/', "-").replace(' ', "_")
+        );
+
+        match gwt_core::tmux::hide_pane(&pane.pane_id, &window_name) {
+            Ok(background_window) => {
+                // Remove from agent_panes list
+                self.agent_panes.retain(|id| id != &pane.pane_id);
+
+                // Update pane state
+                pane.is_background = true;
+                pane.background_window = Some(background_window);
+
+                self.status_message = Some("Pane hidden".to_string());
             }
-
-            let Some(gwt_pane_id) = &self.gwt_pane_id else {
-                self.status_message = Some("GWT pane ID not available".to_string());
-                self.status_message_time = Some(Instant::now());
-                return;
-            };
-
-            let pane_id = pane.pane_id.clone();
-            match gwt_core::tmux::show_pane(&pane_id, gwt_pane_id) {
-                Ok(new_pane_id) => {
-                    // Update the pane ID and clear background state
-                    pane.pane_id = new_pane_id.clone();
-                    pane.is_background = false;
-                    pane.background_window = None;
-
-                    // Update agent_panes list
-                    self.agent_panes.push(new_pane_id);
-
-                    self.status_message = Some("Pane shown".to_string());
-                }
-                Err(e) => {
-                    self.status_message = Some(format!("Failed to show pane: {}", e));
-                }
-            }
-        } else {
-            // Hide the pane (break to background window)
-            let window_name = format!(
-                "gwt-agent-{}",
-                pane.branch_name.replace('/', "-").replace(' ', "_")
-            );
-
-            match gwt_core::tmux::hide_pane(&pane.pane_id, &window_name) {
-                Ok(background_window) => {
-                    // Remove from agent_panes list
-                    self.agent_panes.retain(|id| id != &pane.pane_id);
-
-                    // Update pane state
-                    pane.is_background = true;
-                    pane.background_window = Some(background_window);
-
-                    self.status_message = Some("Pane hidden".to_string());
-                }
-                Err(e) => {
-                    self.status_message = Some(format!("Failed to hide pane: {}", e));
-                }
+            Err(e) => {
+                self.status_message = Some(format!("Failed to hide pane: {}", e));
             }
         }
         self.status_message_time = Some(Instant::now());
@@ -1478,7 +1442,6 @@ impl Model {
         // Update branch list with new pane state
         self.branch_list
             .update_running_agents(&self.pane_list.panes);
-        self.reflow_agent_layout(None);
     }
 
     /// FR-042: Terminate agent pane for the specified branch
@@ -1550,14 +1513,21 @@ impl Model {
                 return;
             }
 
-            let Some(gwt_pane_id) = &self.gwt_pane_id else {
+            let Some(gwt_pane_id) = self.gwt_pane_id.clone() else {
                 self.status_message = Some("GWT pane ID not available".to_string());
                 self.status_message_time = Some(Instant::now());
                 return;
             };
 
+            // FR-037: Hide any currently active pane before showing this one
+            self.hide_active_agent_pane();
+
+            // Re-fetch the pane since hide_active_agent_pane may have modified the list
+            let Some(pane) = self.pane_list.panes.get_mut(selected_idx) else {
+                return;
+            };
             let pane_id = pane.pane_id.clone();
-            match gwt_core::tmux::show_pane(&pane_id, gwt_pane_id) {
+            match gwt_core::tmux::show_pane(&pane_id, &gwt_pane_id) {
                 Ok(new_pane_id) => {
                     // Update the pane ID and clear background state
                     pane.pane_id = new_pane_id.clone();
@@ -2269,8 +2239,8 @@ impl Model {
                     }
                 }
             }
-            Message::ToggleAgentPaneVisibility => {
-                self.toggle_agent_pane_visibility();
+            Message::HideActiveAgentPane => {
+                self.hide_active_agent_pane();
             }
             Message::ConfirmAgentTermination => {
                 // FR-041: Show confirmation dialog before terminating agent
@@ -2515,6 +2485,9 @@ impl Model {
                         auto_install_deps,
                     };
 
+                    // Refresh data to reflect branch/worktree changes (FR-008b)
+                    self.refresh_data();
+
                     // In multi mode, launch in tmux pane without quitting TUI
                     if self.tmux_mode.is_multi() && self.gwt_pane_id.is_some() {
                         // FR-010: Check 1 branch = 1 pane constraint
@@ -2587,6 +2560,10 @@ impl Model {
             ));
         }
 
+        // FR-036/FR-037: Single Active Pane Constraint
+        // Hide any currently active agent pane before launching new one
+        self.hide_active_agent_pane();
+
         let working_dir = config.worktree_path.to_string_lossy().to_string();
 
         // Build environment variables (same as single mode)
@@ -2633,54 +2610,15 @@ impl Model {
             "Launching agent in tmux pane"
         );
 
-        let visible_count = self
-            .pane_list
-            .panes
-            .iter()
-            .filter(|p| !p.is_background)
-            .count();
-        let desired_columns_after = Self::desired_agent_column_count(visible_count + 1);
-        let current_columns = self
-            .agent_layout_snapshot()
-            .map(|(_, columns)| columns)
-            .unwrap_or_default();
-        let needs_new_column = desired_columns_after > current_columns.len();
-
-        // Determine how to split based on current columns
-        let pane_id = if visible_count == 0 {
-            // First agent: split to the right of gwt pane
-            let target = self
-                .gwt_pane_id
-                .as_ref()
-                .ok_or_else(|| "No gwt pane ID available".to_string())?;
-            launcher::launch_in_pane(target, &working_dir, &command)
-        } else if !needs_new_column {
-            if let Some(last_column) = current_columns.last() {
-                if let Some(target_pane) = last_column.pane_ids.last() {
-                    launcher::launch_in_pane_below(target_pane, &working_dir, &command)
-                } else {
-                    let target = self
-                        .gwt_pane_id
-                        .as_ref()
-                        .ok_or_else(|| "No gwt pane ID available".to_string())?;
-                    launcher::launch_in_pane(target, &working_dir, &command)
-                }
-            } else {
-                let target = self
-                    .gwt_pane_id
-                    .as_ref()
-                    .ok_or_else(|| "No gwt pane ID available".to_string())?;
-                launcher::launch_in_pane(target, &working_dir, &command)
-            }
-        } else {
-            // New column will be created in reflow
-            let target = self
-                .gwt_pane_id
-                .as_ref()
-                .ok_or_else(|| "No gwt pane ID available".to_string())?;
-            launcher::launch_in_pane(target, &working_dir, &command)
-        }
-        .map_err(|e| e.to_string())?;
+        // FR-036: Single Active Pane Constraint
+        // hide_active_agent_pane() was called above, so there are no visible agent panes.
+        // Always split to the right of gwt pane.
+        let target = self
+            .gwt_pane_id
+            .as_ref()
+            .ok_or_else(|| "No gwt pane ID available".to_string())?;
+        let pane_id =
+            launcher::launch_in_pane(target, &working_dir, &command).map_err(|e| e.to_string())?;
 
         // Focus the new pane (FR-022)
         if let Err(e) = gwt_core::tmux::pane::select_pane(&pane_id) {
@@ -2742,8 +2680,14 @@ impl Model {
         Ok(pane_id)
     }
 
+    /// FR-036: Single Active Pane Constraint - at most 1 visible agent pane
     fn desired_agent_column_count(count: usize) -> usize {
-        count.div_ceil(3)
+        // Under single-active constraint, count is always 0 or 1
+        if count > 0 {
+            1
+        } else {
+            0
+        }
     }
 
     fn visible_agent_pane_ids(&self) -> Vec<String> {
@@ -3434,9 +3378,10 @@ pub fn run_with_context(
                             Some(Message::Char('q'))
                         }
                         (KeyCode::Esc, _) => {
-                            // Esc behavior matches TypeScript:
+                            // FR-095: ESC key behavior:
                             // - In filter mode: exit filter mode (handled by NavigateBack)
                             // - In BranchList with filter query: clear query
+                            // - In BranchList with active agent pane: hide the pane
                             // - Otherwise: navigate back (but NOT quit from main screen)
                             if matches!(model.screen, Screen::BranchList) {
                                 if model.branch_list.filter_mode {
@@ -3447,8 +3392,11 @@ pub fn run_with_context(
                                     model.branch_list.clear_filter();
                                     model.refresh_branch_summary();
                                     None
+                                } else if model.has_active_agent_pane() {
+                                    // FR-095: Hide active agent pane
+                                    Some(Message::HideActiveAgentPane)
                                 } else {
-                                    // On main screen without filter - do nothing (TypeScript doesn't quit here)
+                                    // On main screen without filter and no active pane - do nothing
                                     None
                                 }
                             } else {
@@ -3594,18 +3542,6 @@ pub fn run_with_context(
                                 Some(Message::ConfirmAgentTermination)
                             } else {
                                 Some(Message::Char('d'))
-                            }
-                        }
-                        (KeyCode::Char('v'), KeyModifiers::NONE) => {
-                            // Toggle agent pane visibility (show/hide)
-                            // Available when branch has running agent
-                            if matches!(model.screen, Screen::BranchList)
-                                && !model.branch_list.filter_mode
-                                && model.selected_branch_has_agent()
-                            {
-                                Some(Message::ToggleAgentPaneVisibility)
-                            } else {
-                                Some(Message::Char('v'))
                             }
                         }
                         (KeyCode::Char('x'), KeyModifiers::NONE) => {

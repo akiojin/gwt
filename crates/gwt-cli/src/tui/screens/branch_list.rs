@@ -346,8 +346,14 @@ impl BranchItem {
     }
 }
 
-/// Spinner animation frames
+/// Spinner animation frames (for loading indicators)
 const SPINNER_FRAMES: &[char] = &['|', '/', '-', '\\'];
+
+/// Active agent spinner (star twinkle)
+const ACTIVE_SPINNER_FRAMES: &[char] = &['✶', '✸', '✹', '✺', '✹', '✷'];
+
+/// Background agent spinner (BLACK_CIRCLE)
+const BG_SPINNER_FRAMES: &[char] = &['◑', '◒', '◐', '◓'];
 
 /// Branch list state
 #[derive(Debug)]
@@ -1268,8 +1274,9 @@ fn render_branch_row(
     running_agent: Option<&AgentPane>,
     width: u16,
 ) -> ListItem<'static> {
+    // Only show selection icons when at least one branch is selected
+    let show_selection = !selected_set.is_empty();
     let is_checked = selected_set.contains(&branch.name);
-    let selection_icon = if is_checked { "[*]" } else { "[ ]" };
     let (worktree_icon, worktree_color) = branch.worktree_icon();
     // FR-031b: Pass spinner_frame for pending safety check
     let (safety_icon, safety_color) = branch.safety_icon(Some(spinner_frame));
@@ -1281,33 +1288,39 @@ fn render_branch_row(
         &branch.name
     };
 
-    // Calculate left side width: "[*] " + worktree + " " + safety + " " + branch_name
-    // selection_icon(3) + space(1) + worktree_icon(1) + space(1) + safety_icon + space(1) + name
-    let left_width = 3 + 1 + 1 + 1 + safety_icon.len() + 1 + display_name.width();
+    // Calculate left side width: optionally "[*] " + worktree + " " + safety + " " + branch_name
+    // selection_icon(3) + space(1) if showing selection, plus worktree_icon(1) + space(1) + safety_icon + space(1) + name
+    let selection_width = if show_selection { 3 } else { 0 }; // "◉ " or "◎ " (2 + 1)
+    let left_width = selection_width + 1 + 1 + safety_icon.len() + 1 + display_name.width();
 
     // Build right side (agent info) and calculate its width
     let (right_spans, right_width): (Vec<Span>, usize) = if let Some(agent) = running_agent {
-        let spinner_char = SPINNER_FRAMES[spinner_frame % SPINNER_FRAMES.len()];
         let agent_display = get_agent_display_name(&agent.agent_name);
         let uptime = agent.uptime_string();
 
         if agent.is_background {
-            // Background (hidden) pane - grayed out: "[BG] Agent uptime"
-            let width = 5 + agent_display.width() + 1 + uptime.width(); // "[BG] " + name + " " + uptime
+            // Background (hidden) pane - with spinner: "X Agent uptime"
+            let bg_spinner_char = BG_SPINNER_FRAMES[spinner_frame % BG_SPINNER_FRAMES.len()];
+            let width = 2 + agent_display.width() + 1 + uptime.width(); // spinner + " " + name + " " + uptime
             let spans = vec![
-                Span::styled("[BG] ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{} ", bg_spinner_char),
+                    Style::default().fg(Color::DarkGray),
+                ),
                 Span::styled(agent_display, Style::default().fg(Color::DarkGray)),
                 Span::styled(" ", Style::default().fg(Color::DarkGray)),
                 Span::styled(uptime, Style::default().fg(Color::DarkGray)),
             ];
             (spans, width)
         } else {
-            // Visible running pane - with spinner: "[X] Agent uptime"
-            let width = 4 + agent_display.width() + 1 + uptime.width(); // "[X] " + name + " " + uptime
+            // Visible running pane - with spinner: "⠋ Agent uptime"
+            let active_spinner_char =
+                ACTIVE_SPINNER_FRAMES[spinner_frame % ACTIVE_SPINNER_FRAMES.len()];
+            let width = 2 + agent_display.width() + 1 + uptime.width(); // spinner(1) + " " + name + " " + uptime
             let agent_color = get_agent_color(Some(&agent.agent_name));
             let spans = vec![
                 Span::styled(
-                    format!("[{}] ", spinner_char),
+                    format!("{} ", active_spinner_char),
                     Style::default().fg(Color::Green),
                 ),
                 Span::styled(agent_display, Style::default().fg(agent_color)),
@@ -1339,22 +1352,29 @@ fn render_branch_row(
     };
 
     // Build the complete spans
-    let mut spans = vec![
-        Span::styled(
+    let mut spans = Vec::new();
+
+    // Only add selection icon when in selection mode
+    if show_selection {
+        let selection_icon = if is_checked { "◉" } else { "◎" };
+        spans.push(Span::styled(
             selection_icon,
             if is_checked && (branch.has_changes || branch.has_unpushed) {
                 Style::default().fg(Color::Red)
             } else {
                 Style::default()
             },
-        ),
-        Span::raw(" "),
+        ));
+        spans.push(Span::raw(" "));
+    }
+
+    spans.extend([
         Span::styled(worktree_icon, Style::default().fg(worktree_color)),
         Span::raw(" "),
         Span::styled(safety_icon, Style::default().fg(safety_color)),
         Span::raw(" "),
         Span::raw(display_name.to_string()),
-    ];
+    ]);
 
     // Add padding and right side if there's agent info
     if !right_spans.is_empty() {
