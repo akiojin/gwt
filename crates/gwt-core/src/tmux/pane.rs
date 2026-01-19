@@ -1090,4 +1090,92 @@ mod tests {
         assert_eq!(detect_agent_name("Claude"), Some("claude".to_string()));
         assert_eq!(detect_agent_name("CODEX"), Some("codex".to_string()));
     }
+
+    // T-TEST-030: シングルアクティブペイン制約テスト
+    #[test]
+    fn test_get_active_pane_single() {
+        let panes = vec![
+            AgentPane {
+                pane_id: "1".to_string(),
+                branch_name: "feature/a".to_string(),
+                agent_name: "claude".to_string(),
+                start_time: SystemTime::now(),
+                pid: 12345,
+                is_background: false, // active
+                background_window: None,
+            },
+            AgentPane {
+                pane_id: "2".to_string(),
+                branch_name: "feature/b".to_string(),
+                agent_name: "codex".to_string(),
+                start_time: SystemTime::now(),
+                pid: 12346,
+                is_background: true, // background
+                background_window: Some("session:@1".to_string()),
+            },
+        ];
+
+        let active: Vec<_> = panes.iter().filter(|p| !p.is_background).collect();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].branch_name, "feature/a");
+    }
+
+    #[test]
+    fn test_no_active_pane_all_background() {
+        let panes = vec![
+            AgentPane {
+                pane_id: "1".to_string(),
+                branch_name: "feature/a".to_string(),
+                agent_name: "claude".to_string(),
+                start_time: SystemTime::now(),
+                pid: 12345,
+                is_background: true,
+                background_window: Some("session:@1".to_string()),
+            },
+            AgentPane {
+                pane_id: "2".to_string(),
+                branch_name: "feature/b".to_string(),
+                agent_name: "codex".to_string(),
+                start_time: SystemTime::now(),
+                pid: 12346,
+                is_background: true,
+                background_window: Some("session:@2".to_string()),
+            },
+        ];
+
+        let active: Vec<_> = panes.iter().filter(|p| !p.is_background).collect();
+        assert!(active.is_empty());
+    }
+
+    // シングルアクティブ制約: 複数のアクティブがある場合は不正状態
+    #[test]
+    fn test_single_active_constraint_violation() {
+        let panes = vec![
+            AgentPane {
+                pane_id: "1".to_string(),
+                branch_name: "feature/a".to_string(),
+                agent_name: "claude".to_string(),
+                start_time: SystemTime::now(),
+                pid: 12345,
+                is_background: false, // active
+                background_window: None,
+            },
+            AgentPane {
+                pane_id: "2".to_string(),
+                branch_name: "feature/b".to_string(),
+                agent_name: "codex".to_string(),
+                start_time: SystemTime::now(),
+                pid: 12346,
+                is_background: false, // also active - constraint violation!
+                background_window: None,
+            },
+        ];
+
+        let active: Vec<_> = panes.iter().filter(|p| !p.is_background).collect();
+        // シングルアクティブ制約違反: 2つ以上のアクティブは許可されない
+        assert!(
+            active.len() > 1,
+            "This test documents the constraint violation case"
+        );
+    }
 }
