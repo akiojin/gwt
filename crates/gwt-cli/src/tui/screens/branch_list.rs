@@ -325,8 +325,8 @@ impl BranchItem {
 /// Spinner animation frames (for loading indicators)
 const SPINNER_FRAMES: &[char] = &['|', '/', '-', '\\'];
 
-/// Active agent spinner (cursor sliding)
-const ACTIVE_SPINNER_FRAMES: &[&str] = &["▸──", "─▸─", "──▸", "─▸─"];
+/// Active agent spinner (spectrum wave)
+const ACTIVE_SPINNER_FRAMES: &[&str] = &["▁▃▅▇", "▃▅▇▅", "▅▇▅▃", "▇▅▃▁", "▅▃▁▃", "▃▁▃▅"];
 
 /// Background agent spinner (BLACK_CIRCLE)
 const BG_SPINNER_FRAMES: &[char] = &['◑', '◒', '◐', '◓'];
