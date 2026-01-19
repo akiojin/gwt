@@ -3312,6 +3312,20 @@ fn build_agent_args_for_tmux(config: &AgentLaunchConfig) -> Vec<String> {
     args
 }
 
+fn is_valid_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn shell_escape(value: &str) -> String {
+    let escaped = value.replace('\'', "'\\''");
+    format!("'{}'", escaped)
+}
+
 /// Build the full tmux command string with environment variables
 fn build_tmux_command(
     env_vars: &[(String, String)],
@@ -3323,14 +3337,17 @@ fn build_tmux_command(
 
     // Add environment variable exports
     for (key, value) in env_vars {
-        let escaped_value = value.replace('\'', "'\\''");
-        parts.push(format!("export {}='{}'", key, escaped_value));
+        if !is_valid_env_name(key) {
+            continue;
+        }
+        let escaped_value = shell_escape(value);
+        parts.push(format!("export {}={}", key, escaped_value));
     }
 
     // Build the command with all arguments
-    let mut cmd_parts = vec![base_cmd.to_string()];
-    cmd_parts.extend(base_args.iter().cloned());
-    cmd_parts.extend(agent_args.iter().cloned());
+    let mut cmd_parts = vec![shell_escape(base_cmd)];
+    cmd_parts.extend(base_args.iter().map(|arg| shell_escape(arg)));
+    cmd_parts.extend(agent_args.iter().map(|arg| shell_escape(arg)));
     let full_cmd = cmd_parts.join(" ");
 
     if parts.is_empty() {
