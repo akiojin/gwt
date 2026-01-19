@@ -1072,7 +1072,10 @@ fn render_branch_row(
             let width = 4 + agent_display.len() + 1 + uptime.len(); // "[X] " + name + " " + uptime
             let agent_color = get_agent_color(Some(&agent.agent_name));
             let spans = vec![
-                Span::styled(format!("[{}] ", spinner_char), Style::default().fg(Color::Green)),
+                Span::styled(
+                    format!("[{}] ", spinner_char),
+                    Style::default().fg(Color::Green),
+                ),
                 Span::styled(agent_display, Style::default().fg(agent_color)),
                 Span::raw(" "),
                 Span::styled(uptime, Style::default().fg(Color::Yellow)),
@@ -1083,7 +1086,10 @@ fn render_branch_row(
         // No running agent, but show last tool usage (FR-070)
         let agent_id = tool.split('@').next();
         let agent_color = get_agent_color(agent_id);
-        let spans = vec![Span::styled(tool.to_string(), Style::default().fg(agent_color))];
+        let spans = vec![Span::styled(
+            tool.to_string(),
+            Style::default().fg(agent_color),
+        )];
         (spans, tool.len())
     } else {
         (vec![], 0)

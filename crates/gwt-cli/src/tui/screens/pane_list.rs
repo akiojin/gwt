@@ -146,7 +146,11 @@ pub fn render_pane_list(state: &mut PaneListState, frame: &mut Frame, area: Rect
 
 /// Create a list item for a pane (deprecated - PaneList panel abolished)
 #[allow(dead_code)]
-fn create_pane_list_item(pane: &AgentPane, _is_selected: bool, _spinner_frame: usize) -> ListItem<'static> {
+fn create_pane_list_item(
+    pane: &AgentPane,
+    _is_selected: bool,
+    _spinner_frame: usize,
+) -> ListItem<'static> {
     let uptime = pane.uptime_string();
 
     // Show [BG] indicator for background (hidden) panes

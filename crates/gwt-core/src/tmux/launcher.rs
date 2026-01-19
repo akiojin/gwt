@@ -335,7 +335,12 @@ fn build_locale_setup(locale_vars: &[(String, String)]) -> String {
 ///
 /// Returns the pane ID of the newly created pane.
 pub fn launch_in_pane(target_pane: &str, working_dir: &str, command: &str) -> TmuxResult<String> {
-    launch_in_pane_with_split(target_pane, working_dir, command, SplitDirection::Horizontal)
+    launch_in_pane_with_split(
+        target_pane,
+        working_dir,
+        command,
+        SplitDirection::Horizontal,
+    )
 }
 
 /// Launch a command in a new tmux pane beside an existing pane (horizontal split)
@@ -350,7 +355,12 @@ pub fn launch_in_pane_beside(
     working_dir: &str,
     command: &str,
 ) -> TmuxResult<String> {
-    launch_in_pane_with_split(target_pane, working_dir, command, SplitDirection::Horizontal)
+    launch_in_pane_with_split(
+        target_pane,
+        working_dir,
+        command,
+        SplitDirection::Horizontal,
+    )
 }
 
 /// Launch a command in a new tmux pane below an existing pane (vertical split)

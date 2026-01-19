@@ -12,9 +12,9 @@ use gwt_core::config::{save_session_entry, Profile, ProfilesConfig, ToolSessionE
 use gwt_core::error::GwtError;
 use gwt_core::git::{Branch, PrCache, Repository};
 use gwt_core::tmux::{
-    break_pane, compute_equal_splits, get_current_session, group_panes_by_left, join_pane_to_target,
-    kill_pane, list_pane_geometries, resize_pane_height, resize_pane_width, launcher, AgentPane,
-    PaneColumn, PaneGeometry, SplitDirection,
+    break_pane, compute_equal_splits, get_current_session, group_panes_by_left,
+    join_pane_to_target, kill_pane, launcher, list_pane_geometries, resize_pane_height,
+    resize_pane_width, AgentPane, PaneColumn, PaneGeometry, SplitDirection,
 };
 use gwt_core::worktree::WorktreeManager;
 use gwt_core::TmuxMode;
@@ -943,7 +943,8 @@ impl Model {
         }
 
         // Sync running_agents in branch_list with current panes
-        self.branch_list.update_running_agents(&self.pane_list.panes);
+        self.branch_list
+            .update_running_agents(&self.pane_list.panes);
         // Update spinner frame for branch list display
         self.branch_list.spinner_frame = self.pane_list.spinner_frame;
         if !removed_panes.is_empty() {
@@ -1018,7 +1019,8 @@ impl Model {
         self.status_message_time = Some(Instant::now());
 
         // Update branch list with new pane state
-        self.branch_list.update_running_agents(&self.pane_list.panes);
+        self.branch_list
+            .update_running_agents(&self.pane_list.panes);
         self.reflow_agent_layout(None);
     }
 
@@ -1059,7 +1061,8 @@ impl Model {
                 // Remove from agent_panes
                 self.agent_panes.retain(|id| id != &pane.pane_id);
                 // Update branch_list running_agents
-                self.branch_list.update_running_agents(&self.pane_list.panes);
+                self.branch_list
+                    .update_running_agents(&self.pane_list.panes);
                 self.reflow_agent_layout(None);
 
                 self.status_message = Some(format!("Agent terminated on '{}'", branch_name));
@@ -1106,7 +1109,8 @@ impl Model {
                     // Update agent_panes list
                     self.agent_panes.push(new_pane_id.clone());
 
-                    self.branch_list.update_running_agents(&self.pane_list.panes);
+                    self.branch_list
+                        .update_running_agents(&self.pane_list.panes);
                     self.reflow_agent_layout(Some(&new_pane_id));
 
                     // Focus the pane
@@ -2159,7 +2163,8 @@ impl Model {
         }
 
         // Update branch list with new agent info
-        self.branch_list.update_running_agents(&self.pane_list.panes);
+        self.branch_list
+            .update_running_agents(&self.pane_list.panes);
 
         // Reflow layout (columns/rows)
         self.reflow_agent_layout(Some(&pane_id));
@@ -2231,9 +2236,8 @@ impl Model {
 
         for column in &columns {
             let source = &column[0];
-            let joined =
-                join_pane_to_target(source, &rightmost_target, SplitDirection::Horizontal)
-                    .map_err(|e| e.to_string())?;
+            let joined = join_pane_to_target(source, &rightmost_target, SplitDirection::Horizontal)
+                .map_err(|e| e.to_string())?;
             id_map.insert(source.clone(), joined.clone());
             rightmost_target = joined.clone();
             column_roots.push(joined);
@@ -2242,9 +2246,8 @@ impl Model {
         for (column, root) in columns.iter().zip(column_roots.iter()) {
             let mut row_target = root.clone();
             for pane_id in column.iter().skip(1) {
-                let joined =
-                    join_pane_to_target(pane_id, &row_target, SplitDirection::Vertical)
-                        .map_err(|e| e.to_string())?;
+                let joined = join_pane_to_target(pane_id, &row_target, SplitDirection::Vertical)
+                    .map_err(|e| e.to_string())?;
                 id_map.insert(pane_id.clone(), joined.clone());
                 row_target = joined;
             }
@@ -2261,7 +2264,8 @@ impl Model {
                     *pane_id = new_id.clone();
                 }
             }
-            self.branch_list.update_running_agents(&self.pane_list.panes);
+            self.branch_list
+                .update_running_agents(&self.pane_list.panes);
         }
 
         Ok(id_map)
@@ -2474,7 +2478,11 @@ impl Model {
                 keybinds.len() + status.len() + 5 // " {} | {} " format adds 5 chars
             };
             let inner_width = frame.area().width.saturating_sub(2) as usize; // borders
-            if footer_text_len > inner_width { 4 } else { 3 }
+            if footer_text_len > inner_width {
+                4
+            } else {
+                3
+            }
         } else {
             0
         };

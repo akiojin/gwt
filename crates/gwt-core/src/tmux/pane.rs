@@ -269,11 +269,7 @@ pub fn group_panes_by_left(panes: &[PaneGeometry]) -> Vec<PaneColumn> {
         .into_iter()
         .map(|(left, mut panes)| {
             panes.sort_by_key(|p| p.top);
-            let width = panes
-                .iter()
-                .map(|p| p.width)
-                .max()
-                .unwrap_or(0);
+            let width = panes.iter().map(|p| p.width).max().unwrap_or(0);
             let total_height = panes.iter().map(|p| p.height).sum();
             let pane_ids = panes.iter().map(|p| p.pane_id.clone()).collect();
             PaneColumn {
@@ -899,7 +895,10 @@ mod tests {
         assert_eq!(columns.len(), 2);
         assert_eq!(columns[0].left, 0);
         assert_eq!(columns[1].left, 80);
-        assert_eq!(columns[1].pane_ids, vec!["%3".to_string(), "%2".to_string()]);
+        assert_eq!(
+            columns[1].pane_ids,
+            vec!["%3".to_string(), "%2".to_string()]
+        );
         assert_eq!(columns[1].total_height, 24);
     }
 
