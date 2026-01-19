@@ -291,8 +291,8 @@ pub fn compute_equal_splits(total: u16, parts: usize) -> Vec<u16> {
     let base = total / parts_u16;
     let remainder = total % parts_u16;
     let mut splits = vec![base; parts];
-    for idx in 0..(remainder as usize) {
-        splits[idx] += 1;
+    for split in splits.iter_mut().take(remainder as usize) {
+        *split += 1;
     }
     splits
 }
