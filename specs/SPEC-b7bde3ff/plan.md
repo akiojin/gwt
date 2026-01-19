@@ -151,24 +151,74 @@ gwtにtmuxマルチモードを追加し、複数のコーディングエージ�
 
 ---
 
+### フェーズ 8: エージェントペインの列/行レイアウト
+
+**目標**: gwt左列 + 右側エージェント列の多段配置を実現
+
+**成果物**:
+
+- `gwt-core/src/tmux/pane.rs` - ペイン位置情報取得とリサイズAPI
+- `gwt-core/src/tmux/launcher.rs` - 追加分割方向の対応
+- `gwt-cli/src/tui/app.rs` - 列/行レイアウトの選択と再配置制御
+
+**実装内容**:
+
+1. ペイン位置（left/top/width/height）の取得
+2. 右側エージェント列の最大3行制約
+3. 3行を超えた場合の新規列追加
+4. 列数に応じた幅の自動調整
+5. 列内の行高さの均等化
+
+**依存関係**: フェーズ 3
+
+---
+
+### フェーズ 9: エージェント表示名の短縮
+
+**目標**: Codex/Gemini 表示名の短縮（CLI表記の削除）
+
+**成果物**:
+
+- `gwt-core/src/agent/mod.rs` - 表示名の調整
+- `gwt-cli/src/tui/screens/wizard.rs` - UIラベルの調整
+- `gwt-core/src/config/session.rs` - セッション表示名の調整
+
+**実装内容**:
+
+1. Codex CLI → Codex の表示名統一
+2. Gemini CLI → Gemini の表示名統一
+3. 既存UI/ログ/履歴への反映
+
+**依存関係**: なし
+
+---
+
+### フェーズ 10: ペイン表示時のmouse有効化
+
+**目標**: ペイン表示時にtmux mouseを有効化する
+
+**成果物**:
+
+- `gwt-core/src/tmux/pane.rs` - ペイン表示時のmouse有効化
+
+**実装内容**:
+
+1. `tmux set -g mouse on` を実行するヘルパー追加
+2. ペイン表示（join-pane）前にmouseを有効化
+
+**依存関係**: フェーズ 3
+
+---
+
 ## 技術的考慮事項
 
 ### tmuxコマンド
 
-```text
-tmux new-session -d -s <session-name>    # セッション作成
-tmux split-window -h/-v -c <dir> <cmd>   # ペイン分割
-tmux select-pane -t <pane-id>            # フォーカス移動
-tmux list-panes -F "#{pane_id}:#{pane_pid}:#{pane_current_command}"  # ペイン一覧
-tmux send-keys -t <pane-id> C-c          # 中断シグナル
-tmux kill-pane -t <pane-id>              # ペイン終了
-```
+運用ガイドのコマンド例を参照: `docs/operations.md`
 
 ### Ctrl-g キーバインド設定
 
-```text
-tmux bind-key -n C-g select-pane -t 0    # gwtペイン（0番）へ移動
-```
+運用ガイドのキーバインド例を参照: `docs/operations.md`
 
 ### ペイン状態監視
 

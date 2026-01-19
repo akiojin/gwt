@@ -1,6 +1,6 @@
 //! Pane list component for tmux multi-mode
 //!
-//! Displays a list of running agent panes with branch name, agent name, and uptime.
+//! Displays a list of running agent panes with branch name, agent name, uptime, and state.
 
 use gwt_core::tmux::AgentPane;
 use ratatui::{
@@ -12,6 +12,8 @@ use ratatui::{
 };
 
 /// State for the pane list component
+/// Note: PaneList panel is abolished, but this struct is still used for agent tracking
+#[allow(dead_code)]
 #[derive(Debug, Default)]
 pub struct PaneListState {
     /// List of running agent panes
@@ -20,8 +22,10 @@ pub struct PaneListState {
     pub selected: usize,
     /// List state for ratatui
     list_state: ListState,
-    /// Whether this component has focus
+    /// Whether this component has focus (deprecated)
     pub has_focus: bool,
+    /// Spinner animation frame counter (FR-031a-b)
+    pub spinner_frame: usize,
 }
 
 impl PaneListState {
@@ -32,6 +36,7 @@ impl PaneListState {
             selected: 0,
             list_state: ListState::default(),
             has_focus: false,
+            spinner_frame: 0,
         }
     }
 
@@ -49,7 +54,8 @@ impl PaneListState {
         });
     }
 
-    /// Select the next pane
+    /// Select the next pane (deprecated - PaneList panel abolished)
+    #[allow(dead_code)]
     pub fn select_next(&mut self) {
         if self.panes.is_empty() {
             return;
@@ -58,7 +64,8 @@ impl PaneListState {
         self.list_state.select(Some(self.selected));
     }
 
-    /// Select the previous pane
+    /// Select the previous pane (deprecated - PaneList panel abolished)
+    #[allow(dead_code)]
     pub fn select_prev(&mut self) {
         if self.panes.is_empty() {
             return;
@@ -90,7 +97,8 @@ impl PaneListState {
     }
 }
 
-/// Render the pane list
+/// Render the pane list (deprecated - PaneList panel abolished)
+#[allow(dead_code)]
 pub fn render_pane_list(state: &mut PaneListState, frame: &mut Frame, area: Rect) {
     let border_style = if state.has_focus {
         Style::default().fg(Color::White)
@@ -113,13 +121,14 @@ pub fn render_pane_list(state: &mut PaneListState, frame: &mut Frame, area: Rect
         return;
     }
 
+    let spinner_frame = state.spinner_frame;
     let items: Vec<ListItem> = state
         .panes
         .iter()
         .enumerate()
         .map(|(i, pane)| {
             let is_selected = i == state.selected && state.has_focus;
-            create_pane_list_item(pane, is_selected)
+            create_pane_list_item(pane, is_selected, spinner_frame)
         })
         .collect();
 
@@ -135,8 +144,13 @@ pub fn render_pane_list(state: &mut PaneListState, frame: &mut Frame, area: Rect
     frame.render_stateful_widget(list, area, &mut state.list_state);
 }
 
-/// Create a list item for a pane
-fn create_pane_list_item(pane: &AgentPane, _is_selected: bool) -> ListItem<'static> {
+/// Create a list item for a pane (deprecated - PaneList panel abolished)
+#[allow(dead_code)]
+fn create_pane_list_item(
+    pane: &AgentPane,
+    _is_selected: bool,
+    _spinner_frame: usize,
+) -> ListItem<'static> {
     let uptime = pane.uptime_string();
 
     // Show [BG] indicator for background (hidden) panes
@@ -184,11 +198,15 @@ fn create_pane_list_item(pane: &AgentPane, _is_selected: bool) -> ListItem<'stat
 
 /// Truncate a string to a maximum length
 fn truncate_string(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max_len - 3])
+    let char_count = s.chars().count();
+    if char_count <= max_len {
+        return s.to_string();
     }
+    if max_len <= 3 {
+        return s.chars().take(max_len).collect();
+    }
+    let truncated: String = s.chars().take(max_len - 3).collect();
+    format!("{truncated}...")
 }
 
 #[cfg(test)]

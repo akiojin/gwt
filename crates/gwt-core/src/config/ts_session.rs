@@ -384,7 +384,7 @@ mod tests {
             last_branch: Some("feature/test".to_string()),
             last_used_tool: Some("codex-cli".to_string()),
             last_session_id: None,
-            tool_label: Some("Codex CLI".to_string()),
+            tool_label: Some("Codex".to_string()),
             tool_version: Some("latest".to_string()),
             model: Some("gpt-5.2-codex".to_string()),
             timestamp: 1_700_000_000_000,
@@ -422,7 +422,7 @@ mod tests {
             last_branch: Some("feature/test".to_string()),
             last_used_tool: Some("codex-cli".to_string()),
             last_session_id: Some("session-123".to_string()),
-            tool_label: Some("Codex CLI".to_string()),
+            tool_label: Some("Codex".to_string()),
             tool_version: Some("latest".to_string()),
             model: Some("gpt-5.2-codex".to_string()),
             timestamp: 1_700_000_000_000,
@@ -442,7 +442,7 @@ mod tests {
         let entry = &entries[0];
         assert_eq!(entry.branch, "feature/test");
         assert_eq!(entry.tool_id, "codex-cli");
-        assert_eq!(entry.tool_label, "Codex CLI");
+        assert_eq!(entry.tool_label, "Codex");
         assert_eq!(entry.model.as_deref(), Some("gpt-5.2-codex"));
         assert_eq!(entry.tool_version.as_deref(), Some("latest"));
         assert_eq!(entry.session_id.as_deref(), Some("session-123"));
@@ -478,7 +478,7 @@ mod tests {
             branch: "main".to_string(),
             worktree_path: None,
             tool_id: "codex-cli".to_string(),
-            tool_label: "Codex CLI".to_string(),
+            tool_label: "Codex".to_string(),
             session_id: None,
             mode: None,
             model: None,

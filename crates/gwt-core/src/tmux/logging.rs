@@ -101,9 +101,9 @@ pub fn stop_logging(pane_id: &str) -> TmuxResult<()> {
             reason: e.to_string(),
         })?;
 
-    // Ignore errors - pipe might not be active
+    // Not an error if pipe wasn't active
     if !output.status.success() {
-        // Not an error if pipe wasn't active
+        return Ok(());
     }
 
     Ok(())
@@ -116,6 +116,7 @@ pub fn read_log(log_path: &Path) -> io::Result<String> {
 
 /// Read the last N lines of a log file
 pub fn read_log_tail(log_path: &Path, lines: usize) -> io::Result<Vec<String>> {
+    // Logs are capped by max_size (default 10MB), so full read is acceptable here.
     let content = fs::read_to_string(log_path)?;
     let all_lines: Vec<&str> = content.lines().collect();
     let start = all_lines.len().saturating_sub(lines);

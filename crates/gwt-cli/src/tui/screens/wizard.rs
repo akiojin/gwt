@@ -161,8 +161,8 @@ impl CodingAgent {
     pub fn label(&self) -> &'static str {
         match self {
             CodingAgent::ClaudeCode => "Claude Code",
-            CodingAgent::CodexCli => "Codex CLI",
-            CodingAgent::GeminiCli => "Gemini CLI",
+            CodingAgent::CodexCli => "Codex",
+            CodingAgent::GeminiCli => "Gemini",
             CodingAgent::OpenCode => "OpenCode",
         }
     }
@@ -453,7 +453,7 @@ impl CodingAgent {
                     .with_max_levels(),
             ],
             CodingAgent::GeminiCli => vec![
-                ModelOption::default_option("Default (Auto)", "Use Gemini CLI default model"),
+                ModelOption::default_option("Default (Auto)", "Use Gemini default model"),
                 ModelOption::new("gemini-3-pro-preview", "Pro (gemini-3-pro-preview)", "Default Pro. Falls back to gemini-2.5-pro when preview is unavailable."),
                 ModelOption::new("gemini-3-flash-preview", "Flash (gemini-3-flash-preview)", "Next-generation high-speed model"),
                 ModelOption::new("gemini-2.5-pro", "Pro (gemini-2.5-pro)", "Stable Pro model for deep reasoning and creativity"),
@@ -2158,7 +2158,7 @@ mod tests {
         let mut state = WizardState::new();
         let history = vec![QuickStartEntry {
             tool_id: "codex-cli".to_string(),
-            tool_label: "Codex CLI".to_string(),
+            tool_label: "Codex".to_string(),
             model: Some("o3-mini".to_string()),
             reasoning_level: Some("high".to_string()),
             version: Some("2.0.0".to_string()),

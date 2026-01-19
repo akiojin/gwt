@@ -6,14 +6,6 @@ use std::process::Command;
 
 use super::error::{TmuxError, TmuxResult};
 
-/// Represents a tmux session
-#[derive(Debug, Clone)]
-pub struct TmuxSession {
-    pub name: String,
-    pub attached: bool,
-    pub windows: u32,
-}
-
 /// Create a new detached tmux session
 ///
 /// # Arguments
