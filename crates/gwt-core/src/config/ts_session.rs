@@ -98,7 +98,10 @@ fn canonical_tool_id(tool_id: &str) -> String {
         _ => {}
     }
 
-    let normalized: String = lower.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    let normalized: String = lower
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
     match normalized.as_str() {
         "claude" | "claudecode" => "claude-code".to_string(),
         "codex" | "codexcli" => "codex-cli".to_string(),
@@ -196,7 +199,10 @@ pub fn load_ts_session(repo_root: &Path) -> Option<TsSessionData> {
     latest.map(|(session, path)| normalize_and_persist_session(path, session))
 }
 
-fn normalize_and_persist_session(session_path: PathBuf, mut session: TsSessionData) -> TsSessionData {
+fn normalize_and_persist_session(
+    session_path: PathBuf,
+    mut session: TsSessionData,
+) -> TsSessionData {
     let mut changed = false;
 
     if let Some(last_used_tool) = session.last_used_tool.as_mut() {
@@ -652,7 +658,10 @@ mod tests {
 
         let updated = std::fs::read_to_string(&session_path).unwrap();
         let updated_session: TsSessionData = serde_json::from_str(&updated).unwrap();
-        assert_eq!(updated_session.last_used_tool.as_deref(), Some("claude-code"));
+        assert_eq!(
+            updated_session.last_used_tool.as_deref(),
+            Some("claude-code")
+        );
         assert_eq!(updated_session.history[0].tool_id, "codex-cli");
 
         match prev_home {
