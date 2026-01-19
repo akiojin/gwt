@@ -29,29 +29,39 @@ crates/gwt-core/src/
 
 ## ユニットテスト
 
-### 1. 環境検出テスト（FR-001〜FR-004）
+### 1. 環境検出テスト（FR-001）
 
 **ファイル**: `crates/gwt-core/src/tmux/detector.rs`
 
 **テスト観点**:
 - FR-001: TMUX 環境変数が設定されている場合に `is_inside_tmux()` が `true`
 - FR-001: TMUX 環境変数が未設定の場合に `is_inside_tmux()` が `false`
-- FR-004: `check_tmux_installed()` の戻り値が `Ok`/`Err` のいずれでも許容される
+- `check_tmux_installed()` の戻り値が `Ok`/`Err` のいずれでも許容される
 - tmux バージョン取得時に major が 2 以上であることを確認（取得可能な場合）
 
 ---
 
-### 2. 実行モードテスト（FR-002〜FR-003）
+### 2. 実行モードテスト（FR-001〜FR-002）
 
 **ファイル**: `crates/gwt-core/src/execution_mode.rs`
 
 **テスト観点**:
-- FR-003: tmux 環境外では `ExecutionMode::Single`
-- FR-002: tmux 環境内では `ExecutionMode::Multi`
+- FR-002: tmux 環境外では `ExecutionMode::Single`
+- FR-001: tmux 環境内では `ExecutionMode::Multi`
 
 ---
 
-### 3. セッション命名テスト（FR-010〜FR-011）
+### 3. CLI起動モードテスト（FR-001〜FR-003）
+
+**ファイル**: `crates/gwt-cli/src/main.rs`
+
+**テスト観点**:
+- FR-001: TMUX 環境変数が設定されている場合にマルチモード判定される
+- FR-002: TMUX 環境変数が未設定の場合にシングルモード判定される
+
+---
+
+### 4. セッション命名テスト（FR-010〜FR-011）
 
 **ファイル**: `crates/gwt-core/src/tmux/naming.rs`
 
@@ -63,7 +73,7 @@ crates/gwt-core/src/
 
 ---
 
-### 4. ペイン管理テスト（FR-020〜FR-024）
+### 5. ペイン管理テスト（FR-020〜FR-024）
 
 **ファイル**: `crates/gwt-core/src/tmux/pane.rs`
 
@@ -74,7 +84,7 @@ crates/gwt-core/src/
 
 ---
 
-### 5. フォーカス切り替えテスト（FR-040〜FR-042）
+### 6. フォーカス切り替えテスト（FR-040〜FR-042）
 
 **ファイル**: `crates/gwt-cli/src/ui/focus_manager.rs`
 
@@ -84,7 +94,7 @@ crates/gwt-core/src/
 
 ---
 
-### 6. 終了確認テスト（FR-050〜FR-052, FR-060〜FR-061）
+### 7. 終了確認テスト（FR-050〜FR-052, FR-060〜FR-061）
 
 **ファイル**: `crates/gwt-core/src/tmux/terminate.rs`
 
@@ -95,7 +105,7 @@ crates/gwt-core/src/
 
 ---
 
-### 7. 多重起動警告テスト（FR-080〜FR-081）
+### 8. 多重起動警告テスト（FR-080〜FR-081）
 
 **ファイル**: `crates/gwt-cli/src/ui/dialogs/duplicate_warn.rs`
 
@@ -106,7 +116,7 @@ crates/gwt-core/src/
 
 ---
 
-### 8. キーバインド変更テスト（FR-100〜FR-101）
+### 9. キーバインド変更テスト（FR-100〜FR-101）
 
 **ファイル**: `crates/gwt-cli/src/ui/keybindings.rs`
 
@@ -117,7 +127,7 @@ crates/gwt-core/src/
 
 ---
 
-### 9. エージェント列/行レイアウトテスト（FR-033〜FR-035）
+### 10. エージェント列/行レイアウトテスト（FR-033〜FR-035）
 
 **ファイル**: `crates/gwt-core/src/tmux/pane.rs` / `crates/gwt-cli/src/tui/app.rs`
 
@@ -130,7 +140,7 @@ crates/gwt-core/src/
 
 ---
 
-### 10. エージェント表示名短縮テスト（FR-026）
+### 11. エージェント表示名短縮テスト（FR-026）
 
 **ファイル**: `crates/gwt-core/src/agent/mod.rs` / `crates/gwt-cli/src/tui/screens/wizard.rs`
 
@@ -141,7 +151,7 @@ crates/gwt-core/src/
 
 ---
 
-### 11. ペイン表示時のmouse有効化テスト（FR-093）
+### 12. ペイン表示時のmouse有効化テスト（FR-093）
 
 **ファイル**: `crates/gwt-core/src/tmux/pane.rs`
 
@@ -154,7 +164,7 @@ crates/gwt-core/src/
 
 ## インテグレーションテスト
 
-### 12. tmuxセッション統合テスト
+### 13. tmuxセッション統合テスト
 
 **ファイル**: `tests/tmux_integration_tests.rs`
 
