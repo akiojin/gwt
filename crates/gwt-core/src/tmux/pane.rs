@@ -491,28 +491,25 @@ pub fn break_pane(pane_id: &str) -> TmuxResult<()> {
 /// Uses `tmux join-pane` to move the pane from its background window back to the main window.
 ///
 /// # Arguments
-/// * `background_window` - The background window identifier (session:window_id)
+/// * `pane_id` - The pane ID to join back to the main window
 /// * `target_pane_id` - The pane ID to join beside (usually the GWT pane)
 ///
 /// # Returns
 /// The new pane ID after joining
-pub fn show_pane(background_window: &str, target_pane_id: &str) -> TmuxResult<String> {
+pub fn show_pane(pane_id: &str, target_pane_id: &str) -> TmuxResult<String> {
     // Ensure mouse mode is on when showing panes
     let _ = enable_mouse();
 
-    // Join the pane from the background window to the target pane
+    // Join the pane back to the target pane
     let output = Command::new("tmux")
         .args([
             "join-pane",
             "-d", // don't switch focus
             "-h", // horizontal split (side by side)
             "-s",
-            background_window,
+            pane_id,
             "-t",
             target_pane_id,
-            "-P",
-            "-F",
-            "#{pane_id}",
         ])
         .output()
         .map_err(|e| TmuxError::CommandFailed {
@@ -528,8 +525,7 @@ pub fn show_pane(background_window: &str, target_pane_id: &str) -> TmuxResult<St
         });
     }
 
-    let new_pane_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Ok(new_pane_id)
+    Ok(pane_id.to_string())
 }
 
 /// Join a pane to a target with a split direction
@@ -549,9 +545,6 @@ pub fn join_pane_to_target(
             pane_id,
             "-t",
             target_pane_id,
-            "-P",
-            "-F",
-            "#{pane_id}",
         ])
         .output()
         .map_err(|e| TmuxError::CommandFailed {
@@ -567,8 +560,7 @@ pub fn join_pane_to_target(
         });
     }
 
-    let joined_pane_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Ok(joined_pane_id)
+    Ok(pane_id.to_string())
 }
 
 /// Send keys to a pane (e.g., Ctrl-C for interrupt)

@@ -966,11 +966,11 @@ impl Model {
 
         if pane.is_background {
             // Show the pane (join back to GWT window)
-            let Some(background_window) = &pane.background_window else {
+            if pane.background_window.is_none() {
                 self.status_message = Some("No background window to restore".to_string());
                 self.status_message_time = Some(Instant::now());
                 return;
-            };
+            }
 
             let Some(gwt_pane_id) = &self.gwt_pane_id else {
                 self.status_message = Some("GWT pane ID not available".to_string());
@@ -978,7 +978,8 @@ impl Model {
                 return;
             };
 
-            match gwt_core::tmux::show_pane(background_window, gwt_pane_id) {
+            let pane_id = pane.pane_id.clone();
+            match gwt_core::tmux::show_pane(&pane_id, gwt_pane_id) {
                 Ok(new_pane_id) => {
                     // Update the pane ID and clear background state
                     pane.pane_id = new_pane_id.clone();
@@ -1088,11 +1089,11 @@ impl Model {
 
         if pane.is_background {
             // Show the pane first (join back to GWT window)
-            let Some(background_window) = &pane.background_window else {
+            if pane.background_window.is_none() {
                 self.status_message = Some("No background window to restore".to_string());
                 self.status_message_time = Some(Instant::now());
                 return;
-            };
+            }
 
             let Some(gwt_pane_id) = &self.gwt_pane_id else {
                 self.status_message = Some("GWT pane ID not available".to_string());
@@ -1100,7 +1101,8 @@ impl Model {
                 return;
             };
 
-            match gwt_core::tmux::show_pane(background_window, gwt_pane_id) {
+            let pane_id = pane.pane_id.clone();
+            match gwt_core::tmux::show_pane(&pane_id, gwt_pane_id) {
                 Ok(new_pane_id) => {
                     // Update the pane ID and clear background state
                     pane.pane_id = new_pane_id.clone();
