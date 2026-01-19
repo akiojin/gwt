@@ -1,0 +1,18 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "gwt-plugins",
+  "version": "0.1.0",
+  "description": "GWT (Git Worktree) plugins for safe worktree operations",
+  "owner": {
+    "name": "akiojin"
+  },
+  "plugins": [
+    {
+      "name": "worktree-protection-hooks",
+      "description": "Block dangerous operations outside worktree directory",
+      "version": "0.1.0",
+      "source": "./plugins/worktree-protection-hooks",
+      "category": "security"
+    }
+  ]
+}

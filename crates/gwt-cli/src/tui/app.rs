@@ -8,21 +8,29 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use gwt_core::config::get_branch_tool_history;
-use gwt_core::config::{Profile, ProfilesConfig};
+use gwt_core::config::{save_session_entry, Profile, ProfilesConfig, ToolSessionEntry};
 use gwt_core::error::GwtError;
 use gwt_core::git::{Branch, PrCache, Repository};
+use gwt_core::tmux::{
+    break_pane, compute_equal_splits, get_current_session, group_panes_by_left,
+    join_pane_to_target, kill_pane, launcher, list_pane_geometries, resize_pane_height,
+    resize_pane_width, AgentPane, PaneColumn, PaneGeometry, SplitDirection,
+};
 use gwt_core::worktree::WorktreeManager;
+use gwt_core::TmuxMode;
 use ratatui::{prelude::*, widgets::*};
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use tracing::{debug, error, info};
 
 use super::screens::branch_list::WorktreeStatus;
 use super::screens::environment::EditField;
+use super::screens::pane_list::PaneListState;
+use super::screens::split_layout::{calculate_split_layout, SplitLayoutState};
 use super::screens::{
     collect_os_env, render_branch_list, render_confirm, render_environment, render_error,
     render_help, render_logs, render_profiles, render_settings, render_wizard,
@@ -31,6 +39,24 @@ use super::screens::{
     QuickStartEntry, ReasoningLevel, SettingsState, WizardConfirmResult, WizardState,
     WorktreeCreateState,
 };
+
+fn resolve_orphaned_agent_name(
+    fallback_name: &str,
+    session_entry: Option<&ToolSessionEntry>,
+) -> String {
+    if let Some(entry) = session_entry {
+        if !entry.tool_id.trim().is_empty() {
+            return entry.tool_id.clone();
+        }
+    }
+
+    let trimmed = fallback_name.trim();
+    if trimmed.is_empty() {
+        "unknown".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
 
 /// Configuration for launching a coding agent after TUI exits
 #[derive(Debug, Clone)]
@@ -179,6 +205,8 @@ pub struct Model {
     pending_agent_launch: Option<AgentLaunchConfig>,
     /// Pending unsafe branch selection (FR-029b)
     pending_unsafe_selection: Option<String>,
+    /// Pending agent termination branch (FR-040)
+    pending_agent_termination: Option<String>,
     /// Pending cleanup branches (FR-010)
     pending_cleanup_branches: Vec<String>,
     /// Branch list update receiver
@@ -189,6 +217,22 @@ pub struct Model {
     safety_rx: Option<Receiver<SafetyUpdate>>,
     /// Worktree status update receiver
     worktree_status_rx: Option<Receiver<WorktreeStatusUpdate>>,
+    /// Tmux mode (Single or Multi)
+    tmux_mode: TmuxMode,
+    /// Tmux session name (when in multi mode)
+    tmux_session: Option<String>,
+    /// The pane ID where gwt is running (for splitting)
+    gwt_pane_id: Option<String>,
+    /// Launched agent pane IDs (visible panes only)
+    agent_panes: Vec<String>,
+    /// Pane list state for tmux multi-mode
+    pane_list: PaneListState,
+    /// Split layout state for tmux multi-mode
+    split_layout: SplitLayoutState,
+    /// Last time pane list was updated (for 1-second polling)
+    last_pane_update: Option<Instant>,
+    /// Last time spinner was updated (for 250ms refresh)
+    last_spinner_update: Option<Instant>,
 }
 
 /// Screen types
@@ -252,6 +296,12 @@ pub enum Message {
     RepairWorktrees,
     /// Copy selected log to clipboard
     CopyLogToClipboard,
+    /// Toggle agent pane visibility (show/hide)
+    ToggleAgentPaneVisibility,
+    /// FR-040: Confirm agent termination (d key)
+    ConfirmAgentTermination,
+    /// Execute agent termination after confirmation
+    ExecuteAgentTermination,
 }
 
 impl Model {
@@ -294,15 +344,43 @@ impl Model {
             total_count: 0,
             pending_agent_launch: None,
             pending_unsafe_selection: None,
+            pending_agent_termination: None,
             pending_cleanup_branches: Vec::new(),
             branch_list_rx: None,
             pr_title_rx: None,
             safety_rx: None,
             worktree_status_rx: None,
+            tmux_mode: TmuxMode::detect(),
+            tmux_session: None,
+            gwt_pane_id: None,
+            agent_panes: Vec::new(),
+            pane_list: PaneListState::new(),
+            split_layout: SplitLayoutState::new(),
+            last_pane_update: None,
+            last_spinner_update: None,
         };
+
+        // Initialize tmux session if in multi mode
+        if model.tmux_mode.is_multi() {
+            // Use the current tmux session, not a generated one
+            model.tmux_session = get_current_session();
+            // Capture the gwt pane ID for splitting
+            model.gwt_pane_id = gwt_core::tmux::get_current_pane_id();
+            debug!(
+                category = "tui",
+                mode = %model.tmux_mode,
+                session = ?model.tmux_session,
+                gwt_pane_id = ?model.gwt_pane_id,
+                "Tmux multi-mode detected"
+            );
+        }
 
         // Load initial data
         model.refresh_data();
+
+        // Reconnect to orphaned agent panes (FR-060~062)
+        model.reconnect_orphaned_panes();
+
         model.apply_entry_context(context);
         model
     }
@@ -522,11 +600,13 @@ impl Model {
                     continue;
                 }
 
-                if let Ok((ahead, _)) =
-                    Branch::divergence_between(&repo_root, &target.branch, &base_branch)
+                // Check if branch is merged into base using merge-base --is-ancestor
+                // This correctly handles cases where base_branch has advanced beyond the merge point
+                if let Ok(is_merged) =
+                    Branch::is_merged_into(&repo_root, &target.branch, &base_branch)
                 {
-                    is_unmerged = ahead > 0;
-                    safe_to_cleanup = !is_unmerged;
+                    is_unmerged = !is_merged;
+                    safe_to_cleanup = is_merged;
                 }
 
                 let _ = tx.send(SafetyUpdate {
@@ -590,6 +670,78 @@ impl Model {
                 });
             }
         });
+    }
+
+    /// Reconnect to orphaned agent panes on startup (FR-060~062)
+    ///
+    /// This function detects panes that were running before gwt restarted
+    /// by matching their working directory to worktree paths.
+    fn reconnect_orphaned_panes(&mut self) {
+        // Only in tmux multi-mode
+        if !self.tmux_mode.is_multi() {
+            return;
+        }
+
+        let Some(session) = &self.tmux_session else {
+            return;
+        };
+
+        // Get worktree list synchronously for matching
+        let worktrees: Vec<(String, std::path::PathBuf)> =
+            match WorktreeManager::new(&self.repo_root) {
+                Ok(manager) => match manager.list_basic() {
+                    Ok(wts) => wts
+                        .into_iter()
+                        .filter_map(|wt| wt.branch.map(|b| (b, wt.path)))
+                        .collect(),
+                    Err(_) => return,
+                },
+                Err(_) => return,
+            };
+
+        if worktrees.is_empty() {
+            return;
+        }
+
+        let tool_usage_map = gwt_core::config::get_last_tool_usage_map(&self.repo_root);
+
+        // Detect orphaned panes
+        let gwt_pane_id = self.gwt_pane_id.as_deref();
+        match gwt_core::tmux::detect_orphaned_panes(session, &worktrees, gwt_pane_id) {
+            Ok(mut orphaned_panes) => {
+                if !orphaned_panes.is_empty() {
+                    debug!(
+                        category = "tui",
+                        count = orphaned_panes.len(),
+                        "Reconnected to orphaned agent panes"
+                    );
+
+                    for pane in orphaned_panes.iter_mut() {
+                        let entry = tool_usage_map.get(&pane.branch_name);
+                        pane.agent_name = resolve_orphaned_agent_name(&pane.agent_name, entry);
+                    }
+
+                    for pane in orphaned_panes {
+                        // Add to agent_panes list
+                        self.agent_panes.push(pane.pane_id.clone());
+                        // Add to pane_list for display
+                        self.pane_list.panes.push(pane);
+                    }
+
+                    // Update branch_list running_agents
+                    self.branch_list
+                        .update_running_agents(&self.pane_list.panes);
+                    self.reflow_agent_layout(None);
+                }
+            }
+            Err(e) => {
+                debug!(
+                    category = "tui",
+                    error = %e,
+                    "Failed to detect orphaned panes"
+                );
+            }
+        }
     }
 
     fn apply_entry_context(&mut self, context: Option<TuiEntryContext>) {
@@ -706,6 +858,339 @@ impl Model {
                 }
             }
         }
+    }
+
+    /// FR-033: Update pane list by polling tmux (1-second interval)
+    /// FR-031e: Update agent states based on pane content changes
+    fn update_pane_list(&mut self) {
+        // Only in tmux multi mode
+        if !self.tmux_mode.is_multi() {
+            return;
+        }
+
+        // Check if 1 second has passed since last update
+        let now = Instant::now();
+        let mut spinner_updated = false;
+        if self
+            .last_spinner_update
+            .map(|last| now.duration_since(last) >= Duration::from_millis(250))
+            .unwrap_or(true)
+        {
+            self.pane_list.spinner_frame = self.pane_list.spinner_frame.wrapping_add(1);
+            self.last_spinner_update = Some(now);
+            spinner_updated = true;
+        }
+
+        if let Some(last) = self.last_pane_update {
+            if now.duration_since(last) < Duration::from_secs(1) {
+                return;
+            }
+        }
+        self.last_pane_update = Some(now);
+        if !spinner_updated {
+            self.pane_list.spinner_frame = self.pane_list.spinner_frame.wrapping_add(1);
+            self.last_spinner_update = Some(now);
+        }
+
+        if self.pane_list.panes.is_empty() {
+            return;
+        }
+
+        // Get current tmux panes
+        let Some(session) = &self.tmux_session else {
+            return;
+        };
+
+        let Ok(current_panes) = gwt_core::tmux::pane::list_panes(session) else {
+            return;
+        };
+
+        // Filter out panes that no longer exist
+        let current_pane_ids: std::collections::HashSet<_> =
+            current_panes.iter().map(|p| p.pane_id.as_str()).collect();
+
+        // FR-072: Detect removed panes and update session
+        let removed_panes: Vec<AgentPane> = self
+            .pane_list
+            .panes
+            .iter()
+            .filter(|p| !current_pane_ids.contains(p.pane_id.as_str()))
+            .cloned()
+            .collect();
+
+        for pane in &removed_panes {
+            // Save session entry for terminated agent (FR-072)
+            let tool_label = crate::tui::normalize_agent_label(&pane.agent_name);
+            let session_entry = ToolSessionEntry {
+                branch: pane.branch_name.clone(),
+                worktree_path: None,
+                tool_id: pane.agent_name.clone(),
+                tool_label,
+                session_id: None,
+                mode: None,
+                model: None,
+                reasoning_level: None,
+                skip_permissions: None,
+                tool_version: None,
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0),
+            };
+            if let Err(e) = save_session_entry(&self.repo_root, session_entry) {
+                debug!(
+                    category = "tui",
+                    pane_id = %pane.pane_id,
+                    error = %e,
+                    "Failed to save session entry for terminated agent"
+                );
+            }
+        }
+
+        // Update state for each remaining pane (FR-031e)
+        let mut updated_panes: Vec<_> = self
+            .pane_list
+            .panes
+            .iter()
+            .filter(|p| current_pane_ids.contains(p.pane_id.as_str()))
+            .cloned()
+            .collect();
+
+        // Also update agent_panes list
+        self.agent_panes
+            .retain(|id| current_pane_ids.contains(id.as_str()));
+
+        // Update pane list if count changed
+        if updated_panes.len() != self.pane_list.panes.len() {
+            self.pane_list.update_panes(updated_panes);
+        } else {
+            // Keep existing panes (with their is_background state)
+            std::mem::swap(&mut self.pane_list.panes, &mut updated_panes);
+        }
+
+        // Sync running_agents in branch_list with current panes
+        self.branch_list
+            .update_running_agents(&self.pane_list.panes);
+        // Update spinner frame for branch list display
+        self.branch_list.spinner_frame = self.pane_list.spinner_frame;
+        if !removed_panes.is_empty() {
+            self.reflow_agent_layout(None);
+        }
+    }
+
+    /// Toggle agent pane visibility (show/hide)
+    ///
+    /// When hiding: moves the pane to a separate background window
+    /// When showing: joins the pane back to the GWT window
+    fn toggle_agent_pane_visibility(&mut self) {
+        // Get the selected pane
+        let selected_idx = self.pane_list.selected;
+        let Some(pane) = self.pane_list.panes.get_mut(selected_idx) else {
+            return;
+        };
+
+        if pane.is_background {
+            // Show the pane (join back to GWT window)
+            if pane.background_window.is_none() {
+                self.status_message = Some("No background window to restore".to_string());
+                self.status_message_time = Some(Instant::now());
+                return;
+            }
+
+            let Some(gwt_pane_id) = &self.gwt_pane_id else {
+                self.status_message = Some("GWT pane ID not available".to_string());
+                self.status_message_time = Some(Instant::now());
+                return;
+            };
+
+            let pane_id = pane.pane_id.clone();
+            match gwt_core::tmux::show_pane(&pane_id, gwt_pane_id) {
+                Ok(new_pane_id) => {
+                    // Update the pane ID and clear background state
+                    pane.pane_id = new_pane_id.clone();
+                    pane.is_background = false;
+                    pane.background_window = None;
+
+                    // Update agent_panes list
+                    self.agent_panes.push(new_pane_id);
+
+                    self.status_message = Some("Pane shown".to_string());
+                }
+                Err(e) => {
+                    self.status_message = Some(format!("Failed to show pane: {}", e));
+                }
+            }
+        } else {
+            // Hide the pane (break to background window)
+            let window_name = format!(
+                "gwt-agent-{}",
+                pane.branch_name.replace('/', "-").replace(' ', "_")
+            );
+
+            match gwt_core::tmux::hide_pane(&pane.pane_id, &window_name) {
+                Ok(background_window) => {
+                    // Remove from agent_panes list
+                    self.agent_panes.retain(|id| id != &pane.pane_id);
+
+                    // Update pane state
+                    pane.is_background = true;
+                    pane.background_window = Some(background_window);
+
+                    self.status_message = Some("Pane hidden".to_string());
+                }
+                Err(e) => {
+                    self.status_message = Some(format!("Failed to hide pane: {}", e));
+                }
+            }
+        }
+        self.status_message_time = Some(Instant::now());
+
+        // Update branch list with new pane state
+        self.branch_list
+            .update_running_agents(&self.pane_list.panes);
+        self.reflow_agent_layout(None);
+    }
+
+    /// FR-042: Terminate agent pane for the specified branch
+    fn terminate_agent_pane(&mut self, branch_name: &str) {
+        // Find the agent pane for this branch
+        let pane_to_kill = self
+            .pane_list
+            .panes
+            .iter()
+            .find(|p| p.branch_name == branch_name)
+            .cloned();
+
+        let Some(pane) = pane_to_kill else {
+            self.status_message = Some("Agent pane not found".to_string());
+            self.status_message_time = Some(Instant::now());
+            return;
+        };
+
+        // Kill the pane using tmux kill-pane
+        let pane_target = if pane.is_background {
+            // For background panes, kill the background window
+            if let Some(ref bg_window) = pane.background_window {
+                bg_window.clone()
+            } else {
+                pane.pane_id.clone()
+            }
+        } else {
+            pane.pane_id.clone()
+        };
+
+        match kill_pane(&pane_target) {
+            Ok(()) => {
+                // Remove from pane_list
+                self.pane_list
+                    .panes
+                    .retain(|p| p.branch_name != branch_name);
+                // Remove from agent_panes
+                self.agent_panes.retain(|id| id != &pane.pane_id);
+                // Update branch_list running_agents
+                self.branch_list
+                    .update_running_agents(&self.pane_list.panes);
+                self.reflow_agent_layout(None);
+
+                self.status_message = Some(format!("Agent terminated on '{}'", branch_name));
+                self.status_message_time = Some(Instant::now());
+            }
+            Err(e) => {
+                self.status_message = Some(format!("Failed to terminate: {}", e));
+                self.status_message_time = Some(Instant::now());
+            }
+        }
+    }
+
+    /// Show a hidden pane and focus it
+    ///
+    /// If the pane is already visible, just focus it.
+    /// If the pane is in background, show it first then focus.
+    fn show_and_focus_selected_pane(&mut self) {
+        let selected_idx = self.pane_list.selected;
+        let Some(pane) = self.pane_list.panes.get_mut(selected_idx) else {
+            return;
+        };
+
+        if pane.is_background {
+            // Show the pane first (join back to GWT window)
+            if pane.background_window.is_none() {
+                self.status_message = Some("No background window to restore".to_string());
+                self.status_message_time = Some(Instant::now());
+                return;
+            }
+
+            let Some(gwt_pane_id) = &self.gwt_pane_id else {
+                self.status_message = Some("GWT pane ID not available".to_string());
+                self.status_message_time = Some(Instant::now());
+                return;
+            };
+
+            let pane_id = pane.pane_id.clone();
+            match gwt_core::tmux::show_pane(&pane_id, gwt_pane_id) {
+                Ok(new_pane_id) => {
+                    // Update the pane ID and clear background state
+                    pane.pane_id = new_pane_id.clone();
+                    pane.is_background = false;
+                    pane.background_window = None;
+
+                    // Update agent_panes list
+                    self.agent_panes.push(new_pane_id.clone());
+
+                    self.branch_list
+                        .update_running_agents(&self.pane_list.panes);
+                    self.reflow_agent_layout(Some(&new_pane_id));
+
+                    // Focus the pane
+                    if let Err(e) = gwt_core::tmux::pane::select_pane(&new_pane_id) {
+                        self.status_message = Some(format!("Failed to focus pane: {}", e));
+                        self.status_message_time = Some(Instant::now());
+                    }
+                }
+                Err(e) => {
+                    self.status_message = Some(format!("Failed to show pane: {}", e));
+                    self.status_message_time = Some(Instant::now());
+                }
+            }
+        } else {
+            // Pane is visible, just focus it
+            if let Err(e) = gwt_core::tmux::pane::select_pane(&pane.pane_id) {
+                self.status_message = Some(format!("Failed to focus pane: {}", e));
+                self.status_message_time = Some(Instant::now());
+            }
+        }
+    }
+
+    /// Handle Enter key on branch list
+    /// FR-040: If branch has running agent, focus the pane
+    /// FR-041: If branch has no agent, open wizard
+    fn handle_branch_enter(&mut self) {
+        let Some(branch) = self.branch_list.selected_branch() else {
+            return;
+        };
+        let branch_name = branch.name.clone();
+
+        // Find pane index in pane_list by branch name
+        if let Some(pane_idx) = self
+            .pane_list
+            .panes
+            .iter()
+            .position(|p| p.branch_name == branch_name)
+        {
+            self.pane_list.selected = pane_idx;
+            self.show_and_focus_selected_pane();
+        } else {
+            // No running agent - open wizard
+            self.update(Message::OpenWizard);
+        }
+    }
+
+    /// Check if currently selected branch has a running agent
+    fn selected_branch_has_agent(&self) -> bool {
+        self.branch_list
+            .selected_branch()
+            .map(|branch| self.branch_list.get_running_agent(&branch.name).is_some())
+            .unwrap_or(false)
     }
 
     fn load_profiles(&mut self) {
@@ -987,9 +1472,13 @@ impl Model {
                 self.apply_pr_title_updates();
                 self.apply_safety_updates();
                 self.apply_worktree_updates();
+                // FR-033: Update pane list every 1 second in tmux multi mode
+                self.update_pane_list();
             }
             Message::SelectNext => match self.screen {
-                Screen::BranchList => self.branch_list.select_next(),
+                Screen::BranchList => {
+                    self.branch_list.select_next();
+                }
                 Screen::WorktreeCreate => self.worktree_create.select_next_base(),
                 Screen::Settings => self.settings.select_next(),
                 Screen::Logs => self.logs.select_next(),
@@ -1000,7 +1489,9 @@ impl Model {
                 Screen::Confirm => {}
             },
             Message::SelectPrev => match self.screen {
-                Screen::BranchList => self.branch_list.select_prev(),
+                Screen::BranchList => {
+                    self.branch_list.select_prev();
+                }
                 Screen::WorktreeCreate => self.worktree_create.select_prev_base(),
                 Screen::Settings => self.settings.select_prev(),
                 Screen::Logs => self.logs.select_prev(),
@@ -1042,8 +1533,9 @@ impl Model {
                         // FR-020: Enter in filter mode exits filter mode
                         self.branch_list.exit_filter_mode();
                     } else {
-                        // Open wizard for selected branch (FR-007)
-                        self.update(Message::OpenWizard);
+                        // FR-040: Enter on branch with running agent focuses the pane
+                        // FR-041: Enter on branch without agent opens wizard
+                        self.handle_branch_enter();
                     }
                 }
                 Screen::WorktreeCreate => {
@@ -1066,9 +1558,14 @@ impl Model {
                             let branches = std::mem::take(&mut self.pending_cleanup_branches);
                             self.execute_cleanup(&branches);
                         }
+                        // FR-040: Handle agent termination confirmation
+                        if self.pending_agent_termination.is_some() {
+                            self.update(Message::ExecuteAgentTermination);
+                        }
                     }
                     // Clear pending state and return to previous screen
                     self.pending_unsafe_selection = None;
+                    self.pending_agent_termination = None;
                     self.pending_cleanup_branches.clear();
                     if let Some(prev_screen) = self.screen_stack.pop() {
                         self.screen = prev_screen;
@@ -1242,10 +1739,39 @@ impl Model {
                     }
                 }
             }
+            Message::ToggleAgentPaneVisibility => {
+                self.toggle_agent_pane_visibility();
+            }
+            Message::ConfirmAgentTermination => {
+                // FR-041: Show confirmation dialog before terminating agent
+                if let Some(branch) = self.branch_list.selected_branch() {
+                    if self.branch_list.get_running_agent(&branch.name).is_some() {
+                        self.pending_agent_termination = Some(branch.name.clone());
+                        self.confirm = ConfirmState {
+                            title: "Terminate Agent".to_string(),
+                            message: format!("Terminate agent on '{}'?", branch.name),
+                            details: vec!["The agent process will be killed.".to_string()],
+                            confirm_label: "Terminate".to_string(),
+                            cancel_label: "Cancel".to_string(),
+                            selected_confirm: true, // Default to Terminate
+                            is_dangerous: true,
+                        };
+                        self.screen_stack.push(self.screen.clone());
+                        self.screen = Screen::Confirm;
+                    }
+                }
+            }
+            Message::ExecuteAgentTermination => {
+                // FR-042: Execute tmux kill-pane
+                if let Some(branch_name) = self.pending_agent_termination.take() {
+                    self.terminate_agent_pane(&branch_name);
+                }
+            }
             Message::Tab => {
                 if let Screen::Settings = self.screen {
                     self.settings.next_category()
                 }
+                // Tab no longer toggles focus - PaneList panel is abolished
             }
             Message::CycleFilter => {
                 if matches!(self.screen, Screen::Logs) {
@@ -1263,7 +1789,7 @@ impl Model {
                 }
             }
             Message::CycleViewMode => {
-                // FR-036: Tab disabled in filter mode
+                // FR-036: 'm' key disabled in filter mode
                 if matches!(self.screen, Screen::BranchList) && !self.branch_list.filter_mode {
                     self.branch_list.cycle_view_mode();
                 }
@@ -1385,7 +1911,7 @@ impl Model {
             "Creating worktree from wizard state"
         );
         if let Ok(manager) = WorktreeManager::new(&self.repo_root) {
-            let branch = &self.worktree_create.branch_name;
+            let branch = self.worktree_create.branch_name.clone();
             let base = if self.worktree_create.create_new_branch {
                 self.wizard
                     .base_branch_override
@@ -1396,15 +1922,15 @@ impl Model {
             };
 
             // First try to get existing worktree for this branch
-            let existing_wt = manager.get_by_branch(branch).ok().flatten();
+            let existing_wt = manager.get_by_branch(&branch).ok().flatten();
 
             let result = if let Some(wt) = existing_wt {
                 // Worktree already exists, just use it
                 Ok(wt)
             } else if self.worktree_create.create_new_branch {
-                manager.create_new_branch(branch, base)
+                manager.create_new_branch(&branch, base)
             } else {
-                manager.create_for_branch(branch)
+                manager.create_for_branch(&branch)
             };
 
             match result {
@@ -1447,9 +1973,38 @@ impl Model {
                         auto_install_deps,
                     };
 
-                    // Store the launch config and quit TUI
-                    self.pending_agent_launch = Some(launch_config);
-                    self.should_quit = true;
+                    // In multi mode, launch in tmux pane without quitting TUI
+                    if self.tmux_mode.is_multi() && self.gwt_pane_id.is_some() {
+                        // FR-010: Check 1 branch = 1 pane constraint
+                        if self
+                            .branch_list
+                            .get_running_agent(&launch_config.branch_name)
+                            .is_some()
+                        {
+                            self.status_message =
+                                Some("Agent already running on this branch".to_string());
+                            self.status_message_time = Some(Instant::now());
+                            return;
+                        }
+                        match self.launch_agent_in_pane(&launch_config) {
+                            Ok(_) => {
+                                self.status_message =
+                                    Some(format!("Agent launched in tmux pane for {}", branch));
+                                self.status_message_time = Some(Instant::now());
+                                // Close wizard and return to branch list
+                                self.wizard.visible = false;
+                                self.screen = Screen::BranchList;
+                            }
+                            Err(e) => {
+                                self.status_message = Some(format!("Failed to launch: {}", e));
+                                self.status_message_time = Some(Instant::now());
+                            }
+                        }
+                    } else {
+                        // Single mode: store launch config and quit TUI
+                        self.pending_agent_launch = Some(launch_config);
+                        self.should_quit = true;
+                    }
                 }
                 Err(e) => {
                     error!(
@@ -1464,6 +2019,376 @@ impl Model {
                     self.status_message_time = Some(Instant::now());
                 }
             }
+        }
+    }
+
+    /// Launch an agent in a tmux pane (multi mode)
+    ///
+    /// Layout strategy:
+    /// - gwt is left column, agents are placed in right columns
+    /// - Each agent column stacks up to 3 panes (vertical split)
+    /// - When a column reaches 3 panes, a new column is added to the right
+    ///
+    /// Uses the same argument building logic as single mode (main.rs)
+    fn launch_agent_in_pane(&mut self, config: &AgentLaunchConfig) -> Result<String, String> {
+        // FR-010: One Branch One Pane constraint
+        // Check if an agent is already running on this branch
+        if self
+            .pane_list
+            .panes
+            .iter()
+            .any(|p| p.branch_name == config.branch_name)
+        {
+            return Err(format!(
+                "Agent already running on branch '{}'",
+                config.branch_name
+            ));
+        }
+
+        let working_dir = config.worktree_path.to_string_lossy().to_string();
+
+        // Build environment variables (same as single mode)
+        let mut env_vars = config.env.clone();
+        // Add IS_SANDBOX=1 for Claude Code with skip_permissions (same as single mode)
+        if config.skip_permissions && config.agent == CodingAgent::ClaudeCode {
+            env_vars.push(("IS_SANDBOX".to_string(), "1".to_string()));
+        }
+
+        // Determine the agent command based on version (FR-063)
+        // - "installed": use direct binary name
+        // - "latest" or specific version: use bunx (or npx fallback) with package spec
+        let (base_cmd, base_args) = if config.version == "installed" {
+            // Use direct binary name for installed version
+            (config.agent.command_name().to_string(), vec![])
+        } else {
+            // Try bunx first, then npx as fallback (same logic as single mode)
+            let runner = which::which("bunx")
+                .or_else(|_| which::which("npx"))
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| "bunx".to_string());
+
+            let package_spec = if config.version == "latest" {
+                format!("{}@latest", config.agent.npm_package())
+            } else {
+                format!("{}@{}", config.agent.npm_package(), config.version)
+            };
+
+            (runner, vec![package_spec])
+        };
+
+        // Build agent-specific arguments (same logic as main.rs build_agent_args)
+        let agent_args = build_agent_args_for_tmux(config);
+
+        // Build the full command string
+        let command = build_tmux_command(&env_vars, &base_cmd, &base_args, &agent_args);
+
+        debug!(
+            category = "tui",
+            gwt_pane_id = ?self.gwt_pane_id,
+            working_dir = %working_dir,
+            command = %command,
+            agent_pane_count = self.agent_panes.len(),
+            "Launching agent in tmux pane"
+        );
+
+        let visible_count = self
+            .pane_list
+            .panes
+            .iter()
+            .filter(|p| !p.is_background)
+            .count();
+        let desired_columns_after = Self::desired_agent_column_count(visible_count + 1);
+        let current_columns = self
+            .agent_layout_snapshot()
+            .map(|(_, columns)| columns)
+            .unwrap_or_default();
+        let needs_new_column = desired_columns_after > current_columns.len();
+
+        // Determine how to split based on current columns
+        let pane_id = if visible_count == 0 {
+            // First agent: split to the right of gwt pane
+            let target = self
+                .gwt_pane_id
+                .as_ref()
+                .ok_or_else(|| "No gwt pane ID available".to_string())?;
+            launcher::launch_in_pane(target, &working_dir, &command)
+        } else if !needs_new_column {
+            if let Some(last_column) = current_columns.last() {
+                if let Some(target_pane) = last_column.pane_ids.last() {
+                    launcher::launch_in_pane_below(target_pane, &working_dir, &command)
+                } else {
+                    let target = self
+                        .gwt_pane_id
+                        .as_ref()
+                        .ok_or_else(|| "No gwt pane ID available".to_string())?;
+                    launcher::launch_in_pane(target, &working_dir, &command)
+                }
+            } else {
+                let target = self
+                    .gwt_pane_id
+                    .as_ref()
+                    .ok_or_else(|| "No gwt pane ID available".to_string())?;
+                launcher::launch_in_pane(target, &working_dir, &command)
+            }
+        } else {
+            // New column will be created in reflow
+            let target = self
+                .gwt_pane_id
+                .as_ref()
+                .ok_or_else(|| "No gwt pane ID available".to_string())?;
+            launcher::launch_in_pane(target, &working_dir, &command)
+        }
+        .map_err(|e| e.to_string())?;
+
+        // Focus the new pane (FR-022)
+        if let Err(e) = gwt_core::tmux::pane::select_pane(&pane_id) {
+            debug!(
+                category = "tui",
+                pane_id = %pane_id,
+                error = %e,
+                "Failed to focus new pane"
+            );
+        }
+
+        // Track the new pane
+        self.agent_panes.push(pane_id.clone());
+
+        // Add to pane list for display
+        let agent_pane = AgentPane::new(
+            pane_id.clone(),
+            config.branch_name.clone(),
+            config.agent.label().to_string(),
+            SystemTime::now(),
+            0, // PID is not tracked by simple launcher
+        );
+        let mut panes = self.pane_list.panes.clone();
+        panes.push(agent_pane);
+        self.pane_list.update_panes(panes);
+
+        // FR-071: Save session entry for tmux mode
+        let session_entry = ToolSessionEntry {
+            branch: config.branch_name.clone(),
+            worktree_path: Some(working_dir),
+            tool_id: config.agent.id().to_string(),
+            tool_label: config.agent.label().to_string(),
+            session_id: config.session_id.clone(),
+            mode: Some(config.execution_mode.label().to_string()),
+            model: config.model.clone(),
+            reasoning_level: config.reasoning_level.map(|r| r.label().to_string()),
+            skip_permissions: Some(config.skip_permissions),
+            tool_version: Some(config.version.clone()),
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0),
+        };
+        if let Err(e) = save_session_entry(&config.worktree_path, session_entry) {
+            debug!(
+                category = "tui",
+                error = %e,
+                "Failed to save session entry"
+            );
+        }
+
+        // Update branch list with new agent info
+        self.branch_list
+            .update_running_agents(&self.pane_list.panes);
+
+        // Reflow layout (columns/rows)
+        self.reflow_agent_layout(Some(&pane_id));
+
+        Ok(pane_id)
+    }
+
+    fn desired_agent_column_count(count: usize) -> usize {
+        count.div_ceil(3)
+    }
+
+    fn visible_agent_pane_ids(&self) -> Vec<String> {
+        self.pane_list
+            .panes
+            .iter()
+            .filter(|p| !p.is_background)
+            .map(|p| p.pane_id.clone())
+            .collect()
+    }
+
+    fn agent_layout_snapshot(&self) -> Option<(PaneGeometry, Vec<PaneColumn>)> {
+        let gwt_pane_id = self.gwt_pane_id.as_deref()?;
+        let geometries = list_pane_geometries(gwt_pane_id).ok()?;
+        let mut geometry_map: HashMap<String, PaneGeometry> = HashMap::new();
+        for geometry in geometries {
+            geometry_map.insert(geometry.pane_id.clone(), geometry);
+        }
+
+        let gwt_geometry = geometry_map.get(gwt_pane_id)?.clone();
+        let visible_ids: std::collections::HashSet<String> =
+            self.visible_agent_pane_ids().into_iter().collect();
+        if visible_ids.is_empty() {
+            return Some((gwt_geometry, Vec::new()));
+        }
+
+        let agent_geometries: Vec<PaneGeometry> = visible_ids
+            .iter()
+            .filter_map(|id| geometry_map.get(id))
+            .cloned()
+            .collect();
+        let columns = group_panes_by_left(&agent_geometries);
+        Some((gwt_geometry, columns))
+    }
+
+    fn rebuild_agent_columns(
+        &mut self,
+        pane_ids: &[String],
+        gwt_pane_id: &str,
+    ) -> Result<HashMap<String, String>, String> {
+        if pane_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let mut columns: Vec<Vec<String>> = Vec::new();
+        for pane_id in pane_ids {
+            if columns.last().map(|c| c.len() == 3).unwrap_or(true) {
+                columns.push(Vec::new());
+            }
+            columns.last_mut().unwrap().push(pane_id.clone());
+        }
+
+        for pane_id in pane_ids {
+            break_pane(pane_id).map_err(|e| e.to_string())?;
+        }
+
+        let mut id_map: HashMap<String, String> = HashMap::new();
+        let mut column_roots: Vec<String> = Vec::new();
+        let mut rightmost_target = gwt_pane_id.to_string();
+
+        for column in &columns {
+            let source = &column[0];
+            let joined = join_pane_to_target(source, &rightmost_target, SplitDirection::Horizontal)
+                .map_err(|e| e.to_string())?;
+            id_map.insert(source.clone(), joined.clone());
+            rightmost_target = joined.clone();
+            column_roots.push(joined);
+        }
+
+        for (column, root) in columns.iter().zip(column_roots.iter()) {
+            let mut row_target = root.clone();
+            for pane_id in column.iter().skip(1) {
+                let joined = join_pane_to_target(pane_id, &row_target, SplitDirection::Vertical)
+                    .map_err(|e| e.to_string())?;
+                id_map.insert(pane_id.clone(), joined.clone());
+                row_target = joined;
+            }
+        }
+
+        if !id_map.is_empty() {
+            for pane in &mut self.pane_list.panes {
+                if let Some(new_id) = id_map.get(&pane.pane_id) {
+                    pane.pane_id = new_id.clone();
+                }
+            }
+            for pane_id in &mut self.agent_panes {
+                if let Some(new_id) = id_map.get(pane_id) {
+                    *pane_id = new_id.clone();
+                }
+            }
+            self.branch_list
+                .update_running_agents(&self.pane_list.panes);
+        }
+
+        Ok(id_map)
+    }
+
+    fn reflow_agent_layout(&mut self, focus_pane: Option<&str>) {
+        if !self.tmux_mode.is_multi() {
+            return;
+        }
+        let Some(gwt_pane_id) = self.gwt_pane_id.clone() else {
+            return;
+        };
+
+        let visible_panes = self.visible_agent_pane_ids();
+        if visible_panes.is_empty() {
+            return;
+        }
+
+        let desired_columns = Self::desired_agent_column_count(visible_panes.len());
+        let mut focus_target = focus_pane.map(|id| id.to_string());
+
+        let Some((mut gwt_geometry, mut columns)) = self.agent_layout_snapshot() else {
+            return;
+        };
+
+        if columns.len() != desired_columns {
+            match self.rebuild_agent_columns(&visible_panes, &gwt_pane_id) {
+                Ok(id_map) => {
+                    if let Some(target) = focus_target.as_ref() {
+                        if let Some(new_id) = id_map.get(target) {
+                            focus_target = Some(new_id.clone());
+                        }
+                    }
+                }
+                Err(err) => {
+                    debug!(
+                        category = "tui",
+                        error = %err,
+                        "Failed to rebuild agent layout"
+                    );
+                    return;
+                }
+            }
+
+            if let Some((new_gwt_geometry, new_columns)) = self.agent_layout_snapshot() {
+                gwt_geometry = new_gwt_geometry;
+                columns = new_columns;
+            }
+        }
+
+        if columns.is_empty() {
+            return;
+        }
+
+        let total_width: u16 = gwt_geometry.width + columns.iter().map(|c| c.width).sum::<u16>();
+        let widths = compute_equal_splits(total_width, columns.len() + 1);
+        if let Some(width) = widths.first() {
+            if let Err(err) = resize_pane_width(&gwt_geometry.pane_id, *width) {
+                debug!(
+                    category = "tui",
+                    error = %err,
+                    "Failed to resize gwt pane width"
+                );
+            }
+        }
+
+        for (column, width) in columns.iter().zip(widths.iter().skip(1)) {
+            if let Some(pane_id) = column.pane_ids.first() {
+                if let Err(err) = resize_pane_width(pane_id, *width) {
+                    debug!(
+                        category = "tui",
+                        pane_id = %pane_id,
+                        error = %err,
+                        "Failed to resize agent column width"
+                    );
+                }
+            }
+        }
+
+        for column in &columns {
+            let heights = compute_equal_splits(column.total_height, column.pane_ids.len());
+            for (pane_id, height) in column.pane_ids.iter().zip(heights.into_iter()) {
+                if let Err(err) = resize_pane_height(pane_id, height) {
+                    debug!(
+                        category = "tui",
+                        pane_id = %pane_id,
+                        error = %err,
+                        "Failed to resize agent row height"
+                    );
+                }
+            }
+        }
+
+        if let Some(pane_id) = focus_target {
+            let _ = gwt_core::tmux::pane::select_pane(&pane_id);
         }
     }
 
@@ -1562,17 +2487,6 @@ impl Model {
             self.screen.clone()
         };
 
-        // Calculate footer height dynamically based on text length
-        let keybinds = self.get_footer_keybinds();
-        let status = self.status_message.as_deref().unwrap_or("");
-        let footer_text_len = if status.is_empty() {
-            keybinds.len() + 2 // " {} " format adds 2 spaces
-        } else {
-            keybinds.len() + status.len() + 5 // " {} | {} " format adds 5 chars
-        };
-        let inner_width = frame.area().width.saturating_sub(2) as usize; // borders
-        let footer_height = if footer_text_len > inner_width { 4 } else { 3 };
-
         // Profiles, Environment, and Logs screens don't need header
         let needs_header = !matches!(
             base_screen,
@@ -1580,12 +2494,33 @@ impl Model {
         );
         let header_height = if needs_header { 6 } else { 0 };
 
+        // BranchList screen doesn't need footer (shortcut legend removed)
+        let needs_footer = !matches!(base_screen, Screen::BranchList);
+        let footer_height = if needs_footer {
+            // Calculate footer height dynamically based on text length
+            let keybinds = self.get_footer_keybinds();
+            let status = self.status_message.as_deref().unwrap_or("");
+            let footer_text_len = if status.is_empty() {
+                keybinds.len() + 2 // " {} " format adds 2 spaces
+            } else {
+                keybinds.len() + status.len() + 5 // " {} | {} " format adds 5 chars
+            };
+            let inner_width = frame.area().width.saturating_sub(2) as usize; // borders
+            if footer_text_len > inner_width {
+                4
+            } else {
+                3
+            }
+        } else {
+            0
+        };
+
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(header_height), // Header (0 for Profiles/Environment)
                 Constraint::Min(0),                // Content
-                Constraint::Length(footer_height), // Footer (dynamic)
+                Constraint::Length(footer_height), // Footer (0 for BranchList)
             ])
             .split(frame.area());
 
@@ -1600,12 +2535,19 @@ impl Model {
 
         // Content
         match base_screen {
-            Screen::BranchList => render_branch_list(
-                &self.branch_list,
-                frame,
-                chunks[1],
-                self.status_message.as_deref(),
-            ),
+            Screen::BranchList => {
+                // Use split layout (branch list takes full area, PaneList abolished)
+                let split_areas = calculate_split_layout(chunks[1], &self.split_layout);
+
+                // Render branch list (always has focus now)
+                render_branch_list(
+                    &mut self.branch_list,
+                    frame,
+                    split_areas.branch_list,
+                    self.status_message.as_deref(),
+                    true, // Branch list always has focus
+                );
+            }
             Screen::WorktreeCreate => {
                 render_worktree_create(&self.worktree_create, frame, chunks[1])
             }
@@ -1622,8 +2564,10 @@ impl Model {
             render_confirm(&self.confirm, frame, chunks[1]);
         }
 
-        // Footer
-        self.view_footer(frame, chunks[2]);
+        // Footer (not for BranchList screen)
+        if needs_footer {
+            self.view_footer(frame, chunks[2]);
+        }
 
         // Wizard overlay (FR-044: popup on top of branch list)
         if self.wizard.visible {
@@ -1726,7 +2670,7 @@ impl Model {
         // Line 4: Mode
         let mode_spans = vec![
             Span::raw(" "),
-            Span::styled("Mode(tab): ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Mode(m):", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 self.branch_list.view_mode.label(),
                 Style::default()
@@ -2099,8 +3043,26 @@ pub fn run_with_context(
                                     model.delete_selected_env();
                                     None
                                 }
+                            } else if matches!(model.screen, Screen::BranchList)
+                                && !model.branch_list.filter_mode
+                                && model.selected_branch_has_agent()
+                            {
+                                // FR-040: d key to delete agent pane with confirmation
+                                Some(Message::ConfirmAgentTermination)
                             } else {
                                 Some(Message::Char('d'))
+                            }
+                        }
+                        (KeyCode::Char('v'), KeyModifiers::NONE) => {
+                            // Toggle agent pane visibility (show/hide)
+                            // Available when branch has running agent
+                            if matches!(model.screen, Screen::BranchList)
+                                && !model.branch_list.filter_mode
+                                && model.selected_branch_has_agent()
+                            {
+                                Some(Message::ToggleAgentPaneVisibility)
+                            } else {
+                                Some(Message::Char('v'))
                             }
                         }
                         (KeyCode::Char('x'), KeyModifiers::NONE) => {
@@ -2159,11 +3121,12 @@ pub fn run_with_context(
                                 Some(Message::Char(' '))
                             }
                         }
-                        (KeyCode::Tab, _) => {
+                        (KeyCode::Tab, _) => Some(Message::Tab),
+                        (KeyCode::Char('m'), KeyModifiers::NONE) => {
                             if matches!(model.screen, Screen::BranchList) {
                                 Some(Message::CycleViewMode)
                             } else {
-                                Some(Message::Tab)
+                                None
                             }
                         }
                         (KeyCode::Up, _) if is_key_press => Some(Message::SelectPrev),
@@ -2217,12 +3180,209 @@ pub fn run_with_context(
         }
     }
 
+    // Cleanup agent panes on exit (tmux multi-mode)
+    if model.tmux_mode.is_multi() && !model.agent_panes.is_empty() {
+        debug!(
+            category = "tui",
+            pane_count = model.agent_panes.len(),
+            "Cleaning up agent panes on exit"
+        );
+        for pane_id in &model.agent_panes {
+            if let Err(e) = kill_pane(pane_id) {
+                debug!(
+                    category = "tui",
+                    pane_id = %pane_id,
+                    error = %e,
+                    "Failed to kill agent pane"
+                );
+            }
+        }
+    }
+
     // Restore terminal
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
     Ok(pending_launch)
+}
+
+/// Build agent-specific command line arguments for tmux mode
+/// (Same logic as main.rs build_agent_args)
+fn build_agent_args_for_tmux(config: &AgentLaunchConfig) -> Vec<String> {
+    use gwt_core::agent::codex::{codex_default_args, codex_skip_permissions_flag};
+
+    let mut args = Vec::new();
+
+    match config.agent {
+        CodingAgent::ClaudeCode => {
+            // Model selection
+            if let Some(model) = &config.model {
+                if !model.is_empty() {
+                    args.push("--model".to_string());
+                    args.push(model.clone());
+                }
+            }
+
+            // Execution mode (FR-102) - same logic as single mode
+            match config.execution_mode {
+                ExecutionMode::Continue | ExecutionMode::Resume => {
+                    if let Some(session_id) = &config.session_id {
+                        args.push("--resume".to_string());
+                        args.push(session_id.clone());
+                    } else if matches!(config.execution_mode, ExecutionMode::Continue) {
+                        args.push("-c".to_string());
+                    } else {
+                        args.push("-r".to_string());
+                    }
+                }
+                ExecutionMode::Normal => {}
+            }
+
+            // Skip permissions
+            if config.skip_permissions {
+                args.push("--dangerously-skip-permissions".to_string());
+            }
+        }
+        CodingAgent::CodexCli => {
+            // Execution mode - resume subcommand must come first
+            match config.execution_mode {
+                ExecutionMode::Continue | ExecutionMode::Resume => {
+                    args.push("resume".to_string());
+                    if let Some(session_id) = &config.session_id {
+                        args.push(session_id.clone());
+                    } else if matches!(config.execution_mode, ExecutionMode::Continue) {
+                        args.push("--last".to_string());
+                    }
+                }
+                ExecutionMode::Normal => {}
+            }
+
+            // Skip permissions (Codex uses versioned flag)
+            let skip_flag = if config.skip_permissions {
+                Some(codex_skip_permissions_flag(None))
+            } else {
+                None
+            };
+            let bypass_sandbox = matches!(
+                skip_flag,
+                Some("--dangerously-bypass-approvals-and-sandbox")
+            );
+
+            let reasoning_override = config.reasoning_level.map(|r| r.label());
+            args.extend(codex_default_args(
+                config.model.as_deref(),
+                reasoning_override,
+                None, // skills_flag_version
+                bypass_sandbox,
+            ));
+
+            if let Some(flag) = skip_flag {
+                args.push(flag.to_string());
+            }
+        }
+        CodingAgent::GeminiCli => {
+            // Model selection (Gemini uses -m or --model)
+            if let Some(model) = &config.model {
+                if !model.is_empty() {
+                    args.push("-m".to_string());
+                    args.push(model.clone());
+                }
+            }
+
+            // Execution mode
+            match config.execution_mode {
+                ExecutionMode::Continue | ExecutionMode::Resume => {
+                    if let Some(session_id) = &config.session_id {
+                        args.push("--resume".to_string());
+                        args.push(session_id.clone());
+                    } else if matches!(config.execution_mode, ExecutionMode::Continue) {
+                        args.push("--continue".to_string());
+                    } else {
+                        args.push("--resume".to_string());
+                    }
+                }
+                ExecutionMode::Normal => {}
+            }
+
+            // Skip permissions
+            if config.skip_permissions {
+                args.push("-y".to_string());
+            }
+        }
+        CodingAgent::OpenCode => {
+            // Model selection
+            if let Some(model) = &config.model {
+                if !model.is_empty() {
+                    args.push("--model".to_string());
+                    args.push(model.clone());
+                }
+            }
+
+            // Execution mode
+            match config.execution_mode {
+                ExecutionMode::Continue | ExecutionMode::Resume => {
+                    if let Some(session_id) = &config.session_id {
+                        args.push("--resume".to_string());
+                        args.push(session_id.clone());
+                    } else if matches!(config.execution_mode, ExecutionMode::Continue) {
+                        args.push("--continue".to_string());
+                    } else {
+                        args.push("--resume".to_string());
+                    }
+                }
+                ExecutionMode::Normal => {}
+            }
+        }
+    }
+
+    args
+}
+
+fn is_valid_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn shell_escape(value: &str) -> String {
+    let escaped = value.replace('\'', "'\\''");
+    format!("'{}'", escaped)
+}
+
+/// Build the full tmux command string with environment variables
+fn build_tmux_command(
+    env_vars: &[(String, String)],
+    base_cmd: &str,
+    base_args: &[String],
+    agent_args: &[String],
+) -> String {
+    let mut parts = Vec::new();
+
+    // Add environment variable exports
+    for (key, value) in env_vars {
+        if !is_valid_env_name(key) {
+            continue;
+        }
+        let escaped_value = shell_escape(value);
+        parts.push(format!("export {}={}", key, escaped_value));
+    }
+
+    // Build the command with all arguments
+    let mut cmd_parts = vec![shell_escape(base_cmd)];
+    cmd_parts.extend(base_args.iter().map(|arg| shell_escape(arg)));
+    cmd_parts.extend(agent_args.iter().map(|arg| shell_escape(arg)));
+    let full_cmd = cmd_parts.join(" ");
+
+    if parts.is_empty() {
+        full_cmd
+    } else {
+        parts.push(full_cmd);
+        parts.join("; ")
+    }
 }
 
 #[cfg(test)]
@@ -2232,6 +3392,37 @@ mod tests {
     use crate::tui::screens::wizard::WizardStep;
     use crate::tui::screens::{BranchItem, BranchListState};
     use gwt_core::git::Branch;
+
+    fn sample_tool_entry(tool_id: &str) -> ToolSessionEntry {
+        ToolSessionEntry {
+            branch: "feature/test".to_string(),
+            worktree_path: Some("/tmp/worktree".to_string()),
+            tool_id: tool_id.to_string(),
+            tool_label: "Codex".to_string(),
+            session_id: None,
+            mode: None,
+            model: None,
+            reasoning_level: None,
+            skip_permissions: None,
+            tool_version: None,
+            timestamp: 0,
+        }
+    }
+
+    #[test]
+    fn test_resolve_orphaned_agent_name_prefers_session_entry() {
+        let entry = sample_tool_entry("codex-cli");
+        let resolved = resolve_orphaned_agent_name("bash", Some(&entry));
+        assert_eq!(resolved, "codex-cli");
+    }
+
+    #[test]
+    fn test_resolve_orphaned_agent_name_fallbacks() {
+        let resolved = resolve_orphaned_agent_name("bash", None);
+        assert_eq!(resolved, "bash");
+        let resolved = resolve_orphaned_agent_name("  ", None);
+        assert_eq!(resolved, "unknown");
+    }
 
     #[test]
     fn test_version_select_single_enter_advances() {

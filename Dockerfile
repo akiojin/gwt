@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y \
     jq \
     vim \
     ripgrep \
+    tmux \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -21,9 +22,12 @@ RUN curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${Z
 # Global tools (minimal - other tools are in devDependencies)
 RUN npm add -g bun@latest
 
-# Install uv/uvx
-RUN curl -fsSL https://astral.sh/uv/install.sh | bash
+# Install Rust
+RUN /bin/bash -c "set -o pipefail && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
 ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Install uv/uvx
+RUN /bin/bash -c "set -o pipefail && curl -fsSL https://astral.sh/uv/install.sh | bash"
 
 # GitHub CLIのインストール
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | gpg --dearmor -o /usr/share/keyrings/githubcli-archive-keyring.gpg && \

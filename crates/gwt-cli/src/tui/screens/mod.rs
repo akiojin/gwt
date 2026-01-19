@@ -6,8 +6,10 @@ pub mod environment;
 pub mod error;
 pub mod help;
 pub mod logs;
+pub mod pane_list;
 pub mod profiles;
 pub mod settings;
+pub mod split_layout;
 pub mod wizard;
 pub mod worktree_create;
 

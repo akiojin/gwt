@@ -11,8 +11,7 @@
 - [x] **T9948** [実装] `crates/gwt-cli/src/tui/screens/branch_list.rs` に一覧取得中のローディング表示と進捗表示用の状態/描画を追加する
 - [x] **T9949** [実装] `crates/gwt-cli/src/tui/app.rs` でブランチ一覧取得も含めてバックグラウンド更新を開始し、完了したブランチから順次反映する
 - [x] **T9950** [実装] `crates/gwt-cli/src/tui/app.rs` で`r`キーによる再取得時に進行中の一覧取得/状態更新を無効化し、最新更新のみ反映する
-- [ ] **T9951** `cargo test -p gwt-cli` と `cargo build --release` を実行し、失敗がないことを確認する
-  - `cargo test -p gwt-cli` が依存クレート解決エラー（gix-transport で `can't find crate`）で失敗
+- [x] **T9951** `cargo test -p gwt-cli` と `cargo build --release` を実行し、失敗がないことを確認する
 
 ## 追加作業: 依存インストールの非ブロッキング化 (2026-01-16)
 

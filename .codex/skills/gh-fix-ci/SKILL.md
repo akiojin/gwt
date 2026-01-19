@@ -1,15 +1,13 @@
 ---
 name: gh-fix-ci
-description: Inspect GitHub PR checks with gh, pull failing GitHub Actions logs, summarize failure context, then create a fix plan and implement after user approval. Use when a user asks to debug or fix failing PR CI/CD checks on GitHub Actions and wants a plan + code changes; for external checks (e.g., Buildkite), only report the details URL and mark them out of scope.
-metadata:
-  short-description: Fix failing Github CI actions
+description: Inspect GitHub PR checks with gh, detect merge conflicts/update-branch requirements, list reviewer feedback, pull failing GitHub Actions logs, summarize failure context, then create a fix plan and implement after user approval. Use when a user asks to debug or fix failing PR CI/CD checks on GitHub Actions and wants a plan + code changes; for external checks (e.g., Buildkite), only report the details URL and mark them out of scope.
 ---
 
 # Gh Pr Checks Plan Fix
 
 ## Overview
 
-Use gh to locate merge conflicts and failing PR checks, fetch GitHub Actions logs for actionable failures, summarize the failure snippet, then propose a fix plan and implement after explicit approval.
+Use gh to locate merge conflicts, detect base-branch updates that require "Update Branch", collect reviewer feedback, and find failing PR checks. Fetch GitHub Actions logs for actionable failures, summarize the failure snippet, then propose a fix plan and implement after explicit approval.
 - Depends on the `plan` skill for drafting and approving the fix plan.
 
 Prereq: ensure `gh` is authenticated (for example, run `gh auth login` once), then run `gh auth status` with escalated permissions (include workflow/repo scopes) so `gh` commands succeed. If sandboxing blocks `gh auth status`, rerun it with `sandbox_permissions=require_escalated`.
@@ -24,6 +22,7 @@ Prereq: ensure `gh` is authenticated (for example, run `gh auth login` once), th
 
 - `python "<path-to-skill>/scripts/inspect_pr_checks.py" --repo "." --pr "<number-or-url>"`
 - Add `--json` if you want machine-friendly output for summarization.
+- Add `--max-review-comments 30` to limit reviewer comment listings.
 
 ## Workflow
 
@@ -34,10 +33,16 @@ Prereq: ensure `gh` is authenticated (for example, run `gh auth login` once), th
 2. Resolve the PR.
    - Prefer the current branch PR: `gh pr view --json number,url`.
    - If the user provides a PR number or URL, use that directly.
-3. Check mergeability (conflicts).
-   - `gh pr view <pr> --json mergeable,mergeStateStatus,url`
+3. Check mergeability (conflicts) and update-branch requirement.
+   - `gh pr view <pr> --json mergeable,mergeStateStatus,baseRefName,headRefName,url`
    - Treat `mergeable=CONFLICTING` or `mergeStateStatus=DIRTY` as merge conflicts that must be resolved.
-4. Inspect failing checks (GitHub Actions only).
+   - Treat `mergeStateStatus=BEHIND` as "Update Branch" required because the base branch advanced.
+4. Collect reviewer feedback.
+   - Preferred: use the bundled script to list review summaries, inline review comments, and issue comments.
+   - Decide if reviewer feedback requires action before touching CI fixes:
+     - Treat `CHANGES_REQUESTED` as action required.
+     - Treat any reviewer comments (inline or issue) as action required.
+5. Inspect failing checks (GitHub Actions only).
    - Preferred: run the bundled script (handles gh field drift and job-log fallbacks):
      - `python "<path-to-skill>/scripts/inspect_pr_checks.py" --repo "." --pr "<number-or-url>"`
      - Add `--json` for machine-friendly output.
@@ -49,24 +54,24 @@ Prereq: ensure `gh` is authenticated (for example, run `gh auth login` once), th
        - `gh run view <run_id> --log`
      - If the run log says it is still in progress, fetch job logs directly:
        - `gh api "/repos/<owner>/<repo>/actions/jobs/<job_id>/logs" > "<path>"`
-5. Scope non-GitHub Actions checks.
+6. Scope non-GitHub Actions checks.
    - If `detailsUrl` is not a GitHub Actions run, label it as external and only report the URL.
    - Do not attempt Buildkite or other providers; keep the workflow lean.
-6. Summarize failures for the user.
+7. Summarize failures for the user.
    - Provide the failing check name, run URL (if any), and a concise log snippet.
    - Call out missing logs explicitly.
-7. Create a plan.
+8. Create a plan.
    - Use the `plan` skill to draft a concise plan and request approval.
-8. Implement after approval.
+9. Implement after approval.
    - Apply the approved plan, summarize diffs/tests, and ask about opening a PR.
-9. Recheck status.
+10. Recheck status.
    - After changes, suggest re-running the relevant tests and `gh pr checks` to confirm.
 
 ## Bundled Resources
 
 ### scripts/inspect_pr_checks.py
 
-Fetch merge conflicts and failing PR checks, pull GitHub Actions logs, and extract a failure snippet. Exits non-zero when conflicts or failures remain so it can be used in automation.
+Fetch merge conflicts, detect when the PR branch is behind the base branch, collect reviewer feedback, and inspect failing PR checks. Pull GitHub Actions logs, and extract a failure snippet. Exits non-zero when conflicts, update-branch requirements, reviewer-action requirements, or failures remain so it can be used in automation.
 
 Usage examples:
 - `python "<path-to-skill>/scripts/inspect_pr_checks.py" --repo "." --pr "123"`

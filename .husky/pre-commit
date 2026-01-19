@@ -1,7 +1,3 @@
 #!/usr/bin/env sh
 
-# Run cargo fmt check on staged Rust files
-cargo fmt --all -- --check
-
-# Run cargo clippy on staged changes
-cargo clippy --all-targets --all-features -- -D warnings
+# Lint runs on pre-push to match CI.

@@ -15,13 +15,14 @@ The Rust implementation covers the core CLI/TUI workflow and the Web UI (REST + 
 ## Key Features
 
 - **Modern TUI**: Built with Ratatui for a smooth, responsive terminal interface
-- **Full-screen Layout**: Persistent header with repo context, boxed branch list, and always-visible footer with keyboard shortcuts
+- **Full-screen Layout**: Persistent header with repo context and boxed branch list
 - **Smart Branch Creation**: Create feature, bugfix, hotfix, or release branches with guided prompts and automatic base branch selection
 - **Advanced Worktree Management**: Complete lifecycle management including creation, cleanup of worktree-backed branches, and path optimization
 - **Coding Agent Selection**: Choose between built-in agents (Claude Code / Codex CLI / Gemini CLI / OpenCode) or custom coding agents defined in `~/.gwt/tools.json`
 - **Coding Agent Integration**: Launch the selected agent in the worktree (Claude Code includes permission handling and post-change flow)
 - **GitHub PR Integration**: Automatic cleanup of merged pull request branches and worktrees
 - **Change Management**: Built-in support for committing, stashing, or discarding changes after development sessions
+- **tmux Multi-Agent Mode**: Run multiple coding agents in parallel using tmux panes (automatically enabled when running inside tmux)
 - **Universal Package**: Install once, use across all your projects with consistent behavior
 
 ## Installation
@@ -134,6 +135,52 @@ The tool presents an interactive interface with the following options:
 2. **Create New Branch**: Guided branch creation with type selection (feature/bugfix/hotfix/release)
 3. **Manage Worktrees**: View, open, or remove existing worktrees
 4. **Cleanup Branches**: Remove merged PR branches or branches identical to their base directly from the CLI (branches without worktrees are excluded)
+
+## Keyboard Shortcuts
+
+### Branch List Screen
+
+| Key | Action |
+|-----|--------|
+| `Enter` | Focus existing agent pane / Show hidden pane / Open wizard |
+| `d` | Delete agent pane (with confirmation) |
+| `v` | Toggle agent pane visibility (show/hide) |
+| `Space` | Select/Deselect branch |
+| `Up/Down` | Navigate branches |
+| `PageUp/PageDown` | Page navigation |
+| `Home/End` | Jump to first/last branch |
+| `f` | Enter filter mode |
+| `r` | Refresh branch list |
+| `c` | Cleanup merged branches |
+| `x` | Repair worktrees |
+| `l` | View logs |
+| `?` | Help |
+| `q` / `Ctrl+C` | Quit |
+
+### Filter Mode
+
+| Key | Action |
+|-----|--------|
+| `Esc` | Exit filter mode |
+| Type | Filter branches by name |
+
+## Status Icons Legend
+
+| Icon | Color | Meaning |
+|------|-------|---------|
+| `o` | Green | Safe - No uncommitted or unpushed changes |
+| `!` | Red | Uncommitted - Has local changes |
+| `^` | Yellow | Unpushed - Has commits not pushed to remote |
+| `*` | Yellow | Unmerged - Has unmerged changes |
+
+## Agent Status Display
+
+In the branch list, running agents are displayed on the right side:
+
+| Format | Meaning |
+|--------|---------|
+| `[/] Claude 01:23:45` | Running agent (spinner, name, uptime) |
+| `[BG] Claude 01:23:45` | Hidden (background) agent (grayed out) |
 
 ## Coding Agents
 
@@ -325,6 +372,27 @@ End users can install the latest published package (via npm or the GitHub Releas
 **Git Worktree Conflicts**: Use the cleanup feature to remove stale worktrees
 **GitHub Authentication**: Run `gh auth login` before using PR cleanup features
 **Binary Not Found**: Ensure the gwt binary is in your PATH
+**Unicode Character Corruption in Docker + tmux**: If Unicode characters (like the Claude Code logo) appear as underscores in Docker containers with tmux, start tmux with UTF-8 mode:
+
+```bash
+tmux -u
+```
+
+Or add to your `~/.tmux.conf`:
+
+```
+set -gq utf8 on
+```
+
+You may also need to install and configure locales in your Docker container:
+
+```bash
+apt-get update && apt-get install -y locales
+sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen
+locale-gen
+export LANG=en_US.UTF-8
+export LC_ALL=en_US.UTF-8
+```
 
 ### Debug Mode
 
