@@ -983,11 +983,23 @@ impl Model {
     /// When hiding: moves the pane to a separate background window
     /// When showing: joins the pane back to the GWT window
     fn toggle_agent_pane_visibility(&mut self) {
-        // Get the selected pane
-        let selected_idx = self.pane_list.selected;
+        // Prefer the pane that matches the selected branch to avoid mismatches.
+        let selected_idx = self
+            .branch_list
+            .selected_branch()
+            .and_then(|branch| {
+                self.pane_list
+                    .panes
+                    .iter()
+                    .position(|pane| pane.branch_name == branch.name)
+            })
+            .unwrap_or(self.pane_list.selected);
+
         let Some(pane) = self.pane_list.panes.get_mut(selected_idx) else {
             return;
         };
+
+        self.pane_list.selected = selected_idx;
 
         if pane.is_background {
             // Show the pane (join back to GWT window)
