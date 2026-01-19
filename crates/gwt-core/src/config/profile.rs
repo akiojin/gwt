@@ -97,16 +97,11 @@ impl AISettings {
         }
     }
 
-    /// Check if settings are enabled (API key or local endpoint)
+    /// Check if settings are enabled (endpoint/model required, API key optional)
     pub fn is_enabled(&self) -> bool {
-        let resolved = self.resolved();
-        if resolved.endpoint.trim().is_empty() || resolved.model.trim().is_empty() {
-            return false;
-        }
-        if !resolved.api_key.trim().is_empty() {
-            return true;
-        }
-        is_local_endpoint(&resolved.endpoint)
+        let endpoint = self.endpoint.trim();
+        let model = self.model.trim();
+        !endpoint.is_empty() && !model.is_empty()
     }
 }
 
@@ -152,14 +147,6 @@ fn resolve_api_key(value: &str) -> String {
         return trimmed.to_string();
     }
     std::env::var("OPENAI_API_KEY").unwrap_or_default()
-}
-
-fn is_local_endpoint(endpoint: &str) -> bool {
-    let lower = endpoint.trim().to_lowercase();
-    lower.starts_with("http://localhost")
-        || lower.starts_with("http://127.0.0.1")
-        || lower.starts_with("http://[::1]")
-        || lower.starts_with("http://0.0.0.0")
 }
 
 /// Profiles configuration stored on disk
@@ -366,6 +353,33 @@ mod tests {
             model: "llama3.2".to_string(),
         };
         assert!(settings.is_enabled());
+    }
+
+    #[test]
+    fn test_ai_settings_enabled_without_key() {
+        let settings = AISettings {
+            endpoint: "https://api.example.com/v1".to_string(),
+            api_key: "".to_string(),
+            model: "gpt-4o-mini".to_string(),
+        };
+        assert!(settings.is_enabled());
+    }
+
+    #[test]
+    fn test_ai_settings_requires_endpoint_and_model() {
+        let missing_endpoint = AISettings {
+            endpoint: "".to_string(),
+            api_key: "key".to_string(),
+            model: "gpt-4o-mini".to_string(),
+        };
+        assert!(!missing_endpoint.is_enabled());
+
+        let missing_model = AISettings {
+            endpoint: "https://api.example.com/v1".to_string(),
+            api_key: "key".to_string(),
+            model: "".to_string(),
+        };
+        assert!(!missing_model.is_enabled());
     }
 
     #[test]

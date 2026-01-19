@@ -291,7 +291,7 @@ let debug_text = format!("commits: {:?}", self.branch_summary);
 
 ### AI機能が動作しない
 
-1. APIキーが設定されているか確認
+1. APIキーが必要なエンドポイントの場合は設定されているか確認
 2. エンドポイントが正しいか確認
 3. ネットワーク接続を確認
 4. `RUST_LOG=debug` でエラーメッセージを確認

@@ -1378,6 +1378,14 @@ fn render_summary_panel(
     }
 }
 
+fn panel_switch_hint() -> Line<'static> {
+    Line::from(Span::styled(
+        " Tab: Switch ",
+        Style::default().fg(Color::DarkGray),
+    ))
+    .right_aligned()
+}
+
 fn render_details_panel(
     state: &BranchListState,
     frame: &mut Frame,
@@ -1419,7 +1427,8 @@ fn render_details_panel(
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
-            .title(title);
+            .title(title)
+            .title_bottom(panel_switch_hint());
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
@@ -1438,7 +1447,8 @@ fn render_details_panel(
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
-            .title(title);
+            .title(title)
+            .title_bottom(panel_switch_hint());
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
@@ -1462,7 +1472,8 @@ fn render_details_panel(
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
-            .title(title);
+            .title(title)
+            .title_bottom(panel_switch_hint());
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
@@ -1497,7 +1508,8 @@ fn render_session_panel(
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan))
-        .title(title);
+        .title(title)
+        .title_bottom(panel_switch_hint());
     let inner = block.inner(area);
     frame.render_widget(block, area);
 

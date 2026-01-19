@@ -329,6 +329,14 @@ pub struct SummaryPanel<'a> {
     pub tick: usize,
 }
 
+fn panel_switch_hint() -> Line<'static> {
+    Line::from(Span::styled(
+        " Tab: Switch ",
+        Style::default().fg(Color::DarkGray),
+    ))
+    .right_aligned()
+}
+
 impl<'a> SummaryPanel<'a> {
     const SPINNER_FRAMES: [&'static str; 4] = ["|", "/", "-", "\\"];
     const PANEL_HEIGHT: u16 = 12;
@@ -353,7 +361,8 @@ impl<'a> SummaryPanel<'a> {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
-            .title(title);
+            .title(title)
+            .title_bottom(panel_switch_hint());
 
         let inner_area = block.inner(area);
         frame.render_widget(block, area);

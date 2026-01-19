@@ -626,8 +626,8 @@ impl EnvironmentState {
 
         if raw_value.is_empty() {
             let placeholder = match field {
-                AiField::ApiKey => "(not set)",
-                _ => "(default)",
+                AiField::ApiKey => "(optional)",
+                _ => "(required)",
             };
             return (placeholder.to_string(), false);
         }
@@ -959,6 +959,24 @@ mod tests {
         let (key, value) = state.validate().expect("validation should pass");
         assert_eq!(key, "EMPTY");
         assert!(value.is_empty());
+    }
+
+    #[test]
+    fn test_ai_placeholders_required_optional() {
+        let state = EnvironmentState::new().with_ai_settings(
+            true,
+            "".to_string(),
+            "".to_string(),
+            "".to_string(),
+        );
+
+        let (endpoint, _) = state.ai_display_value(AiField::Endpoint);
+        let (model, _) = state.ai_display_value(AiField::Model);
+        let (api_key, _) = state.ai_display_value(AiField::ApiKey);
+
+        assert_eq!(endpoint, "(required)");
+        assert_eq!(model, "(required)");
+        assert_eq!(api_key, "(optional)");
     }
 
     #[test]

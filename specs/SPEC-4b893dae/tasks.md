@@ -147,6 +147,8 @@ US6 (AI設定) ─────────────────────�
 ### シリアライズ
 
 - [ ] **T505** [US6] T504の後に `crates/gwt-core/src/config/profile.rs` のYAMLシリアライズにai設定を追加
+- [x] **T506** [US6] T505の後に `crates/gwt-core/src/config/profile.rs` のAI有効判定を更新（エンドポイント/モデル必須、APIキー任意）
+- [x] **T507** [US6] T506の後に `crates/gwt-cli/src/tui/screens/environment.rs` のAIプレースホルダーを必須/任意表記に更新
 
 **チェックポイント**: プロファイルYAMLにai設定が保存・読み込みできる
 
@@ -171,6 +173,7 @@ US6 (AI設定) ─────────────────────�
 - [ ] **T555** [US4a] T554の後に `crates/gwt-cli/src/tui/screens/branch_list.rs` でタブ状態に応じてタイトルを切り替え（`Details` / `Session`）
 - [ ] **T556** [US4a] T555の後に `crates/gwt-cli/src/tui/screens/branch_list.rs` でタブ状態に応じて描画メソッドを切り替え
 - [ ] **T557** [US4a] T556の後に `crates/gwt-cli/src/tui/screens/branch_list.rs` でブランチ切り替え時にタブ状態を維持
+- [x] **T558** [US4a] T557の後に ブランチ詳細/セッション要約パネル枠へTab切り替えヒントを追加
 
 **チェックポイント**: Tabキーでタブ切り替えが動作する
 
