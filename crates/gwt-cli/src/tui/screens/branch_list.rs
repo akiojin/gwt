@@ -1116,8 +1116,9 @@ fn render_branch_row(
     running_agent: Option<&AgentPane>,
     width: u16,
 ) -> ListItem<'static> {
+    // Only show selection icons when at least one branch is selected
+    let show_selection = !selected_set.is_empty();
     let is_checked = selected_set.contains(&branch.name);
-    let selection_icon = if is_checked { "[*]" } else { "[ ]" };
     let (worktree_icon, worktree_color) = branch.worktree_icon();
     // FR-031b: Pass spinner_frame for pending safety check
     let (safety_icon, safety_color) = branch.safety_icon(Some(spinner_frame));
@@ -1129,9 +1130,10 @@ fn render_branch_row(
         &branch.name
     };
 
-    // Calculate left side width: "[*] " + worktree + " " + safety + " " + branch_name
-    // selection_icon(3) + space(1) + worktree_icon(1) + space(1) + safety_icon + space(1) + name
-    let left_width = 3 + 1 + 1 + 1 + safety_icon.len() + 1 + display_name.width();
+    // Calculate left side width: optionally "[*] " + worktree + " " + safety + " " + branch_name
+    // selection_icon(3) + space(1) if showing selection, plus worktree_icon(1) + space(1) + safety_icon + space(1) + name
+    let selection_width = if show_selection { 4 } else { 0 }; // "[*] " or nothing
+    let left_width = selection_width + 1 + 1 + safety_icon.len() + 1 + display_name.width();
 
     // Build right side (agent info) and calculate its width
     let (right_spans, right_width): (Vec<Span>, usize) = if let Some(agent) = running_agent {
@@ -1187,22 +1189,29 @@ fn render_branch_row(
     };
 
     // Build the complete spans
-    let mut spans = vec![
-        Span::styled(
+    let mut spans = Vec::new();
+
+    // Only add selection icon when in selection mode
+    if show_selection {
+        let selection_icon = if is_checked { "[*]" } else { "[ ]" };
+        spans.push(Span::styled(
             selection_icon,
             if is_checked && (branch.has_changes || branch.has_unpushed) {
                 Style::default().fg(Color::Red)
             } else {
                 Style::default()
             },
-        ),
-        Span::raw(" "),
+        ));
+        spans.push(Span::raw(" "));
+    }
+
+    spans.extend([
         Span::styled(worktree_icon, Style::default().fg(worktree_color)),
         Span::raw(" "),
         Span::styled(safety_icon, Style::default().fg(safety_color)),
         Span::raw(" "),
         Span::raw(display_name.to_string()),
-    ];
+    ]);
 
     // Add padding and right side if there's agent info
     if !right_spans.is_empty() {
