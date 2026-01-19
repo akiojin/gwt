@@ -325,8 +325,6 @@ impl<'a> Spinner<'a> {
 pub struct SummaryPanel<'a> {
     /// Branch summary data
     pub summary: &'a gwt_core::git::BranchSummary,
-    /// Whether AI settings are enabled
-    pub ai_enabled: bool,
     /// Animation tick for spinner
     pub tick: usize,
 }
@@ -336,16 +334,7 @@ impl<'a> SummaryPanel<'a> {
     const PANEL_HEIGHT: u16 = 12;
 
     pub fn new(summary: &'a gwt_core::git::BranchSummary) -> Self {
-        Self {
-            summary,
-            ai_enabled: false,
-            tick: 0,
-        }
-    }
-
-    pub fn with_ai_enabled(mut self, enabled: bool) -> Self {
-        self.ai_enabled = enabled;
-        self
+        Self { summary, tick: 0 }
     }
 
     pub fn with_tick(mut self, tick: usize) -> Self {
@@ -408,13 +397,6 @@ impl<'a> SummaryPanel<'a> {
         // Meta section
         sections.push(self.build_meta_section());
 
-        // AI Summary section (only if enabled and available)
-        if self.ai_enabled {
-            if let Some(ai_section) = self.build_ai_section() {
-                sections.push(ai_section);
-            }
-        }
-
         sections
     }
 
@@ -441,8 +423,7 @@ impl<'a> SummaryPanel<'a> {
         } else {
             // T204: Truncate long commit messages with "..."
             const MAX_MSG_LEN: usize = 50;
-            let max_commits = if self.ai_enabled { 3 } else { 5 };
-            for commit in self.summary.commits.iter().take(max_commits) {
+            for commit in self.summary.commits.iter().take(5) {
                 let hash_span = Span::styled(
                     commit.hash.chars().take(7).collect::<String>(),
                     Style::default().fg(Color::Cyan),
@@ -578,34 +559,6 @@ impl<'a> SummaryPanel<'a> {
 
         let count = lines.len();
         (lines, count)
-    }
-
-    fn build_ai_section(&self) -> Option<(Vec<Line<'static>>, usize)> {
-        // Don't show section if AI had an error
-        if self.summary.errors.ai_summary.is_some() {
-            return None;
-        }
-
-        let mut lines = Vec::new();
-        lines.push(Line::from(Span::styled(
-            "Summary:",
-            Style::default().fg(Color::Yellow),
-        )));
-
-        if self.summary.loading.ai_summary {
-            let spinner = Self::SPINNER_FRAMES[self.tick % Self::SPINNER_FRAMES.len()];
-            lines.push(Line::from(format!("  {} Generating...", spinner)));
-        } else if let Some(summary) = &self.summary.ai_summary {
-            for line in summary.iter().take(3) {
-                lines.push(Line::from(format!("  {}", line)));
-            }
-        } else {
-            // No summary available yet
-            return None;
-        }
-
-        let count = lines.len();
-        Some((lines, count))
     }
 
     /// Truncate a string to fit within a given width, adding "..." if truncated

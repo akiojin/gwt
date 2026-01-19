@@ -7,13 +7,16 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use gwt_core::ai::{summarize_commits, AIClient, AIError};
+use gwt_core::ai::{
+    summarize_session, AgentType, AIClient, AIError, ClaudeSessionParser, CodexSessionParser,
+    GeminiSessionParser, OpenCodeSessionParser, SessionParseError, SessionParser,
+};
 use gwt_core::config::get_branch_tool_history;
 use gwt_core::config::{
     save_session_entry, AISettings, Profile, ProfilesConfig, ResolvedAISettings, ToolSessionEntry,
 };
 use gwt_core::error::GwtError;
-use gwt_core::git::{Branch, CommitEntry, PrCache, Repository};
+use gwt_core::git::{Branch, PrCache, Repository};
 use gwt_core::tmux::{
     break_pane, compute_equal_splits, get_current_session, group_panes_by_left,
     join_pane_to_target, kill_pane, launcher, list_pane_geometries, resize_pane_height,
@@ -38,9 +41,9 @@ use super::screens::{
     collect_os_env, render_branch_list, render_confirm, render_environment, render_error,
     render_help, render_logs, render_profiles, render_settings, render_wizard,
     render_worktree_create, BranchItem, BranchListState, BranchType, CodingAgent, ConfirmState,
-    EnvironmentState, ErrorState, ExecutionMode, HelpState, LogsState, ProfilesState,
-    QuickStartEntry, ReasoningLevel, SettingsState, WizardConfirmResult, WizardState,
-    WorktreeCreateState,
+    DetailPanelTab, EnvironmentState, ErrorState, ExecutionMode, HelpState, LogsState,
+    ProfilesState, QuickStartEntry, ReasoningLevel, SettingsState, WizardConfirmResult,
+    WizardState, WorktreeCreateState,
 };
 
 fn resolve_orphaned_agent_name(
@@ -63,6 +66,20 @@ fn resolve_orphaned_agent_name(
 
 fn format_ai_error(err: AIError) -> String {
     err.to_string()
+}
+
+fn session_parser_for_tool(tool_id: &str) -> Option<Box<dyn SessionParser>> {
+    let agent = AgentType::from_tool_id(tool_id)?;
+    match agent {
+        AgentType::ClaudeCode => ClaudeSessionParser::with_default_home()
+            .map(|parser| Box::new(parser) as Box<dyn SessionParser>),
+        AgentType::CodexCli => CodexSessionParser::with_default_home()
+            .map(|parser| Box::new(parser) as Box<dyn SessionParser>),
+        AgentType::GeminiCli => GeminiSessionParser::with_default_home()
+            .map(|parser| Box::new(parser) as Box<dyn SessionParser>),
+        AgentType::OpenCode => OpenCodeSessionParser::with_default_home()
+            .map(|parser| Box::new(parser) as Box<dyn SessionParser>),
+    }
 }
 
 /// Configuration for launching a coding agent after TUI exits
@@ -151,16 +168,19 @@ struct WorktreeStatusTarget {
     path: PathBuf,
 }
 
-struct AiSummaryTask {
+struct SessionSummaryTask {
     branch: String,
-    repo_path: PathBuf,
-    commits: Option<Vec<CommitEntry>>,
+    session_id: String,
+    tool_id: String,
 }
 
-struct AiSummaryUpdate {
+struct SessionSummaryUpdate {
     branch: String,
-    summary: Option<Vec<String>>,
+    session_id: String,
+    summary: Option<gwt_core::ai::SessionSummary>,
     error: Option<String>,
+    mtime: Option<std::time::SystemTime>,
+    missing: bool,
 }
 
 struct BranchListUpdate {
@@ -236,10 +256,10 @@ pub struct Model {
     safety_rx: Option<Receiver<SafetyUpdate>>,
     /// Worktree status update receiver
     worktree_status_rx: Option<Receiver<WorktreeStatusUpdate>>,
-    /// AI summary update sender
-    ai_summary_tx: Option<Sender<AiSummaryUpdate>>,
-    /// AI summary update receiver
-    ai_summary_rx: Option<Receiver<AiSummaryUpdate>>,
+    /// Session summary update sender
+    session_summary_tx: Option<Sender<SessionSummaryUpdate>>,
+    /// Session summary update receiver
+    session_summary_rx: Option<Receiver<SessionSummaryUpdate>>,
     /// Tmux mode (Single or Multi)
     tmux_mode: TmuxMode,
     /// Tmux session name (when in multi mode)
@@ -256,6 +276,8 @@ pub struct Model {
     last_pane_update: Option<Instant>,
     /// Last time spinner was updated (for 250ms refresh)
     last_spinner_update: Option<Instant>,
+    /// Last time session polling ran (30s interval)
+    last_session_poll: Option<Instant>,
 }
 
 /// Screen types
@@ -373,8 +395,8 @@ impl Model {
             pr_title_rx: None,
             safety_rx: None,
             worktree_status_rx: None,
-            ai_summary_tx: None,
-            ai_summary_rx: None,
+            session_summary_tx: None,
+            session_summary_rx: None,
             tmux_mode: TmuxMode::detect(),
             tmux_session: None,
             gwt_pane_id: None,
@@ -383,11 +405,12 @@ impl Model {
             split_layout: SplitLayoutState::new(),
             last_pane_update: None,
             last_spinner_update: None,
+            last_session_poll: None,
         };
 
-        let (ai_tx, ai_rx) = mpsc::channel();
-        model.ai_summary_tx = Some(ai_tx);
-        model.ai_summary_rx = Some(ai_rx);
+        let (session_tx, session_rx) = mpsc::channel();
+        model.session_summary_tx = Some(session_tx);
+        model.session_summary_rx = Some(session_rx);
 
         // Initialize tmux session if in multi mode
         if model.tmux_mode.is_multi() {
@@ -511,6 +534,8 @@ impl Model {
                     // Set tool usage from TypeScript session history (FR-070)
                     if let Some(entry) = tool_usage_map.get(&b.name) {
                         item.last_tool_usage = Some(entry.format_tool_usage());
+                        item.last_tool_id = Some(entry.tool_id.clone());
+                        item.last_session_id = entry.session_id.clone();
                         // FR-041: Compare git commit timestamp and session timestamp,
                         // use the newer one
                         let session_timestamp = entry.timestamp / 1000; // Convert ms to seconds
@@ -705,93 +730,76 @@ impl Model {
     fn refresh_branch_summary(&mut self) {
         self.branch_list.ai_enabled = self.active_ai_enabled();
         self.branch_list.update_branch_summary(&self.repo_root);
-        self.maybe_request_ai_summary_for_selected();
+        if self.branch_list.detail_panel_tab == DetailPanelTab::Session {
+            self.maybe_request_session_summary_for_selected(false);
+        }
     }
 
-    fn maybe_request_ai_summary_for_selected(&mut self) {
+    fn maybe_request_session_summary_for_selected(&mut self, force: bool) {
         if !self.branch_list.ai_enabled {
             return;
         }
 
-        let Some(branch) = self.branch_list.selected_branch() else {
-            return;
+        let (branch_name, session_id, tool_id) = match self.branch_list.selected_branch() {
+            Some(branch) => (
+                branch.name.clone(),
+                branch.last_session_id.clone(),
+                branch.last_tool_id.clone(),
+            ),
+            None => return,
         };
-        if !branch.has_worktree {
-            return;
-        }
-        if self.branch_list.ai_summary_cached(&branch.name)
-            || self.branch_list.ai_summary_inflight(&branch.name)
-        {
-            return;
-        }
-        let Some(settings) = self.active_ai_settings() else {
-            return;
-        };
-        let commits = self
-            .branch_list
-            .branch_summary
-            .as_ref()
-            .map(|summary| summary.commits.clone())
-            .unwrap_or_default();
-        if commits.is_empty() {
-            return;
-        }
-        let repo_path = branch
-            .worktree_path
-            .as_ref()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| self.repo_root.clone());
-        let task = AiSummaryTask {
-            branch: branch.name.clone(),
-            repo_path,
-            commits: Some(commits),
-        };
-        self.spawn_ai_summaries(vec![task], settings);
-    }
 
-    fn prefetch_ai_summaries(&mut self) {
-        if !self.branch_list.ai_enabled {
+        let Some(session_id) = session_id else {
+            self.branch_list.mark_session_missing(&branch_name);
+            return;
+        };
+        let Some(tool_id) = tool_id else {
+            self.branch_list.mark_session_missing(&branch_name);
+            return;
+        };
+        self.branch_list.clear_session_missing(&branch_name);
+
+        if !force {
+            if self.branch_list.session_summary_cached(&branch_name)
+                || self.branch_list.session_summary_inflight(&branch_name)
+            {
+                return;
+            }
+        } else if self.branch_list.session_summary_inflight(&branch_name) {
             return;
         }
+
         let Some(settings) = self.active_ai_settings() else {
             return;
         };
 
-        let tasks: Vec<AiSummaryTask> = self
-            .branch_list
-            .branches
-            .iter()
-            .filter(|branch| branch.has_worktree)
-            .filter(|branch| {
-                !self.branch_list.ai_summary_cached(&branch.name)
-                    && !self.branch_list.ai_summary_inflight(&branch.name)
-            })
-            .filter_map(|branch| {
-                branch.worktree_path.as_ref().map(|path| AiSummaryTask {
-                    branch: branch.name.clone(),
-                    repo_path: PathBuf::from(path),
-                    commits: None,
-                })
-            })
-            .collect();
-
-        self.spawn_ai_summaries(tasks, settings);
+        let task = SessionSummaryTask {
+            branch: branch_name,
+            session_id,
+            tool_id,
+        };
+        self.spawn_session_summaries(vec![task], settings);
     }
 
-    fn spawn_ai_summaries(&mut self, tasks: Vec<AiSummaryTask>, settings: ResolvedAISettings) {
+    fn spawn_session_summaries(
+        &mut self,
+        tasks: Vec<SessionSummaryTask>,
+        settings: ResolvedAISettings,
+    ) {
         if tasks.is_empty() {
             return;
         }
-        let Some(tx) = &self.ai_summary_tx else {
+        let Some(tx) = &self.session_summary_tx else {
             return;
         };
 
         for task in &tasks {
-            self.branch_list.mark_ai_summary_inflight(&task.branch);
+            self.branch_list
+                .mark_session_summary_inflight(&task.branch);
             if let Some(current) = self.branch_list.branch_summary.as_mut() {
                 if current.branch_name == task.branch {
-                    current.loading.ai_summary = true;
-                    current.errors.ai_summary = None;
+                    current.loading.session_summary = true;
+                    current.errors.session_summary = None;
                 }
             }
         }
@@ -803,10 +811,13 @@ impl Model {
                 Err(err) => {
                     let message = err.to_string();
                     for task in tasks {
-                        let _ = tx.send(AiSummaryUpdate {
+                        let _ = tx.send(SessionSummaryUpdate {
                             branch: task.branch,
+                            session_id: task.session_id,
                             summary: None,
                             error: Some(message.clone()),
+                            mtime: None,
+                            missing: false,
                         });
                     }
                     return;
@@ -814,37 +825,74 @@ impl Model {
             };
 
             for task in tasks {
-                let commits = match task.commits {
-                    Some(commits) => commits,
-                    None => match Repository::open(&task.repo_path)
-                        .and_then(|repo| repo.get_commit_log(5))
-                    {
-                        Ok(commits) => commits,
-                        Err(err) => {
-                            let _ = tx.send(AiSummaryUpdate {
-                                branch: task.branch,
-                                summary: None,
-                                error: Some(err.to_string()),
-                            });
-                            continue;
-                        }
-                    },
+                let parser = match session_parser_for_tool(&task.tool_id) {
+                    Some(parser) => parser,
+                    None => {
+                        let _ = tx.send(SessionSummaryUpdate {
+                            branch: task.branch,
+                            session_id: task.session_id,
+                            summary: None,
+                            error: Some("Unsupported agent session".to_string()),
+                            mtime: None,
+                            missing: true,
+                        });
+                        continue;
+                    }
                 };
 
-                let result = summarize_commits(&client, &task.branch, &commits);
-                match result {
-                    Ok(summary) => {
-                        let _ = tx.send(AiSummaryUpdate {
+                let path = parser.session_file_path(&task.session_id);
+                let metadata = match std::fs::metadata(&path) {
+                    Ok(meta) => meta,
+                    Err(err) => {
+                        let missing = err.kind() == std::io::ErrorKind::NotFound;
+                        let _ = tx.send(SessionSummaryUpdate {
                             branch: task.branch,
+                            session_id: task.session_id,
+                            summary: None,
+                            error: Some(err.to_string()),
+                            mtime: None,
+                            missing,
+                        });
+                        continue;
+                    }
+                };
+
+                let mtime = metadata.modified().ok();
+                let parsed = match parser.parse(&task.session_id) {
+                    Ok(parsed) => parsed,
+                    Err(err) => {
+                        let missing = matches!(err, SessionParseError::FileNotFound(_));
+                        let _ = tx.send(SessionSummaryUpdate {
+                            branch: task.branch,
+                            session_id: task.session_id,
+                            summary: None,
+                            error: Some(err.to_string()),
+                            mtime,
+                            missing,
+                        });
+                        continue;
+                    }
+                };
+
+                match summarize_session(&client, &parsed) {
+                    Ok(summary) => {
+                        let _ = tx.send(SessionSummaryUpdate {
+                            branch: task.branch,
+                            session_id: task.session_id,
                             summary: Some(summary),
                             error: None,
+                            mtime,
+                            missing: false,
                         });
                     }
                     Err(err) => {
-                        let _ = tx.send(AiSummaryUpdate {
+                        let _ = tx.send(SessionSummaryUpdate {
                             branch: task.branch,
+                            session_id: task.session_id,
                             summary: None,
                             error: Some(format_ai_error(err)),
+                            mtime,
+                            missing: false,
                         });
                     }
                 }
@@ -852,27 +900,124 @@ impl Model {
         });
     }
 
-    fn apply_ai_summary_updates(&mut self) {
-        let Some(rx) = &self.ai_summary_rx else {
+    fn apply_session_summary_updates(&mut self) {
+        let Some(rx) = &self.session_summary_rx else {
             return;
         };
 
         loop {
             match rx.try_recv() {
                 Ok(update) => {
+                    if update.missing {
+                        self.branch_list.mark_session_missing(&update.branch);
+                        self.branch_list.apply_session_error(
+                            &update.branch,
+                            update.error.unwrap_or_else(|| "No session".to_string()),
+                        );
+                        continue;
+                    }
+
                     if let Some(summary) = update.summary {
-                        self.branch_list.apply_ai_summary(&update.branch, summary);
+                        let mtime = update.mtime.unwrap_or(SystemTime::now());
+                        self.branch_list.apply_session_summary(
+                            &update.branch,
+                            &update.session_id,
+                            summary,
+                            mtime,
+                        );
                     } else if let Some(error) = update.error {
-                        self.branch_list.apply_ai_error(&update.branch, error);
+                        self.branch_list.apply_session_error(&update.branch, error);
                     }
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
-                    self.ai_summary_rx = None;
+                    self.session_summary_rx = None;
                     break;
                 }
             }
         }
+    }
+
+    fn poll_session_summary_if_needed(&mut self) {
+        if self.branch_list.detail_panel_tab != DetailPanelTab::Session {
+            self.last_session_poll = None;
+            return;
+        }
+
+        if !self.branch_list.ai_enabled {
+            return;
+        }
+
+        let now = Instant::now();
+        if let Some(last) = self.last_session_poll {
+            if now.duration_since(last) < Duration::from_secs(30) {
+                return;
+            }
+        }
+        self.last_session_poll = Some(now);
+
+        let (branch_name, session_id, tool_id) = match self.branch_list.selected_branch() {
+            Some(branch) => (
+                branch.name.clone(),
+                branch.last_session_id.clone(),
+                branch.last_tool_id.clone(),
+            ),
+            None => return,
+        };
+
+        let Some(session_id) = session_id else {
+            self.branch_list.mark_session_missing(&branch_name);
+            return;
+        };
+        let Some(tool_id) = tool_id else {
+            self.branch_list.mark_session_missing(&branch_name);
+            return;
+        };
+
+        if self.branch_list.session_summary_inflight(&branch_name) {
+            return;
+        }
+
+        let Some(settings) = self.active_ai_settings() else {
+            return;
+        };
+
+        let parser = match session_parser_for_tool(&tool_id) {
+            Some(parser) => parser,
+            None => {
+                self.branch_list.mark_session_missing(&branch_name);
+                return;
+            }
+        };
+
+        let path = parser.session_file_path(&session_id);
+        let metadata = match std::fs::metadata(&path) {
+            Ok(meta) => meta,
+            Err(err) => {
+                if err.kind() == std::io::ErrorKind::NotFound {
+                    self.branch_list.mark_session_missing(&branch_name);
+                }
+                return;
+            }
+        };
+        self.branch_list.clear_session_missing(&branch_name);
+        let Some(mtime) = metadata.modified().ok() else {
+            return;
+        };
+
+        if !self
+            .branch_list
+            .session_summary_stale(&branch_name, &session_id, mtime)
+        {
+            return;
+        }
+
+        let task = SessionSummaryTask {
+            branch: branch_name,
+            session_id,
+            tool_id,
+        };
+        self.spawn_session_summaries(vec![task], settings);
     }
 
     /// Reconnect to orphaned agent panes on startup (FR-060~062)
@@ -968,13 +1113,17 @@ impl Model {
 
         match rx.try_recv() {
             Ok(update) => {
-                let ai_cache = self.branch_list.clone_ai_cache();
-                let ai_inflight = self.branch_list.clone_ai_inflight();
+                let session_cache = self.branch_list.clone_session_cache();
+                let session_inflight = self.branch_list.clone_session_inflight();
+                let session_missing = self.branch_list.clone_session_missing();
+                let detail_tab = self.branch_list.detail_panel_tab;
                 let mut branch_list = BranchListState::new().with_branches(update.branches);
+                branch_list.detail_panel_tab = detail_tab;
                 branch_list.active_profile = self.profiles_config.active.clone();
                 branch_list.ai_enabled = self.active_ai_enabled();
-                branch_list.set_ai_cache(ai_cache);
-                branch_list.set_ai_inflight(ai_inflight);
+                branch_list.set_session_cache(session_cache);
+                branch_list.set_session_inflight(session_inflight);
+                branch_list.set_session_missing(session_missing);
                 branch_list.working_directory = Some(self.repo_root.display().to_string());
                 branch_list.version = Some(env!("CARGO_PKG_VERSION").to_string());
                 self.branch_list = branch_list;
@@ -989,7 +1138,6 @@ impl Model {
                 self.spawn_safety_checks(update.safety_targets, update.base_branch);
                 self.spawn_worktree_status_checks(update.worktree_targets);
                 self.spawn_pr_title_fetch(update.branch_names);
-                self.prefetch_ai_summaries();
 
                 self.worktree_create =
                     WorktreeCreateState::new().with_base_branches(update.base_branches);
@@ -1763,7 +1911,8 @@ impl Model {
                 self.apply_pr_title_updates();
                 self.apply_safety_updates();
                 self.apply_worktree_updates();
-                self.apply_ai_summary_updates();
+                self.apply_session_summary_updates();
+                self.poll_session_summary_if_needed();
                 // FR-033: Update pane list every 1 second in tmux multi mode
                 self.update_pane_list();
             }
@@ -2097,10 +2246,21 @@ impl Model {
                 }
             }
             Message::Tab => {
-                if let Screen::Settings = self.screen {
-                    self.settings.next_category()
+                match self.screen {
+                    Screen::Settings => self.settings.next_category(),
+                    Screen::BranchList => {
+                        if !self.branch_list.filter_mode {
+                            self.branch_list.detail_panel_tab.toggle();
+                            self.refresh_branch_summary();
+                            if self.branch_list.detail_panel_tab == DetailPanelTab::Session {
+                                self.maybe_request_session_summary_for_selected(false);
+                            } else {
+                                self.last_session_poll = None;
+                            }
+                        }
+                    }
+                    _ => {}
                 }
-                // Tab no longer toggles focus - PaneList panel is abolished
             }
             Message::CycleFilter => {
                 if matches!(self.screen, Screen::Logs) {
@@ -3857,6 +4017,8 @@ mod tests {
                 is_unmerged: false,
                 last_commit_timestamp: None,
                 last_tool_usage: None,
+                last_tool_id: None,
+                last_session_id: None,
                 is_selected: false,
                 pr_title: None,
             },
@@ -3877,6 +4039,8 @@ mod tests {
                 is_unmerged: false,
                 last_commit_timestamp: None,
                 last_tool_usage: None,
+                last_tool_id: None,
+                last_session_id: None,
                 is_selected: false,
                 pr_title: None,
             },

@@ -11,7 +11,7 @@ use thiserror::Error;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-const MAX_TOKENS: u32 = 150;
+const MAX_TOKENS: u32 = 400;
 const TEMPERATURE: f32 = 0.3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
