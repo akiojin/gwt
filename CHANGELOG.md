@@ -1,6 +1,45 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [6.2.0] - 2026-01-19
+
+### Miscellaneous Tasks
+
+- Sync main into develop
+- Disable MD060 table style rule in markdownlint
+
+## [6.1.0] - 2026-01-17
+
+### Bug Fixes
+
+- Rust移行時に誤って削除されたentrypoint.shを復元 (#648)
+- マージ済み判定を git merge-base --is-ancestor に変更 (#649)
+- Unpushedアイコンを!から^に変更して区別化 (#651)
+- **tmux:** エージェント終了時のペイン自動削除とフォーカス移動を修正 (#656)
+- 複数のバグ修正とDocker+tmux文字化け対策 (#657)
+- **docker:** DockerイメージにRustをインストール
+- **tui:** エージェント一覧のブランチ名表示と選択履歴保存のバグを修正 (#658)
+- **tui:** ブランチ一覧のスクロール判定を実際のビューポート高さに対応 (#659)
+- **tui:** TUI起動時の自動orphanクリーンアップを削除 (#662)
+- Auto-normalize toolId in TS sessions (#666)
+- Restore single mode outside tmux (#667)
+
+### Features
+
+- **tmux:** Tmuxマルチモードサポートを追加 (#650)
+- **tmux:** Tmuxマルチモードサポートを追加 (#652)
+- GIT_DIR環境変数の書き換えをブロックするフックを追加 (#653)
+- **tmux:** Tmuxマルチモードサポートの実装 (#654)
+- フックスクリプトをプラグイン形式に移行 (#655)
+- **tui:** Tmuxペイン表示/非表示切り替え機能を追加 (#661)
+- Gh-fix-ciにレビューコメント調査を追加
+- **tmux:** エージェント状態表示とセッション管理を実装 (#660)
+
+### Miscellaneous Tasks
+
+- Dockerにtmuxを追加
+- 未使用のhomebrewディレクトリを削除
+
 ## [6.0.9] - 2026-01-17
 
 ### Bug Fixes
