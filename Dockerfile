@@ -23,11 +23,11 @@ RUN curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${Z
 RUN npm add -g bun@latest
 
 # Install Rust
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+RUN /bin/bash -c "set -o pipefail && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
 ENV PATH="/root/.cargo/bin:${PATH}"
 
 # Install uv/uvx
-RUN curl -fsSL https://astral.sh/uv/install.sh | bash
+RUN /bin/bash -c "set -o pipefail && curl -fsSL https://astral.sh/uv/install.sh | bash"
 
 # GitHub CLIのインストール
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | gpg --dearmor -o /usr/share/keyrings/githubcli-archive-keyring.gpg && \

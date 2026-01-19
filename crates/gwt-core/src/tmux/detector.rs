@@ -153,9 +153,13 @@ pub fn check_tmux_available() -> TmuxResult<TmuxVersion> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_is_inside_tmux_with_env_var() {
+        let _guard = ENV_MUTEX.lock().unwrap();
         // Save original value
         let original = std::env::var("TMUX").ok();
 
@@ -173,6 +177,7 @@ mod tests {
 
     #[test]
     fn test_is_inside_tmux_without_env_var() {
+        let _guard = ENV_MUTEX.lock().unwrap();
         // Save original value
         let original = std::env::var("TMUX").ok();
 
@@ -236,6 +241,7 @@ mod tests {
 
     #[test]
     fn test_get_current_session_outside_tmux() {
+        let _guard = ENV_MUTEX.lock().unwrap();
         // Save original value
         let original = std::env::var("TMUX").ok();
 
@@ -261,6 +267,7 @@ mod tests {
 
     #[test]
     fn test_get_current_pane_id_outside_tmux() {
+        let _guard = ENV_MUTEX.lock().unwrap();
         // Save original value
         let original = std::env::var("TMUX").ok();
 

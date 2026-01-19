@@ -18,7 +18,7 @@ crates/gwt-core/src/tmux/
 ├── logging.rs       -> tests/tmux_logging_tests.rs
 └── error.rs         -> tests/tmux_error_tests.rs
 
-crates/gwt-cli/src/
+crates/gwt-core/src/
 ├── execution_mode.rs -> tests/execution_mode_tests.rs
 └── ui/
     ├── pane_list.rs  -> tests/ui_pane_list_tests.rs
@@ -340,9 +340,43 @@ mod tests {
 
 ---
 
+### 9. エージェント列/行レイアウトテスト（FR-033〜FR-035）
+
+**ファイル**: `crates/gwt-core/src/tmux/pane.rs` / `crates/gwt-cli/src/tui/app.rs`
+
+**テスト観点**:
+
+- 右側列内の最大3行制約が守られる
+- 3行到達時に新規列が作成される
+- 列内の高さが均等化される
+- 列数に応じて幅が均等化される
+
+---
+
+### 10. エージェント表示名短縮テスト（FR-026）
+
+**ファイル**: `crates/gwt-core/src/agent/mod.rs` / `crates/gwt-cli/src/tui/screens/wizard.rs`
+
+**テスト観点**:
+
+- Codex CLI → Codex の表示名統一
+- Gemini CLI → Gemini の表示名統一
+
+---
+
+### 11. ペイン表示時のmouse有効化テスト（FR-093）
+
+**ファイル**: `crates/gwt-core/src/tmux/pane.rs`
+
+**テスト観点**:
+
+- ペイン表示時に `tmux set -g mouse on` が実行される
+
+---
+
 ## インテグレーションテスト
 
-### 9. tmuxセッション統合テスト
+### 12. tmuxセッション統合テスト
 
 **ファイル**: `tests/tmux_integration_tests.rs`
 

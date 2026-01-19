@@ -561,7 +561,17 @@ impl Branch {
         // Exit code 0 means branch is an ancestor (merged)
         // Exit code 1 means branch is not an ancestor (not merged)
         // Other exit codes indicate errors
-        let is_merged = output.status.success();
+        let is_merged = match output.status.code() {
+            Some(0) => true,
+            Some(1) => false,
+            code => {
+                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                return Err(GwtError::GitOperationFailed {
+                    operation: "merge-base".to_string(),
+                    details: format!("exit code {:?}: {}", code, stderr),
+                });
+            }
+        };
 
         debug!(
             category = "git",

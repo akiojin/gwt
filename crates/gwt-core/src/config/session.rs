@@ -18,7 +18,7 @@ pub struct Session {
     /// Agent ID (e.g., "claude-code", "codex-cli")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
-    /// Agent display label (e.g., "Claude Code", "Codex CLI")
+    /// Agent display label (e.g., "Claude Code", "Codex")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_label: Option<String>,
     /// Agent session ID (for resume)

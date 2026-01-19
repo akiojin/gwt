@@ -64,10 +64,10 @@ pub fn extract_repo_name(session_name: &str) -> Option<&str> {
 
     let without_prefix = session_name.strip_prefix("gwt-")?;
 
-    // Remove any numeric suffix (e.g., "-2", "-3")
+    // Remove small numeric suffixes used for session de-duplication (e.g., "-2", "-12")
     if let Some(pos) = without_prefix.rfind('-') {
         let suffix = &without_prefix[pos + 1..];
-        if suffix.chars().all(|c| c.is_ascii_digit()) {
+        if suffix.chars().all(|c| c.is_ascii_digit()) && suffix.len() <= 2 {
             return Some(&without_prefix[..pos]);
         }
     }
@@ -137,6 +137,7 @@ mod tests {
         assert_eq!(extract_repo_name("gwt-myrepo-2"), Some("myrepo"));
         assert_eq!(extract_repo_name("gwt-my-repo"), Some("my-repo"));
         assert_eq!(extract_repo_name("gwt-my-repo-3"), Some("my-repo"));
+        assert_eq!(extract_repo_name("gwt-feature-123"), Some("feature-123"));
         assert_eq!(extract_repo_name("other-session"), None);
     }
 }
