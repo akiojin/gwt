@@ -449,7 +449,11 @@ impl<'a> SummaryPanel<'a> {
                 let truncated_msg = if commit.message.chars().count() > MAX_MSG_LEN {
                     format!(
                         "{}...",
-                        commit.message.chars().take(MAX_MSG_LEN - 3).collect::<String>()
+                        commit
+                            .message
+                            .chars()
+                            .take(MAX_MSG_LEN - 3)
+                            .collect::<String>()
                     )
                 } else {
                     commit.message.clone()
