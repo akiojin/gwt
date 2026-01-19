@@ -159,7 +159,6 @@ crates/gwt-core/src/
 
 - ペイン表示時に `tmux set -g mouse on` が実行される
 - join-paneの`-P`/`-F`未対応環境でも再表示が成功し、pane_idが維持される
-
 ---
 
 ### 13. 再接続判別テスト（FR-063）
