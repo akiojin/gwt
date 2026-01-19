@@ -31,4 +31,3 @@
 
 - [ ] **T901** [TEST] `scripts/verify-husky-hooks.sh` を追加し、フック内容と `prepare` 設定を検証
 - [ ] **T902** [TEST] `package.json` に `lint:husky` スクリプトを追加し、T901を実行可能にする
-

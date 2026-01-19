@@ -113,4 +113,3 @@ If you changed the layout or pane numbering, update the target pane ID according
 ```text
 tmux bind-key -n C-g select-pane -t 0    # focus gwt pane (pane 0)
 ```
-
