@@ -86,12 +86,24 @@ fn short_tool_label(tool_id: Option<&str>, tool_label: &str) -> String {
 
 fn canonical_tool_id(tool_id: &str) -> String {
     let trimmed = tool_id.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
     let lower = trimmed.to_lowercase();
     match lower.as_str() {
-        "claude" | "claude-code" => "claude-code".to_string(),
-        "codex" | "codex-cli" => "codex-cli".to_string(),
-        "gemini" | "gemini-cli" => "gemini-cli".to_string(),
-        "opencode" | "open-code" => "opencode".to_string(),
+        "claude" | "claude-code" => return "claude-code".to_string(),
+        "codex" | "codex-cli" => return "codex-cli".to_string(),
+        "gemini" | "gemini-cli" => return "gemini-cli".to_string(),
+        "opencode" | "open-code" => return "opencode".to_string(),
+        _ => {}
+    }
+
+    let normalized: String = lower.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    match normalized.as_str() {
+        "claude" | "claudecode" => "claude-code".to_string(),
+        "codex" | "codexcli" => "codex-cli".to_string(),
+        "gemini" | "geminicli" => "gemini-cli".to_string(),
+        "opencode" => "opencode".to_string(),
         _ => trimmed.to_string(),
     }
 }
@@ -553,6 +565,15 @@ mod tests {
             Some(value) => std::env::set_var("HOME", value),
             None => std::env::remove_var("HOME"),
         }
+    }
+
+    #[test]
+    fn test_canonical_tool_id_accepts_label_variants() {
+        assert_eq!(canonical_tool_id("Codex CLI"), "codex-cli");
+        assert_eq!(canonical_tool_id("codex cli"), "codex-cli");
+        assert_eq!(canonical_tool_id("Claude Code"), "claude-code");
+        assert_eq!(canonical_tool_id("claude code"), "claude-code");
+        assert_eq!(canonical_tool_id("Gemini CLI"), "gemini-cli");
     }
 
     #[test]
