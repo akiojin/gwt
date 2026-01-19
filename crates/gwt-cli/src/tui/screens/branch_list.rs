@@ -937,6 +937,13 @@ impl BranchListState {
         self.session_summary_cache.get(branch).is_some()
     }
 
+    pub fn set_session_identity(&mut self, branch: &str, tool_id: String, session_id: String) {
+        if let Some(item) = self.branches.iter_mut().find(|b| b.name == branch) {
+            item.last_tool_id = Some(tool_id);
+            item.last_session_id = Some(session_id);
+        }
+    }
+
     pub fn session_summary(&self, branch: &str) -> Option<&gwt_core::ai::SessionSummary> {
         self.session_summary_cache.get(branch)
     }

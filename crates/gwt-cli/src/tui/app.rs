@@ -27,7 +27,7 @@ use gwt_core::TmuxMode;
 use ratatui::{prelude::*, widgets::*};
 use std::collections::HashMap;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -740,24 +740,48 @@ impl Model {
             return;
         }
 
-        let (branch_name, session_id, tool_id) = match self.branch_list.selected_branch() {
-            Some(branch) => (
-                branch.name.clone(),
-                branch.last_session_id.clone(),
-                branch.last_tool_id.clone(),
-            ),
-            None => return,
+        let Some(branch) = self.branch_list.selected_branch().cloned() else {
+            return;
         };
 
-        let Some(session_id) = session_id else {
+        let branch_name = branch.name.clone();
+        let mut session_id = branch.last_session_id.clone();
+        let mut tool_id = branch.last_tool_id.clone();
+
+        if tool_id.is_none() {
+            if let Some(agent) = self.branch_list.get_running_agent(&branch.name) {
+                tool_id = Some(agent.agent_name.clone());
+            }
+        }
+
+        if session_id.is_none() || self.branch_list.is_session_missing(&branch_name) {
+            if let (Some(tool_id), Some(worktree_path)) =
+                (tool_id.as_ref(), branch.worktree_path.as_deref())
+            {
+                if let Some(found) =
+                    crate::detect_session_id_for_tool(tool_id, Path::new(worktree_path))
+                {
+                    session_id = Some(found);
+                }
+            }
+        }
+
+        let (Some(session_id), Some(tool_id)) = (session_id, tool_id) else {
             self.branch_list.mark_session_missing(&branch_name);
             return;
         };
-        let Some(tool_id) = tool_id else {
-            self.branch_list.mark_session_missing(&branch_name);
-            return;
-        };
+        let canonical_tool_id = canonical_tool_id(&tool_id);
         self.branch_list.clear_session_missing(&branch_name);
+        if branch.last_session_id.as_deref() != Some(&session_id)
+            || branch.last_tool_id.as_deref() != Some(&canonical_tool_id)
+        {
+            self.branch_list.set_session_identity(
+                &branch_name,
+                canonical_tool_id.clone(),
+                session_id.clone(),
+            );
+            self.persist_detected_session(&branch, &canonical_tool_id, &session_id);
+        }
 
         if !force {
             if self.branch_list.session_summary_cached(&branch_name)
@@ -776,9 +800,37 @@ impl Model {
         let task = SessionSummaryTask {
             branch: branch_name,
             session_id,
-            tool_id,
+            tool_id: canonical_tool_id,
         };
         self.spawn_session_summaries(vec![task], settings);
+    }
+
+    fn persist_detected_session(
+        &self,
+        branch: &BranchItem,
+        tool_id: &str,
+        session_id: &str,
+    ) {
+        if branch.worktree_path.is_none() {
+            return;
+        }
+        let entry = ToolSessionEntry {
+            branch: branch.name.clone(),
+            worktree_path: branch.worktree_path.clone(),
+            tool_id: tool_id.to_string(),
+            tool_label: crate::tui::normalize_agent_label(tool_id),
+            session_id: Some(session_id.to_string()),
+            mode: None,
+            model: None,
+            reasoning_level: None,
+            skip_permissions: None,
+            tool_version: None,
+            timestamp: SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0),
+        };
+        let _ = save_session_entry(&self.repo_root, entry);
     }
 
     fn spawn_session_summaries(
@@ -3696,6 +3748,23 @@ pub fn run_with_context(
     terminal.show_cursor()?;
 
     Ok(pending_launch)
+}
+
+fn canonical_tool_id(tool_id: &str) -> String {
+    let lower = tool_id.trim().to_lowercase();
+    if lower.contains("claude") {
+        return "claude-code".to_string();
+    }
+    if lower.contains("codex") {
+        return "codex-cli".to_string();
+    }
+    if lower.contains("gemini") {
+        return "gemini-cli".to_string();
+    }
+    if lower.contains("opencode") || lower.contains("open-code") {
+        return "opencode".to_string();
+    }
+    tool_id.trim().to_string()
 }
 
 /// Build agent-specific command line arguments for tmux mode
