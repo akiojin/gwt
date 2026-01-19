@@ -7,7 +7,9 @@
   },
   "type": "module",
   "scripts": {
-    "postinstall": "node scripts/postinstall.js"
+    "postinstall": "node scripts/postinstall.js",
+    "prepare": "bunx husky install",
+    "lint:husky": "bash scripts/verify-husky-hooks.sh"
   },
   "keywords": [
     "git",
