@@ -1984,6 +1984,9 @@ impl Model {
                         auto_install_deps,
                     };
 
+                    // Refresh data to reflect branch/worktree changes (FR-008b)
+                    self.refresh_data();
+
                     // In multi mode, launch in tmux pane without quitting TUI
                     if self.tmux_mode.is_multi() && self.gwt_pane_id.is_some() {
                         // FR-010: Check 1 branch = 1 pane constraint
