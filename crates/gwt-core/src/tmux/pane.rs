@@ -1094,7 +1094,7 @@ mod tests {
     // T-TEST-030: シングルアクティブペイン制約テスト
     #[test]
     fn test_get_active_pane_single() {
-        let panes = vec![
+        let panes = [
             AgentPane {
                 pane_id: "1".to_string(),
                 branch_name: "feature/a".to_string(),
@@ -1122,7 +1122,7 @@ mod tests {
 
     #[test]
     fn test_no_active_pane_all_background() {
-        let panes = vec![
+        let panes = [
             AgentPane {
                 pane_id: "1".to_string(),
                 branch_name: "feature/a".to_string(),
@@ -1150,7 +1150,7 @@ mod tests {
     // シングルアクティブ制約: 複数のアクティブがある場合は不正状態
     #[test]
     fn test_single_active_constraint_violation() {
-        let panes = vec![
+        let panes = [
             AgentPane {
                 pane_id: "1".to_string(),
                 branch_name: "feature/a".to_string(),
