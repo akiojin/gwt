@@ -84,6 +84,33 @@ fn short_tool_label(tool_id: Option<&str>, tool_label: &str) -> String {
     tool_label.to_string()
 }
 
+fn canonical_tool_id(tool_id: &str) -> String {
+    let trimmed = tool_id.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let lower = trimmed.to_lowercase();
+    match lower.as_str() {
+        "claude" | "claude-code" => return "claude-code".to_string(),
+        "codex" | "codex-cli" => return "codex-cli".to_string(),
+        "gemini" | "gemini-cli" => return "gemini-cli".to_string(),
+        "opencode" | "open-code" => return "opencode".to_string(),
+        _ => {}
+    }
+
+    let normalized: String = lower
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+    match normalized.as_str() {
+        "claude" | "claudecode" => "claude-code".to_string(),
+        "codex" | "codexcli" => "codex-cli".to_string(),
+        "gemini" | "geminicli" => "gemini-cli".to_string(),
+        "opencode" => "opencode".to_string(),
+        _ => trimmed.to_string(),
+    }
+}
+
 /// TypeScript session data structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -131,7 +158,7 @@ pub fn load_ts_session(repo_root: &Path) -> Option<TsSessionData> {
     let session_path = get_ts_session_path(repo_root);
     if let Ok(content) = std::fs::read_to_string(&session_path) {
         if let Ok(session) = serde_json::from_str(&content) {
-            return Some(session);
+            return Some(normalize_and_persist_session(session_path, session));
         }
     }
 
@@ -140,7 +167,7 @@ pub fn load_ts_session(repo_root: &Path) -> Option<TsSessionData> {
     let repo_name = repo_root.file_name()?.to_string_lossy().to_string();
     let session_dir = session_path.parent()?;
     let prefix = format!("{}_", repo_name);
-    let mut latest: Option<TsSessionData> = None;
+    let mut latest: Option<(TsSessionData, PathBuf)> = None;
 
     let entries = std::fs::read_dir(session_dir).ok()?;
     for entry in entries.flatten() {
@@ -162,21 +189,55 @@ pub fn load_ts_session(repo_root: &Path) -> Option<TsSessionData> {
         };
         let should_update = latest
             .as_ref()
-            .map(|current| session.timestamp > current.timestamp)
+            .map(|current| session.timestamp > current.0.timestamp)
             .unwrap_or(true);
         if should_update {
-            latest = Some(session);
+            latest = Some((session, path));
         }
     }
 
-    latest
+    latest.map(|(session, path)| normalize_and_persist_session(path, session))
+}
+
+fn normalize_and_persist_session(
+    session_path: PathBuf,
+    mut session: TsSessionData,
+) -> TsSessionData {
+    let mut changed = false;
+
+    if let Some(last_used_tool) = session.last_used_tool.as_mut() {
+        let canonical = canonical_tool_id(last_used_tool);
+        if canonical != *last_used_tool {
+            *last_used_tool = canonical;
+            changed = true;
+        }
+    }
+
+    for entry in session.history.iter_mut() {
+        let canonical = canonical_tool_id(&entry.tool_id);
+        if canonical != entry.tool_id {
+            entry.tool_id = canonical;
+            changed = true;
+        }
+    }
+
+    if changed {
+        if let Ok(content) = serde_json::to_string_pretty(&session) {
+            let _ = std::fs::write(&session_path, content);
+        }
+    }
+
+    session
 }
 
 /// Save session entry to TypeScript-compatible session file (FR-069)
 ///
 /// Adds a new entry to the session history and updates last-used fields.
 /// Creates the session file if it doesn't exist.
-pub fn save_session_entry(repo_root: &Path, entry: ToolSessionEntry) -> Result<(), std::io::Error> {
+pub fn save_session_entry(
+    repo_root: &Path,
+    mut entry: ToolSessionEntry,
+) -> Result<(), std::io::Error> {
     // Resolve to main repo root for consistency
     let main_root = crate::git::get_main_repo_root(repo_root);
     let session_path = get_ts_session_path(&main_root);
@@ -194,6 +255,11 @@ pub fn save_session_entry(repo_root: &Path, entry: ToolSessionEntry) -> Result<(
         repository_root: main_root.to_string_lossy().to_string(),
         history: Vec::new(),
     });
+
+    let canonical_id = canonical_tool_id(&entry.tool_id);
+    if canonical_id != entry.tool_id {
+        entry.tool_id = canonical_id;
+    }
 
     // Update last-used fields
     session.last_worktree_path = entry.worktree_path.clone();
@@ -241,6 +307,12 @@ pub fn get_last_tool_usage_map(repo_root: &Path) -> HashMap<String, ToolSessionE
 
     // Process history entries
     for entry in session.history {
+        let mut entry = entry;
+        let canonical_id = canonical_tool_id(&entry.tool_id);
+        if canonical_id != entry.tool_id {
+            entry.tool_id = canonical_id;
+        }
+
         let existing = map.get(&entry.branch);
         if existing.is_none() || existing.unwrap().timestamp < entry.timestamp {
             map.insert(entry.branch.clone(), entry);
@@ -252,10 +324,12 @@ pub fn get_last_tool_usage_map(repo_root: &Path) -> HashMap<String, ToolSessionE
         if let (Some(branch), Some(worktree_path)) =
             (session.last_branch, session.last_worktree_path)
         {
+            let fallback_tool_id =
+                canonical_tool_id(&session.last_used_tool.clone().unwrap_or_default());
             let entry = ToolSessionEntry {
                 branch: branch.clone(),
                 worktree_path: Some(worktree_path),
-                tool_id: session.last_used_tool.clone().unwrap_or_default(),
+                tool_id: fallback_tool_id.clone(),
                 tool_label: session
                     .tool_label
                     .or(session.last_used_tool)
@@ -302,6 +376,12 @@ pub fn get_branch_tool_history(repo_root: &Path, branch: &str) -> Vec<ToolSessio
 
     for entry in history {
         if entry.branch == branch {
+            let mut entry = entry;
+            let canonical_id = canonical_tool_id(&entry.tool_id);
+            if canonical_id != entry.tool_id {
+                entry.tool_id = canonical_id;
+            }
+
             let existing = tool_map.get(&entry.tool_id);
             if existing.is_none() || existing.unwrap().timestamp < entry.timestamp {
                 tool_map.insert(entry.tool_id.clone(), entry);
@@ -312,7 +392,7 @@ pub fn get_branch_tool_history(repo_root: &Path, branch: &str) -> Vec<ToolSessio
     if tool_map.is_empty() {
         if let Some(last_branch_name) = last_branch {
             if last_branch_name == branch {
-                let fallback_tool_id = last_used_tool.unwrap_or_default();
+                let fallback_tool_id = canonical_tool_id(&last_used_tool.unwrap_or_default());
                 let label = tool_label
                     .or_else(|| {
                         if fallback_tool_id.is_empty() {
@@ -446,6 +526,143 @@ mod tests {
         assert_eq!(entry.model.as_deref(), Some("gpt-5.2-codex"));
         assert_eq!(entry.tool_version.as_deref(), Some("latest"));
         assert_eq!(entry.session_id.as_deref(), Some("session-123"));
+
+        match prev_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    fn test_get_branch_tool_history_canonicalizes_tool_id() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let prev_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", temp.path());
+
+        let repo_root = temp.path().join("sample-repo");
+        std::fs::create_dir_all(&repo_root).unwrap();
+
+        let session = TsSessionData {
+            last_worktree_path: None,
+            last_branch: None,
+            last_used_tool: None,
+            last_session_id: None,
+            tool_label: None,
+            tool_version: None,
+            model: None,
+            timestamp: 1_700_000_000_000,
+            repository_root: repo_root.to_string_lossy().to_string(),
+            history: vec![
+                ToolSessionEntry {
+                    branch: "feature/test".to_string(),
+                    worktree_path: None,
+                    tool_id: "claude".to_string(),
+                    tool_label: "Claude".to_string(),
+                    session_id: None,
+                    mode: None,
+                    model: Some("default".to_string()),
+                    reasoning_level: None,
+                    skip_permissions: None,
+                    tool_version: Some("latest".to_string()),
+                    timestamp: 2_000,
+                },
+                ToolSessionEntry {
+                    branch: "feature/test".to_string(),
+                    worktree_path: None,
+                    tool_id: "claude-code".to_string(),
+                    tool_label: "Claude Code".to_string(),
+                    session_id: None,
+                    mode: None,
+                    model: Some("default".to_string()),
+                    reasoning_level: None,
+                    skip_permissions: None,
+                    tool_version: Some("latest".to_string()),
+                    timestamp: 1_000,
+                },
+            ],
+        };
+
+        let session_path = get_ts_session_path(&repo_root);
+        if let Some(parent) = session_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let content = serde_json::to_string_pretty(&session).unwrap();
+        std::fs::write(&session_path, content).unwrap();
+
+        let entries = get_branch_tool_history(&repo_root, "feature/test");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].tool_id, "claude-code");
+        assert_eq!(entries[0].timestamp, 2_000);
+
+        match prev_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    fn test_canonical_tool_id_accepts_label_variants() {
+        assert_eq!(canonical_tool_id("Codex CLI"), "codex-cli");
+        assert_eq!(canonical_tool_id("codex cli"), "codex-cli");
+        assert_eq!(canonical_tool_id("Claude Code"), "claude-code");
+        assert_eq!(canonical_tool_id("claude code"), "claude-code");
+        assert_eq!(canonical_tool_id("Gemini CLI"), "gemini-cli");
+    }
+
+    #[test]
+    fn test_load_ts_session_persists_canonical_tool_ids() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let prev_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", temp.path());
+
+        let repo_root = temp.path().join("sample-repo");
+        std::fs::create_dir_all(&repo_root).unwrap();
+
+        let session = TsSessionData {
+            last_worktree_path: Some("/path/to/wt".to_string()),
+            last_branch: Some("feature/test".to_string()),
+            last_used_tool: Some("Claude Code".to_string()),
+            last_session_id: None,
+            tool_label: Some("Claude Code".to_string()),
+            tool_version: Some("latest".to_string()),
+            model: Some("default".to_string()),
+            timestamp: 1_700_000_000_000,
+            repository_root: repo_root.to_string_lossy().to_string(),
+            history: vec![ToolSessionEntry {
+                branch: "feature/test".to_string(),
+                worktree_path: Some("/path/to/wt".to_string()),
+                tool_id: "Codex CLI".to_string(),
+                tool_label: "Codex CLI".to_string(),
+                session_id: None,
+                mode: None,
+                model: Some("gpt-5.2-codex".to_string()),
+                reasoning_level: None,
+                skip_permissions: None,
+                tool_version: Some("latest".to_string()),
+                timestamp: 2_000,
+            }],
+        };
+
+        let session_path = get_ts_session_path(&repo_root);
+        if let Some(parent) = session_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let content = serde_json::to_string_pretty(&session).unwrap();
+        std::fs::write(&session_path, content).unwrap();
+
+        let loaded = load_ts_session(&repo_root).unwrap();
+        assert_eq!(loaded.last_used_tool.as_deref(), Some("claude-code"));
+        assert_eq!(loaded.history[0].tool_id, "codex-cli");
+
+        let updated = std::fs::read_to_string(&session_path).unwrap();
+        let updated_session: TsSessionData = serde_json::from_str(&updated).unwrap();
+        assert_eq!(
+            updated_session.last_used_tool.as_deref(),
+            Some("claude-code")
+        );
+        assert_eq!(updated_session.history[0].tool_id, "codex-cli");
 
         match prev_home {
             Some(value) => std::env::set_var("HOME", value),
