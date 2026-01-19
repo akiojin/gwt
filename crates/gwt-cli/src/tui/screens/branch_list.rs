@@ -325,8 +325,10 @@ impl BranchItem {
 /// Spinner animation frames (for loading indicators)
 const SPINNER_FRAMES: &[char] = &['|', '/', '-', '\\'];
 
-/// Active agent spinner (BRAILLE_ONE)
-const ACTIVE_SPINNER_FRAMES: &[char] = &['⠁', '⠂', '⠄', '⠂'];
+/// Active agent spinner (BLOCK rising/falling)
+const ACTIVE_SPINNER_FRAMES: &[char] = &[
+    '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█', '▇', '▆', '▅', '▄', '▃', '▂',
+];
 
 /// Background agent spinner (BLACK_CIRCLE)
 const BG_SPINNER_FRAMES: &[char] = &['◑', '◒', '◐', '◓'];
