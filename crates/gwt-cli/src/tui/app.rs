@@ -895,11 +895,12 @@ impl Model {
 
         for pane in &removed_panes {
             // Save session entry for terminated agent (FR-072)
+            let tool_label = crate::tui::normalize_agent_label(&pane.agent_name);
             let session_entry = ToolSessionEntry {
                 branch: pane.branch_name.clone(),
                 worktree_path: None,
                 tool_id: pane.agent_name.clone(),
-                tool_label: pane.agent_name.clone(),
+                tool_label,
                 session_id: None,
                 mode: None,
                 model: None,

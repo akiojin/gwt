@@ -28,6 +28,7 @@ urlencoding.workspace = true
 which = "7"
 libc.workspace = true
 arboard = "3"
+unicode-width = "0.1"
 
 [dev-dependencies]
 tempfile.workspace = true
