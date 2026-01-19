@@ -1,6 +1,24 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [6.0.9] - 2026-01-17
+
+### Bug Fixes
+
+- Arm64でplaywright-novncのcompose起動を可能にする (#640)
+- ログビューア・プロファイル画面のUI改善 (#641)
+- Upstream未設定ブランチの安全ステータス判定を修正 (#644)
+- Stdoutを継承してエージェントのTTY検出を修正 (#645)
+
+### Features
+
+- ログ出力カバー率を改善しエージェント出力キャプチャを追加 (#642)
+- History.jsonlパーサーを追加しセッションID取得を改善
+
+### Miscellaneous Tasks
+
+- Code-simplifierプラグインを追加 (#643)
+
 ## [6.0.8] - 2026-01-16
 
 ### Documentation
