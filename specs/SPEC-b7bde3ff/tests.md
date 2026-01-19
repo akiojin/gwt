@@ -162,9 +162,19 @@ crates/gwt-core/src/
 
 ---
 
+### 13. 再接続判別テスト（FR-063）
+
+**ファイル**: `crates/gwt-core/src/tmux/pane.rs` / `crates/gwt-cli/src/tui/app.rs`
+
+**テスト観点**:
+- pane_current_command がシェルでも再接続対象になる
+- 直近履歴の toolId を優先して表示名に反映する
+
+---
+
 ## インテグレーションテスト
 
-### 13. tmuxセッション統合テスト
+### 14. tmuxセッション統合テスト
 
 **ファイル**: `tests/tmux_integration_tests.rs`
 
