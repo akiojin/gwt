@@ -8,7 +8,7 @@ use std::process::Command;
 use std::time::SystemTime;
 
 use super::error::{TmuxError, TmuxResult};
-use super::pane::{select_pane, AgentPane, SplitDirection};
+use super::pane::{enable_mouse, select_pane, AgentPane, SplitDirection};
 use tracing::debug;
 
 /// Configuration for launching an agent in a tmux pane
@@ -94,6 +94,9 @@ fn build_split_window_args(
 /// Creates a new pane by splitting the current window, sets up the environment,
 /// and executes the agent command.
 pub fn launch_agent_in_pane(config: &TmuxLaunchConfig) -> TmuxResult<TmuxLaunchResult> {
+    // Ensure mouse mode is on when creating a new pane
+    let _ = enable_mouse();
+
     // Build the command string with environment setup
     let env_setup = build_env_setup(&config.env, &config.env_remove);
     let cmd_parts: Vec<String> = std::iter::once(config.command.as_str())
@@ -396,6 +399,9 @@ fn launch_in_pane_with_split(
     command: &str,
     direction: SplitDirection,
 ) -> TmuxResult<String> {
+    // Ensure mouse mode is on when creating a new pane
+    let _ = enable_mouse();
+
     // Build args with environment variables passed via -e option
     let env_vars = get_locale_env_vars();
     let args = build_split_window_args(target_pane, working_dir, &env_vars, direction);

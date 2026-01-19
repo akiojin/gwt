@@ -445,7 +445,7 @@ pub fn hide_pane(pane_id: &str, window_name: &str) -> TmuxResult<String> {
 }
 
 /// Enable tmux mouse support (global option)
-fn enable_mouse() -> TmuxResult<()> {
+pub(crate) fn enable_mouse() -> TmuxResult<()> {
     let output = Command::new("tmux")
         .args(["set", "-g", "mouse", "on"])
         .output()
@@ -720,16 +720,14 @@ pub fn detect_orphaned_panes(
                 let worktree_norm = normalize_path(worktree_str.as_ref());
                 if current_norm == worktree_norm {
                     // Found a match - create AgentPane
-                    // Detect agent name from the command
-                    if let Some(agent_name) = detect_agent_name(&pane.current_command) {
-                        agents.push(AgentPane::new(
-                            pane.pane_id.clone(),
-                            branch_name.clone(),
-                            agent_name,
-                            SystemTime::now(), // We don't know the actual start time
-                            pane.pane_pid,
-                        ));
-                    }
+                    let agent_name = resolve_agent_name(&pane.current_command);
+                    agents.push(AgentPane::new(
+                        pane.pane_id.clone(),
+                        branch_name.clone(),
+                        agent_name,
+                        SystemTime::now(), // We don't know the actual start time
+                        pane.pane_pid,
+                    ));
                     break;
                 }
             }
@@ -763,6 +761,17 @@ fn detect_agent_name(command: &str) -> Option<String> {
     } else {
         None // Not a recognized agent
     }
+}
+
+fn resolve_agent_name(current_command: &str) -> String {
+    detect_agent_name(current_command).unwrap_or_else(|| {
+        let trimmed = current_command.trim();
+        if trimmed.is_empty() {
+            "unknown".to_string()
+        } else {
+            trimmed.to_string()
+        }
+    })
 }
 
 #[cfg(test)]
@@ -855,6 +864,22 @@ mod tests {
         assert_eq!(panes.len(), 2);
         assert_eq!(panes[0].current_path, None);
         assert_eq!(panes[1].current_path, None);
+    }
+
+    #[test]
+    fn test_resolve_agent_name_prefers_known_agent() {
+        assert_eq!(resolve_agent_name("codex"), "codex".to_string());
+        assert_eq!(resolve_agent_name("Claude"), "claude".to_string());
+    }
+
+    #[test]
+    fn test_resolve_agent_name_falls_back_to_command() {
+        assert_eq!(resolve_agent_name("bash"), "bash".to_string());
+    }
+
+    #[test]
+    fn test_resolve_agent_name_uses_unknown_when_empty() {
+        assert_eq!(resolve_agent_name("  "), "unknown".to_string());
     }
 
     #[test]

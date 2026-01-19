@@ -1,6 +1,6 @@
 {
   "name": "@akiojin/gwt",
-  "version": "6.1.0",
+  "version": "6.2.0",
   "description": "Interactive Git worktree manager with Coding Agent selection (Claude Code / Codex CLI / Gemini CLI)",
   "bin": {
     "gwt": "bin/gwt.js"
@@ -8,7 +8,7 @@
   "type": "module",
   "scripts": {
     "postinstall": "node scripts/postinstall.js",
-    "prepare": "bunx husky install",
+    "prepare": "test -n \"$CI\" || npx husky install",
     "lint:husky": "bash scripts/verify-husky-hooks.sh"
   },
   "keywords": [
