@@ -64,6 +64,7 @@ specs/SPEC-f47db390/
 - Quick Startで「前回設定で続きから/新規」を選択した場合はExecution Mode/Skip Permissions/セッション選択をスキップし、履歴設定を適用して即時起動する。
 - Quick Startの履歴が空でも`lastBranch/lastUsedTool`が一致する場合は単一履歴として扱い、Quick Startを表示する。
 - Quick Startの履歴は`toolId`を正規化して集約し、同一ツールの重複表示を防ぐ。
+- TypeScriptセッション読み込み時に`toolId`/`lastUsedTool`の表記ゆれを正規化し、差分があればセッションファイルへ書き戻して履歴を更新する（ベストエフォート）。
 - Web UIのブランチ詳細で最終セッションIDを表示し、Continue/Resumeで自動的に適用する。
 
 ## フェーズ2: タスク生成

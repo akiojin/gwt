@@ -66,6 +66,12 @@ description: "Continue/Resumeで正しいセッションを再開するための
 
 - [x] **T0617** `[Test]` `crates/gwt-core/src/config/ts_session.rs` にtoolId正規化で履歴が重複しないことを検証するテストを追加
 - [x] **T0618** `[実装]` `crates/gwt-core/src/config/ts_session.rs` でtoolIdを正規化して保存・読込し、Quick Startの集約キーに反映する
+
+## 追加作業: TSセッション履歴の正規化マイグレーション (2026-01-19)
+
+- [ ] **T0619** `[Test]` `crates/gwt-core/src/config/ts_session.rs` で`load_ts_session`が表記ゆれを正規化し、セッションファイルへ書き戻すことを検証するテストを追加
+- [x] **T0619** `[Test]` `crates/gwt-core/src/config/ts_session.rs` で`load_ts_session`が表記ゆれを正規化し、セッションファイルへ書き戻すことを検証するテストを追加
+- [x] **T0620** `[実装]` `crates/gwt-core/src/config/ts_session.rs` で読み込み時に`toolId`/`lastUsedTool`を正規化し、差分があればセッションファイルを自動更新する
 ## フェーズ7: ブランチクイックスタート (P1)
 - [x] **T0501** `[US5]` ブランチ選択後に前回ツール/モデル/セッションIDを提示するQuick Start画面を追加（Inkコンポーネント新設）。
 - [x] **T0502** `[US5]` 履歴が存在する場合はQuick Startへ遷移し、選択結果に応じてツール/モデル/セッションIDを事前セットするロジックを実装（履歴なしは従来フロー）。
