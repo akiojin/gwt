@@ -6,8 +6,8 @@ use gwt_core::agent::codex::{codex_default_args, codex_skip_permissions_flag};
 use gwt_core::agent::get_command_version;
 use gwt_core::config::{save_session_entry, Settings, ToolSessionEntry};
 use gwt_core::error::GwtError;
-use gwt_core::tmux::is_inside_tmux;
 use gwt_core::worktree::WorktreeManager;
+use gwt_core::TmuxMode;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -67,11 +67,13 @@ fn run() -> Result<(), GwtError> {
     match cli.command {
         Some(cmd) => handle_command(cmd, &repo_root, &settings),
         None => {
-            // Interactive TUI mode - tmux is required (FR-001, FR-002)
-            if !is_inside_tmux() {
-                eprintln!("gwt requires tmux. Please run inside a tmux session.");
-                std::process::exit(1);
-            }
+            // Interactive TUI mode - single or multi based on tmux detection
+            let tmux_mode = detect_tui_tmux_mode();
+            debug!(
+                category = "tui",
+                mode = %tmux_mode,
+                "Detected tmux mode for TUI"
+            );
 
             if let Ok(manager) = WorktreeManager::new(&repo_root) {
                 let _ = manager.auto_cleanup_orphans();
@@ -100,6 +102,10 @@ fn run() -> Result<(), GwtError> {
             Ok(())
         }
     }
+}
+
+fn detect_tui_tmux_mode() -> TmuxMode {
+    TmuxMode::detect()
 }
 
 fn handle_command(cmd: Commands, repo_root: &PathBuf, settings: &Settings) -> Result<(), GwtError> {
@@ -1608,8 +1614,11 @@ fn describe_ntstatus(code: u32) -> Option<&'static str> {
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::Mutex;
     use std::thread::sleep;
     use tempfile::TempDir;
+
+    static TMUX_ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     fn sample_config(agent: CodingAgent) -> AgentLaunchConfig {
         AgentLaunchConfig {
@@ -1639,6 +1648,36 @@ mod tests {
             mode: ExecutionMode::Continue.label().to_string(),
             reasoning_level: None,
             skip_permissions: false,
+        }
+    }
+
+    #[test]
+    fn test_detect_tui_tmux_mode_single_outside_tmux() {
+        let _guard = TMUX_ENV_MUTEX.lock().unwrap();
+        let original = std::env::var("TMUX").ok();
+
+        std::env::remove_var("TMUX");
+        let mode = detect_tui_tmux_mode();
+        assert_eq!(mode, TmuxMode::Single);
+
+        if let Some(val) = original {
+            std::env::set_var("TMUX", val);
+        }
+    }
+
+    #[test]
+    fn test_detect_tui_tmux_mode_multi_inside_tmux() {
+        let _guard = TMUX_ENV_MUTEX.lock().unwrap();
+        let original = std::env::var("TMUX").ok();
+
+        std::env::set_var("TMUX", "/tmp/tmux-1000/default,12345,0");
+        let mode = detect_tui_tmux_mode();
+        assert_eq!(mode, TmuxMode::Multi);
+
+        if let Some(val) = original {
+            std::env::set_var("TMUX", val);
+        } else {
+            std::env::remove_var("TMUX");
         }
     }
 
