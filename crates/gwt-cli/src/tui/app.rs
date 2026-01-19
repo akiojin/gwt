@@ -918,20 +918,27 @@ impl Model {
             .cloned()
             .collect();
 
+        let last_tool_usage_map = gwt_core::config::get_last_tool_usage_map(&self.repo_root);
         for pane in &removed_panes {
+            let last_entry = last_tool_usage_map.get(&pane.branch_name);
             // Save session entry for terminated agent (FR-072)
-            let tool_label = crate::tui::normalize_agent_label(&pane.agent_name);
+            let tool_id = last_entry
+                .map(|entry| entry.tool_id.clone())
+                .unwrap_or_else(|| pane.agent_name.clone());
+            let tool_label = last_entry
+                .map(|entry| entry.tool_label.clone())
+                .unwrap_or_else(|| crate::tui::normalize_agent_label(&pane.agent_name));
             let session_entry = ToolSessionEntry {
                 branch: pane.branch_name.clone(),
-                worktree_path: None,
-                tool_id: pane.agent_name.clone(),
+                worktree_path: last_entry.and_then(|entry| entry.worktree_path.clone()),
+                tool_id,
                 tool_label,
-                session_id: None,
-                mode: None,
-                model: None,
-                reasoning_level: None,
-                skip_permissions: None,
-                tool_version: None,
+                session_id: last_entry.and_then(|entry| entry.session_id.clone()),
+                mode: last_entry.and_then(|entry| entry.mode.clone()),
+                model: last_entry.and_then(|entry| entry.model.clone()),
+                reasoning_level: last_entry.and_then(|entry| entry.reasoning_level.clone()),
+                skip_permissions: last_entry.and_then(|entry| entry.skip_permissions),
+                tool_version: last_entry.and_then(|entry| entry.tool_version.clone()),
                 timestamp: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_millis() as i64)
@@ -983,11 +990,23 @@ impl Model {
     /// When hiding: moves the pane to a separate background window
     /// When showing: joins the pane back to the GWT window
     fn toggle_agent_pane_visibility(&mut self) {
-        // Get the selected pane
-        let selected_idx = self.pane_list.selected;
+        // Prefer the pane that matches the selected branch to avoid mismatches.
+        let selected_idx = self
+            .branch_list
+            .selected_branch()
+            .and_then(|branch| {
+                self.pane_list
+                    .panes
+                    .iter()
+                    .position(|pane| pane.branch_name == branch.name)
+            })
+            .unwrap_or(self.pane_list.selected);
+
         let Some(pane) = self.pane_list.panes.get_mut(selected_idx) else {
             return;
         };
+
+        self.pane_list.selected = selected_idx;
 
         if pane.is_background {
             // Show the pane (join back to GWT window)
