@@ -7,10 +7,13 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use gwt_core::ai::{summarize_commits, AIClient, AIError};
 use gwt_core::config::get_branch_tool_history;
-use gwt_core::config::{save_session_entry, Profile, ProfilesConfig, ToolSessionEntry};
+use gwt_core::config::{
+    save_session_entry, AISettings, Profile, ProfilesConfig, ResolvedAISettings, ToolSessionEntry,
+};
 use gwt_core::error::GwtError;
-use gwt_core::git::{Branch, PrCache, Repository};
+use gwt_core::git::{Branch, CommitEntry, PrCache, Repository};
 use gwt_core::tmux::{
     break_pane, compute_equal_splits, get_current_session, group_panes_by_left,
     join_pane_to_target, kill_pane, launcher, list_pane_geometries, resize_pane_height,
@@ -22,7 +25,7 @@ use ratatui::{prelude::*, widgets::*};
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 use tracing::{debug, error, info};
@@ -56,6 +59,10 @@ fn resolve_orphaned_agent_name(
     } else {
         trimmed.to_string()
     }
+}
+
+fn format_ai_error(err: AIError) -> String {
+    err.to_string()
 }
 
 /// Configuration for launching a coding agent after TUI exits
@@ -144,6 +151,18 @@ struct WorktreeStatusTarget {
     path: PathBuf,
 }
 
+struct AiSummaryTask {
+    branch: String,
+    repo_path: PathBuf,
+    commits: Option<Vec<CommitEntry>>,
+}
+
+struct AiSummaryUpdate {
+    branch: String,
+    summary: Option<Vec<String>>,
+    error: Option<String>,
+}
+
 struct BranchListUpdate {
     branches: Vec<BranchItem>,
     branch_names: Vec<String>,
@@ -217,6 +236,10 @@ pub struct Model {
     safety_rx: Option<Receiver<SafetyUpdate>>,
     /// Worktree status update receiver
     worktree_status_rx: Option<Receiver<WorktreeStatusUpdate>>,
+    /// AI summary update sender
+    ai_summary_tx: Option<Sender<AiSummaryUpdate>>,
+    /// AI summary update receiver
+    ai_summary_rx: Option<Receiver<AiSummaryUpdate>>,
     /// Tmux mode (Single or Multi)
     tmux_mode: TmuxMode,
     /// Tmux session name (when in multi mode)
@@ -350,6 +373,8 @@ impl Model {
             pr_title_rx: None,
             safety_rx: None,
             worktree_status_rx: None,
+            ai_summary_tx: None,
+            ai_summary_rx: None,
             tmux_mode: TmuxMode::detect(),
             tmux_session: None,
             gwt_pane_id: None,
@@ -359,6 +384,10 @@ impl Model {
             last_pane_update: None,
             last_spinner_update: None,
         };
+
+        let (ai_tx, ai_rx) = mpsc::channel();
+        model.ai_summary_tx = Some(ai_tx);
+        model.ai_summary_rx = Some(ai_rx);
 
         // Initialize tmux session if in multi mode
         if model.tmux_mode.is_multi() {
@@ -442,6 +471,7 @@ impl Model {
 
         let mut branch_list = BranchListState::new();
         branch_list.active_profile = self.profiles_config.active.clone();
+        branch_list.ai_enabled = self.active_ai_enabled();
         branch_list.working_directory = Some(self.repo_root.display().to_string());
         branch_list.version = Some(env!("CARGO_PKG_VERSION").to_string());
         branch_list.set_loading(true);
@@ -672,6 +702,179 @@ impl Model {
         });
     }
 
+    fn refresh_branch_summary(&mut self) {
+        self.branch_list.ai_enabled = self.active_ai_enabled();
+        self.branch_list.update_branch_summary(&self.repo_root);
+        self.maybe_request_ai_summary_for_selected();
+    }
+
+    fn maybe_request_ai_summary_for_selected(&mut self) {
+        if !self.branch_list.ai_enabled {
+            return;
+        }
+
+        let Some(branch) = self.branch_list.selected_branch() else {
+            return;
+        };
+        if !branch.has_worktree {
+            return;
+        }
+        if self.branch_list.ai_summary_cached(&branch.name)
+            || self.branch_list.ai_summary_inflight(&branch.name)
+        {
+            return;
+        }
+        let Some(settings) = self.active_ai_settings() else {
+            return;
+        };
+        let commits = self
+            .branch_list
+            .branch_summary
+            .as_ref()
+            .map(|summary| summary.commits.clone())
+            .unwrap_or_default();
+        if commits.is_empty() {
+            return;
+        }
+        let repo_path = branch
+            .worktree_path
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.repo_root.clone());
+        let task = AiSummaryTask {
+            branch: branch.name.clone(),
+            repo_path,
+            commits: Some(commits),
+        };
+        self.spawn_ai_summaries(vec![task], settings);
+    }
+
+    fn prefetch_ai_summaries(&mut self) {
+        if !self.branch_list.ai_enabled {
+            return;
+        }
+        let Some(settings) = self.active_ai_settings() else {
+            return;
+        };
+
+        let tasks: Vec<AiSummaryTask> = self
+            .branch_list
+            .branches
+            .iter()
+            .filter(|branch| branch.has_worktree)
+            .filter(|branch| {
+                !self.branch_list.ai_summary_cached(&branch.name)
+                    && !self.branch_list.ai_summary_inflight(&branch.name)
+            })
+            .filter_map(|branch| {
+                branch.worktree_path.as_ref().map(|path| AiSummaryTask {
+                    branch: branch.name.clone(),
+                    repo_path: PathBuf::from(path),
+                    commits: None,
+                })
+            })
+            .collect();
+
+        self.spawn_ai_summaries(tasks, settings);
+    }
+
+    fn spawn_ai_summaries(&mut self, tasks: Vec<AiSummaryTask>, settings: ResolvedAISettings) {
+        if tasks.is_empty() {
+            return;
+        }
+        let Some(tx) = &self.ai_summary_tx else {
+            return;
+        };
+
+        for task in &tasks {
+            self.branch_list.mark_ai_summary_inflight(&task.branch);
+            if let Some(current) = self.branch_list.branch_summary.as_mut() {
+                if current.branch_name == task.branch {
+                    current.loading.ai_summary = true;
+                    current.errors.ai_summary = None;
+                }
+            }
+        }
+
+        let tx = tx.clone();
+        thread::spawn(move || {
+            let client = match AIClient::new(settings) {
+                Ok(client) => client,
+                Err(err) => {
+                    let message = err.to_string();
+                    for task in tasks {
+                        let _ = tx.send(AiSummaryUpdate {
+                            branch: task.branch,
+                            summary: None,
+                            error: Some(message.clone()),
+                        });
+                    }
+                    return;
+                }
+            };
+
+            for task in tasks {
+                let commits = match task.commits {
+                    Some(commits) => commits,
+                    None => match Repository::open(&task.repo_path)
+                        .and_then(|repo| repo.get_commit_log(5))
+                    {
+                        Ok(commits) => commits,
+                        Err(err) => {
+                            let _ = tx.send(AiSummaryUpdate {
+                                branch: task.branch,
+                                summary: None,
+                                error: Some(err.to_string()),
+                            });
+                            continue;
+                        }
+                    },
+                };
+
+                let result = summarize_commits(&client, &task.branch, &commits);
+                match result {
+                    Ok(summary) => {
+                        let _ = tx.send(AiSummaryUpdate {
+                            branch: task.branch,
+                            summary: Some(summary),
+                            error: None,
+                        });
+                    }
+                    Err(err) => {
+                        let _ = tx.send(AiSummaryUpdate {
+                            branch: task.branch,
+                            summary: None,
+                            error: Some(format_ai_error(err)),
+                        });
+                    }
+                }
+            }
+        });
+    }
+
+    fn apply_ai_summary_updates(&mut self) {
+        let Some(rx) = &self.ai_summary_rx else {
+            return;
+        };
+
+        loop {
+            match rx.try_recv() {
+                Ok(update) => {
+                    if let Some(summary) = update.summary {
+                        self.branch_list.apply_ai_summary(&update.branch, summary);
+                    } else if let Some(error) = update.error {
+                        self.branch_list.apply_ai_error(&update.branch, error);
+                    }
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.ai_summary_rx = None;
+                    break;
+                }
+            }
+        }
+    }
+
     /// Reconnect to orphaned agent panes on startup (FR-060~062)
     ///
     /// This function detects panes that were running before gwt restarted
@@ -765,13 +968,18 @@ impl Model {
 
         match rx.try_recv() {
             Ok(update) => {
+                let ai_cache = self.branch_list.clone_ai_cache();
+                let ai_inflight = self.branch_list.clone_ai_inflight();
                 let mut branch_list = BranchListState::new().with_branches(update.branches);
                 branch_list.active_profile = self.profiles_config.active.clone();
+                branch_list.ai_enabled = self.active_ai_enabled();
+                branch_list.set_ai_cache(ai_cache);
+                branch_list.set_ai_inflight(ai_inflight);
                 branch_list.working_directory = Some(self.repo_root.display().to_string());
                 branch_list.version = Some(env!("CARGO_PKG_VERSION").to_string());
                 self.branch_list = branch_list;
                 // SPEC-4b893dae: Update branch summary after branches are loaded
-                self.branch_list.update_branch_summary(&self.repo_root);
+                self.refresh_branch_summary();
 
                 self.total_count = update.total_count;
                 self.active_count = update.active_count;
@@ -781,6 +989,7 @@ impl Model {
                 self.spawn_safety_checks(update.safety_targets, update.base_branch);
                 self.spawn_worktree_status_checks(update.worktree_targets);
                 self.spawn_pr_title_fetch(update.branch_names);
+                self.prefetch_ai_summaries();
 
                 self.worktree_create =
                     WorktreeCreateState::new().with_base_branches(update.base_branches);
@@ -1241,6 +1450,7 @@ impl Model {
 
         self.profiles = ProfilesState::new().with_profiles(profiles);
         self.branch_list.active_profile = self.profiles_config.active.clone();
+        self.branch_list.ai_enabled = self.active_ai_enabled();
     }
 
     fn save_profiles(&mut self) {
@@ -1250,6 +1460,20 @@ impl Model {
             return;
         }
         self.load_profiles();
+        self.refresh_branch_summary();
+    }
+
+    fn active_ai_settings(&self) -> Option<ResolvedAISettings> {
+        self.profiles_config
+            .active_profile()
+            .and_then(|profile| profile.resolved_ai_settings())
+    }
+
+    fn active_ai_enabled(&self) -> bool {
+        self.profiles_config
+            .active_profile()
+            .map(|profile| profile.ai_enabled())
+            .unwrap_or(false)
     }
 
     fn active_env_overrides(&self) -> Vec<(String, String)> {
@@ -1281,7 +1505,7 @@ impl Model {
     }
 
     fn open_environment_editor(&mut self, profile_name: &str) {
-        let (vars, disabled_keys) = self
+        let (vars, disabled_keys, ai_enabled, ai_endpoint, ai_api_key, ai_model) = self
             .profiles_config
             .profiles
             .get(profile_name)
@@ -1296,15 +1520,47 @@ impl Model {
                     })
                     .collect();
                 items.sort_by(|a, b| a.key.cmp(&b.key));
-                (items, profile.disabled_env.clone())
+                let (ai_enabled, ai_endpoint, ai_api_key, ai_model) = match &profile.ai {
+                    Some(ai) => (
+                        true,
+                        ai.endpoint.clone(),
+                        ai.api_key.clone(),
+                        ai.model.clone(),
+                    ),
+                    None => {
+                        let defaults = AISettings::default();
+                        (false, defaults.endpoint, String::new(), defaults.model)
+                    }
+                };
+                (
+                    items,
+                    profile.disabled_env.clone(),
+                    ai_enabled,
+                    ai_endpoint,
+                    ai_api_key,
+                    ai_model,
+                )
             })
-            .unwrap_or_else(|| (Vec::new(), Vec::new()));
+            .unwrap_or_else(|| {
+                let defaults = AISettings::default();
+                (
+                    Vec::new(),
+                    Vec::new(),
+                    false,
+                    defaults.endpoint,
+                    String::new(),
+                    defaults.model,
+                )
+            });
 
         self.environment = EnvironmentState::new()
             .with_profile(profile_name)
             .with_variables(vars)
             .with_disabled_keys(disabled_keys)
+            .with_ai_settings(ai_enabled, ai_endpoint, ai_api_key, ai_model)
             .with_os_variables(collect_os_env());
+        self.environment.selected = 3;
+        self.environment.refresh_selection();
         self.screen_stack.push(self.screen.clone());
         self.screen = Screen::Environment;
     }
@@ -1329,6 +1585,20 @@ impl Model {
         disabled.dedup();
         profile.disabled_env = disabled.clone();
         self.environment.disabled_keys = disabled;
+        if self.environment.ai_enabled {
+            if self.environment.ai_fields_empty() {
+                profile.ai = None;
+                self.environment.ai_enabled = false;
+            } else {
+                profile.ai = Some(AISettings {
+                    endpoint: self.environment.ai_endpoint.clone(),
+                    api_key: self.environment.ai_api_key.clone(),
+                    model: self.environment.ai_model.clone(),
+                });
+            }
+        } else {
+            profile.ai = None;
+        }
         self.save_profiles();
     }
 
@@ -1493,6 +1763,7 @@ impl Model {
                 self.apply_pr_title_updates();
                 self.apply_safety_updates();
                 self.apply_worktree_updates();
+                self.apply_ai_summary_updates();
                 // FR-033: Update pane list every 1 second in tmux multi mode
                 self.update_pane_list();
             }
@@ -1500,7 +1771,7 @@ impl Model {
                 Screen::BranchList => {
                     self.branch_list.select_next();
                     // SPEC-4b893dae: Update branch summary on selection change
-                    self.branch_list.update_branch_summary(&self.repo_root);
+                    self.refresh_branch_summary();
                 }
                 Screen::WorktreeCreate => self.worktree_create.select_next_base(),
                 Screen::Settings => self.settings.select_next(),
@@ -1515,7 +1786,7 @@ impl Model {
                 Screen::BranchList => {
                     self.branch_list.select_prev();
                     // SPEC-4b893dae: Update branch summary on selection change
-                    self.branch_list.update_branch_summary(&self.repo_root);
+                    self.refresh_branch_summary();
                 }
                 Screen::WorktreeCreate => self.worktree_create.select_prev_base(),
                 Screen::Settings => self.settings.select_prev(),
@@ -1530,7 +1801,7 @@ impl Model {
                 Screen::BranchList => {
                     self.branch_list.page_up(10);
                     // SPEC-4b893dae: Update branch summary on selection change
-                    self.branch_list.update_branch_summary(&self.repo_root);
+                    self.refresh_branch_summary();
                 }
                 Screen::Logs => self.logs.page_up(10),
                 Screen::Help => self.help.page_up(),
@@ -1541,7 +1812,7 @@ impl Model {
                 Screen::BranchList => {
                     self.branch_list.page_down(10);
                     // SPEC-4b893dae: Update branch summary on selection change
-                    self.branch_list.update_branch_summary(&self.repo_root);
+                    self.refresh_branch_summary();
                 }
                 Screen::Logs => self.logs.page_down(10),
                 Screen::Help => self.help.page_down(),
@@ -1552,7 +1823,7 @@ impl Model {
                 Screen::BranchList => {
                     self.branch_list.go_home();
                     // SPEC-4b893dae: Update branch summary on selection change
-                    self.branch_list.update_branch_summary(&self.repo_root);
+                    self.refresh_branch_summary();
                 }
                 Screen::Logs => self.logs.go_home(),
                 Screen::Environment => self.environment.go_home(),
@@ -1562,7 +1833,7 @@ impl Model {
                 Screen::BranchList => {
                     self.branch_list.go_end();
                     // SPEC-4b893dae: Update branch summary on selection change
-                    self.branch_list.update_branch_summary(&self.repo_root);
+                    self.refresh_branch_summary();
                 }
                 Screen::Logs => self.logs.go_end(),
                 Screen::Environment => self.environment.go_end(),
@@ -1639,30 +1910,45 @@ impl Model {
                 }
                 Screen::Environment => {
                     if self.environment.edit_mode {
-                        match self.environment.validate() {
-                            Ok((key, value)) => {
-                                if self.environment.is_new {
-                                    self.environment.variables.push(
-                                        super::screens::environment::EnvItem {
-                                            key,
-                                            value,
-                                            is_secret: false,
-                                        },
-                                    );
-                                } else if let Some(index) =
-                                    self.environment.selected_profile_index()
-                                {
-                                    if let Some(var) = self.environment.variables.get_mut(index) {
-                                        var.key = key;
-                                        var.value = value;
-                                    }
+                        if let Some(ai_field) = self.environment.editing_ai_field() {
+                            match self.environment.validate_ai_value() {
+                                Ok(value) => {
+                                    self.environment.apply_ai_value(ai_field, value);
+                                    self.environment.cancel_edit();
+                                    self.environment.refresh_selection();
+                                    self.persist_environment();
                                 }
-                                self.environment.cancel_edit();
-                                self.environment.refresh_selection();
-                                self.persist_environment();
+                                Err(msg) => {
+                                    self.environment.error = Some(msg.to_string());
+                                }
                             }
-                            Err(msg) => {
-                                self.environment.error = Some(msg.to_string());
+                        } else {
+                            match self.environment.validate() {
+                                Ok((key, value)) => {
+                                    if self.environment.is_new {
+                                        self.environment.variables.push(
+                                            super::screens::environment::EnvItem {
+                                                key,
+                                                value,
+                                                is_secret: false,
+                                            },
+                                        );
+                                    } else if let Some(index) =
+                                        self.environment.selected_profile_index()
+                                    {
+                                        if let Some(var) = self.environment.variables.get_mut(index)
+                                        {
+                                            var.key = key;
+                                            var.value = value;
+                                        }
+                                    }
+                                    self.environment.cancel_edit();
+                                    self.environment.refresh_selection();
+                                    self.persist_environment();
+                                }
+                                Err(msg) => {
+                                    self.environment.error = Some(msg.to_string());
+                                }
                             }
                         }
                     } else {
@@ -1687,6 +1973,7 @@ impl Model {
                 {
                     // Filter mode - add character to filter
                     self.branch_list.filter_push(c);
+                    self.refresh_branch_summary();
                 } else if matches!(self.screen, Screen::Profiles) && self.profiles.create_mode {
                     // Profile create mode - add character to name
                     self.profiles.insert_char(c);
@@ -1703,6 +1990,7 @@ impl Model {
                 } else if matches!(self.screen, Screen::BranchList) && self.branch_list.filter_mode
                 {
                     self.branch_list.filter_pop();
+                    self.refresh_branch_summary();
                 } else if matches!(self.screen, Screen::Profiles) && self.profiles.create_mode {
                     self.profiles.delete_char();
                 } else if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
@@ -1833,6 +2121,7 @@ impl Model {
                 // FR-036: 'm' key disabled in filter mode
                 if matches!(self.screen, Screen::BranchList) && !self.branch_list.filter_mode {
                     self.branch_list.cycle_view_mode();
+                    self.refresh_branch_summary();
                 }
             }
             Message::ToggleSelection | Message::Space => {
@@ -2944,6 +3233,7 @@ pub fn run_with_context(
                                 } else if !model.branch_list.filter.is_empty() {
                                     // Clear filter query
                                     model.branch_list.clear_filter();
+                                    model.refresh_branch_summary();
                                     None
                                 } else {
                                     // On main screen without filter - do nothing (TypeScript doesn't quit here)

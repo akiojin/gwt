@@ -2,6 +2,7 @@
 
 #![allow(dead_code)]
 
+use gwt_core::ai::AISummaryCache;
 use gwt_core::git::{Branch, BranchMeta, BranchSummary, DivergenceStatus, Repository};
 use gwt_core::tmux::AgentPane;
 use gwt_core::worktree::Worktree;
@@ -354,6 +355,12 @@ pub struct BranchListState {
     pub running_agents: HashMap<String, AgentPane>,
     /// Branch summary data for the selected branch (SPEC-4b893dae)
     pub branch_summary: Option<BranchSummary>,
+    /// AI summary enabled for active profile
+    pub ai_enabled: bool,
+    /// AI summary cache (session)
+    ai_summary_cache: AISummaryCache,
+    /// AI summary requests in-flight
+    ai_summary_inflight: HashSet<String>,
 }
 
 impl Default for BranchListState {
@@ -382,6 +389,9 @@ impl Default for BranchListState {
             visible_height: 15, // Default fallback (previously hardcoded)
             running_agents: HashMap::new(),
             branch_summary: None,
+            ai_enabled: false,
+            ai_summary_cache: AISummaryCache::default(),
+            ai_summary_inflight: HashSet::new(),
         }
     }
 }
@@ -883,7 +893,66 @@ impl BranchListState {
         };
         summary = summary.with_meta(meta);
 
+        if self.ai_enabled && branch.worktree_path.is_some() {
+            if let Some(summary_lines) = self.ai_summary_cache.get(&branch.name) {
+                summary = summary.with_ai_summary(summary_lines.clone());
+            } else if self.ai_summary_inflight.contains(&branch.name) {
+                summary.loading.ai_summary = true;
+            }
+        }
+
         self.branch_summary = Some(summary);
+    }
+
+    pub fn ai_summary_cached(&self, branch: &str) -> bool {
+        self.ai_summary_cache.get(branch).is_some()
+    }
+
+    pub fn clone_ai_cache(&self) -> AISummaryCache {
+        self.ai_summary_cache.clone()
+    }
+
+    pub fn set_ai_cache(&mut self, cache: AISummaryCache) {
+        self.ai_summary_cache = cache;
+    }
+
+    pub fn ai_summary_inflight(&self, branch: &str) -> bool {
+        self.ai_summary_inflight.contains(branch)
+    }
+
+    pub fn clone_ai_inflight(&self) -> HashSet<String> {
+        self.ai_summary_inflight.clone()
+    }
+
+    pub fn set_ai_inflight(&mut self, inflight: HashSet<String>) {
+        self.ai_summary_inflight = inflight;
+    }
+
+    pub fn mark_ai_summary_inflight(&mut self, branch: &str) {
+        self.ai_summary_inflight.insert(branch.to_string());
+    }
+
+    pub fn apply_ai_summary(&mut self, branch: &str, summary: Vec<String>) {
+        self.ai_summary_cache
+            .set(branch.to_string(), summary.clone());
+        self.ai_summary_inflight.remove(branch);
+        if let Some(current) = self.branch_summary.as_mut() {
+            if current.branch_name == branch {
+                current.ai_summary = Some(summary);
+                current.loading.ai_summary = false;
+                current.errors.ai_summary = None;
+            }
+        }
+    }
+
+    pub fn apply_ai_error(&mut self, branch: &str, error: String) {
+        self.ai_summary_inflight.remove(branch);
+        if let Some(current) = self.branch_summary.as_mut() {
+            if current.branch_name == branch {
+                current.errors.ai_summary = Some(error);
+                current.loading.ai_summary = false;
+            }
+        }
     }
 
     /// Clear branch summary (called when branches are reloaded)
@@ -1323,7 +1392,7 @@ fn render_summary_panel(
     // Render the full summary panel
     let panel = SummaryPanel::new(&summary)
         .with_tick(state.spinner_frame)
-        .with_ai_enabled(false); // AI will be enabled in Phase 7
+        .with_ai_enabled(state.ai_enabled);
 
     panel.render(frame, area);
 }

@@ -441,7 +441,8 @@ impl<'a> SummaryPanel<'a> {
         } else {
             // T204: Truncate long commit messages with "..."
             const MAX_MSG_LEN: usize = 50;
-            for commit in self.summary.commits.iter().take(5) {
+            let max_commits = if self.ai_enabled { 3 } else { 5 };
+            for commit in self.summary.commits.iter().take(max_commits) {
                 let hash_span = Span::styled(
                     commit.hash.chars().take(7).collect::<String>(),
                     Style::default().fg(Color::Cyan),

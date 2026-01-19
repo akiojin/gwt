@@ -27,10 +27,28 @@ pub struct OsEnvItem {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EnvDisplayKind {
+    AiSetting,
     OsOnly,
     OsDisabled,
     Added,
     Overridden,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AiField {
+    Endpoint,
+    ApiKey,
+    Model,
+}
+
+impl AiField {
+    fn label(self) -> &'static str {
+        match self {
+            AiField::Endpoint => "AI Endpoint",
+            AiField::ApiKey => "AI API Key",
+            AiField::Model => "AI Model",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -39,6 +57,8 @@ struct DisplayEnvItem {
     value: String,
     kind: EnvDisplayKind,
     profile_index: Option<usize>,
+    ai_field: Option<AiField>,
+    is_secret: bool,
 }
 
 /// Input field being edited
@@ -80,6 +100,16 @@ pub struct EnvironmentState {
     pub error: Option<String>,
     /// Profile name (context)
     pub profile_name: Option<String>,
+    /// AI settings enabled
+    pub ai_enabled: bool,
+    /// AI endpoint
+    pub ai_endpoint: String,
+    /// AI API key
+    pub ai_api_key: String,
+    /// AI model
+    pub ai_model: String,
+    /// AI field currently being edited
+    editing_ai_field: Option<AiField>,
 }
 
 impl EnvironmentState {
@@ -114,6 +144,25 @@ impl EnvironmentState {
     pub fn with_profile(mut self, profile: &str) -> Self {
         self.profile_name = Some(profile.to_string());
         self
+    }
+
+    /// Initialize AI settings
+    pub fn with_ai_settings(
+        mut self,
+        enabled: bool,
+        endpoint: String,
+        api_key: String,
+        model: String,
+    ) -> Self {
+        self.ai_enabled = enabled;
+        self.ai_endpoint = endpoint;
+        self.ai_api_key = api_key;
+        self.ai_model = model;
+        self
+    }
+
+    pub fn editing_ai_field(&self) -> Option<AiField> {
+        self.editing_ai_field
     }
 
     /// Get selected variable
@@ -246,6 +295,7 @@ impl EnvironmentState {
         self.edit_value.clear();
         self.cursor = 0;
         self.error = None;
+        self.editing_ai_field = None;
     }
 
     pub fn start_edit_selected(&mut self) {
@@ -254,7 +304,9 @@ impl EnvironmentState {
             None => return,
         };
 
-        if let Some(index) = selected.profile_index {
+        if let Some(ai_field) = selected.ai_field {
+            self.start_edit_ai(ai_field);
+        } else if let Some(index) = selected.profile_index {
             self.start_edit_at(index);
         } else {
             self.start_override(selected.key, selected.value);
@@ -280,6 +332,7 @@ impl EnvironmentState {
         self.edit_value = var.value.clone();
         self.cursor = self.edit_value.len();
         self.error = None;
+        self.editing_ai_field = None;
     }
 
     fn start_override(&mut self, key: String, value: String) {
@@ -290,6 +343,22 @@ impl EnvironmentState {
         self.edit_value = value;
         self.cursor = self.edit_value.len();
         self.error = None;
+        self.editing_ai_field = None;
+    }
+
+    fn start_edit_ai(&mut self, field: AiField) {
+        self.edit_mode = true;
+        self.is_new = false;
+        self.edit_field = EditField::Value;
+        self.edit_key = field.label().to_string();
+        self.edit_value = match field {
+            AiField::Endpoint => self.ai_endpoint.clone(),
+            AiField::ApiKey => self.ai_api_key.clone(),
+            AiField::Model => self.ai_model.clone(),
+        };
+        self.cursor = self.edit_value.len();
+        self.error = None;
+        self.editing_ai_field = Some(field);
     }
 
     /// Exit edit mode
@@ -299,6 +368,7 @@ impl EnvironmentState {
         self.edit_key.clear();
         self.edit_value.clear();
         self.cursor = 0;
+        self.editing_ai_field = None;
     }
 
     /// Switch between key and value fields
@@ -386,6 +456,26 @@ impl EnvironmentState {
         Ok((key.to_string(), self.edit_value.clone()))
     }
 
+    /// Validate AI value edit
+    pub fn validate_ai_value(&self) -> Result<String, &'static str> {
+        Ok(self.edit_value.trim().to_string())
+    }
+
+    pub fn apply_ai_value(&mut self, field: AiField, value: String) {
+        self.ai_enabled = true;
+        match field {
+            AiField::Endpoint => self.ai_endpoint = value,
+            AiField::ApiKey => self.ai_api_key = value,
+            AiField::Model => self.ai_model = value,
+        }
+    }
+
+    pub fn ai_fields_empty(&self) -> bool {
+        self.ai_endpoint.trim().is_empty()
+            && self.ai_api_key.trim().is_empty()
+            && self.ai_model.trim().is_empty()
+    }
+
     /// Mark variable as secret
     pub fn toggle_secret(&mut self) {
         if let Some(index) = self.selected_profile_index() {
@@ -416,6 +506,7 @@ impl EnvironmentState {
     }
 
     fn display_len(&self) -> usize {
+        let ai_count = self.ai_display_items().len();
         let mut keys: HashMap<&str, ()> = HashMap::new();
         for var in &self.os_variables {
             keys.insert(var.key.as_str(), ());
@@ -423,7 +514,7 @@ impl EnvironmentState {
         for var in &self.variables {
             keys.insert(var.key.as_str(), ());
         }
-        keys.len()
+        ai_count + keys.len()
     }
 
     fn selected_display_item(&self) -> Option<DisplayEnvItem> {
@@ -432,6 +523,7 @@ impl EnvironmentState {
     }
 
     fn display_items(&self) -> Vec<DisplayEnvItem> {
+        let mut items = self.ai_display_items();
         let mut os_map: HashMap<String, String> = HashMap::new();
         for var in &self.os_variables {
             os_map.insert(var.key.clone(), var.value.clone());
@@ -449,41 +541,99 @@ impl EnvironmentState {
         }
         keys.sort();
 
-        keys.into_iter()
-            .map(|key| match (profile_map.get(&key), os_map.get(&key)) {
-                (Some((index, profile_value)), Some(_os_value)) => DisplayEnvItem {
+        let env_items = keys.into_iter().map(|key| match (profile_map.get(&key), os_map.get(&key))
+        {
+            (Some((index, profile_value)), Some(_os_value)) => DisplayEnvItem {
+                key,
+                value: profile_value.clone(),
+                kind: EnvDisplayKind::Overridden,
+                profile_index: Some(*index),
+                ai_field: None,
+                is_secret: self
+                    .variables
+                    .get(*index)
+                    .map(|var| var.is_secret)
+                    .unwrap_or(false),
+            },
+            (Some((index, profile_value)), None) => DisplayEnvItem {
+                key,
+                value: profile_value.clone(),
+                kind: EnvDisplayKind::Added,
+                profile_index: Some(*index),
+                ai_field: None,
+                is_secret: self
+                    .variables
+                    .get(*index)
+                    .map(|var| var.is_secret)
+                    .unwrap_or(false),
+            },
+            (None, Some(os_value)) => {
+                let kind = if self.disabled_keys.contains(&key) {
+                    EnvDisplayKind::OsDisabled
+                } else {
+                    EnvDisplayKind::OsOnly
+                };
+                DisplayEnvItem {
                     key,
-                    value: profile_value.clone(),
-                    kind: EnvDisplayKind::Overridden,
-                    profile_index: Some(*index),
-                },
-                (Some((index, profile_value)), None) => DisplayEnvItem {
-                    key,
-                    value: profile_value.clone(),
-                    kind: EnvDisplayKind::Added,
-                    profile_index: Some(*index),
-                },
-                (None, Some(os_value)) => {
-                    let kind = if self.disabled_keys.contains(&key) {
-                        EnvDisplayKind::OsDisabled
-                    } else {
-                        EnvDisplayKind::OsOnly
-                    };
-                    DisplayEnvItem {
-                        key,
-                        value: os_value.clone(),
-                        kind,
-                        profile_index: None,
-                    }
-                }
-                (None, None) => DisplayEnvItem {
-                    key,
-                    value: String::new(),
-                    kind: EnvDisplayKind::OsOnly,
+                    value: os_value.clone(),
+                    kind,
                     profile_index: None,
-                },
-            })
-            .collect()
+                    ai_field: None,
+                    is_secret: false,
+                }
+            }
+            (None, None) => DisplayEnvItem {
+                key,
+                value: String::new(),
+                kind: EnvDisplayKind::OsOnly,
+                profile_index: None,
+                ai_field: None,
+                is_secret: false,
+            },
+            });
+
+        items.extend(env_items);
+        items
+    }
+
+    fn ai_display_items(&self) -> Vec<DisplayEnvItem> {
+        let mut items = Vec::new();
+        let fields = [AiField::Endpoint, AiField::ApiKey, AiField::Model];
+        for field in fields {
+            let (value, is_secret) = self.ai_display_value(field);
+            items.push(DisplayEnvItem {
+                key: field.label().to_string(),
+                value,
+                kind: EnvDisplayKind::AiSetting,
+                profile_index: None,
+                ai_field: Some(field),
+                is_secret,
+            });
+        }
+        items
+    }
+
+    fn ai_display_value(&self, field: AiField) -> (String, bool) {
+        if !self.ai_enabled {
+            return ("(disabled)".to_string(), false);
+        }
+
+        let raw_value = match field {
+            AiField::Endpoint => self.ai_endpoint.trim(),
+            AiField::ApiKey => self.ai_api_key.trim(),
+            AiField::Model => self.ai_model.trim(),
+        };
+
+        if raw_value.is_empty() {
+            let placeholder = match field {
+                AiField::ApiKey => "(not set)",
+                _ => "(default)",
+            };
+            return (placeholder.to_string(), false);
+        }
+
+        let is_secret = matches!(field, AiField::ApiKey);
+        (raw_value.to_string(), is_secret)
     }
 
     fn visible_range(&self, total: usize) -> (usize, usize) {
@@ -575,8 +725,12 @@ pub fn render_environment(state: &mut EnvironmentState, frame: &mut Frame, area:
             .enumerate()
             .map(|(i, item)| {
                 let absolute_index = start + i;
-                let value_display = format_display_value(&item.value);
+                let value_display = format_display_value(&item.value, item.is_secret);
                 let (key_style, value_style) = match item.kind {
+                    EnvDisplayKind::AiSetting => (
+                        Style::default().fg(Color::Magenta),
+                        Style::default().fg(Color::DarkGray),
+                    ),
                     EnvDisplayKind::Overridden => {
                         (Style::default().fg(Color::Yellow), Style::default())
                     }
@@ -698,8 +852,12 @@ fn render_edit_area(state: &EnvironmentState, frame: &mut Frame, area: Rect) {
     frame.set_cursor_position((cursor_x, cursor_y));
 }
 
-fn format_display_value(value: &str) -> String {
-    value.to_string()
+fn format_display_value(value: &str, is_secret: bool) -> String {
+    if is_secret && !value.is_empty() {
+        "********".to_string()
+    } else {
+        value.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -790,6 +948,12 @@ mod tests {
         }];
 
         let mut state = EnvironmentState::new().with_variables(vars);
+        let items = state.display_items();
+        let index = items
+            .iter()
+            .position(|item| item.key == "EMPTY")
+            .expect("EMPTY should be listed");
+        state.selected = index;
         state.start_edit();
 
         let (key, value) = state.validate().expect("validation should pass");
@@ -806,7 +970,7 @@ mod tests {
         }];
 
         let state = EnvironmentState::new().with_variables(vars);
-        let visible = format_display_value(&state.variables[0].value);
+        let visible = format_display_value(&state.variables[0].value, false);
 
         assert_eq!(visible, "secret-value");
     }
