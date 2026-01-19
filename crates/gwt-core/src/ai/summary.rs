@@ -5,7 +5,7 @@ use super::session_parser::{MessageRole, ParsedSession, SessionMessage};
 use std::collections::HashMap;
 use std::time::SystemTime;
 
-pub const SESSION_SYSTEM_PROMPT: &str = "You are a helpful assistant summarizing a coding agent session.\nReturn JSON only with keys: task_overview, short_summary, bullets.\n- task_overview: current task and progress in 1 sentence.\n- short_summary: 1-2 sentence summary.\n- bullets: 2-3 concise bullet points (no leading dash).\nUse English, no markdown, no extra text.";
+pub const SESSION_SYSTEM_PROMPT_BASE: &str = "You are a helpful assistant summarizing a coding agent session.\nReturn JSON only with keys: task_overview, short_summary, bullets.\n- task_overview: current task and progress in 1 sentence.\n- short_summary: 1-2 sentence summary.\n- bullets: 2-3 concise bullet points (no leading dash).\nNo markdown, no extra text.";
 
 const MAX_MESSAGE_CHARS: usize = 220;
 const MAX_TOOL_ITEMS: usize = 8;
@@ -75,6 +75,7 @@ struct SessionSummaryFields {
 }
 
 pub fn build_session_prompt(parsed: &ParsedSession) -> Vec<ChatMessage> {
+    let language = detect_summary_language(parsed);
     let mut lines = Vec::new();
     lines.push(format!(
         "Agent: {} (session_id: {})",
@@ -121,7 +122,7 @@ pub fn build_session_prompt(parsed: &ParsedSession) -> Vec<ChatMessage> {
     vec![
         ChatMessage {
             role: "system".to_string(),
-            content: SESSION_SYSTEM_PROMPT.to_string(),
+            content: format!("{}\nUse {}.", SESSION_SYSTEM_PROMPT_BASE, language),
         },
         ChatMessage {
             role: "user".to_string(),
@@ -177,6 +178,45 @@ fn estimate_token_count(messages: &[SessionMessage]) -> usize {
         return 0;
     }
     (total_chars / 4).max(1)
+}
+
+fn detect_summary_language(parsed: &ParsedSession) -> &'static str {
+    let mut has_hiragana = false;
+    let mut has_katakana = false;
+    let mut has_hangul = false;
+    let mut has_cyrillic = false;
+    let mut has_cjk = false;
+
+    for message in &parsed.messages {
+        for ch in message.content.chars() {
+            let code = ch as u32;
+            if (0x3040..=0x309F).contains(&code) {
+                has_hiragana = true;
+            } else if (0x30A0..=0x30FF).contains(&code) {
+                has_katakana = true;
+            } else if (0xAC00..=0xD7AF).contains(&code) {
+                has_hangul = true;
+            } else if (0x0400..=0x04FF).contains(&code) {
+                has_cyrillic = true;
+            } else if (0x4E00..=0x9FFF).contains(&code) {
+                has_cjk = true;
+            }
+        }
+    }
+
+    if has_hiragana || has_katakana {
+        return "Japanese";
+    }
+    if has_hangul {
+        return "Korean";
+    }
+    if has_cyrillic {
+        return "Russian";
+    }
+    if has_cjk {
+        return "Chinese";
+    }
+    "English"
 }
 
 fn parse_session_summary_fields(content: &str) -> Result<SessionSummaryFields, AIError> {
@@ -383,5 +423,43 @@ mod tests {
         let now = SystemTime::now();
         cache.set("main".to_string(), "sess-1".to_string(), summary, now);
         assert!(cache.is_stale("main", "sess-2", now));
+    }
+
+    #[test]
+    fn test_detect_summary_language_japanese() {
+        let parsed = ParsedSession {
+            session_id: "sess-1".to_string(),
+            agent_type: crate::ai::AgentType::ClaudeCode,
+            messages: vec![SessionMessage {
+                role: MessageRole::User,
+                content: "日本語の要約をお願いします。".to_string(),
+                timestamp: None,
+            }],
+            tool_executions: vec![],
+            started_at: None,
+            last_updated_at: None,
+            total_turns: 1,
+        };
+
+        assert_eq!(detect_summary_language(&parsed), "Japanese");
+    }
+
+    #[test]
+    fn test_detect_summary_language_english_default() {
+        let parsed = ParsedSession {
+            session_id: "sess-2".to_string(),
+            agent_type: crate::ai::AgentType::CodexCli,
+            messages: vec![SessionMessage {
+                role: MessageRole::User,
+                content: "Please summarize the session.".to_string(),
+                timestamp: None,
+            }],
+            tool_executions: vec![],
+            started_at: None,
+            last_updated_at: None,
+            total_turns: 1,
+        };
+
+        assert_eq!(detect_summary_language(&parsed), "English");
     }
 }

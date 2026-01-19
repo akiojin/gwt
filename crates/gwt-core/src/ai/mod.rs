@@ -12,5 +12,5 @@ pub use session_parser::{
 };
 pub use summary::{
     build_session_prompt, parse_summary_lines, summarize_session, SessionMetrics, SessionSummary,
-    SessionSummaryCache, SESSION_SYSTEM_PROMPT,
+    SessionSummaryCache, SESSION_SYSTEM_PROMPT_BASE,
 };

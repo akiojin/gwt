@@ -394,6 +394,12 @@ pub struct BranchListState {
     session_summary_inflight: HashSet<String>,
     /// Session missing for branch
     session_missing: HashSet<String>,
+    /// Session summary scroll offset
+    session_scroll_offset: usize,
+    /// Session summary scroll max
+    session_scroll_max: usize,
+    /// Session summary scroll page size
+    session_scroll_page: usize,
 }
 
 impl Default for BranchListState {
@@ -427,6 +433,9 @@ impl Default for BranchListState {
             session_summary_cache: SessionSummaryCache::default(),
             session_summary_inflight: HashSet::new(),
             session_missing: HashSet::new(),
+            session_scroll_offset: 0,
+            session_scroll_max: 0,
+            session_scroll_page: 0,
         }
     }
 }
@@ -862,10 +871,19 @@ impl BranchListState {
     /// Fetches commit log and change stats from the repository.
     /// Should be called when selection changes.
     pub fn update_branch_summary(&mut self, repo_root: &Path) {
-        let Some(branch) = self.selected_branch() else {
+        let Some(branch) = self.selected_branch().cloned() else {
             self.branch_summary = None;
             return;
         };
+
+        if self
+            .branch_summary
+            .as_ref()
+            .map(|summary| summary.branch_name.as_str())
+            != Some(branch.name.as_str())
+        {
+            self.session_scroll_offset = 0;
+        }
 
         // Create base summary
         let mut summary = BranchSummary::new(&branch.name);
@@ -948,6 +966,25 @@ impl BranchListState {
             item.last_tool_id = Some(tool_id);
             item.last_session_id = Some(session_id);
         }
+    }
+
+    pub fn update_session_scroll_bounds(&mut self, max_scroll: usize, page_size: usize) {
+        self.session_scroll_max = max_scroll;
+        self.session_scroll_page = page_size;
+        if self.session_scroll_offset > max_scroll {
+            self.session_scroll_offset = max_scroll;
+        }
+    }
+
+    pub fn scroll_session_page_up(&mut self) {
+        let page = self.session_scroll_page.max(1);
+        self.session_scroll_offset = self.session_scroll_offset.saturating_sub(page);
+    }
+
+    pub fn scroll_session_page_down(&mut self) {
+        let page = self.session_scroll_page.max(1);
+        self.session_scroll_offset =
+            (self.session_scroll_offset + page).min(self.session_scroll_max);
     }
 
     pub fn session_summary(&self, branch: &str) -> Option<&gwt_core::ai::SessionSummary> {
@@ -1394,7 +1431,7 @@ fn render_branch_row(
 
 /// Render summary panel (SPEC-4b893dae FR-001~FR-006)
 fn render_summary_panel(
-    state: &BranchListState,
+    state: &mut BranchListState,
     frame: &mut Frame,
     area: Rect,
     status_message: Option<&str>,
@@ -1413,8 +1450,16 @@ fn panel_switch_hint() -> Line<'static> {
     .right_aligned()
 }
 
+fn session_panel_hint() -> Line<'static> {
+    Line::from(Span::styled(
+        " Tab: Switch | PgUp/PgDn: Scroll ",
+        Style::default().fg(Color::DarkGray),
+    ))
+    .right_aligned()
+}
+
 fn render_details_panel(
-    state: &BranchListState,
+    state: &mut BranchListState,
     frame: &mut Frame,
     area: Rect,
     status_message: Option<&str>,
@@ -1522,7 +1567,7 @@ fn render_details_panel(
 }
 
 fn render_session_panel(
-    state: &BranchListState,
+    state: &mut BranchListState,
     frame: &mut Frame,
     area: Rect,
     status_message: Option<&str>,
@@ -1536,21 +1581,19 @@ fn render_session_panel(
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan))
         .title(title)
-        .title_bottom(panel_switch_hint());
+        .title_bottom(session_panel_hint());
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    let mut lines: Vec<Line> = Vec::new();
+
     if let Some(status) = status_message {
-        let line = Line::from(vec![Span::styled(
+        lines.push(Line::from(Span::styled(
             status,
             Style::default().fg(Color::Yellow),
-        )]);
-        frame.render_widget(Paragraph::new(line), inner);
-        return;
-    }
-
-    if state.is_loading {
-        let line = Line::from(vec![
+        )));
+    } else if state.is_loading {
+        lines.push(Line::from(vec![
             Span::styled(
                 format!("{} ", state.spinner_char()),
                 Style::default().fg(Color::Yellow),
@@ -1559,118 +1602,100 @@ fn render_session_panel(
                 "Loading branch information...",
                 Style::default().fg(Color::Yellow),
             ),
-        ]);
-        frame.render_widget(Paragraph::new(line), inner);
-        return;
-    }
-
-    let Some(branch) = state.selected_branch() else {
-        let line = Line::from(Span::styled(
-            "No branch selected",
-            Style::default().fg(Color::DarkGray),
-        ));
-        frame.render_widget(Paragraph::new(line), inner);
-        return;
-    };
-
-    let mut lines: Vec<Line> = Vec::new();
-
-    if !state.ai_enabled {
-        lines.push(Line::from(Span::styled(
-            "Configure AI in Settings to enable session summary",
-            Style::default().fg(Color::Yellow),
-        )));
-        frame.render_widget(Paragraph::new(lines), inner);
-        return;
-    }
-
-    let session_id = branch.last_session_id.as_deref();
-    if session_id.is_none() || state.is_session_missing(&branch.name) {
-        lines.push(Line::from(Span::styled(
-            "No session",
-            Style::default().fg(Color::DarkGray),
-        )));
-        frame.render_widget(Paragraph::new(lines), inner);
-        return;
-    }
-
-    if state.session_summary_inflight(&branch.name) {
-        lines.push(Line::from(Span::styled(
-            format!("{} Generating session summary...", state.spinner_char()),
-            Style::default().fg(Color::Yellow),
-        )));
-        frame.render_widget(Paragraph::new(lines), inner);
-        return;
-    }
-
-    if let Some(summary) = state.session_summary(&branch.name) {
-        lines.push(Line::from(Span::styled(
-            "Task:",
-            Style::default().fg(Color::Yellow),
-        )));
-        if let Some(task) = summary.task_overview.as_ref() {
-            lines.push(Line::from(format!("  {}", task)));
-        } else {
+        ]));
+    } else if let Some(branch) = state.selected_branch() {
+        if !state.ai_enabled {
             lines.push(Line::from(Span::styled(
-                "  (Not available)",
+                "Configure AI in Settings to enable session summary",
+                Style::default().fg(Color::Yellow),
+            )));
+        } else if branch.last_session_id.is_none() || state.is_session_missing(&branch.name) {
+            lines.push(Line::from(Span::styled(
+                "No session",
                 Style::default().fg(Color::DarkGray),
             )));
-        }
-
-        lines.push(Line::from(Span::styled(
-            "Summary:",
-            Style::default().fg(Color::Yellow),
-        )));
-        if let Some(short) = summary.short_summary.as_ref() {
-            lines.push(Line::from(format!("  {}", short)));
-        } else {
+        } else if let Some(summary) = state.session_summary(&branch.name) {
             lines.push(Line::from(Span::styled(
-                "  (Not available)",
-                Style::default().fg(Color::DarkGray),
+                "Task:",
+                Style::default().fg(Color::Yellow),
             )));
-        }
-
-        lines.push(Line::from(Span::styled(
-            "Highlights:",
-            Style::default().fg(Color::Yellow),
-        )));
-        if summary.bullet_points.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "  (No highlights)",
-                Style::default().fg(Color::DarkGray),
-            )));
-        } else {
-            for bullet in summary.bullet_points.iter().take(3) {
-                lines.push(Line::from(format!("  {}", bullet)));
+            if let Some(task) = summary.task_overview.as_ref() {
+                lines.push(Line::from(format!("  {}", task)));
+            } else {
+                lines.push(Line::from(Span::styled(
+                    "  (Not available)",
+                    Style::default().fg(Color::DarkGray),
+                )));
             }
-        }
 
-        lines.push(Line::from(Span::styled(
-            "Metrics:",
-            Style::default().fg(Color::Yellow),
-        )));
-        lines.push(Line::from(format!("  {}", format_metrics(&summary.metrics))));
-    } else if let Some(error) = state
-        .branch_summary
-        .as_ref()
-        .and_then(|summary| summary.errors.session_summary.as_ref())
-    {
-        lines.push(Line::from(Span::styled(
-            format!("(Failed to load: {})", error),
-            Style::default().fg(Color::Red),
-        )));
+            lines.push(Line::from(Span::styled(
+                "Summary:",
+                Style::default().fg(Color::Yellow),
+            )));
+            if let Some(short) = summary.short_summary.as_ref() {
+                lines.push(Line::from(format!("  {}", short)));
+            } else {
+                lines.push(Line::from(Span::styled(
+                    "  (Not available)",
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+
+            lines.push(Line::from(Span::styled(
+                "Highlights:",
+                Style::default().fg(Color::Yellow),
+            )));
+            if summary.bullet_points.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    "  (No highlights)",
+                    Style::default().fg(Color::DarkGray),
+                )));
+            } else {
+                for bullet in summary.bullet_points.iter().take(3) {
+                    lines.push(Line::from(format!("  {}", bullet)));
+                }
+            }
+
+            lines.push(Line::from(Span::styled(
+                "Metrics:",
+                Style::default().fg(Color::Yellow),
+            )));
+            lines.push(Line::from(format!("  {}", format_metrics(&summary.metrics))));
+        } else if state.session_summary_inflight(&branch.name) {
+            lines.push(Line::from(Span::styled(
+                format!("{} Generating session summary...", state.spinner_char()),
+                Style::default().fg(Color::Yellow),
+            )));
+        } else if let Some(error) = state
+            .branch_summary
+            .as_ref()
+            .and_then(|summary| summary.errors.session_summary.as_ref())
+        {
+            lines.push(Line::from(Span::styled(
+                format!("(Failed to load: {})", error),
+                Style::default().fg(Color::Red),
+            )));
+        } else {
+            lines.push(Line::from(Span::styled(
+                "Generating session summary...",
+                Style::default().fg(Color::Yellow),
+            )));
+        }
     } else {
         lines.push(Line::from(Span::styled(
-            "Generating session summary...",
-            Style::default().fg(Color::Yellow),
+            "No branch selected",
+            Style::default().fg(Color::DarkGray),
         )));
     }
 
-    let max_lines = inner.height as usize;
-    if lines.len() > max_lines {
-        lines.truncate(max_lines);
-    }
-    frame.render_widget(Paragraph::new(lines), inner);
+    let total_lines = count_wrapped_lines(&lines, inner.width as usize);
+    let max_scroll = total_lines.saturating_sub(inner.height as usize);
+    state.update_session_scroll_bounds(max_scroll, inner.height as usize);
+
+    let paragraph = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .scroll((state.session_scroll_offset as u16, 0));
+    frame.render_widget(paragraph, inner);
 }
 
 fn format_metrics(metrics: &gwt_core::ai::SessionMetrics) -> String {
@@ -1684,6 +1709,24 @@ fn format_metrics(metrics: &gwt_core::ai::SessionMetrics) -> String {
     }
     parts.push(format!("turns {}", metrics.turn_count));
     parts.join(" | ")
+}
+
+fn count_wrapped_lines(lines: &[Line], width: usize) -> usize {
+    if width == 0 {
+        return 0;
+    }
+    lines
+        .iter()
+        .map(|line| {
+            let line_width: usize = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref().width())
+                .sum();
+            let line_width = line_width.max(1);
+            (line_width + width - 1) / width
+        })
+        .sum()
 }
 
 fn format_duration(seconds: u64) -> String {

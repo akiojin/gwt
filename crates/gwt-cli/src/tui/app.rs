@@ -1970,9 +1970,13 @@ impl Model {
             },
             Message::PageUp => match self.screen {
                 Screen::BranchList => {
-                    self.branch_list.page_up(10);
-                    // SPEC-4b893dae: Update branch summary on selection change
-                    self.refresh_branch_summary();
+                    if self.branch_list.detail_panel_tab == DetailPanelTab::Session {
+                        self.branch_list.scroll_session_page_up();
+                    } else {
+                        self.branch_list.page_up(10);
+                        // SPEC-4b893dae: Update branch summary on selection change
+                        self.refresh_branch_summary();
+                    }
                 }
                 Screen::Logs => self.logs.page_up(10),
                 Screen::Help => self.help.page_up(),
@@ -1981,9 +1985,13 @@ impl Model {
             },
             Message::PageDown => match self.screen {
                 Screen::BranchList => {
-                    self.branch_list.page_down(10);
-                    // SPEC-4b893dae: Update branch summary on selection change
-                    self.refresh_branch_summary();
+                    if self.branch_list.detail_panel_tab == DetailPanelTab::Session {
+                        self.branch_list.scroll_session_page_down();
+                    } else {
+                        self.branch_list.page_down(10);
+                        // SPEC-4b893dae: Update branch summary on selection change
+                        self.refresh_branch_summary();
+                    }
                 }
                 Screen::Logs => self.logs.page_down(10),
                 Screen::Help => self.help.page_down(),
