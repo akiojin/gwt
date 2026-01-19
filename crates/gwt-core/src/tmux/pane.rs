@@ -445,7 +445,7 @@ pub fn hide_pane(pane_id: &str, window_name: &str) -> TmuxResult<String> {
 }
 
 /// Enable tmux mouse support (global option)
-fn enable_mouse() -> TmuxResult<()> {
+pub(crate) fn enable_mouse() -> TmuxResult<()> {
     let output = Command::new("tmux")
         .args(["set", "-g", "mouse", "on"])
         .output()
