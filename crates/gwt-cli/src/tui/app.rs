@@ -40,6 +40,24 @@ use super::screens::{
     WorktreeCreateState,
 };
 
+fn resolve_orphaned_agent_name(
+    fallback_name: &str,
+    session_entry: Option<&ToolSessionEntry>,
+) -> String {
+    if let Some(entry) = session_entry {
+        if !entry.tool_id.trim().is_empty() {
+            return entry.tool_id.clone();
+        }
+    }
+
+    let trimmed = fallback_name.trim();
+    if trimmed.is_empty() {
+        "unknown".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 /// Configuration for launching a coding agent after TUI exits
 #[derive(Debug, Clone)]
 pub struct AgentLaunchConfig {
@@ -685,16 +703,23 @@ impl Model {
             return;
         }
 
+        let tool_usage_map = gwt_core::config::get_last_tool_usage_map(&self.repo_root);
+
         // Detect orphaned panes
         let gwt_pane_id = self.gwt_pane_id.as_deref();
         match gwt_core::tmux::detect_orphaned_panes(session, &worktrees, gwt_pane_id) {
-            Ok(orphaned_panes) => {
+            Ok(mut orphaned_panes) => {
                 if !orphaned_panes.is_empty() {
                     debug!(
                         category = "tui",
                         count = orphaned_panes.len(),
                         "Reconnected to orphaned agent panes"
                     );
+
+                    for pane in orphaned_panes.iter_mut() {
+                        let entry = tool_usage_map.get(&pane.branch_name);
+                        pane.agent_name = resolve_orphaned_agent_name(&pane.agent_name, entry);
+                    }
 
                     for pane in orphaned_panes {
                         // Add to agent_panes list
@@ -3367,6 +3392,37 @@ mod tests {
     use crate::tui::screens::wizard::WizardStep;
     use crate::tui::screens::{BranchItem, BranchListState};
     use gwt_core::git::Branch;
+
+    fn sample_tool_entry(tool_id: &str) -> ToolSessionEntry {
+        ToolSessionEntry {
+            branch: "feature/test".to_string(),
+            worktree_path: Some("/tmp/worktree".to_string()),
+            tool_id: tool_id.to_string(),
+            tool_label: "Codex".to_string(),
+            session_id: None,
+            mode: None,
+            model: None,
+            reasoning_level: None,
+            skip_permissions: None,
+            tool_version: None,
+            timestamp: 0,
+        }
+    }
+
+    #[test]
+    fn test_resolve_orphaned_agent_name_prefers_session_entry() {
+        let entry = sample_tool_entry("codex-cli");
+        let resolved = resolve_orphaned_agent_name("bash", Some(&entry));
+        assert_eq!(resolved, "codex-cli");
+    }
+
+    #[test]
+    fn test_resolve_orphaned_agent_name_fallbacks() {
+        let resolved = resolve_orphaned_agent_name("bash", None);
+        assert_eq!(resolved, "bash");
+        let resolved = resolve_orphaned_agent_name("  ", None);
+        assert_eq!(resolved, "unknown");
+    }
 
     #[test]
     fn test_version_select_single_enter_advances() {
