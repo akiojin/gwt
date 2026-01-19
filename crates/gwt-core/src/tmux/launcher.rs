@@ -45,6 +45,20 @@ pub struct TmuxLaunchResult {
     pub agent_pane: AgentPane,
 }
 
+fn is_valid_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn shell_escape(value: &str) -> String {
+    let escaped = value.replace('\'', "'\\''");
+    format!("'{}'", escaped)
+}
+
 fn build_split_window_args(
     target_pane: &str,
     working_dir: &str,
@@ -82,15 +96,15 @@ fn build_split_window_args(
 pub fn launch_agent_in_pane(config: &TmuxLaunchConfig) -> TmuxResult<TmuxLaunchResult> {
     // Build the command string with environment setup
     let env_setup = build_env_setup(&config.env, &config.env_remove);
+    let cmd_parts: Vec<String> = std::iter::once(config.command.as_str())
+        .chain(config.args.iter().map(|arg| arg.as_str()))
+        .map(shell_escape)
+        .collect();
+    let command = cmd_parts.join(" ");
     let full_command = if env_setup.is_empty() {
-        format!("{} {}", config.command, config.args.join(" "))
+        command
     } else {
-        format!(
-            "{}; {} {}",
-            env_setup,
-            config.command,
-            config.args.join(" ")
-        )
+        format!("{}; {}", env_setup, command)
     };
 
     // Create a new pane with split-window
@@ -150,14 +164,18 @@ fn build_env_setup(env: &HashMap<String, String>, env_remove: &[String]) -> Stri
 
     // Unset environment variables
     for var in env_remove {
-        commands.push(format!("unset {}", var));
+        if is_valid_env_name(var) {
+            commands.push(format!("unset {}", var));
+        }
     }
 
     // Export environment variables
     for (key, value) in env {
-        // Escape single quotes in value
-        let escaped_value = value.replace('\'', "'\\''");
-        commands.push(format!("export {}='{}'", key, escaped_value));
+        if !is_valid_env_name(key) {
+            continue;
+        }
+        let escaped_value = shell_escape(value);
+        commands.push(format!("export {}={}", key, escaped_value));
     }
 
     commands.join("; ")

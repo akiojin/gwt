@@ -9,6 +9,11 @@ use std::process::Command;
 
 use super::error::{TmuxError, TmuxResult};
 
+fn shell_escape(value: &str) -> String {
+    let escaped = value.replace('\'', "'\\''");
+    format!("'{}'", escaped)
+}
+
 /// Log capture configuration
 #[derive(Debug, Clone)]
 pub struct LogConfig {
@@ -67,13 +72,10 @@ pub fn start_logging(pane_id: &str, log_path: &Path) -> TmuxResult<()> {
         })?;
     }
 
+    let log_path_str = log_path.to_string_lossy();
+    let cmd = format!("cat >> {}", shell_escape(&log_path_str));
     let output = Command::new("tmux")
-        .args([
-            "pipe-pane",
-            "-t",
-            pane_id,
-            &format!("cat >> {}", log_path.display()),
-        ])
+        .args(["pipe-pane", "-t", pane_id, &cmd])
         .output()
         .map_err(|e| TmuxError::CommandFailed {
             command: "pipe-pane".to_string(),
