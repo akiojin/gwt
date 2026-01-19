@@ -1148,8 +1148,7 @@ fn render_branch_row(
 
         if agent.is_background {
             // Background (hidden) pane - with spinner: "X Agent uptime"
-            let bg_spinner_char =
-                BG_SPINNER_FRAMES[spinner_frame % BG_SPINNER_FRAMES.len()];
+            let bg_spinner_char = BG_SPINNER_FRAMES[spinner_frame % BG_SPINNER_FRAMES.len()];
             let width = 2 + agent_display.width() + 1 + uptime.width(); // spinner + " " + name + " " + uptime
             let spans = vec![
                 Span::styled(
