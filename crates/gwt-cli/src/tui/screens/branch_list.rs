@@ -325,8 +325,10 @@ impl BranchItem {
 /// Spinner animation frames (for loading indicators)
 const SPINNER_FRAMES: &[char] = &['|', '/', '-', '\\'];
 
-/// Active agent spinner (spectrum wave)
-const ACTIVE_SPINNER_FRAMES: &[&str] = &["▁▃▅▇", "▃▅▇▅", "▅▇▅▃", "▇▅▃▁", "▅▃▁▃", "▃▁▃▅"];
+/// Active agent spinner (progress dots)
+const ACTIVE_SPINNER_FRAMES: &[&str] = &[
+    "▸▹▹▹▹", "▹▸▹▹▹", "▹▹▸▹▹", "▹▹▹▸▹", "▹▹▹▹▸", "▹▹▹▸▹", "▹▹▸▹▹", "▹▸▹▹▹",
+];
 
 /// Background agent spinner (BLACK_CIRCLE)
 const BG_SPINNER_FRAMES: &[char] = &['◑', '◒', '◐', '◓'];
@@ -1165,7 +1167,7 @@ fn render_branch_row(
             // Visible running pane - with spinner: "▸── Agent uptime"
             let active_spinner =
                 ACTIVE_SPINNER_FRAMES[spinner_frame % ACTIVE_SPINNER_FRAMES.len()];
-            let width = 4 + agent_display.width() + 1 + uptime.width(); // spinner(3) + " " + name + " " + uptime
+            let width = 6 + agent_display.width() + 1 + uptime.width(); // spinner(5) + " " + name + " " + uptime
             let agent_color = get_agent_color(Some(&agent.agent_name));
             let spans = vec![
                 Span::styled(
