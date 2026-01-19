@@ -6,10 +6,10 @@ use gwt_core::agent::codex::{codex_default_args, codex_skip_permissions_flag};
 use gwt_core::agent::get_command_version;
 use gwt_core::config::{save_session_entry, Settings, ToolSessionEntry};
 use gwt_core::error::GwtError;
-use gwt_core::tmux::is_inside_tmux;
 use gwt_core::worktree::WorktreeManager;
+use gwt_core::TmuxMode;
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -67,11 +67,13 @@ fn run() -> Result<(), GwtError> {
     match cli.command {
         Some(cmd) => handle_command(cmd, &repo_root, &settings),
         None => {
-            // Interactive TUI mode - tmux is required (FR-001, FR-002)
-            if !is_inside_tmux() {
-                eprintln!("gwt requires tmux. Please run inside a tmux session.");
-                std::process::exit(1);
-            }
+            // Interactive TUI mode - single or multi based on tmux detection
+            let tmux_mode = detect_tui_tmux_mode();
+            debug!(
+                category = "tui",
+                mode = %tmux_mode,
+                "Detected tmux mode for TUI"
+            );
 
             if let Ok(manager) = WorktreeManager::new(&repo_root) {
                 let _ = manager.auto_cleanup_orphans();
@@ -100,6 +102,10 @@ fn run() -> Result<(), GwtError> {
             Ok(())
         }
     }
+}
+
+fn detect_tui_tmux_mode() -> TmuxMode {
+    TmuxMode::detect()
 }
 
 fn handle_command(cmd: Commands, repo_root: &PathBuf, settings: &Settings) -> Result<(), GwtError> {
@@ -546,61 +552,6 @@ fn install_dependencies(worktree_path: &Path, auto_install: bool) -> Result<(), 
     Ok(())
 }
 
-/// Strip ANSI escape codes from a string for clean log output
-fn strip_ansi_codes(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            // Skip escape sequence
-            if let Some(&'[') = chars.peek() {
-                chars.next(); // consume '['
-                              // Skip until we hit a letter (end of escape sequence)
-                while let Some(&next) = chars.peek() {
-                    chars.next();
-                    if next.is_ascii_alphabetic() {
-                        break;
-                    }
-                }
-            }
-        } else {
-            result.push(c);
-        }
-    }
-    result
-}
-
-/// Spawn a thread to handle agent output (stdout or stderr)
-///
-/// This function reads lines from the given pipe, logs them with ANSI codes stripped,
-/// and writes the original (with ANSI codes) to the specified output.
-fn spawn_output_handler<R: std::io::Read + Send + 'static>(
-    pipe: R,
-    agent_category: String,
-    stream: &'static str,
-    output: fn(&str),
-) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
-        let reader = BufReader::new(pipe);
-        for line in reader.lines().map_while(Result::ok) {
-            // Write to TTY with ANSI codes preserved
-            output(&line);
-
-            // Log with ANSI codes stripped
-            let plain_line = strip_ansi_codes(&line);
-            if !plain_line.trim().is_empty() {
-                info!(
-                    category = agent_category.as_str(),
-                    stream = stream,
-                    "{}",
-                    plain_line
-                );
-            }
-        }
-    })
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AgentExitKind {
     Success,
@@ -780,8 +731,8 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
         .args(&command_args)
         .current_dir(&config.worktree_path)
         .stdin(Stdio::inherit()) // Keep stdin for interactive input
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
     for key in &config.env_remove {
         command.env_remove(key);
     }
@@ -797,24 +748,11 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
         reason: format!("Failed to execute '{}': {}", executable, e),
     })?;
 
-    // Spawn output handlers to capture and log agent output
-    let agent_category = format!("agent:{}", config.agent.id());
-    let stdout_handle = child.stdout.take().map(|stdout| {
-        spawn_output_handler(stdout, agent_category.clone(), "stdout", |line| {
-            println!("{}", line);
-        })
-    });
-    let stderr_handle = child.stderr.take().map(|stderr| {
-        spawn_output_handler(stderr, agent_category.clone(), "stderr", |line| {
-            eprintln!("{}", line);
-        })
-    });
-
     debug!(
         category = "agent",
         agent_id = config.agent.id(),
         worktree_path = %config.worktree_path.display(),
-        "Agent output capture started"
+        "Agent process started"
     );
 
     // FR-043: Start background thread to update timestamp every 30 seconds
@@ -840,18 +778,10 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
     // Signal the updater thread to stop and wait for it
     updater.stop();
 
-    // Wait for output handler threads to finish
-    if let Some(handle) = stdout_handle {
-        let _ = handle.join();
-    }
-    if let Some(handle) = stderr_handle {
-        let _ = handle.join();
-    }
-
     debug!(
         category = "agent",
         agent_id = config.agent.id(),
-        "Agent output capture finished"
+        "Agent process finished"
     );
 
     if let Some(session_id) = detect_agent_session_id(&config) {
@@ -1608,8 +1538,11 @@ fn describe_ntstatus(code: u32) -> Option<&'static str> {
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::Mutex;
     use std::thread::sleep;
     use tempfile::TempDir;
+
+    static TMUX_ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     fn sample_config(agent: CodingAgent) -> AgentLaunchConfig {
         AgentLaunchConfig {
@@ -1639,6 +1572,36 @@ mod tests {
             mode: ExecutionMode::Continue.label().to_string(),
             reasoning_level: None,
             skip_permissions: false,
+        }
+    }
+
+    #[test]
+    fn test_detect_tui_tmux_mode_single_outside_tmux() {
+        let _guard = TMUX_ENV_MUTEX.lock().unwrap();
+        let original = std::env::var("TMUX").ok();
+
+        std::env::remove_var("TMUX");
+        let mode = detect_tui_tmux_mode();
+        assert_eq!(mode, TmuxMode::Single);
+
+        if let Some(val) = original {
+            std::env::set_var("TMUX", val);
+        }
+    }
+
+    #[test]
+    fn test_detect_tui_tmux_mode_multi_inside_tmux() {
+        let _guard = TMUX_ENV_MUTEX.lock().unwrap();
+        let original = std::env::var("TMUX").ok();
+
+        std::env::set_var("TMUX", "/tmp/tmux-1000/default,12345,0");
+        let mode = detect_tui_tmux_mode();
+        assert_eq!(mode, TmuxMode::Multi);
+
+        if let Some(val) = original {
+            std::env::set_var("TMUX", val);
+        } else {
+            std::env::remove_var("TMUX");
         }
     }
 

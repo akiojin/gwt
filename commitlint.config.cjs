@@ -33,7 +33,11 @@ module.exports = {
       // Branch-name-style commits (historical)
       if (/^(bugfix|feature|hotfix|release)\//.test(firstLine)) return true;
       // Historical commits without conventional prefix (Fix/Stabilize pattern)
-      if (/^(Fix|Stabilize|Update|Add|Remove|Refactor|Clean)\s/.test(firstLine))
+      if (
+        /^(Fix|Stabilize|Update|Add|Remove|Refactor|Clean|Format|Resolve)\s/.test(
+          firstLine,
+        )
+      )
         return true;
       return false;
     },

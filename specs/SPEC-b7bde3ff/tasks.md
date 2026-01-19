@@ -105,6 +105,18 @@ T-007 ─> T-024 ─> T-025
 
 ---
 
+## 追加作業: シングルモード復活 (2026-01-19)
+
+- [x] **T-026** `[P][共通]` `crates/gwt-cli/src/main.rs` でtmux必須チェックを廃止し、tmux環境外ではシングルモードでTUIを継続する
+- [x] **T-TEST-026** `[Test]` `crates/gwt-cli/src/main.rs` でTMUX環境変数に応じてシングル/マルチ判定されることをテストする
+
+## 追加作業: 再接続判別の強化 (2026-01-19)
+
+- [x] **T-027** `[P][共通]` `crates/gwt-core/src/tmux/pane.rs` でpane_current_commandがシェルでも再接続対象に含める
+- [x] **T-TEST-027** `[Test]` `crates/gwt-core/src/tmux/pane.rs` で判別不能時のフォールバック名を検証する
+- [x] **T-028** `[P][共通]` `crates/gwt-cli/src/tui/app.rs` で再接続時に直近履歴のtoolIdを優先表示する
+- [x] **T-TEST-028** `[Test]` `crates/gwt-cli/src/tui/app.rs` で再接続時の表示名補正を検証する
+
 ## フェーズ 4: TUI分割表示
 
 ### T-008: ペイン一覧コンポーネント
