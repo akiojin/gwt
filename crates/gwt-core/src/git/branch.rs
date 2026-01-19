@@ -615,6 +615,7 @@ impl std::fmt::Display for DivergenceStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use tempfile::TempDir;
 
     fn create_test_repo() -> TempDir {
@@ -647,6 +648,20 @@ mod tests {
             .output()
             .unwrap();
         temp
+    }
+
+    fn commit_file(repo_path: &Path, filename: &str, content: &str, message: &str) {
+        std::fs::write(repo_path.join(filename), content).unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", message])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
     }
 
     fn create_repo_with_remote() -> (TempDir, String) {
@@ -787,5 +802,64 @@ mod tests {
                 behind: 1
             }
         );
+    }
+
+    #[test]
+    fn test_is_merged_into_true() {
+        let temp = create_test_repo();
+        let base = Branch::current(temp.path()).unwrap().unwrap().name;
+
+        Command::new("git")
+            .args(["checkout", "-b", "feature/merged"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        commit_file(temp.path(), "merged.txt", "merged", "merged commit");
+
+        Command::new("git")
+            .args(["checkout", &base])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        let output = Command::new("git")
+            .args(["merge", "--ff-only", "feature/merged"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+
+        let merged = Branch::is_merged_into(temp.path(), "feature/merged", &base).unwrap();
+        assert!(merged);
+    }
+
+    #[test]
+    fn test_is_merged_into_false() {
+        let temp = create_test_repo();
+        let base = Branch::current(temp.path()).unwrap().unwrap().name;
+
+        Command::new("git")
+            .args(["checkout", "-b", "feature/unmerged"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        commit_file(temp.path(), "unmerged.txt", "unmerged", "unmerged commit");
+
+        Command::new("git")
+            .args(["checkout", &base])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+
+        let merged = Branch::is_merged_into(temp.path(), "feature/unmerged", &base).unwrap();
+        assert!(!merged);
+    }
+
+    #[test]
+    fn test_is_merged_into_invalid_ref() {
+        let temp = create_test_repo();
+        let base = Branch::current(temp.path()).unwrap().unwrap().name;
+
+        let result = Branch::is_merged_into(temp.path(), "no-such-branch", &base);
+        assert!(result.is_err());
     }
 }
