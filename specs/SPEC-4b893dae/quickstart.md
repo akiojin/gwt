@@ -33,21 +33,21 @@ cargo run
 
 ### 変更対象
 
-| ファイル | 変更内容 |
-|---------|---------|
-| `crates/gwt-cli/src/tui/screens/branch_list.rs` | パネルUI追加 |
-| `crates/gwt-core/src/git/repository.rs` | コミットログ・diff統計追加 |
-| `crates/gwt-core/src/config/profile.rs` | AI設定追加 |
+| ファイル                                        | 変更内容                     |
+| ----------------------------------------------- | ---------------------------- |
+| `crates/gwt-cli/src/tui/screens/branch_list.rs` | パネルUI追加                 |
+| `crates/gwt-core/src/git/repository.rs`         | コミットログ・diff統計追加   |
+| `crates/gwt-core/src/config/profile.rs`         | AI設定追加                   |
 
 ### 新規作成
 
-| ファイル | 内容 |
-|---------|------|
-| `crates/gwt-core/src/git/commit.rs` | CommitEntry, ChangeStats, BranchMeta |
-| `crates/gwt-core/src/ai/mod.rs` | AIモジュール |
-| `crates/gwt-core/src/ai/client.rs` | OpenAI互換APIクライアント |
-| `crates/gwt-core/src/ai/summary.rs` | サマリー生成・キャッシュ |
-| `crates/gwt-cli/src/tui/components/summary_panel.rs` | パネルコンポーネント |
+| ファイル                                             | 内容                                 |
+| ---------------------------------------------------- | ------------------------------------ |
+| `crates/gwt-core/src/git/commit.rs`                  | CommitEntry, ChangeStats, BranchMeta |
+| `crates/gwt-core/src/ai/mod.rs`                      | AIモジュール                         |
+| `crates/gwt-core/src/ai/client.rs`                   | OpenAI互換APIクライアント            |
+| `crates/gwt-core/src/ai/summary.rs`                  | サマリー生成・キャッシュ             |
+| `crates/gwt-cli/src/tui/components/summary_panel.rs` | パネルコンポーネント                 |
 
 ## AI機能の設定
 

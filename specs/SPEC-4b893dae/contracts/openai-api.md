@@ -18,10 +18,10 @@ POST {endpoint}/chat/completions
 
 ### ヘッダー
 
-| ヘッダー | 値 | 必須 |
-|---------|-----|------|
-| Content-Type | application/json | Yes |
-| Authorization | Bearer {api_key} | Yes* |
+| ヘッダー      | 値                | 必須  |
+| ------------- | ----------------- | ----- |
+| Content-Type  | application/json  | Yes   |
+| Authorization | Bearer {api_key}  | Yes*  |
 
 *注: api_keyが空の場合はAuthorizationヘッダーを省略（ローカルLLM用）
 
@@ -47,12 +47,12 @@ POST {endpoint}/chat/completions
 
 ### パラメータ詳細
 
-| パラメータ | 型 | 説明 | デフォルト |
-|-----------|-----|------|-----------|
-| model | string | モデル名 | gpt-4o-mini |
-| messages | array | メッセージ配列 | - |
-| max_tokens | integer | 最大トークン数 | 150 |
-| temperature | number | 生成の多様性（0.0-2.0） | 0.3 |
+| パラメータ  | 型      | 説明                     | デフォルト  |
+| ----------- | ------- | ------------------------ | ----------- |
+| model       | string  | モデル名                 | gpt-4o-mini |
+| messages    | array   | メッセージ配列           | -           |
+| max_tokens  | integer | 最大トークン数           | 150         |
+| temperature | number  | 生成の多様性（0.0-2.0）  | 0.3         |
 
 ## レスポンス
 
@@ -147,19 +147,19 @@ Summarize the following git commits for branch '{branch_name}':
 
 ### タイムアウト
 
-| 操作 | タイムアウト |
-|------|-------------|
-| 接続 | 5秒 |
-| 読み取り | 30秒 |
+| 操作       | タイムアウト |
+| ---------- | ------------ |
+| 接続       | 5秒          |
+| 読み取り   | 30秒         |
 
 ### リトライ
 
-| エラー | リトライ | 間隔 |
-|--------|---------|------|
-| 429 Rate Limited | 最大3回 | 指数バックオフ（1s, 2s, 4s） |
-| 5xx Server Error | 最大2回 | 1秒固定 |
-| 接続エラー | 最大2回 | 1秒固定 |
-| 401/403 | なし | - |
+| エラー           | リトライ | 間隔                          |
+| ---------------- | -------- | ----------------------------- |
+| 429 Rate Limited | 最大3回  | 指数バックオフ（1s, 2s, 4s）  |
+| 5xx Server Error | 最大2回  | 1秒固定                       |
+| 接続エラー       | 最大2回  | 1秒固定                       |
+| 401/403          | なし     | -                             |
 
 ### エラーハンドリング
 
@@ -182,13 +182,13 @@ pub enum AIError {
 
 ## 互換性マトリクス
 
-| プロバイダー | エンドポイント | 認証 | 備考 |
-|-------------|---------------|------|------|
-| OpenAI | https://api.openai.com/v1 | Bearer token | 標準 |
-| Azure OpenAI | https://{resource}.openai.azure.com/openai/deployments/{deployment} | api-key header | パス形式が異なる |
-| Ollama | http://localhost:11434/v1 | なし | ローカル |
-| LM Studio | http://localhost:1234/v1 | なし | ローカル |
-| vLLM | http://localhost:8000/v1 | なし | ローカル |
+| プロバイダー | エンドポイント                                                         | 認証           | 備考             |
+| ------------ | ---------------------------------------------------------------------- | -------------- | ---------------- |
+| OpenAI       | `https://api.openai.com/v1`                                            | Bearer token   | 標準             |
+| Azure OpenAI | `https://{resource}.openai.azure.com/openai/deployments/{deployment}`  | api-key header | パス形式が異なる |
+| Ollama       | `http://localhost:11434/v1`                                            | なし           | ローカル         |
+| LM Studio    | `http://localhost:1234/v1`                                             | なし           | ローカル         |
+| vLLM         | `http://localhost:8000/v1`                                             | なし           | ローカル         |
 
 ## セキュリティ考慮事項
 

@@ -148,31 +148,31 @@ let chunks = Layout::default()
 
 ### 3.1 制約
 
-| 制約 | 詳細 |
-|------|------|
-| Ratatui | CLI UIフレームワーク、ASCII文字のみ |
-| パフォーマンス | パネル更新200ms以内 |
-| メモリ | AIサマリーはセッション中キャッシュ |
-| ネットワーク | AI機能はオプショナル（APIなしでも動作） |
+| 制約           | 詳細                                     |
+| -------------- | ---------------------------------------- |
+| Ratatui        | CLI UIフレームワーク、ASCII文字のみ      |
+| パフォーマンス | パネル更新200ms以内                      |
+| メモリ         | AIサマリーはセッション中キャッシュ       |
+| ネットワーク   | AI機能はオプショナル（APIなしでも動作）  |
 
 ### 3.2 依存関係
 
-| 依存 | 詳細 |
-|------|------|
-| SPEC-d2f4762a | 安全性判定データの共有 |
-| Branch構造体 | ahead/behind/commit_timestamp |
-| Profile | AI設定の保存 |
-| OpenAI互換API | AIサマリー生成 |
+| 依存           | 詳細                          |
+| -------------- | ----------------------------- |
+| SPEC-d2f4762a  | 安全性判定データの共有        |
+| Branch構造体   | ahead/behind/commit_timestamp |
+| Profile        | AI設定の保存                  |
+| OpenAI互換API  | AIサマリー生成                |
 
 ## 4. 未実装機能の確認
 
-| 機能 | 現状 | 必要な実装 |
-|------|------|-----------|
-| コミットログ取得 | 未実装 | `git log --oneline -n 5` ラッパー |
-| 変更統計（行数） | 未実装 | `git diff --shortstat` ラッパー |
-| AI API呼び出し | 未実装 | reqwestでOpenAI互換API呼び出し |
-| AI設定 | 未実装 | Profile構造体にaiフィールド追加 |
-| パネルUI | 未実装 | 新規Ratatuiコンポーネント |
+| 機能             | 現状   | 必要な実装                           |
+| ---------------- | ------ | ------------------------------------ |
+| コミットログ取得 | 未実装 | `git log --oneline -n 5` ラッパー    |
+| 変更統計（行数） | 未実装 | `git diff --shortstat` ラッパー      |
+| AI API呼び出し   | 未実装 | reqwestでOpenAI互換API呼び出し       |
+| AI設定           | 未実装 | Profile構造体にaiフィールド追加      |
+| パネルUI         | 未実装 | 新規Ratatuiコンポーネント            |
 
 ## 5. リスク評価
 
@@ -193,10 +193,10 @@ let chunks = Layout::default()
 
 ## 6. 技術スタック確認
 
-| 項目 | 値 |
-|------|-----|
-| 言語 | Rust (Stable) |
-| TUIフレームワーク | Ratatui |
-| HTTPクライアント | reqwest（新規追加） |
-| シリアライズ | serde_yaml, serde_json |
-| Git操作 | std::process::Command |
+| 項目               | 値                      |
+| ------------------ | ----------------------- |
+| 言語               | Rust (Stable)           |
+| TUIフレームワーク  | Ratatui                 |
+| HTTPクライアント   | reqwest（新規追加）     |
+| シリアライズ       | serde_yaml, serde_json  |
+| Git操作            | std::process::Command   |

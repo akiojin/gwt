@@ -275,22 +275,22 @@ Branch（gwt-core、既存）
 
 ## バリデーションルール
 
-| エンティティ | ルール |
-|-------------|--------|
-| CommitEntry.hash | 7文字以上の16進数文字列 |
-| CommitEntry.message | 空文字列でない |
-| ChangeStats.files_changed | 0以上 |
-| AISettings.endpoint | 有効なURL形式 |
-| AISettings.model | 空文字列でない |
+| エンティティ              | ルール                   |
+| ------------------------- | ------------------------ |
+| CommitEntry.hash          | 7文字以上の16進数文字列  |
+| CommitEntry.message       | 空文字列でない           |
+| ChangeStats.files_changed | 0以上                    |
+| AISettings.endpoint       | 有効なURL形式            |
+| AISettings.model          | 空文字列でない           |
 
 ## ファイル配置
 
-| 構造体 | ファイル |
-|--------|---------|
-| BranchSummary | `crates/gwt-cli/src/tui/screens/branch_list.rs` |
-| CommitEntry | `crates/gwt-core/src/git/commit.rs`（新規） |
-| ChangeStats | `crates/gwt-core/src/git/commit.rs`（新規） |
-| BranchMeta | `crates/gwt-core/src/git/commit.rs`（新規） |
-| LoadingState | `crates/gwt-cli/src/tui/screens/branch_list.rs` |
-| AISettings | `crates/gwt-core/src/config/profile.rs` |
-| AISummaryCache | `crates/gwt-core/src/ai/summary.rs`（新規） |
+| 構造体         | ファイル                                         |
+| -------------- | ------------------------------------------------ |
+| BranchSummary  | `crates/gwt-cli/src/tui/screens/branch_list.rs`  |
+| CommitEntry    | `crates/gwt-core/src/git/commit.rs`（新規）      |
+| ChangeStats    | `crates/gwt-core/src/git/commit.rs`（新規）      |
+| BranchMeta     | `crates/gwt-core/src/git/commit.rs`（新規）      |
+| LoadingState   | `crates/gwt-cli/src/tui/screens/branch_list.rs`  |
+| AISettings     | `crates/gwt-core/src/config/profile.rs`          |
+| AISummaryCache | `crates/gwt-core/src/ai/summary.rs`（新規）      |

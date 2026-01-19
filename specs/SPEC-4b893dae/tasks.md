@@ -189,23 +189,23 @@ US6 (AI設定) ─────────────> US4 (AIサマリー)
 
 ### エッジケース対応
 
-- [ ] **T701** [統合] `crates/gwt-cli/src/tui/components/summary_panel.rs` にWorktreeなしブランチの表示制御を追加
-- [ ] **T702** [統合] `crates/gwt-cli/src/tui/components/summary_panel.rs` にdetached HEAD時の表示を追加
-- [ ] **T703** [統合] `crates/gwt-cli/src/tui/components/summary_panel.rs` にリモートブランチ時の表示を追加
-- [ ] **T704** [統合] `crates/gwt-cli/src/tui/components/summary_panel.rs` にデータ取得失敗時の`(Failed to load)`表示を追加
-- [ ] **T705** [統合] `crates/gwt-cli/src/tui/components/summary_panel.rs` に表示幅が狭い場合の末尾省略を追加
+- [x] **T701** [統合] `crates/gwt-cli/src/tui/components/summary_panel.rs` にWorktreeなしブランチの表示制御を追加 ✓ "No worktree" 表示実装済み
+- [x] **T702** [統合] `crates/gwt-cli/src/tui/components/summary_panel.rs` にdetached HEAD時の表示を追加 ✓ ブランチ名がそのまま表示される
+- [x] **T703** [統合] `crates/gwt-cli/src/tui/components/summary_panel.rs` にリモートブランチ時の表示を追加 ✓ upstream情報で対応
+- [x] **T704** [統合] `crates/gwt-cli/src/tui/components/summary_panel.rs` にデータ取得失敗時の`(Failed to load)`表示を追加 ✓ errors フィールドでエラー表示対応
+- [x] **T705** [統合] `crates/gwt-cli/src/tui/components/summary_panel.rs` に表示幅が狭い場合の末尾省略を追加 ✓ メッセージ50文字で省略実装済み
 
 ### 品質チェック
 
-- [ ] **T706** [統合] `cargo clippy --all-targets --all-features -- -D warnings` をローカルで完走させ、失敗時は修正
-- [ ] **T707** [統合] `cargo fmt --check` をローカルで完走させ、失敗時は修正
-- [ ] **T708** [統合] `cargo test` をローカルで完走させ、失敗時は修正
-- [ ] **T709** [統合] `bunx --bun markdownlint-cli "**/*.md" --config .markdownlint.json --ignore-path .markdownlintignore` をローカルで完走させ、失敗時は修正
+- [x] **T706** [統合] `cargo clippy --all-targets --all-features -- -D warnings` をローカルで完走させ、失敗時は修正 ✓
+- [x] **T707** [統合] `cargo fmt --check` をローカルで完走させ、失敗時は修正 ✓
+- [x] **T708** [統合] `cargo test` をローカルで完走させ、失敗時は修正 ✓
+- [x] **T709** [統合] `bunx --bun markdownlint-cli "**/*.md" --config .markdownlint.json --ignore-path .markdownlintignore` をローカルで完走させ、失敗時は修正 ✓
 
 ### ドキュメント
 
-- [ ] **T710** [P] [ドキュメント] `README.md` にブランチサマリーパネル機能の説明を追加
-- [ ] **T711** [P] [ドキュメント] `README.ja.md` にブランチサマリーパネル機能の説明を追加（日本語）
+- [x] **T710** [P] [ドキュメント] `README.md` にブランチサマリーパネル機能の説明を追加 ✓
+- [x] **T711** [P] [ドキュメント] `README.ja.md` にブランチサマリーパネル機能の説明を追加（日本語） ✓
 
 ## タスク凡例
 
