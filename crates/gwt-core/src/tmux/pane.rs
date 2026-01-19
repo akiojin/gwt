@@ -291,10 +291,8 @@ pub fn compute_equal_splits(total: u16, parts: usize) -> Vec<u16> {
     let base = total / parts_u16;
     let remainder = total % parts_u16;
     let mut splits = vec![base; parts];
-    if remainder > 0 {
-        if let Some(last) = splits.last_mut() {
-            *last += remainder;
-        }
+    for split in splits.iter_mut().take(remainder as usize) {
+        *split += 1;
     }
     splits
 }
@@ -400,6 +398,13 @@ pub fn hide_pane(pane_id: &str, window_name: &str) -> TmuxResult<String> {
             command: "display-message".to_string(),
             reason: e.to_string(),
         })?;
+    if !session_output.status.success() {
+        let stderr = String::from_utf8_lossy(&session_output.stderr);
+        return Err(TmuxError::CommandFailed {
+            command: "display-message".to_string(),
+            reason: stderr.to_string(),
+        });
+    }
 
     let session_name = String::from_utf8_lossy(&session_output.stdout)
         .trim()
@@ -486,28 +491,25 @@ pub fn break_pane(pane_id: &str) -> TmuxResult<()> {
 /// Uses `tmux join-pane` to move the pane from its background window back to the main window.
 ///
 /// # Arguments
-/// * `background_window` - The background window identifier (session:window_id)
+/// * `pane_id` - The pane ID to join back to the main window
 /// * `target_pane_id` - The pane ID to join beside (usually the GWT pane)
 ///
 /// # Returns
 /// The new pane ID after joining
-pub fn show_pane(background_window: &str, target_pane_id: &str) -> TmuxResult<String> {
+pub fn show_pane(pane_id: &str, target_pane_id: &str) -> TmuxResult<String> {
     // Ensure mouse mode is on when showing panes
     let _ = enable_mouse();
 
-    // Join the pane from the background window to the target pane
+    // Join the pane back to the target pane
     let output = Command::new("tmux")
         .args([
             "join-pane",
             "-d", // don't switch focus
             "-h", // horizontal split (side by side)
             "-s",
-            background_window,
+            pane_id,
             "-t",
             target_pane_id,
-            "-P",
-            "-F",
-            "#{pane_id}",
         ])
         .output()
         .map_err(|e| TmuxError::CommandFailed {
@@ -523,8 +525,7 @@ pub fn show_pane(background_window: &str, target_pane_id: &str) -> TmuxResult<St
         });
     }
 
-    let new_pane_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Ok(new_pane_id)
+    Ok(pane_id.to_string())
 }
 
 /// Join a pane to a target with a split direction
@@ -544,9 +545,6 @@ pub fn join_pane_to_target(
             pane_id,
             "-t",
             target_pane_id,
-            "-P",
-            "-F",
-            "#{pane_id}",
         ])
         .output()
         .map_err(|e| TmuxError::CommandFailed {
@@ -562,8 +560,7 @@ pub fn join_pane_to_target(
         });
     }
 
-    let joined_pane_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Ok(joined_pane_id)
+    Ok(pane_id.to_string())
 }
 
 /// Send keys to a pane (e.g., Ctrl-C for interrupt)
@@ -695,6 +692,15 @@ pub fn detect_orphaned_panes(
     worktrees: &[(String, std::path::PathBuf)],
     gwt_pane_id: Option<&str>,
 ) -> TmuxResult<Vec<AgentPane>> {
+    fn normalize_path(path: &str) -> &str {
+        let trimmed = path.trim_end_matches('/');
+        if trimmed.is_empty() {
+            "/"
+        } else {
+            trimmed
+        }
+    }
+
     let panes = list_panes(session)?;
     let mut agents = Vec::new();
 
@@ -708,9 +714,11 @@ pub fn detect_orphaned_panes(
 
         if let Some(current_path) = &pane.current_path {
             // Check if current_path matches any worktree path
+            let current_norm = normalize_path(current_path);
             for (branch_name, worktree_path) in worktrees {
                 let worktree_str = worktree_path.to_string_lossy();
-                if current_path == worktree_str.as_ref() {
+                let worktree_norm = normalize_path(worktree_str.as_ref());
+                if current_norm == worktree_norm {
                     // Found a match - create AgentPane
                     // Detect agent name from the command
                     if let Some(agent_name) = detect_agent_name(&pane.current_command) {
@@ -905,7 +913,7 @@ mod tests {
     #[test]
     fn test_compute_equal_splits() {
         assert_eq!(compute_equal_splits(9, 3), vec![3, 3, 3]);
-        assert_eq!(compute_equal_splits(10, 3), vec![3, 3, 4]);
+        assert_eq!(compute_equal_splits(10, 3), vec![4, 3, 3]);
         assert_eq!(compute_equal_splits(5, 1), vec![5]);
         assert!(compute_equal_splits(0, 0).is_empty());
     }

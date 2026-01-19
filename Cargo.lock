@@ -2047,7 +2047,7 @@ checksum = "17e2ac29387b1aa07a1e448f7bb4f35b500787971e965b02842b900afa5c8f6f"
 
 [[package]]
 name = "gwt-cli"
-version = "6.0.9"
+version = "6.1.0"
 dependencies = [
  "arboard",
  "chrono",
@@ -2062,6 +2062,7 @@ dependencies = [
  "thiserror 2.0.17",
  "tokio",
  "tracing",
+ "unicode-width 0.1.14",
  "ureq",
  "urlencoding",
  "which",
@@ -2069,7 +2070,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-core"
-version = "6.0.9"
+version = "6.1.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -2097,7 +2098,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-frontend"
-version = "6.0.9"
+version = "6.1.0"
 dependencies = [
  "console_error_panic_hook",
  "gloo-net",
@@ -2112,7 +2113,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-web"
-version = "6.0.9"
+version = "6.1.0"
 dependencies = [
  "axum",
  "futures-util",

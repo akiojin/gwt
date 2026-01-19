@@ -47,12 +47,12 @@ pub fn create_session(name: &str) -> TmuxResult<()> {
 pub fn create_session_with_command(
     name: &str,
     working_dir: &str,
-    command: Option<&str>,
+    command: Option<&[&str]>,
 ) -> TmuxResult<()> {
     let mut args = vec!["new-session", "-d", "-s", name, "-c", working_dir];
 
     if let Some(cmd) = command {
-        args.push(cmd);
+        args.extend(cmd);
     }
 
     let output =

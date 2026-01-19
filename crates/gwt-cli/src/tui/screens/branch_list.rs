@@ -8,6 +8,7 @@ use gwt_core::worktree::Worktree;
 use ratatui::{prelude::*, widgets::*};
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
+use unicode_width::UnicodeWidthStr;
 
 /// Get terminal color for coding agent (SPEC-3b0ed29b FR-024~FR-027)
 fn get_agent_color(tool_id: Option<&str>) -> Color {
@@ -29,11 +30,7 @@ fn get_agent_color(tool_id: Option<&str>) -> Color {
 
 /// Get display name for agent (capitalize first letter)
 fn get_agent_display_name(agent_name: &str) -> String {
-    let mut chars = agent_name.chars();
-    match chars.next() {
-        None => String::new(),
-        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-    }
+    crate::tui::normalize_agent_label(agent_name)
 }
 
 /// Branch name type for sorting priority (SPEC-d2f4762a FR-003a)
@@ -1049,7 +1046,7 @@ fn render_branch_row(
 
     // Calculate left side width: "[*] " + worktree + " " + safety + " " + branch_name
     // selection_icon(3) + space(1) + worktree_icon(1) + space(1) + safety_icon + space(1) + name
-    let left_width = 3 + 1 + 1 + 1 + safety_icon.len() + 1 + display_name.len();
+    let left_width = 3 + 1 + 1 + 1 + safety_icon.len() + 1 + display_name.width();
 
     // Build right side (agent info) and calculate its width
     let (right_spans, right_width): (Vec<Span>, usize) = if let Some(agent) = running_agent {
@@ -1059,7 +1056,7 @@ fn render_branch_row(
 
         if agent.is_background {
             // Background (hidden) pane - grayed out: "[BG] Agent uptime"
-            let width = 5 + agent_display.len() + 1 + uptime.len(); // "[BG] " + name + " " + uptime
+            let width = 5 + agent_display.width() + 1 + uptime.width(); // "[BG] " + name + " " + uptime
             let spans = vec![
                 Span::styled("[BG] ", Style::default().fg(Color::DarkGray)),
                 Span::styled(agent_display, Style::default().fg(Color::DarkGray)),
@@ -1069,7 +1066,7 @@ fn render_branch_row(
             (spans, width)
         } else {
             // Visible running pane - with spinner: "[X] Agent uptime"
-            let width = 4 + agent_display.len() + 1 + uptime.len(); // "[X] " + name + " " + uptime
+            let width = 4 + agent_display.width() + 1 + uptime.width(); // "[X] " + name + " " + uptime
             let agent_color = get_agent_color(Some(&agent.agent_name));
             let spans = vec![
                 Span::styled(
@@ -1090,7 +1087,7 @@ fn render_branch_row(
             tool.to_string(),
             Style::default().fg(agent_color),
         )];
-        (spans, tool.len())
+        (spans, tool.width())
     } else {
         (vec![], 0)
     };

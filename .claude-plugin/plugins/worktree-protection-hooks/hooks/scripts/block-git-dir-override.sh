@@ -24,7 +24,7 @@ command=$(jq -r '.tool_input.command // empty' <<< "$json_input")
 #   - GIT_DIR=...
 #   - env GIT_DIR=...
 #   - declare -x GIT_DIR=...
-if echo "$command" | grep -qE '(^|[;&|]|[[:space:]])(export[[:space:]]+)?GIT_DIR[[:space:]]*=|env[[:space:]]+[^;]*GIT_DIR[[:space:]]*=|declare[[:space:]]+-x[[:space:]]+GIT_DIR[[:space:]]*='; then
+if grep -qE '(^|[;&|]|[[:space:]])(export[[:space:]]+)?GIT_DIR[[:space:]]*=|env[[:space:]]+[^;]*GIT_DIR[[:space:]]*=|declare[[:space:]]+-x[[:space:]]+GIT_DIR[[:space:]]*=' <<< "$command"; then
     # JSON応答を返す（jqで安全にエスケープ）
     jq -n \
       --arg cmd "$command" \
@@ -42,7 +42,7 @@ if echo "$command" | grep -qE '(^|[;&|]|[[:space:]])(export[[:space:]]+)?GIT_DIR
 fi
 
 # GIT_WORK_TREE の設定も同様にブロック（GIT_DIRと組み合わせて使われることが多い）
-if echo "$command" | grep -qE '(^|[;&|]|[[:space:]])(export[[:space:]]+)?GIT_WORK_TREE[[:space:]]*=|env[[:space:]]+[^;]*GIT_WORK_TREE[[:space:]]*=|declare[[:space:]]+-x[[:space:]]+GIT_WORK_TREE[[:space:]]*='; then
+if grep -qE '(^|[;&|]|[[:space:]])(export[[:space:]]+)?GIT_WORK_TREE[[:space:]]*=|env[[:space:]]+[^;]*GIT_WORK_TREE[[:space:]]*=|declare[[:space:]]+-x[[:space:]]+GIT_WORK_TREE[[:space:]]*=' <<< "$command"; then
     # JSON応答を返す（jqで安全にエスケープ）
     jq -n \
       --arg cmd "$command" \

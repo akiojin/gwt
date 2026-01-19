@@ -160,6 +160,7 @@ fn create_pane_list_item(
         Span::raw("")
     };
 
+    let agent_label = crate::tui::normalize_agent_label(&pane.agent_name);
     let spans = vec![
         status_indicator,
         Span::styled(
@@ -175,7 +176,7 @@ fn create_pane_list_item(
         ),
         Span::raw(" "),
         Span::styled(
-            format!("{:<10}", pane.agent_name),
+            format!("{:<10}", agent_label),
             Style::default().fg(if pane.is_background {
                 Color::DarkGray
             } else {

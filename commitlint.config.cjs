@@ -29,7 +29,7 @@ module.exports = {
     (commit) => {
       const firstLine = commit.split("\n")[0].trim();
       // Merge commits
-      if (firstLine.startsWith("Merge ")) return true;
+      if (/^merge[:\s]/i.test(firstLine)) return true;
       // Branch-name-style commits (historical)
       if (/^(bugfix|feature|hotfix|release)\//.test(firstLine)) return true;
       // Historical commits without conventional prefix (Fix/Stabilize pattern)
@@ -39,4 +39,3 @@ module.exports = {
     },
   ],
 };
-
