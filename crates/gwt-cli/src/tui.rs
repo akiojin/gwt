@@ -13,7 +13,7 @@ pub(crate) fn normalize_agent_label(agent_name: &str) -> String {
     match lower.as_str() {
         "codex-cli" | "codex" => "Codex".to_string(),
         "gemini-cli" | "gemini" => "Gemini".to_string(),
-        "claude-code" | "claude" => "Claude".to_string(),
+        "claude-code" | "claude code" | "claude" => "Claude".to_string(),
         "opencode" | "open-code" => "OpenCode".to_string(),
         "aider" => "Aider".to_string(),
         "cursor" => "Cursor".to_string(),
