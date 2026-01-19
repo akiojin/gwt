@@ -996,11 +996,7 @@ impl Model {
     /// シングルアクティブ制約: アクティブペインは最大1つなので、それを非表示にする
     fn hide_active_agent_pane(&mut self) {
         // Find the active pane (is_background == false)
-        let active_idx = self
-            .pane_list
-            .panes
-            .iter()
-            .position(|p| !p.is_background);
+        let active_idx = self.pane_list.panes.iter().position(|p| !p.is_background);
 
         let Some(idx) = active_idx else {
             // No active pane to hide (FR-096: do nothing)
@@ -2117,8 +2113,8 @@ impl Model {
             .gwt_pane_id
             .as_ref()
             .ok_or_else(|| "No gwt pane ID available".to_string())?;
-        let pane_id = launcher::launch_in_pane(target, &working_dir, &command)
-            .map_err(|e| e.to_string())?;
+        let pane_id =
+            launcher::launch_in_pane(target, &working_dir, &command).map_err(|e| e.to_string())?;
 
         // Focus the new pane (FR-022)
         if let Err(e) = gwt_core::tmux::pane::select_pane(&pane_id) {
@@ -2183,7 +2179,11 @@ impl Model {
     /// FR-036: Single Active Pane Constraint - at most 1 visible agent pane
     fn desired_agent_column_count(count: usize) -> usize {
         // Under single-active constraint, count is always 0 or 1
-        if count > 0 { 1 } else { 0 }
+        if count > 0 {
+            1
+        } else {
+            0
+        }
     }
 
     fn visible_agent_pane_ids(&self) -> Vec<String> {
