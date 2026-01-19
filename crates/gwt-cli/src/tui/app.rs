@@ -745,6 +745,8 @@ impl Model {
                 branch_list.working_directory = Some(self.repo_root.display().to_string());
                 branch_list.version = Some(env!("CARGO_PKG_VERSION").to_string());
                 self.branch_list = branch_list;
+                // SPEC-4b893dae: Update branch summary after branches are loaded
+                self.branch_list.update_branch_summary(&self.repo_root);
 
                 self.total_count = update.total_count;
                 self.active_count = update.active_count;
@@ -1453,6 +1455,8 @@ impl Model {
             Message::SelectNext => match self.screen {
                 Screen::BranchList => {
                     self.branch_list.select_next();
+                    // SPEC-4b893dae: Update branch summary on selection change
+                    self.branch_list.update_branch_summary(&self.repo_root);
                 }
                 Screen::WorktreeCreate => self.worktree_create.select_next_base(),
                 Screen::Settings => self.settings.select_next(),
@@ -1466,6 +1470,8 @@ impl Model {
             Message::SelectPrev => match self.screen {
                 Screen::BranchList => {
                     self.branch_list.select_prev();
+                    // SPEC-4b893dae: Update branch summary on selection change
+                    self.branch_list.update_branch_summary(&self.repo_root);
                 }
                 Screen::WorktreeCreate => self.worktree_create.select_prev_base(),
                 Screen::Settings => self.settings.select_prev(),
@@ -1477,27 +1483,43 @@ impl Model {
                 Screen::Confirm => {}
             },
             Message::PageUp => match self.screen {
-                Screen::BranchList => self.branch_list.page_up(10),
+                Screen::BranchList => {
+                    self.branch_list.page_up(10);
+                    // SPEC-4b893dae: Update branch summary on selection change
+                    self.branch_list.update_branch_summary(&self.repo_root);
+                }
                 Screen::Logs => self.logs.page_up(10),
                 Screen::Help => self.help.page_up(),
                 Screen::Environment => self.environment.page_up(),
                 _ => {}
             },
             Message::PageDown => match self.screen {
-                Screen::BranchList => self.branch_list.page_down(10),
+                Screen::BranchList => {
+                    self.branch_list.page_down(10);
+                    // SPEC-4b893dae: Update branch summary on selection change
+                    self.branch_list.update_branch_summary(&self.repo_root);
+                }
                 Screen::Logs => self.logs.page_down(10),
                 Screen::Help => self.help.page_down(),
                 Screen::Environment => self.environment.page_down(),
                 _ => {}
             },
             Message::GoHome => match self.screen {
-                Screen::BranchList => self.branch_list.go_home(),
+                Screen::BranchList => {
+                    self.branch_list.go_home();
+                    // SPEC-4b893dae: Update branch summary on selection change
+                    self.branch_list.update_branch_summary(&self.repo_root);
+                }
                 Screen::Logs => self.logs.go_home(),
                 Screen::Environment => self.environment.go_home(),
                 _ => {}
             },
             Message::GoEnd => match self.screen {
-                Screen::BranchList => self.branch_list.go_end(),
+                Screen::BranchList => {
+                    self.branch_list.go_end();
+                    // SPEC-4b893dae: Update branch summary on selection change
+                    self.branch_list.update_branch_summary(&self.repo_root);
+                }
                 Screen::Logs => self.logs.go_end(),
                 Screen::Environment => self.environment.go_end(),
                 _ => {}

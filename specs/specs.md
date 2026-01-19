@@ -7,7 +7,7 @@
 
 | SPEC ID | タイトル | 作成日 |
 | --- | --- | --- |
-| [SPEC-6408df0c](SPEC-6408df0c/spec.md) | 機能仕様: HuskyでCIと同等のLintを実行 | 2026-01-19 |
+| [SPEC-4b893dae](SPEC-4b893dae/spec.md) | 機能仕様: [機能名] | [日付] |
 | [SPEC-f47db390](SPEC-f47db390/spec.md) | 機能仕様: セッションID永続化とContinue/Resume強化 | 2025-12-06 |
 | [SPEC-dafff079](SPEC-dafff079/spec.md) | 機能仕様: 環境変数プロファイル機能 | 2025-12-15 |
 | [SPEC-d2f4762a](SPEC-d2f4762a/spec.md) | 機能仕様: ブランチ選択画面（Branch Selection Screen） | 2025-11-18 |
@@ -23,6 +23,7 @@
 | [SPEC-902a89dc](SPEC-902a89dc/spec.md) | 機能仕様: Worktreeパス修復機能 | 2026-01-05 |
 | [SPEC-8adfd99e](SPEC-8adfd99e/spec.md) | 機能仕様: Web UI 環境変数編集機能 | 2025-11-11 |
 | [SPEC-77b1bc70](SPEC-77b1bc70/spec.md) | 機能仕様: リリースフロー要件の明文化とリリース開始時 main→develop 同期 | 2026-01-16 |
+| [SPEC-6408df0c](SPEC-6408df0c/spec.md) | 機能仕様: HuskyでCIと同等のLintを実行 | 2026-01-19 |
 | [SPEC-5e0c1c49](SPEC-5e0c1c49/spec.md) | 機能仕様: Codex CLI gpt-5.1 デフォルト更新 | 2025-11-14 |
 | [SPEC-55fe506f](SPEC-55fe506f/spec.md) | 機能仕様: Worktreeクリーンアップ選択機能 | 2025-11-10 |
 | [SPEC-40c7b4f1](SPEC-40c7b4f1/spec.md) | 機能仕様: ブランチ選択時のdivergence/FF失敗ハンドリング（起動継続） | 2025-12-09 |
