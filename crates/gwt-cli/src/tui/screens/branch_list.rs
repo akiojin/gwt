@@ -2,11 +2,12 @@
 
 #![allow(dead_code)]
 
-use gwt_core::git::{Branch, DivergenceStatus};
+use gwt_core::git::{Branch, BranchMeta, BranchSummary, DivergenceStatus, Repository};
 use gwt_core::tmux::AgentPane;
 use gwt_core::worktree::Worktree;
 use ratatui::{prelude::*, widgets::*};
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::time::Instant;
 use unicode_width::UnicodeWidthStr;
 
@@ -351,6 +352,8 @@ pub struct BranchListState {
     pub visible_height: usize,
     /// Running agents mapped by branch name (for agent info display)
     pub running_agents: HashMap<String, AgentPane>,
+    /// Branch summary data for the selected branch (SPEC-4b893dae)
+    pub branch_summary: Option<BranchSummary>,
 }
 
 impl Default for BranchListState {
@@ -378,6 +381,7 @@ impl Default for BranchListState {
             status_progress_active: false,
             visible_height: 15, // Default fallback (previously hardcoded)
             running_agents: HashMap::new(),
+            branch_summary: None,
         }
     }
 }
@@ -793,7 +797,7 @@ impl BranchListState {
 
     /// Get current spinner character
     pub fn spinner_char(&self) -> char {
-        SPINNER_FRAMES[self.spinner_frame]
+        SPINNER_FRAMES[self.spinner_frame % SPINNER_FRAMES.len()]
     }
 
     /// Check if loading indicator should be visible (after delay)
@@ -807,6 +811,85 @@ impl BranchListState {
             false
         }
     }
+
+    /// Update branch summary for the currently selected branch (SPEC-4b893dae T206)
+    ///
+    /// Fetches commit log and change stats from the repository.
+    /// Should be called when selection changes.
+    pub fn update_branch_summary(&mut self, repo_root: &Path) {
+        let Some(branch) = self.selected_branch() else {
+            self.branch_summary = None;
+            return;
+        };
+
+        // Create base summary
+        let mut summary = BranchSummary::new(&branch.name);
+
+        // Set worktree path if available
+        if let Some(wt_path) = &branch.worktree_path {
+            summary = summary.with_worktree_path(Some(std::path::PathBuf::from(wt_path)));
+        }
+
+        // Try to fetch commit log
+        // For branches with worktree, use the worktree path; otherwise use repo root
+        let repo_path = branch
+            .worktree_path
+            .as_ref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| repo_root.to_path_buf());
+
+        if let Ok(repo) = Repository::open(&repo_path) {
+            // Fetch commit log (max 5 commits)
+            match repo.get_commit_log(5) {
+                Ok(commits) => {
+                    summary = summary.with_commits(commits);
+                }
+                Err(e) => {
+                    summary.errors.commits = Some(e.to_string());
+                }
+            }
+
+            // Fetch change stats only if worktree exists
+            if branch.worktree_path.is_some() {
+                match repo.get_diff_stats() {
+                    Ok(mut stats) => {
+                        // Integrate existing safety check data
+                        stats.has_uncommitted = branch.has_changes;
+                        stats.has_unpushed = branch.has_unpushed;
+                        summary = summary.with_stats(stats);
+                    }
+                    Err(e) => {
+                        summary.errors.stats = Some(e.to_string());
+                    }
+                }
+            }
+        }
+
+        // Set metadata from branch data
+        // Extract ahead/behind from DivergenceStatus
+        let (ahead, behind) = match &branch.divergence {
+            DivergenceStatus::Ahead(a) => (*a, 0),
+            DivergenceStatus::Behind(b) => (0, *b),
+            DivergenceStatus::Diverged { ahead, behind } => (*ahead, *behind),
+            DivergenceStatus::UpToDate | DivergenceStatus::NoRemote => (0, 0),
+        };
+
+        let meta = BranchMeta {
+            upstream: branch.remote_name.clone(),
+            ahead,
+            behind,
+            last_commit_timestamp: branch.last_commit_timestamp,
+            base_branch: None,
+        };
+        summary = summary.with_meta(meta);
+
+        self.branch_summary = Some(summary);
+    }
+
+    /// Clear branch summary (called when branches are reloaded)
+    pub fn clear_branch_summary(&mut self) {
+        self.branch_summary = None;
+    }
 }
 
 /// Render branch list screen
@@ -819,11 +902,13 @@ pub fn render_branch_list(
     status_message: Option<&str>,
     has_focus: bool,
 ) {
+    // SPEC-4b893dae: Summary panel height is 12 lines (FR-003)
+    let panel_height = crate::tui::components::SummaryPanel::height();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(3),    // Branch list (FR-003)
-            Constraint::Length(1), // Worktree path or Status message
+            Constraint::Min(3),               // Branch list (FR-003)
+            Constraint::Length(panel_height), // Summary panel (SPEC-4b893dae)
         ])
         .split(area);
 
@@ -832,7 +917,7 @@ pub fn render_branch_list(
     state.update_visible_height(branch_area_height);
 
     render_branches(state, frame, chunks[0], has_focus);
-    render_worktree_path(state, frame, chunks[1], status_message);
+    render_summary_panel(state, frame, chunks[1], status_message);
 }
 
 /// Render header line (FR-001, FR-001a)
@@ -1135,39 +1220,95 @@ fn render_branch_row(
     ListItem::new(Line::from(spans)).style(style)
 }
 
-/// Render worktree path line or status message
-fn render_worktree_path(
+/// Render summary panel (SPEC-4b893dae FR-001~FR-006)
+fn render_summary_panel(
     state: &BranchListState,
     frame: &mut Frame,
     area: Rect,
     status_message: Option<&str>,
 ) {
-    // If there's a status message, show it instead of worktree path
+    use crate::tui::components::SummaryPanel;
+    use std::path::PathBuf;
+
+    // Create or get branch summary
+    let summary = if let Some(ref summary) = state.branch_summary {
+        summary.clone()
+    } else if let Some(branch) = state.selected_branch() {
+        // Create a basic summary from available branch data
+        let mut summary = BranchSummary::new(&branch.name);
+
+        // Set worktree path if available
+        if let Some(wt_path) = &branch.worktree_path {
+            summary = summary.with_worktree_path(Some(PathBuf::from(wt_path)));
+        }
+
+        // Set loading state based on global loading state
+        if state.is_loading {
+            summary.loading.commits = true;
+            summary.loading.stats = true;
+            summary.loading.meta = true;
+        }
+
+        summary
+    } else {
+        // No branch selected - show empty panel
+        BranchSummary::new("(no branch selected)")
+    };
+
+    // Handle status messages - show them in the panel area if present
     if let Some(status) = status_message {
+        // Draw the panel frame first
+        let title = format!(" [{}] Details ", summary.branch_name);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(title);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        // Show status message inside
         let line = Line::from(vec![Span::styled(
             status,
             Style::default().fg(Color::Yellow),
         )]);
-        frame.render_widget(Paragraph::new(line), area);
+        frame.render_widget(Paragraph::new(line), inner);
         return;
     }
 
+    // Handle loading state - show spinner in panel
     if state.is_loading {
+        let title = format!(" [{}] Details ", summary.branch_name);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(title);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
         let line = Line::from(vec![
             Span::styled(
                 format!("{} ", state.spinner_char()),
                 Style::default().fg(Color::Yellow),
             ),
             Span::styled(
-                "Status: Loading branch list...",
+                "Loading branch information...",
                 Style::default().fg(Color::Yellow),
             ),
         ]);
-        frame.render_widget(Paragraph::new(line), area);
+        frame.render_widget(Paragraph::new(line), inner);
         return;
     }
 
+    // Handle progress state
     if let Some(progress) = state.status_progress_line() {
+        let title = format!(" [{}] Details ", summary.branch_name);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(title);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
         let line = Line::from(vec![
             Span::styled(
                 format!("{} ", state.spinner_char()),
@@ -1175,35 +1316,16 @@ fn render_worktree_path(
             ),
             Span::styled(progress, Style::default().fg(Color::Yellow)),
         ]);
-        frame.render_widget(Paragraph::new(line), area);
+        frame.render_widget(Paragraph::new(line), inner);
         return;
     }
 
-    // Otherwise, show worktree path (FR-004a, FR-004b, FR-004c)
-    let path = if let Some(branch) = state.selected_branch() {
-        if let Some(wt_path) = &branch.worktree_path {
-            wt_path.clone()
-        } else if branch.is_current {
-            // FR-004c: Current branch without worktree shows working directory
-            state
-                .working_directory
-                .clone()
-                .unwrap_or_else(|| "(none)".to_string())
-        } else {
-            "(none)".to_string()
-        }
-    } else {
-        // FR-004b: No branch selected
-        "(none)".to_string()
-    };
+    // Render the full summary panel
+    let panel = SummaryPanel::new(&summary)
+        .with_tick(state.spinner_frame)
+        .with_ai_enabled(false); // AI will be enabled in Phase 7
 
-    let spans = vec![
-        Span::styled("Worktree: ", Style::default().fg(Color::DarkGray)),
-        Span::styled(path, Style::default().fg(Color::DarkGray)),
-    ];
-
-    let line = Line::from(spans);
-    frame.render_widget(Paragraph::new(line), area);
+    panel.render(frame, area);
 }
 
 /// Render footer line with keybindings (FR-004)
@@ -1247,6 +1369,15 @@ mod tests {
         assert_eq!(ViewMode::All.cycle(), ViewMode::Local);
         assert_eq!(ViewMode::Local.cycle(), ViewMode::Remote);
         assert_eq!(ViewMode::Remote.cycle(), ViewMode::All);
+    }
+
+    #[test]
+    fn test_spinner_char_wraps_large_frame() {
+        let mut state = BranchListState::new();
+        state.spinner_frame = SPINNER_FRAMES.len() * 3 + 1;
+        assert_eq!(state.spinner_char(), '/');
+        state.spinner_frame = SPINNER_FRAMES.len() * 5;
+        assert_eq!(state.spinner_char(), '|');
     }
 
     #[test]
@@ -1376,7 +1507,8 @@ mod tests {
         state.reset_status_progress(5);
         state.increment_status_progress();
 
-        let backend = TestBackend::new(60, 5);
+        // SPEC-4b893dae: Panel is 12 lines, so need taller terminal (3 min + 12 panel = 15)
+        let backend = TestBackend::new(60, 20);
         let mut terminal = Terminal::new(backend).expect("terminal init");
 
         terminal
@@ -1387,8 +1519,16 @@ mod tests {
             .expect("draw");
 
         let buffer = terminal.backend().buffer();
-        let line: String = (0..60).map(|x| buffer[(x, 4)].symbol()).collect();
-        assert!(line.contains("Status: Updating branch status (1/5)"));
+        // Search the entire buffer for the progress text (now inside panel)
+        let mut found = false;
+        for y in 0..20 {
+            let line: String = (0..60).map(|x| buffer[(x, y)].symbol()).collect();
+            if line.contains("Updating branch status (1/5)") {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "Progress line should appear somewhere in the panel");
     }
 
     #[test]
@@ -1396,7 +1536,8 @@ mod tests {
         let mut state = BranchListState::new();
         state.set_loading(true);
 
-        let backend = TestBackend::new(60, 5);
+        // SPEC-4b893dae: Panel is 12 lines, so need taller terminal (3 min + 12 panel = 15)
+        let backend = TestBackend::new(60, 20);
         let mut terminal = Terminal::new(backend).expect("terminal init");
 
         terminal
@@ -1407,8 +1548,16 @@ mod tests {
             .expect("draw");
 
         let buffer = terminal.backend().buffer();
-        let line: String = (0..60).map(|x| buffer[(x, 4)].symbol()).collect();
-        assert!(line.contains("Status: Loading branch list..."));
+        // Search the entire buffer for the loading text (now inside panel)
+        let mut found = false;
+        for y in 0..20 {
+            let line: String = (0..60).map(|x| buffer[(x, y)].symbol()).collect();
+            if line.contains("Loading branch information") {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "Loading text should appear somewhere in the panel");
     }
 
     #[test]

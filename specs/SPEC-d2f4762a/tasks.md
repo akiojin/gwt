@@ -3,6 +3,13 @@
 **仕様ID**: `SPEC-d2f4762a`
 **ポリシー**: CLAUDE.md の TDD ルールに基づき、必ず RED→GREEN→リグレッションチェックの順に進める。
 
+## 追加作業: ブランチ一覧スピナーのフレーム安全化 (2026-01-19)
+
+- [x] **T1301** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` にスピナーのフレーム循環とクラッシュ防止の要件・方針を追記
+- [x] **T1302** [Test] `crates/gwt-cli/src/tui/screens/branch_list.rs` にスピナーのフレームカウンタが大きい場合でも描画が破綻しないテストを追加
+- [x] **T1303** [実装] `crates/gwt-cli/src/tui/screens/branch_list.rs` のスピナー表示をフレーム数で循環させ、範囲外アクセスを防止
+- [x] **T1304** `cargo test -p gwt-cli` と `cargo build --release` を実行し、失敗がないことを確認する
+
 ## 追加作業: 起動時の完全非同期取得と進捗表示 (2026-01-16)
 
 - [x] **T9945** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` に起動時の完全非同期取得と進捗表示の要件・方針を追記
