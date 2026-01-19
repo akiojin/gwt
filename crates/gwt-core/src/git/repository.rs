@@ -227,6 +227,77 @@ impl Repository {
         }
     }
 
+    /// Get recent commit log entries (SPEC-4b893dae FR-010~FR-013)
+    ///
+    /// Returns a list of recent commits in oneline format (hash + message).
+    /// Limit specifies the maximum number of commits to return (default: 5).
+    pub fn get_commit_log(&self, limit: usize) -> Result<Vec<super::CommitEntry>> {
+        let limit_arg = format!("-{}", limit.clamp(1, 20));
+
+        let output = Command::new("git")
+            .args(["log", "--oneline", &limit_arg])
+            .current_dir(&self.root)
+            .output()
+            .map_err(|e| GwtError::GitOperationFailed {
+                operation: "log".to_string(),
+                details: e.to_string(),
+            })?;
+
+        if !output.status.success() {
+            // Repository might have no commits yet
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("does not have any commits yet") {
+                return Ok(Vec::new());
+            }
+            return Err(GwtError::GitOperationFailed {
+                operation: "log --oneline".to_string(),
+                details: stderr.to_string(),
+            });
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let commits: Vec<super::CommitEntry> = stdout
+            .lines()
+            .filter_map(super::CommitEntry::from_oneline)
+            .collect();
+
+        tracing::debug!(
+            "get_commit_log: path={:?}, limit={}, found={} commits",
+            self.root,
+            limit,
+            commits.len()
+        );
+
+        Ok(commits)
+    }
+
+    /// Get diff statistics (SPEC-4b893dae FR-020~FR-024)
+    ///
+    /// Returns change statistics for the working directory compared to HEAD.
+    pub fn get_diff_stats(&self) -> Result<super::ChangeStats> {
+        let output = Command::new("git")
+            .args(["diff", "--shortstat"])
+            .current_dir(&self.root)
+            .output()
+            .map_err(|e| GwtError::GitOperationFailed {
+                operation: "diff".to_string(),
+                details: e.to_string(),
+            })?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stats = super::ChangeStats::from_shortstat(&stdout);
+
+        tracing::debug!(
+            "get_diff_stats: path={:?}, files={}, +{}/-{}",
+            self.root,
+            stats.files_changed,
+            stats.insertions,
+            stats.deletions
+        );
+
+        Ok(stats)
+    }
+
     /// Pull with fast-forward only
     pub fn pull_fast_forward(&self) -> Result<()> {
         let output = Command::new("git")
