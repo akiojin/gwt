@@ -907,6 +907,7 @@ pub fn render_branch_list(
     area: Rect,
     status_message: Option<&str>,
     has_focus: bool,
+    footer_status: Option<&str>,
 ) {
     // SPEC-4b893dae: Summary panel height is 12 lines (FR-003)
     let panel_height = crate::tui::components::SummaryPanel::height();
@@ -915,6 +916,7 @@ pub fn render_branch_list(
         .constraints([
             Constraint::Min(3),               // Branch list (FR-003)
             Constraint::Length(panel_height), // Summary panel (SPEC-4b893dae)
+            Constraint::Length(1),            // Footer (FR-004, FR-011d)
         ])
         .split(area);
 
@@ -924,6 +926,7 @@ pub fn render_branch_list(
 
     render_branches(state, frame, chunks[0], has_focus);
     render_summary_panel(state, frame, chunks[1], status_message);
+    render_footer(frame, chunks[2], footer_status);
 }
 
 /// Render header line (FR-001, FR-001a)
@@ -1349,7 +1352,7 @@ fn render_summary_panel(
 }
 
 /// Render footer line with keybindings (FR-004)
-fn render_footer(frame: &mut Frame, area: Rect) {
+fn render_footer(frame: &mut Frame, area: Rect, status: Option<&str>) {
     let keybinds = vec![
         ("r", "Refresh"),
         ("c", "Cleanup"),
@@ -1363,6 +1366,11 @@ fn render_footer(frame: &mut Frame, area: Rect) {
     ];
 
     let mut spans = Vec::new();
+    if let Some(status) = status {
+        spans.push(Span::styled(status, Style::default().fg(Color::Yellow)));
+        spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
+    }
+
     for (i, (key, action)) in keybinds.iter().enumerate() {
         if i > 0 {
             spans.push(Span::styled(" ", Style::default()));
@@ -1534,7 +1542,7 @@ mod tests {
         terminal
             .draw(|f| {
                 let area = f.area();
-                render_branch_list(&mut state, f, area, None, true);
+                render_branch_list(&mut state, f, area, None, true, None);
             })
             .expect("draw");
 
@@ -1552,6 +1560,32 @@ mod tests {
     }
 
     #[test]
+    fn test_cleanup_footer_renders_progress() {
+        let mut state = BranchListState::new();
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).expect("terminal init");
+        let status = "Cleanup: Running / (1/3)";
+
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render_branch_list(&mut state, f, area, None, true, Some(status));
+            })
+            .expect("draw");
+
+        let buffer = terminal.backend().buffer();
+        let mut found = false;
+        for y in 0..20 {
+            let line: String = (0..80).map(|x| buffer[(x, y)].symbol()).collect();
+            if line.contains(status) {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "Cleanup progress should appear in the footer");
+    }
+
+    #[test]
     fn test_loading_status_line_renders() {
         let mut state = BranchListState::new();
         state.set_loading(true);
@@ -1563,7 +1597,7 @@ mod tests {
         terminal
             .draw(|f| {
                 let area = f.area();
-                render_branch_list(&mut state, f, area, None, true);
+                render_branch_list(&mut state, f, area, None, true, None);
             })
             .expect("draw");
 
