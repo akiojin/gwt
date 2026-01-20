@@ -327,6 +327,8 @@ pub struct SummaryPanel<'a> {
     pub summary: &'a gwt_core::git::BranchSummary,
     /// Animation tick for spinner
     pub tick: usize,
+    /// Optional title override
+    pub title: Option<Line<'static>>,
 }
 
 fn panel_switch_hint() -> Line<'static> {
@@ -342,11 +344,20 @@ impl<'a> SummaryPanel<'a> {
     const PANEL_HEIGHT: u16 = 12;
 
     pub fn new(summary: &'a gwt_core::git::BranchSummary) -> Self {
-        Self { summary, tick: 0 }
+        Self {
+            summary,
+            tick: 0,
+            title: None,
+        }
     }
 
     pub fn with_tick(mut self, tick: usize) -> Self {
         self.tick = tick;
+        self
+    }
+
+    pub fn with_title(mut self, title: Line<'static>) -> Self {
+        self.title = Some(title);
         self
     }
 
@@ -357,7 +368,12 @@ impl<'a> SummaryPanel<'a> {
 
     /// Render the summary panel
     pub fn render(&self, frame: &mut Frame, area: Rect) {
-        let title = format!(" [{}] Details ", self.summary.branch_name);
+        let title = self.title.clone().unwrap_or_else(|| {
+            Line::from(Span::raw(format!(
+                " [{}] Details ",
+                self.summary.branch_name
+            )))
+        });
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
