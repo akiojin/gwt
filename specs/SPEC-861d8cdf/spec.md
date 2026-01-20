@@ -208,6 +208,6 @@ pub last_activity_at: Option<DateTime<Utc>>,
 
 ## 実装ノート
 
-- claude-code-monitor (https://github.com/onikan27/claude-code-monitor) の実装を参考にする
+- [claude-code-monitor](https://github.com/onikan27/claude-code-monitor) の実装を参考にする
 - 他エージェントの状態推測は精度が低いため、「推測」であることをUI上で区別する（例: アイコンに?マークを付けるなど）ことを検討
 - ステータスバーは現在のBranchListScreenには存在しないため、新規追加が必要
