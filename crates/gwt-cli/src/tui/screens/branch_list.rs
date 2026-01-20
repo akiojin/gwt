@@ -1858,6 +1858,8 @@ mod tests {
             is_unmerged: false,
             last_commit_timestamp: None,
             last_tool_usage: None,
+            last_tool_id: None,
+            last_session_id: None,
             is_selected: false,
             pr_title: None,
         }
