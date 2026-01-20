@@ -2,6 +2,7 @@
 
 #![allow(dead_code)]
 
+use gwt_core::config::AgentStatus;
 use gwt_core::git::{Branch, BranchMeta, BranchSummary, DivergenceStatus, Repository};
 use gwt_core::tmux::AgentPane;
 use gwt_core::worktree::Worktree;
@@ -1142,41 +1143,67 @@ fn render_branch_row(
     let left_width = selection_width + 1 + 1 + safety_icon.len() + 1 + display_name.width();
 
     // Build right side (agent info) and calculate its width
+    // SPEC-861d8cdf T-103: Status-based display
     let (right_spans, right_width): (Vec<Span>, usize) = if let Some(agent) = running_agent {
         let agent_display = get_agent_display_name(&agent.agent_name);
         let uptime = agent.uptime_string();
 
-        if agent.is_background {
-            // Background (hidden) pane - with spinner: "X Agent uptime"
-            let bg_spinner_char = BG_SPINNER_FRAMES[spinner_frame % BG_SPINNER_FRAMES.len()];
-            let width = 2 + agent_display.width() + 1 + uptime.width(); // spinner + " " + name + " " + uptime
-            let spans = vec![
-                Span::styled(
-                    format!("{} ", bg_spinner_char),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(agent_display, Style::default().fg(Color::DarkGray)),
-                Span::styled(" ", Style::default().fg(Color::DarkGray)),
-                Span::styled(uptime, Style::default().fg(Color::DarkGray)),
-            ];
-            (spans, width)
-        } else {
-            // Visible running pane - with spinner: "⠋ Agent uptime"
-            let active_spinner_char =
-                ACTIVE_SPINNER_FRAMES[spinner_frame % ACTIVE_SPINNER_FRAMES.len()];
-            let width = 2 + agent_display.width() + 1 + uptime.width(); // spinner(1) + " " + name + " " + uptime
-            let agent_color = get_agent_color(Some(&agent.agent_name));
-            let spans = vec![
-                Span::styled(
-                    format!("{} ", active_spinner_char),
-                    Style::default().fg(Color::Green),
-                ),
-                Span::styled(agent_display, Style::default().fg(agent_color)),
-                Span::raw(" "),
-                Span::styled(uptime, Style::default().fg(Color::Yellow)),
-            ];
-            (spans, width)
-        }
+        // Determine icon and color based on status (SPEC-861d8cdf T-103)
+        let (status_icon, status_color) = match agent.status {
+            AgentStatus::Running => {
+                if agent.is_background {
+                    let icon = BG_SPINNER_FRAMES[spinner_frame % BG_SPINNER_FRAMES.len()];
+                    (icon, Color::DarkGray)
+                } else {
+                    let icon = ACTIVE_SPINNER_FRAMES[spinner_frame % ACTIVE_SPINNER_FRAMES.len()];
+                    (icon, Color::Green)
+                }
+            }
+            AgentStatus::WaitingInput => {
+                // Blink effect: 500ms on/off (2 spinner frames = ~500ms with 250ms tick)
+                let should_show = (spinner_frame / 2) % 2 == 0;
+                if should_show {
+                    ('?', Color::Yellow)
+                } else {
+                    (' ', Color::Yellow)
+                }
+            }
+            AgentStatus::Stopped => ('#', Color::Red),
+            AgentStatus::Unknown => {
+                // Fallback to original behavior based on is_background
+                if agent.is_background {
+                    let icon = BG_SPINNER_FRAMES[spinner_frame % BG_SPINNER_FRAMES.len()];
+                    (icon, Color::DarkGray)
+                } else {
+                    let icon = ACTIVE_SPINNER_FRAMES[spinner_frame % ACTIVE_SPINNER_FRAMES.len()];
+                    (icon, Color::Green)
+                }
+            }
+        };
+
+        // Determine text color based on status
+        let text_color = match agent.status {
+            AgentStatus::Stopped => Color::Red,
+            AgentStatus::WaitingInput => Color::Yellow,
+            AgentStatus::Running if agent.is_background => Color::DarkGray,
+            _ => get_agent_color(Some(&agent.agent_name)),
+        };
+
+        let uptime_color = match agent.status {
+            AgentStatus::Stopped => Color::DarkGray,
+            AgentStatus::WaitingInput => Color::Yellow,
+            AgentStatus::Running if agent.is_background => Color::DarkGray,
+            _ => Color::Yellow,
+        };
+
+        let width = 2 + agent_display.width() + 1 + uptime.width();
+        let spans = vec![
+            Span::styled(format!("{} ", status_icon), Style::default().fg(status_color)),
+            Span::styled(agent_display, Style::default().fg(text_color)),
+            Span::raw(" "),
+            Span::styled(uptime, Style::default().fg(uptime_color)),
+        ];
+        (spans, width)
     } else if let Some(tool) = &branch.last_tool_usage {
         // No running agent, but show last tool usage (FR-070)
         let agent_id = tool.split('@').next();

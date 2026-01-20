@@ -6,6 +6,26 @@ use std::process::Command;
 use std::time::{Duration, SystemTime};
 
 use super::error::{TmuxError, TmuxResult};
+use crate::config::AgentStatus;
+
+/// Spinner frames for active agents (SPEC-861d8cdf T-103)
+pub const ACTIVE_SPINNER_FRAMES: &[&str] = &["|", "/", "-", "\\"];
+
+/// Spinner frames for background agents (SPEC-861d8cdf T-103)
+pub const BG_SPINNER_FRAMES: &[&str] = &[".", "o", "O", "o"];
+
+/// Icon for stopped agents (SPEC-861d8cdf T-103)
+pub const STOPPED_ICON: &str = "#";
+
+/// Color enum for status display (SPEC-861d8cdf T-103)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusColor {
+    Green,
+    Yellow,
+    Red,
+    Gray,
+    DarkGray,
+}
 
 /// Information about a tmux pane
 #[derive(Debug, Clone)]
@@ -64,6 +84,8 @@ pub struct AgentPane {
     pub is_background: bool,
     /// Window ID when pane is in background (for restoring)
     pub background_window: Option<String>,
+    /// Agent status for state visualization (SPEC-861d8cdf T-103)
+    pub status: AgentStatus,
 }
 
 impl AgentPane {
@@ -83,7 +105,70 @@ impl AgentPane {
             pid,
             is_background: false,
             background_window: None,
+            status: AgentStatus::Unknown,
         }
+    }
+
+    /// Get the display color for the current status (SPEC-861d8cdf T-103)
+    ///
+    /// Color mapping:
+    /// - Running + Active: Green
+    /// - Running + Background: DarkGray
+    /// - WaitingInput: Yellow
+    /// - Stopped: Red
+    /// - Unknown: Gray
+    pub fn status_color(&self) -> StatusColor {
+        match self.status {
+            AgentStatus::Running => {
+                if self.is_background {
+                    StatusColor::DarkGray
+                } else {
+                    StatusColor::Green
+                }
+            }
+            AgentStatus::WaitingInput => StatusColor::Yellow,
+            AgentStatus::Stopped => StatusColor::Red,
+            AgentStatus::Unknown => StatusColor::Gray,
+        }
+    }
+
+    /// Get the display icon for the current status (SPEC-861d8cdf T-103)
+    ///
+    /// Icon mapping:
+    /// - Running: Spinner animation frame
+    /// - WaitingInput: "?" (blinking)
+    /// - Stopped: Static square
+    /// - Unknown: "~"
+    pub fn status_icon(&self, spinner_frame: usize) -> &'static str {
+        match self.status {
+            AgentStatus::Running => {
+                if self.is_background {
+                    BG_SPINNER_FRAMES[spinner_frame % BG_SPINNER_FRAMES.len()]
+                } else {
+                    ACTIVE_SPINNER_FRAMES[spinner_frame % ACTIVE_SPINNER_FRAMES.len()]
+                }
+            }
+            AgentStatus::WaitingInput => "?",
+            AgentStatus::Stopped => STOPPED_ICON,
+            AgentStatus::Unknown => "~",
+        }
+    }
+
+    /// Check if the icon should be visible (for blinking effect)
+    /// Returns false for WaitingInput status during the "off" phase of blink
+    pub fn should_show_icon(&self, spinner_frame: usize) -> bool {
+        if self.status == AgentStatus::WaitingInput {
+            // 500ms blink = 2 spinner frames (250ms each)
+            // Show icon on even frames, hide on odd frames
+            (spinner_frame / 2) % 2 == 0
+        } else {
+            true
+        }
+    }
+
+    /// Check if this agent needs attention (waiting or stopped)
+    pub fn needs_attention(&self) -> bool {
+        self.status.needs_attention()
     }
 
     /// Calculate uptime duration
@@ -1103,6 +1188,7 @@ mod tests {
                 pid: 12345,
                 is_background: false, // active
                 background_window: None,
+                status: AgentStatus::Unknown,
             },
             AgentPane {
                 pane_id: "2".to_string(),
@@ -1112,6 +1198,7 @@ mod tests {
                 pid: 12346,
                 is_background: true, // background
                 background_window: Some("session:@1".to_string()),
+                status: AgentStatus::Unknown,
             },
         ];
 
@@ -1131,6 +1218,7 @@ mod tests {
                 pid: 12345,
                 is_background: true,
                 background_window: Some("session:@1".to_string()),
+                status: AgentStatus::Unknown,
             },
             AgentPane {
                 pane_id: "2".to_string(),
@@ -1140,6 +1228,7 @@ mod tests {
                 pid: 12346,
                 is_background: true,
                 background_window: Some("session:@2".to_string()),
+                status: AgentStatus::Unknown,
             },
         ];
 
@@ -1159,6 +1248,7 @@ mod tests {
                 pid: 12345,
                 is_background: false, // active
                 background_window: None,
+                status: AgentStatus::Unknown,
             },
             AgentPane {
                 pane_id: "2".to_string(),
@@ -1168,6 +1258,7 @@ mod tests {
                 pid: 12346,
                 is_background: false, // also active - constraint violation!
                 background_window: None,
+                status: AgentStatus::Unknown,
             },
         ];
 
@@ -1177,5 +1268,163 @@ mod tests {
             active.len() > 1,
             "This test documents the constraint violation case"
         );
+    }
+
+    // SPEC-861d8cdf T-103: Status display tests
+    #[test]
+    fn test_render_running_agent_green_spinner() {
+        let pane = AgentPane {
+            pane_id: "1".to_string(),
+            branch_name: "feature/a".to_string(),
+            agent_name: "claude".to_string(),
+            start_time: SystemTime::now(),
+            pid: 12345,
+            is_background: false,
+            background_window: None,
+            status: AgentStatus::Running,
+        };
+
+        assert_eq!(pane.status_color(), StatusColor::Green);
+        // Spinner should cycle through frames
+        assert_eq!(pane.status_icon(0), "|");
+        assert_eq!(pane.status_icon(1), "/");
+        assert_eq!(pane.status_icon(2), "-");
+        assert_eq!(pane.status_icon(3), "\\");
+        assert_eq!(pane.status_icon(4), "|"); // wraps around
+    }
+
+    #[test]
+    fn test_render_waiting_agent_yellow() {
+        let pane = AgentPane {
+            pane_id: "1".to_string(),
+            branch_name: "feature/a".to_string(),
+            agent_name: "claude".to_string(),
+            start_time: SystemTime::now(),
+            pid: 12345,
+            is_background: false,
+            background_window: None,
+            status: AgentStatus::WaitingInput,
+        };
+
+        assert_eq!(pane.status_color(), StatusColor::Yellow);
+        assert_eq!(pane.status_icon(0), "?");
+        assert!(pane.needs_attention());
+    }
+
+    #[test]
+    fn test_render_stopped_agent_red() {
+        let pane = AgentPane {
+            pane_id: "1".to_string(),
+            branch_name: "feature/a".to_string(),
+            agent_name: "claude".to_string(),
+            start_time: SystemTime::now(),
+            pid: 12345,
+            is_background: false,
+            background_window: None,
+            status: AgentStatus::Stopped,
+        };
+
+        assert_eq!(pane.status_color(), StatusColor::Red);
+        assert_eq!(pane.status_icon(0), STOPPED_ICON);
+        assert!(pane.needs_attention());
+    }
+
+    #[test]
+    fn test_render_background_agent_dim() {
+        let pane = AgentPane {
+            pane_id: "1".to_string(),
+            branch_name: "feature/a".to_string(),
+            agent_name: "claude".to_string(),
+            start_time: SystemTime::now(),
+            pid: 12345,
+            is_background: true,
+            background_window: Some("session:@1".to_string()),
+            status: AgentStatus::Running,
+        };
+
+        assert_eq!(pane.status_color(), StatusColor::DarkGray);
+        // Background spinner uses different frames
+        assert_eq!(pane.status_icon(0), ".");
+        assert_eq!(pane.status_icon(1), "o");
+        assert_eq!(pane.status_icon(2), "O");
+        assert_eq!(pane.status_icon(3), "o");
+    }
+
+    #[test]
+    fn test_active_stopped_agent_is_red() {
+        // Even active panes should show red when stopped
+        let pane = AgentPane {
+            pane_id: "1".to_string(),
+            branch_name: "feature/a".to_string(),
+            agent_name: "claude".to_string(),
+            start_time: SystemTime::now(),
+            pid: 12345,
+            is_background: false, // active
+            background_window: None,
+            status: AgentStatus::Stopped,
+        };
+
+        assert_eq!(pane.status_color(), StatusColor::Red);
+        assert_eq!(pane.status_icon(0), STOPPED_ICON);
+    }
+
+    #[test]
+    fn test_waiting_input_blink_interval() {
+        let pane = AgentPane {
+            pane_id: "1".to_string(),
+            branch_name: "feature/a".to_string(),
+            agent_name: "claude".to_string(),
+            start_time: SystemTime::now(),
+            pid: 12345,
+            is_background: false,
+            background_window: None,
+            status: AgentStatus::WaitingInput,
+        };
+
+        // 500ms blink = 2 spinner frames (250ms each)
+        // Frames 0,1 = visible (even division)
+        // Frames 2,3 = hidden (odd division)
+        // Frames 4,5 = visible
+        assert!(pane.should_show_icon(0), "frame 0 should show");
+        assert!(pane.should_show_icon(1), "frame 1 should show");
+        assert!(!pane.should_show_icon(2), "frame 2 should hide");
+        assert!(!pane.should_show_icon(3), "frame 3 should hide");
+        assert!(pane.should_show_icon(4), "frame 4 should show");
+        assert!(pane.should_show_icon(5), "frame 5 should show");
+    }
+
+    #[test]
+    fn test_running_agent_always_shows_icon() {
+        let pane = AgentPane {
+            pane_id: "1".to_string(),
+            branch_name: "feature/a".to_string(),
+            agent_name: "claude".to_string(),
+            start_time: SystemTime::now(),
+            pid: 12345,
+            is_background: false,
+            background_window: None,
+            status: AgentStatus::Running,
+        };
+
+        // Running agents never blink, always show icon
+        for frame in 0..10 {
+            assert!(pane.should_show_icon(frame));
+        }
+    }
+
+    #[test]
+    fn test_unknown_status_gray() {
+        let pane = AgentPane::new(
+            "1".to_string(),
+            "feature/a".to_string(),
+            "claude".to_string(),
+            SystemTime::now(),
+            12345,
+        );
+
+        assert_eq!(pane.status, AgentStatus::Unknown);
+        assert_eq!(pane.status_color(), StatusColor::Gray);
+        assert_eq!(pane.status_icon(0), "~");
+        assert!(!pane.needs_attention()); // Unknown doesn't need attention
     }
 }
