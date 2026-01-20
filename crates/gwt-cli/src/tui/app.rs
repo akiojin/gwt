@@ -1711,27 +1711,38 @@ impl Model {
     }
 
     /// Handle Enter key on branch list
-    /// FR-040: If branch has running agent, focus the pane
-    /// FR-041: If branch has no agent, open wizard
+    /// Always opens wizard with branch action options
+    /// If agent is running: "Focus agent pane" / "Create new branch from this"
+    /// If no agent: "Use selected branch" / "Create new from selected"
     fn handle_branch_enter(&mut self) {
         let Some(branch) = self.branch_list.selected_branch() else {
             return;
         };
         let branch_name = branch.name.clone();
 
-        // Find pane index in pane_list by branch name
-        if let Some(pane_idx) = self
+        // Check if agent is running for this branch
+        let running_pane_idx = self
             .pane_list
             .panes
             .iter()
-            .position(|p| p.branch_name == branch_name)
-        {
-            self.pane_list.selected = pane_idx;
-            self.show_and_focus_selected_pane();
-        } else {
-            // No running agent - open wizard
-            self.update(Message::OpenWizard);
-        }
+            .position(|p| p.branch_name == branch_name);
+
+        // Always open wizard (pass running_pane_idx to show appropriate options)
+        // FR-050: Load session history for Quick Start feature
+        let ts_history = get_branch_tool_history(&self.repo_root, &branch_name);
+        let history: Vec<QuickStartEntry> = ts_history
+            .into_iter()
+            .map(|entry| QuickStartEntry {
+                tool_id: entry.tool_id,
+                tool_label: entry.tool_label,
+                model: entry.model,
+                reasoning_level: entry.reasoning_level,
+                version: entry.tool_version,
+                session_id: entry.session_id,
+                skip_permissions: entry.skip_permissions,
+            })
+            .collect();
+        self.wizard.open_for_branch(&branch_name, history, running_pane_idx);
     }
 
     fn handle_branch_list_mouse(&mut self, mouse: MouseEvent) {
@@ -2766,8 +2777,15 @@ impl Model {
                 // Open wizard for selected branch (FR-044)
                 // Always open wizard regardless of worktree status (matches TypeScript behavior)
                 if let Some(branch) = self.branch_list.selected_branch() {
+                    let branch_name = branch.name.clone();
+                    // Check if agent is running for this branch
+                    let running_pane_idx = self
+                        .pane_list
+                        .panes
+                        .iter()
+                        .position(|p| p.branch_name == branch_name);
                     // FR-050: Load session history for Quick Start feature
-                    let ts_history = get_branch_tool_history(&self.repo_root, &branch.name);
+                    let ts_history = get_branch_tool_history(&self.repo_root, &branch_name);
                     let history: Vec<QuickStartEntry> = ts_history
                         .into_iter()
                         .map(|entry| QuickStartEntry {
@@ -2780,7 +2798,7 @@ impl Model {
                             skip_permissions: entry.skip_permissions,
                         })
                         .collect();
-                    self.wizard.open_for_branch(&branch.name, history);
+                    self.wizard.open_for_branch(&branch_name, history, running_pane_idx);
                 } else {
                     self.status_message = Some("No branch selected".to_string());
                     self.status_message_time = Some(Instant::now());
@@ -2820,6 +2838,11 @@ impl Model {
                             self.create_worktree();
                         }
                         WizardConfirmResult::Advance => {}
+                        WizardConfirmResult::FocusPane(pane_idx) => {
+                            // Focus on existing agent pane (wizard already closed itself)
+                            self.pane_list.selected = pane_idx;
+                            self.show_and_focus_selected_pane();
+                        }
                     }
                 }
             }
