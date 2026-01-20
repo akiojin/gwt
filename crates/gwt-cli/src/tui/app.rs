@@ -1675,6 +1675,9 @@ impl Model {
         if self.wizard.visible {
             return;
         }
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return;
+        }
 
         let Some(index) = self
             .branch_list
@@ -1685,10 +1688,6 @@ impl Model {
 
         if self.branch_list.select_index(index) {
             self.refresh_branch_summary();
-        }
-
-        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-            self.update(Message::Enter);
         }
     }
 
@@ -3783,14 +3782,11 @@ pub fn run_with_context(context: Option<TuiEntryContext>) -> Result<Option<Launc
                         model.update(msg);
                     }
                 }
-                Event::Mouse(mouse) => match mouse.kind {
-                    MouseEventKind::Moved
-                    | MouseEventKind::Drag(_)
-                    | MouseEventKind::Down(MouseButton::Left) => {
+                Event::Mouse(mouse) => {
+                    if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                         model.handle_branch_list_mouse(mouse);
                     }
-                    _ => {}
-                },
+                }
                 _ => {}
             }
         }
@@ -4119,22 +4115,30 @@ mod tests {
     }
 
     #[test]
-    fn test_mouse_click_triggers_branch_enter() {
+    fn test_mouse_click_selects_branch_only() {
         let mut model = Model::new_with_context(None);
         model.screen = Screen::BranchList;
-        let branch = Branch::new("feature/test", "deadbeef");
-        let item = BranchItem::from_branch(&branch, &[]);
-        model.branch_list = BranchListState::new().with_branches(vec![item]);
+        let branches = vec![
+            Branch::new("feature/one", "deadbeef"),
+            Branch::new("feature/two", "deadbeef"),
+        ];
+        let items = branches
+            .iter()
+            .map(|branch| BranchItem::from_branch(branch, &[]))
+            .collect();
+        model.branch_list = BranchListState::new().with_branches(items);
         model.branch_list.update_list_area(Rect::new(0, 0, 20, 5));
 
+        assert_eq!(model.branch_list.selected, 0);
         let mouse = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: 1,
-            row: 1,
+            row: 2,
             modifiers: KeyModifiers::NONE,
         };
         model.handle_branch_list_mouse(mouse);
 
-        assert!(model.wizard.visible);
+        assert_eq!(model.branch_list.selected, 1);
+        assert!(!model.wizard.visible);
     }
 }
