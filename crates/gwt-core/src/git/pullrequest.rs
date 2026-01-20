@@ -250,6 +250,8 @@ mod tests {
                 title: "Merged".to_string(),
                 head_branch: "feature/merged".to_string(),
                 state: "MERGED".to_string(),
+                url: None,
+                updated_at: None,
             },
         );
         cache.branch_to_pr.insert(
@@ -259,6 +261,8 @@ mod tests {
                 title: "Open".to_string(),
                 head_branch: "feature/open".to_string(),
                 state: "OPEN".to_string(),
+                url: None,
+                updated_at: None,
             },
         );
 
