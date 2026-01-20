@@ -329,6 +329,25 @@ pub struct SummaryPanel<'a> {
     pub tick: usize,
     /// Optional title override
     pub title: Option<Line<'static>>,
+    /// Optional links to display
+    pub links: SummaryLinks,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SummaryLinks {
+    pub branch_url: Option<String>,
+    pub pr_url: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LinkRegion {
+    pub area: Rect,
+    pub url: String,
+}
+
+struct SectionLines {
+    lines: Vec<Line<'static>>,
+    link_urls: Vec<Option<String>>,
 }
 
 fn panel_switch_hint() -> Line<'static> {
@@ -348,6 +367,7 @@ impl<'a> SummaryPanel<'a> {
             summary,
             tick: 0,
             title: None,
+            links: SummaryLinks::default(),
         }
     }
 
@@ -361,6 +381,11 @@ impl<'a> SummaryPanel<'a> {
         self
     }
 
+    pub fn with_links(mut self, links: SummaryLinks) -> Self {
+        self.links = links;
+        self
+    }
+
     /// Get the required height for this panel
     pub fn height() -> u16 {
         Self::PANEL_HEIGHT
@@ -368,6 +393,10 @@ impl<'a> SummaryPanel<'a> {
 
     /// Render the summary panel
     pub fn render(&self, frame: &mut Frame, area: Rect) {
+        let _ = self.render_with_links(frame, area);
+    }
+
+    pub fn render_with_links(&self, frame: &mut Frame, area: Rect) -> Vec<LinkRegion> {
         let title = self.title.clone().unwrap_or_else(|| {
             Line::from(Span::raw(format!(
                 " [{}] Details ",
@@ -384,14 +413,14 @@ impl<'a> SummaryPanel<'a> {
         frame.render_widget(block, area);
 
         // Calculate section layout
-        let sections = self.build_sections();
+        let sections = self.build_sections_with_links();
         let constraints: Vec<Constraint> = sections
             .iter()
-            .map(|(_, lines)| Constraint::Length(*lines as u16))
+            .map(|section| Constraint::Length(section.lines.len() as u16))
             .collect();
 
         if constraints.is_empty() {
-            return;
+            return Vec::new();
         }
 
         let chunks = Layout::default()
@@ -399,16 +428,32 @@ impl<'a> SummaryPanel<'a> {
             .constraints(constraints)
             .split(inner_area);
 
-        for (i, (content, _)) in sections.iter().enumerate() {
-            if i < chunks.len() {
-                let paragraph = Paragraph::new(content.clone());
-                frame.render_widget(paragraph, chunks[i]);
+        let mut link_regions = Vec::new();
+        for (i, section) in sections.iter().enumerate() {
+            if i >= chunks.len() {
+                continue;
+            }
+            let paragraph = Paragraph::new(section.lines.clone());
+            frame.render_widget(paragraph, chunks[i]);
+
+            for (line_index, url) in section.link_urls.iter().enumerate() {
+                if let Some(url) = url {
+                    let y = chunks[i].y.saturating_add(line_index as u16);
+                    if y < chunks[i].y.saturating_add(chunks[i].height) {
+                        link_regions.push(LinkRegion {
+                            area: Rect::new(chunks[i].x, y, chunks[i].width, 1),
+                            url: url.clone(),
+                        });
+                    }
+                }
             }
         }
+
+        link_regions
     }
 
     /// Build sections content with their line counts
-    fn build_sections(&self) -> Vec<(Vec<Line<'static>>, usize)> {
+    fn build_sections_with_links(&self) -> Vec<SectionLines> {
         let mut sections = Vec::new();
 
         // Commits section
@@ -422,10 +467,20 @@ impl<'a> SummaryPanel<'a> {
         // Meta section
         sections.push(self.build_meta_section());
 
+        // Links section
+        if self.links.branch_url.is_some() || self.links.pr_url.is_some() {
+            sections.push(self.build_links_section());
+        }
+
         sections
     }
 
-    fn build_commits_section(&self) -> (Vec<Line<'static>>, usize) {
+    fn build_commits_section(&self) -> SectionLines {
+        let max_commits = if self.links.branch_url.is_some() || self.links.pr_url.is_some() {
+            3
+        } else {
+            5
+        };
         let mut lines = Vec::new();
         lines.push(Line::from(Span::styled(
             "Commits:",
@@ -448,7 +503,7 @@ impl<'a> SummaryPanel<'a> {
         } else {
             // T204: Truncate long commit messages with "..."
             const MAX_MSG_LEN: usize = 50;
-            for commit in self.summary.commits.iter().take(5) {
+            for commit in self.summary.commits.iter().take(max_commits) {
                 let hash_span = Span::styled(
                     commit.hash.chars().take(7).collect::<String>(),
                     Style::default().fg(Color::Cyan),
@@ -470,11 +525,11 @@ impl<'a> SummaryPanel<'a> {
             }
         }
 
-        let count = lines.len();
-        (lines, count)
+        let link_urls = vec![None; lines.len()];
+        SectionLines { lines, link_urls }
     }
 
-    fn build_stats_section(&self) -> (Vec<Line<'static>>, usize) {
+    fn build_stats_section(&self) -> SectionLines {
         let mut lines = Vec::new();
         lines.push(Line::from(Span::styled(
             "Stats:",
@@ -526,11 +581,11 @@ impl<'a> SummaryPanel<'a> {
             )));
         }
 
-        let count = lines.len();
-        (lines, count)
+        let link_urls = vec![None; lines.len()];
+        SectionLines { lines, link_urls }
     }
 
-    fn build_meta_section(&self) -> (Vec<Line<'static>>, usize) {
+    fn build_meta_section(&self) -> SectionLines {
         let mut lines = Vec::new();
         lines.push(Line::from(Span::styled(
             "Meta:",
@@ -582,8 +637,37 @@ impl<'a> SummaryPanel<'a> {
             )));
         }
 
-        let count = lines.len();
-        (lines, count)
+        let link_urls = vec![None; lines.len()];
+        SectionLines { lines, link_urls }
+    }
+
+    fn build_links_section(&self) -> SectionLines {
+        let mut lines = Vec::new();
+        let mut link_urls = Vec::new();
+
+        lines.push(Line::from(Span::styled(
+            "Links:",
+            Style::default().fg(Color::Yellow),
+        )));
+        link_urls.push(None);
+
+        if let Some(branch_url) = &self.links.branch_url {
+            lines.push(Line::from(vec![
+                Span::styled("  Branch: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(branch_url.clone(), Style::default().fg(Color::Cyan)),
+            ]));
+            link_urls.push(Some(branch_url.clone()));
+        }
+
+        if let Some(pr_url) = &self.links.pr_url {
+            lines.push(Line::from(vec![
+                Span::styled("  PR: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(pr_url.clone(), Style::default().fg(Color::Cyan)),
+            ]));
+            link_urls.push(Some(pr_url.clone()));
+        }
+
+        SectionLines { lines, link_urls }
     }
 
     /// Truncate a string to fit within a given width, adding "..." if truncated
