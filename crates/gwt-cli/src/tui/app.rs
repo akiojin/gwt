@@ -631,6 +631,10 @@ impl Model {
         self.safety_rx = Some(rx);
 
         thread::spawn(move || {
+            let base_branch_exists = Branch::exists(&repo_root, &base_branch).unwrap_or(false);
+            let mut pr_cache = PrCache::new();
+            pr_cache.populate(&repo_root);
+
             for target in targets {
                 let mut has_unpushed = false;
                 let mut is_unmerged = false;
@@ -658,13 +662,26 @@ impl Model {
                     continue;
                 }
 
+                if pr_cache.is_merged(&target.branch) {
+                    safe_to_cleanup = true;
+                    let _ = tx.send(SafetyUpdate {
+                        branch: target.branch,
+                        has_unpushed,
+                        is_unmerged,
+                        safe_to_cleanup,
+                    });
+                    continue;
+                }
+
                 // Check if branch is merged into base using merge-base --is-ancestor
                 // This correctly handles cases where base_branch has advanced beyond the merge point
-                if let Ok(is_merged) =
-                    Branch::is_merged_into(&repo_root, &target.branch, &base_branch)
-                {
-                    is_unmerged = !is_merged;
-                    safe_to_cleanup = is_merged;
+                if base_branch_exists {
+                    if let Ok(is_merged) =
+                        Branch::is_merged_into(&repo_root, &target.branch, &base_branch)
+                    {
+                        is_unmerged = !is_merged;
+                        safe_to_cleanup = is_merged;
+                    }
                 }
 
                 let _ = tx.send(SafetyUpdate {
