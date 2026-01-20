@@ -3,6 +3,13 @@
 **仕様ID**: `SPEC-d2f4762a`
 **ポリシー**: CLAUDE.md の TDD ルールに基づき、必ず RED→GREEN→リグレッションチェックの順に進める。
 
+## 追加作業: ブランチ一覧のダブルクリック選択 (2026-01-20)
+
+- [x] **T1311** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` にダブルクリック選択の要件・方針を追記
+- [x] **T1312** [Test] `crates/gwt-cli/src/tui/app.rs` にダブルクリックで選択が更新され、単クリックでは更新されないことを検証するテストを追加
+- [x] **T1313** [Impl] `crates/gwt-cli/src/tui/app.rs` のブランチ一覧マウス選択をダブルクリック検知に変更する
+- [x] **T1314** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
+
 ## 追加作業: クリーンアップ進捗の非ブロッキング化 (2026-01-20)
 
 - [x] **T1305** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` にクリーンアップ進捗表示と非ブロッキング要件を追記

@@ -38,6 +38,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 use tracing::{debug, error, info};
 
+const BRANCH_LIST_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(500);
+
 use super::screens::branch_list::WorktreeStatus;
 use super::screens::environment::EditField;
 use super::screens::pane_list::PaneListState;
@@ -145,6 +147,11 @@ impl TuiEntryContext {
     }
 }
 
+struct MouseClick {
+    index: usize,
+    at: Instant,
+}
+
 struct PrTitleUpdate {
     titles: HashMap<String, String>,
 }
@@ -229,6 +236,8 @@ pub struct Model {
     ctrl_c_count: u8,
     /// Last Ctrl+C press time
     last_ctrl_c: Option<Instant>,
+    /// Last mouse click for double click detection
+    last_mouse_click: Option<MouseClick>,
     /// Current screen
     screen: Screen,
     /// Screen stack for navigation
@@ -403,6 +412,7 @@ impl Model {
             should_quit: false,
             ctrl_c_count: 0,
             last_ctrl_c: None,
+            last_mouse_click: None,
             screen: Screen::BranchList,
             screen_stack: Vec::new(),
             repo_root,
@@ -1687,9 +1697,11 @@ impl Model {
 
     fn handle_branch_list_mouse(&mut self, mouse: MouseEvent) {
         if !matches!(self.screen, Screen::BranchList) {
+            self.last_mouse_click = None;
             return;
         }
         if self.wizard.visible {
+            self.last_mouse_click = None;
             return;
         }
         if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
@@ -1700,11 +1712,26 @@ impl Model {
             .branch_list
             .selection_index_from_point(mouse.column, mouse.row)
         else {
+            self.last_mouse_click = None;
             return;
         };
 
-        if self.branch_list.select_index(index) {
-            self.refresh_branch_summary();
+        let now = Instant::now();
+        let is_double_click = self
+            .last_mouse_click
+            .as_ref()
+            .is_some_and(|last| {
+                last.index == index
+                    && now.duration_since(last.at) <= BRANCH_LIST_DOUBLE_CLICK_WINDOW
+            });
+
+        if is_double_click {
+            self.last_mouse_click = None;
+            if self.branch_list.select_index(index) {
+                self.refresh_branch_summary();
+            }
+        } else {
+            self.last_mouse_click = Some(MouseClick { index, at: now });
         }
     }
 
@@ -4405,7 +4432,7 @@ mod tests {
     }
 
     #[test]
-    fn test_mouse_click_selects_branch_only() {
+    fn test_mouse_double_click_selects_branch_only() {
         let mut model = Model::new_with_context(None);
         model.screen = Screen::BranchList;
         let branches = [
@@ -4426,6 +4453,9 @@ mod tests {
             row: 2,
             modifiers: KeyModifiers::NONE,
         };
+        model.handle_branch_list_mouse(mouse);
+
+        assert_eq!(model.branch_list.selected, 0);
         model.handle_branch_list_mouse(mouse);
 
         assert_eq!(model.branch_list.selected, 1);
