@@ -9,6 +9,8 @@ use gwt_core::error::GwtError;
 use gwt_core::worktree::WorktreeManager;
 use gwt_core::TmuxMode;
 use std::fs;
+#[cfg(unix)]
+use std::fs::OpenOptions;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -1015,6 +1017,7 @@ fn execute_launch_plan(plan: LaunchPlan) -> Result<AgentExitKind, GwtError> {
         .stdin(Stdio::inherit()) // Keep stdin for interactive input
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
+    apply_tty_stdio(&mut command);
     for key in &config.env_remove {
         command.env_remove(key);
     }
@@ -1617,6 +1620,24 @@ pub(crate) fn detect_session_id_for_tool(tool_id: &str, worktree_path: &Path) ->
 
 fn detect_agent_session_id(config: &AgentLaunchConfig) -> Option<String> {
     detect_session_id_for_tool(config.agent.id(), &config.worktree_path)
+}
+
+fn apply_tty_stdio(command: &mut Command) {
+    #[cfg(unix)]
+    {
+        let stdin = OpenOptions::new().read(true).open("/dev/tty");
+        let stdout = OpenOptions::new().write(true).open("/dev/tty");
+        let stderr = OpenOptions::new().write(true).open("/dev/tty");
+        if let Ok(file) = stdin {
+            command.stdin(Stdio::from(file));
+        }
+        if let Ok(file) = stdout {
+            command.stdout(Stdio::from(file));
+        }
+        if let Ok(file) = stderr {
+            command.stderr(Stdio::from(file));
+        }
+    }
 }
 
 /// Build agent-specific command line arguments
