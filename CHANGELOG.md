@@ -1,7 +1,17 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [6.3.0] - 2026-01-19
+
+### Miscellaneous Tasks
+
+- Sync main into develop and resolve conflicts
+
 ## [6.2.0] - 2026-01-19
+
+### Bug Fixes
+
+- Skip husky install in CI environment
 
 ### Miscellaneous Tasks
 
