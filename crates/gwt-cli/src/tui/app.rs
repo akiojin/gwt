@@ -4145,7 +4145,7 @@ mod tests {
     fn test_mouse_click_selects_branch_only() {
         let mut model = Model::new_with_context(None);
         model.screen = Screen::BranchList;
-        let branches = vec![
+        let branches = [
             Branch::new("feature/one", "deadbeef"),
             Branch::new("feature/two", "deadbeef"),
         ];
