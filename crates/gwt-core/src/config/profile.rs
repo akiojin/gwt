@@ -158,6 +158,9 @@ pub struct ProfilesConfig {
     /// Active profile name
     #[serde(default)]
     pub active: Option<String>,
+    /// Default AI settings (profile fallback)
+    #[serde(default)]
+    pub default_ai: Option<AISettings>,
     /// Profiles map
     #[serde(default)]
     pub profiles: HashMap<String, Profile>,
@@ -214,8 +217,14 @@ impl ProfilesConfig {
     /// Ensure default profile exists
     fn ensure_defaults(&mut self) {
         if self.profiles.is_empty() {
-            *self = Self::default_with_profile();
-            return;
+            self.profiles
+                .insert("default".to_string(), Profile::new("default"));
+            if self.active.is_none() {
+                self.active = Some("default".to_string());
+            }
+            if self.version == 0 {
+                self.version = 1;
+            }
         }
         if self.active.is_none() && self.profiles.contains_key("default") {
             self.active = Some("default".to_string());
@@ -228,6 +237,7 @@ impl ProfilesConfig {
         Self {
             version: 1,
             active: Some("default".to_string()),
+            default_ai: None,
             profiles,
         }
     }

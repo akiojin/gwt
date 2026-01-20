@@ -2,10 +2,13 @@
 
 #![allow(dead_code)]
 
+use crate::tui::components::{LinkRegion, SummaryLinks};
 use gwt_core::ai::SessionSummaryCache;
+use gwt_core::config::AgentStatus;
 use gwt_core::git::{Branch, BranchMeta, BranchSummary, DivergenceStatus, Repository};
-use gwt_core::tmux::AgentPane;
+use gwt_core::tmux::{AgentPane, StatusBarSummary};
 use gwt_core::worktree::Worktree;
+use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use ratatui::{prelude::*, widgets::*};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -174,6 +177,18 @@ pub struct BranchItem {
     pub is_selected: bool,
     /// PR title for search (FR-016)
     pub pr_title: Option<String>,
+    /// PR number for latest PR (if any)
+    pub pr_number: Option<u64>,
+    /// PR URL for latest PR (if any)
+    pub pr_url: Option<String>,
+}
+
+/// PR info mapped to branch name
+#[derive(Debug, Clone)]
+pub struct PrInfo {
+    pub title: String,
+    pub number: u64,
+    pub url: Option<String>,
 }
 
 /// Worktree status
@@ -235,7 +250,9 @@ impl BranchItem {
             last_tool_id: None,
             last_session_id: None,
             is_selected: false,
-            pr_title: None, // FR-016: Will be populated from PrCache
+            pr_title: None,
+            pr_number: None,
+            pr_url: None, // FR-016: Will be populated from PrCache
         };
         item.update_safety_status();
         item
@@ -284,6 +301,8 @@ impl BranchItem {
             last_session_id: None,
             is_selected: false,
             pr_title: None,
+            pr_number: None,
+            pr_url: None,
         };
         item.update_safety_status();
         item
@@ -404,6 +423,10 @@ pub struct BranchListState {
     session_scroll_max: usize,
     /// Session summary scroll page size
     session_scroll_page: usize,
+    /// Cached repo web URL for GitHub links
+    repo_web_url: Option<String>,
+    /// Clickable link regions in details panel
+    detail_links: Vec<LinkRegion>,
 }
 
 impl Default for BranchListState {
@@ -442,6 +465,8 @@ impl Default for BranchListState {
             session_scroll_offset: 0,
             session_scroll_max: 0,
             session_scroll_page: 0,
+            repo_web_url: None,
+            detail_links: Vec::new(),
         }
     }
 }
@@ -813,18 +838,49 @@ impl BranchListState {
         self.rebuild_filtered_cache();
     }
 
-    pub fn apply_pr_titles(&mut self, titles: &HashMap<String, String>) {
-        if titles.is_empty() {
+    pub fn apply_pr_info(&mut self, info: &HashMap<String, PrInfo>) {
+        if info.is_empty() {
             return;
         }
 
         for item in &mut self.branches {
-            if let Some(title) = titles.get(&item.name) {
-                item.pr_title = Some(title.clone());
+            if let Some(pr) = info.get(&item.name) {
+                item.pr_title = Some(pr.title.clone());
+                item.pr_number = Some(pr.number);
+                item.pr_url = pr.url.clone();
             }
         }
 
         self.rebuild_filtered_cache();
+    }
+
+    pub fn set_repo_web_url(&mut self, url: Option<String>) {
+        self.repo_web_url = url;
+    }
+
+    pub fn repo_web_url(&self) -> Option<&String> {
+        self.repo_web_url.as_ref()
+    }
+
+    pub fn set_detail_links(&mut self, links: Vec<LinkRegion>) {
+        self.detail_links = links;
+    }
+
+    pub fn clear_detail_links(&mut self) {
+        self.detail_links.clear();
+    }
+
+    pub fn link_at_point(&self, column: u16, row: u16) -> Option<String> {
+        for link in &self.detail_links {
+            if column >= link.area.x
+                && column < link.area.x.saturating_add(link.area.width)
+                && row >= link.area.y
+                && row < link.area.y.saturating_add(link.area.height)
+            {
+                return Some(link.url.clone());
+            }
+        }
+        None
     }
 
     pub fn apply_safety_update(
@@ -1149,7 +1205,7 @@ impl BranchListState {
 
 /// Render branch list screen
 /// Note: Header, Filter, Mode are rendered by app.rs view_boxed_header
-/// This function only renders: BranchList + WorktreePath/Status
+/// This function only renders: BranchList + StatusBar + WorktreePath/Status
 pub fn render_branch_list(
     state: &mut BranchListState,
     frame: &mut Frame,
@@ -1159,19 +1215,99 @@ pub fn render_branch_list(
 ) {
     // SPEC-4b893dae: Summary panel height is 12 lines (FR-003)
     let panel_height = crate::tui::components::SummaryPanel::height();
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(3),               // Branch list (FR-003)
-            Constraint::Length(panel_height), // Summary panel (SPEC-4b893dae)
-        ])
-        .split(area);
+
+    // Check if we have agents to show status bar
+    let has_agents = !state.running_agents.is_empty();
+
+    let chunks = if has_agents {
+        // With status bar (SPEC-861d8cdf FR-104a)
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(panel_height), // Branch list (FR-003)
+                Constraint::Length(1),            // Status bar (FR-104a)
+                Constraint::Min(3),               // Summary panel (SPEC-4b893dae)
+            ])
+            .split(area)
+    } else {
+        // Without status bar (no agents)
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(panel_height), // Branch list (FR-003)
+                Constraint::Min(3),               // Summary panel (SPEC-4b893dae)
+            ])
+            .split(area)
+    };
 
     // Cache branch list area for mouse selection and update visible height
     state.update_list_area(chunks[0]);
 
     render_branches(state, frame, chunks[0], has_focus);
-    render_summary_panel(state, frame, chunks[1], status_message);
+
+    if has_agents {
+        render_status_bar(state, frame, chunks[1]);
+        render_summary_panel(state, frame, chunks[2], status_message);
+    } else {
+        render_summary_panel(state, frame, chunks[1], status_message);
+    }
+}
+
+/// Render agent status bar (SPEC-861d8cdf T-105, FR-104a, FR-104b, FR-104c)
+fn render_status_bar(state: &BranchListState, frame: &mut Frame, area: Rect) {
+    let agents: Vec<_> = state.running_agents.values().cloned().collect();
+    let summary = StatusBarSummary::from_agents(&agents);
+
+    if !summary.has_agents() {
+        return;
+    }
+
+    let mut spans = Vec::new();
+
+    // Add "Agents: " prefix
+    spans.push(Span::styled(
+        "Agents: ",
+        Style::default().fg(Color::DarkGray),
+    ));
+
+    // Add running count
+    if summary.running_count > 0 {
+        spans.push(Span::styled(
+            format!("{} running", summary.running_count),
+            Style::default().fg(Color::Green),
+        ));
+    }
+
+    // Add separator if needed
+    if summary.running_count > 0 && (summary.waiting_count > 0 || summary.stopped_count > 0) {
+        spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
+    }
+
+    // Add waiting count (FR-104c: highlighted in yellow)
+    if summary.waiting_count > 0 {
+        spans.push(Span::styled(
+            format!("{} waiting", summary.waiting_count),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    // Add separator if needed
+    if summary.waiting_count > 0 && summary.stopped_count > 0 {
+        spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
+    }
+
+    // Add stopped count
+    if summary.stopped_count > 0 {
+        spans.push(Span::styled(
+            format!("{} stopped", summary.stopped_count),
+            Style::default().fg(Color::Red),
+        ));
+    }
+
+    let line = Line::from(spans);
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 /// Render header line (FR-001, FR-001a)
@@ -1390,41 +1526,70 @@ fn render_branch_row(
     let left_width = selection_width + 1 + 1 + safety_icon.len() + 1 + display_name.width();
 
     // Build right side (agent info) and calculate its width
+    // SPEC-861d8cdf T-103: Status-based display
     let (right_spans, right_width): (Vec<Span>, usize) = if let Some(agent) = running_agent {
         let agent_display = get_agent_display_name(&agent.agent_name);
         let uptime = agent.uptime_string();
 
-        if agent.is_background {
-            // Background (hidden) pane - with spinner: "X Agent uptime"
-            let bg_spinner_char = BG_SPINNER_FRAMES[spinner_frame % BG_SPINNER_FRAMES.len()];
-            let width = 2 + agent_display.width() + 1 + uptime.width(); // spinner + " " + name + " " + uptime
-            let spans = vec![
-                Span::styled(
-                    format!("{} ", bg_spinner_char),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(agent_display, Style::default().fg(Color::DarkGray)),
-                Span::styled(" ", Style::default().fg(Color::DarkGray)),
-                Span::styled(uptime, Style::default().fg(Color::DarkGray)),
-            ];
-            (spans, width)
-        } else {
-            // Visible running pane - with spinner: "⠋ Agent uptime"
-            let active_spinner_char =
-                ACTIVE_SPINNER_FRAMES[spinner_frame % ACTIVE_SPINNER_FRAMES.len()];
-            let width = 2 + agent_display.width() + 1 + uptime.width(); // spinner(1) + " " + name + " " + uptime
-            let agent_color = get_agent_color(Some(&agent.agent_name));
-            let spans = vec![
-                Span::styled(
-                    format!("{} ", active_spinner_char),
-                    Style::default().fg(Color::Green),
-                ),
-                Span::styled(agent_display, Style::default().fg(agent_color)),
-                Span::raw(" "),
-                Span::styled(uptime, Style::default().fg(Color::Yellow)),
-            ];
-            (spans, width)
-        }
+        // Determine icon and color based on status (SPEC-861d8cdf T-103)
+        let (status_icon, status_color) = match agent.status {
+            AgentStatus::Running => {
+                if agent.is_background {
+                    let icon = BG_SPINNER_FRAMES[spinner_frame % BG_SPINNER_FRAMES.len()];
+                    (icon, Color::DarkGray)
+                } else {
+                    let icon = ACTIVE_SPINNER_FRAMES[spinner_frame % ACTIVE_SPINNER_FRAMES.len()];
+                    (icon, Color::Green)
+                }
+            }
+            AgentStatus::WaitingInput => {
+                // Blink effect: 500ms on/off (2 spinner frames = ~500ms with 250ms tick)
+                let should_show = (spinner_frame / 2).is_multiple_of(2);
+                if should_show {
+                    ('?', Color::Yellow)
+                } else {
+                    (' ', Color::Yellow)
+                }
+            }
+            AgentStatus::Stopped => ('#', Color::Red),
+            AgentStatus::Unknown => {
+                // Fallback to original behavior based on is_background
+                if agent.is_background {
+                    let icon = BG_SPINNER_FRAMES[spinner_frame % BG_SPINNER_FRAMES.len()];
+                    (icon, Color::DarkGray)
+                } else {
+                    let icon = ACTIVE_SPINNER_FRAMES[spinner_frame % ACTIVE_SPINNER_FRAMES.len()];
+                    (icon, Color::Green)
+                }
+            }
+        };
+
+        // Determine text color based on status
+        let text_color = match agent.status {
+            AgentStatus::Stopped => Color::Red,
+            AgentStatus::WaitingInput => Color::Yellow,
+            AgentStatus::Running if agent.is_background => Color::DarkGray,
+            _ => get_agent_color(Some(&agent.agent_name)),
+        };
+
+        let uptime_color = match agent.status {
+            AgentStatus::Stopped => Color::DarkGray,
+            AgentStatus::WaitingInput => Color::Yellow,
+            AgentStatus::Running if agent.is_background => Color::DarkGray,
+            _ => Color::Yellow,
+        };
+
+        let width = 2 + agent_display.width() + 1 + uptime.width();
+        let spans = vec![
+            Span::styled(
+                format!("{} ", status_icon),
+                Style::default().fg(status_color),
+            ),
+            Span::styled(agent_display, Style::default().fg(text_color)),
+            Span::raw(" "),
+            Span::styled(uptime, Style::default().fg(uptime_color)),
+        ];
+        (spans, width)
     } else if let Some(tool) = &branch.last_tool_usage {
         // No running agent, but show last tool usage (FR-070)
         let agent_id = tool.split('@').next();
@@ -1497,8 +1662,40 @@ fn render_summary_panel(
 ) {
     match state.detail_panel_tab {
         DetailPanelTab::Details => render_details_panel(state, frame, area, status_message),
-        DetailPanelTab::Session => render_session_panel(state, frame, area, status_message),
+        DetailPanelTab::Session => {
+            state.clear_detail_links();
+            render_session_panel(state, frame, area, status_message);
+        }
     }
+}
+
+fn panel_title_line(branch_name: &str, active: DetailPanelTab) -> Line<'static> {
+    let mut spans = Vec::new();
+    let details_style = if matches!(active, DetailPanelTab::Details) {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let session_style = if matches!(active, DetailPanelTab::Session) {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    spans.push(Span::styled("[Details]", details_style));
+    spans.push(Span::raw(" "));
+    spans.push(Span::styled("[Session]", session_style));
+    spans.push(Span::raw(" "));
+    spans.push(Span::styled(
+        format!(" {}", branch_name),
+        Style::default().fg(Color::DarkGray),
+    ));
+
+    Line::from(spans)
 }
 
 fn panel_switch_hint() -> Line<'static> {
@@ -1517,6 +1714,42 @@ fn session_panel_hint() -> Line<'static> {
     .right_aligned()
 }
 
+fn build_summary_links(repo_web_url: Option<&String>, branch: Option<&BranchItem>) -> SummaryLinks {
+    let Some(branch) = branch else {
+        return SummaryLinks::default();
+    };
+
+    let branch_url = repo_web_url.and_then(|base| {
+        let base = base.trim_end_matches('/');
+        let normalized = normalize_branch_name_for_url(&branch.name);
+        if normalized.is_empty() {
+            None
+        } else {
+            Some(format!("{}/tree/{}", base, normalized))
+        }
+    });
+
+    let pr_url = branch.pr_url.clone().or_else(|| {
+        repo_web_url.and_then(|base| {
+            branch
+                .pr_number
+                .map(|n| format!("{}/pull/{}", base.trim_end_matches('/'), n))
+        })
+    });
+
+    SummaryLinks { branch_url, pr_url }
+}
+
+fn normalize_branch_name_for_url(branch_name: &str) -> String {
+    if let Some(stripped) = branch_name.strip_prefix("remotes/") {
+        if let Some((_, name)) = stripped.split_once('/') {
+            return name.to_string();
+        }
+        return stripped.to_string();
+    }
+    branch_name.to_string()
+}
+
 fn render_details_panel(
     state: &mut BranchListState,
     frame: &mut Frame,
@@ -1525,6 +1758,8 @@ fn render_details_panel(
 ) {
     use crate::tui::components::SummaryPanel;
     use std::path::PathBuf;
+
+    state.clear_detail_links();
 
     // Create or get branch summary
     let summary = if let Some(ref summary) = state.branch_summary {
@@ -1554,7 +1789,7 @@ fn render_details_panel(
     // Handle status messages - show them in the panel area if present
     if let Some(status) = status_message {
         // Draw the panel frame first
-        let title = format!(" [{}] Details ", summary.branch_name);
+        let title = panel_title_line(&summary.branch_name, DetailPanelTab::Details);
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
@@ -1574,7 +1809,7 @@ fn render_details_panel(
 
     // Handle loading state - show spinner in panel
     if state.is_loading {
-        let title = format!(" [{}] Details ", summary.branch_name);
+        let title = panel_title_line(&summary.branch_name, DetailPanelTab::Details);
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
@@ -1599,7 +1834,7 @@ fn render_details_panel(
 
     // Handle progress state
     if let Some(progress) = state.status_progress_line() {
-        let title = format!(" [{}] Details ", summary.branch_name);
+        let title = panel_title_line(&summary.branch_name, DetailPanelTab::Details);
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
@@ -1619,10 +1854,20 @@ fn render_details_panel(
         return;
     }
 
-    // Render the full summary panel
-    let panel = SummaryPanel::new(&summary).with_tick(state.spinner_frame);
+    let selected_branch = state.selected_branch().cloned();
+    let links = build_summary_links(state.repo_web_url(), selected_branch.as_ref());
 
-    panel.render(frame, area);
+    // Render the full summary panel
+    let panel = SummaryPanel::new(&summary)
+        .with_tick(state.spinner_frame)
+        .with_title(panel_title_line(
+            &summary.branch_name,
+            DetailPanelTab::Details,
+        ))
+        .with_links(links);
+
+    let link_regions = panel.render_with_links(frame, area);
+    state.set_detail_links(link_regions);
 }
 
 fn render_session_panel(
@@ -1635,7 +1880,7 @@ fn render_session_panel(
         .selected_branch()
         .map(|branch| branch.name.clone())
         .unwrap_or_else(|| "(no branch selected)".to_string());
-    let title = format!(" [{}] Session ", branch_name);
+    let title = panel_title_line(&branch_name, DetailPanelTab::Session);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan))
@@ -1665,7 +1910,7 @@ fn render_session_panel(
     } else if let Some(branch) = state.selected_branch() {
         if !state.ai_enabled {
             lines.push(Line::from(Span::styled(
-                "Configure AI in Settings to enable session summary",
+                "Configure AI in Profiles to enable session summary",
                 Style::default().fg(Color::Yellow),
             )));
         } else if branch.last_session_id.is_none() || state.is_session_missing(&branch.name) {
@@ -1674,55 +1919,57 @@ fn render_session_panel(
                 Style::default().fg(Color::DarkGray),
             )));
         } else if let Some(summary) = state.session_summary(&branch.name) {
-            lines.push(Line::from(Span::styled(
-                "Task:",
-                Style::default().fg(Color::Yellow),
-            )));
-            if let Some(task) = summary.task_overview.as_ref() {
-                lines.push(Line::from(format!("  {}", task)));
+            let markdown = summary.markdown.clone();
+            let task_overview = summary.task_overview.clone();
+            let short_summary = summary.short_summary.clone();
+            let bullet_points = summary.bullet_points.clone();
+            if let Some(markdown) = markdown.as_ref() {
+                lines = render_markdown_lines(markdown);
+                if lines.is_empty() {
+                    lines.push(Line::from(markdown.to_string()));
+                }
             } else {
                 lines.push(Line::from(Span::styled(
-                    "  (Not available)",
-                    Style::default().fg(Color::DarkGray),
+                    "Task:",
+                    Style::default().fg(Color::Yellow),
                 )));
-            }
+                if let Some(task) = task_overview.as_ref() {
+                    lines.push(Line::from(format!("  {}", task)));
+                } else {
+                    lines.push(Line::from(Span::styled(
+                        "  (Not available)",
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
 
-            lines.push(Line::from(Span::styled(
-                "Summary:",
-                Style::default().fg(Color::Yellow),
-            )));
-            if let Some(short) = summary.short_summary.as_ref() {
-                lines.push(Line::from(format!("  {}", short)));
-            } else {
                 lines.push(Line::from(Span::styled(
-                    "  (Not available)",
-                    Style::default().fg(Color::DarkGray),
+                    "Summary:",
+                    Style::default().fg(Color::Yellow),
                 )));
-            }
+                if let Some(short) = short_summary.as_ref() {
+                    lines.push(Line::from(format!("  {}", short)));
+                } else {
+                    lines.push(Line::from(Span::styled(
+                        "  (Not available)",
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
 
-            lines.push(Line::from(Span::styled(
-                "Highlights:",
-                Style::default().fg(Color::Yellow),
-            )));
-            if summary.bullet_points.is_empty() {
                 lines.push(Line::from(Span::styled(
-                    "  (No highlights)",
-                    Style::default().fg(Color::DarkGray),
+                    "Highlights:",
+                    Style::default().fg(Color::Yellow),
                 )));
-            } else {
-                for bullet in summary.bullet_points.iter().take(3) {
-                    lines.push(Line::from(format!("  {}", bullet)));
+                if bullet_points.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        "  (No highlights)",
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                } else {
+                    for bullet in bullet_points.iter().take(3) {
+                        lines.push(Line::from(format!("  {}", bullet)));
+                    }
                 }
             }
-
-            lines.push(Line::from(Span::styled(
-                "Metrics:",
-                Style::default().fg(Color::Yellow),
-            )));
-            lines.push(Line::from(format!(
-                "  {}",
-                format_metrics(&summary.metrics)
-            )));
         } else if state.session_summary_inflight(&branch.name) {
             lines.push(Line::from(Span::styled(
                 format!("{} Generating session summary...", state.spinner_char()),
@@ -1760,17 +2007,113 @@ fn render_session_panel(
     frame.render_widget(paragraph, inner);
 }
 
-fn format_metrics(metrics: &gwt_core::ai::SessionMetrics) -> String {
-    let mut parts = Vec::new();
-    if let Some(tokens) = metrics.token_count {
-        parts.push(format!("tokens ~{}", tokens));
+fn render_markdown_lines(markdown: &str) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut buffer = String::new();
+    let mut in_item = false;
+
+    let options = Options::ENABLE_STRIKETHROUGH;
+    let parser = Parser::new_ext(markdown, options);
+
+    for event in parser {
+        match event {
+            Event::Start(Tag::Heading { .. }) => {
+                flush_paragraph_lines(&mut lines, &mut buffer, false);
+                buffer.clear();
+            }
+            Event::End(TagEnd::Heading(_)) => {
+                let text = buffer.trim();
+                if !text.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        text.to_string(),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    )));
+                }
+                buffer.clear();
+            }
+            Event::Start(Tag::Item) => {
+                flush_paragraph_lines(&mut lines, &mut buffer, false);
+                buffer.clear();
+                in_item = true;
+            }
+            Event::End(TagEnd::Item) => {
+                let text = buffer.trim();
+                if !text.is_empty() {
+                    push_bullet_lines(&mut lines, text);
+                }
+                buffer.clear();
+                in_item = false;
+            }
+            Event::Start(Tag::Paragraph) => {
+                if !in_item {
+                    buffer.clear();
+                }
+            }
+            Event::End(TagEnd::Paragraph) => {
+                if !in_item {
+                    flush_paragraph_lines(&mut lines, &mut buffer, false);
+                }
+            }
+            Event::Text(text) => buffer.push_str(text.as_ref()),
+            Event::Code(text) => buffer.push_str(text.as_ref()),
+            Event::SoftBreak => buffer.push(' '),
+            Event::HardBreak => buffer.push('\n'),
+            _ => {}
+        }
     }
-    parts.push(format!("tools {}", metrics.tool_execution_count));
-    if let Some(seconds) = metrics.elapsed_seconds {
-        parts.push(format!("elapsed {}", format_duration(seconds)));
+
+    flush_paragraph_lines(&mut lines, &mut buffer, in_item);
+
+    lines
+}
+
+fn flush_paragraph_lines(lines: &mut Vec<Line<'static>>, buffer: &mut String, in_item: bool) {
+    let text = buffer.trim();
+    if text.is_empty() {
+        return;
     }
-    parts.push(format!("turns {}", metrics.turn_count));
-    parts.join(" | ")
+    if in_item {
+        push_bullet_lines(lines, text);
+    } else {
+        push_plain_lines(lines, text);
+    }
+    buffer.clear();
+}
+
+fn push_plain_lines(lines: &mut Vec<Line<'static>>, text: &str) {
+    for line in text.split('\n') {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            lines.push(Line::from(""));
+        } else {
+            lines.push(Line::from(trimmed.to_string()));
+        }
+    }
+}
+
+fn push_bullet_lines(lines: &mut Vec<Line<'static>>, text: &str) {
+    let mut iter = text.split('\n');
+    if let Some(first) = iter.next() {
+        let trimmed = first.trim();
+        if !trimmed.is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled("- ", Style::default().fg(Color::DarkGray)),
+                Span::raw(trimmed.to_string()),
+            ]));
+        }
+    }
+    for rest in iter {
+        let trimmed = rest.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        lines.push(Line::from(vec![
+            Span::styled("  ", Style::default().fg(Color::DarkGray)),
+            Span::raw(trimmed.to_string()),
+        ]));
+    }
 }
 
 fn count_wrapped_lines(lines: &[Line], width: usize) -> usize {
@@ -1789,19 +2132,6 @@ fn count_wrapped_lines(lines: &[Line], width: usize) -> usize {
             line_width.div_ceil(width)
         })
         .sum()
-}
-
-fn format_duration(seconds: u64) -> String {
-    if seconds < 60 {
-        return format!("{}s", seconds);
-    }
-    let minutes = seconds / 60;
-    if minutes < 60 {
-        return format!("{}m", minutes);
-    }
-    let hours = minutes / 60;
-    let mins = minutes % 60;
-    format!("{}h{}m", hours, mins)
 }
 
 /// Render footer line with keybindings (FR-004)
@@ -1862,6 +2192,8 @@ mod tests {
             last_session_id: None,
             is_selected: false,
             pr_title: None,
+            pr_number: None,
+            pr_url: None,
         }
     }
 
@@ -1905,6 +2237,8 @@ mod tests {
                 last_session_id: None,
                 is_selected: false,
                 pr_title: None,
+                pr_number: None,
+                pr_url: None,
             },
             BranchItem {
                 name: "develop".to_string(),
@@ -1927,6 +2261,8 @@ mod tests {
                 last_session_id: None,
                 is_selected: false,
                 pr_title: None,
+                pr_number: None,
+                pr_url: None,
             },
         ];
 
@@ -2005,6 +2341,8 @@ mod tests {
             last_session_id: None,
             is_selected: false,
             pr_title: None,
+            pr_number: None,
+            pr_url: None,
         }];
 
         let mut state = BranchListState::new().with_branches(branches);
@@ -2049,6 +2387,8 @@ mod tests {
             last_session_id: None,
             is_selected: false,
             pr_title: None,
+            pr_number: None,
+            pr_url: None,
         }];
 
         let mut state = BranchListState::new().with_branches(branches);
@@ -2132,6 +2472,8 @@ mod tests {
                 last_session_id: None,
                 is_selected: false,
                 pr_title: None,
+                pr_number: None,
+                pr_url: None,
             },
             BranchItem {
                 name: "remotes/origin/main".to_string(),
@@ -2154,6 +2496,8 @@ mod tests {
                 last_session_id: None,
                 is_selected: false,
                 pr_title: None,
+                pr_number: None,
+                pr_url: None,
             },
         ];
 
@@ -2193,6 +2537,8 @@ mod tests {
                 last_session_id: None,
                 is_selected: false,
                 pr_title: None,
+                pr_number: None,
+                pr_url: None,
             },
             BranchItem {
                 name: "feature/one".to_string(),
@@ -2215,6 +2561,8 @@ mod tests {
                 last_session_id: None,
                 is_selected: false,
                 pr_title: None,
+                pr_number: None,
+                pr_url: None,
             },
         ];
 
@@ -2233,7 +2581,7 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_pr_titles_updates_filter_results() {
+    fn test_apply_pr_info_updates_filter_results() {
         let branches = vec![
             BranchItem {
                 name: "feature/one".to_string(),
@@ -2256,6 +2604,8 @@ mod tests {
                 last_session_id: None,
                 is_selected: false,
                 pr_title: None,
+                pr_number: None,
+                pr_url: None,
             },
             BranchItem {
                 name: "feature/two".to_string(),
@@ -2278,6 +2628,8 @@ mod tests {
                 last_session_id: None,
                 is_selected: false,
                 pr_title: None,
+                pr_number: None,
+                pr_url: None,
             },
         ];
 
@@ -2285,9 +2637,16 @@ mod tests {
         state.set_filter("cool".to_string());
         assert_eq!(state.filtered_branches().len(), 0);
 
-        let mut titles = HashMap::new();
-        titles.insert("feature/one".to_string(), "Cool PR".to_string());
-        state.apply_pr_titles(&titles);
+        let mut info = HashMap::new();
+        info.insert(
+            "feature/one".to_string(),
+            PrInfo {
+                title: "Cool PR".to_string(),
+                number: 123,
+                url: Some("https://github.com/example/repo/pull/123".to_string()),
+            },
+        );
+        state.apply_pr_info(&info);
 
         let filtered = state.filtered_branches();
         assert_eq!(filtered.len(), 1);
@@ -2317,6 +2676,8 @@ mod tests {
             last_session_id: None,
             is_selected: false,
             pr_title: None,
+            pr_number: None,
+            pr_url: None,
         };
 
         item.update_safety_status();
@@ -2368,6 +2729,8 @@ mod tests {
                 last_session_id: None,
                 is_selected: false,
                 pr_title: None,
+                pr_number: None,
+                pr_url: None,
             },
             BranchItem {
                 name: "feature/two".to_string(),
@@ -2390,6 +2753,8 @@ mod tests {
                 last_session_id: None,
                 is_selected: false,
                 pr_title: None,
+                pr_number: None,
+                pr_url: None,
             },
         ];
 
@@ -2440,6 +2805,8 @@ mod tests {
                 last_session_id: None,
                 is_selected: false,
                 pr_title: None,
+                pr_number: None,
+                pr_url: None,
             },
             BranchItem {
                 name: "feature/one".to_string(),
@@ -2462,6 +2829,8 @@ mod tests {
                 last_session_id: None,
                 is_selected: false,
                 pr_title: None,
+                pr_number: None,
+                pr_url: None,
             },
             BranchItem {
                 name: "feature/two".to_string(),
@@ -2484,6 +2853,8 @@ mod tests {
                 last_session_id: None,
                 is_selected: false,
                 pr_title: None,
+                pr_number: None,
+                pr_url: None,
             },
         ];
 

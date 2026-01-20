@@ -26,9 +26,11 @@ pub use launcher::{
 pub use logging::{start_logging, stop_logging, LogConfig};
 pub use naming::generate_session_name;
 pub use pane::{
-    break_pane, compute_equal_splits, detect_orphaned_panes, force_kill_agent, group_panes_by_left,
-    hide_pane, is_process_running, join_pane_to_target, kill_pane, list_pane_geometries,
-    resize_pane_height, resize_pane_width, send_signal, show_pane, terminate_agent, AgentPane,
-    PaneColumn, PaneGeometry, PaneInfo, SplitDirection, TermSignal,
+    break_pane, compute_equal_splits, detect_orphaned_panes, force_kill_agent,
+    get_agent_status_with_confidence, group_panes_by_left, hide_pane, infer_agent_status,
+    infer_agent_status_from_output, is_process_running, join_pane_to_target, kill_pane,
+    list_pane_geometries, resize_pane_height, resize_pane_width, send_signal, show_pane,
+    terminate_agent, AgentPane, PaneColumn, PaneGeometry, PaneInfo, SplitDirection,
+    StatusBarSummary, TermSignal, IDLE_TIMEOUT_SECS, PROMPT_PATTERNS,
 };
 pub use poller::{AgentRegistry, PanePoller, PollMessage, PollerConfig};

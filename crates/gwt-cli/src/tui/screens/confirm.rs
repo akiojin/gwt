@@ -161,6 +161,22 @@ impl ConfirmState {
         }
     }
 
+    /// Create Claude Code hook setup proposal dialog (SPEC-861d8cdf T-104)
+    pub fn hook_setup() -> Self {
+        Self {
+            title: "Setup Agent Status Tracking".to_string(),
+            message: "Enable Claude Code hook for agent status tracking?".to_string(),
+            details: vec![
+                "This will add gwt hooks to Claude Code settings.".to_string(),
+                "You can run 'gwt hook status' to check at any time.".to_string(),
+            ],
+            confirm_label: "Setup".to_string(),
+            cancel_label: "Skip".to_string(),
+            selected_confirm: true, // Default to setup for better UX
+            is_dangerous: false,
+        }
+    }
+
     /// Toggle selection
     pub fn toggle_selection(&mut self) {
         self.selected_confirm = !self.selected_confirm;

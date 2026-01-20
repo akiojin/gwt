@@ -17,6 +17,10 @@ pub struct PullRequest {
     pub head_branch: String,
     /// PR state (open, closed, merged)
     pub state: String,
+    /// PR URL (if available)
+    pub url: Option<String>,
+    /// PR updatedAt timestamp (ISO-8601, if available)
+    pub updated_at: Option<String>,
 }
 
 /// Cache of PR information for a repository
@@ -72,7 +76,13 @@ impl PrCache {
         // Fetch open and merged PRs
         if let Ok(prs) = fetch_prs(repo_path) {
             for pr in prs {
-                self.branch_to_pr.insert(pr.head_branch.clone(), pr);
+                let replace = match self.branch_to_pr.get(&pr.head_branch) {
+                    Some(existing) => is_newer_pr(&pr, existing),
+                    None => true,
+                };
+                if replace {
+                    self.branch_to_pr.insert(pr.head_branch.clone(), pr);
+                }
             }
         }
 
@@ -122,7 +132,7 @@ fn fetch_prs_by_state(repo_path: &Path, state: &str) -> Result<Vec<PullRequest>,
             "--state",
             state,
             "--json",
-            "number,title,headRefName,state",
+            "number,title,headRefName,state,url,updatedAt",
             "--limit",
             "100",
         ])
@@ -153,11 +163,21 @@ fn parse_gh_pr_json(json_str: &str) -> Result<Vec<PullRequest>, std::io::Error> 
                     item.get("headRefName").and_then(|h| h.as_str()),
                     item.get("state").and_then(|s| s.as_str()),
                 ) {
+                    let url = item
+                        .get("url")
+                        .and_then(|u| u.as_str())
+                        .map(|u| u.to_string());
+                    let updated_at = item
+                        .get("updatedAt")
+                        .and_then(|u| u.as_str())
+                        .map(|u| u.to_string());
                     prs.push(PullRequest {
                         number,
                         title: title.to_string(),
                         head_branch: head_branch.to_string(),
                         state: state.to_string(),
+                        url,
+                        updated_at,
                     });
                 }
             }
@@ -165,6 +185,15 @@ fn parse_gh_pr_json(json_str: &str) -> Result<Vec<PullRequest>, std::io::Error> 
     }
 
     Ok(prs)
+}
+
+fn is_newer_pr(candidate: &PullRequest, current: &PullRequest) -> bool {
+    match (&candidate.updated_at, &current.updated_at) {
+        (Some(candidate_ts), Some(current_ts)) => candidate_ts > current_ts,
+        (Some(_), None) => true,
+        (None, Some(_)) => false,
+        (None, None) => candidate.state == "OPEN" && current.state != "OPEN",
+    }
 }
 
 #[cfg(test)]
@@ -181,8 +210,8 @@ mod tests {
     #[test]
     fn test_parse_gh_pr_json() {
         let json = r#"[
-            {"number": 123, "title": "Fix bug", "headRefName": "fix/bug", "state": "OPEN"},
-            {"number": 456, "title": "Add feature", "headRefName": "feature/new", "state": "MERGED"}
+            {"number": 123, "title": "Fix bug", "headRefName": "fix/bug", "state": "OPEN", "url": "https://github.com/a/b/pull/123", "updatedAt": "2024-01-01T00:00:00Z"},
+            {"number": 456, "title": "Add feature", "headRefName": "feature/new", "state": "MERGED", "url": "https://github.com/a/b/pull/456", "updatedAt": "2024-01-02T00:00:00Z"}
         ]"#;
 
         let prs = parse_gh_pr_json(json).unwrap();
@@ -190,6 +219,10 @@ mod tests {
         assert_eq!(prs[0].number, 123);
         assert_eq!(prs[0].title, "Fix bug");
         assert_eq!(prs[0].head_branch, "fix/bug");
+        assert_eq!(
+            prs[0].url.as_deref(),
+            Some("https://github.com/a/b/pull/123")
+        );
         assert_eq!(prs[1].head_branch, "feature/new");
     }
 
@@ -217,6 +250,8 @@ mod tests {
                 title: "Merged".to_string(),
                 head_branch: "feature/merged".to_string(),
                 state: "MERGED".to_string(),
+                url: None,
+                updated_at: None,
             },
         );
         cache.branch_to_pr.insert(
@@ -226,6 +261,8 @@ mod tests {
                 title: "Open".to_string(),
                 head_branch: "feature/open".to_string(),
                 state: "OPEN".to_string(),
+                url: None,
+                updated_at: None,
             },
         );
 

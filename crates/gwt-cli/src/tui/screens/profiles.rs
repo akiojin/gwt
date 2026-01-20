@@ -15,6 +15,12 @@ pub struct ProfileItem {
     pub env_count: usize,
     /// Description (optional)
     pub description: Option<String>,
+    /// AI status label
+    pub ai_label: String,
+    /// AI enabled
+    pub ai_enabled: bool,
+    /// Is default AI settings entry
+    pub is_default_ai: bool,
 }
 
 /// Profile management state
@@ -49,6 +55,11 @@ impl ProfilesState {
             .iter()
             .find(|p| p.is_active)
             .map(|p| p.name.clone());
+        if let Some(active) = &self.active_profile {
+            if let Some(index) = self.profiles.iter().position(|p| &p.name == active) {
+                self.selected = index;
+            }
+        }
         self
     }
 
@@ -158,9 +169,14 @@ pub fn render_profiles(state: &ProfilesState, frame: &mut Frame, area: Rect) {
     };
 
     // Header
+    let profile_count = state
+        .profiles
+        .iter()
+        .filter(|profile| !profile.is_default_ai)
+        .count();
     let header_text = format!(
         "Profiles ({}) | Active: {}",
-        state.profiles.len(),
+        profile_count,
         state.active_profile.as_deref().unwrap_or("none")
     );
     let header = Paragraph::new(header_text)
@@ -181,8 +197,22 @@ pub fn render_profiles(state: &ProfilesState, frame: &mut Frame, area: Rect) {
             .enumerate()
             .map(|(i, profile)| {
                 let active_marker = if profile.is_active { "*" } else { " " };
-                let env_info = format!("[{} vars]", profile.env_count);
+                let env_info = if profile.is_default_ai {
+                    "[AI]".to_string()
+                } else {
+                    format!("[{} vars]", profile.env_count)
+                };
                 let desc = profile.description.as_deref().unwrap_or("");
+                let ai_style = if profile.ai_enabled {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+                let name_style = if profile.is_default_ai {
+                    Style::default().fg(Color::Magenta)
+                } else {
+                    Style::default()
+                };
 
                 let line = Line::from(vec![
                     Span::styled(
@@ -193,12 +223,13 @@ pub fn render_profiles(state: &ProfilesState, frame: &mut Frame, area: Rect) {
                             Color::DarkGray
                         }),
                     ),
-                    Span::raw(&profile.name),
+                    Span::styled(&profile.name, name_style),
                     Span::styled(
                         format!(" {} ", env_info),
                         Style::default().fg(Color::DarkGray),
                     ),
                     Span::styled(desc, Style::default().fg(Color::DarkGray)),
+                    Span::styled(format!(" [{}] ", profile.ai_label), ai_style),
                 ]);
 
                 let style = if i == state.selected && !state.create_mode {
@@ -260,7 +291,7 @@ pub fn render_profiles(state: &ProfilesState, frame: &mut Frame, area: Rect) {
 }
 
 fn profile_actions_text() -> &'static str {
-    "[Space] Activate | [Enter] Edit env | [n] New | [d] Delete | [Esc] Back"
+    "[Space] Activate | [Enter] Edit AI/env | [n] New | [d] Delete | [Esc] Back"
 }
 
 #[cfg(test)]
@@ -275,12 +306,18 @@ mod tests {
                 is_active: true,
                 env_count: 5,
                 description: None,
+                ai_label: "AI: off".to_string(),
+                ai_enabled: false,
+                is_default_ai: false,
             },
             ProfileItem {
                 name: "development".to_string(),
                 is_active: false,
                 env_count: 10,
                 description: Some("Dev environment".to_string()),
+                ai_label: "AI: off".to_string(),
+                ai_enabled: false,
+                is_default_ai: false,
             },
         ];
 
@@ -336,7 +373,7 @@ mod tests {
     fn test_profile_actions_text_uses_enter_for_env() {
         assert_eq!(
             profile_actions_text(),
-            "[Space] Activate | [Enter] Edit env | [n] New | [d] Delete | [Esc] Back"
+            "[Space] Activate | [Enter] Edit AI/env | [n] New | [d] Delete | [Esc] Back"
         );
     }
 }
