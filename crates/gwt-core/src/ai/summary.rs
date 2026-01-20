@@ -5,7 +5,7 @@ use super::session_parser::{MessageRole, ParsedSession, SessionMessage};
 use std::collections::HashMap;
 use std::time::SystemTime;
 
-pub const SESSION_SYSTEM_PROMPT_BASE: &str = "You are a helpful assistant summarizing a coding agent session.\nReturn JSON only with keys: task_overview, short_summary, bullets.\n- task_overview: current task and progress in 1 sentence.\n- short_summary: 1-2 sentence summary.\n- bullets: 2-3 concise bullet points (no leading dash).\nNo markdown, no extra text.";
+pub const SESSION_SYSTEM_PROMPT_BASE: &str = "You are a helpful assistant summarizing a coding agent session.\nReturn JSON only with keys: task_overview, short_summary, bullets.\n- task_overview: current task and progress in 1 sentence.\n- short_summary: 1-2 sentence summary.\n- bullets: 2-3 concise bullet points (no leading dash).\nDetect the response language from the session content and respond in that language.\nIf the session contains multiple languages, use the language used by the user messages.\nOutput must be a single JSON object with no code fences, no markdown, and no extra text.";
 
 const MAX_MESSAGE_CHARS: usize = 220;
 const MAX_TOOL_ITEMS: usize = 8;
