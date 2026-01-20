@@ -1660,7 +1660,10 @@ fn render_session_panel(
                 "Metrics:",
                 Style::default().fg(Color::Yellow),
             )));
-            lines.push(Line::from(format!("  {}", format_metrics(&summary.metrics))));
+            lines.push(Line::from(format!(
+                "  {}",
+                format_metrics(&summary.metrics)
+            )));
         } else if state.session_summary_inflight(&branch.name) {
             lines.push(Line::from(Span::styled(
                 format!("{} Generating session summary...", state.spinner_char()),

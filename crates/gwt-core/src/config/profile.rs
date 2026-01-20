@@ -254,8 +254,8 @@ fn set_private_permissions(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use std::sync::Mutex;
+    use tempfile::TempDir;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 

@@ -1318,10 +1318,7 @@ fn detect_opencode_session_id_at(home: &Path) -> Option<String> {
     })
 }
 
-pub(crate) fn detect_session_id_for_tool(
-    tool_id: &str,
-    worktree_path: &Path,
-) -> Option<String> {
+pub(crate) fn detect_session_id_for_tool(tool_id: &str, worktree_path: &Path) -> Option<String> {
     let home = home_dir()?;
     let lower = tool_id.to_lowercase();
     if lower.contains("codex") {

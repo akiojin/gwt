@@ -381,8 +381,7 @@ fn extract_tool_success(value: &Value) -> bool {
         return success;
     }
     if let Some(status) = value.get("status").and_then(|v| v.as_str()) {
-        return !status.eq_ignore_ascii_case("error")
-            && !status.eq_ignore_ascii_case("failed");
+        return !status.eq_ignore_ascii_case("error") && !status.eq_ignore_ascii_case("failed");
     }
     value.get("error").is_none()
 }
@@ -548,7 +547,11 @@ fn extract_string_field(value: &Value, keys: &[&str]) -> Option<String> {
     None
 }
 
-pub(crate) fn find_session_file(root: &Path, session_id: &str, extensions: &[&str]) -> Option<PathBuf> {
+pub(crate) fn find_session_file(
+    root: &Path,
+    session_id: &str,
+    extensions: &[&str],
+) -> Option<PathBuf> {
     if !root.exists() {
         return None;
     }

@@ -8,7 +8,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use gwt_core::ai::{
-    summarize_session, AgentType, AIClient, AIError, ClaudeSessionParser, CodexSessionParser,
+    summarize_session, AIClient, AIError, AgentType, ClaudeSessionParser, CodexSessionParser,
     GeminiSessionParser, OpenCodeSessionParser, SessionParseError, SessionParser,
 };
 use gwt_core::config::get_branch_tool_history;
@@ -805,12 +805,7 @@ impl Model {
         self.spawn_session_summaries(vec![task], settings);
     }
 
-    fn persist_detected_session(
-        &self,
-        branch: &BranchItem,
-        tool_id: &str,
-        session_id: &str,
-    ) {
+    fn persist_detected_session(&self, branch: &BranchItem, tool_id: &str, session_id: &str) {
         if branch.worktree_path.is_none() {
             return;
         }
@@ -846,8 +841,7 @@ impl Model {
         };
 
         for task in &tasks {
-            self.branch_list
-                .mark_session_summary_inflight(&task.branch);
+            self.branch_list.mark_session_summary_inflight(&task.branch);
             if let Some(current) = self.branch_list.branch_summary.as_mut() {
                 if current.branch_name == task.branch {
                     current.loading.session_summary = true;
@@ -2275,23 +2269,21 @@ impl Model {
                     self.terminate_agent_pane(&branch_name);
                 }
             }
-            Message::Tab => {
-                match self.screen {
-                    Screen::Settings => self.settings.next_category(),
-                    Screen::BranchList => {
-                        if !self.branch_list.filter_mode {
-                            self.branch_list.detail_panel_tab.toggle();
-                            self.refresh_branch_summary();
-                            if self.branch_list.detail_panel_tab == DetailPanelTab::Session {
-                                self.maybe_request_session_summary_for_selected(false);
-                            } else {
-                                self.last_session_poll = None;
-                            }
+            Message::Tab => match self.screen {
+                Screen::Settings => self.settings.next_category(),
+                Screen::BranchList => {
+                    if !self.branch_list.filter_mode {
+                        self.branch_list.detail_panel_tab.toggle();
+                        self.refresh_branch_summary();
+                        if self.branch_list.detail_panel_tab == DetailPanelTab::Session {
+                            self.maybe_request_session_summary_for_selected(false);
+                        } else {
+                            self.last_session_poll = None;
                         }
                     }
-                    _ => {}
                 }
-            }
+                _ => {}
+            },
             Message::CycleFilter => {
                 if matches!(self.screen, Screen::Logs) {
                     self.logs.cycle_filter();

@@ -98,7 +98,10 @@ pub fn build_session_prompt(parsed: &ParsedSession) -> Vec<ChatMessage> {
             if content.chars().count() > MAX_MESSAGE_CHARS {
                 content = format!(
                     "{}...",
-                    content.chars().take(MAX_MESSAGE_CHARS - 3).collect::<String>()
+                    content
+                        .chars()
+                        .take(MAX_MESSAGE_CHARS - 3)
+                        .collect::<String>()
                 );
             }
             let line = format!("{}. {}: {}", index + 1, role, content);
@@ -196,9 +199,17 @@ fn build_metrics(parsed: &ParsedSession) -> SessionMetrics {
     };
 
     SessionMetrics {
-        token_count: if token_count > 0 { Some(token_count) } else { None },
+        token_count: if token_count > 0 {
+            Some(token_count)
+        } else {
+            None
+        },
         tool_execution_count: parsed.tool_executions.len(),
-        elapsed_seconds: if elapsed_seconds > 0 { Some(elapsed_seconds) } else { None },
+        elapsed_seconds: if elapsed_seconds > 0 {
+            Some(elapsed_seconds)
+        } else {
+            None
+        },
         turn_count: if parsed.total_turns > 0 {
             parsed.total_turns
         } else {
@@ -451,5 +462,4 @@ mod tests {
 
         assert!(user_prompt.chars().count() <= MAX_PROMPT_CHARS);
     }
-
 }

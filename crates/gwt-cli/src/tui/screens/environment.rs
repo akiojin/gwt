@@ -541,56 +541,57 @@ impl EnvironmentState {
         }
         keys.sort();
 
-        let env_items = keys.into_iter().map(|key| match (profile_map.get(&key), os_map.get(&key))
-        {
-            (Some((index, profile_value)), Some(_os_value)) => DisplayEnvItem {
-                key,
-                value: profile_value.clone(),
-                kind: EnvDisplayKind::Overridden,
-                profile_index: Some(*index),
-                ai_field: None,
-                is_secret: self
-                    .variables
-                    .get(*index)
-                    .map(|var| var.is_secret)
-                    .unwrap_or(false),
-            },
-            (Some((index, profile_value)), None) => DisplayEnvItem {
-                key,
-                value: profile_value.clone(),
-                kind: EnvDisplayKind::Added,
-                profile_index: Some(*index),
-                ai_field: None,
-                is_secret: self
-                    .variables
-                    .get(*index)
-                    .map(|var| var.is_secret)
-                    .unwrap_or(false),
-            },
-            (None, Some(os_value)) => {
-                let kind = if self.disabled_keys.contains(&key) {
-                    EnvDisplayKind::OsDisabled
-                } else {
-                    EnvDisplayKind::OsOnly
-                };
-                DisplayEnvItem {
-                    key,
-                    value: os_value.clone(),
-                    kind,
-                    profile_index: None,
-                    ai_field: None,
-                    is_secret: false,
-                }
-            }
-            (None, None) => DisplayEnvItem {
-                key,
-                value: String::new(),
-                kind: EnvDisplayKind::OsOnly,
-                profile_index: None,
-                ai_field: None,
-                is_secret: false,
-            },
-            });
+        let env_items =
+            keys.into_iter()
+                .map(|key| match (profile_map.get(&key), os_map.get(&key)) {
+                    (Some((index, profile_value)), Some(_os_value)) => DisplayEnvItem {
+                        key,
+                        value: profile_value.clone(),
+                        kind: EnvDisplayKind::Overridden,
+                        profile_index: Some(*index),
+                        ai_field: None,
+                        is_secret: self
+                            .variables
+                            .get(*index)
+                            .map(|var| var.is_secret)
+                            .unwrap_or(false),
+                    },
+                    (Some((index, profile_value)), None) => DisplayEnvItem {
+                        key,
+                        value: profile_value.clone(),
+                        kind: EnvDisplayKind::Added,
+                        profile_index: Some(*index),
+                        ai_field: None,
+                        is_secret: self
+                            .variables
+                            .get(*index)
+                            .map(|var| var.is_secret)
+                            .unwrap_or(false),
+                    },
+                    (None, Some(os_value)) => {
+                        let kind = if self.disabled_keys.contains(&key) {
+                            EnvDisplayKind::OsDisabled
+                        } else {
+                            EnvDisplayKind::OsOnly
+                        };
+                        DisplayEnvItem {
+                            key,
+                            value: os_value.clone(),
+                            kind,
+                            profile_index: None,
+                            ai_field: None,
+                            is_secret: false,
+                        }
+                    }
+                    (None, None) => DisplayEnvItem {
+                        key,
+                        value: String::new(),
+                        kind: EnvDisplayKind::OsOnly,
+                        profile_index: None,
+                        ai_field: None,
+                        is_secret: false,
+                    },
+                });
 
         items.extend(env_items);
         items
