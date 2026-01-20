@@ -2,12 +2,17 @@
 //!
 //! Handles TOML configuration files with automatic migration from JSON.
 
+mod claude_hooks;
 mod migration;
 mod profile;
 mod session;
 mod settings;
 mod ts_session;
 
+pub use claude_hooks::{
+    get_claude_settings_path, is_gwt_hooks_registered, register_gwt_hooks, unregister_gwt_hooks,
+    HOOK_EVENTS,
+};
 pub use migration::migrate_json_to_toml;
 pub use profile::{Profile, ProfilesConfig};
 pub use session::{get_session_for_branch, load_sessions_from_worktrees, AgentStatus, Session};

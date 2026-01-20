@@ -20,7 +20,7 @@ use tracing::{debug, error, info, warn};
 mod cli;
 mod tui;
 
-use cli::{Cli, Commands, OutputFormat};
+use cli::{Cli, Commands, HookAction, OutputFormat};
 use tui::{AgentLaunchConfig, CodingAgent, ExecutionMode, TuiEntryContext};
 
 fn main() {
@@ -125,7 +125,7 @@ fn handle_command(cmd: Commands, repo_root: &PathBuf, settings: &Settings) -> Re
         Commands::Lock { target, reason } => cmd_lock(repo_root, &target, reason.as_deref()),
         Commands::Unlock { target } => cmd_unlock(repo_root, &target),
         Commands::Repair { target } => cmd_repair(repo_root, target.as_deref()),
-        Commands::Hook { event } => cmd_hook(&event),
+        Commands::Hook { action } => cmd_hook(action),
     }
 }
 
@@ -455,21 +455,77 @@ fn cmd_repair(repo_root: &PathBuf, target: Option<&str>) -> Result<(), GwtError>
 }
 
 
-/// Handle Claude Code hook events (SPEC-861d8cdf FR-101/T-101)
-/// This command is called by Claude Code hooks to update agent status in gwt sessions.
-///
-/// Hook events are mapped to AgentStatus as follows:
-/// - UserPromptSubmit, PreToolUse, PostToolUse -> Running
-/// - Notification (with permission_request) -> WaitingInput
-/// - Stop -> Stopped
-fn cmd_hook(event: &str) -> Result<(), GwtError> {
+/// Handle Claude Code hook subcommands (SPEC-861d8cdf FR-101/T-101/T-102)
+fn cmd_hook(action: HookAction) -> Result<(), GwtError> {
+    use gwt_core::config::{
+        get_claude_settings_path, is_gwt_hooks_registered, register_gwt_hooks, unregister_gwt_hooks,
+    };
+
+    match action {
+        HookAction::Event { name } => handle_hook_event(&name),
+        HookAction::Setup => {
+            let settings_path = get_claude_settings_path().ok_or_else(|| {
+                GwtError::ConfigNotFound {
+                    path: PathBuf::from("~/.claude/settings.json"),
+                }
+            })?;
+
+            if is_gwt_hooks_registered(&settings_path) {
+                println!("gwt hooks are already registered in Claude Code settings.");
+                return Ok(());
+            }
+
+            register_gwt_hooks(&settings_path)?;
+            println!("Successfully registered gwt hooks in Claude Code settings.");
+            println!("Path: {}", settings_path.display());
+            Ok(())
+        }
+        HookAction::Uninstall => {
+            let settings_path = get_claude_settings_path().ok_or_else(|| {
+                GwtError::ConfigNotFound {
+                    path: PathBuf::from("~/.claude/settings.json"),
+                }
+            })?;
+
+            if !is_gwt_hooks_registered(&settings_path) {
+                println!("gwt hooks are not registered in Claude Code settings.");
+                return Ok(());
+            }
+
+            unregister_gwt_hooks(&settings_path)?;
+            println!("Successfully removed gwt hooks from Claude Code settings.");
+            Ok(())
+        }
+        HookAction::Status => {
+            let settings_path = get_claude_settings_path().ok_or_else(|| {
+                GwtError::ConfigNotFound {
+                    path: PathBuf::from("~/.claude/settings.json"),
+                }
+            })?;
+
+            if is_gwt_hooks_registered(&settings_path) {
+                println!("gwt hooks: registered");
+                println!("Path: {}", settings_path.display());
+            } else {
+                println!("gwt hooks: not registered");
+                println!("Run 'gwt hook setup' to enable agent status tracking.");
+            }
+            Ok(())
+        }
+    }
+}
+
+
+/// Process a hook event from Claude Code (SPEC-861d8cdf T-101)
+/// Called by Claude Code hooks via `gwt hook event <name>`
+fn handle_hook_event(event: &str) -> Result<(), GwtError> {
     use std::io::{self, Read};
 
     info!(
         category = "cli",
         command = "hook",
         event = event,
-        "Executing hook command"
+        "Executing hook event command"
     );
 
     // Read JSON payload from stdin
