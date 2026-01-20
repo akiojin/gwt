@@ -1826,16 +1826,15 @@ impl Model {
             }
         }
 
-        if std::env::var_os("TMUX").is_some() {
-            if std::process::Command::new("tmux")
+        if std::env::var_os("TMUX").is_some()
+            && std::process::Command::new("tmux")
                 .args(["set-buffer", "--", url])
                 .spawn()
                 .is_ok()
-            {
-                self.status_message = Some(format!("URL copied to tmux buffer: {}", url));
-                self.status_message_time = Some(Instant::now());
-                return;
-            }
+        {
+            self.status_message = Some(format!("URL copied to tmux buffer: {}", url));
+            self.status_message_time = Some(Instant::now());
+            return;
         }
 
         let mut extra_hint = String::new();
@@ -1843,7 +1842,8 @@ impl Model {
             || std::env::var_os("container").is_some()
             || std::env::var_os("DOCKER_CONTAINER").is_some()
         {
-            if std::fs::write("/tmp/gwt-open-url.txt", url).is_ok() {
+            let write_ok = std::fs::write("/tmp/gwt-open-url.txt", url).is_ok();
+            if write_ok {
                 extra_hint = " URL saved to /tmp/gwt-open-url.txt".to_string();
             }
         }
