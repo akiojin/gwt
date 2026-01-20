@@ -729,8 +729,7 @@ pub fn render_environment(state: &mut EnvironmentState, frame: &mut Frame, area:
             profile_info, total_vars
         )
     };
-    let header = Paragraph::new(header_text)
-        .style(Style::default().fg(Color::Cyan));
+    let header = Paragraph::new(header_text).style(Style::default().fg(Color::Cyan));
     frame.render_widget(header, chunks[0]);
 
     // Variables list

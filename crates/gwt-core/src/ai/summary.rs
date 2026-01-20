@@ -529,7 +529,8 @@ mod tests {
 
     #[test]
     fn test_normalize_session_summary_markdown_from_json() {
-        let content = r#"{"task_overview":"目的文","short_summary":"要約文","bullets":["項目1","項目2"]}"#;
+        let content =
+            r#"{"task_overview":"目的文","short_summary":"要約文","bullets":["項目1","項目2"]}"#;
         let fields = parse_session_summary_fields(content).expect("parse fields");
         let markdown = normalize_session_summary_markdown(content, &fields).expect("markdown");
         assert!(markdown.contains("## 目的"));

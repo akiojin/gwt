@@ -1916,9 +1916,12 @@ impl Model {
             }
         };
 
-        self.environment = EnvironmentState::new()
-            .with_ai_only(true)
-            .with_ai_settings(ai_enabled, ai_endpoint, ai_api_key, ai_model);
+        self.environment = EnvironmentState::new().with_ai_only(true).with_ai_settings(
+            ai_enabled,
+            ai_endpoint,
+            ai_api_key,
+            ai_model,
+        );
         self.environment.selected = 0;
         self.environment.refresh_selection();
         self.screen_stack.push(self.screen.clone());
@@ -3699,31 +3702,32 @@ pub fn run_with_context(context: Option<TuiEntryContext>) -> Result<Option<Launc
                                     }))
                                 }
                             }
-                        (KeyCode::Char('n'), KeyModifiers::NONE) => {
-                            if matches!(model.screen, Screen::BranchList) {
-                                if model.branch_list.filter_mode {
-                                    Some(Message::Char('n'))
+                            (KeyCode::Char('n'), KeyModifiers::NONE) => {
+                                if matches!(model.screen, Screen::BranchList) {
+                                    if model.branch_list.filter_mode {
+                                        Some(Message::Char('n'))
+                                    } else {
+                                        None
+                                    }
+                                } else if matches!(model.screen, Screen::Profiles) {
+                                    // Create new profile
+                                    model.profiles.enter_create_mode();
+                                    None
+                                } else if matches!(model.screen, Screen::Environment) {
+                                    if model.environment.edit_mode {
+                                        Some(Message::Char('n'))
+                                    } else if model.environment.is_ai_only() {
+                                        model.status_message = Some(
+                                            "AI settings only. Use Enter to edit.".to_string(),
+                                        );
+                                        model.status_message_time = Some(Instant::now());
+                                        None
+                                    } else {
+                                        model.environment.start_new();
+                                        None
+                                    }
                                 } else {
-                                    None
-                                }
-                            } else if matches!(model.screen, Screen::Profiles) {
-                                // Create new profile
-                                model.profiles.enter_create_mode();
-                                None
-                            } else if matches!(model.screen, Screen::Environment) {
-                                if model.environment.edit_mode {
                                     Some(Message::Char('n'))
-                                } else if model.environment.is_ai_only() {
-                                    model.status_message =
-                                        Some("AI settings only. Use Enter to edit.".to_string());
-                                    model.status_message_time = Some(Instant::now());
-                                    None
-                                } else {
-                                    model.environment.start_new();
-                                    None
-                                }
-                            } else {
-                                Some(Message::Char('n'))
                                 }
                             }
                             (KeyCode::Char('s'), KeyModifiers::NONE) => {
@@ -3746,8 +3750,9 @@ pub fn run_with_context(context: Option<TuiEntryContext>) -> Result<Option<Launc
                                     if model.environment.edit_mode {
                                         Some(Message::Char('r'))
                                     } else if model.environment.is_ai_only() {
-                                        model.status_message =
-                                            Some("AI settings only. Use Enter to edit.".to_string());
+                                        model.status_message = Some(
+                                            "AI settings only. Use Enter to edit.".to_string(),
+                                        );
                                         model.status_message_time = Some(Instant::now());
                                         None
                                     } else {
@@ -3829,8 +3834,9 @@ pub fn run_with_context(context: Option<TuiEntryContext>) -> Result<Option<Launc
                                     if model.environment.edit_mode {
                                         Some(Message::Char('d'))
                                     } else if model.environment.is_ai_only() {
-                                        model.status_message =
-                                            Some("AI settings only. Use Enter to edit.".to_string());
+                                        model.status_message = Some(
+                                            "AI settings only. Use Enter to edit.".to_string(),
+                                        );
                                         model.status_message_time = Some(Instant::now());
                                         None
                                     } else {

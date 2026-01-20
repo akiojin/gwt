@@ -229,10 +229,7 @@ pub fn render_profiles(state: &ProfilesState, frame: &mut Frame, area: Rect) {
                         Style::default().fg(Color::DarkGray),
                     ),
                     Span::styled(desc, Style::default().fg(Color::DarkGray)),
-                    Span::styled(
-                        format!(" [{}] ", profile.ai_label),
-                        ai_style,
-                    ),
+                    Span::styled(format!(" [{}] ", profile.ai_label), ai_style),
                 ]);
 
                 let style = if i == state.selected && !state.create_mode {
