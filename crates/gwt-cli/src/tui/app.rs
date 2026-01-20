@@ -1750,27 +1750,105 @@ impl Model {
     }
 
     fn open_url(&mut self, url: &str) {
-        let result = {
-            #[cfg(target_os = "macos")]
-            {
-                std::process::Command::new("open").arg(url).spawn()
+        if url.trim().is_empty() {
+            self.status_message = Some("Failed to open URL: empty URL".to_string());
+            self.status_message_time = Some(Instant::now());
+            return;
+        }
+
+        let mut last_error: Option<std::io::Error> = None;
+        #[cfg(target_os = "macos")]
+        {
+            match std::process::Command::new("open").arg(url).spawn() {
+                Ok(_) => return,
+                Err(err) => last_error = Some(err),
             }
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            let candidates = [
+                ("xdg-open", vec![url]),
+                ("gio", vec!["open", url]),
+                ("x-www-browser", vec![url]),
+            ];
+            for (cmd, args) in candidates {
+                match std::process::Command::new(cmd).args(args).spawn() {
+                    Ok(_) => return,
+                    Err(err) => last_error = Some(err),
+                }
+            }
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            match std::process::Command::new("cmd")
+                .args(["/C", "start", "", url])
+                .spawn()
+            {
+                Ok(_) => return,
+                Err(err) => last_error = Some(err),
+            }
+
+            match std::process::Command::new("powershell")
+                .args(["-NoProfile", "-Command", "Start-Process", url])
+                .spawn()
+            {
+                Ok(_) => return,
+                Err(err) => last_error = Some(err),
+            }
+        }
+
+        if std::env::var_os("TMUX").is_some() {
+            if std::process::Command::new("tmux")
+                .args(["set-buffer", "--", url])
+                .spawn()
+                .is_ok()
+            {
+                self.status_message = Some(format!("URL copied to tmux buffer: {}", url));
+                self.status_message_time = Some(Instant::now());
+                return;
+            }
+        }
+
+        let mut extra_hint = String::new();
+        if std::path::Path::new("/.dockerenv").exists()
+            || std::env::var_os("container").is_some()
+            || std::env::var_os("DOCKER_CONTAINER").is_some()
+        {
+            if std::fs::write("/tmp/gwt-open-url.txt", url).is_ok() {
+                extra_hint = " URL saved to /tmp/gwt-open-url.txt".to_string();
+            }
+        }
+
+        let err = last_error.unwrap_or_else(|| std::io::Error::from(std::io::ErrorKind::Other));
+        let message = if err.kind() == std::io::ErrorKind::NotFound {
             #[cfg(target_os = "linux")]
             {
-                std::process::Command::new("xdg-open").arg(url).spawn()
+                format!(
+                    "Failed to open URL: opener not found (xdg-open/gio/x-www-browser). URL: {}{}",
+                    url, extra_hint
+                )
+            }
+            #[cfg(target_os = "macos")]
+            {
+                format!(
+                    "Failed to open URL: opener not found (open). URL: {}{}",
+                    url, extra_hint
+                )
             }
             #[cfg(target_os = "windows")]
             {
-                std::process::Command::new("cmd")
-                    .args(["/C", "start", "", url])
-                    .spawn()
+                format!(
+                    "Failed to open URL: opener not found (cmd/powershell). URL: {}{}",
+                    url, extra_hint
+                )
             }
+        } else {
+            format!("Failed to open URL: {}. URL: {}{}", err, url, extra_hint)
         };
-
-        if let Err(err) = result {
-            self.status_message = Some(format!("Failed to open URL: {}", err));
-            self.status_message_time = Some(Instant::now());
-        }
+        self.status_message = Some(message);
+        self.status_message_time = Some(Instant::now());
     }
 
     /// Check if currently selected branch has a running agent
