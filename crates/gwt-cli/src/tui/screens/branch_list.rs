@@ -2,6 +2,7 @@
 
 #![allow(dead_code)]
 
+use gwt_core::ai::SessionSummaryCache;
 use gwt_core::git::{Branch, BranchMeta, BranchSummary, DivergenceStatus, Repository};
 use gwt_core::tmux::AgentPane;
 use gwt_core::worktree::Worktree;
@@ -78,6 +79,23 @@ pub enum ViewMode {
     Remote,
 }
 
+/// Detail panel tab state
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DetailPanelTab {
+    #[default]
+    Details,
+    Session,
+}
+
+impl DetailPanelTab {
+    pub fn toggle(&mut self) {
+        *self = match self {
+            DetailPanelTab::Details => DetailPanelTab::Session,
+            DetailPanelTab::Session => DetailPanelTab::Details,
+        };
+    }
+}
+
 impl ViewMode {
     pub fn label(&self) -> &'static str {
         match self {
@@ -151,6 +169,8 @@ pub struct BranchItem {
     pub is_unmerged: bool,
     pub last_commit_timestamp: Option<i64>,
     pub last_tool_usage: Option<String>,
+    pub last_tool_id: Option<String>,
+    pub last_session_id: Option<String>,
     pub is_selected: bool,
     /// PR title for search (FR-016)
     pub pr_title: Option<String>,
@@ -212,6 +232,8 @@ impl BranchItem {
             // FR-041: Set commit timestamp from git
             last_commit_timestamp: branch.commit_timestamp,
             last_tool_usage: None,
+            last_tool_id: None,
+            last_session_id: None,
             is_selected: false,
             pr_title: None, // FR-016: Will be populated from PrCache
         };
@@ -258,6 +280,8 @@ impl BranchItem {
             is_unmerged: false,
             last_commit_timestamp: branch.commit_timestamp,
             last_tool_usage: None,
+            last_tool_id: None,
+            last_session_id: None,
             is_selected: false,
             pr_title: None,
         };
@@ -364,6 +388,22 @@ pub struct BranchListState {
     pub running_agents: HashMap<String, AgentPane>,
     /// Branch summary data for the selected branch (SPEC-4b893dae)
     pub branch_summary: Option<BranchSummary>,
+    /// Detail panel tab state
+    pub detail_panel_tab: DetailPanelTab,
+    /// AI settings enabled for active profile
+    pub ai_enabled: bool,
+    /// Session summary cache (session)
+    session_summary_cache: SessionSummaryCache,
+    /// Session summary requests in-flight
+    session_summary_inflight: HashSet<String>,
+    /// Session missing for branch
+    session_missing: HashSet<String>,
+    /// Session summary scroll offset
+    session_scroll_offset: usize,
+    /// Session summary scroll max
+    session_scroll_max: usize,
+    /// Session summary scroll page size
+    session_scroll_page: usize,
 }
 
 impl Default for BranchListState {
@@ -394,6 +434,14 @@ impl Default for BranchListState {
             list_inner_area: None,
             running_agents: HashMap::new(),
             branch_summary: None,
+            detail_panel_tab: DetailPanelTab::Details,
+            ai_enabled: false,
+            session_summary_cache: SessionSummaryCache::default(),
+            session_summary_inflight: HashSet::new(),
+            session_missing: HashSet::new(),
+            session_scroll_offset: 0,
+            session_scroll_max: 0,
+            session_scroll_page: 0,
         }
     }
 }
@@ -883,10 +931,19 @@ impl BranchListState {
     /// Fetches commit log and change stats from the repository.
     /// Should be called when selection changes.
     pub fn update_branch_summary(&mut self, repo_root: &Path) {
-        let Some(branch) = self.selected_branch() else {
+        let Some(branch) = self.selected_branch().cloned() else {
             self.branch_summary = None;
             return;
         };
+
+        if self
+            .branch_summary
+            .as_ref()
+            .map(|summary| summary.branch_name.as_str())
+            != Some(branch.name.as_str())
+        {
+            self.session_scroll_offset = 0;
+        }
 
         // Create base summary
         let mut summary = BranchSummary::new(&branch.name);
@@ -949,7 +1006,139 @@ impl BranchListState {
         };
         summary = summary.with_meta(meta);
 
+        if self.ai_enabled {
+            if let Some(summary_data) = self.session_summary_cache.get(&branch.name) {
+                summary = summary.with_session_summary(summary_data.clone());
+            } else if self.session_summary_inflight.contains(&branch.name) {
+                summary.loading.session_summary = true;
+            }
+        }
+
         self.branch_summary = Some(summary);
+    }
+
+    pub fn session_summary_cached(&self, branch: &str) -> bool {
+        self.session_summary_cache.get(branch).is_some()
+    }
+
+    pub fn set_session_identity(&mut self, branch: &str, tool_id: String, session_id: String) {
+        if let Some(item) = self.branches.iter_mut().find(|b| b.name == branch) {
+            item.last_tool_id = Some(tool_id);
+            item.last_session_id = Some(session_id);
+        }
+    }
+
+    pub fn update_session_scroll_bounds(&mut self, max_scroll: usize, page_size: usize) {
+        self.session_scroll_max = max_scroll;
+        self.session_scroll_page = page_size;
+        if self.session_scroll_offset > max_scroll {
+            self.session_scroll_offset = max_scroll;
+        }
+    }
+
+    pub fn scroll_session_page_up(&mut self) {
+        let page = self.session_scroll_page.max(1);
+        self.session_scroll_offset = self.session_scroll_offset.saturating_sub(page);
+    }
+
+    pub fn scroll_session_page_down(&mut self) {
+        let page = self.session_scroll_page.max(1);
+        self.session_scroll_offset =
+            (self.session_scroll_offset + page).min(self.session_scroll_max);
+    }
+
+    pub fn session_summary(&self, branch: &str) -> Option<&gwt_core::ai::SessionSummary> {
+        self.session_summary_cache.get(branch)
+    }
+
+    pub fn session_summary_stale(
+        &self,
+        branch: &str,
+        session_id: &str,
+        mtime: std::time::SystemTime,
+    ) -> bool {
+        self.session_summary_cache
+            .is_stale(branch, session_id, mtime)
+    }
+
+    pub fn clone_session_cache(&self) -> SessionSummaryCache {
+        self.session_summary_cache.clone()
+    }
+
+    pub fn set_session_cache(&mut self, cache: SessionSummaryCache) {
+        self.session_summary_cache = cache;
+    }
+
+    pub fn session_summary_inflight(&self, branch: &str) -> bool {
+        self.session_summary_inflight.contains(branch)
+    }
+
+    pub fn clone_session_inflight(&self) -> HashSet<String> {
+        self.session_summary_inflight.clone()
+    }
+
+    pub fn set_session_inflight(&mut self, inflight: HashSet<String>) {
+        self.session_summary_inflight = inflight;
+    }
+
+    pub fn clone_session_missing(&self) -> HashSet<String> {
+        self.session_missing.clone()
+    }
+
+    pub fn set_session_missing(&mut self, missing: HashSet<String>) {
+        self.session_missing = missing;
+    }
+
+    pub fn mark_session_summary_inflight(&mut self, branch: &str) {
+        self.session_summary_inflight.insert(branch.to_string());
+    }
+
+    pub fn mark_session_missing(&mut self, branch: &str) {
+        self.session_missing.insert(branch.to_string());
+    }
+
+    pub fn clear_session_missing(&mut self, branch: &str) {
+        self.session_missing.remove(branch);
+    }
+
+    pub fn is_session_missing(&self, branch: &str) -> bool {
+        self.session_missing.contains(branch)
+    }
+
+    pub fn apply_session_summary(
+        &mut self,
+        branch: &str,
+        session_id: &str,
+        summary: gwt_core::ai::SessionSummary,
+        mtime: std::time::SystemTime,
+    ) {
+        self.session_summary_cache.set(
+            branch.to_string(),
+            session_id.to_string(),
+            summary.clone(),
+            mtime,
+        );
+        self.session_summary_inflight.remove(branch);
+        self.session_missing.remove(branch);
+        if let Some(current) = self.branch_summary.as_mut() {
+            if current.branch_name == branch {
+                current.session_summary = Some(summary);
+                current.loading.session_summary = false;
+                current.errors.session_summary = None;
+            }
+        }
+    }
+
+    pub fn apply_session_error(&mut self, branch: &str, error: String) {
+        self.session_summary_inflight.remove(branch);
+        if let Some(current) = self.branch_summary.as_mut() {
+            if current.branch_name == branch {
+                if current.session_summary.is_none() {
+                    current.errors.session_summary = Some(error);
+                }
+                current.loading.session_summary = false;
+            }
+        }
     }
 
     /// Clear branch summary (called when branches are reloaded)
@@ -1301,7 +1490,35 @@ fn render_branch_row(
 
 /// Render summary panel (SPEC-4b893dae FR-001~FR-006)
 fn render_summary_panel(
-    state: &BranchListState,
+    state: &mut BranchListState,
+    frame: &mut Frame,
+    area: Rect,
+    status_message: Option<&str>,
+) {
+    match state.detail_panel_tab {
+        DetailPanelTab::Details => render_details_panel(state, frame, area, status_message),
+        DetailPanelTab::Session => render_session_panel(state, frame, area, status_message),
+    }
+}
+
+fn panel_switch_hint() -> Line<'static> {
+    Line::from(Span::styled(
+        " Tab: Switch ",
+        Style::default().fg(Color::DarkGray),
+    ))
+    .right_aligned()
+}
+
+fn session_panel_hint() -> Line<'static> {
+    Line::from(Span::styled(
+        " Tab: Switch | PgUp/PgDn: Scroll ",
+        Style::default().fg(Color::DarkGray),
+    ))
+    .right_aligned()
+}
+
+fn render_details_panel(
+    state: &mut BranchListState,
     frame: &mut Frame,
     area: Rect,
     status_message: Option<&str>,
@@ -1341,7 +1558,8 @@ fn render_summary_panel(
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
-            .title(title);
+            .title(title)
+            .title_bottom(panel_switch_hint());
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
@@ -1360,7 +1578,8 @@ fn render_summary_panel(
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
-            .title(title);
+            .title(title)
+            .title_bottom(panel_switch_hint());
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
@@ -1384,7 +1603,8 @@ fn render_summary_panel(
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
-            .title(title);
+            .title(title)
+            .title_bottom(panel_switch_hint());
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
@@ -1400,11 +1620,188 @@ fn render_summary_panel(
     }
 
     // Render the full summary panel
-    let panel = SummaryPanel::new(&summary)
-        .with_tick(state.spinner_frame)
-        .with_ai_enabled(false); // AI will be enabled in Phase 7
+    let panel = SummaryPanel::new(&summary).with_tick(state.spinner_frame);
 
     panel.render(frame, area);
+}
+
+fn render_session_panel(
+    state: &mut BranchListState,
+    frame: &mut Frame,
+    area: Rect,
+    status_message: Option<&str>,
+) {
+    let branch_name = state
+        .selected_branch()
+        .map(|branch| branch.name.clone())
+        .unwrap_or_else(|| "(no branch selected)".to_string());
+    let title = format!(" [{}] Session ", branch_name);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(title)
+        .title_bottom(session_panel_hint());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    if let Some(status) = status_message {
+        lines.push(Line::from(Span::styled(
+            status,
+            Style::default().fg(Color::Yellow),
+        )));
+    } else if state.is_loading {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{} ", state.spinner_char()),
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::styled(
+                "Loading branch information...",
+                Style::default().fg(Color::Yellow),
+            ),
+        ]));
+    } else if let Some(branch) = state.selected_branch() {
+        if !state.ai_enabled {
+            lines.push(Line::from(Span::styled(
+                "Configure AI in Settings to enable session summary",
+                Style::default().fg(Color::Yellow),
+            )));
+        } else if branch.last_session_id.is_none() || state.is_session_missing(&branch.name) {
+            lines.push(Line::from(Span::styled(
+                "No session",
+                Style::default().fg(Color::DarkGray),
+            )));
+        } else if let Some(summary) = state.session_summary(&branch.name) {
+            lines.push(Line::from(Span::styled(
+                "Task:",
+                Style::default().fg(Color::Yellow),
+            )));
+            if let Some(task) = summary.task_overview.as_ref() {
+                lines.push(Line::from(format!("  {}", task)));
+            } else {
+                lines.push(Line::from(Span::styled(
+                    "  (Not available)",
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+
+            lines.push(Line::from(Span::styled(
+                "Summary:",
+                Style::default().fg(Color::Yellow),
+            )));
+            if let Some(short) = summary.short_summary.as_ref() {
+                lines.push(Line::from(format!("  {}", short)));
+            } else {
+                lines.push(Line::from(Span::styled(
+                    "  (Not available)",
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+
+            lines.push(Line::from(Span::styled(
+                "Highlights:",
+                Style::default().fg(Color::Yellow),
+            )));
+            if summary.bullet_points.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    "  (No highlights)",
+                    Style::default().fg(Color::DarkGray),
+                )));
+            } else {
+                for bullet in summary.bullet_points.iter().take(3) {
+                    lines.push(Line::from(format!("  {}", bullet)));
+                }
+            }
+
+            lines.push(Line::from(Span::styled(
+                "Metrics:",
+                Style::default().fg(Color::Yellow),
+            )));
+            lines.push(Line::from(format!(
+                "  {}",
+                format_metrics(&summary.metrics)
+            )));
+        } else if state.session_summary_inflight(&branch.name) {
+            lines.push(Line::from(Span::styled(
+                format!("{} Generating session summary...", state.spinner_char()),
+                Style::default().fg(Color::Yellow),
+            )));
+        } else if let Some(error) = state
+            .branch_summary
+            .as_ref()
+            .and_then(|summary| summary.errors.session_summary.as_ref())
+        {
+            lines.push(Line::from(Span::styled(
+                format!("(Failed to load: {})", error),
+                Style::default().fg(Color::Red),
+            )));
+        } else {
+            lines.push(Line::from(Span::styled(
+                "Generating session summary...",
+                Style::default().fg(Color::Yellow),
+            )));
+        }
+    } else {
+        lines.push(Line::from(Span::styled(
+            "No branch selected",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    let total_lines = count_wrapped_lines(&lines, inner.width as usize);
+    let max_scroll = total_lines.saturating_sub(inner.height as usize);
+    state.update_session_scroll_bounds(max_scroll, inner.height as usize);
+
+    let paragraph = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .scroll((state.session_scroll_offset as u16, 0));
+    frame.render_widget(paragraph, inner);
+}
+
+fn format_metrics(metrics: &gwt_core::ai::SessionMetrics) -> String {
+    let mut parts = Vec::new();
+    if let Some(tokens) = metrics.token_count {
+        parts.push(format!("tokens ~{}", tokens));
+    }
+    parts.push(format!("tools {}", metrics.tool_execution_count));
+    if let Some(seconds) = metrics.elapsed_seconds {
+        parts.push(format!("elapsed {}", format_duration(seconds)));
+    }
+    parts.push(format!("turns {}", metrics.turn_count));
+    parts.join(" | ")
+}
+
+fn count_wrapped_lines(lines: &[Line], width: usize) -> usize {
+    if width == 0 {
+        return 0;
+    }
+    lines
+        .iter()
+        .map(|line| {
+            let line_width: usize = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref().width())
+                .sum();
+            let line_width = line_width.max(1);
+            line_width.div_ceil(width)
+        })
+        .sum()
+}
+
+fn format_duration(seconds: u64) -> String {
+    if seconds < 60 {
+        return format!("{}s", seconds);
+    }
+    let minutes = seconds / 60;
+    if minutes < 60 {
+        return format!("{}m", minutes);
+    }
+    let hours = minutes / 60;
+    let mins = minutes % 60;
+    format!("{}h{}m", hours, mins)
 }
 
 /// Render footer line with keybindings (FR-004)
@@ -1502,6 +1899,8 @@ mod tests {
                 is_unmerged: false,
                 last_commit_timestamp: None,
                 last_tool_usage: None,
+                last_tool_id: None,
+                last_session_id: None,
                 is_selected: false,
                 pr_title: None,
             },
@@ -1522,6 +1921,8 @@ mod tests {
                 is_unmerged: false,
                 last_commit_timestamp: None,
                 last_tool_usage: None,
+                last_tool_id: None,
+                last_session_id: None,
                 is_selected: false,
                 pr_title: None,
             },
@@ -1598,6 +1999,8 @@ mod tests {
             is_unmerged: false,
             last_commit_timestamp: None,
             last_tool_usage: None,
+            last_tool_id: None,
+            last_session_id: None,
             is_selected: false,
             pr_title: None,
         }];
@@ -1640,6 +2043,8 @@ mod tests {
             is_unmerged: false,
             last_commit_timestamp: None,
             last_tool_usage: None,
+            last_tool_id: None,
+            last_session_id: None,
             is_selected: false,
             pr_title: None,
         }];
@@ -1721,6 +2126,8 @@ mod tests {
                 is_unmerged: false,
                 last_commit_timestamp: None,
                 last_tool_usage: None,
+                last_tool_id: None,
+                last_session_id: None,
                 is_selected: false,
                 pr_title: None,
             },
@@ -1741,6 +2148,8 @@ mod tests {
                 is_unmerged: false,
                 last_commit_timestamp: None,
                 last_tool_usage: None,
+                last_tool_id: None,
+                last_session_id: None,
                 is_selected: false,
                 pr_title: None,
             },
@@ -1778,6 +2187,8 @@ mod tests {
                 is_unmerged: false,
                 last_commit_timestamp: None,
                 last_tool_usage: None,
+                last_tool_id: None,
+                last_session_id: None,
                 is_selected: false,
                 pr_title: None,
             },
@@ -1798,6 +2209,8 @@ mod tests {
                 is_unmerged: false,
                 last_commit_timestamp: None,
                 last_tool_usage: None,
+                last_tool_id: None,
+                last_session_id: None,
                 is_selected: false,
                 pr_title: None,
             },
@@ -1837,6 +2250,8 @@ mod tests {
                 is_unmerged: false,
                 last_commit_timestamp: None,
                 last_tool_usage: None,
+                last_tool_id: None,
+                last_session_id: None,
                 is_selected: false,
                 pr_title: None,
             },
@@ -1857,6 +2272,8 @@ mod tests {
                 is_unmerged: false,
                 last_commit_timestamp: None,
                 last_tool_usage: None,
+                last_tool_id: None,
+                last_session_id: None,
                 is_selected: false,
                 pr_title: None,
             },
@@ -1894,6 +2311,8 @@ mod tests {
             is_unmerged: true,
             last_commit_timestamp: None,
             last_tool_usage: None,
+            last_tool_id: None,
+            last_session_id: None,
             is_selected: false,
             pr_title: None,
         };
@@ -1943,6 +2362,8 @@ mod tests {
                 is_unmerged: false,
                 last_commit_timestamp: None,
                 last_tool_usage: None,
+                last_tool_id: None,
+                last_session_id: None,
                 is_selected: false,
                 pr_title: None,
             },
@@ -1963,6 +2384,8 @@ mod tests {
                 is_unmerged: false,
                 last_commit_timestamp: None,
                 last_tool_usage: None,
+                last_tool_id: None,
+                last_session_id: None,
                 is_selected: false,
                 pr_title: None,
             },
@@ -2011,6 +2434,8 @@ mod tests {
                 is_unmerged: false,
                 last_commit_timestamp: None,
                 last_tool_usage: None,
+                last_tool_id: None,
+                last_session_id: None,
                 is_selected: false,
                 pr_title: None,
             },
@@ -2031,6 +2456,8 @@ mod tests {
                 is_unmerged: false,
                 last_commit_timestamp: None,
                 last_tool_usage: None,
+                last_tool_id: None,
+                last_session_id: None,
                 is_selected: false,
                 pr_title: None,
             },
@@ -2051,6 +2478,8 @@ mod tests {
                 is_unmerged: false,
                 last_commit_timestamp: None,
                 last_tool_usage: None,
+                last_tool_id: None,
+                last_session_id: None,
                 is_selected: false,
                 pr_title: None,
             },

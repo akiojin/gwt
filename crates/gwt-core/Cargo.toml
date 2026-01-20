@@ -29,6 +29,7 @@ async-trait = "0.1"
 which = "7"
 base64 = "0.22"
 dirs = "6"
+reqwest.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
