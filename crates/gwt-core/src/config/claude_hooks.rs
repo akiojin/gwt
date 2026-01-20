@@ -158,10 +158,7 @@ pub fn register_gwt_hooks(settings_path: &Path) -> Result<(), GwtError> {
 }
 
 /// Internal function to register hooks with a specified executable path
-fn register_gwt_hooks_with_exe_path(
-    settings_path: &Path,
-    exe_path: &str,
-) -> Result<(), GwtError> {
+fn register_gwt_hooks_with_exe_path(settings_path: &Path, exe_path: &str) -> Result<(), GwtError> {
     // Create parent directory if needed
     if let Some(parent) = settings_path.parent() {
         std::fs::create_dir_all(parent)?;
