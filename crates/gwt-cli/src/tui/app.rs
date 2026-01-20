@@ -21,7 +21,7 @@ use gwt_core::config::{
     AISettings, Profile, ProfilesConfig, ResolvedAISettings, ToolSessionEntry,
 };
 use gwt_core::error::GwtError;
-use gwt_core::git::{Branch, PrCache, Repository};
+use gwt_core::git::{Branch, PrCache, Remote, Repository};
 use gwt_core::tmux::{
     break_pane, compute_equal_splits, get_current_session, group_panes_by_left,
     join_pane_to_target, kill_pane, launcher, list_pane_geometries, resize_pane_height,
@@ -38,7 +38,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 use tracing::{debug, error, info};
 
-use super::screens::branch_list::WorktreeStatus;
+use super::screens::branch_list::{PrInfo, WorktreeStatus};
 use super::screens::environment::EditField;
 use super::screens::pane_list::PaneListState;
 use super::screens::split_layout::{calculate_split_layout, SplitLayoutState};
@@ -146,7 +146,7 @@ impl TuiEntryContext {
 }
 
 struct PrTitleUpdate {
-    titles: HashMap<String, String>,
+    info: HashMap<String, PrInfo>,
 }
 
 struct SafetyUpdate {
@@ -447,6 +447,10 @@ impl Model {
             last_session_poll: None,
         };
 
+        model
+            .branch_list
+            .set_repo_web_url(resolve_repo_web_url(&model.repo_root));
+
         let (session_tx, session_rx) = mpsc::channel();
         model.session_summary_tx = Some(session_tx);
         model.session_summary_rx = Some(session_rx);
@@ -658,14 +662,21 @@ impl Model {
             let mut cache = PrCache::new();
             cache.populate(&repo_root);
 
-            let mut titles = HashMap::new();
+            let mut info = HashMap::new();
             for name in branch_names {
-                if let Some(title) = cache.get_title(&name) {
-                    titles.insert(name, title.to_string());
+                if let Some(pr) = cache.get(&name) {
+                    info.insert(
+                        name,
+                        PrInfo {
+                            title: pr.title.clone(),
+                            number: pr.number,
+                            url: pr.url.clone(),
+                        },
+                    );
                 }
             }
 
-            let _ = tx.send(PrTitleUpdate { titles });
+            let _ = tx.send(PrTitleUpdate { info });
         });
     }
 
@@ -1228,6 +1239,7 @@ impl Model {
                 branch_list.set_session_cache(session_cache);
                 branch_list.set_session_inflight(session_inflight);
                 branch_list.set_session_missing(session_missing);
+                branch_list.set_repo_web_url(self.branch_list.repo_web_url().cloned());
                 branch_list.working_directory = Some(self.repo_root.display().to_string());
                 branch_list.version = Some(env!("CARGO_PKG_VERSION").to_string());
                 self.branch_list = branch_list;
@@ -1262,7 +1274,7 @@ impl Model {
 
         match rx.try_recv() {
             Ok(update) => {
-                self.branch_list.apply_pr_titles(&update.titles);
+                self.branch_list.apply_pr_info(&update.info);
                 self.pr_title_rx = None;
             }
             Err(TryRecvError::Empty) => {}
@@ -1696,6 +1708,11 @@ impl Model {
             return;
         }
 
+        if let Some(url) = self.branch_list.link_at_point(mouse.column, mouse.row) {
+            self.open_url(&url);
+            return;
+        }
+
         let Some(index) = self
             .branch_list
             .selection_index_from_point(mouse.column, mouse.row)
@@ -1705,6 +1722,30 @@ impl Model {
 
         if self.branch_list.select_index(index) {
             self.refresh_branch_summary();
+        }
+    }
+
+    fn open_url(&mut self, url: &str) {
+        let result = {
+            #[cfg(target_os = "macos")]
+            {
+                std::process::Command::new("open").arg(url).spawn()
+            }
+            #[cfg(target_os = "linux")]
+            {
+                std::process::Command::new("xdg-open").arg(url).spawn()
+            }
+            #[cfg(target_os = "windows")]
+            {
+                std::process::Command::new("cmd")
+                    .args(["/C", "start", "", url])
+                    .spawn()
+            }
+        };
+
+        if let Err(err) = result {
+            self.status_message = Some(format!("Failed to open URL: {}", err));
+            self.status_message_time = Some(Instant::now());
         }
     }
 
@@ -4207,6 +4248,35 @@ fn build_tmux_command(
     }
 }
 
+fn resolve_repo_web_url(repo_root: &Path) -> Option<String> {
+    let remote = Remote::get(repo_root, "origin").ok().flatten()?;
+    let slug = github_repo_slug(&remote.fetch_url)?;
+    Some(format!("https://github.com/{}", slug))
+}
+
+fn github_repo_slug(url: &str) -> Option<String> {
+    let slug = if let Some(rest) = url.strip_prefix("git@github.com:") {
+        rest
+    } else if let Some(rest) = url.strip_prefix("ssh://git@github.com/") {
+        rest
+    } else if let Some(rest) = url.strip_prefix("https://github.com/") {
+        rest
+    } else if let Some(rest) = url.strip_prefix("http://github.com/") {
+        rest
+    } else if let Some(rest) = url.strip_prefix("git://github.com/") {
+        rest
+    } else {
+        return None;
+    };
+
+    let slug = slug.trim_end_matches(".git").trim_end_matches('/');
+    if slug.is_empty() {
+        None
+    } else {
+        Some(slug.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4368,6 +4438,8 @@ mod tests {
                 last_session_id: None,
                 is_selected: false,
                 pr_title: None,
+                pr_number: None,
+                pr_url: None,
             },
             BranchItem {
                 name: "feature/one".to_string(),
@@ -4390,6 +4462,8 @@ mod tests {
                 last_session_id: None,
                 is_selected: false,
                 pr_title: None,
+                pr_number: None,
+                pr_url: None,
             },
         ];
 

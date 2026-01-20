@@ -2,6 +2,7 @@
 
 #![allow(dead_code)]
 
+use crate::tui::components::{LinkRegion, SummaryLinks};
 use gwt_core::ai::SessionSummaryCache;
 use gwt_core::config::AgentStatus;
 use gwt_core::git::{Branch, BranchMeta, BranchSummary, DivergenceStatus, Repository};
@@ -176,6 +177,18 @@ pub struct BranchItem {
     pub is_selected: bool,
     /// PR title for search (FR-016)
     pub pr_title: Option<String>,
+    /// PR number for latest PR (if any)
+    pub pr_number: Option<u64>,
+    /// PR URL for latest PR (if any)
+    pub pr_url: Option<String>,
+}
+
+/// PR info mapped to branch name
+#[derive(Debug, Clone)]
+pub struct PrInfo {
+    pub title: String,
+    pub number: u64,
+    pub url: Option<String>,
 }
 
 /// Worktree status
@@ -237,7 +250,9 @@ impl BranchItem {
             last_tool_id: None,
             last_session_id: None,
             is_selected: false,
-            pr_title: None, // FR-016: Will be populated from PrCache
+            pr_title: None,
+            pr_number: None,
+            pr_url: None, // FR-016: Will be populated from PrCache
         };
         item.update_safety_status();
         item
@@ -286,6 +301,8 @@ impl BranchItem {
             last_session_id: None,
             is_selected: false,
             pr_title: None,
+            pr_number: None,
+            pr_url: None,
         };
         item.update_safety_status();
         item
@@ -406,6 +423,10 @@ pub struct BranchListState {
     session_scroll_max: usize,
     /// Session summary scroll page size
     session_scroll_page: usize,
+    /// Cached repo web URL for GitHub links
+    repo_web_url: Option<String>,
+    /// Clickable link regions in details panel
+    detail_links: Vec<LinkRegion>,
 }
 
 impl Default for BranchListState {
@@ -444,6 +465,8 @@ impl Default for BranchListState {
             session_scroll_offset: 0,
             session_scroll_max: 0,
             session_scroll_page: 0,
+            repo_web_url: None,
+            detail_links: Vec::new(),
         }
     }
 }
@@ -815,18 +838,49 @@ impl BranchListState {
         self.rebuild_filtered_cache();
     }
 
-    pub fn apply_pr_titles(&mut self, titles: &HashMap<String, String>) {
-        if titles.is_empty() {
+    pub fn apply_pr_info(&mut self, info: &HashMap<String, PrInfo>) {
+        if info.is_empty() {
             return;
         }
 
         for item in &mut self.branches {
-            if let Some(title) = titles.get(&item.name) {
-                item.pr_title = Some(title.clone());
+            if let Some(pr) = info.get(&item.name) {
+                item.pr_title = Some(pr.title.clone());
+                item.pr_number = Some(pr.number);
+                item.pr_url = pr.url.clone();
             }
         }
 
         self.rebuild_filtered_cache();
+    }
+
+    pub fn set_repo_web_url(&mut self, url: Option<String>) {
+        self.repo_web_url = url;
+    }
+
+    pub fn repo_web_url(&self) -> Option<&String> {
+        self.repo_web_url.as_ref()
+    }
+
+    pub fn set_detail_links(&mut self, links: Vec<LinkRegion>) {
+        self.detail_links = links;
+    }
+
+    pub fn clear_detail_links(&mut self) {
+        self.detail_links.clear();
+    }
+
+    pub fn link_at_point(&self, column: u16, row: u16) -> Option<String> {
+        for link in &self.detail_links {
+            if column >= link.area.x
+                && column < link.area.x.saturating_add(link.area.width)
+                && row >= link.area.y
+                && row < link.area.y.saturating_add(link.area.height)
+            {
+                return Some(link.url.clone());
+            }
+        }
+        None
     }
 
     pub fn apply_safety_update(
@@ -1608,7 +1662,10 @@ fn render_summary_panel(
 ) {
     match state.detail_panel_tab {
         DetailPanelTab::Details => render_details_panel(state, frame, area, status_message),
-        DetailPanelTab::Session => render_session_panel(state, frame, area, status_message),
+        DetailPanelTab::Session => {
+            state.clear_detail_links();
+            render_session_panel(state, frame, area, status_message);
+        }
     }
 }
 
@@ -1657,6 +1714,42 @@ fn session_panel_hint() -> Line<'static> {
     .right_aligned()
 }
 
+fn build_summary_links(repo_web_url: Option<&String>, branch: Option<&BranchItem>) -> SummaryLinks {
+    let Some(branch) = branch else {
+        return SummaryLinks::default();
+    };
+
+    let branch_url = repo_web_url.and_then(|base| {
+        let base = base.trim_end_matches('/');
+        let normalized = normalize_branch_name_for_url(&branch.name);
+        if normalized.is_empty() {
+            None
+        } else {
+            Some(format!("{}/tree/{}", base, normalized))
+        }
+    });
+
+    let pr_url = branch.pr_url.clone().or_else(|| {
+        repo_web_url.and_then(|base| {
+            branch
+                .pr_number
+                .map(|n| format!("{}/pull/{}", base.trim_end_matches('/'), n))
+        })
+    });
+
+    SummaryLinks { branch_url, pr_url }
+}
+
+fn normalize_branch_name_for_url(branch_name: &str) -> String {
+    if let Some(stripped) = branch_name.strip_prefix("remotes/") {
+        if let Some((_, name)) = stripped.split_once('/') {
+            return name.to_string();
+        }
+        return stripped.to_string();
+    }
+    branch_name.to_string()
+}
+
 fn render_details_panel(
     state: &mut BranchListState,
     frame: &mut Frame,
@@ -1665,6 +1758,8 @@ fn render_details_panel(
 ) {
     use crate::tui::components::SummaryPanel;
     use std::path::PathBuf;
+
+    state.clear_detail_links();
 
     // Create or get branch summary
     let summary = if let Some(ref summary) = state.branch_summary {
@@ -1759,15 +1854,20 @@ fn render_details_panel(
         return;
     }
 
+    let selected_branch = state.selected_branch().cloned();
+    let links = build_summary_links(state.repo_web_url(), selected_branch.as_ref());
+
     // Render the full summary panel
     let panel = SummaryPanel::new(&summary)
         .with_tick(state.spinner_frame)
         .with_title(panel_title_line(
             &summary.branch_name,
             DetailPanelTab::Details,
-        ));
+        ))
+        .with_links(links);
 
-    panel.render(frame, area);
+    let link_regions = panel.render_with_links(frame, area);
+    state.set_detail_links(link_regions);
 }
 
 fn render_session_panel(
@@ -2092,6 +2192,8 @@ mod tests {
             last_session_id: None,
             is_selected: false,
             pr_title: None,
+            pr_number: None,
+            pr_url: None,
         }
     }
 
@@ -2135,6 +2237,8 @@ mod tests {
                 last_session_id: None,
                 is_selected: false,
                 pr_title: None,
+                pr_number: None,
+                pr_url: None,
             },
             BranchItem {
                 name: "develop".to_string(),
@@ -2157,6 +2261,8 @@ mod tests {
                 last_session_id: None,
                 is_selected: false,
                 pr_title: None,
+                pr_number: None,
+                pr_url: None,
             },
         ];
 
@@ -2235,6 +2341,8 @@ mod tests {
             last_session_id: None,
             is_selected: false,
             pr_title: None,
+            pr_number: None,
+            pr_url: None,
         }];
 
         let mut state = BranchListState::new().with_branches(branches);
@@ -2279,6 +2387,8 @@ mod tests {
             last_session_id: None,
             is_selected: false,
             pr_title: None,
+            pr_number: None,
+            pr_url: None,
         }];
 
         let mut state = BranchListState::new().with_branches(branches);
@@ -2362,6 +2472,8 @@ mod tests {
                 last_session_id: None,
                 is_selected: false,
                 pr_title: None,
+                pr_number: None,
+                pr_url: None,
             },
             BranchItem {
                 name: "remotes/origin/main".to_string(),
@@ -2384,6 +2496,8 @@ mod tests {
                 last_session_id: None,
                 is_selected: false,
                 pr_title: None,
+                pr_number: None,
+                pr_url: None,
             },
         ];
 
@@ -2423,6 +2537,8 @@ mod tests {
                 last_session_id: None,
                 is_selected: false,
                 pr_title: None,
+                pr_number: None,
+                pr_url: None,
             },
             BranchItem {
                 name: "feature/one".to_string(),
@@ -2445,6 +2561,8 @@ mod tests {
                 last_session_id: None,
                 is_selected: false,
                 pr_title: None,
+                pr_number: None,
+                pr_url: None,
             },
         ];
 
@@ -2463,7 +2581,7 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_pr_titles_updates_filter_results() {
+    fn test_apply_pr_info_updates_filter_results() {
         let branches = vec![
             BranchItem {
                 name: "feature/one".to_string(),
@@ -2486,6 +2604,8 @@ mod tests {
                 last_session_id: None,
                 is_selected: false,
                 pr_title: None,
+                pr_number: None,
+                pr_url: None,
             },
             BranchItem {
                 name: "feature/two".to_string(),
@@ -2508,6 +2628,8 @@ mod tests {
                 last_session_id: None,
                 is_selected: false,
                 pr_title: None,
+                pr_number: None,
+                pr_url: None,
             },
         ];
 
@@ -2515,9 +2637,16 @@ mod tests {
         state.set_filter("cool".to_string());
         assert_eq!(state.filtered_branches().len(), 0);
 
-        let mut titles = HashMap::new();
-        titles.insert("feature/one".to_string(), "Cool PR".to_string());
-        state.apply_pr_titles(&titles);
+        let mut info = HashMap::new();
+        info.insert(
+            "feature/one".to_string(),
+            PrInfo {
+                title: "Cool PR".to_string(),
+                number: 123,
+                url: Some("https://github.com/example/repo/pull/123".to_string()),
+            },
+        );
+        state.apply_pr_info(&info);
 
         let filtered = state.filtered_branches();
         assert_eq!(filtered.len(), 1);
@@ -2547,6 +2676,8 @@ mod tests {
             last_session_id: None,
             is_selected: false,
             pr_title: None,
+            pr_number: None,
+            pr_url: None,
         };
 
         item.update_safety_status();
@@ -2598,6 +2729,8 @@ mod tests {
                 last_session_id: None,
                 is_selected: false,
                 pr_title: None,
+                pr_number: None,
+                pr_url: None,
             },
             BranchItem {
                 name: "feature/two".to_string(),
@@ -2620,6 +2753,8 @@ mod tests {
                 last_session_id: None,
                 is_selected: false,
                 pr_title: None,
+                pr_number: None,
+                pr_url: None,
             },
         ];
 
@@ -2670,6 +2805,8 @@ mod tests {
                 last_session_id: None,
                 is_selected: false,
                 pr_title: None,
+                pr_number: None,
+                pr_url: None,
             },
             BranchItem {
                 name: "feature/one".to_string(),
@@ -2692,6 +2829,8 @@ mod tests {
                 last_session_id: None,
                 is_selected: false,
                 pr_title: None,
+                pr_number: None,
+                pr_url: None,
             },
             BranchItem {
                 name: "feature/two".to_string(),
@@ -2714,6 +2853,8 @@ mod tests {
                 last_session_id: None,
                 is_selected: false,
                 pr_title: None,
+                pr_number: None,
+                pr_url: None,
             },
         ];
 
