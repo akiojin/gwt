@@ -29,6 +29,6 @@ pub use pane::{
     break_pane, compute_equal_splits, detect_orphaned_panes, force_kill_agent, group_panes_by_left,
     hide_pane, is_process_running, join_pane_to_target, kill_pane, list_pane_geometries,
     resize_pane_height, resize_pane_width, send_signal, show_pane, terminate_agent, AgentPane,
-    PaneColumn, PaneGeometry, PaneInfo, SplitDirection, TermSignal,
+    PaneColumn, PaneGeometry, PaneInfo, SplitDirection, StatusBarSummary, TermSignal,
 };
 pub use poller::{AgentRegistry, PanePoller, PollMessage, PollerConfig};

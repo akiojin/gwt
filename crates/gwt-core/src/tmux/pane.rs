@@ -27,6 +27,69 @@ pub enum StatusColor {
     DarkGray,
 }
 
+/// Summary of agent statuses for status bar display (SPEC-861d8cdf T-105)
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StatusBarSummary {
+    pub running_count: usize,
+    pub waiting_count: usize,
+    pub stopped_count: usize,
+}
+
+impl StatusBarSummary {
+    /// Create a summary from a list of agents
+    pub fn from_agents(agents: &[AgentPane]) -> Self {
+        let mut summary = Self::default();
+        for agent in agents {
+            match agent.status {
+                AgentStatus::Running => summary.running_count += 1,
+                AgentStatus::WaitingInput => summary.waiting_count += 1,
+                AgentStatus::Stopped => summary.stopped_count += 1,
+                AgentStatus::Unknown => {} // Don't count unknown status
+            }
+        }
+        summary
+    }
+
+    /// Check if there are any agents with known status
+    pub fn has_agents(&self) -> bool {
+        self.running_count > 0 || self.waiting_count > 0 || self.stopped_count > 0
+    }
+
+    /// Total count of agents with known status
+    pub fn total(&self) -> usize {
+        self.running_count + self.waiting_count + self.stopped_count
+    }
+
+    /// Generate display text for the status bar
+    pub fn to_display_text(&self) -> String {
+        if !self.has_agents() {
+            return String::new();
+        }
+
+        let mut parts = Vec::new();
+        if self.running_count > 0 {
+            parts.push(format!("{} running", self.running_count));
+        }
+        if self.waiting_count > 0 {
+            parts.push(format!("{} waiting", self.waiting_count));
+        }
+        if self.stopped_count > 0 {
+            parts.push(format!("{} stopped", self.stopped_count));
+        }
+        parts.join(" | ")
+    }
+
+    /// Check if waiting count needs highlighting
+    pub fn needs_waiting_highlight(&self) -> bool {
+        self.waiting_count > 0
+    }
+
+    /// Check if stopped count needs highlighting
+    pub fn needs_stopped_highlight(&self) -> bool {
+        self.stopped_count > 0
+    }
+}
+
 /// Information about a tmux pane
 #[derive(Debug, Clone)]
 pub struct PaneInfo {
@@ -1426,5 +1489,146 @@ mod tests {
         assert_eq!(pane.status_color(), StatusColor::Gray);
         assert_eq!(pane.status_icon(0), "~");
         assert!(!pane.needs_attention()); // Unknown doesn't need attention
+    }
+
+    // SPEC-861d8cdf T-105: StatusBarSummary tests
+    #[test]
+    fn test_status_bar_count() {
+        let agents = vec![
+            AgentPane {
+                pane_id: "1".to_string(),
+                branch_name: "feature/a".to_string(),
+                agent_name: "claude".to_string(),
+                start_time: SystemTime::now(),
+                pid: 12345,
+                is_background: false,
+                background_window: None,
+                status: AgentStatus::Running,
+            },
+            AgentPane {
+                pane_id: "2".to_string(),
+                branch_name: "feature/b".to_string(),
+                agent_name: "codex".to_string(),
+                start_time: SystemTime::now(),
+                pid: 12346,
+                is_background: false,
+                background_window: None,
+                status: AgentStatus::Running,
+            },
+            AgentPane {
+                pane_id: "3".to_string(),
+                branch_name: "feature/c".to_string(),
+                agent_name: "claude".to_string(),
+                start_time: SystemTime::now(),
+                pid: 12347,
+                is_background: false,
+                background_window: None,
+                status: AgentStatus::WaitingInput,
+            },
+            AgentPane {
+                pane_id: "4".to_string(),
+                branch_name: "feature/d".to_string(),
+                agent_name: "claude".to_string(),
+                start_time: SystemTime::now(),
+                pid: 12348,
+                is_background: false,
+                background_window: None,
+                status: AgentStatus::Stopped,
+            },
+        ];
+
+        let summary = StatusBarSummary::from_agents(&agents);
+
+        assert_eq!(summary.running_count, 2);
+        assert_eq!(summary.waiting_count, 1);
+        assert_eq!(summary.stopped_count, 1);
+        assert_eq!(summary.total(), 4);
+        assert!(summary.has_agents());
+    }
+
+    #[test]
+    fn test_status_bar_text() {
+        let summary = StatusBarSummary {
+            running_count: 2,
+            waiting_count: 1,
+            stopped_count: 0,
+        };
+
+        let text = summary.to_display_text();
+
+        assert!(text.contains("2 running"));
+        assert!(text.contains("1 waiting"));
+        assert!(!text.contains("stopped"));
+    }
+
+    #[test]
+    fn test_status_bar_text_all_states() {
+        let summary = StatusBarSummary {
+            running_count: 1,
+            waiting_count: 2,
+            stopped_count: 3,
+        };
+
+        let text = summary.to_display_text();
+
+        assert!(text.contains("1 running"));
+        assert!(text.contains("2 waiting"));
+        assert!(text.contains("3 stopped"));
+        assert!(text.contains("|")); // Has separators
+    }
+
+    #[test]
+    fn test_status_bar_waiting_highlight() {
+        let summary = StatusBarSummary {
+            running_count: 1,
+            waiting_count: 2,
+            stopped_count: 0,
+        };
+
+        assert!(summary.needs_waiting_highlight());
+    }
+
+    #[test]
+    fn test_status_bar_no_waiting_highlight() {
+        let summary = StatusBarSummary {
+            running_count: 2,
+            waiting_count: 0,
+            stopped_count: 1,
+        };
+
+        assert!(!summary.needs_waiting_highlight());
+    }
+
+    #[test]
+    fn test_status_bar_empty() {
+        let agents: Vec<AgentPane> = vec![];
+        let summary = StatusBarSummary::from_agents(&agents);
+
+        assert!(!summary.has_agents());
+        assert_eq!(summary.total(), 0);
+        assert!(summary.to_display_text().is_empty());
+    }
+
+    #[test]
+    fn test_status_bar_ignores_unknown() {
+        let agents = vec![
+            AgentPane {
+                pane_id: "1".to_string(),
+                branch_name: "feature/a".to_string(),
+                agent_name: "claude".to_string(),
+                start_time: SystemTime::now(),
+                pid: 12345,
+                is_background: false,
+                background_window: None,
+                status: AgentStatus::Unknown,
+            },
+        ];
+
+        let summary = StatusBarSummary::from_agents(&agents);
+
+        assert_eq!(summary.running_count, 0);
+        assert_eq!(summary.waiting_count, 0);
+        assert_eq!(summary.stopped_count, 0);
+        assert!(!summary.has_agents());
     }
 }

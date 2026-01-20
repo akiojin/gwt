@@ -4,7 +4,7 @@
 
 use gwt_core::config::AgentStatus;
 use gwt_core::git::{Branch, BranchMeta, BranchSummary, DivergenceStatus, Repository};
-use gwt_core::tmux::AgentPane;
+use gwt_core::tmux::{AgentPane, StatusBarSummary};
 use gwt_core::worktree::Worktree;
 use ratatui::{prelude::*, widgets::*};
 use std::collections::{HashMap, HashSet};
@@ -901,7 +901,7 @@ impl BranchListState {
 
 /// Render branch list screen
 /// Note: Header, Filter, Mode are rendered by app.rs view_boxed_header
-/// This function only renders: BranchList + WorktreePath/Status
+/// This function only renders: BranchList + StatusBar + WorktreePath/Status
 pub fn render_branch_list(
     state: &mut BranchListState,
     frame: &mut Frame,
@@ -911,20 +911,99 @@ pub fn render_branch_list(
 ) {
     // SPEC-4b893dae: Summary panel height is 12 lines (FR-003)
     let panel_height = crate::tui::components::SummaryPanel::height();
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(3),               // Branch list (FR-003)
-            Constraint::Length(panel_height), // Summary panel (SPEC-4b893dae)
-        ])
-        .split(area);
+
+    // Check if we have agents to show status bar
+    let has_agents = !state.running_agents.is_empty();
+
+    let chunks = if has_agents {
+        // With status bar (SPEC-861d8cdf FR-104a)
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(3),               // Branch list (FR-003)
+                Constraint::Length(1),            // Status bar (FR-104a)
+                Constraint::Length(panel_height), // Summary panel (SPEC-4b893dae)
+            ])
+            .split(area)
+    } else {
+        // Without status bar (no agents)
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(3),               // Branch list (FR-003)
+                Constraint::Length(panel_height), // Summary panel (SPEC-4b893dae)
+            ])
+            .split(area)
+    };
 
     // Calculate visible height from branch list area (accounting for border)
     let branch_area_height = chunks[0].height.saturating_sub(2) as usize; // -2 for borders
     state.update_visible_height(branch_area_height);
 
     render_branches(state, frame, chunks[0], has_focus);
-    render_summary_panel(state, frame, chunks[1], status_message);
+
+    if has_agents {
+        render_status_bar(state, frame, chunks[1]);
+        render_summary_panel(state, frame, chunks[2], status_message);
+    } else {
+        render_summary_panel(state, frame, chunks[1], status_message);
+    }
+}
+
+/// Render agent status bar (SPEC-861d8cdf T-105, FR-104a, FR-104b, FR-104c)
+fn render_status_bar(state: &BranchListState, frame: &mut Frame, area: Rect) {
+    let summary = StatusBarSummary::from_agents(&state.running_agents);
+
+    if !summary.has_agents() {
+        return;
+    }
+
+    let mut spans = Vec::new();
+
+    // Add "Agents: " prefix
+    spans.push(Span::styled(
+        "Agents: ",
+        Style::default().fg(Color::DarkGray),
+    ));
+
+    // Add running count
+    if summary.running_count > 0 {
+        spans.push(Span::styled(
+            format!("{} running", summary.running_count),
+            Style::default().fg(Color::Green),
+        ));
+    }
+
+    // Add separator if needed
+    if summary.running_count > 0 && (summary.waiting_count > 0 || summary.stopped_count > 0) {
+        spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
+    }
+
+    // Add waiting count (FR-104c: highlighted in yellow)
+    if summary.waiting_count > 0 {
+        spans.push(Span::styled(
+            format!("{} waiting", summary.waiting_count),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    // Add separator if needed
+    if summary.waiting_count > 0 && summary.stopped_count > 0 {
+        spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
+    }
+
+    // Add stopped count
+    if summary.stopped_count > 0 {
+        spans.push(Span::styled(
+            format!("{} stopped", summary.stopped_count),
+            Style::default().fg(Color::Red),
+        ));
+    }
+
+    let line = Line::from(spans);
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 /// Render header line (FR-001, FR-001a)
