@@ -1,15 +1,36 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [6.5.0] - 2026-01-20
+
+### Bug Fixes
+
+- PullRequest構造体テストに不足フィールド追加
+
+### Miscellaneous Tasks
+
+- Sync main into develop
+
 ## [6.4.0] - 2026-01-20
 
 ### Bug Fixes
 
 - スピナー範囲外アクセスによるパニックを防止 (#677)
+- Claude Code新hooksフォーマットに対応 (#695)
+- ブランチ一覧のダブルクリック選択に変更 (#697)
+
+### Features
+
+- Add PR source branch validation for main
+- エージェント状態可視化機能 (SPEC-861d8cdf) (#692)
+- ブランチ詳細優先表示とAI設定デフォルト追加 (#694)
+- Responses APIでAI要約を生成 (#696)
+- ブランチ詳細にGitHubリンクを追加 (#698)
 
 ### Miscellaneous Tasks
 
 - Merge main into develop
+- Update Cargo.lock
 
 ## [6.3.0] - 2026-01-19
 
