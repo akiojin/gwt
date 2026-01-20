@@ -1,28 +1,26 @@
-# タスク: ブランチサマリーパネル（セッション要約対応）
+# タスク: ブランチサマリーパネル
 
-**仕様ID**: `SPEC-4b893dae` | **日付**: 2026-01-19 | **更新日**: 2026-01-19
+**仕様ID**: `SPEC-4b893dae` | **日付**: 2026-01-19
 **入力**: `specs/SPEC-4b893dae/` からの設計ドキュメント
 **前提条件**: plan.md、spec.md、data-model.md、contracts/openai-api.md、research.md、quickstart.md
 
 ## ストーリー依存関係
 
 ```text
-US5 (パネル表示) ──┬──> US1 (コミットログ)     ✅ 完了
+US5 (パネル表示) ──┬──> US1 (コミットログ)
                   │
-                  ├──> US2 (変更統計)         ✅ 完了
+                  ├──> US2 (変更統計)
                   │
-                  ├──> US3 (メタデータ)        ✅ 完了
-                  │
-                  └──> US4a (タブ切り替え) ──> US4b (パーサー) ──> US4 (セッション要約)
-                                                                       │
-US6 (AI設定) ─────────────────────────────────────────────────────────┘
+                  └──> US3 (メタデータ)
+                            │
+US6 (AI設定) ─────────────> US4 (AIサマリー)
 ```
 
-**並列実行可能グループ**:
+- US5はすべてのセクションの基盤
+- US1, US2, US3は並列実装可能（US5完了後）
+- US4はUS6に依存
 
-- US4bのパーサー（Claude, Codex, Gemini, OpenCode）は並列実装可能
-
-## フェーズ1: セットアップ（共有基盤） ✅ 完了
+## フェーズ1: セットアップ（共有基盤）
 
 **目的**: データ構造とモジュール構成の準備
 
@@ -38,7 +36,7 @@ US6 (AI設定) ─────────────────────�
 - [x] **T005** [共通] `crates/gwt-cli/src/tui/components.rs` にSummaryPanelを追加（既存パターンに合わせてcomponents.rsに統合）
 - [x] **T006** [共通] SummaryPanelコンポーネントの骨格を定義（render, build_sections等）
 
-## フェーズ2: US5 - パネルの常時表示 (優先度: P0) ✅ 完了
+## フェーズ2: US5 - パネルの常時表示 (優先度: P0)
 
 **ストーリー**: ブランチ選択画面のフッター領域に詳細パネルを常時表示
 
@@ -60,9 +58,9 @@ US6 (AI設定) ─────────────────────�
 
 - [x] **T107** [US5] render_summary_panel関数でブランチ選択に応じたサマリー生成を実装
 
-**✅ チェックポイント**: パネル枠とタイトルが表示される
+**チェックポイント**: パネル枠とタイトルが表示される（内容は空） ✅ 完了
 
-## フェーズ3: US1 - コミットログの確認 (優先度: P0) ✅ 完了
+## フェーズ3: US1 - コミットログの確認 (優先度: P0)
 
 **ストーリー**: 直近3-5件のコミット履歴をハッシュ+メッセージ形式で表示
 
@@ -84,9 +82,9 @@ US6 (AI設定) ─────────────────────�
 - [x] **T206** [US1] T205の後に `crates/gwt-cli/src/tui/screens/branch_list.rs` にコミットログの取得を実装（選択変更時に同期取得）
 - [x] **T207** [US1] T206の後に `crates/gwt-cli/src/tui/components.rs` にローディング表示（ASCIIスピナー）を追加
 
-**✅ チェックポイント**: コミットログがパネルに表示される
+**チェックポイント**: コミットログがパネルに表示される ✅ 完了
 
-## フェーズ4: US2 - 変更統計の確認 (優先度: P0) ✅ 完了
+## フェーズ4: US2 - 変更統計の確認 (優先度: P0)
 
 **ストーリー**: 変更ファイル数、行数、未コミット/未プッシュ状態を表示
 
@@ -106,9 +104,9 @@ US6 (AI設定) ─────────────────────�
 - [x] **T304** [US2] T303の後に `crates/gwt-cli/src/tui/components.rs` に`Stats:`セクション描画を実装
 - [x] **T305** [US2] T304の後に `crates/gwt-cli/src/tui/components.rs` に`Uncommitted changes`/`Unpushed commits`表示を追加
 
-**✅ チェックポイント**: 変更統計がパネルに表示される
+**チェックポイント**: 変更統計がパネルに表示される（既存の安全性判定と一致） ✅ 完了
 
-## フェーズ5: US3 - ブランチメタデータの確認 (優先度: P1) ✅ 完了
+## フェーズ5: US3 - ブランチメタデータの確認 (優先度: P1)
 
 **ストーリー**: ahead/behind、ベースブランチ、最終コミット日時を表示
 
@@ -126,7 +124,7 @@ US6 (AI設定) ─────────────────────�
 - [x] **T405** [US3] T404の後に `crates/gwt-cli/src/tui/components.rs` に最終コミット日時の相対表示を追加
 - [x] **T406** [US3] T405の後に `crates/gwt-cli/src/tui/components.rs` にupstream未設定時の表示制御を追加
 
-**✅ チェックポイント**: メタデータがパネルに表示される
+**チェックポイント**: メタデータがパネルに表示される ✅ 完了
 
 ## フェーズ6: US6 - プロファイルへのAI設定追加 (優先度: P2)
 
@@ -147,168 +145,75 @@ US6 (AI設定) ─────────────────────�
 ### シリアライズ
 
 - [ ] **T505** [US6] T504の後に `crates/gwt-core/src/config/profile.rs` のYAMLシリアライズにai設定を追加
-- [x] **T506** [US6] T505の後に `crates/gwt-core/src/config/profile.rs` のAI有効判定を更新（エンドポイント/モデル必須、APIキー任意）
-- [x] **T507** [US6] T506の後に `crates/gwt-cli/src/tui/screens/environment.rs` のAIプレースホルダーを必須/任意表記に更新
 
 **チェックポイント**: プロファイルYAMLにai設定が保存・読み込みできる
 
-## フェーズ7: US4a - Tabキーによるタブ切り替え (優先度: P0)
+## フェーズ7: US4 - AIサマリーの確認 (優先度: P2)
 
-**ストーリー**: TabキーでブランチとセッションSummaryタブを切り替えられる
+**ストーリー**: AIがコミット履歴を分析して2-3行の箇条書きサマリーを表示
 
-**価値**: ブランチ詳細とセッション要約を両方確認できる
+**価値**: コミットメッセージを読まなくても作業内容の概要を把握できる
 
-### 状態管理
+### AIモジュール基盤
 
-- [ ] **T551** [US4a] `crates/gwt-cli/src/tui/screens/branch_list.rs` に `DetailPanelTab` enum を追加（Details, Session）
-- [ ] **T552** [US4a] T551の後に `crates/gwt-cli/src/tui/screens/branch_list.rs` の `BranchListScreen` に `detail_panel_tab` フィールドを追加
+- [ ] **T601** [US4] `crates/gwt-core/src/ai/mod.rs` を新規作成
+- [ ] **T602** [US4] T601の後に `crates/gwt-core/src/ai/client.rs` を新規作成し、OpenAI互換APIクライアントを実装
+- [ ] **T603** [US4] T602の後に `crates/gwt-core/src/ai/client.rs` にエラーハンドリング（AIError enum）を追加
+- [ ] **T604** [US4] T603の後に `crates/gwt-core/src/ai/client.rs` にタイムアウトとリトライロジックを追加
 
-### キーハンドリング
+### サマリー生成
 
-- [ ] **T553** [US4a] T552の後に `crates/gwt-cli/src/tui/screens/branch_list.rs` に Tabキーハンドラを追加
-- [ ] **T554** [US4a] T553の後に `crates/gwt-cli/src/tui/screens/branch_list.rs` で `detail_panel_tab` を切り替え
+- [ ] **T605** [US4] T604の後に `crates/gwt-core/src/ai/summary.rs` を新規作成し、サマリー生成ロジックを実装
+- [ ] **T606** [US4] T605の後に `crates/gwt-core/src/ai/summary.rs` にプロンプトテンプレートを追加
+- [ ] **T607** [US4] T606の後に `crates/gwt-core/src/ai/summary.rs` にAISummaryCacheを実装
 
-### タブ表示
+### バッチプリフェッチ
 
-- [ ] **T555** [US4a] T554の後に `crates/gwt-cli/src/tui/screens/branch_list.rs` でタブ状態に応じてタイトルを切り替え（`Details` / `Session`）
-- [ ] **T556** [US4a] T555の後に `crates/gwt-cli/src/tui/screens/branch_list.rs` でタブ状態に応じて描画メソッドを切り替え
-- [ ] **T557** [US4a] T556の後に `crates/gwt-cli/src/tui/screens/branch_list.rs` でブランチ切り替え時にタブ状態を維持
-- [x] **T558** [US4a] T557の後に ブランチ詳細/セッション要約パネル枠へTab切り替えヒントを追加
-
-**チェックポイント**: Tabキーでタブ切り替えが動作する
-
-## フェーズ8: US4b - セッションパーサー (優先度: P0)
-
-**ストーリー**: gwtのsession_idを使用してエージェントセッションを特定・解析する
-
-**価値**: 4種類のエージェントセッション内容を抽出できる
-
-### モジュール構成
-
-- [ ] **T601** [US4b] `crates/gwt-core/src/ai/mod.rs` に `session_parser` モジュールを追加
-- [ ] **T602** [US4b] T601の後に `crates/gwt-core/src/ai/session_parser/mod.rs` を新規作成
-
-### トレイト定義
-
-- [ ] **T603** [US4b] T602の後に `crates/gwt-core/src/ai/session_parser/mod.rs` に `SessionParser` トレイトを定義
-- [ ] **T604** [US4b] T603の後に `crates/gwt-core/src/ai/session_parser/mod.rs` に `ParsedSession` 構造体を定義
-- [ ] **T605** [US4b] T604の後に `crates/gwt-core/src/ai/session_parser/mod.rs` に `AgentType` enum を定義
-- [ ] **T606** [US4b] T605の後に `crates/gwt-core/src/ai/session_parser/mod.rs` に `SessionParseError` enum を定義
-
-### Claude Code パーサー
-
-- [ ] **T611** [P] [US4b] T606の後に `crates/gwt-core/src/ai/session_parser/claude.rs` に `ClaudeSessionParser` を実装
-- [ ] **T612** [US4b] T611の後に `crates/gwt-core/src/ai/session_parser/claude.rs` で JSONL 形式を解析
-- [ ] **T613** [US4b] T612の後に `crates/gwt-core/src/ai/session_parser/claude.rs` で会話履歴とツール実行履歴を抽出
-
-### Codex CLI パーサー
-
-- [ ] **T621** [P] [US4b] T606の後に `crates/gwt-core/src/ai/session_parser/codex.rs` に `CodexSessionParser` を実装
-- [ ] **T622** [US4b] T621の後に `crates/gwt-core/src/ai/session_parser/codex.rs` で JSONL 形式を解析
-
-### Gemini CLI パーサー
-
-- [ ] **T631** [P] [US4b] T606の後に `crates/gwt-core/src/ai/session_parser/gemini.rs` に `GeminiSessionParser` を実装
-- [ ] **T632** [US4b] T631の後に `crates/gwt-core/src/ai/session_parser/gemini.rs` で JSON 形式を解析
-
-### OpenCode パーサー
-
-- [ ] **T641** [P] [US4b] T606の後に `crates/gwt-core/src/ai/session_parser/opencode.rs` に `OpenCodeSessionParser` を実装
-- [ ] **T642** [US4b] T641の後に `crates/gwt-core/src/ai/session_parser/opencode.rs` で JSON 形式を解析
-
-### 動的サンプリング
-
-- [ ] **T651** [US4b] T613, T622, T632, T642の後に `crates/gwt-core/src/ai/session_parser/mod.rs` に動的サンプリング関数を実装（1000ターン以上対応）
-
-**チェックポイント**: 4エージェントのセッションを解析できる
-
-## フェーズ9: US4 - セッション要約の確認 (優先度: P0)
-
-**ストーリー**: セッション要約タブに切り替えると、エージェントセッションのAI要約が表示される
-
-**価値**: エージェントの作業状況をリアルタイムで把握できる
-
-### データ構造
-
-- [ ] **T701** [US4] `crates/gwt-core/src/ai/summary.rs` に `SessionSummary` 構造体を追加（task_overview, short_summary, bullet_points, metrics）
-- [ ] **T702** [US4] T701の後に `crates/gwt-core/src/ai/summary.rs` に `SessionMetrics` 構造体を追加（token_count, tool_calls, elapsed_time）
-- [ ] **T703** [US4] T702の後に `crates/gwt-core/src/ai/summary.rs` に `SessionSummaryCache` 構造体を追加
-
-### AI要約生成
-
-- [ ] **T711** [US4] T703の後に `crates/gwt-core/src/ai/summary.rs` にセッション要約用システムプロンプトを追加
-- [ ] **T712** [US4] T711の後に `crates/gwt-core/src/ai/summary.rs` に `summarize_session(parsed: &ParsedSession) -> SessionSummary` を実装
-- [ ] **T713** [US4] T712の後に `crates/gwt-core/src/ai/client.rs` で MAX_TOKENS を調整（150 → 300-500）
-- [x] **T714** [US4] T711の後に システムプロンプトへ言語推定の指示を追加
-- [x] **T715** [US4] T712の後に `build_session_prompt` の入力サイズ上限を追加
-- [x] **T716** [US4] T715の後に 入力サイズ上限のテストを追加
+- [ ] **T608** [US4] T607の後に `crates/gwt-cli/src/tui/screens/branch_list.rs` に起動時のバッチプリフェッチ（Worktreeありブランチのみ）を実装
 
 ### UI表示
 
-- [ ] **T721** [US4] T713の後に `crates/gwt-cli/src/tui/screens/branch_list.rs` にセッション要約タブの描画メソッドを実装
-- [ ] **T722** [US4] T721の後に `crates/gwt-cli/src/tui/screens/branch_list.rs` でタスク概要・短文要約・バレットポイント・メトリクスを表示
-- [ ] **T723** [US4] T722の後に `crates/gwt-cli/src/tui/screens/branch_list.rs` でローディングスピナーを表示
-- [x] **T724** [US4] T723の後に `crates/gwt-cli/src/tui/screens/branch_list.rs` で要約テキストの折り返し/スクロールを追加
-- [x] **T725** [US4] T724の後に 既存要約がある場合は再生成中も表示し続けるように調整
+- [ ] **T609** [US4] T608の後に `crates/gwt-cli/src/tui/components/summary_panel.rs` に`Summary:`セクション描画を実装
+- [ ] **T610** [US4] T609の後に `crates/gwt-cli/src/tui/components/summary_panel.rs` にAI設定無効時のセクション非表示を実装
+- [ ] **T611** [US4] T610の後に `crates/gwt-cli/src/tui/components/summary_panel.rs` にAPIエラー時のグレースフルデグラデーションを実装
 
-### エラーハンドリング
+### 依存関係追加
 
-- [ ] **T731** [US4] T723の後に `crates/gwt-cli/src/tui/screens/branch_list.rs` で AI設定無効時に設定促進メッセージを表示
-- [ ] **T732** [US4] T731の後に `crates/gwt-cli/src/tui/screens/branch_list.rs` で セッションなし時に `No session` を表示
+- [ ] **T612** [US4] `crates/gwt-core/Cargo.toml` にreqwest依存を追加
 
-### ポーリング更新
+**チェックポイント**: AIサマリーがパネルに表示される（設定有効時）
 
-- [ ] **T741** [US4] T732の後に `crates/gwt-cli/src/tui/screens/branch_list.rs` に30秒ポーリングスレッドを実装
-- [ ] **T742** [US4] T741の後に `crates/gwt-cli/src/tui/screens/branch_list.rs` でファイル変更検出時に自動再生成
-- [ ] **T743** [US4] T742の後に `crates/gwt-cli/src/tui/screens/branch_list.rs` でセッションタブ非表示時にポーリング停止
-- [ ] **T744** [US4] T743の後に `crates/gwt-cli/src/tui/screens/branch_list.rs` でポーリングエラー時にキャッシュ表示継続
-
-### キャッシュ
-
-- [ ] **T751** [US4] T744の後に `crates/gwt-core/src/ai/summary.rs` に `SessionSummaryCache` の get/set メソッドを実装
-- [ ] **T752** [US4] T751の後に `crates/gwt-cli/src/tui/screens/branch_list.rs` でキャッシュを活用
-
-**チェックポイント**: セッション要約がタブに表示される
-
-## フェーズ10: 統合と仕上げ
+## フェーズ8: 統合と仕上げ
 
 **目的**: エッジケース対応、テスト、ドキュメント
 
-### エッジケース対応（完了済み）
+### エッジケース対応
 
-- [x] **T801** [統合] `crates/gwt-cli/src/tui/components.rs` にWorktreeなしブランチの表示制御を追加
-- [x] **T802** [統合] `crates/gwt-cli/src/tui/components.rs` にdetached HEAD時の表示を追加
-- [x] **T803** [統合] `crates/gwt-cli/src/tui/components.rs` にリモートブランチ時の表示を追加
-- [x] **T804** [統合] `crates/gwt-cli/src/tui/components.rs` にデータ取得失敗時の`(Failed to load)`表示を追加
-- [x] **T805** [統合] `crates/gwt-cli/src/tui/components.rs` に表示幅が狭い場合の末尾省略を追加
+- [x] **T701** [統合] `crates/gwt-cli/src/tui/components/summary_panel.rs` にWorktreeなしブランチの表示制御を追加 ✓ "No worktree" 表示実装済み
+- [x] **T702** [統合] `crates/gwt-cli/src/tui/components/summary_panel.rs` にdetached HEAD時の表示を追加 ✓ ブランチ名がそのまま表示される
+- [x] **T703** [統合] `crates/gwt-cli/src/tui/components/summary_panel.rs` にリモートブランチ時の表示を追加 ✓ upstream情報で対応
+- [x] **T704** [統合] `crates/gwt-cli/src/tui/components/summary_panel.rs` にデータ取得失敗時の`(Failed to load)`表示を追加 ✓ errors フィールドでエラー表示対応
+- [x] **T705** [統合] `crates/gwt-cli/src/tui/components/summary_panel.rs` に表示幅が狭い場合の末尾省略を追加 ✓ メッセージ50文字で省略実装済み
 
-### セッション要約エッジケース（新規）
+### 品質チェック
 
-- [ ] **T811** [統合] `crates/gwt-core/src/ai/session_parser/mod.rs` でセッションファイル破損時のエラーハンドリングを実装
-- [ ] **T812** [統合] `crates/gwt-core/src/ai/session_parser/mod.rs` でファイルロック時のリトライを実装
-- [ ] **T813** [統合] `crates/gwt-cli/src/tui/screens/branch_list.rs` で長いセッション読み込み中のUI応答性を確保
-
-### 品質チェック（完了済み - 再確認必要）
-
-- [x] **T821** [統合] `cargo clippy --all-targets --all-features -- -D warnings` をローカルで完走させ、失敗時は修正
-- [x] **T822** [統合] `cargo fmt --check` をローカルで完走させ、失敗時は修正
-- [x] **T823** [統合] `cargo test` をローカルで完走させ、失敗時は修正
-- [x] **T824** [統合] `bunx --bun markdownlint-cli "**/*.md" --config .markdownlint.json --ignore-path .markdownlintignore` をローカルで完走させ、失敗時は修正
+- [x] **T706** [統合] `cargo clippy --all-targets --all-features -- -D warnings` をローカルで完走させ、失敗時は修正 ✓
+- [x] **T707** [統合] `cargo fmt --check` をローカルで完走させ、失敗時は修正 ✓
+- [x] **T708** [統合] `cargo test` をローカルで完走させ、失敗時は修正 ✓
+- [x] **T709** [統合] `bunx --bun markdownlint-cli "**/*.md" --config .markdownlint.json --ignore-path .markdownlintignore` をローカルで完走させ、失敗時は修正 ✓
 
 ### ドキュメント
 
-- [x] **T831** [P] [ドキュメント] `README.md` にブランチサマリーパネル機能の説明を追加
-- [x] **T832** [P] [ドキュメント] `README.ja.md` にブランチサマリーパネル機能の説明を追加（日本語）
-- [ ] **T833** [P] [ドキュメント] `README.md` にセッション要約機能の説明を追加
-- [ ] **T834** [P] [ドキュメント] `README.ja.md` にセッション要約機能の説明を追加（日本語）
+- [x] **T710** [P] [ドキュメント] `README.md` にブランチサマリーパネル機能の説明を追加 ✓
+- [x] **T711** [P] [ドキュメント] `README.ja.md` にブランチサマリーパネル機能の説明を追加（日本語） ✓
 
 ## タスク凡例
 
 **優先度**:
 
-- **P0**: 最重要 - 基本機能に必要（US1, US2, US4, US4a, US4b, US5）
+- **P0**: 最重要 - 基本機能に必要（US1, US2, US5）
 - **P1**: 重要 - 完全な機能に必要（US3）
-- **P2**: 補完的 - 付加価値機能（US6）
+- **P2**: 補完的 - 付加価値機能（US4, US6）
 
 **タグ**:
 
@@ -316,9 +221,7 @@ US6 (AI設定) ─────────────────────�
 - **[US1]**: コミットログ
 - **[US2]**: 変更統計
 - **[US3]**: メタデータ
-- **[US4]**: セッション要約
-- **[US4a]**: タブ切り替え
-- **[US4b]**: セッションパーサー
+- **[US4]**: AIサマリー
 - **[US5]**: パネル表示
 - **[US6]**: AI設定
 - **[共通]**: 全ストーリー共通
@@ -332,26 +235,12 @@ US6 (AI設定) ─────────────────────�
 - **ブロックされたタスク**: ブロッカーを文書化
 - **スキップしたタスク**: 理由と共に文書化
 
-## 要約
+## 推奨MVP範囲
 
-| 項目 | 値 |
-|------|-----|
-| 総タスク数 | 74 |
-| 完了済み | 40 |
-| 未完了 | 34 |
-| フェーズ1-5（完了済み） | 26 |
-| フェーズ6（US6: AI設定） | 5 |
-| フェーズ7（US4a: タブ切り替え） | 7 |
-| フェーズ8（US4b: パーサー） | 17 |
-| フェーズ9（US4: セッション要約） | 16 |
-| フェーズ10（統合） | 9 |
-| 並列実行可能タスク | 8 |
+**MVP1**: フェーズ1〜4（セットアップ + US5 + US1 + US2）
 
-## 推奨実装順序
+- パネル枠とタイトル表示
+- コミットログ表示
+- 変更統計表示
 
-1. **US4a** (タブ切り替え) - UIの切り替え基盤
-2. **US4b** (セッションパーサー) - 4エージェント対応
-3. **US4** (セッション要約) - AI要約とポーリング
-4. **US6** (AI設定) - プロファイル連携
-
-MVP範囲: US4a → US4b（Claude Codeのみ先行） → US4（基本機能）
+これにより、AIなしでも実用的なブランチサマリー機能を提供できる。
