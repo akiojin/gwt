@@ -180,14 +180,14 @@ impl SessionParser for NewAgentSessionParser {
 }
 ```
 
-3. `mod.rs` にモジュールを追加:
+1. `mod.rs` にモジュールを追加:
 
 ```rust
 mod newagent;
 pub use newagent::NewAgentSessionParser;
 ```
 
-4. `AgentType` enumに新しいバリアントを追加
+1. `AgentType` enumに新しいバリアントを追加
 
 ### セッションファイル形式
 
