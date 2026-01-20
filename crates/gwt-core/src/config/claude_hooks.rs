@@ -22,6 +22,17 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// Get the absolute path of the gwt executable
+///
+/// Uses std::env::current_exe() to get the path of the running binary.
+/// Falls back to "gwt" if the path cannot be determined.
+fn get_gwt_executable_path() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.to_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| "gwt".to_string())
+}
+
 /// Claude Code settings.json structure (partial)
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ClaudeSettings {
@@ -98,22 +109,22 @@ pub fn is_gwt_hooks_registered(settings_path: &Path) -> bool {
 }
 
 /// Create a gwt hook entry with matcher (for PreToolUse, PostToolUse)
-fn create_gwt_hook_entry_with_matcher(event: &str) -> serde_json::Value {
+fn create_gwt_hook_entry_with_matcher(event: &str, exe_path: &str) -> serde_json::Value {
     serde_json::json!({
         "matcher": "*",
         "hooks": [{
             "type": "command",
-            "command": format!("gwt hook {}", event)
+            "command": format!("{} hook {}", exe_path, event)
         }]
     })
 }
 
 /// Create a gwt hook entry without matcher (for UserPromptSubmit, Notification, Stop)
-fn create_gwt_hook_entry_without_matcher(event: &str) -> serde_json::Value {
+fn create_gwt_hook_entry_without_matcher(event: &str, exe_path: &str) -> serde_json::Value {
     serde_json::json!({
         "hooks": [{
             "type": "command",
-            "command": format!("gwt hook {}", event)
+            "command": format!("{} hook {}", exe_path, event)
         }]
     })
 }
@@ -142,6 +153,15 @@ fn has_gwt_hook_in_array(arr: &[serde_json::Value]) -> bool {
 /// 3. Adds gwt hook commands for all hook events (new format)
 /// 4. Preserves existing hook configurations
 pub fn register_gwt_hooks(settings_path: &Path) -> Result<(), GwtError> {
+    let exe_path = get_gwt_executable_path();
+    register_gwt_hooks_with_exe_path(settings_path, &exe_path)
+}
+
+/// Internal function to register hooks with a specified executable path
+fn register_gwt_hooks_with_exe_path(
+    settings_path: &Path,
+    exe_path: &str,
+) -> Result<(), GwtError> {
     // Create parent directory if needed
     if let Some(parent) = settings_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -177,13 +197,13 @@ pub fn register_gwt_hooks(settings_path: &Path) -> Result<(), GwtError> {
 
     // Register hooks with matcher (PreToolUse, PostToolUse)
     for event in HOOK_EVENTS_WITH_MATCHER {
-        let gwt_entry = create_gwt_hook_entry_with_matcher(event);
+        let gwt_entry = create_gwt_hook_entry_with_matcher(event, exe_path);
         register_event(&mut settings, event, gwt_entry);
     }
 
     // Register hooks without matcher (UserPromptSubmit, Notification, Stop)
     for event in HOOK_EVENTS_WITHOUT_MATCHER {
-        let gwt_entry = create_gwt_hook_entry_without_matcher(event);
+        let gwt_entry = create_gwt_hook_entry_without_matcher(event, exe_path);
         register_event(&mut settings, event, gwt_entry);
     }
 
@@ -264,6 +284,9 @@ pub fn unregister_gwt_hooks(settings_path: &Path) -> Result<(), GwtError> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// Fixed executable path for tests
+    const TEST_EXE_PATH: &str = "gwt";
 
     #[test]
     fn test_create_claude_settings_if_not_exists() {
@@ -358,7 +381,7 @@ mod tests {
         let existing_content = r#"{"hooks": {"UserPromptSubmit": [{"matcher": "", "hooks": [{"type": "command", "command": "echo 'user prompt received'"}]}]}}"#;
         std::fs::write(&settings_path, existing_content).unwrap();
 
-        let result = register_gwt_hooks(&settings_path);
+        let result = register_gwt_hooks_with_exe_path(&settings_path, TEST_EXE_PATH);
 
         assert!(result.is_ok());
         let content = std::fs::read_to_string(&settings_path).unwrap();
@@ -373,7 +396,7 @@ mod tests {
         let settings_path = temp_dir.path().join(".claude").join("settings.json");
 
         // First register hooks
-        register_gwt_hooks(&settings_path).unwrap();
+        register_gwt_hooks_with_exe_path(&settings_path, TEST_EXE_PATH).unwrap();
         assert!(is_gwt_hooks_registered(&settings_path));
 
         // Then unregister
@@ -387,8 +410,8 @@ mod tests {
         let settings_path = temp_dir.path().join(".claude").join("settings.json");
 
         // Register twice
-        register_gwt_hooks(&settings_path).unwrap();
-        register_gwt_hooks(&settings_path).unwrap();
+        register_gwt_hooks_with_exe_path(&settings_path, TEST_EXE_PATH).unwrap();
+        register_gwt_hooks_with_exe_path(&settings_path, TEST_EXE_PATH).unwrap();
 
         // Should only have one gwt hook per event
         let content = std::fs::read_to_string(&settings_path).unwrap();
@@ -408,7 +431,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let settings_path = temp_dir.path().join(".claude").join("settings.json");
 
-        register_gwt_hooks(&settings_path).unwrap();
+        register_gwt_hooks_with_exe_path(&settings_path, TEST_EXE_PATH).unwrap();
 
         let content = std::fs::read_to_string(&settings_path).unwrap();
         let settings: ClaudeSettings = serde_json::from_str(&content).unwrap();
@@ -441,7 +464,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let settings_path = temp_dir.path().join(".claude").join("settings.json");
 
-        register_gwt_hooks(&settings_path).unwrap();
+        register_gwt_hooks_with_exe_path(&settings_path, TEST_EXE_PATH).unwrap();
 
         let content = std::fs::read_to_string(&settings_path).unwrap();
         let settings: ClaudeSettings = serde_json::from_str(&content).unwrap();
