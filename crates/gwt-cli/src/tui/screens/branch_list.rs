@@ -380,6 +380,10 @@ pub struct BranchListState {
     pub status_progress_active: bool,
     /// Viewport height for scroll calculations (updated by renderer)
     pub visible_height: usize,
+    /// Cached branch list area (outer, with border)
+    pub list_area: Option<Rect>,
+    /// Cached branch list inner area (content rows)
+    pub list_inner_area: Option<Rect>,
     /// Running agents mapped by branch name (for agent info display)
     pub running_agents: HashMap<String, AgentPane>,
     /// Branch summary data for the selected branch (SPEC-4b893dae)
@@ -426,6 +430,8 @@ impl Default for BranchListState {
             status_progress_done: 0,
             status_progress_active: false,
             visible_height: 15, // Default fallback (previously hardcoded)
+            list_area: None,
+            list_inner_area: None,
             running_agents: HashMap::new(),
             branch_summary: None,
             detail_panel_tab: DetailPanelTab::Details,
@@ -724,6 +730,60 @@ impl BranchListState {
             self.visible_height = height;
             self.ensure_visible();
         }
+    }
+
+    /// Update cached list areas based on rendered branch list block
+    pub fn update_list_area(&mut self, area: Rect) {
+        self.list_area = Some(area);
+        let inner = if area.width < 2 || area.height < 2 {
+            Rect {
+                x: area.x,
+                y: area.y,
+                width: 0,
+                height: 0,
+            }
+        } else {
+            Rect {
+                x: area.x.saturating_add(1),
+                y: area.y.saturating_add(1),
+                width: area.width.saturating_sub(2),
+                height: area.height.saturating_sub(2),
+            }
+        };
+        self.list_inner_area = Some(inner);
+        self.update_visible_height(inner.height as usize);
+    }
+
+    /// Resolve selection index from a mouse position within the list area
+    pub fn selection_index_from_point(&self, x: u16, y: u16) -> Option<usize> {
+        let inner = self.list_inner_area?;
+        if inner.width == 0 || inner.height == 0 {
+            return None;
+        }
+        let right = inner.x.saturating_add(inner.width);
+        let bottom = inner.y.saturating_add(inner.height);
+        if x < inner.x || x >= right || y < inner.y || y >= bottom {
+            return None;
+        }
+        let row = (y - inner.y) as usize;
+        let index = self.offset.saturating_add(row);
+        if index >= self.filtered_indices.len() {
+            return None;
+        }
+        Some(index)
+    }
+
+    /// Set selected index directly (returns true if selection changed)
+    pub fn select_index(&mut self, index: usize) -> bool {
+        if index >= self.filtered_indices.len() {
+            return false;
+        }
+        if self.selected != index {
+            self.selected = index;
+            self.ensure_visible();
+            return true;
+        }
+        false
     }
 
     /// Get currently selected branch
@@ -1107,9 +1167,8 @@ pub fn render_branch_list(
         ])
         .split(area);
 
-    // Calculate visible height from branch list area (accounting for border)
-    let branch_area_height = chunks[0].height.saturating_sub(2) as usize; // -2 for borders
-    state.update_visible_height(branch_area_height);
+    // Cache branch list area for mouse selection and update visible height
+    state.update_list_area(chunks[0]);
 
     render_branches(state, frame, chunks[0], has_focus);
     render_summary_panel(state, frame, chunks[1], status_message);
@@ -1781,6 +1840,31 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
+    fn sample_branch(name: &str) -> BranchItem {
+        BranchItem {
+            name: name.to_string(),
+            branch_type: BranchType::Local,
+            is_current: false,
+            has_worktree: true,
+            worktree_path: Some("/path".to_string()),
+            worktree_status: WorktreeStatus::Active,
+            has_changes: false,
+            has_unpushed: false,
+            divergence: DivergenceStatus::UpToDate,
+            has_remote_counterpart: true,
+            remote_name: None,
+            safe_to_cleanup: Some(true),
+            safety_status: SafetyStatus::Safe,
+            is_unmerged: false,
+            last_commit_timestamp: None,
+            last_tool_usage: None,
+            last_tool_id: None,
+            last_session_id: None,
+            is_selected: false,
+            pr_title: None,
+        }
+    }
+
     #[test]
     fn test_view_mode_cycle() {
         assert_eq!(ViewMode::All.cycle(), ViewMode::Local);
@@ -1857,6 +1941,45 @@ mod tests {
 
         state.select_prev();
         assert_eq!(state.selected, 0);
+    }
+
+    #[test]
+    fn test_mouse_position_selects_visible_row() {
+        let branches = vec![
+            sample_branch("feature/one"),
+            sample_branch("feature/two"),
+            sample_branch("feature/three"),
+        ];
+        let mut state = BranchListState::new().with_branches(branches);
+        state.update_list_area(Rect::new(0, 0, 20, 5)); // inner height = 3
+
+        let index = state
+            .selection_index_from_point(1, 2) // inner y=1 -> row 1
+            .expect("index");
+        assert_eq!(index, 1);
+        assert!(state.select_index(index));
+        assert_eq!(state.selected, 1);
+    }
+
+    #[test]
+    fn test_mouse_position_respects_offset_and_bounds() {
+        let branches = vec![
+            sample_branch("feature/one"),
+            sample_branch("feature/two"),
+            sample_branch("feature/three"),
+            sample_branch("feature/four"),
+        ];
+        let mut state = BranchListState::new().with_branches(branches);
+        state.update_list_area(Rect::new(2, 3, 20, 5)); // inner y=4..6
+        state.offset = 1;
+
+        let index = state
+            .selection_index_from_point(3, 4) // inner top row
+            .expect("index");
+        assert_eq!(index, 1);
+
+        assert!(state.selection_index_from_point(1, 1).is_none());
+        assert!(state.selection_index_from_point(25, 10).is_none());
     }
 
     #[test]

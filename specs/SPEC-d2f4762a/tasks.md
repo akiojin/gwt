@@ -3,6 +3,13 @@
 **仕様ID**: `SPEC-d2f4762a`
 **ポリシー**: CLAUDE.md の TDD ルールに基づき、必ず RED→GREEN→リグレッションチェックの順に進める。
 
+## 追加作業: ブランチ一覧のマウス選択 (2026-01-20)
+
+- [x] **T1310** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` にマウス選択の要件・方針を追記
+- [x] **T1311** [Test] `crates/gwt-cli/src/tui/screens/branch_list.rs` にマウス移動/クリックで選択が更新されるテストを追加
+- [x] **T1312** [実装] `crates/gwt-cli/src/tui/app.rs` と `crates/gwt-cli/src/tui/screens/branch_list.rs` でマウス移動/クリックから選択行更新とEnter相当の確定を実装
+- [x] **T1313** `cargo test -p gwt-cli` と `cargo build --release` を実行し、失敗がないことを確認する
+
 ## 追加作業: ブランチ一覧スピナーのフレーム安全化 (2026-01-19)
 
 - [x] **T1301** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` にスピナーのフレーム循環とクラッシュ防止の要件・方針を追記
