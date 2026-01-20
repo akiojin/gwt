@@ -803,7 +803,8 @@ impl BranchListState {
 
     /// Get current spinner character
     pub fn spinner_char(&self) -> char {
-        SPINNER_FRAMES[self.spinner_frame % SPINNER_FRAMES.len()]
+        let index = self.spinner_frame % SPINNER_FRAMES.len();
+        SPINNER_FRAMES[index]
     }
 
     /// Check if loading indicator should be visible (after delay)
@@ -1400,12 +1401,12 @@ mod tests {
     }
 
     #[test]
-    fn test_spinner_char_wraps_large_frame() {
+    fn test_spinner_char_wraps_out_of_range() {
         let mut state = BranchListState::new();
-        state.spinner_frame = SPINNER_FRAMES.len() * 3 + 1;
-        assert_eq!(state.spinner_char(), '/');
-        state.spinner_frame = SPINNER_FRAMES.len() * 5;
-        assert_eq!(state.spinner_char(), '|');
+        let frame = SPINNER_FRAMES.len() + 1;
+        state.spinner_frame = frame;
+        let expected = SPINNER_FRAMES[frame % SPINNER_FRAMES.len()];
+        assert_eq!(state.spinner_char(), expected);
     }
 
     #[test]

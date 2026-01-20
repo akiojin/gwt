@@ -1140,6 +1140,92 @@ impl Model {
         // Update branch list with new pane state
         self.branch_list
             .update_running_agents(&self.pane_list.panes);
+        self.reflow_agent_layout(None);
+    }
+
+    /// Toggle agent pane visibility (show/hide)
+    ///
+    /// When hiding: moves the pane to a separate background window
+    /// When showing: joins the pane back to the GWT window
+    fn toggle_agent_pane_visibility(&mut self) {
+        // Prefer the pane that matches the selected branch to avoid mismatches.
+        let selected_idx = self
+            .branch_list
+            .selected_branch()
+            .and_then(|branch| {
+                self.pane_list
+                    .panes
+                    .iter()
+                    .position(|pane| pane.branch_name == branch.name)
+            })
+            .unwrap_or(self.pane_list.selected);
+
+        let Some(pane) = self.pane_list.panes.get_mut(selected_idx) else {
+            return;
+        };
+
+        self.pane_list.selected = selected_idx;
+
+        if pane.is_background {
+            // Show the pane (join back to GWT window)
+            if pane.background_window.is_none() {
+                self.status_message = Some("No background window to restore".to_string());
+                self.status_message_time = Some(Instant::now());
+                return;
+            }
+
+            let Some(gwt_pane_id) = &self.gwt_pane_id else {
+                self.status_message = Some("GWT pane ID not available".to_string());
+                self.status_message_time = Some(Instant::now());
+                return;
+            };
+
+            let pane_id = pane.pane_id.clone();
+            match gwt_core::tmux::show_pane(&pane_id, gwt_pane_id) {
+                Ok(new_pane_id) => {
+                    // Update the pane ID and clear background state
+                    pane.pane_id = new_pane_id.clone();
+                    pane.is_background = false;
+                    pane.background_window = None;
+
+                    // Update agent_panes list
+                    self.agent_panes.push(new_pane_id);
+
+                    self.status_message = Some("Pane shown".to_string());
+                }
+                Err(e) => {
+                    self.status_message = Some(format!("Failed to show pane: {}", e));
+                }
+            }
+        } else {
+            // Hide the pane (break to background window)
+            let window_name = format!(
+                "gwt-agent-{}",
+                pane.branch_name.replace('/', "-").replace(' ', "_")
+            );
+
+            match gwt_core::tmux::hide_pane(&pane.pane_id, &window_name) {
+                Ok(background_window) => {
+                    // Remove from agent_panes list
+                    self.agent_panes.retain(|id| id != &pane.pane_id);
+
+                    // Update pane state
+                    pane.is_background = true;
+                    pane.background_window = Some(background_window);
+
+                    self.status_message = Some("Pane hidden".to_string());
+                }
+                Err(e) => {
+                    self.status_message = Some(format!("Failed to hide pane: {}", e));
+                }
+            }
+        }
+        self.status_message_time = Some(Instant::now());
+
+        // Update branch list with new pane state
+        self.branch_list
+            .update_running_agents(&self.pane_list.panes);
+        self.reflow_agent_layout(None);
     }
 
     /// FR-042: Terminate agent pane for the specified branch

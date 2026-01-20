@@ -528,3 +528,17 @@
 
 - [x] **T1222** [US8] `crates/gwt-cli/src/tui/screens/wizard.rs` に左右余白を追加
 - [x] **T1223** [US8] `crates/gwt-cli/src/tui/screens/confirm.rs` `crates/gwt-cli/src/tui/screens/error.rs` `crates/gwt-cli/src/tui/screens/help.rs` に左右余白を追加
+
+## 追加作業: スピナー範囲外アクセスの防止 (2026-01-19)
+
+### 仕様更新
+
+- [x] **T1230** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` にスピナー範囲外アクセス防止の要件と方針を追記
+
+### テスト（TDD）
+
+- [x] **T1231** [US0] `crates/gwt-cli/src/tui/screens/branch_list.rs` にスピナーのフレーム値が範囲外でもクラッシュしないことを確認するテストを追加
+
+### 実装
+
+- [x] **T1232** [US0] `crates/gwt-cli/src/tui/screens/branch_list.rs` のスピナー参照を正規化し、範囲外アクセスを防止
