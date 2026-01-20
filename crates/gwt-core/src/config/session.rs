@@ -1,10 +1,37 @@
 //! Session management
 
 use crate::error::{GwtError, Result};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::path::{Path, PathBuf};
+
+/// Agent status for state visualization (SPEC-861d8cdf FR-100a)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentStatus {
+    /// Status unknown (default for backward compatibility)
+    #[default]
+    Unknown,
+    /// Agent is actively processing
+    Running,
+    /// Agent is waiting for user input (permission prompt, etc.)
+    WaitingInput,
+    /// Agent has stopped or is idle
+    Stopped,
+}
+
+impl AgentStatus {
+    /// Check if status indicates the agent needs attention
+    pub fn needs_attention(&self) -> bool {
+        matches!(self, AgentStatus::WaitingInput | AgentStatus::Stopped)
+    }
+
+    /// Check if status indicates the agent is active
+    pub fn is_active(&self) -> bool {
+        matches!(self, AgentStatus::Running)
+    }
+}
 
 /// Session information (FR-069: Store version info in session history)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +61,12 @@ pub struct Session {
     pub created_at: DateTime<Utc>,
     /// Last updated timestamp
     pub updated_at: DateTime<Utc>,
+    /// Agent status (SPEC-861d8cdf FR-100a)
+    #[serde(default)]
+    pub status: AgentStatus,
+    /// Last activity timestamp (SPEC-861d8cdf FR-100b)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_activity_at: Option<DateTime<Utc>>,
 }
 
 impl Session {
@@ -54,6 +87,43 @@ impl Session {
             model: None,
             created_at: now,
             updated_at: now,
+            status: AgentStatus::Unknown,
+            last_activity_at: None,
+        }
+    }
+
+    /// Idle timeout in seconds (SPEC-861d8cdf FR-100c)
+    const IDLE_TIMEOUT_SECS: i64 = 60;
+
+    /// Check if session should be marked as stopped due to inactivity
+    /// Returns true if last_activity_at is more than 60 seconds ago
+    pub fn should_mark_stopped(&self) -> bool {
+        if self.status == AgentStatus::Stopped {
+            return false; // Already stopped
+        }
+        if let Some(last_activity) = self.last_activity_at {
+            let elapsed = Utc::now() - last_activity;
+            elapsed > Duration::seconds(Self::IDLE_TIMEOUT_SECS)
+        } else {
+            false
+        }
+    }
+
+    /// Update status and last_activity_at timestamp
+    pub fn update_status(&mut self, status: AgentStatus) {
+        self.status = status;
+        self.last_activity_at = Some(Utc::now());
+        self.updated_at = Utc::now();
+    }
+
+    /// Check and update stopped status if idle timeout exceeded
+    pub fn check_idle_timeout(&mut self) -> bool {
+        if self.should_mark_stopped() {
+            self.status = AgentStatus::Stopped;
+            self.updated_at = Utc::now();
+            true
+        } else {
+            false
         }
     }
 
@@ -226,5 +296,129 @@ mod tests {
             session.format_tool_usage(),
             Some("Codex@latest".to_string())
         );
+    }
+
+    // SPEC-861d8cdf T-100 tests
+
+    #[test]
+    fn test_agent_status_default() {
+        let status = AgentStatus::default();
+        assert_eq!(status, AgentStatus::Unknown);
+    }
+
+    #[test]
+    fn test_agent_status_serialize_deserialize() {
+        let status = AgentStatus::Running;
+        let json = serde_json::to_string(&status).unwrap();
+        assert_eq!(json, "\"running\"");
+
+        let deserialized: AgentStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, AgentStatus::Running);
+    }
+
+    #[test]
+    fn test_agent_status_all_variants() {
+        let variants = [
+            (AgentStatus::Unknown, "\"unknown\""),
+            (AgentStatus::Running, "\"running\""),
+            (AgentStatus::WaitingInput, "\"waiting_input\""),
+            (AgentStatus::Stopped, "\"stopped\""),
+        ];
+
+        for (status, expected_json) in variants {
+            let json = serde_json::to_string(&status).unwrap();
+            assert_eq!(json, expected_json);
+        }
+    }
+
+    #[test]
+    fn test_session_with_status_field() {
+        let session = Session::new("/test/path", "test-branch");
+        assert_eq!(session.status, AgentStatus::Unknown);
+        assert!(session.last_activity_at.is_none());
+    }
+
+    #[test]
+    fn test_session_status_update() {
+        let mut session = Session::new("/test/path", "test-branch");
+        session.update_status(AgentStatus::Running);
+
+        assert_eq!(session.status, AgentStatus::Running);
+        assert!(session.last_activity_at.is_some());
+    }
+
+    #[test]
+    fn test_session_load_without_status_field() {
+        // Old format TOML (without status field)
+        let toml_content = r#"
+id = "test-id"
+worktree_path = "/test/path"
+branch = "test-branch"
+created_at = "2026-01-20T00:00:00Z"
+updated_at = "2026-01-20T00:00:00Z"
+"#;
+
+        let session: Session = toml::from_str(toml_content).unwrap();
+        assert_eq!(session.status, AgentStatus::Unknown);
+    }
+
+    #[test]
+    fn test_session_auto_stopped_after_60_seconds() {
+        let mut session = Session::new("/test/path", "test-branch");
+        session.status = AgentStatus::Running;
+        session.last_activity_at = Some(Utc::now() - Duration::seconds(61));
+
+        assert!(session.should_mark_stopped());
+    }
+
+    #[test]
+    fn test_session_not_stopped_within_60_seconds() {
+        let mut session = Session::new("/test/path", "test-branch");
+        session.status = AgentStatus::Running;
+        session.last_activity_at = Some(Utc::now() - Duration::seconds(30));
+
+        assert!(!session.should_mark_stopped());
+    }
+
+    #[test]
+    fn test_session_check_idle_timeout() {
+        let mut session = Session::new("/test/path", "test-branch");
+        session.status = AgentStatus::Running;
+        session.last_activity_at = Some(Utc::now() - Duration::seconds(61));
+
+        let changed = session.check_idle_timeout();
+        assert!(changed);
+        assert_eq!(session.status, AgentStatus::Stopped);
+    }
+
+    #[test]
+    fn test_agent_status_needs_attention() {
+        assert!(!AgentStatus::Unknown.needs_attention());
+        assert!(!AgentStatus::Running.needs_attention());
+        assert!(AgentStatus::WaitingInput.needs_attention());
+        assert!(AgentStatus::Stopped.needs_attention());
+    }
+
+    #[test]
+    fn test_agent_status_is_active() {
+        assert!(!AgentStatus::Unknown.is_active());
+        assert!(AgentStatus::Running.is_active());
+        assert!(!AgentStatus::WaitingInput.is_active());
+        assert!(!AgentStatus::Stopped.is_active());
+    }
+
+    #[test]
+    fn test_session_save_load_with_status() {
+        let temp = TempDir::new().unwrap();
+        let session_path = temp.path().join("session.toml");
+
+        let mut session = Session::new("/repo/.worktrees/feature", "feature/test");
+        session.update_status(AgentStatus::WaitingInput);
+
+        session.save(&session_path).unwrap();
+
+        let loaded = Session::load(&session_path).unwrap();
+        assert_eq!(loaded.status, AgentStatus::WaitingInput);
+        assert!(loaded.last_activity_at.is_some());
     }
 }

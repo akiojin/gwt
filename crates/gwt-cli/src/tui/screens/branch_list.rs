@@ -3,8 +3,9 @@
 #![allow(dead_code)]
 
 use gwt_core::ai::SessionSummaryCache;
+use gwt_core::config::AgentStatus;
 use gwt_core::git::{Branch, BranchMeta, BranchSummary, DivergenceStatus, Repository};
-use gwt_core::tmux::AgentPane;
+use gwt_core::tmux::{AgentPane, StatusBarSummary};
 use gwt_core::worktree::Worktree;
 use ratatui::{prelude::*, widgets::*};
 use std::collections::{HashMap, HashSet};
@@ -1149,7 +1150,7 @@ impl BranchListState {
 
 /// Render branch list screen
 /// Note: Header, Filter, Mode are rendered by app.rs view_boxed_header
-/// This function only renders: BranchList + WorktreePath/Status
+/// This function only renders: BranchList + StatusBar + WorktreePath/Status
 pub fn render_branch_list(
     state: &mut BranchListState,
     frame: &mut Frame,
@@ -1159,19 +1160,99 @@ pub fn render_branch_list(
 ) {
     // SPEC-4b893dae: Summary panel height is 12 lines (FR-003)
     let panel_height = crate::tui::components::SummaryPanel::height();
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(3),               // Branch list (FR-003)
-            Constraint::Length(panel_height), // Summary panel (SPEC-4b893dae)
-        ])
-        .split(area);
+
+    // Check if we have agents to show status bar
+    let has_agents = !state.running_agents.is_empty();
+
+    let chunks = if has_agents {
+        // With status bar (SPEC-861d8cdf FR-104a)
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(3),               // Branch list (FR-003)
+                Constraint::Length(1),            // Status bar (FR-104a)
+                Constraint::Length(panel_height), // Summary panel (SPEC-4b893dae)
+            ])
+            .split(area)
+    } else {
+        // Without status bar (no agents)
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(3),               // Branch list (FR-003)
+                Constraint::Length(panel_height), // Summary panel (SPEC-4b893dae)
+            ])
+            .split(area)
+    };
 
     // Cache branch list area for mouse selection and update visible height
     state.update_list_area(chunks[0]);
 
     render_branches(state, frame, chunks[0], has_focus);
-    render_summary_panel(state, frame, chunks[1], status_message);
+
+    if has_agents {
+        render_status_bar(state, frame, chunks[1]);
+        render_summary_panel(state, frame, chunks[2], status_message);
+    } else {
+        render_summary_panel(state, frame, chunks[1], status_message);
+    }
+}
+
+/// Render agent status bar (SPEC-861d8cdf T-105, FR-104a, FR-104b, FR-104c)
+fn render_status_bar(state: &BranchListState, frame: &mut Frame, area: Rect) {
+    let agents: Vec<_> = state.running_agents.values().cloned().collect();
+    let summary = StatusBarSummary::from_agents(&agents);
+
+    if !summary.has_agents() {
+        return;
+    }
+
+    let mut spans = Vec::new();
+
+    // Add "Agents: " prefix
+    spans.push(Span::styled(
+        "Agents: ",
+        Style::default().fg(Color::DarkGray),
+    ));
+
+    // Add running count
+    if summary.running_count > 0 {
+        spans.push(Span::styled(
+            format!("{} running", summary.running_count),
+            Style::default().fg(Color::Green),
+        ));
+    }
+
+    // Add separator if needed
+    if summary.running_count > 0 && (summary.waiting_count > 0 || summary.stopped_count > 0) {
+        spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
+    }
+
+    // Add waiting count (FR-104c: highlighted in yellow)
+    if summary.waiting_count > 0 {
+        spans.push(Span::styled(
+            format!("{} waiting", summary.waiting_count),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    // Add separator if needed
+    if summary.waiting_count > 0 && summary.stopped_count > 0 {
+        spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
+    }
+
+    // Add stopped count
+    if summary.stopped_count > 0 {
+        spans.push(Span::styled(
+            format!("{} stopped", summary.stopped_count),
+            Style::default().fg(Color::Red),
+        ));
+    }
+
+    let line = Line::from(spans);
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 /// Render header line (FR-001, FR-001a)
@@ -1390,41 +1471,70 @@ fn render_branch_row(
     let left_width = selection_width + 1 + 1 + safety_icon.len() + 1 + display_name.width();
 
     // Build right side (agent info) and calculate its width
+    // SPEC-861d8cdf T-103: Status-based display
     let (right_spans, right_width): (Vec<Span>, usize) = if let Some(agent) = running_agent {
         let agent_display = get_agent_display_name(&agent.agent_name);
         let uptime = agent.uptime_string();
 
-        if agent.is_background {
-            // Background (hidden) pane - with spinner: "X Agent uptime"
-            let bg_spinner_char = BG_SPINNER_FRAMES[spinner_frame % BG_SPINNER_FRAMES.len()];
-            let width = 2 + agent_display.width() + 1 + uptime.width(); // spinner + " " + name + " " + uptime
-            let spans = vec![
-                Span::styled(
-                    format!("{} ", bg_spinner_char),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(agent_display, Style::default().fg(Color::DarkGray)),
-                Span::styled(" ", Style::default().fg(Color::DarkGray)),
-                Span::styled(uptime, Style::default().fg(Color::DarkGray)),
-            ];
-            (spans, width)
-        } else {
-            // Visible running pane - with spinner: "⠋ Agent uptime"
-            let active_spinner_char =
-                ACTIVE_SPINNER_FRAMES[spinner_frame % ACTIVE_SPINNER_FRAMES.len()];
-            let width = 2 + agent_display.width() + 1 + uptime.width(); // spinner(1) + " " + name + " " + uptime
-            let agent_color = get_agent_color(Some(&agent.agent_name));
-            let spans = vec![
-                Span::styled(
-                    format!("{} ", active_spinner_char),
-                    Style::default().fg(Color::Green),
-                ),
-                Span::styled(agent_display, Style::default().fg(agent_color)),
-                Span::raw(" "),
-                Span::styled(uptime, Style::default().fg(Color::Yellow)),
-            ];
-            (spans, width)
-        }
+        // Determine icon and color based on status (SPEC-861d8cdf T-103)
+        let (status_icon, status_color) = match agent.status {
+            AgentStatus::Running => {
+                if agent.is_background {
+                    let icon = BG_SPINNER_FRAMES[spinner_frame % BG_SPINNER_FRAMES.len()];
+                    (icon, Color::DarkGray)
+                } else {
+                    let icon = ACTIVE_SPINNER_FRAMES[spinner_frame % ACTIVE_SPINNER_FRAMES.len()];
+                    (icon, Color::Green)
+                }
+            }
+            AgentStatus::WaitingInput => {
+                // Blink effect: 500ms on/off (2 spinner frames = ~500ms with 250ms tick)
+                let should_show = (spinner_frame / 2).is_multiple_of(2);
+                if should_show {
+                    ('?', Color::Yellow)
+                } else {
+                    (' ', Color::Yellow)
+                }
+            }
+            AgentStatus::Stopped => ('#', Color::Red),
+            AgentStatus::Unknown => {
+                // Fallback to original behavior based on is_background
+                if agent.is_background {
+                    let icon = BG_SPINNER_FRAMES[spinner_frame % BG_SPINNER_FRAMES.len()];
+                    (icon, Color::DarkGray)
+                } else {
+                    let icon = ACTIVE_SPINNER_FRAMES[spinner_frame % ACTIVE_SPINNER_FRAMES.len()];
+                    (icon, Color::Green)
+                }
+            }
+        };
+
+        // Determine text color based on status
+        let text_color = match agent.status {
+            AgentStatus::Stopped => Color::Red,
+            AgentStatus::WaitingInput => Color::Yellow,
+            AgentStatus::Running if agent.is_background => Color::DarkGray,
+            _ => get_agent_color(Some(&agent.agent_name)),
+        };
+
+        let uptime_color = match agent.status {
+            AgentStatus::Stopped => Color::DarkGray,
+            AgentStatus::WaitingInput => Color::Yellow,
+            AgentStatus::Running if agent.is_background => Color::DarkGray,
+            _ => Color::Yellow,
+        };
+
+        let width = 2 + agent_display.width() + 1 + uptime.width();
+        let spans = vec![
+            Span::styled(
+                format!("{} ", status_icon),
+                Style::default().fg(status_color),
+            ),
+            Span::styled(agent_display, Style::default().fg(text_color)),
+            Span::raw(" "),
+            Span::styled(uptime, Style::default().fg(uptime_color)),
+        ];
+        (spans, width)
     } else if let Some(tool) = &branch.last_tool_usage {
         // No running agent, but show last tool usage (FR-070)
         let agent_id = tool.split('@').next();

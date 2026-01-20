@@ -17,7 +17,8 @@ use gwt_core::ai::{
 };
 use gwt_core::config::get_branch_tool_history;
 use gwt_core::config::{
-    save_session_entry, AISettings, Profile, ProfilesConfig, ResolvedAISettings, ToolSessionEntry,
+    get_claude_settings_path, is_gwt_hooks_registered, register_gwt_hooks, save_session_entry,
+    AISettings, Profile, ProfilesConfig, ResolvedAISettings, ToolSessionEntry,
 };
 use gwt_core::error::GwtError;
 use gwt_core::git::{Branch, PrCache, Repository};
@@ -280,6 +281,8 @@ pub struct Model {
     pending_agent_termination: Option<String>,
     /// Pending cleanup branches (FR-010)
     pending_cleanup_branches: Vec<String>,
+    /// Pending hook setup (SPEC-861d8cdf T-104)
+    pending_hook_setup: bool,
     /// Branch list update receiver
     branch_list_rx: Option<Receiver<BranchListUpdate>>,
     /// PR title update receiver
@@ -426,6 +429,7 @@ impl Model {
             pending_unsafe_selection: None,
             pending_agent_termination: None,
             pending_cleanup_branches: Vec::new(),
+            pending_hook_setup: false,
             branch_list_rx: None,
             pr_title_rx: None,
             safety_rx: None,
@@ -469,6 +473,19 @@ impl Model {
         model.reconnect_orphaned_panes();
 
         model.apply_entry_context(context);
+
+        // SPEC-861d8cdf T-104: Check if hook setup is needed on first startup
+        if model.tmux_mode.is_multi() {
+            if let Some(settings_path) = get_claude_settings_path() {
+                if !is_gwt_hooks_registered(&settings_path) {
+                    model.pending_hook_setup = true;
+                    model.confirm = ConfirmState::hook_setup();
+                    model.screen_stack.push(model.screen.clone());
+                    model.screen = Screen::Confirm;
+                }
+            }
+        }
+
         model
     }
 
@@ -2012,6 +2029,7 @@ impl Model {
                     // FR-029d: Cancel confirm dialog without executing action
                     self.pending_unsafe_selection = None;
                     self.pending_cleanup_branches.clear();
+                    self.pending_hook_setup = false;
                     if let Some(prev_screen) = self.screen_stack.pop() {
                         self.screen = prev_screen;
                     }
@@ -2161,11 +2179,20 @@ impl Model {
                         if self.pending_agent_termination.is_some() {
                             self.update(Message::ExecuteAgentTermination);
                         }
+                        // SPEC-861d8cdf T-104: Handle hook setup confirmation
+                        if self.pending_hook_setup {
+                            if let Some(settings_path) = get_claude_settings_path() {
+                                if let Err(e) = register_gwt_hooks(&settings_path) {
+                                    debug!(category = "tui", error = %e, "Failed to register gwt hooks");
+                                }
+                            }
+                        }
                     }
                     // Clear pending state and return to previous screen
                     self.pending_unsafe_selection = None;
                     self.pending_agent_termination = None;
                     self.pending_cleanup_branches.clear();
+                    self.pending_hook_setup = false;
                     if let Some(prev_screen) = self.screen_stack.pop() {
                         self.screen = prev_screen;
                     }
