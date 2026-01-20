@@ -158,6 +158,9 @@ The tool presents an interactive interface with the following options:
 | `?` | Help |
 | `q` / `Ctrl+C` | Quit |
 
+Mouse:
+- Double-click a branch row to trigger the Enter action (focus pane / open wizard).
+
 ### Filter Mode
 
 | Key | Action |
