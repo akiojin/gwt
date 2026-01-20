@@ -50,6 +50,9 @@ enum BranchNameType {
     Other,
 }
 
+const BRANCH_LIST_PADDING_X: u16 = 1;
+const PANEL_PADDING_X: u16 = 1;
+
 /// Get branch name type for sorting
 fn get_branch_name_type(name: &str) -> BranchNameType {
     let lower = name.to_lowercase();
@@ -760,7 +763,8 @@ impl BranchListState {
     /// Update cached list areas based on rendered branch list block
     pub fn update_list_area(&mut self, area: Rect) {
         self.list_area = Some(area);
-        let inner = if area.width < 2 || area.height < 2 {
+        let min_width = 2 + (BRANCH_LIST_PADDING_X * 2);
+        let inner = if area.width <= min_width || area.height <= 2 {
             Rect {
                 x: area.x,
                 y: area.y,
@@ -769,9 +773,9 @@ impl BranchListState {
             }
         } else {
             Rect {
-                x: area.x.saturating_add(1),
+                x: area.x.saturating_add(1 + BRANCH_LIST_PADDING_X),
                 y: area.y.saturating_add(1),
-                width: area.width.saturating_sub(2),
+                width: area.width.saturating_sub(2 + (BRANCH_LIST_PADDING_X * 2)),
                 height: area.height.saturating_sub(2),
             }
         };
@@ -1412,7 +1416,13 @@ fn render_branches(state: &BranchListState, frame: &mut Frame, area: Rect, has_f
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(border_style);
+        .border_style(border_style)
+        .padding(Padding::new(
+            BRANCH_LIST_PADDING_X,
+            BRANCH_LIST_PADDING_X,
+            0,
+            0,
+        ));
     frame.render_widget(block.clone(), area);
     let inner_area = block.inner(area);
     if inner_area.width == 0 || inner_area.height == 0 {
@@ -1794,7 +1804,8 @@ fn render_details_panel(
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
             .title(title)
-            .title_bottom(panel_switch_hint());
+            .title_bottom(panel_switch_hint())
+            .padding(Padding::new(PANEL_PADDING_X, PANEL_PADDING_X, 0, 0));
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
@@ -1814,7 +1825,8 @@ fn render_details_panel(
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
             .title(title)
-            .title_bottom(panel_switch_hint());
+            .title_bottom(panel_switch_hint())
+            .padding(Padding::new(PANEL_PADDING_X, PANEL_PADDING_X, 0, 0));
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
@@ -1839,7 +1851,8 @@ fn render_details_panel(
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
             .title(title)
-            .title_bottom(panel_switch_hint());
+            .title_bottom(panel_switch_hint())
+            .padding(Padding::new(PANEL_PADDING_X, PANEL_PADDING_X, 0, 0));
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
@@ -1885,7 +1898,8 @@ fn render_session_panel(
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan))
         .title(title)
-        .title_bottom(session_panel_hint());
+        .title_bottom(session_panel_hint())
+        .padding(Padding::new(PANEL_PADDING_X, PANEL_PADDING_X, 0, 0));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -2290,7 +2304,7 @@ mod tests {
         state.update_list_area(Rect::new(0, 0, 20, 5)); // inner height = 3
 
         let index = state
-            .selection_index_from_point(1, 2) // inner y=1 -> row 1
+            .selection_index_from_point(2, 2) // inner x=2,y=1 -> row 1
             .expect("index");
         assert_eq!(index, 1);
         assert!(state.select_index(index));
@@ -2310,7 +2324,7 @@ mod tests {
         state.offset = 1;
 
         let index = state
-            .selection_index_from_point(3, 4) // inner top row
+            .selection_index_from_point(4, 4) // inner top row
             .expect("index");
         assert_eq!(index, 1);
 
@@ -2362,6 +2376,7 @@ mod tests {
         assert_eq!(buffer[(19, 0)].symbol(), "┐");
         assert_eq!(buffer[(0, 4)].symbol(), "└");
         assert_eq!(buffer[(19, 4)].symbol(), "┘");
+        assert_eq!(buffer[(1, 1)].symbol(), " ");
     }
 
     #[test]
