@@ -376,7 +376,7 @@ mod tests {
     fn test_profile_actions_text_uses_enter_for_env() {
         assert_eq!(
             profile_actions_text(),
-            "[Space] Activate | [Enter] Edit env | [n] New | [d] Delete | [Esc] Back"
+            "[Space] Activate | [Enter] Edit AI/env | [n] New | [d] Delete | [Esc] Back"
         );
     }
 }

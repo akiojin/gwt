@@ -1819,7 +1819,11 @@ fn render_session_panel(
                 Style::default().fg(Color::DarkGray),
             )));
         } else if let Some(summary) = state.session_summary(&branch.name) {
-            if let Some(markdown) = summary.markdown.as_ref() {
+            let markdown = summary.markdown.clone();
+            let task_overview = summary.task_overview.clone();
+            let short_summary = summary.short_summary.clone();
+            let bullet_points = summary.bullet_points.clone();
+            if let Some(markdown) = markdown.as_ref() {
                 lines = render_markdown_lines(markdown);
                 if lines.is_empty() {
                     lines.push(Line::from(markdown.to_string()));
@@ -1829,7 +1833,7 @@ fn render_session_panel(
                     "Task:",
                     Style::default().fg(Color::Yellow),
                 )));
-                if let Some(task) = summary.task_overview.as_ref() {
+                if let Some(task) = task_overview.as_ref() {
                     lines.push(Line::from(format!("  {}", task)));
                 } else {
                     lines.push(Line::from(Span::styled(
@@ -1842,7 +1846,7 @@ fn render_session_panel(
                     "Summary:",
                     Style::default().fg(Color::Yellow),
                 )));
-                if let Some(short) = summary.short_summary.as_ref() {
+                if let Some(short) = short_summary.as_ref() {
                     lines.push(Line::from(format!("  {}", short)));
                 } else {
                     lines.push(Line::from(Span::styled(
@@ -1855,13 +1859,13 @@ fn render_session_panel(
                     "Highlights:",
                     Style::default().fg(Color::Yellow),
                 )));
-                if summary.bullet_points.is_empty() {
+                if bullet_points.is_empty() {
                     lines.push(Line::from(Span::styled(
                         "  (No highlights)",
                         Style::default().fg(Color::DarkGray),
                     )));
                 } else {
-                    for bullet in summary.bullet_points.iter().take(3) {
+                    for bullet in bullet_points.iter().take(3) {
                         lines.push(Line::from(format!("  {}", bullet)));
                     }
                 }
@@ -1903,8 +1907,8 @@ fn render_session_panel(
     frame.render_widget(paragraph, inner);
 }
 
-fn render_markdown_lines(markdown: &str) -> Vec<Line> {
-    let mut lines: Vec<Line> = Vec::new();
+fn render_markdown_lines(markdown: &str) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
     let mut buffer = String::new();
     let mut in_item = false;
 
@@ -1965,7 +1969,7 @@ fn render_markdown_lines(markdown: &str) -> Vec<Line> {
     lines
 }
 
-fn flush_paragraph_lines(lines: &mut Vec<Line>, buffer: &mut String, in_item: bool) {
+fn flush_paragraph_lines(lines: &mut Vec<Line<'static>>, buffer: &mut String, in_item: bool) {
     let text = buffer.trim();
     if text.is_empty() {
         return;
@@ -1978,7 +1982,7 @@ fn flush_paragraph_lines(lines: &mut Vec<Line>, buffer: &mut String, in_item: bo
     buffer.clear();
 }
 
-fn push_plain_lines(lines: &mut Vec<Line>, text: &str) {
+fn push_plain_lines(lines: &mut Vec<Line<'static>>, text: &str) {
     for line in text.split('\n') {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -1989,7 +1993,7 @@ fn push_plain_lines(lines: &mut Vec<Line>, text: &str) {
     }
 }
 
-fn push_bullet_lines(lines: &mut Vec<Line>, text: &str) {
+fn push_bullet_lines(lines: &mut Vec<Line<'static>>, text: &str) {
     let mut iter = text.split('\n');
     if let Some(first) = iter.next() {
         let trimmed = first.trim();
