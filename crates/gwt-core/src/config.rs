@@ -10,8 +10,8 @@ mod settings;
 mod ts_session;
 
 pub use claude_hooks::{
-    get_claude_settings_path, is_gwt_hooks_registered, register_gwt_hooks, unregister_gwt_hooks,
-    HOOK_EVENTS,
+    all_hook_events, get_claude_settings_path, is_gwt_hooks_registered, register_gwt_hooks,
+    unregister_gwt_hooks, HOOK_EVENTS_WITHOUT_MATCHER, HOOK_EVENTS_WITH_MATCHER,
 };
 pub use migration::migrate_json_to_toml;
 pub use profile::{AISettings, Profile, ProfilesConfig, ResolvedAISettings};
