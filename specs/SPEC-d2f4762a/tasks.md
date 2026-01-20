@@ -3,6 +3,27 @@
 **仕様ID**: `SPEC-d2f4762a`
 **ポリシー**: CLAUDE.md の TDD ルールに基づき、必ず RED→GREEN→リグレッションチェックの順に進める。
 
+## 追加作業: ブランチ一覧の内側余白 (2026-01-20)
+
+- [x] **T1319** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` にブランチ一覧の左右余白要件を追記
+- [x] **T1320** [Test] `crates/gwt-cli/src/tui/screens/branch_list.rs` のマウス選択/領域計算テストを余白込みの期待値に更新
+- [x] **T1321** [Impl] `crates/gwt-cli/src/tui/screens/branch_list.rs` のブランチ一覧枠に左右余白を追加し、内側領域計算を調整
+- [ ] **T1322** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
+
+## 追加作業: ブランチ一覧のダブルクリック選択 (2026-01-20)
+
+- [x] **T1311** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` にダブルクリック選択の要件・方針を追記
+- [x] **T1312** [Test] `crates/gwt-cli/src/tui/app.rs` にダブルクリックで選択が更新され、単クリックでは更新されないことを検証するテストを追加
+- [x] **T1313** [Impl] `crates/gwt-cli/src/tui/app.rs` のブランチ一覧マウス選択をダブルクリック検知に変更する
+- [x] **T1314** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
+
+## 追加作業: ダブルクリックでEnter相当を実行 (2026-01-20)
+
+- [x] **T1315** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` にダブルクリックでEnter相当を実行する要件・方針を追記
+- [x] **T1316** [Test] `crates/gwt-cli/src/tui/app.rs` にダブルクリックでウィザードが起動することを検証するテストを追加
+- [x] **T1317** [Impl] `crates/gwt-cli/src/tui/app.rs` でダブルクリック時にEnter相当の処理を実行する
+- [x] **T1318** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
+
 ## 追加作業: クリーンアップ進捗の非ブロッキング化 (2026-01-20)
 
 - [x] **T1305** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` にクリーンアップ進捗表示と非ブロッキング要件を追記

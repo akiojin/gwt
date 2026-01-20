@@ -21,7 +21,7 @@ use gwt_core::config::{
     AISettings, Profile, ProfilesConfig, ResolvedAISettings, ToolSessionEntry,
 };
 use gwt_core::error::GwtError;
-use gwt_core::git::{Branch, PrCache, Repository};
+use gwt_core::git::{Branch, PrCache, Remote, Repository};
 use gwt_core::tmux::{
     break_pane, compute_equal_splits, get_current_session, group_panes_by_left,
     join_pane_to_target, kill_pane, launcher, list_pane_geometries, resize_pane_height,
@@ -38,7 +38,9 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 use tracing::{debug, error, info};
 
-use super::screens::branch_list::WorktreeStatus;
+const BRANCH_LIST_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(500);
+
+use super::screens::branch_list::{PrInfo, WorktreeStatus};
 use super::screens::environment::EditField;
 use super::screens::pane_list::PaneListState;
 use super::screens::split_layout::{calculate_split_layout, SplitLayoutState};
@@ -145,8 +147,13 @@ impl TuiEntryContext {
     }
 }
 
+struct MouseClick {
+    index: usize,
+    at: Instant,
+}
+
 struct PrTitleUpdate {
-    titles: HashMap<String, String>,
+    info: HashMap<String, PrInfo>,
 }
 
 struct SafetyUpdate {
@@ -195,6 +202,7 @@ struct BranchListUpdate {
     safety_targets: Vec<SafetyCheckTarget>,
     base_branches: Vec<String>,
     base_branch: String,
+    base_branch_exists: bool,
     total_count: usize,
     active_count: usize,
 }
@@ -229,6 +237,8 @@ pub struct Model {
     ctrl_c_count: u8,
     /// Last Ctrl+C press time
     last_ctrl_c: Option<Instant>,
+    /// Last mouse click for double click detection
+    last_mouse_click: Option<MouseClick>,
     /// Current screen
     screen: Screen,
     /// Screen stack for navigation
@@ -403,6 +413,7 @@ impl Model {
             should_quit: false,
             ctrl_c_count: 0,
             last_ctrl_c: None,
+            last_mouse_click: None,
             screen: Screen::BranchList,
             screen_stack: Vec::new(),
             repo_root,
@@ -446,6 +457,10 @@ impl Model {
             last_spinner_update: None,
             last_session_poll: None,
         };
+
+        model
+            .branch_list
+            .set_repo_web_url(resolve_repo_web_url(&model.repo_root));
 
         let (session_tx, session_rx) = mpsc::channel();
         model.session_summary_tx = Some(session_tx);
@@ -638,6 +653,7 @@ impl Model {
                 safety_targets,
                 base_branches,
                 base_branch,
+                base_branch_exists,
                 total_count,
                 active_count,
             });
@@ -658,18 +674,30 @@ impl Model {
             let mut cache = PrCache::new();
             cache.populate(&repo_root);
 
-            let mut titles = HashMap::new();
+            let mut info = HashMap::new();
             for name in branch_names {
-                if let Some(title) = cache.get_title(&name) {
-                    titles.insert(name, title.to_string());
+                if let Some(pr) = cache.get(&name) {
+                    info.insert(
+                        name,
+                        PrInfo {
+                            title: pr.title.clone(),
+                            number: pr.number,
+                            url: pr.url.clone(),
+                        },
+                    );
                 }
             }
 
-            let _ = tx.send(PrTitleUpdate { titles });
+            let _ = tx.send(PrTitleUpdate { info });
         });
     }
 
-    fn spawn_safety_checks(&mut self, targets: Vec<SafetyCheckTarget>, base_branch: String) {
+    fn spawn_safety_checks(
+        &mut self,
+        targets: Vec<SafetyCheckTarget>,
+        base_branch: String,
+        base_branch_exists: bool,
+    ) {
         if targets.is_empty() {
             self.safety_rx = None;
             return;
@@ -680,6 +708,9 @@ impl Model {
         self.safety_rx = Some(rx);
 
         thread::spawn(move || {
+            let mut pr_cache = PrCache::new();
+            pr_cache.populate(&repo_root);
+
             for target in targets {
                 let mut has_unpushed = false;
                 let mut is_unmerged = false;
@@ -707,13 +738,26 @@ impl Model {
                     continue;
                 }
 
+                if pr_cache.is_merged(&target.branch) {
+                    safe_to_cleanup = true;
+                    let _ = tx.send(SafetyUpdate {
+                        branch: target.branch,
+                        has_unpushed,
+                        is_unmerged,
+                        safe_to_cleanup,
+                    });
+                    continue;
+                }
+
                 // Check if branch is merged into base using merge-base --is-ancestor
                 // This correctly handles cases where base_branch has advanced beyond the merge point
-                if let Ok(is_merged) =
-                    Branch::is_merged_into(&repo_root, &target.branch, &base_branch)
-                {
-                    is_unmerged = !is_merged;
-                    safe_to_cleanup = is_merged;
+                if base_branch_exists {
+                    if let Ok(is_merged) =
+                        Branch::is_merged_into(&repo_root, &target.branch, &base_branch)
+                    {
+                        is_unmerged = !is_merged;
+                        safe_to_cleanup = is_merged;
+                    }
                 }
 
                 let _ = tx.send(SafetyUpdate {
@@ -1228,6 +1272,7 @@ impl Model {
                 branch_list.set_session_cache(session_cache);
                 branch_list.set_session_inflight(session_inflight);
                 branch_list.set_session_missing(session_missing);
+                branch_list.set_repo_web_url(self.branch_list.repo_web_url().cloned());
                 branch_list.working_directory = Some(self.repo_root.display().to_string());
                 branch_list.version = Some(env!("CARGO_PKG_VERSION").to_string());
                 self.branch_list = branch_list;
@@ -1239,7 +1284,11 @@ impl Model {
 
                 let total_updates = update.safety_targets.len() + update.worktree_targets.len();
                 self.branch_list.reset_status_progress(total_updates);
-                self.spawn_safety_checks(update.safety_targets, update.base_branch);
+                self.spawn_safety_checks(
+                    update.safety_targets,
+                    update.base_branch,
+                    update.base_branch_exists,
+                );
                 self.spawn_worktree_status_checks(update.worktree_targets);
                 self.spawn_pr_title_fetch(update.branch_names);
 
@@ -1262,7 +1311,7 @@ impl Model {
 
         match rx.try_recv() {
             Ok(update) => {
-                self.branch_list.apply_pr_titles(&update.titles);
+                self.branch_list.apply_pr_info(&update.info);
                 self.pr_title_rx = None;
             }
             Err(TryRecvError::Empty) => {}
@@ -1687,12 +1736,19 @@ impl Model {
 
     fn handle_branch_list_mouse(&mut self, mouse: MouseEvent) {
         if !matches!(self.screen, Screen::BranchList) {
+            self.last_mouse_click = None;
             return;
         }
         if self.wizard.visible {
+            self.last_mouse_click = None;
             return;
         }
         if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return;
+        }
+
+        if let Some(url) = self.branch_list.link_at_point(mouse.column, mouse.row) {
+            self.open_url(&url);
             return;
         }
 
@@ -1700,12 +1756,126 @@ impl Model {
             .branch_list
             .selection_index_from_point(mouse.column, mouse.row)
         else {
+            self.last_mouse_click = None;
             return;
         };
 
-        if self.branch_list.select_index(index) {
-            self.refresh_branch_summary();
+        let now = Instant::now();
+        let is_double_click = self.last_mouse_click.as_ref().is_some_and(|last| {
+            last.index == index && now.duration_since(last.at) <= BRANCH_LIST_DOUBLE_CLICK_WINDOW
+        });
+
+        if is_double_click {
+            self.last_mouse_click = None;
+            if self.branch_list.select_index(index) {
+                self.refresh_branch_summary();
+            }
+            self.handle_branch_enter();
+        } else {
+            self.last_mouse_click = Some(MouseClick { index, at: now });
         }
+    }
+
+    fn open_url(&mut self, url: &str) {
+        if url.trim().is_empty() {
+            self.status_message = Some("Failed to open URL: empty URL".to_string());
+            self.status_message_time = Some(Instant::now());
+            return;
+        }
+
+        let mut last_error: Option<std::io::Error> = None;
+        #[cfg(target_os = "macos")]
+        {
+            match std::process::Command::new("open").arg(url).spawn() {
+                Ok(_) => return,
+                Err(err) => last_error = Some(err),
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            let candidates = [
+                ("xdg-open", vec![url]),
+                ("gio", vec!["open", url]),
+                ("x-www-browser", vec![url]),
+            ];
+            for (cmd, args) in candidates {
+                match std::process::Command::new(cmd).args(args).spawn() {
+                    Ok(_) => return,
+                    Err(err) => last_error = Some(err),
+                }
+            }
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            match std::process::Command::new("cmd")
+                .args(["/C", "start", "", url])
+                .spawn()
+            {
+                Ok(_) => return,
+                Err(err) => last_error = Some(err),
+            }
+
+            match std::process::Command::new("powershell")
+                .args(["-NoProfile", "-Command", "Start-Process", url])
+                .spawn()
+            {
+                Ok(_) => return,
+                Err(err) => last_error = Some(err),
+            }
+        }
+
+        if std::env::var_os("TMUX").is_some()
+            && std::process::Command::new("tmux")
+                .args(["set-buffer", "--", url])
+                .spawn()
+                .is_ok()
+        {
+            self.status_message = Some(format!("URL copied to tmux buffer: {}", url));
+            self.status_message_time = Some(Instant::now());
+            return;
+        }
+
+        let mut extra_hint = String::new();
+        if std::path::Path::new("/.dockerenv").exists()
+            || std::env::var_os("container").is_some()
+            || std::env::var_os("DOCKER_CONTAINER").is_some()
+        {
+            let write_ok = std::fs::write("/tmp/gwt-open-url.txt", url).is_ok();
+            if write_ok {
+                extra_hint = " URL saved to /tmp/gwt-open-url.txt".to_string();
+            }
+        }
+
+        let err = last_error.unwrap_or_else(|| std::io::Error::from(std::io::ErrorKind::Other));
+        let message = if err.kind() == std::io::ErrorKind::NotFound {
+            #[cfg(target_os = "linux")]
+            {
+                format!(
+                    "Failed to open URL: opener not found (xdg-open/gio/x-www-browser). URL: {}{}",
+                    url, extra_hint
+                )
+            }
+            #[cfg(target_os = "macos")]
+            {
+                format!(
+                    "Failed to open URL: opener not found (open). URL: {}{}",
+                    url, extra_hint
+                )
+            }
+            #[cfg(target_os = "windows")]
+            {
+                format!(
+                    "Failed to open URL: opener not found (cmd/powershell). URL: {}{}",
+                    url, extra_hint
+                )
+            }
+        } else {
+            format!("Failed to open URL: {}. URL: {}{}", err, url, extra_hint)
+        };
+        self.status_message = Some(message);
+        self.status_message_time = Some(Instant::now());
     }
 
     /// Check if currently selected branch has a running agent
@@ -4207,6 +4377,35 @@ fn build_tmux_command(
     }
 }
 
+fn resolve_repo_web_url(repo_root: &Path) -> Option<String> {
+    let remote = Remote::get(repo_root, "origin").ok().flatten()?;
+    let slug = github_repo_slug(&remote.fetch_url)?;
+    Some(format!("https://github.com/{}", slug))
+}
+
+fn github_repo_slug(url: &str) -> Option<String> {
+    let slug = if let Some(rest) = url.strip_prefix("git@github.com:") {
+        rest
+    } else if let Some(rest) = url.strip_prefix("ssh://git@github.com/") {
+        rest
+    } else if let Some(rest) = url.strip_prefix("https://github.com/") {
+        rest
+    } else if let Some(rest) = url.strip_prefix("http://github.com/") {
+        rest
+    } else if let Some(rest) = url.strip_prefix("git://github.com/") {
+        rest
+    } else {
+        return None;
+    };
+
+    let slug = slug.trim_end_matches(".git").trim_end_matches('/');
+    if slug.is_empty() {
+        None
+    } else {
+        Some(slug.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4368,6 +4567,8 @@ mod tests {
                 last_session_id: None,
                 is_selected: false,
                 pr_title: None,
+                pr_number: None,
+                pr_url: None,
             },
             BranchItem {
                 name: "feature/one".to_string(),
@@ -4390,6 +4591,8 @@ mod tests {
                 last_session_id: None,
                 is_selected: false,
                 pr_title: None,
+                pr_number: None,
+                pr_url: None,
             },
         ];
 
@@ -4405,7 +4608,7 @@ mod tests {
     }
 
     #[test]
-    fn test_mouse_click_selects_branch_only() {
+    fn test_mouse_double_click_selects_branch_and_opens_wizard() {
         let mut model = Model::new_with_context(None);
         model.screen = Screen::BranchList;
         let branches = [
@@ -4422,13 +4625,17 @@ mod tests {
         assert_eq!(model.branch_list.selected, 0);
         let mouse = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
-            column: 1,
+            column: 2,
             row: 2,
             modifiers: KeyModifiers::NONE,
         };
         model.handle_branch_list_mouse(mouse);
 
-        assert_eq!(model.branch_list.selected, 1);
+        assert_eq!(model.branch_list.selected, 0);
         assert!(!model.wizard.visible);
+        model.handle_branch_list_mouse(mouse);
+
+        assert_eq!(model.branch_list.selected, 1);
+        assert!(model.wizard.visible);
     }
 }
