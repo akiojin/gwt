@@ -144,6 +144,43 @@ struct WorktreeStatusTarget {
     path: PathBuf,
 }
 
+struct CleanupTarget {
+    branch: String,
+    worktree_path: Option<PathBuf>,
+    worktree_status: WorktreeStatus,
+    has_changes: bool,
+}
+
+enum CleanupUpdate {
+    BranchResult {
+        branch: String,
+        deleted: bool,
+        error: Option<String>,
+    },
+    Finished,
+}
+
+#[derive(Debug, Clone)]
+struct CleanupProgress {
+    total: usize,
+    done: usize,
+    deleted: usize,
+    errors: usize,
+    active: bool,
+}
+
+impl CleanupProgress {
+    fn start(total: usize) -> Self {
+        Self {
+            total,
+            done: 0,
+            deleted: 0,
+            errors: 0,
+            active: true,
+        }
+    }
+}
+
 struct BranchListUpdate {
     branches: Vec<BranchItem>,
     branch_names: Vec<String>,
@@ -217,6 +254,8 @@ pub struct Model {
     safety_rx: Option<Receiver<SafetyUpdate>>,
     /// Worktree status update receiver
     worktree_status_rx: Option<Receiver<WorktreeStatusUpdate>>,
+    /// Cleanup progress update receiver
+    cleanup_rx: Option<Receiver<CleanupUpdate>>,
     /// Tmux mode (Single or Multi)
     tmux_mode: TmuxMode,
     /// Tmux session name (when in multi mode)
@@ -233,6 +272,8 @@ pub struct Model {
     last_pane_update: Option<Instant>,
     /// Last time spinner was updated (for 250ms refresh)
     last_spinner_update: Option<Instant>,
+    /// Cleanup progress (FR-011d/e)
+    cleanup_progress: Option<CleanupProgress>,
 }
 
 /// Screen types
@@ -296,8 +337,8 @@ pub enum Message {
     RepairWorktrees,
     /// Copy selected log to clipboard
     CopyLogToClipboard,
-    /// Toggle agent pane visibility (show/hide)
-    ToggleAgentPaneVisibility,
+    /// FR-095: Hide active agent pane (ESC key in branch list)
+    HideActiveAgentPane,
     /// FR-040: Confirm agent termination (d key)
     ConfirmAgentTermination,
     /// Execute agent termination after confirmation
@@ -350,6 +391,7 @@ impl Model {
             pr_title_rx: None,
             safety_rx: None,
             worktree_status_rx: None,
+            cleanup_rx: None,
             tmux_mode: TmuxMode::detect(),
             tmux_session: None,
             gwt_pane_id: None,
@@ -358,6 +400,7 @@ impl Model {
             split_layout: SplitLayoutState::new(),
             last_pane_update: None,
             last_spinner_update: None,
+            cleanup_progress: None,
         };
 
         // Initialize tmux session if in multi mode
@@ -862,6 +905,67 @@ impl Model {
         }
     }
 
+    fn apply_cleanup_updates(&mut self) {
+        let Some(rx) = &self.cleanup_rx else {
+            return;
+        };
+
+        loop {
+            match rx.try_recv() {
+                Ok(update) => match update {
+                    CleanupUpdate::BranchResult {
+                        branch,
+                        deleted,
+                        error,
+                    } => {
+                        if let Some(progress) = self.cleanup_progress.as_mut() {
+                            progress.done = progress.done.saturating_add(1);
+                            if deleted {
+                                progress.deleted = progress.deleted.saturating_add(1);
+                                self.branch_list.selected_branches.remove(&branch);
+                            }
+                            if error.is_some() {
+                                progress.errors = progress.errors.saturating_add(1);
+                            }
+                        }
+                    }
+                    CleanupUpdate::Finished => {
+                        self.finish_cleanup();
+                        break;
+                    }
+                },
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    if self.cleanup_in_progress() {
+                        self.finish_cleanup();
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    fn finish_cleanup(&mut self) {
+        let Some(progress) = self.cleanup_progress.take() else {
+            self.cleanup_rx = None;
+            return;
+        };
+        self.cleanup_rx = None;
+
+        if progress.errors == 0 {
+            self.status_message = Some(format!("Deleted {} branch(es).", progress.deleted));
+        } else {
+            self.status_message = Some(format!(
+                "Deleted {} branch(es), {} failed.",
+                progress.deleted, progress.errors
+            ));
+        }
+        self.status_message_time = Some(Instant::now());
+
+        // Refresh data to reflect changes (FR-008b)
+        self.refresh_data();
+    }
+
     /// FR-033: Update pane list by polling tmux (1-second interval)
     /// FR-031e: Update agent states based on pane content changes
     fn update_pane_list(&mut self) {
@@ -985,6 +1089,55 @@ impl Model {
         if !removed_panes.is_empty() {
             self.reflow_agent_layout(None);
         }
+    }
+
+    /// FR-095: Check if there is an active (visible) agent pane
+    pub fn has_active_agent_pane(&self) -> bool {
+        self.pane_list.panes.iter().any(|p| !p.is_background)
+    }
+
+    /// FR-095: Hide the active agent pane (ESC key handler)
+    /// シングルアクティブ制約: アクティブペインは最大1つなので、それを非表示にする
+    fn hide_active_agent_pane(&mut self) {
+        // Find the active pane (is_background == false)
+        let active_idx = self.pane_list.panes.iter().position(|p| !p.is_background);
+
+        let Some(idx) = active_idx else {
+            // No active pane to hide (FR-096: do nothing)
+            return;
+        };
+
+        let Some(pane) = self.pane_list.panes.get_mut(idx) else {
+            return;
+        };
+
+        // Hide the pane (break to background window)
+        let window_name = format!(
+            "gwt-agent-{}",
+            pane.branch_name.replace('/', "-").replace(' ', "_")
+        );
+
+        match gwt_core::tmux::hide_pane(&pane.pane_id, &window_name) {
+            Ok(background_window) => {
+                // Remove from agent_panes list
+                self.agent_panes.retain(|id| id != &pane.pane_id);
+
+                // Update pane state
+                pane.is_background = true;
+                pane.background_window = Some(background_window);
+
+                self.status_message = Some("Pane hidden".to_string());
+            }
+            Err(e) => {
+                self.status_message = Some(format!("Failed to hide pane: {}", e));
+            }
+        }
+        self.status_message_time = Some(Instant::now());
+
+        // Update branch list with new pane state
+        self.branch_list
+            .update_running_agents(&self.pane_list.panes);
+        self.reflow_agent_layout(None);
     }
 
     /// Toggle agent pane visibility (show/hide)
@@ -1141,14 +1294,21 @@ impl Model {
                 return;
             }
 
-            let Some(gwt_pane_id) = &self.gwt_pane_id else {
+            let Some(gwt_pane_id) = self.gwt_pane_id.clone() else {
                 self.status_message = Some("GWT pane ID not available".to_string());
                 self.status_message_time = Some(Instant::now());
                 return;
             };
 
+            // FR-037: Hide any currently active pane before showing this one
+            self.hide_active_agent_pane();
+
+            // Re-fetch the pane since hide_active_agent_pane may have modified the list
+            let Some(pane) = self.pane_list.panes.get_mut(selected_idx) else {
+                return;
+            };
             let pane_id = pane.pane_id.clone();
-            match gwt_core::tmux::show_pane(&pane_id, gwt_pane_id) {
+            match gwt_core::tmux::show_pane(&pane_id, &gwt_pane_id) {
                 Ok(new_pane_id) => {
                     // Update the pane ID and clear background state
                     pane.pane_id = new_pane_id.clone();
@@ -1493,6 +1653,7 @@ impl Model {
                 self.apply_pr_title_updates();
                 self.apply_safety_updates();
                 self.apply_worktree_updates();
+                self.apply_cleanup_updates();
                 // FR-033: Update pane list every 1 second in tmux multi mode
                 self.update_pane_list();
             }
@@ -1780,8 +1941,8 @@ impl Model {
                     }
                 }
             }
-            Message::ToggleAgentPaneVisibility => {
-                self.toggle_agent_pane_visibility();
+            Message::HideActiveAgentPane => {
+                self.hide_active_agent_pane();
             }
             Message::ConfirmAgentTermination => {
                 // FR-041: Show confirmation dialog before terminating agent
@@ -2014,6 +2175,9 @@ impl Model {
                         auto_install_deps,
                     };
 
+                    // Refresh data to reflect branch/worktree changes (FR-008b)
+                    self.refresh_data();
+
                     // In multi mode, launch in tmux pane without quitting TUI
                     if self.tmux_mode.is_multi() && self.gwt_pane_id.is_some() {
                         // FR-010: Check 1 branch = 1 pane constraint
@@ -2086,6 +2250,10 @@ impl Model {
             ));
         }
 
+        // FR-036/FR-037: Single Active Pane Constraint
+        // Hide any currently active agent pane before launching new one
+        self.hide_active_agent_pane();
+
         let working_dir = config.worktree_path.to_string_lossy().to_string();
 
         // Build environment variables (same as single mode)
@@ -2132,54 +2300,15 @@ impl Model {
             "Launching agent in tmux pane"
         );
 
-        let visible_count = self
-            .pane_list
-            .panes
-            .iter()
-            .filter(|p| !p.is_background)
-            .count();
-        let desired_columns_after = Self::desired_agent_column_count(visible_count + 1);
-        let current_columns = self
-            .agent_layout_snapshot()
-            .map(|(_, columns)| columns)
-            .unwrap_or_default();
-        let needs_new_column = desired_columns_after > current_columns.len();
-
-        // Determine how to split based on current columns
-        let pane_id = if visible_count == 0 {
-            // First agent: split to the right of gwt pane
-            let target = self
-                .gwt_pane_id
-                .as_ref()
-                .ok_or_else(|| "No gwt pane ID available".to_string())?;
-            launcher::launch_in_pane(target, &working_dir, &command)
-        } else if !needs_new_column {
-            if let Some(last_column) = current_columns.last() {
-                if let Some(target_pane) = last_column.pane_ids.last() {
-                    launcher::launch_in_pane_below(target_pane, &working_dir, &command)
-                } else {
-                    let target = self
-                        .gwt_pane_id
-                        .as_ref()
-                        .ok_or_else(|| "No gwt pane ID available".to_string())?;
-                    launcher::launch_in_pane(target, &working_dir, &command)
-                }
-            } else {
-                let target = self
-                    .gwt_pane_id
-                    .as_ref()
-                    .ok_or_else(|| "No gwt pane ID available".to_string())?;
-                launcher::launch_in_pane(target, &working_dir, &command)
-            }
-        } else {
-            // New column will be created in reflow
-            let target = self
-                .gwt_pane_id
-                .as_ref()
-                .ok_or_else(|| "No gwt pane ID available".to_string())?;
-            launcher::launch_in_pane(target, &working_dir, &command)
-        }
-        .map_err(|e| e.to_string())?;
+        // FR-036: Single Active Pane Constraint
+        // hide_active_agent_pane() was called above, so there are no visible agent panes.
+        // Always split to the right of gwt pane.
+        let target = self
+            .gwt_pane_id
+            .as_ref()
+            .ok_or_else(|| "No gwt pane ID available".to_string())?;
+        let pane_id =
+            launcher::launch_in_pane(target, &working_dir, &command).map_err(|e| e.to_string())?;
 
         // Focus the new pane (FR-022)
         if let Err(e) = gwt_core::tmux::pane::select_pane(&pane_id) {
@@ -2241,8 +2370,14 @@ impl Model {
         Ok(pane_id)
     }
 
+    /// FR-036: Single Active Pane Constraint - at most 1 visible agent pane
     fn desired_agent_column_count(count: usize) -> usize {
-        count.div_ceil(3)
+        // Under single-active constraint, count is always 0 or 1
+        if count > 0 {
+            1
+        } else {
+            0
+        }
     }
 
     fn visible_agent_pane_ids(&self) -> Vec<String> {
@@ -2435,86 +2570,124 @@ impl Model {
 
     /// Execute branch cleanup (FR-010)
     fn execute_cleanup(&mut self, branches: &[String]) {
+        if branches.is_empty() || self.cleanup_in_progress() {
+            return;
+        }
+
         debug!(
             category = "tui",
             branch_count = branches.len(),
             "Starting branch cleanup"
         );
-        let mut deleted = 0;
-        let mut errors = Vec::new();
-        let manager = WorktreeManager::new(&self.repo_root).ok();
 
-        for branch_name in branches {
-            let branch_item = self
-                .branch_list
-                .branches
-                .iter()
-                .find(|b| &b.name == branch_name);
+        let targets: Vec<CleanupTarget> = branches
+            .iter()
+            .map(|branch_name| {
+                let branch_item = self
+                    .branch_list
+                    .branches
+                    .iter()
+                    .find(|b| &b.name == branch_name);
+                CleanupTarget {
+                    branch: branch_name.clone(),
+                    worktree_path: branch_item
+                        .and_then(|item| item.worktree_path.as_ref().map(PathBuf::from)),
+                    worktree_status: branch_item
+                        .map(|item| item.worktree_status)
+                        .unwrap_or(WorktreeStatus::None),
+                    has_changes: branch_item.map(|item| item.has_changes).unwrap_or(false),
+                }
+            })
+            .collect();
 
-            if let (Some(manager), Some(item)) = (manager.as_ref(), branch_item) {
-                if let Some(path) = item.worktree_path.as_deref() {
-                    let force_remove = item.worktree_status == WorktreeStatus::Inaccessible
-                        || item.has_changes
-                        || WorktreeManager::is_protected(&item.name);
-                    let path_buf = PathBuf::from(path);
-                    if let Err(e) = manager.remove(&path_buf, force_remove) {
-                        errors.push(format!("{}: {}", branch_name, e));
+        if targets.is_empty() {
+            return;
+        }
+
+        let (tx, rx) = mpsc::channel();
+        self.cleanup_rx = Some(rx);
+        self.cleanup_progress = Some(CleanupProgress::start(targets.len()));
+        let repo_root = self.repo_root.clone();
+
+        thread::spawn(move || {
+            let manager = WorktreeManager::new(&repo_root).ok();
+            let mut deleted = 0;
+            let mut errors = 0;
+
+            for target in targets {
+                if let (Some(manager), Some(path)) =
+                    (manager.as_ref(), target.worktree_path.as_ref())
+                {
+                    let force_remove = target.worktree_status == WorktreeStatus::Inaccessible
+                        || target.has_changes
+                        || WorktreeManager::is_protected(&target.branch);
+                    if let Err(e) = manager.remove(path, force_remove) {
+                        error!(
+                            category = "tui",
+                            branch = %target.branch,
+                            error = %e,
+                            "Failed to remove worktree"
+                        );
+                        errors += 1;
+                        let _ = tx.send(CleanupUpdate::BranchResult {
+                            branch: target.branch,
+                            deleted: false,
+                            error: Some(e.to_string()),
+                        });
                         continue;
+                    }
+                }
+
+                match Branch::delete(&repo_root, &target.branch, true) {
+                    Ok(_) => {
+                        debug!(
+                            category = "tui",
+                            branch = %target.branch,
+                            "Branch deleted successfully"
+                        );
+                        deleted += 1;
+                        let _ = tx.send(CleanupUpdate::BranchResult {
+                            branch: target.branch,
+                            deleted: true,
+                            error: None,
+                        });
+                    }
+                    Err(e) => {
+                        error!(
+                            category = "tui",
+                            branch = %target.branch,
+                            error = %e,
+                            "Failed to delete branch"
+                        );
+                        errors += 1;
+                        let _ = tx.send(CleanupUpdate::BranchResult {
+                            branch: target.branch,
+                            deleted: false,
+                            error: Some(e.to_string()),
+                        });
                     }
                 }
             }
 
-            // Try to delete the branch
-            match Branch::delete(&self.repo_root, branch_name, true) {
-                Ok(_) => {
-                    debug!(
-                        category = "tui",
-                        branch = %branch_name,
-                        "Branch deleted successfully"
-                    );
-                    deleted += 1;
-                    // Remove from selection
-                    self.branch_list.selected_branches.remove(branch_name);
-                }
-                Err(e) => {
-                    error!(
-                        category = "tui",
-                        branch = %branch_name,
-                        error = %e,
-                        "Failed to delete branch"
-                    );
-                    errors.push(format!("{}: {}", branch_name, e));
-                }
+            if errors == 0 {
+                info!(
+                    category = "tui",
+                    operation = "cleanup",
+                    deleted_count = deleted,
+                    "Branch cleanup completed successfully"
+                );
+            } else {
+                info!(
+                    category = "tui",
+                    operation = "cleanup",
+                    deleted_count = deleted,
+                    error_count = errors,
+                    "Branch cleanup completed with errors"
+                );
             }
-        }
 
-        // Show result message
-        if errors.is_empty() {
-            info!(
-                category = "tui",
-                operation = "cleanup",
-                deleted_count = deleted,
-                "Branch cleanup completed successfully"
-            );
-            self.status_message = Some(format!("Deleted {} branch(es).", deleted));
-        } else {
-            info!(
-                category = "tui",
-                operation = "cleanup",
-                deleted_count = deleted,
-                error_count = errors.len(),
-                "Branch cleanup completed with errors"
-            );
-            self.status_message = Some(format!(
-                "Deleted {} branch(es), {} failed.",
-                deleted,
-                errors.len()
-            ));
-        }
-        self.status_message_time = Some(Instant::now());
-
-        // Refresh data to reflect changes (FR-008b)
-        self.refresh_data();
+            let _ = tx.send(CleanupUpdate::Finished);
+        });
     }
 
     /// View function (Elm Architecture)
@@ -2579,6 +2752,7 @@ impl Model {
             Screen::BranchList => {
                 // Use split layout (branch list takes full area, PaneList abolished)
                 let split_areas = calculate_split_layout(chunks[1], &self.split_layout);
+                let cleanup_status = self.cleanup_status_line();
 
                 // Render branch list (always has focus now)
                 render_branch_list(
@@ -2587,6 +2761,7 @@ impl Model {
                     split_areas.branch_list,
                     self.status_message.as_deref(),
                     true, // Branch list always has focus
+                    cleanup_status.as_deref(),
                 );
             }
             Screen::WorktreeCreate => {
@@ -2807,6 +2982,27 @@ impl Model {
         frame.render_widget(footer, area);
     }
 
+    fn cleanup_in_progress(&self) -> bool {
+        self.cleanup_progress
+            .as_ref()
+            .map(|progress| progress.active)
+            .unwrap_or(false)
+    }
+
+    fn cleanup_status_line(&self) -> Option<String> {
+        let progress = self.cleanup_progress.as_ref()?;
+        if !progress.active {
+            return None;
+        }
+        let done = progress.done.min(progress.total);
+        Some(format!(
+            "Cleanup: Running {} ({}/{})",
+            self.branch_list.spinner_char(),
+            done,
+            progress.total
+        ))
+    }
+
     fn text_input_active(&self) -> bool {
         matches!(self.screen, Screen::Profiles) && self.profiles.create_mode
             || matches!(self.screen, Screen::Environment) && self.environment.edit_mode
@@ -2893,8 +3089,16 @@ pub fn run_with_context(
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
                 let is_key_press = key.kind == KeyEventKind::Press;
+                let cleanup_locked = model.cleanup_in_progress();
                 // Wizard has priority when visible
-                let msg = if model.wizard.visible {
+                let msg = if cleanup_locked {
+                    match (key.code, key.modifiers) {
+                        (KeyCode::Char('c'), KeyModifiers::CONTROL) if is_key_press => {
+                            Some(Message::CtrlC)
+                        }
+                        _ => None,
+                    }
+                } else if model.wizard.visible {
                     match key.code {
                         KeyCode::Esc => Some(Message::WizardBack),
                         KeyCode::Enter if is_key_press => Some(Message::WizardConfirm),
@@ -2933,9 +3137,10 @@ pub fn run_with_context(
                             Some(Message::Char('q'))
                         }
                         (KeyCode::Esc, _) => {
-                            // Esc behavior matches TypeScript:
+                            // FR-095: ESC key behavior:
                             // - In filter mode: exit filter mode (handled by NavigateBack)
                             // - In BranchList with filter query: clear query
+                            // - In BranchList with active agent pane: hide the pane
                             // - Otherwise: navigate back (but NOT quit from main screen)
                             if matches!(model.screen, Screen::BranchList) {
                                 if model.branch_list.filter_mode {
@@ -2945,8 +3150,11 @@ pub fn run_with_context(
                                     // Clear filter query
                                     model.branch_list.clear_filter();
                                     None
+                                } else if model.has_active_agent_pane() {
+                                    // FR-095: Hide active agent pane
+                                    Some(Message::HideActiveAgentPane)
                                 } else {
-                                    // On main screen without filter - do nothing (TypeScript doesn't quit here)
+                                    // On main screen without filter and no active pane - do nothing
                                     None
                                 }
                             } else {
@@ -3092,18 +3300,6 @@ pub fn run_with_context(
                                 Some(Message::ConfirmAgentTermination)
                             } else {
                                 Some(Message::Char('d'))
-                            }
-                        }
-                        (KeyCode::Char('v'), KeyModifiers::NONE) => {
-                            // Toggle agent pane visibility (show/hide)
-                            // Available when branch has running agent
-                            if matches!(model.screen, Screen::BranchList)
-                                && !model.branch_list.filter_mode
-                                && model.selected_branch_has_agent()
-                            {
-                                Some(Message::ToggleAgentPaneVisibility)
-                            } else {
-                                Some(Message::Char('v'))
                             }
                         }
                         (KeyCode::Char('x'), KeyModifiers::NONE) => {
@@ -3601,5 +3797,118 @@ mod tests {
 
         model.update(Message::SelectNext);
         assert_eq!(model.branch_list.selected, 1);
+    }
+
+    #[test]
+    fn test_cleanup_progress_updates_counts_and_selection() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+
+        let branches = vec![
+            BranchItem {
+                name: "feature/one".to_string(),
+                branch_type: BranchType::Local,
+                is_current: false,
+                has_worktree: true,
+                worktree_path: Some("/path1".to_string()),
+                worktree_status: WorktreeStatus::Active,
+                has_changes: false,
+                has_unpushed: false,
+                divergence: gwt_core::git::DivergenceStatus::UpToDate,
+                has_remote_counterpart: true,
+                remote_name: None,
+                safe_to_cleanup: Some(true),
+                safety_status: SafetyStatus::Safe,
+                is_unmerged: false,
+                last_commit_timestamp: None,
+                last_tool_usage: None,
+                is_selected: false,
+                pr_title: None,
+            },
+            BranchItem {
+                name: "feature/two".to_string(),
+                branch_type: BranchType::Local,
+                is_current: false,
+                has_worktree: true,
+                worktree_path: Some("/path2".to_string()),
+                worktree_status: WorktreeStatus::Active,
+                has_changes: false,
+                has_unpushed: false,
+                divergence: gwt_core::git::DivergenceStatus::UpToDate,
+                has_remote_counterpart: true,
+                remote_name: None,
+                safe_to_cleanup: Some(true),
+                safety_status: SafetyStatus::Safe,
+                is_unmerged: false,
+                last_commit_timestamp: None,
+                last_tool_usage: None,
+                is_selected: false,
+                pr_title: None,
+            },
+        ];
+
+        model.branch_list = BranchListState::new().with_branches(branches);
+        model
+            .branch_list
+            .selected_branches
+            .insert("feature/one".to_string());
+        model
+            .branch_list
+            .selected_branches
+            .insert("feature/two".to_string());
+
+        let (tx, rx) = mpsc::channel();
+        model.cleanup_rx = Some(rx);
+        model.cleanup_progress = Some(CleanupProgress::start(2));
+
+        tx.send(CleanupUpdate::BranchResult {
+            branch: "feature/one".to_string(),
+            deleted: true,
+            error: None,
+        })
+        .expect("send cleanup update");
+        tx.send(CleanupUpdate::BranchResult {
+            branch: "feature/two".to_string(),
+            deleted: false,
+            error: Some("failed".to_string()),
+        })
+        .expect("send cleanup update");
+
+        model.apply_cleanup_updates();
+
+        let progress = model.cleanup_progress.as_ref().expect("progress");
+        assert_eq!(progress.done, 2);
+        assert_eq!(progress.deleted, 1);
+        assert_eq!(progress.errors, 1);
+        assert!(!model.branch_list.selected_branches.contains("feature/one"));
+        assert!(model.branch_list.selected_branches.contains("feature/two"));
+    }
+
+    #[test]
+    fn test_cleanup_progress_finishes_and_sets_status() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+
+        let (tx, rx) = mpsc::channel();
+        model.cleanup_rx = Some(rx);
+        model.cleanup_progress = Some(CleanupProgress::start(1));
+
+        tx.send(CleanupUpdate::BranchResult {
+            branch: "main".to_string(),
+            deleted: true,
+            error: None,
+        })
+        .expect("send cleanup update");
+        tx.send(CleanupUpdate::Finished)
+            .expect("send cleanup finish");
+
+        model.apply_cleanup_updates();
+
+        assert!(model.cleanup_progress.is_none());
+        assert_eq!(
+            model.status_message.as_deref(),
+            Some("Deleted 1 branch(es).")
+        );
+        assert!(model.status_message_time.is_some());
     }
 }
