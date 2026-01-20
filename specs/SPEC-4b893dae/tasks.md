@@ -239,7 +239,6 @@ US6 (AI設定) ─────────────────────�
 - [ ] **T711** [US4] T703の後に `crates/gwt-core/src/ai/summary.rs` にセッション要約用システムプロンプトを追加
 - [ ] **T712** [US4] T711の後に `crates/gwt-core/src/ai/summary.rs` に `summarize_session(parsed: &ParsedSession) -> SessionSummary` を実装
 - [ ] **T713** [US4] T712の後に `crates/gwt-core/src/ai/client.rs` で MAX_TOKENS を調整（150 → 300-500）
-- [x] **T714** [US4] T713の後に `crates/gwt-core/src/ai/summary.rs` で要約言語の自動判定を追加
 
 ### UI表示
 
