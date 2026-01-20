@@ -13,7 +13,9 @@ pub mod split_layout;
 pub mod wizard;
 pub mod worktree_create;
 
-pub use branch_list::{render_branch_list, BranchItem, BranchListState, BranchType};
+pub use branch_list::{
+    render_branch_list, BranchItem, BranchListState, BranchType, DetailPanelTab,
+};
 pub use confirm::{render_confirm, ConfirmState};
 pub use environment::{collect_os_env, render_environment, EnvironmentState};
 pub use error::{render_error, ErrorState};

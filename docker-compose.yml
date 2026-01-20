@@ -11,6 +11,8 @@ services:
       - ${HOME:-~}/.codex:/root/.codex-host:ro
     ports:
       - 6400:6400
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       - NPM_USER
       - NPM_EMAIL
