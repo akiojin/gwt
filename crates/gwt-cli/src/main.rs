@@ -1318,14 +1318,26 @@ fn detect_opencode_session_id_at(home: &Path) -> Option<String> {
     })
 }
 
-fn detect_agent_session_id(config: &AgentLaunchConfig) -> Option<String> {
+pub(crate) fn detect_session_id_for_tool(tool_id: &str, worktree_path: &Path) -> Option<String> {
     let home = home_dir()?;
-    match config.agent {
-        CodingAgent::CodexCli => detect_codex_session_id_at(&home, &config.worktree_path),
-        CodingAgent::ClaudeCode => detect_claude_session_id_at(&home, &config.worktree_path),
-        CodingAgent::GeminiCli => detect_gemini_session_id_at(&home),
-        CodingAgent::OpenCode => detect_opencode_session_id_at(&home),
+    let lower = tool_id.to_lowercase();
+    if lower.contains("codex") {
+        return detect_codex_session_id_at(&home, worktree_path);
     }
+    if lower.contains("claude") {
+        return detect_claude_session_id_at(&home, worktree_path);
+    }
+    if lower.contains("gemini") {
+        return detect_gemini_session_id_at(&home);
+    }
+    if lower.contains("opencode") || lower.contains("open-code") {
+        return detect_opencode_session_id_at(&home);
+    }
+    None
+}
+
+fn detect_agent_session_id(config: &AgentLaunchConfig) -> Option<String> {
+    detect_session_id_for_tool(config.agent.id(), &config.worktree_path)
 }
 
 /// Build agent-specific command line arguments

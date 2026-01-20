@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "6.3.0"
+version = "6.4.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/akiojin/gwt"
@@ -86,6 +86,7 @@ libc = "0.2"
 
 # HTTP client (blocking)
 ureq = { version = "3", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 
 # URL encoding
 urlencoding = "2"

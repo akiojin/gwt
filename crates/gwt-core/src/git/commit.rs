@@ -225,14 +225,14 @@ pub struct LoadingState {
     pub stats: bool,
     /// Metadata is loading
     pub meta: bool,
-    /// AI summary is loading
-    pub ai_summary: bool,
+    /// Session summary is loading
+    pub session_summary: bool,
 }
 
 impl LoadingState {
     /// Check if any section is loading
     pub fn is_any_loading(&self) -> bool {
-        self.commits || self.stats || self.meta || self.ai_summary
+        self.commits || self.stats || self.meta || self.session_summary
     }
 
     /// Set commits loading state
@@ -254,8 +254,8 @@ impl LoadingState {
     }
 
     /// Set AI summary loading state
-    pub fn with_ai_summary(mut self, loading: bool) -> Self {
-        self.ai_summary = loading;
+    pub fn with_session_summary(mut self, loading: bool) -> Self {
+        self.session_summary = loading;
         self
     }
 }
@@ -273,8 +273,8 @@ pub struct BranchSummary {
     pub stats: Option<ChangeStats>,
     /// Branch metadata
     pub meta: Option<BranchMeta>,
-    /// AI-generated summary (bullet points, max 3 lines)
-    pub ai_summary: Option<Vec<String>>,
+    /// Session summary
+    pub session_summary: Option<crate::ai::SessionSummary>,
     /// Loading state for each section
     pub loading: LoadingState,
     /// Error messages for failed sections
@@ -287,7 +287,7 @@ pub struct SectionErrors {
     pub commits: Option<String>,
     pub stats: Option<String>,
     pub meta: Option<String>,
-    pub ai_summary: Option<String>,
+    pub session_summary: Option<String>,
 }
 
 impl BranchSummary {
@@ -327,9 +327,9 @@ impl BranchSummary {
     }
 
     /// Set AI summary
-    pub fn with_ai_summary(mut self, summary: Vec<String>) -> Self {
-        self.ai_summary = Some(summary);
-        self.loading.ai_summary = false;
+    pub fn with_session_summary(mut self, summary: crate::ai::SessionSummary) -> Self {
+        self.session_summary = Some(summary);
+        self.loading.session_summary = false;
         self
     }
 
