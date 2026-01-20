@@ -667,7 +667,10 @@ fn run_install_plan(worktree_path: &Path, plan: &InstallPlan) -> Result<(), GwtE
                 })?;
             if !status.success() {
                 eprintln!();
-                eprintln!("Warning: {} install exited with status: {}", manager, status);
+                eprintln!(
+                    "Warning: {} install exited with status: {}",
+                    manager, status
+                );
                 // Don't fail - let the user decide whether to continue
             } else {
                 println!();

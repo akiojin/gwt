@@ -2,6 +2,7 @@
 
 #![allow(dead_code)] // TUI application components for future expansion
 
+use crate::{prepare_launch_plan, InstallPlan, LaunchPlan, LaunchProgress};
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
@@ -10,7 +11,6 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use crate::{prepare_launch_plan, InstallPlan, LaunchPlan, LaunchProgress};
 use gwt_core::ai::{
     summarize_session, AIClient, AIError, AgentType, ClaudeSessionParser, CodexSessionParser,
     GeminiSessionParser, OpenCodeSessionParser, SessionParseError, SessionParser,
@@ -2618,10 +2618,7 @@ impl Model {
             let result = if let Some(wt) = existing_wt {
                 Ok(wt)
             } else if request.create_new_branch {
-                manager.create_new_branch(
-                    &request.branch_name,
-                    request.base_branch.as_deref(),
-                )
+                manager.create_new_branch(&request.branch_name, request.base_branch.as_deref())
             } else {
                 manager.create_for_branch(&request.branch_name)
             };
@@ -3173,7 +3170,9 @@ impl Model {
             Screen::BranchList => {
                 // Use split layout (branch list takes full area, PaneList abolished)
                 let split_areas = calculate_split_layout(chunks[1], &self.split_layout);
-                let status_message = self.active_status_message().map(|message| message.to_string());
+                let status_message = self
+                    .active_status_message()
+                    .map(|message| message.to_string());
 
                 // Render branch list (always has focus now)
                 render_branch_list(
@@ -3459,9 +3458,7 @@ pub fn run() -> Result<Option<LaunchPlan>, GwtError> {
 
 /// Run the TUI application with optional entry context
 /// Returns agent launch plan if wizard completed, None otherwise
-pub fn run_with_context(
-    context: Option<TuiEntryContext>,
-) -> Result<Option<LaunchPlan>, GwtError> {
+pub fn run_with_context(context: Option<TuiEntryContext>) -> Result<Option<LaunchPlan>, GwtError> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
