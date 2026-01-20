@@ -193,6 +193,7 @@ struct BranchListUpdate {
     safety_targets: Vec<SafetyCheckTarget>,
     base_branches: Vec<String>,
     base_branch: String,
+    base_branch_exists: bool,
     total_count: usize,
     active_count: usize,
 }
@@ -589,6 +590,7 @@ impl Model {
                 safety_targets,
                 base_branches,
                 base_branch,
+                base_branch_exists,
                 total_count,
                 active_count,
             });
@@ -620,7 +622,12 @@ impl Model {
         });
     }
 
-    fn spawn_safety_checks(&mut self, targets: Vec<SafetyCheckTarget>, base_branch: String) {
+    fn spawn_safety_checks(
+        &mut self,
+        targets: Vec<SafetyCheckTarget>,
+        base_branch: String,
+        base_branch_exists: bool,
+    ) {
         if targets.is_empty() {
             self.safety_rx = None;
             return;
@@ -631,7 +638,6 @@ impl Model {
         self.safety_rx = Some(rx);
 
         thread::spawn(move || {
-            let base_branch_exists = Branch::exists(&repo_root, &base_branch).unwrap_or(false);
             let mut pr_cache = PrCache::new();
             pr_cache.populate(&repo_root);
 
@@ -1201,7 +1207,11 @@ impl Model {
 
                 let total_updates = update.safety_targets.len() + update.worktree_targets.len();
                 self.branch_list.reset_status_progress(total_updates);
-                self.spawn_safety_checks(update.safety_targets, update.base_branch);
+                self.spawn_safety_checks(
+                    update.safety_targets,
+                    update.base_branch,
+                    update.base_branch_exists,
+                );
                 self.spawn_worktree_status_checks(update.worktree_targets);
                 self.spawn_pr_title_fetch(update.branch_names);
 
