@@ -11,7 +11,7 @@
     "pr-review-toolkit@claude-plugins-official": true,
     "playwright@claude-plugins-official": true,
     "cli-design@akiojin-skills": true,
-    "gh-fix-ci@akiojin-skills": true,
+    "github@akiojin-skills": true,
     "requirements-spec-kit@akiojin-skills": true,
     "typescript-lsp@claude-plugins-official": true,
     "ralph-loop@claude-plugins-official": true,
