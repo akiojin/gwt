@@ -2,11 +2,15 @@
 
 #![allow(dead_code)]
 
-use gwt_core::git::{Branch, DivergenceStatus};
-use gwt_core::tmux::AgentPane;
+use gwt_core::ai::SessionSummaryCache;
+use gwt_core::config::AgentStatus;
+use gwt_core::git::{Branch, BranchMeta, BranchSummary, DivergenceStatus, Repository};
+use gwt_core::tmux::{AgentPane, StatusBarSummary};
 use gwt_core::worktree::Worktree;
+use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use ratatui::{prelude::*, widgets::*};
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::time::Instant;
 use unicode_width::UnicodeWidthStr;
 
@@ -75,6 +79,23 @@ pub enum ViewMode {
     All,
     Local,
     Remote,
+}
+
+/// Detail panel tab state
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DetailPanelTab {
+    #[default]
+    Details,
+    Session,
+}
+
+impl DetailPanelTab {
+    pub fn toggle(&mut self) {
+        *self = match self {
+            DetailPanelTab::Details => DetailPanelTab::Session,
+            DetailPanelTab::Session => DetailPanelTab::Details,
+        };
+    }
 }
 
 impl ViewMode {
@@ -150,6 +171,8 @@ pub struct BranchItem {
     pub is_unmerged: bool,
     pub last_commit_timestamp: Option<i64>,
     pub last_tool_usage: Option<String>,
+    pub last_tool_id: Option<String>,
+    pub last_session_id: Option<String>,
     pub is_selected: bool,
     /// PR title for search (FR-016)
     pub pr_title: Option<String>,
@@ -211,6 +234,8 @@ impl BranchItem {
             // FR-041: Set commit timestamp from git
             last_commit_timestamp: branch.commit_timestamp,
             last_tool_usage: None,
+            last_tool_id: None,
+            last_session_id: None,
             is_selected: false,
             pr_title: None, // FR-016: Will be populated from PrCache
         };
@@ -257,6 +282,8 @@ impl BranchItem {
             is_unmerged: false,
             last_commit_timestamp: branch.commit_timestamp,
             last_tool_usage: None,
+            last_tool_id: None,
+            last_session_id: None,
             is_selected: false,
             pr_title: None,
         };
@@ -321,8 +348,14 @@ impl BranchItem {
     }
 }
 
-/// Spinner animation frames
+/// Spinner animation frames (for loading indicators)
 const SPINNER_FRAMES: &[char] = &['|', '/', '-', '\\'];
+
+/// Active agent spinner (star twinkle)
+const ACTIVE_SPINNER_FRAMES: &[char] = &['✶', '✸', '✹', '✺', '✹', '✷'];
+
+/// Background agent spinner (BLACK_CIRCLE)
+const BG_SPINNER_FRAMES: &[char] = &['◑', '◒', '◐', '◓'];
 
 /// Branch list state
 #[derive(Debug)]
@@ -349,8 +382,30 @@ pub struct BranchListState {
     pub status_progress_active: bool,
     /// Viewport height for scroll calculations (updated by renderer)
     pub visible_height: usize,
+    /// Cached branch list area (outer, with border)
+    pub list_area: Option<Rect>,
+    /// Cached branch list inner area (content rows)
+    pub list_inner_area: Option<Rect>,
     /// Running agents mapped by branch name (for agent info display)
     pub running_agents: HashMap<String, AgentPane>,
+    /// Branch summary data for the selected branch (SPEC-4b893dae)
+    pub branch_summary: Option<BranchSummary>,
+    /// Detail panel tab state
+    pub detail_panel_tab: DetailPanelTab,
+    /// AI settings enabled for active profile
+    pub ai_enabled: bool,
+    /// Session summary cache (session)
+    session_summary_cache: SessionSummaryCache,
+    /// Session summary requests in-flight
+    session_summary_inflight: HashSet<String>,
+    /// Session missing for branch
+    session_missing: HashSet<String>,
+    /// Session summary scroll offset
+    session_scroll_offset: usize,
+    /// Session summary scroll max
+    session_scroll_max: usize,
+    /// Session summary scroll page size
+    session_scroll_page: usize,
 }
 
 impl Default for BranchListState {
@@ -377,7 +432,18 @@ impl Default for BranchListState {
             status_progress_done: 0,
             status_progress_active: false,
             visible_height: 15, // Default fallback (previously hardcoded)
+            list_area: None,
+            list_inner_area: None,
             running_agents: HashMap::new(),
+            branch_summary: None,
+            detail_panel_tab: DetailPanelTab::Details,
+            ai_enabled: false,
+            session_summary_cache: SessionSummaryCache::default(),
+            session_summary_inflight: HashSet::new(),
+            session_missing: HashSet::new(),
+            session_scroll_offset: 0,
+            session_scroll_max: 0,
+            session_scroll_page: 0,
         }
     }
 }
@@ -668,6 +734,60 @@ impl BranchListState {
         }
     }
 
+    /// Update cached list areas based on rendered branch list block
+    pub fn update_list_area(&mut self, area: Rect) {
+        self.list_area = Some(area);
+        let inner = if area.width < 2 || area.height < 2 {
+            Rect {
+                x: area.x,
+                y: area.y,
+                width: 0,
+                height: 0,
+            }
+        } else {
+            Rect {
+                x: area.x.saturating_add(1),
+                y: area.y.saturating_add(1),
+                width: area.width.saturating_sub(2),
+                height: area.height.saturating_sub(2),
+            }
+        };
+        self.list_inner_area = Some(inner);
+        self.update_visible_height(inner.height as usize);
+    }
+
+    /// Resolve selection index from a mouse position within the list area
+    pub fn selection_index_from_point(&self, x: u16, y: u16) -> Option<usize> {
+        let inner = self.list_inner_area?;
+        if inner.width == 0 || inner.height == 0 {
+            return None;
+        }
+        let right = inner.x.saturating_add(inner.width);
+        let bottom = inner.y.saturating_add(inner.height);
+        if x < inner.x || x >= right || y < inner.y || y >= bottom {
+            return None;
+        }
+        let row = (y - inner.y) as usize;
+        let index = self.offset.saturating_add(row);
+        if index >= self.filtered_indices.len() {
+            return None;
+        }
+        Some(index)
+    }
+
+    /// Set selected index directly (returns true if selection changed)
+    pub fn select_index(&mut self, index: usize) -> bool {
+        if index >= self.filtered_indices.len() {
+            return false;
+        }
+        if self.selected != index {
+            self.selected = index;
+            self.ensure_visible();
+            return true;
+        }
+        false
+    }
+
     /// Get currently selected branch
     pub fn selected_branch(&self) -> Option<&BranchItem> {
         self.filtered_branch_at(self.selected)
@@ -793,7 +913,7 @@ impl BranchListState {
 
     /// Get current spinner character
     pub fn spinner_char(&self) -> char {
-        SPINNER_FRAMES[self.spinner_frame]
+        SPINNER_FRAMES[self.spinner_frame % SPINNER_FRAMES.len()]
     }
 
     /// Check if loading indicator should be visible (after delay)
@@ -807,11 +927,231 @@ impl BranchListState {
             false
         }
     }
+
+    /// Update branch summary for the currently selected branch (SPEC-4b893dae T206)
+    ///
+    /// Fetches commit log and change stats from the repository.
+    /// Should be called when selection changes.
+    pub fn update_branch_summary(&mut self, repo_root: &Path) {
+        let Some(branch) = self.selected_branch().cloned() else {
+            self.branch_summary = None;
+            return;
+        };
+
+        if self
+            .branch_summary
+            .as_ref()
+            .map(|summary| summary.branch_name.as_str())
+            != Some(branch.name.as_str())
+        {
+            self.session_scroll_offset = 0;
+        }
+
+        // Create base summary
+        let mut summary = BranchSummary::new(&branch.name);
+
+        // Set worktree path if available
+        if let Some(wt_path) = &branch.worktree_path {
+            summary = summary.with_worktree_path(Some(std::path::PathBuf::from(wt_path)));
+        }
+
+        // Try to fetch commit log
+        // For branches with worktree, use the worktree path; otherwise use repo root
+        let repo_path = branch
+            .worktree_path
+            .as_ref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| repo_root.to_path_buf());
+
+        if let Ok(repo) = Repository::open(&repo_path) {
+            // Fetch commit log (max 5 commits)
+            match repo.get_commit_log(5) {
+                Ok(commits) => {
+                    summary = summary.with_commits(commits);
+                }
+                Err(e) => {
+                    summary.errors.commits = Some(e.to_string());
+                }
+            }
+
+            // Fetch change stats only if worktree exists
+            if branch.worktree_path.is_some() {
+                match repo.get_diff_stats() {
+                    Ok(mut stats) => {
+                        // Integrate existing safety check data
+                        stats.has_uncommitted = branch.has_changes;
+                        stats.has_unpushed = branch.has_unpushed;
+                        summary = summary.with_stats(stats);
+                    }
+                    Err(e) => {
+                        summary.errors.stats = Some(e.to_string());
+                    }
+                }
+            }
+        }
+
+        // Set metadata from branch data
+        // Extract ahead/behind from DivergenceStatus
+        let (ahead, behind) = match &branch.divergence {
+            DivergenceStatus::Ahead(a) => (*a, 0),
+            DivergenceStatus::Behind(b) => (0, *b),
+            DivergenceStatus::Diverged { ahead, behind } => (*ahead, *behind),
+            DivergenceStatus::UpToDate | DivergenceStatus::NoRemote => (0, 0),
+        };
+
+        let meta = BranchMeta {
+            upstream: branch.remote_name.clone(),
+            ahead,
+            behind,
+            last_commit_timestamp: branch.last_commit_timestamp,
+            base_branch: None,
+        };
+        summary = summary.with_meta(meta);
+
+        if self.ai_enabled {
+            if let Some(summary_data) = self.session_summary_cache.get(&branch.name) {
+                summary = summary.with_session_summary(summary_data.clone());
+            } else if self.session_summary_inflight.contains(&branch.name) {
+                summary.loading.session_summary = true;
+            }
+        }
+
+        self.branch_summary = Some(summary);
+    }
+
+    pub fn session_summary_cached(&self, branch: &str) -> bool {
+        self.session_summary_cache.get(branch).is_some()
+    }
+
+    pub fn set_session_identity(&mut self, branch: &str, tool_id: String, session_id: String) {
+        if let Some(item) = self.branches.iter_mut().find(|b| b.name == branch) {
+            item.last_tool_id = Some(tool_id);
+            item.last_session_id = Some(session_id);
+        }
+    }
+
+    pub fn update_session_scroll_bounds(&mut self, max_scroll: usize, page_size: usize) {
+        self.session_scroll_max = max_scroll;
+        self.session_scroll_page = page_size;
+        if self.session_scroll_offset > max_scroll {
+            self.session_scroll_offset = max_scroll;
+        }
+    }
+
+    pub fn scroll_session_page_up(&mut self) {
+        let page = self.session_scroll_page.max(1);
+        self.session_scroll_offset = self.session_scroll_offset.saturating_sub(page);
+    }
+
+    pub fn scroll_session_page_down(&mut self) {
+        let page = self.session_scroll_page.max(1);
+        self.session_scroll_offset =
+            (self.session_scroll_offset + page).min(self.session_scroll_max);
+    }
+
+    pub fn session_summary(&self, branch: &str) -> Option<&gwt_core::ai::SessionSummary> {
+        self.session_summary_cache.get(branch)
+    }
+
+    pub fn session_summary_stale(
+        &self,
+        branch: &str,
+        session_id: &str,
+        mtime: std::time::SystemTime,
+    ) -> bool {
+        self.session_summary_cache
+            .is_stale(branch, session_id, mtime)
+    }
+
+    pub fn clone_session_cache(&self) -> SessionSummaryCache {
+        self.session_summary_cache.clone()
+    }
+
+    pub fn set_session_cache(&mut self, cache: SessionSummaryCache) {
+        self.session_summary_cache = cache;
+    }
+
+    pub fn session_summary_inflight(&self, branch: &str) -> bool {
+        self.session_summary_inflight.contains(branch)
+    }
+
+    pub fn clone_session_inflight(&self) -> HashSet<String> {
+        self.session_summary_inflight.clone()
+    }
+
+    pub fn set_session_inflight(&mut self, inflight: HashSet<String>) {
+        self.session_summary_inflight = inflight;
+    }
+
+    pub fn clone_session_missing(&self) -> HashSet<String> {
+        self.session_missing.clone()
+    }
+
+    pub fn set_session_missing(&mut self, missing: HashSet<String>) {
+        self.session_missing = missing;
+    }
+
+    pub fn mark_session_summary_inflight(&mut self, branch: &str) {
+        self.session_summary_inflight.insert(branch.to_string());
+    }
+
+    pub fn mark_session_missing(&mut self, branch: &str) {
+        self.session_missing.insert(branch.to_string());
+    }
+
+    pub fn clear_session_missing(&mut self, branch: &str) {
+        self.session_missing.remove(branch);
+    }
+
+    pub fn is_session_missing(&self, branch: &str) -> bool {
+        self.session_missing.contains(branch)
+    }
+
+    pub fn apply_session_summary(
+        &mut self,
+        branch: &str,
+        session_id: &str,
+        summary: gwt_core::ai::SessionSummary,
+        mtime: std::time::SystemTime,
+    ) {
+        self.session_summary_cache.set(
+            branch.to_string(),
+            session_id.to_string(),
+            summary.clone(),
+            mtime,
+        );
+        self.session_summary_inflight.remove(branch);
+        self.session_missing.remove(branch);
+        if let Some(current) = self.branch_summary.as_mut() {
+            if current.branch_name == branch {
+                current.session_summary = Some(summary);
+                current.loading.session_summary = false;
+                current.errors.session_summary = None;
+            }
+        }
+    }
+
+    pub fn apply_session_error(&mut self, branch: &str, error: String) {
+        self.session_summary_inflight.remove(branch);
+        if let Some(current) = self.branch_summary.as_mut() {
+            if current.branch_name == branch {
+                if current.session_summary.is_none() {
+                    current.errors.session_summary = Some(error);
+                }
+                current.loading.session_summary = false;
+            }
+        }
+    }
+
+    /// Clear branch summary (called when branches are reloaded)
+    pub fn clear_branch_summary(&mut self) {
+        self.branch_summary = None;
+    }
 }
 
 /// Render branch list screen
 /// Note: Header, Filter, Mode are rendered by app.rs view_boxed_header
-/// This function only renders: BranchList + WorktreePath/Status
+/// This function only renders: BranchList + StatusBar + WorktreePath/Status
 pub fn render_branch_list(
     state: &mut BranchListState,
     frame: &mut Frame,
@@ -819,20 +1159,101 @@ pub fn render_branch_list(
     status_message: Option<&str>,
     has_focus: bool,
 ) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(3),    // Branch list (FR-003)
-            Constraint::Length(1), // Worktree path or Status message
-        ])
-        .split(area);
+    // SPEC-4b893dae: Summary panel height is 12 lines (FR-003)
+    let panel_height = crate::tui::components::SummaryPanel::height();
 
-    // Calculate visible height from branch list area (accounting for border)
-    let branch_area_height = chunks[0].height.saturating_sub(2) as usize; // -2 for borders
-    state.update_visible_height(branch_area_height);
+    // Check if we have agents to show status bar
+    let has_agents = !state.running_agents.is_empty();
+
+    let chunks = if has_agents {
+        // With status bar (SPEC-861d8cdf FR-104a)
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(panel_height), // Branch list (FR-003)
+                Constraint::Length(1),            // Status bar (FR-104a)
+                Constraint::Min(3),               // Summary panel (SPEC-4b893dae)
+            ])
+            .split(area)
+    } else {
+        // Without status bar (no agents)
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(panel_height), // Branch list (FR-003)
+                Constraint::Min(3),               // Summary panel (SPEC-4b893dae)
+            ])
+            .split(area)
+    };
+
+    // Cache branch list area for mouse selection and update visible height
+    state.update_list_area(chunks[0]);
 
     render_branches(state, frame, chunks[0], has_focus);
-    render_worktree_path(state, frame, chunks[1], status_message);
+
+    if has_agents {
+        render_status_bar(state, frame, chunks[1]);
+        render_summary_panel(state, frame, chunks[2], status_message);
+    } else {
+        render_summary_panel(state, frame, chunks[1], status_message);
+    }
+}
+
+/// Render agent status bar (SPEC-861d8cdf T-105, FR-104a, FR-104b, FR-104c)
+fn render_status_bar(state: &BranchListState, frame: &mut Frame, area: Rect) {
+    let agents: Vec<_> = state.running_agents.values().cloned().collect();
+    let summary = StatusBarSummary::from_agents(&agents);
+
+    if !summary.has_agents() {
+        return;
+    }
+
+    let mut spans = Vec::new();
+
+    // Add "Agents: " prefix
+    spans.push(Span::styled(
+        "Agents: ",
+        Style::default().fg(Color::DarkGray),
+    ));
+
+    // Add running count
+    if summary.running_count > 0 {
+        spans.push(Span::styled(
+            format!("{} running", summary.running_count),
+            Style::default().fg(Color::Green),
+        ));
+    }
+
+    // Add separator if needed
+    if summary.running_count > 0 && (summary.waiting_count > 0 || summary.stopped_count > 0) {
+        spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
+    }
+
+    // Add waiting count (FR-104c: highlighted in yellow)
+    if summary.waiting_count > 0 {
+        spans.push(Span::styled(
+            format!("{} waiting", summary.waiting_count),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    // Add separator if needed
+    if summary.waiting_count > 0 && summary.stopped_count > 0 {
+        spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
+    }
+
+    // Add stopped count
+    if summary.stopped_count > 0 {
+        spans.push(Span::styled(
+            format!("{} stopped", summary.stopped_count),
+            Style::default().fg(Color::Red),
+        ));
+    }
+
+    let line = Line::from(spans);
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 /// Render header line (FR-001, FR-001a)
@@ -1031,8 +1452,9 @@ fn render_branch_row(
     running_agent: Option<&AgentPane>,
     width: u16,
 ) -> ListItem<'static> {
+    // Only show selection icons when at least one branch is selected
+    let show_selection = !selected_set.is_empty();
     let is_checked = selected_set.contains(&branch.name);
-    let selection_icon = if is_checked { "[*]" } else { "[ ]" };
     let (worktree_icon, worktree_color) = branch.worktree_icon();
     // FR-031b: Pass spinner_frame for pending safety check
     let (safety_icon, safety_color) = branch.safety_icon(Some(spinner_frame));
@@ -1044,41 +1466,76 @@ fn render_branch_row(
         &branch.name
     };
 
-    // Calculate left side width: "[*] " + worktree + " " + safety + " " + branch_name
-    // selection_icon(3) + space(1) + worktree_icon(1) + space(1) + safety_icon + space(1) + name
-    let left_width = 3 + 1 + 1 + 1 + safety_icon.len() + 1 + display_name.width();
+    // Calculate left side width: optionally "[*] " + worktree + " " + safety + " " + branch_name
+    // selection_icon(3) + space(1) if showing selection, plus worktree_icon(1) + space(1) + safety_icon + space(1) + name
+    let selection_width = if show_selection { 3 } else { 0 }; // "◉ " or "◎ " (2 + 1)
+    let left_width = selection_width + 1 + 1 + safety_icon.len() + 1 + display_name.width();
 
     // Build right side (agent info) and calculate its width
+    // SPEC-861d8cdf T-103: Status-based display
     let (right_spans, right_width): (Vec<Span>, usize) = if let Some(agent) = running_agent {
-        let spinner_char = SPINNER_FRAMES[spinner_frame % SPINNER_FRAMES.len()];
         let agent_display = get_agent_display_name(&agent.agent_name);
         let uptime = agent.uptime_string();
 
-        if agent.is_background {
-            // Background (hidden) pane - grayed out: "[BG] Agent uptime"
-            let width = 5 + agent_display.width() + 1 + uptime.width(); // "[BG] " + name + " " + uptime
-            let spans = vec![
-                Span::styled("[BG] ", Style::default().fg(Color::DarkGray)),
-                Span::styled(agent_display, Style::default().fg(Color::DarkGray)),
-                Span::styled(" ", Style::default().fg(Color::DarkGray)),
-                Span::styled(uptime, Style::default().fg(Color::DarkGray)),
-            ];
-            (spans, width)
-        } else {
-            // Visible running pane - with spinner: "[X] Agent uptime"
-            let width = 4 + agent_display.width() + 1 + uptime.width(); // "[X] " + name + " " + uptime
-            let agent_color = get_agent_color(Some(&agent.agent_name));
-            let spans = vec![
-                Span::styled(
-                    format!("[{}] ", spinner_char),
-                    Style::default().fg(Color::Green),
-                ),
-                Span::styled(agent_display, Style::default().fg(agent_color)),
-                Span::raw(" "),
-                Span::styled(uptime, Style::default().fg(Color::Yellow)),
-            ];
-            (spans, width)
-        }
+        // Determine icon and color based on status (SPEC-861d8cdf T-103)
+        let (status_icon, status_color) = match agent.status {
+            AgentStatus::Running => {
+                if agent.is_background {
+                    let icon = BG_SPINNER_FRAMES[spinner_frame % BG_SPINNER_FRAMES.len()];
+                    (icon, Color::DarkGray)
+                } else {
+                    let icon = ACTIVE_SPINNER_FRAMES[spinner_frame % ACTIVE_SPINNER_FRAMES.len()];
+                    (icon, Color::Green)
+                }
+            }
+            AgentStatus::WaitingInput => {
+                // Blink effect: 500ms on/off (2 spinner frames = ~500ms with 250ms tick)
+                let should_show = (spinner_frame / 2).is_multiple_of(2);
+                if should_show {
+                    ('?', Color::Yellow)
+                } else {
+                    (' ', Color::Yellow)
+                }
+            }
+            AgentStatus::Stopped => ('#', Color::Red),
+            AgentStatus::Unknown => {
+                // Fallback to original behavior based on is_background
+                if agent.is_background {
+                    let icon = BG_SPINNER_FRAMES[spinner_frame % BG_SPINNER_FRAMES.len()];
+                    (icon, Color::DarkGray)
+                } else {
+                    let icon = ACTIVE_SPINNER_FRAMES[spinner_frame % ACTIVE_SPINNER_FRAMES.len()];
+                    (icon, Color::Green)
+                }
+            }
+        };
+
+        // Determine text color based on status
+        let text_color = match agent.status {
+            AgentStatus::Stopped => Color::Red,
+            AgentStatus::WaitingInput => Color::Yellow,
+            AgentStatus::Running if agent.is_background => Color::DarkGray,
+            _ => get_agent_color(Some(&agent.agent_name)),
+        };
+
+        let uptime_color = match agent.status {
+            AgentStatus::Stopped => Color::DarkGray,
+            AgentStatus::WaitingInput => Color::Yellow,
+            AgentStatus::Running if agent.is_background => Color::DarkGray,
+            _ => Color::Yellow,
+        };
+
+        let width = 2 + agent_display.width() + 1 + uptime.width();
+        let spans = vec![
+            Span::styled(
+                format!("{} ", status_icon),
+                Style::default().fg(status_color),
+            ),
+            Span::styled(agent_display, Style::default().fg(text_color)),
+            Span::raw(" "),
+            Span::styled(uptime, Style::default().fg(uptime_color)),
+        ];
+        (spans, width)
     } else if let Some(tool) = &branch.last_tool_usage {
         // No running agent, but show last tool usage (FR-070)
         let agent_id = tool.split('@').next();
@@ -1102,22 +1559,29 @@ fn render_branch_row(
     };
 
     // Build the complete spans
-    let mut spans = vec![
-        Span::styled(
+    let mut spans = Vec::new();
+
+    // Only add selection icon when in selection mode
+    if show_selection {
+        let selection_icon = if is_checked { "◉" } else { "◎" };
+        spans.push(Span::styled(
             selection_icon,
             if is_checked && (branch.has_changes || branch.has_unpushed) {
                 Style::default().fg(Color::Red)
             } else {
                 Style::default()
             },
-        ),
-        Span::raw(" "),
+        ));
+        spans.push(Span::raw(" "));
+    }
+
+    spans.extend([
         Span::styled(worktree_icon, Style::default().fg(worktree_color)),
         Span::raw(" "),
         Span::styled(safety_icon, Style::default().fg(safety_color)),
         Span::raw(" "),
         Span::raw(display_name.to_string()),
-    ];
+    ]);
 
     // Add padding and right side if there's agent info
     if !right_spans.is_empty() {
@@ -1135,39 +1599,155 @@ fn render_branch_row(
     ListItem::new(Line::from(spans)).style(style)
 }
 
-/// Render worktree path line or status message
-fn render_worktree_path(
-    state: &BranchListState,
+/// Render summary panel (SPEC-4b893dae FR-001~FR-006)
+fn render_summary_panel(
+    state: &mut BranchListState,
     frame: &mut Frame,
     area: Rect,
     status_message: Option<&str>,
 ) {
-    // If there's a status message, show it instead of worktree path
+    match state.detail_panel_tab {
+        DetailPanelTab::Details => render_details_panel(state, frame, area, status_message),
+        DetailPanelTab::Session => render_session_panel(state, frame, area, status_message),
+    }
+}
+
+fn panel_title_line(branch_name: &str, active: DetailPanelTab) -> Line<'static> {
+    let mut spans = Vec::new();
+    let details_style = if matches!(active, DetailPanelTab::Details) {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let session_style = if matches!(active, DetailPanelTab::Session) {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    spans.push(Span::styled("[Details]", details_style));
+    spans.push(Span::raw(" "));
+    spans.push(Span::styled("[Session]", session_style));
+    spans.push(Span::raw(" "));
+    spans.push(Span::styled(
+        format!(" {}", branch_name),
+        Style::default().fg(Color::DarkGray),
+    ));
+
+    Line::from(spans)
+}
+
+fn panel_switch_hint() -> Line<'static> {
+    Line::from(Span::styled(
+        " Tab: Switch ",
+        Style::default().fg(Color::DarkGray),
+    ))
+    .right_aligned()
+}
+
+fn session_panel_hint() -> Line<'static> {
+    Line::from(Span::styled(
+        " Tab: Switch | PgUp/PgDn: Scroll ",
+        Style::default().fg(Color::DarkGray),
+    ))
+    .right_aligned()
+}
+
+fn render_details_panel(
+    state: &mut BranchListState,
+    frame: &mut Frame,
+    area: Rect,
+    status_message: Option<&str>,
+) {
+    use crate::tui::components::SummaryPanel;
+    use std::path::PathBuf;
+
+    // Create or get branch summary
+    let summary = if let Some(ref summary) = state.branch_summary {
+        summary.clone()
+    } else if let Some(branch) = state.selected_branch() {
+        // Create a basic summary from available branch data
+        let mut summary = BranchSummary::new(&branch.name);
+
+        // Set worktree path if available
+        if let Some(wt_path) = &branch.worktree_path {
+            summary = summary.with_worktree_path(Some(PathBuf::from(wt_path)));
+        }
+
+        // Set loading state based on global loading state
+        if state.is_loading {
+            summary.loading.commits = true;
+            summary.loading.stats = true;
+            summary.loading.meta = true;
+        }
+
+        summary
+    } else {
+        // No branch selected - show empty panel
+        BranchSummary::new("(no branch selected)")
+    };
+
+    // Handle status messages - show them in the panel area if present
     if let Some(status) = status_message {
+        // Draw the panel frame first
+        let title = panel_title_line(&summary.branch_name, DetailPanelTab::Details);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(title)
+            .title_bottom(panel_switch_hint());
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        // Show status message inside
         let line = Line::from(vec![Span::styled(
             status,
             Style::default().fg(Color::Yellow),
         )]);
-        frame.render_widget(Paragraph::new(line), area);
+        frame.render_widget(Paragraph::new(line), inner);
         return;
     }
 
+    // Handle loading state - show spinner in panel
     if state.is_loading {
+        let title = panel_title_line(&summary.branch_name, DetailPanelTab::Details);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(title)
+            .title_bottom(panel_switch_hint());
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
         let line = Line::from(vec![
             Span::styled(
                 format!("{} ", state.spinner_char()),
                 Style::default().fg(Color::Yellow),
             ),
             Span::styled(
-                "Status: Loading branch list...",
+                "Loading branch information...",
                 Style::default().fg(Color::Yellow),
             ),
         ]);
-        frame.render_widget(Paragraph::new(line), area);
+        frame.render_widget(Paragraph::new(line), inner);
         return;
     }
 
+    // Handle progress state
     if let Some(progress) = state.status_progress_line() {
+        let title = panel_title_line(&summary.branch_name, DetailPanelTab::Details);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(title)
+            .title_bottom(panel_switch_hint());
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
         let line = Line::from(vec![
             Span::styled(
                 format!("{} ", state.spinner_char()),
@@ -1175,35 +1755,283 @@ fn render_worktree_path(
             ),
             Span::styled(progress, Style::default().fg(Color::Yellow)),
         ]);
-        frame.render_widget(Paragraph::new(line), area);
+        frame.render_widget(Paragraph::new(line), inner);
         return;
     }
 
-    // Otherwise, show worktree path (FR-004a, FR-004b, FR-004c)
-    let path = if let Some(branch) = state.selected_branch() {
-        if let Some(wt_path) = &branch.worktree_path {
-            wt_path.clone()
-        } else if branch.is_current {
-            // FR-004c: Current branch without worktree shows working directory
-            state
-                .working_directory
-                .clone()
-                .unwrap_or_else(|| "(none)".to_string())
+    // Render the full summary panel
+    let panel = SummaryPanel::new(&summary)
+        .with_tick(state.spinner_frame)
+        .with_title(panel_title_line(
+            &summary.branch_name,
+            DetailPanelTab::Details,
+        ));
+
+    panel.render(frame, area);
+}
+
+fn render_session_panel(
+    state: &mut BranchListState,
+    frame: &mut Frame,
+    area: Rect,
+    status_message: Option<&str>,
+) {
+    let branch_name = state
+        .selected_branch()
+        .map(|branch| branch.name.clone())
+        .unwrap_or_else(|| "(no branch selected)".to_string());
+    let title = panel_title_line(&branch_name, DetailPanelTab::Session);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(title)
+        .title_bottom(session_panel_hint());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    if let Some(status) = status_message {
+        lines.push(Line::from(Span::styled(
+            status,
+            Style::default().fg(Color::Yellow),
+        )));
+    } else if state.is_loading {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{} ", state.spinner_char()),
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::styled(
+                "Loading branch information...",
+                Style::default().fg(Color::Yellow),
+            ),
+        ]));
+    } else if let Some(branch) = state.selected_branch() {
+        if !state.ai_enabled {
+            lines.push(Line::from(Span::styled(
+                "Configure AI in Profiles to enable session summary",
+                Style::default().fg(Color::Yellow),
+            )));
+        } else if branch.last_session_id.is_none() || state.is_session_missing(&branch.name) {
+            lines.push(Line::from(Span::styled(
+                "No session",
+                Style::default().fg(Color::DarkGray),
+            )));
+        } else if let Some(summary) = state.session_summary(&branch.name) {
+            let markdown = summary.markdown.clone();
+            let task_overview = summary.task_overview.clone();
+            let short_summary = summary.short_summary.clone();
+            let bullet_points = summary.bullet_points.clone();
+            if let Some(markdown) = markdown.as_ref() {
+                lines = render_markdown_lines(markdown);
+                if lines.is_empty() {
+                    lines.push(Line::from(markdown.to_string()));
+                }
+            } else {
+                lines.push(Line::from(Span::styled(
+                    "Task:",
+                    Style::default().fg(Color::Yellow),
+                )));
+                if let Some(task) = task_overview.as_ref() {
+                    lines.push(Line::from(format!("  {}", task)));
+                } else {
+                    lines.push(Line::from(Span::styled(
+                        "  (Not available)",
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+
+                lines.push(Line::from(Span::styled(
+                    "Summary:",
+                    Style::default().fg(Color::Yellow),
+                )));
+                if let Some(short) = short_summary.as_ref() {
+                    lines.push(Line::from(format!("  {}", short)));
+                } else {
+                    lines.push(Line::from(Span::styled(
+                        "  (Not available)",
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+
+                lines.push(Line::from(Span::styled(
+                    "Highlights:",
+                    Style::default().fg(Color::Yellow),
+                )));
+                if bullet_points.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        "  (No highlights)",
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                } else {
+                    for bullet in bullet_points.iter().take(3) {
+                        lines.push(Line::from(format!("  {}", bullet)));
+                    }
+                }
+            }
+        } else if state.session_summary_inflight(&branch.name) {
+            lines.push(Line::from(Span::styled(
+                format!("{} Generating session summary...", state.spinner_char()),
+                Style::default().fg(Color::Yellow),
+            )));
+        } else if let Some(error) = state
+            .branch_summary
+            .as_ref()
+            .and_then(|summary| summary.errors.session_summary.as_ref())
+        {
+            lines.push(Line::from(Span::styled(
+                format!("(Failed to load: {})", error),
+                Style::default().fg(Color::Red),
+            )));
         } else {
-            "(none)".to_string()
+            lines.push(Line::from(Span::styled(
+                "Generating session summary...",
+                Style::default().fg(Color::Yellow),
+            )));
         }
     } else {
-        // FR-004b: No branch selected
-        "(none)".to_string()
-    };
+        lines.push(Line::from(Span::styled(
+            "No branch selected",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
 
-    let spans = vec![
-        Span::styled("Worktree: ", Style::default().fg(Color::DarkGray)),
-        Span::styled(path, Style::default().fg(Color::DarkGray)),
-    ];
+    let total_lines = count_wrapped_lines(&lines, inner.width as usize);
+    let max_scroll = total_lines.saturating_sub(inner.height as usize);
+    state.update_session_scroll_bounds(max_scroll, inner.height as usize);
 
-    let line = Line::from(spans);
-    frame.render_widget(Paragraph::new(line), area);
+    let paragraph = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .scroll((state.session_scroll_offset as u16, 0));
+    frame.render_widget(paragraph, inner);
+}
+
+fn render_markdown_lines(markdown: &str) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut buffer = String::new();
+    let mut in_item = false;
+
+    let options = Options::ENABLE_STRIKETHROUGH;
+    let parser = Parser::new_ext(markdown, options);
+
+    for event in parser {
+        match event {
+            Event::Start(Tag::Heading { .. }) => {
+                flush_paragraph_lines(&mut lines, &mut buffer, false);
+                buffer.clear();
+            }
+            Event::End(TagEnd::Heading(_)) => {
+                let text = buffer.trim();
+                if !text.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        text.to_string(),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    )));
+                }
+                buffer.clear();
+            }
+            Event::Start(Tag::Item) => {
+                flush_paragraph_lines(&mut lines, &mut buffer, false);
+                buffer.clear();
+                in_item = true;
+            }
+            Event::End(TagEnd::Item) => {
+                let text = buffer.trim();
+                if !text.is_empty() {
+                    push_bullet_lines(&mut lines, text);
+                }
+                buffer.clear();
+                in_item = false;
+            }
+            Event::Start(Tag::Paragraph) => {
+                if !in_item {
+                    buffer.clear();
+                }
+            }
+            Event::End(TagEnd::Paragraph) => {
+                if !in_item {
+                    flush_paragraph_lines(&mut lines, &mut buffer, false);
+                }
+            }
+            Event::Text(text) => buffer.push_str(text.as_ref()),
+            Event::Code(text) => buffer.push_str(text.as_ref()),
+            Event::SoftBreak => buffer.push(' '),
+            Event::HardBreak => buffer.push('\n'),
+            _ => {}
+        }
+    }
+
+    flush_paragraph_lines(&mut lines, &mut buffer, in_item);
+
+    lines
+}
+
+fn flush_paragraph_lines(lines: &mut Vec<Line<'static>>, buffer: &mut String, in_item: bool) {
+    let text = buffer.trim();
+    if text.is_empty() {
+        return;
+    }
+    if in_item {
+        push_bullet_lines(lines, text);
+    } else {
+        push_plain_lines(lines, text);
+    }
+    buffer.clear();
+}
+
+fn push_plain_lines(lines: &mut Vec<Line<'static>>, text: &str) {
+    for line in text.split('\n') {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            lines.push(Line::from(""));
+        } else {
+            lines.push(Line::from(trimmed.to_string()));
+        }
+    }
+}
+
+fn push_bullet_lines(lines: &mut Vec<Line<'static>>, text: &str) {
+    let mut iter = text.split('\n');
+    if let Some(first) = iter.next() {
+        let trimmed = first.trim();
+        if !trimmed.is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled("- ", Style::default().fg(Color::DarkGray)),
+                Span::raw(trimmed.to_string()),
+            ]));
+        }
+    }
+    for rest in iter {
+        let trimmed = rest.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        lines.push(Line::from(vec![
+            Span::styled("  ", Style::default().fg(Color::DarkGray)),
+            Span::raw(trimmed.to_string()),
+        ]));
+    }
+}
+
+fn count_wrapped_lines(lines: &[Line], width: usize) -> usize {
+    if width == 0 {
+        return 0;
+    }
+    lines
+        .iter()
+        .map(|line| {
+            let line_width: usize = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref().width())
+                .sum();
+            let line_width = line_width.max(1);
+            line_width.div_ceil(width)
+        })
+        .sum()
 }
 
 /// Render footer line with keybindings (FR-004)
@@ -1242,11 +2070,45 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
+    fn sample_branch(name: &str) -> BranchItem {
+        BranchItem {
+            name: name.to_string(),
+            branch_type: BranchType::Local,
+            is_current: false,
+            has_worktree: true,
+            worktree_path: Some("/path".to_string()),
+            worktree_status: WorktreeStatus::Active,
+            has_changes: false,
+            has_unpushed: false,
+            divergence: DivergenceStatus::UpToDate,
+            has_remote_counterpart: true,
+            remote_name: None,
+            safe_to_cleanup: Some(true),
+            safety_status: SafetyStatus::Safe,
+            is_unmerged: false,
+            last_commit_timestamp: None,
+            last_tool_usage: None,
+            last_tool_id: None,
+            last_session_id: None,
+            is_selected: false,
+            pr_title: None,
+        }
+    }
+
     #[test]
     fn test_view_mode_cycle() {
         assert_eq!(ViewMode::All.cycle(), ViewMode::Local);
         assert_eq!(ViewMode::Local.cycle(), ViewMode::Remote);
         assert_eq!(ViewMode::Remote.cycle(), ViewMode::All);
+    }
+
+    #[test]
+    fn test_spinner_char_wraps_large_frame() {
+        let mut state = BranchListState::new();
+        state.spinner_frame = SPINNER_FRAMES.len() * 3 + 1;
+        assert_eq!(state.spinner_char(), '/');
+        state.spinner_frame = SPINNER_FRAMES.len() * 5;
+        assert_eq!(state.spinner_char(), '|');
     }
 
     #[test]
@@ -1269,6 +2131,8 @@ mod tests {
                 is_unmerged: false,
                 last_commit_timestamp: None,
                 last_tool_usage: None,
+                last_tool_id: None,
+                last_session_id: None,
                 is_selected: false,
                 pr_title: None,
             },
@@ -1289,6 +2153,8 @@ mod tests {
                 is_unmerged: false,
                 last_commit_timestamp: None,
                 last_tool_usage: None,
+                last_tool_id: None,
+                last_session_id: None,
                 is_selected: false,
                 pr_title: None,
             },
@@ -1305,6 +2171,45 @@ mod tests {
 
         state.select_prev();
         assert_eq!(state.selected, 0);
+    }
+
+    #[test]
+    fn test_mouse_position_selects_visible_row() {
+        let branches = vec![
+            sample_branch("feature/one"),
+            sample_branch("feature/two"),
+            sample_branch("feature/three"),
+        ];
+        let mut state = BranchListState::new().with_branches(branches);
+        state.update_list_area(Rect::new(0, 0, 20, 5)); // inner height = 3
+
+        let index = state
+            .selection_index_from_point(1, 2) // inner y=1 -> row 1
+            .expect("index");
+        assert_eq!(index, 1);
+        assert!(state.select_index(index));
+        assert_eq!(state.selected, 1);
+    }
+
+    #[test]
+    fn test_mouse_position_respects_offset_and_bounds() {
+        let branches = vec![
+            sample_branch("feature/one"),
+            sample_branch("feature/two"),
+            sample_branch("feature/three"),
+            sample_branch("feature/four"),
+        ];
+        let mut state = BranchListState::new().with_branches(branches);
+        state.update_list_area(Rect::new(2, 3, 20, 5)); // inner y=4..6
+        state.offset = 1;
+
+        let index = state
+            .selection_index_from_point(3, 4) // inner top row
+            .expect("index");
+        assert_eq!(index, 1);
+
+        assert!(state.selection_index_from_point(1, 1).is_none());
+        assert!(state.selection_index_from_point(25, 10).is_none());
     }
 
     #[test]
@@ -1326,6 +2231,8 @@ mod tests {
             is_unmerged: false,
             last_commit_timestamp: None,
             last_tool_usage: None,
+            last_tool_id: None,
+            last_session_id: None,
             is_selected: false,
             pr_title: None,
         }];
@@ -1368,6 +2275,8 @@ mod tests {
             is_unmerged: false,
             last_commit_timestamp: None,
             last_tool_usage: None,
+            last_tool_id: None,
+            last_session_id: None,
             is_selected: false,
             pr_title: None,
         }];
@@ -1376,7 +2285,8 @@ mod tests {
         state.reset_status_progress(5);
         state.increment_status_progress();
 
-        let backend = TestBackend::new(60, 5);
+        // SPEC-4b893dae: Panel is 12 lines, so need taller terminal (3 min + 12 panel = 15)
+        let backend = TestBackend::new(60, 20);
         let mut terminal = Terminal::new(backend).expect("terminal init");
 
         terminal
@@ -1387,8 +2297,16 @@ mod tests {
             .expect("draw");
 
         let buffer = terminal.backend().buffer();
-        let line: String = (0..60).map(|x| buffer[(x, 4)].symbol()).collect();
-        assert!(line.contains("Status: Updating branch status (1/5)"));
+        // Search the entire buffer for the progress text (now inside panel)
+        let mut found = false;
+        for y in 0..20 {
+            let line: String = (0..60).map(|x| buffer[(x, y)].symbol()).collect();
+            if line.contains("Updating branch status (1/5)") {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "Progress line should appear somewhere in the panel");
     }
 
     #[test]
@@ -1396,7 +2314,8 @@ mod tests {
         let mut state = BranchListState::new();
         state.set_loading(true);
 
-        let backend = TestBackend::new(60, 5);
+        // SPEC-4b893dae: Panel is 12 lines, so need taller terminal (3 min + 12 panel = 15)
+        let backend = TestBackend::new(60, 20);
         let mut terminal = Terminal::new(backend).expect("terminal init");
 
         terminal
@@ -1407,8 +2326,16 @@ mod tests {
             .expect("draw");
 
         let buffer = terminal.backend().buffer();
-        let line: String = (0..60).map(|x| buffer[(x, 4)].symbol()).collect();
-        assert!(line.contains("Status: Loading branch list..."));
+        // Search the entire buffer for the loading text (now inside panel)
+        let mut found = false;
+        for y in 0..20 {
+            let line: String = (0..60).map(|x| buffer[(x, y)].symbol()).collect();
+            if line.contains("Loading branch information") {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "Loading text should appear somewhere in the panel");
     }
 
     #[test]
@@ -1431,6 +2358,8 @@ mod tests {
                 is_unmerged: false,
                 last_commit_timestamp: None,
                 last_tool_usage: None,
+                last_tool_id: None,
+                last_session_id: None,
                 is_selected: false,
                 pr_title: None,
             },
@@ -1451,6 +2380,8 @@ mod tests {
                 is_unmerged: false,
                 last_commit_timestamp: None,
                 last_tool_usage: None,
+                last_tool_id: None,
+                last_session_id: None,
                 is_selected: false,
                 pr_title: None,
             },
@@ -1488,6 +2419,8 @@ mod tests {
                 is_unmerged: false,
                 last_commit_timestamp: None,
                 last_tool_usage: None,
+                last_tool_id: None,
+                last_session_id: None,
                 is_selected: false,
                 pr_title: None,
             },
@@ -1508,6 +2441,8 @@ mod tests {
                 is_unmerged: false,
                 last_commit_timestamp: None,
                 last_tool_usage: None,
+                last_tool_id: None,
+                last_session_id: None,
                 is_selected: false,
                 pr_title: None,
             },
@@ -1547,6 +2482,8 @@ mod tests {
                 is_unmerged: false,
                 last_commit_timestamp: None,
                 last_tool_usage: None,
+                last_tool_id: None,
+                last_session_id: None,
                 is_selected: false,
                 pr_title: None,
             },
@@ -1567,6 +2504,8 @@ mod tests {
                 is_unmerged: false,
                 last_commit_timestamp: None,
                 last_tool_usage: None,
+                last_tool_id: None,
+                last_session_id: None,
                 is_selected: false,
                 pr_title: None,
             },
@@ -1604,6 +2543,8 @@ mod tests {
             is_unmerged: true,
             last_commit_timestamp: None,
             last_tool_usage: None,
+            last_tool_id: None,
+            last_session_id: None,
             is_selected: false,
             pr_title: None,
         };
@@ -1653,6 +2594,8 @@ mod tests {
                 is_unmerged: false,
                 last_commit_timestamp: None,
                 last_tool_usage: None,
+                last_tool_id: None,
+                last_session_id: None,
                 is_selected: false,
                 pr_title: None,
             },
@@ -1673,6 +2616,8 @@ mod tests {
                 is_unmerged: false,
                 last_commit_timestamp: None,
                 last_tool_usage: None,
+                last_tool_id: None,
+                last_session_id: None,
                 is_selected: false,
                 pr_title: None,
             },
@@ -1721,6 +2666,8 @@ mod tests {
                 is_unmerged: false,
                 last_commit_timestamp: None,
                 last_tool_usage: None,
+                last_tool_id: None,
+                last_session_id: None,
                 is_selected: false,
                 pr_title: None,
             },
@@ -1741,6 +2688,8 @@ mod tests {
                 is_unmerged: false,
                 last_commit_timestamp: None,
                 last_tool_usage: None,
+                last_tool_id: None,
+                last_session_id: None,
                 is_selected: false,
                 pr_title: None,
             },
@@ -1761,6 +2710,8 @@ mod tests {
                 is_unmerged: false,
                 last_commit_timestamp: None,
                 last_tool_usage: None,
+                last_tool_id: None,
+                last_session_id: None,
                 is_selected: false,
                 pr_title: None,
             },

@@ -6,6 +6,89 @@ use std::process::Command;
 use std::time::{Duration, SystemTime};
 
 use super::error::{TmuxError, TmuxResult};
+use crate::config::AgentStatus;
+
+/// Spinner frames for active agents (SPEC-861d8cdf T-103)
+pub const ACTIVE_SPINNER_FRAMES: &[&str] = &["|", "/", "-", "\\"];
+
+/// Spinner frames for background agents (SPEC-861d8cdf T-103)
+pub const BG_SPINNER_FRAMES: &[&str] = &[".", "o", "O", "o"];
+
+/// Icon for stopped agents (SPEC-861d8cdf T-103)
+pub const STOPPED_ICON: &str = "#";
+
+/// Color enum for status display (SPEC-861d8cdf T-103)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusColor {
+    Green,
+    Yellow,
+    Red,
+    Gray,
+    DarkGray,
+}
+
+/// Summary of agent statuses for status bar display (SPEC-861d8cdf T-105)
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StatusBarSummary {
+    pub running_count: usize,
+    pub waiting_count: usize,
+    pub stopped_count: usize,
+}
+
+impl StatusBarSummary {
+    /// Create a summary from a list of agents
+    pub fn from_agents(agents: &[AgentPane]) -> Self {
+        let mut summary = Self::default();
+        for agent in agents {
+            match agent.status {
+                AgentStatus::Running => summary.running_count += 1,
+                AgentStatus::WaitingInput => summary.waiting_count += 1,
+                AgentStatus::Stopped => summary.stopped_count += 1,
+                AgentStatus::Unknown => {} // Don't count unknown status
+            }
+        }
+        summary
+    }
+
+    /// Check if there are any agents with known status
+    pub fn has_agents(&self) -> bool {
+        self.running_count > 0 || self.waiting_count > 0 || self.stopped_count > 0
+    }
+
+    /// Total count of agents with known status
+    pub fn total(&self) -> usize {
+        self.running_count + self.waiting_count + self.stopped_count
+    }
+
+    /// Generate display text for the status bar
+    pub fn to_display_text(&self) -> String {
+        if !self.has_agents() {
+            return String::new();
+        }
+
+        let mut parts = Vec::new();
+        if self.running_count > 0 {
+            parts.push(format!("{} running", self.running_count));
+        }
+        if self.waiting_count > 0 {
+            parts.push(format!("{} waiting", self.waiting_count));
+        }
+        if self.stopped_count > 0 {
+            parts.push(format!("{} stopped", self.stopped_count));
+        }
+        parts.join(" | ")
+    }
+
+    /// Check if waiting count needs highlighting
+    pub fn needs_waiting_highlight(&self) -> bool {
+        self.waiting_count > 0
+    }
+
+    /// Check if stopped count needs highlighting
+    pub fn needs_stopped_highlight(&self) -> bool {
+        self.stopped_count > 0
+    }
+}
 
 /// Information about a tmux pane
 #[derive(Debug, Clone)]
@@ -52,6 +135,14 @@ impl SplitDirection {
     }
 }
 
+/// Idle timeout in seconds before inferring stopped status (SPEC-861d8cdf T-106)
+pub const IDLE_TIMEOUT_SECS: u64 = 60;
+
+/// Prompt patterns that indicate waiting for input (SPEC-861d8cdf T-106)
+pub const PROMPT_PATTERNS: &[&str] = &[
+    "> ", "→ ", "Input:", "? ", ">> ", ">>> ", "(y/n)", "(Y/n)", "[y/N]",
+];
+
 /// Represents an agent running in a tmux pane
 #[derive(Debug, Clone)]
 pub struct AgentPane {
@@ -64,6 +155,12 @@ pub struct AgentPane {
     pub is_background: bool,
     /// Window ID when pane is in background (for restoring)
     pub background_window: Option<String>,
+    /// Agent status for state visualization (SPEC-861d8cdf T-103)
+    pub status: AgentStatus,
+    /// Last time output was received from this pane (SPEC-861d8cdf T-106)
+    pub last_output_at: Option<SystemTime>,
+    /// Whether the status was estimated (not from Hook API) (SPEC-861d8cdf T-106)
+    pub is_status_estimated: bool,
 }
 
 impl AgentPane {
@@ -83,7 +180,72 @@ impl AgentPane {
             pid,
             is_background: false,
             background_window: None,
+            status: AgentStatus::Unknown,
+            last_output_at: None,
+            is_status_estimated: false,
         }
+    }
+
+    /// Get the display color for the current status (SPEC-861d8cdf T-103)
+    ///
+    /// Color mapping:
+    /// - Running + Active: Green
+    /// - Running + Background: DarkGray
+    /// - WaitingInput: Yellow
+    /// - Stopped: Red
+    /// - Unknown: Gray
+    pub fn status_color(&self) -> StatusColor {
+        match self.status {
+            AgentStatus::Running => {
+                if self.is_background {
+                    StatusColor::DarkGray
+                } else {
+                    StatusColor::Green
+                }
+            }
+            AgentStatus::WaitingInput => StatusColor::Yellow,
+            AgentStatus::Stopped => StatusColor::Red,
+            AgentStatus::Unknown => StatusColor::Gray,
+        }
+    }
+
+    /// Get the display icon for the current status (SPEC-861d8cdf T-103)
+    ///
+    /// Icon mapping:
+    /// - Running: Spinner animation frame
+    /// - WaitingInput: "?" (blinking)
+    /// - Stopped: Static square
+    /// - Unknown: "~"
+    pub fn status_icon(&self, spinner_frame: usize) -> &'static str {
+        match self.status {
+            AgentStatus::Running => {
+                if self.is_background {
+                    BG_SPINNER_FRAMES[spinner_frame % BG_SPINNER_FRAMES.len()]
+                } else {
+                    ACTIVE_SPINNER_FRAMES[spinner_frame % ACTIVE_SPINNER_FRAMES.len()]
+                }
+            }
+            AgentStatus::WaitingInput => "?",
+            AgentStatus::Stopped => STOPPED_ICON,
+            AgentStatus::Unknown => "~",
+        }
+    }
+
+    /// Check if the icon should be visible (for blinking effect)
+    /// Returns false for WaitingInput status during the "off" phase of blink
+    pub fn should_show_icon(&self, spinner_frame: usize) -> bool {
+        if self.status == AgentStatus::WaitingInput {
+            // 500ms blink = 2 spinner frames (250ms each)
+            // Show icon on even frames, hide on odd frames
+            (spinner_frame / 2).is_multiple_of(2)
+        } else {
+            true
+        }
+    }
+
+    /// Check if this agent needs attention (waiting or stopped)
+    pub fn needs_attention(&self) -> bool {
+        self.status.needs_attention()
     }
 
     /// Calculate uptime duration
@@ -774,6 +936,111 @@ fn resolve_agent_name(current_command: &str) -> String {
     })
 }
 
+/// Infer agent status based on process state and idle time (SPEC-861d8cdf T-106)
+///
+/// This function is used for agents that don't report their status via Hook API.
+/// It checks:
+/// 1. Process is running (using kill -0)
+/// 2. Time since last output (stopped if > 60 seconds)
+///
+/// # Arguments
+/// * `agent` - The agent pane to check
+/// * `pane_output` - Optional pane output for prompt pattern detection
+///
+/// # Returns
+/// The inferred `AgentStatus`
+pub fn infer_agent_status(agent: &AgentPane, pane_output: Option<&str>) -> AgentStatus {
+    // Check if process is running
+    if !is_process_running(agent.pid) {
+        return AgentStatus::Stopped;
+    }
+
+    // Check for idle timeout
+    if let Some(last_output) = agent.last_output_at {
+        if let Ok(elapsed) = last_output.elapsed() {
+            if elapsed > Duration::from_secs(IDLE_TIMEOUT_SECS) {
+                return AgentStatus::Stopped;
+            }
+        }
+    }
+
+    // Check pane output for prompt patterns
+    if let Some(output) = pane_output {
+        let inferred = infer_agent_status_from_output(output);
+        if inferred != AgentStatus::Unknown {
+            return inferred;
+        }
+    }
+
+    // Default to Running if process is alive and not idle
+    AgentStatus::Running
+}
+
+/// Infer agent status from pane output by detecting prompt patterns (SPEC-861d8cdf T-106)
+///
+/// Detects patterns like:
+/// - `> ` (shell prompt)
+/// - `→ ` (arrow prompt)
+/// - `Input:` (input request)
+/// - `? ` (question prompt)
+/// - `(y/n)`, `[y/N]` (confirmation prompts)
+///
+/// # Arguments
+/// * `output` - The pane output text to analyze
+///
+/// # Returns
+/// `AgentStatus::WaitingInput` if a prompt pattern is detected, `AgentStatus::Unknown` otherwise
+pub fn infer_agent_status_from_output(output: &str) -> AgentStatus {
+    // Get the last line(s) of output for prompt detection
+    let trimmed = output.trim_end();
+    if trimmed.is_empty() {
+        return AgentStatus::Unknown;
+    }
+
+    // Check if output ends with any prompt pattern
+    for pattern in PROMPT_PATTERNS {
+        if trimmed.ends_with(pattern) {
+            return AgentStatus::WaitingInput;
+        }
+    }
+
+    // Check last line for prompt patterns (sometimes there's trailing whitespace)
+    if let Some(last_line) = trimmed.lines().last() {
+        let last_line_trimmed = last_line.trim();
+        for pattern in PROMPT_PATTERNS {
+            let pattern_trimmed = pattern.trim();
+            if last_line_trimmed.ends_with(pattern_trimmed) {
+                return AgentStatus::WaitingInput;
+            }
+        }
+    }
+
+    AgentStatus::Unknown
+}
+
+/// Get agent status with confidence indicator (SPEC-861d8cdf T-106)
+///
+/// Returns the agent's status and whether it was estimated (inferred) rather than
+/// confirmed via Hook API.
+///
+/// # Arguments
+/// * `agent` - The agent pane to check
+///
+/// # Returns
+/// A tuple of (AgentStatus, is_estimated)
+/// - is_estimated = false: status was set via Hook API (reliable)
+/// - is_estimated = true: status was inferred (less reliable)
+pub fn get_agent_status_with_confidence(agent: &AgentPane) -> (AgentStatus, bool) {
+    // If status was explicitly set and is not Unknown, it's from Hook API
+    if agent.status != AgentStatus::Unknown && !agent.is_status_estimated {
+        return (agent.status, false);
+    }
+
+    // Otherwise, we need to infer status
+    let inferred = infer_agent_status(agent, None);
+    (inferred, true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1089,5 +1356,594 @@ mod tests {
         assert_eq!(detect_agent_name("CLAUDE"), Some("claude".to_string()));
         assert_eq!(detect_agent_name("Claude"), Some("claude".to_string()));
         assert_eq!(detect_agent_name("CODEX"), Some("codex".to_string()));
+    }
+
+    // T-TEST-030: シングルアクティブペイン制約テスト
+    #[test]
+    fn test_get_active_pane_single() {
+        let panes = [
+            AgentPane {
+                pane_id: "1".to_string(),
+                branch_name: "feature/a".to_string(),
+                agent_name: "claude".to_string(),
+                start_time: SystemTime::now(),
+                pid: 12345,
+                is_background: false, // active
+                background_window: None,
+                status: AgentStatus::Unknown,
+                last_output_at: None,
+                is_status_estimated: false,
+            },
+            AgentPane {
+                pane_id: "2".to_string(),
+                branch_name: "feature/b".to_string(),
+                agent_name: "codex".to_string(),
+                start_time: SystemTime::now(),
+                pid: 12346,
+                is_background: true, // background
+                background_window: Some("session:@1".to_string()),
+                status: AgentStatus::Unknown,
+                last_output_at: None,
+                is_status_estimated: false,
+            },
+        ];
+
+        let active: Vec<_> = panes.iter().filter(|p| !p.is_background).collect();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].branch_name, "feature/a");
+    }
+
+    #[test]
+    fn test_no_active_pane_all_background() {
+        let panes = [
+            AgentPane {
+                pane_id: "1".to_string(),
+                branch_name: "feature/a".to_string(),
+                agent_name: "claude".to_string(),
+                start_time: SystemTime::now(),
+                pid: 12345,
+                is_background: true,
+                background_window: Some("session:@1".to_string()),
+                status: AgentStatus::Unknown,
+                last_output_at: None,
+                is_status_estimated: false,
+            },
+            AgentPane {
+                pane_id: "2".to_string(),
+                branch_name: "feature/b".to_string(),
+                agent_name: "codex".to_string(),
+                start_time: SystemTime::now(),
+                pid: 12346,
+                is_background: true,
+                background_window: Some("session:@2".to_string()),
+                status: AgentStatus::Unknown,
+                last_output_at: None,
+                is_status_estimated: false,
+            },
+        ];
+
+        let active: Vec<_> = panes.iter().filter(|p| !p.is_background).collect();
+        assert!(active.is_empty());
+    }
+
+    // シングルアクティブ制約: 複数のアクティブがある場合は不正状態
+    #[test]
+    fn test_single_active_constraint_violation() {
+        let panes = [
+            AgentPane {
+                pane_id: "1".to_string(),
+                branch_name: "feature/a".to_string(),
+                agent_name: "claude".to_string(),
+                start_time: SystemTime::now(),
+                pid: 12345,
+                is_background: false, // active
+                background_window: None,
+                status: AgentStatus::Unknown,
+                last_output_at: None,
+                is_status_estimated: false,
+            },
+            AgentPane {
+                pane_id: "2".to_string(),
+                branch_name: "feature/b".to_string(),
+                agent_name: "codex".to_string(),
+                start_time: SystemTime::now(),
+                pid: 12346,
+                is_background: false, // also active - constraint violation!
+                background_window: None,
+                status: AgentStatus::Unknown,
+                last_output_at: None,
+                is_status_estimated: false,
+            },
+        ];
+
+        let active: Vec<_> = panes.iter().filter(|p| !p.is_background).collect();
+        // シングルアクティブ制約違反: 2つ以上のアクティブは許可されない
+        assert!(
+            active.len() > 1,
+            "This test documents the constraint violation case"
+        );
+    }
+
+    // SPEC-861d8cdf T-103: Status display tests
+    #[test]
+    fn test_render_running_agent_green_spinner() {
+        let pane = AgentPane {
+            pane_id: "1".to_string(),
+            branch_name: "feature/a".to_string(),
+            agent_name: "claude".to_string(),
+            start_time: SystemTime::now(),
+            pid: 12345,
+            is_background: false,
+            background_window: None,
+            status: AgentStatus::Running,
+            last_output_at: None,
+            is_status_estimated: false,
+        };
+
+        assert_eq!(pane.status_color(), StatusColor::Green);
+        // Spinner should cycle through frames
+        assert_eq!(pane.status_icon(0), "|");
+        assert_eq!(pane.status_icon(1), "/");
+        assert_eq!(pane.status_icon(2), "-");
+        assert_eq!(pane.status_icon(3), "\\");
+        assert_eq!(pane.status_icon(4), "|"); // wraps around
+    }
+
+    #[test]
+    fn test_render_waiting_agent_yellow() {
+        let pane = AgentPane {
+            pane_id: "1".to_string(),
+            branch_name: "feature/a".to_string(),
+            agent_name: "claude".to_string(),
+            start_time: SystemTime::now(),
+            pid: 12345,
+            is_background: false,
+            background_window: None,
+            status: AgentStatus::WaitingInput,
+            last_output_at: None,
+            is_status_estimated: false,
+        };
+
+        assert_eq!(pane.status_color(), StatusColor::Yellow);
+        assert_eq!(pane.status_icon(0), "?");
+        assert!(pane.needs_attention());
+    }
+
+    #[test]
+    fn test_render_stopped_agent_red() {
+        let pane = AgentPane {
+            pane_id: "1".to_string(),
+            branch_name: "feature/a".to_string(),
+            agent_name: "claude".to_string(),
+            start_time: SystemTime::now(),
+            pid: 12345,
+            is_background: false,
+            background_window: None,
+            status: AgentStatus::Stopped,
+            last_output_at: None,
+            is_status_estimated: false,
+        };
+
+        assert_eq!(pane.status_color(), StatusColor::Red);
+        assert_eq!(pane.status_icon(0), STOPPED_ICON);
+        assert!(pane.needs_attention());
+    }
+
+    #[test]
+    fn test_render_background_agent_dim() {
+        let pane = AgentPane {
+            pane_id: "1".to_string(),
+            branch_name: "feature/a".to_string(),
+            agent_name: "claude".to_string(),
+            start_time: SystemTime::now(),
+            pid: 12345,
+            is_background: true,
+            background_window: Some("session:@1".to_string()),
+            status: AgentStatus::Running,
+            last_output_at: None,
+            is_status_estimated: false,
+        };
+
+        assert_eq!(pane.status_color(), StatusColor::DarkGray);
+        // Background spinner uses different frames
+        assert_eq!(pane.status_icon(0), ".");
+        assert_eq!(pane.status_icon(1), "o");
+        assert_eq!(pane.status_icon(2), "O");
+        assert_eq!(pane.status_icon(3), "o");
+    }
+
+    #[test]
+    fn test_active_stopped_agent_is_red() {
+        // Even active panes should show red when stopped
+        let pane = AgentPane {
+            pane_id: "1".to_string(),
+            branch_name: "feature/a".to_string(),
+            agent_name: "claude".to_string(),
+            start_time: SystemTime::now(),
+            pid: 12345,
+            is_background: false, // active
+            background_window: None,
+            status: AgentStatus::Stopped,
+            last_output_at: None,
+            is_status_estimated: false,
+        };
+
+        assert_eq!(pane.status_color(), StatusColor::Red);
+        assert_eq!(pane.status_icon(0), STOPPED_ICON);
+    }
+
+    #[test]
+    fn test_waiting_input_blink_interval() {
+        let pane = AgentPane {
+            pane_id: "1".to_string(),
+            branch_name: "feature/a".to_string(),
+            agent_name: "claude".to_string(),
+            start_time: SystemTime::now(),
+            pid: 12345,
+            is_background: false,
+            background_window: None,
+            status: AgentStatus::WaitingInput,
+            last_output_at: None,
+            is_status_estimated: false,
+        };
+
+        // 500ms blink = 2 spinner frames (250ms each)
+        // Frames 0,1 = visible (even division)
+        // Frames 2,3 = hidden (odd division)
+        // Frames 4,5 = visible
+        assert!(pane.should_show_icon(0), "frame 0 should show");
+        assert!(pane.should_show_icon(1), "frame 1 should show");
+        assert!(!pane.should_show_icon(2), "frame 2 should hide");
+        assert!(!pane.should_show_icon(3), "frame 3 should hide");
+        assert!(pane.should_show_icon(4), "frame 4 should show");
+        assert!(pane.should_show_icon(5), "frame 5 should show");
+    }
+
+    #[test]
+    fn test_running_agent_always_shows_icon() {
+        let pane = AgentPane {
+            pane_id: "1".to_string(),
+            branch_name: "feature/a".to_string(),
+            agent_name: "claude".to_string(),
+            start_time: SystemTime::now(),
+            pid: 12345,
+            is_background: false,
+            background_window: None,
+            status: AgentStatus::Running,
+            last_output_at: None,
+            is_status_estimated: false,
+        };
+
+        // Running agents never blink, always show icon
+        for frame in 0..10 {
+            assert!(pane.should_show_icon(frame));
+        }
+    }
+
+    #[test]
+    fn test_unknown_status_gray() {
+        let pane = AgentPane::new(
+            "1".to_string(),
+            "feature/a".to_string(),
+            "claude".to_string(),
+            SystemTime::now(),
+            12345,
+        );
+
+        assert_eq!(pane.status, AgentStatus::Unknown);
+        assert_eq!(pane.status_color(), StatusColor::Gray);
+        assert_eq!(pane.status_icon(0), "~");
+        assert!(!pane.needs_attention()); // Unknown doesn't need attention
+    }
+
+    // SPEC-861d8cdf T-105: StatusBarSummary tests
+    #[test]
+    fn test_status_bar_count() {
+        let agents = vec![
+            AgentPane {
+                pane_id: "1".to_string(),
+                branch_name: "feature/a".to_string(),
+                agent_name: "claude".to_string(),
+                start_time: SystemTime::now(),
+                pid: 12345,
+                is_background: false,
+                background_window: None,
+                status: AgentStatus::Running,
+                last_output_at: None,
+                is_status_estimated: false,
+            },
+            AgentPane {
+                pane_id: "2".to_string(),
+                branch_name: "feature/b".to_string(),
+                agent_name: "codex".to_string(),
+                start_time: SystemTime::now(),
+                pid: 12346,
+                is_background: false,
+                background_window: None,
+                status: AgentStatus::Running,
+                last_output_at: None,
+                is_status_estimated: false,
+            },
+            AgentPane {
+                pane_id: "3".to_string(),
+                branch_name: "feature/c".to_string(),
+                agent_name: "claude".to_string(),
+                start_time: SystemTime::now(),
+                pid: 12347,
+                is_background: false,
+                background_window: None,
+                status: AgentStatus::WaitingInput,
+                last_output_at: None,
+                is_status_estimated: false,
+            },
+            AgentPane {
+                pane_id: "4".to_string(),
+                branch_name: "feature/d".to_string(),
+                agent_name: "claude".to_string(),
+                start_time: SystemTime::now(),
+                pid: 12348,
+                is_background: false,
+                background_window: None,
+                status: AgentStatus::Stopped,
+                last_output_at: None,
+                is_status_estimated: false,
+            },
+        ];
+
+        let summary = StatusBarSummary::from_agents(&agents);
+
+        assert_eq!(summary.running_count, 2);
+        assert_eq!(summary.waiting_count, 1);
+        assert_eq!(summary.stopped_count, 1);
+        assert_eq!(summary.total(), 4);
+        assert!(summary.has_agents());
+    }
+
+    #[test]
+    fn test_status_bar_text() {
+        let summary = StatusBarSummary {
+            running_count: 2,
+            waiting_count: 1,
+            stopped_count: 0,
+        };
+
+        let text = summary.to_display_text();
+
+        assert!(text.contains("2 running"));
+        assert!(text.contains("1 waiting"));
+        assert!(!text.contains("stopped"));
+    }
+
+    #[test]
+    fn test_status_bar_text_all_states() {
+        let summary = StatusBarSummary {
+            running_count: 1,
+            waiting_count: 2,
+            stopped_count: 3,
+        };
+
+        let text = summary.to_display_text();
+
+        assert!(text.contains("1 running"));
+        assert!(text.contains("2 waiting"));
+        assert!(text.contains("3 stopped"));
+        assert!(text.contains("|")); // Has separators
+    }
+
+    #[test]
+    fn test_status_bar_waiting_highlight() {
+        let summary = StatusBarSummary {
+            running_count: 1,
+            waiting_count: 2,
+            stopped_count: 0,
+        };
+
+        assert!(summary.needs_waiting_highlight());
+    }
+
+    #[test]
+    fn test_status_bar_no_waiting_highlight() {
+        let summary = StatusBarSummary {
+            running_count: 2,
+            waiting_count: 0,
+            stopped_count: 1,
+        };
+
+        assert!(!summary.needs_waiting_highlight());
+    }
+
+    #[test]
+    fn test_status_bar_empty() {
+        let agents: Vec<AgentPane> = vec![];
+        let summary = StatusBarSummary::from_agents(&agents);
+
+        assert!(!summary.has_agents());
+        assert_eq!(summary.total(), 0);
+        assert!(summary.to_display_text().is_empty());
+    }
+
+    #[test]
+    fn test_status_bar_ignores_unknown() {
+        let agents = vec![AgentPane {
+            pane_id: "1".to_string(),
+            branch_name: "feature/a".to_string(),
+            agent_name: "claude".to_string(),
+            start_time: SystemTime::now(),
+            pid: 12345,
+            is_background: false,
+            background_window: None,
+            status: AgentStatus::Unknown,
+            last_output_at: None,
+            is_status_estimated: false,
+        }];
+
+        let summary = StatusBarSummary::from_agents(&agents);
+
+        assert_eq!(summary.running_count, 0);
+        assert_eq!(summary.waiting_count, 0);
+        assert_eq!(summary.stopped_count, 0);
+        assert!(!summary.has_agents());
+    }
+
+    // SPEC-861d8cdf T-106: Agent status inference tests
+
+    #[test]
+    fn test_detect_stopped_by_process_exit() {
+        // T-106-01: Process not running should infer Stopped
+        let agent_pane = AgentPane::new(
+            "1".to_string(),
+            "feature/test".to_string(),
+            "codex".to_string(),
+            SystemTime::now(),
+            99999999, // Non-existent PID
+        );
+
+        let inferred = infer_agent_status(&agent_pane, None);
+        assert_eq!(inferred, AgentStatus::Stopped);
+    }
+
+    #[test]
+    fn test_detect_stopped_by_idle() {
+        // T-106-02: No output for 60+ seconds should infer Stopped
+        let mut agent_pane = AgentPane::new(
+            "1".to_string(),
+            "feature/test".to_string(),
+            "codex".to_string(),
+            SystemTime::now(),
+            std::process::id(), // Use current process (known to be running)
+        );
+
+        // Set last_output_at to 61 seconds ago
+        agent_pane.last_output_at = Some(
+            SystemTime::now()
+                .checked_sub(Duration::from_secs(61))
+                .unwrap(),
+        );
+
+        let inferred = infer_agent_status(&agent_pane, None);
+        assert_eq!(inferred, AgentStatus::Stopped);
+    }
+
+    #[test]
+    fn test_detect_running_when_process_alive() {
+        // If process is running and no idle timeout, should infer Running
+        let agent_pane = AgentPane::new(
+            "1".to_string(),
+            "feature/test".to_string(),
+            "codex".to_string(),
+            SystemTime::now(),
+            std::process::id(), // Use current process (known to be running)
+        );
+
+        let inferred = infer_agent_status(&agent_pane, None);
+        assert_eq!(inferred, AgentStatus::Running);
+    }
+
+    #[test]
+    fn test_detect_waiting_by_prompt_pattern() {
+        // T-106-03: Prompt pattern in output should infer WaitingInput
+        let pane_output = "Processing...\n> ";
+        let inferred = infer_agent_status_from_output(pane_output);
+        assert_eq!(inferred, AgentStatus::WaitingInput);
+    }
+
+    #[test]
+    fn test_detect_waiting_by_arrow_pattern() {
+        // T-106-03: Arrow prompt should infer WaitingInput
+        let pane_output = "Ready\n→ ";
+        let inferred = infer_agent_status_from_output(pane_output);
+        assert_eq!(inferred, AgentStatus::WaitingInput);
+    }
+
+    #[test]
+    fn test_detect_waiting_by_question_prompt() {
+        let pane_output = "Continue? ";
+        let inferred = infer_agent_status_from_output(pane_output);
+        assert_eq!(inferred, AgentStatus::WaitingInput);
+    }
+
+    #[test]
+    fn test_detect_waiting_by_input_prompt() {
+        let pane_output = "Enter your message:\nInput:";
+        let inferred = infer_agent_status_from_output(pane_output);
+        assert_eq!(inferred, AgentStatus::WaitingInput);
+    }
+
+    #[test]
+    fn test_no_prompt_returns_unknown() {
+        // No prompt pattern should return Unknown
+        let pane_output = "Processing...\nWorking on task";
+        let inferred = infer_agent_status_from_output(pane_output);
+        assert_eq!(inferred, AgentStatus::Unknown);
+    }
+
+    #[test]
+    fn test_empty_output_returns_unknown() {
+        let inferred = infer_agent_status_from_output("");
+        assert_eq!(inferred, AgentStatus::Unknown);
+    }
+
+    #[test]
+    fn test_inferred_status_marked_as_estimated() {
+        // T-106-04: Inferred status should be marked as estimated
+        let agent_pane = AgentPane::new(
+            "1".to_string(),
+            "feature/test".to_string(),
+            "codex".to_string(), // Non-Claude agent
+            SystemTime::now(),
+            std::process::id(),
+        );
+
+        let (status, is_estimated) = get_agent_status_with_confidence(&agent_pane);
+        // When status is Unknown, inference happens and result is estimated
+        assert!(is_estimated);
+        assert_eq!(status, AgentStatus::Running);
+    }
+
+    #[test]
+    fn test_hook_based_status_not_estimated() {
+        // T-106-04: Hook-based status should not be marked as estimated
+        let mut agent_pane = AgentPane::new(
+            "1".to_string(),
+            "feature/test".to_string(),
+            "claude".to_string(),
+            SystemTime::now(),
+            std::process::id(),
+        );
+        // Simulate status set via Hook API
+        agent_pane.status = AgentStatus::Running;
+        agent_pane.is_status_estimated = false;
+
+        let (status, is_estimated) = get_agent_status_with_confidence(&agent_pane);
+        assert!(!is_estimated);
+        assert_eq!(status, AgentStatus::Running);
+    }
+
+    #[test]
+    fn test_infer_with_output_uses_prompt_detection() {
+        // When output is provided, prompt detection should be used
+        let agent_pane = AgentPane::new(
+            "1".to_string(),
+            "feature/test".to_string(),
+            "codex".to_string(),
+            SystemTime::now(),
+            std::process::id(),
+        );
+
+        let inferred = infer_agent_status(&agent_pane, Some("Waiting for input\n> "));
+        assert_eq!(inferred, AgentStatus::WaitingInput);
+    }
+
+    #[test]
+    fn test_idle_timeout_constant() {
+        assert_eq!(IDLE_TIMEOUT_SECS, 60);
+    }
+
+    #[test]
+    fn test_prompt_patterns_exist() {
+        // Verify expected patterns exist
+        assert!(PROMPT_PATTERNS.contains(&"> "));
+        assert!(PROMPT_PATTERNS.contains(&"→ "));
+        assert!(PROMPT_PATTERNS.contains(&"Input:"));
     }
 }

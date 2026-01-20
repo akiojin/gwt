@@ -361,6 +361,7 @@ pub fn get_branch_tool_history(repo_root: &Path, branch: &str) -> Vec<ToolSessio
 
     // Collect entries for this branch, keeping only the latest per tool
     let mut tool_map: HashMap<String, ToolSessionEntry> = HashMap::new();
+    let mut last_skip_permissions: HashMap<String, (i64, bool)> = HashMap::new();
     let TsSessionData {
         history,
         last_worktree_path,
@@ -382,9 +383,27 @@ pub fn get_branch_tool_history(repo_root: &Path, branch: &str) -> Vec<ToolSessio
                 entry.tool_id = canonical_id;
             }
 
+            if let Some(skip) = entry.skip_permissions {
+                let should_update = last_skip_permissions
+                    .get(&entry.tool_id)
+                    .map(|(ts, _)| entry.timestamp > *ts)
+                    .unwrap_or(true);
+                if should_update {
+                    last_skip_permissions.insert(entry.tool_id.clone(), (entry.timestamp, skip));
+                }
+            }
+
             let existing = tool_map.get(&entry.tool_id);
             if existing.is_none() || existing.unwrap().timestamp < entry.timestamp {
                 tool_map.insert(entry.tool_id.clone(), entry);
+            }
+        }
+    }
+
+    for entry in tool_map.values_mut() {
+        if entry.skip_permissions.is_none() {
+            if let Some((_, skip)) = last_skip_permissions.get(&entry.tool_id) {
+                entry.skip_permissions = Some(*skip);
             }
         }
     }
@@ -594,6 +613,74 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].tool_id, "claude-code");
         assert_eq!(entries[0].timestamp, 2_000);
+
+        match prev_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    fn test_get_branch_tool_history_backfills_skip_permissions() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let prev_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", temp.path());
+
+        let repo_root = temp.path().join("sample-repo");
+        std::fs::create_dir_all(&repo_root).unwrap();
+
+        let session = TsSessionData {
+            last_worktree_path: None,
+            last_branch: None,
+            last_used_tool: None,
+            last_session_id: None,
+            tool_label: None,
+            tool_version: None,
+            model: None,
+            timestamp: 1_700_000_000_000,
+            repository_root: repo_root.to_string_lossy().to_string(),
+            history: vec![
+                ToolSessionEntry {
+                    branch: "feature/test".to_string(),
+                    worktree_path: Some("/path/to/wt".to_string()),
+                    tool_id: "claude-code".to_string(),
+                    tool_label: "Claude Code".to_string(),
+                    session_id: None,
+                    mode: Some("Normal".to_string()),
+                    model: None,
+                    reasoning_level: None,
+                    skip_permissions: Some(true),
+                    tool_version: Some("latest".to_string()),
+                    timestamp: 1_000,
+                },
+                ToolSessionEntry {
+                    branch: "feature/test".to_string(),
+                    worktree_path: Some("/path/to/wt".to_string()),
+                    tool_id: "claude-code".to_string(),
+                    tool_label: "Claude Code".to_string(),
+                    session_id: Some("session-123".to_string()),
+                    mode: Some("Resume".to_string()),
+                    model: None,
+                    reasoning_level: None,
+                    skip_permissions: None,
+                    tool_version: Some("latest".to_string()),
+                    timestamp: 2_000,
+                },
+            ],
+        };
+
+        let session_path = get_ts_session_path(&repo_root);
+        if let Some(parent) = session_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let content = serde_json::to_string_pretty(&session).unwrap();
+        std::fs::write(&session_path, content).unwrap();
+
+        let entries = get_branch_tool_history(&repo_root, "feature/test");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].tool_id, "claude-code");
+        assert_eq!(entries[0].skip_permissions, Some(true));
 
         match prev_home {
             Some(value) => std::env::set_var("HOME", value),

@@ -16,6 +16,7 @@ The Rust implementation covers the core CLI/TUI workflow and the Web UI (REST + 
 
 - **Modern TUI**: Built with Ratatui for a smooth, responsive terminal interface
 - **Full-screen Layout**: Persistent header with repo context and boxed branch list
+- **Branch Summary Panel**: Real-time branch details panel with commit history, change stats, branch metadata, plus a Tab-switchable session summary view
 - **Smart Branch Creation**: Create feature, bugfix, hotfix, or release branches with guided prompts and automatic base branch selection
 - **Advanced Worktree Management**: Complete lifecycle management including creation, cleanup of worktree-backed branches, and path optimization
 - **Coding Agent Selection**: Choose between built-in agents (Claude Code / Codex CLI / Gemini CLI / OpenCode) or custom coding agents defined in `~/.gwt/tools.json`
