@@ -1,7 +1,43 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [6.4.0] - 2026-01-20
+
+### Bug Fixes
+
+- スピナー範囲外アクセスによるパニックを防止 (#677)
+
+### Miscellaneous Tasks
+
+- Merge main into develop
+
+## [6.3.0] - 2026-01-19
+
+### Bug Fixes
+
+- Tmuxセッション情報の引き継ぎとClaude表記正規化 (#673)
+- Tmuxペイン作成時にmouseを有効化 (#676)
+- Wrap branch list spinner frame (#679)
+- UTF-8文字列の切り詰め時にchar境界を考慮 (#680)
+- Resume時のskip_permissionsを履歴から補完 (#685)
+
+### Features
+
+- ブランチサマリーパネル機能 (SPEC-4b893dae) (#678)
+- シングルアクティブペイン制約の実装 (#681)
+- エージェントペインと選択アイコンのUnicode化 (#683)
+- ブランチ一覧のマウス選択を追加 (#687)
+- Gh-prスキルを追加し、github@akiojin-skillsプラグインを有効化 (#689)
+
+### Miscellaneous Tasks
+
+- Sync main into develop and resolve conflicts
+
 ## [6.2.0] - 2026-01-19
+
+### Bug Fixes
+
+- Skip husky install in CI environment
 
 ### Miscellaneous Tasks
 
