@@ -1717,13 +1717,9 @@ impl Model {
         };
 
         let now = Instant::now();
-        let is_double_click = self
-            .last_mouse_click
-            .as_ref()
-            .is_some_and(|last| {
-                last.index == index
-                    && now.duration_since(last.at) <= BRANCH_LIST_DOUBLE_CLICK_WINDOW
-            });
+        let is_double_click = self.last_mouse_click.as_ref().is_some_and(|last| {
+            last.index == index && now.duration_since(last.at) <= BRANCH_LIST_DOUBLE_CLICK_WINDOW
+        });
 
         if is_double_click {
             self.last_mouse_click = None;
