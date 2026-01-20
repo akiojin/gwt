@@ -952,7 +952,8 @@ pub fn render_branch_list(
 
 /// Render agent status bar (SPEC-861d8cdf T-105, FR-104a, FR-104b, FR-104c)
 fn render_status_bar(state: &BranchListState, frame: &mut Frame, area: Rect) {
-    let summary = StatusBarSummary::from_agents(&state.running_agents);
+    let agents: Vec<_> = state.running_agents.values().cloned().collect();
+    let summary = StatusBarSummary::from_agents(&agents);
 
     if !summary.has_agents() {
         return;
@@ -1240,7 +1241,7 @@ fn render_branch_row(
             }
             AgentStatus::WaitingInput => {
                 // Blink effect: 500ms on/off (2 spinner frames = ~500ms with 250ms tick)
-                let should_show = (spinner_frame / 2) % 2 == 0;
+                let should_show = (spinner_frame / 2).is_multiple_of(2);
                 if should_show {
                     ('?', Color::Yellow)
                 } else {

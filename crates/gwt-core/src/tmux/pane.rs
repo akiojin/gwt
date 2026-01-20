@@ -223,7 +223,7 @@ impl AgentPane {
         if self.status == AgentStatus::WaitingInput {
             // 500ms blink = 2 spinner frames (250ms each)
             // Show icon on even frames, hide on odd frames
-            (spinner_frame / 2) % 2 == 0
+            (spinner_frame / 2).is_multiple_of(2)
         } else {
             true
         }
