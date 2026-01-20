@@ -9,6 +9,7 @@ pub const SESSION_SYSTEM_PROMPT_BASE: &str = "You are a helpful assistant summar
 
 const MAX_MESSAGE_CHARS: usize = 220;
 const MAX_TOOL_ITEMS: usize = 8;
+const MAX_PROMPT_CHARS: usize = 8000;
 
 #[derive(Debug, Clone, Default)]
 pub struct SessionSummary {
@@ -86,6 +87,8 @@ pub fn build_session_prompt(parsed: &ParsedSession) -> Vec<ChatMessage> {
         lines.push("No messages recorded.".to_string());
     } else {
         lines.push("Messages (sampled):".to_string());
+        let mut used_chars = lines.join("\n").chars().count();
+        let mut truncated = false;
         for (index, message) in parsed.messages.iter().enumerate() {
             let role = match message.role {
                 MessageRole::User => "user",
@@ -93,9 +96,26 @@ pub fn build_session_prompt(parsed: &ParsedSession) -> Vec<ChatMessage> {
             };
             let mut content = message.content.trim().to_string();
             if content.chars().count() > MAX_MESSAGE_CHARS {
-                content = format!("{}...", content.chars().take(MAX_MESSAGE_CHARS - 3).collect::<String>());
+                content = format!(
+                    "{}...",
+                    content.chars().take(MAX_MESSAGE_CHARS - 3).collect::<String>()
+                );
             }
-            lines.push(format!("{}. {}: {}", index + 1, role, content));
+            let line = format!("{}. {}: {}", index + 1, role, content);
+            let line_len = line.chars().count() + 1; // +1 for newline
+            if used_chars + line_len > MAX_PROMPT_CHARS {
+                truncated = true;
+                break;
+            }
+            lines.push(line);
+            used_chars += line_len;
+        }
+
+        if truncated {
+            let notice = "Messages truncated due to length.";
+            if used_chars + notice.chars().count() + 1 <= MAX_PROMPT_CHARS {
+                lines.push(notice.to_string());
+            }
         }
     }
 
@@ -113,10 +133,26 @@ pub fn build_session_prompt(parsed: &ParsedSession) -> Vec<ChatMessage> {
             .map(|(name, count)| format!("{} x{}", name, count))
             .collect::<Vec<_>>()
             .join(", ");
-        lines.push(format!("Tool usage: {}", summary));
+        let tool_line = format!("Tool usage: {}", summary);
+        let current_len = lines.join("\n").chars().count();
+        if current_len + tool_line.chars().count() + 1 <= MAX_PROMPT_CHARS {
+            lines.push(tool_line);
+        } else if current_len > MAX_PROMPT_CHARS {
+            // Ensure we never exceed the cap even if previous sections were already too long.
+            let truncated = lines.join("\n");
+            let shortened = truncated.chars().take(MAX_PROMPT_CHARS).collect::<String>();
+            lines.clear();
+            lines.push(shortened);
+        }
     }
 
-    let user_prompt = lines.join("\n");
+    let mut user_prompt = lines.join("\n");
+    if user_prompt.chars().count() > MAX_PROMPT_CHARS {
+        user_prompt = user_prompt
+            .chars()
+            .take(MAX_PROMPT_CHARS)
+            .collect::<String>();
+    }
 
     vec![
         ChatMessage {
@@ -383,6 +419,37 @@ mod tests {
         let now = SystemTime::now();
         cache.set("main".to_string(), "sess-1".to_string(), summary, now);
         assert!(cache.is_stale("main", "sess-2", now));
+    }
+
+    #[test]
+    fn test_build_session_prompt_caps_length() {
+        let long_text = "a".repeat(2000);
+        let messages = (0..200)
+            .map(|_| SessionMessage {
+                role: MessageRole::User,
+                content: long_text.clone(),
+                timestamp: None,
+            })
+            .collect::<Vec<_>>();
+        let parsed = ParsedSession {
+            session_id: "sess-1".to_string(),
+            agent_type: crate::ai::AgentType::CodexCli,
+            messages,
+            tool_executions: vec![],
+            started_at: None,
+            last_updated_at: None,
+            total_turns: 200,
+        };
+
+        let prompt = build_session_prompt(&parsed);
+        let user_prompt = prompt
+            .iter()
+            .find(|msg| msg.role == "user")
+            .expect("user prompt")
+            .content
+            .clone();
+
+        assert!(user_prompt.chars().count() <= MAX_PROMPT_CHARS);
     }
 
 }

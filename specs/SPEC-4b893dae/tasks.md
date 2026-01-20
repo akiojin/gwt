@@ -240,6 +240,8 @@ US6 (AI設定) ─────────────────────�
 - [ ] **T712** [US4] T711の後に `crates/gwt-core/src/ai/summary.rs` に `summarize_session(parsed: &ParsedSession) -> SessionSummary` を実装
 - [ ] **T713** [US4] T712の後に `crates/gwt-core/src/ai/client.rs` で MAX_TOKENS を調整（150 → 300-500）
 - [x] **T714** [US4] T711の後に システムプロンプトへ言語推定の指示を追加
+- [x] **T715** [US4] T712の後に `build_session_prompt` の入力サイズ上限を追加
+- [x] **T716** [US4] T715の後に 入力サイズ上限のテストを追加
 
 ### UI表示
 
