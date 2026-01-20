@@ -159,7 +159,7 @@ The tool presents an interactive interface with the following options:
 | `q` / `Ctrl+C` | Quit |
 
 Mouse:
-- Double-click a branch row to update the selection (does not open the wizard).
+- Double-click a branch row to trigger the Enter action (focus pane / open wizard).
 
 ### Filter Mode
 

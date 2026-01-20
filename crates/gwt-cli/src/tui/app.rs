@@ -1730,6 +1730,7 @@ impl Model {
             if self.branch_list.select_index(index) {
                 self.refresh_branch_summary();
             }
+            self.handle_branch_enter();
         } else {
             self.last_mouse_click = Some(MouseClick { index, at: now });
         }
@@ -4432,7 +4433,7 @@ mod tests {
     }
 
     #[test]
-    fn test_mouse_double_click_selects_branch_only() {
+    fn test_mouse_double_click_selects_branch_and_opens_wizard() {
         let mut model = Model::new_with_context(None);
         model.screen = Screen::BranchList;
         let branches = [
@@ -4456,9 +4457,10 @@ mod tests {
         model.handle_branch_list_mouse(mouse);
 
         assert_eq!(model.branch_list.selected, 0);
+        assert!(!model.wizard.visible);
         model.handle_branch_list_mouse(mouse);
 
         assert_eq!(model.branch_list.selected, 1);
-        assert!(!model.wizard.visible);
+        assert!(model.wizard.visible);
     }
 }
