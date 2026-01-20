@@ -216,7 +216,7 @@ struct LaunchRequest {
 
 enum LaunchUpdate {
     Progress(LaunchProgress),
-    Ready(LaunchPlan),
+    Ready(Box<LaunchPlan>),
     Failed(String),
 }
 
@@ -1190,7 +1190,7 @@ impl Model {
     fn active_status_message(&self) -> Option<&str> {
         self.launch_status
             .as_deref()
-            .or_else(|| self.status_message.as_deref())
+            .or(self.status_message.as_deref())
     }
 
     fn apply_branch_list_updates(&mut self) {
@@ -1279,7 +1279,7 @@ impl Model {
                             _ => "Launching agent...".to_string(),
                         };
                         self.launch_status = Some(next_status);
-                        self.handle_launch_plan(plan);
+                        self.handle_launch_plan(*plan);
                         break;
                     }
                     LaunchUpdate::Failed(message) => {
@@ -2659,7 +2659,7 @@ impl Model {
                 }
             };
 
-            send(LaunchUpdate::Ready(plan));
+            send(LaunchUpdate::Ready(Box::new(plan)));
         });
     }
 
