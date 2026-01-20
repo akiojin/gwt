@@ -29,6 +29,7 @@ which = "7"
 libc.workspace = true
 arboard = "3"
 unicode-width = "0.1"
+pulldown-cmark = "0.12"
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -1723,10 +1723,36 @@ impl Model {
         let mut names: Vec<String> = profiles_config.profiles.keys().cloned().collect();
         names.sort();
 
-        let profiles = names
+        let mut profiles = Vec::new();
+        let (default_ai_label, default_ai_enabled) = match &profiles_config.default_ai {
+            Some(ai) if ai.is_enabled() => ("AI: on".to_string(), true),
+            Some(_) => ("AI: off".to_string(), false),
+            None => ("AI: off".to_string(), false),
+        };
+        profiles.push(super::screens::profiles::ProfileItem {
+            name: "AI (default)".to_string(),
+            is_active: false,
+            env_count: 0,
+            description: Some("Global AI settings".to_string()),
+            ai_label: default_ai_label,
+            ai_enabled: default_ai_enabled,
+            is_default_ai: true,
+        });
+
+        let profile_items: Vec<_> = names
             .into_iter()
             .filter_map(|name| {
                 profiles_config.profiles.get(&name).map(|profile| {
+                    let (ai_label, ai_enabled) = match &profile.ai {
+                        Some(ai) if ai.is_enabled() => ("AI: override".to_string(), true),
+                        Some(_) => ("AI: off".to_string(), false),
+                        None => match &profiles_config.default_ai {
+                            Some(default_ai) if default_ai.is_enabled() => {
+                                ("AI: default".to_string(), true)
+                            }
+                            _ => ("AI: off".to_string(), false),
+                        },
+                    };
                     super::screens::profiles::ProfileItem {
                         name: name.clone(),
                         is_active: profiles_config.active.as_deref() == Some(name.as_str()),
@@ -1736,10 +1762,15 @@ impl Model {
                         } else {
                             Some(profile.description.clone())
                         },
+                        ai_label,
+                        ai_enabled,
+                        is_default_ai: false,
                     }
                 })
             })
             .collect();
+
+        profiles.extend(profile_items);
 
         self.profiles = ProfilesState::new().with_profiles(profiles);
         self.branch_list.active_profile = self.profiles_config.active.clone();
@@ -1757,15 +1788,27 @@ impl Model {
     }
 
     fn active_ai_settings(&self) -> Option<ResolvedAISettings> {
+        if let Some(profile) = self.profiles_config.active_profile() {
+            if let Some(settings) = profile.resolved_ai_settings() {
+                return Some(settings);
+            }
+        }
         self.profiles_config
-            .active_profile()
-            .and_then(|profile| profile.resolved_ai_settings())
+            .default_ai
+            .as_ref()
+            .map(|settings| settings.resolved())
     }
 
     fn active_ai_enabled(&self) -> bool {
+        if let Some(profile) = self.profiles_config.active_profile() {
+            if profile.ai.is_some() {
+                return profile.ai_enabled();
+            }
+        }
         self.profiles_config
-            .active_profile()
-            .map(|profile| profile.ai_enabled())
+            .default_ai
+            .as_ref()
+            .map(|settings| settings.is_enabled())
             .unwrap_or(false)
     }
 
@@ -1858,7 +1901,53 @@ impl Model {
         self.screen = Screen::Environment;
     }
 
+    fn open_default_ai_editor(&mut self) {
+        let (ai_enabled, ai_endpoint, ai_api_key, ai_model) = match &self.profiles_config.default_ai
+        {
+            Some(ai) => (
+                ai.is_enabled(),
+                ai.endpoint.clone(),
+                ai.api_key.clone(),
+                ai.model.clone(),
+            ),
+            None => {
+                let defaults = AISettings::default();
+                (false, defaults.endpoint, String::new(), defaults.model)
+            }
+        };
+
+        self.environment = EnvironmentState::new().with_ai_only(true).with_ai_settings(
+            ai_enabled,
+            ai_endpoint,
+            ai_api_key,
+            ai_model,
+        );
+        self.environment.selected = 0;
+        self.environment.refresh_selection();
+        self.screen_stack.push(self.screen.clone());
+        self.screen = Screen::Environment;
+    }
+
     fn persist_environment(&mut self) {
+        if self.environment.is_ai_only() {
+            if self.environment.ai_enabled {
+                if self.environment.ai_fields_empty() {
+                    self.profiles_config.default_ai = None;
+                    self.environment.ai_enabled = false;
+                } else {
+                    self.profiles_config.default_ai = Some(AISettings {
+                        endpoint: self.environment.ai_endpoint.clone(),
+                        api_key: self.environment.ai_api_key.clone(),
+                        model: self.environment.ai_model.clone(),
+                    });
+                }
+            } else {
+                self.profiles_config.default_ai = None;
+            }
+            self.save_profiles();
+            return;
+        }
+
         let profile_name = match self.environment.profile_name.clone() {
             Some(name) => name,
             None => return,
@@ -1900,6 +1989,13 @@ impl Model {
             Some(item) => item.name.clone(),
             None => return,
         };
+        if let Some(item) = self.profiles.selected_profile() {
+            if item.is_default_ai {
+                self.status_message = Some("Default AI settings cannot be deleted.".to_string());
+                self.status_message_time = Some(Instant::now());
+                return;
+            }
+        }
 
         if self.profiles_config.active.as_deref() == Some(selected.as_str()) {
             self.status_message = Some("Active profile cannot be deleted.".to_string());
@@ -1919,6 +2015,13 @@ impl Model {
             Some(item) => item.name.clone(),
             None => return,
         };
+        if let Some(item) = self.profiles.selected_profile() {
+            if item.is_default_ai {
+                self.status_message = Some("Default AI settings are not a profile.".to_string());
+                self.status_message_time = Some(Instant::now());
+                return;
+            }
+        }
         self.profiles_config.set_active(Some(selected.clone()));
         self.save_profiles();
         if let Some(index) = self
@@ -2217,8 +2320,12 @@ impl Model {
                             }
                         }
                     } else if let Some(item) = self.profiles.selected_profile() {
-                        let name = item.name.clone();
-                        self.open_environment_editor(&name);
+                        if item.is_default_ai {
+                            self.open_default_ai_editor();
+                        } else {
+                            let name = item.name.clone();
+                            self.open_environment_editor(&name);
+                        }
                     }
                 }
                 Screen::Environment => {
@@ -3383,11 +3490,17 @@ impl Model {
                 if self.profiles.create_mode {
                     "[Enter] Save | [Esc] Cancel"
                 } else {
-                    "[Space] Activate | [Enter] Edit env | [n] New | [d] Delete | [Esc] Back"
+                    "[Space] Activate | [Enter] Edit AI/env | [n] New | [d] Delete | [Esc] Back"
                 }
             }
             Screen::Environment => {
-                if self.environment.edit_mode {
+                if self.environment.is_ai_only() {
+                    if self.environment.edit_mode {
+                        "[Enter] Save | [Tab] Switch | [Esc] Cancel"
+                    } else {
+                        "[Enter] Edit | [Esc] Back"
+                    }
+                } else if self.environment.edit_mode {
                     "[Enter] Save | [Tab] Switch | [Esc] Cancel"
                 } else {
                     "[Enter] Edit | [n] New | [d] Delete (profile)/Disable (OS) | [r] Reset (override) | [Esc] Back"
@@ -3603,6 +3716,12 @@ pub fn run_with_context(context: Option<TuiEntryContext>) -> Result<Option<Launc
                                 } else if matches!(model.screen, Screen::Environment) {
                                     if model.environment.edit_mode {
                                         Some(Message::Char('n'))
+                                    } else if model.environment.is_ai_only() {
+                                        model.status_message = Some(
+                                            "AI settings only. Use Enter to edit.".to_string(),
+                                        );
+                                        model.status_message_time = Some(Instant::now());
+                                        None
                                     } else {
                                         model.environment.start_new();
                                         None
@@ -3630,6 +3749,12 @@ pub fn run_with_context(context: Option<TuiEntryContext>) -> Result<Option<Launc
                                 } else if matches!(model.screen, Screen::Environment) {
                                     if model.environment.edit_mode {
                                         Some(Message::Char('r'))
+                                    } else if model.environment.is_ai_only() {
+                                        model.status_message = Some(
+                                            "AI settings only. Use Enter to edit.".to_string(),
+                                        );
+                                        model.status_message_time = Some(Instant::now());
+                                        None
                                     } else {
                                         model.reset_selected_env();
                                         None
@@ -3708,6 +3833,12 @@ pub fn run_with_context(context: Option<TuiEntryContext>) -> Result<Option<Launc
                                 } else if matches!(model.screen, Screen::Environment) {
                                     if model.environment.edit_mode {
                                         Some(Message::Char('d'))
+                                    } else if model.environment.is_ai_only() {
+                                        model.status_message = Some(
+                                            "AI settings only. Use Enter to edit.".to_string(),
+                                        );
+                                        model.status_message_time = Some(Instant::now());
+                                        None
                                     } else {
                                         model.delete_selected_env();
                                         None
@@ -3890,6 +4021,138 @@ fn canonical_tool_id(tool_id: &str) -> String {
         return "opencode".to_string();
     }
     tool_id.trim().to_string()
+}
+
+/// Build agent-specific command line arguments for tmux mode
+/// (Same logic as main.rs build_agent_args)
+fn build_agent_args_for_tmux(config: &AgentLaunchConfig) -> Vec<String> {
+    use gwt_core::agent::codex::{codex_default_args, codex_skip_permissions_flag};
+
+    let mut args = Vec::new();
+
+    match config.agent {
+        CodingAgent::ClaudeCode => {
+            // Model selection
+            if let Some(model) = &config.model {
+                if !model.is_empty() {
+                    args.push("--model".to_string());
+                    args.push(model.clone());
+                }
+            }
+
+            // Execution mode (FR-102) - same logic as single mode
+            match config.execution_mode {
+                ExecutionMode::Continue | ExecutionMode::Resume => {
+                    if let Some(session_id) = &config.session_id {
+                        args.push("--resume".to_string());
+                        args.push(session_id.clone());
+                    } else if matches!(config.execution_mode, ExecutionMode::Continue) {
+                        args.push("-c".to_string());
+                    } else {
+                        args.push("-r".to_string());
+                    }
+                }
+                ExecutionMode::Normal => {}
+            }
+
+            // Skip permissions
+            if config.skip_permissions {
+                args.push("--dangerously-skip-permissions".to_string());
+            }
+        }
+        CodingAgent::CodexCli => {
+            // Execution mode - resume subcommand must come first
+            match config.execution_mode {
+                ExecutionMode::Continue | ExecutionMode::Resume => {
+                    args.push("resume".to_string());
+                    if let Some(session_id) = &config.session_id {
+                        args.push(session_id.clone());
+                    } else if matches!(config.execution_mode, ExecutionMode::Continue) {
+                        args.push("--last".to_string());
+                    }
+                }
+                ExecutionMode::Normal => {}
+            }
+
+            // Skip permissions (Codex uses versioned flag)
+            let skip_flag = if config.skip_permissions {
+                Some(codex_skip_permissions_flag(None))
+            } else {
+                None
+            };
+            let bypass_sandbox = matches!(
+                skip_flag,
+                Some("--dangerously-bypass-approvals-and-sandbox")
+            );
+
+            let reasoning_override = config.reasoning_level.map(|r| r.label());
+            args.extend(codex_default_args(
+                config.model.as_deref(),
+                reasoning_override,
+                None, // skills_flag_version
+                bypass_sandbox,
+            ));
+
+            if let Some(flag) = skip_flag {
+                args.push(flag.to_string());
+            }
+        }
+        CodingAgent::GeminiCli => {
+            // Model selection (Gemini uses -m or --model)
+            if let Some(model) = &config.model {
+                if !model.is_empty() {
+                    args.push("-m".to_string());
+                    args.push(model.clone());
+                }
+            }
+
+            // Execution mode
+            match config.execution_mode {
+                ExecutionMode::Continue | ExecutionMode::Resume => {
+                    if let Some(session_id) = &config.session_id {
+                        args.push("--resume".to_string());
+                        args.push(session_id.clone());
+                    } else if matches!(config.execution_mode, ExecutionMode::Continue) {
+                        args.push("--continue".to_string());
+                    } else {
+                        args.push("--resume".to_string());
+                    }
+                }
+                ExecutionMode::Normal => {}
+            }
+
+            // Skip permissions
+            if config.skip_permissions {
+                args.push("-y".to_string());
+            }
+        }
+        CodingAgent::OpenCode => {
+            // Model selection
+            if let Some(model) = &config.model {
+                if !model.is_empty() {
+                    args.push("--model".to_string());
+                    args.push(model.clone());
+                }
+            }
+
+            // Execution mode
+            match config.execution_mode {
+                ExecutionMode::Continue | ExecutionMode::Resume => {
+                    if let Some(session_id) = &config.session_id {
+                        args.push("--resume".to_string());
+                        args.push(session_id.clone());
+                    } else if matches!(config.execution_mode, ExecutionMode::Continue) {
+                        args.push("--continue".to_string());
+                    } else {
+                        args.push("--resume".to_string());
+                    }
+                }
+                ExecutionMode::Normal => {}
+            }
+        }
+    }
+
+    args
 }
 fn is_valid_env_name(name: &str) -> bool {
     let mut chars = name.chars();

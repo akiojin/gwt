@@ -1,35 +1,48 @@
-# 実装計画: ブランチサマリーパネル
+# 実装計画: ブランチサマリーパネル（セッション要約対応）
 
 **仕様ID**: `SPEC-4b893dae` | **日付**: 2026-01-19 | **仕様書**: [spec.md](./spec.md)
 **入力**: `/specs/SPEC-4b893dae/spec.md` からの機能仕様
 
 ## 概要
 
-ブランチ選択画面のフッター領域を拡張し、選択中ブランチの詳細情報（コミットログ、変更統計、メタデータ、AIサマリー）を常時表示する情報パネルを実装する。既存の`Worktree:`表示を置き換え、12行固定のパネルとして表示する。
+ブランチ選択画面のフッター領域に詳細パネルを表示し、Tabキーで「ブランチ詳細」タブと「セッション要約」タブを切り替え可能にする。セッション要約は、エージェント（Claude Code, Codex CLI, Gemini CLI, OpenCode）のセッション内容をAIで要約して表示する。
+
+主要要件:
+
+- パネル常時表示（10-15行固定高）
+- コミットログ、変更統計、ブランチメタデータ表示
+- Tabキーによるタブ切り替え
+- Tabキー切り替えヒントの表示
+- セッション要約の折り返し/スクロール表示
+- セッションパーサーによる4エージェント対応
+- 30秒ポーリングによる自動更新
+- AIによるセッション要約（タスク/進捗、短文要約、バレットポイント、メトリクス）
+- AI設定: エンドポイント/モデル必須、APIキー任意
+- セッション内容に応じた要約言語推定（AI側で判定）
 
 ## 技術コンテキスト
 
-**言語/バージョン**: Rust (Stable)
-**主要な依存関係**: Ratatui, reqwest（新規）, serde_yaml, tokio
-**ストレージ**: ファイル（YAML/TOML）、メモリキャッシュ
+**言語/バージョン**: Rust 2021 Edition (stable)
+**主要な依存関係**: ratatui 0.29, crossterm 0.28, reqwest (blocking), serde_json, chrono
+**ストレージ**: ファイルシステム（セッションファイル読み取り）、メモリキャッシュ
 **テスト**: cargo test
-**ターゲットプラットフォーム**: Linux, macOS, Windows (CLI)
-**プロジェクトタイプ**: 単一（Cargoワークスペース）
-**パフォーマンス目標**: パネル更新200ms以内、コミットログ取得500ms以内
-**制約**: ASCII文字のみ（絵文字禁止）、オフライン対応（AI機能除く）
-**スケール/範囲**: ブランチ数1000件、コミット履歴5件表示
+**ターゲットプラットフォーム**: Linux, macOS, Windows (cross-platform CLI)
+**プロジェクトタイプ**: Rustワークスペース（gwt-core + gwt-cli）
+**パフォーマンス目標**: タブ切り替え 50ms以内、セッション要約（キャッシュ済み）100ms以内
+**制約**: TUI描画はASCII文字のみ、ブロッキングI/Oを避けUIスレッドを止めない
+**スケール/範囲**: セッション1000ターン以上対応（動的サンプリング）
 
 ## 原則チェック
 
 *ゲート: フェーズ0の調査前に合格する必要があります。フェーズ1の設計後に再チェック。*
 
-| 原則                  | 状態 | 備考                                   |
-| --------------------- | ---- | -------------------------------------- |
-| I. シンプルさの追求   | OK   | 既存パターン踏襲、最小限の新規実装     |
-| II. テストファースト  | OK   | 仕様確定後にテスト作成                 |
-| III. 既存コードの尊重 | OK   | branch_list.rs拡張、新規ファイル最小化 |
-| IV. 品質ゲート        | OK   | clippy, cargo test通過必須             |
-| V. 自動化の徹底       | OK   | Conventional Commits遵守               |
+| 原則 | 状態 | 備考 |
+|------|------|------|
+| I. シンプルさの追求 | ✅ | 既存AIクライアント・セッション検出を再利用 |
+| II. テストファースト | ✅ | spec.md承認後、TDD実施予定 |
+| III. 既存コードの尊重 | ✅ | 既存ai/モジュール、ts_session.rsを拡張 |
+| IV. 品質ゲート | ✅ | cargo clippy, cargo fmt, cargo test必須 |
+| V. 自動化の徹底 | ✅ | Conventional Commits遵守 |
 
 ## プロジェクト構造
 
@@ -39,93 +52,97 @@
 specs/SPEC-4b893dae/
 ├── spec.md              # 機能仕様
 ├── plan.md              # このファイル
-├── research.md          # 調査報告
-├── data-model.md        # データモデル設計
-├── quickstart.md        # 開発者向けガイド
-├── contracts/           # API契約
-│   └── openai-api.md    # OpenAI互換API仕様
-├── checklists/
-│   └── requirements.md  # 要件チェックリスト
-└── tasks.md             # 実装タスク
+├── research.md          # フェーズ0出力
+├── data-model.md        # フェーズ1出力
+├── quickstart.md        # フェーズ1出力
+├── contracts/           # フェーズ1出力
+└── tasks.md             # フェーズ2出力（/speckit.tasksで作成）
 ```
 
 ### ソースコード（リポジトリルート）
 
 ```text
-crates/
-├── gwt-core/src/
-│   ├── git/
-│   │   ├── repository.rs    # [変更] コミットログ・diff統計追加
-│   │   └── commit.rs        # [新規] CommitEntry構造体
-│   ├── config/
-│   │   └── profile.rs       # [変更] AI設定追加
-│   └── ai/
-│       ├── mod.rs           # [新規] AIモジュール
-│       ├── client.rs        # [新規] OpenAI互換APIクライアント
-│       └── summary.rs       # [新規] サマリー生成ロジック
-│
-├── gwt-cli/src/tui/
-│   ├── screens/
-│   │   └── branch_list.rs   # [変更] パネル表示追加
-│   └── components/
-│       └── summary_panel.rs # [新規] サマリーパネルコンポーネント
+crates/gwt-core/src/
+├── ai/
+│   ├── mod.rs           # 既存: AIモジュール
+│   ├── client.rs        # 既存: OpenAI互換APIクライアント
+│   ├── summary.rs       # 既存: コミット要約（変更）→ セッション要約に拡張
+│   └── session_parser/  # 新規: セッションパーサー
+│       ├── mod.rs       # SessionParserトレイト定義
+│       ├── claude.rs    # Claude Code用パーサー
+│       ├── codex.rs     # Codex CLI用パーサー
+│       ├── gemini.rs    # Gemini CLI用パーサー
+│       └── opencode.rs  # OpenCode用パーサー
+
+crates/gwt-cli/src/tui/
+├── app.rs               # 既存: TUIアプリ（タブ切り替え追加）
+└── screens/
+    └── branch_list.rs   # 既存: ブランチ一覧（詳細パネル拡張）
 ```
 
 ## フェーズ0: 調査（技術スタック選定）
 
 **目的**: 要件に基づいて技術スタックを決定し、既存のコードパターンを理解する
 
-**出力**: `specs/SPEC-4b893dae/research.md` ✅ 完了
+**出力**: `specs/SPEC-4b893dae/research.md`
 
-### 調査結果サマリー
+### 調査項目
 
 1. **既存のコードベース分析**
-   - TUI: Ratatui、レイアウトはLayout::default()でVertical分割
-   - Git操作: std::process::Commandでgitコマンドラップ
-   - プロファイル: YAML形式、Profile構造体
+   - ✅ AIクライアント: `crates/gwt-core/src/ai/client.rs` - OpenAI互換APIクライアント実装済み
+   - ✅ コミット要約: `crates/gwt-core/src/ai/summary.rs` - コミットログ要約実装済み
+   - ✅ セッションID検出: `crates/gwt-cli/src/main.rs` - 4エージェント対応済み
+   - ✅ セッション管理: `crates/gwt-core/src/config/ts_session.rs` - ToolSessionEntry構造体
 
 2. **技術的決定**
-   - コミットログ: `git log --oneline -n 5`
-   - 変更統計: `git diff --shortstat` + 既存has_changes/has_unpushed
-   - AI API: reqwestでOpenAI互換API呼び出し
+   - セッションパーサー: 共通trait `SessionParser` + 各エージェント別実装
+   - ポーリング: `std::thread::spawn` + `mpsc::channel` でバックグラウンド更新
+   - キャッシュ: 既存 `AISummaryCache` パターンを流用 → `SessionSummaryCache`
 
 3. **制約と依存関係**
-   - SPEC-d2f4762aの安全性判定データを再利用
-   - ASCII文字のみ（Ratatuiガイドライン）
+   - セッションファイル形式: JSONL（Claude Code, Codex CLI）
+   - エージェントセッションファイルの場所:
+     - Claude Code: `~/.claude/projects/<project-hash>/`
+     - Codex CLI: `~/.codex/sessions/`
+     - Gemini CLI: `~/.gemini/sessions/`
+     - OpenCode: `~/.opencode/sessions/`
 
 ## フェーズ1: 設計（アーキテクチャと契約）
 
 **目的**: 実装前に技術設計を定義する
 
 **出力**:
-- `specs/SPEC-4b893dae/data-model.md` ✅ 完了
-- `specs/SPEC-4b893dae/quickstart.md` ✅ 完了
-- `specs/SPEC-4b893dae/contracts/openai-api.md` ✅ 完了
+
+- `specs/SPEC-4b893dae/data-model.md`
+- `specs/SPEC-4b893dae/quickstart.md`
+- `specs/SPEC-4b893dae/contracts/`
 
 ### 1.1 データモデル設計
 
 **ファイル**: `data-model.md`
 
 主要エンティティ:
-- **BranchSummary**: パネル全体のデータ（コミットログ、統計、メタ、AIサマリー）
-- **CommitEntry**: 個々のコミット情報
-- **ChangeStats**: 変更統計
-- **AISettings**: プロファイルに追加するAI設定
+
+- `SessionSummary`: タスク概要、短文要約、バレットポイント、メトリクス
+- `SessionMetrics`: トークン数、ツール実行数、経過時間
+- `ParsedSession`: 会話履歴 + ツール実行履歴
+- `DetailPanelTab`: Details | Session
 
 ### 1.2 クイックスタートガイド
 
 **ファイル**: `quickstart.md`
 
-開発者向けの簡潔なガイド:
-- 開発環境セットアップ
-- テスト実行方法
-- AI機能の設定方法
+開発者向け:
+
+- セッションパーサー追加方法
+- TUIタブ切り替え実装パターン
+- テスト実行手順
 
 ### 1.3 契約/インターフェース
 
 **ディレクトリ**: `contracts/`
 
-- OpenAI互換API仕様（エンドポイント、リクエスト/レスポンス形式）
+- `session_parser_trait.md`: SessionParserトレイト定義
 
 ## フェーズ2: タスク生成
 
@@ -141,49 +158,46 @@ crates/
 
 ユーザーストーリーの優先度に基づいて実装:
 
-| フェーズ | 優先度 | 内容                         |
-| -------- | ------ | ---------------------------- |
-| Phase 1  | P0     | パネル枠表示 + コミットログ  |
-| Phase 2  | P0     | 変更統計（既存データ再利用） |
-| Phase 3  | P1     | ブランチメタデータ           |
-| Phase 4  | P2     | AI設定 + AIサマリー          |
+1. **P0**: US1（コミットログ）、US2（変更統計）、US4（セッション要約）、US4a（タブ切り替え）、US4b（セッションパーサー）、US5（パネル常時表示）
+2. **P1**: US3（ブランチメタデータ）
+3. **P2**: US6（AI設定）
 
 ### 独立したデリバリー
 
-各フェーズは独立してテスト・デプロイ可能:
-- Phase 1完了 → コミットログ表示のみのMVP
-- Phase 2追加 → 統計情報付きパネル
-- Phase 3追加 → メタデータ完備
-- Phase 4追加 → AI機能付き完全版
+1. **マイルストーン1**: ブランチ詳細パネル（コミットログ、統計、メタデータ）
+2. **マイルストーン2**: タブ切り替え + セッション要約タブUI
+3. **マイルストーン3**: セッションパーサー（Claude Code優先）
+4. **マイルストーン4**: 残り3エージェント対応
+5. **マイルストーン5**: ポーリング更新
 
 ## テスト戦略
 
-- **ユニットテスト**: CommitEntry, ChangeStats, AISettings のパース・シリアライズ
-- **統合テスト**: git log/diff コマンドの出力パース
-- **TUIテスト**: パネルレンダリングのスナップショットテスト
-- **モックテスト**: AI API呼び出しのモック
+- **ユニットテスト**: セッションパーサー、要約生成、キャッシュ
+- **統合テスト**: タブ切り替え、ポーリング更新
+- **エンドツーエンドテスト**: TUIシナリオ（モック使用）
+- **パフォーマンステスト**: 1000ターンセッションの動的サンプリング
 
 ## リスクと緩和策
 
 ### 技術的リスク
 
-1. **AI API依存**
-   - **緩和策**: AIセクションを完全にオプショナル化、エラー時は非表示
+1. **セッションファイル形式の変更**: エージェントのバージョンアップで形式が変わる可能性
+   - **緩和策**: パーサーにバージョン検出を追加、フォールバック処理
 
-2. **パフォーマンス低下**
-   - **緩和策**: バックグラウンド取得、キャッシュ、遅延ロード
+2. **大規模セッションのパフォーマンス**: 数MBのセッションファイル読み込み
+   - **緩和策**: バックグラウンドスレッド、動的サンプリング、ストリーミング読み込み
+
+3. **AI API呼び出しの遅延**: ネットワーク遅延でUI応答性低下
+   - **緩和策**: 非同期処理、キャッシュ、ローディングスピナー表示
 
 ### 依存関係リスク
 
-1. **SPEC-d2f4762aとの統合**
-   - **緩和策**: 既存インターフェースを変更せず、データ参照のみ
-
-2. **reqwest追加によるバイナリサイズ増加**
-   - **緩和策**: feature flagでAI機能をオプショナル化
+1. **エージェントセッションファイルの場所**: エージェント設定で変更される可能性
+   - **緩和策**: 既存の検出ロジック（main.rs）を流用、環境変数対応
 
 ## 次のステップ
 
 1. ✅ フェーズ0完了: 調査と技術スタック決定
-2. ⏭️ フェーズ1: 設計ドキュメント作成
+2. ⏭️ フェーズ1進行中: 設計とアーキテクチャ定義
 3. ⏭️ `/speckit.tasks` を実行してタスクを生成
 4. ⏭️ `/speckit.implement` で実装を開始
