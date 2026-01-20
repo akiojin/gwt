@@ -113,7 +113,7 @@ pub fn build_session_prompt(parsed: &ParsedSession) -> Vec<ChatMessage> {
 
         if truncated {
             let notice = "Messages truncated due to length.";
-            if used_chars + notice.chars().count() + 1 <= MAX_PROMPT_CHARS {
+            if used_chars + notice.chars().count() < MAX_PROMPT_CHARS {
                 lines.push(notice.to_string());
             }
         }
@@ -135,7 +135,7 @@ pub fn build_session_prompt(parsed: &ParsedSession) -> Vec<ChatMessage> {
             .join(", ");
         let tool_line = format!("Tool usage: {}", summary);
         let current_len = lines.join("\n").chars().count();
-        if current_len + tool_line.chars().count() + 1 <= MAX_PROMPT_CHARS {
+        if current_len + tool_line.chars().count() < MAX_PROMPT_CHARS {
             lines.push(tool_line);
         } else if current_len > MAX_PROMPT_CHARS {
             // Ensure we never exceed the cap even if previous sections were already too long.
@@ -222,7 +222,7 @@ fn parse_session_summary_fields(content: &str) -> Result<SessionSummaryFields, A
 
     let bullet_points = parse_summary_lines(content).unwrap_or_default();
     let short_summary = bullet_points
-        .get(0)
+        .first()
         .map(|line| line.trim_start_matches("- ").to_string());
 
     Ok(SessionSummaryFields {
