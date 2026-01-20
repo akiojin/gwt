@@ -953,10 +953,7 @@ impl Model {
         self.cleanup_rx = None;
 
         if progress.errors == 0 {
-            self.status_message = Some(format!(
-                "Deleted {} branch(es).",
-                progress.deleted
-            ));
+            self.status_message = Some(format!("Deleted {} branch(es).", progress.deleted));
         } else {
             self.status_message = Some(format!(
                 "Deleted {} branch(es), {} failed.",
@@ -2618,7 +2615,8 @@ impl Model {
             let mut errors = 0;
 
             for target in targets {
-                if let (Some(manager), Some(path)) = (manager.as_ref(), target.worktree_path.as_ref())
+                if let (Some(manager), Some(path)) =
+                    (manager.as_ref(), target.worktree_path.as_ref())
                 {
                     let force_remove = target.worktree_status == WorktreeStatus::Inaccessible
                         || target.has_changes
