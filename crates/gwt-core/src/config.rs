@@ -14,7 +14,7 @@ pub use claude_hooks::{
     HOOK_EVENTS,
 };
 pub use migration::migrate_json_to_toml;
-pub use profile::{Profile, ProfilesConfig};
+pub use profile::{AISettings, Profile, ProfilesConfig, ResolvedAISettings};
 pub use session::{get_session_for_branch, load_sessions_from_worktrees, AgentStatus, Session};
 pub use settings::Settings;
 pub use ts_session::{

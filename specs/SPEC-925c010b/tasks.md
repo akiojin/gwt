@@ -18,15 +18,20 @@ description: "Docker Compose の Playwright noVNC を arm64 で起動可能に�
 
 - [ ] **T201** [US2] `docker-compose.yml` の変更が gwt サービスに影響しないことを確認する
 
-## フェーズ3: ユーザーストーリー3 - arm64 向けの手順が分かる (優先度: P3)
+## フェーズ3: ユーザーストーリー4 - Linux でも host.docker.internal が使える (優先度: P2)
 
-- [ ] **T301** [P] [US3] `docs/docker-usage.md` にエミュレーション要件の注意点を追記する
+- [x] **T301** [P] [US4] `docker-compose.yml` に `host.docker.internal` の解決設定を追加する
+- [x] **T302** [US4] `docs/docker-usage.md` に Linux での `host.docker.internal` 利用に関する注意点を追記する
 
-## フェーズ4: 統合と検証
+## フェーズ4: ユーザーストーリー3 - arm64 向けの手順が分かる (優先度: P3)
 
-- [ ] **T401** [統合] `docker-compose.yml` を対象に docker compose config を実行し platform 設定が反映されることを確認する
-- [ ] **T402** [統合] `docs/docker-usage.md` と `specs/SPEC-925c010b/*.md` に対して markdownlint を実行する
-- [ ] **T403** [統合] `commitlint.config.cjs` に従ってコミットメッセージを検証する
+- [ ] **T401** [P] [US3] `docs/docker-usage.md` にエミュレーション要件の注意点を追記する
+
+## フェーズ5: 統合と検証
+
+- [ ] **T501** [統合] `docker-compose.yml` を対象に docker compose config を実行し platform 設定が反映されることを確認する
+- [ ] **T502** [統合] `docs/docker-usage.md` と `specs/SPEC-925c010b/*.md` に対して markdownlint を実行する
+- [ ] **T503** [統合] `commitlint.config.cjs` に従ってコミットメッセージを検証する
 
 ## 進捗追跡
 
