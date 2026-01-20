@@ -130,6 +130,31 @@ pub enum Commands {
         /// Specific worktree to repair (repairs all if not specified)
         target: Option<String>,
     },
+
+    /// Manage Claude Code hooks for agent status tracking (SPEC-861d8cdf)
+    Hook {
+        #[command(subcommand)]
+        action: HookAction,
+    },
+}
+
+/// Hook subcommands (SPEC-861d8cdf FR-101, T-102)
+#[derive(Subcommand, Debug)]
+pub enum HookAction {
+    /// Process a hook event from Claude Code (internal use)
+    Event {
+        /// Hook event name (UserPromptSubmit, PreToolUse, PostToolUse, Notification, Stop)
+        name: String,
+    },
+
+    /// Register gwt hooks in Claude Code settings
+    Setup,
+
+    /// Remove gwt hooks from Claude Code settings
+    Uninstall,
+
+    /// Check if gwt hooks are registered
+    Status,
 }
 
 /// Output format for list command

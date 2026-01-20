@@ -4,7 +4,7 @@ use chrono::Utc;
 use clap::Parser;
 use gwt_core::agent::codex::{codex_default_args, codex_skip_permissions_flag};
 use gwt_core::agent::get_command_version;
-use gwt_core::config::{save_session_entry, Settings, ToolSessionEntry};
+use gwt_core::config::{save_session_entry, AgentStatus, Session, Settings, ToolSessionEntry};
 use gwt_core::error::GwtError;
 use gwt_core::worktree::WorktreeManager;
 use gwt_core::TmuxMode;
@@ -20,7 +20,7 @@ use tracing::{debug, error, info, warn};
 mod cli;
 mod tui;
 
-use cli::{Cli, Commands, OutputFormat};
+use cli::{Cli, Commands, HookAction, OutputFormat};
 use tui::{AgentLaunchConfig, CodingAgent, ExecutionMode, TuiEntryContext};
 
 fn main() {
@@ -125,6 +125,7 @@ fn handle_command(cmd: Commands, repo_root: &PathBuf, settings: &Settings) -> Re
         Commands::Lock { target, reason } => cmd_lock(repo_root, &target, reason.as_deref()),
         Commands::Unlock { target } => cmd_unlock(repo_root, &target),
         Commands::Repair { target } => cmd_repair(repo_root, target.as_deref()),
+        Commands::Hook { action } => cmd_hook(action),
     }
 }
 
@@ -451,6 +452,181 @@ fn cmd_repair(repo_root: &PathBuf, target: Option<&str>) -> Result<(), GwtError>
     }
 
     Ok(())
+}
+
+/// Handle Claude Code hook subcommands (SPEC-861d8cdf FR-101/T-101/T-102)
+fn cmd_hook(action: HookAction) -> Result<(), GwtError> {
+    use gwt_core::config::{
+        get_claude_settings_path, is_gwt_hooks_registered, register_gwt_hooks, unregister_gwt_hooks,
+    };
+
+    match action {
+        HookAction::Event { name } => handle_hook_event(&name),
+        HookAction::Setup => {
+            let settings_path =
+                get_claude_settings_path().ok_or_else(|| GwtError::ConfigNotFound {
+                    path: PathBuf::from("~/.claude/settings.json"),
+                })?;
+
+            if is_gwt_hooks_registered(&settings_path) {
+                println!("gwt hooks are already registered in Claude Code settings.");
+                return Ok(());
+            }
+
+            register_gwt_hooks(&settings_path)?;
+            println!("Successfully registered gwt hooks in Claude Code settings.");
+            println!("Path: {}", settings_path.display());
+            Ok(())
+        }
+        HookAction::Uninstall => {
+            let settings_path =
+                get_claude_settings_path().ok_or_else(|| GwtError::ConfigNotFound {
+                    path: PathBuf::from("~/.claude/settings.json"),
+                })?;
+
+            if !is_gwt_hooks_registered(&settings_path) {
+                println!("gwt hooks are not registered in Claude Code settings.");
+                return Ok(());
+            }
+
+            unregister_gwt_hooks(&settings_path)?;
+            println!("Successfully removed gwt hooks from Claude Code settings.");
+            Ok(())
+        }
+        HookAction::Status => {
+            let settings_path =
+                get_claude_settings_path().ok_or_else(|| GwtError::ConfigNotFound {
+                    path: PathBuf::from("~/.claude/settings.json"),
+                })?;
+
+            if is_gwt_hooks_registered(&settings_path) {
+                println!("gwt hooks: registered");
+                println!("Path: {}", settings_path.display());
+            } else {
+                println!("gwt hooks: not registered");
+                println!("Run 'gwt hook setup' to enable agent status tracking.");
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Process a hook event from Claude Code (SPEC-861d8cdf T-101)
+/// Called by Claude Code hooks via `gwt hook event <name>`
+fn handle_hook_event(event: &str) -> Result<(), GwtError> {
+    use std::io::{self, Read};
+
+    info!(
+        category = "cli",
+        command = "hook",
+        event = event,
+        "Executing hook event command"
+    );
+
+    // Read JSON payload from stdin
+    let mut input = String::new();
+    io::stdin().read_to_string(&mut input)?;
+
+    // Parse the JSON payload
+    let payload: serde_json::Value = serde_json::from_str(&input).unwrap_or_default();
+
+    // Extract cwd from payload to determine which worktree to update
+    let cwd = payload
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+    debug!(
+        category = "hook",
+        event = event,
+        cwd = %cwd.display(),
+        "Processing hook event"
+    );
+
+    // Determine the new status based on the event
+    let new_status = hook_event_to_status(event, &payload);
+
+    // Load or create session for the worktree
+    let session_path = Session::session_path(&cwd);
+    let mut session = if session_path.exists() {
+        Session::load(&session_path).unwrap_or_else(|_| {
+            // Create new session if load fails
+            let branch = detect_branch_name(&cwd);
+            Session::new(&cwd, &branch)
+        })
+    } else {
+        let branch = detect_branch_name(&cwd);
+        Session::new(&cwd, &branch)
+    };
+
+    // Update the session status
+    session.update_status(new_status);
+    session.save(&session_path)?;
+
+    debug!(
+        category = "hook",
+        event = event,
+        status = ?new_status,
+        session_path = %session_path.display(),
+        "Session status updated"
+    );
+
+    Ok(())
+}
+
+/// Map hook event name to AgentStatus (SPEC-861d8cdf T-101)
+///
+/// Event mappings:
+/// - UserPromptSubmit, PreToolUse, PostToolUse, SessionStart -> Running
+/// - Stop, SubagentStop, SessionEnd -> Stopped
+/// - Notification (with permission_prompt type) -> WaitingInput
+/// - Unknown events -> Running (activity indicator)
+fn hook_event_to_status(event: &str, payload: &serde_json::Value) -> AgentStatus {
+    match event.to_lowercase().as_str() {
+        "userpromptsubmit" | "pretooluse" | "posttooluse" => AgentStatus::Running,
+        "stop" | "subagentstop" => AgentStatus::Stopped,
+        "notification" => {
+            // Check if this is a permission prompt notification
+            let notification_type = payload
+                .get("notification")
+                .and_then(|n| n.get("type"))
+                .and_then(|t| t.as_str())
+                .unwrap_or("");
+
+            if notification_type == "permission_prompt" {
+                AgentStatus::WaitingInput
+            } else {
+                // Other notifications indicate activity
+                AgentStatus::Running
+            }
+        }
+        "sessionstart" => AgentStatus::Running,
+        "sessionend" => AgentStatus::Stopped,
+        _ => {
+            // Unknown events are treated as activity
+            AgentStatus::Running
+        }
+    }
+}
+
+/// Detect branch name from worktree path
+fn detect_branch_name(path: &Path) -> String {
+    // Try to get branch from git
+    let output = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(path)
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        _ => {
+            // Fallback: extract from path
+            path.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        }
+    }
 }
 
 fn check_git_available() -> bool {
@@ -2022,5 +2198,102 @@ mod tests {
             Some("STATUS_ACCESS_VIOLATION")
         );
         assert_eq!(describe_ntstatus(0x12345678), None);
+    }
+
+    // SPEC-861d8cdf T-101 tests
+
+    #[test]
+    fn test_hook_user_prompt_submit_sets_running() {
+        let payload = serde_json::json!({});
+        let status = hook_event_to_status("UserPromptSubmit", &payload);
+        assert_eq!(status, AgentStatus::Running);
+    }
+
+    #[test]
+    fn test_hook_pre_tool_use_sets_running() {
+        let payload = serde_json::json!({});
+        let status = hook_event_to_status("PreToolUse", &payload);
+        assert_eq!(status, AgentStatus::Running);
+    }
+
+    #[test]
+    fn test_hook_post_tool_use_sets_running() {
+        let payload = serde_json::json!({});
+        let status = hook_event_to_status("PostToolUse", &payload);
+        assert_eq!(status, AgentStatus::Running);
+    }
+
+    #[test]
+    fn test_hook_stop_sets_stopped() {
+        let payload = serde_json::json!({});
+        let status = hook_event_to_status("Stop", &payload);
+        assert_eq!(status, AgentStatus::Stopped);
+    }
+
+    #[test]
+    fn test_hook_subagent_stop_sets_stopped() {
+        let payload = serde_json::json!({});
+        let status = hook_event_to_status("SubagentStop", &payload);
+        assert_eq!(status, AgentStatus::Stopped);
+    }
+
+    #[test]
+    fn test_hook_notification_permission_prompt_sets_waiting_input() {
+        let payload = serde_json::json!({
+            "notification": {
+                "type": "permission_prompt"
+            }
+        });
+        let status = hook_event_to_status("Notification", &payload);
+        assert_eq!(status, AgentStatus::WaitingInput);
+    }
+
+    #[test]
+    fn test_hook_notification_other_type_sets_running() {
+        let payload = serde_json::json!({
+            "notification": {
+                "type": "info"
+            }
+        });
+        let status = hook_event_to_status("Notification", &payload);
+        assert_eq!(status, AgentStatus::Running);
+    }
+
+    #[test]
+    fn test_hook_session_start_sets_running() {
+        let payload = serde_json::json!({});
+        let status = hook_event_to_status("SessionStart", &payload);
+        assert_eq!(status, AgentStatus::Running);
+    }
+
+    #[test]
+    fn test_hook_session_end_sets_stopped() {
+        let payload = serde_json::json!({});
+        let status = hook_event_to_status("SessionEnd", &payload);
+        assert_eq!(status, AgentStatus::Stopped);
+    }
+
+    #[test]
+    fn test_hook_unknown_event_sets_running() {
+        let payload = serde_json::json!({});
+        let status = hook_event_to_status("UnknownEvent", &payload);
+        assert_eq!(status, AgentStatus::Running);
+    }
+
+    #[test]
+    fn test_hook_event_case_insensitive() {
+        let payload = serde_json::json!({});
+        // Test lowercase
+        assert_eq!(
+            hook_event_to_status("userpromptsubmit", &payload),
+            AgentStatus::Running
+        );
+        // Test uppercase
+        assert_eq!(hook_event_to_status("STOP", &payload), AgentStatus::Stopped);
+        // Test mixed case
+        assert_eq!(
+            hook_event_to_status("SessionStart", &payload),
+            AgentStatus::Running
+        );
     }
 }
