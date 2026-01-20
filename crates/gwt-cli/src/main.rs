@@ -82,7 +82,7 @@ fn run() -> Result<(), GwtError> {
             loop {
                 let selection = tui::run_with_context(entry.take())?;
                 match selection {
-                    Some(launch_config) => match launch_coding_agent(launch_config) {
+                    Some(launch_plan) => match execute_launch_plan(launch_plan) {
                         Ok(AgentExitKind::Success) => {
                             entry = Some(TuiEntryContext::success(
                                 "Session completed successfully.".to_string(),
@@ -500,58 +500,6 @@ fn skip_install_warning_message(pm: &str) -> String {
     )
 }
 
-fn install_dependencies(worktree_path: &Path, auto_install: bool) -> Result<(), GwtError> {
-    // Check if package.json exists
-    if !worktree_path.join("package.json").exists() {
-        return Ok(());
-    }
-
-    if !auto_install {
-        if let Some(pm) = should_warn_skip_install(worktree_path) {
-            println!("{}", skip_install_warning_message(pm));
-            println!();
-        }
-        return Ok(());
-    }
-
-    // Check if node_modules already exists (skip if already installed)
-    if worktree_path.join("node_modules").exists() {
-        return Ok(());
-    }
-
-    // Detect package manager
-    let pm = match detect_package_manager(worktree_path) {
-        Some(pm) => pm,
-        None => return Ok(()),
-    };
-
-    println!("Installing dependencies with {}...", pm);
-    println!();
-
-    // FR-040a: Run package manager with inherited stdout/stderr (no capture)
-    // FR-040b: No spinner - just let output flow directly
-    let status = Command::new(pm)
-        .arg("install")
-        .current_dir(worktree_path)
-        .status()
-        .map_err(|e| GwtError::AgentLaunchFailed {
-            name: pm.to_string(),
-            reason: format!("Failed to run '{}': {}", pm, e),
-        })?;
-
-    if !status.success() {
-        eprintln!();
-        eprintln!("Warning: {} install exited with status: {}", pm, status);
-        // Don't fail - let the user decide whether to continue
-    } else {
-        println!();
-        println!("Dependencies installed successfully.");
-    }
-
-    println!();
-    Ok(())
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AgentExitKind {
     Success,
@@ -620,15 +568,131 @@ fn build_launching_message(config: &AgentLaunchConfig) -> String {
     format!("Launching {}...", config.agent.label())
 }
 
-/// Launch a coding agent after TUI exits
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LaunchProgress {
+    ResolvingWorktree,
+    BuildingCommand,
+    CheckingDependencies,
+    InstallingDependencies { manager: String },
+}
+
+impl LaunchProgress {
+    pub(crate) fn message(&self) -> String {
+        match self {
+            LaunchProgress::ResolvingWorktree => "Preparing worktree...".to_string(),
+            LaunchProgress::BuildingCommand => "Preparing launch command...".to_string(),
+            LaunchProgress::CheckingDependencies => "Checking dependencies...".to_string(),
+            LaunchProgress::InstallingDependencies { manager } => {
+                format!("Installing dependencies with {}...", manager)
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum InstallPlan {
+    None,
+    Skip { message: String },
+    Install { manager: String },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LaunchPlan {
+    pub config: AgentLaunchConfig,
+    pub executable: String,
+    pub command_args: Vec<String>,
+    pub log_lines: Vec<String>,
+    pub selected_version: String,
+    pub install_plan: InstallPlan,
+    pub env: Vec<(String, String)>,
+}
+
+pub(crate) fn build_launch_env(config: &AgentLaunchConfig) -> Vec<(String, String)> {
+    let mut env_vars = config.env.clone();
+    if config.skip_permissions && config.agent == CodingAgent::ClaudeCode {
+        let has_sandbox = env_vars.iter().any(|(key, _)| key == "IS_SANDBOX");
+        if !has_sandbox {
+            env_vars.push(("IS_SANDBOX".to_string(), "1".to_string()));
+        }
+    }
+    env_vars
+}
+
+fn build_install_plan(worktree_path: &Path, auto_install: bool) -> InstallPlan {
+    if !worktree_path.join("package.json").exists() {
+        return InstallPlan::None;
+    }
+
+    if !auto_install {
+        if let Some(pm) = should_warn_skip_install(worktree_path) {
+            return InstallPlan::Skip {
+                message: skip_install_warning_message(pm),
+            };
+        }
+        return InstallPlan::None;
+    }
+
+    if worktree_path.join("node_modules").exists() {
+        return InstallPlan::None;
+    }
+
+    let pm = match detect_package_manager(worktree_path) {
+        Some(pm) => pm,
+        None => return InstallPlan::None,
+    };
+
+    InstallPlan::Install {
+        manager: pm.to_string(),
+    }
+}
+
+fn run_install_plan(worktree_path: &Path, plan: &InstallPlan) -> Result<(), GwtError> {
+    match plan {
+        InstallPlan::None => Ok(()),
+        InstallPlan::Skip { message } => {
+            println!("{}", message);
+            println!();
+            Ok(())
+        }
+        InstallPlan::Install { manager } => {
+            println!("Installing dependencies with {}...", manager);
+            println!();
+            let status = Command::new(manager)
+                .arg("install")
+                .current_dir(worktree_path)
+                .status()
+                .map_err(|e| GwtError::AgentLaunchFailed {
+                    name: manager.to_string(),
+                    reason: format!("Failed to run '{}': {}", manager, e),
+                })?;
+            if !status.success() {
+                eprintln!();
+                eprintln!("Warning: {} install exited with status: {}", manager, status);
+                // Don't fail - let the user decide whether to continue
+            } else {
+                println!();
+                println!("Dependencies installed successfully.");
+            }
+
+            println!();
+            Ok(())
+        }
+    }
+}
+
+/// Prepare a launch plan for a coding agent
 ///
 /// Version selection behavior (FR-066, FR-067, FR-068):
 /// - "installed": Use local command if available, fallback to bunx @package@latest
 /// - "latest": Use bunx @package@latest
 /// - specific version: Use bunx @package@X.Y.Z
-fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtError> {
-    println!("{}", build_launching_message(&config));
-    println!();
+pub(crate) fn prepare_launch_plan(
+    config: AgentLaunchConfig,
+    mut progress: impl FnMut(LaunchProgress),
+) -> Result<LaunchPlan, GwtError> {
+    progress(LaunchProgress::BuildingCommand);
+
+    let env = build_launch_env(&config);
 
     let cmd_name = config.agent.command_name();
     let npm_package = config.agent.npm_package();
@@ -640,7 +704,6 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
             Ok(path) => (path.to_string_lossy().to_string(), vec![], true),
             Err(_) => {
                 // FR-019: Fallback to bunx @package@latest if local not found
-                eprintln!("Note: Local '{}' not found, using bunx fallback", cmd_name);
                 let (exe, args) = get_bunx_command(npm_package, "latest");
                 (exe, args, false)
             }
@@ -693,18 +756,58 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
     };
 
     let log_lines = build_launch_log_lines(&config, &agent_args, &version_label, &execution_method);
-    for line in log_lines {
+
+    progress(LaunchProgress::CheckingDependencies);
+    let install_plan = build_install_plan(&config.worktree_path, config.auto_install_deps);
+    if let InstallPlan::Install { manager } = &install_plan {
+        progress(LaunchProgress::InstallingDependencies {
+            manager: manager.clone(),
+        });
+    }
+
+    Ok(LaunchPlan {
+        config,
+        executable,
+        command_args,
+        log_lines,
+        selected_version,
+        install_plan,
+        env,
+    })
+}
+
+fn execute_launch_plan(plan: LaunchPlan) -> Result<AgentExitKind, GwtError> {
+    let LaunchPlan {
+        config,
+        executable,
+        command_args,
+        log_lines,
+        selected_version,
+        install_plan,
+        env,
+        ..
+    } = plan;
+    println!("{}", build_launching_message(&config));
+    println!();
+    if config.version == "installed" && selected_version == "latest" {
+        eprintln!(
+            "Note: Local '{}' not found, using bunx fallback",
+            config.agent.command_name()
+        );
+    }
+
+    for line in &log_lines {
         println!("{}", line);
     }
     println!();
 
-    if config.auto_install_deps {
+    if config.auto_install_deps && matches!(install_plan, InstallPlan::Install { .. }) {
         println!("Preparing to install dependencies...");
         println!();
     }
 
     // FR-040a/FR-040b: Install dependencies only when enabled
-    install_dependencies(&config.worktree_path, config.auto_install_deps)?;
+    run_install_plan(&config.worktree_path, &install_plan)?;
     let started_at = Instant::now();
 
     // FR-069, FR-042: Save session entry before launching agent
@@ -736,15 +839,12 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
     for key in &config.env_remove {
         command.env_remove(key);
     }
-    for (key, value) in &config.env {
+    for (key, value) in &env {
         command.env(key, value);
-    }
-    if config.skip_permissions && config.agent == CodingAgent::ClaudeCode {
-        command.env("IS_SANDBOX", "1");
     }
 
     let mut child = command.spawn().map_err(|e| GwtError::AgentLaunchFailed {
-        name: cmd_name.to_string(),
+        name: config.agent.command_name().to_string(),
         reason: format!("Failed to execute '{}': {}", executable, e),
     })?;
 
@@ -771,7 +871,7 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
 
     // Wait for the agent process to finish
     let status = child.wait().map_err(|e| GwtError::AgentLaunchFailed {
-        name: cmd_name.to_string(),
+        name: config.agent.command_name().to_string(),
         reason: format!("Failed to wait for '{}': {}", executable, e),
     })?;
 
@@ -809,7 +909,7 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
         ExitClassification::Success => {
             info!(
                 agent_id = config.agent.id(),
-                version = selected_version,
+                version = selected_version.as_str(),
                 duration_ms = duration_ms as u64,
                 "Agent exited successfully"
             );
@@ -818,7 +918,7 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
         ExitClassification::Interrupted => {
             warn!(
                 agent_id = config.agent.id(),
-                version = selected_version,
+                version = selected_version.as_str(),
                 duration_ms = duration_ms as u64,
                 "Agent session interrupted"
             );
@@ -827,7 +927,7 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
         ExitClassification::Failure { code, signal } => {
             error!(
                 agent_id = config.agent.id(),
-                version = selected_version,
+                version = selected_version.as_str(),
                 exit_code = code,
                 signal = signal,
                 duration_ms = duration_ms as u64,
@@ -841,7 +941,7 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
                 "Exited with unknown status".to_string()
             };
             Err(GwtError::AgentLaunchFailed {
-                name: cmd_name.to_string(),
+                name: config.agent.command_name().to_string(),
                 reason,
             })
         }
@@ -1731,6 +1831,35 @@ mod tests {
         assert_eq!(
             message,
             "Auto install disabled. Skipping dependency install. Run \"npm install\" if needed or set GWT_AGENT_AUTO_INSTALL_DEPS=true."
+        );
+    }
+
+    #[test]
+    fn test_prepare_launch_plan_progress_order() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("package.json"), "{}").unwrap();
+        let mut config = sample_config(CodingAgent::CodexCli);
+        config.worktree_path = temp.path().to_path_buf();
+        config.auto_install_deps = true;
+        let mut steps = Vec::new();
+
+        let plan = prepare_launch_plan(config, |step| steps.push(step)).unwrap();
+
+        assert_eq!(
+            steps,
+            vec![
+                LaunchProgress::BuildingCommand,
+                LaunchProgress::CheckingDependencies,
+                LaunchProgress::InstallingDependencies {
+                    manager: "npm".to_string()
+                },
+            ]
+        );
+        assert_eq!(
+            plan.install_plan,
+            InstallPlan::Install {
+                manager: "npm".to_string()
+            }
         );
     }
 

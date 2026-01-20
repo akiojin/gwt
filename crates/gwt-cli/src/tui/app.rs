@@ -7,6 +7,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use crate::{prepare_launch_plan, InstallPlan, LaunchPlan, LaunchProgress};
 use gwt_core::config::get_branch_tool_history;
 use gwt_core::config::{save_session_entry, Profile, ProfilesConfig, ToolSessionEntry};
 use gwt_core::error::GwtError;
@@ -155,6 +156,28 @@ struct BranchListUpdate {
     active_count: usize,
 }
 
+struct LaunchRequest {
+    branch_name: String,
+    create_new_branch: bool,
+    base_branch: Option<String>,
+    agent: CodingAgent,
+    model: Option<String>,
+    reasoning_level: Option<ReasoningLevel>,
+    version: String,
+    execution_mode: ExecutionMode,
+    session_id: Option<String>,
+    skip_permissions: bool,
+    env: Vec<(String, String)>,
+    env_remove: Vec<String>,
+    auto_install_deps: bool,
+}
+
+enum LaunchUpdate {
+    Progress(LaunchProgress),
+    Ready(LaunchPlan),
+    Failed(String),
+}
+
 /// Application state (Model in Elm Architecture)
 pub struct Model {
     /// Whether the app should quit
@@ -195,14 +218,20 @@ pub struct Model {
     status_message: Option<String>,
     /// Status message timestamp (for auto-clear)
     status_message_time: Option<Instant>,
+    /// Launch progress message (not auto-cleared)
+    launch_status: Option<String>,
+    /// Launch preparation update receiver
+    launch_rx: Option<Receiver<LaunchUpdate>>,
+    /// Whether launch preparation is in progress
+    launch_in_progress: bool,
     /// Is offline
     is_offline: bool,
     /// Active worktree count
     active_count: usize,
     /// Total branch count
     total_count: usize,
-    /// Pending agent launch configuration (set when wizard completes)
-    pending_agent_launch: Option<AgentLaunchConfig>,
+    /// Pending agent launch plan (set when wizard completes)
+    pending_agent_launch: Option<LaunchPlan>,
     /// Pending unsafe branch selection (FR-029b)
     pending_unsafe_selection: Option<String>,
     /// Pending agent termination branch (FR-040)
@@ -339,6 +368,9 @@ impl Model {
             wizard: WizardState::new(),
             status_message: None,
             status_message_time: None,
+            launch_status: None,
+            launch_rx: None,
+            launch_in_progress: false,
             is_offline: false,
             active_count: 0,
             total_count: 0,
@@ -758,6 +790,12 @@ impl Model {
         }
     }
 
+    fn active_status_message(&self) -> Option<&str> {
+        self.launch_status
+            .as_deref()
+            .or_else(|| self.status_message.as_deref())
+    }
+
     fn apply_branch_list_updates(&mut self) {
         let Some(rx) = &self.branch_list_rx else {
             return;
@@ -807,6 +845,54 @@ impl Model {
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
                 self.pr_title_rx = None;
+            }
+        }
+    }
+
+    fn apply_launch_updates(&mut self) {
+        let Some(rx) = &self.launch_rx else {
+            return;
+        };
+
+        loop {
+            match rx.try_recv() {
+                Ok(update) => match update {
+                    LaunchUpdate::Progress(progress) => {
+                        self.launch_status = Some(progress.message());
+                    }
+                    LaunchUpdate::Ready(plan) => {
+                        self.launch_in_progress = false;
+                        self.launch_rx = None;
+                        let next_status = match &plan.install_plan {
+                            InstallPlan::Install { manager } => {
+                                LaunchProgress::InstallingDependencies {
+                                    manager: manager.clone(),
+                                }
+                                .message()
+                            }
+                            _ => "Launching agent...".to_string(),
+                        };
+                        self.launch_status = Some(next_status);
+                        self.handle_launch_plan(plan);
+                        break;
+                    }
+                    LaunchUpdate::Failed(message) => {
+                        self.launch_in_progress = false;
+                        self.launch_rx = None;
+                        self.launch_status = None;
+                        self.worktree_create.error_message = Some(message.clone());
+                        self.status_message = Some(format!("Error: {}", message));
+                        self.status_message_time = Some(Instant::now());
+                        break;
+                    }
+                },
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.launch_rx = None;
+                    self.launch_in_progress = false;
+                    self.launch_status = None;
+                    break;
+                }
             }
         }
     }
@@ -1463,6 +1549,7 @@ impl Model {
                 self.apply_pr_title_updates();
                 self.apply_safety_updates();
                 self.apply_worktree_updates();
+                self.apply_launch_updates();
                 // FR-033: Update pane list every 1 second in tmux multi mode
                 self.update_pane_list();
             }
@@ -1915,124 +2002,173 @@ impl Model {
 
     /// Create worktree from wizard state and prepare agent launch
     fn create_worktree(&mut self) {
-        debug!(
-            category = "tui",
-            branch = %self.worktree_create.branch_name,
-            create_new_branch = self.worktree_create.create_new_branch,
-            "Creating worktree from wizard state"
-        );
-        if let Ok(manager) = WorktreeManager::new(&self.repo_root) {
-            let branch = self.worktree_create.branch_name.clone();
-            let base = if self.worktree_create.create_new_branch {
-                self.wizard
-                    .base_branch_override
-                    .as_deref()
-                    .or_else(|| self.worktree_create.selected_base_branch())
+        if self.launch_in_progress {
+            self.status_message = Some("Launch already in progress".to_string());
+            self.status_message_time = Some(Instant::now());
+            return;
+        }
+
+        let branch = self.worktree_create.branch_name.clone();
+        if branch.trim().is_empty() {
+            self.status_message = Some("No branch selected".to_string());
+            self.status_message_time = Some(Instant::now());
+            return;
+        }
+
+        let base = if self.worktree_create.create_new_branch {
+            self.wizard
+                .base_branch_override
+                .as_deref()
+                .or_else(|| self.worktree_create.selected_base_branch())
+                .map(|value| value.to_string())
+        } else {
+            None
+        };
+
+        let auto_install_deps = self
+            .settings
+            .settings
+            .as_ref()
+            .map(|settings| settings.agent.auto_install_deps)
+            .unwrap_or(false);
+
+        let request = LaunchRequest {
+            branch_name: branch,
+            create_new_branch: self.worktree_create.create_new_branch,
+            base_branch: base,
+            agent: self.wizard.agent,
+            model: if self.wizard.model.is_empty() {
+                None
+            } else {
+                Some(self.wizard.model.clone())
+            },
+            reasoning_level: if self.wizard.agent == CodingAgent::CodexCli {
+                Some(self.wizard.reasoning_level)
             } else {
                 None
+            },
+            version: self.wizard.version.clone(),
+            execution_mode: self.wizard.execution_mode,
+            session_id: self.wizard.session_id.clone(),
+            skip_permissions: self.wizard.skip_permissions,
+            env: self.active_env_overrides(),
+            env_remove: self.active_env_removals(),
+            auto_install_deps,
+        };
+
+        self.start_launch_preparation(request);
+    }
+
+    fn start_launch_preparation(&mut self, request: LaunchRequest) {
+        if self.launch_in_progress {
+            return;
+        }
+
+        self.launch_in_progress = true;
+        self.launch_status = Some(LaunchProgress::ResolvingWorktree.message());
+
+        let repo_root = self.repo_root.clone();
+        let (tx, rx) = mpsc::channel();
+        self.launch_rx = Some(rx);
+
+        thread::spawn(move || {
+            let send = |update: LaunchUpdate| {
+                let _ = tx.send(update);
             };
 
-            // First try to get existing worktree for this branch
-            let existing_wt = manager.get_by_branch(&branch).ok().flatten();
+            send(LaunchUpdate::Progress(LaunchProgress::ResolvingWorktree));
 
+            let manager = match WorktreeManager::new(&repo_root) {
+                Ok(manager) => manager,
+                Err(e) => {
+                    send(LaunchUpdate::Failed(e.to_string()));
+                    return;
+                }
+            };
+
+            let existing_wt = manager.get_by_branch(&request.branch_name).ok().flatten();
             let result = if let Some(wt) = existing_wt {
-                // Worktree already exists, just use it
                 Ok(wt)
-            } else if self.worktree_create.create_new_branch {
-                manager.create_new_branch(&branch, base)
+            } else if request.create_new_branch {
+                manager.create_new_branch(
+                    &request.branch_name,
+                    request.base_branch.as_deref(),
+                )
             } else {
-                manager.create_for_branch(&branch)
+                manager.create_for_branch(&request.branch_name)
             };
 
-            match result {
-                Ok(wt) => {
-                    info!(
-                        category = "tui",
-                        operation = "create_worktree",
-                        branch = %branch,
-                        worktree_path = %wt.path.display(),
-                        "Worktree created successfully"
-                    );
-                    // Create agent launch configuration
-                    let auto_install_deps = self
-                        .settings
-                        .settings
-                        .as_ref()
-                        .map(|settings| settings.agent.auto_install_deps)
-                        .unwrap_or(false);
+            let worktree = match result {
+                Ok(wt) => wt,
+                Err(e) => {
+                    send(LaunchUpdate::Failed(e.to_string()));
+                    return;
+                }
+            };
 
-                    let launch_config = AgentLaunchConfig {
-                        worktree_path: wt.path.clone(),
-                        branch_name: branch.clone(),
-                        agent: self.wizard.agent,
-                        model: if self.wizard.model.is_empty() {
-                            None
-                        } else {
-                            Some(self.wizard.model.clone())
-                        },
-                        reasoning_level: if self.wizard.agent == CodingAgent::CodexCli {
-                            Some(self.wizard.reasoning_level)
-                        } else {
-                            None
-                        },
-                        version: self.wizard.version.clone(),
-                        execution_mode: self.wizard.execution_mode,
-                        session_id: self.wizard.session_id.clone(),
-                        skip_permissions: self.wizard.skip_permissions,
-                        env: self.active_env_overrides(),
-                        env_remove: self.active_env_removals(),
-                        auto_install_deps,
-                    };
+            let config = AgentLaunchConfig {
+                worktree_path: worktree.path.clone(),
+                branch_name: request.branch_name.clone(),
+                agent: request.agent,
+                model: request.model.clone(),
+                reasoning_level: request.reasoning_level,
+                version: request.version.clone(),
+                execution_mode: request.execution_mode,
+                session_id: request.session_id.clone(),
+                skip_permissions: request.skip_permissions,
+                env: request.env.clone(),
+                env_remove: request.env_remove.clone(),
+                auto_install_deps: request.auto_install_deps,
+            };
 
-                    // Refresh data to reflect branch/worktree changes (FR-008b)
-                    self.refresh_data();
+            let plan = match prepare_launch_plan(config, |progress| {
+                send(LaunchUpdate::Progress(progress))
+            }) {
+                Ok(plan) => plan,
+                Err(e) => {
+                    send(LaunchUpdate::Failed(e.to_string()));
+                    return;
+                }
+            };
 
-                    // In multi mode, launch in tmux pane without quitting TUI
-                    if self.tmux_mode.is_multi() && self.gwt_pane_id.is_some() {
-                        // FR-010: Check 1 branch = 1 pane constraint
-                        if self
-                            .branch_list
-                            .get_running_agent(&launch_config.branch_name)
-                            .is_some()
-                        {
-                            self.status_message =
-                                Some("Agent already running on this branch".to_string());
-                            self.status_message_time = Some(Instant::now());
-                            return;
-                        }
-                        match self.launch_agent_in_pane(&launch_config) {
-                            Ok(_) => {
-                                self.status_message =
-                                    Some(format!("Agent launched in tmux pane for {}", branch));
-                                self.status_message_time = Some(Instant::now());
-                                // Close wizard and return to branch list
-                                self.wizard.visible = false;
-                                self.screen = Screen::BranchList;
-                            }
-                            Err(e) => {
-                                self.status_message = Some(format!("Failed to launch: {}", e));
-                                self.status_message_time = Some(Instant::now());
-                            }
-                        }
-                    } else {
-                        // Single mode: store launch config and quit TUI
-                        self.pending_agent_launch = Some(launch_config);
-                        self.should_quit = true;
+            send(LaunchUpdate::Ready(plan));
+        });
+    }
+
+    fn handle_launch_plan(&mut self, plan: LaunchPlan) {
+        // Refresh data to reflect branch/worktree changes (FR-008b)
+        self.refresh_data();
+
+        if let InstallPlan::Skip { message } = &plan.install_plan {
+            self.status_message = Some(message.clone());
+            self.status_message_time = Some(Instant::now());
+        }
+
+        let keep_launch_status = matches!(plan.install_plan, InstallPlan::Install { .. });
+
+        if self.tmux_mode.is_multi() && self.gwt_pane_id.is_some() {
+            match self.launch_plan_in_pane(&plan) {
+                Ok(_) => {
+                    if !keep_launch_status {
+                        self.launch_status = None;
                     }
+                    self.status_message = Some(format!(
+                        "Agent launched in tmux pane for {}",
+                        plan.config.branch_name
+                    ));
+                    self.status_message_time = Some(Instant::now());
+                    self.wizard.visible = false;
+                    self.screen = Screen::BranchList;
                 }
                 Err(e) => {
-                    error!(
-                        category = "tui",
-                        operation = "create_worktree",
-                        branch = %branch,
-                        error = %e,
-                        "Failed to create worktree"
-                    );
-                    self.worktree_create.error_message = Some(e.to_string());
-                    self.status_message = Some(format!("Error: {}", e));
+                    self.launch_status = None;
+                    self.status_message = Some(format!("Failed to launch: {}", e));
                     self.status_message_time = Some(Instant::now());
                 }
             }
+        } else {
+            self.pending_agent_launch = Some(plan);
+            self.should_quit = true;
         }
     }
 
@@ -2044,18 +2180,18 @@ impl Model {
     /// - When a column reaches 3 panes, a new column is added to the right
     ///
     /// Uses the same argument building logic as single mode (main.rs)
-    fn launch_agent_in_pane(&mut self, config: &AgentLaunchConfig) -> Result<String, String> {
+    fn launch_plan_in_pane(&mut self, plan: &LaunchPlan) -> Result<String, String> {
         // FR-010: One Branch One Pane constraint
         // Check if an agent is already running on this branch
         if self
             .pane_list
             .panes
             .iter()
-            .any(|p| p.branch_name == config.branch_name)
+            .any(|p| p.branch_name == plan.config.branch_name)
         {
             return Err(format!(
                 "Agent already running on branch '{}'",
-                config.branch_name
+                plan.config.branch_name
             ));
         }
 
@@ -2063,42 +2199,28 @@ impl Model {
         // Hide any currently active agent pane before launching new one
         self.hide_active_agent_pane();
 
-        let working_dir = config.worktree_path.to_string_lossy().to_string();
+        let working_dir = plan.config.worktree_path.to_string_lossy().to_string();
 
         // Build environment variables (same as single mode)
-        let mut env_vars = config.env.clone();
-        // Add IS_SANDBOX=1 for Claude Code with skip_permissions (same as single mode)
-        if config.skip_permissions && config.agent == CodingAgent::ClaudeCode {
-            env_vars.push(("IS_SANDBOX".to_string(), "1".to_string()));
-        }
+        let env_vars = plan.env.clone();
 
-        // Determine the agent command based on version (FR-063)
-        // - "installed": use direct binary name
-        // - "latest" or specific version: use bunx (or npx fallback) with package spec
-        let (base_cmd, base_args) = if config.version == "installed" {
-            // Use direct binary name for installed version
-            (config.agent.command_name().to_string(), vec![])
-        } else {
-            // Try bunx first, then npx as fallback (same logic as single mode)
-            let runner = which::which("bunx")
-                .or_else(|_| which::which("npx"))
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| "bunx".to_string());
-
-            let package_spec = if config.version == "latest" {
-                format!("{}@latest", config.agent.npm_package())
-            } else {
-                format!("{}@{}", config.agent.npm_package(), config.version)
-            };
-
-            (runner, vec![package_spec])
+        let install_cmd = match &plan.install_plan {
+            InstallPlan::Install { manager } => {
+                let args = vec!["install".to_string()];
+                Some(build_shell_command(manager, &args))
+            }
+            _ => None,
         };
 
-        // Build agent-specific arguments (same logic as main.rs build_agent_args)
-        let agent_args = build_agent_args_for_tmux(config);
+        let agent_cmd = build_shell_command(&plan.executable, &plan.command_args);
+        let full_cmd = if let Some(install_cmd) = install_cmd {
+            format!("{} && {}", install_cmd, agent_cmd)
+        } else {
+            agent_cmd
+        };
 
         // Build the full command string
-        let command = build_tmux_command(&env_vars, &base_cmd, &base_args, &agent_args);
+        let command = build_tmux_command(&env_vars, &plan.config.env_remove, &full_cmd);
 
         debug!(
             category = "tui",
@@ -2135,8 +2257,8 @@ impl Model {
         // Add to pane list for display
         let agent_pane = AgentPane::new(
             pane_id.clone(),
-            config.branch_name.clone(),
-            config.agent.label().to_string(),
+            plan.config.branch_name.clone(),
+            plan.config.agent.label().to_string(),
             SystemTime::now(),
             0, // PID is not tracked by simple launcher
         );
@@ -2146,22 +2268,22 @@ impl Model {
 
         // FR-071: Save session entry for tmux mode
         let session_entry = ToolSessionEntry {
-            branch: config.branch_name.clone(),
+            branch: plan.config.branch_name.clone(),
             worktree_path: Some(working_dir),
-            tool_id: config.agent.id().to_string(),
-            tool_label: config.agent.label().to_string(),
-            session_id: config.session_id.clone(),
-            mode: Some(config.execution_mode.label().to_string()),
-            model: config.model.clone(),
-            reasoning_level: config.reasoning_level.map(|r| r.label().to_string()),
-            skip_permissions: Some(config.skip_permissions),
-            tool_version: Some(config.version.clone()),
+            tool_id: plan.config.agent.id().to_string(),
+            tool_label: plan.config.agent.label().to_string(),
+            session_id: plan.config.session_id.clone(),
+            mode: Some(plan.config.execution_mode.label().to_string()),
+            model: plan.config.model.clone(),
+            reasoning_level: plan.config.reasoning_level.map(|r| r.label().to_string()),
+            skip_permissions: Some(plan.config.skip_permissions),
+            tool_version: Some(plan.selected_version.clone()),
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)
                 .unwrap_or(0),
         };
-        if let Err(e) = save_session_entry(&config.worktree_path, session_entry) {
+        if let Err(e) = save_session_entry(&plan.config.worktree_path, session_entry) {
             debug!(
                 category = "tui",
                 error = %e,
@@ -2484,7 +2606,7 @@ impl Model {
         let footer_height = if needs_footer {
             // Calculate footer height dynamically based on text length
             let keybinds = self.get_footer_keybinds();
-            let status = self.status_message.as_deref().unwrap_or("");
+            let status = self.active_status_message().unwrap_or("");
             let footer_text_len = if status.is_empty() {
                 keybinds.len() + 2 // " {} " format adds 2 spaces
             } else {
@@ -2523,13 +2645,14 @@ impl Model {
             Screen::BranchList => {
                 // Use split layout (branch list takes full area, PaneList abolished)
                 let split_areas = calculate_split_layout(chunks[1], &self.split_layout);
+                let status_message = self.active_status_message().map(|message| message.to_string());
 
                 // Render branch list (always has focus now)
                 render_branch_list(
                     &mut self.branch_list,
                     frame,
                     split_areas.branch_list,
-                    self.status_message.as_deref(),
+                    status_message.as_deref(),
                     true, // Branch list always has focus
                 );
             }
@@ -2723,7 +2846,7 @@ impl Model {
     fn view_footer(&self, frame: &mut Frame, area: Rect) {
         let keybinds = self.get_footer_keybinds();
 
-        let status = self.status_message.as_deref().unwrap_or("");
+        let status = self.active_status_message().unwrap_or("");
         let footer_text = if status.is_empty() {
             format!(" {} ", keybinds)
         } else {
@@ -2801,16 +2924,16 @@ impl Model {
 }
 
 /// Run the TUI application
-/// Returns agent launch configuration if wizard completed, None otherwise
-pub fn run() -> Result<Option<AgentLaunchConfig>, GwtError> {
+/// Returns agent launch plan if wizard completed, None otherwise
+pub fn run() -> Result<Option<LaunchPlan>, GwtError> {
     run_with_context(None)
 }
 
 /// Run the TUI application with optional entry context
-/// Returns agent launch configuration if wizard completed, None otherwise
+/// Returns agent launch plan if wizard completed, None otherwise
 pub fn run_with_context(
     context: Option<TuiEntryContext>,
-) -> Result<Option<AgentLaunchConfig>, GwtError> {
+) -> Result<Option<LaunchPlan>, GwtError> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -3184,138 +3307,6 @@ pub fn run_with_context(
     Ok(pending_launch)
 }
 
-/// Build agent-specific command line arguments for tmux mode
-/// (Same logic as main.rs build_agent_args)
-fn build_agent_args_for_tmux(config: &AgentLaunchConfig) -> Vec<String> {
-    use gwt_core::agent::codex::{codex_default_args, codex_skip_permissions_flag};
-
-    let mut args = Vec::new();
-
-    match config.agent {
-        CodingAgent::ClaudeCode => {
-            // Model selection
-            if let Some(model) = &config.model {
-                if !model.is_empty() {
-                    args.push("--model".to_string());
-                    args.push(model.clone());
-                }
-            }
-
-            // Execution mode (FR-102) - same logic as single mode
-            match config.execution_mode {
-                ExecutionMode::Continue | ExecutionMode::Resume => {
-                    if let Some(session_id) = &config.session_id {
-                        args.push("--resume".to_string());
-                        args.push(session_id.clone());
-                    } else if matches!(config.execution_mode, ExecutionMode::Continue) {
-                        args.push("-c".to_string());
-                    } else {
-                        args.push("-r".to_string());
-                    }
-                }
-                ExecutionMode::Normal => {}
-            }
-
-            // Skip permissions
-            if config.skip_permissions {
-                args.push("--dangerously-skip-permissions".to_string());
-            }
-        }
-        CodingAgent::CodexCli => {
-            // Execution mode - resume subcommand must come first
-            match config.execution_mode {
-                ExecutionMode::Continue | ExecutionMode::Resume => {
-                    args.push("resume".to_string());
-                    if let Some(session_id) = &config.session_id {
-                        args.push(session_id.clone());
-                    } else if matches!(config.execution_mode, ExecutionMode::Continue) {
-                        args.push("--last".to_string());
-                    }
-                }
-                ExecutionMode::Normal => {}
-            }
-
-            // Skip permissions (Codex uses versioned flag)
-            let skip_flag = if config.skip_permissions {
-                Some(codex_skip_permissions_flag(None))
-            } else {
-                None
-            };
-            let bypass_sandbox = matches!(
-                skip_flag,
-                Some("--dangerously-bypass-approvals-and-sandbox")
-            );
-
-            let reasoning_override = config.reasoning_level.map(|r| r.label());
-            args.extend(codex_default_args(
-                config.model.as_deref(),
-                reasoning_override,
-                None, // skills_flag_version
-                bypass_sandbox,
-            ));
-
-            if let Some(flag) = skip_flag {
-                args.push(flag.to_string());
-            }
-        }
-        CodingAgent::GeminiCli => {
-            // Model selection (Gemini uses -m or --model)
-            if let Some(model) = &config.model {
-                if !model.is_empty() {
-                    args.push("-m".to_string());
-                    args.push(model.clone());
-                }
-            }
-
-            // Execution mode
-            match config.execution_mode {
-                ExecutionMode::Continue | ExecutionMode::Resume => {
-                    if let Some(session_id) = &config.session_id {
-                        args.push("--resume".to_string());
-                        args.push(session_id.clone());
-                    } else if matches!(config.execution_mode, ExecutionMode::Continue) {
-                        args.push("--continue".to_string());
-                    } else {
-                        args.push("--resume".to_string());
-                    }
-                }
-                ExecutionMode::Normal => {}
-            }
-
-            // Skip permissions
-            if config.skip_permissions {
-                args.push("-y".to_string());
-            }
-        }
-        CodingAgent::OpenCode => {
-            // Model selection
-            if let Some(model) = &config.model {
-                if !model.is_empty() {
-                    args.push("--model".to_string());
-                    args.push(model.clone());
-                }
-            }
-
-            // Execution mode
-            match config.execution_mode {
-                ExecutionMode::Continue | ExecutionMode::Resume => {
-                    if let Some(session_id) = &config.session_id {
-                        args.push("--resume".to_string());
-                        args.push(session_id.clone());
-                    } else if matches!(config.execution_mode, ExecutionMode::Continue) {
-                        args.push("--continue".to_string());
-                    } else {
-                        args.push("--resume".to_string());
-                    }
-                }
-                ExecutionMode::Normal => {}
-            }
-        }
-    }
-
-    args
-}
-
 fn is_valid_env_name(name: &str) -> bool {
     let mut chars = name.chars();
     match chars.next() {
@@ -3330,14 +3321,27 @@ fn shell_escape(value: &str) -> String {
     format!("'{}'", escaped)
 }
 
+fn build_shell_command(command: &str, args: &[String]) -> String {
+    let mut cmd_parts = vec![shell_escape(command)];
+    cmd_parts.extend(args.iter().map(|arg| shell_escape(arg)));
+    cmd_parts.join(" ")
+}
+
 /// Build the full tmux command string with environment variables
 fn build_tmux_command(
     env_vars: &[(String, String)],
-    base_cmd: &str,
-    base_args: &[String],
-    agent_args: &[String],
+    env_remove: &[String],
+    command: &str,
 ) -> String {
     let mut parts = Vec::new();
+
+    // Remove environment variables
+    for key in env_remove {
+        if !is_valid_env_name(key) {
+            continue;
+        }
+        parts.push(format!("unset {}", key));
+    }
 
     // Add environment variable exports
     for (key, value) in env_vars {
@@ -3348,16 +3352,10 @@ fn build_tmux_command(
         parts.push(format!("export {}={}", key, escaped_value));
     }
 
-    // Build the command with all arguments
-    let mut cmd_parts = vec![shell_escape(base_cmd)];
-    cmd_parts.extend(base_args.iter().map(|arg| shell_escape(arg)));
-    cmd_parts.extend(agent_args.iter().map(|arg| shell_escape(arg)));
-    let full_cmd = cmd_parts.join(" ");
-
     if parts.is_empty() {
-        full_cmd
+        command.to_string()
     } else {
-        parts.push(full_cmd);
+        parts.push(command.to_string());
         parts.join("; ")
     }
 }
@@ -3369,6 +3367,7 @@ mod tests {
     use crate::tui::screens::wizard::WizardStep;
     use crate::tui::screens::{BranchItem, BranchListState};
     use gwt_core::git::Branch;
+    use std::sync::mpsc;
 
     fn sample_tool_entry(tool_id: &str) -> ToolSessionEntry {
         ToolSessionEntry {
@@ -3399,6 +3398,20 @@ mod tests {
         assert_eq!(resolved, "bash");
         let resolved = resolve_orphaned_agent_name("  ", None);
         assert_eq!(resolved, "unknown");
+    }
+
+    #[test]
+    fn test_apply_launch_updates_sets_status() {
+        let mut model = Model::new_with_context(None);
+        let (tx, rx) = mpsc::channel();
+        model.launch_rx = Some(rx);
+
+        tx.send(LaunchUpdate::Progress(LaunchProgress::BuildingCommand))
+            .unwrap();
+        model.apply_launch_updates();
+
+        let expected = LaunchProgress::BuildingCommand.message();
+        assert_eq!(model.launch_status.as_deref(), Some(expected.as_str()));
     }
 
     #[test]
