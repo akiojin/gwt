@@ -11,7 +11,7 @@ use thiserror::Error;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-const MAX_TOKENS: u32 = 400;
+const MAX_OUTPUT_TOKENS: u32 = 400;
 const TEMPERATURE: f32 = 0.3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,26 +43,48 @@ pub enum AIError {
 }
 
 #[derive(Debug, Serialize)]
-struct ChatRequest<'a> {
+struct ResponsesRequest<'a> {
     model: &'a str,
-    messages: Vec<ChatMessage>,
-    max_tokens: u32,
+    input: Vec<ResponseInputItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instructions: Option<String>,
+    max_output_tokens: u32,
     temperature: f32,
 }
 
 #[derive(Debug, Deserialize)]
-struct ChatResponse {
-    choices: Vec<ChatChoice>,
+struct ResponsesResponse {
+    output: Vec<ResponseOutputItem>,
 }
 
 #[derive(Debug, Deserialize)]
-struct ChatChoice {
-    message: ChatMessageContent,
+struct ResponseOutputItem {
+    #[serde(rename = "type")]
+    item_type: String,
+    role: Option<String>,
+    content: Option<Vec<ResponseOutputContent>>,
 }
 
 #[derive(Debug, Deserialize)]
-struct ChatMessageContent {
-    content: String,
+struct ResponseOutputContent {
+    #[serde(rename = "type")]
+    content_type: String,
+    text: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ResponseInputItem {
+    #[serde(rename = "type")]
+    item_type: String,
+    role: String,
+    content: Vec<ResponseInputContent>,
+}
+
+#[derive(Debug, Serialize)]
+struct ResponseInputContent {
+    #[serde(rename = "type")]
+    content_type: String,
+    text: String,
 }
 
 /// OpenAI-compatible API client (blocking)
@@ -98,12 +120,17 @@ impl AIClient {
         })
     }
 
-    pub fn create_chat_completion(&self, messages: Vec<ChatMessage>) -> Result<String, AIError> {
-        let url = build_chat_url(&self.endpoint)?;
-        let request_body = ChatRequest {
+    pub fn create_response(&self, messages: Vec<ChatMessage>) -> Result<String, AIError> {
+        let url = build_responses_url(&self.endpoint)?;
+        let (instructions, input) = build_responses_input(messages);
+        if input.is_empty() {
+            return Err(AIError::ConfigError("No input messages".to_string()));
+        }
+        let request_body = ResponsesRequest {
             model: &self.model,
-            messages,
-            max_tokens: MAX_TOKENS,
+            input,
+            instructions,
+            max_output_tokens: MAX_OUTPUT_TOKENS,
             temperature: TEMPERATURE,
         };
 
@@ -187,15 +214,15 @@ impl AIClient {
     }
 }
 
-fn build_chat_url(endpoint: &str) -> Result<Url, AIError> {
+fn build_responses_url(endpoint: &str) -> Result<Url, AIError> {
     let mut url = Url::parse(endpoint)
         .map_err(|e| AIError::ConfigError(format!("Invalid endpoint: {}", e)))?;
     let mut path = url.path().trim_end_matches('/').to_string();
-    if !path.ends_with("/chat/completions") {
+    if !path.ends_with("/responses") {
         if path.is_empty() {
-            path = "/chat/completions".to_string();
+            path = "/responses".to_string();
         } else {
-            path = format!("{}/chat/completions", path);
+            path = format!("{}/responses", path);
         }
         url.set_path(&path);
     }
@@ -208,15 +235,60 @@ fn is_azure_endpoint(url: &Url) -> bool {
         .unwrap_or(false)
 }
 
+fn build_responses_input(messages: Vec<ChatMessage>) -> (Option<String>, Vec<ResponseInputItem>) {
+    let mut instructions_parts = Vec::new();
+    let mut items = Vec::new();
+    for message in messages {
+        if message.role == "system" {
+            if !message.content.trim().is_empty() {
+                instructions_parts.push(message.content);
+            }
+            continue;
+        }
+        items.push(ResponseInputItem {
+            item_type: "message".to_string(),
+            role: message.role,
+            content: vec![ResponseInputContent {
+                content_type: "input_text".to_string(),
+                text: message.content,
+            }],
+        });
+    }
+    let instructions = if instructions_parts.is_empty() {
+        None
+    } else {
+        Some(instructions_parts.join("\n"))
+    };
+    (instructions, items)
+}
+
 fn parse_response(body: &str) -> Result<String, AIError> {
-    let parsed: ChatResponse = serde_json::from_str(body)
+    let parsed: ResponsesResponse = serde_json::from_str(body)
         .map_err(|e| AIError::ParseError(format!("Invalid response: {}", e)))?;
-    let choice = parsed
-        .choices
-        .into_iter()
-        .next()
-        .ok_or_else(|| AIError::ParseError("No choices in response".to_string()))?;
-    Ok(choice.message.content)
+    let mut texts = Vec::new();
+    for item in parsed.output {
+        if item.item_type != "message" {
+            continue;
+        }
+        if item.role.as_deref() != Some("assistant") {
+            continue;
+        }
+        if let Some(contents) = item.content {
+            for content in contents {
+                if content.content_type == "output_text" {
+                    if let Some(text) = content.text {
+                        texts.push(text);
+                    }
+                }
+            }
+        }
+    }
+    if texts.is_empty() {
+        return Err(AIError::ParseError(
+            "No assistant output_text in response".to_string(),
+        ));
+    }
+    Ok(texts.join(""))
 }
 
 fn extract_error_message(body: &str) -> Option<String> {

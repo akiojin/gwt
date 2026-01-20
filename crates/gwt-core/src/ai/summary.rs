@@ -175,7 +175,7 @@ pub fn summarize_session(
     parsed: &ParsedSession,
 ) -> Result<SessionSummary, AIError> {
     let messages = build_session_prompt(parsed);
-    let content = client.create_chat_completion(messages)?;
+    let content = client.create_response(messages)?;
     let fields = parse_session_summary_fields(&content).unwrap_or_default();
     let markdown = normalize_session_summary_markdown(&content, &fields)?;
 
