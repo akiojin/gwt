@@ -2,6 +2,20 @@
 //!
 //! This module provides functionality to register gwt hooks in Claude Code's settings.json
 //! for agent status tracking.
+//!
+//! New hooks format (2026+):
+//! ```json
+//! {
+//!   "hooks": {
+//!     "PostToolUse": [
+//!       {
+//!         "matcher": "",
+//!         "hooks": [{"type": "command", "command": "gwt hook PostToolUse"}]
+//!       }
+//!     ]
+//!   }
+//! }
+//! ```
 
 use crate::error::GwtError;
 use serde::{Deserialize, Serialize};
@@ -20,13 +34,18 @@ pub struct ClaudeSettings {
 }
 
 /// Hook event types supported by Claude Code
-pub const HOOK_EVENTS: &[&str] = &[
-    "UserPromptSubmit",
-    "PreToolUse",
-    "PostToolUse",
-    "Notification",
-    "Stop",
-];
+/// Events that require matcher (tool-based): PreToolUse, PostToolUse
+/// Events without matcher: UserPromptSubmit, Notification, Stop
+pub const HOOK_EVENTS_WITH_MATCHER: &[&str] = &["PreToolUse", "PostToolUse"];
+pub const HOOK_EVENTS_WITHOUT_MATCHER: &[&str] = &["UserPromptSubmit", "Notification", "Stop"];
+
+/// Get all hook event types
+pub fn all_hook_events() -> impl Iterator<Item = &'static str> {
+    HOOK_EVENTS_WITH_MATCHER
+        .iter()
+        .chain(HOOK_EVENTS_WITHOUT_MATCHER.iter())
+        .copied()
+}
 
 /// Get the path to Claude Code settings.json
 pub fn get_claude_settings_path() -> Option<PathBuf> {
@@ -49,13 +68,63 @@ pub fn is_gwt_hooks_registered(settings_path: &Path) -> bool {
         Err(_) => return false,
     };
 
-    // Check if at least one gwt hook is registered
+    // Check if at least one gwt hook is registered (new format)
     settings.hooks.values().any(|v| {
-        if let Some(cmd) = v.as_str() {
+        // New format: array of {matcher, hooks}
+        if let Some(arr) = v.as_array() {
+            arr.iter().any(|entry| {
+                if let Some(hooks) = entry.get("hooks").and_then(|h| h.as_array()) {
+                    hooks.iter().any(|hook| {
+                        hook.get("command")
+                            .and_then(|c| c.as_str())
+                            .map(|s| s.contains("gwt hook"))
+                            .unwrap_or(false)
+                    })
+                } else {
+                    // Legacy: array of strings
+                    entry
+                        .as_str()
+                        .map(|s| s.contains("gwt hook"))
+                        .unwrap_or(false)
+                }
+            })
+        } else if let Some(cmd) = v.as_str() {
+            // Legacy: single string
             cmd.contains("gwt hook")
-        } else if let Some(arr) = v.as_array() {
-            arr.iter().any(|item| {
-                item.as_str()
+        } else {
+            false
+        }
+    })
+}
+
+/// Create a gwt hook entry with matcher (for PreToolUse, PostToolUse)
+fn create_gwt_hook_entry_with_matcher(event: &str) -> serde_json::Value {
+    serde_json::json!({
+        "matcher": "*",
+        "hooks": [{
+            "type": "command",
+            "command": format!("gwt hook {}", event)
+        }]
+    })
+}
+
+/// Create a gwt hook entry without matcher (for UserPromptSubmit, Notification, Stop)
+fn create_gwt_hook_entry_without_matcher(event: &str) -> serde_json::Value {
+    serde_json::json!({
+        "hooks": [{
+            "type": "command",
+            "command": format!("gwt hook {}", event)
+        }]
+    })
+}
+
+/// Check if an array contains a gwt hook (new format)
+fn has_gwt_hook_in_array(arr: &[serde_json::Value]) -> bool {
+    arr.iter().any(|entry| {
+        if let Some(hooks) = entry.get("hooks").and_then(|h| h.as_array()) {
+            hooks.iter().any(|hook| {
+                hook.get("command")
+                    .and_then(|c| c.as_str())
                     .map(|s| s.contains("gwt hook"))
                     .unwrap_or(false)
             })
@@ -70,7 +139,7 @@ pub fn is_gwt_hooks_registered(settings_path: &Path) -> bool {
 /// This function:
 /// 1. Creates ~/.claude directory if it doesn't exist
 /// 2. Creates or updates settings.json
-/// 3. Adds gwt hook commands for all hook events
+/// 3. Adds gwt hook commands for all hook events (new format)
 /// 4. Preserves existing hook configurations
 pub fn register_gwt_hooks(settings_path: &Path) -> Result<(), GwtError> {
     // Create parent directory if needed
@@ -86,32 +155,36 @@ pub fn register_gwt_hooks(settings_path: &Path) -> Result<(), GwtError> {
         ClaudeSettings::default()
     };
 
-    // Register hooks for each event
-    for event in HOOK_EVENTS {
-        let hook_command = format!("gwt hook {}", event);
-
-        // Check if this event already has hooks
-        if let Some(existing) = settings.hooks.get_mut(*event) {
-            // If existing is a string, convert to array and add gwt hook
-            if let Some(cmd) = existing.as_str() {
-                if !cmd.contains("gwt hook") {
-                    *existing = serde_json::json!([cmd, hook_command]);
+    // Helper to register a single event
+    let register_event =
+        |settings: &mut ClaudeSettings, event: &str, gwt_entry: serde_json::Value| {
+            if let Some(existing) = settings.hooks.get_mut(event) {
+                if let Some(arr) = existing.as_array_mut() {
+                    if !has_gwt_hook_in_array(arr) {
+                        arr.push(gwt_entry);
+                    }
+                } else {
+                    settings
+                        .hooks
+                        .insert(event.to_string(), serde_json::json!([gwt_entry]));
                 }
-            } else if let Some(arr) = existing.as_array_mut() {
-                // If array, check if gwt hook already exists
-                let has_gwt = arr
-                    .iter()
-                    .any(|v| v.as_str().map(|s| s.contains("gwt hook")).unwrap_or(false));
-                if !has_gwt {
-                    arr.push(serde_json::json!(hook_command));
-                }
+            } else {
+                settings
+                    .hooks
+                    .insert(event.to_string(), serde_json::json!([gwt_entry]));
             }
-        } else {
-            // No existing hook for this event, add new
-            settings
-                .hooks
-                .insert(event.to_string(), serde_json::json!(hook_command));
-        }
+        };
+
+    // Register hooks with matcher (PreToolUse, PostToolUse)
+    for event in HOOK_EVENTS_WITH_MATCHER {
+        let gwt_entry = create_gwt_hook_entry_with_matcher(event);
+        register_event(&mut settings, event, gwt_entry);
+    }
+
+    // Register hooks without matcher (UserPromptSubmit, Notification, Stop)
+    for event in HOOK_EVENTS_WITHOUT_MATCHER {
+        let gwt_entry = create_gwt_hook_entry_without_matcher(event);
+        register_event(&mut settings, event, gwt_entry);
     }
 
     // Write settings back
@@ -122,6 +195,20 @@ pub fn register_gwt_hooks(settings_path: &Path) -> Result<(), GwtError> {
     std::fs::write(settings_path, content)?;
 
     Ok(())
+}
+
+/// Check if an entry is a gwt hook (new format)
+fn is_gwt_hook_entry(entry: &serde_json::Value) -> bool {
+    if let Some(hooks) = entry.get("hooks").and_then(|h| h.as_array()) {
+        hooks.iter().any(|hook| {
+            hook.get("command")
+                .and_then(|c| c.as_str())
+                .map(|s| s.contains("gwt hook"))
+                .unwrap_or(false)
+        })
+    } else {
+        false
+    }
 }
 
 /// Unregister gwt hooks from Claude Code settings.json
@@ -137,31 +224,27 @@ pub fn unregister_gwt_hooks(settings_path: &Path) -> Result<(), GwtError> {
         })?;
 
     // Remove gwt hooks from each event
-    for event in HOOK_EVENTS {
-        if let Some(existing) = settings.hooks.get_mut(*event) {
-            if let Some(cmd) = existing.as_str() {
-                if cmd.contains("gwt hook") {
-                    settings.hooks.remove(*event);
-                    continue;
-                }
-            } else if let Some(arr) = existing.as_array() {
+    for event in all_hook_events() {
+        if let Some(existing) = settings.hooks.get_mut(event) {
+            if let Some(arr) = existing.as_array() {
+                // New format: filter out gwt hook entries
                 let filtered: Vec<_> = arr
                     .iter()
-                    .filter(|v| !v.as_str().map(|s| s.contains("gwt hook")).unwrap_or(false))
+                    .filter(|entry| !is_gwt_hook_entry(entry))
                     .cloned()
                     .collect();
 
                 if filtered.is_empty() {
-                    settings.hooks.remove(*event);
-                } else if filtered.len() == 1 {
-                    // Convert single-item array back to string
-                    settings
-                        .hooks
-                        .insert(event.to_string(), filtered[0].clone());
+                    settings.hooks.remove(event);
                 } else {
                     settings
                         .hooks
                         .insert(event.to_string(), serde_json::json!(filtered));
+                }
+            } else if let Some(cmd) = existing.as_str() {
+                // Legacy format: single string
+                if cmd.contains("gwt hook") {
+                    settings.hooks.remove(event);
                 }
             }
         }
@@ -237,11 +320,26 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_existing_gwt_hooks() {
+    fn test_detect_existing_gwt_hooks_new_format() {
         let temp_dir = TempDir::new().unwrap();
         let settings_path = temp_dir.path().join(".claude").join("settings.json");
         std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
 
+        let content = r#"{"hooks": {"UserPromptSubmit": [{"matcher": "", "hooks": [{"type": "command", "command": "gwt hook UserPromptSubmit"}]}]}}"#;
+        std::fs::write(&settings_path, content).unwrap();
+
+        let result = is_gwt_hooks_registered(&settings_path);
+
+        assert!(result);
+    }
+
+    #[test]
+    fn test_detect_existing_gwt_hooks_legacy_format() {
+        let temp_dir = TempDir::new().unwrap();
+        let settings_path = temp_dir.path().join(".claude").join("settings.json");
+        std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+
+        // Legacy format (string) should still be detected
         let content = r#"{"hooks": {"UserPromptSubmit": "gwt hook UserPromptSubmit"}}"#;
         std::fs::write(&settings_path, content).unwrap();
 
@@ -256,8 +354,8 @@ mod tests {
         let settings_path = temp_dir.path().join(".claude").join("settings.json");
         std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
 
-        // Existing hook for UserPromptSubmit
-        let existing_content = r#"{"hooks": {"UserPromptSubmit": "echo 'user prompt received'"}}"#;
+        // Existing hook for UserPromptSubmit in new format
+        let existing_content = r#"{"hooks": {"UserPromptSubmit": [{"matcher": "", "hooks": [{"type": "command", "command": "echo 'user prompt received'"}]}]}}"#;
         std::fs::write(&settings_path, existing_content).unwrap();
 
         let result = register_gwt_hooks(&settings_path);
@@ -296,12 +394,78 @@ mod tests {
         let content = std::fs::read_to_string(&settings_path).unwrap();
         let settings: ClaudeSettings = serde_json::from_str(&content).unwrap();
 
-        // Check UserPromptSubmit is not duplicated
+        // Check UserPromptSubmit is not duplicated (new format: array with one entry)
         let user_prompt_hook = settings.hooks.get("UserPromptSubmit").unwrap();
-        if let Some(cmd) = user_prompt_hook.as_str() {
-            assert_eq!(cmd, "gwt hook UserPromptSubmit");
-        } else {
-            panic!("Expected string hook, got array");
-        }
+        let arr = user_prompt_hook.as_array().expect("Expected array format");
+        // Should have exactly one entry (not duplicated)
+        assert_eq!(arr.len(), 1);
+        // Verify it's the gwt hook
+        assert!(has_gwt_hook_in_array(arr));
+    }
+
+    #[test]
+    fn test_new_format_structure_with_matcher() {
+        let temp_dir = TempDir::new().unwrap();
+        let settings_path = temp_dir.path().join(".claude").join("settings.json");
+
+        register_gwt_hooks(&settings_path).unwrap();
+
+        let content = std::fs::read_to_string(&settings_path).unwrap();
+        let settings: ClaudeSettings = serde_json::from_str(&content).unwrap();
+
+        // PreToolUse should have matcher
+        let pre_tool_hook = settings.hooks.get("PreToolUse").unwrap();
+        let arr = pre_tool_hook.as_array().expect("Should be array");
+        let entry = &arr[0];
+
+        // Check matcher exists and is "*"
+        let matcher = entry
+            .get("matcher")
+            .expect("PreToolUse should have matcher");
+        assert_eq!(matcher.as_str().unwrap(), "*");
+
+        // Check hooks array exists with command entry
+        let hooks = entry.get("hooks").unwrap().as_array().unwrap();
+        let hook = &hooks[0];
+        assert_eq!(hook.get("type").unwrap().as_str().unwrap(), "command");
+        assert!(hook
+            .get("command")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .contains("gwt hook PreToolUse"));
+    }
+
+    #[test]
+    fn test_new_format_structure_without_matcher() {
+        let temp_dir = TempDir::new().unwrap();
+        let settings_path = temp_dir.path().join(".claude").join("settings.json");
+
+        register_gwt_hooks(&settings_path).unwrap();
+
+        let content = std::fs::read_to_string(&settings_path).unwrap();
+        let settings: ClaudeSettings = serde_json::from_str(&content).unwrap();
+
+        // UserPromptSubmit should NOT have matcher
+        let user_prompt_hook = settings.hooks.get("UserPromptSubmit").unwrap();
+        let arr = user_prompt_hook.as_array().expect("Should be array");
+        let entry = &arr[0];
+
+        // Check matcher does NOT exist
+        assert!(
+            entry.get("matcher").is_none(),
+            "UserPromptSubmit should not have matcher"
+        );
+
+        // Check hooks array exists with command entry
+        let hooks = entry.get("hooks").unwrap().as_array().unwrap();
+        let hook = &hooks[0];
+        assert_eq!(hook.get("type").unwrap().as_str().unwrap(), "command");
+        assert!(hook
+            .get("command")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .contains("gwt hook UserPromptSubmit"));
     }
 }
