@@ -135,6 +135,22 @@ impl SplitDirection {
     }
 }
 
+/// Idle timeout in seconds before inferring stopped status (SPEC-861d8cdf T-106)
+pub const IDLE_TIMEOUT_SECS: u64 = 60;
+
+/// Prompt patterns that indicate waiting for input (SPEC-861d8cdf T-106)
+pub const PROMPT_PATTERNS: &[&str] = &[
+    "> ",
+    "→ ",
+    "Input:",
+    "? ",
+    ">> ",
+    ">>> ",
+    "(y/n)",
+    "(Y/n)",
+    "[y/N]",
+];
+
 /// Represents an agent running in a tmux pane
 #[derive(Debug, Clone)]
 pub struct AgentPane {
@@ -149,6 +165,10 @@ pub struct AgentPane {
     pub background_window: Option<String>,
     /// Agent status for state visualization (SPEC-861d8cdf T-103)
     pub status: AgentStatus,
+    /// Last time output was received from this pane (SPEC-861d8cdf T-106)
+    pub last_output_at: Option<SystemTime>,
+    /// Whether the status was estimated (not from Hook API) (SPEC-861d8cdf T-106)
+    pub is_status_estimated: bool,
 }
 
 impl AgentPane {
@@ -169,6 +189,8 @@ impl AgentPane {
             is_background: false,
             background_window: None,
             status: AgentStatus::Unknown,
+            last_output_at: None,
+            is_status_estimated: false,
         }
     }
 
@@ -922,6 +944,111 @@ fn resolve_agent_name(current_command: &str) -> String {
     })
 }
 
+/// Infer agent status based on process state and idle time (SPEC-861d8cdf T-106)
+///
+/// This function is used for agents that don't report their status via Hook API.
+/// It checks:
+/// 1. Process is running (using kill -0)
+/// 2. Time since last output (stopped if > 60 seconds)
+///
+/// # Arguments
+/// * `agent` - The agent pane to check
+/// * `pane_output` - Optional pane output for prompt pattern detection
+///
+/// # Returns
+/// The inferred `AgentStatus`
+pub fn infer_agent_status(agent: &AgentPane, pane_output: Option<&str>) -> AgentStatus {
+    // Check if process is running
+    if !is_process_running(agent.pid) {
+        return AgentStatus::Stopped;
+    }
+
+    // Check for idle timeout
+    if let Some(last_output) = agent.last_output_at {
+        if let Ok(elapsed) = last_output.elapsed() {
+            if elapsed > Duration::from_secs(IDLE_TIMEOUT_SECS) {
+                return AgentStatus::Stopped;
+            }
+        }
+    }
+
+    // Check pane output for prompt patterns
+    if let Some(output) = pane_output {
+        let inferred = infer_agent_status_from_output(output);
+        if inferred != AgentStatus::Unknown {
+            return inferred;
+        }
+    }
+
+    // Default to Running if process is alive and not idle
+    AgentStatus::Running
+}
+
+/// Infer agent status from pane output by detecting prompt patterns (SPEC-861d8cdf T-106)
+///
+/// Detects patterns like:
+/// - `> ` (shell prompt)
+/// - `→ ` (arrow prompt)
+/// - `Input:` (input request)
+/// - `? ` (question prompt)
+/// - `(y/n)`, `[y/N]` (confirmation prompts)
+///
+/// # Arguments
+/// * `output` - The pane output text to analyze
+///
+/// # Returns
+/// `AgentStatus::WaitingInput` if a prompt pattern is detected, `AgentStatus::Unknown` otherwise
+pub fn infer_agent_status_from_output(output: &str) -> AgentStatus {
+    // Get the last line(s) of output for prompt detection
+    let trimmed = output.trim_end();
+    if trimmed.is_empty() {
+        return AgentStatus::Unknown;
+    }
+
+    // Check if output ends with any prompt pattern
+    for pattern in PROMPT_PATTERNS {
+        if trimmed.ends_with(pattern) {
+            return AgentStatus::WaitingInput;
+        }
+    }
+
+    // Check last line for prompt patterns (sometimes there's trailing whitespace)
+    if let Some(last_line) = trimmed.lines().last() {
+        let last_line_trimmed = last_line.trim();
+        for pattern in PROMPT_PATTERNS {
+            let pattern_trimmed = pattern.trim();
+            if last_line_trimmed.ends_with(pattern_trimmed) {
+                return AgentStatus::WaitingInput;
+            }
+        }
+    }
+
+    AgentStatus::Unknown
+}
+
+/// Get agent status with confidence indicator (SPEC-861d8cdf T-106)
+///
+/// Returns the agent's status and whether it was estimated (inferred) rather than
+/// confirmed via Hook API.
+///
+/// # Arguments
+/// * `agent` - The agent pane to check
+///
+/// # Returns
+/// A tuple of (AgentStatus, is_estimated)
+/// - is_estimated = false: status was set via Hook API (reliable)
+/// - is_estimated = true: status was inferred (less reliable)
+pub fn get_agent_status_with_confidence(agent: &AgentPane) -> (AgentStatus, bool) {
+    // If status was explicitly set and is not Unknown, it's from Hook API
+    if agent.status != AgentStatus::Unknown && !agent.is_status_estimated {
+        return (agent.status, false);
+    }
+
+    // Otherwise, we need to infer status
+    let inferred = infer_agent_status(agent, None);
+    (inferred, true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1252,6 +1379,8 @@ mod tests {
                 is_background: false, // active
                 background_window: None,
                 status: AgentStatus::Unknown,
+                last_output_at: None,
+                is_status_estimated: false,
             },
             AgentPane {
                 pane_id: "2".to_string(),
@@ -1262,6 +1391,8 @@ mod tests {
                 is_background: true, // background
                 background_window: Some("session:@1".to_string()),
                 status: AgentStatus::Unknown,
+                last_output_at: None,
+                is_status_estimated: false,
             },
         ];
 
@@ -1282,6 +1413,8 @@ mod tests {
                 is_background: true,
                 background_window: Some("session:@1".to_string()),
                 status: AgentStatus::Unknown,
+                last_output_at: None,
+                is_status_estimated: false,
             },
             AgentPane {
                 pane_id: "2".to_string(),
@@ -1292,6 +1425,8 @@ mod tests {
                 is_background: true,
                 background_window: Some("session:@2".to_string()),
                 status: AgentStatus::Unknown,
+                last_output_at: None,
+                is_status_estimated: false,
             },
         ];
 
@@ -1312,6 +1447,8 @@ mod tests {
                 is_background: false, // active
                 background_window: None,
                 status: AgentStatus::Unknown,
+                last_output_at: None,
+                is_status_estimated: false,
             },
             AgentPane {
                 pane_id: "2".to_string(),
@@ -1322,6 +1459,8 @@ mod tests {
                 is_background: false, // also active - constraint violation!
                 background_window: None,
                 status: AgentStatus::Unknown,
+                last_output_at: None,
+                is_status_estimated: false,
             },
         ];
 
@@ -1345,6 +1484,8 @@ mod tests {
             is_background: false,
             background_window: None,
             status: AgentStatus::Running,
+            last_output_at: None,
+            is_status_estimated: false,
         };
 
         assert_eq!(pane.status_color(), StatusColor::Green);
@@ -1367,6 +1508,8 @@ mod tests {
             is_background: false,
             background_window: None,
             status: AgentStatus::WaitingInput,
+            last_output_at: None,
+            is_status_estimated: false,
         };
 
         assert_eq!(pane.status_color(), StatusColor::Yellow);
@@ -1385,6 +1528,8 @@ mod tests {
             is_background: false,
             background_window: None,
             status: AgentStatus::Stopped,
+            last_output_at: None,
+            is_status_estimated: false,
         };
 
         assert_eq!(pane.status_color(), StatusColor::Red);
@@ -1403,6 +1548,8 @@ mod tests {
             is_background: true,
             background_window: Some("session:@1".to_string()),
             status: AgentStatus::Running,
+            last_output_at: None,
+            is_status_estimated: false,
         };
 
         assert_eq!(pane.status_color(), StatusColor::DarkGray);
@@ -1425,6 +1572,8 @@ mod tests {
             is_background: false, // active
             background_window: None,
             status: AgentStatus::Stopped,
+            last_output_at: None,
+            is_status_estimated: false,
         };
 
         assert_eq!(pane.status_color(), StatusColor::Red);
@@ -1442,6 +1591,8 @@ mod tests {
             is_background: false,
             background_window: None,
             status: AgentStatus::WaitingInput,
+            last_output_at: None,
+            is_status_estimated: false,
         };
 
         // 500ms blink = 2 spinner frames (250ms each)
@@ -1467,6 +1618,8 @@ mod tests {
             is_background: false,
             background_window: None,
             status: AgentStatus::Running,
+            last_output_at: None,
+            is_status_estimated: false,
         };
 
         // Running agents never blink, always show icon
@@ -1504,6 +1657,8 @@ mod tests {
                 is_background: false,
                 background_window: None,
                 status: AgentStatus::Running,
+                last_output_at: None,
+                is_status_estimated: false,
             },
             AgentPane {
                 pane_id: "2".to_string(),
@@ -1514,6 +1669,8 @@ mod tests {
                 is_background: false,
                 background_window: None,
                 status: AgentStatus::Running,
+                last_output_at: None,
+                is_status_estimated: false,
             },
             AgentPane {
                 pane_id: "3".to_string(),
@@ -1524,6 +1681,8 @@ mod tests {
                 is_background: false,
                 background_window: None,
                 status: AgentStatus::WaitingInput,
+                last_output_at: None,
+                is_status_estimated: false,
             },
             AgentPane {
                 pane_id: "4".to_string(),
@@ -1534,6 +1693,8 @@ mod tests {
                 is_background: false,
                 background_window: None,
                 status: AgentStatus::Stopped,
+                last_output_at: None,
+                is_status_estimated: false,
             },
         ];
 
@@ -1621,6 +1782,8 @@ mod tests {
                 is_background: false,
                 background_window: None,
                 status: AgentStatus::Unknown,
+                last_output_at: None,
+                is_status_estimated: false,
             },
         ];
 
@@ -1630,5 +1793,167 @@ mod tests {
         assert_eq!(summary.waiting_count, 0);
         assert_eq!(summary.stopped_count, 0);
         assert!(!summary.has_agents());
+    }
+
+    // SPEC-861d8cdf T-106: Agent status inference tests
+
+    #[test]
+    fn test_detect_stopped_by_process_exit() {
+        // T-106-01: Process not running should infer Stopped
+        let agent_pane = AgentPane::new(
+            "1".to_string(),
+            "feature/test".to_string(),
+            "codex".to_string(),
+            SystemTime::now(),
+            99999999, // Non-existent PID
+        );
+
+        let inferred = infer_agent_status(&agent_pane, None);
+        assert_eq!(inferred, AgentStatus::Stopped);
+    }
+
+    #[test]
+    fn test_detect_stopped_by_idle() {
+        // T-106-02: No output for 60+ seconds should infer Stopped
+        let mut agent_pane = AgentPane::new(
+            "1".to_string(),
+            "feature/test".to_string(),
+            "codex".to_string(),
+            SystemTime::now(),
+            std::process::id(), // Use current process (known to be running)
+        );
+
+        // Set last_output_at to 61 seconds ago
+        agent_pane.last_output_at = Some(
+            SystemTime::now()
+                .checked_sub(Duration::from_secs(61))
+                .unwrap(),
+        );
+
+        let inferred = infer_agent_status(&agent_pane, None);
+        assert_eq!(inferred, AgentStatus::Stopped);
+    }
+
+    #[test]
+    fn test_detect_running_when_process_alive() {
+        // If process is running and no idle timeout, should infer Running
+        let agent_pane = AgentPane::new(
+            "1".to_string(),
+            "feature/test".to_string(),
+            "codex".to_string(),
+            SystemTime::now(),
+            std::process::id(), // Use current process (known to be running)
+        );
+
+        let inferred = infer_agent_status(&agent_pane, None);
+        assert_eq!(inferred, AgentStatus::Running);
+    }
+
+    #[test]
+    fn test_detect_waiting_by_prompt_pattern() {
+        // T-106-03: Prompt pattern in output should infer WaitingInput
+        let pane_output = "Processing...\n> ";
+        let inferred = infer_agent_status_from_output(pane_output);
+        assert_eq!(inferred, AgentStatus::WaitingInput);
+    }
+
+    #[test]
+    fn test_detect_waiting_by_arrow_pattern() {
+        // T-106-03: Arrow prompt should infer WaitingInput
+        let pane_output = "Ready\n→ ";
+        let inferred = infer_agent_status_from_output(pane_output);
+        assert_eq!(inferred, AgentStatus::WaitingInput);
+    }
+
+    #[test]
+    fn test_detect_waiting_by_question_prompt() {
+        let pane_output = "Continue? ";
+        let inferred = infer_agent_status_from_output(pane_output);
+        assert_eq!(inferred, AgentStatus::WaitingInput);
+    }
+
+    #[test]
+    fn test_detect_waiting_by_input_prompt() {
+        let pane_output = "Enter your message:\nInput:";
+        let inferred = infer_agent_status_from_output(pane_output);
+        assert_eq!(inferred, AgentStatus::WaitingInput);
+    }
+
+    #[test]
+    fn test_no_prompt_returns_unknown() {
+        // No prompt pattern should return Unknown
+        let pane_output = "Processing...\nWorking on task";
+        let inferred = infer_agent_status_from_output(pane_output);
+        assert_eq!(inferred, AgentStatus::Unknown);
+    }
+
+    #[test]
+    fn test_empty_output_returns_unknown() {
+        let inferred = infer_agent_status_from_output("");
+        assert_eq!(inferred, AgentStatus::Unknown);
+    }
+
+    #[test]
+    fn test_inferred_status_marked_as_estimated() {
+        // T-106-04: Inferred status should be marked as estimated
+        let agent_pane = AgentPane::new(
+            "1".to_string(),
+            "feature/test".to_string(),
+            "codex".to_string(), // Non-Claude agent
+            SystemTime::now(),
+            std::process::id(),
+        );
+
+        let (status, is_estimated) = get_agent_status_with_confidence(&agent_pane);
+        // When status is Unknown, inference happens and result is estimated
+        assert!(is_estimated);
+        assert_eq!(status, AgentStatus::Running);
+    }
+
+    #[test]
+    fn test_hook_based_status_not_estimated() {
+        // T-106-04: Hook-based status should not be marked as estimated
+        let mut agent_pane = AgentPane::new(
+            "1".to_string(),
+            "feature/test".to_string(),
+            "claude".to_string(),
+            SystemTime::now(),
+            std::process::id(),
+        );
+        // Simulate status set via Hook API
+        agent_pane.status = AgentStatus::Running;
+        agent_pane.is_status_estimated = false;
+
+        let (status, is_estimated) = get_agent_status_with_confidence(&agent_pane);
+        assert!(!is_estimated);
+        assert_eq!(status, AgentStatus::Running);
+    }
+
+    #[test]
+    fn test_infer_with_output_uses_prompt_detection() {
+        // When output is provided, prompt detection should be used
+        let agent_pane = AgentPane::new(
+            "1".to_string(),
+            "feature/test".to_string(),
+            "codex".to_string(),
+            SystemTime::now(),
+            std::process::id(),
+        );
+
+        let inferred = infer_agent_status(&agent_pane, Some("Waiting for input\n> "));
+        assert_eq!(inferred, AgentStatus::WaitingInput);
+    }
+
+    #[test]
+    fn test_idle_timeout_constant() {
+        assert_eq!(IDLE_TIMEOUT_SECS, 60);
+    }
+
+    #[test]
+    fn test_prompt_patterns_exist() {
+        // Verify expected patterns exist
+        assert!(PROMPT_PATTERNS.contains(&"> "));
+        assert!(PROMPT_PATTERNS.contains(&"→ "));
+        assert!(PROMPT_PATTERNS.contains(&"Input:"));
     }
 }
