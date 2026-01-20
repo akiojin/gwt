@@ -193,6 +193,7 @@ struct BranchListUpdate {
     safety_targets: Vec<SafetyCheckTarget>,
     base_branches: Vec<String>,
     base_branch: String,
+    base_branch_exists: bool,
     total_count: usize,
     active_count: usize,
 }
@@ -589,6 +590,7 @@ impl Model {
                 safety_targets,
                 base_branches,
                 base_branch,
+                base_branch_exists,
                 total_count,
                 active_count,
             });
@@ -620,7 +622,12 @@ impl Model {
         });
     }
 
-    fn spawn_safety_checks(&mut self, targets: Vec<SafetyCheckTarget>, base_branch: String) {
+    fn spawn_safety_checks(
+        &mut self,
+        targets: Vec<SafetyCheckTarget>,
+        base_branch: String,
+        base_branch_exists: bool,
+    ) {
         if targets.is_empty() {
             self.safety_rx = None;
             return;
@@ -631,6 +638,9 @@ impl Model {
         self.safety_rx = Some(rx);
 
         thread::spawn(move || {
+            let mut pr_cache = PrCache::new();
+            pr_cache.populate(&repo_root);
+
             for target in targets {
                 let mut has_unpushed = false;
                 let mut is_unmerged = false;
@@ -658,13 +668,26 @@ impl Model {
                     continue;
                 }
 
+                if pr_cache.is_merged(&target.branch) {
+                    safe_to_cleanup = true;
+                    let _ = tx.send(SafetyUpdate {
+                        branch: target.branch,
+                        has_unpushed,
+                        is_unmerged,
+                        safe_to_cleanup,
+                    });
+                    continue;
+                }
+
                 // Check if branch is merged into base using merge-base --is-ancestor
                 // This correctly handles cases where base_branch has advanced beyond the merge point
-                if let Ok(is_merged) =
-                    Branch::is_merged_into(&repo_root, &target.branch, &base_branch)
-                {
-                    is_unmerged = !is_merged;
-                    safe_to_cleanup = is_merged;
+                if base_branch_exists {
+                    if let Ok(is_merged) =
+                        Branch::is_merged_into(&repo_root, &target.branch, &base_branch)
+                    {
+                        is_unmerged = !is_merged;
+                        safe_to_cleanup = is_merged;
+                    }
                 }
 
                 let _ = tx.send(SafetyUpdate {
@@ -1184,7 +1207,11 @@ impl Model {
 
                 let total_updates = update.safety_targets.len() + update.worktree_targets.len();
                 self.branch_list.reset_status_progress(total_updates);
-                self.spawn_safety_checks(update.safety_targets, update.base_branch);
+                self.spawn_safety_checks(
+                    update.safety_targets,
+                    update.base_branch,
+                    update.base_branch_exists,
+                );
                 self.spawn_worktree_status_checks(update.worktree_targets);
                 self.spawn_pr_title_fetch(update.branch_names);
 
