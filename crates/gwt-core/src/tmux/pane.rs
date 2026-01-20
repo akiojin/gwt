@@ -140,15 +140,7 @@ pub const IDLE_TIMEOUT_SECS: u64 = 60;
 
 /// Prompt patterns that indicate waiting for input (SPEC-861d8cdf T-106)
 pub const PROMPT_PATTERNS: &[&str] = &[
-    "> ",
-    "→ ",
-    "Input:",
-    "? ",
-    ">> ",
-    ">>> ",
-    "(y/n)",
-    "(Y/n)",
-    "[y/N]",
+    "> ", "→ ", "Input:", "? ", ">> ", ">>> ", "(y/n)", "(Y/n)", "[y/N]",
 ];
 
 /// Represents an agent running in a tmux pane
@@ -1772,20 +1764,18 @@ mod tests {
 
     #[test]
     fn test_status_bar_ignores_unknown() {
-        let agents = vec![
-            AgentPane {
-                pane_id: "1".to_string(),
-                branch_name: "feature/a".to_string(),
-                agent_name: "claude".to_string(),
-                start_time: SystemTime::now(),
-                pid: 12345,
-                is_background: false,
-                background_window: None,
-                status: AgentStatus::Unknown,
-                last_output_at: None,
-                is_status_estimated: false,
-            },
-        ];
+        let agents = vec![AgentPane {
+            pane_id: "1".to_string(),
+            branch_name: "feature/a".to_string(),
+            agent_name: "claude".to_string(),
+            start_time: SystemTime::now(),
+            pid: 12345,
+            is_background: false,
+            background_window: None,
+            status: AgentStatus::Unknown,
+            last_output_at: None,
+            is_status_estimated: false,
+        }];
 
         let summary = StatusBarSummary::from_agents(&agents);
 

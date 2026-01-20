@@ -99,11 +99,9 @@ pub fn register_gwt_hooks(settings_path: &Path) -> Result<(), GwtError> {
                 }
             } else if let Some(arr) = existing.as_array_mut() {
                 // If array, check if gwt hook already exists
-                let has_gwt = arr.iter().any(|v| {
-                    v.as_str()
-                        .map(|s| s.contains("gwt hook"))
-                        .unwrap_or(false)
-                });
+                let has_gwt = arr
+                    .iter()
+                    .any(|v| v.as_str().map(|s| s.contains("gwt hook")).unwrap_or(false));
                 if !has_gwt {
                     arr.push(serde_json::json!(hook_command));
                 }
@@ -117,9 +115,10 @@ pub fn register_gwt_hooks(settings_path: &Path) -> Result<(), GwtError> {
     }
 
     // Write settings back
-    let content = serde_json::to_string_pretty(&settings).map_err(|e| GwtError::ConfigWriteError {
-        reason: e.to_string(),
-    })?;
+    let content =
+        serde_json::to_string_pretty(&settings).map_err(|e| GwtError::ConfigWriteError {
+            reason: e.to_string(),
+        })?;
     std::fs::write(settings_path, content)?;
 
     Ok(())
@@ -148,11 +147,7 @@ pub fn unregister_gwt_hooks(settings_path: &Path) -> Result<(), GwtError> {
             } else if let Some(arr) = existing.as_array() {
                 let filtered: Vec<_> = arr
                     .iter()
-                    .filter(|v| {
-                        !v.as_str()
-                            .map(|s| s.contains("gwt hook"))
-                            .unwrap_or(false)
-                    })
+                    .filter(|v| !v.as_str().map(|s| s.contains("gwt hook")).unwrap_or(false))
                     .cloned()
                     .collect();
 
@@ -160,7 +155,9 @@ pub fn unregister_gwt_hooks(settings_path: &Path) -> Result<(), GwtError> {
                     settings.hooks.remove(*event);
                 } else if filtered.len() == 1 {
                     // Convert single-item array back to string
-                    settings.hooks.insert(event.to_string(), filtered[0].clone());
+                    settings
+                        .hooks
+                        .insert(event.to_string(), filtered[0].clone());
                 } else {
                     settings
                         .hooks
@@ -171,9 +168,10 @@ pub fn unregister_gwt_hooks(settings_path: &Path) -> Result<(), GwtError> {
     }
 
     // Write settings back
-    let content = serde_json::to_string_pretty(&settings).map_err(|e| GwtError::ConfigWriteError {
-        reason: e.to_string(),
-    })?;
+    let content =
+        serde_json::to_string_pretty(&settings).map_err(|e| GwtError::ConfigWriteError {
+            reason: e.to_string(),
+        })?;
     std::fs::write(settings_path, content)?;
 
     Ok(())
@@ -259,8 +257,7 @@ mod tests {
         std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
 
         // Existing hook for UserPromptSubmit
-        let existing_content =
-            r#"{"hooks": {"UserPromptSubmit": "echo 'user prompt received'"}}"#;
+        let existing_content = r#"{"hooks": {"UserPromptSubmit": "echo 'user prompt received'"}}"#;
         std::fs::write(&settings_path, existing_content).unwrap();
 
         let result = register_gwt_hooks(&settings_path);

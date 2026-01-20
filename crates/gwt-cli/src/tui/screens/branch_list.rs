@@ -1526,7 +1526,10 @@ fn render_branch_row(
 
         let width = 2 + agent_display.width() + 1 + uptime.width();
         let spans = vec![
-            Span::styled(format!("{} ", status_icon), Style::default().fg(status_color)),
+            Span::styled(
+                format!("{} ", status_icon),
+                Style::default().fg(status_color),
+            ),
             Span::styled(agent_display, Style::default().fg(text_color)),
             Span::raw(" "),
             Span::styled(uptime, Style::default().fg(uptime_color)),

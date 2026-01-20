@@ -454,7 +454,6 @@ fn cmd_repair(repo_root: &PathBuf, target: Option<&str>) -> Result<(), GwtError>
     Ok(())
 }
 
-
 /// Handle Claude Code hook subcommands (SPEC-861d8cdf FR-101/T-101/T-102)
 fn cmd_hook(action: HookAction) -> Result<(), GwtError> {
     use gwt_core::config::{
@@ -464,11 +463,10 @@ fn cmd_hook(action: HookAction) -> Result<(), GwtError> {
     match action {
         HookAction::Event { name } => handle_hook_event(&name),
         HookAction::Setup => {
-            let settings_path = get_claude_settings_path().ok_or_else(|| {
-                GwtError::ConfigNotFound {
+            let settings_path =
+                get_claude_settings_path().ok_or_else(|| GwtError::ConfigNotFound {
                     path: PathBuf::from("~/.claude/settings.json"),
-                }
-            })?;
+                })?;
 
             if is_gwt_hooks_registered(&settings_path) {
                 println!("gwt hooks are already registered in Claude Code settings.");
@@ -481,11 +479,10 @@ fn cmd_hook(action: HookAction) -> Result<(), GwtError> {
             Ok(())
         }
         HookAction::Uninstall => {
-            let settings_path = get_claude_settings_path().ok_or_else(|| {
-                GwtError::ConfigNotFound {
+            let settings_path =
+                get_claude_settings_path().ok_or_else(|| GwtError::ConfigNotFound {
                     path: PathBuf::from("~/.claude/settings.json"),
-                }
-            })?;
+                })?;
 
             if !is_gwt_hooks_registered(&settings_path) {
                 println!("gwt hooks are not registered in Claude Code settings.");
@@ -497,11 +494,10 @@ fn cmd_hook(action: HookAction) -> Result<(), GwtError> {
             Ok(())
         }
         HookAction::Status => {
-            let settings_path = get_claude_settings_path().ok_or_else(|| {
-                GwtError::ConfigNotFound {
+            let settings_path =
+                get_claude_settings_path().ok_or_else(|| GwtError::ConfigNotFound {
                     path: PathBuf::from("~/.claude/settings.json"),
-                }
-            })?;
+                })?;
 
             if is_gwt_hooks_registered(&settings_path) {
                 println!("gwt hooks: registered");
@@ -514,7 +510,6 @@ fn cmd_hook(action: HookAction) -> Result<(), GwtError> {
         }
     }
 }
-
 
 /// Process a hook event from Claude Code (SPEC-861d8cdf T-101)
 /// Called by Claude Code hooks via `gwt hook event <name>`
@@ -580,7 +575,6 @@ fn handle_hook_event(event: &str) -> Result<(), GwtError> {
     Ok(())
 }
 
-
 /// Map hook event name to AgentStatus (SPEC-861d8cdf T-101)
 ///
 /// Event mappings:
@@ -625,9 +619,7 @@ fn detect_branch_name(path: &Path) -> String {
         .output();
 
     match output {
-        Ok(out) if out.status.success() => {
-            String::from_utf8_lossy(&out.stdout).trim().to_string()
-        }
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_string(),
         _ => {
             // Fallback: extract from path
             path.file_name()
@@ -2297,10 +2289,7 @@ mod tests {
             AgentStatus::Running
         );
         // Test uppercase
-        assert_eq!(
-            hook_event_to_status("STOP", &payload),
-            AgentStatus::Stopped
-        );
+        assert_eq!(hook_event_to_status("STOP", &payload), AgentStatus::Stopped);
         // Test mixed case
         assert_eq!(
             hook_event_to_status("SessionStart", &payload),
