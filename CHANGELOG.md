@@ -6,6 +6,10 @@ All notable changes to this project will be documented in this file.
 ### Bug Fixes
 
 - PullRequest構造体テストに不足フィールド追加
+- ブランチ一覧とサマリーパネルの余白 (#700)
+- Improve URL opener fallbacks (#701)
+- Hooksコマンドに絶対パスを使用 (#702)
+- /dev/ttyへstdioを接続して即終了を回避 (#703)
 
 ### Miscellaneous Tasks
 

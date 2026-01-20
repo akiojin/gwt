@@ -4,6 +4,13 @@
 **入力**: `specs/SPEC-4b893dae/` からの設計ドキュメント
 **前提条件**: plan.md、spec.md、data-model.md、contracts/openai-api.md、research.md、quickstart.md
 
+## 追加作業: サマリーパネルの内側余白 (2026-01-20)
+
+- [x] **T8801** [P] [共通] `specs/SPEC-4b893dae/spec.md` / `specs/SPEC-4b893dae/plan.md` にパネル内左右余白の要件を追記
+- [x] **T8802** [Test] `crates/gwt-cli/src/tui/components.rs` のSummaryPanel描画テストを追加し、枠内余白を検証
+- [x] **T8803** [Impl] SummaryPanelとセッション要約パネルの枠内に左右余白を追加する
+- [ ] **T8804** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
+
 ## ストーリー依存関係
 
 ```text
