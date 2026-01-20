@@ -7,6 +7,7 @@ use gwt_core::config::AgentStatus;
 use gwt_core::git::{Branch, BranchMeta, BranchSummary, DivergenceStatus, Repository};
 use gwt_core::tmux::{AgentPane, StatusBarSummary};
 use gwt_core::worktree::Worktree;
+use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use ratatui::{prelude::*, widgets::*};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -1169,9 +1170,9 @@ pub fn render_branch_list(
         Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(3),               // Branch list (FR-003)
+                Constraint::Length(panel_height), // Branch list (FR-003)
                 Constraint::Length(1),            // Status bar (FR-104a)
-                Constraint::Length(panel_height), // Summary panel (SPEC-4b893dae)
+                Constraint::Min(3),               // Summary panel (SPEC-4b893dae)
             ])
             .split(area)
     } else {
@@ -1179,8 +1180,8 @@ pub fn render_branch_list(
         Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(3),               // Branch list (FR-003)
-                Constraint::Length(panel_height), // Summary panel (SPEC-4b893dae)
+                Constraint::Length(panel_height), // Branch list (FR-003)
+                Constraint::Min(3),               // Summary panel (SPEC-4b893dae)
             ])
             .split(area)
     };
@@ -1611,6 +1612,35 @@ fn render_summary_panel(
     }
 }
 
+fn panel_title_line(branch_name: &str, active: DetailPanelTab) -> Line<'static> {
+    let mut spans = Vec::new();
+    let details_style = if matches!(active, DetailPanelTab::Details) {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let session_style = if matches!(active, DetailPanelTab::Session) {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    spans.push(Span::styled("[Details]", details_style));
+    spans.push(Span::raw(" "));
+    spans.push(Span::styled("[Session]", session_style));
+    spans.push(Span::raw(" "));
+    spans.push(Span::styled(
+        format!(" {}", branch_name),
+        Style::default().fg(Color::DarkGray),
+    ));
+
+    Line::from(spans)
+}
+
 fn panel_switch_hint() -> Line<'static> {
     Line::from(Span::styled(
         " Tab: Switch ",
@@ -1664,7 +1694,7 @@ fn render_details_panel(
     // Handle status messages - show them in the panel area if present
     if let Some(status) = status_message {
         // Draw the panel frame first
-        let title = format!(" [{}] Details ", summary.branch_name);
+        let title = panel_title_line(&summary.branch_name, DetailPanelTab::Details);
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
@@ -1684,7 +1714,7 @@ fn render_details_panel(
 
     // Handle loading state - show spinner in panel
     if state.is_loading {
-        let title = format!(" [{}] Details ", summary.branch_name);
+        let title = panel_title_line(&summary.branch_name, DetailPanelTab::Details);
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
@@ -1709,7 +1739,7 @@ fn render_details_panel(
 
     // Handle progress state
     if let Some(progress) = state.status_progress_line() {
-        let title = format!(" [{}] Details ", summary.branch_name);
+        let title = panel_title_line(&summary.branch_name, DetailPanelTab::Details);
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
@@ -1730,7 +1760,12 @@ fn render_details_panel(
     }
 
     // Render the full summary panel
-    let panel = SummaryPanel::new(&summary).with_tick(state.spinner_frame);
+    let panel = SummaryPanel::new(&summary)
+        .with_tick(state.spinner_frame)
+        .with_title(panel_title_line(
+            &summary.branch_name,
+            DetailPanelTab::Details,
+        ));
 
     panel.render(frame, area);
 }
@@ -1745,7 +1780,7 @@ fn render_session_panel(
         .selected_branch()
         .map(|branch| branch.name.clone())
         .unwrap_or_else(|| "(no branch selected)".to_string());
-    let title = format!(" [{}] Session ", branch_name);
+    let title = panel_title_line(&branch_name, DetailPanelTab::Session);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan))
@@ -1775,7 +1810,7 @@ fn render_session_panel(
     } else if let Some(branch) = state.selected_branch() {
         if !state.ai_enabled {
             lines.push(Line::from(Span::styled(
-                "Configure AI in Settings to enable session summary",
+                "Configure AI in Profiles to enable session summary",
                 Style::default().fg(Color::Yellow),
             )));
         } else if branch.last_session_id.is_none() || state.is_session_missing(&branch.name) {
@@ -1784,55 +1819,57 @@ fn render_session_panel(
                 Style::default().fg(Color::DarkGray),
             )));
         } else if let Some(summary) = state.session_summary(&branch.name) {
-            lines.push(Line::from(Span::styled(
-                "Task:",
-                Style::default().fg(Color::Yellow),
-            )));
-            if let Some(task) = summary.task_overview.as_ref() {
-                lines.push(Line::from(format!("  {}", task)));
+            let markdown = summary.markdown.clone();
+            let task_overview = summary.task_overview.clone();
+            let short_summary = summary.short_summary.clone();
+            let bullet_points = summary.bullet_points.clone();
+            if let Some(markdown) = markdown.as_ref() {
+                lines = render_markdown_lines(markdown);
+                if lines.is_empty() {
+                    lines.push(Line::from(markdown.to_string()));
+                }
             } else {
                 lines.push(Line::from(Span::styled(
-                    "  (Not available)",
-                    Style::default().fg(Color::DarkGray),
+                    "Task:",
+                    Style::default().fg(Color::Yellow),
                 )));
-            }
+                if let Some(task) = task_overview.as_ref() {
+                    lines.push(Line::from(format!("  {}", task)));
+                } else {
+                    lines.push(Line::from(Span::styled(
+                        "  (Not available)",
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
 
-            lines.push(Line::from(Span::styled(
-                "Summary:",
-                Style::default().fg(Color::Yellow),
-            )));
-            if let Some(short) = summary.short_summary.as_ref() {
-                lines.push(Line::from(format!("  {}", short)));
-            } else {
                 lines.push(Line::from(Span::styled(
-                    "  (Not available)",
-                    Style::default().fg(Color::DarkGray),
+                    "Summary:",
+                    Style::default().fg(Color::Yellow),
                 )));
-            }
+                if let Some(short) = short_summary.as_ref() {
+                    lines.push(Line::from(format!("  {}", short)));
+                } else {
+                    lines.push(Line::from(Span::styled(
+                        "  (Not available)",
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
 
-            lines.push(Line::from(Span::styled(
-                "Highlights:",
-                Style::default().fg(Color::Yellow),
-            )));
-            if summary.bullet_points.is_empty() {
                 lines.push(Line::from(Span::styled(
-                    "  (No highlights)",
-                    Style::default().fg(Color::DarkGray),
+                    "Highlights:",
+                    Style::default().fg(Color::Yellow),
                 )));
-            } else {
-                for bullet in summary.bullet_points.iter().take(3) {
-                    lines.push(Line::from(format!("  {}", bullet)));
+                if bullet_points.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        "  (No highlights)",
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                } else {
+                    for bullet in bullet_points.iter().take(3) {
+                        lines.push(Line::from(format!("  {}", bullet)));
+                    }
                 }
             }
-
-            lines.push(Line::from(Span::styled(
-                "Metrics:",
-                Style::default().fg(Color::Yellow),
-            )));
-            lines.push(Line::from(format!(
-                "  {}",
-                format_metrics(&summary.metrics)
-            )));
         } else if state.session_summary_inflight(&branch.name) {
             lines.push(Line::from(Span::styled(
                 format!("{} Generating session summary...", state.spinner_char()),
@@ -1870,17 +1907,113 @@ fn render_session_panel(
     frame.render_widget(paragraph, inner);
 }
 
-fn format_metrics(metrics: &gwt_core::ai::SessionMetrics) -> String {
-    let mut parts = Vec::new();
-    if let Some(tokens) = metrics.token_count {
-        parts.push(format!("tokens ~{}", tokens));
+fn render_markdown_lines(markdown: &str) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut buffer = String::new();
+    let mut in_item = false;
+
+    let options = Options::ENABLE_STRIKETHROUGH;
+    let parser = Parser::new_ext(markdown, options);
+
+    for event in parser {
+        match event {
+            Event::Start(Tag::Heading { .. }) => {
+                flush_paragraph_lines(&mut lines, &mut buffer, false);
+                buffer.clear();
+            }
+            Event::End(TagEnd::Heading(_)) => {
+                let text = buffer.trim();
+                if !text.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        text.to_string(),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    )));
+                }
+                buffer.clear();
+            }
+            Event::Start(Tag::Item) => {
+                flush_paragraph_lines(&mut lines, &mut buffer, false);
+                buffer.clear();
+                in_item = true;
+            }
+            Event::End(TagEnd::Item) => {
+                let text = buffer.trim();
+                if !text.is_empty() {
+                    push_bullet_lines(&mut lines, text);
+                }
+                buffer.clear();
+                in_item = false;
+            }
+            Event::Start(Tag::Paragraph) => {
+                if !in_item {
+                    buffer.clear();
+                }
+            }
+            Event::End(TagEnd::Paragraph) => {
+                if !in_item {
+                    flush_paragraph_lines(&mut lines, &mut buffer, false);
+                }
+            }
+            Event::Text(text) => buffer.push_str(text.as_ref()),
+            Event::Code(text) => buffer.push_str(text.as_ref()),
+            Event::SoftBreak => buffer.push(' '),
+            Event::HardBreak => buffer.push('\n'),
+            _ => {}
+        }
     }
-    parts.push(format!("tools {}", metrics.tool_execution_count));
-    if let Some(seconds) = metrics.elapsed_seconds {
-        parts.push(format!("elapsed {}", format_duration(seconds)));
+
+    flush_paragraph_lines(&mut lines, &mut buffer, in_item);
+
+    lines
+}
+
+fn flush_paragraph_lines(lines: &mut Vec<Line<'static>>, buffer: &mut String, in_item: bool) {
+    let text = buffer.trim();
+    if text.is_empty() {
+        return;
     }
-    parts.push(format!("turns {}", metrics.turn_count));
-    parts.join(" | ")
+    if in_item {
+        push_bullet_lines(lines, text);
+    } else {
+        push_plain_lines(lines, text);
+    }
+    buffer.clear();
+}
+
+fn push_plain_lines(lines: &mut Vec<Line<'static>>, text: &str) {
+    for line in text.split('\n') {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            lines.push(Line::from(""));
+        } else {
+            lines.push(Line::from(trimmed.to_string()));
+        }
+    }
+}
+
+fn push_bullet_lines(lines: &mut Vec<Line<'static>>, text: &str) {
+    let mut iter = text.split('\n');
+    if let Some(first) = iter.next() {
+        let trimmed = first.trim();
+        if !trimmed.is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled("- ", Style::default().fg(Color::DarkGray)),
+                Span::raw(trimmed.to_string()),
+            ]));
+        }
+    }
+    for rest in iter {
+        let trimmed = rest.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        lines.push(Line::from(vec![
+            Span::styled("  ", Style::default().fg(Color::DarkGray)),
+            Span::raw(trimmed.to_string()),
+        ]));
+    }
 }
 
 fn count_wrapped_lines(lines: &[Line], width: usize) -> usize {
@@ -1899,19 +2032,6 @@ fn count_wrapped_lines(lines: &[Line], width: usize) -> usize {
             line_width.div_ceil(width)
         })
         .sum()
-}
-
-fn format_duration(seconds: u64) -> String {
-    if seconds < 60 {
-        return format!("{}s", seconds);
-    }
-    let minutes = seconds / 60;
-    if minutes < 60 {
-        return format!("{}m", minutes);
-    }
-    let hours = minutes / 60;
-    let mins = minutes % 60;
-    format!("{}h{}m", hours, mins)
 }
 
 /// Render footer line with keybindings (FR-004)

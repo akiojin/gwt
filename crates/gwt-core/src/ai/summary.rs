@@ -5,7 +5,7 @@ use super::session_parser::{MessageRole, ParsedSession, SessionMessage};
 use std::collections::HashMap;
 use std::time::SystemTime;
 
-pub const SESSION_SYSTEM_PROMPT_BASE: &str = "You are a helpful assistant summarizing a coding agent session.\nReturn JSON only with keys: task_overview, short_summary, bullets.\n- task_overview: current task and progress in 1 sentence.\n- short_summary: 1-2 sentence summary.\n- bullets: 2-3 concise bullet points (no leading dash).\nDetect the response language from the session content and respond in that language.\nIf the session contains multiple languages, use the language used by the user messages.\nOutput must be a single JSON object with no code fences, no markdown, and no extra text.\nThe output must match this JSON schema exactly:\n{\"task_overview\":\"...\",\"short_summary\":\"...\",\"bullets\":[\"...\",\"...\"]}\nDo not include any other keys (e.g., reasoning) and do not wrap in backticks.";
+pub const SESSION_SYSTEM_PROMPT_BASE: &str = "You are a helpful assistant summarizing a coding agent session.\nReturn Markdown only with the following format and headings, in this exact order:\n\n## 目的\n<1 sentence>\n\n## 要約\n<1-2 sentences>\n\n## ハイライト\n- <bullet 1>\n- <bullet 2>\n- <bullet 3>\n\nDetect the response language from the session content and respond in that language.\nIf the session contains multiple languages, use the language used by the user messages.\nDo not output JSON, code fences, or any extra text.";
 
 const MAX_MESSAGE_CHARS: usize = 220;
 const MAX_TOOL_ITEMS: usize = 8;
@@ -16,6 +16,7 @@ pub struct SessionSummary {
     pub task_overview: Option<String>,
     pub short_summary: Option<String>,
     pub bullet_points: Vec<String>,
+    pub markdown: Option<String>,
     pub metrics: SessionMetrics,
     pub last_updated: Option<SystemTime>,
 }
@@ -175,7 +176,8 @@ pub fn summarize_session(
 ) -> Result<SessionSummary, AIError> {
     let messages = build_session_prompt(parsed);
     let content = client.create_chat_completion(messages)?;
-    let fields = parse_session_summary_fields(&content)?;
+    let fields = parse_session_summary_fields(&content).unwrap_or_default();
+    let markdown = normalize_session_summary_markdown(&content, &fields)?;
 
     let metrics = build_metrics(parsed);
 
@@ -183,6 +185,7 @@ pub fn summarize_session(
         task_overview: fields.task_overview,
         short_summary: fields.short_summary,
         bullet_points: fields.bullet_points,
+        markdown: Some(markdown),
         metrics,
         last_updated: Some(SystemTime::now()),
     })
@@ -241,6 +244,67 @@ fn parse_session_summary_fields(content: &str) -> Result<SessionSummaryFields, A
         short_summary,
         bullet_points,
     })
+}
+
+fn normalize_session_summary_markdown(
+    content: &str,
+    fields: &SessionSummaryFields,
+) -> Result<String, AIError> {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return Err(AIError::ParseError("Empty summary".to_string()));
+    }
+
+    if parse_json_summary(trimmed).is_some() {
+        return Ok(build_markdown_from_fields(fields));
+    }
+
+    if looks_like_markdown(trimmed) {
+        return Ok(trimmed.to_string());
+    }
+
+    Ok(build_markdown_from_fields(fields))
+}
+
+fn looks_like_markdown(content: &str) -> bool {
+    content.contains("## ")
+        || content.contains("\n- ")
+        || content.contains("\n* ")
+        || content.contains("\n1.")
+        || content.contains("\n1)")
+}
+
+fn build_markdown_from_fields(fields: &SessionSummaryFields) -> String {
+    let purpose = fields
+        .task_overview
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("(Not available)");
+    let summary = fields
+        .short_summary
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("(Not available)");
+
+    let mut out = String::new();
+    out.push_str("## 目的\n");
+    out.push_str(purpose);
+    out.push_str("\n\n## 要約\n");
+    out.push_str(summary);
+    out.push_str("\n\n## ハイライト\n");
+    if fields.bullet_points.is_empty() {
+        out.push_str("- (No highlights)\n");
+    } else {
+        for bullet in fields.bullet_points.iter().take(3) {
+            let line = bullet.trim_start_matches("- ").trim();
+            out.push_str("- ");
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
 }
 
 fn parse_json_summary(content: &str) -> Option<SessionSummaryFields> {
@@ -461,5 +525,27 @@ mod tests {
             .clone();
 
         assert!(user_prompt.chars().count() <= MAX_PROMPT_CHARS);
+    }
+
+    #[test]
+    fn test_normalize_session_summary_markdown_from_json() {
+        let content =
+            r#"{"task_overview":"目的文","short_summary":"要約文","bullets":["項目1","項目2"]}"#;
+        let fields = parse_session_summary_fields(content).expect("parse fields");
+        let markdown = normalize_session_summary_markdown(content, &fields).expect("markdown");
+        assert!(markdown.contains("## 目的"));
+        assert!(markdown.contains("目的文"));
+        assert!(markdown.contains("## 要約"));
+        assert!(markdown.contains("要約文"));
+        assert!(markdown.contains("## ハイライト"));
+        assert!(markdown.contains("- 項目1"));
+    }
+
+    #[test]
+    fn test_normalize_session_summary_markdown_passthrough() {
+        let content = "## 目的\nA\n\n## 要約\nB\n\n## ハイライト\n- C";
+        let fields = SessionSummaryFields::default();
+        let markdown = normalize_session_summary_markdown(content, &fields).expect("markdown");
+        assert_eq!(markdown, content);
     }
 }

@@ -110,6 +110,8 @@ pub struct EnvironmentState {
     pub ai_model: String,
     /// AI field currently being edited
     editing_ai_field: Option<AiField>,
+    /// AI-only mode (no environment variables)
+    ai_only: bool,
 }
 
 impl EnvironmentState {
@@ -159,6 +161,15 @@ impl EnvironmentState {
         self.ai_api_key = api_key;
         self.ai_model = model;
         self
+    }
+
+    pub fn with_ai_only(mut self, ai_only: bool) -> Self {
+        self.ai_only = ai_only;
+        self
+    }
+
+    pub fn is_ai_only(&self) -> bool {
+        self.ai_only
     }
 
     pub fn editing_ai_field(&self) -> Option<AiField> {
@@ -288,6 +299,9 @@ impl EnvironmentState {
 
     /// Enter edit mode for new variable
     pub fn start_new(&mut self) {
+        if self.ai_only {
+            return;
+        }
         self.edit_mode = true;
         self.is_new = true;
         self.edit_field = EditField::Key;
@@ -506,6 +520,9 @@ impl EnvironmentState {
     }
 
     fn display_len(&self) -> usize {
+        if self.ai_only {
+            return self.ai_display_items().len();
+        }
         let ai_count = self.ai_display_items().len();
         let mut keys: HashMap<&str, ()> = HashMap::new();
         for var in &self.os_variables {
@@ -523,6 +540,9 @@ impl EnvironmentState {
     }
 
     fn display_items(&self) -> Vec<DisplayEnvItem> {
+        if self.ai_only {
+            return self.ai_display_items();
+        }
         let mut items = self.ai_display_items();
         let mut os_map: HashMap<String, String> = HashMap::new();
         for var in &self.os_variables {
@@ -701,11 +721,15 @@ pub fn render_environment(state: &mut EnvironmentState, frame: &mut Frame, area:
     // Header
     let profile_info = state.profile_name.as_deref().unwrap_or("default");
     let total_vars = state.display_len();
-    let header = Paragraph::new(format!(
-        "Environment Variables | Profile: {} | ({} vars)",
-        profile_info, total_vars
-    ))
-    .style(Style::default().fg(Color::Cyan));
+    let header_text = if state.is_ai_only() {
+        format!("AI Settings | Default | ({} items)", total_vars)
+    } else {
+        format!(
+            "Environment Variables | Profile: {} | ({} vars)",
+            profile_info, total_vars
+        )
+    };
+    let header = Paragraph::new(header_text).style(Style::default().fg(Color::Cyan));
     frame.render_widget(header, chunks[0]);
 
     // Variables list
