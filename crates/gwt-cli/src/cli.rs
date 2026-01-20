@@ -130,6 +130,13 @@ pub enum Commands {
         /// Specific worktree to repair (repairs all if not specified)
         target: Option<String>,
     },
+
+    /// Handle Claude Code hook events (SPEC-861d8cdf FR-101)
+    /// Used by Claude Code hooks to update agent status
+    Hook {
+        /// Hook event name (UserPromptSubmit, PreToolUse, PostToolUse, Notification, Stop)
+        event: String,
+    },
 }
 
 /// Output format for list command
