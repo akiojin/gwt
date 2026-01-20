@@ -4625,7 +4625,7 @@ mod tests {
         assert_eq!(model.branch_list.selected, 0);
         let mouse = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
-            column: 1,
+            column: 2,
             row: 2,
             modifiers: KeyModifiers::NONE,
         };

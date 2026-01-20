@@ -333,6 +333,8 @@ pub struct SummaryPanel<'a> {
     pub links: SummaryLinks,
 }
 
+const SUMMARY_PANEL_PADDING_X: u16 = 1;
+
 #[derive(Debug, Clone, Default)]
 pub struct SummaryLinks {
     pub branch_url: Option<String>,
@@ -407,7 +409,13 @@ impl<'a> SummaryPanel<'a> {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
             .title(title)
-            .title_bottom(panel_switch_hint());
+            .title_bottom(panel_switch_hint())
+            .padding(Padding::new(
+                SUMMARY_PANEL_PADDING_X,
+                SUMMARY_PANEL_PADDING_X,
+                0,
+                0,
+            ));
 
         let inner_area = block.inner(area);
         frame.render_widget(block, area);
@@ -707,6 +715,9 @@ pub fn centered_rect(width: u16, height: u16, r: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gwt_core::git::BranchSummary;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
 
     #[test]
     fn test_centered_rect() {
@@ -716,5 +727,22 @@ mod tests {
         assert_eq!(centered.height, 10);
         assert_eq!(centered.x, 40);
         assert_eq!(centered.y, 20);
+    }
+
+    #[test]
+    fn test_summary_panel_padding_adds_left_space() {
+        let summary = BranchSummary::new("main");
+        let backend = TestBackend::new(30, SummaryPanel::height());
+        let mut terminal = Terminal::new(backend).expect("terminal init");
+
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                SummaryPanel::new(&summary).render(f, area);
+            })
+            .expect("draw");
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(1, 1)].symbol(), " ");
     }
 }
