@@ -5,7 +5,7 @@ use super::session_parser::{MessageRole, ParsedSession, SessionMessage};
 use std::collections::HashMap;
 use std::time::SystemTime;
 
-pub const SESSION_SYSTEM_PROMPT_BASE: &str = "You are a helpful assistant summarizing a coding agent session.\nReturn Markdown only with the following format and headings, in this exact order:\n\n## 目的\n<1 sentence>\n\n## 要約\n<1-2 sentences>\n\n## ハイライト\n- <bullet 1>\n- <bullet 2>\n- <bullet 3>\n\nDetect the response language from the session content and respond in that language.\nIf the session contains multiple languages, use the language used by the user messages.\nDo not output JSON, code fences, or any extra text.";
+pub const SESSION_SYSTEM_PROMPT_BASE: &str = "You are a helpful assistant summarizing a coding agent session.\nReturn Markdown only with the following format and headings, in this exact order:\n\n## 目的\n<1 sentence>\n\n## 要約\n<1-2 sentences>\n\n## ハイライト\n- <bullet 1>\n- <bullet 2>\n- <bullet 3>\n\nAdd more bullets if there are additional important items.\nDetect the response language from the session content and respond in that language.\nIf the session contains multiple languages, use the language used by the user messages.\nDo not output JSON, code fences, or any extra text.";
 
 const MAX_MESSAGE_CHARS: usize = 220;
 const MAX_TOOL_ITEMS: usize = 8;
@@ -441,10 +441,6 @@ fn extract_fields_from_json(value: &serde_json::Value) -> Option<SessionSummaryF
         }
     }
 
-    if bullet_points.len() > 3 {
-        bullet_points.truncate(3);
-    }
-
     Some(SessionSummaryFields {
         task_overview,
         short_summary,
@@ -485,18 +481,11 @@ pub fn parse_summary_lines(content: &str) -> Result<Vec<String>, AIError> {
                 continue;
             }
             lines.push(format!("- {}", trimmed.trim_end_matches('.')));
-            if lines.len() >= 3 {
-                break;
-            }
         }
     }
 
     if lines.is_empty() {
         return Err(AIError::ParseError("No summary lines".to_string()));
-    }
-
-    if lines.len() > 3 {
-        lines.truncate(3);
     }
 
     Ok(lines)
@@ -560,11 +549,28 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_summary_lines_allows_more_than_three() {
+        let content = "- A\n- B\n- C\n- D\n- E";
+        let lines = parse_summary_lines(content).expect("should parse");
+        assert_eq!(lines.len(), 5);
+        assert_eq!(lines[3], "- D");
+    }
+
+    #[test]
     fn test_parse_summary_lines_ordered() {
         let content = "1. Added login\n2) Fixed bug";
         let lines = parse_summary_lines(content).expect("should parse");
         assert_eq!(lines[0], "- Added login");
         assert_eq!(lines[1], "- Fixed bug");
+    }
+
+    #[test]
+    fn test_parse_session_summary_fields_keeps_all_bullets_from_json() {
+        let content =
+            r#"{"task_overview":"目的","short_summary":"要約","bullets":["A","B","C","D"]}"#;
+        let fields = parse_session_summary_fields(content).expect("parse fields");
+        assert_eq!(fields.bullet_points.len(), 4);
+        assert_eq!(fields.bullet_points[3], "- D");
     }
 
     #[test]
@@ -632,6 +638,12 @@ mod tests {
     #[test]
     fn test_validate_session_summary_markdown_accepts_complete() {
         let content = "## 目的\nA\n\n## 要約\nB\n\n## ハイライト\n- C";
+        assert!(validate_session_summary_markdown(content).is_ok());
+    }
+
+    #[test]
+    fn test_validate_session_summary_markdown_accepts_many_bullets() {
+        let content = "## 目的\nA\n\n## 要約\nB\n\n## ハイライト\n- C\n- D\n- E\n- F";
         assert!(validate_session_summary_markdown(content).is_ok());
     }
 

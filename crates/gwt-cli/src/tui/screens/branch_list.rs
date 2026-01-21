@@ -2116,7 +2116,7 @@ fn render_session_panel(
                         Style::default().fg(Color::DarkGray),
                     )));
                 } else {
-                    for bullet in bullet_points.iter().take(3) {
+                    for bullet in bullet_points.iter() {
                         lines.push(Line::from(format!("  {}", bullet)));
                     }
                 }
