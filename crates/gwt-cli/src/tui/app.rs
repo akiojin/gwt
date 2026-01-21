@@ -40,7 +40,7 @@ use tracing::{debug, error, info};
 
 const BRANCH_LIST_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(500);
 
-use super::screens::branch_list::{PrInfo, WorktreeStatus};
+use super::screens::branch_list::{BranchSummaryRequest, BranchSummaryUpdate, PrInfo, WorktreeStatus};
 use super::screens::environment::EditField;
 use super::screens::pane_list::PaneListState;
 use super::screens::split_layout::{calculate_split_layout, SplitLayoutState};
@@ -295,6 +295,8 @@ pub struct Model {
     pending_hook_setup: bool,
     /// Branch list update receiver
     branch_list_rx: Option<Receiver<BranchListUpdate>>,
+    /// Branch summary update receiver
+    branch_summary_rx: Option<Receiver<BranchSummaryUpdate>>,
     /// PR title update receiver
     pr_title_rx: Option<Receiver<PrTitleUpdate>>,
     /// Safety check update receiver
@@ -442,6 +444,7 @@ impl Model {
             pending_cleanup_branches: Vec::new(),
             pending_hook_setup: false,
             branch_list_rx: None,
+            branch_summary_rx: None,
             pr_title_rx: None,
             safety_rx: None,
             worktree_status_rx: None,
@@ -692,6 +695,20 @@ impl Model {
         });
     }
 
+    fn spawn_branch_summary_fetch(&mut self, request: BranchSummaryRequest) {
+        let (tx, rx) = mpsc::channel();
+        self.branch_summary_rx = Some(rx);
+
+        thread::spawn(move || {
+            let summary =
+                BranchListState::build_branch_summary(&request.repo_root, &request.branch_item);
+            let _ = tx.send(BranchSummaryUpdate {
+                branch: request.branch,
+                summary,
+            });
+        });
+    }
+
     fn spawn_safety_checks(
         &mut self,
         targets: Vec<SafetyCheckTarget>,
@@ -825,7 +842,9 @@ impl Model {
 
     fn refresh_branch_summary(&mut self) {
         self.branch_list.ai_enabled = self.active_ai_enabled();
-        self.branch_list.update_branch_summary(&self.repo_root);
+        if let Some(request) = self.branch_list.prepare_branch_summary(&self.repo_root) {
+            self.spawn_branch_summary_fetch(request);
+        }
         if self.branch_list.detail_panel_tab == DetailPanelTab::Session {
             self.maybe_request_session_summary_for_selected(false);
         }
@@ -1327,6 +1346,23 @@ impl Model {
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
                 self.pr_title_rx = None;
+            }
+        }
+    }
+
+    fn apply_branch_summary_updates(&mut self) {
+        let Some(rx) = &self.branch_summary_rx else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(update) => {
+                self.branch_list.apply_branch_summary_update(update);
+                self.branch_summary_rx = None;
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.branch_summary_rx = None;
             }
         }
     }
@@ -2349,6 +2385,7 @@ impl Model {
                 // Update spinner animation
                 self.branch_list.tick_spinner();
                 self.apply_branch_list_updates();
+                self.apply_branch_summary_updates();
                 self.apply_pr_title_updates();
                 self.apply_safety_updates();
                 self.apply_worktree_updates();
@@ -4484,6 +4521,7 @@ mod tests {
     use crate::tui::screens::wizard::WizardStep;
     use crate::tui::screens::{BranchItem, BranchListState};
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    use gwt_core::git::BranchSummary;
     use gwt_core::git::Branch;
     use std::sync::mpsc;
 
@@ -4676,6 +4714,102 @@ mod tests {
 
         model.update(Message::SelectNext);
         assert_eq!(model.branch_list.selected, 1);
+    }
+
+    #[test]
+    fn test_branch_summary_update_ignores_non_selected_branch() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+
+        let branches = vec![
+            BranchItem {
+                name: "feature/one".to_string(),
+                branch_type: BranchType::Local,
+                is_current: true,
+                has_worktree: true,
+                worktree_path: Some("/path".to_string()),
+                worktree_status: WorktreeStatus::Active,
+                has_changes: false,
+                has_unpushed: false,
+                divergence: gwt_core::git::DivergenceStatus::UpToDate,
+                has_remote_counterpart: true,
+                remote_name: None,
+                safe_to_cleanup: Some(true),
+                safety_status: SafetyStatus::Safe,
+                is_unmerged: false,
+                last_commit_timestamp: None,
+                last_tool_usage: None,
+                last_tool_id: None,
+                last_session_id: None,
+                is_selected: false,
+                pr_title: None,
+                pr_number: None,
+                pr_url: None,
+            },
+            BranchItem {
+                name: "feature/two".to_string(),
+                branch_type: BranchType::Local,
+                is_current: false,
+                has_worktree: true,
+                worktree_path: Some("/path2".to_string()),
+                worktree_status: WorktreeStatus::Active,
+                has_changes: false,
+                has_unpushed: false,
+                divergence: gwt_core::git::DivergenceStatus::UpToDate,
+                has_remote_counterpart: true,
+                remote_name: None,
+                safe_to_cleanup: Some(true),
+                safety_status: SafetyStatus::Safe,
+                is_unmerged: false,
+                last_commit_timestamp: None,
+                last_tool_usage: None,
+                last_tool_id: None,
+                last_session_id: None,
+                is_selected: false,
+                pr_title: None,
+                pr_number: None,
+                pr_url: None,
+            },
+        ];
+
+        model.branch_list = BranchListState::new().with_branches(branches);
+        model.branch_list.selected = 0;
+
+        let mut existing = BranchSummary::new("feature/one");
+        existing.errors.commits = Some("keep".to_string());
+        model.branch_list.branch_summary = Some(existing);
+
+        let (tx, rx) = mpsc::channel();
+        model.branch_summary_rx = Some(rx);
+
+        let mut ignored = BranchSummary::new("feature/two");
+        ignored.errors.commits = Some("ignored".to_string());
+        tx.send(BranchSummaryUpdate {
+            branch: "feature/two".to_string(),
+            summary: ignored,
+        })
+        .unwrap();
+
+        model.apply_branch_summary_updates();
+
+        let current = model.branch_list.branch_summary.as_ref().expect("summary");
+        assert_eq!(current.branch_name, "feature/one");
+        assert_eq!(current.errors.commits.as_deref(), Some("keep"));
+
+        let (tx2, rx2) = mpsc::channel();
+        model.branch_summary_rx = Some(rx2);
+
+        let mut applied = BranchSummary::new("feature/one");
+        applied.errors.commits = Some("applied".to_string());
+        tx2.send(BranchSummaryUpdate {
+            branch: "feature/one".to_string(),
+            summary: applied,
+        })
+        .unwrap();
+
+        model.apply_branch_summary_updates();
+        let current = model.branch_list.branch_summary.as_ref().expect("summary");
+        assert_eq!(current.errors.commits.as_deref(), Some("applied"));
     }
 
     #[test]

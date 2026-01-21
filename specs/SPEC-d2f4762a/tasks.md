@@ -3,6 +3,15 @@
 **仕様ID**: `SPEC-d2f4762a`
 **ポリシー**: CLAUDE.md の TDD ルールに基づき、必ず RED→GREEN→リグレッションチェックの順に進める。
 
+## 追加作業: ブランチ詳細サマリの非同期更新 (2026-01-21)
+
+- [x] **T1323** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` に詳細サマリの非同期更新要件・方針を追記
+- [x] **T1324** [Test] `crates/gwt-cli/src/tui/app.rs` にサマリ取得がバックグラウンドで動作し、古い結果が破棄されることを検証するテストを追加
+- [x] **T1325** [Test] `crates/gwt-cli/src/tui/screens/branch_list.rs` にサマリLoading表示のリセット挙動を検証するテストを追加
+- [x] **T1326** [Impl] `crates/gwt-cli/src/tui/app.rs` でブランチ詳細サマリ取得を非同期化し、最新選択のみ反映する
+- [x] **T1327** [Impl] `crates/gwt-cli/src/tui/screens/branch_list.rs` でサマリLoading/エラー表示の更新を選択切替に合わせて行う
+- [x] **T1328** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
+
 ## 追加作業: ブランチ一覧の内側余白 (2026-01-20)
 
 - [x] **T1319** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` にブランチ一覧の左右余白要件を追記
