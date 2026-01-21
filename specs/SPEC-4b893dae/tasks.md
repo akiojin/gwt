@@ -147,29 +147,84 @@ US6 (AI設定) ─────────────────────�
 
 **✅ チェックポイント**: メタデータがパネルに表示される
 
-## フェーズ6: US6 - プロファイルへのAI設定追加 (優先度: P2)
+## フェーズ6: US6 - プロファイルへのAI設定追加 (優先度: P0)
 
-**ストーリー**: プロファイルにAI設定（エンドポイント、APIキー、モデル）を追加
+**ストーリー**: プロファイルにAI設定（エンドポイント、APIキー、モデル）を追加し、疎通チェック（モデル一覧取得）を必須とする
 
-**価値**: プロジェクトごとに異なるAI設定を使用できる
+**価値**: プロジェクトごとに異なるAI設定を使用でき、設定ミスを事前に検出できる
 
 ### データモデル
 
-- [ ] **T501** [US6] `crates/gwt-core/src/config/profile.rs` にAISettings構造体を追加
-- [ ] **T502** [US6] T501の後に `crates/gwt-core/src/config/profile.rs` のProfile構造体に`ai: Option<AISettings>`フィールドを追加
+- [x] **T501** [US6] `crates/gwt-core/src/config/profile.rs` にAISettings構造体を追加
+- [x] **T502** [US6] T501の後に `crates/gwt-core/src/config/profile.rs` のProfile構造体に`ai: Option<AISettings>`フィールドを追加
 
-### デフォルト値と環境変数
+### デフォルト値
 
-- [ ] **T503** [US6] T502の後に `crates/gwt-core/src/config/profile.rs` にdefault_endpoint()、default_model()関数を追加
-- [ ] **T504** [US6] T503の後に `crates/gwt-core/src/config/profile.rs` に環境変数フォールバック（OPENAI_API_KEY等）を実装
+- [x] **T503** [US6] T502の後に `crates/gwt-core/src/config/profile.rs` にdefault_endpoint()、default_model()関数を追加
+- [x] **T504** [US6] **【廃止】** ~~環境変数フォールバック（OPENAI_API_KEY等）を実装~~
 
 ### シリアライズ
 
-- [ ] **T505** [US6] T504の後に `crates/gwt-core/src/config/profile.rs` のYAMLシリアライズにai設定を追加
-- [x] **T506** [US6] T505の後に `crates/gwt-core/src/config/profile.rs` のAI有効判定を更新（エンドポイント/モデル必須、APIキー任意）
-- [x] **T507** [US6] T506の後に `crates/gwt-cli/src/tui/screens/environment.rs` のAIプレースホルダーを必須/任意表記に更新
+- [x] **T505** [US6] `crates/gwt-core/src/config/profile.rs` のYAMLシリアライズにai設定を追加
+- [x] **T506** [US6] `crates/gwt-core/src/config/profile.rs` のAI有効判定を更新（エンドポイント/モデル必須、APIキー任意）
+- [x] **T507** [US6] `crates/gwt-cli/src/tui/screens/environment.rs` のAIプレースホルダーを必須/任意表記に更新
 
 **チェックポイント**: プロファイルYAMLにai設定が保存・読み込みできる
+
+---
+
+## フェーズ6a: US6a - AI設定ウィザード（疎通チェック） (優先度: P0)
+
+**ストーリー**: ウィザード形式でAI設定を行い、保存前にGET /modelsで疎通チェックを行う
+
+**価値**: 疎通チェック成功後にのみ保存可能にすることで、設定ミスを事前に防止
+
+### API機能（gwt-core）
+
+- [ ] **T510** [US6a] `crates/gwt-core/src/ai/client.rs` に `list_models()` 関数を追加（GET /models）
+- [ ] **T511** [US6a] T510の後に `crates/gwt-core/src/ai/client.rs` に `ModelInfo` 構造体を追加（id, created, owned_by）
+- [ ] **T512** [US6a] T511の後に `crates/gwt-core/src/ai/client.rs` に10秒タイムアウトを設定（LIST_MODELS_TIMEOUT）
+- [ ] **T513** [US6a] T512の後に `crates/gwt-core/src/ai/client.rs` に詳細なエラーメッセージ生成を追加
+
+### ウィザード状態管理（gwt-cli）
+
+- [ ] **T520** [US6a] `crates/gwt-cli/src/tui/screens/ai_wizard.rs` を新規作成
+- [ ] **T521** [US6a] T520の後に `AISettingsWizardStep` enum を定義（UrlInput, ApiKeyInput, FetchingModels, ModelSelect）
+- [ ] **T522** [US6a] T521の後に `AISettingsWizardState` 構造体を定義（step, url, api_key, models, selected_model, error）
+- [ ] **T523** [US6a] T522の後に 既存AI設定からの初期値プリセット機能を実装
+
+### ウィザードUI（gwt-cli）
+
+- [ ] **T530** [US6a] T523の後に URL入力画面を実装（Enter→次へ、Esc→キャンセル）
+- [ ] **T531** [US6a] T530の後に APIキー入力画面を実装（Enter→取得開始、Esc→URL入力に戻る、空入力許可）
+- [ ] **T532** [US6a] T531の後に ローディング画面を実装（「Fetching models...」テキスト表示）
+- [ ] **T533** [US6a] T532の後に モデル選択画面を実装（リスト形式、上下キー選択、Enter→保存、Esc→APIキー入力に戻る）
+- [ ] **T534** [US6a] T533の後に エラー表示を実装（詳細なエラーメッセージ、URL入力画面に戻る）
+
+### 統合（gwt-cli）
+
+- [ ] **T540** [US6a] T534の後に `crates/gwt-cli/src/tui/screens/profiles.rs` からウィザード起動を実装（編集ボタン押下）
+- [ ] **T541** [US6a] T540の後に グローバルAI設定画面からウィザード起動を実装
+- [ ] **T542** [US6a] T541の後に ウィザード完了時の保存処理を実装
+- [ ] **T543** [US6a] T542の後に `crates/gwt-cli/src/tui/app.rs` に `Screen::AISettingsWizard` を追加
+
+**チェックポイント**: ウィザードでAI設定を行い、疎通チェック成功後にのみ保存できる
+
+---
+
+## フェーズ6b: US6b - AI設定の削除 (優先度: P1)
+
+**ストーリー**: AI設定を削除でき、削除後はAIサマリー機能が無効化される
+
+**価値**: 設定変更の柔軟性を確保
+
+### 削除機能
+
+- [ ] **T550** [US6b] `crates/gwt-cli/src/tui/screens/profiles.rs` または `ai_wizard.rs` にAI設定削除ボタンを追加
+- [ ] **T551** [US6b] T550の後に 削除処理を実装（確認なしで削除）
+- [ ] **T552** [US6b] T551の後に 削除後のUI更新を実装
+
+**チェックポイント**: AI設定を削除でき、削除後はAIサマリー機能が無効化される
 
 ## フェーズ7: US4a - Tabキーによるタブ切り替え (優先度: P0)
 
@@ -337,9 +392,9 @@ US6 (AI設定) ─────────────────────�
 
 **優先度**:
 
-- **P0**: 最重要 - 基本機能に必要（US1, US2, US4, US4a, US4b, US5）
-- **P1**: 重要 - 完全な機能に必要（US3）
-- **P2**: 補完的 - 付加価値機能（US6）
+- **P0**: 最重要 - 基本機能に必要（US1, US2, US4, US4a, US4b, US5, US6, US6a）
+- **P1**: 重要 - 完全な機能に必要（US3, US6b）
+- **P2**: 補完的 - 付加価値機能
 
 **タグ**:
 
@@ -351,7 +406,9 @@ US6 (AI設定) ─────────────────────�
 - **[US4a]**: タブ切り替え
 - **[US4b]**: セッションパーサー
 - **[US5]**: パネル表示
-- **[US6]**: AI設定
+- **[US6]**: AI設定（基本）
+- **[US6a]**: AI設定ウィザード（疎通チェック）
+- **[US6b]**: AI設定削除
 - **[共通]**: 全ストーリー共通
 - **[統合]**: 複数ストーリーにまたがる
 - **[ドキュメント]**: ドキュメント専用
@@ -367,11 +424,13 @@ US6 (AI設定) ─────────────────────�
 
 | 項目 | 値 |
 |------|-----|
-| 総タスク数 | 83 |
-| 完了済み | 40 |
-| 未完了 | 43 |
+| 総タスク数 | 100 |
+| 完了済み | 47 |
+| 未完了 | 53 |
 | フェーズ1-5（完了済み） | 26 |
-| フェーズ6（US6: AI設定） | 5 |
+| フェーズ6（US6: AI設定基本） | 7 (完了) |
+| フェーズ6a（US6a: ウィザード） | 14 |
+| フェーズ6b（US6b: 削除） | 3 |
 | フェーズ7（US4a: タブ切り替え） | 16 (含むブランチ単位タブ記憶9件) |
 | フェーズ8（US4b: パーサー） | 17 |
 | フェーズ9（US4: セッション要約） | 16 |
@@ -380,9 +439,10 @@ US6 (AI設定) ─────────────────────�
 
 ## 推奨実装順序
 
-1. **US4a** (タブ切り替え) - UIの切り替え基盤
-2. **US4b** (セッションパーサー) - 4エージェント対応
-3. **US4** (セッション要約) - AI要約とポーリング
-4. **US6** (AI設定) - プロファイル連携
+1. **US6a** (AI設定ウィザード) - 疎通チェック機能 ← **今回の追加機能**
+2. **US6b** (AI設定削除) - 削除機能
+3. **US4a** (タブ切り替え) - UIの切り替え基盤
+4. **US4b** (セッションパーサー) - 4エージェント対応
+5. **US4** (セッション要約) - AI要約とポーリング
 
-MVP範囲: US4a → US4b（Claude Codeのみ先行） → US4（基本機能）
+MVP範囲: US6a → US4a → US4b（Claude Codeのみ先行） → US4（基本機能）

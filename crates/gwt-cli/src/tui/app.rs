@@ -17,8 +17,8 @@ use gwt_core::ai::{
 };
 use gwt_core::config::get_branch_tool_history;
 use gwt_core::config::{
-    get_claude_settings_path, is_gwt_hooks_registered, register_gwt_hooks, save_session_entry,
-    AISettings, Profile, ProfilesConfig, ResolvedAISettings, ToolSessionEntry,
+    get_claude_settings_path, is_gwt_hooks_registered, register_gwt_hooks, reregister_gwt_hooks,
+    save_session_entry, AISettings, Profile, ProfilesConfig, ResolvedAISettings, ToolSessionEntry,
 };
 use gwt_core::error::GwtError;
 use gwt_core::git::{Branch, PrCache, Remote, Repository};
@@ -36,22 +36,24 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 const BRANCH_LIST_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(500);
 const SESSION_POLL_INTERVAL: Duration = Duration::from_secs(30);
 const SESSION_SUMMARY_QUIET_PERIOD: Duration = Duration::from_secs(5);
 
-use super::screens::branch_list::{PrInfo, WorktreeStatus};
+use super::screens::branch_list::{
+    BranchSummaryRequest, BranchSummaryUpdate, PrInfo, WorktreeStatus,
+};
 use super::screens::environment::EditField;
 use super::screens::pane_list::PaneListState;
 use super::screens::split_layout::{calculate_split_layout, SplitLayoutState};
 use super::screens::{
-    collect_os_env, render_branch_list, render_confirm, render_environment, render_error,
-    render_help, render_logs, render_profiles, render_settings, render_wizard,
-    render_worktree_create, BranchItem, BranchListState, BranchType, CodingAgent, ConfirmState,
-    DetailPanelTab, EnvironmentState, ErrorState, ExecutionMode, HelpState, LogsState,
-    ProfilesState, QuickStartEntry, ReasoningLevel, SettingsState, WizardConfirmResult,
+    collect_os_env, render_ai_wizard, render_branch_list, render_confirm, render_environment,
+    render_error, render_help, render_logs, render_profiles, render_settings, render_wizard,
+    render_worktree_create, AIWizardState, BranchItem, BranchListState, BranchType, CodingAgent,
+    ConfirmState, DetailPanelTab, EnvironmentState, ErrorState, ExecutionMode, HelpState,
+    LogsState, ProfilesState, QuickStartEntry, ReasoningLevel, SettingsState, WizardConfirmResult,
     WizardState, WorktreeCreateState,
 };
 
@@ -291,6 +293,8 @@ pub struct Model {
     environment: EnvironmentState,
     /// Wizard popup state
     wizard: WizardState,
+    /// AI settings wizard state (FR-100)
+    ai_wizard: AIWizardState,
     /// Status message
     status_message: Option<String>,
     /// Status message timestamp (for auto-clear)
@@ -319,6 +323,8 @@ pub struct Model {
     pending_hook_setup: bool,
     /// Branch list update receiver
     branch_list_rx: Option<Receiver<BranchListUpdate>>,
+    /// Branch summary update receiver
+    branch_summary_rx: Option<Receiver<BranchSummaryUpdate>>,
     /// PR title update receiver
     pr_title_rx: Option<Receiver<PrTitleUpdate>>,
     /// Safety check update receiver
@@ -363,6 +369,8 @@ pub enum Screen {
     Error,
     Profiles,
     Environment,
+    /// AI settings wizard (FR-100)
+    AISettingsWizard,
 }
 
 /// Messages (Events in Elm Architecture)
@@ -454,6 +462,7 @@ impl Model {
             profiles_config: ProfilesConfig::default(),
             environment: EnvironmentState::new(),
             wizard: WizardState::new(),
+            ai_wizard: AIWizardState::new(),
             status_message: None,
             status_message_time: None,
             launch_status: None,
@@ -468,6 +477,7 @@ impl Model {
             pending_cleanup_branches: Vec::new(),
             pending_hook_setup: false,
             branch_list_rx: None,
+            branch_summary_rx: None,
             pr_title_rx: None,
             safety_rx: None,
             worktree_status_rx: None,
@@ -516,15 +526,22 @@ impl Model {
 
         model.apply_entry_context(context);
 
-        // SPEC-861d8cdf T-104: Check if hook setup is needed on first startup
-        if model.tmux_mode.is_multi() {
-            if let Some(settings_path) = get_claude_settings_path() {
-                if !is_gwt_hooks_registered(&settings_path) {
-                    model.pending_hook_setup = true;
-                    model.confirm = ConfirmState::hook_setup();
-                    model.screen_stack.push(model.screen.clone());
-                    model.screen = Screen::Confirm;
-                }
+        if let Some(settings_path) = get_claude_settings_path() {
+            // SPEC-861d8cdf T-107: Re-register hooks on startup to sync gwt path
+            if let Err(e) = reregister_gwt_hooks(&settings_path) {
+                warn!(
+                    category = "tui",
+                    error = %e,
+                    "Failed to re-register gwt hooks"
+                );
+            }
+
+            // SPEC-861d8cdf T-104: Check if hook setup is needed on first startup
+            if model.tmux_mode.is_multi() && !is_gwt_hooks_registered(&settings_path) {
+                model.pending_hook_setup = true;
+                model.confirm = ConfirmState::hook_setup();
+                model.screen_stack.push(model.screen.clone());
+                model.screen = Screen::Confirm;
             }
         }
 
@@ -719,6 +736,20 @@ impl Model {
         });
     }
 
+    fn spawn_branch_summary_fetch(&mut self, request: BranchSummaryRequest) {
+        let (tx, rx) = mpsc::channel();
+        self.branch_summary_rx = Some(rx);
+
+        thread::spawn(move || {
+            let summary =
+                BranchListState::build_branch_summary(&request.repo_root, &request.branch_item);
+            let _ = tx.send(BranchSummaryUpdate {
+                branch: request.branch,
+                summary,
+            });
+        });
+    }
+
     fn spawn_safety_checks(
         &mut self,
         targets: Vec<SafetyCheckTarget>,
@@ -852,7 +883,9 @@ impl Model {
 
     fn refresh_branch_summary(&mut self) {
         self.branch_list.ai_enabled = self.active_ai_enabled();
-        self.branch_list.update_branch_summary(&self.repo_root);
+        if let Some(request) = self.branch_list.prepare_branch_summary(&self.repo_root) {
+            self.spawn_branch_summary_fetch(request);
+        }
         if self.branch_list.detail_panel_tab == DetailPanelTab::Session {
             self.maybe_request_session_summary_for_selected(false);
         }
@@ -1421,6 +1454,23 @@ impl Model {
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
                 self.pr_title_rx = None;
+            }
+        }
+    }
+
+    fn apply_branch_summary_updates(&mut self) {
+        let Some(rx) = &self.branch_summary_rx else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(update) => {
+                self.branch_list.apply_branch_summary_update(update);
+                self.branch_summary_rx = None;
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.branch_summary_rx = None;
             }
         }
     }
@@ -2188,30 +2238,123 @@ impl Model {
     }
 
     fn open_default_ai_editor(&mut self) {
-        let (ai_enabled, ai_endpoint, ai_api_key, ai_model) = match &self.profiles_config.default_ai
-        {
-            Some(ai) => (
-                ai.is_enabled(),
-                ai.endpoint.clone(),
-                ai.api_key.clone(),
-                ai.model.clone(),
-            ),
-            None => {
-                let defaults = AISettings::default();
-                (false, defaults.endpoint, String::new(), defaults.model)
+        // FR-100: Use AI settings wizard for default AI settings
+        if let Some(ai) = &self.profiles_config.default_ai {
+            // Edit existing settings
+            self.ai_wizard.open_edit(
+                true, // is_default_ai
+                None, // no profile name
+                &ai.endpoint,
+                &ai.api_key,
+                &ai.model,
+            );
+        } else {
+            // Create new settings
+            self.ai_wizard.open_new(true, None);
+        }
+        self.screen_stack.push(self.screen.clone());
+        self.screen = Screen::AISettingsWizard;
+    }
+
+    /// Open AI settings wizard for a specific profile
+    fn open_profile_ai_editor(&mut self, profile_name: &str) {
+        // FR-100: Use AI settings wizard for profile AI settings
+        if let Some(profile) = self.profiles_config.profiles.get(profile_name) {
+            if let Some(ai) = &profile.ai {
+                // Edit existing settings
+                self.ai_wizard.open_edit(
+                    false, // not default AI
+                    Some(profile_name.to_string()),
+                    &ai.endpoint,
+                    &ai.api_key,
+                    &ai.model,
+                );
+            } else {
+                // Create new settings
+                self.ai_wizard
+                    .open_new(false, Some(profile_name.to_string()));
             }
+            self.screen_stack.push(self.screen.clone());
+            self.screen = Screen::AISettingsWizard;
+        }
+    }
+
+    /// Handle Enter key in AI settings wizard
+    fn handle_ai_wizard_enter(&mut self) {
+        use super::screens::ai_wizard::AIWizardStep;
+
+        match self.ai_wizard.step {
+            AIWizardStep::Endpoint => {
+                self.ai_wizard.next_step();
+            }
+            AIWizardStep::ApiKey => {
+                // Start fetching models
+                self.ai_wizard.step = AIWizardStep::FetchingModels;
+                self.ai_wizard.loading_message = Some("Fetching models...".to_string());
+
+                // Fetch models (blocking)
+                match self.ai_wizard.fetch_models() {
+                    Ok(()) => {
+                        self.ai_wizard.fetch_complete();
+                    }
+                    Err(e) => {
+                        self.ai_wizard.fetch_failed(&e);
+                    }
+                }
+            }
+            AIWizardStep::FetchingModels => {
+                // Do nothing while fetching
+            }
+            AIWizardStep::ModelSelect => {
+                // Save AI settings
+                self.save_ai_wizard_settings();
+                self.ai_wizard.close();
+                if let Some(prev_screen) = self.screen_stack.pop() {
+                    self.screen = prev_screen;
+                }
+                self.load_profiles();
+            }
+        }
+    }
+
+    /// Save AI settings from wizard
+    fn save_ai_wizard_settings(&mut self) {
+        let model = self
+            .ai_wizard
+            .current_model()
+            .map(|m| m.id.clone())
+            .unwrap_or_default();
+        let settings = AISettings {
+            endpoint: self.ai_wizard.endpoint.trim().to_string(),
+            api_key: self.ai_wizard.api_key.trim().to_string(),
+            model,
         };
 
-        self.environment = EnvironmentState::new().with_ai_only(true).with_ai_settings(
-            ai_enabled,
-            ai_endpoint,
-            ai_api_key,
-            ai_model,
-        );
-        self.environment.selected = 0;
-        self.environment.refresh_selection();
-        self.screen_stack.push(self.screen.clone());
-        self.screen = Screen::Environment;
+        if self.ai_wizard.is_default_ai {
+            self.profiles_config.default_ai = Some(settings);
+        } else if let Some(profile_name) = &self.ai_wizard.profile_name {
+            if let Some(profile) = self.profiles_config.profiles.get_mut(profile_name) {
+                profile.ai = Some(settings);
+            }
+        }
+        self.save_profiles();
+    }
+
+    /// Delete AI settings from wizard
+    fn delete_ai_wizard_settings(&mut self) {
+        if self.ai_wizard.is_default_ai {
+            self.profiles_config.default_ai = None;
+        } else if let Some(profile_name) = &self.ai_wizard.profile_name {
+            if let Some(profile) = self.profiles_config.profiles.get_mut(profile_name) {
+                profile.ai = None;
+            }
+        }
+        self.save_profiles();
+        self.ai_wizard.close();
+        if let Some(prev_screen) = self.screen_stack.pop() {
+            self.screen = prev_screen;
+        }
+        self.load_profiles();
     }
 
     fn persist_environment(&mut self) {
@@ -2421,6 +2564,19 @@ impl Model {
                     if let Some(prev_screen) = self.screen_stack.pop() {
                         self.screen = prev_screen;
                     }
+                } else if matches!(self.screen, Screen::AISettingsWizard) {
+                    // Go back in AI wizard or close if at first step
+                    if self.ai_wizard.show_delete_confirm {
+                        self.ai_wizard.cancel_delete();
+                    } else {
+                        self.ai_wizard.prev_step();
+                        if !self.ai_wizard.visible {
+                            // Wizard was closed
+                            if let Some(prev_screen) = self.screen_stack.pop() {
+                                self.screen = prev_screen;
+                            }
+                        }
+                    }
                 } else if let Some(prev_screen) = self.screen_stack.pop() {
                     self.screen = prev_screen;
                 }
@@ -2443,6 +2599,7 @@ impl Model {
                 // Update spinner animation
                 self.branch_list.tick_spinner();
                 self.apply_branch_list_updates();
+                self.apply_branch_summary_updates();
                 self.apply_pr_title_updates();
                 self.apply_safety_updates();
                 self.apply_worktree_updates();
@@ -2470,6 +2627,7 @@ impl Model {
                 Screen::Error => self.error.scroll_down(),
                 Screen::Profiles => self.profiles.select_next(),
                 Screen::Environment => self.environment.select_next(),
+                Screen::AISettingsWizard => self.ai_wizard.select_next_model(),
                 Screen::Confirm => {}
             },
             Message::SelectPrev => match self.screen {
@@ -2490,6 +2648,7 @@ impl Model {
                 Screen::Error => self.error.scroll_up(),
                 Screen::Profiles => self.profiles.select_prev(),
                 Screen::Environment => self.environment.select_prev(),
+                Screen::AISettingsWizard => self.ai_wizard.select_prev_model(),
                 Screen::Confirm => {}
             },
             Message::PageUp => match self.screen {
@@ -2700,6 +2859,9 @@ impl Model {
                 Screen::Logs => {
                     self.logs.toggle_detail();
                 }
+                Screen::AISettingsWizard => {
+                    self.handle_ai_wizard_enter();
+                }
                 _ => {}
             },
             Message::Char(c) => {
@@ -2718,6 +2880,22 @@ impl Model {
                 } else if matches!(self.screen, Screen::Logs) && self.logs.is_searching {
                     // Log search mode - add character to search
                     self.logs.search.push(c);
+                } else if matches!(self.screen, Screen::AISettingsWizard) {
+                    if self.ai_wizard.show_delete_confirm {
+                        // Handle delete confirmation
+                        if c == 'y' || c == 'Y' {
+                            self.delete_ai_wizard_settings();
+                        } else if c == 'n' || c == 'N' {
+                            self.ai_wizard.cancel_delete();
+                        }
+                    } else if c == 'd' || c == 'D' {
+                        // Show delete confirmation (only in edit mode)
+                        if self.ai_wizard.is_edit {
+                            self.ai_wizard.show_delete();
+                        }
+                    } else if self.ai_wizard.is_text_input() {
+                        self.ai_wizard.insert_char(c);
+                    }
                 }
             }
             Message::Backspace => {
@@ -2734,6 +2912,10 @@ impl Model {
                 } else if matches!(self.screen, Screen::Logs) && self.logs.is_searching {
                     // Log search mode - delete character
                     self.logs.search.pop();
+                } else if matches!(self.screen, Screen::AISettingsWizard)
+                    && self.ai_wizard.is_text_input()
+                {
+                    self.ai_wizard.delete_char();
                 }
             }
             Message::CursorLeft => {
@@ -2746,6 +2928,10 @@ impl Model {
                 } else if matches!(self.screen, Screen::Confirm) {
                     // FR-029c: Left/Right toggle selection in confirm dialog
                     self.confirm.toggle_selection();
+                } else if matches!(self.screen, Screen::AISettingsWizard)
+                    && self.ai_wizard.is_text_input()
+                {
+                    self.ai_wizard.cursor_left();
                 }
             }
             Message::CursorRight => {
@@ -2758,6 +2944,10 @@ impl Model {
                 } else if matches!(self.screen, Screen::Confirm) {
                     // FR-029c: Left/Right toggle selection in confirm dialog
                     self.confirm.toggle_selection();
+                } else if matches!(self.screen, Screen::AISettingsWizard)
+                    && self.ai_wizard.is_text_input()
+                {
+                    self.ai_wizard.cursor_right();
                 }
             }
             Message::RefreshData => {
@@ -3591,7 +3781,7 @@ impl Model {
         // Profiles, Environment, and Logs screens don't need header
         let needs_header = !matches!(
             base_screen,
-            Screen::Profiles | Screen::Environment | Screen::Logs
+            Screen::Profiles | Screen::Environment | Screen::Logs | Screen::AISettingsWizard
         );
         let header_height = if needs_header { 6 } else { 0 };
 
@@ -3661,6 +3851,7 @@ impl Model {
             Screen::Error => render_error(&self.error, frame, chunks[1]),
             Screen::Profiles => render_profiles(&self.profiles, frame, chunks[1]),
             Screen::Environment => render_environment(&mut self.environment, frame, chunks[1]),
+            Screen::AISettingsWizard => render_ai_wizard(&self.ai_wizard, frame, chunks[1]),
             Screen::Confirm => {}
         }
 
@@ -3842,6 +4033,13 @@ impl Model {
                     "[Enter] Edit | [n] New | [d] Delete (profile)/Disable (OS) | [r] Reset (override) | [Esc] Back"
                 }
             }
+            Screen::AISettingsWizard => {
+                if self.ai_wizard.show_delete_confirm {
+                    "[y] Confirm Delete | [n] Cancel"
+                } else {
+                    self.ai_wizard.step_title()
+                }
+            }
         }
     }
 
@@ -3879,6 +4077,7 @@ impl Model {
     fn text_input_active(&self) -> bool {
         matches!(self.screen, Screen::Profiles) && self.profiles.create_mode
             || matches!(self.screen, Screen::Environment) && self.environment.edit_mode
+            || matches!(self.screen, Screen::AISettingsWizard) && self.ai_wizard.is_text_input()
     }
 
     fn handle_text_input_key(&mut self, key: KeyEvent, enter_is_press: bool) -> Option<Message> {
@@ -4581,6 +4780,7 @@ mod tests {
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
     use gwt_core::git::Branch;
     use gwt_core::git::DivergenceStatus;
+    use gwt_core::git::BranchSummary;
     use std::sync::mpsc;
 
     fn sample_tool_entry(tool_id: &str) -> ToolSessionEntry {
@@ -4844,6 +5044,102 @@ mod tests {
 
         assert!(model.session_poll_deferred);
         assert_eq!(model.last_session_poll, Some(previous));
+    }
+
+    #[test]
+    fn test_branch_summary_update_ignores_non_selected_branch() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+
+        let branches = vec![
+            BranchItem {
+                name: "feature/one".to_string(),
+                branch_type: BranchType::Local,
+                is_current: true,
+                has_worktree: true,
+                worktree_path: Some("/path".to_string()),
+                worktree_status: WorktreeStatus::Active,
+                has_changes: false,
+                has_unpushed: false,
+                divergence: gwt_core::git::DivergenceStatus::UpToDate,
+                has_remote_counterpart: true,
+                remote_name: None,
+                safe_to_cleanup: Some(true),
+                safety_status: SafetyStatus::Safe,
+                is_unmerged: false,
+                last_commit_timestamp: None,
+                last_tool_usage: None,
+                last_tool_id: None,
+                last_session_id: None,
+                is_selected: false,
+                pr_title: None,
+                pr_number: None,
+                pr_url: None,
+            },
+            BranchItem {
+                name: "feature/two".to_string(),
+                branch_type: BranchType::Local,
+                is_current: false,
+                has_worktree: true,
+                worktree_path: Some("/path2".to_string()),
+                worktree_status: WorktreeStatus::Active,
+                has_changes: false,
+                has_unpushed: false,
+                divergence: gwt_core::git::DivergenceStatus::UpToDate,
+                has_remote_counterpart: true,
+                remote_name: None,
+                safe_to_cleanup: Some(true),
+                safety_status: SafetyStatus::Safe,
+                is_unmerged: false,
+                last_commit_timestamp: None,
+                last_tool_usage: None,
+                last_tool_id: None,
+                last_session_id: None,
+                is_selected: false,
+                pr_title: None,
+                pr_number: None,
+                pr_url: None,
+            },
+        ];
+
+        model.branch_list = BranchListState::new().with_branches(branches);
+        model.branch_list.selected = 0;
+
+        let mut existing = BranchSummary::new("feature/one");
+        existing.errors.commits = Some("keep".to_string());
+        model.branch_list.branch_summary = Some(existing);
+
+        let (tx, rx) = mpsc::channel();
+        model.branch_summary_rx = Some(rx);
+
+        let mut ignored = BranchSummary::new("feature/two");
+        ignored.errors.commits = Some("ignored".to_string());
+        tx.send(BranchSummaryUpdate {
+            branch: "feature/two".to_string(),
+            summary: ignored,
+        })
+        .unwrap();
+
+        model.apply_branch_summary_updates();
+
+        let current = model.branch_list.branch_summary.as_ref().expect("summary");
+        assert_eq!(current.branch_name, "feature/one");
+        assert_eq!(current.errors.commits.as_deref(), Some("keep"));
+
+        let (tx2, rx2) = mpsc::channel();
+        model.branch_summary_rx = Some(rx2);
+
+        let mut applied = BranchSummary::new("feature/one");
+        applied.errors.commits = Some("applied".to_string());
+        tx2.send(BranchSummaryUpdate {
+            branch: "feature/one".to_string(),
+            summary: applied,
+        })
+        .unwrap();
+
+        model.apply_branch_summary_updates();
+        let current = model.branch_list.branch_summary.as_ref().expect("summary");
+        assert_eq!(current.errors.commits.as_deref(), Some("applied"));
     }
 
     #[test]

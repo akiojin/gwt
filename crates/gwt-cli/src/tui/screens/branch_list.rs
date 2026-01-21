@@ -11,7 +11,7 @@ use gwt_core::worktree::Worktree;
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use ratatui::{prelude::*, widgets::*};
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 use unicode_width::UnicodeWidthStr;
 
@@ -192,6 +192,19 @@ pub struct PrInfo {
     pub title: String,
     pub number: u64,
     pub url: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BranchSummaryRequest {
+    pub branch: String,
+    pub repo_root: PathBuf,
+    pub branch_item: BranchItem,
+}
+
+#[derive(Debug, Clone)]
+pub struct BranchSummaryUpdate {
+    pub branch: String,
+    pub summary: BranchSummary,
 }
 
 /// Worktree status
@@ -992,70 +1005,117 @@ impl BranchListState {
         }
     }
 
-    /// Update branch summary for the currently selected branch (SPEC-4b893dae T206)
-    ///
-    /// Fetches commit log and change stats from the repository.
-    /// Should be called when selection changes.
-    pub fn update_branch_summary(&mut self, repo_root: &Path) {
+    /// Prepare branch summary loading state for the selected branch.
+    /// Returns a request payload for background fetch when needed.
+    pub fn prepare_branch_summary(&mut self, repo_root: &Path) -> Option<BranchSummaryRequest> {
         let Some(branch) = self.selected_branch().cloned() else {
             self.branch_summary = None;
-            return;
+            return None;
         };
 
-        if self
+        let selected_changed = self
             .branch_summary
             .as_ref()
             .map(|summary| summary.branch_name.as_str())
-            != Some(branch.name.as_str())
-        {
+            != Some(branch.name.as_str());
+
+        if selected_changed {
             self.session_scroll_offset = 0;
         }
 
-        // Create base summary
-        let mut summary = BranchSummary::new(&branch.name);
-
-        // Set worktree path if available
-        if let Some(wt_path) = &branch.worktree_path {
-            summary = summary.with_worktree_path(Some(std::path::PathBuf::from(wt_path)));
+        if !selected_changed && self.branch_summary.is_some() {
+            return None;
         }
 
-        // Try to fetch commit log
-        // For branches with worktree, use the worktree path; otherwise use repo root
+        let mut summary = BranchSummary::new(&branch.name);
+        if let Some(wt_path) = &branch.worktree_path {
+            summary = summary.with_worktree_path(Some(PathBuf::from(wt_path)));
+            summary.loading.stats = true;
+        }
+        summary.loading.commits = true;
+        summary.loading.meta = true;
+
+        if self.ai_enabled {
+            if let Some(summary_data) = self.session_summary_cache.get(&branch.name) {
+                summary = summary.with_session_summary(summary_data.clone());
+            } else if self.session_summary_inflight.contains(&branch.name) {
+                summary.loading.session_summary = true;
+            }
+        }
+
+        self.branch_summary = Some(summary);
+
+        Some(BranchSummaryRequest {
+            branch: branch.name.clone(),
+            repo_root: repo_root.to_path_buf(),
+            branch_item: branch,
+        })
+    }
+
+    pub fn apply_branch_summary_update(&mut self, update: BranchSummaryUpdate) {
+        let Some(selected) = self.selected_branch() else {
+            return;
+        };
+        if selected.name != update.branch {
+            return;
+        }
+
+        let mut summary = update.summary;
+        if let Some(current) = self.branch_summary.as_ref() {
+            if current.branch_name == update.branch {
+                summary.session_summary = current.session_summary.clone();
+                summary.loading.session_summary = current.loading.session_summary;
+                summary.errors.session_summary = current.errors.session_summary.clone();
+            }
+        }
+        self.branch_summary = Some(summary);
+    }
+
+    /// Build branch summary data in background.
+    pub fn build_branch_summary(repo_root: &Path, branch: &BranchItem) -> BranchSummary {
+        let mut summary = BranchSummary::new(&branch.name);
+        if let Some(wt_path) = &branch.worktree_path {
+            summary = summary.with_worktree_path(Some(PathBuf::from(wt_path)));
+        }
+
         let repo_path = branch
             .worktree_path
             .as_ref()
-            .map(std::path::PathBuf::from)
+            .map(PathBuf::from)
             .unwrap_or_else(|| repo_root.to_path_buf());
 
-        if let Ok(repo) = Repository::open(&repo_path) {
-            // Fetch commit log (max 5 commits)
-            match repo.get_commit_log(5) {
-                Ok(commits) => {
-                    summary = summary.with_commits(commits);
-                }
-                Err(e) => {
-                    summary.errors.commits = Some(e.to_string());
-                }
-            }
-
-            // Fetch change stats only if worktree exists
-            if branch.worktree_path.is_some() {
-                match repo.get_diff_stats() {
-                    Ok(mut stats) => {
-                        // Integrate existing safety check data
-                        stats.has_uncommitted = branch.has_changes;
-                        stats.has_unpushed = branch.has_unpushed;
-                        summary = summary.with_stats(stats);
+        match Repository::open(&repo_path) {
+            Ok(repo) => {
+                match repo.get_commit_log(5) {
+                    Ok(commits) => {
+                        summary = summary.with_commits(commits);
                     }
                     Err(e) => {
-                        summary.errors.stats = Some(e.to_string());
+                        summary.errors.commits = Some(e.to_string());
                     }
+                }
+
+                if branch.worktree_path.is_some() {
+                    match repo.get_diff_stats() {
+                        Ok(mut stats) => {
+                            stats.has_uncommitted = branch.has_changes;
+                            stats.has_unpushed = branch.has_unpushed;
+                            summary = summary.with_stats(stats);
+                        }
+                        Err(e) => {
+                            summary.errors.stats = Some(e.to_string());
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                summary.errors.commits = Some(e.to_string());
+                if branch.worktree_path.is_some() {
+                    summary.errors.stats = Some(e.to_string());
                 }
             }
         }
 
-        // Set metadata from branch data
-        // Extract ahead/behind from DivergenceStatus
         let (ahead, behind) = match &branch.divergence {
             DivergenceStatus::Ahead(a) => (*a, 0),
             DivergenceStatus::Behind(b) => (0, *b),
@@ -1072,15 +1132,7 @@ impl BranchListState {
         };
         summary = summary.with_meta(meta);
 
-        if self.ai_enabled {
-            if let Some(summary_data) = self.session_summary_cache.get(&branch.name) {
-                summary = summary.with_session_summary(summary_data.clone());
-            } else if self.session_summary_inflight.contains(&branch.name) {
-                summary.loading.session_summary = true;
-            }
-        }
-
-        self.branch_summary = Some(summary);
+        summary
     }
 
     pub fn session_summary_cached(&self, branch: &str) -> bool {
@@ -2266,8 +2318,10 @@ fn render_footer(frame: &mut Frame, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gwt_core::git::CommitEntry;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use std::path::Path;
 
     fn sample_branch(name: &str) -> BranchItem {
         BranchItem {
@@ -2310,6 +2364,30 @@ mod tests {
         assert_eq!(state.spinner_char(), '/');
         state.spinner_frame = SPINNER_FRAMES.len() * 5;
         assert_eq!(state.spinner_char(), '|');
+    }
+
+    #[test]
+    fn test_prepare_branch_summary_resets_loading() {
+        let branches = vec![sample_branch("feature/one"), sample_branch("feature/two")];
+        let mut state = BranchListState::new().with_branches(branches);
+
+        let mut existing = BranchSummary::new("feature/one");
+        existing.commits = vec![CommitEntry {
+            hash: "abc1234".to_string(),
+            message: "feat: existing".to_string(),
+        }];
+        state.branch_summary = Some(existing);
+
+        state.selected = 1;
+        let request = state.prepare_branch_summary(Path::new("/repo"));
+        assert!(request.is_some());
+
+        let summary = state.branch_summary.as_ref().expect("summary");
+        assert_eq!(summary.branch_name, "feature/two");
+        assert!(summary.loading.commits);
+        assert!(summary.loading.meta);
+        assert!(summary.loading.stats);
+        assert!(summary.commits.is_empty());
     }
 
     #[test]

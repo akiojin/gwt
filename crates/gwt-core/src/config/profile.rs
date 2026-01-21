@@ -85,15 +85,12 @@ pub struct ResolvedAISettings {
 }
 
 impl AISettings {
-    /// Resolve AI settings with defaults and environment fallbacks
+    /// Resolve AI settings (no environment variable fallback - settings must be explicit)
     pub fn resolved(&self) -> ResolvedAISettings {
-        let endpoint = resolve_endpoint(&self.endpoint);
-        let api_key = resolve_api_key(&self.api_key);
-        let model = resolve_model(&self.model);
         ResolvedAISettings {
-            endpoint,
-            api_key,
-            model,
+            endpoint: self.endpoint.trim().to_string(),
+            api_key: self.api_key.trim().to_string(),
+            model: self.model.trim().to_string(),
         }
     }
 
@@ -110,43 +107,7 @@ fn default_endpoint() -> String {
 }
 
 fn default_model() -> String {
-    "gpt-4o-mini".to_string()
-}
-
-fn resolve_endpoint(value: &str) -> String {
-    let trimmed = value.trim();
-    if !trimmed.is_empty() {
-        return trimmed.to_string();
-    }
-    if let Ok(env_value) = std::env::var("OPENAI_API_BASE") {
-        let env_trimmed = env_value.trim();
-        if !env_trimmed.is_empty() {
-            return env_trimmed.to_string();
-        }
-    }
-    default_endpoint()
-}
-
-fn resolve_model(value: &str) -> String {
-    let trimmed = value.trim();
-    if !trimmed.is_empty() {
-        return trimmed.to_string();
-    }
-    if let Ok(env_value) = std::env::var("OPENAI_MODEL") {
-        let env_trimmed = env_value.trim();
-        if !env_trimmed.is_empty() {
-            return env_trimmed.to_string();
-        }
-    }
-    default_model()
-}
-
-fn resolve_api_key(value: &str) -> String {
-    let trimmed = value.trim();
-    if !trimmed.is_empty() {
-        return trimmed.to_string();
-    }
-    std::env::var("OPENAI_API_KEY").unwrap_or_default()
+    String::new() // No default - must be selected via wizard
 }
 
 /// Profiles configuration stored on disk
@@ -264,10 +225,7 @@ fn set_private_permissions(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
     use tempfile::TempDir;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_profile_builder() {
@@ -308,51 +266,39 @@ mod tests {
 
     #[test]
     fn test_ai_settings_resolved_defaults() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        std::env::remove_var("OPENAI_API_KEY");
-        std::env::remove_var("OPENAI_API_BASE");
-        std::env::remove_var("OPENAI_MODEL");
-
+        // AISettings::default() uses #[derive(Default)], so all fields are empty
+        // The serde default functions (default_endpoint, default_model) are only used during deserialization
         let settings = AISettings::default();
         let resolved = settings.resolved();
-        assert_eq!(resolved.endpoint, "https://api.openai.com/v1");
-        assert_eq!(resolved.model, "gpt-4o-mini");
+        assert_eq!(resolved.endpoint, "");
+        assert_eq!(resolved.model, "");
         assert_eq!(resolved.api_key, "");
     }
 
     #[test]
-    fn test_ai_settings_env_fallbacks() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let prev_key = std::env::var_os("OPENAI_API_KEY");
-        let prev_base = std::env::var_os("OPENAI_API_BASE");
-        let prev_model = std::env::var_os("OPENAI_MODEL");
+    fn test_ai_settings_serde_defaults() {
+        // When deserializing YAML with missing fields, serde defaults are applied
+        let yaml = "{}";
+        let settings: AISettings = serde_yaml::from_str(yaml).unwrap();
+        let resolved = settings.resolved();
+        assert_eq!(resolved.endpoint, "https://api.openai.com/v1"); // serde default
+        assert_eq!(resolved.model, ""); // No default model
+        assert_eq!(resolved.api_key, "");
+    }
 
-        std::env::set_var("OPENAI_API_KEY", "env-key");
-        std::env::set_var("OPENAI_API_BASE", "http://localhost:11434/v1");
-        std::env::set_var("OPENAI_MODEL", "llama3.2");
-
+    #[test]
+    fn test_ai_settings_no_env_fallback() {
+        // Environment variables are NOT used as fallback (settings must be explicit)
         let settings = AISettings {
             endpoint: "".to_string(),
             api_key: "".to_string(),
             model: "".to_string(),
         };
         let resolved = settings.resolved();
-        assert_eq!(resolved.endpoint, "http://localhost:11434/v1");
-        assert_eq!(resolved.model, "llama3.2");
-        assert_eq!(resolved.api_key, "env-key");
-
-        match prev_key {
-            Some(value) => std::env::set_var("OPENAI_API_KEY", value),
-            None => std::env::remove_var("OPENAI_API_KEY"),
-        }
-        match prev_base {
-            Some(value) => std::env::set_var("OPENAI_API_BASE", value),
-            None => std::env::remove_var("OPENAI_API_BASE"),
-        }
-        match prev_model {
-            Some(value) => std::env::set_var("OPENAI_MODEL", value),
-            None => std::env::remove_var("OPENAI_MODEL"),
-        }
+        // Should return empty strings, not environment variable values
+        assert_eq!(resolved.endpoint, "");
+        assert_eq!(resolved.model, "");
+        assert_eq!(resolved.api_key, "");
     }
 
     #[test]
