@@ -3240,6 +3240,10 @@ impl Model {
         };
 
         self.start_launch_preparation(request);
+
+        // Close wizard immediately so user can see launch progress in branch list
+        self.wizard.visible = false;
+        self.screen = Screen::BranchList;
     }
 
     fn start_launch_preparation(&mut self, request: LaunchRequest) {
