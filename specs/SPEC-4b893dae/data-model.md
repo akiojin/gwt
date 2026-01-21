@@ -335,7 +335,7 @@ pub struct SessionSummary {
     pub task_overview: Option<String>,
     /// 短文要約（1-2文）
     pub short_summary: Option<String>,
-    /// バレットポイント一覧（2-3件）
+    /// バレットポイント一覧（件数は重要度に応じて可変）
     pub bullet_points: Vec<String>,
     /// セッションメトリクス
     pub metrics: SessionMetrics,
