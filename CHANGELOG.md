@@ -1,6 +1,25 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [6.7.0] - 2026-01-21
+
+### Bug Fixes
+
+- Hookイベント名直指定に対応 (#710)
+- Async branch summary fetch (#714)
+- 起動時にhookを再登録 (#715)
+- Prevent session summary truncation (#716)
+
+### Features
+
+- ブランチ単位でタブ状態を記憶する機能を追加 (#711)
+- /releaseコマンドをLLMベースに変更 (#712)
+- AI設定ウィザードによる疎通チェック機能を追加 (#713)
+
+### Miscellaneous Tasks
+
+- Update Cargo.lock
+
 ## [6.6.0] - 2026-01-21
 
 ### Miscellaneous Tasks
