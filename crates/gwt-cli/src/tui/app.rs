@@ -45,11 +45,11 @@ use super::screens::environment::EditField;
 use super::screens::pane_list::PaneListState;
 use super::screens::split_layout::{calculate_split_layout, SplitLayoutState};
 use super::screens::{
-    collect_os_env, render_branch_list, render_confirm, render_environment, render_error,
-    render_help, render_logs, render_profiles, render_settings, render_wizard,
-    render_worktree_create, BranchItem, BranchListState, BranchType, CodingAgent, ConfirmState,
-    DetailPanelTab, EnvironmentState, ErrorState, ExecutionMode, HelpState, LogsState,
-    ProfilesState, QuickStartEntry, ReasoningLevel, SettingsState, WizardConfirmResult,
+    collect_os_env, render_ai_wizard, render_branch_list, render_confirm, render_environment,
+    render_error, render_help, render_logs, render_profiles, render_settings, render_wizard,
+    render_worktree_create, AIWizardState, BranchItem, BranchListState, BranchType, CodingAgent,
+    ConfirmState, DetailPanelTab, EnvironmentState, ErrorState, ExecutionMode, HelpState,
+    LogsState, ProfilesState, QuickStartEntry, ReasoningLevel, SettingsState, WizardConfirmResult,
     WizardState, WorktreeCreateState,
 };
 
@@ -267,6 +267,8 @@ pub struct Model {
     environment: EnvironmentState,
     /// Wizard popup state
     wizard: WizardState,
+    /// AI settings wizard state (FR-100)
+    ai_wizard: AIWizardState,
     /// Status message
     status_message: Option<String>,
     /// Status message timestamp (for auto-clear)
@@ -337,6 +339,8 @@ pub enum Screen {
     Error,
     Profiles,
     Environment,
+    /// AI settings wizard (FR-100)
+    AISettingsWizard,
 }
 
 /// Messages (Events in Elm Architecture)
@@ -428,6 +432,7 @@ impl Model {
             profiles_config: ProfilesConfig::default(),
             environment: EnvironmentState::new(),
             wizard: WizardState::new(),
+            ai_wizard: AIWizardState::new(),
             status_message: None,
             status_message_time: None,
             launch_status: None,
@@ -2094,30 +2099,123 @@ impl Model {
     }
 
     fn open_default_ai_editor(&mut self) {
-        let (ai_enabled, ai_endpoint, ai_api_key, ai_model) = match &self.profiles_config.default_ai
-        {
-            Some(ai) => (
-                ai.is_enabled(),
-                ai.endpoint.clone(),
-                ai.api_key.clone(),
-                ai.model.clone(),
-            ),
-            None => {
-                let defaults = AISettings::default();
-                (false, defaults.endpoint, String::new(), defaults.model)
+        // FR-100: Use AI settings wizard for default AI settings
+        if let Some(ai) = &self.profiles_config.default_ai {
+            // Edit existing settings
+            self.ai_wizard.open_edit(
+                true, // is_default_ai
+                None, // no profile name
+                &ai.endpoint,
+                &ai.api_key,
+                &ai.model,
+            );
+        } else {
+            // Create new settings
+            self.ai_wizard.open_new(true, None);
+        }
+        self.screen_stack.push(self.screen.clone());
+        self.screen = Screen::AISettingsWizard;
+    }
+
+    /// Open AI settings wizard for a specific profile
+    fn open_profile_ai_editor(&mut self, profile_name: &str) {
+        // FR-100: Use AI settings wizard for profile AI settings
+        if let Some(profile) = self.profiles_config.profiles.get(profile_name) {
+            if let Some(ai) = &profile.ai {
+                // Edit existing settings
+                self.ai_wizard.open_edit(
+                    false, // not default AI
+                    Some(profile_name.to_string()),
+                    &ai.endpoint,
+                    &ai.api_key,
+                    &ai.model,
+                );
+            } else {
+                // Create new settings
+                self.ai_wizard
+                    .open_new(false, Some(profile_name.to_string()));
             }
+            self.screen_stack.push(self.screen.clone());
+            self.screen = Screen::AISettingsWizard;
+        }
+    }
+
+    /// Handle Enter key in AI settings wizard
+    fn handle_ai_wizard_enter(&mut self) {
+        use super::screens::ai_wizard::AIWizardStep;
+
+        match self.ai_wizard.step {
+            AIWizardStep::Endpoint => {
+                self.ai_wizard.next_step();
+            }
+            AIWizardStep::ApiKey => {
+                // Start fetching models
+                self.ai_wizard.step = AIWizardStep::FetchingModels;
+                self.ai_wizard.loading_message = Some("Fetching models...".to_string());
+
+                // Fetch models (blocking)
+                match self.ai_wizard.fetch_models() {
+                    Ok(()) => {
+                        self.ai_wizard.fetch_complete();
+                    }
+                    Err(e) => {
+                        self.ai_wizard.fetch_failed(&e);
+                    }
+                }
+            }
+            AIWizardStep::FetchingModels => {
+                // Do nothing while fetching
+            }
+            AIWizardStep::ModelSelect => {
+                // Save AI settings
+                self.save_ai_wizard_settings();
+                self.ai_wizard.close();
+                if let Some(prev_screen) = self.screen_stack.pop() {
+                    self.screen = prev_screen;
+                }
+                self.load_profiles();
+            }
+        }
+    }
+
+    /// Save AI settings from wizard
+    fn save_ai_wizard_settings(&mut self) {
+        let model = self
+            .ai_wizard
+            .current_model()
+            .map(|m| m.id.clone())
+            .unwrap_or_default();
+        let settings = AISettings {
+            endpoint: self.ai_wizard.endpoint.trim().to_string(),
+            api_key: self.ai_wizard.api_key.trim().to_string(),
+            model,
         };
 
-        self.environment = EnvironmentState::new().with_ai_only(true).with_ai_settings(
-            ai_enabled,
-            ai_endpoint,
-            ai_api_key,
-            ai_model,
-        );
-        self.environment.selected = 0;
-        self.environment.refresh_selection();
-        self.screen_stack.push(self.screen.clone());
-        self.screen = Screen::Environment;
+        if self.ai_wizard.is_default_ai {
+            self.profiles_config.default_ai = Some(settings);
+        } else if let Some(profile_name) = &self.ai_wizard.profile_name {
+            if let Some(profile) = self.profiles_config.profiles.get_mut(profile_name) {
+                profile.ai = Some(settings);
+            }
+        }
+        self.save_profiles();
+    }
+
+    /// Delete AI settings from wizard
+    fn delete_ai_wizard_settings(&mut self) {
+        if self.ai_wizard.is_default_ai {
+            self.profiles_config.default_ai = None;
+        } else if let Some(profile_name) = &self.ai_wizard.profile_name {
+            if let Some(profile) = self.profiles_config.profiles.get_mut(profile_name) {
+                profile.ai = None;
+            }
+        }
+        self.save_profiles();
+        self.ai_wizard.close();
+        if let Some(prev_screen) = self.screen_stack.pop() {
+            self.screen = prev_screen;
+        }
+        self.load_profiles();
     }
 
     fn persist_environment(&mut self) {
@@ -2327,6 +2425,19 @@ impl Model {
                     if let Some(prev_screen) = self.screen_stack.pop() {
                         self.screen = prev_screen;
                     }
+                } else if matches!(self.screen, Screen::AISettingsWizard) {
+                    // Go back in AI wizard or close if at first step
+                    if self.ai_wizard.show_delete_confirm {
+                        self.ai_wizard.cancel_delete();
+                    } else {
+                        self.ai_wizard.prev_step();
+                        if !self.ai_wizard.visible {
+                            // Wizard was closed
+                            if let Some(prev_screen) = self.screen_stack.pop() {
+                                self.screen = prev_screen;
+                            }
+                        }
+                    }
                 } else if let Some(prev_screen) = self.screen_stack.pop() {
                     self.screen = prev_screen;
                 }
@@ -2376,6 +2487,7 @@ impl Model {
                 Screen::Error => self.error.scroll_down(),
                 Screen::Profiles => self.profiles.select_next(),
                 Screen::Environment => self.environment.select_next(),
+                Screen::AISettingsWizard => self.ai_wizard.select_next_model(),
                 Screen::Confirm => {}
             },
             Message::SelectPrev => match self.screen {
@@ -2396,6 +2508,7 @@ impl Model {
                 Screen::Error => self.error.scroll_up(),
                 Screen::Profiles => self.profiles.select_prev(),
                 Screen::Environment => self.environment.select_prev(),
+                Screen::AISettingsWizard => self.ai_wizard.select_prev_model(),
                 Screen::Confirm => {}
             },
             Message::PageUp => match self.screen {
@@ -2606,6 +2719,9 @@ impl Model {
                 Screen::Logs => {
                     self.logs.toggle_detail();
                 }
+                Screen::AISettingsWizard => {
+                    self.handle_ai_wizard_enter();
+                }
                 _ => {}
             },
             Message::Char(c) => {
@@ -2624,6 +2740,22 @@ impl Model {
                 } else if matches!(self.screen, Screen::Logs) && self.logs.is_searching {
                     // Log search mode - add character to search
                     self.logs.search.push(c);
+                } else if matches!(self.screen, Screen::AISettingsWizard) {
+                    if self.ai_wizard.show_delete_confirm {
+                        // Handle delete confirmation
+                        if c == 'y' || c == 'Y' {
+                            self.delete_ai_wizard_settings();
+                        } else if c == 'n' || c == 'N' {
+                            self.ai_wizard.cancel_delete();
+                        }
+                    } else if c == 'd' || c == 'D' {
+                        // Show delete confirmation (only in edit mode)
+                        if self.ai_wizard.is_edit {
+                            self.ai_wizard.show_delete();
+                        }
+                    } else if self.ai_wizard.is_text_input() {
+                        self.ai_wizard.insert_char(c);
+                    }
                 }
             }
             Message::Backspace => {
@@ -2640,6 +2772,10 @@ impl Model {
                 } else if matches!(self.screen, Screen::Logs) && self.logs.is_searching {
                     // Log search mode - delete character
                     self.logs.search.pop();
+                } else if matches!(self.screen, Screen::AISettingsWizard)
+                    && self.ai_wizard.is_text_input()
+                {
+                    self.ai_wizard.delete_char();
                 }
             }
             Message::CursorLeft => {
@@ -2652,6 +2788,10 @@ impl Model {
                 } else if matches!(self.screen, Screen::Confirm) {
                     // FR-029c: Left/Right toggle selection in confirm dialog
                     self.confirm.toggle_selection();
+                } else if matches!(self.screen, Screen::AISettingsWizard)
+                    && self.ai_wizard.is_text_input()
+                {
+                    self.ai_wizard.cursor_left();
                 }
             }
             Message::CursorRight => {
@@ -2664,6 +2804,10 @@ impl Model {
                 } else if matches!(self.screen, Screen::Confirm) {
                     // FR-029c: Left/Right toggle selection in confirm dialog
                     self.confirm.toggle_selection();
+                } else if matches!(self.screen, Screen::AISettingsWizard)
+                    && self.ai_wizard.is_text_input()
+                {
+                    self.ai_wizard.cursor_right();
                 }
             }
             Message::RefreshData => {
@@ -3496,7 +3640,7 @@ impl Model {
         // Profiles, Environment, and Logs screens don't need header
         let needs_header = !matches!(
             base_screen,
-            Screen::Profiles | Screen::Environment | Screen::Logs
+            Screen::Profiles | Screen::Environment | Screen::Logs | Screen::AISettingsWizard
         );
         let header_height = if needs_header { 6 } else { 0 };
 
@@ -3566,6 +3710,7 @@ impl Model {
             Screen::Error => render_error(&self.error, frame, chunks[1]),
             Screen::Profiles => render_profiles(&self.profiles, frame, chunks[1]),
             Screen::Environment => render_environment(&mut self.environment, frame, chunks[1]),
+            Screen::AISettingsWizard => render_ai_wizard(&self.ai_wizard, frame, chunks[1]),
             Screen::Confirm => {}
         }
 
@@ -3747,6 +3892,13 @@ impl Model {
                     "[Enter] Edit | [n] New | [d] Delete (profile)/Disable (OS) | [r] Reset (override) | [Esc] Back"
                 }
             }
+            Screen::AISettingsWizard => {
+                if self.ai_wizard.show_delete_confirm {
+                    "[y] Confirm Delete | [n] Cancel"
+                } else {
+                    self.ai_wizard.step_title()
+                }
+            }
         }
     }
 
@@ -3784,6 +3936,7 @@ impl Model {
     fn text_input_active(&self) -> bool {
         matches!(self.screen, Screen::Profiles) && self.profiles.create_mode
             || matches!(self.screen, Screen::Environment) && self.environment.edit_mode
+            || matches!(self.screen, Screen::AISettingsWizard) && self.ai_wizard.is_text_input()
     }
 
     fn handle_text_input_key(&mut self, key: KeyEvent, enter_is_press: bool) -> Option<Message> {
