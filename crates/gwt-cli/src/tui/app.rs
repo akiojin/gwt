@@ -3836,16 +3836,10 @@ impl Model {
                             .constraints([Constraint::Length(1), Constraint::Min(0)])
                             .split(chunks[1]);
 
-                        // Render status bar with spinner
-                        let spinner_char = ['|', '/', '-', '\\'][((std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_millis()
-                            / 100)
-                            % 4) as usize];
+                        // Render status bar with star indicator
                         let status_line = Line::from(vec![
                             Span::styled(
-                                format!(" {} ", spinner_char),
+                                " * ",
                                 Style::default()
                                     .fg(Color::Yellow)
                                     .add_modifier(Modifier::BOLD),
