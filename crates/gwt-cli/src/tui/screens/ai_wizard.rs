@@ -353,8 +353,8 @@ pub fn render_ai_wizard(state: &AIWizardState, frame: &mut Frame, area: Rect) {
     }
 
     // Calculate popup size (60% width, 50% height)
-    let popup_width = (area.width * 60 / 100).max(50).min(80);
-    let popup_height = (area.height * 50 / 100).max(15).min(25);
+    let popup_width = (area.width * 60 / 100).clamp(50, 80);
+    let popup_height = (area.height * 50 / 100).clamp(15, 25);
 
     let popup_area = Rect {
         x: area.x + (area.width - popup_width) / 2,
