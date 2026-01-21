@@ -1092,34 +1092,30 @@ impl Model {
                             missing: false,
                         });
                     }
-                    Err(err) => {
-                        match err {
-                            AIError::IncompleteSummary => {
-                                let _ = tx.send(SessionSummaryUpdate {
-                                    branch: task.branch,
-                                    session_id: task.session_id,
-                                    summary: None,
-                                    error: None,
-                                    warning: Some(
-                                        "Incomplete summary; keeping previous".to_string(),
-                                    ),
-                                    mtime,
-                                    missing: false,
-                                });
-                            }
-                            other => {
-                                let _ = tx.send(SessionSummaryUpdate {
-                                    branch: task.branch,
-                                    session_id: task.session_id,
-                                    summary: None,
-                                    error: Some(format_ai_error(other)),
-                                    warning: None,
-                                    mtime,
-                                    missing: false,
-                                });
-                            }
+                    Err(err) => match err {
+                        AIError::IncompleteSummary => {
+                            let _ = tx.send(SessionSummaryUpdate {
+                                branch: task.branch,
+                                session_id: task.session_id,
+                                summary: None,
+                                error: None,
+                                warning: Some("Incomplete summary; keeping previous".to_string()),
+                                mtime,
+                                missing: false,
+                            });
                         }
-                    }
+                        other => {
+                            let _ = tx.send(SessionSummaryUpdate {
+                                branch: task.branch,
+                                session_id: task.session_id,
+                                summary: None,
+                                error: Some(format_ai_error(other)),
+                                warning: None,
+                                mtime,
+                                missing: false,
+                            });
+                        }
+                    },
                 }
             }
         });
@@ -4779,8 +4775,8 @@ mod tests {
     use crate::tui::screens::{BranchItem, BranchListState, BranchType};
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
     use gwt_core::git::Branch;
-    use gwt_core::git::DivergenceStatus;
     use gwt_core::git::BranchSummary;
+    use gwt_core::git::DivergenceStatus;
     use std::sync::mpsc;
 
     fn sample_tool_entry(tool_id: &str) -> ToolSessionEntry {
@@ -5004,8 +5000,8 @@ mod tests {
     #[test]
     fn test_session_file_is_quiet_threshold() {
         let now = SystemTime::now();
-        let recent = now
-            - Duration::from_secs(SESSION_SUMMARY_QUIET_PERIOD.as_secs().saturating_sub(1));
+        let recent =
+            now - Duration::from_secs(SESSION_SUMMARY_QUIET_PERIOD.as_secs().saturating_sub(1));
         assert!(!session_file_is_quiet(recent, now));
 
         let old = now - Duration::from_secs(SESSION_SUMMARY_QUIET_PERIOD.as_secs() + 1);
@@ -5035,7 +5031,9 @@ mod tests {
             .selected_branch()
             .map(|b| b.name.clone())
             .unwrap();
-        model.branch_list.mark_session_summary_inflight(&branch_name);
+        model
+            .branch_list
+            .mark_session_summary_inflight(&branch_name);
 
         let previous = Instant::now() - SESSION_POLL_INTERVAL - Duration::from_secs(1);
         model.last_session_poll = Some(previous);
