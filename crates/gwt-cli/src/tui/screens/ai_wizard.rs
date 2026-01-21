@@ -450,8 +450,7 @@ fn render_endpoint_step(state: &AIWizardState, frame: &mut Frame, area: Rect) {
         .split(area);
 
     // Label
-    let label = Paragraph::new("API Endpoint URL:")
-        .style(Style::default().fg(Color::White));
+    let label = Paragraph::new("API Endpoint URL:").style(Style::default().fg(Color::White));
     frame.render_widget(label, chunks[0]);
 
     // Input field
@@ -476,16 +475,12 @@ fn render_endpoint_step(state: &AIWizardState, frame: &mut Frame, area: Rect) {
 
     // Cursor
     if !state.endpoint.is_empty() {
-        frame.set_cursor_position((
-            input_inner.x + state.endpoint_cursor as u16,
-            input_inner.y,
-        ));
+        frame.set_cursor_position((input_inner.x + state.endpoint_cursor as u16, input_inner.y));
     }
 
     // Error or help text
     if let Some(error) = &state.error {
-        let error_text = Paragraph::new(error.as_str())
-            .style(Style::default().fg(Color::Red));
+        let error_text = Paragraph::new(error.as_str()).style(Style::default().fg(Color::Red));
         frame.render_widget(error_text, chunks[2]);
     } else {
         let help = Paragraph::new("Examples: https://api.openai.com/v1, http://localhost:11434/v1")
@@ -531,20 +526,18 @@ fn render_api_key_step(state: &AIWizardState, frame: &mut Frame, area: Rect) {
 
     // Cursor
     if !state.api_key.is_empty() {
-        frame.set_cursor_position((
-            input_inner.x + state.api_key_cursor as u16,
-            input_inner.y,
-        ));
+        frame.set_cursor_position((input_inner.x + state.api_key_cursor as u16, input_inner.y));
     }
 
     // Error or help text
     if let Some(error) = &state.error {
-        let error_text = Paragraph::new(error.as_str())
-            .style(Style::default().fg(Color::Red));
+        let error_text = Paragraph::new(error.as_str()).style(Style::default().fg(Color::Red));
         frame.render_widget(error_text, chunks[2]);
     } else {
-        let help = Paragraph::new("For OpenAI, enter your API key. For local LLMs like Ollama, leave empty.")
-            .style(Style::default().fg(Color::DarkGray));
+        let help = Paragraph::new(
+            "For OpenAI, enter your API key. For local LLMs like Ollama, leave empty.",
+        )
+        .style(Style::default().fg(Color::DarkGray));
         frame.render_widget(help, chunks[2]);
     }
 }
@@ -557,7 +550,11 @@ fn render_fetching_step(state: &AIWizardState, frame: &mut Frame, area: Rect) {
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(40), Constraint::Length(3), Constraint::Min(0)])
+        .constraints([
+            Constraint::Percentage(40),
+            Constraint::Length(3),
+            Constraint::Min(0),
+        ])
         .split(area);
 
     let loading = Paragraph::new(vec![
@@ -614,8 +611,11 @@ fn render_model_select_step(state: &AIWizardState, frame: &mut Frame, area: Rect
             })
             .collect();
 
-        let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::DarkGray)));
+        let list = List::new(items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::DarkGray)),
+        );
         frame.render_widget(list, chunks[1]);
     }
 
@@ -626,8 +626,7 @@ fn render_model_select_step(state: &AIWizardState, frame: &mut Frame, area: Rect
         } else {
             String::new()
         };
-        let info_text = Paragraph::new(info)
-            .style(Style::default().fg(Color::DarkGray));
+        let info_text = Paragraph::new(info).style(Style::default().fg(Color::DarkGray));
         frame.render_widget(info_text, chunks[2]);
     }
 }

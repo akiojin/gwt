@@ -48,9 +48,9 @@ use super::screens::{
     collect_os_env, render_ai_wizard, render_branch_list, render_confirm, render_environment,
     render_error, render_help, render_logs, render_profiles, render_settings, render_wizard,
     render_worktree_create, AIWizardState, BranchItem, BranchListState, BranchType, CodingAgent,
-    ConfirmState, DetailPanelTab, EnvironmentState, ErrorState, ExecutionMode, HelpState, LogsState,
-    ProfilesState, QuickStartEntry, ReasoningLevel, SettingsState, WizardConfirmResult, WizardState,
-    WorktreeCreateState,
+    ConfirmState, DetailPanelTab, EnvironmentState, ErrorState, ExecutionMode, HelpState,
+    LogsState, ProfilesState, QuickStartEntry, ReasoningLevel, SettingsState, WizardConfirmResult,
+    WizardState, WorktreeCreateState,
 };
 
 fn resolve_orphaned_agent_name(
@@ -2132,7 +2132,8 @@ impl Model {
                 );
             } else {
                 // Create new settings
-                self.ai_wizard.open_new(false, Some(profile_name.to_string()));
+                self.ai_wizard
+                    .open_new(false, Some(profile_name.to_string()));
             }
             self.screen_stack.push(self.screen.clone());
             self.screen = Screen::AISettingsWizard;

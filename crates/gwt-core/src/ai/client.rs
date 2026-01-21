@@ -380,11 +380,7 @@ impl AIClient {
             }
         }
 
-        let response = self
-            .client
-            .get(url.clone())
-            .headers(headers)
-            .send();
+        let response = self.client.get(url.clone()).headers(headers).send();
 
         match response {
             Ok(resp) => {
@@ -443,12 +439,10 @@ fn parse_models_response(body: &str) -> Result<Vec<ModelInfo>, AIError> {
 pub fn format_error_for_display(error: &AIError) -> String {
     match error {
         AIError::Unauthorized => "401 Unauthorized - Check your API key".to_string(),
-        AIError::RateLimited { retry_after } => {
-            match retry_after {
-                Some(secs) => format!("429 Rate Limited - Retry after {} seconds", secs),
-                None => "429 Rate Limited - Please try again later".to_string(),
-            }
-        }
+        AIError::RateLimited { retry_after } => match retry_after {
+            Some(secs) => format!("429 Rate Limited - Retry after {} seconds", secs),
+            None => "429 Rate Limited - Please try again later".to_string(),
+        },
         AIError::ServerError(msg) => format!("Server error: {}", msg),
         AIError::NetworkError(msg) => {
             if msg.contains("timed out") {
@@ -570,7 +564,9 @@ mod tests {
 
     #[test]
     fn test_format_error_rate_limited() {
-        let error = AIError::RateLimited { retry_after: Some(60) };
+        let error = AIError::RateLimited {
+            retry_after: Some(60),
+        };
         let msg = format_error_for_display(&error);
         assert!(msg.contains("429"));
         assert!(msg.contains("60"));
