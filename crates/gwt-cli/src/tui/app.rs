@@ -2884,13 +2884,14 @@ impl Model {
                         } else if c == 'n' || c == 'N' {
                             self.ai_wizard.cancel_delete();
                         }
+                    } else if self.ai_wizard.is_text_input() {
+                        // Text input mode: insert character (including 'd')
+                        self.ai_wizard.insert_char(c);
                     } else if c == 'd' || c == 'D' {
-                        // Show delete confirmation (only in edit mode)
+                        // Show delete confirmation (only in edit mode, non-text-input steps)
                         if self.ai_wizard.is_edit {
                             self.ai_wizard.show_delete();
                         }
-                    } else if self.ai_wizard.is_text_input() {
-                        self.ai_wizard.insert_char(c);
                     }
                 }
             }
