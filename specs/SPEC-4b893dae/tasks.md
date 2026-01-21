@@ -23,6 +23,15 @@
 - [ ] **T8908** [Test] `crates/gwt-cli/src/tui/app.rs` にポーリング再入防止/静止期間のユニットテストを追加（モック時間）
 - [ ] **T8909** `cargo test -p gwt-core` と `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
 
+## 追加作業: ハイライト件数の動的化 (2026-01-21)
+
+- [x] **T8910** [P] [共通] `specs/SPEC-4b893dae/spec.md` / `specs/SPEC-4b893dae/plan.md` / `specs/SPEC-4b893dae/data-model.md` にハイライト件数の可変要件を追記
+- [x] **T8911** [Test] `crates/gwt-core/src/ai/summary.rs` にハイライト件数が3件を超えても保持されるテストを追加
+- [x] **T8912** [Impl] `crates/gwt-core/src/ai/summary.rs` のプロンプト文面を更新し、ハイライト件数を可変にする
+- [x] **T8913** [Impl] `crates/gwt-core/src/ai/summary.rs` の要約パースでハイライト件数を切り詰めないよう修正
+- [x] **T8914** [Impl] `crates/gwt-cli/src/tui/screens/branch_list.rs` のハイライト表示を全件表示に変更
+- [x] **T8915** `cargo test -p gwt-core` と `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
+
 ## ストーリー依存関係
 
 ```text

@@ -1,6 +1,16 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [6.8.0] - 2026-01-21
+
+### Features
+
+- Allow variable session summary highlights (#718)
+
+### Miscellaneous Tasks
+
+- Add .gwt-session.toml to .gitignore
+
 ## [6.7.0] - 2026-01-21
 
 ### Bug Fixes
