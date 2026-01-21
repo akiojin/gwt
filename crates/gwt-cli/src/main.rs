@@ -465,9 +465,9 @@ fn cmd_hook(action: HookAction) -> Result<(), GwtError> {
     match action {
         HookAction::Event { name } => handle_hook_event(&name),
         HookAction::EventAlias(args) => {
-            let name = args.first().ok_or_else(|| {
-                GwtError::Internal("Missing hook event name.".to_string())
-            })?;
+            let name = args
+                .first()
+                .ok_or_else(|| GwtError::Internal("Missing hook event name.".to_string()))?;
             if args.len() > 1 {
                 return Err(GwtError::Internal(format!(
                     "Unexpected hook arguments: {}",

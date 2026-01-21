@@ -193,8 +193,7 @@ mod tests {
 
     #[test]
     fn test_hook_parses_event_subcommand() {
-        let cli =
-            Cli::try_parse_from(["gwt", "hook", "event", "UserPromptSubmit"]).unwrap();
+        let cli = Cli::try_parse_from(["gwt", "hook", "event", "UserPromptSubmit"]).unwrap();
         match cli.command {
             Some(Commands::Hook {
                 action: HookAction::Event { name },
