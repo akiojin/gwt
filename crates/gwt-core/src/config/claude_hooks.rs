@@ -79,33 +79,41 @@ pub fn is_gwt_hooks_registered(settings_path: &Path) -> bool {
         Err(_) => return false,
     };
 
-    // Check if at least one gwt hook is registered (new format)
-    settings.hooks.values().any(|v| {
-        // New format: array of {matcher, hooks}
-        if let Some(arr) = v.as_array() {
-            arr.iter().any(|entry| {
-                if let Some(hooks) = entry.get("hooks").and_then(|h| h.as_array()) {
-                    hooks.iter().any(|hook| {
-                        hook.get("command")
-                            .and_then(|c| c.as_str())
-                            .map(|s| s.contains("gwt hook"))
-                            .unwrap_or(false)
-                    })
-                } else {
-                    // Legacy: array of strings
-                    entry
-                        .as_str()
+    settings_has_gwt_hooks(&settings)
+}
+
+fn settings_has_gwt_hooks(settings: &ClaudeSettings) -> bool {
+    settings
+        .hooks
+        .values()
+        .any(|value| value_has_gwt_hook(value))
+}
+
+fn value_has_gwt_hook(value: &serde_json::Value) -> bool {
+    // New format: array of {matcher, hooks}
+    if let Some(arr) = value.as_array() {
+        arr.iter().any(|entry| {
+            if let Some(hooks) = entry.get("hooks").and_then(|h| h.as_array()) {
+                hooks.iter().any(|hook| {
+                    hook.get("command")
+                        .and_then(|c| c.as_str())
                         .map(|s| s.contains("gwt hook"))
                         .unwrap_or(false)
-                }
-            })
-        } else if let Some(cmd) = v.as_str() {
-            // Legacy: single string
-            cmd.contains("gwt hook")
-        } else {
-            false
-        }
-    })
+                })
+            } else {
+                // Legacy: array of strings
+                entry
+                    .as_str()
+                    .map(|s| s.contains("gwt hook"))
+                    .unwrap_or(false)
+            }
+        })
+    } else if let Some(cmd) = value.as_str() {
+        // Legacy: single string
+        cmd.contains("gwt hook")
+    } else {
+        false
+    }
 }
 
 /// Create a gwt hook entry with matcher (for PreToolUse, PostToolUse)
@@ -212,6 +220,36 @@ fn register_gwt_hooks_with_exe_path(settings_path: &Path, exe_path: &str) -> Res
     std::fs::write(settings_path, content)?;
 
     Ok(())
+}
+
+/// Re-register gwt hooks to update the executable path.
+/// Returns true when hooks were re-registered.
+pub fn reregister_gwt_hooks(settings_path: &Path) -> Result<bool, GwtError> {
+    let exe_path = get_gwt_executable_path();
+    reregister_gwt_hooks_with_exe_path(settings_path, &exe_path)
+}
+
+fn reregister_gwt_hooks_with_exe_path(
+    settings_path: &Path,
+    exe_path: &str,
+) -> Result<bool, GwtError> {
+    if !settings_path.exists() {
+        return Ok(false);
+    }
+
+    let content = std::fs::read_to_string(settings_path)?;
+    let settings: ClaudeSettings =
+        serde_json::from_str(&content).map_err(|e| GwtError::ConfigParseError {
+            reason: e.to_string(),
+        })?;
+
+    if !settings_has_gwt_hooks(&settings) {
+        return Ok(false);
+    }
+
+    unregister_gwt_hooks(settings_path)?;
+    register_gwt_hooks_with_exe_path(settings_path, exe_path)?;
+    Ok(true)
 }
 
 /// Check if an entry is a gwt hook (new format)
@@ -487,5 +525,58 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("gwt hook UserPromptSubmit"));
+    }
+
+    #[test]
+    fn test_reregister_updates_exe_path_and_preserves_custom_hooks() {
+        let temp_dir = TempDir::new().unwrap();
+        let settings_path = temp_dir.path().join(".claude").join("settings.json");
+
+        register_gwt_hooks_with_exe_path(&settings_path, "old-gwt").unwrap();
+
+        let content = std::fs::read_to_string(&settings_path).unwrap();
+        let mut settings: ClaudeSettings = serde_json::from_str(&content).unwrap();
+        let user_prompt_hook = settings.hooks.get_mut("UserPromptSubmit").unwrap();
+        let arr = user_prompt_hook
+            .as_array_mut()
+            .expect("Expected array format");
+        arr.push(serde_json::json!({
+            "hooks": [{
+                "type": "command",
+                "command": "echo custom"
+            }]
+        }));
+        std::fs::write(
+            &settings_path,
+            serde_json::to_string_pretty(&settings).unwrap(),
+        )
+        .unwrap();
+
+        let changed = reregister_gwt_hooks_with_exe_path(&settings_path, "new-gwt").unwrap();
+        assert!(changed);
+
+        let updated = std::fs::read_to_string(&settings_path).unwrap();
+        assert!(updated.contains("new-gwt hook UserPromptSubmit"));
+        assert!(!updated.contains("old-gwt hook UserPromptSubmit"));
+        assert!(updated.contains("new-gwt hook PreToolUse"));
+        assert!(updated.contains("new-gwt hook Stop"));
+        assert!(updated.contains("echo custom"));
+    }
+
+    #[test]
+    fn test_reregister_skips_when_no_gwt_hooks() {
+        let temp_dir = TempDir::new().unwrap();
+        let settings_path = temp_dir.path().join(".claude").join("settings.json");
+        std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+
+        let content = r#"{"hooks": {"CustomHook": "custom-command"}}"#;
+        std::fs::write(&settings_path, content).unwrap();
+        let before = std::fs::read_to_string(&settings_path).unwrap();
+
+        let changed = reregister_gwt_hooks_with_exe_path(&settings_path, "new-gwt").unwrap();
+        assert!(!changed);
+
+        let after = std::fs::read_to_string(&settings_path).unwrap();
+        assert_eq!(after, before);
     }
 }
