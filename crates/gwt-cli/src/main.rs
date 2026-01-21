@@ -1010,9 +1010,10 @@ fn execute_launch_plan(plan: LaunchPlan) -> Result<AgentExitKind, GwtError> {
     }
 
     // Spawn the agent process (FR-043: allows periodic timestamp updates)
-    let mut command = Command::new(&executable);
+    let (exec_name, exec_args) = apply_pty_wrapper(&executable, &command_args);
+    let mut command = Command::new(&exec_name);
     command
-        .args(&command_args)
+        .args(&exec_args)
         .current_dir(&config.worktree_path)
         .stdin(Stdio::inherit()) // Keep stdin for interactive input
         .stdout(Stdio::inherit())
@@ -1637,6 +1638,23 @@ fn apply_tty_stdio(command: &mut Command) {
         if let Ok(file) = stderr {
             command.stderr(Stdio::from(file));
         }
+    }
+}
+
+fn apply_pty_wrapper(executable: &str, args: &[String]) -> (String, Vec<String>) {
+    #[cfg(target_os = "macos")]
+    {
+        let mut wrapped_args = Vec::new();
+        wrapped_args.push("-q".to_string());
+        wrapped_args.push("/dev/null".to_string());
+        wrapped_args.push(executable.to_string());
+        wrapped_args.extend(args.iter().cloned());
+        return ("script".to_string(), wrapped_args);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        (executable.to_string(), args.to_vec())
     }
 }
 
