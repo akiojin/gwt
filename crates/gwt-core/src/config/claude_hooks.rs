@@ -83,10 +83,7 @@ pub fn is_gwt_hooks_registered(settings_path: &Path) -> bool {
 }
 
 fn settings_has_gwt_hooks(settings: &ClaudeSettings) -> bool {
-    settings
-        .hooks
-        .values()
-        .any(|value| value_has_gwt_hook(value))
+    settings.hooks.values().any(value_has_gwt_hook)
 }
 
 fn value_has_gwt_hook(value: &serde_json::Value) -> bool {
