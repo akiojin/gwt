@@ -11,6 +11,11 @@
 - 実装はシンプルに、開発者体験は最高品質に
 - CLI操作の直感性と効率性を技術的複雑さより優先
 
+### 🧩 Ratatui ガイドライン
+
+- CLI TUI は `ratatui` を利用
+- 端末描画で使用するアイコンは ASCII に統一し、全角/絵文字は避ける
+
 ### 📝 設計ガイドライン
 
 - 設計に関するドキュメントには、ソースコードを書かないこと
@@ -25,42 +30,46 @@
 
 ### 基本ルール
 
+- **指示を受けた場合、まず既存要件（spec.md）に追記可能かを調べ、次に要件化（Spec Kit による仕様策定）とTDD化を優先的に実行する。実装は要件とテストが確定した後に着手する。**
 - 作業（タスク）を完了したら、変更点を日本語でコミットログに追加して、コミット＆プッシュを必ず行う
 - 作業（タスク）は、最大限の並列化をして進める
-- 作業（タスク）は、最大限の細分化をしてToDoに登録する
+- 作業（タスク）は、最大限の細分化をしてPLANS.mdにやるべきことを出力する
 - `git rebase -i origin/main` はLLMでの失敗率が高いため禁止（必要な場合は人間が手動で整形すること）
 - Spec Kitを用いたSDD/TDDの絶対遵守を義務付ける。Spec Kit承認前およびSpec準拠のTDD完了前の実装着手を全面禁止し、違反タスクは即時差し戻す。
-- 作業（タスク）の開始前には、必ずToDoを登録した後に作業を開始する
 - 作業（タスク）は、忖度なしで進める
 - **エージェントはユーザーからの明示的な指示なく新規ブランチの作成・削除を行ってはならない。Worktreeは起動ブランチで作業を完結する設計。**
 
 ### コミットメッセージポリシー
 
-> 🚨 **コミットログは semantic-release が参照する唯一の真実であり、ここに齟齬があるとリリースバージョン・CHANGELOG 生成が即座に破綻します。commitlint を素通りさせることは絶対に許されません。**
+> 🚨 **コミットログはリリースワークフローがバージョン判定に使用する唯一の真実であり、ここに齟齬があるとリリースバージョン・CHANGELOG 生成が即座に破綻します。commitlint を素通りさせることは絶対に許されません。**
 
-- semantic-release によってバージョン判定とリリースノート生成を100%自動化しているため、コミットメッセージは例外なく Conventional Commits 形式（`feat:`/`fix:`/`docs:`/`chore:` ...）で記述する。
-- コミットを作成する前に、変更内容と Conventional Commits の種別（`feat`/`fix`/`docs` など）が 1 対 1 で一致しているかを厳格に突き合わせる。 semantic-release が付与するバージョン種別（major/minor/patch）がこの判定で決まるため、嘘の種類を付けた瞬間にバージョン管理が壊れる。
+- バージョン判定とリリースノート生成を Conventional Commits から自動化しているため、コミットメッセージは例外なく Conventional Commits 形式（`feat:`/`fix:`/`docs:`/`chore:` ...）で記述する。
+- コミットを作成する前に、変更内容と Conventional Commits の種別（`feat`/`fix`/`docs` など）が 1 対 1 で一致しているかを厳格に突き合わせる。バージョン種別（major/minor/patch）がこの判定で決まるため、嘘の種類を付けた瞬間にバージョン管理が壊れる。
 - ローカルでは `bunx commitlint --from HEAD~1 --to HEAD` などで必ず自己検証し、CI の commitlint に丸投げしない。エラーが出た状態で push しない。
-- `feat:` はマイナーバージョン、`fix:` はパッチ、`type!:` もしくは本文の `BREAKING CHANGE:` はメジャー扱いになる。 breaking change を含む場合は例外なく `!` か `BREAKING CHANGE:` を記載し、semantic-release に破壊的変更を認識させる。
-- 1コミットで複数タスクを抱き合わせない。変更内容とコミットメッセージの対応関係を明確に保ち、semantic-release の解析精度を担保する。
+- `feat:` はマイナーバージョン、`fix:` はパッチ、`type!:` もしくは本文の `BREAKING CHANGE:` はメジャー扱いになる。 breaking change を含む場合は例外なく `!` か `BREAKING CHANGE:` を記載し、破壊的変更を認識させる。
+- 1コミットで複数タスクを抱き合わせない。変更内容とコミットメッセージの対応関係を明確に保ち、解析精度を担保する。
 - `chore:` や `docs:` などリリース対象外のタイプでも必ずプレフィックスを付け、曖昧な自然文だけのコミットメッセージを禁止する。
 - コミット前に commitlint ルール（subject 空欄禁止・100文字以内など）を自己確認し、CI での差し戻しを防止する。
 
-### ローカル検証/実行ルール（bun）
+### ローカル検証/実行ルール（Rust）
 
-- このリポジトリのローカル検証・実行・CI/CDは bun を使用する
-- 依存インストール: `bun install`
-- ビルド: `bun run build`
-- 実行: `bunx .`（一発実行）または `bun run start`
-- グローバル実行: `bun add -g @akiojin/gwt` → `gwt`
+- このリポジトリのローカル検証・実行は Cargo を使用する
+- ビルド: `cargo build --release`
+- テスト: `cargo test`
+- Lint: `cargo clippy --all-targets --all-features -- -D warnings`
+- フォーマット: `cargo fmt`
+- 実行: `./target/release/gwt` または `cargo run`
+- npm配布: `bunx @akiojin/gwt` または `npm install -g @akiojin/gwt`
 
 ## コミュニケーションガイドライン
 
 - 回答は必ず日本語
+- CLIのユーザー向け出力は英語のみ（日本語の文言を表示しない）
 
 ## ドキュメント管理
 
 - ドキュメントはREADME.md/README.ja.mdに集約する
+- 仕様ファイルは必ず `specs/SPEC-????????/` （UUID8桁）配下に配置する。`specs/feature/*` など別階層への配置は禁止。
 
 ## コードクオリティガイドライン
 
@@ -79,9 +88,55 @@
 ## リリースワークフロー
 
 - feature/\* ブランチは develop へ Auto Merge し、develop で次回リリース候補を蓄積する。
-- `/release` コマンド（または `gh workflow run create-release.yml --ref develop`）で semantic-release のドライランを実行し、次のバージョンを決定して `release/vX.Y.Z` ブランチを自動作成する。
-- `release/vX.Y.Z` ブランチへの push をトリガーに `.github/workflows/release.yml` が以下を実行：
-  1. semantic-release で CHANGELOG/タグ/GitHub Release を作成
-  2. `release/vX.Y.Z` → `main` へ直接マージ
-  3. `release/vX.Y.Z` ブランチを削除
-- main への push をトリガーに `.github/workflows/publish.yml` が npm publish（設定時）と `main` → `develop` のバックマージを実行する。
+- `/release` コマンド（または `gh workflow run prepare-release.yml --ref develop`）で Release PR を作成:
+  - Conventional Commits を解析してバージョン自動判定（feat→minor, fix→patch, !→major）
+  - git-cliff で CHANGELOG.md を更新
+  - Cargo.toml, package.json のバージョンを更新
+  - release/YYYYMMDD-HHMMSS ブランチから main への PR を作成
+- Release PR が main にマージされると `.github/workflows/release.yml` が以下を自動実行:
+  - タグ・GitHub Release を作成
+  - クロスコンパイル済みバイナリを GitHub Release にアップロード
+  - npm へ公開（provenance 付き）
+
+## パッケージ公開状況
+
+> **重要**: 各プラットフォームのバージョンは独立して管理されており、一度公開したバージョンは再利用不可。リリース前に必ず各プラットフォームの最新バージョンを確認すること。
+
+| プラットフォーム | パッケージ名 | 確認コマンド |
+| -------------- | ----------- | ----------- |
+| npmjs | `@akiojin/gwt` | `npm view @akiojin/gwt version` |
+| GitHub Release | - | `gh release list --repo akiojin/gwt --limit 1` |
+
+### 次回リリース時の注意
+
+- 各プラットフォームのバージョンは一度公開すると再利用不可
+- リリース前に上記の確認コマンドで最新バージョンをチェックすること
+- npm の `latest` タグが古いバージョンを指している場合は手動で修正が必要:
+  `npm dist-tag add @akiojin/gwt@<version> latest`
+
+## 使用中の技術
+- Rust 2021 Edition (stable) + ratatui 0.29, crossterm 0.28, reqwest (blocking), serde_json, chrono (SPEC-4b893dae)
+- ファイルシステム（セッションファイル読み取り）、メモリキャッシュ (SPEC-4b893dae)
+
+- Rust (Stable) + Ratatui TUI フレームワーク
+- ファイル/ローカル Git メタデータ（DB なし）
+
+## プロジェクト構成
+
+```text
+├── Cargo.toml          # ワークスペース設定
+├── crates/
+│   ├── gwt-cli/        # CLIエントリポイント・TUI
+│   ├── gwt-core/       # コアライブラリ（worktree管理）
+│   ├── gwt-web/        # Webサーバー（将来）
+│   └── gwt-frontend/   # Webフロントエンド（将来）
+├── package.json        # npm配布用ラッパー
+├── bin/gwt.js          # バイナリラッパースクリプト
+└── scripts/postinstall.js  # バイナリダウンロードスクリプト
+```
+
+## 最近の変更
+- SPEC-4b893dae: 追加: Rust 2021 Edition (stable) + ratatui 0.29, crossterm 0.28, reqwest (blocking), serde_json, chrono
+
+- TypeScript/Bun から Rust への完全移行
+- ブランチ一覧は枠線表示・統計非表示に整理し、クリーンアップはWorktreeのあるブランチのみ対象

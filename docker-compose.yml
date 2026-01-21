@@ -1,20 +1,24 @@
 services:
   gwt:
-    build: .
-    container_name: gwt
+    build:
+      context: .
+      dockerfile: Dockerfile
     volumes:
       - .:/gwt
       - bash-history:/root/.bash_history_dir
-      - ./.docker/bash_history:/root/.bash_history
       - claude-config:/root/.claude
       - codex-config:/root/.codex
       - ${HOME:-~}/.codex:/root/.codex-host:ro
     ports:
-      - "3000:3000"
+      - 6400:6400
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       - NPM_USER
       - NPM_EMAIL
       - NPM_PASS
+      - GIT_USER_EMAIL
+      - GIT_USER_NAME
       - GITHUB_TOKEN
       - GITHUB_PERSONAL_ACCESS_TOKEN
       - GITHUB_USERNAME
@@ -24,9 +28,29 @@ services:
       - MAX_MCP_OUTPUT_TOKENS
       - ENABLE_BACKGROUND_TASKS=1
       - FORCE_AUTO_BACKGROUND_TASKS=1
+      - PORT=3000
     stdin_open: true
     tty: true
     working_dir: /gwt
+
+  playwright-novnc:
+    image: ghcr.io/xtr-dev/mcp-playwright-novnc:latest
+    platform: ${PLAYWRIGHT_NOVNC_PLATFORM:-linux/amd64}
+    ports:
+      - 6080:6080
+      - 3080:3080
+    volumes:
+      - .:/gwt
+    environment:
+      - SCREEN_WIDTH=1920
+      - SCREEN_HEIGHT=1080
+      - SCREEN_DEPTH=24
+      - MCP_BROWSER=chromium
+      - PLAYWRIGHT_BASE_URL=http://gwt:3000
+    working_dir: /gwt
+    shm_size: 2gb
+    depends_on:
+      - gwt
 
 volumes:
   bash-history: {}

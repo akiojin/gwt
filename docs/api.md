@@ -194,7 +194,7 @@ calculateNewVersion("1.2.3", "minor"); // => '1.3.0'
 
 **戻り値:** `WorktreeInfo`オブジェクトの配列
 
-## AI Tool Integration
+## Coding Agent Integration
 
 ### Claude Code (`src/claude.ts`)
 

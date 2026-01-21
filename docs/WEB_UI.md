@@ -1,6 +1,6 @@
 # Web UI 機能
 
-gwt のWeb UI機能により、ブラウザからGitブランチとWorktreeを管理し、AI Toolセッションを起動できます。
+gwt のWeb UI機能により、ブラウザからGitブランチとWorktreeを管理し、Coding Agent セッションを起動できます。
 
 ## 起動方法
 
@@ -14,6 +14,8 @@ bun run start:web
 # または直接実行
 bunx . serve
 ```
+
+通常の `gwt` 起動でも Web UI はバックグラウンドで自動起動します。CLI なしで Web UI だけを起動したい場合に上記コマンドを使ってください。
 
 デフォルトでは `http://localhost:3000` でアクセス可能です。
 
@@ -36,7 +38,7 @@ bunx . serve
 - Worktree管理
   - Worktree作成ボタン
   - Worktree削除（TODO）
-- AI Toolセッション起動
+- Coding Agent セッション起動
   - Claude Code起動
   - Codex CLI起動
   - ブラウザ端末エミュレータ（xterm.js）でリアルタイム操作
@@ -80,27 +82,27 @@ POST /api/worktrees                  # 作成
 DELETE /api/worktrees?path=<path>    # 削除
 ```
 
-### AI Toolセッション
+### Coding Agent セッション
 
 ```http
 GET /api/sessions                    # 一覧取得
 GET /api/sessions/:sessionId         # 詳細取得
 POST /api/sessions                   # 起動
   Body: {
-    toolType: "claude-code" | "codex-cli" | "custom",
-    toolName?: string,
+    agentType: "claude-code" | "codex-cli" | "custom",
+    agentName?: string,
     mode: "normal" | "continue" | "resume",
     worktreePath: string
   }
 DELETE /api/sessions/:sessionId      # 終了
 ```
 
-### カスタムAI Tool設定
+### カスタム Coding Agent 設定
 
 ```http
 GET /api/config                      # 取得
 PUT /api/config                      # 更新
-  Body: { tools: CustomAITool[] }
+  Body: { codingAgents: CodingAgent[] }
 ```
 
 ## WebSocket

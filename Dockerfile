@@ -1,35 +1,33 @@
 # Node.js 22 (LTS) ベースイメージ
 FROM node:22-bookworm
 
+ARG ZIG_VERSION=0.15.2
+ARG ZIG_SHA256=02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239
+
 RUN apt-get update && apt-get install -y \
     jq \
     vim \
     ripgrep \
+    tmux \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Global tools with pnpm
-RUN npm add -g \
-    pnpm@latest \
-    bun@latest \
-    typescript@latest \
-    eslint@latest \
-    prettier@latest \
-    @commitlint/cli@latest \
-    @commitlint/config-conventional@latest 
+# Install Zig
+RUN curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz && \
+    echo "${ZIG_SHA256}  /tmp/zig.tar.xz" | sha256sum -c - && \
+    tar -C /opt -xf /tmp/zig.tar.xz && \
+    ln -s "/opt/zig-x86_64-linux-${ZIG_VERSION}/zig" /usr/local/bin/zig && \
+    rm /tmp/zig.tar.xz
 
-# Setup pnpm global bin directory manually
-ENV PNPM_HOME="/root/.local/share/pnpm"
-ENV PATH="$PNPM_HOME:$PATH"
+# Global tools (minimal - other tools are in devDependencies)
+RUN npm add -g bun@latest
 
-RUN mkdir -p "$PNPM_HOME" && \
-    pnpm config set global-bin-dir "$PNPM_HOME" && \
-    echo 'export PNPM_HOME="/root/.local/share/pnpm"' >> /root/.bashrc && \
-    echo 'export PATH="$PNPM_HOME:$PATH"' >> /root/.bashrc
+# Install Rust
+RUN /bin/bash -c "set -o pipefail && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+ENV PATH="/root/.cargo/bin:${PATH}"
 
 # Install uv/uvx
-RUN curl -fsSL https://astral.sh/uv/install.sh | bash
-ENV PATH="/root/.cargo/bin:${PATH}"
+RUN /bin/bash -c "set -o pipefail && curl -fsSL https://astral.sh/uv/install.sh | bash"
 
 # GitHub CLIのインストール
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | gpg --dearmor -o /usr/share/keyrings/githubcli-archive-keyring.gpg && \
