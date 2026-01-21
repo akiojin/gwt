@@ -1,5 +1,6 @@
 //! TUI Screens
 
+pub mod ai_wizard;
 pub mod branch_list;
 pub mod confirm;
 pub mod environment;
@@ -13,6 +14,7 @@ pub mod split_layout;
 pub mod wizard;
 pub mod worktree_create;
 
+pub use ai_wizard::{render_ai_wizard, AIWizardState};
 pub use branch_list::{
     render_branch_list, BranchItem, BranchListState, BranchType, DetailPanelTab,
 };
