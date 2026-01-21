@@ -1279,8 +1279,11 @@ impl Model {
                 branch_list.version = Some(env!("CARGO_PKG_VERSION").to_string());
                 // FR-074b: タブ記憶を復元し、削除されたブランチのキャッシュをクリーンアップ
                 branch_list.restore_branch_tab_cache(branch_tab_cache);
-                let remaining_branches: std::collections::HashSet<String> =
-                    branch_list.branches.iter().map(|b| b.name.clone()).collect();
+                let remaining_branches: std::collections::HashSet<String> = branch_list
+                    .branches
+                    .iter()
+                    .map(|b| b.name.clone())
+                    .collect();
                 branch_list.cleanup_branch_tab_cache(&remaining_branches);
                 self.branch_list = branch_list;
                 // SPEC-4b893dae: Update branch summary after branches are loaded
