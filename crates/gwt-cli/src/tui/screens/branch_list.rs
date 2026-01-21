@@ -3066,10 +3066,7 @@ mod tests {
 
         // 新規ブランチ作成後の自動更新をシミュレート
         let saved_tab = state.detail_panel_tab;
-        let updated_branches = vec![
-            sample_branch("main"),
-            sample_branch("feature/new-branch"),
-        ];
+        let updated_branches = vec![sample_branch("main"), sample_branch("feature/new-branch")];
         state = BranchListState::new().with_branches(updated_branches);
         state.detail_panel_tab = saved_tab;
 
