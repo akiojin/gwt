@@ -4,7 +4,7 @@ pub mod client;
 pub mod session_parser;
 pub mod summary;
 
-pub use client::{AIClient, AIError, ChatMessage};
+pub use client::{format_error_for_display, AIClient, AIError, ChatMessage, ModelInfo};
 pub use session_parser::{
     AgentType, ClaudeSessionParser, CodexSessionParser, GeminiSessionParser, MessageRole,
     OpenCodeSessionParser, ParsedSession, SessionMessage, SessionParseError, SessionParser,
