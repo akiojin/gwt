@@ -1265,6 +1265,8 @@ impl Model {
                 let session_inflight = self.branch_list.clone_session_inflight();
                 let session_missing = self.branch_list.clone_session_missing();
                 let detail_tab = self.branch_list.detail_panel_tab;
+                // FR-074b: ブランチ単位タブ記憶を保持
+                let branch_tab_cache = self.branch_list.take_branch_tab_cache();
                 let mut branch_list = BranchListState::new().with_branches(update.branches);
                 branch_list.detail_panel_tab = detail_tab;
                 branch_list.active_profile = self.profiles_config.active.clone();
@@ -1275,6 +1277,14 @@ impl Model {
                 branch_list.set_repo_web_url(self.branch_list.repo_web_url().cloned());
                 branch_list.working_directory = Some(self.repo_root.display().to_string());
                 branch_list.version = Some(env!("CARGO_PKG_VERSION").to_string());
+                // FR-074b: タブ記憶を復元し、削除されたブランチのキャッシュをクリーンアップ
+                branch_list.restore_branch_tab_cache(branch_tab_cache);
+                let remaining_branches: std::collections::HashSet<String> = branch_list
+                    .branches
+                    .iter()
+                    .map(|b| b.name.clone())
+                    .collect();
+                branch_list.cleanup_branch_tab_cache(&remaining_branches);
                 self.branch_list = branch_list;
                 // SPEC-4b893dae: Update branch summary after branches are loaded
                 self.refresh_branch_summary();
@@ -2351,6 +2361,11 @@ impl Model {
             Message::SelectNext => match self.screen {
                 Screen::BranchList => {
                     self.branch_list.select_next();
+                    // FR-074: ブランチ選択変更時にタブ状態を復元
+                    if let Some(branch) = self.branch_list.selected_branch() {
+                        let branch_name = branch.name.clone();
+                        self.branch_list.apply_tab_for_branch(&branch_name);
+                    }
                     // SPEC-4b893dae: Update branch summary on selection change
                     self.refresh_branch_summary();
                 }
@@ -2366,6 +2381,11 @@ impl Model {
             Message::SelectPrev => match self.screen {
                 Screen::BranchList => {
                     self.branch_list.select_prev();
+                    // FR-074: ブランチ選択変更時にタブ状態を復元
+                    if let Some(branch) = self.branch_list.selected_branch() {
+                        let branch_name = branch.name.clone();
+                        self.branch_list.apply_tab_for_branch(&branch_name);
+                    }
                     // SPEC-4b893dae: Update branch summary on selection change
                     self.refresh_branch_summary();
                 }
@@ -2384,6 +2404,11 @@ impl Model {
                         self.branch_list.scroll_session_page_up();
                     } else {
                         self.branch_list.page_up(10);
+                        // FR-074: ブランチ選択変更時にタブ状態を復元
+                        if let Some(branch) = self.branch_list.selected_branch() {
+                            let branch_name = branch.name.clone();
+                            self.branch_list.apply_tab_for_branch(&branch_name);
+                        }
                         // SPEC-4b893dae: Update branch summary on selection change
                         self.refresh_branch_summary();
                     }
@@ -2399,6 +2424,11 @@ impl Model {
                         self.branch_list.scroll_session_page_down();
                     } else {
                         self.branch_list.page_down(10);
+                        // FR-074: ブランチ選択変更時にタブ状態を復元
+                        if let Some(branch) = self.branch_list.selected_branch() {
+                            let branch_name = branch.name.clone();
+                            self.branch_list.apply_tab_for_branch(&branch_name);
+                        }
                         // SPEC-4b893dae: Update branch summary on selection change
                         self.refresh_branch_summary();
                     }
@@ -2411,6 +2441,11 @@ impl Model {
             Message::GoHome => match self.screen {
                 Screen::BranchList => {
                     self.branch_list.go_home();
+                    // FR-074: ブランチ選択変更時にタブ状態を復元
+                    if let Some(branch) = self.branch_list.selected_branch() {
+                        let branch_name = branch.name.clone();
+                        self.branch_list.apply_tab_for_branch(&branch_name);
+                    }
                     // SPEC-4b893dae: Update branch summary on selection change
                     self.refresh_branch_summary();
                 }
@@ -2421,6 +2456,11 @@ impl Model {
             Message::GoEnd => match self.screen {
                 Screen::BranchList => {
                     self.branch_list.go_end();
+                    // FR-074: ブランチ選択変更時にタブ状態を復元
+                    if let Some(branch) = self.branch_list.selected_branch() {
+                        let branch_name = branch.name.clone();
+                        self.branch_list.apply_tab_for_branch(&branch_name);
+                    }
                     // SPEC-4b893dae: Update branch summary on selection change
                     self.refresh_branch_summary();
                 }
@@ -2702,7 +2742,13 @@ impl Model {
                 Screen::Settings => self.settings.next_category(),
                 Screen::BranchList => {
                     if !self.branch_list.filter_mode {
-                        self.branch_list.detail_panel_tab.toggle();
+                        // FR-074a: Tab切り替え時に即座にブランチのタブ記憶を更新
+                        if let Some(branch) = self.branch_list.selected_branch() {
+                            let branch_name = branch.name.clone();
+                            self.branch_list.toggle_tab_for_branch(&branch_name);
+                        } else {
+                            self.branch_list.detail_panel_tab.toggle();
+                        }
                         self.refresh_branch_summary();
                         if self.branch_list.detail_panel_tab == DetailPanelTab::Session {
                             self.maybe_request_session_summary_for_selected(false);

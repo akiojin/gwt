@@ -179,10 +179,22 @@ US6 (AI設定) ─────────────────────�
 
 - [ ] **T555** [US4a] T554の後に `crates/gwt-cli/src/tui/screens/branch_list.rs` でタブ状態に応じてタイトルを切り替え（`Details` / `Session`）
 - [ ] **T556** [US4a] T555の後に `crates/gwt-cli/src/tui/screens/branch_list.rs` でタブ状態に応じて描画メソッドを切り替え
-- [ ] **T557** [US4a] T556の後に `crates/gwt-cli/src/tui/screens/branch_list.rs` でブランチ切り替え時にタブ状態を維持
+- [x] **T557** [US4a] T556の後に `crates/gwt-cli/src/tui/screens/branch_list.rs` でブランチ切り替え時にタブ状態を維持（グローバル）
 - [x] **T558** [US4a] T557の後に ブランチ詳細/セッション要約パネル枠へTab切り替えヒントを追加
 
-**チェックポイント**: Tabキーでタブ切り替えが動作する
+### ブランチ単位のタブ記憶 (FR-074シリーズ)
+
+- [x] **T561** [US4a] `crates/gwt-cli/src/tui/screens/branch_list.rs` に `branch_tab_cache: HashMap<String, DetailPanelTab>` フィールドを追加
+- [x] **T562** [US4a] T561の後に `get_tab_for_branch(&self, branch_name: &str) -> DetailPanelTab` メソッドを実装（キャッシュヒット時は記憶値、ミス時はDetails）
+- [x] **T563** [US4a] T562の後に `set_tab_for_branch(&mut self, branch_name: &str, tab: DetailPanelTab)` メソッドを実装
+- [x] **T564** [US4a] T563の後に Tab切り替え時（Tabキー押下時）に即座に `set_tab_for_branch` を呼び出すよう修正
+- [x] **T565** [US4a] T564の後に ブランチ選択変更時に `get_tab_for_branch` でタブ状態を復元するよう修正
+- [x] **T566** [US4a] T565の後に rキーリフレッシュ・自動更新時に `branch_tab_cache` を維持するよう修正
+- [x] **T567** [US4a] T566の後に ブランチリスト更新時に削除されたブランチのタブ記憶を破棄する `cleanup_branch_tab_cache` メソッドを実装
+- [x] **T568** [US4a] T567の後に 選択中ブランチが削除された場合、先頭ブランチに選択を移動するよう修正
+- [x] **T569** [Test] T568の後に ブランチ単位タブ記憶のユニットテストを追加（branch_list.rs内）
+
+**チェックポイント**: Tabキーでタブ切り替えが動作する＋ブランチ単位でタブ状態が記憶される
 
 ## フェーズ8: US4b - セッションパーサー (優先度: P0)
 
@@ -343,12 +355,12 @@ US6 (AI設定) ─────────────────────�
 
 | 項目 | 値 |
 |------|-----|
-| 総タスク数 | 74 |
+| 総タスク数 | 83 |
 | 完了済み | 40 |
-| 未完了 | 34 |
+| 未完了 | 43 |
 | フェーズ1-5（完了済み） | 26 |
 | フェーズ6（US6: AI設定） | 5 |
-| フェーズ7（US4a: タブ切り替え） | 7 |
+| フェーズ7（US4a: タブ切り替え） | 16 (含むブランチ単位タブ記憶9件) |
 | フェーズ8（US4b: パーサー） | 17 |
 | フェーズ9（US4: セッション要約） | 16 |
 | フェーズ10（統合） | 9 |
