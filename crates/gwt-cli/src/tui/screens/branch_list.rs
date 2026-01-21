@@ -1944,40 +1944,21 @@ fn render_details_panel(
         return;
     }
 
-    // Handle progress state
-    if let Some(progress) = state.status_progress_line() {
-        let title = panel_title_line(&summary.branch_name, DetailPanelTab::Details);
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan))
-            .title(title)
-            .title_bottom(panel_switch_hint())
-            .padding(Padding::new(PANEL_PADDING_X, PANEL_PADDING_X, 0, 0));
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-
-        let line = Line::from(vec![
-            Span::styled(
-                format!("{} ", state.spinner_char()),
-                Style::default().fg(Color::Yellow),
-            ),
-            Span::styled(progress, Style::default().fg(Color::Yellow)),
-        ]);
-        frame.render_widget(Paragraph::new(line), inner);
-        return;
-    }
-
     let selected_branch = state.selected_branch().cloned();
     let links = build_summary_links(state.repo_web_url(), selected_branch.as_ref());
 
-    // Render the full summary panel
+    // Get progress status line if active
+    let status_line = state.status_progress_line();
+
+    // Render the full summary panel with optional status line
     let panel = SummaryPanel::new(&summary)
         .with_tick(state.spinner_frame)
         .with_title(panel_title_line(
             &summary.branch_name,
             DetailPanelTab::Details,
         ))
-        .with_links(links);
+        .with_links(links)
+        .with_status_line(status_line);
 
     let link_regions = panel.render_with_links(frame, area);
     state.set_detail_links(link_regions);
