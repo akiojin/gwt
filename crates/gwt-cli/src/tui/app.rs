@@ -17,8 +17,8 @@ use gwt_core::ai::{
 };
 use gwt_core::config::get_branch_tool_history;
 use gwt_core::config::{
-    get_claude_settings_path, is_gwt_hooks_registered, register_gwt_hooks, save_session_entry,
-    AISettings, Profile, ProfilesConfig, ResolvedAISettings, ToolSessionEntry,
+    get_claude_settings_path, is_gwt_hooks_registered, register_gwt_hooks, reregister_gwt_hooks,
+    save_session_entry, AISettings, Profile, ProfilesConfig, ResolvedAISettings, ToolSessionEntry,
 };
 use gwt_core::error::GwtError;
 use gwt_core::git::{Branch, PrCache, Remote, Repository};
@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 const BRANCH_LIST_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(500);
 
@@ -499,15 +499,22 @@ impl Model {
 
         model.apply_entry_context(context);
 
-        // SPEC-861d8cdf T-104: Check if hook setup is needed on first startup
-        if model.tmux_mode.is_multi() {
-            if let Some(settings_path) = get_claude_settings_path() {
-                if !is_gwt_hooks_registered(&settings_path) {
-                    model.pending_hook_setup = true;
-                    model.confirm = ConfirmState::hook_setup();
-                    model.screen_stack.push(model.screen.clone());
-                    model.screen = Screen::Confirm;
-                }
+        if let Some(settings_path) = get_claude_settings_path() {
+            // SPEC-861d8cdf T-107: Re-register hooks on startup to sync gwt path
+            if let Err(e) = reregister_gwt_hooks(&settings_path) {
+                warn!(
+                    category = "tui",
+                    error = %e,
+                    "Failed to re-register gwt hooks"
+                );
+            }
+
+            // SPEC-861d8cdf T-104: Check if hook setup is needed on first startup
+            if model.tmux_mode.is_multi() && !is_gwt_hooks_registered(&settings_path) {
+                model.pending_hook_setup = true;
+                model.confirm = ConfirmState::hook_setup();
+                model.screen_stack.push(model.screen.clone());
+                model.screen = Screen::Confirm;
             }
         }
 
