@@ -60,7 +60,7 @@ impl CodexAgent {
         let authenticated = std::env::var("OPENAI_API_KEY").is_ok();
 
         Some(AgentInfo {
-            name: "Codex CLI".to_string(),
+            name: "Codex".to_string(),
             version,
             path: which::which("codex").ok(),
             authenticated,
@@ -250,7 +250,7 @@ pub fn codex_default_args(
 impl AgentTrait for CodexAgent {
     fn info(&self) -> AgentInfo {
         Self::detect().unwrap_or(AgentInfo {
-            name: "Codex CLI".to_string(),
+            name: "Codex".to_string(),
             version: "unknown".to_string(),
             path: None,
             authenticated: false,
@@ -285,12 +285,12 @@ impl AgentTrait for CodexAgent {
 
         let child = cmd
             .spawn()
-            .map_err(|e| GwtError::Internal(format!("Failed to spawn Codex CLI: {}", e)))?;
+            .map_err(|e| GwtError::Internal(format!("Failed to spawn Codex: {}", e)))?;
 
         let output = child
             .wait_with_output()
             .await
-            .map_err(|e| GwtError::Internal(format!("Failed to run Codex CLI: {}", e)))?;
+            .map_err(|e| GwtError::Internal(format!("Failed to run Codex: {}", e)))?;
 
         let duration = start.elapsed().as_millis() as u64;
 

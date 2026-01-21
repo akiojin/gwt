@@ -1,16 +1,164 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
-
-## [6.0.7] - 2026-01-15
+## [6.7.0] - 2026-01-21
 
 ### Bug Fixes
 
-- Clarify npm wrapper auto-download behavior in README
+- Hookイベント名直指定に対応 (#710)
+- Async branch summary fetch (#714)
+- 起動時にhookを再登録 (#715)
+- Prevent session summary truncation (#716)
+
+### Features
+
+- ブランチ単位でタブ状態を記憶する機能を追加 (#711)
+- /releaseコマンドをLLMベースに変更 (#712)
+- AI設定ウィザードによる疎通チェック機能を追加 (#713)
+
+### Miscellaneous Tasks
+
+- Update Cargo.lock
+
+## [6.6.0] - 2026-01-21
+
+### Miscellaneous Tasks
+
+- Merge main into develop
+
+## [6.5.1] - 2026-01-20
+
+### Bug Fixes
+
+- MacOSでscriptを使ってPTYを確保 (#706)
+
+### Features
+
+- エージェント起動中のブランチでも選択メニューを表示 (#707)
+
+## [6.5.0] - 2026-01-20
+
+### Bug Fixes
+
+- PullRequest構造体テストに不足フィールド追加
+- ブランチ一覧とサマリーパネルの余白 (#700)
+- Improve URL opener fallbacks (#701)
+- Hooksコマンドに絶対パスを使用 (#702)
+- /dev/ttyへstdioを接続して即終了を回避 (#703)
+
+### Miscellaneous Tasks
+
+- Sync main into develop
+
+## [6.4.0] - 2026-01-20
+
+### Bug Fixes
+
+- スピナー範囲外アクセスによるパニックを防止 (#677)
+- Claude Code新hooksフォーマットに対応 (#695)
+- ブランチ一覧のダブルクリック選択に変更 (#697)
+
+### Features
+
+- Add PR source branch validation for main
+- エージェント状態可視化機能 (SPEC-861d8cdf) (#692)
+- ブランチ詳細優先表示とAI設定デフォルト追加 (#694)
+- Responses APIでAI要約を生成 (#696)
+- ブランチ詳細にGitHubリンクを追加 (#698)
+
+### Miscellaneous Tasks
+
+- Merge main into develop
+- Update Cargo.lock
+
+## [6.3.0] - 2026-01-19
+
+### Bug Fixes
+
+- Tmuxセッション情報の引き継ぎとClaude表記正規化 (#673)
+- Tmuxペイン作成時にmouseを有効化 (#676)
+- Wrap branch list spinner frame (#679)
+- UTF-8文字列の切り詰め時にchar境界を考慮 (#680)
+- Resume時のskip_permissionsを履歴から補完 (#685)
+
+### Features
+
+- ブランチサマリーパネル機能 (SPEC-4b893dae) (#678)
+- シングルアクティブペイン制約の実装 (#681)
+- エージェントペインと選択アイコンのUnicode化 (#683)
+- ブランチ一覧のマウス選択を追加 (#687)
+- Gh-prスキルを追加し、github@akiojin-skillsプラグインを有効化 (#689)
+
+### Miscellaneous Tasks
+
+- Sync main into develop and resolve conflicts
+
+## [6.2.0] - 2026-01-19
+
+### Bug Fixes
+
+- Skip husky install in CI environment
+
+### Miscellaneous Tasks
+
+- Sync main into develop
+- Disable MD060 table style rule in markdownlint
+
+## [6.1.0] - 2026-01-17
+
+### Bug Fixes
+
+- Rust移行時に誤って削除されたentrypoint.shを復元 (#648)
+- マージ済み判定を git merge-base --is-ancestor に変更 (#649)
+- Unpushedアイコンを!から^に変更して区別化 (#651)
+- **tmux:** エージェント終了時のペイン自動削除とフォーカス移動を修正 (#656)
+- 複数のバグ修正とDocker+tmux文字化け対策 (#657)
+- **docker:** DockerイメージにRustをインストール
+- **tui:** エージェント一覧のブランチ名表示と選択履歴保存のバグを修正 (#658)
+- **tui:** ブランチ一覧のスクロール判定を実際のビューポート高さに対応 (#659)
+- **tui:** TUI起動時の自動orphanクリーンアップを削除 (#662)
+- Auto-normalize toolId in TS sessions (#666)
+- Restore single mode outside tmux (#667)
+
+### Features
+
+- **tmux:** Tmuxマルチモードサポートを追加 (#650)
+- **tmux:** Tmuxマルチモードサポートを追加 (#652)
+- GIT_DIR環境変数の書き換えをブロックするフックを追加 (#653)
+- **tmux:** Tmuxマルチモードサポートの実装 (#654)
+- フックスクリプトをプラグイン形式に移行 (#655)
+- **tui:** Tmuxペイン表示/非表示切り替え機能を追加 (#661)
+- Gh-fix-ciにレビューコメント調査を追加
+- **tmux:** エージェント状態表示とセッション管理を実装 (#660)
+
+### Miscellaneous Tasks
+
+- Dockerにtmuxを追加
+- 未使用のhomebrewディレクトリを削除
+
+## [6.0.9] - 2026-01-17
+
+### Bug Fixes
+
+- Arm64でplaywright-novncのcompose起動を可能にする (#640)
+- ログビューア・プロファイル画面のUI改善 (#641)
+- Upstream未設定ブランチの安全ステータス判定を修正 (#644)
+- Stdoutを継承してエージェントのTTY検出を修正 (#645)
+
+### Features
+
+- ログ出力カバー率を改善しエージェント出力キャプチャを追加 (#642)
+- History.jsonlパーサーを追加しセッションID取得を改善
+
+### Miscellaneous Tasks
+
+- Code-simplifierプラグインを追加 (#643)
+
+## [6.0.8] - 2026-01-16
 
 ### Documentation
 
-- Remove crates.io references from documentation
+- Fix CHANGELOG structure with proper version sections
 
 ## [6.0.5] - 2026-01-15
 
@@ -39,6 +187,12 @@ All notable changes to this project will be documented in this file.
 - Use cross for Linux ARM64 musl build
 - Add id-token permission for npm provenance and pin cross version
 - Clarify npm wrapper auto-download behavior in README
+- Improve release binary documentation clarity in README
+- ログビューアの時間表示をシステムローカル時間に修正 (#630)
+- Release準備のmain同期をPR経由に変更 (#633)
+- テキスト入力で文字が二重入力されるバグを修正 (#634)
+- プロファイル画面のUX改善 (#635)
+- Main同期とgix APIの互換性修正 (#637)
 - Support merge commit in release workflow trigger
 - Add workflow_dispatch support to release workflow trigger
 
@@ -46,15 +200,21 @@ All notable changes to this project will be documented in this file.
 
 - パッケージ公開状況をCLAUDE.mdに追記
 - Remove crates.io references from documentation
+- Sync CHANGELOG from main and add v6.0.7 entry
 
 ### Miscellaneous Tasks
 
 - Sync main to develop after v6.0.0 release
 - バージョンを 6.0.3 に統一
+- リリースフロー要件化とmain→develop同期 (#629)
 
 ### Refactor
 
 - Use workspace dependencies for internal crates
+
+### UX
+
+- 自動インストール文言の検証と設定説明 (#631)
 
 ### Ci
 

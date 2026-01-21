@@ -3,6 +3,52 @@
 **仕様ID**: `SPEC-d2f4762a`
 **ポリシー**: CLAUDE.md の TDD ルールに基づき、必ず RED→GREEN→リグレッションチェックの順に進める。
 
+## 追加作業: ブランチ詳細サマリの非同期更新 (2026-01-21)
+
+- [x] **T1323** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` に詳細サマリの非同期更新要件・方針を追記
+- [x] **T1324** [Test] `crates/gwt-cli/src/tui/app.rs` にサマリ取得がバックグラウンドで動作し、古い結果が破棄されることを検証するテストを追加
+- [x] **T1325** [Test] `crates/gwt-cli/src/tui/screens/branch_list.rs` にサマリLoading表示のリセット挙動を検証するテストを追加
+- [x] **T1326** [Impl] `crates/gwt-cli/src/tui/app.rs` でブランチ詳細サマリ取得を非同期化し、最新選択のみ反映する
+- [x] **T1327** [Impl] `crates/gwt-cli/src/tui/screens/branch_list.rs` でサマリLoading/エラー表示の更新を選択切替に合わせて行う
+- [x] **T1328** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
+
+## 追加作業: ブランチ一覧の内側余白 (2026-01-20)
+
+- [x] **T1319** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` にブランチ一覧の左右余白要件を追記
+- [x] **T1320** [Test] `crates/gwt-cli/src/tui/screens/branch_list.rs` のマウス選択/領域計算テストを余白込みの期待値に更新
+- [x] **T1321** [Impl] `crates/gwt-cli/src/tui/screens/branch_list.rs` のブランチ一覧枠に左右余白を追加し、内側領域計算を調整
+- [ ] **T1322** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
+
+## 追加作業: ブランチ一覧のダブルクリック選択 (2026-01-20)
+
+- [x] **T1311** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` にダブルクリック選択の要件・方針を追記
+- [x] **T1312** [Test] `crates/gwt-cli/src/tui/app.rs` にダブルクリックで選択が更新され、単クリックでは更新されないことを検証するテストを追加
+- [x] **T1313** [Impl] `crates/gwt-cli/src/tui/app.rs` のブランチ一覧マウス選択をダブルクリック検知に変更する
+- [x] **T1314** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
+
+## 追加作業: ダブルクリックでEnter相当を実行 (2026-01-20)
+
+- [x] **T1315** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` にダブルクリックでEnter相当を実行する要件・方針を追記
+- [x] **T1316** [Test] `crates/gwt-cli/src/tui/app.rs` にダブルクリックでウィザードが起動することを検証するテストを追加
+- [x] **T1317** [Impl] `crates/gwt-cli/src/tui/app.rs` でダブルクリック時にEnter相当の処理を実行する
+- [x] **T1318** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
+
+## 追加作業: クリーンアップ進捗の非ブロッキング化 (2026-01-20)
+
+- [x] **T1305** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` にクリーンアップ進捗表示と非ブロッキング要件を追記
+- [x] **T1306** [Test] `crates/gwt-cli/src/tui/screens/branch_list.rs` にクリーンアップ進捗行（ASCIIスピナー + done/total）の描画テストを追加
+- [x] **T1307** [Test] `crates/gwt-cli/src/tui/app.rs` にクリーンアップ開始/完了で入力ロックと進捗状態が遷移するテストを追加
+- [x] **T1308** [Impl] `crates/gwt-cli/src/tui/app.rs` でクリーンアップをバックグラウンド実行し、進捗(done/total)を更新する
+- [x] **T1309** [Impl] `crates/gwt-cli/src/tui/screens/branch_list.rs` にクリーンアップ進捗のフッター表示を追加する
+- [x] **T1310** `cargo test -p gwt-cli` と `cargo build --release` を実行し、失敗がないことを確認する
+
+## 追加作業: ブランチ一覧スピナーのフレーム安全化 (2026-01-19)
+
+- [x] **T1301** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` にスピナーのフレーム循環とクラッシュ防止の要件・方針を追記
+- [x] **T1302** [Test] `crates/gwt-cli/src/tui/screens/branch_list.rs` にスピナーのフレームカウンタが大きい場合でも描画が破綻しないテストを追加
+- [x] **T1303** [実装] `crates/gwt-cli/src/tui/screens/branch_list.rs` のスピナー表示をフレーム数で循環させ、範囲外アクセスを防止
+- [x] **T1304** `cargo test -p gwt-cli` と `cargo build --release` を実行し、失敗がないことを確認する
+
 ## 追加作業: 起動時の完全非同期取得と進捗表示 (2026-01-16)
 
 - [x] **T9945** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` に起動時の完全非同期取得と進捗表示の要件・方針を追記
@@ -11,8 +57,7 @@
 - [x] **T9948** [実装] `crates/gwt-cli/src/tui/screens/branch_list.rs` に一覧取得中のローディング表示と進捗表示用の状態/描画を追加する
 - [x] **T9949** [実装] `crates/gwt-cli/src/tui/app.rs` でブランチ一覧取得も含めてバックグラウンド更新を開始し、完了したブランチから順次反映する
 - [x] **T9950** [実装] `crates/gwt-cli/src/tui/app.rs` で`r`キーによる再取得時に進行中の一覧取得/状態更新を無効化し、最新更新のみ反映する
-- [ ] **T9951** `cargo test -p gwt-cli` と `cargo build --release` を実行し、失敗がないことを確認する
-  - `cargo test -p gwt-cli` が依存クレート解決エラー（gix-transport で `can't find crate`）で失敗
+- [x] **T9951** `cargo test -p gwt-cli` と `cargo build --release` を実行し、失敗がないことを確認する
 
 ## 追加作業: 依存インストールの非ブロッキング化 (2026-01-16)
 
@@ -513,3 +558,17 @@
 
 - [x] **T1222** [US8] `crates/gwt-cli/src/tui/screens/wizard.rs` に左右余白を追加
 - [x] **T1223** [US8] `crates/gwt-cli/src/tui/screens/confirm.rs` `crates/gwt-cli/src/tui/screens/error.rs` `crates/gwt-cli/src/tui/screens/help.rs` に左右余白を追加
+
+## 追加作業: スピナー範囲外アクセスの防止 (2026-01-19)
+
+### 仕様更新
+
+- [x] **T1230** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` にスピナー範囲外アクセス防止の要件と方針を追記
+
+### テスト（TDD）
+
+- [x] **T1231** [US0] `crates/gwt-cli/src/tui/screens/branch_list.rs` にスピナーのフレーム値が範囲外でもクラッシュしないことを確認するテストを追加
+
+### 実装
+
+- [x] **T1232** [US0] `crates/gwt-cli/src/tui/screens/branch_list.rs` のスピナー参照を正規化し、範囲外アクセスを防止

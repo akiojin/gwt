@@ -321,6 +321,376 @@ impl<'a> Spinner<'a> {
     }
 }
 
+/// Summary panel component for displaying branch details
+pub struct SummaryPanel<'a> {
+    /// Branch summary data
+    pub summary: &'a gwt_core::git::BranchSummary,
+    /// Animation tick for spinner
+    pub tick: usize,
+    /// Optional title override
+    pub title: Option<Line<'static>>,
+    /// Optional links to display
+    pub links: SummaryLinks,
+}
+
+const SUMMARY_PANEL_PADDING_X: u16 = 1;
+
+#[derive(Debug, Clone, Default)]
+pub struct SummaryLinks {
+    pub branch_url: Option<String>,
+    pub pr_url: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LinkRegion {
+    pub area: Rect,
+    pub url: String,
+}
+
+struct SectionLines {
+    lines: Vec<Line<'static>>,
+    link_urls: Vec<Option<String>>,
+}
+
+fn panel_switch_hint() -> Line<'static> {
+    Line::from(Span::styled(
+        " Tab: Switch ",
+        Style::default().fg(Color::DarkGray),
+    ))
+    .right_aligned()
+}
+
+impl<'a> SummaryPanel<'a> {
+    const SPINNER_FRAMES: [&'static str; 4] = ["|", "/", "-", "\\"];
+    const PANEL_HEIGHT: u16 = 12;
+
+    pub fn new(summary: &'a gwt_core::git::BranchSummary) -> Self {
+        Self {
+            summary,
+            tick: 0,
+            title: None,
+            links: SummaryLinks::default(),
+        }
+    }
+
+    pub fn with_tick(mut self, tick: usize) -> Self {
+        self.tick = tick;
+        self
+    }
+
+    pub fn with_title(mut self, title: Line<'static>) -> Self {
+        self.title = Some(title);
+        self
+    }
+
+    pub fn with_links(mut self, links: SummaryLinks) -> Self {
+        self.links = links;
+        self
+    }
+
+    /// Get the required height for this panel
+    pub fn height() -> u16 {
+        Self::PANEL_HEIGHT
+    }
+
+    /// Render the summary panel
+    pub fn render(&self, frame: &mut Frame, area: Rect) {
+        let _ = self.render_with_links(frame, area);
+    }
+
+    pub fn render_with_links(&self, frame: &mut Frame, area: Rect) -> Vec<LinkRegion> {
+        let title = self.title.clone().unwrap_or_else(|| {
+            Line::from(Span::raw(format!(
+                " [{}] Details ",
+                self.summary.branch_name
+            )))
+        });
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(title)
+            .title_bottom(panel_switch_hint())
+            .padding(Padding::new(
+                SUMMARY_PANEL_PADDING_X,
+                SUMMARY_PANEL_PADDING_X,
+                0,
+                0,
+            ));
+
+        let inner_area = block.inner(area);
+        frame.render_widget(block, area);
+
+        // Calculate section layout
+        let sections = self.build_sections_with_links();
+        let constraints: Vec<Constraint> = sections
+            .iter()
+            .map(|section| Constraint::Length(section.lines.len() as u16))
+            .collect();
+
+        if constraints.is_empty() {
+            return Vec::new();
+        }
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(constraints)
+            .split(inner_area);
+
+        let mut link_regions = Vec::new();
+        for (i, section) in sections.iter().enumerate() {
+            if i >= chunks.len() {
+                continue;
+            }
+            let paragraph = Paragraph::new(section.lines.clone());
+            frame.render_widget(paragraph, chunks[i]);
+
+            for (line_index, url) in section.link_urls.iter().enumerate() {
+                if let Some(url) = url {
+                    let y = chunks[i].y.saturating_add(line_index as u16);
+                    if y < chunks[i].y.saturating_add(chunks[i].height) {
+                        link_regions.push(LinkRegion {
+                            area: Rect::new(chunks[i].x, y, chunks[i].width, 1),
+                            url: url.clone(),
+                        });
+                    }
+                }
+            }
+        }
+
+        link_regions
+    }
+
+    /// Build sections content with their line counts
+    fn build_sections_with_links(&self) -> Vec<SectionLines> {
+        let mut sections = Vec::new();
+
+        // Commits section
+        sections.push(self.build_commits_section());
+
+        // Stats section (only if worktree exists)
+        if self.summary.has_worktree() {
+            sections.push(self.build_stats_section());
+        }
+
+        // Meta section
+        sections.push(self.build_meta_section());
+
+        // Links section
+        if self.links.branch_url.is_some() || self.links.pr_url.is_some() {
+            sections.push(self.build_links_section());
+        }
+
+        sections
+    }
+
+    fn build_commits_section(&self) -> SectionLines {
+        let max_commits = if self.links.branch_url.is_some() || self.links.pr_url.is_some() {
+            3
+        } else {
+            5
+        };
+        let mut lines = Vec::new();
+        lines.push(Line::from(Span::styled(
+            "Commits:",
+            Style::default().fg(Color::Yellow),
+        )));
+
+        if self.summary.loading.commits {
+            let spinner = Self::SPINNER_FRAMES[self.tick % Self::SPINNER_FRAMES.len()];
+            lines.push(Line::from(format!("  {} Loading...", spinner)));
+        } else if let Some(err) = &self.summary.errors.commits {
+            lines.push(Line::from(Span::styled(
+                format!("  (Failed to load: {})", err),
+                Style::default().fg(Color::Red),
+            )));
+        } else if self.summary.commits.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "  No commits yet",
+                Style::default().fg(Color::DarkGray),
+            )));
+        } else {
+            // T204: Truncate long commit messages with "..."
+            const MAX_MSG_LEN: usize = 50;
+            for commit in self.summary.commits.iter().take(max_commits) {
+                let hash_span = Span::styled(
+                    commit.hash.chars().take(7).collect::<String>(),
+                    Style::default().fg(Color::Cyan),
+                );
+                let truncated_msg = if commit.message.chars().count() > MAX_MSG_LEN {
+                    format!(
+                        "{}...",
+                        commit
+                            .message
+                            .chars()
+                            .take(MAX_MSG_LEN - 3)
+                            .collect::<String>()
+                    )
+                } else {
+                    commit.message.clone()
+                };
+                let msg_span = Span::raw(format!(" {}", truncated_msg));
+                lines.push(Line::from(vec![Span::raw("  "), hash_span, msg_span]));
+            }
+        }
+
+        let link_urls = vec![None; lines.len()];
+        SectionLines { lines, link_urls }
+    }
+
+    fn build_stats_section(&self) -> SectionLines {
+        let mut lines = Vec::new();
+        lines.push(Line::from(Span::styled(
+            "Stats:",
+            Style::default().fg(Color::Yellow),
+        )));
+
+        if self.summary.loading.stats {
+            let spinner = Self::SPINNER_FRAMES[self.tick % Self::SPINNER_FRAMES.len()];
+            lines.push(Line::from(format!("  {} Loading...", spinner)));
+        } else if let Some(err) = &self.summary.errors.stats {
+            lines.push(Line::from(Span::styled(
+                format!("  (Failed to load: {})", err),
+                Style::default().fg(Color::Red),
+            )));
+        } else if let Some(stats) = &self.summary.stats {
+            let mut parts = Vec::new();
+
+            // Files and lines
+            if stats.files_changed > 0 {
+                parts.push(format!(
+                    "{} file{}, +{}/-{} lines",
+                    stats.files_changed,
+                    if stats.files_changed == 1 { "" } else { "s" },
+                    stats.insertions,
+                    stats.deletions
+                ));
+            }
+
+            // Status flags
+            if stats.has_uncommitted {
+                parts.push("Uncommitted changes".to_string());
+            }
+            if stats.has_unpushed {
+                parts.push("Unpushed commits".to_string());
+            }
+
+            if parts.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    "  No changes",
+                    Style::default().fg(Color::DarkGray),
+                )));
+            } else {
+                lines.push(Line::from(format!("  {}", parts.join(" | "))));
+            }
+        } else {
+            lines.push(Line::from(Span::styled(
+                "  No data",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+
+        let link_urls = vec![None; lines.len()];
+        SectionLines { lines, link_urls }
+    }
+
+    fn build_meta_section(&self) -> SectionLines {
+        let mut lines = Vec::new();
+        lines.push(Line::from(Span::styled(
+            "Meta:",
+            Style::default().fg(Color::Yellow),
+        )));
+
+        if self.summary.loading.meta {
+            let spinner = Self::SPINNER_FRAMES[self.tick % Self::SPINNER_FRAMES.len()];
+            lines.push(Line::from(format!("  {} Loading...", spinner)));
+        } else if let Some(err) = &self.summary.errors.meta {
+            lines.push(Line::from(Span::styled(
+                format!("  (Failed to load: {})", err),
+                Style::default().fg(Color::Red),
+            )));
+        } else if let Some(meta) = &self.summary.meta {
+            let mut parts = Vec::new();
+
+            // Ahead/behind (only if upstream exists)
+            if let Some(upstream) = &meta.upstream {
+                if meta.ahead > 0 || meta.behind > 0 {
+                    parts.push(format!(
+                        "+{} -{} from {}",
+                        meta.ahead, meta.behind, upstream
+                    ));
+                } else {
+                    parts.push(format!("Up to date with {}", upstream));
+                }
+            }
+
+            // Last commit time
+            if let Some(relative) = meta.relative_time() {
+                parts.push(format!("Last commit: {}", relative));
+            }
+
+            if parts.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    "  No upstream",
+                    Style::default().fg(Color::DarkGray),
+                )));
+            } else {
+                for part in parts {
+                    lines.push(Line::from(format!("  {}", part)));
+                }
+            }
+        } else {
+            lines.push(Line::from(Span::styled(
+                "  No data",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+
+        let link_urls = vec![None; lines.len()];
+        SectionLines { lines, link_urls }
+    }
+
+    fn build_links_section(&self) -> SectionLines {
+        let mut lines = Vec::new();
+        let mut link_urls = Vec::new();
+
+        lines.push(Line::from(Span::styled(
+            "Links:",
+            Style::default().fg(Color::Yellow),
+        )));
+        link_urls.push(None);
+
+        if let Some(branch_url) = &self.links.branch_url {
+            lines.push(Line::from(vec![
+                Span::styled("  Branch: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(branch_url.clone(), Style::default().fg(Color::Cyan)),
+            ]));
+            link_urls.push(Some(branch_url.clone()));
+        }
+
+        if let Some(pr_url) = &self.links.pr_url {
+            lines.push(Line::from(vec![
+                Span::styled("  PR: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(pr_url.clone(), Style::default().fg(Color::Cyan)),
+            ]));
+            link_urls.push(Some(pr_url.clone()));
+        }
+
+        SectionLines { lines, link_urls }
+    }
+
+    /// Truncate a string to fit within a given width, adding "..." if truncated
+    #[allow(dead_code)]
+    pub fn truncate_string(s: &str, max_width: usize) -> String {
+        if s.len() <= max_width {
+            s.to_string()
+        } else if max_width <= 3 {
+            ".".repeat(max_width)
+        } else {
+            format!("{}...", &s[..max_width - 3])
+        }
+    }
+}
+
 /// Helper function to create a centered rect
 pub fn centered_rect(width: u16, height: u16, r: Rect) -> Rect {
     let popup_layout = Layout::default()
@@ -345,6 +715,9 @@ pub fn centered_rect(width: u16, height: u16, r: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gwt_core::git::BranchSummary;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
 
     #[test]
     fn test_centered_rect() {
@@ -354,5 +727,22 @@ mod tests {
         assert_eq!(centered.height, 10);
         assert_eq!(centered.x, 40);
         assert_eq!(centered.y, 20);
+    }
+
+    #[test]
+    fn test_summary_panel_padding_adds_left_space() {
+        let summary = BranchSummary::new("main");
+        let backend = TestBackend::new(30, SummaryPanel::height());
+        let mut terminal = Terminal::new(backend).expect("terminal init");
+
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                SummaryPanel::new(&summary).render(f, area);
+            })
+            .expect("draw");
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(1, 1)].symbol(), " ");
     }
 }

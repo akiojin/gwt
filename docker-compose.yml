@@ -11,6 +11,8 @@ services:
       - ${HOME:-~}/.codex:/root/.codex-host:ro
     ports:
       - 6400:6400
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       - NPM_USER
       - NPM_EMAIL
@@ -33,6 +35,7 @@ services:
 
   playwright-novnc:
     image: ghcr.io/xtr-dev/mcp-playwright-novnc:latest
+    platform: ${PLAYWRIGHT_NOVNC_PLATFORM:-linux/amd64}
     ports:
       - 6080:6080
       - 3080:3080

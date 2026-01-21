@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "6.0.3"
+version = "6.7.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/akiojin/gwt"
@@ -22,7 +22,7 @@ gwt-core = { path = "crates/gwt-core" }
 thiserror = "2"
 
 # Git operations
-gix = { version = "0.70", default-features = false, features = [
+gix = { version = "0.77", default-features = false, features = [
     "blocking-network-client",
     "worktree-mutation",
 ] }
@@ -86,6 +86,7 @@ libc = "0.2"
 
 # HTTP client (blocking)
 ureq = { version = "3", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 
 # URL encoding
 urlencoding = "2"

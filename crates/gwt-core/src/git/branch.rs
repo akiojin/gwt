@@ -52,6 +52,13 @@ impl Branch {
     }
 
     fn list_with_options(repo_path: &Path, include_divergence: bool) -> Result<Vec<Branch>> {
+        debug!(
+            category = "git",
+            repo_path = %repo_path.display(),
+            include_divergence,
+            "Listing branches"
+        );
+
         let output = Command::new("git")
             .args([
                 "for-each-ref",
@@ -120,6 +127,12 @@ impl Branch {
 
     /// List all remote branches
     pub fn list_remote(repo_path: &Path) -> Result<Vec<Branch>> {
+        debug!(
+            category = "git",
+            repo_path = %repo_path.display(),
+            "Listing remote branches"
+        );
+
         let output = Command::new("git")
             .args([
                 "for-each-ref",
@@ -169,6 +182,12 @@ impl Branch {
 
     /// Get the current branch
     pub fn current(repo_path: &Path) -> Result<Option<Branch>> {
+        debug!(
+            category = "git",
+            repo_path = %repo_path.display(),
+            "Getting current branch"
+        );
+
         let output = Command::new("git")
             .args(["rev-parse", "--abbrev-ref", "HEAD"])
             .current_dir(repo_path)
@@ -448,7 +467,14 @@ impl Branch {
                 details: e.to_string(),
             })?;
 
-        Ok(output.status.success())
+        let exists = output.status.success();
+        debug!(
+            category = "git",
+            branch = name,
+            exists,
+            "Checked branch existence"
+        );
+        Ok(exists)
     }
 
     /// Check if a branch exists remotely
@@ -505,6 +531,58 @@ impl Branch {
             })
         }
     }
+
+    /// Check if a branch is merged into the base branch
+    ///
+    /// Uses `git merge-base --is-ancestor` to check if the branch commit
+    /// is an ancestor of the base branch (i.e., all commits are included).
+    ///
+    /// Note: This works for regular merges and fast-forward merges.
+    /// For squash merges, the original branch commits are not ancestors
+    /// of the base branch, so this will return false even if the changes
+    /// were squash-merged.
+    pub fn is_merged_into(repo_path: &Path, branch: &str, base: &str) -> Result<bool> {
+        debug!(
+            category = "git",
+            branch = branch,
+            base = base,
+            "Checking if branch is merged into base"
+        );
+
+        let output = Command::new("git")
+            .args(["merge-base", "--is-ancestor", branch, base])
+            .current_dir(repo_path)
+            .output()
+            .map_err(|e| GwtError::GitOperationFailed {
+                operation: "merge-base".to_string(),
+                details: e.to_string(),
+            })?;
+
+        // Exit code 0 means branch is an ancestor (merged)
+        // Exit code 1 means branch is not an ancestor (not merged)
+        // Other exit codes indicate errors
+        let is_merged = match output.status.code() {
+            Some(0) => true,
+            Some(1) => false,
+            code => {
+                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                return Err(GwtError::GitOperationFailed {
+                    operation: "merge-base".to_string(),
+                    details: format!("exit code {:?}: {}", code, stderr),
+                });
+            }
+        };
+
+        debug!(
+            category = "git",
+            branch = branch,
+            base = base,
+            is_merged,
+            "Merge check completed"
+        );
+
+        Ok(is_merged)
+    }
 }
 
 /// Branch divergence status
@@ -537,6 +615,7 @@ impl std::fmt::Display for DivergenceStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use tempfile::TempDir;
 
     fn create_test_repo() -> TempDir {
@@ -569,6 +648,20 @@ mod tests {
             .output()
             .unwrap();
         temp
+    }
+
+    fn commit_file(repo_path: &Path, filename: &str, content: &str, message: &str) {
+        std::fs::write(repo_path.join(filename), content).unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", message])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
     }
 
     fn create_repo_with_remote() -> (TempDir, String) {
@@ -709,5 +802,64 @@ mod tests {
                 behind: 1
             }
         );
+    }
+
+    #[test]
+    fn test_is_merged_into_true() {
+        let temp = create_test_repo();
+        let base = Branch::current(temp.path()).unwrap().unwrap().name;
+
+        Command::new("git")
+            .args(["checkout", "-b", "feature/merged"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        commit_file(temp.path(), "merged.txt", "merged", "merged commit");
+
+        Command::new("git")
+            .args(["checkout", &base])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        let output = Command::new("git")
+            .args(["merge", "--ff-only", "feature/merged"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+
+        let merged = Branch::is_merged_into(temp.path(), "feature/merged", &base).unwrap();
+        assert!(merged);
+    }
+
+    #[test]
+    fn test_is_merged_into_false() {
+        let temp = create_test_repo();
+        let base = Branch::current(temp.path()).unwrap().unwrap().name;
+
+        Command::new("git")
+            .args(["checkout", "-b", "feature/unmerged"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        commit_file(temp.path(), "unmerged.txt", "unmerged", "unmerged commit");
+
+        Command::new("git")
+            .args(["checkout", &base])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+
+        let merged = Branch::is_merged_into(temp.path(), "feature/unmerged", &base).unwrap();
+        assert!(!merged);
+    }
+
+    #[test]
+    fn test_is_merged_into_invalid_ref() {
+        let temp = create_test_repo();
+        let base = Branch::current(temp.path()).unwrap().unwrap().name;
+
+        let result = Branch::is_merged_into(temp.path(), "no-such-branch", &base);
+        assert!(result.is_err());
     }
 }

@@ -130,6 +130,35 @@ pub enum Commands {
         /// Specific worktree to repair (repairs all if not specified)
         target: Option<String>,
     },
+
+    /// Manage Claude Code hooks for agent status tracking (SPEC-861d8cdf)
+    Hook {
+        #[command(subcommand)]
+        action: HookAction,
+    },
+}
+
+/// Hook subcommands (SPEC-861d8cdf FR-101, T-102)
+#[derive(Subcommand, Debug)]
+pub enum HookAction {
+    /// Process a hook event from Claude Code (internal use)
+    Event {
+        /// Hook event name (UserPromptSubmit, PreToolUse, PostToolUse, Notification, Stop)
+        name: String,
+    },
+
+    /// Register gwt hooks in Claude Code settings
+    Setup,
+
+    /// Remove gwt hooks from Claude Code settings
+    Uninstall,
+
+    /// Check if gwt hooks are registered
+    Status,
+
+    /// Accept direct hook event names (e.g. `gwt hook UserPromptSubmit`)
+    #[command(external_subcommand)]
+    EventAlias(Vec<String>),
 }
 
 /// Output format for list command
@@ -142,4 +171,47 @@ pub enum OutputFormat {
     Json,
     /// Simple format (one per line)
     Simple,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn test_hook_parses_direct_event_name() {
+        let cli = Cli::try_parse_from(["gwt", "hook", "UserPromptSubmit"]).unwrap();
+        match cli.command {
+            Some(Commands::Hook {
+                action: HookAction::EventAlias(args),
+            }) => {
+                assert_eq!(args, vec!["UserPromptSubmit".to_string()]);
+            }
+            other => panic!("unexpected parse result: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_hook_parses_event_subcommand() {
+        let cli = Cli::try_parse_from(["gwt", "hook", "event", "UserPromptSubmit"]).unwrap();
+        match cli.command {
+            Some(Commands::Hook {
+                action: HookAction::Event { name },
+            }) => {
+                assert_eq!(name, "UserPromptSubmit");
+            }
+            other => panic!("unexpected parse result: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_hook_parses_setup_subcommand() {
+        let cli = Cli::try_parse_from(["gwt", "hook", "setup"]).unwrap();
+        match cli.command {
+            Some(Commands::Hook {
+                action: HookAction::Setup,
+            }) => {}
+            other => panic!("unexpected parse result: {:?}", other),
+        }
+    }
 }

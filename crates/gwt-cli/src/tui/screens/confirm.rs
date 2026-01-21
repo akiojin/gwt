@@ -91,6 +91,92 @@ impl ConfirmState {
         }
     }
 
+    /// Create exit confirmation dialog when agents are running (tmux mode)
+    pub fn exit_with_running_agents(agent_count: usize) -> Self {
+        Self {
+            title: "Running Agents".to_string(),
+            message: format!(
+                "{} agent(s) are still running.\nExit will terminate all agents.",
+                agent_count
+            ),
+            details: vec![
+                "Press Enter to exit and terminate agents.".to_string(),
+                "Press Esc to cancel and keep working.".to_string(),
+            ],
+            confirm_label: "Exit".to_string(),
+            cancel_label: "Cancel".to_string(),
+            selected_confirm: false,
+            is_dangerous: true,
+        }
+    }
+
+    /// Create termination confirmation dialog for a single agent
+    pub fn terminate_agent(branch_name: &str, agent_name: &str) -> Self {
+        Self {
+            title: "Terminate Agent".to_string(),
+            message: format!(
+                "Terminate {} agent on branch '{}'?",
+                agent_name, branch_name
+            ),
+            details: vec!["The agent will be sent SIGTERM to allow graceful shutdown.".to_string()],
+            confirm_label: "Terminate".to_string(),
+            cancel_label: "Cancel".to_string(),
+            selected_confirm: false,
+            is_dangerous: true,
+        }
+    }
+
+    /// Create force kill confirmation dialog
+    pub fn force_kill_agent(branch_name: &str, agent_name: &str) -> Self {
+        Self {
+            title: "Force Kill Agent".to_string(),
+            message: format!(
+                "Force kill {} agent on branch '{}'?",
+                agent_name, branch_name
+            ),
+            details: vec![
+                "SIGKILL will be sent. Unsaved work may be lost.".to_string(),
+                "Use this only if the agent is not responding.".to_string(),
+            ],
+            confirm_label: "Force Kill".to_string(),
+            cancel_label: "Cancel".to_string(),
+            selected_confirm: false,
+            is_dangerous: true,
+        }
+    }
+
+    /// Create duplicate agent launch warning dialog
+    pub fn duplicate_agent_warning(branch_name: &str, agent_name: &str) -> Self {
+        Self {
+            title: "Duplicate Agent".to_string(),
+            message: format!(
+                "{} agent is already running on branch '{}'.",
+                agent_name, branch_name
+            ),
+            details: vec!["Launch another instance anyway?".to_string()],
+            confirm_label: "Launch".to_string(),
+            cancel_label: "Cancel".to_string(),
+            selected_confirm: false,
+            is_dangerous: false,
+        }
+    }
+
+    /// Create Claude Code hook setup proposal dialog (SPEC-861d8cdf T-104)
+    pub fn hook_setup() -> Self {
+        Self {
+            title: "Setup Agent Status Tracking".to_string(),
+            message: "Enable Claude Code hook for agent status tracking?".to_string(),
+            details: vec![
+                "This will add gwt hooks to Claude Code settings.".to_string(),
+                "You can run 'gwt hook status' to check at any time.".to_string(),
+            ],
+            confirm_label: "Setup".to_string(),
+            cancel_label: "Skip".to_string(),
+            selected_confirm: true, // Default to setup for better UX
+            is_dangerous: false,
+        }
+    }
+
     /// Toggle selection
     pub fn toggle_selection(&mut self) {
         self.selected_confirm = !self.selected_confirm;
@@ -330,5 +416,38 @@ mod tests {
         let state = ConfirmState::cleanup(&branches);
         assert!(state.is_dangerous);
         assert_eq!(state.details.len(), 2);
+    }
+
+    #[test]
+    fn test_exit_with_running_agents() {
+        let state = ConfirmState::exit_with_running_agents(3);
+        assert!(state.is_dangerous);
+        assert!(state.message.contains("3 agent"));
+        assert_eq!(state.confirm_label, "Exit");
+    }
+
+    #[test]
+    fn test_terminate_agent() {
+        let state = ConfirmState::terminate_agent("feature/test", "claude");
+        assert!(state.is_dangerous);
+        assert!(state.message.contains("claude"));
+        assert!(state.message.contains("feature/test"));
+        assert_eq!(state.confirm_label, "Terminate");
+    }
+
+    #[test]
+    fn test_force_kill_agent() {
+        let state = ConfirmState::force_kill_agent("feature/test", "codex");
+        assert!(state.is_dangerous);
+        assert!(state.message.contains("codex"));
+        assert_eq!(state.confirm_label, "Force Kill");
+    }
+
+    #[test]
+    fn test_duplicate_agent_warning() {
+        let state = ConfirmState::duplicate_agent_warning("main", "claude");
+        assert!(!state.is_dangerous); // Not dangerous, just a warning
+        assert!(state.message.contains("claude"));
+        assert!(state.message.contains("main"));
     }
 }
