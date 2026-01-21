@@ -41,6 +41,7 @@ use tracing::{debug, error, info, warn};
 const BRANCH_LIST_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(500);
 const SESSION_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const SESSION_SUMMARY_QUIET_PERIOD: Duration = Duration::from_secs(5);
+const FAST_EXIT_THRESHOLD_SECS: u64 = 2;
 
 use super::screens::branch_list::{
     BranchSummaryRequest, BranchSummaryUpdate, PrInfo, WorktreeStatus,
@@ -1386,9 +1387,8 @@ impl Model {
                 let session_inflight = self.branch_list.clone_session_inflight();
                 let session_missing = self.branch_list.clone_session_missing();
                 let session_warnings = self.branch_list.clone_session_warnings();
+                // FR-074b: グローバルタブ状態を保持
                 let detail_tab = self.branch_list.detail_panel_tab;
-                // FR-074b: ブランチ単位タブ記憶を保持
-                let branch_tab_cache = self.branch_list.take_branch_tab_cache();
                 let mut branch_list = BranchListState::new().with_branches(update.branches);
                 branch_list.detail_panel_tab = detail_tab;
                 branch_list.active_profile = self.profiles_config.active.clone();
@@ -1400,14 +1400,13 @@ impl Model {
                 branch_list.set_repo_web_url(self.branch_list.repo_web_url().cloned());
                 branch_list.working_directory = Some(self.repo_root.display().to_string());
                 branch_list.version = Some(env!("CARGO_PKG_VERSION").to_string());
-                // FR-074b: タブ記憶を復元し、削除されたブランチのキャッシュをクリーンアップ
-                branch_list.restore_branch_tab_cache(branch_tab_cache);
+                // セッション警告のクリーンアップ（削除されたブランチ分）
                 let remaining_branches: std::collections::HashSet<String> = branch_list
                     .branches
                     .iter()
                     .map(|b| b.name.clone())
                     .collect();
-                branch_list.cleanup_branch_tab_cache(&remaining_branches);
+                branch_list.cleanup_session_warnings(&remaining_branches);
                 self.branch_list = branch_list;
                 // SPEC-4b893dae: Update branch summary after branches are loaded
                 self.refresh_branch_summary();
@@ -2608,12 +2607,8 @@ impl Model {
             Message::SelectNext => match self.screen {
                 Screen::BranchList => {
                     self.branch_list.select_next();
-                    // FR-074: ブランチ選択変更時にタブ状態を復元
-                    if let Some(branch) = self.branch_list.selected_branch() {
-                        let branch_name = branch.name.clone();
-                        self.branch_list.apply_tab_for_branch(&branch_name);
-                    }
                     // SPEC-4b893dae: Update branch summary on selection change
+                    // FR-074d: グローバルタブ状態はブランチ切り替え時も維持
                     self.refresh_branch_summary();
                 }
                 Screen::WorktreeCreate => self.worktree_create.select_next_base(),
@@ -2629,12 +2624,8 @@ impl Model {
             Message::SelectPrev => match self.screen {
                 Screen::BranchList => {
                     self.branch_list.select_prev();
-                    // FR-074: ブランチ選択変更時にタブ状態を復元
-                    if let Some(branch) = self.branch_list.selected_branch() {
-                        let branch_name = branch.name.clone();
-                        self.branch_list.apply_tab_for_branch(&branch_name);
-                    }
                     // SPEC-4b893dae: Update branch summary on selection change
+                    // FR-074d: グローバルタブ状態はブランチ切り替え時も維持
                     self.refresh_branch_summary();
                 }
                 Screen::WorktreeCreate => self.worktree_create.select_prev_base(),
@@ -2653,12 +2644,8 @@ impl Model {
                         self.branch_list.scroll_session_page_up();
                     } else {
                         self.branch_list.page_up(10);
-                        // FR-074: ブランチ選択変更時にタブ状態を復元
-                        if let Some(branch) = self.branch_list.selected_branch() {
-                            let branch_name = branch.name.clone();
-                            self.branch_list.apply_tab_for_branch(&branch_name);
-                        }
                         // SPEC-4b893dae: Update branch summary on selection change
+                        // FR-074d: グローバルタブ状態はブランチ切り替え時も維持
                         self.refresh_branch_summary();
                     }
                 }
@@ -2673,12 +2660,8 @@ impl Model {
                         self.branch_list.scroll_session_page_down();
                     } else {
                         self.branch_list.page_down(10);
-                        // FR-074: ブランチ選択変更時にタブ状態を復元
-                        if let Some(branch) = self.branch_list.selected_branch() {
-                            let branch_name = branch.name.clone();
-                            self.branch_list.apply_tab_for_branch(&branch_name);
-                        }
                         // SPEC-4b893dae: Update branch summary on selection change
+                        // FR-074d: グローバルタブ状態はブランチ切り替え時も維持
                         self.refresh_branch_summary();
                     }
                 }
@@ -2690,12 +2673,8 @@ impl Model {
             Message::GoHome => match self.screen {
                 Screen::BranchList => {
                     self.branch_list.go_home();
-                    // FR-074: ブランチ選択変更時にタブ状態を復元
-                    if let Some(branch) = self.branch_list.selected_branch() {
-                        let branch_name = branch.name.clone();
-                        self.branch_list.apply_tab_for_branch(&branch_name);
-                    }
                     // SPEC-4b893dae: Update branch summary on selection change
+                    // FR-074d: グローバルタブ状態はブランチ切り替え時も維持
                     self.refresh_branch_summary();
                 }
                 Screen::Logs => self.logs.go_home(),
@@ -2705,12 +2684,8 @@ impl Model {
             Message::GoEnd => match self.screen {
                 Screen::BranchList => {
                     self.branch_list.go_end();
-                    // FR-074: ブランチ選択変更時にタブ状態を復元
-                    if let Some(branch) = self.branch_list.selected_branch() {
-                        let branch_name = branch.name.clone();
-                        self.branch_list.apply_tab_for_branch(&branch_name);
-                    }
                     // SPEC-4b893dae: Update branch summary on selection change
+                    // FR-074d: グローバルタブ状態はブランチ切り替え時も維持
                     self.refresh_branch_summary();
                 }
                 Screen::Logs => self.logs.go_end(),
@@ -2884,13 +2859,14 @@ impl Model {
                         } else if c == 'n' || c == 'N' {
                             self.ai_wizard.cancel_delete();
                         }
+                    } else if self.ai_wizard.is_text_input() {
+                        // Text input mode: insert character (including 'd')
+                        self.ai_wizard.insert_char(c);
                     } else if c == 'd' || c == 'D' {
-                        // Show delete confirmation (only in edit mode)
+                        // Show delete confirmation (only in edit mode, non-text-input steps)
                         if self.ai_wizard.is_edit {
                             self.ai_wizard.show_delete();
                         }
-                    } else if self.ai_wizard.is_text_input() {
-                        self.ai_wizard.insert_char(c);
                     }
                 }
             }
@@ -3022,13 +2998,8 @@ impl Model {
                 Screen::Settings => self.settings.next_category(),
                 Screen::BranchList => {
                     if !self.branch_list.filter_mode {
-                        // FR-074a: Tab切り替え時に即座にブランチのタブ記憶を更新
-                        if let Some(branch) = self.branch_list.selected_branch() {
-                            let branch_name = branch.name.clone();
-                            self.branch_list.toggle_tab_for_branch(&branch_name);
-                        } else {
-                            self.branch_list.detail_panel_tab.toggle();
-                        }
+                        // FR-074a: Tab切り替え時に即座にグローバルタブ状態を更新
+                        self.branch_list.toggle_tab();
                         self.refresh_branch_summary();
                         if self.branch_list.detail_panel_tab == DetailPanelTab::Session {
                             self.maybe_request_session_summary_for_selected(false);
@@ -3240,6 +3211,10 @@ impl Model {
         };
 
         self.start_launch_preparation(request);
+
+        // Close wizard immediately so user can see launch progress in branch list
+        self.wizard.visible = false;
+        self.screen = Screen::BranchList;
     }
 
     fn start_launch_preparation(&mut self, request: LaunchRequest) {
@@ -3401,6 +3376,7 @@ impl Model {
 
         // Build the full command string
         let command = build_tmux_command(&env_vars, &plan.config.env_remove, &full_cmd);
+        let command = wrap_tmux_command_for_fast_exit(&command);
 
         debug!(
             category = "tui",
@@ -3823,8 +3799,36 @@ impl Model {
         // Content
         match base_screen {
             Screen::BranchList => {
+                // Show launch status bar if launching
+                let content_area = if self.launch_in_progress {
+                    if let Some(status) = &self.launch_status {
+                        // Split content area: status bar (1 line) + rest
+                        let status_chunks = Layout::default()
+                            .direction(Direction::Vertical)
+                            .constraints([Constraint::Length(1), Constraint::Min(0)])
+                            .split(chunks[1]);
+
+                        // Render status bar with star indicator
+                        let status_line = Line::from(vec![
+                            Span::styled(
+                                " * ",
+                                Style::default()
+                                    .fg(Color::Yellow)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(status.as_str(), Style::default().fg(Color::Yellow)),
+                        ]);
+                        frame.render_widget(Paragraph::new(status_line), status_chunks[0]);
+                        status_chunks[1]
+                    } else {
+                        chunks[1]
+                    }
+                } else {
+                    chunks[1]
+                };
+
                 // Use split layout (branch list takes full area, PaneList abolished)
-                let split_areas = calculate_split_layout(chunks[1], &self.split_layout);
+                let split_areas = calculate_split_layout(content_area, &self.split_layout);
                 let status_message = self
                     .active_status_message()
                     .map(|message| message.to_string());
@@ -4703,6 +4707,13 @@ fn build_shell_command(command: &str, args: &[String]) -> String {
     let mut cmd_parts = vec![shell_escape(command)];
     cmd_parts.extend(args.iter().map(|arg| shell_escape(arg)));
     cmd_parts.join(" ")
+}
+
+fn wrap_tmux_command_for_fast_exit(command: &str) -> String {
+    format!(
+        "start=$(date +%s); {} ; status=$?; end=$(date +%s); if [ $status -ne 0 ] || [ $((end-start)) -lt {} ]; then echo; echo \"[gwt] Agent exited immediately (status=$status).\"; echo \"[gwt] Press Enter to close this pane.\"; read -r _; fi; exit $status",
+        command, FAST_EXIT_THRESHOLD_SECS
+    )
 }
 
 /// Build the full tmux command string with environment variables

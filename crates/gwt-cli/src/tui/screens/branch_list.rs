@@ -445,8 +445,6 @@ pub struct BranchListState {
     repo_web_url: Option<String>,
     /// Clickable link regions in details panel
     detail_links: Vec<LinkRegion>,
-    /// Branch-specific tab state cache (FR-074: branch-level tab memory)
-    branch_tab_cache: HashMap<String, DetailPanelTab>,
 }
 
 impl Default for BranchListState {
@@ -488,7 +486,6 @@ impl Default for BranchListState {
             session_scroll_page: 0,
             repo_web_url: None,
             detail_links: Vec::new(),
-            branch_tab_cache: HashMap::new(),
         }
     }
 }
@@ -1188,50 +1185,18 @@ impl BranchListState {
     }
 
     // ================================================================
-    // ブランチ単位タブ記憶 (SPEC-4b893dae FR-074シリーズ)
+    // グローバルタブ状態 (SPEC-4b893dae FR-074シリーズ)
     // ================================================================
 
-    /// Get the remembered tab for a branch (FR-075: default is Details if not set)
-    pub fn get_tab_for_branch(&self, branch_name: &str) -> DetailPanelTab {
-        self.branch_tab_cache
-            .get(branch_name)
-            .copied()
-            .unwrap_or(DetailPanelTab::Details)
+    /// Toggle the global tab state (FR-074a)
+    pub fn toggle_tab(&mut self) {
+        self.detail_panel_tab.toggle();
     }
 
-    /// Set the tab state for a specific branch (FR-074a)
-    pub fn set_tab_for_branch(&mut self, branch_name: &str, tab: DetailPanelTab) {
-        self.branch_tab_cache.insert(branch_name.to_string(), tab);
-    }
-
-    /// Remove tab cache entries for branches that no longer exist (FR-074c)
-    pub fn cleanup_branch_tab_cache(&mut self, remaining_branches: &HashSet<String>) {
-        self.branch_tab_cache
-            .retain(|name, _| remaining_branches.contains(name));
+    /// Cleanup session summary warnings for deleted branches
+    pub fn cleanup_session_warnings(&mut self, remaining_branches: &HashSet<String>) {
         self.session_summary_warnings
             .retain(|name, _| remaining_branches.contains(name));
-    }
-
-    /// Take the branch tab cache for preservation during refresh (FR-074b)
-    pub fn take_branch_tab_cache(&mut self) -> HashMap<String, DetailPanelTab> {
-        std::mem::take(&mut self.branch_tab_cache)
-    }
-
-    /// Restore the branch tab cache after refresh (FR-074b)
-    pub fn restore_branch_tab_cache(&mut self, cache: HashMap<String, DetailPanelTab>) {
-        self.branch_tab_cache = cache;
-    }
-
-    /// Toggle the tab and update both global state and branch cache (FR-074a)
-    pub fn toggle_tab_for_branch(&mut self, branch_name: &str) {
-        self.detail_panel_tab.toggle();
-        self.branch_tab_cache
-            .insert(branch_name.to_string(), self.detail_panel_tab);
-    }
-
-    /// Apply the remembered tab state when switching to a branch (FR-074)
-    pub fn apply_tab_for_branch(&mut self, branch_name: &str) {
-        self.detail_panel_tab = self.get_tab_for_branch(branch_name);
     }
 
     pub fn set_session_cache(&mut self, cache: SessionSummaryCache) {
@@ -1974,40 +1939,21 @@ fn render_details_panel(
         return;
     }
 
-    // Handle progress state
-    if let Some(progress) = state.status_progress_line() {
-        let title = panel_title_line(&summary.branch_name, DetailPanelTab::Details);
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan))
-            .title(title)
-            .title_bottom(panel_switch_hint())
-            .padding(Padding::new(PANEL_PADDING_X, PANEL_PADDING_X, 0, 0));
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-
-        let line = Line::from(vec![
-            Span::styled(
-                format!("{} ", state.spinner_char()),
-                Style::default().fg(Color::Yellow),
-            ),
-            Span::styled(progress, Style::default().fg(Color::Yellow)),
-        ]);
-        frame.render_widget(Paragraph::new(line), inner);
-        return;
-    }
-
     let selected_branch = state.selected_branch().cloned();
     let links = build_summary_links(state.repo_web_url(), selected_branch.as_ref());
 
-    // Render the full summary panel
+    // Get progress status line if active
+    let status_line = state.status_progress_line();
+
+    // Render the full summary panel with optional status line
     let panel = SummaryPanel::new(&summary)
         .with_tick(state.spinner_frame)
         .with_title(panel_title_line(
             &summary.branch_name,
             DetailPanelTab::Details,
         ))
-        .with_links(links);
+        .with_links(links)
+        .with_status_line(status_line);
 
     let link_regions = panel.render_with_links(frame, area);
     state.set_detail_links(link_regions);
@@ -3045,148 +2991,86 @@ mod tests {
     }
 
     // ==========================================================
-    // ブランチ単位タブ記憶のTDDテスト (SPEC-4b893dae FR-074シリーズ)
+    // グローバルタブ状態のTDDテスト (SPEC-4b893dae FR-074シリーズ)
     // ==========================================================
 
     #[test]
-    fn test_get_tab_for_branch_default_is_details() {
-        // FR-075: まだ選択されたことのないブランチのデフォルトタブはDetails
+    fn test_global_tab_default_is_details() {
+        // FR-075: アプリ起動時のデフォルトタブはDetails
         let state = BranchListState::new();
-        let tab = state.get_tab_for_branch("feature/new-branch");
-        assert_eq!(tab, DetailPanelTab::Details);
+        assert_eq!(state.detail_panel_tab, DetailPanelTab::Details);
     }
 
     #[test]
-    fn test_set_and_get_tab_for_branch() {
-        // FR-074a: Tab切り替え時に即座に該当ブランチのタブ記憶を更新
+    fn test_global_tab_toggle() {
+        // FR-074a: Tab切り替え時に即座にグローバルタブ状態を更新
         let mut state = BranchListState::new();
-        state.set_tab_for_branch("feature/test", DetailPanelTab::Session);
-        assert_eq!(
-            state.get_tab_for_branch("feature/test"),
-            DetailPanelTab::Session
-        );
-    }
-
-    #[test]
-    fn test_branch_tab_cache_independent_per_branch() {
-        // FR-074: ブランチごとに最後に選択されたタブ状態を記憶
-        let mut state = BranchListState::new();
-        state.set_tab_for_branch("branch-a", DetailPanelTab::Session);
-        state.set_tab_for_branch("branch-b", DetailPanelTab::Details);
-
-        assert_eq!(
-            state.get_tab_for_branch("branch-a"),
-            DetailPanelTab::Session
-        );
-        assert_eq!(
-            state.get_tab_for_branch("branch-b"),
-            DetailPanelTab::Details
-        );
-        assert_eq!(
-            state.get_tab_for_branch("branch-c"),
-            DetailPanelTab::Details
-        ); // 未設定はDetails
-    }
-
-    #[test]
-    fn test_cleanup_branch_tab_cache_removes_deleted_branches() {
-        // FR-074c: ブランチが削除された場合、そのブランチのタブ記憶を即座に破棄
-        let mut state = BranchListState::new();
-        state.set_tab_for_branch("branch-a", DetailPanelTab::Session);
-        state.set_tab_for_branch("branch-b", DetailPanelTab::Session);
-        state.set_tab_for_branch("branch-c", DetailPanelTab::Details);
-
-        // branch-b のみ残るブランチリスト
-        let remaining_branches: HashSet<String> =
-            vec!["branch-b".to_string()].into_iter().collect();
-        state.cleanup_branch_tab_cache(&remaining_branches);
-
-        // branch-b は維持される
-        assert_eq!(
-            state.get_tab_for_branch("branch-b"),
-            DetailPanelTab::Session
-        );
-        // branch-a, branch-c は削除されてデフォルトに戻る
-        assert_eq!(
-            state.get_tab_for_branch("branch-a"),
-            DetailPanelTab::Details
-        );
-        assert_eq!(
-            state.get_tab_for_branch("branch-c"),
-            DetailPanelTab::Details
-        );
-    }
-
-    #[test]
-    fn test_branch_tab_cache_preserved_on_refresh() {
-        // FR-074b: rキーリフレッシュや操作後の自動更新でブランチ単位のタブ記憶を維持
-        let branches = vec![sample_branch("main"), sample_branch("develop")];
-        let mut state = BranchListState::new().with_branches(branches.clone());
-
-        // タブ状態を設定
-        state.set_tab_for_branch("main", DetailPanelTab::Session);
-        state.set_tab_for_branch("develop", DetailPanelTab::Details);
-
-        // リフレッシュをシミュレート（ブランチリストを再設定）
-        let refreshed_branches = vec![sample_branch("main"), sample_branch("develop")];
-        let old_cache = state.take_branch_tab_cache();
-        state = BranchListState::new().with_branches(refreshed_branches);
-        state.restore_branch_tab_cache(old_cache);
-
-        // タブ記憶が維持されていることを確認
-        assert_eq!(state.get_tab_for_branch("main"), DetailPanelTab::Session);
-        assert_eq!(state.get_tab_for_branch("develop"), DetailPanelTab::Details);
-    }
-
-    #[test]
-    fn test_toggle_tab_updates_branch_cache() {
-        // FR-074a: Tab切り替え時に即座に記憶を更新
-        let branches = vec![sample_branch("feature/test")];
-        let mut state = BranchListState::new().with_branches(branches);
-
-        // 初期状態はDetails
         assert_eq!(state.detail_panel_tab, DetailPanelTab::Details);
 
-        // 選択中のブランチ名を取得してタブを切り替え
-        let branch_name = "feature/test".to_string();
-        state.toggle_tab_for_branch(&branch_name);
-
-        // グローバルタブ状態もブランチキャッシュも更新される
+        state.toggle_tab();
         assert_eq!(state.detail_panel_tab, DetailPanelTab::Session);
-        assert_eq!(
-            state.get_tab_for_branch("feature/test"),
-            DetailPanelTab::Session
-        );
 
-        // もう一度切り替え
-        state.toggle_tab_for_branch(&branch_name);
+        state.toggle_tab();
         assert_eq!(state.detail_panel_tab, DetailPanelTab::Details);
-        assert_eq!(
-            state.get_tab_for_branch("feature/test"),
-            DetailPanelTab::Details
-        );
     }
 
     #[test]
-    fn test_apply_tab_for_branch_on_selection_change() {
-        // FR-074: ブランチ選択変更時にタブ状態を復元
+    fn test_global_tab_preserved_on_branch_change() {
+        // FR-074d: ブランチ切り替え時に現在のグローバルタブ状態を維持
         let branches = vec![sample_branch("branch-a"), sample_branch("branch-b")];
         let mut state = BranchListState::new().with_branches(branches);
 
-        // branch-a でSessionを設定
-        state.set_tab_for_branch("branch-a", DetailPanelTab::Session);
-        state.set_tab_for_branch("branch-b", DetailPanelTab::Details);
-
-        // branch-a を選択
-        state.apply_tab_for_branch("branch-a");
+        // タブをSessionに切り替え
+        state.toggle_tab();
         assert_eq!(state.detail_panel_tab, DetailPanelTab::Session);
 
-        // branch-b を選択
-        state.apply_tab_for_branch("branch-b");
-        assert_eq!(state.detail_panel_tab, DetailPanelTab::Details);
+        // ブランチを切り替えてもタブ状態は維持される
+        // (select_next/select_prev などでブランチが変わっても detail_panel_tab は変わらない)
+        state.selected = 1; // branch-b を選択
+        assert_eq!(state.detail_panel_tab, DetailPanelTab::Session);
 
-        // 新規ブランチ（未設定）を選択
-        state.apply_tab_for_branch("branch-c");
-        assert_eq!(state.detail_panel_tab, DetailPanelTab::Details);
+        state.selected = 0; // branch-a に戻る
+        assert_eq!(state.detail_panel_tab, DetailPanelTab::Session);
+    }
+
+    #[test]
+    fn test_global_tab_preserved_after_refresh() {
+        // FR-074b: rキーリフレッシュでグローバルタブ状態を維持
+        let branches = vec![sample_branch("main"), sample_branch("develop")];
+        let mut state = BranchListState::new().with_branches(branches);
+
+        // タブをSessionに切り替え
+        state.toggle_tab();
+        assert_eq!(state.detail_panel_tab, DetailPanelTab::Session);
+
+        // リフレッシュをシミュレート（ブランチリストを再設定）
+        // 重要: detail_panel_tab を保存して復元する
+        let saved_tab = state.detail_panel_tab;
+        let refreshed_branches = vec![sample_branch("main"), sample_branch("develop")];
+        state = BranchListState::new().with_branches(refreshed_branches);
+        state.detail_panel_tab = saved_tab;
+
+        // タブ状態が維持されていることを確認
+        assert_eq!(state.detail_panel_tab, DetailPanelTab::Session);
+    }
+
+    #[test]
+    fn test_global_tab_preserved_after_new_branch_creation() {
+        // FR-074c: 新規ブランチ作成後の自動更新でグローバルタブ状態を維持
+        let branches = vec![sample_branch("main")];
+        let mut state = BranchListState::new().with_branches(branches);
+
+        // タブをSessionに切り替え
+        state.toggle_tab();
+        assert_eq!(state.detail_panel_tab, DetailPanelTab::Session);
+
+        // 新規ブランチ作成後の自動更新をシミュレート
+        let saved_tab = state.detail_panel_tab;
+        let updated_branches = vec![sample_branch("main"), sample_branch("feature/new-branch")];
+        state = BranchListState::new().with_branches(updated_branches);
+        state.detail_panel_tab = saved_tab;
+
+        // タブ状態が維持されていることを確認
+        assert_eq!(state.detail_panel_tab, DetailPanelTab::Session);
     }
 }
