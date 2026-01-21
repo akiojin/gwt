@@ -258,19 +258,19 @@ US6 (AI設定) ─────────────────────�
 - [x] **T557** [US4a] T556の後に `crates/gwt-cli/src/tui/screens/branch_list.rs` でブランチ切り替え時にタブ状態を維持（グローバル）
 - [x] **T558** [US4a] T557の後に ブランチ詳細/セッション要約パネル枠へTab切り替えヒントを追加
 
-### ブランチ単位のタブ記憶 (FR-074シリーズ)
+### グローバルタブ状態 (FR-074シリーズ)
 
-- [x] **T561** [US4a] `crates/gwt-cli/src/tui/screens/branch_list.rs` に `branch_tab_cache: HashMap<String, DetailPanelTab>` フィールドを追加
-- [x] **T562** [US4a] T561の後に `get_tab_for_branch(&self, branch_name: &str) -> DetailPanelTab` メソッドを実装（キャッシュヒット時は記憶値、ミス時はDetails）
-- [x] **T563** [US4a] T562の後に `set_tab_for_branch(&mut self, branch_name: &str, tab: DetailPanelTab)` メソッドを実装
-- [x] **T564** [US4a] T563の後に Tab切り替え時（Tabキー押下時）に即座に `set_tab_for_branch` を呼び出すよう修正
-- [x] **T565** [US4a] T564の後に ブランチ選択変更時に `get_tab_for_branch` でタブ状態を復元するよう修正
-- [x] **T566** [US4a] T565の後に rキーリフレッシュ・自動更新時に `branch_tab_cache` を維持するよう修正
-- [x] **T567** [US4a] T566の後に ブランチリスト更新時に削除されたブランチのタブ記憶を破棄する `cleanup_branch_tab_cache` メソッドを実装
-- [x] **T568** [US4a] T567の後に 選択中ブランチが削除された場合、先頭ブランチに選択を移動するよう修正
-- [x] **T569** [Test] T568の後に ブランチ単位タブ記憶のユニットテストを追加（branch_list.rs内）
+- [ ] **T561** [US4a] `crates/gwt-cli/src/tui/screens/branch_list.rs` の `branch_tab_cache` フィールドを削除し、`detail_panel_tab` のみでグローバル管理
+- [ ] **T562** [US4a] T561の後に `get_tab_for_branch` / `set_tab_for_branch` / `apply_tab_for_branch` メソッドを削除
+- [ ] **T563** [US4a] T562の後に `toggle_tab_for_branch` を `toggle_tab` に変更（グローバルタブ状態のみ切り替え）
+- [ ] **T564** [US4a] T563の後に ブランチ選択変更時の `apply_tab_for_branch` 呼び出しを削除（タブ状態はグローバルで維持）
+- [ ] **T565** [US4a] T564の後に rキーリフレッシュ時に `detail_panel_tab` が維持されることを確認
+- [ ] **T566** [US4a] T565の後に 新規ブランチ作成後の自動更新で `detail_panel_tab` が維持されることを確認
+- [ ] **T567** [US4a] T566の後に `cleanup_branch_tab_cache` / `take_branch_tab_cache` / `restore_branch_tab_cache` メソッドを削除
+- [ ] **T568** [Test] T567の後に グローバルタブ状態のユニットテストを追加（リフレッシュ後維持、ブランチ切替時維持）
+- [ ] **T569** [Test] T568の後に 旧タブ記憶関連のテストを削除（test_toggle_tab_updates_branch_cache等）
 
-**チェックポイント**: Tabキーでタブ切り替えが動作する＋ブランチ単位でタブ状態が記憶される
+**チェックポイント**: Tabキーでタブ切り替えが動作する＋グローバルタブ状態がリフレッシュ・ブランチ切替時に維持される
 
 ## フェーズ8: US4b - セッションパーサー (優先度: P0)
 
