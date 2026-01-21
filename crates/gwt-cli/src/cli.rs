@@ -155,6 +155,10 @@ pub enum HookAction {
 
     /// Check if gwt hooks are registered
     Status,
+
+    /// Accept direct hook event names (e.g. `gwt hook UserPromptSubmit`)
+    #[command(external_subcommand)]
+    EventAlias(Vec<String>),
 }
 
 /// Output format for list command
@@ -167,4 +171,47 @@ pub enum OutputFormat {
     Json,
     /// Simple format (one per line)
     Simple,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn test_hook_parses_direct_event_name() {
+        let cli = Cli::try_parse_from(["gwt", "hook", "UserPromptSubmit"]).unwrap();
+        match cli.command {
+            Some(Commands::Hook {
+                action: HookAction::EventAlias(args),
+            }) => {
+                assert_eq!(args, vec!["UserPromptSubmit".to_string()]);
+            }
+            other => panic!("unexpected parse result: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_hook_parses_event_subcommand() {
+        let cli = Cli::try_parse_from(["gwt", "hook", "event", "UserPromptSubmit"]).unwrap();
+        match cli.command {
+            Some(Commands::Hook {
+                action: HookAction::Event { name },
+            }) => {
+                assert_eq!(name, "UserPromptSubmit");
+            }
+            other => panic!("unexpected parse result: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_hook_parses_setup_subcommand() {
+        let cli = Cli::try_parse_from(["gwt", "hook", "setup"]).unwrap();
+        match cli.command {
+            Some(Commands::Hook {
+                action: HookAction::Setup,
+            }) => {}
+            other => panic!("unexpected parse result: {:?}", other),
+        }
+    }
 }

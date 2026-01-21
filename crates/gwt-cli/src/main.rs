@@ -464,6 +464,18 @@ fn cmd_hook(action: HookAction) -> Result<(), GwtError> {
 
     match action {
         HookAction::Event { name } => handle_hook_event(&name),
+        HookAction::EventAlias(args) => {
+            let name = args
+                .first()
+                .ok_or_else(|| GwtError::Internal("Missing hook event name.".to_string()))?;
+            if args.len() > 1 {
+                return Err(GwtError::Internal(format!(
+                    "Unexpected hook arguments: {}",
+                    args.join(" ")
+                )));
+            }
+            handle_hook_event(name)
+        }
         HookAction::Setup => {
             let settings_path =
                 get_claude_settings_path().ok_or_else(|| GwtError::ConfigNotFound {
@@ -514,7 +526,7 @@ fn cmd_hook(action: HookAction) -> Result<(), GwtError> {
 }
 
 /// Process a hook event from Claude Code (SPEC-861d8cdf T-101)
-/// Called by Claude Code hooks via `gwt hook event <name>`
+/// Called by Claude Code hooks via `gwt hook <name>` (or `gwt hook event <name>`)
 fn handle_hook_event(event: &str) -> Result<(), GwtError> {
     use std::io::{self, Read};
 
