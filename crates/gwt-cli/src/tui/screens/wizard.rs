@@ -2080,7 +2080,10 @@ mod tests {
         let mut state = WizardState::new();
         state.open_for_branch("feature/test", vec![], Some(0));
         let options = state.branch_action_options();
-        assert_eq!(options, &["Focus agent pane", "Create new branch from this"]);
+        assert_eq!(
+            options,
+            &["Focus agent pane", "Create new branch from this"]
+        );
     }
 
     #[test]
@@ -2088,7 +2091,10 @@ mod tests {
         let mut state = WizardState::new();
         state.open_for_branch("feature/test", vec![], None);
         let options = state.branch_action_options();
-        assert_eq!(options, &["Use selected branch", "Create new from selected"]);
+        assert_eq!(
+            options,
+            &["Use selected branch", "Create new from selected"]
+        );
     }
 
     #[test]

@@ -1742,7 +1742,8 @@ impl Model {
                 skip_permissions: entry.skip_permissions,
             })
             .collect();
-        self.wizard.open_for_branch(&branch_name, history, running_pane_idx);
+        self.wizard
+            .open_for_branch(&branch_name, history, running_pane_idx);
     }
 
     fn handle_branch_list_mouse(&mut self, mouse: MouseEvent) {
@@ -2798,7 +2799,8 @@ impl Model {
                             skip_permissions: entry.skip_permissions,
                         })
                         .collect();
-                    self.wizard.open_for_branch(&branch_name, history, running_pane_idx);
+                    self.wizard
+                        .open_for_branch(&branch_name, history, running_pane_idx);
                 } else {
                     self.status_message = Some("No branch selected".to_string());
                     self.status_message_time = Some(Instant::now());
