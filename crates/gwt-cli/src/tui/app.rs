@@ -41,6 +41,7 @@ use tracing::{debug, error, info, warn};
 const BRANCH_LIST_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(500);
 const SESSION_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const SESSION_SUMMARY_QUIET_PERIOD: Duration = Duration::from_secs(5);
+const FAST_EXIT_THRESHOLD_SECS: u64 = 2;
 
 use super::screens::branch_list::{
     BranchSummaryRequest, BranchSummaryUpdate, PrInfo, WorktreeStatus,
@@ -2858,13 +2859,14 @@ impl Model {
                         } else if c == 'n' || c == 'N' {
                             self.ai_wizard.cancel_delete();
                         }
+                    } else if self.ai_wizard.is_text_input() {
+                        // Text input mode: insert character (including 'd')
+                        self.ai_wizard.insert_char(c);
                     } else if c == 'd' || c == 'D' {
-                        // Show delete confirmation (only in edit mode)
+                        // Show delete confirmation (only in edit mode, non-text-input steps)
                         if self.ai_wizard.is_edit {
                             self.ai_wizard.show_delete();
                         }
-                    } else if self.ai_wizard.is_text_input() {
-                        self.ai_wizard.insert_char(c);
                     }
                 }
             }
@@ -3209,6 +3211,10 @@ impl Model {
         };
 
         self.start_launch_preparation(request);
+
+        // Close wizard immediately so user can see launch progress in branch list
+        self.wizard.visible = false;
+        self.screen = Screen::BranchList;
     }
 
     fn start_launch_preparation(&mut self, request: LaunchRequest) {
@@ -3370,6 +3376,7 @@ impl Model {
 
         // Build the full command string
         let command = build_tmux_command(&env_vars, &plan.config.env_remove, &full_cmd);
+        let command = wrap_tmux_command_for_fast_exit(&command);
 
         debug!(
             category = "tui",
@@ -3792,8 +3799,36 @@ impl Model {
         // Content
         match base_screen {
             Screen::BranchList => {
+                // Show launch status bar if launching
+                let content_area = if self.launch_in_progress {
+                    if let Some(status) = &self.launch_status {
+                        // Split content area: status bar (1 line) + rest
+                        let status_chunks = Layout::default()
+                            .direction(Direction::Vertical)
+                            .constraints([Constraint::Length(1), Constraint::Min(0)])
+                            .split(chunks[1]);
+
+                        // Render status bar with star indicator
+                        let status_line = Line::from(vec![
+                            Span::styled(
+                                " * ",
+                                Style::default()
+                                    .fg(Color::Yellow)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(status.as_str(), Style::default().fg(Color::Yellow)),
+                        ]);
+                        frame.render_widget(Paragraph::new(status_line), status_chunks[0]);
+                        status_chunks[1]
+                    } else {
+                        chunks[1]
+                    }
+                } else {
+                    chunks[1]
+                };
+
                 // Use split layout (branch list takes full area, PaneList abolished)
-                let split_areas = calculate_split_layout(chunks[1], &self.split_layout);
+                let split_areas = calculate_split_layout(content_area, &self.split_layout);
                 let status_message = self
                     .active_status_message()
                     .map(|message| message.to_string());
@@ -4672,6 +4707,13 @@ fn build_shell_command(command: &str, args: &[String]) -> String {
     let mut cmd_parts = vec![shell_escape(command)];
     cmd_parts.extend(args.iter().map(|arg| shell_escape(arg)));
     cmd_parts.join(" ")
+}
+
+fn wrap_tmux_command_for_fast_exit(command: &str) -> String {
+    format!(
+        "start=$(date +%s); {} ; status=$?; end=$(date +%s); if [ $status -ne 0 ] || [ $((end-start)) -lt {} ]; then echo; echo \"[gwt] Agent exited immediately (status=$status).\"; echo \"[gwt] Press Enter to close this pane.\"; read -r _; fi; exit $status",
+        command, FAST_EXIT_THRESHOLD_SECS
+    )
 }
 
 /// Build the full tmux command string with environment variables

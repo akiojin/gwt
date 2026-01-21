@@ -331,6 +331,8 @@ pub struct SummaryPanel<'a> {
     pub title: Option<Line<'static>>,
     /// Optional links to display
     pub links: SummaryLinks,
+    /// Optional status line (e.g., progress indicator)
+    pub status_line: Option<String>,
 }
 
 const SUMMARY_PANEL_PADDING_X: u16 = 1;
@@ -370,6 +372,7 @@ impl<'a> SummaryPanel<'a> {
             tick: 0,
             title: None,
             links: SummaryLinks::default(),
+            status_line: None,
         }
     }
 
@@ -385,6 +388,11 @@ impl<'a> SummaryPanel<'a> {
 
     pub fn with_links(mut self, links: SummaryLinks) -> Self {
         self.links = links;
+        self
+    }
+
+    pub fn with_status_line(mut self, status_line: Option<String>) -> Self {
+        self.status_line = status_line;
         self
     }
 
@@ -463,6 +471,18 @@ impl<'a> SummaryPanel<'a> {
     /// Build sections content with their line counts
     fn build_sections_with_links(&self) -> Vec<SectionLines> {
         let mut sections = Vec::new();
+
+        // Status line section (e.g., progress indicator)
+        if let Some(status) = &self.status_line {
+            let spinner = Self::SPINNER_FRAMES[self.tick % Self::SPINNER_FRAMES.len()];
+            sections.push(SectionLines {
+                lines: vec![Line::from(vec![
+                    Span::styled(format!("{} ", spinner), Style::default().fg(Color::Yellow)),
+                    Span::styled(status.clone(), Style::default().fg(Color::Yellow)),
+                ])],
+                link_urls: vec![None],
+            });
+        }
 
         // Commits section
         sections.push(self.build_commits_section());
