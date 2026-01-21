@@ -1,6 +1,24 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [6.9.0] - 2026-01-21
+
+### Bug Fixes
+
+- AI設定ウィザードでdキーが入力できない問題を修正 (#722)
+- ブランチステータス更新中も詳細パネルにブランチ情報を表示 (#721)
+- 起動直後終了時の可視化を改善 (#719)
+- タブ状態をグローバル管理に変更しリフレッシュ時のリセットを修正 (#724)
+
+### Features
+
+- Allow variable session summary highlights (#718)
+- 起動最適化 - 非同期化と進捗表示の改善 (#723)
+
+### Miscellaneous Tasks
+
+- Add .gwt-session.toml to .gitignore
+
 ## [6.8.0] - 2026-01-21
 
 ### Features
