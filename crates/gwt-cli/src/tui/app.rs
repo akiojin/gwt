@@ -17,8 +17,8 @@ use gwt_core::ai::{
 };
 use gwt_core::config::get_branch_tool_history;
 use gwt_core::config::{
-    get_claude_settings_path, is_gwt_hooks_registered, register_gwt_hooks, save_session_entry,
-    AISettings, Profile, ProfilesConfig, ResolvedAISettings, ToolSessionEntry,
+    get_claude_settings_path, is_gwt_hooks_registered, register_gwt_hooks, reregister_gwt_hooks,
+    save_session_entry, AISettings, Profile, ProfilesConfig, ResolvedAISettings, ToolSessionEntry,
 };
 use gwt_core::error::GwtError;
 use gwt_core::git::{Branch, PrCache, Remote, Repository};
@@ -36,20 +36,24 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 const BRANCH_LIST_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(500);
+const SESSION_POLL_INTERVAL: Duration = Duration::from_secs(60);
+const SESSION_SUMMARY_QUIET_PERIOD: Duration = Duration::from_secs(5);
 
-use super::screens::branch_list::{PrInfo, WorktreeStatus};
+use super::screens::branch_list::{
+    BranchSummaryRequest, BranchSummaryUpdate, PrInfo, WorktreeStatus,
+};
 use super::screens::environment::EditField;
 use super::screens::pane_list::PaneListState;
 use super::screens::split_layout::{calculate_split_layout, SplitLayoutState};
 use super::screens::{
-    collect_os_env, render_branch_list, render_confirm, render_environment, render_error,
-    render_help, render_logs, render_profiles, render_settings, render_wizard,
-    render_worktree_create, BranchItem, BranchListState, BranchType, CodingAgent, ConfirmState,
-    DetailPanelTab, EnvironmentState, ErrorState, ExecutionMode, HelpState, LogsState,
-    ProfilesState, QuickStartEntry, ReasoningLevel, SettingsState, WizardConfirmResult,
+    collect_os_env, render_ai_wizard, render_branch_list, render_confirm, render_environment,
+    render_error, render_help, render_logs, render_profiles, render_settings, render_wizard,
+    render_worktree_create, AIWizardState, BranchItem, BranchListState, BranchType, CodingAgent,
+    ConfirmState, DetailPanelTab, EnvironmentState, ErrorState, ExecutionMode, HelpState,
+    LogsState, ProfilesState, QuickStartEntry, ReasoningLevel, SettingsState, WizardConfirmResult,
     WizardState, WorktreeCreateState,
 };
 
@@ -73,6 +77,27 @@ fn resolve_orphaned_agent_name(
 
 fn format_ai_error(err: AIError) -> String {
     err.to_string()
+}
+
+fn session_poll_due(last_poll: Option<Instant>, now: Instant) -> bool {
+    last_poll
+        .map(|last| now.duration_since(last) >= SESSION_POLL_INTERVAL)
+        .unwrap_or(true)
+}
+
+fn defer_poll_for_quiet(now: Instant) -> Instant {
+    if SESSION_POLL_INTERVAL > SESSION_SUMMARY_QUIET_PERIOD {
+        now - (SESSION_POLL_INTERVAL - SESSION_SUMMARY_QUIET_PERIOD)
+    } else {
+        now
+    }
+}
+
+fn session_file_is_quiet(mtime: SystemTime, now: SystemTime) -> bool {
+    match now.duration_since(mtime) {
+        Ok(elapsed) => elapsed >= SESSION_SUMMARY_QUIET_PERIOD,
+        Err(_) => false,
+    }
 }
 
 fn session_parser_for_tool(tool_id: &str) -> Option<Box<dyn SessionParser>> {
@@ -191,6 +216,7 @@ struct SessionSummaryUpdate {
     session_id: String,
     summary: Option<gwt_core::ai::SessionSummary>,
     error: Option<String>,
+    warning: Option<String>,
     mtime: Option<std::time::SystemTime>,
     missing: bool,
 }
@@ -267,6 +293,8 @@ pub struct Model {
     environment: EnvironmentState,
     /// Wizard popup state
     wizard: WizardState,
+    /// AI settings wizard state (FR-100)
+    ai_wizard: AIWizardState,
     /// Status message
     status_message: Option<String>,
     /// Status message timestamp (for auto-clear)
@@ -295,6 +323,8 @@ pub struct Model {
     pending_hook_setup: bool,
     /// Branch list update receiver
     branch_list_rx: Option<Receiver<BranchListUpdate>>,
+    /// Branch summary update receiver
+    branch_summary_rx: Option<Receiver<BranchSummaryUpdate>>,
     /// PR title update receiver
     pr_title_rx: Option<Receiver<PrTitleUpdate>>,
     /// Safety check update receiver
@@ -321,8 +351,10 @@ pub struct Model {
     last_pane_update: Option<Instant>,
     /// Last time spinner was updated (for 250ms refresh)
     last_spinner_update: Option<Instant>,
-    /// Last time session polling ran (30s interval)
+    /// Last time session polling ran (60s interval)
     last_session_poll: Option<Instant>,
+    /// Session poll deferred while generation is in-flight
+    session_poll_deferred: bool,
 }
 
 /// Screen types
@@ -337,6 +369,8 @@ pub enum Screen {
     Error,
     Profiles,
     Environment,
+    /// AI settings wizard (FR-100)
+    AISettingsWizard,
 }
 
 /// Messages (Events in Elm Architecture)
@@ -428,6 +462,7 @@ impl Model {
             profiles_config: ProfilesConfig::default(),
             environment: EnvironmentState::new(),
             wizard: WizardState::new(),
+            ai_wizard: AIWizardState::new(),
             status_message: None,
             status_message_time: None,
             launch_status: None,
@@ -442,6 +477,7 @@ impl Model {
             pending_cleanup_branches: Vec::new(),
             pending_hook_setup: false,
             branch_list_rx: None,
+            branch_summary_rx: None,
             pr_title_rx: None,
             safety_rx: None,
             worktree_status_rx: None,
@@ -456,6 +492,7 @@ impl Model {
             last_pane_update: None,
             last_spinner_update: None,
             last_session_poll: None,
+            session_poll_deferred: false,
         };
 
         model
@@ -489,15 +526,22 @@ impl Model {
 
         model.apply_entry_context(context);
 
-        // SPEC-861d8cdf T-104: Check if hook setup is needed on first startup
-        if model.tmux_mode.is_multi() {
-            if let Some(settings_path) = get_claude_settings_path() {
-                if !is_gwt_hooks_registered(&settings_path) {
-                    model.pending_hook_setup = true;
-                    model.confirm = ConfirmState::hook_setup();
-                    model.screen_stack.push(model.screen.clone());
-                    model.screen = Screen::Confirm;
-                }
+        if let Some(settings_path) = get_claude_settings_path() {
+            // SPEC-861d8cdf T-107: Re-register hooks on startup to sync gwt path
+            if let Err(e) = reregister_gwt_hooks(&settings_path) {
+                warn!(
+                    category = "tui",
+                    error = %e,
+                    "Failed to re-register gwt hooks"
+                );
+            }
+
+            // SPEC-861d8cdf T-104: Check if hook setup is needed on first startup
+            if model.tmux_mode.is_multi() && !is_gwt_hooks_registered(&settings_path) {
+                model.pending_hook_setup = true;
+                model.confirm = ConfirmState::hook_setup();
+                model.screen_stack.push(model.screen.clone());
+                model.screen = Screen::Confirm;
             }
         }
 
@@ -692,6 +736,20 @@ impl Model {
         });
     }
 
+    fn spawn_branch_summary_fetch(&mut self, request: BranchSummaryRequest) {
+        let (tx, rx) = mpsc::channel();
+        self.branch_summary_rx = Some(rx);
+
+        thread::spawn(move || {
+            let summary =
+                BranchListState::build_branch_summary(&request.repo_root, &request.branch_item);
+            let _ = tx.send(BranchSummaryUpdate {
+                branch: request.branch,
+                summary,
+            });
+        });
+    }
+
     fn spawn_safety_checks(
         &mut self,
         targets: Vec<SafetyCheckTarget>,
@@ -825,7 +883,9 @@ impl Model {
 
     fn refresh_branch_summary(&mut self) {
         self.branch_list.ai_enabled = self.active_ai_enabled();
-        self.branch_list.update_branch_summary(&self.repo_root);
+        if let Some(request) = self.branch_list.prepare_branch_summary(&self.repo_root) {
+            self.spawn_branch_summary_fetch(request);
+        }
         if self.branch_list.detail_panel_tab == DetailPanelTab::Session {
             self.maybe_request_session_summary_for_selected(false);
         }
@@ -958,6 +1018,7 @@ impl Model {
                             session_id: task.session_id,
                             summary: None,
                             error: Some(message.clone()),
+                            warning: None,
                             mtime: None,
                             missing: false,
                         });
@@ -975,6 +1036,7 @@ impl Model {
                             session_id: task.session_id,
                             summary: None,
                             error: Some("Unsupported agent session".to_string()),
+                            warning: None,
                             mtime: None,
                             missing: true,
                         });
@@ -992,6 +1054,7 @@ impl Model {
                             session_id: task.session_id,
                             summary: None,
                             error: Some(err.to_string()),
+                            warning: None,
                             mtime: None,
                             missing,
                         });
@@ -1009,6 +1072,7 @@ impl Model {
                             session_id: task.session_id,
                             summary: None,
                             error: Some(err.to_string()),
+                            warning: None,
                             mtime,
                             missing,
                         });
@@ -1023,20 +1087,35 @@ impl Model {
                             session_id: task.session_id,
                             summary: Some(summary),
                             error: None,
+                            warning: None,
                             mtime,
                             missing: false,
                         });
                     }
-                    Err(err) => {
-                        let _ = tx.send(SessionSummaryUpdate {
-                            branch: task.branch,
-                            session_id: task.session_id,
-                            summary: None,
-                            error: Some(format_ai_error(err)),
-                            mtime,
-                            missing: false,
-                        });
-                    }
+                    Err(err) => match err {
+                        AIError::IncompleteSummary => {
+                            let _ = tx.send(SessionSummaryUpdate {
+                                branch: task.branch,
+                                session_id: task.session_id,
+                                summary: None,
+                                error: None,
+                                warning: Some("Incomplete summary; keeping previous".to_string()),
+                                mtime,
+                                missing: false,
+                            });
+                        }
+                        other => {
+                            let _ = tx.send(SessionSummaryUpdate {
+                                branch: task.branch,
+                                session_id: task.session_id,
+                                summary: None,
+                                error: Some(format_ai_error(other)),
+                                warning: None,
+                                mtime,
+                                missing: false,
+                            });
+                        }
+                    },
                 }
             }
         });
@@ -1056,6 +1135,14 @@ impl Model {
                             &update.branch,
                             update.error.unwrap_or_else(|| "No session".to_string()),
                         );
+                        if self.session_poll_deferred {
+                            if let Some(selected) = self.branch_list.selected_branch() {
+                                if selected.name == update.branch {
+                                    self.last_session_poll = None;
+                                    self.session_poll_deferred = false;
+                                }
+                            }
+                        }
                         continue;
                     }
 
@@ -1067,8 +1154,35 @@ impl Model {
                             summary,
                             mtime,
                         );
+                        if self.session_poll_deferred {
+                            if let Some(selected) = self.branch_list.selected_branch() {
+                                if selected.name == update.branch {
+                                    self.last_session_poll = None;
+                                    self.session_poll_deferred = false;
+                                }
+                            }
+                        }
+                    } else if let Some(warning) = update.warning {
+                        self.branch_list
+                            .apply_session_warning(&update.branch, warning);
+                        if self.session_poll_deferred {
+                            if let Some(selected) = self.branch_list.selected_branch() {
+                                if selected.name == update.branch {
+                                    self.last_session_poll = None;
+                                    self.session_poll_deferred = false;
+                                }
+                            }
+                        }
                     } else if let Some(error) = update.error {
                         self.branch_list.apply_session_error(&update.branch, error);
+                        if self.session_poll_deferred {
+                            if let Some(selected) = self.branch_list.selected_branch() {
+                                if selected.name == update.branch {
+                                    self.last_session_poll = None;
+                                    self.session_poll_deferred = false;
+                                }
+                            }
+                        }
                     }
                 }
                 Err(TryRecvError::Empty) => break,
@@ -1083,6 +1197,7 @@ impl Model {
     fn poll_session_summary_if_needed(&mut self) {
         if self.branch_list.detail_panel_tab != DetailPanelTab::Session {
             self.last_session_poll = None;
+            self.session_poll_deferred = false;
             return;
         }
 
@@ -1091,12 +1206,9 @@ impl Model {
         }
 
         let now = Instant::now();
-        if let Some(last) = self.last_session_poll {
-            if now.duration_since(last) < Duration::from_secs(30) {
-                return;
-            }
+        if !session_poll_due(self.last_session_poll, now) {
+            return;
         }
-        self.last_session_poll = Some(now);
 
         let (branch_name, session_id, tool_id) = match self.branch_list.selected_branch() {
             Some(branch) => (
@@ -1107,6 +1219,14 @@ impl Model {
             None => return,
         };
 
+        if self.branch_list.session_summary_inflight(&branch_name) {
+            self.session_poll_deferred = true;
+            return;
+        }
+
+        self.last_session_poll = Some(now);
+        self.session_poll_deferred = false;
+
         let Some(session_id) = session_id else {
             self.branch_list.mark_session_missing(&branch_name);
             return;
@@ -1115,10 +1235,6 @@ impl Model {
             self.branch_list.mark_session_missing(&branch_name);
             return;
         };
-
-        if self.branch_list.session_summary_inflight(&branch_name) {
-            return;
-        }
 
         let Some(settings) = self.active_ai_settings() else {
             return;
@@ -1151,6 +1267,11 @@ impl Model {
             .branch_list
             .session_summary_stale(&branch_name, &session_id, mtime)
         {
+            return;
+        }
+
+        if !session_file_is_quiet(mtime, SystemTime::now()) {
+            self.last_session_poll = Some(defer_poll_for_quiet(now));
             return;
         }
 
@@ -1264,7 +1385,10 @@ impl Model {
                 let session_cache = self.branch_list.clone_session_cache();
                 let session_inflight = self.branch_list.clone_session_inflight();
                 let session_missing = self.branch_list.clone_session_missing();
+                let session_warnings = self.branch_list.clone_session_warnings();
                 let detail_tab = self.branch_list.detail_panel_tab;
+                // FR-074b: ブランチ単位タブ記憶を保持
+                let branch_tab_cache = self.branch_list.take_branch_tab_cache();
                 let mut branch_list = BranchListState::new().with_branches(update.branches);
                 branch_list.detail_panel_tab = detail_tab;
                 branch_list.active_profile = self.profiles_config.active.clone();
@@ -1272,9 +1396,18 @@ impl Model {
                 branch_list.set_session_cache(session_cache);
                 branch_list.set_session_inflight(session_inflight);
                 branch_list.set_session_missing(session_missing);
+                branch_list.set_session_warnings(session_warnings);
                 branch_list.set_repo_web_url(self.branch_list.repo_web_url().cloned());
                 branch_list.working_directory = Some(self.repo_root.display().to_string());
                 branch_list.version = Some(env!("CARGO_PKG_VERSION").to_string());
+                // FR-074b: タブ記憶を復元し、削除されたブランチのキャッシュをクリーンアップ
+                branch_list.restore_branch_tab_cache(branch_tab_cache);
+                let remaining_branches: std::collections::HashSet<String> = branch_list
+                    .branches
+                    .iter()
+                    .map(|b| b.name.clone())
+                    .collect();
+                branch_list.cleanup_branch_tab_cache(&remaining_branches);
                 self.branch_list = branch_list;
                 // SPEC-4b893dae: Update branch summary after branches are loaded
                 self.refresh_branch_summary();
@@ -1317,6 +1450,23 @@ impl Model {
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
                 self.pr_title_rx = None;
+            }
+        }
+    }
+
+    fn apply_branch_summary_updates(&mut self) {
+        let Some(rx) = &self.branch_summary_rx else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(update) => {
+                self.branch_list.apply_branch_summary_update(update);
+                self.branch_summary_rx = None;
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.branch_summary_rx = None;
             }
         }
     }
@@ -2084,30 +2234,123 @@ impl Model {
     }
 
     fn open_default_ai_editor(&mut self) {
-        let (ai_enabled, ai_endpoint, ai_api_key, ai_model) = match &self.profiles_config.default_ai
-        {
-            Some(ai) => (
-                ai.is_enabled(),
-                ai.endpoint.clone(),
-                ai.api_key.clone(),
-                ai.model.clone(),
-            ),
-            None => {
-                let defaults = AISettings::default();
-                (false, defaults.endpoint, String::new(), defaults.model)
+        // FR-100: Use AI settings wizard for default AI settings
+        if let Some(ai) = &self.profiles_config.default_ai {
+            // Edit existing settings
+            self.ai_wizard.open_edit(
+                true, // is_default_ai
+                None, // no profile name
+                &ai.endpoint,
+                &ai.api_key,
+                &ai.model,
+            );
+        } else {
+            // Create new settings
+            self.ai_wizard.open_new(true, None);
+        }
+        self.screen_stack.push(self.screen.clone());
+        self.screen = Screen::AISettingsWizard;
+    }
+
+    /// Open AI settings wizard for a specific profile
+    fn open_profile_ai_editor(&mut self, profile_name: &str) {
+        // FR-100: Use AI settings wizard for profile AI settings
+        if let Some(profile) = self.profiles_config.profiles.get(profile_name) {
+            if let Some(ai) = &profile.ai {
+                // Edit existing settings
+                self.ai_wizard.open_edit(
+                    false, // not default AI
+                    Some(profile_name.to_string()),
+                    &ai.endpoint,
+                    &ai.api_key,
+                    &ai.model,
+                );
+            } else {
+                // Create new settings
+                self.ai_wizard
+                    .open_new(false, Some(profile_name.to_string()));
             }
+            self.screen_stack.push(self.screen.clone());
+            self.screen = Screen::AISettingsWizard;
+        }
+    }
+
+    /// Handle Enter key in AI settings wizard
+    fn handle_ai_wizard_enter(&mut self) {
+        use super::screens::ai_wizard::AIWizardStep;
+
+        match self.ai_wizard.step {
+            AIWizardStep::Endpoint => {
+                self.ai_wizard.next_step();
+            }
+            AIWizardStep::ApiKey => {
+                // Start fetching models
+                self.ai_wizard.step = AIWizardStep::FetchingModels;
+                self.ai_wizard.loading_message = Some("Fetching models...".to_string());
+
+                // Fetch models (blocking)
+                match self.ai_wizard.fetch_models() {
+                    Ok(()) => {
+                        self.ai_wizard.fetch_complete();
+                    }
+                    Err(e) => {
+                        self.ai_wizard.fetch_failed(&e);
+                    }
+                }
+            }
+            AIWizardStep::FetchingModels => {
+                // Do nothing while fetching
+            }
+            AIWizardStep::ModelSelect => {
+                // Save AI settings
+                self.save_ai_wizard_settings();
+                self.ai_wizard.close();
+                if let Some(prev_screen) = self.screen_stack.pop() {
+                    self.screen = prev_screen;
+                }
+                self.load_profiles();
+            }
+        }
+    }
+
+    /// Save AI settings from wizard
+    fn save_ai_wizard_settings(&mut self) {
+        let model = self
+            .ai_wizard
+            .current_model()
+            .map(|m| m.id.clone())
+            .unwrap_or_default();
+        let settings = AISettings {
+            endpoint: self.ai_wizard.endpoint.trim().to_string(),
+            api_key: self.ai_wizard.api_key.trim().to_string(),
+            model,
         };
 
-        self.environment = EnvironmentState::new().with_ai_only(true).with_ai_settings(
-            ai_enabled,
-            ai_endpoint,
-            ai_api_key,
-            ai_model,
-        );
-        self.environment.selected = 0;
-        self.environment.refresh_selection();
-        self.screen_stack.push(self.screen.clone());
-        self.screen = Screen::Environment;
+        if self.ai_wizard.is_default_ai {
+            self.profiles_config.default_ai = Some(settings);
+        } else if let Some(profile_name) = &self.ai_wizard.profile_name {
+            if let Some(profile) = self.profiles_config.profiles.get_mut(profile_name) {
+                profile.ai = Some(settings);
+            }
+        }
+        self.save_profiles();
+    }
+
+    /// Delete AI settings from wizard
+    fn delete_ai_wizard_settings(&mut self) {
+        if self.ai_wizard.is_default_ai {
+            self.profiles_config.default_ai = None;
+        } else if let Some(profile_name) = &self.ai_wizard.profile_name {
+            if let Some(profile) = self.profiles_config.profiles.get_mut(profile_name) {
+                profile.ai = None;
+            }
+        }
+        self.save_profiles();
+        self.ai_wizard.close();
+        if let Some(prev_screen) = self.screen_stack.pop() {
+            self.screen = prev_screen;
+        }
+        self.load_profiles();
     }
 
     fn persist_environment(&mut self) {
@@ -2317,6 +2560,19 @@ impl Model {
                     if let Some(prev_screen) = self.screen_stack.pop() {
                         self.screen = prev_screen;
                     }
+                } else if matches!(self.screen, Screen::AISettingsWizard) {
+                    // Go back in AI wizard or close if at first step
+                    if self.ai_wizard.show_delete_confirm {
+                        self.ai_wizard.cancel_delete();
+                    } else {
+                        self.ai_wizard.prev_step();
+                        if !self.ai_wizard.visible {
+                            // Wizard was closed
+                            if let Some(prev_screen) = self.screen_stack.pop() {
+                                self.screen = prev_screen;
+                            }
+                        }
+                    }
                 } else if let Some(prev_screen) = self.screen_stack.pop() {
                     self.screen = prev_screen;
                 }
@@ -2339,6 +2595,7 @@ impl Model {
                 // Update spinner animation
                 self.branch_list.tick_spinner();
                 self.apply_branch_list_updates();
+                self.apply_branch_summary_updates();
                 self.apply_pr_title_updates();
                 self.apply_safety_updates();
                 self.apply_worktree_updates();
@@ -2351,6 +2608,11 @@ impl Model {
             Message::SelectNext => match self.screen {
                 Screen::BranchList => {
                     self.branch_list.select_next();
+                    // FR-074: ブランチ選択変更時にタブ状態を復元
+                    if let Some(branch) = self.branch_list.selected_branch() {
+                        let branch_name = branch.name.clone();
+                        self.branch_list.apply_tab_for_branch(&branch_name);
+                    }
                     // SPEC-4b893dae: Update branch summary on selection change
                     self.refresh_branch_summary();
                 }
@@ -2361,11 +2623,17 @@ impl Model {
                 Screen::Error => self.error.scroll_down(),
                 Screen::Profiles => self.profiles.select_next(),
                 Screen::Environment => self.environment.select_next(),
+                Screen::AISettingsWizard => self.ai_wizard.select_next_model(),
                 Screen::Confirm => {}
             },
             Message::SelectPrev => match self.screen {
                 Screen::BranchList => {
                     self.branch_list.select_prev();
+                    // FR-074: ブランチ選択変更時にタブ状態を復元
+                    if let Some(branch) = self.branch_list.selected_branch() {
+                        let branch_name = branch.name.clone();
+                        self.branch_list.apply_tab_for_branch(&branch_name);
+                    }
                     // SPEC-4b893dae: Update branch summary on selection change
                     self.refresh_branch_summary();
                 }
@@ -2376,6 +2644,7 @@ impl Model {
                 Screen::Error => self.error.scroll_up(),
                 Screen::Profiles => self.profiles.select_prev(),
                 Screen::Environment => self.environment.select_prev(),
+                Screen::AISettingsWizard => self.ai_wizard.select_prev_model(),
                 Screen::Confirm => {}
             },
             Message::PageUp => match self.screen {
@@ -2384,6 +2653,11 @@ impl Model {
                         self.branch_list.scroll_session_page_up();
                     } else {
                         self.branch_list.page_up(10);
+                        // FR-074: ブランチ選択変更時にタブ状態を復元
+                        if let Some(branch) = self.branch_list.selected_branch() {
+                            let branch_name = branch.name.clone();
+                            self.branch_list.apply_tab_for_branch(&branch_name);
+                        }
                         // SPEC-4b893dae: Update branch summary on selection change
                         self.refresh_branch_summary();
                     }
@@ -2399,6 +2673,11 @@ impl Model {
                         self.branch_list.scroll_session_page_down();
                     } else {
                         self.branch_list.page_down(10);
+                        // FR-074: ブランチ選択変更時にタブ状態を復元
+                        if let Some(branch) = self.branch_list.selected_branch() {
+                            let branch_name = branch.name.clone();
+                            self.branch_list.apply_tab_for_branch(&branch_name);
+                        }
                         // SPEC-4b893dae: Update branch summary on selection change
                         self.refresh_branch_summary();
                     }
@@ -2411,6 +2690,11 @@ impl Model {
             Message::GoHome => match self.screen {
                 Screen::BranchList => {
                     self.branch_list.go_home();
+                    // FR-074: ブランチ選択変更時にタブ状態を復元
+                    if let Some(branch) = self.branch_list.selected_branch() {
+                        let branch_name = branch.name.clone();
+                        self.branch_list.apply_tab_for_branch(&branch_name);
+                    }
                     // SPEC-4b893dae: Update branch summary on selection change
                     self.refresh_branch_summary();
                 }
@@ -2421,6 +2705,11 @@ impl Model {
             Message::GoEnd => match self.screen {
                 Screen::BranchList => {
                     self.branch_list.go_end();
+                    // FR-074: ブランチ選択変更時にタブ状態を復元
+                    if let Some(branch) = self.branch_list.selected_branch() {
+                        let branch_name = branch.name.clone();
+                        self.branch_list.apply_tab_for_branch(&branch_name);
+                    }
                     // SPEC-4b893dae: Update branch summary on selection change
                     self.refresh_branch_summary();
                 }
@@ -2566,6 +2855,9 @@ impl Model {
                 Screen::Logs => {
                     self.logs.toggle_detail();
                 }
+                Screen::AISettingsWizard => {
+                    self.handle_ai_wizard_enter();
+                }
                 _ => {}
             },
             Message::Char(c) => {
@@ -2584,6 +2876,22 @@ impl Model {
                 } else if matches!(self.screen, Screen::Logs) && self.logs.is_searching {
                     // Log search mode - add character to search
                     self.logs.search.push(c);
+                } else if matches!(self.screen, Screen::AISettingsWizard) {
+                    if self.ai_wizard.show_delete_confirm {
+                        // Handle delete confirmation
+                        if c == 'y' || c == 'Y' {
+                            self.delete_ai_wizard_settings();
+                        } else if c == 'n' || c == 'N' {
+                            self.ai_wizard.cancel_delete();
+                        }
+                    } else if c == 'd' || c == 'D' {
+                        // Show delete confirmation (only in edit mode)
+                        if self.ai_wizard.is_edit {
+                            self.ai_wizard.show_delete();
+                        }
+                    } else if self.ai_wizard.is_text_input() {
+                        self.ai_wizard.insert_char(c);
+                    }
                 }
             }
             Message::Backspace => {
@@ -2600,6 +2908,10 @@ impl Model {
                 } else if matches!(self.screen, Screen::Logs) && self.logs.is_searching {
                     // Log search mode - delete character
                     self.logs.search.pop();
+                } else if matches!(self.screen, Screen::AISettingsWizard)
+                    && self.ai_wizard.is_text_input()
+                {
+                    self.ai_wizard.delete_char();
                 }
             }
             Message::CursorLeft => {
@@ -2612,6 +2924,10 @@ impl Model {
                 } else if matches!(self.screen, Screen::Confirm) {
                     // FR-029c: Left/Right toggle selection in confirm dialog
                     self.confirm.toggle_selection();
+                } else if matches!(self.screen, Screen::AISettingsWizard)
+                    && self.ai_wizard.is_text_input()
+                {
+                    self.ai_wizard.cursor_left();
                 }
             }
             Message::CursorRight => {
@@ -2624,6 +2940,10 @@ impl Model {
                 } else if matches!(self.screen, Screen::Confirm) {
                     // FR-029c: Left/Right toggle selection in confirm dialog
                     self.confirm.toggle_selection();
+                } else if matches!(self.screen, Screen::AISettingsWizard)
+                    && self.ai_wizard.is_text_input()
+                {
+                    self.ai_wizard.cursor_right();
                 }
             }
             Message::RefreshData => {
@@ -2702,12 +3022,19 @@ impl Model {
                 Screen::Settings => self.settings.next_category(),
                 Screen::BranchList => {
                     if !self.branch_list.filter_mode {
-                        self.branch_list.detail_panel_tab.toggle();
+                        // FR-074a: Tab切り替え時に即座にブランチのタブ記憶を更新
+                        if let Some(branch) = self.branch_list.selected_branch() {
+                            let branch_name = branch.name.clone();
+                            self.branch_list.toggle_tab_for_branch(&branch_name);
+                        } else {
+                            self.branch_list.detail_panel_tab.toggle();
+                        }
                         self.refresh_branch_summary();
                         if self.branch_list.detail_panel_tab == DetailPanelTab::Session {
                             self.maybe_request_session_summary_for_selected(false);
                         } else {
                             self.last_session_poll = None;
+                            self.session_poll_deferred = false;
                         }
                     }
                 }
@@ -3450,7 +3777,7 @@ impl Model {
         // Profiles, Environment, and Logs screens don't need header
         let needs_header = !matches!(
             base_screen,
-            Screen::Profiles | Screen::Environment | Screen::Logs
+            Screen::Profiles | Screen::Environment | Screen::Logs | Screen::AISettingsWizard
         );
         let header_height = if needs_header { 6 } else { 0 };
 
@@ -3520,6 +3847,7 @@ impl Model {
             Screen::Error => render_error(&self.error, frame, chunks[1]),
             Screen::Profiles => render_profiles(&self.profiles, frame, chunks[1]),
             Screen::Environment => render_environment(&mut self.environment, frame, chunks[1]),
+            Screen::AISettingsWizard => render_ai_wizard(&self.ai_wizard, frame, chunks[1]),
             Screen::Confirm => {}
         }
 
@@ -3701,6 +4029,13 @@ impl Model {
                     "[Enter] Edit | [n] New | [d] Delete (profile)/Disable (OS) | [r] Reset (override) | [Esc] Back"
                 }
             }
+            Screen::AISettingsWizard => {
+                if self.ai_wizard.show_delete_confirm {
+                    "[y] Confirm Delete | [n] Cancel"
+                } else {
+                    self.ai_wizard.step_title()
+                }
+            }
         }
     }
 
@@ -3738,6 +4073,7 @@ impl Model {
     fn text_input_active(&self) -> bool {
         matches!(self.screen, Screen::Profiles) && self.profiles.create_mode
             || matches!(self.screen, Screen::Environment) && self.environment.edit_mode
+            || matches!(self.screen, Screen::AISettingsWizard) && self.ai_wizard.is_text_input()
     }
 
     fn handle_text_input_key(&mut self, key: KeyEvent, enter_is_press: bool) -> Option<Message> {
@@ -4434,11 +4770,13 @@ fn github_repo_slug(url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::screens::branch_list::SafetyStatus;
+    use crate::tui::screens::branch_list::{SafetyStatus, WorktreeStatus};
     use crate::tui::screens::wizard::WizardStep;
-    use crate::tui::screens::{BranchItem, BranchListState};
+    use crate::tui::screens::{BranchItem, BranchListState, BranchType};
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
     use gwt_core::git::Branch;
+    use gwt_core::git::BranchSummary;
+    use gwt_core::git::DivergenceStatus;
     use std::sync::mpsc;
 
     fn sample_tool_entry(tool_id: &str) -> ToolSessionEntry {
@@ -4454,6 +4792,33 @@ mod tests {
             skip_permissions: None,
             tool_version: None,
             timestamp: 0,
+        }
+    }
+
+    fn sample_branch_with_session(name: &str) -> BranchItem {
+        BranchItem {
+            name: name.to_string(),
+            branch_type: BranchType::Local,
+            is_current: false,
+            has_worktree: true,
+            worktree_path: Some("/tmp/worktree".to_string()),
+            worktree_status: WorktreeStatus::Active,
+            has_changes: false,
+            has_unpushed: false,
+            divergence: DivergenceStatus::UpToDate,
+            has_remote_counterpart: true,
+            remote_name: None,
+            safe_to_cleanup: Some(true),
+            safety_status: SafetyStatus::Safe,
+            is_unmerged: false,
+            last_commit_timestamp: None,
+            last_tool_usage: None,
+            last_tool_id: Some("codex-cli".to_string()),
+            last_session_id: Some("sess-1".to_string()),
+            is_selected: false,
+            pr_title: None,
+            pr_number: None,
+            pr_url: None,
         }
     }
 
@@ -4630,6 +4995,149 @@ mod tests {
 
         model.update(Message::SelectNext);
         assert_eq!(model.branch_list.selected, 1);
+    }
+
+    #[test]
+    fn test_session_file_is_quiet_threshold() {
+        let now = SystemTime::now();
+        let recent =
+            now - Duration::from_secs(SESSION_SUMMARY_QUIET_PERIOD.as_secs().saturating_sub(1));
+        assert!(!session_file_is_quiet(recent, now));
+
+        let old = now - Duration::from_secs(SESSION_SUMMARY_QUIET_PERIOD.as_secs() + 1);
+        assert!(session_file_is_quiet(old, now));
+    }
+
+    #[test]
+    fn test_defer_poll_for_quiet_schedules_next_check() {
+        let now = Instant::now();
+        let deferred = defer_poll_for_quiet(now);
+        let delta = now.duration_since(deferred);
+        assert_eq!(delta, SESSION_POLL_INTERVAL - SESSION_SUMMARY_QUIET_PERIOD);
+    }
+
+    #[test]
+    fn test_poll_session_summary_defers_when_inflight() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+
+        let item = sample_branch_with_session("feature/poll");
+        model.branch_list = BranchListState::new().with_branches(vec![item]);
+        model.branch_list.detail_panel_tab = DetailPanelTab::Session;
+        model.branch_list.ai_enabled = true;
+
+        let branch_name = model
+            .branch_list
+            .selected_branch()
+            .map(|b| b.name.clone())
+            .unwrap();
+        model
+            .branch_list
+            .mark_session_summary_inflight(&branch_name);
+
+        let previous = Instant::now() - SESSION_POLL_INTERVAL - Duration::from_secs(1);
+        model.last_session_poll = Some(previous);
+
+        model.poll_session_summary_if_needed();
+
+        assert!(model.session_poll_deferred);
+        assert_eq!(model.last_session_poll, Some(previous));
+    }
+
+    #[test]
+    fn test_branch_summary_update_ignores_non_selected_branch() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+
+        let branches = vec![
+            BranchItem {
+                name: "feature/one".to_string(),
+                branch_type: BranchType::Local,
+                is_current: true,
+                has_worktree: true,
+                worktree_path: Some("/path".to_string()),
+                worktree_status: WorktreeStatus::Active,
+                has_changes: false,
+                has_unpushed: false,
+                divergence: gwt_core::git::DivergenceStatus::UpToDate,
+                has_remote_counterpart: true,
+                remote_name: None,
+                safe_to_cleanup: Some(true),
+                safety_status: SafetyStatus::Safe,
+                is_unmerged: false,
+                last_commit_timestamp: None,
+                last_tool_usage: None,
+                last_tool_id: None,
+                last_session_id: None,
+                is_selected: false,
+                pr_title: None,
+                pr_number: None,
+                pr_url: None,
+            },
+            BranchItem {
+                name: "feature/two".to_string(),
+                branch_type: BranchType::Local,
+                is_current: false,
+                has_worktree: true,
+                worktree_path: Some("/path2".to_string()),
+                worktree_status: WorktreeStatus::Active,
+                has_changes: false,
+                has_unpushed: false,
+                divergence: gwt_core::git::DivergenceStatus::UpToDate,
+                has_remote_counterpart: true,
+                remote_name: None,
+                safe_to_cleanup: Some(true),
+                safety_status: SafetyStatus::Safe,
+                is_unmerged: false,
+                last_commit_timestamp: None,
+                last_tool_usage: None,
+                last_tool_id: None,
+                last_session_id: None,
+                is_selected: false,
+                pr_title: None,
+                pr_number: None,
+                pr_url: None,
+            },
+        ];
+
+        model.branch_list = BranchListState::new().with_branches(branches);
+        model.branch_list.selected = 0;
+
+        let mut existing = BranchSummary::new("feature/one");
+        existing.errors.commits = Some("keep".to_string());
+        model.branch_list.branch_summary = Some(existing);
+
+        let (tx, rx) = mpsc::channel();
+        model.branch_summary_rx = Some(rx);
+
+        let mut ignored = BranchSummary::new("feature/two");
+        ignored.errors.commits = Some("ignored".to_string());
+        tx.send(BranchSummaryUpdate {
+            branch: "feature/two".to_string(),
+            summary: ignored,
+        })
+        .unwrap();
+
+        model.apply_branch_summary_updates();
+
+        let current = model.branch_list.branch_summary.as_ref().expect("summary");
+        assert_eq!(current.branch_name, "feature/one");
+        assert_eq!(current.errors.commits.as_deref(), Some("keep"));
+
+        let (tx2, rx2) = mpsc::channel();
+        model.branch_summary_rx = Some(rx2);
+
+        let mut applied = BranchSummary::new("feature/one");
+        applied.errors.commits = Some("applied".to_string());
+        tx2.send(BranchSummaryUpdate {
+            branch: "feature/one".to_string(),
+            summary: applied,
+        })
+        .unwrap();
+
+        model.apply_branch_summary_updates();
+        let current = model.branch_list.branch_summary.as_ref().expect("summary");
+        assert_eq!(current.errors.commits.as_deref(), Some("applied"));
     }
 
     #[test]

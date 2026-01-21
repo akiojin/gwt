@@ -178,6 +178,7 @@ pub fn summarize_session(
     let content = client.create_response(messages)?;
     let fields = parse_session_summary_fields(&content).unwrap_or_default();
     let markdown = normalize_session_summary_markdown(&content, &fields)?;
+    validate_session_summary_markdown(&markdown)?;
 
     let metrics = build_metrics(parsed);
 
@@ -264,6 +265,85 @@ fn normalize_session_summary_markdown(
     }
 
     Ok(build_markdown_from_fields(fields))
+}
+
+fn validate_session_summary_markdown(markdown: &str) -> Result<(), AIError> {
+    let mut stage = SummaryStage::Start;
+    let mut has_bullet = false;
+
+    for line in markdown.lines() {
+        let trimmed = line.trim();
+        if let Some(title) = trimmed.strip_prefix("## ") {
+            let title = title.trim();
+            if heading_matches(title, "目的") {
+                if stage != SummaryStage::Start {
+                    return Err(AIError::IncompleteSummary);
+                }
+                stage = SummaryStage::Purpose;
+                continue;
+            }
+            if heading_matches(title, "要約") {
+                if stage != SummaryStage::Purpose {
+                    return Err(AIError::IncompleteSummary);
+                }
+                stage = SummaryStage::Summary;
+                continue;
+            }
+            if heading_matches(title, "ハイライト") {
+                if stage != SummaryStage::Summary {
+                    return Err(AIError::IncompleteSummary);
+                }
+                stage = SummaryStage::Highlight;
+                continue;
+            }
+            if stage == SummaryStage::Highlight {
+                stage = SummaryStage::Done;
+            }
+            continue;
+        }
+
+        if stage == SummaryStage::Highlight && is_bullet_line(trimmed) {
+            has_bullet = true;
+        }
+    }
+
+    if (stage == SummaryStage::Highlight || stage == SummaryStage::Done) && has_bullet {
+        return Ok(());
+    }
+
+    Err(AIError::IncompleteSummary)
+}
+
+fn heading_matches(title: &str, expected: &str) -> bool {
+    let trimmed = title.trim();
+    if trimmed == expected {
+        return true;
+    }
+    let Some(rest) = trimmed.strip_prefix(expected) else {
+        return false;
+    };
+    let rest = rest.trim_start();
+    rest.is_empty()
+        || rest.starts_with('(')
+        || rest.starts_with('（')
+        || rest.starts_with(':')
+        || rest.starts_with('：')
+}
+
+fn is_bullet_line(line: &str) -> bool {
+    if line.starts_with("- ") || line.starts_with("* ") || line.starts_with("•") {
+        return true;
+    }
+    strip_ordered_prefix(line).is_some()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SummaryStage {
+    Start,
+    Purpose,
+    Summary,
+    Highlight,
+    Done,
 }
 
 fn looks_like_markdown(content: &str) -> bool {
@@ -547,5 +627,25 @@ mod tests {
         let fields = SessionSummaryFields::default();
         let markdown = normalize_session_summary_markdown(content, &fields).expect("markdown");
         assert_eq!(markdown, content);
+    }
+
+    #[test]
+    fn test_validate_session_summary_markdown_accepts_complete() {
+        let content = "## 目的\nA\n\n## 要約\nB\n\n## ハイライト\n- C";
+        assert!(validate_session_summary_markdown(content).is_ok());
+    }
+
+    #[test]
+    fn test_validate_session_summary_markdown_rejects_missing_highlight() {
+        let content = "## 目的\nA\n\n## 要約\nB\n";
+        let result = validate_session_summary_markdown(content);
+        assert!(matches!(result, Err(AIError::IncompleteSummary)));
+    }
+
+    #[test]
+    fn test_validate_session_summary_markdown_rejects_missing_bullets() {
+        let content = "## 目的\nA\n\n## 要約\nB\n\n## ハイライト\n";
+        let result = validate_session_summary_markdown(content);
+        assert!(matches!(result, Err(AIError::IncompleteSummary)));
     }
 }

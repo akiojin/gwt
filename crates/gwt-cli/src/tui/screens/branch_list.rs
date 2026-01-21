@@ -11,7 +11,7 @@ use gwt_core::worktree::Worktree;
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use ratatui::{prelude::*, widgets::*};
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 use unicode_width::UnicodeWidthStr;
 
@@ -192,6 +192,19 @@ pub struct PrInfo {
     pub title: String,
     pub number: u64,
     pub url: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BranchSummaryRequest {
+    pub branch: String,
+    pub repo_root: PathBuf,
+    pub branch_item: BranchItem,
+}
+
+#[derive(Debug, Clone)]
+pub struct BranchSummaryUpdate {
+    pub branch: String,
+    pub summary: BranchSummary,
 }
 
 /// Worktree status
@@ -420,6 +433,8 @@ pub struct BranchListState {
     session_summary_inflight: HashSet<String>,
     /// Session missing for branch
     session_missing: HashSet<String>,
+    /// Session summary warnings per branch
+    session_summary_warnings: HashMap<String, String>,
     /// Session summary scroll offset
     session_scroll_offset: usize,
     /// Session summary scroll max
@@ -430,6 +445,8 @@ pub struct BranchListState {
     repo_web_url: Option<String>,
     /// Clickable link regions in details panel
     detail_links: Vec<LinkRegion>,
+    /// Branch-specific tab state cache (FR-074: branch-level tab memory)
+    branch_tab_cache: HashMap<String, DetailPanelTab>,
 }
 
 impl Default for BranchListState {
@@ -465,11 +482,13 @@ impl Default for BranchListState {
             session_summary_cache: SessionSummaryCache::default(),
             session_summary_inflight: HashSet::new(),
             session_missing: HashSet::new(),
+            session_summary_warnings: HashMap::new(),
             session_scroll_offset: 0,
             session_scroll_max: 0,
             session_scroll_page: 0,
             repo_web_url: None,
             detail_links: Vec::new(),
+            branch_tab_cache: HashMap::new(),
         }
     }
 }
@@ -986,70 +1005,117 @@ impl BranchListState {
         }
     }
 
-    /// Update branch summary for the currently selected branch (SPEC-4b893dae T206)
-    ///
-    /// Fetches commit log and change stats from the repository.
-    /// Should be called when selection changes.
-    pub fn update_branch_summary(&mut self, repo_root: &Path) {
+    /// Prepare branch summary loading state for the selected branch.
+    /// Returns a request payload for background fetch when needed.
+    pub fn prepare_branch_summary(&mut self, repo_root: &Path) -> Option<BranchSummaryRequest> {
         let Some(branch) = self.selected_branch().cloned() else {
             self.branch_summary = None;
-            return;
+            return None;
         };
 
-        if self
+        let selected_changed = self
             .branch_summary
             .as_ref()
             .map(|summary| summary.branch_name.as_str())
-            != Some(branch.name.as_str())
-        {
+            != Some(branch.name.as_str());
+
+        if selected_changed {
             self.session_scroll_offset = 0;
         }
 
-        // Create base summary
-        let mut summary = BranchSummary::new(&branch.name);
-
-        // Set worktree path if available
-        if let Some(wt_path) = &branch.worktree_path {
-            summary = summary.with_worktree_path(Some(std::path::PathBuf::from(wt_path)));
+        if !selected_changed && self.branch_summary.is_some() {
+            return None;
         }
 
-        // Try to fetch commit log
-        // For branches with worktree, use the worktree path; otherwise use repo root
+        let mut summary = BranchSummary::new(&branch.name);
+        if let Some(wt_path) = &branch.worktree_path {
+            summary = summary.with_worktree_path(Some(PathBuf::from(wt_path)));
+            summary.loading.stats = true;
+        }
+        summary.loading.commits = true;
+        summary.loading.meta = true;
+
+        if self.ai_enabled {
+            if let Some(summary_data) = self.session_summary_cache.get(&branch.name) {
+                summary = summary.with_session_summary(summary_data.clone());
+            } else if self.session_summary_inflight.contains(&branch.name) {
+                summary.loading.session_summary = true;
+            }
+        }
+
+        self.branch_summary = Some(summary);
+
+        Some(BranchSummaryRequest {
+            branch: branch.name.clone(),
+            repo_root: repo_root.to_path_buf(),
+            branch_item: branch,
+        })
+    }
+
+    pub fn apply_branch_summary_update(&mut self, update: BranchSummaryUpdate) {
+        let Some(selected) = self.selected_branch() else {
+            return;
+        };
+        if selected.name != update.branch {
+            return;
+        }
+
+        let mut summary = update.summary;
+        if let Some(current) = self.branch_summary.as_ref() {
+            if current.branch_name == update.branch {
+                summary.session_summary = current.session_summary.clone();
+                summary.loading.session_summary = current.loading.session_summary;
+                summary.errors.session_summary = current.errors.session_summary.clone();
+            }
+        }
+        self.branch_summary = Some(summary);
+    }
+
+    /// Build branch summary data in background.
+    pub fn build_branch_summary(repo_root: &Path, branch: &BranchItem) -> BranchSummary {
+        let mut summary = BranchSummary::new(&branch.name);
+        if let Some(wt_path) = &branch.worktree_path {
+            summary = summary.with_worktree_path(Some(PathBuf::from(wt_path)));
+        }
+
         let repo_path = branch
             .worktree_path
             .as_ref()
-            .map(std::path::PathBuf::from)
+            .map(PathBuf::from)
             .unwrap_or_else(|| repo_root.to_path_buf());
 
-        if let Ok(repo) = Repository::open(&repo_path) {
-            // Fetch commit log (max 5 commits)
-            match repo.get_commit_log(5) {
-                Ok(commits) => {
-                    summary = summary.with_commits(commits);
-                }
-                Err(e) => {
-                    summary.errors.commits = Some(e.to_string());
-                }
-            }
-
-            // Fetch change stats only if worktree exists
-            if branch.worktree_path.is_some() {
-                match repo.get_diff_stats() {
-                    Ok(mut stats) => {
-                        // Integrate existing safety check data
-                        stats.has_uncommitted = branch.has_changes;
-                        stats.has_unpushed = branch.has_unpushed;
-                        summary = summary.with_stats(stats);
+        match Repository::open(&repo_path) {
+            Ok(repo) => {
+                match repo.get_commit_log(5) {
+                    Ok(commits) => {
+                        summary = summary.with_commits(commits);
                     }
                     Err(e) => {
-                        summary.errors.stats = Some(e.to_string());
+                        summary.errors.commits = Some(e.to_string());
                     }
+                }
+
+                if branch.worktree_path.is_some() {
+                    match repo.get_diff_stats() {
+                        Ok(mut stats) => {
+                            stats.has_uncommitted = branch.has_changes;
+                            stats.has_unpushed = branch.has_unpushed;
+                            summary = summary.with_stats(stats);
+                        }
+                        Err(e) => {
+                            summary.errors.stats = Some(e.to_string());
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                summary.errors.commits = Some(e.to_string());
+                if branch.worktree_path.is_some() {
+                    summary.errors.stats = Some(e.to_string());
                 }
             }
         }
 
-        // Set metadata from branch data
-        // Extract ahead/behind from DivergenceStatus
         let (ahead, behind) = match &branch.divergence {
             DivergenceStatus::Ahead(a) => (*a, 0),
             DivergenceStatus::Behind(b) => (0, *b),
@@ -1066,15 +1132,7 @@ impl BranchListState {
         };
         summary = summary.with_meta(meta);
 
-        if self.ai_enabled {
-            if let Some(summary_data) = self.session_summary_cache.get(&branch.name) {
-                summary = summary.with_session_summary(summary_data.clone());
-            } else if self.session_summary_inflight.contains(&branch.name) {
-                summary.loading.session_summary = true;
-            }
-        }
-
-        self.branch_summary = Some(summary);
+        summary
     }
 
     pub fn session_summary_cached(&self, branch: &str) -> bool {
@@ -1111,6 +1169,10 @@ impl BranchListState {
         self.session_summary_cache.get(branch)
     }
 
+    pub fn session_summary_warning(&self, branch: &str) -> Option<&String> {
+        self.session_summary_warnings.get(branch)
+    }
+
     pub fn session_summary_stale(
         &self,
         branch: &str,
@@ -1123,6 +1185,53 @@ impl BranchListState {
 
     pub fn clone_session_cache(&self) -> SessionSummaryCache {
         self.session_summary_cache.clone()
+    }
+
+    // ================================================================
+    // ブランチ単位タブ記憶 (SPEC-4b893dae FR-074シリーズ)
+    // ================================================================
+
+    /// Get the remembered tab for a branch (FR-075: default is Details if not set)
+    pub fn get_tab_for_branch(&self, branch_name: &str) -> DetailPanelTab {
+        self.branch_tab_cache
+            .get(branch_name)
+            .copied()
+            .unwrap_or(DetailPanelTab::Details)
+    }
+
+    /// Set the tab state for a specific branch (FR-074a)
+    pub fn set_tab_for_branch(&mut self, branch_name: &str, tab: DetailPanelTab) {
+        self.branch_tab_cache.insert(branch_name.to_string(), tab);
+    }
+
+    /// Remove tab cache entries for branches that no longer exist (FR-074c)
+    pub fn cleanup_branch_tab_cache(&mut self, remaining_branches: &HashSet<String>) {
+        self.branch_tab_cache
+            .retain(|name, _| remaining_branches.contains(name));
+        self.session_summary_warnings
+            .retain(|name, _| remaining_branches.contains(name));
+    }
+
+    /// Take the branch tab cache for preservation during refresh (FR-074b)
+    pub fn take_branch_tab_cache(&mut self) -> HashMap<String, DetailPanelTab> {
+        std::mem::take(&mut self.branch_tab_cache)
+    }
+
+    /// Restore the branch tab cache after refresh (FR-074b)
+    pub fn restore_branch_tab_cache(&mut self, cache: HashMap<String, DetailPanelTab>) {
+        self.branch_tab_cache = cache;
+    }
+
+    /// Toggle the tab and update both global state and branch cache (FR-074a)
+    pub fn toggle_tab_for_branch(&mut self, branch_name: &str) {
+        self.detail_panel_tab.toggle();
+        self.branch_tab_cache
+            .insert(branch_name.to_string(), self.detail_panel_tab);
+    }
+
+    /// Apply the remembered tab state when switching to a branch (FR-074)
+    pub fn apply_tab_for_branch(&mut self, branch_name: &str) {
+        self.detail_panel_tab = self.get_tab_for_branch(branch_name);
     }
 
     pub fn set_session_cache(&mut self, cache: SessionSummaryCache) {
@@ -1139,6 +1248,14 @@ impl BranchListState {
 
     pub fn set_session_inflight(&mut self, inflight: HashSet<String>) {
         self.session_summary_inflight = inflight;
+    }
+
+    pub fn clone_session_warnings(&self) -> HashMap<String, String> {
+        self.session_summary_warnings.clone()
+    }
+
+    pub fn set_session_warnings(&mut self, warnings: HashMap<String, String>) {
+        self.session_summary_warnings = warnings;
     }
 
     pub fn clone_session_missing(&self) -> HashSet<String> {
@@ -1179,6 +1296,7 @@ impl BranchListState {
             mtime,
         );
         self.session_summary_inflight.remove(branch);
+        self.session_summary_warnings.remove(branch);
         self.session_missing.remove(branch);
         if let Some(current) = self.branch_summary.as_mut() {
             if current.branch_name == branch {
@@ -1189,8 +1307,20 @@ impl BranchListState {
         }
     }
 
+    pub fn apply_session_warning(&mut self, branch: &str, warning: String) {
+        self.session_summary_inflight.remove(branch);
+        self.session_summary_warnings
+            .insert(branch.to_string(), warning);
+        if let Some(current) = self.branch_summary.as_mut() {
+            if current.branch_name == branch {
+                current.loading.session_summary = false;
+            }
+        }
+    }
+
     pub fn apply_session_error(&mut self, branch: &str, error: String) {
         self.session_summary_inflight.remove(branch);
+        self.session_summary_warnings.remove(branch);
         if let Some(current) = self.branch_summary.as_mut() {
             if current.branch_name == branch {
                 if current.session_summary.is_none() {
@@ -1933,6 +2063,13 @@ fn render_session_panel(
                 Style::default().fg(Color::DarkGray),
             )));
         } else if let Some(summary) = state.session_summary(&branch.name) {
+            if let Some(warning) = state.session_summary_warning(&branch.name) {
+                lines.push(Line::from(Span::styled(
+                    warning.to_string(),
+                    Style::default().fg(Color::Yellow),
+                )));
+                lines.push(Line::from(""));
+            }
             let markdown = summary.markdown.clone();
             let task_overview = summary.task_overview.clone();
             let short_summary = summary.short_summary.clone();
@@ -2181,8 +2318,10 @@ fn render_footer(frame: &mut Frame, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gwt_core::git::CommitEntry;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use std::path::Path;
 
     fn sample_branch(name: &str) -> BranchItem {
         BranchItem {
@@ -2225,6 +2364,30 @@ mod tests {
         assert_eq!(state.spinner_char(), '/');
         state.spinner_frame = SPINNER_FRAMES.len() * 5;
         assert_eq!(state.spinner_char(), '|');
+    }
+
+    #[test]
+    fn test_prepare_branch_summary_resets_loading() {
+        let branches = vec![sample_branch("feature/one"), sample_branch("feature/two")];
+        let mut state = BranchListState::new().with_branches(branches);
+
+        let mut existing = BranchSummary::new("feature/one");
+        existing.commits = vec![CommitEntry {
+            hash: "abc1234".to_string(),
+            message: "feat: existing".to_string(),
+        }];
+        state.branch_summary = Some(existing);
+
+        state.selected = 1;
+        let request = state.prepare_branch_summary(Path::new("/repo"));
+        assert!(request.is_some());
+
+        let summary = state.branch_summary.as_ref().expect("summary");
+        assert_eq!(summary.branch_name, "feature/two");
+        assert!(summary.loading.commits);
+        assert!(summary.loading.meta);
+        assert!(summary.loading.stats);
+        assert!(summary.commits.is_empty());
     }
 
     #[test]
@@ -2879,5 +3042,151 @@ mod tests {
         assert_eq!(visible.len(), 2);
         assert_eq!(state.branches[visible[0]].name, "feature/one");
         assert_eq!(state.branches[visible[1]].name, "feature/two");
+    }
+
+    // ==========================================================
+    // ブランチ単位タブ記憶のTDDテスト (SPEC-4b893dae FR-074シリーズ)
+    // ==========================================================
+
+    #[test]
+    fn test_get_tab_for_branch_default_is_details() {
+        // FR-075: まだ選択されたことのないブランチのデフォルトタブはDetails
+        let state = BranchListState::new();
+        let tab = state.get_tab_for_branch("feature/new-branch");
+        assert_eq!(tab, DetailPanelTab::Details);
+    }
+
+    #[test]
+    fn test_set_and_get_tab_for_branch() {
+        // FR-074a: Tab切り替え時に即座に該当ブランチのタブ記憶を更新
+        let mut state = BranchListState::new();
+        state.set_tab_for_branch("feature/test", DetailPanelTab::Session);
+        assert_eq!(
+            state.get_tab_for_branch("feature/test"),
+            DetailPanelTab::Session
+        );
+    }
+
+    #[test]
+    fn test_branch_tab_cache_independent_per_branch() {
+        // FR-074: ブランチごとに最後に選択されたタブ状態を記憶
+        let mut state = BranchListState::new();
+        state.set_tab_for_branch("branch-a", DetailPanelTab::Session);
+        state.set_tab_for_branch("branch-b", DetailPanelTab::Details);
+
+        assert_eq!(
+            state.get_tab_for_branch("branch-a"),
+            DetailPanelTab::Session
+        );
+        assert_eq!(
+            state.get_tab_for_branch("branch-b"),
+            DetailPanelTab::Details
+        );
+        assert_eq!(
+            state.get_tab_for_branch("branch-c"),
+            DetailPanelTab::Details
+        ); // 未設定はDetails
+    }
+
+    #[test]
+    fn test_cleanup_branch_tab_cache_removes_deleted_branches() {
+        // FR-074c: ブランチが削除された場合、そのブランチのタブ記憶を即座に破棄
+        let mut state = BranchListState::new();
+        state.set_tab_for_branch("branch-a", DetailPanelTab::Session);
+        state.set_tab_for_branch("branch-b", DetailPanelTab::Session);
+        state.set_tab_for_branch("branch-c", DetailPanelTab::Details);
+
+        // branch-b のみ残るブランチリスト
+        let remaining_branches: HashSet<String> =
+            vec!["branch-b".to_string()].into_iter().collect();
+        state.cleanup_branch_tab_cache(&remaining_branches);
+
+        // branch-b は維持される
+        assert_eq!(
+            state.get_tab_for_branch("branch-b"),
+            DetailPanelTab::Session
+        );
+        // branch-a, branch-c は削除されてデフォルトに戻る
+        assert_eq!(
+            state.get_tab_for_branch("branch-a"),
+            DetailPanelTab::Details
+        );
+        assert_eq!(
+            state.get_tab_for_branch("branch-c"),
+            DetailPanelTab::Details
+        );
+    }
+
+    #[test]
+    fn test_branch_tab_cache_preserved_on_refresh() {
+        // FR-074b: rキーリフレッシュや操作後の自動更新でブランチ単位のタブ記憶を維持
+        let branches = vec![sample_branch("main"), sample_branch("develop")];
+        let mut state = BranchListState::new().with_branches(branches.clone());
+
+        // タブ状態を設定
+        state.set_tab_for_branch("main", DetailPanelTab::Session);
+        state.set_tab_for_branch("develop", DetailPanelTab::Details);
+
+        // リフレッシュをシミュレート（ブランチリストを再設定）
+        let refreshed_branches = vec![sample_branch("main"), sample_branch("develop")];
+        let old_cache = state.take_branch_tab_cache();
+        state = BranchListState::new().with_branches(refreshed_branches);
+        state.restore_branch_tab_cache(old_cache);
+
+        // タブ記憶が維持されていることを確認
+        assert_eq!(state.get_tab_for_branch("main"), DetailPanelTab::Session);
+        assert_eq!(state.get_tab_for_branch("develop"), DetailPanelTab::Details);
+    }
+
+    #[test]
+    fn test_toggle_tab_updates_branch_cache() {
+        // FR-074a: Tab切り替え時に即座に記憶を更新
+        let branches = vec![sample_branch("feature/test")];
+        let mut state = BranchListState::new().with_branches(branches);
+
+        // 初期状態はDetails
+        assert_eq!(state.detail_panel_tab, DetailPanelTab::Details);
+
+        // 選択中のブランチ名を取得してタブを切り替え
+        let branch_name = "feature/test".to_string();
+        state.toggle_tab_for_branch(&branch_name);
+
+        // グローバルタブ状態もブランチキャッシュも更新される
+        assert_eq!(state.detail_panel_tab, DetailPanelTab::Session);
+        assert_eq!(
+            state.get_tab_for_branch("feature/test"),
+            DetailPanelTab::Session
+        );
+
+        // もう一度切り替え
+        state.toggle_tab_for_branch(&branch_name);
+        assert_eq!(state.detail_panel_tab, DetailPanelTab::Details);
+        assert_eq!(
+            state.get_tab_for_branch("feature/test"),
+            DetailPanelTab::Details
+        );
+    }
+
+    #[test]
+    fn test_apply_tab_for_branch_on_selection_change() {
+        // FR-074: ブランチ選択変更時にタブ状態を復元
+        let branches = vec![sample_branch("branch-a"), sample_branch("branch-b")];
+        let mut state = BranchListState::new().with_branches(branches);
+
+        // branch-a でSessionを設定
+        state.set_tab_for_branch("branch-a", DetailPanelTab::Session);
+        state.set_tab_for_branch("branch-b", DetailPanelTab::Details);
+
+        // branch-a を選択
+        state.apply_tab_for_branch("branch-a");
+        assert_eq!(state.detail_panel_tab, DetailPanelTab::Session);
+
+        // branch-b を選択
+        state.apply_tab_for_branch("branch-b");
+        assert_eq!(state.detail_panel_tab, DetailPanelTab::Details);
+
+        // 新規ブランチ（未設定）を選択
+        state.apply_tab_for_branch("branch-c");
+        assert_eq!(state.detail_panel_tab, DetailPanelTab::Details);
     }
 }
