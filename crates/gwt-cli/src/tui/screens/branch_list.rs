@@ -420,6 +420,8 @@ pub struct BranchListState {
     session_summary_inflight: HashSet<String>,
     /// Session missing for branch
     session_missing: HashSet<String>,
+    /// Session summary warnings per branch
+    session_summary_warnings: HashMap<String, String>,
     /// Session summary scroll offset
     session_scroll_offset: usize,
     /// Session summary scroll max
@@ -467,6 +469,7 @@ impl Default for BranchListState {
             session_summary_cache: SessionSummaryCache::default(),
             session_summary_inflight: HashSet::new(),
             session_missing: HashSet::new(),
+            session_summary_warnings: HashMap::new(),
             session_scroll_offset: 0,
             session_scroll_max: 0,
             session_scroll_page: 0,
@@ -1114,6 +1117,10 @@ impl BranchListState {
         self.session_summary_cache.get(branch)
     }
 
+    pub fn session_summary_warning(&self, branch: &str) -> Option<&String> {
+        self.session_summary_warnings.get(branch)
+    }
+
     pub fn session_summary_stale(
         &self,
         branch: &str,
@@ -1148,6 +1155,8 @@ impl BranchListState {
     /// Remove tab cache entries for branches that no longer exist (FR-074c)
     pub fn cleanup_branch_tab_cache(&mut self, remaining_branches: &HashSet<String>) {
         self.branch_tab_cache
+            .retain(|name, _| remaining_branches.contains(name));
+        self.session_summary_warnings
             .retain(|name, _| remaining_branches.contains(name));
     }
 
@@ -1189,6 +1198,14 @@ impl BranchListState {
         self.session_summary_inflight = inflight;
     }
 
+    pub fn clone_session_warnings(&self) -> HashMap<String, String> {
+        self.session_summary_warnings.clone()
+    }
+
+    pub fn set_session_warnings(&mut self, warnings: HashMap<String, String>) {
+        self.session_summary_warnings = warnings;
+    }
+
     pub fn clone_session_missing(&self) -> HashSet<String> {
         self.session_missing.clone()
     }
@@ -1227,6 +1244,7 @@ impl BranchListState {
             mtime,
         );
         self.session_summary_inflight.remove(branch);
+        self.session_summary_warnings.remove(branch);
         self.session_missing.remove(branch);
         if let Some(current) = self.branch_summary.as_mut() {
             if current.branch_name == branch {
@@ -1237,8 +1255,20 @@ impl BranchListState {
         }
     }
 
+    pub fn apply_session_warning(&mut self, branch: &str, warning: String) {
+        self.session_summary_inflight.remove(branch);
+        self.session_summary_warnings
+            .insert(branch.to_string(), warning);
+        if let Some(current) = self.branch_summary.as_mut() {
+            if current.branch_name == branch {
+                current.loading.session_summary = false;
+            }
+        }
+    }
+
     pub fn apply_session_error(&mut self, branch: &str, error: String) {
         self.session_summary_inflight.remove(branch);
+        self.session_summary_warnings.remove(branch);
         if let Some(current) = self.branch_summary.as_mut() {
             if current.branch_name == branch {
                 if current.session_summary.is_none() {
@@ -1981,6 +2011,13 @@ fn render_session_panel(
                 Style::default().fg(Color::DarkGray),
             )));
         } else if let Some(summary) = state.session_summary(&branch.name) {
+            if let Some(warning) = state.session_summary_warning(&branch.name) {
+                lines.push(Line::from(Span::styled(
+                    warning.to_string(),
+                    Style::default().fg(Color::Yellow),
+                )));
+                lines.push(Line::from(""));
+            }
             let markdown = summary.markdown.clone();
             let task_overview = summary.task_overview.clone();
             let short_summary = summary.short_summary.clone();

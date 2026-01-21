@@ -1,6 +1,6 @@
 # タスク: ブランチサマリーパネル（セッション要約対応）
 
-**仕様ID**: `SPEC-4b893dae` | **日付**: 2026-01-19 | **更新日**: 2026-01-19
+**仕様ID**: `SPEC-4b893dae` | **日付**: 2026-01-19 | **更新日**: 2026-01-21
 **入力**: `specs/SPEC-4b893dae/` からの設計ドキュメント
 **前提条件**: plan.md、spec.md、data-model.md、contracts/openai-api.md、research.md、quickstart.md
 
@@ -10,6 +10,18 @@
 - [x] **T8802** [Test] `crates/gwt-cli/src/tui/components.rs` のSummaryPanel描画テストを追加し、枠内余白を検証
 - [x] **T8803** [Impl] SummaryPanelとセッション要約パネルの枠内に左右余白を追加する
 - [ ] **T8804** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
+
+## 追加作業: セッション要約の途中切れ対策 (2026-01-21)
+
+- [x] **T8901** [P] [共通] `specs/SPEC-4b893dae/spec.md` にポーリング再入防止/静止期間/不完全要約保持の要件と受け入れシナリオを追記
+- [x] **T8902** [P] [共通] `specs/SPEC-4b893dae/plan.md` に途中切れ対策の実装方針とリスク緩和を追記
+- [ ] **T8903** [US4] `crates/gwt-core/src/ai/summary.rs` に要約Markdownの完全性バリデーションを追加（目的/要約/ハイライト/箇条書きの検証）
+- [ ] **T8904** [US4] T8903の後に 不完全要約をエラー扱いにして既存要約を保持できるよう調整（`crates/gwt-core/src/ai/summary.rs`）
+- [ ] **T8905** [US4] `crates/gwt-cli/src/tui/app.rs` にポーリング再入防止（生成完了後に次回を再スケジュール）と静止期間チェックを追加
+- [ ] **T8906** [US4] `crates/gwt-cli/src/tui/screens/branch_list.rs` に不完全要約時の警告表示（例: `Incomplete summary; keeping previous`）を追加
+- [ ] **T8907** [Test] `crates/gwt-core/src/ai/summary.rs` に完全性バリデーションのユニットテストを追加
+- [ ] **T8908** [Test] `crates/gwt-cli/src/tui/app.rs` にポーリング再入防止/静止期間のユニットテストを追加（モック時間）
+- [ ] **T8909** `cargo test -p gwt-core` と `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
 
 ## ストーリー依存関係
 

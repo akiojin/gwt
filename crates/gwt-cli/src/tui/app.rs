@@ -39,6 +39,8 @@ use std::time::{Duration, Instant, SystemTime};
 use tracing::{debug, error, info};
 
 const BRANCH_LIST_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(500);
+const SESSION_POLL_INTERVAL: Duration = Duration::from_secs(30);
+const SESSION_SUMMARY_QUIET_PERIOD: Duration = Duration::from_secs(5);
 
 use super::screens::branch_list::{PrInfo, WorktreeStatus};
 use super::screens::environment::EditField;
@@ -73,6 +75,27 @@ fn resolve_orphaned_agent_name(
 
 fn format_ai_error(err: AIError) -> String {
     err.to_string()
+}
+
+fn session_poll_due(last_poll: Option<Instant>, now: Instant) -> bool {
+    last_poll
+        .map(|last| now.duration_since(last) >= SESSION_POLL_INTERVAL)
+        .unwrap_or(true)
+}
+
+fn defer_poll_for_quiet(now: Instant) -> Instant {
+    if SESSION_POLL_INTERVAL > SESSION_SUMMARY_QUIET_PERIOD {
+        now - (SESSION_POLL_INTERVAL - SESSION_SUMMARY_QUIET_PERIOD)
+    } else {
+        now
+    }
+}
+
+fn session_file_is_quiet(mtime: SystemTime, now: SystemTime) -> bool {
+    match now.duration_since(mtime) {
+        Ok(elapsed) => elapsed >= SESSION_SUMMARY_QUIET_PERIOD,
+        Err(_) => false,
+    }
 }
 
 fn session_parser_for_tool(tool_id: &str) -> Option<Box<dyn SessionParser>> {
@@ -191,6 +214,7 @@ struct SessionSummaryUpdate {
     session_id: String,
     summary: Option<gwt_core::ai::SessionSummary>,
     error: Option<String>,
+    warning: Option<String>,
     mtime: Option<std::time::SystemTime>,
     missing: bool,
 }
@@ -323,6 +347,8 @@ pub struct Model {
     last_spinner_update: Option<Instant>,
     /// Last time session polling ran (30s interval)
     last_session_poll: Option<Instant>,
+    /// Session poll deferred while generation is in-flight
+    session_poll_deferred: bool,
 }
 
 /// Screen types
@@ -456,6 +482,7 @@ impl Model {
             last_pane_update: None,
             last_spinner_update: None,
             last_session_poll: None,
+            session_poll_deferred: false,
         };
 
         model
@@ -958,6 +985,7 @@ impl Model {
                             session_id: task.session_id,
                             summary: None,
                             error: Some(message.clone()),
+                            warning: None,
                             mtime: None,
                             missing: false,
                         });
@@ -975,6 +1003,7 @@ impl Model {
                             session_id: task.session_id,
                             summary: None,
                             error: Some("Unsupported agent session".to_string()),
+                            warning: None,
                             mtime: None,
                             missing: true,
                         });
@@ -992,6 +1021,7 @@ impl Model {
                             session_id: task.session_id,
                             summary: None,
                             error: Some(err.to_string()),
+                            warning: None,
                             mtime: None,
                             missing,
                         });
@@ -1009,6 +1039,7 @@ impl Model {
                             session_id: task.session_id,
                             summary: None,
                             error: Some(err.to_string()),
+                            warning: None,
                             mtime,
                             missing,
                         });
@@ -1023,19 +1054,38 @@ impl Model {
                             session_id: task.session_id,
                             summary: Some(summary),
                             error: None,
+                            warning: None,
                             mtime,
                             missing: false,
                         });
                     }
                     Err(err) => {
-                        let _ = tx.send(SessionSummaryUpdate {
-                            branch: task.branch,
-                            session_id: task.session_id,
-                            summary: None,
-                            error: Some(format_ai_error(err)),
-                            mtime,
-                            missing: false,
-                        });
+                        match err {
+                            AIError::IncompleteSummary => {
+                                let _ = tx.send(SessionSummaryUpdate {
+                                    branch: task.branch,
+                                    session_id: task.session_id,
+                                    summary: None,
+                                    error: None,
+                                    warning: Some(
+                                        "Incomplete summary; keeping previous".to_string(),
+                                    ),
+                                    mtime,
+                                    missing: false,
+                                });
+                            }
+                            other => {
+                                let _ = tx.send(SessionSummaryUpdate {
+                                    branch: task.branch,
+                                    session_id: task.session_id,
+                                    summary: None,
+                                    error: Some(format_ai_error(other)),
+                                    warning: None,
+                                    mtime,
+                                    missing: false,
+                                });
+                            }
+                        }
                     }
                 }
             }
@@ -1056,6 +1106,14 @@ impl Model {
                             &update.branch,
                             update.error.unwrap_or_else(|| "No session".to_string()),
                         );
+                        if self.session_poll_deferred {
+                            if let Some(selected) = self.branch_list.selected_branch() {
+                                if selected.name == update.branch {
+                                    self.last_session_poll = None;
+                                    self.session_poll_deferred = false;
+                                }
+                            }
+                        }
                         continue;
                     }
 
@@ -1067,8 +1125,35 @@ impl Model {
                             summary,
                             mtime,
                         );
+                        if self.session_poll_deferred {
+                            if let Some(selected) = self.branch_list.selected_branch() {
+                                if selected.name == update.branch {
+                                    self.last_session_poll = None;
+                                    self.session_poll_deferred = false;
+                                }
+                            }
+                        }
+                    } else if let Some(warning) = update.warning {
+                        self.branch_list
+                            .apply_session_warning(&update.branch, warning);
+                        if self.session_poll_deferred {
+                            if let Some(selected) = self.branch_list.selected_branch() {
+                                if selected.name == update.branch {
+                                    self.last_session_poll = None;
+                                    self.session_poll_deferred = false;
+                                }
+                            }
+                        }
                     } else if let Some(error) = update.error {
                         self.branch_list.apply_session_error(&update.branch, error);
+                        if self.session_poll_deferred {
+                            if let Some(selected) = self.branch_list.selected_branch() {
+                                if selected.name == update.branch {
+                                    self.last_session_poll = None;
+                                    self.session_poll_deferred = false;
+                                }
+                            }
+                        }
                     }
                 }
                 Err(TryRecvError::Empty) => break,
@@ -1083,6 +1168,7 @@ impl Model {
     fn poll_session_summary_if_needed(&mut self) {
         if self.branch_list.detail_panel_tab != DetailPanelTab::Session {
             self.last_session_poll = None;
+            self.session_poll_deferred = false;
             return;
         }
 
@@ -1091,12 +1177,9 @@ impl Model {
         }
 
         let now = Instant::now();
-        if let Some(last) = self.last_session_poll {
-            if now.duration_since(last) < Duration::from_secs(30) {
-                return;
-            }
+        if !session_poll_due(self.last_session_poll, now) {
+            return;
         }
-        self.last_session_poll = Some(now);
 
         let (branch_name, session_id, tool_id) = match self.branch_list.selected_branch() {
             Some(branch) => (
@@ -1107,6 +1190,14 @@ impl Model {
             None => return,
         };
 
+        if self.branch_list.session_summary_inflight(&branch_name) {
+            self.session_poll_deferred = true;
+            return;
+        }
+
+        self.last_session_poll = Some(now);
+        self.session_poll_deferred = false;
+
         let Some(session_id) = session_id else {
             self.branch_list.mark_session_missing(&branch_name);
             return;
@@ -1115,10 +1206,6 @@ impl Model {
             self.branch_list.mark_session_missing(&branch_name);
             return;
         };
-
-        if self.branch_list.session_summary_inflight(&branch_name) {
-            return;
-        }
 
         let Some(settings) = self.active_ai_settings() else {
             return;
@@ -1151,6 +1238,11 @@ impl Model {
             .branch_list
             .session_summary_stale(&branch_name, &session_id, mtime)
         {
+            return;
+        }
+
+        if !session_file_is_quiet(mtime, SystemTime::now()) {
+            self.last_session_poll = Some(defer_poll_for_quiet(now));
             return;
         }
 
@@ -1264,6 +1356,7 @@ impl Model {
                 let session_cache = self.branch_list.clone_session_cache();
                 let session_inflight = self.branch_list.clone_session_inflight();
                 let session_missing = self.branch_list.clone_session_missing();
+                let session_warnings = self.branch_list.clone_session_warnings();
                 let detail_tab = self.branch_list.detail_panel_tab;
                 // FR-074b: ブランチ単位タブ記憶を保持
                 let branch_tab_cache = self.branch_list.take_branch_tab_cache();
@@ -1274,6 +1367,7 @@ impl Model {
                 branch_list.set_session_cache(session_cache);
                 branch_list.set_session_inflight(session_inflight);
                 branch_list.set_session_missing(session_missing);
+                branch_list.set_session_warnings(session_warnings);
                 branch_list.set_repo_web_url(self.branch_list.repo_web_url().cloned());
                 branch_list.working_directory = Some(self.repo_root.display().to_string());
                 branch_list.version = Some(env!("CARGO_PKG_VERSION").to_string());
@@ -2754,6 +2848,7 @@ impl Model {
                             self.maybe_request_session_summary_for_selected(false);
                         } else {
                             self.last_session_poll = None;
+                            self.session_poll_deferred = false;
                         }
                     }
                 }
@@ -4480,11 +4575,12 @@ fn github_repo_slug(url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::screens::branch_list::SafetyStatus;
+    use crate::tui::screens::branch_list::{SafetyStatus, WorktreeStatus};
     use crate::tui::screens::wizard::WizardStep;
-    use crate::tui::screens::{BranchItem, BranchListState};
+    use crate::tui::screens::{BranchItem, BranchListState, BranchType};
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
     use gwt_core::git::Branch;
+    use gwt_core::git::DivergenceStatus;
     use std::sync::mpsc;
 
     fn sample_tool_entry(tool_id: &str) -> ToolSessionEntry {
@@ -4500,6 +4596,33 @@ mod tests {
             skip_permissions: None,
             tool_version: None,
             timestamp: 0,
+        }
+    }
+
+    fn sample_branch_with_session(name: &str) -> BranchItem {
+        BranchItem {
+            name: name.to_string(),
+            branch_type: BranchType::Local,
+            is_current: false,
+            has_worktree: true,
+            worktree_path: Some("/tmp/worktree".to_string()),
+            worktree_status: WorktreeStatus::Active,
+            has_changes: false,
+            has_unpushed: false,
+            divergence: DivergenceStatus::UpToDate,
+            has_remote_counterpart: true,
+            remote_name: None,
+            safe_to_cleanup: Some(true),
+            safety_status: SafetyStatus::Safe,
+            is_unmerged: false,
+            last_commit_timestamp: None,
+            last_tool_usage: None,
+            last_tool_id: Some("codex-cli".to_string()),
+            last_session_id: Some("sess-1".to_string()),
+            is_selected: false,
+            pr_title: None,
+            pr_number: None,
+            pr_url: None,
         }
     }
 
@@ -4676,6 +4799,51 @@ mod tests {
 
         model.update(Message::SelectNext);
         assert_eq!(model.branch_list.selected, 1);
+    }
+
+    #[test]
+    fn test_session_file_is_quiet_threshold() {
+        let now = SystemTime::now();
+        let recent = now
+            - Duration::from_secs(SESSION_SUMMARY_QUIET_PERIOD.as_secs().saturating_sub(1));
+        assert!(!session_file_is_quiet(recent, now));
+
+        let old = now - Duration::from_secs(SESSION_SUMMARY_QUIET_PERIOD.as_secs() + 1);
+        assert!(session_file_is_quiet(old, now));
+    }
+
+    #[test]
+    fn test_defer_poll_for_quiet_schedules_next_check() {
+        let now = Instant::now();
+        let deferred = defer_poll_for_quiet(now);
+        let delta = now.duration_since(deferred);
+        assert_eq!(delta, SESSION_POLL_INTERVAL - SESSION_SUMMARY_QUIET_PERIOD);
+    }
+
+    #[test]
+    fn test_poll_session_summary_defers_when_inflight() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+
+        let item = sample_branch_with_session("feature/poll");
+        model.branch_list = BranchListState::new().with_branches(vec![item]);
+        model.branch_list.detail_panel_tab = DetailPanelTab::Session;
+        model.branch_list.ai_enabled = true;
+
+        let branch_name = model
+            .branch_list
+            .selected_branch()
+            .map(|b| b.name.clone())
+            .unwrap();
+        model.branch_list.mark_session_summary_inflight(&branch_name);
+
+        let previous = Instant::now() - SESSION_POLL_INTERVAL - Duration::from_secs(1);
+        model.last_session_poll = Some(previous);
+
+        model.poll_session_summary_if_needed();
+
+        assert!(model.session_poll_deferred);
+        assert_eq!(model.last_session_poll, Some(previous));
     }
 
     #[test]
