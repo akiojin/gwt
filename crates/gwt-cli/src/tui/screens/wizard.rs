@@ -115,6 +115,8 @@ pub enum WizardStep {
 pub enum WizardConfirmResult {
     Advance,
     Complete,
+    /// Focus on an existing pane (for when agent is already running)
+    FocusPane(usize),
 }
 
 /// Quick Start option types (FR-050)
@@ -604,6 +606,11 @@ pub struct WizardState {
     pub quick_start_index: usize,
     /// Whether Quick Start should be shown (has previous history)
     pub has_quick_start: bool,
+    // Running agent context
+    /// Whether an agent is already running for this branch
+    pub has_running_agent: bool,
+    /// Pane index of the running agent (for FocusPane result)
+    pub running_agent_pane_idx: Option<usize>,
 }
 
 impl WizardState {
@@ -616,15 +623,26 @@ impl WizardState {
 
     /// Open wizard for existing branch (FR-050)
     /// If history entries are provided, shows Quick Start first
-    pub fn open_for_branch(&mut self, branch_name: &str, history: Vec<QuickStartEntry>) {
+    /// If running_pane_idx is provided, agent is already running for this branch
+    pub fn open_for_branch(
+        &mut self,
+        branch_name: &str,
+        history: Vec<QuickStartEntry>,
+        running_pane_idx: Option<usize>,
+    ) {
         self.visible = true;
         self.is_new_branch = false;
         self.branch_name = branch_name.to_string();
         self.reset_selections();
         self.has_branch_action = true;
 
-        // FR-050: Show Quick Start if history exists
-        if history.is_empty() {
+        // Set running agent context
+        self.has_running_agent = running_pane_idx.is_some();
+        self.running_agent_pane_idx = running_pane_idx;
+
+        // FR-050: Show Quick Start if history exists (only when no agent is running)
+        if running_pane_idx.is_some() || history.is_empty() {
+            // If agent is running or no history, skip Quick Start and go to BranchAction
             self.step = WizardStep::BranchAction;
             self.has_quick_start = false;
             self.quick_start_entries.clear();
@@ -671,6 +689,17 @@ impl WizardState {
         self.has_branch_action = false;
         self.base_branch_override = None;
         self.quick_start_index = 0;
+        self.has_running_agent = false;
+        self.running_agent_pane_idx = None;
+    }
+
+    /// Get branch action options based on running agent status
+    pub fn branch_action_options(&self) -> &[&'static str] {
+        if self.has_running_agent {
+            &["Focus agent pane", "Create new branch from this"]
+        } else {
+            &["Use selected branch", "Create new from selected"]
+        }
     }
 
     /// Get the total number of Quick Start options (FR-050)
@@ -974,6 +1003,19 @@ impl WizardState {
                 return WizardConfirmResult::Advance;
             }
         }
+
+        // Handle BranchAction step with running agent: "Focus agent pane" selected
+        if self.step == WizardStep::BranchAction
+            && self.has_running_agent
+            && self.branch_action_index == 0
+        {
+            if let Some(pane_idx) = self.running_agent_pane_idx {
+                self.close();
+                return WizardConfirmResult::FocusPane(pane_idx);
+            }
+        }
+        // Note: BranchAction index == 1 with running agent means
+        // "Create new branch from this" - continues to next step via is_complete()/next_step()
 
         if self.is_complete() {
             WizardConfirmResult::Complete
@@ -1575,7 +1617,8 @@ fn render_branch_action_step(state: &WizardState, frame: &mut Frame, area: Rect)
         area.height.saturating_sub(2),
     );
 
-    let options = ["Use selected branch", "Create new from selected"];
+    // Use dynamic options based on running agent status
+    let options = state.branch_action_options();
     let mut items: Vec<ListItem> = Vec::new();
     for (idx, label) in options.iter().enumerate() {
         let selected = state.branch_action_index == idx;
@@ -1934,7 +1977,7 @@ mod tests {
     #[test]
     fn test_wizard_open_for_branch() {
         let mut state = WizardState::new();
-        state.open_for_branch("feature/test", vec![]);
+        state.open_for_branch("feature/test", vec![], None);
         assert!(state.visible);
         assert!(!state.is_new_branch);
         assert_eq!(state.branch_name, "feature/test");
@@ -1954,7 +1997,7 @@ mod tests {
             session_id: Some("abc123".to_string()),
             skip_permissions: None,
         }];
-        state.open_for_branch("feature/test", history);
+        state.open_for_branch("feature/test", history, None);
         assert!(state.visible);
         assert!(!state.is_new_branch);
         assert_eq!(state.branch_name, "feature/test");
@@ -1976,7 +2019,7 @@ mod tests {
     #[test]
     fn test_branch_action_use_selected_goes_to_agent_select() {
         let mut state = WizardState::new();
-        state.open_for_branch("feature/test", vec![]);
+        state.open_for_branch("feature/test", vec![], None);
         assert_eq!(state.step, WizardStep::BranchAction);
 
         state.branch_action_index = 0;
@@ -1990,7 +2033,7 @@ mod tests {
     #[test]
     fn test_branch_action_create_new_goes_to_branch_type_select() {
         let mut state = WizardState::new();
-        state.open_for_branch("feature/test", vec![]);
+        state.open_for_branch("feature/test", vec![], None);
         assert_eq!(state.step, WizardStep::BranchAction);
 
         state.branch_action_index = 1;
@@ -1999,6 +2042,59 @@ mod tests {
         assert_eq!(state.step, WizardStep::BranchTypeSelect);
         assert!(state.is_new_branch);
         assert_eq!(state.base_branch_override.as_deref(), Some("feature/test"));
+    }
+
+    #[test]
+    fn test_branch_action_with_running_agent_focus_pane() {
+        let mut state = WizardState::new();
+        state.open_for_branch("feature/test", vec![], Some(2));
+        assert_eq!(state.step, WizardStep::BranchAction);
+        assert!(state.has_running_agent);
+        assert_eq!(state.running_agent_pane_idx, Some(2));
+
+        // "Focus agent pane" selected
+        state.branch_action_index = 0;
+        let result = state.confirm();
+        assert_eq!(result, WizardConfirmResult::FocusPane(2));
+        assert!(!state.visible); // wizard should close
+    }
+
+    #[test]
+    fn test_branch_action_with_running_agent_create_new() {
+        let mut state = WizardState::new();
+        state.open_for_branch("feature/test", vec![], Some(1));
+        assert_eq!(state.step, WizardStep::BranchAction);
+        assert!(state.has_running_agent);
+
+        // "Create new branch from this" selected
+        state.branch_action_index = 1;
+        let result = state.confirm();
+        assert_eq!(result, WizardConfirmResult::Advance);
+        assert_eq!(state.step, WizardStep::BranchTypeSelect);
+        assert!(state.is_new_branch);
+        assert_eq!(state.base_branch_override.as_deref(), Some("feature/test"));
+    }
+
+    #[test]
+    fn test_branch_action_options_with_running_agent() {
+        let mut state = WizardState::new();
+        state.open_for_branch("feature/test", vec![], Some(0));
+        let options = state.branch_action_options();
+        assert_eq!(
+            options,
+            &["Focus agent pane", "Create new branch from this"]
+        );
+    }
+
+    #[test]
+    fn test_branch_action_options_without_running_agent() {
+        let mut state = WizardState::new();
+        state.open_for_branch("feature/test", vec![], None);
+        let options = state.branch_action_options();
+        assert_eq!(
+            options,
+            &["Use selected branch", "Create new from selected"]
+        );
     }
 
     #[test]
@@ -2013,7 +2109,7 @@ mod tests {
     #[test]
     fn test_wizard_popup_width_clamps_to_max() {
         let mut state = WizardState::new();
-        state.open_for_branch("feature/test", vec![]);
+        state.open_for_branch("feature/test", vec![], None);
         state.step = WizardStep::BranchAction;
 
         let width = wizard_popup_width(&state, 30);
@@ -2023,7 +2119,7 @@ mod tests {
     #[test]
     fn test_wizard_popup_width_expands_for_long_branch() {
         let mut state = WizardState::new();
-        state.open_for_branch("feature/very-long-branch-name", vec![]);
+        state.open_for_branch("feature/very-long-branch-name", vec![], None);
         state.step = WizardStep::BranchAction;
 
         let width = wizard_popup_width(&state, 120);
@@ -2034,7 +2130,7 @@ mod tests {
     #[test]
     fn test_wizard_popup_width_includes_padding() {
         let mut state = WizardState::new();
-        state.open_for_branch("feature/test", vec![]);
+        state.open_for_branch("feature/test", vec![], None);
         state.step = WizardStep::BranchAction;
 
         let content = wizard_required_content_width(&state) as u16;
@@ -2077,7 +2173,7 @@ mod tests {
     #[test]
     fn test_wizard_step_navigation() {
         let mut state = WizardState::new();
-        state.open_for_branch("test", vec![]);
+        state.open_for_branch("test", vec![], None);
 
         assert_eq!(state.step, WizardStep::BranchAction);
         state.branch_action_index = 0;
@@ -2092,7 +2188,7 @@ mod tests {
     #[test]
     fn test_wizard_codex_reasoning_step() {
         let mut state = WizardState::new();
-        state.open_for_branch("test", vec![]);
+        state.open_for_branch("test", vec![], None);
         state.branch_action_index = 0;
         state.next_step();
         state.agent = CodingAgent::CodexCli;
@@ -2106,7 +2202,7 @@ mod tests {
     #[test]
     fn test_wizard_selection() {
         let mut state = WizardState::new();
-        state.open_for_branch("test", vec![]);
+        state.open_for_branch("test", vec![], None);
         state.branch_action_index = 0;
         state.next_step();
 
@@ -2131,7 +2227,7 @@ mod tests {
             session_id: Some("abc123".to_string()),
             skip_permissions: Some(true),
         }];
-        state.open_for_branch("feature/test", history);
+        state.open_for_branch("feature/test", history, None);
 
         // Should start at QuickStart
         assert_eq!(state.step, WizardStep::QuickStart);
@@ -2165,7 +2261,7 @@ mod tests {
             session_id: Some("xyz789".to_string()),
             skip_permissions: Some(false),
         }];
-        state.open_for_branch("feature/test", history);
+        state.open_for_branch("feature/test", history, None);
 
         assert_eq!(state.step, WizardStep::QuickStart);
 
@@ -2198,7 +2294,7 @@ mod tests {
             session_id: Some("abc123".to_string()),
             skip_permissions: None,
         }];
-        state.open_for_branch("feature/test", history);
+        state.open_for_branch("feature/test", history, None);
 
         assert_eq!(state.step, WizardStep::QuickStart);
 
