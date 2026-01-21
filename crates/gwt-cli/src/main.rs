@@ -11,7 +11,7 @@ use gwt_core::TmuxMode;
 use std::fs;
 #[cfg(unix)]
 use std::fs::OpenOptions;
-use std::io::BufRead;
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -690,6 +690,9 @@ fn skip_install_warning_message(pm: &str) -> String {
     )
 }
 
+const FAST_EXIT_THRESHOLD_SECS: u64 = 2;
+const FAST_EXIT_THRESHOLD_MS: u128 = (FAST_EXIT_THRESHOLD_SECS as u128) * 1000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AgentExitKind {
     Success,
@@ -756,6 +759,31 @@ fn spawn_session_updater(context: SessionUpdateContext, interval: Duration) -> S
 
 fn build_launching_message(config: &AgentLaunchConfig) -> String {
     format!("Launching {}...", config.agent.label())
+}
+
+fn is_fast_exit(duration_ms: u128) -> bool {
+    duration_ms < FAST_EXIT_THRESHOLD_MS
+}
+
+fn format_command_line(executable: &str, args: &[String]) -> String {
+    let mut parts = Vec::with_capacity(args.len() + 1);
+    parts.push(executable.to_string());
+    parts.extend(args.iter().cloned());
+    parts.join(" ")
+}
+
+fn emit_fast_exit_notice(duration_ms: u128, command_display: &str) {
+    eprintln!("Agent exited immediately ({} ms).", duration_ms);
+    eprintln!("This usually means the agent could not start.");
+    eprintln!("Check API keys, PATH, and tool version, then try running:");
+    eprintln!("  {}", command_display);
+    if io::stdin().is_terminal() {
+        eprintln!();
+        eprintln!("Press Enter to return to gwt.");
+        let _ = io::stderr().flush();
+        let mut input = String::new();
+        let _ = io::stdin().read_line(&mut input);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1023,6 +1051,7 @@ fn execute_launch_plan(plan: LaunchPlan) -> Result<AgentExitKind, GwtError> {
 
     // Spawn the agent process (FR-043: allows periodic timestamp updates)
     let (exec_name, exec_args) = apply_pty_wrapper(&executable, &command_args);
+    let command_display = format_command_line(&exec_name, &exec_args);
     let mut command = Command::new(&exec_name);
     command
         .args(&exec_args)
@@ -1099,9 +1128,23 @@ fn execute_launch_plan(plan: LaunchPlan) -> Result<AgentExitKind, GwtError> {
     }
 
     let duration_ms = started_at.elapsed().as_millis();
+    let fast_exit = is_fast_exit(duration_ms);
     let exit_info = classify_exit_status(status);
     match exit_info {
         ExitClassification::Success => {
+            if fast_exit {
+                warn!(
+                    agent_id = config.agent.id(),
+                    version = selected_version.as_str(),
+                    duration_ms = duration_ms as u64,
+                    "Agent exited immediately"
+                );
+                emit_fast_exit_notice(duration_ms, &command_display);
+                return Err(GwtError::AgentLaunchFailed {
+                    name: config.agent.command_name().to_string(),
+                    reason: format!("Exited immediately after {} ms.", duration_ms),
+                });
+            }
             info!(
                 agent_id = config.agent.id(),
                 version = selected_version.as_str(),
@@ -1128,6 +1171,9 @@ fn execute_launch_plan(plan: LaunchPlan) -> Result<AgentExitKind, GwtError> {
                 duration_ms = duration_ms as u64,
                 "Agent exited with failure"
             );
+            if fast_exit {
+                emit_fast_exit_notice(duration_ms, &command_display);
+            }
             let reason = if let Some(signal) = signal {
                 format!("Terminated by signal {}", signal)
             } else if let Some(code) = code {
@@ -1977,6 +2023,13 @@ mod tests {
             classify_exit(Some(1), None),
             ExitClassification::Failure { .. }
         ));
+    }
+
+    #[test]
+    fn test_is_fast_exit_threshold() {
+        assert!(is_fast_exit(0));
+        assert!(is_fast_exit(FAST_EXIT_THRESHOLD_MS - 1));
+        assert!(!is_fast_exit(FAST_EXIT_THRESHOLD_MS));
     }
 
     #[test]

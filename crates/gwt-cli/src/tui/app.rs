@@ -41,6 +41,7 @@ use tracing::{debug, error, info, warn};
 const BRANCH_LIST_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(500);
 const SESSION_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const SESSION_SUMMARY_QUIET_PERIOD: Duration = Duration::from_secs(5);
+const FAST_EXIT_THRESHOLD_SECS: u64 = 2;
 
 use super::screens::branch_list::{
     BranchSummaryRequest, BranchSummaryUpdate, PrInfo, WorktreeStatus,
@@ -3406,6 +3407,7 @@ impl Model {
 
         // Build the full command string
         let command = build_tmux_command(&env_vars, &plan.config.env_remove, &full_cmd);
+        let command = wrap_tmux_command_for_fast_exit(&command);
 
         debug!(
             category = "tui",
@@ -4736,6 +4738,13 @@ fn build_shell_command(command: &str, args: &[String]) -> String {
     let mut cmd_parts = vec![shell_escape(command)];
     cmd_parts.extend(args.iter().map(|arg| shell_escape(arg)));
     cmd_parts.join(" ")
+}
+
+fn wrap_tmux_command_for_fast_exit(command: &str) -> String {
+    format!(
+        "start=$(date +%s); {} ; status=$?; end=$(date +%s); if [ $status -ne 0 ] || [ $((end-start)) -lt {} ]; then echo; echo \"[gwt] Agent exited immediately (status=$status).\"; echo \"[gwt] Press Enter to close this pane.\"; read -r _; fi; exit $status",
+        command, FAST_EXIT_THRESHOLD_SECS
+    )
 }
 
 /// Build the full tmux command string with environment variables
