@@ -307,10 +307,8 @@ fn validate_session_summary_markdown(markdown: &str) -> Result<(), AIError> {
         }
     }
 
-    if stage == SummaryStage::Highlight || stage == SummaryStage::Done {
-        if has_bullet {
-            return Ok(());
-        }
+    if (stage == SummaryStage::Highlight || stage == SummaryStage::Done) && has_bullet {
+        return Ok(());
     }
 
     Err(AIError::IncompleteSummary)
