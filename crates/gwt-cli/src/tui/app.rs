@@ -39,7 +39,7 @@ use std::time::{Duration, Instant, SystemTime};
 use tracing::{debug, error, info, warn};
 
 const BRANCH_LIST_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(500);
-const SESSION_POLL_INTERVAL: Duration = Duration::from_secs(30);
+const SESSION_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const SESSION_SUMMARY_QUIET_PERIOD: Duration = Duration::from_secs(5);
 
 use super::screens::branch_list::{
@@ -351,7 +351,7 @@ pub struct Model {
     last_pane_update: Option<Instant>,
     /// Last time spinner was updated (for 250ms refresh)
     last_spinner_update: Option<Instant>,
-    /// Last time session polling ran (30s interval)
+    /// Last time session polling ran (60s interval)
     last_session_poll: Option<Instant>,
     /// Session poll deferred while generation is in-flight
     session_poll_deferred: bool,
