@@ -37,6 +37,9 @@ pub enum AIError {
     /// Response parse error
     #[error("Parse error: {0}")]
     ParseError(String),
+    /// Summary response incomplete (missing required sections)
+    #[error("Incomplete summary")]
+    IncompleteSummary,
     /// Configuration error
     #[error("Config error: {0}")]
     ConfigError(String),
@@ -453,6 +456,7 @@ pub fn format_error_for_display(error: &AIError) -> String {
                 format!("Network error: {}", msg)
             }
         }
+        AIError::IncompleteSummary => "Incomplete summary - retrying".to_string(),
         AIError::ParseError(msg) => format!("Parse error: {}", msg),
         AIError::ConfigError(msg) => format!("Configuration error: {}", msg),
     }

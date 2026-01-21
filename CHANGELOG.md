@@ -1,6 +1,51 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [6.8.0] - 2026-01-21
+
+### Features
+
+- Allow variable session summary highlights (#718)
+
+### Miscellaneous Tasks
+
+- Add .gwt-session.toml to .gitignore
+
+## [6.7.0] - 2026-01-21
+
+### Bug Fixes
+
+- Hookイベント名直指定に対応 (#710)
+- Async branch summary fetch (#714)
+- 起動時にhookを再登録 (#715)
+- Prevent session summary truncation (#716)
+
+### Features
+
+- ブランチ単位でタブ状態を記憶する機能を追加 (#711)
+- /releaseコマンドをLLMベースに変更 (#712)
+- AI設定ウィザードによる疎通チェック機能を追加 (#713)
+
+### Miscellaneous Tasks
+
+- Update Cargo.lock
+
+## [6.6.0] - 2026-01-21
+
+### Miscellaneous Tasks
+
+- Merge main into develop
+
+## [6.5.1] - 2026-01-20
+
+### Bug Fixes
+
+- MacOSでscriptを使ってPTYを確保 (#706)
+
+### Features
+
+- エージェント起動中のブランチでも選択メニューを表示 (#707)
+
 ## [6.5.0] - 2026-01-20
 
 ### Bug Fixes
