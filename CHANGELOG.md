@@ -1,6 +1,22 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [6.6.0] - 2026-01-21
+
+### Miscellaneous Tasks
+
+- Merge main into develop
+
+## [6.5.1] - 2026-01-20
+
+### Bug Fixes
+
+- MacOSでscriptを使ってPTYを確保 (#706)
+
+### Features
+
+- エージェント起動中のブランチでも選択メニューを表示 (#707)
+
 ## [6.5.0] - 2026-01-20
 
 ### Bug Fixes
