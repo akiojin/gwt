@@ -40,7 +40,9 @@ use tracing::{debug, error, info};
 
 const BRANCH_LIST_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(500);
 
-use super::screens::branch_list::{BranchSummaryRequest, BranchSummaryUpdate, PrInfo, WorktreeStatus};
+use super::screens::branch_list::{
+    BranchSummaryRequest, BranchSummaryUpdate, PrInfo, WorktreeStatus,
+};
 use super::screens::environment::EditField;
 use super::screens::pane_list::PaneListState;
 use super::screens::split_layout::{calculate_split_layout, SplitLayoutState};
@@ -4674,8 +4676,8 @@ mod tests {
     use crate::tui::screens::wizard::WizardStep;
     use crate::tui::screens::{BranchItem, BranchListState};
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
-    use gwt_core::git::BranchSummary;
     use gwt_core::git::Branch;
+    use gwt_core::git::BranchSummary;
     use std::sync::mpsc;
 
     fn sample_tool_entry(tool_id: &str) -> ToolSessionEntry {
