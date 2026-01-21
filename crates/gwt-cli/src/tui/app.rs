@@ -3827,8 +3827,42 @@ impl Model {
         // Content
         match base_screen {
             Screen::BranchList => {
+                // Show launch status bar if launching
+                let content_area = if self.launch_in_progress {
+                    if let Some(status) = &self.launch_status {
+                        // Split content area: status bar (1 line) + rest
+                        let status_chunks = Layout::default()
+                            .direction(Direction::Vertical)
+                            .constraints([Constraint::Length(1), Constraint::Min(0)])
+                            .split(chunks[1]);
+
+                        // Render status bar with spinner
+                        let spinner_char = ['|', '/', '-', '\\'][((std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis()
+                            / 100)
+                            % 4) as usize];
+                        let status_line = Line::from(vec![
+                            Span::styled(
+                                format!(" {} ", spinner_char),
+                                Style::default()
+                                    .fg(Color::Yellow)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(status.as_str(), Style::default().fg(Color::Yellow)),
+                        ]);
+                        frame.render_widget(Paragraph::new(status_line), status_chunks[0]);
+                        status_chunks[1]
+                    } else {
+                        chunks[1]
+                    }
+                } else {
+                    chunks[1]
+                };
+
                 // Use split layout (branch list takes full area, PaneList abolished)
-                let split_areas = calculate_split_layout(chunks[1], &self.split_layout);
+                let split_areas = calculate_split_layout(content_area, &self.split_layout);
                 let status_message = self
                     .active_status_message()
                     .map(|message| message.to_string());
