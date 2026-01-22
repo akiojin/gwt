@@ -12,9 +12,9 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use gwt_core::ai::{
-    summarize_session, AIClient, AIError, AgentHistoryStore, AgentType, ClaudeSessionParser,
-    CodexSessionParser, GeminiSessionParser, OpenCodeSessionParser, SessionParseError,
-    SessionParser,
+    summarize_session, AIClient, AIError, AgentHistoryStore, AgentType, ChatMessage,
+    ClaudeSessionParser, CodexSessionParser, GeminiSessionParser, OpenCodeSessionParser,
+    SessionParseError, SessionParser,
 };
 use gwt_core::config::get_branch_tool_history;
 use gwt_core::config::{
@@ -43,6 +43,7 @@ const BRANCH_LIST_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(500);
 const SESSION_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const SESSION_SUMMARY_QUIET_PERIOD: Duration = Duration::from_secs(5);
 const FAST_EXIT_THRESHOLD_SECS: u64 = 2;
+const AGENT_SYSTEM_PROMPT: &str = "You are the master agent. Analyze tasks and propose a plan.";
 
 use super::screens::branch_list::{
     BranchSummaryRequest, BranchSummaryUpdate, PrInfo, WorktreeStatus,
@@ -51,12 +52,13 @@ use super::screens::environment::EditField;
 use super::screens::pane_list::PaneListState;
 use super::screens::split_layout::{calculate_split_layout, SplitLayoutState};
 use super::screens::{
-    collect_os_env, render_ai_wizard, render_branch_list, render_confirm, render_environment,
-    render_error_with_queue, render_help, render_logs, render_profiles, render_settings,
-    render_wizard, render_worktree_create, AIWizardState, BranchItem, BranchListState, BranchType,
-    CodingAgent, ConfirmState, DetailPanelTab, EnvironmentState, ErrorQueue, ErrorState,
-    ExecutionMode, HelpState, LogsState, ProfilesState, QuickStartEntry, ReasoningLevel,
-    SettingsState, WizardConfirmResult, WizardState, WorktreeCreateState,
+    collect_os_env, render_agent_mode, render_ai_wizard, render_branch_list, render_confirm,
+    render_environment, render_error_with_queue, render_help, render_logs, render_profiles,
+    render_settings, render_wizard, render_worktree_create, AIWizardState, AgentMessage,
+    AgentModeState, AgentRole, BranchItem, BranchListState, BranchType, CodingAgent, ConfirmState,
+    EnvironmentState, ErrorQueue, ErrorState, ExecutionMode, HelpState, LogsState, ProfilesState,
+    QuickStartEntry, ReasoningLevel, SettingsState, WizardConfirmResult, WizardState,
+    WorktreeCreateState,
 };
 // log_gwt_error is available for use when GwtError types are available
 
@@ -224,6 +226,11 @@ struct SessionSummaryUpdate {
     missing: bool,
 }
 
+struct AgentModeUpdate {
+    response: Option<String>,
+    error: Option<String>,
+}
+
 struct BranchListUpdate {
     branches: Vec<BranchItem>,
     branch_names: Vec<String>,
@@ -284,8 +291,8 @@ pub struct Model {
     logs: LogsState,
     /// Help state
     help: HelpState,
-    /// Detail panel tab state (FR-074)
-    detail_panel_tab: DetailPanelTab,
+    /// Agent mode state
+    agent_mode: AgentModeState,
     /// Confirm dialog state
     confirm: ConfirmState,
     /// Error queue for managing multiple errors
@@ -340,6 +347,10 @@ pub struct Model {
     session_summary_tx: Option<Sender<SessionSummaryUpdate>>,
     /// Session summary update receiver
     session_summary_rx: Option<Receiver<SessionSummaryUpdate>>,
+    /// Agent mode update sender
+    agent_mode_tx: Option<Sender<AgentModeUpdate>>,
+    /// Agent mode update receiver
+    agent_mode_rx: Option<Receiver<AgentModeUpdate>>,
     /// Tmux mode (Single or Multi)
     tmux_mode: TmuxMode,
     /// Tmux session name (when in multi mode)
@@ -368,6 +379,7 @@ pub struct Model {
 #[derive(Clone, Debug)]
 pub enum Screen {
     BranchList,
+    AgentMode,
     WorktreeCreate,
     Settings,
     Logs,
@@ -450,6 +462,8 @@ impl Model {
             "Initializing TUI model"
         );
 
+        let (agent_mode_tx, agent_mode_rx) = mpsc::channel();
+
         let mut model = Self {
             should_quit: false,
             ctrl_c_count: 0,
@@ -463,7 +477,7 @@ impl Model {
             settings: SettingsState::new(),
             logs: LogsState::new(),
             help: HelpState::new(),
-            detail_panel_tab: DetailPanelTab::Details,
+            agent_mode: AgentModeState::new(),
             confirm: ConfirmState::new(),
             error_queue: ErrorQueue::new(),
             profiles: ProfilesState::new(),
@@ -491,6 +505,8 @@ impl Model {
             worktree_status_rx: None,
             session_summary_tx: None,
             session_summary_rx: None,
+            agent_mode_tx: Some(agent_mode_tx),
+            agent_mode_rx: Some(agent_mode_rx),
             tmux_mode: TmuxMode::detect(),
             tmux_session: None,
             gwt_pane_id: None,
@@ -612,7 +628,6 @@ impl Model {
         self.total_count = 0;
         self.active_count = 0;
 
-        // FR-074: タブ状態はModelレベルで保持されるため、BranchListStateの再生成時に引き継ぎ不要
         let mut branch_list = BranchListState::new();
         branch_list.active_profile = self.profiles_config.active.clone();
         branch_list.ai_enabled = self.active_ai_enabled();
@@ -931,9 +946,99 @@ impl Model {
         if let Some(request) = self.branch_list.prepare_branch_summary(&self.repo_root) {
             self.spawn_branch_summary_fetch(request);
         }
-        if self.detail_panel_tab == DetailPanelTab::Session {
-            self.maybe_request_session_summary_for_selected(false);
+        self.maybe_request_session_summary_for_selected(false);
+    }
+
+    fn enter_agent_mode(&mut self) {
+        self.update_agent_mode_ai_status();
+        self.agent_mode.last_error = None;
+        self.screen = Screen::AgentMode;
+    }
+
+    fn update_agent_mode_ai_status(&mut self) {
+        if !self.active_ai_enabled() {
+            self.agent_mode
+                .set_ai_status(false, Some("AI settings are required.".to_string()));
+            return;
         }
+
+        let (ready, error) = match self.active_ai_settings() {
+            Some(settings) => {
+                if settings.endpoint.trim().is_empty() || settings.model.trim().is_empty() {
+                    (false, Some("AI settings are required.".to_string()))
+                } else {
+                    match AIClient::new(settings) {
+                        Ok(_) => (true, None),
+                        Err(err) => (false, Some(format_ai_error(err))),
+                    }
+                }
+            }
+            None => (false, Some("AI settings are required.".to_string())),
+        };
+        self.agent_mode.set_ai_status(ready, error);
+    }
+
+    fn spawn_agent_mode_request(&mut self, messages: Vec<AgentMessage>) {
+        let Some(settings) = self.active_ai_settings() else {
+            self.agent_mode.last_error = Some("AI settings are required.".to_string());
+            self.agent_mode.set_waiting(false);
+            return;
+        };
+
+        let Some(tx) = &self.agent_mode_tx else {
+            self.agent_mode.last_error = Some("Agent channel unavailable.".to_string());
+            self.agent_mode.set_waiting(false);
+            return;
+        };
+
+        let tx = tx.clone();
+        thread::spawn(move || {
+            let client = match AIClient::new(settings) {
+                Ok(client) => client,
+                Err(err) => {
+                    let _ = tx.send(AgentModeUpdate {
+                        response: None,
+                        error: Some(format_ai_error(err)),
+                    });
+                    return;
+                }
+            };
+
+            let mut chat_messages = Vec::new();
+            if !AGENT_SYSTEM_PROMPT.trim().is_empty() {
+                chat_messages.push(ChatMessage {
+                    role: "system".to_string(),
+                    content: AGENT_SYSTEM_PROMPT.to_string(),
+                });
+            }
+
+            for msg in messages {
+                let role = match msg.role {
+                    AgentRole::User => "user",
+                    AgentRole::Assistant => "assistant",
+                    AgentRole::System => "system",
+                };
+                chat_messages.push(ChatMessage {
+                    role: role.to_string(),
+                    content: msg.content,
+                });
+            }
+
+            match client.create_response(chat_messages) {
+                Ok(response) => {
+                    let _ = tx.send(AgentModeUpdate {
+                        response: Some(response),
+                        error: None,
+                    });
+                }
+                Err(err) => {
+                    let _ = tx.send(AgentModeUpdate {
+                        response: None,
+                        error: Some(format_ai_error(err)),
+                    });
+                }
+            }
+        });
     }
 
     fn maybe_request_session_summary_for_selected(&mut self, force: bool) {
@@ -1260,13 +1365,37 @@ impl Model {
         }
     }
 
-    fn poll_session_summary_if_needed(&mut self) {
-        if self.detail_panel_tab != DetailPanelTab::Session {
-            self.last_session_poll = None;
-            self.session_poll_deferred = false;
+    fn apply_agent_mode_updates(&mut self) {
+        let Some(rx) = &self.agent_mode_rx else {
             return;
-        }
+        };
 
+        loop {
+            match rx.try_recv() {
+                Ok(update) => {
+                    self.agent_mode.set_waiting(false);
+                    if let Some(error) = update.error {
+                        self.agent_mode.last_error = Some(error);
+                        continue;
+                    }
+                    if let Some(response) = update.response {
+                        self.agent_mode.last_error = None;
+                        self.agent_mode.messages.push(AgentMessage {
+                            role: AgentRole::Assistant,
+                            content: response,
+                        });
+                    }
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.agent_mode_rx = None;
+                    break;
+                }
+            }
+        }
+    }
+
+    fn poll_session_summary_if_needed(&mut self) {
         if !self.branch_list.ai_enabled {
             return;
         }
@@ -1455,7 +1584,6 @@ impl Model {
                 let session_inflight = self.branch_list.clone_session_inflight();
                 let session_missing = self.branch_list.clone_session_missing();
                 let session_warnings = self.branch_list.clone_session_warnings();
-                // FR-074: タブ状態はModelレベルで保持されるため、BranchListStateの再生成時に引き継ぎ不要
                 let mut branch_list = BranchListState::new().with_branches(update.branches);
                 branch_list.active_profile = self.profiles_config.active.clone();
                 branch_list.ai_enabled = self.active_ai_enabled();
@@ -2661,6 +2789,16 @@ impl Model {
         }
     }
 
+    fn open_ai_settings_for_agent_mode(&mut self) {
+        if let Some(profile_name) = self.profiles_config.active.clone() {
+            if self.profiles_config.profiles.contains_key(&profile_name) {
+                self.open_profile_ai_editor(&profile_name);
+                return;
+            }
+        }
+        self.open_default_ai_editor();
+    }
+
     /// Handle Enter key in AI settings wizard
     fn handle_ai_wizard_enter(&mut self) {
         use super::screens::ai_wizard::AIWizardStep;
@@ -2956,11 +3094,17 @@ impl Model {
                             // Wizard was closed
                             if let Some(prev_screen) = self.screen_stack.pop() {
                                 self.screen = prev_screen;
+                                if matches!(self.screen, Screen::AgentMode) {
+                                    self.update_agent_mode_ai_status();
+                                }
                             }
                         }
                     }
                 } else if let Some(prev_screen) = self.screen_stack.pop() {
                     self.screen = prev_screen;
+                    if matches!(self.screen, Screen::AgentMode) {
+                        self.update_agent_mode_ai_status();
+                    }
                 }
                 self.status_message = None;
             }
@@ -2987,6 +3131,7 @@ impl Model {
                 self.apply_worktree_updates();
                 self.apply_launch_updates();
                 self.apply_session_summary_updates();
+                self.apply_agent_mode_updates();
                 self.poll_session_summary_if_needed();
                 // FR-033: Update pane list every 1 second in tmux multi mode
                 self.update_pane_list();
@@ -2995,9 +3140,9 @@ impl Model {
                 Screen::BranchList => {
                     self.branch_list.select_next();
                     // SPEC-4b893dae: Update branch summary on selection change
-                    // FR-074d: グローバルタブ状態はブランチ切り替え時も維持
                     self.refresh_branch_summary();
                 }
+                Screen::AgentMode => {}
                 Screen::WorktreeCreate => self.worktree_create.select_next_base(),
                 Screen::Settings => self.settings.select_next(),
                 Screen::Logs => self.logs.select_next(),
@@ -3016,9 +3161,9 @@ impl Model {
                 Screen::BranchList => {
                     self.branch_list.select_prev();
                     // SPEC-4b893dae: Update branch summary on selection change
-                    // FR-074d: グローバルタブ状態はブランチ切り替え時も維持
                     self.refresh_branch_summary();
                 }
+                Screen::AgentMode => {}
                 Screen::WorktreeCreate => self.worktree_create.select_prev_base(),
                 Screen::Settings => self.settings.select_prev(),
                 Screen::Logs => self.logs.select_prev(),
@@ -3035,14 +3180,7 @@ impl Model {
             },
             Message::PageUp => match self.screen {
                 Screen::BranchList => {
-                    if self.detail_panel_tab == DetailPanelTab::Session {
-                        self.branch_list.scroll_session_page_up();
-                    } else {
-                        self.branch_list.page_up(10);
-                        // SPEC-4b893dae: Update branch summary on selection change
-                        // FR-074d: グローバルタブ状態はブランチ切り替え時も維持
-                        self.refresh_branch_summary();
-                    }
+                    self.branch_list.scroll_session_page_up();
                 }
                 Screen::Logs => self.logs.page_up(10),
                 Screen::Help => self.help.page_up(),
@@ -3051,14 +3189,7 @@ impl Model {
             },
             Message::PageDown => match self.screen {
                 Screen::BranchList => {
-                    if self.detail_panel_tab == DetailPanelTab::Session {
-                        self.branch_list.scroll_session_page_down();
-                    } else {
-                        self.branch_list.page_down(10);
-                        // SPEC-4b893dae: Update branch summary on selection change
-                        // FR-074d: グローバルタブ状態はブランチ切り替え時も維持
-                        self.refresh_branch_summary();
-                    }
+                    self.branch_list.scroll_session_page_down();
                 }
                 Screen::Logs => self.logs.page_down(10),
                 Screen::Help => self.help.page_down(),
@@ -3069,7 +3200,6 @@ impl Model {
                 Screen::BranchList => {
                     self.branch_list.go_home();
                     // SPEC-4b893dae: Update branch summary on selection change
-                    // FR-074d: グローバルタブ状態はブランチ切り替え時も維持
                     self.refresh_branch_summary();
                 }
                 Screen::Logs => self.logs.go_home(),
@@ -3080,7 +3210,6 @@ impl Model {
                 Screen::BranchList => {
                     self.branch_list.go_end();
                     // SPEC-4b893dae: Update branch summary on selection change
-                    // FR-074d: グローバルタブ状態はブランチ切り替え時も維持
                     self.refresh_branch_summary();
                 }
                 Screen::Logs => self.logs.go_end(),
@@ -3096,6 +3225,24 @@ impl Model {
                         // FR-040: Enter on branch with running agent focuses the pane
                         // FR-041: Enter on branch without agent opens wizard
                         self.handle_branch_enter();
+                    }
+                }
+                Screen::AgentMode => {
+                    if !self.agent_mode.ai_ready {
+                        self.open_ai_settings_for_agent_mode();
+                    } else if self.agent_mode.is_waiting {
+                        // Ignore input while waiting for response
+                    } else if !self.agent_mode.input.trim().is_empty() {
+                        let content = self.agent_mode.input.trim().to_string();
+                        self.agent_mode.messages.push(AgentMessage {
+                            role: AgentRole::User,
+                            content,
+                        });
+                        self.agent_mode.input.clear();
+                        self.agent_mode.last_error = None;
+                        self.agent_mode.set_waiting(true);
+                        let messages = self.agent_mode.messages.clone();
+                        self.spawn_agent_mode_request(messages);
                     }
                 }
                 Screen::WorktreeCreate => {
@@ -3219,6 +3366,8 @@ impl Model {
                 } else if matches!(self.screen, Screen::Logs) && self.logs.is_searching {
                     // Log search mode - add character to search
                     self.logs.search.push(c);
+                } else if matches!(self.screen, Screen::AgentMode) && self.agent_mode.ai_ready {
+                    self.agent_mode.input.push(c);
                 } else if matches!(self.screen, Screen::AISettingsWizard) {
                     if self.ai_wizard.show_delete_confirm {
                         // Handle delete confirmation
@@ -3285,6 +3434,8 @@ impl Model {
                 } else if matches!(self.screen, Screen::Logs) && self.logs.is_searching {
                     // Log search mode - delete character
                     self.logs.search.pop();
+                } else if matches!(self.screen, Screen::AgentMode) && self.agent_mode.ai_ready {
+                    self.agent_mode.input.pop();
                 } else if matches!(self.screen, Screen::AISettingsWizard)
                     && self.ai_wizard.is_text_input()
                 {
@@ -3384,16 +3535,11 @@ impl Model {
                 Screen::Settings => self.settings.next_category(),
                 Screen::BranchList => {
                     if !self.branch_list.filter_mode {
-                        // FR-074a: Tab切り替え時にModelレベルでタブ状態を更新
-                        self.detail_panel_tab.toggle();
-                        self.refresh_branch_summary();
-                        if self.detail_panel_tab == DetailPanelTab::Session {
-                            self.maybe_request_session_summary_for_selected(false);
-                        } else {
-                            self.last_session_poll = None;
-                            self.session_poll_deferred = false;
-                        }
+                        self.enter_agent_mode();
                     }
+                }
+                Screen::AgentMode => {
+                    self.screen = Screen::BranchList;
                 }
                 _ => {}
             },
@@ -4199,7 +4345,7 @@ impl Model {
             if matches!(base_screen, Screen::BranchList) {
                 self.view_boxed_header(frame, chunks[0]);
             } else {
-                self.view_header(frame, chunks[0]);
+                self.view_header(frame, chunks[0], &base_screen);
             }
         }
 
@@ -4240,9 +4386,6 @@ impl Model {
                     .active_status_message()
                     .map(|message| message.to_string());
 
-                // FR-074: Sync tab state from Model to BranchListState for rendering
-                self.branch_list.detail_panel_tab = self.detail_panel_tab;
-
                 // Render branch list (always has focus now)
                 render_branch_list(
                     &mut self.branch_list,
@@ -4254,6 +4397,17 @@ impl Model {
             }
             Screen::WorktreeCreate => {
                 render_worktree_create(&self.worktree_create, frame, chunks[1])
+            }
+            Screen::AgentMode => {
+                let status_message = self
+                    .active_status_message()
+                    .map(|message| message.to_string());
+                render_agent_mode(
+                    &self.agent_mode,
+                    frame,
+                    chunks[1],
+                    status_message.as_deref(),
+                );
             }
             Screen::Settings => render_settings(&self.settings, frame, chunks[1]),
             Screen::Logs => render_logs(&mut self.logs, frame, chunks[1]),
@@ -4386,7 +4540,7 @@ impl Model {
         frame.render_widget(Paragraph::new(Line::from(mode_spans)), inner_chunks[3]);
     }
 
-    fn view_header(&self, frame: &mut Frame, area: Rect) {
+    fn view_header(&self, frame: &mut Frame, area: Rect, screen: &Screen) {
         let version = env!("CARGO_PKG_VERSION");
         let offline_indicator = if self.is_offline { " [OFFLINE]" } else { "" };
 
@@ -4397,10 +4551,16 @@ impl Model {
             .unwrap_or("default");
 
         // Match TypeScript format: gwt - Branch Selection v{version} | Profile(p): {name}
-        let title = format!(
-            " gwt - Branch Selection v{} | Profile(p): {} {}",
-            version, profile, offline_indicator
-        );
+        let title = match screen {
+            Screen::AgentMode => format!(
+                " gwt - Agent Mode v{} | Profile(p): {} {}",
+                version, profile, offline_indicator
+            ),
+            _ => format!(
+                " gwt - Branch Selection v{} | Profile(p): {} {}",
+                version, profile, offline_indicator
+            ),
+        };
         let header = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
@@ -4415,6 +4575,13 @@ impl Model {
                     "[Esc] Exit filter | Type to search"
                 } else {
                     "[r] Refresh | [c] Cleanup | [l] Logs"
+                }
+            }
+            Screen::AgentMode => {
+                if self.agent_mode.ai_ready {
+                    "[Enter] Send | [Tab] Back"
+                } else {
+                    "[Enter] Configure AI | [Tab] Back"
                 }
             }
             Screen::WorktreeCreate => "[Enter] Next | [Esc] Back",
@@ -5514,7 +5681,6 @@ mod tests {
 
         let item = sample_branch_with_session("feature/poll");
         model.branch_list = BranchListState::new().with_branches(vec![item]);
-        model.detail_panel_tab = DetailPanelTab::Session;
         model.branch_list.ai_enabled = true;
 
         let branch_name = model
@@ -5533,6 +5699,52 @@ mod tests {
 
         assert!(model.session_poll_deferred);
         assert_eq!(model.last_session_poll, Some(previous));
+    }
+
+    #[test]
+    fn test_tab_switches_between_branch_and_agent_mode() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+
+        model.update(Message::Tab);
+        assert!(matches!(model.screen, Screen::AgentMode));
+
+        model.update(Message::Tab);
+        assert!(matches!(model.screen, Screen::BranchList));
+    }
+
+    #[test]
+    fn test_tab_ignored_when_filter_mode() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+        model.branch_list.enter_filter_mode();
+
+        model.update(Message::Tab);
+        assert!(matches!(model.screen, Screen::BranchList));
+    }
+
+    #[test]
+    fn test_agent_mode_input_accepts_char_and_backspace() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::AgentMode;
+        model.agent_mode.ai_ready = true;
+
+        model.update(Message::Char('h'));
+        model.update(Message::Char('i'));
+        assert_eq!(model.agent_mode.input, "hi");
+
+        model.update(Message::Backspace);
+        assert_eq!(model.agent_mode.input, "h");
+    }
+
+    #[test]
+    fn test_agent_mode_enter_opens_ai_wizard_when_disabled() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::AgentMode;
+        model.agent_mode.ai_ready = false;
+
+        model.update(Message::Enter);
+        assert!(matches!(model.screen, Screen::AISettingsWizard));
     }
 
     #[test]
