@@ -64,6 +64,12 @@ pub struct AIWizardState {
     pub loading_message: Option<String>,
     /// Whether delete confirmation is shown
     pub show_delete_confirm: bool,
+
+    // Mouse click support
+    /// Popup area for mouse click detection
+    pub popup_area: Option<Rect>,
+    /// Model list inner area for click detection
+    pub list_inner_area: Option<Rect>,
 }
 
 impl AIWizardState {
@@ -344,10 +350,49 @@ impl AIWizardState {
             "AI Settings".to_string()
         }
     }
+
+    // Mouse click support methods
+
+    /// Check if point is within popup area
+    pub fn is_point_in_popup(&self, x: u16, y: u16) -> bool {
+        self.popup_area.is_some_and(|area| {
+            x >= area.x
+                && x < area.x.saturating_add(area.width)
+                && y >= area.y
+                && y < area.y.saturating_add(area.height)
+        })
+    }
+
+    /// Get model selection index from screen coordinates
+    pub fn selection_index_from_point(&self, x: u16, y: u16) -> Option<usize> {
+        let area = self.list_inner_area?;
+        if x < area.x || x >= area.x.saturating_add(area.width) {
+            return None;
+        }
+        if y < area.y || y >= area.y.saturating_add(area.height) {
+            return None;
+        }
+        let relative_y = y.saturating_sub(area.y) as usize;
+        if relative_y < self.models.len() {
+            Some(relative_y)
+        } else {
+            None
+        }
+    }
+
+    /// Select model by index
+    pub fn select_model_index(&mut self, index: usize) -> bool {
+        if index < self.models.len() {
+            self.model_index = index;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// Render AI settings wizard
-pub fn render_ai_wizard(state: &AIWizardState, frame: &mut Frame, area: Rect) {
+pub fn render_ai_wizard(state: &mut AIWizardState, frame: &mut Frame, area: Rect) {
     if !state.visible {
         return;
     }
@@ -362,6 +407,9 @@ pub fn render_ai_wizard(state: &AIWizardState, frame: &mut Frame, area: Rect) {
         width: popup_width,
         height: popup_height,
     };
+
+    // Record popup area for mouse click detection
+    state.popup_area = Some(popup_area);
 
     // Clear background
     frame.render_widget(Clear, popup_area);
@@ -574,7 +622,7 @@ fn render_fetching_step(state: &AIWizardState, frame: &mut Frame, area: Rect) {
     frame.render_widget(endpoint_info, chunks[2]);
 }
 
-fn render_model_select_step(state: &AIWizardState, frame: &mut Frame, area: Rect) {
+fn render_model_select_step(state: &mut AIWizardState, frame: &mut Frame, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -595,7 +643,15 @@ fn render_model_select_step(state: &AIWizardState, frame: &mut Frame, area: Rect
             .style(Style::default().fg(Color::Red))
             .alignment(Alignment::Center);
         frame.render_widget(empty, chunks[1]);
+        state.list_inner_area = None;
     } else {
+        let list_block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray));
+
+        // Record list inner area for mouse click detection
+        state.list_inner_area = Some(list_block.inner(chunks[1]));
+
         let items: Vec<ListItem> = state
             .models
             .iter()
@@ -611,11 +667,7 @@ fn render_model_select_step(state: &AIWizardState, frame: &mut Frame, area: Rect
             })
             .collect();
 
-        let list = List::new(items).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray)),
-        );
+        let list = List::new(items).block(list_block);
         frame.render_widget(list, chunks[1]);
     }
 
