@@ -1704,6 +1704,7 @@ fn apply_pty_wrapper(executable: &str, args: &[String]) -> (String, Vec<String>)
     {
         let mut wrapped_args = Vec::new();
         wrapped_args.push("-q".to_string());
+        wrapped_args.push("--".to_string());
         wrapped_args.push("/dev/null".to_string());
         wrapped_args.push(executable.to_string());
         wrapped_args.extend(args.iter().cloned());
@@ -2030,6 +2031,33 @@ mod tests {
         assert!(is_fast_exit(0));
         assert!(is_fast_exit(FAST_EXIT_THRESHOLD_MS - 1));
         assert!(!is_fast_exit(FAST_EXIT_THRESHOLD_MS));
+    }
+
+    #[test]
+    fn test_apply_pty_wrapper_macos_option_terminator() {
+        let args = vec![
+            "resume".to_string(),
+            "--resume".to_string(),
+            "-c".to_string(),
+            "value".to_string(),
+        ];
+        let (exe, wrapped) = apply_pty_wrapper("codex", &args);
+
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(exe, "script");
+            assert_eq!(wrapped.get(0).map(String::as_str), Some("-q"));
+            assert_eq!(wrapped.get(1).map(String::as_str), Some("--"));
+            assert_eq!(wrapped.get(2).map(String::as_str), Some("/dev/null"));
+            assert_eq!(wrapped.get(3).map(String::as_str), Some("codex"));
+            assert_eq!(wrapped[4..], args[..]);
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert_eq!(exe, "codex");
+            assert_eq!(wrapped, args);
+        }
     }
 
     #[test]
