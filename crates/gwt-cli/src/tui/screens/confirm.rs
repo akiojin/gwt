@@ -21,6 +21,13 @@ pub struct ConfirmState {
     pub selected_confirm: bool,
     /// Is this a dangerous action (shows in red)
     pub is_dangerous: bool,
+    // Mouse click support
+    /// Cached popup area
+    pub popup_area: Option<Rect>,
+    /// Cached cancel button area
+    pub cancel_button_area: Option<Rect>,
+    /// Cached confirm button area
+    pub confirm_button_area: Option<Rect>,
 }
 
 impl ConfirmState {
@@ -33,6 +40,7 @@ impl ConfirmState {
             cancel_label: "Cancel".to_string(),
             selected_confirm: false, // Default to cancel for safety
             is_dangerous: false,
+            ..Default::default()
         }
     }
 
@@ -46,6 +54,7 @@ impl ConfirmState {
             cancel_label: "Cancel".to_string(),
             selected_confirm: false,
             is_dangerous: true,
+            ..Default::default()
         }
     }
 
@@ -59,6 +68,7 @@ impl ConfirmState {
             cancel_label: "Cancel".to_string(),
             selected_confirm: false,
             is_dangerous: true,
+            ..Default::default()
         }
     }
 
@@ -88,6 +98,7 @@ impl ConfirmState {
             cancel_label: "Cancel".to_string(),
             selected_confirm: false,
             is_dangerous: true,
+            ..Default::default()
         }
     }
 
@@ -107,6 +118,7 @@ impl ConfirmState {
             cancel_label: "Cancel".to_string(),
             selected_confirm: false,
             is_dangerous: true,
+            ..Default::default()
         }
     }
 
@@ -123,6 +135,7 @@ impl ConfirmState {
             cancel_label: "Cancel".to_string(),
             selected_confirm: false,
             is_dangerous: true,
+            ..Default::default()
         }
     }
 
@@ -142,6 +155,7 @@ impl ConfirmState {
             cancel_label: "Cancel".to_string(),
             selected_confirm: false,
             is_dangerous: true,
+            ..Default::default()
         }
     }
 
@@ -158,6 +172,7 @@ impl ConfirmState {
             cancel_label: "Cancel".to_string(),
             selected_confirm: false,
             is_dangerous: false,
+            ..Default::default()
         }
     }
 
@@ -174,7 +189,40 @@ impl ConfirmState {
             cancel_label: "Skip".to_string(),
             selected_confirm: true, // Default to setup for better UX
             is_dangerous: false,
+            ..Default::default()
         }
+    }
+
+    // Mouse click support methods
+
+    /// Check if point is within popup area
+    pub fn is_point_in_popup(&self, x: u16, y: u16) -> bool {
+        self.popup_area.is_some_and(|area| {
+            x >= area.x
+                && x < area.x.saturating_add(area.width)
+                && y >= area.y
+                && y < area.y.saturating_add(area.height)
+        })
+    }
+
+    /// Check if point is on cancel button
+    pub fn is_cancel_button_at(&self, x: u16, y: u16) -> bool {
+        self.cancel_button_area.is_some_and(|area| {
+            x >= area.x
+                && x < area.x.saturating_add(area.width)
+                && y >= area.y
+                && y < area.y.saturating_add(area.height)
+        })
+    }
+
+    /// Check if point is on confirm button
+    pub fn is_confirm_button_at(&self, x: u16, y: u16) -> bool {
+        self.confirm_button_area.is_some_and(|area| {
+            x >= area.x
+                && x < area.x.saturating_add(area.width)
+                && y >= area.y
+                && y < area.y.saturating_add(area.height)
+        })
     }
 
     /// Toggle selection
@@ -199,7 +247,7 @@ impl ConfirmState {
 }
 
 /// Render confirmation dialog
-pub fn render_confirm(state: &ConfirmState, frame: &mut Frame, area: Rect) {
+pub fn render_confirm(state: &mut ConfirmState, frame: &mut Frame, area: Rect) {
     const H_PADDING: usize = 2;
     let message_lines: Vec<String> = state
         .message
@@ -284,6 +332,9 @@ pub fn render_confirm(state: &ConfirmState, frame: &mut Frame, area: Rect) {
     // Center the dialog
     let dialog_area = centered_rect(dialog_width, dialog_height, area);
 
+    // Store popup area for mouse click detection
+    state.popup_area = Some(dialog_area);
+
     // Clear the background
     frame.render_widget(Clear, dialog_area);
 
@@ -355,6 +406,7 @@ pub fn render_confirm(state: &ConfirmState, frame: &mut Frame, area: Rect) {
         Style::default().fg(Color::DarkGray)
     };
     let cancel_text = format!("[ {} ]", state.cancel_label);
+    let cancel_width = cancel_text.chars().count() as u16;
 
     // Confirm button
     let confirm_style = if state.selected_confirm {
@@ -369,6 +421,7 @@ pub fn render_confirm(state: &ConfirmState, frame: &mut Frame, area: Rect) {
         Style::default().fg(Color::Green)
     };
     let confirm_text = format!("[ {} ]", state.confirm_label);
+    let confirm_width = confirm_text.chars().count() as u16;
 
     let button_line = Line::from(vec![
         Span::styled(cancel_text, cancel_style),
@@ -377,6 +430,20 @@ pub fn render_confirm(state: &ConfirmState, frame: &mut Frame, area: Rect) {
     ]);
     let buttons = Paragraph::new(button_line).alignment(Alignment::Center);
     frame.render_widget(buttons, chunks[3]);
+
+    // Calculate and store button areas for mouse click detection
+    // Button line: "[ Cancel ]  [ Confirm ]" centered in chunks[3]
+    let gap_width: u16 = 2; // Two spaces between buttons
+    let total_button_width = cancel_width + gap_width + confirm_width;
+    let buttons_start_x = chunks[3].x + (chunks[3].width.saturating_sub(total_button_width)) / 2;
+
+    state.cancel_button_area = Some(Rect::new(buttons_start_x, chunks[3].y, cancel_width, 1));
+    state.confirm_button_area = Some(Rect::new(
+        buttons_start_x + cancel_width + gap_width,
+        chunks[3].y,
+        confirm_width,
+        1,
+    ));
 }
 
 /// Helper function to create a centered rect

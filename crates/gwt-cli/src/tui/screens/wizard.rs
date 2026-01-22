@@ -611,6 +611,11 @@ pub struct WizardState {
     pub has_running_agent: bool,
     /// Pane index of the running agent (for FocusPane result)
     pub running_agent_pane_idx: Option<usize>,
+    // Mouse click support
+    /// Cached popup area (outer, with border)
+    pub popup_area: Option<Rect>,
+    /// Cached list inner area (content rows inside popup)
+    pub list_inner_area: Option<Rect>,
 }
 
 impl WizardState {
@@ -1221,10 +1226,137 @@ impl WizardState {
     pub fn is_complete(&self) -> bool {
         self.step == WizardStep::SkipPermissions
     }
+
+    // --- Mouse click support ---
+
+    /// Get item count for current step (for mouse click handling)
+    pub fn current_step_item_count(&self) -> usize {
+        match self.step {
+            WizardStep::QuickStart => self.quick_start_option_count(),
+            WizardStep::BranchAction => self.branch_action_options().len(),
+            WizardStep::BranchTypeSelect => BranchType::all().len(),
+            WizardStep::BranchNameInput => 0, // Text input, no list items
+            WizardStep::AgentSelect => CodingAgent::all().len(),
+            WizardStep::ModelSelect => self.agent.models().len(),
+            WizardStep::ReasoningLevel => ReasoningLevel::all().len(),
+            WizardStep::VersionSelect => self.version_options.len(),
+            WizardStep::ExecutionMode => ExecutionMode::all().len(),
+            WizardStep::SkipPermissions => 2, // Yes/No
+        }
+    }
+
+    /// Get current selection index for current step
+    pub fn current_selection_index(&self) -> usize {
+        match self.step {
+            WizardStep::QuickStart => self.quick_start_index,
+            WizardStep::BranchAction => self.branch_action_index,
+            WizardStep::BranchTypeSelect => BranchType::all()
+                .iter()
+                .position(|t| *t == self.branch_type)
+                .unwrap_or(0),
+            WizardStep::BranchNameInput => 0,
+            WizardStep::AgentSelect => self.agent_index,
+            WizardStep::ModelSelect => self.model_index,
+            WizardStep::ReasoningLevel => self.reasoning_level_index,
+            WizardStep::VersionSelect => self.version_index,
+            WizardStep::ExecutionMode => self.execution_mode_index,
+            WizardStep::SkipPermissions => {
+                if self.skip_permissions {
+                    0
+                } else {
+                    1
+                }
+            }
+        }
+    }
+
+    /// Set selection index for current step (returns true if changed)
+    pub fn set_selection_index(&mut self, index: usize) -> bool {
+        let item_count = self.current_step_item_count();
+        if index >= item_count {
+            return false;
+        }
+        let current = self.current_selection_index();
+        if current == index {
+            return false;
+        }
+
+        match self.step {
+            WizardStep::QuickStart => {
+                self.quick_start_index = index;
+            }
+            WizardStep::BranchAction => {
+                self.branch_action_index = index;
+            }
+            WizardStep::BranchTypeSelect => {
+                self.branch_type = BranchType::all()[index];
+            }
+            WizardStep::BranchNameInput => {
+                return false; // No list items
+            }
+            WizardStep::AgentSelect => {
+                self.agent_index = index;
+                self.agent = CodingAgent::all()[index];
+            }
+            WizardStep::ModelSelect => {
+                self.model_index = index;
+                self.model = self.agent.models()[index].id.clone();
+            }
+            WizardStep::ReasoningLevel => {
+                self.reasoning_level_index = index;
+                self.reasoning_level = ReasoningLevel::all()[index];
+            }
+            WizardStep::VersionSelect => {
+                self.version_index = index;
+                self.version = self.version_options[index].value.clone();
+                self.ensure_version_visible();
+            }
+            WizardStep::ExecutionMode => {
+                self.execution_mode_index = index;
+                self.execution_mode = ExecutionMode::all()[index];
+            }
+            WizardStep::SkipPermissions => {
+                self.skip_permissions = index == 0;
+            }
+        }
+        true
+    }
+
+    /// Resolve selection index from a mouse position within the list area
+    pub fn selection_index_from_point(&self, x: u16, y: u16) -> Option<usize> {
+        let inner = self.list_inner_area?;
+        if inner.width == 0 || inner.height == 0 {
+            return None;
+        }
+        let right = inner.x.saturating_add(inner.width);
+        let bottom = inner.y.saturating_add(inner.height);
+        if x < inner.x || x >= right || y < inner.y || y >= bottom {
+            return None;
+        }
+        let row = (y - inner.y) as usize;
+        let index = self.scroll_offset.saturating_add(row);
+        let item_count = self.current_step_item_count();
+        if index >= item_count {
+            return None;
+        }
+        Some(index)
+    }
+
+    /// Check if point is within popup area (for click outside detection)
+    pub fn is_point_in_popup(&self, x: u16, y: u16) -> bool {
+        if let Some(popup) = self.popup_area {
+            x >= popup.x
+                && x < popup.x.saturating_add(popup.width)
+                && y >= popup.y
+                && y < popup.y.saturating_add(popup.height)
+        } else {
+            false
+        }
+    }
 }
 
 /// Render wizard popup overlay
-pub fn render_wizard(state: &WizardState, frame: &mut Frame, area: Rect) {
+pub fn render_wizard(state: &mut WizardState, frame: &mut Frame, area: Rect) {
     if !state.visible {
         return;
     }
@@ -1241,6 +1373,9 @@ pub fn render_wizard(state: &WizardState, frame: &mut Frame, area: Rect) {
     let popup_y = area.y + (area.height.saturating_sub(popup_height)) / 2;
 
     let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
+
+    // Store popup area for mouse click detection
+    state.popup_area = Some(popup_area);
 
     // Clear popup area
     frame.render_widget(Clear, popup_area);
@@ -1271,6 +1406,9 @@ pub fn render_wizard(state: &WizardState, frame: &mut Frame, area: Rect) {
         inner_area.width.saturating_sub(H_PADDING.saturating_mul(2)),
         inner_area.height.saturating_sub(4),
     );
+
+    // Store list inner area for mouse click detection
+    state.list_inner_area = Some(content_area);
 
     match state.step {
         WizardStep::QuickStart => render_quick_start_step(state, frame, content_area),

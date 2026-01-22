@@ -253,7 +253,11 @@ impl BranchItem {
             has_changes: worktree.map(|wt| wt.has_changes).unwrap_or(false),
             has_unpushed: worktree.map(|wt| wt.has_unpushed).unwrap_or(false),
             divergence: DivergenceStatus::UpToDate,
-            has_remote_counterpart: branch.has_remote,
+            has_remote_counterpart: if branch_type == BranchType::Local {
+                branch.has_remote
+            } else {
+                false
+            },
             remote_name: if branch.name.starts_with("remotes/") {
                 Some(branch.name.clone())
             } else {
@@ -305,7 +309,11 @@ impl BranchItem {
             has_changes: false,
             has_unpushed: false,
             divergence: DivergenceStatus::UpToDate,
-            has_remote_counterpart: branch.has_remote,
+            has_remote_counterpart: if branch_type == BranchType::Local {
+                branch.has_remote
+            } else {
+                false
+            },
             remote_name: if branch.name.starts_with("remotes/") {
                 Some(branch.name.clone())
             } else {
@@ -525,7 +533,7 @@ impl BranchListState {
                 .count(),
             remote_count: branches
                 .iter()
-                .filter(|b| b.branch_type == BranchType::Remote || b.has_remote_counterpart)
+                .filter(|b| b.branch_type == BranchType::Remote)
                 .count(),
             worktree_count: branches.iter().filter(|b| b.has_worktree).count(),
             changes_count: branches.iter().filter(|b| b.has_changes).count(),
@@ -543,9 +551,7 @@ impl BranchListState {
             match self.view_mode {
                 ViewMode::All => true,
                 ViewMode::Local => branch.branch_type == BranchType::Local,
-                ViewMode::Remote => {
-                    branch.branch_type == BranchType::Remote || branch.has_remote_counterpart
-                }
+                ViewMode::Remote => branch.branch_type == BranchType::Remote,
             }
         });
 
@@ -2765,7 +2771,8 @@ mod tests {
         assert_eq!(state.filtered_branches()[0].name, "main");
 
         state.set_view_mode(ViewMode::Remote);
-        assert_eq!(state.filtered_branches().len(), 2); // main has remote counterpart
+        assert_eq!(state.filtered_branches().len(), 1);
+        assert_eq!(state.filtered_branches()[0].name, "remotes/origin/main");
     }
 
     #[test]
