@@ -218,21 +218,21 @@
 
 - [x] **T201** [統合] `package.json` に従い `bun run format:check` / `bunx --bun markdownlint-cli "**/*.md" --config .markdownlint.json --ignore-path .markdownlintignore` / `bun run lint` を実行し、失敗があれば修正
 
-## フェーズ4: ユーザーストーリー6 - Worktree作成時のstaleディレクトリ自動回復
+## フェーズ4: ユーザーストーリー6 - Worktree復元の無効化
 
-**ストーリー**: Worktree作成対象パスがstale状態で残っていても、自動回復して作成を完了する。
+**ストーリー**: Worktree作成時や起動時の自動復元・修復を行わず、手動解決のみ許可する。
 
-**価値**: 手動削除の手戻りをなくし、ブランチ選択から作業開始までを途切れさせない。
+**価値**: 予期しない削除や修復の自動実行を防ぎ、運用の透明性を高める。
 
 ### テスト（TDD）
 
-- [x] **T301** [US6] `tests/integration/branch-creation.test.ts` にstaleディレクトリを検出して削除→再作成できるテストを追加
-- [x] **T302** [US6] `tests/integration/branch-creation.test.ts` にstale判定できない既存ディレクトリは削除せずエラーになるテストを追加
+- [x] **T301** [US6] `crates/gwt-core/src/worktree/manager.rs` の既存パス時エラー/自動クリーンアップ無効化テストを更新
+- [x] **T302** [US6] `crates/gwt-cli/src/main.rs` にrepair無効化のテストを追加
 
 ### 実装
 
-- [x] **T303** [US6] `src/worktree.ts` にstale判定・削除処理を追加し、`createWorktree`の前処理として実行
-- [x] **T304** [US6] `src/worktree.ts` に判定不能な既存ディレクトリ向けの明確なエラーメッセージを追加
+- [x] **T303** [US6] `crates/gwt-core/src/worktree/manager.rs` で自動復元を無効化し、既存パスはエラーにする
+- [x] **T304** [US6] `crates/gwt-cli/src/main.rs` / `crates/gwt-cli/src/tui/app.rs` / `crates/gwt-cli/src/tui/screens/branch_list.rs` で自動クリーンアップとrepair操作を無効化し、キーバインド表示を更新
 
 ## フェーズ5: ユーザーストーリー8 - ブランチ選択後のウィザードポップアップ (優先度: P0)
 

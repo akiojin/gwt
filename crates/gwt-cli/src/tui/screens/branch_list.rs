@@ -2258,10 +2258,9 @@ fn count_wrapped_lines(lines: &[Line], width: usize) -> usize {
 
 /// Render footer line with keybindings (FR-004)
 fn render_footer(frame: &mut Frame, area: Rect) {
-    let keybinds = vec![
+    let keybinds = [
         ("r", "Refresh"),
         ("c", "Cleanup"),
-        ("x", "Repair"),
         ("l", "Logs"),
         ("p", "Profile"),
         ("f", "Filter"),

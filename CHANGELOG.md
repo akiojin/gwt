@@ -1,6 +1,24 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [6.10.0] - 2026-01-22
+
+### Bug Fixes
+
+- MacOSのPTYラッパーで引数解釈を遮断 (#731)
+- Hook登録を上書き更新方式に変更 (#734)
+- Worktree復元を無効化 (#735)
+- タブ選択状態がリフレッシュ時にリセットされる問題を修正 (#736)
+- WindowsでClaudeのIS_SANDBOXを無効化 (#737)
+
+### Features
+
+- **tui:** ブランチ名色分けとエージェント履歴永続化 (#730)
+
+### Styling
+
+- Rustfmtフォーマット修正 (#732)
+
 ## [6.9.1] - 2026-01-22
 
 ### Testing

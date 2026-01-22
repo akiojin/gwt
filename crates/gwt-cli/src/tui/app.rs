@@ -283,6 +283,8 @@ pub struct Model {
     logs: LogsState,
     /// Help state
     help: HelpState,
+    /// Detail panel tab state (FR-074)
+    detail_panel_tab: DetailPanelTab,
     /// Confirm dialog state
     confirm: ConfirmState,
     /// Error display state
@@ -420,7 +422,7 @@ pub enum Message {
     WizardConfirm,
     /// Wizard: go back or close
     WizardBack,
-    /// Repair worktrees (x key)
+    /// Repair worktrees (disabled)
     RepairWorktrees,
     /// Copy selected log to clipboard
     CopyLogToClipboard,
@@ -460,6 +462,7 @@ impl Model {
             settings: SettingsState::new(),
             logs: LogsState::new(),
             help: HelpState::new(),
+            detail_panel_tab: DetailPanelTab::Details,
             confirm: ConfirmState::new(),
             error: ErrorState::new(),
             profiles: ProfilesState::new(),
@@ -608,6 +611,7 @@ impl Model {
         self.total_count = 0;
         self.active_count = 0;
 
+        // FR-074: タブ状態はModelレベルで保持されるため、BranchListStateの再生成時に引き継ぎ不要
         let mut branch_list = BranchListState::new();
         branch_list.active_profile = self.profiles_config.active.clone();
         branch_list.ai_enabled = self.active_ai_enabled();
@@ -898,7 +902,7 @@ impl Model {
         if let Some(request) = self.branch_list.prepare_branch_summary(&self.repo_root) {
             self.spawn_branch_summary_fetch(request);
         }
-        if self.branch_list.detail_panel_tab == DetailPanelTab::Session {
+        if self.detail_panel_tab == DetailPanelTab::Session {
             self.maybe_request_session_summary_for_selected(false);
         }
     }
@@ -1207,7 +1211,7 @@ impl Model {
     }
 
     fn poll_session_summary_if_needed(&mut self) {
-        if self.branch_list.detail_panel_tab != DetailPanelTab::Session {
+        if self.detail_panel_tab != DetailPanelTab::Session {
             self.last_session_poll = None;
             self.session_poll_deferred = false;
             return;
@@ -1398,10 +1402,8 @@ impl Model {
                 let session_inflight = self.branch_list.clone_session_inflight();
                 let session_missing = self.branch_list.clone_session_missing();
                 let session_warnings = self.branch_list.clone_session_warnings();
-                // FR-074b: グローバルタブ状態を保持
-                let detail_tab = self.branch_list.detail_panel_tab;
+                // FR-074: タブ状態はModelレベルで保持されるため、BranchListStateの再生成時に引き継ぎ不要
                 let mut branch_list = BranchListState::new().with_branches(update.branches);
-                branch_list.detail_panel_tab = detail_tab;
                 branch_list.active_profile = self.profiles_config.active.clone();
                 branch_list.ai_enabled = self.active_ai_enabled();
                 branch_list.set_session_cache(session_cache);
@@ -2655,7 +2657,7 @@ impl Model {
             },
             Message::PageUp => match self.screen {
                 Screen::BranchList => {
-                    if self.branch_list.detail_panel_tab == DetailPanelTab::Session {
+                    if self.detail_panel_tab == DetailPanelTab::Session {
                         self.branch_list.scroll_session_page_up();
                     } else {
                         self.branch_list.page_up(10);
@@ -2671,7 +2673,7 @@ impl Model {
             },
             Message::PageDown => match self.screen {
                 Screen::BranchList => {
-                    if self.branch_list.detail_panel_tab == DetailPanelTab::Session {
+                    if self.detail_panel_tab == DetailPanelTab::Session {
                         self.branch_list.scroll_session_page_down();
                     } else {
                         self.branch_list.page_down(10);
@@ -2941,23 +2943,7 @@ impl Model {
                 self.refresh_data();
             }
             Message::RepairWorktrees => {
-                // Run git worktree repair
-                match WorktreeManager::new(&self.repo_root) {
-                    Ok(manager) => match manager.repair() {
-                        Ok(()) => {
-                            self.status_message =
-                                Some("Worktrees repaired successfully".to_string());
-                            // Refresh data after repair
-                            self.refresh_data();
-                        }
-                        Err(e) => {
-                            self.status_message = Some(format!("Repair failed: {}", e));
-                        }
-                    },
-                    Err(e) => {
-                        self.status_message = Some(format!("Failed to open repository: {}", e));
-                    }
-                }
+                self.status_message = Some("Worktree repair is disabled.".to_string());
                 self.status_message_time = Some(Instant::now());
             }
             Message::CopyLogToClipboard => {
@@ -3013,10 +2999,10 @@ impl Model {
                 Screen::Settings => self.settings.next_category(),
                 Screen::BranchList => {
                     if !self.branch_list.filter_mode {
-                        // FR-074a: Tab切り替え時に即座にグローバルタブ状態を更新
-                        self.branch_list.toggle_tab();
+                        // FR-074a: Tab切り替え時にModelレベルでタブ状態を更新
+                        self.detail_panel_tab.toggle();
                         self.refresh_branch_summary();
-                        if self.branch_list.detail_panel_tab == DetailPanelTab::Session {
+                        if self.detail_panel_tab == DetailPanelTab::Session {
                             self.maybe_request_session_summary_for_selected(false);
                         } else {
                             self.last_session_poll = None;
@@ -3863,6 +3849,9 @@ impl Model {
                     .active_status_message()
                     .map(|message| message.to_string());
 
+                // FR-074: Sync tab state from Model to BranchListState for rendering
+                self.branch_list.detail_panel_tab = self.detail_panel_tab;
+
                 // Render branch list (always has focus now)
                 render_branch_list(
                     &mut self.branch_list,
@@ -4034,7 +4023,7 @@ impl Model {
                 if self.branch_list.filter_mode {
                     "[Esc] Exit filter | Type to search"
                 } else {
-                    "[r] Refresh | [c] Cleanup | [x] Repair | [l] Logs"
+                    "[r] Refresh | [c] Cleanup | [l] Logs"
                 }
             }
             Screen::WorktreeCreate => "[Enter] Next | [Esc] Back",
@@ -4416,17 +4405,6 @@ pub fn run_with_context(context: Option<TuiEntryContext>) -> Result<Option<Launc
                                     Some(Message::ConfirmAgentTermination)
                                 } else {
                                     Some(Message::Char('d'))
-                                }
-                            }
-                            (KeyCode::Char('x'), KeyModifiers::NONE) => {
-                                // Repair worktrees command
-                                // In filter mode, 'x' goes to filter input
-                                if matches!(model.screen, Screen::BranchList)
-                                    && !model.branch_list.filter_mode
-                                {
-                                    Some(Message::RepairWorktrees)
-                                } else {
-                                    Some(Message::Char('x'))
                                 }
                             }
                             (KeyCode::Char('p'), KeyModifiers::NONE) => {
@@ -5067,7 +5045,7 @@ mod tests {
 
         let item = sample_branch_with_session("feature/poll");
         model.branch_list = BranchListState::new().with_branches(vec![item]);
-        model.branch_list.detail_panel_tab = DetailPanelTab::Session;
+        model.detail_panel_tab = DetailPanelTab::Session;
         model.branch_list.ai_enabled = true;
 
         let branch_name = model

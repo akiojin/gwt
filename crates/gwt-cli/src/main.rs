@@ -78,9 +78,6 @@ fn run() -> Result<(), GwtError> {
                 "Detected tmux mode for TUI"
             );
 
-            if let Ok(manager) = WorktreeManager::new(&repo_root) {
-                let _ = manager.auto_cleanup_orphans();
-            }
             let mut entry: Option<TuiEntryContext> = None;
             loop {
                 let selection = tui::run_with_context(entry.take())?;
@@ -453,30 +450,10 @@ fn cmd_unlock(repo_root: &PathBuf, target: &str) -> Result<(), GwtError> {
     Ok(())
 }
 
-fn cmd_repair(repo_root: &PathBuf, target: Option<&str>) -> Result<(), GwtError> {
-    info!(
-        category = "cli",
-        command = "repair",
-        target = target.unwrap_or("all"),
-        "Executing repair command"
-    );
-
-    let manager = WorktreeManager::new(repo_root)?;
-
-    if let Some(target) = target {
-        let wt = manager
-            .get_by_branch(target)?
-            .ok_or_else(|| GwtError::WorktreeNotFound {
-                path: PathBuf::from(target),
-            })?;
-        manager.repair_path(&wt.path)?;
-        println!("Repaired worktree: {}", wt.path.display());
-    } else {
-        manager.repair()?;
-        println!("Repaired all worktrees.");
-    }
-
-    Ok(())
+fn cmd_repair(_repo_root: &PathBuf, _target: Option<&str>) -> Result<(), GwtError> {
+    Err(GwtError::Internal(
+        "Worktree repair is disabled.".to_string(),
+    ))
 }
 
 /// Handle Claude Code hook subcommands (SPEC-861d8cdf FR-101/T-101/T-102)
@@ -848,11 +825,15 @@ pub(crate) struct LaunchPlan {
     pub env: Vec<(String, String)>,
 }
 
+fn should_set_claude_sandbox_env(target_os: &str) -> bool {
+    target_os != "windows"
+}
+
 pub(crate) fn build_launch_env(config: &AgentLaunchConfig) -> Vec<(String, String)> {
     let mut env_vars = config.env.clone();
     if config.skip_permissions && config.agent == CodingAgent::ClaudeCode {
         let has_sandbox = env_vars.iter().any(|(key, _)| key == "IS_SANDBOX");
-        if !has_sandbox {
+        if !has_sandbox && should_set_claude_sandbox_env(std::env::consts::OS) {
             env_vars.push(("IS_SANDBOX".to_string(), "1".to_string()));
         }
     }
@@ -1988,6 +1969,31 @@ mod tests {
     }
 
     #[test]
+    fn test_should_set_claude_sandbox_env_windows() {
+        assert!(!should_set_claude_sandbox_env("windows"));
+    }
+
+    #[test]
+    fn test_should_set_claude_sandbox_env_non_windows() {
+        assert!(should_set_claude_sandbox_env("linux"));
+        assert!(should_set_claude_sandbox_env("macos"));
+    }
+
+    #[test]
+    fn test_build_launch_env_claude_skip_permissions_gates_is_sandbox() {
+        let config = sample_config(CodingAgent::ClaudeCode);
+        let env = build_launch_env(&config);
+        let has_sandbox = env
+            .iter()
+            .any(|(key, value)| key == "IS_SANDBOX" && value == "1");
+        if should_set_claude_sandbox_env(std::env::consts::OS) {
+            assert!(has_sandbox);
+        } else {
+            assert!(!has_sandbox);
+        }
+    }
+
+    #[test]
     fn test_detect_tui_tmux_mode_single_outside_tmux() {
         let _guard = TMUX_ENV_MUTEX.lock().unwrap();
         let original = std::env::var("TMUX").ok();
@@ -2047,6 +2053,13 @@ mod tests {
             classify_exit(Some(1), None),
             ExitClassification::Failure { .. }
         ));
+    }
+
+    #[test]
+    fn test_cmd_repair_disabled() {
+        let err = cmd_repair(&PathBuf::from("/tmp"), None).unwrap_err();
+        assert!(matches!(err, GwtError::Internal(_)));
+        assert!(err.to_string().contains("Worktree repair is disabled."));
     }
 
     #[test]
