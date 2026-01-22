@@ -5095,7 +5095,7 @@ fn build_shell_command(command: &str, args: &[String]) -> String {
 
 fn wrap_tmux_command_for_fast_exit(command: &str) -> String {
     format!(
-        "start=$(date +%s); {} ; status=$?; end=$(date +%s); if [ $status -ne 0 ] || [ $((end-start)) -lt {} ]; then echo; echo \"[gwt] Agent exited immediately (status=$status).\"; echo \"[gwt] Press Enter to close this pane.\"; read -r _; fi; exit $status",
+        "start=$(date +%s); {} ; exit_status=$?; end=$(date +%s); if [ $exit_status -ne 0 ] || [ $((end-start)) -lt {} ]; then echo; echo \"[gwt] Agent exited immediately (status=$exit_status).\"; echo \"[gwt] Press Enter to close this pane.\"; read -r _; fi; exit $exit_status",
         command, FAST_EXIT_THRESHOLD_SECS
     )
 }
@@ -5223,6 +5223,15 @@ mod tests {
         let entry = sample_tool_entry("codex-cli");
         let resolved = resolve_orphaned_agent_name("bash", Some(&entry));
         assert_eq!(resolved, "codex-cli");
+    }
+
+    #[test]
+    fn test_wrap_tmux_command_for_fast_exit_uses_exit_status_variable() {
+        let wrapped = wrap_tmux_command_for_fast_exit("echo ok");
+        assert!(wrapped.contains("exit_status=$?"));
+        assert!(wrapped.contains("status=$exit_status"));
+        assert!(wrapped.contains("exit $exit_status"));
+        assert!(!wrapped.contains("; status=$?;"));
     }
 
     #[test]
