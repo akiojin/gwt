@@ -2,7 +2,9 @@
 
 #![allow(dead_code)]
 
+use gwt_core::error::GwtError;
 use ratatui::{prelude::*, widgets::*};
+use std::collections::VecDeque;
 
 /// Error severity level
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -92,10 +94,150 @@ impl ErrorState {
             self.scroll_offset -= 1;
         }
     }
+
+    /// Create an error state from GwtError
+    pub fn from_gwt_error(err: &GwtError) -> Self {
+        let code = err.code();
+        let category = err.category();
+        let suggestions = err.suggestions();
+
+        Self {
+            title: format!("{} Error", category),
+            message: err.to_string(),
+            code: Some(code.to_string()),
+            details: Vec::new(),
+            suggestions,
+            severity: ErrorSeverity::Error,
+            scroll_offset: 0,
+        }
+    }
+
+    /// Create an error state from GwtError with details
+    pub fn from_gwt_error_with_details(err: &GwtError, details: Vec<String>) -> Self {
+        let mut state = Self::from_gwt_error(err);
+        state.details = details;
+        state
+    }
+
+    /// Export error as JSON for clipboard
+    pub fn to_json(&self) -> String {
+        let severity = match self.severity {
+            ErrorSeverity::Error => "error",
+            ErrorSeverity::Warning => "warning",
+            ErrorSeverity::Info => "info",
+        };
+
+        let json = serde_json::json!({
+            "code": self.code,
+            "severity": severity,
+            "title": self.title,
+            "message": self.message,
+            "details": self.details,
+            "suggestions": self.suggestions,
+        });
+
+        serde_json::to_string_pretty(&json).unwrap_or_else(|_| self.message.clone())
+    }
 }
 
-/// Render error screen
+/// Error queue for managing multiple errors (FIFO)
+#[derive(Debug, Default)]
+pub struct ErrorQueue {
+    /// Queue of pending errors
+    errors: VecDeque<ErrorState>,
+    /// Currently displayed error
+    current: Option<ErrorState>,
+}
+
+impl ErrorQueue {
+    /// Create a new empty error queue
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Push a new error to the queue
+    pub fn push(&mut self, error: ErrorState) {
+        if self.current.is_none() {
+            self.current = Some(error);
+        } else {
+            self.errors.push_back(error);
+        }
+    }
+
+    /// Dismiss the current error and show the next one
+    pub fn dismiss_current(&mut self) {
+        self.current = self.errors.pop_front();
+    }
+
+    /// Get reference to the current error
+    pub fn current(&self) -> Option<&ErrorState> {
+        self.current.as_ref()
+    }
+
+    /// Get mutable reference to the current error (for scrolling)
+    pub fn current_mut(&mut self) -> Option<&mut ErrorState> {
+        self.current.as_mut()
+    }
+
+    /// Check if queue is empty (no current error and no pending)
+    pub fn is_empty(&self) -> bool {
+        self.current.is_none()
+    }
+
+    /// Get total count (current + pending)
+    pub fn total_count(&self) -> usize {
+        if self.current.is_some() {
+            1 + self.errors.len()
+        } else {
+            0
+        }
+    }
+
+    /// Get current position (1-indexed)
+    pub fn current_position(&self) -> usize {
+        if self.current.is_some() {
+            1
+        } else {
+            0
+        }
+    }
+
+    /// Get position string like "(1/3)" for display
+    pub fn position_string(&self) -> Option<String> {
+        let total = self.total_count();
+        if total > 1 {
+            Some(format!("(1/{})", total))
+        } else {
+            None
+        }
+    }
+
+    /// Clear all errors
+    pub fn clear(&mut self) {
+        self.current = None;
+        self.errors.clear();
+    }
+}
+
+/// Render error screen with queue support
+pub fn render_error_with_queue(queue: &ErrorQueue, frame: &mut Frame, area: Rect) {
+    if let Some(state) = queue.current() {
+        render_error_internal(state, queue.position_string(), frame, area);
+    }
+}
+
+/// Render error screen (single error)
 pub fn render_error(state: &ErrorState, frame: &mut Frame, area: Rect) {
+    render_error_internal(state, None, frame, area);
+}
+
+/// Internal render function with optional queue position
+fn render_error_internal(
+    state: &ErrorState,
+    queue_position: Option<String>,
+    frame: &mut Frame,
+    area: Rect,
+) {
     const H_PADDING: u16 = 2;
     // Calculate dialog size
     let dialog_width = 70.min(area.width.saturating_sub(4));
@@ -129,10 +271,12 @@ pub fn render_error(state: &ErrorState, frame: &mut Frame, area: Rect) {
         ErrorSeverity::Info => "i",
     };
 
-    let title = if let Some(code) = &state.code {
-        format!(" {} {} [{}] ", icon, state.title, code)
-    } else {
-        format!(" {} {} ", icon, state.title)
+    // Build title with optional queue position and error code
+    let title = match (&state.code, &queue_position) {
+        (Some(code), Some(pos)) => format!(" {} {} {} [{}] ", icon, state.title, pos, code),
+        (Some(code), None) => format!(" {} {} [{}] ", icon, state.title, code),
+        (None, Some(pos)) => format!(" {} {} {} ", icon, state.title, pos),
+        (None, None) => format!(" {} {} ", icon, state.title),
     };
 
     let block = Block::default()
@@ -228,10 +372,16 @@ pub fn render_error(state: &ErrorState, frame: &mut Frame, area: Rect) {
         chunk_idx += 1;
     }
 
-    // Footer
-    let footer = Paragraph::new("[Enter/Esc] Close")
-        .style(Style::default().fg(Color::DarkGray))
-        .alignment(Alignment::Center);
+    // Footer with shortcuts
+    let footer_text = Line::from(vec![
+        Span::styled("[Enter/Esc]", Style::default().fg(Color::DarkGray)),
+        Span::raw(" Close  "),
+        Span::styled("[l]", Style::default().fg(Color::Cyan)),
+        Span::raw(" Logs  "),
+        Span::styled("[c]", Style::default().fg(Color::Cyan)),
+        Span::raw(" Copy"),
+    ]);
+    let footer = Paragraph::new(footer_text).alignment(Alignment::Center);
     frame.render_widget(footer, chunks[chunk_idx]);
 }
 
@@ -294,5 +444,59 @@ mod tests {
 
         state.scroll_up();
         assert_eq!(state.scroll_offset, 1);
+    }
+
+    #[test]
+    fn test_error_queue_basic() {
+        let mut queue = ErrorQueue::new();
+        assert!(queue.is_empty());
+        assert_eq!(queue.total_count(), 0);
+
+        // Push first error - becomes current
+        queue.push(ErrorState::from_error("Error 1"));
+        assert!(!queue.is_empty());
+        assert_eq!(queue.total_count(), 1);
+        assert_eq!(queue.current().unwrap().message, "Error 1");
+
+        // Push second error - goes to queue
+        queue.push(ErrorState::from_error("Error 2"));
+        assert_eq!(queue.total_count(), 2);
+        assert_eq!(queue.position_string(), Some("(1/2)".to_string()));
+
+        // Dismiss current - second becomes current
+        queue.dismiss_current();
+        assert_eq!(queue.total_count(), 1);
+        assert_eq!(queue.current().unwrap().message, "Error 2");
+
+        // Dismiss last - queue empty
+        queue.dismiss_current();
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn test_error_queue_position_string() {
+        let mut queue = ErrorQueue::new();
+        assert_eq!(queue.position_string(), None);
+
+        queue.push(ErrorState::from_error("Error 1"));
+        assert_eq!(queue.position_string(), None); // Single error, no position
+
+        queue.push(ErrorState::from_error("Error 2"));
+        assert_eq!(queue.position_string(), Some("(1/2)".to_string()));
+
+        queue.push(ErrorState::from_error("Error 3"));
+        assert_eq!(queue.position_string(), Some("(1/3)".to_string()));
+    }
+
+    #[test]
+    fn test_error_to_json() {
+        let state = ErrorState::from_error("Test error")
+            .with_code("E1001")
+            .with_suggestions(vec!["Try this".to_string()]);
+
+        let json = state.to_json();
+        assert!(json.contains("E1001"));
+        assert!(json.contains("Test error"));
+        assert!(json.contains("Try this"));
     }
 }
