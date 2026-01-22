@@ -52,12 +52,13 @@ use super::screens::pane_list::PaneListState;
 use super::screens::split_layout::{calculate_split_layout, SplitLayoutState};
 use super::screens::{
     collect_os_env, render_ai_wizard, render_branch_list, render_confirm, render_environment,
-    render_error, render_help, render_logs, render_profiles, render_settings, render_wizard,
-    render_worktree_create, AIWizardState, BranchItem, BranchListState, BranchType, CodingAgent,
-    ConfirmState, DetailPanelTab, EnvironmentState, ErrorState, ExecutionMode, HelpState,
-    LogsState, ProfilesState, QuickStartEntry, ReasoningLevel, SettingsState, WizardConfirmResult,
-    WizardState, WorktreeCreateState,
+    render_error_with_queue, render_help, render_logs, render_profiles, render_settings,
+    render_wizard, render_worktree_create, AIWizardState, BranchItem, BranchListState, BranchType,
+    CodingAgent, ConfirmState, DetailPanelTab, EnvironmentState, ErrorQueue, ErrorState,
+    ExecutionMode, HelpState, LogsState, ProfilesState, QuickStartEntry, ReasoningLevel,
+    SettingsState, WizardConfirmResult, WizardState, WorktreeCreateState,
 };
+// log_gwt_error is available for use when GwtError types are available
 
 fn resolve_orphaned_agent_name(
     fallback_name: &str,
@@ -287,8 +288,8 @@ pub struct Model {
     detail_panel_tab: DetailPanelTab,
     /// Confirm dialog state
     confirm: ConfirmState,
-    /// Error display state
-    error: ErrorState,
+    /// Error queue for managing multiple errors
+    error_queue: ErrorQueue,
     /// Profiles state
     profiles: ProfilesState,
     /// Profiles configuration
@@ -464,7 +465,7 @@ impl Model {
             help: HelpState::new(),
             detail_panel_tab: DetailPanelTab::Details,
             confirm: ConfirmState::new(),
-            error: ErrorState::new(),
+            error_queue: ErrorQueue::new(),
             profiles: ProfilesState::new(),
             profiles_config: ProfilesConfig::default(),
             environment: EnvironmentState::new(),
@@ -1378,7 +1379,10 @@ impl Model {
                 self.status_message_time = Some(Instant::now());
             }
             if let Some(message) = context.error_message {
-                self.error = ErrorState::from_error(&message);
+                // Log the error
+                gwt_core::logging::log_error_message("E9001", "cli", &message, None);
+                let error_state = ErrorState::from_error(&message);
+                self.error_queue.push(error_state);
                 self.screen_stack.push(self.screen.clone());
                 self.screen = Screen::Error;
             }
@@ -1514,6 +1518,7 @@ impl Model {
                         self.launch_in_progress = false;
                         self.launch_rx = None;
                         self.launch_status = None;
+                        gwt_core::logging::log_error_message("E4001", "agent", &message, None);
                         self.worktree_create.error_message = Some(message.clone());
                         self.status_message = Some(format!("Error: {}", message));
                         self.status_message_time = Some(Instant::now());
@@ -1951,6 +1956,33 @@ impl Model {
                 self.refresh_branch_summary();
             }
             self.last_mouse_click = Some(MouseClick { index, at: now });
+        }
+    }
+
+    /// Handle mouse events for the error popup
+    fn handle_error_mouse(&mut self, mouse: MouseEvent) {
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                // Click outside the popup area closes it (simplified: any click dismisses)
+                // In a more sophisticated implementation, we'd track popup bounds
+                self.error_queue.dismiss_current();
+                if self.error_queue.is_empty() {
+                    self.update(Message::NavigateBack);
+                }
+            }
+            MouseEventKind::ScrollUp => {
+                // Scroll up in details
+                if let Some(error) = self.error_queue.current_mut() {
+                    error.scroll_up();
+                }
+            }
+            MouseEventKind::ScrollDown => {
+                // Scroll down in details
+                if let Some(error) = self.error_queue.current_mut() {
+                    error.scroll_down();
+                }
+            }
+            _ => {}
         }
     }
 
@@ -2632,7 +2664,11 @@ impl Model {
                 Screen::Settings => self.settings.select_next(),
                 Screen::Logs => self.logs.select_next(),
                 Screen::Help => self.help.scroll_down(),
-                Screen::Error => self.error.scroll_down(),
+                Screen::Error => {
+                    if let Some(error) = self.error_queue.current_mut() {
+                        error.scroll_down();
+                    }
+                }
                 Screen::Profiles => self.profiles.select_next(),
                 Screen::Environment => self.environment.select_next(),
                 Screen::AISettingsWizard => self.ai_wizard.select_next_model(),
@@ -2649,7 +2685,11 @@ impl Model {
                 Screen::Settings => self.settings.select_prev(),
                 Screen::Logs => self.logs.select_prev(),
                 Screen::Help => self.help.scroll_up(),
-                Screen::Error => self.error.scroll_up(),
+                Screen::Error => {
+                    if let Some(error) = self.error_queue.current_mut() {
+                        error.scroll_up();
+                    }
+                }
                 Screen::Profiles => self.profiles.select_prev(),
                 Screen::Environment => self.environment.select_prev(),
                 Screen::AISettingsWizard => self.ai_wizard.select_prev_model(),
@@ -2842,7 +2882,11 @@ impl Model {
                     self.update(Message::NavigateBack);
                 }
                 Screen::Error => {
-                    self.update(Message::NavigateBack);
+                    // Dismiss current error and show next, or close if no more errors
+                    self.error_queue.dismiss_current();
+                    if self.error_queue.is_empty() {
+                        self.update(Message::NavigateBack);
+                    }
                 }
                 Screen::Logs => {
                     self.logs.toggle_detail();
@@ -2884,6 +2928,39 @@ impl Model {
                         if self.ai_wizard.is_edit {
                             self.ai_wizard.show_delete();
                         }
+                    }
+                } else if matches!(self.screen, Screen::Error) {
+                    // Error screen shortcuts
+                    match c {
+                        'l' | 'L' => {
+                            // Navigate to Logs screen
+                            self.screen_stack.push(self.screen.clone());
+                            self.screen = Screen::Logs;
+                        }
+                        'c' | 'C' => {
+                            // Copy error to clipboard as JSON
+                            if let Some(error) = self.error_queue.current() {
+                                let json = error.to_json();
+                                match arboard::Clipboard::new() {
+                                    Ok(mut clipboard) => match clipboard.set_text(&json) {
+                                        Ok(()) => {
+                                            self.status_message =
+                                                Some("Error copied to clipboard".to_string());
+                                        }
+                                        Err(e) => {
+                                            self.status_message =
+                                                Some(format!("Failed to copy: {}", e));
+                                        }
+                                    },
+                                    Err(e) => {
+                                        self.status_message =
+                                            Some(format!("Clipboard unavailable: {}", e));
+                                    }
+                                }
+                                self.status_message_time = Some(Instant::now());
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -3333,6 +3410,12 @@ impl Model {
                 }
                 Err(e) => {
                     self.launch_status = None;
+                    gwt_core::logging::log_error_message(
+                        "E4002",
+                        "agent",
+                        &format!("Failed to launch: {}", e),
+                        None,
+                    );
                     self.status_message = Some(format!("Failed to launch: {}", e));
                     self.status_message_time = Some(Instant::now());
                 }
@@ -3867,7 +3950,7 @@ impl Model {
             Screen::Settings => render_settings(&self.settings, frame, chunks[1]),
             Screen::Logs => render_logs(&self.logs, frame, chunks[1]),
             Screen::Help => render_help(&self.help, frame, chunks[1]),
-            Screen::Error => render_error(&self.error, frame, chunks[1]),
+            Screen::Error => render_error_with_queue(&self.error_queue, frame, chunks[1]),
             Screen::Profiles => render_profiles(&self.profiles, frame, chunks[1]),
             Screen::Environment => render_environment(&mut self.environment, frame, chunks[1]),
             Screen::AISettingsWizard => render_ai_wizard(&self.ai_wizard, frame, chunks[1]),
@@ -4484,7 +4567,9 @@ pub fn run_with_context(context: Option<TuiEntryContext>) -> Result<Option<Launc
                     }
                 }
                 Event::Mouse(mouse) => {
-                    if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                    if matches!(model.screen, Screen::Error) {
+                        model.handle_error_mouse(mouse);
+                    } else if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                         model.handle_branch_list_mouse(mouse);
                     }
                 }
