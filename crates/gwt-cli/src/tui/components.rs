@@ -354,14 +354,6 @@ struct SectionLines {
     link_urls: Vec<Option<String>>,
 }
 
-fn panel_switch_hint() -> Line<'static> {
-    Line::from(Span::styled(
-        " Tab: Switch ",
-        Style::default().fg(Color::DarkGray),
-    ))
-    .right_aligned()
-}
-
 impl<'a> SummaryPanel<'a> {
     const SPINNER_FRAMES: [&'static str; 4] = ["|", "/", "-", "\\"];
     const PANEL_HEIGHT: u16 = 12;
@@ -417,7 +409,6 @@ impl<'a> SummaryPanel<'a> {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
             .title(title)
-            .title_bottom(panel_switch_hint())
             .padding(Padding::new(
                 SUMMARY_PANEL_PADDING_X,
                 SUMMARY_PANEL_PADDING_X,

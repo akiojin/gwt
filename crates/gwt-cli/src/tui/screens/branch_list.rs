@@ -85,23 +85,6 @@ pub enum ViewMode {
     Remote,
 }
 
-/// Detail panel tab state
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum DetailPanelTab {
-    #[default]
-    Details,
-    Session,
-}
-
-impl DetailPanelTab {
-    pub fn toggle(&mut self) {
-        *self = match self {
-            DetailPanelTab::Details => DetailPanelTab::Session,
-            DetailPanelTab::Session => DetailPanelTab::Details,
-        };
-    }
-}
-
 impl ViewMode {
     pub fn label(&self) -> &'static str {
         match self {
@@ -452,8 +435,6 @@ pub struct BranchListState {
     pub running_agents: HashMap<String, AgentPane>,
     /// Branch summary data for the selected branch (SPEC-4b893dae)
     pub branch_summary: Option<BranchSummary>,
-    /// Detail panel tab state
-    pub detail_panel_tab: DetailPanelTab,
     /// AI settings enabled for active profile
     pub ai_enabled: bool,
     /// Session summary cache (session)
@@ -504,7 +485,6 @@ impl Default for BranchListState {
             list_inner_area: None,
             running_agents: HashMap::new(),
             branch_summary: None,
-            detail_panel_tab: DetailPanelTab::Details,
             ai_enabled: false,
             session_summary_cache: SessionSummaryCache::default(),
             session_summary_inflight: HashSet::new(),
@@ -1211,15 +1191,6 @@ impl BranchListState {
         self.session_summary_cache.clone()
     }
 
-    // ================================================================
-    // グローバルタブ状態 (SPEC-4b893dae FR-074シリーズ)
-    // ================================================================
-
-    /// Toggle the global tab state (FR-074a)
-    pub fn toggle_tab(&mut self) {
-        self.detail_panel_tab.toggle();
-    }
-
     /// Cleanup session summary warnings for deleted branches
     pub fn cleanup_session_warnings(&mut self, remaining_branches: &HashSet<String>) {
         self.session_summary_warnings
@@ -1350,9 +1321,10 @@ pub fn render_branch_list(
         Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(panel_height), // Branch list (FR-003)
+                Constraint::Length(panel_height), // Branch list
                 Constraint::Length(1),            // Status bar (FR-104a)
-                Constraint::Min(3),               // Summary panel (SPEC-4b893dae)
+                Constraint::Length(panel_height), // Details panel
+                Constraint::Min(6),               // Session panel
             ])
             .split(area)
     } else {
@@ -1360,8 +1332,9 @@ pub fn render_branch_list(
         Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(panel_height), // Branch list (FR-003)
-                Constraint::Min(3),               // Summary panel (SPEC-4b893dae)
+                Constraint::Length(panel_height), // Branch list
+                Constraint::Length(panel_height), // Details panel
+                Constraint::Min(6),               // Session panel
             ])
             .split(area)
     };
@@ -1373,9 +1346,21 @@ pub fn render_branch_list(
 
     if has_agents {
         render_status_bar(state, frame, chunks[1]);
-        render_summary_panel(state, frame, chunks[2], status_message);
+        render_summary_panels(
+            state,
+            frame,
+            chunks[2],
+            chunks[3],
+            status_message,
+        );
     } else {
-        render_summary_panel(state, frame, chunks[1], status_message);
+        render_summary_panels(
+            state,
+            frame,
+            chunks[1],
+            chunks[2],
+            status_message,
+        );
     }
 }
 
@@ -1539,6 +1524,7 @@ fn render_branches(state: &BranchListState, frame: &mut Frame, area: Rect, has_f
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)
+        .title(" Branches ")
         .padding(Padding::new(
             BRANCH_LIST_PADDING_X,
             BRANCH_LIST_PADDING_X,
@@ -1790,61 +1776,37 @@ fn render_branch_row(
 }
 
 /// Render summary panel (SPEC-4b893dae FR-001~FR-006)
-fn render_summary_panel(
+fn render_summary_panels(
     state: &mut BranchListState,
     frame: &mut Frame,
-    area: Rect,
+    details_area: Rect,
+    session_area: Rect,
     status_message: Option<&str>,
 ) {
-    match state.detail_panel_tab {
-        DetailPanelTab::Details => render_details_panel(state, frame, area, status_message),
-        DetailPanelTab::Session => {
-            state.clear_detail_links();
-            render_session_panel(state, frame, area, status_message);
-        }
-    }
+    render_details_panel(state, frame, details_area, status_message);
+    state.clear_detail_links();
+    render_session_panel(state, frame, session_area, status_message);
 }
 
-fn panel_title_line(branch_name: &str, active: DetailPanelTab) -> Line<'static> {
-    let mut spans = Vec::new();
-    let details_style = if matches!(active, DetailPanelTab::Details) {
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let session_style = if matches!(active, DetailPanelTab::Session) {
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-
-    spans.push(Span::styled("[Details]", details_style));
-    spans.push(Span::raw(" "));
-    spans.push(Span::styled("[Session]", session_style));
-    spans.push(Span::raw(" "));
-    spans.push(Span::styled(
-        format!(" {}", branch_name),
-        Style::default().fg(Color::DarkGray),
-    ));
-
-    Line::from(spans)
-}
-
-fn panel_switch_hint() -> Line<'static> {
-    Line::from(Span::styled(
-        " Tab: Switch ",
-        Style::default().fg(Color::DarkGray),
-    ))
-    .right_aligned()
+fn panel_title_line(branch_name: &str, label: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("[{}]", label),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            branch_name.to_string(),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ])
 }
 
 fn session_panel_hint() -> Line<'static> {
     Line::from(Span::styled(
-        " Tab: Switch | PgUp/PgDn: Scroll ",
+        " PgUp/PgDn: Scroll ",
         Style::default().fg(Color::DarkGray),
     ))
     .right_aligned()
@@ -1925,12 +1887,11 @@ fn render_details_panel(
     // Handle status messages - show them in the panel area if present
     if let Some(status) = status_message {
         // Draw the panel frame first
-        let title = panel_title_line(&summary.branch_name, DetailPanelTab::Details);
+        let title = panel_title_line(&summary.branch_name, "Details");
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
             .title(title)
-            .title_bottom(panel_switch_hint())
             .padding(Padding::new(PANEL_PADDING_X, PANEL_PADDING_X, 0, 0));
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -1946,12 +1907,11 @@ fn render_details_panel(
 
     // Handle loading state - show spinner in panel
     if state.is_loading {
-        let title = panel_title_line(&summary.branch_name, DetailPanelTab::Details);
+        let title = panel_title_line(&summary.branch_name, "Details");
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
             .title(title)
-            .title_bottom(panel_switch_hint())
             .padding(Padding::new(PANEL_PADDING_X, PANEL_PADDING_X, 0, 0));
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -1979,10 +1939,7 @@ fn render_details_panel(
     // Render the full summary panel with optional status line
     let panel = SummaryPanel::new(&summary)
         .with_tick(state.spinner_frame)
-        .with_title(panel_title_line(
-            &summary.branch_name,
-            DetailPanelTab::Details,
-        ))
+        .with_title(panel_title_line(&summary.branch_name, "Details"))
         .with_links(links)
         .with_status_line(status_line);
 
@@ -2000,7 +1957,7 @@ fn render_session_panel(
         .selected_branch()
         .map(|branch| branch.name.clone())
         .unwrap_or_else(|| "(no branch selected)".to_string());
-    let title = panel_title_line(&branch_name, DetailPanelTab::Session);
+    let title = panel_title_line(&branch_name, "Session");
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan))
@@ -3057,87 +3014,4 @@ mod tests {
         assert_eq!(state.branches[visible[1]].name, "feature/two");
     }
 
-    // ==========================================================
-    // グローバルタブ状態のTDDテスト (SPEC-4b893dae FR-074シリーズ)
-    // ==========================================================
-
-    #[test]
-    fn test_global_tab_default_is_details() {
-        // FR-075: アプリ起動時のデフォルトタブはDetails
-        let state = BranchListState::new();
-        assert_eq!(state.detail_panel_tab, DetailPanelTab::Details);
-    }
-
-    #[test]
-    fn test_global_tab_toggle() {
-        // FR-074a: Tab切り替え時に即座にグローバルタブ状態を更新
-        let mut state = BranchListState::new();
-        assert_eq!(state.detail_panel_tab, DetailPanelTab::Details);
-
-        state.toggle_tab();
-        assert_eq!(state.detail_panel_tab, DetailPanelTab::Session);
-
-        state.toggle_tab();
-        assert_eq!(state.detail_panel_tab, DetailPanelTab::Details);
-    }
-
-    #[test]
-    fn test_global_tab_preserved_on_branch_change() {
-        // FR-074d: ブランチ切り替え時に現在のグローバルタブ状態を維持
-        let branches = vec![sample_branch("branch-a"), sample_branch("branch-b")];
-        let mut state = BranchListState::new().with_branches(branches);
-
-        // タブをSessionに切り替え
-        state.toggle_tab();
-        assert_eq!(state.detail_panel_tab, DetailPanelTab::Session);
-
-        // ブランチを切り替えてもタブ状態は維持される
-        // (select_next/select_prev などでブランチが変わっても detail_panel_tab は変わらない)
-        state.selected = 1; // branch-b を選択
-        assert_eq!(state.detail_panel_tab, DetailPanelTab::Session);
-
-        state.selected = 0; // branch-a に戻る
-        assert_eq!(state.detail_panel_tab, DetailPanelTab::Session);
-    }
-
-    #[test]
-    fn test_global_tab_preserved_after_refresh() {
-        // FR-074b: rキーリフレッシュでグローバルタブ状態を維持
-        let branches = vec![sample_branch("main"), sample_branch("develop")];
-        let mut state = BranchListState::new().with_branches(branches);
-
-        // タブをSessionに切り替え
-        state.toggle_tab();
-        assert_eq!(state.detail_panel_tab, DetailPanelTab::Session);
-
-        // リフレッシュをシミュレート（ブランチリストを再設定）
-        // 重要: detail_panel_tab を保存して復元する
-        let saved_tab = state.detail_panel_tab;
-        let refreshed_branches = vec![sample_branch("main"), sample_branch("develop")];
-        state = BranchListState::new().with_branches(refreshed_branches);
-        state.detail_panel_tab = saved_tab;
-
-        // タブ状態が維持されていることを確認
-        assert_eq!(state.detail_panel_tab, DetailPanelTab::Session);
-    }
-
-    #[test]
-    fn test_global_tab_preserved_after_new_branch_creation() {
-        // FR-074c: 新規ブランチ作成後の自動更新でグローバルタブ状態を維持
-        let branches = vec![sample_branch("main")];
-        let mut state = BranchListState::new().with_branches(branches);
-
-        // タブをSessionに切り替え
-        state.toggle_tab();
-        assert_eq!(state.detail_panel_tab, DetailPanelTab::Session);
-
-        // 新規ブランチ作成後の自動更新をシミュレート
-        let saved_tab = state.detail_panel_tab;
-        let updated_branches = vec![sample_branch("main"), sample_branch("feature/new-branch")];
-        state = BranchListState::new().with_branches(updated_branches);
-        state.detail_panel_tab = saved_tab;
-
-        // タブ状態が維持されていることを確認
-        assert_eq!(state.detail_panel_tab, DetailPanelTab::Session);
-    }
 }
