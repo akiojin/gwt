@@ -40,6 +40,10 @@ pub struct ProfilesState {
     pub cursor: usize,
     /// Error message
     pub error: Option<String>,
+
+    // Mouse click support
+    /// List inner area for click detection
+    pub list_inner_area: Option<Rect>,
 }
 
 impl ProfilesState {
@@ -144,10 +148,39 @@ impl ProfilesState {
         }
         Ok(name.to_string())
     }
+
+    // Mouse click support methods
+
+    /// Get profile selection index from screen coordinates
+    pub fn selection_index_from_point(&self, x: u16, y: u16) -> Option<usize> {
+        let area = self.list_inner_area?;
+        if x < area.x || x >= area.x.saturating_add(area.width) {
+            return None;
+        }
+        if y < area.y || y >= area.y.saturating_add(area.height) {
+            return None;
+        }
+        let relative_y = y.saturating_sub(area.y) as usize;
+        if relative_y < self.profiles.len() {
+            Some(relative_y)
+        } else {
+            None
+        }
+    }
+
+    /// Select profile by index
+    pub fn select_index(&mut self, index: usize) -> bool {
+        if index < self.profiles.len() {
+            self.selected = index;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// Render profiles screen
-pub fn render_profiles(state: &ProfilesState, frame: &mut Frame, area: Rect) {
+pub fn render_profiles(state: &mut ProfilesState, frame: &mut Frame, area: Rect) {
     // Layout depends on create_mode
     let chunks = if state.create_mode {
         Layout::default()
@@ -190,6 +223,7 @@ pub fn render_profiles(state: &ProfilesState, frame: &mut Frame, area: Rect) {
             .style(Style::default().fg(Color::DarkGray))
             .alignment(Alignment::Center);
         frame.render_widget(empty, chunks[1]);
+        state.list_inner_area = None;
     } else {
         let items: Vec<ListItem> = state
             .profiles
@@ -241,6 +275,9 @@ pub fn render_profiles(state: &ProfilesState, frame: &mut Frame, area: Rect) {
                 ListItem::new(line).style(style)
             })
             .collect();
+
+        // Record list area for mouse click detection (no borders, so chunks[1] is the inner area)
+        state.list_inner_area = Some(chunks[1]);
 
         let list = List::new(items).block(Block::default().borders(Borders::NONE));
         frame.render_widget(list, chunks[1]);
