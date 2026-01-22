@@ -88,10 +88,10 @@
 
 ## 追加 ハイレベル ToDo (2026-01-22)
 
-23) **Worktree列削除と色分け**: `BranchListScreen`からWorktree列を削除し、ブランチ名の色でWorktree状態を表現する。
-24) **goneステータス検出**: `git for-each-ref`のフォーマットに`upstream:track`を追加し、`[gone]`を検出してBranch構造体に反映する。
-25) **エージェント履歴統合**: ブランチ一覧表示時にAgentHistoryStoreから履歴を取得し、Worktreeなしブランチでもエージェント情報を表示する。
-26) **選択状態の色優先**: 選択中ブランチではWorktree状態色より選択視認性（シアン背景・黒テキスト）を優先する。
+1) **Worktree列削除と色分け**: `BranchListScreen`からWorktree列を削除し、ブランチ名の色でWorktree状態を表現する。
+2) **goneステータス検出**: `git for-each-ref`のフォーマットに`upstream:track`を追加し、`[gone]`を検出してBranch構造体に反映する。
+3) **エージェント履歴統合**: ブランチ一覧表示時にAgentHistoryStoreから履歴を取得し、Worktreeなしブランチでもエージェント情報を表示する。
+4) **選択状態の色優先**: 選択中ブランチではWorktree状態色より選択視認性（シアン背景・黒テキスト）を優先する。
 
 ## リスクと緩和
 - **パフォーマンス**: `getMergedPRWorktrees()` を表示用に呼ぶ頻度を制御（ブランチ更新時のみ）し、結果をキャッシュ。
