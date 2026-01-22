@@ -2234,28 +2234,37 @@ fn wrap_line_chars(line: &Line<'static>, width: usize) -> Vec<Line<'static>> {
         *buffer_active = false;
     };
 
-    let push_line = |wrapped: &mut Vec<Line<'static>>,
-                     spans: &mut Vec<Span<'static>>,
-                     line: &Line<'static>| {
-        wrapped.push(Line {
-            spans: std::mem::take(spans),
-            style: line.style,
-            alignment: line.alignment,
-        });
-    };
+    let push_line =
+        |wrapped: &mut Vec<Line<'static>>, spans: &mut Vec<Span<'static>>, line: &Line<'static>| {
+            wrapped.push(Line {
+                spans: std::mem::take(spans),
+                style: line.style,
+                alignment: line.alignment,
+            });
+        };
 
     for span in &line.spans {
         let span_style = span.style;
         for ch in span.content.chars() {
-            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0) as usize;
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
             if current_width > 0 && current_width + ch_width > width {
-                flush_buffer(&mut current_spans, &mut buffer, &buffer_style, &mut buffer_active);
+                flush_buffer(
+                    &mut current_spans,
+                    &mut buffer,
+                    &buffer_style,
+                    &mut buffer_active,
+                );
                 push_line(&mut wrapped, &mut current_spans, line);
                 current_width = 0;
             }
 
             if !buffer_active || buffer_style != span_style {
-                flush_buffer(&mut current_spans, &mut buffer, &buffer_style, &mut buffer_active);
+                flush_buffer(
+                    &mut current_spans,
+                    &mut buffer,
+                    &buffer_style,
+                    &mut buffer_active,
+                );
                 buffer_style = span_style;
                 buffer_active = true;
             }
@@ -2264,14 +2273,24 @@ fn wrap_line_chars(line: &Line<'static>, width: usize) -> Vec<Line<'static>> {
             current_width += ch_width;
 
             if current_width >= width {
-                flush_buffer(&mut current_spans, &mut buffer, &buffer_style, &mut buffer_active);
+                flush_buffer(
+                    &mut current_spans,
+                    &mut buffer,
+                    &buffer_style,
+                    &mut buffer_active,
+                );
                 push_line(&mut wrapped, &mut current_spans, line);
                 current_width = 0;
             }
         }
     }
 
-    flush_buffer(&mut current_spans, &mut buffer, &buffer_style, &mut buffer_active);
+    flush_buffer(
+        &mut current_spans,
+        &mut buffer,
+        &buffer_style,
+        &mut buffer_active,
+    );
     if !current_spans.is_empty() || wrapped.is_empty() {
         push_line(&mut wrapped, &mut current_spans, line);
     }
