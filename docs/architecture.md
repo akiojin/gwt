@@ -53,7 +53,7 @@ gwtはGit worktreeを活用した対話型ブランチ管理ツールです。Ru
 **責務:**
 
 - Git操作（gix + 外部gitフォールバック）
-- Worktree管理（作成・削除・修復・ロック）
+- Worktree管理（作成・削除・ロック／修復は無効化）
 - 設定/セッション管理（TOML + 自動移行）
 - ログ管理（JSON Lines）
 - Coding Agent起動とセッション履歴

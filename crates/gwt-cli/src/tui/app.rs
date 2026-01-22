@@ -420,7 +420,7 @@ pub enum Message {
     WizardConfirm,
     /// Wizard: go back or close
     WizardBack,
-    /// Repair worktrees (x key)
+    /// Repair worktrees (disabled)
     RepairWorktrees,
     /// Copy selected log to clipboard
     CopyLogToClipboard,
@@ -608,7 +608,11 @@ impl Model {
         self.total_count = 0;
         self.active_count = 0;
 
+        // FR-074b: グローバルタブ状態を保持
+        let detail_tab = self.branch_list.detail_panel_tab;
+
         let mut branch_list = BranchListState::new();
+        branch_list.detail_panel_tab = detail_tab;
         branch_list.active_profile = self.profiles_config.active.clone();
         branch_list.ai_enabled = self.active_ai_enabled();
         branch_list.working_directory = Some(self.repo_root.display().to_string());
@@ -2937,23 +2941,7 @@ impl Model {
                 self.refresh_data();
             }
             Message::RepairWorktrees => {
-                // Run git worktree repair
-                match WorktreeManager::new(&self.repo_root) {
-                    Ok(manager) => match manager.repair() {
-                        Ok(()) => {
-                            self.status_message =
-                                Some("Worktrees repaired successfully".to_string());
-                            // Refresh data after repair
-                            self.refresh_data();
-                        }
-                        Err(e) => {
-                            self.status_message = Some(format!("Repair failed: {}", e));
-                        }
-                    },
-                    Err(e) => {
-                        self.status_message = Some(format!("Failed to open repository: {}", e));
-                    }
-                }
+                self.status_message = Some("Worktree repair is disabled.".to_string());
                 self.status_message_time = Some(Instant::now());
             }
             Message::CopyLogToClipboard => {
@@ -4030,7 +4018,7 @@ impl Model {
                 if self.branch_list.filter_mode {
                     "[Esc] Exit filter | Type to search"
                 } else {
-                    "[r] Refresh | [c] Cleanup | [x] Repair | [l] Logs"
+                    "[r] Refresh | [c] Cleanup | [l] Logs"
                 }
             }
             Screen::WorktreeCreate => "[Enter] Next | [Esc] Back",
@@ -4412,17 +4400,6 @@ pub fn run_with_context(context: Option<TuiEntryContext>) -> Result<Option<Launc
                                     Some(Message::ConfirmAgentTermination)
                                 } else {
                                     Some(Message::Char('d'))
-                                }
-                            }
-                            (KeyCode::Char('x'), KeyModifiers::NONE) => {
-                                // Repair worktrees command
-                                // In filter mode, 'x' goes to filter input
-                                if matches!(model.screen, Screen::BranchList)
-                                    && !model.branch_list.filter_mode
-                                {
-                                    Some(Message::RepairWorktrees)
-                                } else {
-                                    Some(Message::Char('x'))
                                 }
                             }
                             (KeyCode::Char('p'), KeyModifiers::NONE) => {

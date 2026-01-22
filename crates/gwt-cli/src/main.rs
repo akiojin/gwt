@@ -78,9 +78,6 @@ fn run() -> Result<(), GwtError> {
                 "Detected tmux mode for TUI"
             );
 
-            if let Ok(manager) = WorktreeManager::new(&repo_root) {
-                let _ = manager.auto_cleanup_orphans();
-            }
             let mut entry: Option<TuiEntryContext> = None;
             loop {
                 let selection = tui::run_with_context(entry.take())?;
@@ -453,30 +450,10 @@ fn cmd_unlock(repo_root: &PathBuf, target: &str) -> Result<(), GwtError> {
     Ok(())
 }
 
-fn cmd_repair(repo_root: &PathBuf, target: Option<&str>) -> Result<(), GwtError> {
-    info!(
-        category = "cli",
-        command = "repair",
-        target = target.unwrap_or("all"),
-        "Executing repair command"
-    );
-
-    let manager = WorktreeManager::new(repo_root)?;
-
-    if let Some(target) = target {
-        let wt = manager
-            .get_by_branch(target)?
-            .ok_or_else(|| GwtError::WorktreeNotFound {
-                path: PathBuf::from(target),
-            })?;
-        manager.repair_path(&wt.path)?;
-        println!("Repaired worktree: {}", wt.path.display());
-    } else {
-        manager.repair()?;
-        println!("Repaired all worktrees.");
-    }
-
-    Ok(())
+fn cmd_repair(_repo_root: &PathBuf, _target: Option<&str>) -> Result<(), GwtError> {
+    Err(GwtError::Internal(
+        "Worktree repair is disabled.".to_string(),
+    ))
 }
 
 /// Handle Claude Code hook subcommands (SPEC-861d8cdf FR-101/T-101/T-102)
@@ -2076,6 +2053,13 @@ mod tests {
             classify_exit(Some(1), None),
             ExitClassification::Failure { .. }
         ));
+    }
+
+    #[test]
+    fn test_cmd_repair_disabled() {
+        let err = cmd_repair(&PathBuf::from("/tmp"), None).unwrap_err();
+        assert!(matches!(err, GwtError::Internal(_)));
+        assert!(err.to_string().contains("Worktree repair is disabled."));
     }
 
     #[test]

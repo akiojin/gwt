@@ -135,6 +135,7 @@ fn create_gwt_hook_entry_without_matcher(event: &str, exe_path: &str) -> serde_j
 }
 
 /// Check if an array contains a gwt hook (new format)
+#[cfg(test)]
 fn has_gwt_hook_in_array(arr: &[serde_json::Value]) -> bool {
     arr.iter().any(|entry| {
         if let Some(hooks) = entry.get("hooks").and_then(|h| h.as_array()) {
@@ -163,6 +164,7 @@ pub fn register_gwt_hooks(settings_path: &Path) -> Result<(), GwtError> {
 }
 
 /// Internal function to register hooks with a specified executable path
+/// Always overwrites existing gwt hooks with the new executable path
 fn register_gwt_hooks_with_exe_path(settings_path: &Path, exe_path: &str) -> Result<(), GwtError> {
     // Create parent directory if needed
     if let Some(parent) = settings_path.parent() {
@@ -177,14 +179,14 @@ fn register_gwt_hooks_with_exe_path(settings_path: &Path, exe_path: &str) -> Res
         ClaudeSettings::default()
     };
 
-    // Helper to register a single event
+    // Helper to register a single event (always overwrite existing gwt hooks)
     let register_event =
         |settings: &mut ClaudeSettings, event: &str, gwt_entry: serde_json::Value| {
             if let Some(existing) = settings.hooks.get_mut(event) {
                 if let Some(arr) = existing.as_array_mut() {
-                    if !has_gwt_hook_in_array(arr) {
-                        arr.push(gwt_entry);
-                    }
+                    // Remove all existing gwt hooks, then add the new one
+                    arr.retain(|entry| !is_gwt_hook_entry(entry));
+                    arr.push(gwt_entry);
                 } else {
                     settings
                         .hooks
@@ -578,14 +580,14 @@ mod tests {
     }
 
     #[test]
-    fn test_idempotent_registration_with_different_paths() {
+    fn test_overwrite_registration_with_different_paths() {
         let temp_dir = TempDir::new().unwrap();
         let settings_path = temp_dir.path().join(".claude").join("settings.json");
 
         // Register with first path
         register_gwt_hooks_with_exe_path(&settings_path, "/path/to/old-gwt").unwrap();
 
-        // Register with different path - should NOT add duplicate
+        // Register with different path - should OVERWRITE (not add duplicate)
         register_gwt_hooks_with_exe_path(&settings_path, "/path/to/new-gwt").unwrap();
 
         // Should only have one gwt hook per event (not duplicated)
@@ -610,8 +612,8 @@ mod tests {
             "Should have exactly one entry, not duplicated"
         );
 
-        // Verify the original path is preserved (not replaced)
-        assert!(content.contains("/path/to/old-gwt"));
-        assert!(!content.contains("/path/to/new-gwt"));
+        // Verify the new path overwrites the old one
+        assert!(!content.contains("/path/to/old-gwt"));
+        assert!(content.contains("/path/to/new-gwt"));
     }
 }
