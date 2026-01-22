@@ -848,11 +848,15 @@ pub(crate) struct LaunchPlan {
     pub env: Vec<(String, String)>,
 }
 
+fn should_set_claude_sandbox_env(target_os: &str) -> bool {
+    target_os != "windows"
+}
+
 pub(crate) fn build_launch_env(config: &AgentLaunchConfig) -> Vec<(String, String)> {
     let mut env_vars = config.env.clone();
     if config.skip_permissions && config.agent == CodingAgent::ClaudeCode {
         let has_sandbox = env_vars.iter().any(|(key, _)| key == "IS_SANDBOX");
-        if !has_sandbox {
+        if !has_sandbox && should_set_claude_sandbox_env(std::env::consts::OS) {
             env_vars.push(("IS_SANDBOX".to_string(), "1".to_string()));
         }
     }
@@ -1984,6 +1988,31 @@ mod tests {
             mode: ExecutionMode::Continue.label().to_string(),
             reasoning_level: None,
             skip_permissions: false,
+        }
+    }
+
+    #[test]
+    fn test_should_set_claude_sandbox_env_windows() {
+        assert!(!should_set_claude_sandbox_env("windows"));
+    }
+
+    #[test]
+    fn test_should_set_claude_sandbox_env_non_windows() {
+        assert!(should_set_claude_sandbox_env("linux"));
+        assert!(should_set_claude_sandbox_env("macos"));
+    }
+
+    #[test]
+    fn test_build_launch_env_claude_skip_permissions_gates_is_sandbox() {
+        let config = sample_config(CodingAgent::ClaudeCode);
+        let env = build_launch_env(&config);
+        let has_sandbox = env
+            .iter()
+            .any(|(key, value)| key == "IS_SANDBOX" && value == "1");
+        if should_set_claude_sandbox_env(std::env::consts::OS) {
+            assert!(has_sandbox);
+        } else {
+            assert!(!has_sandbox);
         }
     }
 

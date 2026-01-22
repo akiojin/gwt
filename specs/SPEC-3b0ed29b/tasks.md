@@ -62,3 +62,9 @@
 - [x] **T3152** [実装] `crates/gwt-core/src/agent/codex.rs` のデフォルトモデルを仕様に合わせて更新し、スキップ時はsandbox設定を抑止する
 - [x] **T3153** [実装] `crates/gwt-cli/src/tui/screens/wizard.rs` のCodexモデル選択肢を仕様に合わせて更新する
 - [x] **T3154** [実装] `crates/gwt-cli/src/main.rs` でClaude Codeのスキップ時に`IS_SANDBOX=1`を必ず付与する
+
+## 追加作業: Claude CodeのWindows起動互換 (2026-01-22)
+
+- [x] **T3331** [Test] `crates/gwt-cli/src/main.rs` にClaude Codeの`IS_SANDBOX`付与がWindowsでは無効になることを検証するユニットテストを追加する
+- [x] **T3332** [実装] `crates/gwt-cli/src/main.rs` の環境変数生成でWindowsでは`IS_SANDBOX=1`を付与しないよう修正する
+- [x] **T3333** [実装] `crates/gwt-core/src/agent/claude.rs` のClaude Code起動でWindowsでは`IS_SANDBOX=1`を付与しないよう修正する
