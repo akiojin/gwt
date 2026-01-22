@@ -184,6 +184,8 @@ pub struct BranchItem {
     pub pr_number: Option<u64>,
     /// PR URL for latest PR (if any)
     pub pr_url: Option<String>,
+    /// FR-085: Whether the upstream branch has been deleted (gone)
+    pub is_gone: bool,
 }
 
 /// PR info mapped to branch name
@@ -269,6 +271,7 @@ impl BranchItem {
             pr_title: None,
             pr_number: None,
             pr_url: None, // FR-016: Will be populated from PrCache
+            is_gone: branch.is_gone, // FR-085: Populate gone status from Branch
         };
         item.update_safety_status();
         item
@@ -319,6 +322,7 @@ impl BranchItem {
             pr_title: None,
             pr_number: None,
             pr_url: None,
+            is_gone: branch.is_gone, // FR-085: Populate gone status from Branch
         };
         item.update_safety_status();
         item
@@ -377,6 +381,23 @@ impl BranchItem {
             WorktreeStatus::Active => ("w", Color::LightGreen),
             WorktreeStatus::Inaccessible => ("x", Color::Red),
             WorktreeStatus::None => (".", Color::DarkGray),
+        }
+    }
+
+    /// FR-082/FR-083/FR-084/FR-085: Get branch name color based on worktree status and gone status
+    /// - White: Worktree exists and active
+    /// - Gray: No Worktree
+    /// - Red: Worktree path inaccessible OR branch is gone (upstream deleted)
+    pub fn branch_name_color(&self) -> Color {
+        if self.is_gone {
+            // FR-085: Gone branch (upstream deleted) shown in red
+            Color::Red
+        } else {
+            match self.worktree_status {
+                WorktreeStatus::Active => Color::White,       // FR-082: Active worktree
+                WorktreeStatus::None => Color::Gray,          // FR-083: No worktree
+                WorktreeStatus::Inaccessible => Color::Red,   // FR-084: Inaccessible path
+            }
         }
     }
 }
@@ -1614,9 +1635,10 @@ fn render_branch_row(
     // Only show selection icons when at least one branch is selected
     let show_selection = !selected_set.is_empty();
     let is_checked = selected_set.contains(&branch.name);
-    let (worktree_icon, worktree_color) = branch.worktree_icon();
     // FR-031b: Pass spinner_frame for pending safety check
     let (safety_icon, safety_color) = branch.safety_icon(Some(spinner_frame));
+    // FR-082/FR-083/FR-084/FR-085: Get branch name color based on worktree/gone status
+    let branch_name_color = branch.branch_name_color();
 
     // Branch name
     let display_name = if branch.branch_type == BranchType::Remote {
@@ -1625,10 +1647,11 @@ fn render_branch_row(
         &branch.name
     };
 
-    // Calculate left side width: optionally "[*] " + worktree + " " + safety + " " + branch_name
-    // selection_icon(3) + space(1) if showing selection, plus worktree_icon(1) + space(1) + safety_icon + space(1) + name
+    // Calculate left side width: optionally "[*] " + safety + " " + branch_name
+    // FR-082: Worktree column removed, branch name color indicates status
+    // selection_icon(3) + space(1) if showing selection, plus safety_icon + space(1) + name
     let selection_width = if show_selection { 3 } else { 0 }; // "◉ " or "◎ " (2 + 1)
-    let left_width = selection_width + 1 + 1 + safety_icon.len() + 1 + display_name.width();
+    let left_width = selection_width + safety_icon.len() + 1 + display_name.width();
 
     // Build right side (agent info) and calculate its width
     // SPEC-861d8cdf T-103: Status-based display
@@ -1734,12 +1757,11 @@ fn render_branch_row(
         spans.push(Span::raw(" "));
     }
 
+    // FR-082: Worktree column removed, branch name color indicates status
     spans.extend([
-        Span::styled(worktree_icon, Style::default().fg(worktree_color)),
-        Span::raw(" "),
         Span::styled(safety_icon, Style::default().fg(safety_color)),
         Span::raw(" "),
-        Span::raw(display_name.to_string()),
+        Span::styled(display_name.to_string(), Style::default().fg(branch_name_color)),
     ]);
 
     // Add padding and right side if there's agent info
@@ -2293,6 +2315,7 @@ mod tests {
             pr_title: None,
             pr_number: None,
             pr_url: None,
+            is_gone: false,
         }
     }
 
@@ -2362,6 +2385,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                is_gone: false,
             },
             BranchItem {
                 name: "develop".to_string(),
@@ -2386,6 +2410,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                is_gone: false,
             },
         ];
 
@@ -2466,6 +2491,7 @@ mod tests {
             pr_title: None,
             pr_number: None,
             pr_url: None,
+            is_gone: false,
         }];
 
         let mut state = BranchListState::new().with_branches(branches);
@@ -2513,6 +2539,7 @@ mod tests {
             pr_title: None,
             pr_number: None,
             pr_url: None,
+            is_gone: false,
         }];
 
         let mut state = BranchListState::new().with_branches(branches);
@@ -2598,6 +2625,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                is_gone: false,
             },
             BranchItem {
                 name: "remotes/origin/main".to_string(),
@@ -2622,6 +2650,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                is_gone: false,
             },
         ];
 
@@ -2663,6 +2692,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                is_gone: false,
             },
             BranchItem {
                 name: "feature/one".to_string(),
@@ -2687,6 +2717,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                is_gone: false,
             },
         ];
 
@@ -2730,6 +2761,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                is_gone: false,
             },
             BranchItem {
                 name: "feature/two".to_string(),
@@ -2754,6 +2786,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                is_gone: false,
             },
         ];
 
@@ -2802,6 +2835,7 @@ mod tests {
             pr_title: None,
             pr_number: None,
             pr_url: None,
+            is_gone: false,
         };
 
         item.update_safety_status();
@@ -2855,6 +2889,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                is_gone: false,
             },
             BranchItem {
                 name: "feature/two".to_string(),
@@ -2879,6 +2914,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                is_gone: false,
             },
         ];
 
@@ -2931,6 +2967,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                is_gone: false,
             },
             BranchItem {
                 name: "feature/one".to_string(),
@@ -2955,6 +2992,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                is_gone: false,
             },
             BranchItem {
                 name: "feature/two".to_string(),
@@ -2979,6 +3017,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                is_gone: false,
             },
         ];
 

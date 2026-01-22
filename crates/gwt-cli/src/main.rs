@@ -4,6 +4,7 @@ use chrono::Utc;
 use clap::Parser;
 use gwt_core::agent::codex::{codex_default_args, codex_skip_permissions_flag};
 use gwt_core::agent::get_command_version;
+use gwt_core::ai::AgentHistoryStore;
 use gwt_core::config::{save_session_entry, AgentStatus, Session, Settings, ToolSessionEntry};
 use gwt_core::error::GwtError;
 use gwt_core::worktree::WorktreeManager;
@@ -84,20 +85,42 @@ fn run() -> Result<(), GwtError> {
             loop {
                 let selection = tui::run_with_context(entry.take())?;
                 match selection {
-                    Some(launch_plan) => match execute_launch_plan(launch_plan) {
-                        Ok(AgentExitKind::Success) => {
-                            entry = Some(TuiEntryContext::success(
-                                "Session completed successfully.".to_string(),
-                            ));
+                    Some(launch_plan) => {
+                        // FR-088: Record agent usage to history (single mode)
+                        let agent_id = launch_plan.config.agent.id();
+                        let agent_label = format!(
+                            "{}@{}",
+                            launch_plan.config.agent.label(),
+                            launch_plan.selected_version
+                        );
+                        let mut agent_history = AgentHistoryStore::load().unwrap_or_default();
+                        if let Err(e) = agent_history.record(
+                            &repo_root,
+                            &launch_plan.config.branch_name,
+                            agent_id,
+                            &agent_label,
+                        ) {
+                            warn!(category = "main", "Failed to record agent history: {}", e);
                         }
-                        Ok(AgentExitKind::Interrupted) => {
-                            entry =
-                                Some(TuiEntryContext::warning("Session interrupted.".to_string()));
+                        if let Err(e) = agent_history.save() {
+                            warn!(category = "main", "Failed to save agent history: {}", e);
                         }
-                        Err(err) => {
-                            entry = Some(TuiEntryContext::error(err.to_string()));
+                        match execute_launch_plan(launch_plan) {
+                            Ok(AgentExitKind::Success) => {
+                                entry = Some(TuiEntryContext::success(
+                                    "Session completed successfully.".to_string(),
+                                ));
+                            }
+                            Ok(AgentExitKind::Interrupted) => {
+                                entry = Some(TuiEntryContext::warning(
+                                    "Session interrupted.".to_string(),
+                                ));
+                            }
+                            Err(err) => {
+                                entry = Some(TuiEntryContext::error(err.to_string()));
+                            }
                         }
-                    },
+                    }
                     None => break,
                 }
             }

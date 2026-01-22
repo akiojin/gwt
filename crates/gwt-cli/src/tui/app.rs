@@ -12,8 +12,9 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use gwt_core::ai::{
-    summarize_session, AIClient, AIError, AgentType, ClaudeSessionParser, CodexSessionParser,
-    GeminiSessionParser, OpenCodeSessionParser, SessionParseError, SessionParser,
+    summarize_session, AgentHistoryStore, AIClient, AIError, AgentType, ClaudeSessionParser,
+    CodexSessionParser, GeminiSessionParser, OpenCodeSessionParser, SessionParseError,
+    SessionParser,
 };
 use gwt_core::config::get_branch_tool_history;
 use gwt_core::config::{
@@ -356,6 +357,8 @@ pub struct Model {
     last_session_poll: Option<Instant>,
     /// Session poll deferred while generation is in-flight
     session_poll_deferred: bool,
+    /// Agent history store for persisting agent usage per branch (FR-088)
+    agent_history: AgentHistoryStore,
 }
 
 /// Screen types
@@ -494,6 +497,7 @@ impl Model {
             last_spinner_update: None,
             last_session_poll: None,
             session_poll_deferred: false,
+            agent_history: AgentHistoryStore::load().unwrap_or_default(),
         };
 
         model
@@ -614,6 +618,7 @@ impl Model {
 
         let repo_root = self.repo_root.clone();
         let base_branch = settings.default_base_branch.clone();
+        let agent_history = self.agent_history.clone();
         let (tx, rx) = mpsc::channel();
         self.branch_list_rx = Some(rx);
 
@@ -653,6 +658,12 @@ impl Model {
                         let session_timestamp = entry.timestamp / 1000; // Convert ms to seconds
                         let git_timestamp = item.last_commit_timestamp.unwrap_or(0);
                         item.last_commit_timestamp = Some(session_timestamp.max(git_timestamp));
+                    } else if !item.has_worktree {
+                        // FR-088: Fallback to agent history for branches without worktrees
+                        if let Some(history_entry) = agent_history.get(&repo_root, &b.name) {
+                            item.last_tool_usage = Some(history_entry.agent_label.clone());
+                            item.last_tool_id = Some(history_entry.agent_id.clone());
+                        }
                     }
 
                     // Safety check short-circuit: use immediate signals first
@@ -3307,6 +3318,24 @@ impl Model {
                     if !keep_launch_status {
                         self.launch_status = None;
                     }
+                    // FR-088: Record agent usage to history
+                    let agent_id = plan.config.agent.id();
+                    let agent_label = format!(
+                        "{}@{}",
+                        plan.config.agent.label(),
+                        plan.selected_version
+                    );
+                    if let Err(e) = self.agent_history.record(
+                        &self.repo_root,
+                        &plan.config.branch_name,
+                        agent_id,
+                        &agent_label,
+                    ) {
+                        warn!(category = "tui", "Failed to record agent history: {}", e);
+                    }
+                    if let Err(e) = self.agent_history.save() {
+                        warn!(category = "tui", "Failed to save agent history: {}", e);
+                    }
                     self.status_message = Some(format!(
                         "Agent launched in tmux pane for {}",
                         plan.config.branch_name
@@ -4830,6 +4859,7 @@ mod tests {
             pr_title: None,
             pr_number: None,
             pr_url: None,
+            is_gone: false,
         }
     }
 
@@ -4970,6 +5000,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                is_gone: false,
             },
             BranchItem {
                 name: "feature/one".to_string(),
@@ -4994,6 +5025,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                is_gone: false,
             },
         ];
 
@@ -5084,6 +5116,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                is_gone: false,
             },
             BranchItem {
                 name: "feature/two".to_string(),
@@ -5108,6 +5141,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                is_gone: false,
             },
         ];
 

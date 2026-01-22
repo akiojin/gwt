@@ -24,6 +24,8 @@ pub struct Branch {
     pub behind: usize,
     /// Last commit timestamp (Unix timestamp in seconds) - FR-041
     pub commit_timestamp: Option<i64>,
+    /// Whether the upstream branch has been deleted (gone) - FR-085
+    pub is_gone: bool,
 }
 
 impl Branch {
@@ -38,6 +40,7 @@ impl Branch {
             ahead: 0,
             behind: 0,
             commit_timestamp: None,
+            is_gone: false,
         }
     }
 
@@ -62,7 +65,7 @@ impl Branch {
         let output = Command::new("git")
             .args([
                 "for-each-ref",
-                "--format=%(refname:short)%09%(objectname:short)%09%(upstream:short)%09%(HEAD)%09%(committerdate:unix)",
+                "--format=%(refname:short)%09%(objectname:short)%09%(upstream:short)%09%(HEAD)%09%(committerdate:unix)%09%(upstream:track)",
                 "refs/heads/",
             ])
             .current_dir(repo_path)
@@ -94,6 +97,9 @@ impl Branch {
                 };
                 let is_current = parts[3] == "*";
                 let commit_timestamp = parts[4].parse::<i64>().ok();
+                // FR-085: Detect gone status from upstream:track
+                let track_info = parts.get(5).unwrap_or(&"");
+                let is_gone = track_info.contains("[gone]");
 
                 let mut branch = Branch {
                     name,
@@ -104,16 +110,19 @@ impl Branch {
                     ahead: 0,
                     behind: 0,
                     commit_timestamp,
+                    is_gone,
                 };
 
                 if include_divergence {
-                    // Get ahead/behind counts if upstream exists
+                    // Get ahead/behind counts if upstream exists and not gone
                     if let Some(ref up) = upstream {
-                        if let Ok((ahead, behind)) =
-                            Self::get_divergence(repo_path, &branch.name, up)
-                        {
-                            branch.ahead = ahead;
-                            branch.behind = behind;
+                        if !is_gone {
+                            if let Ok((ahead, behind)) =
+                                Self::get_divergence(repo_path, &branch.name, up)
+                            {
+                                branch.ahead = ahead;
+                                branch.behind = behind;
+                            }
                         }
                     }
                 }
@@ -173,6 +182,7 @@ impl Branch {
                     ahead: 0,
                     behind: 0,
                     commit_timestamp,
+                    is_gone: false,
                 });
             }
         }
@@ -260,6 +270,7 @@ impl Branch {
             ahead: 0,
             behind: 0,
             commit_timestamp,
+            is_gone: false, // Current branch cannot be gone
         };
 
         // Get ahead/behind
@@ -794,6 +805,7 @@ mod tests {
             ahead: 2,
             behind: 1,
             commit_timestamp: None,
+            is_gone: false,
         };
         assert_eq!(
             branch.divergence_status(),
@@ -861,5 +873,89 @@ mod tests {
 
         let result = Branch::is_merged_into(temp.path(), "no-such-branch", &base);
         assert!(result.is_err());
+    }
+
+    // T1402: Test gone detection from upstream:track
+    #[test]
+    fn test_gone_branch_detection() {
+        // Create a repo with a remote
+        let temp = create_test_repo();
+        let origin = TempDir::new().unwrap();
+
+        Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(origin.path())
+            .output()
+            .unwrap();
+
+        let branch = Branch::current(temp.path()).unwrap().unwrap().name;
+
+        Command::new("git")
+            .args(["remote", "add", "origin", origin.path().to_str().unwrap()])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+
+        // Create a feature branch and push it
+        Command::new("git")
+            .args(["checkout", "-b", "feature/will-be-gone"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+
+        commit_file(temp.path(), "gone.txt", "gone", "gone commit");
+
+        Command::new("git")
+            .args(["push", "-u", "origin", "feature/will-be-gone"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+
+        // Delete the remote branch directly from the bare repo
+        Command::new("git")
+            .args(["branch", "-D", "feature/will-be-gone"])
+            .current_dir(origin.path())
+            .output()
+            .unwrap();
+
+        // Checkout back to main/master so we can test the feature branch
+        Command::new("git")
+            .args(["checkout", &branch])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+
+        // Fetch with prune to update tracking info
+        Command::new("git")
+            .args(["fetch", "--prune"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+
+        // List branches and check if the gone branch is detected
+        let branches = Branch::list(temp.path()).unwrap();
+        let gone_branch = branches
+            .iter()
+            .find(|b| b.name == "feature/will-be-gone");
+
+        assert!(gone_branch.is_some(), "Feature branch should exist locally");
+        let gone_branch = gone_branch.unwrap();
+        assert!(
+            gone_branch.is_gone,
+            "Branch should be marked as gone after remote deletion"
+        );
+    }
+
+    #[test]
+    fn test_non_gone_branch() {
+        let (temp, branch) = create_repo_with_remote();
+
+        let branches = Branch::list(temp.path()).unwrap();
+        let main_branch = branches.iter().find(|b| b.name == branch).unwrap();
+
+        assert!(
+            !main_branch.is_gone,
+            "Branch with existing remote should not be marked as gone"
+        );
     }
 }
