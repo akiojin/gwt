@@ -576,4 +576,42 @@ mod tests {
         let after = std::fs::read_to_string(&settings_path).unwrap();
         assert_eq!(after, before);
     }
+
+    #[test]
+    fn test_idempotent_registration_with_different_paths() {
+        let temp_dir = TempDir::new().unwrap();
+        let settings_path = temp_dir.path().join(".claude").join("settings.json");
+
+        // Register with first path
+        register_gwt_hooks_with_exe_path(&settings_path, "/path/to/old-gwt").unwrap();
+
+        // Register with different path - should NOT add duplicate
+        register_gwt_hooks_with_exe_path(&settings_path, "/path/to/new-gwt").unwrap();
+
+        // Should only have one gwt hook per event (not duplicated)
+        let content = std::fs::read_to_string(&settings_path).unwrap();
+        let settings: ClaudeSettings = serde_json::from_str(&content).unwrap();
+
+        // Check UserPromptSubmit is not duplicated
+        let user_prompt_hook = settings.hooks.get("UserPromptSubmit").unwrap();
+        let arr = user_prompt_hook.as_array().expect("Expected array format");
+        assert_eq!(
+            arr.len(),
+            1,
+            "Should have exactly one entry, not duplicated"
+        );
+
+        // Check PreToolUse is not duplicated
+        let pre_tool_hook = settings.hooks.get("PreToolUse").unwrap();
+        let arr = pre_tool_hook.as_array().expect("Expected array format");
+        assert_eq!(
+            arr.len(),
+            1,
+            "Should have exactly one entry, not duplicated"
+        );
+
+        // Verify the original path is preserved (not replaced)
+        assert!(content.contains("/path/to/old-gwt"));
+        assert!(!content.contains("/path/to/new-gwt"));
+    }
 }
