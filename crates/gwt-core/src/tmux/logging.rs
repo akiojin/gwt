@@ -9,6 +9,11 @@ use std::process::Command;
 
 use super::error::{TmuxError, TmuxResult};
 
+fn shell_escape(value: &str) -> String {
+    let escaped = value.replace('\'', "'\\''");
+    format!("'{}'", escaped)
+}
+
 /// Log capture configuration
 #[derive(Debug, Clone)]
 pub struct LogConfig {
@@ -67,13 +72,10 @@ pub fn start_logging(pane_id: &str, log_path: &Path) -> TmuxResult<()> {
         })?;
     }
 
+    let log_path_str = log_path.to_string_lossy();
+    let cmd = format!("cat >> {}", shell_escape(&log_path_str));
     let output = Command::new("tmux")
-        .args([
-            "pipe-pane",
-            "-t",
-            pane_id,
-            &format!("cat >> {}", log_path.display()),
-        ])
+        .args(["pipe-pane", "-t", pane_id, &cmd])
         .output()
         .map_err(|e| TmuxError::CommandFailed {
             command: "pipe-pane".to_string(),
@@ -101,9 +103,9 @@ pub fn stop_logging(pane_id: &str) -> TmuxResult<()> {
             reason: e.to_string(),
         })?;
 
-    // Ignore errors - pipe might not be active
+    // Not an error if pipe wasn't active
     if !output.status.success() {
-        // Not an error if pipe wasn't active
+        return Ok(());
     }
 
     Ok(())
@@ -116,6 +118,7 @@ pub fn read_log(log_path: &Path) -> io::Result<String> {
 
 /// Read the last N lines of a log file
 pub fn read_log_tail(log_path: &Path, lines: usize) -> io::Result<Vec<String>> {
+    // Logs are capped by max_size (default 10MB), so full read is acceptable here.
     let content = fs::read_to_string(log_path)?;
     let all_lines: Vec<&str> = content.lines().collect();
     let start = all_lines.len().saturating_sub(lines);

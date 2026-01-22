@@ -2,6 +2,7 @@
 .docker/bash_history
 PLANS.md
 *.local.*
+.gwt-session.toml
 
 # Serena MCP tool cache directory
 .serena/

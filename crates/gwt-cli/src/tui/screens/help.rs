@@ -54,6 +54,7 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("d", "Delete worktree"),
             ("s", "Switch to worktree"),
             ("r", "Refresh data"),
+            ("v", "Toggle pane visibility (tmux)"),
         ],
     ),
     (

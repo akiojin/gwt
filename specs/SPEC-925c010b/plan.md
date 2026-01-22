@@ -5,7 +5,7 @@
 
 ## 概要
 
-playwright-novnc サービスに platform の上書き設定を追加し、arm64 環境でも manifest 不一致のエラーを回避する。既定は linux/amd64 とし、必要に応じて環境変数で上書きできるようにする。合わせて arm64 向けの手順と注意点をドキュメントへ追記する。
+playwright-novnc サービスに platform の上書き設定を追加し、arm64 環境でも manifest 不一致のエラーを回避する。既定は linux/amd64 とし、必要に応じて環境変数で上書きできるようにする。さらに gwt サービスから `host.docker.internal` をホストへ解決できるようにする。合わせて arm64 向けの手順と注意点をドキュメントへ追記する。
 
 ## 技術コンテキスト
 
@@ -90,17 +90,20 @@ Docker Compose 定義: docker-compose.yml
 ### 優先順位付け
 
 1. **P1**: arm64 での起動回避策（platform 指定）
-2. **P2**: amd64 既存フローの維持
-3. **P3**: ドキュメント補足
+2. **P2**: Linux での host.docker.internal 解決
+3. **P3**: amd64 既存フローの維持
+4. **P4**: ドキュメント補足
 
 ### 独立したデリバリー
 
 - platform 指定追加のみで arm64 のエラー回避が可能
+- host.docker.internal 解決の追加は独立して提供可能
 - ドキュメント追記は独立して提供可能
 
 ## テスト戦略
 
 - 手動検証: arm64 で docker compose up -d を実行し、manifest エラーが出ないことを確認
+- 手動検証: Linux で `host.docker.internal` が名前解決できることを確認
 - 回帰確認: amd64 で従来通り起動できることを確認
 
 ## リスクと緩和策

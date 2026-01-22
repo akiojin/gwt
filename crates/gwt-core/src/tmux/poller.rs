@@ -196,15 +196,21 @@ fn poll_loop(
                 // Check for closed panes
                 let closed = registry.update_from_pane_info(&pane_infos);
                 for pane_id in closed {
-                    let _ = tx.send(PollMessage::PaneClosed(pane_id));
+                    if tx.send(PollMessage::PaneClosed(pane_id)).is_err() {
+                        return;
+                    }
                 }
 
                 // Send updated pane list
                 let panes = registry.all_panes();
-                let _ = tx.send(PollMessage::PanesUpdated(panes));
+                if tx.send(PollMessage::PanesUpdated(panes)).is_err() {
+                    return;
+                }
             }
             Err(e) => {
-                let _ = tx.send(PollMessage::Error(e.to_string()));
+                if tx.send(PollMessage::Error(e.to_string())).is_err() {
+                    return;
+                }
             }
         }
     }
@@ -318,6 +324,7 @@ mod tests {
             pane_id: "1".to_string(),
             pane_pid: 12345,
             current_command: "claude".to_string(),
+            current_path: None,
         }];
 
         let closed = registry.update_from_pane_info(&pane_infos);

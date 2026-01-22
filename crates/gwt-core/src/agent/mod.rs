@@ -1,7 +1,7 @@
 //! Coding Agent Integration Module
 //!
 //! Provides a unified interface for interacting with various AI coding agents
-//! (Claude Code, Codex CLI, Gemini CLI).
+//! (Claude Code, Codex, Gemini).
 
 pub mod claude;
 pub mod codex;
@@ -26,8 +26,8 @@ impl AgentType {
     pub fn name(&self) -> &'static str {
         match self {
             AgentType::Claude => "Claude Code",
-            AgentType::Codex => "Codex CLI",
-            AgentType::Gemini => "Gemini CLI",
+            AgentType::Codex => "Codex",
+            AgentType::Gemini => "Gemini",
         }
     }
 
@@ -208,8 +208,8 @@ mod tests {
     #[test]
     fn test_agent_type_name() {
         assert_eq!(AgentType::Claude.name(), "Claude Code");
-        assert_eq!(AgentType::Codex.name(), "Codex CLI");
-        assert_eq!(AgentType::Gemini.name(), "Gemini CLI");
+        assert_eq!(AgentType::Codex.name(), "Codex");
+        assert_eq!(AgentType::Gemini.name(), "Gemini");
     }
 
     #[test]

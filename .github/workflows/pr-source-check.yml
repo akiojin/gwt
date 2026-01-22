@@ -1,0 +1,34 @@
+name: PR Source Branch Check
+
+on:
+  pull_request:
+    branches:
+      - main
+    types: [opened, reopened, synchronize]
+
+jobs:
+  check-source-branch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check PR source branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_HEAD_REF: ${{ github.head_ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          echo "PR head ref: $PR_HEAD_REF"
+
+          # Allow PRs from develop or release/* branches only
+          if [[ "$PR_HEAD_REF" == "develop" ]] || [[ "$PR_HEAD_REF" == release/* ]]; then
+            echo "Valid source branch: $PR_HEAD_REF"
+            exit 0
+          fi
+
+          echo "::error::PRs to main must come from 'develop' or 'release/*' branches."
+          echo "::error::Current source branch: $PR_HEAD_REF"
+          echo ""
+          echo "Please:"
+          echo "1. Close this PR"
+          echo "2. Merge your changes into develop first"
+          echo "3. Use the /release command to create a proper release PR"
+          exit 1

@@ -4,11 +4,15 @@ use chrono::Utc;
 use clap::Parser;
 use gwt_core::agent::codex::{codex_default_args, codex_skip_permissions_flag};
 use gwt_core::agent::get_command_version;
-use gwt_core::config::{save_session_entry, Settings, ToolSessionEntry};
+use gwt_core::ai::AgentHistoryStore;
+use gwt_core::config::{save_session_entry, AgentStatus, Session, Settings, ToolSessionEntry};
 use gwt_core::error::GwtError;
 use gwt_core::worktree::WorktreeManager;
+use gwt_core::TmuxMode;
 use std::fs;
-use std::io::{BufRead, BufReader};
+#[cfg(unix)]
+use std::fs::OpenOptions;
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -19,7 +23,7 @@ use tracing::{debug, error, info, warn};
 mod cli;
 mod tui;
 
-use cli::{Cli, Commands, OutputFormat};
+use cli::{Cli, Commands, HookAction, OutputFormat};
 use tui::{AgentLaunchConfig, CodingAgent, ExecutionMode, TuiEntryContext};
 
 fn main() {
@@ -66,34 +70,64 @@ fn run() -> Result<(), GwtError> {
     match cli.command {
         Some(cmd) => handle_command(cmd, &repo_root, &settings),
         None => {
-            // Interactive TUI mode
-            if let Ok(manager) = WorktreeManager::new(&repo_root) {
-                let _ = manager.auto_cleanup_orphans();
-            }
+            // Interactive TUI mode - single or multi based on tmux detection
+            let tmux_mode = detect_tui_tmux_mode();
+            debug!(
+                category = "tui",
+                mode = %tmux_mode,
+                "Detected tmux mode for TUI"
+            );
+
             let mut entry: Option<TuiEntryContext> = None;
             loop {
                 let selection = tui::run_with_context(entry.take())?;
                 match selection {
-                    Some(launch_config) => match launch_coding_agent(launch_config) {
-                        Ok(AgentExitKind::Success) => {
-                            entry = Some(TuiEntryContext::success(
-                                "Session completed successfully.".to_string(),
-                            ));
+                    Some(launch_plan) => {
+                        // FR-088: Record agent usage to history (single mode)
+                        let agent_id = launch_plan.config.agent.id();
+                        let agent_label = format!(
+                            "{}@{}",
+                            launch_plan.config.agent.label(),
+                            launch_plan.selected_version
+                        );
+                        let mut agent_history = AgentHistoryStore::load().unwrap_or_default();
+                        if let Err(e) = agent_history.record(
+                            &repo_root,
+                            &launch_plan.config.branch_name,
+                            agent_id,
+                            &agent_label,
+                        ) {
+                            warn!(category = "main", "Failed to record agent history: {}", e);
                         }
-                        Ok(AgentExitKind::Interrupted) => {
-                            entry =
-                                Some(TuiEntryContext::warning("Session interrupted.".to_string()));
+                        if let Err(e) = agent_history.save() {
+                            warn!(category = "main", "Failed to save agent history: {}", e);
                         }
-                        Err(err) => {
-                            entry = Some(TuiEntryContext::error(err.to_string()));
+                        match execute_launch_plan(launch_plan) {
+                            Ok(AgentExitKind::Success) => {
+                                entry = Some(TuiEntryContext::success(
+                                    "Session completed successfully.".to_string(),
+                                ));
+                            }
+                            Ok(AgentExitKind::Interrupted) => {
+                                entry = Some(TuiEntryContext::warning(
+                                    "Session interrupted.".to_string(),
+                                ));
+                            }
+                            Err(err) => {
+                                entry = Some(TuiEntryContext::error(err.to_string()));
+                            }
                         }
-                    },
+                    }
                     None => break,
                 }
             }
             Ok(())
         }
     }
+}
+
+fn detect_tui_tmux_mode() -> TmuxMode {
+    TmuxMode::detect()
 }
 
 fn handle_command(cmd: Commands, repo_root: &PathBuf, settings: &Settings) -> Result<(), GwtError> {
@@ -113,6 +147,7 @@ fn handle_command(cmd: Commands, repo_root: &PathBuf, settings: &Settings) -> Re
         Commands::Lock { target, reason } => cmd_lock(repo_root, &target, reason.as_deref()),
         Commands::Unlock { target } => cmd_unlock(repo_root, &target),
         Commands::Repair { target } => cmd_repair(repo_root, target.as_deref()),
+        Commands::Hook { action } => cmd_hook(action),
     }
 }
 
@@ -415,30 +450,197 @@ fn cmd_unlock(repo_root: &PathBuf, target: &str) -> Result<(), GwtError> {
     Ok(())
 }
 
-fn cmd_repair(repo_root: &PathBuf, target: Option<&str>) -> Result<(), GwtError> {
+fn cmd_repair(_repo_root: &PathBuf, _target: Option<&str>) -> Result<(), GwtError> {
+    Err(GwtError::Internal(
+        "Worktree repair is disabled.".to_string(),
+    ))
+}
+
+/// Handle Claude Code hook subcommands (SPEC-861d8cdf FR-101/T-101/T-102)
+fn cmd_hook(action: HookAction) -> Result<(), GwtError> {
+    use gwt_core::config::{
+        get_claude_settings_path, is_gwt_hooks_registered, register_gwt_hooks, unregister_gwt_hooks,
+    };
+
+    match action {
+        HookAction::Event { name } => handle_hook_event(&name),
+        HookAction::EventAlias(args) => {
+            let name = args
+                .first()
+                .ok_or_else(|| GwtError::Internal("Missing hook event name.".to_string()))?;
+            if args.len() > 1 {
+                return Err(GwtError::Internal(format!(
+                    "Unexpected hook arguments: {}",
+                    args.join(" ")
+                )));
+            }
+            handle_hook_event(name)
+        }
+        HookAction::Setup => {
+            let settings_path =
+                get_claude_settings_path().ok_or_else(|| GwtError::ConfigNotFound {
+                    path: PathBuf::from("~/.claude/settings.json"),
+                })?;
+
+            if is_gwt_hooks_registered(&settings_path) {
+                println!("gwt hooks are already registered in Claude Code settings.");
+                return Ok(());
+            }
+
+            register_gwt_hooks(&settings_path)?;
+            println!("Successfully registered gwt hooks in Claude Code settings.");
+            println!("Path: {}", settings_path.display());
+            Ok(())
+        }
+        HookAction::Uninstall => {
+            let settings_path =
+                get_claude_settings_path().ok_or_else(|| GwtError::ConfigNotFound {
+                    path: PathBuf::from("~/.claude/settings.json"),
+                })?;
+
+            if !is_gwt_hooks_registered(&settings_path) {
+                println!("gwt hooks are not registered in Claude Code settings.");
+                return Ok(());
+            }
+
+            unregister_gwt_hooks(&settings_path)?;
+            println!("Successfully removed gwt hooks from Claude Code settings.");
+            Ok(())
+        }
+        HookAction::Status => {
+            let settings_path =
+                get_claude_settings_path().ok_or_else(|| GwtError::ConfigNotFound {
+                    path: PathBuf::from("~/.claude/settings.json"),
+                })?;
+
+            if is_gwt_hooks_registered(&settings_path) {
+                println!("gwt hooks: registered");
+                println!("Path: {}", settings_path.display());
+            } else {
+                println!("gwt hooks: not registered");
+                println!("Run 'gwt hook setup' to enable agent status tracking.");
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Process a hook event from Claude Code (SPEC-861d8cdf T-101)
+/// Called by Claude Code hooks via `gwt hook <name>` (or `gwt hook event <name>`)
+fn handle_hook_event(event: &str) -> Result<(), GwtError> {
+    use std::io::{self, Read};
+
     info!(
         category = "cli",
-        command = "repair",
-        target = target.unwrap_or("all"),
-        "Executing repair command"
+        command = "hook",
+        event = event,
+        "Executing hook event command"
     );
 
-    let manager = WorktreeManager::new(repo_root)?;
+    // Read JSON payload from stdin
+    let mut input = String::new();
+    io::stdin().read_to_string(&mut input)?;
 
-    if let Some(target) = target {
-        let wt = manager
-            .get_by_branch(target)?
-            .ok_or_else(|| GwtError::WorktreeNotFound {
-                path: PathBuf::from(target),
-            })?;
-        manager.repair_path(&wt.path)?;
-        println!("Repaired worktree: {}", wt.path.display());
+    // Parse the JSON payload
+    let payload: serde_json::Value = serde_json::from_str(&input).unwrap_or_default();
+
+    // Extract cwd from payload to determine which worktree to update
+    let cwd = payload
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+    debug!(
+        category = "hook",
+        event = event,
+        cwd = %cwd.display(),
+        "Processing hook event"
+    );
+
+    // Determine the new status based on the event
+    let new_status = hook_event_to_status(event, &payload);
+
+    // Load or create session for the worktree
+    let session_path = Session::session_path(&cwd);
+    let mut session = if session_path.exists() {
+        Session::load(&session_path).unwrap_or_else(|_| {
+            // Create new session if load fails
+            let branch = detect_branch_name(&cwd);
+            Session::new(&cwd, &branch)
+        })
     } else {
-        manager.repair()?;
-        println!("Repaired all worktrees.");
-    }
+        let branch = detect_branch_name(&cwd);
+        Session::new(&cwd, &branch)
+    };
+
+    // Update the session status
+    session.update_status(new_status);
+    session.save(&session_path)?;
+
+    debug!(
+        category = "hook",
+        event = event,
+        status = ?new_status,
+        session_path = %session_path.display(),
+        "Session status updated"
+    );
 
     Ok(())
+}
+
+/// Map hook event name to AgentStatus (SPEC-861d8cdf T-101)
+///
+/// Event mappings:
+/// - UserPromptSubmit, PreToolUse, PostToolUse, SessionStart -> Running
+/// - Stop, SubagentStop, SessionEnd -> Stopped
+/// - Notification (with permission_prompt type) -> WaitingInput
+/// - Unknown events -> Running (activity indicator)
+fn hook_event_to_status(event: &str, payload: &serde_json::Value) -> AgentStatus {
+    match event.to_lowercase().as_str() {
+        "userpromptsubmit" | "pretooluse" | "posttooluse" => AgentStatus::Running,
+        "stop" | "subagentstop" => AgentStatus::Stopped,
+        "notification" => {
+            // Check if this is a permission prompt notification
+            let notification_type = payload
+                .get("notification")
+                .and_then(|n| n.get("type"))
+                .and_then(|t| t.as_str())
+                .unwrap_or("");
+
+            if notification_type == "permission_prompt" {
+                AgentStatus::WaitingInput
+            } else {
+                // Other notifications indicate activity
+                AgentStatus::Running
+            }
+        }
+        "sessionstart" => AgentStatus::Running,
+        "sessionend" => AgentStatus::Stopped,
+        _ => {
+            // Unknown events are treated as activity
+            AgentStatus::Running
+        }
+    }
+}
+
+/// Detect branch name from worktree path
+fn detect_branch_name(path: &Path) -> String {
+    // Try to get branch from git
+    let output = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(path)
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        _ => {
+            // Fallback: extract from path
+            path.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        }
+    }
 }
 
 fn check_git_available() -> bool {
@@ -488,112 +690,8 @@ fn skip_install_warning_message(pm: &str) -> String {
     )
 }
 
-fn install_dependencies(worktree_path: &Path, auto_install: bool) -> Result<(), GwtError> {
-    // Check if package.json exists
-    if !worktree_path.join("package.json").exists() {
-        return Ok(());
-    }
-
-    if !auto_install {
-        if let Some(pm) = should_warn_skip_install(worktree_path) {
-            println!("{}", skip_install_warning_message(pm));
-            println!();
-        }
-        return Ok(());
-    }
-
-    // Check if node_modules already exists (skip if already installed)
-    if worktree_path.join("node_modules").exists() {
-        return Ok(());
-    }
-
-    // Detect package manager
-    let pm = match detect_package_manager(worktree_path) {
-        Some(pm) => pm,
-        None => return Ok(()),
-    };
-
-    println!("Installing dependencies with {}...", pm);
-    println!();
-
-    // FR-040a: Run package manager with inherited stdout/stderr (no capture)
-    // FR-040b: No spinner - just let output flow directly
-    let status = Command::new(pm)
-        .arg("install")
-        .current_dir(worktree_path)
-        .status()
-        .map_err(|e| GwtError::AgentLaunchFailed {
-            name: pm.to_string(),
-            reason: format!("Failed to run '{}': {}", pm, e),
-        })?;
-
-    if !status.success() {
-        eprintln!();
-        eprintln!("Warning: {} install exited with status: {}", pm, status);
-        // Don't fail - let the user decide whether to continue
-    } else {
-        println!();
-        println!("Dependencies installed successfully.");
-    }
-
-    println!();
-    Ok(())
-}
-
-/// Strip ANSI escape codes from a string for clean log output
-fn strip_ansi_codes(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            // Skip escape sequence
-            if let Some(&'[') = chars.peek() {
-                chars.next(); // consume '['
-                              // Skip until we hit a letter (end of escape sequence)
-                while let Some(&next) = chars.peek() {
-                    chars.next();
-                    if next.is_ascii_alphabetic() {
-                        break;
-                    }
-                }
-            }
-        } else {
-            result.push(c);
-        }
-    }
-    result
-}
-
-/// Spawn a thread to handle agent output (stdout or stderr)
-///
-/// This function reads lines from the given pipe, logs them with ANSI codes stripped,
-/// and writes the original (with ANSI codes) to the specified output.
-fn spawn_output_handler<R: std::io::Read + Send + 'static>(
-    pipe: R,
-    agent_category: String,
-    stream: &'static str,
-    output: fn(&str),
-) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
-        let reader = BufReader::new(pipe);
-        for line in reader.lines().map_while(Result::ok) {
-            // Write to TTY with ANSI codes preserved
-            output(&line);
-
-            // Log with ANSI codes stripped
-            let plain_line = strip_ansi_codes(&line);
-            if !plain_line.trim().is_empty() {
-                info!(
-                    category = agent_category.as_str(),
-                    stream = stream,
-                    "{}",
-                    plain_line
-                );
-            }
-        }
-    })
-}
+const FAST_EXIT_THRESHOLD_SECS: u64 = 2;
+const FAST_EXIT_THRESHOLD_MS: u128 = (FAST_EXIT_THRESHOLD_SECS as u128) * 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AgentExitKind {
@@ -663,15 +761,163 @@ fn build_launching_message(config: &AgentLaunchConfig) -> String {
     format!("Launching {}...", config.agent.label())
 }
 
-/// Launch a coding agent after TUI exits
+fn is_fast_exit(duration_ms: u128) -> bool {
+    duration_ms < FAST_EXIT_THRESHOLD_MS
+}
+
+fn format_command_line(executable: &str, args: &[String]) -> String {
+    let mut parts = Vec::with_capacity(args.len() + 1);
+    parts.push(executable.to_string());
+    parts.extend(args.iter().cloned());
+    parts.join(" ")
+}
+
+fn emit_fast_exit_notice(duration_ms: u128, command_display: &str) {
+    eprintln!("Agent exited immediately ({} ms).", duration_ms);
+    eprintln!("This usually means the agent could not start.");
+    eprintln!("Check API keys, PATH, and tool version, then try running:");
+    eprintln!("  {}", command_display);
+    if io::stdin().is_terminal() {
+        eprintln!();
+        eprintln!("Press Enter to return to gwt.");
+        let _ = io::stderr().flush();
+        let mut input = String::new();
+        let _ = io::stdin().read_line(&mut input);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LaunchProgress {
+    ResolvingWorktree,
+    BuildingCommand,
+    CheckingDependencies,
+    InstallingDependencies { manager: String },
+}
+
+impl LaunchProgress {
+    pub(crate) fn message(&self) -> String {
+        match self {
+            LaunchProgress::ResolvingWorktree => "Preparing worktree...".to_string(),
+            LaunchProgress::BuildingCommand => "Preparing launch command...".to_string(),
+            LaunchProgress::CheckingDependencies => "Checking dependencies...".to_string(),
+            LaunchProgress::InstallingDependencies { manager } => {
+                format!("Installing dependencies with {}...", manager)
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum InstallPlan {
+    None,
+    Skip { message: String },
+    Install { manager: String },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LaunchPlan {
+    pub config: AgentLaunchConfig,
+    pub executable: String,
+    pub command_args: Vec<String>,
+    pub log_lines: Vec<String>,
+    pub selected_version: String,
+    pub install_plan: InstallPlan,
+    pub env: Vec<(String, String)>,
+}
+
+fn should_set_claude_sandbox_env(target_os: &str) -> bool {
+    target_os != "windows"
+}
+
+pub(crate) fn build_launch_env(config: &AgentLaunchConfig) -> Vec<(String, String)> {
+    let mut env_vars = config.env.clone();
+    if config.skip_permissions && config.agent == CodingAgent::ClaudeCode {
+        let has_sandbox = env_vars.iter().any(|(key, _)| key == "IS_SANDBOX");
+        if !has_sandbox && should_set_claude_sandbox_env(std::env::consts::OS) {
+            env_vars.push(("IS_SANDBOX".to_string(), "1".to_string()));
+        }
+    }
+    env_vars
+}
+
+fn build_install_plan(worktree_path: &Path, auto_install: bool) -> InstallPlan {
+    if !worktree_path.join("package.json").exists() {
+        return InstallPlan::None;
+    }
+
+    if !auto_install {
+        if let Some(pm) = should_warn_skip_install(worktree_path) {
+            return InstallPlan::Skip {
+                message: skip_install_warning_message(pm),
+            };
+        }
+        return InstallPlan::None;
+    }
+
+    if worktree_path.join("node_modules").exists() {
+        return InstallPlan::None;
+    }
+
+    let pm = match detect_package_manager(worktree_path) {
+        Some(pm) => pm,
+        None => return InstallPlan::None,
+    };
+
+    InstallPlan::Install {
+        manager: pm.to_string(),
+    }
+}
+
+fn run_install_plan(worktree_path: &Path, plan: &InstallPlan) -> Result<(), GwtError> {
+    match plan {
+        InstallPlan::None => Ok(()),
+        InstallPlan::Skip { message } => {
+            println!("{}", message);
+            println!();
+            Ok(())
+        }
+        InstallPlan::Install { manager } => {
+            println!("Installing dependencies with {}...", manager);
+            println!();
+            let status = Command::new(manager)
+                .arg("install")
+                .current_dir(worktree_path)
+                .status()
+                .map_err(|e| GwtError::AgentLaunchFailed {
+                    name: manager.to_string(),
+                    reason: format!("Failed to run '{}': {}", manager, e),
+                })?;
+            if !status.success() {
+                eprintln!();
+                eprintln!(
+                    "Warning: {} install exited with status: {}",
+                    manager, status
+                );
+                // Don't fail - let the user decide whether to continue
+            } else {
+                println!();
+                println!("Dependencies installed successfully.");
+            }
+
+            println!();
+            Ok(())
+        }
+    }
+}
+
+/// Prepare a launch plan for a coding agent
 ///
 /// Version selection behavior (FR-066, FR-067, FR-068):
 /// - "installed": Use local command if available, fallback to bunx @package@latest
 /// - "latest": Use bunx @package@latest
 /// - specific version: Use bunx @package@X.Y.Z
-fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtError> {
-    println!("{}", build_launching_message(&config));
-    println!();
+pub(crate) fn prepare_launch_plan(
+    config: AgentLaunchConfig,
+    mut progress: impl FnMut(LaunchProgress),
+) -> Result<LaunchPlan, GwtError> {
+    progress(LaunchProgress::BuildingCommand);
+
+    let env = build_launch_env(&config);
 
     let cmd_name = config.agent.command_name();
     let npm_package = config.agent.npm_package();
@@ -683,7 +929,6 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
             Ok(path) => (path.to_string_lossy().to_string(), vec![], true),
             Err(_) => {
                 // FR-019: Fallback to bunx @package@latest if local not found
-                eprintln!("Note: Local '{}' not found, using bunx fallback", cmd_name);
                 let (exe, args) = get_bunx_command(npm_package, "latest");
                 (exe, args, false)
             }
@@ -736,18 +981,58 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
     };
 
     let log_lines = build_launch_log_lines(&config, &agent_args, &version_label, &execution_method);
-    for line in log_lines {
+
+    progress(LaunchProgress::CheckingDependencies);
+    let install_plan = build_install_plan(&config.worktree_path, config.auto_install_deps);
+    if let InstallPlan::Install { manager } = &install_plan {
+        progress(LaunchProgress::InstallingDependencies {
+            manager: manager.clone(),
+        });
+    }
+
+    Ok(LaunchPlan {
+        config,
+        executable,
+        command_args,
+        log_lines,
+        selected_version,
+        install_plan,
+        env,
+    })
+}
+
+fn execute_launch_plan(plan: LaunchPlan) -> Result<AgentExitKind, GwtError> {
+    let LaunchPlan {
+        config,
+        executable,
+        command_args,
+        log_lines,
+        selected_version,
+        install_plan,
+        env,
+        ..
+    } = plan;
+    println!("{}", build_launching_message(&config));
+    println!();
+    if config.version == "installed" && selected_version == "latest" {
+        eprintln!(
+            "Note: Local '{}' not found, using bunx fallback",
+            config.agent.command_name()
+        );
+    }
+
+    for line in &log_lines {
         println!("{}", line);
     }
     println!();
 
-    if config.auto_install_deps {
+    if config.auto_install_deps && matches!(install_plan, InstallPlan::Install { .. }) {
         println!("Preparing to install dependencies...");
         println!();
     }
 
     // FR-040a/FR-040b: Install dependencies only when enabled
-    install_dependencies(&config.worktree_path, config.auto_install_deps)?;
+    run_install_plan(&config.worktree_path, &install_plan)?;
     let started_at = Instant::now();
 
     // FR-069, FR-042: Save session entry before launching agent
@@ -769,46 +1054,33 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
     }
 
     // Spawn the agent process (FR-043: allows periodic timestamp updates)
-    let mut command = Command::new(&executable);
+    let (exec_name, exec_args) = apply_pty_wrapper(&executable, &command_args);
+    let command_display = format_command_line(&exec_name, &exec_args);
+    let mut command = Command::new(&exec_name);
     command
-        .args(&command_args)
+        .args(&exec_args)
         .current_dir(&config.worktree_path)
         .stdin(Stdio::inherit()) // Keep stdin for interactive input
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    apply_tty_stdio(&mut command);
     for key in &config.env_remove {
         command.env_remove(key);
     }
-    for (key, value) in &config.env {
+    for (key, value) in &env {
         command.env(key, value);
-    }
-    if config.skip_permissions && config.agent == CodingAgent::ClaudeCode {
-        command.env("IS_SANDBOX", "1");
     }
 
     let mut child = command.spawn().map_err(|e| GwtError::AgentLaunchFailed {
-        name: cmd_name.to_string(),
+        name: config.agent.command_name().to_string(),
         reason: format!("Failed to execute '{}': {}", executable, e),
     })?;
-
-    // Spawn output handlers to capture and log agent output
-    let agent_category = format!("agent:{}", config.agent.id());
-    let stdout_handle = child.stdout.take().map(|stdout| {
-        spawn_output_handler(stdout, agent_category.clone(), "stdout", |line| {
-            println!("{}", line);
-        })
-    });
-    let stderr_handle = child.stderr.take().map(|stderr| {
-        spawn_output_handler(stderr, agent_category.clone(), "stderr", |line| {
-            eprintln!("{}", line);
-        })
-    });
 
     debug!(
         category = "agent",
         agent_id = config.agent.id(),
         worktree_path = %config.worktree_path.display(),
-        "Agent output capture started"
+        "Agent process started"
     );
 
     // FR-043: Start background thread to update timestamp every 30 seconds
@@ -827,25 +1099,17 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
 
     // Wait for the agent process to finish
     let status = child.wait().map_err(|e| GwtError::AgentLaunchFailed {
-        name: cmd_name.to_string(),
+        name: config.agent.command_name().to_string(),
         reason: format!("Failed to wait for '{}': {}", executable, e),
     })?;
 
     // Signal the updater thread to stop and wait for it
     updater.stop();
 
-    // Wait for output handler threads to finish
-    if let Some(handle) = stdout_handle {
-        let _ = handle.join();
-    }
-    if let Some(handle) = stderr_handle {
-        let _ = handle.join();
-    }
-
     debug!(
         category = "agent",
         agent_id = config.agent.id(),
-        "Agent output capture finished"
+        "Agent process finished"
     );
 
     if let Some(session_id) = detect_agent_session_id(&config) {
@@ -868,12 +1132,26 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
     }
 
     let duration_ms = started_at.elapsed().as_millis();
+    let fast_exit = is_fast_exit(duration_ms);
     let exit_info = classify_exit_status(status);
     match exit_info {
         ExitClassification::Success => {
+            if fast_exit {
+                warn!(
+                    agent_id = config.agent.id(),
+                    version = selected_version.as_str(),
+                    duration_ms = duration_ms as u64,
+                    "Agent exited immediately"
+                );
+                emit_fast_exit_notice(duration_ms, &command_display);
+                return Err(GwtError::AgentLaunchFailed {
+                    name: config.agent.command_name().to_string(),
+                    reason: format!("Exited immediately after {} ms.", duration_ms),
+                });
+            }
             info!(
                 agent_id = config.agent.id(),
-                version = selected_version,
+                version = selected_version.as_str(),
                 duration_ms = duration_ms as u64,
                 "Agent exited successfully"
             );
@@ -882,7 +1160,7 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
         ExitClassification::Interrupted => {
             warn!(
                 agent_id = config.agent.id(),
-                version = selected_version,
+                version = selected_version.as_str(),
                 duration_ms = duration_ms as u64,
                 "Agent session interrupted"
             );
@@ -891,12 +1169,15 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
         ExitClassification::Failure { code, signal } => {
             error!(
                 agent_id = config.agent.id(),
-                version = selected_version,
+                version = selected_version.as_str(),
                 exit_code = code,
                 signal = signal,
                 duration_ms = duration_ms as u64,
                 "Agent exited with failure"
             );
+            if fast_exit {
+                emit_fast_exit_notice(duration_ms, &command_display);
+            }
             let reason = if let Some(signal) = signal {
                 format!("Terminated by signal {}", signal)
             } else if let Some(code) = code {
@@ -905,7 +1186,7 @@ fn launch_coding_agent(config: AgentLaunchConfig) -> Result<AgentExitKind, GwtEr
                 "Exited with unknown status".to_string()
             };
             Err(GwtError::AgentLaunchFailed {
-                name: cmd_name.to_string(),
+                name: config.agent.command_name().to_string(),
                 reason,
             })
         }
@@ -1382,13 +1663,61 @@ fn detect_opencode_session_id_at(home: &Path) -> Option<String> {
     })
 }
 
-fn detect_agent_session_id(config: &AgentLaunchConfig) -> Option<String> {
+pub(crate) fn detect_session_id_for_tool(tool_id: &str, worktree_path: &Path) -> Option<String> {
     let home = home_dir()?;
-    match config.agent {
-        CodingAgent::CodexCli => detect_codex_session_id_at(&home, &config.worktree_path),
-        CodingAgent::ClaudeCode => detect_claude_session_id_at(&home, &config.worktree_path),
-        CodingAgent::GeminiCli => detect_gemini_session_id_at(&home),
-        CodingAgent::OpenCode => detect_opencode_session_id_at(&home),
+    let lower = tool_id.to_lowercase();
+    if lower.contains("codex") {
+        return detect_codex_session_id_at(&home, worktree_path);
+    }
+    if lower.contains("claude") {
+        return detect_claude_session_id_at(&home, worktree_path);
+    }
+    if lower.contains("gemini") {
+        return detect_gemini_session_id_at(&home);
+    }
+    if lower.contains("opencode") || lower.contains("open-code") {
+        return detect_opencode_session_id_at(&home);
+    }
+    None
+}
+
+fn detect_agent_session_id(config: &AgentLaunchConfig) -> Option<String> {
+    detect_session_id_for_tool(config.agent.id(), &config.worktree_path)
+}
+
+fn apply_tty_stdio(command: &mut Command) {
+    #[cfg(unix)]
+    {
+        let stdin = OpenOptions::new().read(true).open("/dev/tty");
+        let stdout = OpenOptions::new().write(true).open("/dev/tty");
+        let stderr = OpenOptions::new().write(true).open("/dev/tty");
+        if let Ok(file) = stdin {
+            command.stdin(Stdio::from(file));
+        }
+        if let Ok(file) = stdout {
+            command.stdout(Stdio::from(file));
+        }
+        if let Ok(file) = stderr {
+            command.stderr(Stdio::from(file));
+        }
+    }
+}
+
+fn apply_pty_wrapper(executable: &str, args: &[String]) -> (String, Vec<String>) {
+    #[cfg(target_os = "macos")]
+    {
+        let mut wrapped_args = Vec::new();
+        wrapped_args.push("-q".to_string());
+        wrapped_args.push("--".to_string());
+        wrapped_args.push("/dev/null".to_string());
+        wrapped_args.push(executable.to_string());
+        wrapped_args.extend(args.iter().cloned());
+        return ("script".to_string(), wrapped_args);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        (executable.to_string(), args.to_vec())
     }
 }
 
@@ -1602,8 +1931,11 @@ fn describe_ntstatus(code: u32) -> Option<&'static str> {
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::Mutex;
     use std::thread::sleep;
     use tempfile::TempDir;
+
+    static TMUX_ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     fn sample_config(agent: CodingAgent) -> AgentLaunchConfig {
         AgentLaunchConfig {
@@ -1627,12 +1959,67 @@ mod tests {
             worktree_path: path,
             branch_name: "feature/test".to_string(),
             agent_id: "codex-cli".to_string(),
-            agent_label: "Codex CLI".to_string(),
+            agent_label: "Codex".to_string(),
             version: "latest".to_string(),
             model: None,
             mode: ExecutionMode::Continue.label().to_string(),
             reasoning_level: None,
             skip_permissions: false,
+        }
+    }
+
+    #[test]
+    fn test_should_set_claude_sandbox_env_windows() {
+        assert!(!should_set_claude_sandbox_env("windows"));
+    }
+
+    #[test]
+    fn test_should_set_claude_sandbox_env_non_windows() {
+        assert!(should_set_claude_sandbox_env("linux"));
+        assert!(should_set_claude_sandbox_env("macos"));
+    }
+
+    #[test]
+    fn test_build_launch_env_claude_skip_permissions_gates_is_sandbox() {
+        let config = sample_config(CodingAgent::ClaudeCode);
+        let env = build_launch_env(&config);
+        let has_sandbox = env
+            .iter()
+            .any(|(key, value)| key == "IS_SANDBOX" && value == "1");
+        if should_set_claude_sandbox_env(std::env::consts::OS) {
+            assert!(has_sandbox);
+        } else {
+            assert!(!has_sandbox);
+        }
+    }
+
+    #[test]
+    fn test_detect_tui_tmux_mode_single_outside_tmux() {
+        let _guard = TMUX_ENV_MUTEX.lock().unwrap();
+        let original = std::env::var("TMUX").ok();
+
+        std::env::remove_var("TMUX");
+        let mode = detect_tui_tmux_mode();
+        assert_eq!(mode, TmuxMode::Single);
+
+        if let Some(val) = original {
+            std::env::set_var("TMUX", val);
+        }
+    }
+
+    #[test]
+    fn test_detect_tui_tmux_mode_multi_inside_tmux() {
+        let _guard = TMUX_ENV_MUTEX.lock().unwrap();
+        let original = std::env::var("TMUX").ok();
+
+        std::env::set_var("TMUX", "/tmp/tmux-1000/default,12345,0");
+        let mode = detect_tui_tmux_mode();
+        assert_eq!(mode, TmuxMode::Multi);
+
+        if let Some(val) = original {
+            std::env::set_var("TMUX", val);
+        } else {
+            std::env::remove_var("TMUX");
         }
     }
 
@@ -1669,9 +2056,50 @@ mod tests {
     }
 
     #[test]
+    fn test_cmd_repair_disabled() {
+        let err = cmd_repair(&PathBuf::from("/tmp"), None).unwrap_err();
+        assert!(matches!(err, GwtError::Internal(_)));
+        assert!(err.to_string().contains("Worktree repair is disabled."));
+    }
+
+    #[test]
+    fn test_is_fast_exit_threshold() {
+        assert!(is_fast_exit(0));
+        assert!(is_fast_exit(FAST_EXIT_THRESHOLD_MS - 1));
+        assert!(!is_fast_exit(FAST_EXIT_THRESHOLD_MS));
+    }
+
+    #[test]
+    fn test_apply_pty_wrapper_macos_option_terminator() {
+        let args = vec![
+            "resume".to_string(),
+            "--resume".to_string(),
+            "-c".to_string(),
+            "value".to_string(),
+        ];
+        let (exe, wrapped) = apply_pty_wrapper("codex", &args);
+
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(exe, "script");
+            assert_eq!(wrapped.get(0).map(String::as_str), Some("-q"));
+            assert_eq!(wrapped.get(1).map(String::as_str), Some("--"));
+            assert_eq!(wrapped.get(2).map(String::as_str), Some("/dev/null"));
+            assert_eq!(wrapped.get(3).map(String::as_str), Some("codex"));
+            assert_eq!(wrapped[4..], args[..]);
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert_eq!(exe, "codex");
+            assert_eq!(wrapped, args);
+        }
+    }
+
+    #[test]
     fn test_build_launching_message() {
         let config = sample_config(CodingAgent::CodexCli);
-        assert_eq!(build_launching_message(&config), "Launching Codex CLI...");
+        assert_eq!(build_launching_message(&config), "Launching Codex...");
     }
 
     #[test]
@@ -1762,6 +2190,35 @@ mod tests {
         assert_eq!(
             message,
             "Auto install disabled. Skipping dependency install. Run \"npm install\" if needed or set GWT_AGENT_AUTO_INSTALL_DEPS=true."
+        );
+    }
+
+    #[test]
+    fn test_prepare_launch_plan_progress_order() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("package.json"), "{}").unwrap();
+        let mut config = sample_config(CodingAgent::CodexCli);
+        config.worktree_path = temp.path().to_path_buf();
+        config.auto_install_deps = true;
+        let mut steps = Vec::new();
+
+        let plan = prepare_launch_plan(config, |step| steps.push(step)).unwrap();
+
+        assert_eq!(
+            steps,
+            vec![
+                LaunchProgress::BuildingCommand,
+                LaunchProgress::CheckingDependencies,
+                LaunchProgress::InstallingDependencies {
+                    manager: "npm".to_string()
+                },
+            ]
+        );
+        assert_eq!(
+            plan.install_plan,
+            InstallPlan::Install {
+                manager: "npm".to_string()
+            }
         );
     }
 
@@ -1909,5 +2366,102 @@ mod tests {
             Some("STATUS_ACCESS_VIOLATION")
         );
         assert_eq!(describe_ntstatus(0x12345678), None);
+    }
+
+    // SPEC-861d8cdf T-101 tests
+
+    #[test]
+    fn test_hook_user_prompt_submit_sets_running() {
+        let payload = serde_json::json!({});
+        let status = hook_event_to_status("UserPromptSubmit", &payload);
+        assert_eq!(status, AgentStatus::Running);
+    }
+
+    #[test]
+    fn test_hook_pre_tool_use_sets_running() {
+        let payload = serde_json::json!({});
+        let status = hook_event_to_status("PreToolUse", &payload);
+        assert_eq!(status, AgentStatus::Running);
+    }
+
+    #[test]
+    fn test_hook_post_tool_use_sets_running() {
+        let payload = serde_json::json!({});
+        let status = hook_event_to_status("PostToolUse", &payload);
+        assert_eq!(status, AgentStatus::Running);
+    }
+
+    #[test]
+    fn test_hook_stop_sets_stopped() {
+        let payload = serde_json::json!({});
+        let status = hook_event_to_status("Stop", &payload);
+        assert_eq!(status, AgentStatus::Stopped);
+    }
+
+    #[test]
+    fn test_hook_subagent_stop_sets_stopped() {
+        let payload = serde_json::json!({});
+        let status = hook_event_to_status("SubagentStop", &payload);
+        assert_eq!(status, AgentStatus::Stopped);
+    }
+
+    #[test]
+    fn test_hook_notification_permission_prompt_sets_waiting_input() {
+        let payload = serde_json::json!({
+            "notification": {
+                "type": "permission_prompt"
+            }
+        });
+        let status = hook_event_to_status("Notification", &payload);
+        assert_eq!(status, AgentStatus::WaitingInput);
+    }
+
+    #[test]
+    fn test_hook_notification_other_type_sets_running() {
+        let payload = serde_json::json!({
+            "notification": {
+                "type": "info"
+            }
+        });
+        let status = hook_event_to_status("Notification", &payload);
+        assert_eq!(status, AgentStatus::Running);
+    }
+
+    #[test]
+    fn test_hook_session_start_sets_running() {
+        let payload = serde_json::json!({});
+        let status = hook_event_to_status("SessionStart", &payload);
+        assert_eq!(status, AgentStatus::Running);
+    }
+
+    #[test]
+    fn test_hook_session_end_sets_stopped() {
+        let payload = serde_json::json!({});
+        let status = hook_event_to_status("SessionEnd", &payload);
+        assert_eq!(status, AgentStatus::Stopped);
+    }
+
+    #[test]
+    fn test_hook_unknown_event_sets_running() {
+        let payload = serde_json::json!({});
+        let status = hook_event_to_status("UnknownEvent", &payload);
+        assert_eq!(status, AgentStatus::Running);
+    }
+
+    #[test]
+    fn test_hook_event_case_insensitive() {
+        let payload = serde_json::json!({});
+        // Test lowercase
+        assert_eq!(
+            hook_event_to_status("userpromptsubmit", &payload),
+            AgentStatus::Running
+        );
+        // Test uppercase
+        assert_eq!(hook_event_to_status("STOP", &payload), AgentStatus::Stopped);
+        // Test mixed case
+        assert_eq!(
+            hook_event_to_status("SessionStart", &payload),
+            AgentStatus::Running
+        );
     }
 }
