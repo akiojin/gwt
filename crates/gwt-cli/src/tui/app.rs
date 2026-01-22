@@ -5239,11 +5239,7 @@ mod tests {
         }
     }
 
-    fn sample_branch_with_usage(
-        name: &str,
-        usage: &str,
-        tool_id: Option<&str>,
-    ) -> BranchItem {
+    fn sample_branch_with_usage(name: &str, usage: &str, tool_id: Option<&str>) -> BranchItem {
         let mut branch = sample_branch_with_session(name);
         branch.last_tool_usage = Some(usage.to_string());
         branch.last_tool_id = tool_id.map(|id| id.to_string());
