@@ -12,7 +12,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use gwt_core::ai::{
-    summarize_session, AgentHistoryStore, AIClient, AIError, AgentType, ClaudeSessionParser,
+    summarize_session, AIClient, AIError, AgentHistoryStore, AgentType, ClaudeSessionParser,
     CodexSessionParser, GeminiSessionParser, OpenCodeSessionParser, SessionParseError,
     SessionParser,
 };
@@ -3320,11 +3320,8 @@ impl Model {
                     }
                     // FR-088: Record agent usage to history
                     let agent_id = plan.config.agent.id();
-                    let agent_label = format!(
-                        "{}@{}",
-                        plan.config.agent.label(),
-                        plan.selected_version
-                    );
+                    let agent_label =
+                        format!("{}@{}", plan.config.agent.label(), plan.selected_version);
                     if let Err(e) = self.agent_history.record(
                         &self.repo_root,
                         &plan.config.branch_name,

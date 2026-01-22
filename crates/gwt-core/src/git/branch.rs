@@ -934,9 +934,7 @@ mod tests {
 
         // List branches and check if the gone branch is detected
         let branches = Branch::list(temp.path()).unwrap();
-        let gone_branch = branches
-            .iter()
-            .find(|b| b.name == "feature/will-be-gone");
+        let gone_branch = branches.iter().find(|b| b.name == "feature/will-be-gone");
 
         assert!(gone_branch.is_some(), "Feature branch should exist locally");
         let gone_branch = gone_branch.unwrap();

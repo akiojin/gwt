@@ -163,12 +163,7 @@ impl AgentHistoryStore {
         let repo_key = repo_path.to_string_lossy().to_string();
         self.repos
             .get(&repo_key)
-            .map(|repo| {
-                repo.branches
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v))
-                    .collect()
-            })
+            .map(|repo| repo.branches.iter().map(|(k, v)| (k.clone(), v)).collect())
             .unwrap_or_default()
     }
 }
@@ -265,12 +260,7 @@ mod tests {
     fn test_record_new_entry() {
         let mut store = AgentHistoryStore::new();
         store
-            .record(
-                Path::new("/repo"),
-                "main",
-                "codex-cli",
-                "Codex@latest",
-            )
+            .record(Path::new("/repo"), "main", "codex-cli", "Codex@latest")
             .unwrap();
 
         let entry = store.get(Path::new("/repo"), "main").unwrap();
@@ -380,7 +370,12 @@ mod tests {
     fn test_repo_history_independence() {
         let mut store = AgentHistoryStore::new();
         store
-            .record(Path::new("/repo-a"), "feature", "claude-code", "Claude@latest")
+            .record(
+                Path::new("/repo-a"),
+                "feature",
+                "claude-code",
+                "Claude@latest",
+            )
             .unwrap();
 
         let entries_b = store.get_all_for_repo(Path::new("/repo-b"));
@@ -407,7 +402,9 @@ mod tests {
 
         // Load and verify
         let loaded = AgentHistoryStore::load_from(&history_path).unwrap();
-        let entry = loaded.get(Path::new("/my/repo"), "feature/awesome").unwrap();
+        let entry = loaded
+            .get(Path::new("/my/repo"), "feature/awesome")
+            .unwrap();
         assert_eq!(entry.agent_id, "opencode");
         assert_eq!(entry.agent_label, "OpenCode@latest");
     }

@@ -270,7 +270,7 @@ impl BranchItem {
             is_selected: false,
             pr_title: None,
             pr_number: None,
-            pr_url: None, // FR-016: Will be populated from PrCache
+            pr_url: None,            // FR-016: Will be populated from PrCache
             is_gone: branch.is_gone, // FR-085: Populate gone status from Branch
         };
         item.update_safety_status();
@@ -394,9 +394,9 @@ impl BranchItem {
             Color::Red
         } else {
             match self.worktree_status {
-                WorktreeStatus::Active => Color::White,       // FR-082: Active worktree
-                WorktreeStatus::None => Color::Gray,          // FR-083: No worktree
-                WorktreeStatus::Inaccessible => Color::Red,   // FR-084: Inaccessible path
+                WorktreeStatus::Active => Color::White, // FR-082: Active worktree
+                WorktreeStatus::None => Color::Gray,    // FR-083: No worktree
+                WorktreeStatus::Inaccessible => Color::Red, // FR-084: Inaccessible path
             }
         }
     }
@@ -1761,7 +1761,10 @@ fn render_branch_row(
     spans.extend([
         Span::styled(safety_icon, Style::default().fg(safety_color)),
         Span::raw(" "),
-        Span::styled(display_name.to_string(), Style::default().fg(branch_name_color)),
+        Span::styled(
+            display_name.to_string(),
+            Style::default().fg(branch_name_color),
+        ),
     ]);
 
     // Add padding and right side if there's agent info
