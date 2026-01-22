@@ -1919,10 +1919,8 @@ impl Model {
             return;
         }
 
-        if let Some(url) = self.branch_list.link_at_point(mouse.column, mouse.row) {
-            self.open_url(&url);
-            return;
-        }
+        // Check if clicking on a URL
+        let clicked_url = self.branch_list.link_at_point(mouse.column, mouse.row);
 
         let Some(index) = self
             .branch_list
@@ -1939,11 +1937,17 @@ impl Model {
 
         if is_double_click {
             self.last_mouse_click = None;
+            // Double click: open URL or wizard
+            if let Some(url) = clicked_url {
+                self.open_url(&url);
+            } else {
+                self.handle_branch_enter();
+            }
+        } else {
+            // Single click: select branch and record for potential double click
             if self.branch_list.select_index(index) {
                 self.refresh_branch_summary();
             }
-            self.handle_branch_enter();
-        } else {
             self.last_mouse_click = Some(MouseClick { index, at: now });
         }
     }
@@ -5183,7 +5187,7 @@ mod tests {
     }
 
     #[test]
-    fn test_mouse_double_click_selects_branch_and_opens_wizard() {
+    fn test_mouse_single_click_selects_branch() {
         let mut model = Model::new_with_context(None);
         model.screen = Screen::BranchList;
         let branches = [
@@ -5206,11 +5210,82 @@ mod tests {
         };
         model.handle_branch_list_mouse(mouse);
 
-        assert_eq!(model.branch_list.selected, 0);
+        // Single click should select the branch (index 1, since row 2 maps to second item)
+        assert_eq!(model.branch_list.selected, 1);
+        // Wizard should NOT open on single click
         assert!(!model.wizard.visible);
-        model.handle_branch_list_mouse(mouse);
+    }
 
+    #[test]
+    fn test_mouse_double_click_opens_wizard() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+        let branches = [
+            Branch::new("feature/one", "deadbeef"),
+            Branch::new("feature/two", "deadbeef"),
+        ];
+        let items = branches
+            .iter()
+            .map(|branch| BranchItem::from_branch(branch, &[]))
+            .collect();
+        model.branch_list = BranchListState::new().with_branches(items);
+        model.branch_list.update_list_area(Rect::new(0, 0, 20, 5));
+
+        assert_eq!(model.branch_list.selected, 0);
+        let mouse = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 2,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        // First click: select branch
+        model.handle_branch_list_mouse(mouse);
+        assert_eq!(model.branch_list.selected, 1);
+        assert!(!model.wizard.visible);
+
+        // Second click (double click): open wizard
+        model.handle_branch_list_mouse(mouse);
         assert_eq!(model.branch_list.selected, 1);
         assert!(model.wizard.visible);
+    }
+
+    #[test]
+    fn test_mouse_click_different_branch_resets_double_click() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+        let branches = [
+            Branch::new("feature/one", "deadbeef"),
+            Branch::new("feature/two", "deadbeef"),
+            Branch::new("feature/three", "deadbeef"),
+        ];
+        let items = branches
+            .iter()
+            .map(|branch| BranchItem::from_branch(branch, &[]))
+            .collect();
+        model.branch_list = BranchListState::new().with_branches(items);
+        model.branch_list.update_list_area(Rect::new(0, 0, 20, 5));
+
+        // Click on first branch (row 1)
+        let mouse1 = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 2,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        model.handle_branch_list_mouse(mouse1);
+        assert_eq!(model.branch_list.selected, 0);
+
+        // Click on different branch (row 2) - should NOT trigger double click
+        let mouse2 = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 2,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        };
+        model.handle_branch_list_mouse(mouse2);
+        assert_eq!(model.branch_list.selected, 1);
+        // Wizard should NOT open because it's a different branch
+        assert!(!model.wizard.visible);
     }
 }
