@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [6.9.1] - 2026-01-22
+
+### Testing
+
+- Hook setup重複登録防止のテスト追加 (#726)
+
 ## [6.9.0] - 2026-01-21
 
 ### Bug Fixes
