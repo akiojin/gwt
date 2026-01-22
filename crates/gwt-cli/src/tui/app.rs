@@ -722,8 +722,7 @@ impl Model {
             let total_count = branch_items.len();
             let active_count = branch_items.iter().filter(|b| b.has_worktree).count();
             let base_branches: Vec<String> = branches.iter().map(|b| b.name.clone()).collect();
-            let branch_names: Vec<String> =
-                branch_items.iter().map(|b| b.name.clone()).collect();
+            let branch_names: Vec<String> = branch_items.iter().map(|b| b.name.clone()).collect();
 
             let _ = tx.send(BranchListUpdate {
                 branches: branch_items,
