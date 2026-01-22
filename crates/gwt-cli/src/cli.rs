@@ -125,7 +125,7 @@ pub enum Commands {
         target: String,
     },
 
-    /// Repair worktree metadata
+    /// Repair worktree metadata (disabled)
     Repair {
         /// Specific worktree to repair (repairs all if not specified)
         target: Option<String>,

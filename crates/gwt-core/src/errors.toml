@@ -24,7 +24,7 @@ E2005 = "Protected branch cannot be deleted"
 E2006 = "Worktree path invalid"
 E2007 = "Orphaned worktree detected"
 E2008 = "Worktree locked by another process"
-E2009 = "Path exists but is not a stale worktree"
+E2009 = "Path exists - automatic worktree recovery is disabled"
 
 [config]
 E3001 = "Configuration file not found"
