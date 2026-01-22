@@ -200,9 +200,9 @@ US3 (ログ出力) ─────┬─► US1 (ポップアップ表示) ─�
 
 ### コミット・プッシュ
 
-- [ ] **T806** [統合] 変更をConventional Commits形式でコミット（feat: add error popup and log output system）
-- [ ] **T807** [統合] `bunx commitlint --from HEAD~1 --to HEAD` でコミットメッセージを検証
-- [ ] **T808** [統合] 変更をプッシュ
+- [x] **T806** [統合] 変更をConventional Commits形式でコミット（feat(tui): エラーポップアップとログ出力システムを追加）
+- [x] **T807** [統合] `bunx commitlint --from HEAD~1 --to HEAD` でコミットメッセージを検証
+- [x] **T808** [統合] 変更をプッシュ
 
 ---
 
