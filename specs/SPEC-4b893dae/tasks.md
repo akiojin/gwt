@@ -11,6 +11,7 @@
 - [x] **T8932** [Impl] `crates/gwt-core/src/ai/client.rs` のセッション要約タイムアウトを10分に延長
 - [x] **T8933** `cargo test -p gwt-core` を実行し、失敗がないことを確認する
 
+
 ## 追加作業: 文字単位の折り返し (2026-01-22)
 
 - [x] **T8920** [P] [共通] `specs/SPEC-4b893dae/spec.md` / `specs/SPEC-4b893dae/plan.md` に文字単位折り返し要件を追記
