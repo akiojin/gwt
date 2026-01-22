@@ -31,7 +31,7 @@ use gwt_core::tmux::{
 use gwt_core::worktree::WorktreeManager;
 use gwt_core::TmuxMode;
 use ratatui::{prelude::*, widgets::*};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
@@ -634,6 +634,22 @@ impl Model {
                 .and_then(|manager| manager.list_basic().ok())
                 .unwrap_or_default();
             let branches = Branch::list_basic(&repo_root).unwrap_or_default();
+            let remote_branches = Branch::list_remote(&repo_root).unwrap_or_default();
+            let local_branch_names: HashSet<String> =
+                branches.iter().map(|b| b.name.clone()).collect();
+            let mut remote_only_branches = Vec::new();
+            for mut branch in remote_branches {
+                let short_name = branch
+                    .name
+                    .split_once('/')
+                    .map(|(_, name)| name)
+                    .unwrap_or(branch.name.as_str());
+                if local_branch_names.contains(short_name) {
+                    continue;
+                }
+                branch.name = format!("remotes/{}", branch.name);
+                remote_only_branches.push(branch);
+            }
             let worktree_targets: Vec<WorktreeStatusTarget> = worktrees
                 .iter()
                 .filter_map(|wt| {
@@ -689,6 +705,11 @@ impl Model {
                     item
                 })
                 .collect();
+            branch_items.extend(
+                remote_only_branches
+                    .iter()
+                    .map(|b| BranchItem::from_branch_minimal(b, &worktrees)),
+            );
 
             // Sort branches by timestamp for those with sessions
             branch_items.iter_mut().for_each(|item| {
@@ -700,12 +721,8 @@ impl Model {
 
             let total_count = branch_items.len();
             let active_count = branch_items.iter().filter(|b| b.has_worktree).count();
-            let base_branches: Vec<String> = branches
-                .iter()
-                .filter(|b| !b.name.starts_with("remotes/"))
-                .map(|b| b.name.clone())
-                .collect();
-            let branch_names: Vec<String> = branches.iter().map(|b| b.name.clone()).collect();
+            let base_branches: Vec<String> = branches.iter().map(|b| b.name.clone()).collect();
+            let branch_names: Vec<String> = branch_items.iter().map(|b| b.name.clone()).collect();
 
             let _ = tx.send(BranchListUpdate {
                 branches: branch_items,
@@ -735,9 +752,20 @@ impl Model {
             let mut cache = PrCache::new();
             cache.populate(&repo_root);
 
+            let normalize_branch_name = |name: &str| {
+                if let Some(stripped) = name.strip_prefix("remotes/") {
+                    if let Some((_, branch)) = stripped.split_once('/') {
+                        return branch.to_string();
+                    }
+                    return stripped.to_string();
+                }
+                name.to_string()
+            };
+
             let mut info = HashMap::new();
             for name in branch_names {
-                if let Some(pr) = cache.get(&name) {
+                let lookup = normalize_branch_name(&name);
+                if let Some(pr) = cache.get(&lookup) {
                     info.insert(
                         name,
                         PrInfo {
