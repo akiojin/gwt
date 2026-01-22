@@ -54,11 +54,11 @@ use super::screens::split_layout::{calculate_split_layout, SplitLayoutState};
 use super::screens::{
     collect_os_env, render_agent_mode, render_ai_wizard, render_branch_list, render_confirm,
     render_environment, render_error_with_queue, render_help, render_logs, render_profiles,
-    render_settings, render_wizard, render_worktree_create, AgentMessage, AgentModeState,
-    AgentRole, AIWizardState, BranchItem,
-    BranchListState, BranchType, CodingAgent, ConfirmState, EnvironmentState, ErrorQueue,
-    ErrorState, ExecutionMode, HelpState, LogsState, ProfilesState, QuickStartEntry,
-    ReasoningLevel, SettingsState, WizardConfirmResult, WizardState, WorktreeCreateState,
+    render_settings, render_wizard, render_worktree_create, AIWizardState, AgentMessage,
+    AgentModeState, AgentRole, BranchItem, BranchListState, BranchType, CodingAgent, ConfirmState,
+    EnvironmentState, ErrorQueue, ErrorState, ExecutionMode, HelpState, LogsState, ProfilesState,
+    QuickStartEntry, ReasoningLevel, SettingsState, WizardConfirmResult, WizardState,
+    WorktreeCreateState,
 };
 // log_gwt_error is available for use when GwtError types are available
 

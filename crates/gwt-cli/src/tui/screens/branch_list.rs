@@ -1346,21 +1346,9 @@ pub fn render_branch_list(
 
     if has_agents {
         render_status_bar(state, frame, chunks[1]);
-        render_summary_panels(
-            state,
-            frame,
-            chunks[2],
-            chunks[3],
-            status_message,
-        );
+        render_summary_panels(state, frame, chunks[2], chunks[3], status_message);
     } else {
-        render_summary_panels(
-            state,
-            frame,
-            chunks[1],
-            chunks[2],
-            status_message,
-        );
+        render_summary_panels(state, frame, chunks[1], chunks[2], status_message);
     }
 }
 
@@ -3113,5 +3101,4 @@ mod tests {
         assert_eq!(state.branches[visible[0]].name, "feature/one");
         assert_eq!(state.branches[visible[1]].name, "feature/two");
     }
-
 }

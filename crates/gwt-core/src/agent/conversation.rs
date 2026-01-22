@@ -34,7 +34,9 @@ pub struct Conversation {
 
 impl Conversation {
     pub fn new() -> Self {
-        Self { messages: Vec::new() }
+        Self {
+            messages: Vec::new(),
+        }
     }
 
     pub fn push(&mut self, role: MessageRole, content: impl Into<String>) {
