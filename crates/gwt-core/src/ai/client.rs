@@ -9,7 +9,7 @@ use std::time::Duration;
 use thiserror::Error;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 
 const MAX_OUTPUT_TOKENS: u32 = 400;
 const TEMPERATURE: f32 = 0.3;
@@ -588,6 +588,15 @@ mod tests {
         let error = AIError::NetworkError("Connection refused".to_string());
         let msg = format_error_for_display(&error);
         assert!(msg.contains("refused"));
+    }
+
+    // ========================================
+    // Timeout Constants Tests
+    // ========================================
+
+    #[test]
+    fn test_request_timeout_constant() {
+        assert_eq!(REQUEST_TIMEOUT, Duration::from_secs(600));
     }
 
     // ========================================
