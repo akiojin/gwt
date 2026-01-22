@@ -45,7 +45,7 @@ tmux split-window -h -c /repo bash
 ```
 
 ```text
-tmux split-window -v -c /repo "bunx @akiojin/gwt@latest"
+tmux split-window -v -c /repo "bunx -p @akiojin/gwt@latest gwt"
 ```
 
 ### Focus a pane

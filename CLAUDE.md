@@ -59,7 +59,7 @@
 - Lint: `cargo clippy --all-targets --all-features -- -D warnings`
 - フォーマット: `cargo fmt`
 - 実行: `./target/release/gwt` または `cargo run`
-- npm配布: `bunx @akiojin/gwt` または `npm install -g @akiojin/gwt`
+- npm配布: `bunx -p @akiojin/gwt gwt` または `npm install -g @akiojin/gwt`
 
 ## コミュニケーションガイドライン
 

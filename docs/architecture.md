@@ -296,7 +296,7 @@ git.deleteBranch() → Delete Branch
 ### Distribution
 
 - npm registry経由で配布
-- `bunx @akiojin/gwt`で実行可能
+- `bunx -p @akiojin/gwt gwt`で実行可能
 
 ### Requirements
 

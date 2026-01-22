@@ -58,8 +58,10 @@ bun add -g @akiojin/gwt
 
 # 一回限りの実行
 npx @akiojin/gwt
-bunx @akiojin/gwt
+bunx -p @akiojin/gwt gwt
 ```
+
+補足: `bunx` はパッケージ名と実行バイナリ名が異なる（スコープ付き）場合に `-p` が必要です。
 
 ### Cargo 経由
 
@@ -102,7 +104,7 @@ cargo build --release
 gwt
 
 # または一回限りの実行にbunxを使用
-bunx @akiojin/gwt
+bunx -p @akiojin/gwt gwt
 ```
 
 CLIオプション:

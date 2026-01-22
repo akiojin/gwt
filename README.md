@@ -58,8 +58,10 @@ bun add -g @akiojin/gwt
 
 # One-time execution
 npx @akiojin/gwt
-bunx @akiojin/gwt
+bunx -p @akiojin/gwt gwt
 ```
+
+Note: `bunx` requires `-p` when the binary name differs from the package name (scoped packages).
 
 ### Via Cargo
 
@@ -102,7 +104,7 @@ Run in any Git repository:
 gwt
 
 # Or use bunx for one-time execution
-bunx @akiojin/gwt
+bunx -p @akiojin/gwt gwt
 ```
 
 CLI options:
