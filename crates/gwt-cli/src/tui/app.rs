@@ -4259,9 +4259,7 @@ impl Model {
         } else {
             // Normal key handling
             match (key.code, key.modifiers) {
-                (KeyCode::Char('c'), KeyModifiers::CONTROL) if is_key_press => {
-                    Some(Message::CtrlC)
-                }
+                (KeyCode::Char('c'), KeyModifiers::CONTROL) if is_key_press => Some(Message::CtrlC),
                 (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT)
                     if is_key_press
                         && matches!(self.screen, Screen::BranchList)
@@ -4325,9 +4323,8 @@ impl Model {
                         if self.environment.edit_mode {
                             Some(Message::Char('n'))
                         } else if self.environment.is_ai_only() {
-                            self.status_message = Some(
-                                "AI settings only. Use Enter to edit.".to_string(),
-                            );
+                            self.status_message =
+                                Some("AI settings only. Use Enter to edit.".to_string());
                             self.status_message_time = Some(Instant::now());
                             None
                         } else {
@@ -4354,9 +4351,8 @@ impl Model {
                         if self.environment.edit_mode {
                             Some(Message::Char('r'))
                         } else if self.environment.is_ai_only() {
-                            self.status_message = Some(
-                                "AI settings only. Use Enter to edit.".to_string(),
-                            );
+                            self.status_message =
+                                Some("AI settings only. Use Enter to edit.".to_string());
                             self.status_message_time = Some(Instant::now());
                             None
                         } else {
@@ -4433,9 +4429,8 @@ impl Model {
                         if self.environment.edit_mode {
                             Some(Message::Char('d'))
                         } else if self.environment.is_ai_only() {
-                            self.status_message = Some(
-                                "AI settings only. Use Enter to edit.".to_string(),
-                            );
+                            self.status_message =
+                                Some("AI settings only. Use Enter to edit.".to_string());
                             self.status_message_time = Some(Instant::now());
                             None
                         } else {
