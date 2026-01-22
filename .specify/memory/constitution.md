@@ -34,12 +34,13 @@
 
 ## 技術スタック
 
-- **言語**: TypeScript 5.8+
-- **ランタイム**: Bun >= 1.0
-- **CLI UI**: OpenTUI + SolidJS
-- **Web UI**: React 19 + Vite + Fastify + Tailwind CSS
-- **テスト**: Vitest + Playwright
-- **ログ**: Pino（構造化ログ）
+- **言語**: Rust 2021 Edition (stable)
+- **CLI UI**: ratatui 0.29 + crossterm 0.28
+- **ログ**: tracing + tracing-appender（JSON Lines形式）
+- **HTTP**: reqwest (blocking)
+- **シリアライズ**: serde, serde_json
+- **日時**: chrono
+- **テスト**: cargo test
 
 ## ワークフロー規約
 

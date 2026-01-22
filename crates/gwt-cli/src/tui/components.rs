@@ -3,6 +3,7 @@
 #![allow(dead_code)] // UI components for future use
 
 use ratatui::{prelude::*, widgets::*};
+use unicode_width::UnicodeWidthChar;
 
 /// Header component with statistics
 pub struct Header<'a> {
@@ -354,6 +355,120 @@ struct SectionLines {
     link_urls: Vec<Option<String>>,
 }
 
+fn wrap_section_lines(section: SectionLines, width: usize) -> SectionLines {
+    let width = width.max(1);
+    let SectionLines { lines, link_urls } = section;
+    let mut wrapped_lines = Vec::new();
+    let mut wrapped_links = Vec::new();
+
+    for (index, line) in lines.into_iter().enumerate() {
+        let url = link_urls.get(index).cloned().unwrap_or(None);
+        let wrapped = wrap_line_chars(&line, width);
+        for wrapped_line in wrapped {
+            wrapped_links.push(url.clone());
+            wrapped_lines.push(wrapped_line);
+        }
+    }
+
+    SectionLines {
+        lines: wrapped_lines,
+        link_urls: wrapped_links,
+    }
+}
+
+fn wrap_line_chars(line: &Line<'static>, width: usize) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    if line.spans.is_empty() {
+        return vec![Line {
+            spans: Vec::new(),
+            style: line.style,
+            alignment: line.alignment,
+        }];
+    }
+
+    let mut wrapped = Vec::new();
+    let mut current_spans: Vec<Span<'static>> = Vec::new();
+    let mut current_width = 0usize;
+    let mut buffer = String::new();
+    let mut buffer_style = Style::default();
+    let mut buffer_active = false;
+
+    let flush_buffer = |spans: &mut Vec<Span<'static>>,
+                        buffer: &mut String,
+                        buffer_style: &Style,
+                        buffer_active: &mut bool| {
+        if *buffer_active && !buffer.is_empty() {
+            spans.push(Span::styled(std::mem::take(buffer), *buffer_style));
+        } else {
+            buffer.clear();
+        }
+        *buffer_active = false;
+    };
+
+    let push_line =
+        |wrapped: &mut Vec<Line<'static>>, spans: &mut Vec<Span<'static>>, line: &Line<'static>| {
+            wrapped.push(Line {
+                spans: std::mem::take(spans),
+                style: line.style,
+                alignment: line.alignment,
+            });
+        };
+
+    for span in &line.spans {
+        let span_style = span.style;
+        for ch in span.content.chars() {
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if current_width > 0 && current_width + ch_width > width {
+                flush_buffer(
+                    &mut current_spans,
+                    &mut buffer,
+                    &buffer_style,
+                    &mut buffer_active,
+                );
+                push_line(&mut wrapped, &mut current_spans, line);
+                current_width = 0;
+            }
+
+            if !buffer_active || buffer_style != span_style {
+                flush_buffer(
+                    &mut current_spans,
+                    &mut buffer,
+                    &buffer_style,
+                    &mut buffer_active,
+                );
+                buffer_style = span_style;
+                buffer_active = true;
+            }
+
+            buffer.push(ch);
+            current_width += ch_width;
+
+            if current_width >= width {
+                flush_buffer(
+                    &mut current_spans,
+                    &mut buffer,
+                    &buffer_style,
+                    &mut buffer_active,
+                );
+                push_line(&mut wrapped, &mut current_spans, line);
+                current_width = 0;
+            }
+        }
+    }
+
+    flush_buffer(
+        &mut current_spans,
+        &mut buffer,
+        &buffer_style,
+        &mut buffer_active,
+    );
+    if !current_spans.is_empty() || wrapped.is_empty() {
+        push_line(&mut wrapped, &mut current_spans, line);
+    }
+
+    wrapped
+}
+
 fn panel_switch_hint() -> Line<'static> {
     Line::from(Span::styled(
         " Tab: Switch ",
@@ -428,8 +543,12 @@ impl<'a> SummaryPanel<'a> {
         let inner_area = block.inner(area);
         frame.render_widget(block, area);
 
-        // Calculate section layout
-        let sections = self.build_sections_with_links();
+        // Calculate section layout (wrap lines to available width)
+        let sections = self
+            .build_sections_with_links()
+            .into_iter()
+            .map(|section| wrap_section_lines(section, inner_area.width as usize))
+            .collect::<Vec<_>>();
         let constraints: Vec<Constraint> = sections
             .iter()
             .map(|section| Constraint::Length(section.lines.len() as u16))
@@ -738,6 +857,23 @@ mod tests {
     use gwt_core::git::BranchSummary;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+
+    fn line_text(line: &Line<'_>) -> String {
+        let mut text = String::new();
+        for span in &line.spans {
+            text.push_str(span.content.as_ref());
+        }
+        text
+    }
+
+    #[test]
+    fn test_wrap_line_chars_splits_by_width() {
+        let line = Line::from("abcdef");
+        let wrapped = wrap_line_chars(&line, 3);
+        assert_eq!(wrapped.len(), 2);
+        assert_eq!(line_text(&wrapped[0]), "abc");
+        assert_eq!(line_text(&wrapped[1]), "def");
+    }
 
     #[test]
     fn test_centered_rect() {

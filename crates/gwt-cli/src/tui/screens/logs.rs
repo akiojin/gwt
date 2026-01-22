@@ -112,6 +112,10 @@ pub struct LogsState {
     pub search: String,
     pub is_searching: bool,
     pub show_detail: bool,
+
+    // Mouse click support
+    /// List inner area for click detection
+    pub list_inner_area: Option<Rect>,
 }
 
 impl LogsState {
@@ -244,10 +248,43 @@ impl LogsState {
     pub fn is_detail_shown(&self) -> bool {
         self.show_detail
     }
+
+    // Mouse click support methods
+
+    /// Get selection index from screen coordinates (using filtered entries)
+    pub fn selection_index_from_point(&self, x: u16, y: u16) -> Option<usize> {
+        let area = self.list_inner_area?;
+        if x < area.x || x >= area.x.saturating_add(area.width) {
+            return None;
+        }
+        if y < area.y || y >= area.y.saturating_add(area.height) {
+            return None;
+        }
+        let relative_y = y.saturating_sub(area.y) as usize;
+        let index = self.offset + relative_y;
+        let filtered = self.filtered_entries();
+        if index < filtered.len() {
+            Some(index)
+        } else {
+            None
+        }
+    }
+
+    /// Select item by index
+    pub fn select_index(&mut self, index: usize) -> bool {
+        let filtered_len = self.filtered_entries().len();
+        if index < filtered_len {
+            self.selected = index;
+            self.ensure_visible();
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// Render logs screen
-pub fn render_logs(state: &LogsState, frame: &mut Frame, area: Rect) {
+pub fn render_logs(state: &mut LogsState, frame: &mut Frame, area: Rect) {
     // If detail view is shown, render it as an overlay
     if state.show_detail {
         if let Some(entry) = state.selected_entry() {
@@ -293,11 +330,12 @@ fn render_header(state: &LogsState, frame: &mut Frame, area: Rect) {
     frame.render_widget(header, area);
 }
 
-fn render_entries(state: &LogsState, frame: &mut Frame, area: Rect) {
-    let filtered = state.filtered_entries();
+fn render_entries(state: &mut LogsState, frame: &mut Frame, area: Rect) {
+    let is_empty = state.entries.is_empty();
+    let filtered_empty = state.filtered_entries().is_empty();
 
-    if filtered.is_empty() {
-        let text = if state.entries.is_empty() {
+    if filtered_empty {
+        let text = if is_empty {
             "No log entries"
         } else {
             "No entries match filter"
@@ -306,9 +344,16 @@ fn render_entries(state: &LogsState, frame: &mut Frame, area: Rect) {
             .alignment(Alignment::Center)
             .block(Block::default().borders(Borders::ALL));
         frame.render_widget(paragraph, area);
+        state.list_inner_area = None;
         return;
     }
 
+    let list_block = Block::default().borders(Borders::ALL);
+
+    // Record inner area for mouse click detection
+    state.list_inner_area = Some(list_block.inner(area));
+
+    let filtered = state.filtered_entries();
     let visible_height = area.height.saturating_sub(2) as usize;
     let items: Vec<ListItem> = filtered
         .iter()
@@ -319,7 +364,7 @@ fn render_entries(state: &LogsState, frame: &mut Frame, area: Rect) {
         .collect();
 
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL))
+        .block(list_block)
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
 
     frame.render_widget(list, area);
