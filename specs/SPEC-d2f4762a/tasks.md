@@ -572,3 +572,54 @@
 ### 実装
 
 - [x] **T1232** [US0] `crates/gwt-cli/src/tui/screens/branch_list.rs` のスピナー参照を正規化し、範囲外アクセスを防止
+
+## 追加作業: ブランチ名の色分けによるWorktree状態表現 (2026-01-22)
+
+### 仕様更新
+
+- [ ] **T1401** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` にブランチ名色分けとWorktree列削除の要件・方針を追記（完了済み）
+
+### テスト（TDD）
+
+- [ ] **T1402** [Test] [US12] `crates/gwt-core/src/git/branch.rs` に`upstream:track`から`[gone]`を検出するテストを追加
+- [ ] **T1403** [Test] [US12] `crates/gwt-cli/src/tui/screens/branch_list.rs` にWorktree列が削除されていることを確認するテストを追加
+- [ ] **T1404** [Test] [US12] `crates/gwt-cli/src/tui/screens/branch_list.rs` にブランチ名の色分け（White/Gray/Red）のテストを追加
+- [ ] **T1405** [Test] [US12] `crates/gwt-cli/src/tui/screens/branch_list.rs` に選択中ブランチでシアン背景・黒テキストになるテストを追加
+- [ ] **T1406** [Test] [US12] `crates/gwt-cli/src/tui/screens/branch_list.rs` にgoneブランチが赤色で表示されるテストを追加
+
+### 実装
+
+- [ ] **T1411** [Impl] [US12] `crates/gwt-core/src/git/branch.rs` に`upstream:track`フォーマットを追加し、`gone`フィールドをBranch構造体に追加
+- [ ] **T1412** [Impl] [US12] `crates/gwt-cli/src/tui/screens/branch_list.rs` からWorktree列（`w`/`x`/`.`）の表示を削除
+- [ ] **T1413** [Impl] [US12] `crates/gwt-cli/src/tui/screens/branch_list.rs` にブランチ名の色分けロジックを実装
+- [ ] **T1414** [Impl] [US12] `crates/gwt-cli/src/tui/screens/branch_list.rs` で選択中ブランチの色優先ロジックを調整
+
+### 検証
+
+- [ ] **T1415** [検証] `cargo test -p gwt-core -p gwt-cli` と `cargo clippy` を実行し、失敗がないことを確認
+
+## 追加作業: エージェント履歴表示の拡張 (2026-01-22)
+
+### テスト（TDD）
+
+- [ ] **T1501** [Test] [US13] `crates/gwt-cli/src/tui/app.rs` に起動時にAgentHistoryStoreが読み込まれるテストを追加
+- [ ] **T1502** [Test] [US13] `crates/gwt-cli/src/tui/screens/branch_list.rs` にWorktreeなしブランチで履歴からエージェント情報が表示されるテストを追加
+- [ ] **T1503** [Test] [US13] `crates/gwt-cli/src/tui/screens/branch_list.rs` に実行中エージェントが履歴より優先されるテストを追加
+- [ ] **T1504** [Test] [US13] `crates/gwt-cli/src/tui/screens/branch_list.rs` に履歴なしブランチでエージェント情報が空白になるテストを追加
+
+### 実装
+
+- [ ] **T1511** [Impl] [US13] `crates/gwt-cli/src/tui/app.rs` に起動時のAgentHistoryStore読み込みを追加
+- [ ] **T1512** [Impl] [US13] `crates/gwt-cli/src/tui/screens/branch_list.rs` に履歴からのエージェント表示ロジックを実装
+- [ ] **T1513** [Impl] [US13] `crates/gwt-cli/src/tui/app.rs` にエージェント起動時の履歴記録呼び出しを追加
+
+### 検証
+
+- [ ] **T1514** [検証] `cargo test -p gwt-cli` と `cargo build --release` を実行し、失敗がないことを確認
+
+## タスク凡例（追加分）
+
+**ストーリータグ（追加分）**:
+
+- **[US12]**: ユーザーストーリー12（ブランチ名の色分けによるWorktree状態表現）
+- **[US13]**: ユーザーストーリー13（エージェント履歴表示の拡張）
