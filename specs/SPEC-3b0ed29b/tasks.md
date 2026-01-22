@@ -35,6 +35,11 @@
 - [ ] **T3304** [US15] 依存インストールを共通パイプライン内へ移動し、tmuxモードでも有効時は実行する
 - [ ] **T3305** [US15] 起動準備をバックグラウンドで実行し、進捗メッセージをTUIステータス表示領域へ反映する
 
+## ユーザーストーリー16 - macOSのPTYラッパーで引数が失われず起動できる (優先度: P1)
+
+- [x] **T3311** [P] [US16] `crates/gwt-cli/src/main.rs` のPTYラッパーが`script -q -- /dev/null`形式になることを検証するユニットテストを追加する
+- [x] **T3312** [US16] T3311の後に `crates/gwt-cli/src/main.rs` のPTYラッパーで`--`を挿入してオプション解釈を遮断する
+
 ## ユーザーストーリー1 - デフォルト起動ログの整備 (優先度: P1)
 
 - [x] **T3131** [P] [US1] `crates/gwt-cli/src/main.rs` に起動ログの整形ヘルパーを追加し、Working directory/Model/Reasoning/Mode/Skip/Args/Version/実行方法が出力されることをテストする
