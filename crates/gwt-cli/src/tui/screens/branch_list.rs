@@ -386,7 +386,7 @@ impl BranchItem {
 
     /// FR-082/FR-083/FR-084/FR-085: Get branch name color based on worktree status and gone status
     /// - White: Worktree exists and active
-    /// - Gray: No Worktree
+    /// - DarkGray: No Worktree
     /// - Red: Worktree path inaccessible OR branch is gone (upstream deleted)
     pub fn branch_name_color(&self) -> Color {
         if self.is_gone {
@@ -395,7 +395,7 @@ impl BranchItem {
         } else {
             match self.worktree_status {
                 WorktreeStatus::Active => Color::White, // FR-082: Active worktree
-                WorktreeStatus::None => Color::Gray,    // FR-083: No worktree
+                WorktreeStatus::None => Color::DarkGray, // FR-083: No worktree
                 WorktreeStatus::Inaccessible => Color::Red, // FR-084: Inaccessible path
             }
         }
@@ -2335,6 +2335,25 @@ mod tests {
         assert_eq!(state.spinner_char(), '/');
         state.spinner_frame = SPINNER_FRAMES.len() * 5;
         assert_eq!(state.spinner_char(), '|');
+    }
+
+    #[test]
+    fn test_branch_name_color_by_worktree_status() {
+        let mut branch = sample_branch("feature/color");
+
+        branch.worktree_status = WorktreeStatus::Active;
+        branch.is_gone = false;
+        assert_eq!(branch.branch_name_color(), Color::White);
+
+        branch.worktree_status = WorktreeStatus::None;
+        assert_eq!(branch.branch_name_color(), Color::DarkGray);
+
+        branch.worktree_status = WorktreeStatus::Inaccessible;
+        assert_eq!(branch.branch_name_color(), Color::Red);
+
+        branch.is_gone = true;
+        branch.worktree_status = WorktreeStatus::None;
+        assert_eq!(branch.branch_name_color(), Color::Red);
     }
 
     #[test]
