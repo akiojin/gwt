@@ -5,12 +5,12 @@
 
 ## 概要
 
-エラー発生時にブランチ詳細画面ではなくポップアップダイアログで表示し、全エラーをログファイルに出力するシステム。エラーコード体系（GWT-EXXX形式）、サジェスチョン機能、複数エラーのキュー処理、キーボード/マウス操作に対応する。
+エラー発生時にブランチ詳細画面ではなくポップアップダイアログで表示し、全エラーをログファイルに出力するシステム。エラーコード体系（EXXXX形式）、サジェスチョン機能、複数エラーのキュー処理、キーボード/マウス操作に対応する。
 
 ## 技術コンテキスト
 
 **言語/バージョン**: Rust 2021 Edition (stable)
-**主要な依存関係**: ratatui 0.29, crossterm 0.28, tracing, tracing-appender, serde_json, chrono, cli-clipboard
+**主要な依存関係**: ratatui 0.29, crossterm 0.28, tracing, tracing-appender, serde_json, chrono, arboard
 **ストレージ**: ファイル（gwt.jsonl.YYYY-MM-DD）
 **テスト**: cargo test
 **ターゲットプラットフォーム**: macOS, Linux, Windows
@@ -61,10 +61,8 @@ crates/
     ├── logging/
     │   ├── logger.rs    # ログ初期化（拡張対象）
     │   └── reader.rs    # ログ読み込み
-    └── error/           # 新規: エラーコード定義
-        ├── mod.rs
-        ├── codes.rs     # GWT-EXXX定義
-        └── suggestions.rs # サジェスチョン
+    ├── error.rs         # GwtError（エラーコード定義）
+    └── errors.toml      # サジェスチョン定義ファイル
 ```
 
 ## フェーズ0: 調査（技術スタック選定）
@@ -81,7 +79,7 @@ crates/
    - 統合ポイント: app.rsのエラーハンドリング箇所
 
 2. **技術的決定**
-   - クリップボード: cli-clipboardクレート使用
+   - クリップボード: arboardクレート使用（クロスプラットフォーム対応）
    - エラーキュー: VecDeque<ErrorState>で実装
    - マウスイベント: crosstermのMouseEventで処理
 
@@ -103,7 +101,7 @@ crates/
 **ファイル**: `data-model.md`
 
 主要エンティティ:
-- **ErrorCode**: GWT-EXXX形式のエラー識別子、カテゴリ、サジェスチョン
+- **ErrorCode**: EXXXX形式のエラー識別子、カテゴリ、サジェスチョン
 - **ErrorState**: 表示用エラー状態（拡張）
 - **ErrorQueue**: 複数エラーのFIFOキュー
 - **ErrorSeverity**: Error/Warning/Info
@@ -121,7 +119,7 @@ crates/
 
 **ディレクトリ**: `contracts/`
 
-- エラーコード一覧（GWT-E001〜）
+- エラーコード一覧（E1001〜）
 - ログフォーマット（JSON Lines）
 - クリップボードエクスポート形式
 
@@ -166,11 +164,13 @@ crates/
 ### 依存関係リスク
 
 1. **cli-clipboardクレートの互換性**:
-   - **緩和策**: 代替クレート（arboard）を検討
+   - **緩和策**: arboardクレートを採用（クロスプラットフォーム対応）
 
 ## 次のステップ
 
 1. ✅ フェーズ0完了: research.md作成済み
 2. ✅ フェーズ1完了: data-model.md, quickstart.md, contracts/error-codes.md作成済み
-3. ⏭️ `/speckit.tasks` を実行してタスクを生成
-4. ⏭️ `/speckit.implement` で実装を開始
+3. ✅ `/speckit.tasks` 完了: tasks.md生成済み
+4. ✅ `/speckit.implement` 完了: 全P0/P1機能実装済み
+5. ✅ `/speckit.analyze` 完了: 仕様-実装整合性検証済み
+6. ⏭️ 手動テスト: 残り7件の手動確認タスク
