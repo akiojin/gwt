@@ -1791,7 +1791,7 @@ fn render_summary_panels(
 fn panel_title_line(branch_name: &str, label: &str) -> Line<'static> {
     Line::from(vec![
         Span::styled(
-            format!("[{}]", label),
+            label.to_string(),
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -1960,7 +1960,7 @@ fn render_session_panel(
     let title = panel_title_line(&branch_name, "Session");
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
+        .border_style(Style::default().fg(Color::White))
         .title(title)
         .title_bottom(session_panel_hint())
         .padding(Padding::new(PANEL_PADDING_X, PANEL_PADDING_X, 0, 0));
