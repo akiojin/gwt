@@ -18,6 +18,9 @@ pub struct Profile {
     /// Description
     #[serde(default)]
     pub description: String,
+    /// AI settings (optional)
+    #[serde(default)]
+    pub ai: Option<AISettings>,
 }
 
 impl Profile {
@@ -28,6 +31,7 @@ impl Profile {
             env: HashMap::new(),
             disabled_env: Vec::new(),
             description: String::new(),
+            ai: None,
         }
     }
 
@@ -43,6 +47,67 @@ impl Profile {
             std::env::set_var(key, value);
         }
     }
+
+    /// Resolve AI settings with environment fallbacks
+    pub fn resolved_ai_settings(&self) -> Option<ResolvedAISettings> {
+        self.ai.as_ref().map(|settings| settings.resolved())
+    }
+
+    /// Check if AI settings are enabled for this profile
+    pub fn ai_enabled(&self) -> bool {
+        self.ai
+            .as_ref()
+            .map(|settings| settings.is_enabled())
+            .unwrap_or(false)
+    }
+}
+
+/// AI settings for OpenAI-compatible APIs
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AISettings {
+    /// API endpoint
+    #[serde(default = "default_endpoint")]
+    pub endpoint: String,
+    /// API key (optional for local LLMs)
+    #[serde(default)]
+    pub api_key: String,
+    /// Model name
+    #[serde(default = "default_model")]
+    pub model: String,
+}
+
+/// Resolved AI settings with defaults and environment fallbacks applied
+#[derive(Debug, Clone)]
+pub struct ResolvedAISettings {
+    pub endpoint: String,
+    pub api_key: String,
+    pub model: String,
+}
+
+impl AISettings {
+    /// Resolve AI settings (no environment variable fallback - settings must be explicit)
+    pub fn resolved(&self) -> ResolvedAISettings {
+        ResolvedAISettings {
+            endpoint: self.endpoint.trim().to_string(),
+            api_key: self.api_key.trim().to_string(),
+            model: self.model.trim().to_string(),
+        }
+    }
+
+    /// Check if settings are enabled (endpoint/model required, API key optional)
+    pub fn is_enabled(&self) -> bool {
+        let endpoint = self.endpoint.trim();
+        let model = self.model.trim();
+        !endpoint.is_empty() && !model.is_empty()
+    }
+}
+
+fn default_endpoint() -> String {
+    "https://api.openai.com/v1".to_string()
+}
+
+fn default_model() -> String {
+    String::new() // No default - must be selected via wizard
 }
 
 /// Profiles configuration stored on disk
@@ -54,6 +119,9 @@ pub struct ProfilesConfig {
     /// Active profile name
     #[serde(default)]
     pub active: Option<String>,
+    /// Default AI settings (profile fallback)
+    #[serde(default)]
+    pub default_ai: Option<AISettings>,
     /// Profiles map
     #[serde(default)]
     pub profiles: HashMap<String, Profile>,
@@ -110,8 +178,14 @@ impl ProfilesConfig {
     /// Ensure default profile exists
     fn ensure_defaults(&mut self) {
         if self.profiles.is_empty() {
-            *self = Self::default_with_profile();
-            return;
+            self.profiles
+                .insert("default".to_string(), Profile::new("default"));
+            if self.active.is_none() {
+                self.active = Some("default".to_string());
+            }
+            if self.version == 0 {
+                self.version = 1;
+            }
         }
         if self.active.is_none() && self.profiles.contains_key("default") {
             self.active = Some("default".to_string());
@@ -124,6 +198,7 @@ impl ProfilesConfig {
         Self {
             version: 1,
             active: Some("default".to_string()),
+            default_ai: None,
             profiles,
         }
     }
@@ -187,5 +262,85 @@ mod tests {
             Some(value) => std::env::set_var("HOME", value),
             None => std::env::remove_var("HOME"),
         }
+    }
+
+    #[test]
+    fn test_ai_settings_resolved_defaults() {
+        // AISettings::default() uses #[derive(Default)], so all fields are empty
+        // The serde default functions (default_endpoint, default_model) are only used during deserialization
+        let settings = AISettings::default();
+        let resolved = settings.resolved();
+        assert_eq!(resolved.endpoint, "");
+        assert_eq!(resolved.model, "");
+        assert_eq!(resolved.api_key, "");
+    }
+
+    #[test]
+    fn test_ai_settings_serde_defaults() {
+        // When deserializing YAML with missing fields, serde defaults are applied
+        let yaml = "{}";
+        let settings: AISettings = serde_yaml::from_str(yaml).unwrap();
+        let resolved = settings.resolved();
+        assert_eq!(resolved.endpoint, "https://api.openai.com/v1"); // serde default
+        assert_eq!(resolved.model, ""); // No default model
+        assert_eq!(resolved.api_key, "");
+    }
+
+    #[test]
+    fn test_ai_settings_no_env_fallback() {
+        // Environment variables are NOT used as fallback (settings must be explicit)
+        let settings = AISettings {
+            endpoint: "".to_string(),
+            api_key: "".to_string(),
+            model: "".to_string(),
+        };
+        let resolved = settings.resolved();
+        // Should return empty strings, not environment variable values
+        assert_eq!(resolved.endpoint, "");
+        assert_eq!(resolved.model, "");
+        assert_eq!(resolved.api_key, "");
+    }
+
+    #[test]
+    fn test_ai_settings_enabled_local_without_key() {
+        let settings = AISettings {
+            endpoint: "http://localhost:11434/v1".to_string(),
+            api_key: "".to_string(),
+            model: "llama3.2".to_string(),
+        };
+        assert!(settings.is_enabled());
+    }
+
+    #[test]
+    fn test_ai_settings_enabled_without_key() {
+        let settings = AISettings {
+            endpoint: "https://api.example.com/v1".to_string(),
+            api_key: "".to_string(),
+            model: "gpt-4o-mini".to_string(),
+        };
+        assert!(settings.is_enabled());
+    }
+
+    #[test]
+    fn test_ai_settings_requires_endpoint_and_model() {
+        let missing_endpoint = AISettings {
+            endpoint: "".to_string(),
+            api_key: "key".to_string(),
+            model: "gpt-4o-mini".to_string(),
+        };
+        assert!(!missing_endpoint.is_enabled());
+
+        let missing_model = AISettings {
+            endpoint: "https://api.example.com/v1".to_string(),
+            api_key: "key".to_string(),
+            model: "".to_string(),
+        };
+        assert!(!missing_model.is_enabled());
+    }
+
+    #[test]
+    fn test_profile_ai_enabled_requires_settings() {
+        let profile = Profile::new("dev");
+        assert!(!profile.ai_enabled());
     }
 }

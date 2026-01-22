@@ -1,0 +1,11 @@
+#!/usr/bin/env sh
+
+set -e
+
+echo "Running CI-equivalent lint checks..."
+
+cargo clippy --all-targets --all-features -- -D warnings
+cargo fmt --all -- --check
+bunx --bun markdownlint-cli . --config .markdownlint.json --ignore target --ignore CHANGELOG.md
+
+echo "Lint checks passed."

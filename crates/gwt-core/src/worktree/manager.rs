@@ -2,7 +2,7 @@
 
 use super::{CleanupCandidate, Worktree, WorktreePath, WorktreeStatus};
 use crate::error::{GwtError, Result};
-use crate::git::{Branch, Repository};
+use crate::git::{get_main_repo_root, Branch, Repository};
 use std::path::{Path, PathBuf};
 use tracing::{debug, error, info, warn};
 
@@ -19,10 +19,19 @@ pub struct WorktreeManager {
 
 impl WorktreeManager {
     /// Create a new worktree manager
+    ///
+    /// If the given path is inside a worktree, this automatically resolves
+    /// to the main repository root to ensure worktrees are created at the
+    /// correct location (e.g., /repo/.worktrees/ instead of /repo/.worktrees/branch/.worktrees/)
     pub fn new(repo_root: impl AsRef<Path>) -> Result<Self> {
         let repo_root = repo_root.as_ref().to_path_buf();
-        let repo = Repository::discover(&repo_root)?;
-        Ok(Self { repo_root, repo })
+        // Resolve to main repo root in case we're inside a worktree
+        let main_repo_root = get_main_repo_root(&repo_root);
+        let repo = Repository::discover(&main_repo_root)?;
+        Ok(Self {
+            repo_root: main_repo_root,
+            repo,
+        })
     }
 
     /// Get the repository root path
@@ -90,9 +99,9 @@ impl WorktreeManager {
 
     /// Handle existing path for worktree creation (FR-038-040)
     ///
-    /// FR-038: Detect stale worktrees when path exists but not in `git worktree list`
-    /// FR-039: Auto-delete stale directories and retry worktree creation
-    /// FR-040: For uncertain cases, abort and prompt user for manual resolution
+    /// FR-038: Do not auto-recover worktrees when an existing path is found
+    /// FR-039: Never delete existing directories automatically
+    /// FR-040: Abort and prompt user for manual resolution when a path exists
     fn handle_existing_path(&self, path: &Path) -> Result<()> {
         // Check if this path is in the git worktree list
         let git_worktrees = self.repo.list_worktrees()?;
@@ -105,27 +114,12 @@ impl WorktreeManager {
             });
         }
 
-        // FR-038: Path exists but NOT in worktree list → stale
-        // FR-039: Auto-delete stale directory
-
-        // Safety check: verify it looks like a git worktree (has .git file/directory)
-        let git_path = path.join(".git");
-        if git_path.exists() {
-            // Has .git, so it's likely a stale worktree → safe to delete
-            if let Err(_e) = std::fs::remove_dir_all(path) {
-                // FR-040: Cannot delete → prompt user for manual resolution
-                return Err(GwtError::WorktreePathConflict {
-                    path: path.to_path_buf(),
-                });
-            }
-            Ok(())
-        } else {
-            // No .git marker → could be user data, not safe to delete
-            // FR-040: Abort and prompt user for manual resolution
-            Err(GwtError::WorktreePathConflict {
-                path: path.to_path_buf(),
-            })
-        }
+        // FR-038: Path exists but NOT in worktree list → do not auto-recover
+        // FR-039: Auto-recovery disabled → do not delete anything
+        // FR-040: Always require manual resolution
+        Err(GwtError::WorktreePathConflict {
+            path: path.to_path_buf(),
+        })
     }
 
     /// Create a new worktree for an existing branch
@@ -137,7 +131,7 @@ impl WorktreeManager {
         );
         let path = WorktreePath::generate(&self.repo_root, branch_name);
 
-        // FR-038-040: Handle existing path with stale recovery
+        // FR-038-040: Handle existing path (auto-recovery disabled)
         if path.exists() {
             self.handle_existing_path(&path)?;
         }
@@ -186,7 +180,7 @@ impl WorktreeManager {
         );
         let path = WorktreePath::generate(&self.repo_root, branch_name);
 
-        // FR-038-040: Handle existing path with stale recovery
+        // FR-038-040: Handle existing path (auto-recovery disabled)
         if path.exists() {
             self.handle_existing_path(&path)?;
         }
@@ -356,21 +350,12 @@ impl WorktreeManager {
 
     /// Auto-clean orphaned worktrees on startup
     pub fn auto_cleanup_orphans(&self) -> Result<usize> {
-        let orphans = self.detect_orphans();
-        if orphans.is_empty() {
-            debug!(category = "worktree", "No orphaned worktrees found");
-            return Ok(0);
-        }
-
-        info!(
+        debug!(
             category = "worktree",
             operation = "auto_cleanup",
-            count = orphans.len(),
-            "Cleaning up orphaned worktrees"
+            "Auto cleanup is disabled"
         );
-
-        self.prune()?;
-        Ok(orphans.len())
+        Ok(0)
     }
 
     /// Prune orphaned worktree metadata
@@ -378,15 +363,18 @@ impl WorktreeManager {
         self.repo.prune_worktrees()
     }
 
-    /// Repair worktree administrative files
+    /// Repair worktree administrative files (disabled)
     pub fn repair(&self) -> Result<()> {
-        self.repo.repair_worktrees()
+        Err(GwtError::Internal(
+            "Worktree repair is disabled.".to_string(),
+        ))
     }
 
     /// Repair a specific worktree path
     pub fn repair_path(&self, _path: &Path) -> Result<()> {
-        // Repair all worktrees (git doesn't support per-path repair)
-        self.repo.repair_worktrees()
+        Err(GwtError::Internal(
+            "Worktree repair is disabled.".to_string(),
+        ))
     }
 
     /// Lock a worktree
@@ -603,7 +591,7 @@ mod tests {
     }
 
     #[test]
-    fn test_auto_cleanup_orphans_on_startup() {
+    fn test_auto_cleanup_orphans_disabled() {
         let temp = create_test_repo();
         let manager = WorktreeManager::new(temp.path()).unwrap();
 
@@ -617,31 +605,20 @@ mod tests {
         assert!(!detected.is_empty());
 
         let cleaned = manager.auto_cleanup_orphans().unwrap();
-        assert_eq!(cleaned, detected.len());
+        assert_eq!(cleaned, 0);
 
         let remaining = manager.detect_orphans();
-        assert!(remaining.is_empty());
+        assert!(!remaining.is_empty());
     }
 
     #[test]
-    fn test_stale_worktree_recovery_fr039() {
-        // FR-039: Auto-delete stale directories
+    fn test_stale_worktree_recovery_disabled_fr039() {
+        // FR-039: Auto-recovery disabled -> existing paths must error
         let temp = create_test_repo();
         let manager = WorktreeManager::new(temp.path()).unwrap();
 
-        // First, create a worktree normally
-        let wt = manager.create_new_branch("feature/stale", None).unwrap();
-        let wt_path = wt.path.clone();
-        assert!(wt_path.exists());
-
-        // Manually remove from git worktree list but keep the directory
-        Command::new("git")
-            .args(["worktree", "remove", "--force", wt_path.to_str().unwrap()])
-            .current_dir(temp.path())
-            .output()
-            .unwrap();
-
-        // Recreate the directory with a .git file to simulate stale state
+        let branch = "feature/stale";
+        let wt_path = WorktreePath::generate(temp.path(), branch);
         std::fs::create_dir_all(&wt_path).unwrap();
         std::fs::write(wt_path.join(".git"), "stale worktree").unwrap();
 
@@ -652,18 +629,16 @@ mod tests {
             .output()
             .unwrap();
         let list_output = String::from_utf8_lossy(&output.stdout);
-        assert!(!list_output.contains("feature/stale"));
+        assert!(!list_output.contains(branch));
 
-        // Now try to create a new worktree at the same path - should auto-recover
-        // (FR-039: Auto-delete stale and retry)
-        let new_wt = manager.create_new_branch("feature/stale2", None);
-        // Note: We can't reuse "feature/stale" because the branch might still exist
-        assert!(new_wt.is_ok());
+        // Now try to create a new worktree at the same path - should fail
+        let result = manager.create_new_branch(branch, None);
+        assert!(matches!(result, Err(GwtError::WorktreePathConflict { .. })));
     }
 
     #[test]
     fn test_existing_path_conflict_fr040() {
-        // FR-040: Path exists but no .git → cannot determine if stale → error
+        // FR-040: Existing path must error (auto-recovery disabled)
         let temp = create_test_repo();
         let manager = WorktreeManager::new(temp.path()).unwrap();
 

@@ -115,6 +115,8 @@
   `npm dist-tag add @akiojin/gwt@<version> latest`
 
 ## 使用中の技術
+- Rust 2021 Edition (stable) + ratatui 0.29, crossterm 0.28, reqwest (blocking), serde_json, chrono (SPEC-4b893dae)
+- ファイルシステム（セッションファイル読み取り）、メモリキャッシュ (SPEC-4b893dae)
 
 - Rust (Stable) + Ratatui TUI フレームワーク
 - ファイル/ローカル Git メタデータ（DB なし）
@@ -134,6 +136,7 @@
 ```
 
 ## 最近の変更
+- SPEC-4b893dae: 追加: Rust 2021 Edition (stable) + ratatui 0.29, crossterm 0.28, reqwest (blocking), serde_json, chrono
 
 - TypeScript/Bun から Rust への完全移行
 - ブランチ一覧は枠線表示・統計非表示に整理し、クリーンアップはWorktreeのあるブランチのみ対象

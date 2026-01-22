@@ -4,7 +4,7 @@
 **作成日**: 2025-12-06  
 **ステータス**: 更新中  
 **実装フェーズ**: Phase 2（実装完了）+ Web UI追記  
-**最終更新**: 2026-01-13  
+**最終更新**: 2026-01-19  
 **次のステップ**: 運用中（必要に応じて改善）  
 **入力**: ユーザー説明: "Continueオプションで実際に使ったセッションを確実に再開できるよう、セッションIDを保存して起動時に提示したい（Codexは終了時に resume コマンドを表示、Claude Codeは /status でしか見られないので不便）"
 
@@ -117,6 +117,7 @@
 - **FR-010a**: `history` が空でも `lastBranch/lastUsedTool` が対象ブランチに一致する場合は、Quick Start 用の単一履歴として扱い、クイック選択を表示しなければならない。
 - **FR-011**: Quick Startの表示内容はツール能力に応じて切り替えること。CodexのみReasoningレベルを表示し、他ツールでは非表示とする。また「Start new with previous settings」ではセッションIDを表示しない。
 - **FR-012**: 同一ブランチで複数ツールを利用した場合、各ツールごとに直近設定（toolId/model/reasoningLevel/skipPermissions/sessionId）を保持し、Quick Startでツール別の「Resume with previous settings / Start new with previous settings」を提示する。履歴が無いツールは表示しない。
+- **FR-020**: `toolId` は既知エイリアス（例: `claude`/`codex`/`gemini`）を正規化して保存・読込し、Quick Startでは正規化済みの`toolId`で重複表示を防がなければならない。
 - **FR-016**: Quick Startで「前回設定で続きから/新規」を選択した場合、Execution Mode/Skip Permissions/セッション選択を表示せず、履歴の設定を適用して即時起動しなければならない。
 - **FR-013**: Web UIのブランチ詳細で保存済みセッションIDを表示し、Continue/Resume起動時に明示的なセッションIDを渡せるようにしなければならない。
 - **FR-014**: Web UIのセッション起動APIは`resumeSessionId`を受け取り、Claude/Codexの起動引数に反映しなければならない。未指定時は既存のフォールバック挙動を維持する。
@@ -125,6 +126,7 @@
 - **FR-017**: ブランチ一覧のツール表示を`ToolName@X.Y.Z`形式で表示しなければならない。バージョン情報がない場合は`ToolName@latest`形式で表示する。
 - **FR-018**: 保存済み履歴に`toolVersion`が無い（null/未定義/空）場合、起動時は`latest`を選択し、次回保存時には`toolVersion`を`latest`として保存しなければならない。
 - **FR-019**: `toolVersion`が`installed`でもローカルコマンドが見つからない場合は`latest`へフォールバックし、bunxで起動しなければならない。
+- **FR-021**: TypeScriptセッションファイル読み込み時に`toolId`/`lastUsedTool`の表記ゆれ（例: `Codex CLI`/`Claude Code`）を正規化し、差分がある場合は履歴の内容を維持したままセッションファイルを自動更新しなければならない。更新はベストエフォートで行い、失敗してもワークフローをブロックしない。
 
 ### 主要エンティティ
 - **SessionData**: `lastWorktreePath`, `lastBranch`, `lastUsedTool`, `mode`, `model`, 追加で `lastSessionId` を持つ。履歴`history[]`に`sessionId`/`toolId`/`branch`/`timestamp`を保持。
@@ -139,6 +141,7 @@
 - **SC-004**: 非対応ツール選択時に従来機能（新規起動）が阻害されないことを自動テストで確認。
 - **SC-005**: 履歴があるブランチを選択した場合、クイック選択が表示され、そのうち「前回設定で続きから」選択時に同一ツール/モデル/セッションIDで起動フローへ進むことを統合テストで確認。
 - **SC-006**: Web UIで起動したセッションでもセッションIDが保存され、ブランチ詳細で表示・Continue/Resumeで再開できることを手動確認できる。
+- **SC-007**: `toolId`表記が混在する既存セッションファイルを読み込んだ際、正規化後の`toolId`でセッションファイルが更新され、Quick Startおよびブランチ一覧で重複表示されない。
 
 ## 制約と仮定 *(該当する場合)*
 

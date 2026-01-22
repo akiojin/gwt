@@ -44,7 +44,7 @@ impl GeminiAgent {
             std::env::var("GOOGLE_API_KEY").is_ok() || std::env::var("GEMINI_API_KEY").is_ok();
 
         Some(AgentInfo {
-            name: "Gemini CLI".to_string(),
+            name: "Gemini".to_string(),
             version,
             path: which::which("gemini").ok(),
             authenticated,
@@ -68,7 +68,7 @@ impl GeminiAgent {
 impl AgentTrait for GeminiAgent {
     fn info(&self) -> AgentInfo {
         Self::detect().unwrap_or(AgentInfo {
-            name: "Gemini CLI".to_string(),
+            name: "Gemini".to_string(),
             version: "unknown".to_string(),
             path: None,
             authenticated: false,
@@ -103,12 +103,12 @@ impl AgentTrait for GeminiAgent {
 
         let child = cmd
             .spawn()
-            .map_err(|e| GwtError::Internal(format!("Failed to spawn Gemini CLI: {}", e)))?;
+            .map_err(|e| GwtError::Internal(format!("Failed to spawn Gemini: {}", e)))?;
 
         let output = child
             .wait_with_output()
             .await
-            .map_err(|e| GwtError::Internal(format!("Failed to run Gemini CLI: {}", e)))?;
+            .map_err(|e| GwtError::Internal(format!("Failed to run Gemini: {}", e)))?;
 
         let duration = start.elapsed().as_millis() as u64;
 

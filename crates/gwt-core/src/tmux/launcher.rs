@@ -8,7 +8,8 @@ use std::process::Command;
 use std::time::SystemTime;
 
 use super::error::{TmuxError, TmuxResult};
-use super::pane::{select_pane, AgentPane};
+use super::pane::{enable_mouse, select_pane, AgentPane, SplitDirection};
+use tracing::debug;
 
 /// Configuration for launching an agent in a tmux pane
 #[derive(Debug, Clone)]
@@ -44,22 +45,69 @@ pub struct TmuxLaunchResult {
     pub agent_pane: AgentPane,
 }
 
+fn is_valid_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn shell_escape(value: &str) -> String {
+    let escaped = value.replace('\'', "'\\''");
+    format!("'{}'", escaped)
+}
+
+fn build_split_window_args(
+    target_pane: &str,
+    working_dir: &str,
+    env_vars: &[(String, String)],
+    direction: SplitDirection,
+) -> Vec<String> {
+    let mut args = vec![
+        "split-window".to_string(),
+        direction.tmux_flag().to_string(),
+        "-d".to_string(), // don't switch to new pane (keep focus on gwt)
+        "-t".to_string(),
+        target_pane.to_string(),
+        "-c".to_string(),
+        working_dir.to_string(),
+    ];
+
+    // Add environment variables via -e option (tmux 3.0+)
+    for (key, value) in env_vars {
+        args.push("-e".to_string());
+        args.push(format!("{}={}", key, value));
+    }
+
+    // Add output format options
+    args.push("-P".to_string()); // print pane info
+    args.push("-F".to_string());
+    args.push("#{pane_id}".to_string());
+
+    args
+}
+
 /// Launch an agent in a new tmux pane
 ///
 /// Creates a new pane by splitting the current window, sets up the environment,
 /// and executes the agent command.
 pub fn launch_agent_in_pane(config: &TmuxLaunchConfig) -> TmuxResult<TmuxLaunchResult> {
+    // Ensure mouse mode is on when creating a new pane
+    let _ = enable_mouse();
+
     // Build the command string with environment setup
     let env_setup = build_env_setup(&config.env, &config.env_remove);
+    let cmd_parts: Vec<String> = std::iter::once(config.command.as_str())
+        .chain(config.args.iter().map(|arg| arg.as_str()))
+        .map(shell_escape)
+        .collect();
+    let command = cmd_parts.join(" ");
     let full_command = if env_setup.is_empty() {
-        format!("{} {}", config.command, config.args.join(" "))
+        command
     } else {
-        format!(
-            "{}; {} {}",
-            env_setup,
-            config.command,
-            config.args.join(" ")
-        )
+        format!("{}; {}", env_setup, command)
     };
 
     // Create a new pane with split-window
@@ -119,14 +167,18 @@ fn build_env_setup(env: &HashMap<String, String>, env_remove: &[String]) -> Stri
 
     // Unset environment variables
     for var in env_remove {
-        commands.push(format!("unset {}", var));
+        if is_valid_env_name(var) {
+            commands.push(format!("unset {}", var));
+        }
     }
 
     // Export environment variables
     for (key, value) in env {
-        // Escape single quotes in value
-        let escaped_value = value.replace('\'', "'\\''");
-        commands.push(format!("export {}='{}'", key, escaped_value));
+        if !is_valid_env_name(key) {
+            continue;
+        }
+        let escaped_value = shell_escape(value);
+        commands.push(format!("export {}={}", key, escaped_value));
     }
 
     commands.join("; ")
@@ -194,8 +246,8 @@ pub fn build_agent_command(
         cmd.push_str(" --dangerously-skip-permissions");
     }
 
-    // Version is typically not used as CLI arg but could be for specific agents
-    let _ = version; // Suppress unused warning
+    // TODO: version is reserved for agent-specific flags.
+    let _version = version;
 
     if parts.is_empty() {
         cmd
@@ -217,7 +269,7 @@ fn detect_utf8_locale() -> String {
         if output.status.success() {
             let locales = String::from_utf8_lossy(&output.stdout);
             // Check for common UTF-8 locales in order of preference
-            let candidates = ["C.utf8", "C.UTF-8", "en_US.utf8", "en_US.UTF-8", "POSIX"];
+            let candidates = ["C.utf8", "C.UTF-8", "en_US.utf8", "en_US.UTF-8"];
             for candidate in candidates {
                 if locales.lines().any(|l| l == candidate) {
                     return candidate.to_string();
@@ -298,77 +350,18 @@ fn build_locale_setup(locale_vars: &[(String, String)]) -> String {
 
 /// Launch a command in a new tmux pane (simplified API)
 ///
-/// Creates a new pane below the current one and executes the command.
+/// Creates a new pane to the right of the current one and executes the command.
 /// The pane automatically closes when the command exits (FR-052).
 /// Automatically inherits locale and terminal environment variables to prevent encoding issues.
 ///
 /// Returns the pane ID of the newly created pane.
 pub fn launch_in_pane(target_pane: &str, working_dir: &str, command: &str) -> TmuxResult<String> {
-    // Build args with environment variables passed via -e option
-    let env_vars = get_locale_env_vars();
-    let mut args = vec![
-        "split-window".to_string(),
-        "-v".to_string(), // vertical split (below current pane)
-        "-d".to_string(), // don't switch to new pane (keep focus on gwt)
-        "-t".to_string(),
-        target_pane.to_string(),
-        "-c".to_string(),
-        working_dir.to_string(),
-    ];
-
-    // Add environment variables via -e option (tmux 3.0+)
-    for (key, value) in &env_vars {
-        args.push("-e".to_string());
-        args.push(format!("{}={}", key, value));
-    }
-
-    // Add output format options
-    args.push("-P".to_string()); // print pane info
-    args.push("-F".to_string());
-    args.push("#{pane_id}".to_string());
-
-    // Create the pane (starts an interactive shell)
-    let output =
-        Command::new("tmux")
-            .args(&args)
-            .output()
-            .map_err(|e| TmuxError::PaneCreateFailed {
-                reason: e.to_string(),
-            })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(TmuxError::PaneCreateFailed {
-            reason: stderr.to_string(),
-        });
-    }
-
-    let pane_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
-
-    // Set remain-on-exit off so pane auto-closes when command exits (FR-052)
-    let _ = Command::new("tmux")
-        .args(["set-option", "-t", &pane_id, "remain-on-exit", "off"])
-        .output();
-
-    // Build environment export commands for send-keys
-    // This ensures environment variables are set in the shell before running the command
-    let env_exports: Vec<String> = env_vars
-        .iter()
-        .map(|(k, v)| format!("export {}='{}'", k, v.replace('\'', "'\\''")))
-        .collect();
-
-    // Send environment setup and command to the new pane via send-keys
-    // This ensures stdin/stdout are properly connected to the terminal
-    let full_command = if env_exports.is_empty() {
-        format!("{}; exit", command)
-    } else {
-        format!("{}; {}; exit", env_exports.join("; "), command)
-    };
-    let _ = Command::new("tmux")
-        .args(["send-keys", "-t", &pane_id, &full_command, "Enter"])
-        .output();
-
-    Ok(pane_id)
+    launch_in_pane_with_split(
+        target_pane,
+        working_dir,
+        command,
+        SplitDirection::Horizontal,
+    )
 }
 
 /// Launch a command in a new tmux pane beside an existing pane (horizontal split)
@@ -383,28 +376,35 @@ pub fn launch_in_pane_beside(
     working_dir: &str,
     command: &str,
 ) -> TmuxResult<String> {
+    launch_in_pane_with_split(
+        target_pane,
+        working_dir,
+        command,
+        SplitDirection::Horizontal,
+    )
+}
+
+/// Launch a command in a new tmux pane below an existing pane (vertical split)
+pub fn launch_in_pane_below(
+    target_pane: &str,
+    working_dir: &str,
+    command: &str,
+) -> TmuxResult<String> {
+    launch_in_pane_with_split(target_pane, working_dir, command, SplitDirection::Vertical)
+}
+
+fn launch_in_pane_with_split(
+    target_pane: &str,
+    working_dir: &str,
+    command: &str,
+    direction: SplitDirection,
+) -> TmuxResult<String> {
+    // Ensure mouse mode is on when creating a new pane
+    let _ = enable_mouse();
+
     // Build args with environment variables passed via -e option
     let env_vars = get_locale_env_vars();
-    let mut args = vec![
-        "split-window".to_string(),
-        "-h".to_string(), // horizontal split (beside target pane)
-        "-d".to_string(), // don't switch to new pane (keep focus on gwt)
-        "-t".to_string(),
-        target_pane.to_string(),
-        "-c".to_string(),
-        working_dir.to_string(),
-    ];
-
-    // Add environment variables via -e option (tmux 3.0+)
-    for (key, value) in &env_vars {
-        args.push("-e".to_string());
-        args.push(format!("{}={}", key, value));
-    }
-
-    // Add output format options
-    args.push("-P".to_string()); // print pane info
-    args.push("-F".to_string());
-    args.push("#{pane_id}".to_string());
+    let args = build_split_window_args(target_pane, working_dir, &env_vars, direction);
 
     // Create the pane (starts an interactive shell)
     let output =
@@ -425,9 +425,30 @@ pub fn launch_in_pane_beside(
     let pane_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
     // Set remain-on-exit off so pane auto-closes when command exits (FR-052)
-    let _ = Command::new("tmux")
+    match Command::new("tmux")
         .args(["set-option", "-t", &pane_id, "remain-on-exit", "off"])
-        .output();
+        .output()
+    {
+        Ok(output) => {
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                debug!(
+                    category = "tmux",
+                    pane_id = %pane_id,
+                    error = %stderr,
+                    "Failed to set remain-on-exit"
+                );
+            }
+        }
+        Err(e) => {
+            debug!(
+                category = "tmux",
+                pane_id = %pane_id,
+                error = %e,
+                "Failed to set remain-on-exit"
+            );
+        }
+    }
 
     // Build environment export commands for send-keys
     // This ensures environment variables are set in the shell before running the command
@@ -443,9 +464,30 @@ pub fn launch_in_pane_beside(
     } else {
         format!("{}; {}; exit", env_exports.join("; "), command)
     };
-    let _ = Command::new("tmux")
+    match Command::new("tmux")
         .args(["send-keys", "-t", &pane_id, &full_command, "Enter"])
-        .output();
+        .output()
+    {
+        Ok(output) => {
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                debug!(
+                    category = "tmux",
+                    pane_id = %pane_id,
+                    error = %stderr,
+                    "Failed to send command to pane"
+                );
+            }
+        }
+        Err(e) => {
+            debug!(
+                category = "tmux",
+                pane_id = %pane_id,
+                error = %e,
+                "Failed to send command to pane"
+            );
+        }
+    }
 
     Ok(pane_id)
 }
@@ -472,6 +514,20 @@ pub fn validate_working_dir(path: &Path) -> TmuxResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_split_flag() {
+        assert_eq!(SplitDirection::Horizontal.tmux_flag(), "-h");
+        assert_eq!(SplitDirection::Vertical.tmux_flag(), "-v");
+    }
+
+    #[test]
+    fn test_build_split_window_args_includes_direction() {
+        let args = build_split_window_args("%1", "/tmp", &[], SplitDirection::Horizontal);
+        assert!(args.contains(&"-h".to_string()));
+        let args = build_split_window_args("%1", "/tmp", &[], SplitDirection::Vertical);
+        assert!(args.contains(&"-v".to_string()));
+    }
 
     #[test]
     fn test_build_env_setup_empty() {

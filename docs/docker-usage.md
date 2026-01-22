@@ -71,6 +71,10 @@ playwright-novnc のイメージが arm64 マニフェストを提供してい�
 
 > 注意: arm64 上で amd64 を実行するため、Docker Desktop のエミュレーションや qemu-user-static などが有効である必要があります。無効な場合は `exec format error` が発生します。
 
+### Linux で `host.docker.internal` が解決できない場合
+
+`docker-compose.yml` の gwt サービスには `host.docker.internal` をホストへ解決する設定が含まれています。反映されていない場合は compose を再起動し、最新の設定が読み込まれていることを確認してください。
+
 ### Dockerイメージのクリーンアップ
 
 完全にクリーンな状態から始める場合：
