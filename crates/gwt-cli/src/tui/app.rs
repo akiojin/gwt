@@ -4483,6 +4483,295 @@ impl Model {
             _ => None,
         }
     }
+
+    fn handle_key_event(&mut self, key: KeyEvent) -> Option<Message> {
+        let is_key_press = key.kind == KeyEventKind::Press;
+        // Wizard has priority when visible
+        if self.wizard.visible {
+            match key.code {
+                KeyCode::Esc => Some(Message::WizardBack),
+                KeyCode::Enter if is_key_press => Some(Message::WizardConfirm),
+                KeyCode::Up if is_key_press => Some(Message::WizardPrev),
+                KeyCode::Down if is_key_press => Some(Message::WizardNext),
+                KeyCode::Backspace => {
+                    self.wizard.delete_char();
+                    None
+                }
+                KeyCode::Left => {
+                    self.wizard.cursor_left();
+                    None
+                }
+                KeyCode::Right => {
+                    self.wizard.cursor_right();
+                    None
+                }
+                KeyCode::Char(c)
+                    if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+                {
+                    self.wizard.insert_char(c);
+                    None
+                }
+                _ => None,
+            }
+        } else if self.text_input_active() {
+            self.handle_text_input_key(key, is_key_press)
+        } else {
+            // Normal key handling
+            match (key.code, key.modifiers) {
+                (KeyCode::Char('c'), KeyModifiers::CONTROL) if is_key_press => Some(Message::CtrlC),
+                (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT)
+                    if is_key_press
+                        && matches!(self.screen, Screen::BranchList)
+                        && self.branch_list.filter_mode =>
+                {
+                    Some(Message::Char(c))
+                }
+                (KeyCode::Char('q'), KeyModifiers::NONE) => {
+                    // 'q' does not quit in BranchList (matches TypeScript behavior)
+                    Some(Message::Char('q'))
+                }
+                (KeyCode::Esc, _) => {
+                    // FR-095: ESC key behavior:
+                    // - In filter mode: exit filter mode (handled by NavigateBack)
+                    // - In BranchList with filter query: clear query
+                    // - In BranchList with active agent pane: hide the pane
+                    // - Otherwise: navigate back (but NOT quit from main screen)
+                    if matches!(self.screen, Screen::BranchList) {
+                        if self.branch_list.filter_mode {
+                            // Exit filter mode (clear query if any, then exit mode)
+                            Some(Message::NavigateBack)
+                        } else if !self.branch_list.filter.is_empty() {
+                            // Clear filter query
+                            self.branch_list.clear_filter();
+                            self.refresh_branch_summary();
+                            None
+                        } else if self.has_active_agent_pane() {
+                            // FR-095: Hide active agent pane
+                            Some(Message::HideActiveAgentPane)
+                        } else {
+                            // On main screen without filter and no active pane - do nothing
+                            None
+                        }
+                    } else {
+                        Some(Message::NavigateBack)
+                    }
+                }
+                (KeyCode::Char('?') | KeyCode::Char('h'), KeyModifiers::NONE) => {
+                    if matches!(self.screen, Screen::BranchList | Screen::Help) {
+                        Some(Message::NavigateTo(Screen::Help))
+                    } else {
+                        Some(Message::Char(if key.code == KeyCode::Char('?') {
+                            '?'
+                        } else {
+                            'h'
+                        }))
+                    }
+                }
+                (KeyCode::Char('n'), KeyModifiers::NONE) => {
+                    if matches!(self.screen, Screen::BranchList) {
+                        if self.branch_list.filter_mode {
+                            Some(Message::Char('n'))
+                        } else {
+                            None
+                        }
+                    } else if matches!(self.screen, Screen::Profiles) {
+                        // Create new profile
+                        self.profiles.enter_create_mode();
+                        None
+                    } else if matches!(self.screen, Screen::Environment) {
+                        if self.environment.edit_mode {
+                            Some(Message::Char('n'))
+                        } else if self.environment.is_ai_only() {
+                            self.status_message =
+                                Some("AI settings only. Use Enter to edit.".to_string());
+                            self.status_message_time = Some(Instant::now());
+                            None
+                        } else {
+                            self.environment.start_new();
+                            None
+                        }
+                    } else {
+                        Some(Message::Char('n'))
+                    }
+                }
+                (KeyCode::Char('s'), KeyModifiers::NONE) => {
+                    // In filter mode, 's' goes to filter input
+                    if matches!(self.screen, Screen::BranchList) && !self.branch_list.filter_mode {
+                        Some(Message::NavigateTo(Screen::Settings))
+                    } else {
+                        Some(Message::Char('s'))
+                    }
+                }
+                (KeyCode::Char('r'), KeyModifiers::NONE) => {
+                    // In filter mode, 'r' goes to filter input
+                    if matches!(self.screen, Screen::BranchList) && !self.branch_list.filter_mode {
+                        Some(Message::RefreshData)
+                    } else if matches!(self.screen, Screen::Environment) {
+                        if self.environment.edit_mode {
+                            Some(Message::Char('r'))
+                        } else if self.environment.is_ai_only() {
+                            self.status_message =
+                                Some("AI settings only. Use Enter to edit.".to_string());
+                            self.status_message_time = Some(Instant::now());
+                            None
+                        } else {
+                            self.reset_selected_env();
+                            None
+                        }
+                    } else {
+                        Some(Message::Char('r'))
+                    }
+                }
+                (KeyCode::Char('c'), KeyModifiers::NONE) => {
+                    // Copy to clipboard on Logs screen
+                    if matches!(self.screen, Screen::Logs) && !self.logs.is_searching {
+                        Some(Message::CopyLogToClipboard)
+                    } else if matches!(self.screen, Screen::BranchList)
+                        && !self.branch_list.filter_mode
+                    {
+                        // FR-010: Cleanup command
+                        // In filter mode, 'c' goes to filter input
+                        // FR-028: Check if branches are selected
+                        if self.branch_list.selected_branches.is_empty() {
+                            self.status_message = Some("No branches selected.".to_string());
+                            self.status_message_time = Some(Instant::now());
+                            None
+                        } else {
+                            // FR-028a-b: Filter out remote branches and current branch
+                            let cleanup_branches: Vec<String> = self
+                                .branch_list
+                                .selected_branches
+                                .iter()
+                                .filter(|name| {
+                                    // Find the branch in the list
+                                    self.branch_list
+                                        .branches
+                                        .iter()
+                                        .find(|b| &b.name == *name)
+                                        .map(|b| {
+                                            // Exclude remote branches, current branch, and no-worktree
+                                            b.branch_type == BranchType::Local
+                                                && !b.is_current
+                                                && b.has_worktree
+                                        })
+                                        .unwrap_or(false)
+                                })
+                                .cloned()
+                                .collect();
+
+                            if cleanup_branches.is_empty() {
+                                let excluded = self.branch_list.selected_branches.len();
+                                self.status_message = Some(format!(
+                                    "{} branch(es) excluded (remote, current, or no worktree).",
+                                    excluded
+                                ));
+                                self.status_message_time = Some(Instant::now());
+                                None
+                            } else {
+                                // Show cleanup confirmation dialog
+                                self.confirm = ConfirmState::cleanup(&cleanup_branches);
+                                self.pending_cleanup_branches = cleanup_branches;
+                                self.screen_stack.push(self.screen.clone());
+                                self.screen = Screen::Confirm;
+                                None
+                            }
+                        }
+                    } else {
+                        Some(Message::Char('c'))
+                    }
+                }
+                (KeyCode::Char('d'), KeyModifiers::NONE) => {
+                    if matches!(self.screen, Screen::Profiles) {
+                        self.delete_selected_profile();
+                        None
+                    } else if matches!(self.screen, Screen::Environment) {
+                        if self.environment.edit_mode {
+                            Some(Message::Char('d'))
+                        } else if self.environment.is_ai_only() {
+                            self.status_message =
+                                Some("AI settings only. Use Enter to edit.".to_string());
+                            self.status_message_time = Some(Instant::now());
+                            None
+                        } else {
+                            self.delete_selected_env();
+                            None
+                        }
+                    } else if matches!(self.screen, Screen::BranchList)
+                        && !self.branch_list.filter_mode
+                        && self.selected_branch_has_agent()
+                    {
+                        // FR-040: d key to delete agent pane with confirmation
+                        Some(Message::ConfirmAgentTermination)
+                    } else {
+                        Some(Message::Char('d'))
+                    }
+                }
+                (KeyCode::Char('p'), KeyModifiers::NONE) => {
+                    // In filter mode, 'p' goes to filter input
+                    if matches!(self.screen, Screen::BranchList) && !self.branch_list.filter_mode {
+                        Some(Message::NavigateTo(Screen::Profiles))
+                    } else {
+                        Some(Message::Char('p'))
+                    }
+                }
+                (KeyCode::Char('l'), KeyModifiers::NONE) => {
+                    // In filter mode, 'l' goes to filter input
+                    if matches!(self.screen, Screen::BranchList) && !self.branch_list.filter_mode {
+                        Some(Message::NavigateTo(Screen::Logs))
+                    } else {
+                        Some(Message::Char('l'))
+                    }
+                }
+                (KeyCode::Char('f'), KeyModifiers::NONE) if is_key_press => {
+                    if matches!(self.screen, Screen::Logs) {
+                        Some(Message::CycleFilter)
+                    } else if matches!(self.screen, Screen::BranchList) {
+                        Some(Message::ToggleFilterMode)
+                    } else {
+                        Some(Message::Char('f'))
+                    }
+                }
+                (KeyCode::Char('/'), KeyModifiers::NONE) if is_key_press => {
+                    if matches!(self.screen, Screen::Logs) {
+                        Some(Message::ToggleSearch)
+                    } else if matches!(self.screen, Screen::BranchList) {
+                        Some(Message::ToggleFilterMode)
+                    } else {
+                        Some(Message::Char('/'))
+                    }
+                }
+                (KeyCode::Char(' '), _) => {
+                    if matches!(self.screen, Screen::BranchList | Screen::Profiles) {
+                        Some(Message::Space)
+                    } else {
+                        Some(Message::Char(' '))
+                    }
+                }
+                (KeyCode::Tab, _) => Some(Message::Tab),
+                (KeyCode::Char('m'), KeyModifiers::NONE) => {
+                    if matches!(self.screen, Screen::BranchList) {
+                        Some(Message::CycleViewMode)
+                    } else {
+                        None
+                    }
+                }
+                (KeyCode::Up, _) if is_key_press => Some(Message::SelectPrev),
+                (KeyCode::Down, _) if is_key_press => Some(Message::SelectNext),
+                (KeyCode::PageUp, _) if is_key_press => Some(Message::PageUp),
+                (KeyCode::PageDown, _) if is_key_press => Some(Message::PageDown),
+                (KeyCode::Home, _) if is_key_press => Some(Message::GoHome),
+                (KeyCode::End, _) if is_key_press => Some(Message::GoEnd),
+                (KeyCode::Enter, _) if is_key_press => Some(Message::Enter),
+                (KeyCode::Backspace, _) if is_key_press => Some(Message::Backspace),
+                (KeyCode::Left, _) if is_key_press => Some(Message::CursorLeft),
+                (KeyCode::Right, _) if is_key_press => Some(Message::CursorRight),
+                (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) if is_key_press => {
+                    Some(Message::Char(c))
+                }
+                _ => None,
+            }
+        }
+    }
 }
 
 /// Run the TUI application
@@ -4520,308 +4809,7 @@ pub fn run_with_context(context: Option<TuiEntryContext>) -> Result<Option<Launc
         if event::poll(timeout)? {
             match event::read()? {
                 Event::Key(key) => {
-                    let is_key_press = key.kind == KeyEventKind::Press;
-                    // Wizard has priority when visible
-                    let msg = if model.wizard.visible {
-                        match key.code {
-                            KeyCode::Esc => Some(Message::WizardBack),
-                            KeyCode::Enter if is_key_press => Some(Message::WizardConfirm),
-                            KeyCode::Up if is_key_press => Some(Message::WizardPrev),
-                            KeyCode::Down if is_key_press => Some(Message::WizardNext),
-                            KeyCode::Backspace => {
-                                model.wizard.delete_char();
-                                None
-                            }
-                            KeyCode::Left => {
-                                model.wizard.cursor_left();
-                                None
-                            }
-                            KeyCode::Right => {
-                                model.wizard.cursor_right();
-                                None
-                            }
-                            KeyCode::Char(c)
-                                if key.modifiers.is_empty()
-                                    || key.modifiers == KeyModifiers::SHIFT =>
-                            {
-                                model.wizard.insert_char(c);
-                                None
-                            }
-                            _ => None,
-                        }
-                    } else if model.text_input_active() {
-                        model.handle_text_input_key(key, is_key_press)
-                    } else {
-                        // Normal key handling
-                        match (key.code, key.modifiers) {
-                            (KeyCode::Char('c'), KeyModifiers::CONTROL) if is_key_press => {
-                                Some(Message::CtrlC)
-                            }
-                            (KeyCode::Char('q'), KeyModifiers::NONE) => {
-                                // 'q' does not quit in BranchList (matches TypeScript behavior)
-                                Some(Message::Char('q'))
-                            }
-                            (KeyCode::Esc, _) => {
-                                // FR-095: ESC key behavior:
-                                // - In filter mode: exit filter mode (handled by NavigateBack)
-                                // - In BranchList with filter query: clear query
-                                // - In BranchList with active agent pane: hide the pane
-                                // - Otherwise: navigate back (but NOT quit from main screen)
-                                if matches!(model.screen, Screen::BranchList) {
-                                    if model.branch_list.filter_mode {
-                                        // Exit filter mode (clear query if any, then exit mode)
-                                        Some(Message::NavigateBack)
-                                    } else if !model.branch_list.filter.is_empty() {
-                                        // Clear filter query
-                                        model.branch_list.clear_filter();
-                                        model.refresh_branch_summary();
-                                        None
-                                    } else if model.has_active_agent_pane() {
-                                        // FR-095: Hide active agent pane
-                                        Some(Message::HideActiveAgentPane)
-                                    } else {
-                                        // On main screen without filter and no active pane - do nothing
-                                        None
-                                    }
-                                } else {
-                                    Some(Message::NavigateBack)
-                                }
-                            }
-                            (KeyCode::Char('?') | KeyCode::Char('h'), KeyModifiers::NONE) => {
-                                if matches!(model.screen, Screen::BranchList | Screen::Help) {
-                                    Some(Message::NavigateTo(Screen::Help))
-                                } else {
-                                    Some(Message::Char(if key.code == KeyCode::Char('?') {
-                                        '?'
-                                    } else {
-                                        'h'
-                                    }))
-                                }
-                            }
-                            (KeyCode::Char('n'), KeyModifiers::NONE) => {
-                                if matches!(model.screen, Screen::BranchList) {
-                                    if model.branch_list.filter_mode {
-                                        Some(Message::Char('n'))
-                                    } else {
-                                        None
-                                    }
-                                } else if matches!(model.screen, Screen::Profiles) {
-                                    // Create new profile
-                                    model.profiles.enter_create_mode();
-                                    None
-                                } else if matches!(model.screen, Screen::Environment) {
-                                    if model.environment.edit_mode {
-                                        Some(Message::Char('n'))
-                                    } else if model.environment.is_ai_only() {
-                                        model.status_message = Some(
-                                            "AI settings only. Use Enter to edit.".to_string(),
-                                        );
-                                        model.status_message_time = Some(Instant::now());
-                                        None
-                                    } else {
-                                        model.environment.start_new();
-                                        None
-                                    }
-                                } else {
-                                    Some(Message::Char('n'))
-                                }
-                            }
-                            (KeyCode::Char('s'), KeyModifiers::NONE) => {
-                                // In filter mode, 's' goes to filter input
-                                if matches!(model.screen, Screen::BranchList)
-                                    && !model.branch_list.filter_mode
-                                {
-                                    Some(Message::NavigateTo(Screen::Settings))
-                                } else {
-                                    Some(Message::Char('s'))
-                                }
-                            }
-                            (KeyCode::Char('r'), KeyModifiers::NONE) => {
-                                // In filter mode, 'r' goes to filter input
-                                if matches!(model.screen, Screen::BranchList)
-                                    && !model.branch_list.filter_mode
-                                {
-                                    Some(Message::RefreshData)
-                                } else if matches!(model.screen, Screen::Environment) {
-                                    if model.environment.edit_mode {
-                                        Some(Message::Char('r'))
-                                    } else if model.environment.is_ai_only() {
-                                        model.status_message = Some(
-                                            "AI settings only. Use Enter to edit.".to_string(),
-                                        );
-                                        model.status_message_time = Some(Instant::now());
-                                        None
-                                    } else {
-                                        model.reset_selected_env();
-                                        None
-                                    }
-                                } else {
-                                    Some(Message::Char('r'))
-                                }
-                            }
-                            (KeyCode::Char('c'), KeyModifiers::NONE) => {
-                                // Copy to clipboard on Logs screen
-                                if matches!(model.screen, Screen::Logs) && !model.logs.is_searching
-                                {
-                                    Some(Message::CopyLogToClipboard)
-                                } else if matches!(model.screen, Screen::BranchList)
-                                    && !model.branch_list.filter_mode
-                                {
-                                    // FR-010: Cleanup command
-                                    // In filter mode, 'c' goes to filter input
-                                    // FR-028: Check if branches are selected
-                                    if model.branch_list.selected_branches.is_empty() {
-                                        model.status_message =
-                                            Some("No branches selected.".to_string());
-                                        model.status_message_time = Some(Instant::now());
-                                        None
-                                    } else {
-                                        // FR-028a-b: Filter out remote branches and current branch
-                                        let cleanup_branches: Vec<String> = model
-                                            .branch_list
-                                            .selected_branches
-                                            .iter()
-                                            .filter(|name| {
-                                                // Find the branch in the list
-                                                model
-                                                    .branch_list
-                                                    .branches
-                                                    .iter()
-                                                    .find(|b| &b.name == *name)
-                                                    .map(|b| {
-                                                        // Exclude remote branches, current branch, and no-worktree
-                                                        b.branch_type == BranchType::Local
-                                                            && !b.is_current
-                                                            && b.has_worktree
-                                                    })
-                                                    .unwrap_or(false)
-                                            })
-                                            .cloned()
-                                            .collect();
-
-                                        if cleanup_branches.is_empty() {
-                                            let excluded =
-                                                model.branch_list.selected_branches.len();
-                                            model.status_message = Some(format!(
-                                            "{} branch(es) excluded (remote, current, or no worktree).",
-                                            excluded
-                                        ));
-                                            model.status_message_time = Some(Instant::now());
-                                            None
-                                        } else {
-                                            // Show cleanup confirmation dialog
-                                            model.confirm =
-                                                ConfirmState::cleanup(&cleanup_branches);
-                                            model.pending_cleanup_branches = cleanup_branches;
-                                            model.screen_stack.push(model.screen.clone());
-                                            model.screen = Screen::Confirm;
-                                            None
-                                        }
-                                    }
-                                } else {
-                                    Some(Message::Char('c'))
-                                }
-                            }
-                            (KeyCode::Char('d'), KeyModifiers::NONE) => {
-                                if matches!(model.screen, Screen::Profiles) {
-                                    model.delete_selected_profile();
-                                    None
-                                } else if matches!(model.screen, Screen::Environment) {
-                                    if model.environment.edit_mode {
-                                        Some(Message::Char('d'))
-                                    } else if model.environment.is_ai_only() {
-                                        model.status_message = Some(
-                                            "AI settings only. Use Enter to edit.".to_string(),
-                                        );
-                                        model.status_message_time = Some(Instant::now());
-                                        None
-                                    } else {
-                                        model.delete_selected_env();
-                                        None
-                                    }
-                                } else if matches!(model.screen, Screen::BranchList)
-                                    && !model.branch_list.filter_mode
-                                    && model.selected_branch_has_agent()
-                                {
-                                    // FR-040: d key to delete agent pane with confirmation
-                                    Some(Message::ConfirmAgentTermination)
-                                } else {
-                                    Some(Message::Char('d'))
-                                }
-                            }
-                            (KeyCode::Char('p'), KeyModifiers::NONE) => {
-                                // In filter mode, 'p' goes to filter input
-                                if matches!(model.screen, Screen::BranchList)
-                                    && !model.branch_list.filter_mode
-                                {
-                                    Some(Message::NavigateTo(Screen::Profiles))
-                                } else {
-                                    Some(Message::Char('p'))
-                                }
-                            }
-                            (KeyCode::Char('l'), KeyModifiers::NONE) => {
-                                // In filter mode, 'l' goes to filter input
-                                if matches!(model.screen, Screen::BranchList)
-                                    && !model.branch_list.filter_mode
-                                {
-                                    Some(Message::NavigateTo(Screen::Logs))
-                                } else {
-                                    Some(Message::Char('l'))
-                                }
-                            }
-                            (KeyCode::Char('f'), KeyModifiers::NONE) => {
-                                if matches!(model.screen, Screen::Logs) {
-                                    Some(Message::CycleFilter)
-                                } else if matches!(model.screen, Screen::BranchList) {
-                                    Some(Message::ToggleFilterMode)
-                                } else {
-                                    Some(Message::Char('f'))
-                                }
-                            }
-                            (KeyCode::Char('/'), KeyModifiers::NONE) => {
-                                if matches!(model.screen, Screen::Logs) {
-                                    Some(Message::ToggleSearch)
-                                } else if matches!(model.screen, Screen::BranchList) {
-                                    Some(Message::ToggleFilterMode)
-                                } else {
-                                    Some(Message::Char('/'))
-                                }
-                            }
-                            (KeyCode::Char(' '), _) => {
-                                if matches!(model.screen, Screen::BranchList | Screen::Profiles) {
-                                    Some(Message::Space)
-                                } else {
-                                    Some(Message::Char(' '))
-                                }
-                            }
-                            (KeyCode::Tab, _) => Some(Message::Tab),
-                            (KeyCode::Char('m'), KeyModifiers::NONE) => {
-                                if matches!(model.screen, Screen::BranchList) {
-                                    Some(Message::CycleViewMode)
-                                } else {
-                                    None
-                                }
-                            }
-                            (KeyCode::Up, _) if is_key_press => Some(Message::SelectPrev),
-                            (KeyCode::Down, _) if is_key_press => Some(Message::SelectNext),
-                            (KeyCode::PageUp, _) if is_key_press => Some(Message::PageUp),
-                            (KeyCode::PageDown, _) if is_key_press => Some(Message::PageDown),
-                            (KeyCode::Home, _) if is_key_press => Some(Message::GoHome),
-                            (KeyCode::End, _) if is_key_press => Some(Message::GoEnd),
-                            (KeyCode::Enter, _) if is_key_press => Some(Message::Enter),
-                            (KeyCode::Backspace, _) if is_key_press => Some(Message::Backspace),
-                            (KeyCode::Left, _) if is_key_press => Some(Message::CursorLeft),
-                            (KeyCode::Right, _) if is_key_press => Some(Message::CursorRight),
-                            (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT)
-                                if is_key_press =>
-                            {
-                                Some(Message::Char(c))
-                            }
-                            _ => None,
-                        }
-                    };
-
-                    if let Some(msg) = msg {
+                    if let Some(msg) = model.handle_key_event(key) {
                         model.update(msg);
                     }
                 }
@@ -5271,6 +5259,31 @@ mod tests {
         let key = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE);
         let msg = model.handle_text_input_key(key, true);
         assert!(matches!(msg, Some(Message::Char('n'))));
+    }
+
+    #[test]
+    fn test_filter_mode_char_overrides_shortcuts() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+        model.branch_list.enter_filter_mode();
+
+        let key = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE);
+        let msg = model.handle_key_event(key);
+        assert!(matches!(msg, Some(Message::Char('r'))));
+
+        let key = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE);
+        let msg = model.handle_key_event(key);
+        assert!(matches!(msg, Some(Message::Char('f'))));
+    }
+
+    #[test]
+    fn test_filter_toggle_works_when_not_in_filter_mode() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+
+        let key = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE);
+        let msg = model.handle_key_event(key);
+        assert!(matches!(msg, Some(Message::ToggleFilterMode)));
     }
 
     #[test]
