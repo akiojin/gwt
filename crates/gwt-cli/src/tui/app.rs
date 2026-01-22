@@ -608,7 +608,11 @@ impl Model {
         self.total_count = 0;
         self.active_count = 0;
 
+        // FR-074b: グローバルタブ状態を保持
+        let detail_tab = self.branch_list.detail_panel_tab;
+
         let mut branch_list = BranchListState::new();
+        branch_list.detail_panel_tab = detail_tab;
         branch_list.active_profile = self.profiles_config.active.clone();
         branch_list.ai_enabled = self.active_ai_enabled();
         branch_list.working_directory = Some(self.repo_root.display().to_string());
