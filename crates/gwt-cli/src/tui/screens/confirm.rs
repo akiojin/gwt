@@ -244,7 +244,6 @@ impl ConfirmState {
     pub fn is_confirmed(&self) -> bool {
         self.selected_confirm
     }
-
 }
 
 /// Render confirmation dialog
@@ -438,12 +437,7 @@ pub fn render_confirm(state: &mut ConfirmState, frame: &mut Frame, area: Rect) {
     let total_button_width = cancel_width + gap_width + confirm_width;
     let buttons_start_x = chunks[3].x + (chunks[3].width.saturating_sub(total_button_width)) / 2;
 
-    state.cancel_button_area = Some(Rect::new(
-        buttons_start_x,
-        chunks[3].y,
-        cancel_width,
-        1,
-    ));
+    state.cancel_button_area = Some(Rect::new(buttons_start_x, chunks[3].y, cancel_width, 1));
     state.confirm_button_area = Some(Rect::new(
         buttons_start_x + cancel_width + gap_width,
         chunks[3].y,

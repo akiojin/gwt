@@ -1250,19 +1250,23 @@ impl WizardState {
         match self.step {
             WizardStep::QuickStart => self.quick_start_index,
             WizardStep::BranchAction => self.branch_action_index,
-            WizardStep::BranchTypeSelect => {
-                BranchType::all()
-                    .iter()
-                    .position(|t| *t == self.branch_type)
-                    .unwrap_or(0)
-            }
+            WizardStep::BranchTypeSelect => BranchType::all()
+                .iter()
+                .position(|t| *t == self.branch_type)
+                .unwrap_or(0),
             WizardStep::BranchNameInput => 0,
             WizardStep::AgentSelect => self.agent_index,
             WizardStep::ModelSelect => self.model_index,
             WizardStep::ReasoningLevel => self.reasoning_level_index,
             WizardStep::VersionSelect => self.version_index,
             WizardStep::ExecutionMode => self.execution_mode_index,
-            WizardStep::SkipPermissions => if self.skip_permissions { 0 } else { 1 },
+            WizardStep::SkipPermissions => {
+                if self.skip_permissions {
+                    0
+                } else {
+                    1
+                }
+            }
         }
     }
 

@@ -2001,7 +2001,6 @@ impl Model {
         }
     }
 
-
     fn handle_confirm_mouse(&mut self, mouse: MouseEvent) {
         if !matches!(self.screen, Screen::Confirm) {
             return;
@@ -2058,7 +2057,6 @@ impl Model {
         }
     }
 
-
     fn handle_confirm_action(&mut self) {
         if self.confirm.is_confirmed() {
             // FR-029d: Handle unsafe branch selection confirmation
@@ -2110,15 +2108,22 @@ impl Model {
         }
 
         // Only handle model selection step mouse clicks
-        if !matches!(self.ai_wizard.step, crate::tui::screens::ai_wizard::AIWizardStep::ModelSelect) {
+        if !matches!(
+            self.ai_wizard.step,
+            crate::tui::screens::ai_wizard::AIWizardStep::ModelSelect
+        ) {
             return;
         }
 
         // Check if clicking on model list
-        if let Some(index) = self.ai_wizard.selection_index_from_point(mouse.column, mouse.row) {
+        if let Some(index) = self
+            .ai_wizard
+            .selection_index_from_point(mouse.column, mouse.row)
+        {
             let now = Instant::now();
             let is_double_click = self.last_mouse_click.as_ref().is_some_and(|last| {
-                last.index == index && now.duration_since(last.at) <= BRANCH_LIST_DOUBLE_CLICK_WINDOW
+                last.index == index
+                    && now.duration_since(last.at) <= BRANCH_LIST_DOUBLE_CLICK_WINDOW
             });
 
             if is_double_click {
@@ -2147,10 +2152,14 @@ impl Model {
             return;
         }
 
-        if let Some(index) = self.profiles.selection_index_from_point(mouse.column, mouse.row) {
+        if let Some(index) = self
+            .profiles
+            .selection_index_from_point(mouse.column, mouse.row)
+        {
             let now = Instant::now();
             let is_double_click = self.last_mouse_click.as_ref().is_some_and(|last| {
-                last.index == index && now.duration_since(last.at) <= BRANCH_LIST_DOUBLE_CLICK_WINDOW
+                last.index == index
+                    && now.duration_since(last.at) <= BRANCH_LIST_DOUBLE_CLICK_WINDOW
             });
 
             if is_double_click {
@@ -2179,10 +2188,14 @@ impl Model {
             return;
         }
 
-        if let Some(index) = self.environment.selection_index_from_point(mouse.column, mouse.row) {
+        if let Some(index) = self
+            .environment
+            .selection_index_from_point(mouse.column, mouse.row)
+        {
             let now = Instant::now();
             let is_double_click = self.last_mouse_click.as_ref().is_some_and(|last| {
-                last.index == index && now.duration_since(last.at) <= BRANCH_LIST_DOUBLE_CLICK_WINDOW
+                last.index == index
+                    && now.duration_since(last.at) <= BRANCH_LIST_DOUBLE_CLICK_WINDOW
             });
 
             if is_double_click {
@@ -2211,10 +2224,14 @@ impl Model {
             return;
         }
 
-        if let Some(index) = self.logs.selection_index_from_point(mouse.column, mouse.row) {
+        if let Some(index) = self
+            .logs
+            .selection_index_from_point(mouse.column, mouse.row)
+        {
             let now = Instant::now();
             let is_double_click = self.last_mouse_click.as_ref().is_some_and(|last| {
-                last.index == index && now.duration_since(last.at) <= BRANCH_LIST_DOUBLE_CLICK_WINDOW
+                last.index == index
+                    && now.duration_since(last.at) <= BRANCH_LIST_DOUBLE_CLICK_WINDOW
             });
 
             if is_double_click {
