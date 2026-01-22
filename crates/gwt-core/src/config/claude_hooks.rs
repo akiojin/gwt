@@ -595,12 +595,20 @@ mod tests {
         // Check UserPromptSubmit is not duplicated
         let user_prompt_hook = settings.hooks.get("UserPromptSubmit").unwrap();
         let arr = user_prompt_hook.as_array().expect("Expected array format");
-        assert_eq!(arr.len(), 1, "Should have exactly one entry, not duplicated");
+        assert_eq!(
+            arr.len(),
+            1,
+            "Should have exactly one entry, not duplicated"
+        );
 
         // Check PreToolUse is not duplicated
         let pre_tool_hook = settings.hooks.get("PreToolUse").unwrap();
         let arr = pre_tool_hook.as_array().expect("Expected array format");
-        assert_eq!(arr.len(), 1, "Should have exactly one entry, not duplicated");
+        assert_eq!(
+            arr.len(),
+            1,
+            "Should have exactly one entry, not duplicated"
+        );
 
         // Verify the original path is preserved (not replaced)
         assert!(content.contains("/path/to/old-gwt"));
