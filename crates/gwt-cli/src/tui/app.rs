@@ -1954,6 +1954,278 @@ impl Model {
         }
     }
 
+    fn handle_wizard_mouse(&mut self, mouse: MouseEvent) {
+        if !self.wizard.visible {
+            return;
+        }
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return;
+        }
+
+        // Check if clicking outside popup area - close wizard
+        if !self.wizard.is_point_in_popup(mouse.column, mouse.row) {
+            self.wizard.close();
+            self.last_mouse_click = None;
+            return;
+        }
+
+        // Check if clicking on a list item
+        let Some(index) = self
+            .wizard
+            .selection_index_from_point(mouse.column, mouse.row)
+        else {
+            self.last_mouse_click = None;
+            return;
+        };
+
+        let now = Instant::now();
+        let is_double_click = self.last_mouse_click.as_ref().is_some_and(|last| {
+            last.index == index && now.duration_since(last.at) <= BRANCH_LIST_DOUBLE_CLICK_WINDOW
+        });
+
+        if is_double_click {
+            self.last_mouse_click = None;
+            // Double click: confirm selection (equivalent to Enter)
+            self.update(Message::WizardConfirm);
+        } else {
+            // Single click: select item and record for potential double click
+            if self.wizard.set_selection_index(index) {
+                // Selection changed
+            }
+            self.last_mouse_click = Some(MouseClick { index, at: now });
+        }
+    }
+
+
+    fn handle_confirm_mouse(&mut self, mouse: MouseEvent) {
+        if !matches!(self.screen, Screen::Confirm) {
+            return;
+        }
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return;
+        }
+
+        // Check if clicking outside popup area - close confirm dialog
+        if !self.confirm.is_point_in_popup(mouse.column, mouse.row) {
+            // Pop screen stack to return to previous screen
+            if let Some(prev_screen) = self.screen_stack.pop() {
+                self.screen = prev_screen;
+            }
+            self.last_mouse_click = None;
+            return;
+        }
+
+        // Check if clicking on cancel button
+        if self.confirm.is_cancel_button_at(mouse.column, mouse.row) {
+            let now = Instant::now();
+            let is_double_click = self.last_mouse_click.as_ref().is_some_and(|last| {
+                last.index == 0 && now.duration_since(last.at) <= BRANCH_LIST_DOUBLE_CLICK_WINDOW
+            });
+
+            if is_double_click {
+                self.last_mouse_click = None;
+                // Double click on cancel: close dialog
+                if let Some(prev_screen) = self.screen_stack.pop() {
+                    self.screen = prev_screen;
+                }
+            } else {
+                self.confirm.select_cancel();
+                self.last_mouse_click = Some(MouseClick { index: 0, at: now });
+            }
+            return;
+        }
+
+        // Check if clicking on confirm button
+        if self.confirm.is_confirm_button_at(mouse.column, mouse.row) {
+            let now = Instant::now();
+            let is_double_click = self.last_mouse_click.as_ref().is_some_and(|last| {
+                last.index == 1 && now.duration_since(last.at) <= BRANCH_LIST_DOUBLE_CLICK_WINDOW
+            });
+
+            if is_double_click {
+                self.last_mouse_click = None;
+                // Double click on confirm: execute confirm action
+                self.handle_confirm_action();
+            } else {
+                self.confirm.select_confirm();
+                self.last_mouse_click = Some(MouseClick { index: 1, at: now });
+            }
+        }
+    }
+
+
+    fn handle_confirm_action(&mut self) {
+        if self.confirm.is_confirmed() {
+            // FR-029d: Handle unsafe branch selection confirmation
+            if let Some(branch_name) = self.pending_unsafe_selection.take() {
+                // User confirmed - add branch to selection (FR-030)
+                self.branch_list.selected_branches.insert(branch_name);
+            }
+            // FR-010: Handle cleanup confirmation
+            if !self.pending_cleanup_branches.is_empty() {
+                let branches = std::mem::take(&mut self.pending_cleanup_branches);
+                self.execute_cleanup(&branches);
+            }
+            // FR-040: Handle agent termination confirmation
+            if self.pending_agent_termination.is_some() {
+                self.update(Message::ExecuteAgentTermination);
+            }
+            // SPEC-861d8cdf T-104: Handle hook setup confirmation
+            if self.pending_hook_setup {
+                if let Some(settings_path) = get_claude_settings_path() {
+                    if let Err(e) = register_gwt_hooks(&settings_path) {
+                        debug!(category = "tui", error = %e, "Failed to register gwt hooks");
+                    }
+                }
+            }
+        }
+        // Clear pending state and return to previous screen
+        self.pending_unsafe_selection = None;
+        self.pending_agent_termination = None;
+        self.pending_cleanup_branches.clear();
+        self.pending_hook_setup = false;
+        if let Some(prev_screen) = self.screen_stack.pop() {
+            self.screen = prev_screen;
+        }
+    }
+
+    fn handle_ai_wizard_mouse(&mut self, mouse: MouseEvent) {
+        if !self.ai_wizard.visible {
+            return;
+        }
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return;
+        }
+
+        // Check if clicking outside popup area - close wizard
+        if !self.ai_wizard.is_point_in_popup(mouse.column, mouse.row) {
+            self.ai_wizard.close();
+            self.last_mouse_click = None;
+            return;
+        }
+
+        // Only handle model selection step mouse clicks
+        if !matches!(self.ai_wizard.step, crate::tui::screens::ai_wizard::AIWizardStep::ModelSelect) {
+            return;
+        }
+
+        // Check if clicking on model list
+        if let Some(index) = self.ai_wizard.selection_index_from_point(mouse.column, mouse.row) {
+            let now = Instant::now();
+            let is_double_click = self.last_mouse_click.as_ref().is_some_and(|last| {
+                last.index == index && now.duration_since(last.at) <= BRANCH_LIST_DOUBLE_CLICK_WINDOW
+            });
+
+            if is_double_click {
+                self.last_mouse_click = None;
+                // Double click: select model and proceed (same as Enter)
+                if self.ai_wizard.select_model_index(index) {
+                    self.handle_ai_wizard_enter();
+                }
+            } else {
+                // Single click: just select the model
+                self.ai_wizard.select_model_index(index);
+                self.last_mouse_click = Some(MouseClick { index, at: now });
+            }
+        }
+    }
+
+    fn handle_profiles_mouse(&mut self, mouse: MouseEvent) {
+        if !matches!(self.screen, Screen::Profiles) {
+            return;
+        }
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return;
+        }
+        // Don't handle mouse clicks in create mode
+        if self.profiles.create_mode {
+            return;
+        }
+
+        if let Some(index) = self.profiles.selection_index_from_point(mouse.column, mouse.row) {
+            let now = Instant::now();
+            let is_double_click = self.last_mouse_click.as_ref().is_some_and(|last| {
+                last.index == index && now.duration_since(last.at) <= BRANCH_LIST_DOUBLE_CLICK_WINDOW
+            });
+
+            if is_double_click {
+                self.last_mouse_click = None;
+                // Double click: open environment screen for selected profile (same as Enter)
+                if self.profiles.select_index(index) {
+                    self.update(Message::Enter);
+                }
+            } else {
+                // Single click: just select the profile
+                self.profiles.select_index(index);
+                self.last_mouse_click = Some(MouseClick { index, at: now });
+            }
+        }
+    }
+
+    fn handle_environment_mouse(&mut self, mouse: MouseEvent) {
+        if !matches!(self.screen, Screen::Environment) {
+            return;
+        }
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return;
+        }
+        // Don't handle mouse clicks in edit mode
+        if self.environment.edit_mode {
+            return;
+        }
+
+        if let Some(index) = self.environment.selection_index_from_point(mouse.column, mouse.row) {
+            let now = Instant::now();
+            let is_double_click = self.last_mouse_click.as_ref().is_some_and(|last| {
+                last.index == index && now.duration_since(last.at) <= BRANCH_LIST_DOUBLE_CLICK_WINDOW
+            });
+
+            if is_double_click {
+                self.last_mouse_click = None;
+                // Double click: enter edit mode for selected item (same as Enter)
+                if self.environment.select_index(index) {
+                    self.update(Message::Enter);
+                }
+            } else {
+                // Single click: just select the item
+                self.environment.select_index(index);
+                self.last_mouse_click = Some(MouseClick { index, at: now });
+            }
+        }
+    }
+
+    fn handle_logs_mouse(&mut self, mouse: MouseEvent) {
+        if !matches!(self.screen, Screen::Logs) {
+            return;
+        }
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return;
+        }
+        // Don't handle mouse clicks during search or detail view
+        if self.logs.is_searching || self.logs.is_detail_shown() {
+            return;
+        }
+
+        if let Some(index) = self.logs.selection_index_from_point(mouse.column, mouse.row) {
+            let now = Instant::now();
+            let is_double_click = self.last_mouse_click.as_ref().is_some_and(|last| {
+                last.index == index && now.duration_since(last.at) <= BRANCH_LIST_DOUBLE_CLICK_WINDOW
+            });
+
+            if is_double_click {
+                self.last_mouse_click = None;
+                // Double click: show detail view for selected log entry (same as Enter)
+                if self.logs.select_index(index) {
+                    self.update(Message::Enter);
+                }
+            } else {
+                // Single click: just select the log entry
+                self.logs.select_index(index);
+                self.last_mouse_click = Some(MouseClick { index, at: now });
+            }
+        }
+    }
+
     fn open_url(&mut self, url: &str) {
         if url.trim().is_empty() {
             self.status_message = Some("Failed to open URL: empty URL".to_string());
@@ -2729,38 +3001,7 @@ impl Model {
                     }
                 }
                 Screen::Confirm => {
-                    if self.confirm.is_confirmed() {
-                        // FR-029d: Handle unsafe branch selection confirmation
-                        if let Some(branch_name) = self.pending_unsafe_selection.take() {
-                            // User confirmed - add branch to selection (FR-030)
-                            self.branch_list.selected_branches.insert(branch_name);
-                        }
-                        // FR-010: Handle cleanup confirmation
-                        if !self.pending_cleanup_branches.is_empty() {
-                            let branches = std::mem::take(&mut self.pending_cleanup_branches);
-                            self.execute_cleanup(&branches);
-                        }
-                        // FR-040: Handle agent termination confirmation
-                        if self.pending_agent_termination.is_some() {
-                            self.update(Message::ExecuteAgentTermination);
-                        }
-                        // SPEC-861d8cdf T-104: Handle hook setup confirmation
-                        if self.pending_hook_setup {
-                            if let Some(settings_path) = get_claude_settings_path() {
-                                if let Err(e) = register_gwt_hooks(&settings_path) {
-                                    debug!(category = "tui", error = %e, "Failed to register gwt hooks");
-                                }
-                            }
-                        }
-                    }
-                    // Clear pending state and return to previous screen
-                    self.pending_unsafe_selection = None;
-                    self.pending_agent_termination = None;
-                    self.pending_cleanup_branches.clear();
-                    self.pending_hook_setup = false;
-                    if let Some(prev_screen) = self.screen_stack.pop() {
-                        self.screen = prev_screen;
-                    }
+                    self.handle_confirm_action();
                 }
                 Screen::Profiles => {
                     if self.profiles.create_mode {
@@ -2983,6 +3224,7 @@ impl Model {
                             cancel_label: "Cancel".to_string(),
                             selected_confirm: true, // Default to Terminate
                             is_dangerous: true,
+                            ..Default::default()
                         };
                         self.screen_stack.push(self.screen.clone());
                         self.screen = Screen::Confirm;
@@ -3865,17 +4107,17 @@ impl Model {
                 render_worktree_create(&self.worktree_create, frame, chunks[1])
             }
             Screen::Settings => render_settings(&self.settings, frame, chunks[1]),
-            Screen::Logs => render_logs(&self.logs, frame, chunks[1]),
+            Screen::Logs => render_logs(&mut self.logs, frame, chunks[1]),
             Screen::Help => render_help(&self.help, frame, chunks[1]),
             Screen::Error => render_error(&self.error, frame, chunks[1]),
-            Screen::Profiles => render_profiles(&self.profiles, frame, chunks[1]),
+            Screen::Profiles => render_profiles(&mut self.profiles, frame, chunks[1]),
             Screen::Environment => render_environment(&mut self.environment, frame, chunks[1]),
-            Screen::AISettingsWizard => render_ai_wizard(&self.ai_wizard, frame, chunks[1]),
+            Screen::AISettingsWizard => render_ai_wizard(&mut self.ai_wizard, frame, chunks[1]),
             Screen::Confirm => {}
         }
 
         if matches!(self.screen, Screen::Confirm) {
-            render_confirm(&self.confirm, frame, chunks[1]);
+            render_confirm(&mut self.confirm, frame, chunks[1]);
         }
 
         // Footer (not for BranchList screen)
@@ -3885,7 +4127,7 @@ impl Model {
 
         // Wizard overlay (FR-044: popup on top of branch list)
         if self.wizard.visible {
-            render_wizard(&self.wizard, frame, frame.area());
+            render_wizard(&mut self.wizard, frame, frame.area());
         }
     }
 
@@ -4485,7 +4727,22 @@ pub fn run_with_context(context: Option<TuiEntryContext>) -> Result<Option<Launc
                 }
                 Event::Mouse(mouse) => {
                     if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-                        model.handle_branch_list_mouse(mouse);
+                        // Overlay priority: wizard > ai_wizard > confirm > screen-specific
+                        if model.wizard.visible {
+                            model.handle_wizard_mouse(mouse);
+                        } else if model.ai_wizard.visible {
+                            model.handle_ai_wizard_mouse(mouse);
+                        } else if matches!(model.screen, Screen::Confirm) {
+                            model.handle_confirm_mouse(mouse);
+                        } else {
+                            match model.screen {
+                                Screen::BranchList => model.handle_branch_list_mouse(mouse),
+                                Screen::Profiles => model.handle_profiles_mouse(mouse),
+                                Screen::Environment => model.handle_environment_mouse(mouse),
+                                Screen::Logs => model.handle_logs_mouse(mouse),
+                                _ => {}
+                            }
+                        }
                     }
                 }
                 _ => {}
