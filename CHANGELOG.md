@@ -1,6 +1,42 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [6.11.0] - 2026-01-22
+
+### Bug Fixes
+
+- AI設定ウィザードでdキーが入力できない問題を修正 (#722)
+- ブランチステータス更新中も詳細パネルにブランチ情報を表示 (#721)
+- 起動直後終了時の可視化を改善 (#719)
+- タブ状態をグローバル管理に変更しリフレッシュ時のリセットを修正 (#724)
+- CHANGELOG.mdの重複エントリを修正
+- MacOSのPTYラッパーで引数解釈を遮断 (#731)
+- Hook登録を上書き更新方式に変更 (#734)
+- Worktree復元を無効化 (#735)
+- タブ選択状態がリフレッシュ時にリセットされる問題を修正 (#736)
+- WindowsでClaudeのIS_SANDBOXを無効化 (#737)
+
+### Features
+
+- Allow variable session summary highlights (#718)
+- 起動最適化 - 非同期化と進捗表示の改善 (#723)
+- **tui:** ブランチ名色分けとエージェント履歴永続化 (#730)
+- **tui:** シングルクリックでブランチ選択、ダブルクリックで実行に変更 (#740)
+- セッション要約に依頼と直近指示の明示を追加 (#742)
+- **tui:** エラーポップアップ・ログ出力システム (SPEC-e66acf66) (#743)
+
+### Miscellaneous Tasks
+
+- Add .gwt-session.toml to .gitignore
+
+### Styling
+
+- Rustfmtフォーマット修正 (#732)
+
+### Testing
+
+- Hook setup重複登録防止のテスト追加 (#726)
+
 ## [6.10.0] - 2026-01-22
 
 ### Bug Fixes

@@ -1,7 +1,8 @@
 //! Logger initialization
 
-use crate::error::Result;
+use crate::error::{ErrorCategory, GwtError, Result};
 use std::path::PathBuf;
+use tracing::error;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{
     fmt::{self, format::FmtSpan},
@@ -86,6 +87,81 @@ pub fn init_logger(config: &LogConfig) -> Result<()> {
         .ok(); // Ignore if already initialized
 
     Ok(())
+}
+
+/// Log a GwtError with full context (code, category, message, details)
+pub fn log_gwt_error(err: &GwtError, details: Option<&str>) {
+    let code = err.code();
+    let category = err.category();
+    let message = err.to_string();
+
+    match category {
+        ErrorCategory::Git => {
+            error!(
+                code = %code,
+                category = "git",
+                error_message = %message,
+                details = details.unwrap_or(""),
+                "Git operation error"
+            );
+        }
+        ErrorCategory::Worktree => {
+            error!(
+                code = %code,
+                category = "worktree",
+                error_message = %message,
+                details = details.unwrap_or(""),
+                "Worktree operation error"
+            );
+        }
+        ErrorCategory::Config => {
+            error!(
+                code = %code,
+                category = "config",
+                error_message = %message,
+                details = details.unwrap_or(""),
+                "Configuration error"
+            );
+        }
+        ErrorCategory::Agent => {
+            error!(
+                code = %code,
+                category = "agent",
+                error_message = %message,
+                details = details.unwrap_or(""),
+                "Agent error"
+            );
+        }
+        ErrorCategory::WebApi => {
+            error!(
+                code = %code,
+                category = "webapi",
+                error_message = %message,
+                details = details.unwrap_or(""),
+                "Web API error"
+            );
+        }
+        ErrorCategory::Internal => {
+            error!(
+                code = %code,
+                category = "internal",
+                error_message = %message,
+                details = details.unwrap_or(""),
+                "Internal error"
+            );
+        }
+    }
+}
+
+/// Log an error message with code (for use when GwtError is not available)
+pub fn log_error_message(code: &str, category: &str, message: &str, details: Option<&str>) {
+    error!(
+        code = %code,
+        category = %category,
+        error_message = %message,
+        details = details.unwrap_or(""),
+        "Error occurred"
+    );
 }
 
 #[cfg(test)]

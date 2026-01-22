@@ -234,6 +234,23 @@ impl GwtError {
         None
     }
 
+    /// Get suggestions for resolving this error
+    pub fn suggestions(&self) -> Vec<String> {
+        let code = self.code();
+        let messages = error_messages();
+        if let Some(table) = messages.as_table() {
+            if let Some(suggestions) = table.get("suggestions").and_then(|s| s.as_table()) {
+                if let Some(arr) = suggestions.get(code).and_then(|v| v.as_array()) {
+                    return arr
+                        .iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect();
+                }
+            }
+        }
+        Vec::new()
+    }
+
     /// Get the error category
     pub fn category(&self) -> ErrorCategory {
         match self.code().chars().nth(1).and_then(|c| c.to_digit(10)) {

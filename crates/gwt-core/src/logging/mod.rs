@@ -5,7 +5,7 @@
 mod logger;
 mod reader;
 
-pub use logger::{init_logger, LogConfig};
+pub use logger::{init_logger, log_error_message, log_gwt_error, LogConfig};
 pub use reader::{LogEntry, LogReader};
 
 use crate::error::Result;
