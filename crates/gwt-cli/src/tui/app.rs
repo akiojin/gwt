@@ -1006,10 +1006,31 @@ impl Model {
         self.spawn_session_summaries(vec![task], settings);
     }
 
+    fn extract_tool_version_from_usage(branch: &BranchItem, tool_id: &str) -> Option<String> {
+        let usage = branch.last_tool_usage.as_ref()?;
+        let (label, version) = usage.rsplit_once('@')?;
+        let version = version.trim();
+        if version.is_empty() {
+            return None;
+        }
+        if let Some(last_id) = branch.last_tool_id.as_deref() {
+            if last_id != tool_id {
+                return None;
+            }
+        } else {
+            let normalized = crate::tui::normalize_agent_label(tool_id);
+            if !label.trim().eq_ignore_ascii_case(&normalized) {
+                return None;
+            }
+        }
+        Some(version.to_string())
+    }
+
     fn persist_detected_session(&self, branch: &BranchItem, tool_id: &str, session_id: &str) {
         if branch.worktree_path.is_none() {
             return;
         }
+        let tool_version = Self::extract_tool_version_from_usage(branch, tool_id);
         let entry = ToolSessionEntry {
             branch: branch.name.clone(),
             worktree_path: branch.worktree_path.clone(),
@@ -1020,7 +1041,7 @@ impl Model {
             model: None,
             reasoning_level: None,
             skip_permissions: None,
-            tool_version: None,
+            tool_version,
             timestamp: SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)
@@ -5218,6 +5239,17 @@ mod tests {
         }
     }
 
+    fn sample_branch_with_usage(
+        name: &str,
+        usage: &str,
+        tool_id: Option<&str>,
+    ) -> BranchItem {
+        let mut branch = sample_branch_with_session(name);
+        branch.last_tool_usage = Some(usage.to_string());
+        branch.last_tool_id = tool_id.map(|id| id.to_string());
+        branch
+    }
+
     #[test]
     fn test_resolve_orphaned_agent_name_prefers_session_entry() {
         let entry = sample_tool_entry("codex-cli");
@@ -5231,6 +5263,37 @@ mod tests {
         assert_eq!(resolved, "bash");
         let resolved = resolve_orphaned_agent_name("  ", None);
         assert_eq!(resolved, "unknown");
+    }
+
+    #[test]
+    fn test_extract_tool_version_from_usage_matches_tool_id() {
+        let branch = sample_branch_with_usage("feature/version", "Codex@2.1.0", Some("codex-cli"));
+        let version = Model::extract_tool_version_from_usage(&branch, "codex-cli");
+        assert_eq!(version.as_deref(), Some("2.1.0"));
+    }
+
+    #[test]
+    fn test_extract_tool_version_from_usage_matches_label_when_id_missing() {
+        let branch = sample_branch_with_usage("feature/version", "Codex@2.1.0", None);
+        let version = Model::extract_tool_version_from_usage(&branch, "codex-cli");
+        assert_eq!(version.as_deref(), Some("2.1.0"));
+    }
+
+    #[test]
+    fn test_extract_tool_version_from_usage_rejects_mismatch() {
+        let branch = sample_branch_with_usage("feature/version", "Codex@2.1.0", Some("codex-cli"));
+        let version = Model::extract_tool_version_from_usage(&branch, "gemini-cli");
+        assert!(version.is_none());
+    }
+
+    #[test]
+    fn test_extract_tool_version_from_usage_requires_version_suffix() {
+        let branch = sample_branch_with_usage("feature/version", "Codex", Some("codex-cli"));
+        let version = Model::extract_tool_version_from_usage(&branch, "codex-cli");
+        assert!(version.is_none());
+        let branch = sample_branch_with_usage("feature/version", "Codex@", Some("codex-cli"));
+        let version = Model::extract_tool_version_from_usage(&branch, "codex-cli");
+        assert!(version.is_none());
     }
 
     #[test]
