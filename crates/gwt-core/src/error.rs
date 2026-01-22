@@ -106,7 +106,7 @@ pub enum GwtError {
     #[error("[E2008] Worktree locked by another process: {path}")]
     WorktreeLocked { path: PathBuf },
 
-    #[error("[E2009] Path exists but not a stale worktree - please remove manually: {path}")]
+    #[error("[E2009] Path exists - automatic worktree recovery is disabled. Please resolve manually: {path}")]
     WorktreePathConflict { path: PathBuf },
 
     // E3xxx: Configuration errors

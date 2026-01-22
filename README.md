@@ -153,7 +153,6 @@ The tool presents an interactive interface with the following options:
 | `f` | Enter filter mode |
 | `r` | Refresh branch list |
 | `c` | Cleanup merged branches |
-| `x` | Repair worktrees |
 | `l` | View logs |
 | `?` | Help |
 | `q` / `Ctrl+C` | Quit |

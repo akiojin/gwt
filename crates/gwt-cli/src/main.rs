@@ -4,6 +4,7 @@ use chrono::Utc;
 use clap::Parser;
 use gwt_core::agent::codex::{codex_default_args, codex_skip_permissions_flag};
 use gwt_core::agent::get_command_version;
+use gwt_core::ai::AgentHistoryStore;
 use gwt_core::config::{save_session_entry, AgentStatus, Session, Settings, ToolSessionEntry};
 use gwt_core::error::GwtError;
 use gwt_core::worktree::WorktreeManager;
@@ -77,27 +78,46 @@ fn run() -> Result<(), GwtError> {
                 "Detected tmux mode for TUI"
             );
 
-            if let Ok(manager) = WorktreeManager::new(&repo_root) {
-                let _ = manager.auto_cleanup_orphans();
-            }
             let mut entry: Option<TuiEntryContext> = None;
             loop {
                 let selection = tui::run_with_context(entry.take())?;
                 match selection {
-                    Some(launch_plan) => match execute_launch_plan(launch_plan) {
-                        Ok(AgentExitKind::Success) => {
-                            entry = Some(TuiEntryContext::success(
-                                "Session completed successfully.".to_string(),
-                            ));
+                    Some(launch_plan) => {
+                        // FR-088: Record agent usage to history (single mode)
+                        let agent_id = launch_plan.config.agent.id();
+                        let agent_label = format!(
+                            "{}@{}",
+                            launch_plan.config.agent.label(),
+                            launch_plan.selected_version
+                        );
+                        let mut agent_history = AgentHistoryStore::load().unwrap_or_default();
+                        if let Err(e) = agent_history.record(
+                            &repo_root,
+                            &launch_plan.config.branch_name,
+                            agent_id,
+                            &agent_label,
+                        ) {
+                            warn!(category = "main", "Failed to record agent history: {}", e);
                         }
-                        Ok(AgentExitKind::Interrupted) => {
-                            entry =
-                                Some(TuiEntryContext::warning("Session interrupted.".to_string()));
+                        if let Err(e) = agent_history.save() {
+                            warn!(category = "main", "Failed to save agent history: {}", e);
                         }
-                        Err(err) => {
-                            entry = Some(TuiEntryContext::error(err.to_string()));
+                        match execute_launch_plan(launch_plan) {
+                            Ok(AgentExitKind::Success) => {
+                                entry = Some(TuiEntryContext::success(
+                                    "Session completed successfully.".to_string(),
+                                ));
+                            }
+                            Ok(AgentExitKind::Interrupted) => {
+                                entry = Some(TuiEntryContext::warning(
+                                    "Session interrupted.".to_string(),
+                                ));
+                            }
+                            Err(err) => {
+                                entry = Some(TuiEntryContext::error(err.to_string()));
+                            }
                         }
-                    },
+                    }
                     None => break,
                 }
             }
@@ -430,30 +450,10 @@ fn cmd_unlock(repo_root: &PathBuf, target: &str) -> Result<(), GwtError> {
     Ok(())
 }
 
-fn cmd_repair(repo_root: &PathBuf, target: Option<&str>) -> Result<(), GwtError> {
-    info!(
-        category = "cli",
-        command = "repair",
-        target = target.unwrap_or("all"),
-        "Executing repair command"
-    );
-
-    let manager = WorktreeManager::new(repo_root)?;
-
-    if let Some(target) = target {
-        let wt = manager
-            .get_by_branch(target)?
-            .ok_or_else(|| GwtError::WorktreeNotFound {
-                path: PathBuf::from(target),
-            })?;
-        manager.repair_path(&wt.path)?;
-        println!("Repaired worktree: {}", wt.path.display());
-    } else {
-        manager.repair()?;
-        println!("Repaired all worktrees.");
-    }
-
-    Ok(())
+fn cmd_repair(_repo_root: &PathBuf, _target: Option<&str>) -> Result<(), GwtError> {
+    Err(GwtError::Internal(
+        "Worktree repair is disabled.".to_string(),
+    ))
 }
 
 /// Handle Claude Code hook subcommands (SPEC-861d8cdf FR-101/T-101/T-102)
@@ -825,11 +825,15 @@ pub(crate) struct LaunchPlan {
     pub env: Vec<(String, String)>,
 }
 
+fn should_set_claude_sandbox_env(target_os: &str) -> bool {
+    target_os != "windows"
+}
+
 pub(crate) fn build_launch_env(config: &AgentLaunchConfig) -> Vec<(String, String)> {
     let mut env_vars = config.env.clone();
     if config.skip_permissions && config.agent == CodingAgent::ClaudeCode {
         let has_sandbox = env_vars.iter().any(|(key, _)| key == "IS_SANDBOX");
-        if !has_sandbox {
+        if !has_sandbox && should_set_claude_sandbox_env(std::env::consts::OS) {
             env_vars.push(("IS_SANDBOX".to_string(), "1".to_string()));
         }
     }
@@ -1704,6 +1708,7 @@ fn apply_pty_wrapper(executable: &str, args: &[String]) -> (String, Vec<String>)
     {
         let mut wrapped_args = Vec::new();
         wrapped_args.push("-q".to_string());
+        wrapped_args.push("--".to_string());
         wrapped_args.push("/dev/null".to_string());
         wrapped_args.push(executable.to_string());
         wrapped_args.extend(args.iter().cloned());
@@ -1964,6 +1969,31 @@ mod tests {
     }
 
     #[test]
+    fn test_should_set_claude_sandbox_env_windows() {
+        assert!(!should_set_claude_sandbox_env("windows"));
+    }
+
+    #[test]
+    fn test_should_set_claude_sandbox_env_non_windows() {
+        assert!(should_set_claude_sandbox_env("linux"));
+        assert!(should_set_claude_sandbox_env("macos"));
+    }
+
+    #[test]
+    fn test_build_launch_env_claude_skip_permissions_gates_is_sandbox() {
+        let config = sample_config(CodingAgent::ClaudeCode);
+        let env = build_launch_env(&config);
+        let has_sandbox = env
+            .iter()
+            .any(|(key, value)| key == "IS_SANDBOX" && value == "1");
+        if should_set_claude_sandbox_env(std::env::consts::OS) {
+            assert!(has_sandbox);
+        } else {
+            assert!(!has_sandbox);
+        }
+    }
+
+    #[test]
     fn test_detect_tui_tmux_mode_single_outside_tmux() {
         let _guard = TMUX_ENV_MUTEX.lock().unwrap();
         let original = std::env::var("TMUX").ok();
@@ -2026,10 +2056,44 @@ mod tests {
     }
 
     #[test]
+    fn test_cmd_repair_disabled() {
+        let err = cmd_repair(&PathBuf::from("/tmp"), None).unwrap_err();
+        assert!(matches!(err, GwtError::Internal(_)));
+        assert!(err.to_string().contains("Worktree repair is disabled."));
+    }
+
+    #[test]
     fn test_is_fast_exit_threshold() {
         assert!(is_fast_exit(0));
         assert!(is_fast_exit(FAST_EXIT_THRESHOLD_MS - 1));
         assert!(!is_fast_exit(FAST_EXIT_THRESHOLD_MS));
+    }
+
+    #[test]
+    fn test_apply_pty_wrapper_macos_option_terminator() {
+        let args = vec![
+            "resume".to_string(),
+            "--resume".to_string(),
+            "-c".to_string(),
+            "value".to_string(),
+        ];
+        let (exe, wrapped) = apply_pty_wrapper("codex", &args);
+
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(exe, "script");
+            assert_eq!(wrapped.get(0).map(String::as_str), Some("-q"));
+            assert_eq!(wrapped.get(1).map(String::as_str), Some("--"));
+            assert_eq!(wrapped.get(2).map(String::as_str), Some("/dev/null"));
+            assert_eq!(wrapped.get(3).map(String::as_str), Some("codex"));
+            assert_eq!(wrapped[4..], args[..]);
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert_eq!(exe, "codex");
+            assert_eq!(wrapped, args);
+        }
     }
 
     #[test]

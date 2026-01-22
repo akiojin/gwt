@@ -218,21 +218,21 @@
 
 - [x] **T201** [統合] `package.json` に従い `bun run format:check` / `bunx --bun markdownlint-cli "**/*.md" --config .markdownlint.json --ignore-path .markdownlintignore` / `bun run lint` を実行し、失敗があれば修正
 
-## フェーズ4: ユーザーストーリー6 - Worktree作成時のstaleディレクトリ自動回復
+## フェーズ4: ユーザーストーリー6 - Worktree復元の無効化
 
-**ストーリー**: Worktree作成対象パスがstale状態で残っていても、自動回復して作成を完了する。
+**ストーリー**: Worktree作成時や起動時の自動復元・修復を行わず、手動解決のみ許可する。
 
-**価値**: 手動削除の手戻りをなくし、ブランチ選択から作業開始までを途切れさせない。
+**価値**: 予期しない削除や修復の自動実行を防ぎ、運用の透明性を高める。
 
 ### テスト（TDD）
 
-- [x] **T301** [US6] `tests/integration/branch-creation.test.ts` にstaleディレクトリを検出して削除→再作成できるテストを追加
-- [x] **T302** [US6] `tests/integration/branch-creation.test.ts` にstale判定できない既存ディレクトリは削除せずエラーになるテストを追加
+- [x] **T301** [US6] `crates/gwt-core/src/worktree/manager.rs` の既存パス時エラー/自動クリーンアップ無効化テストを更新
+- [x] **T302** [US6] `crates/gwt-cli/src/main.rs` にrepair無効化のテストを追加
 
 ### 実装
 
-- [x] **T303** [US6] `src/worktree.ts` にstale判定・削除処理を追加し、`createWorktree`の前処理として実行
-- [x] **T304** [US6] `src/worktree.ts` に判定不能な既存ディレクトリ向けの明確なエラーメッセージを追加
+- [x] **T303** [US6] `crates/gwt-core/src/worktree/manager.rs` で自動復元を無効化し、既存パスはエラーにする
+- [x] **T304** [US6] `crates/gwt-cli/src/main.rs` / `crates/gwt-cli/src/tui/app.rs` / `crates/gwt-cli/src/tui/screens/branch_list.rs` で自動クリーンアップとrepair操作を無効化し、キーバインド表示を更新
 
 ## フェーズ5: ユーザーストーリー8 - ブランチ選択後のウィザードポップアップ (優先度: P0)
 
@@ -572,3 +572,54 @@
 ### 実装
 
 - [x] **T1232** [US0] `crates/gwt-cli/src/tui/screens/branch_list.rs` のスピナー参照を正規化し、範囲外アクセスを防止
+
+## 追加作業: ブランチ名の色分けによるWorktree状態表現 (2026-01-22)
+
+### 仕様更新
+
+- [ ] **T1401** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` にブランチ名色分けとWorktree列削除の要件・方針を追記（完了済み）
+
+### テスト（TDD）
+
+- [ ] **T1402** [Test] [US12] `crates/gwt-core/src/git/branch.rs` に`upstream:track`から`[gone]`を検出するテストを追加
+- [ ] **T1403** [Test] [US12] `crates/gwt-cli/src/tui/screens/branch_list.rs` にWorktree列が削除されていることを確認するテストを追加
+- [ ] **T1404** [Test] [US12] `crates/gwt-cli/src/tui/screens/branch_list.rs` にブランチ名の色分け（White/Gray/Red）のテストを追加
+- [ ] **T1405** [Test] [US12] `crates/gwt-cli/src/tui/screens/branch_list.rs` に選択中ブランチでシアン背景・黒テキストになるテストを追加
+- [ ] **T1406** [Test] [US12] `crates/gwt-cli/src/tui/screens/branch_list.rs` にgoneブランチが赤色で表示されるテストを追加
+
+### 実装
+
+- [ ] **T1411** [Impl] [US12] `crates/gwt-core/src/git/branch.rs` に`upstream:track`フォーマットを追加し、`gone`フィールドをBranch構造体に追加
+- [ ] **T1412** [Impl] [US12] `crates/gwt-cli/src/tui/screens/branch_list.rs` からWorktree列（`w`/`x`/`.`）の表示を削除
+- [ ] **T1413** [Impl] [US12] `crates/gwt-cli/src/tui/screens/branch_list.rs` にブランチ名の色分けロジックを実装
+- [ ] **T1414** [Impl] [US12] `crates/gwt-cli/src/tui/screens/branch_list.rs` で選択中ブランチの色優先ロジックを調整
+
+### 検証
+
+- [ ] **T1415** [検証] `cargo test -p gwt-core -p gwt-cli` と `cargo clippy` を実行し、失敗がないことを確認
+
+## 追加作業: エージェント履歴表示の拡張 (2026-01-22)
+
+### テスト（TDD）
+
+- [ ] **T1501** [Test] [US13] `crates/gwt-cli/src/tui/app.rs` に起動時にAgentHistoryStoreが読み込まれるテストを追加
+- [ ] **T1502** [Test] [US13] `crates/gwt-cli/src/tui/screens/branch_list.rs` にWorktreeなしブランチで履歴からエージェント情報が表示されるテストを追加
+- [ ] **T1503** [Test] [US13] `crates/gwt-cli/src/tui/screens/branch_list.rs` に実行中エージェントが履歴より優先されるテストを追加
+- [ ] **T1504** [Test] [US13] `crates/gwt-cli/src/tui/screens/branch_list.rs` に履歴なしブランチでエージェント情報が空白になるテストを追加
+
+### 実装
+
+- [ ] **T1511** [Impl] [US13] `crates/gwt-cli/src/tui/app.rs` に起動時のAgentHistoryStore読み込みを追加
+- [ ] **T1512** [Impl] [US13] `crates/gwt-cli/src/tui/screens/branch_list.rs` に履歴からのエージェント表示ロジックを実装
+- [ ] **T1513** [Impl] [US13] `crates/gwt-cli/src/tui/app.rs` にエージェント起動時の履歴記録呼び出しを追加
+
+### 検証
+
+- [ ] **T1514** [検証] `cargo test -p gwt-cli` と `cargo build --release` を実行し、失敗がないことを確認
+
+## タスク凡例（追加分）
+
+**ストーリータグ（追加分）**:
+
+- **[US12]**: ユーザーストーリー12（ブランチ名の色分けによるWorktree状態表現）
+- **[US13]**: ユーザーストーリー13（エージェント履歴表示の拡張）
