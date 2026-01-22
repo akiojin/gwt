@@ -13,7 +13,7 @@ use ratatui::{prelude::*, widgets::*};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Get terminal color for coding agent (SPEC-3b0ed29b FR-024~FR-027)
 fn get_agent_color(tool_id: Option<&str>) -> Color {
@@ -253,7 +253,11 @@ impl BranchItem {
             has_changes: worktree.map(|wt| wt.has_changes).unwrap_or(false),
             has_unpushed: worktree.map(|wt| wt.has_unpushed).unwrap_or(false),
             divergence: DivergenceStatus::UpToDate,
-            has_remote_counterpart: branch.has_remote,
+            has_remote_counterpart: if branch_type == BranchType::Local {
+                branch.has_remote
+            } else {
+                false
+            },
             remote_name: if branch.name.starts_with("remotes/") {
                 Some(branch.name.clone())
             } else {
@@ -305,7 +309,11 @@ impl BranchItem {
             has_changes: false,
             has_unpushed: false,
             divergence: DivergenceStatus::UpToDate,
-            has_remote_counterpart: branch.has_remote,
+            has_remote_counterpart: if branch_type == BranchType::Local {
+                branch.has_remote
+            } else {
+                false
+            },
             remote_name: if branch.name.starts_with("remotes/") {
                 Some(branch.name.clone())
             } else {
@@ -525,7 +533,7 @@ impl BranchListState {
                 .count(),
             remote_count: branches
                 .iter()
-                .filter(|b| b.branch_type == BranchType::Remote || b.has_remote_counterpart)
+                .filter(|b| b.branch_type == BranchType::Remote)
                 .count(),
             worktree_count: branches.iter().filter(|b| b.has_worktree).count(),
             changes_count: branches.iter().filter(|b| b.has_changes).count(),
@@ -543,9 +551,7 @@ impl BranchListState {
             match self.view_mode {
                 ViewMode::All => true,
                 ViewMode::Local => branch.branch_type == BranchType::Local,
-                ViewMode::Remote => {
-                    branch.branch_type == BranchType::Remote || branch.has_remote_counterpart
-                }
+                ViewMode::Remote => branch.branch_type == BranchType::Remote,
             }
         });
 
@@ -2004,11 +2010,11 @@ fn render_session_panel(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let mut lines: Vec<Line> = Vec::new();
+    let mut lines: Vec<Line<'static>> = Vec::new();
 
     if let Some(status) = status_message {
         lines.push(Line::from(Span::styled(
-            status,
+            status.to_string(),
             Style::default().fg(Color::Yellow),
         )));
     } else if state.is_loading {
@@ -2119,13 +2125,12 @@ fn render_session_panel(
         )));
     }
 
-    let total_lines = count_wrapped_lines(&lines, inner.width as usize);
+    let wrapped_lines = wrap_lines_by_char(lines, inner.width as usize);
+    let total_lines = wrapped_lines.len();
     let max_scroll = total_lines.saturating_sub(inner.height as usize);
     state.update_session_scroll_bounds(max_scroll, inner.height as usize);
 
-    let paragraph = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .scroll((state.session_scroll_offset as u16, 0));
+    let paragraph = Paragraph::new(wrapped_lines).scroll((state.session_scroll_offset as u16, 0));
     frame.render_widget(paragraph, inner);
 }
 
@@ -2191,6 +2196,108 @@ fn render_markdown_lines(markdown: &str) -> Vec<Line<'static>> {
     lines
 }
 
+fn wrap_lines_by_char(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    let mut wrapped = Vec::new();
+    for line in lines {
+        wrapped.extend(wrap_line_chars(&line, width));
+    }
+    wrapped
+}
+
+fn wrap_line_chars(line: &Line<'static>, width: usize) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    if line.spans.is_empty() {
+        return vec![Line {
+            spans: Vec::new(),
+            style: line.style,
+            alignment: line.alignment,
+        }];
+    }
+
+    let mut wrapped = Vec::new();
+    let mut current_spans: Vec<Span<'static>> = Vec::new();
+    let mut current_width = 0usize;
+    let mut buffer = String::new();
+    let mut buffer_style = Style::default();
+    let mut buffer_active = false;
+
+    let flush_buffer = |spans: &mut Vec<Span<'static>>,
+                        buffer: &mut String,
+                        buffer_style: &Style,
+                        buffer_active: &mut bool| {
+        if *buffer_active && !buffer.is_empty() {
+            spans.push(Span::styled(std::mem::take(buffer), *buffer_style));
+        } else {
+            buffer.clear();
+        }
+        *buffer_active = false;
+    };
+
+    let push_line =
+        |wrapped: &mut Vec<Line<'static>>, spans: &mut Vec<Span<'static>>, line: &Line<'static>| {
+            wrapped.push(Line {
+                spans: std::mem::take(spans),
+                style: line.style,
+                alignment: line.alignment,
+            });
+        };
+
+    for span in &line.spans {
+        let span_style = span.style;
+        for ch in span.content.chars() {
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if current_width > 0 && current_width + ch_width > width {
+                flush_buffer(
+                    &mut current_spans,
+                    &mut buffer,
+                    &buffer_style,
+                    &mut buffer_active,
+                );
+                push_line(&mut wrapped, &mut current_spans, line);
+                current_width = 0;
+            }
+
+            if !buffer_active || buffer_style != span_style {
+                flush_buffer(
+                    &mut current_spans,
+                    &mut buffer,
+                    &buffer_style,
+                    &mut buffer_active,
+                );
+                buffer_style = span_style;
+                buffer_active = true;
+            }
+
+            buffer.push(ch);
+            current_width += ch_width;
+
+            if current_width >= width {
+                flush_buffer(
+                    &mut current_spans,
+                    &mut buffer,
+                    &buffer_style,
+                    &mut buffer_active,
+                );
+                push_line(&mut wrapped, &mut current_spans, line);
+                current_width = 0;
+            }
+        }
+    }
+
+    flush_buffer(
+        &mut current_spans,
+        &mut buffer,
+        &buffer_style,
+        &mut buffer_active,
+    );
+    if !current_spans.is_empty() || wrapped.is_empty() {
+        push_line(&mut wrapped, &mut current_spans, line);
+    }
+
+    wrapped
+}
+
 fn flush_paragraph_lines(lines: &mut Vec<Line<'static>>, buffer: &mut String, in_item: bool) {
     let text = buffer.trim();
     if text.is_empty() {
@@ -2238,24 +2345,6 @@ fn push_bullet_lines(lines: &mut Vec<Line<'static>>, text: &str) {
     }
 }
 
-fn count_wrapped_lines(lines: &[Line], width: usize) -> usize {
-    if width == 0 {
-        return 0;
-    }
-    lines
-        .iter()
-        .map(|line| {
-            let line_width: usize = line
-                .spans
-                .iter()
-                .map(|span| span.content.as_ref().width())
-                .sum();
-            let line_width = line_width.max(1);
-            line_width.div_ceil(width)
-        })
-        .sum()
-}
-
 /// Render footer line with keybindings (FR-004)
 fn render_footer(frame: &mut Frame, area: Rect) {
     let keybinds = [
@@ -2292,6 +2381,14 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use std::path::Path;
+
+    fn line_text(line: &Line<'_>) -> String {
+        let mut text = String::new();
+        for span in &line.spans {
+            text.push_str(span.content.as_ref());
+        }
+        text
+    }
 
     fn sample_branch(name: &str) -> BranchItem {
         BranchItem {
@@ -2335,6 +2432,15 @@ mod tests {
         assert_eq!(state.spinner_char(), '/');
         state.spinner_frame = SPINNER_FRAMES.len() * 5;
         assert_eq!(state.spinner_char(), '|');
+    }
+
+    #[test]
+    fn test_wrap_lines_by_char_splits_long_line() {
+        let lines = vec![Line::from("abcdef")];
+        let wrapped = wrap_lines_by_char(lines, 3);
+        assert_eq!(wrapped.len(), 2);
+        assert_eq!(line_text(&wrapped[0]), "abc");
+        assert_eq!(line_text(&wrapped[1]), "def");
     }
 
     #[test]
@@ -2684,7 +2790,8 @@ mod tests {
         assert_eq!(state.filtered_branches()[0].name, "main");
 
         state.set_view_mode(ViewMode::Remote);
-        assert_eq!(state.filtered_branches().len(), 2); // main has remote counterpart
+        assert_eq!(state.filtered_branches().len(), 1);
+        assert_eq!(state.filtered_branches()[0].name, "remotes/origin/main");
     }
 
     #[test]

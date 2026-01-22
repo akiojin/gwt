@@ -129,27 +129,46 @@ impl WorktreeManager {
             branch = branch_name,
             "Creating worktree for existing branch"
         );
-        let path = WorktreePath::generate(&self.repo_root, branch_name);
+        let normalized_branch = normalize_remote_ref(branch_name);
+        let mut resolved_branch = branch_name.to_string();
+        if !Branch::exists(&self.repo_root, branch_name)? {
+            if let Some((remote, branch)) = split_remote_ref(normalized_branch) {
+                if !Branch::remote_exists(&self.repo_root, remote, branch)? {
+                    error!(
+                        category = "worktree",
+                        branch = branch_name,
+                        "Branch not found"
+                    );
+                    return Err(GwtError::BranchNotFound {
+                        name: branch_name.to_string(),
+                    });
+                }
+                resolved_branch = branch.to_string();
+                if !Branch::exists(&self.repo_root, &resolved_branch)? {
+                    let remote_ref = format!("{}/{}", remote, branch);
+                    Branch::create(&self.repo_root, &resolved_branch, &remote_ref)?;
+                }
+            } else {
+                error!(
+                    category = "worktree",
+                    branch = branch_name,
+                    "Branch not found"
+                );
+                return Err(GwtError::BranchNotFound {
+                    name: branch_name.to_string(),
+                });
+            }
+        }
+
+        let path = WorktreePath::generate(&self.repo_root, &resolved_branch);
 
         // FR-038-040: Handle existing path (auto-recovery disabled)
         if path.exists() {
             self.handle_existing_path(&path)?;
         }
 
-        // Check if branch exists
-        if !Branch::exists(&self.repo_root, branch_name)? {
-            error!(
-                category = "worktree",
-                branch = branch_name,
-                "Branch not found"
-            );
-            return Err(GwtError::BranchNotFound {
-                name: branch_name.to_string(),
-            });
-        }
-
         // Create worktree
-        self.repo.create_worktree(&path, branch_name, false)?;
+        self.repo.create_worktree(&path, &resolved_branch, false)?;
 
         // Return the created worktree
         let worktree = self
@@ -159,7 +178,7 @@ impl WorktreeManager {
         info!(
             category = "worktree",
             operation = "create",
-            branch = branch_name,
+            branch = resolved_branch.as_str(),
             path = %worktree.path.display(),
             "Worktree created for existing branch"
         );
@@ -197,18 +216,32 @@ impl WorktreeManager {
             });
         }
 
+        let normalized_base = base_branch.map(|base| normalize_remote_ref(base).to_string());
         // If base branch specified, checkout it first
-        if let Some(base) = base_branch {
+        if let Some(base) = normalized_base.as_deref() {
             // Verify base branch exists
             if !Branch::exists(&self.repo_root, base)? {
-                error!(
-                    category = "worktree",
-                    branch = base,
-                    "Base branch not found"
-                );
-                return Err(GwtError::BranchNotFound {
-                    name: base.to_string(),
-                });
+                if let Some((remote, branch)) = split_remote_ref(base) {
+                    if !Branch::remote_exists(&self.repo_root, remote, branch)? {
+                        error!(
+                            category = "worktree",
+                            branch = base,
+                            "Base branch not found"
+                        );
+                        return Err(GwtError::BranchNotFound {
+                            name: base.to_string(),
+                        });
+                    }
+                } else {
+                    error!(
+                        category = "worktree",
+                        branch = base,
+                        "Base branch not found"
+                    );
+                    return Err(GwtError::BranchNotFound {
+                        name: base.to_string(),
+                    });
+                }
             }
         }
 
@@ -216,7 +249,7 @@ impl WorktreeManager {
         self.repo.create_worktree(&path, branch_name, true)?;
 
         // If base branch specified, reset to it
-        if let Some(base) = base_branch {
+        if let Some(base) = normalized_base.as_deref() {
             let wt_repo = Repository::open(&path)?;
             std::process::Command::new("git")
                 .args(["reset", "--hard", base])
@@ -237,7 +270,7 @@ impl WorktreeManager {
             category = "worktree",
             operation = "create_new_branch",
             branch = branch_name,
-            base = base_branch.unwrap_or("HEAD"),
+            base = normalized_base.as_deref().unwrap_or("HEAD"),
             path = %worktree.path.display(),
             "Worktree created with new branch"
         );
@@ -480,6 +513,14 @@ impl WorktreeManager {
             .filter(|wt| wt.needs_attention())
             .collect())
     }
+}
+
+fn normalize_remote_ref(name: &str) -> &str {
+    name.strip_prefix("remotes/").unwrap_or(name)
+}
+
+fn split_remote_ref(name: &str) -> Option<(&str, &str)> {
+    name.split_once('/')
 }
 
 #[cfg(test)]
