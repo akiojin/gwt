@@ -1,13 +1,14 @@
 <!-- markdownlint-disable MD013 -->
 # 仕様一覧
 
-**最終更新**: 2026-01-21
+**最終更新**: 2026-01-22
 
 このファイルは `.specify/scripts/bash/update-specs-index.sh` により自動生成されました。
 
 | SPEC ID | タイトル | 作成日 |
 | --- | --- | --- |
-| [SPEC-861d8cdf](SPEC-861d8cdf/spec.md) | 機能仕様: エージェント状態の可視化 | 2026-01-20 |
+| [SPEC-e66acf66](SPEC-e66acf66/spec.md) | 機能仕様: [機能名] | [日付] |
+| [SPEC-056d48c9](SPEC-056d48c9/spec.md) | 機能仕様: エラーポップアップ・ログ出力システム | 2026-01-22 |
 | [SPEC-f47db390](SPEC-f47db390/spec.md) | 機能仕様: セッションID永続化とContinue/Resume強化 | 2025-12-06 |
 | [SPEC-dafff079](SPEC-dafff079/spec.md) | 機能仕様: 環境変数プロファイル機能 | 2025-12-15 |
 | [SPEC-d2f4762a](SPEC-d2f4762a/spec.md) | 機能仕様: ブランチ選択画面（Branch Selection Screen） | 2025-11-18 |
@@ -22,6 +23,7 @@
 | [SPEC-925c010b](SPEC-925c010b/spec.md) | 機能仕様: Docker Compose の Playwright noVNC を arm64 で起動可能にする | 2026-01-17 |
 | [SPEC-902a89dc](SPEC-902a89dc/spec.md) | 機能仕様: Worktreeパス修復機能 | 2026-01-05 |
 | [SPEC-8adfd99e](SPEC-8adfd99e/spec.md) | 機能仕様: Web UI 環境変数編集機能 | 2025-11-11 |
+| [SPEC-861d8cdf](SPEC-861d8cdf/spec.md) | 機能仕様: エージェント状態の可視化 | 2026-01-20 |
 | [SPEC-77b1bc70](SPEC-77b1bc70/spec.md) | 機能仕様: リリースフロー要件の明文化とリリース開始時 main→develop 同期 | 2026-01-16 |
 | [SPEC-6408df0c](SPEC-6408df0c/spec.md) | 機能仕様: HuskyでCIと同等のLintを実行 | 2026-01-19 |
 | [SPEC-5e0c1c49](SPEC-5e0c1c49/spec.md) | 機能仕様: Codex CLI gpt-5.1 デフォルト更新 | 2025-11-14 |
@@ -30,7 +32,9 @@
 | [SPEC-40c7b4f1](SPEC-40c7b4f1/spec.md) | 機能仕様: ブランチ選択時のdivergence/FF失敗ハンドリング（起動継続） | 2025-12-09 |
 | [SPEC-3b0ed29b](SPEC-3b0ed29b/spec.md) | 機能仕様: コーディングエージェント対応 | 2025-12-06 |
 | [SPEC-33317a3c](SPEC-33317a3c/spec.md) | 機能仕様: 共通環境変数とローカル環境取り込み機能 | 2025-11-11 |
+| [SPEC-2ca73d7d](SPEC-2ca73d7d/spec.md) | 機能仕様: エージェント履歴の永続化 | 2026-01-22 |
 | [SPEC-29e16bd0](SPEC-29e16bd0/spec.md) | 機能仕様: tools.json スキーママイグレーション | 2026-01-04 |
 | [SPEC-1f56fd80](SPEC-1f56fd80/spec.md) | 機能仕様: Web UI システムトレイ統合 | 2025-12-12 |
 | [SPEC-1defd8fd](SPEC-1defd8fd/spec.md) | 機能仕様: bugfixブランチタイプのサポート追加 | 2025-01-18 |
 | [SPEC-1d62511e](SPEC-1d62511e/spec.md) | SPEC-1d62511e: TypeScript/Bun から Rust への完全移行 | 2026-01-11 |
+| [SPEC-067a8026](SPEC-067a8026/spec.md) | 機能仕様: LLMベースリリースワークフロー | 2026-01-21 |

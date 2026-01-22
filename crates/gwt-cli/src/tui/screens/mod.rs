@@ -20,7 +20,7 @@ pub use branch_list::{
 };
 pub use confirm::{render_confirm, ConfirmState};
 pub use environment::{collect_os_env, render_environment, EnvironmentState};
-pub use error::{render_error, ErrorState};
+pub use error::{render_error_with_queue, ErrorQueue, ErrorState};
 pub use help::{render_help, HelpState};
 pub use logs::{render_logs, LogsState};
 pub use profiles::{render_profiles, ProfilesState};
